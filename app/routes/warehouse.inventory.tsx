@@ -1,0 +1,93 @@
+import { env } from "cloudflare:workers";
+import { Form, Link, useNavigation } from "react-router";
+import type { Route } from "./+types/warehouse.inventory";
+import { Modal } from "../components/Modal";
+import { requireSessionUser } from "../lib/auth.server";
+import { valueOf } from "../lib/validation";
+import { writeAudit } from "../lib/audit.server";
+
+type Inventory={id:string;barcode:string;package_number:string;shipment_number:string;order_number:string;customer_name:string;customer_identity_code:string;pieces:number;weight_kg:number|null;volume_cbm:number|null;status:string;location_id:string;location_name:string;location_code:string;zone_name:string;warehouse_name:string;updated_at:string};
+type Location={id:string;warehouse_id:string;name:string;code:string;zone_name:string;warehouse_name:string};
+type Stocktake={id:string;stocktake_number:string;location_id:string;location_name:string;zone_name:string;warehouse_name:string;status:string;expected_packages:number;counted_packages:number;shortage_packages:number;overage_packages:number;created_at:string;completed_at:string|null;creator_name:string|null};
+type CountItem={id:string;stocktake_id:string;barcode:string;package_number:string;expected_quantity:number;counted_quantity:number;result:string;counted_at:string|null};
+
+export async function loader({request}:Route.LoaderArgs){
+  const user=await requireSessionUser(request,"warehouse.view","warehouse"),url=new URL(request.url),q=url.searchParams.get("q")?.trim()??"",locationFilter=url.searchParams.get("location")??"",pattern=`%${q}%`;
+  const [inventory,locations,stocktakes,items]=await Promise.all([
+    env.DB.prepare(`SELECT p.id,p.barcode,p.package_number,s.shipment_number,o.order_number,c.name customer_name,c.identity_code customer_identity_code,p.pieces,p.weight_kg,p.volume_cbm,p.status,p.location_id,l.name location_name,l.code location_code,z.name zone_name,w.name warehouse_name,p.updated_at FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id JOIN transport_orders o ON o.id=s.order_id JOIN customers c ON c.id=s.customer_id JOIN warehouse_locations l ON l.id=p.location_id JOIN warehouse_zones z ON z.id=l.zone_id JOIN warehouses w ON w.id=l.warehouse_id WHERE p.organization_id=? AND p.status!='dispatched' AND (?='' OR p.barcode LIKE ? OR p.package_number LIKE ? OR s.shipment_number LIKE ? OR o.order_number LIKE ? OR c.identity_code LIKE ? OR c.name LIKE ?) AND (?='' OR p.location_id=?) ORDER BY w.code,z.code,l.code,p.updated_at DESC LIMIT 500`).bind(user.organizationId,q,pattern,pattern,pattern,pattern,pattern,pattern,locationFilter,locationFilter).all<Inventory>(),
+    env.DB.prepare(`SELECT l.id,l.warehouse_id,l.name,l.code,z.name zone_name,w.name warehouse_name FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id JOIN warehouses w ON w.id=l.warehouse_id WHERE l.organization_id=? AND l.status='active' AND z.status='active' AND w.status='active' ORDER BY w.code,z.code,l.code`).bind(user.organizationId).all<Location>(),
+    env.DB.prepare(`SELECT st.id,st.stocktake_number,st.location_id,l.name location_name,z.name zone_name,w.name warehouse_name,st.status,st.expected_packages,st.counted_packages,st.shortage_packages,st.overage_packages,st.created_at,st.completed_at,u.display_name creator_name FROM warehouse_stocktakes st JOIN warehouse_locations l ON l.id=st.location_id JOIN warehouse_zones z ON z.id=l.zone_id JOIN warehouses w ON w.id=st.warehouse_id LEFT JOIN users u ON u.id=st.created_by_user_id WHERE st.organization_id=? ORDER BY CASE st.status WHEN 'counting' THEN 1 ELSE 2 END,st.updated_at DESC LIMIT 30`).bind(user.organizationId).all<Stocktake>(),
+    env.DB.prepare(`SELECT si.id,si.stocktake_id,p.barcode,p.package_number,si.expected_quantity,si.counted_quantity,si.result,si.counted_at FROM warehouse_stocktake_items si JOIN warehouse_packages p ON p.id=si.package_id WHERE si.organization_id=? ORDER BY COALESCE(si.counted_at,p.updated_at) DESC LIMIT 1000`).bind(user.organizationId).all<CountItem>()
+  ]);
+  return{user,q,locationFilter,inventory:inventory.results,locations:locations.results,stocktakes:stocktakes.results,items:items.results};
+}
+
+export async function action({request}:Route.ActionArgs){
+  const user=await requireSessionUser(request,"warehouse.operate","warehouse"),form=await request.formData(),intent=valueOf(form,"intent"),now=new Date().toISOString();
+  if(intent==="move"){
+    const packageId=valueOf(form,"packageId"),targetId=valueOf(form,"targetLocationId"),notes=valueOf(form,"notes");
+    const pkg=await env.DB.prepare("SELECT id,barcode,location_id,status FROM warehouse_packages WHERE id=? AND organization_id=?").bind(packageId,user.organizationId).first<{id:string;barcode:string;location_id:string;status:string}>();
+    const target=await env.DB.prepare("SELECT id FROM warehouse_locations WHERE id=? AND organization_id=? AND status='active'").bind(targetId,user.organizationId).first();
+    if(!pkg||!target)return{formError:"货物或目标库位无效"};
+    if(pkg.location_id===targetId)return{formError:"货物已经位于目标库位"};
+    if(pkg.status==="allocated")return{formError:"货物已进入集货批次，请在批次作业中处理"};
+    if(pkg.status==="dispatched")return{formError:"货物已经出库，不能移库"};
+    await env.DB.batch([
+      env.DB.prepare("UPDATE warehouse_packages SET location_id=?,updated_at=? WHERE id=? AND organization_id=?").bind(targetId,now,pkg.id,user.organizationId),
+      env.DB.prepare("INSERT INTO warehouse_package_movements(id,organization_id,package_id,operation_type,from_location_id,to_location_id,operator_user_id,notes,occurred_at,created_at) VALUES(?,?,?,'move',?,?,?,?,?,?)").bind(crypto.randomUUID(),user.organizationId,pkg.id,pkg.location_id,targetId,user.userId,notes||"扫码移库",now,now)
+    ]);
+    await writeAudit({request,action:"warehouse.inventory.move",resourceType:"warehouse_package",resourceId:pkg.id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{barcode:pkg.barcode,from:pkg.location_id,to:targetId}});
+    return{success:`${pkg.barcode} 已完成移库`};
+  }
+  if(intent==="create_stocktake"){
+    const locationId=valueOf(form,"locationId"),notes=valueOf(form,"notes"),location=await env.DB.prepare("SELECT id,warehouse_id FROM warehouse_locations WHERE id=? AND organization_id=? AND status='active'").bind(locationId,user.organizationId).first<{id:string;warehouse_id:string}>();
+    if(!location)return{formError:"请选择有效盘点库位"};
+    const active=await env.DB.prepare("SELECT id FROM warehouse_stocktakes WHERE location_id=? AND organization_id=? AND status='counting'").bind(location.id,user.organizationId).first();
+    if(active)return{formError:"该库位已有进行中的盘点任务"};
+    const id=crypto.randomUUID(),number=generateStocktake();
+    const expected=await env.DB.prepare("SELECT COUNT(*) total FROM warehouse_packages WHERE location_id=? AND organization_id=? AND status!='dispatched'").bind(location.id,user.organizationId).first<{total:number}>();
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO warehouse_stocktakes(id,organization_id,stocktake_number,warehouse_id,location_id,status,expected_packages,notes,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,'counting',?,?,?,?,?)").bind(id,user.organizationId,number,location.warehouse_id,location.id,expected?.total??0,notes||null,user.userId,now,now),
+      env.DB.prepare("INSERT INTO warehouse_stocktake_items(id,organization_id,stocktake_id,package_id,expected_quantity,counted_quantity,result) SELECT lower(hex(randomblob(16))),organization_id,?,id,1,0,'pending' FROM warehouse_packages WHERE location_id=? AND organization_id=? AND status!='dispatched'").bind(id,location.id,user.organizationId)
+    ]);
+    return{success:`盘点任务 ${number} 已创建，共 ${expected?.total??0} 个账面货物`};
+  }
+  const stocktakeId=valueOf(form,"stocktakeId"),stocktake=await env.DB.prepare("SELECT id,location_id,status,stocktake_number FROM warehouse_stocktakes WHERE id=? AND organization_id=?").bind(stocktakeId,user.organizationId).first<{id:string;location_id:string;status:string;stocktake_number:string}>();
+  if(!stocktake)return{formError:"盘点任务不存在"};
+  if(intent==="count"){
+    if(stocktake.status!=="counting")return{formError:"该盘点任务已经结束"};
+    const barcode=valueOf(form,"barcode").toUpperCase(),pkg=await env.DB.prepare("SELECT id,location_id,status FROM warehouse_packages WHERE organization_id=? AND barcode=? AND status!='dispatched'").bind(user.organizationId,barcode).first<{id:string;location_id:string;status:string}>();
+    if(!pkg)return{formError:`未找到在库标签 ${barcode}`};
+    const item=await env.DB.prepare("SELECT id,counted_quantity,expected_quantity FROM warehouse_stocktake_items WHERE stocktake_id=? AND package_id=?").bind(stocktake.id,pkg.id).first<{id:string;counted_quantity:number;expected_quantity:number}>();
+    if(item?.counted_quantity)return{formError:"该标签已经盘点，请勿重复扫描"};
+    if(item)await env.DB.prepare("UPDATE warehouse_stocktake_items SET counted_quantity=1,result='matched',counted_by_user_id=?,counted_at=? WHERE id=?").bind(user.userId,now,item.id).run();
+    else await env.DB.prepare("INSERT INTO warehouse_stocktake_items(id,organization_id,stocktake_id,package_id,expected_quantity,counted_quantity,result,counted_by_user_id,counted_at) VALUES(?,?,?,?,0,1,'overage',?,?)").bind(crypto.randomUUID(),user.organizationId,stocktake.id,pkg.id,user.userId,now).run();
+    const totals=await env.DB.prepare("SELECT SUM(counted_quantity) counted,SUM(CASE WHEN result='overage' THEN 1 ELSE 0 END) overage FROM warehouse_stocktake_items WHERE stocktake_id=?").bind(stocktake.id).first<{counted:number;overage:number}>();
+    await env.DB.prepare("UPDATE warehouse_stocktakes SET counted_packages=?,overage_packages=?,updated_at=? WHERE id=?").bind(totals?.counted??0,totals?.overage??0,now,stocktake.id).run();
+    return{success:`${barcode} 盘点成功${item?"":"，记录为盘盈"}`};
+  }
+  if(intent==="complete_stocktake"){
+    if(stocktake.status!=="counting")return{formError:"该盘点任务已经结束"};
+    await env.DB.prepare("UPDATE warehouse_stocktake_items SET result='shortage' WHERE stocktake_id=? AND expected_quantity=1 AND counted_quantity=0").bind(stocktake.id).run();
+    const totals=await env.DB.prepare("SELECT SUM(counted_quantity) counted,SUM(CASE WHEN result='shortage' THEN 1 ELSE 0 END) shortage,SUM(CASE WHEN result='overage' THEN 1 ELSE 0 END) overage FROM warehouse_stocktake_items WHERE stocktake_id=?").bind(stocktake.id).first<{counted:number;shortage:number;overage:number}>();
+    await env.DB.prepare("UPDATE warehouse_stocktakes SET status='completed',counted_packages=?,shortage_packages=?,overage_packages=?,completed_by_user_id=?,completed_at=?,updated_at=? WHERE id=?").bind(totals?.counted??0,totals?.shortage??0,totals?.overage??0,user.userId,now,now,stocktake.id).run();
+    await writeAudit({request,action:"warehouse.stocktake.complete",resourceType:"warehouse_stocktake",resourceId:stocktake.id,organizationId:user.organizationId,actorUserId:user.userId,metadata:totals??undefined});
+    return{success:`盘点 ${stocktake.stocktake_number} 已完成：盘亏 ${totals?.shortage??0}，盘盈 ${totals?.overage??0}`};
+  }
+  return{formError:"无效的库存操作"};
+}
+
+const packageStatus:Record<string,string>={in_stock:"在库",allocated:"已集货",exception:"异常"};
+export default function WarehouseInventory({loaderData,actionData}:Route.ComponentProps){
+  const busy=useNavigation().state!=="idle",canOperate=loaderData.user.permissions.includes("warehouse.operate"),active=loaderData.stocktakes.filter(x=>x.status==="counting"),shortages=loaderData.stocktakes.reduce((sum,x)=>sum+x.shortage_packages,0),overages=loaderData.stocktakes.reduce((sum,x)=>sum+x.overage_packages,0);
+  return <><header className="page-header"><div><p className="eyebrow">INVENTORY & STOCKTAKE</p><h1>库存与盘点</h1><p>查询实时货物库位，执行扫码移库和库位盘点，自动识别盘盈盘亏。</p></div>{canOperate&&<Modal title="新建盘点任务" triggerLabel="＋ 新建盘点" closeSignal={actionData?.success}><Form method="post" className="stack"><input type="hidden" name="intent" value="create_stocktake"/><label className="field"><span>盘点库位</span><select name="locationId" required><option value="">请选择库位</option>{loaderData.locations.map(x=><option key={x.id} value={x.id}>{x.warehouse_name} / {x.zone_name} / {x.name}（{x.code}）</option>)}</select>{!loaderData.locations.length&&<small className="field-error">当前没有可盘点库位，请先完成仓库基础配置。</small>}</label>{!loaderData.locations.length&&<Link className="secondary" to="/warehouse/locations">前往仓库与库位</Link>}<label className="field"><span>盘点说明</span><textarea name="notes" rows={3}/></label><button className="primary" disabled={busy||!loaderData.locations.length}>创建盘点任务</button></Form></Modal>}</header>
+    {(actionData?.success||actionData?.formError)&&<div className={`alert ${actionData.formError?"error":"success"}`}>{actionData.formError??actionData.success}</div>}
+    <section className="stats stats-four"><article><span>当前在库标签</span><strong>{loaderData.inventory.length}</strong><small>当前筛选结果</small></article><article><span>进行中盘点</span><strong>{active.length}</strong><small>等待现场扫描</small></article><article><span>累计盘亏</span><strong>{shortages}</strong><small>账面有、实物无</small></article><article><span>累计盘盈</span><strong>{overages}</strong><small>实物有、账面无</small></article></section>
+    <section className="panel"><div className="panel-header"><div><h2>实时库存</h2><p>按客户识别码、订单、运单、标签和库位查询货物。</p></div></div><Form method="get" className="inventory-filter"><label className="field"><span>搜索</span><input name="q" defaultValue={loaderData.q} placeholder="客户识别码、订单、运单、条码或客户"/></label><label className="field"><span>库位</span><select name="location" defaultValue={loaderData.locationFilter}><option value="">全部库位</option>{loaderData.locations.map(x=><option key={x.id} value={x.id}>{x.warehouse_name} / {x.zone_name} / {x.name}</option>)}</select></label><button className="secondary">查询</button></Form><div className="table-wrap"><table><thead><tr><th>标签</th><th>客户识别码/客户</th><th>订单/运单</th><th>数量</th><th>当前库位</th><th>状态</th><th>操作</th></tr></thead><tbody>{loaderData.inventory.map(item=><tr key={item.id}><td><strong>{item.barcode}</strong><small>{item.package_number}</small></td><td><code className="identity-code">{item.customer_identity_code}</code><small>{item.customer_name}</small></td><td><strong>{item.order_number}</strong><small>{item.shipment_number}</small></td><td>{item.pieces} 件<small>{item.weight_kg??"—"} KG · {item.volume_cbm??"—"} CBM</small></td><td><strong>{item.location_name}</strong><small>{item.warehouse_name} / {item.zone_name} / {item.location_code}</small></td><td><span className={`status-pill ${item.status==="exception"?"off":""}`}>{packageStatus[item.status]??item.status}</span></td><td>{canOperate&&item.status!=="allocated"&&<Modal title={`移库 ${item.barcode}`} triggerLabel="移库" triggerClassName="text-button" closeSignal={actionData?.success}><Form method="post" className="stack"><input type="hidden" name="intent" value="move"/><input type="hidden" name="packageId" value={item.id}/><label className="field"><span>客户/订单</span><input value={`[${item.customer_identity_code}] ${item.order_number} · ${item.customer_name}`} readOnly/></label><label className="field"><span>当前库位</span><input value={`${item.warehouse_name} / ${item.zone_name} / ${item.location_name}`} readOnly/></label><label className="field"><span>目标库位</span><select name="targetLocationId" required>{loaderData.locations.filter(x=>x.id!==item.location_id).map(x=><option key={x.id} value={x.id}>{x.warehouse_name} / {x.zone_name} / {x.name}（{x.code}）</option>)}</select></label><label className="field"><span>移库原因</span><input name="notes"/></label><button className="primary" disabled={busy}>确认移库</button></Form></Modal>}</td></tr>)}</tbody></table></div>{!loaderData.inventory.length&&<p className="empty-state">当前条件下没有在库货物。</p>}</section>
+    <div className="stocktake-list">{active.map(task=><StocktakeCard key={task.id} task={task} items={loaderData.items.filter(x=>x.stocktake_id===task.id)} busy={busy}/>)}</div>
+    <section className="panel"><h2>盘点历史</h2><div className="simple-list">{loaderData.stocktakes.filter(x=>x.status==="completed").map(task=><div key={task.id}><div><strong>{task.stocktake_number}</strong><small>{task.warehouse_name} / {task.zone_name} / {task.location_name}</small></div><span>账面 {task.expected_packages} · 实盘 {task.counted_packages} · 盘亏 {task.shortage_packages} · 盘盈 {task.overage_packages}</span></div>)}</div>{!loaderData.stocktakes.some(x=>x.status==="completed")&&<p className="empty-state">暂无已完成盘点。</p>}</section>
+  </>;
+}
+function StocktakeCard({task,items,busy}:{task:Stocktake;items:CountItem[];busy:boolean}){const scanned=items.filter(x=>x.counted_quantity).length;return <article className="panel stocktake-card"><div className="panel-header"><div><h2>{task.stocktake_number}</h2><p>{task.warehouse_name} / {task.zone_name} / {task.location_name}</p></div><div className="dispatch-progress"><strong>{scanned}/{task.expected_packages}</strong><span>已扫描/账面</span></div></div><Form method="post" className="scan-inline"><input type="hidden" name="intent" value="count"/><input type="hidden" name="stocktakeId" value={task.id}/><label className="field"><span>扫描盘点标签</span><input name="barcode" placeholder="扫描货物条码" autoComplete="off" required/></label><button className="primary" disabled={busy}>确认盘点</button></Form><div className="batch-items">{items.filter(x=>x.counted_quantity).slice(0,20).map(item=><div key={item.id}><code>{item.barcode}</code><span>{item.expected_quantity?"账面货物":"非账面货物"}</span><span className={`status-pill ${item.result==="overage"?"off":""}`}>{item.result==="overage"?"盘盈":"相符"}</span></div>)}</div><Form method="post" className="dispatch-confirm"><input type="hidden" name="intent" value="complete_stocktake"/><input type="hidden" name="stocktakeId" value={task.id}/><button className="secondary" disabled={busy}>结束盘点并计算差异</button></Form></article>}
+function generateStocktake(){return `ST-${new Date().toISOString().slice(2,10).replaceAll("-","")}-${crypto.randomUUID().slice(0,5).toUpperCase()}`}
+export function meta(){return[{title:"库存与盘点 | International TMS"}]}

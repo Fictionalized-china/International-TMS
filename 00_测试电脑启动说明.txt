@@ -1,0 +1,19 @@
+International TMS 测试包启动说明
+
+一、打开方式
+1. 双击：启动当前测试系统.cmd
+2. 浏览器打开：http://127.0.0.1:5189/login
+
+二、账号
+后台账号：admin@e2e.test
+后台密码：OulingTMS2026!
+
+仓库端账号：ucrstore01@e2e.test
+仓库端密码：OulingTMS2026!
+
+三、说明
+1. 本目录包含当前代码、node_modules 依赖和 .wrangler 本地 D1 数据。
+2. 测试电脑已安装 Node.js 时，通常不需要重新 npm install。
+3. 如果启动失败，先双击“首次安装并启动当前测试系统.cmd”，它会重新安装依赖并应用本地迁移。
+4. 固定端口是 5189，不再使用 5188。
+

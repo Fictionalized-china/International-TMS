@@ -1,0 +1,39 @@
+{
+  "name": "international-tms",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "react-router build",
+    "ci": "npm run typecheck && npm run test && npm run build",
+    "dev": "react-router dev",
+    "dev:win": "react-router dev --clearScreen=false --host 127.0.0.1 --port 5189 --strictPort",
+    "typecheck": "wrangler types && react-router typegen && tsc -b",
+    "deploy": "npm run build && wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply international-tms --local",
+    "db:migrate:remote": "wrangler d1 migrations apply international-tms --remote",
+    "preview": "npm run build && vite preview",
+    "test": "vitest run",
+    "test:win": "vitest run --pool=threads --maxWorkers=1",
+    "cf-typegen": "wrangler types",
+    "postinstall": "wrangler types"
+  },
+  "dependencies": {
+    "isbot": "^5.1.36",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-router": "8.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.44.0",
+    "@react-router/dev": "8.0.0",
+    "@tailwindcss/vite": "^4.2.2",
+    "@types/node": "^22.20.1",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.3",
+    "vitest": "~3.2.0",
+    "wrangler": "^4.110.0"
+  }
+}
