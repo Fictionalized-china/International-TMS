@@ -10047,6 +10047,117 @@ a.order-module-card.read-only:hover {
   scroll-margin-top: 18px;
 }
 
+.batch-tracking-workbench {
+  scroll-margin-top: 18px;
+}
+
+.batch-tracking-note {
+  display: grid;
+  grid-template-columns: max-content 1fr max-content 1fr;
+  gap: 4px 12px;
+  align-items: center;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  border: 1px solid #c9d9ee;
+  background: #f5f9ff;
+  font-size: 13px;
+}
+.batch-tracking-note strong { color: #0a4fa8; }
+
+.batch-tracking-option-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+.batch-tracking-option-toggles .inline-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid #c9d9ee;
+  background: #fbfdff;
+  border-radius: 6px;
+}
+.batch-tracking-option-toggles .toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.batch-tracking-option-toggles .toggle-label input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+}
+
+.batch-tracking-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.batch-tracking-card {
+  border: 1px solid #d4e0ef;
+  background: #fff;
+  border-radius: 8px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.batch-tracking-card.ready {
+  border-color: #5b9a3a;
+  background: #f4fbf0;
+}
+.batch-tracking-card.partial {
+  border-color: #d49a2a;
+  background: #fff8e8;
+}
+.batch-tracking-card header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+.batch-tracking-card header strong { font-size: 15px; }
+.batch-tracking-card header small { color: #63758d; font-size: 12px; }
+.batch-tracking-card-status {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: #63758d;
+}
+.batch-tracking-card-form summary {
+  cursor: pointer;
+  color: #0a4fa8;
+  font-size: 13px;
+}
+.batch-tracking-form {
+  margin-top: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.batch-tracking-orders > header {
+  margin: 0 0 10px;
+}
+.batch-tracking-orders h3 {
+  margin: 0;
+  font-size: 17px;
+}
+.batch-tracking-orders p {
+  margin: 3px 0 0;
+  color: #63758d;
+  font-size: 12px;
+}
+.tracking-history-list {
+  color: #63758d;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
 .batch-document-scope-note {
   display: grid;
   grid-template-columns: max-content 1fr max-content 1fr;

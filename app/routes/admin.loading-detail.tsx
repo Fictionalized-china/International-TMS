@@ -15,6 +15,20 @@ import { confirmOverseasBatchArrival } from "../lib/overseas-warehouse.server";
 import { canManageOrderModule } from "../lib/position-portal";
 import { maxInlineOrderDocumentBytes, orderDocumentTypeCodes, orderDocumentTypeLabel } from "../lib/order-documents";
 import { syncCustomsModuleFromRecords } from "../lib/customs-status.server";
+import {
+  BATCH_TRACKING_MILESTONES,
+  BATCH_TRACKING_MAIN_CODES,
+  BATCH_TRACKING_OPTIONAL_CODES,
+  BATCH_TRACKING_REQUIRED_PREVIOUS,
+  getBatchOrderIds,
+  getBatchMainVehiclePlate,
+  validateBatchTrackingRequiredPrevious,
+  insertTrackingMilestoneForBatchOrders,
+  syncTrackingModuleStatusForOrder,
+  syncBatchRoadStatusFromTracking,
+  recordShipmentEventForBatchOrders,
+  syncBatchTrackingMilestonesFromBatch,
+} from "../lib/batch-tracking.server";
 import { Modal } from "../components/Modal";
 
 type Batch={id:string;batch_number:string;batch_name:string;origin_location:string;destination_location:string;planned_departure_at:string|null;planned_arrival_at:string|null;status:string;road_status:string;carrier_id:string|null;warehouse_id:string|null;carrier_name:string|null;warehouse_name:string|null;border_port:string|null;transit_location:string|null;route_notes:string|null;notes:string|null;overseas_carrier_name:string|null;overseas_vehicle_type:string|null;overseas_vehicle_count:number;overseas_vehicle_plate:string|null;overseas_driver_name:string|null;overseas_driver_phone:string|null};
@@ -28,6 +42,8 @@ type CustomsSummary={order_id:string;total:number;released:number};
 type BatchCustomsDeclaration={id:string;order_id:string;customs_record_id:string;clearance_stage:string;declaration_number:string;declaration_type:string;declaration_title:string;declaring_company:string;declared_at:string;declared_amount:number;currency:string;gross_weight_kg:number;released_at:string|null;status:string;is_deleted:number;is_redeclared:number;is_amended:number;is_inspected:number;change_reason:string|null;updated_at:string};
 type BatchOutboundStatus={order_id:string;dispatched:number};
 type DepartureGateStatus={order_id:string;ready:boolean;reasons:string[]};
+type BatchTrackingMilestone={id:string;order_id:string;milestone_code:string;milestone_name:string;event_at:string;location:string|null;vehicle_reference:string|null;notes:string|null;visible_to_customer:number;created_at:string};
+type BatchTrackingFlag={order_id:string;requires_transloading:number;requires_transit_customs:number};
 
 const BATCH_DOCUMENT_TYPES=[
   {code:"loading_manifest",name:"配载清单",hint:"本配载单的整票订单、货物与车辆汇总",required:true},
@@ -117,7 +133,21 @@ export async function loader({request,params}:Route.LoaderArgs){
     order_id:item.order_id,
     ...await checkOrderDeparture(current.organizationId,item.order_id,undefined,{warehouseDispatchConfirmed:true}),
   })));
-  return{current,batch,orders:orders.results,vehicles:vehicles.results,carriers:carriers.results,warehouses:warehouses.results,borderPorts:borderPorts.results,costAllocations,batchDocuments:batchDocuments.results,orderDocuments:orderDocuments.results,customsSummaries:customsSummaries.results,customsDeclarations:customsDeclarations.results,outboundStatuses:outboundStatuses.results,departureGateStatuses,returnOrderId};
+  // 配载页运输跟踪：先做反向同步（与订单页打开 tracking 模块一致），保证子订单里程碑齐整
+  const batchOrderIds=orders.results.map(item=>item.order_id);
+  if(batchOrderIds.length>1)await syncBatchTrackingMilestonesFromBatch(current.organizationId,batchOrderIds,current.userId);
+  const trackingPlaceholders=batchOrderIds.length?batchOrderIds.map(()=>"?").join(","):"''";
+  const [trackingMilestones,trackingFlags,batchVehiclePlate]=await Promise.all([
+    env.DB.prepare(`SELECT id,order_id,milestone_code,milestone_name,event_at,location,vehicle_reference,notes,visible_to_customer,created_at
+      FROM order_tracking_milestones
+      WHERE organization_id=? AND order_id IN (${trackingPlaceholders})
+      ORDER BY event_at DESC, created_at DESC`).bind(current.organizationId,...batchOrderIds).all<BatchTrackingMilestone>(),
+    env.DB.prepare(`SELECT bo.order_id, COALESCE(o.requires_transloading,0) requires_transloading, COALESCE(o.requires_transit_customs,0) requires_transit_customs
+      FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
+      WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed' ORDER BY bo.sequence_no`).bind(batchId,current.organizationId).all<BatchTrackingFlag>(),
+    getBatchMainVehiclePlate(current.organizationId,batchId),
+  ]);
+  return{current,batch,orders:orders.results,vehicles:vehicles.results,carriers:carriers.results,warehouses:warehouses.results,borderPorts:borderPorts.results,costAllocations,batchDocuments:batchDocuments.results,orderDocuments:orderDocuments.results,customsSummaries:customsSummaries.results,customsDeclarations:customsDeclarations.results,outboundStatuses:outboundStatuses.results,departureGateStatuses,returnOrderId,trackingMilestones:trackingMilestones.results,trackingFlags:trackingFlags.results,batchVehiclePlate};
 }
 
 export async function action({request,params}:Route.ActionArgs){
@@ -352,6 +382,68 @@ export async function action({request,params}:Route.ActionArgs){
       return{success:`配载单 ${result.batchNumber} 已确认到境外仓；${result.orderCount} 票订单已同步进入境外仓自提`};
     }catch(error){return{formError:errorMessage(error)}}
   }
+  if(intent==="batch_tracking_option_toggle"){
+    const optionCode=valueOf(form,"optionCode");
+    if(!BATCH_TRACKING_OPTIONAL_CODES.includes(optionCode))return{formError:"可选节点类型无效"};
+    const enable=form.get("enable")==="on";
+    const column=optionCode==="transloaded"?"requires_transloading":"requires_transit_customs";
+    const orderIds=await getBatchOrderIds(current.organizationId,batchId);
+    if(!orderIds.length)return{formError:"当前批次没有可操作的订单"};
+    await env.DB.prepare(`UPDATE transport_orders SET ${column}=?, updated_at=? WHERE organization_id=? AND id IN (${orderIds.map(()=>"?").join(",")})`).bind(enable?1:0,now,current.organizationId,...orderIds).run();
+    await writeAudit({request,action:"transport.batch.tracking_option.toggle",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{optionCode,enable,orders:orderIds.length}});
+    return{success:enable?`已为 ${orderIds.length} 票订单开启"${optionCode==="transloaded"?"可换装":"可转运"}"`:`已为 ${orderIds.length} 票订单关闭"${optionCode==="transloaded"?"可换装":"可转运"}"`};
+  }
+  if(intent==="batch_tracking_add"){
+    const milestoneCode=valueOf(form,"milestoneCode");
+    const milestoneDef=BATCH_TRACKING_MILESTONES.find(item=>item.code===milestoneCode);
+    if(!milestoneDef)return{formError:"请选择有效的运输节点"};
+    const eventAt=valueOf(form,"eventAt");
+    if(!eventAt)return{formError:"请填写事件时间"};
+    const orderIds=await getBatchOrderIds(current.organizationId,batchId);
+    if(!orderIds.length)return{formError:"当前批次没有可操作的订单"};
+    // 顺序门禁：批次内每个订单都必须已有前置节点
+    const previousMissing=await validateBatchTrackingRequiredPrevious(current.organizationId,orderIds,milestoneCode);
+    if(previousMissing){
+      return{formError:`节点"${milestoneDef.name}"要求每个订单已登记${BATCH_TRACKING_REQUIRED_PREVIOUS[milestoneCode]?.join("、")||"前置节点"}；${previousMissing.missingOrders} 票订单未满足${previousMissing.sampleOrderNumber?`（示例：${previousMissing.sampleOrderNumber}）`:""}`};
+    }
+    const locationValue=valueOf(form,"location")||null;
+    const notesValue=valueOf(form,"notes")||null;
+    const vehicleReference=valueOf(form,"vehicleReference")||batch.overseas_vehicle_plate||null;
+    const visibleToCustomer=form.get("visibleToCustomer")!=="off";
+    await insertTrackingMilestoneForBatchOrders({
+      organizationId:current.organizationId,
+      orderIds,
+      milestoneCode,
+      milestoneName:milestoneDef.name,
+      eventAt,
+      location:locationValue,
+      vehicleReference,
+      notes:notesValue,
+      visibleToCustomer,
+      actorUserId:current.userId,
+      createdAt:now,
+    });
+    // 同步每票订单的 tracking 模块实例进度
+    for(const orderId of orderIds){
+      await syncTrackingModuleStatusForOrder(current.organizationId,orderId,milestoneCode,current.userId,now);
+    }
+    // 同步批次 road_status / transport_batch_orders 状态
+    await syncBatchRoadStatusFromTracking(current.organizationId,batchId,orderIds,now);
+    // 同步 shipment 轨迹事件
+    const milestoneStatusMap:Record<string,string>={border_arrived:"in_transit",exported:"in_transit",transloaded:"in_transit",transit_customs:"in_transit",foreign_entered:"in_transit",customs_cleared:"in_transit",station_arrived:"delivered"};
+    await recordShipmentEventForBatchOrders({
+      organizationId:current.organizationId,
+      orderIds,
+      eventAt,
+      location:locationValue,
+      description:`批次 ${batch.batch_number} 登记「${milestoneDef.name}」${locationValue?`，地点 ${locationValue}`:""}${vehicleReference?`，车辆 ${vehicleReference}`:""}`,
+      status:milestoneStatusMap[milestoneCode]||"in_transit",
+      actorUserId:current.userId,
+      createdAt:now,
+    });
+    await writeAudit({request,action:"transport.batch.tracking.add",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{milestoneCode,eventAt,orders:orderIds.length,location:locationValue,vehicleReference}});
+    return{success:`已为 ${orderIds.length} 票订单登记「${milestoneDef.name}」（${eventAt}）；模块进度与批次状态已同步`};
+  }
   return{formError:"操作无效"};
 }
 
@@ -420,8 +512,9 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
     </div>
   </section>
   <BatchDocumentWorkbench batchId={loaderData.batch.id} orders={loaderData.orders} batchDocuments={loaderData.batchDocuments} orderDocuments={loaderData.orderDocuments} customsSummaries={loaderData.customsSummaries} customsDeclarations={loaderData.customsDeclarations} busy={busy} manage={manage}/>
+  <BatchTrackingWorkbench batchId={loaderData.batch.id} batchNumber={loaderData.batch.batch_number} orders={loaderData.orders} trackingMilestones={loaderData.trackingMilestones} trackingFlags={loaderData.trackingFlags} batchVehiclePlate={loaderData.batchVehiclePlate} overseasVehiclePlate={loaderData.batch.overseas_vehicle_plate||null} borderPort={loaderData.batch.border_port||null} busy={busy} manage={manage}/>
   <CostAllocationSection allocations={loaderData.costAllocations} busy={busy} manage={manage}/>
-  <section className="panel" id="batch-exit-gate"><div className="panel-header"><div><h2>5. 出境门禁与确认</h2><p>这里逐项核对整批订单；全部通过后，才能统一确认出境并同步所有挂载订单。</p></div><span className="status-pill">{roadStatusLabels[loaderData.batch.road_status]||loaderData.batch.road_status}</span></div>
+  <section className="panel" id="batch-exit-gate"><div className="panel-header"><div><h2>6. 出境门禁与确认</h2><p>这里逐项核对整批订单；全部通过后，才能统一确认出境并同步所有挂载订单。</p></div><span className="status-pill">{roadStatusLabels[loaderData.batch.road_status]||loaderData.batch.road_status}</span></div>
     <div className="batch-exit-gates">
       <div className={`batch-exit-gate ${allDispatched?"ready":"blocked"}`}><span>仓库装车出库</span><strong>{allDispatched?"全部订单已完成交接":`${dispatchedCount}/${loaderData.orders.length} 票已完成`}</strong></div>
       <div className={`batch-exit-gate ${transportResourceReady?"ready":"blocked"}`}><span>境外运输资源</span><strong>{transportResourceReady?`${loaderData.batch.overseas_carrier_name} · ${loaderData.batch.overseas_vehicle_plate}`:"承运方、车辆或司机资料未齐"}</strong></div>
@@ -430,7 +523,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
     </div>
     {loaderData.batch.road_status==="outbound_in_transit"?<div className="alert success">本配载单已出境；现在可以在下方继续确认到境外仓。</div>:["overseas_arrived","waiting_pickup","pickup_completed"].includes(loaderData.batch.road_status)?<div className="alert success">本配载单已完成出境确认。</div>:canConfirmExit&&manage?<Form method="post" className="form-grid compact"><input type="hidden" name="intent" value="exit_confirm"/><Field name="actualExitAt" label="实际出境时间" type="datetime-local" required/><label className="field"><span>实际出境口岸</span><select name="exitPort" defaultValue={loaderData.batch.border_port||""} required><option value="">请选择</option>{loaderData.borderPorts.map(item=><option key={item.code} value={item.code}>{item.name} · {item.code}</option>)}</select></label><Field name="exitVehiclePlate" label="实际出境车辆车牌" required defaultValue={loaderData.batch.overseas_vehicle_plate||loaderData.vehicles.map(item=>item.plate_number).filter(Boolean).join("、")}/><Field name="proofReference" label="出境凭证 / 图片编号"/><Field name="exitNotes" label="出境备注"/><button className="primary" disabled={busy}>确认本配载单已出境并同步订单</button></Form>:<div className="batch-gate-blocker"><div><strong>当前还不能确认出境</strong><p>完成下面的未通过项目后，系统会自动开放“确认出境”。</p>{exitBlockers.length?<ul>{Array.from(new Set(exitBlockers)).map(reason=><li key={reason}>{reason}</li>)}</ul>:<p>当前账号只能查看门禁状态。</p>}</div><div className="batch-gate-actions">{!allDispatched&&assignedOrders[0]&&<WarehouseOutboundAction orderId={assignedOrders[0].order_id} batchId={loaderData.batch.id}/>}<a className="secondary" href="#batch-files">处理配载单文件与逐票报关</a>{!loadPlanReady&&<a className="secondary" href="#batch-arrangement">完善配载和车辆安排</a>}</div></div>}
   </section>
-  <section className="panel"><div className="panel-header"><div><h2>6. 出境后批量推进</h2><p>货到境外目的仓后，在这里一次确认本配载单全部挂载订单到仓；后续通知、预约、自提再回到各订单境外仓模块办理。</p></div><span className="status-pill">{loaderData.orders.filter(item=>item.overseas_status&&item.overseas_status!=="waiting_arrival").length}/{loaderData.orders.length} 票到仓</span></div>{loaderData.batch.road_status==="outbound_in_transit"&&manage?<Form method="post" className="batch-arrival-form"><input type="hidden" name="intent" value="overseas_arrival"/><Field name="actualArrivalAt" label="实际到达境外仓时间" type="datetime-local" required/><label className="field span-2"><span>到仓备注</span><input name="arrivalNotes" placeholder="例如境外仓签收人、到仓异常、卸货说明"/></label><button className="primary" disabled={busy}>确认本配载单已到境外仓并同步订单</button></Form>:["overseas_arrived","waiting_pickup","pickup_completed"].includes(loaderData.batch.road_status)?<div className="alert success">本配载单已确认到境外仓；挂载订单已进入境外仓自提流程。</div>:<div className="alert warning">当前步骤尚未开放：请先在上方完成全部出境门禁并确认出境，之后才能登记到达境外仓。</div>}</section>
+  <section className="panel"><div className="panel-header"><div><h2>7. 出境后批量推进</h2><p>货到境外目的仓后，在这里一次确认本配载单全部挂载订单到仓；后续通知、预约、自提再回到各订单境外仓模块办理。</p></div><span className="status-pill">{loaderData.orders.filter(item=>item.overseas_status&&item.overseas_status!=="waiting_arrival").length}/{loaderData.orders.length} 票到仓</span></div>{loaderData.batch.road_status==="outbound_in_transit"&&manage?<Form method="post" className="batch-arrival-form"><input type="hidden" name="intent" value="overseas_arrival"/><Field name="actualArrivalAt" label="实际到达境外仓时间" type="datetime-local" required/><label className="field span-2"><span>到仓备注</span><input name="arrivalNotes" placeholder="例如境外仓签收人、到仓异常、卸货说明"/></label><button className="primary" disabled={busy}>确认本配载单已到境外仓并同步订单</button></Form>:["overseas_arrived","waiting_pickup","pickup_completed"].includes(loaderData.batch.road_status)?<div className="alert success">本配载单已确认到境外仓；挂载订单已进入境外仓自提流程。</div>:<div className="alert warning">当前步骤尚未开放：请先在上方完成全部出境门禁并确认出境，之后才能登记到达境外仓。</div>}</section>
   </>}
 
 function BatchDocumentWorkbench({batchId,orders,batchDocuments,orderDocuments,customsSummaries,customsDeclarations,busy,manage}:{batchId:string;orders:BatchOrder[];batchDocuments:BatchDocument[];orderDocuments:OrderDocument[];customsSummaries:CustomsSummary[];customsDeclarations:BatchCustomsDeclaration[];busy:boolean;manage:boolean}){
@@ -473,6 +566,74 @@ function BatchDocumentWorkbench({batchId,orders,batchDocuments,orderDocuments,cu
         </tr>})}</tbody></table></div>
     </section>
   </section>
+}
+
+function BatchTrackingWorkbench({batchId,batchNumber,orders,trackingMilestones,trackingFlags,batchVehiclePlate,overseasVehiclePlate,borderPort,busy,manage}:{batchId:string;batchNumber:string;orders:BatchOrder[];trackingMilestones:BatchTrackingMilestone[];trackingFlags:BatchTrackingFlag[];batchVehiclePlate:string|null;overseasVehiclePlate:string|null;borderPort:string|null;busy:boolean;manage:boolean}){
+  // 各订单的最新里程碑（按 progress 权重排序）
+  const milestoneProgressWeight:Record<string,number>={departed:15,border_arrived:28,exported:40,transloaded:46,transit_customs:52,foreign_entered:64,customs_cleared:82,station_arrived:100};
+  const milestonesByOrder=new Map<string,BatchTrackingMilestone[]>();
+  for(const m of trackingMilestones){
+    const list=milestonesByOrder.get(m.order_id)||[];
+    list.push(m);
+    milestonesByOrder.set(m.order_id,list);
+  }
+  const latestByOrder=new Map<string,BatchTrackingMilestone|null>();
+  for(const order of orders){
+    const list=milestonesByOrder.get(order.order_id)||[];
+    const latest=list.slice().sort((a,b)=>(milestoneProgressWeight[b.milestone_code]??0)-(milestoneProgressWeight[a.milestone_code]??0)||b.event_at.localeCompare(a.event_at))[0]||null;
+    latestByOrder.set(order.order_id,latest);
+  }
+  const flagsByOrder=new Map(trackingFlags.map(item=>[item.order_id,item]));
+  const requiresTransloading=orders.some(o=>flagsByOrder.get(o.order_id)?.requires_transloading===1);
+  const requiresTransitCustoms=orders.some(o=>flagsByOrder.get(o.order_id)?.requires_transit_customs===1);
+  // 5 个主节点 + 2 个可选节点（按开关状态决定是否暴露）
+  const visibleMilestones=BATCH_TRACKING_MILESTONES.filter(item=>!item.optional||(item.code==="transloaded"&&requiresTransloading)||(item.code==="transit_customs"&&requiresTransitCustoms));
+  const defaultVehicle=batchVehiclePlate||overseasVehiclePlate||"";
+  const defaultEventAt=dateTimeLocal(new Date().toISOString());
+  return <section className="panel batch-tracking-workbench" id="batch-tracking">
+    <div className="panel-header"><div><h2>4. 运输执行与跟踪</h2><p>在配载单这里登记的运输节点会同步写入本批次所有挂载订单的 <code>order_tracking_milestones</code>，与订单级"运输执行与跟踪"模块共用同一份数据；订单级入口仍保留。</p></div><span className="status-pill">{orders.length} 票 · {trackingMilestones.length} 条节点</span></div>
+    <div className="batch-tracking-note"><strong>幂等写入</strong><span>同一订单同一节点同一事件时间只记一次；不同时间会留下多条记录，作为运输过程的多份痕迹。</span><strong>顺序门禁</strong><span>登记新节点前，批次内每票订单必须已有前置节点（如登记"出境"前要求"到达出境口岸"已存在）。</span></div>
+    {manage&&<div className="batch-tracking-option-toggles">
+      <Form method="post" className="inline-toggle"><input type="hidden" name="intent" value="batch_tracking_option_toggle"/><input type="hidden" name="optionCode" value="transloaded"/><label className="toggle-label"><input type="checkbox" name="enable" defaultChecked={requiresTransloading} onChange={event=>{if(event.target.checked)event.target.form?.requestSubmit();else event.target.form?.requestSubmit();}}/><span>可换装（给本批全部订单打开"换装"可选节点）</span></label><button className="text-button" disabled={busy}>应用</button></Form>
+      <Form method="post" className="inline-toggle"><input type="hidden" name="intent" value="batch_tracking_option_toggle"/><input type="hidden" name="optionCode" value="transit_customs"/><label className="toggle-label"><input type="checkbox" name="enable" defaultChecked={requiresTransitCustoms} onChange={event=>{if(event.target.checked)event.target.form?.requestSubmit();else event.target.form?.requestSubmit();}}/><span>可转运（给本批全部订单打开"转关"可选节点）</span></label><button className="text-button" disabled={busy}>应用</button></Form>
+    </div>}
+    <div className="batch-tracking-card-grid">{visibleMilestones.map(node=>{
+      const count=orders.filter(o=>{const list=milestonesByOrder.get(o.order_id)||[];return list.some(m=>m.milestone_code===node.code);}).length;
+      const total=orders.length;
+      const sample=trackingMilestones.find(m=>m.milestone_code===node.code);
+      return <article className={`batch-tracking-card ${count===total?"ready":""} ${count>0&&count<total?"partial":""}`} key={node.code}>
+        <header><strong>{node.name}</strong><small>进度 {node.progress}%</small></header>
+        <div className="batch-tracking-card-status"><span className={`status-pill ${count===total?"success":""}`}>{count===total?"全票已登记":count>0?`${count}/${total} 票`:"未登记"}</span>{sample&&<small>最近：{formatShortDateTime(sample.event_at)}</small>}</div>
+        {manage&&<details className="batch-tracking-card-form"><summary>登记节点</summary>
+          <Form method="post" className="compact-tool-form batch-tracking-form">
+            <input type="hidden" name="intent" value="batch_tracking_add"/>
+            <input type="hidden" name="milestoneCode" value={node.code}/>
+            <Field name="eventAt" label="事件时间 *" type="datetime-local" required defaultValue={defaultEventAt}/>
+            <Field name="location" label="地点" defaultValue={node.code==="border_arrived"?borderPort||"":""}/>
+            <Field name="vehicleReference" label="车辆/车牌" defaultValue={defaultVehicle}/>
+            <label className="field"><span>备注</span><input name="notes" placeholder="例如换装方式、清关说明"/></label>
+            <label className="field"><span>客户可见</span><select name="visibleToCustomer" defaultValue="on"><option value="on">客户可见</option><option value="off">仅内部</option></select></label>
+            <button className="primary" disabled={busy}>登记到本批 {total} 票订单</button>
+          </Form>
+        </details>}
+      </article>;
+    })}</div>
+    <section className="batch-tracking-orders"><header><div><h3>逐票节点状态</h3><p>下面列出本批每票订单的最新里程碑与历史节点；点击订单号可跳转订单的运输执行与跟踪模块。</p></div></header>
+      <div className="table-wrap"><table><thead><tr><th>订单 / 客户</th><th>最新节点</th><th>节点时间</th><th>地点</th><th>车辆</th><th>历史节点</th><th>操作</th></tr></thead><tbody>{orders.map(order=>{
+        const latest=latestByOrder.get(order.order_id);
+        const list=milestonesByOrder.get(order.order_id)||[];
+        return <tr key={order.order_id}>
+          <td><Link to={`/admin/orders/${order.order_id}/modules/tracking`}><strong>{order.order_number}</strong></Link><small>{order.customer_name}</small></td>
+          <td>{latest?<span className={`status-pill ${milestoneProgressWeight[latest.milestone_code]??0>=100?"success":""}`}>{latest.milestone_name}</span>:<span className="status-pill off">未登记</span>}</td>
+          <td>{latest?formatShortDateTime(latest.event_at):"—"}</td>
+          <td>{latest?.location||"—"}</td>
+          <td>{latest?.vehicle_reference||"—"}</td>
+          <td><small className="tracking-history-list">{list.map(m=>`${m.milestone_name} ${formatShortDateTime(m.event_at)}`).join(" · ")||"无"}</small></td>
+          <td><Link className="text-button" to={`/admin/orders/${order.order_id}/modules/tracking`}>订单跟踪</Link></td>
+        </tr>;
+      })}</tbody></table></div>
+    </section>
+  </section>;
 }
 
 function BatchOrderCustomsWorkbench({orderId,declarations,manage,busy}:{orderId:string;declarations:BatchCustomsDeclaration[];manage:boolean;busy:boolean}){
@@ -556,7 +717,7 @@ function WarehouseOutboundAction({orderId,batchId}:{orderId:string;batchId:strin
 }
 
 function CostAllocationSection({allocations,busy,manage}:{allocations:Awaited<ReturnType<typeof loadCostAllocations>>;busy:boolean;manage:boolean}){
-  return <section className="panel cost-allocation-section"><div className="panel-header"><div><h2>4. 拼车成本分摊</h2><p>按仓库实收重量和体积生成系统建议；人工确认前不入账，确认后只生成内部应付和毛利数据，不会改客户应收。</p></div><span className="status-pill">{allocations.filter(item=>item.status==="draft").length} 个待确认</span></div>
+  return <section className="panel cost-allocation-section"><div className="panel-header"><div><h2>5. 拼车成本分摊</h2><p>按仓库实收重量和体积生成系统建议；人工确认前不入账，确认后只生成内部应付和毛利数据，不会改客户应收。</p></div><span className="status-pill">{allocations.filter(item=>item.status==="draft").length} 个待确认</span></div>
     {manage&&<details className="inline-details"><summary>新增分摊草稿</summary><Form method="post" className="form-grid compact"><input type="hidden" name="intent" value="create_cost_allocation"/><label className="field"><span>费用项目</span><select name="chargeCode" required><option value="">请选择</option>{COST_CHARGES.map(item=><option key={item.code} value={item.code}>{item.name}</option>)}</select></label><Field name="counterpartyName" label="往来单位 / 供应商" required/><Field name="totalAmount" label="费用总额" type="number" required/><Field name="currency" label="币种" required defaultValue="CNY"/><Field name="exchangeRate" label="折本位币汇率" type="number" required defaultValue="1"/><label className="field"><span>分摊方式</span><select name="method" defaultValue="auto"><option value="auto">系统建议（推荐）</option><option value="weight">按实收重量</option><option value="volume">按实收体积</option><option value="equal">按订单均分</option></select></label><label className="field span-2"><span>费用备注</span><input name="allocationNotes" placeholder="例如口岸换装运费、报关费等"/></label><button className="primary" disabled={busy}>生成分摊草稿</button></Form></details>}
     {!allocations.length&&<p className="empty-state">暂无成本分摊。仓库完成实收后，可在这里生成分摊草稿。</p>}
     <div className="cost-allocation-list">{allocations.map(allocation=><article className="cost-allocation-card" key={allocation.id}><header><div><strong>{allocation.charge_name} · {allocation.currency} {allocation.total_amount.toFixed(2)}</strong><small>{allocation.counterparty_name}</small></div><span className={`status-pill ${allocation.status==="confirmed"?"success":""}`}>{allocation.status==="confirmed"?"已确认入账":"草稿待复核"}</span></header><div className="allocation-summary"><span>方式<strong>{allocationMethodLabel(allocation.allocation_method)}</strong></span><span>实收重量<strong>{allocation.total_actual_weight_kg.toFixed(2)} KG</strong></span><span>实收体积<strong>{allocation.total_actual_volume_cbm.toFixed(3)} CBM</strong></span><span>密度<strong>{allocation.density_kg_per_cbm.toFixed(2)} KG/CBM</strong></span></div><small>{allocation.density_result}{allocation.confirmed_at?` · 确认时间 ${allocation.confirmed_at}`:" · 系统建议可人工调整"}</small>
