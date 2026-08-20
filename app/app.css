@@ -6140,6 +6140,76 @@ body.modal-scroll-locked {
 }
 
 /* Dense role queue and domestic road ledger. */
+.warehouse-queue-header {
+  align-items: flex-end;
+}
+
+.warehouse-queue-tabs {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(120px, 1fr));
+  margin-bottom: 10px;
+  border: 1px solid #dbe4ef;
+  border-radius: 4px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.warehouse-queue-tabs a {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-right: 1px solid #dbe4ef;
+  color: #53657e;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.warehouse-queue-tabs a:last-child {
+  border-right: 0;
+}
+
+.warehouse-queue-tabs a.active {
+  background: #eaf3ff;
+  color: #0a4fa8;
+}
+
+.warehouse-queue-panel {
+  padding: 14px;
+}
+
+.warehouse-queue-filter {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) auto auto;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.warehouse-queue-table table {
+  min-width: 1220px;
+  font-size: 12px;
+}
+
+.warehouse-queue-table th,
+.warehouse-queue-table td {
+  padding: 8px 10px;
+  vertical-align: middle;
+}
+
+.warehouse-queue-table td > strong,
+.warehouse-queue-table td > small {
+  display: block;
+}
+
+.warehouse-queue-table td > small {
+  margin-top: 3px;
+  color: #64748b;
+}
+
+.warehouse-queue-table tr.row-blocked td:first-child {
+  box-shadow: inset 3px 0 #dc2626;
+}
+
 .position-order-ledger,
 .domestic-tracking-ledger {
   padding: 16px;
@@ -6292,6 +6362,22 @@ body.modal-scroll-locked {
 }
 
 @media (max-width: 900px) {
+  .warehouse-queue-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .warehouse-queue-tabs a {
+    border-bottom: 1px solid #dbe4ef;
+  }
+
+  .warehouse-queue-filter {
+    grid-template-columns: 1fr auto;
+  }
+
+  .warehouse-queue-filter input {
+    grid-column: 1 / -1;
+  }
+
   .position-ledger-filters,
   .domestic-tracking-filters {
     grid-template-columns: 1fr 1fr;

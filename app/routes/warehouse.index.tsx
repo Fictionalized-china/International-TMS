@@ -1,63 +1,132 @@
 import { env } from "cloudflare:workers";
-import { Form, useNavigation } from "react-router";
+import { Form, Link } from "react-router";
 import type { Route } from "./+types/warehouse.index";
 import { requireSessionUser } from "../lib/auth.server";
-import { valueOf } from "../lib/validation";
-import { writeAudit } from "../lib/audit.server";
-import { recordWorkflowEvent } from "../lib/business-workflow.server";
-import { Modal } from "../components/Modal";
 
-type Task={id:string;order_id:string;customer_id:string;shipment_number:string;order_number:string;customer_name:string;customer_identity_code:string;status:string;current_location:string|null;origin_city:string;destination_city:string;cargo_description:string;pieces:number;gross_weight_kg:number;volume_cbm:number;updated_at:string};
-type Operation={id:string;shipment_id:string;operation_type:string;location:string|null;notes:string|null;occurred_at:string;operator_name:string|null};
-type LocationOption={id:string;code:string;name:string;zone_name:string;warehouse_name:string};
+type WarehouseQueue = "inbound" | "counting" | "inventory" | "outbound" | "exception";
 
-export async function loader({request}:Route.LoaderArgs){
-  const user=await requireSessionUser(request,"warehouse.view","warehouse"),url=new URL(request.url),q=url.searchParams.get("q")?.trim()??"",pattern=`%${q}%`;
-  const [rows,operations,locations]=await Promise.all([env.DB.prepare(`SELECT s.id,s.order_id,s.customer_id,s.shipment_number,o.order_number,c.name AS customer_name,c.identity_code customer_identity_code,s.status,s.current_location,o.origin_city,o.destination_city,o.cargo_description,o.pieces,o.gross_weight_kg,o.volume_cbm,s.updated_at
-    FROM shipments s JOIN transport_orders o ON o.id=s.order_id JOIN customers c ON c.id=s.customer_id
-    WHERE s.organization_id=? AND s.status NOT IN ('delivered','cancelled') AND (?='' OR s.shipment_number LIKE ? OR o.order_number LIKE ? OR c.identity_code LIKE ? OR c.name LIKE ?) ORDER BY CASE s.status WHEN 'booked' THEN 1 WHEN 'picked_up' THEN 2 ELSE 3 END,s.updated_at`).bind(user.organizationId,q,pattern,pattern,pattern,pattern).all<Task>(),env.DB.prepare(`SELECT wo.id,wo.shipment_id,wo.operation_type,wo.location,wo.notes,wo.occurred_at,u.display_name AS operator_name FROM warehouse_operations wo LEFT JOIN users u ON u.id=wo.operator_user_id WHERE wo.organization_id=? ORDER BY wo.occurred_at DESC LIMIT 300`).bind(user.organizationId).all<Operation>(),env.DB.prepare(`SELECT l.id,l.code,l.name,z.name zone_name,w.name warehouse_name FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id JOIN warehouses w ON w.id=l.warehouse_id WHERE l.organization_id=? AND l.status='active' AND z.status='active' AND w.status='active' ORDER BY w.code,z.code,l.code`).bind(user.organizationId).all<LocationOption>()]);
-  return{user,tasks:rows.results,operations:operations.results,locations:locations.results,q};
+type WarehouseQueueRow = {
+  order_id: string;
+  shipment_id: string;
+  shipment_number: string;
+  order_number: string;
+  customer_name: string;
+  customer_identity_code: string;
+  business_type: string;
+  cargo_description: string;
+  pieces: number;
+  gross_weight_kg: number;
+  volume_cbm: number;
+  received: number;
+  cargo_complete: number;
+  receipt_time: string | null;
+  package_count: number;
+  in_stock_count: number;
+  dispatch_status: string | null;
+  active_exception_count: number;
+  updated_at: string;
+};
+
+type CategorizedWarehouseRow = WarehouseQueueRow & { queue: WarehouseQueue };
+
+const queueMeta: Record<WarehouseQueue, { label: string; hint: string }> = {
+  inbound: { label: "待入库", hint: "等待扫码收货" },
+  counting: { label: "收货清点", hint: "已收货，等待确认货齐或异常" },
+  inventory: { label: "在库货物", hint: "已完成实收，等待配载或整车装车" },
+  outbound: { label: "待装车出库", hint: "已有装车任务，等待扫码与交接" },
+  exception: { label: "异常处理", hint: "货物被冻结，需先处理异常" },
+};
+
+export async function loader({ request }: Route.LoaderArgs) {
+  const user = await requireSessionUser(request, "warehouse.view", "warehouse");
+  const url = new URL(request.url);
+  const requestedView = url.searchParams.get("view") || "all";
+  const view = requestedView === "all" || requestedView in queueMeta ? requestedView : "all";
+  const q = (url.searchParams.get("q") || "").trim().toLowerCase();
+  const rows = await env.DB.prepare(
+    `SELECT s.order_id,s.id shipment_id,s.shipment_number,o.order_number,c.name customer_name,
+            c.identity_code customer_identity_code,o.business_type,o.cargo_description,
+            o.pieces,o.gross_weight_kg,o.volume_cbm,
+            EXISTS(SELECT 1 FROM warehouse_receipts wr WHERE wr.organization_id=s.organization_id AND wr.shipment_id=s.id) received,
+            EXISTS(SELECT 1 FROM warehouse_receipts wr WHERE wr.organization_id=s.organization_id AND wr.shipment_id=s.id AND wr.status='completed' AND wr.cargo_complete=1) cargo_complete,
+            (SELECT MAX(wr.received_at) FROM warehouse_receipts wr WHERE wr.organization_id=s.organization_id AND wr.shipment_id=s.id) receipt_time,
+            (SELECT COUNT(*) FROM warehouse_packages wp WHERE wp.organization_id=s.organization_id AND wp.shipment_id=s.id) package_count,
+            (SELECT COUNT(*) FROM warehouse_packages wp WHERE wp.organization_id=s.organization_id AND wp.shipment_id=s.id AND wp.status IN ('in_stock','allocated')) in_stock_count,
+            (SELECT wd.status FROM warehouse_dispatches wd WHERE wd.organization_id=s.organization_id AND wd.shipment_id=s.id ORDER BY wd.created_at DESC LIMIT 1) dispatch_status,
+            (SELECT COUNT(*) FROM warehouse_exceptions we WHERE we.organization_id=s.organization_id AND we.shipment_id=s.id AND we.status IN ('open','processing')) active_exception_count,
+            MAX(o.updated_at,s.updated_at) updated_at
+       FROM shipments s
+       JOIN transport_orders o ON o.id=s.order_id AND o.organization_id=s.organization_id
+       JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
+      WHERE s.organization_id=? AND o.status NOT IN ('cancelled','completed')
+      ORDER BY o.updated_at DESC,s.updated_at DESC`,
+  ).bind(user.organizationId).all<WarehouseQueueRow>();
+
+  const categorized = rows.results.map((row) => ({ ...row, queue: warehouseQueue(row) }));
+  const scoped = categorized.filter((row) => {
+    if (view !== "all" && row.queue !== view) return false;
+    if (!q) return true;
+    return `${row.order_number} ${row.shipment_number} ${row.customer_name} ${row.customer_identity_code} ${row.cargo_description}`.toLowerCase().includes(q);
+  });
+  const counts = Object.fromEntries(
+    Object.keys(queueMeta).map((key) => [key, categorized.filter((row) => row.queue === key).length]),
+  ) as Record<WarehouseQueue, number>;
+  return { user, rows: scoped, counts, view, q };
 }
 
-export async function action({request}:Route.ActionArgs){
-  const user=await requireSessionUser(request,"warehouse.operate","warehouse"),form=await request.formData(),shipmentId=valueOf(form,"shipmentId"),operation=valueOf(form,"operation"),locationId=valueOf(form,"locationId"),manualLocation=valueOf(form,"location"),notes=valueOf(form,"notes"),signedBy=valueOf(form,"signedBy"),occurredAt=valueOf(form,"occurredAt")||new Date().toISOString(),now=new Date().toISOString();
-  const pieces=positiveInt(form,"pieces"),weight=positive(form,"weight"),volume=positive(form,"volume");
-  const shipment=await env.DB.prepare("SELECT id,status,order_id,customer_id,current_location FROM shipments WHERE id=? AND organization_id=?").bind(shipmentId,user.organizationId).first<{id:string;status:string;order_id:string;customer_id:string;current_location:string|null}>();
-  if(!shipment)return{formError:"运单不存在或不属于当前组织"};
-  if(operation==="dispatch")return{formError:"禁止从作业看板直接出库：请先完成拼车配载和车辆安排，再到“按批次装车出库”逐件扫描"};
-  const allowed:Record<string,string[]>={receive:["booked"],measure:["picked_up","in_transit"],exception:["picked_up","in_transit","customs"],resume:["exception"],deliver:["in_transit"]};
-  if(!allowed[operation]?.includes(shipment.status))return{formError:"当前运单状态不能执行该项作业"};
-  if(operation==="measure"&&!pieces&&!weight&&!volume)return{formError:"称重量方至少填写件数、重量或体积之一"};
-  if(operation==="deliver"&&!signedBy)return{formError:"签收作业必须填写签收人"};
-  if(operation==="exception"&&!notes)return{formError:"异常登记必须填写异常原因"};
-  const warehouseLocation=locationId?await env.DB.prepare(`SELECT l.id,l.name,l.code,w.name warehouse_name,z.name zone_name FROM warehouse_locations l JOIN warehouses w ON w.id=l.warehouse_id JOIN warehouse_zones z ON z.id=l.zone_id WHERE l.id=? AND l.organization_id=? AND l.status='active'`).bind(locationId,user.organizationId).first<{id:string;name:string;code:string;warehouse_name:string;zone_name:string}>():null;
-  if(locationId&&!warehouseLocation)return{formError:"所选库位无效或已停用"};
-  const location=warehouseLocation?`${warehouseLocation.warehouse_name} / ${warehouseLocation.zone_name} / ${warehouseLocation.name} (${warehouseLocation.code})`:manualLocation;
-  const nextStatus=operation==="receive"?"picked_up":operation==="resume"?"in_transit":operation==="exception"?"exception":operation==="deliver"?"delivered":shipment.status;
-  const descriptions:Record<string,string>={receive:"仓库已收货并完成提货",measure:"仓库已完成称重量方",exception:`仓库作业异常：${notes}`,resume:"异常处理完成，恢复运输",deliver:`货物已签收，签收人：${signedBy}`};
-  const statements=[
-    env.DB.prepare(`INSERT INTO warehouse_operations(id,organization_id,shipment_id,operation_type,location,measured_pieces,measured_weight_kg,measured_volume_cbm,notes,signed_by,operator_user_id,occurred_at,created_at,warehouse_location_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(),user.organizationId,shipmentId,operation,location||shipment.current_location,pieces,weight,volume,notes||null,signedBy||null,user.userId,occurredAt,now,warehouseLocation?.id??null),
-    env.DB.prepare(`INSERT INTO shipment_events(id,shipment_id,status,location,description,event_at,visible_to_customer,created_by_user_id,created_at) VALUES(?,?,?,?,?,?,1,?,?)`).bind(crypto.randomUUID(),shipmentId,nextStatus,location||shipment.current_location,descriptions[operation],occurredAt,user.userId,now),
-    env.DB.prepare(`UPDATE shipments SET status=?,current_location=COALESCE(NULLIF(?,''),current_location),actual_pickup_at=CASE WHEN ?='receive' THEN ? ELSE actual_pickup_at END,actual_delivery_at=CASE WHEN ?='deliver' THEN ? ELSE actual_delivery_at END,signed_by=CASE WHEN ?='deliver' THEN ? ELSE signed_by END,exception_reason=CASE WHEN ?='exception' THEN ? WHEN ?='resume' THEN NULL ELSE exception_reason END,updated_at=? WHERE id=? AND organization_id=?`).bind(nextStatus,location,operation,occurredAt,operation,occurredAt,operation,signedBy||null,operation,notes||null,operation,now,shipmentId,user.organizationId),
-  ];
-  if(operation==="measure")statements.push(env.DB.prepare("UPDATE transport_orders SET pieces=COALESCE(?,pieces),gross_weight_kg=COALESCE(?,gross_weight_kg),volume_cbm=COALESCE(?,volume_cbm),updated_at=? WHERE id=? AND organization_id=?").bind(pieces,weight,volume,now,shipment.order_id,user.organizationId));
-  await env.DB.batch(statements);
-  const event=operation==="receive"?"shipment.picked_up":operation==="resume"?"shipment.in_transit":operation==="deliver"?"shipment.delivered":null;
-  if(event)await recordWorkflowEvent({organizationId:user.organizationId,event:event as "shipment.picked_up"|"shipment.in_transit"|"shipment.delivered",customerId:shipment.customer_id,orderId:shipment.order_id,shipmentId,actorUserId:user.userId,source:"admin",metadata:{warehouse:true,operation,location}});
-  await writeAudit({request,action:`warehouse.${operation}`,resourceType:"shipment",resourceId:shipmentId,organizationId:user.organizationId,actorUserId:user.userId,metadata:{from:shipment.status,to:nextStatus,pieces,weight,volume}});
-  return{success:`${descriptions[operation]}，轨迹已同步`};
+export default function WarehouseIndex({ loaderData }: Route.ComponentProps) {
+  return <>
+    <header className="page-header warehouse-queue-header">
+      <div><p className="eyebrow">WAREHOUSE WORK QUEUE</p><h1>仓库作业总表</h1><p>一行一票货；系统根据收货、实收、库存、装车和异常记录自动归类。</p></div>
+      <Link className="secondary" to="/warehouse/inventory?status=dispatched">查看已出库记录</Link>
+    </header>
+    <nav className="warehouse-queue-tabs" aria-label="仓库作业分类">
+      <Link className={loaderData.view === "all" ? "active" : ""} to="/warehouse">全部 <strong>{Object.values(loaderData.counts).reduce((sum, count) => sum + count, 0)}</strong></Link>
+      {(Object.keys(queueMeta) as WarehouseQueue[]).map((key) => <Link key={key} className={loaderData.view === key ? "active" : ""} to={`/warehouse?view=${key}`}>{queueMeta[key].label} <strong>{loaderData.counts[key]}</strong></Link>)}
+    </nav>
+    <section className="panel warehouse-queue-panel">
+      <Form method="get" className="warehouse-queue-filter">
+        {loaderData.view !== "all" && <input type="hidden" name="view" value={loaderData.view} />}
+        <input name="q" defaultValue={loaderData.q} placeholder="订单、运单、客户、识别码或货物名称" />
+        <button className="secondary">筛选</button>
+        <Link className="text-button" to={loaderData.view === "all" ? "/warehouse" : `/warehouse?view=${loaderData.view}`}>重置</Link>
+      </Form>
+      <div className="table-wrap warehouse-queue-table"><table><thead><tr><th>作业状态</th><th>订单 / 运单</th><th>客户</th><th>货物与实收</th><th>入库时间</th><th>当前处理</th><th className="sticky-action">操作</th></tr></thead><tbody>{loaderData.rows.map((row) => <tr key={row.shipment_id} className={row.queue === "exception" ? "row-blocked" : ""}>
+        <td><span className={`status-pill warehouse-queue-${row.queue}`}>{queueMeta[row.queue].label}</span><small>{row.business_type === "ftl" ? "整车" : "拼车"}</small></td>
+        <td><strong>{row.order_number}</strong><small>{row.shipment_number}</small></td>
+        <td><strong>{row.customer_name}</strong><small>识别码 {row.customer_identity_code}</small></td>
+        <td><strong>{row.cargo_description || "货物名称待补"}</strong><small>{row.pieces || 0} 件 · {Number(row.gross_weight_kg || 0).toFixed(2)} KG · {Number(row.volume_cbm || 0).toFixed(3)} CBM · {row.package_count} 个标签</small></td>
+        <td>{row.receipt_time ? new Date(row.receipt_time).toLocaleString("zh-CN") : "尚未入库"}</td>
+        <td><strong>{queueMeta[row.queue].hint}</strong><small>{warehouseQueueDetail(row)}</small></td>
+        <td className="sticky-action"><Link className="text-button" to={warehouseQueueHref(row)}>进入办理</Link></td>
+      </tr>)}</tbody></table></div>
+      {!loaderData.rows.length && <p className="empty-state">当前筛选条件下没有仓库作业。</p>}
+    </section>
+  </>;
 }
 
-const labels:Record<string,string>={booked:"待提货",picked_up:"已提货",in_transit:"在途",customs:"清关",out_for_delivery:"在途",exception:"异常"};
-export default function WarehouseIndex({loaderData,actionData}:Route.ComponentProps){
-  const busy=useNavigation().state!=="idle",canOperate=loaderData.user.permissions.includes("warehouse.operate");
-  const pending=loaderData.tasks.filter(task=>task.status==="booked").length,active=loaderData.tasks.filter(task=>["picked_up","in_transit","customs"].includes(task.status)).length,exceptions=loaderData.tasks.filter(task=>task.status==="exception").length;
-  return <><header className="page-header"><div><p className="eyebrow">WAREHOUSE OPERATIONS</p><h1>仓库作业看板</h1><p>按客户识别码、订单号和运单号管理货物；出库必须从已完成配载与车辆安排的批次进入，作业看板不再提供绕过流程的快捷发车。</p></div><span className="status-pill">warehouse.oulingtruck.com</span></header>{(actionData?.success||actionData?.formError)&&<div className={`alert ${actionData.formError?"error":"success"}`}>{actionData.formError??actionData.success}</div>}<section className="stats"><article><span>待处理</span><strong>{pending}</strong><small>等待现场接单</small></article><article><span>作业中</span><strong>{active}</strong><small>收货、复核及异常作业</small></article><article><span>异常</span><strong>{exceptions}</strong><small>需要现场处理</small></article></section><section className="panel"><div className="panel-header"><div><h2>当前作业队列</h2><p>客户识别码是仓库区分货物归属的统一标识。</p></div><Form method="get" className="inventory-filter"><label className="field"><span>快速查找</span><input name="q" defaultValue={loaderData.q} placeholder="客户识别码、订单号、运单号或客户"/></label><button className="secondary">查询</button></Form></div><div className="table-wrap"><table><thead><tr><th>运单/订单</th><th>客户识别码/客户</th><th>线路</th><th>货物</th><th>状态</th><th>操作</th></tr></thead><tbody>{loaderData.tasks.map(task=><tr key={task.id}><td><strong>{task.shipment_number}</strong><small>{task.order_number}</small></td><td><code className="identity-code">{task.customer_identity_code}</code><small>{task.customer_name}</small></td><td>{task.origin_city} → {task.destination_city}</td><td><strong>{task.cargo_description}</strong><small>{task.pieces} 件 · {task.gross_weight_kg} KG · {task.volume_cbm} CBM</small></td><td><span className={`status-pill ${task.status==='exception'?'off':''}`}>{labels[task.status]??task.status}</span></td><td>{canOperate&&<Modal title={`登记 ${task.shipment_number} 作业`} triggerLabel="作业登记" triggerClassName="text-button" closeSignal={actionData?.success}><OperationForm task={task} locations={loaderData.locations} busy={busy}/></Modal>}</td></tr>)}</tbody></table></div>{!loaderData.tasks.length&&<p className="empty-state">当前条件下没有待处理仓库作业。</p>}</section><section className="panel"><h2>最近作业记录</h2><div className="simple-list">{loaderData.operations.slice(0,20).map(operation=><div key={operation.id}><div><strong>{operationLabel[operation.operation_type]??operation.operation_type}</strong><small>{operation.operator_name||"系统"} · {new Date(operation.occurred_at).toLocaleString("zh-CN")}</small></div><span>{operation.location||operation.notes||"—"}</span></div>)}</div>{!loaderData.operations.length&&<p className="empty-state">暂无仓库作业记录。</p>}</section></>;
+function warehouseQueue(row: WarehouseQueueRow): WarehouseQueue {
+  if (row.active_exception_count > 0) return "exception";
+  if (row.dispatch_status === "loading") return "outbound";
+  if (!row.received) return "inbound";
+  if (!row.cargo_complete) return "counting";
+  return "inventory";
 }
 
-const operationLabel:Record<string,string>={receive:"收货提货",measure:"称重量方",dispatch:"出库发车",exception:"异常登记",resume:"恢复运输",deliver:"签收"};
-function OperationForm({task,locations,busy}:{task:Task;locations:LocationOption[];busy:boolean}){const choices=task.status==="booked"?[["receive","收货提货"]]:task.status==="picked_up"?[["measure","称重量方"],["exception","异常登记"]]:task.status==="exception"?[["resume","恢复运输"]]:[["measure","称重量方"],["exception","异常登记"],["deliver","签收"]];return <Form method="post" className="stack"><input type="hidden" name="shipmentId" value={task.id}/><label className="field"><span>作业类型</span><select name="operation" required>{choices.map(([v,t])=><option key={v} value={v}>{t}</option>)}</select></label><label className="field"><span>仓库库位</span><select name="locationId" defaultValue=""><option value="">手工填写作业地点</option>{locations.map(location=><option key={location.id} value={location.id}>{location.warehouse_name} / {location.zone_name} / {location.name}（{location.code}）</option>)}</select></label><label className="field"><span>其他作业地点</span><input name="location" defaultValue={task.current_location??task.origin_city}/></label><label className="field"><span>发生时间</span><input name="occurredAt" type="datetime-local"/></label><div className="form-grid compact"><Num name="pieces" label="实测件数"/><Num name="weight" label="实测重量 KG"/><Num name="volume" label="实测体积 CBM" step="0.001"/></div><label className="field"><span>签收人</span><input name="signedBy"/></label><label className="field"><span>作业说明/异常原因</span><textarea name="notes" rows={3}/></label><button className="primary" disabled={busy}>确认作业并发布轨迹</button></Form>}
-function Num({name,label,step="0.01"}:{name:string;label:string;step?:string}){return <label className="field"><span>{label}</span><input name={name} type="number" min="0" step={step}/></label>}
-function positive(form:FormData,name:string){const raw=valueOf(form,name);if(!raw)return null;const number=Number(raw);return Number.isFinite(number)&&number>0?number:null}function positiveInt(form:FormData,name:string){const value=positive(form,name);return value!==null&&Number.isInteger(value)?value:null}
+function warehouseQueueDetail(row: CategorizedWarehouseRow) {
+  if (row.active_exception_count) return `${row.active_exception_count} 条未结案异常`;
+  if (row.dispatch_status === "loading") return "装车任务进行中";
+  if (!row.received) return "尚无仓库收货记录";
+  if (!row.cargo_complete) return "已收货，尚未确认货齐";
+  return `${row.in_stock_count}/${row.package_count} 个标签在库或已集货`;
+}
 
-export function meta(){return[{title:"仓库作业看板 | International TMS"}]}
+function warehouseQueueHref(row: CategorizedWarehouseRow) {
+  const returnTo = encodeURIComponent(`/admin/orders/${row.order_id}/modules/warehouse`);
+  if (row.queue === "exception") return "/warehouse/exceptions?status=active";
+  if (row.queue === "outbound") return `/warehouse/outbound?orderId=${row.order_id}&returnTo=${returnTo}`;
+  if (row.queue === "inventory") return `/warehouse/inventory?q=${encodeURIComponent(row.order_number)}`;
+  return `/warehouse/inbound?orderId=${row.order_id}&returnTo=${returnTo}`;
+}
+
+export function meta() { return [{ title: "仓库作业总表 | International TMS" }]; }

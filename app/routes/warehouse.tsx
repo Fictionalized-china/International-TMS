@@ -128,20 +128,20 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
         <nav>
           <span className="warehouse-nav-group">现场作业</span>
           <NavLink to={warehouseLink("/warehouse", loaderData.query)} end>
-            <span>▦</span>作业看板
+            <span>▦</span>仓库作业总表
           </NavLink>
           <NavLink to={warehouseLink("/warehouse/inbound", loaderData.query)}>
-            <span>▣</span>扫码收货
+            <span>▣</span>待入库与收货
           </NavLink>
           <NavLink to={warehouseLink("/warehouse/outbound", loaderData.query)}>
-            <span>▤</span>按运输方案装车出库
+            <span>▤</span>待装车与出库
           </NavLink>
           <span className="warehouse-nav-group">库存管理</span>
           <NavLink to={warehouseLink("/warehouse/inventory", loaderData.query)}>
-            <span>▥</span>库存与盘点
+            <span>▥</span>仓库货物与盘点
           </NavLink>
           <NavLink to={warehouseLink("/warehouse/exceptions", loaderData.query)}>
-            <span>!</span>异常与凭证
+            <span>!</span>异常处理
           </NavLink>
           <span className="warehouse-nav-group">仓储配置</span>
           <NavLink to={warehouseLink("/warehouse/locations", loaderData.query)}>
