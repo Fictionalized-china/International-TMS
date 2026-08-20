@@ -625,6 +625,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   const requiresTransloading=loaderData.orders.some(o=>flagsByOrder.get(o.order_id)?.requires_transloading===1);
   const dispatchedCount=loaderData.outboundStatuses.filter(item=>item.dispatched===1).length;
   const allDispatched=loaderData.orders.length>0&&dispatchedCount===loaderData.orders.length;
+  const pendingDispatchOrders=loaderData.orders.filter(order=>!loaderData.outboundStatuses.find(item=>item.order_id===order.order_id)?.dispatched);
   const sharedDocumentsReady=BATCH_DOCUMENT_TYPES.filter(item=>item.required).every(type=>loaderData.batchDocuments.some(document=>document.document_category===type.code&&["approved","archived"].includes(document.review_status)));
   // 报关就绪：报关资料文件已审核 AND 报关单已放行
   const customsReadyForOrder=(orderId:string)=>{
@@ -639,7 +640,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   const transportResourceReady=Boolean(loaderData.batch.overseas_carrier_name&&loaderData.batch.overseas_vehicle_type&&loaderData.batch.overseas_vehicle_count>0&&loaderData.batch.overseas_vehicle_plate&&loaderData.batch.overseas_driver_name&&loaderData.batch.overseas_driver_phone);
   const canConfirmExit=allDispatched&&sharedDocumentsReady&&orderDepartureReady&&transportResourceReady;
   const exitBlockers=[
-    ...(!allDispatched?[`仓库装车出库交接未完成（${dispatchedCount}/${loaderData.orders.length} 票）`]:[]),
+    ...pendingDispatchOrders.map(order=>`${order.order_number}：仓库装车出库交接未完成`),
     ...(!transportResourceReady?["境外承运方、车型、车牌、司机姓名或司机电话尚未补齐"]:[]),
     ...(!sharedDocumentsReady?["配载清单尚未生成或审核通过（可在配载单文件工作台一键生成）"]:[]),
     ...loaderData.departureGateStatuses.flatMap(item=>item.reasons.map(reason=>`${loaderData.orders.find(order=>order.order_id===item.order_id)?.order_number||"订单"}：${reason}`)),
@@ -693,7 +694,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   <CostAllocationSection allocations={loaderData.costAllocations} busy={busy} manage={manage}/>
   <section className="panel" id="batch-exit-gate"><div className="panel-header"><div><h2>6. 出境门禁与确认</h2><p>这里逐项核对整批订单；全部通过后，才能统一确认出境并同步所有挂载订单。</p></div><span className="status-pill">{roadStatusLabels[loaderData.batch.road_status]||loaderData.batch.road_status}</span></div>
     <div className="batch-exit-gates">
-      <div className={`batch-exit-gate ${allDispatched?"ready":"blocked"}`}><span>仓库装车出库</span><strong>{allDispatched?"全部订单已完成交接":`${dispatchedCount}/${loaderData.orders.length} 票已完成`}</strong></div>
+      <div className={`batch-exit-gate ${allDispatched?"ready":"blocked"}`}><span>仓库装车出库</span><strong>{allDispatched?"全部订单已完成交接":`${dispatchedCount}/${loaderData.orders.length} 票已完成；待处理：${pendingDispatchOrders.map(order=>order.order_number).join("、")}`}</strong></div>
       <div className={`batch-exit-gate ${transportResourceReady?"ready":"blocked"}`}><span>境外运输资源</span><strong>{transportResourceReady?`${loaderData.batch.overseas_carrier_name} · ${loaderData.batch.overseas_vehicle_plate}`:"承运方、车辆或司机资料未齐"}</strong></div>
       <div className={`batch-exit-gate ${sharedDocumentsReady?"ready":"blocked"}`}><span>配载单文件</span><strong>{sharedDocumentsReady?"配载清单已生成并审核":"配载清单待生成"}</strong></div>
       <div className={`batch-exit-gate ${orderDepartureReady?"ready":"blocked"}`}><span>逐票资料与报关</span><strong>{orderDepartureReady?"全部订单门禁已通过":`${loaderData.departureGateStatuses.filter(item=>!item.ready).length} 票待处理`}</strong></div>
