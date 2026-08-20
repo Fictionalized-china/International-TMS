@@ -157,6 +157,11 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
             </NavLink>
           )}
           {loaderData.warehouse.warehouse_role !== "overseas_destination" && (
+            <NavLink to={warehouseLink("/warehouse/consolidation", loaderData.query)}>
+              <span>▦</span>货物配载
+            </NavLink>
+          )}
+          {loaderData.warehouse.warehouse_role !== "overseas_destination" && (
             <NavLink to={warehouseLink("/warehouse/ltl-loading", loaderData.query)}>
               <span>▦</span>拼车装货
             </NavLink>
