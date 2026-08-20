@@ -4238,15 +4238,132 @@ label:has(> input:required, > select:required, > textarea:required) > span:first
   overflow-y: scroll;
   touch-action: pan-y;
 }
+.cargo-dialog-card {
+  border: 1px solid #cbd6e2;
+  border-radius: 12px;
+  background: #f4f7fa;
+  box-shadow: 0 26px 70px rgba(15, 35, 55, 0.28);
+}
+.cargo-dialog-card .modal-header {
+  flex: 0 0 auto;
+  padding: 15px 18px;
+  border-bottom-color: #d8e1ea;
+  background: #fff;
+}
+.cargo-dialog-card .modal-header h2 {
+  color: #15283d;
+  font-size: 18px;
+}
+.cargo-dialog-card .modal-body {
+  padding: 14px;
+  background: #f4f7fa;
+}
+.cargo-dialog-form {
+  display: grid;
+  gap: 12px;
+}
+.cargo-dialog-section {
+  overflow: hidden;
+  border: 1px solid #d5dee8;
+  border-radius: 8px;
+  background: #fff;
+}
+.cargo-dialog-section-header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 42px;
+  padding: 7px 12px;
+  border-bottom: 1px solid #e2e8ef;
+  background: #f8fafc;
+}
+.cargo-dialog-section-header > span {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  border: 1px solid #b9c9da;
+  border-radius: 6px;
+  color: #1d5c49;
+  background: #edf8f3;
+  font-size: 11px;
+  font-weight: 900;
+}
+.cargo-dialog-section-header strong,
+.cargo-dialog-section-header small {
+  display: block;
+}
+.cargo-dialog-section-header strong {
+  color: #1b3046;
+  font-size: 13px;
+}
+.cargo-dialog-section-header small {
+  margin-top: 1px;
+  color: #758397;
+  font-size: 10px;
+  font-weight: 500;
+}
+.cargo-dialog-section .dialog-fields {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px 12px;
+  padding: 12px;
+}
+.cargo-dialog-card .cargo-entry-fields label {
+  display: grid;
+  align-content: start;
+  gap: 5px;
+}
+.cargo-dialog-card .cargo-entry-fields label > span {
+  min-height: 17px;
+  margin: 0;
+  color: #41536a;
+  font-size: 11px;
+  font-weight: 750;
+}
+.cargo-dialog-card .cargo-entry-fields input,
+.cargo-dialog-card .cargo-entry-fields select,
+.cargo-dialog-card .cargo-entry-fields textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid #bfcbd8;
+  border-radius: 7px;
+  outline: none;
+  color: #17283b;
+  background: #fff;
+  transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+.cargo-dialog-card .cargo-entry-fields textarea {
+  min-height: 76px;
+  resize: vertical;
+}
+.cargo-dialog-card .cargo-entry-fields input:hover,
+.cargo-dialog-card .cargo-entry-fields select:hover,
+.cargo-dialog-card .cargo-entry-fields textarea:hover {
+  border-color: #91a5ba;
+}
+.cargo-dialog-card .cargo-entry-fields input:focus,
+.cargo-dialog-card .cargo-entry-fields select:focus,
+.cargo-dialog-card .cargo-entry-fields textarea:focus {
+  border-color: #167354;
+  box-shadow: 0 0 0 3px rgba(22, 115, 84, 0.12);
+  background: #fff;
+}
+.cargo-dialog-card .cargo-notes-field {
+  grid-column: span 2;
+}
 .dialog-fields {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 .cargo-volume-preview {
   align-self: end;
-  padding: 9px 10px;
-  border: 1px dashed #aebed5;
-  border-radius: 8px;
-  background: #f8faff;
+  min-height: 61px;
+  padding: 8px 10px;
+  border: 1px solid #b9d9cc;
+  border-radius: 7px;
+  background: #f1faf6;
 }
 .cargo-volume-preview span,
 .cargo-volume-preview strong,
@@ -4255,13 +4372,35 @@ label:has(> input:required, > select:required, > textarea:required) > span:first
 }
 .cargo-volume-preview small {
   margin-top: 3px;
-  color: #72819a;
+  color: #60796f;
+}
+.cargo-volume-preview span {
+  color: #4f6c61;
+  font-size: 10px;
+  font-weight: 750;
+}
+.cargo-volume-preview strong {
+  color: #075e3d;
+  font-size: 15px;
 }
 .dialog-actions {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
   margin-top: 18px;
+}
+.cargo-dialog-card .dialog-actions {
+  position: sticky;
+  z-index: 3;
+  bottom: -14px;
+  margin: 12px -14px -14px;
+  padding: 12px 14px;
+  border-top: 1px solid #d8e1ea;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 -8px 20px rgba(30, 49, 70, 0.06);
+}
+.cargo-dialog-card .dialog-actions button {
+  min-width: 104px;
 }
 .workflow-confirm-warning {
   display: grid;
@@ -4288,16 +4427,33 @@ label:has(> input:required, > select:required, > textarea:required) > span:first
 }
 .cargo-image-field {
   grid-column: 1 / -1;
-  padding: 11px;
-  border: 1px solid #cfdbea;
-  border-radius: 9px;
-  background: #f8faff;
+  padding: 12px 14px;
+  border: 1px solid #d5dee8;
+  border-radius: 8px;
+  background: #fff;
 }
 .cargo-image-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+.cargo-image-heading strong,
+.cargo-image-heading small {
+  display: block;
+}
+.cargo-image-heading strong {
+  color: #1b3046;
+  font-size: 13px;
+}
+.cargo-image-heading small,
+.cargo-image-field > small {
+  color: #758397;
+  font-size: 10px;
+}
+.cargo-image-field > small {
+  display: block;
+  margin-top: 4px;
 }
 .upload-image-button {
   position: relative;
@@ -4351,6 +4507,41 @@ label:has(> input:required, > select:required, > textarea:required) > span:first
   border-radius: 50%;
   color: #fff;
   background: rgba(15, 23, 42, 0.78);
+}
+@media (max-width: 1100px) {
+  .cargo-dialog-section .dialog-fields {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 760px) {
+  .cargo-dialog-backdrop {
+    padding: 10px;
+  }
+  .cargo-dialog-backdrop .modal-card {
+    height: calc(100dvh - 20px);
+  }
+  .cargo-dialog-section .dialog-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .cargo-dialog-card .cargo-notes-field {
+    grid-column: 1 / -1;
+  }
+}
+@media (max-width: 520px) {
+  .cargo-dialog-section .dialog-fields {
+    grid-template-columns: 1fr;
+  }
+  .cargo-dialog-card .cargo-notes-field {
+    grid-column: 1;
+  }
+  .cargo-image-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .cargo-image-heading .upload-image-button {
+    width: 100%;
+    text-align: center;
+  }
 }
 .cargo-table-images {
   display: flex;

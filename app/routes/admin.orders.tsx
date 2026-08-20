@@ -2087,7 +2087,7 @@ function CreateOrder({
             scrollBody.scrollTop += event.deltaY;
           }}
         >
-          <section className="modal-card wide" role="dialog" aria-modal="true">
+          <section className="modal-card xwide cargo-dialog-card" role="dialog" aria-modal="true" aria-label="货物信息">
             <header className="modal-header">
               <h2>
                 {cargoRows.some((x) => x.id === cargoDraft.id)
@@ -2095,15 +2095,22 @@ function CreateOrder({
                   : "新增货物"}
               </h2>
               <button
-                type="button"
-                className="modal-close"
-                onClick={() => setCargoDraft(null)}
+                 type="button"
+                 className="modal-close"
+                 aria-label="关闭货物弹窗"
+                 onClick={() => setCargoDraft(null)}
               >
                 ×
               </button>
             </header>
             <div className="modal-body">
-              <div className="cargo-entry-fields dialog-fields">
+              <div className="cargo-dialog-form">
+                <section className="cargo-dialog-section">
+                  <header className="cargo-dialog-section-header">
+                    <span>01</span>
+                    <div><strong>货物识别</strong><small>品名与海关编码</small></div>
+                  </header>
+                  <div className="cargo-entry-fields dialog-fields">
                 {shows("cargo_name_cn") && <CargoInput
                   label="中文品名"
                   value={cargoDraft.name}
@@ -2128,8 +2135,16 @@ function CreateOrder({
                   onChange={(v) => updateCargo("overseasHsCode", v)}
                   required={requires("overseas_hs_code")}
                 />}
+                  </div>
+                </section>
+                <section className="cargo-dialog-section">
+                  <header className="cargo-dialog-section-header">
+                    <span>02</span>
+                    <div><strong>包装与计量</strong><small>包装、件数、重量和尺寸</small></div>
+                  </header>
+                  <div className="cargo-entry-fields dialog-fields">
                 {shows("package_type") && <label>
-                  <span>包装类型{requires("package_type") && <b className="required-mark">*</b>}</span>
+                  <span>包装类型</span>
                   <select
                     value={cargoDraft.packageType}
                     onChange={(e) => updateCargo("packageType", e.target.value)}
@@ -2198,6 +2213,21 @@ function CreateOrder({
                   step="0.0001"
                   required={requires("volume_per_package_cbm")}
                 />}
+                <div className="cargo-volume-preview">
+                  <span>计算体积</span>
+                  <strong>
+                    {effectiveCargoVolume(cargoDraft).toFixed(4)} CBM/包装
+                  </strong>
+                  <small>体积为 0 时按长×宽×高计算</small>
+                </div>
+                  </div>
+                </section>
+                <section className="cargo-dialog-section">
+                  <header className="cargo-dialog-section-header">
+                    <span>03</span>
+                    <div><strong>申报与补充</strong><small>货值、产地、品牌及备注</small></div>
+                  </header>
+                  <div className="cargo-entry-fields dialog-fields">
                 {shows("declared_value") && <CargoNumber
                   label="申报货值"
                   value={cargoDraft.declaredValue}
@@ -2206,7 +2236,7 @@ function CreateOrder({
                   required={requires("declared_value")}
                 />}
                 {shows("currency") && <label>
-                  <span>货值币种{requires("currency") && <b className="required-mark">*</b>}</span>
+                  <span>货值币种</span>
                   <select value={cargoDraft.currency} onChange={(event) => updateCargo("currency", event.target.value)} required={requires("currency")}>
                     {["CNY", "USD", "KZT", "UZS", "RUB"].map((currency) => <option key={currency}>{currency}</option>)}
                   </select>
@@ -2215,17 +2245,12 @@ function CreateOrder({
                 {shows("brand_model") && <CargoInput label="品牌 / 型号" value={cargoDraft.brandModel} onChange={(v) => updateCargo("brandModel", v)} required={requires("brand_model")} />}
                 {shows("marks") && <CargoInput label="唛头" value={cargoDraft.marks} onChange={(v) => updateCargo("marks", v)} required={requires("marks")} />}
                 {shows("special_attributes") && <CargoInput label="货物属性" value={cargoDraft.specialAttributes} onChange={(v) => updateCargo("specialAttributes", v)} required={requires("special_attributes")} />}
-                {shows("cargo_notes") && <label><span>货物备注{requires("cargo_notes") && <b className="required-mark">*</b>}</span><textarea value={cargoDraft.notes} onChange={(event) => updateCargo("notes", event.target.value)} required={requires("cargo_notes")} rows={3} /></label>}
-                <div className="cargo-volume-preview">
-                  <span>计算体积</span>
-                  <strong>
-                    {effectiveCargoVolume(cargoDraft).toFixed(4)} CBM/包装
-                  </strong>
-                  <small>体积为 0 时按长×宽×高计算</small>
-                </div>
+                {shows("cargo_notes") && <label className="cargo-notes-field"><span>货物备注</span><textarea value={cargoDraft.notes} onChange={(event) => updateCargo("notes", event.target.value)} required={requires("cargo_notes")} rows={3} /></label>}
+                  </div>
+                </section>
                 {shows("cargo_images") && <div className="cargo-image-field">
                   <div className="cargo-image-heading">
-                    <span>货物图片</span>
+                    <div><strong>04　货物图片</strong><small>最多上传 5 张</small></div>
                     <label className="secondary upload-image-button">
                       ＋ 选择图片
                       <input
@@ -2240,9 +2265,7 @@ function CreateOrder({
                       />
                     </label>
                   </div>
-                  <small>
-                    最多 5 张，支持 JPG/PNG/WebP；原图不超过 10 MB，系统会自动压缩后保存
-                  </small>
+                  <small>支持 JPG/PNG/WebP；原图不超过 10 MB，系统会自动压缩后保存</small>
                   {cargoImagesBusy && <p className="field-help">正在压缩图片，请稍候…</p>}
                   {cargoImageError && (
                     <p className="field-error">{cargoImageError}</p>
