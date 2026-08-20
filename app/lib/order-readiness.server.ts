@@ -105,11 +105,8 @@ export async function checkOrderLoadPlan(
       `SELECT b.id,
          COUNT(DISTINCT v.id) vehicle_count,
          COUNT(DISTINCT CASE WHEN NULLIF(TRIM(v.plate_number),'') IS NOT NULL AND NULLIF(TRIM(v.driver_name),'') IS NOT NULL THEN v.id END) staffed_vehicle_count,
-         COUNT(DISTINCT p.id) package_count,
-         COUNT(DISTINCT l.package_id) assigned_count,
          COUNT(DISTINCT CASE WHEN NULLIF(TRIM(v.plate_number),'') IS NOT NULL THEN v.id END) plated_vehicle_count,
          COUNT(DISTINCT CASE WHEN NULLIF(TRIM(v.driver_name),'') IS NOT NULL THEN v.id END) driver_vehicle_count,
-         COUNT(DISTINCT CASE WHEN v.capacity_weight_kg>0 AND v.capacity_volume_cbm>0 THEN v.id END) capacity_vehicle_count,
          MAX(CASE WHEN b.carrier_id IS NOT NULL THEN 1 ELSE 0 END) carrier_ready,
          MAX(CASE WHEN b.warehouse_id IS NOT NULL THEN 1 ELSE 0 END) warehouse_ready,
          MAX(CASE WHEN b.border_port IS NOT NULL THEN 1 ELSE 0 END) port_ready,
@@ -119,8 +116,6 @@ export async function checkOrderLoadPlan(
        FROM transport_batch_orders bo
        JOIN transport_batches b ON b.id=bo.batch_id AND b.status!='cancelled'
        LEFT JOIN transport_batch_vehicles v ON v.batch_id=b.id AND v.status!='cancelled'
-       LEFT JOIN order_cargo_packages p ON p.order_id=bo.order_id AND p.status!='cancelled'
-       LEFT JOIN transport_vehicle_loads l ON l.batch_id=b.id AND l.package_id=p.id
        WHERE bo.organization_id=? AND bo.order_id=? AND bo.status!='removed'
        GROUP BY b.id LIMIT 1`,
     ).bind(vehiclePlate || "", organizationId, orderId).first<{
@@ -129,9 +124,6 @@ export async function checkOrderLoadPlan(
       staffed_vehicle_count: number;
       plated_vehicle_count: number;
       driver_vehicle_count: number;
-      capacity_vehicle_count: number;
-      package_count: number;
-      assigned_count: number;
       carrier_ready: number;
       warehouse_ready: number;
       port_ready: number;
@@ -147,8 +139,6 @@ export async function checkOrderLoadPlan(
       "main_plate_number",
       "main_driver_name",
       "main_driver_phone",
-      "vehicle_capacity_weight",
-      "vehicle_capacity_volume",
       "planned_exit_at",
       "planned_arrival_at",
       "cost_allocation",
@@ -156,20 +146,15 @@ export async function checkOrderLoadPlan(
     if (!plan && loadingRequired) reasons.push("零担订单尚未生成配载批次");
     else {
       if (!plan) return { ready: reasons.length === 0, reasons };
-      const vehicleRequired = ["main_vehicle_type", "main_plate_number", "main_driver_name", "main_driver_phone", "vehicle_capacity_weight", "vehicle_capacity_volume"].some((fieldKey) => required(fieldKey));
+      const vehicleRequired = ["main_vehicle_type", "main_plate_number", "main_driver_name", "main_driver_phone"].some((fieldKey) => required(fieldKey));
       if (!plan.vehicle_count && vehicleRequired) reasons.push("配载批次尚未添加车辆");
       if (required("main_plate_number") && plan.plated_vehicle_count !== plan.vehicle_count) reasons.push("配载车辆尚未完整登记车牌");
       if (required("main_driver_name") && plan.driver_vehicle_count !== plan.vehicle_count) reasons.push("配载车辆尚未完整登记司机");
-      if ((required("vehicle_capacity_weight") || required("vehicle_capacity_volume")) && plan.capacity_vehicle_count !== plan.vehicle_count) reasons.push("配载车辆尚未完整登记载重和容积上限");
       if (required("main_carrier_id") && !plan.carrier_ready) reasons.push("配载批次尚未确定出境承运商");
       if (required("consolidation_warehouse") && !plan.warehouse_ready) reasons.push("配载批次尚未确定集货仓库");
       if (required("exit_port", true) && !plan.port_ready) reasons.push("配载批次尚未确定出境口岸");
       if (required("planned_exit_at") && !plan.departure_ready) reasons.push("配载批次尚未确定计划出境发车时间");
       if (required("planned_arrival_at") && !plan.arrival_ready) reasons.push("配载批次尚未确定计划到达时间");
-      if (required("loading_batch", true)) {
-        if (!plan.package_count) reasons.push("订单尚未生成可装载包装编号");
-        else if (plan.assigned_count !== plan.package_count) reasons.push(`装载指令未确认（已分配 ${plan.assigned_count}/${plan.package_count} 个包装）`);
-      }
       if (vehiclePlate && !plan.plate_match) reasons.push(`车牌 ${vehiclePlate} 不在当前配载计划中`);
     }
   } else if (

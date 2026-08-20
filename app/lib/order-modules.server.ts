@@ -293,8 +293,6 @@ async function synchronizeLoadingModuleFromBatch(
         MAX(o.business_type) business_type,
         COUNT(DISTINCT v.id) vehicle_count,
         COUNT(DISTINCT CASE WHEN NULLIF(TRIM(v.plate_number),'') IS NOT NULL AND NULLIF(TRIM(v.driver_name),'') IS NOT NULL THEN v.id END) staffed_vehicle_count,
-         COUNT(DISTINCT p.id) package_count,
-         COUNT(DISTINCT l.package_id) assigned_count,
          MAX(CASE WHEN EXISTS(
            SELECT 1 FROM warehouse_dispatches d
            JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id
@@ -322,8 +320,6 @@ async function synchronizeLoadingModuleFromBatch(
        JOIN transport_batches b ON b.id=bo.batch_id AND b.status!='cancelled'
        JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
        LEFT JOIN transport_batch_vehicles v ON v.batch_id=b.id AND v.organization_id=b.organization_id AND v.status!='cancelled'
-       LEFT JOIN order_cargo_packages p ON p.order_id=bo.order_id AND p.status!='cancelled'
-       LEFT JOIN transport_vehicle_loads l ON l.batch_id=bo.batch_id AND l.package_id=p.id
        WHERE bo.organization_id=? AND bo.order_id=? AND bo.status!='removed'
        GROUP BY b.id
        ORDER BY b.created_at DESC LIMIT 1`,
@@ -334,8 +330,6 @@ async function synchronizeLoadingModuleFromBatch(
       business_type: string | null;
       vehicle_count: number;
       staffed_vehicle_count: number;
-      package_count: number;
-      assigned_count: number;
       warehouse_dispatched: number;
       plan_complete: number;
     }>();
@@ -356,10 +350,7 @@ async function synchronizeLoadingModuleFromBatch(
       plan.vehicle_count &&
       plan.staffed_vehicle_count === plan.vehicle_count,
   );
-  const orderReady =
-    batchBaseReady &&
-    plan.package_count > 0 &&
-    plan.assigned_count === plan.package_count;
+  const orderReady = batchBaseReady;
   const blockers = [
     !plan.plan_complete
       ? isFtl
@@ -374,34 +365,15 @@ async function synchronizeLoadingModuleFromBatch(
     plan.vehicle_count && plan.staffed_vehicle_count !== plan.vehicle_count
       ? "车辆车牌/司机未完整"
       : null,
-    !plan.package_count
-      ? "订单尚未生成可装载包装编号"
-      : plan.assigned_count !== plan.package_count
-        ? `装载指令未确认（已分配 ${plan.assigned_count}/${plan.package_count} 个包装）`
-        : null,
   ].filter(Boolean);
   const currentStepName = orderReady
     ? isFtl
       ? "整车运输单已安排，待装车出库"
       : "配载运输单已安排，待装车出库"
-    : plan.package_count > 0 && plan.assigned_count === plan.package_count
-      ? isFtl
-        ? "整车运输单已生成，待完善车辆信息"
-        : "配载成单，待完善车辆/批次"
-      : plan.assigned_count > 0
-        ? isFtl
-          ? "整车运输单已生成，待完成装载"
-          : "配载成单，待整票分配"
-        : isFtl
-          ? "整车运输单待生成"
-          : "配载成单";
-  const progress = orderReady
-    ? 60
-    : plan.package_count > 0 && plan.assigned_count === plan.package_count
-      ? 50
-      : plan.assigned_count > 0
-        ? 40
-        : 25;
+    : isFtl
+      ? "整车运输单待完善车辆信息"
+      : "配载成单，待完善整批车辆信息";
+  const progress = orderReady ? 60 : 25;
   await env.DB.prepare(
     `UPDATE order_module_instances
        SET status='in_progress',current_step_code='planned',current_step_name=?,progress_percent=?,

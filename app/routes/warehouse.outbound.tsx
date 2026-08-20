@@ -70,7 +70,7 @@ export async function action({request}:Route.ActionArgs){
     if(!batch && orderNumber){
       const existing=await env.DB.prepare(`SELECT d.dispatch_number,d.status,o.business_type FROM warehouse_dispatches d JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id JOIN warehouse_packages p ON p.id=di.package_id JOIN shipments s ON s.id=p.shipment_id JOIN transport_orders o ON o.id=s.order_id WHERE d.organization_id=? AND p.warehouse_id=? AND UPPER(o.order_number)=UPPER(?) AND d.status!='cancelled' ORDER BY d.created_at DESC LIMIT 1`).bind(user.organizationId,warehouse.id,orderNumber).first<{dispatch_number:string;status:string;business_type:string}>();
       if(existing)return{formError:`${orderNumber} 已经创建装车任务 ${existing.dispatch_number}，当前状态：${existing.status==="loading"?"装车中":"已出库交接"}。请直接在本页下方继续扫码装车或完成出库，不要重复新建任务。`};
-      return{formError:`未找到已确认货齐且尚未创建装车任务的订单：${orderNumber}。请确认：仓库已完成实收并勾选“货齐”；整车已有车辆安排，拼车已生成配载单并分配车辆。`};
+      return{formError:`未找到已确认货齐且尚未创建装车任务的订单：${orderNumber}。请确认：仓库已完成实收并勾选“货齐”；整车已有车辆安排，拼车已生成配载单并完成整批车辆安排。`};
     }    if(!batch)return{formError:`未找到已复核且尚未出库的批次${orderNumber?`：${orderNumber}`:""}，请核对订单号、客户识别码和分拣状态`};
     const workflowFields=await loadOrderModuleWorkflowFields(user.organizationId,batch.order_id,"loading");
     const sealPolicy=workflowFieldPolicy(workflowFields,"loading_seal_number","optional");
@@ -83,15 +83,15 @@ export async function action({request}:Route.ActionArgs){
     if(!plate||!driver||!carrier)return{formError:"运输安排尚未完整：请先在运输安排中确定承运商、车辆和司机，再由仓库创建装车任务"};
     const loadReadiness=await checkOrderLoadPlan(user.organizationId,batch.order_id,plate);
     if(!loadReadiness.ready)return{formError:`暂不能创建装车任务：${loadReadiness.reasons.join("；")}`};
-    if(planned.batch_id&&planned.vehicle_id){
-      const vehicleOrders=await env.DB.prepare(`SELECT DISTINCT bo.order_id FROM transport_batch_orders bo JOIN order_cargo_packages p ON p.order_id=bo.order_id JOIN transport_vehicle_loads l ON l.batch_id=bo.batch_id AND l.package_id=p.id WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed' AND l.vehicle_id=?`).bind(user.organizationId,planned.batch_id,planned.vehicle_id).all<{order_id:string}>();
+    if(planned.batch_id){
+      const vehicleOrders=await env.DB.prepare(`SELECT bo.order_id FROM transport_batch_orders bo WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed' ORDER BY bo.sequence_no`).bind(user.organizationId,planned.batch_id).all<{order_id:string}>();
       for(const item of vehicleOrders.results){
         const readiness=await checkOrderLoadPlan(user.organizationId,item.order_id,plate);
         if(!readiness.ready)return{formError:`同车订单尚未全部具备装车条件：${readiness.reasons.join("；")}`};
       }
     }
     const dispatchId=crypto.randomUUID(),number=generateDispatch();
-    const itemStatement=planned.batch_id&&planned.vehicle_id
+    const itemStatement=planned.batch_id
       ? env.DB.prepare(`INSERT INTO warehouse_dispatch_items(id,organization_id,dispatch_id,package_id,status)
           SELECT lower(hex(randomblob(16))),wsi.organization_id,?,wsi.package_id,'pending'
           FROM warehouse_sorting_items wsi
@@ -99,9 +99,8 @@ export async function action({request}:Route.ActionArgs){
           JOIN warehouse_packages wp ON wp.id=wsi.package_id
           JOIN shipments s ON s.id=wp.shipment_id
           JOIN transport_batch_orders bo ON bo.order_id=s.order_id AND bo.organization_id=wsi.organization_id AND bo.batch_id=? AND bo.status!='removed'
-          WHERE wsi.organization_id=? AND wsi.status='verified'
-            AND EXISTS (SELECT 1 FROM order_cargo_packages p JOIN transport_vehicle_loads l ON l.package_id=p.id AND l.batch_id=bo.batch_id WHERE p.order_id=bo.order_id AND l.vehicle_id=?)
-            AND NOT EXISTS (SELECT 1 FROM warehouse_dispatch_items xdi JOIN warehouse_dispatches xd ON xd.id=xdi.dispatch_id WHERE xdi.package_id=wsi.package_id AND xd.status!='cancelled')`).bind(dispatchId,planned.batch_id,user.organizationId,planned.vehicle_id)
+          WHERE wsi.organization_id=? AND wp.warehouse_id=? AND wsi.status='verified'
+            AND NOT EXISTS (SELECT 1 FROM warehouse_dispatch_items xdi JOIN warehouse_dispatches xd ON xd.id=xdi.dispatch_id WHERE xdi.package_id=wsi.package_id AND xd.status!='cancelled')`).bind(dispatchId,planned.batch_id,user.organizationId,warehouse.id)
       : env.DB.prepare(`INSERT INTO warehouse_dispatch_items(id,organization_id,dispatch_id,package_id,status) SELECT lower(hex(randomblob(16))),organization_id,?,package_id,'pending' FROM warehouse_sorting_items WHERE batch_id=? AND status='verified'`).bind(dispatchId,batch.id);
     await env.DB.batch([
       env.DB.prepare(`INSERT INTO warehouse_dispatches(id,organization_id,dispatch_number,sorting_batch_id,shipment_id,vehicle_plate,driver_name,driver_phone,carrier_name,seal_number,destination,status,notes,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'loading',?,?,?,?)`).bind(dispatchId,user.organizationId,number,batch.id,batch.shipment_id,plate,driver,phone||null,carrier||null,sealPolicy.isActive?(seal||null):null,destination,notesPolicy.isActive?(notes||null):null,user.userId,now,now),
@@ -178,12 +177,12 @@ export default function WarehouseOutbound({loaderData,actionData}:Route.Componen
   const sealPolicy=workflowFieldPolicy(selectedFields,"loading_seal_number","optional");
   const notesPolicy=workflowFieldPolicy(selectedFields,"loading_handover_notes","optional");
   const selectedBatch=loaderData.batches.find((batch)=>batch.order_id===loaderData.orderId);
-  return <><header className="page-header" id="warehouse-outbound-workbench"><div><p className="eyebrow">PICK · LOAD · DISPATCH</p><h1>按运输方案装车出库</h1><p>整车读取本单车辆安排，拼车读取配载单与装载指令；运输方案完整后，仓库按车辆拣货、扫码装车并完成出库交接。</p></div>{canOperate&&<Modal title="新建装车任务" triggerLabel={loaderData.orderId?"下一步：新建本单装车任务":"＋ 新建装车任务"} closeSignal={actionData?.success}><Form method="post" className="stack"><input type="hidden" name="intent" value="create"/><label className="field scan-field"><span>订单号快速定位</span><input name="orderNumber" autoComplete="off" placeholder="扫描或输入完整订单号" defaultValue={selectedBatch?.order_number??""}/><small>整车须已确定车辆；拼车须已加入配载单并分配到具体车辆，系统会自动读取结果。</small></label><label className="field scan-field"><span>客户识别码（可选核对）</span><input name="customerIdentityCode" autoComplete="off" maxLength={5} placeholder="例如 A2B3C"/><small>填写后只允许创建该客户名下订单的装车任务。</small></label><label className="field"><span>收货清点记录（可选）</span><select name="batchId" defaultValue={selectedBatch?.id??""}><option value="">通过订单号定位时无需选择</option>{loaderData.batches.map(x=><option key={x.id} value={x.id}>[{x.customer_identity_code}] {x.order_number} · {x.batch_number} · {x.shipment_number} · {x.customer_name} · {x.item_count} 件货物</option>)}</select></label><div className="inherited-data-strip"><span>运输方案与车辆<strong>自动继承操作结果</strong><small>整车缺车辆、拼车缺配载单或装载指令时禁止创建</small></span><span>承运商与目的地<strong>自动继承运输安排</strong><small>仓库无需重复填写</small></span></div>{sealPolicy.isActive&&<label className="field"><span>封签号（仓库填写）</span><input name="sealNumber" required={sealPolicy.isRequired}/></label>}{notesPolicy.isActive&&<label className="field"><span>交接备注</span><textarea name="notes" rows={3} required={notesPolicy.isRequired}/></label>}<button className="primary warehouse-primary" disabled={busy}>校验运输方案并创建装车任务</button></Form></Modal>}</header>
+  return <><header className="page-header" id="warehouse-outbound-workbench"><div><p className="eyebrow">PICK · LOAD · DISPATCH</p><h1>按运输方案装车出库</h1><p>整车读取本单车辆安排，拼车读取整张配载单；运输方案完整后，仓库按配载单拣货、扫码装车并完成整批出库交接。</p></div>{canOperate&&<Modal title="新建装车任务" triggerLabel={loaderData.orderId?"下一步：新建本单装车任务":"＋ 新建装车任务"} closeSignal={actionData?.success}><Form method="post" className="stack"><input type="hidden" name="intent" value="create"/><label className="field scan-field"><span>订单号快速定位</span><input name="orderNumber" autoComplete="off" placeholder="扫描或输入完整订单号" defaultValue={selectedBatch?.order_number??""}/><small>整车须已确定车辆；拼车输入配载单内任一订单号即可读取整批订单和主车辆。</small></label><label className="field scan-field"><span>客户识别码（可选核对）</span><input name="customerIdentityCode" autoComplete="off" maxLength={5} placeholder="例如 A2B3C"/><small>填写后只允许创建该客户名下订单的装车任务。</small></label><label className="field"><span>收货清点记录（可选）</span><select name="batchId" defaultValue={selectedBatch?.id??""}><option value="">通过订单号定位时无需选择</option>{loaderData.batches.map(x=><option key={x.id} value={x.id}>[{x.customer_identity_code}] {x.order_number} · {x.batch_number} · {x.shipment_number} · {x.customer_name} · {x.item_count} 件货物</option>)}</select></label><div className="inherited-data-strip"><span>运输方案与车辆<strong>自动继承操作结果</strong><small>整车缺车辆、拼车缺配载单或整批车辆安排时禁止创建</small></span><span>承运商与目的地<strong>自动继承运输安排</strong><small>仓库无需重复填写</small></span></div>{sealPolicy.isActive&&<label className="field"><span>封签号（仓库填写）</span><input name="sealNumber" required={sealPolicy.isRequired}/></label>}{notesPolicy.isActive&&<label className="field"><span>交接备注</span><textarea name="notes" rows={3} required={notesPolicy.isRequired}/></label>}<button className="primary warehouse-primary" disabled={busy}>校验运输方案并创建装车任务</button></Form></Modal>}</header>
     {(actionData?.success||actionData?.formError)&&<div className={`alert ${actionData.formError?"error":"success"}`}>
       <span>{actionData.formError??actionData.success}</span>
       {actionData.formError?.includes("发运前文件")&&loaderData.orderId&&<Link className="secondary" to={`/admin/orders/${loaderData.orderId}/modules/loading#module-source-documents`}>去上传并审核发运前文件</Link>}
     </div>}
-    {loaderData.blockedBatches.length>0&&<section className="panel"><div className="panel-header"><div><h2>货齐但尚不可装车</h2><p>这些订单还没有完成配载成单、批次车辆安排或整票装载指令，因此不会出现在可创建装车任务列表中。</p></div><span>{loaderData.blockedBatches.length} 票</span></div><div className="simple-list">{loaderData.blockedBatches.map(item=><div key={item.id}><div><strong>{item.order_number}</strong><small>{item.batch_number}</small></div><span>{item.reasons.join("；")}</span></div>)}</div></section>}
+    {loaderData.blockedBatches.length>0&&<section className="panel"><div className="panel-header"><div><h2>货齐但尚不可装车</h2><p>这些订单还没有完成配载成单或整批车辆安排，因此不会出现在可创建装车任务列表中。</p></div><span>{loaderData.blockedBatches.length} 票</span></div><div className="simple-list">{loaderData.blockedBatches.map(item=><div key={item.id}><div><strong>{item.order_number}</strong><small>{item.batch_number}</small></div><span>{item.reasons.join("；")}</span></div>)}</div></section>}
     <section className="stats"><article><span>待装车</span><strong>{loading.length}</strong><small>正在执行装车扫描</small></article><article><span>可创建任务</span><strong>{loaderData.batches.length}</strong><small>已完成复核的批次</small></article><article><span>已装车待出境</span><strong>{completed.length}</strong><small>已生成仓库交接记录</small></article></section>
     <div className="dispatch-list">{loading.map(task=><DispatchCard key={task.id} task={task} items={loaderData.items.filter(x=>x.dispatch_id===task.id)} fields={loaderData.workflowFieldsByOrder[task.order_id]??[]} manifest={loaderData.manifestsByOrder[task.order_id]} busy={busy}/>)}</div>{!loading.length&&<p className="empty-state">暂无装车中的任务，请从已确认货齐的订单新建。</p>}
     <section className="panel handover-section"><div className="panel-header no-print"><div><h2>已装车待出境与交接单</h2><p>仓库交接完成不等于车辆已经出境；返回配载批次确认实际出境后，运单才进入在途。</p></div><button className="secondary" type="button" onClick={()=>window.print()}>打印交接单</button></div><div className="handover-list">{completed.map(task=><Handover key={task.id} task={task} items={loaderData.items.filter(x=>x.dispatch_id===task.id)} manifest={loaderData.manifestsByOrder[task.order_id]}/>)}</div>{!completed.length&&<p className="empty-state">暂无已装车交接单。</p>}</section>
@@ -194,18 +193,16 @@ function Handover({task,items,manifest}:{task:Dispatch;items:Item[];manifest?:Ma
 function generateDispatch(){return `OUT-${new Date().toISOString().slice(2,10).replaceAll("-","")}-${crypto.randomUUID().slice(0,5).toUpperCase()}`}
 async function resolveDispatchPlan(organizationId:string,orderId:string,businessType:string):Promise<DispatchPlan|{error:string}>{
   if(businessType==="ltl"){
-    const rows=await env.DB.prepare(`SELECT DISTINCT b.id batch_id,v.id vehicle_id,v.plate_number vehicle_plate,v.driver_name,v.driver_phone,COALESCE(vc.name,bc.name) carrier_name
+    const rows=await env.DB.prepare(`SELECT b.id batch_id,v.id vehicle_id,v.plate_number vehicle_plate,v.driver_name,v.driver_phone,COALESCE(vc.name,bc.name) carrier_name
       FROM transport_batch_orders bo
       JOIN transport_batches b ON b.id=bo.batch_id AND b.status='loading'
-      JOIN order_cargo_packages p ON p.order_id=bo.order_id AND p.status!='cancelled'
-      JOIN transport_vehicle_loads l ON l.batch_id=b.id AND l.package_id=p.id
-      JOIN transport_batch_vehicles v ON v.id=l.vehicle_id AND v.status!='cancelled'
+      JOIN transport_batch_vehicles v ON v.batch_id=b.id AND v.organization_id=b.organization_id AND v.status!='cancelled'
       LEFT JOIN carriers vc ON vc.id=v.carrier_id
       LEFT JOIN carriers bc ON bc.id=b.carrier_id
       WHERE bo.organization_id=? AND bo.order_id=? AND bo.status!='removed'
       ORDER BY v.created_at LIMIT 2`).bind(organizationId,orderId).all<DispatchPlan&{id:string}>();
-    if(!rows.results.length)return{error:"尚未找到该订单的配载车辆；请先生成配载批次并完成批次运输安排"};
-    if(rows.results.length>1)return{error:"该订单被分配到多辆车，当前仓库装车任务要求整票订单使用同一辆车，请先调整配载"};
+    if(!rows.results.length)return{error:"尚未找到该配载单的运输车辆；请先完成配载单车辆安排"};
+    if(rows.results.length>1)return{error:"当前配载单存在多辆有效车辆；请保留本批次实际使用的一辆主车"};
     return rows.results[0];
   }
   const row=await env.DB.prepare(`SELECT NULL batch_id,NULL vehicle_id,a.plate_number vehicle_plate,a.driver_name,a.driver_phone,COALESCE(c.name,a.carrier_name) carrier_name

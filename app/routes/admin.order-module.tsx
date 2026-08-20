@@ -4726,7 +4726,7 @@ function ModuleBusinessData({
           <div className="loading-batch-action-alert">
             <div>
               <strong>配载运输单尚未添加装载车辆</strong>
-              <span>请先在配载运输单中添加车辆，再将每张整票订单分配到具体车辆并确认装载指令。</span>
+              <span>请先在配载运输单中登记本批次统一使用的车辆与司机；挂载订单将整票随配载单装车。</span>
             </div>
             <Link className="primary" to={`/admin/loading/${activeBatch.id}`}>打开配载运输单</Link>
           </div>

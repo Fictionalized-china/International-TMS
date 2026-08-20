@@ -9965,8 +9965,22 @@ a.order-module-card.read-only:hover {
 }
 .batch-command-steps {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 10px;
+}
+.batch-current-node {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px 14px;
+  align-items: center;
+  padding: 10px 12px;
+  border-left: 4px solid #ffc20e;
+  background: #fffaf0;
+}
+.batch-current-node span,
+.batch-current-node small {
+  color: #61738c;
+  font-size: 12px;
 }
 .batch-command-step {
   display: grid;
@@ -9978,6 +9992,7 @@ a.order-module-card.read-only:hover {
   border: 1px solid #d7e4f4;
   border-radius: 10px;
   background: #f8fbff;
+  text-decoration: none;
 }
 .batch-command-step b {
   grid-row: span 2;
@@ -10019,6 +10034,55 @@ a.order-module-card.read-only:hover {
 .batch-command-step.current b {
   background: #ffc20e;
   color: #102f5d;
+}
+.batch-customs-portal {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #d7e4f4;
+  background: #fff;
+}
+.batch-customs-portal > header,
+.batch-customs-portal > header > div,
+.batch-customs-portal > div > a,
+.batch-customs-portal > div > a > span {
+  display: flex;
+}
+.batch-customs-portal > header,
+.batch-customs-portal > div > a {
+  justify-content: space-between;
+  gap: 10px;
+}
+.batch-customs-portal > header > div,
+.batch-customs-portal > div > a > span {
+  flex-direction: column;
+}
+.batch-customs-portal > header small,
+.batch-customs-portal > div small {
+  color: #61738c;
+  font-size: 11px;
+}
+.batch-customs-portal > div {
+  display: grid;
+  gap: 6px;
+}
+.batch-customs-portal > div > a {
+  align-items: center;
+  padding: 8px;
+  border: 1px solid #e3eaf3;
+  color: inherit;
+  text-decoration: none;
+}
+@media (max-width: 1200px) {
+  .batch-command-steps {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 900px) {
+  .batch-command-steps,
+  .batch-current-node {
+    grid-template-columns: 1fr;
+  }
 }
 .batch-arrival-form {
   display: grid;
