@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { Form, Link } from "react-router";
 import type { Route } from "./+types/warehouse.index";
+import { Modal } from "../components/Modal";
 import { requireSessionUser } from "../lib/auth.server";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
 
@@ -29,6 +30,32 @@ type WarehouseQueueRow = {
 };
 
 type CategorizedWarehouseRow = WarehouseQueueRow & { queue: WarehouseQueue };
+
+type WarehouseCargoItem = {
+  id: string;
+  order_id: string;
+  line_no: number;
+  cargo_name_cn: string;
+  cargo_name_en: string | null;
+  hs_code: string | null;
+  overseas_hs_code: string | null;
+  package_type: string;
+  package_count: number;
+  pieces_per_package: number;
+  gross_weight_per_package_kg: number;
+  net_weight_per_package_kg: number;
+  length_cm: number;
+  width_cm: number;
+  height_cm: number;
+  volume_per_package_cbm: number;
+  declared_value: number;
+  currency: string;
+  origin_country: string | null;
+  brand_model: string | null;
+  marks: string | null;
+  special_attributes: string | null;
+  notes: string | null;
+};
 
 const queueMeta: Record<WarehouseQueue, { label: string; hint: string }> = {
   inbound: { label: "待入库", hint: "等待扫码收货" },
@@ -101,7 +128,27 @@ export async function loader({ request }: Route.LoaderArgs) {
   const counts = Object.fromEntries(
     Object.keys(queueMeta).map((key) => [key, categorized.filter((row) => row.queue === key).length]),
   ) as Record<WarehouseQueue, number>;
-  return { user, warehouse, rows: scoped, counts, view, q };
+  const orderIds = [...new Set(scoped.map((row) => row.order_id))];
+  const cargoResults = await Promise.all(
+    chunk(orderIds, 80).map((ids) => env.DB.prepare(
+      `SELECT id,order_id,line_no,cargo_name_cn,cargo_name_en,hs_code,overseas_hs_code,
+              package_type,package_count,pieces_per_package,gross_weight_per_package_kg,
+              net_weight_per_package_kg,length_cm,width_cm,height_cm,volume_per_package_cbm,
+              declared_value,currency,origin_country,brand_model,marks,special_attributes,notes
+         FROM order_cargo_items
+        WHERE organization_id=? AND order_id IN (${ids.map(() => "?").join(",")})
+        ORDER BY order_id,line_no,id`,
+    ).bind(user.organizationId, ...ids).all<WarehouseCargoItem>()),
+  );
+  return {
+    user,
+    warehouse,
+    rows: scoped,
+    cargoItems: cargoResults.flatMap((result) => result.results),
+    counts,
+    view,
+    q,
+  };
 }
 
 export default function WarehouseIndex({ loaderData }: Route.ComponentProps) {
@@ -129,11 +176,59 @@ export default function WarehouseIndex({ loaderData }: Route.ComponentProps) {
         <td><strong>{row.cargo_description || "货物名称待补"}</strong><small>{row.pieces || 0} 件 · {Number(row.gross_weight_kg || 0).toFixed(2)} KG · {Number(row.volume_cbm || 0).toFixed(3)} CBM · {row.package_count} 个标签</small></td>
         <td>{row.receipt_time ? new Date(row.receipt_time).toLocaleString("zh-CN") : "尚未入库"}</td>
         <td><strong>{queueHint(row.queue, loaderData.warehouse.warehouse_role === "overseas_destination")}</strong><small>{warehouseQueueDetail(row)}</small></td>
-        <td className="sticky-action"><Link className="text-button" to={warehouseQueueHref(row, loaderData.warehouse.id, loaderData.warehouse.warehouse_role === "overseas_destination")}>进入办理</Link></td>
+        <td className="sticky-action"><div className="warehouse-queue-actions">
+          <Link className="warehouse-queue-action primary-action" to={warehouseQueueHref(row, loaderData.warehouse.id, loaderData.warehouse.warehouse_role === "overseas_destination")}>进入办理</Link>
+          <Modal title={`货物详情 · ${row.order_number}`} triggerLabel="查看货物" triggerClassName="warehouse-queue-action" size="xwide">
+            <WarehouseCargoDetails row={row} items={loaderData.cargoItems.filter((item) => item.order_id === row.order_id)} />
+          </Modal>
+        </div></td>
       </tr>)}</tbody></table></div>
       {!loaderData.rows.length && <p className="empty-state">当前筛选条件下没有仓库作业。</p>}
     </section>
   </>;
+}
+
+function WarehouseCargoDetails({ row, items }: { row: CategorizedWarehouseRow; items: WarehouseCargoItem[] }) {
+  const totals = items.reduce((sum, item) => ({
+    packages: sum.packages + item.package_count,
+    pieces: sum.pieces + item.package_count * item.pieces_per_package,
+    grossWeight: sum.grossWeight + item.package_count * item.gross_weight_per_package_kg,
+    volume: sum.volume + item.package_count * item.volume_per_package_cbm,
+  }), { packages: 0, pieces: 0, grossWeight: 0, volume: 0 });
+
+  return <div className="warehouse-cargo-dialog">
+    <div className="warehouse-cargo-summary">
+      <span><small>客户</small><strong>{row.customer_name}</strong></span>
+      <span><small>运单号</small><strong>{row.shipment_number}</strong></span>
+      <span><small>货物品类</small><strong>{items.length || 1}</strong></span>
+      <span><small>包装 / 件数</small><strong>{items.length ? `${totals.packages} 包装 / ${totals.pieces} 件` : `${row.pieces || 0} 件`}</strong></span>
+      <span><small>总毛重</small><strong>{(items.length ? totals.grossWeight : Number(row.gross_weight_kg || 0)).toFixed(2)} KG</strong></span>
+      <span><small>总体积</small><strong>{(items.length ? totals.volume : Number(row.volume_cbm || 0)).toFixed(3)} CBM</strong></span>
+    </div>
+    {items.length ? <div className="table-wrap warehouse-cargo-detail-table"><table>
+      <thead><tr><th>序号 / 品名</th><th>HS Code</th><th>包装</th><th>重量</th><th>尺寸 / 体积</th><th>申报信息</th><th>标识与备注</th></tr></thead>
+      <tbody>{items.map((item) => <tr key={item.id}>
+        <td><strong>{item.line_no}. {item.cargo_name_cn}</strong><small>{item.cargo_name_en || "英文品名未填"}</small></td>
+        <td><strong>{item.hs_code || "—"}</strong><small>境外：{item.overseas_hs_code || "—"}</small></td>
+        <td><strong>{packageTypeLabel(item.package_type)} · {item.package_count} 包装</strong><small>{item.pieces_per_package} 件/包装，共 {item.package_count * item.pieces_per_package} 件</small></td>
+        <td><strong>毛重 {item.gross_weight_per_package_kg.toFixed(2)} KG/包装</strong><small>净重 {item.net_weight_per_package_kg.toFixed(2)} KG/包装</small></td>
+        <td><strong>{item.length_cm} × {item.width_cm} × {item.height_cm} cm</strong><small>{item.volume_per_package_cbm.toFixed(4)} CBM/包装</small></td>
+        <td><strong>{item.currency} {item.declared_value.toLocaleString("zh-CN")}</strong><small>{item.origin_country || "原产国未填"}{item.brand_model ? ` · ${item.brand_model}` : ""}</small></td>
+        <td><strong>{item.marks || "无唛头"}</strong><small>{[item.special_attributes, item.notes].filter(Boolean).join(" · ") || "无备注"}</small></td>
+      </tr>)}</tbody>
+    </table></div> : <div className="warehouse-cargo-empty">
+      <strong>{row.cargo_description || "货物名称待补"}</strong>
+      <span>该订单尚无逐项货物明细，当前仅有订单汇总：{row.pieces || 0} 件 · {Number(row.gross_weight_kg || 0).toFixed(2)} KG · {Number(row.volume_cbm || 0).toFixed(3)} CBM。</span>
+    </div>}
+  </div>;
+}
+
+function packageTypeLabel(value: string) {
+  return ({ carton: "纸箱", wooden_case: "木箱", pallet: "托盘", bag: "袋装", drum: "桶装", bundle: "捆装", other: "其他" } as Record<string, string>)[value] || value;
+}
+
+function chunk<T>(items: T[], size: number) {
+  return Array.from({ length: Math.ceil(items.length / size) }, (_, index) => items.slice(index * size, (index + 1) * size));
 }
 
 function warehouseQueue(row: WarehouseQueueRow): WarehouseQueue {
