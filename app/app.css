@@ -6148,10 +6148,37 @@ body.modal-scroll-locked {
 .position-ledger-filters,
 .domestic-tracking-filters {
   display: grid;
-  grid-template-columns: minmax(220px, 1.5fr) repeat(2, minmax(150px, .7fr)) auto auto;
+  grid-template-columns: minmax(250px, 1.5fr) repeat(5, minmax(132px, .7fr)) auto auto;
   gap: 8px;
   align-items: center;
   margin-bottom: 12px;
+}
+
+.position-ledger-summary {
+  display: flex;
+  gap: 0;
+  margin: -4px 0 12px;
+  border: 1px solid #dbe4ef;
+  border-radius: 4px;
+  background: #f8fafc;
+}
+
+.position-ledger-summary span {
+  min-width: 118px;
+  padding: 8px 12px;
+  border-right: 1px solid #dbe4ef;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.position-ledger-summary span:last-child {
+  border-right: 0;
+}
+
+.position-ledger-summary strong {
+  margin-left: 5px;
+  color: #17345f;
+  font-size: 15px;
 }
 
 .position-ledger-table table,
@@ -6187,9 +6214,9 @@ body.modal-scroll-locked {
 
 .position-stage-line {
   display: grid;
-  grid-template-columns: repeat(8, minmax(48px, 1fr));
+  grid-template-columns: repeat(10, minmax(48px, 1fr));
   gap: 3px;
-  width: 440px;
+  width: 540px;
 }
 
 .position-stage-line span {
@@ -6268,6 +6295,10 @@ body.modal-scroll-locked {
   .position-ledger-filters,
   .domestic-tracking-filters {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .position-ledger-summary {
+    overflow-x: auto;
   }
 }
 .order-expense-risk-card {
