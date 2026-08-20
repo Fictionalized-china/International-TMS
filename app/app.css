@@ -7926,10 +7926,46 @@ a.order-module-card.read-only:hover {
 }
 .source-document-actions {
   justify-content: flex-end;
+  gap: 6px;
 }
 .source-document-actions .text-button {
-  min-width: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 52px;
+  min-height: 32px;
+  padding: 6px 12px;
+  border: 1px solid #c8d5e4;
+  border-radius: 6px;
+  color: #245ba8;
+  background: #fff;
+  font-size: 12px;
   text-align: center;
+  line-height: 1;
+  transition: border-color 160ms ease, color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+.source-document-actions .text-button:hover {
+  border-color: #7fa5d7;
+  color: #154b96;
+  background: #f2f7fd;
+  box-shadow: 0 2px 7px rgba(36, 91, 168, 0.1);
+}
+.source-document-actions > .text-button:last-child {
+  border-color: #2369c5;
+  color: #fff;
+  background: #2369c5;
+}
+.source-document-actions > .text-button:last-child:hover {
+  border-color: #1855a3;
+  color: #fff;
+  background: #1855a3;
+}
+.source-document-actions .text-button:disabled {
+  cursor: not-allowed;
+  border-color: #d7dee8;
+  color: #94a0af;
+  background: #f3f5f8;
+  box-shadow: none;
 }
 .source-document-upload-form {
   display: flex;
