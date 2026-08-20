@@ -264,6 +264,19 @@ type Carrier = {
   contact_phone: string | null;
   contact_email: string | null;
 };
+type CarrierDriverOption = {
+  id: string;
+  carrier_id: string;
+  name: string;
+  phone: string | null;
+  license_number: string | null;
+};
+type CarrierVehicleOption = {
+  id: string;
+  carrier_id: string;
+  plate_number: string;
+  vehicle_type: string | null;
+};
 type Warehouse = {
   id: string;
   name: string;
@@ -493,6 +506,8 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     quotationCharges,
     services,
     carriers,
+    carrierDrivers,
+    carrierVehicles,
     warehouses,
     loadingCandidates,
     customsRecords,
@@ -581,6 +596,22 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     )
       .bind(current.organizationId)
       .all<Carrier>(),
+    env.DB.prepare(
+      `SELECT id,carrier_id,name,phone,license_number
+       FROM carrier_drivers
+       WHERE organization_id=? AND status='active'
+       ORDER BY name`,
+    )
+      .bind(current.organizationId)
+      .all<CarrierDriverOption>(),
+    env.DB.prepare(
+      `SELECT id,carrier_id,plate_number,vehicle_type
+       FROM carrier_vehicles
+       WHERE organization_id=? AND status='active'
+       ORDER BY plate_number`,
+    )
+      .bind(current.organizationId)
+      .all<CarrierVehicleOption>(),
     env.DB.prepare(
       `SELECT id,name,warehouse_role FROM warehouses WHERE organization_id=? AND status='active'
        ORDER BY CASE warehouse_role WHEN 'domestic_collection' THEN 1 WHEN 'port' THEN 2 ELSE 3 END,code,name`,
@@ -840,6 +871,8 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     quotationCharges: quotationCharges.results,
     services: services.results,
     carriers: carriers.results,
+    carrierDrivers: carrierDrivers.results,
+    carrierVehicles: carrierVehicles.results,
     warehouses: warehouses.results,
     loadingCandidates: loadingCandidates.results,
     customsRecords: customsRecords.results,
@@ -1726,8 +1759,13 @@ export async function action({ request, params }: Route.ActionArgs) {
       const now = new Date().toISOString();
       const carrierId = valueOf(form, "carrierId") || null;
       let carrierName = valueOf(form, "carrierName");
-      const plateNumber = valueOf(form, "plateNumber").trim().toUpperCase();
-      const driverName = valueOf(form, "driverName").trim();
+      const vehicleMasterId = valueOf(form, "vehicleMasterId");
+      const driverMasterId = valueOf(form, "driverMasterId");
+      let vehicleType = valueOf(form, "vehicleType").trim();
+      let plateNumber = valueOf(form, "plateNumber").trim().toUpperCase();
+      let driverName = valueOf(form, "driverName").trim();
+      let driverPhone = valueOf(form, "driverPhone").trim();
+      let driverIdNumber = valueOf(form, "driverIdNumber").trim();
       const plannedDepartureAt = valueOf(form, "plannedDepartureAt");
       const plannedArrivalAt = valueOf(form, "plannedArrivalAt");
       const legType = valueOf(form, "legType") || "first_mile";
@@ -1754,6 +1792,32 @@ export async function action({ request, params }: Route.ActionArgs) {
         ).bind(carrierId, current.organizationId).first<{ name: string }>();
         if (!carrier) return { formError: "请选择有效的启用承运商" };
         carrierName = carrierName || carrier.name;
+        if (vehicleMasterId) {
+          const vehicle = await env.DB.prepare(
+            `SELECT plate_number,vehicle_type FROM carrier_vehicles
+             WHERE id=? AND organization_id=? AND carrier_id=? AND status='active'`,
+          ).bind(vehicleMasterId, current.organizationId, carrierId).first<{
+            plate_number: string;
+            vehicle_type: string | null;
+          }>();
+          if (!vehicle) return { formError: "请选择当前承运商名下的有效车辆" };
+          plateNumber = vehicle.plate_number.trim().toUpperCase();
+          vehicleType = vehicle.vehicle_type || vehicleType;
+        }
+        if (driverMasterId) {
+          const driver = await env.DB.prepare(
+            `SELECT name,phone,license_number FROM carrier_drivers
+             WHERE id=? AND organization_id=? AND carrier_id=? AND status='active'`,
+          ).bind(driverMasterId, current.organizationId, carrierId).first<{
+            name: string;
+            phone: string | null;
+            license_number: string | null;
+          }>();
+          if (!driver) return { formError: "请选择当前承运商名下的有效司机" };
+          driverName = driver.name;
+          driverPhone = driver.phone || driverPhone;
+          driverIdNumber = driver.license_number || driverIdNumber;
+        }
       }
       if (!carrierName) return { formError: "请选择国内承运商" };
       let destinationWarehouse: { id: string; name: string } | null = null;
@@ -1780,13 +1844,13 @@ export async function action({ request, params }: Route.ActionArgs) {
       const freightAmount = payableEnabled ? freightQuantity * freightUnitPrice : 0;
       const transportRequiredValues = [
         ["domestic_carrier_id", carrierId || carrierName, true],
-        ["domestic_vehicle_type", valueOf(form, "vehicleType"), false],
+        ["domestic_vehicle_type", vehicleType, false],
         ["domestic_vehicle_count", valueOf(form, "vehicleCount"), false],
         ["domestic_loading_mode", order.business_type, false],
         ["domestic_plate_number", plateNumber, true],
         ["domestic_driver_name", driverName, true],
-        ["domestic_driver_phone", valueOf(form, "driverPhone"), false],
-        ["domestic_driver_id_number", valueOf(form, "driverIdNumber"), false],
+        ["domestic_driver_phone", driverPhone, false],
+        ["domestic_driver_id_number", driverIdNumber, false],
         ["domestic_planned_departure_at", plannedDepartureAt, true],
         ["domestic_planned_arrival_at", plannedArrivalAt, true],
         ["domestic_loading_requirements", valueOf(form, "loadingRequirements"), false],
@@ -1824,9 +1888,9 @@ export async function action({ request, params }: Route.ActionArgs) {
                  loading_requirements=?,notes=?,status='planned',updated_at=?
              WHERE id=? AND organization_id=?`,
           ).bind(
-            carrierId, carrierName || null, valueOf(form, "vehicleType") || null, vehicleCount,
-            order.business_type, plateNumber, driverName, valueOf(form, "driverPhone") || null,
-            valueOf(form, "driverIdNumber") || null, freightAmount, freightCurrency,
+            carrierId, carrierName || null, vehicleType || null, vehicleCount,
+            order.business_type, plateNumber, driverName, driverPhone || null,
+            driverIdNumber || null, freightAmount, freightCurrency,
             originLocation, destinationLocation, destinationWarehouseId || null,
             plannedDepartureAt, plannedArrivalAt, valueOf(form, "loadingRequirements") || null,
             valueOf(form, "notes") || null, now, assignmentId, current.organizationId,
@@ -1842,9 +1906,9 @@ export async function action({ request, params }: Route.ActionArgs) {
              ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
           ).bind(
             assignmentId, current.organizationId, orderId, legType, carrierId, carrierName || null,
-            valueOf(form, "vehicleType") || null, vehicleCount, order.business_type,
-            plateNumber, driverName, valueOf(form, "driverPhone") || null,
-            valueOf(form, "driverIdNumber") || null, freightAmount, freightCurrency,
+            vehicleType || null, vehicleCount, order.business_type,
+            plateNumber, driverName, driverPhone || null,
+            driverIdNumber || null, freightAmount, freightCurrency,
             originLocation, destinationLocation, destinationWarehouseId || null,
             order.exit_port || null, order.transit_locations || null,
             `${order.origin_country} → ${order.destination_country}`, plannedDepartureAt,
@@ -1864,9 +1928,9 @@ export async function action({ request, params }: Route.ActionArgs) {
              ) VALUES(?,?,?,?,?,?,?,?,?,?,'planned',?,?,?,?)`,
           ).bind(
             crypto.randomUUID(), current.organizationId, assignmentId,
-            (vehicleTotal?.total ?? 0) + offset + 1, valueOf(form, "vehicleType") || null,
-            plateNumber, driverName, valueOf(form, "driverPhone") || null,
-            valueOf(form, "driverIdNumber") || null, plannedDepartureAt,
+            (vehicleTotal?.total ?? 0) + offset + 1, vehicleType || null,
+            plateNumber, driverName, driverPhone || null,
+            driverIdNumber || null, plannedDepartureAt,
             valueOf(form, "notes") || null, current.userId, now, now,
           ));
         }
@@ -3881,6 +3945,11 @@ function ModuleBusinessData({
   reviewCloseSignal?: unknown;
 }) {
   const activeBatch = data.batches.find((item) => item.status !== "cancelled");
+  const [domesticCarrierId, setDomesticCarrierId] = useState("");
+  const [domesticVehicleId, setDomesticVehicleId] = useState("");
+  const [domesticDriverId, setDomesticDriverId] = useState("");
+  const domesticVehicle = data.carrierVehicles.find((item) => item.id === domesticVehicleId);
+  const domesticDriver = data.carrierDrivers.find((item) => item.id === domesticDriverId);
 
   if (code === "cargo")
     return (
@@ -4281,8 +4350,12 @@ function ModuleBusinessData({
                 >
                   {(required) => <select
                     name="carrierId"
+                    value={domesticCarrierId}
                     required={required}
                     onChange={(event) => {
+                      setDomesticCarrierId(event.currentTarget.value);
+                      setDomesticVehicleId("");
+                      setDomesticDriverId("");
                       const option = event.currentTarget.selectedOptions[0];
                       const form = event.currentTarget.form;
                       const carrierName = form?.elements.namedItem("carrierName") as HTMLInputElement | null;
@@ -4338,37 +4411,36 @@ function ModuleBusinessData({
                     <input name="expenseNotes" placeholder="选填" />
                   </label>
                 </fieldset>
-                <ModuleField fields={data.workflowFields} fieldKey="domestic_vehicle_type" label="国内车型" fallbackRequired>
-                  {(required) => <select name="vehicleType" defaultValue="" required={required}>
-                    <option value="">请选择车型</option>
-                    <option value="卡车">卡车</option>
-                    <option value="尖程拼车">尖程拼车</option>
-                    <option value="13米平板">13米平板</option>
-                    <option value="13.5米高栏">13.5米高栏</option>
-                    <option value="13.7米平板">13.7米平板</option>
-                    <option value="17.5米平板">17.5米平板</option>
-                    <option value="17.5米厢式车">17.5米厢式车</option>
-                    <option value="13米高栏">13米高栏</option>
-                    <option value="16米厢式车">16米厢式车</option>
-                    <option value="13米厢式车">13米厢式车</option>
-                    <option value="冷藏车">冷藏车</option>
+                <ModuleField fields={data.workflowFields} fieldKey="domestic_plate_number" label="国内车辆" fallbackRequired>
+                  {(required) => <select name="vehicleMasterId" value={domesticVehicleId} onChange={(event) => setDomesticVehicleId(event.currentTarget.value)} required={required} disabled={!domesticCarrierId}>
+                    <option value="">{domesticCarrierId ? "请选择车辆" : "请先选择承运商"}</option>
+                    {data.carrierVehicles.filter((item) => item.carrier_id === domesticCarrierId).map((item) => (
+                      <option key={item.id} value={item.id}>{item.plate_number}{item.vehicle_type ? ` · ${item.vehicle_type}` : ""}</option>
+                    ))}
                   </select>}
+                </ModuleField>
+                <input type="hidden" name="plateNumber" value={domesticVehicle?.plate_number || ""} />
+                <ModuleField fields={data.workflowFields} fieldKey="domestic_vehicle_type" label="国内车型" fallbackRequired>
+                  {(required) => <input name="vehicleType" value={domesticVehicle?.vehicle_type || ""} readOnly required={required} placeholder="选择车辆后自动带出" />}
                 </ModuleField>
                 <ModuleField fields={data.workflowFields} fieldKey="domestic_vehicle_count" label="车辆数目">
                   {(required) => <input name="vehicleCount" type="number" min="1" step="1" defaultValue="1" required={required} />}
                 </ModuleField>
                 <input type="hidden" name="loadingMode" value={data.order.business_type} />
-                <ModuleField fields={data.workflowFields} fieldKey="domestic_plate_number" label="国内车牌号" fallbackRequired>
-                  {(required) => <input name="plateNumber" required={required} />}
-                </ModuleField>
                 <ModuleField fields={data.workflowFields} fieldKey="domestic_driver_name" label="国内司机姓名" fallbackRequired>
-                  {(required) => <input name="driverName" required={required} />}
+                  {(required) => <select name="driverMasterId" value={domesticDriverId} onChange={(event) => setDomesticDriverId(event.currentTarget.value)} required={required} disabled={!domesticCarrierId}>
+                    <option value="">{domesticCarrierId ? "请选择司机" : "请先选择承运商"}</option>
+                    {data.carrierDrivers.filter((item) => item.carrier_id === domesticCarrierId).map((item) => (
+                      <option key={item.id} value={item.id}>{item.name}{item.phone ? ` · ${item.phone}` : ""}</option>
+                    ))}
+                  </select>}
                 </ModuleField>
+                <input type="hidden" name="driverName" value={domesticDriver?.name || ""} />
                 <ModuleField fields={data.workflowFields} fieldKey="domestic_driver_phone" label="国内司机手机号" fallbackRequired>
-                  {(required) => <input name="driverPhone" required={required} />}
+                  {(required) => <input name="driverPhone" value={domesticDriver?.phone || ""} readOnly required={required} placeholder="选择司机后自动带出" />}
                 </ModuleField>
                 <ModuleField fields={data.workflowFields} fieldKey="domestic_driver_id_number" label="国内司机证件号">
-                  {(required) => <input name="driverIdNumber" required={required} />}
+                  {(required) => <input name="driverIdNumber" value={domesticDriver?.license_number || ""} readOnly required={required} placeholder="选择司机后自动带出" />}
                 </ModuleField>
                 <div className="inherited-data-strip span-2">
                   <span>起运地（继承订单）<strong>{[data.order.origin_country,data.order.origin_state,data.order.origin_city].filter(Boolean).join(" ")}</strong></span>
