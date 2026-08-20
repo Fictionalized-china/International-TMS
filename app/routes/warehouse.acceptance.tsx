@@ -21,7 +21,7 @@ type AcceptanceOrder = {
   customer_id: string;
   customer_name: string;
   customer_identity_code: string;
-  shipper_contact_name: string | null;
+  shipper_contact: string | null;
   shipper_phone: string | null;
   origin_city: string;
   origin_address: string;
@@ -128,7 +128,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   if (reference) {
     const matches = await env.DB.prepare(
       `SELECT o.id,o.order_number,o.status,o.business_type,o.customer_id,c.name customer_name,
-              c.identity_code customer_identity_code,o.shipper_contact_name,o.shipper_phone,
+              c.identity_code customer_identity_code,o.shipper_contact,o.shipper_phone,
               o.origin_city,o.origin_address,s.id shipment_id,s.shipment_number,
               COALESCE(ca.name,a.carrier_name) carrier_name,
               (SELECT GROUP_CONCAT(COALESCE(NULLIF(v.plate_number,''),'未录车牌')||' / '||COALESCE(NULLIF(v.driver_name,''),'未录司机'),'；')
@@ -513,7 +513,7 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
       <section className="panel acceptance-order-strip">
         <span><small>订单 / 类型</small><strong>{loaderData.order.order_number} · {loaderData.order.business_type === "ftl" ? "整车" : "拼车"}</strong></span>
         <span><small>客户</small><strong>[{loaderData.order.customer_identity_code}] {loaderData.order.customer_name}</strong></span>
-        <span><small>发货联系人</small><strong>{loaderData.order.shipper_contact_name || "未填写"} · {loaderData.order.shipper_phone || "未填写"}</strong></span>
+        <span><small>发货联系人</small><strong>{loaderData.order.shipper_contact || "未填写"} · {loaderData.order.shipper_phone || "未填写"}</strong></span>
         <span><small>国内运输</small><strong>{loaderData.order.carrier_name || "承运商未填写"}</strong><em>{loaderData.order.vehicle_summary || "车辆与司机未填写"}</em></span>
         <span><small>提货地</small><strong>{loaderData.order.origin_city} · {loaderData.order.origin_address}</strong></span>
       </section>
