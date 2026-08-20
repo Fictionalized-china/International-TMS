@@ -1347,6 +1347,37 @@ td small {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.warehouse-context-switcher {
+  display: grid;
+  gap: 5px;
+  margin: 0 2px 8px;
+  padding: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.08);
+}
+.warehouse-context-switcher label {
+  display: grid;
+  gap: 5px;
+}
+.warehouse-context-switcher label > span,
+.warehouse-context-switcher > small {
+  color: #dce8ff;
+  font-size: 10px;
+  font-weight: 750;
+}
+.warehouse-context-switcher select {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 4px 26px 4px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 5px;
+  color: #17233a;
+  background: #fff;
+  font-size: 12px;
+  font-weight: 750;
+}
 .warehouse-sidebar nav {
   min-height: 0;
   flex: 1;
@@ -5933,11 +5964,22 @@ body.modal-scroll-locked {
 }
 .order-vertical-workflow li {
   position: relative;
+  min-height: 50px;
+  color: #7a8899;
+}
+.order-vertical-workflow li > a {
   display: grid;
   grid-template-columns: 30px minmax(0, 1fr);
   gap: 10px;
-  min-height: 50px;
-  color: #7a8899;
+  min-height: 46px;
+  border-radius: 6px;
+  color: inherit;
+  text-decoration: none;
+}
+.order-vertical-workflow li > a:hover,
+.order-vertical-workflow li > a:focus-visible {
+  background: #eef5ff;
+  outline: none;
 }
 .order-vertical-workflow li::before {
   position: absolute;

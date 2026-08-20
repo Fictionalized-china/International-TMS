@@ -48,7 +48,6 @@ import {
 } from "../lib/overseas-warehouse";
 import {
   advanceOverseasOrder,
-  confirmOverseasBatchArrival,
 } from "../lib/overseas-warehouse.server";
 import {
   emptyExpenseDirectionControl,
@@ -1401,39 +1400,7 @@ export async function action({ request, params }: Route.ActionArgs) {
       return { success: "仓库实收差异及费用影响已确认，结算阻断已解除" };
     }
     if (intent === "overseas_arrival" && moduleCode === "overseas_warehouse") {
-      const actualArrivalAt = valueOf(form, "actualArrivalAt") || new Date().toISOString();
-      const batchId = valueOf(form, "batchId");
-      if (!batchId && order.business_type === "ltl")
-        return { formError: "拼车订单未找到所属配载单，请先回到配载单确认出境后再登记境外到仓" };
-      const arrivalValues = [
-        ["overseas_arrival_at", valueOf(form, "actualArrivalAt")],
-        ["overseas_arrival_notes", valueOf(form, "notes")],
-      ] as const;
-      const missingArrivalFields = arrivalValues
-        .filter(([fieldKey, value]) => requiredFieldMissing(fieldKey, value))
-        .map(([fieldKey]) => fieldPolicy(fieldKey).label || fieldKey);
-      if (missingArrivalFields.length)
-        return { formError: `请填写当前模板要求的字段：${missingArrivalFields.join("、")}` };
-      if (!order.overseas_warehouse_id)
-        return { formError: "订单尚未指定境外目的仓，请先返回订单资料补充" };
-      const result = await confirmOverseasBatchArrival({
-        organizationId: current.organizationId,
-        batchId: batchId || null,
-        orderId,
-        actualArrivalAt,
-        actorUserId: current.userId,
-        notes: valueOf(form, "notes"),
-      });
-      await writeAudit({
-        request,
-        action: "overseas.batch.arrival.confirm",
-        resourceType: "transport_batch",
-        resourceId: batchId,
-        organizationId: current.organizationId,
-        actorUserId: current.userId,
-        metadata: { orderCount: result.orderCount, actualArrivalAt },
-      });
-      return { success: `${result.batchNumber} 已确认到仓，${result.orderCount} 票订单已同步` };
+      return { formError: "境外到仓不能在运营后台手工确认，请进入订单指定的境外目的仓扫码入库并完成清点" };
     }
     if (intent === "overseas_advance" && moduleCode === "overseas_warehouse") {
       const operationAction = valueOf(form, "operationAction") as
@@ -2042,8 +2009,8 @@ export async function action({ request, params }: Route.ActionArgs) {
         : [orderId];
       if(order.business_type === "ltl" && linkedOrderIds.length > 1 && milestoneCode === "exported")
         return { formError: "拼车订单请在配载单的出境门禁统一确认实际出境，系统会同步全部子订单" };
-      if(order.business_type === "ltl" && linkedOrderIds.length > 1 && milestoneCode === "station_arrived")
-        return { formError: "拼车订单请在配载单统一确认到达境外目的仓，系统会同步全部子订单" };
+      if(milestoneCode === "station_arrived")
+        return { formError: "到达境外目的仓不能手工登记，请由订单指定的境外目的仓扫码入库并完成清点" };
       const trackingValues = [
         ["tracking_milestone", milestoneCode],
         ["tracking_milestone_name", milestoneName],
@@ -4699,9 +4666,6 @@ function ModuleBusinessData({
             <div className="alert success">
               <strong>已自动进入：{flowLabel}</strong>
               <span>{isLtl ? "请在下方选择可配载订单并生成配载运输单。" : "本单无需拼车配载，请登记出境车辆后进入仓库端装车出库。"}</span>
-              {isFtl && resourceReady && (
-                <WarehouseSiteButton orderId={data.order.id} targetPath="/warehouse/outbound" className="primary">去装车出库</WarehouseSiteButton>
-              )}
             </div>
           )}
           </BusinessSubsection>
@@ -4810,6 +4774,7 @@ function ModuleBusinessData({
   if (code === "tracking") {
     const selectableTrackingMilestones = trackingManualMilestoneOptions.filter(
       ([value]) =>
+        value !== "station_arrived" &&
         (value !== "transloaded" || Boolean(data.order.requires_transloading)) &&
         (value !== "transit_customs" || Boolean(data.order.requires_transit_customs)),
     );
@@ -4881,7 +4846,7 @@ function ModuleBusinessData({
           <details className="expandable module-create-dialog">
             <summary>更新运输节点</summary>
             <p className="helper-text">
-              换装、转关为可选节点；没有实际业务时可直接登记国外入境。目的地清关完成后，请登记到达境外目的仓以完成本模块。
+              换装、转关为可选节点；没有实际业务时可直接登记国外入境。目的地清关完成后，由境外目的仓扫码入库和清点自动完成本模块。
             </p>
             <Form method="post" className="form-grid compact">
               <input type="hidden" name="intent" value="tracking_add" />
@@ -5095,22 +5060,23 @@ function ModuleBusinessData({
           </p>
         )}
 
-        {manage && canConfirmArrival && (
+        {manage && canConfirmArrival && data.order.overseas_warehouse_id && (
           <BusinessSubsection
-            title="1. 确认目的仓到仓"
-            hint="这是批次动作，确认后同一批次全部订单都会同步到仓状态。"
+            title="1. 境外目的仓收货清点"
+            hint="到仓状态只由境外目的仓扫码入库和清点确认触发；拼车运输单全部子订单清点完成后统一结束境外运输。"
           >
-            <Form method="post" className="form-grid compact">
-              <input type="hidden" name="intent" value="overseas_arrival" />
-              <input type="hidden" name="batchId" value={operation?.batch_id || ""} />
-              <ModuleField fields={data.workflowFields} fieldKey="overseas_arrival_at" label="实际到仓时间" fallbackRequired>
-                {(required) => <input name="actualArrivalAt" type="datetime-local" required={required} />}
-              </ModuleField>
-              <ModuleField fields={data.workflowFields} fieldKey="overseas_arrival_notes" label="到仓说明" className="field span-2">
-                {(required) => <input name="notes" required={required} placeholder="卸车、入仓或换装说明" />}
-              </ModuleField>
-              <button className="primary" disabled={busy}>确认批次到仓</button>
-            </Form>
+            <div className="loading-next-action">
+              <strong>下一步由境外目的仓办理</strong>
+              <span>仓库人员扫描本票货物标签，登记实收并选择“清点无误”。</span>
+              <WarehouseSiteButton
+                orderId={data.order.id}
+                targetPath={`/warehouse/inbound?warehouseId=${encodeURIComponent(data.order.overseas_warehouse_id)}`}
+                returnModuleCode="overseas_warehouse"
+                className="primary"
+              >
+                去境外目的仓扫码收货
+              </WarehouseSiteButton>
+            </div>
           </BusinessSubsection>
         )}
 
@@ -6704,28 +6670,30 @@ function ExpenseDirectionWorkflow({
     </div>
   );
 }
-function warehouseAdminReturn(orderId: string) {
-  return `/admin/orders/${orderId}/modules/warehouse`;
+function warehouseAdminReturn(orderId: string, moduleCode = "warehouse") {
+  return `/admin/orders/${orderId}/modules/${moduleCode}`;
 }
-function warehouseTarget(orderId: string, targetPath: string) {
+function warehouseTarget(orderId: string, targetPath: string, returnModuleCode = "warehouse") {
   const separator = targetPath.includes("?") ? "&" : "?";
-  return `${targetPath}${separator}orderId=${orderId}&returnTo=${encodeURIComponent(warehouseAdminReturn(orderId))}`;
+  return `${targetPath}${separator}orderId=${orderId}&returnTo=${encodeURIComponent(warehouseAdminReturn(orderId, returnModuleCode))}`;
 }
 function WarehouseSiteButton({
   orderId,
   targetPath,
+  returnModuleCode = "warehouse",
   className = "secondary",
   children,
 }: {
   orderId: string;
   targetPath: string;
+  returnModuleCode?: string;
   className?: string;
   children: ReactNode;
 }) {
   return (
     <Form method="post" action="/switch-site">
       <input type="hidden" name="target" value="warehouse" />
-      <input type="hidden" name="warehouseTo" value={warehouseTarget(orderId, targetPath)} />
+      <input type="hidden" name="warehouseTo" value={warehouseTarget(orderId, targetPath, returnModuleCode)} />
       <button className={className}>{children}</button>
     </Form>
   );

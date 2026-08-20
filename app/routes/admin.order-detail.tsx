@@ -638,6 +638,7 @@ function OrderBusinessForm({
         modules={data.modules}
         workflow={data.businessWorkflow}
         workflowSteps={data.workflowSteps}
+        workflowFormRows={data.workflowFormRows}
       />
       <main className="order-form-sheet">
         <header className="order-form-current">
@@ -1502,11 +1503,13 @@ function OrderVerticalWorkflow({
   modules,
   workflow,
   workflowSteps,
+  workflowFormRows = [],
 }: {
   order: Order;
   modules: OrderModuleInstance[];
   workflow: BusinessWorkflow | null;
   workflowSteps: BusinessWorkflowStep[];
+  workflowFormRows?: WorkflowFormRow[];
 }) {
   if (workflow && workflowSteps.length) {
     const currentIndex = Math.max(
@@ -1529,20 +1532,31 @@ function OrderVerticalWorkflow({
                 : index === currentIndex
                   ? "active"
                   : "pending";
+            const stepModules = uniqueWorkflowModules(
+              workflowFormRows.filter((row) => row.step_key === step.step_key),
+            );
+            const target =
+              stepModules.find((row) => row.module_status !== "completed") ??
+              stepModules[0];
+            const href = target?.module_code
+              ? `/admin/orders/${order.id}/modules/${target.module_code}#module-business-data`
+              : `/admin/orders/${order.id}`;
             return (
               <li key={step.step_key} className={status}>
-                <i>{status === "completed" ? "✓" : index + 1}</i>
-                <div>
-                  <strong>{step.name}</strong>
-                  <small>
-                    {status === "active"
-                      ? "当前节点"
-                      : step.is_required
-                        ? "必须办理"
-                        : "可选节点"}
-                    {step.field_count ? ` · ${step.field_count} 字段` : ""}
-                  </small>
-                </div>
+                <Link to={href} title={`打开${step.name}`}>
+                  <i>{status === "completed" ? "✓" : index + 1}</i>
+                  <div>
+                    <strong>{step.name}</strong>
+                    <small>
+                      {status === "active"
+                        ? "当前节点 · 点击办理"
+                        : step.is_required
+                          ? "必须办理 · 点击查看"
+                          : "可选节点 · 点击查看"}
+                      {step.field_count ? ` · ${step.field_count} 字段` : ""}
+                    </small>
+                  </div>
+                </Link>
               </li>
             );
           })}
@@ -1558,21 +1572,31 @@ function OrderVerticalWorkflow({
         <strong>模块阶段</strong>
       </header>
       <ol>
-        {snapshots.map((snapshot, index) => (
-          <li key={snapshot.stage.code} className={snapshot.status}>
-            <i>{snapshot.status === "completed" ? "✓" : index + 1}</i>
-            <div>
-              <strong>{snapshot.stage.shortTitle}</strong>
-              <small>
-                {snapshot.status === "active"
-                  ? "当前阶段"
-                  : snapshot.status === "skipped"
-                    ? "本单无需拼车配载"
-                    : `${snapshot.progress}%`}
-              </small>
-            </div>
-          </li>
-        ))}
+        {snapshots.map((snapshot, index) => {
+          const target =
+            snapshot.activeModules.find((module) => module.status !== "completed") ??
+            snapshot.activeModules[0];
+          const href = target
+            ? `/admin/orders/${order.id}/modules/${target.module_code}#module-business-data`
+            : `/admin/orders/${order.id}`;
+          return (
+            <li key={snapshot.stage.code} className={snapshot.status}>
+              <Link to={href} title={`打开${snapshot.stage.shortTitle}`}>
+                <i>{snapshot.status === "completed" ? "✓" : index + 1}</i>
+                <div>
+                  <strong>{snapshot.stage.shortTitle}</strong>
+                  <small>
+                    {snapshot.status === "active"
+                      ? "当前阶段 · 点击办理"
+                      : snapshot.status === "skipped"
+                        ? "本单无需拼车配载"
+                        : `${snapshot.progress}% · 点击查看`}
+                  </small>
+                </div>
+              </Link>
+            </li>
+          );
+        })}
       </ol>
     </aside>
   );

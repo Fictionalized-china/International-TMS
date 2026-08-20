@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { Form, Link } from "react-router";
 import type { Route } from "./+types/warehouse.index";
 import { requireSessionUser } from "../lib/auth.server";
+import { loadWarehouseContext } from "../lib/warehouse-context.server";
 
 type WarehouseQueue = "inbound" | "counting" | "inventory" | "outbound" | "exception";
 
@@ -37,8 +38,19 @@ const queueMeta: Record<WarehouseQueue, { label: string; hint: string }> = {
   exception: { label: "异常处理", hint: "货物被冻结，需先处理异常" },
 };
 
+function queueHint(queue: WarehouseQueue, overseas: boolean) {
+  if (!overseas) return queueMeta[queue].hint;
+  if (queue === "inbound") return "等待目的仓扫码入库";
+  if (queue === "counting") return "已入库，等待清点确认";
+  if (queue === "inventory") return "已清点，等待运输单齐套同步";
+  if (queue === "outbound") return "境外仓无需再次装车出库";
+  return queueMeta[queue].hint;
+}
+
 export async function loader({ request }: Route.LoaderArgs) {
   const user = await requireSessionUser(request, "warehouse.view", "warehouse");
+  const warehouseContext = await loadWarehouseContext(request, user);
+  const warehouse = warehouseContext.selected;
   const url = new URL(request.url);
   const requestedView = url.searchParams.get("view") || "all";
   const view = requestedView === "all" || requestedView in queueMeta ? requestedView : "all";
@@ -47,20 +59,38 @@ export async function loader({ request }: Route.LoaderArgs) {
     `SELECT s.order_id,s.id shipment_id,s.shipment_number,o.order_number,c.name customer_name,
             c.identity_code customer_identity_code,o.business_type,o.cargo_description,
             o.pieces,o.gross_weight_kg,o.volume_cbm,
-            EXISTS(SELECT 1 FROM warehouse_receipts wr WHERE wr.organization_id=s.organization_id AND wr.shipment_id=s.id) received,
-            EXISTS(SELECT 1 FROM warehouse_receipts wr WHERE wr.organization_id=s.organization_id AND wr.shipment_id=s.id AND wr.status='completed' AND wr.cargo_complete=1) cargo_complete,
-            (SELECT MAX(wr.received_at) FROM warehouse_receipts wr WHERE wr.organization_id=s.organization_id AND wr.shipment_id=s.id) receipt_time,
-            (SELECT COUNT(*) FROM warehouse_packages wp WHERE wp.organization_id=s.organization_id AND wp.shipment_id=s.id) package_count,
-            (SELECT COUNT(*) FROM warehouse_packages wp WHERE wp.organization_id=s.organization_id AND wp.shipment_id=s.id AND wp.status IN ('in_stock','allocated')) in_stock_count,
-            (SELECT wd.status FROM warehouse_dispatches wd WHERE wd.organization_id=s.organization_id AND wd.shipment_id=s.id ORDER BY wd.created_at DESC LIMIT 1) dispatch_status,
-            (SELECT COUNT(*) FROM warehouse_exceptions we WHERE we.organization_id=s.organization_id AND we.shipment_id=s.id AND we.status IN ('open','processing')) active_exception_count,
+            EXISTS(SELECT 1 FROM warehouse_receipts wr WHERE wr.organization_id=s.organization_id AND wr.shipment_id=s.id AND wr.warehouse_id=?) received,
+            EXISTS(SELECT 1 FROM warehouse_receipts wr WHERE wr.organization_id=s.organization_id AND wr.shipment_id=s.id AND wr.warehouse_id=? AND wr.status='completed' AND wr.cargo_complete=1) cargo_complete,
+            (SELECT MAX(wr.received_at) FROM warehouse_receipts wr WHERE wr.organization_id=s.organization_id AND wr.shipment_id=s.id AND wr.warehouse_id=?) receipt_time,
+            (SELECT COUNT(*) FROM warehouse_packages wp WHERE wp.organization_id=s.organization_id AND wp.shipment_id=s.id AND wp.warehouse_id=?) package_count,
+            (SELECT COUNT(*) FROM warehouse_packages wp WHERE wp.organization_id=s.organization_id AND wp.shipment_id=s.id AND wp.warehouse_id=? AND wp.status IN ('in_stock','allocated')) in_stock_count,
+            (SELECT wd.status FROM warehouse_dispatches wd WHERE wd.organization_id=s.organization_id AND wd.shipment_id=s.id AND EXISTS(SELECT 1 FROM warehouse_dispatch_items wdi JOIN warehouse_packages wp ON wp.id=wdi.package_id WHERE wdi.dispatch_id=wd.id AND wp.warehouse_id=?) ORDER BY wd.created_at DESC LIMIT 1) dispatch_status,
+            (SELECT COUNT(*) FROM warehouse_exceptions we JOIN warehouse_packages wp ON wp.id=we.package_id WHERE we.organization_id=s.organization_id AND we.shipment_id=s.id AND wp.warehouse_id=? AND we.status IN ('open','processing')) active_exception_count,
             MAX(o.updated_at,s.updated_at) updated_at
        FROM shipments s
        JOIN transport_orders o ON o.id=s.order_id AND o.organization_id=s.organization_id
        JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
       WHERE s.organization_id=? AND o.status NOT IN ('cancelled','completed')
+        AND ${warehouse.warehouse_role === "overseas_destination"
+          ? `o.overseas_warehouse_id=? AND (
+               EXISTS(SELECT 1 FROM transport_batch_orders bo JOIN transport_batches b ON b.id=bo.batch_id AND b.organization_id=bo.organization_id WHERE bo.organization_id=o.organization_id AND bo.order_id=o.id AND bo.status!='removed' AND b.road_status IN ('outbound_in_transit','overseas_arrived','waiting_pickup','pickup_completed'))
+               OR EXISTS(SELECT 1 FROM warehouse_receipts wr WHERE wr.organization_id=o.organization_id AND wr.shipment_id=s.id AND wr.warehouse_id=?)
+             )`
+          : `(EXISTS(SELECT 1 FROM order_transport_assignments a WHERE a.organization_id=o.organization_id AND a.order_id=o.id AND a.leg_type='first_mile' AND a.status!='cancelled' AND a.destination_warehouse_id=?)
+               OR EXISTS(SELECT 1 FROM warehouse_receipts wr WHERE wr.organization_id=o.organization_id AND wr.shipment_id=s.id AND wr.warehouse_id=?))`}
       ORDER BY o.updated_at DESC,s.updated_at DESC`,
-  ).bind(user.organizationId).all<WarehouseQueueRow>();
+  ).bind(
+    warehouse.id,
+    warehouse.id,
+    warehouse.id,
+    warehouse.id,
+    warehouse.id,
+    warehouse.id,
+    warehouse.id,
+    user.organizationId,
+    warehouse.id,
+    warehouse.id,
+  ).all<WarehouseQueueRow>();
 
   const categorized = rows.results.map((row) => ({ ...row, queue: warehouseQueue(row) }));
   const scoped = categorized.filter((row) => {
@@ -71,25 +101,26 @@ export async function loader({ request }: Route.LoaderArgs) {
   const counts = Object.fromEntries(
     Object.keys(queueMeta).map((key) => [key, categorized.filter((row) => row.queue === key).length]),
   ) as Record<WarehouseQueue, number>;
-  return { user, rows: scoped, counts, view, q };
+  return { user, warehouse, rows: scoped, counts, view, q };
 }
 
 export default function WarehouseIndex({ loaderData }: Route.ComponentProps) {
   return <>
     <header className="page-header warehouse-queue-header">
       <div><p className="eyebrow">WAREHOUSE WORK QUEUE</p><h1>仓库作业总表</h1><p>一行一票货；系统根据收货、实收、库存、装车和异常记录自动归类。</p></div>
-      <Link className="secondary" to="/warehouse/inventory?status=dispatched">查看已出库记录</Link>
+      <Link className="secondary" to={warehousePath("/warehouse/inventory", loaderData.warehouse.id, { status: "dispatched" })}>查看已出库记录</Link>
     </header>
     <nav className="warehouse-queue-tabs" aria-label="仓库作业分类">
-      <Link className={loaderData.view === "all" ? "active" : ""} to="/warehouse">全部 <strong>{Object.values(loaderData.counts).reduce((sum, count) => sum + count, 0)}</strong></Link>
-      {(Object.keys(queueMeta) as WarehouseQueue[]).map((key) => <Link key={key} className={loaderData.view === key ? "active" : ""} to={`/warehouse?view=${key}`}>{queueMeta[key].label} <strong>{loaderData.counts[key]}</strong></Link>)}
+      <Link className={loaderData.view === "all" ? "active" : ""} to={warehousePath("/warehouse", loaderData.warehouse.id)}>全部 <strong>{Object.values(loaderData.counts).reduce((sum, count) => sum + count, 0)}</strong></Link>
+      {(Object.keys(queueMeta) as WarehouseQueue[]).map((key) => <Link key={key} className={loaderData.view === key ? "active" : ""} to={warehousePath("/warehouse", loaderData.warehouse.id, { view: key })}>{queueMeta[key].label} <strong>{loaderData.counts[key]}</strong></Link>)}
     </nav>
     <section className="panel warehouse-queue-panel">
       <Form method="get" className="warehouse-queue-filter">
         {loaderData.view !== "all" && <input type="hidden" name="view" value={loaderData.view} />}
+        <input type="hidden" name="warehouseId" value={loaderData.warehouse.id} />
         <input name="q" defaultValue={loaderData.q} placeholder="订单、运单、客户、识别码或货物名称" />
         <button className="secondary">筛选</button>
-        <Link className="text-button" to={loaderData.view === "all" ? "/warehouse" : `/warehouse?view=${loaderData.view}`}>重置</Link>
+        <Link className="text-button" to={warehousePath("/warehouse", loaderData.warehouse.id, loaderData.view === "all" ? undefined : { view: loaderData.view })}>重置</Link>
       </Form>
       <div className="table-wrap warehouse-queue-table"><table><thead><tr><th>作业状态</th><th>订单 / 运单</th><th>客户</th><th>货物与实收</th><th>入库时间</th><th>当前处理</th><th className="sticky-action">操作</th></tr></thead><tbody>{loaderData.rows.map((row) => <tr key={row.shipment_id} className={row.queue === "exception" ? "row-blocked" : ""}>
         <td><span className={`status-pill warehouse-queue-${row.queue}`}>{queueMeta[row.queue].label}</span><small>{row.business_type === "ftl" ? "整车" : "拼车"}</small></td>
@@ -97,8 +128,8 @@ export default function WarehouseIndex({ loaderData }: Route.ComponentProps) {
         <td><strong>{row.customer_name}</strong><small>识别码 {row.customer_identity_code}</small></td>
         <td><strong>{row.cargo_description || "货物名称待补"}</strong><small>{row.pieces || 0} 件 · {Number(row.gross_weight_kg || 0).toFixed(2)} KG · {Number(row.volume_cbm || 0).toFixed(3)} CBM · {row.package_count} 个标签</small></td>
         <td>{row.receipt_time ? new Date(row.receipt_time).toLocaleString("zh-CN") : "尚未入库"}</td>
-        <td><strong>{queueMeta[row.queue].hint}</strong><small>{warehouseQueueDetail(row)}</small></td>
-        <td className="sticky-action"><Link className="text-button" to={warehouseQueueHref(row)}>进入办理</Link></td>
+        <td><strong>{queueHint(row.queue, loaderData.warehouse.warehouse_role === "overseas_destination")}</strong><small>{warehouseQueueDetail(row)}</small></td>
+        <td className="sticky-action"><Link className="text-button" to={warehouseQueueHref(row, loaderData.warehouse.id, loaderData.warehouse.warehouse_role === "overseas_destination")}>进入办理</Link></td>
       </tr>)}</tbody></table></div>
       {!loaderData.rows.length && <p className="empty-state">当前筛选条件下没有仓库作业。</p>}
     </section>
@@ -121,12 +152,17 @@ function warehouseQueueDetail(row: CategorizedWarehouseRow) {
   return `${row.in_stock_count}/${row.package_count} 个标签在库或已集货`;
 }
 
-function warehouseQueueHref(row: CategorizedWarehouseRow) {
-  const returnTo = encodeURIComponent(`/admin/orders/${row.order_id}/modules/warehouse`);
-  if (row.queue === "exception") return "/warehouse/exceptions?status=active";
-  if (row.queue === "outbound") return `/warehouse/outbound?orderId=${row.order_id}&returnTo=${returnTo}`;
-  if (row.queue === "inventory") return `/warehouse/inventory?q=${encodeURIComponent(row.order_number)}`;
-  return `/warehouse/inbound?orderId=${row.order_id}&returnTo=${returnTo}`;
+function warehouseQueueHref(row: CategorizedWarehouseRow, warehouseId: string, overseas: boolean) {
+  const returnTo = `/admin/orders/${row.order_id}/modules/${overseas ? "overseas_warehouse" : "warehouse"}`;
+  if (row.queue === "exception") return warehousePath("/warehouse/exceptions", warehouseId, { status: "active" });
+  if (row.queue === "outbound") return warehousePath("/warehouse/outbound", warehouseId, { orderId: row.order_id, returnTo });
+  if (row.queue === "inventory") return warehousePath("/warehouse/inventory", warehouseId, { q: row.order_number });
+  return warehousePath("/warehouse/inbound", warehouseId, { orderId: row.order_id, returnTo });
+}
+
+function warehousePath(path: string, warehouseId: string, values?: Record<string, string>) {
+  const params = new URLSearchParams({ warehouseId, ...(values ?? {}) });
+  return `${path}?${params}`;
 }
 
 export function meta() { return [{ title: "仓库作业总表 | International TMS" }]; }

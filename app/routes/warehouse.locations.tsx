@@ -6,6 +6,7 @@ import { Modal } from "../components/Modal";
 import { requireSessionUser } from "../lib/auth.server";
 import { writeAudit } from "../lib/audit.server";
 import { valueOf } from "../lib/validation";
+import { loadWarehouseContext } from "../lib/warehouse-context.server";
 
 type Warehouse={id:string;code:string;name:string;country_code:string|null;city:string|null;address:string|null;status:string;zone_count:number;location_count:number};
 type Zone={id:string;warehouse_id:string;code:string;name:string;zone_type:string;status:string;location_count:number};
@@ -13,12 +14,13 @@ type Location={id:string;warehouse_id:string;zone_id:string;code:string;name:str
 
 export async function loader({request}:Route.LoaderArgs){
   const user=await requireSessionUser(request,"warehouse.view","warehouse");
+  const warehouseContext=await loadWarehouseContext(request,user),warehouse=warehouseContext.selected;
   const [warehouses,zones,locations]=await Promise.all([
-    env.DB.prepare(`SELECT w.id,w.code,w.name,w.country_code,w.city,w.address,w.status,COUNT(DISTINCT z.id) zone_count,COUNT(DISTINCT l.id) location_count FROM warehouses w LEFT JOIN warehouse_zones z ON z.warehouse_id=w.id LEFT JOIN warehouse_locations l ON l.warehouse_id=w.id WHERE w.organization_id=? GROUP BY w.id ORDER BY w.code`).bind(user.organizationId).all<Warehouse>(),
-    env.DB.prepare(`SELECT z.id,z.warehouse_id,z.code,z.name,z.zone_type,z.status,COUNT(l.id) location_count FROM warehouse_zones z LEFT JOIN warehouse_locations l ON l.zone_id=z.id WHERE z.organization_id=? GROUP BY z.id ORDER BY z.warehouse_id,z.code`).bind(user.organizationId).all<Zone>(),
-    env.DB.prepare("SELECT id,warehouse_id,zone_id,code,name,barcode,capacity_cbm,status FROM warehouse_locations WHERE organization_id=? ORDER BY warehouse_id,zone_id,code").bind(user.organizationId).all<Location>()
+    env.DB.prepare(`SELECT w.id,w.code,w.name,w.country_code,w.city,w.address,w.status,COUNT(DISTINCT z.id) zone_count,COUNT(DISTINCT l.id) location_count FROM warehouses w LEFT JOIN warehouse_zones z ON z.warehouse_id=w.id LEFT JOIN warehouse_locations l ON l.warehouse_id=w.id WHERE w.organization_id=? AND w.id=? GROUP BY w.id ORDER BY w.code`).bind(user.organizationId,warehouse.id).all<Warehouse>(),
+    env.DB.prepare(`SELECT z.id,z.warehouse_id,z.code,z.name,z.zone_type,z.status,COUNT(l.id) location_count FROM warehouse_zones z LEFT JOIN warehouse_locations l ON l.zone_id=z.id WHERE z.organization_id=? AND z.warehouse_id=? GROUP BY z.id ORDER BY z.code`).bind(user.organizationId,warehouse.id).all<Zone>(),
+    env.DB.prepare("SELECT id,warehouse_id,zone_id,code,name,barcode,capacity_cbm,status FROM warehouse_locations WHERE organization_id=? AND warehouse_id=? ORDER BY zone_id,code").bind(user.organizationId,warehouse.id).all<Location>()
   ]);
-  return{user,warehouses:warehouses.results,zones:zones.results,locations:locations.results};
+  return{user,warehouse,warehouses:warehouses.results,zones:zones.results,locations:locations.results};
 }
 
 export async function action({request}:Route.ActionArgs){

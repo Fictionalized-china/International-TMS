@@ -139,7 +139,7 @@ export async function confirmOverseasBatchArrival(input: ArrivalInput) {
         now,
       ),
       env.DB.prepare(
-        `UPDATE order_module_instances SET status='in_progress',current_step_code='notified',current_step_name='客户已通知',progress_percent=MAX(progress_percent,25),started_at=COALESCE(started_at,?),blocking_reason=NULL,updated_at=?
+        `UPDATE order_module_instances SET status='in_progress',current_step_code='arrived',current_step_name='等待通知客户',progress_percent=MAX(progress_percent,25),started_at=COALESCE(started_at,?),blocking_reason=NULL,updated_at=?
          WHERE organization_id=? AND order_id=? AND module_code='overseas_warehouse' AND enabled=1 AND status!='completed'`,
       ).bind(now, now, input.organizationId, item.order_id),
       env.DB.prepare(
@@ -246,7 +246,7 @@ async function confirmStandaloneOrderArrival(input: ArrivalInput & { orderId: st
       now,
     ),
     env.DB.prepare(
-      `UPDATE order_module_instances SET status='in_progress',current_step_code='notified',current_step_name='客户已通知',progress_percent=MAX(progress_percent,25),started_at=COALESCE(started_at,?),blocking_reason=NULL,updated_at=?
+      `UPDATE order_module_instances SET status='in_progress',current_step_code='arrived',current_step_name='等待通知客户',progress_percent=MAX(progress_percent,25),started_at=COALESCE(started_at,?),blocking_reason=NULL,updated_at=?
        WHERE organization_id=? AND order_id=? AND module_code='overseas_warehouse' AND enabled=1 AND status!='completed'`,
     ).bind(now, now, input.organizationId, input.orderId),
     env.DB.prepare(

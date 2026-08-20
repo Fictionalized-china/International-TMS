@@ -2,9 +2,10 @@
 import { env } from "cloudflare:workers";
 import type { Route } from "./+types/warehouse";
 import { requireSessionUser } from "../lib/auth.server";
-import { getWarehouseAccess } from "../lib/warehouse-access.server";
 import { listOrderModules } from "../lib/order-modules.server";
 import { checkOrderLoadPlan } from "../lib/order-readiness.server";
+import { loadWarehouseContext } from "../lib/warehouse-context.server";
+import { warehouseRoleLabels } from "../lib/road-master-data";
 
 type WarehouseOrder = {
   id: string;
@@ -36,20 +37,8 @@ function safeAdminReturn(value: string | null, orderId: string | null) {
 
 export async function loader({ request }: Route.LoaderArgs) {
   const user = await requireSessionUser(request, "warehouse.view", "warehouse");
-  const access = await getWarehouseAccess(user);
-  if (!access.all && !access.warehouseIds.length)
-    throw new Response("尚未分配可访问仓库，请联系管理员", { status: 403 });
-  const warehouse = access.all
-    ? await env.DB.prepare(
-        "SELECT id,name FROM warehouses WHERE organization_id=? AND status='active' ORDER BY code LIMIT 1",
-      )
-        .bind(user.organizationId)
-        .first<{ id: string; name: string }>()
-    : await env.DB.prepare(
-        `SELECT id,name FROM warehouses WHERE organization_id=? AND status='active' AND id IN (${access.warehouseIds.map(() => "?").join(",")}) ORDER BY code LIMIT 1`,
-      )
-        .bind(user.organizationId, ...access.warehouseIds)
-        .first<{ id: string; name: string }>();
+  const warehouseContext = await loadWarehouseContext(request, user);
+  const warehouse = warehouseContext.selected;
 
   const url = new URL(request.url);
   const orderId = url.searchParams.get("orderId");
@@ -71,15 +60,15 @@ export async function loader({ request }: Route.LoaderArgs) {
         listOrderModules(user.organizationId, order.id),
         env.DB.prepare(
           `SELECT
-             EXISTS(SELECT 1 FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE r.organization_id=? AND s.order_id=?) received,
-             EXISTS(SELECT 1 FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE r.organization_id=? AND s.order_id=? AND r.status='completed' AND r.cargo_complete=1) inbound_ready,
+             EXISTS(SELECT 1 FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE r.organization_id=? AND s.order_id=? AND r.warehouse_id=?) received,
+             EXISTS(SELECT 1 FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE r.organization_id=? AND s.order_id=? AND r.warehouse_id=? AND r.status='completed' AND r.cargo_complete=1) inbound_ready,
              (SELECT d.status FROM warehouse_dispatches d JOIN shipments s ON s.id=d.shipment_id WHERE d.organization_id=? AND s.order_id=? ORDER BY d.created_at DESC LIMIT 1) dispatch_status`,
-        ).bind(user.organizationId,order.id,user.organizationId,order.id,user.organizationId,order.id).first<{received:number;inbound_ready:number;dispatch_status:string|null}>(),
+        ).bind(user.organizationId,order.id,warehouse.id,user.organizationId,order.id,warehouse.id,user.organizationId,order.id).first<{received:number;inbound_ready:number;dispatch_status:string|null}>(),
         checkOrderLoadPlan(user.organizationId, order.id),
       ]);
       orderContext = {
         ...order,
-        module: modules.find((item) => item.module_code === "warehouse") ?? null,
+        module: modules.find((item) => item.module_code === (warehouse.warehouse_role === "overseas_destination" ? "overseas_warehouse" : "warehouse")) ?? null,
       };
       warehouseFlow = {
         received:Boolean(operational?.received),
@@ -91,12 +80,15 @@ export async function loader({ request }: Route.LoaderArgs) {
     }
   }
   const preserved = new URLSearchParams();
+  preserved.set("warehouseId", warehouse.id);
   if (orderContext) preserved.set("orderId", orderContext.id);
   if (returnTo !== "/admin") preserved.set("returnTo", returnTo);
   const query = preserved.toString();
   return {
     user,
-    warehouseName: warehouse?.name ?? "仓库作业",
+    warehouses: warehouseContext.warehouses,
+    warehouse,
+    warehouseName: warehouse.name,
     currentPath: url.pathname,
     orderContext,
     warehouseFlow,
@@ -125,6 +117,25 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
             <small>{user.organizationName}</small>
           </div>
         </div>
+        <Form method="get" action={loaderData.currentPath} className="warehouse-context-switcher">
+          {orderContext && <input type="hidden" name="orderId" value={orderContext.id} />}
+          {loaderData.returnTo !== "/admin" && <input type="hidden" name="returnTo" value={loaderData.returnTo} />}
+          <label>
+            <span>当前仓库视角</span>
+            <select
+              name="warehouseId"
+              value={loaderData.warehouse.id}
+              onChange={(event) => event.currentTarget.form?.requestSubmit()}
+            >
+              {loaderData.warehouses.map((warehouse) => (
+                <option key={warehouse.id} value={warehouse.id}>
+                  {warehouse.name} · {warehouseRoleLabels[warehouse.warehouse_role]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <small>{warehouseRoleLabels[loaderData.warehouse.warehouse_role]} · {loaderData.warehouse.code}</small>
+        </Form>
         <nav>
           <span className="warehouse-nav-group">现场作业</span>
           <NavLink to={warehouseLink("/warehouse", loaderData.query)} end>
@@ -133,9 +144,11 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
           <NavLink to={warehouseLink("/warehouse/inbound", loaderData.query)}>
             <span>▣</span>待入库与收货
           </NavLink>
-          <NavLink to={warehouseLink("/warehouse/outbound", loaderData.query)}>
-            <span>▤</span>待装车与出库
-          </NavLink>
+          {loaderData.warehouse.warehouse_role !== "overseas_destination" && (
+            <NavLink to={warehouseLink("/warehouse/outbound", loaderData.query)}>
+              <span>▤</span>待装车与出库
+            </NavLink>
+          )}
           <span className="warehouse-nav-group">库存管理</span>
           <NavLink to={warehouseLink("/warehouse/inventory", loaderData.query)}>
             <span>▥</span>仓库货物与盘点
@@ -185,13 +198,19 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
               <i style={{ width: `${module?.progress_percent ?? 0}%` }} />
             </div>
             <div className="warehouse-context-steps">
-              <span className={flow?.received ? "done" : "active"}>1 到仓收货</span>
-              <span className={flow?.inboundReady ? "done" : flow?.received ? "active" : ""}>2 确认货齐</span>
+              <span className={flow?.received ? "done" : "active"}>1 {loaderData.warehouse.warehouse_role === "overseas_destination" ? "目的仓扫码入库" : "到仓收货"}</span>
+              <span className={flow?.inboundReady ? "done" : flow?.received ? "active" : ""}>2 {loaderData.warehouse.warehouse_role === "overseas_destination" ? "清点确认" : "确认货齐"}</span>
             </div>
             {!flow?.received ? (
               <Link className="primary" to={warehouseLink("/warehouse/inbound", loaderData.query)}>去收货</Link>
             ) : !flow.inboundReady ? (
-              <Link className="primary" to={warehouseLink("/warehouse/inbound", loaderData.query)}>继续收货并确认货齐</Link>
+              <Link className="primary" to={warehouseLink("/warehouse/inbound", loaderData.query)}>{loaderData.warehouse.warehouse_role === "overseas_destination" ? "继续入库并完成清点" : "继续收货并确认货齐"}</Link>
+            ) : loaderData.warehouse.warehouse_role === "overseas_destination" ? (
+              <Form action="/switch-site" method="post">
+                <input type="hidden" name="target" value="admin" />
+                <input type="hidden" name="returnTo" value={`/admin/orders/${orderContext.id}/modules/overseas_warehouse#module-business-data`} />
+                <button className="primary">清点完成，返回订单查看状态</button>
+              </Form>
             ) : loaderData.currentPath.startsWith("/warehouse/outbound") ? (
               <div className="warehouse-context-next">
                 <strong>

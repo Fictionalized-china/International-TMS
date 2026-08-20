@@ -5,6 +5,8 @@ import { Modal } from "../components/Modal";
 import { requireSessionUser } from "../lib/auth.server";
 import { valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
+import { loadWarehouseContext } from "../lib/warehouse-context.server";
+import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
 
 type Inventory={id:string;barcode:string;package_number:string;shipment_number:string;order_number:string;customer_name:string;customer_identity_code:string;pieces:number;weight_kg:number|null;volume_cbm:number|null;status:string;location_id:string;location_name:string;location_code:string;zone_name:string;warehouse_name:string;updated_at:string};
 type Location={id:string;warehouse_id:string;name:string;code:string;zone_name:string;warehouse_name:string};
@@ -12,22 +14,23 @@ type Stocktake={id:string;stocktake_number:string;location_id:string;location_na
 type CountItem={id:string;stocktake_id:string;barcode:string;package_number:string;expected_quantity:number;counted_quantity:number;result:string;counted_at:string|null};
 
 export async function loader({request}:Route.LoaderArgs){
-  const user=await requireSessionUser(request,"warehouse.view","warehouse"),url=new URL(request.url),q=url.searchParams.get("q")?.trim()??"",locationFilter=url.searchParams.get("location")??"",requestedStatus=url.searchParams.get("status")??"stock",statusFilter=["stock","in_stock","allocated","exception","dispatched","all"].includes(requestedStatus)?requestedStatus:"stock",pattern=`%${q}%`;
+  const user=await requireSessionUser(request,"warehouse.view","warehouse"),warehouseContext=await loadWarehouseContext(request,user),warehouse=warehouseContext.selected,url=new URL(request.url),q=url.searchParams.get("q")?.trim()??"",locationFilter=url.searchParams.get("location")??"",requestedStatus=url.searchParams.get("status")??"stock",statusFilter=["stock","in_stock","allocated","exception","dispatched","all"].includes(requestedStatus)?requestedStatus:"stock",pattern=`%${q}%`;
   const [inventory,locations,stocktakes,items]=await Promise.all([
-    env.DB.prepare(`SELECT p.id,p.barcode,p.package_number,s.shipment_number,o.order_number,c.name customer_name,c.identity_code customer_identity_code,p.pieces,p.weight_kg,p.volume_cbm,p.status,p.location_id,l.name location_name,l.code location_code,z.name zone_name,w.name warehouse_name,p.updated_at FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id JOIN transport_orders o ON o.id=s.order_id JOIN customers c ON c.id=s.customer_id JOIN warehouse_locations l ON l.id=p.location_id JOIN warehouse_zones z ON z.id=l.zone_id JOIN warehouses w ON w.id=l.warehouse_id WHERE p.organization_id=? AND (?='all' OR (?='stock' AND p.status!='dispatched') OR p.status=?) AND (?='' OR p.barcode LIKE ? OR p.package_number LIKE ? OR s.shipment_number LIKE ? OR o.order_number LIKE ? OR c.identity_code LIKE ? OR c.name LIKE ?) AND (?='' OR p.location_id=?) ORDER BY w.code,z.code,l.code,p.updated_at DESC LIMIT 500`).bind(user.organizationId,statusFilter,statusFilter,statusFilter,q,pattern,pattern,pattern,pattern,pattern,pattern,locationFilter,locationFilter).all<Inventory>(),
-    env.DB.prepare(`SELECT l.id,l.warehouse_id,l.name,l.code,z.name zone_name,w.name warehouse_name FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id JOIN warehouses w ON w.id=l.warehouse_id WHERE l.organization_id=? AND l.status='active' AND z.status='active' AND w.status='active' ORDER BY w.code,z.code,l.code`).bind(user.organizationId).all<Location>(),
-    env.DB.prepare(`SELECT st.id,st.stocktake_number,st.location_id,l.name location_name,z.name zone_name,w.name warehouse_name,st.status,st.expected_packages,st.counted_packages,st.shortage_packages,st.overage_packages,st.created_at,st.completed_at,u.display_name creator_name FROM warehouse_stocktakes st JOIN warehouse_locations l ON l.id=st.location_id JOIN warehouse_zones z ON z.id=l.zone_id JOIN warehouses w ON w.id=st.warehouse_id LEFT JOIN users u ON u.id=st.created_by_user_id WHERE st.organization_id=? ORDER BY CASE st.status WHEN 'counting' THEN 1 ELSE 2 END,st.updated_at DESC LIMIT 30`).bind(user.organizationId).all<Stocktake>(),
-    env.DB.prepare(`SELECT si.id,si.stocktake_id,p.barcode,p.package_number,si.expected_quantity,si.counted_quantity,si.result,si.counted_at FROM warehouse_stocktake_items si JOIN warehouse_packages p ON p.id=si.package_id WHERE si.organization_id=? ORDER BY COALESCE(si.counted_at,p.updated_at) DESC LIMIT 1000`).bind(user.organizationId).all<CountItem>()
+    env.DB.prepare(`SELECT p.id,p.barcode,p.package_number,s.shipment_number,o.order_number,c.name customer_name,c.identity_code customer_identity_code,p.pieces,p.weight_kg,p.volume_cbm,p.status,p.location_id,l.name location_name,l.code location_code,z.name zone_name,w.name warehouse_name,p.updated_at FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id JOIN transport_orders o ON o.id=s.order_id JOIN customers c ON c.id=s.customer_id JOIN warehouse_locations l ON l.id=p.location_id JOIN warehouse_zones z ON z.id=l.zone_id JOIN warehouses w ON w.id=l.warehouse_id WHERE p.organization_id=? AND p.warehouse_id=? AND (?='all' OR (?='stock' AND p.status!='dispatched') OR p.status=?) AND (?='' OR p.barcode LIKE ? OR p.package_number LIKE ? OR s.shipment_number LIKE ? OR o.order_number LIKE ? OR c.identity_code LIKE ? OR c.name LIKE ?) AND (?='' OR p.location_id=?) ORDER BY z.code,l.code,p.updated_at DESC LIMIT 500`).bind(user.organizationId,warehouse.id,statusFilter,statusFilter,statusFilter,q,pattern,pattern,pattern,pattern,pattern,pattern,locationFilter,locationFilter).all<Inventory>(),
+    env.DB.prepare(`SELECT l.id,l.warehouse_id,l.name,l.code,z.name zone_name,w.name warehouse_name FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id JOIN warehouses w ON w.id=l.warehouse_id WHERE l.organization_id=? AND l.warehouse_id=? AND l.status='active' AND z.status='active' AND w.status='active' ORDER BY z.code,l.code`).bind(user.organizationId,warehouse.id).all<Location>(),
+    env.DB.prepare(`SELECT st.id,st.stocktake_number,st.location_id,l.name location_name,z.name zone_name,w.name warehouse_name,st.status,st.expected_packages,st.counted_packages,st.shortage_packages,st.overage_packages,st.created_at,st.completed_at,u.display_name creator_name FROM warehouse_stocktakes st JOIN warehouse_locations l ON l.id=st.location_id JOIN warehouse_zones z ON z.id=l.zone_id JOIN warehouses w ON w.id=st.warehouse_id LEFT JOIN users u ON u.id=st.created_by_user_id WHERE st.organization_id=? AND st.warehouse_id=? ORDER BY CASE st.status WHEN 'counting' THEN 1 ELSE 2 END,st.updated_at DESC LIMIT 30`).bind(user.organizationId,warehouse.id).all<Stocktake>(),
+    env.DB.prepare(`SELECT si.id,si.stocktake_id,p.barcode,p.package_number,si.expected_quantity,si.counted_quantity,si.result,si.counted_at FROM warehouse_stocktake_items si JOIN warehouse_packages p ON p.id=si.package_id JOIN warehouse_stocktakes st ON st.id=si.stocktake_id WHERE si.organization_id=? AND st.warehouse_id=? ORDER BY COALESCE(si.counted_at,p.updated_at) DESC LIMIT 1000`).bind(user.organizationId,warehouse.id).all<CountItem>()
   ]);
-  return{user,q,locationFilter,statusFilter,inventory:inventory.results,locations:locations.results,stocktakes:stocktakes.results,items:items.results};
+  return{user,warehouse,q,locationFilter,statusFilter,inventory:inventory.results,locations:locations.results,stocktakes:stocktakes.results,items:items.results};
 }
 
 export async function action({request}:Route.ActionArgs){
-  const user=await requireSessionUser(request,"warehouse.operate","warehouse"),form=await request.formData(),intent=valueOf(form,"intent"),now=new Date().toISOString();
+  const user=await requireSessionUser(request,"warehouse.operate","warehouse"),warehouseContext=await loadWarehouseContext(request,user),warehouse=warehouseContext.selected,form=await request.formData(),intent=valueOf(form,"intent"),now=new Date().toISOString();
+  await requireWarehouseAssignment(user,warehouse.id,"operator");
   if(intent==="move"){
     const packageId=valueOf(form,"packageId"),targetId=valueOf(form,"targetLocationId"),notes=valueOf(form,"notes");
-    const pkg=await env.DB.prepare("SELECT id,barcode,location_id,status FROM warehouse_packages WHERE id=? AND organization_id=?").bind(packageId,user.organizationId).first<{id:string;barcode:string;location_id:string;status:string}>();
-    const target=await env.DB.prepare("SELECT id FROM warehouse_locations WHERE id=? AND organization_id=? AND status='active'").bind(targetId,user.organizationId).first();
+    const pkg=await env.DB.prepare("SELECT id,barcode,location_id,status FROM warehouse_packages WHERE id=? AND organization_id=? AND warehouse_id=?").bind(packageId,user.organizationId,warehouse.id).first<{id:string;barcode:string;location_id:string;status:string}>();
+    const target=await env.DB.prepare("SELECT id FROM warehouse_locations WHERE id=? AND organization_id=? AND warehouse_id=? AND status='active'").bind(targetId,user.organizationId,warehouse.id).first();
     if(!pkg||!target)return{formError:"货物或目标库位无效"};
     if(pkg.location_id===targetId)return{formError:"货物已经位于目标库位"};
     if(pkg.status==="allocated")return{formError:"货物已进入集货批次，请在批次作业中处理"};
@@ -40,7 +43,7 @@ export async function action({request}:Route.ActionArgs){
     return{success:`${pkg.barcode} 已完成移库`};
   }
   if(intent==="create_stocktake"){
-    const locationId=valueOf(form,"locationId"),notes=valueOf(form,"notes"),location=await env.DB.prepare("SELECT id,warehouse_id FROM warehouse_locations WHERE id=? AND organization_id=? AND status='active'").bind(locationId,user.organizationId).first<{id:string;warehouse_id:string}>();
+    const locationId=valueOf(form,"locationId"),notes=valueOf(form,"notes"),location=await env.DB.prepare("SELECT id,warehouse_id FROM warehouse_locations WHERE id=? AND organization_id=? AND warehouse_id=? AND status='active'").bind(locationId,user.organizationId,warehouse.id).first<{id:string;warehouse_id:string}>();
     if(!location)return{formError:"请选择有效盘点库位"};
     const active=await env.DB.prepare("SELECT id FROM warehouse_stocktakes WHERE location_id=? AND organization_id=? AND status='counting'").bind(location.id,user.organizationId).first();
     if(active)return{formError:"该库位已有进行中的盘点任务"};
@@ -52,7 +55,7 @@ export async function action({request}:Route.ActionArgs){
     ]);
     return{success:`盘点任务 ${number} 已创建，共 ${expected?.total??0} 个账面货物`};
   }
-  const stocktakeId=valueOf(form,"stocktakeId"),stocktake=await env.DB.prepare("SELECT id,location_id,status,stocktake_number FROM warehouse_stocktakes WHERE id=? AND organization_id=?").bind(stocktakeId,user.organizationId).first<{id:string;location_id:string;status:string;stocktake_number:string}>();
+  const stocktakeId=valueOf(form,"stocktakeId"),stocktake=await env.DB.prepare("SELECT id,location_id,status,stocktake_number FROM warehouse_stocktakes WHERE id=? AND organization_id=? AND warehouse_id=?").bind(stocktakeId,user.organizationId,warehouse.id).first<{id:string;location_id:string;status:string;stocktake_number:string}>();
   if(!stocktake)return{formError:"盘点任务不存在"};
   if(intent==="count"){
     if(stocktake.status!=="counting")return{formError:"该盘点任务已经结束"};

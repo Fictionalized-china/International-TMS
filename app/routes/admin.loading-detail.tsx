@@ -11,7 +11,6 @@ import { roadStatusLabels } from "../lib/warehouse-actual";
 import { recordWarehouseProgress } from "../lib/warehouse-progress.server";
 import { allocationMethodLabel, type AllocationMethod } from "../lib/cost-allocation";
 import { confirmCostAllocation, createCostAllocation, loadCostAllocations, updateCostAllocation } from "../lib/cost-allocation.server";
-import { confirmOverseasBatchArrival } from "../lib/overseas-warehouse.server";
 import { canManageOrderModule } from "../lib/position-portal";
 import { maxInlineOrderDocumentBytes, orderDocumentTypeCodes, orderDocumentTypeLabel } from "../lib/order-documents";
 import { syncCustomsModuleFromRecords } from "../lib/customs-status.server";
@@ -65,7 +64,7 @@ async function syncCostModuleStatusSafe(organizationId: string, orderId: string,
 }
 
 type Batch={id:string;batch_number:string;batch_name:string;origin_location:string;destination_location:string;planned_departure_at:string|null;planned_arrival_at:string|null;status:string;road_status:string;carrier_id:string|null;warehouse_id:string|null;carrier_name:string|null;warehouse_name:string|null;border_port:string|null;customs_location:string|null;transit_location:string|null;route_notes:string|null;notes:string|null;overseas_carrier_name:string|null;overseas_vehicle_type:string|null;overseas_vehicle_count:number;overseas_vehicle_plate:string|null;overseas_driver_name:string|null;overseas_driver_phone:string|null};
-type BatchOrder={order_id:string;order_number:string;business_type:string|null;work_number:string;customer_name:string;cargo_description:string|null;cargo_names:string|null;pieces:number;gross_weight_kg:number;volume_cbm:number;declared_weight_kg:number;declared_volume_cbm:number;inbound_at:string|null;dispatched_packages:number;in_stock_packages:number;package_count:number;assigned_count:number;vehicle_names:string|null;overseas_status:string|null;overseas_arrival_at:string|null};
+type BatchOrder={order_id:string;order_number:string;business_type:string|null;work_number:string;customer_name:string;cargo_description:string|null;cargo_names:string|null;pieces:number;gross_weight_kg:number;volume_cbm:number;declared_weight_kg:number;declared_volume_cbm:number;inbound_at:string|null;dispatched_packages:number;in_stock_packages:number;package_count:number;assigned_count:number;vehicle_names:string|null;overseas_warehouse_id:string|null;overseas_warehouse_name:string|null;overseas_status:string|null;overseas_arrival_at:string|null};
 type Vehicle={id:string;vehicle_no:string;vehicle_type:string|null;plate_number:string|null;driver_name:string|null;driver_phone:string|null;capacity_weight_kg:number;capacity_volume_cbm:number;used_weight:number;used_volume:number;loaded_orders:number;status:string};
 type Option={id:string;name:string};
 type ReferenceOption={code:string;name:string};
@@ -162,8 +161,20 @@ export async function loader({request,params}:Route.LoaderArgs){
         (SELECT COUNT(*) FROM warehouse_packages wp JOIN shipments s2 ON s2.id=wp.shipment_id WHERE s2.order_id=o.id AND wp.status='dispatched') dispatched_packages,
         (SELECT COUNT(*) FROM warehouse_packages wp JOIN shipments s2 ON s2.id=wp.shipment_id WHERE s2.order_id=o.id AND wp.status IN ('in_stock','allocated')) in_stock_packages,
         COUNT(DISTINCT p.id) package_count,COUNT(DISTINCT l.package_id) assigned_count,GROUP_CONCAT(DISTINCT v.vehicle_no) vehicle_names,
-        op.status overseas_status,op.actual_arrival_at overseas_arrival_at
-      FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id JOIN customers c ON c.id=o.customer_id LEFT JOIN order_cargo_packages p ON p.order_id=o.id AND p.status!='cancelled' LEFT JOIN transport_vehicle_loads l ON l.batch_id=bo.batch_id AND l.package_id=p.id LEFT JOIN transport_batch_vehicles v ON v.id=l.vehicle_id LEFT JOIN overseas_warehouse_operations op ON op.batch_id=bo.batch_id AND op.order_id=bo.order_id AND op.organization_id=bo.organization_id
+        o.overseas_warehouse_id,ow.name overseas_warehouse_name,
+        CASE WHEN EXISTS(
+          SELECT 1 FROM warehouse_receipts owr
+          JOIN shipments os ON os.id=owr.shipment_id AND os.organization_id=owr.organization_id
+          WHERE owr.organization_id=o.organization_id AND os.order_id=o.id
+            AND owr.warehouse_id=o.overseas_warehouse_id AND owr.status='completed' AND owr.cargo_complete=1
+        ) THEN 'received' ELSE op.status END overseas_status,
+        COALESCE(op.actual_arrival_at,(
+          SELECT MAX(owr.received_at) FROM warehouse_receipts owr
+          JOIN shipments os ON os.id=owr.shipment_id AND os.organization_id=owr.organization_id
+          WHERE owr.organization_id=o.organization_id AND os.order_id=o.id
+            AND owr.warehouse_id=o.overseas_warehouse_id AND owr.status='completed' AND owr.cargo_complete=1
+        )) overseas_arrival_at
+      FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id JOIN customers c ON c.id=o.customer_id LEFT JOIN order_cargo_packages p ON p.order_id=o.id AND p.status!='cancelled' LEFT JOIN transport_vehicle_loads l ON l.batch_id=bo.batch_id AND l.package_id=p.id LEFT JOIN transport_batch_vehicles v ON v.id=l.vehicle_id LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id LEFT JOIN overseas_warehouse_operations op ON op.batch_id=bo.batch_id AND op.order_id=bo.order_id AND op.organization_id=bo.organization_id
       WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed' GROUP BY bo.order_id ORDER BY bo.sequence_no`).bind(batchId,current.organizationId).all<BatchOrder>(),
     env.DB.prepare(`WITH vehicle_order_actual AS (
         SELECT l.vehicle_id,p.order_id,
@@ -563,13 +574,7 @@ export async function action({request,params}:Route.ActionArgs){
     return{success:"出境确认完成；批次内运单已统一进入出境运输中，轨迹已同步"};
   }
   if(intent==="overseas_arrival"){
-    const actualArrivalAt=valueOf(form,"actualArrivalAt"),notes=valueOf(form,"arrivalNotes");
-    if(!actualArrivalAt)return{formError:"请填写实际到达境外仓时间"};
-    try{
-      const result=await confirmOverseasBatchArrival({organizationId:current.organizationId,batchId,actualArrivalAt,actorUserId:current.userId,notes});
-      await writeAudit({request,action:"transport.batch.overseas_arrival.confirm",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{actualArrivalAt,orders:result.orderCount}});
-      return{success:`配载单 ${result.batchNumber} 已确认到境外仓；${result.orderCount} 票订单已同步进入境外仓自提`};
-    }catch(error){return{formError:errorMessage(error)}}
+    return{formError:"到达境外目的仓不能在配载单中手工确认，请由各订单指定的境外目的仓扫码入库并完成清点"};
   }
   if(intent==="batch_tracking_option_toggle"){
     const optionCode=valueOf(form,"optionCode");
@@ -589,7 +594,7 @@ export async function action({request,params}:Route.ActionArgs){
     const milestoneDef=BATCH_TRACKING_MILESTONES.find(item=>item.code===milestoneCode);
     if(!milestoneDef)return{formError:"请选择有效的运输节点"};
     if(milestoneCode==="exported")return{formError:"请在本页“出境门禁与确认”填写实际出境时间并确认，系统会自动登记出境节点"};
-    if(milestoneCode==="station_arrived")return{formError:"请在本页“出境后批量推进”确认实际到达境外仓，系统会自动登记到仓节点"};
+    if(milestoneCode==="station_arrived")return{formError:"到达境外目的仓不能手工登记，请由各订单指定的境外目的仓扫码入库并完成清点"};
     const eventAt=valueOf(form,"eventAt");
     if(!eventAt)return{formError:"请填写事件时间"};
     const orderIds=await getBatchOrderIds(current.organizationId,batchId);
@@ -727,7 +732,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
     </div>
     {loaderData.batch.road_status==="outbound_in_transit"?<div className="alert success">本配载单已出境；现在可以在下方继续确认到境外仓。</div>:["overseas_arrived","waiting_pickup","pickup_completed"].includes(loaderData.batch.road_status)?<div className="alert success">本配载单已完成出境确认。</div>:canConfirmExit&&manage?<Form method="post" className="form-grid compact"><input type="hidden" name="intent" value="exit_confirm"/><Field name="actualExitAt" label="实际出境时间" type="datetime-local" required/><label className="field"><span>实际出境口岸</span><select name="exitPort" defaultValue={loaderData.batch.border_port||""} required><option value="">请选择</option>{loaderData.borderPorts.map(item=><option key={item.code} value={item.code}>{item.name} · {item.code}</option>)}</select></label><Field name="exitVehiclePlate" label="实际出境车辆车牌" required defaultValue={loaderData.batch.overseas_vehicle_plate||loaderData.vehicles.map(item=>item.plate_number).filter(Boolean).join("、")}/><Field name="proofReference" label="出境凭证 / 图片编号"/><Field name="exitNotes" label="出境备注"/><button className="primary" disabled={busy}>确认本配载单已出境并同步订单</button></Form>:<div className="batch-gate-blocker"><div><strong>当前还不能确认出境</strong><p>完成下面的未通过项目后，系统会自动开放“确认出境”。</p>{exitBlockers.length?<ul>{Array.from(new Set(exitBlockers)).map(reason=><li key={reason}>{reason}</li>)}</ul>:<p>当前账号只能查看门禁状态。</p>}</div><div className="batch-gate-actions">{!allDispatched&&assignedOrders[0]&&<WarehouseOutboundAction orderId={assignedOrders[0].order_id} batchId={loaderData.batch.id} customsReady={firstOrderCustomsReady}/>}<a className="secondary" href="#batch-files">处理配载单文件与逐票报关</a>{!loadPlanReady&&<a className="secondary" href="#batch-arrangement">完善配载和车辆安排</a>}</div></div>}
   </section>
-  <section className="panel"><div className="panel-header"><div><h2>7. 出境后批量推进</h2><p>货到境外目的仓后，在这里一次确认本配载单全部挂载订单到仓；后续通知、预约、自提再回到各订单境外仓模块办理。</p></div><span className="status-pill">{loaderData.orders.filter(item=>item.overseas_status&&item.overseas_status!=="waiting_arrival").length}/{loaderData.orders.length} 票到仓</span></div>{loaderData.batch.road_status==="outbound_in_transit"&&manage?<Form method="post" className="batch-arrival-form"><input type="hidden" name="intent" value="overseas_arrival"/><Field name="actualArrivalAt" label="实际到达境外仓时间" type="datetime-local" required/><label className="field span-2"><span>到仓备注</span><input name="arrivalNotes" placeholder="例如境外仓签收人、到仓异常、卸货说明"/></label><button className="primary" disabled={busy}>确认本配载单已到境外仓并同步订单</button></Form>:["overseas_arrived","waiting_pickup","pickup_completed"].includes(loaderData.batch.road_status)?<div className="alert success">本配载单已确认到境外仓；挂载订单已进入境外仓自提流程。</div>:<div className="alert warning">当前步骤尚未开放：请先在上方完成全部出境门禁并确认出境，之后才能登记到达境外仓。</div>}</section>
+  <section className="panel"><div className="panel-header"><div><h2>7. 境外目的仓收货清点</h2><p>配载单不能手工确认到仓。仓库逐票扫码入库并清点；全部挂载订单清点无误后，系统统一结束境外运输并开放客户通知。</p></div><span className="status-pill">{loaderData.orders.filter(item=>item.overseas_status&&item.overseas_status!=="waiting_arrival").length}/{loaderData.orders.length} 票到仓</span></div>{loaderData.batch.road_status==="outbound_in_transit"&&manage?<div className="loading-assignment-records">{loaderData.orders.map(item=><div className="loading-assignment-record" key={item.order_id}><div><strong>{item.order_number}</strong><small>{item.customer_name}</small></div><div><span>境外目的仓</span><strong>{item.overseas_warehouse_name||"未指定"}</strong></div><span className={`status-pill ${item.overseas_status&&item.overseas_status!=="waiting_arrival"?"success":""}`}>{item.overseas_status&&item.overseas_status!=="waiting_arrival"?"已清点到仓":"待仓库收货"}</span>{item.overseas_warehouse_id&&(!item.overseas_status||item.overseas_status==="waiting_arrival")?<WarehouseOverseasInboundAction orderId={item.order_id} batchId={loaderData.batch.id} warehouseId={item.overseas_warehouse_id}/>:null}</div>)}</div>:["overseas_arrived","waiting_pickup","pickup_completed"].includes(loaderData.batch.road_status)?<div className="alert success">本配载单全部订单已经境外仓扫码入库并清点；现在可分别通知客户。</div>:<div className="alert warning">当前步骤尚未开放：请先在上方完成全部出境门禁并确认出境。</div>}</section>
   </>}
 
 function BatchDocumentWorkbench({batchId,orders,batchDocuments,orderDocuments,customsSummaries,customsDeclarations,busy,manage,requiresTransloading}:{batchId:string;orders:BatchOrder[];batchDocuments:BatchDocument[];orderDocuments:OrderDocument[];customsSummaries:CustomsSummary[];customsDeclarations:BatchCustomsDeclaration[];busy:boolean;manage:boolean;requiresTransloading:boolean}){
@@ -812,7 +817,7 @@ function BatchTrackingWorkbench({batchId,batchNumber,orders,trackingMilestones,t
       return <article className={`batch-tracking-card ${count===total?"ready":""} ${count>0&&count<total?"partial":""}`} key={node.code}>
         <header><strong>{node.name}</strong><small>进度 {node.progress}%</small></header>
         <div className="batch-tracking-card-status"><span className={`status-pill ${count===total?"success":""}`}>{count===total?"全票已登记":count>0?`${count}/${total} 票`:"未登记"}</span>{sample&&<small>最近：{formatShortDateTime(sample.event_at)}</small>}</div>
-        {manage&&<details className="batch-tracking-card-form"><summary>登记节点</summary>
+        {manage&&node.code!=="station_arrived"&&<details className="batch-tracking-card-form"><summary>登记节点</summary>
           <Form method="post" className="compact-tool-form batch-tracking-form">
             <input type="hidden" name="intent" value="batch_tracking_add"/>
             <input type="hidden" name="milestoneCode" value={node.code}/>
@@ -913,7 +918,7 @@ function BatchCommandSteps({status,loadPlanReady,warehouseReady}:{status:string;
     {rank:1,title:"生成配载单",body:"挂载同线路订单"},
     {rank:2,title:"仓库装车出库",body:"仓库端按车辆扫码"},
     {rank:3,title:"确认出境",body:"录出境时间和车号"},
-    {rank:4,title:"确认到境外仓",body:"批量同步所有订单"},
+    {rank:4,title:"境外仓收货",body:"逐票扫码，齐套后同步"},
   ];
   return <div className="batch-command-steps">{steps.map(step=><div key={step.rank} className={`batch-command-step ${current>step.rank?"done":current===step.rank?"current":""}`}><b>{current>step.rank?"✓":step.rank}</b><strong>{step.title}</strong><span>{step.body}</span></div>)}</div>;
 }
@@ -924,6 +929,12 @@ function WarehouseOutboundAction({orderId,batchId,customsReady}:{orderId:string;
   return <div className="loading-warehouse-handoff">
     {customsReady===false&&<div className="alert warning" style={{marginBottom:"0.5rem"}}>⚠️ 本票报关单尚未收齐放行，配载出库前请先到「配载单文件工作台」处理报关资料与报关单。</div>}
     <div><strong>下一步由仓库办理</strong><span>仓库按已确认的配载车辆扫码拣货、装车并完成出库交接。</span></div><Form method="post" action="/switch-site"><input type="hidden" name="target" value="warehouse"/><input type="hidden" name="warehouseTo" value={warehouseTo}/><button className="primary">去仓库端拣货装车</button></Form></div>;
+}
+
+function WarehouseOverseasInboundAction({orderId,batchId,warehouseId}:{orderId:string;batchId:string;warehouseId:string}){
+  const returnTo=`/admin/loading/${batchId}?fromOrderId=${encodeURIComponent(orderId)}`;
+  const warehouseTo=`/warehouse/inbound?warehouseId=${encodeURIComponent(warehouseId)}&orderId=${encodeURIComponent(orderId)}&returnTo=${encodeURIComponent(returnTo)}`;
+  return <Form method="post" action="/switch-site"><input type="hidden" name="target" value="warehouse"/><input type="hidden" name="warehouseTo" value={warehouseTo}/><button className="secondary">去目的仓扫码收货</button></Form>;
 }
 
 function CostAllocationSection({allocations,busy,manage}:{allocations:Awaited<ReturnType<typeof loadCostAllocations>>;busy:boolean;manage:boolean}){
