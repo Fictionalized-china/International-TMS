@@ -152,6 +152,11 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
             <span>▣</span>待入库与收货
           </NavLink>
           {loaderData.warehouse.warehouse_role !== "overseas_destination" && (
+            <NavLink to={warehouseLink("/warehouse/acceptance", loaderData.query)}>
+              <span>✓</span>验收收货
+            </NavLink>
+          )}
+          {loaderData.warehouse.warehouse_role !== "overseas_destination" && (
             <NavLink to={warehouseLink("/warehouse/outbound", loaderData.query)}>
               <span>▤</span>待装车与出库
             </NavLink>

@@ -72,6 +72,7 @@ export default [
   layout("routes/warehouse.tsx", [
     route("warehouse", "routes/warehouse.index.tsx"),
     route("warehouse/inbound", "routes/warehouse.inbound.tsx"),
+    route("warehouse/acceptance", "routes/warehouse.acceptance.tsx"),
     route("warehouse/sorting", "routes/warehouse.sorting.tsx"),
     route("warehouse/outbound", "routes/warehouse.outbound.tsx"),
     route("warehouse/inventory", "routes/warehouse.inventory.tsx"),

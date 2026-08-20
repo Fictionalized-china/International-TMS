@@ -63,7 +63,7 @@ export async function loader({ request }: Route.LoaderArgs) {
             s.shipment_number,s.status shipment_status,s.actual_pickup_at shipment_pickup_at,
             (SELECT MAX(r.received_at) FROM warehouse_receipts r JOIN shipments rs ON rs.id=r.shipment_id WHERE r.organization_id=o.organization_id AND rs.order_id=o.id AND r.status='completed') inbound_at,
             COALESCE((SELECT MAX(r.cargo_complete) FROM warehouse_receipts r JOIN shipments rs ON rs.id=r.shipment_id WHERE r.organization_id=o.organization_id AND rs.order_id=o.id AND r.status='completed'),0) cargo_complete,
-            COALESCE((SELECT MAX(r.has_exception) FROM warehouse_receipts r JOIN shipments rs ON rs.id=r.shipment_id WHERE r.organization_id=o.organization_id AND rs.order_id=o.id AND r.status='completed'),0) has_exception,
+            EXISTS(SELECT 1 FROM warehouse_exceptions e JOIN shipments es ON es.id=e.shipment_id WHERE e.organization_id=o.organization_id AND es.order_id=o.id AND e.status IN ('open','processing')) has_exception,
             COALESCE((SELECT SUM(r.total_pieces) FROM warehouse_receipts r JOIN shipments rs ON rs.id=r.shipment_id WHERE r.organization_id=o.organization_id AND rs.order_id=o.id AND r.status='completed'),0) actual_pieces,
             COALESCE((SELECT SUM(r.total_weight_kg) FROM warehouse_receipts r JOIN shipments rs ON rs.id=r.shipment_id WHERE r.organization_id=o.organization_id AND rs.order_id=o.id AND r.status='completed'),0) actual_weight_kg,
             COALESCE((SELECT SUM(r.total_volume_cbm) FROM warehouse_receipts r JOIN shipments rs ON rs.id=r.shipment_id WHERE r.organization_id=o.organization_id AND rs.order_id=o.id AND r.status='completed'),0) actual_volume_cbm,
