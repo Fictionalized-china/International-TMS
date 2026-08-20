@@ -425,6 +425,7 @@ export async function syncOrderBusinessWorkflow(input: OrderBusinessWorkflowSync
       workflowId,
       targetStepKey:targetStep.step_key,
       orderStatus:order.status,
+      mandatoryModuleCodes:["ftl", "ltl"].includes(order.business_type) ? ["warehouse"] : [],
     });
     return actualStepKey;
   }
@@ -437,6 +438,7 @@ export async function syncOrderBusinessWorkflow(input: OrderBusinessWorkflowSync
       workflowId,
       targetStepKey,
       orderStatus:order.status,
+      mandatoryModuleCodes:["ftl", "ltl"].includes(order.business_type) ? ["warehouse"] : [],
     });
     if (actualStepKey !== previousStepKey) {
       const actual = await env.DB.prepare(

@@ -87,7 +87,7 @@ export const orderModuleDefinitions: OrderModuleDefinition[] = [
     description: "实际收货、验货、称重量方、入库并确认货齐；货齐后国内运输阶段结束",
     icon: "▥",
     required: true,
-    services: ["warehouse", "packing", "destination_warehouse"],
+    businessTypes: ["ftl", "ltl"],
     steps: [
       { code: "waiting", name: "等待到货" },
       { code: "receiving", name: "到仓收货" },
@@ -234,6 +234,13 @@ export function enabledOrderModules(businessType: string, services: string[]) {
 
 export function orderModuleDefinition(code: string) {
   return orderModuleDefinitions.find((item) => item.code === code);
+}
+
+export function isRuntimeMandatoryOrderModule(
+  businessType: string,
+  moduleCode: string,
+) {
+  return ["ftl", "ltl"].includes(businessType) && moduleCode === "warehouse";
 }
 
 export type OrderWorkflowModuleSnapshot = {

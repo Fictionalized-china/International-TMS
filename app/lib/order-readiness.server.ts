@@ -88,7 +88,7 @@ export async function checkOrderLoadPlan(
 
   if (order.warehouse_enabled === 1) {
     const actual = await env.DB.prepare(
-      "SELECT 1 FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE r.organization_id=? AND s.order_id=? AND r.status='completed' LIMIT 1",
+      "SELECT 1 FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE r.organization_id=? AND s.order_id=? AND r.status='completed' AND r.cargo_complete=1 LIMIT 1",
     ).bind(organizationId, orderId).first();
     if (!actual) reasons.push("仓库尚未登记实际收货数量、重量和体积");
   }

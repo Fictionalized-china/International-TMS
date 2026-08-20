@@ -3,6 +3,7 @@ import {
   composeOrderWorkflow,
   composedWorkflowProgress,
   enabledOrderModules,
+  isRuntimeMandatoryOrderModule,
   orderModuleDefinition,
   type OrderWorkflowModuleSnapshot,
 } from "./order-modules";
@@ -85,6 +86,14 @@ describe("order module activation", () => {
     expect(enabledOrderModules("ftl", []).find((item) => item.code === "loading")?.enabled).toBe(true);
   });
 
+  it("keeps domestic warehouse receiving mandatory for road orders", () => {
+    expect(enabledOrderModules("ltl", []).find((item) => item.code === "warehouse")?.enabled).toBe(true);
+    expect(enabledOrderModules("ftl", []).find((item) => item.code === "warehouse")?.enabled).toBe(true);
+    expect(isRuntimeMandatoryOrderModule("ltl", "warehouse")).toBe(true);
+    expect(isRuntimeMandatoryOrderModule("ftl", "warehouse")).toBe(true);
+    expect(isRuntimeMandatoryOrderModule("parcel", "warehouse")).toBe(false);
+  });
+
   it("distinguishes pre-departure planning from post-loading execution", () => {
     expect(orderModuleDefinition("transport")?.name).toBe("运输安排");
     expect(orderModuleDefinition("loading")?.name).toBe("装车与出库");
@@ -104,7 +113,8 @@ describe("order module activation", () => {
       }),
     );
     const workflow = composeOrderWorkflow(snapshots).map((item) => item.module_code);
-    expect(workflow.indexOf("transport")).toBeLessThan(workflow.indexOf("loading"));
+    expect(workflow.indexOf("transport")).toBeLessThan(workflow.indexOf("warehouse"));
+    expect(workflow.indexOf("warehouse")).toBeLessThan(workflow.indexOf("loading"));
     expect(workflow.indexOf("loading")).toBeLessThan(workflow.indexOf("tracking"));
   });
 });

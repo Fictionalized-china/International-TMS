@@ -47,8 +47,19 @@ export async function synchronizeWorkflowExecution(input:{
   workflowId:string;
   targetStepKey:string;
   orderStatus:string;
+  mandatoryModuleCodes?:string[];
 }) {
   await ensureWorkflowExecutionSnapshot({instanceId:input.instanceId,workflowId:input.workflowId});
+  const mandatoryModuleCodes = [...new Set(input.mandatoryModuleCodes ?? [])];
+  if (mandatoryModuleCodes.length) {
+    await env.DB.prepare(
+      `UPDATE workflow_instance_module_states SET is_required=1,updated_at=?
+       WHERE module_code IN (${mandatoryModuleCodes.map(() => "?").join(",")})
+         AND instance_step_state_id IN (
+           SELECT id FROM workflow_instance_step_states WHERE instance_id=?
+         )`,
+    ).bind(new Date().toISOString(), ...mandatoryModuleCodes, input.instanceId).run();
+  }
   const [target,moduleFacts,rows] = await Promise.all([
     env.DB.prepare(
       "SELECT sort_order FROM workflow_steps WHERE workflow_id=? AND step_key=? AND is_active=1",

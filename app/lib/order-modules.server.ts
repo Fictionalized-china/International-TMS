@@ -5,6 +5,7 @@ import {
 } from "./workflow-fields.server";
 import {
   enabledOrderModules,
+  isRuntimeMandatoryOrderModule,
   orderModuleDefinition,
   type OrderModuleCode,
 } from "./order-modules";
@@ -130,7 +131,13 @@ export async function ensureOrderModules(
     );
   });
   if (statements.length) await env.DB.batch(statements);
-  await applyWorkflowModuleConfiguration(organizationId,orderId,order.workflow_id,now);
+  await applyWorkflowModuleConfiguration(
+    organizationId,
+    orderId,
+    order.workflow_id,
+    order.business_type,
+    now,
+  );
   await synchronizeGovernanceModules(organizationId, orderId, order, now);
   await synchronizeDataDrivenModules(organizationId, orderId, metrics, now);
   await syncOrderBusinessWorkflow({
@@ -144,6 +151,7 @@ async function applyWorkflowModuleConfiguration(
   organizationId:string,
   orderId:string,
   workflowId:string|null,
+  businessType:string,
   now:string,
 ) {
   if (!workflowId) return;
@@ -161,7 +169,9 @@ async function applyWorkflowModuleConfiguration(
   ).bind(organizationId,orderId).all<{id:string;module_code:string;status:string}>();
   const updates = rows.results.map((row) => {
     const rule = byCode.get(row.module_code);
-    const enabled = rule?.enabled ? 1 : 0;
+    const mandatory = isRuntimeMandatoryOrderModule(businessType, row.module_code);
+    const enabled = mandatory || rule?.enabled ? 1 : 0;
+    const required = mandatory || rule?.is_required ? 1 : 0;
     return env.DB.prepare(
       `UPDATE order_module_instances SET module_name=COALESCE(?,module_name),enabled=?,is_required=?,
         status=CASE WHEN ?=0 THEN 'not_applicable' WHEN status='not_applicable' THEN 'not_started' ELSE status END,
@@ -169,7 +179,7 @@ async function applyWorkflowModuleConfiguration(
         current_step_name=CASE WHEN ?=0 THEN '当前工作流未启用本模组' ELSE current_step_name END,
         progress_percent=CASE WHEN ?=0 THEN 0 ELSE progress_percent END,updated_at=? WHERE id=?`,
     ).bind(
-      rule?.display_name||null,enabled,rule?.is_required?1:0,enabled,enabled,enabled,enabled,now,row.id,
+      rule?.display_name||null,enabled,required,enabled,enabled,enabled,enabled,now,row.id,
     );
   });
   if (updates.length) await env.DB.batch(updates);
