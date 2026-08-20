@@ -110,6 +110,7 @@ type WorkflowTemplateOption = {
   status: string;
   step_count: number;
   field_count: number;
+  road_load_type: "ltl" | "ftl";
 };
 type PreviewItem = {
   id: string;
@@ -256,14 +257,14 @@ export async function loader({ request }: Route.LoaderArgs) {
       .all<Member>(),
     listOrderWorkflowTransitions(current.organizationId),
     env.DB.prepare(
-      `SELECT wd.id,wd.code,wd.name,wd.status,
+      `SELECT wd.id,wd.code,wd.name,wd.status,wd.road_load_type,
         COUNT(DISTINCT ws.id) step_count,
         COUNT(DISTINCT f.id) field_count
        FROM workflow_definitions wd
        LEFT JOIN workflow_steps ws ON ws.workflow_id=wd.id AND ws.is_active=1
        LEFT JOIN workflow_step_fields f ON f.workflow_id=wd.id AND f.is_active=1
-       WHERE wd.organization_id=? AND wd.status='active'
-       GROUP BY wd.id,wd.code,wd.name,wd.status
+       WHERE wd.organization_id=? AND wd.status='active' AND wd.lifecycle_status='published'
+       GROUP BY wd.id,wd.code,wd.name,wd.status,wd.road_load_type
        ORDER BY CASE WHEN wd.code='tms-default' THEN 0 ELSE 1 END, wd.updated_at DESC`,
     )
       .bind(current.organizationId)
@@ -1125,18 +1126,16 @@ async function resolveWorkflowTemplate(
 ) {
   if (workflowTemplateId) {
     const selected = await env.DB.prepare(
-      "SELECT id,code,name FROM workflow_definitions WHERE id=? AND organization_id=? AND status='active'",
+      "SELECT id,code,name,road_load_type FROM workflow_definitions WHERE id=? AND organization_id=? AND status='active' AND lifecycle_status='published'",
     )
       .bind(workflowTemplateId, organizationId)
-      .first<{ id: string; code: string; name: string }>();
-    const expectedBuiltInCode = businessType === "ftl" ? "tms-ftl-standard" : "tms-default";
-    const builtInCodes = new Set(["tms-road-pending", "tms-default", "tms-ftl-standard"]);
-    if (selected && (!builtInCodes.has(selected.code) || selected.code === expectedBuiltInCode))
+      .first<{ id: string; code: string; name: string; road_load_type:string }>();
+    if (selected && selected.road_load_type === businessType)
       return selected;
   }
   const id = await ensureWorkflowForBusinessType(organizationId, businessType);
   return env.DB.prepare(
-      "SELECT id,name FROM workflow_definitions WHERE id=? AND organization_id=? AND status='active'",
+      "SELECT id,name FROM workflow_definitions WHERE id=? AND organization_id=? AND status='active' AND lifecycle_status='published'",
     )
       .bind(id, organizationId)
       .first<{ id: string; name: string }>();
@@ -1834,8 +1833,7 @@ function CreateOrder({
     setSelectedQuotationId(quotationId);
     const quote=data.quotes.find((item)=>item.id===quotationId);
     if(!quote){setCustomerId("");setShipperCustomerId("");setPickupAddressId("");setCargoRows([]);setInstructions("");return;}
-    const expectedWorkflowCode=quote.road_load_type==="ftl"?"tms-ftl-standard":"tms-default";
-    const matchingWorkflow=data.workflowTemplates.find((template)=>template.code===expectedWorkflowCode);
+    const matchingWorkflow=data.workflowTemplates.find((template)=>template.road_load_type===quote.road_load_type);
     if(matchingWorkflow) setWorkflowTemplateId(matchingWorkflow.id);
     setCustomerId(quote.customer_id);
     setShipperCustomerId(quote.customer_id);
@@ -1920,7 +1918,7 @@ function CreateOrder({
             )}
             {data.workflowTemplates.map((template) => (
               <option key={template.id} value={template.id}>
-                {template.name} · {template.step_count} 节点 · {template.field_count} 字段
+                {template.road_load_type==="ftl"?"整车型":"拼车型"} · {template.name} · {template.step_count} 节点 · {template.field_count} 字段
               </option>
             ))}
           </select>

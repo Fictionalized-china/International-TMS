@@ -8226,6 +8226,84 @@ a.order-module-card.read-only:hover {
   justify-content: flex-end;
   padding-top: 4px;
 }
+.workflow-module-config {
+  display: grid;
+  gap: 10px;
+  margin: 0 16px 16px;
+  padding: 12px;
+  border: 1px solid #cbd8e8;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+.workflow-module-list {
+  display: grid;
+  gap: 8px;
+}
+.workflow-module-row {
+  overflow: hidden;
+  border: 1px solid #dbe4f0;
+  border-radius: 8px;
+  background: #fff;
+}
+.workflow-module-row.off,
+.workflow-task-row.off {
+  opacity: .58;
+}
+.workflow-module-row > header {
+  display: grid;
+  grid-template-columns: 42px minmax(180px, 1fr) minmax(120px, .55fr) 64px;
+  gap: 10px;
+  align-items: center;
+  min-height: 52px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #e8eef5;
+  background: #f7faff;
+}
+.workflow-module-row > header > div {
+  display: grid;
+  gap: 2px;
+}
+.workflow-module-row > header small,
+.workflow-module-row > header > span {
+  color: #64748b;
+  font-size: 11px;
+}
+.workflow-task-list {
+  display: grid;
+  padding: 4px 12px 10px 52px;
+}
+.workflow-task-row {
+  display: grid;
+  grid-template-columns: 28px minmax(180px, 1fr) minmax(180px, .8fr) 52px;
+  gap: 8px;
+  align-items: center;
+  min-height: 38px;
+  border-bottom: 1px solid #edf1f6;
+}
+.workflow-task-row > span {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff;
+  background: #315f99;
+  font-size: 10px;
+  font-weight: 800;
+}
+.workflow-task-row small {
+  color: #64748b;
+}
+.workflow-task-list > .secondary {
+  justify-self: start;
+  margin-top: 8px;
+}
+.workflow-definition-form > form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
 @media (max-width: 900px) {
   .workflow-definition-form,
   .workflow-node-edit-form,
@@ -8250,6 +8328,17 @@ a.order-module-card.read-only:hover {
   .workflow-field-meta,
   .workflow-field-help {
     grid-column: 2 / -1;
+  }
+  .workflow-module-row > header,
+  .workflow-task-row {
+    grid-template-columns: 32px minmax(0,1fr) 56px;
+  }
+  .workflow-module-row > header > span,
+  .workflow-task-row small {
+    grid-column: 2 / -1;
+  }
+  .workflow-task-list {
+    padding-left: 12px;
   }
 }
 @media (max-width: 560px) {

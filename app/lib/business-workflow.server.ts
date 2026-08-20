@@ -101,8 +101,11 @@ const workflowDefinitions = {
 export async function ensureDefaultWorkflow(organizationId: string): Promise<string> {
   await ensureRoadWorkflowTemplates(organizationId);
   const existing = await env.DB.prepare(
-    "SELECT id FROM workflow_definitions WHERE organization_id = ? AND code = 'tms-default'",
-  ).bind(organizationId).first<Definition>();
+    `SELECT id FROM workflow_definitions
+     WHERE organization_id=? AND lifecycle_status='published' AND status='active'
+       AND (code='tms-default' OR template_family_id=?)
+     ORDER BY version_number DESC,updated_at DESC LIMIT 1`,
+  ).bind(organizationId,`${organizationId}:tms-default`).first<Definition>();
   return existing?.id ?? `${organizationId}:tms-default`;
 }
 
@@ -117,8 +120,11 @@ export async function ensureWorkflowForBusinessType(
       ? workflowDefinitions.ltl.code
       : workflowDefinitions.pending.code;
   const existing = await env.DB.prepare(
-    "SELECT id FROM workflow_definitions WHERE organization_id = ? AND code = ? AND status = 'active'",
-  ).bind(organizationId, code).first<Definition>();
+    `SELECT id FROM workflow_definitions
+     WHERE organization_id=? AND lifecycle_status='published' AND status='active'
+       AND (code=? OR template_family_id=?)
+     ORDER BY version_number DESC,updated_at DESC LIMIT 1`,
+  ).bind(organizationId,code,`${organizationId}:${code}`).first<Definition>();
   return existing?.id ?? ensureDefaultWorkflow(organizationId);
 }
 
@@ -227,14 +233,14 @@ export async function recordWorkflowEvent(input: RecordEventInput): Promise<stri
     (instance ? { id: instance.workflow_id } : null) ??
     (input.workflowId
       ? await env.DB.prepare(
-          "SELECT id FROM workflow_definitions WHERE id = ? AND organization_id = ? AND status = 'active'",
+          "SELECT id FROM workflow_definitions WHERE id=? AND organization_id=? AND status='active' AND lifecycle_status='published'",
         ).bind(input.workflowId, input.organizationId).first<Definition>()
       : null) ??
     (await env.DB.prepare(
-      "SELECT id FROM workflow_definitions WHERE organization_id = ? AND code = 'tms-default' AND status = 'active' LIMIT 1",
+      "SELECT id FROM workflow_definitions WHERE organization_id=? AND code='tms-default' AND status='active' AND lifecycle_status='published' LIMIT 1",
     ).bind(input.organizationId).first<Definition>()) ??
     (await env.DB.prepare(
-      "SELECT id FROM workflow_definitions WHERE organization_id = ? AND status = 'active' ORDER BY created_at LIMIT 1",
+      "SELECT id FROM workflow_definitions WHERE organization_id=? AND status='active' AND lifecycle_status='published' ORDER BY created_at LIMIT 1",
     ).bind(input.organizationId).first<Definition>());
   if (!definition) return null;
 
@@ -320,7 +326,7 @@ export async function syncOrderBusinessWorkflow(input: OrderBusinessWorkflowSync
     .bind(input.organizationId, input.orderId)
     .first<OrderWorkflowSnapshot>();
   if (!order) return null;
-  const workflowId = await ensureWorkflowForBusinessType(input.organizationId, order.business_type);
+  let workflowId = await ensureWorkflowForBusinessType(input.organizationId, order.business_type);
   let instance = await env.DB.prepare(
     `SELECT id,workflow_id,current_step_key
      FROM workflow_instances
@@ -329,6 +335,9 @@ export async function syncOrderBusinessWorkflow(input: OrderBusinessWorkflowSync
   )
     .bind(input.organizationId, input.orderId)
     .first<Instance>();
+  // Existing orders are version-frozen. A separate explicit migration action
+  // is required before an order may use a newer published workflow version.
+  if (instance?.workflow_id) workflowId = instance.workflow_id;
   const modules = (
     await env.DB.prepare(
       `SELECT module_code,enabled,is_required,status,current_step_code

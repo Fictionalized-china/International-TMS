@@ -51,6 +51,7 @@ type OrderSeed = {
   business_type: string;
   status: string;
   current_assignee_user_id: string | null;
+  workflow_id: string | null;
 };
 
 export async function ensureOrderModules(
@@ -58,7 +59,10 @@ export async function ensureOrderModules(
   orderId: string,
 ) {
   const order = await env.DB.prepare(
-    "SELECT id,business_type,status,current_assignee_user_id FROM transport_orders WHERE id=? AND organization_id=?",
+    `SELECT o.id,o.business_type,o.status,o.current_assignee_user_id,
+      COALESCE(wi.workflow_id,(SELECT workflow_id FROM workflow_instances x WHERE x.order_id=o.id LIMIT 1)) workflow_id
+     FROM transport_orders o LEFT JOIN workflow_instances wi ON wi.id=o.workflow_instance_id
+     WHERE o.id=? AND o.organization_id=?`,
   )
     .bind(orderId, organizationId)
     .first<OrderSeed>();
@@ -126,6 +130,7 @@ export async function ensureOrderModules(
     );
   });
   if (statements.length) await env.DB.batch(statements);
+  await applyWorkflowModuleConfiguration(organizationId,orderId,order.workflow_id,now);
   await synchronizeGovernanceModules(organizationId, orderId, order, now);
   await synchronizeDataDrivenModules(organizationId, orderId, metrics, now);
   await syncOrderBusinessWorkflow({
@@ -133,6 +138,41 @@ export async function ensureOrderModules(
     orderId,
     source: "system",
   });
+}
+
+async function applyWorkflowModuleConfiguration(
+  organizationId:string,
+  orderId:string,
+  workflowId:string|null,
+  now:string,
+) {
+  if (!workflowId) return;
+  const configured = await env.DB.prepare(
+    `SELECT m.module_code,MAX(m.is_required) is_required,
+      MAX(CASE WHEN m.is_active=1 AND s.is_active=1 THEN 1 ELSE 0 END) enabled,
+      MIN(CASE WHEN m.is_active=1 AND s.is_active=1 THEN m.display_name END) display_name
+     FROM workflow_step_modules m JOIN workflow_steps s ON s.id=m.step_id AND s.workflow_id=m.workflow_id
+     WHERE m.workflow_id=? GROUP BY m.module_code`,
+  ).bind(workflowId).all<{module_code:string;is_required:number;enabled:number;display_name:string|null}>();
+  if (!configured.results.length) return;
+  const byCode = new Map(configured.results.map((item)=>[item.module_code,item]));
+  const rows = await env.DB.prepare(
+    "SELECT id,module_code,status FROM order_module_instances WHERE organization_id=? AND order_id=?",
+  ).bind(organizationId,orderId).all<{id:string;module_code:string;status:string}>();
+  const updates = rows.results.map((row) => {
+    const rule = byCode.get(row.module_code);
+    const enabled = rule?.enabled ? 1 : 0;
+    return env.DB.prepare(
+      `UPDATE order_module_instances SET module_name=COALESCE(?,module_name),enabled=?,is_required=?,
+        status=CASE WHEN ?=0 THEN 'not_applicable' WHEN status='not_applicable' THEN 'not_started' ELSE status END,
+        current_step_code=CASE WHEN ?=0 THEN NULL ELSE current_step_code END,
+        current_step_name=CASE WHEN ?=0 THEN '当前工作流未启用本模组' ELSE current_step_name END,
+        progress_percent=CASE WHEN ?=0 THEN 0 ELSE progress_percent END,updated_at=? WHERE id=?`,
+    ).bind(
+      rule?.display_name||null,enabled,rule?.is_required?1:0,enabled,enabled,enabled,enabled,now,row.id,
+    );
+  });
+  if (updates.length) await env.DB.batch(updates);
 }
 
 async function synchronizeDataDrivenModules(
