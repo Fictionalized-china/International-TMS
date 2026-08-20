@@ -4714,7 +4714,7 @@ function ModuleBusinessData({
               <div className="loading-next-action">
                 <strong>下一步</strong>
                 <span>车辆已登记，系统已把本单包装分配到整车运输单。</span>
-                <WarehouseSiteButton orderId={data.order.id} targetPath="/warehouse/outbound" className="primary">去仓库端装车出库</WarehouseSiteButton>
+                <WarehouseSiteButton orderId={data.order.id} targetPath="/warehouse/outbound" returnModuleCode="loading" className="primary">去仓库端装车出库</WarehouseSiteButton>
               </div>
             )}
           </BusinessSubsection>

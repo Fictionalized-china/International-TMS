@@ -103,6 +103,13 @@ function warehouseLink(path: string, query: string) {
   return query ? `${path}?${query}` : path;
 }
 
+function warehouseReturnLabel(returnTo: string, hasOrderContext: boolean) {
+  if (!hasOrderContext) return "返回管理后台";
+  if (returnTo.includes("/modules/loading")) return "返回装车与出库";
+  if (returnTo.includes("/modules/overseas_warehouse")) return "返回境外仓办理";
+  return "返回订单仓库模块";
+}
+
 export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
   const { user, orderContext } = loaderData;
   const module = orderContext?.module;
@@ -117,7 +124,7 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
             <small>{user.organizationName}</small>
           </div>
         </div>
-        <Form method="get" action={loaderData.currentPath} className="warehouse-context-switcher">
+        <Form method="get" action="/warehouse" className="warehouse-context-switcher">
           {orderContext && <input type="hidden" name="orderId" value={orderContext.id} />}
           {loaderData.returnTo !== "/admin" && <input type="hidden" name="returnTo" value={loaderData.returnTo} />}
           <label>
@@ -167,7 +174,7 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
             <input type="hidden" name="returnTo" value={loaderData.returnTo} />
             <button className="warehouse-return" title="切换回运营管理后台">
               <span>↩</span>
-              {orderContext ? "返回订单仓库模块" : "返回管理后台"}
+              {warehouseReturnLabel(loaderData.returnTo, Boolean(orderContext))}
             </button>
           </Form>
         </div>
