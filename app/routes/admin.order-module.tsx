@@ -316,6 +316,20 @@ const quotationStatusLabels: Record<string, string> = {
   rejected: "客户已拒绝",
   cancelled: "已作废",
 };
+const orderStatusLabels: Record<string, string> = {
+  draft: "草稿",
+  submitted: "待审批",
+  confirmed: "已审核，待派单",
+  in_execution: "执行中",
+  completed: "已完成",
+  cancelled: "已取消",
+};
+const businessNatureLabels: Record<string, string> = {
+  export: "出口",
+  import: "进口",
+  transit: "过境",
+  domestic: "国内",
+};
 
 async function loadModuleWorkflowStageAccess(
   organizationId: string,
@@ -5683,9 +5697,9 @@ function ModuleBusinessData({
               <WorkflowInfo fields={data.workflowFields} fieldKey="customer_id" label="委托客户" value={data.order.customer_name || ""} />
               <WorkflowInfo fields={data.workflowFields} fieldKey="quotation_id" label="已接受报价" value={data.order.quote_number || ""} />
               <WorkflowInfo fields={data.workflowFields} fieldKey="order_date" label="接单日期" value={data.order.order_date || ""} />
-              <WorkflowInfo fields={data.workflowFields} fieldKey="business_nature" label="业务性质" value={data.order.business_nature || ""} />
+              <WorkflowInfo fields={data.workflowFields} fieldKey="business_nature" label="业务性质" value={businessNatureLabels[data.order.business_nature] || data.order.business_nature || ""} />
               <Info label="报价状态" value={quoteStatus} />
-              <Info label="订单状态" value={data.order.status || ""} />
+              <Info label="订单状态" value={orderStatusLabels[data.order.status] || data.order.status || ""} />
             </div>
           </div>
 
@@ -6520,7 +6534,7 @@ function OrderApprovalReview({order,cargo,busy}:{order:OrderSummary;cargo:Cargo[
         <table>
           <tbody>
             <tr><th>订单号</th><td>{order.order_number}</td><th>接单日期</th><td>{order.order_date || "—"}</td></tr>
-            <tr><th>委托客户</th><td>{order.customer_name}</td><th>业务性质</th><td>{order.business_nature || "—"}</td></tr>
+            <tr><th>委托客户</th><td>{order.customer_name}</td><th>业务性质</th><td>{businessNatureLabels[order.business_nature] || order.business_nature || "—"}</td></tr>
             <tr><th>运输方案</th><td>{businessTypeLabel}</td><th>订单状态</th><td>待审核</td></tr>
             <tr><th>发货方</th><td>{order.shipper_name || "—"}</td><th>联系人/电话</th><td>{[order.shipper_contact,order.shipper_phone].filter(Boolean).join(" / ") || "—"}</td></tr>
             <tr><th>提货地址</th><td colSpan={3}>{location(order.origin_country,order.origin_state,order.origin_city,order.origin_address)}</td></tr>
