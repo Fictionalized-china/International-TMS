@@ -5,6 +5,10 @@ import {
   ensureWorkflowCatalogFields,
   snapshotWorkflowFieldsForInstance,
 } from "./workflow-fields.server";
+import {
+  ensureWorkflowExecutionSnapshot,
+  synchronizeWorkflowExecution,
+} from "./workflow-execution.server";
 
 export type WorkflowEvent =
   | "customer.ready"
@@ -262,6 +266,7 @@ export async function recordWorkflowEvent(input: RecordEventInput): Promise<stri
       instanceId,
       workflowId: definition.id,
     });
+    await ensureWorkflowExecutionSnapshot({instanceId,workflowId:definition.id});
   } else {
     const current = await env.DB.prepare(
       "SELECT sort_order,trigger_event FROM workflow_steps WHERE workflow_id = ? AND step_key = ?",
@@ -412,7 +417,44 @@ export async function syncOrderBusinessWorkflow(input: OrderBusinessWorkflowSync
       instanceId,
       workflowId,
     });
-    return targetStep.step_key;
+    await ensureWorkflowExecutionSnapshot({instanceId,workflowId});
+    const actualStepKey = await synchronizeWorkflowExecution({
+      organizationId:input.organizationId,
+      orderId:order.id,
+      instanceId,
+      workflowId,
+      targetStepKey:targetStep.step_key,
+      orderStatus:order.status,
+    });
+    return actualStepKey;
+  }
+  if (instance.workflow_id === workflowId) {
+    const previousStepKey = instance.current_step_key;
+    const actualStepKey = await synchronizeWorkflowExecution({
+      organizationId:input.organizationId,
+      orderId:order.id,
+      instanceId:instance.id,
+      workflowId,
+      targetStepKey,
+      orderStatus:order.status,
+    });
+    if (actualStepKey !== previousStepKey) {
+      const actual = await env.DB.prepare(
+        "SELECT name FROM workflow_steps WHERE workflow_id=? AND step_key=?",
+      ).bind(workflowId,actualStepKey).first<{name:string}>();
+      await env.DB.prepare(
+        `INSERT INTO workflow_history(id,instance_id,step_key,step_name,actor_user_id,source,metadata,occurred_at)
+         SELECT ?,?,?,?,?,?,?,? WHERE NOT EXISTS(
+           SELECT 1 FROM workflow_history WHERE instance_id=? AND step_key=?
+         )`,
+      ).bind(
+        crypto.randomUUID(),instance.id,actualStepKey,actual?.name||actualStepKey,
+        input.actorUserId??null,input.source??"system",
+        JSON.stringify({syncedFromExecutionSnapshot:true,orderStatus:order.status}),now,
+        instance.id,actualStepKey,
+      ).run();
+    }
+    return actualStepKey;
   }
   if (targetStepKey === instance.current_step_key) {
     if (instance.workflow_id !== workflowId) {

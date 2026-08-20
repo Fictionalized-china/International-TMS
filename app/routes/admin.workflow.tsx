@@ -766,6 +766,16 @@ function validateWorkflowConfiguration(
     (item,index) => activeSteps.findIndex((other) => other.sort_order === item.sort_order) !== index,
   );
   if (duplicateStepOrders.length) issues.push("启用节点的顺序不能重复");
+  const requiredRuntimeSteps = [
+    "order_creation","consignment_approval","task_assignment","domestic_execution",
+    "warehouse_receiving","port_loading","outbound_transport","overseas_pickup",
+    "reconciliation","completion_review",
+  ];
+  const missingRuntimeSteps = requiredRuntimeSteps.filter(
+    (key)=>!activeSteps.some((step)=>step.step_key===key),
+  );
+  if (missingRuntimeSteps.length)
+    issues.push(`第一版运行链缺少基础节点：${missingRuntimeSteps.join("、")}`);
   for (const step of activeSteps) {
     const stepModules = modules.filter((item) => item.step_id === step.id && item.is_active);
     if (!stepModules.length) issues.push(`节点“${step.name}”没有启用的功能模组`);

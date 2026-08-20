@@ -8304,6 +8304,49 @@ a.order-module-card.read-only:hover {
   gap: 8px;
   justify-content: flex-end;
 }
+.workflow-current-task-panel {
+  margin-bottom: 12px;
+}
+.workflow-current-task-list {
+  display: grid;
+  gap: 6px;
+}
+.workflow-current-task-list article {
+  display: grid;
+  grid-template-columns: 30px minmax(220px,1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 54px;
+  padding: 8px 10px;
+  border: 1px solid #d9e3ef;
+  border-radius: 8px;
+  background: #fff;
+}
+.workflow-current-task-list article > span {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff;
+  background: #245a98;
+  font-size: 11px;
+  font-weight: 800;
+}
+.workflow-current-task-list article > div {
+  display: grid;
+  gap: 2px;
+}
+.workflow-current-task-list article small,
+.workflow-current-task-list article p {
+  margin: 0;
+  color: #64748b;
+  font-size: 11px;
+}
+.workflow-current-task-list article.done {
+  opacity: .62;
+  background: #f5f8fb;
+}
 @media (max-width: 900px) {
   .workflow-definition-form,
   .workflow-node-edit-form,

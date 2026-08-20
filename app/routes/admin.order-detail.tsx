@@ -13,6 +13,7 @@ import { valueOf } from "../lib/validation";
 import { Modal } from "../components/Modal";
 import { writeAudit } from "../lib/audit.server";
 import {
+  ensureOrderModules,
   listOrderModules,
   type OrderModuleInstance,
 } from "../lib/order-modules.server";
@@ -33,6 +34,12 @@ import {
 } from "../lib/order-guidance";
 import { orderResponsiblePosition } from "../lib/order-responsibility";
 import { completionStatusLabels, type OrderCompletionStatus } from "../lib/order-review";
+import {
+  completeWorkflowTask,
+  listCurrentWorkflowTasks,
+  replaceWorkflowInstanceVersion,
+} from "../lib/workflow-execution.server";
+import { syncOrderBusinessWorkflow } from "../lib/business-workflow.server";
 
 type Order = {
   id: string;
@@ -119,11 +126,14 @@ type MacroHistory = {
   occurred_at: string;
 };
 type BusinessWorkflow = {
+  workflow_id:string;
   workflow_name: string;
+  version_number:number;
   current_step_key: string;
   current_step_name: string | null;
   status: string;
 };
+type WorkflowVersionOption={id:string;name:string;version_number:number};
 type BusinessWorkflowStep = {
   step_key: string;
   name: string;
@@ -183,7 +193,8 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     .first<Order>();
   if (!order) throw new Response("订单不存在", { status: 404 });
   const modules = await listOrderModules(current.organizationId, id);
-  const [history, attachments, macro, businessWorkflow, workflowSteps, tasks, services, members, customers, transitions, expenseRisk] =
+  const currentWorkflowTasks = await listCurrentWorkflowTasks(current.organizationId,id);
+  const [history, attachments, macro, businessWorkflow, workflowSteps, tasks, services, members, customers, transitions, expenseRisk, workflowVersions] =
     await Promise.all([
     env.DB.prepare(
       `SELECT h.id,h.action_name,h.from_status,h.to_status,h.to_step_code,a.display_name actor_name,au.display_name assignee_name,h.notes,h.occurred_at FROM order_workflow_history h LEFT JOIN users a ON a.id=h.actor_user_id LEFT JOIN users au ON au.id=h.assignee_user_id WHERE h.order_id=? AND h.organization_id=? ORDER BY h.occurred_at DESC`,
@@ -201,7 +212,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
       .bind(id, current.organizationId)
       .all<MacroHistory>(),
     env.DB.prepare(
-      `SELECT wd.name workflow_name,wi.current_step_key,ws.name current_step_name,wi.status
+      `SELECT wi.workflow_id,wd.name workflow_name,wd.version_number,wi.current_step_key,ws.name current_step_name,wi.status
        FROM workflow_instances wi
        JOIN workflow_definitions wd ON wd.id=wi.workflow_id
        LEFT JOIN workflow_steps ws ON ws.workflow_id=wi.workflow_id AND ws.step_key=wi.current_step_key
@@ -263,6 +274,11 @@ export async function loader({ request, params }: Route.LoaderArgs) {
         current.organizationId,id,
       )
       .first<ExpenseRisk>(),
+    env.DB.prepare(
+      `SELECT id,name,version_number FROM workflow_definitions
+       WHERE organization_id=? AND lifecycle_status='published' AND validation_status='valid'
+         AND status='active' AND road_load_type=? ORDER BY updated_at DESC,version_number DESC`,
+    ).bind(current.organizationId,order.business_type).all<WorkflowVersionOption>(),
   ]);
   return {
     current,
@@ -274,6 +290,8 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     businessWorkflow,
     workflowSteps: workflowSteps.results,
     modules,
+    currentWorkflowTasks,
+    workflowVersions: workflowVersions.results,
     tasks: tasks.results,
     services: services.results,
     members: members.results,
@@ -297,6 +315,64 @@ export async function action({ request, params }: Route.ActionArgs) {
   const current = await requireSessionUser(request, "order.manage"),
     form = await request.formData();
   const intent = valueOf(form, "intent");
+  if (intent === "workflow_version_switch") {
+    const targetWorkflowId=valueOf(form,"targetWorkflowId");
+    const target=await env.DB.prepare(
+      `SELECT id,name,road_load_type FROM workflow_definitions
+       WHERE id=? AND organization_id=? AND lifecycle_status='published' AND validation_status='valid' AND status='active'`,
+    ).bind(targetWorkflowId,current.organizationId).first<{id:string;name:string;road_load_type:string}>();
+    if(!target)return{formError:"目标工作流版本无效或尚未发布"};
+    const sourceOrder=await env.DB.prepare(
+      "SELECT id,business_type FROM transport_orders WHERE id=? AND organization_id=?",
+    ).bind(params.orderId,current.organizationId).first<{id:string;business_type:string}>();
+    if(!sourceOrder)return{formError:"订单不存在"};
+    if(sourceOrder.business_type!==target.road_load_type)return{formError:"目标工作流与订单整车/拼车类型不一致"};
+    const batchOrders=await env.DB.prepare(
+      `SELECT DISTINCT bo2.order_id FROM transport_batch_orders bo1
+       JOIN transport_batches b ON b.id=bo1.batch_id AND b.status!='cancelled'
+       JOIN transport_batch_orders bo2 ON bo2.batch_id=b.id AND bo2.status!='removed'
+       WHERE bo1.organization_id=? AND bo1.order_id=? AND bo1.status!='removed'`,
+    ).bind(current.organizationId,sourceOrder.id).all<{order_id:string}>();
+    const orderIds=batchOrders.results.length?batchOrders.results.map((item)=>item.order_id):[sourceOrder.id];
+    const placeholders=orderIds.map(()=>"?").join(",");
+    const validOrders=await env.DB.prepare(
+      `SELECT COUNT(*) count FROM transport_orders WHERE organization_id=? AND business_type=? AND id IN (${placeholders})`,
+    ).bind(current.organizationId,target.road_load_type,...orderIds).first<{count:number}>();
+    if(validOrders?.count!==orderIds.length)return{formError:"同一配载批次存在类型不一致订单，已停止切换"};
+    try{
+      for(const orderId of orderIds){
+        await replaceWorkflowInstanceVersion({organizationId:current.organizationId,orderId,targetWorkflowId:target.id});
+        await ensureOrderModules(current.organizationId,orderId);
+        await syncOrderBusinessWorkflow({organizationId:current.organizationId,orderId,actorUserId:current.userId,source:"admin"});
+      }
+      await writeAudit({request,action:"workflow.version.switch",resourceType:"transport_order",resourceId:sourceOrder.id,organizationId:current.organizationId,actorUserId:current.userId,metadata:{targetWorkflowId:target.id,orderIds}});
+      return{success:orderIds.length>1?`配载批次 ${orderIds.length} 张订单已统一使用“${target.name}”`:`订单已使用“${target.name}”`};
+    }catch(error){return{formError:error instanceof Error?error.message:"工作流版本切换失败"};}
+  }
+  if (intent === "workflow_task_complete") {
+    try {
+      await completeWorkflowTask({
+        organizationId:current.organizationId,
+        orderId:params.orderId,
+        taskStateId:valueOf(form,"taskStateId"),
+        actorUserId:current.userId,
+      });
+      await syncOrderBusinessWorkflow({
+        organizationId:current.organizationId,
+        orderId:params.orderId,
+        actorUserId:current.userId,
+        source:"admin",
+      });
+      await writeAudit({
+        request,action:"workflow.task.complete",resourceType:"transport_order",
+        resourceId:params.orderId,organizationId:current.organizationId,actorUserId:current.userId,
+        metadata:{taskStateId:valueOf(form,"taskStateId")},
+      });
+      return {success:"当前办理步骤已完成，工作流已重新校验"};
+    } catch (error) {
+      return {formError:error instanceof Error?error.message:"办理步骤提交失败"};
+    }
+  }
   if (intent === "order_update") {
     const orderId = params.orderId;
     const order = await env.DB.prepare(
@@ -427,6 +503,17 @@ export default function OrderDetail({ loaderData, actionData }: Route.ComponentP
               />
             </Modal>
           )}
+          {loaderData.canManage&&loaderData.businessWorkflow&&loaderData.workflowVersions.some((item)=>item.id!==loaderData.businessWorkflow?.workflow_id)&&(
+            <Modal title={`使用新规则 · ${o.order_number}`} triggerLabel="使用新规则" triggerClassName="secondary" closeSignal={success}>
+              <Form method="post" className="stack">
+                <input type="hidden" name="intent" value="workflow_version_switch"/>
+                <label className="field"><span>当前版本</span><input value={`${loaderData.businessWorkflow.workflow_name} · v${loaderData.businessWorkflow.version_number}`} readOnly/></label>
+                <label className="field"><span>目标已发布版本</span><select name="targetWorkflowId" required defaultValue=""><option value="">请选择</option>{loaderData.workflowVersions.filter((item)=>item.id!==loaderData.businessWorkflow?.workflow_id).map((item)=><option key={item.id} value={item.id}>{item.name} · v{item.version_number}</option>)}</select></label>
+                <div className="alert warning">切换后系统按新规则重新校验当前节点；已填业务数据保留。若订单已有配载单，同批全部订单会一起切换。</div>
+                <button className="primary" disabled={busy}>确认使用新规则</button>
+              </Form>
+            </Modal>
+          )}
           {loaderData.canManage &&
             cancelActions.map((transition) => (
               <OrderDetailAction
@@ -457,6 +544,24 @@ export default function OrderDetail({ loaderData, actionData }: Route.ComponentP
       </nav>
       {blockingNotice && <OrderBlockingNotice notice={blockingNotice} />}
       {success && <div className="alert success">{success}</div>}
+      {loaderData.currentWorkflowTasks.some((task)=>task.status!=="completed") && (
+        <section className="panel workflow-current-task-panel">
+          <div className="panel-header"><div><h2>当前节点办理步骤</h2><p>按顺序完成当前节点的模组任务；未完成步骤会阻止进入下一节点。</p></div></div>
+          <div className="workflow-current-task-list">
+            {loaderData.currentWorkflowTasks.map((task,index)=>(
+              <article className={task.status==="completed"?"done":""} key={task.id}>
+                <span>{index+1}</span>
+                <div><strong>{task.name}</strong><small>{task.module_name} · {task.position_name||"待分配岗位"}</small>{task.instructions&&<p>{task.instructions}</p>}</div>
+                <Link className="secondary" to={`/admin/orders/${o.id}/modules/${task.module_code}#module-business-data`}>打开模组</Link>
+                {task.status!=="completed"&&isWorkflowTaskManual(task.step_key,task.task_key)&&(
+                  <Form method="post"><input type="hidden" name="intent" value="workflow_task_complete"/><input type="hidden" name="taskStateId" value={task.id}/><button className="primary" disabled={busy}>{workflowTaskActionLabel(task.task_type)}</button></Form>
+                )}
+                {task.status!=="completed"&&!isWorkflowTaskManual(task.step_key,task.task_key)&&<small>在对应模组保存完整业务数据后自动完成</small>}
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
       <OrderCommandCenter
         data={loaderData}
         mountedPanel={mountedPanel}
@@ -468,6 +573,17 @@ export default function OrderDetail({ loaderData, actionData }: Route.ComponentP
       )}
     </>
   );
+}
+
+function workflowTaskActionLabel(taskType:string) {
+  if (taskType === "review") return "确认无误并继续";
+  if (taskType === "decision") return "确认决策完成";
+  if (taskType === "system") return "重新检查系统结果";
+  return "确认本步骤完成";
+}
+
+function isWorkflowTaskManual(stepKey:string,taskKey:string) {
+  return !taskKey.startsWith("handle_") || stepKey.startsWith("custom_");
 }
 
 type OrderBlockingNoticeData = {
