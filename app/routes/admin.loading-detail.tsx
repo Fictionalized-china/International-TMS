@@ -418,7 +418,7 @@ export async function action({request,params}:Route.ActionArgs){
     }
     const overseasVehicleCount=1;
     overseasVehiclePlate=overseasVehiclePlate.toUpperCase();
-    if(!batch.border_port||!batch.customs_location||!batch.route_notes||!batch.warehouse_id)return{formError:"配载准备不完整，请返回订单补齐装车仓、线路、出境口岸和清关地"};
+    if(!batch.border_port||!batch.customs_location||!batch.warehouse_id)return{formError:"配载准备不完整，请返回订单补齐装车仓、出境口岸和清关地"};
     if(!carrierId||!borderPort||!plannedDeparture||!plannedArrival)return{formError:"请先确定承运商、出境口岸、计划发车和计划到达时间"};
     if(!overseasCarrierName||!overseasVehicleType||!overseasVehiclePlate||!overseasDriverName||!overseasDriverPhone)return{formError:"请完整填写境外承运方、车型、车辆数、车牌号、司机姓名和电话（可从承运商车辆库 / 司机库下拉选择自动带出）"};
     if(warehouseId&&!(await env.DB.prepare("SELECT 1 FROM warehouses WHERE id=? AND organization_id=? AND status='active' AND warehouse_role IN ('domestic_collection','port')").bind(warehouseId,current.organizationId).first()))return{formError:"集货仓库无效，只能选择国内集货仓或口岸仓"};

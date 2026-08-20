@@ -110,8 +110,10 @@ export async function ensureWorkflowCatalogFields(organizationId: string) {
      SET module_code=COALESCE(module_code,(
        SELECT CASE ws.step_key
          WHEN 'order_creation' THEN 'consignment'
-         WHEN 'review_assignment' THEN 'assignment'
+         WHEN 'consignment_approval' THEN 'consignment'
+         WHEN 'task_assignment' THEN 'assignment'
          WHEN 'domestic_execution' THEN 'transport'
+         WHEN 'warehouse_receiving' THEN 'warehouse'
          WHEN 'port_loading' THEN 'loading'
          WHEN 'outbound_transport' THEN 'tracking'
          WHEN 'overseas_pickup' THEN 'overseas_warehouse'

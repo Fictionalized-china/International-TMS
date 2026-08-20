@@ -68,14 +68,16 @@ type ModuleSnapshot = {
 };
 
 export const defaultWorkflowSteps = [
-  ["order_creation", "订单创建", "order", "order.created", 10, "admin"],
-  ["review_assignment", "审核分配", "order", "manual.review_assignment", 20, "admin"],
-  ["domestic_execution", "国内运输", "order", "manual.domestic_execution", 30, "admin"],
-  ["port_loading", "装车与出库", "order", "manual.port_loading", 40, "admin"],
-  ["outbound_transport", "出境运输", "order", "manual.outbound_transport", 50, "admin"],
-  ["overseas_pickup", "境外仓自提", "order", "manual.overseas_pickup", 60, "admin"],
-  ["reconciliation", "对账结算", "order", "manual.reconciliation", 70, "admin"],
-  ["completion_review", "完成复盘", "order", "manual.completion_review", 80, "admin"],
+  ["order_creation", "订单创建与委托", "order", "order.created", 10, "admin"],
+  ["consignment_approval", "委托审核", "order", "manual.consignment_approval", 20, "admin"],
+  ["task_assignment", "任务分配", "order", "manual.task_assignment", 30, "admin"],
+  ["domestic_execution", "国内运输", "order", "manual.domestic_execution", 40, "admin"],
+  ["warehouse_receiving", "国内仓入库", "order", "manual.warehouse_receiving", 50, "admin"],
+  ["port_loading", "出口准备与装车出库", "order", "manual.port_loading", 60, "admin"],
+  ["outbound_transport", "出境运输", "order", "manual.outbound_transport", 70, "admin"],
+  ["overseas_pickup", "境外仓与自提", "order", "manual.overseas_pickup", 80, "admin"],
+  ["reconciliation", "对账结算", "order", "manual.reconciliation", 90, "admin"],
+  ["completion_review", "完成复盘", "order", "manual.completion_review", 100, "admin"],
 ] as const;
 
 const workflowDefinitions = {
@@ -158,6 +160,14 @@ async function ensureRoadWorkflowTemplates(organizationId: string) {
     );
   }
   await env.DB.batch(statements);
+
+  await env.DB.prepare(
+    `UPDATE workflow_steps SET is_active=0,updated_at=?
+     WHERE workflow_id IN (
+       SELECT id FROM workflow_definitions
+       WHERE organization_id=? AND code IN ('tms-road-pending','tms-default','tms-ftl-standard')
+     ) AND step_key='review_assignment'`,
+  ).bind(now, organizationId).run();
 
   const ltlWorkflowId = `${organizationId}:${workflowDefinitions.ltl.code}`;
   const ftlWorkflowId = `${organizationId}:${workflowDefinitions.ftl.code}`;
@@ -496,7 +506,8 @@ function resolveOrderBusinessStep(
 ) {
   if (status === "cancelled") return null;
   if (status === "draft") return "order_creation";
-  if (status === "submitted" || status === "confirmed") return "review_assignment";
+  if (status === "submitted") return "consignment_approval";
+  if (status === "confirmed") return "task_assignment";
   if (status === "completed") return "completion_review";
   if (status !== "in_execution") return "order_creation";
   const activeModules = modules.filter(

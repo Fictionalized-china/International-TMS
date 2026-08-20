@@ -17,12 +17,12 @@ describe("order stage access", () => {
     expect(orderModuleAccess("draft", "consignment").canEdit).toBe(true);
     expect(orderModuleAccess("draft", "costs").canEdit).toBe(true);
     expect(orderModuleAccess("submitted", "cargo").canEdit).toBe(false);
-    expect(orderModuleAccess("submitted", "assignment").canEdit).toBe(true);
+    expect(orderModuleAccess("submitted", "assignment").canEdit).toBe(false);
   });
 
   it("opens preparation after approval and execution after dispatch", () => {
-    expect(orderModuleAccess("confirmed", "transport").canEdit).toBe(true);
-    expect(orderModuleAccess("confirmed", "warehouse").canEdit).toBe(true);
+    expect(orderModuleAccess("confirmed", "transport").canEdit).toBe(false);
+    expect(orderModuleAccess("confirmed", "warehouse").canEdit).toBe(false);
     expect(orderModuleAccess("confirmed", "documents").canEdit).toBe(false);
     expect(orderModuleAccess("in_execution", "transport").canEdit).toBe(true);
     expect(orderModuleAccess("in_execution", "documents").canEdit).toBe(true);
@@ -41,8 +41,10 @@ describe("order stage access", () => {
   it("defines one unambiguous top-to-bottom business sequence", () => {
     expect(orderBusinessStages.map((stage) => stage.code)).toEqual([
       "order_creation",
-      "review_assignment",
+      "consignment_approval",
+      "task_assignment",
       "domestic_execution",
+      "warehouse_receiving",
       "port_loading",
       "outbound_transport",
       "overseas_pickup",

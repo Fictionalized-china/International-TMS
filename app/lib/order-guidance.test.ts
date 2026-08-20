@@ -28,7 +28,7 @@ describe("order next guidance", () => {
       orderStatus: "confirmed",
       modules: [module({ module_code: "assignment", module_name: "任务分配" })],
     });
-    expect(result.stage.code).toBe("review_assignment");
+    expect(result.stage.code).toBe("task_assignment");
     expect(result.moduleCode).toBe("assignment");
   });
 
@@ -37,7 +37,17 @@ describe("order next guidance", () => {
       module({ module_code: "overseas_warehouse", enabled: 0, status: "not_applicable" }),
       module({ module_code: "costs", module_name: "费用结算" }),
     ]);
-    expect(snapshots[5].status).toBe("skipped");
-    expect(snapshots[6].status).toBe("active");
+    expect(snapshots[7].status).toBe("skipped");
+    expect(snapshots[8].status).toBe("active");
+  });
+
+  it("keeps approval and assignment as separate required stages", () => {
+    const submitted = buildStageSnapshots("submitted", []);
+    const confirmed = buildStageSnapshots("confirmed", [
+      module({ module_code: "assignment", module_name: "任务分配" }),
+    ]);
+    expect(submitted[1].status).toBe("active");
+    expect(confirmed[1].status).toBe("completed");
+    expect(confirmed[2].status).toBe("active");
   });
 });

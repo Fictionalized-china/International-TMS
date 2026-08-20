@@ -146,10 +146,10 @@ export default function PositionPortal({ loaderData }: Route.ComponentProps) {
       <Form method="get" className="position-ledger-filters">
         <input name="q" defaultValue={filters.q} placeholder="订单号、客户、节点或岗位" />
         <select name="state" defaultValue={filters.state}><option value="open">未完成</option><option value="blocked">有阻断</option><option value="overdue">即将/已经超时</option>{canViewAll&&<option value="all">全部订单</option>}</select>
-        <select name="stage" defaultValue={filters.stage}><option value="">全部阶段</option><option value="order_creation">订单创建</option><option value="review_assignment">审核分配</option><option value="domestic_execution">国内运输</option><option value="port_loading">装车出库</option><option value="outbound_transport">出境运输</option><option value="overseas_pickup">境外仓自提</option><option value="reconciliation">对账结算</option><option value="completion_review">完成复盘</option></select>
+        <select name="stage" defaultValue={filters.stage}><option value="">全部阶段</option><option value="order_creation">订单创建</option><option value="consignment_approval">委托审核</option><option value="task_assignment">任务分配</option><option value="domestic_execution">国内运输</option><option value="warehouse_receiving">仓库入库</option><option value="port_loading">出口准备</option><option value="outbound_transport">出境运输</option><option value="overseas_pickup">境外仓自提</option><option value="reconciliation">对账结算</option><option value="completion_review">完成复盘</option></select>
         <button className="secondary">筛选</button><Link className="text-button" to="/admin/portal">重置</Link>
       </Form>
-      <div className="table-wrap position-ledger-table"><table><thead><tr><th>状态</th><th>订单 / 客户</th><th>类型</th><th>八阶段进度</th><th>当前节点</th><th>负责岗位 / 人员</th><th>下一步与阻断</th><th className="sticky-action">操作</th></tr></thead><tbody>{orders.map(order=><tr key={order.order_id} className={order.blocker?"row-blocked":""}>
+      <div className="table-wrap position-ledger-table"><table><thead><tr><th>状态</th><th>订单 / 客户</th><th>类型</th><th>业务进度</th><th>当前节点</th><th>负责岗位 / 人员</th><th>下一步与阻断</th><th className="sticky-action">操作</th></tr></thead><tbody>{orders.map(order=><tr key={order.order_id} className={order.blocker?"row-blocked":""}>
         <td><span className={`status-pill ${order.is_overdue?"danger":""}`}>{order.is_overdue?"超时":orderStatusLabel(order.order_status)}</span></td>
         <td><strong>{order.order_number}</strong><small>{order.customer_name}</small></td>
         <td>{order.business_type==="ftl"?"整车":order.business_type==="ltl"?"拼车":"待确定"}</td>

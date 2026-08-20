@@ -5612,19 +5612,12 @@ function ModuleBusinessData({
           <div className="assignment-bulk-panel assignment-review-entry">
             <div className="assignment-bulk-head">
               <div>
-                <strong>先审核订单资料</strong>
-                <span>
-                  打开订单资料表，核对客户、线路、收发货方和货物信息后再审批。
-                </span>
+                <strong>等待委托审核</strong>
+                <span>审批在委托信息页完成；审批通过后，本页自动开放任务分配。</span>
               </div>
-              <Modal
-                title={`审核订单 · ${data.order.order_number}`}
-                triggerLabel="查看并审核订单"
-                triggerClassName="primary"
-                size="wide"
-              >
-                <OrderApprovalReview order={data.order} cargo={data.cargo} busy={busy} />
-              </Modal>
+              <Link className="primary" to={`/admin/orders/${data.order.id}/modules/consignment#module-business-data`}>
+                返回委托信息审批
+              </Link>
             </div>
           </div>
         )}

@@ -35,8 +35,17 @@ export function buildStageSnapshots(orderStatus: string, modules: GuidanceModule
     const stageModules = stage.modules
       .map((code) => active.find((module) => module.module_code === code))
       .filter((module): module is GuidanceModule => Boolean(module));
-    if (!stageModules.length)
+    if (!stageModules.length) {
+      if (stage.code === "consignment_approval") {
+        if (["confirmed", "in_execution", "completed"].includes(orderStatus)) {
+          return { stage, activeModules: [], status: "completed" as const, progress: 100 };
+        }
+        if (orderStatus === "submitted") {
+          return { stage, activeModules: [], status: "pending" as const, progress: 0 };
+        }
+      }
       return { stage, activeModules: [], status: "skipped" as const, progress: 0 };
+    }
     const stageComplete = stageModules.every((module) =>
       isStageModuleComplete(stage.code, module),
     );
@@ -54,7 +63,8 @@ export function buildStageSnapshots(orderStatus: string, modules: GuidanceModule
     };
   });
   let activeIndex = snapshots.findIndex((snapshot) => snapshot.status === "pending");
-  if (orderStatus === "submitted" || orderStatus === "confirmed") activeIndex = 1;
+  if (orderStatus === "submitted") activeIndex = 1;
+  if (orderStatus === "confirmed") activeIndex = 2;
   if (orderStatus === "completed") activeIndex = snapshots.length - 1;
   if (activeIndex >= 0 && snapshots[activeIndex].status !== "completed") {
     snapshots[activeIndex] = { ...snapshots[activeIndex], status: "active" };
@@ -89,7 +99,7 @@ export function orderNextGuidance(input: {
     };
   if (orderStatus === "completed")
     return {
-      stage: orderBusinessStages[7],
+      stage: orderBusinessStages[9],
       action: "查看订单复盘结果",
       owner: "订单负责人",
       blocker: null,
@@ -117,15 +127,15 @@ export function orderNextGuidance(input: {
       action: "核对资料并审批订单",
       owner: "业务主管",
       blocker: null,
-      href: `${href}/modules/assignment#module-business-data`,
-      moduleCode: "assignment" as const,
+      href: `${href}/modules/consignment#module-business-data`,
+      moduleCode: "consignment" as const,
     };
   if (orderStatus === "confirmed") {
     const assignment = module("assignment");
     if (!assignment || assignment.status !== "completed")
-      return moduleGuidance(orderId, orderBusinessStages[1], assignment, "分配订单和模块负责人", "assignment");
+      return moduleGuidance(orderId, orderBusinessStages[2], assignment, "分配订单和模块负责人", "assignment");
     return {
-      stage: orderBusinessStages[1],
+      stage: orderBusinessStages[2],
       action: "核对分配并确认派单",
       owner: "操作主管",
       blocker: null,
@@ -145,7 +155,7 @@ export function orderNextGuidance(input: {
       pending.module_code,
     );
   return {
-    stage: orderBusinessStages[7],
+    stage: orderBusinessStages[9],
     action: "进入复盘页确认订单完成",
     owner: "订单负责人",
     blocker: null,
