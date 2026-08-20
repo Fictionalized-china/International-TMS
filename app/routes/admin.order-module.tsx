@@ -1,5 +1,6 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { Form, Link, useFetcher, useNavigation, redirect } from "react-router";
+import { env } from "cloudflare:workers";
 import type { Route } from "./+types/admin.order-module";
 import { requireSessionUser } from "../lib/auth.server";
 import { valueOf } from "../lib/validation";
@@ -25,6 +26,7 @@ import {
   type WorkflowStepPosition,
 } from "../lib/order-stage-flow";
 import { canManageOrderModule } from "../lib/position-portal";
+import { ensureFtlVehicleAndLoads } from "../lib/ftl-vehicle-loads.server";
 import { summarizeLoadingSelection } from "../lib/loading-workbench";
 import {
   maxInlineOrderDocumentBytes,
@@ -307,7 +309,6 @@ async function loadModuleWorkflowStageAccess(
   orderId: string,
   moduleCode: OrderModuleCode,
 ) {
-  const { env } = await import("cloudflare:workers");
   const state = await env.DB.prepare(
     `SELECT wi.workflow_id,wi.current_step_key
      FROM workflow_instances wi
@@ -447,7 +448,6 @@ type OverseasOperation = {
 };
 
 export async function loader({ request, params }: Route.LoaderArgs) {
-  const { env } = await import("cloudflare:workers");
   const current = await requireSessionUser(request, "order.view"),
     orderId = params.orderId,
     moduleCode = params.moduleCode;
@@ -860,7 +860,6 @@ export async function loader({ request, params }: Route.LoaderArgs) {
 }
 
 export async function action({ request, params }: Route.ActionArgs) {
-  const { env } = await import("cloudflare:workers");
   const current = await requireSessionUser(request, "order.view"),
     orderId = params.orderId,
     moduleCode = params.moduleCode,
@@ -2612,7 +2611,6 @@ async function syncDocumentsModuleStatus(
   actorUserId: string,
   now: string,
 ) {
-  const { env } = await import("cloudflare:workers");
   const module = await env.DB.prepare(
     "SELECT id,status,current_step_code FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='documents' AND enabled=1",
   )
@@ -2682,7 +2680,6 @@ async function syncTrackingModuleStatus(
   milestoneCode: string,
   now: string,
 ) {
-  const { env } = await import("cloudflare:workers");
   const mapping: Record<string, { step: string; name: string; progress: number; complete?: boolean }> = {
     departed: { step: "departed", name: "已登记发车", progress: 15 },
     border_arrived: { step: "transit", name: "到达出境口岸", progress: 28 },
@@ -2784,7 +2781,6 @@ async function syncTrackingModuleFromMilestones(
   orderId: string,
   actorUserId: string,
 ) {
-  const { env } = await import("cloudflare:workers");
   const latest = await env.DB.prepare(
     `SELECT milestone_code
      FROM order_tracking_milestones
@@ -2826,7 +2822,6 @@ const batchSynchronizedTrackingMilestones = new Set([
 ]);
 
 async function linkedBatchOrderIds(organizationId: string, orderId: string) {
-  const { env } = await import("cloudflare:workers");
   const batch = await env.DB.prepare(
     `SELECT batch_id
      FROM transport_batch_orders
@@ -2849,7 +2844,6 @@ async function linkedBatchOrderIds(organizationId: string, orderId: string) {
 }
 
 async function linkedBatchContext(organizationId: string, orderId: string) {
-  const { env } = await import("cloudflare:workers");
   const batch = await env.DB.prepare(
     `SELECT batch_id
      FROM transport_batch_orders
@@ -2879,7 +2873,6 @@ async function ensureFtlPlanningBatch(
   orderId: string,
   actorUserId: string,
 ) {
-  const { env } = await import("cloudflare:workers");
   const linked = await linkedBatchContext(organizationId, orderId);
   if (linked.batchId) return linked.batchId;
   const now = new Date().toISOString();
@@ -2947,149 +2940,6 @@ async function ensureFtlPlanningBatch(
   return batchId;
 }
 
-async function ensureFtlVehicleAndLoads(input: {
-  organizationId: string;
-  orderId: string;
-  batchId: string;
-  carrierName: string;
-  vehicleType: string;
-  plateNumber: string;
-  driverName: string;
-  driverPhone: string;
-  actorUserId: string;
-  now: string;
-}) {
-  const { env } = await import("cloudflare:workers");
-  const carrier = await env.DB.prepare(
-    "SELECT id FROM carriers WHERE organization_id=? AND name=? AND status='active' LIMIT 1",
-  )
-    .bind(input.organizationId, input.carrierName)
-    .first<{ id: string }>();
-  const existingVehicle = await env.DB.prepare(
-    "SELECT id FROM transport_batch_vehicles WHERE organization_id=? AND batch_id=? AND status!='cancelled' ORDER BY created_at LIMIT 1",
-  )
-    .bind(input.organizationId, input.batchId)
-    .first<{ id: string }>();
-  const vehicleId = existingVehicle?.id || crypto.randomUUID();
-  if (existingVehicle?.id) {
-    await env.DB.prepare(
-      `UPDATE transport_batch_vehicles
-       SET vehicle_type=?,plate_number=?,carrier_id=?,driver_name=?,driver_phone=?,updated_at=?
-       WHERE id=? AND organization_id=?`,
-    )
-      .bind(
-        input.vehicleType,
-        input.plateNumber,
-        carrier?.id || null,
-        input.driverName,
-        input.driverPhone,
-        input.now,
-        vehicleId,
-        input.organizationId,
-      )
-      .run();
-  } else {
-    await env.DB.prepare(
-      `INSERT INTO transport_batch_vehicles(
-        id,organization_id,batch_id,vehicle_no,vehicle_type,plate_number,carrier_id,
-        driver_name,driver_phone,capacity_weight_kg,capacity_volume_cbm,status,created_at,updated_at
-      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,'planned',?,?)`,
-    )
-      .bind(
-        vehicleId,
-        input.organizationId,
-        input.batchId,
-        "1",
-        input.vehicleType,
-        input.plateNumber,
-        carrier?.id || null,
-        input.driverName,
-        input.driverPhone,
-        0,
-        0,
-        input.now,
-        input.now,
-      )
-      .run();
-  }
-  const packages = await env.DB.prepare(
-    `SELECT id
-     FROM order_cargo_packages
-     WHERE organization_id=? AND order_id=? AND status!='cancelled'
-     ORDER BY package_sequence,id`,
-  )
-    .bind(input.organizationId, input.orderId)
-    .all<{ id: string }>();
-  if (!packages.results.length) return;
-  const statements: D1PreparedStatement[] = [
-    env.DB.prepare("UPDATE transport_batch_orders SET status='assigned',updated_at=? WHERE organization_id=? AND batch_id=? AND order_id=?")
-      .bind(input.now, input.organizationId, input.batchId, input.orderId),
-  ];
-  for (const item of packages.results) {
-    statements.push(
-      env.DB.prepare(
-        `INSERT OR IGNORE INTO transport_vehicle_loads(
-          id,organization_id,batch_id,vehicle_id,package_id,created_by_user_id,created_at
-        ) VALUES(?,?,?,?,?,?,?)`,
-      )
-        .bind(
-          crypto.randomUUID(),
-          input.organizationId,
-          input.batchId,
-          vehicleId,
-          item.id,
-          input.actorUserId,
-          input.now,
-        ),
-    );
-  }
-  await env.DB.batch(statements);
-}
-
-async function ensureFtlVehicleAndLoadsFromBatch(
-  organizationId: string,
-  orderId: string,
-  batchId: string,
-  actorUserId: string,
-) {
-  const { env } = await import("cloudflare:workers");
-  const batch = await env.DB.prepare(
-    `SELECT overseas_carrier_name,overseas_vehicle_type,overseas_vehicle_plate,
-            overseas_driver_name,overseas_driver_phone
-     FROM transport_batches
-     WHERE organization_id=? AND id=?`,
-  )
-    .bind(organizationId, batchId)
-    .first<{
-      overseas_carrier_name: string | null;
-      overseas_vehicle_type: string | null;
-      overseas_vehicle_plate: string | null;
-      overseas_driver_name: string | null;
-      overseas_driver_phone: string | null;
-    }>();
-  if (
-    !batch?.overseas_carrier_name ||
-    !batch.overseas_vehicle_type ||
-    !batch.overseas_vehicle_plate ||
-    !batch.overseas_driver_name ||
-    !batch.overseas_driver_phone
-  ) {
-    return;
-  }
-  await ensureFtlVehicleAndLoads({
-    organizationId,
-    orderId,
-    batchId,
-    carrierName: batch.overseas_carrier_name,
-    vehicleType: batch.overseas_vehicle_type,
-    plateNumber: batch.overseas_vehicle_plate,
-    driverName: batch.overseas_driver_name,
-    driverPhone: batch.overseas_driver_phone,
-    actorUserId,
-    now: new Date().toISOString(),
-  });
-}
-
 async function ensureFtlBatchFromTracking(
   organizationId: string,
   orderId: string,
@@ -3098,7 +2948,6 @@ async function ensureFtlBatchFromTracking(
   eventAt: string,
   location: string | null,
 ) {
-  const { env } = await import("cloudflare:workers");
   const linked = await linkedBatchContext(organizationId, orderId);
   const now = new Date().toISOString();
   let batchId = linked.batchId;
@@ -3180,7 +3029,6 @@ async function syncBatchTrackingMilestonesFromOrder(
   orderId: string,
   actorUserId: string,
 ) {
-  const { env } = await import("cloudflare:workers");
   const linkedOrderIds = await linkedBatchOrderIds(organizationId, orderId);
   if (linkedOrderIds.length <= 1) return;
   const placeholders = linkedOrderIds.map(() => "?").join(",");
@@ -3273,7 +3121,6 @@ async function syncOverseasOperationFromBatch(
   orderId: string,
   actorUserId: string,
 ) {
-  const { env } = await import("cloudflare:workers");
   const context = await linkedBatchContext(organizationId, orderId);
   if (!context.batchId) return;
   const batch = await env.DB.prepare(

@@ -8,11 +8,7 @@ import { valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import { ensureWorkflowForBusinessType, recordWorkflowEvent } from "../lib/business-workflow.server";
 import { ensureShipmentForOrder } from "../lib/shipment-sync.server";
-import {
-  executeOrderWorkflowAction,
-  listOrderWorkflowTransitions,
-  validateOrderWorkflowAction,
-} from "../lib/order-workflow.server";
+import { listOrderWorkflowTransitions } from "../lib/order-workflow.server";
 import {
   statusLabel,
   type OrderWorkflowTransition,
@@ -111,12 +107,6 @@ type WorkflowTemplateOption = {
   step_count: number;
   field_count: number;
   road_load_type: "ltl" | "ftl";
-};
-type PreviewItem = {
-  id: string;
-  orderNumber: string;
-  ok: boolean;
-  reason: string;
 };
 const allowedStatuses = [
   "draft",
@@ -331,76 +321,6 @@ export async function action({ request }: Route.ActionArgs) {
       assigneeUserId: valueOf(form, "assigneeUserId") || null,
       notes: valueOf(form, "notes"),
     });
-  if (intent === "bulk_preview") {
-    const ids = form
-        .getAll("orderIds")
-        .map(String)
-        .filter(Boolean)
-        .slice(0, 100),
-      actionCode = valueOf(form, "actionCode"),
-      assigneeUserId = valueOf(form, "assigneeUserId") || null;
-    if (!ids.length) return { formError: "请至少选择一条订单" };
-    if (!actionCode) return { formError: "请选择批量动作" };
-    const preview: PreviewItem[] = [];
-    for (const id of ids) {
-      const checked = await validateOrderWorkflowAction({
-        organizationId: current.organizationId,
-        orderId: id,
-        actionCode,
-        assigneeUserId,
-      });
-      preview.push({
-        id,
-        orderNumber: checked.order?.order_number ?? id,
-        ok: checked.ok,
-        reason: checked.ok
-          ? `可执行${checked.transition.action_name}`
-          : checked.reason,
-      });
-    }
-    return { preview, actionCode, assigneeUserId };
-  }
-  if (intent === "bulk_execute") {
-    const ids = form
-        .getAll("orderIds")
-        .map(String)
-        .filter(Boolean)
-        .slice(0, 100),
-      actionCode = valueOf(form, "actionCode"),
-      assigneeUserId = valueOf(form, "assigneeUserId") || null,
-      notes = valueOf(form, "notes");
-    let success = 0;
-    const failed: string[] = [];
-    for (const id of ids)
-      try {
-        const result = await executeOrderWorkflowAction({
-          organizationId: current.organizationId,
-          orderId: id,
-          actionCode,
-          actorUserId: current.userId,
-          assigneeUserId,
-          notes,
-        });
-        success++;
-        await writeAudit({
-          request,
-          action: `order.workflow.${actionCode}`,
-          resourceType: "transport_order",
-          resourceId: id,
-          organizationId: current.organizationId,
-          actorUserId: current.userId,
-          metadata: result,
-        });
-      } catch (error) {
-        failed.push(
-          `${id}: ${error instanceof Error ? error.message : "执行失败"}`,
-        );
-      }
-    return {
-      success: `批量处理完成：成功 ${success} 条，失败 ${failed.length} 条`,
-      failed,
-    };
-  }
   if (intent !== "create") return { formError: "无效的订单操作" };
   const quotationId = valueOf(form, "quotationId"),
     formCustomerId = valueOf(form, "customerId"),
@@ -1298,10 +1218,6 @@ export default function Orders({
       | {
           success?: string;
           formError?: string;
-          failed?: string[];
-          preview?: PreviewItem[];
-          actionCode?: string;
-          assigneeUserId?: string | null;
           createdOrderId?: string;
         };
   return (
@@ -1336,18 +1252,11 @@ export default function Orders({
           {data.formError ?? data.success}
         </div>
       )}
-      {data?.failed?.length ? (
-        <div className="alert error">
-          {data.failed.slice(0, 8).map((x) => (
-            <div key={x}>{x}</div>
-          ))}
-        </div>
-      ) : null}
       <section className="panel order-workbench">
         <div className="order-workbench-tools">
           <div>
             <h2>订单列表</h2>
-            <p>先查找目标订单，再批量处理或进入单票详情。</p>
+            <p>按条件筛选订单，并直接打开当前工作节点。</p>
           </div>
         </div>
         <Form method="get" className="order-filters">
@@ -1390,60 +1299,10 @@ export default function Orders({
             重置
           </Link>
         </Form>
-        {manage && (
-          <Form method="post" id="bulk-form" className="bulk-toolbar">
-            <input type="hidden" name="intent" value="bulk_preview" />
-            <div className="bulk-toolbar-title">
-              <strong>批量处理</strong>
-              <small>先预览哪些订单可以执行，再确认提交。</small>
-            </div>
-            <select name="actionCode" required>
-              <option value="">选择动作</option>
-              {bulkActions(loaderData.transitions).map((x) => (
-                <option key={x.action_code} value={x.action_code}>
-                  {x.action_name}
-                </option>
-              ))}
-            </select>
-            <select name="assigneeUserId">
-              <option value="">下一处理人（按动作要求）</option>
-              {loaderData.members.map((x) => (
-                <option key={x.id} value={x.id}>
-                  {x.display_name}
-                  {x.department_name ? ` · ${x.department_name}` : ""}
-                </option>
-              ))}
-            </select>
-            <button className="primary" disabled={busy}>
-              预览批量处理
-            </button>
-          </Form>
-        )}
-        {data?.preview && (
-          <BulkPreview
-            preview={data.preview}
-            actionCode={data.actionCode!}
-            assigneeUserId={data.assigneeUserId ?? ""}
-            busy={busy}
-          />
-        )}
         <div className="table-wrap order-table">
           <table>
             <thead>
               <tr>
-                <th className="select-column">
-                  <input
-                    type="checkbox"
-                    aria-label="全选当前页"
-                    onChange={(e) =>
-                      document
-                        .querySelectorAll<HTMLInputElement>(
-                          'input[name="orderIds"]',
-                        )
-                        .forEach((x) => (x.checked = e.currentTarget.checked))
-                    }
-                  />
-                </th>
                 <th>订单号</th>
                 <th>客户</th>
                 <th>业务/线路</th>
@@ -1468,15 +1327,6 @@ export default function Orders({
                 );
                 return (
                   <tr key={o.id}>
-                    <td>
-                      <input
-                        form="bulk-form"
-                        type="checkbox"
-                        name="orderIds"
-                        value={o.id}
-                        aria-label={`选择 ${o.order_number}`}
-                      />
-                    </td>
                     <td>
                       <Link to={`/admin/orders/${o.id}`}>
                         <strong>{o.order_number}</strong>
@@ -1665,54 +1515,6 @@ function ActionButton({
         </Form>
       )}
     </Modal>
-  );
-}
-function BulkPreview({
-  preview,
-  actionCode,
-  assigneeUserId,
-  busy,
-}: {
-  preview: PreviewItem[];
-  actionCode: string;
-  assigneeUserId: string;
-  busy: boolean;
-}) {
-  const valid = preview.filter((x) => x.ok);
-  return (
-    <div className="bulk-preview">
-      <header>
-        <div>
-          <strong>批量执行检查</strong>
-          <small>
-            可执行 {valid.length} 条，不可执行 {preview.length - valid.length}{" "}
-            条
-          </small>
-        </div>
-      </header>
-      <div>
-        {preview.map((x) => (
-          <p key={x.id} className={x.ok ? "ok" : "bad"}>
-            <strong>{x.orderNumber}</strong>
-            <span>{x.reason}</span>
-          </p>
-        ))}
-      </div>
-      {valid.length > 0 && (
-        <Form method="post" className="inline-form">
-          <input type="hidden" name="intent" value="bulk_execute" />
-          <input type="hidden" name="actionCode" value={actionCode} />
-          <input type="hidden" name="assigneeUserId" value={assigneeUserId} />
-          {valid.map((x) => (
-            <input key={x.id} type="hidden" name="orderIds" value={x.id} />
-          ))}
-          <input name="notes" placeholder="批量流转备注（可选）" />
-          <button className="primary" disabled={busy}>
-            确认执行 {valid.length} 条
-          </button>
-        </Form>
-      )}
-    </div>
   );
 }
 type CargoImageDraft = CargoImagePayload;
@@ -2790,12 +2592,6 @@ function uniqueSteps(transitions: OrderWorkflowTransition[]) {
   const map = new Map<string, string>([["draft", "草稿"]]);
   for (const x of transitions) map.set(x.target_step_code, x.target_step_name);
   return [...map].map(([code, name]) => ({ code, name }));
-}
-function bulkActions(transitions: OrderWorkflowTransition[]) {
-  const map = new Map<string, OrderWorkflowTransition>();
-  for (const x of transitions)
-    if (!x.action_code.startsWith("cancel_")) map.set(x.action_code, x);
-  return [...map.values()];
 }
 function GeographicFields({
   prefix,
