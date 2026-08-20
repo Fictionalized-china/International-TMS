@@ -3875,6 +3875,9 @@ function ModuleSourceDocuments({
           const ready = files.some((file) =>
             ["approved", "archived"].includes(file.review_status || ""),
           );
+          const lockedAfterApproval =
+            placement.documentCode === "consignment_letter" &&
+            ["approved", "archived"].includes(latest?.review_status || "");
           return (
             <article
               key={placement.documentCode}
@@ -3897,7 +3900,7 @@ function ModuleSourceDocuments({
               </div>
               {latest ? <div className="row-actions source-document-actions">
                 <a className="text-button" href={latest.data_url} target="_blank" rel="noreferrer">查看</a>
-                {canManageDocs ? <Modal title={`编辑文件 · ${placement.document.name}`} triggerLabel="编辑" triggerClassName="text-button">
+                {canManageDocs && !lockedAfterApproval ? <Modal title={`编辑文件 · ${placement.document.name}`} triggerLabel="编辑" triggerClassName="text-button">
                   <div className="stack">
                     <Form method="post" className="stack">
                       <input type="hidden" name="intent" value="document_metadata_update" />
@@ -3915,8 +3918,8 @@ function ModuleSourceDocuments({
                       <button className="secondary" disabled={busy}>上传替换文件</button>
                     </Form>
                   </div>
-                </Modal> : <button type="button" className="text-button" disabled>编辑</button>}
-                {canManageDocs ? <Modal title={`审核文件 · ${placement.document.name}`} triggerLabel="审核" triggerClassName="text-button" size="wide" closeSignal={reviewCloseSignal}>
+                </Modal> : <button type="button" className="text-button" disabled title={lockedAfterApproval ? "委托书已审核通过，不可编辑" : undefined}>编辑</button>}
+                {canManageDocs && !lockedAfterApproval ? <Modal title={`审核文件 · ${placement.document.name}`} triggerLabel="审核" triggerClassName="text-button" size="wide" closeSignal={reviewCloseSignal}>
                   <Form method="post" className="stack">
                     <input type="hidden" name="intent" value="document_review" />
                     <input type="hidden" name="attachmentId" value={latest.id} />
@@ -3924,7 +3927,7 @@ function ModuleSourceDocuments({
                     <label className="field"><span>审核结果</span><select name="reviewStatus" defaultValue={latest.review_status === "rejected" ? "rejected" : "approved"}><option value="approved">审核通过</option><option value="rejected">退回修改</option></select></label>
                     <button className="primary" disabled={busy}>确认审核结果</button>
                   </Form>
-                </Modal> : <button type="button" className="text-button" disabled>审核</button>}
+                </Modal> : <button type="button" className="text-button" disabled title={lockedAfterApproval ? "委托书已审核通过" : undefined}>审核</button>}
               </div> : canManageDocs ? <Form method="post" encType="multipart/form-data" className="source-document-upload-form">
                 <input type="hidden" name="intent" value="document_upload" />
                 <input type="hidden" name="documentCategory" value={placement.documentCode} />
