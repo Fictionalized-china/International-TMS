@@ -1,4 +1,3 @@
-﻿import { env } from "cloudflare:workers";
 import { useMemo, useState, type ReactNode } from "react";
 import { Form, Link, useFetcher, useNavigation, redirect } from "react-router";
 import type { Route } from "./+types/admin.order-module";
@@ -278,6 +277,11 @@ type LoadingCandidate = {
   gross_weight_kg: number;
   volume_cbm: number;
   package_count: number;
+  exit_port: string;
+  customs_location: string;
+  route_code: string;
+  domestic_warehouse_name: string;
+  overseas_warehouse_name: string;
 };
 
 const assignmentNativeFieldKeys = new Set([
@@ -303,6 +307,7 @@ async function loadModuleWorkflowStageAccess(
   orderId: string,
   moduleCode: OrderModuleCode,
 ) {
+  const { env } = await import("cloudflare:workers");
   const state = await env.DB.prepare(
     `SELECT wi.workflow_id,wi.current_step_key
      FROM workflow_instances wi
@@ -442,6 +447,7 @@ type OverseasOperation = {
 };
 
 export async function loader({ request, params }: Route.LoaderArgs) {
+  const { env } = await import("cloudflare:workers");
   const current = await requireSessionUser(request, "order.view"),
     orderId = params.orderId,
     moduleCode = params.moduleCode;
@@ -453,12 +459,6 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     .bind(orderId, current.organizationId)
     .first<OrderSummary>();
   if (!order) throw new Response("订单不存在", { status: 404 });
-  if (moduleCode === "loading" && order.business_type === "ftl") {
-    const ftlBatchId = await ensureFtlPlanningBatch(current.organizationId, orderId, current.userId);
-    if (ftlBatchId) {
-      await ensureFtlVehicleAndLoadsFromBatch(current.organizationId, orderId, ftlBatchId, current.userId);
-    }
-  }
   if (moduleCode === "customs") {
     await syncCustomsModuleFromRecords(current.organizationId, orderId, current.userId);
   }
@@ -593,20 +593,39 @@ export async function loader({ request, params }: Route.LoaderArgs) {
                   COALESCE(SUM(i.package_count*i.pieces_per_package),0) pieces,
                   COALESCE(SUM(i.package_count*i.gross_weight_per_package_kg),0) gross_weight_kg,
                   COALESCE(SUM(i.package_count*i.volume_per_package_cbm),0) volume_cbm,
-                  COUNT(DISTINCT p.id) package_count
+                  COUNT(DISTINCT p.id) package_count,
+                  o.exit_port,o.customs_location,o.route_notes route_code,
+                  ow.name overseas_warehouse_name,
+                  (SELECT w.name FROM warehouse_receipts wr
+                   JOIN shipments ws ON ws.id=wr.shipment_id
+                   JOIN warehouses w ON w.id=wr.warehouse_id
+                   WHERE wr.organization_id=o.organization_id AND ws.order_id=o.id
+                     AND wr.status='completed' AND wr.cargo_complete=1
+                   ORDER BY wr.received_at DESC LIMIT 1) domestic_warehouse_name
            FROM transport_orders o
            JOIN customers c ON c.id=o.customer_id
+           JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id
            LEFT JOIN order_cargo_items i ON i.order_id=o.id AND i.organization_id=o.organization_id
            LEFT JOIN order_cargo_packages p ON p.order_id=o.id AND p.organization_id=o.organization_id AND p.status!='cancelled'
            WHERE o.organization_id=? AND o.id<>? AND o.business_type='ltl'
              AND o.status IN ('confirmed','in_execution')
              AND o.origin_country=? AND COALESCE(o.origin_state,'')=COALESCE(?,'') AND o.origin_city=?
-             AND o.destination_country=? AND COALESCE(o.destination_state,'')=COALESCE(?,'') AND o.destination_city=?
-             AND EXISTS(
-               SELECT 1 FROM warehouse_receipts wr
-               JOIN shipments ws ON ws.id=wr.shipment_id
-               WHERE ws.order_id=o.id AND wr.status='completed' AND wr.cargo_complete=1
-             )
+              AND o.destination_country=? AND COALESCE(o.destination_state,'')=COALESCE(?,'') AND o.destination_city=?
+              AND o.exit_port=? AND o.customs_location=?
+              AND o.overseas_warehouse_id=?
+              AND EXISTS(
+                SELECT 1 FROM warehouse_receipts wr
+                JOIN shipments ws ON ws.id=wr.shipment_id
+                WHERE ws.order_id=o.id AND wr.status='completed' AND wr.cargo_complete=1
+                  AND wr.warehouse_id=(
+                    SELECT current_wr.warehouse_id
+                    FROM warehouse_receipts current_wr
+                    JOIN shipments current_ws ON current_ws.id=current_wr.shipment_id
+                    WHERE current_wr.organization_id=? AND current_ws.order_id=?
+                      AND current_wr.status='completed' AND current_wr.cargo_complete=1
+                    ORDER BY current_wr.received_at DESC LIMIT 1
+                  )
+              )
              AND EXISTS(
                SELECT 1 FROM order_cargo_packages px
                WHERE px.organization_id=o.organization_id AND px.order_id=o.id AND px.status!='cancelled'
@@ -617,7 +636,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
                WHERE bo.organization_id=o.organization_id AND bo.order_id=o.id
                  AND bo.status!='removed' AND b.status!='cancelled'
              )
-           GROUP BY o.id,o.order_number,c.name,o.status,o.order_date
+           GROUP BY o.id,o.order_number,c.name,o.status,o.order_date,ow.name
            ORDER BY o.order_date,o.order_number
            LIMIT 12`,
         )
@@ -630,6 +649,11 @@ export async function loader({ request, params }: Route.LoaderArgs) {
             order.destination_country,
             order.destination_state,
             order.destination_city,
+            order.exit_port,
+            order.customs_location,
+            order.overseas_warehouse_id,
+            current.organizationId,
+            orderId,
           )
           .all<LoadingCandidate>()
       : Promise.resolve({ results: [] as LoadingCandidate[] }),
@@ -836,6 +860,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
 }
 
 export async function action({ request, params }: Route.ActionArgs) {
+  const { env } = await import("cloudflare:workers");
   const current = await requireSessionUser(request, "order.view"),
     orderId = params.orderId,
     moduleCode = params.moduleCode,
@@ -982,12 +1007,12 @@ export async function action({ request, params }: Route.ActionArgs) {
       const routeCode = valueOf(form, "routeCode");
       if (!["ftl", "ltl"].includes(businessType))
         return { formError: "整车/拼车未从报价固定，无法继续该节点" };
-      if (!exitPort || !customsLocation || !routeCode)
-        return { formError: "请选择出境口岸、清关地和汽运线路" };
+      if (!exitPort || !customsLocation)
+        return { formError: "请选择出境口岸和清关地" };
       const referenceRows = await env.DB.prepare(
         `SELECT category,code FROM reference_data
          WHERE organization_id=? AND status='active'
-           AND category IN ('border_port','customs_place','transit_place','route')`,
+           AND category IN ('border_port','customs_place','transit_place')`,
       )
         .bind(current.organizationId)
         .all<{ category: string; code: string }>();
@@ -995,7 +1020,6 @@ export async function action({ request, params }: Route.ActionArgs) {
         referenceRows.results.some((item) => item.category === category && item.code === value);
       if (!referenceValid("border_port", exitPort)) return { formError: "请选择基础数据中启用的出境口岸" };
       if (!referenceValid("customs_place", customsLocation)) return { formError: "请选择基础数据中启用的清关地" };
-      if (!referenceValid("route", routeCode)) return { formError: "请选择基础数据中启用的汽运线路" };
       if (transitLocations && !referenceValid("transit_place", transitLocations))
         return { formError: "请选择基础数据中启用的中转地" };
       const counting = await env.DB.prepare(
@@ -1009,6 +1033,26 @@ export async function action({ request, params }: Route.ActionArgs) {
         .first<{ ready: number }>();
       if (!counting?.ready)
         return { formError: "仓库尚未完成收货清点与齐套复核，暂不能提交配载/装车参数" };
+      const linkedBatch = await env.DB.prepare(
+        `SELECT b.id,COUNT(DISTINCT bo2.order_id) order_count
+         FROM transport_batch_orders bo
+         JOIN transport_batches b ON b.id=bo.batch_id AND b.status!='cancelled'
+         LEFT JOIN transport_batch_orders bo2 ON bo2.batch_id=b.id AND bo2.status!='removed'
+         WHERE bo.organization_id=? AND bo.order_id=? AND bo.status!='removed'
+         GROUP BY b.id
+         ORDER BY b.created_at DESC
+         LIMIT 1`,
+      )
+        .bind(current.organizationId, orderId)
+        .first<{ id: string; order_count: number }>();
+      const preparationChanged =
+        exitPort !== (order.exit_port || "") ||
+        customsLocation !== (order.customs_location || "") ||
+        routeCode !== (order.route_notes || "") ||
+        transitLocations !== (order.transit_locations || "");
+      if (linkedBatch && linkedBatch.order_count > 1 && preparationChanged) {
+        return { formError: "本订单已进入正式PZ配载单。请先执行重新配载，不能只修改其中一票的线路参数" };
+      }
       const now = new Date().toISOString();
       const moduleRow = await env.DB.prepare(
         "SELECT id,current_step_code FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='loading'",
@@ -1016,7 +1060,7 @@ export async function action({ request, params }: Route.ActionArgs) {
         .bind(current.organizationId, orderId)
         .first<{ id: string; current_step_code: string | null }>();
       if (!moduleRow) return { formError: "配载选择模块尚未初始化，请刷新页面后重试" };
-      await env.DB.batch([
+      const statements = [
         env.DB.prepare(
           `UPDATE transport_orders
            SET exit_port=?,customs_location=?,transit_locations=?,route_notes=?,updated_at=?
@@ -1050,9 +1094,27 @@ export async function action({ request, params }: Route.ActionArgs) {
           crypto.randomUUID(), current.organizationId, orderId, moduleRow.id,
           "loading_route_select", "填写装车参数", moduleRow.current_step_code,
           "selecting", businessType === "ltl" ? "已选择拼车" : "已选择整车",
-          current.userId, `依据仓库实收数据确定${businessType === "ltl" ? "拼车" : "整车"}；口岸 ${exitPort}；清关地 ${customsLocation}；线路 ${routeCode}`, now,
+          current.userId, `依据仓库实收数据确定${businessType === "ltl" ? "拼车" : "整车"}；口岸 ${exitPort}；清关地 ${customsLocation}；线路 ${routeCode || "未填写"}`, now,
         ),
-      ]);
+      ];
+      if (linkedBatch) {
+        statements.push(
+          env.DB.prepare(
+            `UPDATE transport_batches
+             SET border_port=?,customs_location=?,transit_location=?,route_notes=?,updated_at=?
+             WHERE id=? AND organization_id=?`,
+          ).bind(
+            exitPort,
+            customsLocation,
+            transitLocations || null,
+            routeCode,
+            now,
+            linkedBatch.id,
+            current.organizationId,
+          ),
+        );
+      }
+      await env.DB.batch(statements);
       if (businessType === "ftl") {
         await ensureFtlPlanningBatch(current.organizationId, orderId, current.userId);
       }
@@ -2550,6 +2612,7 @@ async function syncDocumentsModuleStatus(
   actorUserId: string,
   now: string,
 ) {
+  const { env } = await import("cloudflare:workers");
   const module = await env.DB.prepare(
     "SELECT id,status,current_step_code FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='documents' AND enabled=1",
   )
@@ -2619,6 +2682,7 @@ async function syncTrackingModuleStatus(
   milestoneCode: string,
   now: string,
 ) {
+  const { env } = await import("cloudflare:workers");
   const mapping: Record<string, { step: string; name: string; progress: number; complete?: boolean }> = {
     departed: { step: "departed", name: "已登记发车", progress: 15 },
     border_arrived: { step: "transit", name: "到达出境口岸", progress: 28 },
@@ -2720,6 +2784,7 @@ async function syncTrackingModuleFromMilestones(
   orderId: string,
   actorUserId: string,
 ) {
+  const { env } = await import("cloudflare:workers");
   const latest = await env.DB.prepare(
     `SELECT milestone_code
      FROM order_tracking_milestones
@@ -2761,6 +2826,7 @@ const batchSynchronizedTrackingMilestones = new Set([
 ]);
 
 async function linkedBatchOrderIds(organizationId: string, orderId: string) {
+  const { env } = await import("cloudflare:workers");
   const batch = await env.DB.prepare(
     `SELECT batch_id
      FROM transport_batch_orders
@@ -2783,6 +2849,7 @@ async function linkedBatchOrderIds(organizationId: string, orderId: string) {
 }
 
 async function linkedBatchContext(organizationId: string, orderId: string) {
+  const { env } = await import("cloudflare:workers");
   const batch = await env.DB.prepare(
     `SELECT batch_id
      FROM transport_batch_orders
@@ -2812,13 +2879,18 @@ async function ensureFtlPlanningBatch(
   orderId: string,
   actorUserId: string,
 ) {
+  const { env } = await import("cloudflare:workers");
   const linked = await linkedBatchContext(organizationId, orderId);
   if (linked.batchId) return linked.batchId;
   const now = new Date().toISOString();
   const order = await env.DB.prepare(
     `SELECT order_number,origin_country,origin_state,origin_city,
             destination_country,destination_state,destination_city,
-            exit_port,transit_locations,current_assignee_user_id
+            exit_port,customs_location,transit_locations,route_notes,overseas_warehouse_id,current_assignee_user_id,
+            (SELECT wr.warehouse_id FROM warehouse_receipts wr
+             JOIN shipments s ON s.id=wr.shipment_id
+             WHERE s.order_id=transport_orders.id AND wr.status='completed' AND wr.cargo_complete=1
+             ORDER BY wr.received_at DESC LIMIT 1) domestic_warehouse_id
      FROM transport_orders
      WHERE organization_id=? AND id=? AND business_type='ftl'`,
   ).bind(organizationId, orderId).first<{
@@ -2830,8 +2902,12 @@ async function ensureFtlPlanningBatch(
     destination_state: string | null;
     destination_city: string;
     exit_port: string | null;
+    customs_location: string | null;
     transit_locations: string | null;
+    route_notes: string | null;
+    overseas_warehouse_id: string | null;
     current_assignee_user_id: string | null;
+    domestic_warehouse_id: string | null;
   }>();
   if (!order) return null;
   const seq = await env.DB.prepare(
@@ -2841,21 +2917,26 @@ async function ensureFtlPlanningBatch(
   const batchNumber = `FTL-${now.slice(0, 10).replaceAll("-", "")}-${String(seq?.next ?? 1).padStart(3, "0")}`;
   const origin = [order.origin_country, order.origin_state, order.origin_city].filter(Boolean).join(" ");
   const destination = [order.destination_country, order.destination_state, order.destination_city].filter(Boolean).join(" ");
+  const keyPart = (value: string | null | undefined) => (value ?? "").trim().toLocaleLowerCase();
   const routeKey = [
-    order.origin_country, order.origin_state, order.origin_city, ">",
-    order.destination_country, order.destination_state, order.destination_city,
-  ].filter(Boolean).join("|").toLowerCase();
+    `${keyPart(order.origin_country)}|${keyPart(order.origin_state)}|${keyPart(order.origin_city)}>${keyPart(order.destination_country)}|${keyPart(order.destination_state)}|${keyPart(order.destination_city)}`,
+    keyPart(order.exit_port),
+    keyPart(order.customs_location),
+    keyPart(order.domestic_warehouse_id),
+    keyPart(order.overseas_warehouse_id),
+  ].join("|");
   await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO transport_batches(
         id,organization_id,order_id,batch_number,batch_name,origin_location,destination_location,
-        status,notes,route_key,created_by_user_id,created_at,updated_at,border_port,transit_location,road_status
-      ) VALUES(?,?,?,?,?,?,?,'planning',?,?,?,?,?,?,?,'waiting_loading')`,
+        status,notes,route_key,warehouse_id,created_by_user_id,created_at,updated_at,border_port,customs_location,transit_location,route_notes,road_status
+      ) VALUES(?,?,?,?,?,?,?,'planning',?,?,?,?,?,?,?,?,?,?,'waiting_loading')`,
     ).bind(
       batchId, organizationId, orderId, batchNumber, `${order.order_number} 整车装车单`, origin, destination,
       "整车方案确认后自动建立；用于统一登记境外承运资源、装车出库和出境运输。",
-      routeKey, actorUserId || order.current_assignee_user_id || null, now, now,
-      order.exit_port || null, order.transit_locations || null,
+      routeKey, order.domestic_warehouse_id || null, actorUserId || order.current_assignee_user_id || null, now, now,
+      order.exit_port || null, order.customs_location || null, order.transit_locations || null,
+      order.route_notes || null,
     ),
     env.DB.prepare(
       `INSERT INTO transport_batch_orders(
@@ -2878,6 +2959,7 @@ async function ensureFtlVehicleAndLoads(input: {
   actorUserId: string;
   now: string;
 }) {
+  const { env } = await import("cloudflare:workers");
   const carrier = await env.DB.prepare(
     "SELECT id FROM carriers WHERE organization_id=? AND name=? AND status='active' LIMIT 1",
   )
@@ -2970,6 +3052,7 @@ async function ensureFtlVehicleAndLoadsFromBatch(
   batchId: string,
   actorUserId: string,
 ) {
+  const { env } = await import("cloudflare:workers");
   const batch = await env.DB.prepare(
     `SELECT overseas_carrier_name,overseas_vehicle_type,overseas_vehicle_plate,
             overseas_driver_name,overseas_driver_phone
@@ -3015,6 +3098,7 @@ async function ensureFtlBatchFromTracking(
   eventAt: string,
   location: string | null,
 ) {
+  const { env } = await import("cloudflare:workers");
   const linked = await linkedBatchContext(organizationId, orderId);
   const now = new Date().toISOString();
   let batchId = linked.batchId;
@@ -3096,6 +3180,7 @@ async function syncBatchTrackingMilestonesFromOrder(
   orderId: string,
   actorUserId: string,
 ) {
+  const { env } = await import("cloudflare:workers");
   const linkedOrderIds = await linkedBatchOrderIds(organizationId, orderId);
   if (linkedOrderIds.length <= 1) return;
   const placeholders = linkedOrderIds.map(() => "?").join(",");
@@ -3188,6 +3273,7 @@ async function syncOverseasOperationFromBatch(
   orderId: string,
   actorUserId: string,
 ) {
+  const { env } = await import("cloudflare:workers");
   const context = await linkedBatchContext(organizationId, orderId);
   if (!context.batchId) return;
   const batch = await env.DB.prepare(
@@ -4649,6 +4735,13 @@ function ModuleBusinessData({
     const isFtl = data.order.business_type === "ftl";
     const isLtl = data.order.business_type === "ltl";
     const hasWarehouseActuals = Boolean(data.warehouseActuals?.counting_completed);
+    const loadingPreparationReady = Boolean(
+      data.order.exit_port &&
+      data.order.customs_location &&
+      data.order.overseas_warehouse_id,
+    );
+    const referenceLabel = (items: ReferenceOption[], codeValue: string | null) =>
+      items.find((item) => item.code === codeValue)?.name || codeValue || "未确定";
     const flowLabel = isFtl ? "整车运输单" : isLtl ? "配载运输单" : "运输方案";
     const resourceReady = Boolean(
       activeBatch?.overseas_carrier_name &&
@@ -4689,7 +4782,64 @@ function ModuleBusinessData({
               <strong>暂不能进入装车：</strong>仓库尚未完成收货清点并确认货齐。
               <Link className="secondary" to={`/admin/orders/${data.order.id}/modules/warehouse#module-business-data`}>返回仓库作业</Link>
             </div>
-          ) : !isFtl && !isLtl ? (
+          ) : (
+            <div className="alert success">
+              <strong>仓库实收数据已确认</strong>
+              <span>下一步请确定出境口岸和起运地清关地，可补充运输线路说明。</span>
+            </div>
+          )}
+        </BusinessSubsection>
+        {hasWarehouseActuals && (
+          <BusinessSubsection
+            title="配载准备"
+            hint="这些参数在国内仓确认货齐后确定；拼车订单只会匹配同口岸、同清关地、同装车仓和同境外目的仓的订单。"
+          >
+            {manage && (
+              <Form method="post" className="consignment-form-grid compact loading-preparation-form">
+                <input type="hidden" name="intent" value="loading_route_select" />
+                <label className="field span-2">
+                  <span>运输线路说明</span>
+                  <textarea name="routeCode" rows={3} defaultValue={data.order.route_notes || ""} placeholder="选填，例如途经口岸、换装点或特殊行驶要求" />
+                </label>
+                <label className="field">
+                  <span>出境口岸 <b>*</b></span>
+                  <select name="exitPort" defaultValue={data.order.exit_port || ""} required>
+                    <option value="">请选择出境口岸</option>
+                    {data.loadingReferences.borderPorts.map((item) => <option key={item.code} value={item.code}>{item.name} · {item.code}</option>)}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>起运地清关地 <b>*</b></span>
+                  <select name="customsLocation" defaultValue={data.order.customs_location || ""} required>
+                    <option value="">请选择清关地</option>
+                    {data.loadingReferences.customsPlaces.map((item) => <option key={item.code} value={item.code}>{item.name} · {item.code}</option>)}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>中转地</span>
+                  <select name="transitLocations" defaultValue={data.order.transit_locations || ""}>
+                    <option value="">无中转地</option>
+                    {data.loadingReferences.transitPlaces.map((item) => <option key={item.code} value={item.code}>{item.name} · {item.code}</option>)}
+                  </select>
+                </label>
+                <label className="field span-2">
+                  <span>境外目的仓</span>
+                  <input value={data.order.overseas_warehouse_name || "未确定"} readOnly />
+                </label>
+                <button className="primary" disabled={busy}>保存配载准备参数</button>
+              </Form>
+            )}
+            {loadingPreparationReady && (
+              <div className="loading-preparation-summary">
+                <span><b>线路</b>{data.order.route_notes || "未填写"}</span>
+                <span><b>口岸</b>{referenceLabel(data.loadingReferences.borderPorts, data.order.exit_port)}</span>
+                <span><b>清关地</b>{referenceLabel(data.loadingReferences.customsPlaces, data.order.customs_location)}</span>
+                <span><b>目的仓</b>{data.order.overseas_warehouse_name}</span>
+              </div>
+            )}
+            {!loadingPreparationReady ? (
+              <div className="alert warning"><strong>出口运输准备尚未完成：</strong>选择出境口岸和清关地后才会开放后续运输分支。</div>
+            ) : !isFtl && !isLtl ? (
             <div className="alert danger">
               <strong>报价未确定车型：</strong>请返回询价报价，确认本单是整车还是拼车后再继续。
             </div>
@@ -4702,7 +4852,8 @@ function ModuleBusinessData({
               )}
             </div>
           )}
-        </BusinessSubsection>
+          </BusinessSubsection>
+        )}
         {manage && activeBatch && (
           <BusinessSubsection
             title={isFtl ? "整车运输单：车辆与承运方" : "配载运输单：境外运输资源"}
@@ -4752,7 +4903,7 @@ function ModuleBusinessData({
             )}
           </BusinessSubsection>
         )}
-        {manage && isLtl && !data.batches.some((item) => item.status !== "cancelled") && (
+        {manage && isLtl && loadingPreparationReady && !data.batches.some((item) => item.status !== "cancelled") && (
           <InlineLoadingWorkbench data={data} busy={busy} />
         )}
         {manage && isLtl && activeBatch && Number(activeBatch.vehicle_count || 0) === 0 && (
@@ -6833,7 +6984,7 @@ function InlineLoadingWorkbench({
         : current.filter((item) => item !== id),
     );
   const validationError = !selectedIds.length
-    ? "请至少再勾选一票同线路订单"
+    ? "请至少再勾选一票可配载订单"
     : null;
   const actionError = fetcher.data?.formError;
   const submitting = fetcher.state !== "idle";
@@ -6842,11 +6993,11 @@ function InlineLoadingWorkbench({
     <section className="inline-loading-workbench">
       <div className="panel-header">
         <div>
-          <h3>{context === "warehouse" ? "本订单快捷配载" : "同线路快捷配载"}</h3>
+          <h3>{context === "warehouse" ? "本订单快捷配载" : "可配载订单"}</h3>
           <p>
             {context === "warehouse"
-              ? "当前订单固定选中；默认只列出可与本订单同线路、同目的地组批的订单。"
-              : "当前订单固定选中；系统按起运国家/省州/城市与目的国家/省州/城市精确匹配。"}
+              ? "当前订单固定选中；只列出同装车仓、同口岸、同清关地和同境外目的仓的订单。"
+              : "当前订单固定选中；系统已按装车仓、口岸、清关地和境外目的仓精确匹配。"}
           </p>
         </div>
         <span className="status-pill">{data.loadingCandidates.length} 票可选</span>
@@ -6874,7 +7025,7 @@ function InlineLoadingWorkbench({
           <table>
             <thead>
               <tr>
-                <th>选择</th><th>订单</th><th>客户</th><th>接单日期</th><th>货物汇总</th><th>状态</th>
+                <th>选择</th><th>订单</th><th>客户</th><th>接单日期</th><th>配载条件</th><th>货物汇总</th><th>状态</th>
               </tr>
             </thead>
             <tbody>
@@ -6883,6 +7034,7 @@ function InlineLoadingWorkbench({
                 <td><strong>{data.order.order_number}</strong></td>
                 <td>{data.order.customer_name}</td>
                 <td>—</td>
+                <td><strong>{data.order.route_notes}</strong><small>{data.order.exit_port} · {data.order.customs_location} · {data.order.overseas_warehouse_name}</small></td>
                 <td>
                   {currentTotals.pieces} 件
                   <small>{currentTotals.weight.toFixed(2)} KG · {currentTotals.volume.toFixed(3)} CBM</small>
@@ -6903,6 +7055,7 @@ function InlineLoadingWorkbench({
                   <td><Link to={`/admin/orders/${item.id}`}>{item.order_number}</Link></td>
                   <td>{item.customer_name}</td>
                   <td>{item.order_date || "—"}</td>
+                  <td><strong>{item.route_code}</strong><small>{item.exit_port} · {item.customs_location}</small><small>{item.domestic_warehouse_name} → {item.overseas_warehouse_name}</small></td>
                   <td>
                     {item.pieces} 件
                     <small>{item.gross_weight_kg.toFixed(2)} KG · {item.volume_cbm.toFixed(3)} CBM</small>
@@ -6914,7 +7067,7 @@ function InlineLoadingWorkbench({
           </table>
         </div>
         {!data.loadingCandidates.length && (
-          <p className="empty-state">当前没有同线路且未进入其他有效批次的订单。</p>
+          <p className="empty-state">当前没有满足装车条件且未进入其他有效批次的订单。</p>
         )}
         {(actionError || validationError) && (
           <div className="inline-validation-result error" role="alert">

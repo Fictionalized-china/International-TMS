@@ -11,7 +11,7 @@ import { roadStatusLabels } from "../lib/warehouse-actual";
 import { canManageOrderModule } from "../lib/position-portal";
 import {
   buildLoadingFilter,
-  loadingRouteKey,
+  loadingCompatibilityKey,
   type LoadingFilterCondition,
   type LoadingFilterField,
   type LoadingFilterOperator,
@@ -33,7 +33,11 @@ type CandidateOrder = {
   destination_city: string;
   destination_label: string;
   exit_port: string | null;
+  customs_location: string | null;
+  route_notes: string | null;
   transit_locations: string | null;
+  overseas_warehouse_id: string | null;
+  domestic_warehouse_id: string | null;
   carrier_name: string | null;
   warehouse_name: string | null;
   operating_company: string;
@@ -108,7 +112,11 @@ const candidateCte = `WITH candidate_orders AS (
     trim(o.origin_country||' '||COALESCE(o.origin_state||' ','')||o.origin_city) origin_label,
     o.destination_country,o.destination_state,o.destination_city,
     trim(o.destination_country||' '||COALESCE(o.destination_state||' ','')||o.destination_city) destination_label,
-    o.exit_port,o.transit_locations,
+    o.exit_port,o.customs_location,o.route_notes,o.transit_locations,o.overseas_warehouse_id,
+    (SELECT wr.warehouse_id FROM warehouse_receipts wr
+      JOIN shipments rs ON rs.id=wr.shipment_id
+      WHERE rs.order_id=o.id AND wr.status='completed' AND wr.cargo_complete=1
+      ORDER BY wr.received_at DESC LIMIT 1) domestic_warehouse_id,
     COALESCE(
       (SELECT COALESCE(cr.name,a.carrier_name) FROM order_transport_assignments a LEFT JOIN carriers cr ON cr.id=a.carrier_id WHERE a.order_id=o.id AND a.status!='cancelled' ORDER BY CASE a.leg_type WHEN 'main' THEN 0 ELSE 1 END,a.created_at DESC LIMIT 1),
       (SELECT cr.name FROM booking_records br LEFT JOIN carriers cr ON cr.id=br.carrier_id WHERE br.order_id=o.id AND br.status!='cancelled' ORDER BY br.created_at DESC LIMIT 1)
@@ -161,6 +169,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     "(warehouse_required=0 OR warehouse_ready=1)",
     "package_ready=1",
     "blocking_module_count=0",
+    "NULLIF(TRIM(exit_port),'') IS NOT NULL",
+    "NULLIF(TRIM(customs_location),'') IS NOT NULL",
+    "overseas_warehouse_id IS NOT NULL",
+    "domestic_warehouse_id IS NOT NULL",
   ];
   const bindings: (string | number)[] = [current.organizationId];
   for (const condition of conditions) {
@@ -237,12 +249,31 @@ export async function action({ request }: Route.ActionArgs) {
   if (orderIds.length < 2) return { formError: "请至少选择两个待配载订单" };
   const placeholders = orderIds.map(() => "?").join(",");
   const selected = await env.DB.prepare(
-    `SELECT id,order_number,origin_country,origin_state,origin_city,destination_country,destination_state,destination_city,status,business_type FROM transport_orders WHERE organization_id=? AND id IN (${placeholders})`,
+    `SELECT o.id,o.order_number,o.origin_country,o.origin_state,o.origin_city,
+            o.destination_country,o.destination_state,o.destination_city,o.status,o.business_type,
+            o.exit_port,o.customs_location,o.route_notes,o.transit_locations,o.overseas_warehouse_id,
+            (SELECT wr.warehouse_id FROM warehouse_receipts wr
+             JOIN shipments s ON s.id=wr.shipment_id
+             WHERE s.order_id=o.id AND wr.status='completed' AND wr.cargo_complete=1
+             ORDER BY wr.received_at DESC LIMIT 1) domestic_warehouse_id
+     FROM transport_orders o
+     WHERE o.organization_id=? AND o.id IN (${placeholders})`,
   ).bind(current.organizationId, ...orderIds).all<CandidateOrder>();
   if (selected.results.length !== orderIds.length || selected.results.some((item) => item.business_type !== "ltl" || !["confirmed","in_execution"].includes(item.status)))
     return { formError: "所选订单包含无效、未审核或非零担订单" };
-  const routeKeys = new Set(selected.results.map(loadingRouteKey));
-  if (routeKeys.size !== 1) return { formError: "所选订单不是同一起运地和目的地线路，不能合并配载" };
+  const preparationMissing = selected.results.find((item) =>
+    !item.exit_port ||
+    !item.customs_location ||
+    !item.domestic_warehouse_id ||
+    !item.overseas_warehouse_id,
+  );
+  if (preparationMissing)
+    return { formError: `订单 ${preparationMissing.order_number} 尚未完成配载准备，请先确定出境口岸、清关地和装车仓` };
+  const compatibilityKeys = new Set(selected.results.map((item) => loadingCompatibilityKey({
+    ...item,
+  })));
+  if (compatibilityKeys.size !== 1)
+    return { formError: "所选订单的装车仓、线路、出境口岸、清关地或境外目的仓不一致，不能生成同一PZ配载单" };
   const occupied = await env.DB.prepare(
     `SELECT o.order_number FROM transport_batch_orders bo JOIN transport_batches b ON b.id=bo.batch_id JOIN transport_orders o ON o.id=bo.order_id WHERE bo.organization_id=? AND bo.order_id IN (${placeholders}) AND bo.status!='removed' AND b.status!='cancelled' LIMIT 1`,
   ).bind(current.organizationId, ...orderIds).first<{order_number:string}>();
@@ -277,19 +308,14 @@ export async function action({ request }: Route.ActionArgs) {
   ).bind(current.organizationId,...orderIds).all<{id:string;order_id:string;current_step_code:string|null}>();
   if (moduleRows.results.length !== orderIds.length) return { formError:"所选订单中存在未启用拼车配载的订单" };
   const now = new Date().toISOString();
-  const seq = await env.DB.prepare("SELECT COUNT(*)+1 next FROM transport_batches WHERE organization_id=?").bind(current.organizationId).first<{next:number}>();
+  const seq = await env.DB.prepare("SELECT COUNT(*)+1 next FROM transport_batches WHERE organization_id=? AND batch_number LIKE 'PZ-%'").bind(current.organizationId).first<{next:number}>();
   const batchId = crypto.randomUUID();
-  const batchNumber = `LOAD-${now.slice(0,10).replaceAll("-","")}-${String(seq?.next ?? 1).padStart(3,"0")}`;
+  const batchNumber = `PZ-${now.slice(0,10).replaceAll("-","")}-${String(seq?.next ?? 1).padStart(3,"0")}`;
   const first = selected.results[0];
   const origin = [first.origin_country,first.origin_state,first.origin_city].filter(Boolean).join(" ");
   const destination = [first.destination_country,first.destination_state,first.destination_city].filter(Boolean).join(" ");
-  const inheritedWarehouse = await env.DB.prepare(
-    `SELECT CASE WHEN COUNT(DISTINCT wr.warehouse_id)=1 THEN MIN(wr.warehouse_id) ELSE NULL END warehouse_id
-     FROM warehouse_receipts wr JOIN shipments s ON s.id=wr.shipment_id
-     WHERE wr.organization_id=? AND s.order_id IN (${placeholders})`,
-  ).bind(current.organizationId,...orderIds).first<{warehouse_id:string|null}>();
   const statements = [
-    env.DB.prepare(`INSERT INTO transport_batches(id,organization_id,order_id,batch_number,batch_name,origin_location,destination_location,planned_departure_at,planned_arrival_at,status,notes,route_key,warehouse_id,carrier_id,created_by_user_id,created_at,updated_at,border_port,transit_location) VALUES(?,?,?,?,?,?,?,NULL,NULL,'planning',?,?,?,NULL,?,?,?,?,?)`).bind(batchId,current.organizationId,orderIds[0],batchNumber,valueOf(form,"batchName")||`${origin} → ${destination}`,origin,destination,valueOf(form,"notes")||null,loadingRouteKey(first),inheritedWarehouse?.warehouse_id||null,current.userId,now,now,first.exit_port||null,first.transit_locations||null),
+    env.DB.prepare(`INSERT INTO transport_batches(id,organization_id,order_id,batch_number,batch_name,origin_location,destination_location,planned_departure_at,planned_arrival_at,status,notes,route_key,warehouse_id,carrier_id,created_by_user_id,created_at,updated_at,border_port,customs_location,transit_location,route_notes) VALUES(?,?,?,?,?,?,?,NULL,NULL,'planning',?,?,?,NULL,?,?,?,?,?,?,?)`).bind(batchId,current.organizationId,orderIds[0],batchNumber,valueOf(form,"batchName")||`${origin} → ${destination}`,origin,destination,valueOf(form,"notes")||null,loadingCompatibilityKey(first),first.domestic_warehouse_id,current.userId,now,now,first.exit_port,first.customs_location,first.transit_locations||null,first.route_notes),
     ...orderIds.map((orderId,index)=>env.DB.prepare("INSERT INTO transport_batch_orders(id,organization_id,batch_id,order_id,sequence_no,status,added_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,'planned',?,?,?)").bind(crypto.randomUUID(),current.organizationId,batchId,orderId,index+1,current.userId,now,now)),
     ...moduleRows.results.map((module)=>env.DB.prepare("UPDATE order_module_instances SET status='in_progress',current_step_code='planned',current_step_name='配载成单',progress_percent=75,started_at=COALESCE(started_at,?),completed_at=NULL,blocking_reason=NULL,updated_at=? WHERE id=?").bind(now,now,module.id)),
     ...moduleRows.results.map((module)=>env.DB.prepare("INSERT INTO order_module_history(id,organization_id,order_id,module_instance_id,action_code,action_name,from_step_code,to_step_code,to_step_name,actor_user_id,notes,occurred_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").bind(crypto.randomUUID(),current.organizationId,module.order_id,module.id,"batch_create","跨订单一键配载",module.current_step_code,"planned","配载成单",current.userId,`加入配载批次 ${batchNumber}；下一步安排承运商、车辆并按整票分配包装`,now)),
@@ -297,7 +323,7 @@ export async function action({ request }: Route.ActionArgs) {
   try { await env.DB.batch(statements); }
   catch { return { formError:"配载批次编号冲突或数据保存失败，请重试" }; }
   await Promise.all(orderIds.map((orderId)=>syncOrderWorkflowSnapshot(current.organizationId,orderId)));
-  await writeAudit({request,action:"transport.batch.cross_order.create",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{batchNumber,orderIds,routeKey:loadingRouteKey(first)}});
+  await writeAudit({request,action:"transport.batch.cross_order.create",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{batchNumber,orderIds,routeKey:loadingCompatibilityKey(first)}});
   return redirect(`/admin/loading/${batchId}?fromOrderId=${orderIds[0]}`);
 }
 

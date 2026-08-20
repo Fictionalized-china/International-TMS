@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildLoadingFilter,
+  loadingCompatibilityKey,
   loadingRouteKey,
   summarizeLoadingSelection,
 } from "./loading-workbench";
@@ -17,6 +18,25 @@ describe("loading workbench", () => {
         destination_city: "Tashkent",
       }),
     ).toBe("cn|guangdong|shenzhen>uz||tashkent");
+  });
+
+  it("includes the mandatory loading decisions in the compatibility key", () => {
+    expect(
+      loadingCompatibilityKey({
+        origin_country: "CN",
+        origin_state: "Xinjiang",
+        origin_city: "Urumqi",
+        destination_country: "UZ",
+        destination_state: null,
+        destination_city: "Tashkent",
+        exit_port: "CN-XJ-KH",
+        customs_location: "CN-XJ-KH-CUSTOMS",
+        domestic_warehouse_id: "WH-CN-01",
+        overseas_warehouse_id: "WH-UZ-01",
+      }),
+    ).toBe(
+      "cn|xinjiang|urumqi>uz||tashkent|cn-xj-kh|cn-xj-kh-customs|wh-cn-01|wh-uz-01",
+    );
   });
 
   it("builds escaped contains filters", () => {

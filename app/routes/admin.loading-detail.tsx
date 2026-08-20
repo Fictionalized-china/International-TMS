@@ -64,7 +64,7 @@ async function syncCostModuleStatusSafe(organizationId: string, orderId: string,
   await modules.syncCostsModuleStatus(organizationId, orderId, now);
 }
 
-type Batch={id:string;batch_number:string;batch_name:string;origin_location:string;destination_location:string;planned_departure_at:string|null;planned_arrival_at:string|null;status:string;road_status:string;carrier_id:string|null;warehouse_id:string|null;carrier_name:string|null;warehouse_name:string|null;border_port:string|null;transit_location:string|null;route_notes:string|null;notes:string|null;overseas_carrier_name:string|null;overseas_vehicle_type:string|null;overseas_vehicle_count:number;overseas_vehicle_plate:string|null;overseas_driver_name:string|null;overseas_driver_phone:string|null};
+type Batch={id:string;batch_number:string;batch_name:string;origin_location:string;destination_location:string;planned_departure_at:string|null;planned_arrival_at:string|null;status:string;road_status:string;carrier_id:string|null;warehouse_id:string|null;carrier_name:string|null;warehouse_name:string|null;border_port:string|null;customs_location:string|null;transit_location:string|null;route_notes:string|null;notes:string|null;overseas_carrier_name:string|null;overseas_vehicle_type:string|null;overseas_vehicle_count:number;overseas_vehicle_plate:string|null;overseas_driver_name:string|null;overseas_driver_phone:string|null};
 type BatchOrder={order_id:string;order_number:string;business_type:string|null;work_number:string;customer_name:string;cargo_description:string|null;cargo_names:string|null;pieces:number;gross_weight_kg:number;volume_cbm:number;declared_weight_kg:number;declared_volume_cbm:number;inbound_at:string|null;dispatched_packages:number;in_stock_packages:number;package_count:number;assigned_count:number;vehicle_names:string|null;overseas_status:string|null;overseas_arrival_at:string|null};
 type Vehicle={id:string;vehicle_no:string;vehicle_type:string|null;plate_number:string|null;driver_name:string|null;driver_phone:string|null;capacity_weight_kg:number;capacity_volume_cbm:number;used_weight:number;used_volume:number;loaded_orders:number;status:string};
 type Option={id:string;name:string};
@@ -148,7 +148,7 @@ const VEHICLE_TYPE_OPTIONS=[
 export async function loader({request,params}:Route.LoaderArgs){
   const current=await requireSessionUser(request,"order.view"),batchId=params.batchId;
   const fromOrderId = new URL(request.url).searchParams.get("fromOrderId");
-  const batch=await env.DB.prepare(`SELECT b.id,b.batch_number,b.batch_name,b.origin_location,b.destination_location,b.planned_departure_at,b.planned_arrival_at,b.status,b.road_status,b.carrier_id,b.warehouse_id,b.border_port,b.transit_location,b.route_notes,b.notes,b.overseas_carrier_name,b.overseas_vehicle_type,b.overseas_vehicle_count,b.overseas_vehicle_plate,b.overseas_driver_name,b.overseas_driver_phone,c.name carrier_name,w.name warehouse_name FROM transport_batches b LEFT JOIN carriers c ON c.id=b.carrier_id LEFT JOIN warehouses w ON w.id=b.warehouse_id WHERE b.id=? AND b.organization_id=?`).bind(batchId,current.organizationId).first<Batch>();
+  const batch=await env.DB.prepare(`SELECT b.id,b.batch_number,b.batch_name,b.origin_location,b.destination_location,b.planned_departure_at,b.planned_arrival_at,b.status,b.road_status,b.carrier_id,b.warehouse_id,b.border_port,b.customs_location,b.transit_location,b.route_notes,b.notes,b.overseas_carrier_name,b.overseas_vehicle_type,b.overseas_vehicle_count,b.overseas_vehicle_plate,b.overseas_driver_name,b.overseas_driver_phone,c.name carrier_name,w.name warehouse_name FROM transport_batches b LEFT JOIN carriers c ON c.id=b.carrier_id LEFT JOIN warehouses w ON w.id=b.warehouse_id WHERE b.id=? AND b.organization_id=?`).bind(batchId,current.organizationId).first<Batch>();
   if(!batch)throw new Response("配载批次不存在",{status:404});
   await synchronizeBatchTransport(current.organizationId,batchId,new Date().toISOString());
   const [orders,vehicles,carriers,warehouses,borderPorts,costAllocations,batchDocuments,orderDocuments,customsSummaries,customsDeclarations]=await Promise.all([
@@ -247,7 +247,7 @@ export async function loader({request,params}:Route.LoaderArgs){
 export async function action({request,params}:Route.ActionArgs){
   const current=await requireSessionUser(request,"order.view"),batchId=params.batchId,form=await request.formData(),intent=valueOf(form,"intent"),now=new Date().toISOString();
   if(!canManageOrderModule(current,"loading"))throw new Response("无权办理拼车配载",{status:403});
-  const batch=await env.DB.prepare("SELECT id,batch_number,status,road_status,border_port,overseas_carrier_name,overseas_vehicle_type,overseas_vehicle_count,overseas_vehicle_plate,overseas_driver_name,overseas_driver_phone FROM transport_batches WHERE id=? AND organization_id=? AND status!='cancelled'").bind(batchId,current.organizationId).first<{id:string;batch_number:string;status:string;road_status:string;border_port:string|null;overseas_carrier_name:string|null;overseas_vehicle_type:string|null;overseas_vehicle_count:number;overseas_vehicle_plate:string|null;overseas_driver_name:string|null;overseas_driver_phone:string|null}>();
+  const batch=await env.DB.prepare("SELECT id,batch_number,status,road_status,border_port,customs_location,route_notes,warehouse_id,overseas_carrier_name,overseas_vehicle_type,overseas_vehicle_count,overseas_vehicle_plate,overseas_driver_name,overseas_driver_phone FROM transport_batches WHERE id=? AND organization_id=? AND status!='cancelled'").bind(batchId,current.organizationId).first<{id:string;batch_number:string;status:string;road_status:string;border_port:string|null;customs_location:string|null;route_notes:string|null;warehouse_id:string|null;overseas_carrier_name:string|null;overseas_vehicle_type:string|null;overseas_vehicle_count:number;overseas_vehicle_plate:string|null;overseas_driver_name:string|null;overseas_driver_phone:string|null}>();
   if(!batch)return{formError:"配载批次无效"};
   if(intent==="batch_document_upload"){
     const documentCategory=valueOf(form,"documentCategory"),file=form.get("attachment");
@@ -418,13 +418,14 @@ export async function action({request,params}:Route.ActionArgs){
     }
     const overseasVehicleCount=1;
     overseasVehiclePlate=overseasVehiclePlate.toUpperCase();
+    if(!batch.border_port||!batch.customs_location||!batch.route_notes||!batch.warehouse_id)return{formError:"配载准备不完整，请返回订单补齐装车仓、线路、出境口岸和清关地"};
     if(!carrierId||!borderPort||!plannedDeparture||!plannedArrival)return{formError:"请先确定承运商、出境口岸、计划发车和计划到达时间"};
     if(!overseasCarrierName||!overseasVehicleType||!overseasVehiclePlate||!overseasDriverName||!overseasDriverPhone)return{formError:"请完整填写境外承运方、车型、车辆数、车牌号、司机姓名和电话（可从承运商车辆库 / 司机库下拉选择自动带出）"};
     if(warehouseId&&!(await env.DB.prepare("SELECT 1 FROM warehouses WHERE id=? AND organization_id=? AND status='active' AND warehouse_role IN ('domestic_collection','port')").bind(warehouseId,current.organizationId).first()))return{formError:"集货仓库无效，只能选择国内集货仓或口岸仓"};
     if(!(await env.DB.prepare("SELECT 1 FROM reference_data WHERE organization_id=? AND category='border_port' AND code=? AND status='active'").bind(current.organizationId,borderPort).first()))return{formError:"出境口岸无效"};
     const existingVehicle=await env.DB.prepare("SELECT id FROM transport_batch_vehicles WHERE batch_id=? AND organization_id=? AND status!='cancelled' ORDER BY created_at LIMIT 1").bind(batchId,current.organizationId).first<{id:string}>();
     await env.DB.batch([
-      env.DB.prepare("UPDATE transport_batches SET carrier_id=?,warehouse_id=COALESCE(?,warehouse_id),planned_departure_at=?,planned_arrival_at=?,border_port=?,transit_location=?,route_notes=?,notes=?,overseas_carrier_name=?,overseas_vehicle_type=?,overseas_vehicle_count=?,overseas_vehicle_plate=?,overseas_driver_name=?,overseas_driver_phone=?,updated_at=? WHERE id=? AND organization_id=?").bind(carrierId,warehouseId||null,plannedDeparture,plannedArrival,borderPort,valueOf(form,"transitLocation")||null,valueOf(form,"routeNotes")||null,valueOf(form,"notes")||null,overseasCarrierName,overseasVehicleType,overseasVehicleCount,overseasVehiclePlate,overseasDriverName,overseasDriverPhone,now,batchId,current.organizationId),
+      env.DB.prepare("UPDATE transport_batches SET carrier_id=?,warehouse_id=COALESCE(?,warehouse_id),planned_departure_at=?,planned_arrival_at=?,notes=?,overseas_carrier_name=?,overseas_vehicle_type=?,overseas_vehicle_count=?,overseas_vehicle_plate=?,overseas_driver_name=?,overseas_driver_phone=?,updated_at=? WHERE id=? AND organization_id=?").bind(carrierId,warehouseId||null,plannedDeparture,plannedArrival,valueOf(form,"notes")||null,overseasCarrierName,overseasVehicleType,overseasVehicleCount,overseasVehiclePlate,overseasDriverName,overseasDriverPhone,now,batchId,current.organizationId),
       existingVehicle
         ? env.DB.prepare("UPDATE transport_batch_vehicles SET carrier_id=?,vehicle_type=?,plate_number=?,driver_name=?,driver_phone=?,capacity_weight_kg=?,capacity_volume_cbm=?,status='planned',updated_at=? WHERE id=? AND organization_id=?").bind(carrierId,overseasVehicleType,overseasVehiclePlate,overseasDriverName,overseasDriverPhone,capacityWeight,capacityVolume,now,existingVehicle.id,current.organizationId)
         : env.DB.prepare("INSERT INTO transport_batch_vehicles(id,organization_id,batch_id,vehicle_no,vehicle_type,plate_number,carrier_id,driver_name,driver_phone,capacity_weight_kg,capacity_volume_cbm,status,created_at,updated_at) VALUES(?,?,?,'MAIN-1',?,?,?,?,?,?,?,'planned',?,?)").bind(crypto.randomUUID(),current.organizationId,batchId,overseasVehicleType,overseasVehiclePlate,carrierId,overseasDriverName,overseasDriverPhone,capacityWeight,capacityVolume,now,now),
@@ -690,11 +691,15 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
       {manage&&<Form method="post" className="loading-sheet-form"><input type="hidden" name="intent" value="arrangement"/>
         <label className="field"><span>承运商</span><select name="carrierId" defaultValue={loaderData.batch.carrier_id||""} required><option value="">请选择承运商</option>{loaderData.carriers.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
         <label className="field"><span>集货仓库</span><select name="warehouseId" defaultValue={loaderData.batch.warehouse_id||""}><option value="">继承当前仓库</option>{loaderData.warehouses.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-        <label className="field"><span>出境口岸</span><select name="borderPort" defaultValue={loaderData.batch.border_port||""} required><option value="">请选择出境口岸</option>{loaderData.borderPorts.map(item=><option key={item.code} value={item.code}>{item.name} · {item.code}</option>)}</select></label>
-        <Field name="transitLocation" label="中转地" defaultValue={loaderData.batch.transit_location||""}/>
+        <input type="hidden" name="borderPort" value={loaderData.batch.border_port||""}/>
+        <div className="loading-preparation-summary span-2">
+          <span><b>汽运线路</b>{loaderData.batch.route_notes||"未确定"}</span>
+          <span><b>出境口岸</b>{loaderData.batch.border_port||"未确定"}</span>
+          <span><b>起运地清关地</b>{loaderData.batch.customs_location||"未确定"}</span>
+          <span><b>中转地</b>{loaderData.batch.transit_location||"无"}</span>
+        </div>
         <Field name="plannedDeparture" label="计划发车" type="datetime-local" required defaultValue={dateTimeLocal(loaderData.batch.planned_departure_at)}/>
         <Field name="plannedArrival" label="计划到达" type="datetime-local" required defaultValue={dateTimeLocal(loaderData.batch.planned_arrival_at)}/>
-        <label className="field span-2"><span>装载要求 / 实际路线</span><input name="routeNotes" defaultValue={loaderData.batch.route_notes||""} placeholder="例如口岸、换装点、装载要求和行驶路线"/></label>
         <label className="field span-2"><span>业务备注</span><input name="notes" defaultValue={loaderData.batch.notes||""}/></label>
         <div className="form-section-title span-2"><strong>境外运输资源</strong><small>确定整车/拼车方案后立即登记；出境确认将直接继承。车辆与司机优先从承运商车辆库下拉选择，避免重复录入。</small></div>
         <OverseasResourceFields batch={loaderData.batch} carrierVehicles={loaderData.carrierVehicles} carrierDrivers={loaderData.carrierDrivers}/>

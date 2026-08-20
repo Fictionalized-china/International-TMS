@@ -69,6 +69,25 @@ export function loadingRouteKey(order: RouteIdentity) {
   return `${part(order.origin_country)}|${part(order.origin_state)}|${part(order.origin_city)}>${part(order.destination_country)}|${part(order.destination_state)}|${part(order.destination_city)}`;
 }
 
+export type LoadingCompatibilityIdentity = RouteIdentity & {
+  exit_port?: string | null;
+  customs_location?: string | null;
+  domestic_warehouse_id?: string | null;
+  overseas_warehouse_id?: string | null;
+};
+
+export function loadingCompatibilityKey(order: LoadingCompatibilityIdentity) {
+  const part = (value: string | null | undefined) =>
+    (value ?? "").trim().toLocaleLowerCase();
+  return [
+    loadingRouteKey(order),
+    part(order.exit_port),
+    part(order.customs_location),
+    part(order.domestic_warehouse_id),
+    part(order.overseas_warehouse_id),
+  ].join("|");
+}
+
 export type LoadingMeasure = {
   id?: string;
   pieces: number;
