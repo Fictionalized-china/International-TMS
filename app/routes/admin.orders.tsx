@@ -203,7 +203,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       .bind(current.organizationId)
       .all<PickupAddressOption>(),
     env.DB.prepare(
-      "SELECT q.id,q.quote_number,q.customer_id,c.name customer_name,q.road_load_type,q.currency,q.total_amount,q.origin_country,q.origin_city,q.destination_country,q.destination_city,q.transport_mode,q.service_level,q.cargo_description,q.pieces,q.gross_weight_kg,q.volume_cbm,q.notes FROM quotations q JOIN customers c ON c.id=q.customer_id WHERE q.organization_id=? AND q.status='accepted' AND NOT EXISTS(SELECT 1 FROM transport_orders o WHERE o.quotation_id=q.id) ORDER BY q.accepted_at DESC",
+      "SELECT q.id,q.quote_number,q.customer_id,c.name customer_name,q.salesperson_user_id,sales.display_name salesperson_name,q.road_load_type,q.currency,q.total_amount,q.origin_country,q.origin_city,q.destination_country,q.destination_city,q.transport_mode,q.service_level,q.cargo_description,q.pieces,q.gross_weight_kg,q.volume_cbm,q.notes FROM quotations q JOIN customers c ON c.id=q.customer_id LEFT JOIN users sales ON sales.id=q.salesperson_user_id WHERE q.organization_id=? AND q.status='accepted' AND NOT EXISTS(SELECT 1 FROM transport_orders o WHERE o.quotation_id=q.id) ORDER BY q.accepted_at DESC",
     )
       .bind(current.organizationId)
       .all<{
@@ -211,6 +211,8 @@ export async function loader({ request }: Route.LoaderArgs) {
         quote_number: string;
         customer_id: string;
         customer_name: string;
+         salesperson_user_id:string|null;
+         salesperson_name:string|null;
          road_load_type:"ftl"|"ltl";
          currency: string;
          total_amount: number;
@@ -361,10 +363,10 @@ export async function action({ request }: Route.ActionArgs) {
     assignee = null;
   const quote = quotationId
     ? await env.DB.prepare(
-        "SELECT id,quote_number,customer_id,road_load_type,currency,subtotal,tax_amount,total_amount,origin_country,origin_city,destination_country,destination_city,cargo_description,pieces,gross_weight_kg,volume_cbm,transport_mode,service_level,notes FROM quotations WHERE id=? AND organization_id=? AND status='accepted'",
+        "SELECT id,quote_number,customer_id,salesperson_user_id,road_load_type,currency,subtotal,tax_amount,total_amount,origin_country,origin_city,destination_country,destination_city,cargo_description,pieces,gross_weight_kg,volume_cbm,transport_mode,service_level,notes FROM quotations WHERE id=? AND organization_id=? AND status='accepted'",
       )
         .bind(quotationId, current.organizationId)
-        .first<Record<string, string | number>>()
+        .first<Record<string, string | number | null>>()
     : null;
   if (!quotationId) return { formError: "请选择已接受报价；订单的整车/拼车类型和应收费用必须从报价继承" };
   if (!quote) return { formError: "报价无效、尚未接受或已被其他订单使用" };
@@ -707,7 +709,7 @@ export async function action({ request }: Route.ActionArgs) {
   const id = crypto.randomUUID(),
     number = await nextDocumentNumber(current.organizationId, "order");
   await env.DB.prepare(
-    `INSERT INTO transport_orders(id,organization_id,order_number,order_date,business_nature,business_type,transport_terms,trade_terms,exit_port,overseas_warehouse_id,overseas_warehouse_address_note,transit_locations,customs_location,route_notes,customer_id,quotation_id,customer_reference,shipper_name,shipper_contact,shipper_phone,shipper_customer_id,pickup_address_id,origin_country,origin_state,origin_city,origin_address,consignee_name,consignee_contact,consignee_phone,destination_country,destination_state,destination_city,destination_address,cargo_description,pieces,gross_weight_kg,volume_cbm,transport_mode,service_level,requested_pickup_date,requested_delivery_date,cargo_ready_at,ro_agent,source,special_instructions,created_by_user_id,current_assignee_user_id,workflow_updated_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    `INSERT INTO transport_orders(id,organization_id,order_number,order_date,business_nature,business_type,transport_terms,trade_terms,exit_port,overseas_warehouse_id,overseas_warehouse_address_note,transit_locations,customs_location,route_notes,customer_id,quotation_id,customer_reference,shipper_name,shipper_contact,shipper_phone,shipper_customer_id,pickup_address_id,origin_country,origin_state,origin_city,origin_address,consignee_name,consignee_contact,consignee_phone,destination_country,destination_state,destination_city,destination_address,cargo_description,pieces,gross_weight_kg,volume_cbm,transport_mode,service_level,requested_pickup_date,requested_delivery_date,cargo_ready_at,ro_agent,source,special_instructions,created_by_user_id,salesperson_user_id,current_assignee_user_id,workflow_updated_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   )
     .bind(
       id,
@@ -756,6 +758,7 @@ export async function action({ request }: Route.ActionArgs) {
       "admin",
       instructions || null,
       current.userId,
+      quote.salesperson_user_id || null,
       assignee,
       now,
       now,
@@ -1065,7 +1068,7 @@ async function captureAcceptedQuoteSnapshot(input: {
   organizationId: string;
   orderId: string;
   quotationId: string;
-  quote: Record<string, string | number>;
+  quote: Record<string, string | number | null>;
   createdAt: string;
 }) {
   const charges = await env.DB.prepare(
@@ -1083,6 +1086,7 @@ async function captureAcceptedQuoteSnapshot(input: {
     subtotal: Number(input.quote.subtotal),
     taxAmount: Number(input.quote.tax_amount),
     totalAmount: Number(input.quote.total_amount),
+    salespersonUserId: input.quote.salesperson_user_id ? String(input.quote.salesperson_user_id) : null,
     originCountry: String(input.quote.origin_country),
     originCity: String(input.quote.origin_city),
     destinationCountry: String(input.quote.destination_country),

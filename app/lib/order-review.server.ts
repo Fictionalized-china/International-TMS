@@ -223,10 +223,10 @@ async function buildOrderReview(
   manual?:{customerDisputeSummary:string|null;reviewConclusion:string|null;improvementNotes:string|null},
 ):Promise<OrderReviewView> {
   const [order,cargo,actual,loaded,timing,financeRows,controls,exceptionRow,people] = await Promise.all([
-    db.prepare(`SELECT o.order_date,o.created_at,o.requested_delivery_date,o.completion_status,c.sales_owner_user_id,
+    db.prepare(`SELECT o.order_date,o.created_at,o.requested_delivery_date,o.completion_status,COALESCE(o.salesperson_user_id,c.sales_owner_user_id) sales_owner_user_id,
       sales.display_name salesperson,creator.display_name creator
       FROM transport_orders o JOIN customers c ON c.id=o.customer_id
-      LEFT JOIN users sales ON sales.id=c.sales_owner_user_id LEFT JOIN users creator ON creator.id=o.created_by_user_id
+      LEFT JOIN users sales ON sales.id=COALESCE(o.salesperson_user_id,c.sales_owner_user_id) LEFT JOIN users creator ON creator.id=o.created_by_user_id
       WHERE o.organization_id=? AND o.id=?`).bind(organizationId,orderId)
       .first<{order_date:string|null;created_at:string;requested_delivery_date:string|null;completion_status:OrderCompletionStatus;salesperson:string|null;creator:string|null}>(),
     db.prepare(`SELECT COALESCE(SUM(package_count*pieces_per_package),0) pieces,
