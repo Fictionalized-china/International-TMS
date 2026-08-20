@@ -109,15 +109,34 @@ export async function action({request}:Route.ActionArgs){
             AND NOT EXISTS (SELECT 1 FROM warehouse_dispatch_items xdi JOIN warehouse_dispatches xd ON xd.id=xdi.dispatch_id WHERE xdi.package_id=wsi.package_id AND xd.status!='cancelled')`).bind(dispatchId,planned.batch_id,user.organizationId,warehouse.id)
       : env.DB.prepare(`INSERT INTO warehouse_dispatch_items(id,organization_id,dispatch_id,package_id,status) SELECT lower(hex(randomblob(16))),organization_id,?,package_id,'pending' FROM warehouse_sorting_items WHERE batch_id=? AND status='verified'`).bind(dispatchId,batch.id);
     await env.DB.batch([
-      env.DB.prepare(`INSERT INTO warehouse_dispatches(id,organization_id,dispatch_number,sorting_batch_id,shipment_id,vehicle_plate,driver_name,driver_phone,carrier_name,seal_number,destination,status,notes,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'loading',?,?,?,?)`).bind(dispatchId,user.organizationId,number,batch.id,batch.shipment_id,plate,driver,phone||null,carrier||null,sealPolicy.isActive?(seal||null):null,destination,notesPolicy.isActive?(notes||null):null,user.userId,now,now),
+      env.DB.prepare(`INSERT INTO warehouse_dispatches(id,organization_id,dispatch_number,sorting_batch_id,shipment_id,vehicle_plate,driver_name,driver_phone,carrier_name,seal_number,destination,status,notes,created_by_user_id,created_at,updated_at,transport_batch_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,'loading',?,?,?,?,?)`).bind(dispatchId,user.organizationId,number,batch.id,batch.shipment_id,plate,driver,phone||null,carrier||null,sealPolicy.isActive?(seal||null):null,destination,notesPolicy.isActive?(notes||null):null,user.userId,now,now,planned.batch_id),
       itemStatement
     ]);
     await recordWarehouseProgress({organizationId:user.organizationId,orderId:batch.order_id,actorUserId:user.userId,stepCode:"loading",stepName:"按配载批次装车",actionCode:"dispatch_create",actionName:"创建批次装车任务",notes:`装车任务 ${number}；车辆 ${plate}`});
     await writeAudit({request,action:"warehouse.dispatch.create",resourceType:"warehouse_dispatch",resourceId:dispatchId,organizationId:user.organizationId,actorUserId:user.userId,metadata:{number,batchId:batch.id,orderNumber:batch.order_number,customerIdentityCode:batch.customer_identity_code,plate,driver}});
     return{success:`装车任务 ${number} 已创建`};
   }
-  const dispatchId=valueOf(form,"dispatchId"),dispatch=await env.DB.prepare(`SELECT d.id,d.shipment_id,s.order_id,d.status,d.dispatch_number,d.vehicle_plate,d.driver_name,d.destination FROM warehouse_dispatches d JOIN shipments s ON s.id=d.shipment_id WHERE d.id=? AND d.organization_id=? AND EXISTS(SELECT 1 FROM warehouse_dispatch_items wi JOIN warehouse_packages wp ON wp.id=wi.package_id WHERE wi.dispatch_id=d.id AND wp.warehouse_id=?)`).bind(dispatchId,user.organizationId,warehouse.id).first<{id:string;shipment_id:string;order_id:string;status:string;dispatch_number:string;vehicle_plate:string;driver_name:string;destination:string}>();
+  const dispatchId=valueOf(form,"dispatchId");
+  let dispatch=await env.DB.prepare(`SELECT d.id,d.shipment_id,s.order_id,d.status,d.dispatch_number,d.vehicle_plate,d.driver_name,d.driver_phone,d.carrier_name,d.destination,d.transport_batch_id FROM warehouse_dispatches d JOIN shipments s ON s.id=d.shipment_id WHERE d.id=? AND d.organization_id=? AND EXISTS(SELECT 1 FROM warehouse_dispatch_items wi JOIN warehouse_packages wp ON wp.id=wi.package_id WHERE wi.dispatch_id=d.id AND wp.warehouse_id=?)`).bind(dispatchId,user.organizationId,warehouse.id).first<{id:string;shipment_id:string;order_id:string;status:string;dispatch_number:string;vehicle_plate:string;driver_name:string;driver_phone:string|null;carrier_name:string|null;destination:string;transport_batch_id:string|null}>();
   if(!dispatch)return{formError:"装车任务不存在"};
+  if((intent==="load"||intent==="dispatch")&&(!dispatch.vehicle_plate.trim()||!dispatch.driver_name.trim()||!dispatch.carrier_name?.trim())&&dispatch.transport_batch_id){
+    const resources=await env.DB.prepare(`SELECT v.plate_number,v.driver_name,v.driver_phone,COALESCE(c.name,bc.name) carrier_name
+      FROM transport_batch_vehicles v JOIN transport_batches b ON b.id=v.batch_id
+      LEFT JOIN carriers c ON c.id=v.carrier_id LEFT JOIN carriers bc ON bc.id=b.carrier_id
+      WHERE v.batch_id=? AND v.organization_id=? AND v.status!='cancelled' ORDER BY v.created_at LIMIT 2`)
+      .bind(dispatch.transport_batch_id,user.organizationId).all<{plate_number:string|null;driver_name:string|null;driver_phone:string|null;carrier_name:string|null}>();
+    if(resources.results.length===1){
+      const resource=resources.results[0];
+      const vehiclePlate=resource.plate_number?.trim().toUpperCase()||"",driverName=resource.driver_name?.trim()||"",carrierName=resource.carrier_name?.trim()||"";
+      if(vehiclePlate&&driverName&&carrierName){
+        await env.DB.prepare("UPDATE warehouse_dispatches SET vehicle_plate=?,driver_name=?,driver_phone=?,carrier_name=?,updated_at=? WHERE id=? AND organization_id=?")
+          .bind(vehiclePlate,driverName,resource.driver_phone?.trim()||null,carrierName,now,dispatch.id,user.organizationId).run();
+        dispatch={...dispatch,vehicle_plate:vehiclePlate,driver_name:driverName,driver_phone:resource.driver_phone?.trim()||null,carrier_name:carrierName};
+      }
+    }
+  }
+  if((intent==="load"||intent==="dispatch")&&(!dispatch.vehicle_plate.trim()||!dispatch.driver_name.trim()||!dispatch.carrier_name?.trim()))
+    return{formError:"尚未补齐承运商、车辆和司机；请先在对应 PZ 配载单中完成车辆安排，再开始扫码装车"};
   const dispatchWorkflowFields=await loadOrderModuleWorkflowFields(user.organizationId,dispatch.order_id,"loading");
   const scanPolicy=workflowFieldPolicy(dispatchWorkflowFields,"loading_scan_confirmation","required");
   if(intent==="load"){
