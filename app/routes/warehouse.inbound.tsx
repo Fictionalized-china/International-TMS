@@ -153,13 +153,16 @@ export async function action({ request }: Route.ActionArgs) {
     packageType = valueOf(form, "packageType"),
     evidenceNote = valueOf(form, "evidenceNote"),
     notes = valueOf(form, "notes"),
-    cargoComplete = form.has("cargoComplete"),
-    hasException = form.has("hasException"),
+    receiptResult = valueOf(form, "receiptResult"),
+    cargoComplete = receiptResult === "ready",
+    hasException = receiptResult === "exception",
     exceptionNotes = valueOf(form, "exceptionNotes").trim(),
     now = new Date().toISOString();
   const pieces = positiveInt(form, "pieces") ?? 1,
     weight = positive(form, "weight"),
     volume = positive(form, "volume");
+  if (!["ready", "exception"].includes(receiptResult))
+    return { formError: "请先选择本次收货结果（货齐/异常）。" };
   if (hasException && !exceptionNotes)
     return { formError: "勾选异常后必须填写异常说明" };
   if (!shipmentId && !shipmentReference)
@@ -663,7 +666,9 @@ export default function WarehouseInbound({
 }: Route.ComponentProps) {
   const busy = useNavigation().state !== "idle",
     canOperate = loaderData.user.permissions.includes("warehouse.operate");
-  const [hasException, setHasException] = useState(false);
+  const [receiptResult, setReceiptResult] = useState<"" | "ready" | "exception">(
+    "",
+  );
   const locationPolicy = workflowFieldPolicy(
     loaderData.workflowFields,
     "warehouse_location",
@@ -891,20 +896,38 @@ export default function WarehouseInbound({
               <fieldset className="warehouse-receipt-result">
                 <legend>本次收货结果</legend>
                 <label className="check-field">
-                  <input type="checkbox" name="cargoComplete" />
+                  <input
+                    type="radio"
+                    name="receiptResult"
+                    value="ready"
+                    checked={receiptResult === "ready"}
+                    onChange={(event) =>
+                      event.currentTarget.checked && setReceiptResult("ready")
+                    }
+                    required={!receiptResult}
+                  />
                   <span><b>货齐</b><small>本订单全部货物已经到齐，允许进入装车或拼车。</small></span>
                 </label>
                 <label className="check-field">
-                  <input type="checkbox" name="hasException" checked={hasException} onChange={(event) => setHasException(event.currentTarget.checked)} />
+                  <input
+                    type="radio"
+                    name="receiptResult"
+                    value="exception"
+                    checked={receiptResult === "exception"}
+                    onChange={(event) =>
+                      event.currentTarget.checked && setReceiptResult("exception")
+                    }
+                    required={!receiptResult}
+                  />
                   <span><b>异常</b><small>数量、重量、包装或货况存在异常。</small></span>
                 </label>
-                {hasException && (
+                {receiptResult === "exception" && (
                   <label className="field warehouse-exception-note">
                     <span>异常说明 <b>*</b></span>
                     <textarea name="exceptionNotes" rows={3} required placeholder="请填写短少、破损、超差等具体情况" />
                   </label>
                 )}
-                <p>未勾选“货齐”时，本次作为累计收货保存，订单仍可继续收货。</p>
+                <p>选择“异常”时，本次作为累计收货保存，订单仍可继续后续收货核对。</p>
               </fieldset>
               <button
                 className="primary warehouse-primary scan-submit"

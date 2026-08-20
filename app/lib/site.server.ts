@@ -9,7 +9,7 @@ export function siteFromRequest(request: Request): Site {
 }
 
 export function siteHome(site: Site): string {
-  return site === "portal" ? "/portal" : site === "warehouse" ? "/warehouse" : "/admin";
+  return site === "portal" ? "/portal" : site === "warehouse" ? "/warehouse" : "/admin/portal";
 }
 
 export function siteLogin(site: Site): string {

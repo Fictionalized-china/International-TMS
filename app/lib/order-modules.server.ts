@@ -11,6 +11,10 @@ import {
 import { orderBusinessStages } from "./order-stage-flow";
 import { syncOrderBusinessWorkflow } from "./business-workflow.server";
 import { checkOrderLoadPlan } from "./order-readiness.server";
+import {
+  orderDocumentPlacements,
+  orderDocumentTypeLabel,
+} from "./order-documents";
 
 export type OrderModuleInstance = {
   id: string;
@@ -427,23 +431,8 @@ async function synchronizeGovernanceModules(
        WHERE organization_id=? AND order_id=? AND module_code='warehouse'`,
     ).bind(now, organizationId, orderId),
   ];
-  if (
-    order.current_assignee_user_id &&
-    ["in_execution", "completed"].includes(order.status)
-  ) {
-    statements.push(
-      env.DB.prepare(
-        "UPDATE order_module_instances SET status='completed',current_step_code='assigned',current_step_name='分配完成',progress_percent=100,assignee_user_id=?,started_at=COALESCE(started_at,?),completed_at=COALESCE(completed_at,?),updated_at=? WHERE organization_id=? AND order_id=? AND module_code='assignment' AND enabled=1",
-      ).bind(
-        order.current_assignee_user_id,
-        now,
-        now,
-        now,
-        organizationId,
-        orderId,
-      ),
-    );
-  }
+  // 任务分配节点必须由操作员在任务分配页手动分配各模块负责人并"确认派单"后完成，
+  // 系统不得因订单已有负责人而自动代完成（业务规则，见 2026-08-18 需求）。
   statements.push(
     env.DB.prepare(
       `UPDATE order_module_instances
@@ -1085,6 +1074,39 @@ async function validateModuleGate(
   ) {
     const readiness = await checkOrderLoadPlan(organizationId, orderId);
     if (!readiness.ready) throw new Error(readiness.reasons.join("；"));
+  }
+  if (moduleCode === "customs") {
+    // 报关作业强阻断：本节点文件未审核不能推进
+    if (currentStep === "documents") {
+      const customsDocCodes = orderDocumentPlacements
+        .filter((p) => p.moduleCode === "customs")
+        .filter((p) => required(p.fieldKey, p.requiredByDefault))
+        .map((p) => p.documentCode);
+      if (customsDocCodes.length) {
+        const approved = await env.DB.prepare(
+          `SELECT DISTINCT document_category FROM order_document_metadata
+           WHERE organization_id=? AND order_id=? AND review_status IN ('approved','archived')`,
+        ).bind(organizationId, orderId).all<{ document_category: string }>();
+        const approvedSet = new Set(approved.results.map((r) => r.document_category));
+        const missing = customsDocCodes.filter((c) => !approvedSet.has(c));
+        if (missing.length)
+          throw new Error(`报关资料尚未审核通过：${missing.map(orderDocumentTypeLabel).join("、")}`);
+      }
+    }
+    // 推进到"海关放行"步骤前，要求至少一张报关单已放行
+    if (currentStep === "review") {
+      const customsGate = await env.DB.prepare(
+        `SELECT COUNT(*) total,
+                SUM(CASE WHEN d.status='released' THEN 1 ELSE 0 END) released
+         FROM order_customs_declarations d
+         JOIN order_customs_records r ON r.id=d.customs_record_id AND r.organization_id=d.organization_id
+        WHERE d.organization_id=? AND d.order_id=? AND d.is_deleted=0 AND d.status!='cancelled'`,
+      ).bind(organizationId, orderId).first<{ total: number; released: number | null }>();
+      const total = customsGate?.total ?? 0;
+      const released = customsGate?.released ?? 0;
+      if (total === 0) throw new Error("请先录入至少一张有效报关单");
+      if (released !== total) throw new Error(`报关单尚未全部放行（已放行 ${released}/${total} 张）`);
+    }
   }
   if (
     moduleCode === "tracking" &&

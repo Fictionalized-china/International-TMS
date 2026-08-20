@@ -56,9 +56,10 @@ describe("order stage access", () => {
       orderModuleSequence("loading"),
     );
     expect(orderModuleSequence("loading")).toBeLessThan(
-      orderModuleSequence("documents"),
+      orderModuleSequence("customs"),
     );
-    expect(orderModuleSequence("documents")).toBeLessThan(orderModuleSequence("customs"));
+    // 文件中心不是工作流独立模块，不参与主序列（归 outbound_transport 阶段查看）
+    expect(orderModuleSequence("documents")).toBe(999);
     expect(orderModuleSequence("transport")).toBeLessThan(
       orderModuleSequence("tracking"),
     );
@@ -79,6 +80,13 @@ describe("order stage access", () => {
       orderModuleWorkflowStageAccess(
         "documents",
         "port_loading",
+        workflowSteps,
+      ).available,
+    ).toBe(false);
+    expect(
+      orderModuleWorkflowStageAccess(
+        "documents",
+        "outbound_transport",
         workflowSteps,
       ).available,
     ).toBe(true);

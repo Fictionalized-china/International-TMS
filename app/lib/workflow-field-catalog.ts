@@ -1,4 +1,4 @@
-import type { OrderModuleCode } from "./order-modules";
+﻿import type { OrderModuleCode } from "./order-modules";
 
 export type WorkflowFieldMode = "required" | "optional" | "hidden";
 export type WorkflowFieldRequirementSource = "legacy_required" | "new_system";
@@ -78,8 +78,6 @@ export const legacyRequiredWorkflowFieldKeys: ReadonlySet<string> = new Set([
   "expense_counterparty",
   "expense_quantity",
   "expense_unit_price",
-  "document_consignment_letter",
-  "document_contract",
   "document_commercial_invoice",
   "document_packing_list",
   "document_customs_document",
@@ -212,7 +210,6 @@ export const workflowFieldCatalog: WorkflowFieldCatalogItem[] = [
   field("domestic_execution", "warehouse", "warehouse_receipt_notes", "收货备注", "textarea", "optional", "仓库收货现场说明和异常备注。"),
   field("domestic_execution", "warehouse", "cargo_complete_set", "货齐状态", "select", "required", "整票货物全部到齐并完成实收登记后，国内运输阶段才结束。", "ready|货齐\nexception|异常"),
 
-  field("port_loading", "loading", "business_type", "整车/拼车选择", "select", "required", "仓库清点完成后，由操作员依据实收数据选择整车或拼车。", "ftl|整车\nltl|拼车"),
   field("port_loading", "loading", "exit_port", "出境口岸", "border_port", "required", "确定运输方案后选择实际出境口岸。"),
   field("port_loading", "loading", "customs_location", "起运地清关地", "text", "required", "确定运输方案后选择起运地清关地点。"),
   field("port_loading", "loading", "transit_locations", "中转地", "multiselect", "optional", "按顺序选择线路中转地。"),
@@ -235,14 +232,13 @@ export const workflowFieldCatalog: WorkflowFieldCatalogItem[] = [
   field("port_loading", "loading", "loading_scan_confirmation", "逐件扫码装车", "select", "required", "要求仓库按车辆逐件扫描并确认整票装车。", "1|已完成扫码装车"),
   field("port_loading", "loading", "cost_allocation", "拼车成本分摊", "text", "optional", "仅拼车订单使用；系统按1:300生成建议，人工可修改确认后才入账，只影响内部毛利和应付。"),
 
-  field("outbound_transport", "documents", "predeparture_documents", "发运前文件", "attachment", "required", "委托书、合同、发票、装箱单、报关资料等发运前文件。"),
+  field("outbound_transport", "documents", "predeparture_documents", "发运前文件", "attachment", "required", "委托书、商业发票、装箱单、报关资料等发运前文件。"),
   field("outbound_transport", "documents", "document_review", "文件审核", "select", "required", "必需文件全部审核通过或归档。", "approved|审核通过\narchived|已归档"),
   field("outbound_transport", "documents", "document_category", "文件类型", "select", "required", "上传文件所属的业务资料类型。"),
   field("outbound_transport", "documents", "document_attachment", "业务文件", "attachment", "required", "实际上传的发运前业务文件。"),
   field("outbound_transport", "documents", "document_description", "文件说明", "textarea", "optional", "文件内容、版本或特殊用途说明。"),
   field("outbound_transport", "documents", "document_public_to_customer", "客户可见", "select", "optional", "决定文件是否同步到客户门户。", "1|客户可见\n0|仅内部"),
-  field("order_creation", "consignment", "document_consignment_letter", "委托书", "attachment", "required", "客户确认运输委托后，在委托信息节点上传。"),
-  field("order_creation", "consignment", "document_contract", "合同", "attachment", "required", "业务合同或运输代理合同在委托信息节点上传。"),
+  field("order_creation", "consignment", "document_consignment_letter", "委托书", "attachment", "optional", "客户确认运输委托后，可在订单中上传委托书。"),
   field("outbound_transport", "customs", "document_commercial_invoice", "商业发票", "attachment", "required", "办理报关申报时使用的商业发票。"),
   field("outbound_transport", "customs", "document_packing_list", "装箱单", "attachment", "required", "办理报关申报时使用的装箱明细。"),
   field("outbound_transport", "customs", "document_customs_document", "报关资料", "attachment", "required", "起运地、过境地或目的地申报所需资料。"),

@@ -1,50 +1,12 @@
-import { env } from "cloudflare:workers";
+﻿import { env } from "cloudflare:workers";
 import { syncOrderWorkflowSnapshot } from "./order-modules.server";
-
-// 配载页"运输执行与跟踪"区块使用的常量与共享函数。
-// 里程碑写入、模块状态同步等 SQL 与 admin.order-module.tsx 的对应实现保持一致，
-// 以便从两条入口（订单级 / 配载级）写入的数据形态完全相同。
-
-export type BatchTrackingMilestone = {
-  code: string;
-  name: string;
-  progress: number;
-  optional?: boolean;
-};
-
-// 5 个主节点 + 2 个可选节点（换装 / 转关）
-export const BATCH_TRACKING_MILESTONES: BatchTrackingMilestone[] = [
-  { code: "border_arrived", name: "到达出境口岸", progress: 28 },
-  { code: "exported", name: "出境", progress: 40 },
-  { code: "transloaded", name: "换装", progress: 46, optional: true },
-  { code: "transit_customs", name: "转关", progress: 52, optional: true },
-  { code: "foreign_entered", name: "国外入境", progress: 64 },
-  { code: "customs_cleared", name: "目的地清关完成", progress: 82 },
-  { code: "station_arrived", name: "到达境外目的仓", progress: 100 },
-];
-
-export const BATCH_TRACKING_MAIN_CODES = [
-  "border_arrived",
-  "exported",
-  "foreign_entered",
-  "customs_cleared",
-  "station_arrived",
-];
-
-export const BATCH_TRACKING_OPTIONAL_CODES = ["transloaded", "transit_customs"];
-
-// 顺序门禁：登记某节点前，批次内每个订单都必须已存在其前置节点
-// 与 admin.order-module.tsx 的 requiredPrevious 一致
-export const BATCH_TRACKING_REQUIRED_PREVIOUS: Record<string, string[]> = {
-  exported: ["border_arrived"],
-  transloaded: ["exported"],
-  transit_customs: ["exported"],
-  foreign_entered: ["exported"],
-  customs_cleared: ["foreign_entered"],
-  station_arrived: ["customs_cleared"],
-};
-
-// 这些节点登记后会同步到同批次所有子订单
+import {
+  type BatchTrackingMilestone,
+  BATCH_TRACKING_MILESTONES,
+  BATCH_TRACKING_MAIN_CODES,
+  BATCH_TRACKING_OPTIONAL_CODES,
+  BATCH_TRACKING_REQUIRED_PREVIOUS,
+} from "./batch-tracking.shared";
 export const BATCH_SYNCED_TRACKING_MILESTONES = new Set([
   "departed",
   "border_arrived",
@@ -56,22 +18,29 @@ export const BATCH_SYNCED_TRACKING_MILESTONES = new Set([
   "station_arrived",
 ]);
 
-// milestone_code -> (step, name, progress) 映射；与 order-module.tsx syncTrackingModuleStatus 内联
 const MILESTONE_MODULE_MAPPING: Record<
   string,
   { step: string; name: string; progress: number; complete?: boolean }
 > = {
-  departed: { step: "departed", name: "已登记发车", progress: 15 },
-  border_arrived: { step: "transit", name: "到达出境口岸", progress: 28 },
-  exported: { step: "transit", name: "已出境", progress: 40 },
-  transloaded: { step: "transit", name: "已换装", progress: 46 },
-  transit_customs: { step: "transit", name: "转关处理中", progress: 52 },
-  foreign_entered: { step: "transit", name: "国外已入境", progress: 64 },
-  customs_cleared: { step: "customs_cleared", name: "目的地清关完成", progress: 82 },
-  station_arrived: { step: "arrived", name: "到达境外目的仓", progress: 100, complete: true },
+  departed: { step: "departed", name: "离港确认", progress: 15 },
+  border_arrived: { step: "transit", name: "口岸到达", progress: 28 },
+  exported: { step: "transit", name: "出境", progress: 40 },
+  transloaded: { step: "transit", name: "换装", progress: 46 },
+  transit_customs: { step: "transit", name: "转关", progress: 52 },
+  foreign_entered: { step: "transit", name: "海外入境", progress: 64 },
+  customs_cleared: {
+    step: "customs_cleared",
+    name: "目的地清关",
+    progress: 82,
+  },
+  station_arrived: {
+    step: "arrived",
+    name: "目的仓到达",
+    progress: 100,
+    complete: true,
+  },
 };
 
-// 进度权重，用于 SQL 内的 CASE 排序
 const MILESTONE_PROGRESS_WEIGHTS: Record<string, number> = {
   departed: 15,
   border_arrived: 28,
@@ -83,9 +52,16 @@ const MILESTONE_PROGRESS_WEIGHTS: Record<string, number> = {
   station_arrived: 100,
 };
 
-/**
- * 取批次内全部子订单 ID（按 sequence_no 排序，排除已移除的）
- */
+const CHUNK_SIZE = 600;
+
+function chunkArray<T>(values: T[], size = CHUNK_SIZE): T[][] {
+  if (!values.length) return [];
+  const chunks: T[][] = [];
+  for (let i = 0; i < values.length; i += size) {
+    chunks.push(values.slice(i, i + size));
+  }
+  return chunks;
+}
 export async function getBatchOrderIds(
   organizationId: string,
   batchId: string,
@@ -100,9 +76,6 @@ export async function getBatchOrderIds(
   return result.results.map((item) => item.order_id);
 }
 
-/**
- * 取批次主车辆的车牌（第一个未取消的车辆；优先取已录车牌的那条）
- */
 export async function getBatchMainVehiclePlate(
   organizationId: string,
   batchId: string,
@@ -118,10 +91,6 @@ export async function getBatchMainVehiclePlate(
   return row?.plate_number || null;
 }
 
-/**
- * 校验"前置节点"是否已存在于批次内全部子订单。
- * 返回缺失前置的订单数与示例订单号；全部满足时返回 null。
- */
 export async function validateBatchTrackingRequiredPrevious(
   organizationId: string,
   orderIds: string[],
@@ -129,32 +98,36 @@ export async function validateBatchTrackingRequiredPrevious(
 ): Promise<{ missingOrders: number; sampleOrderNumber: string | null } | null> {
   const required = BATCH_TRACKING_REQUIRED_PREVIOUS[milestoneCode];
   if (!required || required.length === 0 || !orderIds.length) return null;
-  const placeholders = orderIds.map(() => "?").join(",");
-  // 任一前置节点缺失的订单 = 这些订单在该 code 上没有任何记录
-  const missingRows = await env.DB.prepare(
-    `SELECT o.order_number
-     FROM transport_orders o
-     WHERE o.organization_id=? AND o.id IN (${placeholders})
-       AND NOT EXISTS(
-         SELECT 1 FROM order_tracking_milestones m
-         WHERE m.organization_id=o.organization_id AND m.order_id=o.id
-           AND m.milestone_code IN (${required.map(() => "?").join(",")})
-       )`,
-  )
-    .bind(organizationId, ...orderIds, ...required)
-    .all<{ order_number: string }>();
-  if (!missingRows.results.length) return null;
-  return {
-    missingOrders: missingRows.results.length,
-    sampleOrderNumber: missingRows.results[0].order_number,
-  };
+  const requiredPlaceholders = required.map(() => "?").join(",");
+
+  let missingOrders = 0;
+  let sampleOrderNumber: string | null = null;
+
+  for (const chunk of chunkArray(orderIds)) {
+    const placeholders = chunk.map(() => "?").join(",");
+    const missingRows = await env.DB.prepare(
+      `SELECT o.order_number
+       FROM transport_orders o
+       WHERE o.organization_id=? AND o.id IN (${placeholders})
+         AND NOT EXISTS(
+           SELECT 1 FROM order_tracking_milestones m
+           WHERE m.organization_id=o.organization_id AND m.order_id=o.id
+             AND m.milestone_code IN (${requiredPlaceholders})
+         )`,
+    )
+      .bind(organizationId, ...chunk, ...required)
+      .all<{ order_number: string }>();
+
+    if (missingRows.results.length) {
+      missingOrders += missingRows.results.length;
+      sampleOrderNumber ??= missingRows.results[0].order_number;
+    }
+  }
+
+  if (missingOrders === 0) return null;
+  return { missingOrders, sampleOrderNumber };
 }
 
-/**
- * 给批次内全部子订单幂等写入一条追踪里程碑。
- * 同一订单同一 code + event_at 只写一次（与 order-module.tsx 一致）。
- * 返回实际插入的行数（如已存在则不重复写）。
- */
 export async function insertTrackingMilestoneForBatchOrders(params: {
   organizationId: string;
   orderIds: string[];
@@ -182,9 +155,13 @@ export async function insertTrackingMilestoneForBatchOrders(params: {
     createdAt,
   } = params;
   if (!orderIds.length) return 0;
+
   const statements = orderIds.map((orderId) =>
     env.DB.prepare(
-      `INSERT INTO order_tracking_milestones(id,organization_id,order_id,milestone_code,milestone_name,event_at,location,vehicle_reference,notes,visible_to_customer,created_by_user_id,created_at)
+      `INSERT INTO order_tracking_milestones(
+        id,organization_id,order_id,milestone_code,milestone_name,event_at,
+        location,vehicle_reference,notes,visible_to_customer,created_by_user_id,created_at
+      )
        SELECT ?,?,?,?,?,?,?,?,?,?,?,?
        WHERE NOT EXISTS(
          SELECT 1 FROM order_tracking_milestones
@@ -210,15 +187,9 @@ export async function insertTrackingMilestoneForBatchOrders(params: {
     ),
   );
   await env.DB.batch(statements);
-  // 没有精确的"插入了几行"返回值（NOT EXISTS 在 SQLite 中无法获知实际命中），
-  // 这里只返回订单数作为上界。
   return orderIds.length;
 }
 
-/**
- * 对应 admin.order-module.tsx 的 syncTrackingModuleStatus。
- * 根据最新里程碑推进 tracking 模块实例状态与历史记录。
- */
 export async function syncTrackingModuleStatusForOrder(
   organizationId: string,
   orderId: string,
@@ -228,6 +199,7 @@ export async function syncTrackingModuleStatusForOrder(
 ): Promise<void> {
   const next = MILESTONE_MODULE_MAPPING[milestoneCode];
   if (!next) return;
+
   const recorded = await env.DB.prepare(
     `SELECT MAX(CASE milestone_code
        WHEN 'departed' THEN 15
@@ -244,6 +216,7 @@ export async function syncTrackingModuleStatusForOrder(
   )
     .bind(organizationId, orderId)
     .first<{ progress: number | null }>();
+
   const effectiveProgress = Math.max(next.progress, recorded?.progress ?? 0);
   const effectiveComplete = effectiveProgress >= 100 || Boolean(next.complete);
   const effectiveStep =
@@ -254,14 +227,16 @@ export async function syncTrackingModuleStatusForOrder(
         : effectiveProgress >= 28
           ? "transit"
           : next.step;
+
   const effectiveName =
     effectiveProgress >= 100
-      ? "到达境外目的仓"
+      ? "目的仓到达"
       : effectiveProgress >= 82
-        ? "目的地清关完成"
+        ? "目的地清关"
         : effectiveProgress >= 40
-          ? "出境运输中"
+          ? "出境"
           : next.name;
+
   const module = await env.DB.prepare(
     "SELECT id,status,current_step_code,progress_percent FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='tracking' AND enabled=1",
   )
@@ -273,9 +248,11 @@ export async function syncTrackingModuleStatusForOrder(
       progress_percent: number;
     }>();
   if (!module) return;
+
   if (module.status === "completed" && module.current_step_code === effectiveStep) return;
   if ((module.progress_percent ?? 0) > effectiveProgress && module.current_step_code === effectiveStep)
     return;
+
   await env.DB.batch([
     env.DB.prepare(
       `UPDATE order_module_instances
@@ -303,25 +280,19 @@ export async function syncTrackingModuleStatusForOrder(
       orderId,
       module.id,
       "tracking_status_sync",
-      "保存运输节点后自动同步",
+      "tracking status sync",
       module.current_step_code,
       effectiveStep,
       effectiveName,
       actorUserId,
-      `运输节点：${milestoneCode}`,
+      `tracking milestone: ${milestoneCode}`,
       now,
     ),
   ]);
+
   await syncOrderWorkflowSnapshot(organizationId, orderId);
 }
 
-/**
- * 对应 admin.order-module.tsx 的 syncBatchStateFromTrackingMilestones。
- * 根据批次内最新里程碑推进 transport_batches / 车辆 / 订单的状态。
- * 这里仅更新 transport_batches 主状态和 tracking 模块实例的进度——
- * 与原函数相比有意简化（不动 transport_batch_vehicles 的 status），避免与
- * exit_confirm 路径重复触发车辆状态变更。
- */
 export async function syncBatchRoadStatusFromTracking(
   organizationId: string,
   batchId: string,
@@ -329,75 +300,108 @@ export async function syncBatchRoadStatusFromTracking(
   now: string,
 ): Promise<void> {
   if (!orderIds.length) return;
-  const placeholders = orderIds.map(() => "?").join(",");
-  const latest = await env.DB.prepare(
-    `SELECT milestone_code,event_at,location
-     FROM order_tracking_milestones
-     WHERE organization_id=? AND order_id IN (${placeholders})
-       AND milestone_code IN ('departed','border_arrived','exported','transloaded','transit_customs','foreign_entered','customs_cleared','station_arrived')
-     ORDER BY CASE milestone_code
-       WHEN 'station_arrived' THEN 100
-       WHEN 'customs_cleared' THEN 82
-       WHEN 'foreign_entered' THEN 64
-       WHEN 'transit_customs' THEN 52
-       WHEN 'transloaded' THEN 46
-       WHEN 'exported' THEN 40
-       WHEN 'border_arrived' THEN 28
-       WHEN 'departed' THEN 15
-       ELSE 0 END DESC,
-       event_at DESC, created_at DESC
-     LIMIT 1`,
-  )
-    .bind(organizationId, ...orderIds)
-    .first<{ milestone_code: string; event_at: string; location: string | null }>();
-  if (!latest) return;
+
+  const latestByChunk: Array<{ milestone_code: string; event_at: string; location: string | null }> = [];
+  for (const chunk of chunkArray(orderIds)) {
+    const placeholders = chunk.map(() => "?").join(",");
+    const latest = await env.DB.prepare(
+      `SELECT milestone_code,event_at,location
+       FROM order_tracking_milestones
+       WHERE organization_id=? AND order_id IN (${placeholders})
+         AND milestone_code IN ('departed','border_arrived','exported','transloaded','transit_customs','foreign_entered','customs_cleared','station_arrived')
+       ORDER BY CASE milestone_code
+         WHEN 'station_arrived' THEN 100
+         WHEN 'customs_cleared' THEN 82
+         WHEN 'foreign_entered' THEN 64
+         WHEN 'transit_customs' THEN 52
+         WHEN 'transloaded' THEN 46
+         WHEN 'exported' THEN 40
+         WHEN 'border_arrived' THEN 28
+         WHEN 'departed' THEN 15
+         ELSE 0 END DESC,
+         event_at DESC, created_at DESC
+       LIMIT 1`,
+    )
+      .bind(organizationId, ...chunk)
+      .first<{ milestone_code: string; event_at: string; location: string | null }>();
+    if (latest) {
+      latestByChunk.push(latest);
+    }
+  }
+
+  if (!latestByChunk.length) return;
+  const latestMilestone = latestByChunk.reduce((prev, curr) => {
+    const prevWeight = MILESTONE_PROGRESS_WEIGHTS[prev.milestone_code] ?? 0;
+    const currWeight = MILESTONE_PROGRESS_WEIGHTS[curr.milestone_code] ?? 0;
+    if (currWeight > prevWeight) return curr;
+    if (currWeight < prevWeight) return prev;
+    return curr.event_at > prev.event_at ? curr : prev;
+  });
 
   const batch = await env.DB.prepare(
-    "SELECT id,road_status FROM transport_batches WHERE id=? AND organization_id=? AND status!='cancelled'",
+    "SELECT id,status,road_status FROM transport_batches WHERE id=? AND organization_id=? AND status!='cancelled'",
   )
     .bind(batchId, organizationId)
-    .first<{ id: string; road_status: string }>();
+    .first<{ id: string; status: string; road_status: string }>();
   if (!batch) return;
-  // 若批次已到境外仓或更后阶段，不再因新里程碑回退 road_status
-  if (["overseas_arrived", "waiting_pickup", "pickup_completed"].includes(batch.road_status)) return;
+  if (["overseas_arrived", "waiting_pickup", "pickup_completed"].includes(batch.road_status))
+    return;
 
-  const progress = MILESTONE_PROGRESS_WEIGHTS[latest.milestone_code] ?? 0;
-  // 仅当里程碑推进到 transit 阶段（progress>=28）时，把批次置为 outbound_in_transit
-  // 若已达 station_arrived（progress=100），把批次置为 overseas_arrived
+  const progress = MILESTONE_PROGRESS_WEIGHTS[latestMilestone.milestone_code] ?? 0;
+  let exportedAt: string | null = null;
+  let borderLocation: string | null = null;
+  for (const chunk of chunkArray(orderIds)) {
+    const placeholders = chunk.map(() => "?").join(",");
+    const transition = await env.DB.prepare(
+      `SELECT
+         MAX(CASE WHEN milestone_code='exported' THEN event_at END) exported_at,
+         MAX(CASE WHEN milestone_code IN ('border_arrived','exported') THEN location END) border_location
+       FROM order_tracking_milestones
+       WHERE organization_id=? AND order_id IN (${placeholders})`,
+    )
+      .bind(organizationId, ...chunk)
+      .first<{ exported_at: string | null; border_location: string | null }>();
+    if (transition?.exported_at && (!exportedAt || transition.exported_at > exportedAt)) {
+      exportedAt = transition.exported_at;
+    }
+    borderLocation ??= transition?.border_location || null;
+  }
   const targetRoadStatus =
     progress >= 100
       ? "overseas_arrived"
-      : progress >= 28
+      : progress >= 40
         ? "outbound_in_transit"
         : batch.road_status;
+  const targetBatchStatus = progress >= 100 ? "arrived" : progress >= 40 ? "departed" : batch.status;
 
   const statements = [
     env.DB.prepare(
       `UPDATE transport_batches
-       SET road_status=?, actual_departure_at=COALESCE(actual_departure_at,?),
-           border_port=COALESCE(NULLIF(?,''), border_port), updated_at=?
+       SET status=?, road_status=?, actual_departure_at=COALESCE(actual_departure_at,?),
+            border_port=COALESCE(NULLIF(?,''), border_port), updated_at=?
        WHERE id=? AND organization_id=? AND road_status NOT IN ('overseas_arrived','waiting_pickup','pickup_completed')`,
-    ).bind(targetRoadStatus, latest.event_at, latest.location || "", now, batchId, organizationId),
-    // transport_batch_orders 与 tracking 模块实例同步（仅当 progress>=28 时）
-    env.DB.prepare(
-      `UPDATE transport_batch_orders SET status='departed', updated_at=?
-       WHERE batch_id=? AND organization_id=? AND status NOT IN ('removed','arrived','picked_up')`,
-    ).bind(now, batchId, organizationId),
-    env.DB.prepare(
-      `UPDATE order_module_instances
-       SET status='in_progress', current_step_code='transit', current_step_name='出境运输中',
-           progress_percent=50, started_at=COALESCE(started_at,?), blocking_reason=NULL, updated_at=?
-       WHERE organization_id=? AND module_code='tracking' AND enabled=1
-         AND COALESCE(progress_percent,0)<50 AND order_id IN (${placeholders})`,
-    ).bind(now, now, organizationId, ...orderIds),
+    ).bind(
+      targetBatchStatus,
+      targetRoadStatus,
+      exportedAt,
+      borderLocation || "",
+      now,
+      batchId,
+      organizationId,
+    ),
   ];
+  if (progress >= 40) {
+    statements.push(
+      env.DB.prepare(
+        `UPDATE transport_batch_orders
+         SET status=?, updated_at=?
+         WHERE batch_id=? AND organization_id=? AND status NOT IN ('removed','picked_up')`,
+      ).bind(progress >= 100 ? "arrived" : "departed", now, batchId, organizationId),
+    );
+  }
   await env.DB.batch(statements);
 }
 
-/**
- * 对每票订单的最新 shipment 写一条 shipment_event，并把 shipments.current_location 推进。
- * 不存在 shipment 时跳过。
- */
 export async function recordShipmentEventForBatchOrders(params: {
   organizationId: string;
   orderIds: string[];
@@ -419,26 +423,39 @@ export async function recordShipmentEventForBatchOrders(params: {
     createdAt,
   } = params;
   if (!orderIds.length) return;
-  const placeholders = orderIds.map(() => "?").join(",");
-  const shipments = await env.DB.prepare(
-    `SELECT s.id, s.customer_id FROM shipments s
-     WHERE s.organization_id=? AND s.id IN (
-       SELECT id FROM shipments WHERE order_id IN (${placeholders})
-       ORDER BY created_at DESC
-     )`,
-  )
-    .bind(organizationId, ...orderIds)
-    .all<{ id: string; customer_id: string | null }>();
-  if (!shipments.results.length) return;
-  const statements = shipments.results.flatMap((shipment) => [
+
+  const shipmentIds = new Set<string>();
+  for (const chunk of chunkArray(orderIds)) {
+    const placeholders = chunk.map(() => "?").join(",");
+    const shipmentRows = await env.DB.prepare(
+      `SELECT s.id
+       FROM shipments s
+       WHERE s.organization_id=? AND s.order_id IN (${placeholders})
+         AND s.id=(
+           SELECT latest.id FROM shipments latest
+           WHERE latest.organization_id=s.organization_id AND latest.order_id=s.order_id
+           ORDER BY COALESCE(latest.updated_at,latest.created_at) DESC,latest.created_at DESC
+           LIMIT 1
+         )`,
+    )
+      .bind(organizationId, ...chunk)
+      .all<{ id: string }>();
+    for (const row of shipmentRows.results) {
+      shipmentIds.add(row.id);
+    }
+  }
+
+  const ids = [...shipmentIds];
+  if (!ids.length) return;
+  const statements = ids.flatMap((shipmentId) => [
     env.DB.prepare(
       "UPDATE shipments SET status=?, current_location=?, updated_at=? WHERE id=? AND organization_id=?",
-    ).bind(status, location, createdAt, shipment.id, organizationId),
+    ).bind(status, location, createdAt, shipmentId, organizationId),
     env.DB.prepare(
       "INSERT INTO shipment_events(id,shipment_id,status,location,description,event_at,visible_to_customer,created_by_user_id,created_at) VALUES(?,?,?,?,?,?,1,?,?)",
     ).bind(
       crypto.randomUUID(),
-      shipment.id,
+      shipmentId,
       status,
       location,
       description,
@@ -450,25 +467,16 @@ export async function recordShipmentEventForBatchOrders(params: {
   await env.DB.batch(statements);
 }
 
-/**
- * 反向同步：把批次内任一订单已登记的同步类里程碑幂等复制到其他订单。
- * 用于 loader 打开配载页时保证子订单里程碑状态一致。
- */
 export async function syncBatchTrackingMilestonesFromBatch(
   organizationId: string,
   orderIds: string[],
   actorUserId: string,
 ): Promise<void> {
   if (orderIds.length <= 1) return;
-  const placeholders = orderIds.map(() => "?").join(",");
-  const milestones = await env.DB.prepare(
-    `SELECT milestone_code, milestone_name, event_at, location, vehicle_reference, notes, visible_to_customer, created_at
-     FROM order_tracking_milestones
-     WHERE organization_id=? AND order_id IN (${placeholders})
-     ORDER BY event_at, created_at`,
-  )
-    .bind(organizationId, ...orderIds)
-    .all<{
+
+  const uniqueMilestones = new Map<
+    string,
+    {
       milestone_code: string;
       milestone_name: string;
       event_at: string;
@@ -477,53 +485,124 @@ export async function syncBatchTrackingMilestonesFromBatch(
       notes: string | null;
       visible_to_customer: number;
       created_at: string;
-    }>();
-  const shared = milestones.results.filter((item) =>
-    BATCH_SYNCED_TRACKING_MILESTONES.has(item.milestone_code),
-  );
-  if (!shared.length) return;
-  const now = new Date().toISOString();
-  const statements = orderIds.flatMap((targetOrderId) =>
-    shared.map((milestone) =>
-      env.DB.prepare(
-        `INSERT INTO order_tracking_milestones(id,organization_id,order_id,milestone_code,milestone_name,event_at,location,vehicle_reference,notes,visible_to_customer,created_by_user_id,created_at)
-         SELECT ?,?,?,?,?,?,?,?,?,?,?,?
-         WHERE NOT EXISTS(
-           SELECT 1 FROM order_tracking_milestones
-           WHERE organization_id=? AND order_id=? AND milestone_code=? AND event_at=?
-         )`,
-      ).bind(
-        crypto.randomUUID(),
-        organizationId,
-        targetOrderId,
-        milestone.milestone_code,
-        milestone.milestone_name,
-        milestone.event_at,
-        milestone.location,
-        milestone.vehicle_reference,
-        milestone.notes,
-        milestone.visible_to_customer,
-        actorUserId,
-        milestone.created_at || now,
-        organizationId,
-        targetOrderId,
-        milestone.milestone_code,
-        milestone.event_at,
-      ),
-    ),
-  );
-  await env.DB.batch(statements);
-  const latestByCode = new Map<string, (typeof shared)[number]>();
-  for (const milestone of shared) latestByCode.set(milestone.milestone_code, milestone);
-  for (const targetOrderId of orderIds) {
-    for (const milestone of latestByCode.values()) {
-      await syncTrackingModuleStatusForOrder(
-        organizationId,
-        targetOrderId,
-        milestone.milestone_code,
-        actorUserId,
-        now,
-      );
     }
+  >();
+
+  for (const chunk of chunkArray(orderIds)) {
+    const placeholders = chunk.map(() => "?").join(",");
+    const milestones = await env.DB.prepare(
+      `SELECT milestone_code, milestone_name, event_at, location, vehicle_reference, notes, visible_to_customer, created_at
+       FROM order_tracking_milestones
+       WHERE organization_id=? AND order_id IN (${placeholders})
+       ORDER BY event_at, created_at`,
+    )
+      .bind(organizationId, ...chunk)
+      .all<{
+        milestone_code: string;
+        milestone_name: string;
+        event_at: string;
+        location: string | null;
+        vehicle_reference: string | null;
+        notes: string | null;
+        visible_to_customer: number;
+        created_at: string;
+      }>();
+
+    for (const item of milestones.results) {
+      if (!BATCH_SYNCED_TRACKING_MILESTONES.has(item.milestone_code)) continue;
+      const key = `${item.milestone_code}|${item.event_at}|${item.location ?? ""}|${item.vehicle_reference ?? ""}|${item.notes ?? ""}|${item.visible_to_customer}`;
+      if (!uniqueMilestones.has(key)) {
+        uniqueMilestones.set(key, item);
+      }
+    }
+  }
+
+  const sharedMilestones = [...uniqueMilestones.values()];
+  if (!sharedMilestones.length) return;
+
+  const latestByCode = new Map<
+    string,
+    {
+      milestone_code: string;
+      milestone_name: string;
+      event_at: string;
+      location: string | null;
+      vehicle_reference: string | null;
+      notes: string | null;
+      visible_to_customer: number;
+      created_at: string;
+    }
+  >();
+  for (const milestone of sharedMilestones) {
+    const latest = latestByCode.get(milestone.milestone_code);
+    if (!latest) {
+      latestByCode.set(milestone.milestone_code, milestone);
+      continue;
+    }
+    if (milestone.event_at > latest.event_at) {
+      latestByCode.set(milestone.milestone_code, milestone);
+      continue;
+    }
+    if (
+      milestone.event_at === latest.event_at &&
+      milestone.created_at > latest.created_at
+    ) {
+      latestByCode.set(milestone.milestone_code, milestone);
+    }
+  }
+
+  for (const chunk of chunkArray(orderIds)) {
+    const statements = chunk.flatMap((targetOrderId) =>
+      sharedMilestones.map((milestone) =>
+        env.DB.prepare(
+          `INSERT INTO order_tracking_milestones(
+             id,organization_id,order_id,milestone_code,milestone_name,event_at,
+             location,vehicle_reference,notes,visible_to_customer,created_by_user_id,created_at
+           )
+           SELECT ?,?,?,?,?,?,?,?,?,?,?,?
+           WHERE NOT EXISTS(
+             SELECT 1 FROM order_tracking_milestones
+             WHERE organization_id=? AND order_id=? AND milestone_code=? AND event_at=?
+           )`,
+        ).bind(
+          crypto.randomUUID(),
+          organizationId,
+          targetOrderId,
+          milestone.milestone_code,
+          milestone.milestone_name,
+          milestone.event_at,
+          milestone.location,
+          milestone.vehicle_reference,
+          milestone.notes,
+          milestone.visible_to_customer,
+          actorUserId,
+          milestone.created_at || new Date().toISOString(),
+          organizationId,
+          targetOrderId,
+          milestone.milestone_code,
+          milestone.event_at,
+        ),
+      ),
+    );
+    if (statements.length) {
+      await env.DB.batch(statements);
+    }
+  }
+
+  const latestMilestones = [...latestByCode.values()];
+  for (const chunk of chunkArray(orderIds)) {
+    await Promise.all(
+      chunk.flatMap((targetOrderId) =>
+        latestMilestones.map((milestone) =>
+          syncTrackingModuleStatusForOrder(
+            organizationId,
+            targetOrderId,
+            milestone.milestone_code,
+            actorUserId,
+            new Date().toISOString(),
+          ),
+        ),
+      ),
+    );
   }
 }

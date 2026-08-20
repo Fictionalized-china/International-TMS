@@ -443,6 +443,18 @@ export default function OrderDetail({ loaderData, actionData }: Route.ComponentP
           </Link>
         </div>
       </header>
+      <nav className="order-quick-access" aria-label="订单快捷入口">
+        <Link className="quick-access-button" to={`/admin/orders/${o.id}/modules/cargo`}>
+          <span className="quick-access-icon">◇</span>
+          <span>货物信息</span>
+          <small>查看与编辑货物明细</small>
+        </Link>
+        <Link className="quick-access-button" to={`/admin/orders/${o.id}/modules/documents`}>
+          <span className="quick-access-icon">▤</span>
+          <span>文件中心</span>
+          <small>汇总各节点上传的文件</small>
+        </Link>
+      </nav>
       {blockingNotice && <OrderBlockingNotice notice={blockingNotice} />}
       {success && <div className="alert success">{success}</div>}
       <OrderCommandCenter
@@ -482,7 +494,7 @@ function buildOrderBlockingNotice(
     return {
       title: "订单暂时不能推进",
       message,
-      hint: "先完成货物信息复核与确认，再回来继续提交审批。",
+      hint: "货物信息可在订单详情页随时查看和补充，不再阻断审批提交。",
       href: `/admin/orders/${orderId}/modules/cargo`,
     };
   }
@@ -893,7 +905,7 @@ function directOrderWorkflowAction(data: Route.ComponentProps["loaderData"]) {
   if (data.order.status === "draft") {
     const submit = transition("submit");
     if (!submit) return null;
-    const cargoReady = module("cargo")?.status === "completed";
+    // 货物信息改为常驻查看按钮，不再作为工作流门禁阻断提交审批
     const hasOrderBasics = [
       data.order.shipper_name,
       data.order.consignee_name,
@@ -904,11 +916,11 @@ function directOrderWorkflowAction(data: Route.ComponentProps["loaderData"]) {
       data.order.cargo_description,
       data.order.overseas_warehouse_id,
     ].every(Boolean);
-    if (!cargoReady || !hasOrderBasics) return null;
+    if (!hasOrderBasics) return null;
     return {
       actionCode: "submit",
       label: "提交审批",
-      hint: "已检测到委托、线路、目的仓和货物资料齐全。口岸与整车/零担在到仓后确定。",
+      hint: "已检测到委托、线路、目的仓和货物资料齐全。整车/拼车由已接受报价确定，不在此阶段变更。",
       requiresAssignee: Boolean(submit.requires_assignee),
       assigneeUserId: null as string | null,
     };

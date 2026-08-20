@@ -36,7 +36,6 @@ import {
   saveOrderCustomWorkflowFieldValue,
   type WorkflowFieldRule,
 } from "../lib/workflow-fields.server";
-import { maxInlineOrderDocumentBytes } from "../lib/order-documents";
 
 type Order = {
   id: string;
@@ -489,6 +488,11 @@ export async function action({ request }: Route.ActionArgs) {
   const fieldIsActive = (fieldKey: string, moduleCode?: string) =>
     Boolean(fieldRule(fieldKey, moduleCode)?.isActive);
   const fieldIsRequired = (fieldKey: string, moduleCode?: string) => {
+    if (
+      fieldKey === "document_consignment_letter" ||
+      fieldKey === "document_contract"
+    )
+      return false;
     const rule = fieldRule(fieldKey, moduleCode);
     return Boolean(rule?.isActive && rule.isRequired);
   };
@@ -520,6 +524,31 @@ export async function action({ request }: Route.ActionArgs) {
     : null;
   if (overseasWarehouseId && !overseasWarehouse)
     return { formError: "请选择有效的境外目的仓" };
+  if (!pickupDate) return { formError: "请填写预约提货时间" };
+  if (!overseasWarehouseId) return { formError: "请选择境外目的仓" };
+  const consignmentLetterField = form.get("consignmentLetter");
+  const consignmentLetterFile =
+    consignmentLetterField instanceof File && consignmentLetterField.size > 0
+      ? consignmentLetterField
+      : null;
+  if (!consignmentLetterFile)
+    return { formError: "请上传客户委托书 / 委托单（必填）" };
+  if (consignmentLetterFile.size > 5 * 1024 * 1024)
+    return { formError: "委托书文件不能超过 5MB" };
+  const allowedConsignmentTypes = new Set([
+    "application/pdf",
+    "image/png",
+    "image/jpeg",
+    "image/jpg",
+    "image/webp",
+  ]);
+  if (
+    consignmentLetterFile.type &&
+    !allowedConsignmentTypes.has(consignmentLetterFile.type)
+  )
+    return {
+      formError: "委托书仅支持 PDF / PNG / JPG / WEBP 格式",
+    };
   const [originStateRow, destinationStateRow] = await Promise.all([
         fieldIsActive("origin_state", "consignment") && originStateCode
           ? geographicParent(
@@ -652,57 +681,12 @@ export async function action({ request }: Route.ActionArgs) {
     weight = cargoRows.reduce((n, x) => n + x.packageCount * x.weight, 0),
     volume = cargoRows.reduce((n, x) => n + x.packageCount * x.volume, 0),
     packageTotal = cargoRows.reduce((n, x) => n + x.packageCount, 0);
-  const creationDocuments = [
-    {
-      fieldKey: "document_consignment_letter",
-      category: "consignment_letter",
-      label: "委托书",
-      file: form.get("consignmentLetter"),
-    },
-    {
-      fieldKey: "document_contract",
-      category: "contract",
-      label: "合同",
-      file: form.get("contractFile"),
-    },
-  ].map((item) => ({
-    ...item,
-    file:
-      item.file instanceof File && item.file.size > 0 ? item.file : null,
-  }));
-  const allowedDocumentTypes = new Set([
-    "application/pdf",
-    "application/msword",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "application/vnd.ms-excel",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    "image/jpeg",
-    "image/png",
-    "image/webp",
-  ]);
-  const invalidCreationDocument = creationDocuments.find(
-    (item) =>
-      item.file &&
-      (item.file.size > maxInlineOrderDocumentBytes ||
-        !allowedDocumentTypes.has(item.file.type)),
-  );
-  if (invalidCreationDocument)
-    return {
-      formError: `${invalidCreationDocument.label}仅支持 PDF、Word、Excel 和图片，单个文件不能超过 1.2MB`,
-    };
-  const creationDocumentPayloads = await Promise.all(
-    creationDocuments
-      .filter(
-        (
-          document,
-        ): document is (typeof creationDocuments)[number] & { file: File } =>
-          document.file !== null,
-      )
-      .map(async (document) => ({
-        ...document,
-        dataUrl: await toDataUrl(document.file),
-      })),
-  );
+  const creationDocumentPayloads: {
+    file: File;
+    category: string;
+    label: string;
+    dataUrl: string;
+  }[] = [];
   const consignmentValues: Record<string, unknown> = {
     customer_id: customerId,
     quotation_id: quotationId,
@@ -730,16 +714,6 @@ export async function action({ request }: Route.ActionArgs) {
     requested_delivery_date: deliveryDate,
     ro_agent: roAgent,
     special_instructions: instructions,
-    document_consignment_letter: creationDocuments.find(
-      (item) => item.fieldKey === "document_consignment_letter",
-    )?.file
-      ? "1"
-      : "",
-    document_contract: creationDocuments.find(
-      (item) => item.fieldKey === "document_contract",
-    )?.file
-      ? "1"
-      : "",
   };
   const customCreationValues = new Map<string, string>();
   for (const field of selectedWorkflowFields) {
@@ -759,6 +733,8 @@ export async function action({ request }: Route.ActionArgs) {
       field.moduleCode === "consignment" &&
       field.isActive &&
       field.isRequired &&
+      field.fieldKey !== "document_consignment_letter" &&
+      field.fieldKey !== "document_contract" &&
       !workflowValuePresent(consignmentValues[field.fieldKey], field.fieldType),
   );
   if (missingConsignment.length)
@@ -1110,6 +1086,35 @@ export async function action({ request }: Route.ActionArgs) {
     actorUserId: current.userId,
     request,
   });
+  if (consignmentLetterFile) {
+    const attachmentId = crypto.randomUUID();
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO order_attachments(id,organization_id,order_id,customer_id,file_name,content_type,size_bytes,data_url,uploaded_by_user_id,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,'admin',?)",
+      ).bind(
+        attachmentId,
+        current.organizationId,
+        id,
+        customerId,
+        consignmentLetterFile.name,
+        consignmentLetterFile.type || "application/octet-stream",
+        consignmentLetterFile.size,
+        await toDataUrl(consignmentLetterFile),
+        current.userId,
+        now,
+      ),
+      env.DB.prepare(
+        "INSERT INTO order_document_metadata(attachment_id,organization_id,order_id,document_category,description,public_to_customer,review_status,updated_at) VALUES(?,?,?,?,?,1,'pending',?)",
+      ).bind(
+        attachmentId,
+        current.organizationId,
+        id,
+        "consignment_letter",
+        "新建订单时随单提交的委托书",
+        now,
+      ),
+    ]);
+  }
   return { success: `订单 ${number} 已创建`, createdOrderId: id };
 }
 
@@ -2084,6 +2089,16 @@ function CreateOrder({
           placeholder="可补充门牌、联系人、提货窗口等订单专属说明"
         />}
       </div>}
+      {shows("document_consignment_letter") && <label className="field span-2">
+        <span>委托书 / 委托单上传{requires("document_consignment_letter") && <b className="required-mark">*</b>}</span>
+        <input
+          type="file"
+          name="consignmentLetter"
+          accept="application/pdf,image/png,image/jpeg,image/webp"
+          required={requires("document_consignment_letter")}
+        />
+        <small>必填：客户签字确认的运输委托书，或客户直接发来的委托单/委托函（PDF / 图片）。文件 ≤ 5MB，新建订单时与发货、收货、目的仓一起提交。</small>
+      </label>}
         </div>
       </section>
       {templateFields.some((field) => field.moduleCode === "cargo" && field.isActive) && <section className="cargo-entry order-create-section">
@@ -2212,40 +2227,6 @@ function CreateOrder({
       </label>}
         </div>
       </section>
-      {(shows("document_consignment_letter") || shows("document_contract")) && (
-        <section className="order-create-section">
-          <header>
-            <strong>6. 委托文件</strong>
-            <span>选择本地文件，创建订单时一并上传</span>
-          </header>
-          <div className="order-create-table-grid">
-            {shows("document_consignment_letter") && (
-              <label className="field">
-                <span>委托书{requires("document_consignment_letter") && <b className="required-mark">*</b>}</span>
-                <input
-                  name="consignmentLetter"
-                  type="file"
-                  accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp"
-                  required={requires("document_consignment_letter")}
-                />
-                <small>客户运输委托或托运委托书，单个文件不超过 1.2MB。</small>
-              </label>
-            )}
-            {shows("document_contract") && (
-              <label className="field">
-                <span>合同{requires("document_contract") && <b className="required-mark">*</b>}</span>
-                <input
-                  name="contractFile"
-                  type="file"
-                  accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp"
-                  required={requires("document_contract")}
-                />
-                <small>运输、代理或客户业务合同，单个文件不超过 1.2MB。</small>
-              </label>
-            )}
-          </div>
-        </section>
-      )}
       {templateFields.some(
         (field) =>
           field.stepKey === "order_creation" &&

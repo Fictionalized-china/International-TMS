@@ -15,6 +15,8 @@ type Position = {
   sort_order: number;
   role_code: string;
   permissions: string | null;
+  portal_order_scope: string;
+  portal_default_filter: string;
 };
 
 type Department = { code: string; name: string };
@@ -107,9 +109,12 @@ export async function loader({ request }: Route.LoaderArgs) {
                     WHEN 'BUSINESS_ROUTE' THEN 'pos_business_route'
                     WHEN 'BOOKING' THEN 'pos_booking'
                     ELSE lower(p.code)
-                  END) permissions
+                  END) permissions,
+              COALESCE(pps.order_scope,CASE WHEN p.code IN ('BOSS','DEVELOPER') THEN 'all_orders' ELSE 'current_position' END) portal_order_scope,
+              COALESCE(pps.default_filter,'open') portal_default_filter
        FROM positions p
        LEFT JOIN departments d ON d.organization_id=p.organization_id AND d.code=p.department_code
+       LEFT JOIN position_portal_settings pps ON pps.organization_id=p.organization_id AND pps.position_id=p.id
        WHERE p.organization_id=?
        ORDER BY p.sort_order,p.name`,
     ).bind(current.organizationId).all<Position>(),
@@ -193,6 +198,24 @@ export async function action({ request }: Route.ActionArgs) {
       actorUserId: current.userId,
     });
     return { success: "岗位状态已更新" };
+  }
+
+  if (intent === "portal_settings") {
+    const positionId = valueOf(form, "positionId");
+    const orderScope = valueOf(form, "orderScope");
+    const defaultFilter = valueOf(form, "defaultFilter");
+    if (!["current_position", "all_orders"].includes(orderScope) || !["open", "all", "blocked", "overdue"].includes(defaultFilter))
+      return { formError: "岗位门户配置无效" };
+    const position = await env.DB.prepare("SELECT id FROM positions WHERE id=? AND organization_id=?").bind(positionId, current.organizationId).first();
+    if (!position) return { formError: "岗位不存在" };
+    await env.DB.prepare(
+      `INSERT INTO position_portal_settings(id,organization_id,position_id,order_scope,default_filter,updated_by_user_id,created_at,updated_at)
+       VALUES(?,?,?,?,?,?,?,?)
+       ON CONFLICT(organization_id,position_id) DO UPDATE SET
+         order_scope=excluded.order_scope,default_filter=excluded.default_filter,
+         updated_by_user_id=excluded.updated_by_user_id,updated_at=excluded.updated_at`,
+    ).bind(crypto.randomUUID(), current.organizationId, positionId, orderScope, defaultFilter, current.userId, now, now).run();
+    return { success: "岗位门户查看范围与默认筛选已更新" };
   }
 
   const code = valueOf(form, "code").toUpperCase();
@@ -332,6 +355,7 @@ export default function Positions({ loaderData, actionData }: Route.ComponentPro
                 <th>部门</th>
                 <th>对应角色</th>
                 <th>模块权限</th>
+                <th>岗位门户</th>
                 <th>状态</th>
                 <th>操作</th>
               </tr>
@@ -361,6 +385,23 @@ export default function Positions({ loaderData, actionData }: Route.ComponentPro
                       ) : (
                         "未配置"
                       )}
+                    </td>
+                    <td>
+                      {canManage ? <Form method="post" className="portal-setting-form">
+                        <input type="hidden" name="intent" value="portal_settings" />
+                        <input type="hidden" name="positionId" value={position.id} />
+                        <select name="orderScope" defaultValue={position.portal_order_scope}>
+                          <option value="current_position">仅当前岗位待办</option>
+                          <option value="all_orders">全部订单</option>
+                        </select>
+                        <select name="defaultFilter" defaultValue={position.portal_default_filter}>
+                          <option value="open">默认：未完成</option>
+                          <option value="all">默认：全部</option>
+                          <option value="blocked">默认：有阻断</option>
+                          <option value="overdue">默认：即将/已经超时</option>
+                        </select>
+                        <button className="text-button" disabled={busy}>保存</button>
+                      </Form> : <small>{position.portal_order_scope === "all_orders" ? "全部订单" : "当前岗位待办"}</small>}
                     </td>
                     <td>
                       <span className={`status-pill ${position.status !== "active" ? "off" : ""}`}>
@@ -393,6 +434,7 @@ async function ensurePositionsSeed(organizationId: string) {
   const now = new Date().toISOString();
   const defaults: Array<[string, string, string, number]> = [
     ["BOSS", "老板", "ZJB", 1],
+    ["DEVELOPER", "开发者", "ZJB", 2],
     ["DOC", "单证", "OP", 10],
     ["CS", "客服", "OP", 20],
     ["FINANCE", "财务", "ACC", 30],
@@ -412,6 +454,13 @@ async function ensurePositionsSeed(organizationId: string) {
          name=excluded.name,department_code=excluded.department_code,sort_order=excluded.sort_order,updated_at=excluded.updated_at`,
     ).bind(crypto.randomUUID(), organizationId, code, name, departmentCode, sort, now, now),
   ));
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO position_portal_settings(id,organization_id,position_id,order_scope,default_filter,created_at,updated_at)
+     SELECT lower(hex(randomblob(16))),p.organization_id,p.id,
+            CASE WHEN p.code IN ('BOSS','DEVELOPER') THEN 'all_orders' ELSE 'current_position' END,
+            'open',?,?
+     FROM positions p WHERE p.organization_id=?`,
+  ).bind(now, now, organizationId).run();
 }
 
 export function meta() {

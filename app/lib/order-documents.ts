@@ -1,4 +1,4 @@
-import type { OrderModuleCode } from "./order-modules";
+﻿import type { OrderModuleCode } from "./order-modules";
 
 export type OrderDocumentStageCode =
   | "pre_departure"
@@ -26,8 +26,7 @@ export const orderDocumentStages: readonly OrderDocumentStage[] = [
     name: "发运前",
     hint: "完成业务委托、贸易与报关资料准备；发车门槛会检查必需文件。",
     documents: [
-      { code: "consignment_letter", name: "委托书", hint: "客户运输委托或托运委托书", requiredForDeparture: true },
-      { code: "contract", name: "合同", hint: "运输、代理或客户业务合同", requiredForDeparture: true },
+      { code: "consignment_letter", name: "委托书", hint: "客户运输委托或托运委托书" },
       { code: "commercial_invoice", name: "发票", hint: "商业发票或形式发票", requiredForDeparture: true },
       { code: "packing_list", name: "装箱单", hint: "货物件数、重量和包装明细", requiredForDeparture: true },
       { code: "customs_document", name: "报关资料", hint: "申报、报检或清关所需资料" },
@@ -82,13 +81,7 @@ export const orderDocumentPlacements: readonly OrderDocumentPlacement[] = [
     documentCode: "consignment_letter",
     moduleCode: "consignment",
     fieldKey: "document_consignment_letter",
-    requiredByDefault: true,
-  },
-  {
-    documentCode: "contract",
-    moduleCode: "consignment",
-    fieldKey: "document_contract",
-    requiredByDefault: true,
+    requiredByDefault: false,
   },
   {
     documentCode: "waybill",
@@ -112,7 +105,7 @@ export const orderDocumentPlacements: readonly OrderDocumentPlacement[] = [
     documentCode: "customs_document",
     moduleCode: "customs",
     fieldKey: "document_customs_document",
-    requiredByDefault: false,
+    requiredByDefault: true,
   },
   {
     documentCode: "border_document",

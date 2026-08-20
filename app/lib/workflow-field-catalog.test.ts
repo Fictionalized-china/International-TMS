@@ -26,7 +26,6 @@ describe("workflow field building blocks", () => {
     for (const fieldKey of [
       "overseas_warehouse_id",
       "module_assignees",
-      "business_type",
       "vehicle_capacity_weight",
       "document_review",
       "customer_notified_at",

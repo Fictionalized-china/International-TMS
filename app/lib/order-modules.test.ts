@@ -30,10 +30,11 @@ describe("order module activation", () => {
 
     expect(state.warehouse).toBe(false);
     expect(state.customs).toBe(false);
-    expect(state.loading).toBe(false);
+    // 装车与出库是核心必经模块，整车/拼车都启用，仅按报价类型分支
+    expect(state.loading).toBe(true);
     expect(state.documents).toBe(true);
     expect(orderModuleDefinition("tracking")?.steps.at(-1)?.code).toBe(
-      "signed",
+      "arrived",
     );
   });
 
@@ -56,12 +57,13 @@ describe("order module activation", () => {
       "cargo",
       "assignment",
       "transport",
+      "loading",
       "documents",
       "tracking",
       "costs",
       "review",
     ]);
-    expect(composedWorkflowProgress(snapshots)).toBe(34);
+    expect(composedWorkflowProgress(snapshots)).toBe(33);
   });
 
   it("inserts optional exception handling only after it is activated", () => {
@@ -78,14 +80,14 @@ describe("order module activation", () => {
     expect(composeOrderWorkflow([exception])).toHaveLength(1);
   });
 
-  it("uses the loading workbench for LTL only", () => {
+  it("enables the loading module for both quote types", () => {
     expect(enabledOrderModules("ltl", []).find((item) => item.code === "loading")?.enabled).toBe(true);
-    expect(enabledOrderModules("ftl", []).find((item) => item.code === "loading")?.enabled).toBe(false);
+    expect(enabledOrderModules("ftl", []).find((item) => item.code === "loading")?.enabled).toBe(true);
   });
 
   it("distinguishes pre-departure planning from post-loading execution", () => {
     expect(orderModuleDefinition("transport")?.name).toBe("运输安排");
-    expect(orderModuleDefinition("loading")?.name).toBe("拼车配载");
+    expect(orderModuleDefinition("loading")?.name).toBe("装车与出库");
     expect(orderModuleDefinition("tracking")?.name).toBe("运输执行与跟踪");
   });
 

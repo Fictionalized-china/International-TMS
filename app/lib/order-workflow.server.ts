@@ -90,6 +90,37 @@ export async function validateOrderWorkflowAction(input: {
       order,
       transition,
     };
+  if (input.actionCode === "dispatch") {
+    const assignment = await env.DB.prepare(
+      "SELECT assignee_user_id,status FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='assignment' AND enabled=1",
+    )
+      .bind(input.organizationId, input.orderId)
+      .first<{ assignee_user_id: string | null; status: string | null }>();
+    if (!assignment || assignment.status !== "completed") {
+      return {
+        ok: false as const,
+        reason: "请先完成任务分配并确认派单后再推进订单。",
+        order,
+        transition,
+      };
+    }
+    if (!assignment.assignee_user_id) {
+      return {
+        ok: false as const,
+        reason: "任务分配未设置派单主负责人，请先确认派单。",
+        order,
+        transition,
+      };
+    }
+    if (input.assigneeUserId && input.assigneeUserId !== assignment.assignee_user_id) {
+      return {
+        ok: false as const,
+        reason: "派单负责人与任务分配不一致，请从任务分配页重新确认。",
+        order,
+        transition,
+      };
+    }
+  }
   if (input.assigneeUserId) {
     const member = await env.DB.prepare(
       "SELECT 1 FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=? AND m.user_id=? AND m.status='active' AND u.status='active'",

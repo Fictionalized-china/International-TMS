@@ -11,7 +11,7 @@ export function meta() { return [{ title: "登录 | International TMS" }]; }
 
 export async function loader({ request }: Route.LoaderArgs) {
   const site=siteFromRequest(request); if(site!=="admin")throw redirect(siteLogin(site));
-  if ((await getSessionUser(request))?.site === "admin") throw redirect("/admin");
+  if ((await getSessionUser(request))?.site === "admin") throw redirect("/admin/portal");
   return null;
 }
 
@@ -36,7 +36,7 @@ export async function action({ request }: Route.ActionArgs) {
   }
   await clearLoginFailures(user.id);
   await writeAudit({ request, action: "auth.login", resourceType: "session", organizationId: user.organization_id, actorUserId: user.id });
-  return redirect("/admin", { headers: { "Set-Cookie": await createSession(user.id, user.organization_id, "admin") } });
+  return redirect("/admin/portal", { headers: { "Set-Cookie": await createSession(user.id, user.organization_id, "admin") } });
 }
 
 export default function Login({ actionData }: Route.ComponentProps) {

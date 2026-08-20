@@ -217,39 +217,8 @@ export async function checkOrderDeparture(
 
   const loadPlan = await checkOrderLoadPlan(organizationId, orderId, vehiclePlate);
   const reasons = [...loadPlan.reasons];
-  {
-    const preDepartureModules = new Set<OrderModuleCode>([
-      "consignment",
-      "transport",
-      "customs",
-    ]);
-    const requiredDocuments = orderDocumentPlacements
-      .filter((placement) => preDepartureModules.has(placement.moduleCode))
-      .filter(
-        (placement) =>
-          placement.moduleCode !== "customs" || order.customs_enabled === 1,
-      )
-      .filter((placement) =>
-        required(placement.fieldKey, placement.requiredByDefault),
-      )
-      .map((placement) => placement.documentCode);
-    if (requiredDocuments.length) {
-      const approved = await env.DB.prepare(
-        `SELECT DISTINCT document_category FROM order_document_metadata
-         WHERE organization_id=? AND order_id=? AND review_status IN ('approved','archived')`,
-      )
-        .bind(organizationId, orderId)
-        .all<{ document_category: string }>();
-      const approvedSet = new Set(
-        approved.results.map((item) => item.document_category),
-      );
-      const missing = requiredDocuments.filter((code) => !approvedSet.has(code));
-      if (missing.length)
-        reasons.push(
-          `发运前文件尚未审核通过：${missing.map(orderDocumentTypeLabel).join("、")}`,
-        );
-    }
-  }
+  const documentGate = await checkOrderPreDepartureDocuments(organizationId, orderId);
+  reasons.push(...documentGate.reasons);
 
   if (
     order.customs_enabled === 1 &&
@@ -260,8 +229,7 @@ export async function checkOrderDeparture(
               SUM(CASE WHEN d.status='released' THEN 1 ELSE 0 END) released
        FROM order_customs_declarations d
        JOIN order_customs_records r ON r.id=d.customs_record_id AND r.organization_id=d.organization_id
-       WHERE d.organization_id=? AND d.order_id=? AND r.clearance_stage='origin'
-         AND d.is_deleted=0 AND d.status!='cancelled'`,
+      WHERE d.organization_id=? AND d.order_id=? AND d.is_deleted=0 AND d.status!='cancelled'`,
     ).bind(organizationId, orderId).first<{ total: number; released: number | null }>();
     const total = customsGate?.total ?? 0;
     const released = customsGate?.released ?? 0;
@@ -293,5 +261,36 @@ export async function checkOrderDeparture(
     if (!outbound) reasons.push("仓库尚未完成实际装车与出库交接");
   }
 
+  return { ready: reasons.length === 0, reasons };
+}
+
+export async function checkOrderPreDepartureDocuments(
+  organizationId: string,
+  orderId: string,
+): Promise<ReadinessResult> {
+  const order = await operationalOrder(organizationId, orderId);
+  if (!order) return { ready: false, reasons: ["订单不存在"] };
+  const required = await workflowRequirements(organizationId, orderId, [
+    "documents",
+    "consignment",
+    "transport",
+    "customs",
+  ]);
+  const preDepartureModules = new Set<OrderModuleCode>(["consignment", "transport", "customs"]);
+  const requiredDocuments = orderDocumentPlacements
+    .filter((placement) => preDepartureModules.has(placement.moduleCode))
+    .filter((placement) => placement.moduleCode !== "customs" || order.customs_enabled === 1)
+    .filter((placement) => required(placement.fieldKey, placement.requiredByDefault))
+    .map((placement) => placement.documentCode);
+  if (!requiredDocuments.length) return { ready: true, reasons: [] };
+  const approved = await env.DB.prepare(
+    `SELECT DISTINCT document_category FROM order_document_metadata
+     WHERE organization_id=? AND order_id=? AND review_status IN ('approved','archived')`,
+  ).bind(organizationId, orderId).all<{ document_category: string }>();
+  const approvedSet = new Set(approved.results.map((item) => item.document_category));
+  const missing = requiredDocuments.filter((code) => !approvedSet.has(code));
+  const reasons = missing.length
+    ? [`发运前文件尚未审核通过：${missing.map(orderDocumentTypeLabel).join("、")}`]
+    : [];
   return { ready: reasons.length === 0, reasons };
 }

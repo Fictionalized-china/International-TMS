@@ -22,6 +22,7 @@ export default [
     route("admin/logistics-products", "routes/admin.logistics-products.tsx"),
     route("admin/carriers", "routes/admin.carriers.tsx"),
     route("admin/orders", "routes/admin.orders.tsx"),
+    route("admin/domestic-tracking", "routes/admin.domestic-tracking.tsx"),
     route("admin/cargo", "routes/admin.cargo.tsx"),
     route("admin/loading", "routes/admin.loading.tsx"),
     route("admin/loading/:batchId", "routes/admin.loading-detail.tsx"),

@@ -1,11 +1,11 @@
 import { env } from "cloudflare:workers";
+import { useState } from "react";
 import { Form, Link, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.loading-detail";
 import { requireSessionUser } from "../lib/auth.server";
 import { writeAudit } from "../lib/audit.server";
 import { valueOf } from "../lib/validation";
-import { syncCostsModuleStatus, syncOrderWorkflowSnapshot } from "../lib/order-modules.server";
-import { checkOrderDeparture, checkOrderLoadPlan } from "../lib/order-readiness.server";
+import { checkOrderDeparture, checkOrderLoadPlan, checkOrderPreDepartureDocuments } from "../lib/order-readiness.server";
 import { recordWorkflowEvent } from "../lib/business-workflow.server";
 import { roadStatusLabels } from "../lib/warehouse-actual";
 import { recordWarehouseProgress } from "../lib/warehouse-progress.server";
@@ -17,9 +17,10 @@ import { maxInlineOrderDocumentBytes, orderDocumentTypeCodes, orderDocumentTypeL
 import { syncCustomsModuleFromRecords } from "../lib/customs-status.server";
 import {
   BATCH_TRACKING_MILESTONES,
-  BATCH_TRACKING_MAIN_CODES,
   BATCH_TRACKING_OPTIONAL_CODES,
   BATCH_TRACKING_REQUIRED_PREVIOUS,
+} from "../lib/batch-tracking.shared";
+import {
   getBatchOrderIds,
   getBatchMainVehiclePlate,
   validateBatchTrackingRequiredPrevious,
@@ -31,8 +32,40 @@ import {
 } from "../lib/batch-tracking.server";
 import { Modal } from "../components/Modal";
 
+const CHUNK_SIZE = 800;
+
+let orderModulesImportPromise:
+  | Promise<typeof import("../lib/order-modules.server")>
+  | null = null;
+
+async function ensureOrderModulesModule() {
+  if (!orderModulesImportPromise) {
+    orderModulesImportPromise = import("../lib/order-modules.server");
+  }
+  return orderModulesImportPromise;
+}
+
+function chunkArray<T>(values: T[], size = CHUNK_SIZE): T[][] {
+  if (!values.length) return [];
+  const chunks: T[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+  return chunks;
+}
+
+async function syncOrderWorkflowSnapshotSafe(organizationId: string, orderId: string) {
+  const modules = await ensureOrderModulesModule();
+  await modules.syncOrderWorkflowSnapshot(organizationId, orderId);
+}
+
+async function syncCostModuleStatusSafe(organizationId: string, orderId: string, now: string) {
+  const modules = await ensureOrderModulesModule();
+  await modules.syncCostsModuleStatus(organizationId, orderId, now);
+}
+
 type Batch={id:string;batch_number:string;batch_name:string;origin_location:string;destination_location:string;planned_departure_at:string|null;planned_arrival_at:string|null;status:string;road_status:string;carrier_id:string|null;warehouse_id:string|null;carrier_name:string|null;warehouse_name:string|null;border_port:string|null;transit_location:string|null;route_notes:string|null;notes:string|null;overseas_carrier_name:string|null;overseas_vehicle_type:string|null;overseas_vehicle_count:number;overseas_vehicle_plate:string|null;overseas_driver_name:string|null;overseas_driver_phone:string|null};
-type BatchOrder={order_id:string;order_number:string;business_type:string|null;work_number:string;customer_name:string;cargo_description:string|null;cargo_names:string|null;pieces:number;gross_weight_kg:number;volume_cbm:number;declared_weight_kg:number;declared_volume_cbm:number;package_count:number;assigned_count:number;vehicle_names:string|null;overseas_status:string|null;overseas_arrival_at:string|null};
+type BatchOrder={order_id:string;order_number:string;business_type:string|null;work_number:string;customer_name:string;cargo_description:string|null;cargo_names:string|null;pieces:number;gross_weight_kg:number;volume_cbm:number;declared_weight_kg:number;declared_volume_cbm:number;inbound_at:string|null;dispatched_packages:number;in_stock_packages:number;package_count:number;assigned_count:number;vehicle_names:string|null;overseas_status:string|null;overseas_arrival_at:string|null};
 type Vehicle={id:string;vehicle_no:string;vehicle_type:string|null;plate_number:string|null;driver_name:string|null;driver_phone:string|null;capacity_weight_kg:number;capacity_volume_cbm:number;used_weight:number;used_volume:number;loaded_orders:number;status:string};
 type Option={id:string;name:string};
 type ReferenceOption={code:string;name:string};
@@ -44,15 +77,59 @@ type BatchOutboundStatus={order_id:string;dispatched:number};
 type DepartureGateStatus={order_id:string;ready:boolean;reasons:string[]};
 type BatchTrackingMilestone={id:string;order_id:string;milestone_code:string;milestone_name:string;event_at:string;location:string|null;vehicle_reference:string|null;notes:string|null;visible_to_customer:number;created_at:string};
 type BatchTrackingFlag={order_id:string;requires_transloading:number;requires_transit_customs:number};
+type CarrierVehicleOption={id:string;carrier_id:string;plate_number:string;vehicle_type:string|null;capacity_weight_kg:number|null;capacity_volume_cbm:number|null;carrier_name:string};
+type CarrierDriverOption={id:string;carrier_id:string;name:string;phone:string|null;carrier_name:string};
+type ManifestOrderRow={order_id:string;order_number:string;work_number:string;customer_name:string;cargo_names:string|null;pieces:number;gross_weight_kg:number;volume_cbm:number;vehicle_names:string|null};
+type ManifestVehicleRow={vehicle_no:string;vehicle_type:string|null;plate_number:string|null;driver_name:string|null;driver_phone:string|null;capacity_weight_kg:number|null;capacity_volume_cbm:number|null};
+type ManifestBatchRow={batch_number:string;batch_name:string;origin_location:string;destination_location:string;planned_departure_at:string|null;planned_arrival_at:string|null;border_port:string|null;overseas_carrier_name:string|null;overseas_vehicle_type:string|null;overseas_vehicle_count:number;overseas_vehicle_plate:string|null;overseas_driver_name:string|null;overseas_driver_phone:string|null;carrier_name:string|null};
+
+function escapeHtml(value: string | null | undefined) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char] as string);
+}
+
+function buildLoadingManifestHtml(batch: ManifestBatchRow, orders: ManifestOrderRow[], vehicles: ManifestVehicleRow[], generatedAt: string) {
+  const totalPieces = orders.reduce((sum, item) => sum + item.pieces, 0);
+  const totalWeight = orders.reduce((sum, item) => sum + item.gross_weight_kg, 0);
+  const totalVolume = orders.reduce((sum, item) => sum + item.volume_cbm, 0);
+  const rows = orders.map((item) => `<tr><td>${escapeHtml(item.order_number)}</td><td>${escapeHtml(item.work_number)}</td><td>${escapeHtml(item.customer_name)}</td><td>${escapeHtml(item.cargo_names || "未填写")}</td><td class="num">${item.pieces}</td><td class="num">${item.gross_weight_kg.toFixed(2)}</td><td class="num">${item.volume_cbm.toFixed(3)}</td><td>${escapeHtml(item.vehicle_names || "待分配")}</td></tr>`).join("");
+  const vehicleRows = vehicles.map((item) => `<tr><td>${escapeHtml(item.vehicle_no)}</td><td>${escapeHtml(item.vehicle_type || "—")}</td><td>${escapeHtml(item.plate_number || "—")}</td><td>${escapeHtml(item.driver_name || "—")}</td><td>${escapeHtml(item.driver_phone || "—")}</td><td class="num">${item.capacity_weight_kg ? `${item.capacity_weight_kg} KG` : "不限"}</td><td class="num">${item.capacity_volume_cbm ? `${item.capacity_volume_cbm} CBM` : "不限"}</td></tr>`).join("");
+  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>配载单 ${escapeHtml(batch.batch_number)}</title><style>
+  body{font-family:"Microsoft YaHei",system-ui,sans-serif;color:#111;margin:24px;font-size:12px}
+  h1{font-size:20px;margin:0 0 4px}h2{font-size:14px;margin:18px 0 6px}
+  .meta{display:flex;flex-wrap:wrap;gap:4px 24px;margin:8px 0;color:#333}
+  .meta b{margin-right:4px;color:#555}
+  table{width:100%;border-collapse:collapse;margin:6px 0}
+  th,td{border:1px solid #999;padding:4px 6px;text-align:left;vertical-align:top}
+  th{background:#eee}
+  .num{text-align:right;font-variant-numeric:tabular-nums}
+  tfoot td{font-weight:bold;background:#f7f7f7}
+  .footer{margin-top:18px;display:flex;justify-content:space-between;color:#555}
+  .sign{margin-top:26px;display:flex;gap:48px}.sign div{flex:1;border-top:1px solid #333;padding-top:6px}
+  @media print{body{margin:8mm}}
+</style></head><body>
+<h1>配载单 ${escapeHtml(batch.batch_number)}</h1>
+<div class="meta"><span>${escapeHtml(batch.batch_name)}</span></div>
+<div class="meta"><span><b>线路</b>${escapeHtml(batch.origin_location)} → ${escapeHtml(batch.destination_location)}</span><span><b>承运商</b>${escapeHtml(batch.carrier_name || "待定")}</span><span><b>出境口岸</b>${escapeHtml(batch.border_port || "待定")}</span><span><b>计划发车</b>${escapeHtml(batch.planned_departure_at?.slice(0, 16).replace("T", " ") || "待定")}</span><span><b>计划到达</b>${escapeHtml(batch.planned_arrival_at?.slice(0, 16).replace("T", " ") || "待定")}</span></div>
+<h2>境外运输资源</h2>
+<div class="meta"><span><b>境外承运方</b>${escapeHtml(batch.overseas_carrier_name || "待定")}</span><span><b>车型/数量</b>${escapeHtml(batch.overseas_vehicle_type || "待定")} × ${batch.overseas_vehicle_count || 1}</span><span><b>车牌</b>${escapeHtml(batch.overseas_vehicle_plate || "待定")}</span><span><b>司机</b>${escapeHtml(batch.overseas_driver_name || "待定")} ${escapeHtml(batch.overseas_driver_phone || "")}</span></div>
+<h2>装载车辆（${vehicles.length} 车）</h2>
+<table><thead><tr><th>序号</th><th>车型</th><th>车牌号</th><th>司机</th><th>电话</th><th>载重上限</th><th>体积上限</th></tr></thead><tbody>${vehicleRows}</tbody></table>
+<h2>挂载订单（${orders.length} 票）</h2>
+<table><thead><tr><th>订单号</th><th>工作号</th><th>委托人</th><th>货物名称</th><th>件数</th><th>实收重量 KG</th><th>实收体积 CBM</th><th>装载车辆</th></tr></thead><tbody>${rows}</tbody>
+<tfoot><tr><td colspan="4">合计</td><td class="num">${totalPieces}</td><td class="num">${totalWeight.toFixed(2)}</td><td class="num">${totalVolume.toFixed(3)}</td><td>—</td></tr></tfoot></table>
+<div class="footer"><span>系统生成时间：${escapeHtml(generatedAt.slice(0, 19).replace("T", " "))}</span><span>生成来源：配载工作台（自动审核通过）</span></div>
+<div class="sign"><div>仓库装车签字 / 日期</div><div>司机签字 / 日期</div><div>理货签字 / 日期</div></div>
+</body></html>`;
+}
 
 const BATCH_DOCUMENT_TYPES=[
-  {code:"loading_manifest",name:"配载清单",hint:"本配载单的整票订单、货物与车辆汇总",required:true},
+  {code:"loading_manifest",name:"配载清单",hint:"配载工作台一键自动生成，仓库按此配载单装车出库，无需人工上传",required:true},
   {code:"vehicle_manifest",name:"装车清单",hint:"按车辆形成的装载与包装清单",required:false},
   {code:"batch_waybill",name:"批次运单",hint:"本批次共用的国际运输运单",required:false},
   {code:"border_handover",name:"口岸交接文件",hint:"口岸换装、过境或交接凭证",required:false},
   {code:"transshipment_order",name:"换装单",hint:"发生换装时上传的批次共用凭证",required:false},
 ] as const;
-const ORDER_BATCH_DOCUMENT_CODES=["consignment_letter","contract","commercial_invoice","packing_list","customs_document"] as const;
+const ORDER_BATCH_DOCUMENT_CODES=["consignment_letter","commercial_invoice","packing_list","customs_document"] as const;
 
 const VEHICLE_TYPE_OPTIONS=[
   "卡车",
@@ -81,6 +158,9 @@ export async function loader({request,params}:Route.LoaderArgs){
         COALESCE((SELECT SUM(r.total_weight_kg) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=o.id AND r.status='completed'),o.gross_weight_kg) gross_weight_kg,
         COALESCE((SELECT SUM(r.total_volume_cbm) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=o.id AND r.status='completed'),o.volume_cbm) volume_cbm,
         o.gross_weight_kg declared_weight_kg,o.volume_cbm declared_volume_cbm,
+        (SELECT MIN(r.received_at) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=o.id AND r.status='completed') inbound_at,
+        (SELECT COUNT(*) FROM warehouse_packages wp JOIN shipments s2 ON s2.id=wp.shipment_id WHERE s2.order_id=o.id AND wp.status='dispatched') dispatched_packages,
+        (SELECT COUNT(*) FROM warehouse_packages wp JOIN shipments s2 ON s2.id=wp.shipment_id WHERE s2.order_id=o.id AND wp.status IN ('in_stock','allocated')) in_stock_packages,
         COUNT(DISTINCT p.id) package_count,COUNT(DISTINCT l.package_id) assigned_count,GROUP_CONCAT(DISTINCT v.vehicle_no) vehicle_names,
         op.status overseas_status,op.actual_arrival_at overseas_arrival_at
       FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id JOIN customers c ON c.id=o.customer_id LEFT JOIN order_cargo_packages p ON p.order_id=o.id AND p.status!='cancelled' LEFT JOIN transport_vehicle_loads l ON l.batch_id=bo.batch_id AND l.package_id=p.id LEFT JOIN transport_batch_vehicles v ON v.id=l.vehicle_id LEFT JOIN overseas_warehouse_operations op ON op.batch_id=bo.batch_id AND op.order_id=bo.order_id AND op.organization_id=bo.organization_id
@@ -134,20 +214,34 @@ export async function loader({request,params}:Route.LoaderArgs){
     ...await checkOrderDeparture(current.organizationId,item.order_id,undefined,{warehouseDispatchConfirmed:true}),
   })));
   // 配载页运输跟踪：先做反向同步（与订单页打开 tracking 模块一致），保证子订单里程碑齐整
-  const batchOrderIds=orders.results.map(item=>item.order_id);
+  const batchOrderIds=orders.results.map((item)=>item.order_id);
   if(batchOrderIds.length>1)await syncBatchTrackingMilestonesFromBatch(current.organizationId,batchOrderIds,current.userId);
-  const trackingPlaceholders=batchOrderIds.length?batchOrderIds.map(()=>"?").join(","):"''";
-  const [trackingMilestones,trackingFlags,batchVehiclePlate]=await Promise.all([
-    env.DB.prepare(`SELECT id,order_id,milestone_code,milestone_name,event_at,location,vehicle_reference,notes,visible_to_customer,created_at
-      FROM order_tracking_milestones
-      WHERE organization_id=? AND order_id IN (${trackingPlaceholders})
-      ORDER BY event_at DESC, created_at DESC`).bind(current.organizationId,...batchOrderIds).all<BatchTrackingMilestone>(),
+  const trackingMilestones: BatchTrackingMilestone[] = [];
+  if(batchOrderIds.length){
+    for (const chunk of chunkArray(batchOrderIds, CHUNK_SIZE)) {
+      const trackingPlaceholders = chunk.map(() => "?").join(",");
+      const rows = await env.DB.prepare(`SELECT id,order_id,milestone_code,milestone_name,event_at,location,vehicle_reference,notes,visible_to_customer,created_at
+        FROM order_tracking_milestones
+        WHERE organization_id=? AND order_id IN (${trackingPlaceholders})
+        ORDER BY event_at DESC, created_at DESC`).bind(current.organizationId,...chunk).all<BatchTrackingMilestone>();
+      trackingMilestones.push(...rows.results);
+    }
+  }
+  const [trackingFlags,batchVehiclePlate,carrierVehicles,carrierDrivers]=await Promise.all([
     env.DB.prepare(`SELECT bo.order_id, COALESCE(o.requires_transloading,0) requires_transloading, COALESCE(o.requires_transit_customs,0) requires_transit_customs
       FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
       WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed' ORDER BY bo.sequence_no`).bind(batchId,current.organizationId).all<BatchTrackingFlag>(),
     getBatchMainVehiclePlate(current.organizationId,batchId),
+    env.DB.prepare(`SELECT v.id,v.carrier_id,v.plate_number,v.vehicle_type,v.capacity_weight_kg,v.capacity_volume_cbm,c.name carrier_name
+      FROM carrier_vehicles v JOIN carriers c ON c.id=v.carrier_id
+      WHERE v.organization_id=? AND v.status='active' AND c.status='active'
+      ORDER BY c.name,v.plate_number`).bind(current.organizationId).all<CarrierVehicleOption>(),
+    env.DB.prepare(`SELECT d.id,d.carrier_id,d.name,d.phone,c.name carrier_name
+      FROM carrier_drivers d JOIN carriers c ON c.id=d.carrier_id
+      WHERE d.organization_id=? AND d.status='active' AND c.status='active'
+      ORDER BY c.name,d.name`).bind(current.organizationId).all<CarrierDriverOption>(),
   ]);
-  return{current,batch,orders:orders.results,vehicles:vehicles.results,carriers:carriers.results,warehouses:warehouses.results,borderPorts:borderPorts.results,costAllocations,batchDocuments:batchDocuments.results,orderDocuments:orderDocuments.results,customsSummaries:customsSummaries.results,customsDeclarations:customsDeclarations.results,outboundStatuses:outboundStatuses.results,departureGateStatuses,returnOrderId,trackingMilestones:trackingMilestones.results,trackingFlags:trackingFlags.results,batchVehiclePlate};
+  return{current,batch,orders:orders.results,vehicles:vehicles.results,carriers:carriers.results,warehouses:warehouses.results,borderPorts:borderPorts.results,costAllocations,batchDocuments:batchDocuments.results,orderDocuments:orderDocuments.results,customsSummaries:customsSummaries.results,customsDeclarations:customsDeclarations.results,outboundStatuses:outboundStatuses.results,departureGateStatuses,returnOrderId,trackingMilestones,trackingFlags:trackingFlags.results,batchVehiclePlate,carrierVehicles:carrierVehicles.results,carrierDrivers:carrierDrivers.results};
 }
 
 export async function action({request,params}:Route.ActionArgs){
@@ -190,6 +284,32 @@ export async function action({request,params}:Route.ActionArgs){
     await writeAudit({request,action:"transport.batch.order_document.upload",resourceType:"order_attachment",resourceId:attachmentId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{batchId,orderId,documentCategory}});
     return{success:`${orderDocumentTypeLabel(documentCategory)}已上传到对应订单，等待审核`};
   }
+  if(intent==="generate_manifest"){
+    // 配载单由工作台自动生成：仓库按生成的配载单装车出库，不再要求人工上传。
+    const [ordersList,vehiclesList]=await Promise.all([
+      env.DB.prepare(`SELECT bo.order_id,o.order_number,COALESCE((SELECT s.shipment_number FROM shipments s WHERE s.order_id=o.id ORDER BY s.created_at DESC LIMIT 1),o.order_number) work_number,c.name customer_name,
+          COALESCE((SELECT GROUP_CONCAT(NULLIF(TRIM(i.cargo_name_cn),''),'、') FROM order_cargo_items i WHERE i.order_id=o.id AND i.organization_id=o.organization_id),o.cargo_description) cargo_names,
+          COALESCE((SELECT SUM(r.total_pieces) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=o.id AND r.status='completed'),o.pieces) pieces,
+          COALESCE((SELECT SUM(r.total_weight_kg) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=o.id AND r.status='completed'),o.gross_weight_kg) gross_weight_kg,
+          COALESCE((SELECT SUM(r.total_volume_cbm) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=o.id AND r.status='completed'),o.volume_cbm) volume_cbm,
+          (SELECT GROUP_CONCAT(DISTINCT v.vehicle_no||' '||COALESCE(v.plate_number,'')) FROM transport_vehicle_loads l JOIN order_cargo_packages p ON p.id=l.package_id JOIN transport_batch_vehicles v ON v.id=l.vehicle_id WHERE l.batch_id=bo.batch_id AND p.order_id=o.id) vehicle_names
+        FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id JOIN customers c ON c.id=o.customer_id
+        WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed' ORDER BY bo.sequence_no`).bind(batchId,current.organizationId).all<ManifestOrderRow>(),
+      env.DB.prepare("SELECT vehicle_no,vehicle_type,plate_number,driver_name,driver_phone,capacity_weight_kg,capacity_volume_cbm FROM transport_batch_vehicles WHERE batch_id=? AND organization_id=? AND status!='cancelled' ORDER BY vehicle_no").bind(batchId,current.organizationId).all<ManifestVehicleRow>(),
+    ]);
+    if(!vehiclesList.results.length)return{formError:"配载单还没有车辆；请先在配载单信息中添加车辆，再生成配载单"};
+    const batchDetail=await env.DB.prepare("SELECT b.batch_number,b.batch_name,b.origin_location,b.destination_location,b.planned_departure_at,b.planned_arrival_at,b.border_port,b.overseas_carrier_name,b.overseas_vehicle_type,b.overseas_vehicle_count,b.overseas_vehicle_plate,b.overseas_driver_name,b.overseas_driver_phone,c.name carrier_name FROM transport_batches b LEFT JOIN carriers c ON c.id=b.carrier_id WHERE b.id=? AND b.organization_id=?").bind(batchId,current.organizationId).first<ManifestBatchRow>();
+    if(!batchDetail)return{formError:"配载批次无效"};
+    const html=buildLoadingManifestHtml(batchDetail,ordersList.results,vehiclesList.results,now);
+    const documentId=crypto.randomUUID();
+    await env.DB.batch([
+      env.DB.prepare("UPDATE transport_batch_documents SET review_status='archived',updated_at=? WHERE batch_id=? AND organization_id=? AND document_category='loading_manifest'").bind(now,batchId,current.organizationId),
+      env.DB.prepare(`INSERT INTO transport_batch_documents(id,organization_id,batch_id,document_category,file_name,content_type,size_bytes,data_url,description,review_status,uploaded_by_user_id,reviewed_by_user_id,reviewed_at,review_notes,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,'系统自动生成；仓库按此配载单装车出库','approved',?,?,?,?,?,?)`).bind(documentId,current.organizationId,batchId,"loading_manifest",`配载单-${batchDetail.batch_number}.html`,"text/html",new TextEncoder().encode(html).length,`data:text/html;charset=utf-8,${encodeURIComponent(html)}`,current.userId,current.userId,now,"配载工作台自动生成",now,now),
+    ]);
+    await writeAudit({request,action:"transport.batch.manifest.generate",resourceType:"transport_batch_document",resourceId:documentId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{batchId,orders:ordersList.results.length,vehicles:vehiclesList.results.length}});
+    return{success:`配载单已生成并自动审核通过（${ordersList.results.length} 票 · ${vehiclesList.results.length} 车）；仓库可按此配载单装车出库`};
+  }
   if(intent==="batch_order_document_review"){
     const orderId=valueOf(form,"orderId"),attachmentId=valueOf(form,"attachmentId"),reviewStatus=valueOf(form,"reviewStatus");
     if(!["approved","rejected"].includes(reviewStatus))return{formError:"请选择有效的审核结果"};
@@ -214,8 +334,8 @@ export async function action({request,params}:Route.ActionArgs){
     if(isDeleted&&!changeReason)return{formError:"删单时请填写变更原因"};
     let releasedAt=valueOf(form,"releasedAt")||null;
     if(declarationStatus==="released"){
-      const customsDocument=await env.DB.prepare("SELECT 1 FROM order_document_metadata WHERE organization_id=? AND order_id=? AND document_category='customs_document' LIMIT 1").bind(current.organizationId,orderId).first();
-      if(!customsDocument)return{formError:"确认放行前请先在当前弹窗上传该票报关资料"};
+      const documentGate=await checkOrderPreDepartureDocuments(current.organizationId,orderId);
+      if(!documentGate.ready)return{formError:`确认放行前请先处理文件：${documentGate.reasons.join("；")}`};
       releasedAt||=now;
     }
     let customsRecordId=valueOf(form,"customsRecordId")||null;
@@ -267,8 +387,8 @@ export async function action({request,params}:Route.ActionArgs){
       await confirmCostAllocation(env.DB,{organizationId:current.organizationId,allocationId,userId:current.userId,now});
       const affectedOrders=await env.DB.prepare("SELECT DISTINCT order_id FROM transport_cost_allocation_lines WHERE organization_id=? AND allocation_id=?").bind(current.organizationId,allocationId).all<{order_id:string}>();
       await Promise.all(affectedOrders.results.map(async(item)=>{
-        await syncCostsModuleStatus(current.organizationId,item.order_id,now);
-        await syncOrderWorkflowSnapshot(current.organizationId,item.order_id);
+      await syncCostModuleStatusSafe(current.organizationId,item.order_id,now);
+        await syncOrderWorkflowSnapshotSafe(current.organizationId,item.order_id);
       }));
       await writeAudit({request,action:"transport.batch.cost_allocation.confirm",resourceType:"transport_cost_allocation",resourceId:allocationId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{batchId}});
       return{success:"成本分摊已人工确认，并为各订单生成正式应付费用；该结果只影响内部应付和毛利，不会改客户应收。下一步请到订单费用模块确认、审核并锁定应付"};
@@ -276,22 +396,66 @@ export async function action({request,params}:Route.ActionArgs){
   }
   if(intent==="arrangement"){
     const carrierId=valueOf(form,"carrierId"),warehouseId=valueOf(form,"warehouseId"),borderPort=valueOf(form,"borderPort"),plannedDeparture=valueOf(form,"plannedDeparture"),plannedArrival=valueOf(form,"plannedArrival");
-    const overseasCarrierName=valueOf(form,"overseasCarrierName"),overseasVehicleType=valueOf(form,"overseasVehicleType"),overseasVehicleCount=Math.max(1,Number(valueOf(form,"overseasVehicleCount")||1)),overseasVehiclePlate=valueOf(form,"overseasVehiclePlate").toUpperCase(),overseasDriverName=valueOf(form,"overseasDriverName"),overseasDriverPhone=valueOf(form,"overseasDriverPhone");
+    const overseasVehicleMasterId=valueOf(form,"overseasVehicleMasterId"),overseasDriverMasterId=valueOf(form,"overseasDriverMasterId");
+    let overseasCarrierName=valueOf(form,"overseasCarrierName"),overseasVehicleType=valueOf(form,"overseasVehicleType"),overseasVehiclePlate=valueOf(form,"overseasVehiclePlate"),overseasDriverName=valueOf(form,"overseasDriverName"),overseasDriverPhone=valueOf(form,"overseasDriverPhone");
+    let capacityWeight=numberOf(form,"capacityWeight"),capacityVolume=numberOf(form,"capacityVolume");
+    const carrier=await env.DB.prepare("SELECT id,name FROM carriers WHERE id=? AND organization_id=? AND status='active'").bind(carrierId,current.organizationId).first<{id:string;name:string}>();
+    if(!carrier)return{formError:"承运商无效"};
+    overseasCarrierName=carrier.name;
+    if(overseasVehicleMasterId){
+      const master=await env.DB.prepare("SELECT carrier_id,plate_number,vehicle_type,capacity_weight_kg,capacity_volume_cbm FROM carrier_vehicles WHERE id=? AND organization_id=? AND status='active'").bind(overseasVehicleMasterId,current.organizationId).first<{carrier_id:string;plate_number:string;vehicle_type:string|null;capacity_weight_kg:number|null;capacity_volume_cbm:number|null}>();
+      if(!master||master.carrier_id!==carrierId)return{formError:"所选车辆不属于当前承运商或已停用"};
+      overseasVehicleType=overseasVehicleType||master.vehicle_type||"";
+      overseasVehiclePlate=overseasVehiclePlate||master.plate_number;
+      capacityWeight=capacityWeight||master.capacity_weight_kg||0;
+      capacityVolume=capacityVolume||master.capacity_volume_cbm||0;
+    }
+    if(overseasDriverMasterId){
+      const master=await env.DB.prepare("SELECT carrier_id,name,phone FROM carrier_drivers WHERE id=? AND organization_id=? AND status='active'").bind(overseasDriverMasterId,current.organizationId).first<{carrier_id:string;name:string;phone:string|null}>();
+      if(!master||master.carrier_id!==carrierId)return{formError:"所选司机不属于当前承运商或已停用"};
+      overseasDriverName=overseasDriverName||master.name;
+      overseasDriverPhone=overseasDriverPhone||master.phone||"";
+    }
+    const overseasVehicleCount=1;
+    overseasVehiclePlate=overseasVehiclePlate.toUpperCase();
     if(!carrierId||!borderPort||!plannedDeparture||!plannedArrival)return{formError:"请先确定承运商、出境口岸、计划发车和计划到达时间"};
-    if(!overseasCarrierName||!overseasVehicleType||!overseasVehiclePlate||!overseasDriverName||!overseasDriverPhone)return{formError:"请完整填写境外承运方、车型、车辆数、车牌号、司机姓名和电话"};
-    if(carrierId&&!(await env.DB.prepare("SELECT 1 FROM carriers WHERE id=? AND organization_id=? AND status='active'").bind(carrierId,current.organizationId).first()))return{formError:"承运商无效"};
+    if(!overseasCarrierName||!overseasVehicleType||!overseasVehiclePlate||!overseasDriverName||!overseasDriverPhone)return{formError:"请完整填写境外承运方、车型、车辆数、车牌号、司机姓名和电话（可从承运商车辆库 / 司机库下拉选择自动带出）"};
     if(warehouseId&&!(await env.DB.prepare("SELECT 1 FROM warehouses WHERE id=? AND organization_id=? AND status='active' AND warehouse_role IN ('domestic_collection','port')").bind(warehouseId,current.organizationId).first()))return{formError:"集货仓库无效，只能选择国内集货仓或口岸仓"};
     if(!(await env.DB.prepare("SELECT 1 FROM reference_data WHERE organization_id=? AND category='border_port' AND code=? AND status='active'").bind(current.organizationId,borderPort).first()))return{formError:"出境口岸无效"};
-    await env.DB.prepare("UPDATE transport_batches SET carrier_id=?,warehouse_id=COALESCE(?,warehouse_id),planned_departure_at=?,planned_arrival_at=?,border_port=?,transit_location=?,route_notes=?,notes=?,overseas_carrier_name=?,overseas_vehicle_type=?,overseas_vehicle_count=?,overseas_vehicle_plate=?,overseas_driver_name=?,overseas_driver_phone=?,updated_at=? WHERE id=? AND organization_id=?").bind(carrierId,warehouseId||null,plannedDeparture,plannedArrival,borderPort,valueOf(form,"transitLocation")||null,valueOf(form,"routeNotes")||null,valueOf(form,"notes")||null,overseasCarrierName,overseasVehicleType,overseasVehicleCount,overseasVehiclePlate,overseasDriverName,overseasDriverPhone,now,batchId,current.organizationId).run();
+    const existingVehicle=await env.DB.prepare("SELECT id FROM transport_batch_vehicles WHERE batch_id=? AND organization_id=? AND status!='cancelled' ORDER BY created_at LIMIT 1").bind(batchId,current.organizationId).first<{id:string}>();
+    await env.DB.batch([
+      env.DB.prepare("UPDATE transport_batches SET carrier_id=?,warehouse_id=COALESCE(?,warehouse_id),planned_departure_at=?,planned_arrival_at=?,border_port=?,transit_location=?,route_notes=?,notes=?,overseas_carrier_name=?,overseas_vehicle_type=?,overseas_vehicle_count=?,overseas_vehicle_plate=?,overseas_driver_name=?,overseas_driver_phone=?,updated_at=? WHERE id=? AND organization_id=?").bind(carrierId,warehouseId||null,plannedDeparture,plannedArrival,borderPort,valueOf(form,"transitLocation")||null,valueOf(form,"routeNotes")||null,valueOf(form,"notes")||null,overseasCarrierName,overseasVehicleType,overseasVehicleCount,overseasVehiclePlate,overseasDriverName,overseasDriverPhone,now,batchId,current.organizationId),
+      existingVehicle
+        ? env.DB.prepare("UPDATE transport_batch_vehicles SET carrier_id=?,vehicle_type=?,plate_number=?,driver_name=?,driver_phone=?,capacity_weight_kg=?,capacity_volume_cbm=?,status='planned',updated_at=? WHERE id=? AND organization_id=?").bind(carrierId,overseasVehicleType,overseasVehiclePlate,overseasDriverName,overseasDriverPhone,capacityWeight,capacityVolume,now,existingVehicle.id,current.organizationId)
+        : env.DB.prepare("INSERT INTO transport_batch_vehicles(id,organization_id,batch_id,vehicle_no,vehicle_type,plate_number,carrier_id,driver_name,driver_phone,capacity_weight_kg,capacity_volume_cbm,status,created_at,updated_at) VALUES(?,?,?,'MAIN-1',?,?,?,?,?,?,?,'planned',?,?)").bind(crypto.randomUUID(),current.organizationId,batchId,overseasVehicleType,overseasVehiclePlate,carrierId,overseasDriverName,overseasDriverPhone,capacityWeight,capacityVolume,now,now),
+    ]);
     await synchronizeBatchTransport(current.organizationId,batchId,now);
     await synchronizeBatchWarehouseProgress(current.organizationId,batchId,current.userId);
     await writeAudit({request,action:"transport.batch.arrangement.update",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{carrierId:carrierId||null,warehouseId:warehouseId||null}});
     return{success:"批次运输安排已保存；订单线路和货物数据已自动继承"};
   }
   if(intent==="vehicle"){
-    const vehicleNo=valueOf(form,"vehicleNo"),plateNumber=valueOf(form,"plateNumber").toUpperCase(),driverName=valueOf(form,"driverName");if(!vehicleNo||!plateNumber||!driverName)return{formError:"请填写车辆序号、车牌号和司机"};
+    const vehicleNo=valueOf(form,"vehicleNo");if(!vehicleNo)return{formError:"请填写车辆序号"};
+    const vehicleMasterId=valueOf(form,"vehicleMasterId"),driverMasterId=valueOf(form,"driverMasterId");
+    let vehicleType=valueOf(form,"vehicleType")||null,plateNumber=valueOf(form,"plateNumber"),driverName=valueOf(form,"driverName"),driverPhone=valueOf(form,"driverPhone")||null,capacityWeight=numberOf(form,"capacityWeight"),capacityVolume=numberOf(form,"capacityVolume");
+    if(vehicleMasterId){
+      const master=await env.DB.prepare("SELECT plate_number,vehicle_type,capacity_weight_kg,capacity_volume_cbm FROM carrier_vehicles WHERE id=? AND organization_id=? AND status='active'").bind(vehicleMasterId,current.organizationId).first<{plate_number:string;vehicle_type:string|null;capacity_weight_kg:number|null;capacity_volume_cbm:number|null}>();
+      if(!master)return{formError:"所选承运商车辆不存在或已停用，请到承运商管理维护车辆台账"};
+      vehicleType=vehicleType||master.vehicle_type;
+      plateNumber=plateNumber||master.plate_number;
+      capacityWeight=capacityWeight||master.capacity_weight_kg||0;
+      capacityVolume=capacityVolume||master.capacity_volume_cbm||0;
+    }
+    if(driverMasterId){
+      const master=await env.DB.prepare("SELECT name,phone FROM carrier_drivers WHERE id=? AND organization_id=? AND status='active'").bind(driverMasterId,current.organizationId).first<{name:string;phone:string|null}>();
+      if(!master)return{formError:"所选司机不存在或已停用，请到承运商管理维护司机台账"};
+      driverName=driverName||master.name;
+      driverPhone=driverPhone||master.phone||null;
+    }
+    plateNumber=plateNumber.toUpperCase();
+    if(!plateNumber||!driverName)return{formError:"请填写车牌号和司机（可从承运商车辆库 / 司机库下拉选择自动带出）"};
     const id=crypto.randomUUID();
-    try{await env.DB.prepare("INSERT INTO transport_batch_vehicles(id,organization_id,batch_id,vehicle_no,vehicle_type,plate_number,driver_name,driver_phone,capacity_weight_kg,capacity_volume_cbm,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").bind(id,current.organizationId,batchId,vehicleNo,valueOf(form,"vehicleType")||null,plateNumber,driverName,valueOf(form,"driverPhone")||null,numberOf(form,"capacityWeight"),numberOf(form,"capacityVolume"),now,now).run()}catch{return{formError:"车辆序号重复或车辆信息无效"}}
+    try{await env.DB.prepare("INSERT INTO transport_batch_vehicles(id,organization_id,batch_id,vehicle_no,vehicle_type,plate_number,driver_name,driver_phone,capacity_weight_kg,capacity_volume_cbm,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").bind(id,current.organizationId,batchId,vehicleNo,vehicleType,plateNumber,driverName,driverPhone,capacityWeight,capacityVolume,now,now).run()}catch{return{formError:"车辆序号重复或车辆信息无效"}}
     await synchronizeBatchTransport(current.organizationId,batchId,now);
     await synchronizeBatchWarehouseProgress(current.organizationId,batchId,current.userId);
     await writeAudit({request,action:"transport.batch.vehicle.create",resourceType:"transport_batch_vehicle",resourceId:id,organizationId:current.organizationId,actorUserId:current.userId,metadata:{batchId,vehicleNo}});
@@ -306,16 +470,16 @@ export async function action({request,params}:Route.ActionArgs){
     ]);
     if(!relation||!vehicle)return{formError:"订单或车辆不属于当前配载批次"};
     if(!packages.results.length)return{formError:"该订单没有可配载的包装记录"};
-    const packageIds=packages.results.map(item=>item.id),placeholders=packageIds.map(()=>"?").join(",");
+    const packageIds=packages.results.map(item=>item.id);
     const [used,actual]=await Promise.all([
-      env.DB.prepare(`SELECT COALESCE(SUM(x.weight),0) weight,COALESCE(SUM(x.volume),0) volume FROM (SELECT p.order_id,COALESCE((SELECT SUM(r.total_weight_kg) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=p.order_id AND r.status='completed'),SUM(i.gross_weight_per_package_kg)) weight,COALESCE((SELECT SUM(r.total_volume_cbm) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=p.order_id AND r.status='completed'),SUM(i.volume_per_package_cbm)) volume FROM transport_vehicle_loads l JOIN order_cargo_packages p ON p.id=l.package_id JOIN order_cargo_items i ON i.id=p.cargo_item_id WHERE l.vehicle_id=? AND l.package_id NOT IN (${placeholders}) GROUP BY p.order_id) x`).bind(vehicleId,...packageIds).first<{weight:number;volume:number}>(),
+      env.DB.prepare(`SELECT COALESCE(SUM(x.weight),0) weight,COALESCE(SUM(x.volume),0) volume FROM (SELECT p.order_id,COALESCE((SELECT SUM(r.total_weight_kg) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=p.order_id AND r.status='completed'),SUM(i.gross_weight_per_package_kg)) weight,COALESCE((SELECT SUM(r.total_volume_cbm) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=p.order_id AND r.status='completed'),SUM(i.volume_per_package_cbm)) volume FROM transport_vehicle_loads l JOIN order_cargo_packages p ON p.id=l.package_id JOIN order_cargo_items i ON i.id=p.cargo_item_id WHERE l.vehicle_id=? AND p.order_id!=? GROUP BY p.order_id) x`).bind(vehicleId,orderId).first<{weight:number;volume:number}>(),
       env.DB.prepare("SELECT SUM(r.total_weight_kg) weight,SUM(r.total_volume_cbm) volume FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE r.organization_id=? AND s.order_id=? AND r.status='completed'").bind(current.organizationId,orderId).first<{weight:number|null;volume:number|null}>(),
     ]);
     const orderWeight=actual?.weight??packages.results.reduce((sum,item)=>sum+item.weight,0),orderVolume=actual?.volume??packages.results.reduce((sum,item)=>sum+item.volume,0);
     if(vehicle.capacity_weight_kg>0&&(used?.weight??0)+orderWeight>vehicle.capacity_weight_kg)return{formError:"整票订单装入后将超过车辆重量上限"};
     if(vehicle.capacity_volume_cbm>0&&(used?.volume??0)+orderVolume>vehicle.capacity_volume_cbm)return{formError:"整票订单装入后将超过车辆体积上限"};
     const statements=[
-      env.DB.prepare(`DELETE FROM transport_vehicle_loads WHERE batch_id=? AND package_id IN (${placeholders})`).bind(batchId,...packageIds),
+      env.DB.prepare("DELETE FROM transport_vehicle_loads WHERE batch_id=? AND package_id IN (SELECT id FROM order_cargo_packages WHERE order_id=?)").bind(batchId,orderId),
       ...packageIds.map(packageId=>env.DB.prepare("INSERT INTO transport_vehicle_loads(id,organization_id,batch_id,vehicle_id,package_id,created_by_user_id,created_at) VALUES(?,?,?,?,?,?,?)").bind(crypto.randomUUID(),current.organizationId,batchId,vehicleId,packageId,current.userId,now)),
       env.DB.prepare("UPDATE transport_batches SET status='planning',updated_at=? WHERE id=?").bind(now,batchId),
       env.DB.prepare("UPDATE transport_batch_orders SET status='assigned',updated_at=? WHERE batch_id=? AND order_id=?").bind(now,batchId,orderId),
@@ -332,13 +496,34 @@ export async function action({request,params}:Route.ActionArgs){
     if(!actualExitAt||!exitPort||!exitVehiclePlate)return{formError:"请填写实际出境时间、出境口岸和出境车辆车牌"};
     if(!overseasCarrierName||!overseasVehicleType||!overseasVehiclePlate||!overseasDriverName||!overseasDriverPhone)return{formError:"境外承运方和车辆信息尚未完整，请先在本页配载单运输安排中补齐"};
     if(batch.road_status==="outbound_in_transit")return{formError:"该批次已经完成出境确认，请勿重复操作"};
-    const orders=await env.DB.prepare(`SELECT bo.order_id,s.id shipment_id,s.customer_id,s.current_location FROM transport_batch_orders bo LEFT JOIN shipments s ON s.id=(SELECT id FROM shipments WHERE order_id=bo.order_id ORDER BY created_at DESC LIMIT 1) WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed' ORDER BY bo.sequence_no`).bind(batchId,current.organizationId).all<{order_id:string;shipment_id:string|null;customer_id:string|null;current_location:string|null}>();
+    const orders=await env.DB.prepare(`SELECT bo.order_id,o.order_number,s.id shipment_id,s.customer_id,s.current_location FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id LEFT JOIN shipments s ON s.id=(SELECT id FROM shipments WHERE order_id=bo.order_id ORDER BY created_at DESC LIMIT 1) WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed' ORDER BY bo.sequence_no`).bind(batchId,current.organizationId).all<{order_id:string;order_number:string;shipment_id:string|null;customer_id:string|null;current_location:string|null}>();
     if(!orders.results.length)return{formError:"当前批次没有有效订单"};
     const blockers:string[]=[];
+    const batchCustomsStatus=await env.DB.prepare(
+      `SELECT bo.order_id,
+         COALESCE(MAX(CASE WHEN mi.id IS NOT NULL THEN 1 ELSE 0 END),0) customs_enabled,
+         COUNT(d.id) total,
+         COALESCE(SUM(CASE WHEN d.status='released' THEN 1 ELSE 0 END),0) released
+       FROM transport_batch_orders bo
+       LEFT JOIN order_module_instances mi ON mi.organization_id=bo.organization_id AND mi.order_id=bo.order_id AND mi.module_code='customs' AND mi.enabled=1
+       LEFT JOIN order_customs_declarations d ON d.order_id=bo.order_id AND d.organization_id=bo.organization_id AND d.is_deleted=0 AND d.status!='cancelled'
+       WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed'
+       GROUP BY bo.order_id`,
+    ).bind(batchId,current.organizationId).all<{ order_id: string; customs_enabled: number; total: number; released: number }>();
+    const customsStatusByOrder = new Map(
+      batchCustomsStatus.results.map((item) => [item.order_id, item]),
+    );
     const sharedDocumentGate=await env.DB.prepare("SELECT COUNT(*) total,SUM(CASE WHEN review_status IN ('approved','archived') THEN 1 ELSE 0 END) approved FROM transport_batch_documents WHERE organization_id=? AND batch_id=? AND document_category='loading_manifest'").bind(current.organizationId,batchId).first<{total:number;approved:number|null}>();
-    if(!(sharedDocumentGate?.total??0))blockers.push("配载清单尚未上传");
+    if(!(sharedDocumentGate?.total??0))blockers.push("配载清单尚未生成（可在配载单文件工作台一键生成）");
     else if((sharedDocumentGate?.approved??0)<(sharedDocumentGate?.total??0))blockers.push("配载清单尚未全部审核通过");
     for(const item of orders.results){
+      const customsStatus=customsStatusByOrder.get(item.order_id)??{customs_enabled:0,total:0,released:0};
+      if(customsStatus.customs_enabled===1 && customsStatus.total===0){
+        blockers.push(`订单${item.order_number}尚未录入有效报关单`);
+      }
+      if(customsStatus.customs_enabled===1 && customsStatus.released!==customsStatus.total){
+        blockers.push(`订单${item.order_number}的起运地/目的地报关尚未全部放行（${customsStatus.released}/${customsStatus.total}）`);
+      }
       const dispatched=await env.DB.prepare(`SELECT 1 FROM warehouse_dispatches d JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id JOIN warehouse_packages p ON p.id=di.package_id JOIN shipments s ON s.id=p.shipment_id WHERE d.organization_id=? AND s.order_id=? AND d.status='dispatched' LIMIT 1`).bind(current.organizationId,item.order_id).first();
       if(!dispatched){blockers.push("存在尚未完成仓库装车出库交接的订单");continue;}
       const readiness=await checkOrderDeparture(current.organizationId,item.order_id,undefined,{warehouseDispatchConfirmed:true});
@@ -353,6 +538,9 @@ export async function action({request,params}:Route.ActionArgs){
       env.DB.prepare("UPDATE order_module_instances SET status='in_progress',current_step_code='transit',current_step_name='出境运输中',progress_percent=50,started_at=COALESCE(started_at,?),blocking_reason=NULL,updated_at=? WHERE organization_id=? AND module_code='tracking' AND enabled=1 AND order_id IN (SELECT order_id FROM transport_batch_orders WHERE batch_id=? AND status!='removed')").bind(now,now,current.organizationId,batchId),
     ];
     for(const item of orders.results){
+      statements.push(env.DB.prepare(`INSERT INTO order_tracking_milestones(id,organization_id,order_id,milestone_code,milestone_name,event_at,location,vehicle_reference,notes,visible_to_customer,created_by_user_id,created_at)
+        SELECT ?,?,?,'exported','出境',?,?,?,?,1,?,?
+        WHERE NOT EXISTS(SELECT 1 FROM order_tracking_milestones WHERE organization_id=? AND order_id=? AND milestone_code='exported' AND event_at=?)`).bind(crypto.randomUUID(),current.organizationId,item.order_id,actualExitAt,exitPort,exitVehiclePlate,valueOf(form,"exitNotes")||null,current.userId,now,current.organizationId,item.order_id,actualExitAt));
       statements.push(env.DB.prepare("UPDATE order_cargo_packages SET status='in_transit' WHERE order_id=? AND organization_id=? AND status NOT IN ('cancelled','delivered')").bind(item.order_id,current.organizationId));
       statements.push(env.DB.prepare(`INSERT INTO order_tasks(id,organization_id,order_id,module_code,task_type,title,priority,status,assignee_user_id,assigned_by_user_id,created_at,updated_at)
         SELECT ?,?,?, 'costs','start_receivable_reconciliation','发起客户应收对账','normal','pending',NULL,?,?,?
@@ -367,7 +555,7 @@ export async function action({request,params}:Route.ActionArgs){
     }
     await env.DB.batch(statements);
     await Promise.all(orders.results.map(async item=>{
-      await syncOrderWorkflowSnapshot(current.organizationId,item.order_id);
+      await syncTrackingModuleStatusForOrder(current.organizationId,item.order_id,"exported",current.userId,now);
       if(item.shipment_id&&item.customer_id)await recordWorkflowEvent({organizationId:current.organizationId,event:"shipment.in_transit",customerId:item.customer_id,orderId:item.order_id,shipmentId:item.shipment_id,actorUserId:current.userId,source:"admin",metadata:{batchId,batchNumber:batch.batch_number,exitPort,exitVehiclePlate,overseasVehiclePlate:overseasVehiclePlate||null,overseasCarrierName:overseasCarrierName||null,overseasDriverName:overseasDriverName||null}});
     }));
     await writeAudit({request,action:"transport.batch.exit.confirm",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{actualExitAt,exitPort,exitVehiclePlate,orders:orders.results.length}});
@@ -389,7 +577,9 @@ export async function action({request,params}:Route.ActionArgs){
     const column=optionCode==="transloaded"?"requires_transloading":"requires_transit_customs";
     const orderIds=await getBatchOrderIds(current.organizationId,batchId);
     if(!orderIds.length)return{formError:"当前批次没有可操作的订单"};
-    await env.DB.prepare(`UPDATE transport_orders SET ${column}=?, updated_at=? WHERE organization_id=? AND id IN (${orderIds.map(()=>"?").join(",")})`).bind(enable?1:0,now,current.organizationId,...orderIds).run();
+    for (const chunk of chunkArray(orderIds, CHUNK_SIZE)) {
+      await env.DB.prepare(`UPDATE transport_orders SET ${column}=?, updated_at=? WHERE organization_id=? AND id IN (${chunk.map(() => "?").join(",")})`).bind(enable ? 1 : 0, now, current.organizationId, ...chunk).run();
+    }
     await writeAudit({request,action:"transport.batch.tracking_option.toggle",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{optionCode,enable,orders:orderIds.length}});
     return{success:enable?`已为 ${orderIds.length} 票订单开启"${optionCode==="transloaded"?"可换装":"可转运"}"`:`已为 ${orderIds.length} 票订单关闭"${optionCode==="transloaded"?"可换装":"可转运"}"`};
   }
@@ -397,6 +587,8 @@ export async function action({request,params}:Route.ActionArgs){
     const milestoneCode=valueOf(form,"milestoneCode");
     const milestoneDef=BATCH_TRACKING_MILESTONES.find(item=>item.code===milestoneCode);
     if(!milestoneDef)return{formError:"请选择有效的运输节点"};
+    if(milestoneCode==="exported")return{formError:"请在本页“出境门禁与确认”填写实际出境时间并确认，系统会自动登记出境节点"};
+    if(milestoneCode==="station_arrived")return{formError:"请在本页“出境后批量推进”确认实际到达境外仓，系统会自动登记到仓节点"};
     const eventAt=valueOf(form,"eventAt");
     if(!eventAt)return{formError:"请填写事件时间"};
     const orderIds=await getBatchOrderIds(current.organizationId,batchId);
@@ -427,10 +619,12 @@ export async function action({request,params}:Route.ActionArgs){
     for(const orderId of orderIds){
       await syncTrackingModuleStatusForOrder(current.organizationId,orderId,milestoneCode,current.userId,now);
     }
+    // 同步每票订单的工作流快照（batch-tracking.server.ts 不再 import order-modules.server）
+    await Promise.all(orderIds.map((orderId)=>syncOrderWorkflowSnapshotSafe(current.organizationId,orderId)));
     // 同步批次 road_status / transport_batch_orders 状态
     await syncBatchRoadStatusFromTracking(current.organizationId,batchId,orderIds,now);
     // 同步 shipment 轨迹事件
-    const milestoneStatusMap:Record<string,string>={border_arrived:"in_transit",exported:"in_transit",transloaded:"in_transit",transit_customs:"in_transit",foreign_entered:"in_transit",customs_cleared:"in_transit",station_arrived:"delivered"};
+    const milestoneStatusMap:Record<string,string>={border_arrived:"customs",exported:"in_transit",transloaded:"in_transit",transit_customs:"in_transit",foreign_entered:"in_transit",customs_cleared:"in_transit",station_arrived:"in_transit"};
     await recordShipmentEventForBatchOrders({
       organizationId:current.organizationId,
       orderIds,
@@ -454,16 +648,27 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   const assignedOrders=loaderData.orders.filter(item=>item.assigned_count>0);
   const planReady=Boolean(loaderData.batch.carrier_id&&loaderData.batch.border_port&&loaderData.batch.planned_departure_at&&loaderData.batch.planned_arrival_at);
   const loadPlanReady=planReady&&loaderData.vehicles.length>0&&unassignedOrders===0;
+  const flagsByOrder=new Map(loaderData.trackingFlags.map(item=>[item.order_id,item]));
+  const requiresTransloading=loaderData.orders.some(o=>flagsByOrder.get(o.order_id)?.requires_transloading===1);
   const dispatchedCount=loaderData.outboundStatuses.filter(item=>item.dispatched===1).length;
   const allDispatched=loaderData.orders.length>0&&dispatchedCount===loaderData.orders.length;
   const sharedDocumentsReady=BATCH_DOCUMENT_TYPES.filter(item=>item.required).every(type=>loaderData.batchDocuments.some(document=>document.document_category===type.code&&["approved","archived"].includes(document.review_status)));
+  // 报关就绪：报关资料文件已审核 AND 报关单已放行
+  const customsReadyForOrder=(orderId:string)=>{
+    const customs=loaderData.customsSummaries.find(item=>item.order_id===orderId);
+    const customsDeclReady=Boolean(customs&&customs.total>0&&customs.released===customs.total);
+    const files=loaderData.orderDocuments.filter(item=>item.order_id===orderId);
+    const customsDocApproved=files.some(item=>item.document_category==="customs_document"&&["approved","archived"].includes(item.review_status));
+    return customsDeclReady&&customsDocApproved;
+  };
+  const firstOrderCustomsReady=assignedOrders.length>0?customsReadyForOrder(assignedOrders[0].order_id):false;
   const orderDepartureReady=loaderData.departureGateStatuses.every(item=>item.ready);
   const transportResourceReady=Boolean(loaderData.batch.overseas_carrier_name&&loaderData.batch.overseas_vehicle_type&&loaderData.batch.overseas_vehicle_count>0&&loaderData.batch.overseas_vehicle_plate&&loaderData.batch.overseas_driver_name&&loaderData.batch.overseas_driver_phone);
   const canConfirmExit=allDispatched&&sharedDocumentsReady&&orderDepartureReady&&transportResourceReady;
   const exitBlockers=[
     ...(!allDispatched?[`仓库装车出库交接未完成（${dispatchedCount}/${loaderData.orders.length} 票）`]:[]),
     ...(!transportResourceReady?["境外承运方、车型、车牌、司机姓名或司机电话尚未补齐"]:[]),
-    ...(!sharedDocumentsReady?["配载清单尚未上传并审核通过"]:[]),
+    ...(!sharedDocumentsReady?["配载清单尚未生成或审核通过（可在配载单文件工作台一键生成）"]:[]),
     ...loaderData.departureGateStatuses.flatMap(item=>item.reasons.map(reason=>`${loaderData.orders.find(order=>order.order_id===item.order_id)?.order_number||"订单"}：${reason}`)),
   ];
   return <><header className="page-header"><div><p className="eyebrow">LOAD SHEET · BATCH WORKBENCH</p><h1>{loaderData.batch.batch_number}</h1><p>{loaderData.batch.batch_name} · {loaderData.batch.origin_location} → {loaderData.batch.destination_location}</p></div><div className="page-actions">{loaderData.returnOrderId&&<Link className="secondary" to={`/admin/orders/${loaderData.returnOrderId}`}>返回订单详情</Link>}<Link className="secondary" to="/admin/loading">返回配载工作台</Link><span className="status-pill">{roadStatusLabels[loaderData.batch.road_status]||loaderData.batch.road_status}</span></div></header>{(actionData?.success||actionData?.formError)&&<div className={`alert ${actionData.formError?"error":"success"}`}>{actionData.formError??actionData.success}</div>}
@@ -491,55 +696,53 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
         <Field name="plannedArrival" label="计划到达" type="datetime-local" required defaultValue={dateTimeLocal(loaderData.batch.planned_arrival_at)}/>
         <label className="field span-2"><span>装载要求 / 实际路线</span><input name="routeNotes" defaultValue={loaderData.batch.route_notes||""} placeholder="例如口岸、换装点、装载要求和行驶路线"/></label>
         <label className="field span-2"><span>业务备注</span><input name="notes" defaultValue={loaderData.batch.notes||""}/></label>
-        <div className="form-section-title span-2"><strong>境外运输资源</strong><small>确定整车/拼车方案后立即登记；出境确认将直接继承。</small></div>
-        <label className="field"><span>境外承运方 *</span><select name="overseasCarrierName" defaultValue={loaderData.batch.overseas_carrier_name||""} required><option value="">请选择承运方</option>{loaderData.carriers.map(item=><option key={item.id} value={item.name}>{item.name}</option>)}</select></label>
-        <Field name="overseasVehicleType" label="境外车型 *" required defaultValue={loaderData.batch.overseas_vehicle_type||""}/>
-        <Field name="overseasVehicleCount" label="车辆数目 *" type="number" required defaultValue={String(loaderData.batch.overseas_vehicle_count||1)}/>
-        <Field name="overseasVehiclePlate" label="境外车牌号 *" required defaultValue={loaderData.batch.overseas_vehicle_plate||""}/>
-        <Field name="overseasDriverName" label="司机姓名 *" required defaultValue={loaderData.batch.overseas_driver_name||""}/>
-        <Field name="overseasDriverPhone" label="司机电话 *" required defaultValue={loaderData.batch.overseas_driver_phone||""}/>
+        <div className="form-section-title span-2"><strong>境外运输资源</strong><small>确定整车/拼车方案后立即登记；出境确认将直接继承。车辆与司机优先从承运商车辆库下拉选择，避免重复录入。</small></div>
+        <OverseasResourceFields batch={loaderData.batch} carrierVehicles={loaderData.carrierVehicles} carrierDrivers={loaderData.carrierDrivers}/>
         <button className="primary" disabled={busy||!loaderData.carriers.length}>保存配载单信息</button>
       </Form>}
       <aside className="loading-sheet-tools">
-        {manage&&<details className="loading-tool-card" open={!loaderData.vehicles.length}><summary>新增车辆</summary><Form method="post" className="compact-tool-form"><input type="hidden" name="intent" value="vehicle"/><Field name="vehicleNo" label="车辆序号" required/><label className="field"><span>车型</span><select name="vehicleType" defaultValue=""><option value="">请选择车型</option>{VEHICLE_TYPE_OPTIONS.map(item=><option key={item} value={item}>{item}</option>)}</select></label><Field name="plateNumber" label="车牌号" required/><Field name="driverName" label="司机" required/><Field name="driverPhone" label="司机电话"/><Field name="capacityWeight" label="载重上限 KG" type="number"/><Field name="capacityVolume" label="体积上限 CBM" type="number"/><button className="secondary" disabled={busy}>添加车辆</button></Form></details>}
-        {manage&&<details className="loading-tool-card" open={loaderData.vehicles.length>0&&unassignedOrders>0}><summary>分配整票订单到车辆</summary><Form method="post" className="compact-tool-form"><input type="hidden" name="intent" value="assign_order"/><Select name="orderId" label="订单" items={loaderData.orders.map(item=>[item.order_id,`${item.order_number} · ${item.customer_name} · ${item.package_count} 包装`])}/><Select name="vehicleId" label="车辆" items={loaderData.vehicles.map(item=>[item.id,`${item.vehicle_no} · ${item.plate_number||"未录车牌"}`])}/>{!loaderData.vehicles.length&&<small className="field-error">请先添加至少一辆车。</small>}<button className="secondary" disabled={busy||!loaderData.vehicles.length||!loaderData.orders.length}>确认装载指令</button></Form>{actionData?.success?.startsWith("装载指令已确认")&&<div className="alert success loading-assignment-feedback">{actionData.success}</div>}<div className="loading-assignment-records"><header><strong>分配记录</strong><span>{assignedOrders.length}/{loaderData.orders.length} 票已分配</span></header>{assignedOrders.map(item=><div className="loading-assignment-record" key={item.order_id}><div><strong>{item.order_number}</strong><small>{item.customer_name}</small></div><div><span>装载车辆</span><strong>{item.vehicle_names||"未记录"}</strong></div><div><span>包装</span><strong>{item.assigned_count}/{item.package_count}</strong></div><span className={`status-pill ${item.assigned_count>=item.package_count?"success":""}`}>{item.assigned_count>=item.package_count?"已确认":"部分分配"}</span></div>)}{!assignedOrders.length&&<p className="empty-state">尚无分配记录；确认装载指令后将显示在这里。</p>}{assignedOrders.length>0&&<WarehouseOutboundAction orderId={assignedOrders[0].order_id} batchId={loaderData.batch.id}/>}</div></details>}
+        {manage&&<details className="loading-tool-card" open={loaderData.vehicles.length>0&&unassignedOrders>0}><summary>分配整票订单到车辆</summary><Form method="post" className="compact-tool-form"><input type="hidden" name="intent" value="assign_order"/><Select name="orderId" label="订单" items={loaderData.orders.map(item=>[item.order_id,`${item.order_number} · ${item.customer_name} · ${item.package_count} 包装`])}/><Select name="vehicleId" label="车辆" items={loaderData.vehicles.map(item=>[item.id,`${item.vehicle_no} · ${item.plate_number||"未录车牌"}`])}/>{!loaderData.vehicles.length&&<small className="field-error">请先添加至少一辆车。</small>}<button className="secondary" disabled={busy||!loaderData.vehicles.length||!loaderData.orders.length}>确认装载指令</button></Form>{actionData?.success?.startsWith("装载指令已确认")&&<div className="alert success loading-assignment-feedback">{actionData.success}</div>}<div className="loading-assignment-records"><header><strong>分配记录</strong><span>{assignedOrders.length}/{loaderData.orders.length} 票已分配</span></header>{assignedOrders.map(item=><div className="loading-assignment-record" key={item.order_id}><div><strong>{item.order_number}</strong><small>{item.customer_name}</small></div><div><span>装载车辆</span><strong>{item.vehicle_names||"未记录"}</strong></div><div><span>包装</span><strong>{item.assigned_count}/{item.package_count}</strong></div><span className={`status-pill ${item.assigned_count>=item.package_count?"success":""}`}>{item.assigned_count>=item.package_count?"已确认":"部分分配"}</span></div>)}{!assignedOrders.length&&<p className="empty-state">尚无分配记录；确认装载指令后将显示在这里。</p>}{assignedOrders.length>0&&<WarehouseOutboundAction orderId={assignedOrders[0].order_id} batchId={loaderData.batch.id} customsReady={firstOrderCustomsReady}/>}</div></details>}
       </aside>
     </div>
     <LoadingTotals totals={totals}/>
     <div className="loading-sheet-columns">
-      <section className="loading-sheet-section"><header><h3>挂载订单</h3><span>货物名称按每票货物明细完整汇总；这些订单跟随本配载单批量推进</span></header><div className="table-wrap loading-sheet-table"><table><thead><tr><th>订单号</th><th>工作号</th><th>委托人</th><th>起运地</th><th>目的地</th><th>货物名称</th><th>件数</th><th>报关重量</th><th>报关体积</th><th>进仓重量</th><th>进仓体积</th><th>车辆</th><th>境外仓</th><th>操作</th></tr></thead><tbody>{loaderData.orders.map(item=><tr key={item.order_id}><td><Link to={`/admin/orders/${item.order_id}/modules/loading`}><strong>{item.order_number}</strong></Link></td><td>{item.work_number}</td><td>{item.customer_name}</td><td>{loaderData.batch.origin_location}</td><td>{loaderData.batch.destination_location}</td><td><strong className="loading-cargo-names">{item.cargo_names||item.cargo_description||"未填写"}</strong></td><td>{item.pieces}</td><td>{item.declared_weight_kg.toFixed(2)}</td><td>{item.declared_volume_cbm.toFixed(3)}</td><td>{item.gross_weight_kg.toFixed(2)}</td><td>{item.volume_cbm.toFixed(3)}</td><td>{item.vehicle_names||"待分配"}</td><td>{item.overseas_status==="arrived"||item.overseas_status==="notified"||item.overseas_status==="appointment"||item.overseas_status==="picked_up"?<span className="status-pill success">{item.overseas_arrival_at?`已到仓 ${formatShortDateTime(item.overseas_arrival_at)}`:"已到仓"}</span>:<span className="status-pill off">未到仓</span>}</td><td><div className="loading-row-actions"><Link className="text-button" to={`/admin/orders/${item.order_id}`}>订单中心</Link><a className="text-button" href="#batch-files">处理文件</a></div></td></tr>)}</tbody></table></div></section>
+      <section className="loading-sheet-section"><header><h3>挂载订单</h3><span>货物名称按每票货物明细完整汇总；这些订单跟随本配载单批量推进</span></header><div className="table-wrap loading-sheet-table"><table><thead><tr><th>订单号</th><th>工作号</th><th>委托人</th><th>起运地</th><th>目的地</th><th>货物名称</th><th>件数</th><th>报关重量</th><th>报关体积</th><th>进仓重量</th><th>进仓体积</th><th>入库时间</th><th>货物状态</th><th>车辆</th><th>境外仓</th><th>操作</th></tr></thead><tbody>{loaderData.orders.map(item=><tr key={item.order_id}><td><Link to={`/admin/orders/${item.order_id}/modules/loading`}><strong>{item.order_number}</strong></Link></td><td>{item.work_number}</td><td>{item.customer_name}</td><td>{loaderData.batch.origin_location}</td><td>{loaderData.batch.destination_location}</td><td><strong className="loading-cargo-names">{item.cargo_names||item.cargo_description||"未填写"}</strong></td><td>{item.pieces}</td><td>{item.declared_weight_kg.toFixed(2)}</td><td>{item.declared_volume_cbm.toFixed(3)}</td><td>{item.gross_weight_kg.toFixed(2)}</td><td>{item.volume_cbm.toFixed(3)}</td><td>{item.inbound_at?formatShortDateTime(item.inbound_at):<span className="off">未入库</span>}</td><td>{item.dispatched_packages>0?<span className="status-pill success">已出库 {item.dispatched_packages}</span>:item.inbound_at?(item.in_stock_packages>0?<span className="status-pill">在库 {item.in_stock_packages}</span>:<span className="status-pill off">无在库包装</span>):<span className="status-pill off">未入库</span>}</td><td>{item.vehicle_names||"待分配"}</td><td>{item.overseas_status==="arrived"||item.overseas_status==="notified"||item.overseas_status==="appointment"||item.overseas_status==="picked_up"?<span className="status-pill success">{item.overseas_arrival_at?`已到仓 ${formatShortDateTime(item.overseas_arrival_at)}`:"已到仓"}</span>:<span className="status-pill off">未到仓</span>}</td><td><div className="loading-row-actions"><Link className="text-button" to={`/admin/orders/${item.order_id}`}>订单中心</Link><a className="text-button" href="#batch-files">处理文件</a></div></td></tr>)}</tbody></table></div></section>
       <section className="loading-sheet-section"><header><h3>车辆容量</h3><span>分配时自动校验重量和体积</span></header><div className="loading-vehicle-grid compact">{loaderData.vehicles.map(vehicle=><article key={vehicle.id}><header><strong>{vehicle.vehicle_no}</strong><span>{vehicle.plate_number||"车牌待录"}</span></header><p>{vehicle.vehicle_type||"车型待录"} · {vehicle.driver_name||"司机待定"} · {vehicle.driver_phone||"电话待录"}</p><div><span>重量 {vehicle.used_weight.toFixed(2)} / {vehicle.capacity_weight_kg||"不限"} KG</span><span>体积 {vehicle.used_volume.toFixed(3)} / {vehicle.capacity_volume_cbm||"不限"} CBM</span><span>{vehicle.loaded_orders} 票订单</span></div></article>)}</div>{!loaderData.vehicles.length&&<p className="empty-state">当前批次还没有车辆。</p>}</section>
     </div>
   </section>
-  <BatchDocumentWorkbench batchId={loaderData.batch.id} orders={loaderData.orders} batchDocuments={loaderData.batchDocuments} orderDocuments={loaderData.orderDocuments} customsSummaries={loaderData.customsSummaries} customsDeclarations={loaderData.customsDeclarations} busy={busy} manage={manage}/>
+  <BatchDocumentWorkbench batchId={loaderData.batch.id} orders={loaderData.orders} batchDocuments={loaderData.batchDocuments} orderDocuments={loaderData.orderDocuments} customsSummaries={loaderData.customsSummaries} customsDeclarations={loaderData.customsDeclarations} busy={busy} manage={manage} requiresTransloading={requiresTransloading}/>
   <BatchTrackingWorkbench batchId={loaderData.batch.id} batchNumber={loaderData.batch.batch_number} orders={loaderData.orders} trackingMilestones={loaderData.trackingMilestones} trackingFlags={loaderData.trackingFlags} batchVehiclePlate={loaderData.batchVehiclePlate} overseasVehiclePlate={loaderData.batch.overseas_vehicle_plate||null} borderPort={loaderData.batch.border_port||null} busy={busy} manage={manage}/>
   <CostAllocationSection allocations={loaderData.costAllocations} busy={busy} manage={manage}/>
   <section className="panel" id="batch-exit-gate"><div className="panel-header"><div><h2>6. 出境门禁与确认</h2><p>这里逐项核对整批订单；全部通过后，才能统一确认出境并同步所有挂载订单。</p></div><span className="status-pill">{roadStatusLabels[loaderData.batch.road_status]||loaderData.batch.road_status}</span></div>
     <div className="batch-exit-gates">
       <div className={`batch-exit-gate ${allDispatched?"ready":"blocked"}`}><span>仓库装车出库</span><strong>{allDispatched?"全部订单已完成交接":`${dispatchedCount}/${loaderData.orders.length} 票已完成`}</strong></div>
       <div className={`batch-exit-gate ${transportResourceReady?"ready":"blocked"}`}><span>境外运输资源</span><strong>{transportResourceReady?`${loaderData.batch.overseas_carrier_name} · ${loaderData.batch.overseas_vehicle_plate}`:"承运方、车辆或司机资料未齐"}</strong></div>
-      <div className={`batch-exit-gate ${sharedDocumentsReady?"ready":"blocked"}`}><span>配载单文件</span><strong>{sharedDocumentsReady?"配载清单已审核":"配载清单待上传或审核"}</strong></div>
+      <div className={`batch-exit-gate ${sharedDocumentsReady?"ready":"blocked"}`}><span>配载单文件</span><strong>{sharedDocumentsReady?"配载清单已生成并审核":"配载清单待生成"}</strong></div>
       <div className={`batch-exit-gate ${orderDepartureReady?"ready":"blocked"}`}><span>逐票资料与报关</span><strong>{orderDepartureReady?"全部订单门禁已通过":`${loaderData.departureGateStatuses.filter(item=>!item.ready).length} 票待处理`}</strong></div>
     </div>
-    {loaderData.batch.road_status==="outbound_in_transit"?<div className="alert success">本配载单已出境；现在可以在下方继续确认到境外仓。</div>:["overseas_arrived","waiting_pickup","pickup_completed"].includes(loaderData.batch.road_status)?<div className="alert success">本配载单已完成出境确认。</div>:canConfirmExit&&manage?<Form method="post" className="form-grid compact"><input type="hidden" name="intent" value="exit_confirm"/><Field name="actualExitAt" label="实际出境时间" type="datetime-local" required/><label className="field"><span>实际出境口岸</span><select name="exitPort" defaultValue={loaderData.batch.border_port||""} required><option value="">请选择</option>{loaderData.borderPorts.map(item=><option key={item.code} value={item.code}>{item.name} · {item.code}</option>)}</select></label><Field name="exitVehiclePlate" label="实际出境车辆车牌" required defaultValue={loaderData.batch.overseas_vehicle_plate||loaderData.vehicles.map(item=>item.plate_number).filter(Boolean).join("、")}/><Field name="proofReference" label="出境凭证 / 图片编号"/><Field name="exitNotes" label="出境备注"/><button className="primary" disabled={busy}>确认本配载单已出境并同步订单</button></Form>:<div className="batch-gate-blocker"><div><strong>当前还不能确认出境</strong><p>完成下面的未通过项目后，系统会自动开放“确认出境”。</p>{exitBlockers.length?<ul>{Array.from(new Set(exitBlockers)).map(reason=><li key={reason}>{reason}</li>)}</ul>:<p>当前账号只能查看门禁状态。</p>}</div><div className="batch-gate-actions">{!allDispatched&&assignedOrders[0]&&<WarehouseOutboundAction orderId={assignedOrders[0].order_id} batchId={loaderData.batch.id}/>}<a className="secondary" href="#batch-files">处理配载单文件与逐票报关</a>{!loadPlanReady&&<a className="secondary" href="#batch-arrangement">完善配载和车辆安排</a>}</div></div>}
+    {loaderData.batch.road_status==="outbound_in_transit"?<div className="alert success">本配载单已出境；现在可以在下方继续确认到境外仓。</div>:["overseas_arrived","waiting_pickup","pickup_completed"].includes(loaderData.batch.road_status)?<div className="alert success">本配载单已完成出境确认。</div>:canConfirmExit&&manage?<Form method="post" className="form-grid compact"><input type="hidden" name="intent" value="exit_confirm"/><Field name="actualExitAt" label="实际出境时间" type="datetime-local" required/><label className="field"><span>实际出境口岸</span><select name="exitPort" defaultValue={loaderData.batch.border_port||""} required><option value="">请选择</option>{loaderData.borderPorts.map(item=><option key={item.code} value={item.code}>{item.name} · {item.code}</option>)}</select></label><Field name="exitVehiclePlate" label="实际出境车辆车牌" required defaultValue={loaderData.batch.overseas_vehicle_plate||loaderData.vehicles.map(item=>item.plate_number).filter(Boolean).join("、")}/><Field name="proofReference" label="出境凭证 / 图片编号"/><Field name="exitNotes" label="出境备注"/><button className="primary" disabled={busy}>确认本配载单已出境并同步订单</button></Form>:<div className="batch-gate-blocker"><div><strong>当前还不能确认出境</strong><p>完成下面的未通过项目后，系统会自动开放“确认出境”。</p>{exitBlockers.length?<ul>{Array.from(new Set(exitBlockers)).map(reason=><li key={reason}>{reason}</li>)}</ul>:<p>当前账号只能查看门禁状态。</p>}</div><div className="batch-gate-actions">{!allDispatched&&assignedOrders[0]&&<WarehouseOutboundAction orderId={assignedOrders[0].order_id} batchId={loaderData.batch.id} customsReady={firstOrderCustomsReady}/>}<a className="secondary" href="#batch-files">处理配载单文件与逐票报关</a>{!loadPlanReady&&<a className="secondary" href="#batch-arrangement">完善配载和车辆安排</a>}</div></div>}
   </section>
   <section className="panel"><div className="panel-header"><div><h2>7. 出境后批量推进</h2><p>货到境外目的仓后，在这里一次确认本配载单全部挂载订单到仓；后续通知、预约、自提再回到各订单境外仓模块办理。</p></div><span className="status-pill">{loaderData.orders.filter(item=>item.overseas_status&&item.overseas_status!=="waiting_arrival").length}/{loaderData.orders.length} 票到仓</span></div>{loaderData.batch.road_status==="outbound_in_transit"&&manage?<Form method="post" className="batch-arrival-form"><input type="hidden" name="intent" value="overseas_arrival"/><Field name="actualArrivalAt" label="实际到达境外仓时间" type="datetime-local" required/><label className="field span-2"><span>到仓备注</span><input name="arrivalNotes" placeholder="例如境外仓签收人、到仓异常、卸货说明"/></label><button className="primary" disabled={busy}>确认本配载单已到境外仓并同步订单</button></Form>:["overseas_arrived","waiting_pickup","pickup_completed"].includes(loaderData.batch.road_status)?<div className="alert success">本配载单已确认到境外仓；挂载订单已进入境外仓自提流程。</div>:<div className="alert warning">当前步骤尚未开放：请先在上方完成全部出境门禁并确认出境，之后才能登记到达境外仓。</div>}</section>
   </>}
 
-function BatchDocumentWorkbench({batchId,orders,batchDocuments,orderDocuments,customsSummaries,customsDeclarations,busy,manage}:{batchId:string;orders:BatchOrder[];batchDocuments:BatchDocument[];orderDocuments:OrderDocument[];customsSummaries:CustomsSummary[];customsDeclarations:BatchCustomsDeclaration[];busy:boolean;manage:boolean}){
+function BatchDocumentWorkbench({batchId,orders,batchDocuments,orderDocuments,customsSummaries,customsDeclarations,busy,manage,requiresTransloading}:{batchId:string;orders:BatchOrder[];batchDocuments:BatchDocument[];orderDocuments:OrderDocument[];customsSummaries:CustomsSummary[];customsDeclarations:BatchCustomsDeclaration[];busy:boolean;manage:boolean;requiresTransloading:boolean}){
   const approvedShared=new Set(batchDocuments.filter(item=>["approved","archived"].includes(item.review_status)).map(item=>item.document_category));
-  const missingShared=BATCH_DOCUMENT_TYPES.filter(item=>item.required&&!approvedShared.has(item.code));
+  const visibleBatchDocTypes=BATCH_DOCUMENT_TYPES.filter(type=>requiresTransloading||!["border_handover","transshipment_order"].includes(type.code));
+  const missingShared=visibleBatchDocTypes.filter(item=>item.required&&!approvedShared.has(item.code));
   return <section className="panel batch-document-workbench" id="batch-files">
     <div className="panel-header"><div><h2>3. 配载单文件工作台</h2><p>在这一页处理整批共用文件和每票订单文件；上传结果仍归属原订单，出境门禁自动汇总检查。</p></div><span className={`status-pill ${missingShared.length?"":"success"}`}>{missingShared.length?`整批缺 ${missingShared.length} 项`:"整批文件已齐"}</span></div>
-    <div className="batch-document-scope-note"><strong>整批共用</strong><span>配载清单、装车清单、批次运单、口岸交接文件只上传一次。</span><strong>逐票独立</strong><span>委托书、合同、发票、装箱单、报关资料和报关单按订单分别检查。</span></div>
-    <section className="batch-shared-documents"><header><div><h3>整批共用文件</h3><p>“配载清单”必须上传并审核通过，其他文件按实际业务发生时补充。</p></div></header>
-      <div className="batch-document-grid">{BATCH_DOCUMENT_TYPES.map(type=>{
+    <div className="batch-document-scope-note"><strong>整批共用</strong><span>配载清单由工作台自动生成，装车清单、批次运单{requiresTransloading?"、口岸交接文件与换装单":""}按需上传。</span><strong>逐票独立</strong><span>委托书、发票、装箱单、报关资料和报关单按订单分别检查。</span></div>
+    <section className="batch-shared-documents"><header><div><h3>整批共用文件</h3><p>“配载清单”由配载工作台自动生成并自动审核通过，其他文件按实际业务发生时补充{requiresTransloading?"；换装文件仅在开启换装后显示":""}。</p></div></header>
+      <div className="batch-document-grid">{visibleBatchDocTypes.map(type=>{
         const current=batchDocuments.find(item=>item.document_category===type.code);
+        const isManifest=type.code==="loading_manifest";
         return <article className={current&&["approved","archived"].includes(current.review_status)?"ready":""} key={type.code}>
           <div><strong>{type.name}{type.required&&<b className="required-mark"> *</b>}</strong><small>{type.hint}</small></div>
-          <div className="batch-document-current">{current?<><span className={`status-pill ${current.review_status==="approved"?"success":""}`}>{documentReviewLabel(current.review_status)}</span><a href={current.data_url} target="_blank" rel="noreferrer">{current.file_name}</a></>:<span className="status-pill off">待上传</span>}</div>
-          {manage&&<Form method="post" encType="multipart/form-data" className="batch-document-upload"><input type="hidden" name="intent" value="batch_document_upload"/><input type="hidden" name="documentCategory" value={type.code}/><input name="attachment" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" required/><input name="documentDescription" placeholder="文件说明（选填）"/><button className="secondary" disabled={busy}>{current?"重新上传":"上传"}</button></Form>}
-          {manage&&current&&current.review_status!=="approved"&&<Form method="post" className="batch-document-review"><input type="hidden" name="intent" value="batch_document_review"/><input type="hidden" name="attachmentId" value={current.id}/><input type="hidden" name="reviewStatus" value="approved"/><button className="text-button" disabled={busy}>审核通过</button></Form>}
+          <div className="batch-document-current">{current?<><span className={`status-pill ${current.review_status==="approved"?"success":""}`}>{documentReviewLabel(current.review_status)}</span><a href={current.data_url} target="_blank" rel="noreferrer">{current.file_name}</a></>:<span className="status-pill off">{isManifest?"待生成":"待上传"}</span>}</div>
+          {isManifest
+            ?(manage&&<Form method="post" className="batch-document-upload"><input type="hidden" name="intent" value="generate_manifest"/><button className="secondary" disabled={busy}>{current?"重新生成配载单":"生成配载单"}</button><small className="field-hint">按当前车辆与订单分配实时生成，自动审核通过</small></Form>)
+            :(manage&&<Form method="post" encType="multipart/form-data" className="batch-document-upload"><input type="hidden" name="intent" value="batch_document_upload"/><input type="hidden" name="documentCategory" value={type.code}/><input name="attachment" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" required/><input name="documentDescription" placeholder="文件说明（选填）"/><button className="secondary" disabled={busy}>{current?"重新上传":"上传"}</button></Form>)}
+          {!isManifest&&manage&&current&&current.review_status!=="approved"&&<Form method="post" className="batch-document-review"><input type="hidden" name="intent" value="batch_document_review"/><input type="hidden" name="attachmentId" value={current.id}/><input type="hidden" name="reviewStatus" value="approved"/><button className="text-button" disabled={busy}>审核通过</button></Form>}
         </article>})}</div>
     </section>
     <section className="batch-order-documents"><header><div><h3>逐票订单文件与报关门禁</h3><p>可在任意挂载订单进入本工作台，直接处理同一配载单内其他订单，不再逐页往返。</p></div></header>
@@ -710,10 +913,12 @@ function BatchCommandSteps({status,loadPlanReady,warehouseReady}:{status:string;
   return <div className="batch-command-steps">{steps.map(step=><div key={step.rank} className={`batch-command-step ${current>step.rank?"done":current===step.rank?"current":""}`}><b>{current>step.rank?"✓":step.rank}</b><strong>{step.title}</strong><span>{step.body}</span></div>)}</div>;
 }
 
-function WarehouseOutboundAction({orderId,batchId}:{orderId:string;batchId:string}){
+function WarehouseOutboundAction({orderId,batchId,customsReady}:{orderId:string;batchId:string;customsReady?:boolean}){
   const returnTo=`/admin/loading/${batchId}?fromOrderId=${encodeURIComponent(orderId)}`;
   const warehouseTo=`/warehouse/outbound?orderId=${encodeURIComponent(orderId)}&returnTo=${encodeURIComponent(returnTo)}`;
-  return <div className="loading-warehouse-handoff"><div><strong>下一步由仓库办理</strong><span>仓库按已确认的配载车辆扫码拣货、装车并完成出库交接。</span></div><Form method="post" action="/switch-site"><input type="hidden" name="target" value="warehouse"/><input type="hidden" name="warehouseTo" value={warehouseTo}/><button className="primary">去仓库端拣货装车</button></Form></div>;
+  return <div className="loading-warehouse-handoff">
+    {customsReady===false&&<div className="alert warning" style={{marginBottom:"0.5rem"}}>⚠️ 本票报关单尚未收齐放行，配载出库前请先到「配载单文件工作台」处理报关资料与报关单。</div>}
+    <div><strong>下一步由仓库办理</strong><span>仓库按已确认的配载车辆扫码拣货、装车并完成出库交接。</span></div><Form method="post" action="/switch-site"><input type="hidden" name="target" value="warehouse"/><input type="hidden" name="warehouseTo" value={warehouseTo}/><button className="primary">去仓库端拣货装车</button></Form></div>;
 }
 
 function CostAllocationSection({allocations,busy,manage}:{allocations:Awaited<ReturnType<typeof loadCostAllocations>>;busy:boolean;manage:boolean}){
@@ -754,6 +959,23 @@ function LoadingTotals({totals}:{totals:ReturnType<typeof summarizeBatch>}){
     <span>车辆：<strong>{totals.vehicleCount}</strong></span>
   </div>;
 }
+function OverseasResourceFields({batch,carrierVehicles,carrierDrivers}:{batch:Batch;carrierVehicles:CarrierVehicleOption[];carrierDrivers:CarrierDriverOption[]}){
+  const [vehicleMasterId,setVehicleMasterId]=useState(""),[driverMasterId,setDriverMasterId]=useState("");
+  const [vehicleType,setVehicleType]=useState(batch.overseas_vehicle_type||""),[plate,setPlate]=useState(batch.overseas_vehicle_plate||"");
+  const [driverName,setDriverName]=useState(batch.overseas_driver_name||""),[driverPhone,setDriverPhone]=useState(batch.overseas_driver_phone||"");
+  const [capacityWeight,setCapacityWeight]=useState(""),[capacityVolume,setCapacityVolume]=useState("");
+  return <>
+    {carrierVehicles.length>0&&<label className="field span-2"><span>承运商车辆库（选择后自动带出车型、车牌和容量）</span><select name="overseasVehicleMasterId" value={vehicleMasterId} onChange={event=>{const id=event.target.value;setVehicleMasterId(id);const master=carrierVehicles.find(item=>item.id===id);if(master){setVehicleType(master.vehicle_type||"");setPlate(master.plate_number);setCapacityWeight(master.capacity_weight_kg?String(master.capacity_weight_kg):"");setCapacityVolume(master.capacity_volume_cbm?String(master.capacity_volume_cbm):"");}}}><option value="">手动录入（不从车辆库选择）</option>{carrierVehicles.map(item=><option key={item.id} value={item.id}>{item.carrier_name} · {item.plate_number}{item.vehicle_type?` · ${item.vehicle_type}`:""}</option>)}</select></label>}
+    <label className="field"><span>境外车型 *</span><select name="overseasVehicleType" required value={vehicleType} onChange={event=>setVehicleType(event.target.value)}><option value="">请选择车型</option>{Array.from(new Set([...VEHICLE_TYPE_OPTIONS,vehicleType].filter(Boolean))).map(item=><option key={item} value={item}>{item}</option>)}</select></label>
+    <label className="field"><span>境外车牌号 *</span><input name="overseasVehiclePlate" required value={plate} onChange={event=>setPlate(event.target.value)}/></label>
+    {carrierDrivers.length>0&&<label className="field span-2"><span>司机库（选择后自动带出姓名与电话）</span><select name="overseasDriverMasterId" value={driverMasterId} onChange={event=>{const id=event.target.value;setDriverMasterId(id);const master=carrierDrivers.find(item=>item.id===id);if(master){setDriverName(master.name);setDriverPhone(master.phone||"");}}}><option value="">手动录入（不从司机库选择）</option>{carrierDrivers.map(item=><option key={item.id} value={item.id}>{item.carrier_name} · {item.name}{item.phone?` · ${item.phone}`:""}</option>)}</select></label>}
+    <label className="field"><span>司机姓名 *</span><input name="overseasDriverName" required value={driverName} onChange={event=>setDriverName(event.target.value)}/></label>
+    <label className="field"><span>司机电话 *</span><input name="overseasDriverPhone" required value={driverPhone} onChange={event=>setDriverPhone(event.target.value)}/></label>
+    <label className="field"><span>载重上限 KG</span><input name="capacityWeight" type="number" min={0} step="0.001" value={capacityWeight} onChange={event=>setCapacityWeight(event.target.value)}/></label>
+    <label className="field"><span>体积上限 CBM</span><input name="capacityVolume" type="number" min={0} step="0.001" value={capacityVolume} onChange={event=>setCapacityVolume(event.target.value)}/></label>
+  </>;
+}
+
 function Field({name,label,required,type="text",defaultValue}:{name:string;label:string;required?:boolean;type?:string;defaultValue?:string}){return <label className="field"><span>{label}</span><input name={name} required={required} type={type} defaultValue={defaultValue} min={type==="number"?0:undefined} step={type==="number"?"0.001":undefined}/></label>}
 function Select({name,label,items}:{name:string;label:string;items:[string,string][]}){return <label className="field"><span>{label}</span><select name={name} required><option value="">请选择</option>{items.map(([value,text])=><option key={value} value={value}>{text}</option>)}</select></label>}
 function numberOf(form:FormData,name:string){const value=Number(valueOf(form,name)||0);return Number.isFinite(value)&&value>=0?value:0}
@@ -843,7 +1065,7 @@ async function synchronizeBatchTransport(organizationId:string,batchId:string,no
     }),
   ];
   await env.DB.batch(statements);
-  await Promise.all(orders.results.map((item)=>syncOrderWorkflowSnapshot(organizationId,item.order_id)));
+  await Promise.all(orders.results.map((item)=>syncOrderWorkflowSnapshotSafe(organizationId,item.order_id)));
 }
 async function synchronizeBatchWarehouseProgress(organizationId:string,batchId:string,actorUserId:string){
   const orders=await env.DB.prepare("SELECT order_id FROM transport_batch_orders WHERE organization_id=? AND batch_id=? AND status!='removed'").bind(organizationId,batchId).all<{order_id:string}>();
@@ -865,7 +1087,7 @@ async function synchronizeBatchWarehouseProgress(organizationId:string,batchId:s
 }
 async function syncBatchOrderDocumentsStatus(organizationId:string,orderId:string,actorUserId:string,now:string){
   const module=await env.DB.prepare("SELECT id,status,current_step_code FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='documents' AND enabled=1").bind(organizationId,orderId).first<{id:string;status:string;current_step_code:string|null}>();
-  if(!module||module.status==="completed"){await syncOrderWorkflowSnapshot(organizationId,orderId);return;}
+  if(!module||module.status==="completed"){await syncOrderWorkflowSnapshotSafe(organizationId,orderId);return;}
   const readiness=await env.DB.prepare(`SELECT COUNT(*) total,SUM(CASE WHEN review_status NOT IN ('approved','archived') THEN 1 ELSE 0 END) pending FROM order_document_metadata WHERE organization_id=? AND order_id=?`).bind(organizationId,orderId).first<{total:number;pending:number|null}>();
   const completed=(readiness?.total??0)>0&&(readiness?.pending??0)===0;
   const nextStepCode=completed?"archived":"checking",nextStepName=completed?"文件归档":"资料检查";
@@ -873,7 +1095,7 @@ async function syncBatchOrderDocumentsStatus(organizationId:string,orderId:strin
     env.DB.prepare(`UPDATE order_module_instances SET status=?,current_step_code=?,current_step_name=?,progress_percent=CASE WHEN ?='completed' THEN 100 ELSE MAX(progress_percent,25) END,blocking_reason=NULL,started_at=COALESCE(started_at,?),completed_at=CASE WHEN ?='completed' THEN COALESCE(completed_at,?) ELSE NULL END,updated_at=? WHERE id=?`).bind(completed?"completed":"in_progress",nextStepCode,nextStepName,completed?"completed":"in_progress",now,completed?"completed":"in_progress",now,now,module.id),
     env.DB.prepare("INSERT INTO order_module_history(id,organization_id,order_id,module_instance_id,action_code,action_name,from_step_code,to_step_code,to_step_name,actor_user_id,notes,occurred_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").bind(crypto.randomUUID(),organizationId,orderId,module.id,completed?"documents_approved":"document_uploaded",completed?"批次工作台审核完成":"批次工作台上传文件",module.current_step_code,nextStepCode,nextStepName,actorUserId,completed?"全部现有文件已审核通过":"文件已上传并进入资料检查",now),
   ]);
-  await syncOrderWorkflowSnapshot(organizationId,orderId);
+  await syncOrderWorkflowSnapshotSafe(organizationId,orderId);
 }
 function validateDocumentFile(file:File){
   const allowed=new Set(["application/pdf","application/msword","application/vnd.openxmlformats-officedocument.wordprocessingml.document","application/vnd.ms-excel","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","image/jpeg","image/png","image/webp"]);

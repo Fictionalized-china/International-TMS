@@ -9,7 +9,7 @@ describe("overseas warehouse flow", () => {
     expect(nextOverseasAction(null)).toBe("确认目的仓到仓");
     expect(nextOverseasAction("arrived")).toBe("通知客户到仓");
     expect(nextOverseasAction("notified")).toBe("登记提货预约");
-    expect(nextOverseasAction("appointment")).toBe("确认提货完成");
+    expect(nextOverseasAction("appointment")).toBe("确认客户自提并签收");
   });
 
   it("reports stable progress snapshots", () => {

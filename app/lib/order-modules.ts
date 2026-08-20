@@ -60,9 +60,9 @@ export const orderModuleDefinitions: OrderModuleDefinition[] = [
   {
     code: "cargo",
     name: "货物信息",
-    description: "货物明细、包装、重量体积、HS Code与图片",
+    description: "货物明细、包装、重量体积、HS Code与图片（常驻查看，不阻断工作流）",
     icon: "◇",
-    required: true,
+    required: false,
     steps: [
       { code: "entered", name: "货物录入" },
       { code: "verified", name: "货物复核" },

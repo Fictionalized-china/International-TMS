@@ -36,7 +36,7 @@ const standardWorkflowCodes = new Set([
   "tms-ftl-standard",
 ]);
 
-const ftlOnlyExcludedLoadingFields = new Set([
+const loadingTypeLockedFields = new Set([
   "business_type",
   "loading_batch",
   "consolidation_warehouse",
@@ -44,6 +44,7 @@ const ftlOnlyExcludedLoadingFields = new Set([
   "vehicle_capacity_weight",
   "vehicle_capacity_volume",
 ]);
+const loadingTypeFixedField = new Set(["business_type"]);
 
 export async function ensureWorkflowCatalogFields(organizationId: string) {
   const workflows = await env.DB.prepare(
@@ -58,7 +59,7 @@ export async function ensureWorkflowCatalogFields(organizationId: string) {
     for (const item of workflowFieldCatalog) {
       const isFtlLoadingField =
         workflow.code === "tms-ftl-standard" && item.moduleCode === "loading";
-      if (isFtlLoadingField && ftlOnlyExcludedLoadingFields.has(item.fieldKey)) continue;
+      if (isFtlLoadingField && loadingTypeLockedFields.has(item.fieldKey)) continue;
       const targetStepKey = item.stepKey;
       const isActive = item.defaultMode === "hidden" ? 0 : 1;
       const isRequired = item.defaultMode === "required" ? 1 : 0;
@@ -151,9 +152,9 @@ export async function ensureWorkflowCatalogFields(organizationId: string) {
   )
     .bind(organizationId, ...standardCodes)
     .run();
-  const ftlWorkflow = workflows.results.find((item) => item.code === "tms-ftl-standard");
+    const ftlWorkflow = workflows.results.find((item) => item.code === "tms-ftl-standard");
   if (ftlWorkflow) {
-    const excludedFields = [...ftlOnlyExcludedLoadingFields];
+    const excludedFields = [...loadingTypeLockedFields];
     const excludedPlaceholders = excludedFields.map(() => "?").join(",");
     await env.DB.prepare(
       `UPDATE workflow_step_fields
@@ -260,8 +261,9 @@ export async function loadOrderModuleWorkflowFields(
     )
       .bind(organizationId, orderId)
       .first<{ business_type: string | null }>();
+    raw = raw.filter((item) => !loadingTypeFixedField.has(item.field_key));
     if (order?.business_type === "ftl") {
-      raw = raw.filter((item) => !ftlOnlyExcludedLoadingFields.has(item.field_key));
+      raw = raw.filter((item) => !loadingTypeLockedFields.has(item.field_key));
     }
   }
   const rules = raw.map(toRule);

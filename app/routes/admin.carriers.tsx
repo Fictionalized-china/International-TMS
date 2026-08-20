@@ -17,23 +17,54 @@ type Carrier = {
   status: string;
   shipment_count: number;
   assignment_count: number;
+  driver_count: number;
+  vehicle_count: number;
   created_at: string;
   updated_at: string;
+};
+type CarrierDriver = {
+  id: string;
+  carrier_id: string;
+  name: string;
+  phone: string | null;
+  license_number: string | null;
+  status: string;
+};
+type CarrierVehicle = {
+  id: string;
+  carrier_id: string;
+  plate_number: string;
+  vehicle_type: string | null;
+  capacity_weight_kg: number;
+  capacity_volume_cbm: number;
+  status: string;
 };
 
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "carrier.view");
-  const carriers = await env.DB.prepare(
-    `SELECT c.id,c.code,c.name,c.scac,c.contact_name,c.contact_phone,c.contact_email,c.status,c.created_at,c.updated_at,
-            (SELECT COUNT(*) FROM shipment_legs l WHERE l.carrier_id=c.id) shipment_count,
-            (SELECT COUNT(*) FROM order_transport_assignments a WHERE a.carrier_id=c.id AND a.status!='cancelled') assignment_count
-       FROM carriers c
-      WHERE c.organization_id=?
-      ORDER BY CASE c.status WHEN 'active' THEN 0 ELSE 1 END,c.name`,
-  ).bind(current.organizationId).all<Carrier>();
+  const [carriers, drivers, vehicles] = await Promise.all([
+    env.DB.prepare(
+      `SELECT c.id,c.code,c.name,c.scac,c.contact_name,c.contact_phone,c.contact_email,c.status,c.created_at,c.updated_at,
+              (SELECT COUNT(*) FROM shipment_legs l WHERE l.carrier_id=c.id) shipment_count,
+              (SELECT COUNT(*) FROM order_transport_assignments a WHERE a.carrier_id=c.id AND a.status!='cancelled') assignment_count,
+              (SELECT COUNT(*) FROM carrier_drivers d WHERE d.carrier_id=c.id AND d.status='active') driver_count,
+              (SELECT COUNT(*) FROM carrier_vehicles v WHERE v.carrier_id=c.id AND v.status='active') vehicle_count
+         FROM carriers c
+        WHERE c.organization_id=?
+        ORDER BY CASE c.status WHEN 'active' THEN 0 ELSE 1 END,c.name`,
+    ).bind(current.organizationId).all<Carrier>(),
+    env.DB.prepare(
+      `SELECT id,carrier_id,name,phone,license_number,status FROM carrier_drivers WHERE organization_id=? AND status='active' ORDER BY name`,
+    ).bind(current.organizationId).all<CarrierDriver>(),
+    env.DB.prepare(
+      `SELECT id,carrier_id,plate_number,vehicle_type,capacity_weight_kg,capacity_volume_cbm,status FROM carrier_vehicles WHERE organization_id=? AND status='active' ORDER BY plate_number`,
+    ).bind(current.organizationId).all<CarrierVehicle>(),
+  ]);
   return {
     current,
     carriers: carriers.results,
+    drivers: drivers.results,
+    vehicles: vehicles.results,
     canManage: current.permissions.includes("carrier.manage"),
   };
 }
@@ -44,6 +75,62 @@ export async function action({ request }: Route.ActionArgs) {
   const intent = valueOf(form, "intent");
   const now = new Date().toISOString();
 
+  // --- 司机管理 ---
+  if (intent === "driver_upsert") {
+    const carrierId = valueOf(form, "carrierId");
+    const driverId = valueOf(form, "driverId") || crypto.randomUUID();
+    const name = valueOf(form, "driverName").trim();
+    const phone = valueOf(form, "driverPhone").trim();
+    const licenseNumber = valueOf(form, "licenseNumber").trim();
+    if (name.length < 2) return { formError: "司机姓名至少 2 个字符" };
+    try {
+      await env.DB.prepare(
+        `INSERT INTO carrier_drivers(id,organization_id,carrier_id,name,phone,license_number,status,created_at,updated_at)
+         VALUES(?,?,?,?,?,?, 'active', ?,?)
+         ON CONFLICT(organization_id,carrier_id,name) DO UPDATE SET phone=excluded.phone,license_number=excluded.license_number,status='active',updated_at=excluded.updated_at`,
+      ).bind(driverId, current.organizationId, carrierId, name, phone || null, licenseNumber || null, now, now).run();
+    } catch {
+      return { formError: "司机保存失败，请检查承运商是否存在" };
+    }
+    return { success: `司机 ${name} 已保存` };
+  }
+  if (intent === "driver_toggle") {
+    const driverId = valueOf(form, "driverId");
+    await env.DB.prepare(
+      "UPDATE carrier_drivers SET status='disabled',updated_at=? WHERE id=? AND organization_id=?",
+    ).bind(now, driverId, current.organizationId).run();
+    return { success: "司机已移除" };
+  }
+
+  // --- 车辆管理 ---
+  if (intent === "vehicle_upsert") {
+    const carrierId = valueOf(form, "carrierId");
+    const vehicleId = valueOf(form, "vehicleId") || crypto.randomUUID();
+    const plateNumber = valueOf(form, "plateNumber").trim().toUpperCase();
+    const vehicleType = valueOf(form, "vehicleType").trim();
+    const capacityWeight = Number(valueOf(form, "capacityWeight")) || 0;
+    const capacityVolume = Number(valueOf(form, "capacityVolume")) || 0;
+    if (plateNumber.length < 2) return { formError: "车牌号至少 2 个字符" };
+    try {
+      await env.DB.prepare(
+        `INSERT INTO carrier_vehicles(id,organization_id,carrier_id,plate_number,vehicle_type,capacity_weight_kg,capacity_volume_cbm,status,created_at,updated_at)
+         VALUES(?,?,?,?,?,?,?, 'active', ?,?)
+         ON CONFLICT(organization_id,plate_number) DO UPDATE SET carrier_id=excluded.carrier_id,vehicle_type=excluded.vehicle_type,capacity_weight_kg=excluded.capacity_weight_kg,capacity_volume_cbm=excluded.capacity_volume_cbm,status='active',updated_at=excluded.updated_at`,
+      ).bind(vehicleId, current.organizationId, carrierId, plateNumber, vehicleType || null, capacityWeight, capacityVolume, now, now).run();
+    } catch {
+      return { formError: "车辆保存失败，请检查承运商是否存在" };
+    }
+    return { success: `车辆 ${plateNumber} 已保存` };
+  }
+  if (intent === "vehicle_toggle") {
+    const vehicleId = valueOf(form, "vehicleId");
+    await env.DB.prepare(
+      "UPDATE carrier_vehicles SET status='disabled',updated_at=? WHERE id=? AND organization_id=?",
+    ).bind(now, vehicleId, current.organizationId).run();
+    return { success: "车辆已移除" };
+  }
+
+  // --- 承运商启停 ---
   if (intent === "toggle") {
     const id = valueOf(form, "carrierId");
     const row = await env.DB.prepare(
@@ -65,6 +152,7 @@ export async function action({ request }: Route.ActionArgs) {
     return { success: "承运商状态已更新" };
   }
 
+  // --- 承运商新增/修改 ---
   const id = valueOf(form, "carrierId") || crypto.randomUUID();
   const code = valueOf(form, "code").toLowerCase();
   const name = valueOf(form, "name");
@@ -87,17 +175,9 @@ export async function action({ request }: Route.ActionArgs) {
          contact_phone=excluded.contact_phone,contact_email=excluded.contact_email,
          status=excluded.status,updated_at=excluded.updated_at`,
     ).bind(
-      id,
-      current.organizationId,
-      code,
-      name,
-      scac || null,
-      contactName || null,
-      contactPhone || null,
-      contactEmail || null,
-      status,
-      now,
-      now,
+      id, current.organizationId, code, name, scac || null,
+      contactName || null, contactPhone || null, contactEmail || null,
+      status, now, now,
     ).run();
   } catch {
     return { formError: "承运商代码不能重复" };
@@ -114,6 +194,11 @@ export async function action({ request }: Route.ActionArgs) {
   return { success: `承运商 ${name} 已保存` };
 }
 
+const VEHICLE_TYPE_OPTIONS = [
+  "卡车", "13米平板", "13.5米高栏", "13.7米平板", "17.5米平板",
+  "17.5米厢式车", "13米高栏", "16米厢式车", "13米厢式车", "冷藏车",
+];
+
 export default function Carriers({ loaderData, actionData }: Route.ComponentProps) {
   const busy = useNavigation().state !== "idle";
   return (
@@ -122,14 +207,10 @@ export default function Carriers({ loaderData, actionData }: Route.ComponentProp
         <div>
           <p className="eyebrow">CARRIER MASTER</p>
           <h1>承运商管理</h1>
-          <p>维护国内承运方、车队联系人和电话；运输安排选择承运商后会自动带出联系方式。</p>
+          <p>维护承运方主数据，展开每家承运商可管理其名下司机和车辆；后续配载与运输安排从主数据下拉选择。</p>
         </div>
         {loaderData.canManage && (
-          <Modal
-            title="新增承运商"
-            triggerLabel="+ 新增承运商"
-            closeSignal={actionData?.success}
-          >
+          <Modal title="新增承运商" triggerLabel="+ 新增承运商" closeSignal={actionData?.success}>
             <CarrierForm busy={busy} />
           </Modal>
         )}
@@ -143,72 +224,137 @@ export default function Carriers({ loaderData, actionData }: Route.ComponentProp
         <div className="panel-header">
           <div>
             <h2>承运商台账</h2>
-            <p>承运商是主数据；订单和配载里的“承运商名称”只是显示字段或手工兜底。</p>
+            <p>点击承运商名称展开管理其司机与车辆；配载页选择车辆后自动带出车牌、司机和载重。</p>
           </div>
           <span className="status-pill">共 {loaderData.carriers.length} 家</span>
         </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>承运商</th>
-                <th>联系人</th>
-                <th>电话</th>
-                <th>邮箱</th>
-                <th>使用情况</th>
-                <th>状态</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {loaderData.carriers.map((carrier) => (
-                <tr key={carrier.id}>
-                  <td>
+        <div className="carrier-list">
+          {loaderData.carriers.map((carrier) => {
+            const drivers = loaderData.drivers.filter((d) => d.carrier_id === carrier.id);
+            const vehicles = loaderData.vehicles.filter((v) => v.carrier_id === carrier.id);
+            return (
+              <details key={carrier.id} className="carrier-master-card">
+                <summary className="carrier-master-summary">
+                  <div className="carrier-master-info">
                     <strong>{carrier.name}</strong>
                     <small>{carrier.code}{carrier.scac ? ` · ${carrier.scac}` : ""}</small>
-                  </td>
-                  <td>{carrier.contact_name || "未填写"}</td>
-                  <td>{carrier.contact_phone || "未填写"}</td>
-                  <td>{carrier.contact_email || "未填写"}</td>
-                  <td>
-                    <small>运输安排 {carrier.assignment_count} 次 · 运单分段 {carrier.shipment_count} 次</small>
-                  </td>
-                  <td>
+                    <small>{carrier.contact_name || "无联系人"} · {carrier.contact_phone || "无电话"}</small>
+                  </div>
+                  <div className="carrier-master-counts">
+                    <span className="status-pill">{carrier.driver_count} 名司机</span>
+                    <span className="status-pill">{carrier.vehicle_count} 辆车</span>
                     <span className={`status-pill ${carrier.status !== "active" ? "off" : ""}`}>
                       {carrier.status === "active" ? "启用" : "停用"}
                     </span>
-                  </td>
-                  <td>
-                    {loaderData.canManage ? (
-                      <div className="table-actions">
-                        <Modal
-                          title={`修改 ${carrier.name}`}
-                          triggerLabel="修改"
-                          triggerClassName="text-button"
-                          closeSignal={actionData?.success}
-                        >
+                  </div>
+                </summary>
+                <div className="carrier-master-body">
+                  <div className="carrier-master-actions">
+                    {loaderData.canManage && (
+                      <>
+                        <Modal title={`修改 ${carrier.name}`} triggerLabel="修改承运商" triggerClassName="text-button" closeSignal={actionData?.success}>
                           <CarrierForm carrier={carrier} busy={busy} />
                         </Modal>
-                        <Form method="post">
+                        <Form method="post" style={{ display: "inline" }}>
                           <input type="hidden" name="intent" value="toggle" />
                           <input type="hidden" name="carrierId" value={carrier.id} />
                           <button className="text-button" disabled={busy}>
                             {carrier.status === "active" ? "停用" : "启用"}
                           </button>
                         </Form>
-                      </div>
-                    ) : (
-                      "只读"
+                      </>
                     )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                  </div>
+
+                  <div className="carrier-sub-section">
+                    <h4>车辆台账</h4>
+                    {vehicles.length > 0 && (
+                      <div className="table-wrap">
+                        <table>
+                          <thead>
+                            <tr><th>车牌号</th><th>车型</th><th>载重 KG</th><th>体积 CBM</th><th>操作</th></tr>
+                          </thead>
+                          <tbody>
+                            {vehicles.map((v) => (
+                              <tr key={v.id}>
+                                <td><strong>{v.plate_number}</strong></td>
+                                <td>{v.vehicle_type || "未指定"}</td>
+                                <td>{v.capacity_weight_kg || "不限"}</td>
+                                <td>{v.capacity_volume_cbm || "不限"}</td>
+                                <td>{loaderData.canManage && (
+                                  <Form method="post" style={{ display: "inline" }}>
+                                    <input type="hidden" name="intent" value="vehicle_toggle" />
+                                    <input type="hidden" name="vehicleId" value={v.id} />
+                                    <button className="text-button danger" disabled={busy}>移除</button>
+                                  </Form>
+                                )}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                    {loaderData.canManage && (
+                      <Form method="post" className="form-grid compact carrier-sub-form">
+                        <input type="hidden" name="intent" value="vehicle_upsert" />
+                        <input type="hidden" name="carrierId" value={carrier.id} />
+                        <label className="field"><span>车牌号</span><input name="plateNumber" required placeholder="例如 粤B12345" /></label>
+                        <label className="field"><span>车型</span><select name="vehicleType" defaultValue=""><option value="">请选择</option>{VEHICLE_TYPE_OPTIONS.map((t) => <option key={t} value={t}>{t}</option>)}</select></label>
+                        <label className="field"><span>载重 KG</span><input name="capacityWeight" type="number" defaultValue="0" /></label>
+                        <label className="field"><span>体积 CBM</span><input name="capacityVolume" type="number" defaultValue="0" /></label>
+                        <button className="secondary" disabled={busy}>添加车辆</button>
+                      </Form>
+                    )}
+                    {vehicles.length === 0 && <p className="empty-state">暂无车辆，请先添加。</p>}
+                  </div>
+
+                  <div className="carrier-sub-section">
+                    <h4>司机台账</h4>
+                    {drivers.length > 0 && (
+                      <div className="table-wrap">
+                        <table>
+                          <thead>
+                            <tr><th>姓名</th><th>电话</th><th>驾照号</th><th>操作</th></tr>
+                          </thead>
+                          <tbody>
+                            {drivers.map((d) => (
+                              <tr key={d.id}>
+                                <td><strong>{d.name}</strong></td>
+                                <td>{d.phone || "未填写"}</td>
+                                <td>{d.license_number || "未填写"}</td>
+                                <td>{loaderData.canManage && (
+                                  <Form method="post" style={{ display: "inline" }}>
+                                    <input type="hidden" name="intent" value="driver_toggle" />
+                                    <input type="hidden" name="driverId" value={d.id} />
+                                    <button className="text-button danger" disabled={busy}>移除</button>
+                                  </Form>
+                                )}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                    {loaderData.canManage && (
+                      <Form method="post" className="form-grid compact carrier-sub-form">
+                        <input type="hidden" name="intent" value="driver_upsert" />
+                        <input type="hidden" name="carrierId" value={carrier.id} />
+                        <label className="field"><span>司机姓名</span><input name="driverName" required placeholder="例如 张三" /></label>
+                        <label className="field"><span>电话</span><input name="driverPhone" placeholder="选填" /></label>
+                        <label className="field"><span>驾照号</span><input name="licenseNumber" placeholder="选填" /></label>
+                        <button className="secondary" disabled={busy}>添加司机</button>
+                      </Form>
+                    )}
+                    {drivers.length === 0 && <p className="empty-state">暂无司机，请先添加。</p>}
+                  </div>
+                </div>
+              </details>
+            );
+          })}
+          {!loaderData.carriers.length && (
+            <p className="empty-state">暂无承运商，请先新增承运方，再展开管理其名下司机和车辆。</p>
+          )}
         </div>
-        {!loaderData.carriers.length && (
-          <p className="empty-state">暂无承运商，请先新增国内承运方，后续运输安排和配载会从这里下拉选择。</p>
-        )}
       </section>
     </>
   );

@@ -279,7 +279,7 @@ export async function action({ request }: Route.ActionArgs) {
         stepName: "收货清点完成",
         actionCode: "inbound_ready",
         actionName: "到货齐套复核",
-        notes: `到货复核批次 ${batch.batch_number} 已完成；后续整车/拼车方案由操作员在“配载选择”节点确定。`,
+        notes: `到货复核批次 ${batch.batch_number} 已完成；后续整车/拼车由报价已确定，仓库仅提供实收数据。`,
       });
     }
     return { success: !remaining?.total ? `批次 ${batch.batch_number} 已确认到货齐套` : `${barcode} 复核通过` };
@@ -314,7 +314,7 @@ export default function WarehouseSorting({ loaderData, actionData }: Route.Compo
         <div>
           <p className="eyebrow">RECEIVE · COUNT · READY</p>
           <h1>到货齐套复核</h1>
-          <p>这里确认货物全部到仓，并复核实收数量、重量和体积；完成后由操作员在订单的“配载选择”节点确定整车或拼车。</p>
+          <p>这里确认货物全部到仓，并复核实收数量、重量和体积；完成后由订单报价决定整车或拼车，仓库不再判断。</p>
         </div>
         {canOperate && (
           <Modal title="新建到货复核批次" triggerLabel="新建复核批次" closeSignal={actionData?.success}>
@@ -448,7 +448,7 @@ export default function WarehouseSorting({ loaderData, actionData }: Route.Compo
                   <button className="primary warehouse-primary" disabled={busy}>复核通过</button>
                 </Form>
               ) : (
-                <div className="sorting-done-banner">收货清点与齐套复核已完成。下一步由操作员在订单的“配载选择”节点确定整车或拼车。</div>
+            <div className="sorting-done-banner">收货清点与齐套复核已完成。下一步按订单报价确定整车或拼车，仓库端继续执行清点与出库交接。</div>
               )}
               <div className="batch-items">
                 {loaderData.items.filter((item) => item.batch_id === batch.id).map((item) => (
@@ -506,14 +506,14 @@ function buildFilterHref(filter: SortingFilter, orderId: string | null) {
   return `${query ? `?${query}` : ""}#sorting-queue`;
 }
 function getCommand(batch: Batch | undefined, filter: SortingFilter) {
-  if (filter === "verified") return { title: "这里是已齐套结果", body: "已齐套批次不用继续操作，下一步由操作员在订单的“配载选择”节点确定整车或拼车。", cta: "查看批次" };
+  if (filter === "verified") return { title: "这里是已齐套结果", body: "已齐套批次不用继续仓内操作，运输类型已由报价确定。", cta: "查看批次" };
   if (batch?.status === "open") return { title: "先扫码清点，再完成清点", body: "找到下方清点中的批次，逐件扫描本运单货物标签。扫完后点击完成清点。", cta: "去扫码清点" };
   if (batch?.status === "staged") return { title: "现在做收货清点与齐套复核", body: "逐件扫描并核对仓库实收数据；仓库在这里不判断整车或拼车。", cta: "去齐套复核" };
   return { title: "当前没有待处理复核批次", body: "如果订单已收货但这里没有批次，请新建复核批次；如果已齐套，请回订单详情查看下一步。", cta: "查看批次" };
 }
 function getBatchGuide(batch: Batch) {
   if (batch.status === "open") return { badge: "1", title: "扫码清点", body: "只扫本运单货物标签；扫错、重复扫、已出库都会被拦截。" };
-  if (batch.status === "staged") return { badge: "2", title: "齐套复核", body: "复核完成后，订单进入独立的配载选择节点。" };
+  if (batch.status === "staged") return { badge: "2", title: "齐套复核", body: "复核完成后，订单进入装车与出库（整车）或配载（拼车）流程由业务系统自动分发。" };
   return { badge: "✓", title: "已齐套", body: "本批次已完成仓库复核。" };
 }
 async function ensureSortingBatchForOrder(organizationId: string, userId: string, orderId: string) {

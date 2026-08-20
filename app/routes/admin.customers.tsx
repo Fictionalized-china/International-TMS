@@ -51,21 +51,23 @@ type CustomerRow = {
 type ContactRow = { id: string; customer_id: string; name: string; title: string | null; email: string | null; phone: string | null; is_primary: number };
 type AddressRow = { id: string; customer_id: string; label: string; type: string; country_code: string; state: string | null; city: string; address_line1: string; contact_name: string | null; contact_phone: string | null; is_default: number };
 type PortalRow = { id: string; customer_id: string; display_name: string; email: string; status: string; last_login_at: string | null };
+type ContractRow = { id: string; customer_id: string; title: string; file_name: string; content_type: string; size_bytes: number; data_url: string; effective_at: string | null; expires_at: string | null; status: string; notes: string | null; created_at: string };
 type GeoReference = { code: string; name: string; parent_code: string | null };
 
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "customer.view");
-  const [customers, contacts, addresses, portals, owners, countries, provinces, cities] = await Promise.all([
+  const [customers, contacts, addresses, portals, contracts, owners, countries, provinces, cities] = await Promise.all([
     env.DB.prepare(`SELECT c.id, c.code, c.identity_code, c.name, c.short_name, COALESCE(c.party_category,'customer') AS party_category, c.status, c.notes, c.sales_owner_user_id, u.display_name AS sales_owner_name, COALESCE(GROUP_CONCAT(DISTINCT cbr.role_code), '') AS business_role_codes, COUNT(DISTINCT cc.id) AS contact_count, COUNT(DISTINCT ca.id) AS address_count FROM customers c LEFT JOIN users u ON u.id = c.sales_owner_user_id LEFT JOIN customer_contacts cc ON cc.customer_id = c.id LEFT JOIN customer_addresses ca ON ca.customer_id = c.id LEFT JOIN customer_business_role_assignments cbr ON cbr.customer_id = c.id AND cbr.organization_id = c.organization_id WHERE c.organization_id = ? GROUP BY c.id ORDER BY c.created_at DESC LIMIT 200`).bind(current.organizationId).all<CustomerRow>(),
     env.DB.prepare(`SELECT cc.id, cc.customer_id, cc.name, cc.title, cc.email, cc.phone, cc.is_primary FROM customer_contacts cc JOIN customers c ON c.id = cc.customer_id WHERE c.organization_id = ? ORDER BY cc.is_primary DESC, cc.name`).bind(current.organizationId).all<ContactRow>(),
     env.DB.prepare(`SELECT ca.id, ca.customer_id, ca.label, ca.type, ca.country_code, ca.state, ca.city, ca.address_line1, ca.contact_name, ca.contact_phone, ca.is_default FROM customer_addresses ca JOIN customers c ON c.id = ca.customer_id WHERE c.organization_id = ? ORDER BY ca.is_default DESC, ca.label`).bind(current.organizationId).all<AddressRow>(),
     env.DB.prepare(`SELECT cpa.id, cpa.customer_id, u.display_name, u.email, cpa.status, u.last_login_at FROM customer_portal_accounts cpa JOIN users u ON u.id = cpa.user_id WHERE cpa.organization_id = ? ORDER BY u.display_name`).bind(current.organizationId).all<PortalRow>(),
+    env.DB.prepare(`SELECT id, customer_id, title, file_name, content_type, size_bytes, data_url, effective_at, expires_at, status, notes, created_at FROM customer_contracts WHERE organization_id = ? ORDER BY created_at DESC LIMIT 500`).bind(current.organizationId).all<ContractRow>(),
     env.DB.prepare(`SELECT u.id, u.display_name FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.organization_id = ? AND m.status = 'active' ORDER BY u.display_name`).bind(current.organizationId).all<{ id: string; display_name: string }>(),
     env.DB.prepare("SELECT code, name FROM reference_data WHERE organization_id = ? AND category = 'country' AND status = 'active' ORDER BY sort_order, code").bind(current.organizationId).all<{ code: string; name: string }>(),
     env.DB.prepare("SELECT code, name, parent_code FROM reference_data WHERE organization_id = ? AND category = 'province' AND status = 'active' ORDER BY sort_order, code").bind(current.organizationId).all<GeoReference>(),
     env.DB.prepare("SELECT code, name, parent_code FROM reference_data WHERE organization_id = ? AND category = 'city' AND status = 'active' ORDER BY sort_order, code").bind(current.organizationId).all<GeoReference>(),
   ]);
-  return { current, customers: customers.results, contacts: contacts.results, addresses: addresses.results, portals: portals.results, owners: owners.results, countries: countries.results, provinces: provinces.results, cities: cities.results };
+  return { current, customers: customers.results, contacts: contacts.results, addresses: addresses.results, portals: portals.results, contracts: contracts.results, owners: owners.results, countries: countries.results, provinces: provinces.results, cities: cities.results };
 }
 
 export async function action({ request }: Route.ActionArgs) {
@@ -123,6 +125,29 @@ export async function action({ request }: Route.ActionArgs) {
     ]);
     await writeAudit({ request, action: "portal.account.create", resourceType: "customer_portal_account", resourceId: accountId, organizationId: current.organizationId, actorUserId: current.userId, metadata: { customerId, email } });
     return { success: "客户门户账号已开通" };
+  }
+
+  if (intent === "contract_upload") {
+    const customerId = valueOf(form, "customerId"), title = valueOf(form, "title");
+    const file = form.get("attachment");
+    if (!(await ownedCustomer(customerId, current.organizationId))) return { formError: "客户不存在" };
+    if (title.length < 2) return { formError: "合同名称至少 2 个字符" };
+    if (!(file instanceof File) || file.size <= 0) return { formError: "请选择要上传的合同文件" };
+    const fileError = validateContractFile(file);
+    if (fileError) return { formError: fileError };
+    const id = crypto.randomUUID();
+    await env.DB.prepare(`INSERT INTO customer_contracts (id, organization_id, customer_id, title, file_name, content_type, size_bytes, data_url, effective_at, expires_at, status, notes, uploaded_by_user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`)
+      .bind(id, current.organizationId, customerId, title, file.name, file.type, file.size, await toDataUrl(file), valueOf(form, "effectiveAt") || null, valueOf(form, "expiresAt") || null, valueOf(form, "notes") || null, current.userId, now, now).run();
+    await writeAudit({ request, action: "customer.contract.upload", resourceType: "customer_contract", resourceId: id, organizationId: current.organizationId, actorUserId: current.userId, metadata: { customerId, title } });
+    return { success: `合同“${title}”已归档到客户资料` };
+  }
+
+  if (intent === "contract_archive") {
+    const contractId = valueOf(form, "contractId");
+    const result = await env.DB.prepare("UPDATE customer_contracts SET status='archived', updated_at=? WHERE id=? AND organization_id=?").bind(now, contractId, current.organizationId).run();
+    if (!result.meta.changes) return { formError: "合同不存在或已归档" };
+    await writeAudit({ request, action: "customer.contract.archive", resourceType: "customer_contract", resourceId: contractId, organizationId: current.organizationId, actorUserId: current.userId, metadata: {} });
+    return { success: "合同已归档" };
   }
 
   if (intent === "customer_update") {
@@ -185,6 +210,23 @@ export async function action({ request }: Route.ActionArgs) {
 
 async function ownedCustomer(id: string, organizationId: string) {
   return env.DB.prepare("SELECT id FROM customers WHERE id = ? AND organization_id = ?").bind(id, organizationId).first();
+}
+
+const maxInlineContractBytes = 1_200_000;
+
+function validateContractFile(file: File) {
+  if (file.size > maxInlineContractBytes) return "合同文件不能超过 1.2MB；更大的文件请先压缩或拆分";
+  if (!file.type) return "无法识别文件类型";
+  return null;
+}
+
+async function toDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error("文件读取失败"));
+    reader.readAsDataURL(file);
+  });
 }
 
 async function nextCustomerIdentityCode(organizationId:string):Promise<string|null>{
@@ -253,8 +295,12 @@ export default function Customers({ loaderData, actionData }: Route.ComponentPro
       </div>
       {!loaderData.customers.length && <p className="empty-state">暂无客户，请点击右上角“新增客户”。</p>}
     </section>
-    {canManage && loaderData.customers.length > 0 && <section className="action-grid"><details className="panel expandable"><summary>添加联系人</summary><Form method="post" className="stack"><input type="hidden" name="intent" value="contact"/><CustomerSelect customers={loaderData.customers}/><label className="field"><span>姓名</span><input name="name" required/></label><label className="field"><span>职务</span><input name="title"/></label><label className="field"><span>邮箱</span><input name="email" type="email"/></label><label className="field"><span>电话</span><input name="phone"/></label><label className="check-field"><input name="isPrimary" type="checkbox"/>主要联系人</label><button className="primary" disabled={busy}>添加联系人</button></Form></details><details className="panel expandable"><summary>添加常用地址</summary><Form method="post" className="stack"><input type="hidden" name="intent" value="address"/><CustomerSelect customers={loaderData.customers}/><label className="field"><span>地址名称</span><input name="label" required placeholder="上海仓库"/></label><label className="field"><span>类型</span><select name="type"><option value="shipping">收发货</option><option value="warehouse">仓库</option><option value="billing">账单</option><option value="registered">注册地址</option></select></label><label className="field"><span>国家/地区</span><select name="countryCode">{loaderData.countries.map(item => <option key={item.code} value={item.code}>{item.code} · {item.name}</option>)}</select></label><label className="field"><span>城市</span><input name="city" required/></label><label className="field"><span>详细地址</span><input name="addressLine1" required/></label><label className="check-field"><input name="isDefault" type="checkbox"/>默认地址</label><button className="primary" disabled={busy}>添加地址</button></Form></details><details className="panel expandable pickup-address-panel"><summary>添加常用提货地</summary><Form method="post" className="stack"><input type="hidden" name="intent" value="pickup_address"/><CustomerSelect customers={loaderData.customers}/><label className="field"><span>提货地名称</span><input name="label" required placeholder="深圳工厂"/></label><PickupAddressFields countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities}/><label className="field"><span>详细地址</span><input name="addressLine1" required placeholder="街道、门牌号、园区和楼栋"/></label><label className="field"><span>提货联系人</span><input name="contactName"/></label><label className="field"><span>联系电话</span><input name="contactPhone"/></label><label className="check-field"><input name="isDefault" type="checkbox"/>设为该客户默认提货地</label><button className="primary" disabled={busy}>保存常用提货地</button></Form></details><details className="panel expandable"><summary>开通客户门户</summary><Form method="post" className="stack"><input type="hidden" name="intent" value="portal"/><CustomerSelect customers={loaderData.customers}/><label className="field"><span>用户姓名</span><input name="displayName" required/></label><label className="field"><span>登录邮箱</span><input name="email" type="email" required/></label><label className="field"><span>初始密码</span><input name="password" type="password" required/><small>至少 12 位，包含大小写字母和数字</small></label><button className="primary" disabled={busy}>开通门户</button></Form></details></section>}
-    <section className="panel"><h2>客户档案明细</h2><div className="table-wrap"><table><thead><tr><th>客户</th><th>联系人</th><th>常用地址</th><th>门户用户</th></tr></thead><tbody>{loaderData.customers.map(customer => <tr key={customer.id}><td><strong>{customer.name}</strong><small>{customer.code}</small></td><td>{loaderData.contacts.filter(item => item.customer_id === customer.id).map(item => <div key={item.id}><strong>{item.name}{item.is_primary ? " · 主要" : ""}</strong><small>{item.email || item.phone || "—"}</small></div>)}</td><td>{loaderData.addresses.filter(item => item.customer_id === customer.id).map(item => <div key={item.id}><strong>{item.label}</strong><small>{item.country_code} {item.city} {item.address_line1}</small></div>)}</td><td>{loaderData.portals.filter(item => item.customer_id === customer.id).map(item => <div key={item.id}><strong>{item.display_name}</strong><small>{item.email}</small></div>)}</td></tr>)}</tbody></table></div></section>
+    {canManage && loaderData.customers.length > 0 && <section className="action-grid"><details className="panel expandable"><summary>归档客户合同</summary><Form method="post" className="stack" encType="multipart/form-data"><input type="hidden" name="intent" value="contract_upload"/><CustomerSelect customers={loaderData.customers}/><label className="field"><span>合同名称</span><input name="title" required placeholder="2026 年度运输框架合同"/></label><label className="field"><span>合同文件（≤1.2MB）</span><input name="attachment" type="file" required accept="image/*,application/pdf"/></label><label className="field"><span>生效日期</span><input name="effectiveAt" type="date"/></label><label className="field"><span>到期日期</span><input name="expiresAt" type="date"/></label><label className="field"><span>备注</span><input name="notes" placeholder="合同编号、签署方等"/></label><button className="primary" disabled={busy}>上传并归档合同</button><small className="field-hint">合同统一归档在客户资料页，订单工作流不再要求逐单上传合同。</small></Form></details><details className="panel expandable"><summary>添加联系人</summary><Form method="post" className="stack"><input type="hidden" name="intent" value="contact"/><CustomerSelect customers={loaderData.customers}/><label className="field"><span>姓名</span><input name="name" required/></label><label className="field"><span>职务</span><input name="title"/></label><label className="field"><span>邮箱</span><input name="email" type="email"/></label><label className="field"><span>电话</span><input name="phone"/></label><label className="check-field"><input name="isPrimary" type="checkbox"/>主要联系人</label><button className="primary" disabled={busy}>添加联系人</button></Form></details><details className="panel expandable"><summary>添加常用地址</summary><Form method="post" className="stack"><input type="hidden" name="intent" value="address"/><CustomerSelect customers={loaderData.customers}/><label className="field"><span>地址名称</span><input name="label" required placeholder="上海仓库"/></label><label className="field"><span>类型</span><select name="type"><option value="shipping">收发货</option><option value="warehouse">仓库</option><option value="billing">账单</option><option value="registered">注册地址</option></select></label><label className="field"><span>国家/地区</span><select name="countryCode">{loaderData.countries.map(item => <option key={item.code} value={item.code}>{item.code} · {item.name}</option>)}</select></label><label className="field"><span>城市</span><input name="city" required/></label><label className="field"><span>详细地址</span><input name="addressLine1" required/></label><label className="check-field"><input name="isDefault" type="checkbox"/>默认地址</label><button className="primary" disabled={busy}>添加地址</button></Form></details><details className="panel expandable pickup-address-panel"><summary>添加常用提货地</summary><Form method="post" className="stack"><input type="hidden" name="intent" value="pickup_address"/><CustomerSelect customers={loaderData.customers}/><label className="field"><span>提货地名称</span><input name="label" required placeholder="深圳工厂"/></label><PickupAddressFields countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities}/><label className="field"><span>详细地址</span><input name="addressLine1" required placeholder="街道、门牌号、园区和楼栋"/></label><label className="field"><span>提货联系人</span><input name="contactName"/></label><label className="field"><span>联系电话</span><input name="contactPhone"/></label><label className="check-field"><input name="isDefault" type="checkbox"/>设为该客户默认提货地</label><button className="primary" disabled={busy}>保存常用提货地</button></Form></details><details className="panel expandable"><summary>开通客户门户</summary><Form method="post" className="stack"><input type="hidden" name="intent" value="portal"/><CustomerSelect customers={loaderData.customers}/><label className="field"><span>用户姓名</span><input name="displayName" required/></label><label className="field"><span>登录邮箱</span><input name="email" type="email" required/></label><label className="field"><span>初始密码</span><input name="password" type="password" required/><small>至少 12 位，包含大小写字母和数字</small></label><button className="primary" disabled={busy}>开通门户</button></Form></details></section>}
+    <section className="panel"><h2>客户档案明细</h2><div className="table-wrap"><table><thead><tr><th>客户</th><th>联系人</th><th>常用地址</th><th>门户用户</th><th>合同归档</th></tr></thead><tbody>{loaderData.customers.map(customer => {
+      const contracts = loaderData.contracts.filter(item => item.customer_id === customer.id);
+      const activeContracts = contracts.filter(item => item.status === "active");
+      return <tr key={customer.id}><td><strong>{customer.name}</strong><small>{customer.code}</small></td><td>{loaderData.contacts.filter(item => item.customer_id === customer.id).map(item => <div key={item.id}><strong>{item.name}{item.is_primary ? " · 主要" : ""}</strong><small>{item.email || item.phone || "—"}</small></div>)}</td><td>{loaderData.addresses.filter(item => item.customer_id === customer.id).map(item => <div key={item.id}><strong>{item.label}</strong><small>{item.country_code} {item.city} {item.address_line1}</small></div>)}</td><td>{loaderData.portals.filter(item => item.customer_id === customer.id).map(item => <div key={item.id}><strong>{item.display_name}</strong><small>{item.email}</small></div>)}</td><td>{activeContracts.length ? activeContracts.map(item => <div key={item.id} className="customer-contract-row"><div><strong>{item.title}</strong><small>{item.effective_at ? `${item.effective_at} 生效` : "生效日期未填"}{item.expires_at ? ` · ${item.expires_at} 到期` : ""}{item.notes ? ` · ${item.notes}` : ""}</small></div><div className="customer-contract-actions"><a className="text-button" href={item.data_url} download={item.file_name}>下载</a>{canManage && item.status === "active" && <Form method="post" className="inline-form"><input type="hidden" name="intent" value="contract_archive"/><input type="hidden" name="contractId" value={item.id}/><button className="text-button" disabled={busy}>归档</button></Form>}</div></div>) : <small>暂无合同</small>}{contracts.length > activeContracts.length && <small>另有 {contracts.length - activeContracts.length} 份已归档</small>}</td></tr>;
+    })}</tbody></table></div></section>
   </>;
 }
 
