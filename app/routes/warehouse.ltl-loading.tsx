@@ -13,12 +13,14 @@ const DEFAULT_PAGE_SIZE = 30;
 const PAGE_SIZES = [30, 50, 100];
 
 type CargoRow = {
-  batch_id: string;
-  batch_number: string;
-  batch_name: string;
+  batch_id: string | null;
+  batch_number: string | null;
+  batch_name: string | null;
+  batch_warehouse_id: string | null;
   batch_order_count: number;
   order_id: string;
   order_number: string;
+  business_type: string;
   customer_name: string;
   cargo_names: string | null;
   overseas_warehouse_name: string | null;
@@ -32,6 +34,10 @@ type CargoRow = {
   weight_kg: number;
   volume_cbm: number;
   location_names: string | null;
+  cargo_ready: number;
+  sorting_ready: number;
+  has_exception: number;
+  active_dispatch: number;
 };
 
 type DispatchRow = {
@@ -64,49 +70,23 @@ type Selection = {
   volume: number;
 };
 
-const eligibleBaseSql = `
-  FROM transport_batches b
-  JOIN transport_batch_orders bo ON bo.batch_id=b.id AND bo.organization_id=b.organization_id AND bo.status!='removed'
-  JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
+const stockBaseSql = `
+  FROM transport_orders o
   JOIN customers c ON c.id=o.customer_id
+  LEFT JOIN transport_batch_orders bo ON bo.id=(
+    SELECT bx.id FROM transport_batch_orders bx
+    JOIN transport_batches bb ON bb.id=bx.batch_id AND bb.organization_id=bx.organization_id
+    WHERE bx.organization_id=o.organization_id AND bx.order_id=o.id AND bx.status!='removed'
+      AND bb.batch_number LIKE 'PZ-%' AND bb.status IN ('planning','loading')
+    ORDER BY bb.updated_at DESC LIMIT 1
+  )
+  LEFT JOIN transport_batches b ON b.id=bo.batch_id AND b.organization_id=o.organization_id
   LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id
-  WHERE b.organization_id=? AND b.warehouse_id=? AND b.batch_number LIKE 'PZ-%'
-    AND b.status IN ('planning','loading') AND o.business_type='ltl'
-    AND NOT EXISTS (
-      SELECT 1
-      FROM transport_batch_orders bx
-      JOIN transport_orders ox ON ox.id=bx.order_id AND ox.organization_id=bx.organization_id
-      WHERE bx.batch_id=b.id AND bx.organization_id=b.organization_id AND bx.status!='removed'
-        AND (
-          ox.business_type!='ltl'
-          OR NOT EXISTS (
-            SELECT 1 FROM warehouse_receipts wr JOIN shipments rs ON rs.id=wr.shipment_id
-            WHERE wr.organization_id=b.organization_id AND rs.order_id=ox.id
-              AND wr.warehouse_id=? AND wr.status='completed' AND wr.cargo_complete=1
-          )
-          OR NOT EXISTS (
-            SELECT 1 FROM warehouse_packages wp JOIN shipments ps ON ps.id=wp.shipment_id
-            WHERE wp.organization_id=b.organization_id AND ps.order_id=ox.id
-              AND wp.warehouse_id=? AND wp.status IN ('in_stock','allocated')
-          )
-          OR NOT EXISTS (
-            SELECT 1 FROM warehouse_sorting_batches sb JOIN shipments ss ON ss.id=sb.shipment_id
-            WHERE sb.organization_id=b.organization_id AND ss.order_id=ox.id AND sb.status='verified'
-          )
-          OR EXISTS (
-            SELECT 1 FROM warehouse_exceptions we JOIN shipments es ON es.id=we.shipment_id
-            WHERE we.organization_id=b.organization_id AND es.order_id=ox.id
-              AND we.status IN ('open','processing')
-          )
-          OR EXISTS (
-            SELECT 1 FROM warehouse_dispatch_items di
-            JOIN warehouse_dispatches wd ON wd.id=di.dispatch_id AND wd.status!='cancelled'
-            JOIN warehouse_packages dp ON dp.id=di.package_id
-            JOIN shipments ds ON ds.id=dp.shipment_id
-            WHERE wd.organization_id=b.organization_id AND ds.order_id=ox.id AND dp.warehouse_id=?
-          )
-        )
-    )`;
+  WHERE o.organization_id=? AND EXISTS (
+    SELECT 1 FROM warehouse_packages wp JOIN shipments ps ON ps.id=wp.shipment_id
+    WHERE wp.organization_id=o.organization_id AND ps.order_id=o.id
+      AND wp.warehouse_id=? AND wp.status IN ('in_stock','allocated')
+  )`;
 
 export async function loader({ request }: Route.LoaderArgs) {
   const user = await requireSessionUser(request, "warehouse.view", "warehouse");
@@ -145,33 +125,35 @@ export async function loader({ request }: Route.LoaderArgs) {
     filterBindings.push(...Array(4).fill(`%${filters.keyword}%`));
   }
   const filterClause = filterSql.length ? ` AND ${filterSql.join(" AND ")}` : "";
-  const baseBindings = [user.organizationId, warehouse.id, warehouse.id, warehouse.id, warehouse.id];
-  const totalRow = await env.DB.prepare(`SELECT COUNT(*) total ${eligibleBaseSql}${filterClause}`)
+  const baseBindings = [user.organizationId, warehouse.id];
+  const totalRow = await env.DB.prepare(`SELECT COUNT(*) total ${stockBaseSql}${filterClause}`)
     .bind(...baseBindings, ...filterBindings).first<{ total: number }>();
   const total = totalRow?.total ?? 0;
   const pages = Math.max(1, Math.ceil(total / pageSize));
   const safePage = Math.min(page, pages);
 
   const [rows, options, tasks] = await Promise.all([
-    env.DB.prepare(`SELECT b.id batch_id,b.batch_number,b.batch_name,
-        (SELECT COUNT(*) FROM transport_batch_orders bc WHERE bc.batch_id=b.id AND bc.organization_id=b.organization_id AND bc.status!='removed') batch_order_count,
-        o.id order_id,o.order_number,c.name customer_name,
+    env.DB.prepare(`SELECT b.id batch_id,b.batch_number,b.batch_name,b.warehouse_id batch_warehouse_id,
+        COALESCE((SELECT COUNT(*) FROM transport_batch_orders bc WHERE bc.batch_id=b.id AND bc.organization_id=b.organization_id AND bc.status!='removed'),0) batch_order_count,
+        o.id order_id,o.order_number,o.business_type,c.name customer_name,
         (SELECT GROUP_CONCAT(NULLIF(TRIM(ci.cargo_name_cn),''),'、') FROM order_cargo_items ci WHERE ci.organization_id=o.organization_id AND ci.order_id=o.id) cargo_names,
         ow.name overseas_warehouse_name,o.destination_country,o.destination_state,o.destination_city,b.border_port,b.customs_location,
         (SELECT COUNT(*) FROM warehouse_packages wp JOIN shipments ps ON ps.id=wp.shipment_id WHERE wp.organization_id=o.organization_id AND ps.order_id=o.id AND wp.warehouse_id=? AND wp.status IN ('in_stock','allocated')) package_count,
         COALESCE((SELECT SUM(wp.pieces) FROM warehouse_packages wp JOIN shipments ps ON ps.id=wp.shipment_id WHERE wp.organization_id=o.organization_id AND ps.order_id=o.id AND wp.warehouse_id=? AND wp.status IN ('in_stock','allocated')),0) pieces,
         COALESCE((SELECT SUM(wp.weight_kg) FROM warehouse_packages wp JOIN shipments ps ON ps.id=wp.shipment_id WHERE wp.organization_id=o.organization_id AND ps.order_id=o.id AND wp.warehouse_id=? AND wp.status IN ('in_stock','allocated')),0) weight_kg,
         COALESCE((SELECT SUM(wp.volume_cbm) FROM warehouse_packages wp JOIN shipments ps ON ps.id=wp.shipment_id WHERE wp.organization_id=o.organization_id AND ps.order_id=o.id AND wp.warehouse_id=? AND wp.status IN ('in_stock','allocated')),0) volume_cbm,
-        (SELECT GROUP_CONCAT(DISTINCT wl.name) FROM warehouse_packages wp JOIN shipments ps ON ps.id=wp.shipment_id JOIN warehouse_locations wl ON wl.id=wp.location_id WHERE wp.organization_id=o.organization_id AND ps.order_id=o.id AND wp.warehouse_id=? AND wp.status IN ('in_stock','allocated')) location_names
-      ${eligibleBaseSql}${filterClause}
-      ORDER BY b.updated_at DESC,b.batch_number,bo.sequence_no LIMIT ? OFFSET ?`)
-      .bind(warehouse.id, warehouse.id, warehouse.id, warehouse.id, warehouse.id, ...baseBindings, ...filterBindings, pageSize, (safePage - 1) * pageSize)
+        (SELECT GROUP_CONCAT(DISTINCT wl.name) FROM warehouse_packages wp JOIN shipments ps ON ps.id=wp.shipment_id JOIN warehouse_locations wl ON wl.id=wp.location_id WHERE wp.organization_id=o.organization_id AND ps.order_id=o.id AND wp.warehouse_id=? AND wp.status IN ('in_stock','allocated')) location_names,
+        EXISTS(SELECT 1 FROM warehouse_receipts wr JOIN shipments rs ON rs.id=wr.shipment_id WHERE wr.organization_id=o.organization_id AND rs.order_id=o.id AND wr.warehouse_id=? AND wr.status='completed' AND wr.cargo_complete=1) cargo_ready,
+        EXISTS(SELECT 1 FROM warehouse_sorting_batches sb JOIN shipments ss ON ss.id=sb.shipment_id WHERE sb.organization_id=o.organization_id AND ss.order_id=o.id AND sb.status='verified') sorting_ready,
+        EXISTS(SELECT 1 FROM warehouse_exceptions we JOIN shipments es ON es.id=we.shipment_id WHERE we.organization_id=o.organization_id AND es.order_id=o.id AND we.status IN ('open','processing')) has_exception,
+        EXISTS(SELECT 1 FROM warehouse_dispatch_items di JOIN warehouse_dispatches wd ON wd.id=di.dispatch_id AND wd.status!='cancelled' JOIN warehouse_packages dp ON dp.id=di.package_id JOIN shipments ds ON ds.id=dp.shipment_id WHERE wd.organization_id=o.organization_id AND ds.order_id=o.id AND dp.warehouse_id=?) active_dispatch
+      ${stockBaseSql}${filterClause}
+      ORDER BY CASE WHEN b.id IS NULL THEN 1 ELSE 0 END,b.updated_at DESC,o.updated_at DESC LIMIT ? OFFSET ?`)
+      .bind(warehouse.id, warehouse.id, warehouse.id, warehouse.id, warehouse.id, warehouse.id, warehouse.id, ...baseBindings, ...filterBindings, pageSize, (safePage - 1) * pageSize)
       .all<CargoRow>(),
     env.DB.prepare(`SELECT DISTINCT COALESCE(ow.name,'') overseas_warehouse_name,o.destination_country,o.destination_state,o.destination_city,b.border_port,b.customs_location
-      FROM transport_batches b JOIN transport_batch_orders bo ON bo.batch_id=b.id AND bo.status!='removed'
-      JOIN transport_orders o ON o.id=bo.order_id LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id
-      WHERE b.organization_id=? AND b.warehouse_id=? AND b.batch_number LIKE 'PZ-%' AND b.status IN ('planning','loading') AND o.business_type='ltl'
-      ORDER BY overseas_warehouse_name,o.destination_country,o.destination_state,o.destination_city`).bind(user.organizationId, warehouse.id).all<Pick<CargoRow,"overseas_warehouse_name"|"destination_country"|"destination_state"|"destination_city"|"border_port"|"customs_location">>(),
+      ${stockBaseSql}
+      ORDER BY overseas_warehouse_name,o.destination_country,o.destination_state,o.destination_city`).bind(...baseBindings).all<Pick<CargoRow,"overseas_warehouse_name"|"destination_country"|"destination_state"|"destination_city"|"border_port"|"customs_location">>(),
     env.DB.prepare(`SELECT d.id,d.dispatch_number,d.transport_batch_id,b.batch_number,
         GROUP_CONCAT(DISTINCT o.order_number) order_numbers,d.status,COUNT(DISTINCT di.id) item_count,
         COALESCE(SUM(CASE WHEN di.status='loaded' THEN 1 ELSE 0 END),0) loaded_count,
@@ -323,10 +305,19 @@ export default function WarehouseLtlLoading({ loaderData, actionData }: Route.Co
   const totals = useMemo(()=>selected.reduce((sum,item)=>({packages:sum.packages+item.packages,pieces:sum.pieces+item.pieces,weight:sum.weight+item.weight,volume:sum.volume+item.volume}),{packages:0,pieces:0,weight:0,volume:0}),[selected]);
   const toggle = (row:CargoRow, checked:boolean) => {
     if (!checked) return setSelected((current)=>current.filter((item)=>item.orderId!==row.order_id));
-    if (selectedBatchId && selectedBatchId!==row.batch_id) return;
-    setSelected((current)=>current.some((item)=>item.orderId===row.order_id)?current:[...current,{orderId:row.order_id,orderNumber:row.order_number,batchId:row.batch_id,batchNumber:row.batch_number,batchOrderCount:row.batch_order_count,packages:row.package_count,pieces:row.pieces,weight:row.weight_kg,volume:row.volume_cbm}]);
+    const batchId=row.batch_id,batchNumber=row.batch_number;
+    if (!batchId || !batchNumber || stockBlockers(row,loaderData.warehouse.id).length) return;
+    if (selectedBatchId && selectedBatchId!==batchId) return;
+    setSelected((current)=>current.some((item)=>item.orderId===row.order_id)?current:[...current,{orderId:row.order_id,orderNumber:row.order_number,batchId,batchNumber,batchOrderCount:row.batch_order_count,packages:row.package_count,pieces:row.pieces,weight:row.weight_kg,volume:row.volume_cbm}]);
   };
-  const selectBatch = (batchId:string) => setSelected(loaderData.rows.filter((row)=>row.batch_id===batchId).map((row)=>({orderId:row.order_id,orderNumber:row.order_number,batchId:row.batch_id,batchNumber:row.batch_number,batchOrderCount:row.batch_order_count,packages:row.package_count,pieces:row.pieces,weight:row.weight_kg,volume:row.volume_cbm})));
+  const selectBatch = (batchId:string) => {
+    const next:Selection[]=[];
+    for(const row of loaderData.rows){
+      if(row.batch_id!==batchId||!row.batch_number||stockBlockers(row,loaderData.warehouse.id).length)continue;
+      next.push({orderId:row.order_id,orderNumber:row.order_number,batchId,batchNumber:row.batch_number,batchOrderCount:row.batch_order_count,packages:row.package_count,pieces:row.pieces,weight:row.weight_kg,volume:row.volume_cbm});
+    }
+    setSelected(next);
+  };
   const optionValues = <K extends keyof (typeof loaderData.options)[number]>(key:K) => [...new Set(loaderData.options.map((item)=>item[key]).filter(Boolean) as string[])];
   return <>
     <header className="warehouse-page-header ltl-loading-header"><div><p className="eyebrow">LTL LOADING</p><h1>拼车装货</h1><p>操作端决定拼单关系，仓库按 PZ 配载单整批生成装车任务。</p></div><Modal title="生成拼车装车任务" triggerLabel={`生成装车任务${selected.length?`（${selected.length} 票）`:""}`} size="wide" closeSignal={actionData?.success}>
@@ -338,7 +329,7 @@ export default function WarehouseLtlLoading({ loaderData, actionData }: Route.Co
     {actionData?.formError&&<div className="alert error">{actionData.formError}</div>}
     {actionData?.success&&<div className="alert success">{actionData.success}</div>}
     <section className="panel ltl-filter-panel"><Form method="get" className="ltl-loading-filters"><input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/><label><span>目的仓</span><select name="destinationWarehouse" defaultValue={loaderData.filters.warehouse}><option value="">全部</option>{optionValues("overseas_warehouse_name").map((value)=><option key={value}>{value}</option>)}</select></label><label><span>国家</span><select name="country" defaultValue={loaderData.filters.country}><option value="">全部</option>{optionValues("destination_country").map((value)=><option key={value}>{value}</option>)}</select></label><label><span>省 / 州</span><select name="state" defaultValue={loaderData.filters.state}><option value="">全部</option>{optionValues("destination_state").map((value)=><option key={value}>{value}</option>)}</select></label><label><span>城市</span><select name="city" defaultValue={loaderData.filters.city}><option value="">全部</option>{optionValues("destination_city").map((value)=><option key={value}>{value}</option>)}</select></label><label><span>出境口岸</span><select name="borderPort" defaultValue={loaderData.filters.borderPort}><option value="">全部</option>{optionValues("border_port").map((value)=><option key={value}>{value}</option>)}</select></label><label><span>清关地</span><select name="customs" defaultValue={loaderData.filters.customs}><option value="">全部</option>{optionValues("customs_location").map((value)=><option key={value}>{value}</option>)}</select></label><label className="ltl-filter-search"><span>快速查找</span><input name="q" defaultValue={loaderData.filters.keyword} placeholder="订单、配载单、客户或货物"/></label><label><span>每页</span><select name="pageSize" defaultValue={loaderData.pageSize}>{PAGE_SIZES.map((size)=><option key={size} value={size}>{size} 条</option>)}</select></label><button className="secondary">筛选</button><Link className="text-button" to={`/warehouse/ltl-loading?warehouseId=${loaderData.warehouse.id}`}>重置</Link></Form></section>
-    <section className="panel"><div className="panel-header"><div><h2>当前仓库可装货物</h2><p>一行一票完整订单；跨页选择会保留，但只能选择同一张 PZ 配载单。</p></div><span className="status-pill">{loaderData.total} 票</span></div><div className="table-wrap ltl-loading-table"><table><thead><tr><th>选择</th><th>配载单</th><th>订单 / 客户</th><th>货物</th><th>实收数据</th><th>目的地</th><th>口岸 / 清关</th><th>库位</th></tr></thead><tbody>{loaderData.rows.map((row)=>{const checked=selected.some((item)=>item.orderId===row.order_id);const disabled=Boolean(selectedBatchId&&selectedBatchId!==row.batch_id);return <tr key={row.order_id} className={checked?"selected-row":""}><td><input type="checkbox" checked={checked} disabled={disabled} onChange={(event)=>toggle(row,event.target.checked)} aria-label={`选择订单 ${row.order_number}`}/></td><td><strong>{row.batch_number}</strong><small>{row.batch_order_count} 票 · <button type="button" className="link-button" disabled={disabled} onClick={()=>selectBatch(row.batch_id)}>选择本页同批订单</button></small></td><td><strong>{row.order_number}</strong><small>{row.customer_name}</small></td><td><strong>{row.cargo_names||"未填写货名"}</strong></td><td>{row.package_count} 包装 · {row.pieces} 件<small>{row.weight_kg.toFixed(2)} KG · {row.volume_cbm.toFixed(3)} CBM</small></td><td>{row.overseas_warehouse_name||"目的仓未命名"}<small>{[row.destination_country,row.destination_state,row.destination_city].filter(Boolean).join(" ")}</small></td><td>{row.border_port||"未填口岸"}<small>{row.customs_location||"未填清关地"}</small></td><td>{row.location_names||"—"}</td></tr>})}</tbody></table></div>{!loaderData.rows.length&&<p className="empty-state">当前筛选条件下没有可生成拼车装货任务的订单。</p>}<Pagination loaderData={loaderData}/></section>
+    <section className="panel"><div className="panel-header"><div><h2>当前仓库全部在库货物</h2><p>默认显示全部在库货物；只有已形成 PZ 配载单且满足装车条件的拼车订单可以勾选。</p></div><span className="status-pill">{loaderData.total} 票</span></div><div className="table-wrap ltl-loading-table"><table><thead><tr><th>选择</th><th>装货状态</th><th>配载单</th><th>订单 / 客户</th><th>货物</th><th>实收数据</th><th>目的地</th><th>口岸 / 清关</th><th>库位</th></tr></thead><tbody>{loaderData.rows.map((row)=>{const blockers=stockBlockers(row,loaderData.warehouse.id);const checked=selected.some((item)=>item.orderId===row.order_id);const batchMismatch=Boolean(selectedBatchId&&selectedBatchId!==row.batch_id);const disabled=blockers.length>0||batchMismatch;return <tr key={row.order_id} className={checked?"selected-row":""}><td><input type="checkbox" checked={checked} disabled={disabled} onChange={(event)=>toggle(row,event.target.checked)} aria-label={`选择订单 ${row.order_number}`}/></td><td>{blockers.length?<><span className="status-pill off">暂不可装车</span><small className="danger-text">{blockers.join("；")}</small></>:<span className="status-pill success">可生成任务</span>}</td><td>{row.batch_id&&row.batch_number?<><strong>{row.batch_number}</strong><small>{row.batch_order_count} 票 · <button type="button" className="link-button" disabled={disabled} onClick={()=>selectBatch(row.batch_id!)}>选择本页同批订单</button></small></>:<span className="off">尚无 PZ 配载单</span>}</td><td><strong>{row.order_number}</strong><small>{row.customer_name}</small></td><td><strong>{row.cargo_names||"未填写货名"}</strong></td><td>{row.package_count} 包装 · {row.pieces} 件<small>{row.weight_kg.toFixed(2)} KG · {row.volume_cbm.toFixed(3)} CBM</small></td><td>{row.overseas_warehouse_name||"目的仓未命名"}<small>{[row.destination_country,row.destination_state,row.destination_city].filter(Boolean).join(" ")}</small></td><td>{row.border_port||"未填口岸"}<small>{row.customs_location||"未填清关地"}</small></td><td>{row.location_names||"—"}</td></tr>})}</tbody></table></div>{!loaderData.rows.length&&<p className="empty-state">当前仓库没有符合筛选条件的在库货物。</p>}<Pagination loaderData={loaderData}/></section>
     <section className="panel"><div className="panel-header"><div><h2>最近拼车装货任务</h2><p>待装车任务可进入扫码出库；尚未扫码的任务可以撤销。</p></div><Link className="secondary" to={`/warehouse/outbound?warehouseId=${loaderData.warehouse.id}`}>进入扫码装车与出库</Link></div><div className="table-wrap"><table><thead><tr><th>任务 / 配载单</th><th>订单</th><th>实收汇总</th><th>装车进度</th><th>车辆资源</th><th>计划装车</th><th>状态</th><th>操作</th></tr></thead><tbody>{loaderData.tasks.map((task)=><tr key={task.id}><td><strong>{task.dispatch_number}</strong><small>{task.batch_number}</small></td><td>{task.order_numbers}</td><td>{task.weight_kg.toFixed(2)} KG<small>{task.volume_cbm.toFixed(3)} CBM</small></td><td>{task.loaded_count}/{task.item_count}</td><td>{task.vehicle_plate||"待补车辆"}<small>{task.carrier_name||"待补承运商"} · {task.driver_name||"待补司机"}</small></td><td>{task.planned_loading_at?new Date(task.planned_loading_at).toLocaleString("zh-CN"):"待定"}</td><td><span className={`status-pill ${task.status==="cancelled"?"off":""}`}>{task.status==="loading"?"待装车":task.status==="dispatched"?"已出库":"已撤销"}</span></td><td><div className="button-row">{task.status==="loading"&&<Link className="text-button" to={`/warehouse/outbound?warehouseId=${loaderData.warehouse.id}`}>去装车</Link>}{task.status==="loading"&&task.loaded_count===0&&<Form method="post"><input type="hidden" name="intent" value="cancel"/><input type="hidden" name="dispatchId" value={task.id}/><button className="text-button danger" disabled={busy}>撤销</button></Form>}</div></td></tr>)}</tbody></table></div>{!loaderData.tasks.length&&<p className="empty-state">暂无拼车装货任务。</p>}</section>
   </>;
 }
@@ -350,3 +341,15 @@ function Pagination({loaderData}:{loaderData:{page:number;pages:number;pageSize:
 }
 
 export function meta(){return[{title:"拼车装货 | International TMS"}]}
+
+function stockBlockers(row:CargoRow,warehouseId:string){
+  const reasons:string[]=[];
+  if(row.business_type!=="ltl")reasons.push("整车订单不走拼车装货");
+  if(!row.batch_id)reasons.push("未生成 PZ 配载单");
+  else if(row.batch_warehouse_id!==warehouseId)reasons.push("配载单所属仓库不一致");
+  if(!row.cargo_ready)reasons.push("尚未确认货齐");
+  if(!row.sorting_ready)reasons.push("尚未形成可装车货号");
+  if(row.has_exception)reasons.push("存在未结仓库异常");
+  if(row.active_dispatch)reasons.push("已进入装车任务");
+  return reasons;
+}
