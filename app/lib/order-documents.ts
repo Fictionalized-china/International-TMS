@@ -159,13 +159,30 @@ export function orderDocumentPlacement(documentCode: string) {
 
 export function orderDocumentsForModule(moduleCode: OrderModuleCode) {
   return orderDocumentPlacements
-    .filter((placement) => placement.moduleCode === moduleCode)
+    .filter(
+      (placement) =>
+        orderDocumentCanBeHandledInModule(placement.documentCode, moduleCode),
+    )
     .map((placement) => ({
       ...placement,
       document: orderDocumentTypes.find(
         (document) => document.code === placement.documentCode,
       )!,
     }));
+}
+
+export function orderDocumentCanBeHandledInModule(
+  documentCode: string,
+  moduleCode: OrderModuleCode,
+) {
+  const placement = orderDocumentPlacement(documentCode);
+  if (!placement) return false;
+  if (placement.moduleCode === moduleCode) return true;
+  return moduleCode === "loading" && [
+    "commercial_invoice",
+    "packing_list",
+    "customs_document",
+  ].includes(documentCode);
 }
 
 export const orderDocumentTypeCodes = new Set(

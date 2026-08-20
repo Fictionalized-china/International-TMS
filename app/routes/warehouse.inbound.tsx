@@ -751,7 +751,7 @@ export default function WarehouseInbound({
             <span className="status-pill">防重复扫描</span>
           </div>
           {canOperate ? (
-            <Form method="post" className="stack">
+            <Form method="post" className="warehouse-inbound-form">
               <label className="field scan-field">
                 <span>订单号 / 运单号快速收货</span>
                 <input

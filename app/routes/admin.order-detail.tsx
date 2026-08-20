@@ -528,7 +528,7 @@ export default function OrderDetail({ loaderData, actionData }: Route.ComponentP
     );
   return (
     <>
-      <header className="page-header">
+      <header className="page-header order-detail-page-header">
         <div>
           <p className="eyebrow">TRANSPORT ORDER</p>
           <h1>运输订单 · {o.order_number}</h1>
@@ -616,6 +616,10 @@ function OrderBusinessForm({
     ...step,
     rows: stepRows.get(step.step_key) ?? [],
   }));
+  const currentConfiguredStep =
+    configuredSteps.find((step) => step.step_key === currentStepKey) ??
+    configuredSteps[0] ??
+    null;
   const enabledModules = composeOrderWorkflow(data.modules);
   const configuredModuleCodes = new Set(
     data.workflowFormRows.map((row) => row.module_code).filter(Boolean),
@@ -699,7 +703,8 @@ function OrderBusinessForm({
         </section>
 
         <div className="order-form-workflow-sections">
-          {configuredSteps.map((step, stepIndex) => {
+          {(currentConfiguredStep ? [currentConfiguredStep] : []).map((step) => {
+            const stepIndex = Math.max(0, configuredSteps.findIndex((item) => item.step_key === step.step_key));
             const current = step.step_key === currentStepKey;
             const completed = step.rows[0]?.step_status === "completed";
             const moduleRows = uniqueWorkflowModules(step.rows);
@@ -796,7 +801,7 @@ function OrderBusinessForm({
           })}
         </div>
 
-        {unconfiguredModules.length > 0 && (
+        {unconfiguredModules.length > 0 && !currentConfiguredStep && (
           <details className="order-form-step legacy">
             <summary><i>+</i><div><strong>兼容业务模组</strong><small>当前订单已启用但未挂入冻结工作流的模组</small></div><span>{unconfiguredModules.length} 项</span></summary>
             <div className="order-form-step-body order-form-legacy-modules">

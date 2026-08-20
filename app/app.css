@@ -37,23 +37,41 @@
 }
 
 /* One order, one workflow-driven business form. */
+.order-detail-page-header {
+  min-height: 68px;
+  margin-bottom: 10px;
+  padding-block: 8px;
+}
+.order-detail-page-header h1 {
+  margin-block: 2px;
+  font-size: 25px;
+}
+.order-detail-page-header p {
+  margin-block: 2px;
+}
 .order-single-form {
   display: grid;
   grid-template-columns: 238px minmax(0, 1fr);
   gap: 14px;
   align-items: start;
+  height: calc(100vh - 156px);
+  min-height: 610px;
 }
 .order-single-form > .order-vertical-workflow {
   position: sticky;
   top: 14px;
-  max-height: calc(100vh - 28px);
+  max-height: 100%;
   overflow-y: auto;
   border: 1px solid #d8e1ec;
   border-radius: 8px;
   background: #fff;
 }
 .order-form-sheet {
+  display: flex;
+  height: 100%;
   min-width: 0;
+  flex-direction: column;
+  overflow: hidden;
   border: 1px solid #d7e0eb;
   border-radius: 8px;
   background: #fff;
@@ -178,6 +196,10 @@
 }
 .order-form-workflow-sections {
   display: grid;
+  min-height: 0;
+  flex: 1;
+  align-content: start;
+  overflow-y: auto;
 }
 .order-form-step {
   border-bottom: 1px solid #dfe6ef;
@@ -380,7 +402,10 @@
   color: #68788d;
 }
 .order-form-records {
+  flex: 0 0 auto;
   padding: 12px 16px;
+  border-top: 1px solid #dfe6ef;
+  background: #fff;
 }
 .order-form-records > summary {
   display: flex;
@@ -445,6 +470,8 @@
 @media (max-width: 760px) {
   .order-single-form {
     grid-template-columns: 1fr;
+    height: auto;
+    min-height: 0;
   }
   .order-single-form > .order-vertical-workflow {
     position: static;
@@ -452,6 +479,13 @@
   }
   .order-form-current {
     position: static;
+  }
+  .order-form-sheet {
+    height: auto;
+    overflow: visible;
+  }
+  .order-form-workflow-sections {
+    overflow: visible;
   }
   .order-form-primary-action {
     position: static;
@@ -1585,9 +1619,79 @@ td small {
 }
 .inbound-layout {
   display: grid;
-  grid-template-columns: minmax(360px, 0.9fr) minmax(420px, 1.1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 20px;
   align-items: start;
+}
+.warehouse-inbound-form {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+  border-top: 1px solid #d7e0e9;
+  border-left: 1px solid #d7e0e9;
+}
+.warehouse-inbound-form > .field,
+.warehouse-inbound-form > .form-grid > .field {
+  min-width: 0;
+  margin: 0;
+  padding: 8px 10px;
+  border-right: 1px solid #d7e0e9;
+  border-bottom: 1px solid #d7e0e9;
+  background: #fff;
+}
+.warehouse-inbound-form > .field:nth-of-type(1) {
+  grid-column: span 2;
+}
+.warehouse-inbound-form > .inherited-data-strip,
+.warehouse-inbound-form > .warehouse-receipt-result,
+.warehouse-inbound-form > .scan-submit {
+  grid-column: 1 / -1;
+}
+.warehouse-inbound-form > .form-grid {
+  display: contents;
+}
+.warehouse-inbound-form > .field small {
+  display: none;
+}
+.warehouse-inbound-form .field > span {
+  min-height: 16px;
+  color: #46576d;
+  font-size: 11px;
+  font-weight: 750;
+}
+.warehouse-inbound-form input,
+.warehouse-inbound-form select,
+.warehouse-inbound-form textarea,
+.warehouse-inbound-form .scan-field input {
+  min-height: 40px;
+  border-width: 1px;
+  border-color: #cbd6e2;
+  border-radius: 5px;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+.warehouse-inbound-form textarea {
+  height: 40px;
+  min-height: 40px;
+  resize: vertical;
+}
+.warehouse-inbound-form .inherited-data-strip {
+  margin: 0;
+  border-right: 1px solid #d7e0e9;
+  border-bottom: 1px solid #d7e0e9;
+  border-radius: 0;
+}
+.warehouse-inbound-form .warehouse-receipt-result {
+  margin: 0;
+  border: 0;
+  border-right: 1px solid #d7e0e9;
+  border-bottom: 1px solid #d7e0e9;
+  border-radius: 0;
+}
+.warehouse-inbound-form .scan-submit {
+  min-height: 44px;
+  border-radius: 0 0 5px 5px;
 }
 .inbound-scan .scan-field input {
   min-height: 56px;
@@ -2334,8 +2438,20 @@ td small {
   .inbound-layout {
     grid-template-columns: 1fr;
   }
+  .warehouse-inbound-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 @media (max-width: 700px) {
+  .warehouse-inbound-form {
+    grid-template-columns: 1fr;
+  }
+  .warehouse-inbound-form > .field:nth-of-type(1),
+  .warehouse-inbound-form > .inherited-data-strip,
+  .warehouse-inbound-form > .warehouse-receipt-result,
+  .warehouse-inbound-form > .scan-submit {
+    grid-column: auto;
+  }
   .sorting-action,
   .scan-inline,
   .inventory-filter,

@@ -30,6 +30,7 @@ import { ensureFtlVehicleAndLoads } from "../lib/ftl-vehicle-loads.server";
 import { summarizeLoadingSelection } from "../lib/loading-workbench";
 import {
   maxInlineOrderDocumentBytes,
+  orderDocumentCanBeHandledInModule,
   orderDocumentPlacement,
   orderDocumentPlacements,
   orderDocumentStages,
@@ -2438,7 +2439,7 @@ export async function action({ request, params }: Route.ActionArgs) {
       const placement = orderDocumentPlacement(documentCategory);
       if (
         moduleCode !== "documents" &&
-        (!placement || placement.moduleCode !== moduleCode)
+        !orderDocumentCanBeHandledInModule(documentCategory, moduleCode as OrderModuleCode)
       )
         return { formError: "请在该文件对应的业务节点上传" };
       const documentValues = [
@@ -2533,8 +2534,10 @@ export async function action({ request, params }: Route.ActionArgs) {
         "SELECT document_category FROM order_document_metadata WHERE attachment_id=? AND order_id=? AND organization_id=?",
       ).bind(attachmentId, orderId, current.organizationId).first<{ document_category: string }>();
       if (!target) return { formError: "要审核的文件不存在" };
-      const placement = orderDocumentPlacement(target.document_category);
-      if (moduleCode !== "documents" && placement?.moduleCode !== moduleCode)
+      if (
+        moduleCode !== "documents" &&
+        !orderDocumentCanBeHandledInModule(target.document_category, moduleCode as OrderModuleCode)
+      )
         return { formError: "请在该文件对应的业务节点审核" };
       const status = valueOf(form, "reviewStatus");
       if (!["approved", "rejected", "archived"].includes(status))
@@ -2570,8 +2573,10 @@ export async function action({ request, params }: Route.ActionArgs) {
         "SELECT document_category FROM order_document_metadata WHERE attachment_id=? AND order_id=? AND organization_id=?",
       ).bind(attachmentId, orderId, current.organizationId).first<{ document_category: string }>();
       if (!target) return { formError: "要修改的文件不存在" };
-      const placement = orderDocumentPlacement(target.document_category);
-      if (moduleCode !== "documents" && placement?.moduleCode !== moduleCode)
+      if (
+        moduleCode !== "documents" &&
+        !orderDocumentCanBeHandledInModule(target.document_category, moduleCode as OrderModuleCode)
+      )
         return { formError: "请在该文件对应的业务节点修改" };
       const now = new Date().toISOString();
       await env.DB.prepare(
@@ -3806,15 +3811,15 @@ function ModuleSourceDocuments({
   const canManageDocs = manage || canApproveConsignment;
 
   return (
-    <section className="source-document-section" aria-label="本节点文件">
+    <section className="source-document-section" id="module-source-documents" aria-label="本节点文件">
       <header>
         <div>
-          <h3>本节点文件</h3>
-          <p>文件在实际取得的业务节点上传，上传后自动汇总到文件中心审核和归档。</p>
+          <h3>{code === "loading" ? "装车出库前文件门禁" : "本节点文件"}</h3>
+          <p>{code === "loading" ? "在本页直接上传、查看、编辑和审核发票、装箱单与报关资料；全部通过后仓库才可完成出库交接。" : "文件在实际取得的业务节点上传，上传后自动汇总到文件中心查看和归档。"}</p>
         </div>
-        <Link className="secondary" to={`/admin/orders/${data.order.id}/modules/documents`}>
-          查看文件中心
-        </Link>
+        {code !== "loading" && <Link className="secondary" to={`/admin/orders/${data.order.id}/modules/documents`}>
+          查看文件汇总
+        </Link>}
       </header>
       <div className="source-document-grid">
         {placements.map((placement) => {
@@ -4783,7 +4788,7 @@ function ModuleBusinessData({
                 </span>
               </Link>
               <div className="loading-batch-entry-files">
-                <Link className="secondary" to={`/admin/orders/${data.order.id}/modules/documents`}>处理本订单文件</Link>
+                <a className="secondary" href="#module-source-documents">处理本订单发运前文件</a>
                 <Link className="primary" to={`/admin/loading/${item.id}?fromOrderId=${encodeURIComponent(data.order.id)}#batch-files`}>处理整批文件与报关门禁</Link>
               </div>
             </article>
