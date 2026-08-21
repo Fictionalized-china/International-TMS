@@ -103,7 +103,8 @@
   height: 100%;
   min-width: 0;
   flex-direction: column;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   border: 1px solid #d7e0eb;
   border-radius: 8px;
   background: #fff;
@@ -298,11 +299,11 @@
 .order-form-workflow-sections {
   display: grid;
   min-height: 0;
-  flex: 1;
+  flex: 0 0 auto;
   align-content: start;
   gap: 8px;
   padding: 12px 14px;
-  overflow-y: auto;
+  overflow: visible;
   background: #f5f7fa;
 }
 .order-form-step {
@@ -467,45 +468,34 @@
   padding: 0;
   background: #fff;
 }
-.order-form-basics > summary {
+.order-form-basics > header {
   display: flex;
   min-height: 48px;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+  margin: 0;
   padding: 9px 16px;
-  cursor: pointer;
-  list-style: none;
 }
-.order-form-basics > summary::-webkit-details-marker {
-  display: none;
-}
-.order-form-basics > summary > div {
+.order-form-basics > header > div {
   display: grid;
   min-width: 0;
   gap: 2px;
 }
-.order-form-basics > summary strong {
+.order-form-basics > header h2 {
+  margin: 0;
   color: #26384f;
-  font-size: 13px;
+  font-size: 15px;
 }
-.order-form-basics > summary small {
+.order-form-basics > header small {
   overflow: hidden;
   color: #6b7b90;
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.order-form-basics > summary > span {
-  flex: none;
-  color: #315f99;
-  font-size: 11px;
-  font-weight: 750;
-}
-.order-form-basics[open] > summary {
-  border-bottom: 1px solid #dfe6ef;
-}
 .order-form-basics-body {
+  border-top: 1px solid #dfe6ef;
   padding: 12px 16px 16px;
 }
 .order-form-module-summary b {

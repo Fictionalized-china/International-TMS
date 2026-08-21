@@ -843,16 +843,14 @@ function OrderBusinessForm({
           </details>
         )}
 
-        <details className="order-form-section order-form-basics">
-          <summary>
+        <section className="order-form-section order-form-basics">
+          <header>
             <div>
-              <strong>订单资料</strong>
-              <small>
-                {order.customer_name} · {businessTypeLabels[order.business_type] ?? order.business_type} · {order.cargo_description || "未填写货物名称"}
-              </small>
+              <span>订单资料</span>
+              <h2>基础信息</h2>
             </div>
-            <span>查看完整资料{data.packageLabels.length ? `与 ${data.packageLabels.length} 张货物标签` : ""}</span>
-          </summary>
+            <small>{order.customer_name} · {businessTypeLabels[order.business_type] ?? order.business_type} · {order.cargo_description || "未填写货物名称"}</small>
+          </header>
           <div className="order-form-basics-body">
             <div className="order-form-data-grid">
               <Info label="客户" value={order.customer_name} />
@@ -887,7 +885,7 @@ function OrderBusinessForm({
               </section>
             )}
           </div>
-        </details>
+        </section>
 
         <details className="order-form-records">
           <summary>附件与办理记录 <span>{data.attachments.length} 个附件 · {data.history.length + data.macro.length} 条记录</span></summary>
