@@ -315,8 +315,7 @@ async function synchronizeLoadingModuleFromBatch(
             AND b.carrier_id IS NOT NULL
             AND b.warehouse_id IS NOT NULL
             AND b.border_port IS NOT NULL
-            AND b.planned_departure_at IS NOT NULL
-            AND b.planned_arrival_at IS NOT NULL THEN 1
+            AND b.planned_departure_at IS NOT NULL THEN 1
            ELSE 0
          END) plan_complete
        FROM transport_batch_orders bo

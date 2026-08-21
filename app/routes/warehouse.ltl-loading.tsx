@@ -7,6 +7,7 @@ import { writeAudit } from "../lib/audit.server";
 import { requireSessionUser } from "../lib/auth.server";
 import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
+import { refreshLoadingManifest } from "../lib/loading-manifest.server";
 import { valueOf } from "../lib/validation";
 
 const DEFAULT_PAGE_SIZE = 30;
@@ -409,6 +410,7 @@ export async function action({ request }: Route.ActionArgs) {
         user.organizationId,
       ),
     ]);
+    await refreshLoadingManifest(user.organizationId,batch.id,user.userId,now);
     await writeAudit({
       request,
       action: "warehouse.ltl_loading.route",
@@ -644,6 +646,7 @@ export async function action({ request }: Route.ActionArgs) {
     ).bind(plannedDepartureAt, now, batch.id, user.organizationId),
   );
   await env.DB.batch(statements);
+  await refreshLoadingManifest(user.organizationId,batch.id,user.userId,now);
   await writeAudit({
     request,
     action: "warehouse.ltl_loading.create",

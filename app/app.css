@@ -13209,6 +13209,12 @@ a.order-module-card.read-only:hover {
   font-weight: 600;
 }
 
+.loading-sheet-readonly {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-self: stretch;
+  border-radius: 8px;
+}
+
 @media (max-width: 900px) {
   .loading-preparation-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));

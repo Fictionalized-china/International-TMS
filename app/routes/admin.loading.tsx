@@ -84,7 +84,7 @@ export default function LoadingTracking({ loaderData }: Route.ComponentProps) {
       <div>
         <p className="eyebrow">CONSOLIDATION TRACKING</p>
         <h1>配载单跟踪</h1>
-        <p>配载单统一由仓库端生成；管理后台负责查看、报关、车辆安排和境外运输跟踪。</p>
+        <p>配载单由仓库端生成并自动同步；这里只读查看仓库准备结果，整批出库后再进入运输执行与跟踪。</p>
       </div>
       <span className="status-pill">{loaderData.total} 张配载单</span>
     </header>
@@ -103,11 +103,11 @@ export default function LoadingTracking({ loaderData }: Route.ComponentProps) {
         <td>{batch.origin_location}<small>→ {batch.destination_location}</small></td>
         <td><strong>{batch.order_count} 票</strong><small>{batch.order_numbers || "—"}</small></td>
         <td>{Number(batch.total_weight || 0).toFixed(2)} KG<small>{Number(batch.total_volume || 0).toFixed(3)} CBM</small></td>
-        <td>{batch.carrier_name || "待安排"}<small>{batch.warehouse_name || "仓库未记录"}</small></td>
+        <td>{batch.carrier_name || "待仓库补齐"}<small>{batch.warehouse_name || "仓库未记录"}</small></td>
         <td>{batch.vehicle_count} 辆</td>
         <td>{formatDate(batch.planned_departure_at)}</td>
         <td><span className="status-pill">{roadStatusLabel(batch.road_status)}</span></td>
-        <td><Link className="text-button" to={`/admin/loading/${batch.id}`}>打开配载单</Link></td>
+        <td><Link className="text-button" to={`/admin/loading/${batch.id}`}>查看配载单</Link></td>
       </tr>)}</tbody></table></div>
       {!loaderData.batches.length && <p className="empty-state">没有找到符合条件的已生成配载单。</p>}
       {loaderData.pageCount > 1 && <div className="pagination">

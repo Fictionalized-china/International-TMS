@@ -9,6 +9,7 @@ import { ensureOrderModules, syncOrderWorkflowSnapshot } from "../lib/order-modu
 import { maxInlineOrderDocumentBytes } from "../lib/order-documents";
 import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
+import { refreshLoadingManifest } from "../lib/loading-manifest.server";
 import { valueOf } from "../lib/validation";
 
 const DEFAULT_PAGE_SIZE=30;
@@ -212,6 +213,7 @@ export async function action({request}:Route.ActionArgs){
       env.DB.prepare("UPDATE transport_batch_vehicles SET status='cancelled',updated_at=? WHERE organization_id=? AND batch_id=? AND id!=? AND status!='cancelled'").bind(now,user.organizationId,batchId,vehicleId),
       env.DB.prepare("UPDATE warehouse_dispatches SET vehicle_plate=?,driver_name=?,driver_phone=?,carrier_name=?,updated_at=? WHERE organization_id=? AND transport_batch_id=? AND status='loading'").bind(resource.plateNumber,resource.driverName,resource.driverPhone,resource.carrierName,now,user.organizationId,batchId),
     ]);
+    await refreshLoadingManifest(user.organizationId,batchId,user.userId,now);
     await writeAudit({request,action:"warehouse.consolidation.resource",resourceType:"transport_batch",resourceId:batchId,organizationId:user.organizationId,actorUserId:user.userId,metadata:{batchNumber:batch.batch_number,carrierId:resource.carrierId,vehicleMasterId:resource.vehicleMasterId,driverMasterId:resource.driverMasterId}});
     return{success:`${batch.batch_number} 的承运商、车辆和司机已确认`,batchId};
   }
@@ -255,6 +257,7 @@ export async function action({request}:Route.ActionArgs){
       await env.DB.batch([...documentApprovalStatements,...statements]);
       await addOrdersToPendingDispatch(user.organizationId,warehouse.id,targetBatch.id,states.map(row=>row.order_id),now);
       await activateLoadingModules(user.organizationId,states.map(row=>row.order_id),targetBatch.batch_number,user.userId,now,"加入已有配载单");
+      await refreshLoadingManifest(user.organizationId,targetBatch.id,user.userId,now);
       await writeAudit({request,action:"warehouse.consolidation.add",resourceType:"transport_batch",resourceId:targetBatch.id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{batchNumber:targetBatch.batch_number,orderIds}});
       return{success:`已将 ${states.length} 票订单加入 ${targetBatch.batch_number}`,batchId:targetBatch.id};
     }
@@ -274,6 +277,7 @@ export async function action({request}:Route.ActionArgs){
     states.forEach((row,index)=>statements.push(env.DB.prepare("INSERT INTO transport_batch_orders(id,organization_id,batch_id,order_id,sequence_no,status,added_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,'planned',?,?,?)").bind(crypto.randomUUID(),user.organizationId,batchId,row.order_id,index+1,user.userId,now,now)));
     try{await env.DB.batch(statements)}catch{return{formError:"配载单编号冲突或数据已被其他操作占用，请刷新后重试"}}
     await activateLoadingModules(user.organizationId,states.map(row=>row.order_id),batchNumber,user.userId,now,"仓库货物配载");
+    await refreshLoadingManifest(user.organizationId,batchId,user.userId,now);
     await writeAudit({request,action:"warehouse.consolidation.create",resourceType:"transport_batch",resourceId:batchId,organizationId:user.organizationId,actorUserId:user.userId,metadata:{batchNumber,orderIds,totalWeight:states.reduce((sum,row)=>sum+row.weight_kg,0),totalVolume:states.reduce((sum,row)=>sum+row.volume_cbm,0)}});
     return{success:`配载单 ${batchNumber} 已生成，共 ${states.length} 票完整订单`,batchId};
   }
@@ -288,6 +292,7 @@ export async function action({request}:Route.ActionArgs){
     await env.DB.prepare("UPDATE transport_batch_orders SET status='removed',updated_at=? WHERE batch_id=? AND order_id=? AND organization_id=?").bind(now,batchId,orderId,user.organizationId).run();
     await removeOrdersFromPendingDispatch(user.organizationId,warehouse.id,batchId,[orderId],now);
     await resetLoadingModules(user.organizationId,[orderId],user.userId,now,`从配载单 ${batch.batch_number} 移除`);
+    await refreshLoadingManifest(user.organizationId,batchId,user.userId,now);
     await writeAudit({request,action:"warehouse.consolidation.remove",resourceType:"transport_batch",resourceId:batchId,organizationId:user.organizationId,actorUserId:user.userId,metadata:{batchNumber:batch.batch_number,orderId}});
     return{success:`订单已从 ${batch.batch_number} 移除`,batchId};
   }
