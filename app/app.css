@@ -1296,6 +1296,29 @@ td small {
 .warehouse-shell .eyebrow {
   color: #a14d04 !important;
 }
+.warehouse-login-presets {
+  margin: 20px 0;
+  border: 1px solid #ead8c6;
+  border-radius: 8px;
+  background: #fffaf4;
+}
+.warehouse-login-presets summary {
+  padding: 12px 14px;
+  color: #8b4305;
+  font-weight: 750;
+  cursor: pointer;
+}
+.warehouse-login-presets[open] summary {
+  border-bottom: 1px solid #ead8c6;
+}
+.warehouse-login-presets .field {
+  padding: 12px 14px 6px;
+}
+.warehouse-login-presets > small {
+  display: block;
+  padding: 0 14px 12px;
+  color: #74665b;
+}
 .warehouse-shell {
   min-height: 100vh;
   padding-left: 212px;
