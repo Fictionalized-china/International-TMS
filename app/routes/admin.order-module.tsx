@@ -3359,7 +3359,7 @@ export default function OrderModulePage({
               <input
                 type="hidden"
                 name="warehouseTo"
-                value={`/warehouse?orderId=${order.id}&returnTo=${encodeURIComponent(`/admin/orders/${order.id}/modules/warehouse`)}`}
+                value={`/warehouse/acceptance?orderId=${order.id}&returnTo=${encodeURIComponent(`/admin/orders/${order.id}/modules/warehouse`)}`}
               />
               <button className="primary">进入仓库端</button>
             </Form>
@@ -5800,7 +5800,7 @@ function ModuleBusinessData({
             <div className="warehouse-module-steps">
               <WarehouseSiteCard
                 orderId={data.order.id}
-                targetPath="/warehouse/inbound"
+                targetPath="/warehouse/acceptance"
                 marker="A"
                 title="到仓收货"
                 text="扫码收货，登记实收包装、件数、重量、体积、库位和异常"
@@ -5808,7 +5808,7 @@ function ModuleBusinessData({
               />
             </div>
             <div className="warehouse-module-actions">
-              <WarehouseSiteButton orderId={data.order.id} targetPath="/warehouse/inbound" className="primary">
+              <WarehouseSiteButton orderId={data.order.id} targetPath="/warehouse/acceptance" className="primary">
                 {data.warehouseFlow?.inboundReady ? "查看收货记录" : "去收货并确认货齐"}
               </WarehouseSiteButton>
               {data.warehouseFlow?.inboundReady && <Link className="secondary" to={`/admin/orders/${data.order.id}/modules/loading#module-business-data`}>进入装车与出库</Link>}
@@ -5835,7 +5835,7 @@ function ModuleBusinessData({
         </BusinessSubsection>
         <BusinessSubsection title="当前门禁" hint="完成实收登记并确认货齐后，国内运输阶段结束。">
           <div className="module-capability-grid">
-            <Capability title="到仓收货与货齐确认" text="扫描标签，登记实收数量、重量、体积、库位、货齐状态与异常备注。" href={`/warehouse/inbound?orderId=${data.order.id}&returnTo=${encodeURIComponent(`/admin/orders/${data.order.id}/modules/warehouse`)}`} />
+            <Capability title="到仓收货与货齐确认" text="扫描标签，登记实收数量、重量、体积、库位、货齐状态与异常备注。" href={`/warehouse/acceptance?orderId=${data.order.id}&returnTo=${encodeURIComponent(`/admin/orders/${data.order.id}/modules/warehouse`)}`} />
           </div>
           {!data.warehouseFlow?.inboundReady && <p className="alert warning">国内运输尚未完成：请先完成到仓收货并确认货齐。</p>}
         </BusinessSubsection>

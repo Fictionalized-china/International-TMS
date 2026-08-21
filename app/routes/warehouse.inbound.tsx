@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { Form, Link, useNavigation } from "react-router";
+import { Form, Link, redirect, useNavigation } from "react-router";
 import { useState, type ReactElement } from "react";
 import type { Route } from "./+types/warehouse.inbound";
 import { requireSessionUser } from "../lib/auth.server";
@@ -96,6 +96,8 @@ export async function loader({ request }: Route.LoaderArgs) {
   const warehouse = warehouseContext.selected;
   const isOverseasWarehouse = warehouse.warehouse_role === "overseas_destination";
   const url = new URL(request.url);
+  if (!isOverseasWarehouse)
+    throw redirect(`/warehouse/acceptance${url.search}`);
   const orderId = url.searchParams.get("orderId");
   const reference = (url.searchParams.get("reference") || "").trim();
   const [shipments, locations, receipts, packages] = await Promise.all([
@@ -182,6 +184,8 @@ export async function action({ request }: Route.ActionArgs) {
   const selectedWarehouse = warehouseContext.selected;
   await requireWarehouseAssignment(user, selectedWarehouse.id, "operator");
   const isOverseasWarehouse = selectedWarehouse.warehouse_role === "overseas_destination";
+  if (!isOverseasWarehouse)
+    throw redirect(`/warehouse/acceptance${new URL(request.url).search}`);
   const form = await request.formData(),
     shipmentId = valueOf(form, "shipmentId"),
     shipmentReference = valueOf(form, "shipmentReference").trim(),
