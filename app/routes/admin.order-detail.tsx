@@ -704,9 +704,12 @@ function OrderBusinessForm({
                 <button className="primary" disabled={busy}>{directAction.label}</button>
               </Form>
             ) : guidance.moduleCode ? (
-              <a className={guidance.blocker ? "secondary" : "primary"} href={`#order-form-module-${guidance.moduleCode}`}>
-                {guidance.blocker ? "查看阻断并处理" : "定位当前办理区"}
-              </a>
+              <Link
+                className={guidance.blocker ? "secondary" : "primary"}
+                to={`/admin/orders/${order.id}/modules/${guidance.moduleCode}#module-business-data`}
+              >
+                {guidance.blocker ? "查看阻断并处理" : "办理当前节点"}
+              </Link>
             ) : null}
           </div>
         </header>
@@ -794,16 +797,40 @@ function OrderBusinessForm({
                         key={row.module_state_id}
                       >
                         <header>
-                          <div>
-                            <span>{row.module_required ? "必须办理" : "按需办理"}</span>
-                            <h3>{row.module_name || orderModuleDefinition(row.module_code || "")?.name || row.module_code}</h3>
-                          </div>
-                          <div className="order-form-module-meta">
-                            {mine && <b>待我处理</b>}
-                            <span>{row.position_name || row.responsibility_position_code || "待配置岗位"}</span>
-                            <span>{row.assignee_name || "待分配人员"}</span>
-                            <em>{workflowFormStatusLabel(row.module_status || module?.status || "not_started")}</em>
-                          </div>
+                          {row.module_code ? (
+                            <Link
+                              className="order-form-module-entry"
+                              to={`/admin/orders/${order.id}/modules/${row.module_code}#module-business-data`}
+                              aria-label={`${current && editable ? "办理" : "查看"}${row.module_name || orderModuleDefinition(row.module_code)?.name || row.module_code}`}
+                            >
+                              <div>
+                                <span>{row.module_required ? "必须办理" : "按需办理"}</span>
+                                <h3>{row.module_name || orderModuleDefinition(row.module_code)?.name || row.module_code}</h3>
+                              </div>
+                              <div className="order-form-module-meta">
+                                {mine && <b>待我处理</b>}
+                                <span>{row.position_name || row.responsibility_position_code || "待配置岗位"}</span>
+                                <span>{row.assignee_name || "待分配人员"}</span>
+                                <em>{workflowFormStatusLabel(row.module_status || module?.status || "not_started")}</em>
+                                <strong className="order-form-module-entry-label">
+                                  {current && editable ? "进入办理 →" : "查看 →"}
+                                </strong>
+                              </div>
+                            </Link>
+                          ) : (
+                            <div className="order-form-module-static-entry">
+                              <div>
+                                <span>{row.module_required ? "必须办理" : "按需办理"}</span>
+                                <h3>{row.module_name || row.module_code}</h3>
+                              </div>
+                              <div className="order-form-module-meta">
+                                {mine && <b>待我处理</b>}
+                                <span>{row.position_name || row.responsibility_position_code || "待配置岗位"}</span>
+                                <span>{row.assignee_name || "待分配人员"}</span>
+                                <em>{workflowFormStatusLabel(row.module_status || module?.status || "not_started")}</em>
+                              </div>
+                            </div>
+                          )}
                         </header>
                         <div className="order-form-module-summary">
                           <span><b>{row.required_field_count}</b> 个必填字段</span>
