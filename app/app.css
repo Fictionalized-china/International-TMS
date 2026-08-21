@@ -2698,6 +2698,70 @@ td small {
 .warehouse-destination-cell b {
   color: #c62828;
 }
+.transport-route-row {
+  display: grid;
+  grid-template-columns: minmax(190px, .9fr) 34px minmax(280px, 1.25fr) 34px minmax(190px, .9fr);
+  align-items: stretch;
+  overflow: hidden;
+  margin: 2px 0;
+  border: 1px solid #d5dfeb;
+  border-radius: 6px;
+  background: #fff;
+}
+.transport-route-stop,
+.transport-route-destination {
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  min-width: 0;
+  min-height: 76px;
+  padding: 9px 12px;
+}
+.transport-route-stop > span,
+.transport-route-destination > span {
+  color: #61738c;
+  font-size: 12px;
+  font-weight: 700;
+}
+.transport-route-stop strong {
+  overflow: hidden;
+  color: #142a49;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.transport-route-stop small,
+.transport-route-destination small {
+  color: #728198;
+  font-size: 10px;
+}
+.transport-route-destination {
+  background: #f7fafc;
+}
+.transport-route-destination select {
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 34px 6px 10px;
+  border-color: #b9c9db;
+  background-color: #fff;
+}
+.transport-route-arrow {
+  display: grid;
+  place-items: center;
+  background: #eef3f8;
+  color: #58708f;
+  font-size: 17px;
+  font-weight: 800;
+}
+@media (max-width: 900px) {
+  .transport-route-row {
+    grid-template-columns: 1fr;
+  }
+  .transport-route-arrow {
+    min-height: 24px;
+    transform: none;
+  }
+}
 .overseas-summary-grid {
   grid-template-columns: repeat(5, minmax(0, 1fr));
 }

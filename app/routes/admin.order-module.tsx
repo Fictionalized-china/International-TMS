@@ -4467,12 +4467,17 @@ function ModuleBusinessData({
                 <ModuleField fields={data.workflowFields} fieldKey="domestic_driver_id_number" label="国内司机证件号">
                   {(required) => <input name="driverIdNumber" value={domesticDriver?.license_number || ""} readOnly required={required} placeholder="选择司机后自动带出" />}
                 </ModuleField>
-                <div className="inherited-data-strip span-2">
-                  <span>起运地（继承订单）<strong>{[data.order.origin_country,data.order.origin_state,data.order.origin_city].filter(Boolean).join(" ")}</strong></span>
-                  <label className="warehouse-destination-cell">
-                    <span>国内段终点 <b>*</b></span>
+                <div className="transport-route-row span-2">
+                  <div className="transport-route-stop">
+                    <span>国内提货起点</span>
+                    <strong>{[data.order.origin_country,data.order.origin_state,data.order.origin_city].filter(Boolean).join(" ") || "订单尚未填写起运地"}</strong>
+                    <small>继承订单信息</small>
+                  </div>
+                  <span className="transport-route-arrow" aria-hidden="true">→</span>
+                  <label className="transport-route-destination">
+                    <span>国内入仓终点 <b className="required-mark">*</b></span>
                     <select name="destinationWarehouseId" defaultValue="" required>
-                      <option value="">请选择仓库</option>
+                      <option value="">请选择国内集货仓或口岸仓</option>
                       {data.warehouses
                         .filter((warehouse) => ["domestic_collection", "port"].includes(warehouse.warehouse_role || ""))
                         .map((warehouse) => (
@@ -4481,9 +4486,14 @@ function ModuleBusinessData({
                           </option>
                         ))}
                     </select>
-                    <small>仓库端将显示所选仓库</small>
+                    <small>保存后自动进入所选仓库的待验收列表</small>
                   </label>
-                  <span>境外目的地（后续节点）<strong>{[data.order.destination_country,data.order.destination_state,data.order.destination_city].filter(Boolean).join(" ")}</strong></span>
+                  <span className="transport-route-arrow" aria-hidden="true">→</span>
+                  <div className="transport-route-stop">
+                    <span>境外目的地</span>
+                    <strong>{[data.order.destination_country,data.order.destination_state,data.order.destination_city].filter(Boolean).join(" ") || "订单尚未填写目的地"}</strong>
+                    <small>后续出境运输使用</small>
+                  </div>
                 </div>
                 <ModuleField fields={data.workflowFields} fieldKey="domestic_planned_departure_at" label="计划提货时间" fallbackRequired>
                   {(required) => <input name="plannedDepartureAt" type="datetime-local" required={required} />}
