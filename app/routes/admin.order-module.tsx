@@ -916,6 +916,12 @@ export async function action({ request, params }: Route.ActionArgs) {
     form = await request.formData(),
     intent = valueOf(form, "intent");
   if (!orderModuleDefinition(moduleCode)) return { formError: "模块不存在" };
+  if (
+    moduleCode === "loading" &&
+    ["document_upload", "document_review", "document_metadata_update"].includes(intent)
+  ) {
+    return { formError: "装车出库前文件由仓库端上传并确认，管理后台仅同步查看" };
+  }
   const isConsignmentApprovalAction =
     moduleCode === "consignment" &&
     intent === "workflow_action" &&
@@ -3889,14 +3895,14 @@ function ModuleSourceDocuments({
     })
     .filter((placement) => placement.policy.visible);
   if (!placements.length) return null;
-  const canManageDocs = manage || canApproveConsignment;
+  const canManageDocs = code !== "loading" && (manage || canApproveConsignment);
 
   return (
     <section className="source-document-section" id="module-source-documents" aria-label="本节点文件">
       <header>
         <div>
           <h3>{code === "loading" ? "装车出库前文件门禁" : "本节点文件"}</h3>
-          <p>{code === "loading" ? "在本页直接上传、查看、编辑和审核发票、装箱单与报关资料；全部通过后仓库才可完成出库交接。" : "文件在实际取得的业务节点上传，上传后自动汇总到文件中心查看和归档。"}</p>
+          <p>{code === "loading" ? "发票、装箱单与报关资料由仓库端在创建装车任务时上传、预览并确认；管理后台只读同步文件与审核状态。" : "文件在实际取得的业务节点上传，上传后自动汇总到文件中心查看和归档。"}</p>
         </div>
         {code !== "loading" && <Link className="secondary" to={`/admin/orders/${data.order.id}/modules/documents`}>
           查看文件汇总
@@ -3954,7 +3960,7 @@ function ModuleSourceDocuments({
                       <button className="secondary" disabled={busy}>上传替换文件</button>
                     </Form>
                   </div>
-                </Modal> : <button type="button" className="text-button" disabled title={lockedAfterApproval ? "委托书已审核通过，不可编辑" : undefined}>编辑</button>}
+                </Modal> : code !== "loading" ? <button type="button" className="text-button" disabled title={lockedAfterApproval ? "委托书已审核通过，不可编辑" : undefined}>编辑</button> : null}
                 {canManageDocs && !lockedAfterApproval ? <Modal title={`审核文件 · ${placement.document.name}`} triggerLabel="审核" triggerClassName="text-button" size="wide" closeSignal={reviewCloseSignal}>
                   <Form method="post" className="stack">
                     <input type="hidden" name="intent" value="document_review" />
@@ -3963,7 +3969,7 @@ function ModuleSourceDocuments({
                     <label className="field"><span>审核结果</span><select name="reviewStatus" defaultValue={latest.review_status === "rejected" ? "rejected" : "approved"}><option value="approved">审核通过</option><option value="rejected">退回修改</option></select></label>
                     <button className="primary" disabled={busy}>确认审核结果</button>
                   </Form>
-                </Modal> : <button type="button" className="text-button" disabled title={lockedAfterApproval ? "委托书已审核通过" : undefined}>审核</button>}
+                </Modal> : code !== "loading" ? <button type="button" className="text-button" disabled title={lockedAfterApproval ? "委托书已审核通过" : undefined}>审核</button> : <span className="muted">仓库已同步</span>}
               </div> : canManageDocs ? <Form method="post" encType="multipart/form-data" className="source-document-upload-form">
                 <input type="hidden" name="intent" value="document_upload" />
                 <input type="hidden" name="documentCategory" value={placement.documentCode} />
