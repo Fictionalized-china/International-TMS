@@ -284,7 +284,7 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
   const availableBatches=loaderData.batches.filter(batch=>!batch.has_started&&["planning","loading"].includes(batch.status));
   const documentUploadSignal=actionData?.success&&"actionKind" in actionData&&actionData.actionKind==="document_upload"?actionData.closeSignal:undefined;
   const selectedDocuments=loaderData.documents.filter(document=>selectedIds.has(document.order_id));
-  return<>
+  return <div className="warehouse-consolidation-page">
     <header className="warehouse-page-header ltl-loading-header">
       <div><p className="eyebrow">CARGO CONSOLIDATION</p><h1>货物配载</h1><p>资料上传齐全后勾选完整拼车订单，确认文件并生成正式 PZ 配载单。</p></div>
       <div className="page-actions">
@@ -345,7 +345,7 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
       <Pagination loaderData={loaderData}/>
     </section>
     <section className="panel"><div className="panel-header"><div><h2>当前仓库配载单</h2><p>装车开始前可以增加、移除订单或取消配载；开始装车后由配载单统一推进。</p></div></div><div className="table-wrap"><table><thead><tr><th>配载单</th><th>订单</th><th>实收汇总</th><th>目的地 / 口岸</th><th>计划装车</th><th>状态</th><th>操作</th></tr></thead><tbody>{loaderData.batches.map(batch=><tr key={batch.id}><td><strong>{batch.batch_number}</strong><small>{batch.batch_name}</small></td><td><strong>{batch.order_count} 票</strong><small>{batch.order_numbers}</small></td><td>{batch.total_weight.toFixed(2)} KG<small>{batch.total_volume.toFixed(3)} CBM</small></td><td>{batch.destination_location}<small>{batch.border_port||"口岸待补"} · {batch.customs_location||"清关地待补"}</small></td><td>{batch.planned_loading_at?new Date(batch.planned_loading_at).toLocaleString("zh-CN"):"待定"}</td><td><span className="status-pill">{batch.has_started?"已开始装车":batch.has_dispatch?"装车任务已生成":batch.status==="planning"?"配载已生成":"待装车"}</span></td><td><div className="button-row"><Link className="text-button" to={`/admin/loading/${batch.id}`}>打开</Link>{!batch.has_started&&<Modal title={`调整 ${batch.batch_number}`} triggerLabel="调整" triggerClassName="text-button" closeSignal={actionData?.success}><BatchAdjustment batch={batch} orders={loaderData.batchOrders.filter(row=>row.batch_id===batch.id)} busy={busy}/></Modal>}</div></td></tr>)}</tbody></table></div>{!loaderData.batches.length&&<p className="empty-state">当前仓库尚未生成配载单。</p>}</section>
-  </>;
+  </div>;
 }
 
 function ConsolidationForm({selected,documents,totals,busy}:{selected:Selection[];documents:OrderDocumentRow[];totals:{packages:number;pieces:number;weight:number;volume:number};busy:boolean}){

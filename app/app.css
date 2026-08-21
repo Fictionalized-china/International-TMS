@@ -6200,6 +6200,18 @@ body.modal-scroll-locked {
   overflow: hidden;
 }
 
+.warehouse-consolidation-page {
+  position: relative;
+  left: 50%;
+  width: min(1760px, calc(100vw - 252px));
+  transform: translateX(-50%);
+}
+
+.warehouse-consolidation-page .consolidation-stock-panel {
+  padding-right: 18px;
+  padding-left: 18px;
+}
+
 .consolidation-filter-form {
   display: grid;
 }
@@ -6278,6 +6290,7 @@ body.modal-scroll-locked {
 }
 
 .consolidation-stock-table table {
+  width: 100%;
   min-width: 1580px;
 }
 
@@ -6612,6 +6625,7 @@ body.modal-scroll-locked {
 }
 
 @media (max-width: 720px) {
+  .warehouse-consolidation-page { left: auto; width: 100%; transform: none; }
   .ltl-loading-header { align-items: stretch; flex-direction: column; }
   .ltl-loading-filters { grid-template-columns: 1fr 1fr; }
   .consolidation-filter-primary { grid-template-columns: 1fr; }
