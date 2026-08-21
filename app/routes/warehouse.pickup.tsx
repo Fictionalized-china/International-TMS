@@ -90,14 +90,41 @@ export async function action({ request }: Route.ActionArgs) {
   const barcode = valueOf(form, "barcode").trim();
   if (!barcode) return { formError: "请扫描境外仓现有货物标签" };
 
+  const orderLookup = await env.DB.prepare(
+    `SELECT op.order_id,o.order_number
+       FROM overseas_warehouse_operations op
+       JOIN transport_orders o ON o.id=op.order_id AND o.organization_id=op.organization_id
+      WHERE op.organization_id=? AND op.warehouse_id=? AND o.order_number=? AND op.status!='cancelled'
+      ORDER BY op.created_at DESC LIMIT 1`,
+  ).bind(user.organizationId, warehouse.id, barcode).first<{
+    order_id: string;
+    order_number: string;
+  }>();
+  if (orderLookup) {
+    const params = new URLSearchParams({
+      warehouseId: warehouse.id,
+      orderId: orderLookup.order_id,
+      pickupResult: `${orderLookup.order_number} 已调出，请继续逐件扫描下方货物标签`,
+    });
+    return redirect(`/warehouse/pickup?${params.toString()}`);
+  }
+
   const pkg = await env.DB.prepare(
     `SELECT p.id,p.status,p.location_id,p.barcode,s.order_id,o.order_number,
-            COALESCE(o.consignee_contact,o.shipper_contact,c.contact_name,'客户自提') pickup_contact,
+            COALESCE(
+              o.consignee_contact,
+              o.shipper_contact,
+              (SELECT cc.name
+                 FROM customer_contacts cc
+                WHERE cc.customer_id=o.customer_id
+                ORDER BY cc.is_primary DESC,cc.updated_at DESC
+                LIMIT 1),
+              '客户自提'
+            ) pickup_contact,
             op.status operation_status
        FROM warehouse_packages p
        JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id
        JOIN transport_orders o ON o.id=s.order_id AND o.organization_id=s.organization_id
-       JOIN customers c ON c.id=o.customer_id
        JOIN overseas_warehouse_operations op ON op.order_id=o.id AND op.organization_id=o.organization_id
       WHERE p.organization_id=? AND p.warehouse_id=? AND p.barcode=? AND op.warehouse_id=? AND op.status!='cancelled'
       ORDER BY op.created_at DESC LIMIT 1`,
