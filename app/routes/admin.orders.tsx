@@ -1608,8 +1608,10 @@ function CreateOrder({
     [submitError, setSubmitError] = useState(""),
     [shipperCustomerId, setShipperCustomerId] = useState(""),
     [pickupAddressId, setPickupAddressId] = useState(""),
+    [shipperContactId, setShipperContactId] = useState(""),
     [shipperContact, setShipperContact] = useState(""),
     [shipperPhone, setShipperPhone] = useState(""),
+    [consigneeContactId, setConsigneeContactId] = useState(""),
     [consigneeContact, setConsigneeContact] = useState(""),
     [consigneePhone, setConsigneePhone] = useState(""),
     [originAddress, setOriginAddress] = useState(""),
@@ -1670,6 +1672,8 @@ function CreateOrder({
     );
     setShipperCustomerId(nextCustomerId);
     setPickupAddressId(defaultAddress?.id || "");
+    setShipperContactId(primaryContact?.id || "");
+    setConsigneeContactId(primaryContact?.id || "");
     setOriginAddress(
       defaultAddress
         ? [defaultAddress.address_line1, defaultAddress.address_line2]
@@ -1677,8 +1681,8 @@ function CreateOrder({
             .join(" ")
         : "",
     );
-    setShipperContact(defaultAddress?.contact_name || primaryContact?.name || "");
-    setShipperPhone(defaultAddress?.contact_phone || primaryContact?.phone || "");
+    setShipperContact(primaryContact?.name || "");
+    setShipperPhone(primaryContact?.phone || "");
     setConsigneeContact(primaryContact?.name || "");
     setConsigneePhone(primaryContact?.phone || "");
     setPickupAddressOpen(false);
@@ -1825,8 +1829,26 @@ function CreateOrder({
               </option>
             ))}
           </select>}
-          {shows("shipper_contact") && <input name="shipperContact" placeholder={`发货联系人${requires("shipper_contact") ? " *" : ""}`} value={shipperContact} onChange={(event) => setShipperContact(event.target.value)} required={requires("shipper_contact")} />}
-          {shows("shipper_phone") && <input name="shipperPhone" placeholder={`联系电话${requires("shipper_phone") ? " *" : ""}`} value={shipperPhone} onChange={(event) => setShipperPhone(event.target.value)} required={requires("shipper_phone")} />}
+          {shows("shipper_contact") && <>
+            <select
+              value={shipperContactId}
+              onChange={(event) => {
+                const contact = customerContactOptions.find((item) => item.id === event.target.value);
+                setShipperContactId(event.target.value);
+                setShipperContact(contact?.name || "");
+                setShipperPhone(contact?.phone || "");
+              }}
+              required={requires("shipper_contact")}
+              disabled={!shipperCustomerId}
+              aria-label="发货联系人"
+            >
+              <option value="">{shipperCustomerId ? "请选择发货联系人" : "请先选择发货方"}</option>
+              {customerContactOptions.map((contact) => <option key={contact.id} value={contact.id}>{contact.name} · {contact.phone || "未填电话"}</option>)}
+            </select>
+            <input type="hidden" name="shipperContact" value={shipperContact} />
+          </>}
+          {shows("shipper_phone") && <input name="shipperPhone" placeholder={`联系电话${requires("shipper_phone") ? " *" : ""}`} value={shipperPhone} readOnly required={requires("shipper_phone")} />}
+          {shipperCustomerId && !customerContactOptions.length && <small className="field-error">该客户暂无联系人，请先到客户管理补充。</small>}
         </div>
       </div>}
       {(shows("pickup_address_id") || shows("origin_address")) && <div className="field span-2 order-address-field">
@@ -1860,9 +1882,6 @@ function CreateOrder({
               pickupAddressOptions.map((address) => (
                 <button key={address.id} type="button" onClick={() => {
                   setPickupAddressId(address.id);
-                  const primaryContact = data.customerContacts.find((item) => item.customer_id === shipperCustomerId);
-                  setShipperContact(address.contact_name || primaryContact?.name || "");
-                  setShipperPhone(address.contact_phone || primaryContact?.phone || "");
                   setOriginAddress([address.address_line1, address.address_line2].filter(Boolean).join(" "));
                   setPickupAddressOpen(false);
                 }}>
@@ -1897,9 +1916,25 @@ function CreateOrder({
       {(shows("consignee_contact") || shows("consignee_phone")) && <div className="field order-party-field">
         <span>收货联系人</span>
         <div className="order-party-controls">
-          {shows("consignee_contact") && <input name="consigneeContact" list="customer-contact-options" value={consigneeContact} onChange={(event)=>{const name=event.target.value;setConsigneeContact(name);const contact=customerContactOptions.find((item)=>item.name===name);if(contact)setConsigneePhone(contact.phone||"");}} placeholder={`收货联系人${requires("consignee_contact") ? " *" : ""}`} required={requires("consignee_contact")} />}
-          {shows("consignee_phone") && <input name="consigneePhone" value={consigneePhone} onChange={(event)=>setConsigneePhone(event.target.value)} placeholder={`联系电话${requires("consignee_phone") ? " *" : ""}`} required={requires("consignee_phone")} />}
-          <datalist id="customer-contact-options">{customerContactOptions.map((contact)=><option key={contact.id} value={contact.name}>{contact.phone||"未填电话"}</option>)}</datalist>
+          {shows("consignee_contact") && <>
+            <select
+              value={consigneeContactId}
+              onChange={(event) => {
+                const contact = customerContactOptions.find((item) => item.id === event.target.value);
+                setConsigneeContactId(event.target.value);
+                setConsigneeContact(contact?.name || "");
+                setConsigneePhone(contact?.phone || "");
+              }}
+              required={requires("consignee_contact")}
+              disabled={!shipperCustomerId}
+              aria-label="收货联系人"
+            >
+              <option value="">{shipperCustomerId ? "请选择收货联系人" : "请先选择发货方"}</option>
+              {customerContactOptions.map((contact) => <option key={contact.id} value={contact.id}>{contact.name} · {contact.phone || "未填电话"}</option>)}
+            </select>
+            <input type="hidden" name="consigneeContact" value={consigneeContact} />
+          </>}
+          {shows("consignee_phone") && <input name="consigneePhone" value={consigneePhone} readOnly placeholder={`联系电话${requires("consignee_phone") ? " *" : ""}`} required={requires("consignee_phone")} />}
         </div>
       </div>}
       {(shows("destination_country") || shows("destination_state") || shows("destination_city")) && <GeographicFields

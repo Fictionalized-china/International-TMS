@@ -3769,6 +3769,30 @@ label:has(> input:required, > select:required, > textarea:required) > span:first
   margin-top: 2px;
 }
 
+.customer-profile-fields {
+  min-width: 0;
+  margin: 2px 0 0;
+  padding: 14px;
+  border: 1px solid #d9e2df;
+  border-radius: 8px;
+  background: #f8fbfa;
+}
+
+.customer-profile-fields legend {
+  padding: 0 6px;
+  font-weight: 800;
+}
+
+.customer-profile-fields > p {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.customer-profile-fields > .form-grid {
+  margin: 0;
+}
+
 @media (max-width: 960px) {
   .customer-role-options {
     grid-template-columns: repeat(2, minmax(0, 1fr));
