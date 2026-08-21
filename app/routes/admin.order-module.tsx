@@ -3392,13 +3392,15 @@ export default function OrderModulePage({
             </a>
           ))}
         </div>
-        <ModuleNextGuidance
-          orderId={order.id}
-          moduleStatus={module.status}
-          steps={definition.steps}
-          currentIndex={currentIndex}
-          nextModule={nextModule}
-        />
+        {definition.code !== "loading" && (
+          <ModuleNextGuidance
+            orderId={order.id}
+            moduleStatus={module.status}
+            steps={definition.steps}
+            currentIndex={currentIndex}
+            nextModule={nextModule}
+          />
+        )}
         {module.blocking_reason && (
           <div className="module-blocker">
             <strong>当前阻断原因</strong>
@@ -3410,24 +3412,30 @@ export default function OrderModulePage({
         <section className="panel" id="module-business-data">
           <div className="panel-header">
             <div>
-              <h2>1. 模块业务数据</h2>
-              <p>先按页面从上到下完成业务资料和实际操作。</p>
+              <h2>{definition.code === "loading" ? "仓库作业状态" : "1. 模块业务数据"}</h2>
+              <p>
+                {definition.code === "loading"
+                  ? "本页只读展示仓库端配载、装车和出库结果。"
+                  : "先按页面从上到下完成业务资料和实际操作。"}
+              </p>
             </div>
           </div>
           {loaderData.workflowStageAccess.available || canApproveConsignment ? (
             <>
-              <ModuleSourceDocuments
-                code={definition.code}
-                data={loaderData}
-                manage={manage}
-                canApproveConsignment={canApproveConsignment}
-                busy={busy}
-                reviewCloseSignal={
-                  actionData && "documentReviewSignal" in actionData
-                    ? actionData.documentReviewSignal
-                    : undefined
-                }
-              />
+              {definition.code !== "loading" && (
+                <ModuleSourceDocuments
+                  code={definition.code}
+                  data={loaderData}
+                  manage={manage}
+                  canApproveConsignment={canApproveConsignment}
+                  busy={busy}
+                  reviewCloseSignal={
+                    actionData && "documentReviewSignal" in actionData
+                      ? actionData.documentReviewSignal
+                      : undefined
+                  }
+                />
+              )}
               <ModuleBusinessData
                 code={definition.code}
                 data={loaderData}
@@ -3440,7 +3448,7 @@ export default function OrderModulePage({
                     : undefined
                 }
               />
-              {!(["consignment", "transport"] as OrderModuleCode[]).includes(definition.code) && (
+              {!(["consignment", "transport", "loading"] as OrderModuleCode[]).includes(definition.code) && (
                 <WorkflowFieldChecklist
                   fields={loaderData.workflowFields.filter(
                     (field) =>
@@ -4578,16 +4586,33 @@ function ModuleBusinessData({
       data.order.customs_location &&
       data.order.overseas_warehouse_id,
     );
-    const referenceLabel = (items: ReferenceOption[], codeValue: string | null) =>
-      items.find((item) => item.code === codeValue)?.name || codeValue || "未确定";
-    const flowLabel = isFtl ? "整车运输单" : isLtl ? "配载运输单" : "运输方案";
-    const resourceReady = Boolean(
-      activeBatch?.overseas_carrier_name &&
-      activeBatch?.overseas_vehicle_type &&
-      activeBatch?.overseas_vehicle_plate &&
-      activeBatch?.overseas_driver_name &&
-      activeBatch?.overseas_driver_phone,
-    );
+    const warehouseTargetPath = !hasWarehouseActuals
+      ? "/warehouse/acceptance"
+      : isLtl && !activeBatch
+        ? "/warehouse/consolidation"
+        : isLtl && activeBatch?.status === "planning"
+          ? "/warehouse/ltl-loading"
+          : "/warehouse/outbound";
+    const warehouseActionText = !hasWarehouseActuals
+      ? "进入仓库端验收收货"
+      : isLtl && !activeBatch
+        ? "进入仓库端货物配载"
+        : isLtl && activeBatch?.status === "planning"
+          ? "进入仓库端生成装车任务"
+          : "进入仓库端扫码装车与出库";
+    const stageLabel = !hasWarehouseActuals
+      ? "待验收收货"
+      : !isFtl && !isLtl
+        ? "等待报价确定订单类型"
+        : isLtl && !activeBatch
+          ? "待货物配载"
+          : isLtl && activeBatch?.status === "planning"
+            ? "配载单已生成，待装车任务"
+            : activeBatch?.status === "loading"
+              ? "装车任务已生成，待出库交接"
+              : activeBatch?.road_status
+                ? roadStatusLabels[activeBatch.road_status] || activeBatch.road_status
+                : "待仓库装车出库";
     return (
       <div className="module-business-stack dense-module-stack">
         <div className="current-order-loading-context">
@@ -4596,18 +4621,19 @@ function ModuleBusinessData({
             <strong>{data.order.order_number} · {data.order.customer_name}</strong>
           </div>
           <div>
-            <span>订单线路</span>
-            <strong>{data.order.origin_city} → {data.order.destination_city}</strong>
+            <span>订单类型</span>
+            <strong>{isFtl ? "整车：一单一车" : isLtl ? "拼车：多单一车" : "报价尚未确定"}</strong>
           </div>
           <div>
-            <span>报价类型</span>
-            <strong>{isFtl ? "整车：一单一车" : isLtl ? "拼车：多单一车" : "未确定"}</strong>
+            <span>仓库办理状态</span>
+            <strong>{stageLabel}</strong>
           </div>
-          <p>国内运输完成后按报价类型自动分支；整车直接形成整车运输单，拼车才进入配载运输单。</p>
+          <p>本节点仅展示仓库作业结果，不再提供配载、车辆登记、文件处理、装车或出库操作。</p>
         </div>
+
         <BusinessSubsection
-          title="仓库实收与自动分支"
-          hint="仓库只确认实际收货数据；整车或拼车由报价决定，这里不再重复选择。"
+          title="仓库实收"
+          hint="数据来自仓库端验收收货；订单后台只读展示。"
         >
           <div className="loading-selection-actuals">
             <article><span>实收包装</span><strong>{data.warehouseActuals?.actual_packages ?? 0}</strong><small>个</small></article>
@@ -4615,146 +4641,74 @@ function ModuleBusinessData({
             <article><span>实收重量</span><strong>{Number(data.warehouseActuals?.actual_weight_kg ?? 0).toFixed(2)}</strong><small>KG</small></article>
             <article><span>实测体积</span><strong>{Number(data.warehouseActuals?.actual_volume_cbm ?? 0).toFixed(3)}</strong><small>CBM</small></article>
           </div>
-          {!hasWarehouseActuals ? (
-            <div className="alert warning">
-              <strong>暂不能进入装车：</strong>仓库尚未完成收货清点并确认货齐。
-              <Link className="secondary" to={`/admin/orders/${data.order.id}/modules/warehouse#module-business-data`}>返回仓库作业</Link>
-            </div>
-          ) : (
-            <div className="alert success">
-              <strong>仓库实收数据已确认</strong>
-              <span>下一步请确定出境口岸和起运地清关地，可补充运输线路说明。</span>
-            </div>
-          )}
         </BusinessSubsection>
-        {hasWarehouseActuals && (
-          <BusinessSubsection
-            title="配载准备"
-            hint="这些参数在国内仓确认货齐后确定；拼车订单只会匹配同口岸、同清关地、同装车仓和同境外目的仓的订单。"
-          >
-            {manage && (
-              <Form method="post" className="consignment-form-grid compact loading-preparation-form">
-                <input type="hidden" name="intent" value="loading_route_select" />
-                <label className="field span-2">
-                  <span>运输线路说明</span>
-                  <textarea name="routeCode" rows={3} defaultValue={data.order.route_notes || ""} placeholder="选填，例如途经口岸、换装点或特殊行驶要求" />
-                </label>
-                <label className="field">
-                  <span>出境口岸 <b>*</b></span>
-                  <select name="exitPort" defaultValue={data.order.exit_port || ""} required>
-                    <option value="">请选择出境口岸</option>
-                    {data.loadingReferences.borderPorts.map((item) => <option key={item.code} value={item.code}>{item.name} · {item.code}</option>)}
-                  </select>
-                </label>
-                <label className="field">
-                  <span>起运地清关地 <b>*</b></span>
-                  <select name="customsLocation" defaultValue={data.order.customs_location || ""} required>
-                    <option value="">请选择清关地</option>
-                    {data.loadingReferences.customsPlaces.map((item) => <option key={item.code} value={item.code}>{item.name} · {item.code}</option>)}
-                  </select>
-                </label>
-                <label className="field">
-                  <span>中转地</span>
-                  <select name="transitLocations" defaultValue={data.order.transit_locations || ""}>
-                    <option value="">无中转地</option>
-                    {data.loadingReferences.transitPlaces.map((item) => <option key={item.code} value={item.code}>{item.name} · {item.code}</option>)}
-                  </select>
-                </label>
-                <label className="field span-2">
-                  <span>境外目的仓</span>
-                  <input value={data.order.overseas_warehouse_name || "未确定"} readOnly />
-                </label>
-                <button className="primary" disabled={busy}>保存配载准备参数</button>
-              </Form>
-            )}
-            {loadingPreparationReady && (
-              <div className="loading-preparation-summary">
-                <span><b>线路</b>{data.order.route_notes || "未填写"}</span>
-                <span><b>口岸</b>{referenceLabel(data.loadingReferences.borderPorts, data.order.exit_port)}</span>
-                <span><b>清关地</b>{referenceLabel(data.loadingReferences.customsPlaces, data.order.customs_location)}</span>
-                <span><b>目的仓</b>{data.order.overseas_warehouse_name}</span>
-              </div>
-            )}
-            {!loadingPreparationReady ? (
-              <div className="alert warning"><strong>出口运输准备尚未完成：</strong>选择出境口岸和清关地后才会开放后续运输分支。</div>
-            ) : !isFtl && !isLtl ? (
-            <div className="alert danger">
-              <strong>报价未确定车型：</strong>请返回询价报价，确认本单是整车还是拼车后再继续。
+
+        <BusinessSubsection
+          title="出口运输与装车状态"
+          hint={isLtl
+            ? "拼车订单由仓库端选择整票订单、生成 PZ 配载单、生成装车任务并完成扫码出库。"
+            : "整车订单不走拼车配载，由仓库端按单生成装车任务并完成扫码出库。"}
+        >
+          <div className="loading-preparation-summary">
+            <span><b>运输线路</b>{data.order.route_notes || "待仓库补充"}</span>
+            <span><b>出境口岸</b>{data.order.exit_port || "待仓库补充"}</span>
+            <span><b>清关地</b>{data.order.customs_location || "待仓库补充"}</span>
+            <span><b>境外目的仓</b>{data.order.overseas_warehouse_name || "未设置"}</span>
+          </div>
+
+          {activeBatch ? (
+            <div className="module-data-list">
+              <article className="loading-batch-entry">
+                <div className="loading-batch-entry-link">
+                  <div>
+                    <strong>{activeBatch.batch_number} · {activeBatch.batch_name}</strong>
+                    <small>{activeBatch.order_count} 票订单：{activeBatch.order_numbers || data.order.order_number}</small>
+                    <small>{activeBatch.vehicle_count} 辆车 · {activeBatch.load_count} 个包装已分配</small>
+                  </div>
+                  <span className="loading-batch-entry-action">
+                    <small>{roadStatusLabels[activeBatch.road_status] || activeBatch.road_status}</small>
+                    <b>{isLtl ? "仓库配载单" : "整车运输单"}</b>
+                  </span>
+                </div>
+              </article>
             </div>
           ) : (
-            <div className="alert success">
-              <strong>已自动进入：{flowLabel}</strong>
-              <span>{isLtl ? "请在下方选择可配载订单并生成配载运输单。" : "本单无需拼车配载，请登记出境车辆后进入仓库端装车出库。"}</span>
+            <p className="empty-state">
+              {isLtl ? "仓库端尚未生成 PZ 配载单。" : "仓库端尚未生成装车任务。"}
+            </p>
+          )}
+
+          {!hasWarehouseActuals && (
+            <div className="alert warning">
+              <strong>当前阻断：</strong>仓库尚未完成验收收货并确认货齐。
             </div>
           )}
-          </BusinessSubsection>
-        )}
-        {manage && activeBatch && isFtl && (
-          <BusinessSubsection
-            title={isFtl ? "整车运输单：车辆与承运方" : "配载运输单：境外运输资源"}
-            hint={isLtl
-              ? "这里登记整批出境后使用的承运方和车辆，信息会同步给同一配载单的全部订单。"
-              : "整车订单在这里登记本单出境车辆；保存后系统自动生成单车装载指令。"}
-          >
-            <FtlOutboundResourceForm data={data} batch={activeBatch} busy={busy} />
-            {isFtl && resourceReady && (
-              <div className="loading-next-action">
-                <strong>下一步</strong>
-                <span>车辆已登记，系统已把本单包装分配到整车运输单。</span>
-                <WarehouseSiteButton orderId={data.order.id} targetPath="/warehouse/outbound" returnModuleCode="loading" className="primary">去仓库端装车出库</WarehouseSiteButton>
-              </div>
-            )}
-          </BusinessSubsection>
-        )}
-        {manage && isLtl && loadingPreparationReady && !data.batches.some((item) => item.status !== "cancelled") && (
-          <InlineLoadingWorkbench data={data} busy={busy} />
-        )}
-        {manage && isLtl && activeBatch && Number(activeBatch.vehicle_count || 0) === 0 && (
-          <div className="loading-batch-action-alert">
-            <div>
-              <strong>配载运输单尚未添加装载车辆</strong>
-              <span>请先在配载运输单中登记本批次统一使用的车辆与司机；挂载订单将整票随配载单装车。</span>
+          {hasWarehouseActuals && !isFtl && !isLtl && (
+            <div className="alert danger">
+              <strong>当前阻断：</strong>询价报价尚未确定整车或拼车，仓库不能建立装车流程。
             </div>
-            <Link className="primary" to={`/admin/loading/${activeBatch.id}`}>打开配载运输单</Link>
+          )}
+          {hasWarehouseActuals && isLtl && !loadingPreparationReady && (
+            <div className="alert warning">
+              <strong>待仓库补充：</strong>生成配载单时确认出境口岸、清关地和境外目的仓。
+            </div>
+          )}
+
+          <div className="loading-next-action">
+            <div>
+              <strong>实际操作统一在仓库端完成</strong>
+              <span>完成后，仓库端会自动回写本节点和订单工作流状态。</span>
+            </div>
+            <WarehouseSiteButton
+              orderId={data.order.id}
+              targetPath={warehouseTargetPath}
+              returnModuleCode="loading"
+              className="primary"
+            >
+              {warehouseActionText}
+            </WarehouseSiteButton>
           </div>
-        )}
-        <div className="module-data-list">
-          {data.batches.map((item) => (
-            <article key={item.id} className="loading-batch-entry">
-              <Link className="loading-batch-entry-link" to={`/admin/loading/${item.id}`}>
-                <div>
-                  <strong>
-                    {item.batch_number} · {item.batch_name}
-                  </strong>
-                  <small>
-                    同步 {item.order_count} 票订单：{item.order_numbers || data.order.order_number}
-                  </small>
-                  <small>
-                    {isFtl ? "装载车辆" : "配载车辆"} {item.vehicle_count} 辆 · {item.load_count} 个包装已分配
-                  </small>
-                </div>
-                <span className="loading-batch-entry-action">
-                  <small>{roadStatusLabels[item.road_status]||item.road_status}</small>
-                  <b>{isFtl ? "打开整车运输单" : "打开配载运输单"}</b>
-                </span>
-              </Link>
-              <div className="loading-batch-entry-files">
-                <a className="secondary" href="#module-source-documents">处理本订单发运前文件</a>
-                <Link className="primary" to={`/admin/loading/${item.id}?fromOrderId=${encodeURIComponent(data.order.id)}#batch-files`}>处理整批文件与报关门禁</Link>
-              </div>
-            </article>
-          ))}
-        </div>
-        {isLtl && !data.batches.length && <p className="empty-state">尚未生成配载运输单，请从上方小工作台选择合适订单。</p>}
-        {isLtl && <details className="loading-advanced-link">
-          <summary>高级操作</summary>
-          <Link
-            className="secondary module-external-link"
-            to={`/admin/loading?field=work_number&operator=equals&value=${encodeURIComponent(data.order.order_number)}`}
-          >
-            打开跨订单配载管理
-          </Link>
-        </details>}
+        </BusinessSubsection>
       </div>
     );
   }
