@@ -12849,6 +12849,128 @@ a.order-module-card.read-only:hover {
   scroll-margin-top: 18px;
 }
 
+.batch-detail-disclosure {
+  overflow: hidden;
+  padding: 0;
+  scroll-margin-top: 18px;
+}
+.loading-sheet.batch-detail-disclosure {
+  display: block;
+  padding: 0;
+}
+.batch-detail-disclosure > summary {
+  list-style: none;
+  cursor: pointer;
+}
+.batch-detail-disclosure > summary::-webkit-details-marker,
+.batch-inline-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+.batch-detail-summary {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 72px;
+  padding: 14px 18px;
+  background: #fbfdff;
+}
+.batch-detail-summary:hover,
+.batch-detail-summary:focus-visible {
+  background: #f4f8fd;
+  outline: none;
+}
+.batch-detail-summary h2,
+.batch-detail-summary p {
+  margin: 0;
+}
+.batch-detail-summary p {
+  margin-top: 4px;
+  color: #61738c;
+  font-size: 12px;
+}
+.batch-detail-summary-status {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.batch-detail-summary-status span,
+.batch-detail-summary-status b {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 9px;
+  border: 1px solid #d4e0ef;
+  border-radius: 6px;
+  background: #fff;
+  color: #40516e;
+  font-size: 12px;
+  font-style: normal;
+}
+.batch-detail-summary-status b {
+  border-color: #b8e4cd;
+  background: #f1fbf5;
+  color: #087342;
+}
+.batch-detail-summary-status em::after,
+.batch-inline-disclosure > summary em::after {
+  content: "展开详情";
+  color: #0b56b3;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 700;
+}
+.batch-detail-disclosure[open] > .batch-detail-summary {
+  border-bottom: 1px solid #d7e4f4;
+}
+.batch-detail-disclosure[open] > .batch-detail-summary em::after,
+.batch-inline-disclosure[open] > summary em::after {
+  content: "收起详情";
+}
+.batch-detail-disclosure-body {
+  display: grid;
+  gap: 14px;
+  padding: 16px 18px 18px;
+}
+.batch-inline-disclosure {
+  overflow: hidden;
+  border: 1px solid #d7e4f4;
+  border-radius: 7px;
+  background: #fff;
+}
+.batch-inline-disclosure > summary {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 13px;
+  cursor: pointer;
+  list-style: none;
+  background: #f8fbff;
+}
+.batch-inline-disclosure > summary span {
+  display: grid;
+  gap: 2px;
+}
+.batch-inline-disclosure > summary small {
+  color: #61738c;
+}
+.batch-inline-disclosure[open] > summary {
+  border-bottom: 1px solid #d7e4f4;
+}
+
+@media (max-width: 760px) {
+  .batch-detail-summary {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .batch-detail-summary-status {
+    justify-content: flex-start;
+  }
+}
+
 .batch-tracking-workbench {
   scroll-margin-top: 18px;
 }

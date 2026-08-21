@@ -489,6 +489,25 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     .bind(orderId, current.organizationId)
     .first<OrderSummary>();
   if (!order) throw new Response("订单不存在", { status: 404 });
+  if (moduleCode === "tracking" && order.business_type === "ltl") {
+    const activeBatch = await env.DB.prepare(
+      `SELECT b.id
+       FROM transport_batch_orders bo
+       JOIN transport_batches b
+         ON b.id=bo.batch_id AND b.organization_id=bo.organization_id
+       WHERE bo.organization_id=? AND bo.order_id=? AND bo.status!='removed'
+         AND b.status!='cancelled' AND b.batch_number LIKE 'PZ-%'
+       ORDER BY b.updated_at DESC
+       LIMIT 1`,
+    )
+      .bind(current.organizationId, orderId)
+      .first<{ id: string }>();
+    if (activeBatch) {
+      throw redirect(
+        `/admin/loading/${activeBatch.id}?fromOrderId=${encodeURIComponent(orderId)}`,
+      );
+    }
+  }
   if (moduleCode === "customs") {
     await syncCustomsModuleFromRecords(current.organizationId, orderId, current.userId);
   }
