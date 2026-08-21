@@ -95,7 +95,9 @@ export async function loader({ request }: Route.LoaderArgs) {
   const warehouseContext = await loadWarehouseContext(request, user);
   const warehouse = warehouseContext.selected;
   const isOverseasWarehouse = warehouse.warehouse_role === "overseas_destination";
-  const orderId = new URL(request.url).searchParams.get("orderId");
+  const url = new URL(request.url);
+  const orderId = url.searchParams.get("orderId");
+  const reference = (url.searchParams.get("reference") || "").trim();
   const [shipments, locations, receipts, packages] = await Promise.all([
     env.DB.prepare(
       `SELECT s.id,s.order_id,s.shipment_number,s.status,o.order_number,c.name customer_name,c.identity_code customer_identity_code,o.origin_city,o.destination_city,
@@ -135,10 +137,22 @@ export async function loader({ request }: Route.LoaderArgs) {
       .bind(user.organizationId, warehouse.id)
       .all<Package>(),
   ]);
-  const workflowFields = orderId
+  const selectedShipment = shipments.results.find((item) =>
+    orderId
+      ? item.order_id === orderId
+      : reference
+        ? [item.order_number, item.shipment_number].some(
+            (value) => value.toUpperCase() === reference.toUpperCase(),
+          )
+        : false,
+  );
+  const lookupError = reference && !selectedShipment
+    ? `未找到可进入“${warehouse.name}”验收的订单：${reference}`
+    : "";
+  const workflowFields = selectedShipment
     ? await loadOrderModuleWorkflowFields(
         user.organizationId,
-        orderId,
+        selectedShipment.order_id,
         isOverseasWarehouse ? "overseas_warehouse" : "warehouse",
       )
     : [];
@@ -151,6 +165,9 @@ export async function loader({ request }: Route.LoaderArgs) {
     receipts: receipts.results,
     packages: packages.results,
     orderId,
+    reference,
+    selectedShipment,
+    lookupError,
     workflowFields,
   };
 }
@@ -910,8 +927,41 @@ export default function WarehouseInbound({
     "optional",
   );
   const selectedShipment =
+    loaderData.selectedShipment?.id ??
     loaderData.shipments.find((item) => item.order_id === loaderData.orderId)
       ?.id ?? "";
+  if (loaderData.isOverseasWarehouse && !selectedShipment) {
+    return (
+      <>
+        <header className="page-header acceptance-page-header">
+          <div>
+            <p className="eyebrow">ACCEPTANCE RECEIVING</p>
+            <h1>验收收货</h1>
+            <p>扫描订单号，系统调出客户、货物和运输信息后再办理境外仓验收。</p>
+          </div>
+        </header>
+        {loaderData.lookupError && <div className="alert error">{loaderData.lookupError}</div>}
+        <section className="panel acceptance-lookup-panel">
+          <Form method="get" className="acceptance-lookup-form">
+            <input type="hidden" name="warehouseId" value={loaderData.warehouse.id} />
+            <label className="field">
+              <span>扫描订单号</span>
+              <input
+                name="reference"
+                defaultValue={loaderData.reference}
+                autoFocus
+                autoComplete="off"
+                placeholder="扫描订单号条码后回车"
+                required
+              />
+            </label>
+            <button className="primary">调出验收信息</button>
+            <p>扫描枪输入订单号并发送回车后，系统自动读取客户、货物、运输和预计收货信息。</p>
+          </Form>
+        </section>
+      </>
+    );
+  }
   return (
     <>
       <header className="page-header">
@@ -922,13 +972,13 @@ export default function WarehouseInbound({
             ? `当前仓库：${loaderData.warehouse.name}。逐票扫码并清点；同一运输单全部货物确认无误后，系统自动结束境外运输并开放客户通知。`
             : `当前仓库：${loaderData.warehouse.name}。扫描客户标签或自动生成欧凌标签，完成收货、入库和国内运输状态同步。`}</p>
         </div>
-        <button
+        {!loaderData.isOverseasWarehouse && <button
           className="secondary no-print"
           type="button"
           onClick={() => window.print()}
         >
           打印最近标签
-        </button>
+        </button>}
       </header>
       {(actionData?.success || actionData?.formError) && (
         <div className={`alert ${actionData.formError ? "error" : "success"}`}>
@@ -957,7 +1007,15 @@ export default function WarehouseInbound({
           {canOperate ? (
             <Form method="post" className="warehouse-inbound-form">
               <input type="hidden" name="warehouseId" value={loaderData.warehouse.id} />
-              <label className="field scan-field">
+              {loaderData.isOverseasWarehouse ? (
+                <div className="inherited-data-strip span-2">
+                  <span>订单<strong>{loaderData.selectedShipment?.order_number}</strong></span>
+                  <span>客户<strong>{loaderData.selectedShipment?.customer_name}</strong></span>
+                  <span>系统运单<strong>{loaderData.selectedShipment?.shipment_number}</strong></span>
+                  <span>目的仓<strong>{loaderData.selectedShipment?.expected_warehouse_name}</strong></span>
+                  <input type="hidden" name="shipmentId" value={selectedShipment} />
+                </div>
+              ) : <><label className="field scan-field">
                 <span>订单号 / 运单号快速收货</span>
                 <input
                   name="shipmentReference"
@@ -1006,7 +1064,7 @@ export default function WarehouseInbound({
                     <small>当前页面只显示所选仓库的可用库位。</small>
                   </span>
                 </div>
-              )}
+              )}</>}
               {(loaderData.isOverseasWarehouse || barcodePolicy.isActive) && (
                 <label className="field scan-field">
                   <span>货物标签条码</span>
@@ -1149,7 +1207,7 @@ export default function WarehouseInbound({
           )}
         </section>
       </div>
-      <section className="panel label-section">
+      {!loaderData.isOverseasWarehouse && <section className="panel label-section">
         <div className="panel-header no-print">
           <div>
             <h2>最近货物标签</h2>
@@ -1165,7 +1223,7 @@ export default function WarehouseInbound({
         {!loaderData.packages.length && (
           <p className="empty-state">完成首次收货后将在这里生成标签。</p>
         )}
-      </section>
+      </section>}
     </>
   );
 }

@@ -91,6 +91,13 @@ type PickupAddressOption = {
   contact_phone: string | null;
   is_default: number;
 };
+type CustomerContactOption = {
+  id: string;
+  customer_id: string;
+  name: string;
+  phone: string | null;
+  is_primary: number;
+};
 type WarehouseOption = {
   id: string;
   code: string;
@@ -168,6 +175,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     count,
     customers,
     pickupAddresses,
+    customerContacts,
     quotes,
     countries,
     modes,
@@ -202,6 +210,15 @@ export async function loader({ request }: Route.LoaderArgs) {
     )
       .bind(current.organizationId)
       .all<PickupAddressOption>(),
+    env.DB.prepare(
+      `SELECT cc.id,cc.customer_id,cc.name,cc.phone,cc.is_primary
+       FROM customer_contacts cc
+       JOIN customers c ON c.id=cc.customer_id
+       WHERE c.organization_id=? AND c.status='active'
+       ORDER BY cc.customer_id,cc.is_primary DESC,cc.name`,
+    )
+      .bind(current.organizationId)
+      .all<CustomerContactOption>(),
     env.DB.prepare(
       "SELECT q.id,q.quote_number,q.customer_id,c.name customer_name,q.salesperson_user_id,sales.display_name salesperson_name,q.road_load_type,q.currency,q.total_amount,q.origin_country,q.origin_city,q.destination_country,q.destination_city,q.transport_mode,q.service_level,q.cargo_description,q.pieces,q.gross_weight_kg,q.volume_cbm,q.notes FROM quotations q JOIN customers c ON c.id=q.customer_id LEFT JOIN users sales ON sales.id=q.salesperson_user_id WHERE q.organization_id=? AND q.status='accepted' AND NOT EXISTS(SELECT 1 FROM transport_orders o WHERE o.quotation_id=q.id) ORDER BY q.accepted_at DESC",
     )
@@ -292,6 +309,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     filters: { q, status, step, assignee },
     customers: customers.results,
     pickupAddresses: pickupAddresses.results,
+    customerContacts: customerContacts.results,
     quotes: quotes.results,
     countries: countries.results,
     modes: modes.results,
@@ -1570,6 +1588,10 @@ const emptyCargo = (): CargoDraft => ({
   notes: "",
   images: [],
 });
+function localDateTimeValue(date: Date) {
+  const offset = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+}
 function CreateOrder({
   data,
   busy,
@@ -1588,12 +1610,15 @@ function CreateOrder({
     [pickupAddressId, setPickupAddressId] = useState(""),
     [shipperContact, setShipperContact] = useState(""),
     [shipperPhone, setShipperPhone] = useState(""),
+    [consigneeContact, setConsigneeContact] = useState(""),
+    [consigneePhone, setConsigneePhone] = useState(""),
     [originAddress, setOriginAddress] = useState(""),
     [pickupAddressOpen, setPickupAddressOpen] = useState(false),
     [workflowTemplateId, setWorkflowTemplateId] = useState(data.defaultWorkflowId),
     [selectedQuotationId,setSelectedQuotationId]=useState(""),
     [customerId,setCustomerId]=useState(""),
-    [instructions,setInstructions]=useState("");
+    [instructions,setInstructions]=useState(""),
+    [pickupDate] = useState(() => localDateTimeValue(new Date()));
   const templateFields = data.workflowFields.filter((field) => field.workflowId === workflowTemplateId);
   const fieldMode = (fieldKey: string) => templateFields.find((field) => field.fieldKey === fieldKey)?.mode ?? "hidden";
   const shows = (fieldKey: string) => fieldMode(fieldKey) !== "hidden";
@@ -1602,6 +1627,7 @@ function CreateOrder({
   const selectedQuotation=data.quotes.find((item)=>item.id===selectedQuotationId);
   const quoteProvince=(country:string,city:string)=>data.cities.find((item)=>item.name===city&&data.provinces.some((province)=>province.code===item.parent_code&&province.parent_code===country))?.parent_code||"";
   const pickupAddressOptions = data.pickupAddresses.filter((item) => item.customer_id === shipperCustomerId);
+  const customerContactOptions = data.customerContacts.filter((item) => item.customer_id === shipperCustomerId);
   useModalScrollLock(Boolean(cargoDraft));
   const updateCargo = (key: keyof CargoDraft, value: string | number) =>
     setCargoDraft((row) => (row ? { ...row, [key]: value } : row));
@@ -1635,18 +1661,36 @@ function CreateOrder({
     );
     setCargoDraft(null);
   };
+  const applyCustomerDefaults = (nextCustomerId: string) => {
+    const defaultAddress = data.pickupAddresses.find(
+      (item) => item.customer_id === nextCustomerId,
+    );
+    const primaryContact = data.customerContacts.find(
+      (item) => item.customer_id === nextCustomerId,
+    );
+    setShipperCustomerId(nextCustomerId);
+    setPickupAddressId(defaultAddress?.id || "");
+    setOriginAddress(
+      defaultAddress
+        ? [defaultAddress.address_line1, defaultAddress.address_line2]
+            .filter(Boolean)
+            .join(" ")
+        : "",
+    );
+    setShipperContact(defaultAddress?.contact_name || primaryContact?.name || "");
+    setShipperPhone(defaultAddress?.contact_phone || primaryContact?.phone || "");
+    setConsigneeContact(primaryContact?.name || "");
+    setConsigneePhone(primaryContact?.phone || "");
+    setPickupAddressOpen(false);
+  };
   const selectQuotation=(quotationId:string)=>{
     setSelectedQuotationId(quotationId);
     const quote=data.quotes.find((item)=>item.id===quotationId);
-    if(!quote){setCustomerId("");setShipperCustomerId("");setPickupAddressId("");setCargoRows([]);setInstructions("");return;}
+    if(!quote){setCustomerId("");applyCustomerDefaults("");setCargoRows([]);setInstructions("");return;}
     const matchingWorkflow=data.workflowTemplates.find((template)=>template.road_load_type===quote.road_load_type);
     if(matchingWorkflow) setWorkflowTemplateId(matchingWorkflow.id);
     setCustomerId(quote.customer_id);
-    setShipperCustomerId(quote.customer_id);
-    setPickupAddressId("");
-    setShipperContact("");
-    setShipperPhone("");
-    setOriginAddress("");
+    applyCustomerDefaults(quote.customer_id);
     setInstructions(quote.notes||"");
     setCargoRows([{...emptyCargo(),name:quote.cargo_description,packageType:"other",packageCount:1,piecesPerPackage:Math.max(1,quote.pieces),weight:quote.gross_weight_kg,volume:quote.volume_cbm,currency:quote.currency}]);
   };
@@ -1741,7 +1785,7 @@ function CreateOrder({
         <header><strong>1. 订单基础</strong><span>报价、客户、接单日期与业务性质</span></header>
         <div className="order-create-table-grid">
       {shows("quotation_id") && <label className="field"><span>已接受报价<b className="required-mark">*</b></span><select name="quotationId" value={selectedQuotationId} onChange={(event)=>selectQuotation(event.target.value)} required><option value="">请选择已接受报价</option>{data.quotes.map((q)=><option key={q.id} value={q.id}>{q.quote_number} · {q.road_load_type==="ftl"?"整车":"拼车"} · {q.customer_name} · {q.currency} {q.total_amount.toLocaleString()}</option>)}</select>{selectedQuotation&&<small>已继承{selectedQuotation.road_load_type==="ftl"?"整车":"拼车"}方案、客户、路线、货物、应收费用及报价备注。</small>}</label>}
-      {shows("customer_id") && <label className="field"><span>客户{requires("customer_id")&&<b className="required-mark">*</b>}</span><select name="customerId" value={customerId} onChange={(event)=>{const id=event.target.value;setCustomerId(id);setShipperCustomerId(id);setPickupAddressId("");setShipperContact("");setShipperPhone("");setOriginAddress("");}} disabled={Boolean(selectedQuotationId)} required={requires("customer_id")&&!selectedQuotationId}><option value="">{selectedQuotationId?"已由报价自动确定":"请选择"}</option>{data.customers.map((c)=><option key={c.id} value={c.id}>{c.name}</option>)}</select>{selectedQuotationId&&<input type="hidden" name="customerId" value={customerId}/>}</label>}
+      {shows("customer_id") && <label className="field"><span>客户{requires("customer_id")&&<b className="required-mark">*</b>}</span><select name="customerId" value={customerId} onChange={(event)=>{const id=event.target.value;setCustomerId(id);applyCustomerDefaults(id);}} disabled={Boolean(selectedQuotationId)} required={requires("customer_id")&&!selectedQuotationId}><option value="">{selectedQuotationId?"已由报价自动确定":"请选择"}</option>{data.customers.map((c)=><option key={c.id} value={c.id}>{c.name}</option>)}</select>{selectedQuotationId&&<input type="hidden" name="customerId" value={customerId}/>}</label>}
       {shows("order_date") && <label className="field">
         <span>接单日期{requires("order_date") && <b className="required-mark">*</b>}</span>
         <input
@@ -1772,12 +1816,7 @@ function CreateOrder({
         <span>发货方{requires("shipper_customer_id") && <b className="required-mark">*</b>}</span>
         <div className="order-party-controls">
           {shows("shipper_customer_id") && <select name="shipperCustomerId" value={shipperCustomerId} onChange={(event) => {
-            setShipperCustomerId(event.target.value);
-            setPickupAddressId("");
-            setPickupAddressOpen(false);
-            setShipperContact("");
-            setShipperPhone("");
-            setOriginAddress("");
+            applyCustomerDefaults(event.target.value);
           }} required={requires("shipper_customer_id")}>
             <option value="">请选择发货方</option>
             {data.customers.map((customer) => (
@@ -1821,8 +1860,9 @@ function CreateOrder({
               pickupAddressOptions.map((address) => (
                 <button key={address.id} type="button" onClick={() => {
                   setPickupAddressId(address.id);
-                  setShipperContact(address.contact_name || "");
-                  setShipperPhone(address.contact_phone || "");
+                  const primaryContact = data.customerContacts.find((item) => item.customer_id === shipperCustomerId);
+                  setShipperContact(address.contact_name || primaryContact?.name || "");
+                  setShipperPhone(address.contact_phone || primaryContact?.phone || "");
                   setOriginAddress([address.address_line1, address.address_line2].filter(Boolean).join(" "));
                   setPickupAddressOpen(false);
                 }}>
@@ -1857,8 +1897,9 @@ function CreateOrder({
       {(shows("consignee_contact") || shows("consignee_phone")) && <div className="field order-party-field">
         <span>收货联系人</span>
         <div className="order-party-controls">
-          {shows("consignee_contact") && <input name="consigneeContact" placeholder={`收货联系人${requires("consignee_contact") ? " *" : ""}`} required={requires("consignee_contact")} />}
-          {shows("consignee_phone") && <input name="consigneePhone" placeholder={`联系电话${requires("consignee_phone") ? " *" : ""}`} required={requires("consignee_phone")} />}
+          {shows("consignee_contact") && <input name="consigneeContact" list="customer-contact-options" value={consigneeContact} onChange={(event)=>{const name=event.target.value;setConsigneeContact(name);const contact=customerContactOptions.find((item)=>item.name===name);if(contact)setConsigneePhone(contact.phone||"");}} placeholder={`收货联系人${requires("consignee_contact") ? " *" : ""}`} required={requires("consignee_contact")} />}
+          {shows("consignee_phone") && <input name="consigneePhone" value={consigneePhone} onChange={(event)=>setConsigneePhone(event.target.value)} placeholder={`联系电话${requires("consignee_phone") ? " *" : ""}`} required={requires("consignee_phone")} />}
+          <datalist id="customer-contact-options">{customerContactOptions.map((contact)=><option key={contact.id} value={contact.name}>{contact.phone||"未填电话"}</option>)}</datalist>
         </div>
       </div>}
       {(shows("destination_country") || shows("destination_state") || shows("destination_city")) && <GeographicFields
@@ -2010,7 +2051,7 @@ function CreateOrder({
         <div className="order-create-table-grid">
       {shows("requested_pickup_date") && <label className="field">
         <span>预约提货时间{requires("requested_pickup_date") && <b className="required-mark">*</b>}</span>
-        <input name="pickupDate" type="datetime-local" required={requires("requested_pickup_date")} />
+        <input name="pickupDate" type="datetime-local" defaultValue={pickupDate} required={requires("requested_pickup_date")} />
       </label>}
       {shows("cargo_ready_at") && <label className="field">
         <span>货好时间{requires("cargo_ready_at") && <b className="required-mark">*</b>}</span>
