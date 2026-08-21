@@ -46,6 +46,9 @@ type DispatchRow = {
   transport_batch_id: string;
   batch_number: string;
   order_numbers: string;
+  cargo_names: string | null;
+  customer_names: string | null;
+  destination: string;
   status: string;
   item_count: number;
   loaded_count: number;
@@ -228,7 +231,9 @@ export async function loader({ request }: Route.LoaderArgs) {
       >(),
     env.DB.prepare(
       `SELECT d.id,d.dispatch_number,d.transport_batch_id,b.batch_number,
-        GROUP_CONCAT(DISTINCT o.order_number) order_numbers,d.status,COUNT(DISTINCT di.id) item_count,
+        GROUP_CONCAT(DISTINCT o.order_number) order_numbers,
+        GROUP_CONCAT(DISTINCT cargo.cargo_names) cargo_names,
+        GROUP_CONCAT(DISTINCT c.name) customer_names,d.destination,d.status,COUNT(DISTINCT di.id) item_count,
         COALESCE(SUM(CASE WHEN di.status='loaded' THEN 1 ELSE 0 END),0) loaded_count,
         COALESCE(SUM(p.weight_kg),0) weight_kg,COALESCE(SUM(p.volume_cbm),0) volume_cbm,
         d.vehicle_plate,d.driver_name,d.carrier_name,d.planned_loading_at,d.created_at
@@ -236,6 +241,11 @@ export async function loader({ request }: Route.LoaderArgs) {
       LEFT JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id
       LEFT JOIN warehouse_packages p ON p.id=di.package_id
       LEFT JOIN shipments s ON s.id=p.shipment_id LEFT JOIN transport_orders o ON o.id=s.order_id
+      LEFT JOIN customers c ON c.id=o.customer_id
+      LEFT JOIN (
+        SELECT organization_id,order_id,GROUP_CONCAT(NULLIF(TRIM(cargo_name_cn),''),'、') cargo_names
+        FROM order_cargo_items GROUP BY organization_id,order_id
+      ) cargo ON cargo.organization_id=o.organization_id AND cargo.order_id=o.id
       WHERE d.organization_id=? AND d.transport_batch_id IS NOT NULL
         AND EXISTS(SELECT 1 FROM warehouse_dispatch_items wi JOIN warehouse_packages wp ON wp.id=wi.package_id WHERE wi.dispatch_id=d.id AND wp.warehouse_id=?)
       GROUP BY d.id ORDER BY d.updated_at DESC LIMIT 30`,
@@ -1031,7 +1041,7 @@ export default function WarehouseLtlLoading({
           <span className="status-pill">{loaderData.total} 张配载单</span>
         </div>
         <div className="table-wrap ltl-loading-table">
-          <table>
+          <table className="ltl-task-table">
             <thead>
               <tr>
                 <th>选择</th>
@@ -1270,7 +1280,16 @@ export default function WarehouseLtlLoading({
                 <tr key={task.id}>
                   <td>
                     <strong>{task.dispatch_number}</strong>
-                    <small>{task.batch_number}</small>
+                    <small>{task.batch_number} · 装车任务号</small>
+                    <small
+                      className="dispatch-task-summary"
+                      title={`订单：${task.order_numbers || "—"}；货物：${task.cargo_names || "—"}；客户：${task.customer_names || "—"}；目的地：${task.destination || "—"}`}
+                    >
+                      订单：{task.order_numbers || "—"} · 货物：
+                      {task.cargo_names || "—"} · 客户：
+                      {task.customer_names || "—"} · 目的地：
+                      {task.destination || "—"}
+                    </small>
                   </td>
                   <td>{task.order_numbers}</td>
                   <td>

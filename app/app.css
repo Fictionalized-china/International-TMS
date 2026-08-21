@@ -6480,6 +6480,22 @@ body.modal-scroll-locked {
   font-size: 11px;
 }
 
+.ltl-task-table th:first-child,
+.ltl-task-table td:first-child {
+  min-width: 360px;
+}
+
+.dispatch-task-summary {
+  display: block;
+  max-width: 520px;
+  margin-top: 5px;
+  overflow: hidden;
+  color: #64748b;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .ltl-route-cell {
   display: grid;
   gap: 4px;
