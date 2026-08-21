@@ -6211,9 +6211,25 @@ body.modal-scroll-locked {
 /* Warehouse LTL loading: dense, batch-owned task preparation. */
 .ltl-loading-header {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
-  gap: 18px;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.ltl-loading-header > div:first-child {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.ltl-loading-header > div:first-child .eyebrow,
+.ltl-loading-header > div:first-child p {
+  margin: 0;
+}
+
+.ltl-loading-header > div:first-child p:last-child {
+  line-height: 1.55;
 }
 
 .warehouse-ltl-loading-page,
@@ -6232,13 +6248,15 @@ body.modal-scroll-locked {
 .ltl-loading-filters {
   display: grid;
   grid-template-columns: repeat(6, minmax(120px, 1fr));
-  gap: 10px;
+  column-gap: 12px;
+  row-gap: 16px;
   align-items: end;
+  padding: 18px 20px 20px;
 }
 
 .ltl-loading-filters label {
   display: grid;
-  gap: 5px;
+  gap: 7px;
   min-width: 0;
 }
 
