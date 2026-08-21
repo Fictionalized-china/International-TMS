@@ -917,7 +917,7 @@ export default function WarehouseInbound({
       <header className="page-header">
         <div>
           <p className="eyebrow">SCAN & RECEIVE</p>
-          <h1>{loaderData.isOverseasWarehouse ? "境外目的仓扫码入库" : "扫码收货"}</h1>
+          <h1>验收收货</h1>
           <p>{loaderData.isOverseasWarehouse
             ? `当前仓库：${loaderData.warehouse.name}。逐票扫码并清点；同一运输单全部货物确认无误后，系统自动结束境外运输并开放客户通知。`
             : `当前仓库：${loaderData.warehouse.name}。扫描客户标签或自动生成欧凌标签，完成收货、入库和国内运输状态同步。`}</p>

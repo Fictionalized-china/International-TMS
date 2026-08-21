@@ -376,52 +376,7 @@ export async function action({ request, params }: Route.ActionArgs) {
     );
   }
   if (intent === "batch") {
-    const count = await env.DB.prepare(
-        "SELECT COUNT(*) total FROM transport_batches WHERE order_id=?",
-      )
-        .bind(orderId)
-        .first<{ total: number }>(),
-      seq = (count?.total ?? 0) + 1,
-      id = crypto.randomUUID(),
-      number = `${order.order_number}-B${String(seq).padStart(2, "0")}`;
-    await env.DB.batch([
-      env.DB.prepare(
-        "INSERT INTO transport_batches(id,organization_id,order_id,batch_number,batch_name,origin_location,destination_location,planned_departure_at,planned_arrival_at,notes,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-      ).bind(
-        id,
-        current.organizationId,
-        orderId,
-        number,
-        valueOf(form, "batchName") || `第${seq}批`,
-        valueOf(form, "origin") || order.origin_city,
-        valueOf(form, "destination") || order.destination_city,
-        valueOf(form, "departure") || null,
-        valueOf(form, "arrival") || null,
-        valueOf(form, "notes") || null,
-        current.userId,
-        now,
-        now,
-      ),
-      env.DB.prepare(
-        "INSERT INTO transport_batch_orders(id,organization_id,batch_id,order_id,sequence_no,status,added_by_user_id,created_at,updated_at) VALUES(?,?,?,?,1,'planned',?,?,?)",
-      ).bind(
-        crypto.randomUUID(),
-        current.organizationId,
-        id,
-        orderId,
-        current.userId,
-        now,
-        now,
-      ),
-    ]);
-    return audit(
-      request,
-      current,
-      "transport.batch.create",
-      id,
-      { number },
-      `运输批次 ${number} 已创建`,
-    );
+    return { formError: "配载单统一由仓库端“货物配载”创建，管理后台仅负责跟踪已生成配载单" };
   }
   if (intent === "vehicle") {
     const batchId = valueOf(form, "batchId");

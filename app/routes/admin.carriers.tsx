@@ -4,10 +4,11 @@ import type { Route } from "./+types/admin.carriers";
 import { Modal } from "../components/Modal";
 import { requireSessionUser } from "../lib/auth.server";
 import { writeAudit } from "../lib/audit.server";
-import { validateCode, validateEmail, valueOf } from "../lib/validation";
+import { valueOf } from "../lib/validation";
 
 type Carrier = {
   id: string;
+  carrier_scope: string;
   code: string;
   name: string;
   scac: string | null;
@@ -44,7 +45,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "carrier.view");
   const [carriers, drivers, vehicles] = await Promise.all([
     env.DB.prepare(
-      `SELECT c.id,c.code,c.name,c.scac,c.contact_name,c.contact_phone,c.contact_email,c.status,c.created_at,c.updated_at,
+      `SELECT c.id,c.carrier_scope,c.code,c.name,c.scac,c.contact_name,c.contact_phone,c.contact_email,c.status,c.created_at,c.updated_at,
               (SELECT COUNT(*) FROM shipment_legs l WHERE l.carrier_id=c.id) shipment_count,
               (SELECT COUNT(*) FROM order_transport_assignments a WHERE a.carrier_id=c.id AND a.status!='cancelled') assignment_count,
               (SELECT COUNT(*) FROM carrier_drivers d WHERE d.carrier_id=c.id AND d.status='active') driver_count,
@@ -154,33 +155,35 @@ export async function action({ request }: Route.ActionArgs) {
 
   // --- 承运商新增/修改 ---
   const id = valueOf(form, "carrierId") || crypto.randomUUID();
-  const code = valueOf(form, "code").toLowerCase();
   const name = valueOf(form, "name");
   const scac = valueOf(form, "scac").toUpperCase();
   const contactName = valueOf(form, "contactName");
   const contactPhone = valueOf(form, "contactPhone");
-  const contactEmail = valueOf(form, "contactEmail").toLowerCase();
   const status = valueOf(form, "status") || "active";
-  const codeError = validateCode(code);
-  const emailError = contactEmail ? validateEmail(contactEmail) : null;
-  if (codeError || name.length < 2 || !["active", "disabled"].includes(status) || emailError) {
-    return { formError: codeError || emailError || "请填写有效的承运商代码、名称和状态" };
+  const carrierScope = valueOf(form, "carrierScope") || "domestic";
+  if (!name.trim() || !["active", "disabled"].includes(status) || !["domestic", "overseas"].includes(carrierScope)) {
+    return { formError: "请填写承运商名称并选择有效类型和状态" };
   }
+  const existing = await env.DB.prepare(
+    "SELECT code,contact_email FROM carriers WHERE id=? AND organization_id=?",
+  ).bind(id, current.organizationId).first<{ code: string; contact_email: string | null }>();
+  const code = existing?.code || `carrier-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 6)}`;
+  const contactEmail = existing?.contact_email || null;
   try {
     await env.DB.prepare(
-      `INSERT INTO carriers(id,organization_id,code,name,scac,contact_name,contact_phone,contact_email,status,created_at,updated_at)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?)
+      `INSERT INTO carriers(id,organization_id,code,name,scac,contact_name,contact_phone,contact_email,status,created_at,updated_at,carrier_scope)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(organization_id,code) DO UPDATE SET
          name=excluded.name,scac=excluded.scac,contact_name=excluded.contact_name,
          contact_phone=excluded.contact_phone,contact_email=excluded.contact_email,
-         status=excluded.status,updated_at=excluded.updated_at`,
+         status=excluded.status,carrier_scope=excluded.carrier_scope,updated_at=excluded.updated_at`,
     ).bind(
       id, current.organizationId, code, name, scac || null,
-      contactName || null, contactPhone || null, contactEmail || null,
-      status, now, now,
+      contactName || null, contactPhone || null, contactEmail,
+      status, now, now, carrierScope,
     ).run();
   } catch {
-    return { formError: "承运商代码不能重复" };
+    return { formError: "承运商保存失败，请稍后重试" };
   }
   await writeAudit({
     request,
@@ -237,7 +240,8 @@ export default function Carriers({ loaderData, actionData }: Route.ComponentProp
                 <summary className="carrier-master-summary">
                   <div className="carrier-master-info">
                     <strong>{carrier.name}</strong>
-                    <small>{carrier.code}{carrier.scac ? ` · ${carrier.scac}` : ""}</small>
+                    <span className="status-pill">{carrier.carrier_scope === "overseas" ? "境外承运商" : "境内承运商"}</span>
+                    <small>{carrier.scac || carrier.contact_phone || "未填简称和电话"}</small>
                     <small>{carrier.contact_name || "无联系人"} · {carrier.contact_phone || "无电话"}</small>
                   </div>
                   <div className="carrier-master-counts">
@@ -366,12 +370,15 @@ function CarrierForm({ carrier, busy }: { carrier?: Carrier; busy: boolean }) {
       <input type="hidden" name="intent" value="upsert" />
       {carrier && <input type="hidden" name="carrierId" value={carrier.id} />}
       <label className="field">
-        <span>承运商代码</span>
-        <input name="code" defaultValue={carrier?.code} required placeholder="例如 e2e-carrier" />
-      </label>
-      <label className="field">
         <span>承运商名称</span>
         <input name="name" defaultValue={carrier?.name} required placeholder="例如 深圳某某车队" />
+      </label>
+      <label className="field">
+        <span>承运商类型</span>
+        <select name="carrierScope" defaultValue={carrier?.carrier_scope || "domestic"} required>
+          <option value="domestic">境内承运商</option>
+          <option value="overseas">境外承运商</option>
+        </select>
       </label>
       <label className="field">
         <span>简称 / SCAC</span>
@@ -384,10 +391,6 @@ function CarrierForm({ carrier, busy }: { carrier?: Carrier; busy: boolean }) {
       <label className="field">
         <span>联系电话</span>
         <input name="contactPhone" defaultValue={carrier?.contact_phone || ""} />
-      </label>
-      <label className="field">
-        <span>邮箱</span>
-        <input name="contactEmail" type="email" defaultValue={carrier?.contact_email || ""} />
       </label>
       <label className="field">
         <span>状态</span>

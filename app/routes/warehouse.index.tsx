@@ -252,7 +252,7 @@ function warehouseQueueHref(row: CategorizedWarehouseRow, warehouseId: string, o
   if (row.queue === "exception") return warehousePath("/warehouse/exceptions", warehouseId, { status: "active" });
   if (row.queue === "outbound") return warehousePath("/warehouse/outbound", warehouseId, { orderId: row.order_id, returnTo });
   if (row.queue === "inventory") return warehousePath("/warehouse/inventory", warehouseId, { q: row.order_number });
-  return warehousePath("/warehouse/inbound", warehouseId, { orderId: row.order_id, returnTo });
+  return warehousePath(overseas ? "/warehouse/inbound" : "/warehouse/acceptance", warehouseId, { orderId: row.order_id, returnTo });
 }
 
 function warehousePath(path: string, warehouseId: string, values?: Record<string, string>) {

@@ -170,16 +170,19 @@ async function applyWorkflowModuleConfiguration(
   const updates = rows.results.map((row) => {
     const rule = byCode.get(row.module_code);
     const mandatory = isRuntimeMandatoryOrderModule(businessType, row.module_code);
-    const enabled = mandatory || rule?.enabled ? 1 : 0;
-    const required = mandatory || rule?.is_required ? 1 : 0;
+    const fileIndexOnly = row.module_code === "documents";
+    const enabled = fileIndexOnly ? 0 : mandatory || rule?.enabled ? 1 : 0;
+    const required = fileIndexOnly ? 0 : mandatory || rule?.is_required ? 1 : 0;
     return env.DB.prepare(
       `UPDATE order_module_instances SET module_name=COALESCE(?,module_name),enabled=?,is_required=?,
         status=CASE WHEN ?=0 THEN 'not_applicable' WHEN status='not_applicable' THEN 'not_started' ELSE status END,
         current_step_code=CASE WHEN ?=0 THEN NULL ELSE current_step_code END,
-        current_step_name=CASE WHEN ?=0 THEN '当前工作流未启用本模组' ELSE current_step_name END,
+        current_step_name=CASE WHEN ?=0 THEN ? ELSE current_step_name END,
         progress_percent=CASE WHEN ?=0 THEN 0 ELSE progress_percent END,updated_at=? WHERE id=?`,
     ).bind(
-      rule?.display_name||null,enabled,required,enabled,enabled,enabled,enabled,now,row.id,
+      rule?.display_name||null,enabled,required,enabled,enabled,enabled,
+      fileIndexOnly ? "文件由所属业务节点收集，文件中心仅供查询" : "当前工作流未启用本模组",
+      enabled,now,row.id,
     );
   });
   if (updates.length) await env.DB.batch(updates);

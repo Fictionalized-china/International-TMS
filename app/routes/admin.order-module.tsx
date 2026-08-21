@@ -195,6 +195,7 @@ type Booking = {
 };
 type Batch = {
   id: string;
+  carrier_id: string | null;
   batch_number: string;
   batch_name: string;
   origin_location: string;
@@ -259,6 +260,7 @@ type QuoteCharge = {
 };
 type Carrier = {
   id: string;
+  carrier_scope: string;
   name: string;
   contact_name: string | null;
   contact_phone: string | null;
@@ -564,7 +566,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
       .bind(orderId, current.organizationId)
       .all<Booking>(),
     env.DB.prepare(
-      `SELECT b.id,b.batch_number,b.batch_name,b.origin_location,b.destination_location,b.planned_departure_at,b.planned_arrival_at,b.border_port,b.transit_location,b.route_notes,b.status,b.road_status,c.name carrier_name,w.name warehouse_name,
+      `SELECT b.id,b.carrier_id,b.batch_number,b.batch_name,b.origin_location,b.destination_location,b.planned_departure_at,b.planned_arrival_at,b.border_port,b.transit_location,b.route_notes,b.status,b.road_status,c.name carrier_name,w.name warehouse_name,
               b.overseas_carrier_name,b.overseas_vehicle_type,b.overseas_vehicle_count,b.overseas_vehicle_plate,b.overseas_driver_name,b.overseas_driver_phone,
               (SELECT COUNT(*) FROM transport_batch_vehicles v WHERE v.batch_id=b.id AND v.status!='cancelled') vehicle_count,
               (SELECT COUNT(*) FROM transport_vehicle_loads l WHERE l.batch_id=b.id) load_count,
@@ -606,7 +608,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
       .bind(orderId, current.organizationId)
       .all<OrderService>(),
     env.DB.prepare(
-      `SELECT id,name,contact_name,contact_phone,contact_email FROM carriers WHERE organization_id=? AND status='active' ORDER BY name`,
+      `SELECT id,carrier_scope,name,contact_name,contact_phone,contact_email FROM carriers WHERE organization_id=? AND status='active' ORDER BY name`,
     )
       .bind(current.organizationId)
       .all<Carrier>(),
@@ -1174,14 +1176,29 @@ export async function action({ request, params }: Route.ActionArgs) {
     }
     if (intent === "outbound_transport_resource_save" && moduleCode === "loading") {
       const batchId = valueOf(form, "batchId");
-      const overseasCarrierName = valueOf(form, "overseasCarrierName");
-      const overseasVehicleType = valueOf(form, "overseasVehicleType");
+      const carrierId = valueOf(form, "carrierId");
+      const vehicleMasterId = valueOf(form, "vehicleMasterId");
+      const driverMasterId = valueOf(form, "driverMasterId");
       const overseasVehicleCount = Math.max(1, Number(valueOf(form, "overseasVehicleCount") || 1));
-      const overseasVehiclePlate = valueOf(form, "overseasVehiclePlate").toUpperCase();
-      const overseasDriverName = valueOf(form, "overseasDriverName");
-      const overseasDriverPhone = valueOf(form, "overseasDriverPhone");
-      if (!batchId || !overseasCarrierName || !overseasVehicleType || !overseasVehiclePlate || !overseasDriverName || !overseasDriverPhone)
-        return { formError: "请完整填写境外承运方、车型、车辆数、车牌号、司机姓名和电话" };
+      if (!batchId || !carrierId || !vehicleMasterId || !driverMasterId)
+        return { formError: "请选择境外承运商及其名下车辆和司机" };
+      const [carrier, vehicle, driver] = await Promise.all([
+        env.DB.prepare("SELECT id,name FROM carriers WHERE id=? AND organization_id=? AND status='active' AND carrier_scope='overseas'")
+          .bind(carrierId, current.organizationId).first<{ id: string; name: string }>(),
+        env.DB.prepare("SELECT id,plate_number,vehicle_type FROM carrier_vehicles WHERE id=? AND carrier_id=? AND organization_id=? AND status='active'")
+          .bind(vehicleMasterId, carrierId, current.organizationId).first<{ id: string; plate_number: string; vehicle_type: string | null }>(),
+        env.DB.prepare("SELECT id,name,phone FROM carrier_drivers WHERE id=? AND carrier_id=? AND organization_id=? AND status='active'")
+          .bind(driverMasterId, carrierId, current.organizationId).first<{ id: string; name: string; phone: string | null }>(),
+      ]);
+      if (!carrier || !vehicle || !driver)
+        return { formError: "所选境外承运商、车辆或司机已停用，请重新选择" };
+      if (!vehicle.vehicle_type || !vehicle.plate_number || !driver.name || !driver.phone)
+        return { formError: "所选车辆或司机主数据不完整，请先到承运商管理补齐车型、车牌和司机电话" };
+      const overseasCarrierName = carrier.name;
+      const overseasVehicleType = vehicle.vehicle_type;
+      const overseasVehiclePlate = vehicle.plate_number.toUpperCase();
+      const overseasDriverName = driver.name;
+      const overseasDriverPhone = driver.phone;
       const linked = await env.DB.prepare(
         `SELECT 1 FROM transport_batch_orders
          WHERE organization_id=? AND batch_id=? AND order_id=? AND status!='removed'`,
@@ -1190,11 +1207,11 @@ export async function action({ request, params }: Route.ActionArgs) {
       const now = new Date().toISOString();
       await env.DB.prepare(
         `UPDATE transport_batches
-         SET overseas_carrier_name=?,overseas_vehicle_type=?,overseas_vehicle_count=?,
+         SET carrier_id=?,overseas_carrier_name=?,overseas_vehicle_type=?,overseas_vehicle_count=?,
              overseas_vehicle_plate=?,overseas_driver_name=?,overseas_driver_phone=?,updated_at=?
          WHERE id=? AND organization_id=?`,
       ).bind(
-        overseasCarrierName, overseasVehicleType, overseasVehicleCount,
+        carrierId, overseasCarrierName, overseasVehicleType, overseasVehicleCount,
         overseasVehiclePlate, overseasDriverName, overseasDriverPhone,
         now, batchId, current.organizationId,
       ).run();
@@ -1203,6 +1220,9 @@ export async function action({ request, params }: Route.ActionArgs) {
           organizationId: current.organizationId,
           orderId,
           batchId,
+          carrierId,
+          vehicleMasterId,
+          driverMasterId,
           carrierName: overseasCarrierName,
           vehicleType: overseasVehicleType,
           plateNumber: overseasVehiclePlate,
@@ -1802,7 +1822,7 @@ export async function action({ request, params }: Route.ActionArgs) {
         .map(([fieldKey]) => fieldPolicy(fieldKey, true).label || fieldKey);
       if (carrierId) {
         const carrier = await env.DB.prepare(
-          "SELECT name FROM carriers WHERE id=? AND organization_id=? AND status='active'",
+          "SELECT name FROM carriers WHERE id=? AND organization_id=? AND status='active' AND carrier_scope='domestic'",
         ).bind(carrierId, current.organizationId).first<{ name: string }>();
         if (!carrier) return { formError: "请选择有效的启用承运商" };
         carrierName = carrierName || carrier.name;
@@ -4384,7 +4404,7 @@ function ModuleBusinessData({
                     }}
                   >
                     <option value="">请选择承运商</option>
-                    {data.carriers.map((x) => (
+                    {data.carriers.filter((x) => x.carrier_scope === "domestic").map((x) => (
                       <option
                         key={x.id}
                         value={x.id}
@@ -4759,46 +4779,14 @@ function ModuleBusinessData({
           )}
           </BusinessSubsection>
         )}
-        {manage && activeBatch && (
+        {manage && activeBatch && isFtl && (
           <BusinessSubsection
             title={isFtl ? "整车运输单：车辆与承运方" : "配载运输单：境外运输资源"}
             hint={isLtl
               ? "这里登记整批出境后使用的承运方和车辆，信息会同步给同一配载单的全部订单。"
               : "整车订单在这里登记本单出境车辆；保存后系统自动生成单车装载指令。"}
           >
-            <Form method="post" className="consignment-form-grid compact loading-resource-form">
-              <input type="hidden" name="intent" value="outbound_transport_resource_save" />
-              <input type="hidden" name="batchId" value={activeBatch.id} />
-              <label className="field">
-                <span>境外承运方 <b>*</b></span>
-                <select name="overseasCarrierName" defaultValue={activeBatch.overseas_carrier_name || ""} required>
-                  <option value="">请选择承运方</option>
-                  {data.carriers.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}
-                </select>
-              </label>
-              <label className="field">
-                <span>境外车型 <b>*</b></span>
-                <select name="overseasVehicleType" defaultValue={activeBatch.overseas_vehicle_type || ""} required>
-                  <option value="">请选择车型</option>
-                  <option value="卡车">卡车</option>
-                  <option value="头程拼车">头程拼车</option>
-                  <option value="13米平板">13米平板</option>
-                  <option value="13.5米高栏">13.5米高栏</option>
-                  <option value="13.7米平板">13.7米平板</option>
-                  <option value="17.5米平板">17.5米平板</option>
-                  <option value="17.5米厢式车">17.5米厢式车</option>
-                  <option value="13米高栏">13米高栏</option>
-                  <option value="16米厢式车">16米厢式车</option>
-                  <option value="13米厢式车">13米厢式车</option>
-                  <option value="冷藏车">冷藏车</option>
-                </select>
-              </label>
-              <label className="field"><span>车辆数目 <b>*</b></span><input name="overseasVehicleCount" type="number" min="1" defaultValue={activeBatch.overseas_vehicle_count || 1} required /></label>
-              <label className="field"><span>境外车牌号 <b>*</b></span><input name="overseasVehiclePlate" defaultValue={activeBatch.overseas_vehicle_plate || ""} required /></label>
-              <label className="field"><span>司机姓名 <b>*</b></span><input name="overseasDriverName" defaultValue={activeBatch.overseas_driver_name || ""} required /></label>
-              <label className="field"><span>司机电话 <b>*</b></span><input name="overseasDriverPhone" defaultValue={activeBatch.overseas_driver_phone || ""} required /></label>
-              <button className="primary" disabled={busy}>{isFtl ? "保存整车运输单" : "保存整批运输资源"}</button>
-            </Form>
+            <FtlOutboundResourceForm data={data} batch={activeBatch} busy={busy} />
             {isFtl && resourceReady && (
               <div className="loading-next-action">
                 <strong>下一步</strong>
@@ -6837,7 +6825,101 @@ function Capability({ title, text, href }: { title: string; text: string; href?:
   );
 }
 
+function FtlOutboundResourceForm({
+  data,
+  batch,
+  busy,
+}: {
+  data: Route.ComponentProps["loaderData"];
+  batch: Batch;
+  busy: boolean;
+}) {
+  const overseasCarriers = data.carriers.filter((item) => item.carrier_scope === "overseas");
+  const initialCarrierId = batch.carrier_id
+    || overseasCarriers.find((item) => item.name === batch.overseas_carrier_name)?.id
+    || "";
+  const [carrierId, setCarrierId] = useState(initialCarrierId);
+  const [vehicleId, setVehicleId] = useState(
+    data.carrierVehicles.find((item) => item.carrier_id === initialCarrierId && item.plate_number === batch.overseas_vehicle_plate)?.id || "",
+  );
+  const [driverId, setDriverId] = useState(
+    data.carrierDrivers.find((item) => item.carrier_id === initialCarrierId && item.name === batch.overseas_driver_name)?.id || "",
+  );
+  const vehicles = data.carrierVehicles.filter((item) => item.carrier_id === carrierId);
+  const drivers = data.carrierDrivers.filter((item) => item.carrier_id === carrierId);
+  const vehicle = vehicles.find((item) => item.id === vehicleId);
+  const driver = drivers.find((item) => item.id === driverId);
+
+  return <Form method="post" className="consignment-form-grid compact loading-resource-form">
+    <input type="hidden" name="intent" value="outbound_transport_resource_save" />
+    <input type="hidden" name="batchId" value={batch.id} />
+    <input type="hidden" name="overseasVehicleCount" value="1" />
+    <label className="field">
+      <span>境外承运商 <b>*</b></span>
+      <select name="carrierId" value={carrierId} required onChange={(event) => {
+        setCarrierId(event.currentTarget.value);
+        setVehicleId("");
+        setDriverId("");
+      }}>
+        <option value="">请选择境外承运商</option>
+        {overseasCarriers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+      </select>
+    </label>
+    <label className="field">
+      <span>境外车辆 <b>*</b></span>
+      <select name="vehicleMasterId" value={vehicleId} required disabled={!carrierId} onChange={(event) => setVehicleId(event.currentTarget.value)}>
+        <option value="">{carrierId ? "请选择车辆" : "请先选择境外承运商"}</option>
+        {vehicles.map((item) => <option key={item.id} value={item.id}>{item.plate_number}{item.vehicle_type ? ` · ${item.vehicle_type}` : ""}</option>)}
+      </select>
+    </label>
+    <label className="field">
+      <span>境外司机 <b>*</b></span>
+      <select name="driverMasterId" value={driverId} required disabled={!carrierId} onChange={(event) => setDriverId(event.currentTarget.value)}>
+        <option value="">{carrierId ? "请选择司机" : "请先选择境外承运商"}</option>
+        {drivers.map((item) => <option key={item.id} value={item.id}>{item.name}{item.phone ? ` · ${item.phone}` : ""}</option>)}
+      </select>
+    </label>
+    <label className="field"><span>车型</span><input value={vehicle?.vehicle_type || "选择车辆后自动带出"} readOnly /></label>
+    <label className="field"><span>车牌号</span><input value={vehicle?.plate_number || "选择车辆后自动带出"} readOnly /></label>
+    <label className="field"><span>司机电话</span><input value={driver?.phone || "选择司机后自动带出"} readOnly /></label>
+    <button className="primary" disabled={busy || !carrierId || !vehicleId || !driverId}>保存整车运输单</button>
+  </Form>;
+}
+
 function InlineLoadingWorkbench({
+  data,
+  busy,
+  context = "loading",
+}: {
+  data: Route.ComponentProps["loaderData"];
+  busy: boolean;
+  context?: "loading" | "warehouse";
+}) {
+  const activeBatch = data.batches.find((item) => item.status !== "cancelled");
+  const warehouseTo = `/warehouse/consolidation?orderId=${encodeURIComponent(data.order.id)}&returnTo=${encodeURIComponent(`/admin/orders/${data.order.id}/modules/loading`)}`;
+  return <section className="inline-loading-workbench">
+    <div className="panel-header">
+      <div>
+        <h3>{activeBatch ? "已生成配载单" : "等待仓库配载"}</h3>
+        <p>{activeBatch
+          ? "配载关系由仓库端维护；管理后台可打开配载单继续办理报关、车辆和境外运输。"
+          : "管理后台不再创建配载单。国内仓验收货齐后，由仓库操作员在“货物配载”中选择同批订单。"}</p>
+      </div>
+      <span className="status-pill">{context === "warehouse" ? "仓库创建" : "只读监控"}</span>
+    </div>
+    {activeBatch ? <div className="inline-loading-actions">
+      <small>{activeBatch.batch_number} · 已挂载 {activeBatch.order_count} 票订单</small>
+      <Link className="primary" to={`/admin/loading/${activeBatch.id}`}>打开配载单</Link>
+    </div> : <Form method="post" action="/switch-site" className="inline-loading-actions">
+      <input type="hidden" name="target" value="warehouse" />
+      <input type="hidden" name="warehouseTo" value={warehouseTo} />
+      <small>仓库端会按当前账号绑定仓库显示可配载货物。</small>
+      <button className="primary" disabled={busy}>去仓库端货物配载</button>
+    </Form>}
+  </section>;
+}
+
+function LegacyInlineLoadingWorkbench({
   data,
   busy,
   context = "loading",

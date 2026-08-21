@@ -37,7 +37,8 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
           <span className="nav-group">汽运业务</span>
           {can("order.view") && <SideLink to="/admin/orders" icon="▣">运输订单</SideLink>}
           {can("shipment.view") && <SideLink to="/admin/domestic-tracking" icon="◇">国内物流轨迹</SideLink>}
-          {can("order.view") && <SideLink to="/admin/loading" icon="▰">拼车配载</SideLink>}
+          {can("order.view") && <SideLink to="/admin/loading" icon="▰">配载单跟踪</SideLink>}
+          {can("order.view") && <SideLink to="/admin/documents" icon="▤">文件中心</SideLink>}
           {can("shipment.view") && <SideLink to="/admin/shipments" icon="◎">运单列表</SideLink>}
           {can("carrier.view") && <SideLink to="/admin/carriers" icon="▱">承运商管理</SideLink>}
           {can("order.view") && <SideLink to="/admin/cargo" icon="▤">货物信息</SideLink>}

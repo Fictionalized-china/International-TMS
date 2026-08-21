@@ -124,38 +124,23 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
             <small>{user.organizationName}</small>
           </div>
         </div>
-        <Form method="get" action="/warehouse" className="warehouse-context-switcher">
-          {orderContext && <input type="hidden" name="orderId" value={orderContext.id} />}
-          {loaderData.returnTo !== "/admin" && <input type="hidden" name="returnTo" value={loaderData.returnTo} />}
-          <label>
-            <span>当前仓库视角</span>
-            <select
-              name="warehouseId"
-              value={loaderData.warehouse.id}
-              onChange={(event) => event.currentTarget.form?.requestSubmit()}
-            >
-              {loaderData.warehouses.map((warehouse) => (
-                <option key={warehouse.id} value={warehouse.id}>
-                  {warehouse.name} · {warehouseRoleLabels[warehouse.warehouse_role]}
-                </option>
-              ))}
-            </select>
-          </label>
-          <small>{warehouseRoleLabels[loaderData.warehouse.warehouse_role]} · {loaderData.warehouse.code}</small>
-        </Form>
+        <div className="warehouse-context-switcher warehouse-account-context">
+          <strong>{warehouseRoleLabels[loaderData.warehouse.warehouse_role]}</strong>
+          <small>{loaderData.warehouse.code} · 当前账号绑定仓库</small>
+        </div>
         <nav>
           <span className="warehouse-nav-group">现场作业</span>
           <NavLink to={warehouseLink("/warehouse", loaderData.query)} end>
             <span>▦</span>仓库作业总表
           </NavLink>
-          <NavLink to={warehouseLink("/warehouse/inbound", loaderData.query)}>
-            <span>▣</span>待入库与收货
+          <NavLink to={warehouseLink(
+            loaderData.warehouse.warehouse_role === "overseas_destination"
+              ? "/warehouse/inbound"
+              : "/warehouse/acceptance",
+            loaderData.query,
+          )}>
+            <span>✓</span>验收收货
           </NavLink>
-          {loaderData.warehouse.warehouse_role !== "overseas_destination" && (
-            <NavLink to={warehouseLink("/warehouse/acceptance", loaderData.query)}>
-              <span>✓</span>验收收货
-            </NavLink>
-          )}
           {loaderData.warehouse.warehouse_role !== "overseas_destination" && (
             <NavLink to={warehouseLink("/warehouse/consolidation", loaderData.query)}>
               <span>▦</span>货物配载
@@ -175,6 +160,11 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
           <NavLink to={warehouseLink("/warehouse/inventory", loaderData.query)}>
             <span>▥</span>仓库货物与盘点
           </NavLink>
+          {loaderData.warehouse.warehouse_role === "overseas_destination" && (
+            <NavLink to={warehouseLink("/warehouse/notifications", loaderData.query)}>
+              <span>◎</span>通知客户
+            </NavLink>
+          )}
           <NavLink to={warehouseLink("/warehouse/exceptions", loaderData.query)}>
             <span>!</span>异常处理
           </NavLink>
@@ -224,9 +214,9 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
               <span className={flow?.inboundReady ? "done" : flow?.received ? "active" : ""}>2 {loaderData.warehouse.warehouse_role === "overseas_destination" ? "清点确认" : "确认货齐"}</span>
             </div>
             {!flow?.received ? (
-              <Link className="primary" to={warehouseLink("/warehouse/inbound", loaderData.query)}>去收货</Link>
+              <Link className="primary" to={warehouseLink(loaderData.warehouse.warehouse_role === "overseas_destination" ? "/warehouse/inbound" : "/warehouse/acceptance", loaderData.query)}>去验收收货</Link>
             ) : !flow.inboundReady ? (
-              <Link className="primary" to={warehouseLink("/warehouse/inbound", loaderData.query)}>{loaderData.warehouse.warehouse_role === "overseas_destination" ? "继续入库并完成清点" : "继续收货并确认货齐"}</Link>
+              <Link className="primary" to={warehouseLink(loaderData.warehouse.warehouse_role === "overseas_destination" ? "/warehouse/inbound" : "/warehouse/acceptance", loaderData.query)}>{loaderData.warehouse.warehouse_role === "overseas_destination" ? "继续验收并完成清点" : "继续验收并确认货齐"}</Link>
             ) : loaderData.warehouse.warehouse_role === "overseas_destination" ? (
               <Form action="/switch-site" method="post">
                 <input type="hidden" name="target" value="admin" />

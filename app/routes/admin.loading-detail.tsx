@@ -184,7 +184,7 @@ export async function loader({request,params}:Route.LoaderArgs){
       ) SELECT v.id,v.vehicle_no,v.vehicle_type,v.plate_number,v.driver_name,v.driver_phone,v.capacity_weight_kg,v.capacity_volume_cbm,v.status,COALESCE(SUM(a.weight),0) used_weight,COALESCE(SUM(a.volume),0) used_volume,COUNT(DISTINCT a.order_id) loaded_orders
       FROM transport_batch_vehicles v LEFT JOIN vehicle_order_actual a ON a.vehicle_id=v.id
       WHERE v.batch_id=? AND v.organization_id=? GROUP BY v.id ORDER BY v.created_at`).bind(batchId,current.organizationId).all<Vehicle>(),
-    env.DB.prepare("SELECT id,name FROM carriers WHERE organization_id=? AND status='active' ORDER BY name").bind(current.organizationId).all<Option>(),
+    env.DB.prepare("SELECT id,name FROM carriers WHERE organization_id=? AND status='active' AND carrier_scope='overseas' ORDER BY name").bind(current.organizationId).all<Option>(),
     env.DB.prepare("SELECT id,name FROM warehouses WHERE organization_id=? AND status='active' AND warehouse_role IN ('domestic_collection','port') ORDER BY CASE warehouse_role WHEN 'domestic_collection' THEN 10 ELSE 20 END,code,name").bind(current.organizationId).all<Option>(),
     env.DB.prepare("SELECT code,name FROM reference_data WHERE organization_id=? AND category='border_port' AND status='active' ORDER BY sort_order,code").bind(current.organizationId).all<ReferenceOption>(),
     loadCostAllocations(env.DB,current.organizationId,batchId),
@@ -244,11 +244,11 @@ export async function loader({request,params}:Route.LoaderArgs){
     getBatchMainVehiclePlate(current.organizationId,batchId),
     env.DB.prepare(`SELECT v.id,v.carrier_id,v.plate_number,v.vehicle_type,v.capacity_weight_kg,v.capacity_volume_cbm,c.name carrier_name
       FROM carrier_vehicles v JOIN carriers c ON c.id=v.carrier_id
-      WHERE v.organization_id=? AND v.status='active' AND c.status='active'
+      WHERE v.organization_id=? AND v.status='active' AND c.status='active' AND c.carrier_scope='overseas'
       ORDER BY c.name,v.plate_number`).bind(current.organizationId).all<CarrierVehicleOption>(),
     env.DB.prepare(`SELECT d.id,d.carrier_id,d.name,d.phone,c.name carrier_name
       FROM carrier_drivers d JOIN carriers c ON c.id=d.carrier_id
-      WHERE d.organization_id=? AND d.status='active' AND c.status='active'
+      WHERE d.organization_id=? AND d.status='active' AND c.status='active' AND c.carrier_scope='overseas'
       ORDER BY c.name,d.name`).bind(current.organizationId).all<CarrierDriverOption>(),
   ]);
   return{current,batch,orders:orders.results,vehicles:vehicles.results,carriers:carriers.results,warehouses:warehouses.results,borderPorts:borderPorts.results,costAllocations,batchDocuments:batchDocuments.results,orderDocuments:orderDocuments.results,customsSummaries:customsSummaries.results,customsDeclarations:customsDeclarations.results,outboundStatuses:outboundStatuses.results,departureGateStatuses,returnOrderId,trackingMilestones,trackingFlags:trackingFlags.results,batchVehiclePlate,carrierVehicles:carrierVehicles.results,carrierDrivers:carrierDrivers.results};
@@ -408,23 +408,20 @@ export async function action({request,params}:Route.ActionArgs){
     const overseasVehicleMasterId=valueOf(form,"overseasVehicleMasterId"),overseasDriverMasterId=valueOf(form,"overseasDriverMasterId");
     let overseasCarrierName=valueOf(form,"overseasCarrierName"),overseasVehicleType=valueOf(form,"overseasVehicleType"),overseasVehiclePlate=valueOf(form,"overseasVehiclePlate"),overseasDriverName=valueOf(form,"overseasDriverName"),overseasDriverPhone=valueOf(form,"overseasDriverPhone");
     let capacityWeight=numberOf(form,"capacityWeight"),capacityVolume=numberOf(form,"capacityVolume");
-    const carrier=await env.DB.prepare("SELECT id,name FROM carriers WHERE id=? AND organization_id=? AND status='active'").bind(carrierId,current.organizationId).first<{id:string;name:string}>();
+    const carrier=await env.DB.prepare("SELECT id,name FROM carriers WHERE id=? AND organization_id=? AND status='active' AND carrier_scope='overseas'").bind(carrierId,current.organizationId).first<{id:string;name:string}>();
     if(!carrier)return{formError:"承运商无效"};
     overseasCarrierName=carrier.name;
-    if(overseasVehicleMasterId){
-      const master=await env.DB.prepare("SELECT carrier_id,plate_number,vehicle_type,capacity_weight_kg,capacity_volume_cbm FROM carrier_vehicles WHERE id=? AND organization_id=? AND status='active'").bind(overseasVehicleMasterId,current.organizationId).first<{carrier_id:string;plate_number:string;vehicle_type:string|null;capacity_weight_kg:number|null;capacity_volume_cbm:number|null}>();
-      if(!master||master.carrier_id!==carrierId)return{formError:"所选车辆不属于当前承运商或已停用"};
-      overseasVehicleType=overseasVehicleType||master.vehicle_type||"";
-      overseasVehiclePlate=overseasVehiclePlate||master.plate_number;
-      capacityWeight=capacityWeight||master.capacity_weight_kg||0;
-      capacityVolume=capacityVolume||master.capacity_volume_cbm||0;
-    }
-    if(overseasDriverMasterId){
-      const master=await env.DB.prepare("SELECT carrier_id,name,phone FROM carrier_drivers WHERE id=? AND organization_id=? AND status='active'").bind(overseasDriverMasterId,current.organizationId).first<{carrier_id:string;name:string;phone:string|null}>();
-      if(!master||master.carrier_id!==carrierId)return{formError:"所选司机不属于当前承运商或已停用"};
-      overseasDriverName=overseasDriverName||master.name;
-      overseasDriverPhone=overseasDriverPhone||master.phone||"";
-    }
+    if(!overseasVehicleMasterId||!overseasDriverMasterId)return{formError:"请选择当前境外承运商名下的车辆和司机"};
+    const vehicleMaster=await env.DB.prepare("SELECT carrier_id,plate_number,vehicle_type,capacity_weight_kg,capacity_volume_cbm FROM carrier_vehicles WHERE id=? AND organization_id=? AND status='active'").bind(overseasVehicleMasterId,current.organizationId).first<{carrier_id:string;plate_number:string;vehicle_type:string|null;capacity_weight_kg:number|null;capacity_volume_cbm:number|null}>();
+    if(!vehicleMaster||vehicleMaster.carrier_id!==carrierId)return{formError:"所选车辆不属于当前境外承运商或已停用"};
+    const driverMaster=await env.DB.prepare("SELECT carrier_id,name,phone FROM carrier_drivers WHERE id=? AND organization_id=? AND status='active'").bind(overseasDriverMasterId,current.organizationId).first<{carrier_id:string;name:string;phone:string|null}>();
+    if(!driverMaster||driverMaster.carrier_id!==carrierId)return{formError:"所选司机不属于当前境外承运商或已停用"};
+    overseasVehicleType=vehicleMaster.vehicle_type||"";
+    overseasVehiclePlate=vehicleMaster.plate_number;
+    capacityWeight=vehicleMaster.capacity_weight_kg||0;
+    capacityVolume=vehicleMaster.capacity_volume_cbm||0;
+    overseasDriverName=driverMaster.name;
+    overseasDriverPhone=driverMaster.phone||"";
     const overseasVehicleCount=1;
     overseasVehiclePlate=overseasVehiclePlate.toUpperCase();
     if(!batch.border_port||!batch.customs_location||!batch.warehouse_id)return{formError:"配载准备不完整，请返回订单补齐装车仓、出境口岸和清关地"};
@@ -433,11 +430,14 @@ export async function action({request,params}:Route.ActionArgs){
     if(warehouseId&&!(await env.DB.prepare("SELECT 1 FROM warehouses WHERE id=? AND organization_id=? AND status='active' AND warehouse_role IN ('domestic_collection','port')").bind(warehouseId,current.organizationId).first()))return{formError:"集货仓库无效，只能选择国内集货仓或口岸仓"};
     if(!(await env.DB.prepare("SELECT 1 FROM reference_data WHERE organization_id=? AND category='border_port' AND code=? AND status='active'").bind(current.organizationId,borderPort).first()))return{formError:"出境口岸无效"};
     const existingVehicle=await env.DB.prepare("SELECT id FROM transport_batch_vehicles WHERE batch_id=? AND organization_id=? AND status!='cancelled' ORDER BY created_at LIMIT 1").bind(batchId,current.organizationId).first<{id:string}>();
+    const primaryVehicleId=existingVehicle?.id||crypto.randomUUID();
     await env.DB.batch([
       env.DB.prepare("UPDATE transport_batches SET carrier_id=?,warehouse_id=COALESCE(?,warehouse_id),planned_departure_at=?,planned_arrival_at=?,notes=?,overseas_carrier_name=?,overseas_vehicle_type=?,overseas_vehicle_count=?,overseas_vehicle_plate=?,overseas_driver_name=?,overseas_driver_phone=?,updated_at=? WHERE id=? AND organization_id=?").bind(carrierId,warehouseId||null,plannedDeparture,plannedArrival,valueOf(form,"notes")||null,overseasCarrierName,overseasVehicleType,overseasVehicleCount,overseasVehiclePlate,overseasDriverName,overseasDriverPhone,now,batchId,current.organizationId),
       existingVehicle
-        ? env.DB.prepare("UPDATE transport_batch_vehicles SET carrier_id=?,vehicle_type=?,plate_number=?,driver_name=?,driver_phone=?,capacity_weight_kg=?,capacity_volume_cbm=?,status='planned',updated_at=? WHERE id=? AND organization_id=?").bind(carrierId,overseasVehicleType,overseasVehiclePlate,overseasDriverName,overseasDriverPhone,capacityWeight,capacityVolume,now,existingVehicle.id,current.organizationId)
-        : env.DB.prepare("INSERT INTO transport_batch_vehicles(id,organization_id,batch_id,vehicle_no,vehicle_type,plate_number,carrier_id,driver_name,driver_phone,capacity_weight_kg,capacity_volume_cbm,status,created_at,updated_at) VALUES(?,?,?,'MAIN-1',?,?,?,?,?,?,?,'planned',?,?)").bind(crypto.randomUUID(),current.organizationId,batchId,overseasVehicleType,overseasVehiclePlate,carrierId,overseasDriverName,overseasDriverPhone,capacityWeight,capacityVolume,now,now),
+        ? env.DB.prepare("UPDATE transport_batch_vehicles SET carrier_id=?,vehicle_master_id=?,driver_master_id=?,vehicle_type=?,plate_number=?,driver_name=?,driver_phone=?,capacity_weight_kg=?,capacity_volume_cbm=?,status='planned',updated_at=? WHERE id=? AND organization_id=?").bind(carrierId,overseasVehicleMasterId,overseasDriverMasterId,overseasVehicleType,overseasVehiclePlate,overseasDriverName,overseasDriverPhone,capacityWeight,capacityVolume,now,existingVehicle.id,current.organizationId)
+        : env.DB.prepare("INSERT INTO transport_batch_vehicles(id,organization_id,batch_id,vehicle_no,vehicle_type,plate_number,carrier_id,driver_name,driver_phone,capacity_weight_kg,capacity_volume_cbm,status,created_at,updated_at,vehicle_master_id,driver_master_id) VALUES(?,?,?,'MAIN-1',?,?,?,?,?,?,?,'planned',?,?,?,?)").bind(primaryVehicleId,current.organizationId,batchId,overseasVehicleType,overseasVehiclePlate,carrierId,overseasDriverName,overseasDriverPhone,capacityWeight,capacityVolume,now,now,overseasVehicleMasterId,overseasDriverMasterId),
+      env.DB.prepare("UPDATE transport_batch_vehicles SET status='cancelled',updated_at=? WHERE organization_id=? AND batch_id=? AND id!=? AND status!='cancelled'").bind(now,current.organizationId,batchId,primaryVehicleId),
+      env.DB.prepare("UPDATE transport_vehicle_loads SET vehicle_id=? WHERE organization_id=? AND batch_id=? AND vehicle_id!=?").bind(primaryVehicleId,current.organizationId,batchId,primaryVehicleId),
     ]);
     await synchronizeBatchTransport(current.organizationId,batchId,now);
     await synchronizeBatchWarehouseProgress(current.organizationId,batchId,current.userId);
@@ -618,6 +618,7 @@ export async function action({request,params}:Route.ActionArgs){
 
 export default function LoadingDetail({loaderData,actionData}:Route.ComponentProps){
   const busy=useNavigation().state!=="idle",manage=canManageOrderModule(loaderData.current,"loading");
+  const [selectedCarrierId,setSelectedCarrierId]=useState(loaderData.batch.carrier_id||"");
   const totals=summarizeBatch(loaderData.orders,loaderData.vehicles);
   const planReady=Boolean(loaderData.batch.carrier_id&&loaderData.batch.border_port&&loaderData.batch.planned_departure_at&&loaderData.batch.planned_arrival_at);
   const loadPlanReady=planReady&&loaderData.vehicles.length>0;
@@ -662,7 +663,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
     {!loaderData.carriers.length&&manage&&<div className="alert error">当前没有启用的承运商，无法保存运输安排。请先到<Link to="/admin/shipments">运输执行</Link>维护承运商档案。</div>}
     <div className="loading-sheet-layout">
       {manage&&<Form method="post" className="loading-sheet-form"><input type="hidden" name="intent" value="arrangement"/>
-        <label className="field"><span>承运商</span><select name="carrierId" defaultValue={loaderData.batch.carrier_id||""} required><option value="">请选择承运商</option>{loaderData.carriers.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+        <label className="field"><span>境外承运商</span><select name="carrierId" value={selectedCarrierId} onChange={event=>setSelectedCarrierId(event.target.value)} required><option value="">请选择境外承运商</option>{loaderData.carriers.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
         <label className="field"><span>集货仓库</span><select name="warehouseId" defaultValue={loaderData.batch.warehouse_id||""}><option value="">继承当前仓库</option>{loaderData.warehouses.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
         <input type="hidden" name="borderPort" value={loaderData.batch.border_port||""}/>
         <div className="loading-preparation-summary span-2">
@@ -675,7 +676,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
         <Field name="plannedArrival" label="计划到达" type="datetime-local" required defaultValue={dateTimeLocal(loaderData.batch.planned_arrival_at)}/>
         <label className="field span-2"><span>业务备注</span><input name="notes" defaultValue={loaderData.batch.notes||""}/></label>
         <div className="form-section-title span-2"><strong>境外运输资源</strong><small>确定整车/拼车方案后立即登记；出境确认将直接继承。车辆与司机优先从承运商车辆库下拉选择，避免重复录入。</small></div>
-        <OverseasResourceFields batch={loaderData.batch} carrierVehicles={loaderData.carrierVehicles} carrierDrivers={loaderData.carrierDrivers}/>
+        <OverseasResourceFields key={selectedCarrierId} batch={loaderData.batch} carrierId={selectedCarrierId} carrierVehicles={loaderData.carrierVehicles} carrierDrivers={loaderData.carrierDrivers}/>
         <button className="primary" disabled={busy||!loaderData.carriers.length}>保存配载单信息</button>
       </Form>}
       <aside className="loading-sheet-tools">
@@ -954,17 +955,21 @@ function LoadingTotals({totals}:{totals:ReturnType<typeof summarizeBatch>}){
     <span>车辆：<strong>{totals.vehicleCount}</strong></span>
   </div>;
 }
-function OverseasResourceFields({batch,carrierVehicles,carrierDrivers}:{batch:Batch;carrierVehicles:CarrierVehicleOption[];carrierDrivers:CarrierDriverOption[]}){
-  const [vehicleMasterId,setVehicleMasterId]=useState(""),[driverMasterId,setDriverMasterId]=useState("");
+function OverseasResourceFields({batch,carrierId,carrierVehicles,carrierDrivers}:{batch:Batch;carrierId:string;carrierVehicles:CarrierVehicleOption[];carrierDrivers:CarrierDriverOption[]}){
+  const vehicles=carrierVehicles.filter(item=>item.carrier_id===carrierId);
+  const drivers=carrierDrivers.filter(item=>item.carrier_id===carrierId);
+  const initialVehicle=vehicles.find(item=>item.plate_number===batch.overseas_vehicle_plate);
+  const initialDriver=drivers.find(item=>item.name===batch.overseas_driver_name);
+  const [vehicleMasterId,setVehicleMasterId]=useState(initialVehicle?.id||""),[driverMasterId,setDriverMasterId]=useState(initialDriver?.id||"");
   const [vehicleType,setVehicleType]=useState(batch.overseas_vehicle_type||""),[plate,setPlate]=useState(batch.overseas_vehicle_plate||"");
   const [driverName,setDriverName]=useState(batch.overseas_driver_name||""),[driverPhone,setDriverPhone]=useState(batch.overseas_driver_phone||"");
   return <>
-    {carrierVehicles.length>0&&<label className="field span-2"><span>承运商车辆库（选择后自动带出车型和车牌）</span><select name="overseasVehicleMasterId" value={vehicleMasterId} onChange={event=>{const id=event.target.value;setVehicleMasterId(id);const master=carrierVehicles.find(item=>item.id===id);if(master){setVehicleType(master.vehicle_type||"");setPlate(master.plate_number);}}}><option value="">手动录入（不从车辆库选择）</option>{carrierVehicles.map(item=><option key={item.id} value={item.id}>{item.carrier_name} · {item.plate_number}{item.vehicle_type?` · ${item.vehicle_type}`:""}</option>)}</select></label>}
-    <label className="field"><span>境外车型 *</span><select name="overseasVehicleType" required value={vehicleType} onChange={event=>setVehicleType(event.target.value)}><option value="">请选择车型</option>{Array.from(new Set([...VEHICLE_TYPE_OPTIONS,vehicleType].filter(Boolean))).map(item=><option key={item} value={item}>{item}</option>)}</select></label>
-    <label className="field"><span>境外车牌号 *</span><input name="overseasVehiclePlate" required value={plate} onChange={event=>setPlate(event.target.value)}/></label>
-    {carrierDrivers.length>0&&<label className="field span-2"><span>司机库（选择后自动带出姓名与电话）</span><select name="overseasDriverMasterId" value={driverMasterId} onChange={event=>{const id=event.target.value;setDriverMasterId(id);const master=carrierDrivers.find(item=>item.id===id);if(master){setDriverName(master.name);setDriverPhone(master.phone||"");}}}><option value="">手动录入（不从司机库选择）</option>{carrierDrivers.map(item=><option key={item.id} value={item.id}>{item.carrier_name} · {item.name}{item.phone?` · ${item.phone}`:""}</option>)}</select></label>}
-    <label className="field"><span>司机姓名 *</span><input name="overseasDriverName" required value={driverName} onChange={event=>setDriverName(event.target.value)}/></label>
-    <label className="field"><span>司机电话 *</span><input name="overseasDriverPhone" required value={driverPhone} onChange={event=>setDriverPhone(event.target.value)}/></label>
+    <label className="field span-2"><span>境外车辆 *</span><select name="overseasVehicleMasterId" required value={vehicleMasterId} disabled={!carrierId} onChange={event=>{const id=event.target.value;setVehicleMasterId(id);const master=vehicles.find(item=>item.id===id);setVehicleType(master?.vehicle_type||"");setPlate(master?.plate_number||"");}}><option value="">{carrierId?"请选择当前境外承运商名下车辆":"请先选择境外承运商"}</option>{vehicles.map(item=><option key={item.id} value={item.id}>{item.plate_number}{item.vehicle_type?` · ${item.vehicle_type}`:""}</option>)}</select></label>
+    <label className="field"><span>境外车型</span><input name="overseasVehicleType" value={vehicleType} readOnly placeholder="选择车辆后自动带出" /></label>
+    <label className="field"><span>境外车牌号</span><input name="overseasVehiclePlate" value={plate} readOnly placeholder="选择车辆后自动带出" /></label>
+    <label className="field span-2"><span>境外司机 *</span><select name="overseasDriverMasterId" required value={driverMasterId} disabled={!carrierId} onChange={event=>{const id=event.target.value;setDriverMasterId(id);const master=drivers.find(item=>item.id===id);setDriverName(master?.name||"");setDriverPhone(master?.phone||"");}}><option value="">{carrierId?"请选择当前境外承运商名下司机":"请先选择境外承运商"}</option>{drivers.map(item=><option key={item.id} value={item.id}>{item.name}{item.phone?` · ${item.phone}`:""}</option>)}</select></label>
+    <label className="field"><span>司机姓名</span><input name="overseasDriverName" value={driverName} readOnly placeholder="选择司机后自动带出" /></label>
+    <label className="field"><span>司机电话</span><input name="overseasDriverPhone" value={driverPhone} readOnly placeholder="选择司机后自动带出" /></label>
   </>;
 }
 

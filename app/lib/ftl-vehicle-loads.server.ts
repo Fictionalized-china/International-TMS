@@ -4,6 +4,9 @@ export async function ensureFtlVehicleAndLoads(input: {
   organizationId: string;
   orderId: string;
   batchId: string;
+  carrierId: string;
+  vehicleMasterId: string;
+  driverMasterId: string;
   carrierName: string;
   vehicleType: string;
   plateNumber: string;
@@ -12,11 +15,6 @@ export async function ensureFtlVehicleAndLoads(input: {
   actorUserId: string;
   now: string;
 }) {
-  const carrier = await env.DB.prepare(
-    "SELECT id FROM carriers WHERE organization_id=? AND name=? AND status='active' LIMIT 1",
-  )
-    .bind(input.organizationId, input.carrierName)
-    .first<{ id: string }>();
   const existingVehicle = await env.DB.prepare(
     "SELECT id FROM transport_batch_vehicles WHERE organization_id=? AND batch_id=? AND status!='cancelled' ORDER BY created_at LIMIT 1",
   )
@@ -26,13 +24,15 @@ export async function ensureFtlVehicleAndLoads(input: {
   if (existingVehicle?.id) {
     await env.DB.prepare(
       `UPDATE transport_batch_vehicles
-       SET vehicle_type=?,plate_number=?,carrier_id=?,driver_name=?,driver_phone=?,updated_at=?
+       SET vehicle_type=?,plate_number=?,carrier_id=?,vehicle_master_id=?,driver_master_id=?,driver_name=?,driver_phone=?,updated_at=?
        WHERE id=? AND organization_id=?`,
     )
       .bind(
         input.vehicleType,
         input.plateNumber,
-        carrier?.id || null,
+        input.carrierId,
+        input.vehicleMasterId,
+        input.driverMasterId,
         input.driverName,
         input.driverPhone,
         input.now,
@@ -43,9 +43,9 @@ export async function ensureFtlVehicleAndLoads(input: {
   } else {
     await env.DB.prepare(
       `INSERT INTO transport_batch_vehicles(
-        id,organization_id,batch_id,vehicle_no,vehicle_type,plate_number,carrier_id,
+        id,organization_id,batch_id,vehicle_no,vehicle_type,plate_number,carrier_id,vehicle_master_id,driver_master_id,
         driver_name,driver_phone,capacity_weight_kg,capacity_volume_cbm,status,created_at,updated_at
-      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,'planned',?,?)`,
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'planned',?,?)`,
     )
       .bind(
         vehicleId,
@@ -54,7 +54,9 @@ export async function ensureFtlVehicleAndLoads(input: {
         "1",
         input.vehicleType,
         input.plateNumber,
-        carrier?.id || null,
+        input.carrierId,
+        input.vehicleMasterId,
+        input.driverMasterId,
         input.driverName,
         input.driverPhone,
         0,
@@ -64,6 +66,14 @@ export async function ensureFtlVehicleAndLoads(input: {
       )
       .run();
   }
+  await env.DB.batch([
+    env.DB.prepare(
+      "UPDATE transport_batch_vehicles SET status='cancelled',updated_at=? WHERE organization_id=? AND batch_id=? AND id!=? AND status!='cancelled'",
+    ).bind(input.now, input.organizationId, input.batchId, vehicleId),
+    env.DB.prepare(
+      "UPDATE transport_vehicle_loads SET vehicle_id=? WHERE organization_id=? AND batch_id=? AND vehicle_id!=?",
+    ).bind(vehicleId, input.organizationId, input.batchId, vehicleId),
+  ]);
   const packages = await env.DB.prepare(
     `SELECT id FROM order_cargo_packages
      WHERE organization_id=? AND order_id=? AND status!='cancelled'
