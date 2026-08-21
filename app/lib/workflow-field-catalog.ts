@@ -189,13 +189,6 @@ export const workflowFieldCatalog: WorkflowFieldCatalogItem[] = [
   field("domestic_execution", "transport", "domestic_payable_exchange_rate", "应付费用汇率", "number", "required", "国内运输应付费用折算汇率。"),
   field("domestic_execution", "transport", "domestic_loading_requirements", "国内装载要求", "textarea", "optional", "客户工厂提货和国内运输过程中的装载要求。"),
   field("domestic_execution", "transport", "domestic_transport_notes", "国内运输备注", "textarea", "optional", "国内提货、运输和到仓补充说明。"),
-  field("domestic_execution", "transport", "waybill_number", "运输运单号", "text", "optional", "承运方提供或操作人员登记的运输运单号。"),
-  field("domestic_execution", "transport", "waybill_accompanying_at", "随单时间", "datetime", "optional", "运单和随车资料正式随车的时间。"),
-  field("domestic_execution", "transport", "waybill_shipper_instructions", "发货人指示", "textarea", "optional", "需要在运输运单中体现的发货人指示。"),
-  field("domestic_execution", "transport", "waybill_customs_notes", "运单海关记载", "textarea", "optional", "运输运单中的海关记录或特别说明。"),
-  field("domestic_execution", "transport", "waybill_accompanying_documents", "随附单证", "textarea", "optional", "随运输运单一同流转的文件清单。"),
-  field("domestic_execution", "transport", "waybill_documents_verified", "运单文件核对", "select", "optional", "确认运输运单和随车文件已经核对。", "1|已核对\n0|待核对"),
-  field("domestic_execution", "transport", "document_waybill", "运单文件", "attachment", "optional", "国内运输安排或承运方提供运单后在本节点上传。"),
 
   field("warehouse_receiving", "warehouse", "warehouse_receipt", "到仓收货记录", "text", "required", "仓库扫码收货记录。"),
   field("warehouse_receiving", "warehouse", "warehouse_barcode", "货物标签条码", "text", "optional", "扫描现有货物条码；未填写时由系统自动生成。"),

@@ -933,7 +933,7 @@ export default function WarehouseInbound({
   if (loaderData.isOverseasWarehouse && !selectedShipment) {
     return (
       <>
-        <header className="page-header acceptance-page-header">
+        <header className="page-header acceptance-header">
           <div>
             <p className="eyebrow">ACCEPTANCE RECEIVING</p>
             <h1>验收收货</h1>
@@ -941,8 +941,8 @@ export default function WarehouseInbound({
           </div>
         </header>
         {loaderData.lookupError && <div className="alert error">{loaderData.lookupError}</div>}
-        <section className="panel acceptance-lookup-panel">
-          <Form method="get" className="acceptance-lookup-form">
+        <section className="panel acceptance-scan-panel">
+          <Form method="get" className="acceptance-scan-form">
             <input type="hidden" name="warehouseId" value={loaderData.warehouse.id} />
             <label className="field">
               <span>扫描订单号</span>
@@ -956,7 +956,7 @@ export default function WarehouseInbound({
               />
             </label>
             <button className="primary">调出验收信息</button>
-            <p>扫描枪输入订单号并发送回车后，系统自动读取客户、货物、运输和预计收货信息。</p>
+            <small>扫描枪输入订单号并发送回车后，系统自动读取客户、货物、运输和预计收货信息。</small>
           </Form>
         </section>
       </>

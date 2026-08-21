@@ -3854,7 +3854,7 @@ function ModuleSourceDocuments({
   busy: boolean;
   reviewCloseSignal?: unknown;
 }) {
-  if (code === "documents") return null;
+  if (code === "documents" || code === "transport") return null;
   const placements = orderDocumentsForModule(code)
     .map((placement) => ({
       ...placement,
@@ -4346,18 +4346,6 @@ function ModuleBusinessData({
   if (code === "transport")
     return (
       <div className="module-business-stack dense-module-stack">
-        {data.order.business_type === "ltl" && (
-          <BusinessSubsection
-            title="国内提货运输安排"
-            hint="这里只安排从客户工厂到国内仓/口岸仓的提货车辆、司机、承运方和到仓时间；不做拼车配载。"
-          >
-            <div className="inherited-data-strip">
-              <span>起点<strong>{[data.order.origin_state,data.order.origin_city,data.order.origin_address].filter(Boolean).join(" ") || "客户工厂待确认"}</strong></span>
-              <span>终点<strong>{data.transportAssignments.find((item) => item.leg_type === "first_mile")?.destination_location || "请在下方选择国内段终点仓库"}</strong></span>
-              <span>后续配载<strong>货物到仓复核后，在拼车配载模块按整票订单组批</strong></span>
-            </div>
-          </BusinessSubsection>
-        )}
         <div className="module-toolbar transport-entry-forms">
           {manage && (
             <details className="expandable module-create-dialog module-inline-create transport-entry-panel" open>
@@ -4515,49 +4503,6 @@ function ModuleBusinessData({
               </Form>
             </details>
           )}
-          {manage && (
-            <details className="expandable module-create-dialog module-inline-create transport-entry-panel">
-              <summary>新增运单</summary>
-              <Form method="post" className="form-grid compact transport-waybill-form">
-                <input type="hidden" name="intent" value="waybill_create" />
-                <ModuleField fields={data.workflowFields} fieldKey="waybill_number" label="运输运单号">
-                  {(required) => <input name="waybillNumber" required={required} />}
-                </ModuleField>
-                <ModuleField fields={data.workflowFields} fieldKey="waybill_accompanying_at" label="随单时间">
-                  {(required) => <input name="accompanyingAt" type="datetime-local" required={required} />}
-                </ModuleField>
-                <div className="inherited-data-strip span-2">
-                  <span>发货人（继承订单）<strong>{data.order.shipper_name}</strong><small>{data.order.origin_address}</small></span>
-                  <span>收货人（继承订单）<strong>{data.order.consignee_name}</strong><small>{data.order.destination_address}</small></span>
-                </div>
-                <ModuleField fields={data.workflowFields} fieldKey="waybill_shipper_instructions" label="发货人指示">
-                  {(required) => <textarea name="shipperInstructions" rows={2} required={required} />}
-                </ModuleField>
-                <ModuleField fields={data.workflowFields} fieldKey="waybill_customs_notes" label="运单海关记载">
-                  {(required) => <textarea name="customsNotes" rows={2} required={required} />}
-                </ModuleField>
-                <ModuleField fields={data.workflowFields} fieldKey="waybill_accompanying_documents" label="随附单证" className="field span-2">
-                  {(required) => <textarea name="accompanyingDocuments" rows={2} required={required} />}
-                </ModuleField>
-                {workflowFieldPolicy(data.workflowFields, "waybill_documents_verified").visible && (
-                  <label className="check-field span-2" data-workflow-field="waybill_documents_verified">
-                    <input
-                      name="documentsVerified"
-                      type="checkbox"
-                      required={workflowFieldPolicy(data.workflowFields, "waybill_documents_verified").required}
-                    />
-                    运单和随车文件已核对
-                    {workflowFieldPolicy(data.workflowFields, "waybill_documents_verified").required && (
-                      <b className="required-mark" aria-label="必填">*</b>
-                    )}
-                  </label>
-                )}
-                <button className="primary" disabled={busy}>
-                  建立运单
-                </button>
-              </Form>
-            </details>
-          )}
         </div>
         <BusinessSubsection
           title="运输分段与派车"
@@ -4611,51 +4556,6 @@ function ModuleBusinessData({
           {!data.transportAssignments.length && (
             <p className="empty-state">暂无运输分段安排。</p>
           )}
-        </BusinessSubsection>
-        <BusinessSubsection
-          title="订舱记录"
-          hint="订舱是业务执行节点，可按不同承运人分批建立。"
-        >
-          <div className="table-wrap module-record-table compact-record-table">
-            <table>
-              <thead><tr><th>订舱号</th><th>类型</th><th>承运商</th><th>计划发车</th><th>状态</th></tr></thead>
-              <tbody>
-                {data.bookings.map((item) => (
-                  <tr key={item.id}>
-                    <td><strong>{item.booking_number}</strong></td>
-                    <td>{item.booking_type}</td>
-                    <td>{item.carrier_name || ""}</td>
-                    <td>{item.planned_departure_at ? formatDateTime(item.planned_departure_at) : ""}</td>
-                    <td>{item.status}</td>
-                  </tr>
-                ))}
-                {!data.bookings.length && <tr><td colSpan={5} className="empty-state">暂无订舱记录，可从现有操作页建立。</td></tr>}
-              </tbody>
-            </table>
-          </div>
-        </BusinessSubsection>
-        <BusinessSubsection
-          title="运输运单"
-          hint="集中维护发收货人、随附单证、海关记载和文件核对。"
-        >
-          <div className="table-wrap module-record-table compact-record-table">
-            <table>
-              <thead><tr><th>运单号</th><th>发货方</th><th>收货方</th><th>随单时间</th><th>文件</th><th>状态</th></tr></thead>
-              <tbody>
-                {data.waybills.map((x) => (
-                  <tr key={x.id}>
-                    <td><strong>{x.waybill_number}</strong></td>
-                    <td>{x.shipper_name || ""}</td>
-                    <td>{x.consignee_name || ""}</td>
-                    <td>{x.accompanying_at ? formatDateTime(x.accompanying_at) : ""}</td>
-                    <td>{x.documents_verified ? "已核对" : "待核对"}</td>
-                    <td>{x.status}</td>
-                  </tr>
-                ))}
-                {!data.waybills.length && <tr><td colSpan={6} className="empty-state">暂无运输运单。</td></tr>}
-              </tbody>
-            </table>
-          </div>
         </BusinessSubsection>
       </div>
     );

@@ -84,12 +84,6 @@ export const orderDocumentPlacements: readonly OrderDocumentPlacement[] = [
     requiredByDefault: false,
   },
   {
-    documentCode: "waybill",
-    moduleCode: "transport",
-    fieldKey: "document_waybill",
-    requiredByDefault: false,
-  },
-  {
     documentCode: "commercial_invoice",
     moduleCode: "customs",
     fieldKey: "document_commercial_invoice",
