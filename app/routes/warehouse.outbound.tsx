@@ -58,6 +58,10 @@ export async function loader({request}:Route.LoaderArgs){
   const visibleOrderIds=new Set(visibleBatches.map((batch)=>batch.order_id).concat(visibleDispatches.map((dispatch)=>dispatch.order_id)));
   const manifestsByOrder:Record<string,ManifestDoc>={};
   for(const row of manifestRows.results){if(visibleOrderIds.has(row.order_id)&&!manifestsByOrder[row.order_id])manifestsByOrder[row.order_id]=row;}
+  const requestedBatch=visibleBatches[0]??null;
+  const requestedInspection=orderId&&requestedBatch
+    ?await loadOutboundInspection(user.organizationId,warehouse.id,requestedBatch)
+    :null;
   return{
     user,warehouse,
     batches:evaluated.filter(item=>item.readiness.ready).map(item=>item.batch),
@@ -65,7 +69,8 @@ export async function loader({request}:Route.LoaderArgs){
     dispatches:visibleDispatches,
     items:orderId?items.results.filter((item)=>visibleDispatchIds.has(item.dispatch_id)):items.results,
     orderId,
-    requestedBatch:visibleBatches[0]??null,
+    requestedBatch,
+    requestedInspection,
     workflowFieldsByOrder:Object.fromEntries(workflowFieldEntries),
     manifestsByOrder,
   };
@@ -285,7 +290,9 @@ export default function WarehouseOutbound({loaderData,actionData}:Route.Componen
   const actionSuccess=actionData&&"success" in actionData?actionData.success:undefined;
   const actionError=actionData&&"formError" in actionData?actionData.formError:undefined;
   const actionKind=actionData&&"actionKind" in actionData?actionData.actionKind:undefined;
-  const inspection=actionData&&"inspection" in actionData?actionData.inspection??null:null;
+  const inspection=actionData&&"inspection" in actionData
+    ?actionData.inspection??loaderData.requestedInspection
+    :loaderData.requestedInspection;
   const reviewCloseSignal=actionData&&"reviewCloseSignal" in actionData?actionData.reviewCloseSignal:undefined;
   return <><header className="page-header" id="warehouse-outbound-workbench"><div><p className="eyebrow">PICK · LOAD · DISPATCH</p><h1>按运输方案装车出库</h1><p>整车读取本单车辆安排，拼车读取整张配载单；运输方案完整后，仓库按配载单拣货、扫码装车并完成整批出库交接。</p></div>{canOperate&&<Modal title="新建装车任务" triggerLabel={loaderData.orderId?"下一步：新建本单装车任务":"＋ 新建装车任务"} closeSignal={actionKind==="dispatch_created"?actionSuccess:undefined} size="xwide"><CreateDispatchWorkbench batches={loaderData.batches} requestedBatch={loaderData.requestedBatch} inspection={inspection} busy={busy} actionSuccess={actionSuccess} actionError={actionError} reviewCloseSignal={reviewCloseSignal}/></Modal>}</header>
     {(actionSuccess||actionError)&&<div className={`alert ${actionError?"error":"success"}`}><span>{actionError??actionSuccess}</span></div>}
@@ -307,13 +314,7 @@ function CreateDispatchWorkbench({batches,requestedBatch,inspection,busy,actionS
   const isFtl=inspection?.batch.business_type==="ftl";
   const canCreate=Boolean(inspection&&(inspection.batch.business_type!=="ftl"||inspection.allApproved));
   return <div className="outbound-create-workbench">
-    <Form method="post" className="outbound-inspection-form">
-      <input type="hidden" name="intent" value="inspect_ftl_documents"/>
-      <label className="field scan-field"><span>订单号 *</span><input name="orderNumber" autoComplete="off" placeholder="扫描或输入完整订单号" defaultValue={batch?.order_number??""}/><small>整车先检查发运文件；拼车输入配载单内任一订单号读取整批运输方案。</small></label>
-      <label className="field"><span>收货清点记录（可选）</span><select name="batchId" defaultValue={batch?.id??""}><option value="">通过订单号定位</option>{batches.map(item=><option key={item.id} value={item.id}>[{item.customer_identity_code}] {item.order_number} · {item.batch_number} · {item.customer_name}</option>)}</select></label>
-      <label className="field"><span>客户识别码（可选核对）</span><input name="customerIdentityCode" autoComplete="off" maxLength={5} placeholder="例如 A2B3C"/></label>
-      <button className="primary warehouse-primary" disabled={busy}>检查订单与文件</button>
-    </Form>
+    {inspection?<details className="inline-details outbound-order-switch"><summary>切换订单或重新检查</summary><OutboundInspectionForm batches={batches} batch={batch} busy={busy}/></details>:<OutboundInspectionForm batches={batches} batch={batch} busy={busy}/>}
     {(actionSuccess||actionError)&&<div className={`alert ${actionError?"error":"success"}`}>{actionError??actionSuccess}</div>}
     {inspection&&<>
       <div className="outbound-inspection-summary">
@@ -341,6 +342,16 @@ function CreateDispatchWorkbench({batches,requestedBatch,inspection,busy,actionS
       {canCreate&&<Form method="post" className="outbound-create-form"><input type="hidden" name="intent" value="create"/><input type="hidden" name="batchId" value={inspection.batch.id}/><input type="hidden" name="orderNumber" value={inspection.batch.order_number}/><input type="hidden" name="customerIdentityCode" value={inspection.batch.customer_identity_code}/><div className="inherited-data-strip"><span>运输方案与车辆<strong>自动继承操作结果</strong><small>整车读取订单运输安排，拼车读取配载单唯一主车</small></span><span>承运商与目的地<strong>自动继承运输安排</strong><small>仓库无需重复填写</small></span></div>{inspection.sealActive&&<label className="field"><span>封签号{inspection.sealRequired?" *":""}</span><input name="sealNumber" required={inspection.sealRequired}/></label>}{inspection.notesActive&&<label className="field"><span>交接备注{inspection.notesRequired?" *":""}</span><textarea name="notes" rows={2} required={inspection.notesRequired}/></label>}<button className="primary warehouse-primary" disabled={busy}>创建装车任务</button></Form>}
     </>}
   </div>;
+}
+
+function OutboundInspectionForm({batches,batch,busy}:{batches:Batch[];batch:Batch|null;busy:boolean}){
+  return <Form method="post" className="outbound-inspection-form">
+    <input type="hidden" name="intent" value="inspect_ftl_documents"/>
+    <label className="field scan-field"><span>订单号 *</span><input name="orderNumber" autoComplete="off" placeholder="扫描或输入完整订单号" defaultValue={batch?.order_number??""}/><small>整车先检查发运文件；拼车输入配载单内任一订单号读取整批运输方案。</small></label>
+    <label className="field"><span>收货清点记录（可选）</span><select name="batchId" defaultValue={batch?.id??""}><option value="">通过订单号定位</option>{batches.map(item=><option key={item.id} value={item.id}>[{item.customer_identity_code}] {item.order_number} · {item.batch_number} · {item.customer_name}</option>)}</select></label>
+    <label className="field"><span>客户识别码（可选核对）</span><input name="customerIdentityCode" autoComplete="off" maxLength={5} placeholder="例如 A2B3C"/></label>
+    <button className="primary warehouse-primary" disabled={busy}>检查订单与文件</button>
+  </Form>;
 }
 
 function OutboundDocumentPreview({document}:{document:OutboundDocument}){
