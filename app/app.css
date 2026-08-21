@@ -6166,6 +6166,19 @@ body.modal-scroll-locked {
   gap: 18px;
 }
 
+.warehouse-ltl-loading-page,
+.warehouse-consolidation-page {
+  position: relative;
+  left: 50%;
+  width: min(1760px, calc(100vw - 252px));
+  transform: translateX(-50%);
+}
+
+.ltl-loading-actions {
+  flex-wrap: nowrap;
+  flex: 0 0 auto;
+}
+
 .ltl-loading-filters {
   display: grid;
   grid-template-columns: repeat(6, minmax(120px, 1fr));
@@ -6198,13 +6211,6 @@ body.modal-scroll-locked {
 .ltl-filter-panel {
   padding: 0;
   overflow: hidden;
-}
-
-.warehouse-consolidation-page {
-  position: relative;
-  left: 50%;
-  width: min(1760px, calc(100vw - 252px));
-  transform: translateX(-50%);
 }
 
 .warehouse-consolidation-page .consolidation-stock-panel {
@@ -6280,18 +6286,64 @@ body.modal-scroll-locked {
 
 .consolidation-advanced-filters > div {
   display: grid;
-  grid-template-columns: repeat(6, minmax(130px, 1fr));
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
   gap: 12px;
   padding: 14px 18px 16px;
 }
 
 .ltl-loading-table table {
-  min-width: 1280px;
+  min-width: 1480px;
 }
 
 .consolidation-stock-table table {
   width: 100%;
-  min-width: 1580px;
+  min-width: 1500px;
+}
+
+.warehouse-ltl-loading-page .ltl-loading-table td {
+  overflow-wrap: anywhere;
+}
+
+.warehouse-ltl-loading-page .ltl-loading-table .danger-text {
+  max-width: 220px;
+  white-space: normal;
+}
+
+.ltl-route-context {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px 16px;
+  align-items: center;
+  padding: 12px 14px;
+  border: 1px solid #d7e1ed;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.ltl-route-context span,
+.ltl-route-context small,
+.ltl-route-summary span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.ltl-route-summary {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border: 1px solid #d7e1ed;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.ltl-route-summary > div {
+  display: grid;
+  gap: 5px;
+  padding: 11px 14px;
+  border-right: 1px solid #d7e1ed;
+}
+
+.ltl-route-summary > div:last-child {
+  border-right: 0;
 }
 
 .consolidation-stock-table th:nth-child(2),
@@ -6625,8 +6677,10 @@ body.modal-scroll-locked {
 }
 
 @media (max-width: 720px) {
+  .warehouse-ltl-loading-page,
   .warehouse-consolidation-page { left: auto; width: 100%; transform: none; }
   .ltl-loading-header { align-items: stretch; flex-direction: column; }
+  .ltl-loading-actions { flex-wrap: wrap; justify-content: flex-start; }
   .ltl-loading-filters { grid-template-columns: 1fr 1fr; }
   .consolidation-filter-primary { grid-template-columns: 1fr; }
   .consolidation-filter-actions { grid-column: auto; }

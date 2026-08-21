@@ -58,6 +58,12 @@ type DispatchRow = {
   created_at: string;
 };
 
+type ReferenceOption = {
+  category: "border_port" | "customs_place";
+  code: string;
+  name: string;
+};
+
 type Selection = {
   orderId: string;
   orderNumber: string;
@@ -103,8 +109,6 @@ export async function loader({ request }: Route.LoaderArgs) {
     country: url.searchParams.get("country")?.trim() ?? "",
     state: url.searchParams.get("state")?.trim() ?? "",
     city: url.searchParams.get("city")?.trim() ?? "",
-    borderPort: url.searchParams.get("borderPort")?.trim() ?? "",
-    customs: url.searchParams.get("customs")?.trim() ?? "",
     keyword: url.searchParams.get("q")?.trim() ?? "",
   };
   const filterSql: string[] = [];
@@ -118,8 +122,6 @@ export async function loader({ request }: Route.LoaderArgs) {
   addLike("o.destination_country", filters.country);
   addLike("COALESCE(o.destination_state,'')", filters.state);
   addLike("o.destination_city", filters.city);
-  addLike("COALESCE(b.border_port,'')", filters.borderPort);
-  addLike("COALESCE(b.customs_location,'')", filters.customs);
   if (filters.keyword) {
     filterSql.push("(o.order_number LIKE ? OR b.batch_number LIKE ? OR c.name LIKE ? OR COALESCE(o.cargo_description,'') LIKE ?)");
     filterBindings.push(...Array(4).fill(`%${filters.keyword}%`));
@@ -132,7 +134,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const pages = Math.max(1, Math.ceil(total / pageSize));
   const safePage = Math.min(page, pages);
 
-  const [rows, options, tasks] = await Promise.all([
+  const [rows, options, tasks, routeOptions] = await Promise.all([
     env.DB.prepare(`SELECT b.id batch_id,b.batch_number,b.batch_name,b.warehouse_id batch_warehouse_id,
         COALESCE((SELECT COUNT(*) FROM transport_batch_orders bc WHERE bc.batch_id=b.id AND bc.organization_id=b.organization_id AND bc.status!='removed'),0) batch_order_count,
         o.id order_id,o.order_number,o.business_type,c.name customer_name,
@@ -151,9 +153,9 @@ export async function loader({ request }: Route.LoaderArgs) {
       ORDER BY CASE WHEN b.id IS NULL THEN 1 ELSE 0 END,b.updated_at DESC,o.updated_at DESC LIMIT ? OFFSET ?`)
       .bind(warehouse.id, warehouse.id, warehouse.id, warehouse.id, warehouse.id, warehouse.id, warehouse.id, ...baseBindings, ...filterBindings, pageSize, (safePage - 1) * pageSize)
       .all<CargoRow>(),
-    env.DB.prepare(`SELECT DISTINCT COALESCE(ow.name,'') overseas_warehouse_name,o.destination_country,o.destination_state,o.destination_city,b.border_port,b.customs_location
+    env.DB.prepare(`SELECT DISTINCT COALESCE(ow.name,'') overseas_warehouse_name,o.destination_country,o.destination_state,o.destination_city
       ${stockBaseSql}
-      ORDER BY overseas_warehouse_name,o.destination_country,o.destination_state,o.destination_city`).bind(...baseBindings).all<Pick<CargoRow,"overseas_warehouse_name"|"destination_country"|"destination_state"|"destination_city"|"border_port"|"customs_location">>(),
+      ORDER BY overseas_warehouse_name,o.destination_country,o.destination_state,o.destination_city`).bind(...baseBindings).all<Pick<CargoRow,"overseas_warehouse_name"|"destination_country"|"destination_state"|"destination_city">>(),
     env.DB.prepare(`SELECT d.id,d.dispatch_number,d.transport_batch_id,b.batch_number,
         GROUP_CONCAT(DISTINCT o.order_number) order_numbers,d.status,COUNT(DISTINCT di.id) item_count,
         COALESCE(SUM(CASE WHEN di.status='loaded' THEN 1 ELSE 0 END),0) loaded_count,
@@ -166,9 +168,24 @@ export async function loader({ request }: Route.LoaderArgs) {
       WHERE d.organization_id=? AND d.transport_batch_id IS NOT NULL
         AND EXISTS(SELECT 1 FROM warehouse_dispatch_items wi JOIN warehouse_packages wp ON wp.id=wi.package_id WHERE wi.dispatch_id=d.id AND wp.warehouse_id=?)
       GROUP BY d.id ORDER BY d.updated_at DESC LIMIT 30`).bind(user.organizationId, warehouse.id).all<DispatchRow>(),
+    env.DB.prepare("SELECT category,code,name FROM reference_data WHERE organization_id=? AND category IN ('border_port','customs_place') AND status='active' ORDER BY category,sort_order,code")
+      .bind(user.organizationId).all<ReferenceOption>(),
   ]);
 
-  return { user, warehouse, rows: rows.results, options: options.results, tasks: tasks.results, filters, page: safePage, pageSize, pages, total };
+  return {
+    user,
+    warehouse,
+    rows: rows.results,
+    options: options.results,
+    tasks: tasks.results,
+    borderPorts: routeOptions.results.filter((item) => item.category === "border_port"),
+    customsPlaces: routeOptions.results.filter((item) => item.category === "customs_place"),
+    filters,
+    page: safePage,
+    pageSize,
+    pages,
+    total,
+  };
 }
 
 export async function action({ request }: Route.ActionArgs) {
@@ -200,15 +217,48 @@ export async function action({ request }: Route.ActionArgs) {
     return { success: `装车任务 ${task.dispatch_number} 已撤销，整批货物已释放` };
   }
 
+  if (intent === "route") {
+    const batchId = valueOf(form, "batchId");
+    const borderPort = valueOf(form, "borderPort").trim();
+    const customsLocation = valueOf(form, "customsLocation").trim();
+    if (!batchId) return { formError: "请先选择一张 PZ 配载单" };
+    if (!borderPort || !customsLocation) return { formError: "请选择出境口岸和清关地" };
+    const batch = await env.DB.prepare(`SELECT b.id,b.batch_number,b.warehouse_id,
+        EXISTS(SELECT 1 FROM warehouse_dispatches d WHERE d.organization_id=b.organization_id AND d.transport_batch_id=b.id AND d.status!='cancelled') has_dispatch
+      FROM transport_batches b
+      WHERE b.id=? AND b.organization_id=? AND b.batch_number LIKE 'PZ-%' AND b.status IN ('planning','loading')`)
+      .bind(batchId,user.organizationId)
+      .first<{id:string;batch_number:string;warehouse_id:string|null;has_dispatch:number}>();
+    if (!batch || batch.warehouse_id !== warehouse.id) return { formError: "配载单不存在或不属于当前仓库" };
+    if (batch.has_dispatch) return { formError: `${batch.batch_number} 已生成装车任务，不能再修改口岸和清关地` };
+    const references = await env.DB.prepare(`SELECT category,code FROM reference_data
+      WHERE organization_id=? AND status='active' AND ((category='border_port' AND code=?) OR (category='customs_place' AND code=?))`)
+      .bind(user.organizationId,borderPort,customsLocation)
+      .all<{category:string;code:string}>();
+    if (!references.results.some((item)=>item.category==="border_port"&&item.code===borderPort)) return { formError: "请选择基础数据中启用的出境口岸" };
+    if (!references.results.some((item)=>item.category==="customs_place"&&item.code===customsLocation)) return { formError: "请选择基础数据中启用的清关地" };
+    await env.DB.batch([
+      env.DB.prepare("UPDATE transport_batches SET border_port=?,customs_location=?,updated_at=? WHERE id=? AND organization_id=?")
+        .bind(borderPort,customsLocation,now,batch.id,user.organizationId),
+      env.DB.prepare(`UPDATE transport_orders SET exit_port=?,customs_location=?,updated_at=?
+        WHERE organization_id=? AND id IN (
+          SELECT order_id FROM transport_batch_orders WHERE batch_id=? AND organization_id=? AND status!='removed'
+        )`).bind(borderPort,customsLocation,now,user.organizationId,batch.id,user.organizationId),
+    ]);
+    await writeAudit({request,action:"warehouse.ltl_loading.route",resourceType:"transport_batch",resourceId:batch.id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{batchNumber:batch.batch_number,borderPort,customsLocation}});
+    return { success: `${batch.batch_number} 的出境口岸和清关地已保存`, routeSaved: true };
+  }
+
   if (intent !== "create") return { formError: "未知操作" };
   const batchId = valueOf(form, "batchId");
   const selectedOrderIds = [...new Set(form.getAll("orderId").map(String).filter(Boolean))];
   if (!batchId || !selectedOrderIds.length) return { formError: "请先选择一张配载单内的全部订单" };
-  const batch = await env.DB.prepare(`SELECT id,batch_number,batch_name,destination_location,status,warehouse_id
+  const batch = await env.DB.prepare(`SELECT id,batch_number,batch_name,destination_location,status,warehouse_id,border_port,customs_location
     FROM transport_batches WHERE id=? AND organization_id=? AND batch_number LIKE 'PZ-%' AND status IN ('planning','loading')`)
-    .bind(batchId,user.organizationId).first<{id:string;batch_number:string;batch_name:string;destination_location:string;status:string;warehouse_id:string|null}>();
+    .bind(batchId,user.organizationId).first<{id:string;batch_number:string;batch_name:string;destination_location:string;status:string;warehouse_id:string|null;border_port:string|null;customs_location:string|null}>();
   if (!batch) return { formError: "PZ 配载单不存在或已不能生成装车任务" };
   if (batch.warehouse_id !== warehouse.id) return { formError: `配载单 ${batch.batch_number} 不属于当前仓库` };
+  if (!batch.border_port || !batch.customs_location) return { formError: `请先为 ${batch.batch_number} 选择出境口岸和清关地` };
   const orders = await env.DB.prepare(`SELECT bo.order_id,o.order_number,o.business_type
     FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
     WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed' ORDER BY bo.sequence_no`)
@@ -299,9 +349,10 @@ export default function WarehouseLtlLoading({ loaderData, actionData }: Route.Co
   }, [storageKey]);
   useEffect(() => { localStorage.setItem(storageKey, JSON.stringify(selected)); }, [storageKey,selected]);
   useEffect(() => {
-    if (actionData?.success) setSelected([]);
+    if (actionData?.success && !("routeSaved" in actionData && actionData.routeSaved)) setSelected([]);
   }, [actionData?.success]);
   const selectedBatchId = selected[0]?.batchId ?? "";
+  const selectedBatch = loaderData.rows.find((row)=>row.batch_id===selectedBatchId);
   const totals = useMemo(()=>selected.reduce((sum,item)=>({packages:sum.packages+item.packages,pieces:sum.pieces+item.pieces,weight:sum.weight+item.weight,volume:sum.volume+item.volume}),{packages:0,pieces:0,weight:0,volume:0}),[selected]);
   const toggle = (row:CargoRow, checked:boolean) => {
     if (!checked) return setSelected((current)=>current.filter((item)=>item.orderId!==row.order_id));
@@ -319,19 +370,37 @@ export default function WarehouseLtlLoading({ loaderData, actionData }: Route.Co
     setSelected(next);
   };
   const optionValues = <K extends keyof (typeof loaderData.options)[number]>(key:K) => [...new Set(loaderData.options.map((item)=>item[key]).filter(Boolean) as string[])];
-  return <>
-    <header className="warehouse-page-header ltl-loading-header"><div><p className="eyebrow">LTL LOADING</p><h1>拼车装货</h1><p>仓库端先在“货物配载”生成 PZ 配载单，再按整批生成装车任务。</p></div><Modal title="生成拼车装车任务" triggerLabel={`生成装车任务${selected.length?`（${selected.length} 票）`:""}`} size="wide" closeSignal={actionData?.success}>
+  return <div className="warehouse-ltl-loading-page">
+    <header className="warehouse-page-header ltl-loading-header">
+      <div><p className="eyebrow">LTL LOADING</p><h1>拼车装货</h1><p>选择一张 PZ 配载单，先确定出境口岸与清关地，再按整批生成装车任务。</p></div>
+      <div className="page-actions ltl-loading-actions">
+        {selectedBatchId?<Modal title={`选择口岸与清关 · ${selected[0].batchNumber}`} triggerLabel={selectedBatch?.border_port&&selectedBatch?.customs_location?"修改口岸与清关":"选择口岸与清关"} triggerClassName="secondary" size="wide" closeSignal={actionData?.success}>
+          <Form method="post" className="stack ltl-route-form">
+            <input type="hidden" name="intent" value="route"/>
+            <input type="hidden" name="batchId" value={selectedBatchId}/>
+            <div className="ltl-route-context"><span>当前配载单</span><strong>{selected[0].batchNumber}</strong><small>{selected.length}/{selected[0].batchOrderCount} 票已选</small></div>
+            <div className="form-grid compact">
+              <label className="field"><span>出境口岸 *</span><select name="borderPort" defaultValue={selectedBatch?.border_port||""} required><option value="">请选择出境口岸</option>{loaderData.borderPorts.map((item)=><option key={item.code} value={item.code}>{item.name} · {item.code}</option>)}</select></label>
+              <label className="field"><span>清关地 *</span><select name="customsLocation" defaultValue={selectedBatch?.customs_location||""} required><option value="">请选择清关地</option>{loaderData.customsPlaces.map((item)=><option key={item.code} value={item.code}>{item.name} · {item.code}</option>)}</select></label>
+            </div>
+            <div className="alert info">保存后同步到该配载单的全部订单；生成装车任务前仍可修改。</div>
+            <button className="primary warehouse-primary" disabled={busy}>保存口岸与清关地</button>
+          </Form>
+        </Modal>:<button type="button" className="secondary" disabled>选择口岸与清关</button>}
+        <Modal title="生成拼车装车任务" triggerLabel={`生成装车任务${selected.length?`（${selected.length} 票）`:""}`} size="xwide" closeSignal={actionData?.success}>
       <Form method="post" className="stack ltl-task-form"><input type="hidden" name="intent" value="create"/><input type="hidden" name="batchId" value={selectedBatchId}/>{selected.map((item)=><input key={item.orderId} type="hidden" name="orderId" value={item.orderId}/>)}
-        {!selected.length?<div className="alert">请先从列表选择一张 PZ 配载单内的全部订单。</div>:<><div className="ltl-selection-summary"><div><span>配载单</span><strong>{selected[0].batchNumber}</strong></div><div><span>已选订单</span><strong>{selected.length}/{selected[0].batchOrderCount} 票</strong></div><div><span>包装 / 件数</span><strong>{totals.packages} 包装 · {totals.pieces} 件</strong></div><div><span>实收重量 / 体积</span><strong>{totals.weight.toFixed(2)} KG · {totals.volume.toFixed(3)} CBM</strong></div></div><div className="table-wrap compact-selection-table"><table><thead><tr><th>订单</th><th>包装</th><th>重量</th><th>体积</th></tr></thead><tbody>{selected.map((item)=><tr key={item.orderId}><td>{item.orderNumber}</td><td>{item.packages}</td><td>{item.weight.toFixed(2)} KG</td><td>{item.volume.toFixed(3)} CBM</td></tr>)}</tbody></table></div><div className="form-grid compact"><label className="field"><span>计划装车时间</span><input type="datetime-local" name="plannedLoadingAt"/></label><label className="field span-2"><span>装车备注</span><textarea name="notes" rows={2} placeholder="选填；车辆、司机和承运商可在配载单中后补"/></label></div><div className="alert info">仓库不能增删配载订单。车辆资源可以后补，但扫码装车和完成出库前必须补齐。</div></>}
+        {!selected.length?<div className="alert">请先从列表选择一张 PZ 配载单内的全部订单。</div>:<><div className="ltl-selection-summary"><div><span>配载单</span><strong>{selected[0].batchNumber}</strong></div><div><span>已选订单</span><strong>{selected.length}/{selected[0].batchOrderCount} 票</strong></div><div><span>包装 / 件数</span><strong>{totals.packages} 包装 · {totals.pieces} 件</strong></div><div><span>实收重量 / 体积</span><strong>{totals.weight.toFixed(2)} KG · {totals.volume.toFixed(3)} CBM</strong></div></div><div className="ltl-route-summary"><div><span>出境口岸</span><strong>{selectedBatch?.border_port||"尚未选择"}</strong></div><div><span>清关地</span><strong>{selectedBatch?.customs_location||"尚未选择"}</strong></div></div><div className="table-wrap compact-selection-table"><table><thead><tr><th>订单</th><th>包装</th><th>重量</th><th>体积</th></tr></thead><tbody>{selected.map((item)=><tr key={item.orderId}><td>{item.orderNumber}</td><td>{item.packages}</td><td>{item.weight.toFixed(2)} KG</td><td>{item.volume.toFixed(3)} CBM</td></tr>)}</tbody></table></div><div className="form-grid compact"><label className="field"><span>计划装车时间</span><input type="datetime-local" name="plannedLoadingAt"/></label><label className="field span-2"><span>装车备注</span><textarea name="notes" rows={2} placeholder="选填；车辆、司机和承运商可在配载单中后补"/></label></div><div className="alert info">仓库不能增删配载订单。车辆资源可以后补，但扫码装车和完成出库前必须补齐。</div></>}
         <button className="primary warehouse-primary" disabled={busy||!selected.length||selected.length!==selected[0]?.batchOrderCount}>确认生成整批装车任务</button>
       </Form>
-    </Modal></header>
+        </Modal>
+      </div>
+    </header>
     {actionData?.formError&&<div className="alert error">{actionData.formError}</div>}
     {actionData?.success&&<div className="alert success">{actionData.success}</div>}
-    <section className="panel ltl-filter-panel"><Form method="get" className="ltl-loading-filters"><input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/><label><span>目的仓</span><select name="destinationWarehouse" defaultValue={loaderData.filters.warehouse}><option value="">全部</option>{optionValues("overseas_warehouse_name").map((value)=><option key={value}>{value}</option>)}</select></label><label><span>国家</span><select name="country" defaultValue={loaderData.filters.country}><option value="">全部</option>{optionValues("destination_country").map((value)=><option key={value}>{value}</option>)}</select></label><label><span>省 / 州</span><select name="state" defaultValue={loaderData.filters.state}><option value="">全部</option>{optionValues("destination_state").map((value)=><option key={value}>{value}</option>)}</select></label><label><span>城市</span><select name="city" defaultValue={loaderData.filters.city}><option value="">全部</option>{optionValues("destination_city").map((value)=><option key={value}>{value}</option>)}</select></label><label><span>出境口岸</span><select name="borderPort" defaultValue={loaderData.filters.borderPort}><option value="">全部</option>{optionValues("border_port").map((value)=><option key={value}>{value}</option>)}</select></label><label><span>清关地</span><select name="customs" defaultValue={loaderData.filters.customs}><option value="">全部</option>{optionValues("customs_location").map((value)=><option key={value}>{value}</option>)}</select></label><label className="ltl-filter-search"><span>快速查找</span><input name="q" defaultValue={loaderData.filters.keyword} placeholder="订单、配载单、客户或货物"/></label><label><span>每页</span><select name="pageSize" defaultValue={loaderData.pageSize}>{PAGE_SIZES.map((size)=><option key={size} value={size}>{size} 条</option>)}</select></label><button className="secondary">筛选</button><Link className="text-button" to={`/warehouse/ltl-loading?warehouseId=${loaderData.warehouse.id}`}>重置</Link></Form></section>
+    <section className="panel ltl-filter-panel"><Form method="get" className="ltl-loading-filters"><input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/><label><span>目的仓</span><select name="destinationWarehouse" defaultValue={loaderData.filters.warehouse}><option value="">全部</option>{optionValues("overseas_warehouse_name").map((value)=><option key={value}>{value}</option>)}</select></label><label><span>国家</span><select name="country" defaultValue={loaderData.filters.country}><option value="">全部</option>{optionValues("destination_country").map((value)=><option key={value}>{value}</option>)}</select></label><label><span>省 / 州</span><select name="state" defaultValue={loaderData.filters.state}><option value="">全部</option>{optionValues("destination_state").map((value)=><option key={value}>{value}</option>)}</select></label><label><span>城市</span><select name="city" defaultValue={loaderData.filters.city}><option value="">全部</option>{optionValues("destination_city").map((value)=><option key={value}>{value}</option>)}</select></label><label className="ltl-filter-search"><span>快速查找</span><input name="q" defaultValue={loaderData.filters.keyword} placeholder="订单、配载单、客户或货物"/></label><label><span>每页</span><select name="pageSize" defaultValue={loaderData.pageSize}>{PAGE_SIZES.map((size)=><option key={size} value={size}>{size} 条</option>)}</select></label><button className="secondary">筛选</button><Link className="text-button" to={`/warehouse/ltl-loading?warehouseId=${loaderData.warehouse.id}`}>重置</Link></Form></section>
     <section className="panel"><div className="panel-header"><div><h2>当前仓库全部在库货物</h2><p>默认显示全部在库货物；只有已形成 PZ 配载单且满足装车条件的拼车订单可以勾选。</p></div><span className="status-pill">{loaderData.total} 票</span></div><div className="table-wrap ltl-loading-table"><table><thead><tr><th>选择</th><th>装货状态</th><th>配载单</th><th>订单 / 客户</th><th>货物</th><th>实收数据</th><th>目的地</th><th>口岸 / 清关</th><th>库位</th></tr></thead><tbody>{loaderData.rows.map((row)=>{const blockers=stockBlockers(row,loaderData.warehouse.id);const checked=selected.some((item)=>item.orderId===row.order_id);const batchMismatch=Boolean(selectedBatchId&&selectedBatchId!==row.batch_id);const disabled=blockers.length>0||batchMismatch;return <tr key={row.order_id} className={checked?"selected-row":""}><td><input type="checkbox" checked={checked} disabled={disabled} onChange={(event)=>toggle(row,event.target.checked)} aria-label={`选择订单 ${row.order_number}`}/></td><td>{blockers.length?<><span className="status-pill off">暂不可装车</span><small className="danger-text">{blockers.join("；")}</small></>:<span className="status-pill success">可生成任务</span>}</td><td>{row.batch_id&&row.batch_number?<><strong>{row.batch_number}</strong><small>{row.batch_order_count} 票 · <button type="button" className="link-button" disabled={disabled} onClick={()=>selectBatch(row.batch_id!)}>选择本页同批订单</button></small></>:<span className="off">尚无 PZ 配载单</span>}</td><td><strong>{row.order_number}</strong><small>{row.customer_name}</small></td><td><strong>{row.cargo_names||"未填写货名"}</strong></td><td>{row.package_count} 包装 · {row.pieces} 件<small>{row.weight_kg.toFixed(2)} KG · {row.volume_cbm.toFixed(3)} CBM</small></td><td>{row.overseas_warehouse_name||"目的仓未命名"}<small>{[row.destination_country,row.destination_state,row.destination_city].filter(Boolean).join(" ")}</small></td><td>{row.border_port||"未填口岸"}<small>{row.customs_location||"未填清关地"}</small></td><td>{row.location_names||"—"}</td></tr>})}</tbody></table></div>{!loaderData.rows.length&&<p className="empty-state">当前仓库没有符合筛选条件的在库货物。</p>}<Pagination loaderData={loaderData}/></section>
     <section className="panel"><div className="panel-header"><div><h2>最近拼车装货任务</h2><p>待装车任务可进入扫码出库；尚未扫码的任务可以撤销。</p></div><Link className="secondary" to={`/warehouse/outbound?warehouseId=${loaderData.warehouse.id}`}>进入扫码装车与出库</Link></div><div className="table-wrap"><table><thead><tr><th>任务 / 配载单</th><th>订单</th><th>实收汇总</th><th>装车进度</th><th>车辆资源</th><th>计划装车</th><th>状态</th><th>操作</th></tr></thead><tbody>{loaderData.tasks.map((task)=><tr key={task.id}><td><strong>{task.dispatch_number}</strong><small>{task.batch_number}</small></td><td>{task.order_numbers}</td><td>{task.weight_kg.toFixed(2)} KG<small>{task.volume_cbm.toFixed(3)} CBM</small></td><td>{task.loaded_count}/{task.item_count}</td><td>{task.vehicle_plate||"待补车辆"}<small>{task.carrier_name||"待补承运商"} · {task.driver_name||"待补司机"}</small></td><td>{task.planned_loading_at?new Date(task.planned_loading_at).toLocaleString("zh-CN"):"待定"}</td><td><span className={`status-pill ${task.status==="cancelled"?"off":""}`}>{task.status==="loading"?"待装车":task.status==="dispatched"?"已出库":"已撤销"}</span></td><td><div className="button-row">{task.status==="loading"&&<Link className="text-button" to={`/warehouse/outbound?warehouseId=${loaderData.warehouse.id}`}>去装车</Link>}{task.status==="loading"&&task.loaded_count===0&&<Form method="post"><input type="hidden" name="intent" value="cancel"/><input type="hidden" name="dispatchId" value={task.id}/><button className="text-button danger" disabled={busy}>撤销</button></Form>}</div></td></tr>)}</tbody></table></div>{!loaderData.tasks.length&&<p className="empty-state">暂无拼车装货任务。</p>}</section>
-  </>;
+  </div>;
 }
 
 function Pagination({loaderData}:{loaderData:{page:number;pages:number;pageSize:number;warehouse:{id:string};filters:Record<string,string>}}){

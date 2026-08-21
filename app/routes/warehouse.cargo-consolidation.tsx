@@ -111,10 +111,10 @@ export async function loader({request}:Route.LoaderArgs){
   const url=new URL(request.url),page=Math.max(1,Number(url.searchParams.get("page"))||1);
   const requestedSize=Number(url.searchParams.get("pageSize"))||DEFAULT_PAGE_SIZE;
   const pageSize=PAGE_SIZES.includes(requestedSize)?requestedSize:DEFAULT_PAGE_SIZE;
-  const filters={warehouse:url.searchParams.get("destinationWarehouse")?.trim()??"",country:url.searchParams.get("country")?.trim()??"",state:url.searchParams.get("state")?.trim()??"",city:url.searchParams.get("city")?.trim()??"",borderPort:url.searchParams.get("borderPort")?.trim()??"",customs:url.searchParams.get("customs")?.trim()??"",customer:url.searchParams.get("customer")?.trim()??"",eligibility:url.searchParams.get("eligibility")?.trim()??"",keyword:url.searchParams.get("q")?.trim()??""};
+  const filters={warehouse:url.searchParams.get("destinationWarehouse")?.trim()??"",country:url.searchParams.get("country")?.trim()??"",state:url.searchParams.get("state")?.trim()??"",city:url.searchParams.get("city")?.trim()??"",customer:url.searchParams.get("customer")?.trim()??"",eligibility:url.searchParams.get("eligibility")?.trim()??"",keyword:url.searchParams.get("q")?.trim()??""};
   const clauses:string[]=[],bindings:string[]=[];
   const like=(column:string,value:string)=>{if(value){clauses.push(`${column} LIKE ?`);bindings.push(`%${value}%`)}};
-  like("COALESCE(ow.name,'')",filters.warehouse);like("o.destination_country",filters.country);like("COALESCE(o.destination_state,'')",filters.state);like("o.destination_city",filters.city);like("COALESCE(o.exit_port,'')",filters.borderPort);like("COALESCE(o.customs_location,'')",filters.customs);like("c.name",filters.customer);
+  like("COALESCE(ow.name,'')",filters.warehouse);like("o.destination_country",filters.country);like("COALESCE(o.destination_state,'')",filters.state);like("o.destination_city",filters.city);like("c.name",filters.customer);
   if(filters.keyword){clauses.push("(o.order_number LIKE ? OR c.name LIKE ? OR COALESCE(o.cargo_description,'') LIKE ? OR EXISTS(SELECT 1 FROM order_cargo_items qi WHERE qi.order_id=o.id AND COALESCE(qi.cargo_name_cn,'') LIKE ?))");bindings.push(...Array(4).fill(`%${filters.keyword}%`))}
   if(filters.eligibility==="eligible")clauses.push("o.business_type='ltl' AND rr.order_id IS NOT NULL AND eo.order_id IS NULL AND dd.order_id IS NULL AND ab.batch_id IS NULL AND COALESCE(dg.invoice_uploaded,0)=1 AND COALESCE(dg.packing_list_uploaded,0)=1 AND COALESCE(dg.customs_document_uploaded,0)=1");
   if(filters.eligibility==="blocked")clauses.push("(o.business_type!='ltl' OR rr.order_id IS NULL OR eo.order_id IS NOT NULL OR dd.order_id IS NOT NULL OR ab.batch_id IS NOT NULL OR COALESCE(dg.invoice_uploaded,0)=0 OR COALESCE(dg.packing_list_uploaded,0)=0 OR COALESCE(dg.customs_document_uploaded,0)=0)");
@@ -123,7 +123,7 @@ export async function loader({request}:Route.LoaderArgs){
   const total=totalRow?.total??0,pages=Math.max(1,Math.ceil(total/pageSize)),safePage=Math.min(page,pages);
   const [rows,options,batches,batchOrders]=await Promise.all([
     env.DB.prepare(`${stockCtes} ${rowSelectSql()} ${stockFrom}${filterSql} ORDER BY CASE WHEN ab.batch_id IS NULL THEN 0 ELSE 1 END,o.updated_at DESC LIMIT ? OFFSET ?`).bind(...baseBindings,...bindings,pageSize,(safePage-1)*pageSize).all<StockRow>(),
-    env.DB.prepare(`${stockCtes} SELECT DISTINCT COALESCE(ow.name,'') overseas_warehouse_name,o.destination_country,o.destination_state,o.destination_city,o.exit_port,o.customs_location,c.name customer_name ${stockFrom} ORDER BY overseas_warehouse_name,o.destination_country,o.destination_state,o.destination_city`).bind(...baseBindings).all<StockRow&{customer_name:string}>(),
+    env.DB.prepare(`${stockCtes} SELECT DISTINCT COALESCE(ow.name,'') overseas_warehouse_name,o.destination_country,o.destination_state,o.destination_city,c.name customer_name ${stockFrom} ORDER BY overseas_warehouse_name,o.destination_country,o.destination_state,o.destination_city`).bind(...baseBindings).all<StockRow&{customer_name:string}>(),
     env.DB.prepare(`SELECT b.id,b.batch_number,b.batch_name,b.destination_location,b.border_port,b.customs_location,b.planned_loading_at,b.status,b.road_status,b.created_at,
       COUNT(DISTINCT bo.order_id) order_count,GROUP_CONCAT(DISTINCT o.order_number) order_numbers,
       COALESCE(SUM((SELECT SUM(p.weight_kg) FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id WHERE s.order_id=o.id AND p.warehouse_id=b.warehouse_id AND p.status IN ('in_stock','allocated'))),0) total_weight,
@@ -213,10 +213,6 @@ export async function action({request}:Route.ActionArgs){
     const compatibility=checkCompatibility(comparison);
     if(compatibility)return{formError:compatibility};
     if(targetBatch){
-      const selectedPort=uniqueFilled(states.map(row=>row.exit_port));
-      const selectedCustoms=uniqueFilled(states.map(row=>row.customs_location));
-      if(targetBatch.border_port&&selectedPort&&targetBatch.border_port.trim()!==selectedPort)return{formError:`所选订单的出境口岸与 ${targetBatch.batch_number} 不一致`};
-      if(targetBatch.customs_location&&selectedCustoms&&targetBatch.customs_location.trim()!==selectedCustoms)return{formError:`所选订单的清关地与 ${targetBatch.batch_number} 不一致`};
       const sequence=await env.DB.prepare("SELECT COALESCE(MAX(sequence_no),0) next FROM transport_batch_orders WHERE batch_id=? AND organization_id=?").bind(targetBatch.id,user.organizationId).first<{next:number}>();
       const statements=states.map((row,index)=>env.DB.prepare(`INSERT INTO transport_batch_orders(id,organization_id,batch_id,order_id,sequence_no,status,added_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,'planned',?,?,?) ON CONFLICT(batch_id,order_id) DO UPDATE SET sequence_no=excluded.sequence_no,status='planned',added_by_user_id=excluded.added_by_user_id,updated_at=excluded.updated_at`).bind(crypto.randomUUID(),user.organizationId,targetBatch!.id,row.order_id,(sequence?.next??0)+index+1,user.userId,now,now));
       await env.DB.batch([...documentApprovalStatements,...statements]);
@@ -228,16 +224,10 @@ export async function action({request}:Route.ActionArgs){
     const first=states[0],dateKey=now.slice(0,10).replaceAll("-","");
     const seq=await env.DB.prepare("SELECT COALESCE(MAX(CAST(substr(batch_number,13) AS INTEGER)),0)+1 next FROM transport_batches WHERE organization_id=? AND batch_number LIKE ?").bind(user.organizationId,`PZ-${dateKey}-%`).first<{next:number}>();
     const batchId=crypto.randomUUID(),batchNumber=`PZ-${dateKey}-${String(seq?.next??1).padStart(3,"0")}`;
-    const inheritedPort=uniqueFilled(states.map(row=>row.exit_port)),enteredPort=valueOf(form,"borderPort").trim();
-    const inheritedCustoms=uniqueFilled(states.map(row=>row.customs_location)),enteredCustoms=valueOf(form,"customsLocation").trim();
-    if(enteredPort&&inheritedPort&&enteredPort!==inheritedPort)return{formError:"填写的出境口岸与订单已有口岸不一致"};
-    if(enteredCustoms&&inheritedCustoms&&enteredCustoms!==inheritedCustoms)return{formError:"填写的清关地与订单已有清关地不一致"};
-    const borderPort=enteredPort||inheritedPort||null;
-    const customsLocation=enteredCustoms||inheritedCustoms||null;
     const destination=[first.overseas_warehouse_name,[first.destination_country,first.destination_state,first.destination_city].filter(Boolean).join(" ")].filter(Boolean).join(" · ");
-    const routeKey=[warehouse.id,first.overseas_warehouse_id,first.destination_country,first.destination_state,first.destination_city,borderPort,customsLocation].map(value=>(value??"").trim().toLowerCase()).join("|");
+    const routeKey=[warehouse.id,first.overseas_warehouse_id,first.destination_country,first.destination_state,first.destination_city].map(value=>(value??"").trim().toLowerCase()).join("|");
     const batchName=valueOf(form,"batchName").trim()||`${warehouse.name} → ${first.overseas_warehouse_name||first.destination_city}`;
-    const statements:D1PreparedStatement[]=[...documentApprovalStatements,env.DB.prepare(`INSERT INTO transport_batches(id,organization_id,order_id,batch_number,batch_name,origin_location,destination_location,planned_departure_at,planned_arrival_at,status,notes,route_key,warehouse_id,carrier_id,created_by_user_id,created_at,updated_at,border_port,customs_location,transit_location,route_notes,planned_loading_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(batchId,user.organizationId,first.order_id,batchNumber,batchName,warehouse.name,destination,null,null,"planning",valueOf(form,"notes").trim()||null,routeKey,warehouse.id,null,user.userId,now,now,borderPort,customsLocation,null,valueOf(form,"routeNotes").trim()||null,valueOf(form,"plannedLoadingAt")||null)];
+    const statements:D1PreparedStatement[]=[...documentApprovalStatements,env.DB.prepare(`INSERT INTO transport_batches(id,organization_id,order_id,batch_number,batch_name,origin_location,destination_location,planned_departure_at,planned_arrival_at,status,notes,route_key,warehouse_id,carrier_id,created_by_user_id,created_at,updated_at,border_port,customs_location,transit_location,route_notes,planned_loading_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(batchId,user.organizationId,first.order_id,batchNumber,batchName,warehouse.name,destination,null,null,"planning",valueOf(form,"notes").trim()||null,routeKey,warehouse.id,null,user.userId,now,now,null,null,null,valueOf(form,"routeNotes").trim()||null,valueOf(form,"plannedLoadingAt")||null)];
     states.forEach((row,index)=>statements.push(env.DB.prepare("INSERT INTO transport_batch_orders(id,organization_id,batch_id,order_id,sequence_no,status,added_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,'planned',?,?,?)").bind(crypto.randomUUID(),user.organizationId,batchId,row.order_id,index+1,user.userId,now,now)));
     try{await env.DB.batch(statements)}catch{return{formError:"配载单编号冲突或数据已被其他操作占用，请刷新后重试"}}
     await activateLoadingModules(user.organizationId,states.map(row=>row.order_id),batchNumber,user.userId,now,"仓库货物配载");
@@ -314,11 +304,11 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
               <th>选择</th>
               <th>配载状态</th>
               <th>文件状态</th>
-              <th>订单 / 客户</th>
+              <th>订单</th>
               <th>货物</th>
+              <th>客户</th>
               <th>实收数据</th>
               <th>境外目的仓 / 地区</th>
-              <th>口岸 / 清关地</th>
               <th>库位</th>
             </tr>
           </thead>
@@ -330,11 +320,11 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
                 <td><input type="checkbox" checked={checked} disabled={blockers.length>0} onChange={event=>toggle(row,event.target.checked)} aria-label={`选择订单 ${row.order_number}`}/></td>
                 <td><span className={`status-pill ${blockers.length?"off":"success"}`} title={blockers.join("；")}>{blockers.length?"不可配载":"可配载"}</span></td>
                 <td><DocumentStatusCell row={row} documents={documents} busy={busy} closeSignal={documentUploadSignal}/></td>
-                <td><strong>{row.order_number}</strong><small>{row.customer_name}</small></td>
+                <td><strong>{row.order_number}</strong></td>
                 <td><strong>{row.cargo_names||"未填写货名"}</strong></td>
+                <td><strong>{row.customer_name}</strong></td>
                 <td>{row.package_count} 包装 · {row.pieces} 件<small>{row.weight_kg.toFixed(2)} KG · {row.volume_cbm.toFixed(3)} CBM</small></td>
                 <td>{row.overseas_warehouse_name||"目的仓未设置"}<small>{[row.destination_country,row.destination_state,row.destination_city].filter(Boolean).join(" ")}</small></td>
-                <td>{row.exit_port||"待补充"}<small>{row.customs_location||"待补充"}</small></td>
                 <td>{row.location_names||"—"}</td>
               </tr>
             })}
@@ -344,7 +334,7 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
       {!loaderData.rows.length&&<p className="empty-state">当前仓库没有符合筛选条件的在库货物。</p>}
       <Pagination loaderData={loaderData}/>
     </section>
-    <section className="panel"><div className="panel-header"><div><h2>当前仓库配载单</h2><p>装车开始前可以增加、移除订单或取消配载；开始装车后由配载单统一推进。</p></div></div><div className="table-wrap"><table><thead><tr><th>配载单</th><th>订单</th><th>实收汇总</th><th>目的地 / 口岸</th><th>计划装车</th><th>状态</th><th>操作</th></tr></thead><tbody>{loaderData.batches.map(batch=><tr key={batch.id}><td><strong>{batch.batch_number}</strong><small>{batch.batch_name}</small></td><td><strong>{batch.order_count} 票</strong><small>{batch.order_numbers}</small></td><td>{batch.total_weight.toFixed(2)} KG<small>{batch.total_volume.toFixed(3)} CBM</small></td><td>{batch.destination_location}<small>{batch.border_port||"口岸待补"} · {batch.customs_location||"清关地待补"}</small></td><td>{batch.planned_loading_at?new Date(batch.planned_loading_at).toLocaleString("zh-CN"):"待定"}</td><td><span className="status-pill">{batch.has_started?"已开始装车":batch.has_dispatch?"装车任务已生成":batch.status==="planning"?"配载已生成":"待装车"}</span></td><td><div className="button-row"><Link className="text-button" to={`/admin/loading/${batch.id}`}>打开</Link>{!batch.has_started&&<Modal title={`调整 ${batch.batch_number}`} triggerLabel="调整" triggerClassName="text-button" closeSignal={actionData?.success}><BatchAdjustment batch={batch} orders={loaderData.batchOrders.filter(row=>row.batch_id===batch.id)} busy={busy}/></Modal>}</div></td></tr>)}</tbody></table></div>{!loaderData.batches.length&&<p className="empty-state">当前仓库尚未生成配载单。</p>}</section>
+    <section className="panel"><div className="panel-header"><div><h2>当前仓库配载单</h2><p>装车开始前可以增加、移除订单或取消配载；口岸与清关地在拼车装货开始时确定。</p></div></div><div className="table-wrap"><table><thead><tr><th>配载单</th><th>订单</th><th>实收汇总</th><th>境外目的地</th><th>计划装车</th><th>状态</th><th>操作</th></tr></thead><tbody>{loaderData.batches.map(batch=><tr key={batch.id}><td><strong>{batch.batch_number}</strong><small>{batch.batch_name}</small></td><td><strong>{batch.order_count} 票</strong><small>{batch.order_numbers}</small></td><td>{batch.total_weight.toFixed(2)} KG<small>{batch.total_volume.toFixed(3)} CBM</small></td><td>{batch.destination_location}</td><td>{batch.planned_loading_at?new Date(batch.planned_loading_at).toLocaleString("zh-CN"):"待定"}</td><td><span className="status-pill">{batch.has_started?"已开始装车":batch.has_dispatch?"装车任务已生成":batch.status==="planning"?"配载已生成":"待装车"}</span></td><td><div className="button-row"><Link className="text-button" to={`/admin/loading/${batch.id}`}>打开</Link>{!batch.has_started&&<Modal title={`调整 ${batch.batch_number}`} triggerLabel="调整" triggerClassName="text-button" closeSignal={actionData?.success}><BatchAdjustment batch={batch} orders={loaderData.batchOrders.filter(row=>row.batch_id===batch.id)} busy={busy}/></Modal>}</div></td></tr>)}</tbody></table></div>{!loaderData.batches.length&&<p className="empty-state">当前仓库尚未生成配载单。</p>}</section>
   </div>;
 }
 
@@ -354,7 +344,7 @@ function ConsolidationForm({selected,documents,totals,busy}:{selected:Selection[
     {selected.map(row=><input key={row.orderId} type="hidden" name="orderId" value={row.orderId}/>)}
     <div className="ltl-selection-summary"><div><span>完整订单</span><strong>{selected.length} 票</strong></div><div><span>包装 / 件数</span><strong>{totals.packages} 包装 · {totals.pieces} 件</strong></div><div><span>实收重量</span><strong>{totals.weight.toFixed(2)} KG</strong></div><div><span>实收体积</span><strong>{totals.volume.toFixed(3)} CBM</strong></div></div>
     <FileConfirmationList selected={selected} documents={documents}/>
-    <div className="form-grid compact"><label className="field"><span>配载单名称</span><input name="batchName" placeholder="选填，系统可自动生成"/></label><label className="field"><span>计划装车时间</span><input name="plannedLoadingAt" type="datetime-local"/></label><label className="field"><span>出境口岸</span><input name="borderPort" placeholder="选填或继承订单"/></label><label className="field"><span>清关地</span><input name="customsLocation" placeholder="选填或继承订单"/></label><label className="field span-2"><span>运输线路</span><textarea name="routeNotes" rows={2} placeholder="选填，多行填写"/></label><label className="field span-2"><span>备注</span><textarea name="notes" rows={2}/></label></div>
+    <div className="form-grid compact"><label className="field"><span>配载单名称</span><input name="batchName" placeholder="选填，系统可自动生成"/></label><label className="field"><span>计划装车时间</span><input name="plannedLoadingAt" type="datetime-local"/></label><label className="field span-2"><span>运输线路</span><textarea name="routeNotes" rows={2} placeholder="选填，多行填写"/></label><label className="field span-2"><span>备注</span><textarea name="notes" rows={2}/></label></div>
     <div className="alert info">仓库确认的是配载资料内容；海关放行仍在装车出库前单独校验。配载容量由人工判断。</div>
     <button className="primary" disabled={busy||selected.length<2}>文件确认无误，生成 PZ 配载单</button>
   </Form>
@@ -366,7 +356,7 @@ function AddToBatchForm({selected,documents,batches,busy}:{selected:Selection[];
     {selected.map(row=><input key={row.orderId} type="hidden" name="orderId" value={row.orderId}/>)}
     <FileConfirmationList selected={selected} documents={documents}/>
     <label className="field"><span>目标配载单 *</span><select name="batchId" required><option value="">请选择</option>{batches.map(batch=><option key={batch.id} value={batch.id}>{batch.batch_number} · {batch.destination_location}</option>)}</select></label>
-    <div className="alert info">系统会再次校验目的仓、地区、口岸和清关地是否兼容。</div>
+    <div className="alert info">系统会再次校验境外目的仓和目的地区是否兼容；口岸与清关地在拼车装货时统一确定。</div>
     <button className="primary" disabled={busy}>文件确认无误，加入配载单</button>
   </Form>
 }
@@ -385,7 +375,7 @@ function FileConfirmationList({selected,documents}:{selected:Selection[];documen
 }
 function BatchAdjustment({batch,orders,busy}:{batch:BatchRow;orders:BatchOrder[];busy:boolean}){return<div className="stack"><div className="table-wrap"><table><thead><tr><th>订单</th><th>客户 / 货物</th><th>实收数据</th><th>操作</th></tr></thead><tbody>{orders.map(row=><tr key={row.order_id}><td>{row.order_number}</td><td>{row.customer_name}<small>{row.cargo_names||"—"}</small></td><td>{row.weight_kg.toFixed(2)} KG<small>{row.volume_cbm.toFixed(3)} CBM</small></td><td><Form method="post"><input type="hidden" name="intent" value="remove"/><input type="hidden" name="batchId" value={batch.id}/><input type="hidden" name="orderId" value={row.order_id}/><button className="text-button danger" disabled={busy||orders.length<=2}>移除</button></Form></td></tr>)}</tbody></table></div><div className="alert info">需要增加订单时，请关闭弹窗，在上方在库货物列表勾选订单后点击“加入已有配载单”。</div><Form method="post"><input type="hidden" name="intent" value="cancel"/><input type="hidden" name="batchId" value={batch.id}/><button className="secondary danger" disabled={busy}>取消整张配载单并释放订单</button></Form></div>}
 function FilterForm({loaderData,values}:{loaderData:Route.ComponentProps["loaderData"];values:<K extends keyof (typeof loaderData.options)[number]>(key:K)=>string[]}){
-  const hasAdvanced=Boolean(loaderData.filters.country||loaderData.filters.state||loaderData.filters.city||loaderData.filters.borderPort||loaderData.filters.customs||loaderData.filters.customer);
+  const hasAdvanced=Boolean(loaderData.filters.country||loaderData.filters.state||loaderData.filters.city||loaderData.filters.customer);
   return <Form method="get" className="consolidation-filter-form">
     <input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/>
     <div className="consolidation-filter-primary">
@@ -401,8 +391,6 @@ function FilterForm({loaderData,values}:{loaderData:Route.ComponentProps["loader
         <Select label="国家" name="country" current={loaderData.filters.country} values={values("destination_country")}/>
         <Select label="省 / 州" name="state" current={loaderData.filters.state} values={values("destination_state")}/>
         <Select label="城市" name="city" current={loaderData.filters.city} values={values("destination_city")}/>
-        <Select label="出境口岸" name="borderPort" current={loaderData.filters.borderPort} values={values("exit_port")}/>
-        <Select label="清关地" name="customs" current={loaderData.filters.customs} values={values("customs_location")}/>
         <Select label="客户" name="customer" current={loaderData.filters.customer} values={values("customer_name")}/>
       </div>
     </details>
@@ -452,8 +440,7 @@ function Pagination({loaderData}:{loaderData:{page:number;pages:number;pageSize:
 
 function toSelection(row:StockRow):Selection{return{orderId:row.order_id,orderNumber:row.order_number,customerName:row.customer_name,packages:row.package_count,pieces:row.pieces,weight:row.weight_kg,volume:row.volume_cbm}}
 function candidateBlockers(row:StockRow){const reasons:string[]=[];if(row.business_type!=="ltl")reasons.push("整车订单");if(!row.package_count)reasons.push("当前仓无在库货物");if(!row.cargo_ready)reasons.push("未确认货齐");if(row.has_exception)reasons.push("存在未结异常");if(!row.invoice_uploaded)reasons.push("缺少发票");if(!row.packing_list_uploaded)reasons.push("缺少装箱单");if(!row.customs_document_uploaded)reasons.push("缺少报关单");if(row.active_batch_id)reasons.push(`已加入 ${row.active_batch_number}`);if(row.active_dispatch)reasons.push("已生成装车任务");if(!row.overseas_warehouse_id)reasons.push("未设置境外目的仓");return reasons}
-function uniqueFilled(values:(string|null)[]){const unique=[...new Set(values.map(value=>value?.trim()).filter(Boolean) as string[])];return unique.length===1?unique[0]:""}
-function checkCompatibility(rows:CandidateState[]){if(!rows.length)return"没有可配载订单";const first=rows[0],same=(pick:(row:CandidateState)=>string|null)=>rows.every(row=>(pick(row)||"").trim()===(pick(first)||"").trim());if(!first.overseas_warehouse_id)return"所选订单必须设置境外目的仓";if(!same(row=>row.overseas_warehouse_id))return"所选订单的境外目的仓不一致";if(!same(row=>row.destination_country)||!same(row=>row.destination_state)||!same(row=>row.destination_city))return"所选订单的目的国家、省州或城市不一致";const ports=[...new Set(rows.map(row=>row.exit_port?.trim()).filter(Boolean))],customs=[...new Set(rows.map(row=>row.customs_location?.trim()).filter(Boolean))];if(ports.length>1)return"所选订单已填写的出境口岸不一致";if(customs.length>1)return"所选订单已填写的清关地不一致";return""}
+function checkCompatibility(rows:CandidateState[]){if(!rows.length)return"没有可配载订单";const first=rows[0],same=(pick:(row:CandidateState)=>string|null)=>rows.every(row=>(pick(row)||"").trim()===(pick(first)||"").trim());if(!first.overseas_warehouse_id)return"所选订单必须设置境外目的仓";if(!same(row=>row.overseas_warehouse_id))return"所选订单的境外目的仓不一致";if(!same(row=>row.destination_country)||!same(row=>row.destination_state)||!same(row=>row.destination_city))return"所选订单的目的国家、省州或城市不一致";return""}
 async function loadCandidateStates(organizationId:string,warehouseId:string,orderIds:string[]){if(!orderIds.length)return[];const rows=await Promise.all(orderIds.map(orderId=>env.DB.prepare(`SELECT o.id order_id,o.order_number,o.business_type,o.origin_country,o.origin_state,o.origin_city,o.destination_country,o.destination_state,o.destination_city,o.exit_port,o.customs_location,o.overseas_warehouse_id,ow.name overseas_warehouse_name,c.name customer_name,
     (SELECT GROUP_CONCAT(NULLIF(TRIM(i.cargo_name_cn),''),'、') FROM order_cargo_items i WHERE i.organization_id=o.organization_id AND i.order_id=o.id) cargo_names,
     (SELECT COUNT(*) FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id WHERE p.organization_id=o.organization_id AND s.order_id=o.id AND p.warehouse_id=? AND p.status IN ('in_stock','allocated')) package_count,
