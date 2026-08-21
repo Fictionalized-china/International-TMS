@@ -2164,8 +2164,65 @@ td small {
   gap: 18px;
   margin-bottom: 22px;
 }
+
+.outbound-operation-workbench {
+  display: grid;
+  gap: 14px;
+  margin: 0 0 24px;
+}
+
+.outbound-operation-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 0.75fr);
+  gap: 24px;
+  align-items: end;
+  padding: 16px 18px;
+  border: 1px solid #b9d7c8;
+  border-radius: 8px;
+  background: #f2fbf6;
+}
+
+.outbound-operation-heading h2,
+.outbound-operation-heading p {
+  margin: 0;
+}
+
+.outbound-operation-heading h2 {
+  font-size: 26px;
+}
+
+.outbound-operation-heading > div {
+  display: grid;
+  gap: 4px;
+}
+
+.outbound-task-selector select {
+  min-height: 48px;
+  border-width: 2px;
+  border-color: #0b7d53;
+  background: #fff;
+  font-weight: 800;
+}
+
+.outbound-operation-workbench > .dispatch-card {
+  border-color: #9fcbb5;
+  box-shadow: 0 10px 24px rgba(22, 101, 72, 0.08);
+}
+
+.outbound-empty-state {
+  margin: 0;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+}
 .dispatch-card {
   margin-bottom: 0;
+}
+
+@media (max-width: 860px) {
+  .outbound-operation-heading {
+    grid-template-columns: 1fr;
+  }
 }
 .dispatch-progress {
   min-width: 74px;
