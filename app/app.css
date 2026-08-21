@@ -6245,6 +6245,10 @@ body.modal-scroll-locked {
   flex: 0 0 auto;
 }
 
+.ltl-loading-actions[hidden] {
+  display: none !important;
+}
+
 .ltl-loading-filters {
   display: grid;
   grid-template-columns: repeat(6, minmax(120px, 1fr));
@@ -6270,6 +6274,17 @@ body.modal-scroll-locked {
 .ltl-loading-filters input {
   width: 100%;
   min-width: 0;
+}
+
+.ltl-filter-submit,
+.ltl-generate-task-trigger {
+  min-height: 42px;
+  justify-content: center;
+}
+
+.ltl-filter-reset {
+  min-height: 42px;
+  align-self: end;
 }
 
 .ltl-filter-search {
@@ -6375,6 +6390,35 @@ body.modal-scroll-locked {
 .warehouse-ltl-loading-page .ltl-loading-table .danger-text {
   max-width: 220px;
   white-space: normal;
+}
+
+.ltl-route-cell {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+}
+
+.ltl-route-cell-button {
+  width: fit-content;
+  min-height: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #075985;
+  font: inherit;
+  font-weight: 800;
+  line-height: 1.35;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.ltl-route-cell-button.missing {
+  color: #b45309;
+}
+
+.ltl-route-cell-button:hover {
+  color: #047857;
 }
 
 .ltl-route-context {
