@@ -7,7 +7,7 @@ import {
 describe("overseas warehouse flow", () => {
   it("keeps the handling sequence obvious", () => {
     expect(nextOverseasAction(null)).toBe("确认目的仓到仓");
-    expect(nextOverseasAction("arrived")).toBe("通知客户到仓");
+    expect(nextOverseasAction("arrived")).toBe("系统自动通知客户");
     expect(nextOverseasAction("notified")).toBe("登记提货预约");
     expect(nextOverseasAction("appointment")).toBe("确认客户自提并签收");
   });

@@ -165,7 +165,7 @@ export const orderModuleDefinitions: OrderModuleDefinition[] = [
   {
     code: "overseas_warehouse",
     name: "境外仓自提",
-    description: "境外目的仓到仓后，依次办理通知客户、预约提货、客户自提、签收和运输完成",
+    description: "境外目的仓到仓后自动通知客户，再办理预约提货、客户自提、签收和运输完成",
     icon: "仓",
     required: true,
     services: ["destination_warehouse"],

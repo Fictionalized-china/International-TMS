@@ -811,7 +811,7 @@ export async function action({ request }: Route.ActionArgs) {
     return { success: overseasArrivalWarning, barcode };
   if (overseasArrival?.completed)
     return {
-      success: `境外目的仓收货完成：${barcode}；${overseasArrival.batchNumber} 全部订单已清点，境外运输已结束并开放客户通知`,
+      success: `境外目的仓收货完成：${barcode}；${overseasArrival.batchNumber} 全部订单已清点，境外运输已结束并已自动通知客户`,
       barcode,
     };
   if (overseasArrival)
@@ -969,7 +969,7 @@ export default function WarehouseInbound({
           <p className="eyebrow">SCAN & RECEIVE</p>
           <h1>验收收货</h1>
           <p>{loaderData.isOverseasWarehouse
-            ? `当前仓库：${loaderData.warehouse.name}。逐票扫码并清点；同一运输单全部货物确认无误后，系统自动结束境外运输并开放客户通知。`
+            ? `当前仓库：${loaderData.warehouse.name}。逐票扫码并清点；同一运输单全部货物确认无误后，系统自动结束境外运输并通知客户。`
             : `当前仓库：${loaderData.warehouse.name}。扫描客户标签或自动生成欧凌标签，完成收货、入库和国内运输状态同步。`}</p>
         </div>
         {!loaderData.isOverseasWarehouse && <button

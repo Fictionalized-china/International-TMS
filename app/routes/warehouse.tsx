@@ -160,11 +160,6 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
           <NavLink to={warehouseLink("/warehouse/inventory", loaderData.query)}>
             <span>▥</span>仓库货物与盘点
           </NavLink>
-          {loaderData.warehouse.warehouse_role === "overseas_destination" && (
-            <NavLink to={warehouseLink("/warehouse/notifications", loaderData.query)}>
-              <span>◎</span>通知客户
-            </NavLink>
-          )}
           <NavLink to={warehouseLink("/warehouse/exceptions", loaderData.query)}>
             <span>!</span>异常处理
           </NavLink>
@@ -174,7 +169,7 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
           </NavLink>
         </nav>
         <div className="warehouse-site-actions">
-          <Form action="/switch-site" method="post">
+          <Form action={`/switch-site?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}`} method="post">
             <input type="hidden" name="target" value="admin" />
             <input type="hidden" name="returnTo" value={loaderData.returnTo} />
             <button className="warehouse-return" title="切换回运营管理后台">
@@ -191,7 +186,7 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
             <strong>{user.displayName}</strong>
             <small>{user.email}</small>
           </div>
-          <Form action="/logout" method="post">
+          <Form action={`/logout?site=warehouse&warehouseId=${encodeURIComponent(loaderData.warehouse.id)}`} method="post">
             <button className="warehouse-logout" title="退出登录">↪</button>
           </Form>
         </div>
@@ -218,10 +213,10 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
             ) : !flow.inboundReady ? (
               <Link className="primary" to={warehouseLink(loaderData.warehouse.warehouse_role === "overseas_destination" ? "/warehouse/inbound" : "/warehouse/acceptance", loaderData.query)}>{loaderData.warehouse.warehouse_role === "overseas_destination" ? "继续验收并完成清点" : "继续验收并确认货齐"}</Link>
             ) : loaderData.warehouse.warehouse_role === "overseas_destination" ? (
-              <Form action="/switch-site" method="post">
+              <Form action={`/switch-site?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}`} method="post">
                 <input type="hidden" name="target" value="admin" />
                 <input type="hidden" name="returnTo" value={`/admin/orders/${orderContext.id}/modules/overseas_warehouse#module-business-data`} />
-                <button className="primary">清点完成，返回订单查看状态</button>
+                <button className="primary">清点完成并已自动通知，返回订单</button>
               </Form>
             ) : loaderData.currentPath.startsWith("/warehouse/outbound") ? (
               <div className="warehouse-context-next">
@@ -241,7 +236,7 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
                 </small>
               </div>
             ) : (
-              <Form action="/switch-site" method="post">
+              <Form action={`/switch-site?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}`} method="post">
                 <input type="hidden" name="target" value="admin" />
                 <input type="hidden" name="returnTo" value={`/admin/orders/${orderContext.id}/modules/loading#module-business-data`} />
                 <button className="primary">货齐已确认，进入装车与出库</button>

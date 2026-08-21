@@ -268,7 +268,7 @@ export const workflowFieldCatalog: WorkflowFieldCatalogItem[] = [
 
   field("overseas_pickup", "overseas_warehouse", "overseas_arrival_at", "境外目的仓到仓时间", "datetime", "required", "批次动作，同一批次订单同步到仓。"),
   field("overseas_pickup", "overseas_warehouse", "overseas_arrival_notes", "到仓说明", "textarea", "optional", "卸车、入仓或换装说明。"),
-  field("overseas_pickup", "overseas_warehouse", "customer_notified_at", "通知客户时间", "datetime", "required", "到仓后通知客户可提货。"),
+  field("overseas_pickup", "overseas_warehouse", "customer_notified_at", "系统通知时间", "datetime", "required", "境外仓完成入库清点后由系统自动记录。"),
   field("overseas_pickup", "overseas_warehouse", "customer_notification_notes", "通知说明", "textarea", "optional", "电话、邮件或客户门户通知结果。"),
   field("overseas_pickup", "overseas_warehouse", "pickup_appointment_at", "预约提货时间", "datetime", "optional", "客户门户或客服登记提货预约。"),
   field("overseas_pickup", "overseas_warehouse", "pickup_appointment_notes", "预约说明", "textarea", "optional", "预约车辆、提货码和注意事项。"),

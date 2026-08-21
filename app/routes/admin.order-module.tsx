@@ -49,6 +49,7 @@ import {
 } from "../lib/overseas-warehouse";
 import {
   advanceOverseasOrder,
+  automaticallyNotifyOverseasArrival,
 } from "../lib/overseas-warehouse.server";
 import {
   emptyExpenseDirectionControl,
@@ -1497,10 +1498,9 @@ export async function action({ request, params }: Route.ActionArgs) {
     }
     if (intent === "overseas_advance" && moduleCode === "overseas_warehouse") {
       const operationAction = valueOf(form, "operationAction") as
-        | "notify"
         | "appointment"
         | "pickup";
-      if (!["notify", "appointment", "pickup"].includes(operationAction))
+      if (!["appointment", "pickup"].includes(operationAction))
         return { formError: "境外仓操作无效" };
       if (operationAction === "pickup") {
         const missingDocuments = await missingRequiredDocumentUploads(
@@ -1512,12 +1512,7 @@ export async function action({ request, params }: Route.ActionArgs) {
           };
       }
       const occurredAt = valueOf(form, "occurredAt") || new Date().toISOString();
-      const operationValues = operationAction === "notify"
-        ? [
-            ["customer_notified_at", valueOf(form, "occurredAt")],
-            ["customer_notification_notes", valueOf(form, "notes")],
-          ]
-        : operationAction === "appointment"
+      const operationValues = operationAction === "appointment"
           ? [
               ["pickup_appointment_at", valueOf(form, "occurredAt")],
               ["pickup_appointment_notes", valueOf(form, "notes")],
@@ -3267,8 +3262,8 @@ async function syncOverseasOperationFromBatch(
       env.DB.prepare(
         `UPDATE order_module_instances
          SET status='in_progress',
-             current_step_code='notified',
-             current_step_name='客户已通知',
+             current_step_code='arrived',
+             current_step_name='等待系统通知客户',
              progress_percent=MAX(progress_percent,25),
              started_at=COALESCE(started_at,?),
              blocking_reason=NULL,
@@ -3280,6 +3275,12 @@ async function syncOverseasOperationFromBatch(
   if (!statements.length) return;
   await env.DB.batch(statements);
   for (const item of orders.results) {
+    await automaticallyNotifyOverseasArrival({
+      organizationId,
+      orderId: item.order_id,
+      actorUserId,
+      occurredAt: arrivalAt,
+    });
     await syncOrderWorkflowSnapshot(organizationId, item.order_id);
   }
 }
@@ -4947,7 +4948,7 @@ function ModuleBusinessData({
       <div className="module-business-stack dense-module-stack">
         <BusinessSubsection
           title="境外仓办理进度"
-          hint="严格按“到仓—通知客户—预约提货—客户自提并签收”从左到右办理；批次到仓同步关联订单，每票自提分别确认。"
+          hint="境外仓完成扫码入库与清点后，系统自动通知客户；随后按“预约提货—客户自提并签收”办理。"
         >
           <div className="loading-selection-summary" aria-live="polite">
             <span>
@@ -4962,7 +4963,7 @@ function ModuleBusinessData({
           <div className="tracking-milestone-board dense-milestone-board">
             {[
               ["arrived", "目的仓到仓", 25],
-              ["notified", "通知客户", 50],
+              ["notified", "自动通知客户", 50],
               ["appointment", "预约提货", 75],
               ["picked_up", "客户自提", 100],
               ["signed", "签收", 100],
@@ -5057,24 +5058,8 @@ function ModuleBusinessData({
           </BusinessSubsection>
         )}
 
-        {manage && operationStatus === "arrived" && (
-          <BusinessSubsection title="2. 通知客户" hint="记录实际通知时间；不要求重复填写订单联系人。">
-            <Form method="post" className="form-grid compact">
-              <input type="hidden" name="intent" value="overseas_advance" />
-              <input type="hidden" name="operationAction" value="notify" />
-              <ModuleField fields={data.workflowFields} fieldKey="customer_notified_at" label="通知时间" fallbackRequired>
-                {(required) => <input name="occurredAt" type="datetime-local" required={required} />}
-              </ModuleField>
-              <ModuleField fields={data.workflowFields} fieldKey="customer_notification_notes" label="通知说明" className="field span-2">
-                {(required) => <input name="notes" required={required} placeholder="电话、邮件或客户门户通知结果" />}
-              </ModuleField>
-              <button className="primary" disabled={busy}>确认已通知客户</button>
-            </Form>
-          </BusinessSubsection>
-        )}
-
         {manage && operationStatus === "notified" && (
-          <BusinessSubsection title="3. 预约提货" hint="登记客户确认的预约时间，批次进入等待提货。">
+          <BusinessSubsection title="2. 预约提货" hint={`系统已于 ${formatDateTime(operation?.notified_at) || "到仓时"} 自动通知客户；在此登记客户确认的预约时间。`}>
             <Form method="post" className="form-grid compact">
               <input type="hidden" name="intent" value="overseas_advance" />
               <input type="hidden" name="operationAction" value="appointment" />
@@ -5090,7 +5075,7 @@ function ModuleBusinessData({
         )}
 
         {manage && operationStatus === "appointment" && (
-          <BusinessSubsection title="4. 确认客户自提并签收" hint="每票订单分别确认；保存后自动记录签收并完成运输，批次全部完成后自动关闭提货环节。">
+          <BusinessSubsection title="3. 确认客户自提并签收" hint="每票订单分别确认；保存后自动记录签收并完成运输，批次全部完成后自动关闭提货环节。">
             <Form method="post" className="form-grid compact">
               <input type="hidden" name="intent" value="overseas_advance" />
               <input type="hidden" name="operationAction" value="pickup" />

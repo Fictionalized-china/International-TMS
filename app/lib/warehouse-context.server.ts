@@ -33,8 +33,11 @@ export async function loadWarehouseContext(request: Request, user: SessionUser) 
   if (!result.results.length)
     throw new Response("当前没有可访问的启用仓库", { status: 403 });
 
-  // Warehouse pages are account-scoped. Query parameters must not allow an
-  // operator to switch the active warehouse implicitly.
-  const selected = result.results[0];
+  const requestedWarehouseId = new URL(request.url).searchParams.get("warehouseId");
+  const selected = requestedWarehouseId
+    ? result.results.find((warehouse) => warehouse.id === requestedWarehouseId)
+    : result.results[0];
+  if (!selected)
+    throw new Response("当前登录账号无权访问所选仓库，请使用该仓库绑定账号重新登录", { status: 403 });
   return { warehouses: result.results, selected };
 }

@@ -21,6 +21,13 @@ type AdvanceInput = {
   notes?: string;
 };
 
+type AutomaticNoticeInput = {
+  organizationId: string;
+  orderId: string;
+  actorUserId: string;
+  occurredAt?: string;
+};
+
 type BatchOrder = {
   order_id: string;
   shipment_id: string | null;
@@ -139,7 +146,7 @@ export async function confirmOverseasBatchArrival(input: ArrivalInput) {
         now,
       ),
       env.DB.prepare(
-        `UPDATE order_module_instances SET status='in_progress',current_step_code='arrived',current_step_name='等待通知客户',progress_percent=MAX(progress_percent,25),started_at=COALESCE(started_at,?),blocking_reason=NULL,updated_at=?
+        `UPDATE order_module_instances SET status='in_progress',current_step_code='arrived',current_step_name='等待系统自动通知',progress_percent=MAX(progress_percent,25),started_at=COALESCE(started_at,?),blocking_reason=NULL,updated_at=?
          WHERE organization_id=? AND order_id=? AND module_code='overseas_warehouse' AND enabled=1 AND status!='completed'`,
       ).bind(now, now, input.organizationId, item.order_id),
       env.DB.prepare(
@@ -149,6 +156,14 @@ export async function confirmOverseasBatchArrival(input: ArrivalInput) {
     );
   }
   await env.DB.batch(statements);
+  for (const item of orders.results) {
+    await automaticallyNotifyOverseasArrival({
+      organizationId: input.organizationId,
+      orderId: item.order_id,
+      actorUserId: input.actorUserId,
+      occurredAt: input.actualArrivalAt,
+    });
+  }
   await Promise.all(
     orders.results.map((item) =>
       syncOrderWorkflowSnapshot(input.organizationId, item.order_id),
@@ -246,7 +261,7 @@ async function confirmStandaloneOrderArrival(input: ArrivalInput & { orderId: st
       now,
     ),
     env.DB.prepare(
-      `UPDATE order_module_instances SET status='in_progress',current_step_code='arrived',current_step_name='等待通知客户',progress_percent=MAX(progress_percent,25),started_at=COALESCE(started_at,?),blocking_reason=NULL,updated_at=?
+      `UPDATE order_module_instances SET status='in_progress',current_step_code='arrived',current_step_name='等待系统自动通知',progress_percent=MAX(progress_percent,25),started_at=COALESCE(started_at,?),blocking_reason=NULL,updated_at=?
        WHERE organization_id=? AND order_id=? AND module_code='overseas_warehouse' AND enabled=1 AND status!='completed'`,
     ).bind(now, now, input.organizationId, input.orderId),
     env.DB.prepare(
@@ -254,6 +269,12 @@ async function confirmStandaloneOrderArrival(input: ArrivalInput & { orderId: st
        WHERE organization_id=? AND order_id=? AND module_code='tracking' AND enabled=1`,
     ).bind(now, now, now, input.organizationId, input.orderId),
   ]);
+  await automaticallyNotifyOverseasArrival({
+    organizationId: input.organizationId,
+    orderId: input.orderId,
+    actorUserId: input.actorUserId,
+    occurredAt: input.actualArrivalAt,
+  });
   await syncOrderWorkflowSnapshot(input.organizationId, input.orderId);
   return { batchNumber: order.order_number, orderCount: 1 };
 }
@@ -346,7 +367,7 @@ export async function advanceOverseasOrder(input: AdvanceInput) {
         ? "notified"
         : "appointment";
   if (operation.status !== expected)
-    throw new Error(`当前状态不能执行该操作，请按“到仓—通知客户—预约提货—客户自提并签收”顺序办理`);
+    throw new Error(`当前状态不能执行该操作，请按“到仓并由系统自动通知—预约提货—客户自提并签收”顺序办理`);
 
   const nextStatus =
     input.action === "notify"
@@ -534,4 +555,94 @@ export async function advanceOverseasOrder(input: AdvanceInput) {
   }
   await syncOrderWorkflowSnapshot(input.organizationId, input.orderId);
   return { nextStatus, stepName };
+}
+
+export async function automaticallyNotifyOverseasArrival(input: AutomaticNoticeInput) {
+  const context = await env.DB.prepare(
+    `SELECT op.status,op.warehouse_id,o.order_number,o.customer_id,
+            COALESCE(w.name,'境外目的仓') warehouse_name
+       FROM overseas_warehouse_operations op
+       JOIN transport_orders o ON o.id=op.order_id AND o.organization_id=op.organization_id
+       LEFT JOIN warehouses w ON w.id=op.warehouse_id AND w.organization_id=op.organization_id
+      WHERE op.organization_id=? AND op.order_id=? AND op.status!='cancelled'
+      ORDER BY op.created_at DESC LIMIT 1`,
+  ).bind(input.organizationId, input.orderId).first<{
+    status: string;
+    warehouse_id: string;
+    order_number: string;
+    customer_id: string;
+    warehouse_name: string;
+  }>();
+  if (!context || context.status === "waiting_arrival") return { notified: false };
+
+  const occurredAt = input.occurredAt || new Date().toISOString();
+  if (context.status === "arrived") {
+    await advanceOverseasOrder({
+      organizationId: input.organizationId,
+      orderId: input.orderId,
+      actorUserId: input.actorUserId,
+      action: "notify",
+      occurredAt,
+      notes: `${context.warehouse_name}已完成扫码入库和清点，系统自动通知客户`,
+    });
+  }
+
+  const existing = await env.DB.prepare(
+    `SELECT id,portal_notification_id
+       FROM warehouse_customer_notifications
+      WHERE organization_id=? AND order_id=?`,
+  ).bind(input.organizationId, input.orderId).first<{
+    id: string;
+    portal_notification_id: string | null;
+  }>();
+  if (existing?.portal_notification_id) return { notified: true };
+
+  const portalNotificationId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO portal_notifications(id,organization_id,customer_id,user_id,type,title,message,link,is_read,created_at)
+       VALUES(?,?,?,NULL,'shipment',?,?,?,0,?)`,
+    ).bind(
+      portalNotificationId,
+      input.organizationId,
+      context.customer_id,
+      `订单 ${context.order_number} 已到仓`,
+      `货物已到达${context.warehouse_name}并完成入库清点，请登录客户门户查看并安排自提。`,
+      `/portal/orders?order=${encodeURIComponent(context.order_number)}`,
+      now,
+    ),
+    existing
+      ? env.DB.prepare(
+          `UPDATE warehouse_customer_notifications
+              SET warehouse_id=?,portal_notification_id=?,status='notified',
+                  notified_by_user_id=?,notified_at=?,updated_at=?
+            WHERE id=? AND organization_id=?`,
+        ).bind(
+          context.warehouse_id,
+          portalNotificationId,
+          input.actorUserId,
+          occurredAt,
+          now,
+          existing.id,
+          input.organizationId,
+        )
+      : env.DB.prepare(
+          `INSERT INTO warehouse_customer_notifications(
+             id,organization_id,warehouse_id,order_id,portal_notification_id,status,
+             notified_by_user_id,notified_at,created_at,updated_at
+           ) VALUES(?,?,?,?,?,'notified',?,?,?,?)`,
+        ).bind(
+          crypto.randomUUID(),
+          input.organizationId,
+          context.warehouse_id,
+          input.orderId,
+          portalNotificationId,
+          input.actorUserId,
+          occurredAt,
+          now,
+          now,
+        ),
+  ]);
+  return { notified: true };
 }

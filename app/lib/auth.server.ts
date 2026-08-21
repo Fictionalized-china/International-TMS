@@ -4,7 +4,10 @@ import { randomToken, sha256 } from "./crypto.server";
 import type { Site } from "./site.server";
 import { siteFromRequest, siteLogin } from "./site.server";
 
-const COOKIE_NAME = "itms_session";
+const SITE_COOKIE_NAMES: Record<Exclude<Site, "warehouse">, string> = {
+  admin: "itms_admin_session",
+  portal: "itms_portal_session",
+};
 
 export type SessionUser = {
   sessionId: string;
@@ -28,7 +31,34 @@ function cookieValue(request: Request, name: string): string | null {
   return null;
 }
 
-export async function createSession(userId: string, organizationId: string, site: Site = "admin"): Promise<string> {
+function warehouseIdFromUrl(value: string | null): string | null {
+  if (!value) return null;
+  try {
+    return new URL(value).searchParams.get("warehouseId");
+  } catch {
+    return null;
+  }
+}
+
+export function warehouseIdFromRequest(request: Request): string | null {
+  return (
+    new URL(request.url).searchParams.get("warehouseId") ||
+    warehouseIdFromUrl(request.headers.get("Referer"))
+  );
+}
+
+function cookieName(site: Site, warehouseId?: string | null): string {
+  if (site !== "warehouse") return SITE_COOKIE_NAMES[site];
+  if (!warehouseId) return "itms_warehouse_session";
+  return `itms_warehouse_session_${warehouseId.replace(/[^a-zA-Z0-9_-]/g, "")}`;
+}
+
+export async function createSession(
+  userId: string,
+  organizationId: string,
+  site: Site = "admin",
+  warehouseId?: string | null,
+): Promise<string> {
   const token = randomToken();
   const tokenHash = await sha256(token);
   const now = new Date();
@@ -40,11 +70,18 @@ export async function createSession(userId: string, organizationId: string, site
   )
     .bind(crypto.randomUUID(), userId, organizationId, tokenHash, expiresAt.toISOString(), now.toISOString(), now.toISOString(), site)
     .run();
-  return `${COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${ttl}`;
+  return `${cookieName(site, warehouseId)}=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${ttl}`;
 }
 
-export async function getSessionUser(request: Request): Promise<SessionUser | null> {
-  const token = cookieValue(request, COOKIE_NAME);
+export async function getSessionUser(
+  request: Request,
+  site: Site = siteFromRequest(request),
+  warehouseId?: string | null,
+): Promise<SessionUser | null> {
+  const resolvedWarehouseId = site === "warehouse"
+    ? warehouseId || warehouseIdFromRequest(request)
+    : null;
+  const token = cookieValue(request, cookieName(site, resolvedWarehouseId));
   if (!token) return null;
   const tokenHash = await sha256(token);
   const row = await env.DB.prepare(
@@ -76,7 +113,7 @@ export async function getSessionUser(request: Request): Promise<SessionUser | nu
   )
     .bind(tokenHash, new Date().toISOString())
     .first<Record<string, string>>();
-  if (!row) return null;
+  if (!row || row.site !== site) return null;
   const [permissionRows, accessProfile] = await Promise.all([
     env.DB.prepare(
     `SELECT DISTINCT rp.permission_code AS code
@@ -123,7 +160,7 @@ export function canEditWorkflowDefinition(user: SessionUser) {
 }
 
 export async function requireSessionUser(request: Request, permission?: string, site: Site = "admin"): Promise<SessionUser> {
-  const user = await getSessionUser(request);
+  const user = await getSessionUser(request, site);
   const requestedSite=siteFromRequest(request);
   if (requestedSite!==site) throw redirect(siteLogin(requestedSite));
   if (!user || user.site !== site) throw redirect(siteLogin(site));
@@ -131,10 +168,18 @@ export async function requireSessionUser(request: Request, permission?: string, 
   return user;
 }
 
-export async function destroySession(request: Request): Promise<string> {
-  const token = cookieValue(request, COOKIE_NAME);
+export async function destroySession(
+  request: Request,
+  site: Site = siteFromRequest(request),
+  warehouseId?: string | null,
+): Promise<string> {
+  const resolvedWarehouseId = site === "warehouse"
+    ? warehouseId || warehouseIdFromRequest(request)
+    : null;
+  const name = cookieName(site, resolvedWarehouseId);
+  const token = cookieValue(request, name);
   if (token) await env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(await sha256(token)).run();
-  return `${COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
+  return `${name}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
 }
 
 export function isLoginLocked(lockedUntil: string | null | undefined): boolean {

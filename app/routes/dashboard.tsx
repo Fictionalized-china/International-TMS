@@ -60,7 +60,7 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
             <span>{user.displayName}</span>
             <small>{user.email}</small>
           </div>
-          <Form action="/logout" method="post">
+          <Form action="/logout?site=admin" method="post">
             <button className="sidebar-logout" title="退出登录">↗</button>
           </Form>
           {can("warehouse.view") && <Form action="/switch-site" method="post" className="sidebar-warehouse-switch">

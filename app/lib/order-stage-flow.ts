@@ -92,7 +92,7 @@ export const orderBusinessStages: readonly OrderBusinessStage[] = [
     code: "overseas_pickup",
     title: "8. 境外仓与自提",
     shortTitle: "境外仓自提",
-    description: "目的仓到仓、通知客户、预约提货、交付签收和异常处理。",
+    description: "目的仓到仓后自动通知客户，再办理预约提货、交付签收和异常处理。",
     modules: ["overseas_warehouse"],
     minimumStatus: "in_execution",
     lockedReason: "货物出境并到达目的仓后办理。",

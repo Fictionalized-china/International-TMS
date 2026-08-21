@@ -19,7 +19,7 @@ export const overseasOperationProgress: Record<string, number> = {
 export function nextOverseasAction(status: string | null) {
   switch (status) {
     case "arrived":
-      return "通知客户到仓";
+      return "系统自动通知客户";
     case "notified":
       return "登记提货预约";
     case "appointment":
