@@ -555,12 +555,6 @@ export async function completeOverseasOrderDelivery(input: {
   ).bind(input.organizationId, input.orderId).first<{ id: string }>();
   if (!signedReceipt) throw new Error("签收单尚未上传并审核通过，不能完成运输");
 
-  const module = await env.DB.prepare(
-    `SELECT status FROM order_module_instances
-      WHERE organization_id=? AND order_id=? AND module_code='overseas_warehouse' AND enabled=1`,
-  ).bind(input.organizationId, input.orderId).first<{ status: string }>();
-  if (module?.status === "completed") return { completed: true };
-
   const now = input.occurredAt || new Date().toISOString();
   await env.DB.batch([
     env.DB.prepare(
@@ -621,6 +615,59 @@ export async function completeOverseasOrderDelivery(input: {
   ]);
   await syncOrderWorkflowSnapshot(input.organizationId, input.orderId);
   return { completed: true };
+}
+
+export async function reconcileOverseasOrderDeliveryState(input: {
+  organizationId: string;
+  orderId: string;
+  actorUserId: string;
+}) {
+  const operation = await env.DB.prepare(
+    `SELECT status FROM overseas_warehouse_operations
+      WHERE organization_id=? AND order_id=? AND status!='cancelled'
+      ORDER BY created_at DESC LIMIT 1`,
+  ).bind(input.organizationId, input.orderId).first<{ status: string }>();
+  if (!operation) return;
+
+  if (operation.status === "picked_up") {
+    const signedReceipt = await env.DB.prepare(
+      `SELECT 1 ready
+         FROM order_document_metadata
+        WHERE organization_id=? AND order_id=?
+          AND document_category='delivery_receipt'
+          AND review_status IN ('approved','archived')
+        LIMIT 1`,
+    ).bind(input.organizationId, input.orderId).first<{ ready: number }>();
+    if (signedReceipt) {
+      await completeOverseasOrderDelivery(input);
+      return;
+    }
+  }
+
+  const state = ({
+    waiting_arrival: ["waiting_arrival", "等待到仓", 0],
+    arrived: ["arrived", "等待系统通知客户", 25],
+    notified: ["appointment", "预约提货", 50],
+    appointment: ["picked_up", "等待境外仓扫码自提出库", 75],
+    picked_up: ["signed", "等待签收单确认", 85],
+  } as Record<string, [string, string, number]>)[operation.status];
+  if (!state) return;
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    `UPDATE order_module_instances
+        SET status='in_progress',current_step_code=?,current_step_name=?,progress_percent=?,
+            started_at=COALESCE(started_at,?),completed_at=NULL,blocking_reason=NULL,updated_at=?
+      WHERE organization_id=? AND order_id=? AND module_code='overseas_warehouse' AND enabled=1`,
+  ).bind(
+    state[0],
+    state[1],
+    state[2],
+    now,
+    now,
+    input.organizationId,
+    input.orderId,
+  ).run();
+  await syncOrderWorkflowSnapshot(input.organizationId, input.orderId);
 }
 
 export async function automaticallyNotifyOverseasArrival(input: AutomaticNoticeInput) {

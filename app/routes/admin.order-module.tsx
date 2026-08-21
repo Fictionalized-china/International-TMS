@@ -51,6 +51,7 @@ import {
   advanceOverseasOrder,
   automaticallyNotifyOverseasArrival,
   completeOverseasOrderDelivery,
+  reconcileOverseasOrderDeliveryState,
 } from "../lib/overseas-warehouse.server";
 import {
   emptyExpenseDirectionControl,
@@ -522,6 +523,11 @@ export async function loader({ request, params }: Route.LoaderArgs) {
   }
   if (moduleCode === "overseas_warehouse") {
     await syncOverseasOperationFromBatch(current.organizationId, orderId, current.userId);
+    await reconcileOverseasOrderDeliveryState({
+      organizationId: current.organizationId,
+      orderId,
+      actorUserId: current.userId,
+    });
   }
   const modules = await listOrderModules(current.organizationId, orderId);
   const module = modules.find((item) => item.module_code === moduleCode);
