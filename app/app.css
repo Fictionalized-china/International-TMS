@@ -6515,6 +6515,33 @@ body.modal-scroll-locked {
   border-right: 0;
 }
 
+.batch-resource-fields {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #b9d7c8;
+  border-radius: 6px;
+  background: #f2fbf6;
+}
+
+.batch-resource-fields > header strong,
+.batch-resource-fields > header small {
+  display: block;
+}
+
+.batch-resource-fields > header small {
+  margin-top: 3px;
+  color: #64748b;
+}
+
+.consolidation-stock-table .status-pill small {
+  display: block;
+  margin-top: 2px;
+  color: inherit;
+  font-size: 10px;
+  font-weight: 700;
+}
+
 .consolidation-stock-table th:nth-child(2),
 .consolidation-stock-table td:nth-child(2) {
   width: 112px;
