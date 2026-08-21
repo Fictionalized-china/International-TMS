@@ -1508,7 +1508,10 @@ td small {
 
 .warehouse-content input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]),
 .warehouse-content select,
-.warehouse-content textarea {
+.warehouse-content textarea,
+.modal-body input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]),
+.modal-body select,
+.modal-body textarea {
   width: 100%;
   min-width: 0;
   min-height: 42px;
@@ -1523,13 +1526,19 @@ td small {
 
 .warehouse-content input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):hover,
 .warehouse-content select:hover,
-.warehouse-content textarea:hover {
+.warehouse-content textarea:hover,
+.modal-body input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):hover,
+.modal-body select:hover,
+.modal-body textarea:hover {
   border-color: #7f93aa;
 }
 
 .warehouse-content input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):focus,
 .warehouse-content select:focus,
-.warehouse-content textarea:focus {
+.warehouse-content textarea:focus,
+.modal-body input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):focus,
+.modal-body select:focus,
+.modal-body textarea:focus {
   border-color: #087449;
   background: #fff;
   box-shadow: 0 0 0 3px rgba(8, 116, 73, 0.1);
@@ -1537,7 +1546,10 @@ td small {
 
 .warehouse-content input:disabled,
 .warehouse-content select:disabled,
-.warehouse-content textarea:disabled {
+.warehouse-content textarea:disabled,
+.modal-body input:disabled,
+.modal-body select:disabled,
+.modal-body textarea:disabled {
   border-color: #d7e0e9;
   color: #7a8796;
   background: #f4f7fa;
