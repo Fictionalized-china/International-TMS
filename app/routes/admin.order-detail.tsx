@@ -571,46 +571,56 @@ export default function OrderDetail({ loaderData, actionData }: Route.ComponentP
           <span className={`status-pill review-status-${o.completion_status}`}>
             {completionStatusLabels[o.completion_status]}
           </span>
-          {loaderData.canManage && o.status === "draft" && (
-            <Modal
-              title={`修改订单 · ${o.order_number}`}
-              triggerLabel="修改订单"
-              triggerClassName="secondary"
-              closeSignal={success}
-              size="wide"
-            >
-              <OrderEditForm
-                order={o}
-                customers={loaderData.customers}
-                busy={busy}
-              />
-            </Modal>
-          )}
-          {loaderData.canManage&&loaderData.businessWorkflow&&loaderData.workflowVersions.some((item)=>item.id!==loaderData.businessWorkflow?.workflow_id)&&(
-            <Modal title={`使用新规则 · ${o.order_number}`} triggerLabel="使用新规则" triggerClassName="secondary" closeSignal={success}>
-              <Form method="post" className="stack">
-                <input type="hidden" name="intent" value="workflow_version_switch"/>
-                <label className="field"><span>当前版本</span><input value={`${loaderData.businessWorkflow.workflow_name} · v${loaderData.businessWorkflow.version_number}`} readOnly/></label>
-                <label className="field"><span>目标已发布版本</span><select name="targetWorkflowId" required defaultValue=""><option value="">请选择</option>{loaderData.workflowVersions.filter((item)=>item.id!==loaderData.businessWorkflow?.workflow_id).map((item)=><option key={item.id} value={item.id}>{item.name} · v{item.version_number}</option>)}</select></label>
-                <div className="alert warning">切换后系统按新规则重新校验当前节点；已填业务数据保留。若订单已有配载单，同批全部订单会一起切换。</div>
-                <button className="primary" disabled={busy}>确认使用新规则</button>
-              </Form>
-            </Modal>
-          )}
-          {loaderData.canManage &&
-            cancelActions.map((transition) => (
-              <OrderDetailAction
-                key={transition.action_code}
-                order={o}
-                transition={transition}
-                members={loaderData.members}
-                busy={busy}
-                success={success}
-              />
-            ))}
           <Link className="secondary" to="/admin/orders">
             返回订单工作台
           </Link>
+          {loaderData.canManage && (
+            o.status === "draft" ||
+            cancelActions.length > 0 ||
+            Boolean(loaderData.businessWorkflow && loaderData.workflowVersions.some((item) => item.id !== loaderData.businessWorkflow?.workflow_id))
+          ) && (
+            <details className="order-header-actions-menu">
+              <summary className="secondary">订单操作</summary>
+              <div className="order-header-actions-popover">
+                {o.status === "draft" && (
+                  <Modal
+                    title={`修改订单 · ${o.order_number}`}
+                    triggerLabel="修改订单"
+                    triggerClassName="secondary"
+                    closeSignal={success}
+                    size="wide"
+                  >
+                    <OrderEditForm
+                      order={o}
+                      customers={loaderData.customers}
+                      busy={busy}
+                    />
+                  </Modal>
+                )}
+                {loaderData.businessWorkflow && loaderData.workflowVersions.some((item) => item.id !== loaderData.businessWorkflow?.workflow_id) && (
+                  <Modal title={`使用新规则 · ${o.order_number}`} triggerLabel="使用新规则" triggerClassName="secondary" closeSignal={success}>
+                    <Form method="post" className="stack">
+                      <input type="hidden" name="intent" value="workflow_version_switch" />
+                      <label className="field"><span>当前版本</span><input value={`${loaderData.businessWorkflow.workflow_name} · v${loaderData.businessWorkflow.version_number}`} readOnly /></label>
+                      <label className="field"><span>目标已发布版本</span><select name="targetWorkflowId" required defaultValue=""><option value="">请选择</option>{loaderData.workflowVersions.filter((item) => item.id !== loaderData.businessWorkflow?.workflow_id).map((item) => <option key={item.id} value={item.id}>{item.name} · v{item.version_number}</option>)}</select></label>
+                      <div className="alert warning">切换后系统按新规则重新校验当前节点；已填业务数据保留。若订单已有配载单，同批全部订单会一起切换。</div>
+                      <button className="primary" disabled={busy}>确认使用新规则</button>
+                    </Form>
+                  </Modal>
+                )}
+                {cancelActions.map((transition) => (
+                  <OrderDetailAction
+                    key={transition.action_code}
+                    order={o}
+                    transition={transition}
+                    members={loaderData.members}
+                    busy={busy}
+                    success={success}
+                  />
+                ))}
+              </div>
+            </details>
+          )}
         </div>
       </header>
       {blockingNotice && <OrderBlockingNotice notice={blockingNotice} />}
@@ -714,62 +724,15 @@ function OrderBusinessForm({
           </div>
         </header>
 
-        <section className="order-form-section order-form-basics">
-          <header>
-            <div><span>订单资料</span><h2>基础信息</h2></div>
-            {data.canManage && order.status === "draft" && <small>草稿阶段可通过页面顶部“修改订单”调整</small>}
-          </header>
-          <div className="order-form-data-grid">
-            <Info label="客户" value={order.customer_name} />
-            <Info label="关联报价" value={order.quote_number} />
-            <Info label="订单类型" value={businessTypeLabels[order.business_type] ?? order.business_type} />
-            <Info label="发货方" value={order.shipper_name} />
-            <Info label="发货联系人" value={[order.shipper_contact, order.shipper_phone].filter(Boolean).join(" · ") || null} />
-            <Info label="预约提货" value={order.requested_pickup_date} />
-            <Info label="国内提货地址" value={[order.origin_state, order.origin_city, order.origin_address].filter(Boolean).join(" ")} />
-            <Info label="境外收货联系人" value={[order.consignee_contact, order.consignee_phone].filter(Boolean).join(" · ") || null} />
-            <Info label="境外目的地" value={[order.destination_state, order.destination_city, order.destination_address].filter(Boolean).join(" ")} />
-            <Info label="境外目的仓" value={order.overseas_warehouse_name} />
-            <Info label="货物摘要" value={`${order.cargo_description || "未填写"} · ${order.pieces} 件 · ${order.gross_weight_kg} KG · ${order.volume_cbm} CBM`} />
-            <Info label="备注" value={order.special_instructions} />
-          </div>
-          {data.packageLabels.length > 0 && (
-            <section className="order-package-labels" aria-label="仓库货物标签">
-              <header>
-                <div><strong>货物标签</strong><small>境外仓继续扫描以下国内仓标签；标签出库后仍然有效。</small></div>
-                <span>{data.packageLabels.length} 张</span>
-              </header>
-              <div className="order-package-label-list">
-                {data.packageLabels.map((label) => (
-                  <div className="order-package-label-row" key={label.id}>
-                    <div><code>{label.barcode}</code><small>{label.package_number}</small></div>
-                    <div><strong>{label.cargo_name || "未关联货物明细"}</strong><small>{label.pieces} 件 · {Number(label.weight_kg || 0).toFixed(2)} KG · {Number(label.volume_cbm || 0).toFixed(3)} CBM</small></div>
-                    <div><strong>{label.warehouse_name || "仓库待确认"}</strong><small>{[label.zone_name,label.location_name].filter(Boolean).join(" / ") || "库位待确认"}</small></div>
-                    <span className={`status-pill ${label.status === "dispatched" ? "success" : label.status === "exception" ? "danger" : ""}`}>{warehousePackageStatusLabel(label.status)}</span>
-                  </div>
-                ))}
-              </div>
-            </section>
-          )}
-        </section>
-
         <div className="order-form-workflow-sections">
           {(currentConfiguredStep ? [currentConfiguredStep] : []).map((step) => {
-            const stepIndex = Math.max(0, configuredSteps.findIndex((item) => item.step_key === step.step_key));
             const current = step.step_key === currentStepKey;
-            const completed = step.rows[0]?.step_status === "completed";
             const moduleRows = uniqueWorkflowModules(step.rows);
             return (
-              <details
-                className={`order-form-step ${current ? "current" : ""} ${completed ? "completed" : "future"}`}
+              <section
+                className={`order-form-step ${current ? "current" : ""}`}
                 key={step.step_key}
-                open={current}
               >
-                <summary>
-                  <i>{completed ? "✓" : stepIndex + 1}</i>
-                  <div><strong>{step.name}</strong><small>{step.actor_scope || "按模组岗位办理"}</small></div>
-                  <span>{current ? "当前节点" : completed ? "已完成" : step.is_required ? "后续必办" : "后续可选"}</span>
-                </summary>
                 <div className="order-form-step-body">
                   {moduleRows.map((row) => {
                     const module = data.modules.find((item) => item.module_code === row.module_code);
@@ -832,12 +795,11 @@ function OrderBusinessForm({
                             </div>
                           )}
                         </header>
-                        <div className="order-form-module-summary">
-                          <span><b>{row.required_field_count}</b> 个必填字段</span>
-                          <span><b>{row.optional_field_count}</b> 个选填字段</span>
-                          <span><b>{tasks.length}</b> 个办理步骤</span>
-                          {module?.blocking_reason && <span className="blocked">阻断：{module.blocking_reason}</span>}
-                        </div>
+                        {module?.blocking_reason && (
+                          <div className="order-form-module-summary">
+                            <span className="blocked">阻断：{module.blocking_reason}</span>
+                          </div>
+                        )}
                         {tasks.length > 0 && (
                           <ol className="order-form-task-list">
                             {tasks.map((task, index) => (
@@ -858,20 +820,12 @@ function OrderBusinessForm({
                             ))}
                           </ol>
                         )}
-                        {row.module_code && (
-                          <div className="order-form-module-action">
-                            <Link className={current && editable ? "primary" : "secondary"} to={`/admin/orders/${order.id}/modules/${row.module_code}#module-business-data`}>
-                              {current && editable ? "填写本节内容" : "查看本节内容"}
-                            </Link>
-                            {!editable && <small>{current ? "当前账号仅可查看，或本节尚未开放编辑" : "后续节点暂为只读"}</small>}
-                          </div>
-                        )}
                       </article>
                     );
                   })}
                   {!moduleRows.length && <p className="empty-state">该节点未配置业务模组，但节点本身仍保留在订单流程中。</p>}
                 </div>
-              </details>
+              </section>
             );
           })}
         </div>
@@ -888,6 +842,52 @@ function OrderBusinessForm({
             </div>
           </details>
         )}
+
+        <details className="order-form-section order-form-basics">
+          <summary>
+            <div>
+              <strong>订单资料</strong>
+              <small>
+                {order.customer_name} · {businessTypeLabels[order.business_type] ?? order.business_type} · {order.cargo_description || "未填写货物名称"}
+              </small>
+            </div>
+            <span>查看完整资料{data.packageLabels.length ? `与 ${data.packageLabels.length} 张货物标签` : ""}</span>
+          </summary>
+          <div className="order-form-basics-body">
+            <div className="order-form-data-grid">
+              <Info label="客户" value={order.customer_name} />
+              <Info label="关联报价" value={order.quote_number} />
+              <Info label="订单类型" value={businessTypeLabels[order.business_type] ?? order.business_type} />
+              <Info label="发货方" value={order.shipper_name} />
+              <Info label="发货联系人" value={[order.shipper_contact, order.shipper_phone].filter(Boolean).join(" · ") || null} />
+              <Info label="预约提货" value={order.requested_pickup_date} />
+              <Info label="国内提货地址" value={[order.origin_state, order.origin_city, order.origin_address].filter(Boolean).join(" ")} />
+              <Info label="境外收货联系人" value={[order.consignee_contact, order.consignee_phone].filter(Boolean).join(" · ") || null} />
+              <Info label="境外目的地" value={[order.destination_state, order.destination_city, order.destination_address].filter(Boolean).join(" ")} />
+              <Info label="境外目的仓" value={order.overseas_warehouse_name} />
+              <Info label="货物摘要" value={`${order.cargo_description || "未填写"} · ${order.pieces} 件 · ${order.gross_weight_kg} KG · ${order.volume_cbm} CBM`} />
+              <Info label="备注" value={order.special_instructions} />
+            </div>
+            {data.packageLabels.length > 0 && (
+              <section className="order-package-labels" aria-label="仓库货物标签">
+                <header>
+                  <div><strong>货物标签</strong><small>境外仓继续扫描以下国内仓标签；标签出库后仍然有效。</small></div>
+                  <span>{data.packageLabels.length} 张</span>
+                </header>
+                <div className="order-package-label-list">
+                  {data.packageLabels.map((label) => (
+                    <div className="order-package-label-row" key={label.id}>
+                      <div><code>{label.barcode}</code><small>{label.package_number}</small></div>
+                      <div><strong>{label.cargo_name || "未关联货物明细"}</strong><small>{label.pieces} 件 · {Number(label.weight_kg || 0).toFixed(2)} KG · {Number(label.volume_cbm || 0).toFixed(3)} CBM</small></div>
+                      <div><strong>{label.warehouse_name || "仓库待确认"}</strong><small>{[label.zone_name, label.location_name].filter(Boolean).join(" / ") || "库位待确认"}</small></div>
+                      <span className={`status-pill ${label.status === "dispatched" ? "success" : label.status === "exception" ? "danger" : ""}`}>{warehousePackageStatusLabel(label.status)}</span>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+          </div>
+        </details>
 
         <details className="order-form-records">
           <summary>附件与办理记录 <span>{data.attachments.length} 个附件 · {data.history.length + data.macro.length} 条记录</span></summary>
@@ -1623,13 +1623,15 @@ function OrderVerticalWorkflow({
                     <strong>{step.name}</strong>
                     <small>
                       {status === "active"
-                        ? "当前节点 · 点击办理"
-                        : step.is_required
-                          ? "必须办理 · 点击查看"
-                          : "可选节点 · 点击查看"}
-                      {step.field_count ? ` · ${step.field_count} 字段` : ""}
+                        ? "当前节点"
+                        : status === "completed"
+                          ? "已完成"
+                          : step.is_required
+                            ? "后续必办"
+                            : "按需办理"}
                     </small>
                   </div>
+                  <span aria-hidden="true">→</span>
                 </Link>
               </li>
             );
@@ -1661,12 +1663,15 @@ function OrderVerticalWorkflow({
                   <strong>{snapshot.stage.shortTitle}</strong>
                   <small>
                     {snapshot.status === "active"
-                      ? "当前阶段 · 点击办理"
+                      ? "当前阶段"
                       : snapshot.status === "skipped"
                         ? "本单无需拼车配载"
-                        : `${snapshot.progress}% · 点击查看`}
+                        : snapshot.status === "completed"
+                          ? "已完成"
+                          : "后续阶段"}
                   </small>
                 </div>
+                <span aria-hidden="true">→</span>
               </Link>
             </li>
           );

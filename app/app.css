@@ -49,9 +49,41 @@
 .order-detail-page-header p {
   margin-block: 2px;
 }
+.order-header-actions-menu {
+  position: relative;
+}
+.order-header-actions-menu > summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  cursor: pointer;
+  list-style: none;
+}
+.order-header-actions-menu > summary::-webkit-details-marker {
+  display: none;
+}
+.order-header-actions-popover {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 8px);
+  right: 0;
+  display: grid;
+  width: 190px;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #d5dfeb;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 14px 34px rgba(28, 48, 76, .16);
+}
+.order-header-actions-popover > button,
+.order-header-actions-popover > form,
+.order-header-actions-popover > form > button {
+  width: 100%;
+}
 .order-single-form {
   display: grid;
-  grid-template-columns: 238px minmax(0, 1fr);
+  grid-template-columns: 210px minmax(0, 1fr);
   gap: 14px;
   align-items: start;
   height: calc(100vh - 156px);
@@ -268,10 +300,20 @@
   min-height: 0;
   flex: 1;
   align-content: start;
+  gap: 8px;
+  padding: 12px 14px;
   overflow-y: auto;
+  background: #f5f7fa;
 }
 .order-form-step {
   border-bottom: 1px solid #dfe6ef;
+}
+.order-form-workflow-sections > .order-form-step {
+  border: 0;
+}
+.order-form-workflow-sections > .order-form-step > .order-form-step-body {
+  padding: 0;
+  background: transparent;
 }
 .order-form-step > summary {
   display: grid;
@@ -342,8 +384,9 @@
   background: #fff;
 }
 .order-form-module.mine {
-  border: 2px solid #c7372f;
-  box-shadow: 0 0 0 3px rgba(199, 55, 47, .08);
+  border: 1px solid #e8b3af;
+  border-left: 4px solid #c7372f;
+  box-shadow: 0 4px 14px rgba(56, 74, 98, .07);
 }
 .order-form-module > header {
   display: flex;
@@ -418,6 +461,52 @@
   padding: 8px 11px;
   color: #637287;
   font-size: 11px;
+}
+.order-form-basics {
+  flex: 0 0 auto;
+  padding: 0;
+  background: #fff;
+}
+.order-form-basics > summary {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px 16px;
+  cursor: pointer;
+  list-style: none;
+}
+.order-form-basics > summary::-webkit-details-marker {
+  display: none;
+}
+.order-form-basics > summary > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.order-form-basics > summary strong {
+  color: #26384f;
+  font-size: 13px;
+}
+.order-form-basics > summary small {
+  overflow: hidden;
+  color: #6b7b90;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.order-form-basics > summary > span {
+  flex: none;
+  color: #315f99;
+  font-size: 11px;
+  font-weight: 750;
+}
+.order-form-basics[open] > summary {
+  border-bottom: 1px solid #dfe6ef;
+}
+.order-form-basics-body {
+  padding: 12px 16px 16px;
 }
 .order-form-module-summary b {
   color: #263a53;
@@ -7355,8 +7444,9 @@ body.modal-scroll-locked {
 }
 .order-vertical-workflow li > a {
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: 30px minmax(0, 1fr) 14px;
+  gap: 8px;
+  align-items: start;
   min-height: 46px;
   border-radius: 6px;
   color: inherit;
@@ -7396,6 +7486,11 @@ body.modal-scroll-locked {
 .order-vertical-workflow li div {
   min-width: 0;
   padding-bottom: 12px;
+}
+.order-vertical-workflow li > a > span {
+  align-self: center;
+  color: #8a99ab;
+  font-size: 12px;
 }
 .order-vertical-workflow li strong,
 .order-vertical-workflow li small {
