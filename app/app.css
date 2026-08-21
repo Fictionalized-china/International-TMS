@@ -13629,3 +13629,63 @@ a.order-module-card.read-only:hover {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+.overseas-pickup-scan-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.overseas-pickup-scan-form {
+  grid-template-columns: minmax(0, 1fr) 160px;
+  align-items: end;
+}
+
+.overseas-pickup-progress-panel .panel-header > strong {
+  color: #087b50;
+}
+
+.overseas-pickup-queue-panel td strong,
+.overseas-pickup-queue-panel td small {
+  display: block;
+}
+
+@media (max-width: 760px) {
+  .overseas-pickup-scan-form {
+    grid-template-columns: 1fr;
+  }
+}
+
+.overseas-signature-gate {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.overseas-signature-gate > div {
+  display: grid;
+  gap: 4px;
+}
+
+.overseas-completion-table table {
+  min-width: 1180px;
+}
+
+.overseas-completion-table th,
+.overseas-completion-table td {
+  padding: 9px 10px;
+  font-size: 12px;
+  vertical-align: top;
+}
+
+.overseas-completion-table td strong,
+.overseas-completion-table td small {
+  display: block;
+}
+
+@media (max-width: 760px) {
+  .overseas-signature-gate {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

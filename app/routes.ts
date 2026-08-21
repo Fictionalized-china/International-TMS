@@ -78,6 +78,7 @@ export default [
     route("warehouse/consolidation", "routes/warehouse.cargo-consolidation.tsx"),
     route("warehouse/ltl-loading", "routes/warehouse.ltl-loading.tsx"),
     route("warehouse/outbound", "routes/warehouse.outbound.tsx"),
+    route("warehouse/pickup", "routes/warehouse.pickup.tsx"),
     route("warehouse/inventory", "routes/warehouse.inventory.tsx"),
     route("warehouse/exceptions", "routes/warehouse.exceptions.tsx"),
     route("warehouse/locations", "routes/warehouse.locations.tsx"),

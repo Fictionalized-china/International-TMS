@@ -50,6 +50,7 @@ import {
 import {
   advanceOverseasOrder,
   automaticallyNotifyOverseasArrival,
+  completeOverseasOrderDelivery,
 } from "../lib/overseas-warehouse.server";
 import {
   emptyExpenseDirectionControl,
@@ -1497,32 +1498,14 @@ export async function action({ request, params }: Route.ActionArgs) {
       return { formError: "境外到仓不能在运营后台手工确认，请进入订单指定的境外目的仓扫码入库并完成清点" };
     }
     if (intent === "overseas_advance" && moduleCode === "overseas_warehouse") {
-      const operationAction = valueOf(form, "operationAction") as
-        | "appointment"
-        | "pickup";
-      if (!["appointment", "pickup"].includes(operationAction))
-        return { formError: "境外仓操作无效" };
-      if (operationAction === "pickup") {
-        const missingDocuments = await missingRequiredDocumentUploads(
-          "overseas_warehouse",
-        );
-        if (missingDocuments.length)
-          return {
-            formError: `确认提货完成前请先上传：${missingDocuments.join("、")}`,
-          };
-      }
+      const operationAction = valueOf(form, "operationAction");
+      if (operationAction !== "appointment")
+        return { formError: "客户自提出库只能由境外仓扫描货物标签完成" };
       const occurredAt = valueOf(form, "occurredAt") || new Date().toISOString();
-      const operationValues = operationAction === "appointment"
-          ? [
-              ["pickup_appointment_at", valueOf(form, "occurredAt")],
-              ["pickup_appointment_notes", valueOf(form, "notes")],
-            ]
-          : [
-              ["pickup_completed_at", valueOf(form, "occurredAt")],
-              ["overseas_pickup_contact", valueOf(form, "pickupContact")],
-              ["pickup_proof", valueOf(form, "pickupProofReference")],
-              ["pickup_completion_notes", valueOf(form, "notes")],
-            ];
+      const operationValues = [
+        ["pickup_appointment_at", valueOf(form, "occurredAt")],
+        ["pickup_appointment_notes", valueOf(form, "notes")],
+      ];
       const missingOperationFields = operationValues
         .filter(([fieldKey, value]) => requiredFieldMissing(fieldKey, value))
         .map(([fieldKey]) => fieldPolicy(fieldKey).label || fieldKey);
@@ -1534,8 +1517,6 @@ export async function action({ request, params }: Route.ActionArgs) {
         actorUserId: current.userId,
         action: operationAction,
         occurredAt,
-        pickupContact: valueOf(form, "pickupContact"),
-        pickupProofReference: valueOf(form, "pickupProofReference"),
         notes: valueOf(form, "notes"),
       });
       await writeAudit({
@@ -2651,8 +2632,31 @@ export async function action({ request, params }: Route.ActionArgs) {
         current.userId,
         now,
       );
+      let deliveryCompleted = false;
+      if (
+        moduleCode === "overseas_warehouse" &&
+        target.document_category === "delivery_receipt" &&
+        ["approved", "archived"].includes(status)
+      ) {
+        const operation = await env.DB.prepare(
+          `SELECT status FROM overseas_warehouse_operations
+            WHERE organization_id=? AND order_id=? AND status!='cancelled'
+            ORDER BY created_at DESC LIMIT 1`,
+        ).bind(current.organizationId, orderId).first<{ status: string }>();
+        if (operation?.status === "picked_up") {
+          await completeOverseasOrderDelivery({
+            organizationId: current.organizationId,
+            orderId,
+            actorUserId: current.userId,
+            occurredAt: now,
+          });
+          deliveryCompleted = true;
+        }
+      }
       return {
-        success: "文件审核状态已更新",
+        success: deliveryCompleted
+            ? "签收单已审核通过；运输完成，订单已进入费用结算"
+            : "文件审核状态已更新",
         documentReviewSignal: `${attachmentId}:${now}`,
       };
     }
@@ -3456,7 +3460,7 @@ export default function OrderModulePage({
           </div>
           {loaderData.workflowStageAccess.available || canApproveConsignment ? (
             <>
-              {definition.code !== "loading" && (
+              {definition.code !== "loading" && definition.code !== "overseas_warehouse" && (
                 <ModuleSourceDocuments
                   code={definition.code}
                   data={loaderData}
@@ -3911,7 +3915,7 @@ function ModuleSourceDocuments({
         return false;
       if (code !== "overseas_warehouse") return true;
       const operationStatus = data.overseasOperation?.status;
-      return ["appointment", "picked_up"].includes(operationStatus || "");
+      return operationStatus === "picked_up";
     })
     .filter((placement) => placement.policy.visible);
   if (!placements.length) return null;
@@ -4936,7 +4940,24 @@ function ModuleBusinessData({
   if (code === "overseas_warehouse") {
     const operation = data.overseasOperation;
     const operationStatus = operation?.status || "waiting_arrival";
-    const progress = overseasOperationProgress[operationStatus] || 0;
+    const signedReceiptApproved = data.attachments.some(
+      (attachment) =>
+        attachment.document_category === "delivery_receipt" &&
+        ["approved", "archived"].includes(attachment.review_status || ""),
+    );
+    const transportCompleted = data.module.status === "completed";
+    const progress = transportCompleted
+      ? 100
+      : overseasOperationProgress[operationStatus] || 0;
+    const operationRank: Record<string, number> = {
+      waiting_arrival: 0,
+      arrived: 1,
+      notified: 2,
+      appointment: 3,
+      picked_up: 4,
+    };
+    const operationStepDone = (status: string) =>
+      (operationRank[operationStatus] || 0) >= operationRank[status];
     const canConfirmArrival = Boolean(
       operation &&
         ["outbound_in_transit", "overseas_arrived", "waiting_pickup"].includes(
@@ -4948,32 +4969,34 @@ function ModuleBusinessData({
       <div className="module-business-stack dense-module-stack">
         <BusinessSubsection
           title="境外仓办理进度"
-          hint="境外仓完成扫码入库与清点后，系统自动通知客户；随后按“预约提货—客户自提并签收”办理。"
+          hint="境外仓完成扫码入库与清点后自动通知客户；仓库扫码自提出库后，再上传签收单确认运输完成。"
         >
           <div className="loading-selection-summary" aria-live="polite">
             <span>
               已完成至：
               <strong>
-                {overseasOperationStatusLabels[operationStatus] || operationStatus}
+                {transportCompleted
+                  ? "运输完成"
+                  : overseasOperationStatusLabels[operationStatus] || operationStatus}
               </strong>
             </span>
             <span>{progress}%</span>
-            <span>下一步：{nextOverseasAction(operationStatus)}</span>
+            <span>下一步：{transportCompleted ? "进入费用结算" : nextOverseasAction(operationStatus)}</span>
           </div>
           <div className="tracking-milestone-board dense-milestone-board">
             {[
-              ["arrived", "目的仓到仓", 25],
-              ["notified", "自动通知客户", 50],
-              ["appointment", "预约提货", 75],
-              ["picked_up", "客户自提", 100],
-              ["signed", "签收", 100],
-              ["completed", "运输完成", 100],
-            ].map(([status, label, threshold]) => (
-              <article className={progress >= Number(threshold) ? "done" : ""} key={String(status)}>
-                <b>{progress >= Number(threshold) ? "✓" : "·"}</b>
+              ["arrived", "目的仓到仓", operationStepDone("arrived")],
+              ["notified", "自动通知客户", operationStepDone("notified")],
+              ["appointment", "预约提货", operationStepDone("appointment")],
+              ["picked_up", "客户自提", operationStepDone("picked_up")],
+              ["signed", "签收", signedReceiptApproved],
+              ["completed", "运输完成", transportCompleted],
+            ].map(([status, label, done]) => (
+              <article className={done ? "done" : ""} key={String(status)}>
+                <b>{done ? "✓" : "·"}</b>
                 <div>
                   <strong>{label}</strong>
-                  <small>{progress >= Number(threshold) ? "已完成" : "待办理"}</small>
+                  <small>{done ? "已完成" : "待办理"}</small>
                 </div>
               </article>
             ))}
@@ -5075,37 +5098,62 @@ function ModuleBusinessData({
         )}
 
         {manage && operationStatus === "appointment" && (
-          <BusinessSubsection title="3. 确认客户自提并签收" hint="每票订单分别确认；保存后自动记录签收并完成运输，批次全部完成后自动关闭提货环节。">
-            <Form method="post" className="form-grid compact">
-              <input type="hidden" name="intent" value="overseas_advance" />
-              <input type="hidden" name="operationAction" value="pickup" />
-              <ModuleField fields={data.workflowFields} fieldKey="pickup_completed_at" label="实际提货时间" fallbackRequired>
-                {(required) => <input name="occurredAt" type="datetime-local" required={required} />}
-              </ModuleField>
-              <ModuleField fields={data.workflowFields} fieldKey="overseas_pickup_contact" label="提货人/签收人" fallbackRequired>
-                {(required) => <input name="pickupContact" required={required} />}
-              </ModuleField>
-              <ModuleField fields={data.workflowFields} fieldKey="pickup_proof" label="提货凭证编号">
-                {(required) => <input name="pickupProofReference" required={required} />}
-              </ModuleField>
-              <ModuleField fields={data.workflowFields} fieldKey="pickup_completion_notes" label="交付说明" className="field span-2">
-                {(required) => <input name="notes" required={required} />}
-              </ModuleField>
-              <button className="primary" disabled={busy}>确认客户自提并签收</button>
-            </Form>
+          <BusinessSubsection title="3. 客户自提出库" hint="运营后台只读等待；境外仓逐件扫描货物标签，全部扫完后系统自动同步本票客户自提。">
+            <div className="loading-next-action">
+              <strong>下一步由境外目的仓办理</strong>
+              <span>客户到仓后，由仓库人员扫描本票全部货物标签完成出库；此处无需重复确认。</span>
+              {data.order.overseas_warehouse_id && <WarehouseSiteButton
+                orderId={data.order.id}
+                targetPath={`/warehouse/pickup?warehouseId=${encodeURIComponent(data.order.overseas_warehouse_id)}`}
+                returnModuleCode="overseas_warehouse"
+                className="primary"
+              >
+                去境外仓扫码自提出库
+              </WarehouseSiteButton>}
+            </div>
           </BusinessSubsection>
         )}
 
+        {operationStatus === "picked_up" && <ModuleSourceDocuments
+          code="overseas_warehouse"
+          data={data}
+          manage={manage}
+          canApproveConsignment={canApproveConsignment}
+          busy={busy}
+          reviewCloseSignal={reviewCloseSignal}
+        />}
+
         {operationStatus === "picked_up" && (
-          <BusinessSubsection title="自提与签收结果" hint="客户自提、签收和运输完成结果已同步运单轨迹与客户门户。">
-            <div className="consignment-form-grid overseas-summary-grid">
-              <Info label="实际到仓" value={formatDateTime(operation?.actual_arrival_at)} />
-              <Info label="通知时间" value={formatDateTime(operation?.notified_at)} />
-              <Info label="预约时间" value={formatDateTime(operation?.appointment_at)} />
-              <Info label="提货时间" value={formatDateTime(operation?.pickup_at)} />
-              <Info label="提货人" value={operation?.pickup_contact || ""} />
-              <Info label="提货凭证" value={operation?.pickup_proof_reference || ""} />
+          <BusinessSubsection title="4. 签收确认与运输完成" hint="仓库扫码只代表货物已交给客户；签收单审核通过后，系统才完成运输并进入费用结算。">
+            {!transportCompleted && <div className="alert warning overseas-signature-gate">
+              <div>
+                <strong>客户自提出库已完成，等待签收单</strong>
+                <span>请在本页“本节点文件”上传签收单并审核通过；系统会自动完成签收和运输完成。</span>
+              </div>
+              <a className="primary" href="#module-source-documents">上传并审核签收单</a>
+            </div>}
+            <div className="table-wrap overseas-completion-table">
+              <table>
+                <thead><tr><th>订单</th><th>客户</th><th>配载/运输单</th><th>目的仓</th><th>到仓</th><th>通知</th><th>预约</th><th>客户自提</th><th>签收单</th><th>结果</th></tr></thead>
+                <tbody><tr>
+                  <td><strong>{data.order.order_number}</strong></td>
+                  <td>{data.order.customer_name}</td>
+                  <td>{operation?.batch_number || "—"}</td>
+                  <td>{data.order.overseas_warehouse_name || "—"}</td>
+                  <td>{formatDateTime(operation?.actual_arrival_at) || "—"}</td>
+                  <td>{formatDateTime(operation?.notified_at) || "—"}</td>
+                  <td>{formatDateTime(operation?.appointment_at) || "—"}</td>
+                  <td><strong>{formatDateTime(operation?.pickup_at) || "—"}</strong><small>{operation?.pickup_contact || "客户自提"}</small></td>
+                  <td><span className={`status-pill ${signedReceiptApproved ? "" : "off"}`}>{signedReceiptApproved ? "已审核" : "待上传/审核"}</span></td>
+                  <td><span className={`status-pill ${transportCompleted ? "" : "off"}`}>{transportCompleted ? "运输完成" : "待确认签收"}</span></td>
+                </tr></tbody>
+              </table>
             </div>
+            {transportCompleted && <div className="loading-next-action">
+              <strong>运输已完成</strong>
+              <span>签收结果与订单工作流已同步，下一步进入费用结算。</span>
+              <Link className="primary" to={`/admin/orders/${data.order.id}/modules/costs`}>进入费用结算</Link>
+            </div>}
           </BusinessSubsection>
         )}
       </div>

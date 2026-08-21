@@ -9,7 +9,8 @@ describe("overseas warehouse flow", () => {
     expect(nextOverseasAction(null)).toBe("确认目的仓到仓");
     expect(nextOverseasAction("arrived")).toBe("系统自动通知客户");
     expect(nextOverseasAction("notified")).toBe("登记提货预约");
-    expect(nextOverseasAction("appointment")).toBe("确认客户自提并签收");
+    expect(nextOverseasAction("appointment")).toBe("由境外仓扫码自提出库");
+    expect(nextOverseasAction("picked_up")).toBe("上传并确认签收单");
   });
 
   it("reports stable progress snapshots", () => {
@@ -17,6 +18,6 @@ describe("overseas warehouse flow", () => {
     expect(overseasOperationProgress.arrived).toBe(25);
     expect(overseasOperationProgress.notified).toBe(50);
     expect(overseasOperationProgress.appointment).toBe(75);
-    expect(overseasOperationProgress.picked_up).toBe(100);
+    expect(overseasOperationProgress.picked_up).toBe(85);
   });
 });
