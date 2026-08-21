@@ -9,6 +9,7 @@ import { valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import { recordWorkflowEvent } from "../lib/business-workflow.server";
 import { Modal } from "../components/Modal";
+import { transportChargeNameOptions } from "../lib/charge-options";
 
 type Quote = { id: string; quote_number: string; customer_id:string; customer_name: string; salesperson_user_id:string|null; salesperson_name:string|null; inquiry_number:string|null; version_number:number; origin_country: string; origin_city: string; destination_country: string; destination_city: string; transport_mode: string; road_load_type:"ftl"|"ltl"; service_level: string | null; cargo_description: string; pieces: number; gross_weight_kg: number; volume_cbm: number; currency: string; subtotal:number; tax_amount:number; total_amount: number; valid_until: string | null; status: string; notes:string|null; created_at: string; charges: string | null; charge_name:string|null;charge_quantity:number|null;charge_unit_price:number|null;charge_exchange_rate:number|null;surcharge:number|null };
 type Inquiry={id:string;inquiry_number:string;customer_name:string;product_name:string|null;origin_country:string;origin_city:string|null;destination_country:string;destination_city:string|null;cargo_description:string;pieces:number;gross_weight_kg:number;volume_cbm:number;estimated_currency:string;estimated_total:number;status:string;customer_notes:string|null;created_at:string};
@@ -114,16 +115,6 @@ const quotationTransportModes: [string,string][] = [
   ["RAIL","铁运"],
   ["AIR","空运"],
 ];
-const receivableChargeNames: [string,string][] = [
-  ["陆运费","陆运费"],
-  ["国内汽运费","国内汽运费"],
-  ["国外段汽运费","国外段汽运费"],
-  ["铁路运费","铁路运费"],
-  ["内贸海运费","内贸海运费"],
-  ["内贸铁路运费","内贸铁路运费"],
-  ["汽运运费","汽运运费"],
-  ["押运费","押运费"],
-];
 
 export default function Quotations({ loaderData, actionData }: Route.ComponentProps) {
   const busy = useNavigation().state !== "idle", manage = loaderData.current.permissions.includes("quote.manage");
@@ -150,7 +141,7 @@ function QuotationCreateForm({loaderData,busy}:{loaderData:Route.ComponentProps[
     <Num label="件数" name="pieces" value="1"/>
     <Num label="毛重（KG）" name="weight"/>
     <Num label="体积（CBM）" name="volume" step="0.001"/>
-    <Select label="应收费用名称" name="chargeName" defaultValue="汽运运费" items={receivableChargeNames}/>
+    <Select label="应收费用名称" name="chargeName" defaultValue="汽运运费" items={transportChargeNameOptions}/>
     <Num label="数量" name="quantity" value="1" step="0.0001"/>
     <Num label="单价" name="unitPrice" step="0.01"/>
     <Num label="应收附加费" name="surcharge" step="0.01"/>
@@ -167,7 +158,7 @@ function InquiryQuoteForm({inquiry,loaderData,busy}:{inquiry:Inquiry;loaderData:
     <Select label="汽运方案" name="roadLoadType" defaultValue="ltl" items={[["ltl","拼车"],["ftl","整车"]]}/>
     <CitySelect label="起运城市" name="originCity" country={inquiry.origin_country} defaultValue={inquiry.origin_city||""} provinces={loaderData.provinces} cities={loaderData.cities}/>
     <CitySelect label="目的城市" name="destinationCity" country={inquiry.destination_country} defaultValue={inquiry.destination_city||""} provinces={loaderData.provinces} cities={loaderData.cities}/>
-    <Select label="应收费用名称" name="chargeName" defaultValue="汽运运费" items={receivableChargeNames}/>
+    <Select label="应收费用名称" name="chargeName" defaultValue="汽运运费" items={transportChargeNameOptions}/>
     <Num label="数量" name="quantity" value="1" step="0.0001"/>
     <Num label="单价" name="unitPrice" value={String(inquiry.estimated_total)} step="0.01"/><Num label="应收附加费" name="surcharge" step="0.01"/>
     <label className="field"><span>有效期至</span><input name="validUntil" type="date" required/></label>
@@ -205,7 +196,7 @@ function QuoteEditForm({quote,loaderData,busy}:{quote:Quote;loaderData:Route.Com
     <RouteLocationFields countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} initialOriginCountry={quote.origin_country} initialOriginCity={quote.origin_city} initialDestinationCountry={quote.destination_country} initialDestinationCity={quote.destination_city}/>
     <label className="field quotation-dialog-notes"><span>货物描述</span><textarea name="cargo" rows={2} defaultValue={quote.cargo_description} required/></label>
     <Num label="件数" name="pieces" value={String(quote.pieces)}/><Num label="毛重（KG）" name="weight" value={String(quote.gross_weight_kg)} step="0.001"/><Num label="体积（CBM）" name="volume" value={String(quote.volume_cbm)} step="0.001"/>
-    <Select label="应收费用名称" name="chargeName" defaultValue={quote.charge_name||"汽运运费"} items={receivableChargeNames}/>
+    <Select label="应收费用名称" name="chargeName" defaultValue={quote.charge_name||"汽运运费"} items={transportChargeNameOptions}/>
     <Num label="数量" name="quantity" value={String(quote.charge_quantity||1)} step="0.0001"/><Num label="单价" name="unitPrice" value={String(quote.charge_unit_price||0)} step="0.01"/><Num label="应收附加费" name="surcharge" value={String(quote.surcharge||0)} step="0.01"/>
     <label className="field"><span>有效期至</span><input name="validUntil" type="date" defaultValue={quote.valid_until||""}/></label><label className="field quotation-dialog-notes"><span>备注</span><input name="notes" defaultValue={quote.notes||""}/></label>
     {quote.status!=="draft"&&<div className="alert span-2">修改已确认或已发布报价后，报价会恢复为草稿，需要重新确认。</div>}

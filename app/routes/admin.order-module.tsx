@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Form, Link, useFetcher, useNavigation, redirect } from "react-router";
 import { env } from "cloudflare:workers";
 import type { Route } from "./+types/admin.order-module";
@@ -26,6 +26,7 @@ import {
   type WorkflowStepPosition,
 } from "../lib/order-stage-flow";
 import { canManageOrderModule } from "../lib/position-portal";
+import { transportChargeNameOptions } from "../lib/charge-options";
 import { ensureFtlVehicleAndLoads } from "../lib/ftl-vehicle-loads.server";
 import { summarizeLoadingSelection } from "../lib/loading-workbench";
 import {
@@ -2014,9 +2015,12 @@ export async function action({ request, params }: Route.ActionArgs) {
         ]);
         await syncOrderWorkflowSnapshot(current.organizationId,orderId);
       }
-      return { success: existingDomesticAssignment
-        ? "国内运输安排已更新，并已追加提货车辆"
-        : "国内运输安排已保存；等待国内提货和仓库累计收货" };
+      return {
+        success: existingDomesticAssignment
+          ? "国内运输安排已更新，并已追加提货车辆"
+          : "国内运输安排已保存；等待国内提货和仓库累计收货",
+        actionKind: "transport_assignment" as const,
+      };
     }
     if (intent === "waybill_create") {
       if (moduleCode !== "transport")
@@ -3275,6 +3279,10 @@ export default function OrderModulePage({
         ? actionData.success
         : null;
   const actionFailed = Boolean(actionData && "formError" in actionData);
+  useEffect(() => {
+    if (!actionData || !("success" in actionData) || !("actionKind" in actionData) || actionData.actionKind !== "transport_assignment") return;
+    document.querySelector(".module-workflow-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [actionData]);
   const currentIndex = Math.max(
     0,
     definition.steps.findIndex(
@@ -4419,7 +4427,10 @@ function ModuleBusinessData({
                 <fieldset className="transport-payable-fields span-2">
                   <legend>预计应付费用</legend>
                   <ModuleField fields={data.workflowFields} fieldKey="domestic_payable_charge_name" label="应付费用名称" fallbackRequired>
-                    {(required) => <input name="chargeName" defaultValue="国内运输费" required={required} />}
+                    {(required) => <select name="chargeName" defaultValue="国内汽运费" required={required}>
+                      <option value="">请选择费用名称</option>
+                      {transportChargeNameOptions.map(([value,label])=><option key={value} value={value}>{label}</option>)}
+                    </select>}
                   </ModuleField>
                   <ModuleField fields={data.workflowFields} fieldKey="domestic_freight_currency" label="币种" className="field compact-money-field" fallbackRequired>
                     {(required) => <select name="freightCurrency" defaultValue="CNY" required={required}>
