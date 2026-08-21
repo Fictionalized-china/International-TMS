@@ -194,6 +194,73 @@
 .order-form-data-grid > div:nth-child(12) {
   grid-column: span 2;
 }
+.order-package-labels {
+  margin-top: 10px;
+  overflow: hidden;
+  border: 1px solid #cbd8e5;
+  border-radius: 6px;
+  background: #f8fbff;
+}
+.order-package-labels > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #dce5ef;
+}
+.order-package-labels > header div {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+.order-package-labels > header strong {
+  color: #18345f;
+}
+.order-package-labels > header small,
+.order-package-label-row small {
+  color: #66768b;
+}
+.order-package-labels > header > span {
+  flex: none;
+  color: #087449;
+  font-size: 12px;
+  font-weight: 800;
+}
+.order-package-label-list {
+  max-height: 150px;
+  overflow-y: auto;
+}
+.order-package-label-row {
+  display: grid;
+  grid-template-columns: minmax(190px, 0.9fr) minmax(220px, 1.2fr) minmax(180px, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  min-height: 48px;
+  padding: 7px 10px;
+  border-bottom: 1px solid #e2e9f1;
+  background: #fff;
+}
+.order-package-label-row:last-child {
+  border-bottom: 0;
+}
+.order-package-label-row > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.order-package-label-row code {
+  color: #0b3266;
+  font-size: 13px;
+  font-weight: 850;
+}
+.order-package-label-row strong,
+.order-package-label-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .order-form-workflow-sections {
   display: grid;
   min-height: 0;
@@ -502,6 +569,13 @@
   }
   .order-form-data-grid > div:nth-child(n) {
     grid-column: auto;
+  }
+  .order-package-labels > header div {
+    display: grid;
+    gap: 2px;
+  }
+  .order-package-label-row {
+    grid-template-columns: 1fr;
   }
   .order-form-step-body {
     padding-left: 16px;

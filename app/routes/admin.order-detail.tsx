@@ -119,6 +119,20 @@ type Attachment = {
   data_url: string;
   created_at: string;
 };
+type WarehousePackageLabel = {
+  id: string;
+  barcode: string;
+  package_number: string;
+  status: string;
+  pieces: number;
+  weight_kg: number | null;
+  volume_cbm: number | null;
+  created_at: string;
+  cargo_name: string | null;
+  warehouse_name: string | null;
+  zone_name: string | null;
+  location_name: string | null;
+};
 type MacroHistory = {
   id: string;
   step_name: string;
@@ -223,7 +237,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
   if (!order) throw new Response("订单不存在", { status: 404 });
   const modules = await listOrderModules(current.organizationId, id);
   const currentWorkflowTasks = await listCurrentWorkflowTasks(current.organizationId,id);
-  const [history, attachments, macro, businessWorkflow, workflowSteps, workflowFormRows, tasks, services, members, customers, transitions, expenseRisk, workflowVersions] =
+  const [history, attachments, macro, businessWorkflow, workflowSteps, workflowFormRows, tasks, services, members, customers, transitions, expenseRisk, packageLabels, workflowVersions] =
     await Promise.all([
     env.DB.prepare(
       `SELECT h.id,h.action_name,h.from_status,h.to_status,h.to_step_code,a.display_name actor_name,au.display_name assignee_name,h.notes,h.occurred_at FROM order_workflow_history h LEFT JOIN users a ON a.id=h.actor_user_id LEFT JOIN users au ON au.id=h.assignee_user_id WHERE h.order_id=? AND h.organization_id=? ORDER BY h.occurred_at DESC`,
@@ -331,6 +345,20 @@ export async function loader({ request, params }: Route.LoaderArgs) {
       )
       .first<ExpenseRisk>(),
     env.DB.prepare(
+      `SELECT p.id,p.barcode,p.package_number,p.status,p.pieces,p.weight_kg,p.volume_cbm,p.created_at,
+              i.cargo_name_cn cargo_name,w.name warehouse_name,z.name zone_name,l.name location_name
+         FROM warehouse_packages p
+         JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id
+         LEFT JOIN order_cargo_items i ON i.id=p.cargo_item_id AND i.organization_id=p.organization_id
+         LEFT JOIN warehouses w ON w.id=p.warehouse_id AND w.organization_id=p.organization_id
+         LEFT JOIN warehouse_locations l ON l.id=p.location_id AND l.organization_id=p.organization_id
+         LEFT JOIN warehouse_zones z ON z.id=l.zone_id AND z.organization_id=p.organization_id
+        WHERE p.organization_id=? AND s.order_id=?
+        ORDER BY p.created_at,p.package_number,p.id`,
+    )
+      .bind(current.organizationId, id)
+      .all<WarehousePackageLabel>(),
+    env.DB.prepare(
       `SELECT id,name,version_number FROM workflow_definitions
        WHERE organization_id=? AND lifecycle_status='published' AND validation_status='valid'
          AND status='active' AND road_load_type=? ORDER BY updated_at DESC,version_number DESC`,
@@ -365,6 +393,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
       payable_finance_locked: 0,
       pending_warehouse_differences: 0,
     },
+    packageLabels: packageLabels.results,
   };
 }
 
@@ -701,6 +730,24 @@ function OrderBusinessForm({
             <Info label="货物摘要" value={`${order.cargo_description || "未填写"} · ${order.pieces} 件 · ${order.gross_weight_kg} KG · ${order.volume_cbm} CBM`} />
             <Info label="备注" value={order.special_instructions} />
           </div>
+          {data.packageLabels.length > 0 && (
+            <section className="order-package-labels" aria-label="仓库货物标签">
+              <header>
+                <div><strong>货物标签</strong><small>境外仓继续扫描以下国内仓标签；标签出库后仍然有效。</small></div>
+                <span>{data.packageLabels.length} 张</span>
+              </header>
+              <div className="order-package-label-list">
+                {data.packageLabels.map((label) => (
+                  <div className="order-package-label-row" key={label.id}>
+                    <div><code>{label.barcode}</code><small>{label.package_number}</small></div>
+                    <div><strong>{label.cargo_name || "未关联货物明细"}</strong><small>{label.pieces} 件 · {Number(label.weight_kg || 0).toFixed(2)} KG · {Number(label.volume_cbm || 0).toFixed(3)} CBM</small></div>
+                    <div><strong>{label.warehouse_name || "仓库待确认"}</strong><small>{[label.zone_name,label.location_name].filter(Boolean).join(" / ") || "库位待确认"}</small></div>
+                    <span className={`status-pill ${label.status === "dispatched" ? "success" : label.status === "exception" ? "danger" : ""}`}>{warehousePackageStatusLabel(label.status)}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
         </section>
 
         <div className="order-form-workflow-sections">
@@ -2239,6 +2286,17 @@ function OrderNextAction({
       </Link>
     </section>
   );
+}
+function warehousePackageStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    in_stock: "在库，标签有效",
+    allocated: "已分配，标签有效",
+    dispatched: "已出库，标签有效",
+    exception: "异常冻结",
+    picked_up: "已提货，标签留档",
+    cancelled: "已作废",
+  };
+  return labels[status] || status;
 }
 const businessNatureLabels: Record<string, string> = {
   export: "出口",
