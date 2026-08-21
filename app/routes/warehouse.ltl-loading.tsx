@@ -94,6 +94,15 @@ const stockBaseSql = `
       AND wp.warehouse_id=? AND wp.status IN ('in_stock','allocated')
   )`;
 
+const batchPageBaseSql = `
+  FROM transport_batches b
+  JOIN transport_batch_orders bo ON bo.batch_id=b.id AND bo.organization_id=b.organization_id AND bo.status!='removed'
+  JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
+  JOIN customers c ON c.id=o.customer_id
+  LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id
+  WHERE b.organization_id=? AND b.warehouse_id=?
+    AND b.batch_number LIKE 'PZ-%' AND b.status IN ('planning','loading')`;
+
 export async function loader({ request }: Route.LoaderArgs) {
   const user = await requireSessionUser(request, "warehouse.view", "warehouse");
   const warehouseContext = await loadWarehouseContext(request, user);
@@ -137,13 +146,32 @@ export async function loader({ request }: Route.LoaderArgs) {
     : "";
   const baseBindings = [user.organizationId, warehouse.id];
   const totalRow = await env.DB.prepare(
-    `SELECT COUNT(*) total ${stockBaseSql}${filterClause}`,
+    `SELECT COUNT(DISTINCT b.id) total ${batchPageBaseSql}${filterClause}`,
   )
     .bind(...baseBindings, ...filterBindings)
     .first<{ total: number }>();
   const total = totalRow?.total ?? 0;
   const pages = Math.max(1, Math.ceil(total / pageSize));
   const safePage = Math.min(page, pages);
+
+  const pageBatches = await env.DB.prepare(
+    `SELECT b.id
+    ${batchPageBaseSql}${filterClause}
+    GROUP BY b.id
+    ORDER BY MAX(b.updated_at) DESC
+    LIMIT ? OFFSET ?`,
+  )
+    .bind(
+      ...baseBindings,
+      ...filterBindings,
+      pageSize,
+      (safePage - 1) * pageSize,
+    )
+    .all<{ id: string }>();
+  const pageBatchIds = pageBatches.results.map((item) => item.id);
+  const pageBatchClause = pageBatchIds.length
+    ? ` AND b.id IN (${pageBatchIds.map(() => "?").join(",")})`
+    : " AND 1=0";
 
   const [rows, options, tasks, routeOptions] = await Promise.all([
     env.DB.prepare(
@@ -161,8 +189,14 @@ export async function loader({ request }: Route.LoaderArgs) {
         EXISTS(SELECT 1 FROM warehouse_sorting_batches sb JOIN shipments ss ON ss.id=sb.shipment_id WHERE sb.organization_id=o.organization_id AND ss.order_id=o.id AND sb.status='verified') sorting_ready,
         EXISTS(SELECT 1 FROM warehouse_exceptions we JOIN shipments es ON es.id=we.shipment_id WHERE we.organization_id=o.organization_id AND es.order_id=o.id AND we.status IN ('open','processing')) has_exception,
         EXISTS(SELECT 1 FROM warehouse_dispatch_items di JOIN warehouse_dispatches wd ON wd.id=di.dispatch_id AND wd.status!='cancelled' JOIN warehouse_packages dp ON dp.id=di.package_id JOIN shipments ds ON ds.id=dp.shipment_id WHERE wd.organization_id=o.organization_id AND ds.order_id=o.id AND dp.warehouse_id=?) active_dispatch
-      ${stockBaseSql}${filterClause}
-      ORDER BY CASE WHEN b.id IS NULL THEN 1 ELSE 0 END,b.updated_at DESC,o.updated_at DESC LIMIT ? OFFSET ?`,
+      FROM transport_batches b
+      JOIN transport_batch_orders bo ON bo.batch_id=b.id AND bo.organization_id=b.organization_id AND bo.status!='removed'
+      JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
+      JOIN customers c ON c.id=o.customer_id
+      LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id
+      WHERE b.organization_id=? AND b.warehouse_id=?
+        AND b.batch_number LIKE 'PZ-%' AND b.status IN ('planning','loading')${pageBatchClause}
+      ORDER BY b.updated_at DESC,bo.sequence_no,o.updated_at DESC`,
     )
       .bind(
         warehouse.id,
@@ -172,10 +206,9 @@ export async function loader({ request }: Route.LoaderArgs) {
         warehouse.id,
         warehouse.id,
         warehouse.id,
-        ...baseBindings,
-        ...filterBindings,
-        pageSize,
-        (safePage - 1) * pageSize,
+        user.organizationId,
+        warehouse.id,
+        ...pageBatchIds,
       )
       .all<CargoRow>(),
     env.DB.prepare(
@@ -644,6 +677,20 @@ export default function WarehouseLtlLoading({
   const selectedBatch = loaderData.rows.find(
     (row) => row.batch_id === selectedBatchId,
   );
+  const batchGroups = useMemo(() => {
+    const groups = new Map<string, CargoRow[]>();
+    for (const row of loaderData.rows) {
+      if (!row.batch_id) continue;
+      const group = groups.get(row.batch_id) ?? [];
+      group.push(row);
+      groups.set(row.batch_id, group);
+    }
+    return [...groups.entries()].map(([batchId, rows]) => ({
+      batchId,
+      rows,
+      lead: rows[0],
+    }));
+  }, [loaderData.rows]);
   const totals = useMemo(
     () =>
       selected.reduce(
@@ -657,61 +704,35 @@ export default function WarehouseLtlLoading({
       ),
     [selected],
   );
-  const toggle = (row: CargoRow, checked: boolean) => {
-    if (!checked)
-      return setSelected((current) =>
-        current.filter((item) => item.orderId !== row.order_id),
+  const selectBatch = (batchRows: CargoRow[], checked: boolean) => {
+    const lead = batchRows[0];
+    if (!lead?.batch_id || !lead.batch_number) return;
+    if (!checked) {
+      setSelected((current) =>
+        current.filter((item) => item.batchId !== lead.batch_id),
       );
-    const batchId = row.batch_id,
-      batchNumber = row.batch_number;
+      return;
+    }
+    if (selectedBatchId && selectedBatchId !== lead.batch_id) return;
     if (
-      !batchId ||
-      !batchNumber ||
-      stockBlockers(row, loaderData.warehouse.id).length
+      batchRows.some(
+        (row) => stockBlockers(row, loaderData.warehouse.id).length > 0,
+      )
     )
       return;
-    if (selectedBatchId && selectedBatchId !== batchId) return;
-    setSelected((current) =>
-      current.some((item) => item.orderId === row.order_id)
-        ? current
-        : [
-            ...current,
-            {
-              orderId: row.order_id,
-              orderNumber: row.order_number,
-              batchId,
-              batchNumber,
-              batchOrderCount: row.batch_order_count,
-              packages: row.package_count,
-              pieces: row.pieces,
-              weight: row.weight_kg,
-              volume: row.volume_cbm,
-            },
-          ],
-    );
-  };
-  const selectBatch = (batchId: string) => {
-    const next: Selection[] = [];
-    for (const row of loaderData.rows) {
-      if (
-        row.batch_id !== batchId ||
-        !row.batch_number ||
-        stockBlockers(row, loaderData.warehouse.id).length
-      )
-        continue;
-      next.push({
+    setSelected(
+      batchRows.map((row) => ({
         orderId: row.order_id,
         orderNumber: row.order_number,
-        batchId,
-        batchNumber: row.batch_number,
-        batchOrderCount: row.batch_order_count,
+        batchId: lead.batch_id!,
+        batchNumber: lead.batch_number!,
+        batchOrderCount: lead.batch_order_count,
         packages: row.package_count,
         pieces: row.pieces,
         weight: row.weight_kg,
         volume: row.volume_cbm,
-      });
-    }
-    setSelected(next);
+      })),
+    );
   };
   const optionValues = <K extends keyof (typeof loaderData.options)[number]>(
     key: K,
@@ -1002,13 +1023,12 @@ export default function WarehouseLtlLoading({
       <section className="panel">
         <div className="panel-header">
           <div>
-            <h2>当前仓库全部在库货物</h2>
+            <h2>当前仓库待装车配载单</h2>
             <p>
-              默认显示全部在库货物；只有已形成 PZ
-              配载单且满足装车条件的拼车订单可以勾选。
+              同一张 PZ 配载单的全部订单集中显示；勾选一次即可整批生成装车任务。
             </p>
           </div>
-          <span className="status-pill">{loaderData.total} 票</span>
+          <span className="status-pill">{loaderData.total} 张配载单</span>
         </div>
         <div className="table-wrap ltl-loading-table">
           <table>
@@ -1026,174 +1046,195 @@ export default function WarehouseLtlLoading({
               </tr>
             </thead>
             <tbody>
-              {loaderData.rows.map((row) => {
-                const blockers = stockBlockers(row, loaderData.warehouse.id);
-                const checked = selected.some(
-                  (item) => item.orderId === row.order_id,
+              {batchGroups.map(({ batchId, rows, lead }) => {
+                const blockedOrders = rows.flatMap((row) =>
+                  stockBlockers(row, loaderData.warehouse.id).map(
+                    (reason) => `${row.order_number}：${reason}`,
+                  ),
+                );
+                const selectedOrderIds = new Set(
+                  selected
+                    .filter((item) => item.batchId === batchId)
+                    .map((item) => item.orderId),
+                );
+                const checked = rows.every((row) =>
+                  selectedOrderIds.has(row.order_id),
                 );
                 const batchMismatch = Boolean(
-                  selectedBatchId && selectedBatchId !== row.batch_id,
+                  selectedBatchId && selectedBatchId !== batchId,
                 );
-                const disabled = blockers.length > 0 || batchMismatch;
+                const disabled = blockedOrders.length > 0 || batchMismatch;
+                const batchTotals = rows.reduce(
+                  (sum, row) => ({
+                    packages: sum.packages + row.package_count,
+                    pieces: sum.pieces + row.pieces,
+                    weight: sum.weight + row.weight_kg,
+                    volume: sum.volume + row.volume_cbm,
+                  }),
+                  { packages: 0, pieces: 0, weight: 0, volume: 0 },
+                );
+                const locations = [
+                  ...new Set(
+                    rows.flatMap((row) =>
+                      (row.location_names || "")
+                        .split(",")
+                        .map((item) => item.trim())
+                        .filter(Boolean),
+                    ),
+                  ),
+                ];
                 return (
-                  <tr
-                    key={row.order_id}
-                    className={checked ? "selected-row" : ""}
-                  >
+                  <tr key={batchId} className={checked ? "selected-row" : ""}>
                     <td>
                       <input
                         type="checkbox"
                         checked={checked}
                         disabled={disabled}
-                        onChange={(event) => toggle(row, event.target.checked)}
-                        aria-label={`选择订单 ${row.order_number}`}
+                        onChange={(event) =>
+                          selectBatch(rows, event.target.checked)
+                        }
+                        aria-label={`整批选择配载单 ${lead.batch_number}`}
                       />
+                      <small>整批</small>
                     </td>
                     <td>
-                      {blockers.length ? (
+                      {blockedOrders.length ? (
                         <>
                           <span className="status-pill off">暂不可装车</span>
                           <small className="danger-text">
-                            {blockers.join("；")}
+                            {blockedOrders.join("；")}
                           </small>
                         </>
                       ) : (
-                        <span className="status-pill success">可生成任务</span>
-                      )}
-                    </td>
-                    <td>
-                      {row.batch_id && row.batch_number ? (
                         <>
-                          <strong>{row.batch_number}</strong>
-                          <small>
-                            {row.batch_order_count} 票 ·{" "}
-                            <button
-                              type="button"
-                              className="link-button"
-                              disabled={disabled}
-                              onClick={() => selectBatch(row.batch_id!)}
-                            >
-                              选择本页同批订单
-                            </button>
-                          </small>
+                          <span className="status-pill success">
+                            整批可装车
+                          </span>
+                          <small>勾选一次即选择全部货物</small>
                         </>
-                      ) : (
-                        <span className="off">尚无 PZ 配载单</span>
                       )}
                     </td>
                     <td>
-                      <strong>{row.order_number}</strong>
-                      <small>{row.customer_name}</small>
+                      <strong>{lead.batch_number}</strong>
+                      <small>{rows.length} 票订单 · 同一装车任务</small>
                     </td>
                     <td>
-                      <strong>{row.cargo_names || "未填写货名"}</strong>
+                      <div className="ltl-batch-order-list">
+                        {rows.map((row) => (
+                          <div key={row.order_id}>
+                            <strong>{row.order_number}</strong>
+                            <small>{row.customer_name}</small>
+                          </div>
+                        ))}
+                      </div>
                     </td>
                     <td>
-                      {row.package_count} 包装 · {row.pieces} 件
+                      <div className="ltl-batch-cargo-list">
+                        {rows.map((row) => (
+                          <div key={row.order_id}>
+                            <strong>{row.cargo_names || "未填写货名"}</strong>
+                            <small>{row.order_number}</small>
+                          </div>
+                        ))}
+                      </div>
+                    </td>
+                    <td>
+                      {batchTotals.packages} 包装 · {batchTotals.pieces} 件
                       <small>
-                        {row.weight_kg.toFixed(2)} KG ·{" "}
-                        {row.volume_cbm.toFixed(3)} CBM
+                        {batchTotals.weight.toFixed(2)} KG ·{" "}
+                        {batchTotals.volume.toFixed(3)} CBM
                       </small>
                     </td>
                     <td>
-                      {row.overseas_warehouse_name || "目的仓未命名"}
+                      {lead.overseas_warehouse_name || "目的仓未命名"}
                       <small>
                         {[
-                          row.destination_country,
-                          row.destination_state,
-                          row.destination_city,
+                          lead.destination_country,
+                          lead.destination_state,
+                          lead.destination_city,
                         ]
                           .filter(Boolean)
                           .join(" ")}
                       </small>
                     </td>
                     <td>
-                      {row.batch_id && row.batch_number ? (
-                        <div className="ltl-route-cell">
-                          <Modal
-                            title={`口岸与清关 · ${row.batch_number}`}
-                            triggerLabel={row.border_port || "未填口岸"}
-                            triggerClassName={`ltl-route-cell-button ${row.border_port ? "configured" : "missing"}`}
-                            size="wide"
-                            closeSignal={actionData?.success}
-                          >
-                            <Form
-                              method="post"
-                              className="stack ltl-route-form"
+                      <div className="ltl-route-cell">
+                        <Modal
+                          title={`口岸与清关 · ${lead.batch_number}`}
+                          triggerLabel={lead.border_port || "未填口岸"}
+                          triggerClassName={`ltl-route-cell-button ${lead.border_port ? "configured" : "missing"}`}
+                          size="wide"
+                          closeSignal={actionData?.success}
+                        >
+                          <Form method="post" className="stack ltl-route-form">
+                            <input type="hidden" name="intent" value="route" />
+                            <input
+                              type="hidden"
+                              name="batchId"
+                              value={batchId}
+                            />
+                            <div className="ltl-route-context">
+                              <span>当前配载单</span>
+                              <strong>{lead.batch_number}</strong>
+                              <small>{rows.length} 票订单</small>
+                            </div>
+                            <div className="form-grid compact">
+                              <label className="field">
+                                <span>出境口岸 *</span>
+                                <select
+                                  name="borderPort"
+                                  defaultValue={lead.border_port || ""}
+                                  required
+                                >
+                                  <option value="">请选择出境口岸</option>
+                                  {loaderData.borderPorts.map((item) => (
+                                    <option key={item.code} value={item.code}>
+                                      {item.name} · {item.code}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                              <label className="field">
+                                <span>清关地 *</span>
+                                <select
+                                  name="customsLocation"
+                                  defaultValue={lead.customs_location || ""}
+                                  required
+                                >
+                                  <option value="">请选择清关地</option>
+                                  {loaderData.customsPlaces.map((item) => (
+                                    <option key={item.code} value={item.code}>
+                                      {item.name} · {item.code}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                            </div>
+                            <div className="alert info">
+                              保存后同步到该配载单全部订单；生成装车任务前仍可修改。
+                            </div>
+                            <button
+                              className="primary warehouse-primary"
+                              disabled={busy}
                             >
-                              <input
-                                type="hidden"
-                                name="intent"
-                                value="route"
-                              />
-                              <input
-                                type="hidden"
-                                name="batchId"
-                                value={row.batch_id}
-                              />
-                              <div className="ltl-route-context">
-                                <span>当前配载单</span>
-                                <strong>{row.batch_number}</strong>
-                                <small>{row.batch_order_count} 票订单</small>
-                              </div>
-                              <div className="form-grid compact">
-                                <label className="field">
-                                  <span>出境口岸 *</span>
-                                  <select
-                                    name="borderPort"
-                                    defaultValue={row.border_port || ""}
-                                    required
-                                  >
-                                    <option value="">请选择出境口岸</option>
-                                    {loaderData.borderPorts.map((item) => (
-                                      <option key={item.code} value={item.code}>
-                                        {item.name} · {item.code}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </label>
-                                <label className="field">
-                                  <span>清关地 *</span>
-                                  <select
-                                    name="customsLocation"
-                                    defaultValue={row.customs_location || ""}
-                                    required
-                                  >
-                                    <option value="">请选择清关地</option>
-                                    {loaderData.customsPlaces.map((item) => (
-                                      <option key={item.code} value={item.code}>
-                                        {item.name} · {item.code}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </label>
-                              </div>
-                              <div className="alert info">
-                                保存后同步到该配载单全部订单；生成装车任务前仍可修改。
-                              </div>
-                              <button
-                                className="primary warehouse-primary"
-                                disabled={busy}
-                              >
-                                保存口岸与清关地
-                              </button>
-                            </Form>
-                          </Modal>
-                          <small>{row.customs_location || "未填清关地"}</small>
-                        </div>
-                      ) : (
-                        <span className="off">未生成配载单</span>
-                      )}
+                              保存口岸与清关地
+                            </button>
+                          </Form>
+                        </Modal>
+                        <small>{lead.customs_location || "未填清关地"}</small>
+                      </div>
                     </td>
-                    <td>{row.location_names || "—"}</td>
+                    <td>{locations.join("、") || "—"}</td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
         </div>
-        {!loaderData.rows.length && (
-          <p className="empty-state">当前仓库没有符合筛选条件的在库货物。</p>
+        {!batchGroups.length && (
+          <p className="empty-state">
+            当前仓库没有符合筛选条件的待装车配载单。
+          </p>
         )}
         <Pagination loaderData={loaderData} />
       </section>

@@ -6449,6 +6449,37 @@ body.modal-scroll-locked {
   white-space: normal;
 }
 
+.ltl-batch-order-list,
+.ltl-batch-cargo-list {
+  display: grid;
+  min-width: 190px;
+}
+
+.ltl-batch-order-list > div,
+.ltl-batch-cargo-list > div {
+  display: grid;
+  gap: 2px;
+  padding: 7px 0;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.ltl-batch-order-list > div:first-child,
+.ltl-batch-cargo-list > div:first-child {
+  padding-top: 0;
+}
+
+.ltl-batch-order-list > div:last-child,
+.ltl-batch-cargo-list > div:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.ltl-loading-table td:first-child small {
+  margin-top: 4px;
+  color: #64748b;
+  font-size: 11px;
+}
+
 .ltl-route-cell {
   display: grid;
   gap: 4px;
