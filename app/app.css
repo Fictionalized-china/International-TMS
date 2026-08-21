@@ -6195,8 +6195,250 @@ body.modal-scroll-locked {
   grid-column: span 2;
 }
 
+.ltl-filter-panel {
+  padding: 0;
+  overflow: hidden;
+}
+
+.consolidation-filter-form {
+  display: grid;
+}
+
+.consolidation-filter-primary {
+  display: grid;
+  grid-template-columns: minmax(260px, 2fr) minmax(170px, 1fr) minmax(140px, 0.8fr) minmax(92px, 0.45fr) auto;
+  gap: 12px;
+  align-items: end;
+  padding: 16px 18px;
+}
+
+.consolidation-filter-primary label,
+.consolidation-advanced-filters label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.consolidation-filter-primary label > span,
+.consolidation-advanced-filters label > span {
+  color: #526176;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.consolidation-filter-primary input,
+.consolidation-filter-primary select,
+.consolidation-advanced-filters input,
+.consolidation-advanced-filters select {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+}
+
+.consolidation-filter-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.consolidation-filter-actions .primary,
+.consolidation-filter-actions .secondary {
+  min-width: 76px;
+  min-height: 42px;
+  justify-content: center;
+}
+
+.consolidation-advanced-filters {
+  border-top: 1px solid #dbe4ef;
+  background: #f8fafc;
+}
+
+.consolidation-advanced-filters summary {
+  padding: 10px 18px;
+  color: #31506f;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  list-style-position: inside;
+}
+
+.consolidation-advanced-filters[open] summary {
+  border-bottom: 1px solid #dbe4ef;
+}
+
+.consolidation-advanced-filters > div {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(130px, 1fr));
+  gap: 12px;
+  padding: 14px 18px 16px;
+}
+
 .ltl-loading-table table {
   min-width: 1280px;
+}
+
+.consolidation-stock-table table {
+  min-width: 1580px;
+}
+
+.consolidation-stock-table th:nth-child(2),
+.consolidation-stock-table td:nth-child(2) {
+  width: 210px;
+}
+
+.consolidation-stock-table th:nth-child(3),
+.consolidation-stock-table td:nth-child(3) {
+  width: 220px;
+}
+
+.consolidation-stock-table th:last-child,
+.consolidation-stock-table td:last-child {
+  width: 88px;
+  text-align: center;
+}
+
+.consolidation-document-status {
+  display: grid;
+  gap: 7px;
+  justify-items: start;
+}
+
+.consolidation-document-status > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.document-state {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 7px;
+  border: 1px solid #f0c8bb;
+  border-radius: 4px;
+  background: #fff4ef;
+  color: #9a3412;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.document-state.waiting {
+  border-color: #eed29a;
+  background: #fff8e8;
+  color: #8a4b08;
+}
+
+.document-state.ready {
+  border-color: #acd7c3;
+  background: #ecf8f2;
+  color: #08754b;
+}
+
+.document-state.rejected {
+  border-color: #eab3b3;
+  background: #fff0f0;
+  color: #a52222;
+}
+
+.warehouse-document-upload-workbench {
+  display: grid;
+  gap: 16px;
+}
+
+.warehouse-document-upload-workbench > header {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr 1.6fr;
+  border: 1px solid #d7e1ed;
+  background: #f8fafc;
+}
+
+.warehouse-document-upload-workbench > header > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 11px 13px;
+  border-right: 1px solid #d7e1ed;
+}
+
+.warehouse-document-upload-workbench > header > div:last-child {
+  border-right: 0;
+}
+
+.warehouse-document-upload-workbench > header span,
+.warehouse-document-slot-heading small {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.warehouse-document-upload-workbench > header strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.warehouse-document-upload-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.warehouse-document-upload-grid > article {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #d7e1ed;
+  border-top: 3px solid #d2a04b;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.warehouse-document-upload-grid > article.ready {
+  border-top-color: #0b8a5a;
+}
+
+.warehouse-document-slot-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.warehouse-document-slot-heading > div {
+  display: grid;
+  gap: 4px;
+}
+
+.warehouse-current-document {
+  overflow: hidden;
+  color: #075985;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.warehouse-document-upload-form {
+  display: grid;
+  gap: 10px;
+}
+
+.warehouse-document-upload-form label {
+  display: grid;
+  gap: 5px;
+}
+
+.warehouse-document-upload-form label > span {
+  color: #526176;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.warehouse-document-upload-form input[type="file"] {
+  width: 100%;
+  padding: 8px;
+  border: 1px dashed #aebdce;
+  background: #f8fafc;
 }
 
 .ltl-loading-table th:first-child,
@@ -6248,6 +6490,10 @@ body.modal-scroll-locked {
 
 @media (max-width: 1100px) {
   .ltl-loading-filters { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
+  .consolidation-filter-primary { grid-template-columns: 2fr 1fr 1fr; }
+  .consolidation-filter-actions { grid-column: span 2; }
+  .consolidation-advanced-filters > div { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
+  .warehouse-document-upload-grid { grid-template-columns: 1fr; }
   .ltl-selection-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ltl-selection-summary > div:nth-child(2) { border-right: 0; }
 }
@@ -6255,6 +6501,12 @@ body.modal-scroll-locked {
 @media (max-width: 720px) {
   .ltl-loading-header { align-items: stretch; flex-direction: column; }
   .ltl-loading-filters { grid-template-columns: 1fr 1fr; }
+  .consolidation-filter-primary { grid-template-columns: 1fr; }
+  .consolidation-filter-actions { grid-column: auto; }
+  .consolidation-advanced-filters > div { grid-template-columns: 1fr 1fr; }
+  .warehouse-document-upload-workbench > header { grid-template-columns: 1fr; }
+  .warehouse-document-upload-workbench > header > div { border-right: 0; border-bottom: 1px solid #d7e1ed; }
+  .warehouse-document-upload-workbench > header > div:last-child { border-bottom: 0; }
   .ltl-filter-search { grid-column: span 2; }
   .ltl-selection-summary { grid-template-columns: 1fr; }
   .ltl-selection-summary > div { border-right: 0; border-bottom: 1px solid #d8e1ec; }

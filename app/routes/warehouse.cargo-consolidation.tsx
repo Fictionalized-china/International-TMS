@@ -6,12 +6,19 @@ import { Modal } from "../components/Modal";
 import { writeAudit } from "../lib/audit.server";
 import { requireSessionUser } from "../lib/auth.server";
 import { ensureOrderModules, syncOrderWorkflowSnapshot } from "../lib/order-modules.server";
+import { maxInlineOrderDocumentBytes } from "../lib/order-documents";
 import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
 import { valueOf } from "../lib/validation";
 
 const DEFAULT_PAGE_SIZE=30;
 const PAGE_SIZES=[30,50,100];
+const REQUIRED_LOADING_DOCUMENTS=[
+  {code:"commercial_invoice",name:"发票"},
+  {code:"packing_list",name:"装箱单"},
+  {code:"customs_document",name:"报关单"},
+] as const;
+type RequiredLoadingDocumentCode=(typeof REQUIRED_LOADING_DOCUMENTS)[number]["code"];
 
 type StockRow={
   order_id:string;order_number:string;business_type:string;customer_name:string;
@@ -20,6 +27,7 @@ type StockRow={
   exit_port:string|null;customs_location:string|null;package_count:number;pieces:number;
   weight_kg:number;volume_cbm:number;location_names:string|null;cargo_ready:number;
   has_exception:number;active_dispatch:number;active_batch_id:string|null;active_batch_number:string|null;
+  invoice_ready:number;packing_list_ready:number;customs_document_ready:number;
 };
 
 type BatchRow={
@@ -30,6 +38,7 @@ type BatchRow={
 };
 
 type BatchOrder={batch_id:string;order_id:string;order_number:string;customer_name:string;cargo_names:string|null;weight_kg:number;volume_cbm:number};
+type OrderDocumentRow={order_id:string;attachment_id:string;document_category:RequiredLoadingDocumentCode;file_name:string;data_url:string;review_status:string;created_at:string};
 type Selection={orderId:string;orderNumber:string;customerName:string;packages:number;pieces:number;weight:number;volume:number};
 type CandidateState=StockRow&{origin_country:string;origin_state:string|null;origin_city:string};
 type TargetBatch={id:string;batch_number:string;warehouse_id:string;status:string;destination_location:string;border_port:string|null;customs_location:string|null};
@@ -53,6 +62,20 @@ const stockCtes=`WITH stock AS (
     JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id JOIN warehouse_packages p ON p.id=di.package_id
     JOIN shipments s ON s.id=p.shipment_id
     WHERE d.organization_id=? AND p.warehouse_id=? AND d.status!='cancelled'
+  ), latest_documents AS (
+    SELECT m.order_id,m.document_category,m.review_status,
+      ROW_NUMBER() OVER(PARTITION BY m.order_id,m.document_category ORDER BY a.created_at DESC,a.id DESC) row_no
+    FROM order_document_metadata m
+    JOIN order_attachments a ON a.id=m.attachment_id AND a.organization_id=m.organization_id
+    WHERE m.organization_id=? AND m.document_category IN ('commercial_invoice','packing_list','customs_document')
+  ), document_gate AS (
+    SELECT order_id,
+      MAX(CASE WHEN document_category='commercial_invoice' AND review_status IN ('approved','archived') THEN 1 ELSE 0 END) invoice_ready,
+      MAX(CASE WHEN document_category='packing_list' AND review_status IN ('approved','archived') THEN 1 ELSE 0 END) packing_list_ready,
+      MAX(CASE WHEN document_category='customs_document' AND review_status IN ('approved','archived') THEN 1 ELSE 0 END) customs_document_ready
+    FROM latest_documents
+    WHERE row_no=1
+    GROUP BY order_id
   ), active_batch AS (
     SELECT bo.order_id,b.id batch_id,b.batch_number,
       ROW_NUMBER() OVER(PARTITION BY bo.order_id ORDER BY b.updated_at DESC) row_no
@@ -64,9 +87,10 @@ const stockFrom=` FROM stock st JOIN transport_orders o ON o.id=st.order_id
   LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id
   LEFT JOIN active_batch ab ON ab.order_id=o.id AND ab.row_no=1
   LEFT JOIN ready rr ON rr.order_id=o.id LEFT JOIN exception_orders eo ON eo.order_id=o.id
-  LEFT JOIN dispatch_orders dd ON dd.order_id=o.id WHERE 1=1`;
+  LEFT JOIN dispatch_orders dd ON dd.order_id=o.id
+  LEFT JOIN document_gate dg ON dg.order_id=o.id WHERE 1=1`;
 
-function stockBindings(organizationId:string,warehouseId:string){return[organizationId,warehouseId,organizationId,warehouseId,organizationId,organizationId,warehouseId,organizationId]}
+function stockBindings(organizationId:string,warehouseId:string){return[organizationId,warehouseId,organizationId,warehouseId,organizationId,organizationId,warehouseId,organizationId,organizationId]}
 function rowSelectSql(){return`SELECT o.id order_id,o.order_number,o.business_type,c.name customer_name,
     (SELECT GROUP_CONCAT(NULLIF(TRIM(i.cargo_name_cn),''),'、') FROM order_cargo_items i WHERE i.organization_id=o.organization_id AND i.order_id=o.id) cargo_names,
     o.overseas_warehouse_id,ow.name overseas_warehouse_name,o.destination_country,o.destination_state,o.destination_city,
@@ -74,7 +98,10 @@ function rowSelectSql(){return`SELECT o.id order_id,o.order_number,o.business_ty
     CASE WHEN rr.order_id IS NULL THEN 0 ELSE 1 END cargo_ready,
     CASE WHEN eo.order_id IS NULL THEN 0 ELSE 1 END has_exception,
     CASE WHEN dd.order_id IS NULL THEN 0 ELSE 1 END active_dispatch,
-    ab.batch_id active_batch_id,ab.batch_number active_batch_number`}
+    ab.batch_id active_batch_id,ab.batch_number active_batch_number,
+    COALESCE(dg.invoice_ready,0) invoice_ready,
+    COALESCE(dg.packing_list_ready,0) packing_list_ready,
+    COALESCE(dg.customs_document_ready,0) customs_document_ready`}
 
 export async function loader({request}:Route.LoaderArgs){
   const user=await requireSessionUser(request,"warehouse.view","warehouse");
@@ -88,8 +115,8 @@ export async function loader({request}:Route.LoaderArgs){
   const like=(column:string,value:string)=>{if(value){clauses.push(`${column} LIKE ?`);bindings.push(`%${value}%`)}};
   like("COALESCE(ow.name,'')",filters.warehouse);like("o.destination_country",filters.country);like("COALESCE(o.destination_state,'')",filters.state);like("o.destination_city",filters.city);like("COALESCE(o.exit_port,'')",filters.borderPort);like("COALESCE(o.customs_location,'')",filters.customs);like("c.name",filters.customer);
   if(filters.keyword){clauses.push("(o.order_number LIKE ? OR c.name LIKE ? OR COALESCE(o.cargo_description,'') LIKE ? OR EXISTS(SELECT 1 FROM order_cargo_items qi WHERE qi.order_id=o.id AND COALESCE(qi.cargo_name_cn,'') LIKE ?))");bindings.push(...Array(4).fill(`%${filters.keyword}%`))}
-  if(filters.eligibility==="eligible")clauses.push("o.business_type='ltl' AND rr.order_id IS NOT NULL AND eo.order_id IS NULL AND dd.order_id IS NULL AND ab.batch_id IS NULL");
-  if(filters.eligibility==="blocked")clauses.push("(o.business_type!='ltl' OR rr.order_id IS NULL OR eo.order_id IS NOT NULL OR dd.order_id IS NOT NULL OR ab.batch_id IS NOT NULL)");
+  if(filters.eligibility==="eligible")clauses.push("o.business_type='ltl' AND rr.order_id IS NOT NULL AND eo.order_id IS NULL AND dd.order_id IS NULL AND ab.batch_id IS NULL AND COALESCE(dg.invoice_ready,0)=1 AND COALESCE(dg.packing_list_ready,0)=1 AND COALESCE(dg.customs_document_ready,0)=1");
+  if(filters.eligibility==="blocked")clauses.push("(o.business_type!='ltl' OR rr.order_id IS NULL OR eo.order_id IS NOT NULL OR dd.order_id IS NOT NULL OR ab.batch_id IS NOT NULL OR COALESCE(dg.invoice_ready,0)=0 OR COALESCE(dg.packing_list_ready,0)=0 OR COALESCE(dg.customs_document_ready,0)=0)");
   const filterSql=clauses.length?` AND ${clauses.join(" AND ")}`:"",baseBindings=stockBindings(user.organizationId,warehouse.id);
   const totalRow=await env.DB.prepare(`${stockCtes} SELECT COUNT(*) total ${stockFrom}${filterSql}`).bind(...baseBindings,...bindings).first<{total:number}>();
   const total=totalRow?.total??0,pages=Math.max(1,Math.ceil(total/pageSize)),safePage=Math.min(page,pages);
@@ -115,7 +142,15 @@ export async function loader({request}:Route.LoaderArgs){
       WHERE b.organization_id=? AND b.warehouse_id=? AND b.batch_number LIKE 'PZ-%' AND b.status!='cancelled'
       ORDER BY b.updated_at DESC,bo.sequence_no LIMIT 500`).bind(user.organizationId,warehouse.id).all<BatchOrder>(),
   ]);
-  return{user,warehouse,rows:rows.results,options:options.results,batches:batches.results,batchOrders:batchOrders.results,filters,page:safePage,pageSize,pages,total};
+  const orderIds=rows.results.map(row=>row.order_id);
+  const documents=orderIds.length
+    ?await env.DB.prepare(`SELECT m.order_id,m.attachment_id,m.document_category,a.file_name,a.data_url,m.review_status,a.created_at
+      FROM order_document_metadata m JOIN order_attachments a ON a.id=m.attachment_id
+      WHERE m.organization_id=? AND m.order_id IN (${orderIds.map(()=>"?").join(",")})
+        AND m.document_category IN ('commercial_invoice','packing_list','customs_document')
+      ORDER BY a.created_at DESC,a.id DESC`).bind(user.organizationId,...orderIds).all<OrderDocumentRow>()
+    :{results:[] as OrderDocumentRow[]};
+  return{user,warehouse,rows:rows.results,documents:documents.results,options:options.results,batches:batches.results,batchOrders:batchOrders.results,filters,page:safePage,pageSize,pages,total};
 }
 
 export async function action({request}:Route.ActionArgs){
@@ -123,6 +158,29 @@ export async function action({request}:Route.ActionArgs){
   const context=await loadWarehouseContext(request,user),warehouse=context.selected;
   await requireWarehouseAssignment(user,warehouse.id,"operator");
   const form=await request.formData(),intent=valueOf(form,"intent"),now=new Date().toISOString();
+  if(intent==="document_upload"){
+    const orderId=valueOf(form,"orderId"),documentCategory=valueOf(form,"documentCategory") as RequiredLoadingDocumentCode;
+    const documentType=REQUIRED_LOADING_DOCUMENTS.find(item=>item.code===documentCategory);
+    if(!documentType)return{formError:"请选择发票、装箱单或报关单"};
+    const file=form.get("attachment");
+    if(!(file instanceof File)||file.size<=0)return{formError:`请选择要上传的${documentType.name}`};
+    const fileError=validateDocumentFile(file);if(fileError)return{formError:fileError};
+    const order=await env.DB.prepare(`SELECT o.customer_id FROM transport_orders o
+      WHERE o.id=? AND o.organization_id=? AND EXISTS(
+        SELECT 1 FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id
+        WHERE p.organization_id=o.organization_id AND s.order_id=o.id AND p.warehouse_id=?
+          AND p.status IN ('in_stock','allocated'))`).bind(orderId,user.organizationId,warehouse.id).first<{customer_id:string}>();
+    if(!order)return{formError:"该订单当前不在本仓库，不能从这里上传配载资料"};
+    const attachmentId=crypto.randomUUID();
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO order_attachments(id,organization_id,order_id,customer_id,file_name,content_type,size_bytes,data_url,uploaded_by_user_id,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,'admin',?)")
+        .bind(attachmentId,user.organizationId,orderId,order.customer_id,file.name,file.type,file.size,await toDataUrl(file),user.userId,now),
+      env.DB.prepare("INSERT INTO order_document_metadata(attachment_id,organization_id,order_id,document_category,description,public_to_customer,review_status,updated_at) VALUES(?,?,?,?,?,0,'pending',?)")
+        .bind(attachmentId,user.organizationId,orderId,documentCategory,valueOf(form,"documentDescription").trim()||documentType.name,now),
+    ]);
+    await writeAudit({request,action:"warehouse.consolidation.document_upload",resourceType:"order_attachment",resourceId:attachmentId,organizationId:user.organizationId,actorUserId:user.userId,metadata:{warehouseId:warehouse.id,orderId,documentCategory,fileName:file.name}});
+    return{success:`${documentType.name}已上传，等待审核`,actionKind:"document_upload" as const,closeSignal:attachmentId};
+  }
   if(intent==="create"||intent==="add"){
     const orderIds=[...new Set(form.getAll("orderId").map(String).filter(Boolean))];
     if(intent==="create"&&orderIds.length<2)return{formError:"拼车配载至少需要选择 2 张完整订单"};
@@ -207,29 +265,147 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
   const[selected,setSelected]=useState<Selection[]>([]);
   useEffect(()=>{try{setSelected(JSON.parse(localStorage.getItem(storageKey)||"[]"))}catch{setSelected([])}},[storageKey]);
   useEffect(()=>{localStorage.setItem(storageKey,JSON.stringify(selected))},[storageKey,selected]);
-  useEffect(()=>{if(actionData?.success)setSelected([])},[actionData?.success]);
+  useEffect(()=>{if(actionData?.success&&!("actionKind" in actionData&&actionData.actionKind==="document_upload"))setSelected([])},[actionData]);
   const totals=useMemo(()=>selected.reduce((sum,row)=>({packages:sum.packages+row.packages,pieces:sum.pieces+row.pieces,weight:sum.weight+row.weight,volume:sum.volume+row.volume}),{packages:0,pieces:0,weight:0,volume:0}),[selected]);
   const selectedIds=new Set(selected.map(row=>row.orderId));
   const toggle=(row:StockRow,checked:boolean)=>setSelected(current=>checked?[...current.filter(item=>item.orderId!==row.order_id),toSelection(row)]:current.filter(item=>item.orderId!==row.order_id));
   const values=<K extends keyof (typeof loaderData.options)[number]>(key:K)=>[...new Set(loaderData.options.map(row=>row[key]).filter(Boolean) as string[])];
   const availableBatches=loaderData.batches.filter(batch=>!batch.has_started&&["planning","loading"].includes(batch.status));
+  const documentUploadSignal=actionData?.success&&"actionKind" in actionData&&actionData.actionKind==="document_upload"?actionData.closeSignal:undefined;
   return<>
     <header className="warehouse-page-header ltl-loading-header"><div><p className="eyebrow">CARGO CONSOLIDATION</p><h1>货物配载</h1><p>按仓库实收数据选择完整拼车订单，生成正式 PZ 配载单。</p></div><div className="page-actions"><button type="button" className="secondary" disabled={!selected.length} onClick={()=>setSelected([])}>清空选择</button>{selected.length>0&&availableBatches.length>0&&<Modal title="加入已有配载单" triggerLabel="加入已有配载单" triggerClassName="secondary" closeSignal={actionData?.success}><Form method="post" className="stack"><input type="hidden" name="intent" value="add"/>{selected.map(row=><input key={row.orderId} type="hidden" name="orderId" value={row.orderId}/>)}<label className="field"><span>目标配载单 *</span><select name="batchId" required><option value="">请选择</option>{availableBatches.map(batch=><option key={batch.id} value={batch.id}>{batch.batch_number} · {batch.destination_location}</option>)}</select></label><p>系统会再次校验目的仓、地区、口岸和清关地是否兼容。</p><button className="primary" disabled={busy}>确认加入</button></Form></Modal>}<Modal title="生成配载单" triggerLabel={`生成配载（${selected.length} 票）`} size="wide" closeSignal={actionData?.success}><ConsolidationForm selected={selected} totals={totals} busy={busy}/></Modal></div></header>
     {actionData?.formError&&<div className="alert error">{actionData.formError}</div>}{actionData?.success&&<div className="alert success">{actionData.success}{actionData.batchId&&<> · <Link to={`/admin/loading/${actionData.batchId}`}>打开配载单</Link></>}</div>}
     <section className="panel ltl-filter-panel"><FilterForm loaderData={loaderData} values={values}/></section>
-    <section className="panel"><div className="panel-header"><div><h2>当前仓库全部在库货物</h2><p>默认显示全部尚未出库货物；不可配载的订单保留显示并说明原因。</p></div><span className="status-pill">已选 {selected.length} / 在库 {loaderData.total} 票</span></div><div className="table-wrap ltl-loading-table"><table><thead><tr><th>选择</th><th>配载状态</th><th>订单 / 客户</th><th>货物</th><th>实收数据</th><th>境外目的仓 / 地区</th><th>口岸 / 清关地</th><th>库位</th></tr></thead><tbody>{loaderData.rows.map(row=>{const blockers=candidateBlockers(row),checked=selectedIds.has(row.order_id);return<tr key={row.order_id} className={checked?"selected-row":""}><td><input type="checkbox" checked={checked} disabled={blockers.length>0} onChange={event=>toggle(row,event.target.checked)} aria-label={`选择订单 ${row.order_number}`}/></td><td>{blockers.length?<><span className="status-pill off">不可配载</span><small className="danger-text">{blockers.join("；")}</small></>:<span className="status-pill success">可配载</span>}</td><td><strong>{row.order_number}</strong><small>{row.customer_name}</small></td><td><strong>{row.cargo_names||"未填写货名"}</strong></td><td>{row.package_count} 包装 · {row.pieces} 件<small>{row.weight_kg.toFixed(2)} KG · {row.volume_cbm.toFixed(3)} CBM</small></td><td>{row.overseas_warehouse_name||"目的仓未设置"}<small>{[row.destination_country,row.destination_state,row.destination_city].filter(Boolean).join(" ")}</small></td><td>{row.exit_port||"待补充"}<small>{row.customs_location||"待补充"}</small></td><td>{row.location_names||"—"}</td></tr>})}</tbody></table></div>{!loaderData.rows.length&&<p className="empty-state">当前仓库没有符合筛选条件的在库货物。</p>}<Pagination loaderData={loaderData}/></section>
+    <section className="panel consolidation-stock-panel">
+      <div className="panel-header">
+        <div>
+          <h2>当前仓库全部在库货物</h2>
+          <p>三项配载资料全部审核通过后，订单才会开放勾选。</p>
+        </div>
+        <span className="status-pill">已选 {selected.length} / 在库 {loaderData.total} 票</span>
+      </div>
+      <div className="table-wrap ltl-loading-table consolidation-stock-table">
+        <table>
+          <thead>
+            <tr>
+              <th>选择</th>
+              <th>配载状态</th>
+              <th>文件状态</th>
+              <th>订单 / 客户</th>
+              <th>货物</th>
+              <th>实收数据</th>
+              <th>境外目的仓 / 地区</th>
+              <th>口岸 / 清关地</th>
+              <th>库位</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loaderData.rows.map(row=>{
+              const blockers=candidateBlockers(row),checked=selectedIds.has(row.order_id);
+              const documents=latestDocumentsForOrder(loaderData.documents,row.order_id);
+              return <tr key={row.order_id} className={checked?"selected-row":""}>
+                <td><input type="checkbox" checked={checked} disabled={blockers.length>0} onChange={event=>toggle(row,event.target.checked)} aria-label={`选择订单 ${row.order_number}`}/></td>
+                <td>{blockers.length?<><span className="status-pill off">不可配载</span><small className="danger-text">{blockers.join("；")}</small></>:<span className="status-pill success">可配载</span>}</td>
+                <td><DocumentStatusCell row={row} documents={documents}/></td>
+                <td><strong>{row.order_number}</strong><small>{row.customer_name}</small></td>
+                <td><strong>{row.cargo_names||"未填写货名"}</strong></td>
+                <td>{row.package_count} 包装 · {row.pieces} 件<small>{row.weight_kg.toFixed(2)} KG · {row.volume_cbm.toFixed(3)} CBM</small></td>
+                <td>{row.overseas_warehouse_name||"目的仓未设置"}<small>{[row.destination_country,row.destination_state,row.destination_city].filter(Boolean).join(" ")}</small></td>
+                <td>{row.exit_port||"待补充"}<small>{row.customs_location||"待补充"}</small></td>
+                <td>{row.location_names||"—"}</td>
+                <td><WarehouseDocumentUploadModal row={row} documents={documents} busy={busy} closeSignal={documentUploadSignal}/></td>
+              </tr>
+            })}
+          </tbody>
+        </table>
+      </div>
+      {!loaderData.rows.length&&<p className="empty-state">当前仓库没有符合筛选条件的在库货物。</p>}
+      <Pagination loaderData={loaderData}/>
+    </section>
     <section className="panel"><div className="panel-header"><div><h2>当前仓库配载单</h2><p>装车开始前可以增加、移除订单或取消配载；开始装车后由配载单统一推进。</p></div></div><div className="table-wrap"><table><thead><tr><th>配载单</th><th>订单</th><th>实收汇总</th><th>目的地 / 口岸</th><th>计划装车</th><th>状态</th><th>操作</th></tr></thead><tbody>{loaderData.batches.map(batch=><tr key={batch.id}><td><strong>{batch.batch_number}</strong><small>{batch.batch_name}</small></td><td><strong>{batch.order_count} 票</strong><small>{batch.order_numbers}</small></td><td>{batch.total_weight.toFixed(2)} KG<small>{batch.total_volume.toFixed(3)} CBM</small></td><td>{batch.destination_location}<small>{batch.border_port||"口岸待补"} · {batch.customs_location||"清关地待补"}</small></td><td>{batch.planned_loading_at?new Date(batch.planned_loading_at).toLocaleString("zh-CN"):"待定"}</td><td><span className="status-pill">{batch.has_started?"已开始装车":batch.has_dispatch?"装车任务已生成":batch.status==="planning"?"配载已生成":"待装车"}</span></td><td><div className="button-row"><Link className="text-button" to={`/admin/loading/${batch.id}`}>打开</Link>{!batch.has_started&&<Modal title={`调整 ${batch.batch_number}`} triggerLabel="调整" triggerClassName="text-button" closeSignal={actionData?.success}><BatchAdjustment batch={batch} orders={loaderData.batchOrders.filter(row=>row.batch_id===batch.id)} busy={busy}/></Modal>}</div></td></tr>)}</tbody></table></div>{!loaderData.batches.length&&<p className="empty-state">当前仓库尚未生成配载单。</p>}</section>
   </>;
 }
 
 function ConsolidationForm({selected,totals,busy}:{selected:Selection[];totals:{packages:number;pieces:number;weight:number;volume:number};busy:boolean}){return<Form method="post" className="stack ltl-task-form"><input type="hidden" name="intent" value="create"/>{selected.map(row=><input key={row.orderId} type="hidden" name="orderId" value={row.orderId}/>)}<div className="ltl-selection-summary"><div><span>完整订单</span><strong>{selected.length} 票</strong></div><div><span>包装 / 件数</span><strong>{totals.packages} 包装 · {totals.pieces} 件</strong></div><div><span>实收重量</span><strong>{totals.weight.toFixed(2)} KG</strong></div><div><span>实收体积</span><strong>{totals.volume.toFixed(3)} CBM</strong></div></div><div className="table-wrap compact-selection-table"><table><thead><tr><th>订单</th><th>客户</th><th>重量</th><th>体积</th></tr></thead><tbody>{selected.map(row=><tr key={row.orderId}><td>{row.orderNumber}</td><td>{row.customerName}</td><td>{row.weight.toFixed(2)} KG</td><td>{row.volume.toFixed(3)} CBM</td></tr>)}</tbody></table></div><div className="form-grid compact"><label className="field"><span>配载单名称</span><input name="batchName" placeholder="选填，系统可自动生成"/></label><label className="field"><span>计划装车时间</span><input name="plannedLoadingAt" type="datetime-local"/></label><label className="field"><span>出境口岸</span><input name="borderPort" placeholder="选填或继承订单"/></label><label className="field"><span>清关地</span><input name="customsLocation" placeholder="选填或继承订单"/></label><label className="field span-2"><span>运输线路</span><textarea name="routeNotes" rows={2} placeholder="选填，多行填写"/></label><label className="field span-2"><span>备注</span><textarea name="notes" rows={2}/></label></div><div className="alert info">配载容量由人工判断。生成后订单将被锁定，承运商、车辆和司机可在配载单中后补。</div><button className="primary" disabled={busy||selected.length<2}>确认生成 PZ 配载单</button></Form>}
 function BatchAdjustment({batch,orders,busy}:{batch:BatchRow;orders:BatchOrder[];busy:boolean}){return<div className="stack"><div className="table-wrap"><table><thead><tr><th>订单</th><th>客户 / 货物</th><th>实收数据</th><th>操作</th></tr></thead><tbody>{orders.map(row=><tr key={row.order_id}><td>{row.order_number}</td><td>{row.customer_name}<small>{row.cargo_names||"—"}</small></td><td>{row.weight_kg.toFixed(2)} KG<small>{row.volume_cbm.toFixed(3)} CBM</small></td><td><Form method="post"><input type="hidden" name="intent" value="remove"/><input type="hidden" name="batchId" value={batch.id}/><input type="hidden" name="orderId" value={row.order_id}/><button className="text-button danger" disabled={busy||orders.length<=2}>移除</button></Form></td></tr>)}</tbody></table></div><div className="alert info">需要增加订单时，请关闭弹窗，在上方在库货物列表勾选订单后点击“加入已有配载单”。</div><Form method="post"><input type="hidden" name="intent" value="cancel"/><input type="hidden" name="batchId" value={batch.id}/><button className="secondary danger" disabled={busy}>取消整张配载单并释放订单</button></Form></div>}
-function FilterForm({loaderData,values}:{loaderData:Route.ComponentProps["loaderData"];values:<K extends keyof (typeof loaderData.options)[number]>(key:K)=>string[]}){return<Form method="get" className="ltl-loading-filters"><input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/><Select label="目的仓" name="destinationWarehouse" current={loaderData.filters.warehouse} values={values("overseas_warehouse_name")}/><Select label="国家" name="country" current={loaderData.filters.country} values={values("destination_country")}/><Select label="省 / 州" name="state" current={loaderData.filters.state} values={values("destination_state")}/><Select label="城市" name="city" current={loaderData.filters.city} values={values("destination_city")}/><Select label="出境口岸" name="borderPort" current={loaderData.filters.borderPort} values={values("exit_port")}/><Select label="清关地" name="customs" current={loaderData.filters.customs} values={values("customs_location")}/><Select label="客户" name="customer" current={loaderData.filters.customer} values={values("customer_name")}/><label><span>是否可配载</span><select name="eligibility" defaultValue={loaderData.filters.eligibility}><option value="">全部</option><option value="eligible">仅可配载</option><option value="blocked">仅不可配载</option></select></label><label className="ltl-filter-search"><span>订单 / 货物</span><input name="q" defaultValue={loaderData.filters.keyword} placeholder="订单号或货物名称"/></label><label><span>每页</span><select name="pageSize" defaultValue={loaderData.pageSize}>{PAGE_SIZES.map(size=><option key={size} value={size}>{size} 条</option>)}</select></label><button className="secondary">筛选</button><Link className="text-button" to={`/warehouse/consolidation?warehouseId=${loaderData.warehouse.id}`}>重置</Link></Form>}
+function FilterForm({loaderData,values}:{loaderData:Route.ComponentProps["loaderData"];values:<K extends keyof (typeof loaderData.options)[number]>(key:K)=>string[]}){
+  const hasAdvanced=Boolean(loaderData.filters.country||loaderData.filters.state||loaderData.filters.city||loaderData.filters.borderPort||loaderData.filters.customs||loaderData.filters.customer);
+  return <Form method="get" className="consolidation-filter-form">
+    <input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/>
+    <div className="consolidation-filter-primary">
+      <label className="consolidation-filter-search"><span>订单 / 客户 / 货物</span><input name="q" defaultValue={loaderData.filters.keyword} placeholder="输入订单号、客户或货物名称"/></label>
+      <Select label="境外目的仓" name="destinationWarehouse" current={loaderData.filters.warehouse} values={values("overseas_warehouse_name")}/>
+      <label><span>配载状态</span><select name="eligibility" defaultValue={loaderData.filters.eligibility}><option value="">全部</option><option value="eligible">仅可配载</option><option value="blocked">仅不可配载</option></select></label>
+      <label><span>每页</span><select name="pageSize" defaultValue={loaderData.pageSize}>{PAGE_SIZES.map(size=><option key={size} value={size}>{size} 条</option>)}</select></label>
+      <div className="consolidation-filter-actions"><button className="primary">筛选</button><Link className="secondary" to={`/warehouse/consolidation?warehouseId=${loaderData.warehouse.id}`}>重置</Link></div>
+    </div>
+    <details className="consolidation-advanced-filters" open={hasAdvanced||undefined}>
+      <summary>更多筛选条件</summary>
+      <div>
+        <Select label="国家" name="country" current={loaderData.filters.country} values={values("destination_country")}/>
+        <Select label="省 / 州" name="state" current={loaderData.filters.state} values={values("destination_state")}/>
+        <Select label="城市" name="city" current={loaderData.filters.city} values={values("destination_city")}/>
+        <Select label="出境口岸" name="borderPort" current={loaderData.filters.borderPort} values={values("exit_port")}/>
+        <Select label="清关地" name="customs" current={loaderData.filters.customs} values={values("customs_location")}/>
+        <Select label="客户" name="customer" current={loaderData.filters.customer} values={values("customer_name")}/>
+      </div>
+    </details>
+  </Form>
+}
+
+function latestDocumentsForOrder(documents:OrderDocumentRow[],orderId:string){
+  const latest=new Map<RequiredLoadingDocumentCode,OrderDocumentRow>();
+  for(const document of documents)if(document.order_id===orderId&&!latest.has(document.document_category))latest.set(document.document_category,document);
+  return latest;
+}
+
+function DocumentStatusCell({row,documents}:{row:StockRow;documents:Map<RequiredLoadingDocumentCode,OrderDocumentRow>}){
+  const allReady=Boolean(row.invoice_ready&&row.packing_list_ready&&row.customs_document_ready);
+  return <div className="consolidation-document-status">
+    <span className={`status-pill ${allReady?"success":"off"}`}>{allReady?"文件齐全":"文件未齐"}</span>
+    <div>{REQUIRED_LOADING_DOCUMENTS.map(type=>{
+      const document=documents.get(type.code);
+      const status=document?.review_status;
+      const label=!document?`缺少${type.name}`:status==="pending"?`${type.name}待审核`:status==="rejected"?`${type.name}已退回`:["approved","archived"].includes(status||"")?`${type.name}已通过`:`${type.name}待处理`;
+      return <span key={type.code} className={`document-state ${["approved","archived"].includes(status||"")?"ready":status==="rejected"?"rejected":"waiting"}`}>{label}</span>
+    })}</div>
+  </div>
+}
+
+function WarehouseDocumentUploadModal({row,documents,busy,closeSignal}:{row:StockRow;documents:Map<RequiredLoadingDocumentCode,OrderDocumentRow>;busy:boolean;closeSignal?:unknown}){
+  return <Modal title={`上传配载资料 · ${row.order_number}`} triggerLabel="上传资料" triggerClassName="text-button" size="wide" closeSignal={closeSignal}>
+    <div className="warehouse-document-upload-workbench">
+      <header><div><span>订单</span><strong>{row.order_number}</strong></div><div><span>客户</span><strong>{row.customer_name}</strong></div><div><span>货物</span><strong>{row.cargo_names||"未填写货名"}</strong></div></header>
+      <p className="helper-text">仓库只负责上传。文件上传后进入待审核状态，由报关作业或文件中心审核；三项全部通过后自动开放配载。</p>
+      <div className="warehouse-document-upload-grid">
+        {REQUIRED_LOADING_DOCUMENTS.map(type=>{
+          const current=documents.get(type.code);
+          return <article key={type.code} className={["approved","archived"].includes(current?.review_status||"")?"ready":""}>
+            <div className="warehouse-document-slot-heading"><div><strong>{type.name}</strong><small>{type.code==="commercial_invoice"?"客户货值与交易信息":type.code==="packing_list"?"包装、件数、重量与体积明细":"报关申报使用的单证文件"}</small></div><span className={`status-pill ${["approved","archived"].includes(current?.review_status||"")?"success":""}`}>{current?documentReviewLabel(current.review_status):"缺少文件"}</span></div>
+            {current&&<a className="warehouse-current-document" href={current.data_url} target="_blank" rel="noreferrer">{current.file_name}</a>}
+            <Form method="post" encType="multipart/form-data" className="warehouse-document-upload-form">
+              <input type="hidden" name="intent" value="document_upload"/>
+              <input type="hidden" name="orderId" value={row.order_id}/>
+              <input type="hidden" name="documentCategory" value={type.code}/>
+              <label><span>选择本地文件</span><input name="attachment" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" required/></label>
+              <label><span>文件说明</span><input name="documentDescription" placeholder="选填"/></label>
+              <button className="primary" disabled={busy}>{current?`重新上传${type.name}`:`上传${type.name}`}</button>
+            </Form>
+          </article>
+        })}
+      </div>
+      <div className="alert info">重新上传会以最新文件重新进入审核，审核通过前该订单保持不可配载。</div>
+    </div>
+  </Modal>
+}
+
+function documentReviewLabel(status:string){return({pending:"待审核",approved:"已通过",rejected:"已退回",archived:"已归档"} as Record<string,string>)[status]||status}
 function Select({label,name,current,values}:{label:string;name:string;current:string;values:string[]}){return<label><span>{label}</span><select name={name} defaultValue={current}><option value="">全部</option>{values.map(value=><option key={value}>{value}</option>)}</select></label>}
 function Pagination({loaderData}:{loaderData:{page:number;pages:number;pageSize:number;warehouse:{id:string};filters:Record<string,string>}}){if(loaderData.pages<=1)return null;const href=(page:number)=>{const params=new URLSearchParams({warehouseId:loaderData.warehouse.id,page:String(page),pageSize:String(loaderData.pageSize)}),names:Record<string,string>={warehouse:"destinationWarehouse",keyword:"q"};Object.entries(loaderData.filters).forEach(([key,value])=>{if(value)params.set(names[key]||key,value)});return`/warehouse/consolidation?${params}`};return<footer className="pagination"><span>第 {loaderData.page} / {loaderData.pages} 页</span><div>{loaderData.page>1&&<Link className="secondary" to={href(loaderData.page-1)}>上一页</Link>}{loaderData.page<loaderData.pages&&<Link className="secondary" to={href(loaderData.page+1)}>下一页</Link>}</div></footer>}
 
 function toSelection(row:StockRow):Selection{return{orderId:row.order_id,orderNumber:row.order_number,customerName:row.customer_name,packages:row.package_count,pieces:row.pieces,weight:row.weight_kg,volume:row.volume_cbm}}
-function candidateBlockers(row:StockRow){const reasons:string[]=[];if(row.business_type!=="ltl")reasons.push("整车订单");if(!row.package_count)reasons.push("当前仓无在库货物");if(!row.cargo_ready)reasons.push("未确认货齐");if(row.has_exception)reasons.push("存在未结异常");if(row.active_batch_id)reasons.push(`已加入 ${row.active_batch_number}`);if(row.active_dispatch)reasons.push("已生成装车任务");if(!row.overseas_warehouse_id)reasons.push("未设置境外目的仓");return reasons}
+function candidateBlockers(row:StockRow){const reasons:string[]=[];if(row.business_type!=="ltl")reasons.push("整车订单");if(!row.package_count)reasons.push("当前仓无在库货物");if(!row.cargo_ready)reasons.push("未确认货齐");if(row.has_exception)reasons.push("存在未结异常");if(!row.invoice_ready)reasons.push("发票未审核通过");if(!row.packing_list_ready)reasons.push("装箱单未审核通过");if(!row.customs_document_ready)reasons.push("报关单未审核通过");if(row.active_batch_id)reasons.push(`已加入 ${row.active_batch_number}`);if(row.active_dispatch)reasons.push("已生成装车任务");if(!row.overseas_warehouse_id)reasons.push("未设置境外目的仓");return reasons}
 function uniqueFilled(values:(string|null)[]){const unique=[...new Set(values.map(value=>value?.trim()).filter(Boolean) as string[])];return unique.length===1?unique[0]:""}
 function checkCompatibility(rows:CandidateState[]){if(!rows.length)return"没有可配载订单";const first=rows[0],same=(pick:(row:CandidateState)=>string|null)=>rows.every(row=>(pick(row)||"").trim()===(pick(first)||"").trim());if(!first.overseas_warehouse_id)return"所选订单必须设置境外目的仓";if(!same(row=>row.overseas_warehouse_id))return"所选订单的境外目的仓不一致";if(!same(row=>row.destination_country)||!same(row=>row.destination_state)||!same(row=>row.destination_city))return"所选订单的目的国家、省州或城市不一致";const ports=[...new Set(rows.map(row=>row.exit_port?.trim()).filter(Boolean))],customs=[...new Set(rows.map(row=>row.customs_location?.trim()).filter(Boolean))];if(ports.length>1)return"所选订单已填写的出境口岸不一致";if(customs.length>1)return"所选订单已填写的清关地不一致";return""}
 async function loadCandidateStates(organizationId:string,warehouseId:string,orderIds:string[]){if(!orderIds.length)return[];const rows=await Promise.all(orderIds.map(orderId=>env.DB.prepare(`SELECT o.id order_id,o.order_number,o.business_type,o.origin_country,o.origin_state,o.origin_city,o.destination_country,o.destination_state,o.destination_city,o.exit_port,o.customs_location,o.overseas_warehouse_id,ow.name overseas_warehouse_name,c.name customer_name,
@@ -243,7 +419,20 @@ async function loadCandidateStates(organizationId:string,warehouseId:string,orde
     EXISTS(SELECT 1 FROM warehouse_dispatches d JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id JOIN warehouse_packages p ON p.id=di.package_id JOIN shipments s ON s.id=p.shipment_id WHERE d.organization_id=o.organization_id AND s.order_id=o.id AND p.warehouse_id=? AND d.status!='cancelled') active_dispatch,
     (SELECT b.id FROM transport_batch_orders bo JOIN transport_batches b ON b.id=bo.batch_id WHERE bo.organization_id=o.organization_id AND bo.order_id=o.id AND bo.status!='removed' AND b.status!='cancelled' AND b.batch_number LIKE 'PZ-%' ORDER BY b.updated_at DESC LIMIT 1) active_batch_id,
     (SELECT b.batch_number FROM transport_batch_orders bo JOIN transport_batches b ON b.id=bo.batch_id WHERE bo.organization_id=o.organization_id AND bo.order_id=o.id AND bo.status!='removed' AND b.status!='cancelled' AND b.batch_number LIKE 'PZ-%' ORDER BY b.updated_at DESC LIMIT 1) active_batch_number
-    FROM transport_orders o JOIN customers c ON c.id=o.customer_id LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id WHERE o.id=? AND o.organization_id=?`).bind(warehouseId,warehouseId,warehouseId,warehouseId,warehouseId,warehouseId,orderId,organizationId).first<CandidateState>()));return rows.filter((row):row is CandidateState=>Boolean(row))}
+    FROM transport_orders o JOIN customers c ON c.id=o.customer_id LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id WHERE o.id=? AND o.organization_id=?`).bind(warehouseId,warehouseId,warehouseId,warehouseId,warehouseId,warehouseId,orderId,organizationId).first<CandidateState>()));
+  const present=rows.filter((row):row is CandidateState=>Boolean(row));
+  return Promise.all(present.map(async row=>({...row,...await loadRequiredDocumentGate(organizationId,row.order_id)})));
+}
+async function loadRequiredDocumentGate(organizationId:string,orderId:string){
+  const rows=await env.DB.prepare(`SELECT m.document_category,m.review_status FROM order_document_metadata m
+    JOIN order_attachments a ON a.id=m.attachment_id AND a.organization_id=m.organization_id
+    WHERE m.organization_id=? AND m.order_id=? AND m.document_category IN ('commercial_invoice','packing_list','customs_document')
+    ORDER BY a.created_at DESC,a.id DESC`).bind(organizationId,orderId).all<{document_category:string;review_status:string}>();
+  const latest=new Map<string,string>();
+  for(const row of rows.results)if(!latest.has(row.document_category))latest.set(row.document_category,row.review_status);
+  const ready=(code:RequiredLoadingDocumentCode)=>["approved","archived"].includes(latest.get(code)||"")?1:0;
+  return{invoice_ready:ready("commercial_invoice"),packing_list_ready:ready("packing_list"),customs_document_ready:ready("customs_document")};
+}
 async function activateLoadingModules(organizationId:string,orderIds:string[],batchNumber:string,userId:string,now:string,actionName:string){for(const orderId of orderIds)await ensureOrderModules(organizationId,orderId);const placeholders=orderIds.map(()=>"?").join(","),modules=await env.DB.prepare(`SELECT id,order_id,current_step_code FROM order_module_instances WHERE organization_id=? AND module_code='loading' AND enabled=1 AND order_id IN (${placeholders})`).bind(organizationId,...orderIds).all<{id:string;order_id:string;current_step_code:string|null}>();const statements=modules.results.flatMap(module=>[env.DB.prepare("UPDATE order_module_instances SET status='in_progress',current_step_code='planned',current_step_name='配载成单',progress_percent=75,started_at=COALESCE(started_at,?),completed_at=NULL,blocking_reason=NULL,updated_at=? WHERE id=?").bind(now,now,module.id),env.DB.prepare("INSERT INTO order_module_history(id,organization_id,order_id,module_instance_id,action_code,action_name,from_step_code,to_step_code,to_step_name,actor_user_id,notes,occurred_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").bind(crypto.randomUUID(),organizationId,module.order_id,module.id,"batch_create",actionName,module.current_step_code,"planned","配载成单",userId,`加入配载单 ${batchNumber}`,now)]);if(statements.length)await env.DB.batch(statements);await Promise.all(orderIds.map(orderId=>syncOrderWorkflowSnapshot(organizationId,orderId)))}
 async function resetLoadingModules(organizationId:string,orderIds:string[],userId:string,now:string,notes:string){if(!orderIds.length)return;const placeholders=orderIds.map(()=>"?").join(","),modules=await env.DB.prepare(`SELECT id,order_id,current_step_code FROM order_module_instances WHERE organization_id=? AND module_code='loading' AND enabled=1 AND order_id IN (${placeholders})`).bind(organizationId,...orderIds).all<{id:string;order_id:string;current_step_code:string|null}>();const statements=modules.results.flatMap(module=>[env.DB.prepare("UPDATE order_module_instances SET status='ready',current_step_code='warehouse_ready',current_step_name='仓库已货齐，待配载',progress_percent=50,completed_at=NULL,blocking_reason=NULL,updated_at=? WHERE id=?").bind(now,module.id),env.DB.prepare("INSERT INTO order_module_history(id,organization_id,order_id,module_instance_id,action_code,action_name,from_step_code,to_step_code,to_step_name,actor_user_id,notes,occurred_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").bind(crypto.randomUUID(),organizationId,module.order_id,module.id,"batch_release","释放配载订单",module.current_step_code,"warehouse_ready","仓库已货齐，待配载",userId,notes,now)]);if(statements.length)await env.DB.batch(statements);await Promise.all(orderIds.map(orderId=>syncOrderWorkflowSnapshot(organizationId,orderId)))}
 async function addOrdersToPendingDispatch(organizationId:string,warehouseId:string,batchId:string,orderIds:string[],now:string){
@@ -283,4 +472,15 @@ async function cancelPendingDispatch(organizationId:string,batchId:string,now:st
 }
 async function batchHasStarted(organizationId:string,batchId:string){const row=await env.DB.prepare(`SELECT EXISTS(SELECT 1 FROM warehouse_dispatches d LEFT JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id WHERE d.organization_id=? AND d.transport_batch_id=? AND d.status!='cancelled' AND (d.status='dispatched' OR di.status!='pending')) started`).bind(organizationId,batchId).first<{started:number}>();return Boolean(row?.started)}
 async function editableBatch(organizationId:string,warehouseId:string,batchId:string){const batch=await env.DB.prepare("SELECT id,batch_number FROM transport_batches WHERE id=? AND organization_id=? AND warehouse_id=? AND batch_number LIKE 'PZ-%' AND status IN ('planning','loading')").bind(batchId,organizationId,warehouseId).first<{id:string;batch_number:string}>();if(!batch||await batchHasStarted(organizationId,batchId))return null;return batch}
+function validateDocumentFile(file:File){
+  const allowed=new Set(["application/pdf","application/msword","application/vnd.openxmlformats-officedocument.wordprocessingml.document","application/vnd.ms-excel","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","image/jpeg","image/png","image/webp"]);
+  if(file.size>maxInlineOrderDocumentBytes)return"当前数据库直存模式下单个文件不能超过1.2MB";
+  if(!allowed.has(file.type))return"仅支持 PDF、Word、Excel 和图片文件";
+  return null;
+}
+async function toDataUrl(file:File){
+  const bytes=new Uint8Array(await file.arrayBuffer());let binary="";
+  for(let index=0;index<bytes.length;index+=8192)binary+=String.fromCharCode(...bytes.subarray(index,index+8192));
+  return`data:${file.type};base64,${btoa(binary)}`;
+}
 export function meta(){return[{title:"货物配载 | International TMS"}]}
