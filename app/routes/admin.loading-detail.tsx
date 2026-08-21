@@ -30,6 +30,7 @@ import {
   syncBatchTrackingMilestonesFromBatch,
 } from "../lib/batch-tracking.server";
 import { Modal } from "../components/Modal";
+import { ensureBatchSystemDocuments } from "../lib/loading-manifest.server";
 
 const CHUNK_SIZE = 800;
 const WAREHOUSE_OWNED_BATCH_INTENTS = new Set([
@@ -40,7 +41,6 @@ const WAREHOUSE_OWNED_BATCH_INTENTS = new Set([
   "batch_document_review",
   "batch_order_document_upload",
   "batch_order_document_review",
-  "batch_order_customs_declaration_save",
 ]);
 
 let orderModulesImportPromise:
@@ -132,9 +132,9 @@ function buildLoadingManifestHtml(batch: ManifestBatchRow, orders: ManifestOrder
 }
 
 const BATCH_DOCUMENT_TYPES=[
-  {code:"loading_manifest",name:"配载清单",hint:"仓库生成 PZ 配载单时自动形成，只读留档，不参与审核或出境门禁",required:false},
-  {code:"vehicle_manifest",name:"装车清单",hint:"按车辆形成的装载与包装清单",required:false},
-  {code:"batch_waybill",name:"批次运单",hint:"本批次共用的国际运输运单",required:false},
+  {code:"loading_manifest",name:"配载单",hint:"仓库生成 PZ 配载单时自动形成，只读留档，不参与审核或出境门禁",required:false},
+  {code:"vehicle_manifest",name:"装车清单",hint:"仓库按 PZ 配载订单、车辆和司机自动生成并同步",required:false},
+  {code:"batch_waybill",name:"批次运单",hint:"仓库按 PZ 配载单运输资源自动生成并同步",required:false},
   {code:"border_handover",name:"口岸交接文件",hint:"口岸换装、过境或交接凭证",required:false},
   {code:"transshipment_order",name:"换装单",hint:"发生换装时上传的批次共用凭证",required:false},
 ] as const;
@@ -159,7 +159,9 @@ export async function loader({request,params}:Route.LoaderArgs){
   const fromOrderId = new URL(request.url).searchParams.get("fromOrderId");
   const batch=await env.DB.prepare(`SELECT b.id,b.batch_number,b.batch_name,b.origin_location,b.destination_location,b.planned_departure_at,b.planned_arrival_at,b.status,b.road_status,b.carrier_id,b.warehouse_id,b.border_port,b.customs_location,b.transit_location,b.route_notes,b.notes,b.overseas_carrier_name,b.overseas_vehicle_type,b.overseas_vehicle_count,b.overseas_vehicle_plate,b.overseas_driver_name,b.overseas_driver_phone,c.name carrier_name,w.name warehouse_name FROM transport_batches b LEFT JOIN carriers c ON c.id=b.carrier_id LEFT JOIN warehouses w ON w.id=b.warehouse_id WHERE b.id=? AND b.organization_id=?`).bind(batchId,current.organizationId).first<Batch>();
   if(!batch)throw new Response("配载批次不存在",{status:404});
-  await synchronizeBatchTransport(current.organizationId,batchId,new Date().toISOString());
+  const now=new Date().toISOString();
+  await synchronizeBatchTransport(current.organizationId,batchId,now);
+  await ensureBatchSystemDocuments(current.organizationId,batchId,current.userId,now);
   const [orders,vehicles,carriers,warehouses,borderPorts,costAllocations,batchDocuments,orderDocuments,customsSummaries,customsDeclarations]=await Promise.all([
     env.DB.prepare(`SELECT bo.order_id,o.order_number,o.business_type,COALESCE((SELECT s.shipment_number FROM shipments s WHERE s.order_id=o.id ORDER BY s.created_at DESC LIMIT 1),o.order_number) work_number,c.name customer_name,o.cargo_description,
         COALESCE((SELECT GROUP_CONCAT(NULLIF(TRIM(i.cargo_name_cn),''),'、') FROM order_cargo_items i WHERE i.order_id=o.id AND i.organization_id=o.organization_id),o.cargo_description) cargo_names,
@@ -667,6 +669,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
     <div className="panel-header"><div><h2>配载单执行总览</h2><p>仓库端负责配载、文件确认、车辆司机安排和装车出库；整批出库后，本页才开放运输执行与跟踪。</p></div><span className="status-pill">{roadStatusLabels[loaderData.batch.road_status]||loaderData.batch.road_status}</span></div>
     <BatchCommandSteps status={loaderData.batch.road_status} customsReady={allCustomsReady} loadPlanReady={loadPlanReady} warehouseReady={allDispatched}/>
   </section>
+  <BatchDocumentWorkbench batchId={loaderData.batch.id} orders={loaderData.orders} batchDocuments={loaderData.batchDocuments} orderDocuments={loaderData.orderDocuments} customsSummaries={loaderData.customsSummaries} customsDeclarations={loaderData.customsDeclarations} busy={busy} manageCustoms={manage} requiresTransloading={requiresTransloading} defaultOpen={!allCustomsReady}/>
   <BatchTrackingWorkbench batchId={loaderData.batch.id} batchNumber={loaderData.batch.batch_number} orders={loaderData.orders} trackingMilestones={loaderData.trackingMilestones} trackingFlags={loaderData.trackingFlags} batchVehiclePlate={loaderData.batchVehiclePlate} overseasVehiclePlate={loaderData.batch.overseas_vehicle_plate||null} borderPort={loaderData.batch.border_port||null} customsLocation={loaderData.batch.customs_location||null} busy={busy} manage={manage&&allDispatched} warehouseReady={allDispatched}/>
   <details className="panel loading-sheet batch-detail-disclosure" id="batch-arrangement">
     <summary className="batch-detail-summary"><div><h2>仓库配载结果</h2><p>由仓库端自动同步，管理后台只读查看。</p></div><div className="loading-sheet-state batch-detail-summary-status"><span>{loaderData.orders.length} 票</span><span>{loaderData.vehicles.length} 车</span><b>{allDispatched?"仓库已出库":loadPlanReady&&allCustomsReady?"待仓库装车":"待仓库补齐"}</b><em aria-hidden="true"/></div></summary>
@@ -700,7 +703,6 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
     </div>
     </div>
   </details>
-  <BatchDocumentWorkbench batchId={loaderData.batch.id} orders={loaderData.orders} batchDocuments={loaderData.batchDocuments} orderDocuments={loaderData.orderDocuments} customsSummaries={loaderData.customsSummaries} customsDeclarations={loaderData.customsDeclarations} busy={busy} manage={false} requiresTransloading={requiresTransloading}/>
   <CostAllocationSection allocations={loaderData.costAllocations} busy={busy} manage={manage&&allDispatched}/>
   <section className="panel" id="batch-exit-gate"><div className="panel-header"><div><h2>6. 出境门禁与确认</h2><p>这里逐项核对整批订单；全部通过后，才能统一确认出境并同步所有挂载订单。</p></div><span className="status-pill">{roadStatusLabels[loaderData.batch.road_status]||loaderData.batch.road_status}</span></div>
     <div className="batch-exit-gates">
@@ -714,27 +716,24 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   <section className="panel" id="overseas-warehouse-receiving"><div className="panel-header"><div><h2>7. 境外目的仓收货清点</h2><p>配载单不能手工确认到仓。仓库逐票扫码入库并清点；全部挂载订单清点无误后，系统统一结束境外运输并开放客户通知。</p></div><span className="status-pill">{loaderData.orders.filter(item=>item.overseas_status&&item.overseas_status!=="waiting_arrival").length}/{loaderData.orders.length} 票到仓</span></div>{loaderData.batch.road_status==="outbound_in_transit"&&manage?<div className="loading-assignment-records">{loaderData.orders.map(item=><div className="loading-assignment-record" key={item.order_id}><div><strong>{item.order_number}</strong><small>{item.customer_name}</small></div><div><span>境外目的仓</span><strong>{item.overseas_warehouse_name||"未指定"}</strong></div><span className={`status-pill ${item.overseas_status&&item.overseas_status!=="waiting_arrival"?"success":""}`}>{item.overseas_status&&item.overseas_status!=="waiting_arrival"?"已清点到仓":"待仓库收货"}</span>{item.overseas_warehouse_id&&(!item.overseas_status||item.overseas_status==="waiting_arrival")?<WarehouseOverseasInboundAction orderId={item.order_id} batchId={loaderData.batch.id} warehouseId={item.overseas_warehouse_id}/>:null}</div>)}</div>:["overseas_arrived","waiting_pickup","pickup_completed"].includes(loaderData.batch.road_status)?<div className="alert success">本配载单全部订单已经境外仓扫码入库并清点；现在可分别通知客户。</div>:<div className="alert warning">当前步骤尚未开放：请先在上方完成全部出境门禁并确认出境。</div>}</section>
   </>}
 
-function BatchDocumentWorkbench({batchId,orders,batchDocuments,orderDocuments,customsSummaries,customsDeclarations,busy,manage,requiresTransloading}:{batchId:string;orders:BatchOrder[];batchDocuments:BatchDocument[];orderDocuments:OrderDocument[];customsSummaries:CustomsSummary[];customsDeclarations:BatchCustomsDeclaration[];busy:boolean;manage:boolean;requiresTransloading:boolean}){
+function BatchDocumentWorkbench({batchId,orders,batchDocuments,orderDocuments,customsSummaries,customsDeclarations,busy,manageCustoms,requiresTransloading,defaultOpen}:{batchId:string;orders:BatchOrder[];batchDocuments:BatchDocument[];orderDocuments:OrderDocument[];customsSummaries:CustomsSummary[];customsDeclarations:BatchCustomsDeclaration[];busy:boolean;manageCustoms:boolean;requiresTransloading:boolean;defaultOpen:boolean}){
   const visibleBatchDocTypes=BATCH_DOCUMENT_TYPES.filter(type=>requiresTransloading||!["border_handover","transshipment_order"].includes(type.code));
-  return <details className="panel batch-document-workbench batch-detail-disclosure" id="batch-files">
-    <summary className="batch-detail-summary"><div><h2>文件与报关明细</h2><p>逐票文件、报关单及放行状态，只读汇总。</p></div><div className="batch-detail-summary-status"><span>{orders.length} 票订单</span><b>配载单已同步</b><em aria-hidden="true"/></div></summary>
+  const systemDocumentCodes=new Set(["loading_manifest","vehicle_manifest","batch_waybill"]);
+  return <details className="panel batch-document-workbench batch-detail-disclosure" id="batch-files" open={defaultOpen}>
+    <summary className="batch-detail-summary"><div><h2>报关单办理与文件状态</h2><p>仓库上传逐票报关资料；管理后台在运输跟踪前录入报关单并确认放行。</p></div><div className="batch-detail-summary-status"><span>{orders.length} 票订单</span><b>{defaultOpen?"待办理报关单":"报关门禁已通过"}</b><em aria-hidden="true"/></div></summary>
     <div className="batch-detail-disclosure-body">
-    <div className="batch-document-scope-note"><strong>整批共用</strong><span>配载清单由仓库端生成 PZ 配载单时自动生成，装车清单、批次运单{requiresTransloading?"、口岸交接文件与换装单":""}按实际业务收集。</span><strong>逐票独立</strong><span>委托书、发票、装箱单、报关资料和报关单按订单分别检查。</span></div>
-    <section className="batch-shared-documents"><header><div><h3>整批共用文件</h3><p>“配载清单”随 PZ 配载单自动形成，仅供查看，不参与审核或出境门禁{requiresTransloading?"；换装文件仅在开启换装后显示":""}。</p></div></header>
+    <div className="batch-document-scope-note"><strong>整批共用</strong><span>配载单、装车清单和批次运单均由仓库数据自动生成；{requiresTransloading?"口岸交接文件与换装单按实际业务收集。":"无需人工重复上传。"}</span><strong>逐票独立</strong><span>委托书、发票、装箱单和报关资料按订单检查；报关单在本区逐票录入并放行。</span></div>
+    <section className="batch-shared-documents"><header><div><h3>整批共用文件</h3><p>三类系统单据随仓库配载与装车数据自动形成，仅供查看，不参与人工审核{requiresTransloading?"；换装文件仅在开启换装后显示":""}。</p></div></header>
       <div className="batch-document-grid">{visibleBatchDocTypes.map(type=>{
         const current=batchDocuments.find(item=>item.document_category===type.code);
-        const isManifest=type.code==="loading_manifest";
+        const isSystemDocument=systemDocumentCodes.has(type.code);
         return <article className={current&&["approved","archived"].includes(current.review_status)?"ready":""} key={type.code}>
           <div><strong>{type.name}{type.required&&<b className="required-mark"> *</b>}</strong><small>{type.hint}</small></div>
-          <div className="batch-document-current">{current?<><span className={`status-pill ${current.review_status==="approved"?"success":""}`}>{isManifest?"已同步":documentReviewLabel(current.review_status)}</span><a href={current.data_url} target="_blank" rel="noreferrer">{current.file_name}</a></>:<span className="status-pill off">{isManifest?"无附加清单":"待上传"}</span>}</div>
-          {isManifest
-            ?(manage&&<Form method="post" className="batch-document-upload"><input type="hidden" name="intent" value="generate_manifest"/><button className="secondary" disabled={busy}>{current?"重新生成配载单":"生成配载单"}</button><small className="field-hint">按当前车辆与订单分配实时生成，自动审核通过</small></Form>)
-            :(manage&&<Form method="post" encType="multipart/form-data" className="batch-document-upload"><input type="hidden" name="intent" value="batch_document_upload"/><input type="hidden" name="documentCategory" value={type.code}/><input name="attachment" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" required/><input name="documentDescription" placeholder="文件说明（选填）"/><button className="secondary" disabled={busy}>{current?"重新上传":"上传"}</button></Form>)}
-          {!isManifest&&manage&&current&&current.review_status!=="approved"&&<Form method="post" className="batch-document-review"><input type="hidden" name="intent" value="batch_document_review"/><input type="hidden" name="attachmentId" value={current.id}/><input type="hidden" name="reviewStatus" value="approved"/><button className="text-button" disabled={busy}>审核通过</button></Form>}
+          <div className="batch-document-current">{current?<><span className={`status-pill ${current.review_status==="approved"?"success":""}`}>{isSystemDocument?"已自动同步":documentReviewLabel(current.review_status)}</span><a href={current.data_url} target="_blank" rel="noreferrer">{current.file_name}</a></>:<span className="status-pill off">{isSystemDocument?"待自动生成":"待上传"}</span>}</div>
         </article>})}</div>
     </section>
     <section className="batch-order-documents"><header><div><h3>逐票订单文件与报关门禁</h3><p>可在任意挂载订单进入本工作台，直接处理同一配载单内其他订单，不再逐页往返。</p></div></header>
-      <div className="table-wrap"><table><thead><tr><th>订单 / 客户</th><th>货物名称</th><th>实收数据</th><th>订单文件</th><th>报关单放行</th><th>操作</th></tr></thead><tbody>{orders.map(order=>{
+      <div className="table-wrap"><table><thead><tr><th>订单 / 客户</th><th>货物名称</th><th>实收数据</th><th>订单文件</th><th>申报登记 / 放行</th><th>操作</th></tr></thead><tbody>{orders.map(order=>{
         const files=orderDocuments.filter(item=>item.order_id===order.order_id);
         const latestFiles=ORDER_BATCH_DOCUMENT_CODES.map(code=>files.find(item=>item.document_category===code)).filter((item):item is OrderDocument=>Boolean(item));
         const approvedCodes=new Set(latestFiles.filter(item=>["approved","archived"].includes(item.review_status)).map(item=>item.document_category));
@@ -746,12 +745,11 @@ function BatchDocumentWorkbench({batchId,orders,batchDocuments,orderDocuments,cu
           <td><strong className="loading-cargo-names">{order.cargo_names||order.cargo_description||"未填写"}</strong></td>
           <td>{order.pieces} 件 · {order.gross_weight_kg.toFixed(2)} KG · {order.volume_cbm.toFixed(3)} CBM</td>
           <td><span className={`status-pill ${missingCodes.length?"":"success"}`}>{missingCodes.length?`缺 ${missingCodes.length} 项`:`${ORDER_BATCH_DOCUMENT_CODES.length} 项已齐`}</span>{missingCodes.length>0&&<small>{missingCodes.map(orderDocumentTypeLabel).join("、")}</small>}</td>
-          <td><span className={`status-pill ${customsReady?"success":""}`}>{customs?.total?`${customs.released}/${customs.total} 张放行`:"尚无有效报关单"}</span></td>
-          <td><details className="batch-order-file-details"><summary>{manage?"处理本票文件":"查看本票文件"}</summary><div className="batch-order-file-panel">
-            <header className="batch-order-file-panel-header"><div><strong>{manage?"处理本票文件":"查看本票文件"}</strong><span>{order.order_number} · {order.customer_name}</span></div><button type="button" aria-label="关闭文件查看窗口" onClick={event=>(event.currentTarget.closest("details") as HTMLDetailsElement|null)?.removeAttribute("open")}>×</button></header>
-            <div className="batch-order-file-list">{ORDER_BATCH_DOCUMENT_CODES.map(code=>{const current=files.find(item=>item.document_category===code);return <div key={code}><strong>{orderDocumentTypeLabel(code)}</strong>{current?<><a href={current.data_url} target="_blank" rel="noreferrer">{current.file_name}</a><span className={`status-pill ${current.review_status==="approved"?"success":""}`}>{documentReviewLabel(current.review_status)}</span>{manage&&current.review_status!=="approved"&&<Form method="post"><input type="hidden" name="intent" value="batch_order_document_review"/><input type="hidden" name="orderId" value={order.order_id}/><input type="hidden" name="attachmentId" value={current.id}/><input type="hidden" name="reviewStatus" value="approved"/><button className="text-button" disabled={busy}>审核通过</button></Form>}</>:<span className="status-pill off">待上传</span>}</div>})}</div>
-            {manage&&<Form method="post" encType="multipart/form-data" className="batch-order-file-upload"><input type="hidden" name="intent" value="batch_order_document_upload"/><input type="hidden" name="orderId" value={order.order_id}/><label><span>文件类型</span><select name="documentCategory" required><option value="">请选择</option>{ORDER_BATCH_DOCUMENT_CODES.map(code=><option key={code} value={code}>{orderDocumentTypeLabel(code)}</option>)}</select></label><label><span>选择文件</span><input name="attachment" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" required/></label><label><span>说明</span><input name="documentDescription" placeholder="选填"/></label><button className="primary" disabled={busy}>上传到本订单</button></Form>}
-            <BatchOrderCustomsWorkbench orderId={order.order_id} declarations={customsDeclarations.filter(item=>item.order_id===order.order_id)} manage={manage} busy={busy}/>
+          <td><span className={`status-pill ${customsReady?"success":""}`}>{customs?.total?`${customs.released}/${customs.total} 张放行`:files.some(item=>item.document_category==="customs_document"&&["approved","archived"].includes(item.review_status))?"资料已齐，待登记报关单":"待仓库上传报关资料"}</span></td>
+          <td><details className="batch-order-file-details"><summary>{manageCustoms?"办理本票报关":"查看本票文件"}</summary><div className="batch-order-file-panel">
+            <header className="batch-order-file-panel-header"><div><strong>{manageCustoms?"办理本票报关":"查看本票文件"}</strong><span>{order.order_number} · {order.customer_name}</span></div><button type="button" aria-label="关闭文件查看窗口" onClick={event=>(event.currentTarget.closest("details") as HTMLDetailsElement|null)?.removeAttribute("open")}>×</button></header>
+            <div className="batch-order-file-list">{ORDER_BATCH_DOCUMENT_CODES.map(code=>{const current=files.find(item=>item.document_category===code);return <div key={code}><strong>{orderDocumentTypeLabel(code)}</strong>{current?<><a href={current.data_url} target="_blank" rel="noreferrer">{current.file_name}</a><span className={`status-pill ${current.review_status==="approved"?"success":""}`}>{documentReviewLabel(current.review_status)}</span></>:<span className="status-pill off">待仓库上传</span>}</div>})}</div>
+            <BatchOrderCustomsWorkbench orderId={order.order_id} declarations={customsDeclarations.filter(item=>item.order_id===order.order_id)} manage={manageCustoms} busy={busy}/>
             <div className="batch-order-file-links"><Link className="secondary" to={`/admin/orders/${order.order_id}/modules/documents`}>查看完整文件中心</Link></div>
           </div></details></td>
         </tr>})}</tbody></table></div>

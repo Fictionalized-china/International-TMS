@@ -17,7 +17,7 @@ const PAGE_SIZES=[30,50,100];
 const REQUIRED_LOADING_DOCUMENTS=[
   {code:"commercial_invoice",name:"发票"},
   {code:"packing_list",name:"装箱单"},
-  {code:"customs_document",name:"报关单"},
+  {code:"customs_document",name:"报关资料"},
 ] as const;
 type RequiredLoadingDocumentCode=(typeof REQUIRED_LOADING_DOCUMENTS)[number]["code"];
 
@@ -176,7 +176,7 @@ export async function action({request}:Route.ActionArgs){
   if(intent==="document_upload"){
     const orderId=valueOf(form,"orderId"),documentCategory=valueOf(form,"documentCategory") as RequiredLoadingDocumentCode;
     const documentType=REQUIRED_LOADING_DOCUMENTS.find(item=>item.code===documentCategory);
-    if(!documentType)return{formError:"请选择发票、装箱单或报关单"};
+    if(!documentType)return{formError:"请选择发票、装箱单或报关资料"};
     const file=form.get("attachment");
     if(!(file instanceof File)||file.size<=0)return{formError:`请选择要上传的${documentType.name}`};
     const fileError=validateDocumentFile(file);if(fileError)return{formError:fileError};
@@ -341,7 +341,7 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
       <div className="panel-header">
         <div>
           <h2>当前仓库全部在库货物</h2>
-          <p>发票、装箱单、报关单上传齐全即可勾选；生成配载单前由仓库操作员逐票预览确认。</p>
+          <p>发票、装箱单、报关资料上传齐全即可勾选；生成配载单前由仓库操作员逐票预览确认。</p>
         </div>
         <span className="status-pill">已选 {selected.length} / 在库 {loaderData.total} 票</span>
       </div>
@@ -541,7 +541,7 @@ async function resolveBatchResource(organizationId:string,form:FormData):Promise
   if(!driver.phone?.trim())return{error:"所选司机缺少联系电话，请先到承运商管理补充"};
   return{carrierId:carrier.id,carrierName:carrier.name,vehicleMasterId:vehicle.id,vehicleType:vehicle.vehicle_type.trim(),plateNumber:vehicle.plate_number.trim().toUpperCase(),capacityWeight:vehicle.capacity_weight_kg??0,capacityVolume:vehicle.capacity_volume_cbm??0,driverMasterId:driver.id,driverName:driver.name.trim(),driverPhone:driver.phone.trim()};
 }
-function candidateBlockers(row:StockRow){const reasons:string[]=[];if(row.business_type!=="ltl")reasons.push("整车订单");if(!row.package_count)reasons.push("当前仓无在库货物");if(!row.cargo_ready)reasons.push("未确认货齐");if(row.has_exception)reasons.push("存在未结异常");if(!row.invoice_uploaded)reasons.push("缺少发票");if(!row.packing_list_uploaded)reasons.push("缺少装箱单");if(!row.customs_document_uploaded)reasons.push("缺少报关单");if(row.active_batch_id)reasons.push(`已加入 ${row.active_batch_number}`);if(row.active_dispatch)reasons.push("已生成装车任务");if(!row.overseas_warehouse_id)reasons.push("未设置境外目的仓");return reasons}
+function candidateBlockers(row:StockRow){const reasons:string[]=[];if(row.business_type!=="ltl")reasons.push("整车订单");if(!row.package_count)reasons.push("当前仓无在库货物");if(!row.cargo_ready)reasons.push("未确认货齐");if(row.has_exception)reasons.push("存在未结异常");if(!row.invoice_uploaded)reasons.push("缺少发票");if(!row.packing_list_uploaded)reasons.push("缺少装箱单");if(!row.customs_document_uploaded)reasons.push("缺少报关资料");if(row.active_batch_id)reasons.push(`已加入 ${row.active_batch_number}`);if(row.active_dispatch)reasons.push("已生成装车任务");if(!row.overseas_warehouse_id)reasons.push("未设置境外目的仓");return reasons}
 function checkCompatibility(rows:CandidateState[]){if(!rows.length)return"没有可配载订单";const first=rows[0],same=(pick:(row:CandidateState)=>string|null)=>rows.every(row=>(pick(row)||"").trim()===(pick(first)||"").trim());if(!first.overseas_warehouse_id)return"所选订单必须设置境外目的仓";if(!same(row=>row.overseas_warehouse_id))return"所选订单的境外目的仓不一致";if(!same(row=>row.destination_country)||!same(row=>row.destination_state)||!same(row=>row.destination_city))return"所选订单的目的国家、省州或城市不一致";return""}
 async function loadCandidateStates(organizationId:string,warehouseId:string,orderIds:string[]){if(!orderIds.length)return[];const rows=await Promise.all(orderIds.map(orderId=>env.DB.prepare(`SELECT o.id order_id,o.order_number,o.business_type,o.origin_country,o.origin_state,o.origin_city,o.destination_country,o.destination_state,o.destination_city,o.exit_port,o.customs_location,o.overseas_warehouse_id,ow.name overseas_warehouse_name,c.name customer_name,
     (SELECT GROUP_CONCAT(NULLIF(TRIM(i.cargo_name_cn),''),'、') FROM order_cargo_items i WHERE i.organization_id=o.organization_id AND i.order_id=o.id) cargo_names,

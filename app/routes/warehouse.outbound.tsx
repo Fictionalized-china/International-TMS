@@ -9,6 +9,7 @@ import { writeAudit } from "../lib/audit.server";
 import { isValidCustomerIdentityCode } from "../lib/customer-identity";
 import { maxInlineOrderDocumentBytes } from "../lib/order-documents";
 import { checkOrderDeparture, checkOrderLoadPlan } from "../lib/order-readiness.server";
+import { refreshLoadingManifest } from "../lib/loading-manifest.server";
 import { recordBatchOutboundProgress, recordWarehouseProgress } from "../lib/warehouse-progress.server";
 import { workflowFieldPolicy } from "../lib/workflow-field-catalog";
 import {
@@ -185,6 +186,7 @@ export async function action({request}:Route.ActionArgs){
       env.DB.prepare(`INSERT INTO warehouse_dispatches(id,organization_id,dispatch_number,sorting_batch_id,shipment_id,vehicle_plate,driver_name,driver_phone,carrier_name,seal_number,destination,status,notes,created_by_user_id,created_at,updated_at,transport_batch_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,'loading',?,?,?,?,?)`).bind(dispatchId,user.organizationId,number,batch.id,batch.shipment_id,plate,driver,phone||null,carrier||null,sealPolicy.isActive?(seal||null):null,destination,notesPolicy.isActive?(notes||null):null,user.userId,now,now,planned.batch_id),
       itemStatement
     ]);
+    if(planned.batch_id)await refreshLoadingManifest(user.organizationId,planned.batch_id,user.userId,now);
     await recordWarehouseProgress({organizationId:user.organizationId,orderId:batch.order_id,actorUserId:user.userId,stepCode:"loading",stepName:"按配载批次装车",actionCode:"dispatch_create",actionName:"创建批次装车任务",notes:`装车任务 ${number}；车辆 ${plate}`});
     await writeAudit({request,action:"warehouse.dispatch.create",resourceType:"warehouse_dispatch",resourceId:dispatchId,organizationId:user.organizationId,actorUserId:user.userId,metadata:{number,batchId:batch.id,orderNumber:batch.order_number,customerIdentityCode:batch.customer_identity_code,plate,driver}});
     return{success:`装车任务 ${number} 已创建`,actionKind:"dispatch_created" as const};
@@ -271,6 +273,7 @@ export async function action({request}:Route.ActionArgs){
     );
     await env.DB.batch(statements);
     if(transportBatch?.batch_id){
+      await refreshLoadingManifest(user.organizationId,transportBatch.batch_id,user.userId,now);
       await recordBatchOutboundProgress({organizationId:user.organizationId,batchId:transportBatch.batch_id,actorUserId:user.userId,dispatchNumber:dispatch.dispatch_number,referenceOrderId});
     }else{
       for (const item of shipments.results) {
