@@ -32,7 +32,7 @@ type StockRow={
 
 type BatchRow={
   id:string;batch_number:string;batch_name:string;destination_location:string;
-  border_port:string|null;customs_location:string|null;planned_loading_at:string|null;
+  border_port:string|null;customs_location:string|null;planned_loading_at:string|null;planned_departure_at:string|null;
   status:string;road_status:string;order_count:number;order_numbers:string;
   total_weight:number;total_volume:number;has_dispatch:number;has_started:number;created_at:string;
   carrier_id:string|null;overseas_carrier_name:string|null;overseas_vehicle_plate:string|null;
@@ -131,7 +131,7 @@ export async function loader({request}:Route.LoaderArgs){
   const [rows,options,batches,batchOrders,carriers,carrierVehicles,carrierDrivers]=await Promise.all([
     env.DB.prepare(`${stockCtes} ${rowSelectSql()} ${stockFrom}${filterSql} ORDER BY CASE WHEN ab.batch_id IS NULL THEN 0 ELSE 1 END,o.updated_at DESC LIMIT ? OFFSET ?`).bind(...baseBindings,...bindings,pageSize,(safePage-1)*pageSize).all<StockRow>(),
     env.DB.prepare(`${stockCtes} SELECT DISTINCT COALESCE(ow.name,'') overseas_warehouse_name,o.destination_country,o.destination_state,o.destination_city,c.name customer_name ${stockFrom} ORDER BY overseas_warehouse_name,o.destination_country,o.destination_state,o.destination_city`).bind(...baseBindings).all<StockRow&{customer_name:string}>(),
-    env.DB.prepare(`SELECT b.id,b.batch_number,b.batch_name,b.destination_location,b.border_port,b.customs_location,b.planned_loading_at,b.status,b.road_status,b.created_at,
+    env.DB.prepare(`SELECT b.id,b.batch_number,b.batch_name,b.destination_location,b.border_port,b.customs_location,b.planned_loading_at,b.planned_departure_at,b.status,b.road_status,b.created_at,
       b.carrier_id,b.overseas_carrier_name,b.overseas_vehicle_plate,b.overseas_driver_name,
       (SELECT v.vehicle_master_id FROM transport_batch_vehicles v WHERE v.batch_id=b.id AND v.organization_id=b.organization_id AND v.status!='cancelled' ORDER BY v.created_at LIMIT 1) vehicle_master_id,
       (SELECT v.driver_master_id FROM transport_batch_vehicles v WHERE v.batch_id=b.id AND v.organization_id=b.organization_id AND v.status!='cancelled' ORDER BY v.created_at LIMIT 1) driver_master_id,
@@ -198,12 +198,14 @@ export async function action({request}:Route.ActionArgs){
   if(intent==="resource"){
     const batchId=valueOf(form,"batchId"),batch=await editableBatch(user.organizationId,warehouse.id,batchId);
     if(!batch)return{formError:"配载单不存在、已开始装车或不能修改车辆安排"};
+    const plannedDepartureAt=valueOf(form,"plannedDepartureAt").trim();
+    if(!plannedDepartureAt)return{formError:"请填写计划出境发车时间"};
     const resource=await resolveBatchResource(user.organizationId,form);
     if("error" in resource)return{formError:resource.error};
     const existingVehicle=await env.DB.prepare("SELECT id FROM transport_batch_vehicles WHERE batch_id=? AND organization_id=? AND status!='cancelled' ORDER BY created_at LIMIT 1").bind(batchId,user.organizationId).first<{id:string}>();
     const vehicleId=existingVehicle?.id??crypto.randomUUID();
     await env.DB.batch([
-      env.DB.prepare("UPDATE transport_batches SET carrier_id=?,overseas_carrier_name=?,overseas_vehicle_type=?,overseas_vehicle_count=1,overseas_vehicle_plate=?,overseas_driver_name=?,overseas_driver_phone=?,updated_at=? WHERE id=? AND organization_id=?").bind(resource.carrierId,resource.carrierName,resource.vehicleType,resource.plateNumber,resource.driverName,resource.driverPhone,now,batchId,user.organizationId),
+      env.DB.prepare("UPDATE transport_batches SET carrier_id=?,overseas_carrier_name=?,overseas_vehicle_type=?,overseas_vehicle_count=1,overseas_vehicle_plate=?,overseas_driver_name=?,overseas_driver_phone=?,planned_departure_at=?,updated_at=? WHERE id=? AND organization_id=?").bind(resource.carrierId,resource.carrierName,resource.vehicleType,resource.plateNumber,resource.driverName,resource.driverPhone,plannedDepartureAt,now,batchId,user.organizationId),
       existingVehicle
         ?env.DB.prepare("UPDATE transport_batch_vehicles SET carrier_id=?,vehicle_master_id=?,driver_master_id=?,vehicle_type=?,plate_number=?,driver_name=?,driver_phone=?,capacity_weight_kg=?,capacity_volume_cbm=?,status='planned',updated_at=? WHERE id=? AND organization_id=?").bind(resource.carrierId,resource.vehicleMasterId,resource.driverMasterId,resource.vehicleType,resource.plateNumber,resource.driverName,resource.driverPhone,resource.capacityWeight,resource.capacityVolume,now,vehicleId,user.organizationId)
         :env.DB.prepare("INSERT INTO transport_batch_vehicles(id,organization_id,batch_id,vehicle_no,vehicle_type,plate_number,carrier_id,driver_name,driver_phone,capacity_weight_kg,capacity_volume_cbm,status,created_at,updated_at,vehicle_master_id,driver_master_id) VALUES(?,?,?,'MAIN-1',?,?,?,?,?,?,?,'planned',?,?,?,?)").bind(vehicleId,user.organizationId,batchId,resource.vehicleType,resource.plateNumber,resource.carrierId,resource.driverName,resource.driverPhone,resource.capacityWeight,resource.capacityVolume,now,now,resource.vehicleMasterId,resource.driverMasterId),
@@ -217,6 +219,8 @@ export async function action({request}:Route.ActionArgs){
     const orderIds=[...new Set(form.getAll("orderId").map(String).filter(Boolean))];
     if(intent==="create"&&orderIds.length<2)return{formError:"拼车配载至少需要选择 2 张完整订单"};
     if(intent==="add"&&!orderIds.length)return{formError:"请先选择需要加入配载单的订单"};
+    const plannedDepartureAt=valueOf(form,"plannedDepartureAt").trim();
+    if(intent==="create"&&!plannedDepartureAt)return{formError:"请填写计划出境发车时间"};
     const resource=intent==="create"?await resolveBatchResource(user.organizationId,form):null;
     if(resource&&"error" in resource)return{formError:resource.error};
     const states=await loadCandidateStates(user.organizationId,warehouse.id,orderIds);
@@ -264,7 +268,7 @@ export async function action({request}:Route.ActionArgs){
     const vehicleId=crypto.randomUUID();
     const statements:D1PreparedStatement[]=[
       ...documentApprovalStatements,
-      env.DB.prepare(`INSERT INTO transport_batches(id,organization_id,order_id,batch_number,batch_name,origin_location,destination_location,planned_departure_at,planned_arrival_at,status,notes,route_key,warehouse_id,carrier_id,created_by_user_id,created_at,updated_at,border_port,customs_location,transit_location,route_notes,planned_loading_at,overseas_carrier_name,overseas_vehicle_type,overseas_vehicle_count,overseas_vehicle_plate,overseas_driver_name,overseas_driver_phone) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(batchId,user.organizationId,first.order_id,batchNumber,batchName,warehouse.name,destination,null,null,"planning",valueOf(form,"notes").trim()||null,routeKey,warehouse.id,selectedResource.carrierId,user.userId,now,now,null,null,null,valueOf(form,"routeNotes").trim()||null,valueOf(form,"plannedLoadingAt")||null,selectedResource.carrierName,selectedResource.vehicleType,1,selectedResource.plateNumber,selectedResource.driverName,selectedResource.driverPhone),
+      env.DB.prepare(`INSERT INTO transport_batches(id,organization_id,order_id,batch_number,batch_name,origin_location,destination_location,planned_departure_at,planned_arrival_at,status,notes,route_key,warehouse_id,carrier_id,created_by_user_id,created_at,updated_at,border_port,customs_location,transit_location,route_notes,planned_loading_at,overseas_carrier_name,overseas_vehicle_type,overseas_vehicle_count,overseas_vehicle_plate,overseas_driver_name,overseas_driver_phone) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(batchId,user.organizationId,first.order_id,batchNumber,batchName,warehouse.name,destination,plannedDepartureAt,null,"planning",valueOf(form,"notes").trim()||null,routeKey,warehouse.id,selectedResource.carrierId,user.userId,now,now,null,null,null,valueOf(form,"routeNotes").trim()||null,valueOf(form,"plannedLoadingAt")||null,selectedResource.carrierName,selectedResource.vehicleType,1,selectedResource.plateNumber,selectedResource.driverName,selectedResource.driverPhone),
       env.DB.prepare("INSERT INTO transport_batch_vehicles(id,organization_id,batch_id,vehicle_no,vehicle_type,plate_number,carrier_id,driver_name,driver_phone,capacity_weight_kg,capacity_volume_cbm,status,created_at,updated_at,vehicle_master_id,driver_master_id) VALUES(?,?,?,'MAIN-1',?,?,?,?,?,?,?,'planned',?,?,?,?)").bind(vehicleId,user.organizationId,batchId,selectedResource.vehicleType,selectedResource.plateNumber,selectedResource.carrierId,selectedResource.driverName,selectedResource.driverPhone,selectedResource.capacityWeight,selectedResource.capacityVolume,now,now,selectedResource.vehicleMasterId,selectedResource.driverMasterId),
     ];
     states.forEach((row,index)=>statements.push(env.DB.prepare("INSERT INTO transport_batch_orders(id,organization_id,batch_id,order_id,sequence_no,status,added_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,'planned',?,?,?)").bind(crypto.randomUUID(),user.organizationId,batchId,row.order_id,index+1,user.userId,now,now)));
@@ -375,13 +379,13 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
     </section>
     <section className="panel">
       <div className="panel-header"><div><h2>当前仓库配载单</h2><p>装车开始前可以补充车辆资源、增加或移除订单；口岸与清关地在拼车装货开始时确定。</p></div></div>
-      <div className="table-wrap"><table><thead><tr><th>配载单</th><th>订单</th><th>实收汇总</th><th>承运商 / 车辆 / 司机</th><th>境外目的地</th><th>计划装车</th><th>状态</th><th>操作</th></tr></thead><tbody>{loaderData.batches.map(batch=><tr key={batch.id}>
+      <div className="table-wrap"><table><thead><tr><th>配载单</th><th>订单</th><th>实收汇总</th><th>承运商 / 车辆 / 司机</th><th>境外目的地</th><th>计划装车 / 出境</th><th>状态</th><th>操作</th></tr></thead><tbody>{loaderData.batches.map(batch=><tr key={batch.id}>
         <td><strong>{batch.batch_number}</strong><small>{batch.batch_name}</small></td>
         <td><strong>{batch.order_count} 票</strong><small>{batch.order_numbers}</small></td>
         <td>{batch.total_weight.toFixed(2)} KG<small>{batch.total_volume.toFixed(3)} CBM</small></td>
         <td>{batch.overseas_carrier_name||"待安排承运商"}<small>{batch.overseas_vehicle_plate||"待安排车辆"} · {batch.overseas_driver_name||"待安排司机"}</small></td>
         <td>{batch.destination_location}</td>
-        <td>{batch.planned_loading_at?new Date(batch.planned_loading_at).toLocaleString("zh-CN"):"待定"}</td>
+        <td>{batch.planned_loading_at?new Date(batch.planned_loading_at).toLocaleString("zh-CN"):"装车待定"}<small>出境：{batch.planned_departure_at?new Date(batch.planned_departure_at).toLocaleString("zh-CN"):"未填写"}</small></td>
         <td><span className="status-pill">{batch.has_started?"已开始装车":batch.has_dispatch?"装车任务已生成":batch.status==="planning"?"配载已生成":"待装车"}</span></td>
         <td><div className="button-row"><Link className="text-button" to={`/admin/loading/${batch.id}`}>打开</Link>{!batch.has_started&&<Modal title={`车辆安排 · ${batch.batch_number}`} triggerLabel={batch.carrier_id&&batch.vehicle_master_id&&batch.driver_master_id?"修改车辆安排":"补充车辆安排"} triggerClassName="text-button" closeSignal={actionData?.success}><BatchResourceForm batch={batch} carriers={loaderData.carriers} vehicles={loaderData.carrierVehicles} drivers={loaderData.carrierDrivers} busy={busy}/></Modal>}{!batch.has_started&&<Modal title={`调整 ${batch.batch_number}`} triggerLabel="调整订单" triggerClassName="text-button" closeSignal={actionData?.success}><BatchAdjustment batch={batch} orders={loaderData.batchOrders.filter(row=>row.batch_id===batch.id)} busy={busy}/></Modal>}</div></td>
       </tr>)}</tbody></table></div>
@@ -397,7 +401,7 @@ function ConsolidationForm({selected,documents,totals,carriers,vehicles,drivers,
     <div className="ltl-selection-summary"><div><span>完整订单</span><strong>{selected.length} 票</strong></div><div><span>包装 / 件数</span><strong>{totals.packages} 包装 · {totals.pieces} 件</strong></div><div><span>实收重量</span><strong>{totals.weight.toFixed(2)} KG</strong></div><div><span>实收体积</span><strong>{totals.volume.toFixed(3)} CBM</strong></div></div>
     <BatchResourceFields carriers={carriers} vehicles={vehicles} drivers={drivers}/>
     <FileConfirmationList selected={selected} documents={documents}/>
-    <div className="form-grid compact"><label className="field"><span>配载单名称</span><input name="batchName" placeholder="选填，系统可自动生成"/></label><label className="field"><span>计划装车时间</span><input name="plannedLoadingAt" type="datetime-local"/></label><label className="field span-2"><span>运输线路</span><textarea name="routeNotes" rows={2} placeholder="选填，多行填写"/></label><label className="field span-2"><span>备注</span><textarea name="notes" rows={2}/></label></div>
+    <div className="form-grid compact"><label className="field"><span>配载单名称</span><input name="batchName" placeholder="选填，系统可自动生成"/></label><label className="field"><span>计划装车时间</span><input name="plannedLoadingAt" type="datetime-local"/></label><label className="field"><span>计划出境发车时间 *</span><input name="plannedDepartureAt" type="datetime-local" required/></label><label className="field span-2"><span>运输线路</span><textarea name="routeNotes" rows={2} placeholder="选填，多行填写"/></label><label className="field span-2"><span>备注</span><textarea name="notes" rows={2}/></label></div>
     <div className="alert info">仓库确认的是配载资料内容；海关放行仍在装车出库前单独校验。配载容量由人工判断。</div>
     <button className="primary" disabled={busy||selected.length<2}>文件确认无误，生成 PZ 配载单</button>
   </Form>
@@ -408,6 +412,7 @@ function BatchResourceForm({batch,carriers,vehicles,drivers,busy}:{batch:BatchRo
     <input type="hidden" name="intent" value="resource"/>
     <input type="hidden" name="batchId" value={batch.id}/>
     <BatchResourceFields carriers={carriers} vehicles={vehicles} drivers={drivers} carrierId={batch.carrier_id??""} vehicleMasterId={batch.vehicle_master_id??""} driverMasterId={batch.driver_master_id??""}/>
+    <label className="field"><span>计划出境发车时间 *</span><input name="plannedDepartureAt" type="datetime-local" defaultValue={batch.planned_departure_at?.slice(0,16)??""} required/></label>
     <div className="alert info">保存后同步到管理后台配载单和已生成但尚未开始扫描的仓库装车任务。</div>
     <button className="primary" disabled={busy}>确认承运商、车辆和司机</button>
   </Form>

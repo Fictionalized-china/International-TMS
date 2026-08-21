@@ -29,6 +29,7 @@ type CargoRow = {
   destination_city: string;
   border_port: string | null;
   customs_location: string | null;
+  planned_departure_at: string | null;
   package_count: number;
   pieces: number;
   weight_kg: number;
@@ -182,7 +183,7 @@ export async function loader({ request }: Route.LoaderArgs) {
         COALESCE((SELECT COUNT(*) FROM transport_batch_orders bc WHERE bc.batch_id=b.id AND bc.organization_id=b.organization_id AND bc.status!='removed'),0) batch_order_count,
         o.id order_id,o.order_number,o.business_type,c.name customer_name,
         (SELECT GROUP_CONCAT(NULLIF(TRIM(ci.cargo_name_cn),''),'、') FROM order_cargo_items ci WHERE ci.organization_id=o.organization_id AND ci.order_id=o.id) cargo_names,
-        ow.name overseas_warehouse_name,o.destination_country,o.destination_state,o.destination_city,b.border_port,b.customs_location,
+        ow.name overseas_warehouse_name,o.destination_country,o.destination_state,o.destination_city,b.border_port,b.customs_location,b.planned_departure_at,
         (SELECT COUNT(*) FROM warehouse_packages wp JOIN shipments ps ON ps.id=wp.shipment_id WHERE wp.organization_id=o.organization_id AND ps.order_id=o.id AND wp.warehouse_id=? AND wp.status IN ('in_stock','allocated')) package_count,
         COALESCE((SELECT SUM(wp.pieces) FROM warehouse_packages wp JOIN shipments ps ON ps.id=wp.shipment_id WHERE wp.organization_id=o.organization_id AND ps.order_id=o.id AND wp.warehouse_id=? AND wp.status IN ('in_stock','allocated')),0) pieces,
         COALESCE((SELECT SUM(wp.weight_kg) FROM warehouse_packages wp JOIN shipments ps ON ps.id=wp.shipment_id WHERE wp.organization_id=o.organization_id AND ps.order_id=o.id AND wp.warehouse_id=? AND wp.status IN ('in_stock','allocated')),0) weight_kg,
@@ -429,13 +430,16 @@ export async function action({ request }: Route.ActionArgs) {
 
   if (intent !== "create") return { formError: "未知操作" };
   const batchId = valueOf(form, "batchId");
+  const plannedDepartureAt = valueOf(form, "plannedDepartureAt").trim();
   const selectedOrderIds = [
     ...new Set(form.getAll("orderId").map(String).filter(Boolean)),
   ];
   if (!batchId || !selectedOrderIds.length)
     return { formError: "请先选择一张配载单内的全部订单" };
+  if (!plannedDepartureAt)
+    return { formError: "请填写计划出境发车时间" };
   const batch = await env.DB.prepare(
-    `SELECT id,batch_number,batch_name,destination_location,status,warehouse_id,border_port,customs_location
+    `SELECT id,batch_number,batch_name,destination_location,status,warehouse_id,border_port,customs_location,planned_departure_at
     FROM transport_batches WHERE id=? AND organization_id=? AND batch_number LIKE 'PZ-%' AND status IN ('planning','loading')`,
   )
     .bind(batchId, user.organizationId)
@@ -448,6 +452,7 @@ export async function action({ request }: Route.ActionArgs) {
       warehouse_id: string | null;
       border_port: string | null;
       customs_location: string | null;
+      planned_departure_at: string | null;
     }>();
   if (!batch) return { formError: "PZ 配载单不存在或已不能生成装车任务" };
   if (batch.warehouse_id !== warehouse.id)
@@ -635,8 +640,8 @@ export async function action({ request }: Route.ActionArgs) {
       user.organizationId,
     ),
     env.DB.prepare(
-      "UPDATE transport_batches SET status='loading',road_status='waiting_loading',updated_at=? WHERE id=? AND organization_id=?",
-    ).bind(now, batch.id, user.organizationId),
+      "UPDATE transport_batches SET status='loading',road_status='waiting_loading',planned_departure_at=?,updated_at=? WHERE id=? AND organization_id=?",
+    ).bind(plannedDepartureAt, now, batch.id, user.organizationId),
   );
   await env.DB.batch(statements);
   await writeAudit({
@@ -1469,6 +1474,18 @@ function LoadingTaskModal({
               </table>
             </div>
             <div className="form-grid compact">
+              <label className="field">
+                <span>计划出境发车时间 *</span>
+                <input
+                  type="datetime-local"
+                  name="plannedDepartureAt"
+                  defaultValue={selectedBatch?.planned_departure_at?.slice(
+                    0,
+                    16,
+                  )}
+                  required
+                />
+              </label>
               <label className="field">
                 <span>计划装车时间</span>
                 <input type="datetime-local" name="plannedLoadingAt" />
