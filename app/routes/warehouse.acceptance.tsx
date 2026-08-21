@@ -483,7 +483,6 @@ export async function action({ request }: Route.ActionArgs) {
   });
   const successParams = new URLSearchParams({
     warehouseId: warehouse.id,
-    reference: order.order_number,
     receiptId,
     acceptanceResult: result,
   });
