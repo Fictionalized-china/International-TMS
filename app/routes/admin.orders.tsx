@@ -1233,6 +1233,7 @@ export default function Orders({
   loaderData,
   actionData,
 }: Route.ComponentProps) {
+  const [activeOrderId, setActiveOrderId] = useState<string | null>(null);
   const busy = useNavigation().state !== "idle",
     manage = loaderData.current.permissions.includes("order.manage"),
     data = actionData as
@@ -1242,6 +1243,8 @@ export default function Orders({
           formError?: string;
           createdOrderId?: string;
         };
+  const activeOrder = loaderData.orders.find((order) => order.id === activeOrderId) ?? null;
+  useModalScrollLock(Boolean(activeOrder));
   return (
     <>
       <header className="page-header">
@@ -1325,42 +1328,27 @@ export default function Orders({
           <table>
             <thead>
               <tr>
-                <th>订单号</th>
-                <th>客户</th>
+                <th>订单 / 客户</th>
                 <th>业务/线路</th>
-                <th>货物</th>
-                <th>计划</th>
-                <th>业务状态</th>
-                <th>当前节点</th>
-                <th>当前负责人</th>
-                <th>下一步动作</th>
-                <th>提醒</th>
+                <th>货物 / 计划</th>
+                <th>状态 / 当前节点</th>
+                <th>负责人</th>
+                <th>下一步 / 阻断</th>
+                <th>更新 / 提醒</th>
                 <th className="sticky-action">操作</th>
               </tr>
             </thead>
             <tbody>
               {loaderData.orders.map((o) => {
-                const actions = loaderData.transitions.filter(
-                  (x) =>
-                    x.from_status === o.status &&
-                    (x.action_code !== "complete" ||
-                      (o.active_module_count > 0 &&
-                        o.incomplete_required_module_count === 0)),
-                );
                 return (
                   <tr key={o.id}>
                     <td>
                       <Link to={`/admin/orders/${o.id}`}>
                         <strong>{o.order_number}</strong>
                       </Link>
-                      <small>
-                        {o.customer_reference || o.quote_number || "—"}
-                      </small>
-                    </td>
-                    <td>
                       <strong>{o.customer_name}</strong>
                       <small>
-                        {o.source === "portal" ? "客户门户" : "后台创建"}
+                        {o.quote_number || o.customer_reference || (o.source === "portal" ? "客户门户" : "后台创建")}
                       </small>
                     </td>
                     <td>
@@ -1380,10 +1368,7 @@ export default function Orders({
                         {o.pieces} 件 · {o.gross_weight_kg} KG · {o.volume_cbm}{" "}
                         CBM
                       </small>
-                    </td>
-                    <td>
-                      <strong>{o.requested_pickup_date || "待定"}</strong>
-                      <small>送达 {o.requested_delivery_date || "待定"}</small>
+                      <small>提货 {o.requested_pickup_date || "待定"} · 送达 {o.requested_delivery_date || "待定"}</small>
                     </td>
                     <td>
                       <span
@@ -1391,17 +1376,8 @@ export default function Orders({
                       >
                         {statusLabel(o.status)}
                       </span>
-                      <small>{completionStatusLabels[o.completion_status]}</small>
-                    </td>
-                    <td>
                       <strong>{o.current_step_name}</strong>
-                      <small>
-                        {o.workflow_updated_at
-                          ? new Date(o.workflow_updated_at).toLocaleString(
-                              "zh-CN",
-                            )
-                          : "—"}
-                      </small>
+                      <small>{completionStatusLabels[o.completion_status]}</small>
                     </td>
                     <td>{o.assignee_name || o.next_owner || "未分配"}</td>
                     <td>
@@ -1414,6 +1390,11 @@ export default function Orders({
                       )}
                     </td>
                     <td>
+                      <strong>
+                        {o.workflow_updated_at
+                          ? new Date(o.workflow_updated_at).toLocaleString("zh-CN")
+                          : "—"}
+                      </strong>
                       {o.is_overdue ? (
                         <span className="status-pill off">已超时</span>
                       ) : o.exception_status !== "normal" ? (
@@ -1424,25 +1405,13 @@ export default function Orders({
                     </td>
                     <td className="sticky-action">
                       <div className="row-actions">
-                        <Link
-                          className="text-button"
-                          to={`/admin/orders/${o.id}`}
+                        <button
+                          type="button"
+                          className="secondary order-quick-open"
+                          onClick={() => setActiveOrderId(o.id)}
                         >
-                          详情
-                        </Link>
-                        {manage &&
-                          actions
-                            .slice(0, 3)
-                            .map((a) => (
-                              <ActionButton
-                                key={a.action_code}
-                                order={o}
-                                transition={a}
-                                members={loaderData.members}
-                                busy={busy}
-                                success={data?.success}
-                              />
-                            ))}
+                          快速办理
+                        </button>
                       </div>
                     </td>
                   </tr>
@@ -1461,7 +1430,107 @@ export default function Orders({
           pageSize={loaderData.pageSize}
         />
       </section>
+      {activeOrder && (
+        <OrderQuickDrawer
+          order={activeOrder}
+          transitions={loaderData.transitions}
+          members={loaderData.members}
+          manage={manage}
+          busy={busy}
+          success={data?.success}
+          onClose={() => setActiveOrderId(null)}
+        />
+      )}
     </>
+  );
+}
+
+function OrderQuickDrawer({
+  order,
+  transitions,
+  members,
+  manage,
+  busy,
+  success,
+  onClose,
+}: {
+  order: Order;
+  transitions: OrderWorkflowTransition[];
+  members: Member[];
+  manage: boolean;
+  busy: boolean;
+  success?: string;
+  onClose: () => void;
+}) {
+  const actions = transitions.filter(
+    (transition) =>
+      transition.from_status === order.status &&
+      (transition.action_code !== "complete" ||
+        (order.active_module_count > 0 && order.incomplete_required_module_count === 0)),
+  );
+  return (
+    <div
+      className="order-quick-drawer-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <aside className="order-quick-drawer" role="dialog" aria-modal="true" aria-labelledby="order-quick-title">
+        <header>
+          <div>
+            <span>快速办理</span>
+            <h2 id="order-quick-title">{order.order_number}</h2>
+            <p>{order.customer_name}</p>
+          </div>
+          <button type="button" className="icon-button" aria-label="关闭快速办理" onClick={onClose}>×</button>
+        </header>
+        <div className="order-quick-drawer-body">
+          <section className="order-quick-summary">
+            <h3>订单概况</h3>
+            <dl>
+              <div><dt>业务线路</dt><dd>{order.origin_country} {order.origin_city} → {order.destination_country} {order.destination_city}</dd></div>
+              <div><dt>货物</dt><dd>{order.cargo_description || "未填写"}</dd></div>
+              <div><dt>实物数据</dt><dd>{order.pieces} 件 · {order.gross_weight_kg} KG · {order.volume_cbm} CBM</dd></div>
+              <div><dt>业务状态</dt><dd>{statusLabel(order.status)}</dd></div>
+            </dl>
+          </section>
+          <section className="order-quick-current">
+            <span>当前节点</span>
+            <h3>{order.current_step_name}</h3>
+            <p>负责人：{order.assignee_name || order.next_owner || "未分配"}</p>
+          </section>
+          <section className={`order-quick-next ${order.next_blocker ? "blocked" : ""}`}>
+            <span>{order.next_blocker ? "当前阻断" : "下一步"}</span>
+            <h3>{order.next_blocker || order.next_action}</h3>
+            <p>{order.next_blocker ? `处理后继续：${order.next_action}` : `${order.next_stage} · ${order.next_owner}`}</p>
+            <Link className="primary" to={order.next_href} onClick={onClose}>
+              {order.next_blocker ? "查看阻断并处理" : "打开当前节点"}
+            </Link>
+          </section>
+          {manage && actions.length > 0 && (
+            <section className="order-quick-actions">
+              <h3>订单流转</h3>
+              <div>
+                {actions.map((transition) => (
+                  <ActionButton
+                    key={transition.action_code}
+                    order={order}
+                    transition={transition}
+                    members={members}
+                    busy={busy}
+                    success={success}
+                  />
+                ))}
+              </div>
+            </section>
+          )}
+        </div>
+        <footer>
+          <Link className="secondary" to={`/admin/orders/${order.id}`} onClick={onClose}>查看完整订单</Link>
+        </footer>
+      </aside>
+    </div>
   );
 }
 

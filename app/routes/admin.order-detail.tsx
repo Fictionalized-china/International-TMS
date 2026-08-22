@@ -659,6 +659,9 @@ function OrderBusinessForm({
     configuredSteps.find((step) => step.step_key === currentStepKey) ??
     configuredSteps[0] ??
     null;
+  const currentTaskRows = currentConfiguredStep
+    ? uniqueWorkflowTasks(currentConfiguredStep.rows)
+    : [];
   const enabledModules = composeOrderWorkflow(data.modules);
   const configuredModuleCodes = new Set(
     data.workflowFormRows.map((row) => row.module_code).filter(Boolean),
@@ -686,43 +689,9 @@ function OrderBusinessForm({
             <h2>{data.businessWorkflow?.current_step_name || order.current_step_name}</h2>
             <p>{guidance.action}</p>
           </div>
-          <dl>
-            <div><dt>负责岗位</dt><dd>{currentPositionName}</dd></div>
-            <div><dt>具体负责人</dt><dd>{order.assignee_name || "待分配"}</dd></div>
-            <div className={guidance.blocker ? "blocked" : ""}>
-              <dt>办理条件</dt>
-              <dd>{guidance.blocker || "当前节点暂无阻断"}</dd>
-            </div>
-          </dl>
-          <div className="order-form-primary-action">
-            {directAction && !guidance.blocker ? (
-              <Form method="post">
-                <input type="hidden" name="intent" value="workflow_action" />
-                <input type="hidden" name="actionCode" value={directAction.actionCode} />
-                {directAction.assigneeUserId ? (
-                  <input type="hidden" name="assigneeUserId" value={directAction.assigneeUserId} />
-                ) : directAction.requiresAssignee ? (
-                  <select name="assigneeUserId" required defaultValue="">
-                    <option value="">选择下一处理人</option>
-                    {data.members.map((member) => (
-                      <option key={member.id} value={member.id}>
-                        {member.display_name}{member.department_name ? ` · ${member.department_name}` : ""}
-                      </option>
-                    ))}
-                  </select>
-                ) : null}
-                <button className="primary" disabled={busy}>{directAction.label}</button>
-              </Form>
-            ) : guidance.moduleCode ? (
-              <Link
-                className={guidance.blocker ? "secondary" : "primary"}
-                to={`/admin/orders/${order.id}/modules/${guidance.moduleCode}#module-business-data`}
-              >
-                {guidance.blocker ? "查看阻断并处理" : "办理当前节点"}
-              </Link>
-            ) : null}
-          </div>
         </header>
+
+        <OrderBusinessSummary data={data} />
 
         <div className="order-form-workflow-sections">
           {(currentConfiguredStep ? [currentConfiguredStep] : []).map((step) => {
@@ -843,50 +812,6 @@ function OrderBusinessForm({
           </details>
         )}
 
-        <section className="order-form-section order-form-basics">
-          <header>
-            <div>
-              <span>订单资料</span>
-              <h2>基础信息</h2>
-            </div>
-            <small>{order.customer_name} · {businessTypeLabels[order.business_type] ?? order.business_type} · {order.cargo_description || "未填写货物名称"}</small>
-          </header>
-          <div className="order-form-basics-body">
-            <div className="order-form-data-grid">
-              <Info label="客户" value={order.customer_name} />
-              <Info label="关联报价" value={order.quote_number} />
-              <Info label="订单类型" value={businessTypeLabels[order.business_type] ?? order.business_type} />
-              <Info label="发货方" value={order.shipper_name} />
-              <Info label="发货联系人" value={[order.shipper_contact, order.shipper_phone].filter(Boolean).join(" · ") || null} />
-              <Info label="预约提货" value={order.requested_pickup_date} />
-              <Info label="国内提货地址" value={[order.origin_state, order.origin_city, order.origin_address].filter(Boolean).join(" ")} />
-              <Info label="境外收货联系人" value={[order.consignee_contact, order.consignee_phone].filter(Boolean).join(" · ") || null} />
-              <Info label="境外目的地" value={[order.destination_state, order.destination_city, order.destination_address].filter(Boolean).join(" ")} />
-              <Info label="境外目的仓" value={order.overseas_warehouse_name} />
-              <Info label="货物摘要" value={`${order.cargo_description || "未填写"} · ${order.pieces} 件 · ${order.gross_weight_kg} KG · ${order.volume_cbm} CBM`} />
-              <Info label="备注" value={order.special_instructions} />
-            </div>
-            {data.packageLabels.length > 0 && (
-              <section className="order-package-labels" aria-label="仓库货物标签">
-                <header>
-                  <div><strong>货物标签</strong><small>境外仓继续扫描以下国内仓标签；标签出库后仍然有效。</small></div>
-                  <span>{data.packageLabels.length} 张</span>
-                </header>
-                <div className="order-package-label-list">
-                  {data.packageLabels.map((label) => (
-                    <div className="order-package-label-row" key={label.id}>
-                      <div><code>{label.barcode}</code><small>{label.package_number}</small></div>
-                      <div><strong>{label.cargo_name || "未关联货物明细"}</strong><small>{label.pieces} 件 · {Number(label.weight_kg || 0).toFixed(2)} KG · {Number(label.volume_cbm || 0).toFixed(3)} CBM</small></div>
-                      <div><strong>{label.warehouse_name || "仓库待确认"}</strong><small>{[label.zone_name, label.location_name].filter(Boolean).join(" / ") || "库位待确认"}</small></div>
-                      <span className={`status-pill ${label.status === "dispatched" ? "success" : label.status === "exception" ? "danger" : ""}`}>{warehousePackageStatusLabel(label.status)}</span>
-                    </div>
-                  ))}
-                </div>
-              </section>
-            )}
-          </div>
-        </section>
-
         <details className="order-form-records">
           <summary>附件与办理记录 <span>{data.attachments.length} 个附件 · {data.history.length + data.macro.length} 条记录</span></summary>
           <div className="order-form-record-grid">
@@ -907,6 +832,117 @@ function OrderBusinessForm({
           </div>
         </details>
       </main>
+      <aside className="order-context-rail" aria-label="当前节点办理信息">
+        <header>
+          <span>当前责任</span>
+          <h2>{data.businessWorkflow?.current_step_name || order.current_step_name}</h2>
+        </header>
+        <section>
+          <dl>
+            <div><dt>负责岗位</dt><dd>{currentPositionName}</dd></div>
+            <div><dt>具体负责人</dt><dd>{order.assignee_name || "待分配"}</dd></div>
+            <div><dt>当前状态</dt><dd>{statusLabel(order.status)}</dd></div>
+          </dl>
+        </section>
+        <section className={guidance.blocker ? "order-context-blocker blocked" : "order-context-blocker"}>
+          <span>{guidance.blocker ? "阻断原因" : "办理条件"}</span>
+          <strong>{guidance.blocker || "当前节点暂无阻断"}</strong>
+        </section>
+        <section className="order-context-tasks">
+          <div className="order-context-section-title">
+            <span>本节点任务</span>
+            <b>{currentTaskRows.filter((task) => task.task_status !== "completed").length} 项待办</b>
+          </div>
+          <ol>
+            {currentTaskRows.map((task, index) => (
+              <li className={task.task_status === "completed" ? "completed" : ""} key={task.task_state_id || index}>
+                <i>{task.task_status === "completed" ? "✓" : index + 1}</i>
+                <div><strong>{task.task_name}</strong><small>{task.task_position_name || task.task_position_code || currentPositionName}</small></div>
+              </li>
+            ))}
+          </ol>
+          {!currentTaskRows.length && <p>当前节点没有单独配置人工任务。</p>}
+        </section>
+        <section className="order-context-next">
+          <span>下一步动作</span>
+          <strong>{guidance.action}</strong>
+          {directAction && !guidance.blocker ? (
+            <Form method="post">
+              <input type="hidden" name="intent" value="workflow_action" />
+              <input type="hidden" name="actionCode" value={directAction.actionCode} />
+              {directAction.assigneeUserId ? (
+                <input type="hidden" name="assigneeUserId" value={directAction.assigneeUserId} />
+              ) : directAction.requiresAssignee ? (
+                <select name="assigneeUserId" required defaultValue="">
+                  <option value="">选择下一处理人</option>
+                  {data.members.map((member) => (
+                    <option key={member.id} value={member.id}>
+                      {member.display_name}{member.department_name ? ` · ${member.department_name}` : ""}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
+              <button className="primary" disabled={busy}>{directAction.label}</button>
+            </Form>
+          ) : guidance.moduleCode ? (
+            <Link
+              className={guidance.blocker ? "secondary" : "primary"}
+              to={`/admin/orders/${order.id}/modules/${guidance.moduleCode}#module-business-data`}
+            >
+              {guidance.blocker ? "查看阻断并处理" : "办理当前节点"}
+            </Link>
+          ) : null}
+        </section>
+      </aside>
+    </section>
+  );
+}
+
+function OrderBusinessSummary({ data }: { data: Route.ComponentProps["loaderData"] }) {
+  const order = data.order;
+  return (
+    <section className="order-form-section order-form-basics">
+      <header>
+        <div>
+          <span>订单资料</span>
+          <h2>基础信息</h2>
+        </div>
+        <small>{order.customer_name} · {businessTypeLabels[order.business_type] ?? order.business_type} · {order.cargo_description || "未填写货物名称"}</small>
+      </header>
+      <div className="order-form-basics-body">
+        <div className="order-form-data-grid">
+          <Info label="客户" value={order.customer_name} />
+          <Info label="关联报价" value={order.quote_number} />
+          <Info label="订单类型" value={businessTypeLabels[order.business_type] ?? order.business_type} />
+          <Info label="发货方" value={order.shipper_name} />
+          <Info label="发货联系人" value={[order.shipper_contact, order.shipper_phone].filter(Boolean).join(" · ") || null} />
+          <Info label="预约提货" value={order.requested_pickup_date} />
+          <Info label="国内提货地址" value={[order.origin_state, order.origin_city, order.origin_address].filter(Boolean).join(" ")} />
+          <Info label="境外收货联系人" value={[order.consignee_contact, order.consignee_phone].filter(Boolean).join(" · ") || null} />
+          <Info label="境外目的地" value={[order.destination_state, order.destination_city, order.destination_address].filter(Boolean).join(" ")} />
+          <Info label="境外目的仓" value={order.overseas_warehouse_name} />
+          <Info label="货物摘要" value={`${order.cargo_description || "未填写"} · ${order.pieces} 件 · ${order.gross_weight_kg} KG · ${order.volume_cbm} CBM`} />
+          <Info label="备注" value={order.special_instructions} />
+        </div>
+        {data.packageLabels.length > 0 && (
+          <section className="order-package-labels" aria-label="仓库货物标签">
+            <header>
+              <div><strong>货物标签</strong><small>境外仓继续扫描以下国内仓标签；标签出库后仍然有效。</small></div>
+              <span>{data.packageLabels.length} 张</span>
+            </header>
+            <div className="order-package-label-list">
+              {data.packageLabels.map((label) => (
+                <div className="order-package-label-row" key={label.id}>
+                  <div><code>{label.barcode}</code><small>{label.package_number}</small></div>
+                  <div><strong>{label.cargo_name || "未关联货物明细"}</strong><small>{label.pieces} 件 · {Number(label.weight_kg || 0).toFixed(2)} KG · {Number(label.volume_cbm || 0).toFixed(3)} CBM</small></div>
+                  <div><strong>{label.warehouse_name || "仓库待确认"}</strong><small>{[label.zone_name, label.location_name].filter(Boolean).join(" / ") || "库位待确认"}</small></div>
+                  <span className={`status-pill ${label.status === "dispatched" ? "success" : label.status === "exception" ? "danger" : ""}`}>{warehousePackageStatusLabel(label.status)}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+      </div>
     </section>
   );
 }
