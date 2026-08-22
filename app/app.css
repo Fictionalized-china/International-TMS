@@ -14228,3 +14228,452 @@ a.order-module-card.read-only:hover {
     flex-direction: column;
   }
 }
+
+/* Workflow-driven order object page: dense summary, direct tabs and one current action. */
+.order-detail-tabs {
+  position: sticky;
+  z-index: 12;
+  top: 0;
+  display: grid;
+  grid-template-columns: repeat(8, minmax(104px, 1fr));
+  overflow-x: auto;
+  border-top: 1px solid #dfe6ef;
+  border-bottom: 1px solid #cfd9e6;
+  background: #fff;
+}
+.order-detail-tabs button {
+  display: grid;
+  min-width: 104px;
+  min-height: 48px;
+  align-content: center;
+  gap: 2px;
+  padding: 7px 10px 6px;
+  border: 0;
+  border-right: 1px solid #e4e9f0;
+  border-radius: 0;
+  color: #4f6076;
+  background: #fff;
+  box-shadow: inset 0 -3px transparent;
+  text-align: left;
+}
+.order-detail-tabs button:hover,
+.order-detail-tabs button:focus-visible {
+  color: #174ea6;
+  background: #f6f9fd;
+  outline: none;
+}
+.order-detail-tabs button.active {
+  color: #123e78;
+  background: #f1f6fd;
+  box-shadow: inset 0 -3px #174ea6;
+}
+.order-detail-tabs button strong {
+  font-size: 12px;
+}
+.order-detail-tabs button small {
+  overflow: hidden;
+  color: #7a8798;
+  font-size: 9px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.order-detail-tab-content {
+  min-height: 270px;
+  background: #f5f7fa;
+}
+.order-current-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 268px;
+  gap: 12px;
+  align-items: start;
+  padding: 12px 14px;
+}
+.order-current-modules {
+  min-width: 0;
+}
+.order-current-modules .order-form-workflow-sections {
+  padding: 0;
+}
+.order-current-context {
+  position: sticky;
+  top: 58px;
+  overflow: hidden;
+  border: 1px solid #cbd8e7;
+  border-radius: 7px;
+  background: #fff;
+}
+.order-current-context > header {
+  display: grid;
+  gap: 2px;
+  padding: 11px 12px;
+  border-bottom: 1px solid #dfe6ef;
+  background: #f4f8fd;
+}
+.order-current-context > header span,
+.order-current-guidance span {
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 800;
+}
+.order-current-context > header strong {
+  color: #18345f;
+  font-size: 14px;
+}
+.order-current-context dl {
+  margin: 0;
+}
+.order-current-context dl > div {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #edf1f5;
+}
+.order-current-context dt {
+  color: #778498;
+  font-size: 10px;
+}
+.order-current-context dd {
+  overflow: hidden;
+  margin: 0;
+  color: #273a52;
+  font-size: 11px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.order-current-guidance {
+  display: grid;
+  gap: 4px;
+  padding: 11px 12px;
+  background: #f4faf7;
+}
+.order-current-guidance strong {
+  color: #176344;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.order-current-guidance small {
+  color: #6d7c8f;
+  font-size: 10px;
+  line-height: 1.4;
+}
+.order-current-context.blocked {
+  border-color: #e3b2ad;
+}
+.order-current-context.blocked .order-current-guidance {
+  background: #fff3f1;
+}
+.order-current-context.blocked .order-current-guidance strong {
+  color: #a92a22;
+}
+.order-form-module.mine {
+  border-color: #9dbce5;
+  border-left-color: #2563a9;
+  box-shadow: 0 4px 14px rgba(34, 79, 137, .08);
+}
+.order-form-module-meta b {
+  color: #154c8f;
+  background: #e6f0fc;
+}
+.order-form-module.mine .order-form-module-entry:hover,
+.order-form-module.mine .order-form-module-entry:focus-visible {
+  background: #f2f7fd;
+}
+.order-form-basics > header {
+  min-height: 40px;
+  padding: 7px 14px;
+}
+.order-form-basics-body {
+  padding: 0;
+}
+.order-form-data-grid {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  border: 0;
+}
+.order-form-data-grid > div {
+  min-height: 48px;
+  padding: 7px 9px;
+}
+.order-form-data-grid > div:nth-child(7),
+.order-form-data-grid > div:nth-child(9) {
+  grid-column: span 2;
+}
+.order-form-data-grid > div:nth-child(11),
+.order-form-data-grid > div:nth-child(12) {
+  grid-column: span 3;
+}
+.order-form-data-grid > div:nth-child(10) {
+  grid-column: auto;
+}
+.order-form-data-grid > div span {
+  color: #718096;
+  font-size: 9px;
+}
+.order-form-data-grid > div strong {
+  display: block;
+  overflow: hidden;
+  margin-top: 3px;
+  color: #22344c;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.order-detail-tab-content > .order-mounted-panel,
+.order-tab-panel {
+  min-height: 270px;
+  margin: 0;
+  padding: 14px;
+  border: 0;
+  border-radius: 0;
+  background: #fff;
+  box-shadow: none;
+}
+.order-detail-tab-content .company-profile {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.order-detail-tab-content .route-detail {
+  margin-top: 12px;
+}
+.order-tab-panel-header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+.order-tab-panel-header > div {
+  display: grid;
+  gap: 2px;
+}
+.order-tab-panel-header span {
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 800;
+}
+.order-tab-panel-header h2 {
+  margin: 0;
+  color: #20344e;
+  font-size: 16px;
+}
+.order-tab-panel-header small {
+  color: #6e7d90;
+  font-size: 10px;
+}
+.order-module-overview-table {
+  overflow: hidden;
+  border: 1px solid #d8e1eb;
+  border-radius: 6px;
+}
+.order-module-overview-head,
+.order-module-overview-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.4fr) 100px minmax(160px, 1.1fr) 120px 70px 76px;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+}
+.order-module-overview-head {
+  color: #637389;
+  background: #f2f5f9;
+  font-size: 10px;
+  font-weight: 800;
+}
+.order-module-overview-row {
+  min-height: 48px;
+  border-top: 1px solid #e5eaf0;
+  color: #30445d;
+  background: #fff;
+  font-size: 11px;
+}
+.order-module-overview-row > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.order-module-overview-row strong,
+.order-module-overview-row small,
+.order-module-overview-row > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.order-module-overview-row small {
+  color: #b42318;
+  font-size: 9px;
+}
+.order-module-overview-row.blocked {
+  background: #fff8f7;
+}
+.order-tab-panel > .order-package-labels,
+.order-mounted-panel > .order-package-labels {
+  margin-top: 12px;
+}
+.order-single-form > .order-vertical-workflow li > .order-workflow-step-entry {
+  display: grid;
+  grid-template-columns: 30px minmax(68px, 1fr);
+  min-height: 40px;
+  padding-right: 6px;
+  color: inherit;
+  text-decoration: none;
+}
+.order-single-form > .order-vertical-workflow li > .order-workflow-step-entry > span {
+  display: none;
+}
+.order-single-form > .order-vertical-workflow li > .order-workflow-step-entry.disabled {
+  cursor: not-allowed;
+  opacity: .62;
+}
+.order-single-form > .order-vertical-workflow ol {
+  grid-auto-columns: minmax(112px, 1fr);
+}
+.order-sticky-action-bar {
+  grid-template-columns: 170px minmax(240px, 1fr) minmax(190px, .7fr) auto;
+}
+.order-overview-toggle {
+  min-height: 30px;
+  padding: 5px 10px;
+  font-size: 11px;
+}
+.order-overview-workspace {
+  border-top: 1px solid #d8e1eb;
+  background: #f5f7fa;
+}
+.order-overview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border-bottom: 1px solid #d8e1eb;
+  background: #fff;
+}
+.order-overview-header > div {
+  display: grid;
+  gap: 2px;
+}
+.order-overview-header span,
+.order-overview-header small {
+  color: #6b7b90;
+  font-size: 10px;
+}
+.order-overview-header span {
+  font-weight: 850;
+}
+.order-overview-header h2 {
+  margin: 0;
+  color: #20344e;
+  font-size: 16px;
+}
+.order-overview-workspace > .order-vertical-workflow {
+  position: static;
+  max-height: none;
+  margin: 12px 14px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid #d8e1ec;
+  border-radius: 7px;
+  background: #fff;
+}
+.order-overview-workspace > .order-vertical-workflow header {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  margin-bottom: 9px;
+}
+.order-overview-workspace > .order-vertical-workflow ol {
+  grid-auto-columns: minmax(112px, 1fr);
+  grid-auto-flow: column;
+  min-width: max-content;
+}
+.order-overview-workspace > .order-vertical-workflow li {
+  min-height: 44px;
+}
+.order-overview-workspace > .order-vertical-workflow li > .order-workflow-step-entry {
+  display: grid;
+  grid-template-columns: 30px minmax(68px, 1fr);
+  min-height: 40px;
+  padding-right: 6px;
+  color: inherit;
+  text-decoration: none;
+}
+.order-overview-workspace > .order-vertical-workflow li > .order-workflow-step-entry > span {
+  display: none;
+}
+.order-overview-workspace > .order-vertical-workflow li::before {
+  top: 14px;
+  right: -4px;
+  bottom: auto;
+  left: 30px;
+  width: auto;
+  height: 2px;
+}
+.order-overview-workspace > .order-vertical-workflow li div {
+  z-index: 1;
+  padding: 0 4px;
+  background: #fff;
+}
+.order-overview-workspace .order-detail-tabs {
+  grid-template-columns: repeat(7, minmax(104px, 1fr));
+}
+
+@media (max-width: 1180px) {
+  .order-current-workspace {
+    grid-template-columns: minmax(0, 1fr) 230px;
+  }
+  .order-form-data-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .order-form-data-grid > div:nth-child(7),
+  .order-form-data-grid > div:nth-child(9),
+  .order-form-data-grid > div:nth-child(11),
+  .order-form-data-grid > div:nth-child(12) {
+    grid-column: span 2;
+  }
+  .order-module-overview-head,
+  .order-module-overview-row {
+    grid-template-columns: minmax(160px, 1.3fr) 90px minmax(140px, 1fr) 110px 60px 68px;
+  }
+}
+
+@media (max-width: 860px) {
+  .order-form-current {
+    grid-template-columns: 1fr;
+  }
+  .order-form-current-meta {
+    justify-content: flex-start;
+  }
+  .order-current-workspace {
+    grid-template-columns: 1fr;
+  }
+  .order-current-context {
+    position: static;
+  }
+  .order-detail-tab-content .company-profile {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .order-module-overview-table {
+    overflow-x: auto;
+  }
+  .order-module-overview-head,
+  .order-module-overview-row {
+    min-width: 760px;
+  }
+}
+
+@media (max-width: 600px) {
+  .order-form-data-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .order-form-data-grid > div:nth-child(7),
+  .order-form-data-grid > div:nth-child(9),
+  .order-form-data-grid > div:nth-child(11),
+  .order-form-data-grid > div:nth-child(12) {
+    grid-column: span 2;
+  }
+  .order-detail-tab-content .company-profile {
+    grid-template-columns: 1fr;
+  }
+}

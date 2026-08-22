@@ -209,6 +209,15 @@ type WorkflowFormRow = {
   task_instructions: string | null;
 };
 
+type OrderDetailTab =
+  | "dossier"
+  | "cargo"
+  | "transport"
+  | "warehouse"
+  | "attachments"
+  | "costs"
+  | "history";
+
 export async function loader({ request, params }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "order.view"),
     id = params.orderId;
@@ -568,8 +577,8 @@ export default function OrderDetail({ loaderData, actionData }: Route.ComponentP
         </div>
         <div className="page-actions" id="order-workflow-actions">
           <span className="status-pill">{statusLabel(o.status)}</span>
-          <span className={`status-pill review-status-${o.completion_status}`}>
-            {completionStatusLabels[o.completion_status]}
+          <span className={`status-pill review-status-${o.status === "completed" ? "completed" : o.completion_status}`}>
+            {o.status === "completed" ? "业务已完成" : completionStatusLabels[o.completion_status]}
           </span>
           <Link className="secondary" to="/admin/orders">
             返回订单工作台
@@ -637,7 +646,10 @@ function OrderBusinessForm({
   data: Route.ComponentProps["loaderData"];
   busy: boolean;
 }) {
+  const [activeTab, setActiveTab] = useState<OrderDetailTab>("dossier");
+  const [overviewOpen, setOverviewOpen] = useState(false);
   const order = data.order;
+  const orderCompleted = order.status === "completed";
   const guidance = orderNextGuidance({
     orderId: order.id,
     orderStatus: order.status,
@@ -659,9 +671,16 @@ function OrderBusinessForm({
     configuredSteps.find((step) => step.step_key === currentStepKey) ??
     configuredSteps[0] ??
     null;
+  const currentStepIndex = Math.max(
+    configuredSteps.findIndex((step) => step.step_key === currentConfiguredStep?.step_key),
+    0,
+  );
   const currentTaskRows = currentConfiguredStep
     ? uniqueWorkflowTasks(currentConfiguredStep.rows)
     : [];
+  const pendingTaskCount = orderCompleted
+    ? 0
+    : currentTaskRows.filter((task) => task.task_status !== "completed").length;
   const enabledModules = composeOrderWorkflow(data.modules);
   const configuredModuleCodes = new Set(
     data.workflowFormRows.map((row) => row.module_code).filter(Boolean),
@@ -672,33 +691,76 @@ function OrderBusinessForm({
   const currentPositionName =
     data.currentWorkflowTasks.find((task) => task.status !== "completed")?.position_name ||
     orderResponsiblePosition(guidance.moduleCode, order.status).name;
+  const currentStepDisplayName = orderCompleted
+    ? "订单已完成"
+    : data.businessWorkflow?.current_step_name || order.current_step_name;
+  const currentAction = orderCompleted ? "查看订单资料与历史记录" : guidance.action;
+  const currentPositionDisplay = orderCompleted ? "已归档" : currentPositionName;
+  const currentAssigneeDisplay = orderCompleted ? "无需办理" : order.assignee_name || "待分配";
+  const currentModuleRows = currentConfiguredStep
+    ? uniqueWorkflowModules(currentConfiguredStep.rows)
+    : [];
+  const currentModuleCodes = new Set(
+    currentModuleRows.map((row) => row.module_code).filter(Boolean),
+  );
+  const currentBlockers = data.modules
+    .filter((module) => currentModuleCodes.has(module.module_code) && module.blocking_reason)
+    .map((module) => `${module.module_name}：${module.blocking_reason}`);
+  const requiredFieldCount = currentModuleRows.reduce(
+    (total, row) => total + Number(row.required_field_count || 0),
+    0,
+  );
+  const optionalFieldCount = currentModuleRows.reduce(
+    (total, row) => total + Number(row.optional_field_count || 0),
+    0,
+  );
+  const enabledModuleCount = data.modules.filter((module) => module.enabled === 1).length;
+  const tabItems: Array<{ key: OrderDetailTab; label: string; meta: string }> = [
+    { key: "dossier", label: "订单资料", meta: "客户与线路" },
+    { key: "cargo", label: "货物", meta: `${order.pieces} 件` },
+    { key: "transport", label: "运输", meta: "国内与出境" },
+    { key: "warehouse", label: "仓库", meta: `${data.packageLabels.length} 张标签` },
+    { key: "attachments", label: "文件", meta: `${data.attachments.length} 个` },
+    { key: "costs", label: "费用", meta: `${data.expenseRisk.receivable_count + data.expenseRisk.payable_count} 项` },
+    { key: "history", label: "日志", meta: `${data.history.length + data.macro.length} 条` },
+  ];
 
   return (
     <section className="order-single-form" aria-label="订单业务办理表单">
-      <OrderVerticalWorkflow
-        order={order}
-        modules={data.modules}
-        workflow={data.businessWorkflow}
-        workflowSteps={data.workflowSteps}
-        workflowFormRows={data.workflowFormRows}
-      />
       <main className="order-form-sheet">
         <header className="order-form-current">
           <div>
-            <span>当前办理</span>
-            <h2>{data.businessWorkflow?.current_step_name || order.current_step_name}</h2>
-            <p>{guidance.action}</p>
+            <span>{orderCompleted ? "订单状态" : "当前办理"}</span>
+            <h2>{currentStepDisplayName}</h2>
+            <p>{currentAction}</p>
           </div>
           <div className="order-form-current-meta">
-            <span>{currentTaskRows.filter((task) => task.task_status !== "completed").length} 项待办</span>
-            <span>{currentPositionName}</span>
-            <span>{order.assignee_name || "待分配"}</span>
+            <span>第 {orderCompleted ? configuredSteps.length : currentStepIndex + 1}/{configuredSteps.length || 1} 节点</span>
+            <span>{orderCompleted ? "流程已结束" : `${pendingTaskCount} 项待办`}</span>
+            <span>{currentPositionDisplay}</span>
+            <span>{currentAssigneeDisplay}</span>
+            <button
+              className="secondary order-overview-toggle"
+              type="button"
+              onClick={() => setOverviewOpen((open) => !open)}
+            >
+              {overviewOpen ? "返回当前办理" : "查看订单全貌"}
+            </button>
           </div>
         </header>
 
+        <OrderBusinessSummary data={data} />
+
+        {!overviewOpen && (
+            <section
+              className="order-current-workspace"
+              id="order-tab-panel-current"
+            >
+              <div className="order-current-modules">
+
         <div className="order-form-workflow-sections">
           {(currentConfiguredStep ? [currentConfiguredStep] : []).map((step) => {
-            const current = step.step_key === currentStepKey;
+            const current = !orderCompleted && step.step_key === currentStepKey;
             const moduleRows = uniqueWorkflowModules(step.rows);
             return (
               <section
@@ -727,7 +789,7 @@ function OrderBusinessForm({
                     );
                     return (
                       <article
-                        className={`order-form-module ${mine ? "mine" : ""} ${row.module_status === "completed" ? "completed" : ""}`}
+                        className={`order-form-module ${mine ? "mine" : ""} ${orderCompleted || row.module_status === "completed" ? "completed" : ""}`}
                         id={`order-form-module-${row.module_code}`}
                         key={row.module_state_id}
                       >
@@ -746,7 +808,7 @@ function OrderBusinessForm({
                                 {mine && <b>待我处理</b>}
                                 <span>{row.position_name || row.responsibility_position_code || "待配置岗位"}</span>
                                 <span>{row.assignee_name || "待分配人员"}</span>
-                                <em>{workflowFormStatusLabel(row.module_status || module?.status || "not_started")}</em>
+                                <em>{orderCompleted ? "已归档" : workflowFormStatusLabel(row.module_status || module?.status || "not_started")}</em>
                                 <strong className="order-form-module-entry-label">
                                   {current && editable ? "进入办理 →" : "查看 →"}
                                 </strong>
@@ -762,17 +824,17 @@ function OrderBusinessForm({
                                 {mine && <b>待我处理</b>}
                                 <span>{row.position_name || row.responsibility_position_code || "待配置岗位"}</span>
                                 <span>{row.assignee_name || "待分配人员"}</span>
-                                <em>{workflowFormStatusLabel(row.module_status || module?.status || "not_started")}</em>
+                                <em>{orderCompleted ? "已归档" : workflowFormStatusLabel(row.module_status || module?.status || "not_started")}</em>
                               </div>
                             </div>
                           )}
                         </header>
-                        {module?.blocking_reason && (
+                        {!orderCompleted && module?.blocking_reason && (
                           <div className="order-form-module-summary">
                             <span className="blocked">阻断：{module.blocking_reason}</span>
                           </div>
                         )}
-                        {tasks.length > 0 && (
+                        {!orderCompleted && tasks.length > 0 && (
                           <ol className="order-form-task-list">
                             {tasks.map((task, index) => (
                               <li className={task.task_status === "completed" ? "completed" : ""} key={task.task_state_id || `${row.module_state_id}-${index}`}>
@@ -814,44 +876,104 @@ function OrderBusinessForm({
             </div>
           </details>
         )}
-
-        <OrderBusinessSummary data={data} />
-
-        <details className="order-form-records">
-          <summary>附件与办理记录 <span>{data.attachments.length} 个附件 · {data.history.length + data.macro.length} 条记录</span></summary>
-          <div className="order-form-record-grid">
-            <section>
-              <h3>附件</h3>
-              {data.attachments.map((attachment) => (
-                <a key={attachment.id} href={attachment.data_url} download={attachment.file_name}>{attachment.file_name}</a>
-              ))}
-              {!data.attachments.length && <small>暂无附件</small>}
+              </div>
+              <aside className={`order-current-context ${!orderCompleted && (guidance.blocker || currentBlockers.length) ? "blocked" : ""}`}>
+                <header>
+                  <span>{orderCompleted ? "订单概览" : "本节点概览"}</span>
+                  <strong>{currentStepDisplayName}</strong>
+                </header>
+                <dl>
+                  <div><dt>负责岗位</dt><dd>{currentPositionDisplay}</dd></div>
+                  <div><dt>具体负责人</dt><dd>{currentAssigneeDisplay}</dd></div>
+                  <div><dt>业务模组</dt><dd>{currentModuleRows.length || enabledModuleCount} 个</dd></div>
+                  <div><dt>字段配置</dt><dd>必填 {requiredFieldCount} · 选填 {optionalFieldCount}</dd></div>
+                  <div><dt>待办步骤</dt><dd>{pendingTaskCount} 项</dd></div>
+                </dl>
+                <div className="order-current-guidance">
+                  <span>{orderCompleted ? "查看资料" : guidance.blocker || currentBlockers.length ? "当前阻断" : "下一动作"}</span>
+                  <strong>{orderCompleted ? "订单业务已结束，可查看各节点资料和处理记录" : guidance.blocker || currentBlockers[0] || guidance.action}</strong>
+                  {!orderCompleted && currentBlockers.slice(1).map((blocker) => <small key={blocker}>{blocker}</small>)}
+                </div>
+              </aside>
             </section>
-            <section>
-              <h3>最近记录</h3>
-              {[...data.history, ...data.macro].slice(0, 8).map((item) => (
-                <div key={item.id}><strong>{"action_name" in item ? item.action_name : item.step_name}</strong><small>{new Date(item.occurred_at).toLocaleString("zh-CN")}</small></div>
+          )}
+        {overviewOpen && (
+          <section className="order-overview-workspace" aria-label="订单全貌">
+            <header className="order-overview-header">
+              <div>
+                <span>只读总览</span>
+                <h2>订单全貌</h2>
+                <small>查看完整流程和业务资料；办理操作仍以当前节点为准。</small>
+              </div>
+              <button className="secondary" type="button" onClick={() => setOverviewOpen(false)}>返回当前办理</button>
+            </header>
+            <OrderVerticalWorkflow
+              order={order}
+              modules={data.modules}
+              workflow={data.businessWorkflow}
+              workflowSteps={data.workflowSteps}
+              workflowFormRows={data.workflowFormRows}
+            />
+            <nav className="order-detail-tabs" aria-label="订单全貌内容" role="tablist">
+              {tabItems.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === item.key}
+                  aria-controls={`order-tab-panel-${item.key}`}
+                  className={activeTab === item.key ? "active" : ""}
+                  onClick={() => setActiveTab(item.key)}
+                >
+                  <strong>{item.label}</strong>
+                  <small>{item.meta}</small>
+                </button>
               ))}
-              {!data.history.length && !data.macro.length && <small>暂无记录</small>}
-            </section>
-          </div>
-        </details>
+            </nav>
+            <div className="order-detail-tab-content">
+              {activeTab === "dossier" && <OrderMountedPanel panel="dossier" data={data} />}
+              {activeTab === "cargo" && <OrderMountedPanel panel="cargo" data={data} />}
+              {activeTab === "transport" && (
+                <OrderModuleOverview
+                  data={data}
+                  title="运输进度"
+                  subtitle="国内运输、文件报关、装车与出境运输使用同一组模块状态。"
+                  moduleCodes={["transport", "documents", "customs", "loading", "tracking"]}
+                />
+              )}
+              {activeTab === "warehouse" && (
+                <OrderModuleOverview
+                  data={data}
+                  title="仓库进度"
+                  subtitle="国内入仓、货物标签和境外仓办理状态集中查看。"
+                  moduleCodes={["warehouse", "overseas_warehouse"]}
+                  showPackageLabels
+                />
+              )}
+              {activeTab === "attachments" && <OrderMountedPanel panel="attachments" data={data} />}
+              {activeTab === "costs" && <OrderMountedPanel panel="costs" data={data} />}
+              {activeTab === "history" && <OrderMountedPanel panel="history" data={data} />}
+            </div>
+          </section>
+        )}
       </main>
-      <footer className={`order-sticky-action-bar ${guidance.blocker ? "blocked" : ""}`}>
+      <footer className={`order-sticky-action-bar ${!orderCompleted && guidance.blocker ? "blocked" : ""}`}>
         <div className="order-sticky-responsibility">
-          <span>当前责任</span>
-          <strong>{currentPositionName} · {order.assignee_name || "待分配"}</strong>
+          <span>{orderCompleted ? "订单状态" : "当前责任"}</span>
+          <strong>{orderCompleted ? "业务已完成" : `${currentPositionName} · ${order.assignee_name || "待分配"}`}</strong>
         </div>
         <div className="order-sticky-condition">
-          <span>{guidance.blocker ? "阻断原因" : "办理条件"}</span>
-          <strong>{guidance.blocker || "当前节点暂无阻断"}</strong>
+          <span>{orderCompleted ? "流程结果" : guidance.blocker ? "阻断原因" : "办理条件"}</span>
+          <strong>{orderCompleted ? "全部必办节点已完成" : guidance.blocker || "当前节点暂无阻断"}</strong>
         </div>
         <div className="order-sticky-next">
-          <span>当前动作</span>
-          <strong>{guidance.action}</strong>
+          <span>{orderCompleted ? "可执行操作" : "当前动作"}</span>
+          <strong>{currentAction}</strong>
         </div>
         <div className="order-sticky-primary-action">
-          {directAction && !guidance.blocker ? (
+          {orderCompleted ? (
+            <button className="secondary" type="button" onClick={() => { setActiveTab("history"); setOverviewOpen(true); }}>查看处理记录</button>
+          ) : directAction && !guidance.blocker ? (
             <Form method="post">
               <input type="hidden" name="intent" value="workflow_action" />
               <input type="hidden" name="actionCode" value={directAction.actionCode} />
@@ -889,8 +1011,8 @@ function OrderBusinessSummary({ data }: { data: Route.ComponentProps["loaderData
     <section className="order-form-section order-form-basics">
       <header>
         <div>
-          <span>订单资料</span>
-          <h2>基础信息</h2>
+          <span>订单摘要</span>
+          <h2>关键资料常驻显示</h2>
         </div>
         <small>{order.customer_name} · {businessTypeLabels[order.business_type] ?? order.business_type} · {order.cargo_description || "未填写货物名称"}</small>
       </header>
@@ -909,25 +1031,77 @@ function OrderBusinessSummary({ data }: { data: Route.ComponentProps["loaderData
           <Info label="货物摘要" value={`${order.cargo_description || "未填写"} · ${order.pieces} 件 · ${order.gross_weight_kg} KG · ${order.volume_cbm} CBM`} />
           <Info label="备注" value={order.special_instructions} />
         </div>
-        {data.packageLabels.length > 0 && (
-          <section className="order-package-labels" aria-label="仓库货物标签">
-            <header>
-              <div><strong>货物标签</strong><small>境外仓继续扫描以下国内仓标签；标签出库后仍然有效。</small></div>
-              <span>{data.packageLabels.length} 张</span>
-            </header>
-            <div className="order-package-label-list">
-              {data.packageLabels.map((label) => (
-                <div className="order-package-label-row" key={label.id}>
-                  <div><code>{label.barcode}</code><small>{label.package_number}</small></div>
-                  <div><strong>{label.cargo_name || "未关联货物明细"}</strong><small>{label.pieces} 件 · {Number(label.weight_kg || 0).toFixed(2)} KG · {Number(label.volume_cbm || 0).toFixed(3)} CBM</small></div>
-                  <div><strong>{label.warehouse_name || "仓库待确认"}</strong><small>{[label.zone_name, label.location_name].filter(Boolean).join(" / ") || "库位待确认"}</small></div>
-                  <span className={`status-pill ${label.status === "dispatched" ? "success" : label.status === "exception" ? "danger" : ""}`}>{warehousePackageStatusLabel(label.status)}</span>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
       </div>
+    </section>
+  );
+}
+
+function OrderPackageLabels({ labels }: { labels: WarehousePackageLabel[] }) {
+  if (!labels.length) return <p className="empty-state">当前订单暂无仓库货物标签。</p>;
+  return (
+    <section className="order-package-labels" aria-label="仓库货物标签">
+      <header>
+        <div><strong>货物标签</strong><small>境外仓继续扫描以下国内仓标签；标签出库后仍然有效。</small></div>
+        <span>{labels.length} 张</span>
+      </header>
+      <div className="order-package-label-list">
+        {labels.map((label) => (
+          <div className="order-package-label-row" key={label.id}>
+            <div><code>{label.barcode}</code><small>{label.package_number}</small></div>
+            <div><strong>{label.cargo_name || "未关联货物明细"}</strong><small>{label.pieces} 件 · {Number(label.weight_kg || 0).toFixed(2)} KG · {Number(label.volume_cbm || 0).toFixed(3)} CBM</small></div>
+            <div><strong>{label.warehouse_name || "仓库待确认"}</strong><small>{[label.zone_name, label.location_name].filter(Boolean).join(" / ") || "库位待确认"}</small></div>
+            <span className={`status-pill ${label.status === "dispatched" ? "success" : label.status === "exception" ? "danger" : ""}`}>{warehousePackageStatusLabel(label.status)}</span>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function OrderModuleOverview({
+  data,
+  title,
+  subtitle,
+  moduleCodes,
+  showPackageLabels = false,
+}: {
+  data: Route.ComponentProps["loaderData"];
+  title: string;
+  subtitle: string;
+  moduleCodes: string[];
+  showPackageLabels?: boolean;
+}) {
+  const modules = moduleCodes
+    .map((code) => data.modules.find((module) => module.enabled === 1 && module.module_code === code))
+    .filter((module): module is OrderModuleInstance => Boolean(module));
+  return (
+    <section className="order-tab-panel" role="tabpanel">
+      <header className="order-tab-panel-header">
+        <div><span>业务总览</span><h2>{title}</h2></div>
+        <small>{subtitle}</small>
+      </header>
+      <div className="order-module-overview-table">
+        <div className="order-module-overview-head">
+          <span>业务模组</span><span>状态</span><span>当前步骤</span><span>负责人</span><span>进度</span><span>操作</span>
+        </div>
+        {modules.map((module) => {
+          const access = orderModuleAccess(data.order.status, module.module_code);
+          return (
+            <div className={`order-module-overview-row ${module.blocking_reason ? "blocked" : ""}`} key={module.id}>
+              <div><strong>{module.module_name}</strong>{module.blocking_reason && <small>{module.blocking_reason}</small>}</div>
+              <span>{moduleStatusLabels[module.status] || module.status}</span>
+              <span>{module.current_step_name || "待开始"}</span>
+              <span>{module.assignee_name || "待分配"}</span>
+              <span>{module.progress_percent}%</span>
+              <Link className="text-button" to={`/admin/orders/${data.order.id}/modules/${module.module_code}#module-business-data`}>
+                {access.canEdit ? "进入办理" : "查看"}
+              </Link>
+            </div>
+          );
+        })}
+        {!modules.length && <p className="empty-state">本订单未启用相关业务模组。</p>}
+      </div>
+      {showPackageLabels && <OrderPackageLabels labels={data.packageLabels} />}
     </section>
   );
 }
@@ -1531,6 +1705,7 @@ function OrderMountedPanel({
             <Info label="要求送达" value={order.requested_delivery_date} />
             <Info label="备注" value={order.special_instructions} />
           </div>
+          <OrderPackageLabels labels={data.packageLabels} />
         </>
       )}
       {panel === "costs" && (
@@ -1634,24 +1809,35 @@ function OrderVerticalWorkflow({
             const href = target?.module_code
               ? `/admin/orders/${order.id}/modules/${target.module_code}#module-business-data`
               : `/admin/orders/${order.id}`;
+            const content = (
+              <>
+                <i>{status === "completed" ? "✓" : index + 1}</i>
+                <div>
+                  <strong>{step.name}</strong>
+                  <small>
+                    {status === "active"
+                      ? "当前节点"
+                      : status === "completed"
+                        ? "已完成"
+                        : step.is_required
+                          ? "后续必办"
+                          : "按需办理"}
+                  </small>
+                </div>
+                <span aria-hidden="true">→</span>
+              </>
+            );
             return (
               <li key={step.step_key} className={status}>
-                <Link to={href} title={`打开${step.name}`}>
-                  <i>{status === "completed" ? "✓" : index + 1}</i>
-                  <div>
-                    <strong>{step.name}</strong>
-                    <small>
-                      {status === "active"
-                        ? "当前节点"
-                        : status === "completed"
-                          ? "已完成"
-                          : step.is_required
-                            ? "后续必办"
-                            : "按需办理"}
-                    </small>
+                {status === "pending" ? (
+                  <div className="order-workflow-step-entry disabled" aria-disabled="true" title={`${step.name}尚未开放`}>
+                    {content}
                   </div>
-                  <span aria-hidden="true">→</span>
-                </Link>
+                ) : (
+                  <Link className="order-workflow-step-entry" to={href} title={`打开${step.name}`}>
+                    {content}
+                  </Link>
+                )}
               </li>
             );
           })}
@@ -1674,24 +1860,36 @@ function OrderVerticalWorkflow({
           const href = target
             ? `/admin/orders/${order.id}/modules/${target.module_code}#module-business-data`
             : `/admin/orders/${order.id}`;
+          const navigable = snapshot.status === "active" || snapshot.status === "completed";
+          const content = (
+            <>
+              <i>{snapshot.status === "completed" ? "✓" : index + 1}</i>
+              <div>
+                <strong>{snapshot.stage.shortTitle}</strong>
+                <small>
+                  {snapshot.status === "active"
+                    ? "当前阶段"
+                    : snapshot.status === "skipped"
+                      ? "本单无需拼车配载"
+                      : snapshot.status === "completed"
+                        ? "已完成"
+                        : "后续阶段"}
+                </small>
+              </div>
+              <span aria-hidden="true">→</span>
+            </>
+          );
           return (
             <li key={snapshot.stage.code} className={snapshot.status}>
-              <Link to={href} title={`打开${snapshot.stage.shortTitle}`}>
-                <i>{snapshot.status === "completed" ? "✓" : index + 1}</i>
-                <div>
-                  <strong>{snapshot.stage.shortTitle}</strong>
-                  <small>
-                    {snapshot.status === "active"
-                      ? "当前阶段"
-                      : snapshot.status === "skipped"
-                        ? "本单无需拼车配载"
-                        : snapshot.status === "completed"
-                          ? "已完成"
-                          : "后续阶段"}
-                  </small>
+              {navigable ? (
+                <Link className="order-workflow-step-entry" to={href} title={`打开${snapshot.stage.shortTitle}`}>
+                  {content}
+                </Link>
+              ) : (
+                <div className="order-workflow-step-entry disabled" aria-disabled="true">
+                  {content}
                 </div>
-                <span aria-hidden="true">→</span>
-              </Link>
+              )}
             </li>
           );
         })}
