@@ -14,6 +14,7 @@ import {
   syncOrderWorkflowSnapshot,
 } from "../lib/order-modules.server";
 import { runOrderWorkflowAction } from "../lib/order-workflow-action.server";
+import { isAssignedOrderApprover } from "../lib/order-workflow";
 import {
   composeOrderWorkflow,
   moduleStatusLabels,
@@ -953,22 +954,11 @@ export async function action({ request, params }: Route.ActionArgs) {
     moduleCode === "consignment" &&
     intent === "workflow_action" &&
     valueOf(form, "actionCode") === "approve";
-  const isConsignmentFileAction =
-    moduleCode === "consignment" &&
-    ["document_review", "document_metadata_update", "document_upload"].includes(
-      intent,
-    );
-  const canApproveConsignment =
-    (isConsignmentApprovalAction || isConsignmentFileAction) &&
-    canManageOrderModule(current, "assignment");
-  if (!canManageOrderModule(current, moduleCode) && !canApproveConsignment) {
-    return { formError: "当前岗位可以查看本模块，但没有提交业务操作的权限" };
-  }
   const order = await env.DB.prepare(
     `SELECT status,business_type,shipper_name,origin_country,origin_state,origin_city,origin_address,
             consignee_name,destination_country,destination_state,destination_city,destination_address,
             exit_port,transit_locations,customs_location,route_notes,overseas_warehouse_id,
-            requires_transloading,requires_transit_customs
+            requires_transloading,requires_transit_customs,current_assignee_user_id
      FROM transport_orders WHERE id=? AND organization_id=?`,
   )
     .bind(orderId, current.organizationId)
@@ -976,9 +966,23 @@ export async function action({ request, params }: Route.ActionArgs) {
       status:string;business_type:string;shipper_name:string;origin_country:string;origin_state:string|null;origin_city:string;origin_address:string;
       consignee_name:string;destination_country:string;destination_state:string|null;destination_city:string;destination_address:string;
       exit_port:string|null;transit_locations:string|null;customs_location:string|null;route_notes:string|null;overseas_warehouse_id:string|null;
-      requires_transloading:number;requires_transit_customs:number;
+      requires_transloading:number;requires_transit_customs:number;current_assignee_user_id:string|null;
     }>();
   if (!order) return { formError: "订单不存在" };
+  const isConsignmentDocumentReviewAction =
+    ["consignment", "documents"].includes(moduleCode) &&
+    intent === "document_review";
+  const isAssignedConsignmentApprover = isAssignedOrderApprover({
+    status: order.status,
+    currentAssigneeUserId: order.current_assignee_user_id,
+    currentUserId: current.userId,
+  });
+  const canApproveConsignment =
+    (isConsignmentApprovalAction || isConsignmentDocumentReviewAction) &&
+    isAssignedConsignmentApprover;
+  if (!canManageOrderModule(current, moduleCode) && !canApproveConsignment) {
+    return { formError: "当前岗位可以查看本模块，但没有提交业务操作的权限" };
+  }
   const moduleWorkflowFields = await loadOrderModuleWorkflowFields(
     current.organizationId,
     orderId,
@@ -2611,6 +2615,16 @@ export async function action({ request, params }: Route.ActionArgs) {
       ).bind(attachmentId, orderId, current.organizationId).first<{ document_category: string }>();
       if (!target) return { formError: "要审核的文件不存在" };
       if (
+        target.document_category === "consignment_letter" &&
+        !isAssignedConsignmentApprover
+      )
+        return { formError: "仅提交审批时指定的审批负责人可以审核委托书" };
+      if (
+        target.document_category !== "consignment_letter" &&
+        !canManageOrderModule(current, moduleCode)
+      )
+        return { formError: "当前岗位没有审核该文件的权限" };
+      if (
         moduleCode !== "documents" &&
         !orderDocumentCanBeHandledInModule(target.document_category, moduleCode as OrderModuleCode)
       )
@@ -3305,9 +3319,11 @@ export default function OrderModulePage({
       canManageOrderModule(loaderData.current, definition.code) &&
       loaderData.access.canEdit,
     canApproveConsignment =
-      definition.code === "consignment" &&
-      order.status === "submitted" &&
-      canManageOrderModule(loaderData.current, "assignment");
+      isAssignedOrderApprover({
+        status: order.status,
+        currentAssigneeUserId: order.current_assignee_user_id,
+        currentUserId: loaderData.current.userId,
+      });
   const actionMessage =
     actionData && "formError" in actionData
       ? actionData.formError
@@ -3925,7 +3941,7 @@ function ModuleSourceDocuments({
     })
     .filter((placement) => placement.policy.visible);
   if (!placements.length) return null;
-  const canManageDocs = code !== "loading" && (manage || canApproveConsignment);
+  const canEditDocs = code !== "loading" && manage;
 
   return (
     <section className="source-document-section" id="module-source-documents" aria-label="本节点文件">
@@ -3950,6 +3966,11 @@ function ModuleSourceDocuments({
           const lockedAfterApproval =
             placement.documentCode === "consignment_letter" &&
             ["approved", "archived"].includes(latest?.review_status || "");
+          const canReviewDocument =
+            code !== "loading" &&
+            (placement.documentCode === "consignment_letter"
+              ? canApproveConsignment
+              : manage);
           return (
             <article
               key={placement.documentCode}
@@ -3972,7 +3993,7 @@ function ModuleSourceDocuments({
               </div>
               {latest ? <div className="row-actions source-document-actions">
                 <a className="text-button" href={latest.data_url} target="_blank" rel="noreferrer">查看</a>
-                {canManageDocs && !lockedAfterApproval ? <Modal title={`编辑文件 · ${placement.document.name}`} triggerLabel="编辑" triggerClassName="text-button">
+                {canEditDocs && !lockedAfterApproval ? <Modal title={`编辑文件 · ${placement.document.name}`} triggerLabel="编辑" triggerClassName="text-button">
                   <div className="stack">
                     <Form method="post" className="stack">
                       <input type="hidden" name="intent" value="document_metadata_update" />
@@ -3991,7 +4012,7 @@ function ModuleSourceDocuments({
                     </Form>
                   </div>
                 </Modal> : code !== "loading" ? <button type="button" className="text-button" disabled title={lockedAfterApproval ? "委托书已审核通过，不可编辑" : undefined}>编辑</button> : null}
-                {canManageDocs && !lockedAfterApproval ? <Modal title={`审核文件 · ${placement.document.name}`} triggerLabel="审核" triggerClassName="text-button" size="wide" closeSignal={reviewCloseSignal}>
+                {canReviewDocument && !lockedAfterApproval ? <Modal title={`审核文件 · ${placement.document.name}`} triggerLabel="审核" triggerClassName="text-button" size="wide" closeSignal={reviewCloseSignal}>
                   <Form method="post" className="stack">
                     <input type="hidden" name="intent" value="document_review" />
                     <input type="hidden" name="attachmentId" value={latest.id} />
@@ -3999,8 +4020,8 @@ function ModuleSourceDocuments({
                     <label className="field"><span>审核结果</span><select name="reviewStatus" defaultValue={latest.review_status === "rejected" ? "rejected" : "approved"}><option value="approved">审核通过</option><option value="rejected">退回修改</option></select></label>
                     <button className="primary" disabled={busy}>确认审核结果</button>
                   </Form>
-                </Modal> : code !== "loading" ? <button type="button" className="text-button" disabled title={lockedAfterApproval ? "委托书已审核通过" : undefined}>审核</button> : <span className="muted">仓库已同步</span>}
-              </div> : canManageDocs ? <Form method="post" encType="multipart/form-data" className="source-document-upload-form">
+                </Modal> : code !== "loading" ? <button type="button" className="text-button" disabled title={lockedAfterApproval ? "委托书已审核通过" : placement.documentCode === "consignment_letter" ? "仅当前指定的审批负责人可审核" : undefined}>审核</button> : <span className="muted">仓库已同步</span>}
+              </div> : canEditDocs ? <Form method="post" encType="multipart/form-data" className="source-document-upload-form">
                 <input type="hidden" name="intent" value="document_upload" />
                 <input type="hidden" name="documentCategory" value={placement.documentCode} />
                 <input type="hidden" name="documentDescription" value="" />
@@ -4267,7 +4288,9 @@ function ModuleBusinessData({
                           </Form>}
                         </div>
                       </Modal> : <button type="button" className="text-button" disabled>编辑</button>}
-                      {manage ? <Modal title={`审核文件 · ${item.file_name}`} triggerLabel="审核" triggerClassName="text-button" size="wide" closeSignal={reviewCloseSignal}>
+                      {(item.document_category === "consignment_letter"
+                        ? canApproveConsignment
+                        : manage) ? <Modal title={`审核文件 · ${item.file_name}`} triggerLabel="审核" triggerClassName="text-button" size="wide" closeSignal={reviewCloseSignal}>
                         <Form method="post" className="stack">
                           <input
                             type="hidden"
@@ -4283,7 +4306,14 @@ function ModuleBusinessData({
                           <label className="field"><span>审核结果</span><select name="reviewStatus" defaultValue={item.review_status === "rejected" ? "rejected" : "approved"}><option value="approved">审核通过</option><option value="rejected">退回修改</option><option value="archived">审核通过并归档</option></select></label>
                           <button className="primary" disabled={busy}>确认审核结果</button>
                         </Form>
-                      </Modal> : <button type="button" className="text-button" disabled>审核</button>}
+                      </Modal> : <button
+                        type="button"
+                        className="text-button"
+                        disabled
+                        title={item.document_category === "consignment_letter"
+                          ? "仅当前指定的审批负责人可审核"
+                          : undefined}
+                      >审核</button>}
                     </div>
                   </td>
                 </tr>

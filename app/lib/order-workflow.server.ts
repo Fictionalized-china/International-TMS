@@ -4,6 +4,7 @@ import {
   syncOrderWorkflowSnapshot,
 } from "./order-modules.server";
 import { missingRequiredWorkflowStepFields } from "./workflow-fields.server";
+import { isAssignedOrderApprover } from "./order-workflow";
 
 export type OrderWorkflowTransition = {
   action_code: string;
@@ -21,6 +22,7 @@ type OrderRow = {
   order_number: string;
   status: string;
   current_step_code: string;
+  current_assignee_user_id: string | null;
   shipper_name: string;
   shipper_contact: string | null;
   shipper_phone: string | null;
@@ -52,10 +54,11 @@ export async function validateOrderWorkflowAction(input: {
   organizationId: string;
   orderId: string;
   actionCode: string;
+  actorUserId: string;
   assigneeUserId?: string | null;
 }) {
   const order = await env.DB.prepare(
-    `SELECT o.id,o.order_number,o.status,o.current_step_code,o.shipper_name,o.shipper_contact,o.shipper_phone,o.consignee_name,
+    `SELECT o.id,o.order_number,o.status,o.current_step_code,o.current_assignee_user_id,o.shipper_name,o.shipper_contact,o.shipper_phone,o.consignee_name,
       o.origin_city,o.origin_address,o.destination_city,o.destination_address,o.cargo_description,o.transport_mode,
       o.requested_pickup_date,o.exit_port,o.overseas_warehouse_id,
       CASE WHEN EXISTS(
@@ -82,6 +85,22 @@ export async function validateOrderWorkflowAction(input: {
       ok: false as const,
       reason: `当前状态“${statusLabel(order.status)}”不能执行该动作`,
       order,
+    };
+  if (
+    input.actionCode === "approve" &&
+    !isAssignedOrderApprover({
+      status: order.status,
+      currentAssigneeUserId: order.current_assignee_user_id,
+      currentUserId: input.actorUserId,
+    })
+  )
+    return {
+      ok: false as const,
+      reason: order.current_assignee_user_id
+        ? "仅提交审批时指定的审批负责人可以审批委托"
+        : "当前订单尚未指定审批负责人，请退回草稿后重新提交审批",
+      order,
+      transition,
     };
   if (transition.requires_assignee && !input.assigneeUserId)
     return {

@@ -10,6 +10,7 @@ import { ensureWorkflowForBusinessType, recordWorkflowEvent } from "../lib/busin
 import { ensureShipmentForOrder } from "../lib/shipment-sync.server";
 import { listOrderWorkflowTransitions } from "../lib/order-workflow.server";
 import {
+  isAssignedOrderApprover,
   statusLabel,
   type OrderWorkflowTransition,
 } from "../lib/order-workflow";
@@ -57,6 +58,7 @@ type Order = {
   source: string;
   current_step_code: string;
   current_step_name: string;
+  current_assignee_user_id: string | null;
   assignee_name: string | null;
   workflow_updated_at: string | null;
   is_overdue: number;
@@ -189,7 +191,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     workflowTemplates,
   ] = await Promise.all([
     env.DB.prepare(
-      `SELECT o.id,o.order_number,c.name customer_name,o.customer_reference,q.quote_number,o.origin_country,o.origin_state,o.origin_city,o.destination_country,o.destination_state,o.destination_city,o.cargo_description,o.pieces,o.gross_weight_kg,o.volume_cbm,o.transport_mode,o.service_level,o.requested_pickup_date,o.requested_delivery_date,o.status,o.source,o.current_step_code,o.current_step_name,au.display_name assignee_name,o.workflow_updated_at,o.is_overdue,o.exception_status,o.completion_status,(SELECT COUNT(*) FROM order_attachments a WHERE a.order_id=o.id) attachment_count,(SELECT COUNT(*) FROM order_module_instances m WHERE m.order_id=o.id AND m.organization_id=o.organization_id AND m.enabled=1) active_module_count,(SELECT COUNT(*) FROM order_module_instances m WHERE m.order_id=o.id AND m.organization_id=o.organization_id AND m.enabled=1 AND m.is_required=1 AND m.status!='completed') incomplete_required_module_count,o.created_at ${base} ORDER BY o.created_at DESC LIMIT ? OFFSET ?`,
+      `SELECT o.id,o.order_number,c.name customer_name,o.customer_reference,q.quote_number,o.origin_country,o.origin_state,o.origin_city,o.destination_country,o.destination_state,o.destination_city,o.cargo_description,o.pieces,o.gross_weight_kg,o.volume_cbm,o.transport_mode,o.service_level,o.requested_pickup_date,o.requested_delivery_date,o.status,o.source,o.current_step_code,o.current_step_name,o.current_assignee_user_id,au.display_name assignee_name,o.workflow_updated_at,o.is_overdue,o.exception_status,o.completion_status,(SELECT COUNT(*) FROM order_attachments a WHERE a.order_id=o.id) attachment_count,(SELECT COUNT(*) FROM order_module_instances m WHERE m.order_id=o.id AND m.organization_id=o.organization_id AND m.enabled=1) active_module_count,(SELECT COUNT(*) FROM order_module_instances m WHERE m.order_id=o.id AND m.organization_id=o.organization_id AND m.enabled=1 AND m.is_required=1 AND m.status!='completed') incomplete_required_module_count,o.created_at ${base} ORDER BY o.created_at DESC LIMIT ? OFFSET ?`,
     )
       .bind(...bindings, pageSize, (page - 1) * pageSize)
       .all<Order>(),
@@ -1375,6 +1377,7 @@ export default function Orders({
               order={activeOrder}
               transitions={loaderData.transitions}
               members={loaderData.members}
+              currentUserId={loaderData.current.userId}
               manage={manage}
               busy={busy}
               success={data?.success}
@@ -1392,6 +1395,7 @@ function OrderInboxPanel({
   order,
   transitions,
   members,
+  currentUserId,
   manage,
   busy,
   success,
@@ -1399,6 +1403,7 @@ function OrderInboxPanel({
   order: Order;
   transitions: OrderWorkflowTransition[];
   members: Member[];
+  currentUserId: string;
   manage: boolean;
   busy: boolean;
   success?: string;
@@ -1406,6 +1411,12 @@ function OrderInboxPanel({
   const actions = transitions.filter(
     (transition) =>
       transition.from_status === order.status &&
+      (transition.action_code !== "approve" ||
+        isAssignedOrderApprover({
+          status: order.status,
+          currentAssigneeUserId: order.current_assignee_user_id,
+          currentUserId,
+        })) &&
       (transition.action_code !== "complete" ||
         (order.active_module_count > 0 && order.incomplete_required_module_count === 0)),
   );

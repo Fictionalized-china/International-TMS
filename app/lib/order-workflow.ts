@@ -19,3 +19,15 @@ export function statusLabel(status: string) {
     cancelled: "已取消",
   } as Record<string, string>)[status] ?? status;
 }
+
+export function isAssignedOrderApprover(input: {
+  status: string;
+  currentAssigneeUserId: string | null | undefined;
+  currentUserId: string;
+}) {
+  return (
+    input.status === "submitted" &&
+    Boolean(input.currentAssigneeUserId) &&
+    input.currentAssigneeUserId === input.currentUserId
+  );
+}
