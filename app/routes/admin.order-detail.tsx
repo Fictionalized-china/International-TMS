@@ -21,6 +21,7 @@ import {
   composeOrderWorkflow,
   moduleStatusLabels,
   orderModuleDefinition,
+  type OrderModuleCode,
 } from "../lib/order-modules";
 import {
   orderBusinessStages,
@@ -41,6 +42,10 @@ import {
   replaceWorkflowInstanceVersion,
 } from "../lib/workflow-execution.server";
 import { syncOrderBusinessWorkflow } from "../lib/business-workflow.server";
+import {
+  loadOrderModuleWorkflowFields,
+  type WorkflowFieldState,
+} from "../lib/workflow-fields.server";
 
 type Order = {
   id: string;
@@ -373,6 +378,20 @@ export async function loader({ request, params }: Route.LoaderArgs) {
          AND status='active' AND road_load_type=? ORDER BY updated_at DESC,version_number DESC`,
     ).bind(current.organizationId,order.business_type).all<WorkflowVersionOption>(),
   ]);
+  const currentWorkflowModuleCodes = [
+    ...new Set(
+      workflowFormRows.results
+        .filter((row) => row.step_key === businessWorkflow?.current_step_key && row.module_code)
+        .map((row) => row.module_code as OrderModuleCode),
+    ),
+  ];
+  const currentWorkflowFields = (
+    await Promise.all(
+      currentWorkflowModuleCodes.map((moduleCode) =>
+        loadOrderModuleWorkflowFields(current.organizationId, id, moduleCode),
+      ),
+    )
+  ).flat();
   return {
     current,
     canManage: current.permissions.includes("order.manage"),
@@ -383,6 +402,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     businessWorkflow,
     workflowSteps: workflowSteps.results,
     workflowFormRows: workflowFormRows.results,
+    currentWorkflowFields,
     modules,
     currentWorkflowTasks,
     workflowVersions: workflowVersions.results,
@@ -681,13 +701,6 @@ function OrderBusinessForm({
   const pendingTaskCount = orderCompleted
     ? 0
     : currentTaskRows.filter((task) => task.task_status !== "completed").length;
-  const enabledModules = composeOrderWorkflow(data.modules);
-  const configuredModuleCodes = new Set(
-    data.workflowFormRows.map((row) => row.module_code).filter(Boolean),
-  );
-  const unconfiguredModules = enabledModules.filter(
-    (module) => !configuredModuleCodes.has(module.module_code),
-  );
   const currentPositionName =
     data.currentWorkflowTasks.find((task) => task.status !== "completed")?.position_name ||
     orderResponsiblePosition(guidance.moduleCode, order.status).name;
@@ -700,21 +713,6 @@ function OrderBusinessForm({
   const currentModuleRows = currentConfiguredStep
     ? uniqueWorkflowModules(currentConfiguredStep.rows)
     : [];
-  const currentModuleCodes = new Set(
-    currentModuleRows.map((row) => row.module_code).filter(Boolean),
-  );
-  const currentBlockers = data.modules
-    .filter((module) => currentModuleCodes.has(module.module_code) && module.blocking_reason)
-    .map((module) => `${module.module_name}：${module.blocking_reason}`);
-  const requiredFieldCount = currentModuleRows.reduce(
-    (total, row) => total + Number(row.required_field_count || 0),
-    0,
-  );
-  const optionalFieldCount = currentModuleRows.reduce(
-    (total, row) => total + Number(row.optional_field_count || 0),
-    0,
-  );
-  const enabledModuleCount = data.modules.filter((module) => module.enabled === 1).length;
   const tabItems: Array<{ key: OrderDetailTab; label: string; meta: string }> = [
     { key: "dossier", label: "订单资料", meta: "客户与线路" },
     { key: "cargo", label: "货物", meta: `${order.pieces} 件` },
@@ -752,151 +750,14 @@ function OrderBusinessForm({
         <OrderBusinessSummary data={data} />
 
         {!overviewOpen && (
-            <section
-              className="order-current-workspace"
-              id="order-tab-panel-current"
-            >
-              <div className="order-current-modules">
-
-        <div className="order-form-workflow-sections">
-          {(currentConfiguredStep ? [currentConfiguredStep] : []).map((step) => {
-            const current = !orderCompleted && step.step_key === currentStepKey;
-            const moduleRows = uniqueWorkflowModules(step.rows);
-            return (
-              <section
-                className={`order-form-step ${current ? "current" : ""}`}
-                key={step.step_key}
-              >
-                <div className="order-form-step-body">
-                  {moduleRows.map((row) => {
-                    const module = data.modules.find((item) => item.module_code === row.module_code);
-                    const tasks = uniqueWorkflowTasks(step.rows.filter((item) => item.module_state_id === row.module_state_id));
-                    const pendingTasks = tasks.filter((task) => task.task_status !== "completed");
-                    const mine = current && row.module_status !== "completed" && (
-                      pendingTasks.length > 0
-                        ? pendingTasks.some((task) => {
-                            if (task.task_assignee_user_id) return task.task_assignee_user_id === data.current.userId;
-                            return (task.task_position_code || row.responsibility_position_code) === data.current.positionCode;
-                          })
-                        : row.assignee_user_id
-                          ? row.assignee_user_id === data.current.userId
-                          : row.responsibility_position_code === data.current.positionCode
-                    );
-                    const editable = Boolean(
-                      module &&
-                      orderModuleAccess(order.status, module.module_code).canEdit &&
-                      canManageOrderModule(data.current, module.module_code),
-                    );
-                    return (
-                      <article
-                        className={`order-form-module ${mine ? "mine" : ""} ${orderCompleted || row.module_status === "completed" ? "completed" : ""}`}
-                        id={`order-form-module-${row.module_code}`}
-                        key={row.module_state_id}
-                      >
-                        <header>
-                          {row.module_code ? (
-                            <Link
-                              className="order-form-module-entry"
-                              to={`/admin/orders/${order.id}/modules/${row.module_code}#module-business-data`}
-                              aria-label={`${current && editable ? "办理" : "查看"}${row.module_name || orderModuleDefinition(row.module_code)?.name || row.module_code}`}
-                            >
-                              <div>
-                                <span>{row.module_required ? "必须办理" : "按需办理"}</span>
-                                <h3>{row.module_name || orderModuleDefinition(row.module_code)?.name || row.module_code}</h3>
-                              </div>
-                              <div className="order-form-module-meta">
-                                {mine && <b>待我处理</b>}
-                                <span>{row.position_name || row.responsibility_position_code || "待配置岗位"}</span>
-                                <span>{row.assignee_name || "待分配人员"}</span>
-                                <em>{orderCompleted ? "已归档" : workflowFormStatusLabel(row.module_status || module?.status || "not_started")}</em>
-                                <strong className="order-form-module-entry-label">
-                                  {current && editable ? "进入办理 →" : "查看 →"}
-                                </strong>
-                              </div>
-                            </Link>
-                          ) : (
-                            <div className="order-form-module-static-entry">
-                              <div>
-                                <span>{row.module_required ? "必须办理" : "按需办理"}</span>
-                                <h3>{row.module_name || row.module_code}</h3>
-                              </div>
-                              <div className="order-form-module-meta">
-                                {mine && <b>待我处理</b>}
-                                <span>{row.position_name || row.responsibility_position_code || "待配置岗位"}</span>
-                                <span>{row.assignee_name || "待分配人员"}</span>
-                                <em>{orderCompleted ? "已归档" : workflowFormStatusLabel(row.module_status || module?.status || "not_started")}</em>
-                              </div>
-                            </div>
-                          )}
-                        </header>
-                        {!orderCompleted && module?.blocking_reason && (
-                          <div className="order-form-module-summary">
-                            <span className="blocked">阻断：{module.blocking_reason}</span>
-                          </div>
-                        )}
-                        {!orderCompleted && tasks.length > 0 && (
-                          <ol className="order-form-task-list">
-                            {tasks.map((task, index) => (
-                              <li className={task.task_status === "completed" ? "completed" : ""} key={task.task_state_id || `${row.module_state_id}-${index}`}>
-                                <i>{task.task_status === "completed" ? "✓" : index + 1}</i>
-                                <div>
-                                  <strong>{task.task_name}</strong>
-                                  <small>{task.task_position_name || task.task_position_code || row.position_name || "按模组岗位"}{task.task_instructions ? ` · ${task.task_instructions}` : ""}</small>
-                                </div>
-                                {current && task.task_status !== "completed" && isWorkflowTaskManual(step.step_key, task.task_key || "") ? (
-                                  <Form method="post">
-                                    <input type="hidden" name="intent" value="workflow_task_complete" />
-                                    <input type="hidden" name="taskStateId" value={task.task_state_id || ""} />
-                                    <button className="secondary" disabled={busy}>{workflowTaskActionLabel(task.task_type || "manual")}</button>
-                                  </Form>
-                                ) : task.task_status !== "completed" ? <small>保存本节完整数据后自动完成</small> : null}
-                              </li>
-                            ))}
-                          </ol>
-                        )}
-                      </article>
-                    );
-                  })}
-                  {!moduleRows.length && <p className="empty-state">该节点未配置业务模组，但节点本身仍保留在订单流程中。</p>}
-                </div>
-              </section>
-            );
-          })}
-        </div>
-
-        {unconfiguredModules.length > 0 && !currentConfiguredStep && (
-          <details className="order-form-step legacy">
-            <summary><i>+</i><div><strong>兼容业务模组</strong><small>当前订单已启用但未挂入冻结工作流的模组</small></div><span>{unconfiguredModules.length} 项</span></summary>
-            <div className="order-form-step-body order-form-legacy-modules">
-              {unconfiguredModules.map((module) => (
-                <Link key={module.id} to={`/admin/orders/${order.id}/modules/${module.module_code}#module-business-data`}>
-                  <strong>{module.module_name}</strong><small>{moduleStatusLabels[module.status] || module.status}</small>
-                </Link>
-              ))}
-            </div>
-          </details>
+          <CurrentNodeWorksheet
+            data={data}
+            step={currentConfiguredStep}
+            moduleRows={currentModuleRows}
+            orderCompleted={orderCompleted}
+            busy={busy}
+          />
         )}
-              </div>
-              <aside className={`order-current-context ${!orderCompleted && (guidance.blocker || currentBlockers.length) ? "blocked" : ""}`}>
-                <header>
-                  <span>{orderCompleted ? "订单概览" : "本节点概览"}</span>
-                  <strong>{currentStepDisplayName}</strong>
-                </header>
-                <dl>
-                  <div><dt>负责岗位</dt><dd>{currentPositionDisplay}</dd></div>
-                  <div><dt>具体负责人</dt><dd>{currentAssigneeDisplay}</dd></div>
-                  <div><dt>业务模组</dt><dd>{currentModuleRows.length || enabledModuleCount} 个</dd></div>
-                  <div><dt>字段配置</dt><dd>必填 {requiredFieldCount} · 选填 {optionalFieldCount}</dd></div>
-                  <div><dt>待办步骤</dt><dd>{pendingTaskCount} 项</dd></div>
-                </dl>
-                <div className="order-current-guidance">
-                  <span>{orderCompleted ? "查看资料" : guidance.blocker || currentBlockers.length ? "当前阻断" : "下一动作"}</span>
-                  <strong>{orderCompleted ? "订单业务已结束，可查看各节点资料和处理记录" : guidance.blocker || currentBlockers[0] || guidance.action}</strong>
-                  {!orderCompleted && currentBlockers.slice(1).map((blocker) => <small key={blocker}>{blocker}</small>)}
-                </div>
-              </aside>
-            </section>
-          )}
         {overviewOpen && (
           <section className="order-overview-workspace" aria-label="订单全貌">
             <header className="order-overview-header">
@@ -1002,6 +863,232 @@ function OrderBusinessForm({
         </div>
       </footer>
     </section>
+  );
+}
+
+type CurrentWorksheetStep = BusinessWorkflowStep & { rows: WorkflowFormRow[] };
+type WorksheetTone = "complete" | "pending" | "blocked";
+
+function CurrentNodeWorksheet({
+  data,
+  step,
+  moduleRows,
+  orderCompleted,
+  busy,
+}: {
+  data: Route.ComponentProps["loaderData"];
+  step: CurrentWorksheetStep | null;
+  moduleRows: WorkflowFormRow[];
+  orderCompleted: boolean;
+  busy: boolean;
+}) {
+  if (!step || !moduleRows.length) {
+    return (
+      <section className="order-node-worksheet empty" id="order-tab-panel-current">
+        <strong>当前节点暂未配置业务模组</strong>
+        <span>节点仍会保留在流程中，可在“查看订单全貌”中查看完整配置。</span>
+      </section>
+    );
+  }
+
+  return (
+    <section className="order-node-worksheet" id="order-tab-panel-current" aria-label="当前节点工作表">
+      <header className="order-node-worksheet-header">
+        <div>
+          <span>当前节点工作表</span>
+          <h3>{step.name}</h3>
+          <small>默认只显示需要处理的必填项；已完成和选填内容可按需展开。</small>
+        </div>
+        <div className="order-node-state-legend" aria-label="字段状态说明">
+          <span className="complete">已填写</span>
+          <span className="pending">待处理/选填</span>
+          <span className="blocked">必填缺失/阻断</span>
+        </div>
+      </header>
+
+      <div className="order-node-module-list">
+        {moduleRows.map((row) => {
+          const module = data.modules.find((item) => item.module_code === row.module_code);
+          const fields = data.currentWorkflowFields.filter(
+            (field) => field.isActive && field.stepKey === step.step_key && field.moduleCode === row.module_code,
+          );
+          const missingRequired = fields.filter((field) => field.isRequired && !field.present);
+          const completedFields = fields.filter((field) => field.present);
+          const optionalFields = fields.filter((field) => !field.isRequired && !field.present);
+          const tasks = uniqueWorkflowTasks(
+            step.rows.filter((item) => item.module_state_id === row.module_state_id),
+          );
+          const pendingTasks = tasks.filter((task) => task.task_status !== "completed");
+          const mine = !orderCompleted && row.module_status !== "completed" && (
+            pendingTasks.length > 0
+              ? pendingTasks.some((task) => {
+                  if (task.task_assignee_user_id) return task.task_assignee_user_id === data.current.userId;
+                  return (task.task_position_code || row.responsibility_position_code) === data.current.positionCode;
+                })
+              : row.assignee_user_id
+                ? row.assignee_user_id === data.current.userId
+                : row.responsibility_position_code === data.current.positionCode
+          );
+          const editable = Boolean(
+            module &&
+            orderModuleAccess(data.order.status, module.module_code).canEdit &&
+            canManageOrderModule(data.current, module.module_code),
+          );
+          const tone: WorksheetTone = orderCompleted || row.module_status === "completed"
+            ? "complete"
+            : module?.blocking_reason || missingRequired.length
+              ? "blocked"
+              : "pending";
+          const moduleName = row.module_name || (row.module_code ? orderModuleDefinition(row.module_code)?.name : null) || row.module_code || "未命名模组";
+          const moduleHref = row.module_code
+            ? `/admin/orders/${data.order.id}/modules/${row.module_code}#module-business-data`
+            : null;
+
+          return (
+            <article
+              className={`order-node-module is-${tone}${mine ? " is-mine" : ""}`}
+              id={`order-form-module-${row.module_code}`}
+              key={row.module_state_id}
+            >
+              <header className="order-node-module-header">
+                <div className="order-node-module-title">
+                  <span>{row.module_required ? "必须办理" : "按需办理"}</span>
+                  <strong>{moduleName}</strong>
+                </div>
+                <div className="order-node-module-meta">
+                  {mine && <b>待我处理</b>}
+                  <span>{row.position_name || row.responsibility_position_code || "待配置岗位"}</span>
+                  <span>{row.assignee_name || "待分配人员"}</span>
+                  <em>{orderCompleted ? "已归档" : workflowFormStatusLabel(row.module_status || module?.status || "not_started")}</em>
+                  <span>必填缺失 {missingRequired.length}</span>
+                </div>
+                {moduleHref && (
+                  <Link className="secondary order-node-module-open" to={moduleHref}>
+                    {editable && !orderCompleted ? "打开办理页" : "查看模组"}
+                  </Link>
+                )}
+              </header>
+
+              {!orderCompleted && module?.blocking_reason && (
+                <div className="order-node-blocker" role="alert">
+                  <strong>当前阻断</strong>
+                  <span>{module.blocking_reason}</span>
+                </div>
+              )}
+
+              {missingRequired.length > 0 ? (
+                <div className="order-node-field-section required">
+                  <div className="order-node-field-section-title">
+                    <strong>现在需要填写</strong>
+                    <span>{missingRequired.length} 项必填内容</span>
+                  </div>
+                  <div className="order-node-field-grid">
+                    {missingRequired.map((field) => (
+                      <WorkflowWorksheetField
+                        key={field.id}
+                        field={field}
+                        orderId={data.order.id}
+                        tone="blocked"
+                      />
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="order-node-ready-state">
+                  <strong>{orderCompleted ? "本模组已归档" : "必填内容已齐全"}</strong>
+                  <span>{orderCompleted ? "可展开查看已保存的数据。" : "可以继续完成本模组的办理步骤。"}</span>
+                </div>
+              )}
+
+              {completedFields.length > 0 && (
+                <details className="order-node-field-details">
+                  <summary>已填写字段 <span>{completedFields.length} 项</span></summary>
+                  <div className="order-node-field-grid">
+                    {completedFields.map((field) => (
+                      <WorkflowWorksheetField
+                        key={field.id}
+                        field={field}
+                        orderId={data.order.id}
+                        tone="complete"
+                      />
+                    ))}
+                  </div>
+                </details>
+              )}
+
+              {optionalFields.length > 0 && !orderCompleted && (
+                <details className="order-node-field-details optional">
+                  <summary>可选字段 <span>{optionalFields.length} 项</span></summary>
+                  <div className="order-node-field-grid">
+                    {optionalFields.map((field) => (
+                      <WorkflowWorksheetField
+                        key={field.id}
+                        field={field}
+                        orderId={data.order.id}
+                        tone="pending"
+                      />
+                    ))}
+                  </div>
+                </details>
+              )}
+
+              {!fields.length && (
+                <div className="order-node-no-fields">
+                  <strong>本模组没有需要填写的字段</strong>
+                  <span>按下方办理步骤推进，不会产生隐藏字段门禁。</span>
+                </div>
+              )}
+
+              {!orderCompleted && tasks.length > 0 && (
+                <ol className="order-node-task-list" aria-label={`${moduleName}办理步骤`}>
+                  {tasks.map((task, index) => (
+                    <li className={task.task_status === "completed" ? "completed" : "pending"} key={task.task_state_id || `${row.module_state_id}-${index}`}>
+                      <i>{task.task_status === "completed" ? "✓" : index + 1}</i>
+                      <div>
+                        <strong>{task.task_name}</strong>
+                        <small>{task.task_position_name || task.task_position_code || row.position_name || "按模组岗位"}{task.task_instructions ? ` · ${task.task_instructions}` : ""}</small>
+                      </div>
+                      {task.task_status !== "completed" && isWorkflowTaskManual(step.step_key, task.task_key || "") ? (
+                        <Form method="post">
+                          <input type="hidden" name="intent" value="workflow_task_complete" />
+                          <input type="hidden" name="taskStateId" value={task.task_state_id || ""} />
+                          <button className="secondary" disabled={busy}>{workflowTaskActionLabel(task.task_type || "manual")}</button>
+                        </Form>
+                      ) : task.task_status !== "completed" ? <small>保存完整数据后自动完成</small> : <small>已完成</small>}
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function WorkflowWorksheetField({
+  field,
+  orderId,
+  tone,
+}: {
+  field: WorkflowFieldState;
+  orderId: string;
+  tone: WorksheetTone;
+}) {
+  const statusLabel = tone === "complete" ? "已填写" : tone === "blocked" ? "必填缺失" : "可选";
+  return (
+    <Link
+      className={`order-node-field is-${tone}`}
+      to={`/admin/orders/${orderId}/modules/${field.moduleCode}#workflow-field-${field.fieldKey}`}
+      title={field.displayValue || field.helpText || field.label}
+    >
+      <span>
+        <b>{field.label}</b>
+        <em>{statusLabel}</em>
+      </span>
+      <strong>{field.displayValue || (tone === "blocked" ? "待填写" : "按需填写")}</strong>
+    </Link>
   );
 }
 
