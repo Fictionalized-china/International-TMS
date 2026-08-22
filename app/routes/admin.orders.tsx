@@ -1243,15 +1243,17 @@ export default function Orders({
           formError?: string;
           createdOrderId?: string;
         };
-  const activeOrder = loaderData.orders.find((order) => order.id === activeOrderId) ?? null;
-  useModalScrollLock(Boolean(activeOrder));
+  const activeOrder =
+    loaderData.orders.find((order) => order.id === activeOrderId) ??
+    loaderData.orders[0] ??
+    null;
   return (
     <>
       <header className="page-header">
         <div>
           <p className="eyebrow">ORDER WORKBENCH</p>
           <h1>运输订单工作台</h1>
-          <p>用表格处理业务数据，由工作流控制状态、负责人和下一步动作。</p>
+          <p>左侧选择待办订单，右侧直接查看当前节点、阻断和下一步动作。</p>
         </div>
         <div className="page-actions">
           <span className="status-pill">共 {loaderData.total} 票</span>
@@ -1280,8 +1282,8 @@ export default function Orders({
       <section className="panel order-workbench">
         <div className="order-workbench-tools">
           <div>
-            <h2>订单列表</h2>
-            <p>按条件筛选订单，并直接打开当前工作节点。</p>
+            <h2>待办收件箱</h2>
+            <p>筛选后连续处理订单，不需要反复返回列表。</p>
           </div>
         </div>
         <Form method="get" className="order-filters">
@@ -1324,135 +1326,75 @@ export default function Orders({
             重置
           </Link>
         </Form>
-        <div className="table-wrap order-table">
-          <table>
-            <thead>
-              <tr>
-                <th>订单 / 客户</th>
-                <th>业务/线路</th>
-                <th>货物 / 计划</th>
-                <th>状态 / 当前节点</th>
-                <th>负责人</th>
-                <th>下一步 / 阻断</th>
-                <th>更新 / 提醒</th>
-                <th className="sticky-action">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {loaderData.orders.map((o) => {
-                return (
-                  <tr key={o.id}>
-                    <td>
-                      <Link to={`/admin/orders/${o.id}`}>
-                        <strong>{o.order_number}</strong>
-                      </Link>
-                      <strong>{o.customer_name}</strong>
-                      <small>
-                        {o.quote_number || o.customer_reference || (o.source === "portal" ? "客户门户" : "后台创建")}
-                      </small>
-                    </td>
-                    <td>
-                      <strong>
-                        {o.transport_mode}
-                        {o.service_level ? ` · ${o.service_level}` : ""}
-                      </strong>
-                      <small>
-                        {o.origin_country} {o.origin_state || ""}{" "}
-                        {o.origin_city} → {o.destination_country}{" "}
-                        {o.destination_state || ""} {o.destination_city}
-                      </small>
-                    </td>
-                    <td>
-                      <strong>{o.cargo_description}</strong>
-                      <small>
-                        {o.pieces} 件 · {o.gross_weight_kg} KG · {o.volume_cbm}{" "}
-                        CBM
-                      </small>
-                      <small>提货 {o.requested_pickup_date || "待定"} · 送达 {o.requested_delivery_date || "待定"}</small>
-                    </td>
-                    <td>
-                      <span
-                        className={`status-pill ${o.status === "cancelled" ? "off" : ""}`}
-                      >
-                        {statusLabel(o.status)}
-                      </span>
-                      <strong>{o.current_step_name}</strong>
-                      <small>{completionStatusLabels[o.completion_status]}</small>
-                    </td>
-                    <td>{o.assignee_name || o.next_owner || "未分配"}</td>
-                    <td>
-                      <Link className="order-next-link" to={o.next_href}>
-                        <strong>{o.next_action}</strong>
-                        <small>{o.next_stage} · {o.next_owner}</small>
-                      </Link>
-                      {o.next_blocker && (
-                        <small className="danger-text">阻断：{o.next_blocker}</small>
-                      )}
-                    </td>
-                    <td>
-                      <strong>
-                        {o.workflow_updated_at
-                          ? new Date(o.workflow_updated_at).toLocaleString("zh-CN")
-                          : "—"}
-                      </strong>
-                      {o.is_overdue ? (
-                        <span className="status-pill off">已超时</span>
-                      ) : o.exception_status !== "normal" ? (
-                        <span className="status-pill off">异常</span>
-                      ) : (
-                        <span className="muted">正常</span>
-                      )}
-                    </td>
-                    <td className="sticky-action">
-                      <div className="row-actions">
+        <div className="order-inbox-layout">
+          <section className="order-inbox-list" aria-label="订单待办列表">
+            <header>
+              <div><strong>当前筛选结果</strong><small>点击订单，在右侧直接查看下一步。</small></div>
+              <span>{loaderData.orders.length} 票</span>
+            </header>
+            <div className="table-wrap order-inbox-table">
+              <table>
+                <thead>
+                  <tr><th>订单 / 客户</th><th>当前节点</th><th>负责人</th><th>提醒</th></tr>
+                </thead>
+                <tbody>
+                  {loaderData.orders.map((order) => (
+                    <tr className={activeOrder?.id === order.id ? "selected" : ""} key={order.id}>
+                      <td>
                         <button
                           type="button"
-                          className="secondary order-quick-open"
-                          onClick={() => setActiveOrderId(o.id)}
+                          className="order-inbox-select"
+                          aria-pressed={activeOrder?.id === order.id}
+                          onClick={() => setActiveOrderId(order.id)}
                         >
-                          快速办理
+                          <strong>{order.order_number}</strong>
+                          <span>{order.customer_name}</span>
+                          <small>{order.cargo_description || "未填写货物"}</small>
                         </button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                      </td>
+                      <td><strong>{order.current_step_name}</strong><small>{statusLabel(order.status)}</small></td>
+                      <td>{order.assignee_name || order.next_owner || "未分配"}</td>
+                      <td>
+                        {order.is_overdue ? <span className="status-pill off">超时</span> : order.exception_status !== "normal" ? <span className="status-pill off">异常</span> : order.next_blocker ? <span className="status-pill off">阻断</span> : <span className="status-pill success">正常</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {!loaderData.orders.length && <p className="empty-state">没有符合条件的订单。</p>}
+            <Pagination
+              page={loaderData.page}
+              pages={loaderData.pages}
+              filters={loaderData.filters}
+              pageSize={loaderData.pageSize}
+            />
+          </section>
+          {activeOrder ? (
+            <OrderInboxPanel
+              order={activeOrder}
+              transitions={loaderData.transitions}
+              members={loaderData.members}
+              manage={manage}
+              busy={busy}
+              success={data?.success}
+            />
+          ) : (
+            <aside className="order-inbox-empty"><strong>暂无可办理订单</strong><p>调整筛选条件后再查看。</p></aside>
+          )}
         </div>
-        {!loaderData.orders.length && (
-          <p className="empty-state">没有符合条件的订单。</p>
-        )}
-        <Pagination
-          page={loaderData.page}
-          pages={loaderData.pages}
-          filters={loaderData.filters}
-          pageSize={loaderData.pageSize}
-        />
       </section>
-      {activeOrder && (
-        <OrderQuickDrawer
-          order={activeOrder}
-          transitions={loaderData.transitions}
-          members={loaderData.members}
-          manage={manage}
-          busy={busy}
-          success={data?.success}
-          onClose={() => setActiveOrderId(null)}
-        />
-      )}
     </>
   );
 }
 
-function OrderQuickDrawer({
+function OrderInboxPanel({
   order,
   transitions,
   members,
   manage,
   busy,
   success,
-  onClose,
 }: {
   order: Order;
   transitions: OrderWorkflowTransition[];
@@ -1460,7 +1402,6 @@ function OrderQuickDrawer({
   manage: boolean;
   busy: boolean;
   success?: string;
-  onClose: () => void;
 }) {
   const actions = transitions.filter(
     (transition) =>
@@ -1469,30 +1410,23 @@ function OrderQuickDrawer({
         (order.active_module_count > 0 && order.incomplete_required_module_count === 0)),
   );
   return (
-    <div
-      className="order-quick-drawer-backdrop"
-      role="presentation"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <aside className="order-quick-drawer" role="dialog" aria-modal="true" aria-labelledby="order-quick-title">
+      <aside className="order-inbox-panel" aria-labelledby="order-inbox-title">
         <header>
           <div>
-            <span>快速办理</span>
-            <h2 id="order-quick-title">{order.order_number}</h2>
+            <span>当前订单</span>
+            <h2 id="order-inbox-title">{order.order_number}</h2>
             <p>{order.customer_name}</p>
           </div>
-          <button type="button" className="icon-button" aria-label="关闭快速办理" onClick={onClose}>×</button>
+          <span className={`status-pill ${order.status === "cancelled" ? "off" : ""}`}>{statusLabel(order.status)}</span>
         </header>
-        <div className="order-quick-drawer-body">
+        <div className="order-inbox-panel-body">
           <section className="order-quick-summary">
             <h3>订单概况</h3>
             <dl>
               <div><dt>业务线路</dt><dd>{order.origin_country} {order.origin_city} → {order.destination_country} {order.destination_city}</dd></div>
               <div><dt>货物</dt><dd>{order.cargo_description || "未填写"}</dd></div>
               <div><dt>实物数据</dt><dd>{order.pieces} 件 · {order.gross_weight_kg} KG · {order.volume_cbm} CBM</dd></div>
-              <div><dt>业务状态</dt><dd>{statusLabel(order.status)}</dd></div>
+              <div><dt>更新时间</dt><dd>{order.workflow_updated_at ? new Date(order.workflow_updated_at).toLocaleString("zh-CN") : "—"}</dd></div>
             </dl>
           </section>
           <section className="order-quick-current">
@@ -1504,7 +1438,7 @@ function OrderQuickDrawer({
             <span>{order.next_blocker ? "当前阻断" : "下一步"}</span>
             <h3>{order.next_blocker || order.next_action}</h3>
             <p>{order.next_blocker ? `处理后继续：${order.next_action}` : `${order.next_stage} · ${order.next_owner}`}</p>
-            <Link className="primary" to={order.next_href} onClick={onClose}>
+            <Link className="primary" to={order.next_href}>
               {order.next_blocker ? "查看阻断并处理" : "打开当前节点"}
             </Link>
           </section>
@@ -1527,10 +1461,9 @@ function OrderQuickDrawer({
           )}
         </div>
         <footer>
-          <Link className="secondary" to={`/admin/orders/${order.id}`} onClick={onClose}>查看完整订单</Link>
+          <Link className="secondary" to={`/admin/orders/${order.id}`}>查看完整订单</Link>
         </footer>
       </aside>
-    </div>
   );
 }
 

@@ -689,9 +689,12 @@ function OrderBusinessForm({
             <h2>{data.businessWorkflow?.current_step_name || order.current_step_name}</h2>
             <p>{guidance.action}</p>
           </div>
+          <div className="order-form-current-meta">
+            <span>{currentTaskRows.filter((task) => task.task_status !== "completed").length} 项待办</span>
+            <span>{currentPositionName}</span>
+            <span>{order.assignee_name || "待分配"}</span>
+          </div>
         </header>
-
-        <OrderBusinessSummary data={data} />
 
         <div className="order-form-workflow-sections">
           {(currentConfiguredStep ? [currentConfiguredStep] : []).map((step) => {
@@ -812,6 +815,8 @@ function OrderBusinessForm({
           </details>
         )}
 
+        <OrderBusinessSummary data={data} />
+
         <details className="order-form-records">
           <summary>附件与办理记录 <span>{data.attachments.length} 个附件 · {data.history.length + data.macro.length} 条记录</span></summary>
           <div className="order-form-record-grid">
@@ -832,40 +837,20 @@ function OrderBusinessForm({
           </div>
         </details>
       </main>
-      <aside className="order-context-rail" aria-label="当前节点办理信息">
-        <header>
+      <footer className={`order-sticky-action-bar ${guidance.blocker ? "blocked" : ""}`}>
+        <div className="order-sticky-responsibility">
           <span>当前责任</span>
-          <h2>{data.businessWorkflow?.current_step_name || order.current_step_name}</h2>
-        </header>
-        <section>
-          <dl>
-            <div><dt>负责岗位</dt><dd>{currentPositionName}</dd></div>
-            <div><dt>具体负责人</dt><dd>{order.assignee_name || "待分配"}</dd></div>
-            <div><dt>当前状态</dt><dd>{statusLabel(order.status)}</dd></div>
-          </dl>
-        </section>
-        <section className={guidance.blocker ? "order-context-blocker blocked" : "order-context-blocker"}>
+          <strong>{currentPositionName} · {order.assignee_name || "待分配"}</strong>
+        </div>
+        <div className="order-sticky-condition">
           <span>{guidance.blocker ? "阻断原因" : "办理条件"}</span>
           <strong>{guidance.blocker || "当前节点暂无阻断"}</strong>
-        </section>
-        <section className="order-context-tasks">
-          <div className="order-context-section-title">
-            <span>本节点任务</span>
-            <b>{currentTaskRows.filter((task) => task.task_status !== "completed").length} 项待办</b>
-          </div>
-          <ol>
-            {currentTaskRows.map((task, index) => (
-              <li className={task.task_status === "completed" ? "completed" : ""} key={task.task_state_id || index}>
-                <i>{task.task_status === "completed" ? "✓" : index + 1}</i>
-                <div><strong>{task.task_name}</strong><small>{task.task_position_name || task.task_position_code || currentPositionName}</small></div>
-              </li>
-            ))}
-          </ol>
-          {!currentTaskRows.length && <p>当前节点没有单独配置人工任务。</p>}
-        </section>
-        <section className="order-context-next">
-          <span>下一步动作</span>
+        </div>
+        <div className="order-sticky-next">
+          <span>当前动作</span>
           <strong>{guidance.action}</strong>
+        </div>
+        <div className="order-sticky-primary-action">
           {directAction && !guidance.blocker ? (
             <Form method="post">
               <input type="hidden" name="intent" value="workflow_action" />
@@ -892,8 +877,8 @@ function OrderBusinessForm({
               {guidance.blocker ? "查看阻断并处理" : "办理当前节点"}
             </Link>
           ) : null}
-        </section>
-      </aside>
+        </div>
+      </footer>
     </section>
   );
 }
