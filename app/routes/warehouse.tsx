@@ -6,6 +6,7 @@ import { listOrderModules } from "../lib/order-modules.server";
 import { checkOrderLoadPlan } from "../lib/order-readiness.server";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
 import { warehouseRoleLabels } from "../lib/road-master-data";
+import { AppIcon } from "../components/AppIcon";
 
 type WarehouseOrder = {
   id: string;
@@ -115,23 +116,24 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
   const module = orderContext?.module;
   const flow = loaderData.warehouseFlow;
   return (
-    <div className="warehouse-shell">
+    <div className="warehouse-shell warehouse-app-shell">
+      <a className="skip-link" href="#warehouse-main-content">跳到仓库作业</a>
       <aside className="warehouse-sidebar">
         <div className="warehouse-brand">
-          <span className="brand-mark small warehouse-mark">WH</span>
+          <span className="brand-mark small warehouse-mark"><AppIcon name="warehouse" size={18} /></span>
           <div>
             <strong>{loaderData.warehouseName}</strong>
-            <small>{user.organizationName}</small>
+            <small>新翎航 TMS · 仓库作业端</small>
           </div>
         </div>
         <div className="warehouse-context-switcher warehouse-account-context">
           <strong>{warehouseRoleLabels[loaderData.warehouse.warehouse_role]}</strong>
           <small>{loaderData.warehouse.code} · 当前账号绑定仓库</small>
         </div>
-        <nav>
+        <nav aria-label="仓库作业导航">
           <span className="warehouse-nav-group">现场作业</span>
           <NavLink to={warehouseLink("/warehouse", loaderData.query)} end>
-            <span>▦</span>仓库作业总表
+            <span><AppIcon name="dashboard" size={17} /></span>仓库作业总表
           </NavLink>
           <NavLink to={warehouseLink(
             loaderData.warehouse.warehouse_role === "overseas_destination"
@@ -139,38 +141,38 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
               : "/warehouse/acceptance",
             loaderData.query,
           )}>
-            <span>✓</span>验收收货
+            <span><AppIcon name="clipboardCheck" size={17} /></span>验收收货
           </NavLink>
           {loaderData.warehouse.warehouse_role !== "overseas_destination" && (
             <NavLink to={warehouseLink("/warehouse/consolidation", loaderData.query)}>
-              <span>▦</span>货物配载
+              <span><AppIcon name="boxes" size={17} /></span>货物配载
             </NavLink>
           )}
           {loaderData.warehouse.warehouse_role !== "overseas_destination" && (
             <NavLink to={warehouseLink("/warehouse/ltl-loading", loaderData.query)}>
-              <span>▦</span>拼车装货
+              <span><AppIcon name="truck" size={17} /></span>拼车装货
             </NavLink>
           )}
           {loaderData.warehouse.warehouse_role !== "overseas_destination" && (
             <NavLink to={warehouseLink("/warehouse/outbound", loaderData.query)}>
-              <span>▤</span>待装车与出库
+              <span><AppIcon name="packageCheck" size={17} /></span>待装车与出库
             </NavLink>
           )}
           {loaderData.warehouse.warehouse_role === "overseas_destination" && (
             <NavLink to={warehouseLink("/warehouse/pickup", loaderData.query)}>
-              <span>⇥</span>客户自提出库
+              <span><AppIcon name="packageCheck" size={17} /></span>客户自提出库
             </NavLink>
           )}
           <span className="warehouse-nav-group">库存管理</span>
           <NavLink to={warehouseLink("/warehouse/inventory", loaderData.query)}>
-            <span>▥</span>仓库货物与盘点
+            <span><AppIcon name="archive" size={17} /></span>仓库货物与盘点
           </NavLink>
           <NavLink to={warehouseLink("/warehouse/exceptions", loaderData.query)}>
-            <span>!</span>异常处理
+            <span><AppIcon name="shield" size={17} /></span>异常处理
           </NavLink>
           <span className="warehouse-nav-group">仓储配置</span>
           <NavLink to={warehouseLink("/warehouse/locations", loaderData.query)}>
-            <span>⌂</span>仓库与库位
+            <span><AppIcon name="warehouse" size={17} /></span>仓库与库位
           </NavLink>
         </nav>
         <div className="warehouse-site-actions">
@@ -178,7 +180,7 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
             <input type="hidden" name="target" value="admin" />
             <input type="hidden" name="returnTo" value={loaderData.returnTo} />
             <button className="warehouse-return" title="切换回运营管理后台">
-              <span>↩</span>
+              <AppIcon name="layout" size={16} />
               {warehouseReturnLabel(loaderData.returnTo, Boolean(orderContext))}
             </button>
           </Form>
@@ -192,11 +194,16 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
             <small>{user.email}</small>
           </div>
           <Form action={`/logout?site=warehouse&warehouseId=${encodeURIComponent(loaderData.warehouse.id)}`} method="post">
-            <button className="warehouse-logout" title="退出登录">↪</button>
+            <button className="warehouse-logout" title="退出登录" aria-label="退出登录"><AppIcon name="logout" size={17} /></button>
           </Form>
         </div>
       </aside>
-      <main className="warehouse-content">
+      <div className="warehouse-main-column">
+        <header className="warehouse-topbar">
+          <div><AppIcon name="warehouse" size={17} /><strong>{warehouseRoleLabels[loaderData.warehouse.warehouse_role]}</strong><span>{loaderData.warehouseName}</span></div>
+          <div><span className="warehouse-sync-state"><i />仓库数据同步正常</span><span className="warehouse-topbar-user"><span className="warehouse-avatar">{user.displayName.slice(0, 1).toUpperCase()}</span><span><strong>{user.displayName}</strong><small>当前账号绑定本仓</small></span></span></div>
+        </header>
+      <main className="warehouse-content" id="warehouse-main-content">
         {orderContext && (
           <section className="warehouse-order-context">
             <div>
@@ -253,6 +260,7 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
         {loaderData.error && <div className="alert error">{loaderData.error}</div>}
         <Outlet />
       </main>
+      </div>
     </div>
   );
 }

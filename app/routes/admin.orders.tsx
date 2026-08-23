@@ -28,6 +28,7 @@ import {
 import { loadOrderGuidance } from "../lib/order-guidance.server";
 import { completionStatusLabels, type OrderCompletionStatus } from "../lib/order-review";
 import { inheritAcceptedQuoteReceivables } from "../lib/quote-order.server";
+import { AppIcon } from "../components/AppIcon";
 import {
   listTemplateWorkflowFields,
   saveOrderCustomWorkflowFieldValue,
@@ -47,6 +48,7 @@ type Order = {
   destination_state: string | null;
   destination_city: string;
   cargo_description: string;
+  business_type: string;
   pieces: number;
   gross_weight_kg: number;
   volume_cbm: number;
@@ -191,7 +193,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     workflowTemplates,
   ] = await Promise.all([
     env.DB.prepare(
-      `SELECT o.id,o.order_number,c.name customer_name,o.customer_reference,q.quote_number,o.origin_country,o.origin_state,o.origin_city,o.destination_country,o.destination_state,o.destination_city,o.cargo_description,o.pieces,o.gross_weight_kg,o.volume_cbm,o.transport_mode,o.service_level,o.requested_pickup_date,o.requested_delivery_date,o.status,o.source,o.current_step_code,o.current_step_name,o.current_assignee_user_id,au.display_name assignee_name,o.workflow_updated_at,o.is_overdue,o.exception_status,o.completion_status,(SELECT COUNT(*) FROM order_attachments a WHERE a.order_id=o.id) attachment_count,(SELECT COUNT(*) FROM order_module_instances m WHERE m.order_id=o.id AND m.organization_id=o.organization_id AND m.enabled=1) active_module_count,(SELECT COUNT(*) FROM order_module_instances m WHERE m.order_id=o.id AND m.organization_id=o.organization_id AND m.enabled=1 AND m.is_required=1 AND m.status!='completed') incomplete_required_module_count,o.created_at ${base} ORDER BY o.created_at DESC LIMIT ? OFFSET ?`,
+      `SELECT o.id,o.order_number,c.name customer_name,o.customer_reference,q.quote_number,o.origin_country,o.origin_state,o.origin_city,o.destination_country,o.destination_state,o.destination_city,o.cargo_description,o.business_type,o.pieces,o.gross_weight_kg,o.volume_cbm,o.transport_mode,o.service_level,o.requested_pickup_date,o.requested_delivery_date,o.status,o.source,o.current_step_code,o.current_step_name,o.current_assignee_user_id,au.display_name assignee_name,o.workflow_updated_at,o.is_overdue,o.exception_status,o.completion_status,(SELECT COUNT(*) FROM order_attachments a WHERE a.order_id=o.id) attachment_count,(SELECT COUNT(*) FROM order_module_instances m WHERE m.order_id=o.id AND m.organization_id=o.organization_id AND m.enabled=1) active_module_count,(SELECT COUNT(*) FROM order_module_instances m WHERE m.order_id=o.id AND m.organization_id=o.organization_id AND m.enabled=1 AND m.is_required=1 AND m.status!='completed') incomplete_required_module_count,o.created_at ${base} ORDER BY o.created_at DESC LIMIT ? OFFSET ?`,
     )
       .bind(...bindings, pageSize, (page - 1) * pageSize)
       .all<Order>(),
@@ -1235,7 +1237,6 @@ export default function Orders({
   loaderData,
   actionData,
 }: Route.ComponentProps) {
-  const [activeOrderId, setActiveOrderId] = useState<string | null>(null);
   const busy = useNavigation().state !== "idle",
     manage = loaderData.current.permissions.includes("order.manage"),
     data = actionData as
@@ -1245,24 +1246,22 @@ export default function Orders({
           formError?: string;
           createdOrderId?: string;
         };
-  const activeOrder =
-    loaderData.orders.find((order) => order.id === activeOrderId) ??
-    loaderData.orders[0] ??
-    null;
+  const blockedCount = loaderData.orders.filter((order) => Boolean(order.next_blocker)).length;
+  const overdueCount = loaderData.orders.filter((order) => Boolean(order.is_overdue)).length;
   return (
     <>
-      <header className="page-header">
+      <header className="page-header order-list-header">
         <div>
           <p className="eyebrow">ORDER WORKBENCH</p>
           <h1>运输订单工作台</h1>
-          <p>左侧选择待办订单，右侧直接查看当前节点、阻断和下一步动作。</p>
+          <p>按条件找到订单，进入同一张订单业务表单继续办理。</p>
         </div>
         <div className="page-actions">
           <span className="status-pill">共 {loaderData.total} 票</span>
           {manage && (
             <Modal
               title="新增运输订单"
-              triggerLabel="＋ 新增订单"
+              triggerLabel="新增运输订单"
               triggerClassName="primary"
               size="xwide"
               closeSignal={data?.createdOrderId}
@@ -1281,19 +1280,19 @@ export default function Orders({
           {data.formError ?? data.success}
         </div>
       )}
-      <section className="panel order-workbench">
-        <div className="order-workbench-tools">
-          <div>
-            <h2>待办收件箱</h2>
-            <p>筛选后连续处理订单，不需要反复返回列表。</p>
-          </div>
+      <section className="order-list-summary" aria-label="当前筛选概况">
+        <div><span>筛选结果</span><strong>{loaderData.orders.length}</strong><small>当前页订单</small></div>
+        <div><span>存在阻断</span><strong>{blockedCount}</strong><small>需要先处理门禁</small></div>
+        <div><span>已经超时</span><strong>{overdueCount}</strong><small>建议优先办理</small></div>
+        <div><span>全部订单</span><strong>{loaderData.total}</strong><small>当前权限范围</small></div>
+      </section>
+      <section className="panel order-list-panel">
+        <div className="panel-header order-list-panel-head">
+          <div><h2>运输订单</h2><p>状态、责任人与下一步动作使用订单详情的同一套工作流判断。</p></div>
+          <span className="page-count">第 {loaderData.page} / {loaderData.pages} 页</span>
         </div>
         <Form method="get" className="order-filters">
-          <input
-            name="q"
-            defaultValue={loaderData.filters.q}
-            placeholder="订单号、客户、货物、城市…"
-          />
+          <label className="order-filter-search"><AppIcon name="search" size={16}/><input name="q" defaultValue={loaderData.filters.q} placeholder="订单号、客户、货物或城市" /></label>
           <select name="status" defaultValue={loaderData.filters.status}>
             <option value="">全部状态</option>
             {allowedStatuses.map((s) => (
@@ -1323,69 +1322,28 @@ export default function Orders({
             <option value="50">50 条/页</option>
             <option value="100">100 条/页</option>
           </select>
-          <button className="secondary">查询</button>
+          <button className="primary">筛选</button>
           <Link className="text-button" to="/admin/orders">
             重置
           </Link>
         </Form>
-        <div className="order-inbox-layout">
-          <section className="order-inbox-list" aria-label="订单待办列表">
-            <header>
-              <div><strong>当前筛选结果</strong><small>点击订单，在右侧直接查看下一步。</small></div>
-              <span>{loaderData.orders.length} 票</span>
-            </header>
-            <div className="table-wrap order-inbox-table">
-              <table>
-                <thead>
-                  <tr><th>订单 / 客户</th><th>当前节点</th><th>负责人</th><th>提醒</th></tr>
-                </thead>
-                <tbody>
-                  {loaderData.orders.map((order) => (
-                    <tr className={activeOrder?.id === order.id ? "selected" : ""} key={order.id}>
-                      <td>
-                        <button
-                          type="button"
-                          className="order-inbox-select"
-                          aria-pressed={activeOrder?.id === order.id}
-                          onClick={() => setActiveOrderId(order.id)}
-                        >
-                          <strong>{order.order_number}</strong>
-                          <span>{order.customer_name}</span>
-                          <small>{order.cargo_description || "未填写货物"}</small>
-                        </button>
-                      </td>
-                      <td><strong>{order.current_step_name}</strong><small>{statusLabel(order.status)}</small></td>
-                      <td>{order.assignee_name || order.next_owner || "未分配"}</td>
-                      <td>
-                        {order.is_overdue ? <span className="status-pill off">超时</span> : order.exception_status !== "normal" ? <span className="status-pill off">异常</span> : order.next_blocker ? <span className="status-pill off">阻断</span> : <span className="status-pill success">正常</span>}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            {!loaderData.orders.length && <p className="empty-state">没有符合条件的订单。</p>}
-            <Pagination
-              page={loaderData.page}
-              pages={loaderData.pages}
-              filters={loaderData.filters}
-              pageSize={loaderData.pageSize}
-            />
-          </section>
-          {activeOrder ? (
-            <OrderInboxPanel
-              order={activeOrder}
-              transitions={loaderData.transitions}
-              members={loaderData.members}
-              currentUserId={loaderData.current.userId}
-              manage={manage}
-              busy={busy}
-              success={data?.success}
-            />
-          ) : (
-            <aside className="order-inbox-empty"><strong>暂无可办理订单</strong><p>调整筛选条件后再查看。</p></aside>
-          )}
+        <div className="table-wrap order-list-table">
+          <table>
+            <thead><tr><th>订单 / 客户</th><th>货物与线路</th><th>类型</th><th>当前节点</th><th>负责岗位 / 人员</th><th>阻断原因</th><th>更新时间</th><th className="sticky-action">操作</th></tr></thead>
+            <tbody>{loaderData.orders.map((order) => <tr className={order.next_blocker ? "row-blocked" : ""} key={order.id}>
+              <td><strong className="order-number-cell">{order.order_number}</strong><small>{order.customer_name}</small></td>
+              <td><strong>{order.cargo_description || "货物待补"}</strong><small>{order.origin_city || "起运地待补"} → {order.destination_city || "目的地待补"} · {order.pieces} 件 / {Number(order.gross_weight_kg || 0).toFixed(2)} KG / {Number(order.volume_cbm || 0).toFixed(3)} CBM</small></td>
+              <td><span className={`order-type-pill ${order.business_type === "ltl" ? "ltl" : "ftl"}`}>{order.business_type === "ltl" ? "拼车" : "整车"}</span></td>
+              <td><strong>{order.current_step_name}</strong><small>{statusLabel(order.status)}</small></td>
+              <td><strong>{order.next_owner || "待分配岗位"}</strong><small>{order.assignee_name || "待分配人员"}</small></td>
+              <td><span className={order.next_blocker ? "order-list-blocker" : "order-list-clear"}>{order.next_blocker || "当前节点暂无阻断"}</span></td>
+              <td><span className="order-list-time">{order.workflow_updated_at ? new Date(order.workflow_updated_at).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "尚未更新"}</span></td>
+              <td className="sticky-action"><Link className={order.next_blocker ? "secondary" : "primary"} to={order.next_href || `/admin/orders/${order.id}`}>{order.next_blocker ? "查看阻断" : "打开订单"}</Link></td>
+            </tr>)}</tbody>
+          </table>
         </div>
+        {!loaderData.orders.length && <p className="empty-state">没有符合条件的订单。</p>}
+        <Pagination page={loaderData.page} pages={loaderData.pages} filters={loaderData.filters} pageSize={loaderData.pageSize} />
       </section>
     </>
   );

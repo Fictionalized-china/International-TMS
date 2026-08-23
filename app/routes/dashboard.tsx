@@ -2,6 +2,7 @@ import { Form, NavLink, Outlet } from "react-router";
 import type { ReactNode } from "react";
 import type { Route } from "./+types/dashboard";
 import { requireSessionUser } from "../lib/auth.server";
+import { AppIcon, type AppIconName } from "../components/AppIcon";
 
 export async function loader({ request }: Route.LoaderArgs) {
   return { user: await requireSessionUser(request) };
@@ -12,46 +13,54 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
   const can = (permission: string) => user.permissions.includes(permission);
 
   return (
-    <div className="shell">
-      <aside className="sidebar">
+    <div className="shell admin-app-shell">
+      <a className="skip-link" href="#admin-main-content">跳到业务内容</a>
+      <aside className="sidebar admin-sidebar">
         <div className="brand admin-brand">
-          <span className="admin-logo">O</span>
+          <span className="admin-logo">XL</span>
           <div>
-            <strong>ouling</strong>
-            <small>欧凌国际货运代理</small>
+            <strong>新翎航 TMS</strong>
+            <small>国际汽运协同系统</small>
           </div>
-          <span className="brand-collapse">‹</span>
         </div>
 
-        <nav>
-          <span className="nav-group">业务</span>
-          <SideLink to="/admin/portal" icon="◎">岗位门户</SideLink>
-          <SideLink to="/admin" icon="▣" end>运营总览</SideLink>
-          {can("customer.view") && <SideLink to="/admin/customers" icon="◇">客户管理</SideLink>}
-          {can("sales.view") && <SideLink to="/admin/sales" icon="▱">销售管理</SideLink>}
-          {can("quote.view") && <SideLink to="/admin/quotations" icon="▰">询价报价</SideLink>}
-          {can("pricing.view") && <SideLink to="/admin/logistics-products" icon="◈">物流产品</SideLink>}
-          {can("billing.view") && <SideLink to="/admin/billing" icon="▤">费用结算</SideLink>}
-          {can("workflow.view") && <SideLink to="/admin/workflow" icon="↬">业务工作流</SideLink>}
+        <div className="admin-scope-card">
+          <span>当前工作空间</span>
+          <strong>国际汽运运营中心</strong>
+          <small>{user.displayName} · 数据按岗位范围显示</small>
+        </div>
+
+        <nav aria-label="运营管理导航">
+          <span className="nav-group">工作台</span>
+          <SideLink to="/admin/portal" icon="layout">岗位门户</SideLink>
+          <SideLink to="/admin" icon="dashboard" end>运营总览</SideLink>
 
           <span className="nav-group">汽运业务</span>
-          {can("order.view") && <SideLink to="/admin/orders" icon="▣">运输订单</SideLink>}
-          {can("shipment.view") && <SideLink to="/admin/domestic-tracking" icon="◇">国内物流轨迹</SideLink>}
-          {can("order.view") && <SideLink to="/admin/loading" icon="▰">配载单跟踪</SideLink>}
-          {can("order.view") && <SideLink to="/admin/documents" icon="▤">文件中心</SideLink>}
-          {can("shipment.view") && <SideLink to="/admin/shipments" icon="◎">运单列表</SideLink>}
-          {can("carrier.view") && <SideLink to="/admin/carriers" icon="▱">承运商管理</SideLink>}
-          {can("order.view") && <SideLink to="/admin/cargo" icon="▤">货物信息</SideLink>}
+          {can("quote.view") && <SideLink to="/admin/quotations" icon="receipt">询价与报价</SideLink>}
+          {can("order.view") && <SideLink to="/admin/orders" icon="clipboard">运输订单</SideLink>}
+          {can("shipment.view") && <SideLink to="/admin/domestic-tracking" icon="map">国内物流轨迹</SideLink>}
+          {can("order.view") && <SideLink to="/admin/loading" icon="truck">配载单跟踪</SideLink>}
+          {can("order.view") && <SideLink to="/admin/documents" icon="documents">文件中心</SideLink>}
+          {can("shipment.view") && <SideLink to="/admin/shipments" icon="packageCheck">运单列表</SideLink>}
+          {can("billing.view") && <SideLink to="/admin/billing" icon="billing">费用结算</SideLink>}
+          {can("order.view") && <SideLink to="/admin/cargo" icon="boxes">货物信息</SideLink>}
+
+          <span className="nav-group">业务资料</span>
+          {can("customer.view") && <SideLink to="/admin/customers" icon="building">客户管理</SideLink>}
+          {can("sales.view") && <SideLink to="/admin/sales" icon="chart">销售管理</SideLink>}
+          {can("pricing.view") && <SideLink to="/admin/logistics-products" icon="briefcase">物流产品</SideLink>}
+          {can("carrier.view") && <SideLink to="/admin/carriers" icon="truck">承运商管理</SideLink>}
+          {can("workflow.view") && <SideLink to="/admin/workflow" icon="workflow">业务工作流</SideLink>}
 
           <span className="nav-group">系统</span>
-          {can("master.view") && <SideLink to="/admin/master-data" icon="▦">基础数据</SideLink>}
-          {can("warehouse.manage") && <SideLink to="/admin/warehouses" icon="▥">仓库管理</SideLink>}
-          {can("department.view") && <SideLink to="/admin/departments" icon="▥">部门管理</SideLink>}
-          {can("user.view") && <SideLink to="/admin/positions" icon="▧">岗位管理</SideLink>}
-          {can("user.view") && <SideLink to="/admin/users" icon="◉">用户管理</SideLink>}
-          {can("role.view") && <SideLink to="/admin/roles" icon="▨">角色权限</SideLink>}
-          {can("security.manage") && <SideLink to="/admin/security" icon="↯">安全中心</SideLink>}
-          {can("audit.view") && <SideLink to="/admin/audit" icon="▤">审计日志</SideLink>}
+          {can("master.view") && <SideLink to="/admin/master-data" icon="settings">基础数据</SideLink>}
+          {can("warehouse.manage") && <SideLink to="/admin/warehouses" icon="warehouse">仓库管理</SideLink>}
+          {can("department.view") && <SideLink to="/admin/departments" icon="users">部门管理</SideLink>}
+          {can("user.view") && <SideLink to="/admin/positions" icon="userSettings">岗位管理</SideLink>}
+          {can("user.view") && <SideLink to="/admin/users" icon="users">用户管理</SideLink>}
+          {can("role.view") && <SideLink to="/admin/roles" icon="shield">角色权限</SideLink>}
+          {can("security.manage") && <SideLink to="/admin/security" icon="lock">安全中心</SideLink>}
+          {can("audit.view") && <SideLink to="/admin/audit" icon="history">审计日志</SideLink>}
         </nav>
 
         <div className="sidebar-user">
@@ -61,17 +70,27 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
             <small>{user.email}</small>
           </div>
           <Form action="/logout?site=admin" method="post">
-            <button className="sidebar-logout" title="退出登录">↗</button>
+            <button className="sidebar-logout" title="退出登录" aria-label="退出登录"><AppIcon name="logout" size={17} /></button>
           </Form>
           {can("warehouse.view") && <Form action="/switch-site" method="post" className="sidebar-warehouse-switch">
             <input type="hidden" name="target" value="warehouse" />
-            <button title="使用当前账号进入已绑定仓库">登录仓库管理</button>
+            <button title="使用当前账号进入已绑定仓库"><AppIcon name="warehouse" size={15} />登录仓库管理</button>
           </Form>}
         </div>
       </aside>
-      <main className="content">
-        <Outlet />
-      </main>
+      <div className="admin-main-column">
+        <header className="admin-topbar">
+          <div className="admin-workspace-title"><AppIcon name="panels" size={17} /><strong>运营管理端</strong><span>业务、仓库与财务数据实时联动</span></div>
+          <div className="admin-topbar-actions">
+            <span className="admin-sync-state"><i />系统服务正常</span>
+            <NavLink className="admin-topbar-link" to="/admin/portal"><AppIcon name="search" size={16} />查找待办</NavLink>
+            <span className="admin-topbar-user"><span className="user-avatar">{user.displayName.slice(0, 1).toUpperCase()}</span><span><strong>{user.displayName}</strong><small>{user.positionCode ?? "运营账号"}</small></span></span>
+          </div>
+        </header>
+        <main className="content" id="admin-main-content">
+          <Outlet />
+        </main>
+      </div>
     </div>
   );
 }
@@ -83,13 +102,13 @@ function SideLink({
   children,
 }: {
   to: string;
-  icon: string;
+  icon: AppIconName;
   end?: boolean;
   children: ReactNode;
 }) {
   return (
     <NavLink to={to} end={end}>
-      <span className="nav-icon">{icon}</span>
+      <span className="nav-icon"><AppIcon name={icon} size={17} /></span>
       <span>{children}</span>
     </NavLink>
   );

@@ -3,6 +3,7 @@ import { Link } from "react-router";
 import type { Route } from "./+types/dashboard.index";
 import { requireSessionUser } from "../lib/auth.server";
 import { loadOrderGuidance } from "../lib/order-guidance.server";
+import { AppIcon } from "../components/AppIcon";
 
 export async function loader({ request }: Route.LoaderArgs) {
   const user = await requireSessionUser(request, "dashboard.view");
@@ -39,10 +40,36 @@ export async function loader({ request }: Route.LoaderArgs) {
 export function meta() { return [{ title: "工作台 | International TMS" }]; }
 
 export default function DashboardIndex({ loaderData }: Route.ComponentProps) {
-  return <><header className="page-header"><div><p className="eyebrow">OPERATIONS CENTER</p><h1>你好，{loaderData.user.displayName}</h1><p>欧凌国际物流 · 国际零担运营后台</p></div><span className="status-pill">后台服务正常</span></header>
-    <section className="stats stats-four"><article><span>有效客户</span><strong>{loaderData.stats.customers}</strong><small>客户主数据</small></article><article><span>开放线索</span><strong>{loaderData.stats.leads}</strong><small>待销售推进</small></article><article><span>开放商机</span><strong>{loaderData.stats.opportunities}</strong><small>销售漏斗</small></article><article><span>门户账号</span><strong>{loaderData.stats.portalAccounts}</strong><small>客户协作</small></article></section>
-    <section className="panel"><div className="panel-header"><div><h2>订单闭环看板</h2><p>主管和老板只看三个状态：业务办理、业务完成待结算、已结清。</p></div><Link className="secondary" to="/admin/orders">进入订单工作台</Link></div><div className="completion-stats"><article><span>业务办理中</span><strong>{loaderData.completionStats.inProgress}</strong><small>继续按下一步动作处理</small></article><article><span>业务完成，结算未闭环</span><strong>{loaderData.completionStats.unsettled}</strong><small>财务继续收付款与核销</small></article><article><span>已完成并结清</span><strong>{loaderData.completionStats.settled}</strong><small>订单可进入经营复盘</small></article></div></section>
-    <section className="panel"><div className="panel-header"><div><h2>我的订单待办</h2><p>与订单详情、订单列表使用同一套下一步动作和阻断规则。</p></div><Link className="secondary" to="/admin/orders">查看全部订单</Link></div><div className="table-wrap"><table><thead><tr><th>订单</th><th>当前阶段</th><th>下一步动作</th><th>负责人</th><th>阻断原因</th><th>入口</th></tr></thead><tbody>{loaderData.orderTodos.map(item=><tr key={item.order.id}><td><strong>{item.order.order_number}</strong></td><td>{item.stage.shortTitle}</td><td>{item.action}</td><td>{item.owner}</td><td className={item.blocker?"danger-text":""}>{item.blocker||"当前节点暂无阻断"}</td><td><Link className="text-button" to={item.href}>{item.blocker?"查看阻断并处理":"打开当前节点"}</Link></td></tr>)}</tbody></table></div>{!loaderData.orderTodos.length&&<p className="empty-state">当前没有待处理订单。</p>}</section>
-    <section className="panel"><h2>第一阶段 MVP 能力</h2><div className="module-list"><div><span className="module-icon done">✓</span><div><strong>客户、销售与询价报价</strong><p>客户 360、销售漏斗、标准报价和客户在线确认。</p></div><span>已启用</span></div><div><span className="module-icon done">✓</span><div><strong>订单、运单与运输轨迹</strong><p>门户下单、后台确认、承运分段、轨迹和签收。</p></div><span>已启用</span></div><div><span className="module-icon done">✓</span><div><strong>账单、权限与安全</strong><p>应收账单、收款状态、角色权限和安全审计。</p></div><span>已启用</span></div></div></section>
-  </>;
+  const blocked = loaderData.orderTodos.filter((item) => Boolean(item.blocker)).length;
+  return <div className="ops-dashboard">
+    <header className="page-header ops-dashboard-header">
+      <div><p className="eyebrow">ROLE PORTAL / 岗位门户</p><h1>早上好，{loaderData.user.displayName}</h1><p>这里集中显示今天真正需要处理的订单与阻断。</p></div>
+      <div className="page-actions"><Link className="secondary" to="/admin/portal"><AppIcon name="layout" size={15}/>岗位待办</Link><Link className="primary" to="/admin/orders"><AppIcon name="clipboard" size={15}/>运输订单</Link></div>
+    </header>
+
+    <section className="ops-kpi-grid" aria-label="运营概况">
+      <article><span className="ops-kpi-icon orange"><AppIcon name="clipboardCheck" /></span><div><span>当前待办</span><strong>{loaderData.orderTodos.length}</strong><small>按优先级继续处理</small></div></article>
+      <article><span className="ops-kpi-icon red"><AppIcon name="shield" /></span><div><span>存在阻断</span><strong>{blocked}</strong><small>需先补齐资料或门禁</small></div></article>
+      <article><span className="ops-kpi-icon blue"><AppIcon name="truck" /></span><div><span>业务办理中</span><strong>{loaderData.completionStats.inProgress}</strong><small>运输与仓库执行中</small></div></article>
+      <article><span className="ops-kpi-icon green"><AppIcon name="billing" /></span><div><span>业务完成待结算</span><strong>{loaderData.completionStats.unsettled}</strong><small>等待对账、收付款与核销</small></div></article>
+    </section>
+
+    <section className="panel ops-todo-panel">
+      <div className="panel-header"><div><h2>待我处理</h2><p>下一步动作和阻断原因直接来自订单工作流。</p></div><Link className="secondary" to="/admin/portal">打开岗位门户</Link></div>
+      <div className="ops-todo-list">
+        {loaderData.orderTodos.slice(0, 5).map((item, index) => <Link className={item.blocker ? "blocked" : ""} key={item.order.id} to={item.href}>
+          <span className="ops-todo-index">{String(index + 1).padStart(2, "0")}</span>
+          <span><strong>{item.order.order_number}</strong><small>{item.stage.shortTitle} · {item.owner}</small></span>
+          <span><strong>{item.action}</strong><small className={item.blocker ? "danger-text" : ""}>{item.blocker || "当前节点暂无阻断"}</small></span>
+          <span className="ops-todo-open">打开</span>
+        </Link>)}
+        {!loaderData.orderTodos.length && <p className="empty-state">当前没有待处理订单。</p>}
+      </div>
+    </section>
+
+    <section className="panel ops-closure-panel">
+      <div className="panel-header"><div><h2>订单闭环</h2><p>按办理中、待结算、已结清三个结果查看。</p></div><Link className="text-button" to="/admin/billing">查看费用结算</Link></div>
+      <div className="ops-closure-grid"><div><span>业务办理中</span><strong>{loaderData.completionStats.inProgress}</strong></div><div><span>业务完成待结算</span><strong>{loaderData.completionStats.unsettled}</strong></div><div><span>已完成并结清</span><strong>{loaderData.completionStats.settled}</strong></div><div><span>有效客户</span><strong>{loaderData.stats.customers}</strong></div></div>
+    </section>
+  </div>;
 }
