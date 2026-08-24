@@ -685,7 +685,7 @@ function LinearOrderWorkspace({
         </div>
         <div className="head-actions">
           <span className={`status ${orderCompleted ? "green" : "blue"}`}>{statusLabel(order.status)}</span>
-          <button className="btn" type="button" onClick={() => setDrawerTab("dossier")}>订单关键资料</button>
+          <button className="btn head-detail-trigger" type="button" onClick={() => setDrawerTab("dossier")}>订单关键资料</button>
           <Link className="btn" to="/admin/orders">返回订单列表</Link>
         </div>
       </header>
@@ -740,10 +740,60 @@ function LinearOrderWorkspace({
             </div>
           </footer>}
         </section>
+        <LinearOrderSideRail data={data} blocker={guidance.blocker} onOpen={setDrawerTab} />
       </div>
       {drawerTab && <LinearOrderDrawer data={data} activeTab={drawerTab} onTabChange={setDrawerTab} onClose={() => setDrawerTab(null)} />}
     </div>
   );
+}
+
+function LinearOrderSideRail({
+  data,
+  blocker,
+  onOpen,
+}: {
+  data: Route.ComponentProps["loaderData"];
+  blocker?: string | null;
+  onOpen: (tab: LinearOrderDrawerTab) => void;
+}) {
+  const order = data.order;
+  const received = data.packageLabels.reduce(
+    (total, label) => ({
+      pieces: total.pieces + Number(label.pieces || 0),
+      weight: total.weight + Number(label.weight_kg || 0),
+      volume: total.volume + Number(label.volume_cbm || 0),
+    }),
+    { pieces: 0, weight: 0, volume: 0 },
+  );
+  const receivedSummary = data.packageLabels.length
+    ? `${received.pieces} 件 · ${received.weight.toFixed(2)} KG · ${received.volume.toFixed(3)} CBM`
+    : "等待仓库实收";
+
+  return <aside className="linear-order-side" aria-label="订单关键资料与快捷查看">
+    <section className="linear-side-panel">
+      <header><b>订单关键资料</b><button type="button" onClick={() => onOpen("dossier")}>详情</button></header>
+      <dl className="linear-side-facts">
+        <div><dt>客户</dt><dd title={order.customer_name}>{order.customer_name || "—"}</dd></div>
+        <div><dt>报价</dt><dd title={order.quote_number || ""}>{order.quote_number || "历史订单"}</dd></div>
+        <div><dt>类型</dt><dd>{order.business_type === "ltl" ? "拼车 · 已锁定" : "整车 · 已锁定"}</dd></div>
+        <div><dt>货物</dt><dd title={order.cargo_description}>{order.cargo_description || "—"}</dd></div>
+        <div><dt>实收</dt><dd title={receivedSummary}>{receivedSummary}</dd></div>
+      </dl>
+    </section>
+    <section className="linear-side-panel">
+      <header><b>就地查看</b></header>
+      <div className="linear-side-links">
+        <button type="button" onClick={() => onOpen("dossier")}><span>订单全部资料</span><i>→</i></button>
+        <button type="button" onClick={() => onOpen("cargo")}><span>货物与标签</span><small>{data.packageLabels.length} 张</small><i>→</i></button>
+        <button type="button" onClick={() => onOpen("attachments")}><span>文件汇总</span><small>{data.attachments.length} 个</small><i>→</i></button>
+        <button type="button" onClick={() => onOpen("history")}><span>历史节点与日志</span><small>{data.history.length + data.macro.length} 条</small><i>→</i></button>
+      </div>
+    </section>
+    <section className={`linear-side-panel linear-side-tip${blocker ? " blocked" : ""}`}>
+      <header><b>当前提示</b></header>
+      <p>{blocker || "页面只显示当前节点需要处理的内容；其他资料可在右侧按需展开。"}</p>
+    </section>
+  </aside>;
 }
 
 function LinearOrderDrawer({
