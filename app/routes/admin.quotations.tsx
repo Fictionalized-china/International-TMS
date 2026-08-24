@@ -109,13 +109,13 @@ export async function loader({ request }: Route.LoaderArgs) {
   ]);
   return {
     current,
-    quotes: quotes.results,
-    customers: customers.results,
-    users: users.results,
-    warehouses: warehouses.results,
-    countries: countries.results,
-    provinces: provinces.results,
-    cities: cities.results,
+    quotes: quotes.results ?? [],
+    customers: customers.results ?? [],
+    users: users.results ?? [],
+    warehouses: warehouses.results ?? [],
+    countries,
+    provinces,
+    cities,
     filters: { keyword, lifecycle },
   };
 }
@@ -291,7 +291,7 @@ function ReadCell({ label, value }: { label: string; value: string }) {
 function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof loader>>; busy: boolean }) {
   const [customerId, setCustomerId] = useState(loaderData.customers[0]?.id || "");
   const [pickupAddress, setPickupAddress] = useState(loaderData.customers[0]?.pickup_address || "");
-  const [charges, setCharges] = useState([{ name: transportChargeNameOptions[0] || "国际汽运费", quantity: 1, unitPrice: 0, notes: "" }]);
+  const [charges, setCharges] = useState([{ name: transportChargeNameOptions[0]?.[0] || "国际汽运费", quantity: 1, unitPrice: 0, notes: "" }]);
   const total = charges.reduce((sum, charge) => sum + Number(charge.quantity || 0) * Number(charge.unitPrice || 0), 0);
   const selectCustomer = (id: string) => {
     setCustomerId(id);
@@ -334,8 +334,8 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
       </div>
     </FormSection>
     <FormSection title="客户应收费用" note="接受后直接继承到订单结算">
-      <table className="inline-table quote-charge-table"><thead><tr><th>费用名称 *</th><th>数量 *</th><th>单价 *</th><th>金额</th><th>备注</th><th>操作</th></tr></thead><tbody>{charges.map((charge, index) => <tr key={index}><td><select className="control filled" name="chargeName" value={charge.name} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, name: event.target.value } : row))}>{transportChargeNameOptions.map((option) => <option key={option} value={option}>{option}</option>)}</select></td><td><input className="control filled" name="chargeQuantity" type="number" min="0.01" step="0.01" value={charge.quantity} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: Number(event.target.value) } : row))}/></td><td><input className="control filled" name="chargeUnitPrice" type="number" min="0" step="0.01" value={charge.unitPrice} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, unitPrice: Number(event.target.value) } : row))}/></td><td><b>{(charge.quantity * charge.unitPrice).toLocaleString()}</b></td><td><input className="control" name="chargeNotes" value={charge.notes} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, notes: event.target.value } : row))}/></td><td><button className="btn danger" type="button" disabled={charges.length === 1} onClick={() => setCharges((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>删除</button></td></tr>)}</tbody></table>
-      <div className="quote-charge-actions"><button className="btn" type="button" onClick={() => setCharges((rows) => [...rows, { name: transportChargeNameOptions[0] || "国际汽运费", quantity: 1, unitPrice: 0, notes: "" }])}>新增费用</button><strong>报价总额 CNY {total.toLocaleString()}</strong></div>
+      <table className="inline-table quote-charge-table"><thead><tr><th>费用名称 *</th><th>数量 *</th><th>单价 *</th><th>金额</th><th>备注</th><th>操作</th></tr></thead><tbody>{charges.map((charge, index) => <tr key={index}><td><select className="control filled" name="chargeName" value={charge.name} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, name: event.target.value } : row))}>{transportChargeNameOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td><td><input className="control filled" name="chargeQuantity" type="number" min="0.01" step="0.01" value={charge.quantity} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: Number(event.target.value) } : row))}/></td><td><input className="control filled" name="chargeUnitPrice" type="number" min="0" step="0.01" value={charge.unitPrice} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, unitPrice: Number(event.target.value) } : row))}/></td><td><b>{(charge.quantity * charge.unitPrice).toLocaleString()}</b></td><td><input className="control" name="chargeNotes" value={charge.notes} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, notes: event.target.value } : row))}/></td><td><button className="btn danger" type="button" disabled={charges.length === 1} onClick={() => setCharges((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>删除</button></td></tr>)}</tbody></table>
+      <div className="quote-charge-actions"><button className="btn" type="button" onClick={() => setCharges((rows) => [...rows, { name: transportChargeNameOptions[0]?.[0] || "国际汽运费", quantity: 1, unitPrice: 0, notes: "" }])}>新增费用</button><strong>报价总额 CNY {total.toLocaleString()}</strong></div>
       <div className="grid two"><Field label="报价有效期"><input className="control" name="validUntil" type="date"/></Field><Field label="报价备注"><textarea className="control textarea" name="notes"/></Field></div>
     </FormSection>
     <div className="modal-form-actions"><button className="btn primary large" disabled={busy}>保存报价并等待客户确认</button></div>
@@ -350,7 +350,7 @@ function Field({ label, className = "", children }: { label: string; className?:
   return <label className={`field ${className}`}><span>{label}</span>{children}</label>;
 }
 
-function GeoSelect({ name, options }: { name: string; options: GeoOption[] }) {
+function GeoSelect({ name, options = [] }: { name: string; options?: GeoOption[] }) {
   return <select className="control filled" name={name} required><option value="">请选择</option>{options.map((option) => <option key={`${name}-${option.code}`} value={option.name}>{option.name}</option>)}</select>;
 }
 
@@ -369,7 +369,7 @@ function positiveInteger(value: string, label: string) {
 async function geoOptions(organizationId: string, level: string) {
   return (await env.DB.prepare(
     "SELECT code,name,parent_code FROM reference_data WHERE organization_id=? AND category=? AND status='active' ORDER BY sort_order,name",
-  ).bind(organizationId,level).all<GeoOption>()).results;
+  ).bind(organizationId,level).all<GeoOption>()).results ?? [];
 }
 
 function statusLabel(status: Quote["lifecycle_status"]) {
