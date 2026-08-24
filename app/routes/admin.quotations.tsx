@@ -239,7 +239,7 @@ export default function QuotationsPage({ loaderData, actionData }: Route.Compone
     <div className="breadcrumb">管理后台 / 工作台 / <b>询价与报价</b></div>
     <div className="page-head">
       <div><span className="eyebrow">QUOTE DESK / 询价与报价</span><h1>询价与报价</h1><p>报价被接受后立即生成唯一运输订单，不再二次创建订单。</p></div>
-      <div className="head-actions"><Modal title="创建运输报价" triggerLabel="创建报价" triggerClassName="btn primary" closeSignal={actionData?.success} size="wide"><QuoteForm loaderData={loaderData} busy={busy} /></Modal></div>
+      <div className="head-actions"><Modal title="创建运输报价" triggerLabel="创建报价" triggerClassName="btn primary" closeSignal={actionData?.success} size="xwide"><QuoteForm loaderData={loaderData} busy={busy} /></Modal></div>
     </div>
     {(actionData?.success || actionData?.formError) && <div className={`gate ${actionData.formError ? "" : "ok"}`}>{actionData.formError || actionData.success}</div>}
     <div className="kpis quotation-kpis">
@@ -314,17 +314,17 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
         <Field label="起运国家 / 地区 *"><GeoSelect name="originCountry" options={loaderData.countries}/></Field>
         <Field label="起运省 / 州 *"><GeoSelect name="originState" options={loaderData.provinces}/></Field>
         <Field label="起运城市 *"><GeoSelect name="originCity" options={loaderData.cities}/></Field>
+        <Field label="提货地址 *" className="quote-route-address"><textarea className="control textarea editing" name="pickupAddress" value={pickupAddress} onChange={(event) => setPickupAddress(event.target.value)} required /></Field>
         <Field label="目的国家 / 地区 *"><GeoSelect name="destinationCountry" options={loaderData.countries}/></Field>
         <Field label="目的省 / 州 *"><GeoSelect name="destinationState" options={loaderData.provinces}/></Field>
         <Field label="目的城市 *"><GeoSelect name="destinationCity" options={loaderData.cities}/></Field>
         <Field label="目的仓库 *"><select className="control filled" name="destinationWarehouseId" required><option value="">请选择境外目的仓</option>{loaderData.warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></Field>
-        <Field label="提货地址 *" className="span2"><textarea className="control textarea editing" name="pickupAddress" value={pickupAddress} onChange={(event) => setPickupAddress(event.target.value)} required /></Field>
-        <Field label="报价目的地备注" className="span2"><textarea className="control textarea" name="destinationWarehouseNote" /></Field>
+        <Field label="报价目的地备注" className="quote-route-note"><textarea className="control textarea" name="destinationWarehouseNote" /></Field>
       </div>
     </FormSection>
     <FormSection title="货物预估数据" note="仓库实收后登记实际数据">
       <div className="grid">
-        <Field label="货物描述 *" className="span4"><textarea className="control textarea editing" name="cargoDescription" required /></Field>
+        <Field label="货物描述 *" className="quote-cargo-description"><textarea className="control textarea editing" name="cargoDescription" required /></Field>
         <Field label="预计件数 *"><input className="control filled" name="pieces" type="number" min="1" defaultValue="1" required/></Field>
         <Field label="预计重量 KG *"><input className="control filled" name="weight" type="number" min="0.001" step="0.001" required/></Field>
         <Field label="预计长度 CM *"><input className="control filled" name="length" type="number" min="0.01" step="0.01" required/></Field>
@@ -333,17 +333,21 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
         <Field label="预计体积 CBM *"><input className="control filled" name="volume" type="number" min="0.001" step="0.001" required/></Field>
       </div>
     </FormSection>
-    <FormSection title="客户应收费用" note="接受后直接继承到订单结算">
+    <FormSection
+      title="客户应收费用"
+      note="接受后直接继承到订单结算"
+      action={<button className="btn quote-charge-add" type="button" onClick={() => setCharges((rows) => [...rows, { name: transportChargeNameOptions[0]?.[0] || "国际汽运费", quantity: 1, unitPrice: 0, notes: "" }])}>＋ 添加费用</button>}
+    >
       <table className="inline-table quote-charge-table"><thead><tr><th>费用名称 *</th><th>数量 *</th><th>单价 *</th><th>金额</th><th>备注</th><th>操作</th></tr></thead><tbody>{charges.map((charge, index) => <tr key={index}><td><select className="control filled" name="chargeName" value={charge.name} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, name: event.target.value } : row))}>{transportChargeNameOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td><td><input className="control filled" name="chargeQuantity" type="number" min="0.01" step="0.01" value={charge.quantity} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: Number(event.target.value) } : row))}/></td><td><input className="control filled" name="chargeUnitPrice" type="number" min="0" step="0.01" value={charge.unitPrice} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, unitPrice: Number(event.target.value) } : row))}/></td><td><b>{(charge.quantity * charge.unitPrice).toLocaleString()}</b></td><td><input className="control" name="chargeNotes" value={charge.notes} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, notes: event.target.value } : row))}/></td><td><button className="btn danger" type="button" disabled={charges.length === 1} onClick={() => setCharges((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>删除</button></td></tr>)}</tbody></table>
-      <div className="quote-charge-actions"><button className="btn" type="button" onClick={() => setCharges((rows) => [...rows, { name: transportChargeNameOptions[0]?.[0] || "国际汽运费", quantity: 1, unitPrice: 0, notes: "" }])}>新增费用</button><strong>报价总额 CNY {total.toLocaleString()}</strong></div>
+      <div className="quote-charge-summary"><small>共 {charges.length} 个费用项目，系统按“数量 × 单价”自动汇总</small><strong>报价总额 CNY {total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></div>
       <div className="grid two"><Field label="报价有效期"><input className="control" name="validUntil" type="date"/></Field><Field label="报价备注"><textarea className="control textarea" name="notes"/></Field></div>
     </FormSection>
     <div className="modal-form-actions"><button className="btn primary large" disabled={busy}>保存报价并等待客户确认</button></div>
   </Form>;
 }
 
-function FormSection({ title, note, children }: { title: string; note: string; children: React.ReactNode }) {
-  return <section className="section"><div className="section-title"><b>{title}</b><span>{note}</span></div>{children}</section>;
+function FormSection({ title, note, action, children }: { title: string; note: string; action?: React.ReactNode; children: React.ReactNode }) {
+  return <section className="section"><div className="section-title"><b>{title}</b><div className="quote-section-heading"><span>{note}</span>{action}</div></div>{children}</section>;
 }
 
 function Field({ label, className = "", children }: { label: string; className?: string; children: React.ReactNode }) {
