@@ -1,5 +1,5 @@
 ﻿import { env } from "cloudflare:workers";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Form, Link, redirect, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.order-detail";
 import { requireSessionUser } from "../lib/auth.server";
@@ -228,6 +228,8 @@ type OrderDetailTab =
   | "attachments"
   | "costs"
   | "history";
+
+type LinearOrderDrawerTab = "dossier" | "cargo" | "attachments" | "history";
 
 export async function loader({ request, params, context }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "order.view"),
@@ -649,6 +651,7 @@ function LinearOrderWorkspace({
   success?: string;
   formError?: string;
 }) {
+  const [drawerTab, setDrawerTab] = useState<LinearOrderDrawerTab | null>(null);
   const order = data.order;
   const currentStepKey = data.businessWorkflow?.current_step_key || "";
   const stepRows = new Map<string, WorkflowFormRow[]>();
@@ -666,6 +669,7 @@ function LinearOrderWorkspace({
     ? uniqueWorkflowTasks(selectedStep.rows).filter((task) => !orderCompleted && task.task_status !== "completed")
     : [];
   const progress = orderCompleted ? 100 : steps.length ? Math.round((currentIndex / steps.length) * 100) : 0;
+  const showOuterActionBar = !data.embeddedModuleData;
   const responsiblePosition = data.currentWorkflowTasks.find((task) => !orderCompleted && task.status !== "completed")?.position_name
     || orderResponsiblePosition(guidance.moduleCode, order.status).name;
 
@@ -679,7 +683,11 @@ function LinearOrderWorkspace({
           <div className="summary-cell"><span>负责岗位 / 人员</span><b>{orderCompleted ? "已归档" : `${responsiblePosition} · ${order.assignee_name || "待分配"}`}</b></div>
           <div className="summary-cell"><span>办理条件</span><b className={guidance.blocker ? "danger" : "ok"}>{orderCompleted ? "全部节点已完成" : guidance.blocker || "当前节点暂无阻断"}</b></div>
         </div>
-        <div className="head-actions"><span className={`status ${orderCompleted ? "green" : "blue"}`}>{statusLabel(order.status)}</span><Link className="btn" to="/admin/orders">返回订单列表</Link></div>
+        <div className="head-actions">
+          <span className={`status ${orderCompleted ? "green" : "blue"}`}>{statusLabel(order.status)}</span>
+          <button className="btn" type="button" onClick={() => setDrawerTab("dossier")}>订单关键资料</button>
+          <Link className="btn" to="/admin/orders">返回订单列表</Link>
+        </div>
       </header>
 
       <nav className="workflow" aria-label="订单工作流">
@@ -701,18 +709,24 @@ function LinearOrderWorkspace({
       {formError && <div className="alert error"><b>当前操作未完成：</b>{formError}</div>}
 
       <div className="workspace">
-        <section className="node-panel panel">
+        <section className={`node-panel panel${showOuterActionBar ? "" : " without-actionbar"}`}>
           <header className="node-header">
             <div className="node-title"><span className="node-number">{selectedIndex + 1}</span><div><h2>{selectedStep?.name || "订单资料"}</h2><p>{orderCompleted ? "订单已归档；页面内容仅供查看。" : viewingCurrent ? "本页只显示当前节点需要查看和处理的数据。" : "正在查看已完成节点；历史数据只读。"}</p></div></div>
-            <div className="owner-chips"><span className="active">{responsiblePosition}</span><span>{order.assignee_name || "待分配人员"}</span><span>{viewingCurrent ? `${pendingTasks.length} 项待办` : "历史节点"}</span></div>
+            <div className="node-header-tools">
+              <div className="owner-chips"><span className="active">{responsiblePosition}</span><span>{order.assignee_name || "待分配人员"}</span><span>{viewingCurrent ? `${pendingTasks.length} 项待办` : "历史节点"}</span></div>
+              <div className="node-reference-actions" aria-label="订单辅助资料">
+                <button type="button" onClick={() => setDrawerTab("cargo")}>货物与标签</button>
+                <button type="button" onClick={() => setDrawerTab("attachments")}>文件 {data.attachments.length}</button>
+                <button type="button" onClick={() => setDrawerTab("history")}>记录 {data.history.length + data.macro.length}</button>
+              </div>
+            </div>
           </header>
           <div className="node-scroll">
-            <OrderDossierSection order={order} />
             <SelectedStepSections data={data} rows={selectedRows} selectedStep={selectedStep} viewingCurrent={viewingCurrent} busy={busy} />
             <SelectedStepTasks data={data} step={selectedStep} busy={busy} viewingCurrent={viewingCurrent} />
             {viewingCurrent && guidance.blocker && <div className="gate"><b>当前阻断</b><span>{guidance.blocker}</span></div>}
           </div>
-          <footer className="actionbar">
+          {showOuterActionBar && <footer className="actionbar">
             <div className="action-note"><b>{viewingCurrent ? (orderCompleted ? "订单已完成" : guidance.action) : `查看：${selectedStep?.name}`}</b><span>{viewingCurrent ? (guidance.blocker || "保存本节点完整数据后，系统自动重新校验并推进。") : "已完成节点不可重复推进，可查看其业务数据与记录。"}</span></div>
             <div className="action-buttons">
               {!viewingCurrent && <Link className="btn" to={`?stage=${encodeURIComponent(currentStepKey)}`}>返回当前节点</Link>}
@@ -724,16 +738,111 @@ function LinearOrderWorkspace({
                 <a className={`btn ${guidance.blocker ? "" : "primary"}`} href="#module-business-data">{guidance.blocker ? "查看阻断并处理" : "定位办理表单"}</a>
               ) : null)}
             </div>
-          </footer>
+          </footer>}
         </section>
-        <aside className="side-stack">
-          <section className="side-card panel"><h3>订单关键资料</h3><dl><SideFact label="客户" value={order.customer_name}/><SideFact label="报价" value={order.quote_number || "历史订单"}/><SideFact label="类型" value={order.business_type === "ltl" ? "拼车" : "整车"}/><SideFact label="货物" value={order.cargo_description}/><SideFact label="实物" value={`${order.pieces} 件 / ${order.gross_weight_kg} KG / ${order.volume_cbm} CBM`}/><SideFact label="目的仓" value={order.overseas_warehouse_name || "待填写"}/></dl></section>
-          <section className="side-card panel"><h3>就地查看</h3><div className="quick-list"><a href="#order-dossier">订单全部资料 <span>→</span></a><a href="#node-fields">本节点字段 <span>{data.currentWorkflowFields.length}</span></a><a href="#node-tasks">办理步骤 <span>{pendingTasks.length}</span></a><a href="#order-files">文件汇总 <span>{data.attachments.length}</span></a><a href="#order-history">操作记录 <span>{data.history.length + data.macro.length}</span></a></div></section>
-          <section className="side-card panel"><h3>当前提示</h3><div className={`gate ${guidance.blocker ? "" : "ok"}`}>{guidance.blocker || "页面只显示当前节点需要处理的内容；资料保存后由系统重新判断状态。"}</div></section>
-        </aside>
       </div>
+      {drawerTab && <LinearOrderDrawer data={data} activeTab={drawerTab} onTabChange={setDrawerTab} onClose={() => setDrawerTab(null)} />}
     </div>
   );
+}
+
+function LinearOrderDrawer({
+  data,
+  activeTab,
+  onTabChange,
+  onClose,
+}: {
+  data: Route.ComponentProps["loaderData"];
+  activeTab: LinearOrderDrawerTab;
+  onTabChange: (tab: LinearOrderDrawerTab) => void;
+  onClose: () => void;
+}) {
+  const order = data.order;
+  return (
+    <div className="linear-drawer-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <aside className="linear-order-drawer" role="dialog" aria-modal="true" aria-label="订单辅助资料">
+        <header className="linear-drawer-head">
+          <div><span>TRANSPORT ORDER</span><h2>{order.order_number}</h2></div>
+          <button type="button" aria-label="关闭订单资料" title="关闭" onClick={onClose}>×</button>
+        </header>
+        <nav className="linear-drawer-tabs" aria-label="订单资料分类">
+          <DrawerTab active={activeTab === "dossier"} onClick={() => onTabChange("dossier")}>关键资料</DrawerTab>
+          <DrawerTab active={activeTab === "cargo"} onClick={() => onTabChange("cargo")}>货物与标签</DrawerTab>
+          <DrawerTab active={activeTab === "attachments"} onClick={() => onTabChange("attachments")}>文件 {data.attachments.length}</DrawerTab>
+          <DrawerTab active={activeTab === "history"} onClick={() => onTabChange("history")}>操作记录</DrawerTab>
+        </nav>
+        <div className={`linear-drawer-body is-${activeTab}`}>
+          {activeTab === "dossier" && <>
+            <DrawerSection title="订单来源与责任">
+              <DrawerFact label="客户" value={`${order.customer_code} · ${order.customer_name}`} />
+              <DrawerFact label="关联报价" value={order.quote_number || "历史订单"} />
+              <DrawerFact label="订单类型" value={order.business_type === "ltl" ? "拼车" : "整车"} />
+              <DrawerFact label="清关责任" value={order.customs_clearance_mode === "company" ? "公司代办清关" : "客户自理清关"} />
+              <DrawerFact label="接单日期" value={order.order_date} />
+              <DrawerFact label="当前负责人" value={order.assignee_name || "待分配"} />
+            </DrawerSection>
+            <DrawerSection title="提货信息">
+              <DrawerFact label="发货方" value={order.shipper_name} />
+              <DrawerFact label="发货联系人" value={[order.shipper_contact, order.shipper_phone].filter(Boolean).join(" · ")} />
+              <DrawerFact label="预约提货" value={order.requested_pickup_date} />
+              <DrawerFact label="提货地址" value={[order.origin_country, order.origin_state, order.origin_city, order.origin_address].filter(Boolean).join(" ")} wide />
+            </DrawerSection>
+            <DrawerSection title="境外目的信息">
+              <DrawerFact label="境外联系人" value={[order.consignee_contact, order.consignee_phone].filter(Boolean).join(" · ")} />
+              <DrawerFact label="目的地" value={[order.destination_country, order.destination_state, order.destination_city].filter(Boolean).join(" ")} />
+              <DrawerFact label="境外目的仓" value={order.overseas_warehouse_name} />
+              <DrawerFact label="目的仓地址" value={[order.overseas_warehouse_address, order.overseas_warehouse_address_note].filter(Boolean).join(" · ")} wide />
+            </DrawerSection>
+            <DrawerSection title="线路与备注">
+              <DrawerFact label="出境口岸" value={order.exit_port_name || order.exit_port} />
+              <DrawerFact label="清关地" value={order.customs_location} />
+              <DrawerFact label="运输线路" value={order.route_notes} wide />
+              <DrawerFact label="订单备注" value={order.special_instructions} wide />
+            </DrawerSection>
+          </>}
+          {activeTab === "cargo" && <>
+            <DrawerSection title="货物摘要">
+              <DrawerFact label="货物名称" value={order.cargo_description} wide />
+              <DrawerFact label="件数" value={`${order.pieces} 件`} />
+              <DrawerFact label="毛重" value={`${order.gross_weight_kg} KG`} />
+              <DrawerFact label="体积" value={`${order.volume_cbm} CBM`} />
+              <DrawerFact label="要求送达" value={order.requested_delivery_date} />
+            </DrawerSection>
+            <section className="linear-drawer-section"><h3>仓库货物标签 <span>{data.packageLabels.length} 张</span></h3><div className="linear-drawer-list">
+              {data.packageLabels.map((label) => <article key={label.id}><div><strong>{label.barcode}</strong><span>{label.cargo_name || order.cargo_description} · {label.package_number}</span></div><small>{label.pieces} 件 · {label.weight_kg ?? "—"} KG · {label.volume_cbm ?? "—"} CBM<br/>{label.warehouse_name || "仓库待定"} · {warehousePackageStatusLabel(label.status)}</small></article>)}
+              {!data.packageLabels.length && <p className="linear-drawer-empty">尚未生成仓库货物标签。</p>}
+            </div></section>
+          </>}
+          {activeTab === "attachments" && <section className="linear-drawer-section"><h3>订单文件 <span>{data.attachments.length} 个</span></h3><div className="linear-drawer-list">
+            {data.attachments.map((attachment) => <article key={attachment.id}><div><strong>{attachment.file_name}</strong><span>{new Date(attachment.created_at).toLocaleString("zh-CN")}</span></div><small>{attachment.content_type}<br/>{(attachment.size_bytes / 1024).toFixed(1)} KB</small><a href={attachment.data_url} download={attachment.file_name}>下载</a></article>)}
+            {!data.attachments.length && <p className="linear-drawer-empty">当前订单暂无文件。</p>}
+          </div></section>}
+          {activeTab === "history" && <>
+            <section className="linear-drawer-section"><h3>订单状态记录 <span>{data.history.length} 条</span></h3><div className="linear-drawer-timeline">
+              {data.history.map((item) => <article key={item.id}><time>{new Date(item.occurred_at).toLocaleString("zh-CN")}</time><div><strong>{item.action_name}</strong><span>{statusLabel(item.from_status)} → {statusLabel(item.to_status)} · {item.actor_name || "系统"}</span>{item.notes && <p>{item.notes}</p>}</div></article>)}
+              {!data.history.length && <p className="linear-drawer-empty">暂无订单状态记录。</p>}
+            </div></section>
+            <section className="linear-drawer-section"><h3>工作流节点记录 <span>{data.macro.length} 条</span></h3><div className="linear-drawer-timeline">
+              {data.macro.map((item) => <article key={item.id}><time>{new Date(item.occurred_at).toLocaleString("zh-CN")}</time><div><strong>{item.step_name}</strong><span>{item.actor_name || item.source}</span></div></article>)}
+              {!data.macro.length && <p className="linear-drawer-empty">暂无工作流节点记录。</p>}
+            </div></section>
+          </>}
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function DrawerTab({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
+  return <button className={active ? "active" : ""} type="button" role="tab" aria-selected={active} onClick={onClick}>{children}</button>;
+}
+
+function DrawerSection({ title, children }: { title: string; children: ReactNode }) {
+  return <section className="linear-drawer-section"><h3>{title}</h3><div className="linear-drawer-grid">{children}</div></section>;
+}
+
+function DrawerFact({ label, value, wide = false }: { label: string; value: string | null | undefined; wide?: boolean }) {
+  return <div className={wide ? "wide" : ""}><span>{label}</span><b>{value || "—"}</b></div>;
 }
 
 function OrderDossierSection({ order }: { order: Order }) {
@@ -761,7 +870,6 @@ function SelectedStepTasks({ data, step, busy, viewingCurrent }: { data: Route.C
 }
 
 function ReadCell({ label, value, className = "" }: { label: string; value: string | null | undefined; className?: string }) { return <div className={`read-cell ${className}`}><span>{label}</span><b>{value || "—"}</b></div>; }
-function SideFact({ label, value }: { label: string; value: string | null | undefined }) { return <div><dt>{label}</dt><dd>{value || "—"}</dd></div>; }
 
 function OrderBusinessForm({
   data,
