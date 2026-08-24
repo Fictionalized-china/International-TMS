@@ -46,6 +46,7 @@ export default function PortalLayout({ loaderData }: Route.ComponentProps) {
           <span className="nav-group nav-title">客户门户</span>
           <PortalLink to="/portal" icon="dashboard" end>我的首页</PortalLink>
           <PortalLink to="/portal/calculator" icon="receipt">运费试算</PortalLink>
+          <PortalLink to="/portal/quotes" icon="clipboard">报价确认</PortalLink>
           <PortalLink to="/portal/orders" icon="clipboard">我的订单</PortalLink>
           <PortalLink to="/portal/tracking" icon="map">运输轨迹</PortalLink>
           <PortalLink to="/portal/billing" icon="billing">账单与文件</PortalLink>

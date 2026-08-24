@@ -58,6 +58,7 @@ export default [
   layout("routes/portal.tsx", [
     route("portal", "routes/portal.index.tsx"),
     route("portal/calculator", "routes/portal.calculator.tsx"),
+    route("portal/quotes", "routes/portal.quotes.tsx"),
     route("portal/orders", "routes/portal.orders.tsx"),
     route("portal/tracking", "routes/portal.tracking.tsx"),
     route("portal/billing", "routes/portal.billing.tsx"),

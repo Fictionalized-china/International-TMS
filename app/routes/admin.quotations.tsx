@@ -1,291 +1,386 @@
 import { env } from "cloudflare:workers";
-import { useState } from "react";
-import { Form, useNavigation } from "react-router";
+import { useMemo, useState } from "react";
+import { Form, Link, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.quotations";
-import { requireSessionUser } from "../lib/auth.server";
-import { nextDocumentNumber } from "../lib/documents.server";
-import { canTransition } from "../lib/workflow";
-import { valueOf } from "../lib/validation";
-import { writeAudit } from "../lib/audit.server";
-import { recordWorkflowEvent } from "../lib/business-workflow.server";
 import { Modal } from "../components/Modal";
+import { requireSessionUser } from "../lib/auth.server";
 import { transportChargeNameOptions } from "../lib/charge-options";
-import { createOrderFromAcceptedQuote } from "../lib/quote-order.server";
+import { nextDocumentNumber } from "../lib/documents.server";
+import {
+  acceptQuotation,
+  voidQuotation,
+  withdrawQuotationAcceptance,
+} from "../lib/quotation-lifecycle.server";
+import { valueOf } from "../lib/validation";
 
-type Quote = { id: string; quote_number: string; customer_id:string; customer_name: string; salesperson_user_id:string|null; salesperson_name:string|null; inquiry_number:string|null; version_number:number; origin_country: string; origin_state:string|null; origin_city: string; pickup_address:string|null; destination_country: string; destination_state:string|null; destination_city: string; destination_warehouse_id:string|null; destination_warehouse_name:string|null; destination_warehouse_note:string|null; estimated_length_cm:number; estimated_width_cm:number; estimated_height_cm:number; customs_clearance_mode:"company"|"customer"; auto_order_number:string|null; transport_mode: string; road_load_type:"ftl"|"ltl"; service_level: string | null; cargo_description: string; pieces: number; gross_weight_kg: number; volume_cbm: number; currency: string; subtotal:number; tax_amount:number; total_amount: number; valid_until: string | null; status: string; notes:string|null; created_at: string; charges: string | null; charge_name:string|null;charge_quantity:number|null;charge_unit_price:number|null;charge_exchange_rate:number|null;surcharge:number|null };
-type Inquiry={id:string;inquiry_number:string;customer_name:string;product_name:string|null;origin_country:string;origin_city:string|null;destination_country:string;destination_city:string|null;cargo_description:string;pieces:number;gross_weight_kg:number;volume_cbm:number;estimated_currency:string;estimated_total:number;status:string;customer_notes:string|null;created_at:string};
-type GeoReference={code:string;name:string;parent_code:string|null};
-type SalespersonOption={id:string;display_name:string;email:string};
-type WarehouseOption={id:string;code:string;name:string;country_code:string|null;city:string|null;address:string|null};
+type Quote = {
+  id: string;
+  quote_number: string;
+  customer_name: string;
+  salesperson_name: string | null;
+  origin_country: string;
+  origin_state: string | null;
+  origin_city: string;
+  pickup_address: string | null;
+  destination_country: string;
+  destination_state: string | null;
+  destination_city: string;
+  destination_warehouse_name: string | null;
+  destination_warehouse_note: string | null;
+  customs_clearance_mode: "company" | "customer";
+  transport_mode: string;
+  road_load_type: "ftl" | "ltl";
+  cargo_description: string;
+  pieces: number;
+  gross_weight_kg: number;
+  volume_cbm: number;
+  estimated_length_cm: number;
+  estimated_width_cm: number;
+  estimated_height_cm: number;
+  total_amount: number;
+  valid_until: string | null;
+  lifecycle_status: "pending" | "accepted" | "withdrawn" | "void";
+  order_id: string | null;
+  order_number: string | null;
+  order_status: string | null;
+  current_step_code: string | null;
+  created_at: string;
+};
+
+type CustomerOption = {
+  id: string;
+  name: string;
+  pickup_address: string | null;
+};
+
+type UserOption = { id: string; display_name: string; email: string };
+type WarehouseOption = { id: string; name: string; country_code: string | null; city: string | null; address: string | null };
+type GeoOption = { code: string; name: string; parent_code: string | null };
 
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "quote.view");
-  const [quotes,inquiries, customers, modes, services, currencies, countries,provinces,cities,users,quoteSalespeople,warehouses] = await Promise.all([
-    env.DB.prepare(`SELECT q.id,q.quote_number,q.customer_id,c.name AS customer_name,fi.inquiry_number,q.version_number,
-      q.origin_country,q.origin_state,q.origin_city,q.pickup_address,q.destination_country,q.destination_state,q.destination_city,
-      q.destination_warehouse_id,w.name destination_warehouse_name,q.destination_warehouse_note,
-      q.estimated_length_cm,q.estimated_width_cm,q.estimated_height_cm,q.customs_clearance_mode,
-      (SELECT o.order_number FROM transport_orders o WHERE o.quotation_id=q.id LIMIT 1) auto_order_number,
-      q.transport_mode,q.road_load_type,q.service_level,q.cargo_description,q.pieces,q.gross_weight_kg,q.volume_cbm,
-      q.currency,q.subtotal,q.tax_amount,q.total_amount,q.valid_until,q.status,q.notes,q.created_at,
-      GROUP_CONCAT(qc.description || ' ' || qc.quantity || ' × ' || qc.unit_price || '，汇率 ' || qc.exchange_rate || '，金额 ' || qc.amount, '；') AS charges,
-      MAX(CASE WHEN qc.charge_code='FREIGHT' THEN qc.description END) charge_name,
-      MAX(CASE WHEN qc.charge_code='FREIGHT' THEN qc.quantity END) charge_quantity,
-      MAX(CASE WHEN qc.charge_code='FREIGHT' THEN qc.unit_price END) charge_unit_price,
-      MAX(CASE WHEN qc.charge_code='FREIGHT' THEN qc.exchange_rate END) charge_exchange_rate,
-      MAX(CASE WHEN qc.charge_code='SURCHARGE' THEN qc.amount END) surcharge
-      FROM quotations q JOIN customers c ON c.id=q.customer_id
-      LEFT JOIN freight_inquiries fi ON fi.id=q.inquiry_id
-      LEFT JOIN warehouses w ON w.id=q.destination_warehouse_id
-      LEFT JOIN quotation_charges qc ON qc.quotation_id=q.id
-      WHERE q.organization_id=? GROUP BY q.id ORDER BY q.created_at DESC LIMIT 200`).bind(current.organizationId).all<Quote>(),
-    env.DB.prepare(`SELECT fi.id,fi.inquiry_number,c.name AS customer_name,p.product_name,fi.origin_country,fi.origin_city,fi.destination_country,fi.destination_city,fi.cargo_description,fi.pieces,fi.gross_weight_kg,fi.volume_cbm,fi.estimated_currency,fi.estimated_total,fi.status,fi.customer_notes,fi.created_at FROM freight_inquiries fi JOIN customers c ON c.id=fi.customer_id LEFT JOIN logistics_products p ON p.id=fi.logistics_product_id WHERE fi.organization_id=? ORDER BY CASE fi.status WHEN 'submitted' THEN 0 WHEN 'quoting' THEN 1 ELSE 2 END,fi.created_at DESC LIMIT 200`).bind(current.organizationId).all<Inquiry>(),
-    env.DB.prepare("SELECT id, code, name FROM customers WHERE organization_id = ? AND status = 'active' ORDER BY name").bind(current.organizationId).all<{ id: string; code: string; name: string }>(),
-    reference(current.organizationId, "transport_mode"), reference(current.organizationId, "service_level"), reference(current.organizationId, "currency"), reference(current.organizationId, "country"),
-    geoReference(current.organizationId,"province"),geoReference(current.organizationId,"city"),
-    env.DB.prepare("SELECT u.id,u.display_name,u.email FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=? AND m.status='active' AND u.status='active' ORDER BY u.display_name,u.email").bind(current.organizationId).all<SalespersonOption>(),
-    env.DB.prepare("SELECT q.id quote_id,q.salesperson_user_id,u.display_name salesperson_name FROM quotations q LEFT JOIN users u ON u.id=q.salesperson_user_id WHERE q.organization_id=?").bind(current.organizationId).all<{quote_id:string;salesperson_user_id:string|null;salesperson_name:string|null}>(),
-    env.DB.prepare("SELECT id,code,name,country_code,city,address FROM warehouses WHERE organization_id=? AND warehouse_role='overseas_destination' AND status='active' ORDER BY name").bind(current.organizationId).all<WarehouseOption>(),
+  const url = new URL(request.url);
+  const keyword = (url.searchParams.get("q") || "").trim();
+  const lifecycle = (url.searchParams.get("status") || "").trim();
+  const where = ["q.organization_id=?"];
+  const binds: unknown[] = [current.organizationId];
+  if (keyword) {
+    where.push("(q.quote_number LIKE ? OR c.name LIKE ? OR q.cargo_description LIKE ? OR o.order_number LIKE ?)");
+    const like = `%${keyword}%`;
+    binds.push(like, like, like, like);
+  }
+  if (["pending", "accepted", "withdrawn", "void"].includes(lifecycle)) {
+    where.push("q.lifecycle_status=?");
+    binds.push(lifecycle);
+  }
+  const [quotes, customers, users, warehouses, countries, provinces, cities] = await Promise.all([
+    env.DB.prepare(
+      `SELECT q.id,q.quote_number,c.name customer_name,u.display_name salesperson_name,
+        q.origin_country,q.origin_state,q.origin_city,q.pickup_address,
+        q.destination_country,q.destination_state,q.destination_city,
+        w.name destination_warehouse_name,q.destination_warehouse_note,q.customs_clearance_mode,
+        q.transport_mode,q.road_load_type,q.cargo_description,q.pieces,q.gross_weight_kg,q.volume_cbm,
+        q.estimated_length_cm,q.estimated_width_cm,q.estimated_height_cm,q.total_amount,q.valid_until,
+        q.lifecycle_status,o.id order_id,o.order_number,o.status order_status,o.current_step_code,q.created_at
+       FROM quotations q
+       JOIN customers c ON c.id=q.customer_id
+       LEFT JOIN users u ON u.id=q.salesperson_user_id
+       LEFT JOIN warehouses w ON w.id=q.destination_warehouse_id
+       LEFT JOIN transport_orders o ON o.organization_id=q.organization_id AND o.quotation_id=q.id
+       WHERE ${where.join(" AND ")}
+       ORDER BY q.created_at DESC LIMIT 200`,
+    ).bind(...binds).all<Quote>(),
+    env.DB.prepare(
+      `SELECT c.id,c.name,
+        (SELECT a.address_line1 FROM customer_addresses a WHERE a.customer_id=c.id ORDER BY a.is_default DESC,a.created_at LIMIT 1) pickup_address
+       FROM customers c WHERE c.organization_id=? AND c.status='active' ORDER BY c.name`,
+    ).bind(current.organizationId).all<CustomerOption>(),
+    env.DB.prepare(
+      `SELECT u.id,u.display_name,u.email FROM memberships m JOIN users u ON u.id=m.user_id
+       WHERE m.organization_id=? AND m.status='active' AND u.status='active' ORDER BY u.display_name,u.email`,
+    ).bind(current.organizationId).all<UserOption>(),
+    env.DB.prepare(
+      `SELECT id,name,country_code,city,address FROM warehouses
+       WHERE organization_id=? AND warehouse_role='overseas_destination' AND status='active' ORDER BY name`,
+    ).bind(current.organizationId).all<WarehouseOption>(),
+    geoOptions(current.organizationId, "country"),
+    geoOptions(current.organizationId, "province"),
+    geoOptions(current.organizationId, "city"),
   ]);
-  const salespersonByQuote=new Map(quoteSalespeople.results.map(row=>[row.quote_id,row]));
-  const quoteRows=quotes.results.map(quote=>({...quote,salesperson_user_id:salespersonByQuote.get(quote.id)?.salesperson_user_id??null,salesperson_name:salespersonByQuote.get(quote.id)?.salesperson_name??null}));
-  return { current, quotes: quoteRows,inquiries:inquiries.results, customers: customers.results, modes: modes.results, services: services.results, currencies: currencies.results, countries: countries.results,provinces:provinces.results,cities:cities.results,users:users.results,warehouses:warehouses.results };
+  return {
+    current,
+    quotes: quotes.results,
+    customers: customers.results,
+    users: users.results,
+    warehouses: warehouses.results,
+    countries: countries.results,
+    provinces: provinces.results,
+    cities: cities.results,
+    filters: { keyword, lifecycle },
+  };
 }
 
 export async function action({ request }: Route.ActionArgs) {
   const current = await requireSessionUser(request, "quote.manage");
-  const form = await request.formData(), intent = valueOf(form, "intent"), now = new Date().toISOString();
-  if(intent==="quoteInquiry"){
-    const inquiryId=valueOf(form,"inquiryId"),salespersonUserId=valueOf(form,"salespersonUserId"),roadLoadType=valueOf(form,"roadLoadType"),originState=valueOf(form,"originState"),originCity=valueOf(form,"originCity"),pickupAddress=valueOf(form,"pickupAddress"),destinationState=valueOf(form,"destinationState"),destinationCity=valueOf(form,"destinationCity"),destinationWarehouseId=valueOf(form,"destinationWarehouseId"),destinationWarehouseNote=valueOf(form,"destinationWarehouseNote"),customsClearanceMode=valueOf(form,"customsClearanceMode"),validUntil=valueOf(form,"validUntil"),notes=valueOf(form,"notes"),chargeName=valueOf(form,"chargeName")||"汽运运费",quantity=Number(valueOf(form,"quantity")||1),unitPrice=Number(valueOf(form,"unitPrice")||0),exchangeRate=1,surcharge=Number(valueOf(form,"surcharge")||0),estimatedLength=Number(valueOf(form,"estimatedLength")),estimatedWidth=Number(valueOf(form,"estimatedWidth")),estimatedHeight=Number(valueOf(form,"estimatedHeight"));
-    const inquiry=await env.DB.prepare(`SELECT fi.*,p.transport_mode,p.product_name FROM freight_inquiries fi LEFT JOIN logistics_products p ON p.id=fi.logistics_product_id WHERE fi.id=? AND fi.organization_id=? AND fi.status IN ('submitted','quoting','quoted')`).bind(inquiryId,current.organizationId).first<Record<string,string|number|null>>();
-    const salesperson=await findActiveSalesperson(current.organizationId,salespersonUserId);
-    const currency=String(inquiry?.estimated_currency||"CNY"),freight=quantity*unitPrice;
-    const destinationWarehouse=await validDestinationWarehouse(current.organizationId,destinationWarehouseId);
-    if(!inquiry||!salesperson||!['ftl','ltl'].includes(roadLoadType)||!originState||!originCity||!pickupAddress||!destinationState||!destinationCity||!destinationWarehouse||!["company","customer"].includes(customsClearanceMode)||!chargeName||!Number.isFinite(quantity)||quantity<=0||[unitPrice,surcharge].some(v=>!Number.isFinite(v)||v<0)||[estimatedLength,estimatedWidth,estimatedHeight].some(v=>!Number.isFinite(v)||v<=0))return{formError:"请选择有效业务员，并填写提货地址、目的仓、清关责任和大于 0 的预计长宽高"};
-    const versionRow=await env.DB.prepare("SELECT COALESCE(MAX(version_number),0)+1 AS version FROM quotations WHERE inquiry_id=?").bind(inquiryId).first<{version:number}>(),version=Number(versionRow?.version??1),subtotal=freight+surcharge,tax=0,total=subtotal,id=crypto.randomUUID(),number=await nextDocumentNumber(current.organizationId,"quote");
-    await env.DB.batch([
-      env.DB.prepare("UPDATE quotations SET status='cancelled',updated_at=? WHERE inquiry_id=? AND road_load_type=? AND status='sent'").bind(now,inquiryId,roadLoadType),
-      env.DB.prepare(`INSERT INTO quotations(id,organization_id,quote_number,customer_id,inquiry_id,logistics_product_id,version_number,origin_country,origin_state,origin_city,pickup_address,destination_country,destination_state,destination_city,destination_warehouse_id,destination_warehouse_note,estimated_length_cm,estimated_width_cm,estimated_height_cm,customs_clearance_mode,transport_mode,road_load_type,cargo_description,pieces,gross_weight_kg,volume_cbm,currency,subtotal,tax_amount,total_amount,valid_until,status,notes,salesperson_user_id,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'sent',?,?,?,?,?)`).bind(id,current.organizationId,number,String(inquiry.customer_id),inquiryId,inquiry.logistics_product_id,version,String(inquiry.origin_country),originState,originCity,pickupAddress,String(inquiry.destination_country),destinationState,destinationCity,destinationWarehouse.id,destinationWarehouseNote||null,estimatedLength,estimatedWidth,estimatedHeight,customsClearanceMode,String(inquiry.transport_mode??"ROAD"),roadLoadType,String(inquiry.cargo_description),Number(inquiry.pieces),Number(inquiry.gross_weight_kg),Number(inquiry.volume_cbm),currency,subtotal,tax,total,validUntil||null,notes||null,salesperson.id,current.userId,now,now),
-      env.DB.prepare("INSERT INTO quotation_charges(id,quotation_id,charge_code,description,quantity,unit_price,amount,exchange_rate,sort_order,created_at) VALUES(?,?,'FREIGHT',?,?,?,?,?,10,?)").bind(crypto.randomUUID(),id,chargeName,quantity,unitPrice,freight,exchangeRate,now),
-      env.DB.prepare("UPDATE freight_inquiries SET status='quoted',updated_at=? WHERE id=? AND organization_id=?").bind(now,inquiryId,current.organizationId),
-      env.DB.prepare("INSERT INTO portal_notifications(id,organization_id,customer_id,user_id,type,title,message,link,is_read,created_at) VALUES(?,?,?,?,?,?,?,?,0,?)").bind(crypto.randomUUID(),current.organizationId,String(inquiry.customer_id),null,"quote","新报价待确认",`报价 ${number} 已发布，请确认接受或拒绝。`,"/portal/orders",now),
-    ]);
-    if(surcharge>0)await env.DB.prepare("INSERT INTO quotation_charges(id,quotation_id,charge_code,description,quantity,unit_price,amount,exchange_rate,sort_order,created_at) VALUES(?,?,'SURCHARGE','附加费',1,?,?,?,20,?)").bind(crypto.randomUUID(),id,surcharge,surcharge,exchangeRate,now).run();
-    await recordWorkflowEvent({organizationId:current.organizationId,event:"quote.created",customerId:String(inquiry.customer_id),quotationId:id,actorUserId:current.userId,source:"admin",metadata:{number,total,inquiryId,version}});
-    await writeAudit({request,action:"inquiry.quote.create",resourceType:"quotation",resourceId:id,organizationId:current.organizationId,actorUserId:current.userId,metadata:{number,inquiryId,version,total,salespersonUserId:salesperson.id}});
-    return{success:`正式报价 ${number}（V${version}）已发布到客户门户，等待客户确认`};
-  }
-  if(intent==="edit"){
-    const id=valueOf(form,"id"),customerId=valueOf(form,"customerId"),salespersonUserId=valueOf(form,"salespersonUserId"),roadLoadType=valueOf(form,"roadLoadType"),originCountry=valueOf(form,"originCountry"),originState=valueOf(form,"originState"),originCity=valueOf(form,"originCity"),pickupAddress=valueOf(form,"pickupAddress"),destinationCountry=valueOf(form,"destinationCountry"),destinationState=valueOf(form,"destinationState"),destinationCity=valueOf(form,"destinationCity"),destinationWarehouseId=valueOf(form,"destinationWarehouseId"),destinationWarehouseNote=valueOf(form,"destinationWarehouseNote"),customsClearanceMode=valueOf(form,"customsClearanceMode"),mode=valueOf(form,"mode"),cargo=valueOf(form,"cargo"),validUntil=valueOf(form,"validUntil"),notes=valueOf(form,"notes"),chargeName=valueOf(form,"chargeName"),pieces=Number(valueOf(form,"pieces")),weight=Number(valueOf(form,"weight")),volume=Number(valueOf(form,"volume")),estimatedLength=Number(valueOf(form,"estimatedLength")),estimatedWidth=Number(valueOf(form,"estimatedWidth")),estimatedHeight=Number(valueOf(form,"estimatedHeight")),quantity=Number(valueOf(form,"quantity")),unitPrice=Number(valueOf(form,"unitPrice")),exchangeRate=1,surcharge=Number(valueOf(form,"surcharge")||0);
-    const existing=await env.DB.prepare("SELECT q.status,q.currency,(SELECT o.order_number FROM transport_orders o WHERE o.quotation_id=q.id LIMIT 1) order_number FROM quotations q WHERE q.id=? AND q.organization_id=?").bind(id,current.organizationId).first<{status:string;currency:string;order_number:string|null}>();
-    const salesperson=await findActiveSalesperson(current.organizationId,salespersonUserId);
-    if(!existing)return{formError:"报价不存在"};
-    if(existing.status==="cancelled")return{formError:"已作废报价只能查看，不能编辑"};
-    if(existing.order_number)return{formError:`报价已生成订单 ${existing.order_number}，为保证订单商业数据不被改写，不能再编辑该报价`};
-    const destinationWarehouse=await validDestinationWarehouse(current.organizationId,destinationWarehouseId);
-    if(!salesperson||!customerId||!['ftl','ltl'].includes(roadLoadType)||!originCountry||!originState||!originCity||!pickupAddress||!destinationCountry||!destinationState||!destinationCity||!destinationWarehouse||!["company","customer"].includes(customsClearanceMode)||!mode||!cargo||!chargeName||!Number.isInteger(pieces)||pieces<1||!Number.isFinite(quantity)||quantity<=0||[weight,volume,unitPrice,surcharge].some(value=>!Number.isFinite(value)||value<0)||[estimatedLength,estimatedWidth,estimatedHeight].some(value=>!Number.isFinite(value)||value<=0))return{formError:"请选择有效业务员，并填写提货地址、目的仓、清关责任和大于 0 的预计长宽高"};
-    const currency=existing.currency||"CNY",freight=quantity*unitPrice,subtotal=freight+surcharge,tax=0,total=subtotal,newStatus="draft";
-    const statements=[
-      env.DB.prepare("UPDATE quotations SET customer_id=?,salesperson_user_id=?,origin_country=?,origin_state=?,origin_city=?,pickup_address=?,destination_country=?,destination_state=?,destination_city=?,destination_warehouse_id=?,destination_warehouse_note=?,estimated_length_cm=?,estimated_width_cm=?,estimated_height_cm=?,customs_clearance_mode=?,transport_mode=?,road_load_type=?,cargo_description=?,pieces=?,gross_weight_kg=?,volume_cbm=?,currency=?,subtotal=?,tax_amount=?,total_amount=?,valid_until=?,notes=?,status=?,accepted_at=NULL,updated_at=? WHERE id=? AND organization_id=?").bind(customerId,salesperson.id,originCountry,originState,originCity,pickupAddress,destinationCountry,destinationState,destinationCity,destinationWarehouse.id,destinationWarehouseNote||null,estimatedLength,estimatedWidth,estimatedHeight,customsClearanceMode,mode,roadLoadType,cargo,pieces,weight,volume,currency,subtotal,tax,total,validUntil||null,notes||null,newStatus,now,id,current.organizationId),
-      env.DB.prepare("UPDATE quotation_charges SET description=?,quantity=?,unit_price=?,amount=?,exchange_rate=? WHERE id=(SELECT id FROM quotation_charges WHERE quotation_id=? AND charge_code='FREIGHT' ORDER BY sort_order LIMIT 1)").bind(chargeName,quantity,unitPrice,freight,exchangeRate,id),
-      env.DB.prepare("DELETE FROM quotation_charges WHERE quotation_id=? AND charge_code='SURCHARGE'").bind(id),
-    ];
-    if(surcharge>0)statements.push(env.DB.prepare("INSERT INTO quotation_charges(id,quotation_id,charge_code,description,quantity,unit_price,amount,exchange_rate,sort_order,created_at) VALUES(?,?,'SURCHARGE','附加费',1,?,?,?,20,?)").bind(crypto.randomUUID(),id,surcharge,surcharge,exchangeRate,now));
-    await env.DB.batch(statements);
-    await writeAudit({request,action:"quote.edit",resourceType:"quotation",resourceId:id,organizationId:current.organizationId,actorUserId:current.userId,metadata:{previousStatus:existing.status,newStatus,total,salespersonUserId:salesperson.id}});
-    return{success:existing.status==="draft"?"报价信息已更新":"报价信息已更新；因内容发生变化，状态已恢复为报价草稿"};
-  }
-  if (intent === "status") {
-    const id = valueOf(form, "id"), status = valueOf(form, "status");
-    const quote = await env.DB.prepare("SELECT status,customer_id,quote_number FROM quotations WHERE id = ? AND organization_id = ?").bind(id, current.organizationId).first<{ status: string; customer_id:string; quote_number:string }>();
-    const isOfflineAcceptance=status==="accepted"&&["draft","sent"].includes(quote?.status||"");
-    if (!quote || !["sent","accepted","cancelled"].includes(status) || (!isOfflineAcceptance&&!canTransition("quote", quote.status, status))) return { formError: "报价状态流转无效" };
-    const statements=[env.DB.prepare("UPDATE quotations SET status = ?, accepted_at = CASE WHEN ? = 'accepted' THEN ? ELSE accepted_at END, updated_at = ? WHERE id = ? AND organization_id = ?").bind(status,status,now,now,id,current.organizationId)];
-    if(status==="sent")statements.push(env.DB.prepare("INSERT INTO portal_notifications(id,organization_id,customer_id,user_id,type,title,message,link,is_read,created_at) VALUES(?,?,?,?,?,?,?,?,0,?)").bind(crypto.randomUUID(),current.organizationId,quote.customer_id,null,"quote","新报价待确认",`报价 ${quote.quote_number} 已发布，请确认接受或拒绝。`,"/portal/orders",now));
-    let createdOrder: Awaited<ReturnType<typeof createOrderFromAcceptedQuote>> | null = null;
-    await env.DB.batch(statements);
-    try {
-      if(status==="accepted"){
-        createdOrder=await createOrderFromAcceptedQuote({organizationId:current.organizationId,quotationId:id,actorUserId:current.userId,source:"admin",request});
-        await recordWorkflowEvent({organizationId:current.organizationId,event:"quote.accepted",customerId:quote.customer_id,quotationId:id,actorUserId:current.userId,source:"admin",metadata:{confirmationMethod:"offline",orderId:createdOrder.id}});
+  const form = await request.formData();
+  const intent = valueOf(form, "intent");
+  try {
+    if (intent === "create") {
+      const customerId = valueOf(form, "customerId");
+      const salespersonId = valueOf(form, "salespersonId");
+      const transportMode = valueOf(form, "transportMode");
+      const roadLoadType = valueOf(form, "roadLoadType");
+      const pickupAddress = valueOf(form, "pickupAddress");
+      const originCountry = valueOf(form, "originCountry");
+      const originState = valueOf(form, "originState");
+      const originCity = valueOf(form, "originCity");
+      const destinationCountry = valueOf(form, "destinationCountry");
+      const destinationState = valueOf(form, "destinationState");
+      const destinationCity = valueOf(form, "destinationCity");
+      const destinationWarehouseId = valueOf(form, "destinationWarehouseId");
+      const destinationWarehouseNote = valueOf(form, "destinationWarehouseNote");
+      const customsClearanceMode = valueOf(form, "customsClearanceMode");
+      const cargoDescription = valueOf(form, "cargoDescription");
+      const pieces = positiveInteger(valueOf(form, "pieces"), "预计件数");
+      const weight = positiveNumber(valueOf(form, "weight"), "预计重量");
+      const length = positiveNumber(valueOf(form, "length"), "预计长度");
+      const width = positiveNumber(valueOf(form, "width"), "预计宽度");
+      const height = positiveNumber(valueOf(form, "height"), "预计高度");
+      const volume = positiveNumber(valueOf(form, "volume"), "预计体积");
+      const validUntil = valueOf(form, "validUntil");
+      const notes = valueOf(form, "notes");
+      if (!customerId || !salespersonId || transportMode !== "ROAD" || !["ftl", "ltl"].includes(roadLoadType)) {
+        throw new Error("请选择客户、业务员、汽运和整车/拼车类型");
       }
-    } catch (error) {
-      if(status==="accepted")await env.DB.prepare("UPDATE quotations SET status=?,accepted_at=NULL,updated_at=? WHERE id=? AND organization_id=? AND NOT EXISTS(SELECT 1 FROM transport_orders WHERE organization_id=? AND quotation_id=?)").bind(quote.status,now,id,current.organizationId,current.organizationId,id).run();
-      return { formError: `报价确认失败，系统已恢复原状态：${error instanceof Error ? error.message : String(error)}` };
+      if (![pickupAddress, originCountry, originState, originCity, destinationCountry, destinationState, destinationCity, destinationWarehouseId, cargoDescription].every(Boolean)) {
+        throw new Error("请完整填写提货地址、起运地、目的地、目的仓和货物描述");
+      }
+      if (!["company", "customer"].includes(customsClearanceMode)) throw new Error("请选择清关办理方式");
+      const [customer, salesperson, warehouse] = await Promise.all([
+        env.DB.prepare("SELECT id FROM customers WHERE id=? AND organization_id=? AND status='active'").bind(customerId,current.organizationId).first(),
+        env.DB.prepare("SELECT u.id FROM users u JOIN memberships m ON m.user_id=u.id WHERE u.id=? AND m.organization_id=? AND u.status='active' AND m.status='active'").bind(salespersonId,current.organizationId).first(),
+        env.DB.prepare("SELECT id FROM warehouses WHERE id=? AND organization_id=? AND warehouse_role='overseas_destination' AND status='active'").bind(destinationWarehouseId,current.organizationId).first(),
+      ]);
+      if (!customer || !salesperson || !warehouse) throw new Error("客户、业务员或目的仓已停用");
+      const chargeNames = form.getAll("chargeName").map(String);
+      const quantities = form.getAll("chargeQuantity").map(Number);
+      const unitPrices = form.getAll("chargeUnitPrice").map(Number);
+      const chargeNotes = form.getAll("chargeNotes").map(String);
+      if (!chargeNames.length || chargeNames.some((name) => !name)) throw new Error("至少填写一条应收费用");
+      const charges = chargeNames.map((name, index) => {
+        const quantity = quantities[index];
+        const unitPrice = unitPrices[index];
+        if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(unitPrice) || unitPrice < 0) {
+          throw new Error(`第 ${index + 1} 条费用的数量或单价无效`);
+        }
+        return { name, quantity, unitPrice, amount: quantity * unitPrice, notes: chargeNotes[index] || null };
+      });
+      const total = charges.reduce((sum, item) => sum + item.amount, 0);
+      const now = new Date().toISOString();
+      const id = crypto.randomUUID();
+      const number = await nextDocumentNumber(current.organizationId, "quote");
+      await env.DB.batch([
+        env.DB.prepare(
+          `INSERT INTO quotations(
+            id,organization_id,quote_number,customer_id,origin_country,origin_state,origin_city,pickup_address,
+            destination_country,destination_state,destination_city,destination_warehouse_id,destination_warehouse_note,
+            estimated_length_cm,estimated_width_cm,estimated_height_cm,customs_clearance_mode,
+            transport_mode,road_load_type,cargo_description,pieces,gross_weight_kg,volume_cbm,currency,
+            subtotal,tax_amount,total_amount,valid_until,status,lifecycle_status,notes,salesperson_user_id,
+            created_by_user_id,created_at,updated_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'CNY',?,0,?,?, 'sent','pending',?,?,?,?,?)`,
+        ).bind(
+          id,current.organizationId,number,customerId,originCountry,originState,originCity,pickupAddress,
+          destinationCountry,destinationState,destinationCity,destinationWarehouseId,destinationWarehouseNote || null,
+          length,width,height,customsClearanceMode,transportMode,roadLoadType,cargoDescription,pieces,weight,volume,
+          total,total,validUntil || null,notes || null,salespersonId,current.userId,now,now,
+        ),
+        ...charges.map((charge, index) => env.DB.prepare(
+          `INSERT INTO quotation_charges(
+            id,quotation_id,charge_code,description,quantity,unit_price,amount,exchange_rate,sort_order,created_at
+           ) VALUES(?,?,?,?,?,?,?,1,?,?)`,
+        ).bind(crypto.randomUUID(),id,`RECEIVABLE_${index + 1}`,charge.name,charge.quantity,charge.unitPrice,charge.amount,(index + 1) * 10,now)),
+        env.DB.prepare(
+          `INSERT INTO portal_notifications(
+            id,organization_id,customer_id,user_id,type,title,message,link,is_read,created_at
+           ) VALUES(?,?,?,?,?,?,?,?,0,?)`,
+        ).bind(crypto.randomUUID(),current.organizationId,customerId,null,"quote","新报价待确认",`报价 ${number} 等待确认。`,`/portal/quotes`,now),
+      ]);
+      return { success: `报价 ${number} 已保存并进入待客户确认` };
     }
-    await writeAudit({ request, action: "quote.status", resourceType: "quotation", resourceId: id, organizationId: current.organizationId, actorUserId: current.userId, metadata: { from: quote.status, to: status } });
-    return { success: status==="sent"?"报价已发布到客户门户，等待客户确认":status==="accepted"?`价格已确认，系统已${createdOrder?.created?"自动创建":"关联已有"}订单 ${createdOrder?.orderNumber}`:"报价已作废" };
+    const quotationId = valueOf(form, "id");
+    if (!quotationId) throw new Error("缺少报价编号");
+    if (intent === "accept") {
+      const result = await acceptQuotation({ organizationId: current.organizationId, quotationId, actorUserId: current.userId, source: "admin", request });
+      return { success: `客户报价已确认，${result.created ? "自动创建" : "恢复"}订单 ${result.orderNumber}` };
+    }
+    if (intent === "withdraw") {
+      const result = await withdrawQuotationAcceptance({ organizationId: current.organizationId, quotationId, actorUserId: current.userId, source: "admin" });
+      return { success: `报价接受已撤回，订单 ${result.orderNumber || ""} 已保留` };
+    }
+    if (intent === "void") {
+      await voidQuotation({ organizationId: current.organizationId, quotationId, actorUserId: current.userId, source: "admin" });
+      return { success: "报价已作废" };
+    }
+    throw new Error("未知操作");
+  } catch (error) {
+    return { formError: error instanceof Error ? error.message : String(error) };
   }
-  const customerId = valueOf(form, "customerId"), salespersonUserId=valueOf(form,"salespersonUserId"), roadLoadType=valueOf(form,"roadLoadType"), originCountry = valueOf(form, "originCountry"), originState=valueOf(form,"originState"), originCity = valueOf(form, "originCity"), pickupAddress=valueOf(form,"pickupAddress"), destinationCountry = valueOf(form, "destinationCountry"), destinationState=valueOf(form,"destinationState"), destinationCity = valueOf(form, "destinationCity"), destinationWarehouseId=valueOf(form,"destinationWarehouseId"), destinationWarehouseNote=valueOf(form,"destinationWarehouseNote"), customsClearanceMode=valueOf(form,"customsClearanceMode"), mode = valueOf(form, "mode"), service = valueOf(form, "service"), cargo = valueOf(form, "cargo"), currency = "CNY", validUntil = valueOf(form, "validUntil"), notes = valueOf(form, "notes"), chargeName = valueOf(form, "chargeName") || "汽运运费";
-  const estimatedLength=Number(valueOf(form,"estimatedLength")),estimatedWidth=Number(valueOf(form,"estimatedWidth")),estimatedHeight=Number(valueOf(form,"estimatedHeight"));
-  const pieces = Number(valueOf(form, "pieces") || 1), weight = Number(valueOf(form, "weight") || 0), volume = Number(valueOf(form, "volume") || 0), quantity = Number(valueOf(form, "quantity") || 1), unitPrice = Number(valueOf(form, "unitPrice") || 0), exchangeRate = 1, freight = quantity * unitPrice, surcharge = Number(valueOf(form, "surcharge") || 0);
-  if (!(await env.DB.prepare("SELECT 1 FROM customers WHERE id = ? AND organization_id = ? AND status = 'active'").bind(customerId, current.organizationId).first())) return { formError: "请选择有效客户" };
-  const salesperson=await findActiveSalesperson(current.organizationId,salespersonUserId);
-  if(!salesperson)return{formError:"业务员为必填项，请从启用用户中选择"};
-  const destinationWarehouse=await validDestinationWarehouse(current.organizationId,destinationWarehouseId);
-  if (!['ftl','ltl'].includes(roadLoadType) || !originCountry || !originState || !originCity || !pickupAddress || !destinationCountry || !destinationState || !destinationCity || !destinationWarehouse || !["company","customer"].includes(customsClearanceMode) || !cargo || !mode || !chargeName || !Number.isInteger(pieces) || pieces < 1 || !Number.isFinite(quantity) || quantity <= 0 || [weight,volume,unitPrice,surcharge].some(value => !Number.isFinite(value) || value < 0) || [estimatedLength,estimatedWidth,estimatedHeight].some(value => !Number.isFinite(value) || value <= 0)) return { formError: "请填写完整提货地址、目的仓、清关责任、货物和大于 0 的预计长宽高" };
-  const subtotal = freight + surcharge, tax = 0, total = subtotal, id = crypto.randomUUID(), number = await nextDocumentNumber(current.organizationId, "quote");
-  const statements = [
-    env.DB.prepare(`INSERT INTO quotations (id,organization_id,quote_number,customer_id,salesperson_user_id,origin_country,origin_state,origin_city,pickup_address,destination_country,destination_state,destination_city,destination_warehouse_id,destination_warehouse_note,estimated_length_cm,estimated_width_cm,estimated_height_cm,customs_clearance_mode,transport_mode,road_load_type,service_level,cargo_description,pieces,gross_weight_kg,volume_cbm,currency,subtotal,tax_amount,total_amount,valid_until,notes,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id,current.organizationId,number,customerId,salesperson.id,originCountry,originState,originCity,pickupAddress,destinationCountry,destinationState,destinationCity,destinationWarehouse.id,destinationWarehouseNote||null,estimatedLength,estimatedWidth,estimatedHeight,customsClearanceMode,mode,roadLoadType,service||null,cargo,pieces,weight,volume,currency,subtotal,tax,total,validUntil||null,notes||null,current.userId,now,now),
-    env.DB.prepare("INSERT INTO quotation_charges (id, quotation_id, charge_code, description, quantity, unit_price, amount, exchange_rate, sort_order, created_at) VALUES (?, ?, 'FREIGHT', ?, ?, ?, ?, ?, 10, ?)").bind(crypto.randomUUID(), id, chargeName, quantity, unitPrice, freight, exchangeRate, now),
-  ];
-  if (surcharge > 0) statements.push(env.DB.prepare("INSERT INTO quotation_charges (id, quotation_id, charge_code, description, quantity, unit_price, amount, exchange_rate, sort_order, created_at) VALUES (?, ?, 'SURCHARGE', '附加费', 1, ?, ?, ?, 20, ?)").bind(crypto.randomUUID(), id, surcharge, surcharge, exchangeRate, now));
-  await env.DB.batch(statements);
-  await recordWorkflowEvent({ organizationId: current.organizationId, event: "customer.ready", customerId, quotationId: id, actorUserId: current.userId, source: "admin" });
-  await recordWorkflowEvent({ organizationId: current.organizationId, event: "quote.created", customerId, quotationId: id, actorUserId: current.userId, source: "admin", metadata: { number, total } });
-  await writeAudit({ request, action: "quote.create", resourceType: "quotation", resourceId: id, organizationId: current.organizationId, actorUserId: current.userId, metadata: { number, total, salespersonUserId:salesperson.id } });
-  return { success: `报价 ${number} 已创建` };
 }
 
-function reference(organizationId: string, category: string) { return env.DB.prepare("SELECT code, name FROM reference_data WHERE organization_id = ? AND category = ? AND status = 'active' ORDER BY sort_order, code").bind(organizationId, category).all<{ code: string; name: string }>(); }
-function geoReference(organizationId:string,category:"province"|"city"){return env.DB.prepare("SELECT code,name,parent_code FROM reference_data WHERE organization_id=? AND category=? AND status='active' ORDER BY sort_order,code").bind(organizationId,category).all<GeoReference>();}
-function findActiveSalesperson(organizationId:string,userId:string){return env.DB.prepare("SELECT u.id,u.display_name FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=? AND m.user_id=? AND m.status='active' AND u.status='active'").bind(organizationId,userId).first<{id:string;display_name:string}>();}
-function validDestinationWarehouse(organizationId:string,warehouseId:string){return env.DB.prepare("SELECT id FROM warehouses WHERE id=? AND organization_id=? AND warehouse_role='overseas_destination' AND status='active'").bind(warehouseId,organizationId).first<{id:string}>();}
-export function meta() { return [{ title: "询价报价 | International TMS" }]; }
-const statusLabels: Record<string, string> = { draft: "报价草稿", sent: "待客户确认", accepted: "客户已接受", rejected: "客户已拒绝", expired: "已过期", cancelled: "已作废" };
-const quotationTransportModes: [string,string][] = [
-  ["ROAD","汽运"],
-  ["RAIL","铁运"],
-  ["AIR","空运"],
-];
-
-export default function Quotations({ loaderData, actionData }: Route.ComponentProps) {
-  const busy = useNavigation().state !== "idle", manage = loaderData.current.permissions.includes("quote.manage");
-  return <>
-    <header className="page-header"><div><p className="eyebrow">QUOTATION</p><h1>询价与报价</h1><p>按客户、路线、货量和服务生成标准运输报价。</p></div><span className="status-pill">{loaderData.quotes.length} 份报价</span></header>
-    {(actionData?.success || actionData?.formError) && <div className={`alert ${actionData.formError ? "error" : "success"}`}>{actionData.formError ?? actionData.success}</div>}
-    {loaderData.inquiries.length>0&&<section className="panel"><div className="panel-header"><div><h2>客户询价</h2><p>门户试算后提交的正式询价。</p></div><span className="status-pill">{loaderData.inquiries.filter(i=>i.status==="submitted").length} 待处理</span></div><div className="table-wrap"><table><thead><tr><th>询价号/客户</th><th>产品与线路</th><th>货物</th><th>试算价格</th><th>状态</th><th>操作</th></tr></thead><tbody>{loaderData.inquiries.map(i=><tr key={i.id}><td><strong>{i.inquiry_number}</strong><small>{i.customer_name}</small></td><td><strong>{i.product_name||"产品已下架"}</strong><small>{i.origin_country} {i.origin_city||""} → {i.destination_country} {i.destination_city||""}</small></td><td><strong>{i.cargo_description}</strong><small>{i.pieces} 件 · {i.gross_weight_kg} KG · {i.volume_cbm} CBM</small></td><td><strong>{i.estimated_currency} {i.estimated_total.toLocaleString()}</strong><small>{i.customer_notes||"无备注"}</small></td><td><span className={`status-pill ${i.status==="cancelled"?"off":""}`}>{i.status==="submitted"?"待报价":i.status==="quoted"?"已报价":i.status==="quoting"?"处理中":"已取消"}</span></td><td>{manage&&i.status!=="cancelled"&&<Modal title={`为 ${i.inquiry_number} 生成正式报价`} triggerLabel={i.status==="quoted"?"新版本":"生成报价"} triggerClassName="text-button" closeSignal={actionData?.success} size="wide"><InquiryQuoteForm inquiry={i} loaderData={loaderData} busy={busy}/></Modal>}</td></tr>)}</tbody></table></div></section>}
-    {manage&&<details className="panel expandable quotation-create-panel" open={loaderData.quotes.length===0}><summary>创建报价</summary><QuotationCreateForm loaderData={loaderData} busy={busy}/></details>}
-    <section className="panel"><div className="table-wrap"><table><thead><tr><th>报价号/客户</th><th>业务员</th><th>路线</th><th>货物</th><th>费用</th><th>有效期</th><th>状态</th><th>操作</th></tr></thead><tbody>{loaderData.quotes.map(q=><tr key={q.id}><td><strong>{q.quote_number}{q.inquiry_number?` · V${q.version_number}`:""}</strong><small>{q.customer_name}{q.inquiry_number?` · ${q.inquiry_number}`:""}</small></td><td><strong>{q.salesperson_name||"未指定"}</strong></td><td><strong>{q.origin_country} {q.origin_city} → {q.destination_country} {q.destination_city}</strong><small>{q.transport_mode} · {q.service_level||"标准"}</small></td><td><strong>{q.cargo_description}</strong><small>{q.pieces} 件 · {q.gross_weight_kg} KG · {q.volume_cbm} CBM</small></td><td><strong>{q.currency} {q.total_amount.toLocaleString()}</strong><small>{q.charges||"—"}</small></td><td>{q.valid_until||"—"}</td><td><span className={`status-pill ${q.status==="cancelled"?"off":""}`}>{statusLabels[q.status]||q.status}</span></td><td><QuoteActions quote={q} manage={manage} busy={busy} loaderData={loaderData} closeSignal={actionData?.success}/></td></tr>)}</tbody></table></div></section>
-  </>;
-}
-
-function QuotationCreateForm({loaderData,busy}:{loaderData:Route.ComponentProps["loaderData"];busy:boolean}){
-  return <Form method="post" className="quotation-entry-form">
-    <input type="hidden" name="intent" value="create"/>
-    <Select label="客户" name="customerId" items={loaderData.customers.map(item=>[item.id,`${item.code} · ${item.name}`])}/>
-    <Select label="业务员（销售员）" name="salespersonUserId" items={salespersonItems(loaderData.users)}/>
-    <Select label="运输方式" name="mode" items={quotationTransportModes}/>
-    <Select label="汽运方案" name="roadLoadType" defaultValue="ltl" items={[["ltl","拼车"],["ftl","整车"]]}/>
-    <Select label="服务等级" name="service" optional items={loaderData.services.map(item=>[item.code,item.name])}/>
-    <QuoteRouteFields countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} warehouses={loaderData.warehouses}/>
-    <label className="field quotation-cargo"><span>货物描述</span><textarea name="cargo" rows={3} required/></label>
-    <Num label="件数" name="pieces" value="1"/>
-    <Num label="毛重（KG）" name="weight"/>
-    <Num label="体积（CBM）" name="volume" step="0.001"/>
-    <Num label="预计长（CM）" name="estimatedLength" step="0.1"/>
-    <Num label="预计宽（CM）" name="estimatedWidth" step="0.1"/>
-    <Num label="预计高（CM）" name="estimatedHeight" step="0.1"/>
-    <Select label="应收费用名称" name="chargeName" defaultValue="汽运运费" items={transportChargeNameOptions}/>
-    <Num label="数量" name="quantity" value="1" step="0.0001"/>
-    <Num label="单价" name="unitPrice" step="0.01"/>
-    <Num label="应收附加费" name="surcharge" step="0.01"/>
-    <label className="field"><span>有效期至</span><input name="validUntil" type="date"/></label>
-    <label className="field quotation-notes"><span>备注</span><textarea name="notes" rows={3}/></label>
-    <button className="primary quotation-submit" disabled={busy}>生成报价</button>
-  </Form>;
-}
-
-function InquiryQuoteForm({inquiry,loaderData,busy}:{inquiry:Inquiry;loaderData:Route.ComponentProps["loaderData"];busy:boolean}){
-  return <Form method="post" className="quotation-dialog-form">
-    <input type="hidden" name="intent" value="quoteInquiry"/><input type="hidden" name="inquiryId" value={inquiry.id}/>
-    <Select label="业务员（销售员）" name="salespersonUserId" items={salespersonItems(loaderData.users)}/>
-    <Select label="汽运方案" name="roadLoadType" defaultValue="ltl" items={[["ltl","拼车"],["ftl","整车"]]}/>
-    <QuoteRouteFields countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} warehouses={loaderData.warehouses} initialOriginCountry={inquiry.origin_country} initialOriginCity={inquiry.origin_city||""} initialDestinationCountry={inquiry.destination_country} initialDestinationCity={inquiry.destination_city||""}/>
-    <Num label="预计长（CM）" name="estimatedLength" step="0.1"/>
-    <Num label="预计宽（CM）" name="estimatedWidth" step="0.1"/>
-    <Num label="预计高（CM）" name="estimatedHeight" step="0.1"/>
-    <Select label="应收费用名称" name="chargeName" defaultValue="汽运运费" items={transportChargeNameOptions}/>
-    <Num label="数量" name="quantity" value="1" step="0.0001"/>
-    <Num label="单价" name="unitPrice" value={String(inquiry.estimated_total)} step="0.01"/><Num label="应收附加费" name="surcharge" step="0.01"/>
-    <label className="field"><span>有效期至</span><input name="validUntil" type="date" required/></label>
-    <label className="field quotation-dialog-notes"><span>报价条款</span><textarea name="notes" rows={3} defaultValue={inquiry.customer_notes||""}/></label>
-    <button className="primary" disabled={busy}>发布到客户门户</button>
-  </Form>;
-}
-
-function QuoteActions({quote,manage,busy,loaderData,closeSignal}:{quote:Quote;manage:boolean;busy:boolean;loaderData:Route.ComponentProps["loaderData"];closeSignal?:unknown}){
-  const canPublish=manage&&quote.status==="draft";
-  const canAccept=manage&&(quote.status==="draft"||quote.status==="sent");
-  const canCancel=manage&&(quote.status==="draft"||quote.status==="sent");
-  return <div className="quote-status-actions">
-    <Modal title={`查看报价 · ${quote.quote_number}`} triggerLabel="查看" triggerClassName="text-button" size="wide"><QuoteView quote={quote}/></Modal>
-    {manage&&<Modal title={`编辑报价 · ${quote.quote_number}`} triggerLabel="编辑" triggerClassName="text-button" closeSignal={closeSignal} size="wide">{quote.status==="cancelled"?<div className="alert error">已作废报价只能查看，不能编辑。</div>:<QuoteEditForm quote={quote} loaderData={loaderData} busy={busy}/>}</Modal>}
-    {canPublish&&<Form method="post"><input type="hidden" name="intent" value="status"/><input type="hidden" name="id" value={quote.id}/><input type="hidden" name="status" value="sent"/><button className="text-button" disabled={busy}>发布到客户门户</button></Form>}
-    {canAccept&&<Form method="post" onSubmit={event=>{if(!window.confirm("确认客户已经接受该报价和价格吗？"))event.preventDefault();}}><input type="hidden" name="intent" value="status"/><input type="hidden" name="id" value={quote.id}/><input type="hidden" name="status" value="accepted"/><button className="text-button" disabled={busy}>确认价格</button></Form>}
-    {canCancel&&<Form method="post" onSubmit={event=>{if(!window.confirm("确认作废这份报价吗？作废后不能继续流转。"))event.preventDefault();}}><input type="hidden" name="intent" value="status"/><input type="hidden" name="id" value={quote.id}/><input type="hidden" name="status" value="cancelled"/><button className="text-button danger" disabled={busy}>作废</button></Form>}
-    {!canPublish&&!canAccept&&!canCancel&&<span>—</span>}
+export default function QuotationsPage({ loaderData, actionData }: Route.ComponentProps) {
+  const busy = useNavigation().state !== "idle";
+  const stats = useMemo(() => ({
+    pending: loaderData.quotes.filter((quote) => quote.lifecycle_status === "pending").length,
+    accepted: loaderData.quotes.filter((quote) => quote.lifecycle_status === "accepted").length,
+    orders: loaderData.quotes.filter((quote) => quote.order_id).length,
+  }), [loaderData.quotes]);
+  return <div className="page prototype-page">
+    <div className="breadcrumb">管理后台 / 工作台 / <b>询价与报价</b></div>
+    <div className="page-head">
+      <div><span className="eyebrow">QUOTE DESK / 询价与报价</span><h1>询价与报价</h1><p>报价被接受后立即生成唯一运输订单，不再二次创建订单。</p></div>
+      <div className="head-actions"><Modal title="创建运输报价" triggerLabel="创建报价" triggerClassName="btn primary" closeSignal={actionData?.success} size="wide"><QuoteForm loaderData={loaderData} busy={busy} /></Modal></div>
+    </div>
+    {(actionData?.success || actionData?.formError) && <div className={`gate ${actionData.formError ? "" : "ok"}`}>{actionData.formError || actionData.success}</div>}
+    <div className="kpis quotation-kpis">
+      <div className="panel"><span>待客户确认</span><b>{stats.pending}</b></div>
+      <div className="panel"><span>已接受</span><b>{stats.accepted}</b></div>
+      <div className="panel"><span>自动生成订单</span><b>{stats.orders}</b></div>
+      <div className="panel"><span>规则</span><b>一报一单</b></div>
+    </div>
+    <Form className="panel filters quotation-filters" method="get">
+      <div className="field"><label>报价号 / 客户 / 货物 / 订单号</label><input className="control" name="q" defaultValue={loaderData.filters.keyword} /></div>
+      <div className="field"><label>状态</label><select className="control" name="status" defaultValue={loaderData.filters.lifecycle}><option value="">全部</option><option value="pending">待确认</option><option value="accepted">已接受</option><option value="withdrawn">已撤回</option><option value="void">已作废</option></select></div>
+      <button className="btn primary">筛选</button><Link className="btn" to="/admin/quotations">重置</Link>
+    </Form>
+    <section className="panel table-panel">
+      <div className="panel-head"><div><h2>报价单 <span className="count">{loaderData.quotes.length}</span></h2><p>运输类型在报价接受后锁定，订单仅由报价生成。</p></div></div>
+      <div className="table-wrap"><table><thead><tr><th>报价单号</th><th>客户 / 业务员</th><th>运输方案</th><th>货物 / 线路</th><th>应收总额</th><th>状态</th><th>关联订单</th><th>操作</th></tr></thead><tbody>
+        {loaderData.quotes.map((quote) => <tr key={quote.id}><td><span className="order-id">{quote.quote_number}</span><span className="subline">{new Date(quote.created_at).toLocaleString("zh-CN")}</span></td><td><span className="cell-main">{quote.customer_name}</span><span className="subline">{quote.salesperson_name || "待指定业务员"}</span></td><td><span className={`pill ${quote.road_load_type === "ltl" ? "ltl" : ""}`}>{quote.road_load_type === "ltl" ? "拼车" : "整车"}</span><span className="subline">汽运 · {quote.customs_clearance_mode === "company" ? "公司代办清关" : "客户自理清关"}</span></td><td><span className="cell-main">{quote.cargo_description}</span><span className="subline">{quote.origin_city} → {quote.destination_city} · {quote.destination_warehouse_name || "目的仓待补"}</span></td><td><span className="cell-main">CNY {quote.total_amount.toLocaleString()}</span><span className="subline">{quote.pieces} 件 · {quote.gross_weight_kg} KG · {quote.volume_cbm} CBM</span></td><td><span className={`status ${statusTone(quote.lifecycle_status)}`}>{statusLabel(quote.lifecycle_status)}</span></td><td>{quote.order_id ? <Link className="order-id" to={`/admin/orders/${quote.order_id}`}>{quote.order_number}</Link> : <span className="subline">尚未生成</span>}</td><td><QuoteActions quote={quote} busy={busy} /></td></tr>)}
+      </tbody></table></div>
+      {!loaderData.quotes.length && <div className="empty-state">暂无符合条件的报价。</div>}
+    </section>
   </div>;
 }
 
-function QuoteView({quote}:{quote:Quote}){
-  const rows=[["客户",quote.customer_name],["业务员（销售员）",quote.salesperson_name||"未指定"],["提货路线",`${quote.origin_country} ${quote.origin_state||""} ${quote.origin_city}`],["提货地址",quote.pickup_address||"未填写"],["目的地",`${quote.destination_country} ${quote.destination_state||""} ${quote.destination_city}`],["目的仓",quote.destination_warehouse_name||"未选择"],["目的仓备注",quote.destination_warehouse_note||"—"],["清关责任",quote.customs_clearance_mode==="customer"?"客户自理清关":"公司代办清关"],["运输方式",quotationTransportModes.find(item=>item[0]===quote.transport_mode)?.[1]||quote.transport_mode],["汽运方案",quote.road_load_type==="ftl"?"整车":"拼车"],["货物",quote.cargo_description],["预计数据",`${quote.pieces} 件 · ${quote.gross_weight_kg} KG · ${quote.volume_cbm} CBM · ${quote.estimated_length_cm}×${quote.estimated_width_cm}×${quote.estimated_height_cm} CM`],["应收费用",quote.charges||"—"],["报价总额",`${quote.currency} ${quote.total_amount.toLocaleString()}`],["关联订单",quote.auto_order_number||"接受报价后自动生成"],["有效期",quote.valid_until||"未指定"],["状态",statusLabels[quote.status]||quote.status],["备注",quote.notes||"—"]];
-  return <dl className="quote-detail-grid">{rows.map(([label,value])=><div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>;
+function QuoteActions({ quote, busy }: { quote: Quote; busy: boolean }) {
+  return <div className="toolbar-actions">
+    <Modal title={`报价详情 · ${quote.quote_number}`} triggerLabel="查看" triggerClassName="btn"><QuoteDetail quote={quote} /></Modal>
+    {quote.lifecycle_status === "pending" && <Form method="post"><input type="hidden" name="intent" value="accept"/><input type="hidden" name="id" value={quote.id}/><button className="btn primary" disabled={busy}>代客户确认</button></Form>}
+    {quote.lifecycle_status === "accepted" && quote.order_status === "draft" && <Form method="post"><input type="hidden" name="intent" value="withdraw"/><input type="hidden" name="id" value={quote.id}/><button className="btn" disabled={busy}>撤回接受</button></Form>}
+    {quote.lifecycle_status === "withdrawn" && <Form method="post"><input type="hidden" name="intent" value="accept"/><input type="hidden" name="id" value={quote.id}/><button className="btn primary" disabled={busy}>重新接受</button></Form>}
+    {["pending", "withdrawn"].includes(quote.lifecycle_status) && <Form method="post"><input type="hidden" name="intent" value="void"/><input type="hidden" name="id" value={quote.id}/><button className="btn danger" disabled={busy}>作废</button></Form>}
+  </div>;
 }
 
-function QuoteEditForm({quote,loaderData,busy}:{quote:Quote;loaderData:Route.ComponentProps["loaderData"];busy:boolean}){
-  return <Form method="post" className="quotation-dialog-form">
-    <input type="hidden" name="intent" value="edit"/><input type="hidden" name="id" value={quote.id}/>
-    <Select label="客户" name="customerId" defaultValue={quote.customer_id} items={loaderData.customers.map(item=>[item.id,`${item.code} · ${item.name}`])}/>
-    <Select label="业务员（销售员）" name="salespersonUserId" defaultValue={quote.salesperson_user_id||""} items={salespersonItems(loaderData.users,quote)}/>
-    <Select label="运输方式" name="mode" defaultValue={quote.transport_mode} items={quotationTransportModes}/>
-    <Select label="汽运方案" name="roadLoadType" defaultValue={quote.road_load_type} items={[["ltl","拼车"],["ftl","整车"]]}/>
-    <QuoteRouteFields countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} warehouses={loaderData.warehouses} initialOriginCountry={quote.origin_country} initialOriginState={quote.origin_state||""} initialOriginCity={quote.origin_city} initialPickupAddress={quote.pickup_address||""} initialDestinationCountry={quote.destination_country} initialDestinationState={quote.destination_state||""} initialDestinationCity={quote.destination_city} initialDestinationWarehouseId={quote.destination_warehouse_id||""} initialDestinationWarehouseNote={quote.destination_warehouse_note||""} initialCustomsClearanceMode={quote.customs_clearance_mode}/>
-    <label className="field quotation-dialog-notes"><span>货物描述</span><textarea name="cargo" rows={3} defaultValue={quote.cargo_description} required/></label>
-    <Num label="件数" name="pieces" value={String(quote.pieces)}/><Num label="毛重（KG）" name="weight" value={String(quote.gross_weight_kg)} step="0.001"/><Num label="体积（CBM）" name="volume" value={String(quote.volume_cbm)} step="0.001"/>
-    <Num label="预计长（CM）" name="estimatedLength" value={String(quote.estimated_length_cm)} step="0.1"/><Num label="预计宽（CM）" name="estimatedWidth" value={String(quote.estimated_width_cm)} step="0.1"/><Num label="预计高（CM）" name="estimatedHeight" value={String(quote.estimated_height_cm)} step="0.1"/>
-    <Select label="应收费用名称" name="chargeName" defaultValue={quote.charge_name||"汽运运费"} items={transportChargeNameOptions}/>
-    <Num label="数量" name="quantity" value={String(quote.charge_quantity||1)} step="0.0001"/><Num label="单价" name="unitPrice" value={String(quote.charge_unit_price||0)} step="0.01"/><Num label="应收附加费" name="surcharge" value={String(quote.surcharge||0)} step="0.01"/>
-    <label className="field"><span>有效期至</span><input name="validUntil" type="date" defaultValue={quote.valid_until||""}/></label><label className="field quotation-dialog-notes"><span>备注</span><textarea name="notes" rows={3} defaultValue={quote.notes||""}/></label>
-    {quote.status!=="draft"&&<div className="alert span-2">修改已确认或已发布报价后，报价会恢复为草稿，需要重新确认。</div>}
-    <button className="primary" disabled={busy}>保存修改</button>
+function QuoteDetail({ quote }: { quote: Quote }) {
+  return <div className="drawer-grid quote-detail-grid">
+    <ReadCell label="客户" value={quote.customer_name}/><ReadCell label="业务员" value={quote.salesperson_name || "—"}/>
+    <ReadCell label="运输方案" value={`汽运 · ${quote.road_load_type === "ltl" ? "拼车" : "整车"}`}/><ReadCell label="清关责任" value={quote.customs_clearance_mode === "company" ? "公司代办清关" : "客户自理清关"}/>
+    <ReadCell label="提货地址" value={quote.pickup_address || "—"}/><ReadCell label="目的仓" value={quote.destination_warehouse_name || "—"}/>
+    <ReadCell label="线路" value={`${quote.origin_country} ${quote.origin_state || ""} ${quote.origin_city} → ${quote.destination_country} ${quote.destination_state || ""} ${quote.destination_city}`}/><ReadCell label="目的仓备注" value={quote.destination_warehouse_note || "—"}/>
+    <ReadCell label="货物" value={quote.cargo_description}/><ReadCell label="预计件重体" value={`${quote.pieces} 件 · ${quote.gross_weight_kg} KG · ${quote.volume_cbm} CBM`}/>
+    <ReadCell label="预计长宽高" value={`${quote.estimated_length_cm} × ${quote.estimated_width_cm} × ${quote.estimated_height_cm} CM`}/><ReadCell label="应收总额" value={`CNY ${quote.total_amount.toLocaleString()}`}/>
+  </div>;
+}
+
+function ReadCell({ label, value }: { label: string; value: string }) {
+  return <div><span>{label}</span><b>{value}</b></div>;
+}
+
+function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof loader>>; busy: boolean }) {
+  const [customerId, setCustomerId] = useState(loaderData.customers[0]?.id || "");
+  const [pickupAddress, setPickupAddress] = useState(loaderData.customers[0]?.pickup_address || "");
+  const [charges, setCharges] = useState([{ name: transportChargeNameOptions[0] || "国际汽运费", quantity: 1, unitPrice: 0, notes: "" }]);
+  const total = charges.reduce((sum, charge) => sum + Number(charge.quantity || 0) * Number(charge.unitPrice || 0), 0);
+  const selectCustomer = (id: string) => {
+    setCustomerId(id);
+    setPickupAddress(loaderData.customers.find((customer) => customer.id === id)?.pickup_address || "");
+  };
+  return <Form method="post" className="prototype-quote-form">
+    <input type="hidden" name="intent" value="create"/>
+    <div className="gate ok">带 * 的字段会在报价被接受后自动继承到运输订单，运输类型随即锁定。</div>
+    <FormSection title="客户与运输方案" note="报价确认后不再重复创建订单">
+      <div className="grid">
+        <Field label="客户 *"><select className="control filled" name="customerId" value={customerId} onChange={(event) => selectCustomer(event.target.value)} required><option value="">请选择客户</option>{loaderData.customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name}</option>)}</select></Field>
+        <Field label="业务员 *"><select className="control filled" name="salespersonId" required><option value="">请选择业务员</option>{loaderData.users.map((user) => <option key={user.id} value={user.id}>{user.display_name} · {user.email}</option>)}</select></Field>
+        <Field label="运输方式 *"><select className="control filled" name="transportMode" defaultValue="ROAD"><option value="ROAD">汽运</option><option value="RAIL" disabled>铁运（流程未开放）</option><option value="AIR" disabled>空运（流程未开放）</option></select></Field>
+        <Field label="订单类型 *"><select className="control filled" name="roadLoadType" defaultValue="ltl"><option value="ltl">拼车</option><option value="ftl">整车</option></select></Field>
+        <Field label="清关办理方式 *"><select className="control filled" name="customsClearanceMode" defaultValue="company"><option value="company">公司代办清关</option><option value="customer">客户自理清关</option></select></Field>
+      </div>
+    </FormSection>
+    <FormSection title="起运地与目的地" note="最终目的地为境外目的仓，客户到仓自提">
+      <div className="grid">
+        <Field label="起运国家 / 地区 *"><GeoSelect name="originCountry" options={loaderData.countries}/></Field>
+        <Field label="起运省 / 州 *"><GeoSelect name="originState" options={loaderData.provinces}/></Field>
+        <Field label="起运城市 *"><GeoSelect name="originCity" options={loaderData.cities}/></Field>
+        <Field label="目的国家 / 地区 *"><GeoSelect name="destinationCountry" options={loaderData.countries}/></Field>
+        <Field label="目的省 / 州 *"><GeoSelect name="destinationState" options={loaderData.provinces}/></Field>
+        <Field label="目的城市 *"><GeoSelect name="destinationCity" options={loaderData.cities}/></Field>
+        <Field label="目的仓库 *"><select className="control filled" name="destinationWarehouseId" required><option value="">请选择境外目的仓</option>{loaderData.warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></Field>
+        <Field label="提货地址 *" className="span2"><textarea className="control textarea editing" name="pickupAddress" value={pickupAddress} onChange={(event) => setPickupAddress(event.target.value)} required /></Field>
+        <Field label="报价目的地备注" className="span2"><textarea className="control textarea" name="destinationWarehouseNote" /></Field>
+      </div>
+    </FormSection>
+    <FormSection title="货物预估数据" note="仓库实收后登记实际数据">
+      <div className="grid">
+        <Field label="货物描述 *" className="span4"><textarea className="control textarea editing" name="cargoDescription" required /></Field>
+        <Field label="预计件数 *"><input className="control filled" name="pieces" type="number" min="1" defaultValue="1" required/></Field>
+        <Field label="预计重量 KG *"><input className="control filled" name="weight" type="number" min="0.001" step="0.001" required/></Field>
+        <Field label="预计长度 CM *"><input className="control filled" name="length" type="number" min="0.01" step="0.01" required/></Field>
+        <Field label="预计宽度 CM *"><input className="control filled" name="width" type="number" min="0.01" step="0.01" required/></Field>
+        <Field label="预计高度 CM *"><input className="control filled" name="height" type="number" min="0.01" step="0.01" required/></Field>
+        <Field label="预计体积 CBM *"><input className="control filled" name="volume" type="number" min="0.001" step="0.001" required/></Field>
+      </div>
+    </FormSection>
+    <FormSection title="客户应收费用" note="接受后直接继承到订单结算">
+      <table className="inline-table quote-charge-table"><thead><tr><th>费用名称 *</th><th>数量 *</th><th>单价 *</th><th>金额</th><th>备注</th><th>操作</th></tr></thead><tbody>{charges.map((charge, index) => <tr key={index}><td><select className="control filled" name="chargeName" value={charge.name} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, name: event.target.value } : row))}>{transportChargeNameOptions.map((option) => <option key={option} value={option}>{option}</option>)}</select></td><td><input className="control filled" name="chargeQuantity" type="number" min="0.01" step="0.01" value={charge.quantity} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: Number(event.target.value) } : row))}/></td><td><input className="control filled" name="chargeUnitPrice" type="number" min="0" step="0.01" value={charge.unitPrice} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, unitPrice: Number(event.target.value) } : row))}/></td><td><b>{(charge.quantity * charge.unitPrice).toLocaleString()}</b></td><td><input className="control" name="chargeNotes" value={charge.notes} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, notes: event.target.value } : row))}/></td><td><button className="btn danger" type="button" disabled={charges.length === 1} onClick={() => setCharges((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>删除</button></td></tr>)}</tbody></table>
+      <div className="quote-charge-actions"><button className="btn" type="button" onClick={() => setCharges((rows) => [...rows, { name: transportChargeNameOptions[0] || "国际汽运费", quantity: 1, unitPrice: 0, notes: "" }])}>新增费用</button><strong>报价总额 CNY {total.toLocaleString()}</strong></div>
+      <div className="grid two"><Field label="报价有效期"><input className="control" name="validUntil" type="date"/></Field><Field label="报价备注"><textarea className="control textarea" name="notes"/></Field></div>
+    </FormSection>
+    <div className="modal-form-actions"><button className="btn primary large" disabled={busy}>保存报价并等待客户确认</button></div>
   </Form>;
 }
 
-function RouteLocationFields({countries,provinces,cities,initialOriginCountry="",initialOriginCity="",initialDestinationCountry="",initialDestinationCity=""}:{countries:{code:string;name:string}[];provinces:GeoReference[];cities:GeoReference[];initialOriginCountry?:string;initialOriginCity?:string;initialDestinationCountry?:string;initialDestinationCity?:string}){
-  const [originCountry,setOriginCountry]=useState(initialOriginCountry);
-  const [destinationCountry,setDestinationCountry]=useState(initialDestinationCountry);
-  return <>
-    <label className="field"><span>起运国家</span><select name="originCountry" value={originCountry} onChange={event=>setOriginCountry(event.target.value)} required><option value="">请选择国家/地区</option>{countries.map(item=><option key={item.code} value={item.code}>{item.code} · {item.name}</option>)}</select></label>
-    <CitySelect label="起运城市" name="originCity" country={originCountry} defaultValue={initialOriginCity} provinces={provinces} cities={cities}/>
-    <label className="field"><span>目的国家</span><select name="destinationCountry" value={destinationCountry} onChange={event=>setDestinationCountry(event.target.value)} required><option value="">请选择国家/地区</option>{countries.map(item=><option key={item.code} value={item.code}>{item.code} · {item.name}</option>)}</select></label>
-    <CitySelect label="目的城市" name="destinationCity" country={destinationCountry} defaultValue={initialDestinationCity} provinces={provinces} cities={cities}/>
-  </>;
+function FormSection({ title, note, children }: { title: string; note: string; children: React.ReactNode }) {
+  return <section className="section"><div className="section-title"><b>{title}</b><span>{note}</span></div>{children}</section>;
 }
 
-function QuoteRouteFields({countries,provinces,cities,warehouses,initialOriginCountry="",initialOriginState="",initialOriginCity="",initialPickupAddress="",initialDestinationCountry="",initialDestinationState="",initialDestinationCity="",initialDestinationWarehouseId="",initialDestinationWarehouseNote="",initialCustomsClearanceMode="company"}:{countries:{code:string;name:string}[];provinces:GeoReference[];cities:GeoReference[];warehouses:WarehouseOption[];initialOriginCountry?:string;initialOriginState?:string;initialOriginCity?:string;initialPickupAddress?:string;initialDestinationCountry?:string;initialDestinationState?:string;initialDestinationCity?:string;initialDestinationWarehouseId?:string;initialDestinationWarehouseNote?:string;initialCustomsClearanceMode?:"company"|"customer"}){
-  const [originCountry,setOriginCountry]=useState(initialOriginCountry);
-  const [originState,setOriginState]=useState(initialOriginState);
-  const [destinationCountry,setDestinationCountry]=useState(initialDestinationCountry);
-  const [destinationState,setDestinationState]=useState(initialDestinationState);
-  const originProvinces=provinces.filter(item=>item.parent_code===originCountry);
-  const destinationProvinces=provinces.filter(item=>item.parent_code===destinationCountry);
-  const originStateCode=provinces.find(item=>item.name===originState)?.code;
-  const destinationStateCode=provinces.find(item=>item.name===destinationState)?.code;
-  const originCities=cities.filter(item=>item.parent_code===originStateCode);
-  const destinationCities=cities.filter(item=>item.parent_code===destinationStateCode);
-  return <>
-    <label className="field"><span>起运国家<b className="required-mark">*</b></span><select name="originCountry" value={originCountry} onChange={event=>{setOriginCountry(event.target.value);setOriginState("");}} required><option value="">请选择国家/地区</option>{countries.map(item=><option key={item.code} value={item.code}>{item.code} · {item.name}</option>)}</select></label>
-    <label className="field"><span>起运省/州<b className="required-mark">*</b></span><select name="originState" value={originState} onChange={event=>setOriginState(event.target.value)} required disabled={!originCountry}><option value="">请选择省/州</option>{initialOriginState&&!originProvinces.some(item=>item.name===initialOriginState)&&<option value={initialOriginState}>{initialOriginState} · 历史值</option>}{originProvinces.map(item=><option key={item.code} value={item.name}>{item.name}</option>)}</select></label>
-    <label className="field"><span>起运城市<b className="required-mark">*</b></span><select name="originCity" defaultValue={initialOriginCity} required disabled={!originState}><option value="">请选择城市</option>{initialOriginCity&&!originCities.some(item=>item.name===initialOriginCity)&&<option value={initialOriginCity}>{initialOriginCity} · 历史值</option>}{originCities.map(item=><option key={item.code} value={item.name}>{item.name}</option>)}</select></label>
-    <label className="field quotation-address"><span>提货地址<b className="required-mark">*</b></span><textarea name="pickupAddress" rows={2} defaultValue={initialPickupAddress} required/></label>
-    <label className="field"><span>目的国家<b className="required-mark">*</b></span><select name="destinationCountry" value={destinationCountry} onChange={event=>{setDestinationCountry(event.target.value);setDestinationState("");}} required><option value="">请选择国家/地区</option>{countries.map(item=><option key={item.code} value={item.code}>{item.code} · {item.name}</option>)}</select></label>
-    <label className="field"><span>目的省/州<b className="required-mark">*</b></span><select name="destinationState" value={destinationState} onChange={event=>setDestinationState(event.target.value)} required disabled={!destinationCountry}><option value="">请选择省/州</option>{initialDestinationState&&!destinationProvinces.some(item=>item.name===initialDestinationState)&&<option value={initialDestinationState}>{initialDestinationState} · 历史值</option>}{destinationProvinces.map(item=><option key={item.code} value={item.name}>{item.name}</option>)}</select></label>
-    <label className="field"><span>目的城市<b className="required-mark">*</b></span><select name="destinationCity" defaultValue={initialDestinationCity} required disabled={!destinationState}><option value="">请选择城市</option>{initialDestinationCity&&!destinationCities.some(item=>item.name===initialDestinationCity)&&<option value={initialDestinationCity}>{initialDestinationCity} · 历史值</option>}{destinationCities.map(item=><option key={item.code} value={item.name}>{item.name}</option>)}</select></label>
-    <Select label="目的仓库" name="destinationWarehouseId" defaultValue={initialDestinationWarehouseId} items={warehouses.map(item=>[item.id,`${item.name} · ${item.city||item.country_code||"地址待补"}`])}/>
-    <Select label="清关责任" name="customsClearanceMode" defaultValue={initialCustomsClearanceMode} items={[["company","公司代办清关"],["customer","客户自理清关"]]}/>
-    <label className="field quotation-address"><span>报价目的地备注</span><textarea name="destinationWarehouseNote" rows={2} defaultValue={initialDestinationWarehouseNote}/></label>
-  </>;
+function Field({ label, className = "", children }: { label: string; className?: string; children: React.ReactNode }) {
+  return <label className={`field ${className}`}><span>{label}</span>{children}</label>;
 }
 
-function CitySelect({label,name,country,defaultValue="",provinces,cities}:{label:string;name:string;country:string;defaultValue?:string;provinces:GeoReference[];cities:GeoReference[]}){
-  const provinceNames=new Map(provinces.map(item=>[item.code,item.name]));
-  const provinceCodes=new Set(provinces.filter(item=>item.parent_code===country).map(item=>item.code));
-  const options=cities.filter(item=>item.parent_code&&provinceCodes.has(item.parent_code));
-  const hasDefault=options.some(item=>item.name===defaultValue);
-  return <label className="field"><span>{label}</span><select name={name} defaultValue={defaultValue} disabled={!country} required><option value="">{country?"请选择城市":"请先选择国家"}</option>{defaultValue&&!hasDefault&&<option value={defaultValue}>{defaultValue} · 历史值</option>}{options.map(item=><option key={item.code} value={item.name}>{provinceNames.get(item.parent_code||"")||""} · {item.name}</option>)}</select></label>;
+function GeoSelect({ name, options }: { name: string; options: GeoOption[] }) {
+  return <select className="control filled" name={name} required><option value="">请选择</option>{options.map((option) => <option key={`${name}-${option.code}`} value={option.name}>{option.name}</option>)}</select>;
 }
 
-function salespersonItems(users:SalespersonOption[],quote?:Quote):[string,string][]{const items:[string,string][]=users.map(user=>[user.id,`${user.display_name} · ${user.email}`]);if(quote?.salesperson_user_id&&!items.some(([id])=>id===quote.salesperson_user_id))items.push([quote.salesperson_user_id,`${quote.salesperson_name||"原业务员"} · 已停用`]);return items;}
-function Select({ label, name, items, optional,defaultValue }: { label: string; name: string; items: [string, string][]; optional?: boolean;defaultValue?:string }) { return <label className="field"><span>{label}{!optional&&<b className="required-mark">*</b>}</span><select name={name} required={!optional} defaultValue={defaultValue||""}><option value="">{optional ? "未指定" : "请选择"}</option>{items.map(([value, text]) => <option key={value} value={value}>{text}</option>)}</select></label>; }
-function Num({ label, name, value = "0", step = "1" }: { label: string; name: string; value?: string; step?: string }) { return <label className="field"><span>{label}</span><input name={name} type="number" min="0" step={step} defaultValue={value} required/></label>; }
+function positiveNumber(value: string, label: string) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) throw new Error(`${label}必须大于 0`);
+  return number;
+}
+
+function positiveInteger(value: string, label: string) {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number <= 0) throw new Error(`${label}必须是大于 0 的整数`);
+  return number;
+}
+
+async function geoOptions(organizationId: string, level: string) {
+  return (await env.DB.prepare(
+    "SELECT code,name,parent_code FROM geo_references WHERE organization_id=? AND level=? AND status='active' ORDER BY sort_order,name",
+  ).bind(organizationId,level).all<GeoOption>()).results;
+}
+
+function statusLabel(status: Quote["lifecycle_status"]) {
+  return { pending: "待客户确认", accepted: "客户已接受", withdrawn: "接受已撤回", void: "已作废" }[status];
+}
+
+function statusTone(status: Quote["lifecycle_status"]) {
+  if (status === "accepted") return "green";
+  if (status === "pending") return "orange";
+  if (status === "void") return "red";
+  return "blue";
+}
+
+export function meta() { return [{ title: "询价与报价 | 新翎航 TMS" }]; }
