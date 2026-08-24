@@ -368,7 +368,7 @@ function positiveInteger(value: string, label: string) {
 
 async function geoOptions(organizationId: string, level: string) {
   return (await env.DB.prepare(
-    "SELECT code,name,parent_code FROM geo_references WHERE organization_id=? AND level=? AND status='active' ORDER BY sort_order,name",
+    "SELECT code,name,parent_code FROM reference_data WHERE organization_id=? AND category=? AND status='active' ORDER BY sort_order,name",
   ).bind(organizationId,level).all<GeoOption>()).results;
 }
 
