@@ -65,6 +65,7 @@ type Order = {
   transit_locations: string | null;
   customs_location: string | null;
   route_notes: string | null;
+  customs_clearance_mode: "company" | "customer";
   customer_id: string;
   customer_name: string;
   customer_code: string;
@@ -230,7 +231,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     `SELECT o.id,o.order_number,o.order_date,o.business_nature,o.business_type,o.transport_terms,o.trade_terms,
       o.exit_port,bp.name exit_port_name,o.overseas_warehouse_id,ow.name overseas_warehouse_name,
       ow.code overseas_warehouse_code,ow.address overseas_warehouse_address,o.overseas_warehouse_address_note,
-      o.transit_locations,o.customs_location,o.route_notes,o.customer_id,c.name customer_name,c.code customer_code,
+      o.transit_locations,o.customs_location,o.route_notes,o.customs_clearance_mode,o.customer_id,c.name customer_name,c.code customer_code,
       o.customer_reference,q.quote_number,o.shipper_name,o.shipper_contact,o.shipper_phone,o.origin_country,
       o.origin_state,o.origin_city,o.origin_address,o.consignee_name,o.consignee_contact,o.consignee_phone,
       o.destination_country,o.destination_state,o.destination_city,o.destination_address,o.cargo_description,
@@ -1760,6 +1761,7 @@ function OrderMountedPanel({
             {showPortDecision && <Info label="口岸/清关" value={[order.exit_port_name || order.exit_port, order.customs_location].filter(Boolean).join(" → ") || "待仓库分流后确定"} />}
             {showPortDecision && <Info label="中转地" value={order.transit_locations} />}
             <Info label="境外目的仓" value={order.overseas_warehouse_name ? `${order.overseas_warehouse_name} · ${order.overseas_warehouse_code || ""}` : null} />
+            <Info label="清关责任" value={order.customs_clearance_mode === "customer" ? "客户自理清关" : "公司代办清关"} />
             <Info label="目的仓地址" value={[order.overseas_warehouse_address, order.overseas_warehouse_address_note].filter(Boolean).join(" · ") || null} />
             <Info label="线路说明" value={order.route_notes} />
           </div>

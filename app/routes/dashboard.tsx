@@ -32,13 +32,13 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
 
         <nav aria-label="运营管理导航">
           <span className="nav-group">工作台</span>
-          <SideLink to="/admin/portal" icon="layout">岗位门户</SideLink>
+          <SideLink to="/admin/portal" icon="layout">任务工作台</SideLink>
           <SideLink to="/admin" icon="dashboard" end>运营总览</SideLink>
 
           <span className="nav-group">汽运业务</span>
           {can("quote.view") && <SideLink to="/admin/quotations" icon="receipt">询价与报价</SideLink>}
           {can("order.view") && <SideLink to="/admin/orders" icon="clipboard">运输订单</SideLink>}
-          {can("shipment.view") && <SideLink to="/admin/domestic-tracking" icon="map">国内物流轨迹</SideLink>}
+          {can("shipment.view") && <SideLink to="/admin/domestic-tracking" icon="map">在途车辆</SideLink>}
           {can("order.view") && <SideLink to="/admin/loading" icon="truck">配载单跟踪</SideLink>}
           {can("order.view") && <SideLink to="/admin/documents" icon="documents">文件中心</SideLink>}
           {can("shipment.view") && <SideLink to="/admin/shipments" icon="packageCheck">运单列表</SideLink>}

@@ -114,6 +114,7 @@ type OrderSummary = {
   overseas_warehouse_address_note: string | null;
   transit_locations: string | null;
   customs_location: string | null;
+  customs_clearance_mode: "company" | "customer";
   route_notes: string | null;
   requested_pickup_date: string | null;
   requested_delivery_date: string | null;
@@ -488,7 +489,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
   const definition = orderModuleDefinition(moduleCode);
   if (!definition) throw new Response("订单模块不存在", { status: 404 });
   const order = await env.DB.prepare(
-    `SELECT o.id,o.order_number,o.order_date,o.quotation_id,q.quote_number,q.currency quotation_currency,q.subtotal quotation_subtotal,q.tax_amount quotation_tax_amount,q.total_amount quotation_total_amount,q.status quotation_status,o.customer_id,c.name customer_name,o.customer_reference,o.shipper_name,o.shipper_contact,o.shipper_phone,o.origin_country,o.origin_state,o.origin_city,o.origin_address,o.consignee_name,o.consignee_contact,o.consignee_phone,o.destination_country,o.destination_state,o.destination_city,o.destination_address,o.business_nature,o.business_type,o.transport_mode,o.transport_terms,o.trade_terms,o.exit_port,o.overseas_warehouse_id,ow.name overseas_warehouse_name,ow.code overseas_warehouse_code,ow.address overseas_warehouse_address,o.overseas_warehouse_address_note,o.transit_locations,o.customs_location,o.route_notes,o.requested_pickup_date,o.requested_delivery_date,o.cargo_ready_at,o.ro_agent,o.special_instructions,o.requires_transloading,o.requires_transit_customs,o.current_assignee_user_id,o.status FROM transport_orders o JOIN customers c ON c.id=o.customer_id LEFT JOIN quotations q ON q.id=o.quotation_id AND q.organization_id=o.organization_id LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id WHERE o.id=? AND o.organization_id=?`,
+    `SELECT o.id,o.order_number,o.order_date,o.quotation_id,q.quote_number,q.currency quotation_currency,q.subtotal quotation_subtotal,q.tax_amount quotation_tax_amount,q.total_amount quotation_total_amount,q.status quotation_status,o.customer_id,c.name customer_name,o.customer_reference,o.shipper_name,o.shipper_contact,o.shipper_phone,o.origin_country,o.origin_state,o.origin_city,o.origin_address,o.consignee_name,o.consignee_contact,o.consignee_phone,o.destination_country,o.destination_state,o.destination_city,o.destination_address,o.business_nature,o.business_type,o.transport_mode,o.transport_terms,o.trade_terms,o.exit_port,o.overseas_warehouse_id,ow.name overseas_warehouse_name,ow.code overseas_warehouse_code,ow.address overseas_warehouse_address,o.overseas_warehouse_address_note,o.transit_locations,o.customs_location,o.customs_clearance_mode,o.route_notes,o.requested_pickup_date,o.requested_delivery_date,o.cargo_ready_at,o.ro_agent,o.special_instructions,o.requires_transloading,o.requires_transit_customs,o.current_assignee_user_id,o.status FROM transport_orders o JOIN customers c ON c.id=o.customer_id LEFT JOIN quotations q ON q.id=o.quotation_id AND q.organization_id=o.organization_id LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id WHERE o.id=? AND o.organization_id=?`,
   )
     .bind(orderId, current.organizationId)
     .first<OrderSummary>();
@@ -5005,7 +5006,7 @@ function ModuleBusinessData({
       <div className="module-business-stack dense-module-stack">
         <BusinessSubsection
           title="境外仓办理进度"
-          hint="境外仓完成扫码入库与清点后自动通知客户；仓库扫码自提出库后，再上传签收单确认运输完成。"
+          hint="境外仓完成扫码入库与清点后自动通知客户；客户到仓后逐件扫码并核对整票货物，确认出库即完成签收和运输。"
         >
           <div className="loading-selection-summary" aria-live="polite">
             <span>
@@ -5025,7 +5026,7 @@ function ModuleBusinessData({
               ["notified", "自动通知客户", operationStepDone("notified")],
               ["appointment", "预约提货", operationStepDone("appointment")],
               ["picked_up", "客户自提", operationStepDone("picked_up")],
-              ["signed", "签收", signedReceiptApproved],
+              ["signed", "扫码签收", operationStepDone("picked_up")],
               ["completed", "运输完成", transportCompleted],
             ].map(([status, label, done]) => (
               <article className={done ? "done" : ""} key={String(status)}>
@@ -5150,27 +5151,11 @@ function ModuleBusinessData({
           </BusinessSubsection>
         )}
 
-        {operationStatus === "picked_up" && <ModuleSourceDocuments
-          code="overseas_warehouse"
-          data={data}
-          manage={manage}
-          canApproveConsignment={canApproveConsignment}
-          busy={busy}
-          reviewCloseSignal={reviewCloseSignal}
-        />}
-
         {operationStatus === "picked_up" && (
-          <BusinessSubsection title="4. 签收确认与运输完成" hint="仓库扫码只代表货物已交给客户；签收单审核通过后，系统才完成运输并进入费用结算。">
-            {!transportCompleted && <div className="alert warning overseas-signature-gate">
-              <div>
-                <strong>客户自提出库已完成，等待签收单</strong>
-                <span>请在本页“本节点文件”上传签收单并审核通过；系统会自动完成签收和运输完成。</span>
-              </div>
-              <a className="primary" href="#module-source-documents">上传并审核签收单</a>
-            </div>}
+          <BusinessSubsection title="4. 自提签收与运输完成" hint="境外仓已核对全部货物标签并确认客户自提出库；系统自动完成签收、运输和结算交接。签收单可后续在文件中心补充归档，但不再阻断流程。">
             <div className="table-wrap overseas-completion-table">
               <table>
-                <thead><tr><th>订单</th><th>客户</th><th>配载/运输单</th><th>目的仓</th><th>到仓</th><th>通知</th><th>预约</th><th>客户自提</th><th>签收单</th><th>结果</th></tr></thead>
+                <thead><tr><th>订单</th><th>客户</th><th>配载/运输单</th><th>目的仓</th><th>到仓</th><th>通知</th><th>预约</th><th>扫码自提</th><th>签收单归档</th><th>结果</th></tr></thead>
                 <tbody><tr>
                   <td><strong>{data.order.order_number}</strong></td>
                   <td>{data.order.customer_name}</td>
@@ -5180,14 +5165,14 @@ function ModuleBusinessData({
                   <td>{formatDateTime(operation?.notified_at) || "—"}</td>
                   <td>{formatDateTime(operation?.appointment_at) || "—"}</td>
                   <td><strong>{formatDateTime(operation?.pickup_at) || "—"}</strong><small>{operation?.pickup_contact || "客户自提"}</small></td>
-                  <td><span className={`status-pill ${signedReceiptApproved ? "" : "off"}`}>{signedReceiptApproved ? "已审核" : "待上传/审核"}</span></td>
-                  <td><span className={`status-pill ${transportCompleted ? "" : "off"}`}>{transportCompleted ? "运输完成" : "待确认签收"}</span></td>
+                  <td><span className={`status-pill ${signedReceiptApproved ? "" : "off"}`}>{signedReceiptApproved ? "已归档" : "选填"}</span></td>
+                  <td><span className={`status-pill ${transportCompleted ? "" : "off"}`}>{transportCompleted ? "运输完成" : "正在同步"}</span></td>
                 </tr></tbody>
               </table>
             </div>
             {transportCompleted && <div className="loading-next-action">
               <strong>运输已完成</strong>
-              <span>签收结果与订单工作流已同步，下一步进入费用结算。</span>
+              <span>境外仓扫码自提结果与订单工作流已同步，下一步进入费用结算。</span>
               <Link className="primary" to={`/admin/orders/${data.order.id}/modules/costs`}>进入费用结算</Link>
             </div>}
           </BusinessSubsection>
@@ -5685,6 +5670,7 @@ function ModuleBusinessData({
               <WorkflowInfo fields={data.workflowFields} fieldKey="destination_state" label="目的省/州" value={data.order.destination_state || ""} />
               <WorkflowInfo fields={data.workflowFields} fieldKey="destination_city" label="目的城市" value={data.order.destination_city || ""} />
               <WorkflowInfo fields={data.workflowFields} fieldKey="overseas_warehouse_id" label="境外目的仓" value={data.order.overseas_warehouse_name || ""} />
+              <Info label="清关责任" value={data.order.customs_clearance_mode === "customer" ? "客户自理清关" : "公司代办清关"} />
               <WorkflowInfo fields={data.workflowFields} fieldKey="destination_address" label="送货地址" value={data.order.destination_address || ""} className="span-2" />
               <WorkflowInfo fields={data.workflowFields} fieldKey="overseas_warehouse_address_note" label="目的仓地址备注" value={data.order.overseas_warehouse_address_note || ""} className="span-2" />
             </div>
@@ -6496,6 +6482,7 @@ function OrderApprovalReview({order,cargo,busy}:{order:OrderSummary;cargo:Cargo[
             <tr><th>订单号</th><td>{order.order_number}</td><th>接单日期</th><td>{order.order_date || "—"}</td></tr>
             <tr><th>委托客户</th><td>{order.customer_name}</td><th>业务性质</th><td>{businessNatureLabels[order.business_nature] || order.business_nature || "—"}</td></tr>
             <tr><th>运输方案</th><td>{businessTypeLabel}</td><th>订单状态</th><td>待审核</td></tr>
+            <tr><th>清关责任</th><td>{order.customs_clearance_mode === "customer" ? "客户自理清关" : "公司代办清关"}</td><th>境外目的仓</th><td>{order.overseas_warehouse_name || "—"}</td></tr>
             <tr><th>发货方</th><td>{order.shipper_name || "—"}</td><th>联系人/电话</th><td>{[order.shipper_contact,order.shipper_phone].filter(Boolean).join(" / ") || "—"}</td></tr>
             <tr><th>提货地址</th><td colSpan={3}>{location(order.origin_country,order.origin_state,order.origin_city,order.origin_address)}</td></tr>
             <tr><th>收货方</th><td>{order.consignee_name || "—"}</td><th>联系人/电话</th><td>{[order.consignee_contact,order.consignee_phone].filter(Boolean).join(" / ") || "—"}</td></tr>

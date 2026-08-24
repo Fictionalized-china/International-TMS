@@ -208,7 +208,7 @@ export function positionPortalForUser(user: PortalUser): PositionPortalConfig {
   }
   return portalConfigs[user.positionCode ?? ""] ?? {
     code: "GENERAL",
-    title: "岗位门户",
+    title: "任务工作台",
     description: "查看分配给本账号的订单和下一步待办。",
     viewAreas: ["本人负责订单", "本人待办"],
     operateAreas: ["按已授权模块办理业务"],

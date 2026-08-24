@@ -205,7 +205,7 @@ export async function action({ request }: Route.ActionArgs) {
     const orderScope = valueOf(form, "orderScope");
     const defaultFilter = valueOf(form, "defaultFilter");
     if (!["current_position", "all_orders"].includes(orderScope) || !["open", "all", "blocked", "overdue"].includes(defaultFilter))
-      return { formError: "岗位门户配置无效" };
+      return { formError: "任务工作台配置无效" };
     const position = await env.DB.prepare("SELECT id FROM positions WHERE id=? AND organization_id=?").bind(positionId, current.organizationId).first();
     if (!position) return { formError: "岗位不存在" };
     await env.DB.prepare(
@@ -215,7 +215,7 @@ export async function action({ request }: Route.ActionArgs) {
          order_scope=excluded.order_scope,default_filter=excluded.default_filter,
          updated_by_user_id=excluded.updated_by_user_id,updated_at=excluded.updated_at`,
     ).bind(crypto.randomUUID(), current.organizationId, positionId, orderScope, defaultFilter, current.userId, now, now).run();
-    return { success: "岗位门户查看范围与默认筛选已更新" };
+    return { success: "任务工作台查看范围与默认筛选已更新" };
   }
 
   const code = valueOf(form, "code").toUpperCase();
@@ -355,7 +355,7 @@ export default function Positions({ loaderData, actionData }: Route.ComponentPro
                 <th>部门</th>
                 <th>对应角色</th>
                 <th>模块权限</th>
-                <th>岗位门户</th>
+                <th>任务工作台</th>
                 <th>状态</th>
                 <th>操作</th>
               </tr>

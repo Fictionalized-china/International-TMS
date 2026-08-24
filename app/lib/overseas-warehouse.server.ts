@@ -34,6 +34,7 @@ type BatchOrder = {
   overseas_warehouse_id: string | null;
   warehouse_name: string | null;
   warehouse_address: string | null;
+  customs_clearance_mode: "company" | "customer";
 };
 
 export async function confirmOverseasBatchArrival(input: ArrivalInput) {
@@ -55,7 +56,7 @@ export async function confirmOverseasBatchArrival(input: ArrivalInput) {
     throw new Error("批次尚未确认出境，不能登记境外到仓");
 
   const orders = await env.DB.prepare(
-    `SELECT bo.order_id,s.id shipment_id,o.overseas_warehouse_id,w.name warehouse_name,w.address warehouse_address
+    `SELECT bo.order_id,s.id shipment_id,o.overseas_warehouse_id,w.name warehouse_name,w.address warehouse_address,o.customs_clearance_mode
      FROM transport_batch_orders bo
      JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
      LEFT JOIN shipments s ON s.order_id=o.id AND s.organization_id=o.organization_id
@@ -69,17 +70,18 @@ export async function confirmOverseasBatchArrival(input: ArrivalInput) {
     (item) => !item.overseas_warehouse_id,
   );
   if (missingWarehouse) throw new Error("批次内存在未指定境外目的仓的订单");
-  const orderPlaceholders = orders.results.map(() => "?").join(",");
-  const clearedOrders = await env.DB.prepare(
-    `SELECT COUNT(DISTINCT order_id) total
-     FROM order_tracking_milestones
-     WHERE organization_id=? AND order_id IN (${orderPlaceholders})
-       AND milestone_code='customs_cleared'`,
-  )
-    .bind(input.organizationId, ...orders.results.map((item) => item.order_id))
-    .first<{ total: number }>();
-  if ((clearedOrders?.total ?? 0) !== orders.results.length)
-    throw new Error("批次内仍有订单未完成目的地清关，不能确认境外目的仓到仓");
+  const companyClearanceOrders = orders.results.filter((item) => item.customs_clearance_mode !== "customer");
+  if (companyClearanceOrders.length) {
+    const orderPlaceholders = companyClearanceOrders.map(() => "?").join(",");
+    const clearedOrders = await env.DB.prepare(
+      `SELECT COUNT(DISTINCT order_id) total
+       FROM order_tracking_milestones
+       WHERE organization_id=? AND order_id IN (${orderPlaceholders})
+         AND milestone_code='customs_cleared'`,
+    ).bind(input.organizationId, ...companyClearanceOrders.map((item) => item.order_id)).first<{ total: number }>();
+    if ((clearedOrders?.total ?? 0) !== companyClearanceOrders.length)
+      throw new Error("批次内仍有公司代办清关订单未完成目的地清关，不能确认境外目的仓到仓");
+  }
 
   const now = new Date().toISOString();
   const statements = [
@@ -174,7 +176,7 @@ export async function confirmOverseasBatchArrival(input: ArrivalInput) {
 
 async function confirmStandaloneOrderArrival(input: ArrivalInput & { orderId: string }) {
   const order = await env.DB.prepare(
-    `SELECT o.id,o.order_number,o.business_type,o.overseas_warehouse_id,w.name warehouse_name,w.address warehouse_address
+    `SELECT o.id,o.order_number,o.business_type,o.overseas_warehouse_id,o.customs_clearance_mode,w.name warehouse_name,w.address warehouse_address
      FROM transport_orders o
      LEFT JOIN warehouses w ON w.id=o.overseas_warehouse_id AND w.organization_id=o.organization_id
      WHERE o.organization_id=? AND o.id=?`,
@@ -185,13 +187,14 @@ async function confirmStandaloneOrderArrival(input: ArrivalInput & { orderId: st
       order_number: string;
       business_type: string;
       overseas_warehouse_id: string | null;
+      customs_clearance_mode: "company" | "customer";
       warehouse_name: string | null;
       warehouse_address: string | null;
     }>();
   if (!order) throw new Error("订单不存在");
   if (order.business_type === "ltl") throw new Error("拼车订单必须通过配载单确认境外到仓");
   if (!order.overseas_warehouse_id) throw new Error("订单尚未指定境外目的仓");
-  const destinationCustomsCleared = await env.DB.prepare(
+  const destinationCustomsCleared = order.customs_clearance_mode === "customer" ? true : await env.DB.prepare(
     `SELECT 1 FROM order_tracking_milestones
      WHERE organization_id=? AND order_id=? AND milestone_code='customs_cleared'
      LIMIT 1`,
@@ -381,19 +384,20 @@ export async function advanceOverseasOrder(input: AdvanceInput) {
       : input.action === "appointment"
         ? "预约提货"
         : "客户自提";
-  const progress = input.action === "notify" ? 50 : input.action === "appointment" ? 75 : 85;
+  const progress = input.action === "notify" ? 50 : input.action === "appointment" ? 75 : 100;
   const moduleStepCode =
     input.action === "notify"
       ? "appointment"
       : input.action === "appointment"
         ? "picked_up"
-        : "signed";
+        : "completed";
   const moduleStepName =
     input.action === "notify"
       ? "预约提货"
       : input.action === "appointment"
         ? "客户自提"
-        : "等待签收单确认";
+        : "运输完成，进入费用结算";
+  const moduleStatus=input.action === "pickup" ? "completed" : "in_progress";
   const now = new Date().toISOString();
   const statements = [
     env.DB.prepare(
@@ -422,12 +426,15 @@ export async function advanceOverseasOrder(input: AdvanceInput) {
       operation.id,
     ),
     env.DB.prepare(
-      `UPDATE order_module_instances SET status='in_progress',current_step_code=?,current_step_name=?,progress_percent=?,started_at=COALESCE(started_at,?),completed_at=NULL,blocking_reason=NULL,updated_at=?
+      `UPDATE order_module_instances SET status=?,current_step_code=?,current_step_name=?,progress_percent=?,started_at=COALESCE(started_at,?),completed_at=CASE WHEN ?='completed' THEN COALESCE(completed_at,?) ELSE NULL END,blocking_reason=NULL,updated_at=?
        WHERE organization_id=? AND order_id=? AND module_code='overseas_warehouse' AND enabled=1`,
     ).bind(
+      moduleStatus,
       moduleStepCode,
       moduleStepName,
       progress,
+      now,
+      moduleStatus,
       now,
       now,
       input.organizationId,
@@ -478,7 +485,7 @@ export async function advanceOverseasOrder(input: AdvanceInput) {
       ).bind(input.orderId, input.organizationId),
       env.DB.prepare(
         `INSERT INTO shipment_events(id,shipment_id,status,location,description,event_at,visible_to_customer,created_by_user_id,created_at)
-         SELECT ?,s.id,'delivered',?,'客户已在境外目的仓扫码自提出库，等待签收单确认',?,1,?,?
+         SELECT ?,s.id,'delivered',?,'客户已在境外目的仓扫码核对并完成自提出库，运输完成并进入结算',?,1,?,?
          FROM shipments s WHERE s.order_id=? AND s.organization_id=?`,
       ).bind(
         crypto.randomUUID(),
@@ -502,6 +509,21 @@ export async function advanceOverseasOrder(input: AdvanceInput) {
         input.actorUserId,
         now,
       ),
+      env.DB.prepare(
+        `INSERT INTO order_tracking_milestones(id,organization_id,order_id,milestone_code,milestone_name,event_at,location,notes,visible_to_customer,created_by_user_id,created_at)
+         SELECT ?,?,?,'signed','扫码确认签收',?,?,?,1,?,?
+         WHERE NOT EXISTS(SELECT 1 FROM order_tracking_milestones WHERE organization_id=? AND order_id=? AND milestone_code='signed')`,
+      ).bind(crypto.randomUUID(),input.organizationId,input.orderId,input.occurredAt,operation.warehouse_name,"境外仓复核整票货物后确认客户自提",input.actorUserId,now,input.organizationId,input.orderId),
+      env.DB.prepare(
+        `INSERT INTO order_tracking_milestones(id,organization_id,order_id,milestone_code,milestone_name,event_at,location,notes,visible_to_customer,created_by_user_id,created_at)
+         SELECT ?,?,?,'completed','运输完成',?,?,?,1,?,?
+         WHERE NOT EXISTS(SELECT 1 FROM order_tracking_milestones WHERE organization_id=? AND order_id=? AND milestone_code='completed')`,
+      ).bind(crypto.randomUUID(),input.organizationId,input.orderId,input.occurredAt,operation.warehouse_name,"境外仓扫码自提出库完成，自动进入费用结算",input.actorUserId,now,input.organizationId,input.orderId),
+      env.DB.prepare(
+        `INSERT INTO order_tasks(id,organization_id,order_id,module_code,task_type,title,priority,status,assignee_user_id,assigned_by_user_id,created_at,updated_at)
+         SELECT ?,?,?,'costs','start_receivable_reconciliation','发起客户应收对账','normal','pending',NULL,?,?,?
+         WHERE NOT EXISTS(SELECT 1 FROM order_tasks WHERE organization_id=? AND order_id=? AND task_type='start_receivable_reconciliation' AND status IN ('pending','in_progress'))`,
+      ).bind(crypto.randomUUID(),input.organizationId,input.orderId,input.actorUserId,now,now,input.organizationId,input.orderId),
     );
   }
   await env.DB.batch(statements);
@@ -630,18 +652,16 @@ export async function reconcileOverseasOrderDeliveryState(input: {
   if (!operation) return;
 
   if (operation.status === "picked_up") {
-    const signedReceipt = await env.DB.prepare(
-      `SELECT 1 ready
-         FROM order_document_metadata
-        WHERE organization_id=? AND order_id=?
-          AND document_category='delivery_receipt'
-          AND review_status IN ('approved','archived')
-        LIMIT 1`,
-    ).bind(input.organizationId, input.orderId).first<{ ready: number }>();
-    if (signedReceipt) {
-      await completeOverseasOrderDelivery(input);
-      return;
-    }
+    const now = new Date().toISOString();
+    await env.DB.prepare(
+      `UPDATE order_module_instances
+          SET status='completed',current_step_code='completed',current_step_name='运输完成，进入费用结算',
+              progress_percent=100,started_at=COALESCE(started_at,?),completed_at=COALESCE(completed_at,?),
+              blocking_reason=NULL,updated_at=?
+        WHERE organization_id=? AND order_id=? AND module_code='overseas_warehouse' AND enabled=1`,
+    ).bind(now, now, now, input.organizationId, input.orderId).run();
+    await syncOrderWorkflowSnapshot(input.organizationId, input.orderId);
+    return;
   }
 
   const state = ({
@@ -649,7 +669,6 @@ export async function reconcileOverseasOrderDeliveryState(input: {
     arrived: ["arrived", "等待系统通知客户", 25],
     notified: ["appointment", "预约提货", 50],
     appointment: ["picked_up", "等待境外仓扫码自提出库", 75],
-    picked_up: ["signed", "等待签收单确认", 85],
   } as Record<string, [string, string, number]>)[operation.status];
   if (!state) return;
   const now = new Date().toISOString();

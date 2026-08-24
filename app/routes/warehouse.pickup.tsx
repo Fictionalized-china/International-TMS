@@ -4,6 +4,7 @@ import type { Route } from "./+types/warehouse.pickup";
 import { requireSessionUser } from "../lib/auth.server";
 import { writeAudit } from "../lib/audit.server";
 import { advanceOverseasOrder } from "../lib/overseas-warehouse.server";
+import { Modal } from "../components/Modal";
 import { valueOf } from "../lib/validation";
 import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
@@ -87,6 +88,32 @@ export async function action({ request }: Route.ActionArgs) {
   await requireWarehouseAssignment(user, warehouse.id, "operator");
 
   const form = await request.formData();
+  const intent=valueOf(form,"intent")||"scan";
+  if(intent==="confirm_pickup"){
+    const orderId=valueOf(form,"orderId");
+    const pickup=await env.DB.prepare(`SELECT op.order_id,o.order_number,COALESCE(o.consignee_contact,o.shipper_contact,(SELECT cc.name FROM customer_contacts cc WHERE cc.customer_id=o.customer_id ORDER BY cc.is_primary DESC,cc.updated_at DESC LIMIT 1),'客户自提') pickup_contact,op.status operation_status
+      FROM overseas_warehouse_operations op JOIN transport_orders o ON o.id=op.order_id AND o.organization_id=op.organization_id
+      WHERE op.organization_id=? AND op.warehouse_id=? AND op.order_id=? AND op.status!='cancelled' ORDER BY op.created_at DESC LIMIT 1`).bind(user.organizationId,warehouse.id,orderId).first<{order_id:string;order_number:string;pickup_contact:string;operation_status:string}>();
+    if(!pickup)return{formError:"未找到当前境外仓的待自提订单"};
+    if(pickup.operation_status!=="appointment")return{formError:"订单当前状态不能确认自提出库"};
+    const packageStats=await env.DB.prepare(`SELECT COUNT(*) total,SUM(CASE WHEN p.status='allocated' THEN 1 ELSE 0 END) scanned,SUM(CASE WHEN p.status='exception' THEN 1 ELSE 0 END) exceptions
+      FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id
+      WHERE p.organization_id=? AND p.warehouse_id=? AND s.order_id=? AND p.status!='dispatched'`).bind(user.organizationId,warehouse.id,orderId).first<{total:number;scanned:number|null;exceptions:number|null}>();
+    if(!packageStats?.total||packageStats.scanned!==packageStats.total)return{formError:`${pickup.order_number} 尚未扫描全部货物标签，不能确认出库`};
+    if((packageStats.exceptions??0)>0)return{formError:`${pickup.order_number} 仍有异常货物，不能确认出库`};
+    const now=new Date().toISOString();
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO warehouse_package_movements(id,organization_id,package_id,operation_type,from_location_id,to_location_id,operator_user_id,notes,occurred_at,created_at)
+        SELECT lower(hex(randomblob(16))),p.organization_id,p.id,'dispatch',p.location_id,NULL,?,'境外目的仓客户自提复核后出库',?,?
+        FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id
+        WHERE p.organization_id=? AND p.warehouse_id=? AND s.order_id=? AND p.status='allocated'`).bind(user.userId,now,now,user.organizationId,warehouse.id,orderId),
+      env.DB.prepare(`UPDATE warehouse_packages SET status='dispatched',updated_at=? WHERE organization_id=? AND warehouse_id=? AND status='allocated' AND shipment_id IN (SELECT id FROM shipments WHERE organization_id=? AND order_id=?)`).bind(now,user.organizationId,warehouse.id,user.organizationId,orderId),
+    ]);
+    await advanceOverseasOrder({organizationId:user.organizationId,orderId,actorUserId:user.userId,action:"pickup",occurredAt:now,pickupContact:pickup.pickup_contact,pickupProofReference:`WAREHOUSE-CONFIRM:${pickup.order_number}`,notes:`${warehouse.name} 已核对整票货物并完成客户自提出库`});
+    await writeAudit({request,action:"warehouse.overseas.pickup",resourceType:"transport_order",resourceId:orderId,organizationId:user.organizationId,actorUserId:user.userId,metadata:{warehouseId:warehouse.id,orderNumber:pickup.order_number,confirmedPackages:packageStats.total}});
+    const params=new URLSearchParams({warehouseId:warehouse.id,pickupResult:`${pickup.order_number} 已复核并完成自提出库，运输已结束并进入费用结算`});
+    return redirect(`/warehouse/pickup?${params.toString()}`);
+  }
   const barcode = valueOf(form, "barcode").trim();
   if (!barcode) return { formError: "请扫描境外仓现有货物标签" };
 
@@ -181,53 +208,10 @@ export async function action({ request }: Route.ActionArgs) {
     return redirect(`/warehouse/pickup?${params.toString()}`);
   }
 
-  await env.DB.batch([
-    env.DB.prepare(
-      `INSERT INTO warehouse_package_movements(
-         id,organization_id,package_id,operation_type,from_location_id,to_location_id,
-         operator_user_id,notes,occurred_at,created_at
-       )
-       SELECT lower(hex(randomblob(16))),p.organization_id,p.id,'dispatch',p.location_id,NULL,?,?,?,?
-         FROM warehouse_packages p
-         JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id
-        WHERE p.organization_id=? AND p.warehouse_id=? AND s.order_id=? AND p.status='allocated'`,
-    ).bind(
-      user.userId,
-      "境外目的仓客户自提扫码出库",
-      now,
-      now,
-      user.organizationId,
-      warehouse.id,
-      pkg.order_id,
-    ),
-    env.DB.prepare(
-      `UPDATE warehouse_packages SET status='dispatched',updated_at=?
-        WHERE organization_id=? AND warehouse_id=? AND status='allocated'
-          AND shipment_id IN (SELECT id FROM shipments WHERE organization_id=? AND order_id=?)`,
-    ).bind(now, user.organizationId, warehouse.id, user.organizationId, pkg.order_id),
-  ]);
-  await advanceOverseasOrder({
-    organizationId: user.organizationId,
-    orderId: pkg.order_id,
-    actorUserId: user.userId,
-    action: "pickup",
-    occurredAt: now,
-    pickupContact: pkg.pickup_contact,
-    pickupProofReference: `WAREHOUSE-SCAN:${barcode}`,
-    notes: `${warehouse.name} 已逐件扫码并完成客户自提出库`,
-  });
-  await writeAudit({
-    request,
-    action: "warehouse.overseas.pickup",
-    resourceType: "transport_order",
-    resourceId: pkg.order_id,
-    organizationId: user.organizationId,
-    actorUserId: user.userId,
-    metadata: { warehouseId: warehouse.id, orderNumber: pkg.order_number, barcode },
-  });
   const params = new URLSearchParams({
     warehouseId: warehouse.id,
-    pickupResult: `${pkg.order_number} 全部货物已扫码出库，管理后台已同步为“客户已自提，待签收确认”`,
+    orderId:pkg.order_id,
+    pickupResult: `${pkg.order_number} 全部货物标签已扫描，请核对货物明细后确认自提出库`,
   });
   return redirect(`/warehouse/pickup?${params.toString()}`);
 }
@@ -246,20 +230,21 @@ export default function WarehousePickup({ loaderData, actionData }: Route.Compon
       <div>
         <p className="eyebrow">CUSTOMER PICKUP</p>
         <h1>客户自提出库</h1>
-        <p>逐件扫描境外仓货物标签；同一订单全部货物扫完后，系统自动同步客户自提状态。</p>
+        <p>逐件扫描境外仓货物标签；同一订单全部扫完后核对整票货物，确认无误才完成自提出库。</p>
       </div>
     </header>
     {loaderData.result && <p className="alert success">{loaderData.result}</p>}
     {actionData?.formError && <p className="alert warning">{actionData.formError}</p>}
     <section className="panel overseas-pickup-scan-panel">
       <Form method="post" className="scan-inline overseas-pickup-scan-form">
+        <input type="hidden" name="intent" value="scan"/>
         <label className="field">
           <span>扫描境外仓货物标签</span>
           <input name="barcode" placeholder="扫描货物标签条码后回车" autoComplete="off" autoFocus required />
         </label>
         <button className="primary warehouse-primary" disabled={busy}>{busy ? "正在核对" : "确认扫描"}</button>
       </Form>
-      <small>订单号用于查询，出库必须逐件扫描货物标签；全部扫完后自动完成本票自提出库。</small>
+      <small>订单号用于查询，出库必须逐件扫描货物标签；全部扫完后还需核对明细并确认，避免错拿货物。</small>
     </section>
 
     {loaderData.activeOrder && <section className="panel overseas-pickup-progress-panel">
@@ -267,12 +252,13 @@ export default function WarehousePickup({ loaderData, actionData }: Route.Compon
       <div className="table-wrap"><table><thead><tr><th>货物标签</th><th>包装号</th><th>件数</th><th>重量 / 体积</th><th>状态</th></tr></thead><tbody>
         {loaderData.packages.map((item) => <tr key={item.id}><td><strong>{item.barcode}</strong></td><td>{item.package_number}</td><td>{item.pieces}</td><td>{item.weight_kg ?? "—"} KG · {item.volume_cbm ?? "—"} CBM</td><td><span className={`status-pill ${item.status === "exception" ? "off" : ""}`}>{packageStatusLabels[item.status] || item.status}</span></td></tr>)}
       </tbody></table></div>
+      {loaderData.packages.length>0&&loaderData.packages.every(item=>item.status==="allocated")&&<div className="overseas-pickup-confirm-action"><Modal title={`核对客户自提货物 · ${loaderData.activeOrder.order_number}`} triggerLabel="核对货物并确认自提出库" triggerClassName="primary" size="wide"><div className="stack"><div className="alert warning">请当面核对订单、客户和下列全部货物标签。确认后将立即出库、结束运输并进入费用结算。</div><div className="table-wrap"><table><thead><tr><th>货物标签</th><th>包装号</th><th>件数</th><th>重量 / 体积</th></tr></thead><tbody>{loaderData.packages.map(item=><tr key={item.id}><td><strong>{item.barcode}</strong></td><td>{item.package_number}</td><td>{item.pieces}</td><td>{item.weight_kg??"—"} KG · {item.volume_cbm??"—"} CBM</td></tr>)}</tbody></table></div><Form method="post" className="overseas-pickup-confirm-form"><input type="hidden" name="intent" value="confirm_pickup"/><input type="hidden" name="orderId" value={loaderData.activeOrder.order_id}/><button className="primary" disabled={busy}>确认货物无误并完成自提出库</button></Form></div></Modal></div>}
     </section>}
 
     <section className="panel overseas-pickup-queue-panel">
       <div className="panel-header"><div><h2>境外仓自提队列</h2><p>只显示已预约待自提和已完成自提出库的订单。</p></div><span className="status-pill">{loaderData.orders.length} 票</span></div>
       <div className="table-wrap"><table><thead><tr><th>状态</th><th>订单 / 配载单</th><th>客户</th><th>预约时间</th><th>标签进度</th><th>自提出库时间</th></tr></thead><tbody>
-        {loaderData.orders.map((item) => <tr key={item.order_id}><td><span className={`status-pill ${item.operation_status === "picked_up" ? "" : "off"}`}>{item.operation_status === "picked_up" ? "已自提待签收" : "待扫码自提"}</span></td><td><strong>{item.order_number}</strong><small>{item.batch_number}</small></td><td>{item.customer_name}</td><td>{item.appointment_at ? new Date(item.appointment_at).toLocaleString("zh-CN") : "—"}</td><td>{item.dispatched_count}/{item.package_count} 已出库</td><td>{item.pickup_at ? new Date(item.pickup_at).toLocaleString("zh-CN") : "—"}</td></tr>)}
+        {loaderData.orders.map((item) => <tr key={item.order_id}><td><span className={`status-pill ${item.operation_status === "picked_up" ? "" : "off"}`}>{item.operation_status === "picked_up" ? "运输完成，待结算" : "待扫码自提"}</span></td><td><strong>{item.order_number}</strong><small>{item.batch_number}</small></td><td>{item.customer_name}</td><td>{item.appointment_at ? new Date(item.appointment_at).toLocaleString("zh-CN") : "—"}</td><td>{item.dispatched_count}/{item.package_count} 已出库</td><td>{item.pickup_at ? new Date(item.pickup_at).toLocaleString("zh-CN") : "—"}</td></tr>)}
         {!loaderData.orders.length && <tr><td colSpan={6} className="empty-state">当前仓库暂无待自提订单。</td></tr>}
       </tbody></table></div>
     </section>

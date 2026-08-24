@@ -238,7 +238,7 @@ export const workflowFieldCatalog: WorkflowFieldCatalogItem[] = [
   field("outbound_transport", "customs", "document_border_document", "口岸文件", "attachment", "optional", "口岸交接、过境或查验文件。"),
   field("outbound_transport", "tracking", "document_transshipment_order", "换装单", "attachment", "optional", "发生换装、转关或车辆交接后上传相应凭证。"),
   field("overseas_pickup", "overseas_warehouse", "document_pod", "POD", "attachment", "optional", "境外仓交付或客户提货完成后上传交付证明。"),
-  field("overseas_pickup", "overseas_warehouse", "document_delivery_receipt", "签收单", "attachment", "required", "国外运输结束并完成签收后上传；未上传不能完成境外仓交付。"),
+  field("overseas_pickup", "overseas_warehouse", "document_delivery_receipt", "签收单", "attachment", "optional", "境外仓扫码核对并完成客户自提出库后，可选上传签收文件作为补充归档。"),
   field("overseas_pickup", "overseas_warehouse", "document_return_receipt", "回单", "attachment", "optional", "客户签收回单或业务回执。"),
   field("reconciliation", "costs", "document_billing_statement", "账单", "attachment", "optional", "对账完成后上传客户或供应商账单。"),
   field("reconciliation", "costs", "document_payment_receipt", "收付款凭证", "attachment", "optional", "收付款或核销完成后上传银行回单等凭证。"),

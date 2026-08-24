@@ -266,14 +266,17 @@ export async function action({ request }: Route.ActionArgs) {
     actualPieces: nonNegativeInteger(form, `actualPieces_${index}`),
     actualWeight: nonNegativeNumber(form, `actualWeight_${index}`),
     actualVolume: nonNegativeNumber(form, `actualVolume_${index}`),
+    actualLength: nonNegativeNumber(form, `actualLength_${index}`),
+    actualWidth: nonNegativeNumber(form, `actualWidth_${index}`),
+    actualHeight: nonNegativeNumber(form, `actualHeight_${index}`),
     itemNotes: valueOf(form, `itemNotes_${index}`).trim(),
   }));
-  if (actualRows.some((item) => item.actualPackages === null || item.actualPieces === null || item.actualWeight === null || item.actualVolume === null))
-    return { formError: "实收包装数、件数、重量和体积必须填写有效的非负数字" };
+  if (actualRows.some((item) => item.actualPackages === null || item.actualPieces === null || item.actualWeight === null || item.actualVolume === null || item.actualLength === null || item.actualWidth === null || item.actualHeight === null))
+    return { formError: "实收包装数、件数、重量、体积和长宽高必须填写有效的非负数字" };
   const receivedRows = actualRows.filter((item) => (item.actualPackages ?? 0) > 0);
   if (!receivedRows.length && result !== "ready") return { formError: "本次至少要验收一个实际包装" };
-  if (receivedRows.some((item) => !item.actualPieces || !item.actualWeight || !item.actualVolume))
-    return { formError: "有实收包装的货物必须填写实收件数、实际重量和实际体积" };
+  if (receivedRows.some((item) => !item.actualPieces || !item.actualWeight || !item.actualVolume || !item.actualLength || !item.actualWidth || !item.actualHeight))
+    return { formError: "有实收包装的货物必须填写实收件数、实际重量、实际体积和实际长宽高" };
 
   if (result === "ready") {
     const activeException = await env.DB.prepare(
@@ -333,18 +336,22 @@ export async function action({ request }: Route.ActionArgs) {
     const actualPieces = item.actualPieces as number;
     const actualWeight = item.actualWeight as number;
     const actualVolume = item.actualVolume as number;
+    const actualLength = item.actualLength as number;
+    const actualWidth = item.actualWidth as number;
+    const actualHeight = item.actualHeight as number;
     statements.push(
       env.DB.prepare(
         `INSERT INTO warehouse_receipt_items(
           id,organization_id,receipt_id,order_id,cargo_item_id,
           expected_packages,expected_pieces,expected_weight_kg,expected_volume_cbm,
-          actual_packages,actual_pieces,actual_weight_kg,actual_volume_cbm,result,notes,created_at,updated_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          actual_packages,actual_pieces,actual_weight_kg,actual_volume_cbm,
+          actual_length_cm,actual_width_cm,actual_height_cm,result,notes,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       ).bind(
         crypto.randomUUID(),user.organizationId,receiptId,order.id,item.id,
         item.package_count,item.package_count * item.pieces_per_package,
         item.package_count * item.gross_weight_per_package_kg,item.package_count * item.volume_per_package_cbm,
-        actualPackages,actualPieces,actualWeight,actualVolume,
+        actualPackages,actualPieces,actualWeight,actualVolume,actualLength,actualWidth,actualHeight,
         result === "exception" ? "exception" : "normal",item.itemNotes || null,now,now,
       ),
     );
@@ -361,11 +368,11 @@ export async function action({ request }: Route.ActionArgs) {
         env.DB.prepare(
           `INSERT INTO warehouse_packages(
             id,organization_id,receipt_id,shipment_id,warehouse_id,location_id,barcode,package_number,
-            pieces,weight_kg,volume_cbm,status,notes,created_at,updated_at,cargo_item_id
-          ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            pieces,weight_kg,volume_cbm,length_cm,width_cm,height_cm,status,notes,created_at,updated_at,cargo_item_id
+          ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         ).bind(
           packageId,user.organizationId,receiptId,shipmentId,warehouse.id,location.id,barcode,packageNumber,
-          pieces,weight,volume,packageStatus,item.itemNotes || notes || null,now,now,item.id,
+          pieces,weight,volume,actualLength,actualWidth,actualHeight,packageStatus,item.itemNotes || notes || null,now,now,item.id,
         ),
         env.DB.prepare(
           `INSERT INTO warehouse_package_movements(
@@ -517,11 +524,11 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
         <span><small>提货地</small><strong>{loaderData.order.origin_city} · {loaderData.order.origin_address}</strong></span>
       </section>
       <section className="panel acceptance-cargo-panel"><div className="panel-header"><div><h2>预录货物与本次实收</h2><p>每条货物按本次实际到仓填写；未在本批到仓的货物全部填 0。</p></div><span className="status-pill">{loaderData.cargoItems.length} 条货物</span></div>
-        <div className="table-wrap acceptance-cargo-table"><table><thead><tr><th>预录货物</th><th>计划数据</th><th>累计已收</th><th>本次包装数 *</th><th>本次件数 *</th><th>实际重量 KG *</th><th>实际体积 CBM *</th><th>本行备注</th></tr></thead><tbody>{loaderData.cargoItems.map((item,index) => {
+        <div className="table-wrap acceptance-cargo-table"><table><thead><tr><th>预录货物</th><th>计划数据</th><th>累计已收</th><th>本次包装数 *</th><th>本次件数 *</th><th>实际重量 KG *</th><th>实际长×宽×高 CM *</th><th>实际体积 CBM *</th><th>本行备注</th></tr></thead><tbody>{loaderData.cargoItems.map((item,index) => {
           const expectedPieces = item.package_count * item.pieces_per_package;
           const expectedWeight = item.package_count * item.gross_weight_per_package_kg;
           const expectedVolume = item.package_count * item.volume_per_package_cbm;
-          return <tr key={item.id}><td><strong>{item.line_no}. {item.cargo_name_cn}</strong><small>{item.cargo_name_en || "—"} · HS {item.hs_code || "—"}</small><small>{packageTypeLabel(item.package_type)} · {item.length_cm}×{item.width_cm}×{item.height_cm} cm</small></td><td><strong>{item.package_count} 包 / {expectedPieces} 件</strong><small>{expectedWeight.toFixed(2)} KG · {expectedVolume.toFixed(3)} CBM</small></td><td><strong>{item.received_packages} 包 / {item.received_pieces} 件</strong><small>{item.received_weight_kg.toFixed(2)} KG · {item.received_volume_cbm.toFixed(3)} CBM</small></td><td><input name={`actualPackages_${index}`} type="number" min="0" step="1" defaultValue={Math.max(0,item.package_count-item.received_packages)} required/></td><td><input name={`actualPieces_${index}`} type="number" min="0" step="1" defaultValue={Math.max(0,expectedPieces-item.received_pieces)} required/></td><td><input name={`actualWeight_${index}`} type="number" min="0" step="0.001" defaultValue={Math.max(0,expectedWeight-item.received_weight_kg).toFixed(3)} required/></td><td><input name={`actualVolume_${index}`} type="number" min="0" step="0.0001" defaultValue={Math.max(0,expectedVolume-item.received_volume_cbm).toFixed(4)} required/></td><td><input name={`itemNotes_${index}`} placeholder="选填"/></td></tr>;
+          return <tr key={item.id}><td><strong>{item.line_no}. {item.cargo_name_cn}</strong><small>{item.cargo_name_en || "—"} · HS {item.hs_code || "—"}</small><small>{packageTypeLabel(item.package_type)} · {item.length_cm}×{item.width_cm}×{item.height_cm} cm</small></td><td><strong>{item.package_count} 包 / {expectedPieces} 件</strong><small>{expectedWeight.toFixed(2)} KG · {expectedVolume.toFixed(3)} CBM</small></td><td><strong>{item.received_packages} 包 / {item.received_pieces} 件</strong><small>{item.received_weight_kg.toFixed(2)} KG · {item.received_volume_cbm.toFixed(3)} CBM</small></td><td><input name={`actualPackages_${index}`} type="number" min="0" step="1" defaultValue={Math.max(0,item.package_count-item.received_packages)} required/></td><td><input name={`actualPieces_${index}`} type="number" min="0" step="1" defaultValue={Math.max(0,expectedPieces-item.received_pieces)} required/></td><td><input name={`actualWeight_${index}`} type="number" min="0" step="0.001" defaultValue={Math.max(0,expectedWeight-item.received_weight_kg).toFixed(3)} required/></td><td><div className="acceptance-dimensions"><input name={`actualLength_${index}`} type="number" min="0" step="0.1" defaultValue={item.length_cm} aria-label="实际长度" required/><span>×</span><input name={`actualWidth_${index}`} type="number" min="0" step="0.1" defaultValue={item.width_cm} aria-label="实际宽度" required/><span>×</span><input name={`actualHeight_${index}`} type="number" min="0" step="0.1" defaultValue={item.height_cm} aria-label="实际高度" required/></div></td><td><input name={`actualVolume_${index}`} type="number" min="0" step="0.0001" defaultValue={Math.max(0,expectedVolume-item.received_volume_cbm).toFixed(4)} required/></td><td><input name={`itemNotes_${index}`} placeholder="选填"/></td></tr>;
         })}</tbody></table></div>
       </section>
       <section className="panel acceptance-confirm-panel"><label className="field"><span>入库库位 *</span><select name="locationId" required><option value="">请选择库位</option>{loaderData.locations.map((item) => <option key={item.id} value={item.id}>{item.warehouse_name} / {item.zone_name} / {item.name}（{item.code}）</option>)}</select></label><fieldset className="acceptance-result"><legend>本次验收结果 *</legend><label><input type="radio" name="receiptResult" value="partial" checked={receiptResult === "partial"} onChange={() => setReceiptResult("partial")}/><span><b>分批正常入库</b><small>本批货物无异常，订单尚未全部到齐</small></span></label><label><input type="radio" name="receiptResult" value="ready" checked={receiptResult === "ready"} onChange={() => setReceiptResult("ready")}/><span><b>订单货齐</b><small>本次入库后，订单全部货物已经到齐</small></span></label><label><input type="radio" name="receiptResult" value="exception" checked={receiptResult === "exception"} onChange={() => setReceiptResult("exception")}/><span><b>异常入库</b><small>允许入库但冻结后续装车和配载</small></span></label></fieldset>{receiptResult === "exception" && <label className="field span-2"><span>异常说明 *</span><textarea name="exceptionNotes" rows={3} required placeholder="填写短少、破损、错货、超差等具体情况"/></label>}<label className="field span-2"><span>收货备注</span><textarea name="notes" rows={2} placeholder="选填，本次到货车辆、现场情况等"/></label><button className="primary acceptance-submit" disabled={busy || !canOperate || !loaderData.locations.length}>{busy ? "正在验收入库…" : "确认验收、入库并生成标签"}</button></section>

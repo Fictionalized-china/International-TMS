@@ -223,14 +223,14 @@ export async function loader({ request }: Route.LoaderArgs) {
 }
 
 export function meta() {
-  return [{ title: "岗位门户 | International TMS" }];
+  return [{ title: "任务工作台 | International TMS" }];
 }
 
 export default function PositionPortal({ loaderData }: Route.ComponentProps) {
   const { current, config, links, orders, canViewAll, filters, summary } = loaderData;
   return <>
     <header className="page-header position-portal-header">
-      <div><p className="eyebrow">POSITION WORK QUEUE</p><h1>{config.title}</h1><p>{current.displayName} · {canViewAll ? "可查看全部订单" : "只显示当前由本岗位负责推进的订单"}</p></div>
+      <div><p className="eyebrow">TASK WORKBENCH</p><h1>任务工作台</h1><p>{current.displayName} · {canViewAll ? "可查看全部订单" : "只显示当前由本岗位负责推进的订单"} · 点击订单直接进入对应办理模组</p></div>
       <div className="page-actions"><span className="status-pill">当前显示 {orders.length} 条</span>{links.slice(0,3).map(link=><Link className="secondary" key={link.href} to={link.href}>{link.label}</Link>)}</div>
     </header>
 

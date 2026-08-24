@@ -126,10 +126,15 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
             <small>新翎航 TMS · 仓库作业端</small>
           </div>
         </div>
-        <div className="warehouse-context-switcher warehouse-account-context">
-          <strong>{warehouseRoleLabels[loaderData.warehouse.warehouse_role]}</strong>
-          <small>{loaderData.warehouse.code} · 当前账号绑定仓库</small>
-        </div>
+        <Form method="get" action={loaderData.currentPath} className="warehouse-context-switcher warehouse-account-context">
+          {orderContext&&<input type="hidden" name="orderId" value={orderContext.id}/>}
+          {loaderData.returnTo!=="/admin"&&<input type="hidden" name="returnTo" value={loaderData.returnTo}/>}
+          <label htmlFor="authorized-warehouse"><span>当前授权仓库</span></label>
+          <select id="authorized-warehouse" name="warehouseId" defaultValue={loaderData.warehouse.id} onChange={event=>event.currentTarget.form?.requestSubmit()} disabled={loaderData.warehouses.length<2}>
+            {loaderData.warehouses.map(item=><option key={item.id} value={item.id}>{item.name} · {warehouseRoleLabels[item.warehouse_role]}</option>)}
+          </select>
+          <small>{loaderData.warehouse.code} · 仅显示当前账号获授权的仓库</small>
+        </Form>
         <nav aria-label="仓库作业导航">
           <span className="warehouse-nav-group">现场作业</span>
           <NavLink to={warehouseLink("/warehouse", loaderData.query)} end>

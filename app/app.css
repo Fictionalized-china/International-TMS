@@ -13938,8 +13938,35 @@ a.order-module-card.read-only:hover {
 }
 
 .quotation-cargo,
-.quotation-notes {
-  grid-column: span 2;
+.quotation-notes,
+.quotation-address {
+  grid-column: 1 / -1;
+}
+
+.quotation-entry-form .quotation-cargo textarea,
+.quotation-entry-form .quotation-notes textarea,
+.quotation-entry-form .quotation-address textarea,
+.quotation-dialog-form .quotation-address textarea,
+.quotation-dialog-form .quotation-dialog-notes textarea {
+  min-height: 72px;
+}
+
+.acceptance-dimensions {
+  min-width: 220px;
+  display: grid;
+  grid-template-columns: minmax(58px, 1fr) auto minmax(58px, 1fr) auto minmax(58px, 1fr);
+  align-items: center;
+  gap: 5px;
+}
+
+.acceptance-dimensions input {
+  min-width: 0;
+  text-align: right;
+}
+
+.acceptance-dimensions span {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .quotation-submit {
@@ -14008,6 +14035,7 @@ a.order-module-card.read-only:hover {
 
   .quotation-cargo,
   .quotation-notes,
+  .quotation-address,
   .quotation-dialog-notes {
     grid-column: auto;
   }
@@ -14182,6 +14210,17 @@ a.order-module-card.read-only:hover {
 
 .overseas-pickup-progress-panel .panel-header > strong {
   color: #087b50;
+}
+
+.overseas-pickup-confirm-action {
+  padding-top: 14px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.overseas-pickup-confirm-form {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .overseas-pickup-queue-panel td strong,

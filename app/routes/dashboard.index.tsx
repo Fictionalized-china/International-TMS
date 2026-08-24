@@ -43,7 +43,7 @@ export default function DashboardIndex({ loaderData }: Route.ComponentProps) {
   const blocked = loaderData.orderTodos.filter((item) => Boolean(item.blocker)).length;
   return <div className="ops-dashboard">
     <header className="page-header ops-dashboard-header">
-      <div><p className="eyebrow">ROLE PORTAL / 岗位门户</p><h1>早上好，{loaderData.user.displayName}</h1><p>这里集中显示今天真正需要处理的订单与阻断。</p></div>
+      <div><p className="eyebrow">TASK WORKBENCH / 任务工作台</p><h1>早上好，{loaderData.user.displayName}</h1><p>这里集中显示今天真正需要处理的订单与阻断。</p></div>
       <div className="page-actions"><Link className="secondary" to="/admin/portal"><AppIcon name="layout" size={15}/>岗位待办</Link><Link className="primary" to="/admin/orders"><AppIcon name="clipboard" size={15}/>运输订单</Link></div>
     </header>
 
@@ -55,7 +55,7 @@ export default function DashboardIndex({ loaderData }: Route.ComponentProps) {
     </section>
 
     <section className="panel ops-todo-panel">
-      <div className="panel-header"><div><h2>待我处理</h2><p>下一步动作和阻断原因直接来自订单工作流。</p></div><Link className="secondary" to="/admin/portal">打开岗位门户</Link></div>
+      <div className="panel-header"><div><h2>待我处理</h2><p>下一步动作和阻断原因直接来自订单工作流。</p></div><Link className="secondary" to="/admin/portal">打开任务工作台</Link></div>
       <div className="ops-todo-list">
         {loaderData.orderTodos.slice(0, 5).map((item, index) => <Link className={item.blocker ? "blocked" : ""} key={item.order.id} to={item.href}>
           <span className="ops-todo-index">{String(index + 1).padStart(2, "0")}</span>

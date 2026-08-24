@@ -33,6 +33,15 @@ type DomesticRow = {
   transport_module_status: string | null;
   latest_event: string | null;
   latest_event_at: string | null;
+  outbound_batch_id: string | null;
+  outbound_batch_number: string | null;
+  outbound_road_status: string | null;
+  outbound_carrier_name: string | null;
+  outbound_vehicle_plate: string | null;
+  outbound_driver_name: string | null;
+  outbound_driver_phone: string | null;
+  outbound_departure_at: string | null;
+  outbound_arrival_at: string | null;
 };
 
 type VehicleRow = {
@@ -70,6 +79,10 @@ export async function loader({ request }: Route.LoaderArgs) {
             mi.current_step_name transport_step_name,mi.status transport_module_status,
             (SELECT e.description FROM shipment_events e WHERE e.shipment_id=s.id ORDER BY e.event_at DESC,e.created_at DESC LIMIT 1) latest_event,
             (SELECT e.event_at FROM shipment_events e WHERE e.shipment_id=s.id ORDER BY e.event_at DESC,e.created_at DESC LIMIT 1) latest_event_at
+            ,b.id outbound_batch_id,b.batch_number outbound_batch_number,b.road_status outbound_road_status,
+            b.overseas_carrier_name outbound_carrier_name,b.overseas_vehicle_plate outbound_vehicle_plate,
+            b.overseas_driver_name outbound_driver_name,b.overseas_driver_phone outbound_driver_phone,
+            b.actual_departure_at outbound_departure_at,b.actual_arrival_at outbound_arrival_at
        FROM transport_orders o
        JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
        LEFT JOIN order_transport_assignments a ON a.id=(
@@ -84,6 +97,15 @@ export async function loader({ request }: Route.LoaderArgs) {
          ORDER BY COALESCE(sx.updated_at,sx.created_at) DESC,sx.created_at DESC LIMIT 1
        )
        LEFT JOIN order_module_instances mi ON mi.organization_id=o.organization_id AND mi.order_id=o.id AND mi.module_code='transport' AND mi.enabled=1
+       LEFT JOIN transport_batches b ON b.id=(
+         SELECT bx.id FROM transport_batches bx
+         WHERE bx.organization_id=o.organization_id AND bx.status!='cancelled'
+           AND (bx.order_id=o.id OR EXISTS(
+             SELECT 1 FROM transport_batch_orders bo
+             WHERE bo.organization_id=o.organization_id AND bo.batch_id=bx.id AND bo.order_id=o.id AND bo.status!='removed'
+           ))
+         ORDER BY bx.updated_at DESC,bx.created_at DESC LIMIT 1
+       )
       WHERE o.organization_id=? AND o.status NOT IN ('draft','submitted','cancelled')
       ORDER BY COALESCE(a.updated_at,o.updated_at) DESC`,
   ).bind(current.organizationId).all<DomesticRow>();
@@ -101,12 +123,12 @@ export async function loader({ request }: Route.LoaderArgs) {
   for (const vehicle of vehicles.results) (vehiclesByAssignment[vehicle.assignment_id] ??= []).push(vehicle);
   const mapped = rows.results.map((row) => ({
     ...row,
-    domestic_status: domesticStatus(row, vehiclesByAssignment[row.assignment_id || ""] || []),
+    transit_status: transitStatus(row, vehiclesByAssignment[row.assignment_id || ""] || []),
     vehicles: vehiclesByAssignment[row.assignment_id || ""] || [],
   })).filter((row) => {
-    if (status && row.domestic_status.code !== status) return false;
+    if (status && row.transit_status.code !== status) return false;
     if (businessType && row.business_type !== businessType) return false;
-    if (q && !`${row.order_number} ${row.customer_name} ${row.carrier_name || ""} ${row.warehouse_name || ""} ${row.vehicles.map((vehicle) => `${vehicle.plate_number} ${vehicle.driver_name || ""}`).join(" ")}`.toLowerCase().includes(q.toLowerCase())) return false;
+    if (q && !`${row.order_number} ${row.customer_name} ${row.carrier_name || ""} ${row.warehouse_name || ""} ${row.outbound_batch_number || ""} ${row.outbound_carrier_name || ""} ${row.outbound_vehicle_plate || ""} ${row.outbound_driver_name || ""} ${row.vehicles.map((vehicle) => `${vehicle.plate_number} ${vehicle.driver_name || ""}`).join(" ")}`.toLowerCase().includes(q.toLowerCase())) return false;
     return true;
   });
   return { current, rows: mapped, filters: { q, status, businessType } };
@@ -114,21 +136,21 @@ export async function loader({ request }: Route.LoaderArgs) {
 
 export default function DomesticTracking({ loaderData }: Route.ComponentProps) {
   return <>
-    <header className="page-header"><div><p className="eyebrow">DOMESTIC ROAD TRACKING</p><h1>国内物流轨迹</h1><p>一张订单对应一张国内运单；多辆提货车在同一行展开查看，到仓货齐后保留完整历史。</p></div><span className="status-pill">{loaderData.rows.length} 票</span></header>
+    <header className="page-header"><div><p className="eyebrow">IN-TRANSIT VEHICLES</p><h1>在途车辆</h1><p>统一查看国内提货车辆、出境配载车辆和国内外轨迹；订单全程保持一行，历史不丢失。</p></div><span className="status-pill">{loaderData.rows.length} 票</span></header>
     <section className="panel domestic-tracking-ledger">
-      <Form method="get" className="domestic-tracking-filters"><input name="q" defaultValue={loaderData.filters.q} placeholder="订单、客户、承运商、车牌或司机"/><select name="status" defaultValue={loaderData.filters.status}><option value="">全部国内状态</option><option value="waiting_arrangement">待安排</option><option value="planned">已安排待提货</option><option value="in_transit">国内运输中</option><option value="waiting_receipt">已到仓待收货</option><option value="warehouse_check">仓库清点中</option><option value="completed">国内运输完成</option><option value="exception">异常</option></select><select name="businessType" defaultValue={loaderData.filters.businessType}><option value="">全部订单类型</option><option value="ftl">整车</option><option value="ltl">拼车</option></select><button className="secondary">筛选</button><Link className="text-button" to="/admin/domestic-tracking">重置</Link></Form>
-      <div className="table-wrap domestic-tracking-table"><table><thead><tr><th>国内状态</th><th>订单 / 客户</th><th>类型</th><th>承运商 / 国内运单</th><th>起点 → 国内仓</th><th>计划 / 实际</th><th>车辆</th><th>仓库实收</th><th>最近动态</th><th className="sticky-action">操作</th></tr></thead><tbody>{loaderData.rows.map(row=><tr key={row.order_id}>
-        <td><span className={`status-pill ${row.domestic_status.tone}`}>{row.domestic_status.label}</span><small>{row.transport_step_name||"等待业务安排"}</small></td>
+      <Form method="get" className="domestic-tracking-filters"><input name="q" defaultValue={loaderData.filters.q} placeholder="订单、客户、承运商、配载单、车牌或司机"/><select name="status" defaultValue={loaderData.filters.status}><option value="">全部在途状态</option><option value="waiting_arrangement">国内待安排</option><option value="planned">国内待提货</option><option value="domestic_in_transit">国内运输中</option><option value="waiting_receipt">国内仓待收货</option><option value="warehouse_check">国内仓清点中</option><option value="domestic_completed">国内运输完成</option><option value="waiting_outbound">等待出境</option><option value="outbound_in_transit">出境运输中</option><option value="overseas_arrived">已到境外仓</option><option value="completed">运输完成</option><option value="exception">异常</option></select><select name="businessType" defaultValue={loaderData.filters.businessType}><option value="">全部订单类型</option><option value="ftl">整车</option><option value="ltl">拼车</option></select><button className="secondary">筛选</button><Link className="text-button" to="/admin/domestic-tracking">重置</Link></Form>
+      <div className="table-wrap domestic-tracking-table"><table><thead><tr><th>当前状态</th><th>订单 / 客户</th><th>类型</th><th>国内承运商 / 运单</th><th>国内车辆</th><th>国内仓实收</th><th>出境批次 / 承运商</th><th>出境车辆 / 司机</th><th>最近动态</th><th className="sticky-action">操作</th></tr></thead><tbody>{loaderData.rows.map(row=><tr key={row.order_id}>
+        <td><span className={`status-pill ${row.transit_status.tone}`}>{row.transit_status.label}</span><small>{row.transport_step_name||"等待业务安排"}</small></td>
         <td><strong>{row.order_number}</strong><small>{row.customer_name}</small></td>
         <td>{row.business_type==="ftl"?"整车":"拼车"}</td>
-        <td><strong>{row.carrier_name||"待安排"}</strong><small>{row.shipment_number||"运单待生成"}</small></td>
-        <td><strong>{row.origin_location||"客户提货地待定"}</strong><small>→ {row.warehouse_name||row.destination_location||"国内仓待定"}</small></td>
-        <td><strong>提货 {formatTime(row.actual_departure_at||row.shipment_pickup_at)||formatTime(row.planned_departure_at)||"待定"}</strong><small>到仓 {formatTime(row.actual_arrival_at)||formatTime(row.planned_arrival_at)||"待定"}</small></td>
+        <td><strong>{row.carrier_name||"待安排"}</strong><small>{row.shipment_number||"运单待生成"} · {row.origin_location||"提货地待定"} → {row.warehouse_name||row.destination_location||"国内仓待定"}</small></td>
         <td><VehicleDetails vehicles={row.vehicles}/></td>
         <td><strong>{row.inbound_at?`${row.actual_pieces} 件 · ${formatNumber(row.actual_weight_kg)} KG` : "尚未收货"}</strong><small>{row.inbound_at?`${formatNumber(row.actual_volume_cbm)} CBM · ${formatTime(row.inbound_at)}`:"等待到仓"}</small></td>
+        <td><strong>{row.outbound_batch_number||"尚未生成"}</strong><small>{row.outbound_carrier_name||"出境承运商待定"}</small></td>
+        <td><strong>{row.outbound_vehicle_plate||"车辆待定"}</strong><small>{row.outbound_driver_name||"司机待定"} · {row.outbound_driver_phone||"电话待定"}</small></td>
         <td><strong>{row.latest_event||"暂无轨迹"}</strong><small>{formatTime(row.latest_event_at)}</small></td>
-        <td className="sticky-action"><div className="row-actions"><Link className="text-button" to={`/admin/orders/${row.order_id}/modules/transport#module-business-data`}>国内运输</Link>{row.inbound_at&&<Link className="text-button" to={`/admin/orders/${row.order_id}/modules/warehouse#module-business-data`}>仓库收货</Link>}</div></td>
-      </tr>)}</tbody></table>{!loaderData.rows.length&&<p className="empty-state">没有符合筛选条件的国内运输订单。</p>}</div>
+        <td className="sticky-action"><div className="row-actions">{row.outbound_batch_id?<Link className="text-button" to={`/admin/loading/${row.outbound_batch_id}`}>查看出境轨迹</Link>:<Link className="text-button" to={`/admin/orders/${row.order_id}/modules/transport#module-business-data`}>查看国内运输</Link>}</div></td>
+      </tr>)}</tbody></table>{!loaderData.rows.length&&<p className="empty-state">没有符合筛选条件的在途订单。</p>}</div>
     </section>
   </>;
 }
@@ -138,12 +160,16 @@ function VehicleDetails({ vehicles }: { vehicles: VehicleRow[] }) {
   return <details className="domestic-vehicle-details"><summary>{vehicles.length} 辆车 · {vehicles.map((vehicle) => vehicle.plate_number).join("、")}</summary><div>{vehicles.map((vehicle) => <p key={vehicle.id}><strong>{vehicle.vehicle_sequence}. {vehicle.plate_number}</strong><span>{vehicle.vehicle_type||"车型待定"} · {vehicle.driver_name||"司机待定"} · {vehicle.driver_phone||"电话待定"}</span><small>{vehicleStatusLabel(vehicle.status)} · 提货 {formatTime(vehicle.actual_pickup_at)||formatTime(vehicle.planned_pickup_at)||"待定"}</small></p>)}</div></details>;
 }
 
-function domesticStatus(row: DomesticRow, vehicles: VehicleRow[]) {
+function transitStatus(row: DomesticRow, vehicles: VehicleRow[]) {
+  if (row.order_status === "completed" || row.outbound_road_status === "pickup_completed") return { code: "completed", label: "运输完成", tone: "success" };
+  if (["overseas_arrived","waiting_pickup"].includes(row.outbound_road_status||"")) return { code: "overseas_arrived", label: "已到境外仓", tone: "success" };
+  if (row.outbound_road_status === "outbound_in_transit") return { code: "outbound_in_transit", label: "出境运输中", tone: "" };
+  if (["preplanned","loaded_waiting_exit"].includes(row.outbound_road_status||"")) return { code: "waiting_outbound", label: "等待出境", tone: "" };
   if (row.has_exception) return { code: "exception", label: "仓库异常", tone: "danger" };
-  if (row.cargo_complete) return { code: "completed", label: "国内运输完成", tone: "success" };
+  if (row.cargo_complete) return { code: "domestic_completed", label: "国内运输完成", tone: "success" };
   if (row.inbound_at) return { code: "warehouse_check", label: "仓库清点中", tone: "" };
   if (row.actual_arrival_at || vehicles.some((vehicle) => vehicle.status === "arrived")) return { code: "waiting_receipt", label: "已到仓待收货", tone: "" };
-  if (row.actual_departure_at || row.shipment_pickup_at || vehicles.some((vehicle) => vehicle.status === "picked_up")) return { code: "in_transit", label: "国内运输中", tone: "" };
+  if (row.actual_departure_at || row.shipment_pickup_at || vehicles.some((vehicle) => vehicle.status === "picked_up")) return { code: "domestic_in_transit", label: "国内运输中", tone: "" };
   if (row.assignment_id) return { code: "planned", label: "已安排待提货", tone: "" };
   return { code: "waiting_arrangement", label: "待安排", tone: "off" };
 }
@@ -153,4 +179,4 @@ function vehicleStatusLabel(status: string) {
 }
 function formatTime(value: string | null) { return value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : ""; }
 function formatNumber(value: number) { return Number(value || 0).toFixed(2); }
-export function meta() { return [{ title: "国内物流轨迹 | International TMS" }]; }
+export function meta() { return [{ title: "在途车辆 | International TMS" }]; }

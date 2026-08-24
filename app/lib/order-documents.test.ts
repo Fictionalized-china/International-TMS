@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   orderDocumentStages,
+  orderDocumentPlacement,
   orderDocumentTypeCodes,
   requiredPreDepartureDocumentTypes,
 } from "./order-documents";
@@ -16,5 +17,9 @@ describe("order document taxonomy", () => {
   it("requires customs documents at departure only for customs orders", () => {
     expect(requiredPreDepartureDocumentTypes(false)).not.toContain("customs_document");
     expect(requiredPreDepartureDocumentTypes(true)).toContain("customs_document");
+  });
+
+  it("keeps delivery receipt as optional archive evidence", () => {
+    expect(orderDocumentPlacement("delivery_receipt")?.requiredByDefault).toBe(false);
   });
 });

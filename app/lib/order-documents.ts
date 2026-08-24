@@ -123,7 +123,7 @@ export const orderDocumentPlacements: readonly OrderDocumentPlacement[] = [
     documentCode: "delivery_receipt",
     moduleCode: "overseas_warehouse",
     fieldKey: "document_delivery_receipt",
-    requiredByDefault: true,
+    requiredByDefault: false,
   },
   {
     documentCode: "return_receipt",

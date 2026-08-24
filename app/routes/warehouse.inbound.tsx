@@ -204,7 +204,10 @@ export async function action({ request }: Route.ActionArgs) {
     now = new Date().toISOString();
   const pieces = positiveInt(form, "pieces") ?? 1,
     weight = positive(form, "weight"),
-    volume = positive(form, "volume");
+    volume = positive(form, "volume"),
+    length = positive(form, "length"),
+    width = positive(form, "width"),
+    height = positive(form, "height");
   if (!["ready", "exception"].includes(receiptResult))
     return { formError: "请先选择本次收货结果（货齐/异常）。" };
   if (hasException && !exceptionNotes)
@@ -334,16 +337,17 @@ export async function action({ request }: Route.ActionArgs) {
     const overseasGate = await env.DB.prepare(
       `SELECT
          EXISTS(SELECT 1 FROM transport_batch_orders bo JOIN transport_batches b ON b.id=bo.batch_id AND b.organization_id=bo.organization_id WHERE bo.organization_id=o.organization_id AND bo.order_id=o.id AND bo.status!='removed' AND b.road_status IN ('outbound_in_transit','overseas_arrived','waiting_pickup')) exited,
-         EXISTS(SELECT 1 FROM order_tracking_milestones m WHERE m.organization_id=o.organization_id AND m.order_id=o.id AND m.milestone_code='customs_cleared') customs_cleared
+         EXISTS(SELECT 1 FROM order_tracking_milestones m WHERE m.organization_id=o.organization_id AND m.order_id=o.id AND m.milestone_code='customs_cleared') customs_cleared,
+         o.customs_clearance_mode
        FROM transport_orders o
        WHERE o.organization_id=? AND o.id=? AND o.overseas_warehouse_id=?`,
-    ).bind(user.organizationId, orderId, selectedWarehouse.id).first<{ exited: number; customs_cleared: number }>();
+    ).bind(user.organizationId, orderId, selectedWarehouse.id).first<{ exited: number; customs_cleared: number; customs_clearance_mode:"company"|"customer" }>();
     if (!overseasGate)
       return { formError: `该订单的境外目的仓不是“${selectedWarehouse.name}”，请切换到正确仓库` };
     if (!overseasGate.exited)
       return { formError: "该订单尚未登记实际出境，不能办理境外目的仓入库" };
-    if (!overseasGate.customs_cleared)
-      return { formError: "该订单尚未完成目的地清关，不能办理境外目的仓入库" };
+    if (overseasGate.customs_clearance_mode !== "customer" && !overseasGate.customs_cleared)
+      return { formError: "该订单由公司代办清关，尚未完成目的地清关，不能办理境外目的仓入库" };
   }
   const workflowFields = await loadOrderModuleWorkflowFields(
     user.organizationId,
@@ -420,6 +424,8 @@ export async function action({ request }: Route.ActionArgs) {
     return { formError: "请填写实收重量" };
   if (volumePolicy.isActive && volumePolicy.isRequired && volume == null)
     return { formError: "请填写实测体积" };
+  if (length == null || width == null || height == null)
+    return { formError: "请填写货物实际长、宽、高" };
   if (
     evidencePolicy.isActive &&
     evidencePolicy.isRequired &&
@@ -530,7 +536,7 @@ export async function action({ request }: Route.ActionArgs) {
   const packageStatements = existingPackage
     ? [
         env.DB.prepare(
-          `UPDATE warehouse_packages SET receipt_id=?,warehouse_id=?,location_id=?,pieces=?,weight_kg=?,volume_cbm=?,status='in_stock',notes=?,updated_at=? WHERE id=? AND organization_id=?`,
+          `UPDATE warehouse_packages SET receipt_id=?,warehouse_id=?,location_id=?,pieces=?,weight_kg=?,volume_cbm=?,length_cm=?,width_cm=?,height_cm=?,status='in_stock',notes=?,updated_at=? WHERE id=? AND organization_id=?`,
         ).bind(
           receiptId,
           location.warehouse_id,
@@ -538,6 +544,9 @@ export async function action({ request }: Route.ActionArgs) {
           pieces,
           weight,
           volume,
+          length,
+          width,
+          height,
           notes || null,
           now,
           existingPackage.id,
@@ -559,7 +568,7 @@ export async function action({ request }: Route.ActionArgs) {
       ]
     : [
         env.DB.prepare(
-          `INSERT INTO warehouse_packages(id,organization_id,receipt_id,shipment_id,warehouse_id,location_id,barcode,package_number,pieces,weight_kg,volume_cbm,status,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'in_stock',?,?,?)`,
+          `INSERT INTO warehouse_packages(id,organization_id,receipt_id,shipment_id,warehouse_id,location_id,barcode,package_number,pieces,weight_kg,volume_cbm,length_cm,width_cm,height_cm,status,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'in_stock',?,?,?)`,
         ).bind(
           packageId,
           user.organizationId,
@@ -572,6 +581,9 @@ export async function action({ request }: Route.ActionArgs) {
           pieces,
           weight,
           volume,
+          length,
+          width,
+          height,
           notes || null,
           now,
           now,
@@ -1002,7 +1014,7 @@ export default function WarehouseInbound({
               <h2>收货登记</h2>
               <p>
                 {loaderData.isOverseasWarehouse
-                  ? "扫描订单号、运单号或选择已出境且目的地清关完成的待到仓货物。"
+                  ? "扫描订单号、运单号或选择已出境的待到仓货物；公司代办清关订单须先完成目的地清关。"
                   : "扫描订单号、运单号或选择待收货运单，并可使用客户识别码核对货物归属。"}
               </p>
             </div>
@@ -1029,7 +1041,7 @@ export default function WarehouseInbound({
                 />
                 <small>
                   {loaderData.isOverseasWarehouse
-                    ? "仅允许本仓对应、已登记实际出境且目的地清关完成的订单入库。"
+                    ? "仅允许本仓对应且已登记实际出境的订单入库；客户自理清关不受目的地清关门禁限制。"
                     : "订单尚未生成系统运单时，首次按订单收货会自动生成；一个订单关联多个运单时需从列表选择。"}
                 </small>
               </label>
@@ -1139,6 +1151,9 @@ export default function WarehouseInbound({
                     required={volumePolicy.isRequired}
                   />
                 )}
+                <Num name="length" label="实际长 CM" step="0.1" required />
+                <Num name="width" label="实际宽 CM" step="0.1" required />
+                <Num name="height" label="实际高 CM" step="0.1" required />
               </div>
               {evidencePolicy.isActive && (
                 <label className="field">
