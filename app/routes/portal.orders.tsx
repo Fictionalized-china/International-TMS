@@ -66,7 +66,7 @@ export default function PortalOrders({ loaderData }: Route.ComponentProps) {
       <section className="table-panel">
         <div className="table-panel-head"><div><b>订单列表</b><span>业务办理由新翎航负责，客户门户仅显示真实进度。</span></div><span>{loaderData.orders.length} 单</span></div>
         <div className="table-wrap"><table><thead><tr><th>订单 / 报价</th><th>类型</th><th>货物</th><th>运输线路</th><th>当前节点</th><th>状态</th><th>查看</th></tr></thead><tbody>
-          {loaderData.orders.map((order) => <tr key={order.id} className={order.exception_status && order.exception_status !== "none" ? "row-alert" : ""}>
+          {loaderData.orders.map((order) => <tr key={order.id} className={order.status !== "completed" && order.exception_status && order.exception_status !== "none" ? "row-alert" : ""}>
             <td><b className="order-id">{order.order_number}</b><small className="subline">{order.quote_number || "历史订单"}</small></td>
             <td><span className={`pill ${order.business_type === "ltl" ? "ltl" : ""}`}>{order.business_type === "ltl" ? "拼车" : "整车"}</span></td>
             <td><b>{order.cargo_description}</b><small className="subline">{order.pieces} 件 · {order.gross_weight_kg} KG · {order.volume_cbm} CBM</small></td>
@@ -94,8 +94,8 @@ const statusOptions = [
 
 function statusLabel(status: string) { return statusOptions.find((option) => option.value === status)?.label || status; }
 function statusTone(status: string, exceptionStatus: string | null) {
-  if (exceptionStatus && exceptionStatus !== "none") return "red";
   if (status === "completed") return "green";
+  if (exceptionStatus && exceptionStatus !== "none") return "red";
   if (status === "cancelled") return "red";
   if (["draft", "submitted"].includes(status)) return "orange";
   return "blue";

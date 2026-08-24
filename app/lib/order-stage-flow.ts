@@ -27,8 +27,8 @@ export type OrderBusinessStage = {
 export const orderBusinessStages: readonly OrderBusinessStage[] = [
   {
     code: "order_creation",
-    title: "1. 订单创建与委托",
-    shortTitle: "订单创建",
+    title: "1. 委托资料补充",
+    shortTitle: "委托资料补充",
     description: "从已接受报价继承客户、整车/拼车和应收价格，补充提货、货物、目的仓和委托单后提交审批。",
     modules: ["consignment", "cargo"],
     minimumStatus: "draft",
@@ -90,8 +90,8 @@ export const orderBusinessStages: readonly OrderBusinessStage[] = [
   },
   {
     code: "overseas_pickup",
-    title: "8. 境外仓与自提",
-    shortTitle: "境外仓自提",
+    title: "8. 客户自提与签收",
+    shortTitle: "客户自提与签收",
     description: "目的仓到仓后自动通知客户，再办理预约提货、交付签收和异常处理。",
     modules: ["overseas_warehouse"],
     minimumStatus: "in_execution",

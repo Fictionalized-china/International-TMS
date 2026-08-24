@@ -98,6 +98,6 @@ describe("order stage access", () => {
         "outbound_transport",
         workflowSteps,
       ).reason,
-    ).toContain("境外仓自提");
+    ).toContain("客户自提与签收");
   });
 });

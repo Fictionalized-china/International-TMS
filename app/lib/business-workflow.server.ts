@@ -72,14 +72,14 @@ type ModuleSnapshot = {
 };
 
 export const defaultWorkflowSteps = [
-  ["order_creation", "订单创建与委托", "order", "order.created", 10, "admin"],
+  ["order_creation", "委托资料补充", "order", "order.created", 10, "admin"],
   ["consignment_approval", "委托审核", "order", "manual.consignment_approval", 20, "admin"],
   ["task_assignment", "任务分配", "order", "manual.task_assignment", 30, "admin"],
   ["domestic_execution", "国内运输", "order", "manual.domestic_execution", 40, "admin"],
   ["warehouse_receiving", "国内仓入库", "order", "manual.warehouse_receiving", 50, "admin"],
   ["port_loading", "出口准备与装车出库", "order", "manual.port_loading", 60, "admin"],
   ["outbound_transport", "出境运输", "order", "manual.outbound_transport", 70, "admin"],
-  ["overseas_pickup", "境外仓与自提", "order", "manual.overseas_pickup", 80, "admin"],
+  ["overseas_pickup", "客户自提与签收", "order", "manual.overseas_pickup", 80, "admin"],
   ["reconciliation", "对账结算", "order", "manual.reconciliation", 90, "admin"],
   ["completion_review", "完成复盘", "order", "manual.completion_review", 100, "admin"],
 ] as const;
