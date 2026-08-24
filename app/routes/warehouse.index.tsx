@@ -152,16 +152,17 @@ export async function loader({ request }: Route.LoaderArgs) {
 }
 
 export default function WarehouseIndex({ loaderData }: Route.ComponentProps) {
-  return <>
-    <header className="page-header warehouse-queue-header">
-      <div><p className="eyebrow">WAREHOUSE WORK QUEUE</p><h1>仓库作业总表</h1><p>一行一票货；系统根据收货、实收、库存、装车和异常记录自动归类。</p></div>
-      <Link className="secondary" to={warehousePath("/warehouse/inventory", loaderData.warehouse.id, { status: "dispatched" })}>查看已出库记录</Link>
+  return <div className="page prototype-page warehouse-queue-page">
+    <div className="breadcrumb">仓库作业 / 作业总览 / {loaderData.warehouse.name}</div>
+    <header className="page-head">
+      <div><p className="prototype-kicker">WAREHOUSE WORK QUEUE</p><h1>仓库作业总表</h1><p>一行一票货；系统根据收货、实收、库存、装车和异常记录自动归类。</p></div>
+      <Link className="btn" to={warehousePath("/warehouse/inventory", loaderData.warehouse.id, { status: "dispatched" })}>查看已出库记录</Link>
     </header>
     <nav className="warehouse-queue-tabs" aria-label="仓库作业分类">
       <Link className={loaderData.view === "all" ? "active" : ""} to={warehousePath("/warehouse", loaderData.warehouse.id)}>全部 <strong>{Object.values(loaderData.counts).reduce((sum, count) => sum + count, 0)}</strong></Link>
       {(Object.keys(queueMeta) as WarehouseQueue[]).map((key) => <Link key={key} className={loaderData.view === key ? "active" : ""} to={warehousePath("/warehouse", loaderData.warehouse.id, { view: key })}>{queueMeta[key].label} <strong>{loaderData.counts[key]}</strong></Link>)}
     </nav>
-    <section className="panel warehouse-queue-panel">
+    <section className="table-panel warehouse-queue-panel">
       <Form method="get" className="warehouse-queue-filter">
         {loaderData.view !== "all" && <input type="hidden" name="view" value={loaderData.view} />}
         <input type="hidden" name="warehouseId" value={loaderData.warehouse.id} />
@@ -185,7 +186,7 @@ export default function WarehouseIndex({ loaderData }: Route.ComponentProps) {
       </tr>)}</tbody></table></div>
       {!loaderData.rows.length && <p className="empty-state">当前筛选条件下没有仓库作业。</p>}
     </section>
-  </>;
+  </div>;
 }
 
 function WarehouseCargoDetails({ row, items }: { row: CategorizedWarehouseRow; items: WarehouseCargoItem[] }) {
