@@ -300,7 +300,7 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
   return <Form method="post" className="prototype-quote-form">
     <input type="hidden" name="intent" value="create"/>
     <div className="gate ok">带 * 的字段会在报价被接受后自动继承到运输订单，运输类型随即锁定。</div>
-    <FormSection title="客户与运输方案" note="报价确认后不再重复创建订单">
+    <FormSection className="quote-plan-section" title="客户与运输方案" note="报价确认后不再重复创建订单">
       <div className="grid">
         <Field label="客户 *"><select className="control filled" name="customerId" value={customerId} onChange={(event) => selectCustomer(event.target.value)} required><option value="">请选择客户</option>{loaderData.customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name}</option>)}</select></Field>
         <Field label="业务员 *"><select className="control filled" name="salespersonId" required><option value="">请选择业务员</option>{loaderData.users.map((user) => <option key={user.id} value={user.id}>{user.display_name} · {user.email}</option>)}</select></Field>
@@ -309,7 +309,7 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
         <Field label="清关办理方式 *"><select className="control filled" name="customsClearanceMode" defaultValue="company"><option value="company">公司代办清关</option><option value="customer">客户自理清关</option></select></Field>
       </div>
     </FormSection>
-    <FormSection title="起运地与目的地" note="最终目的地为境外目的仓，客户到仓自提">
+    <FormSection className="quote-route-section" title="起运地与目的地" note="最终目的地为境外目的仓，客户到仓自提">
       <div className="grid">
         <Field label="起运国家 / 地区 *"><GeoSelect name="originCountry" options={loaderData.countries}/></Field>
         <Field label="起运省 / 州 *"><GeoSelect name="originState" options={loaderData.provinces}/></Field>
@@ -346,8 +346,8 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
   </Form>;
 }
 
-function FormSection({ title, note, action, children }: { title: string; note: string; action?: React.ReactNode; children: React.ReactNode }) {
-  return <section className="section"><div className="section-title"><b>{title}</b><div className="quote-section-heading"><span>{note}</span>{action}</div></div>{children}</section>;
+function FormSection({ title, note, action, className = "", children }: { title: string; note: string; action?: React.ReactNode; className?: string; children: React.ReactNode }) {
+  return <section className={`section ${className}`}><div className="section-title"><b>{title}</b><div className="quote-section-heading"><span>{note}</span>{action}</div></div>{children}</section>;
 }
 
 function Field({ label, className = "", children }: { label: string; className?: string; children: React.ReactNode }) {

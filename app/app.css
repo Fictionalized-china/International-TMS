@@ -13899,31 +13899,31 @@ a.order-module-card.read-only:hover {
   max-height: calc(100vh - 32px);
 }
 .modal-card.xwide:has(.prototype-quote-form) .modal-header {
-  min-height: 56px;
-  padding: 0 16px;
+  min-height: 46px;
+  padding: 0 12px;
 }
 .modal-card.xwide:has(.prototype-quote-form) .modal-header h2 { font-size: 15px; }
 .modal-card.xwide:has(.prototype-quote-form) .modal-body {
-  max-height: calc(100dvh - 88px);
-  padding: 10px 16px 0;
+  max-height: calc(100dvh - 78px);
+  padding: 6px 12px 0;
 }
 .prototype-quote-form { color: var(--ink); }
 .prototype-quote-form > .gate {
-  margin-bottom: 9px;
-  padding: 7px 10px;
+  margin-bottom: 5px;
+  padding: 5px 8px;
   border-radius: 3px;
   font-size: 9px;
 }
 .prototype-quote-form .section {
-  margin-bottom: 9px;
+  margin-bottom: 5px;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 3px;
   background: #fff;
 }
 .prototype-quote-form .section-title {
-  min-height: 32px;
-  padding: 0 10px;
+  min-height: 27px;
+  padding: 0 8px;
   display: flex;
   justify-content: space-between;
   gap: 12px;
@@ -13941,45 +13941,50 @@ a.order-module-card.read-only:hover {
   white-space: nowrap;
 }
 .prototype-quote-form .grid {
-  padding: 10px;
+  padding: 6px 8px;
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px 9px;
+  gap: 4px 8px;
 }
+.prototype-quote-form .quote-plan-section .grid,
+.prototype-quote-form .quote-route-section .grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.prototype-quote-form .quote-route-address { grid-column: span 2; }
 .prototype-quote-form .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .prototype-quote-form .field { min-width: 0; margin: 0; }
 .prototype-quote-form .field > span {
-  min-height: 14px;
-  margin-bottom: 4px;
+  min-height: 11px;
+  margin-bottom: 2px;
   display: block;
   color: #718295;
   font-size: 9px;
-  line-height: 1.35;
+  line-height: 1.2;
 }
 .prototype-quote-form .control {
   width: 100%;
-  min-height: 34px;
-  height: 34px;
-  padding: 0 9px;
+  min-height: 30px;
+  height: 30px;
+  padding: 0 8px;
   border: 1px solid #dce4ea;
   border-radius: 2px;
   background: #fff;
   color: var(--ink);
   font-size: 10px;
 }
+.prototype-quote-form .field input.control,
+.prototype-quote-form .field select.control { padding: 0 8px; }
 .prototype-quote-form .control:focus { border-color: var(--blue); box-shadow: 0 0 0 3px #eaf2ff; outline: 0; }
 .prototype-quote-form .control.filled { border-color: #b8decf; background: #fbfffd; }
 .prototype-quote-form .control.editing { border-color: #b9d2fa; background: #fbfdff; }
 .prototype-quote-form textarea.control {
-  height: 58px;
-  min-height: 58px;
-  padding: 7px 9px;
+  height: 44px;
+  min-height: 44px;
+  padding: 5px 8px;
   resize: none;
   line-height: 1.45;
 }
 .prototype-quote-form .quote-route-address textarea,
 .prototype-quote-form .quote-route-note textarea,
-.prototype-quote-form .quote-cargo-description textarea { height: 58px; min-height: 58px; }
+.prototype-quote-form .quote-cargo-description textarea { height: 44px; min-height: 44px; }
 .prototype-quote-form .quote-charge-add {
   min-height: 25px;
   padding: 0 8px;
@@ -13990,7 +13995,7 @@ a.order-module-card.read-only:hover {
 }
 .prototype-quote-form .quote-charge-table { width: 100%; table-layout: fixed; }
 .prototype-quote-form .quote-charge-table th,
-.prototype-quote-form .quote-charge-table td { padding: 7px 9px; vertical-align: middle; }
+.prototype-quote-form .quote-charge-table td { padding: 4px 7px; vertical-align: middle; }
 .prototype-quote-form .quote-charge-table th { color: #8796a4; font-size: 9px; font-weight: 500; }
 .prototype-quote-form .quote-charge-table td:nth-child(1) { width: 21%; }
 .prototype-quote-form .quote-charge-table td:nth-child(2),
@@ -14000,8 +14005,8 @@ a.order-module-card.read-only:hover {
 .prototype-quote-form .quote-charge-table td:nth-child(6) { width: 12%; }
 .prototype-quote-form .quote-charge-table .btn { min-height: 30px; padding: 0 8px; font-size: 9px; }
 .prototype-quote-form .quote-charge-summary {
-  min-height: 32px;
-  padding: 6px 10px;
+  min-height: 28px;
+  padding: 4px 8px;
   display: flex;
   justify-content: flex-end;
   gap: 14px;
@@ -14018,8 +14023,8 @@ a.order-module-card.read-only:hover {
   right: 0;
   bottom: 0;
   left: 0;
-  margin: 0 -16px;
-  padding: 10px 16px;
+  margin: 0 -12px;
+  padding: 6px 12px;
   display: flex;
   justify-content: flex-end;
   border-top: 1px solid var(--line);
@@ -14157,7 +14162,9 @@ a.order-module-card.read-only:hover {
 
 
 @media (max-width: 1100px) {
-  .prototype-quote-form .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .prototype-quote-form .grid,
+  .prototype-quote-form .quote-plan-section .grid,
+  .prototype-quote-form .quote-route-section .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .quotation-entry-form {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -14167,7 +14174,10 @@ a.order-module-card.read-only:hover {
   .modal-card.xwide:has(.prototype-quote-form) { width: calc(100vw - 18px); max-height: calc(100vh - 18px); }
   .modal-card.xwide:has(.prototype-quote-form) .modal-body { padding: 9px 10px 0; }
   .prototype-quote-form .grid,
-  .prototype-quote-form .grid.two { grid-template-columns: 1fr; }
+  .prototype-quote-form .grid.two,
+  .prototype-quote-form .quote-plan-section .grid,
+  .prototype-quote-form .quote-route-section .grid { grid-template-columns: 1fr; }
+  .prototype-quote-form .quote-route-address { grid-column: auto; }
   .prototype-quote-form .section-title { min-height: 42px; align-items: flex-start; flex-direction: column; gap: 3px; padding: 7px 9px; }
   .prototype-quote-form .quote-section-heading { width: 100%; justify-content: space-between; }
   .prototype-quote-form .quote-charge-table { min-width: 720px; }
