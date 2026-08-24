@@ -1,77 +1,104 @@
 import { env } from "cloudflare:workers";
-import { Form as RouterForm, useNavigation } from "react-router";
-import type { ComponentProps } from "react";
+import { Form, Link } from "react-router";
 import type { Route } from "./+types/portal.orders";
 import { requirePortalCustomer } from "../lib/portal.server";
-import { canTransition } from "../lib/workflow";
-import { valueOf } from "../lib/validation";
-import { writeAudit } from "../lib/audit.server";
-import { recordWorkflowEvent } from "../lib/business-workflow.server";
-import { Modal } from "../components/Modal";
-import { createOrderFromAcceptedQuote } from "../lib/quote-order.server";
 
-function Form(props:ComponentProps<typeof RouterForm>){return <RouterForm {...props} encType={props.method==="post"?"multipart/form-data":props.encType}/>}
+type PortalOrder = {
+  id: string;
+  order_number: string;
+  quote_number: string | null;
+  business_type: "ftl" | "ltl";
+  cargo_description: string;
+  pieces: number;
+  gross_weight_kg: number;
+  volume_cbm: number;
+  origin_state: string | null;
+  origin_city: string;
+  destination_state: string | null;
+  destination_city: string;
+  overseas_warehouse_name: string | null;
+  status: string;
+  current_step_name: string | null;
+  exception_status: string | null;
+  created_at: string;
+};
 
-type Order={id:string;order_number:string;customer_reference:string|null;shipper_name:string;shipper_contact:string|null;shipper_phone:string|null;origin_country:string;origin_city:string;origin_address:string;consignee_name:string;consignee_contact:string|null;consignee_phone:string|null;destination_country:string;destination_city:string;destination_address:string;cargo_description:string;pieces:number;gross_weight_kg:number;volume_cbm:number;requested_pickup_date:string|null;requested_delivery_date:string|null;status:string;created_at:string};
-type Quote={id:string;quote_number:string;origin_country:string;origin_state:string|null;origin_city:string;pickup_address:string|null;destination_country:string;destination_state:string|null;destination_city:string;destination_warehouse_name:string|null;destination_warehouse_note:string|null;estimated_length_cm:number;estimated_width_cm:number;estimated_height_cm:number;customs_clearance_mode:"company"|"customer";cargo_description:string;pieces:number;gross_weight_kg:number;volume_cbm:number;currency:string;total_amount:number;valid_until:string|null;status:string};
-type Inquiry={id:string;inquiry_number:string;origin_country:string;destination_country:string;cargo_description:string;gross_weight_kg:number;volume_cbm:number;estimated_currency:string;estimated_total:number;status:string;created_at:string};
-
-export async function loader({request}:Route.LoaderArgs){
-  const {user,customer}=await requirePortalCustomer(request);
-  const [orders,quotes,inquiries]=await Promise.all([
-    env.DB.prepare("SELECT id,order_number,customer_reference,shipper_name,shipper_contact,shipper_phone,origin_country,origin_city,origin_address,consignee_name,consignee_contact,consignee_phone,destination_country,destination_city,destination_address,cargo_description,pieces,gross_weight_kg,volume_cbm,requested_pickup_date,requested_delivery_date,status,created_at FROM transport_orders WHERE organization_id=? AND customer_id=? ORDER BY created_at DESC").bind(user.organizationId,customer.id).all<Order>(),
-    env.DB.prepare(`SELECT q.id,q.quote_number,q.origin_country,q.origin_state,q.origin_city,q.pickup_address,
-      q.destination_country,q.destination_state,q.destination_city,w.name destination_warehouse_name,q.destination_warehouse_note,
-      q.estimated_length_cm,q.estimated_width_cm,q.estimated_height_cm,q.customs_clearance_mode,
-      q.cargo_description,q.pieces,q.gross_weight_kg,q.volume_cbm,q.currency,q.total_amount,q.valid_until,q.status
-      FROM quotations q LEFT JOIN warehouses w ON w.id=q.destination_warehouse_id AND w.organization_id=q.organization_id
-      WHERE q.organization_id=? AND q.customer_id=? AND q.status IN ('sent','accepted','rejected') ORDER BY q.created_at DESC`).bind(user.organizationId,customer.id).all<Quote>(),
-    env.DB.prepare("SELECT id,inquiry_number,origin_country,destination_country,cargo_description,gross_weight_kg,volume_cbm,estimated_currency,estimated_total,status,created_at FROM freight_inquiries WHERE organization_id=? AND customer_id=? ORDER BY created_at DESC").bind(user.organizationId,customer.id).all<Inquiry>(),
-  ]);
-  return {user,customer,orders:orders.results,quotes:quotes.results,inquiries:inquiries.results};
+export async function loader({ request }: Route.LoaderArgs) {
+  const { user, customer } = await requirePortalCustomer(request);
+  const url = new URL(request.url);
+  const keyword = (url.searchParams.get("keyword") || "").trim();
+  const status = url.searchParams.get("status") || "";
+  const where = ["o.organization_id=?", "o.customer_id=?"];
+  const values: unknown[] = [user.organizationId, customer.id];
+  if (keyword) {
+    where.push("(o.order_number LIKE ? OR q.quote_number LIKE ? OR o.cargo_description LIKE ?)");
+    const pattern = `%${keyword}%`;
+    values.push(pattern, pattern, pattern);
+  }
+  if (status) {
+    where.push("o.status=?");
+    values.push(status);
+  }
+  const rows = await env.DB.prepare(
+    `SELECT o.id,o.order_number,q.quote_number,o.business_type,o.cargo_description,o.pieces,
+      o.gross_weight_kg,o.volume_cbm,o.origin_state,o.origin_city,o.destination_state,
+      o.destination_city,w.name overseas_warehouse_name,o.status,o.current_step_name,
+      o.exception_status,o.created_at
+     FROM transport_orders o
+     LEFT JOIN quotations q ON q.id=o.quotation_id AND q.organization_id=o.organization_id
+     LEFT JOIN warehouses w ON w.id=o.overseas_warehouse_id AND w.organization_id=o.organization_id
+     WHERE ${where.join(" AND ")}
+     ORDER BY o.created_at DESC`,
+  ).bind(...values).all<PortalOrder>();
+  return { orders: rows.results, filters: { keyword, status } };
 }
 
-export async function action({request}:Route.ActionArgs){
-  const {user,customer}=await requirePortalCustomer(request),form=await request.formData(),intent=valueOf(form,"intent"),now=new Date().toISOString();
-  if(intent==="completeOrder"){
-    const id=valueOf(form,"id"),reference=valueOf(form,"reference"),shipper=valueOf(form,"shipper"),shipperContact=valueOf(form,"shipperContact"),shipperPhone=valueOf(form,"shipperPhone"),originCity=valueOf(form,"originCity"),originAddress=valueOf(form,"originAddress"),consignee=valueOf(form,"consignee"),consigneeContact=valueOf(form,"consigneeContact"),consigneePhone=valueOf(form,"consigneePhone"),destinationCity=valueOf(form,"destinationCity"),destinationAddress=valueOf(form,"destinationAddress"),pickup=valueOf(form,"pickupDate"),delivery=valueOf(form,"deliveryDate"),instructions=valueOf(form,"instructions");
-    const order=await env.DB.prepare("SELECT id,order_number FROM transport_orders WHERE id=? AND organization_id=? AND customer_id=? AND status='draft'").bind(id,user.organizationId,customer.id).first<{id:string;order_number:string}>();
-    const attachments=await validAttachments(form);if("error" in attachments)return{formError:attachments.error};
-    if(!order||![shipper,originCity,originAddress,consignee,destinationCity,destinationAddress].every(Boolean))return{formError:"请填写完整的收发货人与地址资料"};
-    await env.DB.prepare(`UPDATE transport_orders SET customer_reference=?,shipper_name=?,shipper_contact=?,shipper_phone=?,origin_city=?,origin_address=?,consignee_name=?,consignee_contact=?,consignee_phone=?,destination_city=?,destination_address=?,requested_pickup_date=?,requested_delivery_date=?,special_instructions=?,status='submitted',updated_at=? WHERE id=? AND organization_id=? AND customer_id=? AND status='draft'`).bind(reference||null,shipper,shipperContact||null,shipperPhone||null,originCity,originAddress,consignee,consigneeContact||null,consigneePhone||null,destinationCity,destinationAddress,pickup||null,delivery||null,instructions||null,now,id,user.organizationId,customer.id).run();
-    await saveAttachments(attachments.files,{orderId:id,organizationId:user.organizationId,customerId:customer.id,userId:user.userId,now});
-    await writeAudit({request,action:"portal.order.complete",resourceType:"transport_order",resourceId:id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{number:order.order_number}});
-    return{success:`订单 ${order.order_number} 资料已提交，等待欧凌确认`};
-  }
-  if(intent==="quote"){
-    const id=valueOf(form,"id"),status=valueOf(form,"status");
-    const quote=await env.DB.prepare("SELECT status FROM quotations WHERE id=? AND organization_id=? AND customer_id=?").bind(id,user.organizationId,customer.id).first<{status:string}>();
-    if(!quote||!canTransition("quote",quote.status,status)||!["accepted","rejected"].includes(status))return {formError:"报价状态操作无效"};
-    await env.DB.prepare("UPDATE quotations SET status=?,accepted_at=CASE WHEN ?='accepted' THEN ? ELSE accepted_at END,updated_at=? WHERE id=? AND organization_id=? AND customer_id=?").bind(status,status,now,now,id,user.organizationId,customer.id).run();
-    let createdOrder: Awaited<ReturnType<typeof createOrderFromAcceptedQuote>> | null = null;
-    try {
-      if(status==="accepted"){
-        createdOrder=await createOrderFromAcceptedQuote({organizationId:user.organizationId,quotationId:id,actorUserId:user.userId,source:"portal",request});
-        await recordWorkflowEvent({organizationId:user.organizationId,event:"quote.accepted",customerId:customer.id,quotationId:id,actorUserId:user.userId,source:"portal",metadata:{orderId:createdOrder.id}});
-      }
-    } catch (error) {
-      if(status==="accepted")await env.DB.prepare("UPDATE quotations SET status=?,accepted_at=NULL,updated_at=? WHERE id=? AND organization_id=? AND customer_id=? AND NOT EXISTS(SELECT 1 FROM transport_orders WHERE organization_id=? AND quotation_id=?)").bind(quote.status,now,id,user.organizationId,customer.id,user.organizationId,id).run();
-      return {formError:`报价确认失败，系统已恢复原状态：${error instanceof Error?error.message:String(error)}`};
-    }
-    await writeAudit({request,action:"portal.quote.response",resourceType:"quotation",resourceId:id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{status}});
-    return {success:status==="accepted"?`报价已接受，系统已${createdOrder?.created?"自动创建":"关联已有"}订单 ${createdOrder?.orderNumber}。`:"报价已拒绝"};
-  }
-  return {formError:"订单只能由已接受报价自动生成，请先确认有效报价"};
+export default function PortalOrders({ loaderData }: Route.ComponentProps) {
+  return (
+    <div className="page prototype-page">
+      <div className="breadcrumb">客户门户 / 我的订单</div>
+      <header className="page-head"><div><h1>我的订单</h1><p>订单由已接受报价自动生成，可在此查看当前节点与运输状态。</p></div><Link className="btn primary" to="/portal/quotes">查看报价</Link></header>
+      <Form method="get" className="filters order-table-filters">
+        <label className="field wide"><span>快速查找</span><input className="control" name="keyword" defaultValue={loaderData.filters.keyword} placeholder="订单号、报价号或货物"/></label>
+        <label className="field"><span>订单状态</span><select className="control filled" name="status" defaultValue={loaderData.filters.status}><option value="">全部</option>{statusOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+        <button className="btn primary">筛选</button><Link className="btn" to="/portal/orders">重置</Link>
+      </Form>
+      <section className="table-panel">
+        <div className="table-panel-head"><div><b>订单列表</b><span>业务办理由新翎航负责，客户门户仅显示真实进度。</span></div><span>{loaderData.orders.length} 单</span></div>
+        <div className="table-wrap"><table><thead><tr><th>订单 / 报价</th><th>类型</th><th>货物</th><th>运输线路</th><th>当前节点</th><th>状态</th><th>查看</th></tr></thead><tbody>
+          {loaderData.orders.map((order) => <tr key={order.id} className={order.exception_status && order.exception_status !== "none" ? "row-alert" : ""}>
+            <td><b className="order-id">{order.order_number}</b><small className="subline">{order.quote_number || "历史订单"}</small></td>
+            <td><span className={`pill ${order.business_type === "ltl" ? "ltl" : ""}`}>{order.business_type === "ltl" ? "拼车" : "整车"}</span></td>
+            <td><b>{order.cargo_description}</b><small className="subline">{order.pieces} 件 · {order.gross_weight_kg} KG · {order.volume_cbm} CBM</small></td>
+            <td><b>{order.origin_state || ""}{order.origin_city} → {order.destination_state || ""}{order.destination_city}</b><small className="subline">{order.overseas_warehouse_name || "目的仓待补"}</small></td>
+            <td>{order.current_step_name || "待同步"}</td>
+            <td><span className={`status ${statusTone(order.status, order.exception_status)}`}>{statusLabel(order.status)}</span></td>
+            <td><Link className="btn small" to={`/portal/tracking?order=${encodeURIComponent(order.order_number)}`}>查看轨迹</Link></td>
+          </tr>)}
+          {!loaderData.orders.length && <tr><td className="empty" colSpan={7}>暂无订单；接受有效报价后系统会自动创建。</td></tr>}
+        </tbody></table></div>
+      </section>
+    </div>
+  );
 }
-const allowedTypes=new Set(["application/pdf","application/vnd.ms-excel","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","application/msword","application/vnd.openxmlformats-officedocument.wordprocessingml.document","image/jpeg","image/png","image/webp"]);
-async function validAttachments(form:FormData){const files=form.getAll("attachments").filter((value):value is File=>value instanceof File&&value.size>0);if(files.length>5)return{error:"每次最多上传 5 个附件"};for(const file of files)if(!allowedTypes.has(file.type)||file.size>2_000_000)return{error:"附件仅支持 PDF、Excel、Word 和图片，单个文件不能超过 2 MB"};return{files}}
-async function saveAttachments(files:File[],context:{orderId:string;organizationId:string;customerId:string;userId:string;now:string}){if(!files.length)return;await env.DB.batch(await Promise.all(files.map(async file=>env.DB.prepare("INSERT INTO order_attachments(id,organization_id,order_id,customer_id,file_name,content_type,size_bytes,data_url,uploaded_by_user_id,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,'portal',?)").bind(crypto.randomUUID(),context.organizationId,context.orderId,context.customerId,file.name,file.type,file.size,await toDataUrl(file),context.userId,context.now))))}
-async function toDataUrl(file:File){const bytes=new Uint8Array(await file.arrayBuffer());let binary="";for(let i=0;i<bytes.length;i+=0x8000)binary+=String.fromCharCode(...bytes.subarray(i,i+0x8000));return`data:${file.type};base64,${btoa(binary)}`}
-export function meta(){return[{title:"我的订单 | 欧凌客户门户"}]}
-const orderLabels:Record<string,string>={draft:"草稿",submitted:"待确认",confirmed:"已确认",in_execution:"执行中",completed:"已完成",cancelled:"已取消"};
-const quoteLabels:Record<string,string>={sent:"待确认",accepted:"已接受",rejected:"已拒绝"};
-export default function PortalOrders({loaderData,actionData}:Route.ComponentProps){const busy=useNavigation().state!=="idle";return <><header className="page-header"><div><p className="eyebrow">BOOKING</p><h1>报价与订单</h1><p>在线确认报价、提交运输需求并查看处理状态。</p></div></header>{(actionData?.success||actionData?.formError)&&<div className={`alert ${actionData.formError?"error":"success"}`}>{actionData.formError??actionData.success}</div>}
-  {loaderData.inquiries.length>0&&<section className="panel"><h2>我的询价</h2><div className="table-wrap"><table><thead><tr><th>询价号</th><th>线路/货物</th><th>试算价格</th><th>状态</th></tr></thead><tbody>{loaderData.inquiries.map(i=><tr key={i.id}><td>{i.inquiry_number}</td><td><strong>{i.origin_country} → {i.destination_country}</strong><small>{i.cargo_description} · {i.gross_weight_kg} KG · {i.volume_cbm} CBM</small></td><td>{i.estimated_currency} {i.estimated_total.toLocaleString()}</td><td><span className="status-pill">{i.status==="submitted"?"待报价":i.status==="quoting"?"处理中":i.status==="quoted"?"已报价":"已取消"}</span></td></tr>)}</tbody></table></div></section>}
-  {loaderData.quotes.length>0&&<section className="panel portal-quote-panel"><div className="panel-header"><div><h2>我的报价</h2><p>接受报价后，系统按这里确认的路线、目的仓、货物和清关责任自动创建唯一订单。</p></div></div><div className="table-wrap"><table><thead><tr><th>报价号</th><th>提货与目的仓</th><th>货物预估</th><th>金额</th><th>有效期</th><th>操作</th></tr></thead><tbody>{loaderData.quotes.map(q=><tr key={q.id}><td><strong>{q.quote_number}</strong><small>{quoteLabels[q.status]}</small></td><td><strong>{q.origin_city} → {q.destination_city}</strong><small>{q.pickup_address||"提货地址待补充"} → {q.destination_warehouse_name||"目的仓待补充"}</small></td><td><strong>{q.cargo_description}</strong><small>{q.pieces} 件 · {q.gross_weight_kg} KG · {q.volume_cbm} CBM · {q.estimated_length_cm}×{q.estimated_width_cm}×{q.estimated_height_cm} CM</small></td><td>{q.currency} {q.total_amount.toLocaleString()}</td><td>{q.valid_until||"—"}</td><td><div className="button-row"><Modal title={`报价详情 · ${q.quote_number}`} triggerLabel="查看" triggerClassName="text-button" size="wide"><dl className="quote-detail-grid"><div><dt>提货地区</dt><dd>{[q.origin_country,q.origin_state,q.origin_city].filter(Boolean).join(" ")}</dd></div><div><dt>提货地址</dt><dd>{q.pickup_address||"—"}</dd></div><div><dt>目的地区</dt><dd>{[q.destination_country,q.destination_state,q.destination_city].filter(Boolean).join(" ")}</dd></div><div><dt>目的仓</dt><dd>{q.destination_warehouse_name||"—"}</dd></div><div><dt>目的仓备注</dt><dd>{q.destination_warehouse_note||"—"}</dd></div><div><dt>清关责任</dt><dd>{q.customs_clearance_mode==="customer"?"客户自理清关":"公司代办清关"}</dd></div><div><dt>货物描述</dt><dd>{q.cargo_description}</dd></div><div><dt>预计数据</dt><dd>{q.pieces} 件 · {q.gross_weight_kg} KG · {q.volume_cbm} CBM · {q.estimated_length_cm}×{q.estimated_width_cm}×{q.estimated_height_cm} CM</dd></div><div><dt>报价总额</dt><dd>{q.currency} {q.total_amount.toLocaleString()}</dd></div></dl></Modal>{q.status==="sent"?<><Form method="post"><input type="hidden" name="intent" value="quote"/><input type="hidden" name="id" value={q.id}/><input type="hidden" name="status" value="accepted"/><button className="text-button">接受</button></Form><Form method="post"><input type="hidden" name="intent" value="quote"/><input type="hidden" name="id" value={q.id}/><input type="hidden" name="status" value="rejected"/><button className="text-button danger">拒绝</button></Form></>:<span className="status-pill">{quoteLabels[q.status]}</span>}</div></td></tr>)}</tbody></table></div></section>}
-  <section className="panel portal-order-rule"><strong>订单自动生成</strong><p>客户接受报价后，系统按该报价自动创建唯一订单；路线、目的仓、货物预估数据和应收费用会直接继承，无需再次录入。</p></section>
-  <section className="panel"><h2>我的订单</h2><div className="table-wrap"><table><thead><tr><th>订单号</th><th>路线</th><th>货物</th><th>计划</th><th>状态</th></tr></thead><tbody>{loaderData.orders.map(o=><tr key={o.id}><td><strong>{o.order_number}</strong><small>{o.customer_reference||"—"}</small></td><td>{o.origin_country} {o.origin_city} → {o.destination_country} {o.destination_city}</td><td><strong>{o.cargo_description}</strong><small>{o.pieces} 件 · {o.gross_weight_kg} KG · {o.volume_cbm} CBM</small></td><td>{o.requested_pickup_date||"待定"} → {o.requested_delivery_date||"待定"}</td><td>{o.status==="draft"?<Modal title={`补充订单 ${o.order_number} 资料`} triggerLabel="补充资料" triggerClassName="text-button" closeSignal={actionData?.success}><Form method="post" className="form-grid compact"><input type="hidden" name="intent" value="completeOrder"/><input type="hidden" name="id" value={o.id}/><label className="field"><span>客户参考号</span><input name="reference" defaultValue={o.customer_reference||""}/></label><label className="field"><span>要求提货日</span><input name="pickupDate" type="date"/></label><label className="field"><span>发货人</span><input name="shipper" defaultValue={o.shipper_name==="待客户补充"?loaderData.customer.name:o.shipper_name} required/></label><label className="field"><span>发货联系人/电话</span><input name="shipperContact" placeholder="联系人"/><input name="shipperPhone" placeholder="电话"/></label><label className="field"><span>起运城市</span><input name="originCity" defaultValue={o.origin_city==="待补充"?"":o.origin_city} required/></label><label className="field"><span>提货地址</span><input name="originAddress" defaultValue={o.origin_address==="待客户补充"?"":o.origin_address} required/></label><label className="field"><span>收货人</span><input name="consignee" defaultValue={o.consignee_name==="待客户补充"?"":o.consignee_name} required/></label><label className="field"><span>收货联系人/电话</span><input name="consigneeContact" placeholder="联系人"/><input name="consigneePhone" placeholder="电话"/></label><label className="field"><span>目的城市</span><input name="destinationCity" defaultValue={o.destination_city==="待补充"?"":o.destination_city} required/></label><label className="field"><span>送货地址</span><input name="destinationAddress" defaultValue={o.destination_address==="待客户补充"?"":o.destination_address} required/></label><label className="field"><span>要求送达日</span><input name="deliveryDate" type="date"/></label><label className="field"><span>特殊要求</span><input name="instructions"/></label><button className="primary portal-primary" disabled={busy}>提交订单资料</button></Form></Modal>:<span className="status-pill">{orderLabels[o.status]}</span>}</td></tr>)}</tbody></table></div></section></>}
+
+const statusOptions = [
+  { value: "draft", label: "待补充委托资料" },
+  { value: "submitted", label: "待审核" },
+  { value: "approved", label: "已审核" },
+  { value: "assigned", label: "已分配" },
+  { value: "in_execution", label: "运输执行中" },
+  { value: "completed", label: "已完成" },
+  { value: "cancelled", label: "已取消" },
+];
+
+function statusLabel(status: string) { return statusOptions.find((option) => option.value === status)?.label || status; }
+function statusTone(status: string, exceptionStatus: string | null) {
+  if (exceptionStatus && exceptionStatus !== "none") return "red";
+  if (status === "completed") return "green";
+  if (status === "cancelled") return "red";
+  if (["draft", "submitted"].includes(status)) return "orange";
+  return "blue";
+}
+
+export function meta() { return [{ title: "我的订单 | 新翎航客户门户" }]; }
