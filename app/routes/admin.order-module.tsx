@@ -23,6 +23,7 @@ import {
 } from "../lib/order-modules";
 import {
   orderModuleAccess,
+  orderStageForModule,
   orderModuleWorkflowStageAccess,
   type WorkflowStepPosition,
 } from "../lib/order-stage-flow";
@@ -495,6 +496,15 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     moduleCode = params.moduleCode;
   const definition = orderModuleDefinition(moduleCode);
   if (!definition) throw new Response("订单模块不存在", { status: 404 });
+  const requestUrl = new URL(request.url);
+  if (requestUrl.pathname.includes(`/admin/orders/${orderId}/modules/`)) {
+    const stage = orderStageForModule(moduleCode);
+    const query = new URLSearchParams({
+      stage: stage?.code || "order_creation",
+      module: moduleCode,
+    });
+    throw redirect(`/admin/orders/${orderId}?${query}#module-business-data`);
+  }
   const order = await env.DB.prepare(
     `SELECT o.id,o.order_number,o.order_date,o.quotation_id,q.quote_number,q.currency quotation_currency,q.subtotal quotation_subtotal,q.tax_amount quotation_tax_amount,q.total_amount quotation_total_amount,q.status quotation_status,o.customer_id,c.name customer_name,o.customer_reference,o.shipper_name,o.shipper_contact,o.shipper_phone,o.origin_country,o.origin_state,o.origin_city,o.origin_address,o.consignee_name,o.consignee_contact,o.consignee_phone,o.destination_country,o.destination_state,o.destination_city,o.destination_address,o.business_nature,o.business_type,o.transport_mode,o.transport_terms,o.trade_terms,o.exit_port,o.overseas_warehouse_id,ow.name overseas_warehouse_name,ow.code overseas_warehouse_code,ow.address overseas_warehouse_address,o.overseas_warehouse_address_note,o.transit_locations,o.customs_location,o.customs_clearance_mode,o.route_notes,o.requested_pickup_date,o.requested_delivery_date,o.cargo_ready_at,o.ro_agent,o.special_instructions,o.requires_transloading,o.requires_transit_customs,o.current_assignee_user_id,o.status FROM transport_orders o JOIN customers c ON c.id=o.customer_id LEFT JOIN quotations q ON q.id=o.quotation_id AND q.organization_id=o.organization_id LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id WHERE o.id=? AND o.organization_id=?`,
   )
@@ -5118,7 +5128,7 @@ function ModuleBusinessData({
 
         <BusinessSubsection
           title="批次与目的仓"
-          hint="一票订单只读取创建订单时已选的境外目的仓，不在后续重复填写地址。"
+          hint="一票订单只读取报价及委托资料中已选的境外目的仓，不在后续重复填写地址。"
         >
           <div className="consignment-form-grid overseas-summary-grid">
             <Info

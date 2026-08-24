@@ -85,8 +85,7 @@ export default function PortalOrders({ loaderData }: Route.ComponentProps) {
 const statusOptions = [
   { value: "draft", label: "待补充委托资料" },
   { value: "submitted", label: "待审核" },
-  { value: "approved", label: "已审核" },
-  { value: "assigned", label: "已分配" },
+  { value: "confirmed", label: "已审核，待派单" },
   { value: "in_execution", label: "运输执行中" },
   { value: "completed", label: "已完成" },
   { value: "cancelled", label: "已取消" },

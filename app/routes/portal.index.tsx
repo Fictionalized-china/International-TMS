@@ -102,7 +102,7 @@ export default function PortalIndex({ loaderData }: Route.ComponentProps) {
 }
 
 function statusLabel(status: string) {
-  return ({ draft: "待补充委托资料", submitted: "待审核", approved: "已审核", assigned: "已分配", in_execution: "运输执行中", completed: "已完成", cancelled: "已取消" } as Record<string, string>)[status] || status;
+  return ({ draft: "待补充委托资料", submitted: "待审核", confirmed: "已审核，待派单", in_execution: "运输执行中", completed: "已完成", cancelled: "已取消" } as Record<string, string>)[status] || status;
 }
 function statusTone(status: string, exceptionStatus: string | null) {
   if (status === "completed") return "green";

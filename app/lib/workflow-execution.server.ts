@@ -84,6 +84,37 @@ export async function synchronizeWorkflowExecution(input:{
   ]);
   if (!target) return input.targetStepKey;
   const now = new Date().toISOString();
+  if (input.orderStatus === "completed") {
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE workflow_instance_task_states
+            SET status='completed',completed_at=COALESCE(completed_at,?),updated_at=?
+          WHERE instance_module_state_id IN (
+            SELECT ms.id FROM workflow_instance_module_states ms
+            JOIN workflow_instance_step_states ss ON ss.id=ms.instance_step_state_id
+            WHERE ss.instance_id=?
+          )`,
+      ).bind(now,now,input.instanceId),
+      env.DB.prepare(
+        `UPDATE workflow_instance_module_states
+            SET status='completed',updated_at=?
+          WHERE instance_step_state_id IN (
+            SELECT id FROM workflow_instance_step_states WHERE instance_id=?
+          )`,
+      ).bind(now,input.instanceId),
+      env.DB.prepare(
+        `UPDATE workflow_instance_step_states
+            SET status='completed',started_at=COALESCE(started_at,?),completed_at=COALESCE(completed_at,?),updated_at=?
+          WHERE instance_id=?`,
+      ).bind(now,now,now,input.instanceId),
+      env.DB.prepare(
+        `UPDATE workflow_instances
+            SET current_step_key=?,status='completed',completed_at=COALESCE(completed_at,?),updated_at=?
+          WHERE id=? AND organization_id=?`,
+      ).bind(input.targetStepKey,now,now,input.instanceId,input.organizationId),
+    ]);
+    return input.targetStepKey;
+  }
   const moduleStatus = new Map(moduleFacts.results.map((item)=>[item.module_code,item.status]));
   const taskUpdates = [];
   for (const row of rows.results) {

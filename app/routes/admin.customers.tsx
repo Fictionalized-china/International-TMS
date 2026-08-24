@@ -443,7 +443,7 @@ function CustomerForm({
     <CustomerBusinessRolePicker selected={roles} error={errors?.businessRoles}/>
     <fieldset className="customer-profile-fields span-2">
       <legend>默认联系人</legend>
-      <p>创建订单时可直接选择并自动带入联系电话。</p>
+      <p>报价接受并自动建单后，补充委托资料时可直接选择并带入联系电话。</p>
       <div className="form-grid compact">
         <label className="field"><span>联系人名称 <b aria-hidden="true">*</b></span><input name="contactName" required defaultValue={values?.contactName ?? customer?.primary_contact_name ?? ""} placeholder="请输入联系人姓名" /></label>
         <label className="field"><span>联系人电话 <b aria-hidden="true">*</b></span><input name="contactPhone" required defaultValue={values?.contactPhone ?? customer?.primary_contact_phone ?? ""} placeholder="请输入联系电话" /></label>
@@ -451,7 +451,7 @@ function CustomerForm({
     </fieldset>
     <fieldset className="customer-profile-fields span-2">
       <legend>默认提货地址</legend>
-      <p>创建订单时自动带入，也可在订单中改选其他常用地址或手工输入。</p>
+      <p>报价接受并自动建单后，补充委托资料时自动带入，也可改选其他常用地址或手工输入。</p>
       <div className="form-grid compact">
         <PickupAddressFields
           countries={countries}
