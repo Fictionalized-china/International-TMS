@@ -7,6 +7,7 @@ import { checkOrderLoadPlan } from "../lib/order-readiness.server";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
 import { warehouseRoleLabels } from "../lib/road-master-data";
 import { AppIcon } from "../components/AppIcon";
+import { PrototypeBrandMark } from "../components/PrototypeBrandMark";
 
 type WarehouseOrder = {
   id: string;
@@ -120,10 +121,10 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
       <a className="skip-link" href="#warehouse-main-content">跳到仓库作业</a>
       <aside className="warehouse-sidebar">
         <div className="warehouse-brand">
-          <span className="brand-mark small warehouse-mark"><AppIcon name="warehouse" size={18} /></span>
+          <PrototypeBrandMark compact />
           <div>
-            <strong>{loaderData.warehouseName}</strong>
-            <small>新翎航 TMS · 仓库作业端</small>
+            <strong>新翎航 TMS</strong>
+            <small>WAREHOUSE OPERATIONS</small>
           </div>
         </div>
         <Form method="get" action={loaderData.currentPath} className="warehouse-context-switcher warehouse-account-context">
@@ -135,8 +136,8 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
           </select>
           <small>{loaderData.warehouse.code} · 仅显示当前账号获授权的仓库</small>
         </Form>
-        <nav aria-label="仓库作业导航">
-          <span className="warehouse-nav-group">现场作业</span>
+        <nav className="nav" aria-label="仓库作业导航">
+          <span className="warehouse-nav-group nav-title">现场作业</span>
           <NavLink to={warehouseLink("/warehouse", loaderData.query)} end>
             <span><AppIcon name="dashboard" size={17} /></span>仓库作业总表
           </NavLink>
@@ -168,14 +169,14 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
               <span><AppIcon name="packageCheck" size={17} /></span>客户自提出库
             </NavLink>
           )}
-          <span className="warehouse-nav-group">库存管理</span>
+          <span className="warehouse-nav-group nav-title">库存管理</span>
           <NavLink to={warehouseLink("/warehouse/inventory", loaderData.query)}>
             <span><AppIcon name="archive" size={17} /></span>仓库货物与盘点
           </NavLink>
           <NavLink to={warehouseLink("/warehouse/exceptions", loaderData.query)}>
             <span><AppIcon name="shield" size={17} /></span>异常处理
           </NavLink>
-          <span className="warehouse-nav-group">仓储配置</span>
+          <span className="warehouse-nav-group nav-title">仓储配置</span>
           <NavLink to={warehouseLink("/warehouse/locations", loaderData.query)}>
             <span><AppIcon name="warehouse" size={17} /></span>仓库与库位
           </NavLink>
@@ -204,9 +205,9 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
         </div>
       </aside>
       <div className="warehouse-main-column">
-        <header className="warehouse-topbar">
-          <div><AppIcon name="warehouse" size={17} /><strong>{warehouseRoleLabels[loaderData.warehouse.warehouse_role]}</strong><span>{loaderData.warehouseName}</span></div>
-          <div><span className="warehouse-sync-state"><i />仓库数据同步正常</span><span className="warehouse-topbar-user"><span className="warehouse-avatar">{user.displayName.slice(0, 1).toUpperCase()}</span><span><strong>{user.displayName}</strong><small>当前账号绑定本仓</small></span></span></div>
+        <header className="warehouse-topbar topbar">
+          <div className="workspace-switch"><span className="active"><AppIcon name="warehouse" size={14} />{warehouseRoleLabels[loaderData.warehouse.warehouse_role]}</span></div>
+          <div className="top-actions"><span className="warehouse-sync-state"><i />仓库数据同步正常</span><span className="warehouse-topbar-user top-user"><span className="warehouse-avatar avatar">{user.displayName.slice(0, 1).toUpperCase()}</span><span><strong>{user.displayName}</strong><small>{loaderData.warehouseName}</small></span></span></div>
         </header>
       <main className="warehouse-content" id="warehouse-main-content">
         {orderContext && (

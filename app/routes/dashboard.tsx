@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import type { Route } from "./+types/dashboard";
 import { requireSessionUser } from "../lib/auth.server";
 import { AppIcon, type AppIconName } from "../components/AppIcon";
+import { PrototypeBrandMark } from "../components/PrototypeBrandMark";
 
 export async function loader({ request }: Route.LoaderArgs) {
   return { user: await requireSessionUser(request) };
@@ -17,25 +18,25 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
       <a className="skip-link" href="#admin-main-content">跳到业务内容</a>
       <aside className="sidebar admin-sidebar">
         <div className="brand admin-brand">
-          <span className="admin-logo">XL</span>
+          <PrototypeBrandMark />
           <div>
             <strong>新翎航 TMS</strong>
-            <small>国际汽运协同系统</small>
+            <small>INTERNATIONAL LOGISTICS</small>
           </div>
         </div>
 
-        <div className="admin-scope-card">
+        <div className="admin-scope-card scope">
           <span>当前工作空间</span>
           <strong>国际汽运运营中心</strong>
           <small>{user.displayName} · 数据按岗位范围显示</small>
         </div>
 
-        <nav aria-label="运营管理导航">
-          <span className="nav-group">工作台</span>
+        <nav className="nav" aria-label="运营管理导航">
+          <span className="nav-group nav-title">工作台</span>
           <SideLink to="/admin/portal" icon="layout">任务工作台</SideLink>
           <SideLink to="/admin" icon="dashboard" end>运营总览</SideLink>
 
-          <span className="nav-group">汽运业务</span>
+          <span className="nav-group nav-title">汽运业务</span>
           {can("quote.view") && <SideLink to="/admin/quotations" icon="receipt">询价与报价</SideLink>}
           {can("order.view") && <SideLink to="/admin/orders" icon="clipboard">运输订单</SideLink>}
           {can("shipment.view") && <SideLink to="/admin/domestic-tracking" icon="map">在途车辆</SideLink>}
@@ -45,14 +46,14 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
           {can("billing.view") && <SideLink to="/admin/billing" icon="billing">费用结算</SideLink>}
           {can("order.view") && <SideLink to="/admin/cargo" icon="boxes">货物信息</SideLink>}
 
-          <span className="nav-group">业务资料</span>
+          <span className="nav-group nav-title">业务资料</span>
           {can("customer.view") && <SideLink to="/admin/customers" icon="building">客户管理</SideLink>}
           {can("sales.view") && <SideLink to="/admin/sales" icon="chart">销售管理</SideLink>}
           {can("pricing.view") && <SideLink to="/admin/logistics-products" icon="briefcase">物流产品</SideLink>}
           {can("carrier.view") && <SideLink to="/admin/carriers" icon="truck">承运商管理</SideLink>}
           {can("workflow.view") && <SideLink to="/admin/workflow" icon="workflow">业务工作流</SideLink>}
 
-          <span className="nav-group">系统</span>
+          <span className="nav-group nav-title">系统</span>
           {can("master.view") && <SideLink to="/admin/master-data" icon="settings">基础数据</SideLink>}
           {can("warehouse.manage") && <SideLink to="/admin/warehouses" icon="warehouse">仓库管理</SideLink>}
           {can("department.view") && <SideLink to="/admin/departments" icon="users">部门管理</SideLink>}
@@ -63,7 +64,7 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
           {can("audit.view") && <SideLink to="/admin/audit" icon="history">审计日志</SideLink>}
         </nav>
 
-        <div className="sidebar-user">
+        <div className="sidebar-user userbox">
           <span className="user-avatar">{user.displayName.slice(0, 1).toUpperCase()}</span>
           <div>
             <span>{user.displayName}</span>
@@ -79,12 +80,14 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
         </div>
       </aside>
       <div className="admin-main-column">
-        <header className="admin-topbar">
-          <div className="admin-workspace-title"><AppIcon name="panels" size={17} /><strong>运营管理端</strong><span>业务、仓库与财务数据实时联动</span></div>
-          <div className="admin-topbar-actions">
+        <header className="admin-topbar topbar">
+          <div className="workspace-switch" aria-label="当前工作空间">
+            <span className="active"><AppIcon name="panels" size={14} />管理后台</span>
+          </div>
+          <div className="admin-topbar-actions top-actions">
             <span className="admin-sync-state"><i />系统服务正常</span>
             <NavLink className="admin-topbar-link" to="/admin/portal"><AppIcon name="search" size={16} />查找待办</NavLink>
-            <span className="admin-topbar-user"><span className="user-avatar">{user.displayName.slice(0, 1).toUpperCase()}</span><span><strong>{user.displayName}</strong><small>{user.positionCode ?? "运营账号"}</small></span></span>
+            <span className="admin-topbar-user top-user"><span className="user-avatar avatar">{user.displayName.slice(0, 1).toUpperCase()}</span><span><strong>{user.displayName}</strong><small>{user.positionCode ?? "运营账号"}</small></span></span>
           </div>
         </header>
         <main className="content" id="admin-main-content">
