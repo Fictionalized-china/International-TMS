@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Form, Link, useFetcher, useNavigation, redirect } from "react-router";
+import { createContext, useContext, useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
+import { Form as RouterForm, Link, useFetcher, useNavigation, redirect } from "react-router";
 import { env } from "cloudflare:workers";
 import type { Route } from "./+types/admin.order-module";
 import { requireSessionUser } from "../lib/auth.server";
@@ -126,6 +126,13 @@ type OrderSummary = {
   current_assignee_user_id: string | null;
   status: string;
 };
+
+const embeddedModuleFormAction = createContext<string | undefined>(undefined);
+
+function Form(props: ComponentProps<typeof RouterForm>) {
+  const inheritedAction = useContext(embeddedModuleFormAction);
+  return <RouterForm {...props} action={props.action ?? inheritedAction} />;
+}
 type OrderService = {
   service_code: string;
   service_name: string;
@@ -3534,6 +3541,75 @@ export default function OrderModulePage({
         </section>
       </div>
     </>
+  );
+}
+
+export function EmbeddedOrderModule({
+  data,
+  busy,
+  actionUrl,
+}: {
+  data: Route.ComponentProps["loaderData"];
+  busy: boolean;
+  actionUrl: string;
+}) {
+  const { order, definition } = data;
+  const manage =
+    canManageOrderModule(data.current, definition.code) && data.access.canEdit;
+  const canApproveConsignment = isAssignedOrderApprover({
+    status: order.status,
+    currentAssigneeUserId: order.current_assignee_user_id,
+    currentUserId: data.current.userId,
+  });
+
+  if (!data.workflowStageAccess.available && !canApproveConsignment) {
+    return (
+      <div className="module-future-stage">
+        <strong>当前节点尚未开放办理</strong>
+        <p>{data.workflowStageAccess.reason}</p>
+      </div>
+    );
+  }
+
+  return (
+    <embeddedModuleFormAction.Provider value={actionUrl}>
+      <div className="linear-module-embedded" id="module-business-data">
+        {!data.access.canEdit && (
+          <div className="alert module-access-note">
+            <strong>当前为只读状态</strong>
+            <span>{data.access.reason}</span>
+          </div>
+        )}
+        {definition.code !== "loading" && definition.code !== "overseas_warehouse" && (
+          <ModuleSourceDocuments
+            code={definition.code}
+            data={data}
+            manage={manage}
+            canApproveConsignment={canApproveConsignment}
+            busy={busy}
+          />
+        )}
+        <ModuleBusinessData
+          code={definition.code}
+          data={data}
+          manage={manage}
+          canApproveConsignment={canApproveConsignment}
+          busy={busy}
+        />
+        {!(["consignment", "transport", "loading"] as OrderModuleCode[]).includes(definition.code) && (
+          <WorkflowFieldChecklist
+            fields={data.workflowFields.filter(
+              (field) =>
+                !field.isBuiltIn &&
+                (definition.code !== "assignment" ||
+                  !assignmentNativeFieldKeys.has(field.fieldKey)),
+            )}
+            manage={manage}
+            busy={busy}
+          />
+        )}
+      </div>
+    </embeddedModuleFormAction.Provider>
   );
 }
 
