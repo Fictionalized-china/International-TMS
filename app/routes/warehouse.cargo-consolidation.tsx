@@ -6,7 +6,6 @@ import { Modal } from "../components/Modal";
 import { writeAudit } from "../lib/audit.server";
 import { requireSessionUser } from "../lib/auth.server";
 import { ensureOrderModules, syncOrderWorkflowSnapshot } from "../lib/order-modules.server";
-import { maxInlineOrderDocumentBytes } from "../lib/order-documents";
 import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
 import { refreshLoadingManifest } from "../lib/loading-manifest.server";
@@ -41,7 +40,6 @@ type BatchRow={
 };
 
 type BatchOrder={batch_id:string;order_id:string;order_number:string;customer_name:string;cargo_names:string|null;weight_kg:number;volume_cbm:number};
-type OrderDocumentRow={order_id:string;attachment_id:string;document_category:RequiredLoadingDocumentCode;file_name:string;data_url:string;review_status:string;created_at:string};
 type LatestRequiredDocument={order_id:string;attachment_id:string;document_category:RequiredLoadingDocumentCode;review_status:string};
 type Selection={orderId:string;orderNumber:string;customerName:string;packages:number;pieces:number;weight:number;volume:number};
 type CandidateState=StockRow&{origin_country:string;origin_state:string|null;origin_city:string};
@@ -159,18 +157,7 @@ export async function loader({request}:Route.LoaderArgs){
     env.DB.prepare(`SELECT d.id,d.carrier_id,d.name,d.phone,c.name carrier_name FROM carrier_drivers d JOIN carriers c ON c.id=d.carrier_id WHERE d.organization_id=? AND d.status='active' AND c.status='active' AND c.carrier_scope='overseas' ORDER BY c.name,d.name`).bind(user.organizationId).all<CarrierDriverOption>(),
     env.DB.prepare("SELECT category,code,name FROM reference_data WHERE organization_id=? AND category IN ('border_port','customs_place') AND status='active' ORDER BY category,sort_order,code").bind(user.organizationId).all<ReferenceOption>(),
   ]);
-  const orderIds=rows.results.map(row=>row.order_id);
-  const documents=orderIds.length
-    ?await env.DB.prepare(`WITH ranked AS (
-      SELECT m.order_id,m.attachment_id,m.document_category,a.file_name,a.data_url,m.review_status,a.created_at,
-        ROW_NUMBER() OVER(PARTITION BY m.order_id,m.document_category ORDER BY a.created_at DESC,a.id DESC) row_no
-      FROM order_document_metadata m JOIN order_attachments a ON a.id=m.attachment_id
-      WHERE m.organization_id=? AND m.order_id IN (${orderIds.map(()=>"?").join(",")})
-        AND m.document_category IN ('commercial_invoice','packing_list','customs_document')
-      ) SELECT order_id,attachment_id,document_category,file_name,data_url,review_status,created_at
-        FROM ranked WHERE row_no=1 ORDER BY created_at DESC`).bind(user.organizationId,...orderIds).all<OrderDocumentRow>()
-    :{results:[] as OrderDocumentRow[]};
-  return{user,warehouse,rows:rows.results,documents:documents.results,options:options.results,batches:batches.results,batchOrders:batchOrders.results,carriers:carriers.results,carrierVehicles:carrierVehicles.results,carrierDrivers:carrierDrivers.results,borderPorts:routeOptions.results.filter(item=>item.category==="border_port"),customsPlaces:routeOptions.results.filter(item=>item.category==="customs_place"),filters,page:safePage,pageSize,pages,total};
+  return{user,warehouse,rows:rows.results,options:options.results,batches:batches.results,batchOrders:batchOrders.results,carriers:carriers.results,carrierVehicles:carrierVehicles.results,carrierDrivers:carrierDrivers.results,borderPorts:routeOptions.results.filter(item=>item.category==="border_port"),customsPlaces:routeOptions.results.filter(item=>item.category==="customs_place"),filters,page:safePage,pageSize,pages,total};
 }
 
 export async function action({request}:Route.ActionArgs){
@@ -178,29 +165,6 @@ export async function action({request}:Route.ActionArgs){
   const context=await loadWarehouseContext(request,user),warehouse=context.selected;
   await requireWarehouseAssignment(user,warehouse.id,"operator");
   const form=await request.formData(),intent=valueOf(form,"intent"),now=new Date().toISOString();
-  if(intent==="document_upload"){
-    const orderId=valueOf(form,"orderId"),documentCategory=valueOf(form,"documentCategory") as RequiredLoadingDocumentCode;
-    const documentType=REQUIRED_LOADING_DOCUMENTS.find(item=>item.code===documentCategory);
-    if(!documentType)return{formError:"请选择发票、装箱单或报关资料"};
-    const file=form.get("attachment");
-    if(!(file instanceof File)||file.size<=0)return{formError:`请选择要上传的${documentType.name}`};
-    const fileError=validateDocumentFile(file);if(fileError)return{formError:fileError};
-    const order=await env.DB.prepare(`SELECT o.customer_id FROM transport_orders o
-      WHERE o.id=? AND o.organization_id=? AND EXISTS(
-        SELECT 1 FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id
-        WHERE p.organization_id=o.organization_id AND s.order_id=o.id AND p.warehouse_id=?
-          AND p.status IN ('in_stock','allocated'))`).bind(orderId,user.organizationId,warehouse.id).first<{customer_id:string}>();
-    if(!order)return{formError:"该订单当前不在本仓库，不能从这里上传配载资料"};
-    const attachmentId=crypto.randomUUID();
-    await env.DB.batch([
-      env.DB.prepare("INSERT INTO order_attachments(id,organization_id,order_id,customer_id,file_name,content_type,size_bytes,data_url,uploaded_by_user_id,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,'admin',?)")
-        .bind(attachmentId,user.organizationId,orderId,order.customer_id,file.name,file.type,file.size,await toDataUrl(file),user.userId,now),
-      env.DB.prepare("INSERT INTO order_document_metadata(attachment_id,organization_id,order_id,document_category,description,public_to_customer,review_status,updated_at) VALUES(?,?,?,?,?,0,'pending',?)")
-        .bind(attachmentId,user.organizationId,orderId,documentCategory,valueOf(form,"documentDescription").trim()||documentType.name,now),
-    ]);
-    await writeAudit({request,action:"warehouse.consolidation.document_upload",resourceType:"order_attachment",resourceId:attachmentId,organizationId:user.organizationId,actorUserId:user.userId,metadata:{warehouseId:warehouse.id,orderId,documentCategory,fileName:file.name}});
-    return{success:`${documentType.name}已上传`,actionKind:"document_upload" as const,closeSignal:attachmentId};
-  }
   if(intent==="resource"){
     const batchId=valueOf(form,"batchId"),batch=await editableBatch(user.organizationId,warehouse.id,batchId);
     if(!batch)return{formError:"配载单不存在、已开始装车或不能修改车辆安排"};
@@ -318,16 +282,16 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
   const[selected,setSelected]=useState<Selection[]>([]);
   useEffect(()=>{try{const cached:unknown=JSON.parse(localStorage.getItem(storageKey)||"[]");setSelected(Array.isArray(cached)?cached.filter(isSelection):[])}catch{setSelected([])}},[storageKey]);
   useEffect(()=>{try{localStorage.setItem(storageKey,JSON.stringify(selected))}catch{/* Selection still works for this tab when browser storage is unavailable. */}},[storageKey,selected]);
-  useEffect(()=>{if(actionData?.success&&!("actionKind" in actionData&&actionData.actionKind==="document_upload"))setSelected([])},[actionData]);
+  useEffect(()=>{if(actionData?.success)setSelected([])},[actionData]);
   const totals=useMemo(()=>selected.reduce((sum,row)=>({packages:sum.packages+row.packages,pieces:sum.pieces+row.pieces,weight:sum.weight+row.weight,volume:sum.volume+row.volume}),{packages:0,pieces:0,weight:0,volume:0}),[selected]);
   const selectedIds=new Set(selected.map(row=>row.orderId));
   const toggle=(row:StockRow,checked:boolean)=>setSelected(current=>checked?[...current.filter(item=>item.orderId!==row.order_id),toSelection(row)]:current.filter(item=>item.orderId!==row.order_id));
   const values=<K extends keyof (typeof loaderData.options)[number]>(key:K)=>[...new Set(loaderData.options.map(row=>row[key]).filter(Boolean) as string[])];
   const availableBatches=loaderData.batches.filter(batch=>!batch.has_started&&["planning","loading"].includes(batch.status));
-  const documentUploadSignal=actionData?.success&&"actionKind" in actionData&&actionData.actionKind==="document_upload"?actionData.closeSignal:undefined;
   return <div className="warehouse-consolidation-page">
     <header className="warehouse-page-header ltl-loading-header">
-      <div><p className="eyebrow">CARGO CONSOLIDATION</p><h1>货物配载</h1><p>勾选完整拼车订单并生成正式 PZ 配载单；缺少的发运文件统一在创建装车任务时补齐。</p></div>
+      <div><p className="eyebrow">CARGO CONSOLIDATION</p><h1>货物配载</h1><p>勾选完整拼车订单并生成正式 PZ 配载单；本页仅查看文件齐套状态，不再上传订单文件。</p></div>
+      <Link className="secondary" to={`/warehouse/loading-documents?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}`}>进入配载文件</Link>
     </header>
     {actionData?.formError&&<div className="alert error">{actionData.formError}</div>}{actionData?.success&&<div className="alert success">{actionData.success}{actionData.batchId&&<> · <Link to={`/admin/loading/${actionData.batchId}`}>打开配载单</Link></>}</div>}
     <section className="panel ltl-filter-panel"><FilterForm loaderData={loaderData} values={values}/></section>
@@ -335,7 +299,7 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
       <div className="panel-header">
         <div>
           <h2>当前仓库全部在库货物</h2>
-          <p>本页只校验货物、目的地与车辆配载条件；文件状态仅供参考，不再阻断配载，缺少文件在创建装车任务时统一补齐。</p>
+          <p>本页只校验货物、目的地与车辆配载条件；文件状态只读且不阻断配载，生成配载单后到“配载文件”集中管理。</p>
         </div>
         <div className="consolidation-selection-actions">
           <span className="status-pill">已选 {selected.length} / 在库 {loaderData.total} 票</span>
@@ -362,11 +326,10 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
           <tbody>
             {loaderData.rows.map(row=>{
               const assigned=Boolean(row.active_batch_id),blockers=candidateBlockers(row),checked=selectedIds.has(row.order_id);
-              const documents=latestDocumentsForOrder(loaderData.documents,row.order_id);
               return <tr key={row.order_id} className={checked?"selected-row":""}>
                 <td><input type="checkbox" checked={checked} disabled={assigned||blockers.length>0} onChange={event=>toggle(row,event.target.checked)} aria-label={`选择订单 ${row.order_number}`}/></td>
                 <td>{assigned?<span className="status-pill" title={row.active_batch_number??"已加入配载单"}>已配载<small>{row.active_batch_number}</small></span>:<span className={`status-pill ${blockers.length?"off":"success"}`} title={blockers.join("；")}>{blockers.length?"不可配载":"可配载"}</span>}</td>
-                <td><DocumentStatusCell row={row} documents={documents} busy={busy} closeSignal={documentUploadSignal}/></td>
+                <td><DocumentStatusCell row={row} warehouseId={loaderData.warehouse.id}/></td>
                 <td><strong>{row.order_number}</strong></td>
                 <td><strong>{row.cargo_names||"未填写货名"}</strong></td>
                 <td><strong>{row.customer_name}</strong></td>
@@ -469,42 +432,16 @@ function FilterForm({loaderData,values}:{loaderData:Route.ComponentProps["loader
   </Form>
 }
 
-function latestDocumentsForOrder(documents:OrderDocumentRow[],orderId:string){
-  const latest=new Map<RequiredLoadingDocumentCode,OrderDocumentRow>();
-  for(const document of documents)if(document.order_id===orderId&&!latest.has(document.document_category))latest.set(document.document_category,document);
-  return latest;
-}
-
-function DocumentStatusCell({row,documents,busy,closeSignal}:{row:StockRow;documents:Map<RequiredLoadingDocumentCode,OrderDocumentRow>;busy:boolean;closeSignal?:unknown}){
-  return <div className="consolidation-document-status">{REQUIRED_LOADING_DOCUMENTS.map(type=>{
-    const document=documents.get(type.code);
-    const confirmed=["approved","archived"].includes(document?.review_status||"");
-    const label=!document?`缺少${type.name}`:confirmed?`${type.name}已确认`:`${type.name}已上传`;
-    return <WarehouseDocumentUploadModal key={type.code} row={row} documentType={type} current={document} busy={busy} closeSignal={closeSignal} triggerLabel={label} triggerClassName={`document-state ${!document?"missing":confirmed?"confirmed":"uploaded"}`}/>;
-  })}</div>
-}
-
-function WarehouseDocumentUploadModal({row,documentType,current,busy,closeSignal,triggerLabel,triggerClassName}:{row:StockRow;documentType:(typeof REQUIRED_LOADING_DOCUMENTS)[number];current?:OrderDocumentRow;busy:boolean;closeSignal?:unknown;triggerLabel:string;triggerClassName:string}){
-  return <Modal title={`${documentType.name}上传 · ${row.order_number}`} triggerLabel={triggerLabel} triggerClassName={triggerClassName} size="wide" closeSignal={closeSignal}>
-    <div className="warehouse-document-upload-workbench">
-      <header><div><span>订单</span><strong>{row.order_number}</strong></div><div><span>客户</span><strong>{row.customer_name}</strong></div><div><span>货物</span><strong>{row.cargo_names||"未填写货名"}</strong></div></header>
-      <p className="helper-text">上传完成后返回当前列表。三项文件齐全即可勾选，最终内容在生成配载单前统一预览确认。</p>
-      <div className="warehouse-document-upload-grid single-document">
-        <article className={current?"ready":""}>
-          <div className="warehouse-document-slot-heading"><div><strong>{documentType.name}</strong><small>{documentType.code==="commercial_invoice"?"客户货值与交易信息":documentType.code==="packing_list"?"包装、件数、重量与体积明细":"报关申报使用的单证文件"}</small></div><span className={`status-pill ${current?"success":""}`}>{current?"已上传":"缺少文件"}</span></div>
-          {current&&<a className="warehouse-current-document" href={current.data_url} target="_blank" rel="noreferrer">预览当前文件 · {current.file_name}</a>}
-          <Form method="post" encType="multipart/form-data" className="warehouse-document-upload-form">
-            <input type="hidden" name="intent" value="document_upload"/>
-            <input type="hidden" name="orderId" value={row.order_id}/>
-            <input type="hidden" name="documentCategory" value={documentType.code}/>
-            <label><span>选择本地文件</span><input name="attachment" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" required/></label>
-            <label><span>文件说明</span><input name="documentDescription" placeholder="选填"/></label>
-            <button className="primary" disabled={busy}>{current?`重新上传${documentType.name}`:`上传${documentType.name}`}</button>
-          </Form>
-        </article>
-      </div>
-    </div>
-  </Modal>
+function DocumentStatusCell({row,warehouseId}:{row:StockRow;warehouseId:string}){
+  const statusByType:Record<RequiredLoadingDocumentCode,boolean>={
+    commercial_invoice:Boolean(row.invoice_uploaded),
+    packing_list:Boolean(row.packing_list_uploaded),
+    customs_document:Boolean(row.customs_document_uploaded),
+  };
+  return <div className="consolidation-document-status">
+    {REQUIRED_LOADING_DOCUMENTS.map(type=><span key={type.code} className={`document-state ${statusByType[type.code]?"confirmed":"missing"}`}>{statusByType[type.code]?`${type.name}已上传`:`缺少${type.name}`}</span>)}
+    {row.active_batch_id?<Link className="text-button" to={`/warehouse/loading-documents?warehouseId=${encodeURIComponent(warehouseId)}&batchId=${encodeURIComponent(row.active_batch_id)}`}>到配载文件处理</Link>:<small>生成配载单后集中处理</small>}
+  </div>
 }
 
 function Select({label,name,current,values}:{label:string;name:string;current:string;values:string[]}){return<label><span>{label}</span><select name={name} defaultValue={current}><option value="">全部</option>{values.map(value=><option key={value}>{value}</option>)}</select></label>}
@@ -603,15 +540,4 @@ async function cancelPendingDispatch(organizationId:string,batchId:string,now:st
 }
 async function batchHasStarted(organizationId:string,batchId:string){const row=await env.DB.prepare(`SELECT EXISTS(SELECT 1 FROM warehouse_dispatches d LEFT JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id WHERE d.organization_id=? AND d.transport_batch_id=? AND d.status!='cancelled' AND (d.status='dispatched' OR di.status!='pending')) started`).bind(organizationId,batchId).first<{started:number}>();return Boolean(row?.started)}
 async function editableBatch(organizationId:string,warehouseId:string,batchId:string){const batch=await env.DB.prepare("SELECT id,batch_number FROM transport_batches WHERE id=? AND organization_id=? AND warehouse_id=? AND batch_number LIKE 'PZ-%' AND status IN ('planning','loading')").bind(batchId,organizationId,warehouseId).first<{id:string;batch_number:string}>();if(!batch||await batchHasStarted(organizationId,batchId))return null;return batch}
-function validateDocumentFile(file:File){
-  const allowed=new Set(["application/pdf","application/msword","application/vnd.openxmlformats-officedocument.wordprocessingml.document","application/vnd.ms-excel","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","image/jpeg","image/png","image/webp"]);
-  if(file.size>maxInlineOrderDocumentBytes)return"当前数据库直存模式下单个文件不能超过1.2MB";
-  if(!allowed.has(file.type))return"仅支持 PDF、Word、Excel 和图片文件";
-  return null;
-}
-async function toDataUrl(file:File){
-  const bytes=new Uint8Array(await file.arrayBuffer());let binary="";
-  for(let index=0;index<bytes.length;index+=8192)binary+=String.fromCharCode(...bytes.subarray(index,index+8192));
-  return`data:${file.type};base64,${btoa(binary)}`;
-}
 export function meta(){return[{title:"货物配载 | International TMS"}]}

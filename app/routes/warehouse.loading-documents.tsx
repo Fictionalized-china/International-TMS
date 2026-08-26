@@ -197,11 +197,11 @@ export default function WarehouseLoadingDocuments({ loaderData, actionData }: Ro
   const selected = loaderData.selectedBatch;
   return <>
     <header className="page-header warehouse-loading-documents-header">
-      <div><p className="eyebrow">LOAD DOCUMENTS</p><h1>配载文件</h1><p>按 PZ 配载单集中查看文件齐套状态；文件仍按订单归档，便于客户、报关主体和审核记录追溯。</p></div>
+      <div><p className="eyebrow">LOAD DOCUMENTS</p><h1>配载文件</h1><p>拼车发运文件的统一管理入口：按 PZ 配载单集中上传并查看齐套状态，文件仍按订单归档和追溯。</p></div>
     </header>
     {!selected && (actionData?.success || actionData?.formError) && <div className={`alert ${actionData.formError ? "error" : "success"}`} role={actionData.formError ? "alert" : "status"}>{actionData.formError ?? actionData.success}</div>}
     <section className="panel warehouse-loading-document-list">
-      <div className="panel-header"><div><h2>配载单文件状态</h2><p>一行一张配载单，优先处理缺件和已退回文件。</p></div><span>{loaderData.batches.length} 张</span></div>
+      <div className="panel-header"><div><h2>配载单文件状态</h2><p>一行一张配载单；请优先在这里补齐文件，待装车页只处理创建任务时仍然缺失的项目。</p></div><span>{loaderData.batches.length} 张</span></div>
       <div className="table-wrap"><table><thead><tr><th>配载单</th><th>运输线路</th><th>挂载订单</th><th>文件齐套</th><th>审核状态</th><th>配载状态</th><th>更新时间</th><th>操作</th></tr></thead><tbody>
         {loaderData.batches.map((batch) => {
           const required = batch.order_count * LOADING_DOCUMENTS.length;

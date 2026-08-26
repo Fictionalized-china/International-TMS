@@ -7845,6 +7845,29 @@ body.modal-scroll-locked {
   color: #08754b;
 }
 
+.consolidation-document-status .document-state {
+  cursor: default;
+}
+
+.consolidation-document-status .document-state:hover {
+  border-color: rgba(148, 163, 184, 0.35);
+  background: rgba(241, 245, 249, 0.72);
+  color: #475569;
+}
+
+.consolidation-document-status .document-state.missing,
+.consolidation-document-status .document-state.missing:hover {
+  border-color: rgba(239, 68, 68, 0.28);
+  background: rgba(254, 226, 226, 0.58);
+  color: #b42318;
+}
+
+.consolidation-document-status .document-state.confirmed:hover {
+  border-color: rgba(16, 185, 129, 0.32);
+  background: rgba(209, 250, 229, 0.65);
+  color: #08754b;
+}
+
 .warehouse-document-upload-workbench {
   display: grid;
   gap: 16px;
