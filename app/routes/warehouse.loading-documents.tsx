@@ -295,7 +295,10 @@ function OrderDocumentUploadModal({
             <strong role="cell">{documentType.name}</strong>
             <span role="cell">{current ? <><a href={current.data_url} target="_blank" rel="noreferrer">{current.file_name}</a><small>{reviewStatusLabel(current.review_status)}</small></> : <em>尚未上传</em>}</span>
             <span role="cell" className={selectedFile ? "selected" : ""}>{selectedFile ? <><b>{selectedFile.name}</b><small>{formatFileSize(selectedFile.size)}</small></> : <em>本次不变更</em>}</span>
-            <span role="cell"><input id={inputId} name={`attachment_${documentType.code}`} type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" onChange={(event) => setSelectedFiles((currentFiles) => ({ ...currentFiles, [documentType.code]: event.currentTarget.files?.[0] }))}/><label className="secondary" htmlFor={inputId}>{selectedFile ? "重新选择" : "选择文件"}</label></span>
+            <span role="cell"><input id={inputId} name={`attachment_${documentType.code}`} type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" onChange={(event) => {
+              const file = event.currentTarget.files?.[0];
+              setSelectedFiles((currentFiles) => ({ ...currentFiles, [documentType.code]: file }));
+            }}/><label className="secondary" htmlFor={inputId}>{selectedFile ? "重新选择" : "选择文件"}</label></span>
           </div>;
         })}
       </div>
