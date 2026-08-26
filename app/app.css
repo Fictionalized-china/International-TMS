@@ -19862,32 +19862,52 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
 .warehouse-loading-document-list .selected-row td {
   background: #eff6ff;
 }
+.warehouse-loading-open-button,
+.warehouse-order-upload-trigger {
+  min-height: 28px;
+  padding: 0 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  font-size: 9px;
+  white-space: nowrap;
+  text-decoration: none;
+}
 .loading-document-order-list {
   max-width: 260px;
   white-space: normal;
   overflow-wrap: anywhere;
 }
-.warehouse-loading-document-upload {
-  display: grid;
-  grid-template-columns: minmax(240px, 1.35fr) minmax(180px, .85fr) minmax(280px, 1.35fr) auto;
-  gap: 8px;
-  align-items: end;
-  padding: 9px 10px;
-  border-bottom: 1px solid var(--line);
+.warehouse-loading-document-dialog { min-width: 0; }
+.warehouse-loading-document-dialog-head {
+  min-height: 48px;
+  padding: 8px 10px;
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-bottom: 0;
   background: #f8fafc;
 }
-.warehouse-loading-document-upload .field {
-  min-width: 0;
-  margin: 0;
+.warehouse-loading-document-dialog-head div { min-width: 0; }
+.warehouse-loading-document-dialog-head strong,
+.warehouse-loading-document-dialog-head span { display: block; }
+.warehouse-loading-document-dialog-head strong { color: var(--ink); font-size: 11px; }
+.warehouse-loading-document-dialog-head span { margin-top: 2px; color: #72869a; font-size: 9px; }
+.warehouse-loading-document-dialog-head p { margin: 0; color: #72869a; font-size: 9px; text-align: right; }
+.warehouse-loading-document-message {
+  padding: 7px 10px;
+  border: 1px solid;
+  font-size: 9px;
 }
-.warehouse-loading-document-upload .field > span {
-  margin-bottom: 4px;
-}
-.warehouse-loading-document-upload input,
-.warehouse-loading-document-upload select,
-.warehouse-loading-document-upload button {
-  min-height: 34px;
-}
+.warehouse-loading-document-message.success { color: #0c7047; border-color: #b9dfc9; background: #f1fbf5; }
+.warehouse-loading-document-message.error { color: #a53c2b; border-color: #efc0b7; background: #fff5f3; }
+.warehouse-loading-document-matrix table { min-width: 1040px; }
+.warehouse-loading-document-matrix th:last-child,
+.warehouse-loading-document-matrix td:last-child { position: sticky; right: 0; z-index: 1; background: #fff; box-shadow: -1px 0 var(--line); }
+.warehouse-loading-document-matrix th:last-child { z-index: 2; background: #f8fafc; }
 .warehouse-loading-document-file input[type="file"] {
   width: 100%;
   padding: 5px 7px;
@@ -19903,15 +19923,41 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
 .warehouse-loading-document-matrix td small {
   margin-top: 4px;
 }
-@media (max-width: 1050px) {
-  .warehouse-loading-document-upload {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+.warehouse-order-document-upload-form {
+  display: grid;
+  grid-template-columns: minmax(180px, .7fr) minmax(300px, 1.3fr);
+  gap: 10px;
 }
+.warehouse-order-document-context {
+  grid-column: 1 / -1;
+  padding: 9px 11px;
+  border: 1px solid #cbd9e6;
+  background: #f6f9fc;
+}
+.warehouse-order-document-context span,
+.warehouse-order-document-context strong,
+.warehouse-order-document-context small { display: block; }
+.warehouse-order-document-context span { color: #8999a8; font-size: 9px; }
+.warehouse-order-document-context strong { margin-top: 2px; color: var(--ink); font: 700 12px Consolas, monospace; }
+.warehouse-order-document-context small { margin-top: 3px; color: #657b90; font-size: 9px; overflow-wrap: anywhere; }
+.warehouse-order-document-upload-form .field { min-width: 0; margin: 0; }
+.warehouse-order-document-upload-form .field > span { margin-bottom: 4px; }
+.warehouse-order-document-upload-form input,
+.warehouse-order-document-upload-form select { min-height: 36px; }
+.warehouse-order-document-upload-form .alert,
+.warehouse-order-document-help,
+.warehouse-order-document-upload-form footer { grid-column: 1 / -1; }
+.warehouse-order-document-help { margin: 0; color: #7f90a0; font-size: 9px; }
+.warehouse-order-document-upload-form footer { display: flex; justify-content: flex-end; gap: 7px; padding-top: 4px; }
+.warehouse-order-document-upload-form footer button { min-height: 34px; border-radius: 3px; }
+.modal-card.xwide:has(.warehouse-loading-document-dialog) { width: min(1380px, calc(100vw - 30px)); }
+.modal-card.xwide:has(.warehouse-loading-document-dialog) .modal-header { min-height: 48px; padding: 9px 14px; }
+.modal-card.xwide:has(.warehouse-loading-document-dialog) .modal-header h2 { font-size: 14px; }
+.modal-card.xwide:has(.warehouse-loading-document-dialog) .modal-body { padding: 10px; }
 @media (max-width: 680px) {
-  .warehouse-loading-document-upload {
-    grid-template-columns: 1fr;
-  }
+  .warehouse-loading-document-dialog-head { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .warehouse-loading-document-dialog-head p { text-align: left; }
+  .warehouse-order-document-upload-form { grid-template-columns: 1fr; }
 }
 @media print {
   .warehouse-package-label dl,

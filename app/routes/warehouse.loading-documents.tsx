@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
-import { Form, Link, useNavigation } from "react-router";
+import { Form, Link, useNavigate, useNavigation } from "react-router";
 import type { Route } from "./+types/warehouse.loading-documents";
+import { Modal } from "../components/Modal";
 import { writeAudit } from "../lib/audit.server";
 import { requireSessionUser } from "../lib/auth.server";
 import { maxInlineOrderDocumentBytes } from "../lib/order-documents";
@@ -172,10 +173,11 @@ export async function action({ request }: Route.ActionArgs) {
     actorUserId: user.userId,
     metadata: { warehouseId: warehouse.id, batchId, batchNumber: order.batch_number, orderId, orderNumber: order.order_number, documentCategory, fileName: file.name },
   });
-  return { success: `${order.batch_number} · ${order.order_number} 的${documentName}已上传` };
+  return { success: `${order.batch_number} · ${order.order_number} 的${documentName}已上传`, uploadedAt: now };
 }
 
 export default function WarehouseLoadingDocuments({ loaderData, actionData }: Route.ComponentProps) {
+  const navigate = useNavigate();
   const navigation = useNavigation();
   const busy = navigation.state !== "idle";
   const selected = loaderData.selectedBatch;
@@ -183,7 +185,7 @@ export default function WarehouseLoadingDocuments({ loaderData, actionData }: Ro
     <header className="page-header warehouse-loading-documents-header">
       <div><p className="eyebrow">LOAD DOCUMENTS</p><h1>配载文件</h1><p>按 PZ 配载单集中查看文件齐套状态；文件仍按订单归档，便于客户、报关主体和审核记录追溯。</p></div>
     </header>
-    {(actionData?.success || actionData?.formError) && <div className={`alert ${actionData.formError ? "error" : "success"}`} role={actionData.formError ? "alert" : "status"}>{actionData.formError ?? actionData.success}</div>}
+    {!selected && (actionData?.success || actionData?.formError) && <div className={`alert ${actionData.formError ? "error" : "success"}`} role={actionData.formError ? "alert" : "status"}>{actionData.formError ?? actionData.success}</div>}
     <section className="panel warehouse-loading-document-list">
       <div className="panel-header"><div><h2>配载单文件状态</h2><p>一行一张配载单，优先处理缺件和已退回文件。</p></div><span>{loaderData.batches.length} 张</span></div>
       <div className="table-wrap"><table><thead><tr><th>配载单</th><th>运输线路</th><th>挂载订单</th><th>文件齐套</th><th>审核状态</th><th>配载状态</th><th>更新时间</th><th>操作</th></tr></thead><tbody>
@@ -198,28 +200,49 @@ export default function WarehouseLoadingDocuments({ loaderData, actionData }: Ro
             <td>{batch.rejected_count ? <span className="status-pill off">{batch.rejected_count} 项已退回</span> : batch.approved_count === required ? <span className="status-pill success">全部通过</span> : <span className="status-pill">{batch.approved_count}/{required} 已通过</span>}</td>
             <td><span className={`status-pill ${batch.status === "completed" ? "success" : ""}`}>{batchStatusLabel(batch.status)}</span><small>{roadStatusLabels[batch.road_status] ?? batch.road_status}</small></td>
             <td>{formatDateTime(batch.updated_at)}</td>
-            <td><Link className="text-button" to={`/warehouse/loading-documents?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}&batchId=${encodeURIComponent(batch.id)}`}>打开文件</Link></td>
+            <td><Link className="secondary warehouse-loading-open-button" to={`/warehouse/loading-documents?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}&batchId=${encodeURIComponent(batch.id)}`}>打开文件</Link></td>
           </tr>;
         })}
         {!loaderData.batches.length && <tr><td colSpan={8} className="empty-state">当前仓库还没有 PZ 配载单。</td></tr>}
       </tbody></table></div>
     </section>
-    {selected && <section className="panel warehouse-loading-document-detail">
-      <div className="panel-header"><div><h2>{selected.batch_number} · 订单文件</h2><p>选择配载单内的订单和文件类型后上传；新文件会成为当前版本，历史版本仍保留。</p></div><Link className="secondary" to={`/warehouse/loading-documents?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}`}>收起详情</Link></div>
-      <Form method="post" encType="multipart/form-data" className="warehouse-loading-document-upload">
-        <input type="hidden" name="intent" value="upload"/><input type="hidden" name="batchId" value={selected.id}/><input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/>
-        <label className="field"><span>挂载订单 *</span><select name="orderId" required><option value="">请选择订单</option>{loaderData.orders.map((order) => <option key={order.order_id} value={order.order_id}>{order.order_number} · {order.customer_name}</option>)}</select></label>
-        <label className="field"><span>文件类型 *</span><select name="documentCategory" required><option value="">请选择类型</option>{LOADING_DOCUMENTS.map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label>
-        <label className="field warehouse-loading-document-file"><span>选择文件 *</span><input name="attachment" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" required/></label>
-        <button className="primary" disabled={busy}>{busy ? "正在上传…" : "上传到配载单"}</button>
-      </Form>
-      <div className="table-wrap warehouse-loading-document-matrix"><table><thead><tr><th>订单 / 客户</th><th>货物</th>{LOADING_DOCUMENTS.map((item) => <th key={item.code}>{item.name}</th>)}</tr></thead><tbody>
-        {loaderData.orders.map((order) => <tr key={order.order_id}><td><strong>{order.order_number}</strong><small>{order.customer_name}</small></td><td>{order.cargo_names || "未填写"}</td>{LOADING_DOCUMENTS.map((type) => {
-          const document = loaderData.documents.find((item) => item.order_id === order.order_id && item.document_category === type.code);
-          return <td key={type.code}>{document ? <><a href={document.data_url} target="_blank" rel="noreferrer">{document.file_name}</a><small><span className={`status-pill ${["approved","archived"].includes(document.review_status) ? "success" : document.review_status === "rejected" ? "off" : ""}`}>{reviewStatusLabel(document.review_status)}</span></small></> : <span className="status-pill off">待上传</span>}</td>;
-        })}</tr>)}
-      </tbody></table></div>
-    </section>}
+    {selected && <Modal
+      title={`${selected.batch_number} · 配载文件`}
+      size="xwide"
+      openSignal={selected.id}
+      onClose={() => navigate(`/warehouse/loading-documents?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}`)}
+    >
+      <section className="warehouse-loading-document-dialog">
+        <header className="warehouse-loading-document-dialog-head">
+          <div><strong>{selected.order_count} 票挂载订单</strong><span>{selected.origin_location} → {selected.destination_location}</span></div>
+          <p>在对应订单行点击“上传文件”；新文件成为当前版本，历史版本继续保留。</p>
+        </header>
+        {(actionData?.success || actionData?.formError) && <div className={`warehouse-loading-document-message ${actionData.formError ? "error" : "success"}`} role={actionData.formError ? "alert" : "status"} aria-live="polite">{actionData.formError ?? actionData.success}</div>}
+        <div className="table-wrap warehouse-loading-document-matrix"><table><thead><tr><th>订单 / 客户</th><th>货物</th>{LOADING_DOCUMENTS.map((item) => <th key={item.code}>{item.name}</th>)}<th>操作</th></tr></thead><tbody>
+          {loaderData.orders.map((order) => <tr key={order.order_id}><td><strong>{order.order_number}</strong><small>{order.customer_name}</small></td><td>{order.cargo_names || "未填写"}</td>{LOADING_DOCUMENTS.map((type) => {
+            const document = loaderData.documents.find((item) => item.order_id === order.order_id && item.document_category === type.code);
+            return <td key={type.code}>{document ? <><a href={document.data_url} target="_blank" rel="noreferrer">{document.file_name}</a><small><span className={`status-pill ${["approved","archived"].includes(document.review_status) ? "success" : document.review_status === "rejected" ? "off" : ""}`}>{reviewStatusLabel(document.review_status)}</span></small></> : <span className="status-pill off">待上传</span>}</td>;
+          })}<td><Modal
+            title={`上传订单文件 · ${order.order_number}`}
+            triggerLabel="上传文件"
+            triggerClassName="secondary warehouse-order-upload-trigger"
+            size="wide"
+            closeSignal={actionData?.uploadedAt}
+          >{({ close }) => <Form method="post" encType="multipart/form-data" className="warehouse-order-document-upload-form">
+            <input type="hidden" name="intent" value="upload"/>
+            <input type="hidden" name="batchId" value={selected.id}/>
+            <input type="hidden" name="orderId" value={order.order_id}/>
+            <input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/>
+            <div className="warehouse-order-document-context"><span>挂载订单</span><strong>{order.order_number}</strong><small>{order.customer_name} · {order.cargo_names || "货物名称未填写"}</small></div>
+            {actionData?.formError && <div className="alert error" role="alert">{actionData.formError}</div>}
+            <label className="field"><span>文件类型 *</span><select name="documentCategory" required autoFocus><option value="">请选择类型</option>{LOADING_DOCUMENTS.map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label>
+            <label className="field warehouse-loading-document-file"><span>选择该订单的文件 *</span><input name="attachment" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" required/></label>
+            <p className="warehouse-order-document-help">支持 PDF、Word、Excel、JPG、PNG、WEBP；单个文件不超过 1.2MB。</p>
+            <footer><button type="button" className="secondary" onClick={close}>取消</button><button className="primary" disabled={busy}>{busy ? "正在上传…" : "确认上传"}</button></footer>
+          </Form>}</Modal></td></tr>)}
+        </tbody></table></div>
+      </section>
+    </Modal>}
   </>;
 }
 

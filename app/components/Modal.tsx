@@ -169,12 +169,18 @@ type ModalProps = {
   openSignal?: unknown;
   size?: "normal" | "wide" | "xwide";
   triggerClassName?: string;
+  onClose?: () => void;
 };
 
-export function Modal({ title, triggerLabel, children, closeSignal, openSignal, size = "normal", triggerClassName = "primary" }: ModalProps) {
+export function Modal({ title, triggerLabel, children, closeSignal, openSignal, size = "normal", triggerClassName = "primary", onClose }: ModalProps) {
   const [open, setOpen] = useState(false);
   const titleId = useId();
+  const modalId = useId();
   useModalScrollLock(open);
+  const close = () => {
+    setOpen(false);
+    onClose?.();
+  };
 
   useEffect(() => {
     if (closeSignal) setOpen(false);
@@ -187,20 +193,25 @@ export function Modal({ title, triggerLabel, children, closeSignal, openSignal, 
   useEffect(() => {
     if (!open) return;
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key !== "Escape") return;
+      const openDialogs = document.querySelectorAll<HTMLElement>(".modal-backdrop[data-modal-id]");
+      const topDialog = openDialogs.item(openDialogs.length - 1);
+      if (topDialog?.dataset.modalId !== modalId) return;
+      close();
     };
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [open]);
+  }, [open, onClose]);
 
   const dialog =
     open && typeof document !== "undefined"
       ? createPortal(
           <div
             className="modal-backdrop"
+            data-modal-id={modalId}
             role="presentation"
             onMouseDown={(event) => {
-              if (event.target === event.currentTarget) setOpen(false);
+              if (event.target === event.currentTarget) close();
             }}
           >
             <section
@@ -215,14 +226,14 @@ export function Modal({ title, triggerLabel, children, closeSignal, openSignal, 
                   type="button"
                   className="modal-close"
                   aria-label="关闭"
-                  onClick={() => setOpen(false)}
+                  onClick={close}
                 >
                   ×
                 </button>
               </header>
               <div className="modal-body">
                 {typeof children === "function"
-                  ? children({ close: () => setOpen(false) })
+                  ? children({ close })
                   : children}
               </div>
             </section>
