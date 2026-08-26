@@ -307,7 +307,7 @@ export async function action({ request }: Route.ActionArgs) {
     now = new Date().toISOString();
   const pieces = positiveInt(form, "pieces") ?? 1,
     weight = positive(form, "weight"),
-    volume = positive(form, "volume"),
+    volume = truncateVolume(positive(form, "volume")),
     length = positive(form, "length"),
     width = positive(form, "width"),
     height = positive(form, "height");
@@ -1067,8 +1067,9 @@ export default function WarehouseInbound({
             <p>扫描国内仓生成的货物标签；单件装车任务也可扫描 OUT 装车任务码，核对订单和货物信息后再收货。</p>
           </div>
         </header>
-        {loaderData.lookupError && <div className="alert error">{loaderData.lookupError}</div>}
-        <OverseasReceivingScan warehouseId={loaderData.warehouse.id} reference={loaderData.reference} orderId={loaderData.orderId} returnTo={loaderData.returnTo} />
+        {actionData?.success && <div className="alert success">{actionData.success}</div>}
+        {!actionData?.success && loaderData.lookupError && <div className="alert error">{loaderData.lookupError}</div>}
+        <OverseasReceivingScan warehouseId={loaderData.warehouse.id} reference={actionData?.success ? "" : loaderData.reference} orderId={loaderData.orderId} returnTo={loaderData.returnTo} />
       </>
     );
   }
@@ -1124,7 +1125,7 @@ export default function WarehouseInbound({
                   <tr><td>货物标签</td><td><strong>{loaderData.scannedPackage.barcode}</strong><small>{loaderData.scannedPackage.package_number}</small></td><td>标签状态</td><td><span className="status-pill success">上一仓已出库</span></td></tr>
                   <tr><td>订单</td><td><strong>{loaderData.selectedShipment.order_number}</strong><small>{loaderData.selectedShipment.business_type === "ftl" ? "整车" : "拼车"}</small></td><td>系统运单</td><td><strong>{loaderData.selectedShipment.shipment_number}</strong></td></tr>
                   <tr><td>客户</td><td><strong>[{loaderData.selectedShipment.customer_identity_code}] {loaderData.selectedShipment.customer_name}</strong></td><td>目的仓</td><td><strong>{loaderData.selectedShipment.expected_warehouse_name || loaderData.warehouse.name}</strong></td></tr>
-                  <tr><td>标签货物</td><td><strong>{loaderData.scannedPackage.cargo_name || loaderData.selectedShipment.cargo_description || "货物名称未填写"}</strong><small>{loaderData.scannedPackage.pieces} 件 · {Number(loaderData.scannedPackage.weight_kg || 0).toFixed(3)} KG · {Number(loaderData.scannedPackage.volume_cbm || 0).toFixed(3)} CBM</small></td><td>订单预录</td><td><strong>{loaderData.selectedShipment.pieces} 件 · {Number(loaderData.selectedShipment.gross_weight_kg || 0).toFixed(3)} KG</strong><small>{Number(loaderData.selectedShipment.volume_cbm || 0).toFixed(3)} CBM</small></td></tr>
+                  <tr><td>标签货物</td><td><strong>{loaderData.scannedPackage.cargo_name || loaderData.selectedShipment.cargo_description || "货物名称未填写"}</strong><small>{loaderData.scannedPackage.pieces} 件 · {Number(loaderData.scannedPackage.weight_kg || 0).toFixed(3)} KG · {formatVolume(loaderData.scannedPackage.volume_cbm)} CBM</small></td><td>订单预录</td><td><strong>{loaderData.selectedShipment.pieces} 件 · {Number(loaderData.selectedShipment.gross_weight_kg || 0).toFixed(3)} KG</strong><small>{formatVolume(loaderData.selectedShipment.volume_cbm)} CBM</small></td></tr>
                   <tr><td>发出仓库</td><td><strong>{loaderData.scannedPackage.source_warehouse_name}</strong></td><td>标签尺寸</td><td>{[loaderData.scannedPackage.length_cm,loaderData.scannedPackage.width_cm,loaderData.scannedPackage.height_cm].every((value) => value != null) ? `${loaderData.scannedPackage.length_cm} × ${loaderData.scannedPackage.width_cm} × ${loaderData.scannedPackage.height_cm} CM` : "未记录"}</td></tr>
                 </tbody>
               </table>
@@ -1284,7 +1285,7 @@ export default function WarehouseInbound({
                   <Num
                     name="volume"
                     label="实测体积 CBM"
-                    defaultValue={loaderData.isOverseasWarehouse && loaderData.scannedPackage?.volume_cbm != null ? String(loaderData.scannedPackage.volume_cbm) : undefined}
+                    defaultValue={loaderData.isOverseasWarehouse && loaderData.scannedPackage?.volume_cbm != null ? formatVolume(loaderData.scannedPackage.volume_cbm) : undefined}
                     step="0.001"
                     required={volumePolicy.isRequired}
                   />
@@ -1436,7 +1437,7 @@ function PackageLabel({ item }: { item: Package }) {
         </div>
         <div>
           <dt>实收</dt>
-          <dd>{item.pieces} 件 · {item.weight_kg?.toFixed(2) || "0.00"} KG · {item.volume_cbm?.toFixed(3) || "0.000"} CBM</dd>
+          <dd>{item.pieces} 件 · {item.weight_kg?.toFixed(2) || "0.00"} KG · {formatVolume(item.volume_cbm)} CBM</dd>
         </div>
       </dl>
     </article>
@@ -1545,6 +1546,12 @@ function positive(form: FormData, name: string) {
 function positiveInt(form: FormData, name: string) {
   const value = positive(form, name);
   return value !== null && Number.isInteger(value) ? value : null;
+}
+function truncateVolume(value: number | null) {
+  return value === null ? null : Math.trunc(value * 1000) / 1000;
+}
+function formatVolume(value: number | null | undefined) {
+  return (truncateVolume(Number(value ?? 0)) ?? 0).toFixed(3);
 }
 function generateCode(prefix: string) {
   return `${prefix}-${Date.now().toString(36).toUpperCase()}-${crypto.randomUUID().slice(0, 5).toUpperCase()}`;
