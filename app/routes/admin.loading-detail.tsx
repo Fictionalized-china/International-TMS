@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Form, Link, useNavigation, useSearchParams } from "react-router";
 import type { Route } from "./+types/admin.loading-detail";
 import { requireSessionUser } from "../lib/auth.server";
@@ -681,12 +681,12 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
     ...(!transportResourceReady?["境外承运方、车型、车牌、司机姓名或司机电话尚未补齐"]:[]),
     ...loaderData.departureGateStatuses.flatMap(item=>item.reasons.map(reason=>`${loaderData.orders.find(order=>order.order_id===item.order_id)?.order_number||"订单"}：${reason}`)),
   ];
-  return <><header className="page-header batch-tracking-page-header"><div><p className="eyebrow">PZ LOAD · TRANSPORT TRACKING</p><h1>{loaderData.batch.batch_number}</h1><p>{loaderData.batch.batch_name} · {loaderData.batch.origin_location} → {loaderData.batch.destination_location}</p></div><div className="page-actions">{loaderData.returnOrderId&&<Link className="secondary" to={`/admin/orders/${loaderData.returnOrderId}`}>返回订单详情</Link>}<Link className="secondary" to="/admin/loading">返回配载单跟踪</Link><span className="status-pill">{allDispatched?"后台运输跟踪":"等待仓库出库"}</span><span className="status-pill">{roadStatusLabels[loaderData.batch.road_status]||loaderData.batch.road_status}</span></div></header>{(actionData?.success||actionData?.formError)&&<div className={`alert ${actionData.formError?"error":"success"}`}>{actionData.formError??actionData.success}</div>}
+  return <><header className="page-header batch-tracking-page-header"><div><p className="eyebrow">PZ LOAD · TRANSPORT TRACKING</p><h1>{loaderData.batch.batch_number}</h1><p>{loaderData.batch.batch_name} · {loaderData.batch.origin_location} → {loaderData.batch.destination_location}</p></div><div className="page-actions">{loaderData.returnOrderId&&<Link className="secondary" to={`/admin/orders/${loaderData.returnOrderId}`}>返回订单详情</Link>}<Link className="secondary" to="/admin/loading">返回配载单跟踪</Link><span className="status-pill">{allDispatched?"后台运输跟踪":"等待仓库出库"}</span><span className="status-pill">{roadStatusLabels[loaderData.batch.road_status]||loaderData.batch.road_status}</span></div></header><ActionToast signal={actionData} message={actionData?.formError??actionData?.success} tone={actionData?.formError?"error":"success"}/>
   <section className="panel batch-command-panel">
     <div className="panel-header"><div><h2>配载单执行总览</h2><p>仓库端负责配载、文件确认、车辆司机安排和装车出库；整批出库后，本页才开放运输执行与跟踪。</p></div><span className="status-pill">{roadStatusLabels[loaderData.batch.road_status]||loaderData.batch.road_status}</span></div>
     <BatchWorkspaceTabs status={loaderData.batch.road_status} customsReady={allCustomsReady} loadPlanReady={loadPlanReady} warehouseReady={allDispatched} activeTab={activeTab} tabHref={tabHref}/>
   </section>
-  {activeTab==="tracking"&&<BatchTrackingWorkbench batchId={loaderData.batch.id} batchNumber={loaderData.batch.batch_number} orders={loaderData.orders} trackingMilestones={loaderData.trackingMilestones} trackingFlags={loaderData.trackingFlags} batchVehiclePlate={loaderData.batchVehiclePlate} overseasVehiclePlate={loaderData.batch.overseas_vehicle_plate||null} borderPort={loaderData.batch.border_port||null} customsLocation={loaderData.batch.customs_location||null} busy={busy} manage={manage&&allDispatched} warehouseReady={allDispatched} exitConfirmed={exited} exitGateHref={tabHref("outbound")}/>}
+  {activeTab==="tracking"&&<BatchTrackingWorkbench batchId={loaderData.batch.id} batchNumber={loaderData.batch.batch_number} orders={loaderData.orders} trackingMilestones={loaderData.trackingMilestones} trackingFlags={loaderData.trackingFlags} batchVehiclePlate={loaderData.batchVehiclePlate} overseasVehiclePlate={loaderData.batch.overseas_vehicle_plate||null} borderPort={loaderData.batch.border_port||null} customsLocation={loaderData.batch.customs_location||null} busy={busy} manage={manage&&allDispatched} warehouseReady={allDispatched} exitConfirmed={exited} exitGateHref={tabHref("outbound")} actionCloseSignal={actionData?.success?actionData:undefined}/>}
   {activeTab==="documents"&&<BatchDocumentWorkbench batchId={loaderData.batch.id} orders={loaderData.orders} batchDocuments={loaderData.batchDocuments} orderDocuments={loaderData.orderDocuments} customsSummaries={loaderData.customsSummaries} customsDeclarations={loaderData.customsDeclarations} busy={busy} manageCustoms={manageCustoms} requiresTransloading={requiresTransloading} ready={allCustomsReady} customsCloseSignal={actionData?.success?actionData:undefined}/>}
   {activeTab==="batch"&&<><section className="panel loading-sheet batch-tab-panel" id="batch-arrangement">
     <div className="batch-detail-summary"><div><h2>仓库配载结果</h2><p>由仓库端自动同步，管理后台只读查看。</p></div><div className="loading-sheet-state batch-detail-summary-status"><span>{loaderData.orders.length} 票</span><span>{loaderData.vehicles.length} 车</span><b>{allDispatched?"仓库已出库":loadPlanReady&&allCustomsReady?"待仓库装车":"待仓库补齐"}</b></div></div>
@@ -776,7 +776,23 @@ function BatchDocumentWorkbench({batchId,orders,batchDocuments,orderDocuments,cu
   </section>
 }
 
-function BatchTrackingWorkbench({batchId,batchNumber,orders,trackingMilestones,trackingFlags,batchVehiclePlate,overseasVehiclePlate,borderPort,customsLocation,busy,manage,warehouseReady,exitConfirmed,exitGateHref}:{batchId:string;batchNumber:string;orders:BatchOrder[];trackingMilestones:BatchTrackingMilestone[];trackingFlags:BatchTrackingFlag[];batchVehiclePlate:string|null;overseasVehiclePlate:string|null;borderPort:string|null;customsLocation:string|null;busy:boolean;manage:boolean;warehouseReady:boolean;exitConfirmed:boolean;exitGateHref:string}){
+function ActionToast({signal,message,tone}:{signal?:unknown;message?:string;tone:"success"|"error"}){
+  const [visible,setVisible]=useState(Boolean(message));
+  useEffect(()=>{
+    if(!message)return;
+    setVisible(true);
+    const timer=window.setTimeout(()=>setVisible(false),4200);
+    return()=>window.clearTimeout(timer);
+  },[message,signal]);
+  if(!message||!visible)return null;
+  return <div className={`batch-action-toast ${tone}`} role={tone==="error"?"alert":"status"} aria-live={tone==="error"?"assertive":"polite"}>
+    <span>{tone==="error"?"操作未完成":"操作成功"}</span>
+    <p>{message}</p>
+    <button type="button" aria-label="关闭提示" onClick={()=>setVisible(false)}>×</button>
+  </div>;
+}
+
+function BatchTrackingWorkbench({batchId,batchNumber,orders,trackingMilestones,trackingFlags,batchVehiclePlate,overseasVehiclePlate,borderPort,customsLocation,busy,manage,warehouseReady,exitConfirmed,exitGateHref,actionCloseSignal}:{batchId:string;batchNumber:string;orders:BatchOrder[];trackingMilestones:BatchTrackingMilestone[];trackingFlags:BatchTrackingFlag[];batchVehiclePlate:string|null;overseasVehiclePlate:string|null;borderPort:string|null;customsLocation:string|null;busy:boolean;manage:boolean;warehouseReady:boolean;exitConfirmed:boolean;exitGateHref:string;actionCloseSignal?:unknown}){
   // 各订单的最新里程碑（按 progress 权重排序）
   const milestoneProgressWeight:Record<string,number>={departed:15,border_arrived:28,exported:40,transloaded:46,transit_customs:52,foreign_entered:64,customs_cleared:82,station_arrived:100};
   const milestonesByOrder=new Map<string,BatchTrackingMilestone[]>();
@@ -800,22 +816,23 @@ function BatchTrackingWorkbench({batchId,batchNumber,orders,trackingMilestones,t
   const defaultEventAt=dateTimeLocal(new Date().toISOString());
   const defaultLocation=(nodeCode:string)=>["border_arrived","exported"].includes(nodeCode)?borderPort||"":nodeCode==="customs_cleared"?customsLocation||"":"";
   return <section className="panel batch-tracking-workbench" id="batch-tracking">
-    <div className="panel-header"><div><h2>4. 运输执行与跟踪</h2><p>仓库整批出库后开放登记；时间、口岸、车辆等优先继承配载单，登记结果同步写入全部挂载订单。</p></div><span className="status-pill">{orders.length} 票 · {trackingMilestones.length} 条节点</span></div>
+    <div className="panel-header"><div><h2>4. 运输执行与跟踪</h2><p>仓库整批出库后开放登记；时间、口岸、车辆等优先继承配载单，登记结果同步写入全部挂载订单。</p></div><div className="batch-tracking-header-actions"><span className="status-pill">{orders.length} 票 · {trackingMilestones.length} 条节点</span>{manage&&<Modal title="可选运输节点设置" triggerLabel={`可选节点${requiresTransloading||requiresTransitCustoms?" · 已启用":""}`} triggerClassName="text-button batch-optional-node-trigger" closeSignal={actionCloseSignal}>
+      <div className="batch-optional-node-dialog"><p className="muted">仅在运输途中实际发生换装或转关时启用；默认不参与主流程。</p><div className="table-wrap batch-tracking-option-table"><table><thead><tr><th>可选节点</th><th>适用范围</th><th>当前设置</th><th>操作</th></tr></thead><tbody>
+        <tr><td><strong>换装</strong></td><td>给本批全部订单开放“换装”节点</td><td><span className={`status-pill ${requiresTransloading?"success":"off"}`}>{requiresTransloading?"已启用":"未启用"}</span></td><td><Form method="post"><input type="hidden" name="intent" value="batch_tracking_option_toggle"/><input type="hidden" name="optionCode" value="transloaded"/><label className="toggle-label"><input type="checkbox" name="enable" defaultChecked={requiresTransloading}/><span>启用</span></label><button className="text-button" disabled={busy}>应用</button></Form></td></tr>
+        <tr><td><strong>转关</strong></td><td>给本批全部订单开放“转关”节点</td><td><span className={`status-pill ${requiresTransitCustoms?"success":"off"}`}>{requiresTransitCustoms?"已启用":"未启用"}</span></td><td><Form method="post"><input type="hidden" name="intent" value="batch_tracking_option_toggle"/><input type="hidden" name="optionCode" value="transit_customs"/><label className="toggle-label"><input type="checkbox" name="enable" defaultChecked={requiresTransitCustoms}/><span>启用</span></label><button className="text-button" disabled={busy}>应用</button></Form></td></tr>
+      </tbody></table></div></div>
+    </Modal>}</div></div>
     {!warehouseReady&&<div className="alert warning">仓库端尚未完成整批装车出库。当前仅可查看，完成出库后系统会自动开放节点登记。</div>}
     {warehouseReady&&!exitConfirmed&&<div className="batch-exit-prerequisite" role="status"><div><strong>当前待办：确认实际出境</strong><span>出境节点不在这里手工登记；完成出境确认后，系统会自动写入本批全部订单。</span></div><Link className="primary" to={exitGateHref}>去确认实际出境</Link></div>}
     <div className="batch-tracking-note"><strong>幂等写入</strong><span>同一订单同一节点同一事件时间只记一次；不同时间会留下多条记录，作为运输过程的多份痕迹。</span><strong>顺序门禁</strong><span>登记新节点前，批次内每票订单必须已有前置节点（如登记"出境"前要求"到达出境口岸"已存在）。</span></div>
-    {manage&&<div className="table-wrap batch-tracking-option-table"><table><thead><tr><th>可选节点</th><th>适用范围</th><th>当前设置</th><th>操作</th></tr></thead><tbody>
-      <tr><td><strong>换装</strong></td><td>给本批全部订单开放“换装”节点</td><td><span className={`status-pill ${requiresTransloading?"success":"off"}`}>{requiresTransloading?"已启用":"未启用"}</span></td><td><Form method="post"><input type="hidden" name="intent" value="batch_tracking_option_toggle"/><input type="hidden" name="optionCode" value="transloaded"/><label className="toggle-label"><input type="checkbox" name="enable" defaultChecked={requiresTransloading}/><span>启用</span></label><button className="text-button" disabled={busy}>应用</button></Form></td></tr>
-      <tr><td><strong>转关</strong></td><td>给本批全部订单开放“转关”节点</td><td><span className={`status-pill ${requiresTransitCustoms?"success":"off"}`}>{requiresTransitCustoms?"已启用":"未启用"}</span></td><td><Form method="post"><input type="hidden" name="intent" value="batch_tracking_option_toggle"/><input type="hidden" name="optionCode" value="transit_customs"/><label className="toggle-label"><input type="checkbox" name="enable" defaultChecked={requiresTransitCustoms}/><span>启用</span></label><button className="text-button" disabled={busy}>应用</button></Form></td></tr>
-    </tbody></table></div>}
     <div className="table-wrap batch-tracking-node-table"><table><thead><tr><th>顺序</th><th>运输节点</th><th>流程进度</th><th>批次登记状态</th><th>最近登记</th><th>操作</th></tr></thead><tbody>{visibleMilestones.map((node,index)=>{
       const count=orders.filter(o=>{const list=milestonesByOrder.get(o.order_id)||[];return list.some(m=>m.milestone_code===node.code);}).length;
       const total=orders.length;
       const sample=trackingMilestones.find(m=>m.milestone_code===node.code);
       return <tr className={count===total?"completed-row":count>0?"partial-row":""} key={node.code}>
         <td>{String(index+1).padStart(2,"0")}</td><td><strong>{node.name}</strong></td><td>{node.progress}%</td><td><span className={`status-pill ${count===total?"success":""}`}>{count===total?"全票已登记":count>0?`${count}/${total} 票`:"未登记"}</span></td><td>{sample?formatShortDateTime(sample.event_at):"—"}</td>
-        <td>{node.code==="exported"&&!exitConfirmed?<Link className="text-button batch-exit-gate-link" to={exitGateHref}>去确认实际出境</Link>:manage&&node.code!=="station_arrived"&&node.code!=="exported"?<details className="batch-tracking-row-form"><summary>登记节点</summary>
-          <Form method="post" className="compact-tool-form batch-tracking-form">
+        <td>{node.code==="exported"&&!exitConfirmed?<Link className="text-button batch-exit-gate-link" to={exitGateHref}>去确认实际出境</Link>:manage&&node.code!=="station_arrived"&&node.code!=="exported"?<Modal title={`登记运输节点 · ${node.name}`} triggerLabel="登记节点" triggerClassName="text-button" size="wide" closeSignal={actionCloseSignal}>
+          <Form method="post" className="compact-tool-form batch-tracking-form batch-tracking-modal-form">
             <input type="hidden" name="intent" value="batch_tracking_add"/>
             <input type="hidden" name="milestoneCode" value={node.code}/>
             <Field name="eventAt" label="事件时间 *" type="datetime-local" required defaultValue={defaultEventAt}/>
@@ -825,7 +842,7 @@ function BatchTrackingWorkbench({batchId,batchNumber,orders,trackingMilestones,t
             <label className="field"><span>客户可见</span><select name="visibleToCustomer" defaultValue="on"><option value="on">客户可见</option><option value="off">仅内部</option></select></label>
             <button className="primary" disabled={busy}>登记到本批 {total} 票订单</button>
           </Form>
-        </details>:<span className="muted">{node.code==="exported"?"出境确认自动登记":"仓库自动登记"}</span>}</td>
+        </Modal>:<span className="muted">{node.code==="exported"?"出境确认自动登记":"仓库自动登记"}</span>}</td>
       </tr>;
     })}</tbody></table></div>
     <details className="batch-tracking-orders batch-inline-disclosure"><summary><span><strong>逐票节点状态</strong><small>查看每票订单的最新里程碑与历史节点</small></span><em aria-hidden="true"/></summary>
