@@ -1,8 +1,8 @@
-"""Create four LTL demo orders that are waiting for domestic warehouse acceptance.
+"""Create four LTL demo orders already received and waiting for consolidation.
 
 The script targets the local Miniflare D1 database. It is intentionally
-idempotent: if any of the four stable customer references already exists, it
-does not write a second set.
+idempotent: existing demo orders are repaired to the same post-receipt state
+instead of creating a second set.
 """
 
 from __future__ import annotations
@@ -57,6 +57,216 @@ def clone(row: sqlite3.Row, **changes) -> dict:
     data = dict(row)
     data.update(changes)
     return data
+
+
+def ensure_warehouse_received(
+    connection: sqlite3.Connection,
+    order: sqlite3.Row,
+    domestic_warehouse: sqlite3.Row,
+    admin_id: str,
+) -> dict:
+    """Materialize the same data produced by a normal domestic receipt."""
+    now = iso()
+    order_id = order["id"]
+    order_number = order["order_number"]
+    shipment = first(
+        connection,
+        "SELECT * FROM shipments WHERE order_id=? ORDER BY created_at DESC LIMIT 1",
+        (order_id,),
+    )
+    cargo = first(
+        connection,
+        "SELECT * FROM order_cargo_items WHERE order_id=? ORDER BY line_no LIMIT 1",
+        (order_id,),
+    )
+    location = first(
+        connection,
+        "SELECT * FROM warehouse_locations WHERE warehouse_id=? AND status='active' ORDER BY created_at LIMIT 1",
+        (domestic_warehouse["id"],),
+    )
+
+    receipt = connection.execute(
+        "SELECT * FROM warehouse_receipts WHERE shipment_id=? AND warehouse_id=? AND status='completed' ORDER BY created_at DESC LIMIT 1",
+        (shipment["id"], domestic_warehouse["id"]),
+    ).fetchone()
+    if receipt is None:
+        receipt_id = uid()
+        receipt_number = f"IN-DEMO-{order_number[-8:]}"
+        insert(connection, "warehouse_receipts", {
+            "id": receipt_id,
+            "organization_id": order["organization_id"],
+            "receipt_number": receipt_number,
+            "shipment_id": shipment["id"],
+            "warehouse_id": domestic_warehouse["id"],
+            "location_id": location["id"],
+            "status": "completed",
+            "total_packages": 1,
+            "total_pieces": int(cargo["package_count"] or 1) * int(cargo["pieces_per_package"] or 1),
+            "total_weight_kg": float(cargo["gross_weight_per_package_kg"] or 0),
+            "total_volume_cbm": float(cargo["volume_per_package_cbm"] or 0),
+            "notes": "拼车测试货物已完成仓库验收",
+            "received_by_user_id": admin_id,
+            "received_at": now,
+            "created_at": now,
+            "updated_at": now,
+            "package_type": cargo["package_type"] or "other",
+            "evidence_note": None,
+            "cargo_complete": 1,
+            "has_exception": 0,
+            "exception_notes": None,
+        })
+        insert(connection, "warehouse_receipt_items", {
+            "id": uid(),
+            "organization_id": order["organization_id"],
+            "receipt_id": receipt_id,
+            "order_id": order_id,
+            "cargo_item_id": cargo["id"],
+            "expected_packages": int(cargo["package_count"] or 1),
+            "expected_pieces": int(cargo["package_count"] or 1) * int(cargo["pieces_per_package"] or 1),
+            "expected_weight_kg": float(cargo["gross_weight_per_package_kg"] or 0),
+            "expected_volume_cbm": float(cargo["volume_per_package_cbm"] or 0),
+            "actual_packages": int(cargo["package_count"] or 1),
+            "actual_pieces": int(cargo["package_count"] or 1) * int(cargo["pieces_per_package"] or 1),
+            "actual_weight_kg": float(cargo["gross_weight_per_package_kg"] or 0),
+            "actual_volume_cbm": float(cargo["volume_per_package_cbm"] or 0),
+            "result": "normal",
+            "notes": None,
+            "created_at": now,
+            "updated_at": now,
+            "actual_length_cm": float(cargo["length_cm"] or 0),
+            "actual_width_cm": float(cargo["width_cm"] or 0),
+            "actual_height_cm": float(cargo["height_cm"] or 0),
+        })
+        receipt = first(connection, "SELECT * FROM warehouse_receipts WHERE id=?", (receipt_id,))
+    else:
+        connection.execute(
+            "UPDATE warehouse_receipts SET cargo_complete=1,has_exception=0,exception_notes=NULL,updated_at=? WHERE id=?",
+            (now, receipt["id"]),
+        )
+
+    package = connection.execute(
+        "SELECT * FROM warehouse_packages WHERE shipment_id=? AND warehouse_id=? ORDER BY created_at LIMIT 1",
+        (shipment["id"], domestic_warehouse["id"]),
+    ).fetchone()
+    if package is None:
+        package_id = uid()
+        barcode = f"OUL-DEMO-{order_number[-8:]}"
+        insert(connection, "warehouse_packages", {
+            "id": package_id,
+            "organization_id": order["organization_id"],
+            "receipt_id": receipt["id"],
+            "shipment_id": shipment["id"],
+            "warehouse_id": domestic_warehouse["id"],
+            "location_id": location["id"],
+            "barcode": barcode,
+            "package_number": f"PK-{order_number[1:]}-1-1-DEMO",
+            "pieces": int(cargo["package_count"] or 1) * int(cargo["pieces_per_package"] or 1),
+            "weight_kg": float(cargo["gross_weight_per_package_kg"] or 0),
+            "volume_cbm": float(cargo["volume_per_package_cbm"] or 0),
+            "status": "in_stock",
+            "notes": "拼车测试货物已入库待配载",
+            "created_at": now,
+            "updated_at": now,
+            "parent_package_id": None,
+            "cargo_item_id": cargo["id"],
+            "length_cm": float(cargo["length_cm"] or 0),
+            "width_cm": float(cargo["width_cm"] or 0),
+            "height_cm": float(cargo["height_cm"] or 0),
+        })
+        package = first(connection, "SELECT * FROM warehouse_packages WHERE id=?", (package_id,))
+    else:
+        connection.execute(
+            "UPDATE warehouse_packages SET status='in_stock',receipt_id=?,location_id=?,updated_at=? WHERE id=?",
+            (receipt["id"], location["id"], now, package["id"]),
+        )
+        barcode = package["barcode"]
+
+    batch = connection.execute(
+        "SELECT * FROM warehouse_sorting_batches WHERE shipment_id=? AND status!='cancelled' ORDER BY created_at DESC LIMIT 1",
+        (shipment["id"],),
+    ).fetchone()
+    if batch is None:
+        batch_id = uid()
+        insert(connection, "warehouse_sorting_batches", {
+            "id": batch_id,
+            "organization_id": order["organization_id"],
+            "batch_number": f"SORT-DEMO-{order_number[-8:]}",
+            "shipment_id": shipment["id"],
+            "target_location_id": location["id"],
+            "status": "verified",
+            "notes": "验收确认货齐，自动进入待配载队列",
+            "created_by_user_id": admin_id,
+            "verified_by_user_id": admin_id,
+            "created_at": now,
+            "updated_at": now,
+            "verified_at": now,
+        })
+        batch = first(connection, "SELECT * FROM warehouse_sorting_batches WHERE id=?", (batch_id,))
+    else:
+        connection.execute(
+            "UPDATE warehouse_sorting_batches SET target_location_id=?,status='verified',verified_by_user_id=?,verified_at=COALESCE(verified_at,?),updated_at=? WHERE id=?",
+            (location["id"], admin_id, now, now, batch["id"]),
+        )
+    sorting_item = connection.execute(
+        "SELECT id FROM warehouse_sorting_items WHERE batch_id=? AND package_id=?",
+        (batch["id"], package["id"]),
+    ).fetchone()
+    if sorting_item is None:
+        insert(connection, "warehouse_sorting_items", {
+            "id": uid(),
+            "organization_id": order["organization_id"],
+            "batch_id": batch["id"],
+            "package_id": package["id"],
+            "status": "verified",
+            "sorted_by_user_id": admin_id,
+            "verified_by_user_id": admin_id,
+            "sorted_at": now,
+            "verified_at": now,
+            "notes": "验收确认货齐，自动纳入配载范围",
+        })
+
+    connection.execute(
+        "UPDATE shipments SET status='picked_up',current_location=?,actual_pickup_at=COALESCE(actual_pickup_at,?),updated_at=? WHERE id=?",
+        (f"{domestic_warehouse['name']} / {location['name']}", now, now, shipment["id"]),
+    )
+    connection.execute(
+        "UPDATE transport_orders SET current_step_code='module:loading',current_step_name='出口准备与装车出库 · 仓库已收货待配载',workflow_updated_at=?,updated_at=? WHERE id=?",
+        (now, now, order_id),
+    )
+    connection.execute(
+        "UPDATE workflow_instances SET current_step_key='port_loading',updated_at=? WHERE order_id=?",
+        (now, order_id),
+    )
+    connection.execute(
+        "UPDATE order_module_instances SET status='completed',current_step_code='warehouse_arrived',current_step_name='货物已到国内仓',progress_percent=100,completed_at=COALESCE(completed_at,?),blocking_reason=NULL,updated_at=? WHERE order_id=? AND module_code='transport' AND enabled=1",
+        (now, now, order_id),
+    )
+    connection.execute(
+        "UPDATE order_module_instances SET status='completed',current_step_code='ready',current_step_name='收货清点完成',progress_percent=100,started_at=COALESCE(started_at,?),completed_at=COALESCE(completed_at,?),blocking_reason=NULL,updated_at=? WHERE order_id=? AND module_code='warehouse' AND enabled=1",
+        (now, now, now, order_id),
+    )
+    connection.execute(
+        "UPDATE order_module_instances SET status='not_started',current_step_code='waiting',current_step_name='仓库已收货，待拼车配载',progress_percent=0,completed_at=NULL,blocking_reason=NULL,updated_at=? WHERE order_id=? AND module_code='loading' AND enabled=1",
+        (now, order_id),
+    )
+
+    workflow_instance = first(connection, "SELECT id FROM workflow_instances WHERE order_id=?", (order_id,))
+    has_history = connection.execute(
+        "SELECT 1 FROM workflow_history WHERE instance_id=? AND step_key='port_loading' LIMIT 1",
+        (workflow_instance["id"],),
+    ).fetchone()
+    if has_history is None:
+        insert(connection, "workflow_history", {
+            "id": uid(),
+            "instance_id": workflow_instance["id"],
+            "step_key": "port_loading",
+            "step_name": "出口准备与装车出库",
+            "actor_user_id": admin_id,
+            "source": "system",
+            "metadata": json.dumps({"receiptNumber": receipt["receipt_number"], "cargoComplete": True}, ensure_ascii=False),
+            "occurred_at": now,
+        })
+    return {"barcode": barcode, "receipt_number": receipt["receipt_number"]}
 
 
 def main() -> None:
@@ -122,11 +332,29 @@ def main() -> None:
 
     markers = ",".join("?" for _ in DEMO_REFERENCES)
     existing = connection.execute(
-        f"SELECT customer_reference FROM transport_orders WHERE organization_id=? AND customer_reference IN ({markers})",
+        f"SELECT * FROM transport_orders WHERE organization_id=? AND customer_reference IN ({markers}) ORDER BY customer_reference",
         [organization_id, *DEMO_REFERENCES],
     ).fetchall()
     if existing:
-        print(json.dumps({"skipped": [row["customer_reference"] for row in existing]}, ensure_ascii=False, indent=2))
+        if len(existing) != len(DEMO_REFERENCES):
+            raise RuntimeError("Only part of the stable LTL demo set exists; repair the incomplete set before reseeding")
+        repaired = []
+        for order in existing:
+            receipt_state = ensure_warehouse_received(
+                connection,
+                order,
+                domestic_warehouse,
+                admin["id"],
+            )
+            repaired.append({
+                "订单号": order["order_number"],
+                "货物": order["cargo_description"],
+                "入库单": receipt_state["receipt_number"],
+                "货物条码": receipt_state["barcode"],
+                "状态": "仓库已收货待配载",
+            })
+        connection.commit()
+        print(json.dumps(repaired, ensure_ascii=False, indent=2))
         return
 
     sequence: dict[str, int] = {}
@@ -326,9 +554,17 @@ def main() -> None:
                 "to_step_code": status[1], "to_step_name": status[2], "actor_user_id": admin["id"],
                 "notes": "四票拼车测试数据，停留在国内仓待扫码收货", "occurred_at": now,
             })
+        receipt_state = ensure_warehouse_received(
+            connection,
+            first(connection, "SELECT * FROM transport_orders WHERE id=?", (order_id,)),
+            domestic_warehouse,
+            admin["id"],
+        )
         created.append({
             "订单号": order_number, "报价号": quote_number, "运单号": shipment_number,
             "货物": cargo_name, "重量KG": weight, "体积CBM": volume,
+            "入库单": receipt_state["receipt_number"], "货物条码": receipt_state["barcode"],
+            "状态": "仓库已收货待配载",
         })
 
     connection.commit()
