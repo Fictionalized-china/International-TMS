@@ -24,6 +24,7 @@ type WarehouseQueueRow = {
   receipt_time: string | null;
   package_count: number;
   in_stock_count: number;
+  overseas_operation_status: string | null;
   dispatch_status: string | null;
   active_exception_count: number;
   updated_at: string;
@@ -91,6 +92,10 @@ export async function loader({ request }: Route.LoaderArgs) {
             (SELECT MAX(wr.received_at) FROM warehouse_receipts wr WHERE wr.organization_id=s.organization_id AND wr.shipment_id=s.id AND wr.warehouse_id=?) receipt_time,
             (SELECT COUNT(*) FROM warehouse_packages wp WHERE wp.organization_id=s.organization_id AND wp.shipment_id=s.id AND wp.warehouse_id=?) package_count,
             (SELECT COUNT(*) FROM warehouse_packages wp WHERE wp.organization_id=s.organization_id AND wp.shipment_id=s.id AND wp.warehouse_id=? AND wp.status IN ('in_stock','allocated')) in_stock_count,
+            (SELECT op.status
+               FROM overseas_warehouse_operations op
+              WHERE op.organization_id=s.organization_id AND op.order_id=s.order_id AND op.warehouse_id=? AND op.status!='cancelled'
+              ORDER BY op.created_at DESC LIMIT 1) overseas_operation_status,
             (SELECT wd.status
                FROM warehouse_dispatches wd
                JOIN warehouse_dispatch_items wdi ON wdi.dispatch_id=wd.id
@@ -122,13 +127,14 @@ export async function loader({ request }: Route.LoaderArgs) {
     warehouse.id,
     warehouse.id,
     warehouse.id,
+    warehouse.id,
     user.organizationId,
     warehouse.id,
     warehouse.id,
   ).all<WarehouseQueueRow>();
 
   const activeRows = warehouse.warehouse_role === "overseas_destination"
-    ? rows.results
+    ? rows.results.filter((row) => row.overseas_operation_status !== "picked_up")
     : rows.results.filter((row) => row.dispatch_status !== "dispatched");
   const categorized = activeRows.map((row) => ({ ...row, queue: warehouseQueue(row) }));
   const scoped = categorized.filter((row) => {

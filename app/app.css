@@ -19110,7 +19110,21 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   background: #f8fafc;
 }
 .outbound-upload-order > header span { color: #64748b; font-size: 12px; }
-.outbound-upload-modal .outbound-document-table table { min-width: 760px; }
+.outbound-upload-modal .outbound-document-table table {
+  min-width: 760px;
+  table-layout: fixed;
+}
+.outbound-upload-modal .outbound-document-table th:nth-child(1),
+.outbound-upload-modal .outbound-document-table td:nth-child(1) { width: 34%; }
+.outbound-upload-modal .outbound-document-table th:nth-child(2),
+.outbound-upload-modal .outbound-document-table td:nth-child(2) { width: 16%; }
+.outbound-upload-modal .outbound-document-table th:nth-child(3),
+.outbound-upload-modal .outbound-document-table td:nth-child(3) {
+  width: 32%;
+  overflow-wrap: anywhere;
+}
+.outbound-upload-modal .outbound-document-table th:nth-child(4),
+.outbound-upload-modal .outbound-document-table td:nth-child(4) { width: 18%; }
 .outbound-upload-modal .document-upload-button { width: 100%; min-height: 34px; }
 .outbound-upload-modal-actions {
   position: sticky;
