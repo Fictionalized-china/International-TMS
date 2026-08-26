@@ -54,6 +54,9 @@ type CustomerOption = {
   id: string;
   name: string;
   pickup_address: string | null;
+  pickup_country_code: string | null;
+  pickup_state_code: string | null;
+  pickup_city: string | null;
   contact_name: string | null;
   contact_phone: string | null;
 };
@@ -104,7 +107,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     ).bind(...binds).all<Quote>(),
     env.DB.prepare(
       `SELECT c.id,c.name,
-        (SELECT a.address_line1 FROM customer_addresses a WHERE a.customer_id=c.id ORDER BY a.is_default DESC,a.created_at LIMIT 1) pickup_address,
+        (SELECT a.address_line1 FROM customer_addresses a WHERE a.customer_id=c.id AND a.type='shipping' ORDER BY a.is_default DESC,a.updated_at DESC,a.created_at DESC LIMIT 1) pickup_address,
+        (SELECT a.country_code FROM customer_addresses a WHERE a.customer_id=c.id AND a.type='shipping' ORDER BY a.is_default DESC,a.updated_at DESC,a.created_at DESC LIMIT 1) pickup_country_code,
+        (SELECT a.state FROM customer_addresses a WHERE a.customer_id=c.id AND a.type='shipping' ORDER BY a.is_default DESC,a.updated_at DESC,a.created_at DESC LIMIT 1) pickup_state_code,
+        (SELECT a.city FROM customer_addresses a WHERE a.customer_id=c.id AND a.type='shipping' ORDER BY a.is_default DESC,a.updated_at DESC,a.created_at DESC LIMIT 1) pickup_city,
         (SELECT cc.name FROM customer_contacts cc WHERE cc.customer_id=c.id ORDER BY cc.is_primary DESC,cc.created_at LIMIT 1) contact_name,
         (SELECT cc.phone FROM customer_contacts cc WHERE cc.customer_id=c.id ORDER BY cc.is_primary DESC,cc.created_at LIMIT 1) contact_phone
        FROM customers c WHERE c.organization_id=? AND c.status='active' ORDER BY c.name`,
@@ -335,6 +341,7 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
     ? (Number(pieces) * Number(lengthCm) * Number(widthCm) * Number(heightCm) / 1_000_000).toFixed(4)
     : "";
   const selectedCustomerContacts = loaderData.contacts.filter((contact) => contact.customer_id === customerId);
+  const selectedCustomer = loaderData.customers.find((customer) => customer.id === customerId);
   const selectCustomer = (id: string) => {
     setCustomerId(id);
     const customer = loaderData.customers.find((item) => item.id === id);
@@ -344,31 +351,31 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
   };
   return <Form method="post" className="prototype-quote-form">
     <input type="hidden" name="intent" value="create"/>
-    <div className="gate ok">带 * 的字段会在报价被接受后自动继承到运输订单，运输类型随即锁定。</div>
+    <div className="gate ok">出现 * 表示必填项尚未填写；报价被接受后，相关数据会自动继承到运输订单，运输类型随即锁定。</div>
     <FormSection className="quote-plan-section" title="客户与运输方案" note="报价确认后不再重复创建订单">
       <div className="grid">
-        <Field label="客户 *"><select className="control filled" name="customerId" value={customerId} onChange={(event) => selectCustomer(event.target.value)} required><option value="">请选择客户</option>{loaderData.customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name}</option>)}</select></Field>
-        <Field label="客户联系人 *"><ContactCombobox name="customerContactName" value={customerContactName} contacts={selectedCustomerContacts} mode="name" onChange={(value, contact) => { setCustomerContactName(value); if (contact?.phone) setCustomerContactPhone(contact.phone); }} /></Field>
-        <Field label="联系电话 *"><ContactCombobox name="customerContactPhone" value={customerContactPhone} contacts={selectedCustomerContacts} mode="phone" onChange={(value, contact) => { setCustomerContactPhone(value); if (contact) setCustomerContactName(contact.name); }} /></Field>
-        <Field label="业务员 *"><select className="control filled" name="salespersonId" required><option value="">请选择业务员</option>{loaderData.users.map((user) => <option key={user.id} value={user.id}>{user.display_name} · {user.email}</option>)}</select></Field>
-        <Field label="运输方式 *"><select className="control filled" name="transportMode" defaultValue="ROAD"><option value="ROAD">汽运</option><option value="RAIL" disabled>铁运（流程未开放）</option><option value="AIR" disabled>空运（流程未开放）</option></select></Field>
-        <Field label="订单类型 *"><select className="control filled" name="roadLoadType" defaultValue="ltl"><option value="ltl">拼车</option><option value="ftl">整车</option></select></Field>
-        <Field label="清关办理方式 *"><select className="control filled" name="customsClearanceMode" defaultValue="company"><option value="company">公司代办清关</option><option value="customer">客户自理清关</option></select></Field>
+        <Field label="客户"><select className="control filled" name="customerId" value={customerId} onChange={(event) => selectCustomer(event.target.value)} required><option value="">请选择客户</option>{loaderData.customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name}</option>)}</select></Field>
+        <Field label="客户联系人"><ContactCombobox name="customerContactName" value={customerContactName} contacts={selectedCustomerContacts} mode="name" onChange={(value, contact) => { setCustomerContactName(value); if (contact?.phone) setCustomerContactPhone(contact.phone); }} /></Field>
+        <Field label="联系电话"><ContactCombobox name="customerContactPhone" value={customerContactPhone} contacts={selectedCustomerContacts} mode="phone" onChange={(value, contact) => { setCustomerContactPhone(value); if (contact) setCustomerContactName(contact.name); }} /></Field>
+        <Field label="业务员"><select className="control filled" name="salespersonId" defaultValue={loaderData.current.userId} required><option value="">请选择业务员</option>{loaderData.users.map((user) => <option key={user.id} value={user.id}>{user.display_name} · {user.email}</option>)}</select></Field>
+        <Field label="运输方式"><select className="control filled" name="transportMode" defaultValue="ROAD" required><option value="ROAD">汽运</option><option value="RAIL" disabled>铁运（流程未开放）</option><option value="AIR" disabled>空运（流程未开放）</option></select></Field>
+        <Field label="订单类型"><select className="control filled" name="roadLoadType" defaultValue="ltl" required><option value="ltl">拼车</option><option value="ftl">整车</option></select></Field>
+        <Field label="清关办理方式"><select className="control filled" name="customsClearanceMode" defaultValue="company" required><option value="company">公司代办清关</option><option value="customer">客户自理清关</option></select></Field>
       </div>
     </FormSection>
     <FormSection className="quote-route-section" title="起运地与目的地" note="最终目的地为境外目的仓，客户到仓自提">
       <div className="grid">
-        <GeoCascadeFields prefix="origin" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} />
-        <Field label="提货地址 *" className="quote-route-address"><textarea className="control textarea editing" name="pickupAddress" rows={2} value={pickupAddress} onChange={(event) => setPickupAddress(event.target.value)} required /></Field>
+        <GeoCascadeFields key={`origin-${customerId}`} prefix="origin" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} initialCountry={selectedCustomer?.pickup_country_code} initialProvince={selectedCustomer?.pickup_state_code} initialCity={selectedCustomer?.pickup_city} />
+        <Field label="提货地址" className="quote-route-address"><textarea className="control textarea editing" name="pickupAddress" rows={2} value={pickupAddress} onChange={(event) => setPickupAddress(event.target.value)} required /></Field>
         <GeoCascadeFields prefix="destination" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} />
-        <Field label="目的仓库 *" className="quote-route-warehouse"><select className="control filled" name="destinationWarehouseId" required><option value="">请选择境外目的仓</option>{loaderData.warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></Field>
+        <Field label="目的仓库" className="quote-route-warehouse"><select className="control filled" name="destinationWarehouseId" required><option value="">请选择境外目的仓</option>{loaderData.warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></Field>
         <Field label="报价目的地备注" className="quote-route-note"><textarea className="control textarea" name="destinationWarehouseNote" rows={2} /></Field>
       </div>
     </FormSection>
     <FormSection title="货物预估数据" note="仓库实收后登记实际数据">
       <div className="grid quote-cargo-grid">
-        <Field label="货物描述 *" className="quote-cargo-description"><textarea className="control textarea editing" name="cargoDescription" required /></Field>
-        <div className="table-wrap quote-cargo-metrics-table"><table className="inline-table"><thead><tr><th>预计件数 *</th><th>预计重量 KG *</th><th>预计长度 CM *</th><th>预计宽度 CM *</th><th>预计高度 CM *</th><th>预计体积 CBM（自动计算）*</th></tr></thead><tbody><tr>
+        <Field label="货物描述" className="quote-cargo-description"><textarea className="control textarea editing" name="cargoDescription" required /></Field>
+        <div className="table-wrap quote-cargo-metrics-table"><table className="inline-table"><thead><tr><th>预计件数</th><th>预计重量 KG</th><th>预计长度 CM</th><th>预计宽度 CM</th><th>预计高度 CM</th><th>预计体积 CBM（自动计算）</th></tr></thead><tbody><tr>
           <td><input aria-label="预计件数" className="control filled" name="pieces" type="number" min="1" value={pieces} onChange={(event) => setPieces(event.target.value)} required/></td>
           <td><input aria-label="预计重量 KG" className="control filled" name="weight" type="number" min="0.001" step="0.001" required/></td>
           <td><input aria-label="预计长度 CM" className="control filled" name="length" type="number" min="0.01" step="0.01" value={lengthCm} onChange={(event) => setLengthCm(event.target.value)} required/></td>
@@ -383,7 +390,7 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
       note="接受后直接继承到订单结算"
       action={<button className="btn quote-charge-add" type="button" onClick={() => setCharges((rows) => [...rows, { name: transportChargeNameOptions[0]?.[0] || "国际汽运费", quantity: 1, unitPrice: 0, notes: "" }])}>＋ 添加费用</button>}
     >
-      <table className="inline-table quote-charge-table"><thead><tr><th>费用名称 *</th><th>数量 *</th><th>单价 *</th><th>金额</th><th>备注</th><th>操作</th></tr></thead><tbody>{charges.map((charge, index) => <tr key={index}><td><select className="control filled" name="chargeName" value={charge.name} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, name: event.target.value } : row))}>{transportChargeNameOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td><td><input className="control filled" name="chargeQuantity" type="number" min="0.01" step="0.01" value={charge.quantity} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: Number(event.target.value) } : row))}/></td><td><input className="control filled" name="chargeUnitPrice" type="number" min="0" step="0.01" value={charge.unitPrice} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, unitPrice: Number(event.target.value) } : row))}/></td><td><b>{(charge.quantity * charge.unitPrice).toLocaleString()}</b></td><td><input className="control" name="chargeNotes" value={charge.notes} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, notes: event.target.value } : row))}/></td><td><button className="btn danger" type="button" disabled={charges.length === 1} onClick={() => setCharges((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>删除</button></td></tr>)}</tbody></table>
+      <table className="inline-table quote-charge-table"><thead><tr><th>费用名称</th><th>数量</th><th>单价</th><th>金额</th><th>备注</th><th>操作</th></tr></thead><tbody>{charges.map((charge, index) => <tr key={index}><td><select className="control filled" name="chargeName" value={charge.name} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, name: event.target.value } : row))} required>{transportChargeNameOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td><td><input className="control filled" name="chargeQuantity" type="number" min="0.01" step="0.01" value={charge.quantity} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: Number(event.target.value) } : row))} required/></td><td><input className="control filled" name="chargeUnitPrice" type="number" min="0" step="0.01" value={charge.unitPrice} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, unitPrice: Number(event.target.value) } : row))} required/></td><td><b>{(charge.quantity * charge.unitPrice).toLocaleString()}</b></td><td><input className="control" name="chargeNotes" value={charge.notes} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, notes: event.target.value } : row))}/></td><td><button className="btn danger" type="button" disabled={charges.length === 1} onClick={() => setCharges((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>删除</button></td></tr>)}</tbody></table>
       <div className="quote-charge-summary"><small>共 {charges.length} 个费用项目，系统按“数量 × 单价”自动汇总</small><strong>报价总额 CNY {total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></div>
       <div className="grid two"><Field label="报价有效期"><input className="control" name="validUntil" type="date"/></Field><Field label="报价备注"><textarea className="control textarea" name="notes"/></Field></div>
     </FormSection>
@@ -454,15 +461,24 @@ function GeoCascadeFields({
   countries,
   provinces,
   cities,
+  initialCountry = "",
+  initialProvince = "",
+  initialCity = "",
 }: {
   prefix: "origin" | "destination";
   countries: GeoOption[];
   provinces: GeoOption[];
   cities: GeoOption[];
+  initialCountry?: string | null;
+  initialProvince?: string | null;
+  initialCity?: string | null;
 }) {
-  const [countryCode, setCountryCode] = useState("");
-  const [provinceCode, setProvinceCode] = useState("");
-  const [cityCode, setCityCode] = useState("");
+  const initialCountryCode = countries.find((option) => option.code === initialCountry || option.name === initialCountry)?.code || "";
+  const initialProvinceCode = provinces.find((option) => option.parent_code === initialCountryCode && (option.code === initialProvince || option.name === initialProvince))?.code || "";
+  const initialCityCode = cities.find((option) => option.parent_code === initialProvinceCode && (option.code === initialCity || option.name === initialCity))?.code || "";
+  const [countryCode, setCountryCode] = useState(initialCountryCode);
+  const [provinceCode, setProvinceCode] = useState(initialProvinceCode);
+  const [cityCode, setCityCode] = useState(initialCityCode);
   const countryOptions = countries;
   const provinceOptions = provinces.filter((option) => option.parent_code === countryCode);
   const cityOptions = cities.filter((option) => option.parent_code === provinceCode);
@@ -471,21 +487,21 @@ function GeoCascadeFields({
   const cityName = cities.find((option) => option.code === cityCode)?.name || "";
   const placeLabel = prefix === "origin" ? "起运" : "目的";
   return <>
-    <Field label={`${placeLabel}国家 / 地区 *`}>
+    <Field label={`${placeLabel}国家 / 地区`}>
       <select className="control filled" value={countryCode} onChange={(event) => { setCountryCode(event.target.value); setProvinceCode(""); setCityCode(""); }} required>
         <option value="">请选择</option>
         {countryOptions.map((option) => <option key={`${prefix}-country-${option.code}`} value={option.code}>{option.name}</option>)}
       </select>
       <input name={`${prefix}Country`} type="hidden" value={countryName}/>
     </Field>
-    <Field label={`${placeLabel}省 / 州 *`}>
+    <Field label={`${placeLabel}省 / 州`}>
       <select className="control filled" value={provinceCode} onChange={(event) => { setProvinceCode(event.target.value); setCityCode(""); }} disabled={!countryCode} required>
         <option value="">{countryCode ? "请选择" : "请先选择国家"}</option>
         {provinceOptions.map((option) => <option key={`${prefix}-province-${option.code}`} value={option.code}>{option.name}</option>)}
       </select>
       <input name={`${prefix}State`} type="hidden" value={provinceName}/>
     </Field>
-    <Field label={`${placeLabel}城市 *`}>
+    <Field label={`${placeLabel}城市`}>
       <select className="control filled" value={cityCode} onChange={(event) => setCityCode(event.target.value)} disabled={!provinceCode} required>
         <option value="">{provinceCode ? "请选择" : "请先选择省 / 州"}</option>
         {cityOptions.map((option) => <option key={`${prefix}-city-${option.code}`} value={option.code}>{option.name}</option>)}

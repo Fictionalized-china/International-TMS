@@ -4127,9 +4127,9 @@ td small {
   white-space: nowrap;
 }
 
-label:has(> input:required, > select:required, > textarea:required) > span:first-child::after,
-.field:has(input:required, select:required, textarea:required) > span:first-child::after,
-.cargo-entry-fields label:has(input:required, select:required, textarea:required) > span:first-child::after {
+label:has(> input:required:invalid, > select:required:invalid, > textarea:required:invalid) > span:first-child::after,
+.field:has(input:required:invalid, select:required:invalid, textarea:required:invalid) > span:first-child::after,
+.cargo-entry-fields label:has(input:required:invalid, select:required:invalid, textarea:required:invalid) > span:first-child::after {
   content: " *";
   color: #dc2626;
   font-size: 13px;
@@ -19351,6 +19351,19 @@ form :is(input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):n
   background: #f1faf5;
 }
 .prototype-quote-form .quote-calculated-volume { cursor: default; }
+.prototype-quote-form .quote-cargo-metrics-table:has(td:nth-child(1) :required:invalid) th:nth-child(1)::after,
+.prototype-quote-form .quote-cargo-metrics-table:has(td:nth-child(2) :required:invalid) th:nth-child(2)::after,
+.prototype-quote-form .quote-cargo-metrics-table:has(td:nth-child(3) :required:invalid) th:nth-child(3)::after,
+.prototype-quote-form .quote-cargo-metrics-table:has(td:nth-child(4) :required:invalid) th:nth-child(4)::after,
+.prototype-quote-form .quote-cargo-metrics-table:has(td:nth-child(5) :required:invalid) th:nth-child(5)::after,
+.prototype-quote-form .quote-cargo-metrics-table:has(td:nth-child(6) :required:invalid) th:nth-child(6)::after,
+.prototype-quote-form .quote-charge-table:has(td:nth-child(1) :required:invalid) th:nth-child(1)::after,
+.prototype-quote-form .quote-charge-table:has(td:nth-child(2) :required:invalid) th:nth-child(2)::after,
+.prototype-quote-form .quote-charge-table:has(td:nth-child(3) :required:invalid) th:nth-child(3)::after {
+  content: " *";
+  color: #dc2626;
+  font-weight: 900;
+}
 
 /* Do not stack the order side drawer over a focused operation dialog. */
 body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
