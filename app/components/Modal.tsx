@@ -163,14 +163,15 @@ export function useExpandableDialogScrollLock() {
 
 type ModalProps = {
   title: string;
-  triggerLabel: string;
+  triggerLabel?: string;
   children: ReactNode | ((controls: { close: () => void }) => ReactNode);
   closeSignal?: unknown;
+  openSignal?: unknown;
   size?: "normal" | "wide" | "xwide";
   triggerClassName?: string;
 };
 
-export function Modal({ title, triggerLabel, children, closeSignal, size = "normal", triggerClassName = "primary" }: ModalProps) {
+export function Modal({ title, triggerLabel, children, closeSignal, openSignal, size = "normal", triggerClassName = "primary" }: ModalProps) {
   const [open, setOpen] = useState(false);
   const titleId = useId();
   useModalScrollLock(open);
@@ -178,6 +179,10 @@ export function Modal({ title, triggerLabel, children, closeSignal, size = "norm
   useEffect(() => {
     if (closeSignal) setOpen(false);
   }, [closeSignal]);
+
+  useEffect(() => {
+    if (openSignal) setOpen(true);
+  }, [openSignal]);
 
   useEffect(() => {
     if (!open) return;
@@ -228,13 +233,13 @@ export function Modal({ title, triggerLabel, children, closeSignal, size = "norm
 
   return (
     <>
-      <button
+      {triggerLabel && <button
         type="button"
         className={triggerClassName}
         onClick={() => setOpen(true)}
       >
         {triggerLabel}
-      </button>
+      </button>}
       {dialog}
     </>
   );

@@ -7,8 +7,9 @@ import {
   ScrollRestoration,
   useLocation,
   useNavigation,
+  useRevalidator,
 } from "react-router";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 
 import type { Route } from "./+types/root";
 import { useExpandableDialogScrollLock } from "./components/Modal";
@@ -37,6 +38,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
 export default function App() {
   const location = useLocation();
   const navigation = useNavigation();
+  const revalidator = useRevalidator();
+  const warehouseMutation = useRef(false);
   useExpandableDialogScrollLock();
   useEffect(() => {
     if (navigation.state === "idle")
@@ -46,6 +49,50 @@ export default function App() {
         )
         .forEach((element) => element.removeAttribute("open"));
   }, [location.pathname, navigation.state]);
+  useEffect(() => {
+    if (navigation.state === "submitting") {
+      const action = navigation.formAction || location.pathname;
+      warehouseMutation.current =
+        navigation.formMethod?.toUpperCase() !== "GET" &&
+        new URL(action, window.location.origin).pathname.startsWith("/warehouse");
+      return;
+    }
+    if (navigation.state !== "idle" || !warehouseMutation.current) return;
+    warehouseMutation.current = false;
+    const signal = JSON.stringify({ source: "warehouse", occurredAt: Date.now() });
+    if ("BroadcastChannel" in window) {
+      const channel = new BroadcastChannel("international-tms-data-sync");
+      channel.postMessage(signal);
+      channel.close();
+    }
+    window.localStorage.setItem("international-tms-data-sync", signal);
+  }, [location.pathname, navigation.formAction, navigation.formMethod, navigation.state]);
+  useEffect(() => {
+    if (!location.pathname.startsWith("/admin")) return;
+    const refresh = () => {
+      if (revalidator.state === "idle") revalidator.revalidate();
+    };
+    const channel = "BroadcastChannel" in window
+      ? new BroadcastChannel("international-tms-data-sync")
+      : null;
+    if (channel) channel.onmessage = refresh;
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === "international-tms-data-sync") refresh();
+    };
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("focus", refresh);
+    const polling = location.pathname.startsWith("/admin/orders/")
+      ? window.setInterval(() => {
+          if (document.visibilityState === "visible") refresh();
+        }, 2500)
+      : null;
+    return () => {
+      channel?.close();
+      if (polling !== null) window.clearInterval(polling);
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [location.pathname, revalidator]);
   return <Outlet />;
 }
 

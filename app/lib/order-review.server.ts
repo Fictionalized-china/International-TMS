@@ -236,24 +236,32 @@ async function buildOrderReview(
       .first<{pieces:number;weight:number;volume:number}>(),
     db.prepare(`SELECT COALESCE(SUM(r.total_pieces),0) pieces,COALESCE(SUM(r.total_weight_kg),0) weight,COALESCE(SUM(r.total_volume_cbm),0) volume,
       MAX(r.received_at) inbound_at,MAX(u.display_name) warehouse_handler
-      FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id LEFT JOIN users u ON u.id=r.received_by_user_id
+      FROM warehouse_receipts r
+      JOIN shipments s ON s.id=r.shipment_id
+      JOIN warehouses w ON w.id=r.warehouse_id AND w.organization_id=r.organization_id AND w.warehouse_role IN ('domestic_collection','port')
+      LEFT JOIN users u ON u.id=r.received_by_user_id
       WHERE r.organization_id=? AND s.order_id=? AND r.status='completed'`).bind(organizationId,orderId)
       .first<{pieces:number;weight:number;volume:number;inbound_at:string|null;warehouse_handler:string|null}>(),
     db.prepare(`SELECT COALESCE(SUM(p.pieces),0) pieces,COALESCE(SUM(p.weight_kg),0) weight,COALESCE(SUM(p.volume_cbm),0) volume,
       MAX(di.loaded_at) loading_at
-      FROM warehouse_dispatch_items di JOIN warehouse_dispatches d ON d.id=di.dispatch_id
-      JOIN shipments s ON s.id=d.shipment_id JOIN warehouse_packages p ON p.id=di.package_id
-      WHERE di.organization_id=? AND s.order_id=? AND di.status='loaded'`).bind(organizationId,orderId)
+      FROM warehouse_dispatch_items di
+      JOIN warehouse_dispatches d ON d.id=di.dispatch_id
+      JOIN warehouse_packages p ON p.id=di.package_id
+      JOIN shipments package_shipment ON package_shipment.id=p.shipment_id
+      WHERE di.organization_id=? AND package_shipment.order_id=? AND di.status='loaded'`).bind(organizationId,orderId)
       .first<{pieces:number;weight:number;volume:number;loading_at:string|null}>(),
     db.prepare(`SELECT
       (SELECT MIN(s.actual_pickup_at) FROM shipments s WHERE s.organization_id=? AND s.order_id=?) pickup_at,
-      (SELECT MAX(x.actual_exit_at) FROM transport_exit_confirmations x JOIN transport_batch_orders bo ON bo.batch_id=x.batch_id WHERE x.organization_id=? AND bo.order_id=? AND bo.status!='removed') outbound_at,
+      COALESCE(
+        (SELECT MAX(x.actual_exit_at) FROM transport_exit_confirmations x JOIN transport_batch_orders bo ON bo.batch_id=x.batch_id WHERE x.organization_id=? AND bo.order_id=? AND bo.status!='removed'),
+        (SELECT MAX(m.event_at) FROM order_tracking_milestones m WHERE m.organization_id=? AND m.order_id=? AND m.milestone_code='exported')
+      ) outbound_at,
       (SELECT MAX(op.actual_arrival_at) FROM overseas_warehouse_operations op WHERE op.organization_id=? AND op.order_id=? AND op.status!='cancelled') overseas_arrival_at,
       (SELECT MAX(op.pickup_at) FROM overseas_warehouse_operations op WHERE op.organization_id=? AND op.order_id=? AND op.status='picked_up') pickup_completed_at,
       CASE WHEN EXISTS(SELECT 1 FROM overseas_warehouse_operations op WHERE op.organization_id=? AND op.order_id=? AND op.status='picked_up')
         OR EXISTS(SELECT 1 FROM transport_batch_orders bo JOIN transport_batches b ON b.id=bo.batch_id WHERE bo.organization_id=? AND bo.order_id=? AND bo.status!='removed' AND b.road_status='pickup_completed')
         OR EXISTS(SELECT 1 FROM shipments s WHERE s.organization_id=? AND s.order_id=? AND s.status='delivered') THEN 1 ELSE 0 END pickup_complete`)
-      .bind(organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId)
+      .bind(organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId)
       .first<{pickup_at:string|null;outbound_at:string|null;overseas_arrival_at:string|null;pickup_completed_at:string|null;pickup_complete:number}>(),
     db.prepare(`SELECT e.currency,
       SUM(CASE WHEN e.direction='receivable' THEN e.amount ELSE 0 END) receivable,
@@ -291,6 +299,12 @@ async function buildOrderReview(
   for (const direction of ["receivable","payable"] as const) {
     if ((direction==="receivable"?hasReceivable:hasPayable) && !control(direction)?.finance_locked)
       blockers.push({code:`${direction}_unlocked`,message:`${direction==="receivable"?"应收":"应付"}费用尚未完成财务锁定`,href:`/admin/orders/${orderId}/modules/costs#module-business-data`});
+  }
+  for (const line of finance) {
+    if (line.receivableBalance > 0.009)
+      blockers.push({code:`receivable_balance_${line.currency}`,message:`${line.currency} 应收尚有 ${line.receivableBalance.toFixed(2)} 未收款或未核销`,href:"/admin/billing"});
+    if (line.payableBalance > 0.009)
+      blockers.push({code:`payable_balance_${line.currency}`,message:`${line.currency} 应付尚有 ${line.payableBalance.toFixed(2)} 未付款或未核销`,href:"/admin/billing"});
   }
   if ((exceptionRow?.pending_difference_count??0)>0) blockers.push({code:"cargo_difference",message:"仓库实收差异或费用影响尚未确认",href:`/admin/orders/${orderId}/modules/warehouse#module-business-data`});
   if ((exceptionRow?.open_exception_count??0)>0) blockers.push({code:"open_exception",message:"仍有未关闭的仓库异常",href:`/admin/orders/${orderId}/modules/exceptions#module-business-data`});

@@ -1,8 +1,10 @@
 import { env } from "cloudflare:workers";
 import {
   orderDocumentPlacements,
+  preDepartureDocumentTypeCodes,
   orderDocumentTypeLabel,
 } from "./order-documents";
+import { customsDeclarationGate } from "./customs-declarations";
 import { loadOrderModuleWorkflowFields } from "./workflow-fields.server";
 import type { OrderModuleCode } from "./order-modules";
 
@@ -67,6 +69,7 @@ export async function checkOrderLoadPlan(
   organizationId: string,
   orderId: string,
   vehiclePlate?: string,
+  transportBatchId?: string | null,
 ): Promise<ReadinessResult> {
   const order = await operationalOrder(organizationId, orderId);
   if (!order) return { ready: false, reasons: ["订单不存在"] };
@@ -117,8 +120,9 @@ export async function checkOrderLoadPlan(
        JOIN transport_batches b ON b.id=bo.batch_id AND b.status!='cancelled'
        LEFT JOIN transport_batch_vehicles v ON v.batch_id=b.id AND v.status!='cancelled'
        WHERE bo.organization_id=? AND bo.order_id=? AND bo.status!='removed'
+         AND (?='' OR b.id=?)
        GROUP BY b.id LIMIT 1`,
-    ).bind(vehiclePlate || "", organizationId, orderId).first<{
+    ).bind(vehiclePlate || "", organizationId, orderId, transportBatchId || "", transportBatchId || "").first<{
       id: string;
       vehicle_count: number;
       staffed_vehicle_count: number;
@@ -191,35 +195,25 @@ export async function checkOrderDeparture(
 ): Promise<ReadinessResult> {
   const order = await operationalOrder(organizationId, orderId);
   if (!order) return { ready: false, reasons: ["订单不存在"] };
-  const required = await workflowRequirements(organizationId, orderId, [
-    "documents",
-    "consignment",
-    "transport",
-    "customs",
-    "warehouse",
-    "tracking",
-  ]);
-
   const loadPlan = await checkOrderLoadPlan(organizationId, orderId, vehiclePlate);
   const reasons = [...loadPlan.reasons];
   const documentGate = await checkOrderPreDepartureDocuments(organizationId, orderId);
   reasons.push(...documentGate.reasons);
 
-  if (
-    order.customs_enabled === 1 &&
-    (required("customs_declarations", true) || required("customs_release", true))
-  ) {
-    const customsGate = await env.DB.prepare(
-      `SELECT COUNT(*) total,
-              SUM(CASE WHEN d.status='released' THEN 1 ELSE 0 END) released
+  if (order.customs_enabled === 1) {
+    const declarations = await env.DB.prepare(
+      `SELECT r.clearance_stage,d.status,d.is_deleted
        FROM order_customs_declarations d
        JOIN order_customs_records r ON r.id=d.customs_record_id AND r.organization_id=d.organization_id
-      WHERE d.organization_id=? AND d.order_id=? AND d.is_deleted=0 AND d.status!='cancelled'`,
-    ).bind(organizationId, orderId).first<{ total: number; released: number | null }>();
-    const total = customsGate?.total ?? 0;
-    const released = customsGate?.released ?? 0;
-    if (total === 0) reasons.push("尚未录入有效起运地报关单");
-    else if (released !== total) reasons.push(`起运地报关尚未全部放行（已放行 ${released}/${total} 张）`);
+      WHERE d.organization_id=? AND d.order_id=?`,
+    ).bind(organizationId, orderId).all<{
+      clearance_stage: string;
+      status: string;
+      is_deleted: number;
+    }>();
+    const gate = customsDeclarationGate(declarations.results, "origin");
+    if (gate.total === 0) reasons.push("尚未录入有效起运地报关单");
+    else if (!gate.ready) reasons.push(`起运地报关尚未全部放行（已放行 ${gate.released}/${gate.total} 张）`);
   }
 
   if (order.warehouse_enabled === 1 && !options?.warehouseDispatchConfirmed) {
@@ -263,6 +257,7 @@ export async function checkOrderPreDepartureDocuments(
   ]);
   const preDepartureModules = new Set<OrderModuleCode>(["consignment", "transport", "customs"]);
   const requiredDocuments = orderDocumentPlacements
+    .filter((placement) => preDepartureDocumentTypeCodes.has(placement.documentCode))
     .filter((placement) => preDepartureModules.has(placement.moduleCode))
     .filter((placement) => placement.moduleCode !== "customs" || order.customs_enabled === 1)
     .filter((placement) => required(placement.fieldKey, placement.requiredByDefault))

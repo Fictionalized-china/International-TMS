@@ -165,7 +165,7 @@ export const orderModuleDefinitions: OrderModuleDefinition[] = [
   {
     code: "overseas_warehouse",
     name: "境外仓自提",
-    description: "境外目的仓到仓后自动通知客户，再办理预约提货、客户自提、签收和运输完成",
+    description: "境外目的仓完成入库后自动通知客户，客户到仓扫码核对并确认收货，一次完成自提、出库和签收",
     icon: "仓",
     required: true,
     services: ["destination_warehouse"],
@@ -173,10 +173,7 @@ export const orderModuleDefinitions: OrderModuleDefinition[] = [
       { code: "waiting_arrival", name: "等待到仓" },
       { code: "arrived", name: "目的仓已到仓" },
       { code: "notified", name: "客户已通知" },
-      { code: "appointment", name: "预约提货" },
-      { code: "picked_up", name: "客户自提" },
-      { code: "signed", name: "签收" },
-      { code: "completed", name: "运输完成" },
+      { code: "signed", name: "扫码自提签收" },
     ],
   },
   {

@@ -9,6 +9,7 @@ export async function runOrderWorkflowAction(input: {
   actionCode: string;
   assigneeUserId?: string | null;
   notes?: string | null;
+  bypassAssigneeRestriction?: boolean;
 }) {
   try {
     const result = await executeOrderWorkflowAction({
@@ -18,6 +19,7 @@ export async function runOrderWorkflowAction(input: {
       actorUserId: input.actorUserId,
       assigneeUserId: input.assigneeUserId || null,
       notes: input.notes || null,
+      bypassAssigneeRestriction: input.bypassAssigneeRestriction,
     });
     await writeAudit({
       request: input.request,

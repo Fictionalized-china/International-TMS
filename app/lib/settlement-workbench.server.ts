@@ -33,7 +33,7 @@ export async function loadSettlementWorkbench(db:D1Database,organizationId:strin
       COALESCE((SELECT SUM(a.amount) FROM settlement_cash_allocations a JOIN settlement_cash_transactions t ON t.id=a.cash_transaction_id AND t.status!='void' WHERE a.expense_id=e.id),0) settled_amount,
       CASE WHEN EXISTS(SELECT 1 FROM transport_batch_orders bo JOIN transport_batches b ON b.id=bo.batch_id WHERE bo.order_id=o.id AND bo.status!='removed' AND b.road_status IN ('outbound_in_transit','overseas_arrived','waiting_pickup','pickup_completed')) THEN 1 ELSE 0 END outbound_ready
       FROM business_expenses e JOIN transport_orders o ON o.id=e.order_id JOIN customers c ON c.id=o.customer_id
-      WHERE e.organization_id=? AND e.stage='confirmed' AND NOT EXISTS(SELECT 1 FROM settlement_reconciliation_lines l JOIN settlement_reconciliations r ON r.id=l.reconciliation_id WHERE l.expense_id=e.id AND r.status!='withdrawn')
+      WHERE e.organization_id=? AND e.stage='confirmed' AND e.amount>0 AND NOT EXISTS(SELECT 1 FROM settlement_reconciliation_lines l JOIN settlement_reconciliations r ON r.id=l.reconciliation_id WHERE l.expense_id=e.id AND r.status!='withdrawn')
       AND (e.direction='payable' OR EXISTS(SELECT 1 FROM transport_batch_orders bo JOIN transport_batches b ON b.id=bo.batch_id WHERE bo.order_id=o.id AND bo.status!='removed' AND b.road_status IN ('outbound_in_transit','overseas_arrived','waiting_pickup','pickup_completed')))
       ORDER BY e.direction,c.name,e.currency,o.order_number,e.created_at`).bind(organizationId).all<SettlementExpense>(),
     db.prepare(`SELECT r.id,r.document_number,r.direction,r.counterparty_name,r.settlement_entity,r.currency,r.total_amount,r.status,r.notes,r.confirmed_at,r.created_at,COUNT(DISTINCT l.expense_id) expense_count,GROUP_CONCAT(DISTINCT o.order_number) orders,
@@ -66,9 +66,11 @@ export async function createReconciliation(db:D1Database,input:{organizationId:s
   if(!counterparty)throw new Error("应付费用缺少往来单位，不能发起对账");
   if(input.direction==="receivable"&&rows.results.some(row=>row.customer_id!==customerId))throw new Error("客户应收对账不能跨客户合并");
   if(input.direction==="payable"&&rows.results.some(row=>(row.counterparty_name||"").trim()!==counterparty))throw new Error("供应商应付对账不能跨往来单位合并");
+  if(rows.results.some(row=>!Number.isFinite(row.amount)||row.amount<=0))throw new Error("所选费用中存在金额为 0 的记录，请先完善费用金额再发起对账");
   const org=await db.prepare("SELECT name FROM organizations WHERE id=?").bind(input.organizationId).first<{name:string}>();
   if(!org)throw new Error("组织信息无效");
   const id=crypto.randomUUID(),number=settlementDocumentNumber(input.direction==="receivable"?"REC":"PAY",new Date(input.now)),total=rows.results.reduce((sum,row)=>sum+row.amount,0);
+  if(!Number.isFinite(total)||total<=0)throw new Error("所选费用合计必须大于 0，请先完善费用金额再发起对账");
   await db.batch([
     db.prepare(`INSERT INTO settlement_reconciliations(id,organization_id,document_number,direction,counterparty_name,customer_id,settlement_entity,currency,total_amount,status,notes,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,'draft',?,?,?,?)`).bind(id,input.organizationId,number,input.direction,counterparty,customerId,org.name,currency,total,input.notes||null,input.userId,input.now,input.now),
     ...rows.results.map(row=>db.prepare("INSERT INTO settlement_reconciliation_lines(id,organization_id,reconciliation_id,expense_id,amount,created_at) VALUES(?,?,?,?,?,?)").bind(crypto.randomUUID(),input.organizationId,id,row.id,row.amount,input.now)),

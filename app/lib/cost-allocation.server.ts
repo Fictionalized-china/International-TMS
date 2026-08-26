@@ -56,23 +56,36 @@ export async function updateCostAllocation(db:D1Database,input:{
   organizationId:string;allocationId:string;method:AllocationMethod;
   adjustments:{lineId:string;amount:number;reason:string}[];now:string;
 }){
-  const header=await db.prepare("SELECT id,total_amount,status FROM transport_cost_allocations WHERE id=? AND organization_id=?").bind(input.allocationId,input.organizationId).first<{id:string;total_amount:number;status:string}>();
+  const header=await db.prepare("SELECT id,batch_id,total_amount,status FROM transport_cost_allocations WHERE id=? AND organization_id=?").bind(input.allocationId,input.organizationId).first<{id:string;batch_id:string;total_amount:number;status:string}>();
   if(!header||header.status!=="draft")throw new Error("只有未确认的分摊草稿可以调整");
   const lines=await db.prepare("SELECT id,order_id,actual_weight_kg,actual_volume_cbm FROM transport_cost_allocation_lines WHERE organization_id=? AND allocation_id=? ORDER BY id").bind(input.organizationId,input.allocationId).all<{id:string;order_id:string;actual_weight_kg:number;actual_volume_cbm:number}>();
   if(lines.results.length!==input.adjustments.length)throw new Error("分摊明细不完整，请刷新页面后重试");
-  const suggestions=allocateCost(lines.results.map(item=>({orderId:item.order_id,actualWeightKg:item.actual_weight_kg,actualVolumeCbm:item.actual_volume_cbm})),header.total_amount,input.method);
+  const actuals=await loadBatchActuals(db,input.organizationId,header.batch_id);
+  const missing=actuals.filter(item=>item.receipt_count===0);
+  if(missing.length)throw new Error(`以下订单没有仓库实收数据：${missing.map(item=>item.order_number).join("、")}`);
+  const actualByOrder=new Map(actuals.map(item=>[item.order_id,item]));
+  const suggestions=allocateCost(lines.results.map(item=>{
+    const actual=actualByOrder.get(item.order_id);
+    if(!actual)throw new Error("分摊订单已不在当前配载批次，请刷新页面后重试");
+    return{orderId:item.order_id,actualWeightKg:actual.actual_weight_kg,actualVolumeCbm:actual.actual_volume_cbm};
+  }),header.total_amount,input.method);
+  const suggestionByOrder=new Map(suggestions.map(item=>[item.orderId,item]));
   const adjustmentMap=new Map(input.adjustments.map(item=>[item.lineId,item]));
   const statements:D1PreparedStatement[]=[];
   let finalTotal=0;
   for(let index=0;index<lines.results.length;index++){
-    const line=lines.results[index],suggestion=suggestions[index],adjustment=adjustmentMap.get(line.id);
+    const line=lines.results[index],actual=actualByOrder.get(line.order_id),suggestion=suggestionByOrder.get(line.order_id),adjustment=adjustmentMap.get(line.id);
+    if(!actual||!suggestion)throw new Error("分摊订单实收数据不完整，请刷新页面后重试");
     if(!adjustment||!Number.isFinite(adjustment.amount)||adjustment.amount<0)throw new Error("分摊金额必须为不小于 0 的数字");
     if(Math.abs(adjustment.amount-suggestion.amount)>0.009&&!adjustment.reason.trim())throw new Error("修改系统建议金额时必须填写调整原因");
     finalTotal+=adjustment.amount;
-    statements.push(db.prepare("UPDATE transport_cost_allocation_lines SET suggested_ratio=?,suggested_amount=?,adjusted_amount=?,adjustment_reason=?,final_amount=?,updated_at=? WHERE id=? AND organization_id=? AND allocation_id=?").bind(suggestion.ratio,suggestion.amount,Math.abs(adjustment.amount-suggestion.amount)>0.009?adjustment.amount:null,adjustment.reason.trim()||null,adjustment.amount,input.now,line.id,input.organizationId,input.allocationId));
+    statements.push(db.prepare("UPDATE transport_cost_allocation_lines SET actual_weight_kg=?,actual_volume_cbm=?,suggested_ratio=?,suggested_amount=?,adjusted_amount=?,adjustment_reason=?,final_amount=?,updated_at=? WHERE id=? AND organization_id=? AND allocation_id=?").bind(actual.actual_weight_kg,actual.actual_volume_cbm,suggestion.ratio,suggestion.amount,Math.abs(adjustment.amount-suggestion.amount)>0.009?adjustment.amount:null,adjustment.reason.trim()||null,adjustment.amount,input.now,line.id,input.organizationId,input.allocationId));
   }
   if(Math.abs(finalTotal-header.total_amount)>0.009)throw new Error(`各订单分摊金额合计必须等于 ${header.total_amount.toFixed(2)}`);
-  statements.push(db.prepare("UPDATE transport_cost_allocations SET allocation_method=?,updated_at=? WHERE id=? AND organization_id=?").bind(input.method,input.now,input.allocationId,input.organizationId));
+  const totalWeight=actuals.reduce((sum,item)=>sum+item.actual_weight_kg,0);
+  const totalVolume=actuals.reduce((sum,item)=>sum+item.actual_volume_cbm,0);
+  const density=allocationDensity(totalWeight,totalVolume);
+  statements.push(db.prepare("UPDATE transport_cost_allocations SET allocation_method=?,total_actual_weight_kg=?,total_actual_volume_cbm=?,density_kg_per_cbm=?,density_result=?,updated_at=? WHERE id=? AND organization_id=?").bind(input.method,totalWeight,totalVolume,density,density<300?"轻货：密度低于 300 KG/CBM":"重货：密度达到 300 KG/CBM",input.now,input.allocationId,input.organizationId));
   await db.batch(statements);
 }
 
@@ -100,8 +113,12 @@ export async function confirmCostAllocation(db:D1Database,input:{organizationId:
 
 async function loadBatchActuals(db:D1Database,organizationId:string,batchId:string){
   const result=await db.prepare(`SELECT bo.order_id,o.order_number,c.name customer_name,COUNT(DISTINCT r.id) receipt_count,COALESCE(SUM(r.total_weight_kg),0) actual_weight_kg,COALESCE(SUM(r.total_volume_cbm),0) actual_volume_cbm
-    FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id JOIN customers c ON c.id=o.customer_id
-    LEFT JOIN shipments s ON s.order_id=o.id LEFT JOIN warehouse_receipts r ON r.shipment_id=s.id AND r.status='completed'
+    FROM transport_batch_orders bo
+    JOIN transport_batches b ON b.id=bo.batch_id AND b.organization_id=bo.organization_id
+    JOIN transport_orders o ON o.id=bo.order_id
+    JOIN customers c ON c.id=o.customer_id
+    LEFT JOIN shipments s ON s.order_id=o.id
+    LEFT JOIN warehouse_receipts r ON r.shipment_id=s.id AND r.warehouse_id=b.warehouse_id AND r.status='completed'
     WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
     GROUP BY bo.order_id,o.order_number,c.name ORDER BY bo.sequence_no`).bind(organizationId,batchId).all<ActualOrder>();
   if(!result.results.length)throw new Error("配载批次没有有效订单");

@@ -61,7 +61,7 @@ const queueMeta: Record<WarehouseQueue, { label: string; hint: string }> = {
   inbound: { label: "待入库", hint: "等待扫码收货" },
   counting: { label: "收货清点", hint: "已收货，等待确认货齐或异常" },
   inventory: { label: "在库货物", hint: "已完成实收，等待配载或整车装车" },
-  outbound: { label: "待装车出库", hint: "已有装车任务，等待扫码与交接" },
+  outbound: { label: "装车与出库", hint: "已有装车任务，等待扫码与交接" },
   exception: { label: "异常处理", hint: "货物被冻结，需先处理异常" },
 };
 
@@ -91,7 +91,15 @@ export async function loader({ request }: Route.LoaderArgs) {
             (SELECT MAX(wr.received_at) FROM warehouse_receipts wr WHERE wr.organization_id=s.organization_id AND wr.shipment_id=s.id AND wr.warehouse_id=?) receipt_time,
             (SELECT COUNT(*) FROM warehouse_packages wp WHERE wp.organization_id=s.organization_id AND wp.shipment_id=s.id AND wp.warehouse_id=?) package_count,
             (SELECT COUNT(*) FROM warehouse_packages wp WHERE wp.organization_id=s.organization_id AND wp.shipment_id=s.id AND wp.warehouse_id=? AND wp.status IN ('in_stock','allocated')) in_stock_count,
-            (SELECT wd.status FROM warehouse_dispatches wd WHERE wd.organization_id=s.organization_id AND wd.shipment_id=s.id AND EXISTS(SELECT 1 FROM warehouse_dispatch_items wdi JOIN warehouse_packages wp ON wp.id=wdi.package_id WHERE wdi.dispatch_id=wd.id AND wp.warehouse_id=?) ORDER BY wd.created_at DESC LIMIT 1) dispatch_status,
+            (SELECT wd.status
+               FROM warehouse_dispatches wd
+               JOIN warehouse_dispatch_items wdi ON wdi.dispatch_id=wd.id
+               JOIN warehouse_packages dwp ON dwp.id=wdi.package_id AND dwp.shipment_id=s.id
+               JOIN warehouse_sorting_items dsi ON dsi.package_id=dwp.id
+               JOIN warehouse_sorting_batches dsb ON dsb.id=dsi.batch_id
+               JOIN warehouse_locations dl ON dl.id=dsb.target_location_id
+              WHERE wd.organization_id=s.organization_id AND dl.warehouse_id=?
+              ORDER BY wd.created_at DESC LIMIT 1) dispatch_status,
             (SELECT COUNT(*) FROM warehouse_exceptions we JOIN warehouse_packages wp ON wp.id=we.package_id WHERE we.organization_id=s.organization_id AND we.shipment_id=s.id AND wp.warehouse_id=? AND we.status IN ('open','processing')) active_exception_count,
             MAX(o.updated_at,s.updated_at) updated_at
        FROM shipments s
@@ -119,7 +127,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     warehouse.id,
   ).all<WarehouseQueueRow>();
 
-  const categorized = rows.results.map((row) => ({ ...row, queue: warehouseQueue(row) }));
+  const activeRows = warehouse.warehouse_role === "overseas_destination"
+    ? rows.results
+    : rows.results.filter((row) => row.dispatch_status !== "dispatched");
+  const categorized = activeRows.map((row) => ({ ...row, queue: warehouseQueue(row) }));
   const scoped = categorized.filter((row) => {
     if (view !== "all" && row.queue !== view) return false;
     if (!q) return true;

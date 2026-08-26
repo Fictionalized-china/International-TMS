@@ -45,6 +45,7 @@ const loadingTypeLockedFields = new Set([
   "vehicle_capacity_volume",
 ]);
 const loadingTypeFixedField = new Set(["business_type"]);
+const retiredWorkflowFields = new Set(["loading_seal_number"]);
 
 export async function ensureWorkflowCatalogFields(organizationId: string) {
   const workflows = await env.DB.prepare(
@@ -57,6 +58,7 @@ export async function ensureWorkflowCatalogFields(organizationId: string) {
   for (const workflow of workflows.results) {
     if (!standardWorkflowCodes.has(workflow.code)) continue;
     for (const item of workflowFieldCatalog) {
+      if (retiredWorkflowFields.has(item.fieldKey)) continue;
       const isFtlLoadingField =
         workflow.code === "tms-ftl-standard" && item.moduleCode === "loading";
       if (isFtlLoadingField && loadingTypeLockedFields.has(item.fieldKey)) continue;
@@ -123,6 +125,38 @@ export async function ensureWorkflowCatalogFields(organizationId: string) {
        FROM workflow_steps ws WHERE ws.id=workflow_step_fields.step_id
      ))
      WHERE workflow_id IN (SELECT id FROM workflow_definitions WHERE organization_id=?)`,
+  )
+    .bind(organizationId)
+    .run();
+  await env.DB.prepare(
+    `UPDATE workflow_step_fields
+     SET is_active=0,is_required=0,updated_at=?
+     WHERE workflow_id IN (SELECT id FROM workflow_definitions WHERE organization_id=?)
+       AND field_key='loading_seal_number'`,
+  )
+    .bind(now, organizationId)
+    .run();
+  await env.DB.prepare(
+    `UPDATE workflow_instance_fields
+     SET is_active=0,is_required=0
+     WHERE workflow_id IN (SELECT id FROM workflow_definitions WHERE organization_id=?)
+       AND field_key='loading_seal_number'`,
+  )
+    .bind(organizationId)
+    .run();
+  await env.DB.prepare(
+    `UPDATE workflow_step_fields
+     SET is_required=0,updated_at=?
+     WHERE workflow_id IN (SELECT id FROM workflow_definitions WHERE organization_id=?)
+       AND field_key='document_customs_declaration_file'`,
+  )
+    .bind(now, organizationId)
+    .run();
+  await env.DB.prepare(
+    `UPDATE workflow_instance_fields
+     SET is_required=0
+     WHERE workflow_id IN (SELECT id FROM workflow_definitions WHERE organization_id=?)
+       AND field_key='document_customs_declaration_file'`,
   )
     .bind(organizationId)
     .run();
@@ -263,7 +297,7 @@ export async function loadOrderModuleWorkflowFields(
     )
       .bind(organizationId, orderId)
       .first<{ business_type: string | null }>();
-    raw = raw.filter((item) => !loadingTypeFixedField.has(item.field_key));
+    raw = raw.filter((item) => !loadingTypeFixedField.has(item.field_key) && !retiredWorkflowFields.has(item.field_key));
     if (order?.business_type === "ftl") {
       raw = raw.filter((item) => !loadingTypeLockedFields.has(item.field_key));
     }
@@ -611,7 +645,7 @@ async function resolveFieldPresence(
           setPresence(result, rule.fieldKey, assignment[rule.fieldKey]);
     }
     const dispatch = await env.DB.prepare(
-      `SELECT d.seal_number loading_seal_number,d.notes loading_handover_notes,
+      `SELECT d.notes loading_handover_notes,
               COUNT(CASE WHEN di.status='loaded' THEN 1 END) loaded,
               COUNT(di.id) total
        FROM warehouse_dispatches d
@@ -622,7 +656,6 @@ async function resolveFieldPresence(
        GROUP BY d.id ORDER BY d.created_at DESC LIMIT 1`,
     ).bind(organizationId, orderId).first<Record<string, unknown>>();
     if (dispatch) {
-      setPresence(result, "loading_seal_number", dispatch.loading_seal_number);
       setPresence(result, "loading_handover_notes", dispatch.loading_handover_notes);
       setPresence(
         result,

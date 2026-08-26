@@ -126,7 +126,7 @@ const portalConfigs: Record<string, PositionPortalConfig> = {
     title: "海外人员门户",
     description: "处理境外运输跟踪、目的仓到仓、通知和客户提货。",
     viewAreas: ["本人负责订单", "出境后轨迹", "境外目的仓", "海外异常"],
-    operateAreas: ["更新境外轨迹", "确认目的仓到仓", "通知与预约提货", "登记提货完成"],
+    operateAreas: ["更新境外轨迹", "确认目的仓到仓", "通知客户", "办理自提签收"],
     moduleCodes: ["tracking", "overseas_warehouse", "exceptions"],
     quickLinks: [
       { label: "海外待办", description: "处理到仓和自提", href: "/admin/workbenches/tasks", permission: "order.view" },

@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Form, Link, useNavigation } from "react-router";
+import { ChevronDown } from "lucide-react";
 import type { Route } from "./+types/admin.quotations";
 import { Modal } from "../components/Modal";
 import { requireSessionUser } from "../lib/auth.server";
@@ -17,6 +18,8 @@ type Quote = {
   id: string;
   quote_number: string;
   customer_name: string;
+  customer_contact_name: string | null;
+  customer_contact_phone: string | null;
   salesperson_name: string | null;
   origin_country: string;
   origin_state: string | null;
@@ -51,6 +54,15 @@ type CustomerOption = {
   id: string;
   name: string;
   pickup_address: string | null;
+  contact_name: string | null;
+  contact_phone: string | null;
+};
+type CustomerContactOption = {
+  id: string;
+  customer_id: string;
+  name: string;
+  phone: string | null;
+  is_primary: number;
 };
 
 type UserOption = { id: string; display_name: string; email: string };
@@ -73,9 +85,9 @@ export async function loader({ request }: Route.LoaderArgs) {
     where.push("q.lifecycle_status=?");
     binds.push(lifecycle);
   }
-  const [quotes, customers, users, warehouses, countries, provinces, cities] = await Promise.all([
+  const [quotes, customers, contacts, users, warehouses, countries, provinces, cities] = await Promise.all([
     env.DB.prepare(
-      `SELECT q.id,q.quote_number,c.name customer_name,u.display_name salesperson_name,
+      `SELECT q.id,q.quote_number,c.name customer_name,q.customer_contact_name,q.customer_contact_phone,u.display_name salesperson_name,
         q.origin_country,q.origin_state,q.origin_city,q.pickup_address,
         q.destination_country,q.destination_state,q.destination_city,
         w.name destination_warehouse_name,q.destination_warehouse_note,q.customs_clearance_mode,
@@ -92,9 +104,18 @@ export async function loader({ request }: Route.LoaderArgs) {
     ).bind(...binds).all<Quote>(),
     env.DB.prepare(
       `SELECT c.id,c.name,
-        (SELECT a.address_line1 FROM customer_addresses a WHERE a.customer_id=c.id ORDER BY a.is_default DESC,a.created_at LIMIT 1) pickup_address
+        (SELECT a.address_line1 FROM customer_addresses a WHERE a.customer_id=c.id ORDER BY a.is_default DESC,a.created_at LIMIT 1) pickup_address,
+        (SELECT cc.name FROM customer_contacts cc WHERE cc.customer_id=c.id ORDER BY cc.is_primary DESC,cc.created_at LIMIT 1) contact_name,
+        (SELECT cc.phone FROM customer_contacts cc WHERE cc.customer_id=c.id ORDER BY cc.is_primary DESC,cc.created_at LIMIT 1) contact_phone
        FROM customers c WHERE c.organization_id=? AND c.status='active' ORDER BY c.name`,
     ).bind(current.organizationId).all<CustomerOption>(),
+    env.DB.prepare(
+      `SELECT cc.id,cc.customer_id,cc.name,cc.phone,cc.is_primary
+       FROM customer_contacts cc
+       JOIN customers c ON c.id=cc.customer_id
+       WHERE c.organization_id=? AND c.status='active'
+       ORDER BY cc.customer_id,cc.is_primary DESC,cc.updated_at DESC,cc.name`,
+    ).bind(current.organizationId).all<CustomerContactOption>(),
     env.DB.prepare(
       `SELECT u.id,u.display_name,u.email FROM memberships m JOIN users u ON u.id=m.user_id
        WHERE m.organization_id=? AND m.status='active' AND u.status='active' ORDER BY u.display_name,u.email`,
@@ -111,6 +132,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     current,
     quotes: quotes.results ?? [],
     customers: customers.results ?? [],
+    contacts: contacts.results ?? [],
     users: users.results ?? [],
     warehouses: warehouses.results ?? [],
     countries,
@@ -130,6 +152,8 @@ export async function action({ request }: Route.ActionArgs) {
       const salespersonId = valueOf(form, "salespersonId");
       const transportMode = valueOf(form, "transportMode");
       const roadLoadType = valueOf(form, "roadLoadType");
+      const customerContactName = valueOf(form, "customerContactName");
+      const customerContactPhone = valueOf(form, "customerContactPhone");
       const pickupAddress = valueOf(form, "pickupAddress");
       const originCountry = valueOf(form, "originCountry");
       const originState = valueOf(form, "originState");
@@ -152,10 +176,14 @@ export async function action({ request }: Route.ActionArgs) {
       if (!customerId || !salespersonId || transportMode !== "ROAD" || !["ftl", "ltl"].includes(roadLoadType)) {
         throw new Error("请选择客户、业务员、汽运和整车/拼车类型");
       }
-      if (![pickupAddress, originCountry, originState, originCity, destinationCountry, destinationState, destinationCity, destinationWarehouseId, cargoDescription].every(Boolean)) {
-        throw new Error("请完整填写提货地址、起运地、目的地、目的仓和货物描述");
+      if (![customerContactName, customerContactPhone, pickupAddress, originCountry, originState, originCity, destinationCountry, destinationState, destinationCity, destinationWarehouseId, cargoDescription].every(Boolean)) {
+        throw new Error("请完整填写客户联系人、联系电话、提货地址、起运地、目的地、目的仓和货物描述");
       }
       if (!["company", "customer"].includes(customsClearanceMode)) throw new Error("请选择清关办理方式");
+      await Promise.all([
+        assertGeoHierarchy(current.organizationId, originCountry, originState, originCity, "起运地"),
+        assertGeoHierarchy(current.organizationId, destinationCountry, destinationState, destinationCity, "目的地"),
+      ]);
       const [customer, salesperson, warehouse] = await Promise.all([
         env.DB.prepare("SELECT id FROM customers WHERE id=? AND organization_id=? AND status='active'").bind(customerId,current.organizationId).first(),
         env.DB.prepare("SELECT u.id FROM users u JOIN memberships m ON m.user_id=u.id WHERE u.id=? AND m.organization_id=? AND u.status='active' AND m.status='active'").bind(salespersonId,current.organizationId).first(),
@@ -195,6 +223,9 @@ export async function action({ request }: Route.ActionArgs) {
           length,width,height,customsClearanceMode,transportMode,roadLoadType,cargoDescription,pieces,weight,volume,
           total,total,validUntil || null,notes || null,salespersonId,current.userId,now,now,
         ),
+        env.DB.prepare(
+          "UPDATE quotations SET customer_contact_name=?,customer_contact_phone=? WHERE id=? AND organization_id=?",
+        ).bind(customerContactName,customerContactPhone,id,current.organizationId),
         ...charges.map((charge, index) => env.DB.prepare(
           `INSERT INTO quotation_charges(
             id,quotation_id,charge_code,description,quantity,unit_price,amount,exchange_rate,sort_order,created_at
@@ -264,7 +295,7 @@ export default function QuotationsPage({ loaderData, actionData }: Route.Compone
 }
 
 function QuoteActions({ quote, busy }: { quote: Quote; busy: boolean }) {
-  return <div className="toolbar-actions">
+  return <div className="toolbar-actions quotation-table-actions">
     <Modal title={`报价详情 · ${quote.quote_number}`} triggerLabel="查看" triggerClassName="btn"><QuoteDetail quote={quote} /></Modal>
     {quote.lifecycle_status === "pending" && <Form method="post"><input type="hidden" name="intent" value="accept"/><input type="hidden" name="id" value={quote.id}/><button className="btn primary" disabled={busy}>代客户确认</button></Form>}
     {quote.lifecycle_status === "accepted" && quote.order_status === "draft" && <Form method="post"><input type="hidden" name="intent" value="withdraw"/><input type="hidden" name="id" value={quote.id}/><button className="btn" disabled={busy}>撤回接受</button></Form>}
@@ -276,6 +307,7 @@ function QuoteActions({ quote, busy }: { quote: Quote; busy: boolean }) {
 function QuoteDetail({ quote }: { quote: Quote }) {
   return <div className="drawer-grid quote-detail-grid">
     <ReadCell label="客户" value={quote.customer_name}/><ReadCell label="业务员" value={quote.salesperson_name || "—"}/>
+    <ReadCell label="客户联系人" value={quote.customer_contact_name || "—"}/><ReadCell label="联系电话" value={quote.customer_contact_phone || "—"}/>
     <ReadCell label="运输方案" value={`汽运 · ${quote.road_load_type === "ltl" ? "拼车" : "整车"}`}/><ReadCell label="清关责任" value={quote.customs_clearance_mode === "company" ? "公司代办清关" : "客户自理清关"}/>
     <ReadCell label="提货地址" value={quote.pickup_address || "—"}/><ReadCell label="目的仓" value={quote.destination_warehouse_name || "—"}/>
     <ReadCell label="线路" value={`${quote.origin_country} ${quote.origin_state || ""} ${quote.origin_city} → ${quote.destination_country} ${quote.destination_state || ""} ${quote.destination_city}`}/><ReadCell label="目的仓备注" value={quote.destination_warehouse_note || "—"}/>
@@ -291,11 +323,24 @@ function ReadCell({ label, value }: { label: string; value: string }) {
 function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof loader>>; busy: boolean }) {
   const [customerId, setCustomerId] = useState(loaderData.customers[0]?.id || "");
   const [pickupAddress, setPickupAddress] = useState(loaderData.customers[0]?.pickup_address || "");
+  const [customerContactName, setCustomerContactName] = useState(loaderData.customers[0]?.contact_name || "");
+  const [customerContactPhone, setCustomerContactPhone] = useState(loaderData.customers[0]?.contact_phone || "");
+  const [pieces, setPieces] = useState("1");
+  const [lengthCm, setLengthCm] = useState("");
+  const [widthCm, setWidthCm] = useState("");
+  const [heightCm, setHeightCm] = useState("");
   const [charges, setCharges] = useState([{ name: transportChargeNameOptions[0]?.[0] || "国际汽运费", quantity: 1, unitPrice: 0, notes: "" }]);
   const total = charges.reduce((sum, charge) => sum + Number(charge.quantity || 0) * Number(charge.unitPrice || 0), 0);
+  const calculatedVolume = [pieces, lengthCm, widthCm, heightCm].every((value) => Number(value) > 0)
+    ? (Number(pieces) * Number(lengthCm) * Number(widthCm) * Number(heightCm) / 1_000_000).toFixed(4)
+    : "";
+  const selectedCustomerContacts = loaderData.contacts.filter((contact) => contact.customer_id === customerId);
   const selectCustomer = (id: string) => {
     setCustomerId(id);
-    setPickupAddress(loaderData.customers.find((customer) => customer.id === id)?.pickup_address || "");
+    const customer = loaderData.customers.find((item) => item.id === id);
+    setPickupAddress(customer?.pickup_address || "");
+    setCustomerContactName(customer?.contact_name || "");
+    setCustomerContactPhone(customer?.contact_phone || "");
   };
   return <Form method="post" className="prototype-quote-form">
     <input type="hidden" name="intent" value="create"/>
@@ -303,6 +348,8 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
     <FormSection className="quote-plan-section" title="客户与运输方案" note="报价确认后不再重复创建订单">
       <div className="grid">
         <Field label="客户 *"><select className="control filled" name="customerId" value={customerId} onChange={(event) => selectCustomer(event.target.value)} required><option value="">请选择客户</option>{loaderData.customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name}</option>)}</select></Field>
+        <Field label="客户联系人 *"><ContactCombobox name="customerContactName" value={customerContactName} contacts={selectedCustomerContacts} mode="name" onChange={(value, contact) => { setCustomerContactName(value); if (contact?.phone) setCustomerContactPhone(contact.phone); }} /></Field>
+        <Field label="联系电话 *"><ContactCombobox name="customerContactPhone" value={customerContactPhone} contacts={selectedCustomerContacts} mode="phone" onChange={(value, contact) => { setCustomerContactPhone(value); if (contact) setCustomerContactName(contact.name); }} /></Field>
         <Field label="业务员 *"><select className="control filled" name="salespersonId" required><option value="">请选择业务员</option>{loaderData.users.map((user) => <option key={user.id} value={user.id}>{user.display_name} · {user.email}</option>)}</select></Field>
         <Field label="运输方式 *"><select className="control filled" name="transportMode" defaultValue="ROAD"><option value="ROAD">汽运</option><option value="RAIL" disabled>铁运（流程未开放）</option><option value="AIR" disabled>空运（流程未开放）</option></select></Field>
         <Field label="订单类型 *"><select className="control filled" name="roadLoadType" defaultValue="ltl"><option value="ltl">拼车</option><option value="ftl">整车</option></select></Field>
@@ -311,26 +358,24 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
     </FormSection>
     <FormSection className="quote-route-section" title="起运地与目的地" note="最终目的地为境外目的仓，客户到仓自提">
       <div className="grid">
-        <Field label="起运国家 / 地区 *"><GeoSelect name="originCountry" options={loaderData.countries}/></Field>
-        <Field label="起运省 / 州 *"><GeoSelect name="originState" options={loaderData.provinces}/></Field>
-        <Field label="起运城市 *"><GeoSelect name="originCity" options={loaderData.cities}/></Field>
+        <GeoCascadeFields prefix="origin" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} />
         <Field label="提货地址 *" className="quote-route-address"><textarea className="control textarea editing" name="pickupAddress" value={pickupAddress} onChange={(event) => setPickupAddress(event.target.value)} required /></Field>
-        <Field label="目的国家 / 地区 *"><GeoSelect name="destinationCountry" options={loaderData.countries}/></Field>
-        <Field label="目的省 / 州 *"><GeoSelect name="destinationState" options={loaderData.provinces}/></Field>
-        <Field label="目的城市 *"><GeoSelect name="destinationCity" options={loaderData.cities}/></Field>
-        <Field label="目的仓库 *"><select className="control filled" name="destinationWarehouseId" required><option value="">请选择境外目的仓</option>{loaderData.warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></Field>
+        <GeoCascadeFields prefix="destination" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} />
+        <Field label="目的仓库 *" className="quote-route-warehouse"><select className="control filled" name="destinationWarehouseId" required><option value="">请选择境外目的仓</option>{loaderData.warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></Field>
         <Field label="报价目的地备注" className="quote-route-note"><textarea className="control textarea" name="destinationWarehouseNote" /></Field>
       </div>
     </FormSection>
     <FormSection title="货物预估数据" note="仓库实收后登记实际数据">
       <div className="grid">
         <Field label="货物描述 *" className="quote-cargo-description"><textarea className="control textarea editing" name="cargoDescription" required /></Field>
-        <Field label="预计件数 *"><input className="control filled" name="pieces" type="number" min="1" defaultValue="1" required/></Field>
+        <Field label="预计件数 *"><input className="control filled" name="pieces" type="number" min="1" value={pieces} onChange={(event) => setPieces(event.target.value)} required/></Field>
         <Field label="预计重量 KG *"><input className="control filled" name="weight" type="number" min="0.001" step="0.001" required/></Field>
-        <Field label="预计长度 CM *"><input className="control filled" name="length" type="number" min="0.01" step="0.01" required/></Field>
-        <Field label="预计宽度 CM *"><input className="control filled" name="width" type="number" min="0.01" step="0.01" required/></Field>
-        <Field label="预计高度 CM *"><input className="control filled" name="height" type="number" min="0.01" step="0.01" required/></Field>
-        <Field label="预计体积 CBM *"><input className="control filled" name="volume" type="number" min="0.001" step="0.001" required/></Field>
+        <div className="quote-dimension-row">
+          <Field label="预计长度 CM *"><input className="control filled" name="length" type="number" min="0.01" step="0.01" value={lengthCm} onChange={(event) => setLengthCm(event.target.value)} required/></Field>
+          <Field label="预计宽度 CM *"><input className="control filled" name="width" type="number" min="0.01" step="0.01" value={widthCm} onChange={(event) => setWidthCm(event.target.value)} required/></Field>
+          <Field label="预计高度 CM *"><input className="control filled" name="height" type="number" min="0.01" step="0.01" value={heightCm} onChange={(event) => setHeightCm(event.target.value)} required/></Field>
+          <Field label="预计体积 CBM（自动计算）*"><input className="control filled quote-calculated-volume" name="volume" type="number" min="0.0001" step="0.0001" value={calculatedVolume} readOnly required/></Field>
+        </div>
       </div>
     </FormSection>
     <FormSection
@@ -354,8 +399,100 @@ function Field({ label, className = "", children }: { label: string; className?:
   return <label className={`field ${className}`}><span>{label}</span>{children}</label>;
 }
 
-function GeoSelect({ name, options = [] }: { name: string; options?: GeoOption[] }) {
-  return <select className="control filled" name={name} required><option value="">请选择</option>{options.map((option) => <option key={`${name}-${option.code}`} value={option.name}>{option.name}</option>)}</select>;
+function ContactCombobox({
+  name,
+  value,
+  contacts,
+  mode,
+  onChange,
+}: {
+  name: string;
+  value: string;
+  contacts: CustomerContactOption[];
+  mode: "name" | "phone";
+  onChange: (value: string, contact?: CustomerContactOption) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listId = `quote-${name}-options`;
+  const selectableContacts = contacts.filter((contact) => mode === "name" || Boolean(contact.phone));
+  const findContact = (nextValue: string) => selectableContacts.find((contact) => (
+    mode === "name" ? contact.name === nextValue : contact.phone === nextValue
+  ));
+  return <div className="quote-contact-combobox">
+    <input
+      ref={inputRef}
+      className="control"
+      name={name}
+      type={mode === "phone" ? "tel" : "text"}
+      list={listId}
+      value={value}
+      placeholder={mode === "name" ? "选择或输入联系人" : "选择或输入联系电话"}
+      onChange={(event) => onChange(event.target.value, findContact(event.target.value))}
+      required
+    />
+    <button
+      type="button"
+      title={contacts.length ? "展开客户联系人" : "该客户暂无联系人，可直接输入"}
+      aria-label={contacts.length ? "展开客户联系人" : "该客户暂无联系人，可直接输入"}
+      onClick={() => {
+        inputRef.current?.focus();
+        try {
+          inputRef.current?.showPicker?.();
+        } catch {
+          // Some browsers expose showPicker but do not allow it for text inputs.
+        }
+      }}
+    ><ChevronDown aria-hidden="true" size={14}/></button>
+    <datalist id={listId}>
+      {selectableContacts.map((contact) => <option key={`${name}-${contact.id}`} value={mode === "name" ? contact.name : contact.phone || ""}>{mode === "name" ? contact.phone || "未登记电话" : contact.name}{contact.is_primary ? " · 主要联系人" : ""}</option>)}
+    </datalist>
+  </div>;
+}
+
+function GeoCascadeFields({
+  prefix,
+  countries,
+  provinces,
+  cities,
+}: {
+  prefix: "origin" | "destination";
+  countries: GeoOption[];
+  provinces: GeoOption[];
+  cities: GeoOption[];
+}) {
+  const [countryCode, setCountryCode] = useState("");
+  const [provinceCode, setProvinceCode] = useState("");
+  const [cityCode, setCityCode] = useState("");
+  const countryOptions = countries;
+  const provinceOptions = provinces.filter((option) => option.parent_code === countryCode);
+  const cityOptions = cities.filter((option) => option.parent_code === provinceCode);
+  const countryName = countries.find((option) => option.code === countryCode)?.name || "";
+  const provinceName = provinces.find((option) => option.code === provinceCode)?.name || "";
+  const cityName = cities.find((option) => option.code === cityCode)?.name || "";
+  const placeLabel = prefix === "origin" ? "起运" : "目的";
+  return <>
+    <Field label={`${placeLabel}国家 / 地区 *`}>
+      <select className="control filled" value={countryCode} onChange={(event) => { setCountryCode(event.target.value); setProvinceCode(""); setCityCode(""); }} required>
+        <option value="">请选择</option>
+        {countryOptions.map((option) => <option key={`${prefix}-country-${option.code}`} value={option.code}>{option.name}</option>)}
+      </select>
+      <input name={`${prefix}Country`} type="hidden" value={countryName}/>
+    </Field>
+    <Field label={`${placeLabel}省 / 州 *`}>
+      <select className="control filled" value={provinceCode} onChange={(event) => { setProvinceCode(event.target.value); setCityCode(""); }} disabled={!countryCode} required>
+        <option value="">{countryCode ? "请选择" : "请先选择国家"}</option>
+        {provinceOptions.map((option) => <option key={`${prefix}-province-${option.code}`} value={option.code}>{option.name}</option>)}
+      </select>
+      <input name={`${prefix}State`} type="hidden" value={provinceName}/>
+    </Field>
+    <Field label={`${placeLabel}城市 *`}>
+      <select className="control filled" value={cityCode} onChange={(event) => setCityCode(event.target.value)} disabled={!provinceCode} required>
+        <option value="">{provinceCode ? "请选择" : "请先选择省 / 州"}</option>
+        {cityOptions.map((option) => <option key={`${prefix}-city-${option.code}`} value={option.code}>{option.name}</option>)}
+      </select>
+      <input name={`${prefix}City`} type="hidden" value={cityName}/>
+    </Field>
+  </>;
 }
 
 function positiveNumber(value: string, label: string) {
@@ -374,6 +511,31 @@ async function geoOptions(organizationId: string, level: string) {
   return (await env.DB.prepare(
     "SELECT code,name,parent_code FROM reference_data WHERE organization_id=? AND category=? AND status='active' ORDER BY sort_order,name",
   ).bind(organizationId,level).all<GeoOption>()).results ?? [];
+}
+
+async function assertGeoHierarchy(organizationId: string, countryName: string, provinceName: string, cityName: string, label: string) {
+  const row = await env.DB.prepare(
+    `SELECT city.code
+     FROM reference_data country
+     JOIN reference_data province
+       ON province.organization_id=country.organization_id
+      AND province.category='province'
+      AND province.parent_code=country.code
+      AND province.status='active'
+     JOIN reference_data city
+       ON city.organization_id=province.organization_id
+      AND city.category='city'
+      AND city.parent_code=province.code
+      AND city.status='active'
+     WHERE country.organization_id=?
+       AND country.category='country'
+       AND country.status='active'
+       AND country.name=?
+       AND province.name=?
+       AND city.name=?
+     LIMIT 1`,
+  ).bind(organizationId, countryName, provinceName, cityName).first();
+  if (!row) throw new Error(`${label}的国家、省州和城市不属于同一条地理层级，请重新选择`);
 }
 
 function statusLabel(status: Quote["lifecycle_status"]) {

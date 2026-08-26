@@ -14,6 +14,7 @@ import { syncOrderBusinessWorkflow } from "./business-workflow.server";
 import { checkOrderLoadPlan } from "./order-readiness.server";
 import {
   orderDocumentPlacements,
+  preDepartureDocumentTypeCodes,
   orderDocumentTypeLabel,
 } from "./order-documents";
 
@@ -574,7 +575,9 @@ async function syncModuleStateFromTransportBatch(organizationId: string, orderId
     `SELECT b.id,b.road_status,b.status,bo.status order_batch_status,
             EXISTS(SELECT 1 FROM warehouse_dispatches d JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id JOIN warehouse_packages wp ON wp.id=di.package_id JOIN shipments s ON s.id=wp.shipment_id WHERE d.organization_id=? AND s.order_id=? AND d.status='dispatched') warehouse_dispatched,
             EXISTS(SELECT 1 FROM transport_vehicle_loads l JOIN order_cargo_packages p ON p.id=l.package_id WHERE l.organization_id=? AND p.order_id=? AND l.loaded_at IS NOT NULL) packages_loaded,
-            EXISTS(SELECT 1 FROM overseas_warehouse_operations op WHERE op.organization_id=? AND op.order_id=? AND op.status!='cancelled') overseas_operation_exists,
+            (SELECT op.status FROM overseas_warehouse_operations op
+              WHERE op.organization_id=? AND op.order_id=? AND op.status!='cancelled'
+              ORDER BY op.created_at DESC LIMIT 1) overseas_operation_status,
             (SELECT COUNT(*) FROM order_cargo_packages p WHERE p.organization_id=? AND p.order_id=? AND p.status!='cancelled') package_count,
             (SELECT COUNT(DISTINCT l.package_id)
              FROM transport_vehicle_loads l
@@ -604,7 +607,7 @@ async function syncModuleStateFromTransportBatch(organizationId: string, orderId
     order_batch_status: string | null;
     warehouse_dispatched: number;
     packages_loaded: number;
-    overseas_operation_exists: number;
+    overseas_operation_status: string | null;
     package_count: number;
     loaded_package_count: number;
   }>();
@@ -646,17 +649,38 @@ async function syncModuleStateFromTransportBatch(organizationId: string, orderId
       ).bind(now, now, now, organizationId, orderId),
     );
   }
-  if (batch.overseas_operation_exists || ["overseas_arrived", "waiting_pickup", "pickup_completed"].includes(batch.road_status || "")) {
+  if (batch.overseas_operation_status || ["overseas_arrived", "waiting_pickup", "pickup_completed"].includes(batch.road_status || "")) {
+    const operationStatus = batch.overseas_operation_status || "arrived";
+    const pickupCompleted = operationStatus === "picked_up";
+    const notified = ["notified", "appointment"].includes(operationStatus);
+    const moduleStatus = pickupCompleted ? "completed" : "in_progress";
+    const moduleStepCode = pickupCompleted ? "signed" : notified ? "notified" : "arrived";
+    const moduleStepName = pickupCompleted
+      ? "扫码自提签收完成"
+      : notified
+        ? "等待客户扫码确认收货"
+        : "等待系统自动通知客户";
+    const progress = pickupCompleted ? 100 : notified ? 60 : 25;
     statements.push(
       env.DB.prepare(
         `UPDATE order_module_instances
-         SET status=CASE WHEN current_step_code='picked_up' THEN 'completed' ELSE 'in_progress' END,
-             current_step_code=CASE WHEN current_step_code IN ('notified','appointment','picked_up') THEN current_step_code ELSE 'notified' END,
-             current_step_name=CASE WHEN current_step_code IN ('notified','appointment','picked_up') THEN current_step_name ELSE '客户已通知' END,
-             progress_percent=MAX(progress_percent,25),
-             started_at=COALESCE(started_at,?),blocking_reason=NULL,updated_at=?
-         WHERE organization_id=? AND order_id=? AND module_code='overseas_warehouse' AND enabled=1 AND status!='completed'`,
-      ).bind(now, now, organizationId, orderId),
+         SET status=?,current_step_code=?,current_step_name=?,progress_percent=?,
+             started_at=COALESCE(started_at,?),
+             completed_at=CASE WHEN ?='completed' THEN COALESCE(completed_at,?) ELSE NULL END,
+             blocking_reason=NULL,updated_at=?
+         WHERE organization_id=? AND order_id=? AND module_code='overseas_warehouse' AND enabled=1`,
+      ).bind(
+        moduleStatus,
+        moduleStepCode,
+        moduleStepName,
+        progress,
+        now,
+        moduleStatus,
+        now,
+        now,
+        organizationId,
+        orderId,
+      ),
     );
   }
   if (statements.length) await env.DB.batch(statements);
@@ -1104,6 +1128,7 @@ async function validateModuleGate(
     if (currentStep === "documents") {
       const customsDocCodes = orderDocumentPlacements
         .filter((p) => p.moduleCode === "customs")
+        .filter((p) => preDepartureDocumentTypeCodes.has(p.documentCode))
         .filter((p) => required(p.fieldKey, p.requiredByDefault))
         .map((p) => p.documentCode);
       if (customsDocCodes.length) {

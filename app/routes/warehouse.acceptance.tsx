@@ -538,7 +538,7 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
 }
 
 function AcceptanceLabel({ item }: { item: PackageLabel }) {
-  return <article className="package-label"><header><strong>OULING 国际物流</strong><span>仓库货物标签</span></header><Code39 value={item.barcode}/><b>{item.barcode}</b><dl><div><dt>订单</dt><dd>{item.order_number}</dd></div><div><dt>包装号</dt><dd>{item.package_number}</dd></div><div><dt>客户</dt><dd>[{item.customer_identity_code}] {item.customer_name}</dd></div><div><dt>货物</dt><dd>{item.cargo_name_cn || "未关联货物明细"}</dd></div><div><dt>包装</dt><dd>{packageTypeLabel(item.package_type || "other")} · {item.pieces} 件</dd></div><div><dt>实收</dt><dd>{item.weight_kg?.toFixed(2) || "0.00"} KG · {item.volume_cbm?.toFixed(3) || "0.000"} CBM</dd></div><div><dt>仓库</dt><dd>{item.warehouse_name}</dd></div><div><dt>库位</dt><dd>{item.zone_name} / {item.location_name}（{item.location_code}）</dd></div><div><dt>入库</dt><dd>{new Date(item.created_at).toLocaleString("zh-CN")}</dd></div></dl></article>;
+  return <article className="package-label"><header><strong>OULING 国际物流</strong><span>货物条码标签</span></header><Code39 value={item.barcode}/><b>{item.barcode}</b><dl><div><dt>订单</dt><dd>{item.order_number}</dd></div><div><dt>货物条码</dt><dd>{item.barcode}</dd></div><div><dt>客户</dt><dd>[{item.customer_identity_code}] {item.customer_name}</dd></div><div><dt>实收</dt><dd>{item.pieces} 件 · {item.weight_kg?.toFixed(2) || "0.00"} KG · {item.volume_cbm?.toFixed(3) || "0.000"} CBM</dd></div><div><dt>库位</dt><dd>{item.zone_name} / {item.location_name}（{item.location_code}）</dd></div></dl></article>;
 }
 
 function Code39({ value }: { value: string }) {

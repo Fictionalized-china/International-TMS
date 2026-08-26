@@ -15,9 +15,9 @@ export type WorkflowFieldCatalogItem = {
   optionsText?: string;
 };
 
-// Only fields confirmed as mandatory in the legacy operating forms belong in
-// this baseline. New-system workflow, portal and control fields stay visible
-// but optional; their owning module still validates the actual business action.
+// This baseline contains fields confirmed as mandatory in the legacy forms or
+// explicitly approved as operational hard gates. Other new-system workflow,
+// portal and control fields stay visible but optional.
 export const legacyRequiredWorkflowFieldKeys: ReadonlySet<string> = new Set([
   "customer_id",
   "order_date",
@@ -28,12 +28,10 @@ export const legacyRequiredWorkflowFieldKeys: ReadonlySet<string> = new Set([
   "origin_country",
   "origin_state",
   "origin_city",
-  "origin_address",
   "consignee_name",
   "destination_country",
   "destination_state",
   "destination_city",
-  "destination_address",
   "cargo_name_cn",
   "package_type",
   "package_count",
@@ -81,6 +79,7 @@ export const legacyRequiredWorkflowFieldKeys: ReadonlySet<string> = new Set([
   "document_commercial_invoice",
   "document_packing_list",
   "document_customs_document",
+  "document_customs_declaration_file",
   "document_delivery_receipt",
 ]);
 
@@ -120,20 +119,20 @@ export const workflowFieldCatalog: WorkflowFieldCatalogItem[] = [
   field("order_creation", "consignment", "order_date", "接单日期", "date", "required", "业务正式接单日期。"),
   field("order_creation", "consignment", "business_nature", "业务性质", "select", "optional", "出口、进口、过境或国内业务。", "export|出口\nimport|进口\ntransit|过境\ndomestic|国内"),
   field("order_creation", "consignment", "shipper_customer_id", "发货人", "customer", "required", "从客户管理中选择发货人。"),
-  field("order_creation", "consignment", "pickup_address_id", "常用提货地", "select", "optional", "从客户地址簿选择，也可以手工填写提货地址。"),
+  field("order_creation", "consignment", "pickup_address_id", "常用提货地", "select", "hidden", "报价阶段已确定提货地址，订单审批不重复填写。"),
   field("order_creation", "consignment", "shipper_contact", "提货联系人", "text", "required", "客户工厂或提货地点联系人。"),
   field("order_creation", "consignment", "shipper_phone", "提货联系电话", "text", "required", "提货现场联系电话。"),
   field("order_creation", "consignment", "origin_country", "起运国家/地区", "select", "required", "国内提货起点所属国家或地区。"),
   field("order_creation", "consignment", "origin_state", "起运省/州", "select", "required", "国内提货起点所属省或州。"),
   field("order_creation", "consignment", "origin_city", "起运城市", "select", "required", "国内提货起点城市。"),
-  field("order_creation", "consignment", "origin_address", "提货地址", "textarea", "required", "客户工厂、仓库或实际提货地址。"),
+  field("order_creation", "consignment", "origin_address", "提货地址", "textarea", "hidden", "报价阶段保存为运输数据，订单审批不重复显示。"),
   field("order_creation", "consignment", "consignee_name", "收货人", "text", "required", "境外收货人。"),
   field("order_creation", "consignment", "consignee_contact", "收货联系人", "text", "optional", "境外收货联系人。"),
   field("order_creation", "consignment", "consignee_phone", "收货联系电话", "text", "optional", "境外收货联系电话。"),
   field("order_creation", "consignment", "destination_country", "目的国家/地区", "select", "required", "最终目的国家或地区。"),
   field("order_creation", "consignment", "destination_state", "目的省/州", "select", "required", "最终目的省或州。"),
   field("order_creation", "consignment", "destination_city", "目的城市", "select", "required", "最终目的城市。"),
-  field("order_creation", "consignment", "destination_address", "送货地址", "textarea", "optional", "境外仓或客户指定的最终地址，可留空。"),
+  field("order_creation", "consignment", "destination_address", "送货地址", "textarea", "hidden", "系统按境外目的仓地址自动生成。"),
   field("order_creation", "consignment", "overseas_warehouse_id", "境外目的仓", "warehouse", "required", "只能选择启用且角色为境外目的仓的仓库。"),
   field("order_creation", "consignment", "overseas_warehouse_address_note", "境外目的仓地址备注", "textarea", "optional", "门牌、联系人、提货窗口等订单专属说明。"),
   field("order_creation", "consignment", "requested_pickup_date", "预约提货时间", "datetime", "required", "客户和业务员约定的提货时间。"),
@@ -220,12 +219,11 @@ export const workflowFieldCatalog: WorkflowFieldCatalogItem[] = [
   field("port_loading", "loading", "planned_arrival_at", "计划境外到仓时间", "datetime", "optional", "配载单预计到达境外目的仓时间。"),
   field("port_loading", "loading", "loading_instruction", "装载要求/实际路线", "textarea", "optional", "装载、加固和线路要求。"),
   field("port_loading", "loading", "loading_notes", "配载备注", "textarea", "optional", "批次业务说明。"),
-  field("port_loading", "loading", "loading_seal_number", "封签号", "text", "optional", "仓库完成装车交接时登记的车辆封签号。"),
   field("port_loading", "loading", "loading_handover_notes", "装车交接备注", "textarea", "optional", "仓库装车、交接和出库补充说明。"),
   field("port_loading", "loading", "loading_scan_confirmation", "逐件扫码装车", "select", "required", "要求仓库按车辆逐件扫描并确认整票装车。", "1|已完成扫码装车"),
   field("port_loading", "loading", "cost_allocation", "拼车成本分摊", "text", "optional", "仅拼车订单使用；系统按1:300生成建议，人工可修改确认后才入账，只影响内部毛利和应付。"),
 
-  field("outbound_transport", "documents", "predeparture_documents", "发运前文件", "attachment", "required", "委托书、商业发票、装箱单、报关资料等发运前文件。"),
+  field("outbound_transport", "documents", "predeparture_documents", "发运前文件", "attachment", "required", "委托书、商业发票、装箱单及报关资料为必需文件；报关单/预录报关单可选。"),
   field("outbound_transport", "documents", "document_review", "文件审核", "select", "required", "必需文件全部审核通过或归档。", "approved|审核通过\narchived|已归档"),
   field("outbound_transport", "documents", "document_category", "文件类型", "select", "required", "上传文件所属的业务资料类型。"),
   field("outbound_transport", "documents", "document_attachment", "业务文件", "attachment", "required", "实际上传的发运前业务文件。"),
@@ -234,7 +232,8 @@ export const workflowFieldCatalog: WorkflowFieldCatalogItem[] = [
   field("order_creation", "consignment", "document_consignment_letter", "委托书", "attachment", "optional", "客户确认运输委托后，可在订单中上传委托书。"),
   field("outbound_transport", "customs", "document_commercial_invoice", "商业发票", "attachment", "required", "办理报关申报时使用的商业发票。"),
   field("outbound_transport", "customs", "document_packing_list", "装箱单", "attachment", "required", "办理报关申报时使用的装箱明细。"),
-  field("outbound_transport", "customs", "document_customs_document", "报关资料", "attachment", "required", "起运地、过境地或目的地申报所需资料。"),
+  field("outbound_transport", "customs", "document_customs_document", "报关资料", "attachment", "required", "起运地、过境地或目的地申报所需的配套资料。"),
+  field("outbound_transport", "customs", "document_customs_declaration_file", "报关单 / 预录报关单", "attachment", "optional", "可选上传预录或正式报关单文件；正式报关单号与海关放行状态仍在报关作业登记。"),
   field("outbound_transport", "customs", "document_border_document", "口岸文件", "attachment", "optional", "口岸交接、过境或查验文件。"),
   field("outbound_transport", "tracking", "document_transshipment_order", "换装单", "attachment", "optional", "发生换装、转关或车辆交接后上传相应凭证。"),
   field("overseas_pickup", "overseas_warehouse", "document_pod", "POD", "attachment", "optional", "境外仓交付或客户提货完成后上传交付证明。"),
@@ -270,8 +269,6 @@ export const workflowFieldCatalog: WorkflowFieldCatalogItem[] = [
   field("overseas_pickup", "overseas_warehouse", "overseas_arrival_notes", "到仓说明", "textarea", "optional", "卸车、入仓或换装说明。"),
   field("overseas_pickup", "overseas_warehouse", "customer_notified_at", "系统通知时间", "datetime", "required", "境外仓完成入库清点后由系统自动记录。"),
   field("overseas_pickup", "overseas_warehouse", "customer_notification_notes", "通知说明", "textarea", "optional", "电话、邮件或客户门户通知结果。"),
-  field("overseas_pickup", "overseas_warehouse", "pickup_appointment_at", "预约提货时间", "datetime", "optional", "客户门户或客服登记提货预约。"),
-  field("overseas_pickup", "overseas_warehouse", "pickup_appointment_notes", "预约说明", "textarea", "optional", "预约车辆、提货码和注意事项。"),
   field("overseas_pickup", "overseas_warehouse", "overseas_pickup_contact", "提货人/签收人", "text", "required", "客户实际提货人或签收人。"),
   field("overseas_pickup", "overseas_warehouse", "pickup_proof", "提货凭证", "attachment", "optional", "扫码、自提或签收凭证。"),
   field("overseas_pickup", "overseas_warehouse", "pickup_completed_at", "提货完成时间", "datetime", "required", "全部货物提走后记录完成时间。"),

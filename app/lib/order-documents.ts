@@ -29,7 +29,12 @@ export const orderDocumentStages: readonly OrderDocumentStage[] = [
       { code: "consignment_letter", name: "委托书", hint: "客户运输委托或托运委托书" },
       { code: "commercial_invoice", name: "发票", hint: "商业发票或形式发票", requiredForDeparture: true },
       { code: "packing_list", name: "装箱单", hint: "货物件数、重量和包装明细", requiredForDeparture: true },
-      { code: "customs_document", name: "报关资料", hint: "申报、报检或清关所需资料" },
+      { code: "customs_document", name: "报关资料", hint: "申报、报检或清关所需的配套资料" },
+      {
+        code: "customs_declaration_file",
+        name: "报关单 / 预录报关单",
+        hint: "可选上传预录或正式申报单文件；正式单号与海关放行状态另行登记",
+      },
     ],
   },
   {
@@ -81,7 +86,7 @@ export const orderDocumentPlacements: readonly OrderDocumentPlacement[] = [
     documentCode: "consignment_letter",
     moduleCode: "consignment",
     fieldKey: "document_consignment_letter",
-    requiredByDefault: false,
+    requiredByDefault: true,
   },
   {
     documentCode: "commercial_invoice",
@@ -100,6 +105,12 @@ export const orderDocumentPlacements: readonly OrderDocumentPlacement[] = [
     moduleCode: "customs",
     fieldKey: "document_customs_document",
     requiredByDefault: true,
+  },
+  {
+    documentCode: "customs_declaration_file",
+    moduleCode: "customs",
+    fieldKey: "document_customs_declaration_file",
+    requiredByDefault: false,
   },
   {
     documentCode: "border_document",
@@ -176,8 +187,15 @@ export function orderDocumentCanBeHandledInModule(
     "commercial_invoice",
     "packing_list",
     "customs_document",
+    "customs_declaration_file",
   ].includes(documentCode);
 }
+
+export const preDepartureDocumentTypeCodes = new Set(
+  orderDocumentStages
+    .find((stage) => stage.code === "pre_departure")
+    ?.documents.map((document) => document.code) ?? [],
+);
 
 export const orderDocumentTypeCodes = new Set(
   orderDocumentTypes.map((document) => document.code),
@@ -203,5 +221,7 @@ export function requiredPreDepartureDocumentTypes(customsEnabled: boolean) {
   const required = orderDocumentStages[0].documents
     .filter((document) => document.requiredForDeparture)
     .map((document) => document.code);
-  return customsEnabled ? [...required, "customs_document"] : required;
+  return customsEnabled
+    ? [...required, "customs_document"]
+    : required;
 }

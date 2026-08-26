@@ -86,12 +86,17 @@ export async function loader({ request }: Route.LoaderArgs) {
   if (orderContext) preserved.set("orderId", orderContext.id);
   if (returnTo !== "/admin") preserved.set("returnTo", returnTo);
   const query = preserved.toString();
+  const requestedOutboundView = url.searchParams.get("view");
+  const outboundView = requestedOutboundView === "pending" || requestedOutboundView === "execution"
+    ? requestedOutboundView
+    : warehouseFlow?.dispatchStatus === "loading" ? "execution" : "pending";
   return {
     user,
     warehouses: warehouseContext.warehouses,
     warehouse,
     warehouseName: warehouse.name,
     currentPath: url.pathname,
+    outboundView,
     orderContext,
     warehouseFlow,
     returnTo,
@@ -103,6 +108,12 @@ export async function loader({ request }: Route.LoaderArgs) {
 
 function warehouseLink(path: string, query: string) {
   return query ? `${path}?${query}` : path;
+}
+
+function warehouseOutboundLink(query: string, view: "pending" | "execution") {
+  const params = new URLSearchParams(query);
+  params.set("view", view);
+  return `/warehouse/outbound?${params.toString()}`;
 }
 
 function warehouseReturnLabel(returnTo: string, hasOrderContext: boolean) {
@@ -127,7 +138,7 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
             <small>WAREHOUSE OPERATIONS</small>
           </div>
         </div>
-        <Form method="get" action={loaderData.currentPath} className="warehouse-context-switcher warehouse-account-context">
+        <Form method="get" action="/warehouse" className="warehouse-context-switcher warehouse-account-context">
           {orderContext&&<input type="hidden" name="orderId" value={orderContext.id}/>}
           {loaderData.returnTo!=="/admin"&&<input type="hidden" name="returnTo" value={loaderData.returnTo}/>}
           <label htmlFor="authorized-warehouse"><span>当前授权仓库</span></label>
@@ -155,18 +166,18 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
             </NavLink>
           )}
           {loaderData.warehouse.warehouse_role !== "overseas_destination" && (
-            <NavLink to={warehouseLink("/warehouse/ltl-loading", loaderData.query)}>
-              <span><AppIcon name="truck" size={17} /></span>拼车装货
-            </NavLink>
+            <Link className={loaderData.currentPath.startsWith("/warehouse/outbound") && loaderData.outboundView === "pending" ? "active" : undefined} to={warehouseOutboundLink(loaderData.query,"pending")}>
+              <span><AppIcon name="packageCheck" size={17} /></span>待装车
+            </Link>
           )}
           {loaderData.warehouse.warehouse_role !== "overseas_destination" && (
-            <NavLink to={warehouseLink("/warehouse/outbound", loaderData.query)}>
-              <span><AppIcon name="packageCheck" size={17} /></span>待装车与出库
-            </NavLink>
+            <Link className={loaderData.currentPath.startsWith("/warehouse/outbound") && loaderData.outboundView === "execution" ? "active" : undefined} to={warehouseOutboundLink(loaderData.query,"execution")}>
+              <span><AppIcon name="truck" size={17} /></span>装车与出库
+            </Link>
           )}
           {loaderData.warehouse.warehouse_role === "overseas_destination" && (
             <NavLink to={warehouseLink("/warehouse/pickup", loaderData.query)}>
-              <span><AppIcon name="packageCheck" size={17} /></span>客户自提出库
+              <span><AppIcon name="packageCheck" size={17} /></span>扫码自提签收
             </NavLink>
           )}
           <span className="warehouse-nav-group nav-title">库存管理</span>
@@ -243,22 +254,18 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
                     ? "本单已完成装车出库"
                     : flow.dispatchStatus === "loading"
                       ? "当前办理：继续本单装车任务"
-                      : "下一步：新建本单装车任务"}
+                      : "当前办理：选择订单创建装车任务"}
                 </strong>
                 <small>
                   {flow.dispatchStatus === "dispatched"
                     ? "仓库交接已经完成，无需再次创建装车任务。"
                     : flow.dispatchStatus === "loading"
-                      ? "请在本页装车任务中继续扫码并完成出库交接。"
-                      : "请点击本页右上角按钮，系统会自动读取整车运输方案。"}
+                      ? "任务已同步到“装车与出库”，请继续扫码并完成出库交接。"
+                      : "请在“待装车”中选择订单、检查文件并创建装车任务。"}
                 </small>
               </div>
             ) : (
-              <Form action={`/switch-site?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}`} method="post">
-                <input type="hidden" name="target" value="admin" />
-                <input type="hidden" name="returnTo" value={`/admin/orders/${orderContext.id}/modules/loading#module-business-data`} />
-                <button className="primary">货齐已确认，进入装车与出库</button>
-              </Form>
+              <Link className="primary" to={warehouseOutboundLink(loaderData.query,"pending")}>货齐已确认，进入待装车</Link>
             )}
           </section>
         )}

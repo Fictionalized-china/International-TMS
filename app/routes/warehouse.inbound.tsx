@@ -1,7 +1,8 @@
 import { env } from "cloudflare:workers";
 import { Form, Link, redirect, useNavigation } from "react-router";
-import { useState, type ReactElement } from "react";
+import { useEffect, useState, type ReactElement } from "react";
 import type { Route } from "./+types/warehouse.inbound";
+import { Modal } from "../components/Modal";
 import { requireSessionUser } from "../lib/auth.server";
 import { valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
@@ -28,6 +29,37 @@ type Shipment = {
   origin_city: string;
   destination_city: string;
   expected_warehouse_name: string | null;
+  business_type: string;
+  cargo_description: string | null;
+  pieces: number;
+  gross_weight_kg: number;
+  volume_cbm: number;
+};
+type ScannedPackage = {
+  id: string;
+  shipment_id: string;
+  barcode: string;
+  package_number: string;
+  status: string;
+  warehouse_id: string;
+  source_warehouse_name: string;
+  receipt_number: string | null;
+  received_at: string | null;
+  receipt_status: string | null;
+  cargo_name: string | null;
+  package_type: string | null;
+  pieces: number;
+  weight_kg: number | null;
+  volume_cbm: number | null;
+  length_cm: number | null;
+  width_cm: number | null;
+  height_cm: number | null;
+};
+type ScannedDispatch = {
+  id: string;
+  dispatch_number: string;
+  status: string;
+  package_count: number;
 };
 type Location = {
   id: string;
@@ -99,10 +131,12 @@ export async function loader({ request }: Route.LoaderArgs) {
   if (!isOverseasWarehouse)
     throw redirect(`/warehouse/acceptance${url.search}`);
   const orderId = url.searchParams.get("orderId");
+  const returnTo = url.searchParams.get("returnTo") || "";
   const reference = (url.searchParams.get("reference") || "").trim();
   const [shipments, locations, receipts, packages] = await Promise.all([
     env.DB.prepare(
       `SELECT s.id,s.order_id,s.shipment_number,s.status,o.order_number,c.name customer_name,c.identity_code customer_identity_code,o.origin_city,o.destination_city,
+              o.business_type,o.cargo_description,o.pieces,o.gross_weight_kg,o.volume_cbm,
       ${isOverseasWarehouse
         ? `(SELECT w.name FROM warehouses w WHERE w.id=o.overseas_warehouse_id AND w.organization_id=o.organization_id)`
         : `(SELECT COALESCE(w.name,a.destination_location) FROM order_transport_assignments a
@@ -139,18 +173,85 @@ export async function loader({ request }: Route.LoaderArgs) {
       .bind(user.organizationId, warehouse.id)
       .all<Package>(),
   ]);
-  const selectedShipment = shipments.results.find((item) =>
-    orderId
-      ? item.order_id === orderId
-      : reference
-        ? [item.order_number, item.shipment_number].some(
-            (value) => value.toUpperCase() === reference.toUpperCase(),
-          )
-        : false,
+  const directlyScannedPackage = reference
+    ? await env.DB.prepare(
+        `SELECT p.id,p.shipment_id,p.barcode,p.package_number,p.status,p.warehouse_id,
+                w.name source_warehouse_name,
+                COALESCE(NULLIF(TRIM(i.cargo_name_cn),''),NULLIF(TRIM(o.cargo_description),'')) cargo_name,
+                 COALESCE(r.package_type,i.package_type) package_type,
+                 r.receipt_number,r.received_at,r.status receipt_status,
+                p.pieces,p.weight_kg,p.volume_cbm,p.length_cm,p.width_cm,p.height_cm
+           FROM warehouse_packages p
+           JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id
+           JOIN transport_orders o ON o.id=s.order_id AND o.organization_id=s.organization_id
+           JOIN warehouses w ON w.id=p.warehouse_id AND w.organization_id=p.organization_id
+           LEFT JOIN warehouse_receipts r ON r.id=p.receipt_id AND r.organization_id=p.organization_id
+           LEFT JOIN order_cargo_items i ON i.id=p.cargo_item_id AND i.organization_id=p.organization_id
+          WHERE p.organization_id=?
+            AND (UPPER(p.barcode)=UPPER(?) OR UPPER(p.package_number)=UPPER(?))
+          ORDER BY CASE WHEN UPPER(p.barcode)=UPPER(?) THEN 1 ELSE 2 END
+          LIMIT 1`,
+      )
+        .bind(user.organizationId, reference, reference, reference)
+        .first<ScannedPackage>()
+    : null;
+  const scannedDispatch = reference && !directlyScannedPackage
+    ? await env.DB.prepare(
+        `SELECT d.id,d.dispatch_number,d.status,COUNT(di.id) package_count
+           FROM warehouse_dispatches d
+           LEFT JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id AND di.organization_id=d.organization_id
+          WHERE d.organization_id=? AND UPPER(d.dispatch_number)=UPPER(?)
+          GROUP BY d.id
+          LIMIT 1`,
+      )
+        .bind(user.organizationId, reference)
+        .first<ScannedDispatch>()
+    : null;
+  const dispatchPackage = scannedDispatch?.package_count === 1
+    ? await env.DB.prepare(
+        `SELECT p.id,p.shipment_id,p.barcode,p.package_number,p.status,p.warehouse_id,
+                w.name source_warehouse_name,
+                COALESCE(NULLIF(TRIM(i.cargo_name_cn),''),NULLIF(TRIM(o.cargo_description),'')) cargo_name,
+                 COALESCE(r.package_type,i.package_type) package_type,
+                 r.receipt_number,r.received_at,r.status receipt_status,
+                p.pieces,p.weight_kg,p.volume_cbm,p.length_cm,p.width_cm,p.height_cm
+           FROM warehouse_dispatch_items di
+           JOIN warehouse_packages p ON p.id=di.package_id AND p.organization_id=di.organization_id
+           JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id
+           JOIN transport_orders o ON o.id=s.order_id AND o.organization_id=s.organization_id
+           JOIN warehouses w ON w.id=p.warehouse_id AND w.organization_id=p.organization_id
+           LEFT JOIN warehouse_receipts r ON r.id=p.receipt_id AND r.organization_id=p.organization_id
+           LEFT JOIN order_cargo_items i ON i.id=p.cargo_item_id AND i.organization_id=p.organization_id
+          WHERE di.organization_id=? AND di.dispatch_id=?
+          LIMIT 1`,
+      )
+        .bind(user.organizationId, scannedDispatch.id)
+        .first<ScannedPackage>()
+    : null;
+  const scannedPackage = directlyScannedPackage ?? dispatchPackage;
+  const packageReady = Boolean(
+    scannedPackage &&
+      scannedPackage.status === "dispatched" &&
+      scannedPackage.warehouse_id !== warehouse.id,
   );
-  const lookupError = reference && !selectedShipment
-    ? `未找到可进入“${warehouse.name}”验收的订单：${reference}`
-    : "";
+  const selectedShipment = packageReady
+    ? shipments.results.find((item) => item.id === scannedPackage?.shipment_id)
+    : undefined;
+  let lookupError = "";
+  if (reference && scannedDispatch && scannedDispatch.status !== "dispatched")
+    lookupError = `装车任务 ${scannedDispatch.dispatch_number} 尚未完成出库交接，暂不能办理境外目的仓收货`;
+  else if (reference && scannedDispatch && scannedDispatch.package_count > 1)
+    lookupError = `装车任务 ${scannedDispatch.dispatch_number} 包含 ${scannedDispatch.package_count} 个货物标签，请逐件扫描货物标签入库`;
+  else if (reference && scannedPackage?.warehouse_id === warehouse.id && scannedPackage.receipt_status === "completed")
+    lookupError = `货物标签 ${scannedPackage.barcode} 已于${scannedPackage.received_at ? ` ${new Date(scannedPackage.received_at).toLocaleString("zh-CN")}` : ""}通过入库单 ${scannedPackage.receipt_number || "—"} 在“${warehouse.name}”完成入库，请勿重复扫描`;
+  else if (reference && scannedPackage?.warehouse_id === warehouse.id)
+    lookupError = `货物标签 ${scannedPackage.barcode} 已归属“${warehouse.name}”，但未找到已完成入库单，请联系管理员检查仓库数据`;
+  else if (reference && scannedPackage && scannedPackage.status !== "dispatched")
+    lookupError = `货物标签 ${scannedPackage.barcode} 尚未完成上一仓库出库，暂不能办理境外目的仓收货`;
+  else if (reference && scannedPackage && !selectedShipment)
+    lookupError = `货物标签 ${scannedPackage.barcode} 不属于当前目的仓，或对应运输单尚未进入可收货阶段`;
+  else if (reference && !scannedPackage)
+    lookupError = `未找到国内仓生成的货物标签或装车任务：${reference}`;
   const workflowFields = selectedShipment
     ? await loadOrderModuleWorkflowFields(
         user.organizationId,
@@ -167,8 +268,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     receipts: receipts.results,
     packages: packages.results,
     orderId,
+    returnTo,
     reference,
     selectedShipment,
+    scannedPackage: selectedShipment ? scannedPackage : null,
     lookupError,
     workflowFields,
   };
@@ -902,6 +1005,17 @@ export default function WarehouseInbound({
   const [receiptResult, setReceiptResult] = useState<"" | "ready" | "exception">(
     "",
   );
+  const [scanConfirmed, setScanConfirmed] = useState(false);
+  useEffect(() => {
+    setScanConfirmed(false);
+    setReceiptResult("");
+  }, [loaderData.reference]);
+  useEffect(() => {
+    if (actionData?.success) {
+      setScanConfirmed(false);
+      setReceiptResult("");
+    }
+  }, [actionData?.success]);
   const locationPolicy = workflowFieldPolicy(
     loaderData.workflowFields,
     "warehouse_location",
@@ -942,10 +1056,7 @@ export default function WarehouseInbound({
     "warehouse_receipt_notes",
     "optional",
   );
-  const selectedShipment =
-    loaderData.selectedShipment?.id ??
-    loaderData.shipments.find((item) => item.order_id === loaderData.orderId)
-      ?.id ?? "";
+  const selectedShipment = loaderData.selectedShipment?.id ?? "";
   if (loaderData.isOverseasWarehouse && !selectedShipment) {
     return (
       <>
@@ -953,28 +1064,11 @@ export default function WarehouseInbound({
           <div>
             <p className="eyebrow">ACCEPTANCE RECEIVING</p>
             <h1>验收收货</h1>
-            <p>扫描订单号，系统调出客户、货物和运输信息后再办理境外仓验收。</p>
+            <p>扫描国内仓生成的货物标签；单件装车任务也可扫描 OUT 装车任务码，核对订单和货物信息后再收货。</p>
           </div>
         </header>
         {loaderData.lookupError && <div className="alert error">{loaderData.lookupError}</div>}
-        <section className="panel acceptance-scan-panel">
-          <Form method="get" className="acceptance-scan-form">
-            <input type="hidden" name="warehouseId" value={loaderData.warehouse.id} />
-            <label className="field">
-              <span>扫描订单号</span>
-              <input
-                name="reference"
-                defaultValue={loaderData.reference}
-                autoFocus
-                autoComplete="off"
-                placeholder="扫描订单号条码后回车"
-                required
-              />
-            </label>
-            <button className="primary">调出验收信息</button>
-            <small>扫描枪输入订单号并发送回车后，系统自动读取客户、货物、运输和预计收货信息。</small>
-          </Form>
-        </section>
+        <OverseasReceivingScan warehouseId={loaderData.warehouse.id} reference={loaderData.reference} orderId={loaderData.orderId} returnTo={loaderData.returnTo} />
       </>
     );
   }
@@ -1007,14 +1101,50 @@ export default function WarehouseInbound({
           <Link to={`/warehouse/locations?warehouseId=${loaderData.warehouse.id}`}>前往“仓库与库位”完成配置</Link>。
         </div>
       )}
-      <div className="inbound-layout">
+      {loaderData.isOverseasWarehouse && (
+        <OverseasReceivingScan
+          key={actionData?.success ? `completed:${actionData.success}` : loaderData.reference}
+          warehouseId={loaderData.warehouse.id}
+          reference={actionData?.success ? "" : loaderData.reference}
+          orderId={loaderData.orderId}
+          returnTo={loaderData.returnTo}
+        />
+      )}
+      {loaderData.isOverseasWarehouse && loaderData.selectedShipment && loaderData.scannedPackage && (
+        <Modal
+          title="核对境外目的仓到货信息"
+          openSignal={`${loaderData.reference}:${loaderData.selectedShipment.id}`}
+          size="wide"
+        >
+          {({ close }) => <div className="overseas-receiving-confirmation">
+            <div className="table-wrap overseas-receiving-confirmation-table">
+              <table>
+                <thead><tr><th>核对项目</th><th>系统记录</th><th>核对项目</th><th>系统记录</th></tr></thead>
+                <tbody>
+                  <tr><td>货物标签</td><td><strong>{loaderData.scannedPackage.barcode}</strong><small>{loaderData.scannedPackage.package_number}</small></td><td>标签状态</td><td><span className="status-pill success">上一仓已出库</span></td></tr>
+                  <tr><td>订单</td><td><strong>{loaderData.selectedShipment.order_number}</strong><small>{loaderData.selectedShipment.business_type === "ftl" ? "整车" : "拼车"}</small></td><td>系统运单</td><td><strong>{loaderData.selectedShipment.shipment_number}</strong></td></tr>
+                  <tr><td>客户</td><td><strong>[{loaderData.selectedShipment.customer_identity_code}] {loaderData.selectedShipment.customer_name}</strong></td><td>目的仓</td><td><strong>{loaderData.selectedShipment.expected_warehouse_name || loaderData.warehouse.name}</strong></td></tr>
+                  <tr><td>标签货物</td><td><strong>{loaderData.scannedPackage.cargo_name || loaderData.selectedShipment.cargo_description || "货物名称未填写"}</strong><small>{loaderData.scannedPackage.pieces} 件 · {Number(loaderData.scannedPackage.weight_kg || 0).toFixed(3)} KG · {Number(loaderData.scannedPackage.volume_cbm || 0).toFixed(3)} CBM</small></td><td>订单预录</td><td><strong>{loaderData.selectedShipment.pieces} 件 · {Number(loaderData.selectedShipment.gross_weight_kg || 0).toFixed(3)} KG</strong><small>{Number(loaderData.selectedShipment.volume_cbm || 0).toFixed(3)} CBM</small></td></tr>
+                  <tr><td>发出仓库</td><td><strong>{loaderData.scannedPackage.source_warehouse_name}</strong></td><td>标签尺寸</td><td>{[loaderData.scannedPackage.length_cm,loaderData.scannedPackage.width_cm,loaderData.scannedPackage.height_cm].every((value) => value != null) ? `${loaderData.scannedPackage.length_cm} × ${loaderData.scannedPackage.width_cm} × ${loaderData.scannedPackage.height_cm} CM` : "未记录"}</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p className="overseas-receiving-confirmation-note">请核对货物标签、订单、客户和目的仓均与现场来货一致。确认后才能填写实收数据并入库。</p>
+            <div className="row-actions overseas-receiving-confirmation-actions">
+              <button type="button" className="secondary" onClick={close}>返回重新扫描</button>
+              <button type="button" className="primary" onClick={() => { setScanConfirmed(true); close(); }}>信息无误，开始收货</button>
+            </div>
+          </div>}
+        </Modal>
+      )}
+      {(!loaderData.isOverseasWarehouse || scanConfirmed) && <div className="inbound-layout">
         <section className="panel inbound-scan">
           <div className="panel-header">
             <div>
               <h2>收货登记</h2>
               <p>
                 {loaderData.isOverseasWarehouse
-                  ? "扫描订单号、运单号或选择已出境的待到仓货物；公司代办清关订单须先完成目的地清关。"
+                  ? "已根据扫描结果锁定订单和货物；公司代办清关订单须先完成目的地清关。"
                   : "扫描订单号、运单号或选择待收货运单，并可使用客户识别码核对货物归属。"}
               </p>
             </div>
@@ -1087,8 +1217,10 @@ export default function WarehouseInbound({
                   <input
                     name="barcode"
                     autoComplete="off"
+                    defaultValue={loaderData.isOverseasWarehouse ? loaderData.scannedPackage?.barcode ?? "" : ""}
                     placeholder={loaderData.isOverseasWarehouse ? "扫描国内仓生成的货物标签" : "扫描现有条码；留空自动生成"}
                     required={loaderData.isOverseasWarehouse || barcodePolicy.isRequired}
+                    readOnly={loaderData.isOverseasWarehouse}
                   />
                   {loaderData.isOverseasWarehouse && <small>使用国内仓装车出库时的原标签；系统会迁移货物位置，不会生成重复标签。</small>}
                 </label>
@@ -1115,6 +1247,7 @@ export default function WarehouseInbound({
                   <span>实际包装类型</span>
                   <select
                     name="packageType"
+                    defaultValue={loaderData.isOverseasWarehouse ? loaderData.scannedPackage?.package_type ?? "" : ""}
                     required={packageTypePolicy.isRequired}
                   >
                     <option value="">请选择</option>
@@ -1122,6 +1255,9 @@ export default function WarehouseInbound({
                     <option value="pallet">托盘</option>
                     <option value="wooden_case">木箱</option>
                     <option value="bag">袋装</option>
+                    <option value="drum">桶装</option>
+                    <option value="bundle">捆装</option>
+                    <option value="mixed">混合包装</option>
                     <option value="other">其他</option>
                   </select>
                 </label>
@@ -1131,7 +1267,7 @@ export default function WarehouseInbound({
                   <Num
                     name="pieces"
                     label="实收件数"
-                    defaultValue="1"
+                    defaultValue={loaderData.isOverseasWarehouse ? String(loaderData.scannedPackage?.pieces ?? 1) : "1"}
                     step="1"
                     required={piecesPolicy.isRequired}
                   />
@@ -1140,6 +1276,7 @@ export default function WarehouseInbound({
                   <Num
                     name="weight"
                     label="实重 KG"
+                    defaultValue={loaderData.isOverseasWarehouse && loaderData.scannedPackage?.weight_kg != null ? String(loaderData.scannedPackage.weight_kg) : undefined}
                     required={weightPolicy.isRequired}
                   />
                 )}{" "}
@@ -1147,13 +1284,14 @@ export default function WarehouseInbound({
                   <Num
                     name="volume"
                     label="实测体积 CBM"
+                    defaultValue={loaderData.isOverseasWarehouse && loaderData.scannedPackage?.volume_cbm != null ? String(loaderData.scannedPackage.volume_cbm) : undefined}
                     step="0.001"
                     required={volumePolicy.isRequired}
                   />
                 )}
-                <Num name="length" label="实际长 CM" step="0.1" required />
-                <Num name="width" label="实际宽 CM" step="0.1" required />
-                <Num name="height" label="实际高 CM" step="0.1" required />
+                <Num name="length" label="实际长 CM" step="0.1" defaultValue={loaderData.isOverseasWarehouse && loaderData.scannedPackage?.length_cm != null ? String(loaderData.scannedPackage.length_cm) : undefined} required />
+                <Num name="width" label="实际宽 CM" step="0.1" defaultValue={loaderData.isOverseasWarehouse && loaderData.scannedPackage?.width_cm != null ? String(loaderData.scannedPackage.width_cm) : undefined} required />
+                <Num name="height" label="实际高 CM" step="0.1" defaultValue={loaderData.isOverseasWarehouse && loaderData.scannedPackage?.height_cm != null ? String(loaderData.scannedPackage.height_cm) : undefined} required />
               </div>
               {evidencePolicy.isActive && (
                 <label className="field">
@@ -1225,7 +1363,7 @@ export default function WarehouseInbound({
             <p className="empty-state">当前账号没有仓库操作权限。</p>
           )}
         </section>
-      </div>
+      </div>}
       {!loaderData.isOverseasWarehouse && <section className="panel label-section">
         <div className="panel-header no-print">
           <div>
@@ -1247,43 +1385,58 @@ export default function WarehouseInbound({
   );
 }
 
+function OverseasReceivingScan({ warehouseId, reference, orderId, returnTo }: { warehouseId: string; reference: string; orderId: string | null; returnTo: string }) {
+  return <section className="panel acceptance-scan-panel overseas-receiving-scan-panel">
+    <Form method="get" className="acceptance-scan-form">
+      <input type="hidden" name="warehouseId" value={warehouseId} />
+      {orderId && <input type="hidden" name="orderId" value={orderId} />}
+      {returnTo && <input type="hidden" name="returnTo" value={returnTo} />}
+      <label className="field scan-field">
+        <span>扫描货物标签 / 装车任务码</span>
+        <input
+          name="reference"
+          defaultValue={reference}
+          autoFocus
+          autoComplete="off"
+          placeholder="扫描国内仓货物条码、包装号或 OUT 装车任务码后回车"
+          required
+        />
+      </label>
+      <button className="primary">核对到货信息</button>
+      <small>单件装车任务可直接扫描 OUT 任务码；多件任务须逐件扫描货物标签。扫描后先核对订单、客户、运单、目的仓和货物信息。</small>
+    </Form>
+  </section>;
+}
+
 function PackageLabel({ item }: { item: Package }) {
   return (
     <article className="package-label">
       <header>
-        <strong>OULING 国际零担</strong>
-        <span>货物标签</span>
+        <strong>OULING 国际物流</strong>
+        <span>货物条码标签</span>
       </header>
       <Code39 value={item.barcode} />
       <b>{item.barcode}</b>
       <dl>
         <div>
-          <dt>客户识别码</dt>
-          <dd>
-            <strong>{item.customer_identity_code}</strong>
-          </dd>
-        </div>
-        <div>
           <dt>订单</dt>
           <dd>{item.order_number}</dd>
         </div>
         <div>
-          <dt>运单</dt>
-          <dd>{item.shipment_number}</dd>
+          <dt>货物条码</dt>
+          <dd><strong>{item.barcode}</strong></dd>
         </div>
         <div>
           <dt>客户</dt>
-          <dd>{item.customer_name}</dd>
+          <dd>[{item.customer_identity_code}] {item.customer_name}</dd>
         </div>
         <div>
           <dt>库位</dt>
           <dd>{item.location_name}</dd>
         </div>
         <div>
-          <dt>数量</dt>
-          <dd>
-            {item.pieces} 件{item.weight_kg ? ` / ${item.weight_kg} KG` : ""}
-          </dd>
+          <dt>实收</dt>
+          <dd>{item.pieces} 件 · {item.weight_kg?.toFixed(2) || "0.00"} KG · {item.volume_cbm?.toFixed(3) || "0.000"} CBM</dd>
         </div>
       </dl>
     </article>

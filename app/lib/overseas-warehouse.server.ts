@@ -14,7 +14,7 @@ type AdvanceInput = {
   organizationId: string;
   orderId: string;
   actorUserId: string;
-  action: "notify" | "appointment" | "pickup";
+  action: "notify" | "pickup";
   occurredAt: string;
   pickupContact?: string;
   pickupProofReference?: string;
@@ -363,55 +363,31 @@ export async function advanceOverseasOrder(input: AdvanceInput) {
     .first<{ id: string; batch_id: string; status: string; warehouse_name: string }>();
   if (!operation) throw new Error("请先由批次确认货物已到达境外目的仓");
 
-  const expected =
-    input.action === "notify"
-      ? "arrived"
-      : input.action === "appointment"
-        ? "notified"
-        : "appointment";
-  if (operation.status !== expected)
-    throw new Error(`当前状态不能执行该操作，请按“到仓并由系统自动通知—预约提货—客户自提并签收”顺序办理`);
+  const canAdvance = input.action === "notify"
+    ? operation.status === "arrived"
+    : ["notified", "appointment"].includes(operation.status);
+  if (!canAdvance)
+    throw new Error(`当前状态不能执行该操作，请按“到仓并由系统自动通知—客户扫码核对并确认收货”顺序办理`);
 
-  const nextStatus =
-    input.action === "notify"
-      ? "notified"
-      : input.action === "appointment"
-        ? "appointment"
-        : "picked_up";
-  const stepName =
-    input.action === "notify"
-      ? "客户已通知"
-      : input.action === "appointment"
-        ? "预约提货"
-        : "客户自提";
-  const progress = input.action === "notify" ? 50 : input.action === "appointment" ? 75 : 100;
-  const moduleStepCode =
-    input.action === "notify"
-      ? "appointment"
-      : input.action === "appointment"
-        ? "picked_up"
-        : "completed";
-  const moduleStepName =
-    input.action === "notify"
-      ? "预约提货"
-      : input.action === "appointment"
-        ? "客户自提"
-        : "运输完成，进入费用结算";
+  const nextStatus = input.action === "notify" ? "notified" : "picked_up";
+  const stepName = input.action === "notify" ? "客户已通知" : "扫码自提签收";
+  const progress = input.action === "notify" ? 60 : 100;
+  const moduleStepCode = input.action === "notify" ? "notified" : "signed";
+  const moduleStepName = input.action === "notify"
+    ? "等待客户扫码确认收货"
+    : "扫码自提签收完成";
   const moduleStatus=input.action === "pickup" ? "completed" : "in_progress";
   const now = new Date().toISOString();
   const statements = [
     env.DB.prepare(
       `UPDATE overseas_warehouse_operations SET status=?,
          notified_at=CASE WHEN ?='notify' THEN ? ELSE notified_at END,
-         appointment_at=CASE WHEN ?='appointment' THEN ? ELSE appointment_at END,
          pickup_at=CASE WHEN ?='pickup' THEN ? ELSE pickup_at END,
          pickup_contact=CASE WHEN ?='pickup' THEN ? ELSE pickup_contact END,
          pickup_proof_reference=CASE WHEN ?='pickup' THEN ? ELSE pickup_proof_reference END,
          notes=COALESCE(?,notes),updated_by_user_id=?,updated_at=? WHERE id=?`,
     ).bind(
       nextStatus,
-      input.action,
-      input.occurredAt,
       input.action,
       input.occurredAt,
       input.action,
@@ -441,16 +417,7 @@ export async function advanceOverseasOrder(input: AdvanceInput) {
       input.orderId,
     ),
   ];
-  if (input.action === "appointment") {
-    statements.push(
-      env.DB.prepare(
-        "UPDATE transport_batches SET status='arrived',road_status='waiting_pickup',updated_at=? WHERE id=? AND organization_id=? AND road_status='overseas_arrived'",
-      ).bind(now, operation.batch_id, input.organizationId),
-    );
-  }
-  if (input.action === "notify" || input.action === "appointment") {
-    const milestoneCode = input.action === "notify" ? "customer_notified" : "pickup_appointment";
-    const milestoneName = input.action === "notify" ? "通知客户" : "预约提货";
+  if (input.action === "notify") {
     statements.push(
       env.DB.prepare(
         `INSERT INTO order_tracking_milestones(id,organization_id,order_id,milestone_code,milestone_name,event_at,location,notes,visible_to_customer,created_by_user_id,created_at)
@@ -459,8 +426,8 @@ export async function advanceOverseasOrder(input: AdvanceInput) {
         crypto.randomUUID(),
         input.organizationId,
         input.orderId,
-        milestoneCode,
-        milestoneName,
+        "customer_notified",
+        "通知客户",
         input.occurredAt,
         operation.warehouse_name,
         input.notes || null,
@@ -485,7 +452,7 @@ export async function advanceOverseasOrder(input: AdvanceInput) {
       ).bind(input.orderId, input.organizationId),
       env.DB.prepare(
         `INSERT INTO shipment_events(id,shipment_id,status,location,description,event_at,visible_to_customer,created_by_user_id,created_at)
-         SELECT ?,s.id,'delivered',?,'客户已在境外目的仓扫码核对并完成自提出库，运输完成并进入结算',?,1,?,?
+          SELECT ?,s.id,'delivered',?,'客户已在境外目的仓扫码核对并完成自提签收，订单进入结算',?,1,?,?
          FROM shipments s WHERE s.order_id=? AND s.organization_id=?`,
       ).bind(
         crypto.randomUUID(),
@@ -514,11 +481,6 @@ export async function advanceOverseasOrder(input: AdvanceInput) {
          SELECT ?,?,?,'signed','扫码确认签收',?,?,?,1,?,?
          WHERE NOT EXISTS(SELECT 1 FROM order_tracking_milestones WHERE organization_id=? AND order_id=? AND milestone_code='signed')`,
       ).bind(crypto.randomUUID(),input.organizationId,input.orderId,input.occurredAt,operation.warehouse_name,"境外仓复核整票货物后确认客户自提",input.actorUserId,now,input.organizationId,input.orderId),
-      env.DB.prepare(
-        `INSERT INTO order_tracking_milestones(id,organization_id,order_id,milestone_code,milestone_name,event_at,location,notes,visible_to_customer,created_by_user_id,created_at)
-         SELECT ?,?,?,'completed','运输完成',?,?,?,1,?,?
-         WHERE NOT EXISTS(SELECT 1 FROM order_tracking_milestones WHERE organization_id=? AND order_id=? AND milestone_code='completed')`,
-      ).bind(crypto.randomUUID(),input.organizationId,input.orderId,input.occurredAt,operation.warehouse_name,"境外仓扫码自提出库完成，自动进入费用结算",input.actorUserId,now,input.organizationId,input.orderId),
       env.DB.prepare(
         `INSERT INTO order_tasks(id,organization_id,order_id,module_code,task_type,title,priority,status,assignee_user_id,assigned_by_user_id,created_at,updated_at)
          SELECT ?,?,?,'costs','start_receivable_reconciliation','发起客户应收对账','normal','pending',NULL,?,?,?
@@ -575,7 +537,7 @@ export async function completeOverseasOrderDelivery(input: {
         AND m.review_status IN ('approved','archived')
       ORDER BY a.created_at DESC LIMIT 1`,
   ).bind(input.organizationId, input.orderId).first<{ id: string }>();
-  if (!signedReceipt) throw new Error("签收单尚未上传并审核通过，不能完成运输");
+  if (!signedReceipt) throw new Error("签收单尚未上传并审核通过，不能归档签收记录");
 
   const now = input.occurredAt || new Date().toISOString();
   await env.DB.batch([
@@ -609,27 +571,8 @@ export async function completeOverseasOrderDelivery(input: {
       input.orderId,
     ),
     env.DB.prepare(
-      `INSERT INTO order_tracking_milestones(id,organization_id,order_id,milestone_code,milestone_name,event_at,location,notes,visible_to_customer,created_by_user_id,created_at)
-       SELECT ?,?,?,'completed','运输完成',?,?,?,1,?,?
-       WHERE NOT EXISTS(
-         SELECT 1 FROM order_tracking_milestones
-          WHERE organization_id=? AND order_id=? AND milestone_code='completed'
-       )`,
-    ).bind(
-      crypto.randomUUID(),
-      input.organizationId,
-      input.orderId,
-      now,
-      operation.warehouse_name,
-      "签收单已确认，运输完成",
-      input.actorUserId,
-      now,
-      input.organizationId,
-      input.orderId,
-    ),
-    env.DB.prepare(
       `UPDATE order_module_instances
-          SET status='completed',current_step_code='completed',current_step_name='运输完成',
+          SET status='completed',current_step_code='signed',current_step_name='扫码自提签收完成',
               progress_percent=100,started_at=COALESCE(started_at,?),completed_at=COALESCE(completed_at,?),
               blocking_reason=NULL,updated_at=?
         WHERE organization_id=? AND order_id=? AND module_code='overseas_warehouse' AND enabled=1`,
@@ -645,42 +588,51 @@ export async function reconcileOverseasOrderDeliveryState(input: {
   actorUserId: string;
 }) {
   const operation = await env.DB.prepare(
-    `SELECT status FROM overseas_warehouse_operations
-      WHERE organization_id=? AND order_id=? AND status!='cancelled'
-      ORDER BY created_at DESC LIMIT 1`,
-  ).bind(input.organizationId, input.orderId).first<{ status: string }>();
+    `SELECT op.status,m.status module_status,m.current_step_code,m.progress_percent
+       FROM overseas_warehouse_operations op
+       LEFT JOIN order_module_instances m
+         ON m.organization_id=op.organization_id AND m.order_id=op.order_id
+        AND m.module_code='overseas_warehouse' AND m.enabled=1
+      WHERE op.organization_id=? AND op.order_id=? AND op.status!='cancelled'
+      ORDER BY op.created_at DESC LIMIT 1`,
+  ).bind(input.organizationId, input.orderId).first<{
+    status: string;
+    module_status: string | null;
+    current_step_code: string | null;
+    progress_percent: number | null;
+  }>();
   if (!operation) return;
 
-  if (operation.status === "picked_up") {
-    const now = new Date().toISOString();
-    await env.DB.prepare(
-      `UPDATE order_module_instances
-          SET status='completed',current_step_code='completed',current_step_name='运输完成，进入费用结算',
-              progress_percent=100,started_at=COALESCE(started_at,?),completed_at=COALESCE(completed_at,?),
-              blocking_reason=NULL,updated_at=?
-        WHERE organization_id=? AND order_id=? AND module_code='overseas_warehouse' AND enabled=1`,
-    ).bind(now, now, now, input.organizationId, input.orderId).run();
-    await syncOrderWorkflowSnapshot(input.organizationId, input.orderId);
-    return;
-  }
-
-  const state = ({
-    waiting_arrival: ["waiting_arrival", "等待到仓", 0],
-    arrived: ["arrived", "等待系统通知客户", 25],
-    notified: ["appointment", "预约提货", 50],
-    appointment: ["picked_up", "等待境外仓扫码自提出库", 75],
-  } as Record<string, [string, string, number]>)[operation.status];
+  const state = operation.status === "picked_up"
+    ? ["completed", "signed", "扫码自提签收完成", 100] as const
+    : ({
+        waiting_arrival: ["in_progress", "waiting_arrival", "等待到仓", 0],
+        arrived: ["in_progress", "arrived", "等待系统通知客户", 25],
+        notified: ["in_progress", "notified", "等待客户扫码确认收货", 60],
+        appointment: ["in_progress", "notified", "等待客户扫码确认收货", 60],
+      } as Record<string, readonly [string, string, string, number]>)[operation.status];
   if (!state) return;
+  if (
+    operation.module_status === state[0] &&
+    operation.current_step_code === state[1] &&
+    operation.progress_percent === state[3]
+  ) return;
+
   const now = new Date().toISOString();
   await env.DB.prepare(
     `UPDATE order_module_instances
-        SET status='in_progress',current_step_code=?,current_step_name=?,progress_percent=?,
-            started_at=COALESCE(started_at,?),completed_at=NULL,blocking_reason=NULL,updated_at=?
+        SET status=?,current_step_code=?,current_step_name=?,progress_percent=?,
+            started_at=COALESCE(started_at,?),
+            completed_at=CASE WHEN ?='completed' THEN COALESCE(completed_at,?) ELSE NULL END,
+            blocking_reason=NULL,updated_at=?
       WHERE organization_id=? AND order_id=? AND module_code='overseas_warehouse' AND enabled=1`,
   ).bind(
     state[0],
     state[1],
     state[2],
+    state[3],
+    now,
+    state[0],
     now,
     now,
     input.organizationId,

@@ -59,7 +59,7 @@ export function orderCompletionStatus(input: CompletionInput): OrderCompletionSt
   const unsettled = input.finance.some(
     (line) => line.receivableBalance > 0.009 || line.payableBalance > 0.009,
   );
-  return unsettled ? "business_complete_unsettled" : "completed_settled";
+  return unsettled ? "in_progress" : "completed_settled";
 }
 
 function money(value: number) {

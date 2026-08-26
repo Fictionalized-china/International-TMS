@@ -56,6 +56,7 @@ export async function validateOrderWorkflowAction(input: {
   actionCode: string;
   actorUserId: string;
   assigneeUserId?: string | null;
+  bypassAssigneeRestriction?: boolean;
 }) {
   const order = await env.DB.prepare(
     `SELECT o.id,o.order_number,o.status,o.current_step_code,o.current_assignee_user_id,o.shipper_name,o.shipper_contact,o.shipper_phone,o.consignee_name,
@@ -88,6 +89,7 @@ export async function validateOrderWorkflowAction(input: {
     };
   if (
     input.actionCode === "approve" &&
+    !input.bypassAssigneeRestriction &&
     !isAssignedOrderApprover({
       status: order.status,
       currentAssigneeUserId: order.current_assignee_user_id,
@@ -209,6 +211,7 @@ export async function executeOrderWorkflowAction(input: {
   actorUserId: string;
   assigneeUserId?: string | null;
   notes?: string | null;
+  bypassAssigneeRestriction?: boolean;
 }) {
   const checked = await validateOrderWorkflowAction(input);
   if (!checked.ok) throw new Error(checked.reason);

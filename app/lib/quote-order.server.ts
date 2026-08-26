@@ -35,6 +35,8 @@ type AcceptedQuote = {
   quote_number: string;
   customer_id: string;
   customer_name: string;
+  customer_contact_name: string | null;
+  customer_contact_phone: string | null;
   salesperson_user_id: string | null;
   origin_country: string;
   origin_state: string | null;
@@ -126,6 +128,8 @@ export async function createOrderFromAcceptedQuote(input: {
   const orderNumber = await nextDocumentNumber(input.organizationId, "order");
   const cargoId = crypto.randomUUID();
   const destinationAddress = quote.warehouse_address || quote.destination_warehouse_note || quote.warehouse_name || quote.destination_city;
+  const contactName = quote.customer_contact_name || contact?.name || quote.customer_name;
+  const contactPhone = quote.customer_contact_phone || contact?.phone || null;
   const pieces = Math.max(1, Number(quote.pieces || 1));
 
   const snapshotJson = JSON.stringify({
@@ -135,6 +139,8 @@ export async function createOrderFromAcceptedQuote(input: {
     originState: quote.origin_state,
     originCity: quote.origin_city,
     pickupAddress: quote.pickup_address,
+    customerContactName: contactName,
+    customerContactPhone: contactPhone,
     destinationCountry: quote.destination_country,
     destinationState: quote.destination_state,
     destinationCity: quote.destination_city,
@@ -173,9 +179,9 @@ export async function createOrderFromAcceptedQuote(input: {
     ).bind(
       orderId,input.organizationId,orderNumber,now.slice(0,10),"export",quote.road_load_type,
       quote.destination_warehouse_id,quote.destination_warehouse_note,quote.customer_id,quote.id,
-      quote.customer_name,contact?.name || null,contact?.phone || null,quote.customer_id,pickupAddress?.id || null,
+      quote.customer_name,contactName,contactPhone,quote.customer_id,pickupAddress?.id || null,
       quote.origin_country,quote.origin_state,quote.origin_city,quote.pickup_address,
-      quote.customer_name,contact?.name || null,contact?.phone || null,
+      quote.customer_name,contactName,contactPhone,
       quote.destination_country,quote.destination_state,quote.destination_city,destinationAddress,
       quote.cargo_description,pieces,quote.gross_weight_kg,quote.volume_cbm,quote.transport_mode,quote.service_level,
       "draft",input.source,quote.notes,input.actorUserId,quote.salesperson_user_id,
@@ -246,7 +252,10 @@ export async function createOrderFromAcceptedQuote(input: {
 
 async function loadAcceptedQuote(organizationId: string, quotationId: string) {
   return env.DB.prepare(
-    `SELECT q.id,q.quote_number,q.customer_id,c.name customer_name,q.salesperson_user_id,
+    `SELECT q.id,q.quote_number,q.customer_id,c.name customer_name,
+            COALESCE(q.customer_contact_name,(SELECT cc.name FROM customer_contacts cc WHERE cc.customer_id=q.customer_id ORDER BY cc.is_primary DESC,cc.created_at LIMIT 1),c.name) customer_contact_name,
+            COALESCE(q.customer_contact_phone,(SELECT cc.phone FROM customer_contacts cc WHERE cc.customer_id=q.customer_id ORDER BY cc.is_primary DESC,cc.created_at LIMIT 1)) customer_contact_phone,
+            q.salesperson_user_id,
             q.origin_country,q.origin_state,q.origin_city,q.pickup_address,
             q.destination_country,q.destination_state,q.destination_city,
             q.destination_warehouse_id,q.destination_warehouse_note,
@@ -273,6 +282,25 @@ async function repairGeneratedOrder(input: {
   orderNumber: string;
   quote: AcceptedQuote;
 }) {
+  const now = new Date().toISOString();
+  const destinationAddress = input.quote.warehouse_address || input.quote.destination_warehouse_note || input.quote.warehouse_name || input.quote.destination_city;
+  await env.DB.prepare(
+    `UPDATE transport_orders
+        SET shipper_contact=?,shipper_phone=?,consignee_contact=?,consignee_phone=?,
+            requested_pickup_date=COALESCE(requested_pickup_date,?),
+            destination_address=?,updated_at=?
+      WHERE id=? AND organization_id=?`,
+  ).bind(
+    input.quote.customer_contact_name || input.quote.customer_name,
+    input.quote.customer_contact_phone,
+    input.quote.customer_contact_name || input.quote.customer_name,
+    input.quote.customer_contact_phone,
+    now,
+    destinationAddress,
+    now,
+    input.orderId,
+    input.organizationId,
+  ).run();
   const workflowId = await ensureWorkflowForBusinessType(input.organizationId, input.quote.road_load_type);
   const workflowInstanceId = await recordWorkflowEvent({
     organizationId: input.organizationId,

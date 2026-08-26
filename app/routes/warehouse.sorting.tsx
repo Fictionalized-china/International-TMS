@@ -376,23 +376,11 @@ export default function WarehouseSorting({ loaderData, actionData }: Route.Compo
         </div>
       </section>
 
-      <section className="stats warehouse-sort-stats" id="sorting-queue">
-        <Link className={`warehouse-stat-card ${loaderData.filter === "open" ? "active" : ""}`} to={filterHref("open")}>
-          <span>清点中</span>
-          <strong>{loaderData.stats.open}</strong>
-          <small>需要扫描货物标签</small>
-        </Link>
-        <Link className={`warehouse-stat-card ${loaderData.filter === "staged" ? "active" : ""}`} to={filterHref("staged")}>
-          <span>待齐套复核</span>
-          <strong>{loaderData.stats.staged}</strong>
-          <small>已清点，待二次复核</small>
-        </Link>
-        <Link className={`warehouse-stat-card ${loaderData.filter === "verified" ? "active" : ""}`} to={filterHref("verified")}>
-          <span>今日已齐套</span>
-          <strong>{loaderData.stats.verifiedToday}</strong>
-          <small>已进入下一步</small>
-        </Link>
-      </section>
+      <section className="panel warehouse-sort-stats" id="sorting-queue"><div className="table-wrap"><table><thead><tr><th>队列</th><th>任务数</th><th>办理说明</th><th>操作</th></tr></thead><tbody>
+        <tr className={loaderData.filter==="open"?"active-row":""}><td><strong>清点中</strong></td><td>{loaderData.stats.open}</td><td>需要扫描货物标签</td><td><Link className="text-button" to={filterHref("open")}>查看</Link></td></tr>
+        <tr className={loaderData.filter==="staged"?"active-row":""}><td><strong>待齐套复核</strong></td><td>{loaderData.stats.staged}</td><td>已清点，待二次复核</td><td><Link className="text-button" to={filterHref("staged")}>查看</Link></td></tr>
+        <tr className={loaderData.filter==="verified"?"active-row":""}><td><strong>今日已齐套</strong></td><td>{loaderData.stats.verifiedToday}</td><td>已进入下一步</td><td><Link className="text-button" to={filterHref("verified")}>查看</Link></td></tr>
+      </tbody></table></div></section>
 
       <div className="sorting-batches">
         {active.map((batch) => {
@@ -413,13 +401,7 @@ export default function WarehouseSorting({ loaderData, actionData }: Route.Compo
                   </strong>
                 </div>
               </div>
-              <div className={`sorting-card-guide ${batch.status === "verified" ? "done" : ""}`}>
-                <b>{guide.badge}</b>
-                <div>
-                  <strong>{guide.title}</strong>
-                  <span>{guide.body}</span>
-                </div>
-              </div>
+              <div className="table-wrap sorting-guide-table"><table><thead><tr><th>当前步骤</th><th>操作要求</th><th>状态</th></tr></thead><tbody><tr className={batch.status==="verified"?"completed-row":""}><td><strong>{guide.title}</strong></td><td>{guide.body}</td><td><span className={`status-pill ${batch.status==="verified"?"success":""}`}>{guide.badge}</span></td></tr></tbody></table></div>
               {batch.status === "open" ? (
                 <div className="sorting-action">
                   <Form method="post" className="scan-inline">

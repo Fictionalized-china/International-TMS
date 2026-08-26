@@ -11,7 +11,7 @@ describe("order review completion", () => {
     })).toBe("in_progress");
   });
 
-  it("marks business complete without requiring all cash to be settled", () => {
+  it("keeps completion blocked while any cash balance remains", () => {
     const finance = [currencyFinance({
       currency: "usd",
       receivable: 1000,
@@ -24,7 +24,7 @@ describe("order review completion", () => {
       blockers: [],
       reviewGenerated: true,
       finance,
-    })).toBe("business_complete_unsettled");
+    })).toBe("in_progress");
     expect(finance[0]).toMatchObject({ margin: 300, marginRate: 30, receivableBalance: 400 });
   });
 

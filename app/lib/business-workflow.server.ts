@@ -79,7 +79,7 @@ export const defaultWorkflowSteps = [
   ["warehouse_receiving", "国内仓入库", "order", "manual.warehouse_receiving", 50, "admin"],
   ["port_loading", "出口准备与装车出库", "order", "manual.port_loading", 60, "admin"],
   ["outbound_transport", "出境运输", "order", "manual.outbound_transport", 70, "admin"],
-  ["overseas_pickup", "客户自提与签收", "order", "manual.overseas_pickup", 80, "admin"],
+  ["overseas_pickup", "客户扫码自提签收", "order", "manual.overseas_pickup", 80, "admin"],
   ["reconciliation", "对账结算", "order", "manual.reconciliation", 90, "admin"],
   ["completion_review", "完成复盘", "order", "manual.completion_review", 100, "admin"],
 ] as const;
@@ -178,6 +178,23 @@ async function ensureRoadWorkflowTemplates(organizationId: string) {
        WHERE organization_id=? AND code IN ('tms-road-pending','tms-default','tms-ftl-standard')
      ) AND step_key='review_assignment'`,
   ).bind(now, organizationId).run();
+
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE workflow_step_fields SET is_active=0,updated_at=?
+       WHERE workflow_id IN (
+         SELECT id FROM workflow_definitions
+         WHERE organization_id=? AND code IN ('tms-road-pending','tms-default','tms-ftl-standard')
+       ) AND field_key IN ('pickup_appointment_at','pickup_appointment_notes')`,
+    ).bind(now, organizationId),
+    env.DB.prepare(
+      `UPDATE workflow_instance_fields SET is_active=0
+       WHERE workflow_id IN (
+         SELECT id FROM workflow_definitions
+         WHERE organization_id=? AND code IN ('tms-road-pending','tms-default','tms-ftl-standard')
+       ) AND field_key IN ('pickup_appointment_at','pickup_appointment_notes')`,
+    ).bind(organizationId),
+  ]);
 
   const ltlWorkflowId = `${organizationId}:${workflowDefinitions.ltl.code}`;
   const ftlWorkflowId = `${organizationId}:${workflowDefinitions.ftl.code}`;

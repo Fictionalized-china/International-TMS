@@ -36,6 +36,7 @@ import {
   orderDocumentCanBeHandledInModule,
   orderDocumentPlacement,
   orderDocumentPlacements,
+  preDepartureDocumentTypeCodes,
   orderDocumentStages,
   orderDocumentsForModule,
   orderDocumentTypeCodes,
@@ -50,7 +51,6 @@ import {
   overseasOperationStatusLabels,
 } from "../lib/overseas-warehouse";
 import {
-  advanceOverseasOrder,
   automaticallyNotifyOverseasArrival,
   completeOverseasOrderDelivery,
   reconcileOverseasOrderDeliveryState,
@@ -65,7 +65,6 @@ import {
   generateOrderReview,
   loadOrderReview,
 } from "../lib/order-review.server";
-import { customsDeclarationGate } from "../lib/customs-declarations";
 import { syncCustomsModuleFromRecords } from "../lib/customs-status.server";
 import { Modal } from "../components/Modal";
 import {
@@ -143,7 +142,17 @@ type Member = {
   id: string;
   display_name: string;
   department_name: string | null;
+  position_name: string | null;
 };
+function canEditWorkflowDefinitionInUi(user: {
+  positionCode?: string | null;
+  roleCodes: string[];
+}) {
+  return (
+    ["BOSS", "DEVELOPER"].includes(user.positionCode ?? "") ||
+    user.roleCodes.some((code) => ["boss", "developer", "owner"].includes(code))
+  );
+}
 type ReferenceOption = { code: string; name: string };
 type Task = {
   id: string;
@@ -236,6 +245,21 @@ type Batch = {
   overseas_driver_name: string | null;
   overseas_driver_phone: string | null;
 };
+type WarehouseDispatchReport = {
+  id: string;
+  dispatch_number: string;
+  status: string;
+  vehicle_plate: string;
+  driver_name: string;
+  carrier_name: string | null;
+  notes: string | null;
+  item_count: number;
+  loaded_count: number;
+  created_at: string;
+  dispatched_at: string | null;
+  creator_name: string | null;
+  dispatcher_name: string | null;
+};
 type Shipment = {
   id: string;
   shipment_number: string;
@@ -298,6 +322,67 @@ type Warehouse = {
   name: string;
   warehouse_role: string | null;
 };
+type WarehouseCargoActual = {
+  cargo_item_id: string;
+  actual_record_count: number;
+  actual_packages: number | null;
+  actual_pieces: number | null;
+  actual_weight_kg: number | null;
+  actual_volume_cbm: number | null;
+  actual_dimensions: string | null;
+  actual_package_types: string | null;
+  receipt_numbers: string | null;
+  first_received_at: string | null;
+  last_received_at: string | null;
+};
+type WarehousePackageLabelRow = {
+  id: string;
+  cargo_item_id: string | null;
+  line_no: number | null;
+  cargo_name_cn: string | null;
+  package_number: string;
+  barcode: string;
+  pieces: number;
+  weight_kg: number | null;
+  volume_cbm: number | null;
+  length_cm: number | null;
+  width_cm: number | null;
+  height_cm: number | null;
+  status: string;
+  warehouse_name: string | null;
+  zone_name: string | null;
+  location_name: string | null;
+  location_code: string | null;
+  created_at: string;
+};
+function warehousePackageTypeLabel(value: string) {
+  const labels: Record<string, string> = {
+    carton: "纸箱",
+    pallet: "托盘",
+    wooden_case: "木箱",
+    bag: "袋装",
+    drum: "桶装",
+    bundle: "捆装",
+    other: "其他",
+    mixed: "混合包装",
+  };
+  return labels[value] || value;
+}
+function warehousePackageTypesLabel(value: string | null) {
+  if (!value) return "—";
+  return value.split(",").map((item) => warehousePackageTypeLabel(item)).join("、");
+}
+function warehousePackageStatusText(status: string) {
+  const labels: Record<string, string> = {
+    in_stock: "在库",
+    allocated: "已分配待出库",
+    dispatched: "已出库",
+    exception: "异常冻结",
+    picked_up: "已提货",
+    cancelled: "已作废",
+  };
+  return labels[status] || status;
+}
 type LoadingCandidate = {
   id: string;
   order_number: string;
@@ -583,7 +668,13 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     expenseDirectionControls,
   ] = await Promise.all([
     env.DB.prepare(
-      `SELECT u.id,u.display_name,d.name department_name FROM memberships m JOIN users u ON u.id=m.user_id LEFT JOIN departments d ON d.id=m.department_id WHERE m.organization_id=? AND m.status='active' AND u.status='active' ORDER BY d.sort_order,u.display_name`,
+      `SELECT u.id,u.display_name,d.name department_name,p.name position_name
+       FROM memberships m
+       JOIN users u ON u.id=m.user_id
+       LEFT JOIN departments d ON d.id=m.department_id
+       LEFT JOIN positions p ON p.id=m.position_id AND p.organization_id=m.organization_id
+       WHERE m.organization_id=? AND m.status='active' AND u.status='active'
+       ORDER BY p.sort_order,d.sort_order,u.display_name`,
     )
       .bind(current.organizationId)
       .all<Member>(),
@@ -834,8 +925,43 @@ export async function loader({ request, params }: Route.LoaderArgs) {
            WHERE p.organization_id=? AND s.order_id=?
            GROUP BY p.status`,
         ).bind(current.organizationId,orderId).all<{status:string;package_count:number;move_count:number}>(),
+        env.DB.prepare(
+          `SELECT i.id cargo_item_id,
+                  COUNT(r.id) actual_record_count,
+                  SUM(CASE WHEN r.id IS NOT NULL THEN ri.actual_packages END) actual_packages,
+                  SUM(CASE WHEN r.id IS NOT NULL THEN ri.actual_pieces END) actual_pieces,
+                  SUM(CASE WHEN r.id IS NOT NULL THEN ri.actual_weight_kg END) actual_weight_kg,
+                  SUM(CASE WHEN r.id IS NOT NULL THEN ri.actual_volume_cbm END) actual_volume_cbm,
+                  GROUP_CONCAT(DISTINCT CASE WHEN r.id IS NOT NULL THEN printf('%g × %g × %g',ri.actual_length_cm,ri.actual_width_cm,ri.actual_height_cm) END) actual_dimensions,
+                  GROUP_CONCAT(DISTINCT CASE WHEN r.id IS NOT NULL THEN r.package_type END) actual_package_types,
+                  GROUP_CONCAT(DISTINCT CASE WHEN r.id IS NOT NULL THEN r.receipt_number END) receipt_numbers,
+                  MIN(CASE WHEN r.id IS NOT NULL THEN r.received_at END) first_received_at,
+                  MAX(CASE WHEN r.id IS NOT NULL THEN r.received_at END) last_received_at
+             FROM order_cargo_items i
+             LEFT JOIN warehouse_receipt_items ri
+               ON ri.cargo_item_id=i.id AND ri.organization_id=i.organization_id
+             LEFT JOIN warehouse_receipts r
+               ON r.id=ri.receipt_id AND r.organization_id=ri.organization_id
+              AND r.status='completed'
+            WHERE i.organization_id=? AND i.order_id=?
+            GROUP BY i.id
+            ORDER BY i.line_no,i.id`,
+        ).bind(current.organizationId,orderId).all<WarehouseCargoActual>(),
+        env.DB.prepare(
+          `SELECT p.id,p.cargo_item_id,i.line_no,i.cargo_name_cn,p.package_number,p.barcode,
+                  p.pieces,p.weight_kg,p.volume_cbm,p.length_cm,p.width_cm,p.height_cm,p.status,
+                  w.name warehouse_name,z.name zone_name,l.name location_name,l.code location_code,p.created_at
+             FROM warehouse_packages p
+             JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id
+             LEFT JOIN order_cargo_items i ON i.id=p.cargo_item_id AND i.organization_id=p.organization_id
+             LEFT JOIN warehouses w ON w.id=p.warehouse_id AND w.organization_id=p.organization_id
+             LEFT JOIN warehouse_locations l ON l.id=p.location_id AND l.organization_id=p.organization_id
+             LEFT JOIN warehouse_zones z ON z.id=l.zone_id AND z.organization_id=p.organization_id
+            WHERE p.organization_id=? AND s.order_id=?
+            ORDER BY COALESCE(i.line_no,9999),p.created_at,p.package_number,p.id`,
+        ).bind(current.organizationId,orderId).all<WarehousePackageLabelRow>(),
         checkOrderLoadPlan(current.organizationId, orderId),
-      ]).then(([operation, inboundTimes, packageStatuses, loadPlan]) => ({
+      ]).then(([operation, inboundTimes, packageStatuses, cargoActuals, packageLabels, loadPlan]) => ({
         received:Boolean(operation?.received),
         inboundReady:Boolean(operation?.inbound_ready),
         loadPlanReady:loadPlan.ready,
@@ -847,26 +973,49 @@ export async function loader({ request, params }: Route.LoaderArgs) {
         lastInboundAt:inboundTimes?.last_inbound_at ?? null,
         receiptCount:inboundTimes?.receipt_count ?? 0,
         packageStatuses:packageStatuses.results,
+        cargoActuals:cargoActuals.results,
+        packageLabels:packageLabels.results,
       }))
     : null;
   const warehouseActuals = moduleCode === "loading"
     ? await env.DB.prepare(
-        `SELECT COUNT(DISTINCT r.id) receipt_count,
-                COALESCE(SUM(r.total_packages),0) actual_packages,
-                COALESCE(SUM(r.total_pieces),0) actual_pieces,
-                COALESCE(SUM(r.total_weight_kg),0) actual_weight_kg,
-                COALESCE(SUM(r.total_volume_cbm),0) actual_volume_cbm,
+        `SELECT
+                (SELECT COUNT(DISTINCT r.id)
+                   FROM warehouse_receipts r
+                   JOIN shipments s ON s.id=r.shipment_id
+                  WHERE r.organization_id=? AND s.order_id=? AND r.status='completed') receipt_count,
+                (SELECT COUNT(*)
+                   FROM warehouse_packages p
+                   JOIN shipments s ON s.id=p.shipment_id
+                  WHERE p.organization_id=? AND s.order_id=?) actual_packages,
+                COALESCE((SELECT SUM(p.pieces)
+                   FROM warehouse_packages p
+                   JOIN shipments s ON s.id=p.shipment_id
+                  WHERE p.organization_id=? AND s.order_id=?),0) actual_pieces,
+                COALESCE((SELECT SUM(p.weight_kg)
+                   FROM warehouse_packages p
+                   JOIN shipments s ON s.id=p.shipment_id
+                  WHERE p.organization_id=? AND s.order_id=?),0) actual_weight_kg,
+                COALESCE((SELECT SUM(p.volume_cbm)
+                   FROM warehouse_packages p
+                   JOIN shipments s ON s.id=p.shipment_id
+                  WHERE p.organization_id=? AND s.order_id=?),0) actual_volume_cbm,
                 EXISTS(
                   SELECT 1 FROM warehouse_receipts rx
                   JOIN shipments sx ON sx.id=rx.shipment_id
                   WHERE sx.order_id=? AND rx.organization_id=?
                     AND rx.status='completed' AND rx.cargo_complete=1
                 ) counting_completed
-         FROM warehouse_receipts r
-         JOIN shipments s ON s.id=r.shipment_id
-         WHERE r.organization_id=? AND s.order_id=? AND r.status='completed'`,
+        `,
       )
-        .bind(orderId, current.organizationId, current.organizationId, orderId)
+        .bind(
+          current.organizationId, orderId,
+          current.organizationId, orderId,
+          current.organizationId, orderId,
+          current.organizationId, orderId,
+          current.organizationId, orderId,
+          orderId, current.organizationId,
+        )
         .first<{
           receipt_count: number;
           actual_packages: number;
@@ -876,6 +1025,25 @@ export async function loader({ request, params }: Route.LoaderArgs) {
           counting_completed: number;
         }>()
     : null;
+  const warehouseDispatches = moduleCode === "loading"
+    ? await env.DB.prepare(
+        `SELECT d.id,d.dispatch_number,d.status,d.vehicle_plate,d.driver_name,d.carrier_name,d.notes,
+                COUNT(DISTINCT di.id) item_count,
+                COUNT(DISTINCT CASE WHEN di.status='loaded' THEN di.id END) loaded_count,
+                d.created_at,d.dispatched_at,creator.display_name creator_name,dispatcher.display_name dispatcher_name
+           FROM warehouse_dispatches d
+           JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id AND di.organization_id=d.organization_id
+           JOIN warehouse_packages p ON p.id=di.package_id AND p.organization_id=di.organization_id
+           JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id
+           LEFT JOIN users creator ON creator.id=d.created_by_user_id
+           LEFT JOIN users dispatcher ON dispatcher.id=d.dispatched_by_user_id
+          WHERE d.organization_id=? AND s.order_id=? AND d.status!='cancelled'
+          GROUP BY d.id
+          ORDER BY d.created_at DESC`,
+      )
+        .bind(current.organizationId, orderId)
+        .all<WarehouseDispatchReport>()
+    : { results: [] as WarehouseDispatchReport[] };
   const loadingReferences = moduleCode === "loading"
     ? await Promise.all(
         ["border_port", "customs_place", "transit_place", "route"].map((category) =>
@@ -948,6 +1116,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     expenseDirectionControls: expenseDirectionControls.results,
     warehouseFlow,
     warehouseActuals,
+    warehouseDispatches: warehouseDispatches.results,
     loadingReferences,
     orderReview,
     trackingDepartureGate,
@@ -990,15 +1159,16 @@ export async function action({ request, params }: Route.ActionArgs) {
   const isConsignmentDocumentReviewAction =
     ["consignment", "documents"].includes(moduleCode) &&
     intent === "document_review";
+  const workflowAdministrator = canEditWorkflowDefinitionInUi(current);
   const isAssignedConsignmentApprover = isAssignedOrderApprover({
     status: order.status,
     currentAssigneeUserId: order.current_assignee_user_id,
     currentUserId: current.userId,
-  });
+  }) || (workflowAdministrator && order.status === "submitted");
   const canApproveConsignment =
     (isConsignmentApprovalAction || isConsignmentDocumentReviewAction) &&
     isAssignedConsignmentApprover;
-  if (!canManageOrderModule(current, moduleCode) && !canApproveConsignment) {
+  if (!canManageOrderModule(current, moduleCode) && !canApproveConsignment && !workflowAdministrator) {
     return { formError: "当前岗位可以查看本模块，但没有提交业务操作的权限" };
   }
   const moduleWorkflowFields = await loadOrderModuleWorkflowFields(
@@ -1026,6 +1196,8 @@ export async function action({ request, params }: Route.ActionArgs) {
     const requiredPlacements = orderDocumentPlacements.filter(
       (placement) =>
         placement.moduleCode === sourceModule &&
+        (sourceModule !== "customs" ||
+          preDepartureDocumentTypeCodes.has(placement.documentCode)) &&
         fieldPolicy(
           placement.fieldKey,
           placement.requiredByDefault,
@@ -1069,6 +1241,10 @@ export async function action({ request, params }: Route.ActionArgs) {
     return { formError: access.reason || "当前订单状态不允许办理该模块" };
   if (intent === "workflow_action") {
     const actionCode = valueOf(form, "actionCode");
+    if (moduleCode === "consignment" && actionCode === "approve") {
+      const missingDocuments = await missingRequiredDocumentUploads("consignment");
+      if (missingDocuments.length) return { formError: `请先审核通过：${missingDocuments.join("、")}` };
+    }
     const result = await runOrderWorkflowAction({
       request,
       organizationId: current.organizationId,
@@ -1077,15 +1253,17 @@ export async function action({ request, params }: Route.ActionArgs) {
       actionCode,
       assigneeUserId: valueOf(form, "assigneeUserId") || null,
       notes: valueOf(form, "notes"),
+      bypassAssigneeRestriction: workflowAdministrator,
     });
     if (
       !("formError" in result) &&
       moduleCode === "consignment" &&
       actionCode === "approve"
     ) {
-      return redirect(
-        `/admin/orders/${orderId}/modules/assignment#module-business-data`,
-      );
+      return redirect(`/admin/orders/${orderId}`);
+    }
+    if (!("formError" in result) && moduleCode === "consignment" && actionCode === "submit") {
+      return redirect(`/admin/orders/${orderId}`);
     }
     return result;
   }
@@ -1450,6 +1628,89 @@ export async function action({ request, params }: Route.ActionArgs) {
       });
       return { success: `已批量分配 ${assignable.length} 个模块，待确认派单后进度推进。` };
     }
+    if (intent === "assign_manifest_confirm" && moduleCode === "assignment") {
+      if (order.status !== "confirmed")
+        return { formError: "订单当前状态不是“待派单”，无法确认派单" };
+      const modules = await listOrderModules(current.organizationId, orderId);
+      const dispatchModuleCodes = new Set(["transport", "tracking", "costs"]);
+      const assignable = modules.filter(
+        (item) =>
+          item.enabled === 1 &&
+          dispatchModuleCodes.has(item.module_code) &&
+          !["completed", "not_applicable"].includes(item.status),
+      );
+      const selections = assignable.map((item) => ({
+        module: item,
+        assigneeUserId: valueOf(form, `moduleAssignee_${item.module_code}`),
+      }));
+      const missing = selections.filter((item) => !item.assigneeUserId);
+      if (missing.length)
+        return {
+          formError: `请为以下业务模组选择具体负责人：${missing
+            .map((item) => item.module.module_name)
+            .join("、")}`,
+        };
+      const activeMembers = await env.DB.prepare(
+        "SELECT m.user_id id FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=? AND m.status='active' AND u.status='active'",
+      )
+        .bind(current.organizationId)
+        .all<{ id: string }>();
+      const activeMemberIds = new Set(activeMembers.results.map((item) => item.id));
+      const invalid = selections.find((item) => !activeMemberIds.has(item.assigneeUserId));
+      if (invalid)
+        return { formError: `${invalid.module.module_name}选择的负责人不是当前组织有效成员` };
+      const mainAssigneeUserId = valueOf(form, "assigneeUserId");
+      if (!mainAssigneeUserId || !activeMemberIds.has(mainAssigneeUserId))
+        return { formError: "请选择有效的主操作员" };
+
+      for (const selection of selections) {
+        await assignOrderModule({
+          organizationId: current.organizationId,
+          orderId,
+          moduleCode: selection.module.module_code,
+          assigneeUserId: selection.assigneeUserId,
+          actorUserId: current.userId,
+          dueAt: null,
+          notes: valueOf(form, "notes"),
+        });
+      }
+      const now = new Date().toISOString();
+      await env.DB.batch([
+        env.DB.prepare(
+          "UPDATE order_module_instances SET status='completed',current_step_code='assigned',current_step_name='分配完成',progress_percent=100,assignee_user_id=?,started_at=COALESCE(started_at,?),completed_at=COALESCE(completed_at,?),blocking_reason=NULL,updated_at=? WHERE organization_id=? AND order_id=? AND module_code='assignment' AND enabled=1",
+        ).bind(mainAssigneeUserId, now, now, now, current.organizationId, orderId),
+        env.DB.prepare(
+          "UPDATE order_tasks SET status='completed',completed_at=?,updated_at=? WHERE organization_id=? AND order_id=? AND module_code='assignment' AND status IN ('pending','in_progress')",
+        ).bind(now, now, current.organizationId, orderId),
+      ]);
+      await writeAudit({
+        request,
+        action: "order.module.assignment.manifest_confirm",
+        resourceType: "transport_order",
+        resourceId: orderId,
+        organizationId: current.organizationId,
+        actorUserId: current.userId,
+        metadata: {
+          mainAssigneeUserId,
+          assignments: selections.map((item) => ({
+            moduleCode: item.module.module_code,
+            assigneeUserId: item.assigneeUserId,
+          })),
+        },
+      });
+      const workflowResult = await runOrderWorkflowAction({
+        request,
+        organizationId: current.organizationId,
+        actorUserId: current.userId,
+        orderId,
+        actionCode: "dispatch",
+        assigneeUserId: mainAssigneeUserId,
+        notes: valueOf(form, "notes"),
+        bypassAssigneeRestriction: canEditWorkflowDefinitionInUi(current),
+      });
+      if (!("formError" in workflowResult)) return redirect(`/admin/orders/${orderId}`);
+      return workflowResult;
+    }
     if (intent === "confirm_dispatch" && moduleCode === "assignment") {
       if (order.status !== "confirmed")
         return { formError: "订单当前状态不是“待派单”，无法确认派单" };
@@ -1524,39 +1785,6 @@ export async function action({ request, params }: Route.ActionArgs) {
     }
     if (intent === "overseas_arrival" && moduleCode === "overseas_warehouse") {
       return { formError: "境外到仓不能在运营后台手工确认，请进入订单指定的境外目的仓扫码入库并完成清点" };
-    }
-    if (intent === "overseas_advance" && moduleCode === "overseas_warehouse") {
-      const operationAction = valueOf(form, "operationAction");
-      if (operationAction !== "appointment")
-        return { formError: "客户自提出库只能由境外仓扫描货物标签完成" };
-      const occurredAt = valueOf(form, "occurredAt") || new Date().toISOString();
-      const operationValues = [
-        ["pickup_appointment_at", valueOf(form, "occurredAt")],
-        ["pickup_appointment_notes", valueOf(form, "notes")],
-      ];
-      const missingOperationFields = operationValues
-        .filter(([fieldKey, value]) => requiredFieldMissing(fieldKey, value))
-        .map(([fieldKey]) => fieldPolicy(fieldKey).label || fieldKey);
-      if (missingOperationFields.length)
-        return { formError: `请填写当前模板要求的字段：${missingOperationFields.join("、")}` };
-      const result = await advanceOverseasOrder({
-        organizationId: current.organizationId,
-        orderId,
-        actorUserId: current.userId,
-        action: operationAction,
-        occurredAt,
-        notes: valueOf(form, "notes"),
-      });
-      await writeAudit({
-        request,
-        action: `overseas.order.${operationAction}`,
-        resourceType: "transport_order",
-        resourceId: orderId,
-        organizationId: current.organizationId,
-        actorUserId: current.userId,
-        metadata: { occurredAt, nextStatus: result.nextStatus },
-      });
-      return { success: `${result.stepName}已登记` };
     }
     if (intent === "advance") {
       await advanceOrderModule({
@@ -1723,7 +1951,7 @@ export async function action({ request, params }: Route.ActionArgs) {
         actorUserId: current.userId,
         metadata: { declarationId, declarationNumber, clearanceStage, declarationStatus, isDeleted },
       });
-      return { success: isDeleted ? "申报单已标记删单，门禁已重新计算" : "申报单已保存，门禁已重新计算" };
+      return { success: isDeleted ? "申报单已标记删单" : declarationStatus === "released" ? "申报单已确认放行" : "申报单已保存" };
     }
     if (intent === "customs_save") {
       if (moduleCode !== "customs") return { formError: "只能在报关模块登记" };
@@ -2693,7 +2921,7 @@ export async function action({ request, params }: Route.ActionArgs) {
       }
       return {
         success: deliveryCompleted
-            ? "签收单已审核通过；运输完成，订单已进入费用结算"
+            ? "签收单已审核通过；自提签收记录已归档"
             : "文件审核状态已更新",
         documentReviewSignal: `${attachmentId}:${now}`,
       };
@@ -3334,14 +3562,14 @@ export default function OrderModulePage({
   const { order, module, definition } = loaderData,
     busy = useNavigation().state !== "idle",
     manage =
-      canManageOrderModule(loaderData.current, definition.code) &&
+      (canManageOrderModule(loaderData.current, definition.code) || canEditWorkflowDefinitionInUi(loaderData.current)) &&
       loaderData.access.canEdit,
     canApproveConsignment =
       isAssignedOrderApprover({
         status: order.status,
         currentAssigneeUserId: order.current_assignee_user_id,
         currentUserId: loaderData.current.userId,
-      });
+      }) || (order.status === "submitted" && canEditWorkflowDefinitionInUi(loaderData.current));
   const actionMessage =
     actionData && "formError" in actionData
       ? actionData.formError
@@ -3558,19 +3786,28 @@ export function EmbeddedOrderModule({
   data,
   busy,
   actionUrl,
+  consignmentSection = "info",
+  hideConsignmentActionBar = false,
+  approvalMode = false,
+  reviewCloseSignal,
 }: {
   data: Route.ComponentProps["loaderData"];
   busy: boolean;
   actionUrl: string;
+  consignmentSection?: "info" | "files" | "costs";
+  hideConsignmentActionBar?: boolean;
+  approvalMode?: boolean;
+  reviewCloseSignal?: unknown;
 }) {
   const { order, definition } = data;
   const manage =
-    canManageOrderModule(data.current, definition.code) && data.access.canEdit;
+    (canManageOrderModule(data.current, definition.code) || canEditWorkflowDefinitionInUi(data.current)) && data.access.canEdit;
   const canApproveConsignment = isAssignedOrderApprover({
     status: order.status,
     currentAssigneeUserId: order.current_assignee_user_id,
     currentUserId: data.current.userId,
-  });
+  }) || (order.status === "submitted" && canEditWorkflowDefinitionInUi(data.current));
+  const compactApproval = definition.code === "consignment" && approvalMode && order.status === "submitted";
 
   if (!data.workflowStageAccess.available && !canApproveConsignment) {
     return (
@@ -3590,22 +3827,39 @@ export function EmbeddedOrderModule({
             <span>{data.access.reason}</span>
           </div>
         )}
-        {definition.code !== "loading" && definition.code !== "overseas_warehouse" && (
+        {!compactApproval && definition.code !== "loading" &&
+          definition.code !== "overseas_warehouse" &&
+          (definition.code !== "consignment" ||
+            !hideConsignmentActionBar ||
+            consignmentSection === "files") && (
           <ModuleSourceDocuments
             code={definition.code}
             data={data}
             manage={manage}
             canApproveConsignment={canApproveConsignment}
             busy={busy}
+            reviewCloseSignal={reviewCloseSignal}
           />
         )}
-        <ModuleBusinessData
-          code={definition.code}
-          data={data}
-          manage={manage}
-          canApproveConsignment={canApproveConsignment}
-          busy={busy}
-        />
+        {compactApproval ? (
+          <OrderApprovalReview
+            data={data}
+            manage={manage}
+            canApproveConsignment={canApproveConsignment}
+            busy={busy}
+          />
+        ) : (
+          <ModuleBusinessData
+            code={definition.code}
+            data={data}
+            manage={manage}
+            canApproveConsignment={canApproveConsignment}
+            busy={busy}
+            reviewCloseSignal={reviewCloseSignal}
+            consignmentSection={definition.code === "consignment" && hideConsignmentActionBar ? consignmentSection : undefined}
+            showConsignmentActionBar={!hideConsignmentActionBar}
+          />
+        )}
         {!(["consignment", "transport", "loading"] as OrderModuleCode[]).includes(definition.code) && (
           <WorkflowFieldChecklist
             fields={data.workflowFields.filter(
@@ -3621,6 +3875,63 @@ export function EmbeddedOrderModule({
       </div>
     </embeddedModuleFormAction.Provider>
   );
+}
+
+export function ConsignmentReviewActionBar({
+  data,
+  busy,
+}: {
+  data: Route.ComponentProps["loaderData"];
+  busy: boolean;
+}) {
+  const manage =
+    (canManageOrderModule(data.current, "consignment") || canEditWorkflowDefinitionInUi(data.current)) && data.access.canEdit;
+  const canApproveConsignment = isAssignedOrderApprover({
+    status: data.order.status,
+    currentAssigneeUserId: data.order.current_assignee_user_id,
+    currentUserId: data.current.userId,
+  }) || (data.order.status === "submitted" && canEditWorkflowDefinitionInUi(data.current));
+
+  if (manage && data.order.status === "draft") {
+    return (
+      <Form method="post" className="consignment-submit-bar">
+        <div>
+          <strong>委托资料复核完成后，直接提交审批</strong>
+          <span>系统只检查当前有效必填项；选填项和已停用的旧字段不会阻断。</span>
+        </div>
+        <div>
+          <input type="hidden" name="intent" value="workflow_action" />
+          <input type="hidden" name="actionCode" value="submit" />
+          <select name="assigneeUserId" required defaultValue="">
+            <option value="">选择审批人</option>
+            {data.members.map((member) => (
+              <option key={member.id} value={member.id}>
+                {member.display_name}
+                {member.department_name ? ` · ${member.department_name}` : ""}
+              </option>
+            ))}
+          </select>
+          <button className="primary" disabled={busy}>提交审批</button>
+        </div>
+      </Form>
+    );
+  }
+  if (canApproveConsignment) {
+    return (
+      <Form method="post" className="consignment-submit-bar">
+        <div>
+          <strong>委托资料审批</strong>
+          <span>请核对委托信息、货物信息、订单费用和委托书后审批。</span>
+        </div>
+        <div>
+          <input type="hidden" name="intent" value="workflow_action" />
+          <input type="hidden" name="actionCode" value="approve" />
+          <button className="primary" disabled={busy || !data.cargo.length}>审批通过</button>
+        </div>
+      </Form>
+    );
+  }
+  return null;
 }
 
 function ModuleNextGuidance({
@@ -3749,44 +4060,29 @@ function TrackingDepartureGate({
   orderId: string;
   reasons: string[];
 }) {
-  const targets = Array.from(
-    new Map(
-      reasons.map((reason) => {
-        const target = trackingGateTarget(orderId, reason);
-        return [target.key, target];
-      }),
-    ).values(),
-  );
   return (
-    <section className="tracking-gate-panel">
-      <div className="tracking-gate-copy">
-        <span>出境前置条件未完成</span>
-        <h3>请先处理下方阻断，再更新运踪</h3>
-        <p>
-          运踪会同步给后续执行和客户可见轨迹；未完成装车出库、资料或报关放行前，不能登记出境后的运输节点。
-        </p>
+    <section className="tracking-gate-table" aria-label="出境前置条件">
+      <div className="table-section-heading danger">
+        <div>
+          <strong>出境前置条件未完成</strong>
+          <span>处理完表内阻断后才能登记出境后的运输节点。</span>
+        </div>
       </div>
-      <div className="tracking-gate-reasons">
-        {reasons.map((reason) => {
-          const target = trackingGateTarget(orderId, reason);
-          return (
-            <article key={reason}>
-              <strong>{reason}</strong>
-              <span>{target.hint}</span>
-            </article>
-          );
-        })}
-      </div>
-      <div className="tracking-gate-actions">
-        {targets.map((target, index) => (
-          <Link
-            key={target.key}
-            className={index === 0 ? "primary" : "secondary"}
-            to={target.href}
-          >
-            {target.title}
-          </Link>
-        ))}
+      <div className="table-wrap module-record-table">
+        <table>
+          <thead><tr><th>门禁状态</th><th>阻断条件</th><th>处理说明</th><th>操作</th></tr></thead>
+          <tbody>
+            {reasons.map((reason) => {
+              const target = trackingGateTarget(orderId, reason);
+              return <tr key={reason}>
+                <td><span className="status-pill danger">未通过</span></td>
+                <td><strong>{reason}</strong></td>
+                <td>{target.hint}</td>
+                <td><Link className="primary" to={target.href}>{target.title}</Link></td>
+              </tr>;
+            })}
+          </tbody>
+        </table>
       </div>
     </section>
   );
@@ -3957,11 +4253,15 @@ function WorkflowInfo({
 }) {
   const policy = workflowFieldPolicy(fields, fieldKey);
   if (!policy.visible) return null;
+  const configured = fields.find((field) => field.fieldKey === fieldKey);
+  const present = configured ? configured.present : Boolean(value.trim());
+  const state = present ? (policy.required ? "filled" : undefined) : policy.required ? "required-missing" : "optional-empty";
   return (
     <Info
       label={`${policy.label || label}${policy.required ? " *" : ""}`}
       value={value}
-      className={className}
+      className={[className, "workflow-info-cell", state].filter(Boolean).join(" ")}
+      state={state}
     />
   );
 }
@@ -3992,6 +4292,12 @@ function DocumentReviewPreview({ attachment }: { attachment: Attachment }) {
       <a className="secondary" href={attachment.data_url} download={attachment.file_name}>下载原文件</a>
     </footer>
   </section>;
+}
+
+function documentReviewCloseSignal(signal: unknown, attachmentId: string) {
+  return typeof signal === "string" && signal.startsWith(`${attachmentId}:`)
+    ? signal
+    : undefined;
 }
 
 function ModuleSourceDocuments({
@@ -4050,6 +4356,24 @@ function ModuleSourceDocuments({
           const ready = files.some((file) =>
             ["approved", "archived"].includes(file.review_status || ""),
           );
+          const pendingReview = latest?.review_status === "pending";
+          const rejected = latest?.review_status === "rejected";
+          const documentState = ready
+            ? "filled"
+            : pendingReview
+              ? "optional-empty"
+              : rejected || placement.policy.required
+                ? "required-missing"
+                : "optional-empty";
+          const documentStateLabel = ready
+            ? "已填"
+            : pendingReview
+              ? "已上传待审核"
+              : rejected
+                ? "审核退回"
+                : placement.policy.required
+                  ? "必填但未填"
+                  : "未填";
           const lockedAfterApproval =
             placement.documentCode === "consignment_letter" &&
             ["approved", "archived"].includes(latest?.review_status || "");
@@ -4061,7 +4385,7 @@ function ModuleSourceDocuments({
           return (
             <article
               key={placement.documentCode}
-              className={`source-document-row ${ready ? "ready" : ""}`}
+              className={`source-document-row ${ready && placement.policy.required ? "ready" : pendingReview ? "optional-empty" : rejected || placement.policy.required ? "required-missing" : "optional-empty"}`}
             >
               <div className="source-document-name">
                 <strong>
@@ -4073,10 +4397,10 @@ function ModuleSourceDocuments({
                 <small>{placement.document.hint}</small>
               </div>
               <div className="source-document-current">
-                <span className="status-pill">
-                  {latest ? documentReviewLabel(latest.review_status) : "待上传"}
+                <span className={`field-state ${documentState}`}>
+                  {documentStateLabel}
                 </span>
-                <small title={latest?.file_name}>{latest?.file_name || "尚无文件"}</small>
+                <small title={latest?.file_name}>{latest ? `${latest.file_name} · ${documentReviewLabel(latest.review_status)}` : "尚无文件"}</small>
               </div>
               {latest ? <div className="row-actions source-document-actions">
                 <a className="text-button" href={latest.data_url} target="_blank" rel="noreferrer">查看</a>
@@ -4099,7 +4423,7 @@ function ModuleSourceDocuments({
                     </Form>
                   </div>
                 </Modal> : code !== "loading" ? <button type="button" className="text-button" disabled title={lockedAfterApproval ? "委托书已审核通过，不可编辑" : undefined}>编辑</button> : null}
-                {canReviewDocument && !lockedAfterApproval ? <Modal title={`审核文件 · ${placement.document.name}`} triggerLabel="审核" triggerClassName="text-button" size="wide" closeSignal={reviewCloseSignal}>
+                {canReviewDocument && !lockedAfterApproval ? <Modal key={`review:${latest.id}:${documentReviewCloseSignal(reviewCloseSignal, latest.id) ?? "idle"}`} title={`审核文件 · ${placement.document.name}`} triggerLabel="审核" triggerClassName="text-button" size="wide" closeSignal={documentReviewCloseSignal(reviewCloseSignal, latest.id)}>
                   <Form method="post" className="stack">
                     <input type="hidden" name="intent" value="document_review" />
                     <input type="hidden" name="attachmentId" value={latest.id} />
@@ -4126,6 +4450,97 @@ function ModuleSourceDocuments({
   );
 }
 
+function AssignmentManifestWorkbench({
+  modules,
+  members,
+  mainAssigneeUserId,
+  canSubmit,
+  busy,
+}: {
+  modules: Route.ComponentProps["loaderData"]["modules"];
+  members: Member[];
+  mainAssigneeUserId: string;
+  canSubmit: boolean;
+  busy: boolean;
+}) {
+  const moduleLabels: Record<string, string> = {
+    transport: "国内运输",
+    tracking: "出境运输",
+    costs: "对账结算",
+  };
+  const memberById = useMemo(() => new Map(members.map((member) => [member.id, member])), [members]);
+  const positions = useMemo(
+    () => Array.from(new Set(members.map((member) => member.position_name || "未设置岗位"))),
+    [members],
+  );
+  const [roles, setRoles] = useState<Record<string, string>>(() =>
+    Object.fromEntries(
+      modules.map((module) => [
+        module.module_code,
+        module.assignee_user_id
+          ? memberById.get(module.assignee_user_id)?.position_name || "未设置岗位"
+          : "",
+      ]),
+    ),
+  );
+  const [assignees, setAssignees] = useState<Record<string, string>>(() =>
+    Object.fromEntries(modules.map((module) => [module.module_code, module.assignee_user_id || ""])),
+  );
+  const [mainAssignee, setMainAssignee] = useState(mainAssigneeUserId);
+
+  return (
+    <Form method="post" className="assignment-manifest">
+      <input type="hidden" name="intent" value="assign_manifest_confirm" />
+      <div className="assignment-manifest-gate">
+        <span>!</span>
+        <p>本节点必须由主管把每个业务模组分配到具体人员；确认后才进入国内运输。</p>
+      </div>
+      <section className="assignment-manifest-section">
+        <header><strong>业务模组负责人</strong><span>按业务顺序流转到具体人员</span></header>
+        <div className="table-wrap">
+          <table className="assignment-manifest-table">
+            <thead><tr><th>业务模组</th><th>负责岗位</th><th>具体负责人</th><th>顺序</th><th>状态</th></tr></thead>
+            <tbody>
+              {modules.map((module, index) => {
+                const role = roles[module.module_code] || "";
+                const availableMembers = role
+                  ? members.filter((member) => (member.position_name || "未设置岗位") === role)
+                  : members;
+                return <tr key={module.id}>
+                  <td><strong>{moduleLabels[module.module_code] || module.module_name}</strong><small>{module.current_step_name || "未开始"}</small></td>
+                  <td><select className="control filled" value={role} onChange={(event) => {
+                    const nextRole = event.currentTarget.value;
+                    setRoles((current) => ({ ...current, [module.module_code]: nextRole }));
+                    setAssignees((current) => ({ ...current, [module.module_code]: "" }));
+                  }} required><option value="">选择负责岗位</option>{positions.map((position) => <option key={position} value={position}>{position}</option>)}</select></td>
+                  <td><select className="control editing" name={`moduleAssignee_${module.module_code}`} value={assignees[module.module_code] || ""} onChange={(event) => {
+                    const nextAssignee = event.currentTarget.value;
+                    setAssignees((current) => ({ ...current, [module.module_code]: nextAssignee }));
+                  }} required><option value="">选择具体负责人</option>{availableMembers.map((member) => <option key={member.id} value={member.id}>{member.display_name}</option>)}</select></td>
+                  <td>{String(index + 1).padStart(2, "0")}</td>
+                  <td><span className={`assignment-row-status${assignees[module.module_code] ? " ready" : ""}`}>{assignees[module.module_code] ? "待确认" : "待分配"}</span></td>
+                </tr>;
+              })}
+              {!modules.length && <tr><td colSpan={5} className="empty-state">当前没有需要分配的业务模组</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section className="assignment-manifest-section assignment-manifest-extra">
+        <header><strong>派单补充</strong><span>办理期限第一期不显示</span></header>
+        <div className="assignment-manifest-fields">
+          <label><span>主操作员 <b>*</b></span><select className="control editing" name="assigneeUserId" value={mainAssignee} onChange={(event) => setMainAssignee(event.currentTarget.value)} required><option value="">选择主操作员</option>{members.map((member) => <option key={member.id} value={member.id}>{member.display_name}{member.position_name ? ` · ${member.position_name}` : ""}</option>)}</select></label>
+          <label className="wide"><span>派单说明</span><textarea className="control filled" name="notes" rows={2} placeholder="如需特别说明可填写" /></label>
+        </div>
+      </section>
+      <footer className="assignment-manifest-footer">
+        <div><strong>确认派单并进入国内运输</strong><span>系统保存全部负责人后推进订单，不再需要逐行点击保存。</span></div>
+        <button className="primary" disabled={busy || !canSubmit || !modules.length}>确认派单并进入国内运输 →</button>
+      </footer>
+    </Form>
+  );
+}
+
 function ModuleBusinessData({
   code,
   data,
@@ -4133,6 +4548,8 @@ function ModuleBusinessData({
   canApproveConsignment,
   busy,
   reviewCloseSignal,
+  consignmentSection,
+  showConsignmentActionBar = true,
 }: {
   code: OrderModuleCode;
   data: Route.ComponentProps["loaderData"];
@@ -4140,6 +4557,8 @@ function ModuleBusinessData({
   canApproveConsignment: boolean;
   busy: boolean;
   reviewCloseSignal?: unknown;
+  consignmentSection?: "info" | "files" | "costs";
+  showConsignmentActionBar?: boolean;
 }) {
   const activeBatch = data.batches.find((item) => item.status !== "cancelled");
   const [domesticCarrierId, setDomesticCarrierId] = useState("");
@@ -4151,44 +4570,16 @@ function ModuleBusinessData({
   if (code === "cargo")
     return (
       <div className="module-business-stack">
-        <div className="module-summary-cards">
-          <article>
-            <span>货物明细</span>
-            <strong>{data.cargo.length}</strong>
-            <small>最小货品记录</small>
-          </article>
-          <article>
-            <span>包装数</span>
-            <strong>
-              {data.cargo.reduce((sum, x) => sum + x.package_count, 0)}
-            </strong>
-            <small>箱/托/件</small>
-          </article>
-          <article>
-            <span>总毛重</span>
-            <strong>
-              {data.cargo
-                .reduce(
-                  (sum, x) =>
-                    sum + x.package_count * x.gross_weight_per_package_kg,
-                  0,
-                )
-                .toFixed(3)}
-            </strong>
-            <small>KG</small>
-          </article>
-          <article>
-            <span>总体积</span>
-            <strong>
-              {data.cargo
-                .reduce(
-                  (sum, x) => sum + x.package_count * x.volume_per_package_cbm,
-                  0,
-                )
-                .toFixed(4)}
-            </strong>
-            <small>CBM</small>
-          </article>
+        <div className="table-wrap cargo-summary-table">
+          <table>
+            <thead><tr><th>货物明细</th><th>包装数</th><th>总毛重</th><th>总体积</th></tr></thead>
+            <tbody><tr>
+              <td><strong>{data.cargo.length}</strong> 条</td>
+              <td><strong>{data.cargo.reduce((sum, x) => sum + x.package_count, 0)}</strong> 箱/托/件</td>
+              <td><strong>{data.cargo.reduce((sum, x) => sum + x.package_count * x.gross_weight_per_package_kg, 0).toFixed(3)}</strong> KG</td>
+              <td><strong>{data.cargo.reduce((sum, x) => sum + x.package_count * x.volume_per_package_cbm, 0).toFixed(4)}</strong> CBM</td>
+            </tr></tbody>
+          </table>
         </div>
         <div className="table-wrap module-record-table">
           <table>
@@ -4259,7 +4650,7 @@ function ModuleBusinessData({
       <div className="module-business-stack dense-module-stack">
         <section className="order-document-stages">
           {orderDocumentStages.map((stage) => (
-            <article className="order-document-stage" key={stage.code}>
+            <section className="order-document-stage" key={stage.code}>
               <header>
                 <div>
                   <h3>{stage.name}</h3>
@@ -4278,39 +4669,24 @@ function ModuleBusinessData({
                   /{stage.documents.length} 已就绪
                 </span>
               </header>
-              <div className="order-document-grid">
+              <div className="table-wrap module-record-table order-document-stage-table"><table><thead><tr><th>文件类型</th><th>用途说明</th><th>当前状态</th><th>最新文件</th><th>审核状态</th></tr></thead><tbody>
                 {stage.documents.map((document) => {
                   const files = data.attachments.filter(
                     (attachment) => attachment.document_category === document.code,
                   );
                   const latest = files[0];
                   return (
-                    <Form
-                      method="post"
-                      encType="multipart/form-data"
-                      className={`order-document-card ${files.some((file) => ["approved", "archived"].includes(file.review_status || "")) ? "ready" : ""}`}
-                      key={document.code}
-                    >
-                      <input type="hidden" name="intent" value="document_upload" />
-                      <input type="hidden" name="documentCategory" value={document.code} />
-                      <div className="order-document-card-title">
-                        <strong>{document.name}</strong>
-                        <span>{files.length ? `${files.length} 份` : "待上传"}</span>
-                      </div>
-                      <small>{document.hint}</small>
-                      {latest && (
-                        <p title={latest.file_name}>
-                          {latest.file_name} · {documentReviewLabel(latest.review_status)}
-                        </p>
-                      )}
-                      {!latest && (
-                        <p className="muted">请到对应业务节点上传，文件中心不重复录入。</p>
-                      )}
-                    </Form>
+                    <tr className={files.some((file) => ["approved", "archived"].includes(file.review_status || "")) ? "completed-row" : ""} key={document.code}>
+                      <td><strong>{document.name}</strong></td>
+                      <td>{document.hint}</td>
+                      <td><span className={`status-pill ${files.length ? "success" : "off"}`}>{files.length ? `${files.length} 份` : "待上传"}</span></td>
+                      <td title={latest?.file_name}>{latest?.file_name || "请到对应业务节点上传"}</td>
+                      <td>{latest ? documentReviewLabel(latest.review_status) : "—"}</td>
+                    </tr>
                   );
                 })}
-              </div>
-            </article>
+              </tbody></table></div>
+            </section>
           ))}
           <p className="document-storage-note">
             支持 PDF、Word、Excel 和图片；当前数据库直存模式单个文件上限 1.2MB，后续接入对象存储后可提高。
@@ -4377,7 +4753,7 @@ function ModuleBusinessData({
                       </Modal> : <button type="button" className="text-button" disabled>编辑</button>}
                       {(item.document_category === "consignment_letter"
                         ? canApproveConsignment
-                        : manage) ? <Modal title={`审核文件 · ${item.file_name}`} triggerLabel="审核" triggerClassName="text-button" size="wide" closeSignal={reviewCloseSignal}>
+                        : manage) ? <Modal key={`review:${item.id}:${documentReviewCloseSignal(reviewCloseSignal, item.id) ?? "idle"}`} title={`审核文件 · ${item.file_name}`} triggerLabel="审核" triggerClassName="text-button" size="wide" closeSignal={documentReviewCloseSignal(reviewCloseSignal, item.id)}>
                         <Form method="post" className="stack">
                           <input
                             type="hidden"
@@ -4418,40 +4794,24 @@ function ModuleBusinessData({
       </div>
     );
   if (code === "customs") {
-    const originGate = customsDeclarationGate(data.customsDeclarations, "origin");
     const activeDeclarations = data.customsDeclarations.filter((item) => item.is_deleted !== 1 && item.status !== "cancelled");
+    const activeOriginDeclarations = activeDeclarations.filter((item) => item.clearance_stage === "origin");
+    const releasedOriginCount = activeOriginDeclarations.filter((item) => item.status === "released").length;
     const deletedCount = data.customsDeclarations.length - activeDeclarations.length;
     return (
       <div className="module-business-stack dense-module-stack">
-        <CustomsDeclarationGatePanel gate={originGate} />
         {manage && (
           <details className="expandable module-create-dialog" open={!activeDeclarations.length}>
             <summary>新增报关单</summary>
             <CustomsDeclarationForm busy={busy} fields={data.workflowFields} />
           </details>
         )}
-        <div className="module-summary-cards">
-          <article>
-            <span>有效起运地报关单</span>
-            <strong>{originGate.total}</strong>
-            <small>张</small>
-          </article>
-          <article>
-            <span>起运地已放行</span>
-            <strong>{originGate.released}</strong>
-            <small>张</small>
-          </article>
-          <article>
-            <span>待放行</span>
-            <strong>{originGate.pending}</strong>
-            <small>张</small>
-          </article>
-          <article>
-            <span>删单/作废</span>
-            <strong>{deletedCount}</strong>
-            <small>张，不计门禁</small>
-          </article>
-        </div>
+        <ModuleSummaryTable items={[
+          { label: "有效起运地报关单", value: activeOriginDeclarations.length, detail: "张" },
+          { label: "起运地已放行", value: releasedOriginCount, detail: "张" },
+          { label: "待放行", value: activeOriginDeclarations.length - releasedOriginCount, detail: "张" },
+          { label: "删单 / 作废", value: deletedCount, detail: "张，不计有效单据" },
+        ]} />
         <div className="table-wrap module-record-table">
           <table>
             <thead>
@@ -4466,43 +4826,53 @@ function ModuleBusinessData({
               </tr>
             </thead>
             <tbody>
-              {data.customsDeclarations.map((x) => (
-                <tr key={x.id}>
-                  <td>
+              {data.customsDeclarations.map((x) => {
+                const identityMissing = customsValueMissing(x.declaration_number) || customsValueMissing(x.declaration_type);
+                const companyMissing = customsValueMissing(x.declaration_title) || customsValueMissing(x.declaring_company);
+                const cargoDataMissing = customsValueMissing(x.currency) || Number(x.declared_amount) <= 0 || Number(x.gross_weight_kg) <= 0;
+                const dateMissing = customsValueMissing(x.declared_at) || (x.status === "released" && customsValueMissing(x.released_at));
+                const pendingRelease = x.is_deleted !== 1 && x.status !== "cancelled" && x.status !== "released";
+                return <tr key={x.id}>
+                  <td className={identityMissing ? "customs-missing-cell" : undefined}>
                     <strong>{customsStageLabel(x.clearance_stage)}</strong>
-                    <small>{x.declaration_number} · {x.declaration_type}</small>
+                    <small>{customsDisplayValue(x.declaration_number)} · {customsDisplayValue(x.declaration_type)}</small>
                   </td>
-                  <td>
-                    {x.declaration_title}
-                    <small>{x.declaring_company}</small>
+                  <td className={companyMissing ? "customs-missing-cell" : undefined}>
+                    {customsDisplayValue(x.declaration_title)}
+                    <small>{customsDisplayValue(x.declaring_company)}</small>
                   </td>
-                  <td>
-                    {x.currency} {Number(x.declared_amount).toLocaleString()}
-                    <small>{Number(x.gross_weight_kg).toLocaleString()} KG</small>
+                  <td className={cargoDataMissing ? "customs-missing-cell" : undefined}>
+                    {customsValueMissing(x.currency) || Number(x.declared_amount) <= 0 ? <CustomsMissingValue /> : <>{x.currency} {Number(x.declared_amount).toLocaleString()}</>}
+                    <small>{Number(x.gross_weight_kg) > 0 ? `${Number(x.gross_weight_kg).toLocaleString()} KG` : <CustomsMissingValue />}</small>
                   </td>
-                  <td>
-                    申报 {formatDateTime(x.declared_at)}
-                    <small>放行 {formatDateTime(x.released_at)}</small>
+                  <td className={dateMissing ? "customs-missing-cell" : undefined}>
+                    申报 {customsValueMissing(x.declared_at) ? <CustomsMissingValue /> : formatDateTime(x.declared_at)}
+                    <small>放行 {pendingRelease ? <span className="muted">待放行后生成</span> : customsValueMissing(x.released_at) ? <CustomsMissingValue /> : formatDateTime(x.released_at)}</small>
                   </td>
                   <td>
                     <CustomsDeclarationFlags declaration={x} />
                   </td>
                   <td>
-                    <span className={`status-pill ${x.status === "released" ? "success" : x.is_deleted ? "off" : ""}`}>
+                    <span className={`status-pill ${x.status === "released" ? "success" : x.is_deleted || x.status === "cancelled" ? "off" : ""}`}>
                       {customsDeclarationStatusLabel(x)}
                     </span>
                   </td>
                   <td>
                     <CustomsDeclarationAction declaration={x} manage={manage} busy={busy} fields={data.workflowFields} />
                   </td>
+                </tr>;
+              })}
+              {!data.customsDeclarations.length && (
+                <tr className="customs-empty-declaration-row">
+                  {["阶段 / 报关单号", "申报抬头 / 公司", "金额 / 毛重", "申报 / 放行日期", "业务标记", "状态"].map((label) => (
+                    <td key={label} className="customs-missing-cell"><CustomsMissingValue label={label} /></td>
+                  ))}
+                  <td><span className="muted">请先新增报关单</span></td>
                 </tr>
-              ))}
+              )}
             </tbody>
           </table>
         </div>
-        {!data.customsDeclarations.length && (
-          <p className="empty-state">尚未录入报关单。新增第一张起运地报关单后，系统开始计算放行门禁。</p>
-        )}
         <Link
           className="secondary module-external-link"
           to={`/admin/workbenches/customs?q=${encodeURIComponent(data.order.order_number)}`}
@@ -4529,13 +4899,7 @@ function ModuleBusinessData({
                   <strong>先安排承运商并登记预计应付</strong>
                   <span>由业务员在国内运输开始时确认；保存后同步生成国内运输应付明细。</span>
                 </div>
-                <label className="field">
-                  <span>运输分段</span>
-                  <select name="legType">
-                    <option value="first_mile">国内提货段：客户工厂 → 国内仓/口岸仓</option>
-                    <option value="main">出境 / 境外运输段</option>
-                  </select>
-                </label>
+                <input type="hidden" name="legType" value="first_mile" />
                 <ModuleField
                   fields={data.workflowFields}
                   fieldKey="domestic_carrier_id"
@@ -4687,14 +5051,13 @@ function ModuleBusinessData({
           )}
         </div>
         <BusinessSubsection
-          title="运输分段与派车"
-          hint="头程、干线、后程分别记录承运商、车辆、司机、时间和运费。"
+          title="国内运输安排与派车"
+          hint="记录国内提货承运商、车辆、司机、时间和预计运费。"
         >
           <div className="table-wrap module-record-table">
             <table>
               <thead>
                 <tr>
-                  <th>分段</th>
                   <th>承运商/车辆</th>
                   <th>司机</th>
                   <th>线路</th>
@@ -4706,7 +5069,6 @@ function ModuleBusinessData({
               <tbody>
                 {data.transportAssignments.map((x) => (
                   <tr key={x.id}>
-                    <td>{legTypeLabel(x.leg_type)}</td>
                     <td>
                       <strong>{x.carrier_name || "待定"}</strong>
                       <small>
@@ -4736,9 +5098,20 @@ function ModuleBusinessData({
             </table>
           </div>
           {!data.transportAssignments.length && (
-            <p className="empty-state">暂无运输分段安排。</p>
+            <p className="empty-state">暂无国内运输安排。</p>
           )}
         </BusinessSubsection>
+        {data.transportAssignments.length > 0 && (
+          <div className="transport-next-step-banner">
+            <div>
+              <strong>国内运输安排已完成</strong>
+              <span>运输信息已保存，可以进入仓库验收收货。</span>
+            </div>
+            <Link className="btn primary" to={`/admin/orders/${data.order.id}?stage=warehouse_receiving&module=warehouse`}>
+              下一步：仓库验收收货 →
+            </Link>
+          </div>
+        )}
       </div>
     );
   if (code === "loading") {
@@ -4754,9 +5127,7 @@ function ModuleBusinessData({
       ? "/warehouse/acceptance"
       : isLtl && !activeBatch
         ? "/warehouse/consolidation"
-        : isLtl && activeBatch?.status === "planning"
-          ? "/warehouse/ltl-loading"
-          : "/warehouse/outbound";
+        : "/warehouse/outbound";
     const warehouseActionText = !hasWarehouseActuals
       ? "进入仓库端验收收货"
       : isLtl && !activeBatch
@@ -4777,33 +5148,39 @@ function ModuleBusinessData({
               : activeBatch?.road_status
                 ? roadStatusLabels[activeBatch.road_status] || activeBatch.road_status
                 : "待仓库装车出库";
+    const plannedPackages = data.cargo.reduce((sum, item) => sum + item.package_count, 0);
+    const plannedPieces = data.cargo.reduce((sum, item) => sum + item.package_count * item.pieces_per_package, 0);
+    const plannedWeight = data.cargo.reduce((sum, item) => sum + item.package_count * item.gross_weight_per_package_kg, 0);
+    const plannedVolume = data.cargo.reduce((sum, item) => sum + item.package_count * item.volume_per_package_cbm, 0);
+    const hasWarehouseReceipt = Boolean(data.warehouseActuals?.receipt_count);
     return (
       <div className="module-business-stack dense-module-stack">
-        <div className="current-order-loading-context">
-          <div>
-            <span>当前订单</span>
-            <strong>{data.order.order_number} · {data.order.customer_name}</strong>
+        <BusinessSubsection title="订单与仓库同步状态" hint="管理端只读展示仓库作业结果，实际配载、装车和出库在仓库端办理。">
+          <div className="table-wrap module-record-table operation-sheet-table">
+            <table>
+              <thead><tr><th>订单号</th><th>客户</th><th>订单类型</th><th>仓库办理状态</th></tr></thead>
+              <tbody><tr>
+                <td><strong>{data.order.order_number}</strong></td>
+                <td>{data.order.customer_name}</td>
+                <td>{isFtl ? "整车 · 一单一车" : isLtl ? "拼车 · 多单一车" : "报价尚未确定"}</td>
+                <td><span className={`status-pill ${hasWarehouseActuals ? "success" : ""}`}>{stageLabel}</span></td>
+              </tr></tbody>
+            </table>
           </div>
-          <div>
-            <span>订单类型</span>
-            <strong>{isFtl ? "整车：一单一车" : isLtl ? "拼车：多单一车" : "报价尚未确定"}</strong>
-          </div>
-          <div>
-            <span>仓库办理状态</span>
-            <strong>{stageLabel}</strong>
-          </div>
-          <p>本节点仅展示仓库作业结果，不再提供配载、车辆登记、文件处理、装车或出库操作。</p>
-        </div>
+        </BusinessSubsection>
 
         <BusinessSubsection
-          title="仓库实收"
-          hint="数据来自仓库端验收收货；订单后台只读展示。"
+          title="订单创建与仓库实收对比"
+          hint="订单创建口径来自货物明细；仓库尚未收货时实收行保持为空，收货后自动同步。"
         >
-          <div className="loading-selection-actuals">
-            <article><span>实收包装</span><strong>{data.warehouseActuals?.actual_packages ?? 0}</strong><small>个</small></article>
-            <article><span>实收件数</span><strong>{data.warehouseActuals?.actual_pieces ?? 0}</strong><small>件</small></article>
-            <article><span>实收重量</span><strong>{Number(data.warehouseActuals?.actual_weight_kg ?? 0).toFixed(2)}</strong><small>KG</small></article>
-            <article><span>实测体积</span><strong>{Number(data.warehouseActuals?.actual_volume_cbm ?? 0).toFixed(3)}</strong><small>CBM</small></article>
+          <div className="table-wrap module-record-table operation-sheet-table cargo-comparison-summary-table">
+            <table>
+              <thead><tr><th>数据口径</th><th>包装数</th><th>件数</th><th>重量 KG</th><th>体积 CBM</th><th>同步状态</th></tr></thead>
+              <tbody>
+                <tr><td><strong>订单创建</strong></td><td>{plannedPackages}</td><td>{plannedPieces}</td><td>{plannedWeight.toFixed(2)}</td><td>{plannedVolume.toFixed(3)}</td><td>订单货物明细</td></tr>
+                <tr><td><strong>仓库实收</strong></td><td>{hasWarehouseReceipt ? data.warehouseActuals?.actual_packages : "—"}</td><td>{hasWarehouseReceipt ? data.warehouseActuals?.actual_pieces : "—"}</td><td>{hasWarehouseReceipt ? Number(data.warehouseActuals?.actual_weight_kg).toFixed(2) : "—"}</td><td>{hasWarehouseReceipt ? Number(data.warehouseActuals?.actual_volume_cbm).toFixed(3) : "—"}</td><td>{hasWarehouseReceipt ? `${data.warehouseActuals?.receipt_count} 张收货单` : "待仓库清点"}</td></tr>
+              </tbody>
+            </table>
           </div>
         </BusinessSubsection>
 
@@ -4813,43 +5190,49 @@ function ModuleBusinessData({
             ? "拼车订单由仓库端选择整票订单、生成 PZ 配载单、生成装车任务并完成扫码出库。"
             : "整车订单不走拼车配载，由仓库端按单生成装车任务并完成扫码出库。"}
         >
-          <div className="loading-preparation-summary">
-            <span><b>运输线路</b>{data.order.route_notes || "待仓库补充"}</span>
-            <span><b>出境口岸</b>{data.order.exit_port || "待仓库补充"}</span>
-            <span><b>清关地</b>{data.order.customs_location || "待仓库补充"}</span>
-            <span><b>境外目的仓</b>{data.order.overseas_warehouse_name || "未设置"}</span>
+          <div className="table-wrap module-record-table operation-sheet-table">
+            <table>
+              <thead><tr><th>运输线路</th><th>出境口岸</th><th>清关地</th><th>境外目的仓</th></tr></thead>
+              <tbody><tr><td>{data.order.route_notes || "待仓库补充"}</td><td>{data.order.exit_port || "待仓库补充"}</td><td>{data.order.customs_location || "待仓库补充"}</td><td>{data.order.overseas_warehouse_name || "未设置"}</td></tr></tbody>
+            </table>
           </div>
 
-          {activeBatch ? (
-            <div className="module-data-list">
-              <article className="loading-batch-entry">
-                <div className="loading-batch-entry-link">
-                  <div>
-                    <strong>{activeBatch.batch_number} · {activeBatch.batch_name}</strong>
-                    <small>{activeBatch.order_count} 票订单：{activeBatch.order_numbers || data.order.order_number}</small>
-                    <small>{activeBatch.vehicle_count} 辆车 · {activeBatch.load_count} 个包装已分配</small>
-                  </div>
-                  <span className="loading-batch-entry-action">
-                    <small>{roadStatusLabels[activeBatch.road_status] || activeBatch.road_status}</small>
-                    <b>{isLtl ? "仓库配载单" : "整车运输单"}</b>
-                  </span>
-                </div>
-              </article>
-            </div>
-          ) : (
-            <p className="empty-state">
-              {isLtl ? "仓库端尚未生成 PZ 配载单。" : "仓库端尚未生成装车任务。"}
-            </p>
-          )}
+          <div className="table-wrap module-record-table operation-sheet-table loading-batch-table">
+            <table>
+              <thead><tr><th>配载 / 运输单</th><th>订单</th><th>车辆</th><th>已分配包装</th><th>类型</th><th>状态</th></tr></thead>
+              <tbody>{activeBatch ? <tr>
+                <td><strong>{activeBatch.batch_number}</strong><small>{activeBatch.batch_name}</small></td>
+                <td>{activeBatch.order_count} 票<small>{activeBatch.order_numbers || data.order.order_number}</small></td>
+                <td>{activeBatch.vehicle_count} 辆</td>
+                <td>{activeBatch.load_count} 个</td>
+                <td>{isLtl ? "仓库配载单" : "整车运输单"}</td>
+                <td><span className="status-pill">{roadStatusLabels[activeBatch.road_status] || activeBatch.road_status}</span></td>
+              </tr> : <tr><td colSpan={6} className="empty-state">{isLtl ? "仓库端尚未生成 PZ 配载单。" : "仓库端尚未生成装车任务。"}</td></tr>}</tbody>
+            </table>
+          </div>
+
+          <div className="table-wrap module-record-table operation-sheet-table warehouse-dispatch-report-table">
+            <table>
+              <thead><tr><th>装车出库任务</th><th>装车进度</th><th>车辆 / 司机</th><th>仓库上报状态</th><th>交接人 / 时间</th><th>交接备注</th></tr></thead>
+              <tbody>{data.warehouseDispatches.map((dispatch) => <tr key={dispatch.id}>
+                <td><strong>{dispatch.dispatch_number}</strong><small>创建：{formatDateTime(dispatch.created_at)} · {dispatch.creator_name || "仓库操作员"}</small></td>
+                <td>{dispatch.loaded_count}/{dispatch.item_count}<small>{dispatch.loaded_count === dispatch.item_count ? "货物已全部装车" : "扫码装车中"}</small></td>
+                <td>{dispatch.vehicle_plate}<small>{dispatch.driver_name} · {dispatch.carrier_name || "承运商待补"}</small></td>
+                <td><span className={`status-pill ${dispatch.status === "dispatched" ? "success" : ""}`}>{dispatch.status === "dispatched" ? "已上报出库交接" : "装车中"}</span></td>
+                <td>{dispatch.dispatcher_name || "—"}<small>{formatDateTime(dispatch.dispatched_at)}</small></td>
+                <td>{dispatch.notes || "—"}</td>
+              </tr>)}{!data.warehouseDispatches.length && <tr><td colSpan={6} className="empty-state">仓库端尚未创建装车出库任务。</td></tr>}</tbody>
+            </table>
+          </div>
 
           {!hasWarehouseActuals && (
             <div className="alert warning">
-              <strong>当前阻断：</strong>仓库尚未完成验收收货并确认货齐。
+              <strong>仓库状态：</strong>尚未完成验收收货并确认货齐。
             </div>
           )}
           {hasWarehouseActuals && !isFtl && !isLtl && (
             <div className="alert danger">
-              <strong>当前阻断：</strong>询价报价尚未确定整车或拼车，仓库不能建立装车流程。
+              <strong>订单状态：</strong>询价报价尚未确定整车或拼车，仓库不能建立装车流程。
             </div>
           )}
           {hasWarehouseActuals && isLtl && !loadingPreparationReady && (
@@ -4895,65 +5278,33 @@ function ModuleBusinessData({
     );
     return (
       <div className="module-business-stack dense-module-stack">
+        <BusinessSubsection title="运输节点进度" hint="进入本页首先查看必经运输节点、当前状态、发生时间和地点。" tag="后续接入接口自动推进">
+          <div className="table-wrap module-record-table tracking-progress-table">
+            <table>
+              <thead><tr><th>顺序</th><th>运输节点</th><th>类型</th><th>当前状态</th><th>发生时间</th><th>地点</th></tr></thead>
+              <tbody>{displayedTrackingMilestones.map(([value, label], index) => {
+                const item = data.trackingMilestones.find((x) => x.milestone_code === value);
+                return <tr className={item ? "completed-row" : ""} key={value}>
+                  <td>{String(index + 1).padStart(2, "0")}</td>
+                  <td><strong>{label}</strong></td>
+                  <td>{trackingOptionalMilestones.has(value) ? "可选节点" : "必经节点"}</td>
+                  <td><span className={`status-pill ${item ? "success" : "off"}`}>{item ? "已完成" : trackingOptionalMilestones.has(value) ? "待实际发生" : "待更新"}</span></td>
+                  <td>{item ? formatDateTime(item.event_at) : "—"}</td>
+                  <td>{item?.location || "—"}</td>
+                </tr>;
+              })}</tbody>
+            </table>
+          </div>
+        </BusinessSubsection>
         {data.trackingDepartureGate && !data.trackingDepartureGate.ready && (
           <TrackingDepartureGate
             orderId={data.order.id}
             reasons={data.trackingDepartureGate.reasons}
           />
         )}
-        {manage && (
-          <section className="tracking-option-controls" aria-label="可选运输节点">
-            <div>
-              <strong>可选运输节点</strong>
-              <small>默认关闭。打开后，对应节点才会出现在运输节点下拉框中。</small>
-            </div>
-            <Form method="post">
-              <input type="hidden" name="intent" value="tracking_option_toggle" />
-              <input type="hidden" name="optionCode" value="transloaded" />
-              <input
-                type="hidden"
-                name="enabled"
-                value={data.order.requires_transloading ? "0" : "1"}
-              />
-              <button
-                type="submit"
-                className={data.order.requires_transloading ? "tracking-switch on" : "tracking-switch"}
-                role="switch"
-                aria-checked={Boolean(data.order.requires_transloading)}
-                disabled={busy}
-              >
-                <span className="tracking-switch-track"><i /></span>
-                换装
-              </button>
-            </Form>
-            <Form method="post">
-              <input type="hidden" name="intent" value="tracking_option_toggle" />
-              <input type="hidden" name="optionCode" value="transit_customs" />
-              <input
-                type="hidden"
-                name="enabled"
-                value={data.order.requires_transit_customs ? "0" : "1"}
-              />
-              <button
-                type="submit"
-                className={data.order.requires_transit_customs ? "tracking-switch on" : "tracking-switch"}
-                role="switch"
-                aria-checked={Boolean(data.order.requires_transit_customs)}
-                disabled={busy}
-              >
-                <span className="tracking-switch-track"><i /></span>
-                转关
-              </button>
-            </Form>
-          </section>
-        )}
         {manage && (!data.trackingDepartureGate || data.trackingDepartureGate.ready) && (
-          <details className="expandable module-create-dialog">
-            <summary>更新运输节点</summary>
-            <p className="helper-text">
-              换装、转关为可选节点；没有实际业务时可直接登记国外入境。目的地清关完成后，由境外目的仓扫码入库和清点自动完成本模块。
-            </p>
-            <Form method="post" className="form-grid compact">
+          <BusinessSubsection className="tracking-node-entry-section" title="登记运输节点" hint="按实际发生登记节点；换装、转关未发生可跳过，目的仓入库由仓库扫码自动完成。">
+            <Form method="post" className="form-grid compact tracking-node-entry-form">
               <input type="hidden" name="intent" value="tracking_add" />
               {!workflowFieldPolicy(data.workflowFields, "tracking_milestone").visible && <input type="hidden" name="milestoneCode" value="border_arrived" />}
               {!workflowFieldPolicy(data.workflowFields, "tracking_milestone_name").visible && <input type="hidden" name="milestoneName" value="到达出境口岸" />}
@@ -4985,34 +5336,12 @@ function ModuleBusinessData({
               <ModuleField fields={data.workflowFields} fieldKey="visible_to_customer" label="客户可见" className="field span-2" fallbackRequired>
                 {(required) => <select name="visibleToCustomer" defaultValue="1" required={required}><option value="1">同步客户门户</option><option value="0">仅内部可见</option></select>}
               </ModuleField>
-              <button className="primary" disabled={busy}>
+              <button className="primary tracking-node-submit" disabled={busy}>
                 保存运输节点
               </button>
             </Form>
-          </details>
+          </BusinessSubsection>
         )}
-        <div className="tracking-milestone-board dense-milestone-board">
-          {displayedTrackingMilestones.map(([value, label]) => {
-            const item = data.trackingMilestones.find(
-              (x) => x.milestone_code === value,
-            );
-            return (
-              <article className={item ? "done" : ""} key={value}>
-                <b>{item ? "✓" : "·"}</b>
-                <div>
-                  <strong>{label}</strong>
-                  <small>
-                    {item
-                      ? `${formatDateTime(item.event_at)} · ${item.location || "地点待补"}`
-                      : trackingOptionalMilestones.has(value)
-                        ? "可选，无需时可跳过"
-                        : "待更新"}
-                  </small>
-                </div>
-              </article>
-            );
-          })}
-        </div>
         <BusinessSubsection
           title="运单跟踪"
           hint="按顺序汇总出境口岸、出境、国外入境、目的地清关和境外目的仓到仓；换装与转关按实际发生情况登记。"
@@ -5057,6 +5386,32 @@ function ModuleBusinessData({
             </table>
           </div>
         </BusinessSubsection>
+        {manage && (
+          <details className="tracking-option-table tracking-option-settings" aria-label="可选运输节点">
+            <summary><span>可选运输节点设置</span><small>换装、转关仅在实际发生时启用</small></summary>
+            <div className="table-wrap module-record-table">
+              <table>
+                <thead><tr><th>节点</th><th>适用场景</th><th>当前设置</th><th>操作</th></tr></thead>
+                <tbody>
+                  {([
+                    ["transloaded", "换装", "运输途中发生车辆或载具更换", Boolean(data.order.requires_transloading)],
+                    ["transit_customs", "转关", "运输途中需要办理转关手续", Boolean(data.order.requires_transit_customs)],
+                  ] as const).map(([optionCode, label, hint, enabled]) => <tr key={optionCode}>
+                    <td><strong>{label}</strong></td>
+                    <td>{hint}</td>
+                    <td><span className={`status-pill ${enabled ? "success" : "off"}`}>{enabled ? "已启用" : "未启用"}</span></td>
+                    <td><Form method="post">
+                      <input type="hidden" name="intent" value="tracking_option_toggle" />
+                      <input type="hidden" name="optionCode" value={optionCode} />
+                      <input type="hidden" name="enabled" value={enabled ? "0" : "1"} />
+                      <button type="submit" className="text-button" disabled={busy}>{enabled ? "停用" : "启用"}</button>
+                    </Form></td>
+                  </tr>)}
+                </tbody>
+              </table>
+            </div>
+          </details>
+        )}
       </div>
     );
   }
@@ -5068,16 +5423,16 @@ function ModuleBusinessData({
         attachment.document_category === "delivery_receipt" &&
         ["approved", "archived"].includes(attachment.review_status || ""),
     );
-    const transportCompleted = data.module.status === "completed";
-    const progress = transportCompleted
+    const selfPickupCompleted = data.module.status === "completed";
+    const progress = selfPickupCompleted
       ? 100
       : overseasOperationProgress[operationStatus] || 0;
     const operationRank: Record<string, number> = {
       waiting_arrival: 0,
       arrived: 1,
       notified: 2,
-      appointment: 3,
-      picked_up: 4,
+      appointment: 2,
+      picked_up: 3,
     };
     const operationStepDone = (status: string) =>
       (operationRank[operationStatus] || 0) >= operationRank[status];
@@ -5092,37 +5447,31 @@ function ModuleBusinessData({
       <div className="module-business-stack dense-module-stack">
         <BusinessSubsection
           title="境外仓办理进度"
-          hint="境外仓完成扫码入库与清点后自动通知客户；客户到仓后逐件扫码并核对整票货物，确认出库即完成签收和运输。"
+          hint="境外仓完成扫码入库与清点后，运输跟踪即结束并自动通知客户；客户到仓后逐件扫码，确认出库即完成自提签收。"
         >
-          <div className="loading-selection-summary" aria-live="polite">
-            <span>
-              已完成至：
-              <strong>
-                {transportCompleted
-                  ? "运输完成"
-                  : overseasOperationStatusLabels[operationStatus] || operationStatus}
-              </strong>
-            </span>
-            <span>{progress}%</span>
-            <span>下一步：{transportCompleted ? "进入费用结算" : nextOverseasAction(operationStatus)}</span>
+          <div className="table-wrap module-record-table overseas-progress-table" aria-live="polite">
+            <table>
+              <thead><tr><th>当前状态</th><th>完成进度</th><th>下一步</th></tr></thead>
+              <tbody><tr>
+                <td><strong>{selfPickupCompleted ? "客户已自提并签收" : overseasOperationStatusLabels[operationStatus] || operationStatus}</strong></td>
+                <td>{progress}%</td>
+                <td>{selfPickupCompleted ? "进入费用结算" : nextOverseasAction(operationStatus)}</td>
+              </tr></tbody>
+            </table>
           </div>
-          <div className="tracking-milestone-board dense-milestone-board">
-            {[
-              ["arrived", "目的仓到仓", operationStepDone("arrived")],
-              ["notified", "自动通知客户", operationStepDone("notified")],
-              ["appointment", "预约提货", operationStepDone("appointment")],
-              ["picked_up", "客户自提", operationStepDone("picked_up")],
-              ["signed", "扫码签收", operationStepDone("picked_up")],
-              ["completed", "运输完成", transportCompleted],
-            ].map(([status, label, done]) => (
-              <article className={done ? "done" : ""} key={String(status)}>
-                <b>{done ? "✓" : "·"}</b>
-                <div>
-                  <strong>{label}</strong>
-                  <small>{done ? "已完成" : "待办理"}</small>
-                </div>
-              </article>
-            ))}
+          <div className="table-wrap module-record-table overseas-step-table">
+            <table>
+              <thead><tr><th>顺序</th><th>业务节点</th><th>当前状态</th></tr></thead>
+              <tbody>{[
+                ["arrived", "目的仓到仓", operationStepDone("arrived")],
+                ["notified", "自动通知客户", operationStepDone("notified")],
+                ["signed", "扫码自提签收", operationStepDone("picked_up")],
+              ].map(([status, label, done], index) => <tr className={done ? "completed-row" : ""} key={String(status)}>
+                <td>{String(index + 1).padStart(2, "0")}</td>
+                <td><strong>{label}</strong></td>
+                <td><span className={`status-pill ${done ? "success" : "off"}`}>{done ? "已完成" : "待办理"}</span></td>
+              </tr>)}</tbody>
+            </table>
           </div>
         </BusinessSubsection>
 
@@ -5130,46 +5479,17 @@ function ModuleBusinessData({
           title="批次与目的仓"
           hint="一票订单只读取报价及委托资料中已选的境外目的仓，不在后续重复填写地址。"
         >
-          <div className="consignment-form-grid overseas-summary-grid">
-            <Info
-              label="配载批次"
-              value={operation?.batch_number || ""}
-            />
-            <Info
-              label="批次状态"
-              value={
-                operation
-                  ? roadStatusLabels[operation.road_status] || operation.road_status
-                  : ""
-              }
-            />
-            <Info
-              label="境外目的仓"
-              value={
-                data.order.overseas_warehouse_name
-                  ? `${data.order.overseas_warehouse_name} · ${data.order.overseas_warehouse_code || ""}`
-                  : ""
-              }
-            />
-            <Info
-              label="目的仓地址"
-              value={
-                [
-                  data.order.overseas_warehouse_address,
-                  data.order.overseas_warehouse_address_note,
-                ]
-                  .filter(Boolean)
-                  .join(" · ")
-              }
-            />
-            <Info
-              label="批次提货进度"
-              value={
-                operation
-                  ? `${operation.picked_up_order_count}/${operation.batch_order_count} 票`
-                  : ""
-              }
-            />
+          <div className="table-wrap module-record-table overseas-batch-table">
+            <table>
+              <thead><tr><th>配载批次</th><th>批次状态</th><th>境外目的仓</th><th>目的仓地址</th><th>批次提货进度</th></tr></thead>
+              <tbody><tr>
+                <td><strong>{operation?.batch_number || "—"}</strong></td>
+                <td>{operation ? roadStatusLabels[operation.road_status] || operation.road_status : "—"}</td>
+                <td>{data.order.overseas_warehouse_name ? `${data.order.overseas_warehouse_name} · ${data.order.overseas_warehouse_code || ""}` : "—"}</td>
+                <td>{[data.order.overseas_warehouse_address,data.order.overseas_warehouse_address_note].filter(Boolean).join(" · ") || "—"}</td>
+                <td>{operation ? `${operation.picked_up_order_count}/${operation.batch_order_count} 票` : "—"}</td>
+              </tr></tbody>
+            </table>
           </div>
         </BusinessSubsection>
 
@@ -5204,44 +5524,28 @@ function ModuleBusinessData({
           </BusinessSubsection>
         )}
 
-        {manage && operationStatus === "notified" && (
-          <BusinessSubsection title="2. 预约提货" hint={`系统已于 ${formatDateTime(operation?.notified_at) || "到仓时"} 自动通知客户；在此登记客户确认的预约时间。`}>
-            <Form method="post" className="form-grid compact">
-              <input type="hidden" name="intent" value="overseas_advance" />
-              <input type="hidden" name="operationAction" value="appointment" />
-              <ModuleField fields={data.workflowFields} fieldKey="pickup_appointment_at" label="预约提货时间">
-                {(required) => <input name="occurredAt" type="datetime-local" required={required} />}
-              </ModuleField>
-              <ModuleField fields={data.workflowFields} fieldKey="pickup_appointment_notes" label="预约说明" className="field span-2">
-                {(required) => <input name="notes" required={required} placeholder="车辆、提货码或注意事项" />}
-              </ModuleField>
-              <button className="primary" disabled={busy}>保存提货预约</button>
-            </Form>
-          </BusinessSubsection>
-        )}
-
-        {manage && operationStatus === "appointment" && (
-          <BusinessSubsection title="3. 客户自提出库" hint="运营后台只读等待；境外仓逐件扫描货物标签，全部扫完后系统自动同步本票客户自提。">
+        {manage && ["notified", "appointment"].includes(operationStatus) && (
+          <BusinessSubsection title="2. 客户扫码自提签收" hint={`系统已于 ${formatDateTime(operation?.notified_at) || "到仓时"} 自动通知客户；无需登记预约，客户到仓后逐件扫码并在弹窗内确认收货。`}>
             <div className="loading-next-action">
               <strong>下一步由境外目的仓办理</strong>
-              <span>客户到仓后，由仓库人员扫描本票全部货物标签完成出库；此处无需重复确认。</span>
+              <span>客户到仓后扫描本票全部货物条码，并在货物核对弹窗内确认收货；此处无需重复确认。</span>
               {data.order.overseas_warehouse_id && <WarehouseSiteButton
                 orderId={data.order.id}
                 targetPath={`/warehouse/pickup?warehouseId=${encodeURIComponent(data.order.overseas_warehouse_id)}`}
                 returnModuleCode="overseas_warehouse"
                 className="primary"
               >
-                去境外仓扫码自提出库
+                去境外仓扫码自提签收
               </WarehouseSiteButton>}
             </div>
           </BusinessSubsection>
         )}
 
         {operationStatus === "picked_up" && (
-          <BusinessSubsection title="4. 自提签收与运输完成" hint="境外仓已核对全部货物标签并确认客户自提出库；系统自动完成签收、运输和结算交接。签收单可后续在文件中心补充归档，但不再阻断流程。">
+          <BusinessSubsection title="3. 扫码自提签收记录" hint="客户已在境外仓核对全部货物条码并确认收货；系统一次完成自提出库、签收并进入费用结算。签收单可后续在文件中心补充归档，但不再阻断流程。">
             <div className="table-wrap overseas-completion-table">
               <table>
-                <thead><tr><th>订单</th><th>客户</th><th>配载/运输单</th><th>目的仓</th><th>到仓</th><th>通知</th><th>预约</th><th>扫码自提</th><th>签收单归档</th><th>结果</th></tr></thead>
+                <thead><tr><th>订单</th><th>客户</th><th>配载/运输单</th><th>目的仓</th><th>到仓</th><th>通知</th><th>扫码确认收货</th><th>签收单归档</th><th>结果</th></tr></thead>
                 <tbody><tr>
                   <td><strong>{data.order.order_number}</strong></td>
                   <td>{data.order.customer_name}</td>
@@ -5249,15 +5553,14 @@ function ModuleBusinessData({
                   <td>{data.order.overseas_warehouse_name || "—"}</td>
                   <td>{formatDateTime(operation?.actual_arrival_at) || "—"}</td>
                   <td>{formatDateTime(operation?.notified_at) || "—"}</td>
-                  <td>{formatDateTime(operation?.appointment_at) || "—"}</td>
                   <td><strong>{formatDateTime(operation?.pickup_at) || "—"}</strong><small>{operation?.pickup_contact || "客户自提"}</small></td>
                   <td><span className={`status-pill ${signedReceiptApproved ? "" : "off"}`}>{signedReceiptApproved ? "已归档" : "选填"}</span></td>
-                  <td><span className={`status-pill ${transportCompleted ? "" : "off"}`}>{transportCompleted ? "运输完成" : "正在同步"}</span></td>
+                  <td><span className={`status-pill ${selfPickupCompleted ? "" : "off"}`}>{selfPickupCompleted ? "自提签收完成" : "正在同步"}</span></td>
                 </tr></tbody>
               </table>
             </div>
-            {transportCompleted && <div className="loading-next-action">
-              <strong>运输已完成</strong>
+            {selfPickupCompleted && <div className="loading-next-action">
+              <strong>扫码自提签收已完成</strong>
               <span>境外仓扫码自提结果与订单工作流已同步，下一步进入费用结算。</span>
               <Link className="primary" to={`/admin/orders/${data.order.id}/modules/costs`}>进入费用结算</Link>
             </div>}
@@ -5385,44 +5688,12 @@ function ModuleBusinessData({
           )}
           <span className="status-pill">应收、应付分别确认和锁定</span>
         </div>
-        <div className="module-summary-cards">
-          <article>
-            <span>应收</span>
-            <strong>
-              {moneyTotal(data.expenses, "receivable").toFixed(2)}
-            </strong>
-            <small>折算汇总</small>
-          </article>
-          <article>
-            <span>应付</span>
-            <strong>{moneyTotal(data.expenses, "payable").toFixed(2)}</strong>
-            <small>折算汇总</small>
-          </article>
-          <article>
-            <span>预计利润</span>
-            <strong>
-              {(
-                moneyTotal(data.expenses, "receivable") -
-                moneyTotal(data.expenses, "payable")
-              ).toFixed(2)}
-            </strong>
-            <small>未含跨币种展示差异</small>
-          </article>
-          <article>
-            <span>费用风险</span>
-            <strong>
-              {data.expenses.length === 0
-                ? "尚未预录"
-                : ["receivable", "payable"].some(
-                      (direction) =>
-                        !directionControl(direction as "receivable" | "payable").confirmed,
-                    )
-                  ? "存在未确认费用"
-                  : "费用已确认"}
-            </strong>
-            <small>风险只提醒，正式门禁在对账环节校验</small>
-          </article>
-        </div>
+        <ModuleSummaryTable items={[
+          { label: "应收", value: moneyTotal(data.expenses, "receivable").toFixed(2), detail: "折算汇总" },
+          { label: "应付", value: moneyTotal(data.expenses, "payable").toFixed(2), detail: "折算汇总" },
+          { label: "预计利润", value: (moneyTotal(data.expenses, "receivable") - moneyTotal(data.expenses, "payable")).toFixed(2), detail: "未含跨币种展示差异" },
+          { label: "费用风险", value: data.expenses.length === 0 ? "尚未预录" : ["receivable", "payable"].some((direction) => !directionControl(direction as "receivable" | "payable").confirmed) ? "存在未确认费用" : "费用已确认", detail: "正式门禁在对账环节校验" },
+        ]} />
         {(["receivable", "payable"] as const).map((direction) => {
           const control = directionControl(direction);
           const rows = data.expenses.filter((item) => item.direction === direction);
@@ -5526,423 +5797,234 @@ function ModuleBusinessData({
     );
   }
   if (code === "assignment") {
+    const dispatchModuleCodes = new Set(["transport", "tracking", "costs"]);
     const assignableModules = data.modules.filter(
       (item) =>
         item.enabled === 1 &&
-        item.module_code !== "assignment" &&
+        dispatchModuleCodes.has(item.module_code) &&
         !["completed", "not_applicable"].includes(item.status),
     );
     const assignmentModule = data.modules.find((item) => item.module_code === "assignment");
-    const assignedCount = assignableModules.filter(
-      (item) => item.assignee_user_id,
-    ).length;
-    const unassignedModules = assignableModules.filter(
-      (item) => !item.assignee_user_id,
-    );
-    const shouldRequireConfirmDispatch = data.order.status === "confirmed";
-    const canConfirmDispatch = unassignedModules.length === 0 && data.order.status === "confirmed";
-    return (
-      <div className="assignment-workbench">
-        {data.order.status === "submitted" && (
-          <div className="assignment-bulk-panel assignment-review-entry">
-            <div className="assignment-bulk-head">
-              <div>
-                <strong>等待委托审核</strong>
-                <span>审批在委托信息页完成；审批通过后，本页自动开放任务分配。</span>
-              </div>
-              <Link className="primary" to={`/admin/orders/${data.order.id}/modules/consignment#module-business-data`}>
-                返回委托信息审批
-              </Link>
-            </div>
-          </div>
-        )}
-        {data.order.status !== "submitted" && (
-          <>
-            <Form method="post" className="assignment-primary-panel">
-              <input type="hidden" name="intent" value="assign_bulk" />
-              {unassignedModules.map((item) => (
-                <input key={item.id} type="hidden" name="targetModuleCode" value={item.module_code} />
-              ))}
-              <div>
-                <strong>整单派给一位主操作员</strong>
-                <span>
-                  {assignedCount}/{assignableModules.length} 个模块已有负责人；系统只分配尚未分配的模块。
-                </span>
-              </div>
-              {unassignedModules.length ? (
-                <>
-                  <label className="field compact-assignment-field">
-                    <span>主操作员 <b className="required-mark">*</b></span>
-                    <select name="assigneeUserId" required defaultValue="">
-                      <option value="">请选择主操作员</option>
-                      {data.members.map((user) => (
-                        <option value={user.id} key={user.id}>
-                          {user.display_name}
-                          {user.department_name ? ` · ${user.department_name}` : ""}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <button className="primary" disabled={busy}>确认整单派单</button>
-                </>
-              ) : (
-                <div className="assignment-complete-state">
-                  <strong>全部模块已分配</strong>
-                  <span>模块分配已完成，请执行“确认派单”。</span>
-                  <Link className="secondary" to={`/admin/orders/${data.order.id}`}>返回订单中心</Link>
-                </div>
-              )}
-            </Form>
-
-            {shouldRequireConfirmDispatch && assignmentModule?.status !== "completed" && (
-              <Form method="post" className="assignment-confirm-panel">
-                <input type="hidden" name="intent" value="confirm_dispatch" />
-                <div>
-                  <strong>确认派单</strong>
-                  {unassignedModules.length > 0 ? (
-                    <span>尚有 {unassignedModules.length} 个模块未分配，先分配后才能确认派单。</span>
-                  ) : (
-                    <span>审核通过后，由主管手工确认派单并推进订单执行。</span>
-                  )}
-                </div>
-                <label className="field compact-assignment-field">
-                  <span>主操作员 <b className="required-mark">*</b></span>
-                  <select
-                    name="assigneeUserId"
-                    required
-                    defaultValue={
-                      assignmentModule?.assignee_user_id || data.order.current_assignee_user_id || ""
-                    }
-                  >
-                    <option value="">请选择主操作员</option>
-                    {data.members.map((user) => (
-                      <option value={user.id} key={user.id}>
-                        {user.display_name}
-                        {user.department_name ? ` · ${user.department_name}` : ""}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="field compact-assignment-field">
-                  <span>派单说明</span>
-                  <input
-                    name="notes"
-                    type="text"
-                    placeholder="如需特别说明可填写"
-                  />
-                </label>
-                <button className="primary" disabled={busy || unassignedModules.length > 0}>
-                  立即确认派单
-                </button>
-              </Form>
-            )}
-
-            {workflowFieldPolicy(data.workflowFields, "assignment_scope").visible && (
-              <details className="assignment-advanced-panel">
-                <summary>高级操作：按模块分别分配</summary>
-                <Form method="post" className="assignment-bulk-panel">
-                  <input type="hidden" name="intent" value="assign_bulk" />
-                  <div className="assignment-bulk-controls">
-                    {workflowFieldPolicy(data.workflowFields, "module_assignees").visible && <select name="assigneeUserId" required={workflowFieldPolicy(data.workflowFields, "module_assignees").required} defaultValue="">
-                      <option value="">不选择时由当前操作人负责</option>
-                      {data.members.map((user) => (
-                        <option value={user.id} key={user.id}>{user.display_name}{user.department_name ? ` · ${user.department_name}` : ""}</option>
-                      ))}
-                    </select>}
-                    {workflowFieldPolicy(data.workflowFields, "assignment_due_at").visible && <input name="dueAt" type="datetime-local" required={workflowFieldPolicy(data.workflowFields, "assignment_due_at").required} aria-label="办理期限" />}
-                    {workflowFieldPolicy(data.workflowFields, "assignment_notes").visible && <input name="notes" required={workflowFieldPolicy(data.workflowFields, "assignment_notes").required} placeholder="分配说明" />}
-                    <button className="secondary" disabled={busy}>分配选中模块</button>
-                  </div>
-                  <div className="assignment-bulk-list">
-                    {assignableModules.map((item) => (
-                      <label key={item.id}>
-                        <input type="checkbox" name="targetModuleCode" value={item.module_code} defaultChecked={!item.assignee_user_id} />
-                        <span><strong>{item.module_name}</strong><small>{item.current_step_name || "未开始"} · {item.assignee_name || "未分配"}</small></span>
-                      </label>
-                    ))}
-                  </div>
-                </Form>
-                <div className="assignment-single-list">
-                  {assignableModules.map((item) => (
-                    <Form method="post" className="assignment-module-row" key={item.id}>
-                      <input type="hidden" name="intent" value="assign_other" />
-                      <input type="hidden" name="targetModuleCode" value={item.module_code} />
-                      <div><strong>{item.module_name}</strong><small>{item.current_step_name || "未开始"} · {item.assignee_name || "未分配"}</small></div>
-                      <select name="assigneeUserId" required defaultValue={item.assignee_user_id || ""}>
-                        <option value="">请选择负责人</option>
-                        {data.members.map((user) => <option value={user.id} key={user.id}>{user.display_name}</option>)}
-                      </select>
-                      <button className="secondary">保存</button>
-                    </Form>
-                  ))}
-                </div>
-              </details>
-            )}
-          </>
-        )}
-        <Link
-          className="secondary module-external-link"
-          to="/admin/workbenches/tasks"
-        >
-          进入跨订单任务中心
-        </Link>
-      </div>
-    );
+    if (data.order.status === "submitted") {
+      return <div className="assignment-waiting-note"><strong>等待委托审核</strong><span>委托审批通过后，本页自动开放任务分配。</span></div>;
+    }
+    return <AssignmentManifestWorkbench
+      modules={assignableModules}
+      members={data.members}
+      mainAssigneeUserId={assignmentModule?.assignee_user_id || data.order.current_assignee_user_id || ""}
+      canSubmit={data.order.status === "confirmed" && assignmentModule?.status !== "completed"}
+      busy={busy}
+    />;
   }
   if (code === "consignment") {
-    const cargoTotals = data.cargo.reduce(
-      (total, item) => ({
-        packages: total.packages + item.package_count,
-        pieces: total.pieces + item.package_count * item.pieces_per_package,
-        grossWeight:
-          total.grossWeight +
-          item.package_count * item.gross_weight_per_package_kg,
-        netWeight:
-          total.netWeight + item.package_count * item.net_weight_per_package_kg,
-        volume:
-          total.volume + item.package_count * item.volume_per_package_cbm,
-      }),
-      { packages: 0, pieces: 0, grossWeight: 0, netWeight: 0, volume: 0 },
-    );
     const customFields = data.workflowFields.filter(
       (field) => field.isActive && !field.isBuiltIn,
     );
-    const quoteStatus = data.order.quotation_status
-      ? quotationStatusLabels[data.order.quotation_status] ||
-        data.order.quotation_status
-      : "";
+    const showInfo = !consignmentSection || consignmentSection === "info";
+    const showCosts = !consignmentSection || consignmentSection === "costs";
     return (
       <div className="module-business-stack consignment-business-stack">
-        <section className="consignment-form-sheet" aria-label="委托信息">
+        {showInfo && <section className="consignment-form-sheet" aria-label="委托信息">
           <header>
             <div>
               <h3>委托信息</h3>
-              <p>已知内容集中展示；未填写的选填项保持空白。</p>
+              <p>报价和客户资料自动继承；这里只复核订单事实，不重复录入货物、文件和费用。</p>
             </div>
             <span className="status-pill">{data.order.order_number}</span>
           </header>
 
           <div className="consignment-form-group">
             <h4>订单基础</h4>
-            <div className="consignment-form-grid">
-              <WorkflowInfo fields={data.workflowFields} fieldKey="customer_id" label="委托客户" value={data.order.customer_name || ""} />
-              <WorkflowInfo fields={data.workflowFields} fieldKey="quotation_id" label="已接受报价" value={data.order.quote_number || ""} />
-              <WorkflowInfo fields={data.workflowFields} fieldKey="order_date" label="接单日期" value={data.order.order_date || ""} />
-              <WorkflowInfo fields={data.workflowFields} fieldKey="business_nature" label="业务性质" value={businessNatureLabels[data.order.business_nature] || data.order.business_nature || ""} />
-              <Info label="报价状态" value={quoteStatus} />
-              <Info label="订单状态" value={orderStatusLabels[data.order.status] || data.order.status || ""} />
-            </div>
+            <InformationTable fields={data.workflowFields} items={[
+              { fieldKey: "customer_id", label: "委托客户", value: data.order.customer_name || "" },
+              { fieldKey: "order_date", label: "接单日期", value: data.order.order_date || "" },
+              { fieldKey: "business_nature", label: "业务性质", value: businessNatureLabels[data.order.business_nature] || data.order.business_nature || "" },
+            ]} />
           </div>
 
           <div className="consignment-form-group">
-            <h4>提货信息</h4>
-            <div className="consignment-form-grid">
-              <WorkflowInfo fields={data.workflowFields} fieldKey="shipper_customer_id" label="发货方" value={data.order.shipper_name || ""} />
-              <WorkflowInfo fields={data.workflowFields} fieldKey="shipper_contact" label="提货联系人" value={data.order.shipper_contact || ""} />
-              <WorkflowInfo fields={data.workflowFields} fieldKey="shipper_phone" label="联系电话" value={data.order.shipper_phone || ""} />
-              <WorkflowInfo fields={data.workflowFields} fieldKey="origin_country" label="起运国家/地区" value={data.order.origin_country || ""} />
-              <WorkflowInfo fields={data.workflowFields} fieldKey="origin_state" label="起运省/州" value={data.order.origin_state || ""} />
-              <WorkflowInfo fields={data.workflowFields} fieldKey="origin_city" label="起运城市" value={data.order.origin_city || ""} />
-              <WorkflowInfo fields={data.workflowFields} fieldKey="origin_address" label="提货地址" value={data.order.origin_address || ""} className="span-2" />
-            </div>
+            <h4>客户与起运地</h4>
+            <InformationTable fields={data.workflowFields} items={[
+              { fieldKey: "shipper_customer_id", label: "发货方", value: data.order.shipper_name || "" },
+              { fieldKey: "shipper_contact", label: "客户联系人", value: data.order.shipper_contact || "" },
+              { fieldKey: "shipper_phone", label: "联系电话", value: data.order.shipper_phone || "" },
+              { fieldKey: "origin_country", label: "起运国家/地区", value: data.order.origin_country || "" },
+              { fieldKey: "origin_state", label: "起运省/州", value: data.order.origin_state || "" },
+              { fieldKey: "origin_city", label: "起运城市", value: data.order.origin_city || "" },
+            ]} />
           </div>
 
           <div className="consignment-form-group">
-            <h4>收货与目的地</h4>
-            <div className="consignment-form-grid">
-              <WorkflowInfo fields={data.workflowFields} fieldKey="consignee_contact" label="收货联系人" value={data.order.consignee_contact || ""} />
-              <WorkflowInfo fields={data.workflowFields} fieldKey="consignee_phone" label="联系电话" value={data.order.consignee_phone || ""} />
-              <WorkflowInfo fields={data.workflowFields} fieldKey="destination_country" label="目的国家/地区" value={data.order.destination_country || ""} />
-              <WorkflowInfo fields={data.workflowFields} fieldKey="destination_state" label="目的省/州" value={data.order.destination_state || ""} />
-              <WorkflowInfo fields={data.workflowFields} fieldKey="destination_city" label="目的城市" value={data.order.destination_city || ""} />
-              <WorkflowInfo fields={data.workflowFields} fieldKey="overseas_warehouse_id" label="境外目的仓" value={data.order.overseas_warehouse_name || ""} />
-              <Info label="清关责任" value={data.order.customs_clearance_mode === "customer" ? "客户自理清关" : "公司代办清关"} />
-              <WorkflowInfo fields={data.workflowFields} fieldKey="destination_address" label="送货地址" value={data.order.destination_address || ""} className="span-2" />
-              <WorkflowInfo fields={data.workflowFields} fieldKey="overseas_warehouse_address_note" label="目的仓地址备注" value={data.order.overseas_warehouse_address_note || ""} className="span-2" />
-            </div>
-          </div>
-
-          <div className="consignment-form-group">
-            <h4>货物汇总</h4>
-            <div className="consignment-form-grid">
-              <Info label="品名" value={data.cargo.map((item) => item.cargo_name_cn).filter(Boolean).join("、")} className="span-2" />
-              <Info label="包装数" value={data.cargo.length ? String(cargoTotals.packages) : ""} />
-              <Info label="件数" value={data.cargo.length ? String(cargoTotals.pieces) : ""} />
-              <Info label="毛重" value={data.cargo.length ? `${cargoTotals.grossWeight.toFixed(3)} KG` : ""} />
-              <Info label="净重" value={data.cargo.length ? `${cargoTotals.netWeight.toFixed(3)} KG` : ""} />
-              <Info label="体积" value={data.cargo.length ? `${cargoTotals.volume.toFixed(4)} CBM` : ""} />
-              <Info label="货物明细" value={data.cargo.length ? `${data.cargo.length} 条` : ""} />
-            </div>
-          </div>
-
-          <div className="consignment-form-group consignment-quote-group">
-            <div className="consignment-group-heading">
-              <h4>已接受报价费用</h4>
-              <strong>
-                {data.order.quotation_currency && data.order.quotation_total_amount != null
-                  ? `${data.order.quotation_currency} ${Number(data.order.quotation_total_amount).toLocaleString()}`
-                  : ""}
-              </strong>
-            </div>
-            <div className="table-wrap consignment-charge-table">
-              <table>
-                <thead>
-                  <tr>
-                    <th>费用名称</th>
-                    <th>费用代码</th>
-                    <th>币种</th>
-                    <th>汇率</th>
-                    <th>数量</th>
-                    <th>单价</th>
-                    <th>金额</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.quotationCharges.map((charge) => (
-                    <tr key={charge.id}>
-                      <td><strong>{charge.description}</strong></td>
-                      <td>{charge.charge_code}</td>
-                      <td>{data.order.quotation_currency || ""}</td>
-                      <td>{Number(charge.exchange_rate).toLocaleString()}</td>
-                      <td>{Number(charge.quantity).toLocaleString()}</td>
-                      <td>{Number(charge.unit_price).toLocaleString()}</td>
-                      <td><strong>{Number(charge.amount).toLocaleString()}</strong></td>
-                    </tr>
-                  ))}
-                  {!data.quotationCharges.length && (
-                    <tr className="blank-row">
-                      <td>&nbsp;</td><td></td><td></td><td></td><td></td><td></td><td></td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+            <h4>清关与境外目的仓</h4>
+            <InformationTable fields={data.workflowFields} items={[
+              { fieldKey: "destination_country", label: "目的国家/地区", value: data.order.destination_country || "" },
+              { fieldKey: "destination_state", label: "目的省/州", value: data.order.destination_state || "" },
+              { fieldKey: "destination_city", label: "目的城市", value: data.order.destination_city || "" },
+              { fieldKey: "overseas_warehouse_id", label: "境外目的仓", value: data.order.overseas_warehouse_name || "" },
+              { label: "清关责任", value: data.order.customs_clearance_mode === "customer" ? "客户自理清关" : "公司代办清关" },
+              { fieldKey: "overseas_warehouse_address_note", label: "目的仓地址备注", value: data.order.overseas_warehouse_address_note || "" },
+            ]} />
           </div>
 
           <div className="consignment-form-group">
             <h4>时间与备注</h4>
-            <div className="consignment-form-grid">
-              <WorkflowInfo fields={data.workflowFields} fieldKey="requested_pickup_date" label="预约提货时间" value={data.order.requested_pickup_date || ""} />
-              <WorkflowInfo fields={data.workflowFields} fieldKey="cargo_ready_at" label="货好时间" value={data.order.cargo_ready_at ? formatDateTime(data.order.cargo_ready_at) : ""} />
-              <WorkflowInfo fields={data.workflowFields} fieldKey="requested_delivery_date" label="要求送达日" value={data.order.requested_delivery_date || ""} />
-              <WorkflowInfo fields={data.workflowFields} fieldKey="ro_agent" label="RO 代理" value={data.order.ro_agent || ""} />
-              {workflowFieldPolicy(data.workflowFields, "special_instructions").visible && (
-                <WorkflowInfo fields={data.workflowFields} fieldKey="special_instructions" label="备注" value={data.order.special_instructions || ""} className="span-4 multiline" />
-              )}
-            </div>
+            <InformationTable fields={data.workflowFields} items={[
+              { fieldKey: "requested_pickup_date", label: "预约提货时间", value: data.order.requested_pickup_date || "" },
+              { fieldKey: "cargo_ready_at", label: "货好时间", value: data.order.cargo_ready_at ? formatDateTime(data.order.cargo_ready_at) : "" },
+              { fieldKey: "requested_delivery_date", label: "要求送达日", value: data.order.requested_delivery_date || "" },
+              { fieldKey: "ro_agent", label: "RO 代理", value: data.order.ro_agent || "" },
+              { fieldKey: "special_instructions", label: "备注", value: data.order.special_instructions || "" },
+            ]} />
           </div>
 
           {customFields.length > 0 && (
             <div className="consignment-form-group">
               <h4>模板补充字段</h4>
-              <div className="consignment-form-grid consignment-custom-fields">
-                {customFields.map((field) => (
-                  <div key={field.id} className={`consignment-custom-field-cell${field.present ? " ready" : field.isRequired ? " missing" : ""}`}>
-                    <div>
-                      <strong>{field.label}{field.isRequired && <sup>*</sup>}</strong>
-                      <small>{field.helpText || (field.isRequired ? "必须填写" : "选填")}</small>
-                    </div>
-                    {manage ? (
-                      <CustomWorkflowFieldForm field={field} busy={busy} />
-                    ) : (
-                      <span>{field.displayValue || ""}</span>
-                    )}
-                  </div>
-                ))}
+              <div className="table-wrap">
+                <table className="consignment-custom-table">
+                  <thead><tr><th>字段</th><th>填写要求</th><th>当前内容</th></tr></thead>
+                  <tbody>{customFields.map((field) => (
+                    <tr key={field.id} className={field.present ? "ready" : field.isRequired ? "missing" : ""}>
+                      <td><strong>{field.label}{field.isRequired && <sup>*</sup>}</strong><small className="subline">{field.helpText || "业务补充信息"}</small></td>
+                      <td><span className={`field-state ${field.present && field.isRequired ? "filled" : field.isRequired ? "required-missing" : "optional-empty"}`}>{field.present ? "已填" : field.isRequired ? "必填但未填" : "未填"}</span></td>
+                      <td>{manage ? <CustomWorkflowFieldForm field={field} busy={busy} /> : <span>{field.displayValue || ""}</span>}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
               </div>
             </div>
           )}
-        </section>
+        </section>}
 
-        {manage && data.order.status === "draft" && (
-          <Form method="post" className="consignment-submit-bar">
-            <div>
-              <strong>委托资料复核完成后，直接提交审批</strong>
-              <span>系统按当前模板检查必填项；选填项留空不会阻断。</span>
-            </div>
-            <div>
-              <input type="hidden" name="intent" value="workflow_action" />
-              <input type="hidden" name="actionCode" value="submit" />
-              <select name="assigneeUserId" required defaultValue="">
-                <option value="">选择审批人</option>
-                {data.members.map((member) => (
-                  <option key={member.id} value={member.id}>
-                    {member.display_name}
-                    {member.department_name ? ` · ${member.department_name}` : ""}
-                  </option>
-                ))}
-              </select>
-              <button className="primary" disabled={busy}>提交审批</button>
-            </div>
-          </Form>
-        )}
-        {canApproveConsignment && (
-          <Form method="post" className="consignment-submit-bar">
-            <div>
-              <strong>委托资料审批</strong>
-              <span>请在本页核对委托信息、报价费用、货物明细和委托文件，确认无误后审批。</span>
-            </div>
-            <div>
-              <input type="hidden" name="intent" value="workflow_action" />
-              <input type="hidden" name="actionCode" value="approve" />
-              <button className="primary" disabled={busy || !data.cargo.length}>
-                审批通过
-              </button>
-            </div>
-          </Form>
-        )}
+        {showCosts && <section className="consignment-form-sheet" aria-label="订单费用">
+          <header>
+            <div><h3>订单费用</h3><p>客户已接受的报价费用自动继承，只读展示并进入后续结算。</p></div>
+            <strong className="consignment-total-amount">{data.order.quotation_currency && data.order.quotation_total_amount != null ? `${data.order.quotation_currency} ${Number(data.order.quotation_total_amount).toLocaleString()}` : "—"}</strong>
+          </header>
+          <div className="table-wrap consignment-charge-table">
+            <table>
+              <thead><tr><th>费用名称</th><th>费用代码</th><th>币种</th><th>汇率</th><th>数量</th><th>单价</th><th>金额</th></tr></thead>
+              <tbody>
+                {data.quotationCharges.map((charge) => <tr key={charge.id}><td><strong>{charge.description}</strong></td><td>{charge.charge_code}</td><td>{data.order.quotation_currency || ""}</td><td>{Number(charge.exchange_rate).toLocaleString()}</td><td>{Number(charge.quantity).toLocaleString()}</td><td>{Number(charge.unit_price).toLocaleString()}</td><td><strong>{Number(charge.amount).toLocaleString()}</strong></td></tr>)}
+                {!data.quotationCharges.length && <tr><td colSpan={7} className="empty-state">关联报价尚无费用明细</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </section>}
+
+        {showConsignmentActionBar && <ConsignmentReviewActionBar data={data} busy={busy} />}
       </div>
     );
   }
-  if (code === "warehouse")
+  if (code === "warehouse") {
+    const actualByCargo = new Map(
+      (data.warehouseFlow?.cargoActuals ?? []).map((item) => [item.cargo_item_id, item]),
+    );
+    const packageLabels = data.warehouseFlow?.packageLabels ?? [];
+    const packageStatuses = data.warehouseFlow?.packageStatuses ?? [];
+    const packageCount = (status: string) =>
+      packageStatuses.find((item) => item.status === status)?.package_count ?? 0;
+    const hasReceipt = Boolean(data.warehouseFlow?.receiptCount);
     return (
-      <div className="module-business-stack dense-module-stack">
-        <BusinessSubsection title="仓库收货与清点" hint="本模块只负责到仓收货、实收登记和确认货齐；完成后自动进入装车与出库。">
-          <div className="warehouse-module-quick-panel">
-            <div className="warehouse-module-steps">
-              <WarehouseSiteCard
-                orderId={data.order.id}
-                targetPath="/warehouse/acceptance"
-                marker="A"
-                title="到仓收货"
-                text="扫码收货，登记实收包装、件数、重量、体积、库位和异常"
-                className={data.warehouseFlow?.received ? "done" : undefined}
-              />
-            </div>
-            <div className="warehouse-module-actions">
-              <WarehouseSiteButton orderId={data.order.id} targetPath="/warehouse/acceptance" className="primary">
-                {data.warehouseFlow?.inboundReady ? "查看收货记录" : "去收货并确认货齐"}
-              </WarehouseSiteButton>
-              {data.warehouseFlow?.inboundReady && <Link className="secondary" to={`/admin/orders/${data.order.id}/modules/loading#module-business-data`}>进入装车与出库</Link>}
-            </div>
+      <div className="module-business-stack dense-module-stack warehouse-comparison-workbench">
+        <p className="readonly-note">本节点由国内仓操作员在仓库端完成。管理端按货物行对照订单创建数据与仓库实际清点数据，不重复修改仓库实收。</p>
+
+        <BusinessSubsection title="订单创建数据与仓库实际清点对比" hint="每条货物固定显示订单创建行和仓库实点行；入库前实点值为空，验收入库后自动同步。">
+          <div className="table-wrap module-record-table operation-sheet-table warehouse-cargo-comparison-table">
+            <table>
+              <thead><tr><th>货物</th><th>数据来源</th><th>包装类型</th><th>包装数</th><th>件数</th><th>重量 KG</th><th>长×宽×高 CM</th><th>体积 CBM</th><th>收货单 / 标签</th></tr></thead>
+              <tbody>
+                {data.cargo.flatMap((cargo) => {
+                  const actual = actualByCargo.get(cargo.id);
+                  const hasActual = Boolean(actual?.actual_record_count);
+                  const labels = packageLabels.filter((item) => item.cargo_item_id === cargo.id);
+                  return [
+                    <tr key={`${cargo.id}-planned`} className="comparison-planned-row">
+                      <td rowSpan={2}><strong>{cargo.cargo_name_cn}</strong><small>{cargo.cargo_name_en || "—"} · HS {cargo.hs_code || "—"}</small></td>
+                      <td><span className="data-source-label planned">订单创建</span></td>
+                      <td>{warehousePackageTypeLabel(cargo.package_type)}</td>
+                      <td>{cargo.package_count}</td>
+                      <td>{cargo.package_count * cargo.pieces_per_package}</td>
+                      <td>{(cargo.package_count * cargo.gross_weight_per_package_kg).toFixed(2)}</td>
+                      <td>{cargo.length_cm} × {cargo.width_cm} × {cargo.height_cm}</td>
+                      <td>{(cargo.package_count * cargo.volume_per_package_cbm).toFixed(3)}</td>
+                      <td>订单货物明细</td>
+                    </tr>,
+                    <tr key={`${cargo.id}-actual`} className={hasActual ? "comparison-actual-row ready" : "comparison-actual-row pending"}>
+                      <td><span className={`data-source-label ${hasActual ? "actual" : "pending"}`}>仓库实点</span></td>
+                      <td>{hasActual ? warehousePackageTypesLabel(actual?.actual_package_types ?? null) : "—"}</td>
+                      <td>{hasActual ? actual?.actual_packages : "—"}</td>
+                      <td>{hasActual ? actual?.actual_pieces : "—"}</td>
+                      <td>{hasActual ? Number(actual?.actual_weight_kg).toFixed(2) : "—"}</td>
+                      <td>{hasActual ? actual?.actual_dimensions || "—" : "—"}</td>
+                      <td>{hasActual ? Number(actual?.actual_volume_cbm).toFixed(3) : "—"}</td>
+                      <td>{hasActual ? <><strong>{actual?.receipt_numbers || "收货单待同步"}</strong><small>{labels.length} 张仓库标签</small></> : "—"}</td>
+                    </tr>,
+                  ];
+                })}
+                {!data.cargo.length && <tr><td colSpan={9} className="empty-state">订单尚无货物创建数据。</td></tr>}
+              </tbody>
+            </table>
           </div>
           {Boolean(data.warehouseFlow?.pendingDifferenceCount) && <div className="alert warning"><strong>实收差异待确认：</strong>共 {data.warehouseFlow?.pendingDifferenceCount} 条，最大差异 {data.warehouseFlow?.maxDifferencePercent?.toFixed(1)}%。仓库可继续作业，但结算前必须确认费用影响。<Form method="post"><input type="hidden" name="intent" value="warehouse_difference_confirm"/><button className="secondary">确认差异及费用影响</button></Form></div>}
         </BusinessSubsection>
-        <BusinessSubsection title="入库时间与货物状态" hint="入库时间取仓库收货登记；在库、已分配、已出库和移库记录按包装实时统计。">
-          {data.warehouseFlow?.receiptCount ? (
-            <>
-              <div className="loading-selection-actuals">
-                <article><span>入库时间</span><strong>{data.warehouseFlow.firstInboundAt ? new Date(data.warehouseFlow.firstInboundAt).toLocaleString("zh-CN",{hour12:false}) : "—"}</strong><small>{data.warehouseFlow.receiptCount} 张收货单{data.warehouseFlow.lastInboundAt && data.warehouseFlow.lastInboundAt !== data.warehouseFlow.firstInboundAt ? `，最后入库 ${new Date(data.warehouseFlow.lastInboundAt).toLocaleString("zh-CN",{hour12:false})}` : ""}</small></article>
-                <article><span>在库</span><strong>{data.warehouseFlow.packageStatuses?.find(item=>item.status==="in_stock")?.package_count ?? 0}</strong><small>个包装</small></article>
-                <article><span>已分配待出库</span><strong>{data.warehouseFlow.packageStatuses?.find(item=>item.status==="allocated")?.package_count ?? 0}</strong><small>个包装</small></article>
-                <article><span>已出库</span><strong>{data.warehouseFlow.packageStatuses?.find(item=>item.status==="dispatched")?.package_count ?? 0}</strong><small>个包装</small></article>
-                <article><span>移库记录</span><strong>{(data.warehouseFlow.packageStatuses ?? []).reduce((sum,item)=>sum+item.move_count,0)}</strong><small>次</small></article>
-                {(data.warehouseFlow.packageStatuses?.some(item=>item.status==="exception")) && <article className="danger-text"><span>异常</span><strong>{data.warehouseFlow.packageStatuses?.find(item=>item.status==="exception")?.package_count ?? 0}</strong><small>个包装需处理</small></article>}
-              </div>
-              <p className="field-hint">货物状态由仓库端实时维护：收货后在库、分配装载指令后已分配、装车出库交接后已出库；库位调整会记入移库记录。</p>
-            </>
-          ) : (
-            <p className="empty-state">本订单还没有仓库收货记录；到仓收货后会在这里显示入库时间和货物在库状态。</p>
-          )}
-        </BusinessSubsection>
-        <BusinessSubsection title="当前门禁" hint="完成实收登记并确认货齐后，国内运输阶段结束。">
-          <div className="module-capability-grid">
-            <Capability title="到仓收货与货齐确认" text="扫描标签，登记实收数量、重量、体积、库位、货齐状态与异常备注。" href={`/warehouse/acceptance?orderId=${data.order.id}&returnTo=${encodeURIComponent(`/admin/orders/${data.order.id}/modules/warehouse`)}`} />
+
+        <BusinessSubsection title="仓库标签明细" hint="标签号和条码来自仓库验收生成的实际包装；出库后仍保留历史记录。">
+          <div className="table-wrap module-record-table operation-sheet-table warehouse-label-table">
+            <table>
+              <thead><tr><th>标签号</th><th>条码</th><th>货物</th><th>实点件数</th><th>重量 / 体积</th><th>长×宽×高 CM</th><th>仓库 / 库位</th><th>状态</th><th>生成时间</th></tr></thead>
+              <tbody>
+                {packageLabels.map((label) => <tr key={label.id}>
+                  <td><strong>{label.package_number}</strong></td>
+                  <td><code>{label.barcode}</code></td>
+                  <td>{label.line_no ? `${label.line_no}. ` : ""}{label.cargo_name_cn || "未关联货物行"}</td>
+                  <td>{label.pieces}</td>
+                  <td>{label.weight_kg == null ? "—" : `${Number(label.weight_kg).toFixed(2)} KG`}<small>{label.volume_cbm == null ? "—" : `${Number(label.volume_cbm).toFixed(3)} CBM`}</small></td>
+                  <td>{label.length_cm == null || label.width_cm == null || label.height_cm == null ? "—" : `${label.length_cm} × ${label.width_cm} × ${label.height_cm}`}</td>
+                  <td>{label.warehouse_name || "—"}<small>{[label.zone_name,label.location_name,label.location_code && `(${label.location_code})`].filter(Boolean).join(" / ") || "—"}</small></td>
+                  <td><span className={`status-pill ${["in_stock","allocated","dispatched","picked_up"].includes(label.status) ? "success" : label.status === "exception" ? "danger" : ""}`}>{warehousePackageStatusText(label.status)}</span></td>
+                  <td>{new Date(label.created_at).toLocaleString("zh-CN",{hour12:false})}</td>
+                </tr>)}
+                {!packageLabels.length && <tr><td colSpan={9} className="empty-state">尚未验收入库，暂无仓库标签号。</td></tr>}
+              </tbody>
+            </table>
           </div>
-          {!data.warehouseFlow?.inboundReady && <p className="alert warning">国内运输尚未完成：请先完成到仓收货并确认货齐。</p>}
+        </BusinessSubsection>
+
+        <BusinessSubsection title="入库记录与库存状态" hint="入库、分配、出库和移库状态均由仓库包装记录实时汇总。">
+          <div className="table-wrap module-record-table operation-sheet-table warehouse-status-table">
+            <table>
+              <thead><tr><th>首次入库</th><th>最后入库</th><th>收货单</th><th>在库</th><th>已分配</th><th>已出库</th><th>异常</th><th>移库记录</th></tr></thead>
+              <tbody><tr>
+                <td>{hasReceipt && data.warehouseFlow?.firstInboundAt ? new Date(data.warehouseFlow.firstInboundAt).toLocaleString("zh-CN",{hour12:false}) : "—"}</td>
+                <td>{hasReceipt && data.warehouseFlow?.lastInboundAt ? new Date(data.warehouseFlow.lastInboundAt).toLocaleString("zh-CN",{hour12:false}) : "—"}</td>
+                <td>{hasReceipt ? `${data.warehouseFlow?.receiptCount} 张` : "—"}</td>
+                <td>{hasReceipt ? `${packageCount("in_stock")} 个` : "—"}</td>
+                <td>{hasReceipt ? `${packageCount("allocated")} 个` : "—"}</td>
+                <td>{hasReceipt ? `${packageCount("dispatched")} 个` : "—"}</td>
+                <td>{hasReceipt ? `${packageCount("exception")} 个` : "—"}</td>
+                <td>{hasReceipt ? `${packageStatuses.reduce((sum,item)=>sum+item.move_count,0)} 次` : "—"}</td>
+              </tr></tbody>
+            </table>
+          </div>
+        </BusinessSubsection>
+
+        <BusinessSubsection title="仓库办理" hint="实际收货操作继续在仓库端完成；管理端仅提供入口和同步状态。">
+          <div className="table-wrap module-record-table operation-sheet-table warehouse-operation-table">
+            <table>
+              <thead><tr><th>办理事项</th><th>当前状态</th><th>同步结果</th><th>操作</th></tr></thead>
+              <tbody><tr>
+                <td>到仓收货、实点登记与货齐确认</td>
+                <td><span className={`status-pill ${data.warehouseFlow?.inboundReady ? "success" : ""}`}>{data.warehouseFlow?.inboundReady ? "已入库并确认货齐" : data.warehouseFlow?.received ? "已收货，待确认货齐" : "待仓库收货"}</span></td>
+                <td>{data.warehouseFlow?.inboundReady ? "已同步至订单，允许进入装车与出库" : "仓库实点值和标签将在入库后自动显示"}</td>
+                <td><div className="row-actions"><WarehouseSiteButton orderId={data.order.id} targetPath="/warehouse/acceptance" className="primary">{data.warehouseFlow?.inboundReady ? "查看收货记录" : "去仓库收货"}</WarehouseSiteButton>{data.warehouseFlow?.inboundReady && <Link className="secondary" to={`/admin/orders/${data.order.id}/modules/loading#module-business-data`}>进入装车与出库</Link>}</div></td>
+              </tr></tbody>
+            </table>
+          </div>
         </BusinessSubsection>
       </div>
     );
+  }
   if (code === "review" && data.orderReview) {
     const review = data.orderReview;
     const canGenerate = manage;
@@ -5959,7 +6041,7 @@ function ModuleBusinessData({
       <div className="module-business-stack dense-module-stack order-review-workbench">
         <BusinessSubsection
           title="复盘结论与完成判定"
-          hint="业务完成不要求所有款项已收已付；未结余额继续进入财务待办。"
+          hint="完成复盘前必须完成应收、应付的收付款与核销，并确保所有币种未结余额为零。"
         >
           <div className="order-review-status-row">
             <span className={`status-pill review-status-${review.completionStatus}`}>
@@ -5973,26 +6055,24 @@ function ModuleBusinessData({
           </div>
           {review.blockers.length ? (
             <div className="review-blocker-list">
-              <strong>完成阻断</strong>
+              <strong>异常通知</strong>
               {review.blockers.map((blocker) => (
                 <Link key={blocker.code} to={blocker.href}>
-                  {blocker.message} <span>查看阻断并处理 →</span>
+                  {blocker.message} <span>查看并处理 →</span>
                 </Link>
               ))}
             </div>
           ) : (
-            <p className="alert success">业务完成条件已满足；生成复盘后系统将按余额自动判断是否结清。</p>
+            <p className="alert success">业务条件、收付款与核销均已闭环；生成复盘后可完成订单。</p>
           )}
         </BusinessSubsection>
 
         <BusinessSubsection title="时效复盘" hint="所有时间均来自对应业务模块的实际记录，不要求重复填写。">
-          <div className="review-timing-grid">
-            {timings.map(([label, value]) => (
-              <article key={label} className={value ? "done" : "pending"}>
-                <span>{label}</span>
-                <strong>{reviewDate(value)}</strong>
-              </article>
-            ))}
+          <div className="table-wrap module-record-table review-timing-table">
+            <table>
+              <thead><tr>{timings.map(([label]) => <th key={label}>{label}</th>)}</tr></thead>
+              <tbody><tr>{timings.map(([label, value]) => <td className={value ? "completed-cell" : "pending-cell"} key={label}><strong>{reviewDate(value)}</strong></td>)}</tr></tbody>
+            </table>
           </div>
         </BusinessSubsection>
 
@@ -6033,17 +6113,17 @@ function ModuleBusinessData({
         </BusinessSubsection>
 
         <BusinessSubsection title="异常与人员" hint="自动汇总系统记录，客户异议与复盘结论由复盘人补充。">
-          <div className="module-summary-cards review-summary-cards">
-            <article><span>货差</span><strong>{review.exceptions.cargoDifferenceCount}</strong><small>最大 {review.exceptions.maxCargoDifferencePercent.toFixed(1)}%</small></article>
-            <article><span>未关闭异常</span><strong>{review.exceptions.openWarehouseExceptionCount}</strong><small>仓库异常</small></article>
-            <article><span>延误</span><strong>{review.exceptions.delayDays}</strong><small>天</small></article>
-            <article><span>费用调整</span><strong>{review.exceptions.costAdjustmentCount}</strong><small>条</small></article>
-          </div>
-          <div className="company-profile review-people-grid">
-            <Info label="业务员" value={review.people.salesperson || "—"} />
-            <Info label="主操作" value={review.people.mainOperator || "—"} />
-            <Info label="仓库经办" value={review.people.warehouseHandler || "—"} />
-            <Info label="财务经办" value={review.people.financeHandler || "—"} />
+          <ModuleSummaryTable className="review-summary-table" items={[
+            { label: "货差", value: review.exceptions.cargoDifferenceCount, detail: `最大 ${review.exceptions.maxCargoDifferencePercent.toFixed(1)}%` },
+            { label: "未关闭异常", value: review.exceptions.openWarehouseExceptionCount, detail: "仓库异常" },
+            { label: "延误", value: review.exceptions.delayDays, detail: "天" },
+            { label: "费用调整", value: review.exceptions.costAdjustmentCount, detail: "条" },
+          ]} />
+          <div className="table-wrap module-record-table review-people-table">
+            <table>
+              <thead><tr><th>业务员</th><th>主操作</th><th>仓库经办</th><th>财务经办</th></tr></thead>
+              <tbody><tr><td>{review.people.salesperson || "—"}</td><td>{review.people.mainOperator || "—"}</td><td>{review.people.warehouseHandler || "—"}</td><td>{review.people.financeHandler || "—"}</td></tr></tbody>
+            </table>
           </div>
         </BusinessSubsection>
 
@@ -6071,23 +6151,16 @@ function ModuleBusinessData({
   if (code === "exceptions")
     return (
       <div className="module-business-stack dense-module-stack">
-        <div className="module-capability-grid">
-          <Capability
-            title="异常登记"
-            text="支持资料、货损、短少、多货、错标、报关、配载、运输和费用异常。"
-          />
-          <Capability
-            title="证据与责任"
-            text="上传现场图片、记录严重等级、责任人和处理期限。"
-          />
-          <Capability
-            title="冻结与解除"
-            text="异常期间冻结相关业务动作，结案后解除。"
-          />
-          <Capability
-            title="客户沟通"
-            text="区分内部说明与客户可见的处理进展。"
-          />
+        <div className="table-wrap module-record-table exception-capability-table">
+          <table>
+            <thead><tr><th>处理环节</th><th>业务范围</th><th>办理位置</th></tr></thead>
+            <tbody>
+              <tr><td><strong>异常登记</strong></td><td>资料、货损、短少、多货、错标、报关、配载、运输和费用异常</td><td rowSpan={4}>仓库异常工作台</td></tr>
+              <tr><td><strong>证据与责任</strong></td><td>上传现场图片、记录严重等级、责任人和处理期限</td></tr>
+              <tr><td><strong>冻结与解除</strong></td><td>异常期间冻结相关业务动作，结案后解除</td></tr>
+              <tr><td><strong>客户沟通</strong></td><td>区分内部说明与客户可见的处理进展</td></tr>
+            </tbody>
+          </table>
         </div>
         <Form method="post" action="/switch-site" className="module-external-form">
           <input type="hidden" name="target" value="warehouse" />
@@ -6106,21 +6179,6 @@ function ModuleBusinessData({
     </p>
   );
 }
-function CustomsDeclarationGatePanel({ gate }: { gate: ReturnType<typeof customsDeclarationGate> }) {
-  const tone = gate.ready ? "done" : gate.total ? "urgent" : "";
-  return <section className={`customs-action-panel ${tone}`}>
-    <div className="customs-action-copy">
-      <span>起运地报关门禁</span>
-      <h3>{gate.ready ? "全部有效报关单已放行" : gate.total ? `还有 ${gate.pending} 张报关单待放行` : "尚未录入有效起运地报关单"}</h3>
-      <p>{gate.ready ? `已放行 ${gate.released}/${gate.total} 张，可以继续校验出境门禁。` : gate.total ? `当前已放行 ${gate.released}/${gate.total} 张。所有未删单的起运地报关单都放行后，门禁才会通过。` : "新增第一张起运地报关单并完成海关放行后，系统才会开放出境门禁。"}</p>
-    </div>
-    <div className="customs-action-state">
-      <strong>{gate.released}/{gate.total}</strong>
-      <span>有效报关单已放行</span>
-    </div>
-  </section>;
-}
-
 function CustomsDeclarationFlags({ declaration }: { declaration: CustomsDeclaration }) {
   const flags = [
     declaration.is_deleted ? "删单" : "",
@@ -6140,9 +6198,9 @@ function CustomsDeclarationAction({ declaration, manage, busy, fields }: { decla
     {manage ? <Modal title={`编辑报关单 · ${declaration.declaration_number}`} triggerLabel="编辑" triggerClassName="text-button" size="wide">
       <CustomsDeclarationForm declaration={declaration} busy={busy} fields={fields} lockStatus submitLabel="保存修改" />
     </Modal> : <button type="button" className="text-button" disabled title="当前账号只读">编辑</button>}
-    {manage && canRelease ? <Modal title={`确认海关放行 · ${declaration.declaration_number}`} triggerLabel="放行" triggerClassName="text-button" size="normal">
-      <CustomsDeclarationReleaseForm declaration={declaration} busy={busy} />
-    </Modal> : <button type="button" className="text-button" disabled title={declaration.status === "released" ? "该报关单已放行" : declaration.is_deleted ? "已删单的报关单不能放行" : "当前账号只读"}>放行</button>}
+    {manage && canRelease
+      ? <CustomsDeclarationInlineRelease declaration={declaration} busy={busy} />
+      : <button type="button" className="text-button" disabled title={declaration.status === "released" ? "该报关单已放行" : declaration.is_deleted ? "已删单的报关单不能放行" : "当前账号只读"}>放行</button>}
   </div>;
 }
 
@@ -6163,8 +6221,15 @@ function CustomsDeclarationView({ declaration }: { declaration: CustomsDeclarati
   </dl>;
 }
 
-function CustomsDeclarationReleaseForm({ declaration, busy }: { declaration: CustomsDeclaration; busy: boolean }) {
-  return <Form method="post" className="stack">
+function CustomsDeclarationInlineRelease({ declaration, busy }: { declaration: CustomsDeclaration; busy: boolean }) {
+  return <Form method="post" className="customs-inline-release-form">
+    <CustomsDeclarationReleaseFields declaration={declaration} releasedAt={new Date().toISOString()} />
+    <button className="primary" disabled={busy}>确认放行</button>
+  </Form>;
+}
+
+function CustomsDeclarationReleaseFields({ declaration, releasedAt }: { declaration: CustomsDeclaration; releasedAt?: string }) {
+  return <>
     <input type="hidden" name="intent" value="customs_declaration_save" />
     <input type="hidden" name="declarationId" value={declaration.id} />
     <input type="hidden" name="customsRecordId" value={declaration.customs_record_id} />
@@ -6179,16 +6244,24 @@ function CustomsDeclarationReleaseForm({ declaration, busy }: { declaration: Cus
     <input type="hidden" name="currency" value={declaration.currency} />
     <input type="hidden" name="grossWeightKg" value={declaration.gross_weight_kg} />
     <input type="hidden" name="changeReason" value={declaration.change_reason || ""} />
+    {releasedAt && <input type="hidden" name="releasedAt" value={toDateTimeInput(releasedAt)} />}
     {declaration.is_redeclared === 1 && <input type="hidden" name="isRedeclared" value="on" />}
     {declaration.is_amended === 1 && <input type="hidden" name="isAmended" value="on" />}
     {declaration.is_inspected === 1 && <input type="hidden" name="isInspected" value="on" />}
-    <div className="alert warning">请确认报关单 <strong>{declaration.declaration_number}</strong> 已获得海关放行。确认后将重新计算订单的报关门禁。</div>
-    <label className="field">
-      <span>放行时间 <b className="required-mark">*</b></span>
-      <input name="releasedAt" type="datetime-local" defaultValue={toDateTimeInput(new Date().toISOString())} required />
-    </label>
-    <button className="primary" disabled={busy}>确认放行</button>
-  </Form>;
+  </>;
+}
+
+function customsValueMissing(value: unknown) {
+  const normalized = String(value ?? "").trim();
+  return !normalized || normalized === "未配置" || normalized === "—";
+}
+
+function customsDisplayValue(value: unknown) {
+  return customsValueMissing(value) ? "未填写" : String(value);
+}
+
+function CustomsMissingValue({ label }: { label?: string }) {
+  return <span className="customs-missing-value">{label ? `${label}未填写` : "未填写"}</span>;
 }
 
 function CustomsDeclarationForm({ busy, declaration, fields, lockStatus = false, submitLabel }: { busy: boolean; declaration?: CustomsDeclaration; fields: WorkflowFieldState[]; lockStatus?: boolean; submitLabel?: string }) {
@@ -6254,7 +6327,7 @@ function CustomsDeclarationForm({ busy, declaration, fields, lockStatus = false,
     <ModuleField fields={fields} fieldKey="declaration_change_reason" label="申报变更原因" className="field span-2">
       {(required) => <textarea name="changeReason" rows={3} defaultValue={declaration?.change_reason ?? ""} required={required || isDeleted} placeholder={isDeleted ? "删单时必须说明原因；重报后请另建新报关单" : "发生删单、重报、改单或查验时填写"} />}
     </ModuleField>
-    <button className="primary span-2" disabled={busy}>{submitLabel || (isDeleted ? "保存删单状态并重算门禁" : status === "released" ? "保存并确认放行" : "保存申报单")}</button>
+    <button className="primary span-2" disabled={busy}>{submitLabel || (isDeleted ? "保存删单状态" : status === "released" ? "保存并确认放行" : "保存申报单")}</button>
   </Form>;
 }
 
@@ -6550,64 +6623,60 @@ function ReviewCargoRow({label,pieces,weight,volume}:{label:string;pieces:number
 function reviewDate(value:string|null) {
   return value ? new Date(value).toLocaleString("zh-CN") : "待记录";
 }
-function OrderApprovalReview({order,cargo,busy}:{order:OrderSummary;cargo:Cargo[];busy:boolean}) {
-  const businessTypeLabel=order.business_type === "ltl" ? "零担" : order.business_type === "ftl" ? "整车" : "待同步报价（不可后改）";
-  const location=(country:string,state:string|null,city:string,address:string)=>[country,state,city,address].filter(Boolean).join(" ") || "—";
-  const cargoTotals=cargo.reduce((total,item)=>({
-    packages:total.packages+item.package_count,
-    pieces:total.pieces+item.package_count*item.pieces_per_package,
-    grossWeight:total.grossWeight+item.package_count*item.gross_weight_per_package_kg,
-    volume:total.volume+item.package_count*item.volume_per_package_cbm,
-  }),{packages:0,pieces:0,grossWeight:0,volume:0});
-  return <div className="assignment-review-dialog">
-    <section>
-      <h3>订单资料</h3>
-      <div className="table-wrap assignment-review-table">
-        <table>
-          <tbody>
-            <tr><th>订单号</th><td>{order.order_number}</td><th>接单日期</th><td>{order.order_date || "—"}</td></tr>
-            <tr><th>委托客户</th><td>{order.customer_name}</td><th>业务性质</th><td>{businessNatureLabels[order.business_nature] || order.business_nature || "—"}</td></tr>
-            <tr><th>运输方案</th><td>{businessTypeLabel}</td><th>订单状态</th><td>待审核</td></tr>
-            <tr><th>清关责任</th><td>{order.customs_clearance_mode === "customer" ? "客户自理清关" : "公司代办清关"}</td><th>境外目的仓</th><td>{order.overseas_warehouse_name || "—"}</td></tr>
-            <tr><th>发货方</th><td>{order.shipper_name || "—"}</td><th>联系人/电话</th><td>{[order.shipper_contact,order.shipper_phone].filter(Boolean).join(" / ") || "—"}</td></tr>
-            <tr><th>提货地址</th><td colSpan={3}>{location(order.origin_country,order.origin_state,order.origin_city,order.origin_address)}</td></tr>
-            <tr><th>收货方</th><td>{order.consignee_name || "—"}</td><th>联系人/电话</th><td>{[order.consignee_contact,order.consignee_phone].filter(Boolean).join(" / ") || "—"}</td></tr>
-            <tr><th>送货地址</th><td colSpan={3}>{location(order.destination_country,order.destination_state,order.destination_city,order.destination_address)}</td></tr>
-            <tr><th>要求提货日</th><td>{order.requested_pickup_date || "—"}</td><th>要求送达日</th><td>{order.requested_delivery_date || "—"}</td></tr>
-            <tr><th>货好时间</th><td>{order.cargo_ready_at ? formatDateTime(order.cargo_ready_at) : "—"}</td><th>RO 代理</th><td>{order.ro_agent || "—"}</td></tr>
-            <tr><th>备注</th><td colSpan={3}>{order.special_instructions || "—"}</td></tr>
-          </tbody>
-        </table>
+function OrderApprovalReview({
+  data,
+  manage,
+  canApproveConsignment,
+  busy,
+}: {
+  data: Route.ComponentProps["loaderData"];
+  manage: boolean;
+  canApproveConsignment: boolean;
+  busy: boolean;
+}) {
+  const { order, cargo } = data;
+  const cargoTotals = cargo.reduce((total, item) => ({
+    pieces: total.pieces + item.package_count * item.pieces_per_package,
+    grossWeight: total.grossWeight + item.package_count * item.gross_weight_per_package_kg,
+    volume: total.volume + item.package_count * item.volume_per_package_cbm,
+  }), { pieces: 0, grossWeight: 0, volume: 0 });
+  const pickupAddress = [order.origin_country, order.origin_state, order.origin_city, order.origin_address]
+    .filter(Boolean)
+    .join(" ");
+  return <div className="approval-sheet">
+    <section className="approval-section">
+      <header><strong>审批资料一览</strong><span>详细委托资料可在右侧“订单关键资料”查看</span></header>
+      <div className="approval-facts">
+        <Info label="客户" value={order.customer_name} className="span-2" />
+        <Info label="关联报价" value={order.quote_number || "历史订单"} />
+        <Info label="订单类型" value={`${order.business_type === "ltl" ? "拼车" : "整车"} · 报价锁定`} />
+        <Info label="提货地址" value={pickupAddress} className="span-2" />
+        <Info label="预约提货" value={order.requested_pickup_date || "—"} />
+        <Info label="清关方式" value={order.customs_clearance_mode === "customer" ? "客户自理清关" : "公司代办清关"} />
+        <Info label="货物" value={`${cargo.map((item) => item.cargo_name_cn).filter(Boolean).join("、") || "—"} · ${cargoTotals.pieces} 件`} className="span-2" />
+        <Info label="预录数据" value={`${cargoTotals.grossWeight.toFixed(3)} KG · ${cargoTotals.volume.toFixed(4)} CBM`} />
+        <Info label="境外目的仓" value={order.overseas_warehouse_name || "—"} />
       </div>
     </section>
-    <section>
-      <div className="assignment-review-section-head">
-        <h3>货物明细</h3>
-        <span>{cargoTotals.packages} 包装 · {cargoTotals.pieces} 件 · {cargoTotals.grossWeight.toFixed(3)} KG · {cargoTotals.volume.toFixed(4)} CBM</span>
-      </div>
-      <div className="table-wrap assignment-review-cargo-table">
-        <table>
-          <thead><tr><th>品名 / HS Code</th><th>包装</th><th>件数</th><th>毛重</th><th>体积</th><th>申报价值</th><th>品牌/唛头</th></tr></thead>
-          <tbody>
-            {cargo.map(item=><tr key={item.id}>
-              <td><strong>{item.cargo_name_cn}</strong><small>{item.cargo_name_en || "—"} · {item.hs_code || "无 HS Code"}</small></td>
-              <td>{item.package_type} × {item.package_count}</td>
-              <td>{item.package_count*item.pieces_per_package}</td>
-              <td>{(item.package_count*item.gross_weight_per_package_kg).toFixed(3)} KG</td>
-              <td>{(item.package_count*item.volume_per_package_cbm).toFixed(4)} CBM</td>
-              <td>{item.currency} {item.declared_value.toLocaleString()}</td>
-              <td>{[item.brand_model,item.marks].filter(Boolean).join(" / ") || "—"}</td>
-            </tr>)}
-            {!cargo.length&&<tr><td colSpan={7} className="empty-state">暂无货物明细，不能审批。</td></tr>}
-          </tbody>
-        </table>
+    <ModuleSourceDocuments
+      code="consignment"
+      data={data}
+      manage={manage}
+      canApproveConsignment={canApproveConsignment}
+      busy={busy}
+    />
+    <section className="approval-section approval-decision">
+      <header><strong>审批意见</strong><span>审批通过后进入任务分配</span></header>
+      <div className="approval-decision-fields">
+        <label><span>审批结果 <b>*</b></span><select className="control filled" aria-label="审批结果" defaultValue="approved"><option value="approved">通过</option></select></label>
+        <label><span>审批意见</span><input className="control editing" form="consignment-approval-form" name="notes" defaultValue="资料完整，同意进入任务分配" /></label>
       </div>
     </section>
-    <Form method="post" className="assignment-review-action">
+    <Form method="post" id="consignment-approval-form" className="approval-footer">
       <input type="hidden" name="intent" value="workflow_action" />
       <input type="hidden" name="actionCode" value="approve" />
-      <span>确认以上订单资料真实、完整后再执行审批。审批通过后进入负责人分配。</span>
-      <button className="primary" disabled={busy || !cargo.length}>审批通过</button>
+      <div><strong>审批通过并进入任务分配</strong><span>系统校验委托书和订单资料后自动推进，不返回订单列表。</span></div>
+      <button className="primary" disabled={busy || !cargo.length || !canApproveConsignment}>审批通过并进入任务分配 →</button>
     </Form>
   </div>;
 }
@@ -6615,38 +6684,82 @@ function Info({
   label,
   value,
   className,
+  state,
 }: {
   label: string;
   value: string;
   className?: string;
+  state?: "filled" | "optional-empty" | "required-missing";
 }) {
   return (
     <div className={className}>
       <span>{label}</span>
       <strong>{value || "\u00a0"}</strong>
+      {state && <em className={`field-state ${state}`}>{state === "filled" ? "已填" : state === "required-missing" ? "必填但未填" : "未填"}</em>}
     </div>
   );
 }
 function BusinessSubsection({
   title,
   hint,
+  tag,
+  className,
   children,
 }: {
   title: string;
   hint?: string;
+  tag?: string;
+  className?: string;
   children: ReactNode;
 }) {
   return (
-    <section className="module-business-section">
+    <section className={`module-business-section${className ? ` ${className}` : ""}`}>
       <header>
         <div>
           <h3>{title}</h3>
           {hint && <p>{hint}</p>}
         </div>
+        {tag && <span className="module-business-tag">{tag}</span>}
       </header>
       {children}
     </section>
   );
+}
+
+function ModuleSummaryTable({
+  items,
+  className,
+}: {
+  items: Array<{ label: string; value: ReactNode; detail?: ReactNode }>;
+  className?: string;
+}) {
+  return <div className={["table-wrap", "module-record-table", "module-summary-table", className].filter(Boolean).join(" ")}>
+    <table>
+      <thead><tr>{items.map((item) => <th key={item.label}>{item.label}</th>)}</tr></thead>
+      <tbody><tr>{items.map((item) => <td key={item.label}><strong>{item.value}</strong>{item.detail !== undefined && <small>{item.detail}</small>}</td>)}</tr></tbody>
+    </table>
+  </div>;
+}
+
+function InformationTable({
+  items,
+  fields,
+  className,
+}: {
+  items: Array<{ label: string; value: ReactNode; fieldKey?: string }>;
+  fields?: WorkflowFieldState[];
+  className?: string;
+}) {
+  const visibleItems = items.filter((item) => !item.fieldKey || !fields || workflowFieldPolicy(fields, item.fieldKey).visible);
+  return <div className={["table-wrap", "module-record-table", "information-table", className].filter(Boolean).join(" ")}>
+    <table>
+      <thead><tr>{visibleItems.map((item) => {
+        const policy = item.fieldKey && fields ? workflowFieldPolicy(fields, item.fieldKey) : null;
+        return <th key={item.fieldKey || item.label}>{policy?.label || item.label}{policy?.required ? " *" : ""}</th>;
+      })}</tr></thead>
+      <tbody><tr>{visibleItems.map((item) => <td key={item.fieldKey || item.label}>{item.value || "—"}</td>)}</tr></tbody>
+    </table>
+  </div>;
 }
 
 function ExpenseEditForm({
@@ -6762,16 +6875,11 @@ function ExpenseDirectionWorkflow({
   ] as const;
   return (
     <div className="expense-direction-flow">
-      <div className="loading-selection-summary">
-        <span><strong>{progress}%</strong> 已完成</span>
-        <span>下一步：{hasExpenses ? nextAction : "先录入费用"}</span>
-      </div>
-      <div className="expense-direction-steps">
-        {steps.map(([label, complete]) => (
-          <span className={complete ? "done" : ""} key={label}>
-            <b>{complete ? "✓" : "·"}</b>{label}
-          </span>
-        ))}
+      <div className="table-wrap module-record-table expense-direction-table">
+        <table>
+          <thead><tr><th>完成进度</th>{steps.map(([label]) => <th key={label}>{label}</th>)}<th>下一步</th></tr></thead>
+          <tbody><tr><td><strong>{progress}%</strong></td>{steps.map(([label, complete]) => <td className={complete ? "completed-cell" : "pending-cell"} key={label}><span className={`status-pill ${complete ? "success" : "off"}`}>{complete ? "已完成" : "待办理"}</span></td>)}<td>{hasExpenses ? nextAction : "先录入费用"}</td></tr></tbody>
+        </table>
       </div>
       {manage && hasExpenses && action && (
         <Form method="post" className="expense-direction-action">
