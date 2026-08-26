@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
-import { useEffect, useId, useState } from "react";
-import { Form, Link, useNavigate, useNavigation } from "react-router";
+import { useEffect, useId, useRef, useState } from "react";
+import { Link, useNavigate, useNavigation, useSubmit } from "react-router";
 import type { Route } from "./+types/warehouse.loading-documents";
 import { Modal } from "../components/Modal";
 import { writeAudit } from "../lib/audit.server";
@@ -264,33 +264,56 @@ function OrderDocumentUploadModal({
   busy: boolean;
   actionData: Route.ComponentProps["actionData"];
 }) {
-  const formId = `order-document-upload-${useId().replace(/:/g, "")}`;
+  const controlPrefix = `order-document-upload-${useId().replace(/:/g, "")}`;
+  const submit = useSubmit();
+  const movingToPreview = useRef(false);
   const [selectedFiles, setSelectedFiles] = useState<Partial<Record<LoadingDocumentCode, File>>>({});
+  const [selectionSignal, setSelectionSignal] = useState(0);
   const [previewSignal, setPreviewSignal] = useState(0);
   const selectedCount = Object.values(selectedFiles).filter(Boolean).length;
   useEffect(() => {
     if (actionData?.uploadedAt) setSelectedFiles({});
   }, [actionData?.uploadedAt]);
-  return <Modal
-    title={`上传订单文件 · ${order.order_number}`}
-    triggerLabel="上传文件"
-    triggerClassName="secondary warehouse-order-upload-trigger"
-    size="wide"
-    closeSignal={actionData?.uploadedAt}
-    onClose={() => setSelectedFiles({})}
-  >{({ close }) => <>
-    <Form id={formId} method="post" encType="multipart/form-data" className="warehouse-order-document-upload-form">
-      <input type="hidden" name="intent" value="upload_many"/>
-      <input type="hidden" name="batchId" value={batchId}/>
-      <input type="hidden" name="orderId" value={order.order_id}/>
-      <input type="hidden" name="warehouseId" value={warehouseId}/>
+  const openPreview = (closeSelection: () => void) => {
+    movingToPreview.current = true;
+    closeSelection();
+    setPreviewSignal((value) => value + 1);
+  };
+  const uploadSelectedFiles = () => {
+    const formData = new FormData();
+    formData.set("intent", "upload_many");
+    formData.set("batchId", batchId);
+    formData.set("orderId", order.order_id);
+    formData.set("warehouseId", warehouseId);
+    for (const documentType of LOADING_DOCUMENTS) {
+      const file = selectedFiles[documentType.code];
+      if (file) formData.set(`attachment_${documentType.code}`, file);
+    }
+    submit(formData, { method: "post", encType: "multipart/form-data" });
+  };
+  return <>
+    <Modal
+      title={`上传订单文件 · ${order.order_number}`}
+      triggerLabel="上传文件"
+      triggerClassName="secondary warehouse-order-upload-trigger"
+      size="wide"
+      openSignal={selectionSignal || undefined}
+      closeSignal={actionData?.uploadedAt}
+      onClose={() => {
+        if (movingToPreview.current) {
+          movingToPreview.current = false;
+          return;
+        }
+        setSelectedFiles({});
+      }}
+    >{({ close }) => <section className="warehouse-order-document-upload-form">
       <div className="warehouse-order-document-context"><span>挂载订单</span><strong>{order.order_number}</strong><small>{order.customer_name} · {order.cargo_names || "货物名称未填写"}</small></div>
       <div className="warehouse-order-document-picker" role="table" aria-label="选择订单文件">
         <div className="warehouse-order-document-picker-head" role="row"><span role="columnheader">文件类型</span><span role="columnheader">当前文件</span><span role="columnheader">本次选择</span><span role="columnheader">操作</span></div>
         {LOADING_DOCUMENTS.map((documentType) => {
           const current = documents.find((item) => item.document_category === documentType.code);
           const selectedFile = selectedFiles[documentType.code];
-          const inputId = `${formId}-${documentType.code}`;
+          const inputId = `${controlPrefix}-${documentType.code}`;
           return <div className="warehouse-order-document-picker-row" role="row" key={documentType.code}>
             <strong role="cell">{documentType.name}</strong>
             <span role="cell">{current ? <><a href={current.data_url} target="_blank" rel="noreferrer">{current.file_name}</a><small>{reviewStatusLabel(current.review_status)}</small></> : <em>尚未上传</em>}</span>
@@ -303,8 +326,8 @@ function OrderDocumentUploadModal({
         })}
       </div>
       <p className="warehouse-order-document-help">支持 PDF、Word、Excel、JPG、PNG、WEBP；单个文件不超过 1.2MB。本次未选择的已有文件不会改变。</p>
-      <footer><button type="button" className="secondary" onClick={close}>取消</button><button type="button" className="primary" disabled={!selectedCount} onClick={() => setPreviewSignal((value) => value + 1)}>查看并确认（{selectedCount}）</button></footer>
-    </Form>
+      <footer><button type="button" className="secondary" onClick={() => { setSelectedFiles({}); close(); }}>取消</button><button type="button" className="primary" disabled={!selectedCount} onClick={() => openPreview(close)}>查看并确认（{selectedCount}）</button></footer>
+    </section>}</Modal>
     <Modal title={`文件总览 · ${order.order_number}`} size="xwide" openSignal={previewSignal || undefined} closeSignal={actionData?.uploadedAt}>{({ close: closePreview }) =>
       <section className="warehouse-order-document-preview">
         <header><div><span>第二步 / 共两步</span><strong>确认本次订单文件</strong></div><p>确认后才会正式上传；已有同类型文件将保留为历史版本。</p></header>
@@ -315,10 +338,10 @@ function OrderDocumentUploadModal({
           return <tr key={documentType.code}><td><strong>{documentType.name}</strong></td><td>{current ? <a href={current.data_url} target="_blank" rel="noreferrer">{current.file_name}</a> : "—"}</td><td>{selectedFile ? <><strong>{selectedFile.name}</strong><small>{formatFileSize(selectedFile.size)} · {selectedFile.type || "未知格式"}</small></> : "—"}</td><td><span className={`status-pill ${selectedFile ? "success" : current ? "" : "off"}`}>{selectedFile ? current ? "上传新版本" : "新增文件" : current ? "保留当前" : "仍缺失"}</span></td></tr>;
         })}</tbody></table></div>
         <div className="warehouse-order-document-preview-grid">{LOADING_DOCUMENTS.map((documentType) => <OrderDocumentPreview key={documentType.code} documentType={documentType} selectedFile={selectedFiles[documentType.code]} current={documents.find((item) => item.document_category === documentType.code)}/>)}</div>
-        <footer><span>本次将上传 {selectedCount} 个文件</span><div><button type="button" className="secondary" onClick={closePreview}>返回修改</button><button type="submit" form={formId} className="primary" disabled={busy}>{busy ? "正在上传…" : "确认并上传"}</button></div></footer>
+        <footer><span>本次将上传 {selectedCount} 个文件</span><div><button type="button" className="secondary" onClick={() => { closePreview(); setSelectionSignal((value) => value + 1); }}>返回修改</button><button type="button" className="primary" disabled={busy} onClick={uploadSelectedFiles}>{busy ? "正在上传…" : "确认并上传"}</button></div></footer>
       </section>
     }</Modal>
-  </>}</Modal>;
+  </>;
 }
 
 function OrderDocumentPreview({ documentType, selectedFile, current }: { documentType: (typeof LOADING_DOCUMENTS)[number]; selectedFile?: File; current?: DocumentRow }) {

@@ -20023,7 +20023,7 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
 }
 .warehouse-order-document-preview-grid article {
   min-width: 0;
-  min-height: 470px;
+  min-height: 410px;
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--line);
@@ -20044,15 +20044,15 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
 .warehouse-order-document-preview-grid article > img,
 .warehouse-order-document-preview-grid article > iframe {
   width: 100%;
-  height: min(72vh, 820px);
-  min-height: 420px;
+  height: min(58vh, 640px);
+  min-height: 360px;
   border: 0;
   object-fit: contain;
   background: #eef2f5;
 }
 .warehouse-order-document-preview-grid article > img { padding: 14px; }
 .warehouse-order-document-preview-grid article > iframe { padding: 0; }
-.warehouse-order-document-preview-grid article > div { min-height: 420px; padding: 24px; display: grid; place-content: center; text-align: center; }
+.warehouse-order-document-preview-grid article > div { min-height: 360px; padding: 24px; display: grid; place-content: center; text-align: center; }
 .warehouse-order-document-preview-grid article > div b,
 .warehouse-order-document-preview-grid article > div small,
 .warehouse-order-document-preview-grid article > div a { display: block; overflow-wrap: anywhere; }
@@ -20082,10 +20082,10 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
 .modal-card.xwide:has(.warehouse-loading-document-dialog) .modal-header h2 { font-size: 14px; }
 .modal-card.xwide:has(.warehouse-loading-document-dialog) .modal-body { padding: 10px; }
 .modal-card.xwide:has(.warehouse-order-document-preview) {
-  width: calc(100vw - 16px);
-  height: calc(100dvh - 16px);
-  max-height: calc(100dvh - 16px);
-  border-radius: 6px;
+  width: min(1180px, calc(100vw - 48px));
+  height: min(860px, calc(100dvh - 48px));
+  max-height: calc(100dvh - 48px);
+  border-radius: 8px;
 }
 .modal-card.xwide:has(.warehouse-order-document-preview) .modal-header { min-height: 52px; padding: 9px 16px; flex: 0 0 auto; }
 .modal-card.xwide:has(.warehouse-order-document-preview) .modal-header h2 { font-size: 14px; }
