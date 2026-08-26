@@ -333,7 +333,7 @@ function OrderDocumentPreview({ documentType, selectedFile, current }: { documen
   const contentType = selectedFile?.type || current?.data_url.match(/^data:([^;,]+)/)?.[1] || "";
   return <article className={!previewUrl ? "empty" : ""}>
     <header><strong>{documentType.name}</strong><span>{selectedFile ? "本次选择" : current ? "当前版本" : "尚未上传"}</span></header>
-    {previewUrl && contentType.startsWith("image/") ? <img src={previewUrl} alt={`${documentType.name}预览`}/> : previewUrl && contentType === "application/pdf" ? <iframe src={previewUrl} title={`${documentType.name} PDF 预览`}/> : <div><b>{selectedFile?.name || current?.file_name || "无文件"}</b><small>{previewUrl ? "该格式请下载或在新窗口查看" : "本次仍未提供该文件"}</small>{current && !selectedFile && <a href={current.data_url} target="_blank" rel="noreferrer">打开当前文件</a>}</div>}
+    {previewUrl && contentType.startsWith("image/") ? <img src={previewUrl} alt={`${documentType.name}预览`}/> : previewUrl && contentType === "application/pdf" ? <iframe src={previewUrl} title={`${documentType.name} PDF 预览`}/> : <div><b>{selectedFile?.name || current?.file_name || "无文件"}</b><small>{previewUrl ? "该格式请在新窗口打开检查" : "本次仍未提供该文件"}</small>{previewUrl && <a href={previewUrl} target="_blank" rel="noreferrer">{selectedFile ? "打开本次文件" : "打开当前文件"}</a>}</div>}
   </article>;
 }
 
