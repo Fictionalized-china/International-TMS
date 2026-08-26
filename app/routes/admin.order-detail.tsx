@@ -809,6 +809,7 @@ function LinearOrderSideRail({
   const receivedSummary = data.packageLabels.length
     ? `${received.pieces} 件 · ${received.weight.toFixed(2)} KG · ${received.volume.toFixed(3)} CBM`
     : "等待仓库实收";
+  const markLabelReady = ["confirmed", "in_execution", "completed"].includes(order.status);
 
   return <aside className="linear-order-side" aria-label="订单关键资料与快捷查看">
     <section className="linear-side-panel linear-side-panel-clickable" role="button" tabIndex={0} onClick={() => onOpen("dossier")} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onOpen("dossier"); }}>
@@ -825,6 +826,7 @@ function LinearOrderSideRail({
       <header><b>就地查看</b></header>
       <div className="linear-side-links">
         <button type="button" onClick={() => onOpen("dossier")}><span>订单全部资料</span><i>→</i></button>
+        <button type="button" onClick={() => onOpen("dossier")}><span>入仓唛头标签</span><small>{markLabelReady ? "已生成" : "待审核"}</small><i>→</i></button>
         <button type="button" onClick={() => onOpen("cargo")}><span>货物与标签</span><small>{data.packageLabels.length} 张</small><i>→</i></button>
         <button type="button" onClick={() => onOpen("attachments")}><span>文件汇总</span><small>{data.attachments.length} 个</small><i>→</i></button>
         <button type="button" onClick={() => onOpen("history")}><span>历史节点与日志</span><small>{data.history.length + data.macro.length} 条</small><i>→</i></button>
@@ -849,6 +851,7 @@ function LinearOrderDrawer({
   onClose: () => void;
 }) {
   const order = data.order;
+  const markLabelReady = ["confirmed", "in_execution", "completed"].includes(order.status);
   return (
     <div className="linear-drawer-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <aside className="linear-order-drawer" role="dialog" aria-modal="true" aria-label="订单辅助资料">
@@ -864,6 +867,20 @@ function LinearOrderDrawer({
         </nav>
         <div className={`linear-drawer-body is-${activeTab}`}>
           {activeTab === "dossier" && <>
+            <section className={`linear-drawer-section order-mark-portal${markLabelReady ? " ready" : " pending"}`}>
+              <h3>入仓唛头标签 <span>{markLabelReady ? "审核通过 · 已生成" : "订单审核通过后生成"}</span></h3>
+              <div className="order-mark-portal-body">
+                <div>
+                  <strong>{markLabelReady ? order.order_number : "暂未生成"}</strong>
+                  <p>{markLabelReady ? "条码内容即订单号；客户打印后粘贴至每个外包装。" : "当前订单尚未审核通过，查看、打印和下载入口暂未开放。"}</p>
+                </div>
+                {markLabelReady && <div className="order-mark-portal-actions">
+                  <Link to={`/admin/orders/${order.id}/mark-label`} target="_blank" rel="noreferrer">查看标签</Link>
+                  <Link to={`/admin/orders/${order.id}/mark-label`} target="_blank" rel="noreferrer">打开打印页</Link>
+                  <a href={`/admin/orders/${order.id}/mark-label?download=1`}>下载 SVG</a>
+                </div>}
+              </div>
+            </section>
             <DrawerSection title="订单来源与责任">
               <DrawerFact label="客户" value={`${order.customer_code} · ${order.customer_name}`} />
               <DrawerFact label="关联报价" value={order.quote_number || "历史订单"} />

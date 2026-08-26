@@ -5686,6 +5686,55 @@ label:has(> input:required, > select:required, > textarea:required) > span:first
 .package-label dt {
   font-weight: 700;
 }
+.order-mark-page {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 18px;
+}
+.order-mark-toolbar {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: center;
+  border: 1px solid var(--line);
+  background: #fff;
+}
+.order-mark-toolbar span { color: #8a9cac; font-size: 9px; font-weight: 700; letter-spacing: .1em; }
+.order-mark-toolbar h1 { margin: 3px 0; color: var(--ink); font-size: 21px; }
+.order-mark-toolbar p { margin: 0; color: #718598; font-size: 10px; }
+.order-mark-toolbar > div:last-child { display: flex; gap: 7px; flex: 0 0 auto; }
+.order-mark-toolbar a { text-decoration: none; }
+.order-mark-print-area { display: flex; justify-content: center; }
+.order-mark-label {
+  width: min(760px, 100%);
+  padding: 18px 22px;
+  color: #111;
+  border: 3px solid #111;
+  border-radius: 5px;
+  background: #fff;
+  break-inside: avoid;
+}
+.order-mark-label > header {
+  padding-bottom: 9px;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  border-bottom: 2px solid #111;
+}
+.order-mark-label > header strong { font-size: 22px; }
+.order-mark-label > header span { font-size: 15px; font-weight: 700; }
+.order-mark-code39 { width: 100%; height: 86px; margin: 17px 0 6px; display: block; fill: #111; }
+.order-mark-number { display: block; padding: 0 0 13px; font: 800 23px Consolas, monospace; letter-spacing: 2px; text-align: center; }
+.order-mark-label dl { margin: 0; border-top: 1px solid #777; }
+.order-mark-label dl > div { min-height: 48px; display: grid; grid-template-columns: 118px minmax(0, 1fr); border-bottom: 1px solid #aaa; }
+.order-mark-label dt,
+.order-mark-label dd { margin: 0; padding: 10px 8px; overflow-wrap: anywhere; }
+.order-mark-label dt { font-size: 13px; font-weight: 700; }
+.order-mark-label dd { border-left: 1px solid #aaa; font-size: 14px; font-weight: 650; line-height: 1.5; }
+.order-mark-label footer { padding-top: 10px; color: #444; font-size: 11px; line-height: 1.5; }
+.portal-order-actions { display: flex; gap: 5px; }
 @media print {
   body {
     background: #fff;
@@ -5714,6 +5763,15 @@ label:has(> input:required, > select:required, > textarea:required) > span:first
   .package-label {
     page-break-inside: avoid;
   }
+  .portal-sidebar,
+  .portal-app-topbar,
+  .order-mark-toolbar { display: none !important; }
+  .portal-shell,
+  .portal-main-column { display: block !important; min-height: 0 !important; }
+  .portal-main-column,
+  .portal-content { margin: 0 !important; padding: 0 !important; }
+  .order-mark-page { max-width: none; margin: 0; padding: 0; }
+  .order-mark-label { width: 100%; }
 }
 
 .operation-jump {
@@ -17383,6 +17441,34 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   font-size: 11px;
 }
 .linear-drawer-section > h3 span { color: #94a2b0; font-size: 9px; font-weight: 500; }
+.order-mark-portal.ready { border-color: #b9dfc9; }
+.order-mark-portal.ready > h3 { color: #0e6f49; background: #f2fbf6; }
+.order-mark-portal.pending > h3 { color: #6f7d89; background: #f8fafb; }
+.order-mark-portal-body {
+  min-height: 70px;
+  padding: 9px 11px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+}
+.order-mark-portal-body strong { display: block; color: var(--ink); font: 700 15px Consolas, monospace; }
+.order-mark-portal-body p { margin: 4px 0 0; color: #7e8f9f; font-size: 9px; line-height: 1.45; }
+.order-mark-portal-actions { display: flex; gap: 5px; }
+.order-mark-portal-actions a {
+  min-height: 30px;
+  padding: 0 9px;
+  display: inline-flex;
+  align-items: center;
+  color: var(--blue);
+  border: 1px solid #c8d9ed;
+  border-radius: 3px;
+  background: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  text-decoration: none;
+}
+.order-mark-portal-actions a:hover { border-color: #8eafd6; background: #f7faff; }
 .linear-drawer-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); }
 .linear-drawer-grid > div { min-width: 0; min-height: 44px; padding: 6px 9px; border-right: 1px solid var(--line2); border-bottom: 1px solid var(--line2); }
 .linear-drawer-grid > div:nth-child(3n) { border-right: 0; }

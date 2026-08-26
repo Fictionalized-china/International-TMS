@@ -73,7 +73,7 @@ export default function PortalOrders({ loaderData }: Route.ComponentProps) {
             <td><b>{order.origin_state || ""}{order.origin_city} → {order.destination_state || ""}{order.destination_city}</b><small className="subline">{order.overseas_warehouse_name || "目的仓待补"}</small></td>
             <td>{order.current_step_name || "待同步"}</td>
             <td><span className={`status ${statusTone(order.status, order.exception_status)}`}>{statusLabel(order.status)}</span></td>
-            <td><Link className="btn small" to={`/portal/tracking?order=${encodeURIComponent(order.order_number)}`}>查看轨迹</Link></td>
+            <td><div className="portal-order-actions"><Link className="btn small" to={`/portal/tracking?order=${encodeURIComponent(order.order_number)}`}>查看轨迹</Link>{["confirmed", "in_execution", "completed"].includes(order.status) && <Link className="btn small" to={`/portal/orders/${order.id}/mark-label`}>唛头标签</Link>}</div></td>
           </tr>)}
           {!loaderData.orders.length && <tr><td className="empty" colSpan={7}>暂无订单；接受有效报价后系统会自动创建。</td></tr>}
         </tbody></table></div>
