@@ -201,7 +201,6 @@ type Attachment = {
   file_name: string;
   content_type: string;
   size_bytes: number;
-  data_url: string;
   created_at: string;
   document_category: string | null;
   description: string | null;
@@ -694,7 +693,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
       .bind(orderId, current.organizationId)
       .all<Cargo>(),
     env.DB.prepare(
-      `SELECT a.id,a.file_name,a.content_type,a.size_bytes,a.data_url,a.created_at,m.document_category,m.description,m.public_to_customer,m.review_status FROM order_attachments a LEFT JOIN order_document_metadata m ON m.attachment_id=a.id WHERE a.order_id=? AND a.organization_id=? ORDER BY a.created_at DESC`,
+      `SELECT a.id,a.file_name,a.content_type,a.size_bytes,a.created_at,m.document_category,m.description,m.public_to_customer,m.review_status FROM order_attachments a LEFT JOIN order_document_metadata m ON m.attachment_id=a.id WHERE a.order_id=? AND a.organization_id=? ORDER BY a.created_at DESC`,
     )
       .bind(orderId, current.organizationId)
       .all<Attachment>(),
@@ -4278,8 +4277,8 @@ function DocumentReviewPreview({ attachment }: { attachment: Attachment }) {
       <span className="status-pill">{documentReviewLabel(attachment.review_status)}</span>
     </header>
     <div className={`document-review-canvas ${!isImage && !isPdf ? "unsupported" : ""}`}>
-      {isImage && <img src={attachment.data_url} alt={attachment.file_name} />}
-      {isPdf && <object data={attachment.data_url} type="application/pdf" aria-label={attachment.file_name}>
+      {isImage && <img src={`/admin/document-files/order/${attachment.id}?mode=view`} alt={attachment.file_name} loading="lazy" />}
+      {isPdf && <object data={`/admin/document-files/order/${attachment.id}?mode=view`} type="application/pdf" aria-label={attachment.file_name}>
         <p>PDF 无法在当前浏览器内预览，请使用下方按钮打开。</p>
       </object>}
       {!isImage && !isPdf && <div className="document-review-fallback">
@@ -4288,8 +4287,8 @@ function DocumentReviewPreview({ attachment }: { attachment: Attachment }) {
       </div>}
     </div>
     <footer className="row-actions">
-      <a className="secondary" href={attachment.data_url} target="_blank" rel="noreferrer">在新窗口打开</a>
-      <a className="secondary" href={attachment.data_url} download={attachment.file_name}>下载原文件</a>
+      <a className="secondary" href={`/admin/document-files/order/${attachment.id}?mode=view`} target="_blank" rel="noreferrer">在新窗口打开</a>
+      <a className="secondary" href={`/admin/document-files/order/${attachment.id}`}>下载原文件</a>
     </footer>
   </section>;
 }
@@ -4403,7 +4402,7 @@ function ModuleSourceDocuments({
                 <small title={latest?.file_name}>{latest ? `${latest.file_name} · ${documentReviewLabel(latest.review_status)}` : "尚无文件"}</small>
               </div>
               {latest ? <div className="row-actions source-document-actions">
-                <a className="text-button" href={latest.data_url} target="_blank" rel="noreferrer">查看</a>
+                <a className="text-button" href={`/admin/document-files/order/${latest.id}?mode=view`} target="_blank" rel="noreferrer">查看</a>
                 {canEditDocs && !lockedAfterApproval ? <Modal title={`编辑文件 · ${placement.document.name}`} triggerLabel="编辑" triggerClassName="text-button">
                   <div className="stack">
                     <Form method="post" className="stack">
@@ -4726,7 +4725,7 @@ function ModuleBusinessData({
                     <div className="row-actions">
                       <a
                         className="text-button"
-                        href={item.data_url}
+                        href={`/admin/document-files/order/${item.id}?mode=view`}
                         target="_blank"
                         rel="noreferrer"
                       >

@@ -21,6 +21,7 @@ export function storedDataUrlResponse(input: {
       "Content-Type": input.contentType || match[1] || "application/octet-stream",
       "Content-Disposition": `${input.disposition || "attachment"}; filename*=UTF-8''${encodeURIComponent(input.fileName)}`,
       "Cache-Control": "private, no-store",
+      "X-Content-Type-Options": "nosniff",
     },
   });
 }

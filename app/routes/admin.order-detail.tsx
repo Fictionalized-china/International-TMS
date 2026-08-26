@@ -129,7 +129,6 @@ type Attachment = {
   file_name: string;
   content_type: string;
   size_bytes: number;
-  data_url: string;
   created_at: string;
 };
 type WarehousePackageLabel = {
@@ -274,7 +273,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
       .bind(id, current.organizationId)
       .all<History>(),
     env.DB.prepare(
-      "SELECT id,file_name,content_type,size_bytes,data_url,created_at FROM order_attachments WHERE order_id=? AND organization_id=? ORDER BY created_at DESC",
+      "SELECT id,file_name,content_type,size_bytes,created_at FROM order_attachments WHERE order_id=? AND organization_id=? ORDER BY created_at DESC",
     )
       .bind(id, current.organizationId)
       .all<Attachment>(),
@@ -922,7 +921,7 @@ function LinearOrderDrawer({
             </div></section>
           </>}
           {activeTab === "attachments" && <section className="linear-drawer-section"><h3>订单文件 <span>{data.attachments.length} 个</span></h3><div className="linear-drawer-list">
-            {data.attachments.map((attachment) => <article key={attachment.id}><div><strong>{attachment.file_name}</strong><span>{new Date(attachment.created_at).toLocaleString("zh-CN")}</span></div><small>{attachment.content_type}<br/>{(attachment.size_bytes / 1024).toFixed(1)} KB</small><a href={attachment.data_url} download={attachment.file_name}>下载</a></article>)}
+            {data.attachments.map((attachment) => <article key={attachment.id}><div><strong>{attachment.file_name}</strong><span>{new Date(attachment.created_at).toLocaleString("zh-CN")}</span></div><small>{attachment.content_type}<br/>{(attachment.size_bytes / 1024).toFixed(1)} KB</small><a href={`/admin/document-files/order/${attachment.id}`}>下载</a></article>)}
             {!data.attachments.length && <p className="linear-drawer-empty">当前订单暂无文件。</p>}
           </div></section>}
           {activeTab === "history" && <>
@@ -2135,7 +2134,7 @@ function OrderMountedPanel({
                   <strong>{attachment.file_name}</strong>
                   <small>{attachment.content_type} · {(attachment.size_bytes / 1024).toFixed(1)} KB</small>
                 </span>
-                <a className="text-button" href={attachment.data_url} download={attachment.file_name}>下载</a>
+                <a className="text-button" href={`/admin/document-files/order/${attachment.id}`}>下载</a>
               </div>
             ))}
           </div>

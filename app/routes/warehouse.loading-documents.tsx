@@ -47,7 +47,7 @@ type DocumentRow = {
   attachment_id: string;
   document_category: LoadingDocumentCode;
   file_name: string;
-  data_url: string;
+  content_type: string;
   review_status: string;
   created_at: string;
 };
@@ -101,14 +101,14 @@ export async function loader({ request }: Route.LoaderArgs) {
       ).bind(user.organizationId, selectedBatch.id).all<OrderRow>(),
       env.DB.prepare(
         `WITH ranked AS (
-           SELECT m.order_id,m.attachment_id,m.document_category,a.file_name,a.data_url,m.review_status,a.created_at,
+           SELECT m.order_id,m.attachment_id,m.document_category,a.file_name,a.content_type,m.review_status,a.created_at,
              ROW_NUMBER() OVER(PARTITION BY m.order_id,m.document_category ORDER BY a.created_at DESC,a.id DESC) row_no
            FROM transport_batch_orders bo
            JOIN order_document_metadata m ON m.order_id=bo.order_id AND m.organization_id=bo.organization_id
            JOIN order_attachments a ON a.id=m.attachment_id AND a.organization_id=m.organization_id
            WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed' AND m.document_category IN (${documentCodes})
          )
-         SELECT order_id,attachment_id,document_category,file_name,data_url,review_status,created_at
+         SELECT order_id,attachment_id,document_category,file_name,content_type,review_status,created_at
          FROM ranked WHERE row_no=1 ORDER BY order_id,document_category`,
       ).bind(user.organizationId, selectedBatch.id).all<DocumentRow>(),
     ]);
@@ -235,7 +235,7 @@ export default function WarehouseLoadingDocuments({ loaderData, actionData }: Ro
         <div className="table-wrap warehouse-loading-document-matrix"><table><thead><tr><th>订单 / 客户</th><th>货物</th>{LOADING_DOCUMENTS.map((item) => <th key={item.code}>{item.name}</th>)}<th>操作</th></tr></thead><tbody>
           {loaderData.orders.map((order) => <tr key={order.order_id}><td><strong>{order.order_number}</strong><small>{order.customer_name}</small></td><td>{order.cargo_names || "未填写"}</td>{LOADING_DOCUMENTS.map((type) => {
             const document = loaderData.documents.find((item) => item.order_id === order.order_id && item.document_category === type.code);
-            return <td key={type.code}>{document ? <><a href={document.data_url} target="_blank" rel="noreferrer">{document.file_name}</a><small><span className={`status-pill ${["approved","archived"].includes(document.review_status) ? "success" : document.review_status === "rejected" ? "off" : ""}`}>{reviewStatusLabel(document.review_status)}</span></small></> : <span className="status-pill off">待上传</span>}</td>;
+            return <td key={type.code}>{document ? <><a href={warehouseDocumentHref(document, loaderData.warehouse.id)} target="_blank" rel="noreferrer">{document.file_name}</a><small><span className={`status-pill ${["approved","archived"].includes(document.review_status) ? "success" : document.review_status === "rejected" ? "off" : ""}`}>{reviewStatusLabel(document.review_status)}</span></small></> : <span className="status-pill off">待上传</span>}</td>;
           })}<td><OrderDocumentUploadModal
             order={order}
             documents={loaderData.documents.filter((item) => item.order_id === order.order_id)}
@@ -317,7 +317,7 @@ function OrderDocumentUploadModal({
           const inputId = `${controlPrefix}-${documentType.code}`;
           return <div className="warehouse-order-document-picker-row" role="row" key={documentType.code}>
             <strong role="cell">{documentType.name}</strong>
-            <span role="cell">{current ? <><a href={current.data_url} target="_blank" rel="noreferrer">{current.file_name}</a><small>{reviewStatusLabel(current.review_status)}</small></> : <em>尚未上传</em>}</span>
+            <span role="cell">{current ? <><a href={warehouseDocumentHref(current, warehouseId)} target="_blank" rel="noreferrer">{current.file_name}</a><small>{reviewStatusLabel(current.review_status)}</small></> : <em>尚未上传</em>}</span>
             <span role="cell" className={selectedFile ? "selected" : ""}>{selectedFile ? <><b>{selectedFile.name}</b><small>{formatFileSize(selectedFile.size)}</small></> : <em>本次不变更</em>}</span>
             <span role="cell"><input id={inputId} name={`attachment_${documentType.code}`} type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" onChange={(event) => {
               const file = event.currentTarget.files?.[0];
@@ -336,29 +336,37 @@ function OrderDocumentUploadModal({
         <div className="table-wrap"><table><thead><tr><th>文件类型</th><th>当前版本</th><th>本次文件</th><th>确认结果</th></tr></thead><tbody>{LOADING_DOCUMENTS.map((documentType) => {
           const current = documents.find((item) => item.document_category === documentType.code);
           const selectedFile = selectedFiles[documentType.code];
-          return <tr key={documentType.code}><td><strong>{documentType.name}</strong></td><td>{current ? <a href={current.data_url} target="_blank" rel="noreferrer">{current.file_name}</a> : "—"}</td><td>{selectedFile ? <><strong>{selectedFile.name}</strong><small>{formatFileSize(selectedFile.size)} · {selectedFile.type || "未知格式"}</small></> : "—"}</td><td><span className={`status-pill ${selectedFile ? "success" : current ? "" : "off"}`}>{selectedFile ? current ? "上传新版本" : "新增文件" : current ? "保留当前" : "仍缺失"}</span></td></tr>;
+          return <tr key={documentType.code}><td><strong>{documentType.name}</strong></td><td>{current ? <a href={warehouseDocumentHref(current, warehouseId)} target="_blank" rel="noreferrer">{current.file_name}</a> : "—"}</td><td>{selectedFile ? <><strong>{selectedFile.name}</strong><small>{formatFileSize(selectedFile.size)} · {selectedFile.type || "未知格式"}</small></> : "—"}</td><td><span className={`status-pill ${selectedFile ? "success" : current ? "" : "off"}`}>{selectedFile ? current ? "上传新版本" : "新增文件" : current ? "保留当前" : "仍缺失"}</span></td></tr>;
         })}</tbody></table></div>
-        <div className="warehouse-order-document-preview-grid">{LOADING_DOCUMENTS.map((documentType) => <OrderDocumentPreview key={documentType.code} documentType={documentType} selectedFile={selectedFiles[documentType.code]} current={documents.find((item) => item.document_category === documentType.code)}/>)}</div>
+        <div className="warehouse-order-document-preview-grid">{LOADING_DOCUMENTS.map((documentType) => <OrderDocumentPreview key={documentType.code} documentType={documentType} selectedFile={selectedFiles[documentType.code]} current={documents.find((item) => item.document_category === documentType.code)} warehouseId={warehouseId}/>)}</div>
         <footer><span>本次将上传 {selectedCount} 个文件</span><div><button type="button" className="secondary" onClick={() => { closePreview(); setSelectionSignal((value) => value + 1); }}>返回修改</button><button type="button" className="primary" disabled={busy} onClick={uploadSelectedFiles}>{busy ? "正在上传…" : "确认并上传"}</button></div></footer>
       </section>
     }</Modal>
   </>;
 }
 
-function OrderDocumentPreview({ documentType, selectedFile, current }: { documentType: (typeof LOADING_DOCUMENTS)[number]; selectedFile?: File; current?: DocumentRow }) {
+function OrderDocumentPreview({ documentType, selectedFile, current, warehouseId }: { documentType: (typeof LOADING_DOCUMENTS)[number]; selectedFile?: File; current?: DocumentRow; warehouseId: string }) {
   const [objectUrl, setObjectUrl] = useState("");
   useEffect(() => {
     if (!selectedFile) { setObjectUrl(""); return; }
-    const url = URL.createObjectURL(selectedFile);
-    setObjectUrl(url);
-    return () => URL.revokeObjectURL(url);
+    try {
+      const url = URL.createObjectURL(selectedFile);
+      setObjectUrl(url);
+      return () => URL.revokeObjectURL(url);
+    } catch {
+      setObjectUrl("");
+    }
   }, [selectedFile]);
-  const previewUrl = objectUrl || current?.data_url || "";
-  const contentType = selectedFile?.type || current?.data_url.match(/^data:([^;,]+)/)?.[1] || "";
+  const previewUrl = selectedFile ? objectUrl : current ? warehouseDocumentHref(current, warehouseId) : "";
+  const contentType = selectedFile?.type || current?.content_type || "";
   return <article className={!previewUrl ? "empty" : ""}>
     <header><strong>{documentType.name}</strong><span>{selectedFile ? "本次选择" : current ? "当前版本" : "尚未上传"}</span></header>
     {previewUrl && contentType.startsWith("image/") ? <img src={previewUrl} alt={`${documentType.name}预览`}/> : previewUrl && contentType === "application/pdf" ? <iframe src={previewUrl} title={`${documentType.name} PDF 预览`}/> : <div><b>{selectedFile?.name || current?.file_name || "无文件"}</b><small>{previewUrl ? "该格式请在新窗口打开检查" : "本次仍未提供该文件"}</small>{previewUrl && <a href={previewUrl} target="_blank" rel="noreferrer">{selectedFile ? "打开本次文件" : "打开当前文件"}</a>}</div>}
   </article>;
+}
+
+function warehouseDocumentHref(document: DocumentRow, warehouseId: string) {
+  return `/warehouse/document-files/order/${document.attachment_id}?warehouseId=${encodeURIComponent(warehouseId)}&mode=view`;
 }
 
 function validateDocumentFile(file: File) {

@@ -32,6 +32,7 @@ export default [
       "admin/document-files/:sourceType/:fileId",
       "routes/admin.document-file.ts",
     ),
+    route("admin/cargo-images/:imageId", "routes/admin.cargo-image.ts"),
     route("admin/cargo", "routes/admin.cargo.tsx"),
     route("admin/loading", "routes/admin.loading.tsx"),
     route("admin/loading/:batchId", "routes/admin.loading-detail.tsx"),
@@ -87,6 +88,10 @@ export default [
   ),
   route("switch-site", "routes/switch-site.ts"),
   route("warehouse/order-module", "routes/warehouse.order-module.ts"),
+  route(
+    "warehouse/document-files/:sourceType/:fileId",
+    "routes/warehouse.document-file.ts",
+  ),
   layout("routes/warehouse.tsx", [
     route("warehouse", "routes/warehouse.index.tsx"),
     route("warehouse/inbound", "routes/warehouse.inbound.tsx"),

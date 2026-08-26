@@ -38,19 +38,26 @@ export async function verifyPassword(password: string, encoded: string): Promise
   const [algorithm, iterationsText, saltText, expectedText] = encoded.split("$");
   if (algorithm !== "pbkdf2_sha256" || !iterationsText || !saltText || !expectedText) return false;
   const iterations = Number(iterationsText);
-  if (!Number.isSafeInteger(iterations) || iterations < 100_000) return false;
-  const material = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits(
-    { name: "PBKDF2", hash: "SHA-256", salt: fromBase64(saltText), iterations },
-    material,
-    256,
-  );
-  const actual = new Uint8Array(bits);
-  const expected = fromBase64(expectedText);
-  if (actual.length !== expected.length) return false;
-  let difference = 0;
-  for (let index = 0; index < actual.length; index += 1) difference |= actual[index] ^ expected[index];
-  return difference === 0;
+  if (!Number.isSafeInteger(iterations) || iterations < 100_000 || iterations > 1_000_000) return false;
+  try {
+    const salt = fromBase64(saltText);
+    const expected = fromBase64(expectedText);
+    if (salt.length < 8 || salt.length > 64 || expected.length !== 32) return false;
+    const material = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
+    const bits = await crypto.subtle.deriveBits(
+      { name: "PBKDF2", hash: "SHA-256", salt, iterations },
+      material,
+      256,
+    );
+    const actual = new Uint8Array(bits);
+    let difference = 0;
+    for (let index = 0; index < actual.length; index += 1) difference |= actual[index] ^ expected[index];
+    return difference === 0;
+  } catch {
+    // Corrupted legacy hashes and invalid Base64 must behave like a failed
+    // login instead of taking down every login surface with a 500 response.
+    return false;
+  }
 }
 
 export async function secureEqual(left: string, right: string): Promise<boolean> {

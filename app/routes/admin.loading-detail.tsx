@@ -78,8 +78,8 @@ type BatchOrder={order_id:string;order_number:string;business_type:string|null;w
 type Vehicle={id:string;vehicle_no:string;vehicle_type:string|null;plate_number:string|null;driver_name:string|null;driver_phone:string|null;capacity_weight_kg:number;capacity_volume_cbm:number;used_weight:number;used_volume:number;loaded_orders:number;status:string};
 type Option={id:string;name:string};
 type ReferenceOption={code:string;name:string};
-type BatchDocument={id:string;document_category:string;file_name:string;content_type:string;size_bytes:number;data_url:string;description:string|null;review_status:string;created_at:string};
-type OrderDocument={id:string;order_id:string;document_category:string;file_name:string;content_type:string;size_bytes:number;data_url:string;description:string|null;review_status:string;created_at:string};
+type BatchDocument={id:string;document_category:string;file_name:string;content_type:string;size_bytes:number;description:string|null;review_status:string;created_at:string};
+type OrderDocument={id:string;order_id:string;document_category:string;file_name:string;content_type:string;size_bytes:number;description:string|null;review_status:string;created_at:string};
 type CustomsSummary={order_id:string;total:number;released:number};
 type BatchCustomsDeclaration={id:string;order_id:string;customs_record_id:string;clearance_stage:string;declaration_number:string;declaration_type:string;declaration_title:string;declaring_company:string;declared_at:string;declared_amount:number;currency:string;gross_weight_kg:number;released_at:string|null;status:string;is_deleted:number;is_redeclared:number;is_amended:number;is_inspected:number;change_reason:string|null;updated_at:string};
 type BatchOutboundStatus={order_id:string;dispatched:number};
@@ -207,18 +207,18 @@ export async function loader({request,params}:Route.LoaderArgs){
     env.DB.prepare("SELECT code,name FROM reference_data WHERE organization_id=? AND category='border_port' AND status='active' ORDER BY sort_order,code").bind(current.organizationId).all<ReferenceOption>(),
     loadCostAllocations(env.DB,current.organizationId,batchId),
     env.DB.prepare(`WITH ranked AS (
-      SELECT id,document_category,file_name,content_type,size_bytes,data_url,description,review_status,created_at,
+      SELECT id,document_category,file_name,content_type,size_bytes,description,review_status,created_at,
         ROW_NUMBER() OVER(PARTITION BY document_category ORDER BY created_at DESC,id DESC) row_no
       FROM transport_batch_documents WHERE organization_id=? AND batch_id=?
-    ) SELECT id,document_category,file_name,content_type,size_bytes,data_url,description,review_status,created_at
+    ) SELECT id,document_category,file_name,content_type,size_bytes,description,review_status,created_at
       FROM ranked WHERE row_no=1 ORDER BY created_at DESC`).bind(current.organizationId,batchId).all<BatchDocument>(),
     env.DB.prepare(`WITH ranked AS (
-      SELECT a.id,a.order_id,m.document_category,a.file_name,a.content_type,a.size_bytes,a.data_url,m.description,m.review_status,a.created_at,
+      SELECT a.id,a.order_id,m.document_category,a.file_name,a.content_type,a.size_bytes,m.description,m.review_status,a.created_at,
         ROW_NUMBER() OVER(PARTITION BY a.order_id,m.document_category ORDER BY a.created_at DESC,a.id DESC) row_no
       FROM transport_batch_orders bo JOIN order_attachments a ON a.order_id=bo.order_id AND a.organization_id=bo.organization_id
       JOIN order_document_metadata m ON m.attachment_id=a.id AND m.order_id=bo.order_id AND m.organization_id=bo.organization_id
       WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed'
-    ) SELECT id,order_id,document_category,file_name,content_type,size_bytes,data_url,description,review_status,created_at
+    ) SELECT id,order_id,document_category,file_name,content_type,size_bytes,description,review_status,created_at
       FROM ranked WHERE row_no=1 ORDER BY created_at DESC`).bind(batchId,current.organizationId).all<OrderDocument>(),
     env.DB.prepare(`SELECT bo.order_id,COUNT(d.id) total,COALESCE(SUM(CASE WHEN d.status='released' THEN 1 ELSE 0 END),0) released
       FROM transport_batch_orders bo
@@ -755,7 +755,7 @@ function BatchDocumentWorkbench({batchId,orders,batchDocuments,orderDocuments,cu
         return <tr className={current&&["approved","archived"].includes(current.review_status)?"completed-row":""} key={type.code}>
           <td><strong>{type.name}{type.required&&<b className="required-mark"> *</b>}</strong></td><td>{type.hint}</td>
           <td>{current?<span className={`status-pill ${current.review_status==="approved"?"success":""}`}>{isSystemDocument?"已自动同步":documentReviewLabel(current.review_status)}</span>:<span className="status-pill off">{isSystemDocument?"待自动生成":"待上传"}</span>}</td>
-          <td>{current?<a href={current.data_url} target="_blank" rel="noreferrer">{current.file_name}</a>:"—"}</td>
+          <td>{current?<a href={`/admin/document-files/batch/${current.id}?mode=view`} target="_blank" rel="noreferrer">{current.file_name}</a>:"—"}</td>
         </tr>})}</tbody></table></div>
     </section>
     <section className="batch-order-documents"><header><div><h3>逐票订单文件与报关门禁</h3><p>点击“办理本票报关”即可在当前页面查看文件、新增申报单、编辑和放行。</p></div></header>
@@ -774,7 +774,7 @@ function BatchDocumentWorkbench({batchId,orders,batchDocuments,orderDocuments,cu
           <td><span className={`status-pill ${customsReady?"success":""}`}>{customs?.total?`${customs.released}/${customs.total} 张放行`:["customs_document","customs_declaration_file"].every(code=>files.some(item=>item.document_category===code&&["approved","archived"].includes(item.review_status)))?"文件已齐，待登记正式报关单":"待补齐报关资料与申报单文件"}</span></td>
           <td><details className="batch-order-file-details"><summary>{manageCustoms?"办理本票报关":"查看本票文件"}</summary><div className="batch-order-file-panel">
             <header className="batch-order-file-panel-header"><div><strong>{manageCustoms?"办理本票报关":"查看本票文件"}</strong><span>{order.order_number} · {order.customer_name}</span></div><button type="button" aria-label="关闭文件查看窗口" onClick={event=>(event.currentTarget.closest("details") as HTMLDetailsElement|null)?.removeAttribute("open")}>×</button></header>
-            <div className="batch-order-file-list">{ORDER_BATCH_DOCUMENT_CODES.map(code=>{const current=files.find(item=>item.document_category===code);return <div key={code}><strong>{orderDocumentTypeLabel(code)}</strong>{current?<><a href={current.data_url} target="_blank" rel="noreferrer">{current.file_name}</a><span className={`status-pill ${current.review_status==="approved"?"success":""}`}>{documentReviewLabel(current.review_status)}</span></>:<span className="status-pill off">待仓库上传</span>}</div>})}</div>
+            <div className="batch-order-file-list">{ORDER_BATCH_DOCUMENT_CODES.map(code=>{const current=files.find(item=>item.document_category===code);return <div key={code}><strong>{orderDocumentTypeLabel(code)}</strong>{current?<><a href={`/admin/document-files/order/${current.id}?mode=view`} target="_blank" rel="noreferrer">{current.file_name}</a><span className={`status-pill ${current.review_status==="approved"?"success":""}`}>{documentReviewLabel(current.review_status)}</span></>:<span className="status-pill off">待仓库上传</span>}</div>})}</div>
             <BatchOrderCustomsWorkbench orderId={order.order_id} declarations={customsDeclarations.filter(item=>item.order_id===order.order_id)} manage={manageCustoms} busy={busy} closeSignal={customsCloseSignal}/>
             <div className="batch-order-file-links"><Link className="secondary" to={`/admin/orders/${order.order_id}/modules/documents`}>查看完整文件中心</Link></div>
           </div></details></td>

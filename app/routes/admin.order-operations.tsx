@@ -102,7 +102,6 @@ type CargoImage = {
   id: string;
   cargo_item_id: string;
   file_name: string;
-  data_url: string;
 };
 
 export async function loader({ request, params }: Route.LoaderArgs) {
@@ -173,9 +172,9 @@ export async function loader({ request, params }: Route.LoaderArgs) {
       .bind(current.organizationId)
       .all<{ id: string; name: string }>(),
     env.DB.prepare(
-      "SELECT id,cargo_item_id,file_name,data_url FROM order_cargo_images WHERE order_id=? ORDER BY sort_order,created_at",
+      "SELECT id,cargo_item_id,file_name FROM order_cargo_images WHERE order_id=? AND organization_id=? ORDER BY sort_order,created_at",
     )
-      .bind(orderId)
+      .bind(orderId, current.organizationId)
       .all<CargoImage>(),
   ]);
   const receivable = expenses.results
@@ -771,12 +770,12 @@ export default function OrderOperations({
                         .slice(0, 4)
                         .map((image) => (
                           <a
-                            href={image.data_url}
+                            href={`/admin/cargo-images/${image.id}`}
                             target="_blank"
                             rel="noreferrer"
                             key={image.id}
                           >
-                            <img src={image.data_url} alt={image.file_name} />
+                            <img src={`/admin/cargo-images/${image.id}`} alt={image.file_name} loading="lazy" />
                           </a>
                         ))}
                     </div>

@@ -38,7 +38,6 @@ type CargoImage = {
   id: string;
   cargo_item_id: string;
   file_name: string;
-  data_url: string;
 };
 
 const packageLabels: Record<string, string> = {
@@ -79,7 +78,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const ids = cargo.results.map((item) => item.id);
   const images = ids.length
     ? await env.DB.prepare(
-        `SELECT id,cargo_item_id,file_name,data_url FROM order_cargo_images WHERE organization_id=? AND cargo_item_id IN (${ids.map(() => "?").join(",")}) ORDER BY cargo_item_id,sort_order,created_at`,
+        `SELECT id,cargo_item_id,file_name FROM order_cargo_images WHERE organization_id=? AND cargo_item_id IN (${ids.map(() => "?").join(",")}) ORDER BY cargo_item_id,sort_order,created_at`,
       )
         .bind(current.organizationId, ...ids)
         .all<CargoImage>()
@@ -177,17 +176,20 @@ export default function CargoInformation({ loaderData }: Route.ComponentProps) {
                     <td>
                       {itemImages.length ? (
                         <div className="cargo-table-images">
-                          {itemImages.slice(0, 3).map((image) => (
-                            <a
-                              key={image.id}
-                              href={image.data_url}
-                              target="_blank"
-                              rel="noreferrer"
-                              title={image.file_name}
-                            >
-                              <img src={image.data_url} alt={image.file_name} />
-                            </a>
-                          ))}
+                          {itemImages.slice(0, 3).map((image) => {
+                            const imageHref = `/admin/cargo-images/${image.id}`;
+                            return (
+                              <a
+                                key={image.id}
+                                href={imageHref}
+                                target="_blank"
+                                rel="noreferrer"
+                                title={image.file_name}
+                              >
+                                <img src={imageHref} alt={image.file_name} loading="lazy" />
+                              </a>
+                            );
+                          })}
                           {itemImages.length > 3 && (
                             <span>+{itemImages.length - 3}</span>
                           )}
