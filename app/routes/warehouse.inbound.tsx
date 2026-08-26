@@ -1410,7 +1410,7 @@ function OverseasReceivingScan({ warehouseId, reference, orderId, returnTo }: { 
 
 function PackageLabel({ item }: { item: Package }) {
   return (
-    <article className="package-label">
+    <article className="package-label warehouse-package-label">
       <header>
         <strong>OULING 国际物流</strong>
         <span>货物条码标签</span>

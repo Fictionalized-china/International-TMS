@@ -4887,7 +4887,7 @@ function ModuleBusinessData({
       <div className="module-business-stack dense-module-stack">
         <div className="module-toolbar transport-entry-forms">
           {manage && (
-            <details className="expandable module-create-dialog module-inline-create transport-entry-panel" open>
+            <details className="expandable module-create-dialog module-inline-create transport-entry-panel" open={!data.transportAssignments.length}>
               <summary>新增运输安排</summary>
               <Form method="post" className="form-grid compact transport-arrangement-form">
                 <input
