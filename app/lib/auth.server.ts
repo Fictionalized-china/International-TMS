@@ -26,7 +26,15 @@ function cookieValue(request: Request, name: string): string | null {
   const header = request.headers.get("Cookie") ?? "";
   for (const part of header.split(";")) {
     const [key, ...value] = part.trim().split("=");
-    if (key === name) return decodeURIComponent(value.join("="));
+    if (key !== name) continue;
+    const encoded = value.join("=");
+    try {
+      return decodeURIComponent(encoded);
+    } catch {
+      // A malformed cookie must be treated as an invalid session instead of
+      // taking down every loader that asks for the current user.
+      return null;
+    }
   }
   return null;
 }

@@ -16,7 +16,16 @@ export async function loader({request}:Route.LoaderArgs){
   const user=await requireSessionUser(request,"warehouse.view","warehouse"),warehouseContext=await loadWarehouseContext(request,user),warehouse=warehouseContext.selected,url=new URL(request.url),status=url.searchParams.get("status")??"active";
   const [exceptions,attachments,users]=await Promise.all([
     env.DB.prepare(`SELECT e.id,e.exception_number,e.package_id,p.barcode,s.shipment_number,o.order_number,c.name customer_name,c.identity_code customer_identity_code,l.name location_name,e.exception_type,e.severity,e.status,e.description,e.resolution,e.reported_at,e.resolved_at,ur.display_name reporter_name,ua.display_name assignee_name FROM warehouse_exceptions e JOIN warehouse_packages p ON p.id=e.package_id JOIN shipments s ON s.id=e.shipment_id JOIN transport_orders o ON o.id=s.order_id JOIN customers c ON c.id=s.customer_id JOIN warehouse_locations l ON l.id=p.location_id LEFT JOIN users ur ON ur.id=e.reported_by_user_id LEFT JOIN users ua ON ua.id=e.assigned_to_user_id WHERE e.organization_id=? AND p.warehouse_id=? AND (?='all' OR (?='active' AND e.status IN ('open','processing')) OR e.status=?) ORDER BY CASE e.severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END,e.updated_at DESC LIMIT 100`).bind(user.organizationId,warehouse.id,status,status,status).all<ExceptionRow>(),
-    env.DB.prepare(`SELECT a.id,a.exception_id,a.file_name,a.content_type,a.size_bytes,a.data_url FROM warehouse_exception_attachments a JOIN warehouse_exceptions e ON e.id=a.exception_id JOIN warehouse_packages p ON p.id=e.package_id WHERE a.organization_id=? AND p.warehouse_id=? ORDER BY a.created_at`).bind(user.organizationId,warehouse.id).all<Attachment>(),
+    env.DB.prepare(`SELECT a.id,a.exception_id,a.file_name,a.content_type,a.size_bytes,a.data_url
+      FROM warehouse_exception_attachments a
+      WHERE a.organization_id=? AND a.exception_id IN (
+        SELECT e.id FROM warehouse_exceptions e
+        JOIN warehouse_packages p ON p.id=e.package_id
+        WHERE e.organization_id=? AND p.warehouse_id=?
+          AND (?='all' OR (?='active' AND e.status IN ('open','processing')) OR e.status=?)
+        ORDER BY CASE e.severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END,e.updated_at DESC
+        LIMIT 100
+      ) ORDER BY a.created_at`).bind(user.organizationId,user.organizationId,warehouse.id,status,status,status).all<Attachment>(),
     env.DB.prepare(`SELECT DISTINCT u.id,u.display_name FROM users u JOIN memberships m ON m.user_id=u.id WHERE m.organization_id=? AND u.status='active' ORDER BY u.display_name`).bind(user.organizationId).all<UserOption>()
   ]);
   return{user,warehouse,status,exceptions:exceptions.results,attachments:attachments.results,users:users.results};

@@ -15,7 +15,6 @@ type FileRow = {
   file_name: string;
   content_type: string;
   size_bytes: number;
-  data_url: string;
   review_status: string;
   created_at: string;
   reviewed_at: string | null;
@@ -36,7 +35,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     `WITH files AS (
        SELECT a.id,'order' source_type,a.order_id,o.order_number order_numbers,
               NULL batch_id,NULL batch_number,COALESCE(m.document_category,'other') document_category,
-              a.file_name,a.content_type,a.size_bytes,a.data_url,COALESCE(m.review_status,'pending') review_status,
+              a.file_name,a.content_type,a.size_bytes,COALESCE(m.review_status,'pending') review_status,
               a.created_at,m.reviewed_at,up.display_name uploader_name,rv.display_name reviewer_name
          FROM order_attachments a
          JOIN transport_orders o ON o.id=a.order_id AND o.organization_id=a.organization_id
@@ -47,7 +46,7 @@ export async function loader({ request }: Route.LoaderArgs) {
        UNION ALL
        SELECT d.id,'batch' source_type,NULL order_id,
               COALESCE((SELECT GROUP_CONCAT(o.order_number) FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id WHERE bo.batch_id=d.batch_id AND bo.status!='removed'),'') order_numbers,
-              d.batch_id,b.batch_number,d.document_category,d.file_name,d.content_type,d.size_bytes,d.data_url,d.review_status,
+              d.batch_id,b.batch_number,d.document_category,d.file_name,d.content_type,d.size_bytes,d.review_status,
               d.created_at,d.reviewed_at,up.display_name uploader_name,rv.display_name reviewer_name
          FROM transport_batch_documents d
          JOIN transport_batches b ON b.id=d.batch_id AND b.organization_id=d.organization_id
@@ -106,6 +105,7 @@ export default function DocumentCenter({ loaderData }: Route.ComponentProps) {
         : item.order_id && placement
           ? `/admin/orders/${item.order_id}/modules/${placement.moduleCode}#module-source-documents`
           : item.order_id ? `/admin/orders/${item.order_id}` : "/admin/documents";
+      const fileHref = `/admin/document-files/${item.source_type}/${item.id}`;
       return <tr key={`${item.source_type}-${item.id}`}>
         <td>{item.batch_number && <strong>{item.batch_number}</strong>}<small>{item.order_numbers || "—"}</small></td>
         <td>{orderDocumentTypeLabel(item.document_category)}</td>
@@ -114,7 +114,7 @@ export default function DocumentCenter({ loaderData }: Route.ComponentProps) {
         <td><span className={`status-pill ${item.review_status === "approved" || item.review_status === "archived" ? "success" : item.review_status === "rejected" ? "off" : "warning"}`}>{reviewLabel(item.review_status)}</span></td>
         <td>{item.uploader_name || "—"}<small>{new Date(item.created_at).toLocaleString("zh-CN")}</small></td>
         <td>{item.reviewer_name || "—"}<small>{item.reviewed_at ? new Date(item.reviewed_at).toLocaleString("zh-CN") : "尚未审核"}</small></td>
-        <td><div className="page-actions"><a className="text-button" href={item.data_url} target="_blank" rel="noreferrer">查看</a><a className="text-button" href={item.data_url} download={item.file_name}>下载</a><Link className="text-button" to={sourceHref}>打开来源节点</Link></div></td>
+        <td><div className="page-actions"><a className="text-button" href={`${fileHref}?mode=view`} target="_blank" rel="noreferrer">查看</a><a className="text-button" href={fileHref}>下载</a><Link className="text-button" to={sourceHref}>打开来源节点</Link></div></td>
       </tr>;
     })}</tbody></table></div>{!loaderData.rows.length && <p className="empty-state">当前筛选条件下没有文件记录。</p>}
       {loaderData.pageCount > 1 && <div className="pagination">{loaderData.page > 1 && <Link className="secondary" to={pageHref(loaderData, loaderData.page - 1)}>上一页</Link>}<span>第 {loaderData.page} / {loaderData.pageCount} 页</span>{loaderData.page < loaderData.pageCount && <Link className="secondary" to={pageHref(loaderData, loaderData.page + 1)}>下一页</Link>}</div>}

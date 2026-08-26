@@ -60,21 +60,36 @@ export default function App() {
     if (navigation.state !== "idle" || !warehouseMutation.current) return;
     warehouseMutation.current = false;
     const signal = JSON.stringify({ source: "warehouse", occurredAt: Date.now() });
-    if ("BroadcastChannel" in window) {
-      const channel = new BroadcastChannel("international-tms-data-sync");
-      channel.postMessage(signal);
-      channel.close();
+    try {
+      if ("BroadcastChannel" in window) {
+        const channel = new BroadcastChannel("international-tms-data-sync");
+        channel.postMessage(signal);
+        channel.close();
+      }
+    } catch {
+      // Cross-tab synchronization is an enhancement. Browsers may expose the
+      // API while denying access in restricted/privacy contexts.
     }
-    window.localStorage.setItem("international-tms-data-sync", signal);
+    try {
+      window.localStorage.setItem("international-tms-data-sync", signal);
+    } catch {
+      // Do not turn a successful warehouse mutation into a client crash when
+      // storage is unavailable or blocked by browser policy.
+    }
   }, [location.pathname, navigation.formAction, navigation.formMethod, navigation.state]);
   useEffect(() => {
     if (!location.pathname.startsWith("/admin")) return;
     const refresh = () => {
       if (revalidator.state === "idle") revalidator.revalidate();
     };
-    const channel = "BroadcastChannel" in window
-      ? new BroadcastChannel("international-tms-data-sync")
-      : null;
+    let channel: BroadcastChannel | null = null;
+    try {
+      channel = "BroadcastChannel" in window
+        ? new BroadcastChannel("international-tms-data-sync")
+        : null;
+    } catch {
+      channel = null;
+    }
     if (channel) channel.onmessage = refresh;
     const onStorage = (event: StorageEvent) => {
       if (event.key === "international-tms-data-sync") refresh();

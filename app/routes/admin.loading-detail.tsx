@@ -206,12 +206,20 @@ export async function loader({request,params}:Route.LoaderArgs){
     env.DB.prepare("SELECT id,name FROM warehouses WHERE organization_id=? AND status='active' AND warehouse_role IN ('domestic_collection','port') ORDER BY CASE warehouse_role WHEN 'domestic_collection' THEN 10 ELSE 20 END,code,name").bind(current.organizationId).all<Option>(),
     env.DB.prepare("SELECT code,name FROM reference_data WHERE organization_id=? AND category='border_port' AND status='active' ORDER BY sort_order,code").bind(current.organizationId).all<ReferenceOption>(),
     loadCostAllocations(env.DB,current.organizationId,batchId),
-    env.DB.prepare("SELECT id,document_category,file_name,content_type,size_bytes,data_url,description,review_status,created_at FROM transport_batch_documents WHERE organization_id=? AND batch_id=? ORDER BY created_at DESC").bind(current.organizationId,batchId).all<BatchDocument>(),
-    env.DB.prepare(`SELECT a.id,a.order_id,m.document_category,a.file_name,a.content_type,a.size_bytes,a.data_url,m.description,m.review_status,a.created_at
+    env.DB.prepare(`WITH ranked AS (
+      SELECT id,document_category,file_name,content_type,size_bytes,data_url,description,review_status,created_at,
+        ROW_NUMBER() OVER(PARTITION BY document_category ORDER BY created_at DESC,id DESC) row_no
+      FROM transport_batch_documents WHERE organization_id=? AND batch_id=?
+    ) SELECT id,document_category,file_name,content_type,size_bytes,data_url,description,review_status,created_at
+      FROM ranked WHERE row_no=1 ORDER BY created_at DESC`).bind(current.organizationId,batchId).all<BatchDocument>(),
+    env.DB.prepare(`WITH ranked AS (
+      SELECT a.id,a.order_id,m.document_category,a.file_name,a.content_type,a.size_bytes,a.data_url,m.description,m.review_status,a.created_at,
+        ROW_NUMBER() OVER(PARTITION BY a.order_id,m.document_category ORDER BY a.created_at DESC,a.id DESC) row_no
       FROM transport_batch_orders bo JOIN order_attachments a ON a.order_id=bo.order_id AND a.organization_id=bo.organization_id
       JOIN order_document_metadata m ON m.attachment_id=a.id AND m.order_id=bo.order_id AND m.organization_id=bo.organization_id
       WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed'
-      ORDER BY a.created_at DESC`).bind(batchId,current.organizationId).all<OrderDocument>(),
+    ) SELECT id,order_id,document_category,file_name,content_type,size_bytes,data_url,description,review_status,created_at
+      FROM ranked WHERE row_no=1 ORDER BY created_at DESC`).bind(batchId,current.organizationId).all<OrderDocument>(),
     env.DB.prepare(`SELECT bo.order_id,COUNT(d.id) total,COALESCE(SUM(CASE WHEN d.status='released' THEN 1 ELSE 0 END),0) released
       FROM transport_batch_orders bo
       LEFT JOIN order_customs_records r ON r.order_id=bo.order_id AND r.organization_id=bo.organization_id AND r.clearance_stage='origin'

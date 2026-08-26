@@ -17,6 +17,10 @@ export default [
     route("admin/portal", "routes/admin.position-portal.tsx"),
     route("admin/master-data", "routes/admin.master-data.tsx"),
     route("admin/customers", "routes/admin.customers.tsx"),
+    route(
+      "admin/customer-contracts/:contractId/download",
+      "routes/admin.customer-contract-download.ts",
+    ),
     route("admin/sales", "routes/admin.sales.tsx"),
     route("admin/quotations", "routes/admin.quotations.tsx"),
     route("admin/logistics-products", "routes/admin.logistics-products.tsx"),
@@ -24,6 +28,10 @@ export default [
     route("admin/orders", "routes/admin.orders.tsx"),
     route("admin/domestic-tracking", "routes/admin.domestic-tracking.tsx"),
     route("admin/documents", "routes/admin.documents.tsx"),
+    route(
+      "admin/document-files/:sourceType/:fileId",
+      "routes/admin.document-file.ts",
+    ),
     route("admin/cargo", "routes/admin.cargo.tsx"),
     route("admin/loading", "routes/admin.loading.tsx"),
     route("admin/loading/:batchId", "routes/admin.loading-detail.tsx"),

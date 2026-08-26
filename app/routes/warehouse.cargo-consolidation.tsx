@@ -161,11 +161,14 @@ export async function loader({request}:Route.LoaderArgs){
   ]);
   const orderIds=rows.results.map(row=>row.order_id);
   const documents=orderIds.length
-    ?await env.DB.prepare(`SELECT m.order_id,m.attachment_id,m.document_category,a.file_name,a.data_url,m.review_status,a.created_at
+    ?await env.DB.prepare(`WITH ranked AS (
+      SELECT m.order_id,m.attachment_id,m.document_category,a.file_name,a.data_url,m.review_status,a.created_at,
+        ROW_NUMBER() OVER(PARTITION BY m.order_id,m.document_category ORDER BY a.created_at DESC,a.id DESC) row_no
       FROM order_document_metadata m JOIN order_attachments a ON a.id=m.attachment_id
       WHERE m.organization_id=? AND m.order_id IN (${orderIds.map(()=>"?").join(",")})
         AND m.document_category IN ('commercial_invoice','packing_list','customs_document')
-      ORDER BY a.created_at DESC,a.id DESC`).bind(user.organizationId,...orderIds).all<OrderDocumentRow>()
+      ) SELECT order_id,attachment_id,document_category,file_name,data_url,review_status,created_at
+        FROM ranked WHERE row_no=1 ORDER BY created_at DESC`).bind(user.organizationId,...orderIds).all<OrderDocumentRow>()
     :{results:[] as OrderDocumentRow[]};
   return{user,warehouse,rows:rows.results,documents:documents.results,options:options.results,batches:batches.results,batchOrders:batchOrders.results,carriers:carriers.results,carrierVehicles:carrierVehicles.results,carrierDrivers:carrierDrivers.results,borderPorts:routeOptions.results.filter(item=>item.category==="border_port"),customsPlaces:routeOptions.results.filter(item=>item.category==="customs_place"),filters,page:safePage,pageSize,pages,total};
 }
@@ -313,8 +316,8 @@ export async function action({request}:Route.ActionArgs){
 export default function CargoConsolidation({loaderData,actionData}:Route.ComponentProps){
   const busy=useNavigation().state!=="idle",storageKey=`warehouse-consolidation:${loaderData.warehouse.id}`;
   const[selected,setSelected]=useState<Selection[]>([]);
-  useEffect(()=>{try{setSelected(JSON.parse(localStorage.getItem(storageKey)||"[]"))}catch{setSelected([])}},[storageKey]);
-  useEffect(()=>{localStorage.setItem(storageKey,JSON.stringify(selected))},[storageKey,selected]);
+  useEffect(()=>{try{const cached:unknown=JSON.parse(localStorage.getItem(storageKey)||"[]");setSelected(Array.isArray(cached)?cached.filter(isSelection):[])}catch{setSelected([])}},[storageKey]);
+  useEffect(()=>{try{localStorage.setItem(storageKey,JSON.stringify(selected))}catch{/* Selection still works for this tab when browser storage is unavailable. */}},[storageKey,selected]);
   useEffect(()=>{if(actionData?.success&&!("actionKind" in actionData&&actionData.actionKind==="document_upload"))setSelected([])},[actionData]);
   const totals=useMemo(()=>selected.reduce((sum,row)=>({packages:sum.packages+row.packages,pieces:sum.pieces+row.pieces,weight:sum.weight+row.weight,volume:sum.volume+row.volume}),{packages:0,pieces:0,weight:0,volume:0}),[selected]);
   const selectedIds=new Set(selected.map(row=>row.orderId));
@@ -508,6 +511,12 @@ function Select({label,name,current,values}:{label:string;name:string;current:st
 function Pagination({loaderData}:{loaderData:{page:number;pages:number;pageSize:number;warehouse:{id:string};filters:Record<string,string>}}){if(loaderData.pages<=1)return null;const href=(page:number)=>{const params=new URLSearchParams({warehouseId:loaderData.warehouse.id,page:String(page),pageSize:String(loaderData.pageSize)}),names:Record<string,string>={warehouse:"destinationWarehouse",keyword:"q"};Object.entries(loaderData.filters).forEach(([key,value])=>{if(value)params.set(names[key]||key,value)});return`/warehouse/consolidation?${params}`};return<footer className="pagination"><span>第 {loaderData.page} / {loaderData.pages} 页</span><div>{loaderData.page>1&&<Link className="secondary" to={href(loaderData.page-1)}>上一页</Link>}{loaderData.page<loaderData.pages&&<Link className="secondary" to={href(loaderData.page+1)}>下一页</Link>}</div></footer>}
 
 function toSelection(row:StockRow):Selection{return{orderId:row.order_id,orderNumber:row.order_number,customerName:row.customer_name,packages:row.package_count,pieces:row.pieces,weight:row.weight_kg,volume:row.volume_cbm}}
+function isSelection(value:unknown):value is Selection{
+  if(!value||typeof value!=="object")return false;
+  const row=value as Partial<Selection>;
+  return typeof row.orderId==="string"&&typeof row.orderNumber==="string"&&typeof row.customerName==="string"&&
+    [row.packages,row.pieces,row.weight,row.volume].every(item=>typeof item==="number"&&Number.isFinite(item));
+}
 async function resolveBatchResource(organizationId:string,form:FormData):Promise<BatchResource|{error:string}>{
   const carrierId=valueOf(form,"carrierId"),vehicleMasterId=valueOf(form,"vehicleMasterId"),driverMasterId=valueOf(form,"driverMasterId");
   if(!carrierId||!vehicleMasterId||!driverMasterId)return{error:"请选择境外承运商、出境车辆和出境司机"};

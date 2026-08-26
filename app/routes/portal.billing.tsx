@@ -35,7 +35,8 @@ export async function action({request}:Route.ActionArgs){
     if(!(file instanceof File)||file.size===0)return{formError:"请上传付款凭证"};
     const allowed=["application/pdf","image/jpeg","image/png","image/webp"];
     if(file.size>2*1024*1024||!allowed.includes(file.type))return{formError:"付款凭证仅支持 PDF、JPG、PNG、WebP，且不超过 2 MB"};
-    const id=crypto.randomUUID(),bytes=new Uint8Array(await file.arrayBuffer());let binary="";for(const byte of bytes)binary+=String.fromCharCode(byte);
+    const id=crypto.randomUUID(),bytes=new Uint8Array(await file.arrayBuffer());let binary="";
+    for(let index=0;index<bytes.length;index+=8192)binary+=String.fromCharCode(...bytes.subarray(index,index+8192));
     await env.DB.batch([
       env.DB.prepare("INSERT INTO payment_submissions(id,organization_id,customer_id,invoice_id,amount,currency,payment_date,reference,notes,status,submitted_by_user_id,submitted_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)").bind(id,user.organizationId,customer.id,invoice.id,amount,invoice.currency,paymentDate,reference||null,notes||null,user.userId,now,now,now),
       env.DB.prepare("INSERT INTO payment_attachments(id,organization_id,payment_submission_id,file_name,content_type,size_bytes,data_url,uploaded_by_user_id,created_at) VALUES(?,?,?,?,?,?,?,?,?)").bind(crypto.randomUUID(),user.organizationId,id,file.name,file.type,file.size,`data:${file.type};base64,${btoa(binary)}`,user.userId,now),

@@ -79,10 +79,20 @@ export async function loader({request}:Route.LoaderArgs){
     }
     return{batch,readiness:await checkOrderLoadPlan(user.organizationId,batch.order_id)};
   }));
-  const manifestRows=await env.DB.prepare(`SELECT bo.order_id,d.file_name,d.data_url,d.review_status,d.created_at FROM transport_batch_documents d JOIN transport_batch_orders bo ON bo.batch_id=d.batch_id AND bo.organization_id=d.organization_id AND bo.status!='removed' WHERE d.organization_id=? AND d.document_category='loading_manifest' AND d.review_status IN ('approved','archived') ORDER BY CASE d.review_status WHEN 'approved' THEN 0 ELSE 1 END,d.created_at DESC`).bind(user.organizationId).all<ManifestDoc>();
   const visibleOrderIds=new Set(visibleBatches.flatMap(batch=>batch.related_order_ids.split(",")).concat(visibleDispatches.flatMap(dispatch=>(dispatch.related_order_ids||dispatch.order_id).split(","))));
+  const visibleOrderIdList=[...visibleOrderIds];
+  const manifestRows=(await Promise.all(Array.from({length:Math.ceil(visibleOrderIdList.length/80)},async(_,chunkIndex)=>{
+    const chunk=visibleOrderIdList.slice(chunkIndex*80,chunkIndex*80+80);
+    return env.DB.prepare(`SELECT bo.order_id,d.file_name,d.data_url,d.review_status,d.created_at
+      FROM transport_batch_documents d
+      JOIN transport_batch_orders bo ON bo.batch_id=d.batch_id AND bo.organization_id=d.organization_id AND bo.status!='removed'
+      WHERE d.organization_id=? AND bo.order_id IN (${chunk.map(()=>"?").join(",")})
+        AND d.document_category='loading_manifest' AND d.review_status IN ('approved','archived')
+      ORDER BY CASE d.review_status WHEN 'approved' THEN 0 ELSE 1 END,d.created_at DESC`)
+      .bind(user.organizationId,...chunk).all<ManifestDoc>();
+  }))).flatMap(result=>result.results);
   const manifestsByOrder:Record<string,ManifestDoc>={};
-  for(const row of manifestRows.results){if(visibleOrderIds.has(row.order_id)&&!manifestsByOrder[row.order_id])manifestsByOrder[row.order_id]=row;}
+  for(const row of manifestRows){if(!manifestsByOrder[row.order_id])manifestsByOrder[row.order_id]=row;}
   const readyBatches=evaluated.filter(item=>item.readiness.ready).map(item=>item.batch);
   const requestedBatchId=url.searchParams.get("batchId");
   const requestedBatch=(requestedBatchId?readyBatches.find(batch=>batch.id===requestedBatchId):null)??readyBatches[0]??null;
@@ -583,10 +593,13 @@ async function loadOutboundInspection(organizationId:string,warehouseId:string,b
   const orderRows=scopeOrders.results.length?scopeOrders.results:[{order_id:batch.order_id,order_number:batch.order_number,customer_id:batch.customer_id,customer_name:batch.customer_name}];
   const placeholders=orderRows.map(()=>"?").join(",");
   const [documentRows,workflowFields,documentRequirements]=await Promise.all([
-    env.DB.prepare(`SELECT m.order_id,m.attachment_id,m.document_category,a.file_name,a.content_type,a.size_bytes,a.data_url,m.review_status,a.created_at
+    env.DB.prepare(`WITH ranked AS (
+      SELECT m.order_id,m.attachment_id,m.document_category,a.file_name,a.content_type,a.size_bytes,a.data_url,m.review_status,a.created_at,
+        ROW_NUMBER() OVER(PARTITION BY m.order_id,m.document_category ORDER BY a.created_at DESC,a.id DESC) row_no
       FROM order_document_metadata m JOIN order_attachments a ON a.id=m.attachment_id
       WHERE m.organization_id=? AND m.order_id IN (${placeholders}) AND m.document_category IN ('consignment_letter','commercial_invoice','packing_list','customs_document','customs_declaration_file')
-      ORDER BY a.created_at DESC,a.id DESC`).bind(organizationId,...orderRows.map(order=>order.order_id)).all<{order_id:string;attachment_id:string;document_category:LoadingDocumentCode;file_name:string;content_type:string;size_bytes:number;data_url:string;review_status:string;created_at:string}>(),
+      ) SELECT order_id,attachment_id,document_category,file_name,content_type,size_bytes,data_url,review_status,created_at
+        FROM ranked WHERE row_no=1 ORDER BY created_at DESC`).bind(organizationId,...orderRows.map(order=>order.order_id)).all<{order_id:string;attachment_id:string;document_category:LoadingDocumentCode;file_name:string;content_type:string;size_bytes:number;data_url:string;review_status:string;created_at:string}>(),
     loadOrderModuleWorkflowFields(organizationId,batch.order_id,"loading"),
     Promise.all(orderRows.map(async order=>{
       const [consignmentFields,customsFields,customsModule]=await Promise.all([

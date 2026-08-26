@@ -66,10 +66,10 @@ function releasePageScrollLock() {
 
 function clearStalePageScrollLock() {
   if (typeof document === "undefined") return;
-  if (scrollLockCount > 0) {
-    releasePageScrollLock();
-    return;
-  }
+  // A positive reference count belongs to an active React modal or expandable
+  // dialog. Decrementing it here can unlock the wrong dialog and later leave
+  // the page permanently fixed after nested dialogs close.
+  if (scrollLockCount > 0) return;
   const html = document.documentElement;
   const body = document.body;
   html.classList.remove("modal-scroll-locked");
