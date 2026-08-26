@@ -359,23 +359,23 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
     <FormSection className="quote-route-section" title="起运地与目的地" note="最终目的地为境外目的仓，客户到仓自提">
       <div className="grid">
         <GeoCascadeFields prefix="origin" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} />
-        <Field label="提货地址 *" className="quote-route-address"><textarea className="control textarea editing" name="pickupAddress" value={pickupAddress} onChange={(event) => setPickupAddress(event.target.value)} required /></Field>
+        <Field label="提货地址 *" className="quote-route-address"><textarea className="control textarea editing" name="pickupAddress" rows={2} value={pickupAddress} onChange={(event) => setPickupAddress(event.target.value)} required /></Field>
         <GeoCascadeFields prefix="destination" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} />
         <Field label="目的仓库 *" className="quote-route-warehouse"><select className="control filled" name="destinationWarehouseId" required><option value="">请选择境外目的仓</option>{loaderData.warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></Field>
-        <Field label="报价目的地备注" className="quote-route-note"><textarea className="control textarea" name="destinationWarehouseNote" /></Field>
+        <Field label="报价目的地备注" className="quote-route-note"><textarea className="control textarea" name="destinationWarehouseNote" rows={2} /></Field>
       </div>
     </FormSection>
     <FormSection title="货物预估数据" note="仓库实收后登记实际数据">
-      <div className="grid">
+      <div className="grid quote-cargo-grid">
         <Field label="货物描述 *" className="quote-cargo-description"><textarea className="control textarea editing" name="cargoDescription" required /></Field>
-        <Field label="预计件数 *"><input className="control filled" name="pieces" type="number" min="1" value={pieces} onChange={(event) => setPieces(event.target.value)} required/></Field>
-        <Field label="预计重量 KG *"><input className="control filled" name="weight" type="number" min="0.001" step="0.001" required/></Field>
-        <div className="quote-dimension-row">
-          <Field label="预计长度 CM *"><input className="control filled" name="length" type="number" min="0.01" step="0.01" value={lengthCm} onChange={(event) => setLengthCm(event.target.value)} required/></Field>
-          <Field label="预计宽度 CM *"><input className="control filled" name="width" type="number" min="0.01" step="0.01" value={widthCm} onChange={(event) => setWidthCm(event.target.value)} required/></Field>
-          <Field label="预计高度 CM *"><input className="control filled" name="height" type="number" min="0.01" step="0.01" value={heightCm} onChange={(event) => setHeightCm(event.target.value)} required/></Field>
-          <Field label="预计体积 CBM（自动计算）*"><input className="control filled quote-calculated-volume" name="volume" type="number" min="0.0001" step="0.0001" value={calculatedVolume} readOnly required/></Field>
-        </div>
+        <div className="table-wrap quote-cargo-metrics-table"><table className="inline-table"><thead><tr><th>预计件数 *</th><th>预计重量 KG *</th><th>预计长度 CM *</th><th>预计宽度 CM *</th><th>预计高度 CM *</th><th>预计体积 CBM（自动计算）*</th></tr></thead><tbody><tr>
+          <td><input aria-label="预计件数" className="control filled" name="pieces" type="number" min="1" value={pieces} onChange={(event) => setPieces(event.target.value)} required/></td>
+          <td><input aria-label="预计重量 KG" className="control filled" name="weight" type="number" min="0.001" step="0.001" required/></td>
+          <td><input aria-label="预计长度 CM" className="control filled" name="length" type="number" min="0.01" step="0.01" value={lengthCm} onChange={(event) => setLengthCm(event.target.value)} required/></td>
+          <td><input aria-label="预计宽度 CM" className="control filled" name="width" type="number" min="0.01" step="0.01" value={widthCm} onChange={(event) => setWidthCm(event.target.value)} required/></td>
+          <td><input aria-label="预计高度 CM" className="control filled" name="height" type="number" min="0.01" step="0.01" value={heightCm} onChange={(event) => setHeightCm(event.target.value)} required/></td>
+          <td><input aria-label="预计体积 CBM" className="control filled quote-calculated-volume" name="volume" type="number" min="0.0001" step="0.0001" value={calculatedVolume} readOnly required/></td>
+        </tr></tbody></table></div>
       </div>
     </FormSection>
     <FormSection
