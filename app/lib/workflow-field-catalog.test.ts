@@ -57,4 +57,17 @@ describe("workflow field building blocks", () => {
       isRequired: true,
     });
   });
+
+  it("lets an optional workflow rule override a required document fallback", () => {
+    const fields = [
+      {
+        fieldKey: "document_consignment_letter",
+        isActive: true,
+        isRequired: false,
+      },
+    ];
+    expect(
+      workflowFieldPolicy(fields, "document_consignment_letter", "required"),
+    ).toEqual({ isActive: true, isRequired: false });
+  });
 });

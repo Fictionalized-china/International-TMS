@@ -623,7 +623,7 @@ async function loadOutboundInspection(organizationId:string,warehouseId:string,b
       const row=latestByOrderCode.get(`${order.order_id}:${type.code}`);
       const fields=type.moduleCode==="consignment"?requirements?.consignmentFields??[]:requirements?.customsFields??[];
       const policy=workflowFieldPolicy(fields,type.fieldKey,type.requiredByDefault?"required":"optional");
-      const required=type.requiredByDefault||(policy.isActive&&policy.isRequired);
+      const required=policy.isRequired;
       return{orderId:order.order_id,orderNumber:order.order_number,customerId:order.customer_id,customerName:order.customer_name,required,attachmentId:row?.attachment_id??null,code:type.code,name:type.name,fileName:row?.file_name??null,contentType:row?.content_type??null,sizeBytes:row?.size_bytes??null,reviewStatus:row?.review_status??null};
     });
     return{orderId:order.order_id,orderNumber:order.order_number,customerId:order.customer_id,customerName:order.customer_name,documents,allUploaded:documents.filter(document=>document.required).every(document=>Boolean(document.attachmentId)),allApproved:documents.filter(document=>document.required).every(document=>["approved","archived"].includes(document.reviewStatus||""))};

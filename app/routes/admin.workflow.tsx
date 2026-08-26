@@ -17,6 +17,7 @@ import {
   workflowFieldMode,
   workflowFieldModeFlags,
 } from "../lib/workflow-field-catalog";
+import { synchronizeWorkflowFieldPolicyForInstances } from "../lib/workflow-fields.server";
 
 type Definition = {
   id: string;
@@ -455,10 +456,10 @@ export async function action({ request }: Route.ActionArgs) {
   if (intent === "field_update") {
     const fieldId = valueOf(form, "fieldId");
     const field = await env.DB.prepare(
-      "SELECT id FROM workflow_step_fields WHERE id=? AND workflow_id=?",
+      "SELECT id,field_key,COALESCE(module_code,'consignment') module_code FROM workflow_step_fields WHERE id=? AND workflow_id=?",
     )
       .bind(fieldId, workflowId)
-      .first<{ id: string }>();
+      .first<{ id: string; field_key: string; module_code: OrderModuleCode }>();
     if (!field) return { formError: "字段不存在" };
     const parsed = parseFieldForm(form);
     if ("formError" in parsed) return parsed;
@@ -480,7 +481,14 @@ export async function action({ request }: Route.ActionArgs) {
         workflowId,
       )
       .run();
-    return { success: `字段“${parsed.label}”已更新` };
+    await synchronizeWorkflowFieldPolicyForInstances({
+      workflowId,
+      fieldKey: field.field_key,
+      moduleCode: field.module_code,
+      isRequired: parsed.required,
+      isActive: parsed.active,
+    });
+    return { success: `字段“${parsed.label}”已更新，填写规则已同步到现有订单` };
   }
 
   if (intent === "field_delete") {

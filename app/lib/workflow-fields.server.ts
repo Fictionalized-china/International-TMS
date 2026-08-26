@@ -233,6 +233,28 @@ export async function snapshotWorkflowFieldsForInstance(input: {
     .run();
 }
 
+export async function synchronizeWorkflowFieldPolicyForInstances(input: {
+  workflowId: string;
+  fieldKey: string;
+  moduleCode: OrderModuleCode;
+  isRequired: number;
+  isActive: number;
+}) {
+  await env.DB.prepare(
+    `UPDATE workflow_instance_fields
+     SET is_required=?,is_active=?
+     WHERE workflow_id=? AND field_key=? AND module_code=?`,
+  )
+    .bind(
+      input.isRequired,
+      input.isActive,
+      input.workflowId,
+      input.fieldKey,
+      input.moduleCode,
+    )
+    .run();
+}
+
 export async function listTemplateWorkflowFields(workflowIds: string[]) {
   if (!workflowIds.length) return [] as (WorkflowFieldRule & { workflowId: string })[];
   const placeholders = workflowIds.map(() => "?").join(",");
