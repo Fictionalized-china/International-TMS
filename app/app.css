@@ -19224,3 +19224,293 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
   border-color: #d7e0e8;
   background: #fff;
 }
+
+/* Compact flat-table workbench for PZ tracking. */
+.admin-app-shell .content:has(.batch-tracking-page-header) {
+  padding: 16px 18px;
+}
+.batch-tracking-page-header {
+  align-items: center;
+  margin-bottom: 8px;
+}
+.batch-tracking-page-header h1 {
+  margin: 1px 0 0;
+  font-size: 26px;
+  line-height: 1.05;
+}
+.batch-tracking-page-header p {
+  margin-top: 4px;
+  font-size: 11px;
+}
+.batch-tracking-page-header .page-actions {
+  gap: 5px;
+}
+.batch-command-panel,
+.batch-tracking-workbench,
+.batch-document-workbench,
+.batch-detail-disclosure,
+.cost-allocation-section,
+#batch-exit-gate,
+#overseas-warehouse-receiving {
+  margin-bottom: 8px;
+  border-radius: 2px;
+  box-shadow: none;
+}
+.batch-command-panel,
+.batch-tracking-workbench,
+#batch-exit-gate,
+#overseas-warehouse-receiving {
+  padding: 0;
+}
+.batch-command-panel > .panel-header,
+.batch-tracking-workbench > .panel-header,
+#batch-exit-gate > .panel-header,
+#overseas-warehouse-receiving > .panel-header {
+  align-items: center;
+  min-height: 42px;
+  margin: 0;
+  padding: 7px 10px;
+  border-bottom: 1px solid #d7e4f4;
+}
+.batch-command-panel > .panel-header h2,
+.batch-tracking-workbench > .panel-header h2,
+#batch-exit-gate > .panel-header h2,
+#overseas-warehouse-receiving > .panel-header h2 {
+  font-size: 14px;
+}
+.batch-command-panel > .panel-header p,
+.batch-tracking-workbench > .panel-header p,
+#batch-exit-gate > .panel-header p,
+#overseas-warehouse-receiving > .panel-header p {
+  margin-top: 2px;
+  line-height: 1.3;
+}
+.batch-current-node {
+  grid-template-columns: max-content minmax(150px, .35fr) minmax(0, 1fr);
+  gap: 6px 10px;
+  min-height: 34px;
+  padding: 5px 9px;
+  border-left-width: 3px;
+}
+.batch-current-node strong {
+  color: #102f5d;
+  font-size: 13px;
+}
+.batch-current-node small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.batch-command-table {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+.batch-command-table table {
+  width: 100%;
+  min-width: 1020px;
+  table-layout: fixed;
+}
+.batch-command-table th {
+  padding: 5px 7px;
+  color: #5c7088;
+  font-size: 10px;
+  font-weight: 700;
+}
+.batch-command-table td {
+  padding: 0;
+  vertical-align: top;
+  border-right: 1px solid #dce5ef;
+}
+.batch-command-table td:last-child {
+  border-right: 0;
+}
+.batch-command-table td.current-node {
+  background: #fff9e9;
+  box-shadow: inset 0 -2px #e9a900;
+}
+.batch-command-table td.blocked-row {
+  background: #fff5f3;
+}
+.batch-command-table td.completed-row {
+  background: #f2faf6;
+}
+.batch-command-table td > a {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 6px;
+  min-height: 54px;
+  padding: 6px 7px;
+  color: inherit;
+  text-decoration: none;
+}
+.batch-command-table td > a:hover,
+.batch-command-table td > a:focus-visible {
+  background: rgba(9, 80, 145, .05);
+  outline: 2px solid #7da9d3;
+  outline-offset: -2px;
+}
+.batch-command-table td strong {
+  overflow: hidden;
+  align-self: center;
+  color: #102f5d;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.batch-command-table td small {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  color: #66788c;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.batch-command-table .status-pill {
+  padding: 2px 5px;
+  border-radius: 3px;
+  font-size: 9px;
+}
+.batch-detail-summary {
+  min-height: 44px;
+  padding: 7px 10px;
+}
+.batch-detail-summary p {
+  margin-top: 2px;
+  line-height: 1.3;
+}
+.batch-detail-summary-status span,
+.batch-detail-summary-status b {
+  min-height: 24px;
+  padding: 2px 7px;
+  border-radius: 3px;
+  font-size: 10px;
+}
+.batch-detail-disclosure-body {
+  gap: 8px;
+  padding: 8px 10px 10px;
+}
+.batch-tracking-workbench > .alert,
+.batch-tracking-workbench > .batch-tracking-note,
+.batch-tracking-workbench > .batch-tracking-option-table,
+.batch-tracking-workbench > .batch-tracking-orders {
+  margin: 7px 9px;
+}
+.batch-tracking-note,
+.batch-document-scope-note {
+  gap: 3px 8px;
+  padding: 5px 8px;
+  margin-bottom: 7px;
+  font-size: 10px;
+  line-height: 1.3;
+}
+.batch-tracking-node-table,
+.batch-document-workbench .table-wrap,
+#batch-exit-gate .table-wrap,
+#overseas-warehouse-receiving .table-wrap {
+  margin: 0;
+  border-right: 0;
+  border-left: 0;
+  border-radius: 0;
+}
+.batch-tracking-workbench :is(th, td),
+.batch-document-workbench :is(th, td),
+#batch-exit-gate :is(th, td),
+#overseas-warehouse-receiving :is(th, td),
+.batch-detail-disclosure-body :is(th, td) {
+  padding: 5px 7px;
+  font-size: 10px;
+  line-height: 1.3;
+}
+.batch-shared-documents > header,
+.batch-order-documents > header {
+  margin-bottom: 5px;
+}
+.batch-shared-documents h3,
+.batch-order-documents h3 {
+  font-size: 13px;
+}
+.batch-document-grid {
+  margin-bottom: 8px;
+}
+.batch-document-grid > article {
+  gap: 5px 8px;
+  padding: 6px 8px;
+}
+.loading-summary-strip,
+.loading-preparation-summary,
+.loading-sheet-readonly,
+.loading-total-bar,
+.loading-sheet-section {
+  border-radius: 0;
+  box-shadow: none;
+}
+.loading-summary-strip span,
+.loading-preparation-summary > span {
+  gap: 2px;
+  padding: 5px 7px;
+  font-size: 10px;
+}
+.loading-summary-strip strong,
+.loading-preparation-summary > span {
+  font-size: 11px;
+}
+.loading-sheet-layout,
+.loading-sheet-columns {
+  gap: 8px;
+}
+.loading-total-bar {
+  gap: 5px 10px;
+  padding: 5px 8px;
+  font-size: 10px;
+}
+.loading-total-bar strong {
+  font-size: 11px;
+}
+.loading-sheet-section {
+  padding: 7px;
+}
+.loading-sheet-section > header {
+  margin-bottom: 5px;
+}
+.loading-sheet-section h3 {
+  font-size: 13px;
+}
+.loading-sheet-section > header span {
+  font-size: 10px;
+}
+#batch-exit-gate > :not(.panel-header),
+#overseas-warehouse-receiving > :not(.panel-header) {
+  margin-right: 9px;
+  margin-left: 9px;
+}
+#batch-exit-gate > .batch-exit-gate-table,
+#overseas-warehouse-receiving > .overseas-receiving-table {
+  width: calc(100% - 18px);
+}
+#batch-exit-gate > .form-grid.compact {
+  gap: 6px 8px;
+  padding: 8px 0;
+}
+.batch-gate-blocker {
+  gap: 8px;
+  padding: 7px 9px;
+}
+.batch-gate-blocker p,
+.batch-gate-blocker ul {
+  margin: 3px 0;
+  font-size: 10px;
+}
+@media (max-width: 900px) {
+  .admin-app-shell .content:has(.batch-tracking-page-header) {
+    padding: 12px;
+  }
+  .batch-tracking-page-header,
+  .batch-current-node {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+  .batch-tracking-page-header {
+    flex-direction: column;
+  }
+}

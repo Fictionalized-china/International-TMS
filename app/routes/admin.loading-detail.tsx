@@ -228,7 +228,7 @@ export async function loader({request,params}:Route.LoaderArgs){
         JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id
         JOIN warehouse_packages p ON p.id=di.package_id
         JOIN shipments s ON s.id=p.shipment_id
-        WHERE d.organization_id=bo.organization_id AND s.order_id=bo.order_id AND d.status='dispatched'
+        WHERE d.organization_id=bo.organization_id AND d.transport_batch_id=bo.batch_id AND s.order_id=bo.order_id AND d.status='dispatched'
       ) THEN 1 ELSE 0 END dispatched
     FROM transport_batch_orders bo
     WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed'
@@ -530,7 +530,7 @@ export async function action({request,params}:Route.ActionArgs){
       if(customsStatus.customs_enabled===1 && customsStatus.released!==customsStatus.total){
         blockers.push(`订单${item.order_number}的起运地报关尚未全部放行（${customsStatus.released}/${customsStatus.total}）`);
       }
-      const dispatched=await env.DB.prepare(`SELECT 1 FROM warehouse_dispatches d JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id JOIN warehouse_packages p ON p.id=di.package_id JOIN shipments s ON s.id=p.shipment_id WHERE d.organization_id=? AND s.order_id=? AND d.status='dispatched' LIMIT 1`).bind(current.organizationId,item.order_id).first();
+      const dispatched=await env.DB.prepare(`SELECT 1 FROM warehouse_dispatches d JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id JOIN warehouse_packages p ON p.id=di.package_id JOIN shipments s ON s.id=p.shipment_id WHERE d.organization_id=? AND d.transport_batch_id=? AND s.order_id=? AND d.status='dispatched' LIMIT 1`).bind(current.organizationId,batchId,item.order_id).first();
       if(!dispatched){blockers.push("存在尚未完成仓库装车出库交接的订单");continue;}
       const readiness=await checkOrderDeparture(current.organizationId,item.order_id,undefined,{warehouseDispatchConfirmed:true});
       if(!readiness.ready)blockers.push(...readiness.reasons);
@@ -668,13 +668,13 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
     ...(!transportResourceReady?["境外承运方、车型、车牌、司机姓名或司机电话尚未补齐"]:[]),
     ...loaderData.departureGateStatuses.flatMap(item=>item.reasons.map(reason=>`${loaderData.orders.find(order=>order.order_id===item.order_id)?.order_number||"订单"}：${reason}`)),
   ];
-  return <><header className="page-header"><div><p className="eyebrow">PZ LOAD · TRANSPORT TRACKING</p><h1>{loaderData.batch.batch_number}</h1><p>{loaderData.batch.batch_name} · {loaderData.batch.origin_location} → {loaderData.batch.destination_location}</p></div><div className="page-actions">{loaderData.returnOrderId&&<Link className="secondary" to={`/admin/orders/${loaderData.returnOrderId}`}>返回订单详情</Link>}<Link className="secondary" to="/admin/loading">返回配载单跟踪</Link><span className="status-pill">{allDispatched?"后台运输跟踪":"等待仓库出库"}</span><span className="status-pill">{roadStatusLabels[loaderData.batch.road_status]||loaderData.batch.road_status}</span></div></header>{(actionData?.success||actionData?.formError)&&<div className={`alert ${actionData.formError?"error":"success"}`}>{actionData.formError??actionData.success}</div>}
+  return <><header className="page-header batch-tracking-page-header"><div><p className="eyebrow">PZ LOAD · TRANSPORT TRACKING</p><h1>{loaderData.batch.batch_number}</h1><p>{loaderData.batch.batch_name} · {loaderData.batch.origin_location} → {loaderData.batch.destination_location}</p></div><div className="page-actions">{loaderData.returnOrderId&&<Link className="secondary" to={`/admin/orders/${loaderData.returnOrderId}`}>返回订单详情</Link>}<Link className="secondary" to="/admin/loading">返回配载单跟踪</Link><span className="status-pill">{allDispatched?"后台运输跟踪":"等待仓库出库"}</span><span className="status-pill">{roadStatusLabels[loaderData.batch.road_status]||loaderData.batch.road_status}</span></div></header>{(actionData?.success||actionData?.formError)&&<div className={`alert ${actionData.formError?"error":"success"}`}>{actionData.formError??actionData.success}</div>}
   <section className="panel batch-command-panel">
     <div className="panel-header"><div><h2>配载单执行总览</h2><p>仓库端负责配载、文件确认、车辆司机安排和装车出库；整批出库后，本页才开放运输执行与跟踪。</p></div><span className="status-pill">{roadStatusLabels[loaderData.batch.road_status]||loaderData.batch.road_status}</span></div>
     <BatchCommandSteps status={loaderData.batch.road_status} customsReady={allCustomsReady} loadPlanReady={loadPlanReady} warehouseReady={allDispatched}/>
   </section>
-  <BatchDocumentWorkbench batchId={loaderData.batch.id} orders={loaderData.orders} batchDocuments={loaderData.batchDocuments} orderDocuments={loaderData.orderDocuments} customsSummaries={loaderData.customsSummaries} customsDeclarations={loaderData.customsDeclarations} busy={busy} manageCustoms={false} requiresTransloading={requiresTransloading} defaultOpen={!allCustomsReady}/>
   <BatchTrackingWorkbench batchId={loaderData.batch.id} batchNumber={loaderData.batch.batch_number} orders={loaderData.orders} trackingMilestones={loaderData.trackingMilestones} trackingFlags={loaderData.trackingFlags} batchVehiclePlate={loaderData.batchVehiclePlate} overseasVehiclePlate={loaderData.batch.overseas_vehicle_plate||null} borderPort={loaderData.batch.border_port||null} customsLocation={loaderData.batch.customs_location||null} busy={busy} manage={manage&&allDispatched} warehouseReady={allDispatched}/>
+  <BatchDocumentWorkbench batchId={loaderData.batch.id} orders={loaderData.orders} batchDocuments={loaderData.batchDocuments} orderDocuments={loaderData.orderDocuments} customsSummaries={loaderData.customsSummaries} customsDeclarations={loaderData.customsDeclarations} busy={busy} manageCustoms={false} requiresTransloading={requiresTransloading} defaultOpen={!allCustomsReady}/>
   <details className="panel loading-sheet batch-detail-disclosure" id="batch-arrangement">
     <summary className="batch-detail-summary"><div><h2>仓库配载结果</h2><p>由仓库端自动同步，管理后台只读查看。</p></div><div className="loading-sheet-state batch-detail-summary-status"><span>{loaderData.orders.length} 票</span><span>{loaderData.vehicles.length} 车</span><b>{allDispatched?"仓库已出库":loadPlanReady&&allCustomsReady?"待仓库装车":"待仓库补齐"}</b><em aria-hidden="true"/></div></summary>
     <div className="batch-detail-disclosure-body">
@@ -897,19 +897,18 @@ function customsDeclarationStatusLabel(declaration:BatchCustomsDeclaration){if(d
 function BatchCommandSteps({status,customsReady,loadPlanReady,warehouseReady}:{status:string;customsReady:boolean;loadPlanReady:boolean;warehouseReady:boolean}){
   const exited=["outbound_in_transit","overseas_arrived","waiting_pickup","pickup_completed"].includes(status);
   const arrived=["overseas_arrived","waiting_pickup","pickup_completed"].includes(status);
-  const vehicleReady=customsReady&&loadPlanReady;
-  const outboundReady=vehicleReady&&warehouseReady;
   const steps=[
     {rank:1,title:"配载成单",body:"仓库挂载完整订单",done:true,href:"#batch-arrangement"},
     {rank:2,title:"报关资料与放行",body:"逐票资料状态只读汇总",done:customsReady,href:"#batch-files"},
-    {rank:3,title:"运输车辆安排",body:"仓库整批登记一套资源",done:vehicleReady,href:"#batch-arrangement"},
-    {rank:4,title:"仓库装车出库",body:"仓库按配载单扫码交接",done:outboundReady,href:"#batch-exit-gate"},
-    {rank:5,title:"出境运输",body:"配载单统一更新运输节点",done:outboundReady&&exited,href:"#batch-tracking"},
-    {rank:6,title:"境外仓到仓",body:"全部子订单扫码清点",done:outboundReady&&exited&&arrived,href:"#overseas-warehouse-receiving"},
+    {rank:3,title:"运输车辆安排",body:"仓库整批登记一套资源",done:loadPlanReady,href:"#batch-arrangement"},
+    {rank:4,title:"仓库装车出库",body:"仓库按配载单扫码交接",done:warehouseReady,href:"#batch-exit-gate"},
+    {rank:5,title:"出境运输",body:warehouseReady&&!exited?"门禁通过后确认实际出境":"配载单统一更新运输节点",done:exited,href:"#batch-tracking"},
+    {rank:6,title:"境外仓到仓",body:"全部子订单扫码清点",done:arrived,href:"#overseas-warehouse-receiving"},
   ];
-  const currentRank=steps.find(step=>!step.done)?.rank??steps.length+1;
-  const currentTitle=steps.find(step=>step.rank===currentRank)?.title??"配载单流程已完成";
-  return <><div className="batch-current-node"><span>当前工作节点</span><strong>{currentTitle}</strong><small>点击任一节点可直接跳转到对应办理区域</small></div><div className="batch-command-steps">{steps.map(step=><a href={step.href} key={step.rank} aria-current={currentRank===step.rank?"step":undefined} className={`batch-command-step ${step.done?"done":currentRank===step.rank?"current":""}`}><b>{step.done?"✓":step.rank}</b><strong>{step.title}</strong><span>{step.body}</span></a>)}</div></>;
+  const currentRank=arrived?null:exited?6:warehouseReady?5:loadPlanReady?4:3;
+  const currentTitle=arrived?"配载单流程已完成":warehouseReady&&!exited?"待出境确认":steps.find(step=>step.rank===currentRank)?.title??"配载单执行中";
+  const currentHint=!customsReady&&warehouseReady?"仓库交接已完成；报关尚未放行，当前不能确认出境。":"节点按真实业务状态独立显示，点击表格列可直达办理区域。";
+  return <><div className="batch-current-node"><span>当前业务节点</span><strong>{currentTitle}</strong><small>{currentHint}</small></div><div className="table-wrap batch-command-table"><table><thead><tr>{steps.map(step=><th key={step.rank}>{String(step.rank).padStart(2,"0")} · {step.title}</th>)}</tr></thead><tbody><tr>{steps.map(step=>{const current=currentRank===step.rank,blocking=!step.done&&!current&&step.rank<(currentRank??0);return <td key={step.rank} className={step.done?"completed-row":current?"current-node":blocking?"blocked-row":""}><a href={step.href} aria-current={current?"step":undefined}><span className={`status-pill ${step.done?"success":blocking?"danger":"off"}`}>{step.done?"已完成":current?"当前节点":blocking?"待补齐":"未开始"}</span><strong>{step.title}</strong><small>{step.body}</small></a></td>})}</tr></tbody></table></div></>;
 }
 
 function BatchCustomsPortal({orders,customsSummaries}:{orders:BatchOrder[];customsSummaries:CustomsSummary[]}){
