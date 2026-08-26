@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { useEffect, useId, useState } from "react";
 import { Form, Link, useNavigate, useNavigation } from "react-router";
 import type { Route } from "./+types/warehouse.loading-documents";
 import { Modal } from "../components/Modal";
@@ -134,13 +135,9 @@ export async function action({ request }: Route.ActionArgs) {
   }
   await requireWarehouseAssignment(user, warehouse.id, "operator");
   const form = await request.formData();
-  if (valueOf(form, "intent") !== "upload") return { formError: "操作类型无效" };
+  if (valueOf(form, "intent") !== "upload_many") return { formError: "操作类型无效" };
   const batchId = valueOf(form, "batchId");
   const orderId = valueOf(form, "orderId");
-  const documentCategory = valueOf(form, "documentCategory") as LoadingDocumentCode;
-  if (!LOADING_DOCUMENTS.some((item) => item.code === documentCategory)) {
-    return { formError: "请选择有效的配载文件类型" };
-  }
   const order = await env.DB.prepare(
     `SELECT o.customer_id,o.order_number,b.batch_number
      FROM transport_batches b
@@ -149,31 +146,47 @@ export async function action({ request }: Route.ActionArgs) {
      WHERE b.id=? AND b.organization_id=? AND b.warehouse_id=? AND b.batch_number LIKE 'PZ-%' AND b.status!='cancelled' AND o.id=?`,
   ).bind(batchId, user.organizationId, warehouse.id, orderId).first<{ customer_id: string; order_number: string; batch_number: string }>();
   if (!order) return { formError: "配载单或挂载订单无效" };
-  const file = form.get("attachment");
-  if (!(file instanceof File) || file.size <= 0) return { formError: "请选择要上传的文件" };
-  const fileError = validateDocumentFile(file);
-  if (fileError) return { formError: fileError };
-  const attachmentId = crypto.randomUUID();
+  const selectedFiles = LOADING_DOCUMENTS.flatMap((documentType) => {
+    const file = form.get(`attachment_${documentType.code}`);
+    return file instanceof File && file.size > 0 ? [{ documentType, file }] : [];
+  });
+  if (!selectedFiles.length) return { formError: "请至少选择一个需要上传的订单文件" };
+  for (const item of selectedFiles) {
+    const fileError = validateDocumentFile(item.file);
+    if (fileError) return { formError: `${item.documentType.name}：${fileError}` };
+  }
   const now = new Date().toISOString();
-  const documentName = LOADING_DOCUMENTS.find((item) => item.code === documentCategory)?.name ?? documentCategory;
-  await env.DB.batch([
+  const uploads = await Promise.all(selectedFiles.map(async ({ documentType, file }) => ({
+    attachmentId: crypto.randomUUID(),
+    documentType,
+    file,
+    dataUrl: await toDataUrl(file),
+  })));
+  await env.DB.batch(uploads.flatMap(({ attachmentId, documentType, file, dataUrl }) => [
     env.DB.prepare(
       "INSERT INTO order_attachments(id,organization_id,order_id,customer_id,file_name,content_type,size_bytes,data_url,uploaded_by_user_id,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,'admin',?)",
-    ).bind(attachmentId, user.organizationId, orderId, order.customer_id, file.name, file.type, file.size, await toDataUrl(file), user.userId, now),
+    ).bind(attachmentId, user.organizationId, orderId, order.customer_id, file.name, file.type, file.size, dataUrl, user.userId, now),
     env.DB.prepare(
       "INSERT INTO order_document_metadata(attachment_id,organization_id,order_id,document_category,description,public_to_customer,review_status,updated_at) VALUES(?,?,?,?,?,0,'pending',?)",
-    ).bind(attachmentId, user.organizationId, orderId, documentCategory, `${order.batch_number} 配载文件·${documentName}`, now),
-  ]);
+    ).bind(attachmentId, user.organizationId, orderId, documentType.code, `${order.batch_number} 配载文件·${documentType.name}`, now),
+  ]));
   await writeAudit({
     request,
-    action: "warehouse.loading_documents.upload",
-    resourceType: "order_attachment",
-    resourceId: attachmentId,
+    action: "warehouse.loading_documents.upload_many",
+    resourceType: "transport_order",
+    resourceId: orderId,
     organizationId: user.organizationId,
     actorUserId: user.userId,
-    metadata: { warehouseId: warehouse.id, batchId, batchNumber: order.batch_number, orderId, orderNumber: order.order_number, documentCategory, fileName: file.name },
+    metadata: {
+      warehouseId: warehouse.id,
+      batchId,
+      batchNumber: order.batch_number,
+      orderId,
+      orderNumber: order.order_number,
+      files: uploads.map(({ documentType, file }) => ({ documentCategory: documentType.code, fileName: file.name })),
+    },
   });
-  return { success: `${order.batch_number} · ${order.order_number} 的${documentName}已上传`, uploadedAt: now };
+  return { success: `${order.batch_number} · ${order.order_number} 的 ${uploads.length} 个文件已上传`, uploadedAt: now };
 }
 
 export default function WarehouseLoadingDocuments({ loaderData, actionData }: Route.ComponentProps) {
@@ -222,28 +235,103 @@ export default function WarehouseLoadingDocuments({ loaderData, actionData }: Ro
           {loaderData.orders.map((order) => <tr key={order.order_id}><td><strong>{order.order_number}</strong><small>{order.customer_name}</small></td><td>{order.cargo_names || "未填写"}</td>{LOADING_DOCUMENTS.map((type) => {
             const document = loaderData.documents.find((item) => item.order_id === order.order_id && item.document_category === type.code);
             return <td key={type.code}>{document ? <><a href={document.data_url} target="_blank" rel="noreferrer">{document.file_name}</a><small><span className={`status-pill ${["approved","archived"].includes(document.review_status) ? "success" : document.review_status === "rejected" ? "off" : ""}`}>{reviewStatusLabel(document.review_status)}</span></small></> : <span className="status-pill off">待上传</span>}</td>;
-          })}<td><Modal
-            title={`上传订单文件 · ${order.order_number}`}
-            triggerLabel="上传文件"
-            triggerClassName="secondary warehouse-order-upload-trigger"
-            size="wide"
-            closeSignal={actionData?.uploadedAt}
-          >{({ close }) => <Form method="post" encType="multipart/form-data" className="warehouse-order-document-upload-form">
-            <input type="hidden" name="intent" value="upload"/>
-            <input type="hidden" name="batchId" value={selected.id}/>
-            <input type="hidden" name="orderId" value={order.order_id}/>
-            <input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/>
-            <div className="warehouse-order-document-context"><span>挂载订单</span><strong>{order.order_number}</strong><small>{order.customer_name} · {order.cargo_names || "货物名称未填写"}</small></div>
-            {actionData?.formError && <div className="alert error" role="alert">{actionData.formError}</div>}
-            <label className="field"><span>文件类型 *</span><select name="documentCategory" required autoFocus><option value="">请选择类型</option>{LOADING_DOCUMENTS.map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label>
-            <label className="field warehouse-loading-document-file"><span>选择该订单的文件 *</span><input name="attachment" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" required/></label>
-            <p className="warehouse-order-document-help">支持 PDF、Word、Excel、JPG、PNG、WEBP；单个文件不超过 1.2MB。</p>
-            <footer><button type="button" className="secondary" onClick={close}>取消</button><button className="primary" disabled={busy}>{busy ? "正在上传…" : "确认上传"}</button></footer>
-          </Form>}</Modal></td></tr>)}
+          })}<td><OrderDocumentUploadModal
+            order={order}
+            documents={loaderData.documents.filter((item) => item.order_id === order.order_id)}
+            batchId={selected.id}
+            warehouseId={loaderData.warehouse.id}
+            busy={busy}
+            actionData={actionData}
+          /></td></tr>)}
         </tbody></table></div>
       </section>
     </Modal>}
   </>;
+}
+
+function OrderDocumentUploadModal({
+  order,
+  documents,
+  batchId,
+  warehouseId,
+  busy,
+  actionData,
+}: {
+  order: OrderRow;
+  documents: DocumentRow[];
+  batchId: string;
+  warehouseId: string;
+  busy: boolean;
+  actionData: Route.ComponentProps["actionData"];
+}) {
+  const formId = `order-document-upload-${useId().replace(/:/g, "")}`;
+  const [selectedFiles, setSelectedFiles] = useState<Partial<Record<LoadingDocumentCode, File>>>({});
+  const [previewSignal, setPreviewSignal] = useState(0);
+  const selectedCount = Object.values(selectedFiles).filter(Boolean).length;
+  useEffect(() => {
+    if (actionData?.uploadedAt) setSelectedFiles({});
+  }, [actionData?.uploadedAt]);
+  return <Modal
+    title={`上传订单文件 · ${order.order_number}`}
+    triggerLabel="上传文件"
+    triggerClassName="secondary warehouse-order-upload-trigger"
+    size="wide"
+    closeSignal={actionData?.uploadedAt}
+    onClose={() => setSelectedFiles({})}
+  >{({ close }) => <>
+    <Form id={formId} method="post" encType="multipart/form-data" className="warehouse-order-document-upload-form">
+      <input type="hidden" name="intent" value="upload_many"/>
+      <input type="hidden" name="batchId" value={batchId}/>
+      <input type="hidden" name="orderId" value={order.order_id}/>
+      <input type="hidden" name="warehouseId" value={warehouseId}/>
+      <div className="warehouse-order-document-context"><span>挂载订单</span><strong>{order.order_number}</strong><small>{order.customer_name} · {order.cargo_names || "货物名称未填写"}</small></div>
+      <div className="warehouse-order-document-picker" role="table" aria-label="选择订单文件">
+        <div className="warehouse-order-document-picker-head" role="row"><span role="columnheader">文件类型</span><span role="columnheader">当前文件</span><span role="columnheader">本次选择</span><span role="columnheader">操作</span></div>
+        {LOADING_DOCUMENTS.map((documentType) => {
+          const current = documents.find((item) => item.document_category === documentType.code);
+          const selectedFile = selectedFiles[documentType.code];
+          const inputId = `${formId}-${documentType.code}`;
+          return <div className="warehouse-order-document-picker-row" role="row" key={documentType.code}>
+            <strong role="cell">{documentType.name}</strong>
+            <span role="cell">{current ? <><a href={current.data_url} target="_blank" rel="noreferrer">{current.file_name}</a><small>{reviewStatusLabel(current.review_status)}</small></> : <em>尚未上传</em>}</span>
+            <span role="cell" className={selectedFile ? "selected" : ""}>{selectedFile ? <><b>{selectedFile.name}</b><small>{formatFileSize(selectedFile.size)}</small></> : <em>本次不变更</em>}</span>
+            <span role="cell"><input id={inputId} name={`attachment_${documentType.code}`} type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" onChange={(event) => setSelectedFiles((currentFiles) => ({ ...currentFiles, [documentType.code]: event.currentTarget.files?.[0] }))}/><label className="secondary" htmlFor={inputId}>{selectedFile ? "重新选择" : "选择文件"}</label></span>
+          </div>;
+        })}
+      </div>
+      <p className="warehouse-order-document-help">支持 PDF、Word、Excel、JPG、PNG、WEBP；单个文件不超过 1.2MB。本次未选择的已有文件不会改变。</p>
+      <footer><button type="button" className="secondary" onClick={close}>取消</button><button type="button" className="primary" disabled={!selectedCount} onClick={() => setPreviewSignal((value) => value + 1)}>查看并确认（{selectedCount}）</button></footer>
+    </Form>
+    <Modal title={`文件总览 · ${order.order_number}`} size="xwide" openSignal={previewSignal || undefined} closeSignal={actionData?.uploadedAt}>{({ close: closePreview }) =>
+      <section className="warehouse-order-document-preview">
+        <header><div><span>第二步 / 共两步</span><strong>确认本次订单文件</strong></div><p>确认后才会正式上传；已有同类型文件将保留为历史版本。</p></header>
+        {actionData?.formError && <div className="alert error" role="alert">{actionData.formError}</div>}
+        <div className="table-wrap"><table><thead><tr><th>文件类型</th><th>当前版本</th><th>本次文件</th><th>确认结果</th></tr></thead><tbody>{LOADING_DOCUMENTS.map((documentType) => {
+          const current = documents.find((item) => item.document_category === documentType.code);
+          const selectedFile = selectedFiles[documentType.code];
+          return <tr key={documentType.code}><td><strong>{documentType.name}</strong></td><td>{current ? <a href={current.data_url} target="_blank" rel="noreferrer">{current.file_name}</a> : "—"}</td><td>{selectedFile ? <><strong>{selectedFile.name}</strong><small>{formatFileSize(selectedFile.size)} · {selectedFile.type || "未知格式"}</small></> : "—"}</td><td><span className={`status-pill ${selectedFile ? "success" : current ? "" : "off"}`}>{selectedFile ? current ? "上传新版本" : "新增文件" : current ? "保留当前" : "仍缺失"}</span></td></tr>;
+        })}</tbody></table></div>
+        <div className="warehouse-order-document-preview-grid">{LOADING_DOCUMENTS.map((documentType) => <OrderDocumentPreview key={documentType.code} documentType={documentType} selectedFile={selectedFiles[documentType.code]} current={documents.find((item) => item.document_category === documentType.code)}/>)}</div>
+        <footer><span>本次将上传 {selectedCount} 个文件</span><div><button type="button" className="secondary" onClick={closePreview}>返回修改</button><button type="submit" form={formId} className="primary" disabled={busy}>{busy ? "正在上传…" : "确认并上传"}</button></div></footer>
+      </section>
+    }</Modal>
+  </>}</Modal>;
+}
+
+function OrderDocumentPreview({ documentType, selectedFile, current }: { documentType: (typeof LOADING_DOCUMENTS)[number]; selectedFile?: File; current?: DocumentRow }) {
+  const [objectUrl, setObjectUrl] = useState("");
+  useEffect(() => {
+    if (!selectedFile) { setObjectUrl(""); return; }
+    const url = URL.createObjectURL(selectedFile);
+    setObjectUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [selectedFile]);
+  const previewUrl = objectUrl || current?.data_url || "";
+  const contentType = selectedFile?.type || current?.data_url.match(/^data:([^;,]+)/)?.[1] || "";
+  return <article className={!previewUrl ? "empty" : ""}>
+    <header><strong>{documentType.name}</strong><span>{selectedFile ? "本次选择" : current ? "当前版本" : "尚未上传"}</span></header>
+    {previewUrl && contentType.startsWith("image/") ? <img src={previewUrl} alt={`${documentType.name}预览`}/> : previewUrl && contentType === "application/pdf" ? <iframe src={previewUrl} title={`${documentType.name} PDF 预览`}/> : <div><b>{selectedFile?.name || current?.file_name || "无文件"}</b><small>{previewUrl ? "该格式请下载或在新窗口查看" : "本次仍未提供该文件"}</small>{current && !selectedFile && <a href={current.data_url} target="_blank" rel="noreferrer">打开当前文件</a>}</div>}
+  </article>;
 }
 
 function validateDocumentFile(file: File) {
@@ -261,4 +349,5 @@ async function toDataUrl(file: File) {
 function batchStatusLabel(status: string) { return ({ planning: "待完善", loading: "待装车", completed: "已完成" } as Record<string, string>)[status] ?? status; }
 function reviewStatusLabel(status: string) { return ({ pending: "待审核", approved: "已通过", rejected: "已退回", archived: "已归档" } as Record<string, string>)[status] ?? status; }
 function formatDateTime(value: string) { return new Date(value).toLocaleString("zh-CN", { hour12: false }); }
+function formatFileSize(size: number) { return size >= 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(2)} MB` : `${Math.max(1, Math.round(size / 1024))} KB`; }
 export function meta() { return [{ title: "配载文件 | International TMS" }]; }
