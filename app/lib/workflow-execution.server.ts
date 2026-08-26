@@ -164,7 +164,7 @@ export async function synchronizeWorkflowExecution(input:{
   }>();
   const reachable = steps.results.filter((item)=>item.sort_order<=target.sort_order);
   const current = reachable.find((item)=>item.module_count===0 || item.pending_required>0) ??
-    reachable.at(-1) ?? steps.results[0];
+    reachable[reachable.length - 1] ?? steps.results[0];
   if (!current) return input.targetStepKey;
   const stepUpdates = steps.results.map((item) => {
     const completed = item.sort_order<current.sort_order ||

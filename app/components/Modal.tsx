@@ -124,7 +124,7 @@ export function useExpandableDialogScrollLock() {
           "details.expandable[open]:not(.module-inline-create)",
         ),
       );
-      const dialog = targetedDialog ?? openDialogs.at(-1);
+      const dialog = targetedDialog ?? openDialogs[openDialogs.length - 1];
       if (!dialog) return;
       const scrollArea = Array.from(dialog.children).find(
         (element): element is HTMLElement =>
@@ -168,11 +168,12 @@ type ModalProps = {
   closeSignal?: unknown;
   openSignal?: unknown;
   size?: "normal" | "wide" | "xwide";
+  dialogClassName?: string;
   triggerClassName?: string;
   onClose?: () => void;
 };
 
-export function Modal({ title, triggerLabel, children, closeSignal, openSignal, size = "normal", triggerClassName = "primary", onClose }: ModalProps) {
+export function Modal({ title, triggerLabel, children, closeSignal, openSignal, size = "normal", dialogClassName = "", triggerClassName = "primary", onClose }: ModalProps) {
   const [open, setOpen] = useState(false);
   const titleId = useId();
   const modalId = useId();
@@ -215,7 +216,7 @@ export function Modal({ title, triggerLabel, children, closeSignal, openSignal, 
             }}
           >
             <section
-              className={`modal-card ${size === "normal" ? "" : size}`}
+              className={`modal-card ${size === "normal" ? "" : size} ${dialogClassName}`.trim()}
               role="dialog"
               aria-modal="true"
               aria-labelledby={titleId}

@@ -23,10 +23,14 @@ export function Layout({ children }: { children: React.ReactNode }) {
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name="theme-color" content="#0d263b" />
         <Meta />
         <Links />
       </head>
       <body>
+        <div className="legacy-browser-warning" role="alert">
+          当前为 360 兼容模式，系统需要现代浏览器内核。请切换到“极速模式”后继续使用。
+        </div>
         {children}
         <ScrollRestoration />
         <Scripts />

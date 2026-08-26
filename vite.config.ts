@@ -4,6 +4,9 @@ import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
 
 export default defineConfig({
+  build: {
+    target: ["chrome87", "edge88", "firefox78"],
+  },
   server: {
     host: "127.0.0.1",
     port: 5188,

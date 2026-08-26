@@ -223,6 +223,7 @@ export default function WarehouseLoadingDocuments({ loaderData, actionData }: Ro
     {selected && <Modal
       title={`${selected.batch_number} · 配载文件`}
       size="xwide"
+      dialogClassName="warehouse-loading-document-modal"
       openSignal={selected.id}
       onClose={() => navigate(`/warehouse/loading-documents?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}`)}
     >
@@ -329,7 +330,7 @@ function OrderDocumentUploadModal({
       <p className="warehouse-order-document-help">支持 PDF、Word、Excel、JPG、PNG、WEBP；单个文件不超过 1.2MB。本次未选择的已有文件不会改变。</p>
       <footer><button type="button" className="secondary" onClick={() => { setSelectedFiles({}); close(); }}>取消</button><button type="button" className="primary" disabled={!selectedCount} onClick={() => openPreview(close)}>查看并确认（{selectedCount}）</button></footer>
     </section>}</Modal>
-    <Modal title={`文件总览 · ${order.order_number}`} size="xwide" openSignal={previewSignal || undefined} closeSignal={actionData?.uploadedAt}>{({ close: closePreview }) =>
+    <Modal title={`文件总览 · ${order.order_number}`} size="xwide" dialogClassName="warehouse-order-document-preview-modal" openSignal={previewSignal || undefined} closeSignal={actionData?.uploadedAt}>{({ close: closePreview }) =>
       <section className="warehouse-order-document-preview">
         <header><div><span>第二步 / 共两步</span><strong>确认本次订单文件</strong></div><p>确认后才会正式上传；已有同类型文件将保留为历史版本。</p></header>
         {actionData?.formError && <div className="alert error" role="alert">{actionData.formError}</div>}

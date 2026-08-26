@@ -8,6 +8,7 @@ import { loadWarehouseContext } from "../lib/warehouse-context.server";
 import { warehouseRoleLabels } from "../lib/road-master-data";
 import { AppIcon } from "../components/AppIcon";
 import { PrototypeBrandMark } from "../components/PrototypeBrandMark";
+import { submitForm } from "../lib/form-submit";
 
 type WarehouseOrder = {
   id: string;
@@ -142,7 +143,7 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
           {orderContext&&<input type="hidden" name="orderId" value={orderContext.id}/>}
           {loaderData.returnTo!=="/admin"&&<input type="hidden" name="returnTo" value={loaderData.returnTo}/>}
           <label htmlFor="authorized-warehouse"><span>当前授权仓库</span></label>
-          <select id="authorized-warehouse" name="warehouseId" defaultValue={loaderData.warehouse.id} onChange={event=>event.currentTarget.form?.requestSubmit()} disabled={loaderData.warehouses.length<2}>
+          <select id="authorized-warehouse" name="warehouseId" defaultValue={loaderData.warehouse.id} onChange={event=>submitForm(event.currentTarget.form)} disabled={loaderData.warehouses.length<2}>
             {loaderData.warehouses.map(item=><option key={item.id} value={item.id}>{item.name} · {warehouseRoleLabels[item.warehouse_role]}</option>)}
           </select>
           <small>{loaderData.warehouse.code} · 仅显示当前账号获授权的仓库</small>

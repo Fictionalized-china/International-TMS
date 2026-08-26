@@ -120,6 +120,7 @@
   padding: 14px 16px;
   border-bottom: 1px solid #cbd8e7;
   background: rgba(248, 251, 255, .98);
+  -webkit-backdrop-filter: blur(8px);
   backdrop-filter: blur(8px);
 }
 .order-form-current > div:first-child span,
@@ -1015,6 +1016,7 @@ h3 {
   z-index: 100;
   inset: 0 auto 0 0;
   width: 248px;
+  height: 100vh;
   height: 100dvh;
   overflow: hidden;
   padding: 24px 18px;
@@ -1601,6 +1603,7 @@ td small {
   z-index: 100;
   inset: 0 auto 0 0;
   width: 212px;
+  height: 100vh;
   height: 100dvh;
   padding: 0 8px 12px;
   display: flex;
@@ -5299,6 +5302,7 @@ label:has(> input:required:invalid, > select:required:invalid, > textarea:requir
   z-index: 1010;
 }
 .cargo-dialog-backdrop .modal-card {
+  height: calc(100vh - 48px);
   height: calc(100dvh - 48px);
 }
 .cargo-dialog-backdrop .modal-body {
@@ -5585,6 +5589,7 @@ label:has(> input:required:invalid, > select:required:invalid, > textarea:requir
     padding: 10px;
   }
   .cargo-dialog-backdrop .modal-card {
+    height: calc(100vh - 20px);
     height: calc(100dvh - 20px);
   }
   .cargo-dialog-section .dialog-fields {
@@ -5783,6 +5788,7 @@ label:has(> input:required:invalid, > select:required:invalid, > textarea:requir
   padding: 10px 12px;
   margin-bottom: 16px;
   background: rgba(241, 245, 249, 0.94);
+  -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -6721,6 +6727,7 @@ label:has(> input:required:invalid, > select:required:invalid, > textarea:requir
   place-items: center;
   padding: 24px;
   background: rgba(7, 22, 15, 0.56);
+  -webkit-backdrop-filter: blur(3px);
   backdrop-filter: blur(3px);
   overflow: hidden;
   overscroll-behavior: none;
@@ -6767,6 +6774,7 @@ label:has(> input:required:invalid, > select:required:invalid, > textarea:requir
 .modal-body {
   flex: 1 1 auto;
   min-height: 0;
+  max-height: calc(100vh - 130px);
   max-height: calc(100dvh - 130px);
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -11216,6 +11224,7 @@ a.order-module-card.read-only:hover {
   display: flex;
   flex-direction: column;
   width: min(920px, calc(100vw - 32px));
+  height: min(880px, calc(100vh - 48px));
   height: min(880px, calc(100dvh - 48px));
   max-height: calc(100vh - 48px);
   margin: 0;
@@ -11248,6 +11257,7 @@ a.order-module-card.read-only:hover {
   min-height: 0;
   min-width: 0;
   max-width: 100%;
+  max-height: calc(100vh - 112px);
   max-height: calc(100dvh - 112px);
   margin: 0;
   padding: 22px 24px 24px;
@@ -11331,6 +11341,7 @@ a.order-module-card.read-only:hover {
 @media (max-width: 700px) {
   .expandable[open] {
     width: calc(100vw - 18px);
+    height: calc(100vh - 18px);
     height: calc(100dvh - 18px);
     max-height: calc(100vh - 18px);
   }
@@ -14427,16 +14438,21 @@ a.order-module-card.read-only:hover {
 }
 
 /* 4.html quotation workspace: dense, aligned and contained inside one dialog. */
-.modal-card.xwide:has(.prototype-quote-form) {
+.modal-card.xwide:has(.prototype-quote-form),
+.modal-card.xwide.quote-form-modal {
   width: min(1360px, calc(100vw - 24px));
   max-height: calc(100vh - 20px);
 }
-.modal-card.xwide:has(.prototype-quote-form) .modal-header {
+.modal-card.xwide:has(.prototype-quote-form) .modal-header,
+.modal-card.xwide.quote-form-modal .modal-header {
   min-height: 38px;
   padding: 0 10px;
 }
-.modal-card.xwide:has(.prototype-quote-form) .modal-header h2 { font-size: 14px; }
-.modal-card.xwide:has(.prototype-quote-form) .modal-body {
+.modal-card.xwide:has(.prototype-quote-form) .modal-header h2,
+.modal-card.xwide.quote-form-modal .modal-header h2 { font-size: 14px; }
+.modal-card.xwide:has(.prototype-quote-form) .modal-body,
+.modal-card.xwide.quote-form-modal .modal-body {
+  max-height: calc(100vh - 58px);
   max-height: calc(100dvh - 58px);
   padding: 3px 10px 0;
 }
@@ -14791,8 +14807,8 @@ a.order-module-card.read-only:hover {
 }
 
 @media (max-width: 700px) {
-  .modal-card.xwide:has(.prototype-quote-form) { width: calc(100vw - 18px); max-height: calc(100vh - 18px); }
-  .modal-card.xwide:has(.prototype-quote-form) .modal-body { padding: 9px 10px 0; }
+  .modal-card.xwide:has(.prototype-quote-form), .modal-card.xwide.quote-form-modal { width: calc(100vw - 18px); max-height: calc(100vh - 18px); }
+  .modal-card.xwide:has(.prototype-quote-form) .modal-body, .modal-card.xwide.quote-form-modal .modal-body { padding: 9px 10px 0; }
   .prototype-quote-form .grid,
   .prototype-quote-form .grid.two,
   .prototype-quote-form .quote-plan-section .grid,
@@ -16057,6 +16073,7 @@ a.order-module-card.read-only:hover {
   color: var(--tms-ink);
   border-bottom: 1px solid var(--tms-line);
   background: rgba(255,255,255,.96);
+  -webkit-backdrop-filter: blur(12px);
   backdrop-filter: blur(12px);
 }
 .admin-workspace-title,
@@ -16277,6 +16294,7 @@ a.order-module-card.read-only:hover {
   border-radius: 6px;
   background: rgba(247,252,250,.97);
   box-shadow: 0 10px 30px rgba(24,48,65,.13);
+  -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
 }
 .order-sticky-action-bar.blocked { border-color: #e2b9b5; background: rgba(255,248,247,.97); }
@@ -16325,7 +16343,7 @@ a.order-module-card.read-only:hover {
 .warehouse-app-shell .warehouse-return { min-height: 35px; display: flex; justify-content: center; align-items: center; gap: 7px; border-color: rgba(255,255,255,.2); border-radius: 4px; }
 .warehouse-app-shell .warehouse-user { position: static; padding: 10px 12px; background: #0d263b; border-top-color: rgba(255,255,255,.1); }
 .warehouse-main-column { min-width: 0; display: grid; grid-template-rows: 62px minmax(0,1fr); }
-.warehouse-topbar { position: sticky; z-index: 25; top: 0; padding: 0 26px; display: flex; justify-content: space-between; align-items: center; gap: 18px; border-bottom: 1px solid var(--tms-line); background: rgba(255,255,255,.96); backdrop-filter: blur(12px); }
+.warehouse-topbar { position: sticky; z-index: 25; top: 0; padding: 0 26px; display: flex; justify-content: space-between; align-items: center; gap: 18px; border-bottom: 1px solid var(--tms-line); background: rgba(255,255,255,.96); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
 .warehouse-topbar > div,
 .warehouse-sync-state,
 .warehouse-topbar-user { display: flex; align-items: center; }
@@ -16728,6 +16746,7 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   color: var(--ink);
   border-bottom: 1px solid var(--line);
   background: #fff;
+  -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
 .workspace-switch { display: flex; padding: 3px; border-radius: 4px; background: #f0f3f6; }
@@ -20127,19 +20146,23 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
 .warehouse-order-document-preview > footer > span { color: #536a7f; font-size: 10px; font-weight: 700; }
 .warehouse-order-document-preview > footer > div { display: flex; gap: 7px; }
 .warehouse-order-document-preview > footer button { min-height: 35px; border-radius: 3px; }
-.modal-card.xwide:has(.warehouse-loading-document-dialog) { width: min(1380px, calc(100vw - 30px)); }
-.modal-card.xwide:has(.warehouse-loading-document-dialog) .modal-header { min-height: 48px; padding: 9px 14px; }
-.modal-card.xwide:has(.warehouse-loading-document-dialog) .modal-header h2 { font-size: 14px; }
-.modal-card.xwide:has(.warehouse-loading-document-dialog) .modal-body { padding: 10px; }
-.modal-card.xwide:has(.warehouse-order-document-preview) {
+.modal-card.xwide:has(.warehouse-loading-document-dialog), .modal-card.xwide.warehouse-loading-document-modal { width: min(1380px, calc(100vw - 30px)); }
+.modal-card.xwide:has(.warehouse-loading-document-dialog) .modal-header, .modal-card.xwide.warehouse-loading-document-modal .modal-header { min-height: 48px; padding: 9px 14px; }
+.modal-card.xwide:has(.warehouse-loading-document-dialog) .modal-header h2, .modal-card.xwide.warehouse-loading-document-modal .modal-header h2 { font-size: 14px; }
+.modal-card.xwide:has(.warehouse-loading-document-dialog) .modal-body, .modal-card.xwide.warehouse-loading-document-modal .modal-body { padding: 10px; }
+.modal-card.xwide:has(.warehouse-order-document-preview),
+.modal-card.xwide.warehouse-order-document-preview-modal {
   width: min(1180px, calc(100vw - 48px));
+  height: min(860px, calc(100vh - 48px));
   height: min(860px, calc(100dvh - 48px));
+  max-height: calc(100vh - 48px);
   max-height: calc(100dvh - 48px);
   border-radius: 8px;
 }
-.modal-card.xwide:has(.warehouse-order-document-preview) .modal-header { min-height: 52px; padding: 9px 16px; flex: 0 0 auto; }
-.modal-card.xwide:has(.warehouse-order-document-preview) .modal-header h2 { font-size: 14px; }
-.modal-card.xwide:has(.warehouse-order-document-preview) .modal-body {
+.modal-card.xwide:has(.warehouse-order-document-preview) .modal-header, .modal-card.xwide.warehouse-order-document-preview-modal .modal-header { min-height: 52px; padding: 9px 16px; flex: 0 0 auto; }
+.modal-card.xwide:has(.warehouse-order-document-preview) .modal-header h2, .modal-card.xwide.warehouse-order-document-preview-modal .modal-header h2 { font-size: 14px; }
+.modal-card.xwide:has(.warehouse-order-document-preview) .modal-body,
+.modal-card.xwide.warehouse-order-document-preview-modal .modal-body {
   max-height: none;
   padding: 10px 12px 0;
   overflow-y: auto;
@@ -20156,6 +20179,12 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
   .warehouse-order-document-preview-grid { grid-template-columns: 1fr; }
 }
 @media print {
+  .order-mark-label,
+  .package-label,
+  .warehouse-package-label {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
   .warehouse-package-label dl,
   .warehouse-app-shell .warehouse-package-label dl {
     display: block !important;
@@ -20165,5 +20194,59 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
     text-overflow: clip !important;
     white-space: normal !important;
     overflow-wrap: anywhere !important;
+  }
+}
+
+/* Cross-browser baseline: keep controls, scrolling and glass surfaces usable
+   on Firefox and the Chromium builds distributed by Edge and 360. */
+html {
+  color-scheme: light;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+button,
+[role="button"],
+a,
+summary,
+label[for],
+select {
+  touch-action: manipulation;
+}
+input,
+select,
+textarea,
+button {
+  font: inherit;
+}
+.table-wrap,
+.modal-body,
+.warehouse-sidebar nav,
+.admin-sidebar nav {
+  scrollbar-width: thin;
+  scrollbar-color: #a9b8c6 transparent;
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .admin-topbar,
+  .warehouse-topbar,
+  .order-form-current,
+  .operation-jump,
+  .order-sticky-action-bar {
+    background: #fff;
+  }
+}
+.legacy-browser-warning {
+  display: none;
+}
+@media all and (-ms-high-contrast: none), (-ms-high-contrast: active) {
+  .legacy-browser-warning {
+    display: block;
+    position: relative;
+    z-index: 99999;
+    padding: 12px 18px;
+    color: #7f1d1d;
+    border-bottom: 1px solid #fca5a5;
+    background: #fef2f2;
+    font: 14px/1.5 "Microsoft YaHei", Arial, sans-serif;
+    text-align: center;
   }
 }

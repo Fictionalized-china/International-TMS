@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { syncOrderWorkflowSnapshot } from "./order-modules.server";
+import { portalOrderListLink } from "./portal-notification-links";
 
 type ArrivalInput = {
   organizationId: string;
@@ -693,7 +694,7 @@ export async function automaticallyNotifyOverseasArrival(input: AutomaticNoticeI
       context.customer_id,
       `订单 ${context.order_number} 已到仓`,
       `货物已到达${context.warehouse_name}并完成入库清点，请登录客户门户查看并安排自提。`,
-      `/portal/orders?order=${encodeURIComponent(context.order_number)}`,
+      portalOrderListLink(context.order_number),
       now,
     ),
     existing

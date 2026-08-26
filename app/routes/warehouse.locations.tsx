@@ -46,7 +46,7 @@ export async function action({request}:Route.ActionArgs){
     if(existing.results.length)return{formError:`以下库位代码已存在：${existing.results.slice(0,8).map(item=>item.code).join("、")}${existing.results.length>8?"…":""}`};
     await env.DB.batch(generated.map(item=>env.DB.prepare("INSERT INTO warehouse_locations(id,organization_id,warehouse_id,zone_id,code,name,barcode,capacity_cbm,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'active',?,?)").bind(crypto.randomUUID(),user.organizationId,zone.warehouse_id,zone.id,item.code,item.name,item.barcode,capacity>0?capacity:null,now,now)));
     await writeAudit({request,action:"warehouse.location.batch_create",resourceType:"warehouse_location",organizationId:user.organizationId,actorUserId:user.userId,metadata:{zoneId,prefix,start,count,padding,capacity}});
-    return{success:`已批量生成 ${count} 个库位（${generated[0].code} 至 ${generated.at(-1)?.code}）`};
+    return{success:`已批量生成 ${count} 个库位（${generated[0].code} 至 ${generated[generated.length-1]?.code}）`};
   }
   const code=valueOf(form,"code").toUpperCase(),name=valueOf(form,"name");
   if(!/^[A-Z0-9-]{2,24}$/.test(code)||name.length<1||name.length>80)return{formError:"请填写有效的名称和代码（代码仅限字母、数字和横线）"};

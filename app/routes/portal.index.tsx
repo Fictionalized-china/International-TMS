@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { Link } from "react-router";
 import type { Route } from "./+types/portal.index";
 import { requirePortalCustomer } from "../lib/portal.server";
+import { normalizePortalNotificationLink } from "../lib/portal-notification-links";
 
 type Contact = { id: string; name: string; title: string | null; email: string | null; phone: string | null; is_primary: number };
 type Address = { id: string; label: string; country_code: string; city: string; address_line1: string; is_default: number };
@@ -88,7 +89,7 @@ export default function PortalIndex({ loaderData }: Route.ComponentProps) {
     <div className="portal-home-lower">
       <section className="table-panel">
         <div className="table-panel-head"><div><b>最新消息</b><span>报价、运输和账单状态集中显示。</span></div><Link className="btn small" to="/portal/notifications">消息中心</Link></div>
-        <div className="portal-home-message-list">{loaderData.notices.map((notice) => <Link to={notice.link || "/portal/notifications"} key={notice.id} className={notice.is_read ? "" : "unread"}><span className="status blue">{noticeTypeLabel(notice.type)}</span><strong>{notice.title}</strong><small>{notice.message}</small><time>{new Date(notice.created_at).toLocaleString("zh-CN")}</time></Link>)}{!loaderData.notices.length && <p className="empty-state">暂无消息。</p>}</div>
+        <div className="portal-home-message-list">{loaderData.notices.map((notice) => <Link to={normalizePortalNotificationLink(notice.link) || "/portal/notifications"} key={notice.id} className={notice.is_read ? "" : "unread"}><span className="status blue">{noticeTypeLabel(notice.type)}</span><strong>{notice.title}</strong><small>{notice.message}</small><time>{new Date(notice.created_at).toLocaleString("zh-CN")}</time></Link>)}{!loaderData.notices.length && <p className="empty-state">暂无消息。</p>}</div>
       </section>
       <section className="table-panel portal-home-profile">
         <div className="table-panel-head"><div><b>常用资料</b><span>下单与业务沟通时直接复用。</span></div><Link className="btn small" to="/portal/account?tab=contacts">维护资料</Link></div>

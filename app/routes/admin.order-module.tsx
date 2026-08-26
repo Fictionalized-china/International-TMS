@@ -31,6 +31,7 @@ import { canManageOrderModule } from "../lib/position-portal";
 import { transportChargeNameOptions } from "../lib/charge-options";
 import { ensureFtlVehicleAndLoads } from "../lib/ftl-vehicle-loads.server";
 import { summarizeLoadingSelection } from "../lib/loading-workbench";
+import { submitForm } from "../lib/form-submit";
 import {
   maxInlineOrderDocumentBytes,
   orderDocumentCanBeHandledInModule,
@@ -3952,7 +3953,7 @@ function ModuleNextGuidance({
 }) {
   const completedStep =
     moduleStatus === "completed"
-      ? steps.at(-1)
+      ? steps[steps.length - 1]
       : currentIndex > 0
         ? steps[currentIndex - 1]
         : null;
@@ -4437,7 +4438,7 @@ function ModuleSourceDocuments({
                 <input type="hidden" name="documentDescription" value="" />
                 <input type="hidden" name="publicToCustomer" value="0" />
                 <label className="document-upload-button">
-                  <input className="document-upload-input" name="attachments" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" required disabled={busy} onChange={(event) => { if (event.currentTarget.files?.length) event.currentTarget.form?.requestSubmit(); }} />
+                  <input className="document-upload-input" name="attachments" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" required disabled={busy} onChange={(event) => { if (event.currentTarget.files?.length) submitForm(event.currentTarget.form); }} />
                   <span>{busy ? "正在上传…" : "选择并上传"}</span>
                 </label>
               </Form> : <span className="muted">只读</span>}

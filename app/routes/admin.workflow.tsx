@@ -1260,7 +1260,7 @@ function NodeCreateForm({
       <Select name="actorScope" label="执行角色" items={Object.entries(scopeLabels)} value="admin" />
       <label className="field">
         <span>流程顺序</span>
-        <input name="sortOrder" type="number" min="1" max="999" defaultValue={(activeSteps.at(-1)?.sort_order ?? 0) + 10} required />
+        <input name="sortOrder" type="number" min="1" max="999" defaultValue={(activeSteps[activeSteps.length - 1]?.sort_order ?? 0) + 10} required />
       </label>
       <p className="field-hint">新增节点会加入当前选中的工作流模板。</p>
       <button className="primary" disabled={busy}>
@@ -1355,7 +1355,7 @@ function ModuleList({
                 ))}
                 {!tasks.length && <p className="workflow-field-group-empty">尚未配置办理步骤</p>}
                 <Modal title={`新增办理步骤 · ${item.display_name}`} triggerLabel="新增办理步骤" triggerClassName="secondary" closeSignal={closeSignal}>
-                  <TaskForm workflowId={workflowId} module={item} positions={positions} busy={busy} nextSort={(tasks.at(-1)?.sort_order ?? 0)+10}/>
+                  <TaskForm workflowId={workflowId} module={item} positions={positions} busy={busy} nextSort={(tasks[tasks.length - 1]?.sort_order ?? 0)+10}/>
                 </Modal>
               </div>
             </article>
@@ -1368,7 +1368,7 @@ function ModuleList({
             <input type="hidden" name="intent" value="module_add"/><input type="hidden" name="workflowId" value={workflowId}/><input type="hidden" name="stepId" value={step.id}/>
             <label className="field"><span>功能模组</span><select name="moduleCode" required>{available.map((item)=><option key={item.code} value={item.code}>{item.name}</option>)}</select></label>
             <PositionSelect positions={positions}/>
-            <label className="field"><span>顺序</span><input name="moduleSortOrder" type="number" min="1" max="999" defaultValue={(modules.at(-1)?.sort_order ?? 0)+10} required/></label>
+            <label className="field"><span>顺序</span><input name="moduleSortOrder" type="number" min="1" max="999" defaultValue={(modules[modules.length - 1]?.sort_order ?? 0)+10} required/></label>
             <button className="primary" disabled={busy}>加入节点</button>
           </Form>
         </Modal>
@@ -1504,10 +1504,10 @@ function FieldList({
       {manage && (
         <div className="workflow-field-actions">
           <Modal title={`从字段库添加 · ${step.name}`} triggerLabel="从字段库添加" triggerClassName="secondary" size="wide" closeSignal={closeSignal}>
-            <CatalogFieldForm workflowId={workflowId} step={step} fields={fields} busy={busy} nextSort={(fields.at(-1)?.sort_order ?? 0) + 10} />
+            <CatalogFieldForm workflowId={workflowId} step={step} fields={fields} busy={busy} nextSort={(fields[fields.length - 1]?.sort_order ?? 0) + 10} />
           </Modal>
           <Modal title={`新增字段 · ${step.name}`} triggerLabel="新增自定义字段" triggerClassName="secondary" size="wide" closeSignal={closeSignal}>
-            <FieldForm workflowId={workflowId} stepId={step.id} busy={busy} nextSort={(fields.at(-1)?.sort_order ?? 0) + 10} />
+            <FieldForm workflowId={workflowId} stepId={step.id} busy={busy} nextSort={(fields[fields.length - 1]?.sort_order ?? 0) + 10} />
           </Modal>
         </div>
       )}

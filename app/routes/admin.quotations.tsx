@@ -276,7 +276,7 @@ export default function QuotationsPage({ loaderData, actionData }: Route.Compone
     <div className="breadcrumb">管理后台 / 工作台 / <b>询价与报价</b></div>
     <div className="page-head">
       <div><span className="eyebrow">QUOTE DESK / 询价与报价</span><h1>询价与报价</h1><p>报价被接受后立即生成唯一运输订单，不再二次创建订单。</p></div>
-      <div className="head-actions"><Modal title="创建运输报价" triggerLabel="创建报价" triggerClassName="btn primary" closeSignal={actionData?.success} size="xwide"><QuoteForm loaderData={loaderData} busy={busy} /></Modal></div>
+      <div className="head-actions"><Modal title="创建运输报价" triggerLabel="创建报价" triggerClassName="btn primary" closeSignal={actionData?.success} size="xwide" dialogClassName="quote-form-modal"><QuoteForm loaderData={loaderData} busy={busy} /></Modal></div>
     </div>
     {(actionData?.success || actionData?.formError) && <div className={`gate ${actionData.formError ? "" : "ok"}`}>{actionData.formError || actionData.success}</div>}
     <div className="kpis quotation-kpis">

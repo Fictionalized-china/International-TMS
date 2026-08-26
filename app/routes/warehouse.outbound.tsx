@@ -8,6 +8,7 @@ import { valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import { isValidCustomerIdentityCode } from "../lib/customer-identity";
 import { maxInlineOrderDocumentBytes } from "../lib/order-documents";
+import { submitForm } from "../lib/form-submit";
 import { checkOrderLoadPlan, checkOrderPreDepartureDocuments } from "../lib/order-readiness.server";
 import { refreshLoadingManifest } from "../lib/loading-manifest.server";
 import { recordBatchOutboundProgress, recordWarehouseProgress } from "../lib/warehouse-progress.server";
@@ -449,7 +450,7 @@ function CreateDispatchWorkbench({warehouseId,batches,requestedBatch,inspection,
                 <td><strong>{document.name}</strong></td><td><span className="status-pill">{outboundDocumentStatus(document)}</span></td><td title={document.fileName??undefined}>{document.fileName||"尚未上传"}</td>
                 <td><Form method="post" encType="multipart/form-data" className="outbound-document-upload-form">
                   <input type="hidden" name="intent" value="loading_document_upload"/><input type="hidden" name="inspectionOrderId" value={inspection.batch.order_id}/><input type="hidden" name="orderId" value={document.orderId}/><input type="hidden" name="batchId" value={inspection.batch.id}/><input type="hidden" name="documentCategory" value={document.code}/>
-                  <label className="document-upload-button"><input className="document-upload-input" name="attachment" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" required disabled={busy} onChange={(event)=>event.currentTarget.form?.requestSubmit()}/><span>{document.attachmentId?"选择替换文件":"选择文件"}</span></label>
+                  <label className="document-upload-button"><input className="document-upload-input" name="attachment" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" required disabled={busy} onChange={(event)=>submitForm(event.currentTarget.form)}/><span>{document.attachmentId?"选择替换文件":"选择文件"}</span></label>
                 </Form></td>
               </tr>)}</tbody></table></div>
             </section>)}
