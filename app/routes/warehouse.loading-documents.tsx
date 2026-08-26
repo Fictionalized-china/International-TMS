@@ -167,8 +167,8 @@ export async function action({ request }: Route.ActionArgs) {
       "INSERT INTO order_attachments(id,organization_id,order_id,customer_id,file_name,content_type,size_bytes,data_url,uploaded_by_user_id,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,'admin',?)",
     ).bind(attachmentId, user.organizationId, orderId, order.customer_id, file.name, file.type, file.size, dataUrl, user.userId, now),
     env.DB.prepare(
-      "INSERT INTO order_document_metadata(attachment_id,organization_id,order_id,document_category,description,public_to_customer,review_status,updated_at) VALUES(?,?,?,?,?,0,'pending',?)",
-    ).bind(attachmentId, user.organizationId, orderId, documentType.code, `${order.batch_number} 配载文件·${documentType.name}`, now),
+      "INSERT INTO order_document_metadata(attachment_id,organization_id,order_id,document_category,description,public_to_customer,review_status,reviewed_by_user_id,reviewed_at,updated_at) VALUES(?,?,?,?,?,0,'approved',?,?,?)",
+    ).bind(attachmentId, user.organizationId, orderId, documentType.code, `${order.batch_number} 配载文件·${documentType.name}`, user.userId, now, now),
   ]));
   await writeAudit({
     request,
@@ -183,10 +183,11 @@ export async function action({ request }: Route.ActionArgs) {
       batchNumber: order.batch_number,
       orderId,
       orderNumber: order.order_number,
+      autoApproved: true,
       files: uploads.map(({ documentType, file }) => ({ documentCategory: documentType.code, fileName: file.name })),
     },
   });
-  return { success: `${order.batch_number} · ${order.order_number} 的 ${uploads.length} 个文件已上传`, uploadedAt: now };
+  return { success: `${order.batch_number} · ${order.order_number} 的 ${uploads.length} 个文件已上传并自动通过`, uploadedAt: now };
 }
 
 export default function WarehouseLoadingDocuments({ loaderData, actionData }: Route.ComponentProps) {
