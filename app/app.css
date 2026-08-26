@@ -19301,6 +19301,72 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.batch-workspace-tabs {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  border-top: 1px solid #d7e4f4;
+  background: #fff;
+}
+.batch-workspace-tabs > a {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 6px;
+  min-width: 0;
+  min-height: 50px;
+  padding: 6px 9px;
+  border-right: 1px solid #dce5ef;
+  border-bottom: 2px solid transparent;
+  color: #183a64;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease;
+}
+.batch-workspace-tabs > a:last-child {
+  border-right: 0;
+}
+.batch-workspace-tabs > a:hover,
+.batch-workspace-tabs > a:focus-visible {
+  background: #edf5fd;
+  border-bottom-color: #78a9d8;
+  outline: 2px solid #78a9d8;
+  outline-offset: -2px;
+}
+.batch-workspace-tabs > a.active {
+  background: #0d2d50;
+  border-bottom-color: #f26a3d;
+  color: #fff;
+}
+.batch-workspace-tabs > a.done:not(.active) {
+  border-bottom-color: #28a77b;
+}
+.batch-workspace-tabs > a strong {
+  overflow: hidden;
+  align-self: center;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.batch-workspace-tabs > a small {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  color: #65768a;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.batch-workspace-tabs > a.active small {
+  color: #cfdeed;
+}
+.batch-workspace-tabs .status-pill {
+  padding: 2px 5px;
+  border-radius: 2px;
+  font-size: 9px;
+}
+.batch-tab-panel {
+  margin-bottom: 8px;
+  border-radius: 2px;
+  box-shadow: none;
+}
 .batch-command-table {
   margin: 0;
   border: 0;
@@ -19512,5 +19578,11 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
   }
   .batch-tracking-page-header {
     flex-direction: column;
+  }
+  .batch-workspace-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .batch-workspace-tabs > a:nth-child(2n) {
+    border-right: 0;
   }
 }
