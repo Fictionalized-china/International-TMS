@@ -103,33 +103,44 @@ const workflowDefinitions = {
 } as const;
 
 export async function ensureDefaultWorkflow(organizationId: string): Promise<string> {
+  const existingId = await findPublishedWorkflowId(
+    organizationId,
+    workflowDefinitions.ltl.code,
+  );
+  if (existingId) return existingId;
   await ensureRoadWorkflowTemplates(organizationId);
-  const existing = await env.DB.prepare(
-    `SELECT id FROM workflow_definitions
-     WHERE organization_id=? AND lifecycle_status='published' AND status='active'
-       AND (code='tms-default' OR template_family_id=?)
-     ORDER BY version_number DESC,updated_at DESC LIMIT 1`,
-  ).bind(organizationId,`${organizationId}:tms-default`).first<Definition>();
-  return existing?.id ?? `${organizationId}:tms-default`;
+  return (
+    (await findPublishedWorkflowId(organizationId, workflowDefinitions.ltl.code)) ??
+    `${organizationId}:tms-default`
+  );
 }
 
 export async function ensureWorkflowForBusinessType(
   organizationId: string,
   businessType?: string | null,
 ): Promise<string> {
-  await ensureRoadWorkflowTemplates(organizationId);
   const code = businessType === "ftl"
     ? workflowDefinitions.ftl.code
     : businessType === "ltl"
       ? workflowDefinitions.ltl.code
       : workflowDefinitions.pending.code;
+  const existingId = await findPublishedWorkflowId(organizationId, code);
+  if (existingId) return existingId;
+  await ensureRoadWorkflowTemplates(organizationId);
+  return (
+    (await findPublishedWorkflowId(organizationId, code)) ??
+    ensureDefaultWorkflow(organizationId)
+  );
+}
+
+async function findPublishedWorkflowId(organizationId: string, code: string) {
   const existing = await env.DB.prepare(
     `SELECT id FROM workflow_definitions
      WHERE organization_id=? AND lifecycle_status='published' AND status='active'
        AND (code=? OR template_family_id=?)
      ORDER BY version_number DESC,updated_at DESC LIMIT 1`,
   ).bind(organizationId,code,`${organizationId}:${code}`).first<Definition>();
-  return existing?.id ?? ensureDefaultWorkflow(organizationId);
+  return existing?.id ?? null;
 }
 
 async function ensureRoadWorkflowTemplates(organizationId: string) {
