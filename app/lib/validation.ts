@@ -20,3 +20,15 @@ export function validatePassword(password: string): string | undefined {
 export function validateCode(code: string): string | undefined {
   if (!/^[a-z0-9][a-z0-9-]{1,30}$/.test(code)) return "代码只能使用小写字母、数字和连字符（2-31 位）";
 }
+
+export function requirePositiveNumber(value: string, label: string): number {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) throw new Error(`${label}必须大于 0`);
+  return number;
+}
+
+export function requirePositiveInteger(value: string, label: string): number {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number <= 0) throw new Error(`${label}必须是大于 0 的整数`);
+  return number;
+}

@@ -340,7 +340,7 @@ export default function MasterData({
           {actionData.formError ?? actionData.success}
         </div>
       )}
-      <Form method="get" className="master-search">
+      <Form method="get" action="." className="master-search">
         <input type="hidden" name="category" value={loaderData.category} />
         <span>⌕</span>
         <input

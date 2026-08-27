@@ -12,7 +12,7 @@ import {
   voidQuotation,
   withdrawQuotationAcceptance,
 } from "../lib/quotation-lifecycle.server";
-import { valueOf } from "../lib/validation";
+import { requirePositiveInteger, requirePositiveNumber, valueOf } from "../lib/validation";
 
 type Quote = {
   id: string;
@@ -171,12 +171,12 @@ export async function action({ request }: Route.ActionArgs) {
       const destinationWarehouseNote = valueOf(form, "destinationWarehouseNote");
       const customsClearanceMode = valueOf(form, "customsClearanceMode");
       const cargoDescription = valueOf(form, "cargoDescription");
-      const pieces = positiveInteger(valueOf(form, "pieces"), "预计件数");
-      const weight = positiveNumber(valueOf(form, "weight"), "预计重量");
-      const length = positiveNumber(valueOf(form, "length"), "预计长度");
-      const width = positiveNumber(valueOf(form, "width"), "预计宽度");
-      const height = positiveNumber(valueOf(form, "height"), "预计高度");
-      const volume = positiveNumber(valueOf(form, "volume"), "预计体积");
+      const pieces = requirePositiveInteger(valueOf(form, "pieces"), "预计件数");
+      const weight = requirePositiveNumber(valueOf(form, "weight"), "预计重量");
+      const length = requirePositiveNumber(valueOf(form, "length"), "预计长度");
+      const width = requirePositiveNumber(valueOf(form, "width"), "预计宽度");
+      const height = requirePositiveNumber(valueOf(form, "height"), "预计高度");
+      const volume = requirePositiveNumber(valueOf(form, "volume"), "预计体积");
       const validUntil = valueOf(form, "validUntil");
       const notes = valueOf(form, "notes");
       if (!customerId || !salespersonId || transportMode !== "ROAD" || !["ftl", "ltl"].includes(roadLoadType)) {
@@ -204,7 +204,7 @@ export async function action({ request }: Route.ActionArgs) {
       const charges = chargeNames.map((name, index) => {
         const quantity = quantities[index];
         const unitPrice = unitPrices[index];
-        if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(unitPrice) || unitPrice < 0) {
+        if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(unitPrice) || unitPrice <= 0) {
           throw new Error(`第 ${index + 1} 条费用的数量或单价无效`);
         }
         return { name, quantity, unitPrice, amount: quantity * unitPrice, notes: chargeNotes[index] || null };
@@ -285,7 +285,7 @@ export default function QuotationsPage({ loaderData, actionData }: Route.Compone
       <div className="panel"><span>自动生成订单</span><b>{stats.orders}</b></div>
       <div className="panel"><span>规则</span><b>一报一单</b></div>
     </div>
-    <Form className="panel filters quotation-filters" method="get">
+    <Form className="panel filters quotation-filters" method="get" action=".">
       <div className="field"><label>报价号 / 客户 / 货物 / 订单号</label><input className="control" name="q" defaultValue={loaderData.filters.keyword} /></div>
       <div className="field"><label>状态</label><select className="control" name="status" defaultValue={loaderData.filters.lifecycle}><option value="">全部</option><option value="pending">待确认</option><option value="accepted">已接受</option><option value="withdrawn">已撤回</option><option value="void">已作废</option></select></div>
       <button className="btn primary">筛选</button><Link className="btn" to="/admin/quotations">重置</Link>
@@ -390,7 +390,7 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
       note="接受后直接继承到订单结算"
       action={<button className="btn quote-charge-add" type="button" onClick={() => setCharges((rows) => [...rows, { name: transportChargeNameOptions[0]?.[0] || "国际汽运费", quantity: 1, unitPrice: 0, notes: "" }])}>＋ 添加费用</button>}
     >
-      <table className="inline-table quote-charge-table"><thead><tr><th>费用名称</th><th>数量</th><th>单价</th><th>金额</th><th>备注</th><th>操作</th></tr></thead><tbody>{charges.map((charge, index) => <tr key={index}><td><select className="control filled" name="chargeName" value={charge.name} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, name: event.target.value } : row))} required>{transportChargeNameOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td><td><input className="control filled" name="chargeQuantity" type="number" min="0.01" step="0.01" value={charge.quantity} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: Number(event.target.value) } : row))} required/></td><td><input className="control filled" name="chargeUnitPrice" type="number" min="0" step="0.01" value={charge.unitPrice} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, unitPrice: Number(event.target.value) } : row))} required/></td><td><b>{(charge.quantity * charge.unitPrice).toLocaleString()}</b></td><td><input className="control" name="chargeNotes" value={charge.notes} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, notes: event.target.value } : row))}/></td><td><button className="btn danger" type="button" disabled={charges.length === 1} onClick={() => setCharges((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>删除</button></td></tr>)}</tbody></table>
+      <table className="inline-table quote-charge-table"><thead><tr><th>费用名称</th><th>数量</th><th>单价</th><th>金额</th><th>备注</th><th>操作</th></tr></thead><tbody>{charges.map((charge, index) => <tr key={index}><td><select className="control filled" name="chargeName" value={charge.name} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, name: event.target.value } : row))} required>{transportChargeNameOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td><td><input className="control filled" name="chargeQuantity" type="number" min="0.01" step="0.01" value={charge.quantity} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: Number(event.target.value) } : row))} required/></td><td><input className="control filled" name="chargeUnitPrice" type="number" min="0.01" step="0.01" value={charge.unitPrice} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, unitPrice: Number(event.target.value) } : row))} required/></td><td><b>{(charge.quantity * charge.unitPrice).toLocaleString()}</b></td><td><input className="control" name="chargeNotes" value={charge.notes} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, notes: event.target.value } : row))}/></td><td><button className="btn danger" type="button" disabled={charges.length === 1} onClick={() => setCharges((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>删除</button></td></tr>)}</tbody></table>
       <div className="quote-charge-summary"><small>共 {charges.length} 个费用项目，系统按“数量 × 单价”自动汇总</small><strong>报价总额 CNY {total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></div>
       <div className="grid two"><Field label="报价有效期"><input className="control" name="validUntil" type="date"/></Field><Field label="报价备注"><textarea className="control textarea" name="notes"/></Field></div>
     </FormSection>
@@ -509,18 +509,6 @@ function GeoCascadeFields({
       <input name={`${prefix}City`} type="hidden" value={cityName}/>
     </Field>
   </>;
-}
-
-function positiveNumber(value: string, label: string) {
-  const number = Number(value);
-  if (!Number.isFinite(number) || number <= 0) throw new Error(`${label}必须大于 0`);
-  return number;
-}
-
-function positiveInteger(value: string, label: string) {
-  const number = Number(value);
-  if (!Number.isInteger(number) || number <= 0) throw new Error(`${label}必须是大于 0 的整数`);
-  return number;
 }
 
 async function geoOptions(organizationId: string, level: string) {

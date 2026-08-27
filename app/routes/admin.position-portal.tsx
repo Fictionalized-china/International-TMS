@@ -236,7 +236,7 @@ export default function PositionPortal({ loaderData }: Route.ComponentProps) {
 
     <section className="panel position-order-ledger">
       <div className="position-ledger-summary" aria-label="待办概况"><span>未完成 <strong>{summary.open}</strong></span><span>有阻断 <strong>{summary.blocked}</strong></span><span>已超时 <strong>{summary.overdue}</strong></span><span>当前视图 <strong>{orders.length}</strong></span></div>
-      <Form method="get" className="position-ledger-filters">
+      <Form method="get" action="." className="position-ledger-filters">
         <input name="q" defaultValue={filters.q} placeholder="订单、客户、线路、节点、岗位或人员" />
         <select name="state" defaultValue={filters.state}><option value="open">未完成</option><option value="blocked">有阻断</option><option value="overdue">即将/已经超时</option>{canViewAll&&<option value="all">全部订单</option>}</select>
         <select name="stage" defaultValue={filters.stage}><option value="">全部阶段</option><option value="order_creation">订单创建</option><option value="consignment_approval">委托审核</option><option value="task_assignment">任务分配</option><option value="domestic_execution">国内运输</option><option value="warehouse_receiving">仓库入库</option><option value="port_loading">出口准备</option><option value="outbound_transport">出境运输</option><option value="overseas_pickup">境外仓自提</option><option value="reconciliation">对账结算</option><option value="completion_review">完成复盘</option></select>

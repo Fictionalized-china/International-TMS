@@ -53,6 +53,10 @@ export default [
       "routes/admin.order-mark-label.tsx",
     ),
     route(
+      "admin/orders/:orderId/mark-label/download",
+      "routes/admin.order-mark-label-download.ts",
+    ),
+    route(
       "admin/orders/:orderId/modules/:moduleCode",
       "routes/admin.order-module.tsx",
     ),
@@ -76,6 +80,10 @@ export default [
     route(
       "portal/orders/:orderId/mark-label",
       "routes/portal.order-mark-label.tsx",
+    ),
+    route(
+      "portal/orders/:orderId/mark-label/download",
+      "routes/portal.order-mark-label-download.ts",
     ),
     route("portal/tracking", "routes/portal.tracking.tsx"),
     route("portal/billing", "routes/portal.billing.tsx"),

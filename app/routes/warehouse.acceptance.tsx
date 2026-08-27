@@ -506,7 +506,7 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
     {(loaderData.resultMessage || actionData?.formError) && <div className={`alert ${actionData?.formError ? "error" : "success"}`}>{actionData?.formError ?? loaderData.resultMessage}</div>}
     {!loaderData.locations.length && <div className="alert error">当前仓库没有可用库位，请先<Link to={`/warehouse/locations?warehouseId=${loaderData.warehouse.id}`}>配置仓库与库位</Link>。</div>}
     <section className="panel acceptance-scan-panel no-print">
-      <Form method="get" className="acceptance-scan-form">
+      <Form method="get" action="." className="acceptance-scan-form">
         <input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/>
         <label className="field scan-field"><span>扫描订单号</span><input name="reference" defaultValue={loaderData.reference} autoFocus autoComplete="off" placeholder="扫描订单号条码后回车"/></label>
         <button className="primary">调出验收信息</button>

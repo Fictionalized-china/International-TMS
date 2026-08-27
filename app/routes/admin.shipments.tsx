@@ -322,7 +322,7 @@ export default function Shipments({ loaderData, actionData }: Route.ComponentPro
         </div>
       </div>
       <div className="shipment-filter-shell">
-        <Form method="get" className="shipment-filters">
+        <Form method="get" action="." className="shipment-filters">
           <input name="q" defaultValue={loaderData.filters.q} placeholder="运单号、订单号、客户、识别码、货物、位置"/>
           <select name="status" defaultValue={loaderData.filters.status}><option value="">全部运单状态</option>{Object.entries(labels).map(([value,label])=><option key={value} value={value}>{label}</option>)}</select>
           <select name="workflowStatus" defaultValue={loaderData.filters.workflowStatus}><option value="">全部工作流状态</option>{orderWorkflowStatuses.map(value=><option key={value} value={value}>{orderStatusLabel(value)}</option>)}</select>

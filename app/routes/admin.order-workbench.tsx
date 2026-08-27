@@ -473,7 +473,7 @@ export default function OrderWorkbench({
 
       <section className="panel">
         <div className="panel-header workbench-filter-header">
-          <Form method="get" className="workbench-filter">
+          <Form method="get" action="." className="workbench-filter">
             <input type="hidden" name="scope" value={loaderData.scope} />
             <label>
               <span>关键词</span>

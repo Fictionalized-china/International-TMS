@@ -1,6 +1,6 @@
 import type { Route } from "./+types/portal.order-mark-label";
 import { OrderMarkLabelPage } from "../components/OrderMarkLabelPage";
-import { loadOrderMarkLabel, orderMarkLabelDownload } from "../lib/order-mark-label.server";
+import { loadOrderMarkLabel } from "../lib/order-mark-label.server";
 import { requirePortalCustomer } from "../lib/portal.server";
 
 export async function loader({ request, params }: Route.LoaderArgs) {
@@ -10,12 +10,11 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     customerId: customer.id,
     orderId: params.orderId,
   });
-  if (new URL(request.url).searchParams.get("download") === "1") return orderMarkLabelDownload(order);
   return { order };
 }
 
 export default function PortalOrderMarkLabel({ loaderData }: Route.ComponentProps) {
-  return <OrderMarkLabelPage order={loaderData.order} returnTo="/portal/orders" />;
+  return <OrderMarkLabelPage order={loaderData.order} returnTo="/portal/orders" downloadTo={`/portal/orders/${loaderData.order.id}/mark-label/download`} />;
 }
 
 export function meta() {

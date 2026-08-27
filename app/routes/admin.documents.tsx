@@ -92,7 +92,7 @@ export async function loader({ request }: Route.LoaderArgs) {
 export default function DocumentCenter({ loaderData }: Route.ComponentProps) {
   return <>
     <header className="page-header"><div><p className="eyebrow">DOCUMENT INDEX</p><h1>文件中心</h1><p>集中查看订单与配载单文件；上传、编辑、审核和门禁仍由文件所属业务节点负责。</p></div><span className="status-pill">{loaderData.total} 个文件</span></header>
-    <section className="panel"><Form method="get" className="filter-bar compact">
+    <section className="panel"><Form method="get" action="." className="filter-bar compact">
       <label className="field"><span>订单号 / 配载单号 / 文件名</span><input name="q" defaultValue={loaderData.q} placeholder="输入关键词" /></label>
       <label className="field"><span>审核状态</span><select name="status" defaultValue={loaderData.status}><option value="all">全部</option><option value="pending">待审核</option><option value="approved">已通过</option><option value="rejected">已退回</option><option value="archived">已归档</option></select></label>
       <label className="field"><span>文件类型</span><select name="category" defaultValue={loaderData.category}><option value="all">全部</option>{loaderData.categories.map((item) => <option key={item} value={item}>{orderDocumentTypeLabel(item)}</option>)}</select></label>

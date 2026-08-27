@@ -5,9 +5,11 @@ import type { OrderMarkLabel } from "../lib/order-mark-label.server";
 export function OrderMarkLabelPage({
   order,
   returnTo,
+  downloadTo,
 }: {
   order: OrderMarkLabel;
   returnTo: string;
+  downloadTo: string;
 }) {
   const route = [order.origin_country, order.origin_state, order.origin_city]
     .filter(Boolean)
@@ -24,7 +26,7 @@ export function OrderMarkLabelPage({
         </div>
         <div>
           <Link className="secondary" to={returnTo}>返回订单</Link>
-          <a className="secondary" href="?download=1">下载 SVG</a>
+          <a className="secondary" href={downloadTo}>下载 SVG</a>
           <button className="primary" type="button" onClick={() => window.print()}>打印标签</button>
         </div>
       </header>

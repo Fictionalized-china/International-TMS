@@ -1073,6 +1073,8 @@ export default function WarehouseInbound({
       </>
     );
   }
+  const selectedShipmentRecord = loaderData.selectedShipment;
+  const scannedPackageRecord = loaderData.scannedPackage;
   return (
     <>
       <header className="page-header">
@@ -1111,10 +1113,10 @@ export default function WarehouseInbound({
           returnTo={loaderData.returnTo}
         />
       )}
-      {loaderData.isOverseasWarehouse && loaderData.selectedShipment && loaderData.scannedPackage && (
+      {loaderData.isOverseasWarehouse && selectedShipmentRecord && scannedPackageRecord && (
         <Modal
           title="核对境外目的仓到货信息"
-          openSignal={`${loaderData.reference}:${loaderData.selectedShipment.id}`}
+          openSignal={`${loaderData.reference}:${selectedShipmentRecord.id}`}
           size="wide"
         >
           {({ close }) => <div className="overseas-receiving-confirmation">
@@ -1122,11 +1124,11 @@ export default function WarehouseInbound({
               <table>
                 <thead><tr><th>核对项目</th><th>系统记录</th><th>核对项目</th><th>系统记录</th></tr></thead>
                 <tbody>
-                  <tr><td>货物标签</td><td><strong>{loaderData.scannedPackage.barcode}</strong><small>{loaderData.scannedPackage.package_number}</small></td><td>标签状态</td><td><span className="status-pill success">上一仓已出库</span></td></tr>
-                  <tr><td>订单</td><td><strong>{loaderData.selectedShipment.order_number}</strong><small>{loaderData.selectedShipment.business_type === "ftl" ? "整车" : "拼车"}</small></td><td>系统运单</td><td><strong>{loaderData.selectedShipment.shipment_number}</strong></td></tr>
-                  <tr><td>客户</td><td><strong>[{loaderData.selectedShipment.customer_identity_code}] {loaderData.selectedShipment.customer_name}</strong></td><td>目的仓</td><td><strong>{loaderData.selectedShipment.expected_warehouse_name || loaderData.warehouse.name}</strong></td></tr>
-                  <tr><td>标签货物</td><td><strong>{loaderData.scannedPackage.cargo_name || loaderData.selectedShipment.cargo_description || "货物名称未填写"}</strong><small>{loaderData.scannedPackage.pieces} 件 · {Number(loaderData.scannedPackage.weight_kg || 0).toFixed(3)} KG · {formatVolume(loaderData.scannedPackage.volume_cbm)} CBM</small></td><td>订单预录</td><td><strong>{loaderData.selectedShipment.pieces} 件 · {Number(loaderData.selectedShipment.gross_weight_kg || 0).toFixed(3)} KG</strong><small>{formatVolume(loaderData.selectedShipment.volume_cbm)} CBM</small></td></tr>
-                  <tr><td>发出仓库</td><td><strong>{loaderData.scannedPackage.source_warehouse_name}</strong></td><td>标签尺寸</td><td>{[loaderData.scannedPackage.length_cm,loaderData.scannedPackage.width_cm,loaderData.scannedPackage.height_cm].every((value) => value != null) ? `${loaderData.scannedPackage.length_cm} × ${loaderData.scannedPackage.width_cm} × ${loaderData.scannedPackage.height_cm} CM` : "未记录"}</td></tr>
+                  <tr><td>货物标签</td><td><strong>{scannedPackageRecord.barcode}</strong><small>{scannedPackageRecord.package_number}</small></td><td>标签状态</td><td><span className="status-pill success">上一仓已出库</span></td></tr>
+                  <tr><td>订单</td><td><strong>{selectedShipmentRecord.order_number}</strong><small>{selectedShipmentRecord.business_type === "ftl" ? "整车" : "拼车"}</small></td><td>系统运单</td><td><strong>{selectedShipmentRecord.shipment_number}</strong></td></tr>
+                  <tr><td>客户</td><td><strong>[{selectedShipmentRecord.customer_identity_code}] {selectedShipmentRecord.customer_name}</strong></td><td>目的仓</td><td><strong>{selectedShipmentRecord.expected_warehouse_name || loaderData.warehouse.name}</strong></td></tr>
+                  <tr><td>标签货物</td><td><strong>{scannedPackageRecord.cargo_name || selectedShipmentRecord.cargo_description || "货物名称未填写"}</strong><small>{scannedPackageRecord.pieces} 件 · {Number(scannedPackageRecord.weight_kg || 0).toFixed(3)} KG · {formatVolume(scannedPackageRecord.volume_cbm)} CBM</small></td><td>订单预录</td><td><strong>{selectedShipmentRecord.pieces} 件 · {Number(selectedShipmentRecord.gross_weight_kg || 0).toFixed(3)} KG</strong><small>{formatVolume(selectedShipmentRecord.volume_cbm)} CBM</small></td></tr>
+                  <tr><td>发出仓库</td><td><strong>{scannedPackageRecord.source_warehouse_name}</strong></td><td>标签尺寸</td><td>{[scannedPackageRecord.length_cm,scannedPackageRecord.width_cm,scannedPackageRecord.height_cm].every((value) => value != null) ? `${scannedPackageRecord.length_cm} × ${scannedPackageRecord.width_cm} × ${scannedPackageRecord.height_cm} CM` : "未记录"}</td></tr>
                 </tbody>
               </table>
             </div>
@@ -1388,7 +1390,7 @@ export default function WarehouseInbound({
 
 function OverseasReceivingScan({ warehouseId, reference, orderId, returnTo }: { warehouseId: string; reference: string; orderId: string | null; returnTo: string }) {
   return <section className="panel acceptance-scan-panel overseas-receiving-scan-panel">
-    <Form method="get" className="acceptance-scan-form">
+    <Form method="get" action="." className="acceptance-scan-form">
       <input type="hidden" name="warehouseId" value={warehouseId} />
       {orderId && <input type="hidden" name="orderId" value={orderId} />}
       {returnTo && <input type="hidden" name="returnTo" value={returnTo} />}

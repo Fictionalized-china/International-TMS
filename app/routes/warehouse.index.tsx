@@ -180,7 +180,7 @@ export default function WarehouseIndex({ loaderData }: Route.ComponentProps) {
       {(Object.keys(queueMeta) as WarehouseQueue[]).map((key) => <Link key={key} className={loaderData.view === key ? "active" : ""} to={warehousePath("/warehouse", loaderData.warehouse.id, { view: key })}>{queueMeta[key].label} <strong>{loaderData.counts[key]}</strong></Link>)}
     </nav>
     <section className="table-panel warehouse-queue-panel">
-      <Form method="get" className="warehouse-queue-filter">
+      <Form method="get" action="." className="warehouse-queue-filter">
         {loaderData.view !== "all" && <input type="hidden" name="view" value={loaderData.view} />}
         <input type="hidden" name="warehouseId" value={loaderData.warehouse.id} />
         <input name="q" defaultValue={loaderData.q} placeholder="订单、运单、客户、识别码或货物名称" />

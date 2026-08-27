@@ -308,7 +308,7 @@ export async function action({ request, params }: Route.ActionArgs) {
         valueOf(form, "originCountry") || null,
         valueOf(form, "brandModel") || null,
         valueOf(form, "marks") || null,
-        form.getAll("attributes").map(String).join(",") || null,
+        form.getAll("specialAttributes").map(String).join(",") || null,
         valueOf(form, "notes") || null,
         now,
         now,
@@ -837,7 +837,7 @@ export default function OrderOperations({
                   ["magnetic", "磁性"],
                 ].map(([v, t]) => (
                   <label key={v}>
-                    <input type="checkbox" name="attributes" value={v} />
+                    <input type="checkbox" name="specialAttributes" value={v} />
                     <span>{t}</span>
                   </label>
                 ))}

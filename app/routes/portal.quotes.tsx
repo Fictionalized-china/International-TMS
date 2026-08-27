@@ -131,7 +131,7 @@ export default function PortalQuotes({ loaderData, actionData }: Route.Component
       {(actionData?.success || actionData?.formError) && (
         <div className={`alert ${actionData.formError ? "error" : "success"}`}>{actionData.formError || actionData.success}</div>
       )}
-      <Form method="get" className="filters quotation-filters">
+      <Form method="get" action="." className="filters quotation-filters">
         <label className="field"><span>报价状态</span><select className="control filled" name="status" defaultValue={loaderData.lifecycle}><option value="">全部</option><option value="pending">待确认</option><option value="accepted">已接受</option><option value="withdrawn">接受已撤回</option><option value="void">已作废</option></select></label>
         <button className="btn primary">筛选</button>
       </Form>

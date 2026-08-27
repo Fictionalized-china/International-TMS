@@ -89,7 +89,7 @@ export default function LoadingTracking({ loaderData }: Route.ComponentProps) {
       <span className="status-pill">{loaderData.total} 张配载单</span>
     </header>
     <section className="panel">
-      <Form method="get" className="filter-bar compact loading-tracking-filter">
+      <Form method="get" action="." className="filter-bar compact loading-tracking-filter">
         <label className="field"><span>配载单号或订单号</span><input name="q" defaultValue={loaderData.q} placeholder="输入子订单号可定位所属配载单" /></label>
         <label className="field"><span>状态</span><select name="status" defaultValue={loaderData.status}><option value="all">全部</option><option value="active">执行中</option><option value="completed">已完成</option><option value="cancelled">已取消</option></select></label>
         <button className="secondary">查询</button>
