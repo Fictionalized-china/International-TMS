@@ -39,12 +39,18 @@ async function worker() {
         redirect:"manual",
         signal:controller.signal,
       });
-      await response.arrayBuffer();
+      const responseBody = await response.text();
       const duration = performance.now()-started;
       samples.push(duration);
       const key = `${route}:${response.status}`;
       statusCounts.set(key,(statusCounts.get(key)||0)+1);
-      if (response.status !== 200) failures.push({index,route,status:response.status,duration});
+      if (response.status !== 200) failures.push({
+        index,
+        route,
+        status:response.status,
+        duration,
+        responseBody:failureSnippet(responseBody),
+      });
     } catch (error) {
       failures.push({index,route,error:error instanceof Error?error.message:String(error)});
     } finally {
@@ -92,4 +98,15 @@ function percentile(values,ratio) {
 }
 function round(value) {
   return typeof value === "number"?Number(value.toFixed(1)):null;
+}
+
+function failureSnippet(body) {
+  const normalized=body.replace(/\s+/g," ").trim();
+  const needles=["D1_ERROR","SQLITE","Internal Server Error","Error","error"];
+  const matchedIndex=needles
+    .map((needle)=>normalized.indexOf(needle))
+    .filter((index)=>index>=0)
+    .sort((a,b)=>a-b)[0];
+  const start=matchedIndex===undefined?0:Math.max(0,matchedIndex-120);
+  return normalized.slice(start,start+800);
 }

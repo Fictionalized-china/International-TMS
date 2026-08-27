@@ -71,7 +71,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const assigneeFilter = url.searchParams.get("assignee") || "";
   const query = (url.searchParams.get("q") || "").trim().toLowerCase();
 
-  const [rows, workflowTasks, positions, assignees] = await Promise.all([
+  const [rows, workflowTasks, positions, assignees] = await env.DB.batch([
     env.DB.prepare(
     `SELECT o.id order_id,o.order_number,o.status order_status,o.business_type,
             o.origin_city,o.destination_city,o.pieces,o.gross_weight_kg,o.volume_cbm,
@@ -86,7 +86,7 @@ export async function loader({ request }: Route.LoaderArgs) {
        LEFT JOIN users u ON u.id=m.assignee_user_id
       WHERE o.organization_id=? AND m.enabled=1
       ORDER BY o.is_overdue DESC,o.updated_at DESC,m.updated_at DESC`,
-    ).bind(current.organizationId).all<PortalModuleRow>(),
+    ).bind(current.organizationId),
     env.DB.prepare(
       `SELECT wi.order_id,ss.step_key,ss.step_name,ms.module_code,ms.display_name module_name,
               ts.name task_name,ts.status task_status,
@@ -105,24 +105,29 @@ export async function loader({ request }: Route.LoaderArgs) {
          LEFT JOIN users u ON u.id=COALESCE(ts.assignee_user_id,omi.assignee_user_id)
         WHERE wi.organization_id=? AND ts.status!='completed'
         ORDER BY ss.sort_order,ms.sort_order,ts.sort_order`,
-    ).bind(current.organizationId).all<WorkflowTaskRow>(),
+    ).bind(current.organizationId),
     env.DB.prepare(
       "SELECT code id,name FROM positions WHERE organization_id=? AND status='active' ORDER BY name",
-    ).bind(current.organizationId).all<FilterOption>(),
+    ).bind(current.organizationId),
     env.DB.prepare(
       `SELECT u.id,u.display_name name FROM memberships m
        JOIN users u ON u.id=m.user_id
        WHERE m.organization_id=? AND m.status='active' ORDER BY u.display_name`,
-    ).bind(current.organizationId).all<FilterOption>(),
+    ).bind(current.organizationId),
   ]);
 
+  const portalRows = rows as D1Result<PortalModuleRow>;
+  const portalWorkflowTasks = workflowTasks as D1Result<WorkflowTaskRow>;
+  const portalPositions = positions as D1Result<FilterOption>;
+  const portalAssignees = assignees as D1Result<FilterOption>;
+
   const currentTaskByOrder = new Map<string, WorkflowTaskRow>();
-  for (const task of workflowTasks.results) {
+  for (const task of portalWorkflowTasks.results) {
     if (!currentTaskByOrder.has(task.order_id)) currentTaskByOrder.set(task.order_id, task);
   }
 
   const modulesByOrder = new Map<string, PortalModuleRow[]>();
-  for (const row of rows.results) {
+  for (const row of portalRows.results) {
     const modules = modulesByOrder.get(row.order_id) ?? [];
     modules.push(row);
     modulesByOrder.set(row.order_id, modules);
@@ -209,8 +214,8 @@ export async function loader({ request }: Route.LoaderArgs) {
       blocked: scopedOrders.filter((order) => Boolean(order.blocker)).length,
       overdue: scopedOrders.filter((order) => Boolean(order.is_overdue)).length,
     },
-    positions: positions.results,
-    assignees: assignees.results,
+    positions: portalPositions.results,
+    assignees: portalAssignees.results,
     filters: {
       state: stateFilter,
       stage: stageFilter,
