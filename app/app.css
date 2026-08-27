@@ -20495,3 +20495,855 @@ button {
     display: grid;
   }
 }
+
+/* --------------------------------------------------------------------------
+   Canonical 4.html UI convergence (system-wide)
+   Flat, dense, table-first workspaces for admin, warehouse and client portal.
+   -------------------------------------------------------------------------- */
+.admin-app-shell,
+.warehouse-app-shell,
+.prototype-portal-shell {
+  --ui-control-height: 32px;
+  --ui-section-gap: 9px;
+  --ui-cell-x: 10px;
+  --ui-cell-y: 8px;
+}
+
+.admin-app-shell .content,
+.warehouse-app-shell .warehouse-content,
+.prototype-portal-shell .portal-content {
+  padding: 14px 20px 18px;
+}
+
+.admin-app-shell .page-header,
+.warehouse-app-shell .page-header,
+.prototype-portal-shell .page-header,
+.admin-app-shell .page-head,
+.warehouse-app-shell .page-head,
+.prototype-portal-shell .page-head {
+  min-height: 0;
+  flex: 0 0 auto;
+  margin-bottom: var(--ui-section-gap);
+  padding-bottom: 8px;
+  align-items: flex-end;
+  border-bottom: 1px solid var(--line);
+}
+
+.admin-app-shell .page-header h1,
+.warehouse-app-shell .page-header h1,
+.prototype-portal-shell .page-header h1,
+.admin-app-shell .page-head h1,
+.warehouse-app-shell .page-head h1,
+.prototype-portal-shell .page-head h1 {
+  margin: 3px 0 2px;
+  font-size: 23px;
+  line-height: 1.18;
+}
+
+.admin-app-shell .page-header p,
+.warehouse-app-shell .page-header p,
+.prototype-portal-shell .page-header p,
+.admin-app-shell .page-head p,
+.warehouse-app-shell .page-head p,
+.prototype-portal-shell .page-head p {
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.admin-app-shell .breadcrumb,
+.warehouse-app-shell .breadcrumb,
+.prototype-portal-shell .breadcrumb {
+  min-height: 16px;
+  flex: 0 0 auto;
+  margin-bottom: 5px;
+  font-size: 9px;
+}
+
+/* One section is one bordered work surface, never a floating card. */
+.admin-app-shell .panel,
+.warehouse-app-shell .panel,
+.prototype-portal-shell .panel,
+.admin-app-shell .table-panel,
+.warehouse-app-shell .table-panel,
+.prototype-portal-shell .table-panel,
+.admin-app-shell .role-card,
+.warehouse-app-shell .role-card,
+.prototype-portal-shell .role-card,
+.order-form-sheet,
+.order-node-module,
+.warehouse-order-context {
+  margin-bottom: var(--ui-section-gap);
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #fff;
+  box-shadow: none;
+}
+
+.admin-app-shell .table-panel,
+.warehouse-app-shell .table-panel,
+.prototype-portal-shell .table-panel {
+  padding: 0;
+}
+
+.admin-app-shell .panel-header,
+.warehouse-app-shell .panel-header,
+.prototype-portal-shell .panel-header,
+.admin-app-shell .panel-head,
+.warehouse-app-shell .panel-head,
+.prototype-portal-shell .panel-head,
+.admin-app-shell .table-panel-head,
+.warehouse-app-shell .table-panel-head,
+.prototype-portal-shell .table-panel-head {
+  min-height: 42px;
+  margin: 0;
+  padding: 7px 10px;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  background: #fff;
+}
+
+.admin-app-shell .panel-header h2,
+.warehouse-app-shell .panel-header h2,
+.prototype-portal-shell .panel-header h2,
+.admin-app-shell .panel-head h2,
+.warehouse-app-shell .panel-head h2,
+.prototype-portal-shell .panel-head h2,
+.admin-app-shell .table-panel-head b,
+.warehouse-app-shell .table-panel-head b,
+.prototype-portal-shell .table-panel-head b {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.admin-app-shell .panel-header p,
+.warehouse-app-shell .panel-header p,
+.prototype-portal-shell .panel-header p,
+.admin-app-shell .panel-head p,
+.warehouse-app-shell .panel-head p,
+.prototype-portal-shell .panel-head p,
+.admin-app-shell .table-panel-head span,
+.warehouse-app-shell .table-panel-head span,
+.prototype-portal-shell .table-panel-head span {
+  margin-top: 2px;
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+/* Contiguous statistics strips replace KPI card mosaics. */
+.admin-app-shell .stats,
+.warehouse-app-shell .stats,
+.prototype-portal-shell .stats,
+.admin-app-shell .kpis,
+.warehouse-app-shell .kpis,
+.prototype-portal-shell .kpis,
+.position-ledger-summary,
+.warehouse-queue-tabs {
+  gap: 0;
+  overflow: hidden;
+  margin-bottom: var(--ui-section-gap);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #fff;
+}
+
+.admin-app-shell .stats article,
+.warehouse-app-shell .stats article,
+.prototype-portal-shell .stats article,
+.admin-app-shell .kpis > div,
+.warehouse-app-shell .kpis > div,
+.prototype-portal-shell .kpis > div,
+.position-ledger-summary > *,
+.warehouse-queue-tabs > * {
+  min-height: 54px;
+  margin: 0;
+  padding: 8px 10px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+  background: #fff;
+  box-shadow: none;
+}
+
+.admin-app-shell .stats article:last-child,
+.warehouse-app-shell .stats article:last-child,
+.prototype-portal-shell .stats article:last-child,
+.admin-app-shell .kpis > div:last-child,
+.warehouse-app-shell .kpis > div:last-child,
+.prototype-portal-shell .kpis > div:last-child,
+.position-ledger-summary > *:last-child,
+.warehouse-queue-tabs > *:last-child {
+  border-right: 0;
+}
+
+.admin-app-shell .stats strong,
+.warehouse-app-shell .stats strong,
+.prototype-portal-shell .stats strong,
+.admin-app-shell .kpis b,
+.warehouse-app-shell .kpis b,
+.prototype-portal-shell .kpis b {
+  margin: 3px 0 1px;
+  font-size: 17px;
+  line-height: 1.15;
+}
+
+.admin-app-shell .stats span,
+.warehouse-app-shell .stats span,
+.prototype-portal-shell .stats span,
+.admin-app-shell .stats small,
+.warehouse-app-shell .stats small,
+.prototype-portal-shell .stats small,
+.admin-app-shell .kpis span,
+.warehouse-app-shell .kpis span,
+.prototype-portal-shell .kpis span,
+.admin-app-shell .kpis small,
+.warehouse-app-shell .kpis small,
+.prototype-portal-shell .kpis small {
+  font-size: 9px;
+  line-height: 1.3;
+}
+
+/* Compact forms and filters mirror the 34px controls in 4.html. */
+.admin-app-shell .form-grid,
+.warehouse-app-shell .form-grid,
+.prototype-portal-shell .form-grid,
+.admin-app-shell .stack,
+.warehouse-app-shell .stack,
+.prototype-portal-shell .stack {
+  gap: 8px;
+}
+
+.admin-app-shell .filters,
+.warehouse-app-shell .filters,
+.prototype-portal-shell .filters,
+.admin-app-shell .position-ledger-filters,
+.warehouse-app-shell .warehouse-queue-filter,
+.prototype-portal-shell .position-ledger-filters {
+  margin-bottom: var(--ui-section-gap);
+  padding: 8px 10px;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #fff;
+  box-shadow: none;
+}
+
+.admin-app-shell input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]),
+.admin-app-shell select,
+.warehouse-app-shell input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]),
+.warehouse-app-shell select,
+.prototype-portal-shell input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]),
+.prototype-portal-shell select {
+  min-height: var(--ui-control-height);
+  height: var(--ui-control-height);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.admin-app-shell textarea,
+.warehouse-app-shell textarea,
+.prototype-portal-shell textarea {
+  min-height: 54px;
+}
+
+.admin-app-shell .primary,
+.admin-app-shell .secondary,
+.admin-app-shell .text-button,
+.warehouse-app-shell .primary,
+.warehouse-app-shell .secondary,
+.warehouse-app-shell .text-button,
+.prototype-portal-shell .primary,
+.prototype-portal-shell .secondary,
+.prototype-portal-shell .text-button,
+.prototype-page .btn {
+  min-height: var(--ui-control-height);
+  border-radius: 2px;
+  box-shadow: none;
+}
+
+.admin-app-shell .text-button,
+.warehouse-app-shell .text-button,
+.prototype-portal-shell .text-button {
+  min-height: 26px;
+}
+
+/* Dense data tables: clear separators, no card-like row blocks. */
+.admin-app-shell th,
+.warehouse-app-shell th,
+.prototype-portal-shell th,
+.prototype-page th {
+  padding: 7px var(--ui-cell-x);
+  background: #f7f9fb;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.admin-app-shell td,
+.warehouse-app-shell td,
+.prototype-portal-shell td,
+.prototype-page td {
+  padding: var(--ui-cell-y) var(--ui-cell-x);
+  line-height: 1.35;
+}
+
+.admin-app-shell table > :is(thead, tbody) > tr > * + *,
+.warehouse-app-shell table > :is(thead, tbody) > tr > * + *,
+.prototype-portal-shell table > :is(thead, tbody) > tr > * + * {
+  border-left: 1px solid var(--line2);
+}
+
+.admin-app-shell .tabs,
+.warehouse-app-shell .tabs,
+.prototype-portal-shell .tabs,
+.admin-app-shell .order-detail-tabs,
+.warehouse-app-shell .order-detail-tabs,
+.prototype-portal-shell .order-detail-tabs {
+  min-height: 34px;
+  margin-bottom: var(--ui-section-gap);
+  padding: 0;
+  gap: 0;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #fff;
+}
+
+.admin-app-shell .tabs a,
+.warehouse-app-shell .tabs a,
+.prototype-portal-shell .tabs a,
+.admin-app-shell .tabs button,
+.warehouse-app-shell .tabs button,
+.prototype-portal-shell .tabs button {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+  background: #fff;
+  font-size: 10px;
+  box-shadow: none;
+}
+
+.admin-app-shell .tabs .active,
+.warehouse-app-shell .tabs .active,
+.prototype-portal-shell .tabs .active {
+  color: #fff;
+  background: var(--navy);
+}
+
+/* Client portal: same data workspace, with customer-facing wording only. */
+.portal-home-page .portal-home-kpis {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: var(--ui-section-gap);
+}
+
+.portal-home-page .portal-home-orders {
+  min-height: 218px;
+}
+
+.portal-home-page .portal-home-orders .table-wrap {
+  max-height: 240px;
+}
+
+.portal-home-lower {
+  grid-template-columns: minmax(0, 1.25fr) minmax(300px, .75fr);
+  gap: 0;
+  overflow: hidden;
+  margin-top: 0;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #fff;
+}
+
+.portal-home-lower > .table-panel {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+.portal-home-lower > .table-panel + .table-panel {
+  border-left: 1px solid var(--line);
+}
+
+.portal-home-message-list > a {
+  min-height: 38px;
+  padding: 6px 10px;
+}
+
+.portal-home-profile-grid {
+  min-height: 150px;
+}
+
+.portal-home-profile-grid > div {
+  padding: 8px 10px;
+}
+
+.portal-home-profile-grid span {
+  min-height: 30px;
+  padding: 5px 0;
+}
+
+.notification-layout {
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #fff;
+}
+
+.notification-layout > .panel {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+.notification-layout > .panel + .panel {
+  border-left: 1px solid var(--line);
+}
+
+.notification-list article {
+  min-height: 48px;
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--line2);
+  border-radius: 0;
+  background: #fff;
+  box-shadow: none;
+}
+
+.notification-list article.unread {
+  margin: 0;
+  padding: 7px 9px;
+  border-radius: 0;
+  box-shadow: inset 3px 0 var(--orange);
+  background: #fffaf7;
+}
+
+.notification-list h3 {
+  margin: 0 0 3px;
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.notification-list p {
+  margin: 0 0 3px;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.notification-list small {
+  font-size: 9px;
+}
+
+.preference-panel h2 {
+  margin: 0 0 5px;
+  font-size: 13px;
+}
+
+.company-profile {
+  gap: 0;
+  border-color: var(--line);
+  border-radius: 2px;
+  background: #fff;
+}
+
+.company-profile > div {
+  min-height: 48px;
+  padding: 7px 9px;
+  gap: 3px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.account-panel {
+  max-width: none;
+}
+
+.account-list > div {
+  min-height: 44px;
+  padding: 7px 9px;
+  gap: 10px;
+}
+
+.address-grid {
+  display: block;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+}
+
+.address-card {
+  min-height: 0;
+  padding: 8px 10px;
+  display: grid;
+  grid-template-columns: 100px minmax(110px, .7fr) minmax(260px, 2fr) minmax(150px, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  border: 0;
+  border-bottom: 1px solid var(--line2);
+  border-radius: 0;
+  background: #fff;
+}
+
+.address-card:last-child {
+  border-bottom: 0;
+}
+
+.address-card header,
+.address-card h3,
+.address-card p,
+.address-card > small,
+.address-card footer {
+  margin: 0;
+  padding: 0;
+}
+
+.address-card p {
+  line-height: 1.45;
+}
+
+.address-card footer {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.calculator-panel {
+  gap: var(--ui-section-gap);
+}
+
+.calculator-note {
+  padding: 8px 10px;
+  border-radius: 2px;
+  font-size: 10px;
+}
+
+.rate-results {
+  gap: 0;
+  overflow: hidden;
+  margin-top: var(--ui-section-gap);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+}
+
+.rate-card {
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.rate-card:last-child {
+  border-bottom: 0;
+}
+
+.rate-card > header {
+  padding: 9px 11px;
+  gap: 12px;
+}
+
+.rate-card h2 {
+  margin: 2px 0;
+  font-size: 14px;
+}
+
+.rate-total strong {
+  font-size: 18px;
+}
+
+.rate-metrics {
+  padding: 8px 11px;
+}
+
+.rate-breakdown {
+  padding: 8px 11px;
+  gap: 6px 16px;
+  font-size: 10px;
+}
+
+.rate-remarks {
+  margin: 0 11px 8px;
+  padding: 7px 9px;
+  border-radius: 2px;
+}
+
+.rate-inquiry-action {
+  padding: 0 11px 8px;
+}
+
+/* Retire the last legacy "card wall" components without changing behavior. */
+.admin-app-shell .cards,
+.warehouse-app-shell .cards,
+.prototype-portal-shell .cards,
+.carrier-list,
+.batch-grid,
+.cost-allocation-list,
+.shipment-board {
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #fff;
+}
+
+.admin-app-shell .cards .role-card,
+.warehouse-app-shell .cards .role-card,
+.prototype-portal-shell .cards .role-card,
+.carrier-master-card,
+.batch-card,
+.cost-allocation-card,
+.shipment-card {
+  min-height: 0;
+  margin: 0;
+  padding: 9px 10px;
+  border: 0;
+  border-right: 1px solid var(--line2);
+  border-bottom: 1px solid var(--line2);
+  border-radius: 0;
+  background: #fff;
+  box-shadow: none;
+}
+
+.carrier-master-summary {
+  min-height: 38px;
+  padding: 7px 9px;
+}
+
+.carrier-master-info {
+  gap: 1px;
+}
+
+.carrier-master-info strong {
+  font-size: 13px;
+}
+
+.carrier-master-info small {
+  font-size: 10px;
+}
+
+.carrier-master-body {
+  padding: 0 9px 9px;
+}
+
+.carrier-master-actions,
+.carrier-sub-section {
+  margin-top: 6px;
+  padding: 6px 0;
+}
+
+.carrier-sub-form,
+.cost-allocation-section .inline-details {
+  margin: 6px 0;
+  padding: 8px;
+  border-radius: 2px;
+  background: #f7f9fb;
+}
+
+.location-zone {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #fff;
+}
+
+.location-zone > header {
+  min-height: 42px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
+  background: #f7f9fb;
+}
+
+.location-list {
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 0;
+  padding: 0;
+}
+
+.location-card {
+  min-height: 54px;
+  padding: 7px 9px;
+  gap: 5px;
+  border: 0;
+  border-right: 1px solid var(--line2);
+  border-bottom: 1px solid var(--line2);
+  border-radius: 0;
+  background: #fff;
+}
+
+.batch-card > header,
+.cost-allocation-card > header {
+  margin-bottom: 7px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--line2);
+}
+
+.allocation-summary {
+  gap: 0;
+  overflow: hidden;
+  margin: 7px 0;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+}
+
+.allocation-summary span {
+  padding: 7px 9px;
+  border-right: 1px solid var(--line2);
+  border-radius: 0;
+  background: #fff;
+}
+
+.batch-preview,
+.attachment-field,
+.access-note,
+.calculation-result {
+  padding: 8px 10px;
+  border-radius: 2px;
+  box-shadow: none;
+}
+
+.order-now-card,
+.order-risk-card {
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #fff;
+  box-shadow: none;
+}
+
+.order-now-card {
+  border-left: 3px solid var(--orange);
+}
+
+.order-now-card h2 {
+  font-size: 18px;
+}
+
+.order-now-card p,
+.order-risk-card strong {
+  font-size: 12px;
+}
+
+.order-now-module {
+  gap: 8px;
+  margin-top: 0;
+  padding-top: 8px;
+  border-top-color: var(--line);
+}
+
+.order-now-module li,
+.order-now-meta b {
+  padding: 3px 6px;
+  border-radius: 2px;
+  font-size: 9px;
+}
+
+.admin-app-shell .empty-state,
+.warehouse-app-shell .empty-state,
+.prototype-portal-shell .empty-state {
+  padding: 14px;
+  border-radius: 0;
+  background: #fafbfc;
+}
+
+/* Modals use the same compact section grammar as the main workspaces. */
+.modal-card,
+.modal,
+.dialog-card,
+.drawer-panel,
+.expandable-dialog {
+  border-radius: 4px !important;
+}
+
+.modal-header {
+  min-height: 48px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.modal-header h2 {
+  font-size: 14px;
+}
+
+.modal-body {
+  padding: 10px 12px;
+}
+
+.modal-close {
+  width: 30px;
+  height: 30px;
+  border-radius: 3px;
+}
+
+details,
+.expandable {
+  border-radius: 2px;
+}
+
+details > summary,
+.expandable > summary {
+  min-height: 34px;
+  padding: 7px 9px;
+  background: #f7f9fb;
+}
+
+@media (max-width: 980px) {
+  .admin-app-shell .content,
+  .warehouse-app-shell .warehouse-content,
+  .prototype-portal-shell .portal-content {
+    padding: 12px 14px 16px;
+  }
+
+  .portal-home-page .portal-home-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .portal-home-page .portal-home-kpis > div:nth-child(2) {
+    border-right: 0;
+  }
+
+  .portal-home-page .portal-home-kpis > div:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--line);
+  }
+
+  .portal-home-lower {
+    grid-template-columns: 1fr;
+  }
+
+  .portal-home-lower > .table-panel + .table-panel,
+  .notification-layout > .panel + .panel {
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .address-card {
+    grid-template-columns: 90px minmax(120px, .7fr) minmax(220px, 1.5fr) auto;
+  }
+
+  .address-card > small {
+    display: none;
+  }
+}
+
+@media (max-width: 700px) {
+  .admin-app-shell .stats,
+  .warehouse-app-shell .stats,
+  .prototype-portal-shell .stats,
+  .admin-app-shell .kpis,
+  .warehouse-app-shell .kpis,
+  .prototype-portal-shell .kpis {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .address-card {
+    grid-template-columns: 1fr;
+    gap: 5px;
+  }
+
+  .address-card footer {
+    justify-content: flex-start;
+  }
+
+  .rate-metrics {
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 0;
+  }
+}
