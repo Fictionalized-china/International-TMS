@@ -292,8 +292,60 @@ export async function action({ request }: Route.ActionArgs) {
     return { success: `工作流 v${definition.version_number} 已发布；旧订单继续使用原版本` };
   }
 
+  if (intent === "field_mode_update") {
+    const fieldId = valueOf(form, "fieldId");
+    const mode = valueOf(form, "fieldMode");
+    if (mode !== "required" && mode !== "optional") {
+      return { formError: "旧工作流只能把现有字段设置为必填或选填" };
+    }
+    const field = await env.DB.prepare(
+      `SELECT id,field_key,label,is_active,COALESCE(module_code,'consignment') module_code
+       FROM workflow_step_fields WHERE id=? AND workflow_id=?`,
+    )
+      .bind(fieldId, workflowId)
+      .first<{
+        id: string;
+        field_key: string;
+        label: string;
+        is_active: number;
+        module_code: OrderModuleCode;
+      }>();
+    if (!field) return { formError: "字段不存在" };
+    if (!field.is_active && definition.lifecycle_status !== "draft") {
+      return { formError: "旧工作流中的隐藏字段属于结构配置，不能重新启用" };
+    }
+    const required = mode === "required" ? 1 : 0;
+    await env.DB.prepare(
+      "UPDATE workflow_step_fields SET is_required=?,is_active=1,updated_at=? WHERE id=? AND workflow_id=?",
+    )
+      .bind(required, now, field.id, workflowId)
+      .run();
+    await synchronizeWorkflowFieldPolicyForInstances({
+      workflowId,
+      fieldKey: field.field_key,
+      moduleCode: field.module_code,
+      isRequired: required,
+      isActive: 1,
+    });
+    await writeAudit({
+      request,
+      action: "workflow.field.requirement.update",
+      resourceType: "workflow_step_field",
+      resourceId: field.id,
+      organizationId: current.organizationId,
+      actorUserId: current.userId,
+      metadata: {
+        workflowId,
+        lifecycleStatus: definition.lifecycle_status,
+        fieldKey: field.field_key,
+        mode,
+      },
+    });
+    return { success: `字段“${field.label}”已设为${required ? "必填" : "选填"}，现有订单后续门禁已同步` };
+  }
+
   if (definition.lifecycle_status !== "draft" && intent !== "advance") {
-    return { formError: "已发布版本只读；请先创建新版本后再修改" };
+    return { formError: "旧工作流只能调整现有字段是否必填；节点和字段结构不能修改" };
   }
 
   if (intent === "definition") {
@@ -1013,19 +1065,39 @@ export default function Workflow({ loaderData, actionData }: Route.ComponentProp
             <p>选择一个模板后，在下方配置节点和字段。新订单后续可按模板生成订单流程。</p>
           </div>
         </div>
-        <div className="workflow-template-list">
-          {loaderData.definitions.map((item) => (
-            <Link
-              key={item.id}
-              to={`/admin/workflow?workflowId=${encodeURIComponent(item.id)}`}
-              className={item.id === loaderData.definition.id ? "active" : ""}
-            >
-              <strong>{item.name}</strong>
-              <small>
-                {item.road_load_type === "ftl" ? "整车型" : "拼车型"} · v{item.version_number} · {lifecycleLabel(item.lifecycle_status)} · {item.step_count} 个节点 · {item.instance_count} 个订单
-              </small>
-            </Link>
-          ))}
+        <div className="table-wrap workflow-template-list">
+          <table>
+            <thead>
+              <tr>
+                <th>工作流模板</th>
+                <th>订单类型</th>
+                <th>版本</th>
+                <th>状态</th>
+                <th>节点</th>
+                <th>订单</th>
+                <th>最后更新</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loaderData.definitions.map((item) => (
+                <tr key={item.id} className={item.id === loaderData.definition.id ? "active" : ""}>
+                  <td><strong>{item.name}</strong></td>
+                  <td>{item.road_load_type === "ftl" ? "整车型" : "拼车型"}</td>
+                  <td>v{item.version_number}</td>
+                  <td><span className={`status-pill ${item.lifecycle_status === "retired" ? "off" : ""}`}>{lifecycleLabel(item.lifecycle_status)}</span></td>
+                  <td>{item.step_count}</td>
+                  <td>{item.instance_count}</td>
+                  <td>{new Date(item.updated_at).toLocaleDateString("zh-CN")}</td>
+                  <td>
+                    <Link className="text-button" to={`/admin/workflow?workflowId=${encodeURIComponent(item.id)}`}>
+                      {item.id === loaderData.definition.id ? "当前查看" : "查看配置"}
+                    </Link>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </section>
 
@@ -1033,7 +1105,7 @@ export default function Workflow({ loaderData, actionData }: Route.ComponentProp
         <div className="panel-header">
           <div>
             <h2>{loaderData.definition.name}</h2>
-            <p>v{loaderData.definition.version_number} · {loaderData.definition.lifecycle_status === "draft" ? "草稿可编辑，发布后冻结" : "已冻结；老订单永久使用本版本"}</p>
+            <p>v{loaderData.definition.version_number} · {loaderData.definition.lifecycle_status === "draft" ? "草稿可编辑全部结构" : "旧版本结构已锁定，可调整现有字段是否必填"}</p>
           </div>
           <div className="page-actions">
             <span className={`status-pill ${loaderData.definition.status !== "active" ? "off" : ""}`}>
@@ -1051,13 +1123,20 @@ export default function Workflow({ loaderData, actionData }: Route.ComponentProp
                 <NodeCreateForm workflowId={loaderData.definition.id} activeSteps={activeSteps} busy={busy} />
               </Modal>
             )}
-            {manageDraft && (
-              <Modal title={`节点配置 · ${loaderData.definition.name}`} triggerLabel="节点配置" triggerClassName="secondary" size="xwide">
+            {manage && (
+              <Modal
+                title={`节点配置 · ${loaderData.definition.name}`}
+                triggerLabel="节点配置"
+                triggerClassName="secondary"
+                size="xwide"
+                closeSignal={successMessage}
+              >
                 <NodeConfigDialog
                   workflowId={loaderData.definition.id}
                   steps={loaderData.steps}
                   fieldsByStep={fieldsByStep}
-                  manage={manageDraft}
+                  structureEditable={manageDraft}
+                  requirementEditable={manage}
                   busy={busy}
                   closeSignal={successMessage}
                   modulesByStep={modulesByStep}
@@ -1083,15 +1162,27 @@ export default function Workflow({ loaderData, actionData }: Route.ComponentProp
             </Form>
           </div>
         )}
-        <div className="workflow-track">
-          {activeSteps.map((step, index) => (
-            <div className="workflow-node" key={step.id}>
-              <span>{index + 1}</span>
-              <strong>{step.name}</strong>
-              <small>{scopeLabels[step.actor_scope]}</small>
-              <small>{(modulesByStep.get(step.id) ?? []).filter((item) => item.is_active).map((item) => item.display_name).join(" / ") || "未配置模组"}</small>
-            </div>
-          ))}
+        <div className="table-wrap workflow-track">
+          <table>
+            <thead><tr><th>顺序</th><th>流程节点</th><th>执行角色</th><th>功能模组</th><th>字段规则</th><th>状态</th></tr></thead>
+            <tbody>
+              {activeSteps.map((step, index) => {
+                const stepFields = fieldsByStep.get(step.id) ?? [];
+                const requiredCount = stepFields.filter((field) => field.is_active && field.is_required).length;
+                const optionalCount = stepFields.filter((field) => field.is_active && !field.is_required).length;
+                return (
+                  <tr key={step.id}>
+                    <td>{String(index + 1).padStart(2, "0")}</td>
+                    <td><strong>{step.name}</strong></td>
+                    <td>{scopeLabels[step.actor_scope]}</td>
+                    <td>{(modulesByStep.get(step.id) ?? []).filter((item) => item.is_active).map((item) => item.display_name).join(" / ") || "未配置"}</td>
+                    <td>{requiredCount} 必填 · {optionalCount} 选填</td>
+                    <td><span className="status-pill success">启用</span></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       </section>
 
@@ -1182,7 +1273,8 @@ function NodeConfigDialog({
   workflowId,
   steps,
   fieldsByStep,
-  manage,
+  structureEditable,
+  requirementEditable,
   busy,
   closeSignal,
   modulesByStep,
@@ -1192,7 +1284,8 @@ function NodeConfigDialog({
   workflowId: string;
   steps: Step[];
   fieldsByStep: Map<string, StepField[]>;
-  manage: boolean;
+  structureEditable: boolean;
+  requirementEditable: boolean;
   busy: boolean;
   closeSignal?: unknown;
   modulesByStep: Map<string, StepModule[]>;
@@ -1204,39 +1297,44 @@ function NodeConfigDialog({
       <div className="workflow-config-dialog-header">
         <div>
           <strong>节点与字段</strong>
-          <span>展开一个节点后，可以维护基础信息、必填字段、选填字段和字段表。</span>
+          <span>{structureEditable ? "草稿版本可维护节点结构和字段；字段必填性会同步到订单门禁。" : "旧版本仅允许调整现有字段是否必填，节点、模组和字段结构保持锁定。"}</span>
         </div>
-        <small>已有执行记录的节点不能物理删除，只能停用。</small>
+        <small>{structureEditable ? "发布后结构自动锁定。" : "必填性保存后立即作用于该版本的现有订单。"}</small>
       </div>
       <div className="workflow-node-config-list">
+        <div className="workflow-node-config-table-head" aria-hidden="true">
+          <span>顺序</span><span>节点</span><span>执行角色</span><span>模组</span><span>字段</span><span>状态 / 操作</span>
+        </div>
         {steps.map((step) => (
           <details className="workflow-node-config" key={step.id}>
             <summary>
-              <span>{step.sort_order}</span>
+              <span className="workflow-field-order">{step.sort_order}</span>
               <strong>{step.name}</strong>
-              <small>
-                {step.is_active ? "启用" : "停用"} · {fieldsByStep.get(step.id)?.length ?? 0} 个字段
-              </small>
+              <span>{scopeLabels[step.actor_scope]}</span>
+              <span>{(modulesByStep.get(step.id) ?? []).filter((item) => item.is_active).length}</span>
+              <span>{fieldsByStep.get(step.id)?.length ?? 0}</span>
+              <small>{step.is_active ? "启用" : "停用"} · 展开配置</small>
             </summary>
-            {manage ? (
+            {structureEditable ? (
               <NodeEditForm workflowId={workflowId} step={step} busy={busy} />
-            ) : (
-              <p className="empty-state">当前账号没有配置权限。</p>
+            ) : null}
+            {structureEditable && (
+              <ModuleList
+                workflowId={workflowId}
+                step={step}
+                modules={modulesByStep.get(step.id) ?? []}
+                tasksByModule={tasksByModule}
+                positions={positions}
+                busy={busy}
+                closeSignal={closeSignal}
+              />
             )}
-            <ModuleList
-              workflowId={workflowId}
-              step={step}
-              modules={modulesByStep.get(step.id) ?? []}
-              tasksByModule={tasksByModule}
-              positions={positions}
-              busy={busy}
-              closeSignal={closeSignal}
-            />
             <FieldList
               workflowId={workflowId}
               step={step}
               fields={fieldsByStep.get(step.id) ?? []}
-              manage={manage}
+              structureEditable={structureEditable}
+              requirementEditable={requirementEditable}
               busy={busy}
               closeSignal={closeSignal}
             />
@@ -1412,104 +1510,62 @@ function FieldList({
   workflowId,
   step,
   fields,
-  manage,
+  structureEditable,
+  requirementEditable,
   busy,
   closeSignal,
 }: {
   workflowId: string;
   step: Step;
   fields: StepField[];
-  manage: boolean;
+  structureEditable: boolean;
+  requirementEditable: boolean;
   busy: boolean;
   closeSignal?: unknown;
 }) {
-  const fieldGroupDescriptions = {
-    required: "未填写时阻止当前节点提交。",
-    optional: "业务需要时填写，不影响当前节点提交。",
-    hidden: "保留字段配置，但业务页面不显示。",
-  } as const;
-  const fieldGroupMarks = {
-    required: "必",
-    optional: "选",
-    hidden: "隐",
-  } as const;
-  const fieldGroups = workflowFieldModes.map((mode) => ({
-    ...mode,
-    fields: fields.filter((field) => workflowFieldMode(field) === mode.value),
-  }));
-
   return (
     <div className="workflow-field-config">
       <div className="workflow-field-config-heading">
         <div>
           <h3>字段填写规则</h3>
-          <p>字段按业务页面中的填写要求分类，点击“编辑”可调整所属分组。</p>
+          <p>必填字段缺失会阻断后续流程；选填字段缺失不会阻断。</p>
         </div>
         <strong>{fields.length} 个字段</strong>
       </div>
-      <div className="workflow-field-groups">
-        {fieldGroups.map((group) => (
-          <section
-            className={`workflow-field-group workflow-field-group-${group.value}`}
-            key={group.value}
-            aria-labelledby={`${step.id}-${group.value}-title`}
-          >
-            <header className="workflow-field-group-header">
-              <span className="workflow-field-group-mark" aria-hidden="true">
-                {fieldGroupMarks[group.value]}
-              </span>
-              <div>
-                <h4 id={`${step.id}-${group.value}-title`}>{group.label}</h4>
-                <p>{fieldGroupDescriptions[group.value]}</p>
-              </div>
-              <strong>{group.fields.length} 项</strong>
-            </header>
-            {group.fields.length ? (
-              <div className="workflow-field-group-list">
-                {group.fields.map((field) => {
-                  const source = workflowFieldCatalogByKey.get(field.field_key)?.requirementSource;
-                  return (
-                    <div className="workflow-field-row" key={field.id}>
-                      <span className="workflow-field-order">{field.sort_order}</span>
-                      <div className="workflow-field-name">
-                        <strong>{field.label}</strong>
-                        <small>{field.field_key}</small>
-                      </div>
-                      <div className="workflow-field-meta">
-                        <span>{fieldTypeLabels[field.field_type]}</span>
-                        <span>{moduleLabels[field.module_code]}</span>
-                        <span>
-                          {source === "legacy_required"
-                            ? "旧系统必填基线"
-                            : workflowFieldCatalogByKey.has(field.field_key)
-                              ? "新系统字段"
-                              : "自定义字段"}
-                        </span>
-                      </div>
-                      <p className="workflow-field-help">{field.help_text || "暂无说明"}</p>
-                      {manage && (
-                        <Modal
-                          title={`编辑字段 · ${field.label}`}
-                          triggerLabel="编辑"
-                          triggerClassName="text-button"
-                          size="wide"
-                          closeSignal={closeSignal}
-                        >
+      <div className="table-wrap workflow-field-table">
+        <table>
+          <thead><tr><th>顺序</th><th>字段</th><th>业务模块</th><th>类型</th><th>当前规则</th><th>说明</th><th>操作</th></tr></thead>
+          <tbody>
+            {fields.map((field) => {
+              const mode = workflowFieldMode(field);
+              return (
+                <tr key={field.id}>
+                  <td>{field.sort_order}</td>
+                  <td><strong>{field.label}</strong><small>{field.field_key}</small></td>
+                  <td>{moduleLabels[field.module_code]}</td>
+                  <td>{fieldTypeLabels[field.field_type]}</td>
+                  <td><span className={`status-pill workflow-mode-${mode}`}>{workflowFieldModes.find((item) => item.value === mode)?.label}</span></td>
+                  <td>{field.help_text || "—"}</td>
+                  <td>
+                    <div className="workflow-field-row-actions">
+                      {requirementEditable && mode !== "hidden" && (
+                        <RequirementModeForm workflowId={workflowId} field={field} busy={busy} />
+                      )}
+                      {structureEditable && (
+                        <Modal title={`编辑字段 · ${field.label}`} triggerLabel="编辑结构" triggerClassName="text-button" size="wide" closeSignal={closeSignal}>
                           <FieldForm workflowId={workflowId} stepId={step.id} field={field} busy={busy} />
                         </Modal>
                       )}
                     </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <p className="workflow-field-group-empty">该分组暂无字段</p>
-            )}
-          </section>
-        ))}
+                  </td>
+                </tr>
+              );
+            })}
+            {!fields.length && <tr><td colSpan={7} className="empty-state">该节点暂未配置字段。</td></tr>}
+          </tbody>
+        </table>
       </div>
-      {!fields.length && <p className="empty-state">该节点暂未配置字段。</p>}
-      {manage && (
+      {structureEditable && (
         <div className="workflow-field-actions">
           <Modal title={`从字段库添加 · ${step.name}`} triggerLabel="从字段库添加" triggerClassName="secondary" size="wide" closeSignal={closeSignal}>
             <CatalogFieldForm workflowId={workflowId} step={step} fields={fields} busy={busy} nextSort={(fields[fields.length - 1]?.sort_order ?? 0) + 10} />
@@ -1520,6 +1576,29 @@ function FieldList({
         </div>
       )}
     </div>
+  );
+}
+
+function RequirementModeForm({
+  workflowId,
+  field,
+  busy,
+}: {
+  workflowId: string;
+  field: StepField;
+  busy: boolean;
+}) {
+  return (
+    <Form method="post" className="workflow-requirement-form">
+      <input type="hidden" name="intent" value="field_mode_update" />
+      <input type="hidden" name="workflowId" value={workflowId} />
+      <input type="hidden" name="fieldId" value={field.id} />
+      <select name="fieldMode" defaultValue={field.is_required ? "required" : "optional"} aria-label={`${field.label}填写规则`}>
+        <option value="required">必填</option>
+        <option value="optional">选填</option>
+      </select>
+      <button className="text-button" disabled={busy}>保存</button>
+    </Form>
   );
 }
 

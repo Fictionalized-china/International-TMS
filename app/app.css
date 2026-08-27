@@ -20250,3 +20250,248 @@ button {
     text-align: center;
   }
 }
+
+/* Dense workflow editor: flat rows instead of card/timeline navigation. */
+.workflow-template-panel {
+  gap: 8px;
+}
+.workflow-template-list {
+  display: block;
+  overflow-x: auto;
+}
+.workflow-template-list table {
+  min-width: 920px;
+}
+.workflow-template-list th,
+.workflow-template-list td,
+.workflow-track th,
+.workflow-track td,
+.workflow-field-table th,
+.workflow-field-table td {
+  padding: 7px 10px;
+  line-height: 1.35;
+}
+.workflow-template-list tbody tr.active td {
+  background: #eef6ff;
+  border-block-color: #a9c8ef;
+}
+.workflow-template-list tbody tr.active td:first-child {
+  box-shadow: inset 3px 0 #0b56b3;
+}
+.workflow-template-list .status-pill,
+.workflow-track .status-pill,
+.workflow-field-table .status-pill {
+  min-height: 22px;
+  padding: 2px 7px;
+  border-radius: 2px;
+  box-shadow: none;
+}
+.workflow-track {
+  display: block;
+  overflow-x: auto;
+  padding: 0;
+  margin-top: 8px;
+}
+.workflow-track table {
+  min-width: 820px;
+}
+.workflow-track th:first-child {
+  width: 64px;
+}
+.workflow-track th:nth-child(2) {
+  width: 190px;
+}
+.workflow-track th:nth-child(3) {
+  width: 120px;
+}
+.workflow-track th:nth-child(5),
+.workflow-track th:nth-child(6) {
+  width: 130px;
+}
+.workflow-config-dialog {
+  gap: 8px;
+}
+.workflow-config-dialog-header {
+  padding: 8px 10px;
+  border-radius: 2px;
+  background: #f7f9fc;
+}
+.workflow-config-dialog-header strong {
+  font-size: 14px;
+}
+.workflow-node-config-list {
+  display: block;
+  overflow-x: auto;
+  border: 1px solid #d8e1ec;
+}
+.workflow-node-config-table-head,
+.workflow-node-config > summary {
+  display: grid;
+  grid-template-columns: 70px minmax(190px, 1.25fr) minmax(110px, .7fr) 80px 80px minmax(130px, .8fr);
+  gap: 0;
+  align-items: center;
+  min-width: 820px;
+}
+.workflow-node-config-table-head {
+  color: #607086;
+  background: #f5f7fa;
+  border-bottom: 1px solid #d8e1ec;
+  font-size: 11px;
+  font-weight: 700;
+}
+.workflow-node-config-table-head > span,
+.workflow-node-config > summary > * {
+  padding: 7px 9px;
+}
+.workflow-node-config {
+  min-width: 820px;
+  border: 0;
+  border-radius: 0;
+  border-bottom: 1px solid #e2e8f0;
+}
+.workflow-node-config:last-child {
+  border-bottom: 0;
+}
+.workflow-node-config > summary {
+  min-height: 38px;
+  padding: 0;
+  background: #fff;
+}
+.workflow-node-config > summary:hover {
+  background: #f8fbff;
+}
+.workflow-node-config > summary span,
+.workflow-node-config > summary small {
+  width: auto;
+  height: auto;
+  display: block;
+  border-radius: 0;
+  background: transparent;
+  color: #52657b;
+  font-size: 11px;
+  font-weight: 600;
+}
+.workflow-node-config[open] {
+  padding-bottom: 8px;
+  background: #fbfdff;
+}
+.workflow-node-config[open] > summary {
+  margin-bottom: 8px;
+  background: #edf6ff;
+  border-bottom: 1px solid #c9dcef;
+}
+.workflow-node-config > form,
+.workflow-field-config {
+  margin-inline: 10px;
+}
+.workflow-node-config .workflow-node-edit-form {
+  margin-bottom: 8px;
+  padding: 8px;
+  border: 1px solid #d8e1ec;
+  background: #fff;
+}
+.workflow-module-config {
+  margin: 0 10px 8px;
+  padding: 8px;
+  border-radius: 2px;
+}
+.workflow-field-config {
+  gap: 6px;
+}
+.workflow-field-config-heading {
+  min-height: 32px;
+}
+.workflow-field-config h3 {
+  font-size: 13px;
+}
+.workflow-field-table table {
+  min-width: 820px;
+  table-layout: fixed;
+}
+.workflow-field-table th:nth-child(1) { width: 58px; }
+.workflow-field-table th:nth-child(2) { width: 180px; }
+.workflow-field-table th:nth-child(3) { width: 115px; }
+.workflow-field-table th:nth-child(4) { width: 82px; }
+.workflow-field-table th:nth-child(5) { width: 106px; }
+.workflow-field-table th:nth-child(6) { width: auto; }
+.workflow-field-table th:nth-child(7) { width: 180px; }
+.workflow-field-table td {
+  min-height: 38px;
+  vertical-align: middle;
+}
+.workflow-field-table td small {
+  margin-top: 1px;
+  font-size: 10px;
+}
+.workflow-field-table td:nth-child(6) {
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+.workflow-mode-required {
+  color: #9d2d20;
+  border-color: #f0b9b2;
+  background: #fff4f2;
+}
+.workflow-mode-optional {
+  color: #245a98;
+  border-color: #bfd2e9;
+  background: #f2f7fd;
+}
+.workflow-mode-hidden {
+  color: #697586;
+  border-color: #d8dee7;
+  background: #f5f6f8;
+}
+.workflow-field-row-actions,
+.workflow-requirement-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.workflow-requirement-form select {
+  width: 92px;
+  min-height: 30px;
+  padding: 4px 24px 4px 7px;
+  border: 1px solid #c8d4e1;
+  border-radius: 2px;
+  background: #fff;
+}
+.workflow-field-actions {
+  padding-bottom: 0;
+}
+
+/* Semantic input sizing: short values should not look like paragraph fields. */
+.field.compact {
+  justify-self: start;
+  width: min(100%, 16rem);
+}
+.field > input[type="number"] {
+  width: min(100%, 15rem);
+}
+.field > input[type="date"],
+.field > input[type="time"] {
+  width: min(100%, 16rem);
+}
+.field > input[type="datetime-local"] {
+  width: min(100%, 19rem);
+}
+.field > input[name$="Code" i],
+.field > input[name$="Phone" i],
+.field > input[name$="Count" i],
+.field > input[name$="Rate" i],
+.field > input[name$="Number" i],
+.field > select[name$="Status" i],
+.field > select[name$="Type" i],
+.field > select[name*="currency" i] {
+  width: min(100%, 20rem);
+}
+
+@media (max-width: 900px) {
+  .workflow-node-config-table-head,
+  .workflow-node-config > summary {
+    grid-template-columns: 58px minmax(170px, 1fr) 100px 64px 64px 120px;
+  }
+  .workflow-config-dialog-header {
+    display: grid;
+  }
+}
