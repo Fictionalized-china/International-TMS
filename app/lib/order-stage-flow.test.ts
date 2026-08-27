@@ -100,4 +100,18 @@ describe("order stage access", () => {
       ).reason,
     ).toContain("扫码自提签收");
   });
+
+  it("opens a module at an earlier workflow node when a field block is moved there", () => {
+    const access = orderModuleWorkflowStageAccess(
+      "customs",
+      "consignment_approval",
+      workflowSteps,
+      "consignment_approval",
+    );
+    expect(access).toMatchObject({
+      available: true,
+      requiredStepKey: "consignment_approval",
+      customPlacement: true,
+    });
+  });
 });

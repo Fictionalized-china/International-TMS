@@ -111,6 +111,30 @@ export async function validateOrderWorkflowAction(input: {
       order,
       transition,
     };
+  const gateStepByAction: Record<string,string> = {
+    submit: "order_creation",
+    approve: "consignment_approval",
+    dispatch: "task_assignment",
+    complete: "completion_review",
+  };
+  const gateStepKey = gateStepByAction[input.actionCode];
+  if (gateStepKey) {
+    await ensureOrderModules(input.organizationId, input.orderId);
+    const missing = await missingRequiredWorkflowStepFields(
+      input.organizationId,
+      input.orderId,
+      gateStepKey,
+    );
+    if (missing.length)
+      return {
+        ok: false as const,
+        reason: `请先补齐当前工作流要求的字段：${missing
+          .map((field) => `${field.label}（${field.moduleCode}）`)
+          .join("、")}`,
+        order,
+        transition,
+      };
+  }
   if (input.actionCode === "dispatch") {
     const assignment = await env.DB.prepare(
       "SELECT assignee_user_id,status FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='assignment' AND enabled=1",
@@ -152,23 +176,6 @@ export async function validateOrderWorkflowAction(input: {
       return {
         ok: false as const,
         reason: "指定的处理人无效",
-        order,
-        transition,
-      };
-  }
-  if (input.actionCode === "submit") {
-    await ensureOrderModules(input.organizationId, input.orderId);
-    const missing = await missingRequiredWorkflowStepFields(
-      input.organizationId,
-      input.orderId,
-      "order_creation",
-    );
-    if (missing.length)
-      return {
-        ok: false as const,
-        reason: `请先补齐当前工作流要求的字段：${missing
-          .map((field) => `${field.label}（${field.moduleCode}）`)
-          .join("、")}`,
         order,
         transition,
       };

@@ -7,11 +7,11 @@ import {
 } from "./order-documents";
 
 describe("order document taxonomy", () => {
-  it("defines four stages and thirteen dedicated document types", () => {
+  it("defines four stages and fourteen dedicated document types", () => {
     expect(orderDocumentStages).toHaveLength(4);
-    expect(orderDocumentTypeCodes.size).toBe(13);
-    // 合同不再作为订单工作流文件（2026-08-18 需求：合同归客户资料管理）
-    expect(orderDocumentTypeCodes.has("contract")).toBe(false);
+    expect(orderDocumentTypeCodes.size).toBe(14);
+    // 客户主档合同仍独立保存；工作流合同是可配置的订单级文件，可按字段策略释放。
+    expect(orderDocumentTypeCodes.has("contract")).toBe(true);
   });
 
   it("requires customs documents at departure only for customs orders", () => {

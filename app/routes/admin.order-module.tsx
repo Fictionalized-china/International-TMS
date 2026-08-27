@@ -70,6 +70,7 @@ import { syncCustomsModuleFromRecords } from "../lib/customs-status.server";
 import { Modal } from "../components/Modal";
 import {
   loadOrderModuleWorkflowFields,
+  missingRequiredModuleFields,
   saveOrderCustomWorkflowFieldValue,
   type WorkflowFieldState,
 } from "../lib/workflow-fields.server";
@@ -454,6 +455,13 @@ async function loadModuleWorkflowStageAccess(
   )
     .bind(state.workflow_id)
     .all<{ step_key: string; step_name: string; sort_order: number }>();
+  const configuredPlacement = await env.DB.prepare(
+    `SELECT s.step_key
+     FROM workflow_step_modules m
+     JOIN workflow_steps s ON s.id=m.step_id AND s.workflow_id=m.workflow_id
+     WHERE m.workflow_id=? AND m.module_code=? AND m.is_active=1 AND s.is_active=1
+     ORDER BY s.sort_order,m.sort_order LIMIT 1`,
+  ).bind(state.workflow_id,moduleCode).first<{step_key:string}>();
   const positions: WorkflowStepPosition[] = steps.results.map((step) => ({
     stepKey: step.step_key,
     stepName: step.step_name,
@@ -463,6 +471,7 @@ async function loadModuleWorkflowStageAccess(
     moduleCode,
     state.current_step_key,
     positions,
+    configuredPlacement?.step_key ?? null,
   );
 }
 type CustomsRecord = {
@@ -1078,13 +1087,18 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     definition.code,
   );
   const baseAccess = orderModuleAccess(order.status, moduleCode);
+  const dynamicStageEdit = workflowStageAccess.customPlacement &&
+    workflowStageAccess.available && !["completed","cancelled"].includes(order.status);
+  const policyRemediationEdit = workflowFields.some(
+    (field)=>field.isActive && field.isRequired && !field.present,
+  ) && !["completed","cancelled"].includes(order.status);
   return {
     current,
     order,
     access: {
       ...baseAccess,
-      canEdit: baseAccess.canEdit && workflowStageAccess.available,
-      reason: baseAccess.reason || workflowStageAccess.reason,
+      canEdit: (baseAccess.canEdit || dynamicStageEdit || policyRemediationEdit) && workflowStageAccess.available,
+      reason: workflowStageAccess.reason || (dynamicStageEdit || policyRemediationEdit ? null : baseAccess.reason),
     },
     workflowStageAccess,
     module,
@@ -1229,12 +1243,19 @@ export async function action({ request, params }: Route.ActionArgs) {
     moduleCode as OrderModuleCode,
   );
   const access = orderModuleAccess(order.status, moduleCode);
+  const dynamicStageEdit = stageAccess.customPlacement &&
+    stageAccess.available && !["completed","cancelled"].includes(order.status);
+  const policyRemediationEdit = (await missingRequiredModuleFields(
+    current.organizationId,
+    orderId,
+    moduleCode as OrderModuleCode,
+  )).length > 0 && !["completed","cancelled"].includes(order.status);
   const isSubmittedConsignmentApproval =
     canApproveConsignment && order.status === "submitted";
   if (!stageAccess.available && !isSubmittedConsignmentApproval)
     return { formError: stageAccess.reason || "当前业务阶段尚未开放本模块" };
   if (
-    !access.canEdit &&
+    !access.canEdit && !dynamicStageEdit && !policyRemediationEdit &&
     !isSubmittedConsignmentApproval &&
     !(moduleCode === "review" && intent === "generate_order_review")
   )

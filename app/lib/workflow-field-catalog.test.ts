@@ -70,4 +70,15 @@ describe("workflow field building blocks", () => {
       workflowFieldPolicy(fields, "document_consignment_letter", "required"),
     ).toEqual({ isActive: true, isRequired: false });
   });
+
+  it("keeps order-level contracts available as a hidden workflow block", () => {
+    expect(
+      workflowFieldCatalog.find((item) => item.fieldKey === "document_contract"),
+    ).toMatchObject({
+      stepKey: "order_creation",
+      moduleCode: "consignment",
+      fieldType: "attachment",
+      defaultMode: "hidden",
+    });
+  });
 });

@@ -144,22 +144,6 @@ export async function ensureWorkflowCatalogFields(organizationId: string) {
   )
     .bind(organizationId)
     .run();
-  await env.DB.prepare(
-    `UPDATE workflow_step_fields
-     SET is_required=0,updated_at=?
-     WHERE workflow_id IN (SELECT id FROM workflow_definitions WHERE organization_id=?)
-       AND field_key='document_customs_declaration_file'`,
-  )
-    .bind(now, organizationId)
-    .run();
-  await env.DB.prepare(
-    `UPDATE workflow_instance_fields
-     SET is_required=0
-     WHERE workflow_id IN (SELECT id FROM workflow_definitions WHERE organization_id=?)
-       AND field_key='document_customs_declaration_file'`,
-  )
-    .bind(organizationId)
-    .run();
   const standardCodes = [...standardWorkflowCodes];
   const placeholders = standardCodes.map(() => "?").join(",");
   await env.DB.prepare(
@@ -255,6 +239,123 @@ export async function synchronizeWorkflowFieldPolicyForInstances(input: {
     .run();
 }
 
+export async function synchronizeWorkflowFieldDefinitionForInstances(input: {
+  workflowId: string;
+  stepKey: string;
+  fieldKey: string;
+  moduleCode: OrderModuleCode;
+  label: string;
+  fieldType: string;
+  isRequired: number;
+  isActive: number;
+  sortOrder: number;
+  optionsText: string | null;
+  helpText: string | null;
+}) {
+  const now = new Date().toISOString();
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE workflow_instance_fields
+       SET step_key=?,label=?,field_type=?,is_required=?,is_active=?,sort_order=?,
+           options_text=?,help_text=?
+       WHERE workflow_id=? AND field_key=? AND module_code=?`,
+    ).bind(
+      input.stepKey,
+      input.label,
+      input.fieldType,
+      input.isRequired,
+      input.isActive,
+      input.sortOrder,
+      input.optionsText,
+      input.helpText,
+      input.workflowId,
+      input.fieldKey,
+      input.moduleCode,
+    ),
+    env.DB.prepare(
+      `INSERT OR IGNORE INTO workflow_instance_fields(
+         id,instance_id,workflow_id,step_key,module_code,field_key,label,field_type,
+         is_required,is_active,sort_order,options_text,help_text,created_at
+       )
+       SELECT lower(hex(randomblob(16))),wi.id,wi.workflow_id,?,?,?,?,?,?,?,?,?,?,?
+       FROM workflow_instances wi WHERE wi.workflow_id=?`,
+    ).bind(
+      input.stepKey,
+      input.moduleCode,
+      input.fieldKey,
+      input.label,
+      input.fieldType,
+      input.isRequired,
+      input.isActive,
+      input.sortOrder,
+      input.optionsText,
+      input.helpText,
+      now,
+      input.workflowId,
+    ),
+  ]);
+}
+
+export async function releaseHiddenWorkflowFieldData(input: {
+  organizationId: string;
+  workflowId: string;
+  fieldKey: string;
+  moduleCode: OrderModuleCode;
+}) {
+  const placement = orderDocumentPlacements.find(
+    (item) => item.fieldKey === input.fieldKey,
+  );
+  let releasedFiles = 0;
+  let releasedBytes = 0;
+  if (placement) {
+    const stored = await env.DB.prepare(
+      `SELECT COUNT(*) file_count,COALESCE(SUM(a.size_bytes),0) total_bytes
+       FROM order_attachments a
+       JOIN order_document_metadata m ON m.attachment_id=a.id
+       WHERE a.organization_id=? AND m.document_category=?
+         AND EXISTS(
+           SELECT 1 FROM workflow_instances wi
+           WHERE wi.workflow_id=? AND wi.order_id=a.order_id
+         )`,
+    ).bind(
+      input.organizationId,
+      placement.documentCode,
+      input.workflowId,
+    ).first<{ file_count: number; total_bytes: number }>();
+    releasedFiles = Number(stored?.file_count || 0);
+    releasedBytes = Number(stored?.total_bytes || 0);
+    await env.DB.prepare(
+      `DELETE FROM order_attachments
+       WHERE organization_id=? AND id IN (
+         SELECT a.id FROM order_attachments a
+         JOIN order_document_metadata m ON m.attachment_id=a.id
+         WHERE a.organization_id=? AND m.document_category=?
+           AND EXISTS(
+             SELECT 1 FROM workflow_instances wi
+             WHERE wi.workflow_id=? AND wi.order_id=a.order_id
+           )
+       )`,
+    ).bind(
+      input.organizationId,
+      input.organizationId,
+      placement.documentCode,
+      input.workflowId,
+    ).run();
+  }
+  const customValues = await env.DB.prepare(
+    `DELETE FROM order_custom_workflow_field_values
+     WHERE field_instance_id IN (
+       SELECT id FROM workflow_instance_fields
+       WHERE workflow_id=? AND field_key=? AND module_code=?
+     )`,
+  ).bind(input.workflowId,input.fieldKey,input.moduleCode).run();
+  return {
+    releasedFiles,
+    releasedBytes,
+    releasedCustomValues: Number(customValues.meta?.changes || 0),
+  };
+}
+
 export async function listTemplateWorkflowFields(workflowIds: string[]) {
   if (!workflowIds.length) return [] as (WorkflowFieldRule & { workflowId: string })[];
   const placeholders = workflowIds.map(() => "?").join(",");
@@ -340,6 +441,22 @@ export async function missingRequiredModuleFields(
 ) {
   const fields = await loadOrderModuleWorkflowFields(organizationId, orderId, moduleCode);
   return fields.filter((item) => item.isActive && item.isRequired && !item.present);
+}
+
+export async function missingRequiredWorkflowModuleStepFields(
+  organizationId: string,
+  orderId: string,
+  stepKey: string,
+  moduleCode: OrderModuleCode,
+) {
+  const fields = await loadOrderModuleWorkflowFields(organizationId, orderId, moduleCode);
+  return fields.filter(
+    (item) =>
+      item.stepKey === stepKey &&
+      item.isActive &&
+      item.isRequired &&
+      !item.present,
+  );
 }
 
 export async function missingRequiredWorkflowStepFields(

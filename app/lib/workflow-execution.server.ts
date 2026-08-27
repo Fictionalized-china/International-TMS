@@ -1,5 +1,9 @@
 import { env } from "cloudflare:workers";
-import { snapshotWorkflowFieldsForInstance } from "./workflow-fields.server";
+import {
+  missingRequiredWorkflowModuleStepFields,
+  snapshotWorkflowFieldsForInstance,
+} from "./workflow-fields.server";
+import type { OrderModuleCode } from "./order-modules";
 
 type ModuleFact = { module_code:string; status:string };
 
@@ -131,7 +135,7 @@ export async function synchronizeWorkflowExecution(input:{
   if (taskUpdates.length) await env.DB.batch(taskUpdates);
 
   const modules = await env.DB.prepare(
-    `SELECT ms.id,ms.instance_step_state_id,ms.is_required,ms.completion_mode,
+    `SELECT ms.id,ms.instance_step_state_id,ms.is_required,ms.completion_mode,ms.module_code,ss.step_key,
       COUNT(ts.id) task_count,
       SUM(CASE WHEN ts.is_required=1 AND ts.status!='completed' THEN 1 ELSE 0 END) pending_required
      FROM workflow_instance_module_states ms
@@ -140,12 +144,24 @@ export async function synchronizeWorkflowExecution(input:{
      WHERE ss.instance_id=? GROUP BY ms.id`,
   ).bind(input.instanceId).all<{
     id:string;instance_step_state_id:string;is_required:number;completion_mode:string;
+    module_code:string;step_key:string;
     task_count:number;pending_required:number;
   }>();
+  const fieldBlockers = new Set<string>();
+  await Promise.all(modules.results.map(async (item) => {
+    const missing = await missingRequiredWorkflowModuleStepFields(
+      input.organizationId,
+      input.orderId,
+      item.step_key,
+      item.module_code as OrderModuleCode,
+    );
+    if (missing.length) fieldBlockers.add(item.id);
+  }));
   const moduleUpdates = modules.results.map((item) => {
-    const completed = item.completion_mode === "automatic"
+    const taskComplete = item.completion_mode === "automatic"
       ? item.task_count === 0 || item.pending_required === 0
       : item.task_count > 0 && item.pending_required === 0;
+    const completed = taskComplete && !fieldBlockers.has(item.id);
     return env.DB.prepare(
       "UPDATE workflow_instance_module_states SET status=?,updated_at=? WHERE id=?",
     ).bind(completed?"completed":"pending",now,item.id);

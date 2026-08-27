@@ -13,6 +13,7 @@
     "db:migrate:remote": "wrangler d1 migrations apply international-tms --remote",
     "preview": "npm run build && vite preview",
     "test": "vitest run",
+    "test:stress": "node scripts/http-stress.mjs",
     "test:win": "vitest run --pool=threads --maxWorkers=1",
     "cf-typegen": "wrangler types",
     "postinstall": "wrangler types"

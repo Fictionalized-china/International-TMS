@@ -230,6 +230,7 @@ export const workflowFieldCatalog: WorkflowFieldCatalogItem[] = [
   field("outbound_transport", "documents", "document_description", "文件说明", "textarea", "optional", "文件内容、版本或特殊用途说明。"),
   field("outbound_transport", "documents", "document_public_to_customer", "客户可见", "select", "optional", "决定文件是否同步到客户门户。", "1|客户可见\n0|仅内部"),
   field("order_creation", "consignment", "document_consignment_letter", "委托书", "attachment", "optional", "客户确认运输委托后，可在订单中上传委托书。"),
+  field("order_creation", "consignment", "document_contract", "合同", "attachment", "hidden", "默认按客户资料归档；仅在工作流明确启用订单级合同时显示。"),
   field("outbound_transport", "customs", "document_commercial_invoice", "商业发票", "attachment", "required", "办理报关申报时使用的商业发票。"),
   field("outbound_transport", "customs", "document_packing_list", "装箱单", "attachment", "required", "办理报关申报时使用的装箱明细。"),
   field("outbound_transport", "customs", "document_customs_document", "报关资料", "attachment", "required", "起运地、过境地或目的地申报所需的配套资料。"),

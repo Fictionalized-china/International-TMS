@@ -20459,6 +20459,38 @@ button {
 .workflow-field-actions {
   padding-bottom: 0;
 }
+.workflow-catalog-table table {
+  min-width: 900px;
+  table-layout: fixed;
+}
+.workflow-catalog-table th,
+.workflow-catalog-table td {
+  padding: 7px 9px;
+  vertical-align: middle;
+}
+.workflow-catalog-table th:nth-child(1) { width: 210px; }
+.workflow-catalog-table th:nth-child(2) { width: 120px; }
+.workflow-catalog-table th:nth-child(3) { width: 180px; }
+.workflow-catalog-table td small {
+  margin-top: 1px;
+  font-size: 10px;
+}
+.workflow-catalog-row-form {
+  display: grid;
+  grid-template-columns: 120px 84px minmax(110px,auto);
+  gap: 7px;
+  align-items: center;
+}
+.workflow-catalog-row-form select,
+.workflow-catalog-row-form input {
+  width: 100%;
+  min-height: 30px;
+  padding: 4px 7px;
+}
+.workflow-catalog-row-form .text-button {
+  justify-self: start;
+  white-space: nowrap;
+}
 
 /* Semantic input sizing: short values should not look like paragraph fields. */
 .field.compact {

@@ -160,6 +160,7 @@ export type OrderModuleWorkflowStageAccess = {
   currentStepName: string | null;
   requiredStepKey: string;
   requiredStepName: string;
+  customPlacement: boolean;
   reason: string | null;
 };
 
@@ -179,12 +180,19 @@ const moduleUnlockStep: Record<OrderModuleCode, OrderBusinessStageCode> = {
   review: "completion_review",
 };
 
+export function canonicalModuleUnlockStep(moduleCode: OrderModuleCode) {
+  return moduleUnlockStep[moduleCode];
+}
+
 export function orderModuleWorkflowStageAccess(
   moduleCode: OrderModuleCode,
   currentStepKey: string | null,
   workflowSteps: WorkflowStepPosition[],
+  requiredStepKeyOverride?: string | null,
 ): OrderModuleWorkflowStageAccess {
-  const requiredStepKey = moduleUnlockStep[moduleCode];
+  const canonicalStepKey = moduleUnlockStep[moduleCode];
+  const requiredStepKey = requiredStepKeyOverride || canonicalStepKey;
+  const customPlacement = requiredStepKey !== canonicalStepKey;
   const current = workflowSteps.find((step) => step.stepKey === currentStepKey) ?? null;
   const required = workflowSteps.find((step) => step.stepKey === requiredStepKey) ?? null;
   if (!current || !required) {
@@ -195,6 +203,7 @@ export function orderModuleWorkflowStageAccess(
       requiredStepKey,
       requiredStepName:
         orderBusinessStages.find((stage) => stage.code === requiredStepKey)?.shortTitle ?? requiredStepKey,
+      customPlacement,
       reason: null,
     };
   }
@@ -205,6 +214,7 @@ export function orderModuleWorkflowStageAccess(
     currentStepName: current.stepName,
     requiredStepKey,
     requiredStepName: required.stepName,
+    customPlacement,
     reason: available
       ? null
       : `当前处于“${current.stepName}”，进入“${required.stepName}”后自动开放本模块`,

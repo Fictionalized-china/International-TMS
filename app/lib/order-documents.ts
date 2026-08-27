@@ -27,6 +27,7 @@ export const orderDocumentStages: readonly OrderDocumentStage[] = [
     hint: "完成业务委托、贸易与报关资料准备；发车门槛会检查必需文件。",
     documents: [
       { code: "consignment_letter", name: "委托书", hint: "客户运输委托或托运委托书" },
+      { code: "contract", name: "合同", hint: "仅在工作流明确启用时使用的订单级业务合同" },
       { code: "commercial_invoice", name: "发票", hint: "商业发票或形式发票", requiredForDeparture: true },
       { code: "packing_list", name: "装箱单", hint: "货物件数、重量和包装明细", requiredForDeparture: true },
       { code: "customs_document", name: "报关资料", hint: "申报、报检或清关所需的配套资料" },
@@ -87,6 +88,12 @@ export const orderDocumentPlacements: readonly OrderDocumentPlacement[] = [
     moduleCode: "consignment",
     fieldKey: "document_consignment_letter",
     requiredByDefault: true,
+  },
+  {
+    documentCode: "contract",
+    moduleCode: "consignment",
+    fieldKey: "document_contract",
+    requiredByDefault: false,
   },
   {
     documentCode: "commercial_invoice",
