@@ -20773,6 +20773,19 @@ button {
   padding-bottom: 0;
 }
 
+/* Native selects need an explicit text lane. Earlier form rules can contribute
+   11px vertical padding while this density layer fixes the control at 32px;
+   that leaves less than one font line and clips the selected value. The
+   :not([multiple]) qualifier also gives this reset enough specificity to win
+   over legacy `.shell .field select` rules without affecting list boxes. */
+.admin-app-shell select:not([multiple]),
+.warehouse-app-shell select:not([multiple]),
+.prototype-portal-shell select:not([multiple]) {
+  box-sizing: border-box;
+  padding-block: 4px;
+  line-height: 18px;
+}
+
 .admin-app-shell textarea,
 .warehouse-app-shell textarea,
 .prototype-portal-shell textarea {
