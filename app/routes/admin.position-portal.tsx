@@ -2,9 +2,7 @@ import { env } from "cloudflare:workers";
 import { Form, Link } from "react-router";
 import type { Route } from "./+types/admin.position-portal";
 import { requireSessionUser } from "../lib/auth.server";
-import { positionPortalForUser, visiblePortalLinks } from "../lib/position-portal";
 import {
-  buildStageSnapshots,
   orderNextGuidance,
   type GuidanceModule,
 } from "../lib/order-guidance";
@@ -49,7 +47,6 @@ type PortalSettings = {
 
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "order.view");
-  const config = positionPortalForUser(current);
   const url = new URL(request.url);
   const settings = current.positionCode
     ? await env.DB.prepare(
@@ -176,11 +173,6 @@ export async function loader({ request }: Route.LoaderArgs) {
         ? `/admin/orders/${order.order_id}/modules/${effectiveModuleCode}#module-business-data`
         : guidance.href,
       updated_at: order.updated_at,
-      stages: buildStageSnapshots(order.order_status, modules).map((snapshot) => ({
-        code: snapshot.stage.code,
-        name: snapshot.stage.shortTitle,
-        status: snapshot.status,
-      })),
     };
   });
 
@@ -205,8 +197,6 @@ export async function loader({ request }: Route.LoaderArgs) {
 
   return {
     current,
-    config,
-    links: visiblePortalLinks(config, current.permissions),
     orders: visible,
     canViewAll,
     summary: {
@@ -232,30 +222,36 @@ export function meta() {
 }
 
 export default function PositionPortal({ loaderData }: Route.ComponentProps) {
-  const { current, config, links, orders, canViewAll, filters, summary } = loaderData;
+  const { current, orders, canViewAll, filters, summary } = loaderData;
+  const advancedFilterCount = [filters.stage, filters.businessType, filters.position, filters.assignee].filter(Boolean).length;
   return <>
     <header className="page-header position-portal-header">
       <div><p className="eyebrow">TASK WORKBENCH</p><h1>任务工作台</h1><p>{current.displayName} · {canViewAll ? "可查看全部订单" : "只显示当前由本岗位负责推进的订单"} · 点击订单直接进入对应办理模组</p></div>
-      <div className="page-actions"><span className="status-pill">当前显示 {orders.length} 条</span>{links.slice(0,3).map(link=><Link className="secondary" key={link.href} to={link.href}>{link.label}</Link>)}</div>
+      <div className="page-actions"><span className="status-pill">当前显示 {orders.length} 条</span></div>
     </header>
 
     <section className="panel position-order-ledger">
       <div className="position-ledger-summary" aria-label="待办概况"><span>未完成 <strong>{summary.open}</strong></span><span>有阻断 <strong>{summary.blocked}</strong></span><span>已超时 <strong>{summary.overdue}</strong></span><span>当前视图 <strong>{orders.length}</strong></span></div>
       <Form method="get" action="." className="position-ledger-filters">
-        <input name="q" defaultValue={filters.q} placeholder="订单、客户、线路、节点、岗位或人员" />
-        <select name="state" defaultValue={filters.state}><option value="open">未完成</option><option value="blocked">有阻断</option><option value="overdue">即将/已经超时</option>{canViewAll&&<option value="all">全部订单</option>}</select>
-        <select name="stage" defaultValue={filters.stage}><option value="">全部阶段</option><option value="order_creation">订单创建</option><option value="consignment_approval">委托审核</option><option value="task_assignment">任务分配</option><option value="domestic_execution">国内运输</option><option value="warehouse_receiving">仓库入库</option><option value="port_loading">出口准备</option><option value="outbound_transport">出境运输</option><option value="overseas_pickup">境外仓自提</option><option value="reconciliation">对账结算</option><option value="completion_review">完成复盘</option></select>
-        <select name="businessType" defaultValue={filters.businessType}><option value="">全部类型</option><option value="ftl">整车</option><option value="ltl">拼车</option></select>
-        <select name="position" defaultValue={filters.position}><option value="">全部负责岗位</option>{loaderData.positions.map((item)=><option key={item.id} value={item.id}>{item.name}</option>)}</select>
-        <select name="assignee" defaultValue={filters.assignee}><option value="">全部负责人</option>{loaderData.assignees.map((item)=><option key={item.id} value={item.id}>{item.name}</option>)}</select>
-        <button className="secondary">筛选</button><Link className="text-button" to="/admin/portal">重置</Link>
+        <div className="position-primary-filters">
+          <input name="q" defaultValue={filters.q} placeholder="订单、客户、线路、节点、岗位或人员" />
+          <select name="state" defaultValue={filters.state}><option value="open">未完成</option><option value="blocked">有阻断</option><option value="overdue">即将/已经超时</option>{canViewAll&&<option value="all">全部订单</option>}</select>
+          <button className="primary">查询任务</button><Link className="text-button" to="/admin/portal">重置</Link>
+        </div>
+        <details className="position-advanced-filters" open={advancedFilterCount > 0}>
+          <summary><span>更多筛选条件</span><small>{advancedFilterCount ? `已启用 ${advancedFilterCount} 项` : "阶段、类型、岗位和负责人"}</small></summary>
+          <div className="position-advanced-filter-grid">
+            <label><span>业务阶段</span><select name="stage" defaultValue={filters.stage}><option value="">全部阶段</option><option value="order_creation">订单创建</option><option value="consignment_approval">委托审核</option><option value="task_assignment">任务分配</option><option value="domestic_execution">国内运输</option><option value="warehouse_receiving">仓库入库</option><option value="port_loading">出口准备</option><option value="outbound_transport">出境运输</option><option value="overseas_pickup">境外仓自提</option><option value="reconciliation">对账结算</option><option value="completion_review">完成复盘</option></select></label>
+            <label><span>订单类型</span><select name="businessType" defaultValue={filters.businessType}><option value="">全部类型</option><option value="ftl">整车</option><option value="ltl">拼车</option></select></label>
+            <label><span>负责岗位</span><select name="position" defaultValue={filters.position}><option value="">全部负责岗位</option>{loaderData.positions.map((item)=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+            <label><span>具体负责人</span><select name="assignee" defaultValue={filters.assignee}><option value="">全部负责人</option>{loaderData.assignees.map((item)=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+          </div>
+        </details>
       </Form>
-      <div className="table-wrap position-ledger-table"><table><thead><tr><th>状态</th><th>订单 / 客户</th><th>线路 / 货量</th><th>类型</th><th>业务进度</th><th>当前节点 / 模组 / 步骤</th><th>负责岗位 / 人员</th><th>下一步与阻断</th><th className="sticky-action">操作</th></tr></thead><tbody>{orders.map(order=><tr key={order.order_id} className={order.blocker?"row-blocked":""}>
+      <div className="table-wrap position-ledger-table"><table><thead><tr><th>状态</th><th>订单 / 客户</th><th>线路 / 货量</th><th>当前节点 / 模组</th><th>负责岗位 / 人员</th><th>下一步与阻断</th><th className="sticky-action">操作</th></tr></thead><tbody>{orders.map(order=><tr key={order.order_id} className={order.blocker?"row-blocked":""}>
         <td><span className={`status-pill ${order.is_overdue?"danger":""}`}>{order.is_overdue?"超时":orderStatusLabel(order.order_status)}</span></td>
         <td><strong>{order.order_number}</strong><small>{order.customer_name}</small></td>
-        <td><strong>{order.origin_city || "起运地待补"} → {order.destination_city || "目的地待补"}</strong><small>{order.pieces || 0} 件 · {Number(order.gross_weight_kg || 0).toFixed(2)} KG · {Number(order.volume_cbm || 0).toFixed(3)} CBM</small></td>
-        <td>{order.business_type==="ftl"?"整车":order.business_type==="ltl"?"拼车":"待确定"}</td>
-        <td><div className="position-stage-line">{order.stages.map(stage=><span key={stage.code} className={stage.status} title={stage.name}>{stage.name}</span>)}</div></td>
+        <td><strong>{order.origin_city || "起运地待补"} → {order.destination_city || "目的地待补"}</strong><small>{order.business_type==="ftl"?"整车":order.business_type==="ltl"?"拼车":"待确定"} · {order.pieces || 0} 件 · {Number(order.gross_weight_kg || 0).toFixed(2)} KG · {Number(order.volume_cbm || 0).toFixed(3)} CBM</small></td>
         <td><strong>{order.current_stage_name}</strong><small>{order.current_module_name} · {order.current_step_name}</small></td>
         <td><strong>{order.responsible_position_name}</strong><small>{order.assignee_name||"待分配"}</small></td>
         <td><strong>{order.next_action}</strong><small className={order.blocker?"danger-text":""}>{order.blocker||"当前节点暂无阻断"}</small></td>
