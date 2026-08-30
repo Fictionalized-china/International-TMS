@@ -364,12 +364,22 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
       </div>
     </FormSection>
     <FormSection className="quote-route-section" title="起运地与目的地" note="最终目的地为境外目的仓，客户到仓自提">
-      <div className="grid">
-        <GeoCascadeFields key={`origin-${customerId}`} prefix="origin" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} initialCountry={selectedCustomer?.pickup_country_code} initialProvince={selectedCustomer?.pickup_state_code} initialCity={selectedCustomer?.pickup_city} />
-        <Field label="提货地址" className="quote-route-address"><textarea className="control textarea editing" name="pickupAddress" rows={2} value={pickupAddress} onChange={(event) => setPickupAddress(event.target.value)} required /></Field>
-        <GeoCascadeFields prefix="destination" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} />
-        <Field label="目的仓库" className="quote-route-warehouse"><select className="control filled" name="destinationWarehouseId" required><option value="">请选择境外目的仓</option>{loaderData.warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></Field>
-        <Field label="报价目的地备注" className="quote-route-note"><textarea className="control textarea" name="destinationWarehouseNote" rows={2} /></Field>
+      <div className="quote-route-compare">
+        <section className="quote-route-group" aria-labelledby="quote-origin-heading">
+          <header className="quote-route-group-title"><b id="quote-origin-heading">起运</b><span>客户提货信息</span></header>
+          <div className="quote-route-group-grid">
+            <GeoCascadeFields key={`origin-${customerId}`} prefix="origin" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} initialCountry={selectedCustomer?.pickup_country_code} initialProvince={selectedCustomer?.pickup_state_code} initialCity={selectedCustomer?.pickup_city} />
+            <Field label="提货地址" className="quote-route-address"><textarea className="control textarea editing" name="pickupAddress" rows={2} value={pickupAddress} onChange={(event) => setPickupAddress(event.target.value)} required /></Field>
+          </div>
+        </section>
+        <section className="quote-route-group" aria-labelledby="quote-destination-heading">
+          <header className="quote-route-group-title"><b id="quote-destination-heading">目的地</b><span>境外目的仓信息</span></header>
+          <div className="quote-route-group-grid">
+            <GeoCascadeFields prefix="destination" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} />
+            <Field label="目的仓库" className="quote-route-warehouse"><select className="control filled" name="destinationWarehouseId" required><option value="">请选择境外目的仓</option>{loaderData.warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></Field>
+            <Field label="报价目的地备注" className="quote-route-note"><textarea className="control textarea" name="destinationWarehouseNote" rows={2} /></Field>
+          </div>
+        </section>
       </div>
     </FormSection>
     <FormSection title="货物预估数据" note="仓库实收后登记实际数据">

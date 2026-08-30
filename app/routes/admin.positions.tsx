@@ -313,7 +313,7 @@ export default function Positions({ loaderData, actionData }: Route.ComponentPro
       {canManage && (
         <section className="panel">
           <h2>新增或更新岗位</h2>
-          <Form method="post" className="form-grid compact">
+          <Form method="post" className="form-grid compact position-editor-form">
             <input type="hidden" name="intent" value="upsert" />
             <label className="field">
               <span>岗位名称</span>

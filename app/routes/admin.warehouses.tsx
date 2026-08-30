@@ -385,7 +385,7 @@ export default function AdminWarehouses({ loaderData, actionData }: Route.Compon
 
 function WarehouseForm({ warehouse, busy }: { warehouse?: Warehouse; busy: boolean }) {
   return (
-    <Form method="post" className="stack">
+    <Form method="post" className="stack warehouse-config-form">
       <input type="hidden" name="intent" value={warehouse ? "update" : "create"} />
       {warehouse && <input type="hidden" name="warehouseId" value={warehouse.id} />}
       <label className="field"><span>仓库名称</span><input name="name" defaultValue={warehouse?.name} required /></label>
@@ -401,7 +401,7 @@ function WarehouseForm({ warehouse, busy }: { warehouse?: Warehouse; busy: boole
         <label className="field"><span>国家代码</span><input name="country" defaultValue={warehouse?.country_code ?? ""} placeholder="CN" /></label>
         <label className="field"><span>城市</span><input name="city" defaultValue={warehouse?.city ?? ""} /></label>
       </div>
-      <label className="field"><span>详细地址</span><input name="address" defaultValue={warehouse?.address ?? ""} /></label>
+      <label className="field warehouse-config-address"><span>详细地址</span><textarea name="address" rows={2} defaultValue={warehouse?.address ?? ""} /></label>
       <button className="primary" disabled={busy}>{warehouse ? "保存仓库" : "创建仓库"}</button>
     </Form>
   );

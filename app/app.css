@@ -14496,10 +14496,43 @@ a.order-module-card.read-only:hover {
   gap: 2px 7px;
 }
 .prototype-quote-form .quote-plan-section .grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.prototype-quote-form .quote-route-section .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.prototype-quote-form .quote-route-address,
-.prototype-quote-form .quote-route-warehouse,
-.prototype-quote-form .quote-route-note { grid-column: 1 / -1; }
+.prototype-quote-form .quote-route-compare {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border-bottom: 0;
+}
+.prototype-quote-form .quote-route-group {
+  min-width: 0;
+  border-right: 1px solid var(--line);
+}
+.prototype-quote-form .quote-route-group:last-child { border-right: 0; }
+.prototype-quote-form .quote-route-group-title {
+  min-height: 22px;
+  padding: 3px 7px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border-bottom: 1px solid var(--line2);
+  background: #f8fafc;
+}
+.prototype-quote-form .quote-route-group-title b {
+  color: #24425e;
+  font-size: 10px;
+}
+.prototype-quote-form .quote-route-group-title span {
+  color: #8796a4;
+  font-size: 9px;
+}
+.prototype-quote-form .quote-route-group-grid {
+  padding: 4px 7px;
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 2px 7px;
+}
+.prototype-quote-form .quote-route-group-grid > .field { grid-column: span 4; }
+.prototype-quote-form .quote-route-address { grid-column: 1 / -1 !important; }
+.prototype-quote-form .quote-route-warehouse { grid-column: span 5 !important; }
+.prototype-quote-form .quote-route-note { grid-column: span 7 !important; }
 .prototype-quote-form .quote-cargo-description,
 .prototype-quote-form .quote-cargo-metrics-table {
   grid-column: 1 / -1;
@@ -14799,8 +14832,7 @@ a.order-module-card.read-only:hover {
 
 @media (max-width: 1100px) {
   .prototype-quote-form .grid,
-  .prototype-quote-form .quote-plan-section .grid,
-  .prototype-quote-form .quote-route-section .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .prototype-quote-form .quote-plan-section .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .quotation-entry-form {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -14811,11 +14843,15 @@ a.order-module-card.read-only:hover {
   .modal-card.xwide:has(.prototype-quote-form) .modal-body, .modal-card.xwide.quote-form-modal .modal-body { padding: 9px 10px 0; }
   .prototype-quote-form .grid,
   .prototype-quote-form .grid.two,
-  .prototype-quote-form .quote-plan-section .grid,
-  .prototype-quote-form .quote-route-section .grid { grid-template-columns: 1fr; }
+  .prototype-quote-form .quote-plan-section .grid { grid-template-columns: 1fr; }
+  .prototype-quote-form .quote-route-compare { grid-template-columns: 1fr; }
+  .prototype-quote-form .quote-route-group { border-right: 0; border-bottom: 1px solid var(--line); }
+  .prototype-quote-form .quote-route-group:last-child { border-bottom: 0; }
+  .prototype-quote-form .quote-route-group-grid { grid-template-columns: 1fr; }
+  .prototype-quote-form .quote-route-group-grid > .field,
   .prototype-quote-form .quote-route-address,
   .prototype-quote-form .quote-route-warehouse,
-  .prototype-quote-form .quote-route-note { grid-column: auto; }
+  .prototype-quote-form .quote-route-note { grid-column: auto !important; }
   .prototype-quote-form .section-title { min-height: 42px; align-items: flex-start; flex-direction: column; gap: 3px; padding: 7px 9px; }
   .prototype-quote-form .quote-section-heading { width: 100%; justify-content: space-between; }
   .prototype-quote-form .quote-charge-table { min-width: 720px; }
@@ -22208,4 +22244,282 @@ details > summary,
   .ops-filter-order-list > a {
     min-width: 900px;
   }
+}
+
+/* Semantic field widths: control size follows expected content, not spare row width. */
+:is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell, .modal-backdrop) .field > input[type="number"] {
+  width: min(100%, 14rem) !important;
+  justify-self: start;
+}
+
+:is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell, .modal-backdrop) .field > :is(input[type="date"], input[type="time"]) {
+  width: min(100%, 16rem) !important;
+  justify-self: start;
+}
+
+:is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell, .modal-backdrop) .field > input[type="datetime-local"] {
+  width: min(100%, 19rem) !important;
+  justify-self: start;
+}
+
+:is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell, .modal-backdrop) .field > input:is(
+  [name$="Code" i],
+  [name$="Phone" i],
+  [name$="Count" i],
+  [name$="Rate" i],
+  [name$="Number" i],
+  [name="currency" i],
+  [name="postal" i]
+) {
+  width: min(100%, 18rem) !important;
+  justify-self: start;
+}
+
+:is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell, .modal-backdrop) .field > select:is(
+  [name$="Status" i],
+  [name$="Type" i],
+  [name$="Mode" i],
+  [name$="Scope" i],
+  [name$="Filter" i],
+  [name$="Code" i],
+  [name$="Country" i],
+  [name$="State" i],
+  [name$="City" i],
+  [name$="Province" i],
+  [name$="Role" i],
+  [name="direction" i],
+  [name="currency" i],
+  [name="country" i],
+  [name="state" i],
+  [name="city" i],
+  [name="province" i],
+  [name="category" i],
+  [name="padding" i]
+) {
+  width: min(100%, 18rem) !important;
+  justify-self: start;
+}
+
+/* Search stays flexible; the two enumerated document filters remain compact. */
+.document-center-filters {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) 180px 220px auto auto;
+  gap: 8px;
+  align-items: end;
+}
+.document-center-filters .field { min-width: 0; }
+.document-center-filters .field > :is(input, select) { width: 100% !important; }
+
+/* Dense finance entry: short accounting values fit on one four-column sheet. */
+.settlement-cash-form {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  padding: 8px 10px 10px;
+}
+.settlement-cash-form .field > :is(input, select) { width: 100% !important; }
+.settlement-cash-form .settlement-cash-notes { grid-column: span 3; }
+.settlement-cash-form .settlement-cash-notes textarea { min-height: 50px; }
+.settlement-selector .field textarea { min-height: 50px; }
+
+/* Sales entry uses a compact data-entry grid instead of full-width stacked fields. */
+.sales-actions .expandable[open] { flex: 1 1 100%; }
+.sales-actions .expandable[open] > :not(summary) { padding: 8px 10px; }
+.sales-entry-form {
+  display: grid !important;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px 10px !important;
+}
+.sales-entry-form .field { min-width: 0; }
+.sales-entry-form .field > :is(input, select) { width: 100% !important; }
+.sales-entry-form .field:has(> input[name="companyName"]),
+.sales-entry-form .field:has(> input[name="name"]) { grid-column: span 2; }
+.sales-entry-form .sales-entry-notes { grid-column: span 2; }
+.sales-entry-form .sales-entry-notes textarea { min-height: 50px; }
+.sales-entry-form > button { align-self: end; justify-self: start; }
+
+/* Product and position configuration are short-field ledgers, not two huge columns. */
+.product-calculator-form {
+  grid-template-columns: minmax(260px, 360px) 180px 180px auto;
+  align-items: end;
+}
+.product-calculator-form .field > :is(input, select) { width: 100% !important; }
+.product-config-form { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.product-config-form .field > :is(input, select) { width: 100% !important; }
+.product-config-form .field:has(> input[name="name"]) { grid-column: span 2; }
+.product-config-form .span-2 { grid-column: 1 / -1; }
+.position-editor-form {
+  grid-template-columns: minmax(150px, 220px) minmax(140px, 200px) minmax(200px, 280px) 110px auto;
+  align-items: end;
+}
+.position-editor-form .field > :is(input, select) { width: 100% !important; }
+
+.warehouse-config-form,
+.department-config-form {
+  display: grid !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 10px !important;
+}
+.warehouse-config-form > .form-grid { margin: 0; }
+.warehouse-config-form > .field > :is(input, select),
+.department-config-form > .field > :is(input, select) { width: 100% !important; }
+.warehouse-config-form .warehouse-config-address { grid-column: 1 / -1; }
+.warehouse-config-form .warehouse-config-address textarea { min-height: 50px; }
+.warehouse-config-form > button,
+.department-config-form > button { align-self: end; justify-self: start; }
+
+@media (max-width: 1000px) {
+  .document-center-filters,
+  .settlement-cash-form,
+  .sales-entry-form,
+  .product-config-form,
+  .position-editor-form,
+  .warehouse-config-form,
+  .department-config-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .document-center-filters > .field:first-child,
+  .settlement-cash-form .settlement-cash-notes,
+  .sales-entry-form .sales-entry-notes,
+  .product-config-form .span-2 { grid-column: 1 / -1; }
+  .product-calculator-form { grid-template-columns: minmax(240px, 1fr) 160px 160px auto; }
+}
+
+@media (max-width: 700px) {
+  .document-center-filters,
+  .settlement-cash-form,
+  .sales-entry-form,
+  .product-calculator-form,
+  .product-config-form,
+  .position-editor-form,
+  .warehouse-config-form,
+  .department-config-form {
+    grid-template-columns: 1fr;
+  }
+  .document-center-filters > *,
+  .settlement-cash-form .settlement-cash-notes,
+  .sales-entry-form .field:has(> input[name="companyName"]),
+  .sales-entry-form .field:has(> input[name="name"]),
+  .sales-entry-form .sales-entry-notes,
+  .product-config-form .field:has(> input[name="name"]),
+  .product-config-form .span-2,
+  .warehouse-config-form .warehouse-config-address { grid-column: auto; }
+}
+
+/* Final semantic-width pass: short enumerations must not inherit a whole grid track. */
+:is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell, .modal-backdrop) select[name="pageSize" i] {
+  width: min(100%, 9rem) !important;
+  justify-self: start;
+}
+
+:is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell, .modal-backdrop) .field > select:is(
+  [name="origin" i],
+  [name="destination" i],
+  [name="locale" i],
+  [name="timezone" i]
+) {
+  width: min(100%, 15rem) !important;
+  justify-self: start;
+}
+
+/* Customer calculator: six short facts share one dense row; notes remain readable. */
+.prototype-portal-shell .calculator-form {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 8px 10px;
+  align-items: end;
+}
+.prototype-portal-shell .calculator-form .calculator-route-field,
+.prototype-portal-shell .calculator-form .calculator-number-field { grid-column: span 2; }
+.prototype-portal-shell .calculator-form .calculator-pieces-field { grid-column: span 1; }
+.prototype-portal-shell .calculator-form .calculator-cargo-field { grid-column: span 3; }
+.prototype-portal-shell .calculator-form .calculator-notes-field { grid-column: span 9; }
+.prototype-portal-shell .calculator-form .field > :is(input, select, textarea) { width: 100% !important; }
+.prototype-portal-shell .calculator-form .calculator-notes-field textarea { min-height: 48px; }
+.prototype-portal-shell .calculator-form > .primary { grid-column: span 3; }
+
+/* Portal filters and account profile use content-sized controls, not half-page fields. */
+.prototype-portal-shell .billing-filters select[name="status"] {
+  flex: 0 0 11rem;
+  width: 11rem !important;
+  min-width: 0;
+}
+.prototype-portal-shell .billing-filters input[name="currency"] {
+  flex: 0 0 8rem;
+  width: 8rem !important;
+  min-width: 0;
+}
+.prototype-portal-shell .account-profile-form {
+  display: grid;
+  grid-template-columns: 14rem 20rem 15rem;
+  gap: 8px 10px;
+  justify-content: start;
+}
+.prototype-portal-shell .account-profile-form .field > :is(input, select) { width: 100% !important; }
+.prototype-portal-shell .account-profile-form > .primary { align-self: end; justify-self: start; }
+
+/* Administrative identity dialogs: names and credentials are short-to-medium fields. */
+.modal-body .form-grid:has(> input[name="intent"][value="create"]):has(input[name="password"]) {
+  grid-template-columns: 15rem 20rem;
+  justify-content: start;
+}
+.modal-body .form-grid:has(> input[name="intent"][value="create"]):has(input[name="password"]) .span-2 {
+  grid-column: 1 / -1;
+  width: 20rem;
+}
+.modal-body form:has(> .permission-grid) {
+  grid-template-columns: 16rem 16rem;
+  justify-content: start;
+}
+.modal-body form:has(> .permission-grid) > .span-2,
+.modal-body form:has(> .permission-grid) > .permission-grid { grid-column: 1 / -1; }
+
+@media (max-width: 1000px) {
+  .prototype-portal-shell .calculator-form { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  .prototype-portal-shell .calculator-form .calculator-route-field,
+  .prototype-portal-shell .calculator-form .calculator-number-field { grid-column: span 3; }
+  .prototype-portal-shell .calculator-form .calculator-pieces-field { grid-column: span 2; }
+  .prototype-portal-shell .calculator-form .calculator-cargo-field { grid-column: span 4; }
+  .prototype-portal-shell .calculator-form .calculator-notes-field { grid-column: span 4; }
+  .prototype-portal-shell .calculator-form > .primary { grid-column: span 2; }
+  .prototype-portal-shell .account-profile-form { grid-template-columns: 14rem 1fr; }
+}
+
+@media (max-width: 700px) {
+  .prototype-portal-shell .calculator-form,
+  .prototype-portal-shell .account-profile-form,
+  .modal-body .form-grid:has(> input[name="intent"][value="create"]):has(input[name="password"]),
+  .modal-body form:has(> .permission-grid) { grid-template-columns: 1fr; }
+  .prototype-portal-shell .calculator-form > *,
+  .prototype-portal-shell .account-profile-form > *,
+  .modal-body .form-grid:has(> input[name="intent"][value="create"]):has(input[name="password"]) .span-2,
+  .modal-body form:has(> .permission-grid) > .span-2,
+  .modal-body form:has(> .permission-grid) > .permission-grid {
+    grid-column: auto;
+    width: 100%;
+  }
+  .prototype-portal-shell .billing-filters select[name="status"],
+  .prototype-portal-shell .billing-filters input[name="currency"] { width: 100% !important; }
+}
+
+/* Customer editor uses a 12-column ledger with widths matched to real content. */
+.customer-form-grid > .field:not(.field-short, .field-medium, .field-wide, .span-all) { grid-column: span 3; }
+.customer-form-grid > .field-short { grid-column: span 2; }
+.customer-form-grid > .field-medium { grid-column: span 3; }
+.customer-form-grid > .field-wide { grid-column: span 5; }
+.customer-role-dropdown { grid-column: span 3; }
+.customer-contact-grid > .field-wide { grid-column: span 3; }
+
+@media (max-width: 900px) {
+  .customer-form-grid > .field-short,
+  .customer-form-grid > .field-medium,
+  .customer-form-grid > .field-wide,
+  .customer-form-grid > .field:not(.field-short, .field-medium, .field-wide, .span-all),
+  .customer-role-dropdown { grid-column: span 6; }
+}
+
+@media (max-width: 620px) {
+  .customer-form-grid > .field-short,
+  .customer-form-grid > .field-medium,
+  .customer-form-grid > .field-wide,
+  .customer-form-grid > .field:not(.field-short, .field-medium, .field-wide, .span-all),
+  .customer-role-dropdown { grid-column: 1 / -1; }
 }
