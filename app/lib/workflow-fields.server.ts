@@ -296,7 +296,7 @@ export async function synchronizeWorkflowFieldDefinitionForInstances(input: {
   ]);
 }
 
-export async function releaseHiddenWorkflowFieldData(input: {
+export async function inspectHiddenWorkflowFieldData(input: {
   organizationId: string;
   workflowId: string;
   fieldKey: string;
@@ -305,8 +305,8 @@ export async function releaseHiddenWorkflowFieldData(input: {
   const placement = orderDocumentPlacements.find(
     (item) => item.fieldKey === input.fieldKey,
   );
-  let releasedFiles = 0;
-  let releasedBytes = 0;
+  let preservedFiles = 0;
+  let preservedBytes = 0;
   if (placement) {
     const stored = await env.DB.prepare(
       `SELECT COUNT(*) file_count,COALESCE(SUM(a.size_bytes),0) total_bytes
@@ -322,37 +322,26 @@ export async function releaseHiddenWorkflowFieldData(input: {
       placement.documentCode,
       input.workflowId,
     ).first<{ file_count: number; total_bytes: number }>();
-    releasedFiles = Number(stored?.file_count || 0);
-    releasedBytes = Number(stored?.total_bytes || 0);
-    await env.DB.prepare(
-      `DELETE FROM order_attachments
-       WHERE organization_id=? AND id IN (
-         SELECT a.id FROM order_attachments a
-         JOIN order_document_metadata m ON m.attachment_id=a.id
-         WHERE a.organization_id=? AND m.document_category=?
-           AND EXISTS(
-             SELECT 1 FROM workflow_instances wi
-             WHERE wi.workflow_id=? AND wi.order_id=a.order_id
-           )
-       )`,
-    ).bind(
-      input.organizationId,
-      input.organizationId,
-      placement.documentCode,
-      input.workflowId,
-    ).run();
+    preservedFiles = Number(stored?.file_count || 0);
+    preservedBytes = Number(stored?.total_bytes || 0);
   }
   const customValues = await env.DB.prepare(
-    `DELETE FROM order_custom_workflow_field_values
-     WHERE field_instance_id IN (
+    `SELECT COUNT(*) value_count
+     FROM order_custom_workflow_field_values
+     WHERE organization_id=? AND field_instance_id IN (
        SELECT id FROM workflow_instance_fields
        WHERE workflow_id=? AND field_key=? AND module_code=?
      )`,
-  ).bind(input.workflowId,input.fieldKey,input.moduleCode).run();
+  ).bind(
+    input.organizationId,
+    input.workflowId,
+    input.fieldKey,
+    input.moduleCode,
+  ).first<{ value_count: number }>();
   return {
-    releasedFiles,
-    releasedBytes,
-    releasedCustomValues: Number(customValues.meta?.changes || 0),
+    preservedFiles,
+    preservedBytes,
+    preservedCustomValues: Number(customValues?.value_count || 0),
   };
 }
 

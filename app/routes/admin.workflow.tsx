@@ -20,7 +20,7 @@ import {
   workflowFieldModeFlags,
 } from "../lib/workflow-field-catalog";
 import {
-  releaseHiddenWorkflowFieldData,
+  inspectHiddenWorkflowFieldData,
   synchronizeWorkflowFieldDefinitionForInstances,
 } from "../lib/workflow-fields.server";
 import { ensureWorkflowExecutionSnapshot } from "../lib/workflow-execution.server";
@@ -29,6 +29,7 @@ import {
   editableWorkflowFieldMode,
   normalizedWorkflowSortOrders,
   parseWorkflowSortOrder,
+  normalizeWorkflowStepRequiredFlag,
   workflowEditCapabilities,
   workflowInsertionSortOrder,
   workflowIntentAllowedForUsage,
@@ -359,8 +360,8 @@ export async function action({ request }: Route.ActionArgs) {
       await ensureFieldPolicyModule(workflowId, field.step_id, field.module_code, flags.isRequired, now);
     }
     await reconcileFieldPolicyModule(workflowId, field.step_id, field.module_code, now);
-    const released = flags.releasesStoredValue
-      ? await releaseHiddenWorkflowFieldData({
+    const preserved = flags.preservesStoredValue
+      ? await inspectHiddenWorkflowFieldData({
           organizationId: current.organizationId,
           workflowId,
           fieldKey: field.field_key,
@@ -379,18 +380,18 @@ export async function action({ request }: Route.ActionArgs) {
         lifecycleStatus: definition.lifecycle_status,
         fieldKey: field.field_key,
         mode,
-        released,
+        preserved,
       },
     });
-    const releasedText = released && (released.releasedFiles || released.releasedCustomValues)
-      ? `；已释放 ${released.releasedFiles} 个文件、${released.releasedCustomValues} 条自定义值`
+    const preservedText = preserved && (preserved.preservedFiles || preserved.preservedCustomValues)
+      ? `；历史数据已保留（${preserved.preservedFiles} 个文件、${preserved.preservedCustomValues} 条自定义值）`
       : "";
     const modeLabel = mode === "required" ? "必填" : mode === "optional" ? "选填" : "隐藏";
-    return { success: `字段“${field.label}”已设为${modeLabel}，现有订单后续门禁已同步${releasedText}` };
+    return { success: `字段“${field.label}”已设为${modeLabel}，现有订单后续门禁已同步${preservedText}` };
   }
 
   if (!workflowIntentAllowedForUsage(intent, definition.instance_count) && intent !== "advance") {
-    return { formError: "该工作流已被订单使用，只能调整字段为必填、选填或隐藏；不能增删节点、模组和办理步骤" };
+    return { formError: "该工作流已被订单使用：可新增字段并调整必填、选填或隐藏；不能增删节点、模组和办理步骤，也不能改写既有字段结构" };
   }
 
   if (intent === "definition") {
@@ -606,8 +607,8 @@ export async function action({ request }: Route.ActionArgs) {
       await reconcileFieldPolicyModule(workflowId, exists.step_id, exists.module_code, now);
     }
     await reconcileFieldPolicyModule(workflowId, step.id, catalog.moduleCode, now);
-    if (flags.releasesStoredValue) {
-      await releaseHiddenWorkflowFieldData({
+    if (flags.preservesStoredValue) {
+      await inspectHiddenWorkflowFieldData({
         organizationId: current.organizationId,
         workflowId,
         fieldKey: catalog.fieldKey,
@@ -677,7 +678,7 @@ export async function action({ request }: Route.ActionArgs) {
       await reconcileFieldPolicyModule(workflowId, field.step_id, parsed.moduleCode, now);
     }
     if (!parsed.active) {
-      await releaseHiddenWorkflowFieldData({
+      await inspectHiddenWorkflowFieldData({
         organizationId: current.organizationId,
         workflowId,
         fieldKey: parsed.fieldKey,
@@ -851,7 +852,7 @@ export async function action({ request }: Route.ActionArgs) {
 
 async function copyWorkflowStepsAndFields(sourceWorkflowId: string, targetWorkflowId: string, now: string) {
   const sourceSteps = await env.DB.prepare(
-    "SELECT id,step_key,name,entity_type,trigger_event,sort_order,is_active,actor_scope FROM workflow_steps WHERE workflow_id=? ORDER BY sort_order,step_key",
+    "SELECT id,step_key,name,entity_type,trigger_event,sort_order,is_required,is_active,actor_scope FROM workflow_steps WHERE workflow_id=? ORDER BY sort_order,step_key",
   )
     .bind(sourceWorkflowId)
     .all<Step>();
@@ -872,7 +873,7 @@ async function copyWorkflowStepsAndFields(sourceWorkflowId: string, targetWorkfl
         step.entity_type,
         step.trigger_event,
         step.sort_order,
-        0,
+        normalizeWorkflowStepRequiredFlag(step.is_required),
         step.is_active,
         step.actor_scope,
         now,
@@ -1542,9 +1543,9 @@ function NodeConfigDialog({
       <div className="workflow-config-dialog-header">
         <div>
           <strong>节点与字段</strong>
-          <span>{structureEditable ? "该工作流尚无订单，可像积木一样插入、删除节点并配置字段。" : "该工作流已有订单：节点、模组和步骤锁定，字段仍可移动并设为必填、选填或隐藏。"}</span>
+          <span>{structureEditable ? "该工作流尚无订单，可像积木一样插入、删除节点并配置字段。" : "该工作流已有订单：节点、模组和步骤锁定，仍可在既有节点新增字段并设置为必填、选填或隐藏。"}</span>
         </div>
-        <small>{structureEditable ? "首个订单使用后自动锁定节点结构。" : "保存即同步到现有订单和后续门禁；隐藏附件会释放订单级文件。"}</small>
+        <small>{structureEditable ? "首个订单使用后自动锁定节点结构。" : "保存即同步到现有订单和后续门禁；隐藏只影响显示，历史值和附件永久保留审计。"}</small>
       </div>
       <div className="workflow-node-config-list">
         <div className="workflow-node-config-table-head" aria-hidden="true">

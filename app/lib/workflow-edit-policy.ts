@@ -5,7 +5,6 @@ const structureMutationIntents = new Set([
   "create",
   "delete",
   "step",
-  "field_create",
   "field_update",
   "field_delete",
   "module_add",
@@ -37,8 +36,12 @@ export function editableWorkflowFieldFlags(mode: EditableWorkflowFieldMode) {
   return {
     isRequired: mode === "required" ? 1 : 0,
     isActive: mode === "hidden" ? 0 : 1,
-    releasesStoredValue: mode === "hidden",
+    preservesStoredValue: mode === "hidden",
   } as const;
+}
+
+export function normalizeWorkflowStepRequiredFlag(value: unknown) {
+  return value === 0 ? 0 : 1;
 }
 
 export function parseWorkflowSortOrder(value: string, max = 999) {

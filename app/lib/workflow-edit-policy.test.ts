@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   editableWorkflowFieldFlags,
   editableWorkflowFieldMode,
+  normalizeWorkflowStepRequiredFlag,
   normalizedWorkflowSortOrders,
   parseWorkflowSortOrder,
   workflowEditCapabilities,
@@ -25,28 +26,39 @@ describe("workflow edit policy", () => {
     expect(workflowIntentAllowedForUsage("create", 1)).toBe(false);
     expect(workflowIntentAllowedForUsage("field_mode_update", 1200)).toBe(true);
     expect(workflowIntentAllowedForUsage("field_catalog_assign", 1200)).toBe(true);
+    expect(workflowIntentAllowedForUsage("field_create", 1200)).toBe(true);
+    expect(workflowIntentAllowedForUsage("field_update", 1200)).toBe(false);
+    expect(workflowIntentAllowedForUsage("field_delete", 1200)).toBe(false);
   });
 
   it("maps required, optional and hidden without leaving hidden fields required", () => {
     expect(editableWorkflowFieldFlags("required")).toEqual({
       isRequired: 1,
       isActive: 1,
-      releasesStoredValue: false,
+      preservesStoredValue: false,
     });
     expect(editableWorkflowFieldFlags("optional")).toEqual({
       isRequired: 0,
       isActive: 1,
-      releasesStoredValue: false,
+      preservesStoredValue: false,
     });
     expect(editableWorkflowFieldFlags("hidden")).toEqual({
       isRequired: 0,
       isActive: 0,
-      releasesStoredValue: true,
+      preservesStoredValue: true,
     });
     expect(editableWorkflowFieldMode("hidden")).toBe("hidden");
     expect(editableWorkflowFieldMode("HIDDEN")).toBeNull();
     expect(editableWorkflowFieldMode("0")).toBeNull();
     expect(editableWorkflowFieldMode("O")).toBeNull();
+  });
+
+  it("preserves copied step gates and defaults malformed legacy values to required", () => {
+    expect(normalizeWorkflowStepRequiredFlag(0)).toBe(0);
+    expect(normalizeWorkflowStepRequiredFlag(1)).toBe(1);
+    expect(normalizeWorkflowStepRequiredFlag(undefined)).toBe(1);
+    expect(normalizeWorkflowStepRequiredFlag(null)).toBe(1);
+    expect(normalizeWorkflowStepRequiredFlag("0")).toBe(1);
   });
 
   it("rejects visually similar and malformed sort values", () => {
@@ -75,15 +87,15 @@ describe("workflow edit policy", () => {
     const modes = ["required", "optional", "hidden"] as const;
     let required = 0;
     let active = 0;
-    let released = 0;
+    let preserved = 0;
     for (let index = 0; index < 100_000; index += 1) {
       const flags = editableWorkflowFieldFlags(modes[index % modes.length]);
       required += flags.isRequired;
       active += flags.isActive;
-      released += Number(flags.releasesStoredValue);
+      preserved += Number(flags.preservesStoredValue);
     }
     expect(required).toBe(33_334);
     expect(active).toBe(66_667);
-    expect(released).toBe(33_333);
+    expect(preserved).toBe(33_333);
   });
 });
