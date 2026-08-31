@@ -3,12 +3,14 @@ import { Form, Link } from "react-router";
 import type { Route } from "./+types/admin.documents";
 import { requireSessionUser } from "../lib/auth.server";
 import { orderDocumentPlacement, orderDocumentTypeLabel } from "../lib/order-documents";
+import { BatchNumberLink, OrderNumberLink, OrderNumberLinkList } from "../components/EntityNumberLink";
 
 type FileRow = {
   id: string;
   source_type: "order" | "batch";
   order_id: string | null;
   order_numbers: string;
+  order_refs: string;
   batch_id: string | null;
   batch_number: string | null;
   document_category: string;
@@ -33,7 +35,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const page = Math.max(1, Number.parseInt(url.searchParams.get("page") || "1", 10) || 1);
   const rows = await env.DB.prepare(
     `WITH files AS (
-       SELECT a.id,'order' source_type,a.order_id,o.order_number order_numbers,
+       SELECT a.id,'order' source_type,a.order_id,o.order_number order_numbers,o.id||'|'||o.order_number order_refs,
               NULL batch_id,NULL batch_number,COALESCE(m.document_category,'other') document_category,
               a.file_name,a.content_type,a.size_bytes,COALESCE(m.review_status,'pending') review_status,
               a.created_at,m.reviewed_at,up.display_name uploader_name,rv.display_name reviewer_name
@@ -46,6 +48,7 @@ export async function loader({ request }: Route.LoaderArgs) {
        UNION ALL
        SELECT d.id,'batch' source_type,NULL order_id,
               COALESCE((SELECT GROUP_CONCAT(o.order_number) FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id WHERE bo.batch_id=d.batch_id AND bo.status!='removed'),'') order_numbers,
+              COALESCE((SELECT GROUP_CONCAT(o.id||'|'||o.order_number) FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id WHERE bo.batch_id=d.batch_id AND bo.status!='removed'),'') order_refs,
               d.batch_id,b.batch_number,d.document_category,d.file_name,d.content_type,d.size_bytes,d.review_status,
               d.created_at,d.reviewed_at,up.display_name uploader_name,rv.display_name reviewer_name
          FROM transport_batch_documents d
@@ -107,7 +110,7 @@ export default function DocumentCenter({ loaderData }: Route.ComponentProps) {
           : item.order_id ? `/admin/orders/${item.order_id}` : "/admin/documents";
       const fileHref = `/admin/document-files/${item.source_type}/${item.id}`;
       return <tr key={`${item.source_type}-${item.id}`}>
-        <td>{item.batch_number && <strong>{item.batch_number}</strong>}<small>{item.order_numbers || "—"}</small></td>
+        <td>{item.batch_id&&item.batch_number?<strong><BatchNumberLink id={item.batch_id} number={item.batch_number}/></strong>:item.order_id?<strong><OrderNumberLink id={item.order_id} number={item.order_numbers}/></strong>:null}<small className="entity-number-list">{item.batch_id?<OrderNumberLinkList orders={orderReferences(item.order_refs)}/>:"订单文件"}</small></td>
         <td>{orderDocumentTypeLabel(item.document_category)}</td>
         <td><strong>{item.file_name}</strong><small>{formatBytes(item.size_bytes)} · {item.content_type}</small></td>
         <td>{placement ? moduleLabel(placement.moduleCode) : item.source_type === "batch" ? "配载单" : "其他"}</td>
@@ -123,6 +126,7 @@ export default function DocumentCenter({ loaderData }: Route.ComponentProps) {
 }
 
 function pageHref(data: { q: string; status: string; category: string }, page: number) { return `/admin/documents?${new URLSearchParams({ q: data.q, status: data.status, category: data.category, page: String(page) })}`; }
+function orderReferences(value: string) { return (value || "").split(",").flatMap((reference) => { const separator = reference.indexOf("|"); return separator > 0 ? [{ id: reference.slice(0, separator), number: reference.slice(separator + 1) }] : []; }); }
 function formatBytes(value: number) { return value >= 1024 * 1024 ? `${(value / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(value / 1024))} KB`; }
 function reviewLabel(value: string) { return ({ pending: "待审核", approved: "已通过", rejected: "已退回", archived: "已归档" } as Record<string, string>)[value] || value; }
 function moduleLabel(value: string) { return ({ consignment: "委托信息", transport: "国内运输", customs: "报关作业", tracking: "运输跟踪", overseas_warehouse: "境外仓与自提", costs: "费用结算" } as Record<string, string>)[value] || value; }

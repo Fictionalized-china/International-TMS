@@ -17387,6 +17387,29 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .prototype-page tbody tr:hover { background: #f9fbfc; }
 .prototype-page tbody tr.row-alert { box-shadow: inset 3px 0 0 #e38a8a; background: #fffafa; }
 .prototype-page .order-id { color: #356fca; font-family: Consolas, monospace; font-weight: 700; text-decoration: none; }
+.entity-number-link {
+  color: var(--blue, #285db4);
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+}
+.entity-number-link:hover {
+  color: #17468f;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.entity-number-link:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(40, 93, 180, 0.24);
+}
+.entity-number-list {
+  display: block;
+  white-space: normal;
+  line-height: 1.55;
+}
 .prototype-page .cell-main { color: #50667b; font-weight: 600; }
 .prototype-page .subline { margin-top: 3px; display: block; color: #9aa7b3; font-size: 9px; text-decoration: none; }
 .prototype-page .status { display: inline-flex; gap: 5px; align-items: center; font-size: 10px; }

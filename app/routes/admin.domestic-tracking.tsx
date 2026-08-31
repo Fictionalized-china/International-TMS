@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { Form, Link } from "react-router";
 import type { Route } from "./+types/admin.domestic-tracking";
+import { BatchNumberLink, OrderNumberLink } from "../components/EntityNumberLink";
 import { requireSessionUser } from "../lib/auth.server";
 
 type DomesticRow = {
@@ -141,12 +142,12 @@ export default function DomesticTracking({ loaderData }: Route.ComponentProps) {
       <Form method="get" action="." className="domestic-tracking-filters"><input name="q" defaultValue={loaderData.filters.q} placeholder="订单、客户、承运商、配载单、车牌或司机"/><select name="status" defaultValue={loaderData.filters.status}><option value="">全部在途状态</option><option value="waiting_arrangement">国内待安排</option><option value="planned">国内待提货</option><option value="domestic_in_transit">国内运输中</option><option value="waiting_receipt">国内仓待收货</option><option value="warehouse_check">国内仓清点中</option><option value="domestic_completed">国内运输完成</option><option value="waiting_outbound">等待出境</option><option value="outbound_in_transit">出境运输中</option><option value="overseas_arrived">已到境外仓</option><option value="completed">客户已自提</option><option value="exception">异常</option></select><select name="businessType" defaultValue={loaderData.filters.businessType}><option value="">全部订单类型</option><option value="ftl">整车</option><option value="ltl">拼车</option></select><button className="secondary">筛选</button><Link className="text-button" to="/admin/domestic-tracking">重置</Link></Form>
       <div className="table-wrap domestic-tracking-table"><table><thead><tr><th>当前状态</th><th>订单 / 客户</th><th>类型</th><th>国内承运商 / 运单</th><th>国内车辆</th><th>国内仓实收</th><th>出境批次 / 承运商</th><th>出境车辆 / 司机</th><th>最近动态</th><th className="sticky-action">操作</th></tr></thead><tbody>{loaderData.rows.map(row=><tr key={row.order_id}>
         <td><span className={`status-pill ${row.transit_status.tone}`}>{row.transit_status.label}</span><small>{row.transport_step_name||"等待业务安排"}</small></td>
-        <td><strong>{row.order_number}</strong><small>{row.customer_name}</small></td>
+        <td><strong><OrderNumberLink id={row.order_id} number={row.order_number}/></strong><small>{row.customer_name}</small></td>
         <td>{row.business_type==="ftl"?"整车":"拼车"}</td>
         <td><strong>{row.carrier_name||"待安排"}</strong><small>{row.shipment_number||"运单待生成"} · {row.origin_location||"提货地待定"} → {row.warehouse_name||row.destination_location||"国内仓待定"}</small></td>
         <td><VehicleDetails vehicles={row.vehicles}/></td>
         <td><strong>{row.inbound_at?`${row.actual_pieces} 件 · ${formatNumber(row.actual_weight_kg)} KG` : "尚未收货"}</strong><small>{row.inbound_at?`${formatNumber(row.actual_volume_cbm)} CBM · ${formatTime(row.inbound_at)}`:"等待到仓"}</small></td>
-        <td><strong>{row.outbound_batch_number||"尚未生成"}</strong><small>{row.outbound_carrier_name||"出境承运商待定"}</small></td>
+        <td><strong>{row.outbound_batch_id&&row.outbound_batch_number?<BatchNumberLink id={row.outbound_batch_id} number={row.outbound_batch_number}/>:"尚未生成"}</strong><small>{row.outbound_carrier_name||"出境承运商待定"}</small></td>
         <td><strong>{row.outbound_vehicle_plate||"车辆待定"}</strong><small>{row.outbound_driver_name||"司机待定"} · {row.outbound_driver_phone||"电话待定"}</small></td>
         <td><strong>{row.latest_event||"暂无轨迹"}</strong><small>{formatTime(row.latest_event_at)}</small></td>
         <td className="sticky-action"><div className="row-actions">{row.outbound_batch_id?<Link className="text-button" to={`/admin/loading/${row.outbound_batch_id}`}>查看出境轨迹</Link>:<Link className="text-button" to={`/admin/orders/${row.order_id}/modules/transport#module-business-data`}>查看国内运输</Link>}</div></td>

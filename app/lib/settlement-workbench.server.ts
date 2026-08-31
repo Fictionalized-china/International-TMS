@@ -10,7 +10,7 @@ export type SettlementExpense={
 export type ReconciliationRow={
   id:string;document_number:string;direction:"receivable"|"payable";counterparty_name:string;
   settlement_entity:string;currency:string;total_amount:number;status:string;notes:string|null;
-  confirmed_at:string|null;created_at:string;expense_count:number;orders:string|null;
+  confirmed_at:string|null;created_at:string;expense_count:number;orders:string|null;order_refs:string|null;
   invoiced_amount:number;settled_amount:number;
 };
 
@@ -36,7 +36,7 @@ export async function loadSettlementWorkbench(db:D1Database,organizationId:strin
       WHERE e.organization_id=? AND e.stage='confirmed' AND e.amount>0 AND NOT EXISTS(SELECT 1 FROM settlement_reconciliation_lines l JOIN settlement_reconciliations r ON r.id=l.reconciliation_id WHERE l.expense_id=e.id AND r.status!='withdrawn')
       AND (e.direction='payable' OR EXISTS(SELECT 1 FROM transport_batch_orders bo JOIN transport_batches b ON b.id=bo.batch_id WHERE bo.order_id=o.id AND bo.status!='removed' AND b.road_status IN ('outbound_in_transit','overseas_arrived','waiting_pickup','pickup_completed')))
       ORDER BY e.direction,c.name,e.currency,o.order_number,e.created_at`).bind(organizationId).all<SettlementExpense>(),
-    db.prepare(`SELECT r.id,r.document_number,r.direction,r.counterparty_name,r.settlement_entity,r.currency,r.total_amount,r.status,r.notes,r.confirmed_at,r.created_at,COUNT(DISTINCT l.expense_id) expense_count,GROUP_CONCAT(DISTINCT o.order_number) orders,
+    db.prepare(`SELECT r.id,r.document_number,r.direction,r.counterparty_name,r.settlement_entity,r.currency,r.total_amount,r.status,r.notes,r.confirmed_at,r.created_at,COUNT(DISTINCT l.expense_id) expense_count,GROUP_CONCAT(DISTINCT o.order_number) orders,GROUP_CONCAT(DISTINCT o.id||'|'||o.order_number) order_refs,
       COALESCE((SELECT SUM(i.amount) FROM settlement_invoice_records i WHERE i.reconciliation_id=r.id AND i.status!='void'),0) invoiced_amount,
       COALESCE((SELECT SUM(a.amount) FROM settlement_cash_allocations a JOIN settlement_cash_transactions t ON t.id=a.cash_transaction_id AND t.status!='void' WHERE a.reconciliation_id=r.id),0) settled_amount
       FROM settlement_reconciliations r JOIN settlement_reconciliation_lines l ON l.reconciliation_id=r.id JOIN business_expenses e ON e.id=l.expense_id LEFT JOIN transport_orders o ON o.id=e.order_id

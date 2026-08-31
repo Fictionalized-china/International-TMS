@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { Form, Link, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.shipments";
+import { OrderNumberLink } from "../components/EntityNumberLink";
 import { requireSessionUser } from "../lib/auth.server";
 import { nextDocumentNumber } from "../lib/documents.server";
 import { canTransition, nextStates } from "../lib/workflow";
@@ -353,7 +354,7 @@ export default function Shipments({ loaderData, actionData }: Route.ComponentPro
           <tbody>{loaderData.shipments.map(s=><tr key={s.id}>
             <td><span className={`status-pill shipment-status-${s.status}`}>{labels[s.status]||s.status}</span>{s.exception_reason&&<small className="danger-text">{s.exception_reason}</small>}</td>
             <td><ShipmentWorkflow shipment={s}/></td>
-            <td><strong>{s.shipment_number}</strong><small>订单 {s.order_number}</small>{s.master_tracking_number&&<small>追踪号 {s.master_tracking_number}</small>}</td>
+            <td><strong>{s.shipment_number}</strong><small>订单 <OrderNumberLink id={s.order_id} number={s.order_number}/></small>{s.master_tracking_number&&<small>追踪号 {s.master_tracking_number}</small>}</td>
             <td><strong>{s.customer_name}</strong><small>识别码 {s.customer_code}</small></td>
             <td><strong>{businessTypeLabels[s.business_type]||s.business_type} · {s.transport_mode}</strong><small>{routeText(s)}</small>{s.service_level&&<small>服务等级 {s.service_level}</small>}</td>
             <td><strong>{s.cargo_description}</strong><small>{s.pieces} 件 · {formatNumber(s.gross_weight_kg)} KG · {formatNumber(s.volume_cbm)} CBM</small></td>

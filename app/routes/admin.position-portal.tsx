@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { Form, Link } from "react-router";
 import type { Route } from "./+types/admin.position-portal";
+import { OrderNumberLink } from "../components/EntityNumberLink";
 import { requireSessionUser } from "../lib/auth.server";
 import {
   orderNextGuidance,
@@ -250,7 +251,7 @@ export default function PositionPortal({ loaderData }: Route.ComponentProps) {
       </Form>
       <div className="table-wrap position-ledger-table"><table><thead><tr><th>状态</th><th>订单 / 客户</th><th>线路 / 货量</th><th>当前节点 / 模组</th><th>负责岗位 / 人员</th><th>下一步与阻断</th><th className="sticky-action">操作</th></tr></thead><tbody>{orders.map(order=><tr key={order.order_id} className={order.blocker?"row-blocked":""}>
         <td><span className={`status-pill ${order.is_overdue?"danger":""}`}>{order.is_overdue?"超时":orderStatusLabel(order.order_status)}</span></td>
-        <td><strong>{order.order_number}</strong><small>{order.customer_name}</small></td>
+        <td><strong><OrderNumberLink id={order.order_id} number={order.order_number}/></strong><small>{order.customer_name}</small></td>
         <td><strong>{order.origin_city || "起运地待补"} → {order.destination_city || "目的地待补"}</strong><small>{order.business_type==="ftl"?"整车":order.business_type==="ltl"?"拼车":"待确定"} · {order.pieces || 0} 件 · {Number(order.gross_weight_kg || 0).toFixed(2)} KG · {Number(order.volume_cbm || 0).toFixed(3)} CBM</small></td>
         <td><strong>{order.current_stage_name}</strong><small>{order.current_module_name} · {order.current_step_name}</small></td>
         <td><strong>{order.responsible_position_name}</strong><small>{order.assignee_name||"待分配"}</small></td>

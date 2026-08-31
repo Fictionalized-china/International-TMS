@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { useState } from "react";
 import { Form, Link } from "react-router";
 import type { Route } from "./+types/admin.order-workbench";
+import { OrderNumberLink } from "../components/EntityNumberLink";
 import { requireSessionUser } from "../lib/auth.server";
 import { writeAudit } from "../lib/audit.server";
 import { assignOrderModule } from "../lib/order-modules.server";
@@ -683,7 +684,7 @@ function BatchItems({ items, preview = false }: { items: BatchResultItem[]; prev
       {items.map((item) => (
         <div key={item.rowId} className={item.success ? "pass" : "fail"}>
           <span>{item.success ? "✓" : "!"}</span>
-          <strong>{item.orderNumber}</strong>
+          <strong>{item.orderId?<OrderNumberLink id={item.orderId} number={item.orderNumber}/>:item.orderNumber}</strong>
           <small>{item.customerName} · {item.moduleName}</small>
           <b>{preview && item.success ? "可执行" : item.reason}</b>
         </div>

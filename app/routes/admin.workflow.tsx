@@ -9,6 +9,7 @@ import {
 import { valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import { Modal } from "../components/Modal";
+import { OrderNumberLink } from "../components/EntityNumberLink";
 import { orderModuleDefinitions, type OrderModuleCode } from "../lib/order-modules";
 import {
   workflowFieldCatalog,
@@ -101,6 +102,7 @@ type Instance = {
   id: string;
   customer_name: string;
   quote_number: string | null;
+  order_id: string | null;
   order_number: string | null;
   shipment_number: string | null;
   invoice_number: string | null;
@@ -165,7 +167,7 @@ export async function loader({ request }: Route.LoaderArgs) {
        WHERE p.organization_id=? AND p.status='active' ORDER BY p.sort_order,p.name`,
     ).bind(current.organizationId).all<PositionOption>(),
     env.DB.prepare(
-      `SELECT wi.id,c.name AS customer_name,q.quote_number,o.order_number,s.shipment_number,i.invoice_number,
+      `SELECT wi.id,c.name AS customer_name,q.quote_number,o.id order_id,o.order_number,s.shipment_number,i.invoice_number,
         wi.current_step_key,ws.name AS current_step_name,wi.status,wi.updated_at
        FROM workflow_instances wi JOIN customers c ON c.id=wi.customer_id
        JOIN workflow_steps ws ON ws.workflow_id=wi.workflow_id AND ws.step_key=wi.current_step_key
@@ -1452,7 +1454,7 @@ export default function Workflow({ loaderData, actionData }: Route.ComponentProp
                       <strong>{row.customer_name}</strong>
                     </td>
                     <td>{row.quote_number || "—"}</td>
-                    <td>{row.order_number || "—"}</td>
+                    <td>{row.order_id&&row.order_number?<OrderNumberLink id={row.order_id} number={row.order_number}/>:"—"}</td>
                     <td>{row.shipment_number || "—"}</td>
                     <td>{row.invoice_number || "—"}</td>
                     <td>

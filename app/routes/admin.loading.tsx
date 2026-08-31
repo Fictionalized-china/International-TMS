@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { Form, Link } from "react-router";
 import type { Route } from "./+types/admin.loading";
+import { BatchNumberLink, OrderNumberLinkList } from "../components/EntityNumberLink";
 import { requireSessionUser } from "../lib/auth.server";
 
 type BatchRow = {
@@ -16,6 +17,7 @@ type BatchRow = {
   warehouse_name: string | null;
   order_count: number;
   order_numbers: string | null;
+  order_refs: string | null;
   total_weight: number;
   total_volume: number;
   vehicle_count: number;
@@ -54,6 +56,7 @@ export async function loader({ request }: Route.LoaderArgs) {
             b.planned_departure_at,b.status,b.road_status,c.name carrier_name,w.name warehouse_name,
             COUNT(DISTINCT bo.order_id) order_count,
             GROUP_CONCAT(DISTINCT o.order_number) order_numbers,
+            GROUP_CONCAT(DISTINCT o.id||'|'||o.order_number) order_refs,
             COALESCE(SUM(COALESCE((SELECT SUM(r.total_weight_kg) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=o.id AND r.status='completed'),o.gross_weight_kg)),0) total_weight,
             COALESCE(SUM(COALESCE((SELECT SUM(r.total_volume_cbm) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=o.id AND r.status='completed'),o.volume_cbm)),0) total_volume,
             (SELECT COUNT(*) FROM transport_batch_vehicles v WHERE v.batch_id=b.id AND v.status!='cancelled') vehicle_count
@@ -99,9 +102,9 @@ export default function LoadingTracking({ loaderData }: Route.ComponentProps) {
     </section>
     <section className="panel">
       <div className="table-wrap"><table><thead><tr><th>配载单</th><th>线路</th><th>挂载订单</th><th>实收重量/体积</th><th>承运商/仓库</th><th>车辆</th><th>计划发车</th><th>状态</th><th>操作</th></tr></thead><tbody>{loaderData.batches.map((batch) => <tr key={batch.id}>
-        <td><strong>{batch.batch_number}</strong><small>{batch.batch_name}</small></td>
+        <td><strong><BatchNumberLink id={batch.id} number={batch.batch_number}/></strong><small>{batch.batch_name}</small></td>
         <td>{batch.origin_location}<small>→ {batch.destination_location}</small></td>
-        <td><strong>{batch.order_count} 票</strong><small>{batch.order_numbers || "—"}</small></td>
+        <td><strong>{batch.order_count} 票</strong><small className="entity-number-list"><OrderNumberLinkList orders={orderReferences(batch.order_refs)}/></small></td>
         <td>{Number(batch.total_weight || 0).toFixed(2)} KG<small>{Number(batch.total_volume || 0).toFixed(3)} CBM</small></td>
         <td>{batch.carrier_name || "待仓库补齐"}<small>{batch.warehouse_name || "仓库未记录"}</small></td>
         <td>{batch.vehicle_count} 辆</td>
@@ -122,6 +125,13 @@ export default function LoadingTracking({ loaderData }: Route.ComponentProps) {
 function pageHref(data: { q: string; status: string }, page: number) {
   const params = new URLSearchParams({ q: data.q, status: data.status, page: String(page) });
   return `/admin/loading?${params}`;
+}
+
+function orderReferences(value: string | null) {
+  return (value || "").split(",").flatMap((reference) => {
+    const separator = reference.indexOf("|");
+    return separator > 0 ? [{ id: reference.slice(0, separator), number: reference.slice(separator + 1) }] : [];
+  });
 }
 
 function formatDate(value: string | null) {

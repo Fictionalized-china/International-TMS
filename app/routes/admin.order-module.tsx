@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useState, type Component
 import { Form as RouterForm, Link, useFetcher, useNavigation, redirect } from "react-router";
 import { env } from "cloudflare:workers";
 import type { Route } from "./+types/admin.order-module";
+import { BatchNumberLink, OrderNumberLink } from "../components/EntityNumberLink";
 import { requireSessionUser } from "../lib/auth.server";
 import { valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
@@ -5181,7 +5182,7 @@ function ModuleBusinessData({
             <table>
               <thead><tr><th>订单号</th><th>客户</th><th>订单类型</th><th>仓库办理状态</th></tr></thead>
               <tbody><tr>
-                <td><strong>{data.order.order_number}</strong></td>
+                <td><strong><OrderNumberLink id={data.order.id} number={data.order.order_number}/></strong></td>
                 <td>{data.order.customer_name}</td>
                 <td>{isFtl ? "整车 · 一单一车" : isLtl ? "拼车 · 多单一车" : "报价尚未确定"}</td>
                 <td><span className={`status-pill ${hasWarehouseActuals ? "success" : ""}`}>{stageLabel}</span></td>
@@ -5222,7 +5223,7 @@ function ModuleBusinessData({
             <table>
               <thead><tr><th>配载 / 运输单</th><th>订单</th><th>车辆</th><th>已分配包装</th><th>类型</th><th>状态</th></tr></thead>
               <tbody>{activeBatch ? <tr>
-                <td><strong>{activeBatch.batch_number}</strong><small>{activeBatch.batch_name}</small></td>
+                <td><strong><BatchNumberLink id={activeBatch.id} number={activeBatch.batch_number}/></strong><small>{activeBatch.batch_name}</small></td>
                 <td>{activeBatch.order_count} 票<small>{activeBatch.order_numbers || data.order.order_number}</small></td>
                 <td>{activeBatch.vehicle_count} 辆</td>
                 <td>{activeBatch.load_count} 个</td>
@@ -5504,7 +5505,7 @@ function ModuleBusinessData({
             <table>
               <thead><tr><th>配载批次</th><th>批次状态</th><th>境外目的仓</th><th>目的仓地址</th><th>批次提货进度</th></tr></thead>
               <tbody><tr>
-                <td><strong>{operation?.batch_number || "—"}</strong></td>
+                <td><strong>{operation?<BatchNumberLink id={operation.batch_id} number={operation.batch_number}/>:"—"}</strong></td>
                 <td>{operation ? roadStatusLabels[operation.road_status] || operation.road_status : "—"}</td>
                 <td>{data.order.overseas_warehouse_name ? `${data.order.overseas_warehouse_name} · ${data.order.overseas_warehouse_code || ""}` : "—"}</td>
                 <td>{[data.order.overseas_warehouse_address,data.order.overseas_warehouse_address_note].filter(Boolean).join(" · ") || "—"}</td>
@@ -5568,9 +5569,9 @@ function ModuleBusinessData({
               <table>
                 <thead><tr><th>订单</th><th>客户</th><th>配载/运输单</th><th>目的仓</th><th>到仓</th><th>通知</th><th>扫码确认收货</th><th>签收单归档</th><th>结果</th></tr></thead>
                 <tbody><tr>
-                  <td><strong>{data.order.order_number}</strong></td>
+                  <td><strong><OrderNumberLink id={data.order.id} number={data.order.order_number}/></strong></td>
                   <td>{data.order.customer_name}</td>
-                  <td>{operation?.batch_number || "—"}</td>
+                  <td>{operation?<BatchNumberLink id={operation.batch_id} number={operation.batch_number}/>:"—"}</td>
                   <td>{data.order.overseas_warehouse_name || "—"}</td>
                   <td>{formatDateTime(operation?.actual_arrival_at) || "—"}</td>
                   <td>{formatDateTime(operation?.notified_at) || "—"}</td>
@@ -5851,7 +5852,7 @@ function ModuleBusinessData({
               <h3>委托信息</h3>
               <p>报价和客户资料自动继承；这里只复核订单事实，不重复录入货物、文件和费用。</p>
             </div>
-            <span className="status-pill">{data.order.order_number}</span>
+            <OrderNumberLink className="status-pill" id={data.order.id} number={data.order.order_number}/>
           </header>
 
           <div className="consignment-form-group">
@@ -7079,7 +7080,7 @@ function InlineLoadingWorkbench({
       <span className="status-pill">{context === "warehouse" ? "仓库创建" : "只读监控"}</span>
     </div>
     {activeBatch ? <div className="inline-loading-actions">
-      <small>{activeBatch.batch_number} · 已挂载 {activeBatch.order_count} 票订单</small>
+      <small><BatchNumberLink id={activeBatch.id} number={activeBatch.batch_number}/> · 已挂载 {activeBatch.order_count} 票订单</small>
       <Link className="primary" to={`/admin/loading/${activeBatch.id}`}>打开配载单</Link>
     </div> : <Form method="post" action="/switch-site" className="inline-loading-actions">
       <input type="hidden" name="target" value="warehouse" />
@@ -7186,7 +7187,7 @@ function LegacyInlineLoadingWorkbench({
             <tbody>
               <tr className="selected-row">
                 <td><span className="status-pill">当前</span></td>
-                <td><strong>{data.order.order_number}</strong></td>
+                <td><strong><OrderNumberLink id={data.order.id} number={data.order.order_number}/></strong></td>
                 <td>{data.order.customer_name}</td>
                 <td>—</td>
                 <td><strong>{data.order.route_notes}</strong><small>{data.order.exit_port} · {data.order.customs_location} · {data.order.overseas_warehouse_name}</small></td>
@@ -7207,7 +7208,7 @@ function LegacyInlineLoadingWorkbench({
                       onChange={(event) => toggle(item.id, event.target.checked)}
                     />
                   </td>
-                  <td><Link to={`/admin/orders/${item.id}`}>{item.order_number}</Link></td>
+                  <td><OrderNumberLink id={item.id} number={item.order_number}/></td>
                   <td>{item.customer_name}</td>
                   <td>{item.order_date || "—"}</td>
                   <td><strong>{item.route_code}</strong><small>{item.exit_port} · {item.customs_location}</small><small>{item.domestic_warehouse_name} → {item.overseas_warehouse_name}</small></td>
