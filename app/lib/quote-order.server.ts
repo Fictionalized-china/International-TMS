@@ -104,8 +104,8 @@ export async function createOrderFromAcceptedQuote(input: {
     await env.DB.prepare(
       `UPDATE transport_orders
        SET quote_withdrawn=0,status=CASE WHEN status='cancelled' THEN 'draft' ELSE status END,
-           current_step_code=CASE WHEN status='cancelled' THEN 'order_creation' ELSE current_step_code END,
-           current_step_name=CASE WHEN status='cancelled' THEN '委托资料补充' ELSE current_step_name END,
+           current_step_code=CASE WHEN status='cancelled' OR quote_withdrawn=1 OR current_step_code='quote_withdrawn' THEN 'order_creation' ELSE current_step_code END,
+           current_step_name=CASE WHEN status='cancelled' OR quote_withdrawn=1 OR current_step_code='quote_withdrawn' THEN '委托资料补充' ELSE current_step_name END,
            updated_at=?
        WHERE id=? AND organization_id=?`,
     ).bind(new Date().toISOString(), existing.id, input.organizationId).run();

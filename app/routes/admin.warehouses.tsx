@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { Form, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.warehouses";
 import { Modal } from "../components/Modal";
+import { ConfirmAction } from "../components/ConfirmAction";
 import { requireSessionUser } from "../lib/auth.server";
 import { valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
@@ -158,9 +159,10 @@ export async function action({ request }: Route.ActionArgs) {
         .bind(accessId, current.organizationId)
         .first<{ warehouse_id: string; user_id: string }>();
     if (!row) return { formError: "仓库权限不存在" };
-    await env.DB.prepare("DELETE FROM warehouse_user_access WHERE id=? AND organization_id=?")
+    const result=await env.DB.prepare("DELETE FROM warehouse_user_access WHERE id=? AND organization_id=?")
       .bind(accessId, current.organizationId)
       .run();
+    if(!Number(result.meta?.changes||0))return{formError:"仓库权限已被其他人移除，请刷新后查看"};
     await writeAudit({
       request,
       action: "warehouse.access.revoke",
@@ -175,18 +177,21 @@ export async function action({ request }: Route.ActionArgs) {
 
   if (intent === "toggle") {
     const id = valueOf(form, "warehouseId"),
+      status = valueOf(form, "status"),
       warehouse = await env.DB.prepare(
         "SELECT status FROM warehouses WHERE id=? AND organization_id=?",
       )
         .bind(id, current.organizationId)
         .first<{ status: string }>();
+    if (!['active','disabled'].includes(status)) return { formError: "仓库目标状态无效" };
     if (!warehouse) return { formError: "仓库不存在" };
-    const status = warehouse.status === "active" ? "disabled" : "active";
-    await env.DB.prepare(
-      "UPDATE warehouses SET status=?,updated_at=? WHERE id=? AND organization_id=?",
+    if (warehouse.status === status) return { formError: status === "active" ? "仓库已启用" : "仓库已停用" };
+    const result = await env.DB.prepare(
+      "UPDATE warehouses SET status=?,updated_at=? WHERE id=? AND organization_id=? AND status=?",
     )
-      .bind(status, now, id, current.organizationId)
+      .bind(status, now, id, current.organizationId, warehouse.status)
       .run();
+    if (!Number(result.meta?.changes || 0)) return { formError: "仓库状态已被其他人修改，请刷新后查看" };
     await writeAudit({
       request,
       action: `warehouse.${status}`,
@@ -369,7 +374,10 @@ export default function AdminWarehouses({ loaderData, actionData }: Route.Compon
                       <Form method="post">
                         <input type="hidden" name="intent" value="toggle" />
                         <input type="hidden" name="warehouseId" value={warehouse.id} />
-                        <button className="text-button" disabled={busy}>{warehouse.status === "active" ? "停用" : "启用"}</button>
+                        <input type="hidden" name="status" value={warehouse.status === "active" ? "disabled" : "active"} />
+                        {warehouse.status === "active"
+                          ? <ConfirmAction title="停用仓库" description={`停用后 ${warehouse.name} 将不能接收新的仓库作业或被新订单选用；历史库存和作业审计永久保留。`} triggerLabel="停用" confirmLabel="确认停用仓库" confirmationKeyword={warehouse.code} pending={busy}/>
+                          : <button className="text-button" disabled={busy}>启用</button>}
                       </Form>
                     </div>
                   </td>
@@ -428,7 +436,7 @@ function AccessManager({ warehouse, users, access, busy }: { warehouse: Warehous
           <div key={row.id}>
             <div><strong>{row.display_name}</strong><small>{row.email}</small></div>
             <span className="status-pill">{levelLabels[row.access_level]}</span>
-            <Form method="post"><input type="hidden" name="intent" value="revoke" /><input type="hidden" name="accessId" value={row.id} /><button className="text-button danger" disabled={busy}>移除</button></Form>
+            <Form method="post"><input type="hidden" name="intent" value="revoke" /><input type="hidden" name="accessId" value={row.id} /><ConfirmAction title="移除仓库授权" description={`移除后 ${row.display_name} 将不能再进入本仓库办理作业；既有操作与审计记录永久保留。`} triggerLabel="移除" confirmLabel="确认移除授权" pending={busy}/></Form>
           </div>
         ))}
       </div>

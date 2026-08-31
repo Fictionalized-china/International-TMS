@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Form, Link, useNavigation } from "react-router";
 import type { Route } from "./+types/warehouse.cargo-consolidation";
 import { Modal } from "../components/Modal";
+import { ConfirmAction } from "../components/ConfirmAction";
 import { writeAudit } from "../lib/audit.server";
 import { requireSessionUser } from "../lib/auth.server";
 import { ensureOrderModules, syncOrderWorkflowSnapshot } from "../lib/order-modules.server";
@@ -262,7 +263,22 @@ export async function action({request}:Route.ActionArgs){
     if((count?.total??0)<=2)return{formError:"配载单至少保留 2 票订单；如需全部重配，请取消该配载单"};
     const membership=await env.DB.prepare("SELECT 1 ok FROM transport_batch_orders WHERE batch_id=? AND order_id=? AND organization_id=? AND status!='removed'").bind(batchId,orderId,user.organizationId).first();
     if(!membership)return{formError:"该订单不在当前配载单中"};
-    await env.DB.prepare("UPDATE transport_batch_orders SET status='removed',updated_at=? WHERE batch_id=? AND order_id=? AND organization_id=?").bind(now,batchId,orderId,user.organizationId).run();
+    const removed=await env.DB.prepare(
+      `UPDATE transport_batch_orders SET status='removed',updated_at=?
+       WHERE batch_id=? AND order_id=? AND organization_id=? AND status!='removed'
+         AND EXISTS(
+           SELECT 1 FROM transport_batches b
+           WHERE b.id=transport_batch_orders.batch_id AND b.organization_id=transport_batch_orders.organization_id
+             AND b.warehouse_id=? AND b.status IN ('planning','loading')
+         )
+         AND 2 < (
+           SELECT COUNT(*) FROM transport_batch_orders active
+           WHERE active.batch_id=transport_batch_orders.batch_id
+             AND active.organization_id=transport_batch_orders.organization_id
+             AND active.status!='removed'
+         )`,
+    ).bind(now,batchId,orderId,user.organizationId,warehouse.id).run();
+    if(!Number(removed.meta?.changes||0))return{formError:"配载单状态已变化、订单已移出或当前仅剩 2 票，请刷新后查看"};
     await removeOrdersFromPendingDispatch(user.organizationId,warehouse.id,batchId,[orderId],now);
     await resetLoadingModules(user.organizationId,[orderId],user.userId,now,`从配载单 ${batch.batch_number} 移除`);
     await synchronizeBatchTransport(user.organizationId,batchId,now);
@@ -275,8 +291,20 @@ export async function action({request}:Route.ActionArgs){
     const batchId=valueOf(form,"batchId"),batch=await editableBatch(user.organizationId,warehouse.id,batchId);
     if(!batch)return{formError:"配载单不存在、已开始装车或不能取消"};
     const orders=await env.DB.prepare("SELECT order_id FROM transport_batch_orders WHERE batch_id=? AND organization_id=? AND status!='removed'").bind(batchId,user.organizationId).all<{order_id:string}>();
+    const [,cancelled]=await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE transport_batch_orders SET status='removed',updated_at=?
+         WHERE batch_id=? AND organization_id=? AND status!='removed'
+           AND EXISTS(
+             SELECT 1 FROM transport_batches b
+             WHERE b.id=transport_batch_orders.batch_id AND b.organization_id=transport_batch_orders.organization_id
+               AND b.warehouse_id=? AND b.status IN ('planning','loading')
+           )`,
+      ).bind(now,batchId,user.organizationId,warehouse.id),
+      env.DB.prepare("UPDATE transport_batches SET status='cancelled',updated_at=? WHERE id=? AND organization_id=? AND warehouse_id=? AND status IN ('planning','loading')").bind(now,batchId,user.organizationId,warehouse.id),
+    ]);
+    if(!Number(cancelled.meta?.changes||0))return{formError:"配载单已被其他人取消或状态已经变化，请刷新后查看"};
     await cancelPendingDispatch(user.organizationId,batchId,now);
-    await env.DB.batch([env.DB.prepare("UPDATE transport_batches SET status='cancelled',updated_at=? WHERE id=? AND organization_id=?").bind(now,batchId,user.organizationId),env.DB.prepare("UPDATE transport_batch_orders SET status='removed',updated_at=? WHERE batch_id=? AND organization_id=? AND status!='removed'").bind(now,batchId,user.organizationId)]);
     await resetLoadingModules(user.organizationId,orders.results.map(row=>row.order_id),user.userId,now,`取消配载单 ${batch.batch_number}`);
     await synchronizeOrderExceptionStatuses(user.organizationId,orders.results.map(row=>row.order_id),now);
     await writeAudit({request,action:"warehouse.consolidation.cancel",resourceType:"transport_batch",resourceId:batchId,organizationId:user.organizationId,actorUserId:user.userId,metadata:{batchNumber:batch.batch_number,orderIds:orders.results.map(row=>row.order_id)}});
@@ -416,7 +444,13 @@ function AddToBatchForm({selected,batches,busy}:{selected:Selection[];batches:Ba
   </Form>
 }
 
-function BatchAdjustment({batch,orders,busy}:{batch:BatchRow;orders:BatchOrder[];busy:boolean}){return<div className="stack"><div className="table-wrap"><table><thead><tr><th>订单</th><th>客户 / 货物</th><th>实收数据</th><th>操作</th></tr></thead><tbody>{orders.map(row=><tr key={row.order_id}><td>{row.order_number}</td><td>{row.customer_name}<small>{row.cargo_names||"—"}</small></td><td>{row.weight_kg.toFixed(2)} KG<small>{row.volume_cbm.toFixed(3)} CBM</small></td><td><Form method="post"><input type="hidden" name="intent" value="remove"/><input type="hidden" name="batchId" value={batch.id}/><input type="hidden" name="orderId" value={row.order_id}/><button className="text-button danger" disabled={busy||orders.length<=2}>移除</button></Form></td></tr>)}</tbody></table></div><div className="alert info">需要增加订单时，请关闭弹窗，在上方在库货物列表勾选订单后点击“加入已有配载单”。</div><Form method="post"><input type="hidden" name="intent" value="cancel"/><input type="hidden" name="batchId" value={batch.id}/><button className="secondary danger" disabled={busy}>取消整张配载单并释放订单</button></Form></div>}
+function BatchAdjustment({batch,orders,busy}:{batch:BatchRow;orders:BatchOrder[];busy:boolean}){
+  return <div className="stack">
+    <div className="table-wrap"><table><thead><tr><th>订单</th><th>客户 / 货物</th><th>实收数据</th><th>操作</th></tr></thead><tbody>{orders.map(row=><tr key={row.order_id}><td>{row.order_number}</td><td>{row.customer_name}<small>{row.cargo_names||"—"}</small></td><td>{row.weight_kg.toFixed(2)} KG<small>{row.volume_cbm.toFixed(3)} CBM</small></td><td><Form method="post"><input type="hidden" name="intent" value="remove"/><input type="hidden" name="batchId" value={batch.id}/><input type="hidden" name="orderId" value={row.order_id}/><ConfirmAction title="从配载单移除订单" description={`将 ${row.order_number} 从 ${batch.batch_number} 移出，并释放其待装车任务；订单历史与资料不会删除。`} triggerLabel="移除" confirmLabel="确认移出配载单" pending={busy} disabled={orders.length<=2}/></Form></td></tr>)}</tbody></table></div>
+    <div className="alert info">需要增加订单时，请关闭弹窗，在上方在库货物列表勾选订单后点击“加入已有配载单”。</div>
+    <Form method="post"><input type="hidden" name="intent" value="cancel"/><input type="hidden" name="batchId" value={batch.id}/><ConfirmAction className="secondary danger" title="取消整张配载单" description={`将取消 ${batch.batch_number}，释放其中 ${orders.length} 票订单及待装车任务；已产生的配载记录和审计痕迹永久保留。`} triggerLabel="取消整张配载单并释放订单" confirmLabel="确认取消并释放" confirmationKeyword={batch.batch_number} pending={busy}/></Form>
+  </div>;
+}
 function FilterForm({loaderData,values}:{loaderData:Route.ComponentProps["loaderData"];values:<K extends keyof (typeof loaderData.options)[number]>(key:K)=>string[]}){
   const hasAdvanced=Boolean(loaderData.filters.country||loaderData.filters.state||loaderData.filters.city||loaderData.filters.customer);
   return <Form method="get" action="." className="consolidation-filter-form">

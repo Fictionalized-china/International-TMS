@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { Form, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.carriers";
 import { Modal } from "../components/Modal";
+import { ConfirmAction } from "../components/ConfirmAction";
 import { requireSessionUser } from "../lib/auth.server";
 import { writeAudit } from "../lib/audit.server";
 import { validatePhone, valueOf } from "../lib/validation";
@@ -99,9 +100,11 @@ export async function action({ request }: Route.ActionArgs) {
   }
   if (intent === "driver_toggle") {
     const driverId = valueOf(form, "driverId");
-    await env.DB.prepare(
-      "UPDATE carrier_drivers SET status='disabled',updated_at=? WHERE id=? AND organization_id=?",
+    const result=await env.DB.prepare(
+      "UPDATE carrier_drivers SET status='disabled',updated_at=? WHERE id=? AND organization_id=? AND status='active'",
     ).bind(now, driverId, current.organizationId).run();
+    if(!Number(result.meta?.changes||0))return{formError:"司机不存在或已被移除"};
+    await writeAudit({request,action:"carrier.driver.disable",resourceType:"carrier_driver",resourceId:driverId,organizationId:current.organizationId,actorUserId:current.userId});
     return { success: "司机已移除" };
   }
 
@@ -127,23 +130,28 @@ export async function action({ request }: Route.ActionArgs) {
   }
   if (intent === "vehicle_toggle") {
     const vehicleId = valueOf(form, "vehicleId");
-    await env.DB.prepare(
-      "UPDATE carrier_vehicles SET status='disabled',updated_at=? WHERE id=? AND organization_id=?",
+    const result=await env.DB.prepare(
+      "UPDATE carrier_vehicles SET status='disabled',updated_at=? WHERE id=? AND organization_id=? AND status='active'",
     ).bind(now, vehicleId, current.organizationId).run();
+    if(!Number(result.meta?.changes||0))return{formError:"车辆不存在或已被移除"};
+    await writeAudit({request,action:"carrier.vehicle.disable",resourceType:"carrier_vehicle",resourceId:vehicleId,organizationId:current.organizationId,actorUserId:current.userId});
     return { success: "车辆已移除" };
   }
 
   // --- 承运商启停 ---
   if (intent === "toggle") {
     const id = valueOf(form, "carrierId");
+    const next = valueOf(form, "status");
+    if (!['active','disabled'].includes(next)) return { formError: "承运商目标状态无效" };
     const row = await env.DB.prepare(
       "SELECT status FROM carriers WHERE id=? AND organization_id=?",
     ).bind(id, current.organizationId).first<{ status: string }>();
     if (!row) return { formError: "承运商不存在" };
-    const next = row.status === "active" ? "disabled" : "active";
-    await env.DB.prepare(
-      "UPDATE carriers SET status=?,updated_at=? WHERE id=? AND organization_id=?",
-    ).bind(next, now, id, current.organizationId).run();
+    if (row.status === next) return { formError: next === "active" ? "承运商已启用" : "承运商已停用" };
+    const result = await env.DB.prepare(
+      "UPDATE carriers SET status=?,updated_at=? WHERE id=? AND organization_id=? AND status=?",
+    ).bind(next, now, id, current.organizationId, row.status).run();
+    if (!Number(result.meta?.changes || 0)) return { formError: "承运商状态已被其他人修改，请刷新后查看" };
     await writeAudit({
       request,
       action: `carrier.${next}`,
@@ -266,9 +274,10 @@ export default function Carriers({ loaderData, actionData }: Route.ComponentProp
                         <Form method="post" style={{ display: "inline" }}>
                           <input type="hidden" name="intent" value="toggle" />
                           <input type="hidden" name="carrierId" value={carrier.id} />
-                          <button className="text-button" disabled={busy}>
-                            {carrier.status === "active" ? "停用" : "启用"}
-                          </button>
+                          <input type="hidden" name="status" value={carrier.status === "active" ? "disabled" : "active"} />
+                          {carrier.status === "active"
+                            ? <ConfirmAction title="停用承运商" description={`停用后 ${carrier.name} 及其车辆、司机将不能用于新的运输安排；历史运输记录不受影响。`} triggerLabel="停用" confirmLabel="确认停用" pending={busy}/>
+                            : <button className="text-button" disabled={busy}>启用</button>}
                         </Form>
                       </>
                     )}
@@ -293,7 +302,7 @@ export default function Carriers({ loaderData, actionData }: Route.ComponentProp
                                   <Form method="post" style={{ display: "inline" }}>
                                     <input type="hidden" name="intent" value="vehicle_toggle" />
                                     <input type="hidden" name="vehicleId" value={v.id} />
-                                    <button className="text-button danger" disabled={busy}>移除</button>
+                                    <ConfirmAction title="移除承运商车辆" description={`车辆 ${v.plate_number} 将从可选车辆台账中停用；已发生的运输记录不会删除。`} triggerLabel="移除" confirmLabel="确认移除" pending={busy}/>
                                   </Form>
                                 )}</td>
                               </tr>
@@ -334,7 +343,7 @@ export default function Carriers({ loaderData, actionData }: Route.ComponentProp
                                   <Form method="post" style={{ display: "inline" }}>
                                     <input type="hidden" name="intent" value="driver_toggle" />
                                     <input type="hidden" name="driverId" value={d.id} />
-                                    <button className="text-button danger" disabled={busy}>移除</button>
+                                    <ConfirmAction title="移除承运商司机" description={`司机 ${d.name} 将从可选司机台账中停用；已发生的运输记录不会删除。`} triggerLabel="移除" confirmLabel="确认移除" pending={busy}/>
                                   </Form>
                                 )}</td>
                               </tr>

@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { Form, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.positions";
+import { ConfirmAction } from "../components/ConfirmAction";
 import { requireSessionUser } from "../lib/auth.server";
 import { writeAudit } from "../lib/audit.server";
 import { valueOf } from "../lib/validation";
@@ -181,14 +182,17 @@ export async function action({ request }: Route.ActionArgs) {
 
   if (intent === "toggle") {
     const id = valueOf(form, "positionId");
+    const next = valueOf(form, "status");
+    if (!["active","disabled"].includes(next)) return { formError: "岗位目标状态无效" };
     const row = await env.DB.prepare(
       "SELECT status FROM positions WHERE id=? AND organization_id=?",
     ).bind(id, current.organizationId).first<{ status: string }>();
     if (!row) return { formError: "岗位不存在" };
-    const next = row.status === "active" ? "disabled" : "active";
-    await env.DB.prepare(
-      "UPDATE positions SET status=?,updated_at=? WHERE id=? AND organization_id=?",
-    ).bind(next, now, id, current.organizationId).run();
+    if (row.status === next) return { formError: next === "active" ? "岗位已启用" : "岗位已停用" };
+    const result = await env.DB.prepare(
+      "UPDATE positions SET status=?,updated_at=? WHERE id=? AND organization_id=? AND status=?",
+    ).bind(next, now, id, current.organizationId, row.status).run();
+    if (!Number(result.meta?.changes || 0)) return { formError: "岗位状态已被其他人修改，请刷新后查看" };
     await writeAudit({
       request,
       action: `position.${next}`,
@@ -413,9 +417,10 @@ export default function Positions({ loaderData, actionData }: Route.ComponentPro
                         <Form method="post">
                           <input type="hidden" name="intent" value="toggle" />
                           <input type="hidden" name="positionId" value={position.id} />
-                          <button className="text-button" disabled={busy}>
-                            {position.status === "active" ? "停用" : "启用"}
-                          </button>
+                          <input type="hidden" name="status" value={position.status === "active" ? "disabled" : "active"} />
+                          {position.status === "active"
+                            ? <ConfirmAction title="停用岗位" description={`停用后“${position.name}”不能再分配给人员或承接新的岗位待办；现有成员关系与历史审计保留。`} triggerLabel="停用" confirmLabel="确认停用" pending={busy}/>
+                            : <button className="text-button" disabled={busy}>启用</button>}
                         </Form>
                       )}
                     </td>

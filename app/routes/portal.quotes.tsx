@@ -4,6 +4,7 @@ import type { Route } from "./+types/portal.quotes";
 import { acceptQuotation, withdrawQuotationAcceptance } from "../lib/quotation-lifecycle.server";
 import { requirePortalCustomer } from "../lib/portal.server";
 import { valueOf } from "../lib/validation";
+import { ConfirmAction } from "../components/ConfirmAction";
 
 type Quote = {
   id: string;
@@ -170,7 +171,7 @@ function QuoteActions({ quote, busy }: { quote: Quote; busy: boolean }) {
     return <Form method="post"><input type="hidden" name="intent" value="accept"/><input type="hidden" name="id" value={quote.id}/><button className="btn primary" disabled={busy}>{quote.lifecycle_status === "withdrawn" ? "重新接受" : "接受报价"}</button></Form>;
   }
   if (quote.lifecycle_status === "accepted" && quote.order_status === "draft") {
-    return <Form method="post"><input type="hidden" name="intent" value="withdraw"/><input type="hidden" name="id" value={quote.id}/><button className="btn" disabled={busy}>撤回接受</button></Form>;
+    return <Form method="post"><input type="hidden" name="intent" value="withdraw"/><input type="hidden" name="id" value={quote.id}/><ConfirmAction className="btn" title="撤回报价接受" description={`撤回后 ${quote.quote_number} 将恢复为可重新接受状态；已经生成的订单保留为草稿并留下审计记录。`} triggerLabel="撤回接受" confirmLabel="确认撤回" pending={busy}/></Form>;
   }
   return quote.lifecycle_status === "accepted" ? <span className="subline">订单已进入业务流程</span> : <span className="subline">无可用操作</span>;
 }
