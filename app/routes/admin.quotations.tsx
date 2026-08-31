@@ -363,7 +363,7 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
         <Field label="清关办理方式"><select className="control filled" name="customsClearanceMode" defaultValue="company" required><option value="company">公司代办清关</option><option value="customer">客户自理清关</option></select></Field>
       </div>
     </FormSection>
-    <FormSection className="quote-route-section" title="起运地与目的地" note="最终目的地为境外目的仓，客户到仓自提">
+    <FormSection className="quote-route-section" title="运输路线" note="按国家 / 地区 → 省 / 州 → 城市逐级选择，最终目的地为境外目的仓">
       <div className="quote-route-compare">
         <section className="quote-route-group" aria-labelledby="quote-origin-heading">
           <header className="quote-route-group-title"><b id="quote-origin-heading">起运</b><span>客户提货信息</span></header>
@@ -384,7 +384,7 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
     </FormSection>
     <FormSection title="货物预估数据" note="仓库实收后登记实际数据">
       <div className="grid quote-cargo-grid">
-        <Field label="货物描述" className="quote-cargo-description"><textarea className="control textarea editing" name="cargoDescription" required /></Field>
+        <Field label="货物描述" className="quote-cargo-description"><textarea className="control textarea editing" name="cargoDescription" rows={3} placeholder="填写货物名称、品类、材质、用途或其他便于识别的说明" required /></Field>
         <div className="table-wrap quote-cargo-metrics-table"><table className="inline-table"><thead><tr><th>预计件数</th><th>预计重量 KG</th><th>预计长度 CM</th><th>预计宽度 CM</th><th>预计高度 CM</th><th>预计体积 CBM（自动计算）</th></tr></thead><tbody><tr>
           <td><input aria-label="预计件数" className="control filled" name="pieces" type="number" min="1" value={pieces} onChange={(event) => setPieces(event.target.value)} required/></td>
           <td><input aria-label="预计重量 KG" className="control filled" name="weight" type="number" min="0.001" step="0.001" required/></td>
@@ -489,6 +489,7 @@ function GeoCascadeFields({
   const [countryCode, setCountryCode] = useState(initialCountryCode);
   const [provinceCode, setProvinceCode] = useState(initialProvinceCode);
   const [cityCode, setCityCode] = useState(initialCityCode);
+  const [openLevel, setOpenLevel] = useState<1 | 2 | 3 | null>(null);
   const countryOptions = countries;
   const provinceOptions = provinces.filter((option) => option.parent_code === countryCode);
   const cityOptions = cities.filter((option) => option.parent_code === provinceCode);
@@ -496,29 +497,147 @@ function GeoCascadeFields({
   const provinceName = provinces.find((option) => option.code === provinceCode)?.name || "";
   const cityName = cities.find((option) => option.code === cityCode)?.name || "";
   const placeLabel = prefix === "origin" ? "起运" : "目的";
-  return <>
-    <Field label={`${placeLabel}国家 / 地区`}>
-      <select className="control filled" value={countryCode} onChange={(event) => { setCountryCode(event.target.value); setProvinceCode(""); setCityCode(""); }} required>
-        <option value="">请选择</option>
-        {countryOptions.map((option) => <option key={`${prefix}-country-${option.code}`} value={option.code}>{option.name}</option>)}
-      </select>
-      <input name={`${prefix}Country`} type="hidden" value={countryName}/>
-    </Field>
-    <Field label={`${placeLabel}省 / 州`}>
-      <select className="control filled" value={provinceCode} onChange={(event) => { setProvinceCode(event.target.value); setCityCode(""); }} disabled={!countryCode} required>
-        <option value="">{countryCode ? "请选择" : "请先选择国家"}</option>
-        {provinceOptions.map((option) => <option key={`${prefix}-province-${option.code}`} value={option.code}>{option.name}</option>)}
-      </select>
-      <input name={`${prefix}State`} type="hidden" value={provinceName}/>
-    </Field>
-    <Field label={`${placeLabel}城市`}>
-      <select className="control filled" value={cityCode} onChange={(event) => setCityCode(event.target.value)} disabled={!provinceCode} required>
-        <option value="">{provinceCode ? "请选择" : "请先选择省 / 州"}</option>
-        {cityOptions.map((option) => <option key={`${prefix}-city-${option.code}`} value={option.code}>{option.name}</option>)}
-      </select>
-      <input name={`${prefix}City`} type="hidden" value={cityName}/>
-    </Field>
-  </>;
+  const activeOptions = openLevel === 1 ? countryOptions : openLevel === 2 ? provinceOptions : openLevel === 3 ? cityOptions : [];
+  const activeValue = openLevel === 1 ? countryCode : openLevel === 2 ? provinceCode : cityCode;
+  const activeLabel = openLevel === 1 ? "国家 / 地区" : openLevel === 2 ? "省 / 州" : "城市";
+  const selectionLabel = [countryName, provinceName, cityName].filter(Boolean).join(" / ");
+  const panelId = `${prefix}-geo-drawer`;
+  const chooseOption = (option: GeoOption) => {
+    if (openLevel === 1) {
+      setCountryCode(option.code);
+      setProvinceCode("");
+      setCityCode("");
+      setOpenLevel(2);
+      return;
+    }
+    if (openLevel === 2) {
+      setProvinceCode(option.code);
+      setCityCode("");
+      setOpenLevel(3);
+      return;
+    }
+    setCityCode(option.code);
+    setOpenLevel(null);
+  };
+  const openRequiredLevel = (level: 1 | 2 | 3) => {
+    if (level === 2 && !countryCode) {
+      setOpenLevel(1);
+      return;
+    }
+    if (level === 3 && !provinceCode) {
+      setOpenLevel(countryCode ? 2 : 1);
+      return;
+    }
+    setOpenLevel((current) => current === level ? null : level);
+  };
+  return <div className={`quote-geo-picker ${cityCode ? "is-complete" : "is-incomplete"}`}>
+    <div className="quote-geo-picker-head">
+      <span className="quote-geo-picker-label">{placeLabel}地区</span>
+      <small aria-live="polite">{selectionLabel || "请选择国家 / 地区"}</small>
+    </div>
+    <div className="quote-geo-steps">
+      <GeoStepButton
+        step={1}
+        label="国家 / 地区"
+        value={countryName}
+        active={openLevel === 1}
+        disabled={false}
+        panelId={panelId}
+        onClick={() => openRequiredLevel(1)}
+      />
+      <GeoStepButton
+        step={2}
+        label="省 / 州"
+        value={provinceName}
+        active={openLevel === 2}
+        disabled={!countryCode}
+        panelId={panelId}
+        onClick={() => openRequiredLevel(2)}
+      />
+      <GeoStepButton
+        step={3}
+        label="城市"
+        value={cityName}
+        active={openLevel === 3}
+        disabled={!provinceCode}
+        panelId={panelId}
+        onClick={() => openRequiredLevel(3)}
+      />
+    </div>
+    {openLevel && <div className="quote-geo-drawer" id={panelId} role="group" aria-label={`选择${placeLabel}${activeLabel}`}>
+      <div className="quote-geo-drawer-head"><b>选择{placeLabel}{activeLabel}</b><button type="button" onClick={() => setOpenLevel(null)}>收起</button></div>
+      {activeOptions.length > 0
+        ? <div className="quote-geo-options">{activeOptions.map((option) => <button
+            aria-pressed={activeValue === option.code}
+            className={activeValue === option.code ? "selected" : ""}
+            key={`${prefix}-${openLevel}-${option.code}`}
+            type="button"
+            onClick={() => chooseOption(option)}
+          >{option.name}</button>)}</div>
+        : <p className="quote-geo-empty">当前层级没有可选数据，请先检查上一级选择。</p>}
+    </div>}
+    <select
+      aria-label={`${placeLabel}国家 / 地区校验`}
+      className="quote-geo-native-validator"
+      name={`${prefix}Country`}
+      value={countryName}
+      onChange={() => undefined}
+      onInvalid={() => setOpenLevel(1)}
+      required
+      tabIndex={-1}
+    ><option value=""/>{countryName && <option value={countryName}>{countryName}</option>}</select>
+    <select
+      aria-label={`${placeLabel}省 / 州校验`}
+      className="quote-geo-native-validator"
+      name={`${prefix}State`}
+      value={provinceName}
+      onChange={() => undefined}
+      onInvalid={() => setOpenLevel(countryCode ? 2 : 1)}
+      required
+      tabIndex={-1}
+    ><option value=""/>{provinceName && <option value={provinceName}>{provinceName}</option>}</select>
+    <select
+      aria-label={`${placeLabel}城市校验`}
+      className="quote-geo-native-validator"
+      name={`${prefix}City`}
+      value={cityName}
+      onChange={() => undefined}
+      onInvalid={() => setOpenLevel(provinceCode ? 3 : countryCode ? 2 : 1)}
+      required
+      tabIndex={-1}
+    ><option value=""/>{cityName && <option value={cityName}>{cityName}</option>}</select>
+  </div>;
+}
+
+function GeoStepButton({
+  step,
+  label,
+  value,
+  active,
+  disabled,
+  panelId,
+  onClick,
+}: {
+  step: 1 | 2 | 3;
+  label: string;
+  value: string;
+  active: boolean;
+  disabled: boolean;
+  panelId: string;
+  onClick: () => void;
+}) {
+  return <button
+    aria-controls={panelId}
+    aria-expanded={active}
+    className={`quote-geo-step ${value ? "is-selected" : "is-missing"} ${active ? "is-active" : ""}`}
+    disabled={disabled}
+    type="button"
+    onClick={onClick}
+  >
+    <span className="quote-geo-step-label"><i>{step}</i>{label}</span>
+    <b>{value || (disabled ? "请先完成上一级" : "请选择")}</b>
+    <ChevronDown aria-hidden="true" size={13}/>
+  </button>;
 }
 
 async function geoOptions(organizationId: string, level: string) {
