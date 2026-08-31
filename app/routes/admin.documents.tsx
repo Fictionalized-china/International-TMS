@@ -32,6 +32,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const q = (url.searchParams.get("q") || "").trim();
   const status = url.searchParams.get("status") || "all";
   const category = url.searchParams.get("category") || "all";
+  const scope = url.searchParams.get("scope") === "batch" ? "batch" : "order";
   const page = Math.max(1, Number.parseInt(url.searchParams.get("page") || "1", 10) || 1);
   const rows = await env.DB.prepare(
     `WITH files AS (
@@ -58,26 +59,33 @@ export async function loader({ request }: Route.LoaderArgs) {
         WHERE d.organization_id=?
      )
      SELECT * FROM files
-      WHERE (?='' OR order_numbers LIKE '%'||?||'%' OR COALESCE(batch_number,'') LIKE '%'||?||'%' OR file_name LIKE '%'||?||'%')
+      WHERE source_type=?
+        AND (?='' OR order_numbers LIKE '%'||?||'%' OR COALESCE(batch_number,'') LIKE '%'||?||'%' OR file_name LIKE '%'||?||'%')
         AND (?='all' OR review_status=?)
         AND (?='all' OR document_category=?)
       ORDER BY created_at DESC LIMIT ? OFFSET ?`,
   ).bind(
     current.organizationId,current.organizationId,
-    q,q,q,q,status,status,category,category,pageSize,(page - 1) * pageSize,
+    scope,q,q,q,q,status,status,category,category,pageSize,(page - 1) * pageSize,
   ).all<FileRow>();
   const total = await env.DB.prepare(
     `SELECT COUNT(*) total FROM (
-       SELECT a.id,o.order_number order_numbers,NULL batch_number,COALESCE(m.document_category,'other') document_category,COALESCE(m.review_status,'pending') review_status,a.file_name
+       SELECT a.id,'order' source_type,o.order_number order_numbers,NULL batch_number,COALESCE(m.document_category,'other') document_category,COALESCE(m.review_status,'pending') review_status,a.file_name
          FROM order_attachments a JOIN transport_orders o ON o.id=a.order_id LEFT JOIN order_document_metadata m ON m.attachment_id=a.id
         WHERE a.organization_id=?
        UNION ALL
-       SELECT d.id,COALESCE((SELECT GROUP_CONCAT(o.order_number) FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id WHERE bo.batch_id=d.batch_id AND bo.status!='removed'),''),b.batch_number,d.document_category,d.review_status,d.file_name
+       SELECT d.id,'batch' source_type,COALESCE((SELECT GROUP_CONCAT(o.order_number) FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id WHERE bo.batch_id=d.batch_id AND bo.status!='removed'),''),b.batch_number,d.document_category,d.review_status,d.file_name
          FROM transport_batch_documents d JOIN transport_batches b ON b.id=d.batch_id WHERE d.organization_id=?
      ) files
-     WHERE (?='' OR order_numbers LIKE '%'||?||'%' OR COALESCE(batch_number,'') LIKE '%'||?||'%' OR file_name LIKE '%'||?||'%')
+     WHERE source_type=?
+       AND (?='' OR order_numbers LIKE '%'||?||'%' OR COALESCE(batch_number,'') LIKE '%'||?||'%' OR file_name LIKE '%'||?||'%')
        AND (?='all' OR review_status=?) AND (?='all' OR document_category=?)`,
-  ).bind(current.organizationId,current.organizationId,q,q,q,q,status,status,category,category).first<{ total: number }>();
+  ).bind(current.organizationId,current.organizationId,scope,q,q,q,q,status,status,category,category).first<{ total: number }>();
+  const scopeCounts = await env.DB.prepare(
+    `SELECT
+       (SELECT COUNT(*) FROM order_attachments WHERE organization_id=?) order_total,
+       (SELECT COUNT(*) FROM transport_batch_documents WHERE organization_id=?) batch_total`,
+  ).bind(current.organizationId,current.organizationId).first<{ order_total: number; batch_total: number }>();
   const categories = await env.DB.prepare(
     `SELECT document_category FROM order_document_metadata WHERE organization_id=?
      UNION SELECT document_category FROM transport_batch_documents WHERE organization_id=?
@@ -86,22 +94,32 @@ export async function loader({ request }: Route.LoaderArgs) {
   return {
     rows: rows.results,
     total: total?.total ?? 0,
+    scopeCounts: { order: scopeCounts?.order_total ?? 0, batch: scopeCounts?.batch_total ?? 0 },
     categories: categories.results.map((item) => item.document_category),
-    q,status,category,page,
+    q,status,category,scope,page,
     pageCount: Math.max(1, Math.ceil((total?.total ?? 0) / pageSize)),
   };
 }
 
 export default function DocumentCenter({ loaderData }: Route.ComponentProps) {
   return <>
-    <header className="page-header"><div><p className="eyebrow">DOCUMENT INDEX</p><h1>文件中心</h1><p>集中查看订单与配载单文件；上传、编辑、审核和门禁仍由文件所属业务节点负责。</p></div><span className="status-pill">{loaderData.total} 个文件</span></header>
+    <header className="page-header"><div><p className="eyebrow">DOCUMENT INDEX</p><h1>文件中心</h1><p>集中查看订单与配载单文件；上传、编辑、审核和门禁仍由文件所属业务节点负责。</p></div><span className="status-pill">{loaderData.scope === "order" ? "订单文件" : "配载单文件"} · {loaderData.total} 个</span></header>
     <section className="panel"><Form method="get" action="." className="filter-bar compact document-center-filters">
-      <label className="field"><span>订单号 / 配载单号 / 文件名</span><input name="q" defaultValue={loaderData.q} placeholder="输入关键词" /></label>
+      <fieldset className="document-scope-filter">
+        <legend>文件归属</legend>
+        <div className="document-scope-switch" data-scope={loaderData.scope}>
+          <input id="document-scope-order" type="radio" name="scope" value="order" checked={loaderData.scope === "order"} onChange={(event) => event.currentTarget.form?.requestSubmit()} />
+          <label htmlFor="document-scope-order"><span>订单文件</span><small>{loaderData.scopeCounts.order}</small></label>
+          <input id="document-scope-batch" type="radio" name="scope" value="batch" checked={loaderData.scope === "batch"} onChange={(event) => event.currentTarget.form?.requestSubmit()} />
+          <label htmlFor="document-scope-batch"><span>配载单文件</span><small>{loaderData.scopeCounts.batch}</small></label>
+        </div>
+      </fieldset>
+      <label className="field"><span>{loaderData.scope === "order" ? "订单号 / 文件名" : "配载单号 / 挂载订单号 / 文件名"}</span><input name="q" defaultValue={loaderData.q} placeholder="输入关键词" /></label>
       <label className="field"><span>审核状态</span><select name="status" defaultValue={loaderData.status}><option value="all">全部</option><option value="pending">待审核</option><option value="approved">已通过</option><option value="rejected">已退回</option><option value="archived">已归档</option></select></label>
       <label className="field"><span>文件类型</span><select name="category" defaultValue={loaderData.category}><option value="all">全部</option>{loaderData.categories.map((item) => <option key={item} value={item}>{orderDocumentTypeLabel(item)}</option>)}</select></label>
-      <button className="secondary">筛选</button><Link className="text-button" to="/admin/documents">重置</Link>
+      <button className="secondary">筛选</button><Link className="text-button" to={`/admin/documents?scope=${loaderData.scope}`}>重置</Link>
     </Form></section>
-    <section className="panel"><div className="table-wrap"><table><thead><tr><th>订单/配载单</th><th>文件类型</th><th>文件</th><th>来源节点</th><th>审核状态</th><th>上传</th><th>审核</th><th>操作</th></tr></thead><tbody>{loaderData.rows.map((item) => {
+    <section className="panel"><div className="table-wrap"><table><thead><tr><th>{loaderData.scope === "order" ? "订单" : "配载单 / 挂载订单"}</th><th>文件类型</th><th>文件</th><th>来源节点</th><th>审核状态</th><th>上传</th><th>审核</th><th>操作</th></tr></thead><tbody>{loaderData.rows.map((item) => {
       const placement = orderDocumentPlacement(item.document_category);
       const sourceHref = item.source_type === "batch" && item.batch_id
         ? `/admin/loading/${item.batch_id}#batch-files`
@@ -119,13 +137,13 @@ export default function DocumentCenter({ loaderData }: Route.ComponentProps) {
         <td>{item.reviewer_name || "—"}<small>{item.reviewed_at ? new Date(item.reviewed_at).toLocaleString("zh-CN") : "尚未审核"}</small></td>
         <td><div className="page-actions"><a className="text-button" href={`${fileHref}?mode=view`} target="_blank" rel="noreferrer">查看</a><a className="text-button" href={fileHref}>下载</a><Link className="text-button" to={sourceHref}>打开来源节点</Link></div></td>
       </tr>;
-    })}</tbody></table></div>{!loaderData.rows.length && <p className="empty-state">当前筛选条件下没有文件记录。</p>}
+    })}</tbody></table></div>{!loaderData.rows.length && <p className="empty-state">当前筛选条件下没有{loaderData.scope === "order" ? "订单" : "配载单"}文件记录。</p>}
       {loaderData.pageCount > 1 && <div className="pagination">{loaderData.page > 1 && <Link className="secondary" to={pageHref(loaderData, loaderData.page - 1)}>上一页</Link>}<span>第 {loaderData.page} / {loaderData.pageCount} 页</span>{loaderData.page < loaderData.pageCount && <Link className="secondary" to={pageHref(loaderData, loaderData.page + 1)}>下一页</Link>}</div>}
     </section>
   </>;
 }
 
-function pageHref(data: { q: string; status: string; category: string }, page: number) { return `/admin/documents?${new URLSearchParams({ q: data.q, status: data.status, category: data.category, page: String(page) })}`; }
+function pageHref(data: { q: string; status: string; category: string; scope: string }, page: number) { return `/admin/documents?${new URLSearchParams({ q: data.q, status: data.status, category: data.category, scope: data.scope, page: String(page) })}`; }
 function orderReferences(value: string) { return (value || "").split(",").flatMap((reference) => { const separator = reference.indexOf("|"); return separator > 0 ? [{ id: reference.slice(0, separator), number: reference.slice(separator + 1) }] : []; }); }
 function formatBytes(value: number) { return value >= 1024 * 1024 ? `${(value / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(value / 1024))} KB`; }
 function reviewLabel(value: string) { return ({ pending: "待审核", approved: "已通过", rejected: "已退回", archived: "已归档" } as Record<string, string>)[value] || value; }
