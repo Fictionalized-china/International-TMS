@@ -7,6 +7,7 @@ import { valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
 import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
+import { synchronizeOrderExceptionStatuses } from "../lib/order-exception-status.server";
 
 type ExceptionRow={id:string;exception_number:string;package_id:string;barcode:string;shipment_number:string;order_number:string;customer_name:string;customer_identity_code:string;location_name:string;exception_type:string;severity:string;status:string;description:string;resolution:string|null;reported_at:string;resolved_at:string|null;reporter_name:string|null;assignee_name:string|null};
 type Attachment={id:string;exception_id:string;file_name:string;content_type:string;size_bytes:number};
@@ -37,7 +38,7 @@ export async function action({request}:Route.ActionArgs){
   if(intent==="create"){
     const barcode=valueOf(form,"barcode").toUpperCase(),type=valueOf(form,"exceptionType"),severity=valueOf(form,"severity"),description=valueOf(form,"description"),assignedTo=valueOf(form,"assignedTo")||null;
     if(!["damage","shortage","overage","wrong_label","wrong_location","other"].includes(type)||!["low","medium","high","critical"].includes(severity)||description.length<4)return{formError:"请完整填写异常类型、等级和说明"};
-    const pkg=await env.DB.prepare("SELECT id,shipment_id,location_id,status FROM warehouse_packages WHERE organization_id=? AND warehouse_id=? AND barcode=?").bind(user.organizationId,warehouse.id,barcode).first<{id:string;shipment_id:string;location_id:string;status:string}>();
+    const pkg=await env.DB.prepare("SELECT p.id,p.shipment_id,p.location_id,p.status,s.order_id FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id WHERE p.organization_id=? AND p.warehouse_id=? AND p.barcode=?").bind(user.organizationId,warehouse.id,barcode).first<{id:string;shipment_id:string;location_id:string;status:string;order_id:string}>();
     if(!pkg)return{formError:`未找到货物标签 ${barcode}`};
     if(pkg.status==="dispatched")return{formError:"货物已经出库，请从运单异常流程处理"};
     const duplicate=await env.DB.prepare("SELECT id FROM warehouse_exceptions WHERE package_id=? AND organization_id=? AND status IN ('open','processing')").bind(pkg.id,user.organizationId).first();
@@ -53,10 +54,11 @@ export async function action({request}:Route.ActionArgs){
     ];
     for(const photo of photos)statements.push(env.DB.prepare("INSERT INTO warehouse_exception_attachments(id,organization_id,exception_id,file_name,content_type,size_bytes,data_url,uploaded_by_user_id,created_at) VALUES(?,?,?,?,?,?,?,?,?)").bind(crypto.randomUUID(),user.organizationId,id,photo.name,photo.type,photo.size,await toDataUrl(photo),user.userId,now));
     await env.DB.batch(statements);
+    await synchronizeOrderExceptionStatuses(user.organizationId,[pkg.order_id],now);
     await writeAudit({request,action:"warehouse.exception.create",resourceType:"warehouse_exception",resourceId:id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{number,barcode,type,severity,photos:photos.length}});
     return{success:`异常 ${number} 已登记，货物已冻结`};
   }
-  const exceptionId=valueOf(form,"exceptionId"),exception=await env.DB.prepare("SELECT e.id,e.package_id,e.status,e.previous_package_status,e.exception_number FROM warehouse_exceptions e JOIN warehouse_packages p ON p.id=e.package_id WHERE e.id=? AND e.organization_id=? AND p.warehouse_id=?").bind(exceptionId,user.organizationId,warehouse.id).first<{id:string;package_id:string;status:string;previous_package_status:string;exception_number:string}>();
+  const exceptionId=valueOf(form,"exceptionId"),exception=await env.DB.prepare("SELECT e.id,e.package_id,e.status,e.previous_package_status,e.exception_number,s.order_id FROM warehouse_exceptions e JOIN warehouse_packages p ON p.id=e.package_id JOIN shipments s ON s.id=e.shipment_id WHERE e.id=? AND e.organization_id=? AND p.warehouse_id=?").bind(exceptionId,user.organizationId,warehouse.id).first<{id:string;package_id:string;status:string;previous_package_status:string;exception_number:string;order_id:string}>();
   if(!exception)return{formError:"异常记录不存在"};
   if(intent==="processing"){
     if(exception.status!=="open")return{formError:"只有待处理异常可以开始处理"};
@@ -71,6 +73,7 @@ export async function action({request}:Route.ActionArgs){
       env.DB.prepare("UPDATE warehouse_exceptions SET status='resolved',resolution=?,resolved_by_user_id=?,resolved_at=?,updated_at=? WHERE id=?").bind(resolution,user.userId,now,now,exception.id),
       env.DB.prepare("UPDATE warehouse_packages SET status=?,updated_at=? WHERE id=? AND organization_id=? AND status='exception'").bind(exception.previous_package_status,now,exception.package_id,user.organizationId)
     ]);
+    await synchronizeOrderExceptionStatuses(user.organizationId,[exception.order_id],now);
     await writeAudit({request,action:"warehouse.exception.resolve",resourceType:"warehouse_exception",resourceId:exception.id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{resolution}});
     return{success:`${exception.exception_number} 已结案，货物已解除冻结`};
   }

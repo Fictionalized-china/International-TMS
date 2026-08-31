@@ -939,10 +939,19 @@ async function resolveFieldPresence(
 
   if (moduleCode === "exceptions") {
     const exceptions = await env.DB.prepare(
-      `SELECT COUNT(*) total
-       FROM warehouse_exceptions e JOIN shipments s ON s.id=e.shipment_id
-       WHERE e.organization_id=? AND s.order_id=?`,
-    ).bind(organizationId, orderId).first<{ total: number }>();
+      `SELECT
+        (SELECT COUNT(*) FROM warehouse_exceptions e JOIN shipments s ON s.id=e.shipment_id
+         WHERE e.organization_id=? AND s.order_id=?)
+        +
+        (SELECT COUNT(*) FROM transport_batch_exceptions e
+         WHERE e.organization_id=? AND (
+           e.order_id=? OR (e.scope='batch' AND EXISTS(
+             SELECT 1 FROM transport_batch_orders bo
+             WHERE bo.organization_id=e.organization_id AND bo.batch_id=e.batch_id
+               AND bo.order_id=? AND bo.status!='removed'
+           ))
+         )) total`,
+    ).bind(organizationId, orderId, organizationId, orderId, orderId).first<{ total: number }>();
     setPresence(result, "exception_records", exceptions?.total ?? 0, true);
   }
 

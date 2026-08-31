@@ -425,6 +425,7 @@ export async function action({ request }: Route.ActionArgs) {
       title:`工作流字段规则已变更：${field.label}`,
       message:`${field.label} 已由${previousMode==="required"?"必填":previousMode==="optional"?"选填":"隐藏"}改为${mode==="required"?"必填":mode==="optional"?"选填":"隐藏"}。影响 ${impact.total} 张订单：当前 ${impact.current}、未来 ${impact.future}、历史补录 ${impact.historical}、审计补录 ${impact.auditOnly}；历史节点不会回退。`,
       link:`/admin/workflow?workflowId=${encodeURIComponent(workflowId)}`,
+      requiresLeadershipAck:true,
     });
     const preservedText = preserved && (preserved.preservedFiles || preserved.preservedCustomValues)
       ? `；历史数据已保留（${preserved.preservedFiles} 个文件、${preserved.preservedCustomValues} 条自定义值）`
@@ -640,6 +641,7 @@ export async function action({ request }: Route.ActionArgs) {
       title:`工作流新增字段：${parsed.label}`,
       message:`“${parsed.label}”已加入“${step.step_key}”节点并设为${workflowModeLabel(parsed.mode)}。影响 ${impact.total} 张订单；历史节点不回退${supplementTasks.created?`，已生成 ${supplementTasks.created} 项补录任务`:""}。`,
       link:`/admin/workflow?workflowId=${encodeURIComponent(workflowId)}`,
+      requiresLeadershipAck:true,
     });
     return { success: `字段“${parsed.label}”已新增并同步到 ${impact.total} 张现有订单${supplementTasks.created?`；已创建 ${supplementTasks.created} 项资料补录任务`:""}` };
   }
@@ -756,6 +758,7 @@ export async function action({ request }: Route.ActionArgs) {
       title:`工作流字段积木已变更：${catalog.label}`,
       message:`“${catalog.label}”已${exists?"更新":"加入"}到“${step.step_key}”并设为${workflowModeLabel(mode)}。影响 ${impact.total} 张订单；历史节点不回退${supplementTasks.created?`，已生成 ${supplementTasks.created} 项补录任务`:""}。`,
       link:`/admin/workflow?workflowId=${encodeURIComponent(workflowId)}`,
+      requiresLeadershipAck:true,
     });
     return { success: `业务字段“${catalog.label}”已${exists ? "更新" : "加入"}到“${step.step_key}”，${impact.total} 张现有订单已同步${supplementTasks.created?`；已创建 ${supplementTasks.created} 项补录任务`:""}` };
   }

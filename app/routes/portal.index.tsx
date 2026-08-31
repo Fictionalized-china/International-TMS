@@ -73,7 +73,7 @@ export default function PortalIndex({ loaderData }: Route.ComponentProps) {
     <section className="table-panel portal-home-orders">
       <div className="table-panel-head"><div><b>最近订单</b><span>已接受报价自动生成，显示当前真实业务节点。</span></div><Link className="btn small" to="/portal/orders">查看全部</Link></div>
       <div className="table-wrap"><table><thead><tr><th>订单 / 报价</th><th>类型</th><th>货物</th><th>线路</th><th>当前节点</th><th>状态</th><th>操作</th></tr></thead><tbody>
-        {loaderData.recentOrders.map((order) => <tr key={order.id} className={order.exception_status && order.exception_status !== "none" ? "row-alert" : ""}>
+        {loaderData.recentOrders.map((order) => <tr key={order.id} className={order.exception_status && order.exception_status !== "normal" ? "row-alert" : ""}>
           <td><b className="order-id">{order.order_number}</b><small className="subline">{order.quote_number || "历史订单"}</small></td>
           <td><span className={`pill ${order.business_type === "ltl" ? "ltl" : ""}`}>{order.business_type === "ltl" ? "拼车" : "整车"}</span></td>
           <td><span className="cell-main">{order.cargo_description || "货物待补充"}</span></td>
@@ -107,7 +107,7 @@ function statusLabel(status: string) {
 }
 function statusTone(status: string, exceptionStatus: string | null) {
   if (status === "completed") return "green";
-  if ((exceptionStatus && exceptionStatus !== "none") || status === "cancelled") return "red";
+  if ((exceptionStatus && exceptionStatus !== "normal") || status === "cancelled") return "red";
   if (["draft", "submitted"].includes(status)) return "orange";
   return "blue";
 }

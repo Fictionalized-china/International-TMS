@@ -279,8 +279,18 @@ async function buildOrderReview(
       (SELECT COUNT(*) FROM warehouse_receipt_differences d WHERE d.organization_id=? AND d.order_id=? AND d.status!='cancelled' AND d.max_difference_percent>0) cargo_difference_count,
       COALESCE((SELECT MAX(d.max_difference_percent) FROM warehouse_receipt_differences d WHERE d.organization_id=? AND d.order_id=? AND d.status!='cancelled'),0) max_difference,
       (SELECT COUNT(*) FROM warehouse_receipt_differences d WHERE d.organization_id=? AND d.order_id=? AND (d.status='pending' OR d.fee_impact_confirmed=0)) pending_difference_count,
-      (SELECT COUNT(*) FROM warehouse_exceptions x JOIN shipments s ON s.id=x.shipment_id WHERE x.organization_id=? AND s.order_id=? AND x.status IN ('open','processing')) open_exception_count`)
-      .bind(organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId)
+      ((SELECT COUNT(*) FROM warehouse_exceptions x JOIN shipments s ON s.id=x.shipment_id
+        WHERE x.organization_id=? AND s.order_id=? AND x.status IN ('open','processing'))
+       +
+       (SELECT COUNT(*) FROM transport_batch_exceptions x
+        WHERE x.organization_id=? AND x.status IN ('open','processing') AND x.blocks_progress=1 AND (
+          x.order_id=? OR (x.scope='batch' AND EXISTS(
+            SELECT 1 FROM transport_batch_orders bo
+            WHERE bo.organization_id=x.organization_id AND bo.batch_id=x.batch_id
+              AND bo.order_id=? AND bo.status!='removed'
+          ))
+        ))) open_exception_count`)
+      .bind(organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId,orderId)
       .first<{cargo_difference_count:number;max_difference:number;pending_difference_count:number;open_exception_count:number}>(),
     db.prepare(`SELECT
       (SELECT u.display_name FROM order_module_instances m JOIN users u ON u.id=m.assignee_user_id WHERE m.organization_id=? AND m.order_id=? AND m.module_code='transport') main_operator,

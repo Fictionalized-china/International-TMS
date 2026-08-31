@@ -488,7 +488,7 @@ function ShipmentWorkflow({shipment}:{shipment:Shipment}) {
   const progress=Math.max(0,Math.min(100,Number(shipment.workflow_progress_percent||0)));
   const hasModules=shipment.workflow_module_count>0;
   const currentStep=shipment.workflow_current_module||shipment.order_current_step_name||orderStatusLabel(shipment.order_status);
-  const hasAlert=Boolean(shipment.order_is_overdue)||Boolean(shipment.order_exception_status);
+  const hasAlert=Boolean(shipment.order_is_overdue)||["warning","exception"].includes(shipment.order_exception_status||"");
   return <div className={`shipment-workflow${hasAlert?" has-alert":""}`}>
     <div className="shipment-workflow-heading">
       <span className={`status-pill order-workflow-status-${shipment.order_status}`}>{orderStatusLabel(shipment.order_status)}</span>

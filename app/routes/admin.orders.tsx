@@ -59,8 +59,8 @@ export async function loader({ request }: Route.LoaderArgs) {
     where.push("COALESCE(o.current_step_name,'')=?");
     values.push(step);
   }
-  if (exception === "yes") where.push("COALESCE(o.exception_status,'none')!='none'");
-  if (exception === "no") where.push("COALESCE(o.exception_status,'none')='none'");
+  if (exception === "yes") where.push("COALESCE(o.exception_status,'normal')!='normal'");
+  if (exception === "no") where.push("COALESCE(o.exception_status,'normal')='normal'");
   const clause = where.join(" AND ");
   const [rows, countRow, stepRows] = await Promise.all([
     env.DB.prepare(
@@ -105,7 +105,7 @@ export async function loader({ request }: Route.LoaderArgs) {
 export default function Orders({ loaderData }: Route.ComponentProps) {
   const active = loaderData.orders.filter((order) => !["completed", "cancelled"].includes(order.status)).length;
   const completed = loaderData.orders.filter((order) => order.status === "completed").length;
-  const exceptions = loaderData.orders.filter((order) => order.exception_status && order.exception_status !== "none").length;
+  const exceptions = loaderData.orders.filter((order) => order.exception_status && order.exception_status !== "normal").length;
   return (
     <div className="page prototype-page order-list-page">
       <div className="breadcrumb">汽运业务 / 运输订单</div>
@@ -135,7 +135,7 @@ export default function Orders({ loaderData }: Route.ComponentProps) {
             <thead><tr><th>订单 / 报价</th><th>客户</th><th>类型</th><th>货物与实物数据</th><th>线路与目的仓</th><th>当前节点</th><th>负责人</th><th>状态</th><th>操作</th></tr></thead>
             <tbody>
               {loaderData.orders.map((order) => (
-                <tr key={order.id} className={order.status !== "completed" && order.exception_status && order.exception_status !== "none" ? "row-alert" : ""}>
+                <tr key={order.id} className={order.status !== "completed" && order.exception_status && order.exception_status !== "normal" ? "row-alert" : ""}>
                   <td><Link className="order-id" to={`/admin/orders/${order.id}`}>{order.order_number}</Link><small className="subline">{order.quote_number || "历史订单无关联报价"}</small></td>
                   <td><b>{order.customer_name}</b><small className="subline">{order.order_date || order.created_at.slice(0, 10)}</small></td>
                   <td><span className={`pill ${order.business_type === "ltl" ? "ltl" : ""}`}>{order.business_type === "ltl" ? "拼车" : "整车"}</span></td>
@@ -186,7 +186,7 @@ function statusLabel(status: string) {
 
 function statusTone(status: string, exceptionStatus: string | null) {
   if (status === "completed") return "green";
-  if (exceptionStatus && exceptionStatus !== "none") return "red";
+  if (exceptionStatus && exceptionStatus !== "normal") return "red";
   if (["cancelled"].includes(status)) return "red";
   if (["draft", "submitted"].includes(status)) return "orange";
   return "blue";

@@ -12,6 +12,7 @@ import { recordWarehouseProgress } from "../lib/warehouse-progress.server";
 import { recordWorkflowEvent } from "../lib/business-workflow.server";
 import { syncOrderWorkflowSnapshot } from "../lib/order-modules.server";
 import { writeAudit } from "../lib/audit.server";
+import { synchronizeOrderExceptionStatuses } from "../lib/order-exception-status.server";
 
 type AcceptanceOrder = {
   id: string;
@@ -280,10 +281,21 @@ export async function action({ request }: Route.ActionArgs) {
 
   if (result === "ready") {
     const activeException = await env.DB.prepare(
-      `SELECT e.exception_number FROM warehouse_exceptions e
-       JOIN shipments s ON s.id=e.shipment_id
-       WHERE e.organization_id=? AND s.order_id=? AND e.status IN ('open','processing') LIMIT 1`,
-    ).bind(user.organizationId, order.id).first<{ exception_number: string }>();
+      `SELECT exception_number FROM (
+         SELECT e.exception_number,e.reported_at event_at
+         FROM warehouse_exceptions e JOIN shipments s ON s.id=e.shipment_id
+         WHERE e.organization_id=? AND s.order_id=? AND e.status IN ('open','processing')
+         UNION ALL
+         SELECT e.exception_number,e.reported_at event_at
+         FROM transport_batch_exceptions e
+         WHERE e.organization_id=? AND e.status IN ('open','processing') AND e.blocks_progress=1
+           AND (e.order_id=? OR (e.scope='batch' AND EXISTS(
+             SELECT 1 FROM transport_batch_orders bo
+             WHERE bo.organization_id=e.organization_id AND bo.batch_id=e.batch_id
+               AND bo.order_id=? AND bo.status!='removed'
+           )))
+       ) ORDER BY event_at LIMIT 1`,
+    ).bind(user.organizationId, order.id, user.organizationId, order.id, order.id).first<{ exception_number: string }>();
     if (activeException) return { formError: `订单仍有未结案异常 ${activeException.exception_number}，处理结案后才能确认货齐` };
   }
 
@@ -461,6 +473,10 @@ export async function action({ request }: Route.ActionArgs) {
   } catch (error) {
     console.error("warehouse acceptance failed", error);
     return { formError: "验收入库失败，未写入库存，请检查数据后重试" };
+  }
+
+  if (result === "exception") {
+    await synchronizeOrderExceptionStatuses(user.organizationId, [order.id], now);
   }
 
   if (result === "ready") {

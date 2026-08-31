@@ -20,6 +20,7 @@ export async function broadcastInternalNotification(input:{
   title:string;
   message:string;
   link?:string|null;
+  requiresLeadershipAck?:boolean;
 }) {
   const now = new Date().toISOString();
   return env.DB.prepare(
@@ -28,18 +29,18 @@ export async function broadcastInternalNotification(input:{
       is_read,created_by_user_id,created_at
      )
      SELECT lower(hex(randomblob(16))),m.organization_id,m.user_id,?,?,?,?,?,
-       CASE WHEN m.user_id=? OR EXISTS(
+       CASE WHEN ?=1 AND (m.user_id=? OR EXISTS(
          SELECT 1 FROM membership_roles mr
          JOIN roles r ON r.id=mr.role_id
          WHERE mr.membership_id=m.id AND r.code IN ('owner','boss','developer')
-       ) THEN 1 ELSE 0 END,
+       )) THEN 1 ELSE 0 END,
        0,?,?
      FROM memberships m
      JOIN users u ON u.id=m.user_id AND u.status='active'
      WHERE m.organization_id=? AND m.status='active'`,
   ).bind(
     input.category,input.severity,input.title,input.message,input.link??null,
-    input.actorUserId,input.actorUserId,now,input.organizationId,
+    input.requiresLeadershipAck?1:0,input.actorUserId,input.actorUserId,now,input.organizationId,
   ).run();
 }
 
