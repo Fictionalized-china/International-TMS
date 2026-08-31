@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Form, Link, useNavigation } from "react-router";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import type { Route } from "./+types/admin.quotations";
 import { Modal } from "../components/Modal";
 import { requireSessionUser } from "../lib/auth.server";
@@ -351,65 +351,70 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
   };
   return <Form method="post" className="prototype-quote-form">
     <input type="hidden" name="intent" value="create"/>
-    <div className="gate ok">出现 * 表示必填项尚未填写；报价被接受后，相关数据会自动继承到运输订单，运输类型随即锁定。</div>
-    <FormSection className="quote-plan-section" title="客户与运输方案" note="报价确认后不再重复创建订单">
-      <div className="grid">
-        <Field label="客户"><select className="control filled" name="customerId" value={customerId} onChange={(event) => selectCustomer(event.target.value)} required><option value="">请选择客户</option>{loaderData.customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name}</option>)}</select></Field>
+    <div className="quote-form-note">必填项只有在未填写时显示红色标记；报价被接受后，表内数据自动继承到运输订单。</div>
+    <div className="quote-ledger">
+    <QuoteLedgerSection className="quote-plan-section" title="客户与运输方案" note="报价确认后不再重复创建订单">
+      <div className="quote-field-grid quote-plan-grid">
+        <Field label="客户"><select className="control" name="customerId" value={customerId} onChange={(event) => selectCustomer(event.target.value)} required><option value="">请选择客户</option>{loaderData.customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name}</option>)}</select></Field>
         <Field label="客户联系人"><ContactCombobox name="customerContactName" value={customerContactName} contacts={selectedCustomerContacts} mode="name" onChange={(value, contact) => { setCustomerContactName(value); if (contact?.phone) setCustomerContactPhone(contact.phone); }} /></Field>
         <Field label="联系电话"><ContactCombobox name="customerContactPhone" value={customerContactPhone} contacts={selectedCustomerContacts} mode="phone" onChange={(value, contact) => { setCustomerContactPhone(value); if (contact) setCustomerContactName(contact.name); }} /></Field>
-        <Field label="业务员"><select className="control filled" name="salespersonId" defaultValue={loaderData.current.userId} required><option value="">请选择业务员</option>{loaderData.users.map((user) => <option key={user.id} value={user.id}>{user.display_name} · {user.email}</option>)}</select></Field>
-        <Field label="运输方式"><select className="control filled" name="transportMode" defaultValue="ROAD" required><option value="ROAD">汽运</option><option value="RAIL" disabled>铁运（流程未开放）</option><option value="AIR" disabled>空运（流程未开放）</option></select></Field>
-        <Field label="订单类型"><select className="control filled" name="roadLoadType" defaultValue="ltl" required><option value="ltl">拼车</option><option value="ftl">整车</option></select></Field>
-        <Field label="清关办理方式"><select className="control filled" name="customsClearanceMode" defaultValue="company" required><option value="company">公司代办清关</option><option value="customer">客户自理清关</option></select></Field>
+        <Field label="业务员"><select className="control" name="salespersonId" defaultValue={loaderData.current.userId} required><option value="">请选择业务员</option>{loaderData.users.map((user) => <option key={user.id} value={user.id}>{user.display_name} · {user.email}</option>)}</select></Field>
+        <Field label="运输方式"><select className="control" name="transportMode" defaultValue="ROAD" required><option value="ROAD">汽运</option><option value="RAIL" disabled>铁运（流程未开放）</option><option value="AIR" disabled>空运（流程未开放）</option></select></Field>
+        <Field label="订单类型"><select className="control" name="roadLoadType" defaultValue="ltl" required><option value="ltl">拼车</option><option value="ftl">整车</option></select></Field>
+        <Field label="清关办理方式"><select className="control" name="customsClearanceMode" defaultValue="company" required><option value="company">公司代办清关</option><option value="customer">客户自理清关</option></select></Field>
       </div>
-    </FormSection>
-    <FormSection className="quote-route-section" title="运输路线" note="按国家 / 地区 → 省 / 州 → 城市逐级选择，最终目的地为境外目的仓">
+    </QuoteLedgerSection>
+    <QuoteLedgerSection className="quote-route-section" title="运输路线" note="点击地区后按国家 / 地区 → 省 / 州 → 城市逐级展开">
       <div className="quote-route-compare">
         <section className="quote-route-group" aria-labelledby="quote-origin-heading">
           <header className="quote-route-group-title"><b id="quote-origin-heading">起运</b><span>客户提货信息</span></header>
-          <div className="quote-route-group-grid">
+          <div className="quote-route-group-body">
             <GeoCascadeFields key={`origin-${customerId}`} prefix="origin" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} initialCountry={selectedCustomer?.pickup_country_code} initialProvince={selectedCustomer?.pickup_state_code} initialCity={selectedCustomer?.pickup_city} />
-            <Field label="提货地址" className="quote-route-address"><textarea className="control textarea editing" name="pickupAddress" rows={2} value={pickupAddress} onChange={(event) => setPickupAddress(event.target.value)} required /></Field>
+            <Field label="提货地址" className="quote-route-address"><textarea className="control textarea" name="pickupAddress" rows={2} value={pickupAddress} onChange={(event) => setPickupAddress(event.target.value)} required /></Field>
           </div>
         </section>
         <section className="quote-route-group" aria-labelledby="quote-destination-heading">
           <header className="quote-route-group-title"><b id="quote-destination-heading">目的地</b><span>境外目的仓信息</span></header>
-          <div className="quote-route-group-grid">
+          <div className="quote-route-group-body">
             <GeoCascadeFields prefix="destination" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} />
-            <Field label="目的仓库" className="quote-route-warehouse"><select className="control filled" name="destinationWarehouseId" required><option value="">请选择境外目的仓</option>{loaderData.warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></Field>
+            <Field label="目的仓库" className="quote-route-warehouse"><select className="control quote-warehouse-select" name="destinationWarehouseId" required><option value="">请选择境外目的仓</option>{loaderData.warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></Field>
             <Field label="报价目的地备注" className="quote-route-note"><textarea className="control textarea" name="destinationWarehouseNote" rows={2} /></Field>
           </div>
         </section>
       </div>
-    </FormSection>
-    <FormSection title="货物预估数据" note="仓库实收后登记实际数据">
-      <div className="grid quote-cargo-grid">
-        <Field label="货物描述" className="quote-cargo-description"><textarea className="control textarea editing" name="cargoDescription" rows={3} placeholder="填写货物名称、品类、材质、用途或其他便于识别的说明" required /></Field>
+    </QuoteLedgerSection>
+    <QuoteLedgerSection title="货物预估与报价说明" note="货物数据为预估值，仓库收货后登记实际数据">
+      <div className="quote-description-grid">
+        <Field label="货物描述"><textarea className="control textarea" name="cargoDescription" rows={3} placeholder="填写货物名称、品类、材质、用途等说明" required /></Field>
+        <Field label="报价备注"><textarea className="control textarea" name="notes" rows={3} placeholder="填写报价范围、特殊约定或其他说明" /></Field>
+      </div>
+      <div className="quote-cargo-grid">
         <div className="table-wrap quote-cargo-metrics-table"><table className="inline-table"><thead><tr><th>预计件数</th><th>预计重量 KG</th><th>预计长度 CM</th><th>预计宽度 CM</th><th>预计高度 CM</th><th>预计体积 CBM（自动计算）</th></tr></thead><tbody><tr>
-          <td><input aria-label="预计件数" className="control filled" name="pieces" type="number" min="1" value={pieces} onChange={(event) => setPieces(event.target.value)} required/></td>
-          <td><input aria-label="预计重量 KG" className="control filled" name="weight" type="number" min="0.001" step="0.001" required/></td>
-          <td><input aria-label="预计长度 CM" className="control filled" name="length" type="number" min="0.01" step="0.01" value={lengthCm} onChange={(event) => setLengthCm(event.target.value)} required/></td>
-          <td><input aria-label="预计宽度 CM" className="control filled" name="width" type="number" min="0.01" step="0.01" value={widthCm} onChange={(event) => setWidthCm(event.target.value)} required/></td>
-          <td><input aria-label="预计高度 CM" className="control filled" name="height" type="number" min="0.01" step="0.01" value={heightCm} onChange={(event) => setHeightCm(event.target.value)} required/></td>
-          <td><input aria-label="预计体积 CBM" className="control filled quote-calculated-volume" name="volume" type="number" min="0.0001" step="0.0001" value={calculatedVolume} readOnly required/></td>
+          <td><input aria-label="预计件数" className="control" name="pieces" type="number" min="1" value={pieces} onChange={(event) => setPieces(event.target.value)} required/></td>
+          <td><input aria-label="预计重量 KG" className="control" name="weight" type="number" min="0.001" step="0.001" required/></td>
+          <td><input aria-label="预计长度 CM" className="control" name="length" type="number" min="0.01" step="0.01" value={lengthCm} onChange={(event) => setLengthCm(event.target.value)} required/></td>
+          <td><input aria-label="预计宽度 CM" className="control" name="width" type="number" min="0.01" step="0.01" value={widthCm} onChange={(event) => setWidthCm(event.target.value)} required/></td>
+          <td><input aria-label="预计高度 CM" className="control" name="height" type="number" min="0.01" step="0.01" value={heightCm} onChange={(event) => setHeightCm(event.target.value)} required/></td>
+          <td><input aria-label="预计体积 CBM" className="control quote-calculated-volume" name="volume" type="number" min="0.0001" step="0.0001" value={calculatedVolume} readOnly required/></td>
         </tr></tbody></table></div>
       </div>
-    </FormSection>
-    <FormSection
+    </QuoteLedgerSection>
+    <QuoteLedgerSection
       title="客户应收费用"
       note="接受后直接继承到订单结算"
       action={<button className="btn quote-charge-add" type="button" onClick={() => setCharges((rows) => [...rows, { name: transportChargeNameOptions[0]?.[0] || "国际汽运费", quantity: 1, unitPrice: 0, notes: "" }])}>＋ 添加费用</button>}
     >
-      <table className="inline-table quote-charge-table"><thead><tr><th>费用名称</th><th>数量</th><th>单价</th><th>金额</th><th>备注</th><th>操作</th></tr></thead><tbody>{charges.map((charge, index) => <tr key={index}><td><select className="control filled" name="chargeName" value={charge.name} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, name: event.target.value } : row))} required>{transportChargeNameOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td><td><input className="control filled" name="chargeQuantity" type="number" min="0.01" step="0.01" value={charge.quantity} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: Number(event.target.value) } : row))} required/></td><td><input className="control filled" name="chargeUnitPrice" type="number" min="0.01" step="0.01" value={charge.unitPrice} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, unitPrice: Number(event.target.value) } : row))} required/></td><td><b>{(charge.quantity * charge.unitPrice).toLocaleString()}</b></td><td><input className="control" name="chargeNotes" value={charge.notes} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, notes: event.target.value } : row))}/></td><td><button className="btn danger" type="button" disabled={charges.length === 1} onClick={() => setCharges((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>删除</button></td></tr>)}</tbody></table>
+      <div className="table-wrap quote-charge-table-wrap"><table className="inline-table quote-charge-table"><thead><tr><th>费用名称</th><th>数量</th><th>单价</th><th>金额</th><th>备注</th><th>操作</th></tr></thead><tbody>{charges.map((charge, index) => <tr key={index}><td><select className="control" name="chargeName" value={charge.name} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, name: event.target.value } : row))} required>{transportChargeNameOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td><td><input className="control" name="chargeQuantity" type="number" min="0.01" step="0.01" value={charge.quantity} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: Number(event.target.value) } : row))} required/></td><td><input className="control" name="chargeUnitPrice" type="number" min="0.01" step="0.01" value={charge.unitPrice} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, unitPrice: Number(event.target.value) } : row))} required/></td><td><b>{(charge.quantity * charge.unitPrice).toLocaleString()}</b></td><td><input className="control" name="chargeNotes" value={charge.notes} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, notes: event.target.value } : row))}/></td><td><button className="btn danger" type="button" disabled={charges.length === 1} onClick={() => setCharges((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>删除</button></td></tr>)}</tbody></table></div>
       <div className="quote-charge-summary"><small>共 {charges.length} 个费用项目，系统按“数量 × 单价”自动汇总</small><strong>报价总额 CNY {total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></div>
-      <div className="grid two"><Field label="报价有效期"><input className="control" name="validUntil" type="date"/></Field><Field label="报价备注"><textarea className="control textarea" name="notes"/></Field></div>
-    </FormSection>
+      <div className="quote-validity-row"><Field label="报价有效期"><input className="control" name="validUntil" type="date"/></Field></div>
+    </QuoteLedgerSection>
+    </div>
     <div className="modal-form-actions"><button className="btn primary large" disabled={busy}>保存报价并等待客户确认</button></div>
   </Form>;
 }
 
-function FormSection({ title, note, action, className = "", children }: { title: string; note: string; action?: React.ReactNode; className?: string; children: React.ReactNode }) {
-  return <section className={`section ${className}`}><div className="section-title"><b>{title}</b><div className="quote-section-heading"><span>{note}</span>{action}</div></div>{children}</section>;
+function QuoteLedgerSection({ title, note, action, className = "", children }: { title: string; note: string; action?: React.ReactNode; className?: string; children: React.ReactNode }) {
+  return <section className={`quote-ledger-section ${className}`}><div className="quote-ledger-heading"><b>{title}</b><div className="quote-section-heading"><span>{note}</span>{action}</div></div><div className="quote-ledger-body">{children}</div></section>;
 }
 
 function Field({ label, className = "", children }: { label: string; className?: string; children: React.ReactNode }) {
@@ -489,7 +494,8 @@ function GeoCascadeFields({
   const [countryCode, setCountryCode] = useState(initialCountryCode);
   const [provinceCode, setProvinceCode] = useState(initialProvinceCode);
   const [cityCode, setCityCode] = useState(initialCityCode);
-  const [openLevel, setOpenLevel] = useState<1 | 2 | 3 | null>(null);
+  const [isOpen, setIsOpen] = useState(false);
+  const pickerRef = useRef<HTMLDivElement>(null);
   const countryOptions = countries;
   const provinceOptions = provinces.filter((option) => option.parent_code === countryCode);
   const cityOptions = cities.filter((option) => option.parent_code === provinceCode);
@@ -497,84 +503,71 @@ function GeoCascadeFields({
   const provinceName = provinces.find((option) => option.code === provinceCode)?.name || "";
   const cityName = cities.find((option) => option.code === cityCode)?.name || "";
   const placeLabel = prefix === "origin" ? "起运" : "目的";
-  const activeOptions = openLevel === 1 ? countryOptions : openLevel === 2 ? provinceOptions : openLevel === 3 ? cityOptions : [];
-  const activeValue = openLevel === 1 ? countryCode : openLevel === 2 ? provinceCode : cityCode;
-  const activeLabel = openLevel === 1 ? "国家 / 地区" : openLevel === 2 ? "省 / 州" : "城市";
   const selectionLabel = [countryName, provinceName, cityName].filter(Boolean).join(" / ");
-  const panelId = `${prefix}-geo-drawer`;
-  const chooseOption = (option: GeoOption) => {
-    if (openLevel === 1) {
-      setCountryCode(option.code);
-      setProvinceCode("");
-      setCityCode("");
-      setOpenLevel(2);
-      return;
-    }
-    if (openLevel === 2) {
-      setProvinceCode(option.code);
-      setCityCode("");
-      setOpenLevel(3);
-      return;
-    }
-    setCityCode(option.code);
-    setOpenLevel(null);
-  };
-  const openRequiredLevel = (level: 1 | 2 | 3) => {
-    if (level === 2 && !countryCode) {
-      setOpenLevel(1);
-      return;
-    }
-    if (level === 3 && !provinceCode) {
-      setOpenLevel(countryCode ? 2 : 1);
-      return;
-    }
-    setOpenLevel((current) => current === level ? null : level);
-  };
-  return <div className={`quote-geo-picker ${cityCode ? "is-complete" : "is-incomplete"}`}>
-    <div className="quote-geo-picker-head">
-      <span className="quote-geo-picker-label">{placeLabel}地区</span>
-      <small aria-live="polite">{selectionLabel || "请选择国家 / 地区"}</small>
-    </div>
-    <div className="quote-geo-steps">
-      <GeoStepButton
-        step={1}
-        label="国家 / 地区"
-        value={countryName}
-        active={openLevel === 1}
-        disabled={false}
-        panelId={panelId}
-        onClick={() => openRequiredLevel(1)}
+  const panelId = `${prefix}-geo-cascade`;
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (!pickerRef.current?.contains(event.target as Node)) setIsOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setIsOpen(false);
+    };
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [isOpen]);
+
+  return <div ref={pickerRef} className={`quote-geo-picker ${cityCode ? "is-complete" : "is-incomplete"} ${isOpen ? "is-open" : ""}`}>
+    <button
+      aria-controls={panelId}
+      aria-expanded={isOpen}
+      className="quote-geo-trigger"
+      type="button"
+      onClick={() => setIsOpen((current) => !current)}
+    >
+      <span className="quote-geo-trigger-label">{placeLabel}地区</span>
+      <b>{selectionLabel || "请选择国家 / 地区"}</b>
+      <ChevronDown aria-hidden="true" size={14}/>
+    </button>
+    {isOpen && <div className="quote-geo-cascade" id={panelId} role="group" aria-label={`选择${placeLabel}地区`}>
+      <GeoCascadePanel
+        title="1  国家 / 地区"
+        options={countryOptions}
+        activeValue={countryCode}
+        emptyText="暂无国家 / 地区数据"
+        showNext
+        onSelect={(option) => {
+          setCountryCode(option.code);
+          setProvinceCode("");
+          setCityCode("");
+        }}
       />
-      <GeoStepButton
-        step={2}
-        label="省 / 州"
-        value={provinceName}
-        active={openLevel === 2}
-        disabled={!countryCode}
-        panelId={panelId}
-        onClick={() => openRequiredLevel(2)}
-      />
-      <GeoStepButton
-        step={3}
-        label="城市"
-        value={cityName}
-        active={openLevel === 3}
-        disabled={!provinceCode}
-        panelId={panelId}
-        onClick={() => openRequiredLevel(3)}
-      />
-    </div>
-    {openLevel && <div className="quote-geo-drawer" id={panelId} role="group" aria-label={`选择${placeLabel}${activeLabel}`}>
-      <div className="quote-geo-drawer-head"><b>选择{placeLabel}{activeLabel}</b><button type="button" onClick={() => setOpenLevel(null)}>收起</button></div>
-      {activeOptions.length > 0
-        ? <div className="quote-geo-options">{activeOptions.map((option) => <button
-            aria-pressed={activeValue === option.code}
-            className={activeValue === option.code ? "selected" : ""}
-            key={`${prefix}-${openLevel}-${option.code}`}
-            type="button"
-            onClick={() => chooseOption(option)}
-          >{option.name}</button>)}</div>
-        : <p className="quote-geo-empty">当前层级没有可选数据，请先检查上一级选择。</p>}
+      {countryCode && <GeoCascadePanel
+        title="2  省 / 州"
+        options={provinceOptions}
+        activeValue={provinceCode}
+        emptyText="该国家暂无省 / 州数据"
+        showNext
+        onSelect={(option) => {
+          setProvinceCode(option.code);
+          setCityCode("");
+        }}
+      />}
+      {provinceCode && <GeoCascadePanel
+        title="3  城市"
+        options={cityOptions}
+        activeValue={cityCode}
+        emptyText="该省 / 州暂无城市数据"
+        onSelect={(option) => {
+          setCityCode(option.code);
+          setIsOpen(false);
+        }}
+      />}
     </div>}
     <select
       aria-label={`${placeLabel}国家 / 地区校验`}
@@ -582,7 +575,7 @@ function GeoCascadeFields({
       name={`${prefix}Country`}
       value={countryName}
       onChange={() => undefined}
-      onInvalid={() => setOpenLevel(1)}
+      onInvalid={() => setIsOpen(true)}
       required
       tabIndex={-1}
     ><option value=""/>{countryName && <option value={countryName}>{countryName}</option>}</select>
@@ -592,7 +585,7 @@ function GeoCascadeFields({
       name={`${prefix}State`}
       value={provinceName}
       onChange={() => undefined}
-      onInvalid={() => setOpenLevel(countryCode ? 2 : 1)}
+      onInvalid={() => setIsOpen(true)}
       required
       tabIndex={-1}
     ><option value=""/>{provinceName && <option value={provinceName}>{provinceName}</option>}</select>
@@ -602,42 +595,41 @@ function GeoCascadeFields({
       name={`${prefix}City`}
       value={cityName}
       onChange={() => undefined}
-      onInvalid={() => setOpenLevel(provinceCode ? 3 : countryCode ? 2 : 1)}
+      onInvalid={() => setIsOpen(true)}
       required
       tabIndex={-1}
     ><option value=""/>{cityName && <option value={cityName}>{cityName}</option>}</select>
   </div>;
 }
 
-function GeoStepButton({
-  step,
-  label,
-  value,
-  active,
-  disabled,
-  panelId,
-  onClick,
+function GeoCascadePanel({
+  title,
+  options,
+  activeValue,
+  emptyText,
+  showNext = false,
+  onSelect,
 }: {
-  step: 1 | 2 | 3;
-  label: string;
-  value: string;
-  active: boolean;
-  disabled: boolean;
-  panelId: string;
-  onClick: () => void;
+  title: string;
+  options: GeoOption[];
+  activeValue: string;
+  emptyText: string;
+  showNext?: boolean;
+  onSelect: (option: GeoOption) => void;
 }) {
-  return <button
-    aria-controls={panelId}
-    aria-expanded={active}
-    className={`quote-geo-step ${value ? "is-selected" : "is-missing"} ${active ? "is-active" : ""}`}
-    disabled={disabled}
-    type="button"
-    onClick={onClick}
-  >
-    <span className="quote-geo-step-label"><i>{step}</i>{label}</span>
-    <b>{value || (disabled ? "请先完成上一级" : "请选择")}</b>
-    <ChevronDown aria-hidden="true" size={13}/>
-  </button>;
+  return <section className="quote-geo-panel">
+    <header>{title}</header>
+    {options.length > 0
+      ? <div className="quote-geo-panel-options" role="listbox" aria-label={title}>{options.map((option) => <button
+          aria-selected={activeValue === option.code}
+          className={activeValue === option.code ? "selected" : ""}
+          key={`${title}-${option.code}`}
+          role="option"
+          type="button"
+          onClick={() => onSelect(option)}
+        ><span>{option.name}</span>{showNext && <ChevronRight aria-hidden="true" size={13}/>}</button>)}</div>
+      : <p>{emptyText}</p>}
+  </section>;
 }
 
 async function geoOptions(organizationId: string, level: string) {
