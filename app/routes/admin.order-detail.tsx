@@ -496,10 +496,14 @@ export async function action({ request, params, context }: Route.ActionArgs) {
     ).bind(targetWorkflowId,current.organizationId).first<{id:string;name:string;road_load_type:string}>();
     if(!target)return{formError:"目标工作流版本无效或尚未发布"};
     const sourceOrder=await env.DB.prepare(
-      "SELECT id,business_type FROM transport_orders WHERE id=? AND organization_id=?",
-    ).bind(params.orderId,current.organizationId).first<{id:string;business_type:string}>();
+      `SELECT o.id,o.business_type,wi.workflow_id
+       FROM transport_orders o
+       LEFT JOIN workflow_instances wi ON wi.order_id=o.id AND wi.organization_id=o.organization_id
+       WHERE o.id=? AND o.organization_id=?`,
+    ).bind(params.orderId,current.organizationId).first<{id:string;business_type:string;workflow_id:string|null}>();
     if(!sourceOrder)return{formError:"订单不存在"};
     if(sourceOrder.business_type!==target.road_load_type)return{formError:"目标工作流与订单整车/拼车类型不一致"};
+    if(sourceOrder.workflow_id===target.id)return{success:`订单当前已使用“${target.name}”`};
     const batchOrders=await env.DB.prepare(
       `SELECT DISTINCT bo2.order_id FROM transport_batch_orders bo1
        JOIN transport_batches b ON b.id=bo1.batch_id AND b.status!='cancelled'
@@ -723,6 +727,7 @@ function LinearOrderWorkspace({
         </div>
         <div className="head-actions">
           <span className={`status ${orderCompleted ? "green" : "blue"}`}>{statusLabel(order.status)}</span>
+          {data.canManage && <Modal title={`工作流版本 · ${order.order_number}`} triggerLabel="工作流版本" triggerClassName="btn" closeSignal={success} size="wide" dialogClassName="workflow-switch-modal"><WorkflowVersionSwitchForm current={data.businessWorkflow} options={data.workflowVersions} busy={busy}/></Modal>}
           <button className="btn head-detail-trigger" type="button" onClick={() => setDrawerTab("dossier")}>订单关键资料</button>
           <Link className="btn" to="/admin/orders">返回订单列表</Link>
         </div>
@@ -785,6 +790,24 @@ function LinearOrderWorkspace({
       {drawerTab && <LinearOrderDrawer data={data} activeTab={drawerTab} onTabChange={setDrawerTab} onClose={() => setDrawerTab(null)} />}
     </div>
   );
+}
+
+function WorkflowVersionSwitchForm({
+  current,
+  options,
+  busy,
+}: {
+  current: BusinessWorkflow | null;
+  options: WorkflowVersionOption[];
+  busy: boolean;
+}) {
+  return <Form method="post" className="workflow-switch-form">
+    <input type="hidden" name="intent" value="workflow_version_switch"/>
+    <div className="table-wrap"><table><thead><tr><th>当前工作流</th><th>当前版本</th><th>当前节点</th></tr></thead><tbody><tr><td><strong>{current?.workflow_name || "尚未生成工作流实例"}</strong></td><td>v{current?.version_number || "—"}</td><td>{current?.current_step_name || "—"}</td></tr></tbody></table></div>
+    <label className="field"><span>切换到已发布版本</span><select className="control" name="targetWorkflowId" defaultValue={current?.workflow_id || ""} required><option value="">请选择兼容版本</option>{options.map((option) => <option key={option.id} value={option.id}>{option.name} · v{option.version_number}{option.id === current?.workflow_id ? "（当前）" : ""}</option>)}</select></label>
+    <div className="workflow-switch-note" role="note"><strong>切换规则</strong><span>系统保留已完成节点和同名字段值，并重新生成后续节点门禁；若订单已加入配载单，同批订单将统一切换。</span></div>
+    <div className="modal-form-actions"><button className="btn primary" disabled={busy || !options.length}>确认切换工作流</button></div>
+  </Form>;
 }
 
 function LinearOrderSideRail({

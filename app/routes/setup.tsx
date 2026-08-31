@@ -81,9 +81,11 @@ export async function action({ request }: Route.ActionArgs) {
   const geographicSeeds = [
     ["province", "CN-XJ", "新疆维吾尔自治区", "Xinjiang", "CN", 10],
     ["province", "CN-GD", "广东省", "Guangdong", "CN", 20],
+    ["province", "CN-HN", "湖南省", "Hunan", "CN", 30],
     ["province", "UZ-TK", "塔什干市", "Tashkent City", "UZ", 10],
     ["city", "CN-XJ-URC", "乌鲁木齐市", "Urumqi", "CN-XJ", 10],
     ["city", "CN-GD-SZX", "深圳市", "Shenzhen", "CN-GD", 10],
+    ["city", "CN-HN-CSX", "长沙市", "Changsha", "CN-HN", 10],
     ["city", "UZ-TK-TAS", "塔什干", "Tashkent", "UZ-TK", 10],
   ] as const;
   let passwordHash: string;

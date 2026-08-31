@@ -38,6 +38,7 @@ type AcceptedQuote = {
   customer_contact_name: string | null;
   customer_contact_phone: string | null;
   salesperson_user_id: string | null;
+  workflow_definition_id: string | null;
   origin_country: string;
   origin_state: string | null;
   origin_city: string;
@@ -158,6 +159,7 @@ export async function createOrderFromAcceptedQuote(input: {
     taxAmount: quote.tax_amount,
     totalAmount: quote.total_amount,
     salespersonUserId: quote.salesperson_user_id,
+    workflowDefinitionId: quote.workflow_definition_id,
     notes: quote.notes,
     charges: chargeRows.results,
   });
@@ -255,7 +257,7 @@ async function loadAcceptedQuote(organizationId: string, quotationId: string) {
     `SELECT q.id,q.quote_number,q.customer_id,c.name customer_name,
             COALESCE(q.customer_contact_name,(SELECT cc.name FROM customer_contacts cc WHERE cc.customer_id=q.customer_id ORDER BY cc.is_primary DESC,cc.created_at LIMIT 1),c.name) customer_contact_name,
             COALESCE(q.customer_contact_phone,(SELECT cc.phone FROM customer_contacts cc WHERE cc.customer_id=q.customer_id ORDER BY cc.is_primary DESC,cc.created_at LIMIT 1)) customer_contact_phone,
-            q.salesperson_user_id,
+            q.salesperson_user_id,q.workflow_definition_id,
             q.origin_country,q.origin_state,q.origin_city,q.pickup_address,
             q.destination_country,q.destination_state,q.destination_city,
             q.destination_warehouse_id,q.destination_warehouse_note,
@@ -301,7 +303,22 @@ async function repairGeneratedOrder(input: {
     input.orderId,
     input.organizationId,
   ).run();
-  const workflowId = await ensureWorkflowForBusinessType(input.organizationId, input.quote.road_load_type);
+  let workflowId: string;
+  if (input.quote.workflow_definition_id) {
+    const selectedWorkflow = await env.DB.prepare(
+      `SELECT id FROM workflow_definitions
+       WHERE id=? AND organization_id=? AND lifecycle_status='published'
+         AND validation_status='valid' AND status='active' AND road_load_type=?`,
+    ).bind(
+      input.quote.workflow_definition_id,
+      input.organizationId,
+      input.quote.road_load_type,
+    ).first<{ id: string }>();
+    if (!selectedWorkflow) throw new Error("报价指定的工作流版本已停用或与订单类型不匹配，请先更新报价");
+    workflowId = selectedWorkflow.id;
+  } else {
+    workflowId = await ensureWorkflowForBusinessType(input.organizationId, input.quote.road_load_type);
+  }
   const workflowInstanceId = await recordWorkflowEvent({
     organizationId: input.organizationId,
     event: "order.created",

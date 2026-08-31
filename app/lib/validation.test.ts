@@ -5,6 +5,7 @@ import {
   validateCode,
   validateEmail,
   validatePassword,
+  validatePhone,
 } from "./validation";
 
 describe("identity validation", () => {
@@ -38,5 +39,25 @@ describe("business number validation", () => {
 
   it("accepts a positive integer", () => {
     expect(requirePositiveInteger("12", "件数")).toBe(12);
+  });
+});
+
+describe("phone validation", () => {
+  it("accepts common domestic and international phone formats", () => {
+    expect(validatePhone("13873082631")).toBeUndefined();
+    expect(validatePhone("+86 138-7308-2631")).toBeUndefined();
+    expect(validatePhone("(010) 8888-6666")).toBeUndefined();
+  });
+
+  it("rejects letter O and other alphabetic characters", () => {
+    expect(validatePhone("13873O82631")).toContain("只能包含");
+    expect(validatePhone("+86 138-A308-2631")).toContain("只能包含");
+    expect(validatePhone("138+73082631")).toContain("只能包含");
+    expect(validatePhone("++8613873082631")).toContain("只能包含");
+  });
+
+  it("rejects missing and implausibly short values", () => {
+    expect(validatePhone("")).toBe("请输入联系电话");
+    expect(validatePhone("12345")).toContain("应包含 6-20 位数字");
   });
 });

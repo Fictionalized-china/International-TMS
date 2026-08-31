@@ -4,7 +4,7 @@ import type { Route } from "./+types/admin.carriers";
 import { Modal } from "../components/Modal";
 import { requireSessionUser } from "../lib/auth.server";
 import { writeAudit } from "../lib/audit.server";
-import { valueOf } from "../lib/validation";
+import { validatePhone, valueOf } from "../lib/validation";
 
 type Carrier = {
   id: string;
@@ -84,6 +84,8 @@ export async function action({ request }: Route.ActionArgs) {
     const phone = valueOf(form, "driverPhone").trim();
     const licenseNumber = valueOf(form, "licenseNumber").trim();
     if (name.length < 2) return { formError: "司机姓名至少 2 个字符" };
+    const phoneError = phone ? validatePhone(phone, "司机电话") : undefined;
+    if (phoneError) return { formError: phoneError };
     try {
       await env.DB.prepare(
         `INSERT INTO carrier_drivers(id,organization_id,carrier_id,name,phone,license_number,status,created_at,updated_at)
@@ -164,6 +166,8 @@ export async function action({ request }: Route.ActionArgs) {
   if (!name.trim() || !["active", "disabled"].includes(status) || !["domestic", "overseas"].includes(carrierScope)) {
     return { formError: "请填写承运商名称并选择有效类型和状态" };
   }
+  const phoneError = contactPhone ? validatePhone(contactPhone, "承运商联系电话") : undefined;
+  if (phoneError) return { formError: phoneError };
   const existing = await env.DB.prepare(
     "SELECT code,contact_email FROM carriers WHERE id=? AND organization_id=?",
   ).bind(id, current.organizationId).first<{ code: string; contact_email: string | null }>();
@@ -344,7 +348,7 @@ export default function Carriers({ loaderData, actionData }: Route.ComponentProp
                         <input type="hidden" name="intent" value="driver_upsert" />
                         <input type="hidden" name="carrierId" value={carrier.id} />
                         <label className="field"><span>司机姓名</span><input name="driverName" required placeholder="例如 张三" /></label>
-                        <label className="field"><span>电话</span><input name="driverPhone" placeholder="选填" /></label>
+                        <label className="field"><span>电话</span><input name="driverPhone" type="tel" inputMode="tel" pattern="[+0-9 \(\)\-]{6,30}" title="只能输入数字、空格、括号、短横线和开头的加号" maxLength={30} placeholder="选填" /></label>
                         <label className="field"><span>驾照号</span><input name="licenseNumber" placeholder="选填" /></label>
                         <button className="secondary" disabled={busy}>添加司机</button>
                       </Form>
@@ -390,7 +394,7 @@ function CarrierForm({ carrier, busy }: { carrier?: Carrier; busy: boolean }) {
       </label>
       <label className="field">
         <span>联系电话</span>
-        <input name="contactPhone" defaultValue={carrier?.contact_phone || ""} />
+        <input name="contactPhone" type="tel" inputMode="tel" pattern="[+0-9 \(\)\-]{6,30}" title="只能输入数字、空格、括号、短横线和开头的加号" maxLength={30} defaultValue={carrier?.contact_phone || ""} />
       </label>
       <label className="field">
         <span>状态</span>

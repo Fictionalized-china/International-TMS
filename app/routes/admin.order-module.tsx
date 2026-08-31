@@ -4,7 +4,7 @@ import { env } from "cloudflare:workers";
 import type { Route } from "./+types/admin.order-module";
 import { BatchNumberLink, OrderNumberLink } from "../components/EntityNumberLink";
 import { requireSessionUser } from "../lib/auth.server";
-import { valueOf } from "../lib/validation";
+import { validatePhone, valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import {
   advanceOrderModule,
@@ -2100,13 +2100,31 @@ export async function action({ request, params }: Route.ActionArgs) {
       const missingPayableFields = payableFieldValues
         .filter(([fieldKey, value]) => requiredFieldMissing(fieldKey, value, true))
         .map(([fieldKey]) => fieldPolicy(fieldKey, true).label || fieldKey);
+      const resourceMasterStatements: D1PreparedStatement[] = [];
       if (carrierId) {
         const carrier = await env.DB.prepare(
           "SELECT name FROM carriers WHERE id=? AND organization_id=? AND status='active' AND carrier_scope='domestic'",
         ).bind(carrierId, current.organizationId).first<{ name: string }>();
         if (!carrier) return { formError: "请选择有效的启用承运商" };
         carrierName = carrierName || carrier.name;
-        if (vehicleMasterId) {
+        if (vehicleMasterId === "__new__") {
+          plateNumber = valueOf(form, "newVehiclePlateNumber").trim().toUpperCase();
+          vehicleType = valueOf(form, "newVehicleType").trim();
+          const capacityWeight = Number(valueOf(form, "newVehicleCapacityWeight") || 0);
+          const capacityVolume = Number(valueOf(form, "newVehicleCapacityVolume") || 0);
+          if (!/^[\p{L}A-Z0-9·-]{4,20}$/u.test(plateNumber)) return { formError: "请输入 4-20 位有效车牌号" };
+          if (vehicleType.length < 2) return { formError: "请填写新车辆车型" };
+          if (!Number.isFinite(capacityWeight) || capacityWeight < 0 || !Number.isFinite(capacityVolume) || capacityVolume < 0)
+            return { formError: "车辆载重和容积不能为负数" };
+          const duplicateVehicle = await env.DB.prepare(
+            "SELECT carrier_id FROM carrier_vehicles WHERE organization_id=? AND plate_number=?",
+          ).bind(current.organizationId,plateNumber).first<{carrier_id:string}>();
+          if (duplicateVehicle) return { formError: duplicateVehicle.carrier_id === carrierId ? "该承运商已登记此车牌，请直接从下拉列表选择" : "该车牌已登记在其他承运商名下" };
+          resourceMasterStatements.push(env.DB.prepare(
+            `INSERT INTO carrier_vehicles(id,organization_id,carrier_id,plate_number,vehicle_type,capacity_weight_kg,capacity_volume_cbm,status,created_at,updated_at)
+             VALUES(?,?,?,?,?,?,?,'active',?,?)`,
+          ).bind(crypto.randomUUID(),current.organizationId,carrierId,plateNumber,vehicleType,capacityWeight,capacityVolume,now,now));
+        } else if (vehicleMasterId) {
           const vehicle = await env.DB.prepare(
             `SELECT plate_number,vehicle_type FROM carrier_vehicles
              WHERE id=? AND organization_id=? AND carrier_id=? AND status='active'`,
@@ -2118,7 +2136,22 @@ export async function action({ request, params }: Route.ActionArgs) {
           plateNumber = vehicle.plate_number.trim().toUpperCase();
           vehicleType = vehicle.vehicle_type || vehicleType;
         }
-        if (driverMasterId) {
+        if (driverMasterId === "__new__") {
+          driverName = valueOf(form, "newDriverName").trim();
+          driverPhone = valueOf(form, "newDriverPhone").trim();
+          driverIdNumber = valueOf(form, "newDriverLicenseNumber").trim();
+          if (driverName.length < 2) return { formError: "新司机姓名至少需要 2 个字符" };
+          const phoneError = validatePhone(driverPhone, "司机电话");
+          if (phoneError) return { formError: phoneError };
+          const duplicateDriver = await env.DB.prepare(
+            "SELECT id FROM carrier_drivers WHERE organization_id=? AND carrier_id=? AND name=?",
+          ).bind(current.organizationId,carrierId,driverName).first();
+          if (duplicateDriver) return { formError: "该承运商已登记同名司机，请直接从下拉列表选择" };
+          resourceMasterStatements.push(env.DB.prepare(
+            `INSERT INTO carrier_drivers(id,organization_id,carrier_id,name,phone,license_number,status,created_at,updated_at)
+             VALUES(?,?,?,?,?,?,'active',?,?)`,
+          ).bind(crypto.randomUUID(),current.organizationId,carrierId,driverName,driverPhone,driverIdNumber || null,now,now));
+        } else if (driverMasterId) {
           const driver = await env.DB.prepare(
             `SELECT name,phone,license_number FROM carrier_drivers
              WHERE id=? AND organization_id=? AND carrier_id=? AND status='active'`,
@@ -2229,6 +2262,7 @@ export async function action({ request, params }: Route.ActionArgs) {
             plannedArrivalAt, valueOf(form, "loadingRequirements") || null,
             valueOf(form, "notes") || null, "planned", current.userId, now, now,
           )];
+      transportStatements.unshift(...resourceMasterStatements);
       if (legType === "first_mile") {
         const vehicleTotal = await env.DB.prepare(
           "SELECT COUNT(*) total FROM domestic_waybill_vehicles WHERE assignment_id=? AND status!='cancelled'",
@@ -5000,8 +5034,10 @@ function ModuleBusinessData({
                     {data.carrierVehicles.filter((item) => item.carrier_id === domesticCarrierId).map((item) => (
                       <option key={item.id} value={item.id}>{item.plate_number}{item.vehicle_type ? ` · ${item.vehicle_type}` : ""}</option>
                     ))}
+                    {domesticCarrierId && <option value="__new__">＋ 新建未登记车辆并立即使用</option>}
                   </select>}
                 </ModuleField>
+                {domesticVehicleId === "__new__" && <fieldset className="transport-resource-inline-fields span-2"><legend>新车辆快速建档</legend><label className="field"><span>车牌号 <b>*</b></span><input name="newVehiclePlateNumber" required maxLength={20} placeholder="例如 湘AT0831"/></label><label className="field"><span>车型 <b>*</b></span><input name="newVehicleType" required maxLength={80} placeholder="例如 13.5 米高栏"/></label><label className="field compact-money-field"><span>载重 KG</span><input name="newVehicleCapacityWeight" type="number" min="0" step="0.001" defaultValue="0"/></label><label className="field compact-money-field"><span>容积 CBM</span><input name="newVehicleCapacityVolume" type="number" min="0" step="0.001" defaultValue="0"/></label></fieldset>}
                 <input type="hidden" name="plateNumber" value={domesticVehicle?.plate_number || ""} />
                 <ModuleField fields={data.workflowFields} fieldKey="domestic_vehicle_type" label="国内车型" fallbackRequired>
                   {(required) => <input name="vehicleType" value={domesticVehicle?.vehicle_type || ""} readOnly required={required} placeholder="选择车辆后自动带出" />}
@@ -5016,8 +5052,10 @@ function ModuleBusinessData({
                     {data.carrierDrivers.filter((item) => item.carrier_id === domesticCarrierId).map((item) => (
                       <option key={item.id} value={item.id}>{item.name}{item.phone ? ` · ${item.phone}` : ""}</option>
                     ))}
+                    {domesticCarrierId && <option value="__new__">＋ 新建未登记司机并立即使用</option>}
                   </select>}
                 </ModuleField>
+                {domesticDriverId === "__new__" && <fieldset className="transport-resource-inline-fields span-2"><legend>新司机快速建档</legend><label className="field"><span>司机姓名 <b>*</b></span><input name="newDriverName" required maxLength={80}/></label><label className="field"><span>司机电话 <b>*</b></span><input name="newDriverPhone" type="tel" inputMode="tel" pattern="[+0-9 \(\)\-]{6,30}" title="只能输入数字、空格、括号、短横线和开头的加号" required maxLength={30}/></label><label className="field"><span>证件号</span><input name="newDriverLicenseNumber" maxLength={80}/></label></fieldset>}
                 <input type="hidden" name="driverName" value={domesticDriver?.name || ""} />
                 <ModuleField fields={data.workflowFields} fieldKey="domestic_driver_phone" label="国内司机手机号" fallbackRequired>
                   {(required) => <input name="driverPhone" value={domesticDriver?.phone || ""} readOnly required={required} placeholder="选择司机后自动带出" />}

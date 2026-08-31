@@ -4,7 +4,7 @@ import { useState } from "react";
 import type { Route } from "./+types/admin.customers";
 import { requireSessionUser } from "../lib/auth.server";
 import { hashPassword } from "../lib/crypto.server";
-import { validateCode, validateEmail, validatePassword, valueOf } from "../lib/validation";
+import { validateCode, validateEmail, validatePassword, validatePhone, valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import { Modal } from "../components/Modal";
 import { generateCustomerIdentityCode } from "../lib/customer-identity";
@@ -92,7 +92,8 @@ async function validateCustomerDefaultProfile(profile: CustomerDefaultProfile, o
   if (profile.contactName.length < 2) return "默认联系人姓名至少 2 个字符";
   if (profile.contactTitle.length > 80) return "联系人职务不能超过 80 个字符";
   if (profile.contactEmail && validateEmail(profile.contactEmail)) return "联系人邮箱格式不正确";
-  if (!profile.contactPhone || profile.contactPhone.length > 30) return "请填写有效的默认联系人电话";
+  const phoneError = validatePhone(profile.contactPhone, "默认联系人电话");
+  if (phoneError) return phoneError;
   if (!profile.addressCountryCode || !profile.addressState || !profile.addressCity || !profile.addressLine1)
     return "请完整选择默认提货地址的国家、省州和城市，并填写详细地址";
   const [province, city] = await Promise.all([
@@ -142,8 +143,14 @@ export async function action({ request }: Route.ActionArgs) {
     if (!(await ownedCustomer(customerId, current.organizationId))) return { formError: "客户不存在" };
     if (name.length < 2) return { formError: "联系人姓名至少 2 个字符" };
     if (email && validateEmail(email)) return { formError: "联系人邮箱格式不正确" };
+    const phoneError = phone ? validatePhone(phone) : undefined;
+    if (phoneError) return { formError: phoneError };
     const id = crypto.randomUUID();
-    await env.DB.prepare("INSERT INTO customer_contacts (id, customer_id, name, title, email, phone, is_primary, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, customerId, name, title || null, email || null, phone || null, form.has("isPrimary") ? 1 : 0, now, now).run();
+    const isPrimary = form.has("isPrimary");
+    await env.DB.batch([
+      ...(isPrimary ? [env.DB.prepare("UPDATE customer_contacts SET is_primary=0,updated_at=? WHERE customer_id=? AND is_primary=1").bind(now, customerId)] : []),
+      env.DB.prepare("INSERT INTO customer_contacts (id, customer_id, name, title, email, phone, is_primary, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, customerId, name, title || null, email || null, phone || null, isPrimary ? 1 : 0, now, now),
+    ]);
     await writeAudit({ request, action: "customer.contact.create", resourceType: "customer_contact", resourceId: id, organizationId: current.organizationId, actorUserId: current.userId, metadata: { customerId } });
     return { success: "联系人已添加" };
   }
@@ -163,6 +170,8 @@ export async function action({ request }: Route.ActionArgs) {
     const customerId = valueOf(form, "customerId"), label = valueOf(form, "label"), countryCode = valueOf(form, "countryCode"), state = valueOf(form, "state"), city = valueOf(form, "city"), addressLine1 = valueOf(form, "addressLine1"), contactName = valueOf(form, "contactName"), contactPhone = valueOf(form, "contactPhone");
     if (!(await ownedCustomer(customerId, current.organizationId))) return { formError: "客户不存在" };
     if (!label || !countryCode || !state || !city || !addressLine1) return { formError: "请完整填写提货地名称、国家、省州、城市和详细地址" };
+    const phoneError = contactPhone ? validatePhone(contactPhone, "提货联系电话") : undefined;
+    if (phoneError) return { formError: phoneError };
     const province = await env.DB.prepare("SELECT 1 FROM reference_data WHERE organization_id=? AND category='province' AND code=? AND parent_code=? AND status='active'").bind(current.organizationId, state, countryCode).first();
     const cityRow = await env.DB.prepare("SELECT 1 FROM reference_data WHERE organization_id=? AND category='city' AND name=? AND parent_code=? AND status='active'").bind(current.organizationId, city, state).first();
     if (!province || !cityRow) return { formError: "请选择国家对应的省/州和城市" };
@@ -444,7 +453,7 @@ function CustomerContractForm({ customer, busy }: { customer: CustomerRow; busy:
 }
 
 function CustomerContactForm({ customer, busy }: { customer: CustomerRow; busy: boolean }) {
-  return <Form method="post" className="customer-subform"><input type="hidden" name="intent" value="contact"/><input type="hidden" name="customerId" value={customer.id}/><div className="customer-form-section"><div className="customer-form-section-title"><strong>联系人信息</strong><span>短字段使用紧凑输入框</span></div><div className="customer-form-grid"><label className="field field-medium"><span>姓名</span><input name="name" required maxLength={80}/></label><label className="field field-medium"><span>职务</span><input name="title" maxLength={80}/></label><label className="field field-medium"><span>电话</span><input name="phone" type="tel" maxLength={30}/></label><label className="field field-wide"><span>邮箱</span><input name="email" type="email" maxLength={254}/></label><label className="check-field span-all"><input name="isPrimary" type="checkbox"/>设为主要联系人</label></div></div><div className="customer-form-actions"><span>主要联系人会优先带入报价和订单资料。</span><button className="primary" disabled={busy}>确认添加联系人</button></div></Form>;
+  return <Form method="post" className="customer-subform"><input type="hidden" name="intent" value="contact"/><input type="hidden" name="customerId" value={customer.id}/><div className="customer-form-section"><div className="customer-form-section-title"><strong>联系人信息</strong><span>短字段使用紧凑输入框</span></div><div className="customer-form-grid"><label className="field field-medium"><span>姓名</span><input name="name" required maxLength={80}/></label><label className="field field-medium"><span>职务</span><input name="title" maxLength={80}/></label><label className="field field-medium"><span>电话</span><input name="phone" type="tel" inputMode="tel" pattern="[+0-9 \(\)\-]{6,30}" title="只能输入数字、空格、括号、短横线和开头的加号" maxLength={30}/></label><label className="field field-wide"><span>邮箱</span><input name="email" type="email" maxLength={254}/></label><label className="check-field span-all"><input name="isPrimary" type="checkbox"/>设为主要联系人</label></div></div><div className="customer-form-actions"><span>设为主要联系人时，系统会自动取消原主要联系人。</span><button className="primary" disabled={busy}>确认添加联系人</button></div></Form>;
 }
 
 function CustomerAddressForm({ customer, countries, busy }: { customer: CustomerRow; countries: { code: string; name: string }[]; busy: boolean }) {
@@ -452,7 +461,7 @@ function CustomerAddressForm({ customer, countries, busy }: { customer: Customer
 }
 
 function CustomerPickupAddressForm({ customer, countries, provinces, cities, busy }: { customer: CustomerRow; countries: { code: string; name: string }[]; provinces: GeoReference[]; cities: GeoReference[]; busy: boolean }) {
-  return <Form method="post" className="customer-subform"><input type="hidden" name="intent" value="pickup_address"/><input type="hidden" name="customerId" value={customer.id}/><div className="customer-form-section"><div className="customer-form-section-title"><strong>常用提货地</strong><span>国家、省州和城市必须保持层级一致</span></div><div className="customer-form-grid"><label className="field field-medium"><span>提货地名称</span><input name="label" required maxLength={80} placeholder="深圳工厂"/></label><PickupAddressFields countries={countries} provinces={provinces} cities={cities}/><label className="field span-all"><span>详细地址</span><input name="addressLine1" required maxLength={240} placeholder="街道、门牌号、园区和楼栋"/></label><label className="field field-medium"><span>提货联系人</span><input name="contactName" maxLength={80}/></label><label className="field field-medium"><span>联系电话</span><input name="contactPhone" type="tel" maxLength={30}/></label><label className="check-field span-all"><input name="isDefault" type="checkbox"/>设为默认提货地</label></div></div><div className="customer-form-actions"><span>默认提货地会自动继承到新报价。</span><button className="primary" disabled={busy}>确认保存提货地</button></div></Form>;
+  return <Form method="post" className="customer-subform"><input type="hidden" name="intent" value="pickup_address"/><input type="hidden" name="customerId" value={customer.id}/><div className="customer-form-section"><div className="customer-form-section-title"><strong>常用提货地</strong><span>国家、省州和城市必须保持层级一致</span></div><div className="customer-form-grid"><label className="field field-medium"><span>提货地名称</span><input name="label" required maxLength={80} placeholder="深圳工厂"/></label><PickupAddressFields countries={countries} provinces={provinces} cities={cities}/><label className="field span-all"><span>详细地址</span><input name="addressLine1" required maxLength={240} placeholder="街道、门牌号、园区和楼栋"/></label><label className="field field-medium"><span>提货联系人</span><input name="contactName" maxLength={80}/></label><label className="field field-medium"><span>联系电话</span><input name="contactPhone" type="tel" inputMode="tel" pattern="[+0-9 \(\)\-]{6,30}" title="只能输入数字、空格、括号、短横线和开头的加号" maxLength={30}/></label><label className="check-field span-all"><input name="isDefault" type="checkbox"/>设为默认提货地</label></div></div><div className="customer-form-actions"><span>默认提货地会自动继承到新报价。</span><button className="primary" disabled={busy}>确认保存提货地</button></div></Form>;
 }
 
 function CustomerPortalForm({ customer, busy }: { customer: CustomerRow; busy: boolean }) {
@@ -528,7 +537,7 @@ function CustomerForm({
       <div className="customer-form-section-title"><strong>2. 默认联系人</strong><span>创建订单时可直接继承</span></div>
       <div className="customer-form-grid customer-contact-grid">
         <label className="field field-medium"><span>联系人姓名</span><input name="contactName" required maxLength={80} defaultValue={values?.contactName ?? customer?.primary_contact_name ?? ""} placeholder="请输入联系人姓名" /></label>
-        <label className="field field-medium"><span>联系电话</span><input name="contactPhone" type="tel" required maxLength={30} defaultValue={values?.contactPhone ?? customer?.primary_contact_phone ?? ""} placeholder="请输入联系电话" /></label>
+        <label className="field field-medium"><span>联系电话</span><input name="contactPhone" type="tel" inputMode="tel" pattern="[+0-9 \(\)\-]{6,30}" title="只能输入数字、空格、括号、短横线和开头的加号" required maxLength={30} defaultValue={values?.contactPhone ?? customer?.primary_contact_phone ?? ""} placeholder="请输入联系电话" /></label>
         <label className="field field-medium"><span>职务 <em>选填</em></span><input name="contactTitle" maxLength={80} defaultValue={values?.contactTitle ?? customer?.primary_contact_title ?? ""}/></label>
         <label className="field field-wide"><span>邮箱 <em>选填</em></span><input name="contactEmail" type="email" maxLength={254} defaultValue={values?.contactEmail ?? customer?.primary_contact_email ?? ""}/></label>
       </div>

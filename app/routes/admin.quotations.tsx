@@ -12,7 +12,7 @@ import {
   voidQuotation,
   withdrawQuotationAcceptance,
 } from "../lib/quotation-lifecycle.server";
-import { requirePositiveInteger, requirePositiveNumber, valueOf } from "../lib/validation";
+import { requirePositiveInteger, requirePositiveNumber, validatePhone, valueOf } from "../lib/validation";
 
 type Quote = {
   id: string;
@@ -21,6 +21,9 @@ type Quote = {
   customer_contact_name: string | null;
   customer_contact_phone: string | null;
   salesperson_name: string | null;
+  workflow_definition_id: string | null;
+  workflow_name: string | null;
+  workflow_version_number: number | null;
   origin_country: string;
   origin_state: string | null;
   origin_city: string;
@@ -71,6 +74,7 @@ type CustomerContactOption = {
 type UserOption = { id: string; display_name: string; email: string };
 type WarehouseOption = { id: string; name: string; country_code: string | null; city: string | null; address: string | null };
 type GeoOption = { code: string; name: string; parent_code: string | null };
+type WorkflowOption = { id: string; name: string; version_number: number; road_load_type: "ftl" | "ltl" };
 
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "quote.view");
@@ -88,9 +92,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     where.push("q.lifecycle_status=?");
     binds.push(lifecycle);
   }
-  const [quotes, customers, contacts, users, warehouses, countries, provinces, cities] = await Promise.all([
+  const [quotes, customers, contacts, users, warehouses, countries, provinces, cities, workflows] = await Promise.all([
     env.DB.prepare(
       `SELECT q.id,q.quote_number,c.name customer_name,q.customer_contact_name,q.customer_contact_phone,u.display_name salesperson_name,
+        q.workflow_definition_id,wd.name workflow_name,wd.version_number workflow_version_number,
         q.origin_country,q.origin_state,q.origin_city,q.pickup_address,
         q.destination_country,q.destination_state,q.destination_city,
         w.name destination_warehouse_name,q.destination_warehouse_note,q.customs_clearance_mode,
@@ -100,6 +105,7 @@ export async function loader({ request }: Route.LoaderArgs) {
        FROM quotations q
        JOIN customers c ON c.id=q.customer_id
        LEFT JOIN users u ON u.id=q.salesperson_user_id
+       LEFT JOIN workflow_definitions wd ON wd.id=q.workflow_definition_id AND wd.organization_id=q.organization_id
        LEFT JOIN warehouses w ON w.id=q.destination_warehouse_id
        LEFT JOIN transport_orders o ON o.organization_id=q.organization_id AND o.quotation_id=q.id
        WHERE ${where.join(" AND ")}
@@ -133,6 +139,12 @@ export async function loader({ request }: Route.LoaderArgs) {
     geoOptions(current.organizationId, "country"),
     geoOptions(current.organizationId, "province"),
     geoOptions(current.organizationId, "city"),
+    env.DB.prepare(
+      `SELECT id,name,version_number,road_load_type FROM workflow_definitions
+       WHERE organization_id=? AND lifecycle_status='published' AND validation_status='valid'
+         AND status='active' AND road_load_type IN ('ftl','ltl')
+       ORDER BY road_load_type,name,version_number DESC,updated_at DESC`,
+    ).bind(current.organizationId).all<WorkflowOption>(),
   ]);
   return {
     current,
@@ -144,6 +156,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     countries,
     provinces,
     cities,
+    workflows: workflows.results ?? [],
     filters: { keyword, lifecycle },
   };
 }
@@ -158,6 +171,7 @@ export async function action({ request }: Route.ActionArgs) {
       const salespersonId = valueOf(form, "salespersonId");
       const transportMode = valueOf(form, "transportMode");
       const roadLoadType = valueOf(form, "roadLoadType");
+      const workflowDefinitionId = valueOf(form, "workflowDefinitionId");
       const customerContactName = valueOf(form, "customerContactName");
       const customerContactPhone = valueOf(form, "customerContactPhone");
       const pickupAddress = valueOf(form, "pickupAddress");
@@ -182,6 +196,9 @@ export async function action({ request }: Route.ActionArgs) {
       if (!customerId || !salespersonId || transportMode !== "ROAD" || !["ftl", "ltl"].includes(roadLoadType)) {
         throw new Error("请选择客户、业务员、汽运和整车/拼车类型");
       }
+      if (!workflowDefinitionId) throw new Error("请选择本报价使用的工作流版本");
+      const phoneError = validatePhone(customerContactPhone, "客户联系电话");
+      if (phoneError) throw new Error(phoneError);
       if (![customerContactName, customerContactPhone, pickupAddress, originCountry, originState, originCity, destinationCountry, destinationState, destinationCity, destinationWarehouseId, cargoDescription].every(Boolean)) {
         throw new Error("请完整填写客户联系人、联系电话、提货地址、起运地、目的地、目的仓和货物描述");
       }
@@ -190,12 +207,18 @@ export async function action({ request }: Route.ActionArgs) {
         assertGeoHierarchy(current.organizationId, originCountry, originState, originCity, "起运地"),
         assertGeoHierarchy(current.organizationId, destinationCountry, destinationState, destinationCity, "目的地"),
       ]);
-      const [customer, salesperson, warehouse] = await Promise.all([
+      const [customer, salesperson, warehouse, workflow] = await Promise.all([
         env.DB.prepare("SELECT id FROM customers WHERE id=? AND organization_id=? AND status='active'").bind(customerId,current.organizationId).first(),
         env.DB.prepare("SELECT u.id FROM users u JOIN memberships m ON m.user_id=u.id WHERE u.id=? AND m.organization_id=? AND u.status='active' AND m.status='active'").bind(salespersonId,current.organizationId).first(),
         env.DB.prepare("SELECT id FROM warehouses WHERE id=? AND organization_id=? AND warehouse_role='overseas_destination' AND status='active'").bind(destinationWarehouseId,current.organizationId).first(),
+        env.DB.prepare(
+          `SELECT id FROM workflow_definitions
+           WHERE id=? AND organization_id=? AND lifecycle_status='published'
+             AND validation_status='valid' AND status='active' AND road_load_type=?`,
+        ).bind(workflowDefinitionId,current.organizationId,roadLoadType).first(),
       ]);
       if (!customer || !salesperson || !warehouse) throw new Error("客户、业务员或目的仓已停用");
+      if (!workflow) throw new Error("所选工作流与整车/拼车类型不匹配，或该版本已停用");
       const chargeNames = form.getAll("chargeName").map(String);
       const quantities = form.getAll("chargeQuantity").map(Number);
       const unitPrices = form.getAll("chargeUnitPrice").map(Number);
@@ -220,14 +243,14 @@ export async function action({ request }: Route.ActionArgs) {
             destination_country,destination_state,destination_city,destination_warehouse_id,destination_warehouse_note,
             estimated_length_cm,estimated_width_cm,estimated_height_cm,customs_clearance_mode,
             transport_mode,road_load_type,cargo_description,pieces,gross_weight_kg,volume_cbm,currency,
-            subtotal,tax_amount,total_amount,valid_until,status,lifecycle_status,notes,salesperson_user_id,
+            subtotal,tax_amount,total_amount,valid_until,status,lifecycle_status,notes,salesperson_user_id,workflow_definition_id,
             created_by_user_id,created_at,updated_at
-           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'CNY',?,0,?,?, 'sent','pending',?,?,?,?,?)`,
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'CNY',?,0,?,?, 'sent','pending',?,?,?,?,?,?)`,
         ).bind(
           id,current.organizationId,number,customerId,originCountry,originState,originCity,pickupAddress,
           destinationCountry,destinationState,destinationCity,destinationWarehouseId,destinationWarehouseNote || null,
           length,width,height,customsClearanceMode,transportMode,roadLoadType,cargoDescription,pieces,weight,volume,
-          total,total,validUntil || null,notes || null,salespersonId,current.userId,now,now,
+          total,total,validUntil || null,notes || null,salespersonId,workflowDefinitionId,current.userId,now,now,
         ),
         env.DB.prepare(
           "UPDATE quotations SET customer_contact_name=?,customer_contact_phone=? WHERE id=? AND organization_id=?",
@@ -293,7 +316,7 @@ export default function QuotationsPage({ loaderData, actionData }: Route.Compone
     <section className="panel table-panel">
       <div className="panel-head"><div><h2>报价单 <span className="count">{loaderData.quotes.length}</span></h2><p>运输类型在报价接受后锁定，订单仅由报价生成。</p></div></div>
       <div className="table-wrap"><table><thead><tr><th>报价单号</th><th>客户 / 业务员</th><th>运输方案</th><th>货物 / 线路</th><th>应收总额</th><th>状态</th><th>关联订单</th><th>操作</th></tr></thead><tbody>
-        {loaderData.quotes.map((quote) => <tr key={quote.id}><td><span className="order-id">{quote.quote_number}</span><span className="subline">{new Date(quote.created_at).toLocaleString("zh-CN")}</span></td><td><span className="cell-main">{quote.customer_name}</span><span className="subline">{quote.salesperson_name || "待指定业务员"}</span></td><td><span className={`pill ${quote.road_load_type === "ltl" ? "ltl" : ""}`}>{quote.road_load_type === "ltl" ? "拼车" : "整车"}</span><span className="subline">汽运 · {quote.customs_clearance_mode === "company" ? "公司代办清关" : "客户自理清关"}</span></td><td><span className="cell-main">{quote.cargo_description}</span><span className="subline">{quote.origin_city} → {quote.destination_city} · {quote.destination_warehouse_name || "目的仓待补"}</span></td><td><span className="cell-main">CNY {quote.total_amount.toLocaleString()}</span><span className="subline">{quote.pieces} 件 · {quote.gross_weight_kg} KG · {quote.volume_cbm} CBM</span></td><td><span className={`status ${statusTone(quote.lifecycle_status)}`}>{statusLabel(quote.lifecycle_status)}</span></td><td>{quote.order_id ? <Link className="order-id" to={`/admin/orders/${quote.order_id}`}>{quote.order_number}</Link> : <span className="subline">尚未生成</span>}</td><td><QuoteActions quote={quote} busy={busy} /></td></tr>)}
+        {loaderData.quotes.map((quote) => <tr key={quote.id}><td><span className="order-id">{quote.quote_number}</span><span className="subline">{new Date(quote.created_at).toLocaleString("zh-CN")}</span></td><td><span className="cell-main">{quote.customer_name}</span><span className="subline">{quote.salesperson_name || "待指定业务员"}</span></td><td><span className={`pill ${quote.road_load_type === "ltl" ? "ltl" : ""}`}>{quote.road_load_type === "ltl" ? "拼车" : "整车"}</span><span className="subline">{quote.workflow_name ? `${quote.workflow_name} v${quote.workflow_version_number}` : "历史报价 · 接受时自动匹配流程"}</span></td><td><span className="cell-main">{quote.cargo_description}</span><span className="subline">{quote.origin_city} → {quote.destination_city} · {quote.destination_warehouse_name || "目的仓待补"}</span></td><td><span className="cell-main">CNY {quote.total_amount.toLocaleString()}</span><span className="subline">{quote.pieces} 件 · {quote.gross_weight_kg} KG · {quote.volume_cbm} CBM</span></td><td><span className={`status ${statusTone(quote.lifecycle_status)}`}>{statusLabel(quote.lifecycle_status)}</span></td><td>{quote.order_id ? <Link className="order-id" to={`/admin/orders/${quote.order_id}`}>{quote.order_number}</Link> : <span className="subline">尚未生成</span>}</td><td><QuoteActions quote={quote} busy={busy} /></td></tr>)}
       </tbody></table></div>
       {!loaderData.quotes.length && <div className="empty-state">暂无符合条件的报价。</div>}
     </section>
@@ -315,6 +338,7 @@ function QuoteDetail({ quote }: { quote: Quote }) {
     <ReadCell label="客户" value={quote.customer_name}/><ReadCell label="业务员" value={quote.salesperson_name || "—"}/>
     <ReadCell label="客户联系人" value={quote.customer_contact_name || "—"}/><ReadCell label="联系电话" value={quote.customer_contact_phone || "—"}/>
     <ReadCell label="运输方案" value={`汽运 · ${quote.road_load_type === "ltl" ? "拼车" : "整车"}`}/><ReadCell label="清关责任" value={quote.customs_clearance_mode === "company" ? "公司代办清关" : "客户自理清关"}/>
+    <ReadCell label="工作流版本" value={quote.workflow_name ? `${quote.workflow_name} · v${quote.workflow_version_number}` : "历史报价 · 接受时自动匹配"}/>
     <ReadCell label="提货地址" value={quote.pickup_address || "—"}/><ReadCell label="目的仓" value={quote.destination_warehouse_name || "—"}/>
     <ReadCell label="线路" value={`${quote.origin_country} ${quote.origin_state || ""} ${quote.origin_city} → ${quote.destination_country} ${quote.destination_state || ""} ${quote.destination_city}`}/><ReadCell label="目的仓备注" value={quote.destination_warehouse_note || "—"}/>
     <ReadCell label="货物" value={quote.cargo_description}/><ReadCell label="预计件重体" value={`${quote.pieces} 件 · ${quote.gross_weight_kg} KG · ${quote.volume_cbm} CBM`}/>
@@ -331,6 +355,8 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
   const [pickupAddress, setPickupAddress] = useState(loaderData.customers[0]?.pickup_address || "");
   const [customerContactName, setCustomerContactName] = useState(loaderData.customers[0]?.contact_name || "");
   const [customerContactPhone, setCustomerContactPhone] = useState(loaderData.customers[0]?.contact_phone || "");
+  const [roadLoadType, setRoadLoadType] = useState<"ltl" | "ftl">("ltl");
+  const [workflowDefinitionId, setWorkflowDefinitionId] = useState(loaderData.workflows.find((workflow) => workflow.road_load_type === "ltl")?.id || "");
   const [pieces, setPieces] = useState("1");
   const [lengthCm, setLengthCm] = useState("");
   const [widthCm, setWidthCm] = useState("");
@@ -342,6 +368,15 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
     : "";
   const selectedCustomerContacts = loaderData.contacts.filter((contact) => contact.customer_id === customerId);
   const selectedCustomer = loaderData.customers.find((customer) => customer.id === customerId);
+  const compatibleWorkflows = useMemo(
+    () => loaderData.workflows.filter((workflow) => workflow.road_load_type === roadLoadType),
+    [loaderData.workflows, roadLoadType],
+  );
+  useEffect(() => {
+    if (!compatibleWorkflows.some((workflow) => workflow.id === workflowDefinitionId)) {
+      setWorkflowDefinitionId(compatibleWorkflows[0]?.id || "");
+    }
+  }, [roadLoadType, workflowDefinitionId, compatibleWorkflows]);
   const selectCustomer = (id: string) => {
     setCustomerId(id);
     const customer = loaderData.customers.find((item) => item.id === id);
@@ -360,8 +395,9 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
         <Field label="联系电话"><ContactCombobox name="customerContactPhone" value={customerContactPhone} contacts={selectedCustomerContacts} mode="phone" onChange={(value, contact) => { setCustomerContactPhone(value); if (contact) setCustomerContactName(contact.name); }} /></Field>
         <Field label="业务员"><select className="control" name="salespersonId" defaultValue={loaderData.current.userId} required><option value="">请选择业务员</option>{loaderData.users.map((user) => <option key={user.id} value={user.id}>{user.display_name} · {user.email}</option>)}</select></Field>
         <Field label="运输方式"><select className="control" name="transportMode" defaultValue="ROAD" required><option value="ROAD">汽运</option><option value="RAIL" disabled>铁运（流程未开放）</option><option value="AIR" disabled>空运（流程未开放）</option></select></Field>
-        <Field label="订单类型"><select className="control" name="roadLoadType" defaultValue="ltl" required><option value="ltl">拼车</option><option value="ftl">整车</option></select></Field>
+        <Field label="订单类型"><select className="control" name="roadLoadType" value={roadLoadType} onChange={(event) => setRoadLoadType(event.target.value as "ltl" | "ftl")} required><option value="ltl">拼车</option><option value="ftl">整车</option></select></Field>
         <Field label="清关办理方式"><select className="control" name="customsClearanceMode" defaultValue="company" required><option value="company">公司代办清关</option><option value="customer">客户自理清关</option></select></Field>
+        <Field label="工作流版本"><select className="control" name="workflowDefinitionId" value={workflowDefinitionId} onChange={(event) => setWorkflowDefinitionId(event.target.value)} required><option value="">{compatibleWorkflows.length ? "请选择工作流版本" : "当前类型暂无可用工作流"}</option>{compatibleWorkflows.map((workflow) => <option key={workflow.id} value={workflow.id}>{workflow.name} · v{workflow.version_number}</option>)}</select></Field>
       </div>
     </QuoteLedgerSection>
     <QuoteLedgerSection className="quote-route-section" title="运输路线" note="地区按国家 / 地区 → 省 / 州 → 城市逐级选择">
@@ -453,6 +489,9 @@ function ContactCombobox({
       className="control"
       name={name}
       type={mode === "phone" ? "tel" : "text"}
+      inputMode={mode === "phone" ? "tel" : undefined}
+      pattern={mode === "phone" ? "[+0-9 \\(\\)\\-]{6,30}" : undefined}
+      title={mode === "phone" ? "只能输入数字、空格、括号、短横线和开头的加号" : undefined}
       list={listId}
       value={value}
       placeholder={mode === "name" ? "选择或输入联系人" : "选择或输入联系电话"}
