@@ -365,22 +365,30 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
       </div>
     </QuoteLedgerSection>
     <QuoteLedgerSection className="quote-route-section" title="运输路线" note="点击地区后按国家 / 地区 → 省 / 州 → 城市逐级展开">
-      <div className="quote-route-compare">
-        <section className="quote-route-group" aria-labelledby="quote-origin-heading">
-          <header className="quote-route-group-title"><b id="quote-origin-heading">起运</b><span>客户提货信息</span></header>
-          <div className="quote-route-group-body">
+      <div className="quote-route-workbench">
+        <div className="quote-route-strip" aria-label="报价运输路线">
+          <section className="quote-route-stop quote-route-stop-origin" aria-labelledby="quote-origin-heading">
+            <header className="quote-route-stop-heading">
+              <span className="quote-route-stop-index" aria-hidden="true">起</span>
+              <span><b id="quote-origin-heading" className="quote-route-stop-title">起运地</b><small>客户提货地区</small></span>
+            </header>
             <GeoCascadeFields key={`origin-${customerId}`} prefix="origin" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} initialCountry={selectedCustomer?.pickup_country_code} initialProvince={selectedCustomer?.pickup_state_code} initialCity={selectedCustomer?.pickup_city} />
-            <Field label="提货地址" className="quote-route-address"><textarea className="control textarea" name="pickupAddress" rows={2} value={pickupAddress} onChange={(event) => setPickupAddress(event.target.value)} required /></Field>
-          </div>
-        </section>
-        <section className="quote-route-group" aria-labelledby="quote-destination-heading">
-          <header className="quote-route-group-title"><b id="quote-destination-heading">目的地</b><span>境外目的仓信息</span></header>
-          <div className="quote-route-group-body">
+          </section>
+          <span className="quote-route-arrow" aria-hidden="true"><ChevronRight size={16} /></span>
+          <section className="quote-route-stop quote-route-stop-destination" aria-labelledby="quote-destination-heading">
+            <header className="quote-route-stop-heading">
+              <span className="quote-route-stop-index" aria-hidden="true">到</span>
+              <span><b id="quote-destination-heading" className="quote-route-stop-title">目的地</b><small>境外到达地区</small></span>
+            </header>
             <GeoCascadeFields prefix="destination" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} />
-            <Field label="目的仓库" className="quote-route-warehouse"><select className="control quote-warehouse-select" name="destinationWarehouseId" required><option value="">请选择境外目的仓</option>{loaderData.warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></Field>
-            <Field label="报价目的地备注" className="quote-route-note"><textarea className="control textarea" name="destinationWarehouseNote" rows={2} /></Field>
-          </div>
-        </section>
+          </section>
+          <span className="quote-route-arrow" aria-hidden="true"><ChevronRight size={16} /></span>
+          <Field label="目的仓库" className="quote-route-warehouse"><select className="control quote-warehouse-select" name="destinationWarehouseId" required><option value="">请选择境外目的仓</option>{loaderData.warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></Field>
+        </div>
+        <div className="quote-route-detail-row">
+          <Field label="提货地址" className="quote-route-address"><textarea className="control textarea" name="pickupAddress" rows={2} value={pickupAddress} onChange={(event) => setPickupAddress(event.target.value)} required /></Field>
+          <Field label="报价目的地备注" className="quote-route-note"><textarea className="control textarea" name="destinationWarehouseNote" rows={2} /></Field>
+        </div>
       </div>
     </QuoteLedgerSection>
     <QuoteLedgerSection title="货物预估与报价说明" note="货物数据为预估值，仓库收货后登记实际数据">
