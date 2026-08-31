@@ -17,6 +17,7 @@ type ConfirmActionProps = {
   pending?: boolean;
   pendingLabel?: string;
   formNoValidate?: boolean;
+  disabled?: boolean;
 };
 
 export function ConfirmAction({
@@ -34,6 +35,7 @@ export function ConfirmAction({
   pending = false,
   pendingLabel = "正在处理…",
   formNoValidate = true,
+  disabled = false,
 }: ConfirmActionProps) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
@@ -70,7 +72,7 @@ export function ConfirmAction({
         ref={triggerRef}
         type="button"
         className={className}
-        disabled={pending}
+        disabled={disabled || pending}
         aria-haspopup="dialog"
         onClick={() => {
           setError("");
@@ -107,7 +109,7 @@ export function ConfirmAction({
               type="button"
               className={confirmClassName}
               data-confirm-action
-              disabled={!canConfirm || pending}
+              disabled={disabled || !canConfirm || pending}
               onClick={submit}
             >
               {pending ? pendingLabel : confirmLabel}

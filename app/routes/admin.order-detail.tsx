@@ -11,6 +11,7 @@ import { listOrderWorkflowTransitions } from "../lib/order-workflow.server";
 import { runOrderWorkflowAction } from "../lib/order-workflow-action.server";
 import { valueOf } from "../lib/validation";
 import { Modal } from "../components/Modal";
+import { ConfirmAction } from "../components/ConfirmAction";
 import { writeAudit } from "../lib/audit.server";
 import {
   ensureOrderModules,
@@ -38,6 +39,7 @@ import { canManageOrderModule } from "../lib/position-portal";
 import { completionStatusLabels, type OrderCompletionStatus } from "../lib/order-review";
 import {
   completeWorkflowTask,
+  inspectWorkflowVersionSwitchImpact,
   listCurrentWorkflowTasks,
   replaceWorkflowInstanceVersion,
 } from "../lib/workflow-execution.server";
@@ -265,6 +267,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
   });
   const modules = await listOrderModules(current.organizationId, id);
   const currentWorkflowTasks = await listCurrentWorkflowTasks(current.organizationId,id);
+  const workflowSwitchImpact = await inspectWorkflowVersionSwitchImpact(current.organizationId,id);
   const [history, attachments, macro, businessWorkflow, workflowSteps, workflowFormRows, tasks, services, members, customers, transitions, expenseRisk, packageLabels, workflowVersions] =
     await Promise.all([
     env.DB.prepare(
@@ -463,6 +466,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
     modules,
     currentWorkflowTasks,
     workflowVersions: workflowVersions.results,
+    workflowSwitchImpact,
     tasks: tasks.results,
     services: services.results,
     members: members.results,
@@ -504,26 +508,48 @@ export async function action({ request, params, context }: Route.ActionArgs) {
     if(!sourceOrder)return{formError:"订单不存在"};
     if(sourceOrder.business_type!==target.road_load_type)return{formError:"目标工作流与订单整车/拼车类型不一致"};
     if(sourceOrder.workflow_id===target.id)return{success:`订单当前已使用“${target.name}”`};
-    const batchOrders=await env.DB.prepare(
-      `SELECT DISTINCT bo2.order_id FROM transport_batch_orders bo1
-       JOIN transport_batches b ON b.id=bo1.batch_id AND b.status!='cancelled'
-       JOIN transport_batch_orders bo2 ON bo2.batch_id=b.id AND bo2.status!='removed'
-       WHERE bo1.organization_id=? AND bo1.order_id=? AND bo1.status!='removed'`,
-    ).bind(current.organizationId,sourceOrder.id).all<{order_id:string}>();
-    const orderIds=batchOrders.results.length?batchOrders.results.map((item)=>item.order_id):[sourceOrder.id];
+    if(valueOf(form,"impactConfirmed")!=="1")return{formError:"请先查看影响范围，并在二次确认弹窗中确认切换"};
+    const impact=await inspectWorkflowVersionSwitchImpact(current.organizationId,sourceOrder.id);
+    if(!impact.allowed)return{formError:impact.reason||"当前阶段不允许切换工作流版本"};
+    const orderIds=impact.orderIds;
     const placeholders=orderIds.map(()=>"?").join(",");
     const validOrders=await env.DB.prepare(
       `SELECT COUNT(*) count FROM transport_orders WHERE organization_id=? AND business_type=? AND id IN (${placeholders})`,
     ).bind(current.organizationId,target.road_load_type,...orderIds).first<{count:number}>();
     if(validOrders?.count!==orderIds.length)return{formError:"同一配载批次存在类型不一致订单，已停止切换"};
+    const incompatibleOrders=await env.DB.prepare(
+      `SELECT o.order_number,wi.current_step_key
+       FROM transport_orders o
+       LEFT JOIN workflow_instances wi ON wi.order_id=o.id AND wi.organization_id=o.organization_id
+       WHERE o.organization_id=? AND o.id IN (${placeholders})
+         AND (
+           wi.id IS NULL OR NOT EXISTS(
+             SELECT 1 FROM workflow_steps target_step
+             WHERE target_step.workflow_id=? AND target_step.step_key=wi.current_step_key
+               AND target_step.is_active=1
+           )
+         )`,
+    ).bind(current.organizationId,...orderIds,target.id).all<{
+      order_number:string;current_step_key:string|null;
+    }>();
+    if(incompatibleOrders.results.length){
+      const numbers=incompatibleOrders.results.map((item)=>item.order_number).join("、");
+      return{formError:`目标版本缺少受影响订单的当前节点，已在写入前整体停止：${numbers}`};
+    }
     try{
       for(const orderId of orderIds){
-        await replaceWorkflowInstanceVersion({organizationId:current.organizationId,orderId,targetWorkflowId:target.id});
+        await replaceWorkflowInstanceVersion({
+          organizationId:current.organizationId,
+          orderId,
+          targetWorkflowId:target.id,
+          actorUserId:current.userId,
+          affectedOrderCount:impact.affectedOrderCount,
+        });
         await ensureOrderModules(current.organizationId,orderId);
         await syncOrderBusinessWorkflow({organizationId:current.organizationId,orderId,actorUserId:current.userId,source:"admin"});
       }
-      await writeAudit({request,action:"workflow.version.switch",resourceType:"transport_order",resourceId:sourceOrder.id,organizationId:current.organizationId,actorUserId:current.userId,metadata:{targetWorkflowId:target.id,orderIds}});
-      return{success:orderIds.length>1?`配载批次 ${orderIds.length} 张订单已统一使用“${target.name}”`:`订单已使用“${target.name}”`};
+      await writeAudit({request,action:"workflow.version.switch",resourceType:"transport_order",resourceId:sourceOrder.id,organizationId:current.organizationId,actorUserId:current.userId,metadata:{targetWorkflowId:target.id,orderIds,currentStepKey:impact.currentStepKey,completedStepCount:impact.completedStepCount,historicalStepsPreserved:true}});
+      return{success:orderIds.length>1?`配载批次 ${orderIds.length} 张订单已统一使用“${target.name}”；历史节点未回退`:`订单已使用“${target.name}”；历史节点未回退`};
     }catch(error){return{formError:error instanceof Error?error.message:"工作流版本切换失败"};}
   }
   if (intent === "workflow_task_complete") {
@@ -727,7 +753,7 @@ function LinearOrderWorkspace({
         </div>
         <div className="head-actions">
           <span className={`status ${orderCompleted ? "green" : "blue"}`}>{statusLabel(order.status)}</span>
-          {data.canManage && <Modal title={`工作流版本 · ${order.order_number}`} triggerLabel="工作流版本" triggerClassName="btn" closeSignal={success} size="wide" dialogClassName="workflow-switch-modal"><WorkflowVersionSwitchForm current={data.businessWorkflow} options={data.workflowVersions} busy={busy}/></Modal>}
+          {data.canManage && <Modal title={`工作流版本 · ${order.order_number}`} triggerLabel="工作流版本" triggerClassName="btn" closeSignal={success} size="wide" dialogClassName="workflow-switch-modal"><WorkflowVersionSwitchForm current={data.businessWorkflow} options={data.workflowVersions} impact={data.workflowSwitchImpact} busy={busy}/></Modal>}
           <button className="btn head-detail-trigger" type="button" onClick={() => setDrawerTab("dossier")}>订单关键资料</button>
           <Link className="btn" to="/admin/orders">返回订单列表</Link>
         </div>
@@ -795,18 +821,43 @@ function LinearOrderWorkspace({
 function WorkflowVersionSwitchForm({
   current,
   options,
+  impact,
   busy,
 }: {
   current: BusinessWorkflow | null;
   options: WorkflowVersionOption[];
+  impact: Route.ComponentProps["loaderData"]["workflowSwitchImpact"];
   busy: boolean;
 }) {
-  return <Form method="post" className="workflow-switch-form">
+  const formId = `workflow-version-switch-${current?.workflow_id || "unbound"}`;
+  const impactScope = impact.batchNumber
+    ? `配载单 ${impact.batchNumber} 内 ${impact.affectedOrderCount} 张订单`
+    : "当前订单";
+  return <Form id={formId} method="post" className="workflow-switch-form">
     <input type="hidden" name="intent" value="workflow_version_switch"/>
     <div className="table-wrap"><table><thead><tr><th>当前工作流</th><th>当前版本</th><th>当前节点</th></tr></thead><tbody><tr><td><strong>{current?.workflow_name || "尚未生成工作流实例"}</strong></td><td>v{current?.version_number || "—"}</td><td>{current?.current_step_name || "—"}</td></tr></tbody></table></div>
     <label className="field"><span>切换到已发布版本</span><select className="control" name="targetWorkflowId" defaultValue={current?.workflow_id || ""} required><option value="">请选择兼容版本</option>{options.map((option) => <option key={option.id} value={option.id}>{option.name} · v{option.version_number}{option.id === current?.workflow_id ? "（当前）" : ""}</option>)}</select></label>
-    <div className="workflow-switch-note" role="note"><strong>切换规则</strong><span>系统保留已完成节点和同名字段值，并重新生成后续节点门禁；若订单已加入配载单，同批订单将统一切换。</span></div>
-    <div className="modal-form-actions"><button className="btn primary" disabled={busy || !options.length}>确认切换工作流</button></div>
+    <div className={`workflow-switch-note${impact.allowed ? "" : " blocked"}`} role="note">
+      <strong>本次影响范围</strong>
+      <span>{impactScope}；当前节点“{impact.currentStepName || "待识别"}”，已完成 {impact.completedStepCount} 个历史节点。</span>
+      <span>{impact.allowed ? "历史节点、同名字段值和审计快照将保留，仅重建当前及后续门禁。" : impact.reason}</span>
+    </div>
+    <div className="modal-form-actions">
+      <ConfirmAction
+        title="二次确认工作流版本切换"
+        description={`将影响${impactScope}。系统不会回退已完成节点；旧版字段值会先进入永久审计快照，再把兼容值带入新版本。请确认已检查目标版本。`}
+        triggerLabel="查看影响并确认切换"
+        confirmLabel="确认切换"
+        className="btn primary"
+        confirmClassName="primary"
+        formId={formId}
+        name="impactConfirmed"
+        value="1"
+        formNoValidate={false}
+        pending={busy}
+        disabled={!impact.allowed || !options.length}
+      />
+    </div>
   </Form>;
 }
 

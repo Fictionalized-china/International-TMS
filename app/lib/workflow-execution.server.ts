@@ -4,6 +4,7 @@ import {
   snapshotWorkflowFieldsForInstance,
 } from "./workflow-fields.server";
 import type { OrderModuleCode } from "./order-modules";
+import { workflowVersionSwitchDecision } from "./workflow-version-policy";
 
 type ModuleFact = { module_code:string; status:string };
 
@@ -136,6 +137,7 @@ export async function synchronizeWorkflowExecution(input:{
 
   const modules = await env.DB.prepare(
     `SELECT ms.id,ms.instance_step_state_id,ms.is_required,ms.completion_mode,ms.module_code,ss.step_key,
+      ss.status step_status,
       COUNT(ts.id) task_count,
       SUM(CASE WHEN ts.is_required=1 AND ts.status!='completed' THEN 1 ELSE 0 END) pending_required
      FROM workflow_instance_module_states ms
@@ -144,7 +146,7 @@ export async function synchronizeWorkflowExecution(input:{
      WHERE ss.instance_id=? GROUP BY ms.id`,
   ).bind(input.instanceId).all<{
     id:string;instance_step_state_id:string;is_required:number;completion_mode:string;
-    module_code:string;step_key:string;
+    module_code:string;step_key:string;step_status:string;
     task_count:number;pending_required:number;
   }>();
   const fieldBlockers = new Set<string>();
@@ -161,7 +163,8 @@ export async function synchronizeWorkflowExecution(input:{
     const taskComplete = item.completion_mode === "automatic"
       ? item.task_count === 0 || item.pending_required === 0
       : item.task_count > 0 && item.pending_required === 0;
-    const completed = taskComplete && !fieldBlockers.has(item.id);
+    const completed = item.step_status === "completed" ||
+      (taskComplete && !fieldBlockers.has(item.id));
     return env.DB.prepare(
       "UPDATE workflow_instance_module_states SET status=?,updated_at=? WHERE id=?",
     ).bind(completed?"completed":"pending",now,item.id);
@@ -169,17 +172,21 @@ export async function synchronizeWorkflowExecution(input:{
   if (moduleUpdates.length) await env.DB.batch(moduleUpdates);
 
   const steps = await env.DB.prepare(
-    `SELECT ss.id,ss.step_key,ss.sort_order,
+    `SELECT ss.id,ss.step_key,ss.sort_order,ss.status existing_status,
       COUNT(ms.id) module_count,
       SUM(CASE WHEN ms.is_required=1 AND ms.status!='completed' THEN 1 ELSE 0 END) pending_required
      FROM workflow_instance_step_states ss
      LEFT JOIN workflow_instance_module_states ms ON ms.instance_step_state_id=ss.id
      WHERE ss.instance_id=? GROUP BY ss.id ORDER BY ss.sort_order`,
   ).bind(input.instanceId).all<{
-    id:string;step_key:string;sort_order:number;module_count:number;pending_required:number;
+    id:string;step_key:string;sort_order:number;existing_status:string;
+    module_count:number;pending_required:number;
   }>();
   const reachable = steps.results.filter((item)=>item.sort_order<=target.sort_order);
-  const current = reachable.find((item)=>item.module_count===0 || item.pending_required>0) ??
+  const current = reachable.find((item)=>
+    item.existing_status !== "completed" &&
+    (item.module_count===0 || item.pending_required>0),
+  ) ?? steps.results.find((item)=>item.existing_status === "active") ??
     reachable[reachable.length - 1] ?? steps.results[0];
   if (!current) return input.targetStepKey;
   const stepUpdates = steps.results.map((item) => {
@@ -267,48 +274,271 @@ export async function replaceWorkflowInstanceVersion(input:{
   organizationId:string;
   orderId:string;
   targetWorkflowId:string;
+  actorUserId:string;
+  affectedOrderCount?:number;
 }) {
   const instance = await env.DB.prepare(
-    "SELECT id,workflow_id FROM workflow_instances WHERE organization_id=? AND order_id=?",
-  ).bind(input.organizationId,input.orderId).first<{id:string;workflow_id:string}>();
+    "SELECT id,workflow_id,current_step_key,status FROM workflow_instances WHERE organization_id=? AND order_id=?",
+  ).bind(input.organizationId,input.orderId).first<{
+    id:string;workflow_id:string;current_step_key:string;status:string;
+  }>();
   if (!instance) throw new Error("订单工作流实例不存在");
   if (instance.workflow_id === input.targetWorkflowId) return instance.id;
-  const values = await env.DB.prepare(
-    `SELECT f.field_key,f.module_code,v.value_text
-     FROM workflow_instance_fields f JOIN order_custom_workflow_field_values v ON v.field_instance_id=f.id
-     WHERE f.instance_id=? AND v.order_id=? AND v.organization_id=?`,
-  ).bind(instance.id,input.orderId,input.organizationId).all<{
-    field_key:string;module_code:string;value_text:string|null;
-  }>();
+  const targetCurrentStep = await env.DB.prepare(
+    "SELECT sort_order FROM workflow_steps WHERE workflow_id=? AND step_key=? AND is_active=1",
+  ).bind(input.targetWorkflowId,instance.current_step_key).first<{sort_order:number}>();
+  if (!targetCurrentStep) {
+    throw new Error(`目标工作流缺少当前节点“${instance.current_step_key}”，为避免订单回退已停止切换`);
+  }
   const now = new Date().toISOString();
+  const changeId = crypto.randomUUID();
   await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO workflow_instance_version_changes(
+        id,organization_id,instance_id,order_id,from_workflow_id,to_workflow_id,
+        preserved_current_step_key,affected_order_count,actor_user_id,reason,created_at
+       ) VALUES(?,?,?,?,?,?,?,?,?,'manual_switch',?)`,
+    ).bind(
+      changeId,input.organizationId,instance.id,input.orderId,instance.workflow_id,
+      input.targetWorkflowId,instance.current_step_key,input.affectedOrderCount??1,input.actorUserId,now,
+    ),
+    env.DB.prepare(
+      `INSERT INTO workflow_instance_version_step_archive(
+        id,change_id,step_key,step_name,sort_order,status,started_at,completed_at
+       )
+       SELECT lower(hex(randomblob(16))),?,step_key,step_name,sort_order,status,started_at,completed_at
+       FROM workflow_instance_step_states WHERE instance_id=?`,
+    ).bind(changeId,instance.id),
+    env.DB.prepare(
+      `INSERT INTO workflow_instance_version_task_archive(
+        id,change_id,step_key,module_code,task_key,task_name,status,completed_by_user_id,completed_at
+       )
+       SELECT lower(hex(randomblob(16))),?,ss.step_key,ms.module_code,ts.task_key,ts.name,
+              ts.status,ts.completed_by_user_id,ts.completed_at
+       FROM workflow_instance_task_states ts
+       JOIN workflow_instance_module_states ms ON ms.id=ts.instance_module_state_id
+       JOIN workflow_instance_step_states ss ON ss.id=ms.instance_step_state_id
+       WHERE ss.instance_id=?`,
+    ).bind(changeId,instance.id),
+    env.DB.prepare(
+      `INSERT INTO workflow_field_value_audit_archive(
+        id,change_id,organization_id,order_id,source_workflow_id,step_key,module_code,
+        field_key,field_label,value_text,original_created_at,original_updated_at,archived_at
+       )
+       SELECT lower(hex(randomblob(16))),?,?,?,?,f.step_key,f.module_code,f.field_key,f.label,
+              v.value_text,v.created_at,v.updated_at,?
+       FROM workflow_instance_fields f
+       JOIN order_custom_workflow_field_values v ON v.field_instance_id=f.id
+       WHERE f.instance_id=? AND v.order_id=? AND v.organization_id=?`,
+    ).bind(
+      changeId,input.organizationId,input.orderId,instance.workflow_id,now,
+      instance.id,input.orderId,input.organizationId,
+    ),
     env.DB.prepare("DELETE FROM workflow_instance_step_states WHERE instance_id=?").bind(instance.id),
     env.DB.prepare("DELETE FROM workflow_instance_fields WHERE instance_id=?").bind(instance.id),
     env.DB.prepare(
-      `UPDATE workflow_instances SET workflow_id=?,current_step_key='order_creation',status='active',
-        completed_at=NULL,updated_at=? WHERE id=? AND organization_id=?`,
-    ).bind(input.targetWorkflowId,now,instance.id,input.organizationId),
+      `UPDATE workflow_instances SET workflow_id=?,current_step_key=?,updated_at=?
+       WHERE id=? AND organization_id=?`,
+    ).bind(input.targetWorkflowId,instance.current_step_key,now,instance.id,input.organizationId),
+    env.DB.prepare(
+      `INSERT INTO workflow_instance_fields(
+        id,instance_id,workflow_id,step_key,module_code,field_key,label,field_type,
+        is_required,is_active,sort_order,options_text,help_text,created_at
+       )
+       SELECT lower(hex(randomblob(16))),?,f.workflow_id,s.step_key,
+              COALESCE(f.module_code,'consignment'),f.field_key,f.label,f.field_type,
+              f.is_required,f.is_active,f.sort_order,f.options_text,f.help_text,?
+       FROM workflow_step_fields f
+       JOIN workflow_steps s ON s.id=f.step_id AND s.workflow_id=f.workflow_id
+       WHERE f.workflow_id=?`,
+    ).bind(instance.id,now,input.targetWorkflowId),
+    env.DB.prepare(
+      `INSERT INTO workflow_instance_step_states(
+        id,instance_id,workflow_id,step_id,step_key,step_name,sort_order,status,
+        started_at,completed_at,updated_at
+       )
+       SELECT lower(hex(randomblob(16))),?,?,s.id,s.step_key,s.name,s.sort_order,
+         CASE
+           WHEN ?='completed' THEN 'completed'
+           WHEN s.sort_order<? THEN 'completed'
+           WHEN EXISTS(
+             SELECT 1 FROM workflow_instance_version_step_archive a
+             WHERE a.change_id=? AND a.step_key=s.step_key AND a.status='completed'
+           ) THEN 'completed'
+           WHEN s.step_key=? THEN 'active'
+           ELSE 'pending'
+         END,
+         CASE WHEN s.sort_order<=? THEN COALESCE((
+           SELECT a.started_at FROM workflow_instance_version_step_archive a
+           WHERE a.change_id=? AND a.step_key=s.step_key
+         ),?) ELSE NULL END,
+         CASE WHEN ?='completed' OR s.sort_order<? OR EXISTS(
+           SELECT 1 FROM workflow_instance_version_step_archive a
+           WHERE a.change_id=? AND a.step_key=s.step_key AND a.status='completed'
+         ) THEN COALESCE((
+           SELECT a.completed_at FROM workflow_instance_version_step_archive a
+           WHERE a.change_id=? AND a.step_key=s.step_key
+         ),?) ELSE NULL END,
+         ?
+       FROM workflow_steps s WHERE s.workflow_id=? AND s.is_active=1`,
+    ).bind(
+      instance.id,input.targetWorkflowId,instance.status,targetCurrentStep.sort_order,changeId,
+      instance.current_step_key,targetCurrentStep.sort_order,changeId,now,instance.status,
+      targetCurrentStep.sort_order,changeId,changeId,now,now,input.targetWorkflowId,
+    ),
+    env.DB.prepare(
+      `INSERT INTO workflow_instance_module_states(
+        id,instance_step_state_id,step_module_id,module_code,display_name,sort_order,is_required,status,
+        responsibility_position_code,completion_mode,updated_at
+       )
+       SELECT lower(hex(randomblob(16))),ss.id,m.id,m.module_code,m.display_name,m.sort_order,m.is_required,
+         CASE WHEN ss.status='completed' THEN 'completed' ELSE 'pending' END,
+         m.responsibility_position_code,m.completion_mode,?
+       FROM workflow_instance_step_states ss
+       JOIN workflow_step_modules m
+         ON m.workflow_id=ss.workflow_id AND m.step_id=ss.step_id AND m.is_active=1
+       WHERE ss.instance_id=?`,
+    ).bind(now,instance.id),
+    env.DB.prepare(
+      `INSERT INTO workflow_instance_task_states(
+        id,instance_module_state_id,module_task_id,task_key,name,task_type,sort_order,is_required,status,
+        responsibility_position_code,instructions,completed_by_user_id,completed_at,updated_at
+       )
+       SELECT lower(hex(randomblob(16))),ms.id,t.id,t.task_key,t.name,t.task_type,t.sort_order,t.is_required,
+         CASE WHEN ss.status='completed' OR EXISTS(
+           SELECT 1 FROM workflow_instance_version_task_archive a
+           WHERE a.change_id=? AND a.step_key=ss.step_key AND a.module_code=ms.module_code
+             AND a.task_key=t.task_key AND a.status='completed'
+         ) THEN 'completed' ELSE 'pending' END,
+         COALESCE(t.responsibility_position_code,ms.responsibility_position_code),t.instructions,
+         (SELECT a.completed_by_user_id FROM workflow_instance_version_task_archive a
+          WHERE a.change_id=? AND a.step_key=ss.step_key AND a.module_code=ms.module_code
+            AND a.task_key=t.task_key AND a.status='completed' LIMIT 1),
+         CASE WHEN ss.status='completed' THEN COALESCE((
+           SELECT a.completed_at FROM workflow_instance_version_task_archive a
+           WHERE a.change_id=? AND a.step_key=ss.step_key AND a.module_code=ms.module_code
+             AND a.task_key=t.task_key AND a.status='completed' LIMIT 1
+         ),?) ELSE (
+           SELECT a.completed_at FROM workflow_instance_version_task_archive a
+           WHERE a.change_id=? AND a.step_key=ss.step_key AND a.module_code=ms.module_code
+             AND a.task_key=t.task_key AND a.status='completed' LIMIT 1
+         ) END,?
+       FROM workflow_instance_module_states ms
+       JOIN workflow_instance_step_states ss ON ss.id=ms.instance_step_state_id
+       JOIN workflow_module_tasks t
+         ON t.workflow_id=ss.workflow_id AND t.step_module_id=ms.step_module_id AND t.is_active=1
+       WHERE ss.instance_id=?`,
+    ).bind(changeId,changeId,changeId,now,changeId,now,instance.id),
+    env.DB.prepare(
+      `INSERT INTO order_custom_workflow_field_values(
+        id,organization_id,order_id,field_instance_id,value_text,created_at,updated_at
+       )
+       SELECT lower(hex(randomblob(16))),a.organization_id,a.order_id,f.id,a.value_text,?,?
+       FROM workflow_field_value_audit_archive a
+       JOIN workflow_instance_fields f
+         ON f.instance_id=? AND f.field_key=a.field_key AND f.module_code=a.module_code
+       WHERE a.change_id=?
+         AND f.id=(
+           SELECT candidate.id FROM workflow_instance_fields candidate
+           WHERE candidate.instance_id=f.instance_id AND candidate.field_key=a.field_key
+             AND candidate.module_code=a.module_code
+           ORDER BY candidate.is_active DESC,candidate.sort_order,candidate.id LIMIT 1
+         )`,
+    ).bind(now,now,instance.id,changeId),
+    env.DB.prepare(
+      `INSERT INTO workflow_history(
+        id,instance_id,step_key,step_name,actor_user_id,source,metadata,occurred_at
+       )
+       SELECT ?,?,?,s.name,?,'admin',?,?
+       FROM workflow_steps s WHERE s.workflow_id=? AND s.step_key=?`,
+    ).bind(
+      crypto.randomUUID(),instance.id,instance.current_step_key,input.actorUserId,
+      JSON.stringify({
+        versionChanged:true,
+        changeId,
+        fromWorkflowId:instance.workflow_id,
+        toWorkflowId:input.targetWorkflowId,
+        historicalStepsPreserved:true,
+      }),now,input.targetWorkflowId,instance.current_step_key,
+    ),
   ]);
-  await snapshotWorkflowFieldsForInstance({
-    organizationId:input.organizationId,
-    instanceId:instance.id,
-    workflowId:input.targetWorkflowId,
-  });
-  await ensureWorkflowExecutionSnapshot({instanceId:instance.id,workflowId:input.targetWorkflowId});
-  if (values.results.length) {
-    const fields = await env.DB.prepare(
-      "SELECT id,field_key,module_code FROM workflow_instance_fields WHERE instance_id=?",
-    ).bind(instance.id).all<{id:string;field_key:string;module_code:string}>();
-    const statements = values.results.map((value) => {
-      const field = fields.results.find((item)=>item.field_key===value.field_key&&item.module_code===value.module_code);
-      if (!field) return null;
-      return env.DB.prepare(
-        `INSERT INTO order_custom_workflow_field_values(
-          id,organization_id,order_id,field_instance_id,value_text,created_at,updated_at
-         ) VALUES(?,?,?,?,?,?,?)`,
-      ).bind(crypto.randomUUID(),input.organizationId,input.orderId,field.id,value.value_text,now,now);
-    }).filter(Boolean) as D1PreparedStatement[];
-    if (statements.length) await env.DB.batch(statements);
-  }
   return instance.id;
+}
+
+export type WorkflowVersionSwitchImpact = {
+  orderIds:string[];
+  affectedOrderCount:number;
+  completedOrderCount:number;
+  completedStepCount:number;
+  batchNumber:string|null;
+  currentStepKey:string|null;
+  currentStepName:string|null;
+  hasActualExit:boolean;
+  allowed:boolean;
+  reason:string|null;
+};
+
+export async function inspectWorkflowVersionSwitchImpact(
+  organizationId:string,
+  orderId:string,
+):Promise<WorkflowVersionSwitchImpact> {
+  const order = await env.DB.prepare(
+    `SELECT o.id,o.status,wi.current_step_key,ws.name current_step_name,
+      (SELECT COUNT(*) FROM workflow_instance_step_states ss
+       WHERE ss.instance_id=wi.id AND ss.status='completed') completed_step_count,
+      EXISTS(
+        SELECT 1 FROM order_tracking_milestones tm
+        WHERE tm.organization_id=o.organization_id AND tm.order_id=o.id
+          AND tm.milestone_code IN ('exported','actual_exit','exit')
+      ) order_exited
+     FROM transport_orders o
+     LEFT JOIN workflow_instances wi ON wi.organization_id=o.organization_id AND wi.order_id=o.id
+     LEFT JOIN workflow_steps ws ON ws.workflow_id=wi.workflow_id AND ws.step_key=wi.current_step_key
+     WHERE o.organization_id=? AND o.id=?`,
+  ).bind(organizationId,orderId).first<{
+    id:string;status:string;current_step_key:string|null;current_step_name:string|null;
+    completed_step_count:number;order_exited:number;
+  }>();
+  if (!order) {
+    return {
+      orderIds:[],affectedOrderCount:0,completedOrderCount:0,completedStepCount:0,
+      batchNumber:null,currentStepKey:null,currentStepName:null,hasActualExit:false,
+      allowed:false,reason:"订单不存在。",
+    };
+  }
+  const batch = await env.DB.prepare(
+    `SELECT b.id,b.batch_number,
+      EXISTS(SELECT 1 FROM transport_exit_confirmations ec WHERE ec.batch_id=b.id) has_exit
+     FROM transport_batch_orders bo
+     JOIN transport_batches b ON b.id=bo.batch_id AND b.organization_id=bo.organization_id
+     WHERE bo.organization_id=? AND bo.order_id=? AND bo.status!='removed' AND b.status!='cancelled'
+     ORDER BY b.created_at DESC LIMIT 1`,
+  ).bind(organizationId,orderId).first<{id:string;batch_number:string;has_exit:number}>();
+  const orderRows = batch
+    ? await env.DB.prepare(
+        `SELECT o.id,o.status FROM transport_batch_orders bo
+         JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
+         WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'`,
+      ).bind(organizationId,batch.id).all<{id:string;status:string}>()
+    : { results:[{id:order.id,status:order.status}] };
+  const orderIds = orderRows.results.map((item)=>item.id);
+  const completedOrderCount = orderRows.results.filter((item)=>item.status==="completed").length;
+  const hasActualExit = Boolean(order.order_exited || batch?.has_exit);
+  const decision = workflowVersionSwitchDecision({
+    affectedOrderCount:orderIds.length,
+    completedOrderCount,
+    hasActualExit,
+  });
+  return {
+    orderIds,
+    affectedOrderCount:orderIds.length,
+    completedOrderCount,
+    completedStepCount:Number(order.completed_step_count||0),
+    batchNumber:batch?.batch_number??null,
+    currentStepKey:order.current_step_key,
+    currentStepName:order.current_step_name,
+    hasActualExit,
+    allowed:decision.allowed,
+    reason:decision.reason,
+  };
 }
