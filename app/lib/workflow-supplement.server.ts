@@ -1,0 +1,175 @@
+import { env } from "cloudflare:workers";
+import type { OrderModuleCode } from "./order-modules";
+
+export type WorkflowFieldPolicyImpact = {
+  total:number;
+  future:number;
+  current:number;
+  historical:number;
+  auditOnly:number;
+};
+
+export type WorkflowSupplementTask = {
+  id:string;
+  target_step_key:string;
+  target_step_name:string|null;
+  module_code:OrderModuleCode;
+  field_key:string;
+  field_label:string;
+  task_kind:"supplement"|"audit_only";
+  status:"open"|"completed"|"cancelled";
+  reason:string;
+  resolution_note:string|null;
+  created_at:string;
+  completed_at:string|null;
+  completed_by_name:string|null;
+};
+
+export async function inspectWorkflowFieldPolicyImpact(
+  workflowId:string,
+  targetStepKey:string,
+):Promise<WorkflowFieldPolicyImpact> {
+  const result = await env.DB.prepare(
+    `SELECT
+      COUNT(wi.id) total,
+      SUM(CASE WHEN current_step.sort_order<target_step.sort_order THEN 1 ELSE 0 END) future_count,
+      SUM(CASE WHEN current_step.sort_order=target_step.sort_order THEN 1 ELSE 0 END) current_count,
+      SUM(CASE WHEN current_step.sort_order>target_step.sort_order
+        AND wi.status!='completed'
+        AND NOT EXISTS(
+          SELECT 1 FROM transport_batch_orders bo
+          JOIN transport_exit_confirmations ec ON ec.batch_id=bo.batch_id
+          WHERE bo.order_id=wi.order_id AND bo.status!='removed'
+        )
+        AND NOT EXISTS(
+          SELECT 1 FROM order_tracking_milestones tm
+          WHERE tm.order_id=wi.order_id AND tm.milestone_code IN ('exported','actual_exit','exit')
+        ) THEN 1 ELSE 0 END) historical_count,
+      SUM(CASE WHEN current_step.sort_order>target_step.sort_order AND (
+        wi.status='completed'
+        OR EXISTS(
+          SELECT 1 FROM transport_batch_orders bo
+          JOIN transport_exit_confirmations ec ON ec.batch_id=bo.batch_id
+          WHERE bo.order_id=wi.order_id AND bo.status!='removed'
+        )
+        OR EXISTS(
+          SELECT 1 FROM order_tracking_milestones tm
+          WHERE tm.order_id=wi.order_id AND tm.milestone_code IN ('exported','actual_exit','exit')
+        )
+      ) THEN 1 ELSE 0 END) audit_count
+     FROM workflow_steps target_step
+     LEFT JOIN workflow_instances wi ON wi.workflow_id=target_step.workflow_id AND wi.order_id IS NOT NULL
+     LEFT JOIN workflow_steps current_step
+       ON current_step.workflow_id=wi.workflow_id AND current_step.step_key=wi.current_step_key
+     WHERE target_step.workflow_id=? AND target_step.step_key=?`,
+  ).bind(workflowId,targetStepKey).first<{
+    total:number;future_count:number;current_count:number;historical_count:number;audit_count:number;
+  }>();
+  return {
+    total:Number(result?.total||0),
+    future:Number(result?.future_count||0),
+    current:Number(result?.current_count||0),
+    historical:Number(result?.historical_count||0),
+    auditOnly:Number(result?.audit_count||0),
+  };
+}
+
+export async function synchronizeWorkflowSupplementTasks(input:{
+  organizationId:string;
+  workflowId:string;
+  targetStepKey:string;
+  moduleCode:OrderModuleCode;
+  fieldKey:string;
+  fieldLabel:string;
+  mode:"required"|"optional"|"hidden";
+  actorUserId:string;
+}) {
+  const now = new Date().toISOString();
+  if (input.mode !== "required") {
+    const cancelled = await env.DB.prepare(
+      `UPDATE workflow_supplement_tasks
+       SET status='cancelled',resolution_note=?,completed_by_user_id=?,completed_at=?,updated_at=?
+       WHERE organization_id=? AND workflow_id=? AND module_code=? AND field_key=? AND status='open'`,
+    ).bind(
+      input.mode === "hidden" ? "字段已隐藏，补录任务关闭；历史值继续保留审计。" : "字段已改为选填，补录任务关闭。",
+      input.actorUserId,now,now,input.organizationId,input.workflowId,input.moduleCode,input.fieldKey,
+    ).run();
+    return { created:0,cancelled:Number(cancelled.meta?.changes||0) };
+  }
+  const created = await env.DB.prepare(
+    `INSERT OR IGNORE INTO workflow_supplement_tasks(
+      id,organization_id,workflow_id,instance_id,order_id,target_step_key,module_code,
+      field_key,field_label,task_kind,status,reason,created_by_user_id,created_at,updated_at
+     )
+     SELECT lower(hex(randomblob(16))),wi.organization_id,wi.workflow_id,wi.id,wi.order_id,?, ?, ?, ?,
+       CASE WHEN wi.status='completed'
+         OR EXISTS(
+           SELECT 1 FROM transport_batch_orders bo
+           JOIN transport_exit_confirmations ec ON ec.batch_id=bo.batch_id
+           WHERE bo.order_id=wi.order_id AND bo.status!='removed'
+         )
+         OR EXISTS(
+           SELECT 1 FROM order_tracking_milestones tm
+           WHERE tm.order_id=wi.order_id AND tm.milestone_code IN ('exported','actual_exit','exit')
+         ) THEN 'audit_only' ELSE 'supplement' END,
+       'open',
+       CASE WHEN wi.status='completed'
+         OR EXISTS(
+           SELECT 1 FROM transport_batch_orders bo
+           JOIN transport_exit_confirmations ec ON ec.batch_id=bo.batch_id
+           WHERE bo.order_id=wi.order_id AND bo.status!='removed'
+         )
+         OR EXISTS(
+           SELECT 1 FROM order_tracking_milestones tm
+           WHERE tm.order_id=wi.order_id AND tm.milestone_code IN ('exported','actual_exit','exit')
+         ) THEN '订单已出境或完成：仅补录审计，不回退历史节点。'
+         ELSE '字段改为必填时订单已通过所属节点：创建补录任务，不回退历史节点。' END,
+       ?,?,?
+     FROM workflow_instances wi
+     JOIN workflow_steps current_step
+       ON current_step.workflow_id=wi.workflow_id AND current_step.step_key=wi.current_step_key
+     JOIN workflow_steps target_step
+       ON target_step.workflow_id=wi.workflow_id AND target_step.step_key=?
+     WHERE wi.organization_id=? AND wi.workflow_id=? AND wi.order_id IS NOT NULL
+       AND current_step.sort_order>target_step.sort_order`,
+  ).bind(
+    input.targetStepKey,input.moduleCode,input.fieldKey,input.fieldLabel,
+    input.actorUserId,now,now,input.targetStepKey,input.organizationId,input.workflowId,
+  ).run();
+  return { created:Number(created.meta?.changes||0),cancelled:0 };
+}
+
+export async function listOrderSupplementTasks(
+  organizationId:string,
+  orderId:string,
+) {
+  return (await env.DB.prepare(
+    `SELECT t.id,t.target_step_key,s.name target_step_name,t.module_code,t.field_key,
+      t.field_label,t.task_kind,t.status,t.reason,t.resolution_note,t.created_at,t.completed_at,
+      u.display_name completed_by_name
+     FROM workflow_supplement_tasks t
+     LEFT JOIN workflow_steps s ON s.workflow_id=t.workflow_id AND s.step_key=t.target_step_key
+     LEFT JOIN users u ON u.id=t.completed_by_user_id
+     WHERE t.organization_id=? AND t.order_id=?
+     ORDER BY CASE t.status WHEN 'open' THEN 0 WHEN 'completed' THEN 1 ELSE 2 END,t.created_at DESC`,
+  ).bind(organizationId,orderId).all<WorkflowSupplementTask>()).results;
+}
+
+export async function completeWorkflowSupplementTask(input:{
+  organizationId:string;
+  orderId:string;
+  taskId:string;
+  actorUserId:string;
+  resolutionNote:string;
+}) {
+  if (input.resolutionNote.trim().length < 2) throw new Error("请填写至少 2 个字的补录或复核说明");
+  const now = new Date().toISOString();
+  const updated = await env.DB.prepare(
+    `UPDATE workflow_supplement_tasks
+     SET status='completed',completed_by_user_id=?,resolution_note=?,completed_at=?,updated_at=?
+     WHERE id=? AND organization_id=? AND order_id=? AND status='open'`,
+  ).bind(
+    input.actorUserId,input.resolutionNote.trim(),now,now,input.taskId,input.organizationId,input.orderId,
+  ).run();
+  if (!Number(updated.meta?.changes||0)) throw new Error("补录任务不存在或已经处理");
+}

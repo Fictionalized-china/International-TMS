@@ -28,6 +28,19 @@ export function workflowIntentAllowedForUsage(intent: string, instanceCount: num
   return !workflowEditCapabilities(instanceCount).usedByOrders || !structureMutationIntents.has(intent);
 }
 
+export function workflowFieldPlacementLock(input:{
+  instanceCount:number;
+  currentStepId:string|null;
+  targetStepId:string;
+  currentSortOrder:number|null;
+  targetSortOrder:number;
+}) {
+  if (!workflowEditCapabilities(input.instanceCount).usedByOrders || !input.currentStepId) return null;
+  if (input.currentStepId !== input.targetStepId) return "position" as const;
+  if (input.currentSortOrder !== input.targetSortOrder) return "sort" as const;
+  return null;
+}
+
 export function editableWorkflowFieldMode(value: string): EditableWorkflowFieldMode | null {
   return value === "required" || value === "optional" || value === "hidden" ? value : null;
 }

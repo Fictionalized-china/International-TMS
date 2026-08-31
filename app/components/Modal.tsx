@@ -184,6 +184,7 @@ type ModalProps = {
   dialogClassName?: string;
   triggerClassName?: string;
   closeOnBackdrop?: boolean;
+  dismissible?:boolean;
   dirty?: boolean;
   discardMessage?: string;
   initialFocusSelector?: string;
@@ -202,6 +203,7 @@ export function Modal({
   dialogClassName = "",
   triggerClassName = "primary",
   closeOnBackdrop = false,
+  dismissible = true,
   dirty = false,
   discardMessage = "当前内容尚未保存，确定放弃本次修改吗？",
   initialFocusSelector,
@@ -223,10 +225,11 @@ export function Modal({
   }, [isOpen, onOpenChange]);
 
   const close = useCallback((force = false) => {
+    if(!force&&!dismissible)return;
     if (!force && dirty && typeof window !== "undefined" && !window.confirm(discardMessage)) return;
     updateOpen(false);
     onClose?.();
-  }, [dirty, discardMessage, onClose, updateOpen]);
+  }, [dirty, dismissible, discardMessage, onClose, updateOpen]);
 
   useEffect(() => {
     if (!closeSignal) return;
@@ -316,14 +319,14 @@ export function Modal({
           >
             <header className="modal-header">
               <h2 id={titleId}>{title}</h2>
-              <button
-                type="button"
-                className="modal-close"
-                aria-label="关闭"
-                onClick={() => close()}
-              >
-                ×
-              </button>
+              {dismissible&&<button
+                  type="button"
+                  className="modal-close"
+                  aria-label="关闭"
+                  onClick={() => close()}
+                >
+                  ×
+                </button>}
             </header>
             <div className="modal-body">
               {typeof children === "function" ? children({ close: () => close() }) : children}

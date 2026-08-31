@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { useState } from "react";
 import { Form, Link, redirect, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.workflow";
 import { canEditWorkflowDefinition, requireSessionUser } from "../lib/auth.server";
@@ -24,6 +25,12 @@ import {
   synchronizeWorkflowFieldDefinitionForInstances,
 } from "../lib/workflow-fields.server";
 import { ensureWorkflowExecutionSnapshot } from "../lib/workflow-execution.server";
+import { broadcastInternalNotification } from "../lib/internal-notifications.server";
+import {
+  inspectWorkflowFieldPolicyImpact,
+  synchronizeWorkflowSupplementTasks,
+  type WorkflowFieldPolicyImpact,
+} from "../lib/workflow-supplement.server";
 import {
   editableWorkflowFieldFlags,
   editableWorkflowFieldMode,
@@ -33,6 +40,7 @@ import {
   workflowEditCapabilities,
   workflowInsertionSortOrder,
   workflowIntentAllowedForUsage,
+  workflowFieldPlacementLock,
 } from "../lib/workflow-edit-policy";
 
 type Definition = {
@@ -180,6 +188,12 @@ export async function loader({ request }: Route.LoaderArgs) {
       .bind(current.organizationId, workflowId)
       .all<Instance>(),
   ]);
+  const impactRows = await Promise.all(
+    steps.results.map(async (step) => [
+      step.step_key,
+      await inspectWorkflowFieldPolicyImpact(workflowId,step.step_key),
+    ] as const),
+  );
   return {
     current,
     definitions: definitions.results,
@@ -195,6 +209,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       moduleTasks.results,
     ),
     instances: instances.results,
+    fieldPolicyImpacts:Object.fromEntries(impactRows) as Record<string,WorkflowFieldPolicyImpact>,
     canEdit: canEditWorkflowDefinition(current),
   };
 }
@@ -317,7 +332,7 @@ export async function action({ request }: Route.ActionArgs) {
     const mode = editableWorkflowFieldMode(valueOf(form, "fieldMode"));
     if (!mode) return { formError: "字段规则只能设置为必填、选填或隐藏" };
     const field = await env.DB.prepare(
-      `SELECT f.id,f.step_id,s.step_key,f.field_key,f.label,f.field_type,f.is_active,f.sort_order,
+      `SELECT f.id,f.step_id,s.step_key,f.field_key,f.label,f.field_type,f.is_required,f.is_active,f.sort_order,
         f.options_text,f.help_text,COALESCE(f.module_code,'consignment') module_code
        FROM workflow_step_fields f JOIN workflow_steps s ON s.id=f.step_id
        WHERE f.id=? AND f.workflow_id=?`,
@@ -330,6 +345,7 @@ export async function action({ request }: Route.ActionArgs) {
         field_key: string;
         label: string;
         field_type: string;
+        is_required:number;
         is_active: number;
         sort_order: number;
         options_text: string | null;
@@ -337,6 +353,12 @@ export async function action({ request }: Route.ActionArgs) {
         module_code: OrderModuleCode;
     }>();
     if (!field) return { formError: "字段不存在" };
+    const previousMode=workflowFieldMode(field);
+    if(previousMode===mode)return{success:`字段“${field.label}”当前已经是${mode==="required"?"必填":mode==="optional"?"选填":"隐藏"}`};
+    const impact=await inspectWorkflowFieldPolicyImpact(workflowId,field.step_key);
+    if(impact.total>0&&valueOf(form,"impactConfirmed")!=="1"){
+      return{formError:"该规则会影响现有订单，请先查看分层影响并在弹窗中二次确认"};
+    }
     const flags = editableWorkflowFieldFlags(mode);
     await env.DB.prepare(
       "UPDATE workflow_step_fields SET is_required=?,is_active=?,updated_at=? WHERE id=? AND workflow_id=?",
@@ -360,6 +382,16 @@ export async function action({ request }: Route.ActionArgs) {
       await ensureFieldPolicyModule(workflowId, field.step_id, field.module_code, flags.isRequired, now);
     }
     await reconcileFieldPolicyModule(workflowId, field.step_id, field.module_code, now);
+    const supplementTasks=await synchronizeWorkflowSupplementTasks({
+      organizationId:current.organizationId,
+      workflowId,
+      targetStepKey:field.step_key,
+      moduleCode:field.module_code,
+      fieldKey:field.field_key,
+      fieldLabel:field.label,
+      mode,
+      actorUserId:current.userId,
+    });
     const preserved = flags.preservesStoredValue
       ? await inspectHiddenWorkflowFieldData({
           organizationId: current.organizationId,
@@ -381,13 +413,25 @@ export async function action({ request }: Route.ActionArgs) {
         fieldKey: field.field_key,
         mode,
         preserved,
+        impact,
+        supplementTasks,
       },
+    });
+    await broadcastInternalNotification({
+      organizationId:current.organizationId,
+      actorUserId:current.userId,
+      category:"workflow_field_policy_changed",
+      severity:mode==="required"?"critical":"warning",
+      title:`工作流字段规则已变更：${field.label}`,
+      message:`${field.label} 已由${previousMode==="required"?"必填":previousMode==="optional"?"选填":"隐藏"}改为${mode==="required"?"必填":mode==="optional"?"选填":"隐藏"}。影响 ${impact.total} 张订单：当前 ${impact.current}、未来 ${impact.future}、历史补录 ${impact.historical}、审计补录 ${impact.auditOnly}；历史节点不会回退。`,
+      link:`/admin/workflow?workflowId=${encodeURIComponent(workflowId)}`,
     });
     const preservedText = preserved && (preserved.preservedFiles || preserved.preservedCustomValues)
       ? `；历史数据已保留（${preserved.preservedFiles} 个文件、${preserved.preservedCustomValues} 条自定义值）`
       : "";
     const modeLabel = mode === "required" ? "必填" : mode === "optional" ? "选填" : "隐藏";
-    return { success: `字段“${field.label}”已设为${modeLabel}，现有订单后续门禁已同步${preservedText}` };
+    const taskText=supplementTasks.created?`；已创建 ${supplementTasks.created} 项资料补录任务`:supplementTasks.cancelled?`；已关闭 ${supplementTasks.cancelled} 项旧补录任务`:"";
+    return { success: `字段“${field.label}”已设为${modeLabel}，现有订单后续门禁已同步${taskText}${preservedText}` };
   }
 
   if (!workflowIntentAllowedForUsage(intent, definition.instance_count) && intent !== "advance") {
@@ -522,6 +566,14 @@ export async function action({ request }: Route.ActionArgs) {
     if (!step) return { formError: "流程节点不存在" };
     const parsed = parseFieldForm(form);
     if ("formError" in parsed) return parsed;
+    const duplicate = await env.DB.prepare(
+      "SELECT 1 FROM workflow_step_fields WHERE workflow_id=? AND step_id=? AND field_key=?",
+    ).bind(workflowId,step.id,parsed.fieldKey).first();
+    if (duplicate) return { formError: `当前节点已存在编码为“${parsed.fieldKey}”的字段` };
+    const impact=await inspectWorkflowFieldPolicyImpact(workflowId,step.step_key);
+    if(impact.total>0&&valueOf(form,"impactConfirmed")!=="1"){
+      return{formError:"新增字段会同步到现有订单，请先查看分层影响并在弹窗中二次确认"};
+    }
     const id = crypto.randomUUID();
     await env.DB.prepare(
       `INSERT INTO workflow_step_fields(id,workflow_id,step_id,field_key,label,field_type,is_required,is_active,sort_order,options_text,help_text,module_code,created_at,updated_at)
@@ -544,11 +596,52 @@ export async function action({ request }: Route.ActionArgs) {
         now,
       )
       .run();
+    await synchronizeWorkflowFieldDefinitionForInstances({
+      workflowId,
+      stepKey:step.step_key,
+      fieldKey:parsed.fieldKey,
+      moduleCode:parsed.moduleCode,
+      label:parsed.label,
+      fieldType:parsed.fieldType,
+      isRequired:parsed.required,
+      isActive:parsed.active,
+      sortOrder:parsed.sortOrder,
+      optionsText:parsed.optionsText,
+      helpText:parsed.helpText,
+    });
     if (parsed.active) {
       await ensureFieldPolicyModule(workflowId, step.id, parsed.moduleCode, parsed.required, now);
     }
     await reconcileFieldPolicyModule(workflowId, step.id, parsed.moduleCode, now);
-    return { success: `字段“${parsed.label}”已新增` };
+    const supplementTasks=await synchronizeWorkflowSupplementTasks({
+      organizationId:current.organizationId,
+      workflowId,
+      targetStepKey:step.step_key,
+      moduleCode:parsed.moduleCode,
+      fieldKey:parsed.fieldKey,
+      fieldLabel:parsed.label,
+      mode:parsed.mode,
+      actorUserId:current.userId,
+    });
+    await writeAudit({
+      request,
+      action:"workflow.field.create",
+      resourceType:"workflow_step_field",
+      resourceId:id,
+      organizationId:current.organizationId,
+      actorUserId:current.userId,
+      metadata:{workflowId,stepKey:step.step_key,fieldKey:parsed.fieldKey,mode:parsed.mode,impact,supplementTasks},
+    });
+    await broadcastInternalNotification({
+      organizationId:current.organizationId,
+      actorUserId:current.userId,
+      category:"workflow_field_added",
+      severity:parsed.mode==="required"?"critical":"warning",
+      title:`工作流新增字段：${parsed.label}`,
+      message:`“${parsed.label}”已加入“${step.step_key}”节点并设为${workflowModeLabel(parsed.mode)}。影响 ${impact.total} 张订单；历史节点不回退${supplementTasks.created?`，已生成 ${supplementTasks.created} 项补录任务`:""}。`,
+      link:`/admin/workflow?workflowId=${encodeURIComponent(workflowId)}`,
+    });
+    return { success: `字段“${parsed.label}”已新增并同步到 ${impact.total} 张现有订单${supplementTasks.created?`；已创建 ${supplementTasks.created} 项资料补录任务`:""}` };
   }
 
   if (intent === "field_catalog_add" || intent === "field_catalog_assign") {
@@ -562,11 +655,32 @@ export async function action({ request }: Route.ActionArgs) {
     if (sortOrder === null)
       return { formError: "字段顺序必须在 1–9999 之间" };
     const exists = await env.DB.prepare(
-      `SELECT id,step_id,COALESCE(module_code,?) module_code
+      `SELECT id,step_id,COALESCE(module_code,?) module_code,is_required,is_active,sort_order
        FROM workflow_step_fields
        WHERE workflow_id=? AND field_key=? AND COALESCE(module_code,?)=?`,
     ).bind(catalog.moduleCode,workflowId,catalog.fieldKey,catalog.moduleCode,catalog.moduleCode)
-      .first<{ id: string; step_id: string; module_code: OrderModuleCode }>();
+      .first<{ id: string; step_id: string; module_code: OrderModuleCode;is_required:number;is_active:number;sort_order:number }>();
+    const placementLock=workflowFieldPlacementLock({
+      instanceCount:definition.instance_count,
+      currentStepId:exists?.step_id??null,
+      targetStepId:step.id,
+      currentSortOrder:exists?.sort_order??null,
+      targetSortOrder:sortOrder,
+    });
+    if(placementLock==="position"){
+      return{formError:"工作流已有订单，不能移动已有字段；可以在目标节点新增另一个字段"};
+    }
+    const previousMode=exists?workflowFieldMode(exists):null;
+    if(exists?.step_id===step.id&&previousMode===mode&&exists.sort_order===sortOrder){
+      return{success:`业务字段“${catalog.label}”当前规则未变化`};
+    }
+    if(placementLock==="sort"){
+      return{formError:"工作流已有订单，既有字段顺序已锁定，只能修改可填、必填或隐藏状态"};
+    }
+    const impact=await inspectWorkflowFieldPolicyImpact(workflowId,step.step_key);
+    if(impact.total>0&&valueOf(form,"impactConfirmed")!=="1"){
+      return{formError:"字段积木变更会影响现有订单，请先查看分层影响并在弹窗中二次确认"};
+    }
     const fieldId = exists?.id || crypto.randomUUID();
     if (exists) {
       await env.DB.prepare(
@@ -615,6 +729,16 @@ export async function action({ request }: Route.ActionArgs) {
         moduleCode: catalog.moduleCode,
       });
     }
+    const supplementTasks=await synchronizeWorkflowSupplementTasks({
+      organizationId:current.organizationId,
+      workflowId,
+      targetStepKey:step.step_key,
+      moduleCode:catalog.moduleCode,
+      fieldKey:catalog.fieldKey,
+      fieldLabel:catalog.label,
+      mode,
+      actorUserId:current.userId,
+    });
     await writeAudit({
       request,
       action: "workflow.field.block.assign",
@@ -622,9 +746,18 @@ export async function action({ request }: Route.ActionArgs) {
       resourceId: fieldId,
       organizationId: current.organizationId,
       actorUserId: current.userId,
-      metadata: { workflowId, stepKey: step.step_key, fieldKey: catalog.fieldKey, mode, moved: Boolean(exists) },
+      metadata: { workflowId, stepKey: step.step_key, fieldKey: catalog.fieldKey, mode, moved: Boolean(exists&&exists.step_id!==step.id), impact, supplementTasks },
     });
-    return { success: `业务字段“${catalog.label}”已${exists ? "移动并更新" : "加入"}到“${step.step_key}”，现有订单已同步` };
+    await broadcastInternalNotification({
+      organizationId:current.organizationId,
+      actorUserId:current.userId,
+      category:"workflow_field_catalog_changed",
+      severity:mode==="required"?"critical":"warning",
+      title:`工作流字段积木已变更：${catalog.label}`,
+      message:`“${catalog.label}”已${exists?"更新":"加入"}到“${step.step_key}”并设为${workflowModeLabel(mode)}。影响 ${impact.total} 张订单；历史节点不回退${supplementTasks.created?`，已生成 ${supplementTasks.created} 项补录任务`:""}。`,
+      link:`/admin/workflow?workflowId=${encodeURIComponent(workflowId)}`,
+    });
+    return { success: `业务字段“${catalog.label}”已${exists ? "更新" : "加入"}到“${step.step_key}”，${impact.total} 张现有订单已同步${supplementTasks.created?`；已创建 ${supplementTasks.created} 项补录任务`:""}` };
   }
 
   if (intent === "field_update") {
@@ -1128,7 +1261,8 @@ function parseFieldForm(form: FormData) {
   const fieldKey = normalizeFieldKey(rawKey || label);
   const fieldType = valueOf(form, "fieldType");
   const moduleCode = valueOf(form, "moduleCode") as OrderModuleCode;
-  const mode = valueOf(form, "fieldMode") || "optional";
+  const mode = editableWorkflowFieldMode(valueOf(form, "fieldMode") || "optional");
+  if (!mode) return { formError: "填写规则只能设置为必填、选填或隐藏" };
   const flags = workflowFieldModeFlags(mode);
   const sortOrder = parseWorkflowSortOrder(valueOf(form, "fieldSortOrder"), 9999);
   if (
@@ -1146,12 +1280,17 @@ function parseFieldForm(form: FormData) {
     fieldKey,
     fieldType,
     moduleCode,
+    mode,
     sortOrder,
     required: flags.isRequired,
     active: flags.isActive,
     optionsText: valueOf(form, "optionsText").trim() || null,
     helpText: valueOf(form, "helpText").trim() || null,
   };
+}
+
+function workflowModeLabel(mode:"required"|"optional"|"hidden"){
+  return mode==="required"?"必填":mode==="optional"?"选填":"隐藏";
 }
 
 function normalizeFieldKey(input: string) {
@@ -1386,6 +1525,7 @@ export default function Workflow({ loaderData, actionData }: Route.ComponentProp
                   modulesByStep={modulesByStep}
                   tasksByModule={tasksByModule}
                   positions={loaderData.positions}
+                  fieldPolicyImpacts={loaderData.fieldPolicyImpacts}
                 />
               </Modal>
             )}
@@ -1525,6 +1665,7 @@ function NodeConfigDialog({
   modulesByStep,
   tasksByModule,
   positions,
+  fieldPolicyImpacts,
 }: {
   workflowId: string;
   steps: Step[];
@@ -1537,6 +1678,7 @@ function NodeConfigDialog({
   modulesByStep: Map<string, StepModule[]>;
   tasksByModule: Map<string, ModuleTask[]>;
   positions: PositionOption[];
+  fieldPolicyImpacts:Record<string,WorkflowFieldPolicyImpact>;
 }) {
   return (
     <div className="workflow-config-dialog">
@@ -1583,8 +1725,10 @@ function NodeConfigDialog({
               allFields={allFields}
               structureEditable={structureEditable}
               requirementEditable={requirementEditable}
+              used={!structureEditable}
               busy={busy}
               closeSignal={closeSignal}
+              impact={fieldPolicyImpacts[step.step_key]??{total:0,future:0,current:0,historical:0,auditOnly:0}}
             />
           </details>
         ))}
@@ -1777,8 +1921,10 @@ function FieldList({
   allFields,
   structureEditable,
   requirementEditable,
+  used,
   busy,
   closeSignal,
+  impact,
 }: {
   workflowId: string;
   step: Step;
@@ -1787,15 +1933,17 @@ function FieldList({
   allFields: StepField[];
   structureEditable: boolean;
   requirementEditable: boolean;
+  used:boolean;
   busy: boolean;
   closeSignal?: unknown;
+  impact:WorkflowFieldPolicyImpact;
 }) {
   return (
     <div className="workflow-field-config">
       <div className="workflow-field-config-heading">
         <div>
           <h3>字段填写规则</h3>
-          <p>必填字段缺失会阻断后续流程；选填不阻断；隐藏不显示、不阻断，并释放订单级附件或自定义值。</p>
+          <p>必填字段缺失会阻断当前和未来流程；历史节点不回退而生成补录任务；隐藏不显示、不阻断，历史值与附件永久保留。</p>
         </div>
         <strong>{fields.length} 个字段</strong>
       </div>
@@ -1816,7 +1964,7 @@ function FieldList({
                   <td>
                     <div className="workflow-field-row-actions">
                       {requirementEditable && (
-                        <RequirementModeForm workflowId={workflowId} field={field} busy={busy} />
+                        <RequirementModeForm workflowId={workflowId} field={field} impact={impact} busy={busy} />
                       )}
                       {structureEditable && (
                         <Modal title={`编辑字段 · ${field.label}`} triggerLabel="编辑结构" triggerClassName="text-button" size="wide" closeSignal={closeSignal}>
@@ -1836,12 +1984,12 @@ function FieldList({
         <div className="workflow-field-actions">
           {requirementEditable && (
             <Modal title={`配置字段积木 · ${step.name}`} triggerLabel="配置字段积木" triggerClassName="secondary" size="wide" closeSignal={closeSignal}>
-              <CatalogFieldForm workflowId={workflowId} step={step} steps={steps} allFields={allFields} busy={busy} nextSort={(fields[fields.length - 1]?.sort_order ?? 0) + 10} />
+              <CatalogFieldForm workflowId={workflowId} step={step} steps={steps} allFields={allFields} busy={busy} nextSort={(fields[fields.length - 1]?.sort_order ?? 0) + 10} impact={impact} used={used} />
             </Modal>
           )}
-          {structureEditable && (
+          {(structureEditable || requirementEditable) && (
             <Modal title={`新增字段 · ${step.name}`} triggerLabel="新增自定义字段" triggerClassName="secondary" size="wide" closeSignal={closeSignal}>
-              <FieldForm workflowId={workflowId} stepId={step.id} busy={busy} nextSort={(fields[fields.length - 1]?.sort_order ?? 0) + 10} />
+              <FieldForm workflowId={workflowId} stepId={step.id} busy={busy} nextSort={(fields[fields.length - 1]?.sort_order ?? 0) + 10} impact={impact} />
             </Modal>
           )}
         </div>
@@ -1853,23 +2001,45 @@ function FieldList({
 function RequirementModeForm({
   workflowId,
   field,
+  impact,
   busy,
 }: {
   workflowId: string;
   field: StepField;
+  impact:WorkflowFieldPolicyImpact;
   busy: boolean;
 }) {
+  const [mode,setMode]=useState(workflowFieldMode(field));
+  const formId=`workflow-field-mode-${field.id}`;
+  const modeLabel=mode==="required"?"必填":mode==="optional"?"选填":"隐藏";
+  const description=mode==="required"
+    ? `改为必填后：${impact.current} 张当前节点订单与 ${impact.future} 张未到达订单启用门禁；${impact.historical} 张已通过节点订单生成资料补录；${impact.auditOnly} 张已出境或完成订单只生成审计补录。历史节点不会回退。`
+    : mode==="hidden"
+      ? `改为隐藏后，${impact.total} 张订单停止显示和校验该字段；已有值与附件永久保留审计，相关未完成补录任务关闭。`
+      : `改为选填后，${impact.total} 张订单不再因该字段阻断，相关未完成补录任务关闭；已有数据保持不变。`;
   return (
-    <Form method="post" className="workflow-requirement-form">
+    <Form id={formId} method="post" className="workflow-requirement-form">
       <input type="hidden" name="intent" value="field_mode_update" />
       <input type="hidden" name="workflowId" value={workflowId} />
       <input type="hidden" name="fieldId" value={field.id} />
-      <select name="fieldMode" defaultValue={workflowFieldMode(field)} aria-label={`${field.label}填写规则`}>
+      <select name="fieldMode" value={mode} onChange={(event)=>setMode(editableWorkflowFieldMode(event.target.value)??"optional")} aria-label={`${field.label}填写规则`}>
         <option value="required">必填</option>
         <option value="optional">选填</option>
         <option value="hidden">隐藏</option>
       </select>
-      <button className="text-button" disabled={busy}>保存</button>
+      <ConfirmAction
+        title={`确认将“${field.label}”设为${modeLabel}`}
+        description={description}
+        triggerLabel="预览影响"
+        confirmLabel="确认应用规则"
+        className="text-button"
+        confirmClassName="primary"
+        formId={formId}
+        name="impactConfirmed"
+        value="1"
+        formNoValidate={false}
+        pending={busy}
+      />
     </Form>
   );
 }
@@ -1880,16 +2050,23 @@ function FieldForm({
   field,
   busy,
   nextSort = 10,
+  impact,
 }: {
   workflowId: string;
   stepId: string;
   field?: StepField;
   busy: boolean;
   nextSort?: number;
+  impact?:WorkflowFieldPolicyImpact;
 }) {
   const editing = Boolean(field);
+  const [mode,setMode]=useState(field?workflowFieldMode(field):"optional");
+  const formId=`workflow-field-${field?.id??`new-${stepId}`}`;
+  const impactDescription=mode==="required"
+    ? `新增后，${impact?.current??0} 张当前节点订单与 ${impact?.future??0} 张未到达订单启用门禁；${impact?.historical??0} 张已通过节点订单生成资料补录；${impact?.auditOnly??0} 张已出境或完成订单只生成审计补录。历史节点不会回退。`
+    : `新增后同步到 ${impact?.total??0} 张现有订单，设为${workflowModeLabel(mode)}，不会阻断已通过节点；历史数据保持不变。`;
   return (
-    <Form method="post" className="workflow-field-form workflow-field-modal-form">
+    <Form id={formId} method="post" className="workflow-field-form workflow-field-modal-form">
       <input type="hidden" name="intent" value={editing ? "field_update" : "field_create"} />
       <input type="hidden" name="workflowId" value={workflowId} />
       <input type="hidden" name="stepId" value={stepId} />
@@ -1908,12 +2085,7 @@ function FieldForm({
         <input name="fieldSortOrder" type="number" min="1" max="9999" defaultValue={field?.sort_order ?? nextSort} required />
       </label>
       <Select name="moduleCode" label="所属业务模块" items={Object.entries(moduleLabels)} value={field?.module_code ?? "consignment"} />
-      <Select
-        name="fieldMode"
-        label="填写规则"
-        items={workflowFieldModes.map((item) => [item.value, item.label])}
-        value={field ? workflowFieldMode(field) : "optional"}
-      />
+      <label className="field"><span>填写规则</span><select name="fieldMode" value={mode} onChange={(event)=>setMode(editableWorkflowFieldMode(event.target.value)??"optional")} required>{workflowFieldModes.map((item)=><option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
       <label className="check-field" style={{ display: "none" }}>
         <input name="fieldRequired" type="checkbox" defaultChecked={Boolean(field?.is_required)} />
         必填
@@ -1933,9 +2105,23 @@ function FieldForm({
         <input name="helpText" defaultValue={field?.help_text ?? ""} placeholder="告诉使用者这个字段应该填什么" />
       </label>
       <div className="button-row span-2">
-        <button className="secondary" disabled={busy}>
-          {editing ? "保存字段" : "新增字段"}
-        </button>
+        {editing||!impact?.total?(
+          <button className="secondary" disabled={busy}>{editing ? "保存字段" : "新增字段"}</button>
+        ):(
+          <ConfirmAction
+            title={`确认新增${workflowModeLabel(mode)}字段`}
+            description={impactDescription}
+            triggerLabel="预览影响并新增"
+            confirmLabel="确认新增并同步"
+            className="secondary"
+            confirmClassName="primary"
+            formId={formId}
+            name="impactConfirmed"
+            value="1"
+            formNoValidate={false}
+            pending={busy}
+          />
+        )}
         {editing && (
           <ConfirmAction
             title="删除工作流字段"
@@ -1959,6 +2145,8 @@ function CatalogFieldForm({
   allFields,
   busy,
   nextSort,
+  impact,
+  used,
 }: {
   workflowId: string;
   step: Step;
@@ -1966,6 +2154,8 @@ function CatalogFieldForm({
   allFields: StepField[];
   busy: boolean;
   nextSort: number;
+  impact:WorkflowFieldPolicyImpact;
+  used:boolean;
 }) {
   const existingByKey = new Map(
     allFields.map((field) => [`${field.module_code}:${field.field_key}`,field]),
@@ -1985,21 +2175,9 @@ function CatalogFieldForm({
                 <td>{moduleLabels[catalog.moduleCode]}</td>
                 <td>{existing ? stepNameById.get(existing.step_id) ?? "其他节点" : "尚未加入"}</td>
                 <td colSpan={3}>
-                  <Form method="post" className="workflow-catalog-row-form">
-                    <input type="hidden" name="intent" value="field_catalog_assign" />
-                    <input type="hidden" name="workflowId" value={workflowId} />
-                    <input type="hidden" name="stepId" value={step.id} />
-                    <input type="hidden" name="catalogFieldKey" value={catalog.fieldKey} />
-                    <select name="fieldMode" defaultValue={existing ? workflowFieldMode(existing) : catalog.defaultMode} aria-label={`${catalog.label}填写规则`}>
-                      <option value="required">必填</option>
-                      <option value="optional">选填</option>
-                      <option value="hidden">隐藏</option>
-                    </select>
-                    <input name="fieldSortOrder" type="number" min="1" max="9999" defaultValue={existing?.sort_order ?? nextSort} aria-label={`${catalog.label}排序`} required />
-                    <button className="text-button" disabled={busy}>
-                      {onCurrentStep ? "更新规则" : existing ? "移动到本节点" : "加入本节点"}
-                    </button>
-                  </Form>
+                  {used&&existing&&!onCurrentStep
+                    ? <span className="muted">已有订单，字段位置已锁定</span>
+                    : <CatalogFieldAction workflowId={workflowId} step={step} catalog={catalog} existing={existing} onCurrentStep={onCurrentStep} busy={busy} nextSort={nextSort} impact={impact} used={used} />}
                 </td>
               </tr>
             );
@@ -2008,6 +2186,50 @@ function CatalogFieldForm({
       </table>
     </div>
   );
+}
+
+function CatalogFieldAction({workflowId,step,catalog,existing,onCurrentStep,busy,nextSort,impact,used}:{
+  workflowId:string;
+  step:Step;
+  catalog:(typeof workflowFieldCatalog)[number];
+  existing?:StepField;
+  onCurrentStep:boolean;
+  busy:boolean;
+  nextSort:number;
+  impact:WorkflowFieldPolicyImpact;
+  used:boolean;
+}){
+  const [mode,setMode]=useState(existing?workflowFieldMode(existing):catalog.defaultMode);
+  const formId=`workflow-catalog-${step.id}-${catalog.fieldKey}`;
+  const actionLabel=onCurrentStep?"更新规则":existing?"移动到本节点":"加入本节点";
+  const description=mode==="required"
+    ? `${actionLabel}后，${impact.current} 张当前节点订单与 ${impact.future} 张未到达订单启用门禁；${impact.historical} 张历史订单生成资料补录；${impact.auditOnly} 张已出境或完成订单只生成审计补录。历史节点不会回退。`
+    : `${actionLabel}后同步到 ${impact.total} 张现有订单，设为${workflowModeLabel(mode)}；已有值与附件保持不变。`;
+  return <Form id={formId} method="post" className="workflow-catalog-row-form">
+    <input type="hidden" name="intent" value="field_catalog_assign" />
+    <input type="hidden" name="workflowId" value={workflowId} />
+    <input type="hidden" name="stepId" value={step.id} />
+    <input type="hidden" name="catalogFieldKey" value={catalog.fieldKey} />
+    <select name="fieldMode" value={mode} onChange={(event)=>setMode(editableWorkflowFieldMode(event.target.value)??"optional")} aria-label={`${catalog.label}填写规则`}>
+      <option value="required">必填</option>
+      <option value="optional">选填</option>
+      <option value="hidden">隐藏</option>
+    </select>
+    {used&&existing?<><input type="hidden" name="fieldSortOrder" value={existing.sort_order}/><input type="number" value={existing.sort_order} aria-label={`${catalog.label}排序（已锁定）`} disabled /></>:<input name="fieldSortOrder" type="number" min="1" max="9999" defaultValue={existing?.sort_order ?? nextSort} aria-label={`${catalog.label}排序`} required />}
+    {impact.total?<ConfirmAction
+      title={`确认${actionLabel}“${catalog.label}”`}
+      description={description}
+      triggerLabel="预览影响"
+      confirmLabel={`确认${actionLabel}`}
+      className="text-button"
+      confirmClassName="primary"
+      formId={formId}
+      name="impactConfirmed"
+      value="1"
+      formNoValidate={false}
+      pending={busy}
+    />:<button className="text-button" disabled={busy}>{actionLabel}</button>}
+  </Form>;
 }
 
 function Select({

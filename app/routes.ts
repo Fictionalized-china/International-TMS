@@ -15,6 +15,7 @@ export default [
   layout("routes/dashboard.tsx", [
     route("admin", "routes/dashboard.index.tsx"),
     route("admin/portal", "routes/admin.position-portal.tsx"),
+    route("admin/notifications", "routes/admin.notifications.tsx"),
     route("admin/master-data", "routes/admin.master-data.tsx"),
     route("admin/customers", "routes/admin.customers.tsx"),
     route(

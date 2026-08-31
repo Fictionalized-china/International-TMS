@@ -8,6 +8,7 @@ import {
   workflowEditCapabilities,
   workflowInsertionSortOrder,
   workflowIntentAllowedForUsage,
+  workflowFieldPlacementLock,
 } from "./workflow-edit-policy";
 
 describe("workflow edit policy", () => {
@@ -51,6 +52,14 @@ describe("workflow edit policy", () => {
     expect(editableWorkflowFieldMode("HIDDEN")).toBeNull();
     expect(editableWorkflowFieldMode("0")).toBeNull();
     expect(editableWorkflowFieldMode("O")).toBeNull();
+  });
+
+  it("locks the position and sort of fields after the workflow is used", () => {
+    expect(workflowFieldPlacementLock({instanceCount:0,currentStepId:"a",targetStepId:"b",currentSortOrder:10,targetSortOrder:20})).toBeNull();
+    expect(workflowFieldPlacementLock({instanceCount:4,currentStepId:null,targetStepId:"b",currentSortOrder:null,targetSortOrder:20})).toBeNull();
+    expect(workflowFieldPlacementLock({instanceCount:4,currentStepId:"a",targetStepId:"b",currentSortOrder:10,targetSortOrder:10})).toBe("position");
+    expect(workflowFieldPlacementLock({instanceCount:4,currentStepId:"a",targetStepId:"a",currentSortOrder:10,targetSortOrder:20})).toBe("sort");
+    expect(workflowFieldPlacementLock({instanceCount:4,currentStepId:"a",targetStepId:"a",currentSortOrder:10,targetSortOrder:10})).toBeNull();
   });
 
   it("preserves copied step gates and defaults malformed legacy values to required", () => {
@@ -97,5 +106,26 @@ describe("workflow edit policy", () => {
     expect(required).toBe(33_334);
     expect(active).toBe(66_667);
     expect(preserved).toBe(33_333);
+  });
+
+  it("keeps field placement locking deterministic under 100,000 mixed requests", () => {
+    let allowed=0;
+    let positionLocked=0;
+    let sortLocked=0;
+    for(let index=0;index<100_000;index+=1){
+      const lock=workflowFieldPlacementLock({
+        instanceCount:index%5===0?0:1,
+        currentStepId:index%7===0?null:"step-a",
+        targetStepId:index%3===0?"step-b":"step-a",
+        currentSortOrder:10,
+        targetSortOrder:index%2===0?10:20,
+      });
+      if(lock==="position")positionLocked+=1;
+      else if(lock==="sort")sortLocked+=1;
+      else allowed+=1;
+    }
+    expect(allowed+positionLocked+sortLocked).toBe(100_000);
+    expect(positionLocked).toBeGreaterThan(0);
+    expect(sortLocked).toBeGreaterThan(0);
   });
 });

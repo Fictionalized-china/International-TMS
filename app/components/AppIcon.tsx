@@ -1,6 +1,7 @@
 import {
   Archive,
   BadgeDollarSign,
+  Bell,
   Boxes,
   BriefcaseBusiness,
   Building2,
@@ -33,6 +34,7 @@ import {
 const icons = {
   archive: Archive,
   billing: BadgeDollarSign,
+  bell: Bell,
   boxes: Boxes,
   briefcase: BriefcaseBusiness,
   building: Building2,

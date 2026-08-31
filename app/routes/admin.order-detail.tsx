@@ -55,6 +55,10 @@ import {
   loader as orderModuleLoader,
 } from "./admin.order-module";
 import { reconcileOverseasOrderDeliveryState } from "../lib/overseas-warehouse.server";
+import {
+  completeWorkflowSupplementTask,
+  listOrderSupplementTasks,
+} from "../lib/workflow-supplement.server";
 
 type Order = {
   id: string;
@@ -232,7 +236,7 @@ type OrderDetailTab =
   | "costs"
   | "history";
 
-type LinearOrderDrawerTab = "dossier" | "cargo" | "attachments" | "history";
+type LinearOrderDrawerTab = "dossier" | "cargo" | "attachments" | "supplements" | "history";
 
 export async function loader({ request, params, context }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "order.view"),
@@ -265,8 +269,11 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
     orderId: id,
     actorUserId: current.userId,
   });
-  const modules = await listOrderModules(current.organizationId, id);
-  const currentWorkflowTasks = await listCurrentWorkflowTasks(current.organizationId,id);
+  const [modules,currentWorkflowTasks,supplementTasks] = await Promise.all([
+    listOrderModules(current.organizationId,id),
+    listCurrentWorkflowTasks(current.organizationId,id),
+    listOrderSupplementTasks(current.organizationId,id),
+  ]);
   const workflowSwitchImpact = await inspectWorkflowVersionSwitchImpact(current.organizationId,id);
   const [history, attachments, macro, businessWorkflow, workflowSteps, workflowFormRows, tasks, services, members, customers, transitions, expenseRisk, packageLabels, workflowVersions] =
     await Promise.all([
@@ -465,6 +472,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
     embeddedModuleRedirect,
     modules,
     currentWorkflowTasks,
+    supplementTasks,
     workflowVersions: workflowVersions.results,
     workflowSwitchImpact,
     tasks: tasks.results,
@@ -492,6 +500,25 @@ export async function action({ request, params, context }: Route.ActionArgs) {
   const current = await requireSessionUser(request, "order.manage"),
     form = await request.formData();
   const intent = valueOf(form, "intent");
+  if(intent==="workflow_supplement_complete"){
+    try{
+      await completeWorkflowSupplementTask({
+        organizationId:current.organizationId,
+        orderId:params.orderId,
+        taskId:valueOf(form,"taskId"),
+        actorUserId:current.userId,
+        resolutionNote:valueOf(form,"resolutionNote"),
+      });
+      await writeAudit({
+        request,action:"workflow.supplement.complete",resourceType:"transport_order",
+        resourceId:params.orderId,organizationId:current.organizationId,actorUserId:current.userId,
+        metadata:{taskId:valueOf(form,"taskId")},
+      });
+      return{success:"资料补录任务已完成；历史节点保持不变"};
+    }catch(error){
+      return{formError:error instanceof Error?error.message:"补录任务提交失败"};
+    }
+  }
   if (intent === "workflow_version_switch") {
     const targetWorkflowId=valueOf(form,"targetWorkflowId");
     const target=await env.DB.prepare(
@@ -902,6 +929,7 @@ function LinearOrderSideRail({
         <button type="button" onClick={() => onOpen("dossier")}><span>入仓唛头标签</span><small>{markLabelReady ? "已生成" : "待审核"}</small><i>→</i></button>
         <button type="button" onClick={() => onOpen("cargo")}><span>货物与标签</span><small>{data.packageLabels.length} 张</small><i>→</i></button>
         <button type="button" onClick={() => onOpen("attachments")}><span>文件汇总</span><small>{data.attachments.length} 个</small><i>→</i></button>
+        <button type="button" onClick={() => onOpen("supplements")}><span>资料补录</span><small>{data.supplementTasks.filter((item)=>item.status==="open").length} 项待办</small><i>→</i></button>
         <button type="button" onClick={() => onOpen("history")}><span>历史节点与日志</span><small>{data.history.length + data.macro.length} 条</small><i>→</i></button>
       </div>
     </section>
@@ -936,6 +964,7 @@ function LinearOrderDrawer({
           <DrawerTab active={activeTab === "dossier"} onClick={() => onTabChange("dossier")}>关键资料</DrawerTab>
           <DrawerTab active={activeTab === "cargo"} onClick={() => onTabChange("cargo")}>货物与标签</DrawerTab>
           <DrawerTab active={activeTab === "attachments"} onClick={() => onTabChange("attachments")}>文件 {data.attachments.length}</DrawerTab>
+          <DrawerTab active={activeTab === "supplements"} onClick={() => onTabChange("supplements")}>资料补录 {data.supplementTasks.filter((item)=>item.status==="open").length}</DrawerTab>
           <DrawerTab active={activeTab === "history"} onClick={() => onTabChange("history")}>操作记录</DrawerTab>
         </nav>
         <div className={`linear-drawer-body is-${activeTab}`}>
@@ -997,6 +1026,14 @@ function LinearOrderDrawer({
           {activeTab === "attachments" && <section className="linear-drawer-section"><h3>订单文件 <span>{data.attachments.length} 个</span></h3><div className="linear-drawer-list">
             {data.attachments.map((attachment) => <article key={attachment.id}><div><strong>{attachment.file_name}</strong><span>{new Date(attachment.created_at).toLocaleString("zh-CN")}</span></div><small>{attachment.content_type}<br/>{(attachment.size_bytes / 1024).toFixed(1)} KB</small><a href={`/admin/document-files/order/${attachment.id}`}>下载</a></article>)}
             {!data.attachments.length && <p className="linear-drawer-empty">当前订单暂无文件。</p>}
+          </div></section>}
+          {activeTab === "supplements" && <section className="linear-drawer-section"><h3>资料补录 <span>{data.supplementTasks.filter((item)=>item.status==="open").length} 项待办</span></h3><p className="linear-drawer-section-note">工作流规则变化后，已完成节点不会回退；需要补齐或复核的资料集中在此处理并保留审计。</p><div className="linear-drawer-list supplement-task-list">
+            {data.supplementTasks.map((task)=><article key={task.id} className={task.status==="open"?"open":"resolved"}>
+              <div><strong>{task.field_label}</strong><span>{task.target_step_name||task.target_step_key} · {task.task_kind==="audit_only"?"审计补录":"资料补录"}</span><p>{task.reason}</p>{task.resolution_note&&<p>处理说明：{task.resolution_note}</p>}</div>
+              <small>{task.status==="open"?"待处理":task.status==="completed"?`已完成 · ${task.completed_by_name||"系统"}`:"已关闭"}<br/>{new Date(task.created_at).toLocaleString("zh-CN")}</small>
+              {task.status==="open"&&<Form method="post" className="supplement-task-form"><input type="hidden" name="intent" value="workflow_supplement_complete"/><input type="hidden" name="taskId" value={task.id}/><input name="resolutionNote" aria-label={`${task.field_label}补录说明`} placeholder="填写补录/复核说明" minLength={2} required/><div><Link className="text-button" to={`/admin/orders/${order.id}/modules/${task.module_code}`}>查看办理位置</Link><button className="text-button">完成补录</button></div></Form>}
+            </article>)}
+            {!data.supplementTasks.length&&<p className="linear-drawer-empty">当前订单没有资料补录任务。</p>}
           </div></section>}
           {activeTab === "history" && <>
             <section className="linear-drawer-section"><h3>订单状态记录 <span>{data.history.length} 条</span></h3><div className="linear-drawer-timeline">

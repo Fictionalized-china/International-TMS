@@ -17579,6 +17579,25 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .portal-sync-state i { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
 .admin-topbar-link { min-height: 30px; padding: 0 9px; display: inline-flex; gap: 6px; align-items: center; color: #64788a; border-radius: 3px; font-size: 11px; text-decoration: none; }
 .admin-topbar-link:hover { color: var(--ink); background: #f0f3f6; }
+.internal-notification-trigger { border: 0; background: transparent; cursor: pointer; position: relative; }
+.internal-notification-trigger > b { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; display: inline-grid; place-items: center; background: #c9362b; color: #fff; font-size: 10px; }
+.internal-notification-card { display: grid; gap: 10px; }
+.internal-notification-card > span { width: fit-content; padding: 3px 8px; border-radius: 3px; background: #eef3f7; color: #526779; font-size: 12px; }
+.internal-notification-card.warning > span { background: #fff2d8; color: #8a5a00; }
+.internal-notification-card.critical > span { background: #fee9e7; color: #a12820; }
+.internal-notification-card h3 { margin: 0; font-size: 19px; color: var(--ink); }
+.internal-notification-card p { margin: 0; line-height: 1.7; color: #526779; }
+.internal-notification-card time { color: #8393a0; font-size: 12px; }
+.internal-notification-card .confirm-action-buttons form { margin: 0; }
+.internal-notification-list article { grid-template-columns: auto minmax(0,1fr) auto; }
+.linear-drawer-section-note { margin: -4px 0 12px; color: #667b8d; line-height: 1.6; font-size: 12px; }
+.supplement-task-list article { align-items: start; grid-template-columns: minmax(0,1fr) auto; }
+.supplement-task-list article.open { border-left: 3px solid #d18a13; padding-left: 12px; }
+.supplement-task-list article.resolved { opacity: .72; }
+.supplement-task-list article p { margin: 5px 0 0; color: #667b8d; line-height: 1.5; }
+.supplement-task-form { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; align-items: center; margin-top: 8px; }
+.supplement-task-form input { min-height: 34px; border: 1px solid #ccd6de; border-radius: 3px; padding: 6px 9px; }
+.supplement-task-form > div { display: flex; gap: 8px; align-items: center; }
 .top-user { padding-left: 14px; display: flex; gap: 8px; align-items: center; border-left: 1px solid var(--line); }
 .top-user strong,
 .top-user small { display: block; }
