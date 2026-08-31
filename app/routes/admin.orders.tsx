@@ -120,7 +120,7 @@ export default function Orders({ loaderData }: Route.ComponentProps) {
         <div><span>异常订单</span><b>{exceptions}</b><small>当前页</small></div>
       </section>
       <Form method="get" action="." className="filters order-table-filters">
-        <label className="field wide"><span>快速查找</span><input className="control" name="keyword" defaultValue={loaderData.filters.keyword} placeholder="订单号、报价号、客户或货物"/></label>
+        <label className="field wide"><span>快速查找</span><input className="control" name="keyword" data-keyboard-search defaultValue={loaderData.filters.keyword} placeholder="订单号、报价号、客户或货物"/></label>
         <FilterSelect name="type" label="订单类型" value={loaderData.filters.type} options={[{ value: "ftl", label: "整车" }, { value: "ltl", label: "拼车" }]}/>
         <FilterSelect name="status" label="订单状态" value={loaderData.filters.status} options={statusOptions}/>
         <FilterSelect name="step" label="当前节点" value={loaderData.filters.step} options={loaderData.steps}/>

@@ -59,7 +59,7 @@ export default function PortalOrders({ loaderData }: Route.ComponentProps) {
       <div className="breadcrumb">客户门户 / 我的订单</div>
       <header className="page-head"><div><h1>我的订单</h1><p>订单由已接受报价自动生成，可在此查看当前节点与运输状态。</p></div><Link className="btn primary" to="/portal/quotes">查看报价</Link></header>
       <Form method="get" action="." className="filters order-table-filters">
-        <label className="field wide"><span>快速查找</span><input className="control" name="keyword" defaultValue={loaderData.filters.keyword} placeholder="订单号、报价号或货物"/></label>
+        <label className="field wide"><span>快速查找</span><input className="control" name="keyword" data-keyboard-search defaultValue={loaderData.filters.keyword} placeholder="订单号、报价号或货物"/></label>
         <label className="field"><span>订单状态</span><select className="control filled" name="status" defaultValue={loaderData.filters.status}><option value="">全部</option>{statusOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
         <button className="btn primary">筛选</button><Link className="btn" to="/portal/orders">重置</Link>
       </Form>

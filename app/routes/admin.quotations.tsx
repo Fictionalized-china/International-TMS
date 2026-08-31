@@ -385,7 +385,7 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
     setCustomerContactName(customer?.contact_name || "");
     setCustomerContactPhone(customer?.contact_phone || "");
   };
-  return <Form method="post" className="prototype-quote-form">
+  return <Form method="post" className="prototype-quote-form" data-keyboard-submit>
     <input type="hidden" name="intent" value="create"/>
     <div className="quote-form-note">必填项只有在未填写时显示红色标记；报价被接受后，表内数据自动继承到运输订单。</div>
     <div className="quote-ledger">

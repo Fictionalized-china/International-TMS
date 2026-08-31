@@ -23601,3 +23601,98 @@ details > summary,
 @media (max-width: 980px) {
   .batch-exception-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* Shared production-workspace preferences: admin, warehouse and client portal. */
+.workspace-preferences {
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid #d8e1e8;
+  border-radius: 4px;
+  background: #f7f9fb;
+}
+.workspace-preference-button {
+  min-width: 42px;
+  min-height: 28px;
+  padding: 0 8px;
+  color: #526779;
+  border: 0;
+  border-right: 1px solid #d8e1e8;
+  background: transparent;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+.workspace-preference-button:last-of-type { border-right: 0; }
+.workspace-preference-button:hover,
+.workspace-preference-button:focus-visible {
+  color: #0d263b;
+  background: #fff;
+}
+.shortcut-help-button { min-width: 28px; padding-inline: 7px; font-weight: 800; }
+
+.shortcut-help-list { display: grid; gap: 0; border: 1px solid #dbe4ec; }
+.shortcut-help-list > div {
+  min-height: 48px;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid #e7edf2;
+}
+.shortcut-help-list > div:last-child { border-bottom: 0; }
+.shortcut-help-list kbd {
+  min-width: 27px;
+  min-height: 25px;
+  padding: 4px 7px;
+  display: inline-grid;
+  place-items: center;
+  color: #21384c;
+  border: 1px solid #c7d2dc;
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: #f8fafc;
+  font: 700 10px/1 system-ui, sans-serif;
+}
+.shortcut-help-list > div > b { color: #91a0ad; font-size: 10px; }
+.shortcut-help-list > div > span { min-width: 0; margin-left: 6px; display: grid; gap: 2px; }
+.shortcut-help-list strong { color: #193246; font-size: 12px; }
+.shortcut-help-list small { color: #647687; font-size: 10px; line-height: 1.4; }
+
+html[data-density="comfortable"] :is(.admin-app-shell,.warehouse-app-shell,.prototype-portal-shell) {
+  --ui-control-height: 38px;
+  --ui-section-gap: 14px;
+  --ui-cell-x: 13px;
+  --ui-cell-y: 11px;
+}
+html[data-density="comfortable"] :is(
+  .admin-app-shell .content,
+  .warehouse-app-shell .warehouse-content,
+  .prototype-portal-shell .portal-content
+) {
+  padding: 20px 24px 26px;
+}
+html[data-density="comfortable"] :is(
+  .admin-app-shell textarea,
+  .warehouse-app-shell textarea,
+  .prototype-portal-shell textarea
+) { min-height: 72px; }
+html[data-density="comfortable"] :is(
+  .admin-app-shell th,
+  .warehouse-app-shell th,
+  .prototype-portal-shell th,
+  .prototype-page th
+) { font-size: 10px; }
+
+html[data-motion="off"] *,
+html[data-motion="off"] *::before,
+html[data-motion="off"] *::after {
+  scroll-behavior: auto !important;
+  animation: none !important;
+  transition-duration: .001ms !important;
+  transition-delay: 0ms !important;
+}
+
+@media (max-width: 1120px) {
+  .workspace-preference-button:not(.shortcut-help-button) { min-width: 34px; padding-inline: 6px; font-size: 9px; }
+}

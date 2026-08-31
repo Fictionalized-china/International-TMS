@@ -1168,6 +1168,7 @@ export default function WarehouseInbound({
                 <span>订单号 / 运单号快速收货</span>
                 <input
                   name="shipmentReference"
+                  data-keyboard-search
                   autoFocus
                   autoComplete="off"
                   placeholder="扫描或输入订单号、系统运单号或业务运单号"

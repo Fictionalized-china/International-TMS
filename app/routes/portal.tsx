@@ -5,6 +5,7 @@ import { requireSessionUser } from "../lib/auth.server";
 import { AppIcon, type AppIconName } from "../components/AppIcon";
 import { PrototypeBrandMark } from "../components/PrototypeBrandMark";
 import { ConnectionStatus } from "../components/InteractionFeedback";
+import { WorkspacePreferences } from "../components/WorkspacePreferences";
 
 export async function loader({ request }: Route.LoaderArgs) {
   const user = await requireSessionUser(request, undefined, "portal");
@@ -67,7 +68,7 @@ export default function PortalLayout({ loaderData }: Route.ComponentProps) {
       <div className="portal-main-column">
         <header className="portal-app-topbar topbar">
           <div className="workspace-switch"><span className="active"><AppIcon name="layout" size={14} />客户门户</span></div>
-          <div className="top-actions"><ConnectionStatus className="portal-sync-state" /><span className="top-user"><span className="avatar">{user.displayName.slice(0, 1).toUpperCase()}</span><span><strong>{user.displayName}</strong><small>{user.organizationName}</small></span></span></div>
+          <div className="top-actions"><ConnectionStatus className="portal-sync-state" /><WorkspacePreferences /><span className="top-user"><span className="avatar">{user.displayName.slice(0, 1).toUpperCase()}</span><span><strong>{user.displayName}</strong><small>{user.organizationName}</small></span></span></div>
         </header>
         <main className="portal-content" id="portal-main-content"><Outlet /></main>
       </div>

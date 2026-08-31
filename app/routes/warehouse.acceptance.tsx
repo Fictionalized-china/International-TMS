@@ -524,7 +524,7 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
     <section className="panel acceptance-scan-panel no-print">
       <Form method="get" action="." className="acceptance-scan-form">
         <input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/>
-        <label className="field scan-field"><span>扫描订单号</span><input name="reference" defaultValue={loaderData.reference} autoFocus autoComplete="off" placeholder="扫描订单号条码后回车"/></label>
+        <label className="field scan-field"><span>扫描订单号</span><input name="reference" data-keyboard-search defaultValue={loaderData.reference} autoFocus autoComplete="off" placeholder="扫描订单号条码后回车"/></label>
         <button className="primary">调出验收信息</button>
         <small>扫描枪输入订单号并发送回车后，系统自动读取客户、货物、运输和累计收货信息。</small>
       </Form>

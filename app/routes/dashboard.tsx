@@ -6,6 +6,7 @@ import { AppIcon, type AppIconName } from "../components/AppIcon";
 import { PrototypeBrandMark } from "../components/PrototypeBrandMark";
 import { ConnectionStatus } from "../components/InteractionFeedback";
 import { InternalNotificationCenter } from "../components/InternalNotificationCenter";
+import { WorkspacePreferences } from "../components/WorkspacePreferences";
 import { loadInternalNotificationSummary } from "../lib/internal-notifications.server";
 
 export async function loader({ request }: Route.LoaderArgs) {
@@ -93,6 +94,7 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
           </div>
           <div className="admin-topbar-actions top-actions">
             <ConnectionStatus className="admin-sync-state" />
+            <WorkspacePreferences />
             <InternalNotificationCenter {...loaderData.notifications}/>
             <NavLink className="admin-topbar-link" to="/admin/portal"><AppIcon name="search" size={16} />查找待办</NavLink>
             <span className="admin-topbar-user top-user"><span className="user-avatar avatar">{user.displayName.slice(0, 1).toUpperCase()}</span><span><strong>{user.displayName}</strong><small>{user.positionCode ?? "运营账号"}</small></span></span>
