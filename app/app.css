@@ -23442,3 +23442,118 @@ details > summary,
   .customer-form-grid > .field:not(.field-short, .field-medium, .field-wide, .span-all),
   .customer-role-dropdown { grid-column: 1 / -1; }
 }
+
+/* Production interaction foundation: deterministic progress, recovery and focus. */
+.visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0 0 0 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+.interaction-progress {
+  position: fixed;
+  z-index: 10020;
+  inset: 0 0 auto;
+  height: 3px;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.interaction-progress.is-active { opacity: 1; }
+.interaction-progress > span {
+  display: block;
+  width: 36%;
+  height: 100%;
+  border-radius: 999px;
+  background: #2f80ed;
+  box-shadow: 0 0 10px rgb(47 128 237 / 45%);
+  animation: interaction-progress-slide 1s ease-in-out infinite;
+}
+.interaction-progress.is-slow > span { background: #d97706; }
+
+@keyframes interaction-progress-slide {
+  from { transform: translateX(-120%); }
+  to { transform: translateX(380%); }
+}
+
+.interaction-slow-notice {
+  position: fixed;
+  z-index: 10010;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(520px, calc(100vw - 32px));
+  padding: 8px 12px;
+  border: 1px solid #f0c36b;
+  border-radius: 8px;
+  background: #fff8e8;
+  color: #7c4a03;
+  box-shadow: 0 8px 24px rgb(15 23 42 / 16%);
+  font-size: 13px;
+}
+
+.modal-card:focus-visible,
+.modal-card :is(button, a, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid #2f80ed;
+  outline-offset: 2px;
+}
+.modal-close {
+  min-width: 32px;
+  min-height: 32px;
+  line-height: 1;
+}
+
+.confirm-action-content { display: grid; gap: 16px; }
+.confirm-action-content > p { margin: 0; color: #334155; line-height: 1.65; }
+.confirm-action-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.error-boundary {
+  width: min(720px, calc(100% - 32px));
+  margin: 12vh auto 0;
+  padding: 28px;
+  border: 1px solid #d9e2ec;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 18px 48px rgb(15 23 42 / 12%);
+}
+.error-boundary h1 { margin: 6px 0 10px; }
+.error-boundary > p:not(.eyebrow) { color: #475569; line-height: 1.7; }
+.error-boundary > small { display: block; margin-top: 16px; color: #64748b; }
+.error-boundary pre { max-height: 320px; overflow: auto; white-space: pre-wrap; }
+
+:is(.admin-sync-state, .portal-sync-state, .warehouse-sync-state).is-offline {
+  color: #b42318;
+}
+:is(.admin-sync-state, .portal-sync-state, .warehouse-sync-state).is-offline i {
+  background: #dc2626;
+}
+:is(.admin-sync-state, .portal-sync-state, .warehouse-sync-state).is-syncing i {
+  animation: sync-status-pulse 900ms ease-in-out infinite alternate;
+}
+
+@keyframes sync-status-pulse {
+  from { opacity: .35; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .interaction-progress,
+  .interaction-progress > span,
+  :is(.admin-sync-state, .portal-sync-state, .warehouse-sync-state).is-syncing i {
+    animation: none !important;
+    transition: none !important;
+  }
+  .interaction-progress > span { width: 100%; transform: none; }
+}

@@ -4,6 +4,7 @@ import type { Route } from "./+types/dashboard";
 import { requireSessionUser } from "../lib/auth.server";
 import { AppIcon, type AppIconName } from "../components/AppIcon";
 import { PrototypeBrandMark } from "../components/PrototypeBrandMark";
+import { ConnectionStatus } from "../components/InteractionFeedback";
 
 export async function loader({ request }: Route.LoaderArgs) {
   return { user: await requireSessionUser(request) };
@@ -85,7 +86,7 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
             <span className="active"><AppIcon name="panels" size={14} />管理后台</span>
           </div>
           <div className="admin-topbar-actions top-actions">
-            <span className="admin-sync-state"><i />系统服务正常</span>
+            <ConnectionStatus className="admin-sync-state" />
             <NavLink className="admin-topbar-link" to="/admin/portal"><AppIcon name="search" size={16} />查找待办</NavLink>
             <span className="admin-topbar-user top-user"><span className="user-avatar avatar">{user.displayName.slice(0, 1).toUpperCase()}</span><span><strong>{user.displayName}</strong><small>{user.positionCode ?? "运营账号"}</small></span></span>
           </div>

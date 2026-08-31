@@ -1,4 +1,11 @@
-import { useEffect, useId, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { createPortal } from "react-dom";
 
 type ScrollSnapshot = {
@@ -65,11 +72,7 @@ function releasePageScrollLock() {
 }
 
 function clearStalePageScrollLock() {
-  if (typeof document === "undefined") return;
-  // A positive reference count belongs to an active React modal or expandable
-  // dialog. Decrementing it here can unlock the wrong dialog and later leave
-  // the page permanently fixed after nested dialogs close.
-  if (scrollLockCount > 0) return;
+  if (typeof document === "undefined" || scrollLockCount > 0) return;
   const html = document.documentElement;
   const body = document.body;
   html.classList.remove("modal-scroll-locked");
@@ -138,8 +141,7 @@ export function useExpandableDialogScrollLock() {
       }
       const atTop = scrollArea.scrollTop <= 0;
       const atBottom =
-        scrollArea.scrollTop + scrollArea.clientHeight >=
-        scrollArea.scrollHeight - 1;
+        scrollArea.scrollTop + scrollArea.clientHeight >= scrollArea.scrollHeight - 1;
       if ((event.deltaY < 0 && atTop) || (event.deltaY > 0 && atBottom)) {
         event.preventDefault();
         return;
@@ -161,97 +163,189 @@ export function useExpandableDialogScrollLock() {
   }, []);
 }
 
+const focusableSelector = [
+  "[data-autofocus]",
+  "input:not([disabled]):not([type='hidden'])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "button:not([disabled])",
+  "a[href]",
+  "[tabindex]:not([tabindex='-1'])",
+].join(",");
+
 type ModalProps = {
   title: string;
   triggerLabel?: string;
   children: ReactNode | ((controls: { close: () => void }) => ReactNode);
   closeSignal?: unknown;
   openSignal?: unknown;
+  isOpen?: boolean;
   size?: "normal" | "wide" | "xwide";
   dialogClassName?: string;
   triggerClassName?: string;
+  closeOnBackdrop?: boolean;
+  dirty?: boolean;
+  discardMessage?: string;
+  initialFocusSelector?: string;
   onClose?: () => void;
+  onOpenChange?: (open: boolean) => void;
 };
 
-export function Modal({ title, triggerLabel, children, closeSignal, openSignal, size = "normal", dialogClassName = "", triggerClassName = "primary", onClose }: ModalProps) {
-  const [open, setOpen] = useState(false);
+export function Modal({
+  title,
+  triggerLabel,
+  children,
+  closeSignal,
+  openSignal,
+  isOpen,
+  size = "normal",
+  dialogClassName = "",
+  triggerClassName = "primary",
+  closeOnBackdrop = false,
+  dirty = false,
+  discardMessage = "当前内容尚未保存，确定放弃本次修改吗？",
+  initialFocusSelector,
+  onClose,
+  onOpenChange,
+}: ModalProps) {
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const open = isOpen ?? uncontrolledOpen;
   const titleId = useId();
   const modalId = useId();
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
   useModalScrollLock(open);
-  const close = () => {
-    setOpen(false);
+
+  const updateOpen = useCallback((nextOpen: boolean) => {
+    if (isOpen === undefined) setUncontrolledOpen(nextOpen);
+    onOpenChange?.(nextOpen);
+  }, [isOpen, onOpenChange]);
+
+  const close = useCallback((force = false) => {
+    if (!force && dirty && typeof window !== "undefined" && !window.confirm(discardMessage)) return;
+    updateOpen(false);
     onClose?.();
-  };
+  }, [dirty, discardMessage, onClose, updateOpen]);
 
   useEffect(() => {
-    if (closeSignal) setOpen(false);
-  }, [closeSignal]);
+    if (!closeSignal) return;
+    close(true);
+  }, [closeSignal, close]);
 
   useEffect(() => {
-    if (openSignal) setOpen(true);
-  }, [openSignal]);
+    if (openSignal) updateOpen(true);
+  }, [openSignal, updateOpen]);
 
   useEffect(() => {
     if (!open) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+    previousFocusRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : triggerRef.current;
+    const frame = window.requestAnimationFrame(() => {
+      const preferred = initialFocusSelector
+        ? dialogRef.current?.querySelector<HTMLElement>(initialFocusSelector)
+        : null;
+      const first = preferred ?? dialogRef.current?.querySelector<HTMLElement>(focusableSelector);
+      first?.focus();
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      const previous = previousFocusRef.current;
+      window.requestAnimationFrame(() => {
+        if (previous?.isConnected) previous.focus();
+      });
+    };
+  }, [initialFocusSelector, open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const keepFocusInside = (event: KeyboardEvent) => {
       const openDialogs = document.querySelectorAll<HTMLElement>(".modal-backdrop[data-modal-id]");
       const topDialog = openDialogs.item(openDialogs.length - 1);
       if (topDialog?.dataset.modalId !== modalId) return;
-      close();
-    };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [open, onClose]);
 
-  const dialog =
-    open && typeof document !== "undefined"
-      ? createPortal(
-          <div
-            className="modal-backdrop"
-            data-modal-id={modalId}
-            role="presentation"
-            onMouseDown={(event) => {
-              if (event.target === event.currentTarget) close();
-            }}
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        close();
+        return;
+      }
+      if (event.key !== "Tab") return;
+
+      const focusable = Array.from(
+        dialogRef.current?.querySelectorAll<HTMLElement>(focusableSelector) ?? [],
+      ).filter((element) => !element.hasAttribute("disabled") && element.getAttribute("aria-hidden") !== "true");
+      if (!focusable.length) {
+        event.preventDefault();
+        dialogRef.current?.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || !dialogRef.current?.contains(active))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (active === last || !dialogRef.current?.contains(active))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", keepFocusInside, true);
+    return () => document.removeEventListener("keydown", keepFocusInside, true);
+  }, [close, modalId, open]);
+
+  const dialog = open && typeof document !== "undefined"
+    ? createPortal(
+        <div
+          className="modal-backdrop"
+          data-modal-id={modalId}
+          role="presentation"
+          onMouseDown={(event) => {
+            if (closeOnBackdrop && event.target === event.currentTarget) close();
+          }}
+        >
+          <section
+            className={`modal-card ${size === "normal" ? "" : size} ${dialogClassName}`.trim()}
+            ref={dialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={titleId}
+            tabIndex={-1}
           >
-            <section
-              className={`modal-card ${size === "normal" ? "" : size} ${dialogClassName}`.trim()}
-              role="dialog"
-              aria-modal="true"
-              aria-labelledby={titleId}
-            >
-              <header className="modal-header">
-                <h2 id={titleId}>{title}</h2>
-                <button
-                  type="button"
-                  className="modal-close"
-                  aria-label="关闭"
-                  onClick={close}
-                >
-                  ×
-                </button>
-              </header>
-              <div className="modal-body">
-                {typeof children === "function"
-                  ? children({ close })
-                  : children}
-              </div>
-            </section>
-          </div>,
-          document.body,
-        )
-      : null;
+            <header className="modal-header">
+              <h2 id={titleId}>{title}</h2>
+              <button
+                type="button"
+                className="modal-close"
+                aria-label="关闭"
+                onClick={() => close()}
+              >
+                ×
+              </button>
+            </header>
+            <div className="modal-body">
+              {typeof children === "function" ? children({ close: () => close() }) : children}
+            </div>
+          </section>
+        </div>,
+        document.body,
+      )
+    : null;
 
   return (
     <>
-      {triggerLabel && <button
-        type="button"
-        className={triggerClassName}
-        onClick={() => setOpen(true)}
-      >
-        {triggerLabel}
-      </button>}
+      {triggerLabel && (
+        <button
+          ref={triggerRef}
+          type="button"
+          className={triggerClassName}
+          onClick={() => updateOpen(true)}
+        >
+          {triggerLabel}
+        </button>
+      )}
       {dialog}
     </>
   );

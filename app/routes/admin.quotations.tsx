@@ -4,6 +4,7 @@ import { Form, Link, useNavigation } from "react-router";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import type { Route } from "./+types/admin.quotations";
 import { Modal } from "../components/Modal";
+import { ConfirmAction } from "../components/ConfirmAction";
 import { requireSessionUser } from "../lib/auth.server";
 import { transportChargeNameOptions } from "../lib/charge-options";
 import { nextDocumentNumber } from "../lib/documents.server";
@@ -327,9 +328,9 @@ function QuoteActions({ quote, busy }: { quote: Quote; busy: boolean }) {
   return <div className="toolbar-actions quotation-table-actions">
     <Modal title={`报价详情 · ${quote.quote_number}`} triggerLabel="查看" triggerClassName="btn"><QuoteDetail quote={quote} /></Modal>
     {quote.lifecycle_status === "pending" && <Form method="post"><input type="hidden" name="intent" value="accept"/><input type="hidden" name="id" value={quote.id}/><button className="btn primary" disabled={busy}>代客户确认</button></Form>}
-    {quote.lifecycle_status === "accepted" && quote.order_status === "draft" && <Form method="post"><input type="hidden" name="intent" value="withdraw"/><input type="hidden" name="id" value={quote.id}/><button className="btn" disabled={busy}>撤回接受</button></Form>}
+    {quote.lifecycle_status === "accepted" && quote.order_status === "draft" && <Form method="post"><input type="hidden" name="intent" value="withdraw"/><input type="hidden" name="id" value={quote.id}/><ConfirmAction className="btn" title="撤回报价接受" description={`将撤回 ${quote.quote_number} 的客户接受状态；已生成订单会保留为草稿并留下审计记录。`} triggerLabel="撤回接受" confirmLabel="确认撤回" pending={busy}/></Form>}
     {quote.lifecycle_status === "withdrawn" && <Form method="post"><input type="hidden" name="intent" value="accept"/><input type="hidden" name="id" value={quote.id}/><button className="btn primary" disabled={busy}>重新接受</button></Form>}
-    {["pending", "withdrawn"].includes(quote.lifecycle_status) && <Form method="post"><input type="hidden" name="intent" value="void"/><input type="hidden" name="id" value={quote.id}/><button className="btn danger" disabled={busy}>作废</button></Form>}
+    {["pending", "withdrawn"].includes(quote.lifecycle_status) && <Form method="post"><input type="hidden" name="intent" value="void"/><input type="hidden" name="id" value={quote.id}/><ConfirmAction className="btn danger" title="作废报价" description={`作废后 ${quote.quote_number} 不能再被客户接受；报价资料和审计记录仍会永久保留。`} triggerLabel="作废" confirmLabel="确认作废" pending={busy}/></Form>}
   </div>;
 }
 

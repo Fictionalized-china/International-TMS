@@ -8,6 +8,7 @@ import { loadWarehouseContext } from "../lib/warehouse-context.server";
 import { warehouseRoleLabels } from "../lib/road-master-data";
 import { AppIcon } from "../components/AppIcon";
 import { PrototypeBrandMark } from "../components/PrototypeBrandMark";
+import { ConnectionStatus } from "../components/InteractionFeedback";
 import { submitForm } from "../lib/form-submit";
 
 type WarehouseOrder = {
@@ -224,7 +225,7 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
       <div className="warehouse-main-column">
         <header className="warehouse-topbar topbar">
           <div className="workspace-switch"><span className="active"><AppIcon name="warehouse" size={14} />{warehouseRoleLabels[loaderData.warehouse.warehouse_role]}</span></div>
-          <div className="top-actions"><span className="warehouse-sync-state"><i />仓库数据同步正常</span><span className="warehouse-topbar-user top-user"><span className="warehouse-avatar avatar">{user.displayName.slice(0, 1).toUpperCase()}</span><span><strong>{user.displayName}</strong><small>{loaderData.warehouseName}</small></span></span></div>
+          <div className="top-actions"><ConnectionStatus className="warehouse-sync-state" /><span className="warehouse-topbar-user top-user"><span className="warehouse-avatar avatar">{user.displayName.slice(0, 1).toUpperCase()}</span><span><strong>{user.displayName}</strong><small>{loaderData.warehouseName}</small></span></span></div>
         </header>
       <main className="warehouse-content" id="warehouse-main-content">
         {orderContext && (

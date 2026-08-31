@@ -12,6 +12,7 @@ import {
 import { useEffect, useRef } from "react";
 
 import type { Route } from "./+types/root";
+import { GlobalInteractionFeedback } from "./components/InteractionFeedback";
 import { useExpandableDialogScrollLock } from "./components/Modal";
 import "./app.css";
 
@@ -45,14 +46,17 @@ export default function App() {
   const revalidator = useRevalidator();
   const warehouseMutation = useRef(false);
   useExpandableDialogScrollLock();
+
   useEffect(() => {
-    if (navigation.state === "idle")
+    if (navigation.state === "idle") {
       document
         .querySelectorAll<HTMLDetailsElement>(
           "details.expandable[open]:not(.module-inline-create)",
         )
         .forEach((element) => element.removeAttribute("open"));
+    }
   }, [location.pathname, navigation.state]);
+
   useEffect(() => {
     if (navigation.state === "submitting") {
       const action = navigation.formAction || location.pathname;
@@ -71,16 +75,15 @@ export default function App() {
         channel.close();
       }
     } catch {
-      // Cross-tab synchronization is an enhancement. Browsers may expose the
-      // API while denying access in restricted/privacy contexts.
+      // 跨标签同步是增强能力，隐私模式拒绝该 API 时不能影响主业务提交。
     }
     try {
       window.localStorage.setItem("international-tms-data-sync", signal);
     } catch {
-      // Do not turn a successful warehouse mutation into a client crash when
-      // storage is unavailable or blocked by browser policy.
+      // 本地存储不可用时保留本次服务端提交结果。
     }
   }, [location.pathname, navigation.formAction, navigation.formMethod, navigation.state]);
+
   useEffect(() => {
     if (!location.pathname.startsWith("/admin")) return;
     const refresh = () => {
@@ -112,33 +115,50 @@ export default function App() {
       window.removeEventListener("focus", refresh);
     };
   }, [location.pathname, revalidator]);
-  return <Outlet />;
+
+  return (
+    <>
+      <GlobalInteractionFeedback />
+      <Outlet />
+    </>
+  );
 }
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
-  let message = "出现错误";
-  let details = "系统暂时无法完成请求。";
+  let title = "系统暂时无法完成请求";
+  let details = "当前页面发生异常。您可以重试、返回上一页，或回到工作台继续处理其他任务。";
   let stack: string | undefined;
 
   if (isRouteErrorResponse(error)) {
-    message = error.status === 404 ? "404" : "错误";
-    details =
-      error.status === 404
-        ? "找不到请求的页面。"
-        : error.statusText || details;
-  } else if (import.meta.env.DEV && error && error instanceof Error) {
+    title = error.status === 404 ? "找不到该页面" : `请求失败（${error.status}）`;
+    details = error.status === 404
+      ? "页面地址可能已变更，请返回工作台重新进入。"
+      : error.statusText || details;
+  } else if (import.meta.env.DEV && error instanceof Error) {
     details = error.message;
     stack = error.stack;
   }
 
   return (
-    <main className="pt-16 p-4 container mx-auto">
-      <h1>{message}</h1>
+    <main className="error-boundary" role="alert">
+      <p className="eyebrow">SYSTEM RECOVERY</p>
+      <h1>{title}</h1>
       <p>{details}</p>
+      <div className="button-row">
+        <button type="button" className="primary" onClick={() => window.location.reload()}>
+          重试当前页面
+        </button>
+        <button type="button" className="secondary" onClick={() => window.history.back()}>
+          返回上一页
+        </button>
+        <a className="text-button" href="/admin">回到工作台</a>
+      </div>
+      <small>表单内容是否已保存以页面提示为准；请勿连续重复提交。</small>
       {stack && (
-        <pre className="w-full p-4 overflow-x-auto">
-          <code>{stack}</code>
-        </pre>
+        <details>
+          <summary>开发环境错误详情</summary>
+          <pre><code>{stack}</code></pre>
+        </details>
       )}
     </main>
   );

@@ -9,6 +9,7 @@ import {
 import { valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import { Modal } from "../components/Modal";
+import { ConfirmAction } from "../components/ConfirmAction";
 import { OrderNumberLink } from "../components/EntityNumberLink";
 import { orderModuleDefinitions, type OrderModuleCode } from "../lib/order-modules";
 import {
@@ -1654,9 +1655,15 @@ function NodeEditForm({ workflowId, step, busy }: { workflowId: string; step: St
         <button className="secondary" name="intent" value="step" disabled={busy}>
           保存节点
         </button>
-        <button className="text-button danger" name="intent" value="delete" formNoValidate disabled={busy}>
-          删除节点
-        </button>
+        <ConfirmAction
+          title="删除工作流节点"
+          description={`将删除节点“${step.name}”。如果节点已经产生执行记录，服务端会拒绝删除并要求改为停用。`}
+          triggerLabel="删除节点"
+          confirmLabel="确认删除"
+          name="intent"
+          value="delete"
+          pending={busy}
+        />
       </div>
     </Form>
   );
@@ -1701,7 +1708,7 @@ function ModuleList({
                     <label className="field span-2"><span>启用条件</span><input name="activationCondition" defaultValue={item.activation_condition || ""} placeholder="选填，例如：仅拼车订单"/></label>
                     <label className="check-field"><input name="isRequired" type="checkbox" defaultChecked={Boolean(item.is_required)}/>必须办理</label>
                     <label className="check-field"><input name="isActive" type="checkbox" defaultChecked={Boolean(item.is_active)}/>启用</label>
-                    <div className="button-row span-2"><button className="secondary" name="intent" value="module_update" disabled={busy}>保存模组</button><button className="text-button danger" name="intent" value="module_delete" formNoValidate disabled={busy}>删除模组</button></div>
+                    <div className="button-row span-2"><button className="secondary" name="intent" value="module_update" disabled={busy}>保存模组</button><ConfirmAction title="删除工作流模组" description={`将删除模组“${item.display_name}”。模组仍有关联字段时服务端会拒绝该操作。`} triggerLabel="删除模组" confirmLabel="确认删除" name="intent" value="module_delete" pending={busy}/></div>
                   </Form>
                 </Modal>
               </header>
@@ -1752,7 +1759,7 @@ function TaskForm({workflowId,module,task,positions,busy,nextSort=10}:{workflowI
       <label className="field span-2"><span>办理说明</span><textarea name="instructions" rows={3} defaultValue={task?.instructions || ""}/></label>
       <label className="check-field"><input name="isRequired" type="checkbox" defaultChecked={task ? Boolean(task.is_required) : true}/>必须完成</label>
       {task&&<label className="check-field"><input name="isActive" type="checkbox" defaultChecked={Boolean(task.is_active)}/>启用</label>}
-      <div className="button-row span-2"><button className="secondary" disabled={busy}>{task?"保存步骤":"新增步骤"}</button>{task&&<button className="text-button danger" name="intent" value="task_delete" formNoValidate disabled={busy}>删除步骤</button>}</div>
+      <div className="button-row span-2"><button className="secondary" disabled={busy}>{task?"保存步骤":"新增步骤"}</button>{task&&<ConfirmAction title="删除办理步骤" description={`将从当前模组删除“${task.name}”，历史执行记录不会因此回退。`} triggerLabel="删除步骤" confirmLabel="确认删除" name="intent" value="task_delete" pending={busy}/>}</div>
     </Form>
   );
 }
@@ -1929,9 +1936,15 @@ function FieldForm({
           {editing ? "保存字段" : "新增字段"}
         </button>
         {editing && (
-          <button className="text-button danger" name="intent" value="field_delete" formNoValidate disabled={busy}>
-            删除字段
-          </button>
+          <ConfirmAction
+            title="删除工作流字段"
+            description={`将删除字段“${field?.label ?? "未命名字段"}”。已有业务数据不会物理删除，但此字段不再出现在后续填写界面。`}
+            triggerLabel="删除字段"
+            confirmLabel="确认删除"
+            name="intent"
+            value="field_delete"
+            pending={busy}
+          />
         )}
       </div>
     </Form>
