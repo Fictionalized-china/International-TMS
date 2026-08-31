@@ -61,7 +61,7 @@ type CustomerRow = {
 };
 type ContactRow = { id: string; customer_id: string; name: string; title: string | null; email: string | null; phone: string | null; is_primary: number };
 type AddressRow = { id: string; customer_id: string; label: string; type: string; country_code: string; state: string | null; city: string; address_line1: string; contact_name: string | null; contact_phone: string | null; is_default: number };
-type PortalRow = { id: string; customer_id: string; display_name: string; email: string; status: string; last_login_at: string | null };
+type PortalRow = { id: string; customer_id: string; user_id: string; display_name: string; email: string; status: string; last_login_at: string | null };
 type ContractRow = { id: string; customer_id: string; title: string; file_name: string; content_type: string; size_bytes: number; effective_at: string | null; expires_at: string | null; status: string; notes: string | null; created_at: string };
 type GeoReference = { code: string; name: string; parent_code: string | null };
 type CustomerDefaultProfile = {
@@ -122,7 +122,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       FROM customers c LEFT JOIN users u ON u.id = c.sales_owner_user_id LEFT JOIN customer_contacts cc ON cc.customer_id = c.id LEFT JOIN customer_addresses ca ON ca.customer_id = c.id LEFT JOIN customer_business_role_assignments cbr ON cbr.customer_id = c.id AND cbr.organization_id = c.organization_id WHERE c.organization_id = ? GROUP BY c.id ORDER BY c.created_at DESC LIMIT 200`).bind(current.organizationId).all<CustomerRow>(),
     env.DB.prepare(`SELECT cc.id, cc.customer_id, cc.name, cc.title, cc.email, cc.phone, cc.is_primary FROM customer_contacts cc JOIN customers c ON c.id = cc.customer_id WHERE c.organization_id = ? AND cc.customer_id IN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) ORDER BY cc.is_primary DESC, cc.name`).bind(current.organizationId,current.organizationId).all<ContactRow>(),
     env.DB.prepare(`SELECT ca.id, ca.customer_id, ca.label, ca.type, ca.country_code, ca.state, ca.city, ca.address_line1, ca.contact_name, ca.contact_phone, ca.is_default FROM customer_addresses ca JOIN customers c ON c.id = ca.customer_id WHERE c.organization_id = ? AND ca.customer_id IN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) ORDER BY ca.is_default DESC, ca.label`).bind(current.organizationId,current.organizationId).all<AddressRow>(),
-    env.DB.prepare(`SELECT cpa.id, cpa.customer_id, u.display_name, u.email, cpa.status, u.last_login_at FROM customer_portal_accounts cpa JOIN users u ON u.id = cpa.user_id WHERE cpa.organization_id = ? AND cpa.customer_id IN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) ORDER BY u.display_name`).bind(current.organizationId,current.organizationId).all<PortalRow>(),
+    env.DB.prepare(`SELECT cpa.id, cpa.customer_id, cpa.user_id, u.display_name, u.email, cpa.status, u.last_login_at FROM customer_portal_accounts cpa JOIN users u ON u.id = cpa.user_id WHERE cpa.organization_id = ? AND cpa.customer_id IN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) ORDER BY u.display_name`).bind(current.organizationId,current.organizationId).all<PortalRow>(),
     env.DB.prepare(`SELECT id, customer_id, title, file_name, content_type, size_bytes, effective_at, expires_at, status, notes, created_at FROM customer_contracts WHERE organization_id = ? AND customer_id IN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) ORDER BY created_at DESC LIMIT 500`).bind(current.organizationId,current.organizationId).all<ContractRow>(),
     env.DB.prepare(`SELECT u.id, u.display_name FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.organization_id = ? AND m.status = 'active' ORDER BY u.display_name`).bind(current.organizationId).all<{ id: string; display_name: string }>(),
     env.DB.prepare("SELECT code, name FROM reference_data WHERE organization_id = ? AND category = 'country' AND status = 'active' ORDER BY sort_order, code").bind(current.organizationId).all<{ code: string; name: string }>(),
@@ -195,6 +195,27 @@ export async function action({ request }: Route.ActionArgs) {
     ]);
     await writeAudit({ request, action: "portal.account.create", resourceType: "customer_portal_account", resourceId: accountId, organizationId: current.organizationId, actorUserId: current.userId, metadata: { customerId, email } });
     return { success: "客户门户账号已开通" };
+  }
+
+  if (intent === "portal_password_reset") {
+    const customerId = valueOf(form, "customerId"), accountId = valueOf(form, "accountId"), password = valueOf(form, "password"), confirmPassword = valueOf(form, "confirmPassword");
+    const account = await env.DB.prepare(
+      `SELECT cpa.user_id,u.email
+       FROM customer_portal_accounts cpa
+       JOIN users u ON u.id=cpa.user_id
+       WHERE cpa.id=? AND cpa.customer_id=? AND cpa.organization_id=? LIMIT 1`,
+    ).bind(accountId, customerId, current.organizationId).first<{ user_id: string; email: string }>();
+    if (!account) return { formError: "客户门户账号不存在" };
+    const passwordError = validatePassword(password);
+    if (passwordError) return { formError: passwordError };
+    if (password !== confirmPassword) return { formError: "两次输入的新密码不一致" };
+    await env.DB.batch([
+      env.DB.prepare("UPDATE users SET password_hash=?,failed_login_count=0,locked_until=NULL,updated_at=? WHERE id=?")
+        .bind(await hashPassword(password), now, account.user_id),
+      env.DB.prepare("DELETE FROM sessions WHERE user_id=?").bind(account.user_id),
+    ]);
+    await writeAudit({ request, action: "portal.password.reset", resourceType: "customer_portal_account", resourceId: accountId, organizationId: current.organizationId, actorUserId: current.userId, metadata: { customerId, email: account.email } });
+    return { success: `门户账号 ${account.email} 的密码已重置，原登录会话已退出` };
   }
 
   if (intent === "contract_upload") {
@@ -344,6 +365,7 @@ export function meta() { return [{ title: "客户管理 | International TMS" }];
 
 export default function Customers({ loaderData, actionData }: Route.ComponentProps) {
   const busy = useNavigation().state !== "idle", canManage = loaderData.current.permissions.includes("customer.manage");
+  const modalCloseSignal = actionData?.success ? actionData : undefined;
   const submittedValues = actionData && "values" in actionData ? actionData.values : undefined;
   const submittedErrors = actionData && "errors" in actionData ? actionData.errors : undefined;
   const submittedCustomerId = submittedValues && "customerId" in submittedValues ? submittedValues.customerId : undefined;
@@ -356,7 +378,7 @@ export default function Customers({ loaderData, actionData }: Route.ComponentPro
     <section className="panel customer-ledger">
       <div className="panel-header">
         <div><h2>客户资料台账</h2><p>一行一位客商；点击“客户档案”集中维护联系人、地址、合同和门户账号。</p></div>
-        {canManage && <Modal title="新增客户" triggerLabel="新增客户" size="xwide" dialogClassName="customer-editor-modal" closeSignal={actionData?.success}>
+        {canManage && <Modal title="新增客户" triggerLabel="新增客户" size="xwide" dialogClassName="customer-editor-modal" closeSignal={modalCloseSignal}>
           <CustomerForm
             intent="customer"
             owners={loaderData.owners}
@@ -396,10 +418,10 @@ export default function Customers({ loaderData, actionData }: Route.ComponentPro
                     cities={loaderData.cities}
                     canManage={canManage}
                     busy={busy}
-                    closeSignal={actionData?.success}
+                    closeSignal={modalCloseSignal}
                   />
                 </Modal>
-                {canManage && <Modal title={`编辑客户 · ${customer.name}`} triggerLabel="编辑" triggerClassName="text-button" size="xwide" dialogClassName="customer-editor-modal" closeSignal={actionData?.success}>
+                {canManage && <Modal title={`编辑客户 · ${customer.name}`} triggerLabel="编辑" triggerClassName="text-button" size="xwide" dialogClassName="customer-editor-modal" closeSignal={modalCloseSignal}>
                   <CustomerForm intent="customer_update" customer={customer} owners={loaderData.owners} countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} busy={busy} values={editValues} errors={editValues ? submittedErrors : undefined} selectedRoles={roles}/>
                 </Modal>}
               </div></td>
@@ -439,13 +461,27 @@ function CustomerDossier({ customer, roles, contacts, addresses, portals, contra
     </div>}
     <DossierSection title="联系人" count={contacts.length} columns={["姓名 / 职务", "电话", "邮箱", "标记"]} rows={contacts.map((item) => [item.name + (item.title ? ` · ${item.title}` : ""), item.phone || "—", item.email || "—", item.is_primary ? "主要联系人" : "普通联系人"])} />
     <DossierSection title="常用地址与提货地" count={addresses.length} columns={["地址名称", "类型", "城市", "详细地址", "标记"]} rows={addresses.map((item) => [item.label, addressTypeLabel(item.type), `${item.country_code} · ${item.state || "—"} · ${item.city}`, item.address_line1, item.is_default ? "默认" : "—"])} />
-    <DossierSection title="门户账号" count={portals.length} columns={["用户", "登录邮箱", "状态", "最近登录"]} rows={portals.map((item) => [item.display_name, item.email, item.status === "active" ? "正常" : item.status, item.last_login_at || "尚未登录"])} />
+    <CustomerPortalAccountsSection customer={customer} portals={portals} canManage={canManage} busy={busy} closeSignal={closeSignal} />
     <section className="customer-dossier-section"><div className="customer-dossier-section-head"><strong>合同归档</strong><span>{contracts.length} 份</span></div><div className="table-wrap"><table><thead><tr><th>合同名称</th><th>文件</th><th>有效期</th><th>状态 / 备注</th><th>操作</th></tr></thead><tbody>{contracts.length ? contracts.map((item) => <tr key={item.id}><td>{item.title}</td><td>{item.file_name}<small>{Math.ceil(item.size_bytes / 1024)} KB</small></td><td>{item.effective_at || "未填"} — {item.expires_at || "未填"}</td><td>{item.status === "active" ? "有效" : "已归档"}<small>{item.notes || "—"}</small></td><td><div className="row-actions"><a className="text-button" href={`/admin/customer-contracts/${item.id}/download`}>下载</a>{canManage && item.status === "active" && <Form method="post" className="inline-form"><input type="hidden" name="intent" value="contract_archive"/><input type="hidden" name="contractId" value={item.id}/><button className="text-button" disabled={busy}>归档</button></Form>}</div></td></tr>) : <tr><td colSpan={5} className="empty-state">暂无合同</td></tr>}</tbody></table></div></section>
   </div>;
 }
 
 function DossierSection({ title, count, columns, rows }: { title: string; count: number; columns: string[]; rows: string[][] }) {
   return <section className="customer-dossier-section"><div className="customer-dossier-section-head"><strong>{title}</strong><span>{count} 条</span></div><div className="table-wrap"><table><thead><tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{rows.length ? rows.map((row, rowIndex) => <tr key={`${title}-${rowIndex}`}>{row.map((value, columnIndex) => <td key={`${title}-${rowIndex}-${columnIndex}`}>{value}</td>)}</tr>) : <tr><td colSpan={columns.length} className="empty-state">暂无数据</td></tr>}</tbody></table></div></section>;
+}
+
+function CustomerPortalAccountsSection({ customer, portals, canManage, busy, closeSignal }: { customer: CustomerRow; portals: PortalRow[]; canManage: boolean; busy: boolean; closeSignal?: unknown }) {
+  return <section className="customer-dossier-section customer-portal-accounts"><div className="customer-dossier-section-head"><strong>门户账号</strong><span>{portals.length} 个</span></div><div className="table-wrap"><table><thead><tr><th>登录用户</th><th>登录账号</th><th>密码</th><th>状态 / 最近登录</th><th>操作</th></tr></thead><tbody>{portals.length ? portals.map((item) => <tr key={item.id}>
+    <td><strong>{item.display_name}</strong></td>
+    <td><code>{item.email}</code><small>客户门户登录邮箱</small></td>
+    <td><span className="status-pill">已加密保存</span><small>安全原因不可回显明文</small></td>
+    <td><span className={`status-pill${item.status === "active" ? "" : " off"}`}>{item.status === "active" ? "正常" : item.status}</span><small>{item.last_login_at ? `最近登录 ${item.last_login_at}` : "尚未登录"}</small></td>
+    <td>{canManage ? <Modal title={`重置门户密码 · ${item.email}`} triggerLabel="重置密码" triggerClassName="text-button" size="wide" dialogClassName="customer-submodal" closeSignal={closeSignal}><CustomerPortalPasswordResetForm customer={customer} account={item} busy={busy}/></Modal> : "—"}</td>
+  </tr>) : <tr><td colSpan={5} className="empty-state">尚未开通门户账号；该客户的报价暂时无法在客户门户查看。</td></tr>}</tbody></table></div></section>;
+}
+
+function CustomerPortalPasswordResetForm({ customer, account, busy }: { customer: CustomerRow; account: PortalRow; busy: boolean }) {
+  return <Form method="post" className="customer-subform"><input type="hidden" name="intent" value="portal_password_reset"/><input type="hidden" name="customerId" value={customer.id}/><input type="hidden" name="accountId" value={account.id}/><div className="customer-form-section"><div className="customer-form-section-title"><strong>设置新的初始密码</strong><span>保存后原有门户登录会话将全部退出</span></div><div className="customer-form-grid"><label className="field field-wide"><span>登录账号</span><input value={account.email} autoComplete="username" disabled/></label><label className="field field-wide"><span>新密码</span><input name="password" type="password" autoComplete="new-password" required minLength={12} maxLength={128}/><small>至少 12 位，包含大小写字母和数字</small></label><label className="field field-wide"><span>确认新密码</span><input name="confirmPassword" type="password" autoComplete="new-password" required minLength={12} maxLength={128}/></label></div></div><div className="customer-form-actions"><span>系统不会保存或展示明文密码，请将新密码通过安全渠道交给客户。</span><button className="primary" disabled={busy}>确认重置密码</button></div></Form>;
 }
 
 function CustomerContractForm({ customer, busy }: { customer: CustomerRow; busy: boolean }) {
