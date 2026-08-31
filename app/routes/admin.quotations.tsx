@@ -364,30 +364,29 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
         <Field label="清关办理方式"><select className="control" name="customsClearanceMode" defaultValue="company" required><option value="company">公司代办清关</option><option value="customer">客户自理清关</option></select></Field>
       </div>
     </QuoteLedgerSection>
-    <QuoteLedgerSection className="quote-route-section" title="运输路线" note="点击地区后按国家 / 地区 → 省 / 州 → 城市逐级展开">
-      <div className="quote-route-workbench">
-        <div className="quote-route-strip" aria-label="报价运输路线">
-          <section className="quote-route-stop quote-route-stop-origin" aria-labelledby="quote-origin-heading">
-            <header className="quote-route-stop-heading">
-              <span className="quote-route-stop-index" aria-hidden="true">起</span>
-              <span><b id="quote-origin-heading" className="quote-route-stop-title">起运地</b><small>客户提货地区</small></span>
-            </header>
-            <GeoCascadeFields key={`origin-${customerId}`} prefix="origin" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} initialCountry={selectedCustomer?.pickup_country_code} initialProvince={selectedCustomer?.pickup_state_code} initialCity={selectedCustomer?.pickup_city} />
-          </section>
-          <span className="quote-route-arrow" aria-hidden="true"><ChevronRight size={16} /></span>
-          <section className="quote-route-stop quote-route-stop-destination" aria-labelledby="quote-destination-heading">
-            <header className="quote-route-stop-heading">
-              <span className="quote-route-stop-index" aria-hidden="true">到</span>
-              <span><b id="quote-destination-heading" className="quote-route-stop-title">目的地</b><small>境外到达地区</small></span>
-            </header>
-            <GeoCascadeFields prefix="destination" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} />
-          </section>
-          <span className="quote-route-arrow" aria-hidden="true"><ChevronRight size={16} /></span>
-          <Field label="目的仓库" className="quote-route-warehouse"><select className="control quote-warehouse-select" name="destinationWarehouseId" required><option value="">请选择境外目的仓</option>{loaderData.warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></Field>
+    <QuoteLedgerSection className="quote-route-section" title="运输路线" note="地区按国家 / 地区 → 省 / 州 → 城市逐级选择">
+      <div className="quote-route-matrix" role="group" aria-label="报价运输路线">
+        <div className="quote-route-matrix-row quote-route-matrix-head" aria-hidden="true">
+          <span>填写项目</span>
+          <b>起运信息</b>
+          <b>目的信息</b>
         </div>
-        <div className="quote-route-detail-row">
-          <Field label="提货地址" className="quote-route-address"><textarea className="control textarea" name="pickupAddress" rows={2} value={pickupAddress} onChange={(event) => setPickupAddress(event.target.value)} required /></Field>
-          <Field label="报价目的地备注" className="quote-route-note"><textarea className="control textarea" name="destinationWarehouseNote" rows={2} /></Field>
+        <div className="quote-route-matrix-row">
+          <span className="quote-route-matrix-label">地区</span>
+          <div className="quote-route-matrix-cell" data-column="起运信息">
+            <GeoCascadeFields key={`origin-${customerId}`} prefix="origin" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} initialCountry={selectedCustomer?.pickup_country_code} initialProvince={selectedCustomer?.pickup_state_code} initialCity={selectedCustomer?.pickup_city} />
+          </div>
+          <div className="quote-route-matrix-cell" data-column="目的信息">
+            <GeoCascadeFields prefix="destination" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} />
+          </div>
+        </div>
+        <div className="quote-route-matrix-row">
+          <span className="quote-route-matrix-label">交接地点</span>
+          <Field label="提货地址" className="quote-route-matrix-cell quote-route-address"><textarea className="control textarea" name="pickupAddress" rows={2} value={pickupAddress} onChange={(event) => setPickupAddress(event.target.value)} required /></Field>
+          <div className="quote-route-matrix-cell quote-route-destination-details">
+            <Field label="目的仓库" className="quote-route-warehouse"><select className="control quote-warehouse-select" name="destinationWarehouseId" required><option value="">请选择境外目的仓</option>{loaderData.warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></Field>
+            <Field label="目的地备注" className="quote-route-note"><textarea className="control textarea" name="destinationWarehouseNote" rows={2} /></Field>
+          </div>
         </div>
       </div>
     </QuoteLedgerSection>
