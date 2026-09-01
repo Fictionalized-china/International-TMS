@@ -7,6 +7,7 @@ import {
   parseWorkflowSortOrder,
   partitionWorkflowDefinitionsByRoadType,
   workflowEditCapabilities,
+  workflowEditorEntryMode,
   workflowInsertionSortOrder,
   workflowIntentAllowedForUsage,
   workflowFieldPlacementLock,
@@ -44,6 +45,11 @@ describe("workflow edit policy", () => {
     expect(workflowIntentAllowedForUsage("field_create", 1200)).toBe(true);
     expect(workflowIntentAllowedForUsage("field_update", 1200)).toBe(false);
     expect(workflowIntentAllowedForUsage("field_delete", 1200)).toBe(false);
+  });
+
+  it("reopens the editor directly when the inspected workflow is already selected", () => {
+    expect(workflowEditorEntryMode(true)).toBe("open_current");
+    expect(workflowEditorEntryMode(false)).toBe("navigate_and_open");
   });
 
   it("maps required, optional and hidden without leaving hidden fields required", () => {

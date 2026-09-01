@@ -24,7 +24,6 @@ describe("workflow field building blocks", () => {
 
   it("keeps new-system supplemental fields optional by default", () => {
     for (const fieldKey of [
-      "overseas_warehouse_id",
       "module_assignees",
       "vehicle_capacity_weight",
       "document_review",
@@ -35,6 +34,27 @@ describe("workflow field building blocks", () => {
       expect(field?.defaultMode, fieldKey).toBe("optional");
       expect(field?.requirementSource, fieldKey).toBe("new_system");
     }
+  });
+
+  it("inherits accepted quote data and keeps only the consignment letter as the order-creation gate", () => {
+    const orderCreationFields = workflowFieldCatalog.filter(
+      (field) => field.stepKey === "order_creation",
+    );
+    expect(
+      orderCreationFields
+        .filter((field) => field.defaultMode === "required")
+        .map((field) => field.fieldKey),
+    ).toEqual(["document_consignment_letter"]);
+    expect(
+      orderCreationFields.filter((field) => field.defaultMode !== "hidden"),
+    ).toMatchObject([
+      {
+        fieldKey: "document_consignment_letter",
+        moduleCode: "consignment",
+        fieldType: "attachment",
+        defaultMode: "required",
+      },
+    ]);
   });
 
   it("maps required, optional and hidden without ambiguous states", () => {

@@ -32,6 +32,12 @@ export function workflowEditCapabilities(instanceCount: number) {
   } as const;
 }
 
+export function workflowEditorEntryMode(
+  isSelectedDefinition: boolean,
+): "open_current" | "navigate_and_open" {
+  return isSelectedDefinition ? "open_current" : "navigate_and_open";
+}
+
 export function workflowIntentAllowedForUsage(intent: string, instanceCount: number) {
   return !workflowEditCapabilities(instanceCount).usedByOrders || !structureMutationIntents.has(intent);
 }

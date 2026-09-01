@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Form, Link, redirect, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.workflow";
 import { canEditWorkflowDefinition, requireSessionUser } from "../lib/auth.server";
@@ -39,6 +39,7 @@ import {
   normalizeWorkflowStepRequiredFlag,
   partitionWorkflowDefinitionsByRoadType,
   workflowEditCapabilities,
+  workflowEditorEntryMode,
   workflowInsertionSortOrder,
   workflowIntentAllowedForUsage,
   workflowFieldPlacementLock,
@@ -1406,9 +1407,17 @@ export default function Workflow({ loaderData, actionData }: Route.ComponentProp
   const structureEditable = manage && capabilities.structureEditable;
   const isDraft = loaderData.definition.lifecycle_status === "draft";
   const busy = useNavigation().state !== "idle";
+  const [editorOpen, setEditorOpen] = useState(loaderData.openEditor);
   const activeSteps = loaderData.steps.filter((step) => step.is_active);
   const successMessage = actionData && "success" in actionData ? actionData.success : null;
   const formError = actionData && "formError" in actionData ? actionData.formError : null;
+  useEffect(() => {
+    if (successMessage) {
+      setEditorOpen(false);
+      return;
+    }
+    if (loaderData.openEditor) setEditorOpen(true);
+  }, [loaderData.definition.id, loaderData.openEditor, successMessage]);
   const fieldsByStep = new Map<string, StepField[]>();
   for (const field of loaderData.fields) {
     const list = fieldsByStep.get(field.step_id) ?? [];
@@ -1494,6 +1503,7 @@ export default function Workflow({ loaderData, actionData }: Route.ComponentProp
           selectedId={loaderData.definition.id}
           manage={manage}
           busy={busy}
+          onEditSelected={() => setEditorOpen(true)}
         />
         <WorkflowTypeGroup
           type="ltl"
@@ -1502,6 +1512,7 @@ export default function Workflow({ loaderData, actionData }: Route.ComponentProp
           selectedId={loaderData.definition.id}
           manage={manage}
           busy={busy}
+          onEditSelected={() => setEditorOpen(true)}
         />
       </section>
       {workflowGroups.unclassified.length > 0 && (
@@ -1536,8 +1547,8 @@ export default function Workflow({ loaderData, actionData }: Route.ComponentProp
                 triggerLabel="节点配置"
                 triggerClassName="secondary"
                 size="xwide"
-                closeSignal={successMessage}
-                openSignal={loaderData.openEditor ? `${loaderData.definition.id}-edit` : undefined}
+                isOpen={editorOpen}
+                onOpenChange={setEditorOpen}
               >
                 <NodeConfigDialog
                   workflowId={loaderData.definition.id}
@@ -1663,6 +1674,7 @@ function WorkflowTypeGroup({
   selectedId,
   manage,
   busy,
+  onEditSelected,
 }: {
   type: "ftl" | "ltl";
   definitions: Definition[];
@@ -1670,6 +1682,7 @@ function WorkflowTypeGroup({
   selectedId: string;
   manage: boolean;
   busy: boolean;
+  onEditSelected: () => void;
 }) {
   const label = type === "ftl" ? "整车工作流" : "拼车工作流";
   return (
@@ -1690,6 +1703,7 @@ function WorkflowTypeGroup({
             selected={definition.id === selectedId}
             manage={manage}
             busy={busy}
+            onEditSelected={onEditSelected}
           />
         ))}
         {!definitions.length && <div className="empty-state">尚未创建{label}。</div>}
@@ -1704,12 +1718,14 @@ function WorkflowDefinitionCard({
   selected,
   manage,
   busy,
+  onEditSelected,
 }: {
   definition: Definition;
   steps: DefinitionStepSummary[];
   selected: boolean;
   manage: boolean;
   busy: boolean;
+  onEditSelected: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [showClone, setShowClone] = useState(false);
@@ -1717,6 +1733,7 @@ function WorkflowDefinitionCard({
   const activeSteps = steps.filter((step) => step.is_active);
   const hiddenFieldCount = steps.reduce((total, step) => total + step.hidden_field_count, 0);
   const cloneName = `${definition.name.slice(0, 52)}（副本）`;
+  const editorEntryMode = workflowEditorEntryMode(selected);
   return (
     <>
       <button
@@ -1791,7 +1808,21 @@ function WorkflowDefinitionCard({
               </Form>
             )}
             <div className="workflow-inspect-actions">
-              {manage && <Link className="primary workflow-inspect-primary" to={`/admin/workflow?workflowId=${encodeURIComponent(definition.id)}&edit=1#workflow-editor`} onClick={close}>编辑</Link>}
+              {manage && editorEntryMode === "open_current" && (
+                <button
+                  type="button"
+                  className="primary workflow-inspect-primary"
+                  onClick={() => {
+                    close();
+                    onEditSelected();
+                  }}
+                >
+                  编辑
+                </button>
+              )}
+              {manage && editorEntryMode === "navigate_and_open" && (
+                <Link className="primary workflow-inspect-primary" to={`/admin/workflow?workflowId=${encodeURIComponent(definition.id)}&edit=1#workflow-editor`} onClick={() => close()}>编辑</Link>
+              )}
               {manage && <button type="button" className="secondary" onClick={() => setShowClone((current) => !current)}>{showClone ? "收起新建表单" : "以此工作流为基础创建新工作流"}</button>}
               <button type="button" className="secondary" onClick={close}>取消</button>
             </div>

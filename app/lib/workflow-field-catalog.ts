@@ -19,25 +19,7 @@ export type WorkflowFieldCatalogItem = {
 // explicitly approved as operational hard gates. Other new-system workflow,
 // portal and control fields stay visible but optional.
 export const legacyRequiredWorkflowFieldKeys: ReadonlySet<string> = new Set([
-  "customer_id",
-  "order_date",
-  "business_nature",
-  "shipper_customer_id",
-  "shipper_contact",
-  "shipper_phone",
-  "origin_country",
-  "origin_state",
-  "origin_city",
-  "consignee_name",
-  "destination_country",
-  "destination_state",
-  "destination_city",
-  "cargo_name_cn",
-  "package_type",
-  "package_count",
-  "pieces_per_package",
-  "gross_weight_per_package_kg",
-  "volume_per_package_cbm",
+  "document_consignment_letter",
   "primary_operator",
   "domestic_carrier_id",
   "domestic_planned_departure_at",
@@ -98,11 +80,13 @@ const field = (
   fieldKey,
   label,
   fieldType,
-  defaultMode: legacyRequiredWorkflowFieldKeys.has(fieldKey)
-    ? "required"
-    : defaultMode === "hidden"
-      ? "hidden"
-      : "optional",
+  defaultMode: stepKey === "order_creation"
+    ? fieldKey === "document_consignment_letter" ? "required" : "hidden"
+    : legacyRequiredWorkflowFieldKeys.has(fieldKey)
+      ? "required"
+      : defaultMode === "hidden"
+        ? "hidden"
+        : "optional",
   requirementSource: legacyRequiredWorkflowFieldKeys.has(fieldKey)
     ? "legacy_required"
     : "new_system",
@@ -229,7 +213,7 @@ export const workflowFieldCatalog: WorkflowFieldCatalogItem[] = [
   field("outbound_transport", "documents", "document_attachment", "业务文件", "attachment", "required", "实际上传的发运前业务文件。"),
   field("outbound_transport", "documents", "document_description", "文件说明", "textarea", "optional", "文件内容、版本或特殊用途说明。"),
   field("outbound_transport", "documents", "document_public_to_customer", "客户可见", "select", "optional", "决定文件是否同步到客户门户。", "1|客户可见\n0|仅内部"),
-  field("order_creation", "consignment", "document_consignment_letter", "委托书", "attachment", "optional", "客户确认运输委托后，可在订单中上传委托书。"),
+  field("order_creation", "consignment", "document_consignment_letter", "委托书", "attachment", "required", "客户确认运输委托后必须上传；报价已确定的客户、线路与货物资料只读继承，不重复填写。"),
   field("order_creation", "consignment", "document_contract", "合同", "attachment", "hidden", "默认按客户资料归档；仅在工作流明确启用订单级合同时显示。"),
   field("outbound_transport", "customs", "document_commercial_invoice", "商业发票", "attachment", "required", "办理报关申报时使用的商业发票。"),
   field("outbound_transport", "customs", "document_packing_list", "装箱单", "attachment", "required", "办理报关申报时使用的装箱明细。"),
