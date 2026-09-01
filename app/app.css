@@ -5892,7 +5892,38 @@ label:has(> input:required:invalid, > select:required:invalid, > textarea:requir
 .order-mark-label dt { font-size: 13px; font-weight: 700; }
 .order-mark-label dd { border-left: 1px solid #aaa; font-size: 14px; font-weight: 650; line-height: 1.5; }
 .order-mark-label footer { padding-top: 10px; color: #444; font-size: 11px; line-height: 1.5; }
-.portal-order-actions { display: flex; gap: 5px; }
+.portal-order-actions { display: flex; flex-wrap: wrap; gap: 5px; }
+.order-mark-preview-modal { width: min(940px, calc(100vw - 48px)); border-radius: 8px; }
+.order-mark-preview-modal .modal-header { min-height: 52px; padding: 10px 16px; }
+.order-mark-preview-modal .modal-header h2 { font-size: 15px; }
+.order-mark-preview-modal .modal-body { padding: 12px 16px 0; }
+.order-mark-dialog { display: grid; gap: 12px; }
+.order-mark-dialog-status {
+  min-height: 46px;
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid #b9e1cf;
+  border-left: 4px solid #15936b;
+  background: #f0fbf6;
+}
+.order-mark-dialog-status > div { display: flex; align-items: baseline; gap: 12px; }
+.order-mark-dialog-status span,
+.order-mark-dialog-status time { color: #5d7469; font-size: 11px; }
+.order-mark-dialog-status strong { color: #115f48; font-size: 14px; }
+.order-mark-dialog-actions {
+  position: sticky;
+  bottom: 0;
+  padding: 10px 0 12px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  background: #fff;
+}
+.order-mark-dialog-actions a { text-decoration: none; }
 @media print {
   body {
     background: #fff;
@@ -5930,6 +5961,36 @@ label:has(> input:required:invalid, > select:required:invalid, > textarea:requir
   .portal-content { margin: 0 !important; padding: 0 !important; }
   .order-mark-page { max-width: none; margin: 0; padding: 0; }
   .order-mark-label { width: 100%; }
+  body.printing-order-mark > *:not(.modal-backdrop) { display: none !important; }
+  body.printing-order-mark > .modal-backdrop {
+    position: static !important;
+    display: block !important;
+    padding: 0 !important;
+    background: #fff !important;
+    overflow: visible !important;
+  }
+  .order-mark-preview-modal {
+    width: 100% !important;
+    max-height: none !important;
+    overflow: visible !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+  }
+  .order-mark-preview-modal > .modal-header,
+  .order-mark-preview-modal .order-mark-dialog-status,
+  .order-mark-preview-modal .order-mark-dialog-actions { display: none !important; }
+  .order-mark-preview-modal > .modal-body {
+    max-height: none !important;
+    padding: 0 !important;
+    overflow: visible !important;
+  }
+}
+
+@media (max-width: 680px) {
+  .order-mark-preview-modal { width: calc(100vw - 24px); }
+  .order-mark-preview-modal .modal-body { padding: 10px 10px 0; }
+  .order-mark-dialog-status { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .order-mark-dialog-status > div { align-items: flex-start; flex-direction: column; gap: 2px; }
 }
 
 .operation-jump {

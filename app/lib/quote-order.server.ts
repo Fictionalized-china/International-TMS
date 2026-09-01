@@ -223,6 +223,16 @@ export async function createOrderFromAcceptedQuote(input: {
       "draft","draft","order_creation",input.actorUserId,quote.salesperson_user_id,
       `来源报价 ${quote.quote_number}`,now,
     ),
+    env.DB.prepare(
+      `INSERT INTO order_workflow_history(
+         id,organization_id,order_id,action_code,action_name,from_status,to_status,to_step_code,
+         actor_user_id,notes,occurred_at
+       ) VALUES(?,?,?,?,?,'draft','draft','order_creation',?,?,?)`,
+    ).bind(
+      `${orderId}:mark-label-generated`,input.organizationId,orderId,
+      "order_mark_label_generated","客户接受报价，系统自动生成入仓唛头标签",
+      input.actorUserId,`唛头号 ${orderNumber}（与订单号一致）`,now,
+    ),
     ...Object.entries(defaultServices)
       .filter(([code]) => quote.customs_clearance_mode === "company" || code !== "destination_customs")
       .map(([code, name]) => env.DB.prepare(

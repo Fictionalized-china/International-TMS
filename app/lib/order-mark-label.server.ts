@@ -1,4 +1,6 @@
 import { env } from "cloudflare:workers";
+import { orderMarkLabelAvailable } from "./order-mark-label-policy";
+export { orderMarkLabelAvailable } from "./order-mark-label-policy";
 
 export type OrderMarkLabel = {
   id: string;
@@ -16,13 +18,8 @@ export type OrderMarkLabel = {
   destination_city: string;
   overseas_warehouse_name: string | null;
   status: string;
+  label_generated_at: string;
 };
-
-const approvedOrderStatuses = new Set(["confirmed", "in_execution", "completed"]);
-
-export function orderMarkLabelAvailable(status: string) {
-  return approvedOrderStatuses.has(status);
-}
 
 export async function loadOrderMarkLabel(input: {
   organizationId: string;
@@ -37,17 +34,27 @@ export async function loadOrderMarkLabel(input: {
     `SELECT o.id,o.order_number,c.name customer_name,o.cargo_description,o.pieces,
       o.gross_weight_kg,o.volume_cbm,o.origin_country,o.origin_state,o.origin_city,
       o.destination_country,o.destination_state,o.destination_city,
-      w.name overseas_warehouse_name,o.status
+      w.name overseas_warehouse_name,o.status,
+      CASE
+        WHEN q.accepted_at IS NOT NULL THEN q.accepted_at
+        WHEN o.quotation_id IS NULL AND o.status IN ('confirmed','in_execution','completed') THEN o.created_at
+        ELSE NULL
+      END label_generated_at,o.quote_withdrawn
      FROM transport_orders o
      JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
+     LEFT JOIN quotations q ON q.id=o.quotation_id AND q.organization_id=o.organization_id
      LEFT JOIN warehouses w ON w.id=o.overseas_warehouse_id AND w.organization_id=o.organization_id
      WHERE o.id=? AND o.organization_id=?${customerScope}`,
   )
     .bind(...values)
-    .first<OrderMarkLabel>();
+    .first<OrderMarkLabel & { quote_withdrawn: number }>();
   if (!order) throw new Response("订单不存在", { status: 404 });
-  if (!orderMarkLabelAvailable(order.status)) {
-    throw new Response("订单审核通过后才会生成入仓唛头标签", { status: 409 });
+  if (!orderMarkLabelAvailable({
+    status: order.status,
+    acceptedAt: order.label_generated_at,
+    quoteWithdrawn: order.quote_withdrawn,
+  })) {
+    throw new Response("客户接受报价后才会自动生成入仓唛头标签", { status: 409 });
   }
   return order;
 }
@@ -63,7 +70,7 @@ export function orderMarkLabelDownload(order: OrderMarkLabel) {
   });
 }
 
-function buildOrderMarkLabelSvg(order: OrderMarkLabel) {
+export function buildOrderMarkLabelSvg(order: OrderMarkLabel) {
   const barcode = code39Bars(order.order_number.toUpperCase());
   const scale = 880 / barcode.width;
   const route = [order.origin_country, order.origin_state, order.origin_city]
@@ -72,6 +79,7 @@ function buildOrderMarkLabelSvg(order: OrderMarkLabel) {
       .filter(Boolean)
       .join(" ");
   const rows = [
+    ["唛头号", order.order_number],
     ["订单号", order.order_number],
     ["客户", order.customer_name],
     ["货物", order.cargo_description],

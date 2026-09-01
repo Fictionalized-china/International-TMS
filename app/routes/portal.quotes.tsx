@@ -105,7 +105,7 @@ export async function action({ request }: Route.ActionArgs) {
         source: "portal",
         request,
       });
-      return { success: `报价已接受，系统已${result.created ? "自动创建" : "恢复"}订单 ${result.orderNumber}` };
+      return { success: `报价已接受，系统已${result.created ? "自动创建" : "恢复"}订单 ${result.orderNumber}，入仓唛头已生成` };
     }
     if (intent === "withdraw") {
       const result = await withdrawQuotationAcceptance({

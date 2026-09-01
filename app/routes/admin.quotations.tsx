@@ -273,7 +273,7 @@ export async function action({ request }: Route.ActionArgs) {
     if (!quotationId) throw new Error("缺少报价编号");
     if (intent === "accept") {
       const result = await acceptQuotation({ organizationId: current.organizationId, quotationId, actorUserId: current.userId, source: "admin", request });
-      return { success: `客户报价已确认，${result.created ? "自动创建" : "恢复"}订单 ${result.orderNumber}` };
+      return { success: `客户报价已确认，${result.created ? "自动创建" : "恢复"}订单 ${result.orderNumber}，入仓唛头已生成` };
     }
     if (intent === "withdraw") {
       const result = await withdrawQuotationAcceptance({ organizationId: current.organizationId, quotationId, actorUserId: current.userId, source: "admin" });

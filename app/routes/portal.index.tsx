@@ -1,22 +1,19 @@
 import { env } from "cloudflare:workers";
 import type { Route } from "./+types/portal.index";
 import { PortalLink as Link } from "../components/PortalNavigation";
+import { OrderMarkLabelModal } from "../components/OrderMarkLabelModal";
+import type { OrderMarkLabel } from "../lib/order-mark-label.server";
 import { requirePortalCustomer } from "../lib/portal.server";
 import { normalizePortalNotificationLink } from "../lib/portal-notification-links";
 
 type Contact = { id: string; name: string; title: string | null; email: string | null; phone: string | null; is_primary: number };
 type Address = { id: string; label: string; country_code: string; city: string; address_line1: string; is_default: number };
-type RecentOrder = {
-  id: string;
-  order_number: string;
+type RecentOrder = OrderMarkLabel & {
   quote_number: string | null;
   business_type: "ftl" | "ltl";
-  cargo_description: string;
-  origin_city: string;
-  destination_city: string;
   current_step_name: string | null;
-  status: string;
   exception_status: string | null;
+  quote_withdrawn: number;
   updated_at: string;
 };
 type Notice = { id: string; type: string; title: string; message: string; link: string | null; is_read: number; created_at: string };
@@ -30,10 +27,19 @@ export async function loader({ request }: Route.LoaderArgs) {
     env.DB.prepare("SELECT COUNT(*) count FROM shipments WHERE organization_id=? AND customer_id=? AND status NOT IN ('delivered','cancelled')").bind(user.organizationId, customer.id).first<{ count: number }>(),
     env.DB.prepare("SELECT COALESCE(SUM(total_amount-paid_amount),0) amount FROM invoices WHERE organization_id=? AND customer_id=? AND status IN ('issued','partially_paid','overdue')").bind(user.organizationId, customer.id).first<{ amount: number }>(),
     env.DB.prepare(
-      `SELECT o.id,o.order_number,q.quote_number,o.business_type,o.cargo_description,o.origin_city,
-              o.destination_city,o.current_step_name,o.status,o.exception_status,o.updated_at
+      `SELECT o.id,o.order_number,c.name customer_name,q.quote_number,o.business_type,o.cargo_description,
+              o.pieces,o.gross_weight_kg,o.volume_cbm,o.origin_country,o.origin_state,o.origin_city,
+              o.destination_country,o.destination_state,o.destination_city,w.name overseas_warehouse_name,
+              o.current_step_name,o.status,o.exception_status,o.updated_at,
+              CASE
+                WHEN q.accepted_at IS NOT NULL THEN q.accepted_at
+                WHEN o.quotation_id IS NULL AND o.status IN ('confirmed','in_execution','completed') THEN o.created_at
+                ELSE ''
+              END label_generated_at,o.quote_withdrawn
          FROM transport_orders o
+         JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
          LEFT JOIN quotations q ON q.id=o.quotation_id AND q.organization_id=o.organization_id
+         LEFT JOIN warehouses w ON w.id=o.overseas_warehouse_id AND w.organization_id=o.organization_id
         WHERE o.organization_id=? AND o.customer_id=?
         ORDER BY o.updated_at DESC LIMIT 8`,
     ).bind(user.organizationId, customer.id).all<RecentOrder>(),
@@ -80,7 +86,7 @@ export default function PortalIndex({ loaderData }: Route.ComponentProps) {
           <td>{order.origin_city} → {order.destination_city}</td>
           <td>{order.current_step_name || "待同步"}</td>
           <td><span className={`status ${statusTone(order.status, order.exception_status)}`}>{statusLabel(order.status)}</span></td>
-          <td><Link className="btn small" to={`/portal/tracking?order=${encodeURIComponent(order.order_number)}`}>查看轨迹</Link></td>
+          <td><div className="portal-order-actions"><Link className="btn small" to={`/portal/tracking?order=${encodeURIComponent(order.order_number)}`}>查看轨迹</Link>{markLabelAvailable(order) && <OrderMarkLabelModal order={order} />}</div></td>
         </tr>)}
         {!loaderData.recentOrders.length && <tr><td className="empty" colSpan={7}>暂无订单；接受有效报价后系统会自动创建。</td></tr>}
       </tbody></table></div>
@@ -113,6 +119,10 @@ function statusTone(status: string, exceptionStatus: string | null) {
 }
 function noticeTypeLabel(type: string) {
   return ({ quote: "报价", order: "订单", shipment: "运输", invoice: "账单", payment: "付款", system: "系统" } as Record<string, string>)[type] || type;
+}
+
+function markLabelAvailable(order: RecentOrder) {
+  return Boolean(order.label_generated_at) && order.quote_withdrawn !== 1 && order.status !== "cancelled";
 }
 
 export function meta() { return [{ title: "客户门户 | 新翎航 TMS" }]; }

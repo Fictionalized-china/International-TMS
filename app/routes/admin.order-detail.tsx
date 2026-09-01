@@ -84,6 +84,8 @@ type Order = {
   customer_code: string;
   customer_reference: string | null;
   quote_number: string | null;
+  quote_accepted_at: string | null;
+  quote_withdrawn: number;
   shipper_name: string;
   shipper_contact: string | null;
   shipper_phone: string | null;
@@ -238,6 +240,12 @@ type OrderDetailTab =
 
 type LinearOrderDrawerTab = "dossier" | "cargo" | "attachments" | "supplements" | "history";
 
+function isOrderMarkLabelReady(order: Pick<Order, "status" | "quote_number" | "quote_accepted_at" | "quote_withdrawn">) {
+  if (order.quote_withdrawn === 1 || order.status === "cancelled") return false;
+  return Boolean(order.quote_accepted_at)
+    || (!order.quote_number && ["confirmed", "in_execution", "completed"].includes(order.status));
+}
+
 export async function loader({ request, params, context }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "order.view"),
     id = params.orderId;
@@ -246,7 +254,8 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
       o.exit_port,bp.name exit_port_name,o.overseas_warehouse_id,ow.name overseas_warehouse_name,
       ow.code overseas_warehouse_code,ow.address overseas_warehouse_address,o.overseas_warehouse_address_note,
       o.transit_locations,o.customs_location,o.route_notes,o.customs_clearance_mode,o.customer_id,c.name customer_name,c.code customer_code,
-      o.customer_reference,q.quote_number,o.shipper_name,o.shipper_contact,o.shipper_phone,o.origin_country,
+      o.customer_reference,q.quote_number,q.accepted_at quote_accepted_at,o.quote_withdrawn,
+      o.shipper_name,o.shipper_contact,o.shipper_phone,o.origin_country,
       o.origin_state,o.origin_city,o.origin_address,o.consignee_name,o.consignee_contact,o.consignee_phone,
       o.destination_country,o.destination_state,o.destination_city,o.destination_address,o.cargo_description,
       o.pieces,o.gross_weight_kg,o.volume_cbm,o.transport_mode,o.service_level,o.requested_pickup_date,
@@ -909,7 +918,7 @@ function LinearOrderSideRail({
   const receivedSummary = data.packageLabels.length
     ? `${received.pieces} 件 · ${received.weight.toFixed(2)} KG · ${received.volume.toFixed(3)} CBM`
     : "等待仓库实收";
-  const markLabelReady = ["confirmed", "in_execution", "completed"].includes(order.status);
+  const markLabelReady = isOrderMarkLabelReady(order);
 
   return <aside className="linear-order-side" aria-label="订单关键资料与快捷查看">
     <section className="linear-side-panel linear-side-panel-clickable" role="button" tabIndex={0} onClick={() => onOpen("dossier")} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onOpen("dossier"); }}>
@@ -926,7 +935,7 @@ function LinearOrderSideRail({
       <header><b>就地查看</b></header>
       <div className="linear-side-links">
         <button type="button" onClick={() => onOpen("dossier")}><span>订单全部资料</span><i>→</i></button>
-        <button type="button" onClick={() => onOpen("dossier")}><span>入仓唛头标签</span><small>{markLabelReady ? "已生成" : "待审核"}</small><i>→</i></button>
+        <button type="button" onClick={() => onOpen("dossier")}><span>入仓唛头标签</span><small>{markLabelReady ? "已生成" : "待接受报价"}</small><i>→</i></button>
         <button type="button" onClick={() => onOpen("cargo")}><span>货物与标签</span><small>{data.packageLabels.length} 张</small><i>→</i></button>
         <button type="button" onClick={() => onOpen("attachments")}><span>文件汇总</span><small>{data.attachments.length} 个</small><i>→</i></button>
         <button type="button" onClick={() => onOpen("supplements")}><span>资料补录</span><small>{data.supplementTasks.filter((item)=>item.status==="open").length} 项待办</small><i>→</i></button>
@@ -952,7 +961,7 @@ function LinearOrderDrawer({
   onClose: () => void;
 }) {
   const order = data.order;
-  const markLabelReady = ["confirmed", "in_execution", "completed"].includes(order.status);
+  const markLabelReady = isOrderMarkLabelReady(order);
   return (
     <div className="linear-drawer-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <aside className="linear-order-drawer" role="dialog" aria-modal="true" aria-label="订单辅助资料">
@@ -970,11 +979,11 @@ function LinearOrderDrawer({
         <div className={`linear-drawer-body is-${activeTab}`}>
           {activeTab === "dossier" && <>
             <section className={`linear-drawer-section order-mark-portal${markLabelReady ? " ready" : " pending"}`}>
-              <h3>入仓唛头标签 <span>{markLabelReady ? "审核通过 · 已生成" : "订单审核通过后生成"}</span></h3>
+              <h3>入仓唛头标签 <span>{markLabelReady ? "报价已接受 · 已生成" : "客户接受报价后生成"}</span></h3>
               <div className="order-mark-portal-body">
                 <div>
                   <strong>{markLabelReady ? order.order_number : "暂未生成"}</strong>
-                  <p>{markLabelReady ? "条码内容即订单号；客户打印后粘贴至每个外包装。" : "当前订单尚未审核通过，查看、打印和下载入口暂未开放。"}</p>
+                  <p>{markLabelReady ? "唛头号与条码内容均为订单号；客户打印后粘贴至每个外包装。" : "客户接受报价后，系统会自动生成并开放查看、打印和下载入口。"}</p>
                 </div>
                 {markLabelReady && <div className="order-mark-portal-actions">
                   <Link to={`/admin/orders/${order.id}/mark-label`} target="_blank" rel="noreferrer">查看标签</Link>

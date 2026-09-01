@@ -1,25 +1,16 @@
 import { env } from "cloudflare:workers";
 import type { Route } from "./+types/portal.orders";
 import { PortalForm as Form, PortalLink as Link } from "../components/PortalNavigation";
+import { OrderMarkLabelModal } from "../components/OrderMarkLabelModal";
+import type { OrderMarkLabel } from "../lib/order-mark-label.server";
 import { requirePortalCustomer } from "../lib/portal.server";
 
-type PortalOrder = {
-  id: string;
-  order_number: string;
+type PortalOrder = OrderMarkLabel & {
   quote_number: string | null;
   business_type: "ftl" | "ltl";
-  cargo_description: string;
-  pieces: number;
-  gross_weight_kg: number;
-  volume_cbm: number;
-  origin_state: string | null;
-  origin_city: string;
-  destination_state: string | null;
-  destination_city: string;
-  overseas_warehouse_name: string | null;
-  status: string;
   current_step_name: string | null;
   exception_status: string | null;
+  quote_withdrawn: number;
   created_at: string;
 };
 
@@ -40,11 +31,17 @@ export async function loader({ request }: Route.LoaderArgs) {
     values.push(status);
   }
   const rows = await env.DB.prepare(
-    `SELECT o.id,o.order_number,q.quote_number,o.business_type,o.cargo_description,o.pieces,
-      o.gross_weight_kg,o.volume_cbm,o.origin_state,o.origin_city,o.destination_state,
-      o.destination_city,w.name overseas_warehouse_name,o.status,o.current_step_name,
-      o.exception_status,o.created_at
+    `SELECT o.id,o.order_number,c.name customer_name,q.quote_number,o.business_type,o.cargo_description,o.pieces,
+      o.gross_weight_kg,o.volume_cbm,o.origin_country,o.origin_state,o.origin_city,o.destination_country,
+      o.destination_state,o.destination_city,w.name overseas_warehouse_name,o.status,o.current_step_name,
+      o.exception_status,o.created_at,
+      CASE
+        WHEN q.accepted_at IS NOT NULL THEN q.accepted_at
+        WHEN o.quotation_id IS NULL AND o.status IN ('confirmed','in_execution','completed') THEN o.created_at
+        ELSE ''
+      END label_generated_at,o.quote_withdrawn
      FROM transport_orders o
+     JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
      LEFT JOIN quotations q ON q.id=o.quotation_id AND q.organization_id=o.organization_id
      LEFT JOIN warehouses w ON w.id=o.overseas_warehouse_id AND w.organization_id=o.organization_id
      WHERE ${where.join(" AND ")}
@@ -73,7 +70,7 @@ export default function PortalOrders({ loaderData }: Route.ComponentProps) {
             <td><b>{order.origin_state || ""}{order.origin_city} → {order.destination_state || ""}{order.destination_city}</b><small className="subline">{order.overseas_warehouse_name || "目的仓待补"}</small></td>
             <td>{order.current_step_name || "待同步"}</td>
             <td><span className={`status ${statusTone(order.status, order.exception_status)}`}>{statusLabel(order.status)}</span></td>
-            <td><div className="portal-order-actions"><Link className="btn small" to={`/portal/tracking?order=${encodeURIComponent(order.order_number)}`}>查看轨迹</Link>{["confirmed", "in_execution", "completed"].includes(order.status) && <Link className="btn small" to={`/portal/orders/${order.id}/mark-label`}>唛头标签</Link>}</div></td>
+            <td><div className="portal-order-actions"><Link className="btn small" to={`/portal/tracking?order=${encodeURIComponent(order.order_number)}`}>查看轨迹</Link>{markLabelAvailable(order) && <OrderMarkLabelModal order={order} />}</div></td>
           </tr>)}
           {!loaderData.orders.length && <tr><td className="empty" colSpan={7}>暂无订单；接受有效报价后系统会自动创建。</td></tr>}
         </tbody></table></div>
@@ -98,6 +95,10 @@ function statusTone(status: string, exceptionStatus: string | null) {
   if (status === "cancelled") return "red";
   if (["draft", "submitted"].includes(status)) return "orange";
   return "blue";
+}
+
+function markLabelAvailable(order: PortalOrder) {
+  return Boolean(order.label_generated_at) && order.quote_withdrawn !== 1 && order.status !== "cancelled";
 }
 
 export function meta() { return [{ title: "我的订单 | 新翎航客户门户" }]; }
