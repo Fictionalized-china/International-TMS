@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   filterWarehouseOutboundLoadUnits,
+  isConsolidatedOutboundTask,
   normalizeWarehouseOutboundListFilters,
+  validateFtlOutboundResourceSelection,
 } from "./warehouse-outbound-list";
 
 const units = [
@@ -45,5 +47,26 @@ describe("warehouse outbound order list", () => {
       .toEqual([units[1]]);
     expect(filterWarehouseOutboundLoadUnits(units, { query: "测试客户甲", businessType: "all", readiness: "ready" }))
       .toEqual([units[0]]);
+  });
+
+  it("never treats a full-truck task as a consolidation task", () => {
+    expect(isConsolidatedOutboundTask("ftl", "legacy-batch-id")).toBe(false);
+    expect(isConsolidatedOutboundTask("ltl", "pz-batch-id")).toBe(true);
+    expect(isConsolidatedOutboundTask("ltl", null)).toBe(false);
+  });
+
+  it("requires the warehouse to confirm all outbound resources for a full-truck task", () => {
+    expect(validateFtlOutboundResourceSelection({
+      carrierId: "",
+      vehicleId: "vehicle-1",
+      driverId: "",
+      plannedDepartureAt: "",
+    })).toBe("请由仓库确认：境外承运商、出境司机、计划出境发车时间");
+    expect(validateFtlOutboundResourceSelection({
+      carrierId: "carrier-1",
+      vehicleId: "vehicle-1",
+      driverId: "driver-1",
+      plannedDepartureAt: "2026-09-02T09:00",
+    })).toBeNull();
   });
 });

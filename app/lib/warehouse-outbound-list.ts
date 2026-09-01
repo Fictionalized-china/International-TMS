@@ -51,3 +51,24 @@ export function filterWarehouseOutboundLoadUnits<T extends FilterableLoadUnit>(
     ].some((value) => value.toLocaleLowerCase("zh-CN").includes(query));
   });
 }
+
+export function isConsolidatedOutboundTask(
+  businessType: string,
+  transportBatchId: string | null | undefined,
+) {
+  return businessType === "ltl" && Boolean(transportBatchId);
+}
+
+export function validateFtlOutboundResourceSelection(input: {
+  carrierId: string;
+  vehicleId: string;
+  driverId: string;
+  plannedDepartureAt: string;
+}) {
+  const missing: string[] = [];
+  if (!input.carrierId.trim()) missing.push("境外承运商");
+  if (!input.vehicleId.trim()) missing.push("出境车辆");
+  if (!input.driverId.trim()) missing.push("出境司机");
+  if (!input.plannedDepartureAt.trim()) missing.push("计划出境发车时间");
+  return missing.length ? `请由仓库确认：${missing.join("、")}` : null;
+}

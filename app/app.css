@@ -20173,6 +20173,28 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 }
 .outbound-upload-modal-actions span { margin-right: auto; color: #64748b; }
 .outbound-review-create-form { display: grid; gap: 12px; }
+.ftl-outbound-resource-confirmation {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #9fc6b7;
+  border-left: 4px solid #178765;
+  background: #f2faf7;
+}
+.ftl-outbound-resource-confirmation > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.ftl-outbound-resource-confirmation > header div { display: grid; gap: 3px; }
+.ftl-outbound-resource-confirmation > header strong { color: #0d5744; }
+.ftl-outbound-resource-confirmation > header span:not(.status-pill) { color: #526879; font-size: 12px; }
+.ftl-outbound-resource-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
 .outbound-review-create-form .outbound-document-review-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0;
@@ -20190,6 +20212,8 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   .outbound-create-entry-actions,
   .outbound-upload-modal-intro,
   .outbound-upload-modal-actions { align-items: stretch; flex-direction: column; }
+  .ftl-outbound-resource-confirmation > header { flex-direction: column; }
+  .ftl-outbound-resource-grid { grid-template-columns: 1fr; }
   .outbound-review-create-form .outbound-document-review-grid { grid-template-columns: 1fr; }
   .outbound-review-create-form .outbound-document-preview { border-right: 0; border-bottom: 1px solid #cbd8e5; }
   .outbound-review-create-form .outbound-document-preview:last-child { border-bottom: 0; }
