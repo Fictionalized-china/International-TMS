@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
-import { Link } from "react-router";
 import type { Route } from "./+types/portal.index";
+import { PortalLink as Link } from "../components/PortalNavigation";
 import { requirePortalCustomer } from "../lib/portal.server";
 import { normalizePortalNotificationLink } from "../lib/portal-notification-links";
 

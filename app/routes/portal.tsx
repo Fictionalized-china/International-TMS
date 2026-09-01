@@ -1,35 +1,34 @@
 import { env } from "cloudflare:workers";
-import { Form, NavLink, Outlet } from "react-router";
+import { Outlet } from "react-router";
 import type { Route } from "./+types/portal";
-import { requireSessionUser } from "../lib/auth.server";
 import { AppIcon, type AppIconName } from "../components/AppIcon";
+import {
+  PortalForm,
+  PortalNavLink,
+  PortalSessionBoundary,
+} from "../components/PortalNavigation";
 import { PrototypeBrandMark } from "../components/PrototypeBrandMark";
 import { ConnectionStatus } from "../components/InteractionFeedback";
 import { WorkspacePreferences } from "../components/WorkspacePreferences";
+import { portalContextIdFromRequest } from "../lib/portal-session-context";
+import { requirePortalCustomer } from "../lib/portal.server";
 
 export async function loader({ request }: Route.LoaderArgs) {
-  const user = await requireSessionUser(request, undefined, "portal");
-  const account = await env.DB.prepare(
-    "SELECT customer_id FROM customer_portal_accounts WHERE user_id=? AND organization_id=? AND status='active' LIMIT 1",
+  const { user, customer } = await requirePortalCustomer(request);
+  const contextId = portalContextIdFromRequest(request);
+  if (!contextId) throw new Response("客户门户窗口上下文缺失", { status: 400 });
+  const row = await env.DB.prepare(
+    "SELECT COUNT(*) count FROM portal_notifications WHERE organization_id=? AND customer_id=? AND (user_id IS NULL OR user_id=?) AND is_read=0",
   )
-    .bind(user.userId, user.organizationId)
-    .first<{ customer_id: string }>();
-  let unread = 0;
-  if (account) {
-    const row = await env.DB.prepare(
-      "SELECT COUNT(*) count FROM portal_notifications WHERE organization_id=? AND customer_id=? AND (user_id IS NULL OR user_id=?) AND is_read=0",
-    )
-      .bind(user.organizationId, account.customer_id, user.userId)
-      .first<{ count: number }>();
-    unread = row?.count ?? 0;
-  }
-  return { user, unread };
+    .bind(user.organizationId, customer.id, user.userId)
+    .first<{ count: number }>();
+  return { user, customer, contextId, unread: row?.count ?? 0 };
 }
 
 export default function PortalLayout({ loaderData }: Route.ComponentProps) {
-  const { user, unread } = loaderData;
+  const { user, customer, contextId, unread } = loaderData;
   return (
-    <div className="portal-shell prototype-portal-shell">
+    <PortalSessionBoundary contextId={contextId}><div className="portal-shell prototype-portal-shell">
       <a className="skip-link" href="#portal-main-content">跳到客户门户内容</a>
       <aside className="portal-sidebar">
         <div className="brand portal-brand">
@@ -41,7 +40,7 @@ export default function PortalLayout({ loaderData }: Route.ComponentProps) {
         </div>
         <div className="portal-scope scope">
           <span>当前客户</span>
-          <strong>{user.organizationName}</strong>
+          <strong>{customer.name}</strong>
           <small>订单、轨迹、账单与通知</small>
         </div>
         <nav className="nav" aria-label="客户门户导航">
@@ -60,22 +59,22 @@ export default function PortalLayout({ loaderData }: Route.ComponentProps) {
         <div className="portal-user userbox">
           <span className="avatar">{user.displayName.slice(0, 1).toUpperCase()}</span>
           <div><strong>{user.displayName}</strong><small>客户门户用户</small></div>
-          <Form action="/logout?site=portal" method="post">
+          <PortalForm action="/logout?site=portal" method="post">
             <button className="portal-logout" title="退出登录" aria-label="退出登录"><AppIcon name="logout" size={17} /></button>
-          </Form>
+          </PortalForm>
         </div>
       </aside>
       <div className="portal-main-column">
         <header className="portal-app-topbar topbar">
           <div className="workspace-switch"><span className="active"><AppIcon name="layout" size={14} />客户门户</span></div>
-          <div className="top-actions"><ConnectionStatus className="portal-sync-state" /><WorkspacePreferences /><span className="top-user"><span className="avatar">{user.displayName.slice(0, 1).toUpperCase()}</span><span><strong>{user.displayName}</strong><small>{user.organizationName}</small></span></span></div>
+          <div className="top-actions"><ConnectionStatus className="portal-sync-state" /><WorkspacePreferences /><span className="top-user"><span className="avatar">{user.displayName.slice(0, 1).toUpperCase()}</span><span><strong>{user.displayName}</strong><small>{customer.name}</small></span></span></div>
         </header>
         <main className="portal-content" id="portal-main-content"><Outlet /></main>
       </div>
-    </div>
+    </div></PortalSessionBoundary>
   );
 }
 
 function PortalLink({ to, icon, end, children }: { to: string; icon: AppIconName; end?: boolean; children: React.ReactNode }) {
-  return <NavLink to={to} end={end}><span className="nav-icon"><AppIcon name={icon} size={17} /></span><span>{children}</span></NavLink>;
+  return <PortalNavLink to={to} end={end}><span className="nav-icon"><AppIcon name={icon} size={17} /></span><span>{children}</span></PortalNavLink>;
 }

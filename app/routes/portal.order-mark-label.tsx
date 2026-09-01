@@ -1,5 +1,6 @@
 import type { Route } from "./+types/portal.order-mark-label";
 import { OrderMarkLabelPage } from "../components/OrderMarkLabelPage";
+import { usePortalHref } from "../components/PortalNavigation";
 import { loadOrderMarkLabel } from "../lib/order-mark-label.server";
 import { requirePortalCustomer } from "../lib/portal.server";
 
@@ -14,7 +15,9 @@ export async function loader({ request, params }: Route.LoaderArgs) {
 }
 
 export default function PortalOrderMarkLabel({ loaderData }: Route.ComponentProps) {
-  return <OrderMarkLabelPage order={loaderData.order} returnTo="/portal/orders" downloadTo={`/portal/orders/${loaderData.order.id}/mark-label/download`} />;
+  const returnTo = usePortalHref("/portal/orders");
+  const downloadTo = usePortalHref(`/portal/orders/${loaderData.order.id}/mark-label/download`);
+  return <OrderMarkLabelPage order={loaderData.order} returnTo={returnTo} downloadTo={downloadTo} />;
 }
 
 export function meta() {

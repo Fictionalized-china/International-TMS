@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
-import { Form, useNavigation } from "react-router";
+import { useNavigation } from "react-router";
 import type { Route } from "./+types/portal.calculator";
+import { PortalForm as Form } from "../components/PortalNavigation";
 import { requirePortalCustomer } from "../lib/portal.server";
 import { calculatePrice, type ChargeWeightMode, type PriceTier, type PricingMode, type PricingProduct } from "../lib/pricing";
 import { valueOf } from "../lib/validation";

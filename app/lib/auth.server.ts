@@ -1,6 +1,12 @@
 import { env } from "cloudflare:workers";
 import { redirect } from "react-router";
 import { randomToken, sha256 } from "./crypto.server";
+import {
+  cookieValueFromHeader,
+  portalContextIdFromRequest,
+  portalContextualPath,
+  portalSessionCookieName,
+} from "./portal-session-context";
 import type { Site } from "./site.server";
 import { siteFromRequest, siteLogin } from "./site.server";
 
@@ -23,20 +29,7 @@ export type SessionUser = {
 };
 
 function cookieValue(request: Request, name: string): string | null {
-  const header = request.headers.get("Cookie") ?? "";
-  for (const part of header.split(";")) {
-    const [key, ...value] = part.trim().split("=");
-    if (key !== name) continue;
-    const encoded = value.join("=");
-    try {
-      return decodeURIComponent(encoded);
-    } catch {
-      // A malformed cookie must be treated as an invalid session instead of
-      // taking down every loader that asks for the current user.
-      return null;
-    }
-  }
-  return null;
+  return cookieValueFromHeader(request.headers.get("Cookie"), name);
 }
 
 function warehouseIdFromUrl(value: string | null): string | null {
@@ -55,7 +48,8 @@ export function warehouseIdFromRequest(request: Request): string | null {
   );
 }
 
-function cookieName(site: Site, warehouseId?: string | null): string {
+function cookieName(site: Site, warehouseId?: string | null, portalContextId?: string | null): string | null {
+  if (site === "portal") return portalSessionCookieName(portalContextId);
   if (site !== "warehouse") return SITE_COOKIE_NAMES[site];
   if (!warehouseId) return "itms_warehouse_session";
   return `itms_warehouse_session_${warehouseId.replace(/[^a-zA-Z0-9_-]/g, "")}`;
@@ -66,7 +60,10 @@ export async function createSession(
   organizationId: string,
   site: Site = "admin",
   warehouseId?: string | null,
+  portalContextId?: string | null,
 ): Promise<string> {
+  const name = cookieName(site, warehouseId, portalContextId);
+  if (!name) throw new Error("创建客户门户会话时缺少有效的窗口上下文");
   const token = randomToken();
   const tokenHash = await sha256(token);
   const now = new Date();
@@ -78,18 +75,24 @@ export async function createSession(
   )
     .bind(crypto.randomUUID(), userId, organizationId, tokenHash, expiresAt.toISOString(), now.toISOString(), now.toISOString(), site)
     .run();
-  return `${cookieName(site, warehouseId)}=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${ttl}`;
+  return `${name}=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${ttl}`;
 }
 
 export async function getSessionUser(
   request: Request,
   site: Site = siteFromRequest(request),
   warehouseId?: string | null,
+  portalContextId?: string | null,
 ): Promise<SessionUser | null> {
   const resolvedWarehouseId = site === "warehouse"
     ? warehouseId || warehouseIdFromRequest(request)
     : null;
-  const token = cookieValue(request, cookieName(site, resolvedWarehouseId));
+  const resolvedPortalContextId = site === "portal"
+    ? portalContextId || portalContextIdFromRequest(request)
+    : null;
+  const name = cookieName(site, resolvedWarehouseId, resolvedPortalContextId);
+  if (!name) return null;
+  const token = cookieValue(request, name);
   if (!token) return null;
   const tokenHash = await sha256(token);
   const row = await env.DB.prepare(
@@ -171,7 +174,10 @@ export async function requireSessionUser(request: Request, permission?: string, 
   const user = await getSessionUser(request, site);
   const requestedSite=siteFromRequest(request);
   if (requestedSite!==site) throw redirect(siteLogin(requestedSite));
-  if (!user || user.site !== site) throw redirect(siteLogin(site));
+  if (!user || user.site !== site) {
+    const portalContextId = site === "portal" ? portalContextIdFromRequest(request) : null;
+    throw redirect(portalContextId ? portalContextualPath(siteLogin(site), portalContextId) : siteLogin(site));
+  }
   if (permission && !user.permissions.includes(permission)) throw new Response("没有权限执行此操作", { status: 403 });
   return user;
 }
@@ -180,11 +186,16 @@ export async function destroySession(
   request: Request,
   site: Site = siteFromRequest(request),
   warehouseId?: string | null,
+  portalContextId?: string | null,
 ): Promise<string> {
   const resolvedWarehouseId = site === "warehouse"
     ? warehouseId || warehouseIdFromRequest(request)
     : null;
-  const name = cookieName(site, resolvedWarehouseId);
+  const resolvedPortalContextId = site === "portal"
+    ? portalContextId || portalContextIdFromRequest(request)
+    : null;
+  const name = cookieName(site, resolvedWarehouseId, resolvedPortalContextId);
+  if (!name) return "itms_portal_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0";
   const token = cookieValue(request, name);
   if (token) await env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(await sha256(token)).run();
   return `${name}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;

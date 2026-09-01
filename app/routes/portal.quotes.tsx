@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
-import { Form, Link, useNavigation } from "react-router";
+import { useNavigation } from "react-router";
 import type { Route } from "./+types/portal.quotes";
+import { PortalForm as Form, PortalLink as Link } from "../components/PortalNavigation";
 import { acceptQuotation, withdrawQuotationAcceptance } from "../lib/quotation-lifecycle.server";
 import { requirePortalCustomer } from "../lib/portal.server";
 import { valueOf } from "../lib/validation";
