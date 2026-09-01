@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""2 整车 + 3 拼车工作流即时同步真实 UI 串行回归。
+"""2 整车 + 3 拼车工作流及门户关键功能真实 UI 回归。
 
 所有业务写入都由 Playwright 的 click/fill/select_option/set_input_files/
 keyboard.press 完成；脚本不使用 page.request、HTTP API 或数据库。
-管理后台、客户 4、客户 5、仓库各使用独立 BrowserContext。
+原五单业务步骤保持串行；扩展步骤额外验证客户自助注册、后台绑定、
+同一 BrowserContext 三窗口身份隔离、站内通知、订单唯一性与唛头。
 """
 
 from __future__ import annotations
@@ -77,6 +78,7 @@ class FiveOrderWorkflowSync:
         self.args = args
         self.output_dir = Path(args.output_dir).resolve()
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        expect.set_options(timeout=args.timeout_ms)
         self.browser: Browser = playwright.chromium.launch(
             headless=args.headless,
             slow_mo=args.slow_mo,
@@ -88,7 +90,14 @@ class FiveOrderWorkflowSync:
         self.cases: list[dict[str, Any]] = []
         self.orders: dict[str, OrderRecord] = {}
         self.batch: dict[str, str] = {}
-        for name in ("admin", "customer4", "customer5", "warehouse"):
+        for name in (
+            "admin",
+            "customer4",
+            "customer5",
+            "customer6",
+            "warehouse",
+            "portalShared",
+        ):
             context = self.browser.new_context(
                 locale="zh-CN",
                 viewport={"width": 1600, "height": 1000},
@@ -242,7 +251,10 @@ class FiveOrderWorkflowSync:
                     {"title": f"停止 {name} trace", "status": "WARNING", "error": truncated(error)}
                 )
             finally:
-                self.active_case_by_page[name] = None
+                context = self.contexts[name]
+                for page_name, page in self.pages.items():
+                    if page.context == context:
+                        self.active_case_by_page[page_name] = None
 
     def run_case(
         self,
@@ -327,7 +339,8 @@ class FiveOrderWorkflowSync:
                 "pdf": str(Path(self.args.pdf).resolve()),
                 "browser": "chromium",
                 "headed": not self.args.headless,
-                "contexts": ["admin", "customer4", "customer5", "warehouse"],
+                "contexts": list(self.contexts),
+                "resume_portal_features_from": self.args.resume_portal_features_from or None,
                 "business_write_channels": [
                     "page.click",
                     "locator.fill",
@@ -443,13 +456,24 @@ class FiveOrderWorkflowSync:
         self.navigate(page, "/warehouse/login")
         if "/warehouse/login" not in urlparse(page.url).path:
             return
-        page.locator('input[name="email"]').fill(self.args.warehouse_email)
-        page.locator('input[name="password"]').fill(
+        # 这两个字段是 React 受控输入。DOM 刚出现时立即 fill，
+        # 可能在开发模式水合完成时被初始空状态覆盖。按人类操作节奏
+        # 等待一帧，并在点击前确认输入值仍然存在。
+        page.wait_for_timeout(400)
+        email = page.locator('input[name="email"]')
+        password = page.locator('input[name="password"]')
+        email.fill(self.args.warehouse_email)
+        expect(email).to_have_value(self.args.warehouse_email)
+        password.fill(
             self.args.warehouse_password or self.args.admin_password
         )
+        expect(password).not_to_have_value("")
+        expect(email).to_have_value(self.args.warehouse_email)
         page.get_by_role("button", name="进入仓库作业").click()
         # `/warehouse/login` must not be mistaken for a successful login.
-        expect(page).to_have_url(re.compile(r"/warehouse/?(?:\?.*)?$"))
+        expect(page).to_have_url(
+            re.compile(r"/warehouse/?(?:\?.*)?$"), timeout=self.args.timeout_ms
+        )
         self.screenshot(case, "warehouse", "warehouse-login")
 
     @staticmethod
@@ -530,7 +554,9 @@ class FiveOrderWorkflowSync:
         dialog.get_by_role("button", name="确认创建客户").click()
         expect(page.locator(".alert.success")).to_contain_text("客户已创建")
 
-        row = page.get_by_role("row").filter(has_text=customer_name)
+        row = page.locator("section.customer-ledger").get_by_role("row").filter(
+            has_text=customer_name
+        )
         expect(row).to_be_visible()
         row.get_by_role("button", name="客户档案").click()
         dossier = page.get_by_role(
@@ -549,6 +575,123 @@ class FiveOrderWorkflowSync:
         expect(page.locator(".alert.success")).to_contain_text("客户门户账号已开通")
         case["values"][f"customer{sequence}"] = {"name": customer_name, "email": email}
         self.screenshot(case, "admin", f"customer-{sequence}-portal-opened")
+
+    def create_customer_without_portal(
+        self,
+        case: dict[str, Any],
+        customer_name: str,
+        email: str,
+        sequence: int,
+    ) -> None:
+        """通过客户管理页新建客户，故意不在后台直接开通门户。"""
+        page = self.pages["admin"]
+        self.navigate(page, "/admin/customers")
+        page.get_by_role("button", name="新增客户").click()
+        dialog = page.get_by_role("dialog", name="新增客户")
+        expect(dialog).to_be_visible()
+        dialog.locator('input[name="name"]').fill(customer_name)
+        dialog.locator('select[name="partyCategory"]').select_option(value="customer")
+        dialog.locator("details.customer-role-dropdown summary").click()
+        dialog.locator('input[name="businessRoles"][value="principal"]').click()
+        dialog.locator('input[name="shortName"]').fill(f"自助注册客户{sequence}")
+        dialog.locator('input[name="contactName"]').fill(f"注册联系人{sequence}")
+        dialog.locator('input[name="contactPhone"]').fill(f"13800004{sequence:03d}")
+        dialog.locator('input[name="contactEmail"]').fill(email)
+        dialog.locator('select[name="addressCountryCode"]').select_option(value="CN")
+        self.select_matching_text(
+            dialog.locator('select[name="addressState"]'),
+            self.args.customer_state,
+            "客户6默认地址省/州",
+        )
+        self.select_matching_text(
+            dialog.locator('select[name="addressCity"]'),
+            self.args.customer_city,
+            "客户6默认地址城市",
+        )
+        dialog.locator('input[name="addressLine1"]').fill(
+            f"客户自助注册回归园区 {sequence} 号"
+        )
+        self.screenshot(case, "admin", f"customer-{sequence}-before-create")
+        dialog.get_by_role("button", name="确认创建客户").click()
+        expect(page.locator(".alert.success")).to_contain_text("客户已创建")
+        row = page.locator("section.customer-ledger").get_by_role("row").filter(
+            has_text=customer_name
+        )
+        expect(row).to_be_visible()
+        case["values"][f"customer{sequence}"] = {
+            "name": customer_name,
+            "email": email,
+            "portal_opened_by_admin": False,
+        }
+        self.screenshot(case, "admin", f"customer-{sequence}-created-without-portal")
+
+    def submit_portal_registration(
+        self,
+        case: dict[str, Any],
+        page_name: str,
+        customer_name: str,
+        email: str,
+        sequence: int,
+    ) -> None:
+        page = self.pages[page_name]
+        self.navigate(page, "/portal/register")
+        form = page.locator("form.portal-register-form")
+        expect(form).to_be_visible()
+        form.locator('input[name="companyName"]').fill(customer_name)
+        form.locator('input[name="displayName"]').fill(f"客户{sequence}自助注册账号")
+        form.locator('input[name="phone"]').fill(f"13800005{sequence:03d}")
+        form.locator('input[name="email"]').fill(email)
+        form.locator('input[name="password"]').fill(self.args.portal_password)
+        form.locator('input[name="confirmPassword"]').fill(self.args.portal_password)
+        form.locator('input[name="acceptedTerms"]').check()
+        self.screenshot(case, page_name, f"customer-{sequence}-registration-before-submit")
+        form.get_by_role("button", name="提交注册申请").click()
+        expect(page.get_by_role("heading", name="注册申请已提交")).to_be_visible()
+        self.screenshot(case, page_name, f"customer-{sequence}-registration-submitted")
+
+    def assert_pending_registration_cannot_login(
+        self,
+        case: dict[str, Any],
+        page_name: str,
+        email: str,
+    ) -> None:
+        page = self.pages[page_name]
+        page.get_by_role("link", name=re.compile(r"返回客户门户登录")).click()
+        expect(page).to_have_url(re.compile(r"/portal/login(?:\?.*)?$"))
+        page.locator('input[name="email"]').fill(email)
+        page.locator('input[name="password"]').fill(self.args.portal_password)
+        page.get_by_role("button", name="进入客户门户").click()
+        expect(page.locator(".alert.error")).to_contain_text("审核中")
+        case["values"]["pending_registration_login_blocked"] = True
+        self.screenshot(case, page_name, "registration-pending-login-blocked")
+
+    def approve_portal_registration(
+        self,
+        case: dict[str, Any],
+        customer_name: str,
+        email: str,
+    ) -> None:
+        page = self.pages["admin"]
+        self.navigate(page, "/admin/customers#portal-registration-requests")
+        # 若管理端原本就停在客户页，仅增加 hash 是同文档导航，
+        # React Router loader 不会重读另一窗口刚提交的注册申请。
+        page.reload(wait_until="domcontentloaded")
+        self.acknowledge_required_notifications(page)
+        section = page.locator("#portal-registration-requests")
+        row = section.get_by_role("row").filter(has_text=email)
+        expect(row).to_be_visible()
+        select = row.locator('select[name="customerId"]')
+        self.select_matching_text(select, customer_name, "自助注册最终绑定客户")
+        row.get_by_role("button", name="批准并绑定").click()
+        success = page.locator(".alert.success")
+        expect(success).to_contain_text(email)
+        expect(success).to_contain_text(customer_name)
+        expect(section.get_by_role("row").filter(has_text=email)).to_have_count(0)
+        case["values"]["registration_binding"] = {
+            "email": email,
+            "customer": customer_name,
+        }
+        self.screenshot(case, "admin", "registration-approved-and-bound")
 
     def _fill_quote_geo(
         self, form: Locator, prefix: str, country: str, state: str, city: str
@@ -1321,6 +1464,312 @@ class FiveOrderWorkflowSync:
                     raise AssertionError(f"{record.order_number} 未同步 {label}：{primary}")
             self.screenshot(case, "admin", f"{record.case_id}-pz-synced")
 
+    @staticmethod
+    def context_id_from_page(page: Page) -> str:
+        values = parse_qs(urlparse(page.url).query).get("portalContext", [])
+        context_id = values[0].lower() if values else ""
+        if not PORTAL_CONTEXT_RE.fullmatch(context_id):
+            raise AssertionError(f"客户门户 URL 缺少有效 portalContext：{page.url}")
+        return context_id
+
+    def add_shared_portal_page(
+        self, case: dict[str, Any], page_name: str
+    ) -> Page:
+        page = self.contexts["portalShared"].new_page()
+        self.pages[page_name] = page
+        self.active_case_by_page[page_name] = case
+        self._attach_diagnostics(page_name, page)
+        return page
+
+    def assert_portal_identity(
+        self,
+        page_name: str,
+        customer_name: str,
+        email: str | None = None,
+    ) -> None:
+        page = self.pages[page_name]
+        expect(page.locator(".portal-scope strong")).to_have_text(customer_name)
+        expect(page.locator(".top-user small")).to_have_text(customer_name)
+        context_id = self.context_id_from_page(page)
+        expected_context_id = self.portal_context_ids.get(page_name)
+        if expected_context_id and context_id != expected_context_id:
+            raise AssertionError(
+                f"{page_name} 导航后 portalContext 改变："
+                f"{expected_context_id} -> {context_id}"
+            )
+        self.portal_context_ids[page_name] = context_id
+        if email:
+            page.get_by_role("link", name="账户中心", exact=True).click()
+            expect(page).to_have_url(re.compile(r"/portal/account(?:\?.*)?$"))
+            expect(page.locator('input[value="' + email + '"]')).to_be_visible()
+            expect(page.locator(".portal-scope strong")).to_have_text(customer_name)
+
+    def case_registration_binding(self, case: dict[str, Any]) -> None:
+        with self.step(case, "管理端新增客户6，不直接开通门户", "admin"):
+            self.create_customer_without_portal(
+                case,
+                self.args.customer6_name,
+                self.args.customer6_email,
+                6,
+            )
+        with self.step(case, "客户6通过注册页提交开户申请", "customer6"):
+            self.submit_portal_registration(
+                case,
+                "customer6",
+                self.args.customer6_name,
+                self.args.customer6_email,
+                6,
+            )
+        with self.step(case, "后台批准前注册账号不能查看客户数据", "customer6"):
+            self.assert_pending_registration_cannot_login(
+                case, "customer6", self.args.customer6_email
+            )
+        with self.step(case, "管理端将注册账号绑定到客户6", "admin"):
+            self.approve_portal_registration(
+                case, self.args.customer6_name, self.args.customer6_email
+            )
+        with self.step(case, "客户6审核后登录并显示正确客户", "customer6"):
+            self.login_portal(
+                case,
+                "customer6",
+                self.args.customer6_email,
+                self.args.customer6_name,
+            )
+            self.assert_portal_identity(
+                "customer6", self.args.customer6_name, self.args.customer6_email
+            )
+            self.screenshot(case, "customer6", "registration-bound-portal")
+
+    def case_same_browser_portal_isolation(self, case: dict[str, Any]) -> None:
+        page_names = (
+            "portalShared",
+            "portalSharedCustomer5",
+            "portalSharedCustomer6",
+        )
+        customer_names = (
+            self.args.customer4_name,
+            self.args.customer5_name,
+            self.args.customer6_name,
+        )
+        emails = (
+            self.args.customer4_email,
+            self.args.customer5_email,
+            self.args.customer6_email,
+        )
+        with self.step(case, "同一浏览器上创建三个客户门户窗口", "portalShared"):
+            self.add_shared_portal_page(case, page_names[1])
+            self.add_shared_portal_page(case, page_names[2])
+            for page_name, customer_name, email in zip(
+                page_names, customer_names, emails, strict=True
+            ):
+                self.login_portal(case, page_name, email, customer_name)
+            context_ids = [self.portal_context_ids[name] for name in page_names]
+            if len(set(context_ids)) != 3:
+                raise AssertionError(
+                    f"同浏览器三窗口 portalContext 不唯一：{context_ids}"
+                )
+            case["values"]["shared_window_contexts"] = dict(
+                zip(page_names, context_ids, strict=True)
+            )
+
+        with self.step(case, "三窗口点击我的订单后仅显示各自数据", "portalShared"):
+            own_orders = (
+                self.orders["ftl1"].order_number,
+                self.orders["ltl3"].order_number,
+                "",
+            )
+            foreign_orders = (
+                self.orders["ltl3"].order_number,
+                self.orders["ftl1"].order_number,
+                self.orders["ftl1"].order_number,
+            )
+            for page_name, customer_name, own_order, foreign_order in zip(
+                page_names,
+                customer_names,
+                own_orders,
+                foreign_orders,
+                strict=True,
+            ):
+                page = self.pages[page_name]
+                page.get_by_role("link", name="我的订单", exact=True).click()
+                expect(page).to_have_url(re.compile(r"/portal/orders(?:\?.*)?$"))
+                self.assert_portal_identity(page_name, customer_name)
+                if own_order:
+                    expect(page.get_by_role("row").filter(has_text=own_order)).to_be_visible()
+                else:
+                    expect(page.get_by_text("暂无订单", exact=False)).to_be_visible()
+                expect(page.get_by_role("row").filter(has_text=foreign_order)).to_have_count(0)
+                self.screenshot(case, page_name, "shared-window-own-orders")
+
+        with self.step(case, "三窗口进入账户中心并刷新，身份不串号", "portalShared"):
+            for page_name, customer_name, email in zip(
+                page_names, customer_names, emails, strict=True
+            ):
+                self.assert_portal_identity(page_name, customer_name, email)
+                page = self.pages[page_name]
+                page.reload(wait_until="domcontentloaded")
+                self.acknowledge_required_notifications(page)
+                self.assert_portal_identity(page_name, customer_name)
+                expect(page.locator('input[value="' + email + '"]')).to_be_visible()
+
+        with self.step(case, "中间窗口退出不影响其他两个窗口", "portalSharedCustomer5"):
+            middle = self.pages[page_names[1]]
+            middle.get_by_role("button", name="退出登录").click()
+            expect(middle).to_have_url(re.compile(r"/portal/login(?:\?.*)?$"))
+            for page_name, customer_name in (
+                (page_names[0], customer_names[0]),
+                (page_names[2], customer_names[2]),
+            ):
+                page = self.pages[page_name]
+                page.reload(wait_until="domcontentloaded")
+                self.acknowledge_required_notifications(page)
+                self.assert_portal_identity(page_name, customer_name)
+            self.login_portal(
+                case, page_names[1], self.args.customer5_email, self.args.customer5_name
+            )
+            self.assert_portal_identity(page_names[1], self.args.customer5_name)
+            case["values"]["middle_window_logout_isolated"] = True
+            self.screenshot(case, page_names[1], "middle-window-relogin")
+
+    def case_portal_order_features(self, case: dict[str, Any]) -> None:
+        record = self.orders["ltl1"]
+        page_name = "customer4"
+        page = self.pages[page_name]
+        with self.step(case, "客户4的报价通知可查看并标为已读", page_name):
+            self.login_portal(
+                case, page_name, self.args.customer4_email, self.args.customer4_name
+            )
+            page.locator(".portal-sidebar").get_by_role(
+                "link", name=re.compile(r"^消息中心")
+            ).click()
+            article = page.locator(".notification-list article").filter(
+                has_text=record.quote_number
+            )
+            expect(article).to_be_visible()
+            expect(article).to_contain_text("新报价待确认")
+            read_button = article.get_by_role("button", name="标为已读")
+            if read_button.count():
+                read_button.click()
+                expect(page.locator(".alert.success")).to_contain_text("消息已读")
+                article = page.locator(".notification-list article").filter(
+                    has_text=record.quote_number
+                )
+                expect(article.get_by_role("button", name="标为已读")).to_have_count(0)
+            case["values"]["quote_notification"] = record.quote_number
+            self.screenshot(case, page_name, "quote-notification-read")
+
+        with self.step(case, "键盘筛选订单且同一报价只有一张订单", page_name):
+            page.get_by_role("link", name="我的订单", exact=True).click()
+            search = page.locator('form.order-table-filters input[name="keyword"]')
+            search.fill(record.quote_number)
+            search.press("Enter")
+            row = page.get_by_role("row").filter(has_text=record.quote_number)
+            expect(row).to_have_count(1)
+            numbers = set(ORDER_NUMBER_RE.findall(row.inner_text()))
+            if numbers != {record.order_number}:
+                raise AssertionError(
+                    f"报价 {record.quote_number} 关联订单异常：{sorted(numbers)}"
+                )
+            case["values"]["unique_order_for_quote"] = {
+                "quote": record.quote_number,
+                "order": record.order_number,
+                "row_count": 1,
+            }
+
+        with self.step(case, "查看唯一唛头并通过页面按钮下载SVG", page_name):
+            row = page.get_by_role("row").filter(has_text=record.order_number)
+            trigger = row.get_by_role("button", name="查看唛头")
+            expect(trigger).to_be_visible()
+            trigger.click()
+            dialog = page.get_by_role(
+                "dialog", name=f"查看唛头 · {record.order_number}"
+            )
+            expect(dialog).to_be_visible()
+            expect(dialog.locator(".order-mark-number")).to_have_text(record.order_number)
+            expect(dialog).to_contain_text(record.customer_name)
+            expect(dialog).to_contain_text(record.cargo_marker)
+            print_button = dialog.get_by_role("button", name="打印唛头")
+            expect(print_button).to_be_visible()
+            expect(print_button).to_be_focused()
+            with page.expect_download() as download_info:
+                dialog.get_by_role("link", name="下载 SVG").click()
+            download = download_info.value
+            expected_name = f"{record.order_number}-mark-label.svg"
+            if download.suggested_filename != expected_name:
+                raise AssertionError(
+                    f"唛头下载文件名错误：{download.suggested_filename}"
+                )
+            saved = self.output_dir / expected_name
+            download.save_as(str(saved))
+            if not saved.is_file() or saved.stat().st_size <= 0:
+                raise AssertionError("唛头 SVG 下载文件为空")
+            case["values"]["mark_label"] = {
+                "number": record.order_number,
+                "download": str(saved),
+                "bytes": saved.stat().st_size,
+            }
+            self.screenshot(case, page_name, "mark-label-modal")
+            page.keyboard.press("Escape")
+            expect(dialog).not_to_be_visible()
+            expect(trigger).to_be_focused()
+
+        with self.step(case, "已接受报价刷新后不再出现重复接受入口", page_name):
+            self.navigate(page, self.portal_path(page_name, "/portal/quotes"))
+            quote_row = page.get_by_role("row").filter(has_text=record.quote_number)
+            expect(quote_row).to_have_count(1)
+            expect(quote_row.get_by_role("button", name="接受报价")).to_have_count(0)
+            quote_row_text = quote_row.inner_text()
+            if record.order_number not in quote_row_text:
+                raise AssertionError(
+                    f"已接受报价行未保留原订单号：{quote_row_text}"
+                )
+            page.reload(wait_until="domcontentloaded")
+            self.acknowledge_required_notifications(page)
+            quote_row = page.get_by_role("row").filter(has_text=record.quote_number)
+            expect(quote_row.get_by_role("button", name="接受报价")).to_have_count(0)
+            case["values"]["duplicate_accept_prevented"] = True
+
+        with self.step(case, "订单查看轨迹保留当前窗口上下文", page_name):
+            self.navigate(page, self.portal_path(page_name, "/portal/orders"))
+            row = page.get_by_role("row").filter(has_text=record.order_number)
+            row.get_by_role("link", name="查看轨迹").click()
+            expect(page).to_have_url(re.compile(r"/portal/tracking\?.*order="))
+            self.assert_portal_identity(page_name, self.args.customer4_name)
+            expect(page.locator("body")).to_contain_text(record.order_number)
+            self.screenshot(case, page_name, "tracking-from-order")
+
+    def load_portal_feature_resume_state(self) -> None:
+        source = Path(self.args.resume_portal_features_from).resolve()
+        if not source.is_file():
+            raise AssertionError(f"续测摘要不存在：{source}")
+        payload = json.loads(source.read_text(encoding="utf-8"))
+        raw_orders = payload.get("orders") or {}
+        for case_id, raw in raw_orders.items():
+            self.orders[case_id] = OrderRecord(**raw)
+        if "ltl1" not in self.orders:
+            raise AssertionError(f"续测摘要缺少 ltl1 订单：{source}")
+        customer4 = self.orders["ltl1"]
+        self.args.customer4_name = customer4.customer_name
+        self.args.customer4_email = customer4.customer_email
+        self.batch = dict(payload.get("batch") or {})
+
+    def run_resumed_portal_features(self) -> int:
+        self.load_portal_feature_resume_state()
+        failure: Exception | None = None
+        try:
+            self.run_case(
+                "08-portal-order-notification-mark-resume",
+                "客户门户订单、通知、唛头与防重续测",
+                "使用已由同一真实键鼠用例创建的订单，续测通知、"
+                "键盘筛选、唛头SVG、报价防重和轨迹导航。",
+                ("customer4",),
+                self.case_portal_order_features,
+            )
+        except Exception as error:
+            failure = error
+        self.flush_summary(partial=False)
+        return 1 if failure else 0
+
     def case_ftl_1(self, case: dict[str, Any]) -> None:
         with self.step(case, "登录管理后台", "admin"):
             self.login_admin(case)
@@ -1468,7 +1917,9 @@ class FiveOrderWorkflowSync:
             self.assert_batch_synced_to_orders(case, ltl_records)
 
     def run(self) -> int:
-        plans: list[
+        if self.args.resume_portal_features_from:
+            return self.run_resumed_portal_features()
+        base_plans: list[
             tuple[str, str, str, Sequence[str], Callable[[dict[str, Any]], None]]
         ] = [
             (
@@ -1509,12 +1960,12 @@ class FiveOrderWorkflowSync:
             ),
         ]
         failure: Exception | None = None
-        for index, (case_id, title, expected, contexts, callback) in enumerate(plans):
+        for index, (case_id, title, expected, contexts, callback) in enumerate(base_plans):
             try:
                 self.run_case(case_id, title, expected, contexts, callback)
             except Exception as error:
                 failure = error
-                for blocked_id, blocked_title, blocked_expected, _, _ in plans[index + 1 :]:
+                for blocked_id, blocked_title, blocked_expected, _, _ in base_plans[index + 1 :]:
                     blocked = self.new_case(blocked_id, blocked_title, blocked_expected)
                     blocked["status"] = "BLOCKED"
                     blocked["error"] = (
@@ -1523,6 +1974,74 @@ class FiveOrderWorkflowSync:
                     )
                     blocked["ended_at"] = utc_now()
                 break
+
+        extension_plans: list[
+            tuple[
+                str,
+                str,
+                str,
+                Sequence[str],
+                Sequence[str],
+                Callable[[dict[str, Any]], None],
+            ]
+        ] = [
+            (
+                "06-portal-self-registration-binding",
+                "客户自助注册、审核前阻断与后台绑定",
+                "客户6只由页面新建客户与提交注册；审核前不可登录，绑定后只显示客户6。",
+                ("admin", "customer6"),
+                (),
+                self.case_registration_binding,
+            ),
+            (
+                "07-same-browser-three-window-isolation",
+                "同一浏览器三窗口客户身份隔离",
+                "客户4/5/6 使用同一 BrowserContext 不同窗口登录；"
+                "导航、刷新、单窗口退出均不串号。",
+                ("portalShared",),
+                ("06-portal-self-registration-binding",),
+                self.case_same_browser_portal_isolation,
+            ),
+            (
+                "08-portal-order-notification-mark",
+                "客户门户订单、通知、唛头与防重",
+                "报价通知可已读；键盘查询只返回唯一订单；"
+                "唛头号等于订单号且SVG可下载；已接受报价不可重复接受。",
+                ("customer4",),
+                (),
+                self.case_portal_order_features,
+            ),
+        ]
+        if failure is None:
+            for case_id, title, expected, contexts, dependencies, callback in extension_plans:
+                failed_dependencies = [
+                    dependency
+                    for dependency in dependencies
+                    if not any(
+                        item["id"] == dependency and item["status"] == "PASSED"
+                        for item in self.cases
+                    )
+                ]
+                if failed_dependencies:
+                    blocked = self.new_case(case_id, title, expected)
+                    blocked["status"] = "BLOCKED"
+                    blocked["error"] = (
+                        "扩展用例依赖未通过：" + "、".join(failed_dependencies)
+                    )
+                    blocked["ended_at"] = utc_now()
+                    failure = failure or RuntimeError(blocked["error"])
+                    continue
+                try:
+                    self.run_case(case_id, title, expected, contexts, callback)
+                except Exception as error:
+                    # 扩展用例彼此独立：记录失败并继续收集后续功能证据。
+                    failure = failure or error
+        else:
+            for case_id, title, expected, _, _, _ in extension_plans:
+                blocked = self.new_case(case_id, title, expected)
+                blocked["status"] = "BLOCKED"
+                blocked["error"] = "原五单串行业务前置失败，扩展结果不可信。"
+                blocked["ended_at"] = utc_now()
         self.flush_summary(partial=False)
         return 1 if failure else 0
 
@@ -1530,7 +2049,7 @@ class FiveOrderWorkflowSync:
 def build_parser() -> argparse.ArgumentParser:
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     parser = argparse.ArgumentParser(
-        description="真实 Playwright 键鼠串行验证 2 整车 + 3 拼车工作流即时同步。"
+        description="真实 Playwright 键鼠验证 2 整车 + 3 拼车及客户门户关键功能。"
     )
     parser.add_argument("--base-url", default="http://127.0.0.1:5189")
     parser.add_argument("--admin-email", default="admin@e2e.test")
@@ -1554,8 +2073,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id", default=run_id)
     parser.add_argument("--customer4-name", default=f"五单同步测试客户4-{run_id}")
     parser.add_argument("--customer5-name", default=f"五单同步测试客户5-{run_id}")
+    parser.add_argument("--customer6-name", default=f"自助注册测试客户6-{run_id}")
     parser.add_argument("--customer4-email", default=f"customer4.{run_id}@e2e.test")
     parser.add_argument("--customer5-email", default=f"customer5.{run_id}@e2e.test")
+    parser.add_argument("--customer6-email", default=f"customer6.{run_id}@e2e.test")
+    parser.add_argument(
+        "--resume-portal-features-from",
+        default="",
+        help="从先前 summary.json 读取已创建订单，仅续测客户门户功能",
+    )
     parser.add_argument("--customer-state", default="广东省")
     parser.add_argument("--customer-city", default="深圳市")
     parser.add_argument("--origin-country", default="中国")

@@ -1,0 +1,52 @@
+{
+  "schema": "international-tms-e2e-bug-ledger/v1",
+  "generated_at": "2026-09-02T04:31:00+08:00",
+  "acceptance_authority": "user",
+  "overall_result": "FAILED_WITH_BLOCKER",
+  "functional_evidence": {
+    "main_run": "20260902-extended-r5-042110",
+    "main_run_cases": {
+      "passed": 7,
+      "failed": 1,
+      "blocked": 0,
+      "total": 8
+    },
+    "portal_resume_run": "20260902-portal-resume-043011",
+    "portal_resume_steps": {
+      "passed": 5,
+      "failed": 0
+    },
+    "confirmed_functional_cases_with_pass_evidence": 8
+  },
+  "bugs": [
+    {
+      "id": "TMS-QT-20260902-001",
+      "title": "询价报价数据增长后 D1 SQL 变量超限导致页面 500",
+      "severity": "P0_BLOCKER",
+      "status": "OPEN_CONFIRMED",
+      "area": "管理端 / 询价与报价",
+      "route": "/admin/quotations",
+      "actual": "SYSTEM RECOVERY; D1_ERROR: too many SQL variables at offset 377: SQLITE_ERROR; HTTP 500",
+      "expected": "报价数据增长后列表、查询和新建报价仍可用",
+      "impact": "整个询价报价核心页面不可用，无法继续新建整车或拼车报价",
+      "root_cause_evidence": [
+        "admin.quotations.tsx 最多返回 200 个 quoteRows",
+        "quoteRows 全部 ID 被传给 listQuotationWorkflowFieldValues 和 listQuotationWorkflowInstanceFields",
+        "quotation-workflow-fields.server.ts 将全部 ID 拼成单条 quotation_id IN (?,...) 并一次绑定"
+      ],
+      "recommended_fix": "分批查询并合并结果，或改为数据库内子查询/JOIN；增加超过 D1 bind 阈值的 loader 回归测试",
+      "evidence": {
+        "run": "output/playwright/five-order-workflow-sync-20260902-extended-r6-042701/summary.json",
+        "page_text": "output/playwright/five-order-workflow-sync-20260902-extended-r6-042701/03-ltl-required-to-optional-failure-01--1-admin.txt",
+        "screenshot": "output/playwright/five-order-workflow-sync-20260902-extended-r6-042701/03-ltl-required-to-optional-failure-01--1-admin.png",
+        "admin_trace": "output/playwright/five-order-workflow-sync-20260902-extended-r6-042701/03-ltl-required-to-optional-admin-trace.zip"
+      }
+    }
+  ],
+  "automation_issues_not_product_bugs": [
+    "仓库受控邮箱输入在开发模式水合前填写时被初始状态覆盖",
+    "客户页只改变 hash 没有重跑 loader，测试读到旧注册列表",
+    "客户行和消息中心定位器范围过宽",
+    "唛头定位文字曾误写为形近字“唆头”"
+  ]
+}
