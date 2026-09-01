@@ -24484,3 +24484,66 @@ html[data-motion="off"] *::after {
   .workflow-config-dialog-tools { max-width: none; align-items: stretch; flex-direction: column; }
   .workflow-config-dialog-tools small { text-align: left; }
 }
+
+.prototype-quote-form .quote-form-note b { color: #174f79; }
+.quote-workflow-field-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.quote-workflow-field-grid > .field {
+  min-width: 0;
+  padding: 7px 9px;
+  border-right: 1px solid #e0e7ed;
+  border-bottom: 1px solid #e0e7ed;
+}
+.quote-workflow-field-grid > .field:nth-child(4n) { border-right: 0; }
+.quote-workflow-field-grid > .field.span-2 { grid-column: span 2; }
+.quote-workflow-field-grid .field-hint {
+  display: block;
+  margin-top: 3px;
+  color: #738598;
+  font-size: 9px;
+  line-height: 1.35;
+}
+.quote-workflow-multiselect { min-height: 62px !important; padding-block: 3px !important; }
+.quote-workflow-file-control { display: grid; gap: 4px; }
+.quote-workflow-file-control > a { color: var(--blue); font-size: 10px; }
+.quote-workflow-empty {
+  padding: 12px;
+  color: #687b8d;
+  background: #f8fafc;
+  font-size: 10px;
+}
+.quotation-workflow-update-form { display: grid; gap: 10px; }
+.quotation-workflow-update-form .quote-workflow-field-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 1px solid #d8e1e9;
+}
+.quotation-workflow-update-form .quote-workflow-field-grid > .field:nth-child(2n) { border-right: 0; }
+.quotation-workflow-update-form .field > span {
+  display: block;
+  margin-bottom: 4px;
+  color: #4e6478;
+  font-size: 10px;
+}
+.quotation-workflow-update-form .field:has(:required:invalid) > span::after {
+  content: " *";
+  color: #d84a36;
+}
+.quotation-workflow-update-form .control { width: 100%; }
+.quote-workflow-form-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 11px;
+  color: #174f79;
+  background: #edf6fb;
+  border-left: 3px solid #2684b8;
+}
+.quote-workflow-form-head span { color: #64798b; font-size: 10px; }
+@media (max-width: 1000px) {
+  .quote-workflow-field-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .quote-workflow-field-grid > .field:nth-child(4n) { border-right: 1px solid #e0e7ed; }
+  .quote-workflow-field-grid > .field:nth-child(2n) { border-right: 0; }
+}

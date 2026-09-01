@@ -8,11 +8,26 @@ import { ConfirmAction } from "../components/ConfirmAction";
 import { requireSessionUser } from "../lib/auth.server";
 import { transportChargeNameOptions } from "../lib/charge-options";
 import { nextDocumentNumber } from "../lib/documents.server";
+import { recordWorkflowEvent } from "../lib/business-workflow.server";
 import {
   acceptQuotation,
   voidQuotation,
   withdrawQuotationAcceptance,
 } from "../lib/quotation-lifecycle.server";
+import {
+  listQuotationWorkflowFields,
+  listQuotationWorkflowFieldValues,
+  prepareQuotationWorkflowFieldValues,
+  savePreparedQuotationWorkflowFieldValues,
+} from "../lib/quotation-workflow-fields.server";
+import {
+  parseQuotationWorkflowFieldOptions,
+  quotationWorkflowDisplayValue,
+  quotationWorkflowFieldHasValue,
+  quotationWorkflowFieldInputName,
+  type QuotationWorkflowField,
+  type QuotationWorkflowFieldValue,
+} from "../lib/quotation-workflow-fields";
 import { requirePositiveInteger, requirePositiveNumber, validatePhone, valueOf } from "../lib/validation";
 
 type Quote = {
@@ -75,7 +90,13 @@ type CustomerContactOption = {
 type UserOption = { id: string; display_name: string; email: string };
 type WarehouseOption = { id: string; name: string; country_code: string | null; city: string | null; address: string | null };
 type GeoOption = { code: string; name: string; parent_code: string | null };
-type WorkflowOption = { id: string; name: string; version_number: number; road_load_type: "ftl" | "ltl" };
+type WorkflowOption = {
+  id: string;
+  name: string;
+  version_number: number;
+  road_load_type: "ftl" | "ltl";
+  lifecycle_status: "published" | "retired";
+};
 
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "quote.view");
@@ -93,7 +114,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     where.push("q.lifecycle_status=?");
     binds.push(lifecycle);
   }
-  const [quotes, customers, contacts, users, warehouses, countries, provinces, cities, workflows] = await Promise.all([
+  const [quotes, customers, contacts, users, warehouses, countries, provinces, cities, workflows, workflowFields] = await Promise.all([
     env.DB.prepare(
       `SELECT q.id,q.quote_number,c.name customer_name,q.customer_contact_name,q.customer_contact_phone,u.display_name salesperson_name,
         q.workflow_definition_id,wd.name workflow_name,wd.version_number workflow_version_number,
@@ -141,15 +162,23 @@ export async function loader({ request }: Route.LoaderArgs) {
     geoOptions(current.organizationId, "province"),
     geoOptions(current.organizationId, "city"),
     env.DB.prepare(
-      `SELECT id,name,version_number,road_load_type FROM workflow_definitions
-       WHERE organization_id=? AND lifecycle_status='published' AND validation_status='valid'
-         AND status='active' AND road_load_type IN ('ftl','ltl')
-       ORDER BY road_load_type,name,version_number DESC,updated_at DESC`,
+      `SELECT id,name,version_number,road_load_type,lifecycle_status FROM workflow_definitions
+       WHERE organization_id=? AND lifecycle_status IN ('published','retired')
+         AND validation_status='valid' AND road_load_type IN ('ftl','ltl')
+       ORDER BY road_load_type,
+         CASE lifecycle_status WHEN 'published' THEN 0 ELSE 1 END,
+         COALESCE(published_at,updated_at) DESC,version_number DESC,name`,
     ).bind(current.organizationId).all<WorkflowOption>(),
+    listQuotationWorkflowFields(current.organizationId),
   ]);
+  const quoteRows = quotes.results ?? [];
+  const workflowValues = await listQuotationWorkflowFieldValues(
+    current.organizationId,
+    quoteRows.map((quote) => quote.id),
+  );
   return {
     current,
-    quotes: quotes.results ?? [],
+    quotes: quoteRows,
     customers: customers.results ?? [],
     contacts: contacts.results ?? [],
     users: users.results ?? [],
@@ -158,6 +187,8 @@ export async function loader({ request }: Route.LoaderArgs) {
     provinces,
     cities,
     workflows: workflows.results ?? [],
+    workflowFields,
+    workflowValues,
     filters: { keyword, lifecycle },
   };
 }
@@ -167,6 +198,38 @@ export async function action({ request }: Route.ActionArgs) {
   const form = await request.formData();
   const intent = valueOf(form, "intent");
   try {
+    if (intent === "workflow_fields_update") {
+      const quotationId = valueOf(form, "id");
+      const quote = await env.DB.prepare(
+        `SELECT id,workflow_definition_id,lifecycle_status
+         FROM quotations WHERE id=? AND organization_id=?`,
+      ).bind(quotationId,current.organizationId).first<{
+        id:string;
+        workflow_definition_id:string|null;
+        lifecycle_status:string;
+      }>();
+      if (!quote?.workflow_definition_id) throw new Error("报价未锁定工作流版本");
+      if (!["pending","withdrawn"].includes(quote.lifecycle_status))
+        throw new Error("只有待确认或已撤回报价可以补充第一步字段");
+      const [fields,existingValues] = await Promise.all([
+        listQuotationWorkflowFields(current.organizationId),
+        listQuotationWorkflowFieldValues(current.organizationId,[quotationId]),
+      ]);
+      const selectedFields = fields.filter((field) => field.workflow_id === quote.workflow_definition_id);
+      const prepared = await prepareQuotationWorkflowFieldValues({
+        form,
+        fields:selectedFields,
+        existingValues,
+      });
+      await savePreparedQuotationWorkflowFieldValues({
+        organizationId:current.organizationId,
+        quotationId,
+        workflowId:quote.workflow_definition_id,
+        actorUserId:current.userId,
+        values:prepared,
+      });
+      return { success: "询价报价第一步的配置字段已保存" };
+    }
     if (intent === "create") {
       const customerId = valueOf(form, "customerId");
       const salespersonId = valueOf(form, "salespersonId");
@@ -214,12 +277,18 @@ export async function action({ request }: Route.ActionArgs) {
         env.DB.prepare("SELECT id FROM warehouses WHERE id=? AND organization_id=? AND warehouse_role='overseas_destination' AND status='active'").bind(destinationWarehouseId,current.organizationId).first(),
         env.DB.prepare(
           `SELECT id FROM workflow_definitions
-           WHERE id=? AND organization_id=? AND lifecycle_status='published'
-             AND validation_status='valid' AND status='active' AND road_load_type=?`,
+           WHERE id=? AND organization_id=? AND lifecycle_status IN ('published','retired')
+             AND validation_status='valid' AND road_load_type=?`,
         ).bind(workflowDefinitionId,current.organizationId,roadLoadType).first(),
       ]);
       if (!customer || !salesperson || !warehouse) throw new Error("客户、业务员或目的仓已停用");
-      if (!workflow) throw new Error("所选工作流与整车/拼车类型不匹配，或该版本已停用");
+      if (!workflow) throw new Error("所选工作流与整车/拼车类型不匹配，或该版本无效");
+      const selectedWorkflowFields = (await listQuotationWorkflowFields(current.organizationId))
+        .filter((field) => field.workflow_id === workflowDefinitionId);
+      const preparedWorkflowValues = await prepareQuotationWorkflowFieldValues({
+        form,
+        fields:selectedWorkflowFields,
+      });
       const chargeNames = form.getAll("chargeName").map(String);
       const quantities = form.getAll("chargeQuantity").map(Number);
       const unitPrices = form.getAll("chargeUnitPrice").map(Number);
@@ -236,37 +305,68 @@ export async function action({ request }: Route.ActionArgs) {
       const total = charges.reduce((sum, item) => sum + item.amount, 0);
       const now = new Date().toISOString();
       const id = crypto.randomUUID();
+      const notificationId = crypto.randomUUID();
       const number = await nextDocumentNumber(current.organizationId, "quote");
-      await env.DB.batch([
-        env.DB.prepare(
-          `INSERT INTO quotations(
-            id,organization_id,quote_number,customer_id,origin_country,origin_state,origin_city,pickup_address,
-            destination_country,destination_state,destination_city,destination_warehouse_id,destination_warehouse_note,
-            estimated_length_cm,estimated_width_cm,estimated_height_cm,customs_clearance_mode,
-            transport_mode,road_load_type,cargo_description,pieces,gross_weight_kg,volume_cbm,currency,
-            subtotal,tax_amount,total_amount,valid_until,status,lifecycle_status,notes,salesperson_user_id,workflow_definition_id,
-            created_by_user_id,created_at,updated_at
-           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'CNY',?,0,?,?, 'sent','pending',?,?,?,?,?,?)`,
-        ).bind(
-          id,current.organizationId,number,customerId,originCountry,originState,originCity,pickupAddress,
-          destinationCountry,destinationState,destinationCity,destinationWarehouseId,destinationWarehouseNote || null,
-          length,width,height,customsClearanceMode,transportMode,roadLoadType,cargoDescription,pieces,weight,volume,
-          total,total,validUntil || null,notes || null,salespersonId,workflowDefinitionId,current.userId,now,now,
-        ),
-        env.DB.prepare(
-          "UPDATE quotations SET customer_contact_name=?,customer_contact_phone=? WHERE id=? AND organization_id=?",
-        ).bind(customerContactName,customerContactPhone,id,current.organizationId),
-        ...charges.map((charge, index) => env.DB.prepare(
-          `INSERT INTO quotation_charges(
-            id,quotation_id,charge_code,description,quantity,unit_price,amount,exchange_rate,sort_order,created_at
-           ) VALUES(?,?,?,?,?,?,?,1,?,?)`,
-        ).bind(crypto.randomUUID(),id,`RECEIVABLE_${index + 1}`,charge.name,charge.quantity,charge.unitPrice,charge.amount,(index + 1) * 10,now)),
-        env.DB.prepare(
-          `INSERT INTO portal_notifications(
-            id,organization_id,customer_id,user_id,type,title,message,link,is_read,created_at
-           ) VALUES(?,?,?,?,?,?,?,?,0,?)`,
-        ).bind(crypto.randomUUID(),current.organizationId,customerId,null,"quote","新报价待确认",`报价 ${number} 等待确认。`,`/portal/quotes`,now),
-      ]);
+      try {
+        await env.DB.batch([
+          env.DB.prepare(
+            `INSERT INTO quotations(
+              id,organization_id,quote_number,customer_id,origin_country,origin_state,origin_city,pickup_address,
+              destination_country,destination_state,destination_city,destination_warehouse_id,destination_warehouse_note,
+              estimated_length_cm,estimated_width_cm,estimated_height_cm,customs_clearance_mode,
+              transport_mode,road_load_type,cargo_description,pieces,gross_weight_kg,volume_cbm,currency,
+              subtotal,tax_amount,total_amount,valid_until,status,lifecycle_status,notes,salesperson_user_id,workflow_definition_id,
+              created_by_user_id,created_at,updated_at
+             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'CNY',?,0,?,?, 'sent','pending',?,?,?,?,?,?)`,
+          ).bind(
+            id,current.organizationId,number,customerId,originCountry,originState,originCity,pickupAddress,
+            destinationCountry,destinationState,destinationCity,destinationWarehouseId,destinationWarehouseNote || null,
+            length,width,height,customsClearanceMode,transportMode,roadLoadType,cargoDescription,pieces,weight,volume,
+            total,total,validUntil || null,notes || null,salespersonId,workflowDefinitionId,current.userId,now,now,
+          ),
+          env.DB.prepare(
+            "UPDATE quotations SET customer_contact_name=?,customer_contact_phone=? WHERE id=? AND organization_id=?",
+          ).bind(customerContactName,customerContactPhone,id,current.organizationId),
+          ...charges.map((charge, index) => env.DB.prepare(
+            `INSERT INTO quotation_charges(
+              id,quotation_id,charge_code,description,quantity,unit_price,amount,exchange_rate,sort_order,created_at
+             ) VALUES(?,?,?,?,?,?,?,1,?,?)`,
+          ).bind(crypto.randomUUID(),id,`RECEIVABLE_${index + 1}`,charge.name,charge.quantity,charge.unitPrice,charge.amount,(index + 1) * 10,now)),
+          env.DB.prepare(
+            `INSERT INTO portal_notifications(
+              id,organization_id,customer_id,user_id,type,title,message,link,is_read,created_at
+             ) VALUES(?,?,?,?,?,?,?,?,0,?)`,
+          ).bind(notificationId,current.organizationId,customerId,null,"quote","新报价待确认",`报价 ${number} 等待确认。`,`/portal/quotes`,now),
+        ]);
+        await savePreparedQuotationWorkflowFieldValues({
+          organizationId:current.organizationId,
+          quotationId:id,
+          workflowId:workflowDefinitionId,
+          actorUserId:current.userId,
+          values:preparedWorkflowValues,
+        });
+        const workflowInstanceId = await recordWorkflowEvent({
+          organizationId:current.organizationId,
+          workflowId:workflowDefinitionId,
+          event:"quote.created",
+          customerId,
+          quotationId:id,
+          actorUserId:current.userId,
+          source:"admin",
+          metadata:{ number,roadLoadType,workflowVersionLocked:true },
+        });
+        if (!workflowInstanceId) throw new Error("所选工作流缺少询价报价第一节点");
+      } catch (error) {
+        await env.DB.batch([
+          env.DB.prepare("DELETE FROM workflow_instances WHERE organization_id=? AND quotation_id=?")
+            .bind(current.organizationId,id),
+          env.DB.prepare("DELETE FROM portal_notifications WHERE id=? AND organization_id=?")
+            .bind(notificationId,current.organizationId),
+          env.DB.prepare("DELETE FROM quotations WHERE id=? AND organization_id=?")
+            .bind(id,current.organizationId),
+        ]);
+        throw error;
+      }
       return { success: `报价 ${number} 已保存并进入待客户确认` };
     }
     const quotationId = valueOf(form, "id");
@@ -315,26 +415,48 @@ export default function QuotationsPage({ loaderData, actionData }: Route.Compone
       <button className="btn primary">筛选</button><Link className="btn" to="/admin/quotations">重置</Link>
     </Form>
     <section className="panel table-panel">
-      <div className="panel-head"><div><h2>报价单 <span className="count">{loaderData.quotes.length}</span></h2><p>运输类型在报价接受后锁定，订单仅由报价生成。</p></div></div>
+      <div className="panel-head"><div><h2>报价单 <span className="count">{loaderData.quotes.length}</span></h2><p>首次保存即锁定整车/拼车工作流版本；接受后自动进入第二步“委托资料补充”。</p></div></div>
       <div className="table-wrap"><table><thead><tr><th>报价单号</th><th>客户 / 业务员</th><th>运输方案</th><th>货物 / 线路</th><th>应收总额</th><th>状态</th><th>关联订单</th><th>操作</th></tr></thead><tbody>
-        {loaderData.quotes.map((quote) => <tr key={quote.id}><td><span className="order-id">{quote.quote_number}</span><span className="subline">{new Date(quote.created_at).toLocaleString("zh-CN")}</span></td><td><span className="cell-main">{quote.customer_name}</span><span className="subline">{quote.salesperson_name || "待指定业务员"}</span></td><td><span className={`pill ${quote.road_load_type === "ltl" ? "ltl" : ""}`}>{quote.road_load_type === "ltl" ? "拼车" : "整车"}</span><span className="subline">{quote.workflow_name ? `${quote.workflow_name} v${quote.workflow_version_number}` : "历史报价 · 接受时自动匹配流程"}</span></td><td><span className="cell-main">{quote.cargo_description}</span><span className="subline">{quote.origin_city} → {quote.destination_city} · {quote.destination_warehouse_name || "目的仓待补"}</span></td><td><span className="cell-main">CNY {quote.total_amount.toLocaleString()}</span><span className="subline">{quote.pieces} 件 · {quote.gross_weight_kg} KG · {quote.volume_cbm} CBM</span></td><td><span className={`status ${statusTone(quote.lifecycle_status)}`}>{statusLabel(quote.lifecycle_status)}</span></td><td>{quote.order_id ? <Link className="order-id" to={`/admin/orders/${quote.order_id}`}>{quote.order_number}</Link> : <span className="subline">尚未生成</span>}</td><td><QuoteActions quote={quote} busy={busy} /></td></tr>)}
+        {loaderData.quotes.map((quote) => {
+          const fields = loaderData.workflowFields.filter((field) => field.workflow_id === quote.workflow_definition_id);
+          const values = loaderData.workflowValues.filter((value) => value.quotation_id === quote.id);
+          return <tr key={quote.id}><td><span className="order-id">{quote.quote_number}</span><span className="subline">{new Date(quote.created_at).toLocaleString("zh-CN")}</span></td><td><span className="cell-main">{quote.customer_name}</span><span className="subline">{quote.salesperson_name || "待指定业务员"}</span></td><td><span className={`pill ${quote.road_load_type === "ltl" ? "ltl" : ""}`}>{quote.road_load_type === "ltl" ? "拼车" : "整车"}</span><span className="subline">{quote.workflow_name ? `${quote.workflow_name} v${quote.workflow_version_number} · 已锁定` : "历史报价 · 接受时自动匹配流程"}</span></td><td><span className="cell-main">{quote.cargo_description}</span><span className="subline">{quote.origin_city} → {quote.destination_city} · {quote.destination_warehouse_name || "目的仓待补"}</span></td><td><span className="cell-main">CNY {quote.total_amount.toLocaleString()}</span><span className="subline">{quote.pieces} 件 · {quote.gross_weight_kg} KG · {quote.volume_cbm} CBM</span></td><td><span className={`status ${statusTone(quote.lifecycle_status)}`}>{statusLabel(quote.lifecycle_status)}</span></td><td>{quote.order_id ? <Link className="order-id" to={`/admin/orders/${quote.order_id}`}>{quote.order_number}</Link> : <span className="subline">尚未生成</span>}</td><td><QuoteActions quote={quote} fields={fields} values={values} customers={loaderData.customers} warehouses={loaderData.warehouses} busy={busy} /></td></tr>;
+        })}
       </tbody></table></div>
       {!loaderData.quotes.length && <div className="empty-state">暂无符合条件的报价。</div>}
     </section>
   </div>;
 }
 
-function QuoteActions({ quote, busy }: { quote: Quote; busy: boolean }) {
+function QuoteActions({ quote, fields, values, customers, warehouses, busy }: {
+  quote: Quote;
+  fields: QuotationWorkflowField[];
+  values: QuotationWorkflowFieldValue[];
+  customers: CustomerOption[];
+  warehouses: WarehouseOption[];
+  busy: boolean;
+}) {
+  const missing = fields.filter((field) => field.is_required && !quotationWorkflowFieldHasValue(
+    field,
+    values.find((value) => value.field_id === field.id) || null,
+  ));
   return <div className="toolbar-actions quotation-table-actions">
-    <Modal title={`报价详情 · ${quote.quote_number}`} triggerLabel="查看" triggerClassName="btn"><QuoteDetail quote={quote} /></Modal>
-    {quote.lifecycle_status === "pending" && <Form method="post"><input type="hidden" name="intent" value="accept"/><input type="hidden" name="id" value={quote.id}/><button className="btn primary" disabled={busy}>代客户确认</button></Form>}
+    <Modal title={`报价详情 · ${quote.quote_number}`} triggerLabel="查看" triggerClassName="btn"><QuoteDetail quote={quote} fields={fields} values={values} customers={customers} warehouses={warehouses} /></Modal>
+    {fields.length > 0 && ["pending","withdrawn"].includes(quote.lifecycle_status) && <Modal title={`补充第一步配置项 · ${quote.quote_number}`} triggerLabel={missing.length ? `补充配置项 ${missing.length}` : "配置项"} triggerClassName={missing.length ? "btn danger" : "btn"} closeSignal={undefined} size="wide"><Form method="post" encType="multipart/form-data" className="quotation-workflow-update-form"><input type="hidden" name="intent" value="workflow_fields_update"/><input type="hidden" name="id" value={quote.id}/><div className="quote-workflow-form-head"><strong>第 1 步 · 询价报价</strong><span>{quote.workflow_name} v{quote.workflow_version_number} · 版本已锁定</span></div><QuotationWorkflowFieldInputs fields={fields} values={values} customers={customers} warehouses={warehouses}/><div className="modal-form-actions"><button className="btn primary" disabled={busy}>保存配置项</button></div></Form></Modal>}
+    {quote.lifecycle_status === "pending" && <Form method="post"><input type="hidden" name="intent" value="accept"/><input type="hidden" name="id" value={quote.id}/><button className="btn primary" disabled={busy || missing.length > 0} title={missing.length ? `尚缺：${missing.map((field) => field.label).join("、")}` : undefined}>代客户确认</button></Form>}
     {quote.lifecycle_status === "accepted" && quote.order_status === "draft" && <Form method="post"><input type="hidden" name="intent" value="withdraw"/><input type="hidden" name="id" value={quote.id}/><ConfirmAction className="btn" title="撤回报价接受" description={`将撤回 ${quote.quote_number} 的客户接受状态；已生成订单会保留为草稿并留下审计记录。`} triggerLabel="撤回接受" confirmLabel="确认撤回" pending={busy}/></Form>}
     {quote.lifecycle_status === "withdrawn" && <Form method="post"><input type="hidden" name="intent" value="accept"/><input type="hidden" name="id" value={quote.id}/><button className="btn primary" disabled={busy}>重新接受</button></Form>}
     {["pending", "withdrawn"].includes(quote.lifecycle_status) && <Form method="post"><input type="hidden" name="intent" value="void"/><input type="hidden" name="id" value={quote.id}/><ConfirmAction className="btn danger" title="作废报价" description={`作废后 ${quote.quote_number} 不能再被客户接受；报价资料和审计记录仍会永久保留。`} triggerLabel="作废" confirmLabel="确认作废" pending={busy}/></Form>}
   </div>;
 }
 
-function QuoteDetail({ quote }: { quote: Quote }) {
+function QuoteDetail({ quote, fields, values, customers, warehouses }: {
+  quote: Quote;
+  fields: QuotationWorkflowField[];
+  values: QuotationWorkflowFieldValue[];
+  customers: CustomerOption[];
+  warehouses: WarehouseOption[];
+}) {
   return <div className="drawer-grid quote-detail-grid">
     <ReadCell label="客户" value={quote.customer_name}/><ReadCell label="业务员" value={quote.salesperson_name || "—"}/>
     <ReadCell label="客户联系人" value={quote.customer_contact_name || "—"}/><ReadCell label="联系电话" value={quote.customer_contact_phone || "—"}/>
@@ -344,6 +466,15 @@ function QuoteDetail({ quote }: { quote: Quote }) {
     <ReadCell label="线路" value={`${quote.origin_country} ${quote.origin_state || ""} ${quote.origin_city} → ${quote.destination_country} ${quote.destination_state || ""} ${quote.destination_city}`}/><ReadCell label="目的仓备注" value={quote.destination_warehouse_note || "—"}/>
     <ReadCell label="货物" value={quote.cargo_description}/><ReadCell label="预计件重体" value={`${quote.pieces} 件 · ${quote.gross_weight_kg} KG · ${quote.volume_cbm} CBM`}/>
     <ReadCell label="预计长宽高" value={`${quote.estimated_length_cm} × ${quote.estimated_width_cm} × ${quote.estimated_height_cm} CM`}/><ReadCell label="应收总额" value={`CNY ${quote.total_amount.toLocaleString()}`}/>
+    {fields.map((field) => {
+      const value = values.find((item) => item.field_id === field.id) || null;
+      const referenced = field.field_type === "customer"
+        ? customers.find((item) => item.id === value?.value_text)?.name
+        : field.field_type === "warehouse"
+          ? warehouses.find((item) => item.id === value?.value_text)?.name
+          : null;
+      return <ReadCell key={field.id} label={`${field.label}${field.is_required ? "（必填）" : ""}`} value={referenced || quotationWorkflowDisplayValue(field,value)}/>;
+    })}
   </div>;
 }
 
@@ -373,6 +504,10 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
     () => loaderData.workflows.filter((workflow) => workflow.road_load_type === roadLoadType),
     [loaderData.workflows, roadLoadType],
   );
+  const selectedWorkflow = compatibleWorkflows.find((workflow) => workflow.id === workflowDefinitionId);
+  const selectedWorkflowFields = loaderData.workflowFields.filter(
+    (field) => field.workflow_id === workflowDefinitionId,
+  );
   useEffect(() => {
     if (!compatibleWorkflows.some((workflow) => workflow.id === workflowDefinitionId)) {
       setWorkflowDefinitionId(compatibleWorkflows[0]?.id || "");
@@ -385,9 +520,9 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
     setCustomerContactName(customer?.contact_name || "");
     setCustomerContactPhone(customer?.contact_phone || "");
   };
-  return <Form method="post" className="prototype-quote-form" data-keyboard-submit>
+  return <Form method="post" encType="multipart/form-data" className="prototype-quote-form" data-keyboard-submit>
     <input type="hidden" name="intent" value="create"/>
-    <div className="quote-form-note">必填项只有在未填写时显示红色标记；报价被接受后，表内数据自动继承到运输订单。</div>
+    <div className="quote-form-note"><b>第 1 步 · 询价报价</b>　选择整车或拼车后加载对应流程；首次保存即锁定所选版本，后续发布新版本不会改动本报价。</div>
     <div className="quote-ledger">
     <QuoteLedgerSection className="quote-plan-section" title="客户与运输方案" note="报价确认后不再重复创建订单">
       <div className="quote-field-grid quote-plan-grid">
@@ -398,8 +533,13 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
         <Field label="运输方式"><select className="control" name="transportMode" defaultValue="ROAD" required><option value="ROAD">汽运</option><option value="RAIL" disabled>铁运（流程未开放）</option><option value="AIR" disabled>空运（流程未开放）</option></select></Field>
         <Field label="订单类型"><select className="control" name="roadLoadType" value={roadLoadType} onChange={(event) => setRoadLoadType(event.target.value as "ltl" | "ftl")} required><option value="ltl">拼车</option><option value="ftl">整车</option></select></Field>
         <Field label="清关办理方式"><select className="control" name="customsClearanceMode" defaultValue="company" required><option value="company">公司代办清关</option><option value="customer">客户自理清关</option></select></Field>
-        <Field label="工作流版本"><select className="control" name="workflowDefinitionId" value={workflowDefinitionId} onChange={(event) => setWorkflowDefinitionId(event.target.value)} required><option value="">{compatibleWorkflows.length ? "请选择工作流版本" : "当前类型暂无可用工作流"}</option>{compatibleWorkflows.map((workflow) => <option key={workflow.id} value={workflow.id}>{workflow.name} · v{workflow.version_number}</option>)}</select></Field>
+        <Field label="工作流版本"><select className="control" name="workflowDefinitionId" value={workflowDefinitionId} onChange={(event) => setWorkflowDefinitionId(event.target.value)} required><option value="">{compatibleWorkflows.length ? "请选择工作流版本" : "当前类型暂无可用工作流"}</option>{compatibleWorkflows.map((workflow) => <option key={workflow.id} value={workflow.id}>{workflow.name} · v{workflow.version_number}{workflow.lifecycle_status === "published" ? " · 当前发布" : " · 历史版本"}</option>)}</select></Field>
       </div>
+    </QuoteLedgerSection>
+    <QuoteLedgerSection className="quote-workflow-fields-section" title="工作流配置项" note={selectedWorkflow ? `${selectedWorkflow.name} v${selectedWorkflow.version_number} · 随订单类型和版本切换` : "请先选择工作流版本"}>
+      {selectedWorkflowFields.length
+        ? <QuotationWorkflowFieldInputs fields={selectedWorkflowFields} values={[]} customers={loaderData.customers} warehouses={loaderData.warehouses}/>
+        : <div className="quote-workflow-empty">当前版本没有额外配置项；系统必需的客户、路线、货物与费用仍按标准报价单填写。</div>}
     </QuoteLedgerSection>
     <QuoteLedgerSection className="quote-route-section" title="运输路线" note="地区按国家 / 地区 → 省 / 州 → 城市逐级选择">
       <div className="quote-route-matrix" role="group" aria-label="报价运输路线">
@@ -455,6 +595,61 @@ function QuoteForm({ loaderData, busy }: { loaderData: Awaited<ReturnType<typeof
     </div>
     <div className="modal-form-actions"><button className="btn primary large" disabled={busy}>保存报价并等待客户确认</button></div>
   </Form>;
+}
+
+function QuotationWorkflowFieldInputs({ fields, values, customers, warehouses }: {
+  fields: QuotationWorkflowField[];
+  values: QuotationWorkflowFieldValue[];
+  customers: CustomerOption[];
+  warehouses: WarehouseOption[];
+}) {
+  return <div className="quote-workflow-field-grid">
+    {fields.map((field) => {
+      const name = quotationWorkflowFieldInputName(field.id);
+      const existing = values.find((value) => value.field_id === field.id) || null;
+      const options = parseQuotationWorkflowFieldOptions(field.options_text);
+      const selectedValues = field.field_type === "multiselect"
+        ? parseStoredMultipleValues(existing?.value_text)
+        : [];
+      const label = `${field.label}${field.is_required ? "" : "（选填）"}`;
+      let control: React.ReactNode;
+      if (field.field_type === "textarea") {
+        control = <textarea className="control textarea" name={name} defaultValue={existing?.value_text || ""} rows={2} required={Boolean(field.is_required)}/>;
+      } else if (field.field_type === "attachment") {
+        control = <div className="quote-workflow-file-control">
+          {existing?.file_name && <a href={`/admin/quotation-field-files/${existing.id}`} target="_blank" rel="noreferrer">已上传：{existing.file_name}</a>}
+          <input className="control" name={name} type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" required={Boolean(field.is_required && !existing?.file_name)}/>
+        </div>;
+      } else if (field.field_type === "customer") {
+        control = <select className="control" name={name} defaultValue={existing?.value_text || ""} required={Boolean(field.is_required)}><option value="">请选择客户</option>{customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name}</option>)}</select>;
+      } else if (field.field_type === "warehouse") {
+        control = <select className="control" name={name} defaultValue={existing?.value_text || ""} required={Boolean(field.is_required)}><option value="">请选择仓库</option>{warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select>;
+      } else if (field.field_type === "multiselect" && options.length) {
+        control = <select className="control quote-workflow-multiselect" name={name} defaultValue={selectedValues} multiple required={Boolean(field.is_required)}>{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>;
+      } else if (field.field_type === "select" && options.length) {
+        control = <select className="control" name={name} defaultValue={existing?.value_text || ""} required={Boolean(field.is_required)}><option value="">请选择</option>{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>;
+      } else {
+        const type = field.field_type === "datetime" ? "datetime-local"
+          : field.field_type === "date" ? "date"
+            : ["number","amount"].includes(field.field_type) ? "number" : "text";
+        control = <input className="control" name={name} type={type} step={type === "number" ? "any" : undefined} defaultValue={existing?.value_text || ""} required={Boolean(field.is_required)}/>;
+      }
+      return <Field key={field.id} label={label} className={field.field_type === "textarea" || field.field_type === "attachment" ? "span-2" : ""}>
+        {control}
+        {field.help_text && <small className="field-hint">{field.help_text}</small>}
+      </Field>;
+    })}
+  </div>;
+}
+
+function parseStoredMultipleValues(value: string | null | undefined) {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.map(String) : [value];
+  } catch {
+    return value.split(",").map((item) => item.trim()).filter(Boolean);
+  }
 }
 
 function QuoteLedgerSection({ title, note, action, className = "", children }: { title: string; note: string; action?: React.ReactNode; className?: string; children: React.ReactNode }) {

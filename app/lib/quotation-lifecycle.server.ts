@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { createOrderFromAcceptedQuote, type CreatedOrder } from "./quote-order.server";
+import { assertQuotationWorkflowFieldsComplete } from "./quotation-workflow-fields.server";
 
 type LifecycleStatus = "pending" | "accepted" | "withdrawn" | "void";
 
@@ -32,8 +33,10 @@ export async function acceptQuotation(input: {
     if (quote.order_id && quote.order_number) {
       return { id: quote.order_id, orderNumber: quote.order_number, created: false };
     }
+    await assertQuotationWorkflowFieldsComplete(input.organizationId,input.quotationId);
     return createOrderFromAcceptedQuote(input);
   }
+  await assertQuotationWorkflowFieldsComplete(input.organizationId,input.quotationId);
   const previousLifecycle = quote.lifecycle_status;
   const now = new Date().toISOString();
   const transition = await env.DB.prepare(
@@ -143,6 +146,10 @@ export async function voidQuotation(input: {
     "UPDATE quotations SET lifecycle_status='void',status='cancelled',updated_at=? WHERE id=? AND organization_id=? AND lifecycle_status NOT IN ('accepted','void')",
   ).bind(new Date().toISOString(),input.quotationId,input.organizationId).run();
   if (!Number(result.meta?.changes || 0)) throw new Error("报价已作废或状态已经变化，请刷新后查看");
+  await env.DB.prepare(
+    `UPDATE workflow_instances SET status='cancelled',updated_at=?
+     WHERE organization_id=? AND quotation_id=? AND order_id IS NULL`,
+  ).bind(new Date().toISOString(),input.organizationId,input.quotationId).run();
   await writeAudit({ ...input, action: "quotation.void", resourceId: input.quotationId, metadata: {} });
 }
 

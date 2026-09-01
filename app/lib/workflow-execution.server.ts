@@ -43,6 +43,29 @@ export async function ensureWorkflowExecutionSnapshot(input:{
      JOIN workflow_module_tasks t ON t.workflow_id=ss.workflow_id AND t.step_module_id=ms.step_module_id AND t.is_active=1
      WHERE ss.instance_id=?`,
   ).bind(now,input.instanceId).run();
+  await env.DB.prepare(
+    `UPDATE workflow_instance_step_states
+     SET status='active',started_at=COALESCE(started_at,?),updated_at=?
+     WHERE instance_id=? AND step_key=(
+       SELECT current_step_key FROM workflow_instances WHERE id=?
+     ) AND status='pending'`,
+  ).bind(now,now,input.instanceId,input.instanceId).run();
+  await env.DB.prepare(
+    `UPDATE workflow_instance_module_states
+     SET status='active',updated_at=?
+     WHERE instance_step_state_id IN (
+       SELECT id FROM workflow_instance_step_states WHERE instance_id=? AND status='active'
+     ) AND status='pending'`,
+  ).bind(now,input.instanceId).run();
+  await env.DB.prepare(
+    `UPDATE workflow_instance_task_states
+     SET status='active',updated_at=?
+     WHERE instance_module_state_id IN (
+       SELECT ms.id FROM workflow_instance_module_states ms
+       JOIN workflow_instance_step_states ss ON ss.id=ms.instance_step_state_id
+       WHERE ss.instance_id=? AND ss.status='active'
+     ) AND status='pending'`,
+  ).bind(now,input.instanceId).run();
 }
 
 export async function synchronizeWorkflowExecution(input:{
@@ -214,6 +237,7 @@ function shouldAutoCompleteTemplateTask(
   moduleStatus:string,
 ) {
   if (!taskKey.startsWith("handle_")) return false;
+  if (stepKey === "quotation") return true;
   if (stepKey === "order_creation") return orderStatus !== "draft";
   if (stepKey === "consignment_approval") return ["confirmed","in_execution","completed"].includes(orderStatus);
   if (stepKey === "task_assignment") return ["in_execution","completed"].includes(orderStatus);

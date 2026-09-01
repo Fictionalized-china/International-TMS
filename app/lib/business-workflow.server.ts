@@ -72,16 +72,17 @@ type ModuleSnapshot = {
 };
 
 export const defaultWorkflowSteps = [
-  ["order_creation", "委托资料补充", "order", "order.created", 10, "admin"],
-  ["consignment_approval", "委托审核", "order", "manual.consignment_approval", 20, "admin"],
-  ["task_assignment", "任务分配", "order", "manual.task_assignment", 30, "admin"],
-  ["domestic_execution", "国内运输", "order", "manual.domestic_execution", 40, "admin"],
-  ["warehouse_receiving", "国内仓入库", "order", "manual.warehouse_receiving", 50, "admin"],
-  ["port_loading", "出口准备与装车出库", "order", "manual.port_loading", 60, "admin"],
-  ["outbound_transport", "出境运输", "order", "manual.outbound_transport", 70, "admin"],
-  ["overseas_pickup", "客户扫码自提签收", "order", "manual.overseas_pickup", 80, "admin"],
-  ["reconciliation", "对账结算", "order", "manual.reconciliation", 90, "admin"],
-  ["completion_review", "完成复盘", "order", "manual.completion_review", 100, "admin"],
+  ["quotation", "询价报价", "quote", "quote.created", 10, "admin"],
+  ["order_creation", "委托资料补充", "order", "order.created", 20, "admin"],
+  ["consignment_approval", "委托审核", "order", "manual.consignment_approval", 30, "admin"],
+  ["task_assignment", "任务分配", "order", "manual.task_assignment", 40, "admin"],
+  ["domestic_execution", "国内运输", "order", "manual.domestic_execution", 50, "admin"],
+  ["warehouse_receiving", "国内仓入库", "order", "manual.warehouse_receiving", 60, "admin"],
+  ["port_loading", "出口准备与装车出库", "order", "manual.port_loading", 70, "admin"],
+  ["outbound_transport", "出境运输", "order", "manual.outbound_transport", 80, "admin"],
+  ["overseas_pickup", "客户扫码自提签收", "order", "manual.overseas_pickup", 90, "admin"],
+  ["reconciliation", "对账结算", "order", "manual.reconciliation", 100, "admin"],
+  ["completion_review", "完成复盘", "order", "manual.completion_review", 110, "admin"],
 ] as const;
 
 const workflowDefinitions = {
@@ -182,6 +183,32 @@ async function ensureRoadWorkflowTemplates(organizationId: string) {
   }
   await env.DB.batch(statements);
 
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT OR IGNORE INTO workflow_step_modules(
+        id,workflow_id,step_id,module_code,display_name,sort_order,is_required,is_active,
+        responsibility_position_code,completion_mode,created_at,updated_at
+       )
+       SELECT s.id||':module:consignment',s.workflow_id,s.id,'consignment','询价与报价',10,1,1,
+         'SALES','all_tasks',?,?
+       FROM workflow_steps s
+       JOIN workflow_definitions wd ON wd.id=s.workflow_id
+       WHERE wd.organization_id=? AND s.step_key='quotation' AND s.is_active=1`,
+    ).bind(now,now,organizationId),
+    env.DB.prepare(
+      `INSERT OR IGNORE INTO workflow_module_tasks(
+        id,workflow_id,step_module_id,task_key,name,task_type,sort_order,is_required,is_active,
+        responsibility_position_code,instructions,created_at,updated_at
+       )
+       SELECT m.id||':task:handle_quotation',m.workflow_id,m.id,'handle_quotation',
+         '填写询价并完成报价','system',10,1,1,'SALES',?, ?,?
+       FROM workflow_step_modules m
+       JOIN workflow_steps s ON s.id=m.step_id AND s.workflow_id=m.workflow_id
+       JOIN workflow_definitions wd ON wd.id=m.workflow_id
+       WHERE wd.organization_id=? AND s.step_key='quotation' AND m.module_code='consignment'`,
+    ).bind("首次保存报价时锁定工作流版本；客户接受后完成本节点。",now,now,organizationId),
+  ]);
+
   await env.DB.prepare(
     `UPDATE workflow_steps SET is_active=0,updated_at=?
      WHERE workflow_id IN (
@@ -265,7 +292,9 @@ export async function recordWorkflowEvent(input: RecordEventInput): Promise<stri
     (instance ? { id: instance.workflow_id } : null) ??
     (input.workflowId
       ? await env.DB.prepare(
-          "SELECT id FROM workflow_definitions WHERE id=? AND organization_id=? AND status='active' AND lifecycle_status='published'",
+          `SELECT id FROM workflow_definitions
+           WHERE id=? AND organization_id=? AND validation_status='valid'
+             AND lifecycle_status IN ('published','retired')`,
         ).bind(input.workflowId, input.organizationId).first<Definition>()
       : null) ??
     (await env.DB.prepare(

@@ -1234,14 +1234,14 @@ function validateWorkflowConfiguration(
   const issues: string[] = [];
   const activeSteps = steps.filter((item) => item.is_active).sort((a,b) => a.sort_order-b.sort_order);
   if (!activeSteps.length) issues.push("至少需要一个启用节点");
-  if (activeSteps.length && activeSteps[0].trigger_event !== "order.created")
-    issues.push("第一个启用节点必须承接订单创建");
+  if (activeSteps.length && activeSteps[0].trigger_event !== "quote.created")
+    issues.push("第一个启用节点必须是询价报价，并承接报价首次保存");
   const duplicateStepOrders = activeSteps.filter(
     (item,index) => activeSteps.findIndex((other) => other.sort_order === item.sort_order) !== index,
   );
   if (duplicateStepOrders.length) issues.push("启用节点的顺序不能重复");
   const requiredRuntimeSteps = [
-    "order_creation","consignment_approval","task_assignment","domestic_execution",
+    "quotation","order_creation","consignment_approval","task_assignment","domestic_execution",
     "warehouse_receiving","port_loading","outbound_transport","overseas_pickup",
     "reconciliation","completion_review",
   ];
@@ -1891,7 +1891,7 @@ function NodeConfigDialog({
           <span>{structureEditable ? "该工作流尚无订单，可像积木一样插入、删除节点并配置字段。" : "该工作流已有订单：节点、模组和步骤锁定，仍可在既有节点新增字段并设置为必填、选填或隐藏。"}</span>
         </div>
         <div className="workflow-config-dialog-tools">
-          <small>{structureEditable ? "首个订单使用后自动锁定节点结构。" : "保存即同步到现有订单和后续门禁；隐藏只影响显示，历史值和附件永久保留审计。"}</small>
+          <small>{structureEditable ? "首份报价保存后自动锁定节点结构。" : "保存即同步到既有业务实例和后续门禁；隐藏只影响显示，历史值和附件永久保留审计。"}</small>
           {structureEditable && (
             <Modal title="新增流程节点" triggerLabel="新增节点" triggerClassName="secondary" closeSignal={closeSignal}>
               <NodeCreateForm workflowId={workflowId} activeSteps={steps.filter((step) => step.is_active)} busy={busy} />

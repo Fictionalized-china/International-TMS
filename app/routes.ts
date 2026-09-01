@@ -25,6 +25,10 @@ export default [
     ),
     route("admin/sales", "routes/admin.sales.tsx"),
     route("admin/quotations", "routes/admin.quotations.tsx"),
+    route(
+      "admin/quotation-field-files/:valueId",
+      "routes/admin.quotation-field-file.ts",
+    ),
     route("admin/logistics-products", "routes/admin.logistics-products.tsx"),
     route("admin/carriers", "routes/admin.carriers.tsx"),
     route("admin/orders", "routes/admin.orders.tsx"),

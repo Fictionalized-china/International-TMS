@@ -991,7 +991,31 @@ async function resolveFieldPresence(
     setPresence(result, "exception_records", exceptions?.total ?? 0, true);
   }
 
-  const customFields = rules.filter((rule) => !rule.isBuiltIn);
+  const quotationFields = rules.filter((rule) => rule.stepKey === "quotation");
+  if (quotationFields.length) {
+    const values = await env.DB.prepare(
+      `SELECT v.field_key,v.value_text,v.file_name
+       FROM transport_orders o
+       JOIN quotation_workflow_field_values v
+         ON v.quotation_id=o.quotation_id AND v.organization_id=o.organization_id
+       WHERE o.organization_id=? AND o.id=? AND v.module_code=?`,
+    ).bind(organizationId,orderId,moduleCode).all<{
+      field_key:string;
+      value_text:string|null;
+      file_name:string|null;
+    }>();
+    for (const item of values.results) {
+      const rule = quotationFields.find((field) => field.fieldKey === item.field_key);
+      if (!rule) continue;
+      setPresence(
+        result,
+        rule.fieldKey,
+        rule.fieldType === "attachment" ? item.file_name : item.value_text,
+      );
+    }
+  }
+
+  const customFields = rules.filter((rule) => !rule.isBuiltIn && rule.stepKey !== "quotation");
   if (customFields.length) {
     const ids = customFields.map((item) => item.id);
     const placeholders = ids.map(() => "?").join(",");
