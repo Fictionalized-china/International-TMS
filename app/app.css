@@ -2758,6 +2758,144 @@ td small {
   margin-top: 3px;
   color: var(--muted);
 }
+.outbound-order-filter-form {
+  display: grid;
+  grid-template-columns: minmax(280px, 1.8fr) minmax(150px, .65fr) minmax(170px, .72fr) auto;
+  gap: 10px;
+  align-items: end;
+  padding: 11px 12px;
+  border-top: 1px solid #dbe4ed;
+  border-bottom: 1px solid #dbe4ed;
+  background: #f8fafc;
+}
+.outbound-order-filter-form label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: #526272;
+  font-size: 12px;
+  font-weight: 700;
+}
+.outbound-order-filter-form input,
+.outbound-order-filter-form select {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  border: 1px solid #cbd8e5;
+  border-radius: 3px;
+  background: #fff;
+}
+.outbound-order-filter-form :is(input, select):focus-visible,
+.outbound-order-number-link:focus-visible {
+  outline: 2px solid #16855d;
+  outline-offset: 2px;
+}
+.outbound-order-filter-actions {
+  display: flex;
+  gap: 8px;
+}
+.outbound-order-filter-actions :is(button, a) {
+  min-height: 36px;
+  white-space: nowrap;
+}
+.outbound-list-summary {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  min-height: 38px;
+  padding: 7px 12px;
+  border-bottom: 1px solid #e1e8ef;
+  color: #687887;
+  font-size: 12px;
+}
+.outbound-list-summary strong {
+  margin-left: 3px;
+  color: var(--ink);
+  font-size: 14px;
+}
+.outbound-pending-orders .outbound-load-units-table {
+  min-width: 1480px;
+}
+.outbound-load-units-table td {
+  vertical-align: middle;
+}
+.outbound-order-number-link {
+  display: inline-grid;
+  gap: 2px;
+  color: #0f6680;
+  text-decoration: none;
+  cursor: pointer;
+  transition: color 160ms ease;
+}
+.outbound-order-number-link:hover {
+  color: #0a855d;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.outbound-load-units-table .blocked-row td {
+  background: #fffdf8;
+}
+.outbound-block-reason {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.outbound-create-rhythm {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0 0 14px;
+  padding: 0;
+  overflow: hidden;
+  list-style: none;
+  border: 1px solid #cbd8e5;
+  border-radius: 3px;
+  background: #fff;
+}
+.outbound-create-rhythm li {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 58px;
+  padding: 9px 14px;
+  border-right: 1px solid #dbe4ed;
+}
+.outbound-create-rhythm li:last-child { border-right: 0; }
+.outbound-create-rhythm li > span {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  border: 1px solid #aebdca;
+  border-radius: 50%;
+  color: #607180;
+  font-size: 12px;
+  font-weight: 800;
+}
+.outbound-create-rhythm li > div { display: grid; gap: 2px; }
+.outbound-create-rhythm small { color: var(--muted); }
+.outbound-create-rhythm li.complete { background: #f2fbf6; }
+.outbound-create-rhythm li.complete > span { border-color: #15966b; background: #15966b; color: #fff; }
+.outbound-create-rhythm li.current { background: #f5fafc; box-shadow: inset 0 -3px 0 #0f6680; }
+.outbound-create-rhythm li.current > span { border-color: #0f6680; color: #0f6680; }
+.outbound-create-rhythm li.upcoming { color: #71808d; background: #fafbfc; }
+.outbound-create-blocked { overflow: hidden; }
+.outbound-create-blocked > ul {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 14px 18px 14px 38px;
+  color: #8a4f17;
+  background: #fffaf1;
+}
+.outbound-create-blocked .panel-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px 14px;
+  border-top: 1px solid #e6dfd4;
+}
 .outbound-task-center {
   overflow: hidden;
   border-radius: 3px;
@@ -2929,6 +3067,21 @@ td small {
 }
 
 @media (max-width: 860px) {
+  .outbound-order-filter-form {
+    grid-template-columns: 1fr 1fr;
+  }
+  .outbound-order-filter-form label:first-of-type,
+  .outbound-order-filter-actions {
+    grid-column: 1 / -1;
+  }
+  .outbound-create-rhythm {
+    grid-template-columns: 1fr;
+  }
+  .outbound-create-rhythm li {
+    border-right: 0;
+    border-bottom: 1px solid #dbe4ed;
+  }
+  .outbound-create-rhythm li:last-child { border-bottom: 0; }
   .outbound-operation-heading {
     grid-template-columns: 1fr;
   }

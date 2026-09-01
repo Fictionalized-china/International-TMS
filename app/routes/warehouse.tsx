@@ -175,7 +175,7 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
           )}
           {loaderData.warehouse.warehouse_role !== "overseas_destination" && (
             <Link className={loaderData.currentPath.startsWith("/warehouse/outbound") && loaderData.outboundView === "pending" ? "active" : undefined} to={warehouseOutboundLink(loaderData.query,"pending")}>
-              <span><AppIcon name="packageCheck" size={17} /></span>待装车
+              <span><AppIcon name="packageCheck" size={17} /></span>在仓待装
             </Link>
           )}
           {loaderData.warehouse.warehouse_role !== "overseas_destination" && (
@@ -269,11 +269,11 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
                     ? "仓库交接已经完成，无需再次创建装车任务。"
                     : flow.dispatchStatus === "loading"
                       ? "任务已同步到“装车与出库”，请继续扫码并完成出库交接。"
-                      : "请在“待装车”中选择订单、检查文件并创建装车任务。"}
+                      : "请在“在仓待装”中选择订单，再检查文件并创建装车任务。"}
                 </small>
               </div>
             ) : (
-              <Link className="primary" to={warehouseOutboundLink(loaderData.query,"pending")}>货齐已确认，进入待装车</Link>
+              <Link className="primary" to={warehouseOutboundLink(loaderData.query,"pending")}>货齐已确认，进入在仓待装</Link>
             )}
           </section>
         )}
