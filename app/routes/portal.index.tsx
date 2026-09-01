@@ -20,11 +20,13 @@ type Notice = { id: string; type: string; title: string; message: string; link: 
 
 export async function loader({ request }: Route.LoaderArgs) {
   const { user, customer } = await requirePortalCustomer(request);
-  const [contacts, addresses, orders, shipments, invoices, recentOrders, notices, unread] = await Promise.all([
+  const [contacts, addresses, orders, shipments] = await Promise.all([
     env.DB.prepare("SELECT id,name,title,email,phone,is_primary FROM customer_contacts WHERE customer_id=? ORDER BY is_primary DESC,name LIMIT 4").bind(customer.id).all<Contact>(),
     env.DB.prepare("SELECT id,label,country_code,city,address_line1,is_default FROM customer_addresses WHERE customer_id=? ORDER BY is_default DESC,label LIMIT 4").bind(customer.id).all<Address>(),
     env.DB.prepare("SELECT COUNT(*) count FROM transport_orders WHERE organization_id=? AND customer_id=? AND status NOT IN ('completed','cancelled')").bind(user.organizationId, customer.id).first<{ count: number }>(),
     env.DB.prepare("SELECT COUNT(*) count FROM shipments WHERE organization_id=? AND customer_id=? AND status NOT IN ('delivered','cancelled')").bind(user.organizationId, customer.id).first<{ count: number }>(),
+  ]);
+  const [invoices, recentOrders, notices, unread] = await Promise.all([
     env.DB.prepare("SELECT COALESCE(SUM(total_amount-paid_amount),0) amount FROM invoices WHERE organization_id=? AND customer_id=? AND status IN ('issued','partially_paid','overdue')").bind(user.organizationId, customer.id).first<{ amount: number }>(),
     env.DB.prepare(
       `SELECT o.id,o.order_number,c.name customer_name,q.quote_number,o.business_type,o.cargo_description,

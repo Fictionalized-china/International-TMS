@@ -35,6 +35,7 @@ import {
   normalizeWarehouseOutboundListFilters,
   validateFtlOutboundResourceSelection,
 } from "../lib/warehouse-outbound-list";
+import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 
 const LOADING_DOCUMENTS=loadingOrderDocumentDefinitions;
 const LOADING_DOCUMENT_PLACEHOLDERS=LOADING_DOCUMENTS.map(()=>"?").join(",");
@@ -106,14 +107,16 @@ export async function loader({request}:Route.LoaderArgs){
     if("error" in plan)selectedResourcePolicyError=plan.error;
     else selectedResourceDifferences=dispatchPlanPolicyIssues(selectedExecutionPolicy.batchFields,plan).differences;
   }
-  const evaluated=await Promise.all(visibleBatches.map(async batch=>{
+  const evaluated:Array<{batch:Batch;readiness:{ready:boolean;reasons:string[]}}>=[];
+  for(const batch of visibleBatches){
     if(batch.transport_batch_id){
       const readiness=await checkBatchWarehouseReadiness(user.organizationId,warehouse.id,batch.transport_batch_id);
       const blocked=readiness.orders.filter(item=>item.reasons.length>0);
-      return{batch,readiness:{ready:blocked.length===0,reasons:blocked.flatMap(item=>item.reasons.map(reason=>`${item.orderNumber}：${reason}`))}};
+      evaluated.push({batch,readiness:{ready:blocked.length===0,reasons:blocked.flatMap(item=>item.reasons.map(reason=>`${item.orderNumber}：${reason}`))}});
+    }else{
+      evaluated.push({batch,readiness:await checkOrderLoadPlan(user.organizationId,batch.order_id)});
     }
-    return{batch,readiness:await checkOrderLoadPlan(user.organizationId,batch.order_id)};
-  }));
+  }
   const loadUnits=evaluated.map(item=>({...item.batch,ready:item.readiness.ready,reasons:item.readiness.reasons}));
   const filteredLoadUnits=filterWarehouseOutboundLoadUnits(loadUnits,filters);
   const manifestsByOrder:Record<string,ManifestDoc>={};
@@ -216,8 +219,12 @@ export async function action({request}:Route.ActionArgs){
     const missing=inspection.documents.filter(document=>document.required&&!document.attachmentId);
     if(missing.length)return{formError:`请先上传：${missing.map(document=>`${document.orderNumber} ${document.name}`).join("、")}`,inspection};
     const uploadedDocuments=inspection.documents.filter(document=>document.attachmentId);
-    await env.DB.batch(uploadedDocuments.map(document=>env.DB.prepare("UPDATE order_document_metadata SET review_status=CASE WHEN review_status='archived' THEN 'archived' ELSE 'approved' END,reviewed_by_user_id=?,reviewed_at=?,updated_at=? WHERE attachment_id=? AND order_id=? AND organization_id=?")
-      .bind(user.userId,now,now,document.attachmentId,document.orderId,user.organizationId)));
+    const approvalStatements=chunkD1Values(uploadedDocuments,4).map(documentChunk=>env.DB.prepare(`UPDATE order_document_metadata
+      SET review_status=CASE WHEN review_status='archived' THEN 'archived' ELSE 'approved' END,
+          reviewed_by_user_id=?,reviewed_at=?,updated_at=?
+      WHERE organization_id=? AND attachment_id IN (${d1Placeholders(documentChunk.length)})`)
+      .bind(user.userId,now,now,user.organizationId,...documentChunk.map(document=>document.attachmentId)));
+    if(approvalStatements.length)await env.DB.batch(approvalStatements);
     await writeAudit({request,action:"warehouse.outbound.documents_approve",resourceType:"transport_order",resourceId:inspectionOrderId,organizationId:user.organizationId,actorUserId:user.userId,metadata:{warehouseId:warehouse.id,orderNumbers:inspection.documentGroups.map(group=>group.orderNumber),documents:inspection.documents.map(document=>`${document.orderNumber}:${document.code}`)}});
     return{success:"本装车任务涉及订单的必需发运文件已全部确认，现在可以创建装车任务",actionKind:"loading_documents_approved" as const,reviewCloseSignal:now,inspection:await loadOutboundInspectionByIds(user.organizationId,warehouse.id,inspectionOrderId,batchId)};
   }
@@ -247,8 +254,11 @@ export async function action({request}:Route.ActionArgs){
     if(missing.length)return rejectCreate(`请先上传：${missing.map(document=>`${document.orderNumber} ${document.name}`).join("、")}`);
     const documentsToApprove=inspection.documents.filter(document=>document.attachmentId&&!["approved","archived"].includes(document.reviewStatus||""));
     if(documentsToApprove.length){
-      await env.DB.batch(documentsToApprove.map(document=>env.DB.prepare("UPDATE order_document_metadata SET review_status='approved',reviewed_by_user_id=?,reviewed_at=?,updated_at=? WHERE attachment_id=? AND order_id=? AND organization_id=?")
-        .bind(user.userId,now,now,document.attachmentId,document.orderId,user.organizationId)));
+      const approvalStatements=chunkD1Values(documentsToApprove,4).map(documentChunk=>env.DB.prepare(`UPDATE order_document_metadata
+        SET review_status='approved',reviewed_by_user_id=?,reviewed_at=?,updated_at=?
+        WHERE organization_id=? AND attachment_id IN (${d1Placeholders(documentChunk.length)})`)
+        .bind(user.userId,now,now,user.organizationId,...documentChunk.map(document=>document.attachmentId)));
+      await env.DB.batch(approvalStatements);
       await writeAudit({request,action:"warehouse.outbound.documents_confirm_and_create",resourceType:"transport_order",resourceId:batch.order_id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{warehouseId:warehouse.id,orderNumbers:inspection.documentGroups.map(group=>group.orderNumber),documents:documentsToApprove.map(document=>`${document.orderNumber}:${document.code}`)}});
       inspection=await loadOutboundInspectionByIds(user.organizationId,warehouse.id,batch.order_id,batch.id);
       if(!inspection)return{formError:"文件确认后订单状态发生变化，请重新检查订单"};
@@ -257,7 +267,10 @@ export async function action({request}:Route.ActionArgs){
       const pending=inspection.documents.filter(document=>document.required&&!["approved","archived"].includes(document.reviewStatus||""));
       return rejectCreate(`请先上传、检查并确认：${pending.map(document=>`${document.orderNumber} ${document.name}`).join("、")}`);
     }
-    const documentGateResults=await Promise.all(inspection.documentGroups.map(async group=>({group,gate:await checkOrderPreDepartureDocuments(user.organizationId,group.orderId)})));
+    const documentGateResults:Array<{group:(typeof inspection.documentGroups)[number];gate:Awaited<ReturnType<typeof checkOrderPreDepartureDocuments>>}>=[];
+    for(const group of inspection.documentGroups){
+      documentGateResults.push({group,gate:await checkOrderPreDepartureDocuments(user.organizationId,group.orderId)});
+    }
     const documentGateBlockers=documentGateResults.filter(item=>!item.gate.ready).flatMap(item=>item.gate.reasons.map(reason=>`${item.group.orderNumber}：${reason}`));
     if(documentGateBlockers.length)return rejectCreate(`暂不能创建装车任务：${documentGateBlockers.join("；")}`);
     if(inspection.notesActive&&inspection.notesRequired&&!notes.trim())return rejectCreate("请填写装车交接备注");
@@ -308,14 +321,23 @@ export async function action({request}:Route.ActionArgs){
       ...mainAssignmentStatements,
       ...batchStateStatements,
     ]);
-    if(planned.batch_id)await refreshLoadingManifest(user.organizationId,planned.batch_id,user.userId,now);
-    await Promise.all(inspection.documentGroups.map(group=>recordWarehouseProgress({organizationId:user.organizationId,orderId:group.orderId,actorUserId:user.userId,stepCode:"loading",stepName:planned.batch_id?"按配载单统一装车":"整车装车",actionCode:"dispatch_create",actionName:planned.batch_id?"创建配载单装车任务":"创建整车装车任务",notes:`装车任务 ${number}；车辆 ${plate}`})));
-    await writeAudit({request,action:"warehouse.dispatch.create",resourceType:"warehouse_dispatch",resourceId:dispatchId,organizationId:user.organizationId,actorUserId:user.userId,metadata:{number,batchId:batch.id,transportBatchId:planned.batch_id,orderNumbers:inspection.documentGroups.map(group=>group.orderNumber),businessType:batch.business_type,carrier,plate,driver,plannedDepartureAt:planned.planned_departure_at,resourceSource:planned.batch_id?"ltl_batch":"warehouse_ftl_confirmation",resourcePolicyDifferences:resourceDifferences,resourceDifferenceConfirmed:resourceDifferences.length>0&&resourceDifferenceConfirmed}});
+    const postCreateWarnings:string[]=[];
+    if(planned.batch_id){
+      try{await refreshLoadingManifest(user.organizationId,planned.batch_id,user.userId,now)}catch(error){console.error("dispatch manifest sync failed",error);postCreateWarnings.push("配载舱单待重试")}
+    }
+    for(const group of inspection.documentGroups){
+      try{
+        await recordWarehouseProgress({organizationId:user.organizationId,orderId:group.orderId,actorUserId:user.userId,stepCode:"loading",stepName:planned.batch_id?"按配载单统一装车":"整车装车",actionCode:"dispatch_create",actionName:planned.batch_id?"创建配载单装车任务":"创建整车装车任务",notes:`装车任务 ${number}；车辆 ${plate}`});
+      }catch(error){console.error("dispatch order progress sync failed",error);postCreateWarnings.push(`${group.orderNumber} 进度待重试`)}
+    }
+    try{
+      await writeAudit({request,action:"warehouse.dispatch.create",resourceType:"warehouse_dispatch",resourceId:dispatchId,organizationId:user.organizationId,actorUserId:user.userId,metadata:{number,batchId:batch.id,transportBatchId:planned.batch_id,orderNumbers:inspection.documentGroups.map(group=>group.orderNumber),businessType:batch.business_type,carrier,plate,driver,plannedDepartureAt:planned.planned_departure_at,resourceSource:planned.batch_id?"ltl_batch":"warehouse_ftl_confirmation",resourcePolicyDifferences:resourceDifferences,resourceDifferenceConfirmed:resourceDifferences.length>0&&resourceDifferenceConfirmed}});
+    }catch(error){console.error("dispatch audit write failed",error);postCreateWarnings.push("审计记录待重试")}
     const sourceUrl=new URL(request.url),redirectParams=new URLSearchParams();
     for(const key of ["warehouseId","returnTo","orderId"]){const value=sourceUrl.searchParams.get(key);if(value)redirectParams.set(key,value);}
     redirectParams.set("view","execution");
     redirectParams.set("dispatchId",dispatchId);
-    redirectParams.set("warehouseResult",`装车任务 ${number} 已创建，已同步到“装车与出库”`);
+    redirectParams.set("warehouseResult",`装车任务 ${number} 已创建，已同步到“装车与出库”${postCreateWarnings.length?`；${[...new Set(postCreateWarnings)].join("、")}`:""}`);
     return redirect(`/warehouse/outbound?${redirectParams.toString()}`);
   }
   const dispatchId=valueOf(form,"dispatchId");
@@ -400,14 +422,34 @@ export async function action({request}:Route.ActionArgs){
       env.DB.prepare("UPDATE warehouse_dispatches SET status='dispatched',dispatched_by_user_id=?,dispatched_at=?,updated_at=? WHERE id=?").bind(user.userId,now,now,dispatch.id),
       env.DB.prepare("UPDATE warehouse_packages SET status='dispatched',updated_at=? WHERE id IN (SELECT package_id FROM warehouse_dispatch_items WHERE dispatch_id=?) AND organization_id=?").bind(now,dispatch.id,user.organizationId),
       env.DB.prepare(`INSERT INTO warehouse_package_movements(id,organization_id,package_id,operation_type,from_location_id,to_location_id,batch_id,operator_user_id,notes,occurred_at,created_at) SELECT lower(hex(randomblob(16))),di.organization_id,di.package_id,'dispatch',p.location_id,NULL,d.sorting_batch_id,?,?,?,? FROM warehouse_dispatch_items di JOIN warehouse_packages p ON p.id=di.package_id JOIN warehouse_dispatches d ON d.id=di.dispatch_id WHERE di.dispatch_id=?`).bind(user.userId,description,now,now,dispatch.id),
+      env.DB.prepare(`INSERT INTO warehouse_operations(id,organization_id,shipment_id,operation_type,location,notes,operator_user_id,occurred_at,created_at)
+        SELECT lower(hex(randomblob(16))),?,scope.shipment_id,'dispatch',scope.current_location,?,?,?,?
+        FROM (
+          SELECT DISTINCT s.id shipment_id,s.current_location
+          FROM warehouse_dispatch_items di
+          JOIN warehouse_packages p ON p.id=di.package_id
+          JOIN shipments s ON s.id=p.shipment_id
+          WHERE di.dispatch_id=? AND di.organization_id=?
+        ) scope`).bind(user.organizationId,description,user.userId,now,now,dispatch.id,user.organizationId),
+      env.DB.prepare(`INSERT INTO shipment_events(id,shipment_id,status,location,description,event_at,visible_to_customer,created_by_user_id,created_at)
+        SELECT lower(hex(randomblob(16))),scope.shipment_id,'picked_up',scope.current_location,?,?,1,?,?
+        FROM (
+          SELECT DISTINCT s.id shipment_id,s.current_location
+          FROM warehouse_dispatch_items di
+          JOIN warehouse_packages p ON p.id=di.package_id
+          JOIN shipments s ON s.id=p.shipment_id
+          WHERE di.dispatch_id=? AND di.organization_id=?
+        ) scope`).bind(description,now,user.userId,now,dispatch.id,user.organizationId),
+      env.DB.prepare(`UPDATE order_cargo_packages SET status='loaded'
+        WHERE organization_id=? AND status NOT IN ('cancelled','in_transit','delivered')
+          AND order_id IN (
+            SELECT DISTINCT s.order_id
+            FROM warehouse_dispatch_items di
+            JOIN warehouse_packages p ON p.id=di.package_id
+            JOIN shipments s ON s.id=p.shipment_id
+            WHERE di.dispatch_id=? AND di.organization_id=?
+          )`).bind(user.organizationId,dispatch.id,user.organizationId),
     ];
-    for(const shipment of shipments.results){
-      statements.push(
-        env.DB.prepare(`INSERT INTO warehouse_operations(id,organization_id,shipment_id,operation_type,location,notes,operator_user_id,occurred_at,created_at) VALUES(?,?,?,'dispatch',?,?,?,?,?)`).bind(crypto.randomUUID(),user.organizationId,shipment.shipment_id,shipment.current_location,description,user.userId,now,now),
-        env.DB.prepare(`INSERT INTO shipment_events(id,shipment_id,status,location,description,event_at,visible_to_customer,created_by_user_id,created_at) VALUES(?,?,'picked_up',?,?,?,1,?,?)`).bind(crypto.randomUUID(),shipment.shipment_id,shipment.current_location,description,now,user.userId,now),
-        env.DB.prepare("UPDATE order_cargo_packages SET status='loaded' WHERE order_id=? AND organization_id=? AND status NOT IN ('cancelled','in_transit','delivered')").bind(shipment.order_id,user.organizationId),
-      );
-    }
     const referenceOrderId=shipments.results[0].order_id;
     const linkedBatch=dispatch.transport_batch_id?{batch_id:dispatch.transport_batch_id}:null;
     if(linkedBatch?.batch_id)statements.push(
@@ -415,18 +457,24 @@ export async function action({request}:Route.ActionArgs){
       env.DB.prepare("UPDATE transport_batches SET road_status='loaded_waiting_exit',updated_at=? WHERE id=? AND organization_id=?").bind(now,linkedBatch.batch_id,user.organizationId),
     );
     await env.DB.batch(statements);
+    const completionWarnings:string[]=[];
     if(linkedBatch?.batch_id){
-      await refreshLoadingManifest(user.organizationId,linkedBatch.batch_id,user.userId,now);
-      await recordBatchOutboundProgress({organizationId:user.organizationId,batchId:linkedBatch.batch_id,actorUserId:user.userId,dispatchNumber:dispatch.dispatch_number,referenceOrderId});
+      try{await refreshLoadingManifest(user.organizationId,linkedBatch.batch_id,user.userId,now)}catch(error){console.error("completed dispatch manifest sync failed",error);completionWarnings.push("配载舱单待重试")}
+      try{await recordBatchOutboundProgress({organizationId:user.organizationId,batchId:linkedBatch.batch_id,actorUserId:user.userId,dispatchNumber:dispatch.dispatch_number,referenceOrderId})}catch(error){console.error("completed dispatch batch progress sync failed",error);completionWarnings.push("批次进度待重试")}
     }else{
       for (const item of shipments.results) {
-        await recordWarehouseProgress({organizationId:user.organizationId,orderId:item.order_id,actorUserId:user.userId,stepCode:"outbound",stepName:"装车出库交接完成",actionCode:"dispatch_complete",actionName:"完成装车出库交接",notes:`装车任务 ${dispatch.dispatch_number} 完成装车出库，等待出境确认`});
+        try{
+          await recordWarehouseProgress({organizationId:user.organizationId,orderId:item.order_id,actorUserId:user.userId,stepCode:"outbound",stepName:"装车出库交接完成",actionCode:"dispatch_complete",actionName:"完成装车出库交接",notes:`装车任务 ${dispatch.dispatch_number} 完成装车出库，等待出境确认`});
+        }catch(error){console.error("completed dispatch order progress sync failed",error);completionWarnings.push(`${item.order_number} 进度待重试`)}
       }
     }
-    await writeAudit({request,action:"warehouse.dispatch.complete",resourceType:"warehouse_dispatch",resourceId:dispatch.id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{dispatchNumber:dispatch.dispatch_number,packages:counts.total,scanPolicy:executionPolicy?.scanConfirmation.mode??"required",scannedPackages:loadedCount,unscannedPackages:missingScanCount,scanDifferenceConfirmed:missingScanCount>0&&scanDifferenceConfirmed,resourcePolicyDifferences:resourceDifferences,resourceDifferenceConfirmed:resourceDifferences.length>0}});
-    return{success:dispatch.business_type==="ltl"
+    try{
+      await writeAudit({request,action:"warehouse.dispatch.complete",resourceType:"warehouse_dispatch",resourceId:dispatch.id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{dispatchNumber:dispatch.dispatch_number,packages:counts.total,scanPolicy:executionPolicy?.scanConfirmation.mode??"required",scannedPackages:loadedCount,unscannedPackages:missingScanCount,scanDifferenceConfirmed:missingScanCount>0&&scanDifferenceConfirmed,resourcePolicyDifferences:resourceDifferences,resourceDifferenceConfirmed:resourceDifferences.length>0}});
+    }catch(error){console.error("completed dispatch audit write failed",error);completionWarnings.push("审计记录待重试")}
+    const completionWarningText=completionWarnings.length?`；${[...new Set(completionWarnings)].join("、")}`:"";
+    return{success:(dispatch.business_type==="ltl"
       ?`${dispatch.dispatch_number} 已完成装车出库交接，交接数据已同步管理端；请回 PZ 配载单执行实际出境确认，运单此时尚未进入在途`
-      :`${dispatch.dispatch_number} 已完成整车装车出库交接，车辆与司机信息已同步管理端；后续由订单的报关及出境运输节点确认实际出境`,printHandoverSignal:now};
+      :`${dispatch.dispatch_number} 已完成整车装车出库交接，车辆与司机信息已同步管理端；后续由订单的报关及出境运输节点确认实际出境`)+completionWarningText,printHandoverSignal:now};
   }
   return{formError:"无效的出库操作"};
 }
@@ -646,7 +694,8 @@ async function checkWarehouseOrders(
   vehiclePlate?:string,
   transportBatchId?:string,
 ):Promise<WarehouseOrderBlocker[]> {
-  return Promise.all(orders.map(async order=>{
+  const results:WarehouseOrderBlocker[]=[];
+  for(const order of orders){
     const [loadPlan,warehouseState]=await Promise.all([
       checkOrderLoadPlan(organizationId,order.order_id,vehiclePlate,transportBatchId),
       env.DB.prepare(`SELECT
@@ -662,8 +711,9 @@ async function checkWarehouseOrders(
     if(!warehouseState?.package_count)reasons.push("当前仓库没有可装车货号");
     else if((warehouseState.verified_package_count??0)!==warehouseState.package_count)
       reasons.push(`货号核验不完整（已核验 ${warehouseState.verified_package_count??0}/${warehouseState.package_count}）`);
-    return{orderId:order.order_id,orderNumber:order.order_number,reasons:[...new Set(reasons)]};
-  }));
+    results.push({orderId:order.order_id,orderNumber:order.order_number,reasons:[...new Set(reasons)]});
+  }
+  return results;
 }
 async function checkBatchWarehouseReadiness(organizationId:string,warehouseId:string,batchId:string,vehiclePlate?:string){
   const [batch,orders]=await Promise.all([
@@ -737,21 +787,28 @@ async function loadOutboundInspection(organizationId:string,warehouseId:string,b
       ORDER BY bo.sequence_no`).bind(organizationId,batch.order_id,batch.transport_batch_id,batch.transport_batch_id).all<{order_id:string;order_number:string;customer_id:string;customer_name:string}>()
     :{results:[{order_id:batch.order_id,order_number:batch.order_number,customer_id:batch.customer_id,customer_name:batch.customer_name}]};
   const orderRows=scopeOrders.results.length?scopeOrders.results:[{order_id:batch.order_id,order_number:batch.order_number,customer_id:batch.customer_id,customer_name:batch.customer_name}];
-  const placeholders=orderRows.map(()=>"?").join(",");
-  const [documentRows,workflowOrders,documentRequirements]=await Promise.all([
-    env.DB.prepare(`WITH ranked AS (
+  type DocumentRow={order_id:string;attachment_id:string;document_category:LoadingDocumentCode;file_name:string;content_type:string;size_bytes:number;review_status:string;created_at:string};
+  const documentRows:DocumentRow[]=[];
+  const documentRowsPromise=(async()=>{
+    for(const orderChunk of chunkD1Values(orderRows,1+LOADING_DOCUMENTS.length)){
+      const result=await env.DB.prepare(`WITH ranked AS (
       SELECT m.order_id,m.attachment_id,m.document_category,a.file_name,a.content_type,a.size_bytes,m.review_status,a.created_at,
         ROW_NUMBER() OVER(PARTITION BY m.order_id,m.document_category ORDER BY a.created_at DESC,a.id DESC) row_no
       FROM order_document_metadata m JOIN order_attachments a ON a.id=m.attachment_id
-      WHERE m.organization_id=? AND m.order_id IN (${placeholders}) AND m.document_category IN (${LOADING_DOCUMENT_PLACEHOLDERS})
+      WHERE m.organization_id=? AND m.order_id IN (${d1Placeholders(orderChunk.length)}) AND m.document_category IN (${LOADING_DOCUMENT_PLACEHOLDERS})
       ) SELECT order_id,attachment_id,document_category,file_name,content_type,size_bytes,review_status,created_at
-        FROM ranked WHERE row_no=1 ORDER BY created_at DESC`).bind(organizationId,...orderRows.map(order=>order.order_id),...LOADING_DOCUMENTS.map(document=>document.code)).all<{order_id:string;attachment_id:string;document_category:LoadingDocumentCode;file_name:string;content_type:string;size_bytes:number;review_status:string;created_at:string}>(),
+        FROM ranked WHERE row_no=1 ORDER BY created_at DESC`).bind(organizationId,...orderChunk.map(order=>order.order_id),...LOADING_DOCUMENTS.map(document=>document.code)).all<DocumentRow>();
+      documentRows.push(...result.results);
+    }
+  })();
+  const [,workflowOrders,documentRequirements]=await Promise.all([
+    documentRowsPromise,
     loadLoadingBatchWorkflowOrders(organizationId,orderRows.map(order=>order.order_id)),
     loadOrderLoadingDocumentRequirements(organizationId,orderRows.map(order=>order.order_id)),
   ]);
   const requirementsByOrder=new Map(documentRequirements.map(requirement=>[requirement.orderId,requirement]));
-  const latestByOrderCode=new Map<string,(typeof documentRows.results)[number]>();
-  for(const row of documentRows.results){const key=`${row.order_id}:${row.document_category}`;if(!latestByOrderCode.has(key))latestByOrderCode.set(key,row);}
+  const latestByOrderCode=new Map<string,DocumentRow>();
+  for(const row of documentRows){const key=`${row.order_id}:${row.document_category}`;if(!latestByOrderCode.has(key))latestByOrderCode.set(key,row);}
   const documentGroups=orderRows.map(order=>{
     const requirements=requirementsByOrder.get(order.order_id);
     const documents=(requirements?.documents??[]).filter(type=>type.isActive).map(type=>{

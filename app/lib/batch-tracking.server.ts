@@ -1,5 +1,6 @@
 ﻿import { env } from "cloudflare:workers";
 import { syncOrderWorkflowSnapshot } from "./order-modules.server";
+import { chunkD1Values, d1Placeholders } from "./d1-bindings";
 import {
   type BatchTrackingMilestone,
   BATCH_TRACKING_MILESTONES,
@@ -52,16 +53,6 @@ const MILESTONE_PROGRESS_WEIGHTS: Record<string, number> = {
   station_arrived: 100,
 };
 
-const CHUNK_SIZE = 600;
-
-function chunkArray<T>(values: T[], size = CHUNK_SIZE): T[][] {
-  if (!values.length) return [];
-  const chunks: T[][] = [];
-  for (let i = 0; i < values.length; i += size) {
-    chunks.push(values.slice(i, i + size));
-  }
-  return chunks;
-}
 export async function getBatchOrderIds(
   organizationId: string,
   batchId: string,
@@ -98,13 +89,13 @@ export async function validateBatchTrackingRequiredPrevious(
 ): Promise<{ missingOrders: number; sampleOrderNumber: string | null } | null> {
   const required = BATCH_TRACKING_REQUIRED_PREVIOUS[milestoneCode];
   if (!required || required.length === 0 || !orderIds.length) return null;
-  const requiredPlaceholders = required.map(() => "?").join(",");
+  const requiredPlaceholders = d1Placeholders(required.length);
 
   let missingOrders = 0;
   let sampleOrderNumber: string | null = null;
 
-  for (const chunk of chunkArray(orderIds)) {
-    const placeholders = chunk.map(() => "?").join(",");
+  for (const chunk of chunkD1Values(orderIds, 1 + required.length)) {
+    const placeholders = d1Placeholders(chunk.length);
     const missingRows = await env.DB.prepare(
       `SELECT o.order_number
        FROM transport_orders o
@@ -302,8 +293,8 @@ export async function syncBatchRoadStatusFromTracking(
   if (!orderIds.length) return;
 
   const latestByChunk: Array<{ milestone_code: string; event_at: string; location: string | null }> = [];
-  for (const chunk of chunkArray(orderIds)) {
-    const placeholders = chunk.map(() => "?").join(",");
+  for (const chunk of chunkD1Values(orderIds)) {
+    const placeholders = d1Placeholders(chunk.length);
     const latest = await env.DB.prepare(
       `SELECT milestone_code,event_at,location
        FROM order_tracking_milestones
@@ -350,8 +341,8 @@ export async function syncBatchRoadStatusFromTracking(
   const progress = MILESTONE_PROGRESS_WEIGHTS[latestMilestone.milestone_code] ?? 0;
   let exportedAt: string | null = null;
   let borderLocation: string | null = null;
-  for (const chunk of chunkArray(orderIds)) {
-    const placeholders = chunk.map(() => "?").join(",");
+  for (const chunk of chunkD1Values(orderIds)) {
+    const placeholders = d1Placeholders(chunk.length);
     const transition = await env.DB.prepare(
       `SELECT
          MAX(CASE WHEN milestone_code='exported' THEN event_at END) exported_at,
@@ -425,8 +416,8 @@ export async function recordShipmentEventForBatchOrders(params: {
   if (!orderIds.length) return;
 
   const shipmentIds = new Set<string>();
-  for (const chunk of chunkArray(orderIds)) {
-    const placeholders = chunk.map(() => "?").join(",");
+  for (const chunk of chunkD1Values(orderIds)) {
+    const placeholders = d1Placeholders(chunk.length);
     const shipmentRows = await env.DB.prepare(
       `SELECT s.id
        FROM shipments s
@@ -488,8 +479,8 @@ export async function syncBatchTrackingMilestonesFromBatch(
     }
   >();
 
-  for (const chunk of chunkArray(orderIds)) {
-    const placeholders = chunk.map(() => "?").join(",");
+  for (const chunk of chunkD1Values(orderIds)) {
+    const placeholders = d1Placeholders(chunk.length);
     const milestones = await env.DB.prepare(
       `SELECT milestone_code, milestone_name, event_at, location, vehicle_reference, notes, visible_to_customer, created_at
        FROM order_tracking_milestones
@@ -551,58 +542,79 @@ export async function syncBatchTrackingMilestonesFromBatch(
     }
   }
 
-  for (const chunk of chunkArray(orderIds)) {
-    const statements = chunk.flatMap((targetOrderId) =>
-      sharedMilestones.map((milestone) =>
-        env.DB.prepare(
-          `INSERT INTO order_tracking_milestones(
-             id,organization_id,order_id,milestone_code,milestone_name,event_at,
-             location,vehicle_reference,notes,visible_to_customer,created_by_user_id,created_at
-           )
-           SELECT ?,?,?,?,?,?,?,?,?,?,?,?
-           WHERE NOT EXISTS(
-             SELECT 1 FROM order_tracking_milestones
-             WHERE organization_id=? AND order_id=? AND milestone_code=? AND event_at=?
-           )`,
-        ).bind(
-          crypto.randomUUID(),
-          organizationId,
-          targetOrderId,
-          milestone.milestone_code,
-          milestone.milestone_name,
-          milestone.event_at,
-          milestone.location,
-          milestone.vehicle_reference,
-          milestone.notes,
-          milestone.visible_to_customer,
-          actorUserId,
-          milestone.created_at || new Date().toISOString(),
-          organizationId,
-          targetOrderId,
-          milestone.milestone_code,
-          milestone.event_at,
-        ),
-      ),
-    );
-    if (statements.length) {
-      await env.DB.batch(statements);
-    }
-  }
+  const fallbackCreatedAt = new Date().toISOString();
+  await env.DB.prepare(
+    `WITH target_orders AS (
+       SELECT DISTINCT CAST(value AS TEXT) AS order_id
+       FROM json_each(?)
+     ),
+     shared_milestones AS (
+       SELECT
+         CAST(key AS INTEGER) AS source_order,
+         CAST(json_extract(value, '$.milestone_code') AS TEXT) AS milestone_code,
+         CAST(json_extract(value, '$.milestone_name') AS TEXT) AS milestone_name,
+         CAST(json_extract(value, '$.event_at') AS TEXT) AS event_at,
+         json_extract(value, '$.location') AS location,
+         json_extract(value, '$.vehicle_reference') AS vehicle_reference,
+         json_extract(value, '$.notes') AS notes,
+         CAST(json_extract(value, '$.visible_to_customer') AS INTEGER) AS visible_to_customer,
+         COALESCE(
+           NULLIF(CAST(json_extract(value, '$.created_at') AS TEXT), ''),
+           ?
+         ) AS created_at
+       FROM json_each(?)
+     ),
+     ranked_milestones AS (
+       SELECT *, ROW_NUMBER() OVER (
+         PARTITION BY milestone_code, event_at
+         ORDER BY source_order
+       ) AS insert_rank
+       FROM shared_milestones
+     ),
+     insertable_milestones AS (
+       SELECT * FROM ranked_milestones WHERE insert_rank=1
+     )
+     INSERT INTO order_tracking_milestones(
+       id,organization_id,order_id,milestone_code,milestone_name,event_at,
+       location,vehicle_reference,notes,visible_to_customer,created_by_user_id,created_at
+     )
+     SELECT
+       lower(hex(randomblob(16))), ?, target.order_id,
+       milestone.milestone_code, milestone.milestone_name, milestone.event_at,
+       milestone.location, milestone.vehicle_reference, milestone.notes,
+       milestone.visible_to_customer, ?, milestone.created_at
+     FROM target_orders target
+     CROSS JOIN insertable_milestones milestone
+     WHERE NOT EXISTS(
+       SELECT 1 FROM order_tracking_milestones existing
+       WHERE existing.organization_id=?
+         AND existing.order_id=target.order_id
+         AND existing.milestone_code=milestone.milestone_code
+         AND existing.event_at=milestone.event_at
+     )`,
+  )
+    .bind(
+      JSON.stringify(orderIds),
+      fallbackCreatedAt,
+      JSON.stringify(sharedMilestones),
+      organizationId,
+      actorUserId,
+      organizationId,
+    )
+    .run();
 
   const latestMilestones = [...latestByCode.values()];
-  for (const chunk of chunkArray(orderIds)) {
-    await Promise.all(
-      chunk.flatMap((targetOrderId) =>
-        latestMilestones.map((milestone) =>
-          syncTrackingModuleStatusForOrder(
-            organizationId,
-            targetOrderId,
-            milestone.milestone_code,
-            actorUserId,
-            new Date().toISOString(),
-          ),
-        ),
-      ),
-    );
+  // A status projection performs several dependent reads/writes. Keep it serial so a
+  // large batch cannot fan out into unbounded simultaneous D1 connections.
+  for (const chunk of chunkD1Values(orderIds)) {
+    for (const targetOrderId of chunk)
+      for (const milestone of latestMilestones)
+        await syncTrackingModuleStatusForOrder(
+          organizationId,
+          targetOrderId,
+          milestone.milestone_code,
+          actorUserId,
+          new Date().toISOString(),
+        );
   }
 }

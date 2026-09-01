@@ -114,18 +114,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     .bind(orderId, current.organizationId)
     .first<Order>();
   if (!order) throw new Response("订单不存在", { status: 404 });
-  const [
-    cargo,
-    packages,
-    batches,
-    vehicles,
-    loads,
-    bookings,
-    expenses,
-    services,
-    carriers,
-    cargoImages,
-  ] = await Promise.all([
+  const [cargo, packages, batches, vehicles] = await Promise.all([
     env.DB.prepare(
       "SELECT id,line_no,cargo_name_cn,cargo_name_en,hs_code,package_type,package_count,pieces_per_package,gross_weight_per_package_kg,volume_per_package_cbm,marks FROM order_cargo_items WHERE order_id=? ORDER BY line_no",
     )
@@ -146,6 +135,8 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     )
       .bind(orderId, orderId)
       .all<Vehicle>(),
+  ]);
+  const [loads, bookings, expenses, services] = await Promise.all([
     env.DB.prepare(
       `SELECT l.id,l.batch_id,l.vehicle_id,l.package_id,v.vehicle_no,p.package_code,i.cargo_name_cn FROM transport_vehicle_loads l JOIN transport_batch_vehicles v ON v.id=l.vehicle_id JOIN order_cargo_packages p ON p.id=l.package_id JOIN order_cargo_items i ON i.id=p.cargo_item_id WHERE p.order_id=? ORDER BY l.created_at`,
     )
@@ -166,6 +157,8 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     )
       .bind(orderId)
       .all<Service>(),
+  ]);
+  const [carriers, cargoImages] = await Promise.all([
     env.DB.prepare(
       "SELECT id,name FROM carriers WHERE organization_id=? AND status='active' ORDER BY name",
     )

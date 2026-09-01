@@ -41,6 +41,13 @@ export async function synchronizeBatchTransport(organizationId:string,batchId:st
     !stats?.vehicle_count ? (isFtlBatch?"整车运输单尚未生成车辆":"配载运输单尚未添加车辆") : null,
     stats?.vehicle_count&&stats.staffed_vehicle_count!==stats.vehicle_count ? "车辆车牌/司机未完整" : null,
   ].filter(Boolean).join("；");
+  const blockingReason=batchBlockers||null;
+  const currentStepName=batchOutboundCompleted
+    ? "装车出库交接完成"
+    : batchBaseReady
+      ? (isFtlBatch?"整车运输单已安排，待装车出库":"配载运输单已安排，待仓库整批装车出库")
+      : (isFtlBatch?"整车运输单待完善车辆信息":"配载成单，待完善整批车辆信息");
+  const progress=batchOutboundCompleted?100:batchBaseReady?75:60;
   const statements=[
     env.DB.prepare(`UPDATE transport_batches
       SET status=CASE
@@ -54,33 +61,33 @@ export async function synchronizeBatchTransport(organizationId:string,batchId:st
           END,
           updated_at=?
       WHERE id=? AND organization_id=?`).bind(batchReady?"loading":"planning",batchReady?"preplanned":"waiting_loading",now,batchId,organizationId),
-    ...orders.results.map((order)=>{
-      const blockingReason=batchBlockers||null;
-      const currentStepName=batchOutboundCompleted?"装车出库交接完成":batchBaseReady?(isFtlBatch?"整车运输单已安排，待装车出库":"配载运输单已安排，待仓库整批装车出库"):(isFtlBatch?"整车运输单待完善车辆信息":"配载成单，待完善整批车辆信息");
-      const progress=batchOutboundCompleted?100:batchBaseReady?75:60;
-      return env.DB.prepare(`UPDATE order_module_instances
+    env.DB.prepare(`UPDATE order_module_instances
          SET status=?,current_step_code=?,current_step_name=?,progress_percent=?,
-             started_at=COALESCE(started_at,?),
-             completed_at=CASE WHEN ?='completed' THEN COALESCE(completed_at,?) ELSE NULL END,
-             blocking_reason=?,updated_at=?
-       WHERE organization_id=? AND module_code='loading' AND enabled=1 AND order_id=?`).bind(
-        batchOutboundCompleted?"completed":"in_progress",
-        batchOutboundCompleted?"confirmed":"planned",
+              started_at=COALESCE(started_at,?),
+              completed_at=CASE WHEN ?='completed' THEN COALESCE(completed_at,?) ELSE NULL END,
+              blocking_reason=?,updated_at=?
+       WHERE organization_id=? AND module_code='loading' AND enabled=1
+         AND order_id IN (
+           SELECT order_id FROM transport_batch_orders
+           WHERE organization_id=? AND batch_id=? AND status!='removed'
+         )`).bind(
+         batchOutboundCompleted?"completed":"in_progress",
+         batchOutboundCompleted?"confirmed":"planned",
         currentStepName,
         progress,
         now,
         batchOutboundCompleted?"completed":"in_progress",
         now,
         batchOutboundCompleted?null:blockingReason,
-        now,
-        organizationId,
-        order.order_id,
-      );
-    }),
+         now,
+         organizationId,
+         organizationId,
+         batchId,
+       ),
   ];
   await env.DB.batch(statements);
-  await Promise.all([
-    ...orders.results.map((item)=>syncOrderWorkflowSnapshot(organizationId,item.order_id)),
-    synchronizeOrderExceptionStatuses(organizationId,orders.results.map(item=>item.order_id),now),
-  ]);
+  await synchronizeOrderExceptionStatuses(organizationId,orders.results.map(item=>item.order_id),now);
+  for (const item of orders.results) {
+    await syncOrderWorkflowSnapshot(organizationId,item.order_id);
+  }
 }

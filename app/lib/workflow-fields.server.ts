@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { chunkD1Values, d1Placeholders } from "./d1-bindings";
 import type { OrderModuleCode } from "./order-modules";
 import { domesticTransportPayableWorkflowValues } from "./transport-workflow";
 import { orderDocumentPlacements } from "./order-documents";
@@ -416,19 +417,21 @@ export async function inspectHiddenWorkflowFieldData(input: {
 
 export async function listTemplateWorkflowFields(workflowIds: string[]) {
   if (!workflowIds.length) return [] as (WorkflowFieldRule & { workflowId: string })[];
-  const placeholders = workflowIds.map(() => "?").join(",");
-  const rows = await env.DB.prepare(
-    `SELECT f.id,f.workflow_id,s.step_key,COALESCE(f.module_code,'consignment') module_code,
-            f.field_key,f.label,f.field_type,f.is_required,f.is_active,f.sort_order,
-            f.options_text,f.help_text
-     FROM workflow_step_fields f
-     JOIN workflow_steps s ON s.id=f.step_id
-     WHERE f.workflow_id IN (${placeholders})
-     ORDER BY f.workflow_id,s.sort_order,f.sort_order,f.field_key`,
-  )
-    .bind(...workflowIds)
-    .all<RawField>();
-  return rows.results.map(toRule);
+  const fields: RawField[] = [];
+  for (const workflowChunk of chunkD1Values([...new Set(workflowIds)])) {
+    const rows = await env.DB.prepare(
+      `SELECT f.id,f.workflow_id,s.step_key,COALESCE(f.module_code,'consignment') module_code,
+              f.field_key,f.label,f.field_type,f.is_required,f.is_active,f.sort_order,
+              f.options_text,f.help_text
+       FROM workflow_step_fields f
+       JOIN workflow_steps s ON s.id=f.step_id
+       WHERE f.workflow_id IN (${d1Placeholders(workflowChunk.length)})
+       ORDER BY f.workflow_id,s.sort_order,f.sort_order,f.field_key`,
+    ).bind(...workflowChunk).all<RawField>();
+    fields.push(...rows.results);
+  }
+  fields.sort((left, right) => left.workflow_id.localeCompare(right.workflow_id));
+  return fields.map(toRule);
 }
 
 export async function loadOrderModuleWorkflowFields(
@@ -537,11 +540,10 @@ export async function missingRequiredWorkflowStepFields(
     "exceptions",
     "review",
   ];
-  const groups = await Promise.all(
-    moduleCodes.map((moduleCode) =>
-      loadOrderModuleWorkflowFields(organizationId, orderId, moduleCode),
-    ),
-  );
+  const groups: Awaited<ReturnType<typeof loadOrderModuleWorkflowFields>>[] = [];
+  for (const moduleCode of moduleCodes) {
+    groups.push(await loadOrderModuleWorkflowFields(organizationId, orderId, moduleCode));
+  }
   return groups
     .flat()
     .filter(
@@ -1109,17 +1111,18 @@ async function resolveFieldPresence(
   const customFields = rules.filter((rule) => !rule.isBuiltIn && rule.stepKey !== "quotation");
   if (customFields.length) {
     const ids = customFields.map((item) => item.id);
-    const placeholders = ids.map(() => "?").join(",");
-    const values = await env.DB.prepare(
-      `SELECT field_instance_id,value_text FROM order_custom_workflow_field_values
-       WHERE organization_id=? AND order_id=? AND field_instance_id IN (${placeholders})`,
-    ).bind(organizationId, orderId, ...ids).all<{ field_instance_id: string; value_text: string | null }>();
-    for (const item of values.results)
-      setPresence(
-        result,
-        customFields.find((field) => field.id === item.field_instance_id)?.fieldKey ?? "",
-        item.value_text,
-      );
+    for (const idChunk of chunkD1Values(ids, 2)) {
+      const values = await env.DB.prepare(
+        `SELECT field_instance_id,value_text FROM order_custom_workflow_field_values
+         WHERE organization_id=? AND order_id=? AND field_instance_id IN (${d1Placeholders(idChunk.length)})`,
+      ).bind(organizationId, orderId, ...idChunk).all<{ field_instance_id: string; value_text: string | null }>();
+      for (const item of values.results)
+        setPresence(
+          result,
+          customFields.find((field) => field.id === item.field_instance_id)?.fieldKey ?? "",
+          item.value_text,
+        );
+    }
   }
   return result;
 }

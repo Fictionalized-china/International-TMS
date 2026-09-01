@@ -85,7 +85,7 @@ export function ConfirmAction({
         title={title}
         isOpen={open}
         onOpenChange={setOpen}
-        initialFocusSelector={confirmationKeyword ? "[data-confirm-keyword]" : "[data-confirm-action]"}
+        initialFocusSelector={confirmationKeyword ? "[data-confirm-keyword]" : "[data-confirm-cancel]"}
       >
         <div className="confirm-action-content">
           <p>{description}</p>
@@ -102,7 +102,12 @@ export function ConfirmAction({
           )}
           {error && <div className="alert error" role="alert">{error}</div>}
           <div className="confirm-action-buttons">
-            <button type="button" className="secondary" onClick={() => setOpen(false)}>
+            <button
+              type="button"
+              className="secondary"
+              data-confirm-cancel
+              onClick={() => setOpen(false)}
+            >
               {cancelLabel}
             </button>
             <button

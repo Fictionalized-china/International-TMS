@@ -146,8 +146,9 @@ export async function loader({ request }: Route.LoaderArgs) {
     Object.keys(queueMeta).map((key) => [key, categorized.filter((row) => row.queue === key).length]),
   ) as Record<WarehouseQueue, number>;
   const orderIds = [...new Set(scoped.map((row) => row.order_id))];
-  const cargoResults = await Promise.all(
-    chunk(orderIds, 80).map((ids) => env.DB.prepare(
+  const cargoItems: WarehouseCargoItem[] = [];
+  for (const ids of chunk(orderIds, 80)) {
+    const cargoResult = await env.DB.prepare(
       `SELECT id,order_id,line_no,cargo_name_cn,cargo_name_en,hs_code,overseas_hs_code,
               package_type,package_count,pieces_per_package,gross_weight_per_package_kg,
               net_weight_per_package_kg,length_cm,width_cm,height_cm,volume_per_package_cbm,
@@ -155,13 +156,14 @@ export async function loader({ request }: Route.LoaderArgs) {
          FROM order_cargo_items
         WHERE organization_id=? AND order_id IN (${ids.map(() => "?").join(",")})
         ORDER BY order_id,line_no,id`,
-    ).bind(user.organizationId, ...ids).all<WarehouseCargoItem>()),
-  );
+    ).bind(user.organizationId, ...ids).all<WarehouseCargoItem>();
+    cargoItems.push(...cargoResult.results);
+  }
   return {
     user,
     warehouse,
     rows: scoped,
-    cargoItems: cargoResults.flatMap((result) => result.results),
+    cargoItems,
     counts,
     view,
     q,

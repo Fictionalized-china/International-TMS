@@ -933,7 +933,7 @@ export async function action({ request }: Route.ActionArgs) {
     return { success: overseasArrivalWarning, barcode };
   if (overseasArrival?.completed)
     return {
-      success: `境外目的仓收货完成：${barcode}；${overseasArrival.batchNumber} 全部订单已清点，境外运输已结束并已自动通知客户`,
+      success: `境外目的仓收货完成：${barcode}；${overseasArrival.batchNumber} 全部订单已清点，境外运输已结束${overseasArrival.warning ? `；${overseasArrival.warning}` : "并已自动通知客户"}`,
       barcode,
     };
   if (overseasArrival)
@@ -948,6 +948,7 @@ type OverseasReceivingResult = {
   completed: boolean;
   batchNumber: string;
   remaining: number;
+  warning?: string | null;
 };
 
 async function finalizeOverseasReceiving(input: {
@@ -958,15 +959,35 @@ async function finalizeOverseasReceiving(input: {
   notes: string;
 }): Promise<OverseasReceivingResult> {
   const batch = await env.DB.prepare(
-    `SELECT b.id,b.batch_number,b.road_status
+    `SELECT b.id,b.batch_number,b.road_status,b.actual_arrival_at
      FROM transport_batch_orders bo
      JOIN transport_batches b ON b.id=bo.batch_id AND b.organization_id=bo.organization_id
      WHERE bo.organization_id=? AND bo.order_id=? AND bo.status!='removed' AND b.status!='cancelled'
      ORDER BY b.updated_at DESC LIMIT 1`,
-  ).bind(input.organizationId, input.orderId).first<{ id: string; batch_number: string; road_status: string }>();
+  ).bind(input.organizationId, input.orderId).first<{
+    id: string;
+    batch_number: string;
+    road_status: string;
+    actual_arrival_at: string | null;
+  }>();
   if (!batch) throw new Error("未找到本票对应的整车运输单或配载运输单");
-  if (["overseas_arrived", "waiting_pickup", "pickup_completed"].includes(batch.road_status))
+  if (batch.road_status === "pickup_completed")
     return { completed: true, batchNumber: batch.batch_number, remaining: 0 };
+  if (["overseas_arrived", "waiting_pickup"].includes(batch.road_status)) {
+    const retry = await confirmOverseasBatchArrival({
+      organizationId: input.organizationId,
+      batchId: batch.id,
+      actualArrivalAt: batch.actual_arrival_at || input.actualArrivalAt,
+      actorUserId: input.actorUserId,
+      notes: input.notes,
+    });
+    return {
+      completed: true,
+      batchNumber: batch.batch_number,
+      remaining: 0,
+      warning: retry.warning,
+    };
+  }
   if (batch.road_status !== "outbound_in_transit")
     throw new Error("运输单尚未登记实际出境");
 
@@ -989,14 +1010,19 @@ async function finalizeOverseasReceiving(input: {
   if (ready < total)
     return { completed: false, batchNumber: batch.batch_number, remaining: total - ready };
 
-  await confirmOverseasBatchArrival({
+  const arrival = await confirmOverseasBatchArrival({
     organizationId: input.organizationId,
     batchId: batch.id,
     actualArrivalAt: input.actualArrivalAt,
     actorUserId: input.actorUserId,
     notes: input.notes,
   });
-  return { completed: true, batchNumber: batch.batch_number, remaining: 0 };
+  return {
+    completed: true,
+    batchNumber: batch.batch_number,
+    remaining: 0,
+    warning: arrival.warning,
+  };
 }
 
 export default function WarehouseInbound({

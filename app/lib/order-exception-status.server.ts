@@ -1,6 +1,5 @@
 import { env } from "cloudflare:workers";
-
-const CHUNK_SIZE=700;
+import { chunkD1Values, d1Placeholders } from "./d1-bindings";
 
 export async function synchronizeOrderExceptionStatuses(
   organizationId:string,
@@ -9,9 +8,8 @@ export async function synchronizeOrderExceptionStatuses(
 ) {
   const unique=[...new Set(orderIds.filter(Boolean))];
   let changed=0;
-  for(let index=0;index<unique.length;index+=CHUNK_SIZE){
-    const chunk=unique.slice(index,index+CHUNK_SIZE);
-    const placeholders=chunk.map(()=>"?").join(",");
+  for(const chunk of chunkD1Values(unique,2)){
+    const placeholders=d1Placeholders(chunk.length);
     const result=await env.DB.prepare(
       `UPDATE transport_orders AS target
        SET exception_status=CASE

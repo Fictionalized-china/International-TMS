@@ -10,6 +10,7 @@ import {
 import { listOrderWorkflowTransitions } from "../lib/order-workflow.server";
 import { runOrderWorkflowAction } from "../lib/order-workflow-action.server";
 import { valueOf } from "../lib/validation";
+import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 import { Modal } from "../components/Modal";
 import { ConfirmAction } from "../components/ConfirmAction";
 import { writeAudit } from "../lib/audit.server";
@@ -284,8 +285,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
     listOrderSupplementTasks(current.organizationId,id),
   ]);
   const workflowSwitchImpact = await inspectWorkflowVersionSwitchImpact(current.organizationId,id);
-  const [history, attachments, macro, businessWorkflow, workflowSteps, workflowFormRows, tasks, services, members, customers, transitions, expenseRisk, packageLabels, workflowVersions] =
-    await Promise.all([
+  const [history, attachments, macro, businessWorkflow] = await Promise.all([
     env.DB.prepare(
       `SELECT h.id,h.action_name,h.from_status,h.to_status,h.to_step_code,a.display_name actor_name,au.display_name assignee_name,h.notes,h.occurred_at FROM order_workflow_history h LEFT JOIN users a ON a.id=h.actor_user_id LEFT JOIN users au ON au.id=h.assignee_user_id WHERE h.order_id=? AND h.organization_id=? ORDER BY h.occurred_at DESC`,
     )
@@ -311,6 +311,8 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
     )
       .bind(id, current.organizationId)
       .first<BusinessWorkflow>(),
+  ]);
+  const [workflowSteps, workflowFormRows, tasks, services] = await Promise.all([
     env.DB.prepare(
       `SELECT ws.step_key,ws.name,ws.sort_order,ws.actor_scope,ws.is_required,
         COUNT(f.id) field_count
@@ -360,6 +362,8 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
     )
       .bind(id, current.organizationId)
       .all<Service>(),
+  ]);
+  const [members, customers, transitions, expenseRisk] = await Promise.all([
     env.DB.prepare(
       "SELECT u.id,u.display_name,d.name department_name FROM memberships m JOIN users u ON u.id=m.user_id LEFT JOIN departments d ON d.id=m.department_id WHERE m.organization_id=? AND m.status='active' AND u.status='active' ORDER BY d.sort_order,u.display_name",
     )
@@ -391,6 +395,8 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
         current.organizationId,id,
       )
       .first<ExpenseRisk>(),
+  ]);
+  const [packageLabels, workflowVersions] = await Promise.all([
     env.DB.prepare(
       `SELECT p.id,p.barcode,p.package_number,p.status,p.pieces,p.weight_kg,p.volume_cbm,p.created_at,
               i.cargo_name_cn cargo_name,w.name warehouse_name,z.name zone_name,l.name location_name
@@ -429,13 +435,15 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
         .map((row) => row.module_code as OrderModuleCode),
     ),
   ];
-  const currentWorkflowFields = (
-    await Promise.all(
-      currentWorkflowModuleCodes.map((moduleCode) =>
-        loadOrderModuleWorkflowFields(current.organizationId, id, moduleCode),
-      ),
-    )
-  ).flat();
+  const currentWorkflowFieldGroups: Awaited<
+    ReturnType<typeof loadOrderModuleWorkflowFields>
+  >[] = [];
+  for (const moduleCode of currentWorkflowModuleCodes) {
+    currentWorkflowFieldGroups.push(
+      await loadOrderModuleWorkflowFields(current.organizationId, id, moduleCode),
+    );
+  }
+  const currentWorkflowFields = currentWorkflowFieldGroups.flat();
   const requestedModuleCode = requestUrl.searchParams.get("module") as OrderModuleCode | null;
   const requestedConsignmentSection = requestUrl.searchParams.get("section");
   const selectedConsignmentSection = ["info", "files", "costs"].includes(
@@ -548,28 +556,33 @@ export async function action({ request, params, context }: Route.ActionArgs) {
     const impact=await inspectWorkflowVersionSwitchImpact(current.organizationId,sourceOrder.id);
     if(!impact.allowed)return{formError:impact.reason||"当前阶段不允许切换工作流版本"};
     const orderIds=impact.orderIds;
-    const placeholders=orderIds.map(()=>"?").join(",");
-    const validOrders=await env.DB.prepare(
-      `SELECT COUNT(*) count FROM transport_orders WHERE organization_id=? AND business_type=? AND id IN (${placeholders})`,
-    ).bind(current.organizationId,target.road_load_type,...orderIds).first<{count:number}>();
-    if(validOrders?.count!==orderIds.length)return{formError:"同一配载批次存在类型不一致订单，已停止切换"};
-    const incompatibleOrders=await env.DB.prepare(
-      `SELECT o.order_number,wi.current_step_key
-       FROM transport_orders o
-       LEFT JOIN workflow_instances wi ON wi.order_id=o.id AND wi.organization_id=o.organization_id
-       WHERE o.organization_id=? AND o.id IN (${placeholders})
-         AND (
-           wi.id IS NULL OR NOT EXISTS(
-             SELECT 1 FROM workflow_steps target_step
-             WHERE target_step.workflow_id=? AND target_step.step_key=wi.current_step_key
-               AND target_step.is_active=1
-           )
-         )`,
-    ).bind(current.organizationId,...orderIds,target.id).all<{
+    let validOrderCount=0;
+    const incompatibleRows:Array<{
       order_number:string;current_step_key:string|null;
-    }>();
-    if(incompatibleOrders.results.length){
-      const numbers=incompatibleOrders.results.map((item)=>item.order_number).join("、");
+    }>=[];
+    for(const orderChunk of chunkD1Values(orderIds,2)){
+      const validOrders=await env.DB.prepare(
+        `SELECT COUNT(*) count FROM transport_orders WHERE organization_id=? AND business_type=? AND id IN (${d1Placeholders(orderChunk.length)})`,
+      ).bind(current.organizationId,target.road_load_type,...orderChunk).first<{count:number}>();
+      validOrderCount+=validOrders?.count??0;
+      const incompatibleOrders=await env.DB.prepare(
+        `SELECT o.order_number,wi.current_step_key
+         FROM transport_orders o
+         LEFT JOIN workflow_instances wi ON wi.order_id=o.id AND wi.organization_id=o.organization_id
+         WHERE o.organization_id=? AND o.id IN (${d1Placeholders(orderChunk.length)})
+           AND (
+             wi.id IS NULL OR NOT EXISTS(
+               SELECT 1 FROM workflow_steps target_step
+               WHERE target_step.workflow_id=? AND target_step.step_key=wi.current_step_key
+                 AND target_step.is_active=1
+             )
+           )`,
+      ).bind(current.organizationId,...orderChunk,target.id).all<{order_number:string;current_step_key:string|null}>();
+      incompatibleRows.push(...incompatibleOrders.results);
+    }
+    if(validOrderCount!==orderIds.length)return{formError:"同一配载批次存在类型不一致订单，已停止切换"};
+    if(incompatibleRows.length){
+      const numbers=incompatibleRows.map((item)=>item.order_number).join("、");
       return{formError:`目标版本缺少受影响订单的当前节点，已在写入前整体停止：${numbers}`};
     }
     try{

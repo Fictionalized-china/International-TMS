@@ -32,10 +32,8 @@ import {
   getBatchOrderIds,
   getBatchMainVehiclePlate,
   validateBatchTrackingRequiredPrevious,
-  insertTrackingMilestoneForBatchOrders,
   syncTrackingModuleStatusForOrder,
   syncBatchRoadStatusFromTracking,
-  recordShipmentEventForBatchOrders,
 } from "../lib/batch-tracking.server";
 import { Modal } from "../components/Modal";
 import {
@@ -51,8 +49,8 @@ import {
 import { broadcastInternalNotification } from "../lib/internal-notifications.server";
 import { isActiveExceptionStatus } from "../lib/batch-exception-policy";
 import { synchronizeBatchTransport } from "../lib/batch-transport-sync.server";
+import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 
-const CHUNK_SIZE = 800;
 const WAREHOUSE_OWNED_BATCH_INTENTS = new Set([
   "arrangement",
   "vehicle",
@@ -72,15 +70,6 @@ async function ensureOrderModulesModule() {
     orderModulesImportPromise = import("../lib/order-modules.server");
   }
   return orderModulesImportPromise;
-}
-
-function chunkArray<T>(values: T[], size = CHUNK_SIZE): T[][] {
-  if (!values.length) return [];
-  const chunks: T[][] = [];
-  for (let index = 0; index < values.length; index += size) {
-    chunks.push(values.slice(index, index + size));
-  }
-  return chunks;
 }
 
 async function syncOrderWorkflowSnapshotSafe(organizationId: string, orderId: string) {
@@ -185,7 +174,10 @@ export async function loader({request,params}:Route.LoaderArgs){
   const fromOrderId = new URL(request.url).searchParams.get("fromOrderId");
   const batch=await env.DB.prepare(`SELECT b.id,b.batch_number,b.batch_name,b.origin_location,b.destination_location,b.planned_departure_at,b.planned_arrival_at,b.status,b.road_status,b.carrier_id,b.warehouse_id,b.border_port,b.customs_location,b.transit_location,b.route_notes,b.notes,b.overseas_carrier_name,b.overseas_vehicle_type,b.overseas_vehicle_count,b.overseas_vehicle_plate,b.overseas_driver_name,b.overseas_driver_phone,c.name carrier_name,w.name warehouse_name FROM transport_batches b LEFT JOIN carriers c ON c.id=b.carrier_id LEFT JOIN warehouses w ON w.id=b.warehouse_id WHERE b.id=? AND b.organization_id=?`).bind(batchId,current.organizationId).first<Batch>();
   if(!batch)throw new Response("配载批次不存在",{status:404});
-  const [orders,vehicles,carriers,warehouses,borderPorts,costAllocations,batchDocuments,orderDocuments,customsSummaries,customsDeclarations,batchExceptions,exceptionPackages]=await Promise.all([
+  // D1 allows only a small number of simultaneous connections per Worker
+  // invocation. Load the workspace in groups of four instead of opening every
+  // independent query at once.
+  const [orders,vehicles,carriers,warehouses]=await Promise.all([
     env.DB.prepare(`SELECT bo.order_id,o.order_number,o.business_type,COALESCE((SELECT s.shipment_number FROM shipments s WHERE s.order_id=o.id ORDER BY s.created_at DESC LIMIT 1),o.order_number) work_number,c.name customer_name,o.cargo_description,
         COALESCE((SELECT GROUP_CONCAT(NULLIF(TRIM(i.cargo_name_cn),''),'、') FROM order_cargo_items i WHERE i.order_id=o.id AND i.organization_id=o.organization_id),o.cargo_description) cargo_names,
         COALESCE((SELECT SUM(r.total_pieces) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=o.id AND r.status='completed'),o.pieces) pieces,
@@ -221,6 +213,8 @@ export async function loader({request,params}:Route.LoaderArgs){
       WHERE v.batch_id=? AND v.organization_id=? GROUP BY v.id ORDER BY v.created_at`).bind(batchId,current.organizationId).all<Vehicle>(),
     env.DB.prepare("SELECT id,name FROM carriers WHERE organization_id=? AND status='active' AND carrier_scope='overseas' ORDER BY name").bind(current.organizationId).all<Option>(),
     env.DB.prepare("SELECT id,name FROM warehouses WHERE organization_id=? AND status='active' AND warehouse_role IN ('domestic_collection','port') ORDER BY CASE warehouse_role WHEN 'domestic_collection' THEN 10 ELSE 20 END,code,name").bind(current.organizationId).all<Option>(),
+  ]);
+  const [borderPorts,costAllocations,batchDocuments,orderDocuments]=await Promise.all([
     env.DB.prepare("SELECT code,name FROM reference_data WHERE organization_id=? AND category='border_port' AND status='active' ORDER BY sort_order,code").bind(current.organizationId).all<ReferenceOption>(),
     loadCostAllocations(env.DB,current.organizationId,batchId),
     env.DB.prepare(`WITH ranked AS (
@@ -237,6 +231,8 @@ export async function loader({request,params}:Route.LoaderArgs){
       WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed'
     ) SELECT id,order_id,document_category,file_name,content_type,size_bytes,description,review_status,created_at
       FROM ranked WHERE row_no=1 ORDER BY created_at DESC`).bind(batchId,current.organizationId).all<OrderDocument>(),
+  ]);
+  const [customsSummaries,customsDeclarations,batchExceptions,exceptionPackages]=await Promise.all([
     env.DB.prepare(`SELECT bo.order_id,COUNT(d.id) total,COALESCE(SUM(CASE WHEN d.status='released' THEN 1 ELSE 0 END),0) released
       FROM transport_batch_orders bo
       LEFT JOIN order_customs_records r ON r.order_id=bo.order_id AND r.organization_id=bo.organization_id AND r.clearance_stage='origin'
@@ -266,16 +262,19 @@ export async function loader({request,params}:Route.LoaderArgs){
     FROM transport_batch_orders bo
     WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed'
     ORDER BY bo.sequence_no`).bind(batchId,current.organizationId).all<BatchOutboundStatus>();
-  const departureGateStatuses:DepartureGateStatus[]=await Promise.all(orders.results.map(async item=>({
-    order_id:item.order_id,
-    ...await checkOrderDeparture(current.organizationId,item.order_id,undefined,{warehouseDispatchConfirmed:true}),
-  })));
+  const departureGateStatuses:DepartureGateStatus[]=[];
+  for(const item of orders.results){
+    departureGateStatuses.push({
+      order_id:item.order_id,
+      ...await checkOrderDeparture(current.organizationId,item.order_id,undefined,{warehouseDispatchConfirmed:true}),
+    });
+  }
   const batchOrderIds=orders.results.map((item)=>item.order_id);
   const orderDocumentRequirements=await loadOrderLoadingDocumentRequirements(current.organizationId,batchOrderIds);
   const trackingMilestones: BatchTrackingMilestone[] = [];
   if(batchOrderIds.length){
-    for (const chunk of chunkArray(batchOrderIds, CHUNK_SIZE)) {
-      const trackingPlaceholders = chunk.map(() => "?").join(",");
+    for (const chunk of chunkD1Values(batchOrderIds, 1)) {
+      const trackingPlaceholders = d1Placeholders(chunk.length);
       const rows = await env.DB.prepare(`SELECT id,order_id,milestone_code,milestone_name,event_at,location,vehicle_reference,notes,visible_to_customer,created_at
         FROM order_tracking_milestones
         WHERE organization_id=? AND order_id IN (${trackingPlaceholders})
@@ -506,12 +505,20 @@ export async function action({request,params}:Route.ActionArgs){
     try{
       await confirmCostAllocation(env.DB,{organizationId:current.organizationId,allocationId,userId:current.userId,now});
       const affectedOrders=await env.DB.prepare("SELECT DISTINCT order_id FROM transport_cost_allocation_lines WHERE organization_id=? AND allocation_id=?").bind(current.organizationId,allocationId).all<{order_id:string}>();
-      await Promise.all(affectedOrders.results.map(async(item)=>{
-      await syncCostModuleStatusSafe(current.organizationId,item.order_id,now);
-        await syncOrderWorkflowSnapshotSafe(current.organizationId,item.order_id);
-      }));
-      await writeAudit({request,action:"transport.batch.cost_allocation.confirm",resourceType:"transport_cost_allocation",resourceId:allocationId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{batchId}});
-      return{success:"成本分摊已人工确认，并为各订单生成正式应付费用；该结果只影响内部应付和毛利，不会改客户应收。下一步请到订单费用模块确认、审核并锁定应付"};
+      const synchronizationFailures=(await mapWithConcurrency(affectedOrders.results,2,async(item)=>{
+        try{
+          await syncCostModuleStatusSafe(current.organizationId,item.order_id,now);
+          await syncOrderWorkflowSnapshotSafe(current.organizationId,item.order_id);
+          return null;
+        }catch{return item.order_id;}
+      })).filter((orderId):orderId is string=>orderId!==null);
+      let auditFailed=false;
+      try{await writeAudit({request,action:"transport.batch.cost_allocation.confirm",resourceType:"transport_cost_allocation",resourceId:allocationId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{batchId}})}catch{auditFailed=true}
+      const warning=[
+        synchronizationFailures.length?`${synchronizationFailures.length} 票订单的工作流快照待重试`:null,
+        auditFailed?"审计记录暂未写入":null,
+      ].filter(Boolean).join("；");
+      return{success:`成本分摊已人工确认，并为各订单生成正式应付费用；该结果只影响内部应付和毛利，不会改客户应收。下一步请到订单费用模块确认、审核并锁定应付${warning?`；注意：${warning}`:""}`};
     }catch(error){return{formError:errorMessage(error)}}
   }
   if(intent==="arrangement"){
@@ -551,9 +558,9 @@ export async function action({request,params}:Route.ActionArgs){
       env.DB.prepare("UPDATE transport_vehicle_loads SET vehicle_id=? WHERE organization_id=? AND batch_id=? AND vehicle_id!=?").bind(primaryVehicleId,current.organizationId,batchId,primaryVehicleId),
     ]);
     await synchronizeBatchTransport(current.organizationId,batchId,now);
-    await synchronizeBatchWarehouseProgress(current.organizationId,batchId,current.userId);
+    const warehouseProgressFailures=await synchronizeBatchWarehouseProgress(current.organizationId,batchId,current.userId);
     await writeAudit({request,action:"transport.batch.arrangement.update",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{carrierId:carrierId||null,warehouseId:warehouseId||null}});
-    return{success:"批次运输安排已保存；订单线路和货物数据已自动继承"};
+    return{success:`批次运输安排已保存；订单线路和货物数据已自动继承${warehouseProgressFailures.length?`；注意：${warehouseProgressFailures.length} 票订单的仓库进度待重试`:""}`};
   }
   if(intent==="vehicle"){
     const vehicleNo=valueOf(form,"vehicleNo");if(!vehicleNo)return{formError:"请填写车辆序号"};
@@ -578,9 +585,9 @@ export async function action({request,params}:Route.ActionArgs){
     const id=crypto.randomUUID();
     try{await env.DB.prepare("INSERT INTO transport_batch_vehicles(id,organization_id,batch_id,vehicle_no,vehicle_type,plate_number,driver_name,driver_phone,capacity_weight_kg,capacity_volume_cbm,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").bind(id,current.organizationId,batchId,vehicleNo,vehicleType,plateNumber,driverName,driverPhone,capacityWeight,capacityVolume,now,now).run()}catch{return{formError:"车辆序号重复或车辆信息无效"}}
     await synchronizeBatchTransport(current.organizationId,batchId,now);
-    await synchronizeBatchWarehouseProgress(current.organizationId,batchId,current.userId);
+    const warehouseProgressFailures=await synchronizeBatchWarehouseProgress(current.organizationId,batchId,current.userId);
     await writeAudit({request,action:"transport.batch.vehicle.create",resourceType:"transport_batch_vehicle",resourceId:id,organizationId:current.organizationId,actorUserId:current.userId,metadata:{batchId,vehicleNo}});
-    return{success:"车辆已加入配载批次"};
+    return{success:`车辆已加入配载批次${warehouseProgressFailures.length?`；注意：${warehouseProgressFailures.length} 票订单的仓库进度待重试`:""}`};
   }
   if(intent==="exit_confirm"){
     const actualExitAt=valueOf(form,"actualExitAt"),exitPort=valueOf(form,"exitPort"),exitVehiclePlate=valueOf(form,"exitVehiclePlate").trim().toUpperCase();
@@ -622,36 +629,92 @@ export async function action({request,params}:Route.ActionArgs){
       if(!readiness.ready)blockers.push(...readiness.reasons);
     }
     if(blockers.length)return{formError:`暂不能确认出境：${[...new Set(blockers)].join("；")}`};
+    const exitNotes=valueOf(form,"exitNotes")||null;
+    const description=`批次 ${batch.batch_number} 已从 ${exitPort} 出境，车辆 ${exitVehiclePlate}${overseasVehiclePlate?`，境外车辆 ${overseasVehiclePlate}`:""}`;
+    // Keep the complete exit hand-off in one small transactional batch. The
+    // order-level work is expressed as set-based SQL, so the statement count
+    // no longer grows with the number of orders in the batch.
     const statements:D1PreparedStatement[]=[
       env.DB.prepare("INSERT INTO transport_exit_confirmations(id,organization_id,batch_id,actual_exit_at,exit_port,exit_vehicle_plate,overseas_vehicle_plate,overseas_carrier_name,overseas_vehicle_type,overseas_driver_name,overseas_driver_phone,proof_reference,notes,confirmed_by_user_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(crypto.randomUUID(),current.organizationId,batchId,actualExitAt,exitPort,exitVehiclePlate,overseasVehiclePlate||null,overseasCarrierName||null,overseasVehicleType||null,overseasDriverName||null,overseasDriverPhone||null,valueOf(form,"proofReference")||null,valueOf(form,"exitNotes")||null,current.userId,now),
       env.DB.prepare("UPDATE transport_batches SET status='departed',road_status='outbound_in_transit',actual_departure_at=?,border_port=?,updated_at=? WHERE id=? AND organization_id=?").bind(actualExitAt,exitPort,now,batchId,current.organizationId),
       env.DB.prepare("UPDATE transport_batch_vehicles SET status='departed',updated_at=? WHERE batch_id=? AND organization_id=? AND status!='cancelled'").bind(now,batchId,current.organizationId),
       env.DB.prepare("UPDATE transport_batch_orders SET status='departed',updated_at=? WHERE batch_id=? AND organization_id=? AND status!='removed'").bind(now,batchId,current.organizationId),
-      env.DB.prepare("UPDATE order_module_instances SET status='in_progress',current_step_code='transit',current_step_name='出境运输中',progress_percent=50,started_at=COALESCE(started_at,?),blocking_reason=NULL,updated_at=? WHERE organization_id=? AND module_code='tracking' AND enabled=1 AND order_id IN (SELECT order_id FROM transport_batch_orders WHERE batch_id=? AND status!='removed')").bind(now,now,current.organizationId,batchId),
+      env.DB.prepare(`UPDATE order_module_instances
+        SET status='in_progress',current_step_code='transit',current_step_name='出境运输中',progress_percent=50,
+            started_at=COALESCE(started_at,?),blocking_reason=NULL,updated_at=?
+        WHERE organization_id=? AND module_code='tracking' AND enabled=1
+          AND order_id IN (
+            SELECT bo.order_id FROM transport_batch_orders bo
+            WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
+          )`).bind(now,now,current.organizationId,current.organizationId,batchId),
+      env.DB.prepare(`INSERT INTO order_tracking_milestones(
+          id,organization_id,order_id,milestone_code,milestone_name,event_at,
+          location,vehicle_reference,notes,visible_to_customer,created_by_user_id,created_at
+        )
+        SELECT lower(hex(randomblob(16))),bo.organization_id,bo.order_id,'exported','出境',?,?,?,?,1,?,?
+        FROM transport_batch_orders bo
+        WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
+          AND NOT EXISTS(
+            SELECT 1 FROM order_tracking_milestones existing
+            WHERE existing.organization_id=bo.organization_id AND existing.order_id=bo.order_id
+              AND existing.milestone_code='exported' AND existing.event_at=?
+          )`).bind(actualExitAt,exitPort,exitVehiclePlate,exitNotes,current.userId,now,current.organizationId,batchId,actualExitAt),
+      env.DB.prepare(`UPDATE order_cargo_packages
+        SET status='in_transit'
+        WHERE organization_id=? AND status NOT IN ('cancelled','delivered')
+          AND order_id IN (
+            SELECT bo.order_id FROM transport_batch_orders bo
+            WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
+          )`).bind(current.organizationId,current.organizationId,batchId),
+      env.DB.prepare(`INSERT INTO order_tasks(
+          id,organization_id,order_id,module_code,task_type,title,priority,status,
+          assignee_user_id,assigned_by_user_id,created_at,updated_at
+        )
+        SELECT lower(hex(randomblob(16))),bo.organization_id,bo.order_id,'costs','start_receivable_reconciliation',
+          '发起客户应收对账','normal','pending',NULL,?,?,?
+        FROM transport_batch_orders bo
+        WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
+          AND NOT EXISTS(
+            SELECT 1 FROM order_tasks existing
+            WHERE existing.organization_id=bo.organization_id AND existing.order_id=bo.order_id
+              AND existing.task_type='start_receivable_reconciliation'
+              AND existing.status IN ('pending','in_progress')
+          )`).bind(current.userId,now,now,current.organizationId,batchId),
+      env.DB.prepare(`UPDATE shipments
+        SET status='in_transit',current_location=?,updated_at=?
+        WHERE organization_id=? AND id IN (
+          SELECT (
+            SELECT latest.id FROM shipments latest
+            WHERE latest.organization_id=bo.organization_id AND latest.order_id=bo.order_id
+            ORDER BY latest.created_at DESC LIMIT 1
+          )
+          FROM transport_batch_orders bo
+          WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
+        )`).bind(exitPort,now,current.organizationId,current.organizationId,batchId),
+      env.DB.prepare(`INSERT INTO shipment_events(
+          id,shipment_id,status,location,description,event_at,visible_to_customer,created_by_user_id,created_at
+        )
+        SELECT lower(hex(randomblob(16))),latest.id,'in_transit',?,?,?,1,?,?
+        FROM transport_batch_orders bo
+        JOIN shipments latest ON latest.id=(
+          SELECT candidate.id FROM shipments candidate
+          WHERE candidate.organization_id=bo.organization_id AND candidate.order_id=bo.order_id
+          ORDER BY candidate.created_at DESC LIMIT 1
+        )
+        WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'`).bind(exitPort,description,actualExitAt,current.userId,now,current.organizationId,batchId),
     ];
-    for(const item of orders.results){
-      statements.push(env.DB.prepare(`INSERT INTO order_tracking_milestones(id,organization_id,order_id,milestone_code,milestone_name,event_at,location,vehicle_reference,notes,visible_to_customer,created_by_user_id,created_at)
-        SELECT ?,?,?,'exported','出境',?,?,?,?,1,?,?
-        WHERE NOT EXISTS(SELECT 1 FROM order_tracking_milestones WHERE organization_id=? AND order_id=? AND milestone_code='exported' AND event_at=?)`).bind(crypto.randomUUID(),current.organizationId,item.order_id,actualExitAt,exitPort,exitVehiclePlate,valueOf(form,"exitNotes")||null,current.userId,now,current.organizationId,item.order_id,actualExitAt));
-      statements.push(env.DB.prepare("UPDATE order_cargo_packages SET status='in_transit' WHERE order_id=? AND organization_id=? AND status NOT IN ('cancelled','delivered')").bind(item.order_id,current.organizationId));
-      statements.push(env.DB.prepare(`INSERT INTO order_tasks(id,organization_id,order_id,module_code,task_type,title,priority,status,assignee_user_id,assigned_by_user_id,created_at,updated_at)
-        SELECT ?,?,?, 'costs','start_receivable_reconciliation','发起客户应收对账','normal','pending',NULL,?,?,?
-        WHERE NOT EXISTS(SELECT 1 FROM order_tasks WHERE organization_id=? AND order_id=? AND task_type='start_receivable_reconciliation' AND status IN ('pending','in_progress'))`).bind(crypto.randomUUID(),current.organizationId,item.order_id,current.userId,now,now,current.organizationId,item.order_id));
-      if(item.shipment_id){
-        const description=`批次 ${batch.batch_number} 已从 ${exitPort} 出境，车辆 ${exitVehiclePlate}${overseasVehiclePlate?`，境外车辆 ${overseasVehiclePlate}`:""}`;
-        statements.push(
-          env.DB.prepare("UPDATE shipments SET status='in_transit',current_location=?,updated_at=? WHERE id=? AND organization_id=?").bind(exitPort,now,item.shipment_id,current.organizationId),
-          env.DB.prepare("INSERT INTO shipment_events(id,shipment_id,status,location,description,event_at,visible_to_customer,created_by_user_id,created_at) VALUES(?,?,'in_transit',?,?,?,1,?,?)").bind(crypto.randomUUID(),item.shipment_id,exitPort,description,actualExitAt,current.userId,now),
-        );
-      }
-    }
     await env.DB.batch(statements);
-    await Promise.all(orders.results.map(async item=>{
-      await syncTrackingModuleStatusForOrder(current.organizationId,item.order_id,"exported",current.userId,now);
-      if(item.shipment_id&&item.customer_id)await recordWorkflowEvent({organizationId:current.organizationId,event:"shipment.in_transit",customerId:item.customer_id,orderId:item.order_id,shipmentId:item.shipment_id,actorUserId:current.userId,source:"admin",metadata:{batchId,batchNumber:batch.batch_number,exitPort,exitVehiclePlate,overseasVehiclePlate:overseasVehiclePlate||null,overseasCarrierName:overseasCarrierName||null,overseasDriverName:overseasDriverName||null}});
-    }));
-    await writeAudit({request,action:"transport.batch.exit.confirm",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{actualExitAt,exitPort,exitVehiclePlate,orders:orders.results.length}});
-    return{success:"出境确认完成；批次内运单已统一进入出境运输中，轨迹已同步"};
+    const postCommitWarnings:string[]=[];
+    try{await writeAudit({request,action:"transport.batch.exit.confirm",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{actualExitAt,exitPort,exitVehiclePlate,orders:orders.results.length}})}catch{postCommitWarnings.push("审计记录暂未写入")}
+    const workflowEventFailures=(await mapWithConcurrency(orders.results,2,async item=>{
+      if(!item.shipment_id||!item.customer_id)return null;
+      try{
+        await recordWorkflowEvent({organizationId:current.organizationId,event:"shipment.in_transit",customerId:item.customer_id,orderId:item.order_id,shipmentId:item.shipment_id,actorUserId:current.userId,source:"admin",metadata:{batchId,batchNumber:batch.batch_number,exitPort,exitVehiclePlate,overseasVehiclePlate:overseasVehiclePlate||null,overseasCarrierName:overseasCarrierName||null,overseasDriverName:overseasDriverName||null}});
+        return null;
+      }catch{return item.order_number;}
+    })).filter((orderNumber):orderNumber is string=>orderNumber!==null);
+    if(workflowEventFailures.length)postCommitWarnings.push(`${workflowEventFailures.length} 票旧版工作流事件待重试`);
+    return{success:`出境确认完成；批次内运单已统一进入出境运输中，轨迹已同步${postCommitWarnings.length?`；注意：${postCommitWarnings.join("；")}`:""}`};
   }
   if(intent==="overseas_arrival"){
     return{formError:"到达境外目的仓不能在配载单中手工确认，请由各订单指定的境外目的仓扫码入库并完成清点"};
@@ -663,9 +726,18 @@ export async function action({request,params}:Route.ActionArgs){
     const column=optionCode==="transloaded"?"requires_transloading":"requires_transit_customs";
     const orderIds=await getBatchOrderIds(current.organizationId,batchId);
     if(!orderIds.length)return{formError:"当前批次没有可操作的订单"};
-    for (const chunk of chunkArray(orderIds, CHUNK_SIZE)) {
-      await env.DB.prepare(`UPDATE transport_orders SET ${column}=?, updated_at=? WHERE organization_id=? AND id IN (${chunk.map(() => "?").join(",")})`).bind(enable ? 1 : 0, now, current.organizationId, ...chunk).run();
-    }
+    await env.DB.prepare(`UPDATE transport_orders
+      SET ${column}=?, updated_at=?
+      WHERE organization_id=? AND id IN (
+        SELECT order_id FROM transport_batch_orders
+        WHERE organization_id=? AND batch_id=? AND status!='removed'
+      )`).bind(
+        enable ? 1 : 0,
+        now,
+        current.organizationId,
+        current.organizationId,
+        batchId,
+      ).run();
     await writeAudit({request,action:"transport.batch.tracking_option.toggle",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{optionCode,enable,orders:orderIds.length}});
     return{success:enable?`已为 ${orderIds.length} 票订单开启"${optionCode==="transloaded"?"可换装":"可转运"}"`:`已为 ${orderIds.length} 票订单关闭"${optionCode==="transloaded"?"可换装":"可转运"}"`};
   }
@@ -693,41 +765,50 @@ export async function action({request,params}:Route.ActionArgs){
     const notesValue=valueOf(form,"notes")||null;
     const vehicleReference=valueOf(form,"vehicleReference")||batch.overseas_vehicle_plate||null;
     const visibleToCustomer=form.get("visibleToCustomer")!=="off";
-    await insertTrackingMilestoneForBatchOrders({
-      organizationId:current.organizationId,
-      orderIds,
-      milestoneCode,
-      milestoneName:milestoneDef.name,
-      eventAt,
-      location:locationValue,
-      vehicleReference,
-      notes:notesValue,
-      visibleToCustomer,
-      actorUserId:current.userId,
-      createdAt:now,
-    });
-    // 同步每票订单的 tracking 模块实例进度
-    for(const orderId of orderIds){
-      await syncTrackingModuleStatusForOrder(current.organizationId,orderId,milestoneCode,current.userId,now);
-    }
-    // 同步每票订单的工作流快照（batch-tracking.server.ts 不再 import order-modules.server）
-    await Promise.all(orderIds.map((orderId)=>syncOrderWorkflowSnapshotSafe(current.organizationId,orderId)));
-    // 同步批次 road_status / transport_batch_orders 状态
-    await syncBatchRoadStatusFromTracking(current.organizationId,batchId,orderIds,now);
-    // 同步 shipment 轨迹事件
+    await env.DB.prepare(`INSERT INTO order_tracking_milestones(
+        id,organization_id,order_id,milestone_code,milestone_name,event_at,
+        location,vehicle_reference,notes,visible_to_customer,created_by_user_id,created_at
+      )
+      SELECT lower(hex(randomblob(16))),bo.organization_id,bo.order_id,?,?,?,?,?,?,?,?,?
+      FROM transport_batch_orders bo
+      WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
+        AND NOT EXISTS(
+          SELECT 1 FROM order_tracking_milestones existing
+          WHERE existing.organization_id=bo.organization_id AND existing.order_id=bo.order_id
+            AND existing.milestone_code=? AND existing.event_at=?
+        )`).bind(milestoneCode,milestoneDef.name,eventAt,locationValue,vehicleReference,notesValue,visibleToCustomer?1:0,current.userId,now,current.organizationId,batchId,milestoneCode,eventAt).run();
+    const postCommitWarnings:string[]=[];
+    try{await writeAudit({request,action:"transport.batch.tracking.add",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{milestoneCode,eventAt,orders:orderIds.length,location:locationValue,vehicleReference}})}catch{postCommitWarnings.push("审计记录暂未写入")}
+    const moduleSyncFailures=(await mapWithConcurrency(orderIds,2,async(orderId)=>{
+      try{await syncTrackingModuleStatusForOrder(current.organizationId,orderId,milestoneCode,current.userId,now);return null}catch{return orderId}
+    })).filter((orderId):orderId is string=>orderId!==null);
+    if(moduleSyncFailures.length)postCommitWarnings.push(`${moduleSyncFailures.length} 票轨迹模块状态待重试`);
+    try{await syncBatchRoadStatusFromTracking(current.organizationId,batchId,orderIds,now)}catch{postCommitWarnings.push("批次道路状态待重试")}
     const milestoneStatusMap:Record<string,string>={border_arrived:"customs",exported:"in_transit",transloaded:"in_transit",transit_customs:"in_transit",foreign_entered:"in_transit",customs_cleared:"in_transit",station_arrived:"in_transit"};
-    await recordShipmentEventForBatchOrders({
-      organizationId:current.organizationId,
-      orderIds,
-      eventAt,
-      location:locationValue,
-      description:`批次 ${batch.batch_number} 登记「${milestoneDef.name}」${locationValue?`，地点 ${locationValue}`:""}${vehicleReference?`，车辆 ${vehicleReference}`:""}`,
-      status:milestoneStatusMap[milestoneCode]||"in_transit",
-      actorUserId:current.userId,
-      createdAt:now,
-    });
-    await writeAudit({request,action:"transport.batch.tracking.add",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{milestoneCode,eventAt,orders:orderIds.length,location:locationValue,vehicleReference}});
-    return{success:`已为 ${orderIds.length} 票订单登记「${milestoneDef.name}」（${eventAt}）；模块进度与批次状态已同步`};
+    const shipmentStatus=milestoneStatusMap[milestoneCode]||"in_transit";
+    const shipmentDescription=`批次 ${batch.batch_number} 登记「${milestoneDef.name}」${locationValue?`，地点 ${locationValue}`:""}${vehicleReference?`，车辆 ${vehicleReference}`:""}`;
+    try{
+      await env.DB.batch([
+        env.DB.prepare(`UPDATE shipments SET status=?,current_location=?,updated_at=?
+          WHERE organization_id=? AND id IN (
+            SELECT (SELECT latest.id FROM shipments latest
+              WHERE latest.organization_id=bo.organization_id AND latest.order_id=bo.order_id
+              ORDER BY COALESCE(latest.updated_at,latest.created_at) DESC,latest.created_at DESC LIMIT 1)
+            FROM transport_batch_orders bo
+            WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
+          )`).bind(shipmentStatus,locationValue,now,current.organizationId,current.organizationId,batchId),
+        env.DB.prepare(`INSERT INTO shipment_events(id,shipment_id,status,location,description,event_at,visible_to_customer,created_by_user_id,created_at)
+          SELECT lower(hex(randomblob(16))),latest.id,?,?,?,?,1,?,?
+          FROM transport_batch_orders bo
+          JOIN shipments latest ON latest.id=(
+            SELECT candidate.id FROM shipments candidate
+            WHERE candidate.organization_id=bo.organization_id AND candidate.order_id=bo.order_id
+            ORDER BY COALESCE(candidate.updated_at,candidate.created_at) DESC,candidate.created_at DESC LIMIT 1
+          )
+          WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'`).bind(shipmentStatus,locationValue,shipmentDescription,eventAt,current.userId,now,current.organizationId,batchId),
+      ]);
+    }catch{postCommitWarnings.push("运单轨迹事件待重试")}
+    return{success:`已为 ${orderIds.length} 票订单登记「${milestoneDef.name}」（${eventAt}）${postCommitWarnings.length?`；节点已保存，注意：${postCommitWarnings.join("；")}`:"；模块进度与批次状态已同步"}`};
   }
   return{formError:"操作无效"};
 }
@@ -1138,23 +1219,45 @@ function Field({name,label,required,type="text",defaultValue}:{name:string;label
 function numberOf(form:FormData,name:string){const value=Number(valueOf(form,name)||0);return Number.isFinite(value)&&value>=0?value:0}
 function positiveNumberOf(form:FormData,name:string,fallback=0){const value=Number(valueOf(form,name)||fallback);return Number.isFinite(value)&&value>0?value:0}
 function errorMessage(error:unknown){return error instanceof Error?error.message:"操作失败，请稍后重试"}
-async function synchronizeBatchWarehouseProgress(organizationId:string,batchId:string,actorUserId:string){
+async function synchronizeBatchWarehouseProgress(organizationId:string,batchId:string,actorUserId:string):Promise<string[]>{
   const orders=await env.DB.prepare("SELECT order_id FROM transport_batch_orders WHERE organization_id=? AND batch_id=? AND status!='removed'").bind(organizationId,batchId).all<{order_id:string}>();
-  await Promise.all(orders.results.map(async(item)=>{
-    const readiness=await checkOrderLoadPlan(organizationId,item.order_id);
-    if(readiness.ready){
-      await recordWarehouseProgress({
-        organizationId,
-        orderId:item.order_id,
-        actorUserId,
-        stepCode:"loading",
-        stepName:"按配载批次装车",
-        actionCode:"load_plan_ready",
-        actionName:"配载单运输安排已完成",
-        notes:"批次运输安排和整批车辆信息已满足，仓库可按配载单创建装车任务",
-      });
+  return (await mapWithConcurrency(orders.results,2,async(item)=>{
+    try{
+      const readiness=await checkOrderLoadPlan(organizationId,item.order_id);
+      if(readiness.ready){
+        await recordWarehouseProgress({
+          organizationId,
+          orderId:item.order_id,
+          actorUserId,
+          stepCode:"loading",
+          stepName:"按配载批次装车",
+          actionCode:"load_plan_ready",
+          actionName:"配载单运输安排已完成",
+          notes:"批次运输安排和整批车辆信息已满足，仓库可按配载单创建装车任务",
+        });
+      }
+      return null;
+    }catch{return item.order_id;}
+  })).filter((orderId):orderId is string=>orderId!==null);
+}
+
+async function mapWithConcurrency<T,R>(
+  items:readonly T[],
+  concurrency:number,
+  worker:(item:T,index:number)=>Promise<R>,
+):Promise<R[]> {
+  if(!items.length)return[];
+  const results=new Array<R>(items.length);
+  let nextIndex=0;
+  const workerCount=Math.min(Math.max(1,Math.floor(concurrency)),items.length);
+  await Promise.all(Array.from({length:workerCount},async()=>{
+    while(true){
+      const index=nextIndex++;
+      if(index>=items.length)return;
+      results[index]=await worker(items[index],index);
     }
   }));
+  return results;
 }
 function validateDocumentFile(file:File){
   const allowed=new Set(["application/pdf","application/msword","application/vnd.openxmlformats-officedocument.wordprocessingml.document","application/vnd.ms-excel","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","image/jpeg","image/png","image/webp"]);

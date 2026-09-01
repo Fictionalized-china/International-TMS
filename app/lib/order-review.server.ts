@@ -222,7 +222,7 @@ async function buildOrderReview(
   snapshot:SnapshotRow|null,
   manual?:{customerDisputeSummary:string|null;reviewConclusion:string|null;improvementNotes:string|null},
 ):Promise<OrderReviewView> {
-  const [order,cargo,actual,loaded,timing,financeRows,controls,exceptionRow,people] = await Promise.all([
+  const [order,cargo,actual,loaded] = await Promise.all([
     db.prepare(`SELECT o.order_date,o.created_at,o.requested_delivery_date,o.completion_status,COALESCE(o.salesperson_user_id,c.sales_owner_user_id) sales_owner_user_id,
       sales.display_name salesperson,creator.display_name creator
       FROM transport_orders o JOIN customers c ON c.id=o.customer_id
@@ -250,6 +250,8 @@ async function buildOrderReview(
       JOIN shipments package_shipment ON package_shipment.id=p.shipment_id
       WHERE di.organization_id=? AND package_shipment.order_id=? AND di.status='loaded'`).bind(organizationId,orderId)
       .first<{pieces:number;weight:number;volume:number;loading_at:string|null}>(),
+  ]);
+  const [timing,financeRows,controls,exceptionRow] = await Promise.all([
     db.prepare(`SELECT
       (SELECT MIN(s.actual_pickup_at) FROM shipments s WHERE s.organization_id=? AND s.order_id=?) pickup_at,
       COALESCE(
@@ -292,6 +294,8 @@ async function buildOrderReview(
         ))) open_exception_count`)
       .bind(organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId,orderId)
       .first<{cargo_difference_count:number;max_difference:number;pending_difference_count:number;open_exception_count:number}>(),
+  ]);
+  const [people] = await Promise.all([
     db.prepare(`SELECT
       (SELECT u.display_name FROM order_module_instances m JOIN users u ON u.id=m.assignee_user_id WHERE m.organization_id=? AND m.order_id=? AND m.module_code='transport') main_operator,
       (SELECT u.display_name FROM settlement_cash_allocations a JOIN business_expenses e ON e.id=a.expense_id JOIN settlement_cash_transactions t ON t.id=a.cash_transaction_id LEFT JOIN users u ON u.id=t.handled_by_user_id WHERE e.organization_id=? AND e.order_id=? AND t.status!='void' ORDER BY a.created_at DESC LIMIT 1) finance_handler`)

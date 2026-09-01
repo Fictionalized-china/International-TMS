@@ -35,6 +35,25 @@ function findPageSearch() {
   return Array.from(document.querySelectorAll<HTMLElement>(selectors.join(","))).find(isVisible) ?? null;
 }
 
+function moveToNextFormControl(target: HTMLElement) {
+  const form = target.closest<HTMLFormElement>("form[data-enter-flow]");
+  if (!form) return false;
+  if (target.matches("textarea,select,[contenteditable='true'],input[list],input[type='file'],input[type='checkbox'],input[type='radio']")) return false;
+  if (target.getAttribute("role") === "combobox") return false;
+  const controls = Array.from(form.querySelectorAll<HTMLElement>([
+    "input:not([type='hidden']):not([disabled]):not([readonly])",
+    "select:not([disabled])",
+    "textarea:not([disabled]):not([readonly])",
+    "button[type='submit']:not([disabled])",
+    "button:not([type]):not([disabled])",
+    "input[type='submit']:not([disabled])",
+  ].join(","))).filter((element) => isVisible(element) && element.tabIndex >= 0);
+  const currentIndex = controls.indexOf(target);
+  if (currentIndex < 0 || currentIndex >= controls.length - 1) return false;
+  controls[currentIndex + 1]?.focus();
+  return true;
+}
+
 export function WorkspacePreferences() {
   const [density, setDensity] = useState<DensityMode>("compact");
   const [motion, setMotion] = useState<MotionMode>("on");
@@ -87,6 +106,15 @@ export function WorkspacePreferences() {
       if (event.defaultPrevented) return;
       const editable = isEditableTarget(event.target);
 
+      if (event.key === "Enter" && !event.isComposing && event.keyCode !== 229 && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && editable) {
+        const target = event.target as HTMLElement;
+        if (moveToNextFormControl(target)) {
+          event.preventDefault();
+          setAnnouncement("已进入下一个填写项。");
+          return;
+        }
+      }
+
       if (event.key === "/" && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && !editable) {
         const search = findPageSearch();
         if (!search) {
@@ -138,16 +166,18 @@ export function WorkspacePreferences() {
         className="workspace-preference-button"
         onClick={toggleDensity}
         title="切换信息密度（Alt+Shift+D）"
+        aria-pressed={density === "comfortable"}
       >
-        {density === "compact" ? "紧凑" : "舒适"}
+        密度：{density === "compact" ? "紧凑" : "舒适"}
       </button>
       <button
         type="button"
         className="workspace-preference-button"
         onClick={toggleMotion}
         title="开关功能动效（Alt+Shift+M）"
+        aria-pressed={motion === "on"}
       >
-        动效{motion === "on" ? "开" : "关"}
+        动效：{motion === "on" ? "开" : "关"}
       </button>
       <button
         type="button"
@@ -163,6 +193,7 @@ export function WorkspacePreferences() {
         <div className="shortcut-help-list">
           <div><kbd>/</kbd><span><strong>快速查找</strong><small>定位当前页面的关键词输入框</small></span></div>
           <div><kbd>Ctrl</kbd><b>+</b><kbd>Enter</kbd><span><strong>保存当前表单</strong><small>仅在明确支持快捷提交的录入表单中生效</small></span></div>
+          <div><kbd>Enter</kbd><span><strong>连续录入</strong><small>在支持的高频表单中进入下一个填写项</small></span></div>
           <div><kbd>Alt</kbd><b>+</b><kbd>Shift</kbd><b>+</b><kbd>D</kbd><span><strong>切换信息密度</strong><small>紧凑与舒适模式即时切换并自动记忆</small></span></div>
           <div><kbd>Alt</kbd><b>+</b><kbd>Shift</kbd><b>+</b><kbd>M</kbd><span><strong>开关功能动效</strong><small>低配电脑可关闭所有非必要过渡</small></span></div>
           <div><kbd>Tab</kbd><span><strong>顺序办理</strong><small>按页面顺序移动焦点，弹窗内焦点不会逃逸</small></span></div>

@@ -5,6 +5,7 @@ import type { Route } from "./+types/admin.order-module";
 import { BatchNumberLink, OrderNumberLink } from "../components/EntityNumberLink";
 import { requireSessionUser } from "../lib/auth.server";
 import { validatePhone, valueOf } from "../lib/validation";
+import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 import { writeAudit } from "../lib/audit.server";
 import { synchronizeOrderDocumentsModuleStatus } from "../lib/documents-module-status.server";
 import {
@@ -672,32 +673,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     moduleCode === "assignment"
       ? [orderId, current.organizationId]
       : [orderId, current.organizationId, moduleCode];
-  const [
-    members,
-    tasks,
-    history,
-    cargo,
-    attachments,
-    bookings,
-    batches,
-    shipments,
-    expenses,
-    quotationCharges,
-    services,
-    carriers,
-    carrierDrivers,
-    carrierVehicles,
-    warehouses,
-    loadingCandidates,
-    customsRecords,
-    customsDeclarations,
-    transportAssignments,
-    waybills,
-    trackingMilestones,
-    expenseControl,
-    overseasOperation,
-    expenseDirectionControls,
-  ] = await Promise.all([
+  const [members, tasks, history, cargo] = await Promise.all([
     env.DB.prepare(
       `SELECT u.id,u.display_name,d.name department_name,p.name position_name
        FROM memberships m
@@ -724,6 +700,8 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     )
       .bind(orderId, current.organizationId)
       .all<Cargo>(),
+  ]);
+  const [attachments, bookings, batches, shipments] = await Promise.all([
     env.DB.prepare(
       `SELECT a.id,a.file_name,a.content_type,a.size_bytes,a.created_at,m.document_category,m.description,m.public_to_customer,m.review_status FROM order_attachments a LEFT JOIN order_document_metadata m ON m.attachment_id=a.id WHERE a.order_id=? AND a.organization_id=? ORDER BY a.created_at DESC`,
     )
@@ -756,6 +734,8 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     )
       .bind(orderId, current.organizationId)
       .all<Shipment>(),
+  ]);
+  const [expenses, quotationCharges, services, carriers] = await Promise.all([
     env.DB.prepare(
       `SELECT id,source_type,direction,stage,charge_code,charge_name,counterparty_name,currency,quantity,unit_price,amount,exchange_rate,tax_rate,tax_amount,occurred_on,is_internal,foreign_account_no,notes FROM business_expenses WHERE order_id=? AND organization_id=? ORDER BY created_at DESC`,
     )
@@ -781,6 +761,8 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     )
       .bind(current.organizationId)
       .all<Carrier>(),
+  ]);
+  const [carrierDrivers, carrierVehicles, warehouses, loadingCandidates] = await Promise.all([
     env.DB.prepare(
       `SELECT id,carrier_id,name,phone,license_number
        FROM carrier_drivers
@@ -873,6 +855,8 @@ export async function loader({ request, params }: Route.LoaderArgs) {
           )
           .all<LoadingCandidate>()
       : Promise.resolve({ results: [] as LoadingCandidate[] }),
+  ]);
+  const [customsRecords, customsDeclarations, transportAssignments, waybills] = await Promise.all([
     env.DB.prepare(
       `SELECT id,clearance_stage,declaration_number,declaration_type,declaration_mode,document_provider,broker_name,broker_contact,cutoff_at,declared_at,released_at,transit_customs,inspection_required,inspection_notes,quarantine_required,quarantine_notes,status,created_at,updated_at FROM order_customs_records WHERE order_id=? AND organization_id=? ORDER BY clearance_stage,created_at DESC`,
     )
@@ -900,6 +884,8 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     )
       .bind(orderId, current.organizationId)
       .all<Waybill>(),
+  ]);
+  const [trackingMilestones, expenseControl, overseasOperation, expenseDirectionControls] = await Promise.all([
     env.DB.prepare(
       `SELECT id,milestone_code,milestone_name,event_at,location,vehicle_reference,notes,visible_to_customer FROM order_tracking_milestones WHERE order_id=? AND organization_id=? ORDER BY event_at DESC`,
     )
@@ -934,7 +920,8 @@ export async function loader({ request, params }: Route.LoaderArgs) {
       .all<ExpenseDirectionControl>(),
   ]);
   const warehouseFlow = moduleCode === "warehouse"
-    ? await Promise.all([
+    ? await (async () => {
+        const [operation, inboundTimes, packageStatuses, receipts] = await Promise.all([
         env.DB.prepare(
           `SELECT
              EXISTS(SELECT 1 FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE r.organization_id=? AND s.order_id=?) received,
@@ -969,8 +956,10 @@ export async function loader({ request, params }: Route.LoaderArgs) {
              LEFT JOIN users u ON u.id=r.received_by_user_id
             WHERE r.organization_id=? AND s.order_id=? AND r.status='completed'
             ORDER BY r.received_at DESC,r.id DESC`,
-        ).bind(current.organizationId,orderId).all<WarehouseReceiptDetail>(),
-        env.DB.prepare(
+         ).bind(current.organizationId,orderId).all<WarehouseReceiptDetail>(),
+        ]);
+        const [cargoActuals, packageLabels, loadPlan] = await Promise.all([
+         env.DB.prepare(
           `SELECT i.id cargo_item_id,
                   COUNT(r.id) actual_record_count,
                   SUM(CASE WHEN r.id IS NOT NULL THEN ri.actual_packages END) actual_packages,
@@ -1004,24 +993,26 @@ export async function loader({ request, params }: Route.LoaderArgs) {
              LEFT JOIN warehouse_zones z ON z.id=l.zone_id AND z.organization_id=p.organization_id
             WHERE p.organization_id=? AND s.order_id=?
             ORDER BY COALESCE(i.line_no,9999),p.created_at,p.package_number,p.id`,
-        ).bind(current.organizationId,orderId).all<WarehousePackageLabelRow>(),
-        checkOrderLoadPlan(current.organizationId, orderId),
-      ]).then(([operation, inboundTimes, packageStatuses, receipts, cargoActuals, packageLabels, loadPlan]) => ({
-        received:Boolean(operation?.received),
-        inboundReady:Boolean(operation?.inbound_ready),
-        loadPlanReady:loadPlan.ready,
-        loadPlanReasons:loadPlan.reasons,
-        dispatchStatus:operation?.dispatch_status ?? null,
-        pendingDifferenceCount:operation?.pending_difference_count ?? 0,
-        maxDifferencePercent:operation?.max_difference_percent ?? null,
-        firstInboundAt:inboundTimes?.first_inbound_at ?? null,
-        lastInboundAt:inboundTimes?.last_inbound_at ?? null,
-        receiptCount:inboundTimes?.receipt_count ?? 0,
-        packageStatuses:packageStatuses.results,
-        receipts:receipts.results,
-        cargoActuals:cargoActuals.results,
-        packageLabels:packageLabels.results,
-      }))
+         ).bind(current.organizationId,orderId).all<WarehousePackageLabelRow>(),
+         checkOrderLoadPlan(current.organizationId, orderId),
+        ]);
+        return {
+          received:Boolean(operation?.received),
+          inboundReady:Boolean(operation?.inbound_ready),
+          loadPlanReady:loadPlan.ready,
+          loadPlanReasons:loadPlan.reasons,
+          dispatchStatus:operation?.dispatch_status ?? null,
+          pendingDifferenceCount:operation?.pending_difference_count ?? 0,
+          maxDifferencePercent:operation?.max_difference_percent ?? null,
+          firstInboundAt:inboundTimes?.first_inbound_at ?? null,
+          lastInboundAt:inboundTimes?.last_inbound_at ?? null,
+          receiptCount:inboundTimes?.receipt_count ?? 0,
+          packageStatuses:packageStatuses.results,
+          receipts:receipts.results,
+          cargoActuals:cargoActuals.results,
+          packageLabels:packageLabels.results,
+        };
+      })()
     : null;
   const warehouseActuals = moduleCode === "loading"
     ? await env.DB.prepare(
@@ -1525,8 +1516,23 @@ export async function action({ request, params }: Route.ActionArgs) {
         });
       }
       const linkedOrders = await linkedBatchOrderIds(current.organizationId, orderId);
-      await Promise.all(linkedOrders.map((linkedOrderId) => syncOrderWorkflowSnapshot(current.organizationId, linkedOrderId)));
-      return { success: "境外承运方和车辆信息已保存，并同步到当前装车单的全部订单" };
+      let failedSyncCount = 0;
+      for (const linkedOrderId of linkedOrders) {
+        try {
+          await syncOrderWorkflowSnapshot(current.organizationId, linkedOrderId);
+        } catch (error) {
+          failedSyncCount += 1;
+          console.error("Failed to synchronize an order workflow snapshot", {
+            linkedOrderId,
+            error,
+          });
+        }
+      }
+      return {
+        success: failedSyncCount
+          ? `境外承运方和车辆信息已保存；${failedSyncCount} 票订单的流程快照暂未同步，请稍后重试`
+          : "境外承运方和车辆信息已保存，并同步到当前装车单的全部订单",
+      };
     }
     if (intent === "generate_order_review" && moduleCode === "review") {
       const now = new Date().toISOString();
@@ -3432,17 +3438,10 @@ async function syncBatchTrackingMilestonesFromOrder(
   orderId: string,
   actorUserId: string,
 ) {
+  const repairLimit = 8;
   const linkedOrderIds = await linkedBatchOrderIds(organizationId, orderId);
   if (linkedOrderIds.length <= 1) return;
-  const placeholders = linkedOrderIds.map(() => "?").join(",");
-  const milestones = await env.DB.prepare(
-    `SELECT milestone_code,milestone_name,event_at,location,vehicle_reference,notes,visible_to_customer,created_at
-     FROM order_tracking_milestones
-     WHERE organization_id=? AND order_id IN (${placeholders})
-     ORDER BY event_at,created_at`,
-  )
-    .bind(organizationId, ...linkedOrderIds)
-    .all<{
+  type SharedMilestone={
       milestone_code: string;
       milestone_name: string;
       event_at: string;
@@ -3451,54 +3450,133 @@ async function syncBatchTrackingMilestonesFromOrder(
       notes: string | null;
       visible_to_customer: number;
       created_at: string;
-    }>();
-  const shared = milestones.results.filter((item) =>
-    batchSynchronizedTrackingMilestones.has(item.milestone_code),
-  );
+  };
+  const sharedByEvent=new Map<string,SharedMilestone>();
+  for(const orderChunk of chunkD1Values(linkedOrderIds,1)){
+    const milestones=await env.DB.prepare(
+      `SELECT milestone_code,milestone_name,event_at,location,vehicle_reference,notes,visible_to_customer,created_at
+       FROM order_tracking_milestones
+       WHERE organization_id=? AND order_id IN (${d1Placeholders(orderChunk.length)})
+       ORDER BY event_at,created_at`,
+    ).bind(organizationId,...orderChunk).all<SharedMilestone>();
+    for(const item of milestones.results)if(batchSynchronizedTrackingMilestones.has(item.milestone_code)){
+      const signature=`${item.milestone_code}\u0000${item.event_at}`;
+      if(!sharedByEvent.has(signature))sharedByEvent.set(signature,item);
+    }
+  }
+  const shared=[...sharedByEvent.values()];
   if (!shared.length) return;
   const now = new Date().toISOString();
-  const statements = linkedOrderIds.flatMap((targetOrderId) =>
-    shared.map((milestone) =>
-      env.DB.prepare(
-        `INSERT INTO order_tracking_milestones(id,organization_id,order_id,milestone_code,milestone_name,event_at,location,vehicle_reference,notes,visible_to_customer,created_by_user_id,created_at)
-         SELECT ?,?,?,?,?,?,?,?,?,?,?,?
-         WHERE NOT EXISTS(
-           SELECT 1 FROM order_tracking_milestones
-           WHERE organization_id=? AND order_id=? AND milestone_code=? AND event_at=?
-         )`,
-      ).bind(
-        crypto.randomUUID(),
-        organizationId,
-        targetOrderId,
-        milestone.milestone_code,
-        milestone.milestone_name,
-        milestone.event_at,
-        milestone.location,
-        milestone.vehicle_reference,
-        milestone.notes,
-        milestone.visible_to_customer,
-        actorUserId,
-        milestone.created_at || now,
-        organizationId,
-        targetOrderId,
-        milestone.milestone_code,
-        milestone.event_at,
-      ),
-    ),
-  );
-  await env.DB.batch(statements);
-  const latestByCode = new Map<string, Omit<TrackingMilestone, "id">>();
-  for (const milestone of shared) latestByCode.set(milestone.milestone_code, milestone);
-  for (const targetOrderId of linkedOrderIds) {
-    for (const milestone of latestByCode.values()) {
-      await syncTrackingModuleStatus(
-        organizationId,
-        targetOrderId,
-        actorUserId,
-        milestone.milestone_code,
-        now,
-      );
-    }
+  const insertResult=await env.DB.prepare(
+    `WITH target_orders AS (
+       SELECT DISTINCT CAST(value AS TEXT) order_id FROM json_each(?)
+     ),
+     shared_milestones AS (
+       SELECT
+         CAST(key AS INTEGER) source_order,
+         CAST(json_extract(value,'$.milestone_code') AS TEXT) milestone_code,
+         CAST(json_extract(value,'$.milestone_name') AS TEXT) milestone_name,
+         CAST(json_extract(value,'$.event_at') AS TEXT) event_at,
+         json_extract(value,'$.location') location,
+         json_extract(value,'$.vehicle_reference') vehicle_reference,
+         json_extract(value,'$.notes') notes,
+         CAST(json_extract(value,'$.visible_to_customer') AS INTEGER) visible_to_customer,
+         COALESCE(NULLIF(CAST(json_extract(value,'$.created_at') AS TEXT),''),?) created_at
+       FROM json_each(?)
+     ),
+     insertable AS (
+       SELECT *,ROW_NUMBER() OVER(
+         PARTITION BY milestone_code,event_at ORDER BY source_order
+       ) insert_rank
+       FROM shared_milestones
+     )
+     INSERT INTO order_tracking_milestones(
+       id,organization_id,order_id,milestone_code,milestone_name,event_at,
+       location,vehicle_reference,notes,visible_to_customer,created_by_user_id,created_at
+     )
+     SELECT lower(hex(randomblob(16))),?,target.order_id,
+       milestone.milestone_code,milestone.milestone_name,milestone.event_at,
+       milestone.location,milestone.vehicle_reference,milestone.notes,
+       milestone.visible_to_customer,?,milestone.created_at
+     FROM target_orders target
+     CROSS JOIN insertable milestone
+     WHERE milestone.insert_rank=1 AND NOT EXISTS(
+       SELECT 1 FROM order_tracking_milestones existing
+       WHERE existing.organization_id=? AND existing.order_id=target.order_id
+         AND existing.milestone_code=milestone.milestone_code
+         AND existing.event_at=milestone.event_at
+     )`,
+  ).bind(
+    JSON.stringify(linkedOrderIds),
+    now,
+    JSON.stringify(shared),
+    organizationId,
+    actorUserId,
+    organizationId,
+  ).run();
+  const repairCandidates=await env.DB.prepare(
+    `WITH target_orders AS (
+       SELECT DISTINCT CAST(value AS TEXT) order_id FROM json_each(?)
+     ),
+     milestone_progress AS (
+       SELECT target.order_id,
+              MAX(CASE milestone.milestone_code
+                WHEN 'departed' THEN 15
+                WHEN 'border_arrived' THEN 28
+                WHEN 'exported' THEN 40
+                WHEN 'transloaded' THEN 46
+                WHEN 'transit_customs' THEN 52
+                WHEN 'foreign_entered' THEN 64
+                WHEN 'customs_cleared' THEN 82
+                WHEN 'station_arrived' THEN 100
+                ELSE 0 END) progress
+       FROM target_orders target
+       JOIN order_tracking_milestones milestone
+         ON milestone.organization_id=? AND milestone.order_id=target.order_id
+        AND milestone.milestone_code IN (
+          'departed','border_arrived','exported','transloaded',
+          'transit_customs','foreign_entered','customs_cleared','station_arrived'
+        )
+       GROUP BY target.order_id
+     )
+     SELECT target.order_id
+     FROM target_orders target
+     JOIN milestone_progress progress ON progress.order_id=target.order_id
+     JOIN order_module_instances module
+       ON module.organization_id=? AND module.order_id=target.order_id
+      AND module.module_code='tracking' AND module.enabled=1
+     WHERE module.status!='completed'
+       AND (
+         COALESCE(module.progress_percent,0)<progress.progress
+         OR module.status IN ('not_started','blocked','exception')
+         OR (
+           COALESCE(module.progress_percent,0)<=progress.progress
+           AND COALESCE(module.current_step_code,'')<>CASE
+             WHEN progress.progress>=100 THEN 'arrived'
+             WHEN progress.progress>=82 THEN 'customs_cleared'
+             WHEN progress.progress>=28 THEN 'transit'
+             ELSE 'departed'
+           END
+         )
+       )
+     ORDER BY CASE WHEN target.order_id=? THEN 0 ELSE 1 END,target.order_id
+     LIMIT ?`,
+  ).bind(
+    JSON.stringify(linkedOrderIds),
+    organizationId,
+    organizationId,
+    orderId,
+    repairLimit+1,
+  ).all<{order_id:string}>();
+  for (const candidate of repairCandidates.results.slice(0,repairLimit)) {
+    await syncTrackingModuleFromMilestones(organizationId,candidate.order_id,actorUserId);
+  }
+  if(repairCandidates.results.length>repairLimit){
+    console.info("Deferred linked tracking module repairs to a later bounded pass",{
+      orderId,
+      insertedMilestones:Number(insertResult.meta.changes||0),
+      deferredCountAtLeast:repairCandidates.results.length-repairLimit,
+    });
   }
 }
 
@@ -3650,7 +3728,7 @@ export default function OrderModulePage({
         </div>
         <div className="page-actions">
           <span
-            className={`status-pill ${["blocked", "exception", "not_applicable"].includes(module.status) ? "off" : ""}`}
+            className={`status-pill ${["blocked", "exception"].includes(module.status) ? "danger" : module.status === "not_applicable" ? "off" : ""}`}
           >
             {moduleStatusLabels[module.status] ?? module.status}
           </span>
@@ -4150,7 +4228,7 @@ function WorkflowFieldChecklist({
             必填 {visible.filter((field) => field.isRequired).length} 项 · 选填 {visible.filter((field) => !field.isRequired).length} 项；本页集中显示已有内容，空白项表示尚未填写。
           </small>
         </div>
-        <span className={`status-pill ${missing.length ? "off" : ""}`}>
+        <span className={`status-pill ${missing.length ? "danger" : "success"}`}>
           {missing.length ? `缺 ${missing.length} 项必填` : "必填项已齐"}
         </span>
       </section>

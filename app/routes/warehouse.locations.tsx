@@ -8,6 +8,7 @@ import { requireSessionUser } from "../lib/auth.server";
 import { writeAudit } from "../lib/audit.server";
 import { valueOf } from "../lib/validation";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
+import { chunkD1Rows, chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 
 type Warehouse={id:string;code:string;name:string;country_code:string|null;city:string|null;address:string|null;status:string;zone_count:number;location_count:number};
 type Zone={id:string;warehouse_id:string;code:string;name:string;zone_type:string;status:string;location_count:number};
@@ -46,9 +47,19 @@ export async function action({request}:Route.ActionArgs){
     if(!zone)return{formError:"请选择有效的启用库区"};
     const generated=Array.from({length:count},(_,index)=>{const sequence=String(start+index).padStart(padding,"0"),code=`${prefix}-${sequence}`;return{code,name:`${namePrefix}${sequence}`,barcode:`LOC-${zone.warehouse_code}-${zone.zone_code}-${code}`};});
     if(generated.some(item=>item.code.length>24))return{formError:"生成后的库位代码超过 24 位，请缩短前缀或补零位数"};
-    const placeholders=generated.map(()=>"?").join(","),existing=await env.DB.prepare(`SELECT code FROM warehouse_locations WHERE warehouse_id=? AND code IN (${placeholders})`).bind(zone.warehouse_id,...generated.map(item=>item.code)).all<{code:string}>();
-    if(existing.results.length)return{formError:`以下库位代码已存在：${existing.results.slice(0,8).map(item=>item.code).join("、")}${existing.results.length>8?"…":""}`};
-    await env.DB.batch(generated.map(item=>env.DB.prepare("INSERT INTO warehouse_locations(id,organization_id,warehouse_id,zone_id,code,name,barcode,capacity_cbm,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'active',?,?)").bind(crypto.randomUUID(),user.organizationId,zone.warehouse_id,zone.id,item.code,item.name,item.barcode,capacity>0?capacity:null,now,now)));
+    const existingCodes:string[]=[];
+    for(const codeChunk of chunkD1Values(generated.map(item=>item.code),1)){
+      const existing=await env.DB.prepare(`SELECT code FROM warehouse_locations WHERE warehouse_id=? AND code IN (${d1Placeholders(codeChunk.length)})`).bind(zone.warehouse_id,...codeChunk).all<{code:string}>();
+      existingCodes.push(...existing.results.map(item=>item.code));
+    }
+    if(existingCodes.length)return{formError:`以下库位代码已存在：${existingCodes.slice(0,8).join("、")}${existingCodes.length>8?"…":""}`};
+    const insertStatements:D1PreparedStatement[]=[];
+    for(const itemChunk of chunkD1Rows(generated,10)){
+      const valuesSql=itemChunk.map(()=>"(?,?,?,?,?,?,?,?,'active',?,?)").join(",");
+      const bindings=itemChunk.flatMap(item=>[crypto.randomUUID(),user.organizationId,zone.warehouse_id,zone.id,item.code,item.name,item.barcode,capacity>0?capacity:null,now,now]);
+      insertStatements.push(env.DB.prepare(`INSERT INTO warehouse_locations(id,organization_id,warehouse_id,zone_id,code,name,barcode,capacity_cbm,status,created_at,updated_at) VALUES ${valuesSql}`).bind(...bindings));
+    }
+    await env.DB.batch(insertStatements);
     await writeAudit({request,action:"warehouse.location.batch_create",resourceType:"warehouse_location",organizationId:user.organizationId,actorUserId:user.userId,metadata:{zoneId,prefix,start,count,padding,capacity}});
     return{success:`已批量生成 ${count} 个库位（${generated[0].code} 至 ${generated[generated.length-1]?.code}）`};
   }

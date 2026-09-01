@@ -173,7 +173,7 @@ export async function synchronizeWorkflowExecution(input:{
     task_count:number;pending_required:number;
   }>();
   const fieldBlockers = new Set<string>();
-  await Promise.all(modules.results.map(async (item) => {
+  for (const item of modules.results) {
     const missing = await missingRequiredWorkflowModuleStepFields(
       input.organizationId,
       input.orderId,
@@ -181,7 +181,7 @@ export async function synchronizeWorkflowExecution(input:{
       item.module_code as OrderModuleCode,
     );
     if (missing.length) fieldBlockers.add(item.id);
-  }));
+  }
   const moduleUpdates = modules.results.map((item) => {
     const taskComplete = item.completion_mode === "automatic"
       ? item.task_count === 0 || item.pending_required === 0

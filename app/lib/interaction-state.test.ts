@@ -12,19 +12,13 @@ describe("interaction state", () => {
     expect(connectionStatusLabel({
       online: false,
       syncing: false,
-      lastUpdatedAt: new Date("2026-09-01T02:00:00Z"),
     })).toBe("离线，当前数据可能已过期");
   });
 
-  it("distinguishes initial, active and completed synchronization", () => {
-    expect(connectionStatusLabel({ online: true, syncing: true, lastUpdatedAt: null }))
+  it("distinguishes active synchronization from an idle healthy connection", () => {
+    expect(connectionStatusLabel({ online: true, syncing: true }))
       .toBe("正在同步页面数据…");
-    expect(connectionStatusLabel({ online: true, syncing: false, lastUpdatedAt: null }))
-      .toBe("网络在线，等待首次同步");
-    expect(connectionStatusLabel({
-      online: true,
-      syncing: false,
-      lastUpdatedAt: new Date("2026-09-01T10:11:12+08:00"),
-    })).toContain("页面已更新");
+    expect(connectionStatusLabel({ online: true, syncing: false }))
+      .toBe("网络在线");
   });
 });

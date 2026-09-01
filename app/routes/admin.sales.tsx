@@ -11,11 +11,13 @@ type Activity = { id: string; type: string; subject: string; owner_name: string 
 
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "sales.view");
-  const [leads, opportunities, activities, owners, customers, sources, currencies] = await Promise.all([
+  const [leads, opportunities, activities, owners] = await Promise.all([
     env.DB.prepare(`SELECT l.id, l.company_name, l.contact_name, l.email, l.phone, l.source_code, u.display_name AS owner_name, l.status, l.estimated_monthly_shipments, l.created_at FROM sales_leads l LEFT JOIN users u ON u.id = l.owner_user_id WHERE l.organization_id = ? ORDER BY l.created_at DESC LIMIT 200`).bind(current.organizationId).all<Lead>(),
     env.DB.prepare(`SELECT o.id, o.name, c.name AS customer_name, l.company_name AS lead_name, u.display_name AS owner_name, o.stage, o.estimated_value, o.currency, o.probability, o.expected_close_date FROM sales_opportunities o LEFT JOIN customers c ON c.id = o.customer_id LEFT JOIN sales_leads l ON l.id = o.lead_id LEFT JOIN users u ON u.id = o.owner_user_id WHERE o.organization_id = ? ORDER BY o.updated_at DESC LIMIT 200`).bind(current.organizationId).all<Opportunity>(),
     env.DB.prepare(`SELECT a.id, a.type, a.subject, u.display_name AS owner_name, a.due_at, a.completed_at, COALESCE(c.name, l.company_name, o.name) AS target_name FROM sales_activities a LEFT JOIN users u ON u.id = a.owner_user_id LEFT JOIN customers c ON c.id = a.customer_id LEFT JOIN sales_leads l ON l.id = a.lead_id LEFT JOIN sales_opportunities o ON o.id = a.opportunity_id WHERE a.organization_id = ? ORDER BY COALESCE(a.due_at, a.created_at) DESC LIMIT 100`).bind(current.organizationId).all<Activity>(),
     env.DB.prepare(`SELECT u.id, u.display_name FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.organization_id = ? AND m.status = 'active' ORDER BY u.display_name`).bind(current.organizationId).all<{ id: string; display_name: string }>(),
+  ]);
+  const [customers, sources, currencies] = await Promise.all([
     env.DB.prepare("SELECT id, code, name FROM customers WHERE organization_id = ? AND status IN ('prospect', 'active') ORDER BY name").bind(current.organizationId).all<{ id: string; code: string; name: string }>(),
     env.DB.prepare("SELECT code, name FROM reference_data WHERE organization_id = ? AND category = 'lead_source' AND status = 'active' ORDER BY sort_order").bind(current.organizationId).all<{ code: string; name: string }>(),
     env.DB.prepare("SELECT code, name FROM reference_data WHERE organization_id = ? AND category = 'currency' AND status = 'active' ORDER BY sort_order").bind(current.organizationId).all<{ code: string; name: string }>(),

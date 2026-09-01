@@ -5,6 +5,7 @@ import { PortalForm as Form } from "../components/PortalNavigation";
 import { requirePortalCustomer } from "../lib/portal.server";
 import { calculatePrice, type ChargeWeightMode, type PriceTier, type PricingMode, type PricingProduct } from "../lib/pricing";
 import { valueOf } from "../lib/validation";
+import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 import { nextDocumentNumber } from "../lib/documents.server";
 import { writeAudit } from "../lib/audit.server";
 import { recordWorkflowEvent } from "../lib/business-workflow.server";
@@ -47,10 +48,13 @@ export async function action({ request }:Route.ActionArgs) {
   }
   const products = await env.DB.prepare(`SELECT * ${publicProductSql} AND origin_country_code=? AND destination_country_code=? ORDER BY currency,product_name`).bind(user.organizationId,origin,destination).all<ProductRow>();
   if (!products.results.length) return { formError:"该线路暂时没有可试算的物流产品，请联系客户经理。", values };
-  const placeholders = products.results.map(()=>"?").join(",");
-  const tiers = await env.DB.prepare(`SELECT * FROM logistics_product_price_tiers WHERE product_id IN (${placeholders}) ORDER BY product_id,sort_order,from_value`).bind(...products.results.map(product=>product.id)).all<TierRow>();
+  const tierRows:TierRow[]=[];
+  for(const productChunk of chunkD1Values(products.results)){
+    const tiers=await env.DB.prepare(`SELECT * FROM logistics_product_price_tiers WHERE product_id IN (${d1Placeholders(productChunk.length)}) ORDER BY product_id,sort_order,from_value`).bind(...productChunk.map(product=>product.id)).all<TierRow>();
+    tierRows.push(...tiers.results);
+  }
   const results = products.results.flatMap(product => {
-    const calculation = calculatePrice(mapProduct(product),tiers.results.filter(tier=>tier.product_id===product.id).map(mapTier),actualWeight,volumeCbm);
+    const calculation = calculatePrice(mapProduct(product),tierRows.filter(tier=>tier.product_id===product.id).map(mapTier),actualWeight,volumeCbm);
     return calculation ? [{ id:product.id, code:product.product_code, name:product.product_name, origin:product.origin_country_code, originCity:product.origin_city, destination:product.destination_country_code, destinationCity:product.destination_city, transportMode:product.transport_mode, estimatedDays:product.estimated_days, currency:product.currency, remarks:product.remarks, chargeLabel:chargeLabels[product.charge_weight_mode], priceLabel:priceLabels[product.pricing_mode], ...calculation }] : [];
   }).sort((a,b)=>a.currency.localeCompare(b.currency)||a.total-b.total);
   if (!results.length) return { formError:"现有产品没有匹配该重量或密度的价格阶梯，请联系客户经理。", values };

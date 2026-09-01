@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { Form, useNavigation } from "react-router";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Route } from "./+types/admin.customers";
 import { requireSessionUser } from "../lib/auth.server";
 import { hashPassword } from "../lib/crypto.server";
@@ -108,7 +108,7 @@ async function validateCustomerDefaultProfile(profile: CustomerDefaultProfile, o
 
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "customer.view");
-  const [customers, contacts, addresses, portals, registrations, contracts, owners, countries, provinces, cities] = await Promise.all([
+  const [customers, contacts, addresses, portals] = await Promise.all([
     env.DB.prepare(`SELECT c.id, c.code, c.identity_code, c.name, c.short_name, COALESCE(c.party_category,'customer') AS party_category, c.status, c.notes, c.sales_owner_user_id, u.display_name AS sales_owner_name, COALESCE(GROUP_CONCAT(DISTINCT cbr.role_code), '') AS business_role_codes, COUNT(DISTINCT cc.id) AS contact_count, COUNT(DISTINCT ca.id) AS address_count,
       (SELECT x.id FROM customer_contacts x WHERE x.customer_id=c.id ORDER BY x.is_primary DESC,x.updated_at DESC LIMIT 1) AS primary_contact_id,
       (SELECT x.name FROM customer_contacts x WHERE x.customer_id=c.id ORDER BY x.is_primary DESC,x.updated_at DESC LIMIT 1) AS primary_contact_name,
@@ -124,10 +124,14 @@ export async function loader({ request }: Route.LoaderArgs) {
     env.DB.prepare(`SELECT cc.id, cc.customer_id, cc.name, cc.title, cc.email, cc.phone, cc.is_primary FROM customer_contacts cc JOIN customers c ON c.id = cc.customer_id WHERE c.organization_id = ? AND cc.customer_id IN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) ORDER BY cc.is_primary DESC, cc.name`).bind(current.organizationId,current.organizationId).all<ContactRow>(),
     env.DB.prepare(`SELECT ca.id, ca.customer_id, ca.label, ca.type, ca.country_code, ca.state, ca.city, ca.address_line1, ca.contact_name, ca.contact_phone, ca.is_default FROM customer_addresses ca JOIN customers c ON c.id = ca.customer_id WHERE c.organization_id = ? AND ca.customer_id IN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) ORDER BY ca.is_default DESC, ca.label`).bind(current.organizationId,current.organizationId).all<AddressRow>(),
     env.DB.prepare(`SELECT cpa.id, cpa.customer_id, cpa.user_id, u.display_name, u.email, cpa.status, u.last_login_at FROM customer_portal_accounts cpa JOIN users u ON u.id = cpa.user_id WHERE cpa.organization_id = ? AND cpa.customer_id IN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) ORDER BY u.display_name`).bind(current.organizationId,current.organizationId).all<PortalRow>(),
+  ]);
+  const [registrations, contracts, owners, countries] = await Promise.all([
     env.DB.prepare(`SELECT pr.id,pr.user_id,pr.company_name,pr.customer_identity_code,pr.contact_name,pr.contact_phone,pr.email,pr.candidate_customer_id,c.name candidate_customer_name,pr.created_at FROM portal_registration_requests pr LEFT JOIN customers c ON c.id=pr.candidate_customer_id AND c.organization_id=pr.organization_id WHERE pr.organization_id=? AND pr.status='pending' ORDER BY pr.created_at`).bind(current.organizationId).all<PortalRegistrationRow>(),
     env.DB.prepare(`SELECT id, customer_id, title, file_name, content_type, size_bytes, effective_at, expires_at, status, notes, created_at FROM customer_contracts WHERE organization_id = ? AND customer_id IN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) ORDER BY created_at DESC LIMIT 500`).bind(current.organizationId,current.organizationId).all<ContractRow>(),
     env.DB.prepare(`SELECT u.id, u.display_name FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.organization_id = ? AND m.status = 'active' ORDER BY u.display_name`).bind(current.organizationId).all<{ id: string; display_name: string }>(),
     env.DB.prepare("SELECT code, name FROM reference_data WHERE organization_id = ? AND category = 'country' AND status = 'active' ORDER BY sort_order, code").bind(current.organizationId).all<{ code: string; name: string }>(),
+  ]);
+  const [provinces, cities] = await Promise.all([
     env.DB.prepare("SELECT code, name, parent_code FROM reference_data WHERE organization_id = ? AND category = 'province' AND status = 'active' ORDER BY sort_order, code").bind(current.organizationId).all<GeoReference>(),
     env.DB.prepare("SELECT code, name, parent_code FROM reference_data WHERE organization_id = ? AND category = 'city' AND status = 'active' ORDER BY sort_order, code").bind(current.organizationId).all<GeoReference>(),
   ]);
@@ -139,6 +143,25 @@ export async function action({ request }: Route.ActionArgs) {
   const form = await request.formData();
   const intent = valueOf(form, "intent");
   const now = new Date().toISOString();
+
+  const result = await runCustomerAction({ request, current, form, intent, now });
+  return {
+    intent,
+    customerId: valueOf(form, "customerId") || undefined,
+    accountId: valueOf(form, "accountId") || undefined,
+    requestId: valueOf(form, "requestId") || undefined,
+    contractId: valueOf(form, "contractId") || undefined,
+    ...result,
+  };
+}
+
+async function runCustomerAction({ request, current, form, intent, now }: {
+  request: Request;
+  current: Awaited<ReturnType<typeof requireSessionUser>>;
+  form: FormData;
+  intent: string;
+  now: string;
+}) {
 
   if (intent === "portal_registration_approve") {
     const requestId = valueOf(form, "requestId"), customerId = valueOf(form, "customerId");
@@ -404,6 +427,33 @@ async function nextCustomerIdentityCode(organizationId:string):Promise<string|nu
 
 export function meta() { return [{ title: "客户管理 | International TMS" }]; }
 
+function customerActionError(
+  actionData: unknown,
+  expectedIntent: string | readonly string[],
+  customerId?: string,
+  accountId?: string,
+) {
+  if (!actionData || typeof actionData !== "object") return undefined;
+  const data = actionData as Record<string, unknown>;
+  const intents = Array.isArray(expectedIntent) ? expectedIntent : [expectedIntent];
+  if (!intents.includes(String(data.intent ?? ""))) return undefined;
+  if (customerId && data.customerId !== customerId) return undefined;
+  if (accountId && data.accountId !== accountId) return undefined;
+  return typeof data.formError === "string" ? data.formError : undefined;
+}
+
+function CustomerModalActionError({ actionData, intent, customerId, accountId }: {
+  actionData: unknown;
+  intent: string | readonly string[];
+  customerId?: string;
+  accountId?: string;
+}) {
+  const message = customerActionError(actionData, intent, customerId, accountId);
+  return message
+    ? <div className="alert error" role="alert"><strong>操作尚未完成</strong><span>{message}</span><small>已填写内容仍保留，请按提示修改后重试。</small></div>
+    : null;
+}
+
 export default function Customers({ loaderData, actionData }: Route.ComponentProps) {
   const busy = useNavigation().state !== "idle", canManage = loaderData.current.permissions.includes("customer.manage");
   const bindableCustomers = loaderData.customers.filter((customer) => customer.status !== "archived");
@@ -433,7 +483,7 @@ export default function Customers({ loaderData, actionData }: Route.ComponentPro
     <section className="panel customer-ledger">
       <div className="panel-header">
         <div><h2>客户资料台账</h2><p>一行一位客商；点击“客户档案”集中维护联系人、地址、合同和门户账号。</p></div>
-        {canManage && <Modal title="新增客户" triggerLabel="新增客户" size="xwide" dialogClassName="customer-editor-modal" closeSignal={modalCloseSignal}>
+        {canManage && <Modal title="新增客户" triggerLabel="新增客户" size="xwide" dialogClassName="customer-editor-modal" closeSignal={modalCloseSignal} guardFormChanges>
           <CustomerForm
             intent="customer"
             owners={loaderData.owners}
@@ -443,6 +493,7 @@ export default function Customers({ loaderData, actionData }: Route.ComponentPro
             busy={busy}
             values={submittedCustomerId ? undefined : submittedValues}
             errors={submittedCustomerId ? undefined : submittedErrors}
+            formError={customerActionError(actionData,"customer")}
           />
         </Modal>}
       </div>
@@ -474,10 +525,11 @@ export default function Customers({ loaderData, actionData }: Route.ComponentPro
                     canManage={canManage}
                     busy={busy}
                     closeSignal={modalCloseSignal}
+                    actionData={actionData}
                   />
                 </Modal>
-                {canManage && <Modal title={`编辑客户 · ${customer.name}`} triggerLabel="编辑" triggerClassName="text-button" size="xwide" dialogClassName="customer-editor-modal" closeSignal={modalCloseSignal}>
-                  <CustomerForm intent="customer_update" customer={customer} owners={loaderData.owners} countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} busy={busy} values={editValues} errors={editValues ? submittedErrors : undefined} selectedRoles={roles}/>
+                {canManage && <Modal title={`编辑客户 · ${customer.name}`} triggerLabel="编辑" triggerClassName="text-button" size="xwide" dialogClassName="customer-editor-modal" closeSignal={modalCloseSignal} guardFormChanges>
+                  <CustomerForm intent="customer_update" customer={customer} owners={loaderData.owners} countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} busy={busy} values={editValues} errors={editValues ? submittedErrors : undefined} formError={customerActionError(actionData,"customer_update",customer.id)} selectedRoles={roles}/>
                 </Modal>}
               </div></td>
             </tr>;
@@ -489,7 +541,7 @@ export default function Customers({ loaderData, actionData }: Route.ComponentPro
   </>;
 }
 
-function CustomerDossier({ customer, roles, contacts, addresses, portals, contracts, countries, provinces, cities, canManage, busy, closeSignal }: {
+function CustomerDossier({ customer, roles, contacts, addresses, portals, contracts, countries, provinces, cities, canManage, busy, closeSignal, actionData }: {
   customer: CustomerRow;
   roles: CustomerBusinessRoleCode[];
   contacts: ContactRow[];
@@ -502,22 +554,29 @@ function CustomerDossier({ customer, roles, contacts, addresses, portals, contra
   canManage: boolean;
   busy: boolean;
   closeSignal?: unknown;
+  actionData?: unknown;
 }) {
+  const archivedContractId = actionData && typeof actionData === "object"
+    ? String((actionData as Record<string, unknown>).contractId ?? "")
+    : "";
+  const contractArchiveError = contracts.some((item) => item.id === archivedContractId)
+    ? customerActionError(actionData, "contract_archive")
+    : undefined;
   return <div className="customer-dossier">
     <div className="customer-dossier-summary table-wrap"><table><tbody><tr>
       <th>客户代码</th><td>{customer.code}</td><th>系统识别码</th><td><code>{customer.identity_code}</code></td><th>客商分类</th><td>{customerPartyCategoryLabel(customer.party_category)}</td><th>状态</th><td>{customer.status === "active" ? "正常" : customer.status === "suspended" ? "暂停" : "归档"}</td>
     </tr><tr><th>业务身份</th><td colSpan={3}>{roles.map(customerBusinessRoleLabel).join("、") || "未设置"}</td><th>销售负责人</th><td>{customer.sales_owner_name || "未指定"}</td><th>备注</th><td>{customer.notes || "—"}</td></tr></tbody></table></div>
     {canManage && <div className="customer-dossier-actions" aria-label="客户档案操作">
-      <Modal title={`归档客户合同 · ${customer.name}`} triggerLabel="归档合同" triggerClassName="secondary" size="wide" dialogClassName="customer-submodal" closeSignal={closeSignal}><CustomerContractForm customer={customer} busy={busy}/></Modal>
-      <Modal title={`添加联系人 · ${customer.name}`} triggerLabel="添加联系人" triggerClassName="secondary" size="wide" dialogClassName="customer-submodal" closeSignal={closeSignal}><CustomerContactForm customer={customer} busy={busy}/></Modal>
-      <Modal title={`添加常用地址 · ${customer.name}`} triggerLabel="添加常用地址" triggerClassName="secondary" size="wide" dialogClassName="customer-submodal" closeSignal={closeSignal}><CustomerAddressForm customer={customer} countries={countries} busy={busy}/></Modal>
-      <Modal title={`添加常用提货地 · ${customer.name}`} triggerLabel="添加提货地" triggerClassName="secondary" size="wide" dialogClassName="customer-submodal" closeSignal={closeSignal}><CustomerPickupAddressForm customer={customer} countries={countries} provinces={provinces} cities={cities} busy={busy}/></Modal>
-      <Modal title={`开通客户门户 · ${customer.name}`} triggerLabel="开通门户" triggerClassName="secondary" size="wide" dialogClassName="customer-submodal" closeSignal={closeSignal}><CustomerPortalForm customer={customer} busy={busy}/></Modal>
+      <Modal title={`归档客户合同 · ${customer.name}`} triggerLabel="归档合同" triggerClassName="secondary" size="wide" dialogClassName="customer-submodal" closeSignal={closeSignal} guardFormChanges><CustomerModalActionError actionData={actionData} intent="contract_upload" customerId={customer.id}/><CustomerContractForm customer={customer} busy={busy}/></Modal>
+      <Modal title={`添加联系人 · ${customer.name}`} triggerLabel="添加联系人" triggerClassName="secondary" size="wide" dialogClassName="customer-submodal" closeSignal={closeSignal} guardFormChanges><CustomerModalActionError actionData={actionData} intent="contact" customerId={customer.id}/><CustomerContactForm customer={customer} busy={busy}/></Modal>
+      <Modal title={`添加常用地址 · ${customer.name}`} triggerLabel="添加常用地址" triggerClassName="secondary" size="wide" dialogClassName="customer-submodal" closeSignal={closeSignal} guardFormChanges><CustomerModalActionError actionData={actionData} intent="address" customerId={customer.id}/><CustomerAddressForm customer={customer} countries={countries} busy={busy}/></Modal>
+      <Modal title={`添加常用提货地 · ${customer.name}`} triggerLabel="添加提货地" triggerClassName="secondary" size="wide" dialogClassName="customer-submodal" closeSignal={closeSignal} guardFormChanges><CustomerModalActionError actionData={actionData} intent="pickup_address" customerId={customer.id}/><CustomerPickupAddressForm customer={customer} countries={countries} provinces={provinces} cities={cities} busy={busy}/></Modal>
+      <Modal title={`开通客户门户 · ${customer.name}`} triggerLabel="开通门户" triggerClassName="secondary" size="wide" dialogClassName="customer-submodal" closeSignal={closeSignal} guardFormChanges><CustomerModalActionError actionData={actionData} intent="portal" customerId={customer.id}/><CustomerPortalForm customer={customer} busy={busy}/></Modal>
     </div>}
     <DossierSection title="联系人" count={contacts.length} columns={["姓名 / 职务", "电话", "邮箱", "标记"]} rows={contacts.map((item) => [item.name + (item.title ? ` · ${item.title}` : ""), item.phone || "—", item.email || "—", item.is_primary ? "主要联系人" : "普通联系人"])} />
     <DossierSection title="常用地址与提货地" count={addresses.length} columns={["地址名称", "类型", "城市", "详细地址", "标记"]} rows={addresses.map((item) => [item.label, addressTypeLabel(item.type), `${item.country_code} · ${item.state || "—"} · ${item.city}`, item.address_line1, item.is_default ? "默认" : "—"])} />
-    <CustomerPortalAccountsSection customer={customer} portals={portals} canManage={canManage} busy={busy} closeSignal={closeSignal} />
-    <section className="customer-dossier-section"><div className="customer-dossier-section-head"><strong>合同归档</strong><span>{contracts.length} 份</span></div><div className="table-wrap"><table><thead><tr><th>合同名称</th><th>文件</th><th>有效期</th><th>状态 / 备注</th><th>操作</th></tr></thead><tbody>{contracts.length ? contracts.map((item) => <tr key={item.id}><td>{item.title}</td><td>{item.file_name}<small>{Math.ceil(item.size_bytes / 1024)} KB</small></td><td>{item.effective_at || "未填"} — {item.expires_at || "未填"}</td><td>{item.status === "active" ? "有效" : "已归档"}<small>{item.notes || "—"}</small></td><td><div className="row-actions"><a className="text-button" href={`/admin/customer-contracts/${item.id}/download`}>下载</a>{canManage && item.status === "active" && <Form method="post" className="inline-form"><input type="hidden" name="intent" value="contract_archive"/><input type="hidden" name="contractId" value={item.id}/><button className="text-button" disabled={busy}>归档</button></Form>}</div></td></tr>) : <tr><td colSpan={5} className="empty-state">暂无合同</td></tr>}</tbody></table></div></section>
+    <CustomerPortalAccountsSection customer={customer} portals={portals} canManage={canManage} busy={busy} closeSignal={closeSignal} actionData={actionData} />
+    <section className="customer-dossier-section"><div className="customer-dossier-section-head"><strong>合同归档</strong><span>{contracts.length} 份</span></div>{contractArchiveError && <div className="alert error" role="alert"><strong>合同尚未归档</strong><span>{contractArchiveError}</span><small>当前客户档案仍保持打开，请刷新状态后重试。</small></div>}<div className="table-wrap"><table><thead><tr><th>合同名称</th><th>文件</th><th>有效期</th><th>状态 / 备注</th><th>操作</th></tr></thead><tbody>{contracts.length ? contracts.map((item) => <tr key={item.id}><td>{item.title}</td><td>{item.file_name}<small>{Math.ceil(item.size_bytes / 1024)} KB</small></td><td>{item.effective_at || "未填"} — {item.expires_at || "未填"}</td><td>{item.status === "active" ? "有效" : "已归档"}<small>{item.notes || "—"}</small></td><td><div className="row-actions"><a className="text-button" href={`/admin/customer-contracts/${item.id}/download`}>下载</a>{canManage && item.status === "active" && <Form method="post" className="inline-form"><input type="hidden" name="intent" value="contract_archive"/><input type="hidden" name="contractId" value={item.id}/><button className="text-button" disabled={busy}>归档</button></Form>}</div></td></tr>) : <tr><td colSpan={5} className="empty-state">暂无合同</td></tr>}</tbody></table></div></section>
   </div>;
 }
 
@@ -525,13 +584,13 @@ function DossierSection({ title, count, columns, rows }: { title: string; count:
   return <section className="customer-dossier-section"><div className="customer-dossier-section-head"><strong>{title}</strong><span>{count} 条</span></div><div className="table-wrap"><table><thead><tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{rows.length ? rows.map((row, rowIndex) => <tr key={`${title}-${rowIndex}`}>{row.map((value, columnIndex) => <td key={`${title}-${rowIndex}-${columnIndex}`}>{value}</td>)}</tr>) : <tr><td colSpan={columns.length} className="empty-state">暂无数据</td></tr>}</tbody></table></div></section>;
 }
 
-function CustomerPortalAccountsSection({ customer, portals, canManage, busy, closeSignal }: { customer: CustomerRow; portals: PortalRow[]; canManage: boolean; busy: boolean; closeSignal?: unknown }) {
+function CustomerPortalAccountsSection({ customer, portals, canManage, busy, closeSignal, actionData }: { customer: CustomerRow; portals: PortalRow[]; canManage: boolean; busy: boolean; closeSignal?: unknown; actionData?: unknown }) {
   return <section className="customer-dossier-section customer-portal-accounts"><div className="customer-dossier-section-head"><strong>门户账号</strong><span>{portals.length} 个</span></div><div className="table-wrap"><table><thead><tr><th>登录用户</th><th>登录账号</th><th>密码</th><th>状态 / 最近登录</th><th>操作</th></tr></thead><tbody>{portals.length ? portals.map((item) => <tr key={item.id}>
     <td><strong>{item.display_name}</strong></td>
     <td><code>{item.email}</code><small>客户门户登录邮箱</small></td>
     <td><span className="status-pill">已加密保存</span><small>安全原因不可回显明文</small></td>
     <td><span className={`status-pill${item.status === "active" ? "" : " off"}`}>{item.status === "active" ? "正常" : item.status}</span><small>{item.last_login_at ? `最近登录 ${item.last_login_at}` : "尚未登录"}</small></td>
-    <td>{canManage ? <Modal title={`重置门户密码 · ${item.email}`} triggerLabel="重置密码" triggerClassName="text-button" size="wide" dialogClassName="customer-submodal" closeSignal={closeSignal}><CustomerPortalPasswordResetForm customer={customer} account={item} busy={busy}/></Modal> : "—"}</td>
+    <td>{canManage ? <Modal title={`重置门户密码 · ${item.email}`} triggerLabel="重置密码" triggerClassName="text-button" size="wide" dialogClassName="customer-submodal" closeSignal={closeSignal} guardFormChanges><CustomerModalActionError actionData={actionData} intent="portal_password_reset" customerId={customer.id} accountId={item.id}/><CustomerPortalPasswordResetForm customer={customer} account={item} busy={busy}/></Modal> : "—"}</td>
   </tr>) : <tr><td colSpan={5} className="empty-state">尚未开通门户账号；该客户的报价暂时无法在客户门户查看。</td></tr>}</tbody></table></div></section>;
 }
 
@@ -593,6 +652,7 @@ function CustomerForm({
   busy,
   values,
   errors,
+  formError,
   selectedRoles = [],
 }: {
   intent: "customer" | "customer_update";
@@ -604,13 +664,28 @@ function CustomerForm({
   busy: boolean;
   values?: CustomerFormValues;
   errors?: Record<string, string>;
+  formError?: string;
   selectedRoles?: CustomerBusinessRoleCode[];
 }) {
   const editing = intent === "customer_update";
   const roles = values?.businessRoles ?? selectedRoles;
-  return <Form method="post" className="customer-editor-form">
+  const errorFields = Object.keys(errors ?? {});
+  const errorSummary = formError || (errorFields.length
+    ? `请检查 ${errorFields.length} 处标记的必填或格式问题`
+    : undefined);
+  const errorSummaryRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!errorSummary) return;
+    const frame = window.requestAnimationFrame(() => {
+      errorSummaryRef.current?.focus();
+      errorSummaryRef.current?.scrollIntoView({ block: "nearest" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [errorSummary]);
+  return <Form method="post" className="customer-editor-form" data-enter-flow>
     <input type="hidden" name="intent" value={intent} />
     {customer && <input type="hidden" name="customerId" value={customer.id} />}
+    {errorSummary && <div ref={errorSummaryRef} className="alert error" role="alert" tabIndex={-1}><strong>客户资料尚未保存</strong><span>{errorSummary}</span><small>已填写内容仍保留，请按提示修改后重试。</small></div>}
     <section className="customer-form-section">
       <div className="customer-form-section-title"><strong>1. 客户基本信息</strong><span>客户代码选填；留空时由系统自动生成</span></div>
       <div className="customer-form-grid customer-basic-grid">

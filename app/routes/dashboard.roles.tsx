@@ -5,6 +5,7 @@ import { requireSessionUser } from "../lib/auth.server";
 import { validateCode, valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import { Modal } from "../components/Modal";
+import { chunkD1Rows, chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 
 type RoleRow = { id: string; code: string; name: string; description: string | null; is_system: number; permissions: string | null; member_count: number };
 type PermissionRow = { code: string; module: string; name: string; description: string };
@@ -22,20 +23,25 @@ export async function action({ request }: Route.ActionArgs) {
   const current = await requireSessionUser(request, "role.manage");
   const form = await request.formData();
   const name = valueOf(form, "name"), code = valueOf(form, "code").toLowerCase(), description = valueOf(form, "description");
-  const selected = form.getAll("permissions").filter((item): item is string => typeof item === "string");
+  const selected = [...new Set(form.getAll("permissions").filter((item): item is string => typeof item === "string"))];
   const errors: Record<string, string> = {};
   if (name.length < 2 || name.length > 50) errors.name = "角色名称需要 2-50 个字符";
   const codeError = validateCode(code); if (codeError) errors.code = codeError;
   if (!selected.length) errors.permissions = "至少选择一项权限";
-  const known = await env.DB.prepare(`SELECT code FROM permissions WHERE code IN (${selected.map(() => "?").join(",") || "''"})`).bind(...selected).all<{ code: string }>();
-  if (known.results.length !== selected.length) errors.permissions = "权限选项无效";
+  const knownCodes=new Set<string>();
+  for(const permissionChunk of chunkD1Values(selected)){
+    const known=await env.DB.prepare(`SELECT code FROM permissions WHERE code IN (${d1Placeholders(permissionChunk.length)})`).bind(...permissionChunk).all<{code:string}>();
+    for(const permission of known.results)knownCodes.add(permission.code);
+  }
+  if (knownCodes.size !== selected.length) errors.permissions = "权限选项无效";
   if (Object.keys(errors).length) return { errors, values: { name, code, description, permissions: selected } };
   const exists = await env.DB.prepare("SELECT id FROM roles WHERE organization_id = ? AND code = ?").bind(current.organizationId, code).first();
   if (exists) return { formError: "角色代码已经存在", values: { name, code, description, permissions: selected } };
   const roleId = crypto.randomUUID(), now = new Date().toISOString();
+  const permissionStatements=chunkD1Rows(selected,2).map(permissionChunk=>env.DB.prepare(`INSERT INTO role_permissions (role_id, permission_code) VALUES ${permissionChunk.map(()=>"(?, ?)").join(",")}`).bind(...permissionChunk.flatMap(permission=>[roleId,permission])));
   await env.DB.batch([
     env.DB.prepare("INSERT INTO roles (id, organization_id, code, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(roleId, current.organizationId, code, name, description || null, now, now),
-    ...selected.map(permission => env.DB.prepare("INSERT INTO role_permissions (role_id, permission_code) VALUES (?, ?)").bind(roleId, permission)),
+    ...permissionStatements,
   ]);
   await writeAudit({ request, action: "role.create", resourceType: "role", resourceId: roleId, organizationId: current.organizationId, actorUserId: current.userId, metadata: { code, permissions: selected } });
   return { success: "角色已创建" };

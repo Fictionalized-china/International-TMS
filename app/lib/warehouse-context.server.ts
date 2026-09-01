@@ -17,19 +17,21 @@ export async function loadWarehouseContext(request: Request, user: SessionUser) 
   if (!access.all && !access.warehouseIds.length)
     throw new Response("尚未分配可访问仓库，请联系管理员", { status: 403 });
 
-  const sql = access.all
-    ? `SELECT id,code,name,warehouse_role,country_code,city
-       FROM warehouses
-       WHERE organization_id=? AND status='active'
-       ORDER BY CASE warehouse_role WHEN 'domestic_collection' THEN 10 WHEN 'port' THEN 20 ELSE 30 END,code`
-    : `SELECT id,code,name,warehouse_role,country_code,city
-       FROM warehouses
-       WHERE organization_id=? AND status='active'
-         AND id IN (${access.warehouseIds.map(() => "?").join(",")})
-       ORDER BY CASE warehouse_role WHEN 'domestic_collection' THEN 10 WHEN 'port' THEN 20 ELSE 30 END,code`;
-  const result = await env.DB.prepare(sql)
-    .bind(user.organizationId, ...(access.all ? [] : access.warehouseIds))
-    .all<WarehouseContextOption>();
+  const result = access.all
+    ? await env.DB.prepare(
+      `SELECT w.id,w.code,w.name,w.warehouse_role,w.country_code,w.city
+       FROM warehouses w
+       WHERE w.organization_id=? AND w.status='active'
+       ORDER BY CASE w.warehouse_role WHEN 'domestic_collection' THEN 10 WHEN 'port' THEN 20 ELSE 30 END,w.code`,
+    ).bind(user.organizationId).all<WarehouseContextOption>()
+    : await env.DB.prepare(
+      `SELECT w.id,w.code,w.name,w.warehouse_role,w.country_code,w.city
+       FROM warehouses w
+       JOIN warehouse_user_access access
+         ON access.organization_id=w.organization_id AND access.warehouse_id=w.id
+       WHERE w.organization_id=? AND w.status='active' AND access.user_id=?
+       ORDER BY CASE w.warehouse_role WHEN 'domestic_collection' THEN 10 WHEN 'port' THEN 20 ELSE 30 END,w.code`,
+    ).bind(user.organizationId, user.userId).all<WarehouseContextOption>();
   if (!result.results.length)
     throw new Response("当前没有可访问的启用仓库", { status: 403 });
 

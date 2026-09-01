@@ -3,6 +3,7 @@ import { Form, Link } from "react-router";
 import type { Route } from "./+types/admin.domestic-tracking";
 import { BatchNumberLink, OrderNumberLink } from "../components/EntityNumberLink";
 import { requireSessionUser } from "../lib/auth.server";
+import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 
 type DomesticRow = {
   order_id: string;
@@ -111,17 +112,19 @@ export async function loader({ request }: Route.LoaderArgs) {
       ORDER BY COALESCE(a.updated_at,o.updated_at) DESC`,
   ).bind(current.organizationId).all<DomesticRow>();
   const assignmentIds = rows.results.map((row) => row.assignment_id).filter((id): id is string => Boolean(id));
-  const vehicles = assignmentIds.length
-    ? await env.DB.prepare(
+  const vehicles: VehicleRow[] = [];
+  for (const assignmentChunk of chunkD1Values(assignmentIds, 1)) {
+    const result = await env.DB.prepare(
       `SELECT assignment_id,id,vehicle_sequence,vehicle_type,plate_number,driver_name,driver_phone,
               planned_pickup_at,actual_pickup_at,actual_arrival_at,status
        FROM domestic_waybill_vehicles
-       WHERE organization_id=? AND assignment_id IN (${assignmentIds.map(() => "?").join(",")}) AND status!='cancelled'
+       WHERE organization_id=? AND assignment_id IN (${d1Placeholders(assignmentChunk.length)}) AND status!='cancelled'
        ORDER BY assignment_id,vehicle_sequence`,
-    ).bind(current.organizationId, ...assignmentIds).all<VehicleRow>()
-    : { results: [] as VehicleRow[] };
+    ).bind(current.organizationId, ...assignmentChunk).all<VehicleRow>();
+    vehicles.push(...result.results);
+  }
   const vehiclesByAssignment: Record<string, VehicleRow[]> = {};
-  for (const vehicle of vehicles.results) (vehiclesByAssignment[vehicle.assignment_id] ??= []).push(vehicle);
+  for (const vehicle of vehicles) (vehiclesByAssignment[vehicle.assignment_id] ??= []).push(vehicle);
   const mapped = rows.results.map((row) => ({
     ...row,
     transit_status: transitStatus(row, vehiclesByAssignment[row.assignment_id || ""] || []),

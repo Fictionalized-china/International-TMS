@@ -53,7 +53,7 @@ export default function AdminNotifications({loaderData,actionData}:Route.Compone
     {actionData&&"formError" in actionData&&actionData.formError&&<div className="alert error" role="alert">{actionData.formError}</div>}
     <section className="panel notification-list internal-notification-list">
       {loaderData.notifications.map((item)=><article key={item.id} className={item.is_read?"":"unread"}>
-        <span className={`status-pill ${item.severity==="critical"?"off":""}`}>{item.requires_ack?"需确认":item.severity==="warning"?"提醒":"消息"}</span>
+        <span className={`status-pill ${item.severity==="critical"?"danger":item.severity==="warning"?"warning":""}`}>{item.requires_ack?"需确认":item.severity==="warning"?"提醒":"消息"}</span>
         <div><h3>{item.title}</h3><p>{item.message}</p><small>{new Date(item.created_at).toLocaleString("zh-CN")}</small></div>
         <div className="page-actions">{item.link&&<Link className="text-button" to={item.link}>查看对象</Link>}{!item.is_read&&<Form method="post"><input type="hidden" name="intent" value={item.requires_ack?"acknowledge":"read"}/><input type="hidden" name="notificationId" value={item.id}/><button className="text-button">{item.requires_ack?"确认知悉":"标为已读"}</button></Form>}</div>
       </article>)}

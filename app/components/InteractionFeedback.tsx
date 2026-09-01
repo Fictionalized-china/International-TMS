@@ -1,11 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useFetchers, useNavigation, useRevalidator } from "react-router";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useBlocker,
+  useFetchers,
+  useNavigation,
+  useRevalidator,
+  type BlockerFunction,
+} from "react-router";
 import { connectionStatusLabel, hasActiveInteraction } from "../lib/interaction-state";
 
 export function GlobalInteractionFeedback() {
   const navigation = useNavigation();
   const fetchers = useFetchers();
-  const activeFetcherCount = fetchers.filter((fetcher) => fetcher.state !== "idle").length;
   const busy = hasActiveInteraction(
     navigation.state,
     fetchers.map((fetcher) => fetcher.state),
@@ -13,6 +18,39 @@ export function GlobalInteractionFeedback() {
   const wasBusy = useRef(false);
   const [slow, setSlow] = useState(false);
   const [announcement, setAnnouncement] = useState("");
+  const unsavedRegistry = useRef(new Map<string, string>());
+  const [unsavedMessage, setUnsavedMessage] = useState("");
+
+  useEffect(() => {
+    const updateUnsavedRegistry = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        id: string;
+        active: boolean;
+        message: string;
+      }>).detail;
+      if (!detail?.id) return;
+      if (detail.active) unsavedRegistry.current.set(detail.id, detail.message);
+      else unsavedRegistry.current.delete(detail.id);
+      setUnsavedMessage([...unsavedRegistry.current.values()].at(-1) ?? "");
+    };
+    window.addEventListener("itms:unsaved-changes", updateUnsavedRegistry);
+    return () => window.removeEventListener("itms:unsaved-changes", updateUnsavedRegistry);
+  }, []);
+
+  const blocker = useBlocker(useCallback<BlockerFunction>(({ currentLocation, nextLocation }) => {
+    if (!unsavedMessage || navigation.state !== "idle") return false;
+    return `${currentLocation.pathname}${currentLocation.search}${currentLocation.hash}` !==
+      `${nextLocation.pathname}${nextLocation.search}${nextLocation.hash}`;
+  }, [navigation.state, unsavedMessage]));
+
+  useEffect(() => {
+    if (blocker.state !== "blocked") return;
+    if (window.confirm(unsavedMessage || "当前内容尚未保存，确定离开吗？")) {
+      const timer = window.setTimeout(() => blocker.proceed(), 0);
+      return () => window.clearTimeout(timer);
+    }
+    else blocker.reset();
+  }, [blocker, unsavedMessage]);
 
   useEffect(() => {
     if (!busy) {
@@ -60,9 +98,10 @@ export function GlobalInteractionFeedback() {
 export function ConnectionStatus({ className = "" }: { className?: string }) {
   const navigation = useNavigation();
   const revalidator = useRevalidator();
-  const syncing = navigation.state !== "idle" || revalidator.state !== "idle";
+  const fetchers = useFetchers();
+  const syncing = navigation.state !== "idle" || revalidator.state !== "idle" ||
+    fetchers.some((fetcher) => fetcher.state !== "idle");
   const [online, setOnline] = useState(true);
-  const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
 
   useEffect(() => {
     const syncOnlineState = () => setOnline(window.navigator.onLine);
@@ -75,14 +114,7 @@ export function ConnectionStatus({ className = "" }: { className?: string }) {
     };
   }, []);
 
-  useEffect(() => {
-    if (!syncing && online) setLastUpdatedAt(new Date());
-  }, [online, syncing]);
-
-  const label = useMemo(
-    () => connectionStatusLabel({ online, syncing, lastUpdatedAt }),
-    [lastUpdatedAt, online, syncing],
-  );
+  const label = connectionStatusLabel({ online, syncing });
 
   return (
     <span

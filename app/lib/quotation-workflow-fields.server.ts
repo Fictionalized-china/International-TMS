@@ -10,6 +10,7 @@ import {
   type QuotationWorkflowField,
   type QuotationWorkflowFieldValue,
 } from "./quotation-workflow-fields";
+import { chunkD1Values, d1Placeholders } from "./d1-bindings";
 
 export type PreparedQuotationWorkflowFieldValue = {
   field: QuotationWorkflowField;
@@ -40,27 +41,32 @@ export async function listQuotationWorkflowInstanceFields(
   quotationIds: string[],
 ) {
   if (!quotationIds.length) return [];
-  const placeholders = quotationIds.map(() => "?").join(",");
-  return (await env.DB.prepare(
-    `SELECT wi.quotation_id,definition_field.id,f.workflow_id,
-      COALESCE(f.module_code,'consignment') module_code,
-      f.field_key,f.label,f.field_type,f.is_required,f.is_active,f.sort_order,
-      f.options_text,f.help_text
-     FROM workflow_instances wi
-     JOIN workflow_instance_fields f ON f.instance_id=wi.id
-     JOIN workflow_step_fields definition_field
-       ON definition_field.workflow_id=f.workflow_id
-      AND definition_field.field_key=f.field_key
-      AND COALESCE(definition_field.module_code,'consignment')=COALESCE(f.module_code,'consignment')
-     JOIN workflow_steps definition_step
-       ON definition_step.id=definition_field.step_id
-      AND definition_step.step_key='quotation'
-     WHERE wi.organization_id=? AND wi.quotation_id IN (${placeholders})
-       AND f.step_key='quotation'
-     ORDER BY wi.quotation_id,f.sort_order,f.label`,
-  ).bind(organizationId,...quotationIds).all<QuotationWorkflowField & {
-    quotation_id:string;
-  }>()).results;
+  const uniqueQuotationIds = [...new Set(quotationIds)];
+  const rows: Array<QuotationWorkflowField & { quotation_id: string }> = [];
+  for (const chunk of chunkD1Values(uniqueQuotationIds, 1)) {
+    const result = await env.DB.prepare(
+      `SELECT wi.quotation_id,definition_field.id,f.workflow_id,
+        COALESCE(f.module_code,'consignment') module_code,
+        f.field_key,f.label,f.field_type,f.is_required,f.is_active,f.sort_order,
+        f.options_text,f.help_text
+       FROM workflow_instances wi
+       JOIN workflow_instance_fields f ON f.instance_id=wi.id
+       JOIN workflow_step_fields definition_field
+         ON definition_field.workflow_id=f.workflow_id
+        AND definition_field.field_key=f.field_key
+        AND COALESCE(definition_field.module_code,'consignment')=COALESCE(f.module_code,'consignment')
+       JOIN workflow_steps definition_step
+         ON definition_step.id=definition_field.step_id
+        AND definition_step.step_key='quotation'
+       WHERE wi.organization_id=? AND wi.quotation_id IN (${d1Placeholders(chunk.length)})
+         AND f.step_key='quotation'
+       ORDER BY wi.quotation_id,f.sort_order,f.label`,
+    ).bind(organizationId, ...chunk).all<QuotationWorkflowField & {
+      quotation_id: string;
+    }>();
+    rows.push(...result.results);
+  }
+  return rows;
 }
 
 export async function listQuotationWorkflowFieldValues(
@@ -68,13 +74,18 @@ export async function listQuotationWorkflowFieldValues(
   quotationIds: string[],
 ) {
   if (!quotationIds.length) return [];
-  const placeholders = quotationIds.map(() => "?").join(",");
-  return (await env.DB.prepare(
-    `SELECT id,quotation_id,field_id,field_key,value_text,file_name,content_type,size_bytes
-     FROM quotation_workflow_field_values
-     WHERE organization_id=? AND quotation_id IN (${placeholders})
-     ORDER BY created_at,id`,
-  ).bind(organizationId, ...quotationIds).all<QuotationWorkflowFieldValue>()).results;
+  const uniqueQuotationIds = [...new Set(quotationIds)];
+  const rows: QuotationWorkflowFieldValue[] = [];
+  for (const chunk of chunkD1Values(uniqueQuotationIds, 1)) {
+    const result = await env.DB.prepare(
+      `SELECT id,quotation_id,field_id,field_key,value_text,file_name,content_type,size_bytes
+       FROM quotation_workflow_field_values
+       WHERE organization_id=? AND quotation_id IN (${d1Placeholders(chunk.length)})
+       ORDER BY created_at,id`,
+    ).bind(organizationId, ...chunk).all<QuotationWorkflowFieldValue>();
+    rows.push(...result.results);
+  }
+  return rows;
 }
 
 export async function prepareQuotationWorkflowFieldValues(input: {

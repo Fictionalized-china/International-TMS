@@ -172,7 +172,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     definitions.results[0];
   const workflowId = selected.id;
 
-  const [steps, fields, stepModules, moduleTasks, positions, instances, definitionSteps] = await Promise.all([
+  const [steps, fields, stepModules, moduleTasks] = await Promise.all([
     env.DB.prepare(
       "SELECT id, step_key, name, entity_type, trigger_event, sort_order, is_required, is_active, actor_scope FROM workflow_steps WHERE workflow_id = ? ORDER BY sort_order, step_key",
     )
@@ -193,6 +193,8 @@ export async function loader({ request }: Route.LoaderArgs) {
         responsibility_position_code,instructions
        FROM workflow_module_tasks WHERE workflow_id=? ORDER BY step_module_id,sort_order,task_key`,
     ).bind(workflowId).all<ModuleTask>(),
+  ]);
+  const [positions, instances, definitionSteps] = await Promise.all([
     env.DB.prepare(
       `SELECT p.code,p.name,d.name department_name
        FROM positions p LEFT JOIN departments d ON d.organization_id=p.organization_id AND d.code=p.department_code
@@ -226,12 +228,18 @@ export async function loader({ request }: Route.LoaderArgs) {
        ORDER BY ws.workflow_id,ws.sort_order,ws.id`,
     ).bind(current.organizationId).all<DefinitionStepSummary>(),
   ]);
-  const impactRows = await Promise.all(
-    steps.results.map(async (step) => [
+  const impactRows: Array<
+    readonly [
+      string,
+      Awaited<ReturnType<typeof inspectWorkflowFieldPolicyImpact>>,
+    ]
+  > = [];
+  for (const step of steps.results) {
+    impactRows.push([
       step.step_key,
       await inspectWorkflowFieldPolicyImpact(workflowId,step.step_key),
-    ] as const),
-  );
+    ] as const);
+  }
   return {
     current,
     openEditor,
@@ -1194,7 +1202,7 @@ async function synchronizeWorkflowExecutionSnapshots(
        AND current_step.sort_order<=target_step.sort_order
      ORDER BY wi.id`,
   ).bind(targetStepId,workflowId).all<{ id: string }>();
-  const chunkSize = 20;
+  const chunkSize = 4;
   for (let index = 0; index < instances.results.length; index += chunkSize) {
     await Promise.all(
       instances.results.slice(index, index + chunkSize).map((instance) =>

@@ -1175,24 +1175,17 @@ async function validateModuleGate(
 }
 
 async function orderModuleMetrics(organizationId: string, orderId: string) {
-  const [
-    cargo,
-    attachments,
-    bookings,
-    transportAssignments,
-    batches,
-    shipments,
-    expenses,
-  ] =
-    await Promise.all([
-      count("order_cargo_items", organizationId, orderId),
-      count("order_attachments", organizationId, orderId),
-      count("booking_records", organizationId, orderId),
-      count("order_transport_assignments", organizationId, orderId),
-      count("transport_batches", organizationId, orderId),
-      count("shipments", organizationId, orderId),
-      count("business_expenses", organizationId, orderId),
-    ]);
+  const [cargo, attachments, bookings, transportAssignments] = await Promise.all([
+    count("order_cargo_items", organizationId, orderId),
+    count("order_attachments", organizationId, orderId),
+    count("booking_records", organizationId, orderId),
+    count("order_transport_assignments", organizationId, orderId),
+  ]);
+  const [batches, shipments, expenses] = await Promise.all([
+    count("transport_batches", organizationId, orderId),
+    count("shipments", organizationId, orderId),
+    count("business_expenses", organizationId, orderId),
+  ]);
   return {
     cargo,
     attachments,

@@ -18,6 +18,7 @@ import { loadOrderLoadingDocumentRequirements } from "../lib/loading-document-re
 import { roadStatusLabels } from "../lib/warehouse-actual";
 import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
+import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 import { valueOf } from "../lib/validation";
 
 const LOADING_DOCUMENTS = loadingOrderDocumentDefinitions;
@@ -107,8 +108,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     batchOrderIds,
   );
   let batchDocumentStatuses: BatchDocumentStatusRow[] = [];
-  if (batches.results.length) {
-    const batchPlaceholders = batches.results.map(() => "?").join(",");
+  for (const batchChunk of chunkD1Values(batches.results, 1)) {
     const statusRows = await env.DB.prepare(
       `WITH ranked AS (
          SELECT bo.batch_id,bo.order_id,m.document_category,m.review_status,
@@ -117,15 +117,15 @@ export async function loader({ request }: Route.LoaderArgs) {
          JOIN order_document_metadata m ON m.order_id=bo.order_id AND m.organization_id=bo.organization_id
          JOIN order_attachments a ON a.id=m.attachment_id AND a.organization_id=m.organization_id
          WHERE bo.organization_id=? AND bo.status!='removed'
-           AND bo.batch_id IN (${batchPlaceholders})
+           AND bo.batch_id IN (${d1Placeholders(batchChunk.length)})
            AND m.document_category IN (${documentCodes})
        )
        SELECT batch_id,order_id,document_category,review_status
        FROM ranked WHERE row_no=1`,
     )
-      .bind(user.organizationId, ...batches.results.map((batch) => batch.id))
+      .bind(user.organizationId, ...batchChunk.map((batch) => batch.id))
       .all<BatchDocumentStatusRow>();
-    batchDocumentStatuses = statusRows.results;
+    batchDocumentStatuses.push(...statusRows.results);
   }
   const requirementsByOrder = new Map(
     batchRequirements.map((group) => [group.orderId, group]),
@@ -336,8 +336,8 @@ export default function WarehouseLoadingDocuments({ loaderData, actionData }: Ro
             <td><strong>{batch.batch_number}</strong><small>{batch.batch_name || "未命名配载批次"}</small></td>
             <td>{batch.origin_location}<small>至 {batch.destination_location}</small></td>
             <td><strong>{batch.order_count} 票</strong><small className="loading-document-order-list">{batch.order_numbers}</small></td>
-            <td><span className={`status-pill ${missing ? "off" : "success"}`}>{summary.requiredCount === 0 ? "无必填文件" : missing ? `缺 ${missing} 项` : `${summary.requiredCount}/${summary.requiredCount} 已上传`}</span><small>仅统计当前工作流必填项</small></td>
-            <td>{summary.rejectedRequiredCount ? <span className="status-pill off">{summary.rejectedRequiredCount} 项必填文件已退回</span> : summary.requiredCount === 0 ? <span className="status-pill success">无需审核</span> : summary.approvedRequiredCount === summary.requiredCount ? <span className="status-pill success">全部通过</span> : <span className="status-pill">{summary.approvedRequiredCount}/{summary.requiredCount} 已通过</span>}</td>
+            <td><span className={`status-pill ${missing ? "danger" : "success"}`}>{summary.requiredCount === 0 ? "无必填文件" : missing ? `缺 ${missing} 项` : `${summary.requiredCount}/${summary.requiredCount} 已上传`}</span><small>仅统计当前工作流必填项</small></td>
+            <td>{summary.rejectedRequiredCount ? <span className="status-pill danger">{summary.rejectedRequiredCount} 项必填文件已退回</span> : summary.requiredCount === 0 ? <span className="status-pill success">无需审核</span> : summary.approvedRequiredCount === summary.requiredCount ? <span className="status-pill success">全部通过</span> : <span className="status-pill">{summary.approvedRequiredCount}/{summary.requiredCount} 已通过</span>}</td>
             <td><span className={`status-pill ${batch.status === "completed" ? "success" : ""}`}>{batchStatusLabel(batch.status)}</span><small>{roadStatusLabels[batch.road_status] ?? batch.road_status}</small></td>
             <td>{formatDateTime(batch.updated_at)}</td>
             <td><Link className="secondary warehouse-loading-open-button" to={`/warehouse/loading-documents?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}&batchId=${encodeURIComponent(batch.id)}`}>打开文件</Link></td>
@@ -371,7 +371,7 @@ export default function WarehouseLoadingDocuments({ loaderData, actionData }: Ro
               const requirement = requirements.find((item) => item.code === type.code);
               const document = loaderData.documents.find((item) => item.order_id === order.order_id && item.document_category === type.code);
               if (!requirement?.isActive) return <td key={type.code}><span className="status-pill">不适用</span></td>;
-              return <td key={type.code}>{document ? <><a href={warehouseDocumentHref(document, loaderData.warehouse.id)} target="_blank" rel="noreferrer">{document.file_name}</a><small><span className={`status-pill ${["approved","archived"].includes(document.review_status) ? "success" : document.review_status === "rejected" ? "off" : ""}`}>{reviewStatusLabel(document.review_status)}</span> · {requirement.isRequired ? "必填" : "选填"}</small></> : <span className={`status-pill ${requirement.isRequired ? "off" : ""}`}>{requirement.isRequired ? "待上传" : "选填"}</span>}</td>;
+              return <td key={type.code}>{document ? <><a href={warehouseDocumentHref(document, loaderData.warehouse.id)} target="_blank" rel="noreferrer">{document.file_name}</a><small><span className={`status-pill ${["approved","archived"].includes(document.review_status) ? "success" : document.review_status === "rejected" ? "danger" : ""}`}>{reviewStatusLabel(document.review_status)}</span> · {requirement.isRequired ? "必填" : "选填"}</small></> : <span className={`status-pill ${requirement.isRequired ? "danger" : ""}`}>{requirement.isRequired ? "待上传" : "选填"}</span>}</td>;
             })}<td><OrderDocumentUploadModal
               order={order}
               documents={loaderData.documents.filter((item) => item.order_id === order.order_id)}
@@ -479,7 +479,7 @@ function OrderDocumentUploadModal({
         <div className="table-wrap"><table><thead><tr><th>文件类型</th><th>当前版本</th><th>本次文件</th><th>确认结果</th></tr></thead><tbody>{documentTypes.map((documentType) => {
           const current = documents.find((item) => item.document_category === documentType.code);
           const selectedFile = selectedFiles[documentType.code];
-          return <tr key={documentType.code}><td><strong>{documentType.name}</strong><small>{documentType.isRequired ? "必填" : "选填"}</small></td><td>{current ? <a href={warehouseDocumentHref(current, warehouseId)} target="_blank" rel="noreferrer">{current.file_name}</a> : "—"}</td><td>{selectedFile ? <><strong>{selectedFile.name}</strong><small>{formatFileSize(selectedFile.size)} · {selectedFile.type || "未知格式"}</small></> : "—"}</td><td><span className={`status-pill ${selectedFile ? "success" : current || !documentType.isRequired ? "" : "off"}`}>{selectedFile ? current ? "上传新版本" : "新增文件" : current ? "保留当前" : documentType.isRequired ? "仍缺失" : "选填未提供"}</span></td></tr>;
+          return <tr key={documentType.code}><td><strong>{documentType.name}</strong><small>{documentType.isRequired ? "必填" : "选填"}</small></td><td>{current ? <a href={warehouseDocumentHref(current, warehouseId)} target="_blank" rel="noreferrer">{current.file_name}</a> : "—"}</td><td>{selectedFile ? <><strong>{selectedFile.name}</strong><small>{formatFileSize(selectedFile.size)} · {selectedFile.type || "未知格式"}</small></> : "—"}</td><td><span className={`status-pill ${selectedFile ? "success" : current || !documentType.isRequired ? "" : "danger"}`}>{selectedFile ? current ? "上传新版本" : "新增文件" : current ? "保留当前" : documentType.isRequired ? "仍缺失" : "选填未提供"}</span></td></tr>;
         })}</tbody></table></div>
         <div className="warehouse-order-document-preview-grid">{documentTypes.map((documentType) => <OrderDocumentPreview key={documentType.code} documentType={documentType} selectedFile={selectedFiles[documentType.code]} current={documents.find((item) => item.document_category === documentType.code)} warehouseId={warehouseId}/>)}</div>
         <footer><span>本次将上传 {selectedCount} 个文件</span><div><button type="button" className="secondary" onClick={() => { closePreview(); setSelectionSignal((value) => value + 1); }}>返回修改</button><button type="button" className="primary" disabled={busy} onClick={uploadSelectedFiles}>{busy ? "正在上传…" : "确认并上传"}</button></div></footer>

@@ -1,5 +1,6 @@
 import{allocateToOutstanding,settlementDocumentNumber}from"./settlement";
 import{refreshOrderCompletionStatus}from"./order-review.server";
+import{chunkD1Rows,chunkD1Values,d1Placeholders}from"./d1-bindings";
 
 export type SettlementExpense={
   id:string;order_id:string;order_number:string;customer_name:string;direction:"receivable"|"payable";
@@ -50,30 +51,36 @@ export async function loadSettlementWorkbench(db:D1Database,organizationId:strin
 export async function createReconciliation(db:D1Database,input:{organizationId:string;expenseIds:string[];direction:"receivable"|"payable";notes?:string;userId:string;now:string}){
   const ids=[...new Set(input.expenseIds)].slice(0,100);
   if(!ids.length)throw new Error("请至少勾选一条已确认费用");
-  const placeholders=ids.map(()=>"?").join(",");
-  const rows=await db.prepare(`SELECT e.id,e.order_id,e.direction,e.stage,e.currency,e.amount,e.counterparty_name,o.customer_id,c.name customer_name,
-    CASE WHEN EXISTS(SELECT 1 FROM transport_batch_orders bo JOIN transport_batches b ON b.id=bo.batch_id WHERE bo.order_id=o.id AND bo.status!='removed' AND b.road_status IN ('outbound_in_transit','overseas_arrived','waiting_pickup','pickup_completed')) THEN 1 ELSE 0 END outbound_ready,
-    CASE WHEN EXISTS(SELECT 1 FROM settlement_reconciliation_lines l JOIN settlement_reconciliations r ON r.id=l.reconciliation_id WHERE l.expense_id=e.id AND r.status!='withdrawn') THEN 1 ELSE 0 END already_linked
-    FROM business_expenses e JOIN transport_orders o ON o.id=e.order_id JOIN customers c ON c.id=o.customer_id WHERE e.organization_id=? AND e.id IN (${placeholders})`).bind(input.organizationId,...ids).all<{id:string;order_id:string;direction:string;stage:string;currency:string;amount:number;counterparty_name:string|null;customer_id:string;customer_name:string;outbound_ready:number;already_linked:number}>();
-  if(rows.results.length!==ids.length)throw new Error("部分费用不存在，请刷新页面后重试");
-  if(rows.results.some(row=>row.direction!==input.direction||row.stage!=="confirmed"))throw new Error("只能选择同方向的已确认费用");
-  if(rows.results.some(row=>row.already_linked))throw new Error("部分费用已加入其他有效对账单");
-  if(input.direction==="receivable"&&rows.results.some(row=>!row.outbound_ready))throw new Error("客户应收对账只能在订单进入出境运输后发起");
-  const currency=rows.results[0].currency;
-  if(rows.results.some(row=>row.currency!==currency))throw new Error("一张对账单只能包含同一币种");
-  const customerId=input.direction==="receivable"?rows.results[0].customer_id:null;
-  const counterparty=input.direction==="receivable"?rows.results[0].customer_name:(rows.results[0].counterparty_name||"").trim();
+  type Candidate={id:string;order_id:string;direction:string;stage:string;currency:string;amount:number;counterparty_name:string|null;customer_id:string;customer_name:string;outbound_ready:number;already_linked:number};
+  const loaded:Candidate[]=[];
+  for(const chunk of chunkD1Values(ids,1)){
+    const result=await db.prepare(`SELECT e.id,e.order_id,e.direction,e.stage,e.currency,e.amount,e.counterparty_name,o.customer_id,c.name customer_name,
+      CASE WHEN EXISTS(SELECT 1 FROM transport_batch_orders bo JOIN transport_batches b ON b.id=bo.batch_id WHERE bo.order_id=o.id AND bo.status!='removed' AND b.road_status IN ('outbound_in_transit','overseas_arrived','waiting_pickup','pickup_completed')) THEN 1 ELSE 0 END outbound_ready,
+      CASE WHEN EXISTS(SELECT 1 FROM settlement_reconciliation_lines l JOIN settlement_reconciliations r ON r.id=l.reconciliation_id WHERE l.expense_id=e.id AND r.status!='withdrawn') THEN 1 ELSE 0 END already_linked
+      FROM business_expenses e JOIN transport_orders o ON o.id=e.order_id JOIN customers c ON c.id=o.customer_id WHERE e.organization_id=? AND e.id IN (${d1Placeholders(chunk.length)})`).bind(input.organizationId,...chunk).all<Candidate>();
+    loaded.push(...result.results);
+  }
+  const loadedById=new Map(loaded.map(row=>[row.id,row])),rows=ids.map(id=>loadedById.get(id)).filter((row):row is Candidate=>Boolean(row));
+  if(rows.length!==ids.length)throw new Error("部分费用不存在，请刷新页面后重试");
+  if(rows.some(row=>row.direction!==input.direction||row.stage!=="confirmed"))throw new Error("只能选择同方向的已确认费用");
+  if(rows.some(row=>row.already_linked))throw new Error("部分费用已加入其他有效对账单");
+  if(input.direction==="receivable"&&rows.some(row=>!row.outbound_ready))throw new Error("客户应收对账只能在订单进入出境运输后发起");
+  const currency=rows[0].currency;
+  if(rows.some(row=>row.currency!==currency))throw new Error("一张对账单只能包含同一币种");
+  const customerId=input.direction==="receivable"?rows[0].customer_id:null;
+  const counterparty=input.direction==="receivable"?rows[0].customer_name:(rows[0].counterparty_name||"").trim();
   if(!counterparty)throw new Error("应付费用缺少往来单位，不能发起对账");
-  if(input.direction==="receivable"&&rows.results.some(row=>row.customer_id!==customerId))throw new Error("客户应收对账不能跨客户合并");
-  if(input.direction==="payable"&&rows.results.some(row=>(row.counterparty_name||"").trim()!==counterparty))throw new Error("供应商应付对账不能跨往来单位合并");
-  if(rows.results.some(row=>!Number.isFinite(row.amount)||row.amount<=0))throw new Error("所选费用中存在金额为 0 的记录，请先完善费用金额再发起对账");
+  if(input.direction==="receivable"&&rows.some(row=>row.customer_id!==customerId))throw new Error("客户应收对账不能跨客户合并");
+  if(input.direction==="payable"&&rows.some(row=>(row.counterparty_name||"").trim()!==counterparty))throw new Error("供应商应付对账不能跨往来单位合并");
+  if(rows.some(row=>!Number.isFinite(row.amount)||row.amount<=0))throw new Error("所选费用中存在金额为 0 的记录，请先完善费用金额再发起对账");
   const org=await db.prepare("SELECT name FROM organizations WHERE id=?").bind(input.organizationId).first<{name:string}>();
   if(!org)throw new Error("组织信息无效");
-  const id=crypto.randomUUID(),number=settlementDocumentNumber(input.direction==="receivable"?"REC":"PAY",new Date(input.now)),total=rows.results.reduce((sum,row)=>sum+row.amount,0);
+  const id=crypto.randomUUID(),number=settlementDocumentNumber(input.direction==="receivable"?"REC":"PAY",new Date(input.now)),total=rows.reduce((sum,row)=>sum+row.amount,0);
   if(!Number.isFinite(total)||total<=0)throw new Error("所选费用合计必须大于 0，请先完善费用金额再发起对账");
+  const lineStatements=chunkD1Rows(rows,6).map(chunk=>db.prepare(`INSERT INTO settlement_reconciliation_lines(id,organization_id,reconciliation_id,expense_id,amount,created_at) VALUES ${chunk.map(()=>"(?,?,?,?,?,?)").join(",")}`).bind(...chunk.flatMap(row=>[crypto.randomUUID(),input.organizationId,id,row.id,row.amount,input.now])));
   await db.batch([
     db.prepare(`INSERT INTO settlement_reconciliations(id,organization_id,document_number,direction,counterparty_name,customer_id,settlement_entity,currency,total_amount,status,notes,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,'draft',?,?,?,?)`).bind(id,input.organizationId,number,input.direction,counterparty,customerId,org.name,currency,total,input.notes||null,input.userId,input.now,input.now),
-    ...rows.results.map(row=>db.prepare("INSERT INTO settlement_reconciliation_lines(id,organization_id,reconciliation_id,expense_id,amount,created_at) VALUES(?,?,?,?,?,?)").bind(crypto.randomUUID(),input.organizationId,id,row.id,row.amount,input.now)),
+    ...lineStatements,
   ]);
   return{id,number};
 }
@@ -97,9 +104,10 @@ export async function recordSettlementInvoice(db:D1Database,input:{organizationI
   const lines=await loadReconciliationOutstanding(db,input.organizationId,input.reconciliationId,"invoice");
   const allocations=allocateToOutstanding(lines.map(line=>({id:line.expense_id,outstanding:line.outstanding})),input.amount);
   const id=crypto.randomUUID(),recordNumber=settlementDocumentNumber("TAX",new Date(input.now));
+  const allocationStatements=chunkD1Rows(allocations,6).map(chunk=>db.prepare(`INSERT INTO settlement_invoice_allocations(id,organization_id,invoice_record_id,expense_id,amount,created_at) VALUES ${chunk.map(()=>"(?,?,?,?,?,?)").join(",")}`).bind(...chunk.flatMap(item=>[crypto.randomUUID(),input.organizationId,id,item.id,item.amount,input.now])));
   await db.batch([
     db.prepare(`INSERT INTO settlement_invoice_records(id,organization_id,record_number,reconciliation_id,direction,counterparty_name,invoice_company,invoice_type,invoice_number,invoice_code,invoice_date,tax_rate,title_name,tax_number,address_phone,bank_account,currency,amount,exchange_rate,attachment_reference,notes,status,created_by_user_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'recorded',?,?)`).bind(id,input.organizationId,recordNumber,input.reconciliationId,reconciliation.direction,reconciliation.counterparty_name,input.invoiceCompany,input.invoiceType,input.invoiceNumber,input.invoiceCode||null,input.invoiceDate,input.taxRate,input.titleName,input.taxNumber||null,input.addressPhone||null,input.bankAccount||null,reconciliation.currency,input.amount,input.exchangeRate,input.attachmentReference||null,input.notes||null,input.userId,input.now),
-    ...allocations.map(item=>db.prepare("INSERT INTO settlement_invoice_allocations(id,organization_id,invoice_record_id,expense_id,amount,created_at) VALUES(?,?,?,?,?,?)").bind(crypto.randomUUID(),input.organizationId,id,item.id,item.amount,input.now)),
+    ...allocationStatements,
   ]);
   await refreshExpenseStages(db,input.organizationId,allocations.map(item=>item.id),input.now);
   return{id,recordNumber};
@@ -127,13 +135,18 @@ export async function allocateCashTransaction(db:D1Database,input:{organizationI
   if(input.amount-cash.remaining>0.009)throw new Error("核销金额超过流水未分配余额");
   const lines=await loadReconciliationOutstanding(db,input.organizationId,input.reconciliationId,"cash");
   const allocations=allocateToOutstanding(lines.map(line=>({id:line.expense_id,outstanding:line.outstanding})),input.amount);
-  await db.batch(allocations.map(item=>db.prepare("INSERT INTO settlement_cash_allocations(id,organization_id,cash_transaction_id,reconciliation_id,expense_id,amount,created_by_user_id,created_at) VALUES(?,?,?,?,?,?,?,?)").bind(crypto.randomUUID(),input.organizationId,input.transactionId,input.reconciliationId,item.id,item.amount,input.userId,input.now)));
+  const allocationStatements=chunkD1Rows(allocations,8).map(chunk=>db.prepare(`INSERT INTO settlement_cash_allocations(id,organization_id,cash_transaction_id,reconciliation_id,expense_id,amount,created_by_user_id,created_at) VALUES ${chunk.map(()=>"(?,?,?,?,?,?,?,?)").join(",")}`).bind(...chunk.flatMap(item=>[crypto.randomUUID(),input.organizationId,input.transactionId,input.reconciliationId,item.id,item.amount,input.userId,input.now])));
+  await db.batch(allocationStatements);
   const allocated=await db.prepare("SELECT COALESCE(SUM(amount),0) total FROM settlement_cash_allocations WHERE cash_transaction_id=?").bind(input.transactionId).first<{total:number}>();
   const status=(allocated?.total??0)>=cash.amount-0.009?"allocated":"partially_allocated";
   await db.prepare("UPDATE settlement_cash_transactions SET status=?,updated_at=? WHERE id=? AND organization_id=?").bind(status,input.now,input.transactionId,input.organizationId).run();
   await refreshExpenseStages(db,input.organizationId,allocations.map(item=>item.id),input.now);
-  const affectedOrders=await db.prepare(`SELECT DISTINCT order_id FROM business_expenses WHERE organization_id=? AND id IN (${allocations.map(()=>"?").join(",")}) AND order_id IS NOT NULL`).bind(input.organizationId,...allocations.map(item=>item.id)).all<{order_id:string}>();
-  await refreshOrderCompletionStatus(db,input.organizationId,affectedOrders.results.map(row=>row.order_id),input.now);
+  const affectedOrderIds:string[]=[];
+  for(const allocationChunk of chunkD1Values(allocations,1)){
+    const affectedOrders=await db.prepare(`SELECT DISTINCT order_id FROM business_expenses WHERE organization_id=? AND id IN (${d1Placeholders(allocationChunk.length)}) AND order_id IS NOT NULL`).bind(input.organizationId,...allocationChunk.map(item=>item.id)).all<{order_id:string}>();
+    affectedOrderIds.push(...affectedOrders.results.map(row=>row.order_id));
+  }
+  await refreshOrderCompletionStatus(db,input.organizationId,[...new Set(affectedOrderIds)],input.now);
 }
 
 async function loadReconciliationOutstanding(db:D1Database,organizationId:string,reconciliationId:string,type:"invoice"|"cash"){
@@ -143,13 +156,11 @@ async function loadReconciliationOutstanding(db:D1Database,organizationId:string
 }
 
 async function refreshExpenseStages(db:D1Database,organizationId:string,expenseIds:string[],now:string){
-  for(const expenseId of [...new Set(expenseIds)]){
-    const totals=await db.prepare(`SELECT e.amount,
-      COALESCE((SELECT SUM(a.amount) FROM settlement_invoice_allocations a JOIN settlement_invoice_records i ON i.id=a.invoice_record_id AND i.status!='void' WHERE a.expense_id=e.id),0) invoiced,
-      COALESCE((SELECT SUM(a.amount) FROM settlement_cash_allocations a JOIN settlement_cash_transactions t ON t.id=a.cash_transaction_id AND t.status!='void' WHERE a.expense_id=e.id),0) settled
-      FROM business_expenses e WHERE e.id=? AND e.organization_id=?`).bind(expenseId,organizationId).first<{amount:number;invoiced:number;settled:number}>();
-    if(!totals)continue;
-    const stage=totals.settled>=totals.amount-0.009?"settled":totals.invoiced>=totals.amount-0.009?"invoiced":"reconciled";
-    await db.prepare("UPDATE business_expenses SET stage=?,updated_at=? WHERE id=? AND organization_id=?").bind(stage,now,expenseId,organizationId).run();
+  for(const chunk of chunkD1Values([...new Set(expenseIds)],2)){
+    await db.prepare(`UPDATE business_expenses AS e SET stage=CASE
+      WHEN COALESCE((SELECT SUM(a.amount) FROM settlement_cash_allocations a JOIN settlement_cash_transactions t ON t.id=a.cash_transaction_id AND t.status!='void' WHERE a.expense_id=e.id),0)>=e.amount-0.009 THEN 'settled'
+      WHEN COALESCE((SELECT SUM(a.amount) FROM settlement_invoice_allocations a JOIN settlement_invoice_records i ON i.id=a.invoice_record_id AND i.status!='void' WHERE a.expense_id=e.id),0)>=e.amount-0.009 THEN 'invoiced'
+      ELSE 'reconciled' END,updated_at=?
+      WHERE e.organization_id=? AND e.id IN (${d1Placeholders(chunk.length)})`).bind(now,organizationId,...chunk).run();
   }
 }

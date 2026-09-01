@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
+import { useNavigation } from "react-router";
 
 type ScrollSnapshot = {
   scrollY: number;
@@ -21,6 +22,37 @@ type ScrollSnapshot = {
 
 let scrollLockCount = 0;
 let scrollSnapshot: ScrollSnapshot | null = null;
+
+function serializeModalForms(dialog: HTMLElement) {
+  const forms = Array.from(dialog.querySelectorAll("form"));
+  return JSON.stringify(forms.map((form) => {
+    const fields: unknown[][] = [];
+    Array.from(form.elements).forEach((element, index) => {
+      if (element instanceof HTMLInputElement) {
+        const value = element.type === "file"
+          ? Array.from(element.files ?? []).map((file) => [file.name, file.size, file.lastModified])
+          : ["checkbox", "radio"].includes(element.type)
+            ? { checked: element.checked, value: element.value }
+            : element.value;
+        fields.push([index, element.name, element.type, value]);
+        return;
+      }
+      if (element instanceof HTMLSelectElement) {
+        fields.push([
+          index,
+          element.name,
+          "select",
+          Array.from(element.selectedOptions).map((option) => option.value),
+        ]);
+        return;
+      }
+      if (element instanceof HTMLTextAreaElement) {
+        fields.push([index, element.name, "textarea", element.value]);
+      }
+    });
+    return fields;
+  }));
+}
 
 function acquirePageScrollLock() {
   if (typeof document === "undefined" || typeof window === "undefined") return;
@@ -186,6 +218,7 @@ type ModalProps = {
   closeOnBackdrop?: boolean;
   dismissible?:boolean;
   dirty?: boolean;
+  guardFormChanges?: boolean;
   discardMessage?: string;
   initialFocusSelector?: string;
   onClose?: () => void;
@@ -205,13 +238,20 @@ export function Modal({
   closeOnBackdrop = false,
   dismissible = true,
   dirty = false,
+  guardFormChanges = false,
   discardMessage = "当前内容尚未保存，确定放弃本次修改吗？",
   initialFocusSelector,
   onClose,
   onOpenChange,
 }: ModalProps) {
   const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const [formDirty, setFormDirty] = useState(false);
+  const [longSubmission, setLongSubmission] = useState(false);
   const open = isOpen ?? uncontrolledOpen;
+  const hasUnsavedChanges = dirty || (guardFormChanges && formDirty);
+  const navigation = useNavigation();
+  const submissionPending = open && navigation.state !== "idle" && Boolean(navigation.formMethod);
+  const submissionCloseLocked = submissionPending && !longSubmission;
   const titleId = useId();
   const modalId = useId();
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -225,11 +265,74 @@ export function Modal({
   }, [isOpen, onOpenChange]);
 
   const close = useCallback((force = false) => {
+    if (!force && submissionCloseLocked) return;
     if(!force&&!dismissible)return;
-    if (!force && dirty && typeof window !== "undefined" && !window.confirm(discardMessage)) return;
+    if (!force && hasUnsavedChanges && typeof window !== "undefined" && !window.confirm(discardMessage)) return;
     updateOpen(false);
     onClose?.();
-  }, [dirty, dismissible, discardMessage, onClose, updateOpen]);
+  }, [dismissible, discardMessage, hasUnsavedChanges, onClose, submissionCloseLocked, updateOpen]);
+
+  useEffect(() => {
+    if (!submissionPending) {
+      setLongSubmission(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setLongSubmission(true), 2_000);
+    return () => window.clearTimeout(timer);
+  }, [submissionPending]);
+
+  useEffect(() => {
+    if (!open || !guardFormChanges) return;
+    setFormDirty(false);
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const baseline = serializeModalForms(dialog);
+    let pendingFrame: number | null = null;
+    const detectChanges = (event: Event) => {
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      if (target?.closest("[data-ignore-dirty]")) return;
+      if (!target?.closest("form")) return;
+      if (pendingFrame !== null) window.cancelAnimationFrame(pendingFrame);
+      pendingFrame = window.requestAnimationFrame(() => {
+        pendingFrame = null;
+        setFormDirty(serializeModalForms(dialog) !== baseline);
+      });
+    };
+    dialog.addEventListener("input", detectChanges);
+    dialog.addEventListener("change", detectChanges);
+    dialog.addEventListener("click", detectChanges);
+    return () => {
+      if (pendingFrame !== null) window.cancelAnimationFrame(pendingFrame);
+      dialog.removeEventListener("input", detectChanges);
+      dialog.removeEventListener("change", detectChanges);
+      dialog.removeEventListener("click", detectChanges);
+    };
+  }, [guardFormChanges, open]);
+
+  useEffect(() => {
+    if (!open || !hasUnsavedChanges) return;
+    const preventAccidentalReload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", preventAccidentalReload);
+    return () => window.removeEventListener("beforeunload", preventAccidentalReload);
+  }, [hasUnsavedChanges, open]);
+
+  useEffect(() => {
+    if (!guardFormChanges || typeof window === "undefined") return;
+    const detail = {
+      id: modalId,
+      active: open && hasUnsavedChanges,
+      message: discardMessage,
+    };
+    window.dispatchEvent(new CustomEvent("itms:unsaved-changes", { detail }));
+    return () => {
+      window.dispatchEvent(new CustomEvent("itms:unsaved-changes", {
+        detail: { ...detail, active: false },
+      }));
+    };
+  }, [discardMessage, guardFormChanges, hasUnsavedChanges, modalId, open]);
 
   // `closeSignal` / `openSignal` are event-like values.  Their effects must run
   // only when the signal changes, not whenever a parent recreates an inline
@@ -331,10 +434,17 @@ export function Modal({
           >
             <header className="modal-header">
               <h2 id={titleId}>{title}</h2>
+              {hasUnsavedChanges && <span className="modal-unsaved-indicator" role="status">未保存</span>}
               {dismissible&&<button
                   type="button"
                   className="modal-close"
                   aria-label="关闭"
+                  disabled={submissionCloseLocked}
+                  title={submissionCloseLocked
+                    ? "请求正在提交，请稍候"
+                    : submissionPending
+                      ? "请求仍在处理；关闭弹窗不会取消请求"
+                      : undefined}
                   onClick={() => close()}
                 >
                   ×

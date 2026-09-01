@@ -53,11 +53,10 @@ async function workflowRequirements(
   orderId: string,
   moduleCodes: OrderModuleCode[],
 ) {
-  const groups = await Promise.all(
-    moduleCodes.map((moduleCode) =>
-      loadOrderModuleWorkflowFields(organizationId, orderId, moduleCode),
-    ),
-  );
+  const groups: Awaited<ReturnType<typeof loadOrderModuleWorkflowFields>>[] = [];
+  for (const moduleCode of moduleCodes) {
+    groups.push(await loadOrderModuleWorkflowFields(organizationId, orderId, moduleCode));
+  }
   const fields = groups.flat();
   return (fieldKey: string, fallback = false) => {
     const field = fields.find((item) => item.fieldKey === fieldKey);

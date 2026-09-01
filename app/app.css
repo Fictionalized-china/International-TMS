@@ -6985,6 +6985,18 @@ label:has(> input:required:invalid, > select:required:invalid, > textarea:requir
   font-size: 24px;
   line-height: 1;
 }
+.modal-unsaved-indicator {
+  margin-left: auto;
+  color: #9a6700;
+  background: #fff7d6;
+  border: 1px solid #e8cf79;
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.modal-unsaved-indicator + .modal-close { margin-left: 4px; }
 .modal-body {
   flex: 1 1 auto;
   min-height: 0;
@@ -20130,6 +20142,16 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   border-color: #e7b7b1;
   background: #fff0ee;
 }
+.status-pill.warning {
+  color: #8a5a16;
+  border-color: #e7c985;
+  background: #fff7e5;
+}
+.stocktake-count-table .status-pill.off {
+  color: #9c2f25;
+  border-color: #e7b7b1;
+  background: #fff0ee;
+}
 
 .outbound-node-table,
 .dispatch-sheet,
@@ -20438,7 +20460,7 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   min-width: 980px;
 }
 
-/* Required state language: missing is pale red, complete is pale green, optional stays neutral. */
+/* Required state language: missing is pale red; completed and optional fields stay neutral. */
 form :is(input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="file"]), select, textarea):not(:required):not(:disabled) {
   border-color: #c8d3df !important;
   background: #fff !important;
@@ -20448,8 +20470,8 @@ form :is(input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):n
   background: #fff3f3 !important;
 }
 form :is(input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="file"]), select, textarea):required:valid:not(:disabled) {
-  border-color: #b9ddca !important;
-  background: #f1faf5 !important;
+  border-color: #c8d3df !important;
+  background: #fff !important;
 }
 form :is(input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="file"]), select, textarea):required:disabled {
   border-color: #dfe6ec !important;
@@ -20464,8 +20486,8 @@ form :is(input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):n
   background: #fff3f3;
 }
 .prototype-quote-form .quote-contact-combobox:has(input:required:valid) {
-  border-color: #b9ddca;
-  background: #f1faf5;
+  border-color: #d6e0e8;
+  background: #fff;
 }
 
 /* The quotation ledger stays visually neutral after entry; only missing required fields need emphasis. */
@@ -24017,6 +24039,11 @@ details > summary,
   outline: 2px solid #2f80ed;
   outline-offset: 2px;
 }
+:where(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell)
+  :where(button, a, input, select, textarea, [tabindex]:not([tabindex="-1"])):focus-visible {
+  outline: 2px solid #2f80ed;
+  outline-offset: 2px;
+}
 .modal-close {
   min-width: 32px;
   min-height: 32px;
@@ -24177,6 +24204,37 @@ html[data-density="comfortable"] :is(
   .prototype-portal-shell th,
   .prototype-page th
 ) { font-size: 10px; }
+html[data-density="comfortable"] .modal-card {
+  --ui-control-height: 38px;
+  --ui-section-gap: 14px;
+  --ui-cell-x: 13px;
+  --ui-cell-y: 11px;
+}
+html[data-density="comfortable"] .modal-card .modal-body :is(
+  input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+  select:not([multiple])
+) {
+  min-height: var(--ui-control-height);
+  height: var(--ui-control-height);
+  font-size: 13px;
+}
+html[data-density="comfortable"] .modal-card .modal-body textarea {
+  min-height: 72px;
+  font-size: 13px;
+}
+html[data-density="comfortable"] .modal-card .modal-body :is(.field > span, th) {
+  font-size: 12px;
+}
+html[data-density="comfortable"] .modal-card .modal-body th {
+  padding: 9px var(--ui-cell-x);
+}
+html[data-density="comfortable"] .modal-card .modal-body td {
+  padding: var(--ui-cell-y) var(--ui-cell-x);
+}
+html[data-density="comfortable"] .modal-card .modal-body .quote-contact-combobox {
+  min-height: var(--ui-control-height);
+  height: var(--ui-control-height);
+}
 
 html[data-motion="off"] *,
 html[data-motion="off"] *::before,
