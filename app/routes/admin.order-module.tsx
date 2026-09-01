@@ -337,6 +337,25 @@ type WarehouseCargoActual = {
   first_received_at: string | null;
   last_received_at: string | null;
 };
+type WarehouseReceiptDetail = {
+  id: string;
+  receipt_number: string;
+  received_at: string;
+  cargo_complete: number;
+  has_exception: number;
+  exception_notes: string | null;
+  total_packages: number;
+  total_pieces: number;
+  total_weight_kg: number;
+  total_volume_cbm: number;
+  notes: string | null;
+  evidence_note: string | null;
+  operator_name: string | null;
+  warehouse_name: string;
+  zone_name: string;
+  location_name: string;
+  location_code: string;
+};
 type WarehousePackageLabelRow = {
   id: string;
   cargo_item_id: string | null;
@@ -936,6 +955,20 @@ export async function loader({ request, params }: Route.LoaderArgs) {
            GROUP BY p.status`,
         ).bind(current.organizationId,orderId).all<{status:string;package_count:number;move_count:number}>(),
         env.DB.prepare(
+          `SELECT r.id,r.receipt_number,r.received_at,r.cargo_complete,r.has_exception,r.exception_notes,
+                  r.total_packages,r.total_pieces,r.total_weight_kg,r.total_volume_cbm,r.notes,r.evidence_note,
+                  u.display_name operator_name,w.name warehouse_name,z.name zone_name,
+                  l.name location_name,l.code location_code
+             FROM warehouse_receipts r
+             JOIN shipments s ON s.id=r.shipment_id AND s.organization_id=r.organization_id
+             JOIN warehouses w ON w.id=r.warehouse_id AND w.organization_id=r.organization_id
+             JOIN warehouse_locations l ON l.id=r.location_id AND l.organization_id=r.organization_id
+             JOIN warehouse_zones z ON z.id=l.zone_id AND z.organization_id=r.organization_id
+             LEFT JOIN users u ON u.id=r.received_by_user_id
+            WHERE r.organization_id=? AND s.order_id=? AND r.status='completed'
+            ORDER BY r.received_at DESC,r.id DESC`,
+        ).bind(current.organizationId,orderId).all<WarehouseReceiptDetail>(),
+        env.DB.prepare(
           `SELECT i.id cargo_item_id,
                   COUNT(r.id) actual_record_count,
                   SUM(CASE WHEN r.id IS NOT NULL THEN ri.actual_packages END) actual_packages,
@@ -971,7 +1004,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
             ORDER BY COALESCE(i.line_no,9999),p.created_at,p.package_number,p.id`,
         ).bind(current.organizationId,orderId).all<WarehousePackageLabelRow>(),
         checkOrderLoadPlan(current.organizationId, orderId),
-      ]).then(([operation, inboundTimes, packageStatuses, cargoActuals, packageLabels, loadPlan]) => ({
+      ]).then(([operation, inboundTimes, packageStatuses, receipts, cargoActuals, packageLabels, loadPlan]) => ({
         received:Boolean(operation?.received),
         inboundReady:Boolean(operation?.inbound_ready),
         loadPlanReady:loadPlan.ready,
@@ -983,6 +1016,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
         lastInboundAt:inboundTimes?.last_inbound_at ?? null,
         receiptCount:inboundTimes?.receipt_count ?? 0,
         packageStatuses:packageStatuses.results,
+        receipts:receipts.results,
         cargoActuals:cargoActuals.results,
         packageLabels:packageLabels.results,
       }))
@@ -6043,6 +6077,7 @@ function ModuleBusinessData({
       (data.warehouseFlow?.cargoActuals ?? []).map((item) => [item.cargo_item_id, item]),
     );
     const packageLabels = data.warehouseFlow?.packageLabels ?? [];
+    const receipts = data.warehouseFlow?.receipts ?? [];
     const packageStatuses = data.warehouseFlow?.packageStatuses ?? [];
     const packageCount = (status: string) =>
       packageStatuses.find((item) => item.status === status)?.package_count ?? 0;
@@ -6050,6 +6085,32 @@ function ModuleBusinessData({
     return (
       <div className="module-business-stack dense-module-stack warehouse-comparison-workbench">
         <p className="readonly-note">本节点由国内仓操作员在仓库端完成。管理端按货物行对照订单创建数据与仓库实际清点数据，不重复修改仓库实收。</p>
+
+        {data.warehouseFlow?.inboundReady ? (
+          <div className="alert success"><strong>国内仓入库完成：</strong>仓库已经确认货齐，实收数据已同步至订单，主流程会自动开放出口准备与装车出库。</div>
+        ) : data.warehouseFlow?.received ? (
+          <div className="alert warning"><strong>国内仓已部分入库：</strong>实收数据已经同步，等待仓库确认整票货齐后自动推进下一节点。</div>
+        ) : null}
+
+        <BusinessSubsection title="国内仓入库核实记录" hint="逐张显示仓库提交的入仓时间、实收数量、库位、核实结果和操作人员。">
+          <div className="table-wrap module-record-table operation-sheet-table warehouse-receipt-detail-table">
+            <table>
+              <thead><tr><th>收货单</th><th>入仓时间</th><th>仓库 / 库位</th><th>仓库核实结果</th><th>实收</th><th>操作人员</th><th>备注 / 凭证</th></tr></thead>
+              <tbody>
+                {receipts.map((receipt) => <tr key={receipt.id}>
+                  <td><strong>{receipt.receipt_number}</strong></td>
+                  <td>{new Date(receipt.received_at).toLocaleString("zh-CN",{hour12:false})}</td>
+                  <td>{receipt.warehouse_name}<small>{receipt.zone_name} / {receipt.location_name}（{receipt.location_code}）</small></td>
+                  <td><span className={`status-pill ${receipt.cargo_complete ? "success" : receipt.has_exception ? "danger" : ""}`}>{receipt.cargo_complete ? "已核实货齐" : receipt.has_exception ? "异常入库" : "分批入库"}</span>{receipt.exception_notes && <small className="danger-text">{receipt.exception_notes}</small>}</td>
+                  <td><strong>{receipt.total_packages} 包 / {receipt.total_pieces} 件</strong><small>{Number(receipt.total_weight_kg).toFixed(2)} KG · {Number(receipt.total_volume_cbm).toFixed(3)} CBM</small></td>
+                  <td>{receipt.operator_name || "仓库操作员"}</td>
+                  <td>{receipt.notes || "—"}<small>{receipt.evidence_note || "无补充凭证说明"}</small></td>
+                </tr>)}
+                {!receipts.length && <tr><td colSpan={7} className="empty-state">尚未收到国内仓入库核实记录。</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </BusinessSubsection>
 
         <BusinessSubsection title="订单创建数据与仓库实际清点对比" hint="每条货物固定显示订单创建行和仓库实点行；入库前实点值为空，验收入库后自动同步。">
           <div className="table-wrap module-record-table operation-sheet-table warehouse-cargo-comparison-table">

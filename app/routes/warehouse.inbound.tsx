@@ -828,6 +828,9 @@ export async function action({ request }: Route.ActionArgs) {
       env.DB.prepare(
         "UPDATE order_transport_assignments SET status='arrived',actual_arrival_at=COALESCE(actual_arrival_at,?),updated_at=? WHERE organization_id=? AND order_id=? AND leg_type='first_mile' AND status!='cancelled'",
       ).bind(now, now, user.organizationId, shipment.order_id),
+      env.DB.prepare(
+        "UPDATE shipments SET actual_delivery_at=COALESCE(actual_delivery_at,?),updated_at=? WHERE id=? AND organization_id=?",
+      ).bind(now, now, shipment.id, user.organizationId),
     ];
     if (assignment?.id)
       completionStatements.push(

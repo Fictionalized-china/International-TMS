@@ -577,12 +577,14 @@ async function completeDomesticTransport(organizationId:string,orderId:string,sh
     env.DB.prepare("SELECT id,current_step_code FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='transport' AND enabled=1").bind(organizationId,orderId).first<{id:string;current_step_code:string|null}>(),
     env.DB.prepare("SELECT id FROM order_transport_assignments WHERE organization_id=? AND order_id=? AND leg_type='first_mile' AND status!='cancelled' ORDER BY created_at DESC LIMIT 1").bind(organizationId,orderId).first<{id:string}>(),
   ]);
-  const statements:D1PreparedStatement[]=[env.DB.prepare("UPDATE order_transport_assignments SET status='arrived',actual_arrival_at=COALESCE(actual_arrival_at,?),updated_at=? WHERE organization_id=? AND order_id=? AND leg_type='first_mile' AND status!='cancelled'").bind(now,now,organizationId,orderId)];
+  const statements:D1PreparedStatement[]=[
+    env.DB.prepare("UPDATE order_transport_assignments SET status='arrived',actual_arrival_at=COALESCE(actual_arrival_at,?),updated_at=? WHERE organization_id=? AND order_id=? AND leg_type='first_mile' AND status!='cancelled'").bind(now,now,organizationId,orderId),
+    env.DB.prepare("UPDATE shipments SET actual_delivery_at=COALESCE(actual_delivery_at,?),updated_at=? WHERE id=? AND organization_id=?").bind(now,now,shipmentId,organizationId),
+  ];
   if(assignment) statements.push(env.DB.prepare("UPDATE domestic_waybill_vehicles SET status='arrived',actual_arrival_at=COALESCE(actual_arrival_at,?),updated_at=? WHERE organization_id=? AND assignment_id=?").bind(now,now,organizationId,assignment.id));
   if(module) statements.push(env.DB.prepare("UPDATE order_module_instances SET status='completed',current_step_code='warehouse_arrived',current_step_name='货物已到国内仓',progress_percent=100,completed_at=COALESCE(completed_at,?),blocking_reason=NULL,updated_at=? WHERE id=?").bind(now,now,module.id),env.DB.prepare("INSERT INTO order_module_history(id,organization_id,order_id,module_instance_id,action_code,action_name,from_step_code,to_step_code,to_step_name,actor_user_id,notes,occurred_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").bind(crypto.randomUUID(),organizationId,orderId,module.id,"warehouse_acceptance_ready","验收确认货齐",module.current_step_code,"warehouse_arrived","货物已到国内仓",actorUserId,`入库单 ${receiptNumber} 已确认货齐`,now));
   await env.DB.batch(statements);
   await syncOrderWorkflowSnapshot(organizationId,orderId);
-  void shipmentId;
 }
 
 function nonNegativeNumber(form:FormData,name:string){const raw=valueOf(form,name);if(raw==="")return null;const value=Number(raw);return Number.isFinite(value)&&value>=0?value:null}

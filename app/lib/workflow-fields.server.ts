@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import type { OrderModuleCode } from "./order-modules";
+import { domesticTransportPayableWorkflowValues } from "./transport-workflow";
 import { orderDocumentPlacements } from "./order-documents";
 import {
   workflowFieldCatalog,
@@ -680,8 +681,9 @@ async function resolveFieldPresence(
   }
 
   if (moduleCode === "transport") {
-    const transport = await env.DB.prepare(
-      `SELECT a.*,COALESCE(a.carrier_id,a.carrier_name) domestic_carrier_id,
+    const [transport, payable] = await Promise.all([
+      env.DB.prepare(
+        `SELECT a.*,COALESCE(a.carrier_id,a.carrier_name) domestic_carrier_id,
               a.vehicle_type domestic_vehicle_type,a.vehicle_count domestic_vehicle_count,a.loading_mode domestic_loading_mode,a.plate_number domestic_plate_number,
               a.driver_name domestic_driver_name,a.driver_phone domestic_driver_phone,
               a.driver_id_number domestic_driver_id_number,
@@ -691,12 +693,35 @@ async function resolveFieldPresence(
        FROM order_transport_assignments a
        WHERE a.organization_id=? AND a.order_id=? AND a.leg_type='first_mile' AND a.status!='cancelled'
        ORDER BY a.created_at DESC LIMIT 1`,
-    ).bind(organizationId, orderId).first<Record<string, unknown>>();
+      ).bind(organizationId, orderId).first<Record<string, unknown>>(),
+      env.DB.prepare(
+        `SELECT charge_name,quantity,exchange_rate
+         FROM business_expenses
+         WHERE organization_id=? AND order_id=? AND direction='payable' AND stage!='cancelled'
+           AND charge_code='DOMESTIC_FREIGHT'
+         ORDER BY CASE WHEN source_type='transport_assignment' THEN 0 ELSE 1 END,updated_at DESC,created_at DESC
+         LIMIT 1`,
+      ).bind(organizationId, orderId).first<{
+        charge_name: string | null;
+        quantity: number | null;
+        exchange_rate: number | null;
+      }>(),
+    ]);
     for (const rule of rules) {
       if (transport && rule.fieldKey in transport) setPresence(result, rule.fieldKey, transport[rule.fieldKey]);
     }
+    const payableValues = domesticTransportPayableWorkflowValues(payable);
+    for (const [fieldKey, value] of Object.entries(payableValues))
+      setPresence(result, fieldKey, value);
     const shipment = await env.DB.prepare(
-      "SELECT actual_pickup_at,actual_delivery_at FROM shipments WHERE organization_id=? AND order_id=? ORDER BY created_at DESC LIMIT 1",
+      `SELECT s.actual_pickup_at,
+              COALESCE(s.actual_delivery_at,(
+                SELECT MAX(r.received_at) FROM warehouse_receipts r
+                WHERE r.organization_id=s.organization_id AND r.shipment_id=s.id
+                  AND r.status='completed' AND r.cargo_complete=1
+              )) actual_delivery_at
+       FROM shipments s WHERE s.organization_id=? AND s.order_id=?
+       ORDER BY s.created_at DESC LIMIT 1`,
     ).bind(organizationId, orderId).first<{ actual_pickup_at: string | null; actual_delivery_at: string | null }>();
     setPresence(result, "domestic_actual_pickup_at", shipment?.actual_pickup_at);
     setPresence(result, "domestic_actual_arrival_at", shipment?.actual_delivery_at);
