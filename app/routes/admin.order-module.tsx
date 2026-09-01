@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
-import { Form as RouterForm, Link, useFetcher, useNavigation, redirect } from "react-router";
+import { Form as RouterForm, Link, useActionData, useFetcher, useNavigation, redirect } from "react-router";
 import { env } from "cloudflare:workers";
 import type { Route } from "./+types/admin.order-module";
 import { BatchNumberLink, OrderNumberLink } from "../components/EntityNumberLink";
@@ -4626,8 +4626,24 @@ function ModuleBusinessData({
   const [domesticCarrierId, setDomesticCarrierId] = useState("");
   const [domesticVehicleId, setDomesticVehicleId] = useState("");
   const [domesticDriverId, setDomesticDriverId] = useState("");
+  const [transportView, setTransportView] = useState<"create" | "records">(
+    manage ? "create" : "records",
+  );
+  const moduleActionData = useActionData() as
+    | { actionKind?: string; success?: string }
+    | undefined;
   const domesticVehicle = data.carrierVehicles.find((item) => item.id === domesticVehicleId);
   const domesticDriver = data.carrierDrivers.find((item) => item.id === domesticDriverId);
+
+  useEffect(() => {
+    if (
+      code === "transport" &&
+      moduleActionData?.actionKind === "transport_assignment" &&
+      moduleActionData.success
+    ) {
+      setTransportView("records");
+    }
+  }, [code, moduleActionData]);
 
   if (code === "cargo")
     return (
@@ -4946,12 +4962,41 @@ function ModuleBusinessData({
   }
   if (code === "transport")
     return (
-      <div className="module-business-stack dense-module-stack">
-        <div className="module-toolbar transport-entry-forms">
-          {manage && (
-            <details className="expandable module-create-dialog module-inline-create transport-entry-panel" open={!data.transportAssignments.length}>
-              <summary>新增运输安排</summary>
-              <Form method="post" className="form-grid compact transport-arrangement-form">
+      <div className="module-business-stack dense-module-stack transport-operation-workbench">
+        <nav className="transport-view-tabs" role="tablist" aria-label="国内运输业务分区">
+          {manage && <button
+            type="button"
+            id="transport-create-tab"
+            role="tab"
+            aria-selected={transportView === "create"}
+            aria-controls="transport-create-panel"
+            className={transportView === "create" ? "active" : ""}
+            onClick={() => setTransportView("create")}
+          >
+            新增运输安排
+          </button>}
+          <button
+            type="button"
+            id="transport-records-tab"
+            role="tab"
+            aria-selected={transportView === "records"}
+            aria-controls="transport-records-panel"
+            className={transportView === "records" ? "active" : ""}
+            onClick={() => setTransportView("records")}
+          >
+            已有运输安排
+            <span>{data.transportAssignments.length}</span>
+          </button>
+        </nav>
+        {manage && <section
+          id="transport-create-panel"
+          role="tabpanel"
+          aria-labelledby="transport-create-tab"
+          className="transport-view-panel transport-create-panel"
+          hidden={transportView !== "create"}
+        >
+          <div className="module-toolbar transport-entry-forms">
+              <Form method="post" className="form-grid compact transport-arrangement-form transport-compact-form">
                 <input
                   type="hidden"
                   name="intent"
@@ -4962,49 +5007,50 @@ function ModuleBusinessData({
                   <span>由业务员在国内运输开始时确认；保存后同步生成国内运输应付明细。</span>
                 </div>
                 <input type="hidden" name="legType" value="first_mile" />
-                <ModuleField
-                  fields={data.workflowFields}
-                  fieldKey="domestic_carrier_id"
-                  label="国内承运商"
-                  fallbackRequired
-                >
-                  {(required) => <select
-                    name="carrierId"
-                    value={domesticCarrierId}
-                    required={required}
-                    onChange={(event) => {
-                      setDomesticCarrierId(event.currentTarget.value);
-                      setDomesticVehicleId("");
-                      setDomesticDriverId("");
-                      const option = event.currentTarget.selectedOptions[0];
-                      const form = event.currentTarget.form;
-                      const carrierName = form?.elements.namedItem("carrierName") as HTMLInputElement | null;
-                      const carrierContact = form?.elements.namedItem("carrierContact") as HTMLInputElement | null;
-                      const carrierPhone = form?.elements.namedItem("carrierPhone") as HTMLInputElement | null;
-                      if (carrierName) carrierName.value = option?.dataset.name ?? "";
-                      if (carrierContact) carrierContact.value = option?.dataset.contact ?? "";
-                      if (carrierPhone) carrierPhone.value = option?.dataset.phone ?? "";
-                    }}
-                  >
-                    <option value="">请选择承运商</option>
-                    {data.carriers.filter((x) => x.carrier_scope === "domestic").map((x) => (
-                      <option
-                        key={x.id}
-                        value={x.id}
-                        data-name={x.name}
-                        data-contact={x.contact_name || ""}
-                        data-phone={x.contact_phone || ""}
-                      >
-                        {x.name}{x.contact_phone ? ` · ${x.contact_phone}` : ""}
-                      </option>
-                    ))}
-                  </select>}
-                </ModuleField>
                 <input type="hidden" name="carrierName" />
                 <input type="hidden" name="carrierContact" />
                 <input type="hidden" name="carrierPhone" />
                 <fieldset className="transport-payable-fields span-2">
-                  <legend>预计应付费用</legend>
+                  <legend>承运商与预计应付</legend>
+                  <ModuleField
+                    fields={data.workflowFields}
+                    fieldKey="domestic_carrier_id"
+                    label="国内承运商"
+                    className="field transport-carrier-field"
+                    fallbackRequired
+                  >
+                    {(required) => <select
+                      name="carrierId"
+                      value={domesticCarrierId}
+                      required={required}
+                      onChange={(event) => {
+                        setDomesticCarrierId(event.currentTarget.value);
+                        setDomesticVehicleId("");
+                        setDomesticDriverId("");
+                        const option = event.currentTarget.selectedOptions[0];
+                        const form = event.currentTarget.form;
+                        const carrierName = form?.elements.namedItem("carrierName") as HTMLInputElement | null;
+                        const carrierContact = form?.elements.namedItem("carrierContact") as HTMLInputElement | null;
+                        const carrierPhone = form?.elements.namedItem("carrierPhone") as HTMLInputElement | null;
+                        if (carrierName) carrierName.value = option?.dataset.name ?? "";
+                        if (carrierContact) carrierContact.value = option?.dataset.contact ?? "";
+                        if (carrierPhone) carrierPhone.value = option?.dataset.phone ?? "";
+                      }}
+                    >
+                      <option value="">请选择承运商</option>
+                      {data.carriers.filter((x) => x.carrier_scope === "domestic").map((x) => (
+                        <option
+                          key={x.id}
+                          value={x.id}
+                          data-name={x.name}
+                          data-contact={x.contact_name || ""}
+                          data-phone={x.contact_phone || ""}
+                        >
+                          {x.name}{x.contact_phone ? ` · ${x.contact_phone}` : ""}
+                        </option>
+                      ))}
+                    </select>}
+                  </ModuleField>
                   <ModuleField fields={data.workflowFields} fieldKey="domestic_payable_charge_name" label="应付费用名称" fallbackRequired>
                     {(required) => <select name="chargeName" defaultValue="国内汽运费" required={required}>
                       <option value="">请选择费用名称</option>
@@ -5097,87 +5143,97 @@ function ModuleBusinessData({
                     <small>后续出境运输使用</small>
                   </div>
                 </div>
-                <ModuleField fields={data.workflowFields} fieldKey="domestic_planned_departure_at" label="计划提货时间" fallbackRequired>
+                <ModuleField fields={data.workflowFields} fieldKey="domestic_planned_departure_at" label="计划提货时间" className="field transport-time-field" fallbackRequired>
                   {(required) => <input name="plannedDepartureAt" type="datetime-local" required={required} />}
                 </ModuleField>
-                <ModuleField fields={data.workflowFields} fieldKey="domestic_planned_arrival_at" label="计划到仓时间" fallbackRequired>
+                <ModuleField fields={data.workflowFields} fieldKey="domestic_planned_arrival_at" label="计划到仓时间" className="field transport-time-field" fallbackRequired>
                   {(required) => <input name="plannedArrivalAt" type="datetime-local" required={required} />}
                 </ModuleField>
-                <ModuleField fields={data.workflowFields} fieldKey="domestic_loading_requirements" label="国内装载要求" className="field span-2">
-                  {(required) => <textarea name="loadingRequirements" rows={2} required={required} />}
+                <ModuleField fields={data.workflowFields} fieldKey="domestic_loading_requirements" label="国内装载要求" className="field transport-compact-note">
+                  {(required) => <textarea name="loadingRequirements" rows={1} required={required} />}
                 </ModuleField>
-                <ModuleField fields={data.workflowFields} fieldKey="domestic_transport_notes" label="国内运输备注" className="field span-2">
-                  {(required) => <textarea name="notes" rows={2} required={required} />}
+                <ModuleField fields={data.workflowFields} fieldKey="domestic_transport_notes" label="国内运输备注" className="field transport-compact-note">
+                  {(required) => <textarea name="notes" rows={1} required={required} />}
                 </ModuleField>
                 <button className="primary" disabled={busy}>
-                  保存运输安排
+                  {busy ? "保存中…" : "保存运输安排"}
                 </button>
               </Form>
-            </details>
-          )}
-        </div>
-        <BusinessSubsection
-          title="国内运输安排与派车"
-          hint="记录国内提货承运商、车辆、司机、时间和预计运费。"
+          </div>
+        </section>}
+        <section
+          id="transport-records-panel"
+          role="tabpanel"
+          aria-labelledby="transport-records-tab"
+          className="transport-view-panel transport-records-panel"
+          hidden={transportView !== "records"}
         >
-          <div className="table-wrap module-record-table">
-            <table>
-              <thead>
-                <tr>
-                  <th>承运商/车辆</th>
-                  <th>司机</th>
-                  <th>线路</th>
-                  <th>计划</th>
-                  <th>运费</th>
-                  <th>状态</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.transportAssignments.map((x) => (
-                  <tr key={x.id}>
-                    <td>
-                      <strong>{x.carrier_name || "待定"}</strong>
-                      <small>
-                        {x.loading_mode === "ftl" ? "整车" : x.loading_mode === "ltl" ? "拼车" : "装车方式待定"} · {x.vehicle_type || "车型待定"} × {x.vehicle_count || 1} 辆 · {x.plate_number || "车牌待定"}
-                      </small>
-                    </td>
-                    <td>
-                      {x.driver_name || "—"}
-                      <small>{x.driver_phone || "—"}</small>
-                    </td>
-                    <td>
-                      {x.origin_location || "—"} →{" "}
-                      {x.destination_location || "—"}
-                      <small>{x.border_port || "口岸待定"}</small>
-                    </td>
-                    <td>
-                      {formatDateTime(x.planned_departure_at)}
-                      <small>至 {formatDateTime(x.planned_arrival_at)}</small>
-                    </td>
-                    <td>
-                      {x.freight_currency} {x.freight_amount.toLocaleString()}
-                    </td>
-                    <td>{x.status}</td>
+          <BusinessSubsection
+            title="国内运输安排与派车"
+            hint="记录国内提货承运商、车辆、司机、时间和预计运费。"
+          >
+            <div className="table-wrap module-record-table compact-record-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th>承运商/车辆</th>
+                    <th>司机</th>
+                    <th>线路</th>
+                    <th>计划</th>
+                    <th>运费</th>
+                    <th>状态</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {!data.transportAssignments.length && (
-            <p className="empty-state">暂无国内运输安排。</p>
-          )}
-        </BusinessSubsection>
-        {data.transportAssignments.length > 0 && (
-          <div className="transport-next-step-banner">
-            <div>
-              <strong>国内运输安排已完成</strong>
-              <span>运输信息已保存，可以进入仓库验收收货。</span>
+                </thead>
+                <tbody>
+                  {data.transportAssignments.map((x) => (
+                    <tr key={x.id}>
+                      <td>
+                        <strong>{x.carrier_name || "待定"}</strong>
+                        <small>
+                          {x.loading_mode === "ftl" ? "整车" : x.loading_mode === "ltl" ? "拼车" : "装车方式待定"} · {x.vehicle_type || "车型待定"} × {x.vehicle_count || 1} 辆 · {x.plate_number || "车牌待定"}
+                        </small>
+                      </td>
+                      <td>
+                        {x.driver_name || "—"}
+                        <small>{x.driver_phone || "—"}</small>
+                      </td>
+                      <td>
+                        {x.origin_location || "—"} →{" "}
+                        {x.destination_location || "—"}
+                        <small>{x.border_port || "口岸待定"}</small>
+                      </td>
+                      <td>
+                        {formatDateTime(x.planned_departure_at)}
+                        <small>至 {formatDateTime(x.planned_arrival_at)}</small>
+                      </td>
+                      <td>
+                        {x.freight_currency} {x.freight_amount.toLocaleString()}
+                      </td>
+                      <td><span className="status-pill">{transportAssignmentStatusLabel(x.status)}</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-            <Link className="btn primary" to={`/admin/orders/${data.order.id}?stage=warehouse_receiving&module=warehouse`}>
-              下一步：仓库验收收货 →
-            </Link>
-          </div>
-        )}
+            {!data.transportAssignments.length && (
+              <div className="transport-empty-records">
+                <span>暂无国内运输安排。</span>
+                {manage && <button type="button" className="secondary" onClick={() => setTransportView("create")}>返回新增运输安排</button>}
+              </div>
+            )}
+          </BusinessSubsection>
+          {data.transportAssignments.length > 0 && (
+            <div className="transport-next-step-banner">
+              <div>
+                <strong>国内运输安排已完成</strong>
+                <span>运输信息已保存，可以进入仓库验收收货。</span>
+              </div>
+              <Link className="btn primary" to={`/admin/orders/${data.order.id}?stage=warehouse_receiving&module=warehouse`}>
+                下一步：仓库验收收货 →
+              </Link>
+            </div>
+          )}
+        </section>
       </div>
     );
   if (code === "loading") {
@@ -7303,6 +7359,16 @@ const trackingManualMilestoneOptions: [string, string][] = [
 const trackingOptionalMilestones = new Set(["transloaded", "transit_customs"]);
 function formatDateTime(value: string | null | undefined) {
   return value ? new Date(value).toLocaleString("zh-CN") : "—";
+}
+function transportAssignmentStatusLabel(status: string) {
+  return ({
+    planned: "已计划",
+    dispatched: "已派车",
+    in_transit: "运输中",
+    arrived: "已到仓",
+    completed: "已完成",
+    cancelled: "已取消",
+  } as Record<string, string>)[status] ?? status;
 }
 function toDateTimeInput(value: string | null | undefined) {
   if (!value) return "";

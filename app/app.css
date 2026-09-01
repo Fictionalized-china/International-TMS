@@ -20298,6 +20298,262 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
   background: #fff;
 }
 
+/* Domestic transport: task-focused tabs and a single-screen compact entry sheet. */
+.transport-operation-workbench {
+  min-width: 0;
+}
+.transport-view-tabs {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  min-height: 41px;
+  padding: 6px 8px 0;
+  border-bottom: 1px solid #d8e2ec;
+  background: #fff;
+}
+.transport-view-tabs button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 118px;
+  min-height: 34px;
+  margin: 0;
+  padding: 6px 13px;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 3px 3px 0 0;
+  color: #526b84;
+  background: transparent;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: color 150ms ease, background-color 150ms ease, border-color 150ms ease;
+}
+.transport-view-tabs button:hover {
+  color: #173b61;
+  background: #f1f6fb;
+}
+.transport-view-tabs button:focus-visible {
+  outline: 2px solid #4f8fc9;
+  outline-offset: 2px;
+}
+.transport-view-tabs button.active {
+  color: #fff;
+  border-color: #0b2a49;
+  background: #0b2a49;
+}
+.transport-view-tabs button > span {
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  color: #345b80;
+  background: #e8f0f7;
+  font-size: 9px;
+  line-height: 1.5;
+}
+.transport-view-tabs button.active > span {
+  color: #0b2a49;
+  background: #fff;
+}
+.transport-view-panel[hidden] {
+  display: none !important;
+}
+.transport-create-panel,
+.transport-records-panel {
+  min-width: 0;
+  background: #fff;
+}
+.transport-create-panel .transport-entry-forms {
+  gap: 0;
+}
+.transport-compact-form {
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  align-items: end;
+  gap: 5px 7px;
+  padding: 8px 10px 10px;
+}
+.transport-compact-form .transport-cost-heading {
+  grid-column: 1 / -1;
+  min-height: 30px;
+  padding: 5px 9px;
+  border-left-width: 3px;
+}
+.transport-compact-form .transport-cost-heading strong {
+  font-size: 11px;
+}
+.transport-compact-form .transport-cost-heading span {
+  font-size: 9px;
+}
+.transport-compact-form .transport-payable-fields {
+  grid-column: 1 / -1;
+  grid-template-columns:
+    minmax(170px, 1.45fr)
+    minmax(145px, 1.2fr)
+    repeat(4, minmax(72px, 0.62fr))
+    minmax(135px, 1.05fr);
+  align-items: end;
+  gap: 5px 7px;
+  padding: 2px 6px 5px;
+  border-radius: 3px;
+}
+.transport-compact-form .transport-payable-fields legend {
+  padding-inline: 5px;
+  font-size: 10px;
+  line-height: 1.2;
+}
+.transport-compact-form .transport-payable-notes {
+  grid-column: auto;
+}
+.transport-compact-form .field {
+  gap: 2px;
+}
+.transport-compact-form .field > span {
+  line-height: 1.2;
+}
+.linear-order-page .transport-compact-form input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]),
+.linear-order-page .transport-compact-form select,
+.linear-order-page .transport-compact-form textarea {
+  min-height: 28px;
+  height: 28px;
+  padding-block: 3px;
+}
+.transport-compact-form .transport-route-row {
+  grid-column: 1 / -1;
+  margin: 0;
+  border-radius: 3px;
+}
+.transport-compact-form .transport-route-stop,
+.transport-compact-form .transport-route-destination {
+  min-height: 48px;
+  gap: 2px;
+  padding: 5px 8px;
+}
+.transport-compact-form .transport-route-stop > span,
+.transport-compact-form .transport-route-destination > span {
+  font-size: 9px;
+}
+.transport-compact-form .transport-route-stop strong {
+  font-size: 11px;
+}
+.transport-compact-form .transport-route-destination select {
+  min-height: 28px;
+  padding-block: 3px;
+}
+.transport-compact-form .transport-route-stop small,
+.transport-compact-form .transport-route-destination small {
+  display: none;
+}
+.transport-compact-form .transport-time-field {
+  grid-column: span 2;
+}
+.transport-compact-form .transport-compact-note {
+  grid-column: span 1;
+}
+.transport-compact-form textarea,
+.linear-order-page .transport-compact-form textarea {
+  min-height: 31px;
+  height: 31px;
+  resize: vertical;
+}
+.transport-compact-form > button,
+.linear-order-page .transport-compact-form > button {
+  grid-column: span 2;
+  min-height: 28px;
+  margin: 0;
+  padding-block: 4px;
+}
+.transport-records-panel .module-business-section > header {
+  min-height: 31px;
+  padding-block: 4px;
+}
+.transport-records-panel .compact-record-table th,
+.transport-records-panel .compact-record-table td {
+  padding: 5px 7px;
+}
+.transport-empty-records {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 58px;
+  padding: 9px 10px;
+  color: #6f8193;
+  font-size: 10px;
+}
+.transport-empty-records button {
+  min-height: 30px;
+  margin: 0;
+  padding: 4px 10px;
+}
+.transport-records-panel .transport-next-step-banner {
+  margin: 0;
+  padding: 7px 9px;
+  border: 0;
+  border-top: 1px solid #b7ddc9;
+  border-radius: 0;
+}
+
+@media (max-width: 1250px) {
+  .transport-compact-form {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .transport-compact-form .transport-payable-fields {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .transport-compact-form .transport-carrier-field,
+  .transport-compact-form .transport-payable-fields > .field:nth-of-type(2) {
+    grid-column: span 2;
+  }
+  .transport-compact-form .transport-payable-notes {
+    grid-column: 1 / -1;
+  }
+  .transport-compact-form .transport-compact-note {
+    grid-column: span 1;
+  }
+  .transport-compact-form .transport-time-field {
+    grid-column: span 2;
+  }
+  .transport-compact-form > button,
+  .linear-order-page .transport-compact-form > button {
+    grid-column: 4;
+  }
+}
+
+@media (max-width: 900px) {
+  .transport-compact-form,
+  .transport-compact-form .transport-payable-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .transport-compact-form .transport-compact-note,
+  .transport-compact-form .transport-payable-notes {
+    grid-column: span 2;
+  }
+  .transport-compact-form > button,
+  .linear-order-page .transport-compact-form > button {
+    grid-column: 2;
+  }
+}
+
+@media (max-width: 700px) {
+  .transport-view-tabs button {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+  .transport-compact-form,
+  .transport-compact-form .transport-payable-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .transport-compact-form .transport-carrier-field,
+  .transport-compact-form .transport-payable-fields > .field:nth-of-type(2),
+  .transport-compact-form .transport-compact-note,
+  .transport-compact-form .transport-payable-notes,
+  .transport-compact-form > button,
+  .linear-order-page .transport-compact-form > button {
+    grid-column: 1;
+  }
+}
+
 /* Compact flat-table workbench for PZ tracking. */
 .admin-app-shell .content:has(.batch-tracking-page-header) {
   padding: 10px 12px;
