@@ -6,10 +6,19 @@ import { acceptQuotation, withdrawQuotationAcceptance } from "../lib/quotation-l
 import { requirePortalCustomer } from "../lib/portal.server";
 import { valueOf } from "../lib/validation";
 import { ConfirmAction } from "../components/ConfirmAction";
+import {
+  listQuotationWorkflowFields,
+  listQuotationWorkflowInstanceFields,
+} from "../lib/quotation-workflow-fields.server";
+import {
+  quotationWorkflowFieldPolicy,
+} from "../lib/quotation-workflow-fields";
+import type { QuotationNativeFieldKey } from "../lib/quotation-native-field-catalog";
 
 type Quote = {
   id: string;
   quote_number: string;
+  workflow_definition_id: string | null;
   origin_country: string;
   origin_state: string | null;
   origin_city: string;
@@ -59,7 +68,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   }
   const [quoteRows, chargeRows] = await Promise.all([
     env.DB.prepare(
-      `SELECT q.id,q.quote_number,q.origin_country,q.origin_state,q.origin_city,q.pickup_address,
+      `SELECT q.id,q.quote_number,q.workflow_definition_id,q.origin_country,q.origin_state,q.origin_city,q.pickup_address,
         q.destination_country,q.destination_state,q.destination_city,w.name destination_warehouse_name,
         q.destination_warehouse_note,q.customs_clearance_mode,q.road_load_type,q.cargo_description,
         q.pieces,q.gross_weight_kg,q.volume_cbm,q.estimated_length_cm,q.estimated_width_cm,
@@ -83,7 +92,20 @@ export async function loader({ request }: Route.LoaderArgs) {
   for (const charge of chargeRows.results) {
     charges.set(charge.quotation_id, [...(charges.get(charge.quotation_id) || []), charge]);
   }
-  return { quotes: quoteRows.results, charges: Object.fromEntries(charges), lifecycle };
+  const [workflowFields,quotationWorkflowFields] = await Promise.all([
+    listQuotationWorkflowFields(user.organizationId),
+    listQuotationWorkflowInstanceFields(
+      user.organizationId,
+      quoteRows.results.map((quote) => quote.id),
+    ),
+  ]);
+  return {
+    quotes: quoteRows.results,
+    charges: Object.fromEntries(charges),
+    lifecycle,
+    workflowFields,
+    quotationWorkflowFields,
+  };
 }
 
 export async function action({ request }: Route.ActionArgs) {
@@ -142,17 +164,30 @@ export default function PortalQuotes({ loaderData, actionData }: Route.Component
           <table>
             <thead><tr><th>报价</th><th>运输方案</th><th>线路与目的仓</th><th>货物</th><th>费用</th><th>状态</th><th>操作</th></tr></thead>
             <tbody>
-              {loaderData.quotes.map((quote) => (
-                <tr key={quote.id}>
+              {loaderData.quotes.map((quote) => {
+                const snapshotFields=loaderData.quotationWorkflowFields.filter(field=>field.quotation_id===quote.id);
+                const fields=snapshotFields.length?snapshotFields:loaderData.workflowFields.filter(field=>field.workflow_id===quote.workflow_definition_id);
+                const visible=(key:QuotationNativeFieldKey,fallback:"required"|"optional")=>quotationWorkflowFieldPolicy(fields,key,fallback).isActive;
+                const measures=[
+                  visible("quotation_pieces","required")?`${quote.pieces} 件`:null,
+                  visible("quotation_gross_weight_kg","required")?`${quote.gross_weight_kg} KG`:null,
+                  visible("quotation_volume_cbm","required")?`${quote.volume_cbm} CBM`:null,
+                ].filter(Boolean).join(" · ");
+                const dimensions=[
+                  visible("quotation_length_cm","required")?quote.estimated_length_cm:null,
+                  visible("quotation_width_cm","required")?quote.estimated_width_cm:null,
+                  visible("quotation_height_cm","required")?quote.estimated_height_cm:null,
+                ];
+                return <tr key={quote.id}>
                   <td><b className="order-id">{quote.quote_number}</b><small className="subline">{new Date(quote.created_at).toLocaleString("zh-CN")}</small></td>
-                  <td><span className={`pill ${quote.road_load_type === "ltl" ? "ltl" : ""}`}>{quote.road_load_type === "ltl" ? "拼车" : "整车"}</span><small className="subline">汽运 · {quote.customs_clearance_mode === "company" ? "公司代办清关" : "客户自理清关"}</small></td>
-                  <td><b>{quote.origin_state || ""}{quote.origin_city} → {quote.destination_state || ""}{quote.destination_city}</b><small className="subline">提货：{quote.pickup_address || "未填写"}</small><small className="subline">目的仓：{quote.destination_warehouse_name || "未填写"}{quote.destination_warehouse_note ? ` · ${quote.destination_warehouse_note}` : ""}</small></td>
-                  <td><b>{quote.cargo_description}</b><small className="subline">{quote.pieces} 件 · {quote.gross_weight_kg} KG · {quote.volume_cbm} CBM</small><small className="subline">预计 {quote.estimated_length_cm} × {quote.estimated_width_cm} × {quote.estimated_height_cm} CM</small></td>
-                  <td><b>CNY {quote.total_amount.toLocaleString()}</b><QuoteChargeSummary charges={loaderData.charges[quote.id] || []} /></td>
-                  <td><span className={`status ${statusTone(quote.lifecycle_status)}`}>{statusLabel(quote.lifecycle_status)}</span>{quote.valid_until && <small className="subline">有效期至 {quote.valid_until}</small>}{quote.order_id && <Link className="subline order-id" to="/portal/orders">订单 {quote.order_number}</Link>}</td>
+                  <td><span className={`pill ${quote.road_load_type === "ltl" ? "ltl" : ""}`}>{quote.road_load_type === "ltl" ? "拼车" : "整车"}</span>{visible("quotation_customs_clearance_mode","required")&&<small className="subline">汽运 · {quote.customs_clearance_mode === "company" ? "公司代办清关" : "客户自理清关"}</small>}</td>
+                  <td>{(visible("quotation_origin_region","required")||visible("quotation_destination_region","required"))&&<b>{quote.origin_state || ""}{quote.origin_city} → {quote.destination_state || ""}{quote.destination_city}</b>}{visible("quotation_pickup_address","required")&&<small className="subline">提货：{quote.pickup_address || "未填写"}</small>}{visible("quotation_destination_warehouse_id","required")&&<small className="subline">目的仓：{quote.destination_warehouse_name || "未填写"}</small>}{visible("quotation_destination_warehouse_note","optional")&&quote.destination_warehouse_note&&<small className="subline">目的备注：{quote.destination_warehouse_note}</small>}</td>
+                  <td>{visible("quotation_cargo_description","required")&&<b>{quote.cargo_description}</b>}{measures&&<small className="subline">{measures}</small>}{dimensions.some(value=>value!==null)&&<small className="subline">预计 {dimensions.map(value=>value??"—").join(" × ")} CM</small>}</td>
+                  <td>{visible("quotation_charge_items","required")?<><b>CNY {quote.total_amount.toLocaleString()}</b><QuoteChargeSummary charges={loaderData.charges[quote.id] || []} /></>:<span className="subline">当前工作流不展示费用</span>}</td>
+                  <td><span className={`status ${statusTone(quote.lifecycle_status)}`}>{statusLabel(quote.lifecycle_status)}</span>{visible("quotation_valid_until","optional")&&quote.valid_until && <small className="subline">有效期至 {quote.valid_until}</small>}{quote.order_id && <Link className="subline order-id" to="/portal/orders">订单 {quote.order_number}</Link>}</td>
                   <td><QuoteActions quote={quote} busy={busy} /></td>
-                </tr>
-              ))}
+                </tr>;
+              })}
               {!loaderData.quotes.length && <tr><td className="empty" colSpan={7}>暂无报价</td></tr>}
             </tbody>
           </table>

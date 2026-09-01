@@ -1,0 +1,153 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+type RecordedStatement = {
+  sql: string;
+  bindings: unknown[];
+  bind: (...bindings: unknown[]) => RecordedStatement;
+  run: () => Promise<{ meta: { changes: number } }>;
+};
+
+const database = vi.hoisted(() => {
+  const prepared: RecordedStatement[] = [];
+  const batches: RecordedStatement[][] = [];
+  return {
+    prepared,
+    batches,
+    DB: {
+      prepare(sql: string) {
+        const statement: RecordedStatement = {
+          sql,
+          bindings: [],
+          bind(...bindings: unknown[]) {
+            statement.bindings = bindings;
+            return statement;
+          },
+          async run() {
+            return { meta: { changes: 0 } };
+          },
+        };
+        prepared.push(statement);
+        return statement;
+      },
+      async batch(statements: RecordedStatement[]) {
+        batches.push(statements);
+        return [];
+      },
+    },
+  };
+});
+
+vi.mock("cloudflare:workers", () => ({ env: { DB: database.DB } }));
+
+import {
+  synchronizeWorkflowFieldDefinitionForInstances,
+  synchronizeWorkflowFieldPolicyForInstances,
+  workflowFieldPolicyAppliesAtStage,
+} from "./workflow-fields.server";
+
+describe("stage-aware workflow field synchronization", () => {
+  beforeEach(() => {
+    database.prepared.length = 0;
+    database.batches.length = 0;
+  });
+
+  it("applies a changed rule only to future and current stages", () => {
+    expect(workflowFieldPolicyAppliesAtStage(10, 20)).toBe(true);
+    expect(workflowFieldPolicyAppliesAtStage(20, 20)).toBe(true);
+    expect(workflowFieldPolicyAppliesAtStage(30, 20)).toBe(false);
+  });
+
+  it("updates and inserts definition snapshots only before the target step is passed", async () => {
+    await synchronizeWorkflowFieldDefinitionForInstances({
+      workflowId: "workflow-1",
+      stepKey: "order_creation",
+      fieldKey: "document_consignment_letter",
+      moduleCode: "consignment",
+      label: "委托书",
+      fieldType: "attachment",
+      isRequired: 1,
+      isActive: 1,
+      sortOrder: 10,
+      optionsText: null,
+      helpText: null,
+    });
+
+    expect(database.batches).toHaveLength(1);
+    const [updateStatement, insertStatement] = database.batches[0];
+    for (const statement of [updateStatement, insertStatement]) {
+      expect(statement.sql).toContain(
+        "current_step.sort_order<=target_step.sort_order",
+      );
+      expect(statement.sql).toContain("current_step.step_key=wi.current_step_key");
+    }
+    expect(updateStatement.sql).toContain(
+      "WHERE workflow_id=? AND step_key=? AND field_key=? AND module_code=?",
+    );
+    expect(updateStatement.bindings.slice(-5)).toEqual([
+      "workflow-1",
+      "order_creation",
+      "document_consignment_letter",
+      "consignment",
+      "order_creation",
+    ]);
+    expect(updateStatement.bindings.at(-1)).toBe("order_creation");
+    expect(insertStatement.bindings.slice(-2)).toEqual([
+      "order_creation",
+      "workflow-1",
+    ]);
+  });
+
+  it("matches the previous identity when a definition is structurally edited", async () => {
+    await synchronizeWorkflowFieldDefinitionForInstances({
+      workflowId: "workflow-1",
+      sourceStepKey: "old_step",
+      sourceFieldKey: "old_key",
+      sourceModuleCode: "consignment",
+      stepKey: "new_step",
+      fieldKey: "new_key",
+      moduleCode: "cargo",
+      label: "新字段",
+      fieldType: "text",
+      isRequired: 0,
+      isActive: 1,
+      sortOrder: 20,
+      optionsText: null,
+      helpText: null,
+    });
+
+    const [updateStatement] = database.batches[0];
+    expect(updateStatement.bindings.slice(-5)).toEqual([
+      "workflow-1",
+      "old_step",
+      "old_key",
+      "consignment",
+      "new_step",
+    ]);
+  });
+
+  it("keeps the policy-only synchronization path stage-aware", async () => {
+    await synchronizeWorkflowFieldPolicyForInstances({
+      workflowId: "workflow-1",
+      fieldKey: "document_consignment_letter",
+      moduleCode: "consignment",
+      isRequired: 0,
+      isActive: 1,
+    });
+
+    expect(database.prepared).toHaveLength(1);
+    const [statement] = database.prepared;
+    expect(statement.sql).toContain(
+      "target_step.step_key=workflow_instance_fields.step_key",
+    );
+    expect(statement.sql).toContain(
+      "current_step.sort_order<=target_step.sort_order",
+    );
+    expect(statement.bindings).toEqual([
+      0,
+      1,
+      "workflow-1",
+      "document_consignment_letter",
+      "consignment",
+    ]);
+  });
+});

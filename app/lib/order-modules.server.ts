@@ -11,7 +11,10 @@ import {
 } from "./order-modules";
 import { orderBusinessStages } from "./order-stage-flow";
 import { syncOrderBusinessWorkflow } from "./business-workflow.server";
-import { checkOrderLoadPlan } from "./order-readiness.server";
+import {
+  checkOrderLoadPlan,
+  checkOrderPreDepartureDocuments,
+} from "./order-readiness.server";
 import {
   orderDocumentPlacements,
   preDepartureDocumentTypeCodes,
@@ -276,8 +279,9 @@ async function synchronizeDataDrivenModules(
     statements.push(
       env.DB.prepare(
         `UPDATE order_module_instances
-         SET status='in_progress',current_step_code='checking',current_step_name='资料检查',
-           progress_percent=MAX(progress_percent,25),blocking_reason=NULL,started_at=COALESCE(started_at,?),updated_at=?
+         SET status=CASE WHEN status='not_started' THEN 'in_progress' ELSE status END,
+           current_step_code='checking',current_step_name='资料检查',
+           progress_percent=MAX(progress_percent,25),started_at=COALESCE(started_at,?),updated_at=?
          WHERE organization_id=? AND order_id=? AND module_code='documents' AND enabled=1
            AND status NOT IN ('completed','not_applicable')`,
       ).bind(now, now, organizationId, orderId),
@@ -1041,12 +1045,11 @@ async function validateModuleGate(
     currentStep === "waiting" &&
     required("predeparture_documents", true)
   ) {
-    const row = await env.DB.prepare(
-      "SELECT COUNT(*) total FROM order_attachments WHERE organization_id=? AND order_id=?",
-    )
-      .bind(organizationId, orderId)
-      .first<{ total: number }>();
-    if (!row?.total) throw new Error("请先上传至少一份订单文件");
+    const readiness = await checkOrderPreDepartureDocuments(
+      organizationId,
+      orderId,
+    );
+    if (!readiness.ready) throw new Error(readiness.reasons.join("；"));
   }
   if (
     moduleCode === "transport" &&

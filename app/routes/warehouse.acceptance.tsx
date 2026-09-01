@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { Form, Link, redirect, useNavigation } from "react-router";
-import { useState, type ReactElement } from "react";
+import { useEffect, useState, type ReactElement } from "react";
 import type { Route } from "./+types/warehouse.acceptance";
 import { requireSessionUser } from "../lib/auth.server";
 import { valueOf } from "../lib/validation";
@@ -13,6 +13,14 @@ import { recordWorkflowEvent } from "../lib/business-workflow.server";
 import { syncOrderWorkflowSnapshot } from "../lib/order-modules.server";
 import { writeAudit } from "../lib/audit.server";
 import { synchronizeOrderExceptionStatuses } from "../lib/order-exception-status.server";
+import { loadOrderModuleWorkflowFields } from "../lib/workflow-fields.server";
+import {
+  acceptanceRequiredMarker,
+  automaticWarehouseAcceptanceResult,
+  resolveWarehouseAcceptancePolicies,
+  warehouseAcceptancePackageCount,
+  warehouseAcceptanceReadyIsBlocked,
+} from "../lib/warehouse-acceptance-policy";
 
 type AcceptanceOrder = {
   id: string;
@@ -125,6 +133,7 @@ export async function loader({ request }: Route.LoaderArgs) {
 
   let order: AcceptanceOrder | null = null;
   let cargoItems: CargoItem[] = [];
+  let workflowFields: Awaited<ReturnType<typeof loadOrderModuleWorkflowFields>> = [];
   let lookupError = "";
   if (reference) {
     const matches = await env.DB.prepare(
@@ -179,6 +188,11 @@ export async function loader({ request }: Route.LoaderArgs) {
           ORDER BY i.line_no,i.id`,
       ).bind(warehouse.id, user.organizationId, order.id).all<CargoItem>();
       cargoItems = cargo.results;
+      workflowFields = await loadOrderModuleWorkflowFields(
+        user.organizationId,
+        order.id,
+        "warehouse",
+      );
       if (!cargoItems.length) lookupError = "该订单没有货物明细，不能办理逐条验收，请先在订单中补充货物";
     }
   }
@@ -189,6 +203,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     reference,
     order,
     cargoItems,
+    workflowFields,
     locations: locations.results,
     recentLabels: recentLabels.results,
     receiptId,
@@ -212,13 +227,12 @@ export async function action({ request }: Route.ActionArgs) {
 
   const form = await request.formData();
   const orderId = valueOf(form, "orderId");
-  const locationId = valueOf(form, "locationId");
-  const result = valueOf(form, "receiptResult");
-  const exceptionNotes = valueOf(form, "exceptionNotes").trim();
+  const requestedLocationId = valueOf(form, "locationId");
+  const requestedResult = valueOf(form, "receiptResult");
+  let exceptionNotes = valueOf(form, "exceptionNotes").trim();
+  const evidenceNote = valueOf(form, "evidenceNote").trim();
   const notes = valueOf(form, "notes").trim();
-  if (!orderId || !locationId) return { formError: "订单和入库库位不能为空" };
-  if (!['partial','ready','exception'].includes(result)) return { formError: "请选择本次验收结果" };
-  if (result === "exception" && !exceptionNotes) return { formError: "异常入库必须填写异常说明" };
+  if (!orderId) return { formError: "订单不能为空" };
 
   const order = await env.DB.prepare(
     `SELECT o.id,o.order_number,o.customer_id,o.origin_city,s.id shipment_id,s.shipment_number
@@ -241,6 +255,46 @@ export async function action({ request }: Route.ActionArgs) {
   }>();
   if (!order) return { formError: "订单不存在、状态不可收货，或计划入库仓库与当前仓库不一致" };
 
+  const workflowFields = await loadOrderModuleWorkflowFields(
+    user.organizationId,
+    order.id,
+    "warehouse",
+  );
+  const policies = resolveWarehouseAcceptancePolicies(workflowFields);
+  if (policies.evidence.isActive && policies.evidence.isRequired && !evidenceNote)
+    return { formError: "请填写收货凭证或现场凭证索引" };
+  if (policies.notes.isActive && policies.notes.isRequired && !notes)
+    return { formError: "请填写收货备注" };
+
+  let result: "partial" | "ready" | "exception" | "auto";
+  if (policies.cargoComplete.isActive) {
+    if (!["partial", "ready", "exception"].includes(requestedResult)) {
+      if (policies.cargoComplete.isRequired)
+        return { formError: "请选择本次验收结果" };
+      result = "partial";
+    } else {
+      result = requestedResult as "partial" | "ready" | "exception";
+    }
+  } else {
+    // Hidden means the operator no longer decides this workflow gate. The
+    // server derives ready/partial/exception after comparing cumulative stock.
+    result = "auto";
+  }
+
+  let locationId = requestedLocationId;
+  if (!locationId && (!policies.location.isActive || !policies.location.isRequired)) {
+    const defaultLocation = await env.DB.prepare(
+      `SELECT l.id FROM warehouse_locations l
+        JOIN warehouse_zones z ON z.id=l.zone_id JOIN warehouses w ON w.id=l.warehouse_id
+       WHERE l.organization_id=? AND l.warehouse_id=?
+         AND l.status='active' AND z.status='active' AND w.status='active'
+       ORDER BY z.code,l.code LIMIT 1`,
+    ).bind(user.organizationId, warehouse.id).first<{ id: string }>();
+    locationId = defaultLocation?.id ?? "";
+  }
+  if (!locationId)
+    return { formError: "请选择入库库位" };
+
   const location = await env.DB.prepare(
     `SELECT l.id,l.code,l.name,z.name zone_name,w.name warehouse_name
        FROM warehouse_locations l
@@ -252,52 +306,83 @@ export async function action({ request }: Route.ActionArgs) {
 
   const cargo = await env.DB.prepare(
     `SELECT id,line_no,cargo_name_cn,package_type,package_count,pieces_per_package,
-            gross_weight_per_package_kg,volume_per_package_cbm
+            gross_weight_per_package_kg,volume_per_package_cbm,
+            COALESCE((
+              SELECT SUM(ri.actual_packages)
+              FROM warehouse_receipt_items ri
+              JOIN warehouse_receipts r ON r.id=ri.receipt_id
+              WHERE ri.organization_id=order_cargo_items.organization_id
+                AND ri.cargo_item_id=order_cargo_items.id
+                AND r.warehouse_id=? AND r.status='completed'
+            ),0) received_packages
        FROM order_cargo_items WHERE organization_id=? AND order_id=? ORDER BY line_no,id`,
-  ).bind(user.organizationId, order.id).all<{
+  ).bind(warehouse.id, user.organizationId, order.id).all<{
     id: string; line_no: number; cargo_name_cn: string; package_type: string;
     package_count: number; pieces_per_package: number;
     gross_weight_per_package_kg: number; volume_per_package_cbm: number;
+    received_packages: number;
   }>();
   if (!cargo.results.length) return { formError: "订单没有货物明细，无法验收" };
 
-  const actualRows = cargo.results.map((item, index) => ({
+  const actualRows = cargo.results.map((item, index) => {
+    const packageFieldName = `actualPackages_${index}`;
+    const packageRaw = policies.actualPackages.isActive
+      ? valueOf(form, packageFieldName)
+      : "";
+    const submittedPackages = packageRaw === ""
+      ? null
+      : nonNegativeInteger(form, packageFieldName);
+    return {
+      ...item,
+      actualPackages: warehouseAcceptancePackageCount({
+        plannedPackages: item.package_count,
+        receivedPackages: item.received_packages,
+        submittedPackages,
+      }),
+      packageCountProvided: packageRaw !== "",
+      packageCountInvalid: packageRaw !== "" && submittedPackages === null,
+      actualPieces: policies.actualPieces.isActive
+        ? nonNegativeInteger(form, `actualPieces_${index}`)
+        : null,
+      actualWeight: policies.actualWeight.isActive
+        ? nonNegativeNumber(form, `actualWeight_${index}`)
+        : null,
+      actualVolume: policies.actualVolume.isActive
+        ? nonNegativeNumber(form, `actualVolume_${index}`)
+        : null,
+      actualLength: nonNegativeNumber(form, `actualLength_${index}`),
+      actualWidth: nonNegativeNumber(form, `actualWidth_${index}`),
+      actualHeight: nonNegativeNumber(form, `actualHeight_${index}`),
+      itemNotes: valueOf(form, `itemNotes_${index}`).trim(),
+    };
+  });
+  if (actualRows.some((item) => item.packageCountInvalid))
+    return { formError: "实收包装数如果填写，必须是有效的非负整数" };
+  if (policies.actualPackages.isRequired && actualRows.some((item) => !item.packageCountProvided))
+    return { formError: "实收包装数为必填，请逐条确认" };
+  const receivedRows = actualRows.filter((item) => item.actualPackages > 0);
+  if (receivedRows.some((item) => !item.actualLength || !item.actualWidth || !item.actualHeight))
+    return { formError: "有实收包装的货物必须填写大于 0 的实际长、宽、高" };
+  if (policies.actualPieces.isRequired && receivedRows.some((item) => !item.actualPieces))
+    return { formError: "有实收包装的货物必须填写大于 0 的实收件数" };
+  if (policies.actualPieces.isActive && receivedRows.some((item) => item.actualPieces !== null && item.actualPieces <= 0))
+    return { formError: "实收件数如果填写，必须大于 0" };
+  if (policies.actualWeight.isRequired && receivedRows.some((item) => !item.actualWeight))
+    return { formError: "有实收包装的货物必须填写大于 0 的实际重量" };
+  if (policies.actualVolume.isRequired && receivedRows.some((item) => !item.actualVolume))
+    return { formError: "有实收包装的货物必须填写大于 0 的实际体积" };
+  const inventoryRows = receivedRows.map((item) => ({
     ...item,
-    actualPackages: nonNegativeInteger(form, `actualPackages_${index}`),
-    actualPieces: nonNegativeInteger(form, `actualPieces_${index}`),
-    actualWeight: nonNegativeNumber(form, `actualWeight_${index}`),
-    actualVolume: nonNegativeNumber(form, `actualVolume_${index}`),
-    actualLength: nonNegativeNumber(form, `actualLength_${index}`),
-    actualWidth: nonNegativeNumber(form, `actualWidth_${index}`),
-    actualHeight: nonNegativeNumber(form, `actualHeight_${index}`),
-    itemNotes: valueOf(form, `itemNotes_${index}`).trim(),
+    // A package row needs at least one piece for the physical inventory
+    // constraint. Optional/hidden piece counts therefore use the conservative
+    // one-piece-per-package minimum for package rows, while the receipt keeps
+    // zero so a future optional->required change still sees the measurement as
+    // missing rather than falsely treating this fallback as warehouse data.
+    actualPieces: item.actualPieces ?? 0,
+    packagePieces: item.actualPieces ?? (item.actualPackages as number),
+    actualWeight: item.actualWeight ?? 0,
+    actualVolume: item.actualVolume ?? 0,
   }));
-  if (actualRows.some((item) => item.actualPackages === null || item.actualPieces === null || item.actualWeight === null || item.actualVolume === null || item.actualLength === null || item.actualWidth === null || item.actualHeight === null))
-    return { formError: "实收包装数、件数、重量、体积和长宽高必须填写有效的非负数字" };
-  const receivedRows = actualRows.filter((item) => (item.actualPackages ?? 0) > 0);
-  if (!receivedRows.length && result !== "ready") return { formError: "本次至少要验收一个实际包装" };
-  if (receivedRows.some((item) => !item.actualPieces || !item.actualWeight || !item.actualVolume || !item.actualLength || !item.actualWidth || !item.actualHeight))
-    return { formError: "有实收包装的货物必须填写实收件数、实际重量、实际体积和实际长宽高" };
-
-  if (result === "ready") {
-    const activeException = await env.DB.prepare(
-      `SELECT exception_number FROM (
-         SELECT e.exception_number,e.reported_at event_at
-         FROM warehouse_exceptions e JOIN shipments s ON s.id=e.shipment_id
-         WHERE e.organization_id=? AND s.order_id=? AND e.status IN ('open','processing')
-         UNION ALL
-         SELECT e.exception_number,e.reported_at event_at
-         FROM transport_batch_exceptions e
-         WHERE e.organization_id=? AND e.status IN ('open','processing') AND e.blocks_progress=1
-           AND (e.order_id=? OR (e.scope='batch' AND EXISTS(
-             SELECT 1 FROM transport_batch_orders bo
-             WHERE bo.organization_id=e.organization_id AND bo.batch_id=e.batch_id
-               AND bo.order_id=? AND bo.status!='removed'
-           )))
-       ) ORDER BY event_at LIMIT 1`,
-    ).bind(user.organizationId, order.id, user.organizationId, order.id, order.id).first<{ exception_number: string }>();
-    if (activeException) return { formError: `订单仍有未结案异常 ${activeException.exception_number}，处理结案后才能确认货齐` };
-  }
 
   const now = new Date().toISOString();
   let shipmentId = order.shipment_id;
@@ -320,11 +405,89 @@ export async function action({ request }: Route.ActionArgs) {
 
   const receiptId = crypto.randomUUID();
   const receiptNumber = generateCode("IN");
-  const totalPackages = receivedRows.reduce((sum, item) => sum + (item.actualPackages ?? 0), 0);
-  const totalPieces = receivedRows.reduce((sum, item) => sum + (item.actualPieces ?? 0), 0);
-  const totalWeight = receivedRows.reduce((sum, item) => sum + (item.actualWeight ?? 0), 0);
-  const totalVolume = receivedRows.reduce((sum, item) => sum + (item.actualVolume ?? 0), 0);
-  const packageTypes = [...new Set(receivedRows.map((item) => item.package_type))];
+  const totalPackages = inventoryRows.reduce((sum, item) => sum + (item.actualPackages ?? 0), 0);
+  const totalPieces = inventoryRows.reduce((sum, item) => sum + item.actualPieces, 0);
+  const totalWeight = inventoryRows.reduce((sum, item) => sum + item.actualWeight, 0);
+  const totalVolume = inventoryRows.reduce((sum, item) => sum + item.actualVolume, 0);
+  const packageTypes = [...new Set(inventoryRows.map((item) => item.package_type))];
+  const expected = cargo.results.reduce((sum, item) => ({
+    packages: sum.packages + item.package_count,
+    pieces: sum.pieces + item.package_count * item.pieces_per_package,
+    weightKg: sum.weightKg + item.package_count * item.gross_weight_per_package_kg,
+    volumeCbm: sum.volumeCbm + item.package_count * item.volume_per_package_cbm,
+  }), { packages: 0, pieces: 0, weightKg: 0, volumeCbm: 0 });
+  const previous = await env.DB.prepare(
+    `SELECT COALESCE(SUM(total_packages),0) packages,COALESCE(SUM(total_pieces),0) pieces,COALESCE(SUM(total_weight_kg),0) weight_kg,
+            COALESCE(SUM(total_volume_cbm),0) volume_cbm
+       FROM warehouse_receipts WHERE organization_id=? AND shipment_id=? AND warehouse_id=? AND status='completed'`,
+  ).bind(user.organizationId, shipmentId, warehouse.id).first<{ packages: number; pieces: number; weight_kg: number; volume_cbm: number }>();
+  const cumulative = {
+    packages: (previous?.packages ?? 0) + totalPackages,
+    pieces: (previous?.pieces ?? 0) + totalPieces,
+    weightKg: (previous?.weight_kg ?? 0) + totalWeight,
+    volumeCbm: (previous?.volume_cbm ?? 0) + totalVolume,
+  };
+  const piecesComparable = policies.actualPieces.isActive &&
+    receivedRows.every((item) => item.actualPieces !== null);
+  const weightComparable = policies.actualWeight.isActive &&
+    receivedRows.every((item) => item.actualWeight !== null);
+  const volumeComparable = policies.actualVolume.isActive &&
+    receivedRows.every((item) => item.actualVolume !== null);
+  const difference = calculateWarehouseDifference(
+    {
+      pieces: piecesComparable ? expected.pieces : cumulative.pieces,
+      weightKg: weightComparable ? expected.weightKg : cumulative.weightKg,
+      volumeCbm: volumeComparable ? expected.volumeCbm : cumulative.volumeCbm,
+    },
+    cumulative,
+  );
+  const packageMismatch = cumulative.packages !== expected.packages;
+  const piecesMismatch = piecesComparable && cumulative.pieces !== expected.pieces;
+  const acceptanceComparison = {
+    actualPackages: cumulative.packages,
+    expectedPackages: expected.packages,
+    piecesMismatch,
+    requiresFeeConfirmation: difference.requiresFeeConfirmation,
+  };
+  if (result === "auto") {
+    result = automaticWarehouseAcceptanceResult(acceptanceComparison);
+    if (result === "exception") {
+      exceptionNotes ||= "系统已隐藏人工货齐选择，实收超量或差异较大，已自动转为异常入库";
+    }
+  }
+  if (!inventoryRows.length && result !== "ready")
+    return { formError: "本次至少要验收一个实际包装" };
+  if (result === "exception" && !exceptionNotes)
+    return { formError: "异常入库必须填写异常说明" };
+  if (cumulative.packages > expected.packages && result !== "exception")
+    return {
+      formError: `累计实收 ${cumulative.packages} 包已超过计划 ${expected.packages} 包，不能按正常或货齐入库。请选择“异常入库”并填写说明。`,
+    };
+  if (result === "ready" && warehouseAcceptanceReadyIsBlocked(acceptanceComparison))
+    return {
+      formError: `累计实收与预录差异较大，不能直接确认货齐：预录 ${expected.packages} 包/${expected.pieces} 件，累计实收 ${cumulative.packages} 包/${cumulative.pieces} 件，最大可比实收差异 ${difference.maxPercent.toFixed(1)}%。请选择“异常入库”并处理差异。`,
+    };
+
+  if (result === "ready") {
+    const activeException = await env.DB.prepare(
+      `SELECT exception_number FROM (
+         SELECT e.exception_number,e.reported_at event_at
+         FROM warehouse_exceptions e JOIN shipments s ON s.id=e.shipment_id
+         WHERE e.organization_id=? AND s.order_id=? AND e.status IN ('open','processing')
+         UNION ALL
+         SELECT e.exception_number,e.reported_at event_at
+         FROM transport_batch_exceptions e
+         WHERE e.organization_id=? AND e.status IN ('open','processing') AND e.blocks_progress=1
+           AND (e.order_id=? OR (e.scope='batch' AND EXISTS(
+             SELECT 1 FROM transport_batch_orders bo
+             WHERE bo.organization_id=e.organization_id AND bo.batch_id=e.batch_id
+               AND bo.order_id=? AND bo.status!='removed'
+           )))
+       ) ORDER BY event_at LIMIT 1`,
+    ).bind(user.organizationId, order.id, user.organizationId, order.id, order.id).first<{ exception_number: string }>();
+    if (activeException) return { formError: `订单仍有未结案异常 ${activeException.exception_number}，处理结案后才能确认货齐` };
+  }
+  const effectiveNotes = policies.notes.isActive ? notes : "";
   const locationText = `${location.warehouse_name} / ${location.zone_name} / ${location.name} (${location.code})`;
   const statements: D1PreparedStatement[] = [...bootstrap];
   statements.push(
@@ -336,14 +499,14 @@ export async function action({ request }: Route.ActionArgs) {
       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).bind(
       receiptId,user.organizationId,receiptNumber,shipmentId,warehouse.id,location.id,"completed",
-      totalPackages,totalPieces,totalWeight,totalVolume,notes || null,user.userId,now,now,now,
-      packageTypes.length === 1 ? packageTypes[0] : "mixed",null,result === "ready" ? 1 : 0,
+      totalPackages,totalPieces,totalWeight,totalVolume,effectiveNotes || null,user.userId,now,now,now,
+      packageTypes.length === 1 ? packageTypes[0] : "mixed",policies.evidence.isActive ? evidenceNote || null : null,result === "ready" ? 1 : 0,
       result === "exception" ? 1 : 0,exceptionNotes || null,
     ),
   );
 
   const createdPackages: { id: string; barcode: string }[] = [];
-  for (const item of receivedRows) {
+  for (const item of inventoryRows) {
     const actualPackages = item.actualPackages as number;
     const actualPieces = item.actualPieces as number;
     const actualWeight = item.actualWeight as number;
@@ -371,9 +534,13 @@ export async function action({ request }: Route.ActionArgs) {
       const packageId = crypto.randomUUID();
       const barcode = generateCode("OUL");
       const packageNumber = generatePackageNumber(order.order_number, item.line_no, sequence);
-      const pieces = distributeInteger(actualPieces, actualPackages, sequence);
-      const weight = distributeDecimal(actualWeight, actualPackages, sequence);
-      const volume = distributeDecimal(actualVolume, actualPackages, sequence);
+      const pieces = distributeInteger(item.packagePieces, actualPackages, sequence);
+      const weight = actualWeight > 0
+        ? distributeDecimal(actualWeight, actualPackages, sequence)
+        : null;
+      const volume = actualVolume > 0
+        ? distributeDecimal(actualVolume, actualPackages, sequence)
+        : null;
       const packageStatus = result === "exception" && sequence === 1 && createdPackages.length === 0 ? "exception" : "in_stock";
       createdPackages.push({ id: packageId, barcode });
       statements.push(
@@ -384,7 +551,7 @@ export async function action({ request }: Route.ActionArgs) {
           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         ).bind(
           packageId,user.organizationId,receiptId,shipmentId,warehouse.id,location.id,barcode,packageNumber,
-          pieces,weight,volume,actualLength,actualWidth,actualHeight,packageStatus,item.itemNotes || notes || null,now,now,item.id,
+          pieces,weight,volume,actualLength,actualWidth,actualHeight,packageStatus,item.itemNotes || effectiveNotes || null,now,now,item.id,
         ),
         env.DB.prepare(
           `INSERT INTO warehouse_package_movements(
@@ -402,7 +569,7 @@ export async function action({ request }: Route.ActionArgs) {
         id,organization_id,shipment_id,operation_type,location,measured_pieces,
         measured_weight_kg,measured_volume_cbm,notes,operator_user_id,occurred_at,created_at,warehouse_location_id
       ) VALUES(?,?,?,'receive',?,?,?,?,?,?,?,?,?)`,
-    ).bind(crypto.randomUUID(),user.organizationId,shipmentId,locationText,totalPieces,totalWeight,totalVolume,notes || exceptionNotes || null,user.userId,now,now,location.id),
+    ).bind(crypto.randomUUID(),user.organizationId,shipmentId,locationText,totalPieces,totalWeight,totalVolume,effectiveNotes || exceptionNotes || null,user.userId,now,now,location.id),
     env.DB.prepare(
       `INSERT INTO shipment_events(id,shipment_id,status,location,description,event_at,visible_to_customer,created_by_user_id,created_at)
        VALUES(?,?,'picked_up',?,?,?,1,?,?)`,
@@ -417,32 +584,7 @@ export async function action({ request }: Route.ActionArgs) {
     ).bind(now,order.id,user.organizationId),
   );
 
-  const expected = cargo.results.reduce((sum, item) => ({
-    packages: sum.packages + item.package_count,
-    pieces: sum.pieces + item.package_count * item.pieces_per_package,
-    weightKg: sum.weightKg + item.package_count * item.gross_weight_per_package_kg,
-    volumeCbm: sum.volumeCbm + item.package_count * item.volume_per_package_cbm,
-  }), { packages: 0, pieces: 0, weightKg: 0, volumeCbm: 0 });
-  const previous = await env.DB.prepare(
-    `SELECT COALESCE(SUM(total_packages),0) packages,COALESCE(SUM(total_pieces),0) pieces,COALESCE(SUM(total_weight_kg),0) weight_kg,
-            COALESCE(SUM(total_volume_cbm),0) volume_cbm
-       FROM warehouse_receipts WHERE organization_id=? AND shipment_id=? AND warehouse_id=? AND status='completed'`,
-  ).bind(user.organizationId, shipmentId, warehouse.id).first<{ packages: number; pieces: number; weight_kg: number; volume_cbm: number }>();
-  const cumulative = {
-    packages: (previous?.packages ?? 0) + totalPackages,
-    pieces: (previous?.pieces ?? 0) + totalPieces,
-    weightKg: (previous?.weight_kg ?? 0) + totalWeight,
-    volumeCbm: (previous?.volume_cbm ?? 0) + totalVolume,
-  };
-  const difference = calculateWarehouseDifference(expected, cumulative);
-  if (result === "ready" && (
-    cumulative.packages !== expected.packages ||
-    cumulative.pieces !== expected.pieces ||
-    difference.requiresFeeConfirmation
-  )) return {
-    formError: `累计实收与预录差异较大，不能直接确认货齐：预录 ${expected.packages} 包/${expected.pieces} 件，累计实收 ${cumulative.packages} 包/${cumulative.pieces} 件，最大重量或体积差异 ${difference.maxPercent.toFixed(1)}%。请选择“异常入库”并处理差异。`,
-  };
-  if (result !== "partial" && difference.hasDifference) {
+  if (result !== "partial" && (difference.hasDifference || packageMismatch || piecesMismatch)) {
     statements.push(
       env.DB.prepare(
         `INSERT INTO warehouse_receipt_differences(
@@ -452,7 +594,7 @@ export async function action({ request }: Route.ActionArgs) {
       ).bind(
         crypto.randomUUID(),user.organizationId,receiptId,order.id,expected.pieces,expected.weightKg,
         expected.volumeCbm,cumulative.pieces,cumulative.weightKg,cumulative.volumeCbm,difference.maxPercent,
-        exceptionNotes || notes || "仓库验收实收与预录存在差异",now,now,
+        exceptionNotes || effectiveNotes || "仓库验收实收与预录存在差异",now,now,
       ),
     );
   }
@@ -517,6 +659,8 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
   const canOperate = loaderData.user.permissions.includes("warehouse.operate");
   const [receiptResult, setReceiptResult] = useState<"partial" | "ready" | "exception">("partial");
   const labels = loaderData.receiptId ? loaderData.recentLabels : [];
+  const policies = resolveWarehouseAcceptancePolicies(loaderData.workflowFields);
+  useEffect(() => setReceiptResult("partial"), [loaderData.order?.id]);
   return <>
     <header className="page-header acceptance-header"><div><p className="eyebrow">ACCEPTANCE RECEIVING</p><h1>验收收货</h1><p>扫描订单号，逐条核对预录与实收数据，选择库位入库后打印每个实际包装的仓库标签。</p></div>{labels.length > 0 && <button type="button" className="primary no-print" onClick={() => window.print()}>打印本次 {labels.length} 张标签</button>}</header>
     {(loaderData.resultMessage || actionData?.formError) && <div className={`alert ${actionData?.formError ? "error" : "success"}`}>{actionData?.formError ?? loaderData.resultMessage}</div>}
@@ -539,15 +683,42 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
         <span><small>国内运输</small><strong>{loaderData.order.carrier_name || "承运商未填写"}</strong><em>{loaderData.order.vehicle_summary || "车辆与司机未填写"}</em></span>
         <span><small>提货地</small><strong>{loaderData.order.origin_city} · {loaderData.order.origin_address}</strong></span>
       </section>
-      <section className="panel acceptance-cargo-panel"><div className="panel-header"><div><h2>预录货物与本次实收</h2><p>每条货物按本次实际到仓填写；未在本批到仓的货物全部填 0。</p></div><span className="status-pill">{loaderData.cargoItems.length} 条货物</span></div>
-        <div className="table-wrap acceptance-cargo-table"><table><thead><tr><th>预录货物</th><th>计划数据</th><th>累计已收</th><th>本次包装数 *</th><th>本次件数 *</th><th>实际重量 KG *</th><th>实际长×宽×高 CM *</th><th>实际体积 CBM *</th><th>本行备注</th></tr></thead><tbody>{loaderData.cargoItems.map((item,index) => {
+      <section className="panel acceptance-cargo-panel">
+        <div className="panel-header"><div><h2>预录货物与本次实收</h2><p>每条货物按本次实际到仓填写；未在本批到仓的货物全部填 0。长宽高用于生成实物库存与标签，固定为系统必填。</p></div><span className="status-pill">{loaderData.cargoItems.length} 条货物</span></div>
+        {!policies.actualPackages.isActive && <div className="alert info">实收包装数已在当前订单工作流中隐藏；系统将按每条货物的“计划包装数 − 当前仓累计实收包装数”推导本次包装数，最低为 0。</div>}
+        <div className="table-wrap acceptance-cargo-table"><table><thead><tr>
+          <th>预录货物</th><th>计划数据</th><th>累计已收</th>
+          {policies.actualPackages.isActive && <th>本次包装数{acceptanceRequiredMarker(policies.actualPackages)}</th>}
+          {policies.actualPieces.isActive && <th>本次件数{acceptanceRequiredMarker(policies.actualPieces)}</th>}
+          {policies.actualWeight.isActive && <th>实际重量 KG{acceptanceRequiredMarker(policies.actualWeight)}</th>}
+          <th>实际长×宽×高 CM{acceptanceRequiredMarker(policies.actualDimensions)}</th>
+          {policies.actualVolume.isActive && <th>实际体积 CBM{acceptanceRequiredMarker(policies.actualVolume)}</th>}
+          <th>本行备注</th>
+        </tr></thead><tbody>{loaderData.cargoItems.map((item,index) => {
           const expectedPieces = item.package_count * item.pieces_per_package;
           const expectedWeight = item.package_count * item.gross_weight_per_package_kg;
           const expectedVolume = item.package_count * item.volume_per_package_cbm;
-          return <tr key={item.id}><td><strong>{item.line_no}. {item.cargo_name_cn}</strong><small>{item.cargo_name_en || "—"} · HS {item.hs_code || "—"}</small><small>{packageTypeLabel(item.package_type)} · {item.length_cm}×{item.width_cm}×{item.height_cm} cm</small></td><td><strong>{item.package_count} 包 / {expectedPieces} 件</strong><small>{expectedWeight.toFixed(2)} KG · {expectedVolume.toFixed(3)} CBM</small></td><td><strong>{item.received_packages} 包 / {item.received_pieces} 件</strong><small>{item.received_weight_kg.toFixed(2)} KG · {item.received_volume_cbm.toFixed(3)} CBM</small></td><td><input name={`actualPackages_${index}`} type="number" min="0" step="1" defaultValue={Math.max(0,item.package_count-item.received_packages)} required/></td><td><input name={`actualPieces_${index}`} type="number" min="0" step="1" defaultValue={Math.max(0,expectedPieces-item.received_pieces)} required/></td><td><input name={`actualWeight_${index}`} type="number" min="0" step="0.001" defaultValue={Math.max(0,expectedWeight-item.received_weight_kg).toFixed(3)} required/></td><td><div className="acceptance-dimensions"><input name={`actualLength_${index}`} type="number" min="0" step="0.1" defaultValue={item.length_cm} aria-label="实际长度" required/><span>×</span><input name={`actualWidth_${index}`} type="number" min="0" step="0.1" defaultValue={item.width_cm} aria-label="实际宽度" required/><span>×</span><input name={`actualHeight_${index}`} type="number" min="0" step="0.1" defaultValue={item.height_cm} aria-label="实际高度" required/></div></td><td><input name={`actualVolume_${index}`} type="number" min="0" step="0.0001" defaultValue={Math.max(0,expectedVolume-item.received_volume_cbm).toFixed(4)} required/></td><td><input name={`itemNotes_${index}`} placeholder="选填"/></td></tr>;
+          return <tr key={item.id}>
+            <td><strong>{item.line_no}. {item.cargo_name_cn}</strong><small>{item.cargo_name_en || "—"} · HS {item.hs_code || "—"}</small><small>{packageTypeLabel(item.package_type)} · {item.length_cm}×{item.width_cm}×{item.height_cm} cm</small></td>
+            <td><strong>{item.package_count} 包 / {expectedPieces} 件</strong><small>{expectedWeight.toFixed(2)} KG · {expectedVolume.toFixed(3)} CBM</small></td>
+            <td><strong>{item.received_packages} 包 / {item.received_pieces} 件</strong><small>{item.received_weight_kg.toFixed(2)} KG · {item.received_volume_cbm.toFixed(3)} CBM</small></td>
+            {policies.actualPackages.isActive && <td><input name={`actualPackages_${index}`} type="number" min="0" step="1" defaultValue={Math.max(0,item.package_count-item.received_packages)} required={policies.actualPackages.isRequired}/></td>}
+            {policies.actualPieces.isActive && <td><input name={`actualPieces_${index}`} type="number" min="0" step="1" defaultValue={Math.max(0,expectedPieces-item.received_pieces)} required={policies.actualPieces.isRequired}/></td>}
+            {policies.actualWeight.isActive && <td><input name={`actualWeight_${index}`} type="number" min="0" step="0.001" defaultValue={Math.max(0,expectedWeight-item.received_weight_kg).toFixed(3)} required={policies.actualWeight.isRequired}/></td>}
+            <td><div className="acceptance-dimensions"><input name={`actualLength_${index}`} type="number" min="0" step="0.1" defaultValue={item.length_cm} aria-label="实际长度" required/><span>×</span><input name={`actualWidth_${index}`} type="number" min="0" step="0.1" defaultValue={item.width_cm} aria-label="实际宽度" required/><span>×</span><input name={`actualHeight_${index}`} type="number" min="0" step="0.1" defaultValue={item.height_cm} aria-label="实际高度" required/></div></td>
+            {policies.actualVolume.isActive && <td><input name={`actualVolume_${index}`} type="number" min="0" step="0.0001" defaultValue={Math.max(0,expectedVolume-item.received_volume_cbm).toFixed(4)} required={policies.actualVolume.isRequired}/></td>}
+            <td><input name={`itemNotes_${index}`} placeholder="选填"/></td>
+          </tr>;
         })}</tbody></table></div>
       </section>
-      <section className="panel acceptance-confirm-panel"><label className="field"><span>入库库位 *</span><select name="locationId" required><option value="">请选择库位</option>{loaderData.locations.map((item) => <option key={item.id} value={item.id}>{item.warehouse_name} / {item.zone_name} / {item.name}（{item.code}）</option>)}</select></label><fieldset className="acceptance-result"><legend>本次验收结果 *</legend><label><input type="radio" name="receiptResult" value="partial" checked={receiptResult === "partial"} onChange={() => setReceiptResult("partial")}/><span><b>分批正常入库</b><small>本批货物无异常，订单尚未全部到齐</small></span></label><label><input type="radio" name="receiptResult" value="ready" checked={receiptResult === "ready"} onChange={() => setReceiptResult("ready")}/><span><b>订单货齐</b><small>本次入库后，订单全部货物已经到齐</small></span></label><label><input type="radio" name="receiptResult" value="exception" checked={receiptResult === "exception"} onChange={() => setReceiptResult("exception")}/><span><b>异常入库</b><small>允许入库但冻结后续装车和配载</small></span></label></fieldset>{receiptResult === "exception" && <label className="field span-2"><span>异常说明 *</span><textarea name="exceptionNotes" rows={3} required placeholder="填写短少、破损、错货、超差等具体情况"/></label>}<label className="field span-2"><span>收货备注</span><textarea name="notes" rows={2} placeholder="选填，本次到货车辆、现场情况等"/></label><button className="primary acceptance-submit" disabled={busy || !canOperate || !loaderData.locations.length}>{busy ? "正在验收入库…" : "确认验收、入库并生成标签"}</button></section>
+      <section className="panel acceptance-confirm-panel">
+        {policies.location.isActive ? <label className="field"><span>入库库位{acceptanceRequiredMarker(policies.location)}</span><select name="locationId" required={policies.location.isRequired}><option value="">{policies.location.isRequired ? "请选择库位" : "未选则使用首个启用库位"}</option>{loaderData.locations.map((item) => <option key={item.id} value={item.id}>{item.warehouse_name} / {item.zone_name} / {item.name}（{item.code}）</option>)}</select></label> : <div className="alert info">入库库位已在当前工作流中隐藏，系统将使用当前仓库首个启用库位。</div>}
+        {policies.cargoComplete.isActive ? <fieldset className="acceptance-result"><legend>本次验收结果{acceptanceRequiredMarker(policies.cargoComplete)}</legend><label><input type="radio" name="receiptResult" value="partial" checked={receiptResult === "partial"} required={policies.cargoComplete.isRequired} onChange={() => setReceiptResult("partial")}/><span><b>分批正常入库</b><small>本批货物无异常，订单尚未全部到齐</small></span></label><label><input type="radio" name="receiptResult" value="ready" checked={receiptResult === "ready"} required={policies.cargoComplete.isRequired} onChange={() => setReceiptResult("ready")}/><span><b>订单货齐</b><small>本次入库后，订单全部货物已经到齐</small></span></label><label><input type="radio" name="receiptResult" value="exception" checked={receiptResult === "exception"} required={policies.cargoComplete.isRequired} onChange={() => setReceiptResult("exception")}/><span><b>异常入库</b><small>允许入库但冻结后续装车和配载</small></span></label></fieldset> : <div className="alert info">货齐选择已在当前工作流中隐藏：系统依据累计包装数和已填的实收数据自动判定分批、货齐或异常。</div>}
+        {policies.cargoComplete.isActive && receiptResult === "exception" && <label className="field span-2"><span>异常说明 *</span><textarea name="exceptionNotes" rows={3} required placeholder="填写短少、破损、错货、超差等具体情况"/></label>}
+        {policies.evidence.isActive && <label className="field span-2"><span>收货凭证{acceptanceRequiredMarker(policies.evidence)}</span><textarea name="evidenceNote" rows={2} required={policies.evidence.isRequired} placeholder="照片、单证或现场凭证的索引/说明"/></label>}
+        {policies.notes.isActive && <label className="field span-2"><span>收货备注{acceptanceRequiredMarker(policies.notes)}</span><textarea name="notes" rows={2} required={policies.notes.isRequired} placeholder="本次到货车辆、现场情况等"/></label>}
+        <button className="primary acceptance-submit" disabled={busy || !canOperate || !loaderData.locations.length}>{busy ? "正在验收入库…" : "确认验收、入库并生成标签"}</button>
+      </section>
     </Form>}
     {labels.length > 0 && <section className="acceptance-label-section"><div className="panel-header no-print"><div><h2>本次仓库货物标签</h2><p>每个实际包装一张，打印后粘贴到对应货物外包装。</p></div><span>{labels.length} 张</span></div><div className="package-labels">{labels.map((item) => <AcceptanceLabel key={item.id} item={item}/>)}</div></section>}
   </>;

@@ -231,14 +231,26 @@ export function Modal({
     onClose?.();
   }, [dirty, dismissible, discardMessage, onClose, updateOpen]);
 
+  // `closeSignal` / `openSignal` are event-like values.  Their effects must run
+  // only when the signal changes, not whenever a parent recreates an inline
+  // callback.  Depending directly on `close` previously allowed an `onClose`
+  // handler that updates local state to create a render/close loop after a
+  // successful form action, leaving the global navigation indicator active.
+  const closeRef = useRef(close);
+  const updateOpenRef = useRef(updateOpen);
   useEffect(() => {
-    if (!closeSignal) return;
-    close(true);
-  }, [closeSignal, close]);
+    closeRef.current = close;
+    updateOpenRef.current = updateOpen;
+  }, [close, updateOpen]);
 
   useEffect(() => {
-    if (openSignal) updateOpen(true);
-  }, [openSignal, updateOpen]);
+    if (!closeSignal) return;
+    closeRef.current(true);
+  }, [closeSignal]);
+
+  useEffect(() => {
+    if (openSignal) updateOpenRef.current(true);
+  }, [openSignal]);
 
   useEffect(() => {
     if (!open) return;

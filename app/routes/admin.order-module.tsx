@@ -6,6 +6,7 @@ import { BatchNumberLink, OrderNumberLink } from "../components/EntityNumberLink
 import { requireSessionUser } from "../lib/auth.server";
 import { validatePhone, valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
+import { synchronizeOrderDocumentsModuleStatus } from "../lib/documents-module-status.server";
 import {
   advanceOrderModule,
   assignOrderModule,
@@ -32,6 +33,7 @@ import { canManageOrderModule } from "../lib/position-portal";
 import { transportChargeNameOptions } from "../lib/charge-options";
 import { ensureFtlVehicleAndLoads } from "../lib/ftl-vehicle-loads.server";
 import { summarizeLoadingSelection } from "../lib/loading-workbench";
+import { batchTransportDisplay } from "../lib/batch-transport-display";
 import { submitForm } from "../lib/form-submit";
 import {
   maxInlineOrderDocumentBytes,
@@ -44,7 +46,7 @@ import {
   orderDocumentTypeCodes,
   orderDocumentTypeLabel,
 } from "../lib/order-documents";
-import { checkOrderDeparture, checkOrderLoadPlan, checkOrderPreDepartureDocuments } from "../lib/order-readiness.server";
+import { checkOrderDeparture, checkOrderLoadPlan } from "../lib/order-readiness.server";
 import { roadStatusLabels } from "../lib/warehouse-actual";
 import { syncBatchRoadStatusFromTracking } from "../lib/batch-tracking.server";
 import {
@@ -2842,12 +2844,13 @@ export async function action({ request, params }: Route.ActionArgs) {
             current.organizationId,
           )
           .run();
-        await syncDocumentsModuleStatus(
-          current.organizationId,
+        await synchronizeOrderDocumentsModuleStatus({
+          organizationId: current.organizationId,
           orderId,
-          current.userId,
+          actorUserId: current.userId,
           now,
-        );
+          source: "admin_review",
+        });
         return { success: "文件已审核通过" };
       }
       const files = form
@@ -2942,12 +2945,13 @@ export async function action({ request, params }: Route.ActionArgs) {
         );
       }
       await env.DB.batch(statements);
-      await syncDocumentsModuleStatus(
-        current.organizationId,
+      await synchronizeOrderDocumentsModuleStatus({
+        organizationId: current.organizationId,
         orderId,
-        current.userId,
+        actorUserId: current.userId,
         now,
-      );
+        source: "admin_upload",
+      });
       return { success: `${orderDocumentTypeLabel(documentCategory)}已上传并进入审核` };
     }
     if (intent === "document_review") {
@@ -2988,12 +2992,13 @@ export async function action({ request, params }: Route.ActionArgs) {
           current.organizationId,
         )
         .run();
-      await syncDocumentsModuleStatus(
-        current.organizationId,
+      await synchronizeOrderDocumentsModuleStatus({
+        organizationId: current.organizationId,
         orderId,
-        current.userId,
+        actorUserId: current.userId,
         now,
-      );
+        source: "admin_review",
+      });
       let deliveryCompleted = false;
       if (
         moduleCode === "overseas_warehouse" &&
@@ -3044,7 +3049,13 @@ export async function action({ request, params }: Route.ActionArgs) {
         orderId,
         current.organizationId,
       ).run();
-      await syncDocumentsModuleStatus(current.organizationId, orderId, current.userId, now);
+      await synchronizeOrderDocumentsModuleStatus({
+        organizationId: current.organizationId,
+        orderId,
+        actorUserId: current.userId,
+        now,
+        source: "admin_review",
+      });
       return { success: "文件信息已修改，请重新审核" };
     }
     return { formError: "无效操作" };
@@ -3063,74 +3074,6 @@ export async function action({ request, params }: Route.ActionArgs) {
       .run();
     return { formError: message };
   }
-}
-
-async function syncDocumentsModuleStatus(
-  organizationId: string,
-  orderId: string,
-  actorUserId: string,
-  now: string,
-) {
-  const module = await env.DB.prepare(
-    "SELECT id,status,current_step_code FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='documents' AND enabled=1",
-  )
-    .bind(organizationId, orderId)
-    .first<{ id: string; status: string; current_step_code: string | null }>();
-  if (!module) return;
-  const documentReadiness = await env.DB.prepare(
-    `SELECT COUNT(*) total,
-            SUM(CASE WHEN COALESCE(review_status,'pending') NOT IN ('approved','archived') THEN 1 ELSE 0 END) pending
-     FROM order_document_metadata
-     WHERE organization_id=? AND order_id=?`,
-  )
-    .bind(organizationId, orderId)
-    .first<{ total: number; pending: number | null }>();
-  const preDepartureDocuments = await checkOrderPreDepartureDocuments(organizationId, orderId);
-  const completed = preDepartureDocuments.ready &&
-    (documentReadiness?.total ?? 0) > 0 &&
-    (documentReadiness?.pending ?? 0) === 0;
-  const nextStepCode = completed ? "archived" : "checking";
-  const nextStepName = completed ? "文件归档" : "资料检查";
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE order_module_instances
-       SET status=?,current_step_code=?,current_step_name=?,
-         progress_percent=CASE WHEN ?='completed' THEN 100 ELSE MAX(progress_percent,25) END,
-         blocking_reason=NULL,started_at=COALESCE(started_at,?),
-         completed_at=CASE WHEN ?='completed' THEN COALESCE(completed_at,?) ELSE NULL END,
-         updated_at=?
-       WHERE id=?`,
-    ).bind(
-      completed ? "completed" : "in_progress",
-      nextStepCode,
-      nextStepName,
-      completed ? "completed" : "in_progress",
-      now,
-      completed ? "completed" : "in_progress",
-      now,
-      now,
-      module.id,
-    ),
-    env.DB.prepare(
-      "INSERT INTO order_module_history(id,organization_id,order_id,module_instance_id,action_code,action_name,from_step_code,to_step_code,to_step_name,actor_user_id,notes,occurred_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-    ).bind(
-      crypto.randomUUID(),
-      organizationId,
-      orderId,
-      module.id,
-      completed ? "documents_approved" : "document_uploaded",
-      completed ? "文件审核完成后自动归档" : "上传文件后自动进入资料检查",
-      module.current_step_code,
-      nextStepCode,
-      nextStepName,
-      actorUserId,
-      completed
-        ? "全部文件已审核通过或归档，文件中心自动完成"
-        : "文件已上传，系统自动推进到资料检查；审核通过后再完成文件中心",
-      now,
-    ),
-  ]);
-  await syncOrderWorkflowSnapshot(organizationId, orderId);
 }
 
 async function syncTrackingModuleStatus(
@@ -5308,6 +5251,7 @@ function ModuleBusinessData({
     const plannedPieces = data.cargo.reduce((sum, item) => sum + item.package_count * item.pieces_per_package, 0);
     const plannedWeight = data.cargo.reduce((sum, item) => sum + item.package_count * item.gross_weight_per_package_kg, 0);
     const plannedVolume = data.cargo.reduce((sum, item) => sum + item.package_count * item.volume_per_package_cbm, 0);
+    const activeBatchResource = activeBatch ? batchTransportDisplay(activeBatch) : null;
     const hasWarehouseReceipt = Boolean(data.warehouseActuals?.receipt_count);
     return (
       <div className="module-business-stack dense-module-stack">
@@ -5355,15 +5299,17 @@ function ModuleBusinessData({
 
           <div className="table-wrap module-record-table operation-sheet-table loading-batch-table">
             <table>
-              <thead><tr><th>配载 / 运输单</th><th>订单</th><th>车辆</th><th>已分配包装</th><th>类型</th><th>状态</th></tr></thead>
+              <thead><tr><th>配载 / 运输单</th><th>订单</th><th>承运商</th><th>车辆（车牌 / 车型）</th><th>司机（姓名 / 电话）</th><th>已分配包装</th><th>类型</th><th>状态</th></tr></thead>
               <tbody>{activeBatch ? <tr>
                 <td><strong><BatchNumberLink id={activeBatch.id} number={activeBatch.batch_number}/></strong><small>{activeBatch.batch_name}</small></td>
                 <td>{activeBatch.order_count} 票<small>{activeBatch.order_numbers || data.order.order_number}</small></td>
-                <td>{activeBatch.vehicle_count} 辆</td>
+                <td>{activeBatchResource?.carrier}</td>
+                <td>{activeBatchResource?.vehicle}<small>{activeBatch.vehicle_count} 辆已登记</small></td>
+                <td>{activeBatchResource?.driver}</td>
                 <td>{activeBatch.load_count} 个</td>
                 <td>{isLtl ? "仓库配载单" : "整车运输单"}</td>
                 <td><span className="status-pill">{roadStatusLabels[activeBatch.road_status] || activeBatch.road_status}</span></td>
-              </tr> : <tr><td colSpan={6} className="empty-state">{isLtl ? "仓库端尚未生成 PZ 配载单。" : "仓库端尚未生成装车任务。"}</td></tr>}</tbody>
+              </tr> : <tr><td colSpan={8} className="empty-state">{isLtl ? "仓库端尚未生成 PZ 配载单。" : "仓库端尚未生成装车任务。"}</td></tr>}</tbody>
             </table>
           </div>
 

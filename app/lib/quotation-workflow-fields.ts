@@ -1,3 +1,10 @@
+import {
+  quotationNativeFieldCatalog,
+  quotationNativeFieldKeySet,
+  type QuotationNativeFieldKey,
+  type QuotationNativeFieldMode,
+} from "./quotation-native-field-catalog";
+
 export type QuotationWorkflowField = {
   id: string;
   workflow_id: string;
@@ -6,15 +13,55 @@ export type QuotationWorkflowField = {
   label: string;
   field_type: string;
   is_required: number;
+  is_active: number;
   sort_order: number;
   options_text: string | null;
   help_text: string | null;
 };
 
+// Compatibility exports for callers that pre-date the single native-field
+// registry. Their values are derived from the registry so the UI, validation
+// and workflow catalog cannot silently drift apart again.
+export const quotationBuiltInWorkflowFieldKeys = quotationNativeFieldCatalog.map(
+  (field) => field.fieldKey,
+);
+export const quotationBuiltInWorkflowFieldKeySet = quotationNativeFieldKeySet;
+export type QuotationBuiltInWorkflowFieldKey = QuotationNativeFieldKey;
+export type QuotationWorkflowFieldMode = QuotationNativeFieldMode;
+
+export function quotationWorkflowFieldPolicy(
+  fields: readonly QuotationWorkflowField[],
+  fieldKey: QuotationBuiltInWorkflowFieldKey,
+  fallbackMode: QuotationWorkflowFieldMode,
+) {
+  const configured = fields.find((field) => field.field_key === fieldKey);
+  if (configured) {
+    return {
+      isActive: Boolean(configured.is_active),
+      isRequired: Boolean(configured.is_active && configured.is_required),
+    };
+  }
+  return {
+    isActive: fallbackMode !== "hidden",
+    isRequired: fallbackMode === "required",
+  };
+}
+
+export function activeQuotationCustomWorkflowFields(
+  fields: readonly QuotationWorkflowField[],
+) {
+  return fields.filter(
+    (field) =>
+      Boolean(field.is_active) &&
+      !quotationBuiltInWorkflowFieldKeySet.has(field.field_key),
+  );
+}
+
 export type QuotationWorkflowFieldValue = {
   id: string;
   quotation_id: string;
   field_id: string;
+  field_key: string;
   value_text: string | null;
   file_name: string | null;
   content_type: string | null;

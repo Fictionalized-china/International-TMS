@@ -3,6 +3,10 @@ import type { OrderModuleCode } from "./order-modules";
 import { domesticTransportPayableWorkflowValues } from "./transport-workflow";
 import { orderDocumentPlacements } from "./order-documents";
 import {
+  quotationNativeFieldKeySet,
+  quotationNativeFieldPresent,
+} from "./quotation-native-field-catalog";
+import {
   workflowFieldCatalog,
   workflowFieldCatalogByKey,
   workflowFieldMode,
@@ -50,15 +54,24 @@ const retiredWorkflowFields = new Set(["loading_seal_number"]);
 
 export async function ensureWorkflowCatalogFields(organizationId: string) {
   const workflows = await env.DB.prepare(
-    "SELECT id,code FROM workflow_definitions WHERE organization_id=?",
+    "SELECT id,code,road_load_type FROM workflow_definitions WHERE organization_id=?",
   )
     .bind(organizationId)
-    .all<{ id: string; code: string }>();
+    .all<{ id: string; code: string; road_load_type: string | null }>();
   const now = new Date().toISOString();
   const statements: D1PreparedStatement[] = [];
   for (const workflow of workflows.results) {
-    if (!standardWorkflowCodes.has(workflow.code)) continue;
     for (const item of workflowFieldCatalog) {
+      // Full catalog seeding remains limited to the canonical templates. The
+      // quotation registry, however, must exist on every FTL/LTL version: the
+      // quote form is the first node of the version selected by the user.
+      // INSERT OR IGNORE preserves every boss-authored required/optional/
+      // hidden choice on versions that already contain the field.
+      const shouldSeed = standardWorkflowCodes.has(workflow.code) || (
+        item.stepKey === "quotation" &&
+        ["ftl", "ltl"].includes(workflow.road_load_type || "")
+      );
+      if (!shouldSeed) continue;
       if (retiredWorkflowFields.has(item.fieldKey)) continue;
       const isFtlLoadingField =
         workflow.code === "tms-ftl-standard" && item.moduleCode === "loading";
@@ -228,7 +241,20 @@ export async function synchronizeWorkflowFieldPolicyForInstances(input: {
   await env.DB.prepare(
     `UPDATE workflow_instance_fields
      SET is_required=?,is_active=?
-     WHERE workflow_id=? AND field_key=? AND module_code=?`,
+     WHERE workflow_id=? AND field_key=? AND module_code=?
+       AND EXISTS(
+         SELECT 1
+         FROM workflow_instances wi
+         JOIN workflow_steps current_step
+           ON current_step.workflow_id=wi.workflow_id
+          AND current_step.step_key=wi.current_step_key
+         JOIN workflow_steps target_step
+           ON target_step.workflow_id=wi.workflow_id
+          AND target_step.step_key=workflow_instance_fields.step_key
+         WHERE wi.id=workflow_instance_fields.instance_id
+           AND wi.workflow_id=workflow_instance_fields.workflow_id
+           AND current_step.sort_order<=target_step.sort_order
+       )`,
   )
     .bind(
       input.isRequired,
@@ -245,6 +271,9 @@ export async function synchronizeWorkflowFieldDefinitionForInstances(input: {
   stepKey: string;
   fieldKey: string;
   moduleCode: OrderModuleCode;
+  sourceStepKey?: string;
+  sourceFieldKey?: string;
+  sourceModuleCode?: OrderModuleCode;
   label: string;
   fieldType: string;
   isRequired: number;
@@ -254,12 +283,28 @@ export async function synchronizeWorkflowFieldDefinitionForInstances(input: {
   helpText: string | null;
 }) {
   const now = new Date().toISOString();
+  const sourceStepKey = input.sourceStepKey ?? input.stepKey;
+  const sourceFieldKey = input.sourceFieldKey ?? input.fieldKey;
+  const sourceModuleCode = input.sourceModuleCode ?? input.moduleCode;
   await env.DB.batch([
     env.DB.prepare(
       `UPDATE workflow_instance_fields
        SET step_key=?,label=?,field_type=?,is_required=?,is_active=?,sort_order=?,
            options_text=?,help_text=?
-       WHERE workflow_id=? AND field_key=? AND module_code=?`,
+       WHERE workflow_id=? AND step_key=? AND field_key=? AND module_code=?
+         AND EXISTS(
+           SELECT 1
+           FROM workflow_instances wi
+           JOIN workflow_steps current_step
+             ON current_step.workflow_id=wi.workflow_id
+            AND current_step.step_key=wi.current_step_key
+           JOIN workflow_steps target_step
+             ON target_step.workflow_id=wi.workflow_id
+            AND target_step.step_key=?
+           WHERE wi.id=workflow_instance_fields.instance_id
+             AND wi.workflow_id=workflow_instance_fields.workflow_id
+             AND current_step.sort_order<=target_step.sort_order
+         )`,
     ).bind(
       input.stepKey,
       input.label,
@@ -270,8 +315,10 @@ export async function synchronizeWorkflowFieldDefinitionForInstances(input: {
       input.optionsText,
       input.helpText,
       input.workflowId,
-      input.fieldKey,
-      input.moduleCode,
+      sourceStepKey,
+      sourceFieldKey,
+      sourceModuleCode,
+      input.stepKey,
     ),
     env.DB.prepare(
       `INSERT OR IGNORE INTO workflow_instance_fields(
@@ -279,7 +326,15 @@ export async function synchronizeWorkflowFieldDefinitionForInstances(input: {
          is_required,is_active,sort_order,options_text,help_text,created_at
        )
        SELECT lower(hex(randomblob(16))),wi.id,wi.workflow_id,?,?,?,?,?,?,?,?,?,?,?
-       FROM workflow_instances wi WHERE wi.workflow_id=?`,
+       FROM workflow_instances wi
+       JOIN workflow_steps current_step
+         ON current_step.workflow_id=wi.workflow_id
+        AND current_step.step_key=wi.current_step_key
+       JOIN workflow_steps target_step
+         ON target_step.workflow_id=wi.workflow_id
+        AND target_step.step_key=?
+       WHERE wi.workflow_id=?
+         AND current_step.sort_order<=target_step.sort_order`,
     ).bind(
       input.stepKey,
       input.moduleCode,
@@ -292,9 +347,22 @@ export async function synchronizeWorkflowFieldDefinitionForInstances(input: {
       input.optionsText,
       input.helpText,
       now,
+      input.stepKey,
       input.workflowId,
     ),
   ]);
+}
+
+/**
+ * A template-field change belongs to the live gate only while an order is at
+ * the target node or has not reached it yet.  Once the order has moved past
+ * the node, its instance snapshot is historical evidence and must stay frozen.
+ */
+export function workflowFieldPolicyAppliesAtStage(
+  currentStepSortOrder: number,
+  targetStepSortOrder: number,
+) {
+  return currentStepSortOrder <= targetStepSortOrder;
 }
 
 export async function inspectHiddenWorkflowFieldData(input: {
@@ -571,6 +639,29 @@ async function resolveFieldPresence(
   if (!order) return result;
   for (const rule of rules) {
     if (rule.fieldKey in order) setPresence(result, rule.fieldKey, order[rule.fieldKey]);
+  }
+
+  const quotationRules = rules.filter((rule) =>
+    quotationNativeFieldKeySet.has(rule.fieldKey),
+  );
+  if (quotationRules.length) {
+    const quotation = await env.DB.prepare(
+      `SELECT q.*,
+        (SELECT COUNT(*) FROM quotation_charges c
+         WHERE c.quotation_id=q.id AND c.quantity>0 AND c.unit_price>0) quotation_charge_items
+       FROM quotations q
+       JOIN transport_orders o ON o.quotation_id=q.id AND o.organization_id=q.organization_id
+       WHERE o.id=? AND o.organization_id=?`,
+    ).bind(orderId,organizationId).first<Record<string, unknown>>();
+    if (quotation) {
+      for (const rule of quotationRules) {
+        const present = quotationNativeFieldPresent(rule.fieldKey,quotation);
+        result.set(rule.fieldKey,{
+          present,
+          displayValue:present ? "已由报价继承" : null,
+        });
+      }
+    }
   }
 
   const documentRules = rules.filter((rule) =>

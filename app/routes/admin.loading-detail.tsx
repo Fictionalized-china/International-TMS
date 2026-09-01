@@ -5,6 +5,7 @@ import type { Route } from "./+types/admin.loading-detail";
 import { OrderNumberLink } from "../components/EntityNumberLink";
 import { requireSessionUser } from "../lib/auth.server";
 import { writeAudit } from "../lib/audit.server";
+import { synchronizeOrderDocumentsModuleStatus } from "../lib/documents-module-status.server";
 import { valueOf } from "../lib/validation";
 import { checkOrderDeparture, checkOrderLoadPlan, checkOrderPreDepartureDocuments } from "../lib/order-readiness.server";
 import { recordWorkflowEvent } from "../lib/business-workflow.server";
@@ -14,6 +15,13 @@ import { allocationMethodLabel, type AllocationMethod } from "../lib/cost-alloca
 import { confirmCostAllocation, createCostAllocation, loadCostAllocations, updateCostAllocation } from "../lib/cost-allocation.server";
 import { canManageOrderModule } from "../lib/position-portal";
 import { maxInlineOrderDocumentBytes, orderDocumentTypeCodes, orderDocumentTypeLabel } from "../lib/order-documents";
+import {
+  loadingOrderDocumentDefinitions,
+  summarizeLoadingDocumentRequirements,
+  type LoadingOrderDocumentCode,
+  type OrderLoadingDocumentRequirements,
+} from "../lib/loading-document-requirements";
+import { loadOrderLoadingDocumentRequirements } from "../lib/loading-document-requirements.server";
 import { syncCustomsModuleFromRecords } from "../lib/customs-status.server";
 import {
   BATCH_TRACKING_MILESTONES,
@@ -150,7 +158,7 @@ const BATCH_DOCUMENT_TYPES=[
   {code:"border_handover",name:"口岸交接文件",hint:"口岸换装、过境或交接凭证",required:false},
   {code:"transshipment_order",name:"换装单",hint:"发生换装时上传的批次共用凭证",required:false},
 ] as const;
-const ORDER_BATCH_DOCUMENT_CODES=["consignment_letter","commercial_invoice","packing_list","customs_document","customs_declaration_file"] as const;
+const ORDER_BATCH_DOCUMENT_CODES=loadingOrderDocumentDefinitions.map((item)=>item.code);
 const BATCH_WORKSPACE_TAB_CODES=["batch","documents","outbound","tracking","overseas","exceptions"] as const;
 type BatchWorkspaceTab=(typeof BATCH_WORKSPACE_TAB_CODES)[number];
 
@@ -263,6 +271,7 @@ export async function loader({request,params}:Route.LoaderArgs){
     ...await checkOrderDeparture(current.organizationId,item.order_id,undefined,{warehouseDispatchConfirmed:true}),
   })));
   const batchOrderIds=orders.results.map((item)=>item.order_id);
+  const orderDocumentRequirements=await loadOrderLoadingDocumentRequirements(current.organizationId,batchOrderIds);
   const trackingMilestones: BatchTrackingMilestone[] = [];
   if(batchOrderIds.length){
     for (const chunk of chunkArray(batchOrderIds, CHUNK_SIZE)) {
@@ -288,7 +297,7 @@ export async function loader({request,params}:Route.LoaderArgs){
       WHERE d.organization_id=? AND d.status='active' AND c.status='active' AND c.carrier_scope='overseas'
       ORDER BY c.name,d.name`).bind(current.organizationId).all<CarrierDriverOption>(),
   ]);
-  return{current,batch,orders:orders.results,vehicles:vehicles.results,carriers:carriers.results,warehouses:warehouses.results,borderPorts:borderPorts.results,costAllocations,batchDocuments:batchDocuments.results,orderDocuments:orderDocuments.results,customsSummaries:customsSummaries.results,customsDeclarations:customsDeclarations.results,batchExceptions,exceptionPackages,outboundStatuses:outboundStatuses.results,departureGateStatuses,returnOrderId,trackingMilestones,trackingFlags:trackingFlags.results,batchVehiclePlate,carrierVehicles:carrierVehicles.results,carrierDrivers:carrierDrivers.results};
+  return{current,batch,orders:orders.results,vehicles:vehicles.results,carriers:carriers.results,warehouses:warehouses.results,borderPorts:borderPorts.results,costAllocations,batchDocuments:batchDocuments.results,orderDocuments:orderDocuments.results,orderDocumentRequirements,customsSummaries:customsSummaries.results,customsDeclarations:customsDeclarations.results,batchExceptions,exceptionPackages,outboundStatuses:outboundStatuses.results,departureGateStatuses,returnOrderId,trackingMilestones,trackingFlags:trackingFlags.results,batchVehiclePlate,carrierVehicles:carrierVehicles.results,carrierDrivers:carrierDrivers.results};
 }
 
 export async function action({request,params}:Route.ActionArgs){
@@ -382,7 +391,7 @@ export async function action({request,params}:Route.ActionArgs){
   }
   if(intent==="batch_order_document_upload"){
     const orderId=valueOf(form,"orderId"),documentCategory=valueOf(form,"documentCategory"),file=form.get("attachment");
-    if(!ORDER_BATCH_DOCUMENT_CODES.includes(documentCategory as typeof ORDER_BATCH_DOCUMENT_CODES[number])||!orderDocumentTypeCodes.has(documentCategory))return{formError:"请选择有效的订单文件类型"};
+    if(!ORDER_BATCH_DOCUMENT_CODES.includes(documentCategory as LoadingOrderDocumentCode)||!orderDocumentTypeCodes.has(documentCategory))return{formError:"请选择有效的订单文件类型"};
     if(!(file instanceof File)||file.size<=0)return{formError:"请选择要上传的订单文件"};
     const fileError=validateDocumentFile(file);if(fileError)return{formError:fileError};
     const order=await env.DB.prepare(`SELECT o.customer_id FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id WHERE bo.batch_id=? AND bo.order_id=? AND bo.organization_id=? AND bo.status!='removed'`).bind(batchId,orderId,current.organizationId).first<{customer_id:string}>();
@@ -392,7 +401,7 @@ export async function action({request,params}:Route.ActionArgs){
       env.DB.prepare("INSERT INTO order_attachments(id,organization_id,order_id,customer_id,file_name,content_type,size_bytes,data_url,uploaded_by_user_id,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,'admin',?)").bind(attachmentId,current.organizationId,orderId,order.customer_id,file.name,file.type,file.size,await toDataUrl(file),current.userId,now),
       env.DB.prepare("INSERT INTO order_document_metadata(attachment_id,organization_id,order_id,document_category,description,public_to_customer,review_status,updated_at) VALUES(?,?,?,?,?,0,'pending',?)").bind(attachmentId,current.organizationId,orderId,documentCategory,valueOf(form,"documentDescription")||orderDocumentTypeLabel(documentCategory),now),
     ]);
-    await syncBatchOrderDocumentsStatus(current.organizationId,orderId,current.userId,now);
+    await synchronizeOrderDocumentsModuleStatus({organizationId:current.organizationId,orderId,actorUserId:current.userId,now,source:"admin_upload"});
     await writeAudit({request,action:"transport.batch.order_document.upload",resourceType:"order_attachment",resourceId:attachmentId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{batchId,orderId,documentCategory}});
     return{success:`${orderDocumentTypeLabel(documentCategory)}已上传到对应订单，等待审核`};
   }
@@ -426,7 +435,7 @@ export async function action({request,params}:Route.ActionArgs){
     if(!["approved","rejected"].includes(reviewStatus))return{formError:"请选择有效的审核结果"};
     const result=await env.DB.prepare(`UPDATE order_document_metadata SET review_status=?,reviewed_by_user_id=?,reviewed_at=?,updated_at=? WHERE attachment_id=? AND order_id=? AND organization_id=? AND EXISTS(SELECT 1 FROM transport_batch_orders bo WHERE bo.batch_id=? AND bo.order_id=? AND bo.organization_id=? AND bo.status!='removed')`).bind(reviewStatus,current.userId,now,now,attachmentId,orderId,current.organizationId,batchId,orderId,current.organizationId).run();
     if(!result.meta.changes)return{formError:"订单文件不存在或不属于当前配载单"};
-    await syncBatchOrderDocumentsStatus(current.organizationId,orderId,current.userId,now);
+    await synchronizeOrderDocumentsModuleStatus({organizationId:current.organizationId,orderId,actorUserId:current.userId,now,source:"admin_review"});
     await writeAudit({request,action:"transport.batch.order_document.review",resourceType:"order_attachment",resourceId:attachmentId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{batchId,orderId,reviewStatus}});
     return{success:reviewStatus==="approved"?"订单文件已审核通过":"订单文件已退回"};
   }
@@ -736,18 +745,27 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   const pendingDispatchOrders=loaderData.orders.filter(order=>!loaderData.outboundStatuses.find(item=>item.order_id===order.order_id)?.dispatched);
   // 报关就绪：报关资料文件已审核 AND 报关单已放行
   const customsReadyForOrder=(orderId:string)=>{
+    const requirementGroup=loaderData.orderDocumentRequirements.find(group=>group.orderId===orderId);
+    if(!requirementGroup?.customsEnabled)return true;
     const customs=loaderData.customsSummaries.find(item=>item.order_id===orderId);
     const customsDeclReady=Boolean(customs&&customs.total>0&&customs.released===customs.total);
     const files=loaderData.orderDocuments.filter(item=>item.order_id===orderId);
-    const customsFilesApproved=["customs_document","customs_declaration_file"].every(code=>files.some(item=>item.document_category===code&&["approved","archived"].includes(item.review_status)));
+    const requiredCustomsDocuments=requirementGroup.documents.filter(document=>document.moduleCode==="customs"&&document.isActive&&document.isRequired);
+    const customsFilesApproved=requiredCustomsDocuments.every(document=>files.some(item=>item.document_category===document.code&&["approved","archived"].includes(item.review_status)));
     return customsDeclReady&&customsFilesApproved;
   };
   const allCustomsReady=loaderData.orders.length>0&&loaderData.orders.every(order=>customsReadyForOrder(order.order_id));
+  const allRequiredDocumentsReady=loaderData.orders.length>0&&loaderData.orders.every(order=>{
+    const requirements=loaderData.orderDocumentRequirements.find(group=>group.orderId===order.order_id)?.documents??[];
+    const files=loaderData.orderDocuments.filter(item=>item.order_id===order.order_id);
+    return summarizeLoadingDocumentRequirements(requirements,files).complete;
+  });
+  const allDocumentGateReady=allCustomsReady&&allRequiredDocumentsReady;
   const activeExceptions=loaderData.batchExceptions.filter(item=>isActiveExceptionStatus(item.status));
   const blockingExceptions=activeExceptions.filter(item=>item.blocks_progress===1);
   const exited=["outbound_in_transit","overseas_arrived","waiting_pickup","pickup_completed"].includes(loaderData.batch.road_status);
   const arrived=["overseas_arrived","waiting_pickup","pickup_completed"].includes(loaderData.batch.road_status);
-  const defaultActiveTab:BatchWorkspaceTab=activeExceptions.length?"exceptions":arrived?"overseas":exited?"tracking":allDispatched&&!allCustomsReady?"documents":allDispatched?"outbound":"batch";
+  const defaultActiveTab:BatchWorkspaceTab=activeExceptions.length?"exceptions":arrived?"overseas":exited?"tracking":allDispatched&&!allDocumentGateReady?"documents":allDispatched?"outbound":"batch";
   const requestedTab=searchParams.get("tab");
   const activeTab:BatchWorkspaceTab=isBatchWorkspaceTab(requestedTab)?requestedTab:defaultActiveTab;
   const tabHref=(tab:BatchWorkspaceTab)=>{const next=new URLSearchParams(searchParams);next.set("tab",tab);return `?${next.toString()}`};
@@ -763,13 +781,13 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   return <><header className="page-header batch-tracking-page-header"><div><p className="eyebrow">PZ LOAD · TRANSPORT TRACKING</p><h1>{loaderData.batch.batch_number}</h1><p>{loaderData.batch.batch_name} · {loaderData.batch.origin_location} → {loaderData.batch.destination_location}</p></div><div className="page-actions">{loaderData.returnOrderId&&<Link className="secondary" to={`/admin/orders/${loaderData.returnOrderId}`}>返回订单详情</Link>}<Link className="secondary" to="/admin/loading">返回配载单跟踪</Link><span className="status-pill">{allDispatched?"后台运输跟踪":"等待仓库出库"}</span><span className="status-pill">{roadStatusLabels[loaderData.batch.road_status]||loaderData.batch.road_status}</span></div></header><ActionToast signal={actionData} message={actionData?.formError??actionData?.success} tone={actionData?.formError?"error":"success"}/>
   <section className="panel batch-command-panel">
     <div className="panel-header"><div><h2>配载单执行总览</h2><p>仓库端负责配载、文件确认、车辆司机安排和装车出库；整批出库后，本页才开放运输执行与跟踪。</p></div><span className="status-pill">{roadStatusLabels[loaderData.batch.road_status]||loaderData.batch.road_status}</span></div>
-    <BatchWorkspaceTabs status={loaderData.batch.road_status} customsReady={allCustomsReady} loadPlanReady={loadPlanReady} warehouseReady={allDispatched} exceptionCount={activeExceptions.length} activeTab={activeTab} tabHref={tabHref}/>
+    <BatchWorkspaceTabs status={loaderData.batch.road_status} documentGateReady={allDocumentGateReady} loadPlanReady={loadPlanReady} warehouseReady={allDispatched} exceptionCount={activeExceptions.length} activeTab={activeTab} tabHref={tabHref}/>
   </section>
   {activeTab==="tracking"&&<BatchTrackingWorkbench batchId={loaderData.batch.id} batchNumber={loaderData.batch.batch_number} orders={loaderData.orders} trackingMilestones={loaderData.trackingMilestones} trackingFlags={loaderData.trackingFlags} batchVehiclePlate={loaderData.batchVehiclePlate} overseasVehiclePlate={loaderData.batch.overseas_vehicle_plate||null} borderPort={loaderData.batch.border_port||null} customsLocation={loaderData.batch.customs_location||null} busy={busy} manage={manage&&allDispatched} warehouseReady={allDispatched} exitConfirmed={exited} exitGateHref={tabHref("outbound")} actionCloseSignal={actionData?.success?actionData:undefined}/>}
-  {activeTab==="documents"&&<BatchDocumentWorkbench batchId={loaderData.batch.id} orders={loaderData.orders} batchDocuments={loaderData.batchDocuments} orderDocuments={loaderData.orderDocuments} customsSummaries={loaderData.customsSummaries} customsDeclarations={loaderData.customsDeclarations} busy={busy} manageCustoms={manageCustoms} requiresTransloading={requiresTransloading} ready={allCustomsReady} customsCloseSignal={actionData?.success?actionData:undefined}/>}
+  {activeTab==="documents"&&<BatchDocumentWorkbench batchId={loaderData.batch.id} orders={loaderData.orders} batchDocuments={loaderData.batchDocuments} orderDocuments={loaderData.orderDocuments} orderDocumentRequirements={loaderData.orderDocumentRequirements} customsSummaries={loaderData.customsSummaries} customsDeclarations={loaderData.customsDeclarations} busy={busy} manageCustoms={manageCustoms} requiresTransloading={requiresTransloading} ready={allDocumentGateReady} customsCloseSignal={actionData?.success?actionData:undefined}/>}
   {activeTab==="exceptions"&&<BatchExceptionWorkbench batch={loaderData.batch} orders={loaderData.orders} packages={loaderData.exceptionPackages} exceptions={loaderData.batchExceptions} busy={busy} manage={manage||canManageOrderModule(loaderData.current,"exceptions")} closeSignal={actionData?.success?actionData:undefined}/>}
   {activeTab==="batch"&&<><section className="panel loading-sheet batch-tab-panel" id="batch-arrangement">
-    <div className="batch-detail-summary"><div><h2>仓库配载结果</h2><p>由仓库端自动同步，管理后台只读查看。</p></div><div className="loading-sheet-state batch-detail-summary-status"><span>{loaderData.orders.length} 票</span><span>{loaderData.vehicles.length} 车</span><b>{allDispatched?"仓库已出库":loadPlanReady&&allCustomsReady?"待仓库装车":"待仓库补齐"}</b></div></div>
+    <div className="batch-detail-summary"><div><h2>仓库配载结果</h2><p>由仓库端自动同步，管理后台只读查看。</p></div><div className="loading-sheet-state batch-detail-summary-status"><span>{loaderData.orders.length} 票</span><span>{loaderData.vehicles.length} 车</span><b>{allDispatched?"仓库已出库":loadPlanReady&&allDocumentGateReady?"待仓库装车":"待仓库补齐"}</b></div></div>
     <div className="batch-detail-disclosure-body">
     <div className="loading-summary-strip">
       <span>起运地<strong>{loaderData.batch.origin_location}</strong></span>
@@ -825,13 +843,13 @@ function BatchExceptionWorkbench({batch,orders,packages,exceptions,busy,manage,c
   </section>;
 }
 
-function BatchDocumentWorkbench({batchId,orders,batchDocuments,orderDocuments,customsSummaries,customsDeclarations,busy,manageCustoms,requiresTransloading,ready,customsCloseSignal}:{batchId:string;orders:BatchOrder[];batchDocuments:BatchDocument[];orderDocuments:OrderDocument[];customsSummaries:CustomsSummary[];customsDeclarations:BatchCustomsDeclaration[];busy:boolean;manageCustoms:boolean;requiresTransloading:boolean;ready:boolean;customsCloseSignal?:unknown}){
+function BatchDocumentWorkbench({batchId,orders,batchDocuments,orderDocuments,orderDocumentRequirements,customsSummaries,customsDeclarations,busy,manageCustoms,requiresTransloading,ready,customsCloseSignal}:{batchId:string;orders:BatchOrder[];batchDocuments:BatchDocument[];orderDocuments:OrderDocument[];orderDocumentRequirements:OrderLoadingDocumentRequirements[];customsSummaries:CustomsSummary[];customsDeclarations:BatchCustomsDeclaration[];busy:boolean;manageCustoms:boolean;requiresTransloading:boolean;ready:boolean;customsCloseSignal?:unknown}){
   const visibleBatchDocTypes=BATCH_DOCUMENT_TYPES.filter(type=>requiresTransloading||!["border_handover","transshipment_order"].includes(type.code));
   const systemDocumentCodes=new Set(["loading_manifest","vehicle_manifest","batch_waybill"]);
   return <section className="panel batch-document-workbench batch-tab-panel" id="batch-files">
-    <div className="batch-detail-summary"><div><h2>报关与文件工作台</h2><p>在当前配载单内查看逐票文件，并直接新增、编辑或放行报关单，无需跳回订单页。</p></div><div className="batch-detail-summary-status"><span>{orders.length} 票订单</span><b>{ready?"报关门禁已通过":"存在待办资料"}</b></div></div>
+    <div className="batch-detail-summary"><div><h2>报关与文件工作台</h2><p>在当前配载单内查看逐票文件，并直接新增、编辑或放行报关单，无需跳回订单页。</p></div><div className="batch-detail-summary-status"><span>{orders.length} 票订单</span><b>{ready?"文件与报关门禁已通过":"存在待办资料"}</b></div></div>
     <div className="batch-detail-disclosure-body">
-    <div className="batch-document-scope-note"><strong>整批共用</strong><span>配载单、装车清单和批次运单均由仓库数据自动生成；{requiresTransloading?"口岸交接文件与换装单按实际业务收集。":"无需人工重复上传。"}</span><strong>逐票独立</strong><span>委托书、发票、装箱单、报关资料及报关单/预录报关单文件按订单检查；正式报关单号与放行状态在本区逐票登记。</span></div>
+    <div className="batch-document-scope-note"><strong>整批共用</strong><span>配载单、装车清单和批次运单均由仓库数据自动生成；{requiresTransloading?"口岸交接文件与换装单按实际业务收集。":"无需人工重复上传。"}</span><strong>逐票独立</strong><span>逐票文件按各订单当前生效工作流的必填、选填和隐藏规则检查；正式报关单号与放行状态在本区逐票登记。</span></div>
     <section className="batch-shared-documents"><header><div><h3>整批共用文件</h3><p>三类系统单据随仓库配载与装车数据自动形成，仅供查看，不参与人工审核{requiresTransloading?"；换装文件仅在开启换装后显示":""}。</p></div></header>
       <div className="table-wrap batch-document-table"><table><thead><tr><th>文件类型</th><th>用途说明</th><th>当前状态</th><th>文件</th></tr></thead><tbody>{visibleBatchDocTypes.map(type=>{
         const current=batchDocuments.find(item=>item.document_category===type.code);
@@ -845,20 +863,24 @@ function BatchDocumentWorkbench({batchId,orders,batchDocuments,orderDocuments,cu
     <section className="batch-order-documents"><header><div><h3>逐票订单文件与报关门禁</h3><p>点击“办理本票报关”即可在当前页面查看文件、新增申报单、编辑和放行。</p></div></header>
       <div className="table-wrap"><table><thead><tr><th>订单 / 客户</th><th>货物名称</th><th>实收数据</th><th>订单文件</th><th>申报登记 / 放行</th><th>操作</th></tr></thead><tbody>{orders.map(order=>{
         const files=orderDocuments.filter(item=>item.order_id===order.order_id);
-        const latestFiles=ORDER_BATCH_DOCUMENT_CODES.map(code=>files.find(item=>item.document_category===code)).filter((item):item is OrderDocument=>Boolean(item));
-        const approvedCodes=new Set(latestFiles.filter(item=>["approved","archived"].includes(item.review_status)).map(item=>item.document_category));
-        const missingCodes=ORDER_BATCH_DOCUMENT_CODES.filter(code=>!approvedCodes.has(code));
+        const requirementGroup=orderDocumentRequirements.find(group=>group.orderId===order.order_id);
+        const activeRequirements=requirementGroup?.documents.filter(document=>document.isActive)??[];
+        const documentSummary=summarizeLoadingDocumentRequirements(activeRequirements,files);
+        const incompleteCodes=documentSummary.incompleteCodes;
         const customs=customsSummaries.find(item=>item.order_id===order.order_id);
-        const customsReady=Boolean(customs&&customs.total>0&&customs.released===customs.total);
+        const requiredCustomsDocuments=activeRequirements.filter(document=>document.moduleCode==="customs"&&document.isRequired);
+        const customsFilesReady=requiredCustomsDocuments.every(document=>files.some(item=>item.document_category===document.code&&["approved","archived"].includes(item.review_status)));
+        const customsDeclarationsReady=Boolean(customs&&customs.total>0&&customs.released===customs.total);
+        const customsReady=!requirementGroup?.customsEnabled||(customsFilesReady&&customsDeclarationsReady);
         return <tr key={order.order_id} id={`batch-customs-${order.order_id}`}>
           <td><strong><OrderNumberLink id={order.order_id} number={order.order_number}/></strong><small>{order.customer_name}</small></td>
           <td><strong className="loading-cargo-names">{order.cargo_names||order.cargo_description||"未填写"}</strong></td>
           <td>{order.pieces} 件 · {order.gross_weight_kg.toFixed(2)} KG · {order.volume_cbm.toFixed(3)} CBM</td>
-          <td><span className={`status-pill ${missingCodes.length?"":"success"}`}>{missingCodes.length?`缺 ${missingCodes.length} 项`:`${ORDER_BATCH_DOCUMENT_CODES.length} 项已齐`}</span>{missingCodes.length>0&&<small>{missingCodes.map(orderDocumentTypeLabel).join("、")}</small>}</td>
-          <td><span className={`status-pill ${customsReady?"success":""}`}>{customs?.total?`${customs.released}/${customs.total} 张放行`:["customs_document","customs_declaration_file"].every(code=>files.some(item=>item.document_category===code&&["approved","archived"].includes(item.review_status)))?"文件已齐，待登记正式报关单":"待补齐报关资料与申报单文件"}</span></td>
+          <td><span className={`status-pill ${documentSummary.complete?"success":""}`}>{documentSummary.requiredCount===0?"无必填文件":incompleteCodes.length?`待处理 ${incompleteCodes.length} 项`:`${documentSummary.requiredCount} 项必填文件已齐`}</span>{incompleteCodes.length>0&&<small>{incompleteCodes.map(orderDocumentTypeLabel).join("、")}</small>}</td>
+          <td><span className={`status-pill ${customsReady?"success":""}`}>{!requirementGroup?.customsEnabled?"本单未启用报关":!customsFilesReady?"必填报关文件待审核":customs?.total?`${customs.released}/${customs.total} 张放行`:"待登记并放行正式报关单"}</span></td>
           <td><details className="batch-order-file-details"><summary>{manageCustoms?"办理本票报关":"查看本票文件"}</summary><div className="batch-order-file-panel">
             <header className="batch-order-file-panel-header"><div><strong>{manageCustoms?"办理本票报关":"查看本票文件"}</strong><span><OrderNumberLink id={order.order_id} number={order.order_number}/> · {order.customer_name}</span></div><button type="button" aria-label="关闭文件查看窗口" onClick={event=>(event.currentTarget.closest("details") as HTMLDetailsElement|null)?.removeAttribute("open")}>×</button></header>
-            <div className="batch-order-file-list">{ORDER_BATCH_DOCUMENT_CODES.map(code=>{const current=files.find(item=>item.document_category===code);return <div key={code}><strong>{orderDocumentTypeLabel(code)}</strong>{current?<><a href={`/admin/document-files/order/${current.id}?mode=view`} target="_blank" rel="noreferrer">{current.file_name}</a><span className={`status-pill ${current.review_status==="approved"?"success":""}`}>{documentReviewLabel(current.review_status)}</span></>:<span className="status-pill off">待仓库上传</span>}</div>})}</div>
+            <div className="batch-order-file-list">{activeRequirements.map(requirement=>{const current=files.find(item=>item.document_category===requirement.code);return <div key={requirement.code}><strong>{requirement.name}{requirement.isRequired&&<b className="required-mark"> *</b>}</strong>{current?<><a href={`/admin/document-files/order/${current.id}?mode=view`} target="_blank" rel="noreferrer">{current.file_name}</a><span className={`status-pill ${["approved","archived"].includes(current.review_status)?"success":""}`}>{documentReviewLabel(current.review_status)}</span></>:<span className={`status-pill ${requirement.isRequired?"off":""}`}>{requirement.isRequired?"待仓库上传":"选填未提供"}</span>}</div>})}{!activeRequirements.length&&<span className="status-pill success">当前工作流未启用逐票文件</span>}</div>
             <BatchOrderCustomsWorkbench orderId={order.order_id} declarations={customsDeclarations.filter(item=>item.order_id===order.order_id)} manage={manageCustoms} busy={busy} closeSignal={customsCloseSignal}/>
             <div className="batch-order-file-links"><Link className="secondary" to={`/admin/orders/${order.order_id}/modules/documents`}>查看完整文件中心</Link></div>
           </div></details></td>
@@ -1021,19 +1043,19 @@ function batchExceptionTypeLabel(type:string){return({cargo_damage:"货损",carg
 function batchExceptionSeverityLabel(severity:string){return({low:"低",medium:"中",high:"高",critical:"紧急"} as Record<string,string>)[severity]||severity}
 function batchExceptionStatusLabel(status:string){return({open:"待处理",processing:"处理中",resolved:"已结案",cancelled:"已取消"} as Record<string,string>)[status]||status}
 
-function BatchWorkspaceTabs({status,customsReady,loadPlanReady,warehouseReady,exceptionCount,activeTab,tabHref}:{status:string;customsReady:boolean;loadPlanReady:boolean;warehouseReady:boolean;exceptionCount:number;activeTab:BatchWorkspaceTab;tabHref:(tab:BatchWorkspaceTab)=>string}){
+function BatchWorkspaceTabs({status,documentGateReady,loadPlanReady,warehouseReady,exceptionCount,activeTab,tabHref}:{status:string;documentGateReady:boolean;loadPlanReady:boolean;warehouseReady:boolean;exceptionCount:number;activeTab:BatchWorkspaceTab;tabHref:(tab:BatchWorkspaceTab)=>string}){
   const exited=["outbound_in_transit","overseas_arrived","waiting_pickup","pickup_completed"].includes(status);
   const arrived=["overseas_arrived","waiting_pickup","pickup_completed"].includes(status);
   const tabs:{code:BatchWorkspaceTab;title:string;body:string;done:boolean}[]=[
     {code:"batch",title:"配载与车辆",body:"配载订单、车辆司机与分摊",done:loadPlanReady},
-    {code:"documents",title:"报关与文件",body:"逐票文件、申报、编辑与放行",done:customsReady},
+    {code:"documents",title:"报关与文件",body:"逐票文件、申报、编辑与放行",done:documentGateReady},
     {code:"outbound",title:"装车出库与出境确认",body:warehouseReady?"仓库已交接，待确认实际出境":"待仓库装车出库",done:exited},
     {code:"tracking",title:"出境运输",body:"配载单统一更新运输节点",done:exited},
     {code:"overseas",title:"境外到仓",body:"全部子订单扫码收货清点",done:arrived},
     {code:"exceptions",title:"异常处理",body:exceptionCount?`${exceptionCount} 项待处理 · 批次/订单/OUL`:"批次、订单或 OUL 就地登记",done:exceptionCount===0},
   ];
-  const currentTitle=exceptionCount?`有 ${exceptionCount} 项异常待处理`:arrived?"配载单流程已完成":exited?"境外运输中":warehouseReady&&!customsReady?"待报关放行":warehouseReady?"待出境确认":loadPlanReady?"待仓库装车出库":"待完善配载与车辆";
-  const currentHint=exceptionCount?"异常处理不会回退已经完成的历史节点；标记为阻断推进的异常结案后才可继续。":!customsReady&&warehouseReady?"仓库交接已完成；请在“报关与文件”内直接补齐申报并放行。":"标签页仅切换当前工作区，不再滚动跳转到页面其他位置。";
+  const currentTitle=exceptionCount?`有 ${exceptionCount} 项异常待处理`:arrived?"配载单流程已完成":exited?"境外运输中":warehouseReady&&!documentGateReady?"待补齐文件或报关放行":warehouseReady?"待出境确认":loadPlanReady?"待仓库装车出库":"待完善配载与车辆";
+  const currentHint=exceptionCount?"异常处理不会回退已经完成的历史节点；标记为阻断推进的异常结案后才可继续。":!documentGateReady&&warehouseReady?"仓库交接已完成；请在“报关与文件”内按各订单当前工作流补齐必填文件并完成申报放行。":"标签页仅切换当前工作区，不再滚动跳转到页面其他位置。";
   return <><div className="batch-current-node"><span>当前业务节点</span><strong>{currentTitle}</strong><small>{currentHint}</small></div><nav className="batch-workspace-tabs" aria-label="配载单工作区">{tabs.map(tab=><Link key={tab.code} to={tabHref(tab.code)} className={`${activeTab===tab.code?"active":""} ${tab.done?"done":""}`.trim()} aria-current={activeTab===tab.code?"page":undefined}><span className={`status-pill ${tab.done?"success":"off"}`}>{tab.done?"已完成":"待处理"}</span><strong>{tab.title}</strong><small>{tab.body}</small></Link>)}</nav></>;
 }
 
@@ -1133,18 +1155,6 @@ async function synchronizeBatchWarehouseProgress(organizationId:string,batchId:s
       });
     }
   }));
-}
-async function syncBatchOrderDocumentsStatus(organizationId:string,orderId:string,actorUserId:string,now:string){
-  const module=await env.DB.prepare("SELECT id,status,current_step_code FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='documents' AND enabled=1").bind(organizationId,orderId).first<{id:string;status:string;current_step_code:string|null}>();
-  if(!module||module.status==="completed"){await syncOrderWorkflowSnapshotSafe(organizationId,orderId);return;}
-  const readiness=await env.DB.prepare(`SELECT COUNT(*) total,SUM(CASE WHEN review_status NOT IN ('approved','archived') THEN 1 ELSE 0 END) pending FROM order_document_metadata WHERE organization_id=? AND order_id=?`).bind(organizationId,orderId).first<{total:number;pending:number|null}>();
-  const completed=(readiness?.total??0)>0&&(readiness?.pending??0)===0;
-  const nextStepCode=completed?"archived":"checking",nextStepName=completed?"文件归档":"资料检查";
-  await env.DB.batch([
-    env.DB.prepare(`UPDATE order_module_instances SET status=?,current_step_code=?,current_step_name=?,progress_percent=CASE WHEN ?='completed' THEN 100 ELSE MAX(progress_percent,25) END,blocking_reason=NULL,started_at=COALESCE(started_at,?),completed_at=CASE WHEN ?='completed' THEN COALESCE(completed_at,?) ELSE NULL END,updated_at=? WHERE id=?`).bind(completed?"completed":"in_progress",nextStepCode,nextStepName,completed?"completed":"in_progress",now,completed?"completed":"in_progress",now,now,module.id),
-    env.DB.prepare("INSERT INTO order_module_history(id,organization_id,order_id,module_instance_id,action_code,action_name,from_step_code,to_step_code,to_step_name,actor_user_id,notes,occurred_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").bind(crypto.randomUUID(),organizationId,orderId,module.id,completed?"documents_approved":"document_uploaded",completed?"批次工作台审核完成":"批次工作台上传文件",module.current_step_code,nextStepCode,nextStepName,actorUserId,completed?"全部现有文件已审核通过":"文件已上传并进入资料检查",now),
-  ]);
-  await syncOrderWorkflowSnapshotSafe(organizationId,orderId);
 }
 function validateDocumentFile(file:File){
   const allowed=new Set(["application/pdf","application/msword","application/vnd.openxmlformats-officedocument.wordprocessingml.document","application/vnd.ms-excel","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","image/jpeg","image/png","image/webp"]);

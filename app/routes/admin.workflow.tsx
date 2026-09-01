@@ -20,7 +20,9 @@ import {
   workflowFieldMode,
   workflowFieldModeFlags,
 } from "../lib/workflow-field-catalog";
+import { quotationNativeFieldCatalog } from "../lib/quotation-native-field-catalog";
 import {
+  ensureWorkflowCatalogFields,
   inspectHiddenWorkflowFieldData,
   synchronizeWorkflowFieldDefinitionForInstances,
 } from "../lib/workflow-fields.server";
@@ -31,6 +33,7 @@ import {
   synchronizeWorkflowSupplementTasks,
   type WorkflowFieldPolicyImpact,
 } from "../lib/workflow-supplement.server";
+import { reconcileWorkflowFieldRuntimeStatus } from "../lib/workflow-field-runtime-status.server";
 import {
   editableWorkflowFieldFlags,
   editableWorkflowFieldMode,
@@ -98,6 +101,7 @@ type StepField = {
   options_text: string | null;
   help_text: string | null;
   module_code: OrderModuleCode;
+  updated_at: string;
 };
 type StepModule = {
   id: string;
@@ -140,6 +144,7 @@ type Instance = {
 
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "workflow.view");
+  await ensureWorkflowCatalogFields(current.organizationId);
   const defaultWorkflowId = await ensureDefaultWorkflow(current.organizationId);
   const url = new URL(request.url);
   const requestedWorkflowId = url.searchParams.get("workflowId");
@@ -174,7 +179,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       .bind(workflowId)
       .all<Step>(),
     env.DB.prepare(
-      "SELECT id, step_id, field_key, label, field_type, is_required, is_active, sort_order, options_text, help_text, COALESCE(module_code,'consignment') module_code FROM workflow_step_fields WHERE workflow_id=? ORDER BY sort_order, field_key",
+      "SELECT id, step_id, field_key, label, field_type, is_required, is_active, sort_order, options_text, help_text, COALESCE(module_code,'consignment') module_code, updated_at FROM workflow_step_fields WHERE workflow_id=? ORDER BY sort_order, field_key",
     )
       .bind(workflowId)
       .all<StepField>(),
@@ -242,6 +247,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       steps.results,
       stepModules.results,
       moduleTasks.results,
+      fields.results,
     ),
     instances: instances.results,
     fieldPolicyImpacts:Object.fromEntries(impactRows) as Record<string,WorkflowFieldPolicyImpact>,
@@ -251,6 +257,7 @@ export async function loader({ request }: Route.LoaderArgs) {
 
 export async function action({ request }: Route.ActionArgs) {
   const current = await requireSessionUser(request, "workflow.manage");
+  await ensureWorkflowCatalogFields(current.organizationId);
   const defaultWorkflowId = await ensureDefaultWorkflow(current.organizationId);
   const form = await request.formData();
   const intent = valueOf(form, "intent");
@@ -368,7 +375,7 @@ export async function action({ request }: Route.ActionArgs) {
     if (!mode) return { formError: "字段规则只能设置为必填、选填或隐藏" };
     const field = await env.DB.prepare(
       `SELECT f.id,f.step_id,s.step_key,f.field_key,f.label,f.field_type,f.is_required,f.is_active,f.sort_order,
-        f.options_text,f.help_text,COALESCE(f.module_code,'consignment') module_code
+        f.options_text,f.help_text,COALESCE(f.module_code,'consignment') module_code,f.updated_at
        FROM workflow_step_fields f JOIN workflow_steps s ON s.id=f.step_id
        WHERE f.id=? AND f.workflow_id=?`,
     )
@@ -386,6 +393,7 @@ export async function action({ request }: Route.ActionArgs) {
         options_text: string | null;
         help_text: string | null;
         module_code: OrderModuleCode;
+        updated_at: string;
     }>();
     if (!field) return { formError: "字段不存在" };
     const previousMode=workflowFieldMode(field);
@@ -395,11 +403,16 @@ export async function action({ request }: Route.ActionArgs) {
       return{formError:"该规则会影响现有订单，请先查看分层影响并在弹窗中二次确认"};
     }
     const flags = editableWorkflowFieldFlags(mode);
-    await env.DB.prepare(
-      "UPDATE workflow_step_fields SET is_required=?,is_active=?,updated_at=? WHERE id=? AND workflow_id=?",
+    const expectedUpdatedAt=valueOf(form,"fieldUpdatedAt");
+    if(!expectedUpdatedAt)return{formError:"字段版本信息缺失，请刷新工作流后重试"};
+    const updateResult=await env.DB.prepare(
+      "UPDATE workflow_step_fields SET is_required=?,is_active=?,updated_at=? WHERE id=? AND workflow_id=? AND updated_at=?",
     )
-      .bind(flags.isRequired, flags.isActive, now, field.id, workflowId)
+      .bind(flags.isRequired, flags.isActive, now, field.id, workflowId, expectedUpdatedAt)
       .run();
+    if(!updateResult.meta.changes){
+      return{formError:"该字段已被其他窗口修改，请刷新后查看最新规则再操作"};
+    }
     await synchronizeWorkflowFieldDefinitionForInstances({
       workflowId,
       stepKey: field.step_key,
@@ -427,6 +440,15 @@ export async function action({ request }: Route.ActionArgs) {
       mode,
       actorUserId:current.userId,
     });
+    const runtimeStatus=await reconcileWorkflowFieldRuntimeStatus({
+      organizationId:current.organizationId,
+      workflowId,
+      targetStepKey:field.step_key,
+      moduleCode:field.module_code,
+      fieldKey:field.field_key,
+      actorUserId:current.userId,
+      now,
+    });
     const preserved = flags.preservesStoredValue
       ? await inspectHiddenWorkflowFieldData({
           organizationId: current.organizationId,
@@ -446,10 +468,12 @@ export async function action({ request }: Route.ActionArgs) {
         workflowId,
         lifecycleStatus: definition.lifecycle_status,
         fieldKey: field.field_key,
+        previousMode,
         mode,
         preserved,
         impact,
         supplementTasks,
+        runtimeStatus,
       },
     });
     await broadcastInternalNotification({
@@ -659,6 +683,15 @@ export async function action({ request }: Route.ActionArgs) {
       mode:parsed.mode,
       actorUserId:current.userId,
     });
+    const runtimeStatus=await reconcileWorkflowFieldRuntimeStatus({
+      organizationId:current.organizationId,
+      workflowId,
+      targetStepKey:step.step_key,
+      moduleCode:parsed.moduleCode,
+      fieldKey:parsed.fieldKey,
+      actorUserId:current.userId,
+      now,
+    });
     await writeAudit({
       request,
       action:"workflow.field.create",
@@ -666,7 +699,7 @@ export async function action({ request }: Route.ActionArgs) {
       resourceId:id,
       organizationId:current.organizationId,
       actorUserId:current.userId,
-      metadata:{workflowId,stepKey:step.step_key,fieldKey:parsed.fieldKey,mode:parsed.mode,impact,supplementTasks},
+      metadata:{workflowId,stepKey:step.step_key,fieldKey:parsed.fieldKey,mode:parsed.mode,impact,supplementTasks,runtimeStatus},
     });
     await broadcastInternalNotification({
       organizationId:current.organizationId,
@@ -776,6 +809,15 @@ export async function action({ request }: Route.ActionArgs) {
       mode,
       actorUserId:current.userId,
     });
+    const runtimeStatus=await reconcileWorkflowFieldRuntimeStatus({
+      organizationId:current.organizationId,
+      workflowId,
+      targetStepKey:step.step_key,
+      moduleCode:catalog.moduleCode,
+      fieldKey:catalog.fieldKey,
+      actorUserId:current.userId,
+      now,
+    });
     await writeAudit({
       request,
       action: "workflow.field.block.assign",
@@ -783,7 +825,7 @@ export async function action({ request }: Route.ActionArgs) {
       resourceId: fieldId,
       organizationId: current.organizationId,
       actorUserId: current.userId,
-      metadata: { workflowId, stepKey: step.step_key, fieldKey: catalog.fieldKey, mode, moved: Boolean(exists&&exists.step_id!==step.id), impact, supplementTasks },
+      metadata: { workflowId, stepKey: step.step_key, fieldKey: catalog.fieldKey, mode, moved: Boolean(exists&&exists.step_id!==step.id), impact, supplementTasks, runtimeStatus },
     });
     await broadcastInternalNotification({
       organizationId:current.organizationId,
@@ -833,6 +875,9 @@ export async function action({ request }: Route.ActionArgs) {
     }
     await synchronizeWorkflowFieldDefinitionForInstances({
       workflowId,
+      sourceStepKey: field.step_key,
+      sourceFieldKey: field.field_key,
+      sourceModuleCode: field.module_code,
       stepKey: field.step_key,
       fieldKey: parsed.fieldKey,
       moduleCode: parsed.moduleCode,
@@ -1132,10 +1177,23 @@ async function copyWorkflowStepsAndFields(sourceWorkflowId: string, targetWorkfl
   if (taskStatements.length) await env.DB.batch(taskStatements);
 }
 
-async function synchronizeWorkflowExecutionSnapshots(workflowId: string) {
+async function synchronizeWorkflowExecutionSnapshots(
+  workflowId: string,
+  targetStepId: string,
+) {
   const instances = await env.DB.prepare(
-    "SELECT id FROM workflow_instances WHERE workflow_id=? ORDER BY id",
-  ).bind(workflowId).all<{ id: string }>();
+    `SELECT wi.id
+     FROM workflow_instances wi
+     JOIN workflow_steps current_step
+       ON current_step.workflow_id=wi.workflow_id
+      AND current_step.step_key=wi.current_step_key
+     JOIN workflow_steps target_step
+       ON target_step.workflow_id=wi.workflow_id
+      AND target_step.id=?
+     WHERE wi.workflow_id=?
+       AND current_step.sort_order<=target_step.sort_order
+     ORDER BY wi.id`,
+  ).bind(targetStepId,workflowId).all<{ id: string }>();
   const chunkSize = 20;
   for (let index = 0; index < instances.results.length; index += chunkSize) {
     await Promise.all(
@@ -1166,7 +1224,7 @@ async function ensureFieldPolicyModule(
           updated_at=? WHERE id=?`,
       ).bind(required, required, now, existing.id).run();
     }
-    await synchronizeWorkflowExecutionSnapshots(workflowId);
+    await synchronizeWorkflowExecutionSnapshots(workflowId,stepId);
     return existing.id;
   }
   const definitionModule = orderModuleDefinitions.find((item) => item.code === moduleCode);
@@ -1183,7 +1241,7 @@ async function ensureFieldPolicyModule(
     id, workflowId, stepId, moduleCode, definitionModule?.name ?? moduleCode,
     order?.next_order ?? 10, required, now, now,
   ).run();
-  await synchronizeWorkflowExecutionSnapshots(workflowId);
+  await synchronizeWorkflowExecutionSnapshots(workflowId,stepId);
   return id;
 }
 
@@ -1212,24 +1270,33 @@ async function reconcileFieldPolicyModule(
     await env.DB.prepare(
       "UPDATE workflow_step_modules SET is_active=?,is_required=?,updated_at=? WHERE id=?",
     ).bind(activeCount ? 1 : 0, required, now, module.id).run();
-    if (!activeCount) {
-      await env.DB.prepare(
-        "DELETE FROM workflow_instance_module_states WHERE step_module_id=?",
-      ).bind(module.id).run();
-      return;
-    }
   }
   await env.DB.prepare(
-    `UPDATE workflow_instance_module_states SET is_required=?,updated_at=?
-     WHERE step_module_id=?`,
-  ).bind(required, now, module.id).run();
-  if (activeCount) await synchronizeWorkflowExecutionSnapshots(workflowId);
+    `UPDATE workflow_instance_module_states
+     SET is_required=?,updated_at=?
+     WHERE step_module_id=?
+       AND EXISTS(
+         SELECT 1
+         FROM workflow_instance_step_states target_state
+         JOIN workflow_instances wi ON wi.id=target_state.instance_id
+         JOIN workflow_steps current_step
+           ON current_step.workflow_id=wi.workflow_id
+          AND current_step.step_key=wi.current_step_key
+         JOIN workflow_steps target_step
+           ON target_step.workflow_id=wi.workflow_id
+          AND target_step.id=?
+         WHERE target_state.id=workflow_instance_module_states.instance_step_state_id
+           AND current_step.sort_order<=target_step.sort_order
+       )`,
+  ).bind(activeCount ? required : 0, now, module.id, stepId).run();
+  if (activeCount) await synchronizeWorkflowExecutionSnapshots(workflowId,stepId);
 }
 
 function validateWorkflowConfiguration(
   steps: Step[],
   modules: StepModule[],
   tasks: ModuleTask[],
+  fields: StepField[] = [],
 ) {
   const issues: string[] = [];
   const activeSteps = steps.filter((item) => item.is_active).sort((a,b) => a.sort_order-b.sort_order);
@@ -1250,6 +1317,22 @@ function validateWorkflowConfiguration(
   );
   if (missingRuntimeSteps.length)
     issues.push(`第一版运行链缺少基础节点：${missingRuntimeSteps.join("、")}`);
+  const quotationStep = activeSteps.find((step) => step.step_key === "quotation");
+  if (quotationStep) {
+    const quotationKeys = new Set(
+      fields.filter((field) => field.step_id === quotationStep.id).map((field) => field.field_key),
+    );
+    const missingQuotationFields = quotationNativeFieldCatalog.filter(
+      (field) => !quotationKeys.has(field.fieldKey),
+    );
+    if (missingQuotationFields.length)
+      issues.push(`询价报价节点缺少标准字段：${missingQuotationFields.map((field) => field.label).join("、")}`);
+  }
+  const duplicateFieldKeys = fields.filter(
+    (field,index) => fields.findIndex((other) => other.field_key === field.field_key) !== index,
+  );
+  if (duplicateFieldKeys.length)
+    issues.push(`同一工作流内字段键不能跨节点重复：${[...new Set(duplicateFieldKeys.map((field) => field.field_key))].join("、")}`);
   for (const step of activeSteps) {
     const stepModules = modules.filter((item) => item.step_id === step.id && item.is_active);
     if (!stepModules.length) issues.push(`节点“${step.name}”没有启用的功能模组`);
@@ -1263,7 +1346,7 @@ function validateWorkflowConfiguration(
 }
 
 async function loadWorkflowValidationIssues(workflowId: string) {
-  const [steps,modules,tasks] = await Promise.all([
+  const [steps,modules,tasks,fields] = await Promise.all([
     env.DB.prepare(
       "SELECT id,step_key,name,entity_type,trigger_event,sort_order,is_required,is_active,actor_scope FROM workflow_steps WHERE workflow_id=? ORDER BY sort_order,step_key",
     ).bind(workflowId).all<Step>(),
@@ -1277,8 +1360,13 @@ async function loadWorkflowValidationIssues(workflowId: string) {
         responsibility_position_code,instructions
        FROM workflow_module_tasks WHERE workflow_id=? ORDER BY sort_order,task_key`,
     ).bind(workflowId).all<ModuleTask>(),
+    env.DB.prepare(
+      `SELECT id,step_id,field_key,label,field_type,is_required,is_active,sort_order,
+        options_text,help_text,COALESCE(module_code,'consignment') module_code
+       FROM workflow_step_fields WHERE workflow_id=? ORDER BY sort_order,field_key`,
+    ).bind(workflowId).all<StepField>(),
   ]);
-  return validateWorkflowConfiguration(steps.results,modules.results,tasks.results);
+  return validateWorkflowConfiguration(steps.results,modules.results,tasks.results,fields.results);
 }
 
 async function validPosition(organizationId: string, code: string) {
@@ -2232,6 +2320,7 @@ function RequirementModeForm({
       <input type="hidden" name="intent" value="field_mode_update" />
       <input type="hidden" name="workflowId" value={workflowId} />
       <input type="hidden" name="fieldId" value={field.id} />
+      <input type="hidden" name="fieldUpdatedAt" value={field.updated_at} />
       <select name="fieldMode" value={mode} onChange={(event)=>setMode(editableWorkflowFieldMode(event.target.value)??"optional")} aria-label={`${field.label}填写规则`}>
         <option value="required">必填</option>
         <option value="optional">选填</option>

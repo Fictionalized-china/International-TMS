@@ -89,9 +89,6 @@ export async function createOrderFromAcceptedQuote(input: {
 }): Promise<CreatedOrder> {
   const quote = await loadAcceptedQuote(input.organizationId, input.quotationId);
   if (!quote) throw new Error("报价无效或尚未被接受");
-  if (!quote.pickup_address || !quote.destination_warehouse_id) {
-    throw new Error("报价缺少提货地址或目的仓，不能自动创建订单");
-  }
 
   const existing = await env.DB.prepare(
     "SELECT id,order_number,workflow_instance_id FROM transport_orders WHERE organization_id=? AND quotation_id=? LIMIT 1",
@@ -118,8 +115,13 @@ export async function createOrderFromAcceptedQuote(input: {
       "SELECT name,phone FROM customer_contacts WHERE customer_id=? ORDER BY is_primary DESC,created_at LIMIT 1",
     ).bind(quote.customer_id).first<{ name: string; phone: string | null }>(),
     env.DB.prepare(
-      "SELECT id FROM customer_addresses WHERE customer_id=? AND address_line1=? ORDER BY is_default DESC,created_at LIMIT 1",
-    ).bind(quote.customer_id, quote.pickup_address).first<{ id: string }>(),
+      `SELECT id,address_line1 FROM customer_addresses
+       WHERE customer_id=? AND (?='' OR address_line1=?)
+       ORDER BY is_default DESC,created_at
+       LIMIT 1`,
+    ).bind(
+      quote.customer_id,quote.pickup_address || "",quote.pickup_address || "",
+    ).first<{ id: string; address_line1: string }>(),
     env.DB.prepare(
       "SELECT id,charge_code,description,quantity,unit_price,amount,exchange_rate,sort_order FROM quotation_charges WHERE quotation_id=? ORDER BY sort_order,id",
     ).bind(quote.id).all<QuoteCharge>(),
@@ -128,7 +130,8 @@ export async function createOrderFromAcceptedQuote(input: {
   const orderId = crypto.randomUUID();
   const orderNumber = await nextDocumentNumber(input.organizationId, "order");
   const cargoId = crypto.randomUUID();
-  const destinationAddress = quote.warehouse_address || quote.destination_warehouse_note || quote.warehouse_name || quote.destination_city;
+  const pickupAddressText = quote.pickup_address || pickupAddress?.address_line1 || "待补充提货地址";
+  const destinationAddress = quote.warehouse_address || quote.destination_warehouse_note || quote.warehouse_name || quote.destination_city || "待补充目的地";
   const contactName = quote.customer_contact_name || contact?.name || quote.customer_name;
   const contactPhone = quote.customer_contact_phone || contact?.phone || null;
   const pieces = Math.max(1, Number(quote.pieces || 1));
@@ -139,7 +142,7 @@ export async function createOrderFromAcceptedQuote(input: {
     originCountry: quote.origin_country,
     originState: quote.origin_state,
     originCity: quote.origin_city,
-    pickupAddress: quote.pickup_address,
+    pickupAddress: pickupAddressText,
     customerContactName: contactName,
     customerContactPhone: contactPhone,
     destinationCountry: quote.destination_country,
@@ -181,8 +184,8 @@ export async function createOrderFromAcceptedQuote(input: {
     ).bind(
       orderId,input.organizationId,orderNumber,now.slice(0,10),"export",quote.road_load_type,
       quote.destination_warehouse_id,quote.destination_warehouse_note,quote.customer_id,quote.id,
-      quote.customer_name,contactName,contactPhone,quote.customer_id,pickupAddress?.id || null,
-      quote.origin_country,quote.origin_state,quote.origin_city,quote.pickup_address,
+       quote.customer_name,contactName,contactPhone,quote.customer_id,pickupAddress?.id || null,
+       quote.origin_country,quote.origin_state,quote.origin_city,pickupAddressText,
       quote.customer_name,contactName,contactPhone,
       quote.destination_country,quote.destination_state,quote.destination_city,destinationAddress,
       quote.cargo_description,pieces,quote.gross_weight_kg,quote.volume_cbm,quote.transport_mode,quote.service_level,

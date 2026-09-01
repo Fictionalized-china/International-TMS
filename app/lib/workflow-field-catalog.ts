@@ -1,7 +1,9 @@
 ﻿import type { OrderModuleCode } from "./order-modules";
 
+import { quotationNativeFieldCatalog } from "./quotation-native-field-catalog";
+
 export type WorkflowFieldMode = "required" | "optional" | "hidden";
-export type WorkflowFieldRequirementSource = "legacy_required" | "new_system";
+export type WorkflowFieldRequirementSource = "legacy_required" | "quotation_native" | "new_system";
 
 export type WorkflowFieldCatalogItem = {
   fieldKey: string;
@@ -80,14 +82,18 @@ const field = (
   fieldKey,
   label,
   fieldType,
-  defaultMode: stepKey === "order_creation"
+  defaultMode: stepKey === "quotation"
+    ? defaultMode
+    : stepKey === "order_creation"
     ? fieldKey === "document_consignment_letter" ? "required" : "hidden"
     : legacyRequiredWorkflowFieldKeys.has(fieldKey)
       ? "required"
       : defaultMode === "hidden"
         ? "hidden"
         : "optional",
-  requirementSource: legacyRequiredWorkflowFieldKeys.has(fieldKey)
+  requirementSource: stepKey === "quotation"
+    ? "quotation_native"
+    : legacyRequiredWorkflowFieldKeys.has(fieldKey)
     ? "legacy_required"
     : "new_system",
   helpText,
@@ -98,6 +104,19 @@ const field = (
 // from their owning order/module tables; only user-created custom fields use
 // the generic workflow value table.
 export const workflowFieldCatalog: WorkflowFieldCatalogItem[] = [
+  // 报价创建前的客户、订单类型和版本选择属于系统前置条件；其余标准
+  // 报价输入从同一注册表派生，避免页面、门禁和工作流目录再次分叉。
+  ...quotationNativeFieldCatalog.map((item) => field(
+    "quotation",
+    item.moduleCode,
+    item.fieldKey,
+    item.label,
+    item.fieldType,
+    item.defaultMode,
+    item.helpText,
+    item.optionsText,
+  )),
+
   field("order_creation", "consignment", "customer_id", "委托客户", "customer", "required", "本订单的委托客户。"),
   field("order_creation", "consignment", "quotation_id", "已接受报价", "select", "optional", "有正式报价时关联，未报价订单可以不填。"),
   field("order_creation", "consignment", "order_date", "接单日期", "date", "required", "业务正式接单日期。"),
