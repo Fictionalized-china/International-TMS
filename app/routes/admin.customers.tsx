@@ -62,6 +62,7 @@ type CustomerRow = {
 type ContactRow = { id: string; customer_id: string; name: string; title: string | null; email: string | null; phone: string | null; is_primary: number };
 type AddressRow = { id: string; customer_id: string; label: string; type: string; country_code: string; state: string | null; city: string; address_line1: string; contact_name: string | null; contact_phone: string | null; is_default: number };
 type PortalRow = { id: string; customer_id: string; user_id: string; display_name: string; email: string; status: string; last_login_at: string | null };
+type PortalRegistrationRow = { id: string; user_id: string; company_name: string; customer_identity_code: string | null; contact_name: string; contact_phone: string | null; email: string; candidate_customer_id: string | null; candidate_customer_name: string | null; created_at: string };
 type ContractRow = { id: string; customer_id: string; title: string; file_name: string; content_type: string; size_bytes: number; effective_at: string | null; expires_at: string | null; status: string; notes: string | null; created_at: string };
 type GeoReference = { code: string; name: string; parent_code: string | null };
 type CustomerDefaultProfile = {
@@ -107,7 +108,7 @@ async function validateCustomerDefaultProfile(profile: CustomerDefaultProfile, o
 
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "customer.view");
-  const [customers, contacts, addresses, portals, contracts, owners, countries, provinces, cities] = await Promise.all([
+  const [customers, contacts, addresses, portals, registrations, contracts, owners, countries, provinces, cities] = await Promise.all([
     env.DB.prepare(`SELECT c.id, c.code, c.identity_code, c.name, c.short_name, COALESCE(c.party_category,'customer') AS party_category, c.status, c.notes, c.sales_owner_user_id, u.display_name AS sales_owner_name, COALESCE(GROUP_CONCAT(DISTINCT cbr.role_code), '') AS business_role_codes, COUNT(DISTINCT cc.id) AS contact_count, COUNT(DISTINCT ca.id) AS address_count,
       (SELECT x.id FROM customer_contacts x WHERE x.customer_id=c.id ORDER BY x.is_primary DESC,x.updated_at DESC LIMIT 1) AS primary_contact_id,
       (SELECT x.name FROM customer_contacts x WHERE x.customer_id=c.id ORDER BY x.is_primary DESC,x.updated_at DESC LIMIT 1) AS primary_contact_name,
@@ -123,13 +124,14 @@ export async function loader({ request }: Route.LoaderArgs) {
     env.DB.prepare(`SELECT cc.id, cc.customer_id, cc.name, cc.title, cc.email, cc.phone, cc.is_primary FROM customer_contacts cc JOIN customers c ON c.id = cc.customer_id WHERE c.organization_id = ? AND cc.customer_id IN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) ORDER BY cc.is_primary DESC, cc.name`).bind(current.organizationId,current.organizationId).all<ContactRow>(),
     env.DB.prepare(`SELECT ca.id, ca.customer_id, ca.label, ca.type, ca.country_code, ca.state, ca.city, ca.address_line1, ca.contact_name, ca.contact_phone, ca.is_default FROM customer_addresses ca JOIN customers c ON c.id = ca.customer_id WHERE c.organization_id = ? AND ca.customer_id IN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) ORDER BY ca.is_default DESC, ca.label`).bind(current.organizationId,current.organizationId).all<AddressRow>(),
     env.DB.prepare(`SELECT cpa.id, cpa.customer_id, cpa.user_id, u.display_name, u.email, cpa.status, u.last_login_at FROM customer_portal_accounts cpa JOIN users u ON u.id = cpa.user_id WHERE cpa.organization_id = ? AND cpa.customer_id IN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) ORDER BY u.display_name`).bind(current.organizationId,current.organizationId).all<PortalRow>(),
+    env.DB.prepare(`SELECT pr.id,pr.user_id,pr.company_name,pr.customer_identity_code,pr.contact_name,pr.contact_phone,pr.email,pr.candidate_customer_id,c.name candidate_customer_name,pr.created_at FROM portal_registration_requests pr LEFT JOIN customers c ON c.id=pr.candidate_customer_id AND c.organization_id=pr.organization_id WHERE pr.organization_id=? AND pr.status='pending' ORDER BY pr.created_at`).bind(current.organizationId).all<PortalRegistrationRow>(),
     env.DB.prepare(`SELECT id, customer_id, title, file_name, content_type, size_bytes, effective_at, expires_at, status, notes, created_at FROM customer_contracts WHERE organization_id = ? AND customer_id IN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) ORDER BY created_at DESC LIMIT 500`).bind(current.organizationId,current.organizationId).all<ContractRow>(),
     env.DB.prepare(`SELECT u.id, u.display_name FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.organization_id = ? AND m.status = 'active' ORDER BY u.display_name`).bind(current.organizationId).all<{ id: string; display_name: string }>(),
     env.DB.prepare("SELECT code, name FROM reference_data WHERE organization_id = ? AND category = 'country' AND status = 'active' ORDER BY sort_order, code").bind(current.organizationId).all<{ code: string; name: string }>(),
     env.DB.prepare("SELECT code, name, parent_code FROM reference_data WHERE organization_id = ? AND category = 'province' AND status = 'active' ORDER BY sort_order, code").bind(current.organizationId).all<GeoReference>(),
     env.DB.prepare("SELECT code, name, parent_code FROM reference_data WHERE organization_id = ? AND category = 'city' AND status = 'active' ORDER BY sort_order, code").bind(current.organizationId).all<GeoReference>(),
   ]);
-  return { current, customers: customers.results, contacts: contacts.results, addresses: addresses.results, portals: portals.results, contracts: contracts.results, owners: owners.results, countries: countries.results, provinces: provinces.results, cities: cities.results };
+  return { current, customers: customers.results, contacts: contacts.results, addresses: addresses.results, portals: portals.results, registrations: registrations.results, contracts: contracts.results, owners: owners.results, countries: countries.results, provinces: provinces.results, cities: cities.results };
 }
 
 export async function action({ request }: Route.ActionArgs) {
@@ -137,6 +139,45 @@ export async function action({ request }: Route.ActionArgs) {
   const form = await request.formData();
   const intent = valueOf(form, "intent");
   const now = new Date().toISOString();
+
+  if (intent === "portal_registration_approve") {
+    const requestId = valueOf(form, "requestId"), customerId = valueOf(form, "customerId");
+    const [registration, customer, existingPortal] = await Promise.all([
+      env.DB.prepare(`SELECT id,user_id,company_name,contact_name,contact_phone,email FROM portal_registration_requests WHERE id=? AND organization_id=? AND status='pending'`).bind(requestId, current.organizationId).first<{ id: string; user_id: string; company_name: string; contact_name: string; contact_phone: string | null; email: string }>(),
+      env.DB.prepare(`SELECT id,name,status FROM customers WHERE id=? AND organization_id=? AND status IN ('prospect','active','suspended')`).bind(customerId, current.organizationId).first<{ id: string; name: string; status: string }>(),
+      env.DB.prepare(`SELECT id FROM customer_portal_accounts WHERE organization_id=? AND user_id=(SELECT user_id FROM portal_registration_requests WHERE id=? AND organization_id=?)`).bind(current.organizationId, requestId, current.organizationId).first<{ id: string }>(),
+    ]);
+    if (!registration) return { formError: "注册申请不存在、已处理或已被其他人处理" };
+    if (!customer) return { formError: "请选择当前组织内有效的客户档案" };
+    if (existingPortal) return { formError: "该注册账号已经绑定客户，请刷新后查看" };
+    const accountId = crypto.randomUUID();
+    let approvalResults;
+    try {
+      approvalResults = await env.DB.batch([
+        env.DB.prepare(`UPDATE portal_registration_requests SET customer_id=?,status='approved',review_notes=?,reviewed_by_user_id=?,reviewed_at=?,updated_at=? WHERE id=? AND organization_id=? AND status='pending'`).bind(customer.id, `已绑定客户：${customer.name}`, current.userId, now, now, registration.id, current.organizationId),
+        env.DB.prepare(`INSERT INTO customer_portal_accounts(id,organization_id,customer_id,user_id,status,created_at,updated_at) SELECT ?,organization_id,customer_id,user_id,'active',?,? FROM portal_registration_requests WHERE id=? AND organization_id=? AND status='approved' AND reviewed_by_user_id=? AND reviewed_at=?`).bind(accountId, now, now, registration.id, current.organizationId, current.userId, now),
+        env.DB.prepare(`INSERT INTO customer_contacts(id,customer_id,name,title,email,phone,is_primary,created_at,updated_at) SELECT ?,?,?,?,?,?,CASE WHEN EXISTS(SELECT 1 FROM customer_contacts WHERE customer_id=?) THEN 0 ELSE 1 END,?,? WHERE EXISTS(SELECT 1 FROM customer_portal_accounts WHERE id=?) AND NOT EXISTS(SELECT 1 FROM customer_contacts WHERE customer_id=? AND LOWER(COALESCE(email,''))=LOWER(?))`).bind(crypto.randomUUID(), customer.id, registration.contact_name, "客户门户注册联系人", registration.email, registration.contact_phone, customer.id, now, now, accountId, customer.id, registration.email),
+        env.DB.prepare(`INSERT INTO portal_notifications(id,organization_id,customer_id,user_id,type,title,message,link,is_read,created_at) SELECT ?,?,?,?,'system',?,?,?,0,? WHERE EXISTS(SELECT 1 FROM customer_portal_accounts WHERE id=?)`).bind(crypto.randomUUID(), current.organizationId, customer.id, registration.user_id, "客户门户账号已开通", `您的账号已经绑定到 ${customer.name}，现在可以查看对应客户的业务资料。`, "/portal/account", now, accountId),
+      ]);
+    } catch (error) {
+      if (String(error).includes("UNIQUE constraint failed")) return { formError: "该注册账号已由其他操作绑定，请刷新后查看" };
+      throw error;
+    }
+    if (!approvalResults[0].meta.changes) return { formError: "该注册申请已由其他人处理，请刷新后查看" };
+    await writeAudit({ request, action: "portal.registration.approve", resourceType: "portal_registration_request", resourceId: registration.id, organizationId: current.organizationId, actorUserId: current.userId, metadata: { customerId: customer.id, customerName: customer.name, userId: registration.user_id, email: registration.email, accountId } });
+    return { success: `已将 ${registration.email} 绑定到客户“${customer.name}”` };
+  }
+
+  if (intent === "portal_registration_reject") {
+    const requestId = valueOf(form, "requestId"), reviewNotes = valueOf(form, "reviewNotes");
+    if (reviewNotes.length < 2 || reviewNotes.length > 240) return { formError: "请填写 2-240 个字符的拒绝原因，便于申请人修正资料" };
+    const registration = await env.DB.prepare(`SELECT id,user_id,email FROM portal_registration_requests WHERE id=? AND organization_id=? AND status='pending'`).bind(requestId, current.organizationId).first<{ id: string; user_id: string; email: string }>();
+    if (!registration) return { formError: "注册申请不存在、已处理或已被其他人处理" };
+    const rejected = await env.DB.prepare(`UPDATE portal_registration_requests SET status='rejected',review_notes=?,reviewed_by_user_id=?,reviewed_at=?,updated_at=? WHERE id=? AND organization_id=? AND status='pending'`).bind(reviewNotes, current.userId, now, now, registration.id, current.organizationId).run();
+    if (!rejected.meta.changes) return { formError: "该注册申请已由其他人处理，请刷新后查看" };
+    await writeAudit({ request, action: "portal.registration.reject", resourceType: "portal_registration_request", resourceId: registration.id, organizationId: current.organizationId, actorUserId: current.userId, metadata: { userId: registration.user_id, email: registration.email, reviewNotes } });
+    return { success: `已拒绝 ${registration.email} 的注册申请` };
+  }
 
   if (intent === "contact") {
     const customerId = valueOf(form, "customerId"), name = valueOf(form, "name"), title = valueOf(form, "title"), email = valueOf(form, "email").toLowerCase(), phone = valueOf(form, "phone");
@@ -365,6 +406,7 @@ export function meta() { return [{ title: "客户管理 | International TMS" }];
 
 export default function Customers({ loaderData, actionData }: Route.ComponentProps) {
   const busy = useNavigation().state !== "idle", canManage = loaderData.current.permissions.includes("customer.manage");
+  const bindableCustomers = loaderData.customers.filter((customer) => customer.status !== "archived");
   const modalCloseSignal = actionData?.success ? actionData : undefined;
   const submittedValues = actionData && "values" in actionData ? actionData.values : undefined;
   const submittedErrors = actionData && "errors" in actionData ? actionData.errors : undefined;
@@ -375,6 +417,19 @@ export default function Customers({ loaderData, actionData }: Route.ComponentPro
       <div className="page-actions"><span className="status-pill">{loaderData.customers.length} 家客商</span></div>
     </header>
     {(actionData?.success || actionData?.formError) && <div className={`alert ${actionData.formError ? "error" : "success"}`}>{actionData.formError ?? actionData.success}</div>}
+    <section className="panel portal-registration-review" id="portal-registration-requests">
+      <div className="panel-header"><div><h2>客户门户注册申请</h2><p>申请人只能提交资料；必须在这里确认最终客户，批准后才会开放该客户的订单、报价和账单。</p></div><span className={`status-pill ${loaderData.registrations.length ? "warning" : "success"}`}>{loaderData.registrations.length} 条待审核</span></div>
+      <div className="table-wrap"><table><thead><tr><th>申请时间</th><th>企业资料</th><th>联系人 / 登录邮箱</th><th>系统预匹配</th><th>绑定客户并处理</th></tr></thead><tbody>{loaderData.registrations.map((registration) => <tr key={registration.id}>
+        <td>{new Date(registration.created_at).toLocaleString("zh-CN", { hour12: false })}</td>
+        <td><strong>{registration.company_name}</strong><small>{registration.customer_identity_code ? `客户识别码 ${registration.customer_identity_code}` : "未填写客户识别码"}</small></td>
+        <td><strong>{registration.contact_name}</strong><small>{registration.email}{registration.contact_phone ? ` · ${registration.contact_phone}` : ""}</small></td>
+        <td>{registration.candidate_customer_id ? <><span className="status-pill">已预匹配</span><small>{registration.candidate_customer_name}</small></> : <><span className="status-pill off">未匹配</span><small>请人工选择客户</small></>}</td>
+        <td>{canManage ? <div className="portal-registration-actions">
+          <Form method="post" className="portal-registration-approve-form"><input type="hidden" name="intent" value="portal_registration_approve"/><input type="hidden" name="requestId" value={registration.id}/><label><span>最终绑定客户</span><select name="customerId" defaultValue={registration.candidate_customer_id ?? ""} required><option value="">请选择客户档案</option>{bindableCustomers.map((customer) => <option key={customer.id} value={customer.id}>{customer.identity_code} · {customer.name}</option>)}</select></label><button className="primary" disabled={busy}>批准并绑定</button></Form>
+          <Form method="post" className="portal-registration-reject-form"><input type="hidden" name="intent" value="portal_registration_reject"/><input type="hidden" name="requestId" value={registration.id}/><label><span>拒绝原因</span><input name="reviewNotes" required minLength={2} maxLength={240} placeholder="例如：企业资料与客户档案不一致"/></label><button className="secondary danger" disabled={busy}>拒绝</button></Form>
+        </div> : <span className="muted">仅可查看</span>}</td>
+      </tr>)}{!loaderData.registrations.length&&<tr><td colSpan={5} className="empty-state">暂无待审核的客户门户注册申请。</td></tr>}</tbody></table></div>
+    </section>
     <section className="panel customer-ledger">
       <div className="panel-header">
         <div><h2>客户资料台账</h2><p>一行一位客商；点击“客户档案”集中维护联系人、地址、合同和门户账号。</p></div>

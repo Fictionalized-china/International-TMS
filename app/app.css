@@ -24105,3 +24105,151 @@ html[data-motion="off"] *::after {
 @media (max-width: 1120px) {
   .workspace-preference-button:not(.shortcut-help-button) { min-width: 34px; padding-inline: 6px; font-size: 9px; }
 }
+
+/* Customer portal self-registration and customer-binding review. */
+.portal-register-page {
+  align-items: start;
+  padding-block: 26px;
+  overflow-y: auto;
+}
+.portal-register-card {
+  width: min(820px, 100%) !important;
+  padding: 24px 28px 26px;
+}
+.portal-register-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 18px;
+}
+.portal-register-heading .muted { margin-bottom: 0; }
+.portal-register-heading .site-switch { flex: 0 0 auto; margin-top: 3px; }
+.portal-register-form { display: grid; gap: 12px; }
+.portal-register-form > section {
+  padding: 13px 14px 15px;
+  border: 1px solid #e0e7ed;
+  border-radius: 3px;
+  background: #fbfcfd;
+}
+.portal-register-form > section > h2 { margin: 0; color: #17324a; font-size: 14px; }
+.portal-register-form > section > p { margin: 3px 0 11px; color: #728495; font-size: 10px; line-height: 1.5; }
+.portal-register-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 11px 14px;
+}
+.portal-register-grid .field-wide { grid-column: 1 / -1; }
+.portal-register-form .field { min-width: 0; }
+.portal-register-form .field > small { display: block; margin-top: 4px; color: #7b8b99; font-size: 10px; line-height: 1.4; }
+.portal-register-form .field > .field-error,
+.portal-register-agreement .field-error { color: #b42318; }
+.portal-register-form input[aria-invalid="true"] { border-color: #d92d20; box-shadow: 0 0 0 3px rgba(217,45,32,.08); }
+.portal-register-agreement {
+  min-height: 38px;
+  padding: 9px 11px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  gap: 2px 8px;
+  color: #42586b;
+  border: 1px solid #dce5eb;
+  border-radius: 3px;
+  background: #fff;
+  font-size: 11px;
+  line-height: 1.55;
+}
+.portal-register-agreement input { width: 15px !important; min-height: 15px !important; margin-top: 1px; }
+.portal-register-agreement .field-error { grid-column: 2; }
+.portal-register-actions { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.portal-register-actions > span { color: #718294; font-size: 10px; }
+.portal-register-actions .primary { width: auto; min-width: 150px; margin: 0; }
+.portal-auth-links { margin-top: 15px; display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.portal-auth-links .site-switch { margin: 0; }
+.portal-register-entry { color: #1769aa; font-size: 11px; font-weight: 700; text-decoration: none; }
+.portal-register-entry:hover { text-decoration: underline; }
+.portal-registration-complete { text-align: center; }
+.portal-registration-complete::before { margin-inline: auto; }
+.portal-registration-steps {
+  margin: 20px 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  list-style: none;
+  text-align: left;
+}
+.portal-registration-steps li {
+  min-width: 0;
+  padding: 12px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-block: 1px solid #e1e8ee;
+  background: #f7f9fb;
+}
+.portal-registration-steps li:first-child { border-left: 1px solid #e1e8ee; border-radius: 3px 0 0 3px; }
+.portal-registration-steps li:last-child { border-right: 1px solid #e1e8ee; border-radius: 0 3px 3px 0; }
+.portal-registration-steps li > span {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  display: grid;
+  place-items: center;
+  color: #75889a;
+  border: 1px solid #b9c7d2;
+  border-radius: 50%;
+  background: #fff;
+  font-size: 10px;
+  font-weight: 800;
+}
+.portal-registration-steps li.complete { background: #eef8f3; }
+.portal-registration-steps li.complete > span { color: #fff; border-color: #239a6b; background: #239a6b; }
+.portal-registration-steps li.current { border-color: #f0c1a6; background: #fff6f0; }
+.portal-registration-steps li.current > span { color: #fff; border-color: var(--orange); background: var(--orange); }
+.portal-registration-steps strong,
+.portal-registration-steps small { display: block; }
+.portal-registration-steps strong { color: #263e52; font-size: 11px; }
+.portal-registration-steps small { margin-top: 2px; color: #728495; font-size: 9px; }
+.portal-register-login { width: auto !important; display: inline-flex; text-decoration: none; }
+
+.portal-registration-review {
+  margin-bottom: 9px;
+  padding: 0 !important;
+  overflow: hidden;
+  border-radius: 3px !important;
+  box-shadow: none !important;
+}
+.portal-registration-review > .panel-header { min-height: 50px; margin: 0; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.portal-registration-review > .panel-header h2 { font-size: 14px; }
+.portal-registration-review > .panel-header p { margin-top: 2px; }
+.portal-registration-review table { min-width: 1080px; }
+.portal-registration-review th,
+.portal-registration-review td { padding: 7px 9px !important; vertical-align: top; }
+.portal-registration-review td > strong,
+.portal-registration-review td > small { display: block; }
+.portal-registration-review td > small { margin-top: 3px; color: var(--muted); font-size: 9px; }
+.portal-registration-actions { min-width: 390px; display: grid; gap: 5px; }
+.portal-registration-approve-form,
+.portal-registration-reject-form {
+  display: grid;
+  grid-template-columns: minmax(210px, 1fr) auto;
+  align-items: end;
+  gap: 6px;
+}
+.portal-registration-actions label { min-width: 0; display: grid; gap: 3px; }
+.portal-registration-actions label > span { color: #758797; font-size: 9px; font-weight: 700; }
+.portal-registration-actions :is(select,input) { width: 100%; min-height: 32px; }
+.portal-registration-actions button { min-height: 32px; white-space: nowrap; }
+
+@media (max-width: 760px) {
+  .portal-register-page { padding: 12px; }
+  .portal-register-card { padding: 20px 16px; }
+  .portal-register-heading { display: grid; gap: 8px; }
+  .portal-register-heading .site-switch { margin: 0; }
+  .portal-register-grid { grid-template-columns: 1fr; }
+  .portal-register-grid .field-wide { grid-column: auto; }
+  .portal-register-actions { align-items: stretch; flex-direction: column; }
+  .portal-register-actions .primary { width: 100%; }
+  .portal-registration-steps { grid-template-columns: 1fr; }
+  .portal-registration-steps li { border: 1px solid #e1e8ee; border-radius: 0 !important; }
+}
