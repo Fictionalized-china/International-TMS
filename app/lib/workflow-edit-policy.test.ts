@@ -5,6 +5,7 @@ import {
   normalizeWorkflowStepRequiredFlag,
   normalizedWorkflowSortOrders,
   parseWorkflowSortOrder,
+  partitionWorkflowDefinitionsByRoadType,
   workflowEditCapabilities,
   workflowInsertionSortOrder,
   workflowIntentAllowedForUsage,
@@ -12,6 +13,19 @@ import {
 } from "./workflow-edit-policy";
 
 describe("workflow edit policy", () => {
+  it("keeps full-truck and less-than-truckload workflows in separate groups", () => {
+    const workflows = [
+      { id: "ftl-a", road_load_type: "ftl" },
+      { id: "ltl-a", road_load_type: "ltl" },
+      { id: "legacy", road_load_type: "unknown" },
+      { id: "ftl-b", road_load_type: "ftl" },
+    ];
+    const grouped = partitionWorkflowDefinitionsByRoadType(workflows);
+    expect(grouped.ftl.map((item) => item.id)).toEqual(["ftl-a", "ftl-b"]);
+    expect(grouped.ltl.map((item) => item.id)).toEqual(["ltl-a"]);
+    expect(grouped.unclassified.map((item) => item.id)).toEqual(["legacy"]);
+  });
+
   it("allows block structure changes only before the workflow is used", () => {
     expect(workflowEditCapabilities(0)).toEqual({
       usedByOrders: false,

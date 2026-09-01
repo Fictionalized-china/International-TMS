@@ -1,5 +1,13 @@
 export type EditableWorkflowFieldMode = "required" | "optional" | "hidden";
 
+export function partitionWorkflowDefinitionsByRoadType<T extends { road_load_type: string }>(definitions: T[]) {
+  return {
+    ftl: definitions.filter((item) => item.road_load_type === "ftl"),
+    ltl: definitions.filter((item) => item.road_load_type === "ltl"),
+    unclassified: definitions.filter((item) => item.road_load_type !== "ftl" && item.road_load_type !== "ltl"),
+  } as const;
+}
+
 const structureMutationIntents = new Set([
   "definition",
   "create",

@@ -37,6 +37,7 @@ import {
   normalizedWorkflowSortOrders,
   parseWorkflowSortOrder,
   normalizeWorkflowStepRequiredFlag,
+  partitionWorkflowDefinitionsByRoadType,
   workflowEditCapabilities,
   workflowInsertionSortOrder,
   workflowIntentAllowedForUsage,
@@ -69,6 +70,20 @@ type Step = {
   is_required: number;
   is_active: number;
   actor_scope: string;
+};
+type DefinitionStepSummary = {
+  workflow_id: string;
+  id: string;
+  name: string;
+  sort_order: number;
+  actor_scope: string;
+  is_active: number;
+  module_names: string;
+  module_count: number;
+  field_count: number;
+  required_field_count: number;
+  optional_field_count: number;
+  hidden_field_count: number;
 };
 type StepField = {
   id: string;
@@ -127,6 +142,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const defaultWorkflowId = await ensureDefaultWorkflow(current.organizationId);
   const url = new URL(request.url);
   const requestedWorkflowId = url.searchParams.get("workflowId");
+  const openEditor = url.searchParams.get("edit") === "1";
 
   const definitions = await env.DB.prepare(
     `SELECT wd.id,wd.code,wd.name,wd.status,wd.updated_at,
@@ -150,7 +166,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     definitions.results[0];
   const workflowId = selected.id;
 
-  const [steps, fields, stepModules, moduleTasks, positions, instances] = await Promise.all([
+  const [steps, fields, stepModules, moduleTasks, positions, instances, definitionSteps] = await Promise.all([
     env.DB.prepare(
       "SELECT id, step_key, name, entity_type, trigger_event, sort_order, is_required, is_active, actor_scope FROM workflow_steps WHERE workflow_id = ? ORDER BY sort_order, step_key",
     )
@@ -187,6 +203,22 @@ export async function loader({ request }: Route.LoaderArgs) {
     )
       .bind(current.organizationId, workflowId)
       .all<Instance>(),
+    env.DB.prepare(
+      `SELECT ws.workflow_id,ws.id,ws.name,ws.sort_order,ws.actor_scope,ws.is_active,
+        COALESCE(GROUP_CONCAT(DISTINCT CASE WHEN wsm.is_active=1 THEN wsm.display_name END),'') module_names,
+        COUNT(DISTINCT CASE WHEN wsm.is_active=1 THEN wsm.id END) module_count,
+        COUNT(DISTINCT wsf.id) field_count,
+        COUNT(DISTINCT CASE WHEN wsf.is_active=1 AND wsf.is_required=1 THEN wsf.id END) required_field_count,
+        COUNT(DISTINCT CASE WHEN wsf.is_active=1 AND wsf.is_required=0 THEN wsf.id END) optional_field_count,
+        COUNT(DISTINCT CASE WHEN wsf.is_active=0 THEN wsf.id END) hidden_field_count
+       FROM workflow_steps ws
+       JOIN workflow_definitions wd ON wd.id=ws.workflow_id
+       LEFT JOIN workflow_step_modules wsm ON wsm.workflow_id=ws.workflow_id AND wsm.step_id=ws.id
+       LEFT JOIN workflow_step_fields wsf ON wsf.workflow_id=ws.workflow_id AND wsf.step_id=ws.id
+       WHERE wd.organization_id=?
+       GROUP BY ws.id
+       ORDER BY ws.workflow_id,ws.sort_order,ws.id`,
+    ).bind(current.organizationId).all<DefinitionStepSummary>(),
   ]);
   const impactRows = await Promise.all(
     steps.results.map(async (step) => [
@@ -196,7 +228,9 @@ export async function loader({ request }: Route.LoaderArgs) {
   );
   return {
     current,
+    openEditor,
     definitions: definitions.results,
+    definitionSteps: definitionSteps.results,
     definition: selected,
     steps: steps.results,
     fields: fields.results,
@@ -262,7 +296,7 @@ export async function action({ request }: Route.ActionArgs) {
       actorUserId: current.userId,
       metadata: { name, sourceWorkflowId: sourceWorkflowId || null },
     });
-    throw redirect(`/admin/workflow?workflowId=${encodeURIComponent(id)}`);
+    throw redirect(`/admin/workflow?workflowId=${encodeURIComponent(id)}&edit=1#workflow-editor`);
   }
 
   const definition = await env.DB.prepare(
@@ -302,7 +336,7 @@ export async function action({ request }: Route.ActionArgs) {
       version,definition.id,definition.road_load_type,now,now,
     ).run();
     await copyWorkflowStepsAndFields(definition.id, id, now);
-    throw redirect(`/admin/workflow?workflowId=${encodeURIComponent(id)}`);
+    throw redirect(`/admin/workflow?workflowId=${encodeURIComponent(id)}&edit=1#workflow-editor`);
   }
 
   if (intent === "validate" || intent === "publish") {
@@ -1318,6 +1352,8 @@ const scopeLabels: Record<string, string> = {
   system: "系统",
 };
 function workflowTypeLabel(code: string) {
+  if (code === "ltl") return "拼车型";
+  if (code === "ftl") return "整车型";
   if (code === "tms-default") return "拼车型标准流程";
   if (code === "tms-ftl-standard") return "整车型标准流程";
   return code;
@@ -1391,6 +1427,13 @@ export default function Workflow({ loaderData, actionData }: Route.ComponentProp
     list.push(item);
     tasksByModule.set(item.step_module_id,list);
   }
+  const definitionStepsByWorkflow = new Map<string, DefinitionStepSummary[]>();
+  for (const step of loaderData.definitionSteps) {
+    const list = definitionStepsByWorkflow.get(step.workflow_id) ?? [];
+    list.push(step);
+    definitionStepsByWorkflow.set(step.workflow_id, list);
+  }
+  const workflowGroups = partitionWorkflowDefinitionsByRoadType(loaderData.definitions);
 
   return (
     <>
@@ -1443,50 +1486,29 @@ export default function Workflow({ loaderData, actionData }: Route.ComponentProp
         </div>
       )}
 
-      <section className="panel workflow-template-panel">
-        <div className="panel-header">
-          <div>
-            <h2>工作流模板</h2>
-            <p>选择一个模板后，在下方配置节点和字段。新订单后续可按模板生成订单流程。</p>
-          </div>
-        </div>
-        <div className="table-wrap workflow-template-list">
-          <table>
-            <thead>
-              <tr>
-                <th>工作流模板</th>
-                <th>订单类型</th>
-                <th>版本</th>
-                <th>状态</th>
-                <th>节点</th>
-                <th>订单</th>
-                <th>最后更新</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {loaderData.definitions.map((item) => (
-                <tr key={item.id} className={item.id === loaderData.definition.id ? "active" : ""}>
-                  <td><strong>{item.name}</strong></td>
-                  <td>{item.road_load_type === "ftl" ? "整车型" : "拼车型"}</td>
-                  <td>v{item.version_number}</td>
-                  <td><span className={`status-pill ${item.lifecycle_status === "retired" ? "off" : ""}`}>{lifecycleLabel(item.lifecycle_status)}</span></td>
-                  <td>{item.step_count}</td>
-                  <td>{item.instance_count}</td>
-                  <td>{new Date(item.updated_at).toLocaleDateString("zh-CN")}</td>
-                  <td>
-                    <Link className="text-button" to={`/admin/workflow?workflowId=${encodeURIComponent(item.id)}`}>
-                      {item.id === loaderData.definition.id ? "当前查看" : "查看配置"}
-                    </Link>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+      <section className="workflow-type-groups" aria-label="按订单类型分类的工作流">
+        <WorkflowTypeGroup
+          type="ftl"
+          definitions={workflowGroups.ftl}
+          definitionStepsByWorkflow={definitionStepsByWorkflow}
+          selectedId={loaderData.definition.id}
+          manage={manage}
+          busy={busy}
+        />
+        <WorkflowTypeGroup
+          type="ltl"
+          definitions={workflowGroups.ltl}
+          definitionStepsByWorkflow={definitionStepsByWorkflow}
+          selectedId={loaderData.definition.id}
+          manage={manage}
+          busy={busy}
+        />
       </section>
+      {workflowGroups.unclassified.length > 0 && (
+        <div className="alert error">发现 {workflowGroups.unclassified.length} 个未标记整车/拼车类型的历史工作流，已从候选列表隔离，请先修复类型后再使用。</div>
+      )}
 
-      <section className="panel">
+      <section className="panel" id="workflow-editor">
         <div className="panel-header">
           <div>
             <h2>{loaderData.definition.name}</h2>
@@ -1515,6 +1537,7 @@ export default function Workflow({ loaderData, actionData }: Route.ComponentProp
                 triggerClassName="secondary"
                 size="xwide"
                 closeSignal={successMessage}
+                openSignal={loaderData.openEditor ? `${loaderData.definition.id}-edit` : undefined}
               >
                 <NodeConfigDialog
                   workflowId={loaderData.definition.id}
@@ -1633,6 +1656,152 @@ export default function Workflow({ loaderData, actionData }: Route.ComponentProp
   );
 }
 
+function WorkflowTypeGroup({
+  type,
+  definitions,
+  definitionStepsByWorkflow,
+  selectedId,
+  manage,
+  busy,
+}: {
+  type: "ftl" | "ltl";
+  definitions: Definition[];
+  definitionStepsByWorkflow: Map<string, DefinitionStepSummary[]>;
+  selectedId: string;
+  manage: boolean;
+  busy: boolean;
+}) {
+  const label = type === "ftl" ? "整车工作流" : "拼车工作流";
+  return (
+    <section className={`panel workflow-type-group workflow-type-${type}`}>
+      <div className="panel-header workflow-type-group-header">
+        <div>
+          <div className="workflow-type-title"><span className="workflow-type-code">{type.toUpperCase()}</span><h2>{label}</h2></div>
+          <p>{type === "ftl" ? "仅用于整车报价与订单，不会出现在拼车工作流候选项中。" : "仅用于拼车报价与订单，不会与整车工作流混用。"}</p>
+        </div>
+        <span className="status-pill">{definitions.length} 个版本</span>
+      </div>
+      <div className="workflow-definition-cards">
+        {definitions.map((definition) => (
+          <WorkflowDefinitionCard
+            key={definition.id}
+            definition={definition}
+            steps={definitionStepsByWorkflow.get(definition.id) ?? []}
+            selected={definition.id === selectedId}
+            manage={manage}
+            busy={busy}
+          />
+        ))}
+        {!definitions.length && <div className="empty-state">尚未创建{label}。</div>}
+      </div>
+    </section>
+  );
+}
+
+function WorkflowDefinitionCard({
+  definition,
+  steps,
+  selected,
+  manage,
+  busy,
+}: {
+  definition: Definition;
+  steps: DefinitionStepSummary[];
+  selected: boolean;
+  manage: boolean;
+  busy: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [showClone, setShowClone] = useState(false);
+  const capabilities = workflowEditCapabilities(definition.instance_count);
+  const activeSteps = steps.filter((step) => step.is_active);
+  const hiddenFieldCount = steps.reduce((total, step) => total + step.hidden_field_count, 0);
+  const cloneName = `${definition.name.slice(0, 52)}（副本）`;
+  return (
+    <>
+      <button
+        type="button"
+        className={`workflow-definition-card ${selected ? "active" : ""}`}
+        onClick={() => setOpen(true)}
+        aria-haspopup="dialog"
+      >
+        <span className="workflow-definition-card-main">
+          <span className="workflow-definition-card-title"><strong>{definition.name}</strong><span className={`status-pill ${definition.lifecycle_status === "retired" ? "off" : ""}`}>{lifecycleLabel(definition.lifecycle_status)}</span></span>
+          <small>{activeSteps.slice(0, 4).map((step) => step.name).join(" → ")}{activeSteps.length > 4 ? ` → 等 ${activeSteps.length} 个节点` : ""}</small>
+        </span>
+        <span className="workflow-definition-card-metrics">
+          <span><b>v{definition.version_number}</b><small>版本</small></span>
+          <span><b>{definition.step_count}</b><small>节点</small></span>
+          <span><b>{definition.instance_count}</b><small>订单</small></span>
+        </span>
+        <span className="workflow-definition-card-open">查看配置 →</span>
+      </button>
+      <Modal
+        title={`工作流配置 · ${definition.name}`}
+        isOpen={open}
+        onOpenChange={(nextOpen) => {
+          setOpen(nextOpen);
+          if (!nextOpen) setShowClone(false);
+        }}
+        size="wide"
+        dialogClassName="workflow-inspect-modal"
+        initialFocusSelector=".workflow-inspect-primary"
+      >
+        {({ close }) => (
+          <div className="workflow-inspect-content">
+            <div className="workflow-inspect-summary">
+              <div><span>订单类型</span><strong>{workflowTypeLabel(definition.road_load_type)}</strong></div>
+              <div><span>版本状态</span><strong>v{definition.version_number} · {lifecycleLabel(definition.lifecycle_status)}</strong></div>
+              <div><span>流程节点</span><strong>{activeSteps.length} 个</strong></div>
+              <div><span>使用订单</span><strong>{definition.instance_count} 张</strong></div>
+              <div><span>隐藏字段</span><strong>{hiddenFieldCount} 个</strong></div>
+              <div><span>最后更新</span><strong>{new Date(definition.updated_at).toLocaleString("zh-CN", { hour12: false })}</strong></div>
+            </div>
+            <div className={`alert ${capabilities.usedByOrders ? "warning" : "success"}`}>
+              {capabilities.usedByOrders
+                ? "该版本已被订单使用：可以新增字段并调整必填、选填或隐藏；历史节点不回退。若需增删节点，请基于此版本创建新的工作流。"
+                : "该版本尚未被订单使用：点击编辑后可新增、删除节点，配置功能模组，并调整字段必填、选填或隐藏。"}
+            </div>
+            <div className="table-wrap workflow-inspect-node-table">
+              <table>
+                <thead><tr><th>顺序</th><th>节点</th><th>执行角色</th><th>功能模组</th><th>字段规则</th><th>状态</th></tr></thead>
+                <tbody>
+                  {steps.map((step, index) => (
+                    <tr key={step.id}>
+                      <td>{String(index + 1).padStart(2, "0")}</td>
+                      <td><strong>{step.name}</strong></td>
+                      <td>{scopeLabels[step.actor_scope] ?? step.actor_scope}</td>
+                      <td>{step.module_names || "未配置"}</td>
+                      <td>{step.required_field_count} 必填 · {step.optional_field_count} 选填{step.hidden_field_count ? ` · ${step.hidden_field_count} 隐藏` : ""}</td>
+                      <td><span className={`status-pill ${step.is_active ? "success" : "off"}`}>{step.is_active ? "启用" : "停用"}</span></td>
+                    </tr>
+                  ))}
+                  {!steps.length && <tr><td colSpan={6} className="empty-state">该工作流尚未配置节点。</td></tr>}
+                </tbody>
+              </table>
+            </div>
+            {showClone && manage && (
+              <Form method="post" className="workflow-clone-form" onSubmit={() => close()}>
+                <input type="hidden" name="intent" value="workflow_create" />
+                <input type="hidden" name="sourceWorkflowId" value={definition.id} />
+                <input type="hidden" name="roadLoadType" value={definition.road_load_type} />
+                <div><strong>基于当前配置创建独立工作流</strong><small>复制节点、模组、办理步骤与字段，但不复制历史订单；订单类型固定为{workflowTypeLabel(definition.road_load_type)}。</small></div>
+                <label className="field"><span>新工作流名称</span><input name="name" defaultValue={cloneName} minLength={2} maxLength={60} required data-autofocus /></label>
+                <button className="primary" disabled={busy}>创建并进入编辑</button>
+              </Form>
+            )}
+            <div className="workflow-inspect-actions">
+              {manage && <Link className="primary workflow-inspect-primary" to={`/admin/workflow?workflowId=${encodeURIComponent(definition.id)}&edit=1#workflow-editor`} onClick={close}>编辑</Link>}
+              {manage && <button type="button" className="secondary" onClick={() => setShowClone((current) => !current)}>{showClone ? "收起新建表单" : "以此工作流为基础创建新工作流"}</button>}
+              <button type="button" className="secondary" onClick={close}>取消</button>
+            </div>
+          </div>
+        )}
+      </Modal>
+    </>
+  );
+}
+
 function DefinitionForm({ definition, busy }: { definition: Definition; busy: boolean }) {
   return (
     <Form method="post" className="workflow-definition-form">
@@ -1690,7 +1859,14 @@ function NodeConfigDialog({
           <strong>节点与字段</strong>
           <span>{structureEditable ? "该工作流尚无订单，可像积木一样插入、删除节点并配置字段。" : "该工作流已有订单：节点、模组和步骤锁定，仍可在既有节点新增字段并设置为必填、选填或隐藏。"}</span>
         </div>
-        <small>{structureEditable ? "首个订单使用后自动锁定节点结构。" : "保存即同步到现有订单和后续门禁；隐藏只影响显示，历史值和附件永久保留审计。"}</small>
+        <div className="workflow-config-dialog-tools">
+          <small>{structureEditable ? "首个订单使用后自动锁定节点结构。" : "保存即同步到现有订单和后续门禁；隐藏只影响显示，历史值和附件永久保留审计。"}</small>
+          {structureEditable && (
+            <Modal title="新增流程节点" triggerLabel="新增节点" triggerClassName="secondary" closeSignal={closeSignal}>
+              <NodeCreateForm workflowId={workflowId} activeSteps={steps.filter((step) => step.is_active)} busy={busy} />
+            </Modal>
+          )}
+        </div>
       </div>
       <div className="workflow-node-config-list">
         <div className="workflow-node-config-table-head" aria-hidden="true">
