@@ -641,14 +641,25 @@ async function resolveFieldPresence(
   if (moduleCode === "assignment") {
     const assignment = await env.DB.prepare(
       `SELECT o.status,o.current_assignee_user_id,
+              MAX(CASE WHEN m.module_code='assignment' THEN m.assignee_user_id END) assignment_assignee_user_id,
               COUNT(CASE WHEN m.enabled=1 AND m.is_required=1 AND m.assignee_user_id IS NOT NULL THEN 1 END) assigned,
               COUNT(CASE WHEN m.enabled=1 AND m.is_required=1 THEN 1 END) required_total
        FROM transport_orders o
        LEFT JOIN order_module_instances m ON m.order_id=o.id AND m.organization_id=o.organization_id
        WHERE o.id=? AND o.organization_id=? GROUP BY o.id`,
-    ).bind(orderId, organizationId).first<{ status: string; current_assignee_user_id: string | null; assigned: number; required_total: number }>();
+    ).bind(orderId, organizationId).first<{
+      status: string;
+      current_assignee_user_id: string | null;
+      assignment_assignee_user_id: string | null;
+      assigned: number;
+      required_total: number;
+    }>();
     setPresence(result, "approval_result", assignment && !["draft", "submitted"].includes(assignment.status) ? "approved" : null);
-    setPresence(result, "primary_operator", assignment?.current_assignee_user_id);
+    setPresence(
+      result,
+      "primary_operator",
+      assignment?.assignment_assignee_user_id ?? assignment?.current_assignee_user_id,
+    );
     setPresence(result, "module_assignees", assignment && assignment.required_total > 0 && assignment.assigned >= assignment.required_total ? assignment.assigned : null);
     setPresence(result, "assignment_scope", assignment && assignment.required_total > 0 && assignment.assigned >= assignment.required_total ? assignment.assigned : null);
     const assignmentTask = await env.DB.prepare(

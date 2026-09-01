@@ -57,6 +57,7 @@ export async function validateOrderWorkflowAction(input: {
   actorUserId: string;
   assigneeUserId?: string | null;
   bypassAssigneeRestriction?: boolean;
+  allowPendingAssignment?: boolean;
 }) {
   const order = await env.DB.prepare(
     `SELECT o.id,o.order_number,o.status,o.current_step_code,o.current_assignee_user_id,o.shipper_name,o.shipper_contact,o.shipper_phone,o.consignee_name,
@@ -141,7 +142,10 @@ export async function validateOrderWorkflowAction(input: {
     )
       .bind(input.organizationId, input.orderId)
       .first<{ assignee_user_id: string | null; status: string | null }>();
-    if (!assignment || assignment.status !== "completed") {
+    if (
+      !assignment ||
+      (!input.allowPendingAssignment && assignment.status !== "completed")
+    ) {
       return {
         ok: false as const,
         reason: "请先完成任务分配并确认派单后再推进订单。",
@@ -219,6 +223,8 @@ export async function executeOrderWorkflowAction(input: {
   assigneeUserId?: string | null;
   notes?: string | null;
   bypassAssigneeRestriction?: boolean;
+  allowPendingAssignment?: boolean;
+  atomicStatements?: D1PreparedStatement[];
 }) {
   const checked = await validateOrderWorkflowAction(input);
   if (!checked.ok) throw new Error(checked.reason);
@@ -227,6 +233,7 @@ export async function executeOrderWorkflowAction(input: {
     historyId = crypto.randomUUID(),
     assignee = input.assigneeUserId || null;
   await env.DB.batch([
+    ...(input.atomicStatements ?? []),
     env.DB.prepare(
       `UPDATE transport_orders SET status=?,current_step_code=?,current_step_name=?,current_assignee_user_id=?,workflow_updated_at=?,is_overdue=0,confirmed_at=CASE WHEN ?='confirmed' THEN COALESCE(confirmed_at,?) ELSE confirmed_at END,updated_at=? WHERE id=? AND organization_id=? AND status=?`,
     ).bind(

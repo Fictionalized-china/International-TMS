@@ -1697,14 +1697,31 @@ export async function action({ request, params }: Route.ActionArgs) {
         });
       }
       const now = new Date().toISOString();
-      await env.DB.batch([
-        env.DB.prepare(
-          "UPDATE order_module_instances SET status='completed',current_step_code='assigned',current_step_name='分配完成',progress_percent=100,assignee_user_id=?,started_at=COALESCE(started_at,?),completed_at=COALESCE(completed_at,?),blocking_reason=NULL,updated_at=? WHERE organization_id=? AND order_id=? AND module_code='assignment' AND enabled=1",
-        ).bind(mainAssigneeUserId, now, now, now, current.organizationId, orderId),
-        env.DB.prepare(
-          "UPDATE order_tasks SET status='completed',completed_at=?,updated_at=? WHERE organization_id=? AND order_id=? AND module_code='assignment' AND status IN ('pending','in_progress')",
-        ).bind(now, now, current.organizationId, orderId),
-      ]);
+      await env.DB.prepare(
+        "UPDATE order_module_instances SET assignee_user_id=?,blocking_reason=NULL,updated_at=? WHERE organization_id=? AND order_id=? AND module_code='assignment' AND enabled=1",
+      )
+        .bind(mainAssigneeUserId, now, current.organizationId, orderId)
+        .run();
+      const workflowResult = await runOrderWorkflowAction({
+        request,
+        organizationId: current.organizationId,
+        actorUserId: current.userId,
+        orderId,
+        actionCode: "dispatch",
+        assigneeUserId: mainAssigneeUserId,
+        notes: valueOf(form, "notes"),
+        bypassAssigneeRestriction: canEditWorkflowDefinitionInUi(current),
+        allowPendingAssignment: true,
+        atomicStatements: [
+          env.DB.prepare(
+            "UPDATE order_module_instances SET status='completed',current_step_code='assigned',current_step_name='分配完成',progress_percent=100,assignee_user_id=?,started_at=COALESCE(started_at,?),completed_at=COALESCE(completed_at,?),blocking_reason=NULL,updated_at=? WHERE organization_id=? AND order_id=? AND module_code='assignment' AND enabled=1",
+          ).bind(mainAssigneeUserId, now, now, now, current.organizationId, orderId),
+          env.DB.prepare(
+            "UPDATE order_tasks SET status='completed',completed_at=?,updated_at=? WHERE organization_id=? AND order_id=? AND module_code='assignment' AND status IN ('pending','in_progress')",
+          ).bind(now, now, current.organizationId, orderId),
+        ],
+      });
+      if ("formError" in workflowResult) return workflowResult;
       await writeAudit({
         request,
         action: "order.module.assignment.manifest_confirm",
@@ -1720,18 +1737,7 @@ export async function action({ request, params }: Route.ActionArgs) {
           })),
         },
       });
-      const workflowResult = await runOrderWorkflowAction({
-        request,
-        organizationId: current.organizationId,
-        actorUserId: current.userId,
-        orderId,
-        actionCode: "dispatch",
-        assigneeUserId: mainAssigneeUserId,
-        notes: valueOf(form, "notes"),
-        bypassAssigneeRestriction: canEditWorkflowDefinitionInUi(current),
-      });
-      if (!("formError" in workflowResult)) return redirect(`/admin/orders/${orderId}`);
-      return workflowResult;
+      return redirect(`/admin/orders/${orderId}`);
     }
     if (intent === "confirm_dispatch" && moduleCode === "assignment") {
       if (order.status !== "confirmed")
@@ -5872,7 +5878,7 @@ function ModuleBusinessData({
       modules={assignableModules}
       members={data.members}
       mainAssigneeUserId={assignmentModule?.assignee_user_id || data.order.current_assignee_user_id || ""}
-      canSubmit={data.order.status === "confirmed" && assignmentModule?.status !== "completed"}
+      canSubmit={data.order.status === "confirmed"}
       busy={busy}
     />;
   }
