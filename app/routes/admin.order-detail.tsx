@@ -39,6 +39,7 @@ import {
   orderNextGuidance,
 } from "../lib/order-guidance";
 import { orderResponsiblePosition } from "../lib/order-responsibility";
+import { orderModuleTabAttention } from "../lib/order-module-tab-attention";
 import { canManageOrderModule } from "../lib/position-portal";
 import { completionStatusLabels, type OrderCompletionStatus } from "../lib/order-review";
 import {
@@ -1149,7 +1150,17 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, 
         {orderCreationTabs.map((tab) => <Link key={tab.key} className={selectedSection === tab.key ? "active" : ""} to={`?stage=${encodeURIComponent(selectedStep.step_key)}&module=${tab.module}${tab.section ? `&section=${tab.section}` : ""}`}>{tab.label}{tabHasRequiredMissing(tab.key) && <b className="tab-required-star" title="存在必填但未填内容" aria-label="存在必填但未填内容">*</b>}</Link>)}
       </nav>
     ) : rows.length > 1 ? (
-      <nav className="linear-module-tabs" aria-label="本节点业务分区">{rows.map((row) => <Link key={row.module_state_id || row.module_code} className={row.module_code === selectedModuleCode ? "active" : ""} to={`?stage=${encodeURIComponent(selectedStep.step_key)}&module=${encodeURIComponent(row.module_code || "")}`}>{row.module_name || row.module_code}{moduleHasRequiredMissing(row.module_code) && <b className="tab-required-star" title="存在必填但未填内容" aria-label="存在必填但未填内容">*</b>}</Link>)}</nav>
+      <nav className="linear-module-tabs" aria-label="本节点业务分区">{rows.map((row) => {
+        const attention = orderModuleTabAttention(
+          row.module_code,
+          moduleHasRequiredMissing(row.module_code),
+        );
+        return <Link key={row.module_state_id || row.module_code} className={row.module_code === selectedModuleCode ? "active" : ""} to={`?stage=${encodeURIComponent(selectedStep.step_key)}&module=${encodeURIComponent(row.module_code || "")}`}>
+          {row.module_name || row.module_code}
+          {attention === "action" && <span className="tab-action-badge" title="存在待办理的报关作业" aria-label="存在待办理的报关作业"><i aria-hidden="true">!</i>待办理</span>}
+          {attention === "required" && <b className="tab-required-star" title="存在必填但未填内容" aria-label="存在必填但未填内容">*</b>}
+        </Link>;
+      })}</nav>
     ) : null}
     {data.embeddedModuleRedirect ? <section className="section"><div className="section-title"><b>{selectedRow.module_name || "关联业务单"}</b><span>该节点按配载单统一推进</span></div><div className="linear-external-work"><p>拼车订单在仓库生成 PZ 配载单后，由配载单统一记录出境运输并同步全部子订单。</p><Link className="btn primary" to={data.embeddedModuleRedirect}>打开配载单跟踪</Link></div></section> : data.embeddedModuleData ? <EmbeddedOrderModule data={data.embeddedModuleData} busy={busy} actionUrl={actionUrl} workflowStepKey={selectedStep.step_key} consignmentSection={data.selectedConsignmentSection} hideConsignmentActionBar={isOrderCreation} approvalMode={selectedStep.step_key === "consignment_approval"} reviewCloseSignal={documentReviewSignal}/> : <section className="section"><div className="section-title"><b>{selectedRow.module_name || selectedRow.module_code || "业务数据"}</b><span>{viewingCurrent ? "当前节点" : "历史节点"}</span></div><div className="grid">{selectedFields.map((field) => {
       const fieldState = field.present ? "filled" : field.isRequired ? "required-missing" : "optional-empty";

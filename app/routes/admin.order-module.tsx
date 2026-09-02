@@ -4223,109 +4223,6 @@ function ModuleNextGuidance({
   );
 }
 
-function trackingGateTarget(orderId: string, reason: string) {
-  if (reason.includes("报关") || reason.includes("清关") || reason.includes("海关") || reason.includes("放行") || reason.includes("转关")) {
-    return {
-      key: "customs",
-      title: "去报关作业处理",
-      href: `/admin/orders/${orderId}/modules/customs#module-business-data`,
-      hint: "在报关作业里补齐申报资料，并把起运地报关推进到海关放行。",
-    };
-  }
-  if (reason.includes("文件") || reason.includes("单证") || reason.includes("资料")) {
-    return {
-      key: "documents",
-      title: "去文件中心处理",
-      href: `/admin/orders/${orderId}/modules/documents#module-business-data`,
-      hint: "上传发运前必须文件，并完成审核或归档。",
-    };
-  }
-  if (
-    reason.includes("国内运输安排") ||
-    reason.includes("整车订单尚未完成车辆运输安排")
-  ) {
-    return {
-      key: "transport",
-      title: "去国内运输处理",
-      href: `/admin/orders/${orderId}/modules/transport#module-business-data`,
-      hint: "补齐当前订单工作流要求的国内承运方、车辆、司机或计划时间。",
-    };
-  }
-  if (reason.includes("仓库") || reason.includes("装车") || reason.includes("出库") || reason.includes("交接")) {
-    return {
-      key: "warehouse",
-      title: "去仓库作业处理",
-      href: `/admin/orders/${orderId}/modules/warehouse#module-business-data`,
-      hint: "完成按批次拣货装车、出库交接，仓库模块完成后再回到运踪。",
-    };
-  }
-  if (reason.includes("配载") || reason.includes("装载") || reason.includes("包装") || reason.includes("车辆")) {
-    return {
-      key: "loading",
-      title: "去配载单处理",
-      href: `/admin/orders/${orderId}/modules/loading#module-business-data`,
-      hint: "生成或打开配载批次，补齐车辆、包装装载指令和整票装载确认。",
-    };
-  }
-  if (reason.includes("运输安排") || reason.includes("车牌") || reason.includes("司机")) {
-    return {
-      key: "transport",
-      title: "去国内运输处理",
-      href: `/admin/orders/${orderId}/modules/transport#module-business-data`,
-      hint: "补齐承运方、车牌、司机、电话、计划发车和到达时间。",
-    };
-  }
-  if (reason.includes("出境口岸") || reason.includes("目的仓")) {
-    return {
-      key: "order",
-      title: "去订单资料补充",
-      href: `/admin/orders/${orderId}/operations`,
-      hint: "补齐订单的出境口岸、境外目的仓和线路资料。",
-    };
-  }
-  return {
-    key: "order-center",
-    title: "返回订单中心查看",
-    href: `/admin/orders/${orderId}`,
-    hint: "查看当前订单工作流、模块状态和全部门禁提示。",
-  };
-}
-
-function TrackingDepartureGate({
-  orderId,
-  reasons,
-}: {
-  orderId: string;
-  reasons: string[];
-}) {
-  return (
-    <section className="tracking-gate-table" aria-label="出境前置条件">
-      <div className="table-section-heading danger">
-        <div>
-          <strong>出境前置条件未完成</strong>
-          <span>处理完表内阻断后才能登记出境后的运输节点。</span>
-        </div>
-      </div>
-      <div className="table-wrap module-record-table">
-        <table>
-          <thead><tr><th>门禁状态</th><th>阻断条件</th><th>处理说明</th><th>操作</th></tr></thead>
-          <tbody>
-            {reasons.map((reason) => {
-              const target = trackingGateTarget(orderId, reason);
-              return <tr key={reason}>
-                <td><span className="status-pill danger">未通过</span></td>
-                <td><strong>{reason}</strong></td>
-                <td>{target.hint}</td>
-                <td><Link className="primary" to={target.href}>{target.title}</Link></td>
-              </tr>;
-            })}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  );
-}
-
 function WorkflowFieldChecklist({
   fields,
   manage,
@@ -5645,12 +5542,6 @@ function ModuleBusinessData({
             </table>
           </div>
         </BusinessSubsection>
-        {data.trackingDepartureGate && !data.trackingDepartureGate.ready && (
-          <TrackingDepartureGate
-            orderId={data.order.id}
-            reasons={data.trackingDepartureGate.reasons}
-          />
-        )}
         {manage && (!data.trackingDepartureGate || data.trackingDepartureGate.ready) && (
           <BusinessSubsection className="tracking-node-entry-section" title="登记运输节点" hint="按实际发生登记节点；换装、转关未发生可跳过，目的仓入库由仓库扫码自动完成。">
             <Form method="post" className="form-grid compact tracking-node-entry-form">
