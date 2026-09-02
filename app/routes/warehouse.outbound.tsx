@@ -35,6 +35,7 @@ import {
   normalizeWarehouseOutboundListFilters,
   validateFtlOutboundResourceSelection,
 } from "../lib/warehouse-outbound-list";
+import { warehouseOutboundRemediations } from "../lib/warehouse-outbound-remediation";
 import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 
 const LOADING_DOCUMENTS=loadingOrderDocumentDefinitions;
@@ -575,6 +576,13 @@ function BlockedLoadingDocumentRemediation({inspection,reasons,pendingHref,canOp
   const missingRequired=unresolvedRequired.filter(document=>!document.attachmentId);
   const [open,setOpen]=useState(unresolvedRequired.length>0);
   const taskLabel=inspection?.batch.business_type==="ltl"?inspection.batch.batch_number:inspection?.batch.order_number;
+  const retryHref=inspection?createLoadUnitHref(pendingHref,inspection.batch.id):pendingHref;
+  const remediationTargets=inspection?warehouseOutboundRemediations({
+    orderId:inspection.batch.order_id,
+    transportBatchId:inspection.batch.transport_batch_id,
+    reasons,
+    retryHref,
+  }):[];
   useEffect(()=>{
     if(actionError||(actionSuccess&&inspection&&!inspection.allApproved))setOpen(true);
   },[actionError,actionSuccess,inspection?.allApproved]);
@@ -583,6 +591,16 @@ function BlockedLoadingDocumentRemediation({inspection,reasons,pendingHref,canOp
     {(actionSuccess||actionError)&&<div className={`alert ${actionError?"error":"success"}`} role={actionError?"alert":"status"} aria-live="polite">{actionError??actionSuccess}</div>}
     {unresolvedRequired.length>0&&<div className="outbound-blocked-document-summary"><strong>需要补充或确认以下文件</strong><span>{unresolvedRequired.map(document=>`${document.orderNumber} ${document.name}`).join("、")}</span></div>}
     <ul>{reasons.map(reason=><li key={reason}>{reason}</li>)}</ul>
+    {remediationTargets.length>0&&<div className="outbound-remediation-portals" aria-label="截断处理入口">
+      {remediationTargets.map(target=><article key={target.key}>
+        <div><strong>{target.title}</strong><span>{target.hint}</span></div>
+        <Link className="secondary" to={target.href} target="_blank" rel="noreferrer">打开处理入口</Link>
+      </article>)}
+      <div className="outbound-remediation-recheck">
+        <span>处理页会在新标签打开；完成后无需重复查找订单，回到本页重新核验即可。</span>
+        <Link className="primary warehouse-primary" to={retryHref} reloadDocument>已处理，重新核验</Link>
+      </div>
+    </div>}
     <div className="panel-footer">
       <Link className="secondary" to={pendingHref}>返回在仓订单</Link>
       {canOperate&&inspection&&unresolvedRequired.length>0&&<Modal

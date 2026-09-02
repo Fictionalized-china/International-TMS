@@ -2913,6 +2913,45 @@ td small {
   font-size: 12px;
   line-height: 1.6;
 }
+.outbound-remediation-portals {
+  display: grid;
+  gap: 8px;
+  margin: 12px 14px;
+}
+.outbound-remediation-portals article,
+.outbound-remediation-recheck {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  border: 1px solid #d8e2ea;
+  background: #f8fbfd;
+}
+.outbound-remediation-portals article > div {
+  display: grid;
+  gap: 3px;
+}
+.outbound-remediation-portals article strong { color: #17384d; }
+.outbound-remediation-portals article span,
+.outbound-remediation-recheck > span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.outbound-remediation-portals article .secondary,
+.outbound-remediation-recheck .primary { flex: 0 0 auto; }
+.outbound-remediation-recheck {
+  border-color: #b9ddcf;
+  background: #f2fbf6;
+}
+@media (max-width: 840px) {
+  .outbound-remediation-portals article,
+  .outbound-remediation-recheck {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
 .outbound-task-center {
   overflow: hidden;
   border-radius: 3px;

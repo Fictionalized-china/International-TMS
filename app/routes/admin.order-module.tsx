@@ -4240,6 +4240,17 @@ function trackingGateTarget(orderId: string, reason: string) {
       hint: "上传发运前必须文件，并完成审核或归档。",
     };
   }
+  if (
+    reason.includes("国内运输安排") ||
+    reason.includes("整车订单尚未完成车辆运输安排")
+  ) {
+    return {
+      key: "transport",
+      title: "去国内运输处理",
+      href: `/admin/orders/${orderId}/modules/transport#module-business-data`,
+      hint: "补齐当前订单工作流要求的国内承运方、车辆、司机或计划时间。",
+    };
+  }
   if (reason.includes("仓库") || reason.includes("装车") || reason.includes("出库") || reason.includes("交接")) {
     return {
       key: "warehouse",

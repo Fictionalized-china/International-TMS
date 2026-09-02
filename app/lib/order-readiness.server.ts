@@ -7,6 +7,13 @@ import {
 import { customsDeclarationGate } from "./customs-declarations";
 import { loadOrderModuleWorkflowFields } from "./workflow-fields.server";
 import type { OrderModuleCode } from "./order-modules";
+import {
+  domesticTransportGateFieldLabel,
+  domesticTransportGateFields,
+  missingDomesticTransportGateFields,
+  type DomesticTransportGateAssignment,
+  type DomesticTransportGateFieldKey,
+} from "./domestic-transport-readiness";
 
 export type ReadinessResult = {
   ready: boolean;
@@ -160,27 +167,44 @@ export async function checkOrderLoadPlan(
       if (required("planned_arrival_at") && !plan.arrival_ready) reasons.push("配载批次尚未确定计划到达时间");
       if (vehiclePlate && !plan.plate_match) reasons.push(`车牌 ${vehiclePlate} 不在当前配载计划中`);
     }
-  } else if (
-    order.business_type === "ftl" &&
-    [
-      "domestic_carrier_id",
-      "domestic_vehicle_type",
-      "domestic_plate_number",
-      "domestic_driver_name",
-      "domestic_driver_phone",
-      "domestic_planned_departure_at",
-      "domestic_planned_arrival_at",
-    ].some((fieldKey) => required(fieldKey))
-  ) {
-    const assignment = await env.DB.prepare(
-      `SELECT plate_number FROM order_transport_assignments
-       WHERE organization_id=? AND order_id=? AND status!='cancelled'
-         AND NULLIF(TRIM(plate_number),'') IS NOT NULL
-       ORDER BY CASE leg_type WHEN 'main' THEN 0 ELSE 1 END,created_at DESC LIMIT 1`,
-    ).bind(organizationId, orderId).first<{ plate_number: string }>();
-    if (!assignment) reasons.push("整车订单尚未完成车辆运输安排");
-    else if (vehiclePlate && assignment.plate_number.toUpperCase() !== vehiclePlate.toUpperCase())
-      reasons.push(`车牌与运输计划不一致（计划车牌 ${assignment.plate_number}）`);
+  } else if (order.business_type === "ftl") {
+    const requiredDomesticFields = domesticTransportGateFields
+      .filter((field) => required(field.fieldKey))
+      .map((field) => field.fieldKey as DomesticTransportGateFieldKey);
+    if (requiredDomesticFields.length) {
+      const assignment = await env.DB.prepare(
+        `SELECT carrier_id,carrier_name,vehicle_type,plate_number,driver_name,driver_phone,
+                planned_departure_at,planned_arrival_at
+         FROM order_transport_assignments
+         WHERE organization_id=? AND order_id=? AND leg_type='first_mile' AND status!='cancelled'
+         ORDER BY created_at DESC LIMIT 1`,
+      ).bind(organizationId, orderId).first<DomesticTransportGateAssignment>();
+      const missingFields = missingDomesticTransportGateFields(
+        requiredDomesticFields,
+        assignment ?? null,
+      );
+      if (missingFields.length) {
+        reasons.push(
+          `国内运输安排缺少必填信息：${missingFields.map(domesticTransportGateFieldLabel).join("、")}`,
+        );
+      }
+    }
+    if (vehiclePlate) {
+      const outboundAssignment = await env.DB.prepare(
+        `SELECT plate_number FROM order_transport_assignments
+         WHERE organization_id=? AND order_id=? AND leg_type='main' AND status!='cancelled'
+           AND NULLIF(TRIM(plate_number),'') IS NOT NULL
+         ORDER BY created_at DESC LIMIT 1`,
+      ).bind(organizationId, orderId).first<{ plate_number: string }>();
+      if (
+        outboundAssignment &&
+        outboundAssignment.plate_number.toUpperCase() !== vehiclePlate.toUpperCase()
+      ) {
+        reasons.push(
+          `车牌与出境运输计划不一致（计划车牌 ${outboundAssignment.plate_number}）`,
+        );
+      }
+    }
   }
 
   return { ready: reasons.length === 0, reasons };
