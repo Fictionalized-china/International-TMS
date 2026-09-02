@@ -7,6 +7,7 @@ import { writeAudit } from "../lib/audit.server";
 import { valueOf } from "../lib/validation";
 import { roleCodeForPosition } from "../lib/position-role";
 import { isProtectedAccessRole } from "../lib/permission-blocks";
+import { inspectAccessControlSchema } from "../lib/access-control-schema.server";
 
 type Position = {
   id: string;
@@ -146,6 +147,8 @@ export async function loader({ request }: Route.LoaderArgs) {
 
 export async function action({ request }: Route.ActionArgs) {
   const current = await requireSessionUser(request, "user.manage");
+  const schema = await inspectAccessControlSchema(env.DB);
+  if (!schema.ready) return { formError: `权限数据库升级尚未完成：${schema.missing.join("、")}。为保护岗位关系，本次修改未执行。` };
   const form = await request.formData();
   const intent = valueOf(form, "intent");
   const now = new Date().toISOString();

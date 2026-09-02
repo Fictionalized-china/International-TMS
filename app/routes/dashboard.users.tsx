@@ -9,6 +9,7 @@ import { writeAudit } from "../lib/audit.server";
 import { Modal } from "../components/Modal";
 import { roleCodeForPosition } from "../lib/position-role";
 import { isProtectedAccessRole } from "../lib/permission-blocks";
+import { inspectAccessControlSchema } from "../lib/access-control-schema.server";
 
 type MemberRow = { membership_id: string; user_id: string; display_name: string; email: string; title: string | null; department_id:string|null; department_name:string|null; position_id:string|null; position_name:string|null; status: string; roles: string | null; role_ids: string | null; role_codes: string | null; last_login_at: string | null };
 type Department = { id:string; parent_id:string|null; name:string; status:string; sort_order:number };
@@ -16,18 +17,19 @@ type PositionOption = { id:string; code:string; name:string; department_id:strin
 
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "user.view");
-  const [members,roles,departments,positions] = await Promise.all([
+  const [members,departments,positions] = await Promise.all([
     env.DB.prepare(`SELECT m.id AS membership_id, u.id AS user_id, u.display_name, u.email, m.title, m.department_id, d.name AS department_name, m.position_id, p.name AS position_name, m.status, u.last_login_at, GROUP_CONCAT(r.name, '、') AS roles, GROUP_CONCAT(r.id) AS role_ids, GROUP_CONCAT(DISTINCT r.code) AS role_codes FROM memberships m JOIN users u ON u.id = m.user_id LEFT JOIN departments d ON d.id=m.department_id AND d.organization_id=m.organization_id LEFT JOIN positions p ON p.id=m.position_id AND p.organization_id=m.organization_id LEFT JOIN membership_roles mr ON mr.membership_id = m.id LEFT JOIN roles r ON r.id = mr.role_id WHERE m.organization_id = ? GROUP BY m.id ORDER BY d.sort_order,p.sort_order,u.display_name`).bind(current.organizationId).all<MemberRow>(),
-    env.DB.prepare("SELECT id, name FROM roles WHERE organization_id = ? AND status='active' ORDER BY name").bind(current.organizationId).all<{ id: string; name: string }>(),
     env.DB.prepare("SELECT id,parent_id,name,status,sort_order FROM departments WHERE organization_id=? ORDER BY sort_order,name").bind(current.organizationId).all<Department>(),
     env.DB.prepare(`SELECT p.id,p.code,p.name,d.id department_id FROM positions p JOIN departments d ON d.organization_id=p.organization_id AND d.code=p.department_code AND d.status='active' WHERE p.organization_id=? AND p.status='active' ORDER BY d.sort_order,p.sort_order,p.name`).bind(current.organizationId).all<PositionOption>(),
   ]);
   const canAssignProtectedPosition=isProtectedAccessRole(current.roleCodes);
-  return { current, members: members.results, roles: roles.results, departments:departments.results, positions:positions.results.filter((position)=>canAssignProtectedPosition||!["BOSS","DEVELOPER"].includes(position.code)) };
+  return { current, members: members.results, departments:departments.results, positions:positions.results.filter((position)=>canAssignProtectedPosition||!["BOSS","DEVELOPER"].includes(position.code)) };
 }
 
 export async function action({ request }: Route.ActionArgs) {
   const current = await requireSessionUser(request, "user.manage");
+  const schema = await inspectAccessControlSchema(env.DB);
+  if (!schema.ready) return { formError: `权限数据库升级尚未完成：${schema.missing.join("、")}。为保护账号，本次修改未执行。` };
   const form = await request.formData();
   const intent = valueOf(form, "intent");
   if (intent === "role") {

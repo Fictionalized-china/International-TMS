@@ -5,10 +5,10 @@
   "scripts": {
     "build": "react-router build",
     "ci": "npm run typecheck && npm run test && npm run build",
-    "dev": "react-router dev",
-    "dev:win": "react-router dev --clearScreen=false --host 127.0.0.1 --port 5189 --strictPort",
+    "dev": "npm run db:migrate:local && react-router dev",
+    "dev:win": "npm run db:migrate:local && react-router dev --clearScreen=false --host 127.0.0.1 --port 5189 --strictPort",
     "typecheck": "wrangler types && react-router typegen && tsc -b",
-    "deploy": "npm run build && wrangler deploy",
+    "deploy": "npm run db:migrate:remote && npm run build && wrangler deploy",
     "db:migrate:local": "wrangler d1 migrations apply international-tms --local",
     "db:migrate:remote": "wrangler d1 migrations apply international-tms --remote",
     "preview": "npm run build && vite preview",

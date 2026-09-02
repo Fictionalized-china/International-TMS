@@ -9,6 +9,7 @@ import {
 } from "./portal-session-context";
 import type { Site } from "./site.server";
 import { siteFromRequest, siteLogin } from "./site.server";
+import { isMissingSqliteTableError } from "./d1-errors";
 import {
   effectivePermissionCodes,
   isProtectedAccessRole,
@@ -19,6 +20,29 @@ const SITE_COOKIE_NAMES: Record<Exclude<Site, "warehouse">, string> = {
   admin: "itms_admin_session",
   portal: "itms_portal_session",
 };
+
+let warnedAboutMissingPermissionOverrides = false;
+
+async function listPermissionOverrides(userId: string, organizationId: string) {
+  try {
+    const rows = await env.DB.prepare(
+      `SELECT mpo.permission_code code,mpo.effect
+       FROM memberships m
+       JOIN membership_permission_overrides mpo ON mpo.membership_id=m.id
+       WHERE m.user_id=? AND m.organization_id=? AND m.status='active'`,
+    )
+      .bind(userId, organizationId)
+      .all<PermissionOverride>();
+    return rows.results;
+  } catch (error) {
+    if (!isMissingSqliteTableError(error, "membership_permission_overrides")) throw error;
+    if (!warnedAboutMissingPermissionOverrides) {
+      console.warn("权限覆盖表尚未迁移，当前请求暂时按岗位角色权限运行；请执行数据库迁移。");
+      warnedAboutMissingPermissionOverrides = true;
+    }
+    return [];
+  }
+}
 
 export type SessionUser = {
   sessionId: string;
@@ -122,7 +146,7 @@ export async function getSessionUser(
           (s.site = 'warehouse' AND EXISTS (
             SELECT 1 FROM memberships m
             JOIN membership_roles mr ON mr.membership_id=m.id
-            JOIN roles r ON r.id=mr.role_id AND r.organization_id=m.organization_id AND r.status='active'
+            JOIN roles r ON r.id=mr.role_id AND r.organization_id=m.organization_id
             JOIN role_permissions rp ON rp.role_id=r.id AND rp.permission_code='warehouse.view'
             WHERE m.user_id=u.id AND m.organization_id=o.id AND m.status='active'
           ))
@@ -136,7 +160,7 @@ export async function getSessionUser(
     `SELECT DISTINCT rp.permission_code AS code
        FROM memberships m
        JOIN membership_roles mr ON mr.membership_id = m.id
-       JOIN roles r ON r.id = mr.role_id AND r.organization_id = m.organization_id AND r.status='active'
+       JOIN roles r ON r.id = mr.role_id AND r.organization_id = m.organization_id
        JOIN role_permissions rp ON rp.role_id = r.id
       WHERE m.user_id = ? AND m.organization_id = ? AND m.status = 'active'`,
   )
@@ -147,27 +171,20 @@ export async function getSessionUser(
        FROM memberships m
        LEFT JOIN positions p ON p.id=m.position_id AND p.organization_id=m.organization_id
        LEFT JOIN membership_roles mr ON mr.membership_id=m.id
-       LEFT JOIN roles r ON r.id=mr.role_id AND r.organization_id=m.organization_id AND r.status='active'
+       LEFT JOIN roles r ON r.id=mr.role_id AND r.organization_id=m.organization_id
        WHERE m.user_id=? AND m.organization_id=? AND m.status='active'
        GROUP BY m.id
        LIMIT 1`,
     )
       .bind(row.user_id, row.organization_id)
       .first<{ membership_id: string; position_code: string | null; role_codes: string | null }>(),
-    env.DB.prepare(
-      `SELECT mpo.permission_code code,mpo.effect
-       FROM memberships m
-       JOIN membership_permission_overrides mpo ON mpo.membership_id=m.id
-       WHERE m.user_id=? AND m.organization_id=? AND m.status='active'`,
-    )
-      .bind(row.user_id, row.organization_id)
-      .all<PermissionOverride>(),
+    listPermissionOverrides(row.user_id, row.organization_id),
     env.DB.prepare("SELECT code FROM permissions ORDER BY code").all<{ code: string }>(),
   ]);
   const roleCodes = (accessProfile?.role_codes ?? "").split(",").filter(Boolean);
   const permissions = effectivePermissionCodes({
     inherited: permissionRows.results.map((item) => item.code),
-    overrides: overrideRows.results,
+    overrides: overrideRows,
     allPermissions: allPermissionRows.results.map((item) => item.code),
     protectedRole: isProtectedAccessRole(roleCodes),
   });

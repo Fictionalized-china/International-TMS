@@ -9,6 +9,7 @@ import {
   useNavigation,
   useRevalidator,
 } from "react-router";
+import { isSqliteSchemaMismatchError } from "./lib/d1-errors";
 import { useEffect, useRef } from "react";
 
 import type { Route } from "./+types/root";
@@ -127,16 +128,18 @@ export default function App() {
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   let title = "系统暂时无法完成请求";
   let details = "当前页面发生异常。您可以重试、返回上一页，或回到工作台继续处理其他任务。";
-  let stack: string | undefined;
 
   if (isRouteErrorResponse(error)) {
     title = error.status === 404 ? "找不到该页面" : `请求失败（${error.status}）`;
     details = error.status === 404
       ? "页面地址可能已变更，请返回工作台重新进入。"
       : error.statusText || details;
-  } else if (import.meta.env.DEV && error instanceof Error) {
-    details = error.message;
-    stack = error.stack;
+  } else if (error instanceof Error) {
+    console.error("Unhandled application error", error);
+    if (isSqliteSchemaMismatchError(error)) {
+      title = "系统正在同步数据库升级";
+      details = "当前程序与数据库版本暂时不同步。系统已停止本次操作以保护数据，请稍后重试；若持续出现，请重新启动服务完成自动迁移。";
+    }
   }
 
   return (
@@ -154,12 +157,6 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
         <a className="text-button" href="/admin">回到工作台</a>
       </div>
       <small>表单内容是否已保存以页面提示为准；请勿连续重复提交。</small>
-      {stack && (
-        <details>
-          <summary>开发环境错误详情</summary>
-          <pre><code>{stack}</code></pre>
-        </details>
-      )}
     </main>
   );
 }

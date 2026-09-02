@@ -27,9 +27,14 @@ npm run dev:win
 ```powershell
 git status
 npm install
-npm run db:migrate:local
 npm run dev:win
 ```
+
+`dev` 与 `dev:win` 会在启动服务前自动检查并应用本地数据库迁移。即使遗漏手动迁移，也不会让新版代码连接旧表结构后直接崩溃。
+
+## 部署顺序保护
+
+必须使用 `npm run deploy` 部署。该命令会先应用远程数据库迁移，迁移成功后才构建并发布代码；不要直接运行 `wrangler deploy` 跳过数据库升级。
 
 ## 提交前检查
 

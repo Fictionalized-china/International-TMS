@@ -11,6 +11,7 @@ import {
   isProtectedAccessRole,
   type PermissionOverride,
 } from "../lib/permission-blocks";
+import { inspectAccessControlSchema } from "../lib/access-control-schema.server";
 
 type RoleRow = {
   id: string;
@@ -53,6 +54,10 @@ const moduleLabels: Record<string, string> = {
 
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "role.view");
+  const schema = await inspectAccessControlSchema(env.DB);
+  if (!schema.ready) {
+    return { current, roles: [] as RoleRow[], permissions: [] as PermissionRow[], members: [] as MemberRow[], schemaReady: false, schemaMissing: schema.missing };
+  }
   const [roles, permissions, members] = await Promise.all([
     env.DB.prepare(
       `SELECT r.id,r.code,r.name,r.description,r.is_system,r.status,
@@ -96,6 +101,8 @@ export async function loader({ request }: Route.LoaderArgs) {
     roles: roles.results,
     permissions: permissions.results,
     members: members.results,
+    schemaReady: true,
+    schemaMissing: [] as string[],
   };
 }
 
@@ -124,6 +131,8 @@ function rolePermissionStatements(roleId: string, selected: string[]) {
 
 export async function action({ request }: Route.ActionArgs) {
   const current = await requireSessionUser(request, "role.manage");
+  const schema = await inspectAccessControlSchema(env.DB);
+  if (!schema.ready) return { formError: `权限数据库升级尚未完成：${schema.missing.join("、")}。请完成迁移后重试。` };
   const form = await request.formData();
   const intent = valueOf(form, "intent") || "create_role";
   const now = new Date().toISOString();
@@ -250,6 +259,10 @@ export function meta() { return [{ title: "角色权限 | International TMS" }];
 
 export default function Roles({ loaderData, actionData }: Route.ComponentProps) {
   const busy = useNavigation().state !== "idle";
+  if (!loaderData.schemaReady) return <>
+    <header className="page-header"><div><p className="eyebrow">ACCESS CONTROL MAINTENANCE</p><h1>角色权限暂时只读</h1><p>系统检测到数据库版本落后于当前程序，已停止权限写入以保护现有账号。</p></div></header>
+    <section className="panel"><div className="alert warning" role="status">待升级项目：{loaderData.schemaMissing.join("、")}。请重新启动服务；启动命令会自动应用数据库迁移。</div></section>
+  </>;
   const grouped = loaderData.permissions.reduce<Record<string, PermissionRow[]>>((groups, permission) => {
     (groups[permission.module] ??= []).push(permission);
     return groups;
