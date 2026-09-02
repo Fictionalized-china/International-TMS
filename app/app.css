@@ -15072,6 +15072,17 @@ a.order-module-card.read-only:hover {
 .batch-order-documents td > strong + small { display: block; margin-top: 4px; color: #63758d; }
 .loading-cargo-names { color: #102f5d; line-height: 1.45; }
 .loading-row-actions { display: grid; gap: 4px; }
+.batch-order-row-actions { display: grid; gap: 6px; min-width: 132px; }
+.batch-order-direct-release-button {
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 10px;
+  white-space: nowrap;
+}
+.batch-direct-release-item { display: grid; gap: 12px; }
+.batch-direct-release-item + .batch-direct-release-item { margin-top: 14px; padding-top: 14px; border-top: 1px solid #d6e1f0; }
+.batch-direct-release-item > header { display: grid; gap: 3px; }
+.batch-direct-release-item > header span { color: #63758d; font-size: 12px; }
 .batch-order-file-details { position: relative; }
 .batch-order-file-details > summary { color: #0757b8; cursor: pointer; white-space: nowrap; font-weight: 700; }
 .batch-order-file-details[open]::before {
@@ -15172,11 +15183,6 @@ a.order-module-card.read-only:hover {
 .batch-customs-row > div:not(.batch-customs-actions) { display: grid; gap: 2px; min-width: 0; }
 .batch-customs-row small { color: #63758d; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .batch-customs-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
-.batch-customs-release-button {
-  min-height: 30px;
-  padding: 5px 12px;
-  white-space: nowrap;
-}
 .batch-order-customs-workbench > .secondary { justify-self: start; }
 
 @media (max-width: 900px) {
