@@ -40,7 +40,7 @@ import {
 } from "../lib/order-guidance";
 import { orderResponsiblePosition } from "../lib/order-responsibility";
 import { orderModuleTabAttention } from "../lib/order-module-tab-attention";
-import { orderModuleTabDescriptors, resolveCostsSection, resolveCustomsSection, type OrderModuleTabSection } from "../lib/order-module-tabs";
+import { orderModuleTabDescriptors, orderModuleTabHref, resolveCostsSection, resolveCustomsSection, type OrderModuleTabSection } from "../lib/order-module-tabs";
 import { canManageOrderModule } from "../lib/position-portal";
 import { completionStatusLabels, type OrderCompletionStatus } from "../lib/order-review";
 import {
@@ -1125,14 +1125,18 @@ function OrderDossierSection({ order }: { order: Order }) {
 }
 
 function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, documentReviewSignal }: { data: Route.ComponentProps["loaderData"]; rows: WorkflowFormRow[]; selectedStep: (BusinessWorkflowStep & { rows: WorkflowFormRow[] }) | null; viewingCurrent: boolean; busy: boolean; documentReviewSignal?: unknown }) {
-  if (!selectedStep || !rows.length) return <section className="section" id="node-fields"><div className="section-title"><b>本节点业务数据</b><span>当前节点没有配置需要人工填写的字段</span></div><div className="grid"><ReadCell label="节点状态" value="无需人工录入，节点仍按工作流保留" className="span4"/></div></section>;
   const selectedModuleCode = data.embeddedModuleCode;
+  const [selectedConsignmentSection, setSelectedConsignmentSection] = useState(data.selectedConsignmentSection);
+  const [selectedCustomsSection, setSelectedCustomsSection] = useState(data.selectedCustomsSection);
+  const [selectedCostsSection, setSelectedCostsSection] = useState(data.selectedCostsSection);
+  useEffect(() => setSelectedConsignmentSection(data.selectedConsignmentSection), [data.selectedConsignmentSection, data.selectedStepKey]);
+  useEffect(() => setSelectedCustomsSection(data.selectedCustomsSection), [data.selectedCustomsSection, data.selectedStepKey]);
+  useEffect(() => setSelectedCostsSection(data.selectedCostsSection), [data.selectedCostsSection, data.selectedStepKey]);
+  if (!selectedStep || !rows.length) return <section className="section" id="node-fields"><div className="section-title"><b>本节点业务数据</b><span>当前节点没有配置需要人工填写的字段</span></div><div className="grid"><ReadCell label="节点状态" value="无需人工录入，节点仍按工作流保留" className="span4"/></div></section>;
   const selectedRow = rows.find((row) => row.module_code === selectedModuleCode) || rows[0];
   const selectedFields = data.currentWorkflowFields.filter((field) => field.stepKey === selectedStep.step_key && field.moduleCode === selectedRow.module_code && field.isActive);
   const isOrderCreation = selectedStep.step_key === "order_creation";
-  const selectedSection = selectedModuleCode === "cargo" ? "cargo" : data.selectedConsignmentSection;
-  const selectedCustomsSection = data.selectedCustomsSection;
-  const selectedCostsSection = data.selectedCostsSection;
+  const selectedSection = selectedModuleCode === "cargo" ? "cargo" : selectedConsignmentSection;
   const orderCreationFields = data.currentWorkflowFields.filter(
     (field) => field.stepKey === "order_creation" && field.isActive,
   );
@@ -1154,13 +1158,18 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, 
     },
   );
   const selectedModuleSection = selectedModuleCode === "consignment"
-    ? data.selectedConsignmentSection
+    ? selectedConsignmentSection
     : selectedModuleCode === "customs"
       ? selectedCustomsSection
       : selectedModuleCode === "costs"
         ? selectedCostsSection
       : null;
-  const actionUrl = `/admin/orders/${data.order.id}?stage=${encodeURIComponent(selectedStep.step_key)}&module=${encodeURIComponent(selectedModuleCode || "")}${selectedModuleSection ? `&section=${encodeURIComponent(selectedModuleSection)}` : ""}`;
+  const actionUrl = orderModuleTabHref({
+    orderId: data.order.id,
+    stepKey: selectedStep.step_key,
+    moduleCode: selectedModuleCode,
+    section: selectedModuleSection,
+  });
   const orderCreationTabs = [
     { key: "info", label: "委托信息", module: "consignment", section: "info" },
     { key: "cargo", label: "货物信息", module: "cargo", section: "" },
@@ -1172,10 +1181,25 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, 
     moduleCode: row.module_code,
     moduleName: row.module_name,
   }));
+  const activateTab = (moduleCode: string | null, section: string | null) => {
+    if (moduleCode === "consignment" && ["info", "files", "costs"].includes(section || "")) {
+      setSelectedConsignmentSection(section as "info" | "files" | "costs");
+    }
+    if (moduleCode === "customs" && ["files", "declarations"].includes(section || "")) {
+      setSelectedCustomsSection(section as "files" | "declarations");
+    }
+    if (moduleCode === "costs" && ["files", "expenses"].includes(section || "")) {
+      setSelectedCostsSection(section as "files" | "expenses");
+    }
+  };
+  const activeTabKey = `${selectedStep.step_key}:${selectedModuleCode || "none"}:${selectedModuleSection || "main"}`;
   return <div id="node-fields">
     {isOrderCreation ? (
       <nav className="linear-module-tabs" aria-label="委托资料补充分区">
-        {orderCreationTabs.map((tab) => <Link key={tab.key} className={selectedSection === tab.key ? "active" : ""} to={`?stage=${encodeURIComponent(selectedStep.step_key)}&module=${tab.module}${tab.section ? `&section=${tab.section}` : ""}`}>{tab.label}{tabHasRequiredMissing(tab.key) && <b className="tab-required-star" title="存在必填但未填内容" aria-label="存在必填但未填内容">*</b>}</Link>)}
+        {orderCreationTabs.map((tab) => {
+          const isActive = selectedSection === tab.key;
+          return <Link key={tab.key} className={isActive ? "active" : ""} aria-current={isActive ? "page" : undefined} viewTransition preventScrollReset onClick={() => activateTab(tab.module, tab.section || null)} to={orderModuleTabHref({ orderId: data.order.id, stepKey: selectedStep.step_key, moduleCode: tab.module, section: tab.section || null })}>{tab.label}{tabHasRequiredMissing(tab.key) && <b className="tab-required-star" title="存在必填但未填内容" aria-label="存在必填但未填内容">*</b>}</Link>;
+        })}
       </nav>
     ) : businessTabs.length > 1 ? (
       <nav className="linear-module-tabs" aria-label="本节点业务分区">{businessTabs.map((tab) => {
@@ -1192,7 +1216,11 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, 
         return <Link
           key={tab.key}
           className={isActive ? "active" : ""}
-          to={`?stage=${encodeURIComponent(selectedStep.step_key)}&module=${encodeURIComponent(tab.moduleCode || "")}${tab.section ? `&section=${encodeURIComponent(tab.section)}` : ""}`}
+          aria-current={isActive ? "page" : undefined}
+          viewTransition
+          preventScrollReset
+          onClick={() => activateTab(tab.moduleCode, tab.section)}
+          to={orderModuleTabHref({ orderId: data.order.id, stepKey: selectedStep.step_key, moduleCode: tab.moduleCode, section: tab.section })}
         >
           {tab.label}
           {attention === "action" && <b className="tab-required-star" title="报关单待办理" aria-label="报关单待办理">*</b>}
@@ -1200,11 +1228,15 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, 
         </Link>;
       })}</nav>
     ) : null}
-    {data.embeddedModuleRedirect ? <section className="section"><div className="section-title"><b>{selectedRow.module_name || "关联业务单"}</b><span>该节点按配载单统一推进</span></div><div className="linear-external-work"><p>拼车订单在仓库生成 PZ 配载单后，由配载单统一记录出境运输并同步全部子订单。</p><Link className="btn primary" to={data.embeddedModuleRedirect}>打开配载单跟踪</Link></div></section> : data.embeddedModuleData ? <EmbeddedOrderModule data={data.embeddedModuleData} busy={busy} actionUrl={actionUrl} workflowStepKey={selectedStep.step_key} consignmentSection={data.selectedConsignmentSection} customsSection={selectedCustomsSection} costsSection={selectedCostsSection} hideConsignmentActionBar={isOrderCreation} approvalMode={selectedStep.step_key === "consignment_approval"} reviewCloseSignal={documentReviewSignal}/> : <section className="section"><div className="section-title"><b>{selectedRow.module_name || selectedRow.module_code || "业务数据"}</b><span>{viewingCurrent ? "当前节点" : "历史节点"}</span></div><div className="grid">{selectedFields.map((field) => {
+    <div className="linear-module-tab-viewport">
+      <div className="linear-module-tab-panel" key={activeTabKey}>
+    {data.embeddedModuleRedirect ? <section className="section"><div className="section-title"><b>{selectedRow.module_name || "关联业务单"}</b><span>该节点按配载单统一推进</span></div><div className="linear-external-work"><p>拼车订单在仓库生成 PZ 配载单后，由配载单统一记录出境运输并同步全部子订单。</p><Link className="btn primary" to={data.embeddedModuleRedirect}>打开配载单跟踪</Link></div></section> : data.embeddedModuleData ? <EmbeddedOrderModule data={data.embeddedModuleData} busy={busy} actionUrl={actionUrl} workflowStepKey={selectedStep.step_key} consignmentSection={selectedConsignmentSection} customsSection={selectedCustomsSection} costsSection={selectedCostsSection} hideConsignmentActionBar={isOrderCreation} approvalMode={selectedStep.step_key === "consignment_approval"} reviewCloseSignal={documentReviewSignal}/> : <section className="section"><div className="section-title"><b>{selectedRow.module_name || selectedRow.module_code || "业务数据"}</b><span>{viewingCurrent ? "当前节点" : "历史节点"}</span></div><div className="grid">{selectedFields.map((field) => {
       const fieldState = field.present ? "filled" : field.isRequired ? "required-missing" : "optional-empty";
       return <div className={`read-cell workflow-cell ${field.present ? "complete" : field.isRequired ? "missing" : "optional"}`} key={field.id}><span>{field.label}{field.isRequired ? " *" : ""}</span><b>{field.displayValue || "—"}</b><em className={`field-state ${fieldState}`}>{field.present ? "已填" : field.isRequired ? "必填但未填" : "未填"}</em></div>;
     })}</div></section>}
     {!isOrderCreation && <div className="linear-module-summary" aria-label="本节点其他分区状态">{rows.filter((row) => row.module_code !== selectedModuleCode).map((row) => <span key={row.module_state_id || row.module_code}>{row.module_name || row.module_code} · {workflowFormStatusLabel(row.module_status || "not_started")}</span>)}</div>}
+      </div>
+    </div>
   </div>;
 }
 

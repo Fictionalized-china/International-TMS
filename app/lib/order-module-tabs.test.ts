@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { orderModuleTabDescriptors, resolveCostsSection, resolveCustomsSection } from "./order-module-tabs";
+import { orderModuleTabDescriptors, orderModuleTabHref, resolveCostsSection, resolveCustomsSection } from "./order-module-tabs";
+
+describe("orderModuleTabHref", () => {
+  it("builds an absolute section link so sibling tabs keep the order route", () => {
+    expect(orderModuleTabHref({
+      orderId: "order/1",
+      stepKey: "reconciliation",
+      moduleCode: "costs",
+      section: "expenses",
+    })).toBe("/admin/orders/order%2F1?stage=reconciliation&module=costs&section=expenses");
+  });
+});
 
 describe("orderModuleTabDescriptors", () => {
   it("splits customs documents and declarations into sibling tabs", () => {

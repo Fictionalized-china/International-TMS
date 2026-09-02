@@ -9,6 +9,23 @@ export type OrderModuleTabDescriptor = {
   section: OrderModuleTabSection;
 };
 
+export function orderModuleTabHref({
+  orderId,
+  stepKey,
+  moduleCode,
+  section,
+}: {
+  orderId: string;
+  stepKey: string;
+  moduleCode: string | null;
+  section: string | null;
+}) {
+  const params = new URLSearchParams({ stage: stepKey });
+  if (moduleCode) params.set("module", moduleCode);
+  if (section) params.set("section", section);
+  return `/admin/orders/${encodeURIComponent(orderId)}?${params.toString()}`;
+}
+
 export function resolveCustomsSection(value: string | null): CustomsModuleTabSection {
   return value === "declarations" ? "declarations" : "files";
 }

@@ -18993,8 +18993,12 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   border: 1px solid transparent;
   border-bottom: 0;
   border-radius: 3px 3px 0 0;
+  background: #fff;
   font-size: 10px;
+  font-weight: 650;
   text-decoration: none;
+  cursor: pointer;
+  transition: color 160ms ease, background-color 160ms ease, border-color 160ms ease;
 }
 .linear-order-page .linear-module-tabs a:hover {
   color: var(--blue);
@@ -19005,6 +19009,42 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   border-color: #173654;
   background: var(--navy);
 }
+.linear-order-page .linear-module-tabs a:focus-visible {
+  outline: 2px solid #2d6cdf;
+  outline-offset: 2px;
+}
+.linear-order-page .linear-module-tab-viewport {
+  min-width: 0;
+  overflow: clip;
+}
+.linear-order-page .linear-module-tab-panel {
+  min-width: 0;
+  view-transition-name: linear-module-tab-panel;
+}
+@keyframes linear-module-tab-enter {
+  from { opacity: .25; transform: translateX(18px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes linear-module-tab-exit {
+  from { opacity: 1; transform: translateX(0); }
+  to { opacity: .15; transform: translateX(-18px); }
+}
+::view-transition-group(linear-module-tab-panel) { animation-duration: 190ms; }
+::view-transition-old(linear-module-tab-panel) { animation: linear-module-tab-exit 150ms ease-in both; }
+::view-transition-new(linear-module-tab-panel) { animation: linear-module-tab-enter 190ms ease-out both; }
+@supports not (view-transition-name: linear-module-tab-panel) {
+  .linear-order-page .linear-module-tab-panel { animation: linear-module-tab-enter 190ms ease-out; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .linear-order-page .linear-module-tabs a { transition: none; }
+  .linear-order-page .linear-module-tab-panel,
+  ::view-transition-group(linear-module-tab-panel),
+  ::view-transition-old(linear-module-tab-panel),
+  ::view-transition-new(linear-module-tab-panel) { animation: none !important; }
+}
+html[data-motion="off"]::view-transition-group(linear-module-tab-panel),
+html[data-motion="off"]::view-transition-old(linear-module-tab-panel),
+html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animation: none !important; }
 .linear-order-page .tab-required-star {
   margin-left: 5px;
   color: #d35f5f;
