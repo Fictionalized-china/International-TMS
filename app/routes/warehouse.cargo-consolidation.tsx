@@ -364,17 +364,24 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
       </div>
       <div className="table-wrap ltl-loading-table consolidation-stock-table">
         <table>
+          <colgroup>
+            <col className="consolidation-col-select" />
+            <col className="consolidation-col-status" />
+            <col className="consolidation-col-order" />
+            <col className="consolidation-col-receipt" />
+            <col className="consolidation-col-destination" />
+            <col className="consolidation-col-location" />
+            <col className="consolidation-col-documents" />
+          </colgroup>
           <thead>
             <tr>
               <th>选择</th>
               <th>配载状态</th>
-              <th>文件状态</th>
-              <th>订单</th>
-              <th>货物</th>
-              <th>客户</th>
+              <th>订单 / 客户 / 货物</th>
               <th>实收数据</th>
-              <th>境外目的仓 / 地区</th>
+              <th>境外目的地</th>
               <th>库位</th>
+              <th>文件准备</th>
             </tr>
           </thead>
           <tbody>
@@ -385,13 +392,11 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
               return <tr key={row.order_id} className={checked?"selected-row":""}>
                 <td><input type="checkbox" checked={checked} disabled={assigned||blockers.length>0} onChange={event=>toggle(row,event.target.checked)} aria-label={`选择订单 ${row.order_number}`}/></td>
                 <td>{assigned?<span className="status-pill" title={row.active_batch_number??"已加入配载单"}>已配载<small>{row.active_batch_number}</small></span>:<span className={`status-pill ${blockers.length?"off":"success"}`} title={blockers.join("；")}>{blockers.length?"不可配载":"可配载"}</span>}</td>
+                <td className="consolidation-order-cell"><strong>{row.order_number}</strong><span>{row.customer_name}</span><small>{row.cargo_names||"未填写货名"}</small></td>
+                <td className="consolidation-receipt-cell"><strong>{row.package_count} 包装 · {row.pieces} 件</strong><small>{row.weight_kg.toFixed(2)} KG · {row.volume_cbm.toFixed(3)} CBM</small></td>
+                <td className="consolidation-destination-cell"><strong>{row.overseas_warehouse_name||"目的仓未设置"}</strong><small>{[row.destination_country,row.destination_state,row.destination_city].filter(Boolean).join(" ")||"地区未填写"}</small></td>
+                <td className="consolidation-location-cell">{row.location_names||"—"}</td>
                 <td><DocumentStatusCell row={row} warehouseId={loaderData.warehouse.id} requirements={requirements} documents={documents}/></td>
-                <td><strong>{row.order_number}</strong></td>
-                <td><strong>{row.cargo_names||"未填写货名"}</strong></td>
-                <td><strong>{row.customer_name}</strong></td>
-                <td>{row.package_count} 包装 · {row.pieces} 件<small>{row.weight_kg.toFixed(2)} KG · {row.volume_cbm.toFixed(3)} CBM</small></td>
-                <td>{row.overseas_warehouse_name||"目的仓未设置"}<small>{[row.destination_country,row.destination_state,row.destination_city].filter(Boolean).join(" ")}</small></td>
-                <td>{row.location_names||"—"}</td>
               </tr>
             })}
           </tbody>
@@ -517,15 +522,24 @@ function FilterForm({loaderData,values}:{loaderData:Route.ComponentProps["loader
 function DocumentStatusCell({row,warehouseId,requirements,documents}:{row:StockRow;warehouseId:string;requirements:readonly EffectiveLoadingDocumentRequirement[];documents:readonly LatestRequiredDocument[]}){
   const activeRequirements=requirements.filter(requirement=>requirement.isActive);
   const uploadedCodes=new Set(documents.map(document=>document.document_category));
+  const uploadedCount=activeRequirements.filter(requirement=>uploadedCodes.has(requirement.code)).length;
+  const missingRequiredCount=activeRequirements.filter(requirement=>requirement.isRequired&&!uploadedCodes.has(requirement.code)).length;
   return <div className="consolidation-document-status">
-    {activeRequirements.map(requirement=>{
-      const uploaded=uploadedCodes.has(requirement.code);
-      const className=uploaded?"confirmed":requirement.isRequired?"missing":"";
-      const label=uploaded?`${requirement.name}已上传`:requirement.isRequired?`缺少${requirement.name}`:`${requirement.name}：选填未上传`;
-      return <span key={requirement.code} className={`document-state ${className}`.trim()}>{label}</span>;
-    })}
-    {!activeRequirements.length&&<small>当前工作流无生效文件</small>}
-    {row.active_batch_id?<Link className="text-button" to={`/warehouse/loading-documents?warehouseId=${encodeURIComponent(warehouseId)}&batchId=${encodeURIComponent(row.active_batch_id)}`}>到配载文件处理</Link>:<small>生成配载单后集中处理</small>}
+    {activeRequirements.length?<>
+      <div className="consolidation-document-summary">
+        <span>{uploadedCount}/{activeRequirements.length} 已上传</span>
+        <strong className={missingRequiredCount?"missing":"ready"}>{missingRequiredCount?`缺 ${missingRequiredCount} 项必传`:"必传已齐"}</strong>
+      </div>
+      <div className="consolidation-document-list">
+        {activeRequirements.map(requirement=>{
+          const uploaded=uploadedCodes.has(requirement.code);
+          const className=uploaded?"confirmed":requirement.isRequired?"missing":"optional";
+          const stateLabel=uploaded?"已上传":requirement.isRequired?"缺少":"选填未传";
+          return <span key={requirement.code} className={`document-state ${className}`} title={`${requirement.name}：${stateLabel}`}><strong>{requirement.name}</strong><small>{stateLabel}</small></span>;
+        })}
+      </div>
+    </>:<span className="consolidation-document-empty">当前工作流无生效文件</span>}
+    <div className="consolidation-document-next">{row.active_batch_id?<Link className="text-button" to={`/warehouse/loading-documents?warehouseId=${encodeURIComponent(warehouseId)}&batchId=${encodeURIComponent(row.active_batch_id)}`}>进入配载文件</Link>:<small>生成配载单后统一补传</small>}</div>
   </div>
 }
 
