@@ -22,6 +22,7 @@ import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 import { valueOf } from "../lib/validation";
 
 const LOADING_DOCUMENTS = loadingOrderDocumentDefinitions;
+const PAGE_SIZE = 10;
 type LoadingDocumentCode = LoadingOrderDocumentCode;
 type BatchRow = {
   id: string;
@@ -71,9 +72,9 @@ export async function loader({ request }: Route.LoaderArgs) {
   }
   const url = new URL(request.url);
   const requestedBatchId = url.searchParams.get("batchId")?.trim() || "";
+  const requestedPage = Math.max(1, Number(url.searchParams.get("page")) || 1);
   const documentCodes = LOADING_DOCUMENTS.map((item) => `'${item.code}'`).join(",");
-  const batches = await env.DB.prepare(
-    `WITH ranked_documents AS (
+  const batchSummarySql = `WITH ranked_documents AS (
        SELECT bo.batch_id,m.order_id,m.document_category,m.review_status,
          ROW_NUMBER() OVER(PARTITION BY bo.batch_id,m.order_id,m.document_category ORDER BY a.created_at DESC,a.id DESC) row_no
        FROM transport_batch_orders bo
@@ -91,14 +92,33 @@ export async function loader({ request }: Route.LoaderArgs) {
      JOIN transport_batch_orders bo ON bo.batch_id=b.id AND bo.organization_id=b.organization_id AND bo.status!='removed'
      JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
      LEFT JOIN ranked_documents rd ON rd.batch_id=b.id AND rd.order_id=bo.order_id
+     WHERE b.organization_id=? AND b.warehouse_id=? AND b.batch_number LIKE 'PZ-%' AND b.status!='cancelled'`;
+  const totalRow = await env.DB.prepare(
+    `SELECT COUNT(*) total FROM transport_batches b
      WHERE b.organization_id=? AND b.warehouse_id=? AND b.batch_number LIKE 'PZ-%' AND b.status!='cancelled'
+       AND EXISTS(SELECT 1 FROM transport_batch_orders bo WHERE bo.organization_id=b.organization_id AND bo.batch_id=b.id AND bo.status!='removed')`,
+  ).bind(user.organizationId, warehouse.id).first<{ total: number }>();
+  const total = totalRow?.total ?? 0;
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const page = Math.min(requestedPage, pages);
+  const batches = await env.DB.prepare(
+    `${batchSummarySql}
      GROUP BY b.id
      ORDER BY CASE b.status WHEN 'planning' THEN 1 WHEN 'loading' THEN 2 ELSE 3 END,b.updated_at DESC
-     LIMIT 100`,
-  ).bind(user.organizationId, user.organizationId, warehouse.id).all<BatchRow>();
+     LIMIT ? OFFSET ?`,
+  ).bind(user.organizationId, user.organizationId, warehouse.id, PAGE_SIZE, (page - 1) * PAGE_SIZE).all<BatchRow>();
+  let selectedBatch = batches.results.find((item) => item.id === requestedBatchId) ?? null;
+  if (requestedBatchId && !selectedBatch) {
+    selectedBatch = await env.DB.prepare(
+      `${batchSummarySql} AND b.id=? GROUP BY b.id`,
+    ).bind(user.organizationId, user.organizationId, warehouse.id, requestedBatchId).first<BatchRow>();
+  }
+  const contextBatches = selectedBatch && !batches.results.some((batch) => batch.id === selectedBatch?.id)
+    ? [...batches.results, selectedBatch]
+    : batches.results;
   const batchOrderIds = [
     ...new Set(
-      batches.results.flatMap((batch) =>
+      contextBatches.flatMap((batch) =>
         batch.order_ids.split(",").filter(Boolean),
       ),
     ),
@@ -108,7 +128,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     batchOrderIds,
   );
   let batchDocumentStatuses: BatchDocumentStatusRow[] = [];
-  for (const batchChunk of chunkD1Values(batches.results, 1)) {
+  for (const batchChunk of chunkD1Values(contextBatches, 1)) {
     const statusRows = await env.DB.prepare(
       `WITH ranked AS (
          SELECT bo.batch_id,bo.order_id,m.document_category,m.review_status,
@@ -169,7 +189,6 @@ export async function loader({ request }: Route.LoaderArgs) {
       ),
     };
   });
-  const selectedBatch = batches.results.find((item) => item.id === requestedBatchId) ?? null;
   let orders: OrderRow[] = [];
   let documents: DocumentRow[] = [];
   if (selectedBatch) {
@@ -226,6 +245,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     batchDocumentSummaries,
     selectedDocumentRequirements,
     selectedDocumentTypes,
+    page,
+    pageSize: PAGE_SIZE,
+    pages,
+    total,
   };
 }
 
@@ -317,7 +340,7 @@ export default function WarehouseLoadingDocuments({ loaderData, actionData }: Ro
     </header>
     {!selected && (actionData?.success || actionData?.formError) && <div className={`alert ${actionData.formError ? "error" : "success"}`} role={actionData.formError ? "alert" : "status"}>{actionData.formError ?? actionData.success}</div>}
     <section className="panel warehouse-loading-document-list">
-      <div className="panel-header"><div><h2>配载单文件状态</h2><p>一行一张配载单；请优先在这里补齐文件，待装车页只处理创建任务时仍然缺失的项目。</p></div><span>{loaderData.batches.length} 张</span></div>
+      <div className="panel-header"><div><h2>配载单文件状态</h2><p>一行一张配载单；请优先在这里补齐文件，待装车页只处理创建任务时仍然缺失的项目。</p></div><span>共 {loaderData.total} 张</span></div>
       <div className="table-wrap"><table><thead><tr><th>配载单</th><th>运输线路</th><th>挂载订单</th><th>文件齐套</th><th>审核状态</th><th>配载状态</th><th>更新时间</th><th>操作</th></tr></thead><tbody>
         {loaderData.batches.map((batch) => {
           const summary = loaderData.batchDocumentSummaries.find(
@@ -340,18 +363,19 @@ export default function WarehouseLoadingDocuments({ loaderData, actionData }: Ro
             <td>{summary.rejectedRequiredCount ? <span className="status-pill danger">{summary.rejectedRequiredCount} 项必填文件已退回</span> : summary.requiredCount === 0 ? <span className="status-pill success">无需审核</span> : summary.approvedRequiredCount === summary.requiredCount ? <span className="status-pill success">全部通过</span> : <span className="status-pill">{summary.approvedRequiredCount}/{summary.requiredCount} 已通过</span>}</td>
             <td><span className={`status-pill ${batch.status === "completed" ? "success" : ""}`}>{batchStatusLabel(batch.status)}</span><small>{roadStatusLabels[batch.road_status] ?? batch.road_status}</small></td>
             <td>{formatDateTime(batch.updated_at)}</td>
-            <td><Link className="secondary warehouse-loading-open-button" to={`/warehouse/loading-documents?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}&batchId=${encodeURIComponent(batch.id)}`}>打开文件</Link></td>
+            <td><Link className="secondary warehouse-loading-open-button" to={loadingDocumentsHref(loaderData.warehouse.id, loaderData.page, batch.id)}>打开文件</Link></td>
           </tr>;
         })}
         {!loaderData.batches.length && <tr><td colSpan={8} className="empty-state">当前仓库还没有 PZ 配载单。</td></tr>}
       </tbody></table></div>
+      <LoadingDocumentsPagination loaderData={loaderData}/>
     </section>
     {selected && <Modal
       title={`${selected.batch_number} · 配载文件`}
       size="xwide"
       dialogClassName="warehouse-loading-document-modal"
       openSignal={selected.id}
-      onClose={() => navigate(`/warehouse/loading-documents?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}`)}
+      onClose={() => navigate(loadingDocumentsHref(loaderData.warehouse.id, loaderData.page))}
     >
       <section className="warehouse-loading-document-dialog">
         <header className="warehouse-loading-document-dialog-head">
@@ -519,6 +543,31 @@ function LoadingDocumentOrders({ count, numbers }: { count: number; numbers: str
       {orders.map((number, index) => <span role="listitem" key={`${number}-${index}`}>{number}</span>)}
     </div>
   </details>;
+}
+
+function loadingDocumentsHref(warehouseId: string, page: number, batchId?: string) {
+  const params = new URLSearchParams({ warehouseId, page: String(page) });
+  if (batchId) params.set("batchId", batchId);
+  return `/warehouse/loading-documents?${params}`;
+}
+
+function LoadingDocumentsPagination({ loaderData }: { loaderData: Route.ComponentProps["loaderData"] }) {
+  const previous = loaderData.page - 1;
+  const next = loaderData.page + 1;
+  const count = Math.min(5, loaderData.pages);
+  const start = Math.max(1, Math.min(loaderData.page - 2, loaderData.pages - count + 1));
+  const pageNumbers = Array.from({ length: count }, (_, index) => start + index);
+  const href = (page: number) => loadingDocumentsHref(loaderData.warehouse.id, page);
+  return <footer className="pagination consolidation-pagination warehouse-loading-document-pagination" aria-label="配载文件分页">
+    <span>每页 {loaderData.pageSize} 张 · 第 {loaderData.page} / {loaderData.pages} 页 · 共 {loaderData.total} 张</span>
+    <div>
+      {previous >= 1 ? <Link className="secondary" to={href(previous)}>上一页</Link> : <span className="secondary disabled" aria-disabled="true">上一页</span>}
+      {pageNumbers.map((page) => page === loaderData.page
+        ? <span key={page} className="consolidation-pagination-current" aria-current="page">{page}</span>
+        : <Link key={page} className="secondary" to={href(page)} aria-label={`第 ${page} 页`}>{page}</Link>)}
+      {next <= loaderData.pages ? <Link className="secondary" to={href(next)}>下一页</Link> : <span className="secondary disabled" aria-disabled="true">下一页</span>}
+    </div>
+  </footer>;
 }
 
 function warehouseDocumentHref(document: DocumentRow, warehouseId: string) {
