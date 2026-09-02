@@ -5,6 +5,7 @@ import {
 } from "./workflow-fields.server";
 import type { OrderModuleCode } from "./order-modules";
 import { workflowVersionSwitchDecision } from "./workflow-version-policy";
+import { selectWorkflowExecutionCurrentStep } from "./workflow-execution";
 
 type ModuleFact = { module_code:string; status:string };
 
@@ -205,12 +206,11 @@ export async function synchronizeWorkflowExecution(input:{
     id:string;step_key:string;sort_order:number;existing_status:string;
     module_count:number;pending_required:number;
   }>();
-  const reachable = steps.results.filter((item)=>item.sort_order<=target.sort_order);
-  const current = reachable.find((item)=>
-    item.existing_status !== "completed" &&
-    (item.module_count===0 || item.pending_required>0),
-  ) ?? steps.results.find((item)=>item.existing_status === "active") ??
-    reachable[reachable.length - 1] ?? steps.results[0];
+  const current = selectWorkflowExecutionCurrentStep(
+    steps.results,
+    input.targetStepKey,
+    target.sort_order,
+  );
   if (!current) return input.targetStepKey;
   const stepUpdates = steps.results.map((item) => {
     const completed = item.sort_order<current.sort_order ||

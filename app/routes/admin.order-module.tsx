@@ -4125,8 +4125,50 @@ export function EmbeddedOrderModule({
             busy={busy}
           />
         )}
+        {definition.code === "costs" && (
+          <CostsCompletionReviewEntry
+            orderId={order.id}
+            costsCompleted={scopedData.module.status === "completed"}
+          />
+        )}
       </div>
     </embeddedModuleFormAction.Provider>
+  );
+}
+
+function CostsCompletionReviewEntry({
+  orderId,
+  costsCompleted,
+}: {
+  orderId: string;
+  costsCompleted: boolean;
+}) {
+  return (
+    <div className={`costs-review-entry ${costsCompleted ? "ready" : "pending"}`}>
+      <div>
+        <strong>{costsCompleted ? "对账结算已完成" : "下一步：完成复盘"}</strong>
+        <span>
+          {costsCompleted
+            ? "应收、应付费用已完成确认、审核与锁定，可以进入完成复盘。"
+            : "请先在“费用”页完成应收、应付费用的确认、业务审核、财务审核与锁定；完成后系统自动开放复盘。"}
+        </span>
+      </div>
+      {costsCompleted ? (
+        <Link
+          className="primary"
+          to={`/admin/orders/${orderId}?stage=completion_review&module=review#module-business-data`}
+        >
+          进入完成复盘
+        </Link>
+      ) : (
+        <Link
+          className="secondary"
+          to={`/admin/orders/${orderId}?stage=reconciliation&module=costs&section=expenses#module-business-data`}
+        >
+          去完成费用
+        </Link>
+      )}
+    </div>
   );
 }
 

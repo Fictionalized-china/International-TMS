@@ -20267,6 +20267,39 @@ html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animatio
   border-radius: 0;
 }
 
+.linear-order-page .costs-review-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border-top: 1px solid #d6e5f2;
+  background: #f6f9fc;
+}
+.linear-order-page .costs-review-entry > div {
+  display: grid;
+  gap: 3px;
+}
+.linear-order-page .costs-review-entry strong {
+  color: #173654;
+  font-size: 11px;
+}
+.linear-order-page .costs-review-entry span {
+  color: #61758a;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.linear-order-page .costs-review-entry.ready {
+  border-top-color: #9fd6b7;
+  background: #eefaf3;
+}
+.linear-order-page .costs-review-entry.ready strong { color: #075f40; }
+.linear-order-page .costs-review-entry > a {
+  min-width: 104px;
+  text-align: center;
+  text-decoration: none;
+}
+
 @media (max-width: 760px) {
   .linear-order-page .dense-module-stack .module-business-section > header {
     padding-inline: 8px;
