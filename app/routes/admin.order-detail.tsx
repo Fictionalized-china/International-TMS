@@ -1,5 +1,6 @@
 ﻿import { env } from "cloudflare:workers";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 import { Form, Link, redirect, useNavigate, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.order-detail";
 import { canEditWorkflowDefinition, requireSessionUser } from "../lib/auth.server";
@@ -1125,6 +1126,7 @@ function OrderDossierSection({ order }: { order: Order }) {
 }
 
 function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, documentReviewSignal }: { data: Route.ComponentProps["loaderData"]; rows: WorkflowFormRow[]; selectedStep: (BusinessWorkflowStep & { rows: WorkflowFormRow[] }) | null; viewingCurrent: boolean; busy: boolean; documentReviewSignal?: unknown }) {
+  const navigate = useNavigate();
   const selectedModuleCode = data.embeddedModuleCode;
   const [selectedConsignmentSection, setSelectedConsignmentSection] = useState(data.selectedConsignmentSection);
   const [selectedCustomsSection, setSelectedCustomsSection] = useState(data.selectedCustomsSection);
@@ -1192,17 +1194,78 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, 
       setSelectedCostsSection(section as "files" | "expenses");
     }
   };
+  const canActivateTabLocally = (moduleCode: string | null, section: string | null) => moduleCode === selectedModuleCode && (
+    (moduleCode === "consignment" && ["info", "files", "costs"].includes(section || ""))
+    || (moduleCode === "customs" && ["files", "declarations"].includes(section || ""))
+    || (moduleCode === "costs" && ["files", "expenses"].includes(section || ""))
+  );
+  const switchLocalTab = (
+    event: ReactMouseEvent<HTMLAnchorElement>,
+    moduleCode: string | null,
+    section: string | null,
+    href: string,
+    targetIndex: number,
+    currentIndex: number,
+  ) => {
+    if (!canActivateTabLocally(moduleCode, section)
+      || event.button !== 0
+      || event.metaKey
+      || event.ctrlKey
+      || event.shiftKey
+      || event.altKey) return;
+    event.preventDefault();
+    if (targetIndex === currentIndex) return;
+
+    const commitTab = () => activateTab(moduleCode, section);
+    const syncUrl = () => navigate(href, { preventScrollReset: true });
+    const root = document.documentElement;
+    const reduceMotion = root.dataset.motion === "off" || window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const transitionDocument = document as Document & {
+      startViewTransition?: (update: () => void) => { ready: Promise<void>; finished: Promise<void> };
+    };
+    if (!transitionDocument.startViewTransition || reduceMotion) {
+      commitTab();
+      syncUrl();
+      return;
+    }
+
+    const direction = targetIndex < currentIndex ? "backward" : "forward";
+    root.dataset.moduleTabDirection = direction;
+    const transition = transitionDocument.startViewTransition(() => flushSync(commitTab));
+    let urlSynced = false;
+    const syncUrlOnce = () => {
+      if (urlSynced) return;
+      urlSynced = true;
+      syncUrl();
+    };
+    void transition.ready.then(syncUrlOnce, syncUrlOnce);
+    const clearDirection = () => {
+      if (root.dataset.moduleTabDirection === direction) delete root.dataset.moduleTabDirection;
+    };
+    void transition.finished.then(clearDirection, clearDirection);
+  };
   const activeTabKey = `${selectedStep.step_key}:${selectedModuleCode || "none"}:${selectedModuleSection || "main"}`;
+  const orderCreationActiveIndex = orderCreationTabs.findIndex((tab) => selectedSection === tab.key);
+  const businessActiveIndex = businessTabs.findIndex((tab) => {
+    const activeSection = tab.moduleCode === "customs"
+      ? selectedCustomsSection
+      : tab.moduleCode === "costs"
+        ? selectedCostsSection
+        : null;
+    return tab.moduleCode === selectedModuleCode && (tab.section === null || tab.section === activeSection);
+  });
   return <div id="node-fields">
     {isOrderCreation ? (
       <nav className="linear-module-tabs" aria-label="委托资料补充分区">
-        {orderCreationTabs.map((tab) => {
+        {orderCreationTabs.map((tab, tabIndex) => {
           const isActive = selectedSection === tab.key;
-          return <Link key={tab.key} className={isActive ? "active" : ""} aria-current={isActive ? "page" : undefined} viewTransition preventScrollReset onClick={() => activateTab(tab.module, tab.section || null)} to={orderModuleTabHref({ orderId: data.order.id, stepKey: selectedStep.step_key, moduleCode: tab.module, section: tab.section || null })}>{tab.label}{tabHasRequiredMissing(tab.key) && <b className="tab-required-star" title="存在必填但未填内容" aria-label="存在必填但未填内容">*</b>}</Link>;
+          const tabHref = orderModuleTabHref({ orderId: data.order.id, stepKey: selectedStep.step_key, moduleCode: tab.module, section: tab.section || null });
+          const localSwitch = canActivateTabLocally(tab.module, tab.section || null);
+          return <Link key={tab.key} className={isActive ? "active" : ""} aria-current={isActive ? "page" : undefined} viewTransition={!localSwitch} preventScrollReset onClick={(event) => switchLocalTab(event, tab.module, tab.section || null, tabHref, tabIndex, orderCreationActiveIndex)} to={tabHref}>{tab.label}{tabHasRequiredMissing(tab.key) && <b className="tab-required-star" title="存在必填但未填内容" aria-label="存在必填但未填内容">*</b>}</Link>;
         })}
       </nav>
     ) : businessTabs.length > 1 ? (
-      <nav className="linear-module-tabs" aria-label="本节点业务分区">{businessTabs.map((tab) => {
+      <nav className="linear-module-tabs" aria-label="本节点业务分区">{businessTabs.map((tab, tabIndex) => {
         const missing = moduleHasRequiredMissing(tab.moduleCode, tab.section);
         const attention = tab.moduleCode === "customs" && tab.section === "files"
           ? missing ? "required" : null
@@ -1213,14 +1276,16 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, 
             ? selectedCostsSection
             : null;
         const isActive = tab.moduleCode === selectedModuleCode && (tab.section === null || tab.section === activeSection);
+        const tabHref = orderModuleTabHref({ orderId: data.order.id, stepKey: selectedStep.step_key, moduleCode: tab.moduleCode, section: tab.section });
+        const localSwitch = canActivateTabLocally(tab.moduleCode, tab.section);
         return <Link
           key={tab.key}
           className={isActive ? "active" : ""}
           aria-current={isActive ? "page" : undefined}
-          viewTransition
+          viewTransition={!localSwitch}
           preventScrollReset
-          onClick={() => activateTab(tab.moduleCode, tab.section)}
-          to={orderModuleTabHref({ orderId: data.order.id, stepKey: selectedStep.step_key, moduleCode: tab.moduleCode, section: tab.section })}
+          onClick={(event) => switchLocalTab(event, tab.moduleCode, tab.section, tabHref, tabIndex, businessActiveIndex)}
+          to={tabHref}
         >
           {tab.label}
           {attention === "action" && <b className="tab-required-star" title="报关单待办理" aria-label="报关单待办理">*</b>}

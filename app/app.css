@@ -19030,9 +19030,21 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   from { opacity: 1; transform: translateX(0); }
   to { opacity: .15; transform: translateX(-18px); }
 }
-::view-transition-group(linear-module-tab-panel) { animation-duration: 190ms; }
-::view-transition-old(linear-module-tab-panel) { animation: linear-module-tab-exit 150ms ease-in both; }
-::view-transition-new(linear-module-tab-panel) { animation: linear-module-tab-enter 190ms ease-out both; }
+@keyframes linear-module-tab-enter-backward {
+  from { opacity: .25; transform: translateX(-18px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes linear-module-tab-exit-backward {
+  from { opacity: 1; transform: translateX(0); }
+  to { opacity: .15; transform: translateX(18px); }
+}
+::view-transition-group(linear-module-tab-panel) { animation: none; }
+::view-transition-old(linear-module-tab-panel),
+::view-transition-new(linear-module-tab-panel) { mix-blend-mode: normal; }
+::view-transition-old(linear-module-tab-panel) { animation: linear-module-tab-exit 180ms cubic-bezier(.4, 0, 1, 1) both; }
+::view-transition-new(linear-module-tab-panel) { animation: linear-module-tab-enter 220ms cubic-bezier(.22, 1, .36, 1) both; }
+html[data-module-tab-direction="backward"]::view-transition-old(linear-module-tab-panel) { animation-name: linear-module-tab-exit-backward; }
+html[data-module-tab-direction="backward"]::view-transition-new(linear-module-tab-panel) { animation-name: linear-module-tab-enter-backward; }
 @supports not (view-transition-name: linear-module-tab-panel) {
   .linear-order-page .linear-module-tab-panel { animation: linear-module-tab-enter 190ms ease-out; }
 }
