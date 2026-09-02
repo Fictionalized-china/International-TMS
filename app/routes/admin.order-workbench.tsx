@@ -4,6 +4,7 @@ import { Form, Link } from "react-router";
 import type { Route } from "./+types/admin.order-workbench";
 import { OrderNumberLink } from "../components/EntityNumberLink";
 import { requireSessionUser } from "../lib/auth.server";
+import { orderVisibilitySql, requireOrderAccess } from "../lib/order-access.server";
 import { writeAudit } from "../lib/audit.server";
 import { assignOrderModule } from "../lib/order-modules.server";
 import {
@@ -107,8 +108,12 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     workspace,
     current.organizationId,
   );
-  const conditions: string[] = [];
+  const visibility = orderVisibilitySql(current, "scope_order");
+  const conditions: string[] = [
+    `order_id IN (SELECT scope_order.id FROM transport_orders scope_order WHERE scope_order.organization_id=? AND ${visibility.sql})`,
+  ];
   const filterBindings: unknown[] = [...bindings];
+  filterBindings.push(current.organizationId, ...visibility.values);
 
   if (q) {
     conditions.push(
@@ -241,6 +246,7 @@ export async function action({ request, params }: Route.ActionArgs): Promise<Act
     current.organizationId,
     selectedIds,
   );
+  for (const candidate of candidates) await requireOrderAccess(current, candidate.order_id);
   const checks = validateWorkbenchBatch(
     selectedIds,
     candidates,

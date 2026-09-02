@@ -4,6 +4,7 @@ import type { Route } from "./+types/dashboard.index";
 import { requireSessionUser } from "../lib/auth.server";
 import { loadOrderGuidance } from "../lib/order-guidance.server";
 import { AppIcon } from "../components/AppIcon";
+import { orderVisibilitySql } from "../lib/order-access.server";
 
 const dashboardViewCodes = ["todo", "blocked", "in_progress", "unsettled"] as const;
 type DashboardViewCode = (typeof dashboardViewCodes)[number];
@@ -28,7 +29,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const selectedView: DashboardViewCode = dashboardViewCodes.includes(requestedView as DashboardViewCode)
     ? requestedView as DashboardViewCode
     : "todo";
-  const canViewAll = user.permissions.includes("order.manage") ? 1 : 0;
+  const visibility = orderVisibilitySql(user, "o");
   const result = await env.DB.prepare(
     `SELECT o.id,o.order_number,o.status,COALESCE(o.completion_status,'in_progress') completion_status,
             o.business_type,o.origin_city,o.destination_city,o.is_overdue,c.name customer_name,
@@ -36,12 +37,10 @@ export async function loader({ request }: Route.LoaderArgs) {
        FROM transport_orders o
        JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
       WHERE o.organization_id=? AND o.status!='cancelled'
-        AND (?=1 OR o.current_assignee_user_id=? OR o.created_by_user_id=? OR EXISTS(
-          SELECT 1 FROM order_module_instances m WHERE m.order_id=o.id AND m.assignee_user_id=?
-        ))
+        AND ${visibility.sql}
       ORDER BY o.is_overdue DESC,COALESCE(o.workflow_updated_at,o.updated_at,o.created_at) DESC
       LIMIT 300`,
-  ).bind(user.organizationId, canViewAll, user.userId, user.userId, user.userId).all<DashboardOrderRow>();
+  ).bind(user.organizationId, ...visibility.values).all<DashboardOrderRow>();
   const rows = result.results ?? [];
   const guidance = await loadOrderGuidance(env.DB, user.organizationId, rows.map(({ id, order_number, status }) => ({ id, order_number, status })));
   const allOrders = rows.map((order) => ({ order, ...guidance.get(order.id)! }));

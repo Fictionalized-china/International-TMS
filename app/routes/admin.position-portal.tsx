@@ -3,6 +3,7 @@ import { Form, Link } from "react-router";
 import type { Route } from "./+types/admin.position-portal";
 import { OrderNumberLink } from "../components/EntityNumberLink";
 import { requireSessionUser } from "../lib/auth.server";
+import { canSeeScopedOrder, canViewAllOrders } from "../lib/order-access.server";
 import {
   orderNextGuidance,
   type GuidanceModule,
@@ -23,6 +24,9 @@ type PortalModuleRow = GuidanceModule & {
   volume_cbm: number;
   is_overdue: number;
   updated_at: string;
+  salesperson_user_id: string | null;
+  created_by_user_id: string | null;
+  customer_sales_owner_user_id: string | null;
 };
 
 type WorkflowTaskRow = {
@@ -57,8 +61,7 @@ export async function loader({ request }: Route.LoaderArgs) {
        WHERE p.organization_id=? AND p.code=?`,
     ).bind(current.organizationId, current.positionCode).first<PortalSettings>()
     : null;
-  const privileged = current.roleCodes.some((code) => ["owner", "boss", "developer"].includes(code));
-  const canViewAll = settings?.order_scope === "all_orders" || (privileged && !settings);
+  const canViewAll = canViewAllOrders(current);
   const requestedFilter = url.searchParams.get("state");
   const stateFilter = ["open", "all", "blocked", "overdue"].includes(requestedFilter || "")
     ? requestedFilter!
@@ -73,7 +76,8 @@ export async function loader({ request }: Route.LoaderArgs) {
     env.DB.prepare(
     `SELECT o.id order_id,o.order_number,o.status order_status,o.business_type,
             o.origin_city,o.destination_city,o.pieces,o.gross_weight_kg,o.volume_cbm,
-            o.is_overdue,c.name customer_name,
+            o.is_overdue,o.salesperson_user_id,o.created_by_user_id,
+            c.sales_owner_user_id customer_sales_owner_user_id,c.name customer_name,
             m.module_code,m.module_name,m.enabled,m.is_required,m.status,
             m.current_step_code,m.current_step_name,m.blocking_reason,
             m.progress_percent,u.display_name assignee_name,
@@ -170,6 +174,9 @@ export async function loader({ request }: Route.LoaderArgs) {
       blocker: guidance.blocker,
       responsible_position_code: responsible.code,
       responsible_position_name: responsible.name,
+      salesperson_user_id: order.salesperson_user_id,
+      created_by_user_id: order.created_by_user_id,
+      customer_sales_owner_user_id: order.customer_sales_owner_user_id,
       href: effectiveModuleCode
         ? `/admin/orders/${order.order_id}/modules/${effectiveModuleCode}#module-business-data`
         : guidance.href,
@@ -177,9 +184,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     };
   });
 
-  const scopedOrders = canViewAll
-    ? allOrders
-    : allOrders.filter((order) => order.responsible_position_code === current.positionCode);
+  const scopedOrders = allOrders.filter((order) => canSeeScopedOrder(current, order));
   const visible = scopedOrders.filter((order) => {
     if (stateFilter === "open" && ["completed", "cancelled"].includes(order.order_status)) return false;
     if (stateFilter === "blocked" && !order.blocker) return false;

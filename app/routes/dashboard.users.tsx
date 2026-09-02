@@ -7,20 +7,23 @@ import { hashPassword } from "../lib/crypto.server";
 import { validateEmail, validatePassword, valueOf, type FieldErrors } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import { Modal } from "../components/Modal";
+import { roleCodeForPosition } from "../lib/position-role";
+import { isProtectedAccessRole } from "../lib/permission-blocks";
 
-type MemberRow = { membership_id: string; user_id: string; display_name: string; email: string; title: string | null; department_id:string|null; department_name:string|null; position_id:string|null; position_name:string|null; status: string; roles: string | null; role_ids: string | null; last_login_at: string | null };
+type MemberRow = { membership_id: string; user_id: string; display_name: string; email: string; title: string | null; department_id:string|null; department_name:string|null; position_id:string|null; position_name:string|null; status: string; roles: string | null; role_ids: string | null; role_codes: string | null; last_login_at: string | null };
 type Department = { id:string; parent_id:string|null; name:string; status:string; sort_order:number };
-type PositionOption = { id:string; name:string; department_id:string };
+type PositionOption = { id:string; code:string; name:string; department_id:string };
 
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "user.view");
   const [members,roles,departments,positions] = await Promise.all([
-    env.DB.prepare(`SELECT m.id AS membership_id, u.id AS user_id, u.display_name, u.email, m.title, m.department_id, d.name AS department_name, m.position_id, p.name AS position_name, m.status, u.last_login_at, GROUP_CONCAT(r.name, '、') AS roles, GROUP_CONCAT(r.id) AS role_ids FROM memberships m JOIN users u ON u.id = m.user_id LEFT JOIN departments d ON d.id=m.department_id AND d.organization_id=m.organization_id LEFT JOIN positions p ON p.id=m.position_id AND p.organization_id=m.organization_id LEFT JOIN membership_roles mr ON mr.membership_id = m.id LEFT JOIN roles r ON r.id = mr.role_id WHERE m.organization_id = ? GROUP BY m.id ORDER BY d.sort_order,p.sort_order,u.display_name`).bind(current.organizationId).all<MemberRow>(),
-    env.DB.prepare("SELECT id, name FROM roles WHERE organization_id = ? ORDER BY name").bind(current.organizationId).all<{ id: string; name: string }>(),
+    env.DB.prepare(`SELECT m.id AS membership_id, u.id AS user_id, u.display_name, u.email, m.title, m.department_id, d.name AS department_name, m.position_id, p.name AS position_name, m.status, u.last_login_at, GROUP_CONCAT(r.name, '、') AS roles, GROUP_CONCAT(r.id) AS role_ids, GROUP_CONCAT(DISTINCT r.code) AS role_codes FROM memberships m JOIN users u ON u.id = m.user_id LEFT JOIN departments d ON d.id=m.department_id AND d.organization_id=m.organization_id LEFT JOIN positions p ON p.id=m.position_id AND p.organization_id=m.organization_id LEFT JOIN membership_roles mr ON mr.membership_id = m.id LEFT JOIN roles r ON r.id = mr.role_id WHERE m.organization_id = ? GROUP BY m.id ORDER BY d.sort_order,p.sort_order,u.display_name`).bind(current.organizationId).all<MemberRow>(),
+    env.DB.prepare("SELECT id, name FROM roles WHERE organization_id = ? AND status='active' ORDER BY name").bind(current.organizationId).all<{ id: string; name: string }>(),
     env.DB.prepare("SELECT id,parent_id,name,status,sort_order FROM departments WHERE organization_id=? ORDER BY sort_order,name").bind(current.organizationId).all<Department>(),
-    env.DB.prepare(`SELECT p.id,p.name,d.id department_id FROM positions p JOIN departments d ON d.organization_id=p.organization_id AND d.code=p.department_code AND d.status='active' WHERE p.organization_id=? AND p.status='active' ORDER BY d.sort_order,p.sort_order,p.name`).bind(current.organizationId).all<PositionOption>(),
+    env.DB.prepare(`SELECT p.id,p.code,p.name,d.id department_id FROM positions p JOIN departments d ON d.organization_id=p.organization_id AND d.code=p.department_code AND d.status='active' WHERE p.organization_id=? AND p.status='active' ORDER BY d.sort_order,p.sort_order,p.name`).bind(current.organizationId).all<PositionOption>(),
   ]);
-  return { current, members: members.results, roles: roles.results, departments:departments.results, positions:positions.results };
+  const canAssignProtectedPosition=isProtectedAccessRole(current.roleCodes);
+  return { current, members: members.results, roles: roles.results, departments:departments.results, positions:positions.results.filter((position)=>canAssignProtectedPosition||!["BOSS","DEVELOPER"].includes(position.code)) };
 }
 
 export async function action({ request }: Route.ActionArgs) {
@@ -28,22 +31,23 @@ export async function action({ request }: Route.ActionArgs) {
   const form = await request.formData();
   const intent = valueOf(form, "intent");
   if (intent === "role") {
-    const membershipId = valueOf(form, "membershipId"), roleId = valueOf(form, "roleId");
-    const valid = await env.DB.prepare("SELECT m.id FROM memberships m JOIN roles r ON r.organization_id = m.organization_id WHERE m.id = ? AND r.id = ? AND m.organization_id = ?").bind(membershipId, roleId, current.organizationId).first();
-    if (!valid) return { formError: "成员或角色无效" };
-    await env.DB.batch([
-      env.DB.prepare("DELETE FROM membership_roles WHERE membership_id = ?").bind(membershipId),
-      env.DB.prepare("INSERT INTO membership_roles (membership_id, role_id) VALUES (?, ?)").bind(membershipId, roleId),
-    ]);
-    await writeAudit({ request, action: "membership.role.assign", resourceType: "membership", resourceId: membershipId, organizationId: current.organizationId, actorUserId: current.userId, metadata: { roleId } });
-    return { success: "成员角色已更新" };
+    return { formError: "角色随岗位自动匹配；个人差异请在角色权限中配置账户权限积木" };
   }
   if (intent === "department") {
     const membershipId=valueOf(form,"membershipId"),positionId=valueOf(form,"positionId");
-    const membership=await env.DB.prepare("SELECT id FROM memberships WHERE id=? AND organization_id=?").bind(membershipId,current.organizationId).first();
-    const placement=await env.DB.prepare(`SELECT p.id position_id,p.name position_name,d.id department_id FROM positions p JOIN departments d ON d.organization_id=p.organization_id AND d.code=p.department_code AND d.status='active' WHERE p.id=? AND p.organization_id=? AND p.status='active'`).bind(positionId,current.organizationId).first<{position_id:string;position_name:string;department_id:string}>();
+    const membership=await env.DB.prepare(`SELECT m.id,GROUP_CONCAT(DISTINCT r.code) role_codes FROM memberships m LEFT JOIN membership_roles mr ON mr.membership_id=m.id LEFT JOIN roles r ON r.id=mr.role_id WHERE m.id=? AND m.organization_id=? GROUP BY m.id`).bind(membershipId,current.organizationId).first<{id:string;role_codes:string|null}>();
+    const placement=await env.DB.prepare(`SELECT p.id position_id,p.code position_code,p.name position_name,d.id department_id FROM positions p JOIN departments d ON d.organization_id=p.organization_id AND d.code=p.department_code AND d.status='active' WHERE p.id=? AND p.organization_id=? AND p.status='active'`).bind(positionId,current.organizationId).first<{position_id:string;position_code:string;position_name:string;department_id:string}>();
     if(!membership||!placement)return{formError:"请选择有效的部门和岗位"};
-    await env.DB.prepare("UPDATE memberships SET department_id=?,position_id=?,title=?,updated_at=? WHERE id=? AND organization_id=?").bind(placement.department_id,placement.position_id,placement.position_name,new Date().toISOString(),membershipId,current.organizationId).run();
+    if(isProtectedAccessRole((membership.role_codes??"").split(",").filter(Boolean)))return{formError:"老板/所有者账户的岗位和角色不可修改"};
+    if(["BOSS","DEVELOPER"].includes(placement.position_code)&&!isProtectedAccessRole(current.roleCodes))return{formError:"只有老板/所有者可以分配受保护岗位"};
+    const roleCode=roleCodeForPosition(placement.position_code);
+    const role=await env.DB.prepare("SELECT id FROM roles WHERE organization_id=? AND code=? AND status='active'").bind(current.organizationId,roleCode).first<{id:string}>();
+    if(!role)return{formError:`岗位 ${placement.position_name} 尚未配置可用角色`};
+    await env.DB.batch([
+      env.DB.prepare("UPDATE memberships SET department_id=?,position_id=?,title=?,updated_at=? WHERE id=? AND organization_id=?").bind(placement.department_id,placement.position_id,placement.position_name,new Date().toISOString(),membershipId,current.organizationId),
+      env.DB.prepare("DELETE FROM membership_roles WHERE membership_id=? AND role_id IN (SELECT id FROM roles WHERE organization_id=? AND (code LIKE 'pos_%' OR code IN ('boss','developer','warehouse_operator','overseas_warehouse_operator')))").bind(membershipId,current.organizationId),
+      env.DB.prepare("INSERT OR IGNORE INTO membership_roles(membership_id,role_id) VALUES(?,?)").bind(membershipId,role.id),
+    ]);
     await writeAudit({request,action:"membership.organization.assign",resourceType:"membership",resourceId:membershipId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{departmentId:placement.department_id,positionId:placement.position_id}});
     return{success:"用户的部门和岗位已更新"};
   }
@@ -51,6 +55,8 @@ export async function action({ request }: Route.ActionArgs) {
     const membershipId = valueOf(form, "membershipId");
     const membership = await env.DB.prepare("SELECT user_id, status FROM memberships WHERE id = ? AND organization_id = ?").bind(membershipId, current.organizationId).first<{ user_id: string; status: string }>();
     if (!membership || membership.user_id === current.userId) return { formError: "不能停用当前登录用户" };
+    const protectedRoles=await env.DB.prepare(`SELECT GROUP_CONCAT(r.code) role_codes FROM membership_roles mr JOIN roles r ON r.id=mr.role_id WHERE mr.membership_id=?`).bind(membershipId).first<{role_codes:string|null}>();
+    if(isProtectedAccessRole((protectedRoles?.role_codes??"").split(",").filter(Boolean)))return{formError:"老板/所有者账户不能停用"};
     const next = membership.status === "active" ? "disabled" : "active";
     await env.DB.prepare("UPDATE memberships SET status = ?, updated_at = ? WHERE id = ? AND organization_id = ?").bind(next, new Date().toISOString(), membershipId, current.organizationId).run();
     await writeAudit({ request, action: `membership.${next}`, resourceType: "membership", resourceId: membershipId, organizationId: current.organizationId, actorUserId: current.userId });
@@ -60,24 +66,25 @@ export async function action({ request }: Route.ActionArgs) {
   const displayName = valueOf(form, "displayName");
   const email = valueOf(form, "email").toLowerCase();
   const password = valueOf(form, "password");
-  const roleId = valueOf(form, "roleId");
   const positionId=valueOf(form,"positionId");
   const errors: FieldErrors = {};
   if (displayName.length < 2 || displayName.length > 80) errors.displayName = "姓名需要 2-80 个字符";
   const emailError = validateEmail(email); if (emailError) errors.email = emailError;
   const passwordError = validatePassword(password); if (passwordError) errors.password = passwordError;
-  const role = await env.DB.prepare("SELECT id FROM roles WHERE id = ? AND organization_id = ?").bind(roleId, current.organizationId).first();
-  if (!role) errors.roleId = "请选择有效角色";
-  const placement=await env.DB.prepare(`SELECT p.id position_id,p.name position_name,d.id department_id FROM positions p JOIN departments d ON d.organization_id=p.organization_id AND d.code=p.department_code AND d.status='active' WHERE p.id=? AND p.organization_id=? AND p.status='active'`).bind(positionId,current.organizationId).first<{position_id:string;position_name:string;department_id:string}>();
+  const placement=await env.DB.prepare(`SELECT p.id position_id,p.code position_code,p.name position_name,d.id department_id FROM positions p JOIN departments d ON d.organization_id=p.organization_id AND d.code=p.department_code AND d.status='active' WHERE p.id=? AND p.organization_id=? AND p.status='active'`).bind(positionId,current.organizationId).first<{position_id:string;position_code:string;position_name:string;department_id:string}>();
   if(!placement)errors.positionId="请选择有效的部门和岗位";
-  if (Object.keys(errors).length) return { errors, values: { displayName, email, roleId,departmentId:valueOf(form,"departmentId"),positionId } };
+  const automaticRoleCode=placement?roleCodeForPosition(placement.position_code):"";
+  if(placement&&["BOSS","DEVELOPER"].includes(placement.position_code)&&!isProtectedAccessRole(current.roleCodes))errors.positionId="只有老板/所有者可以创建受保护岗位账号";
+  const role=automaticRoleCode?await env.DB.prepare("SELECT id FROM roles WHERE organization_id=? AND code=? AND status='active'").bind(current.organizationId,automaticRoleCode).first<{id:string}>():null;
+  if(placement&&!role)errors.positionId=`岗位 ${placement.position_name} 尚未配置可用角色`;
+  if (Object.keys(errors).length) return { errors, values: { displayName, email,departmentId:valueOf(form,"departmentId"),positionId } };
   const duplicate = await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(email).first();
-  if (duplicate) return { formError: "该邮箱已经存在；跨组织用户关联将在后续版本提供", values: { displayName, email, roleId,departmentId:valueOf(form,"departmentId"),positionId } };
+  if (duplicate) return { formError: "该邮箱已经存在；跨组织用户关联将在后续版本提供", values: { displayName, email,departmentId:valueOf(form,"departmentId"),positionId } };
   const now = new Date().toISOString(), userId = crypto.randomUUID(), membershipId = crypto.randomUUID();
   await env.DB.batch([
     env.DB.prepare("INSERT INTO users (id, email, password_hash, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)").bind(userId, email, await hashPassword(password), displayName, now, now),
     env.DB.prepare("INSERT INTO memberships (id, organization_id, user_id, title, department_id, position_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(membershipId, current.organizationId, userId, placement!.position_name, placement!.department_id, placement!.position_id, now, now),
-    env.DB.prepare("INSERT INTO membership_roles (membership_id, role_id) VALUES (?, ?)").bind(membershipId, roleId),
+    env.DB.prepare("INSERT INTO membership_roles (membership_id, role_id) VALUES (?, ?)").bind(membershipId, role!.id),
   ]);
   await writeAudit({ request, action: "user.create", resourceType: "user", resourceId: userId, organizationId: current.organizationId, actorUserId: current.userId, metadata: { email, departmentId: placement!.department_id, positionId: placement!.position_id } });
   return { success: "用户已创建" };
@@ -126,14 +133,7 @@ export default function Users({ loaderData, actionData }: Route.ComponentProps) 
             />
             {errors?.positionId && <small className="field-error">{errors.positionId}</small>}
           </div>
-          <label className="field">
-            <span>角色</span>
-            <select name="roleId" required defaultValue={values?.roleId}>
-              <option value="">请选择</option>
-              {loaderData.roles.map((role) => <option key={role.id} value={role.id}>{role.name}</option>)}
-            </select>
-            {errors?.roleId && <small className="field-error">{errors.roleId}</small>}
-          </label>
+          <div className="field"><span>角色</span><p className="field-static-note">由所选岗位自动匹配；个人增减权限请前往“角色权限 → 账户权限积木”。</p></div>
           <label className="field span-2">
             <span>初始密码</span>
             <input name="password" type="password" required/>
@@ -155,10 +155,10 @@ export default function Users({ loaderData, actionData }: Route.ComponentProps) 
       <div className="table-wrap">
         <table>
           <thead><tr><th>成员</th><th colSpan={2}>组织归属（部门 → 岗位）</th><th>角色</th><th>最近登录</th><th>状态</th><th></th></tr></thead>
-          <tbody>{loaderData.members.map((member) => <tr key={member.membership_id}>
+          <tbody>{loaderData.members.map((member) => {const protectedMember=isProtectedAccessRole((member.role_codes ?? "").split(",").filter(Boolean));return <tr key={member.membership_id}>
             <td><strong>{member.display_name}</strong><small>{member.email}</small></td>
             <td colSpan={2}>
-              {canManage ? <Form method="post" className="member-placement-form">
+              {canManage&&!protectedMember ? <Form method="post" className="member-placement-form">
                 <input type="hidden" name="intent" value="department"/>
                 <input type="hidden" name="membershipId" value={member.membership_id}/>
                 <OrganizationPlacementFields
@@ -168,24 +168,17 @@ export default function Users({ loaderData, actionData }: Route.ComponentProps) 
                   defaultPositionId={member.position_id ?? ""}
                 />
                 <button className="text-button" disabled={busy}>保存归属</button>
-              </Form> : `${member.department_name || "未分配"} / ${member.position_name || "未分配"}`}
+              </Form> : `${member.department_name || "未分配"} / ${member.position_name || "未分配"}${protectedMember?" · 系统保护":""}`}
             </td>
-            <td>{canManage ? <Form method="post" className="inline-form">
-              <input type="hidden" name="intent" value="role"/>
-              <input type="hidden" name="membershipId" value={member.membership_id}/>
-              <select name="roleId" defaultValue={member.role_ids?.split(",")[0] || ""}>
-                {loaderData.roles.map((role) => <option key={role.id} value={role.id}>{role.name}</option>)}
-              </select>
-              <button className="text-button">分配</button>
-            </Form> : member.roles || "未分配"}</td>
+            <td><strong>{member.roles || "未分配"}</strong><small>随岗位自动匹配；个人差异使用权限积木</small></td>
             <td>{member.last_login_at ? new Date(member.last_login_at).toLocaleString("zh-CN") : "从未"}</td>
             <td><span className={`status-pill ${member.status !== "active" ? "off" : ""}`}>{member.status === "active" ? "有效" : "已停用"}</span></td>
-            <td>{canManage && member.user_id !== loaderData.current.userId && <Form method="post">
+            <td>{canManage && !protectedMember && member.user_id !== loaderData.current.userId && <Form method="post">
               <input type="hidden" name="intent" value="toggle"/>
               <input type="hidden" name="membershipId" value={member.membership_id}/>
               <button className="text-button">{member.status === "active" ? "停用" : "恢复"}</button>
             </Form>}</td>
-          </tr>)}</tbody>
+          </tr>})}</tbody>
         </table>
       </div>
     </section>

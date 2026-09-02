@@ -25030,3 +25030,82 @@ html[data-motion="off"] *::after {
   .quote-workflow-field-grid > .field:nth-child(4n) { border-right: 1px solid #e0e7ed; }
   .quote-workflow-field-grid > .field:nth-child(2n) { border-right: 0; }
 }
+
+/* Modular role and account access editor. */
+.permission-section {
+  margin-top: 12px;
+  border: 1px solid #d9e2ea;
+  background: #fff;
+}
+.permission-section .section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 56px;
+  padding: 9px 12px;
+  border-bottom: 1px solid #d9e2ea;
+}
+.permission-section .section-heading h2 { margin: 0; font-size: 15px; }
+.permission-section .section-heading p,
+.permission-section .section-heading span { margin: 2px 0 0; color: #60758a; font-size: 11px; }
+.role-permission-cards { margin: 0; border: 0; }
+.role-permission-cards .role-card { display: grid; gap: 8px; min-height: 200px; }
+.role-permission-cards .role-card.is-disabled { background: #f7f9fb; opacity: .78; }
+.role-permission-cards .role-card > button { justify-self: start; }
+.permission-editor-form { display: grid; gap: 12px; }
+.permission-editor-notice {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 11px;
+  color: #174f79;
+  border: 1px solid #bcd8e8;
+  border-left: 3px solid #2684b8;
+  background: #f1f8fc;
+}
+.permission-editor-notice.warning { color: #7a4b12; border-color: #ead1a6; border-left-color: #d58a22; background: #fff9ee; }
+.permission-editor-notice span { color: inherit; font-size: 11px; }
+.permission-editor-form > .permission-grid { grid-column: 1 / -1; }
+.permission-editor-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  padding: 10px 0 2px;
+  background: #fff;
+  border-top: 1px solid #d9e2ea;
+}
+.permission-editor-actions span { margin-right: auto; color: #60758a; font-size: 11px; }
+.account-permission-table td { vertical-align: middle; }
+.account-permission-table td small { display: block; margin-top: 2px; color: #6b7e90; }
+.account-override-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.account-override-grid > section { border: 1px solid #d9e2ea; }
+.account-override-grid h3 { margin: 0; padding: 8px 10px; font-size: 12px; background: #f3f6f9; border-bottom: 1px solid #d9e2ea; }
+.account-override-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 118px;
+  align-items: center;
+  gap: 10px;
+  min-height: 50px;
+  padding: 6px 9px;
+  border-bottom: 1px solid #edf1f4;
+}
+.account-override-row:last-child { border-bottom: 0; }
+.account-override-row b,
+.account-override-row small { display: block; }
+.account-override-row b { font-size: 11px; }
+.account-override-row small { margin-top: 2px; color: #667b8f; font-size: 10px; line-height: 1.35; }
+.account-override-row select { width: 100%; min-height: 30px; }
+@media (max-width: 900px) {
+  .account-override-grid { grid-template-columns: 1fr; }
+  .permission-editor-notice,
+  .permission-editor-actions { align-items: stretch; flex-direction: column; }
+}

@@ -8,11 +8,11 @@ import {
 describe("position portal", () => {
   it("maps each position to a focused portal", () => {
     const finance = positionPortalForUser({
-      positionCode: "FINANCE",
+      positionCode: "FINANCE_ACCOUNTING",
       roleCodes: ["pos_finance"],
       permissions: ["order.view", "billing.view"],
     });
-    expect(finance.title).toBe("财务门户");
+    expect(finance.title).toBe("财务会计岗门户");
     expect(finance.moduleCodes).toEqual(["costs", "review"]);
     expect(visiblePortalLinks(finance, ["order.view", "billing.view"]).map((item) => item.label))
       .toEqual(["费用待办", "费用结算"]);

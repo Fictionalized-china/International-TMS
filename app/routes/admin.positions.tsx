@@ -5,6 +5,8 @@ import { ConfirmAction } from "../components/ConfirmAction";
 import { requireSessionUser } from "../lib/auth.server";
 import { writeAudit } from "../lib/audit.server";
 import { valueOf } from "../lib/validation";
+import { roleCodeForPosition } from "../lib/position-role";
+import { isProtectedAccessRole } from "../lib/permission-blocks";
 
 type Position = {
   id: string;
@@ -30,21 +32,6 @@ type Member = {
   position_id: string | null;
   position_name: string | null;
   role_codes: string | null;
-};
-
-const positionRoleMap: Record<string, string> = {
-  BOSS: "boss",
-  DEVELOPER: "developer",
-  DOC: "pos_doc",
-  CS: "pos_customer_service",
-  FINANCE: "pos_finance",
-  SALES: "pos_sales",
-  OVERSEAS: "pos_overseas",
-  CONTAINER: "pos_container",
-  SALES_ASSISTANT: "pos_sales_assistant",
-  OPERATION: "pos_operation",
-  BUSINESS_ROUTE: "pos_business_route",
-  BOOKING: "pos_booking",
 };
 
 const permissionLabels: Record<string, string> = {
@@ -90,6 +77,13 @@ export async function loader({ request }: Route.LoaderArgs) {
                 WHEN 'OPERATION' THEN 'pos_operation'
                 WHEN 'BUSINESS_ROUTE' THEN 'pos_business_route'
                 WHEN 'BOOKING' THEN 'pos_booking'
+                WHEN 'TRACKING' THEN 'pos_tracking'
+                WHEN 'LOADING' THEN 'pos_front_loading'
+                WHEN 'FINANCE_ACCOUNTING' THEN 'pos_finance'
+                WHEN 'CASHIER' THEN 'pos_cashier'
+                WHEN 'HR_ADMIN' THEN 'pos_hr_admin'
+                WHEN 'WAREHOUSE' THEN 'warehouse_operator'
+                WHEN 'OVERSEAS_WAREHOUSE' THEN 'overseas_warehouse_operator'
                 ELSE lower(p.code)
               END role_code,
               (SELECT GROUP_CONCAT(rp.permission_code)
@@ -109,6 +103,13 @@ export async function loader({ request }: Route.LoaderArgs) {
                     WHEN 'OPERATION' THEN 'pos_operation'
                     WHEN 'BUSINESS_ROUTE' THEN 'pos_business_route'
                     WHEN 'BOOKING' THEN 'pos_booking'
+                    WHEN 'TRACKING' THEN 'pos_tracking'
+                    WHEN 'LOADING' THEN 'pos_front_loading'
+                    WHEN 'FINANCE_ACCOUNTING' THEN 'pos_finance'
+                    WHEN 'CASHIER' THEN 'pos_cashier'
+                    WHEN 'HR_ADMIN' THEN 'pos_hr_admin'
+                    WHEN 'WAREHOUSE' THEN 'warehouse_operator'
+                    WHEN 'OVERSEAS_WAREHOUSE' THEN 'overseas_warehouse_operator'
                     ELSE lower(p.code)
                   END) permissions,
               COALESCE(pps.order_scope,CASE WHEN p.code IN ('BOSS','DEVELOPER') THEN 'all_orders' ELSE 'current_position' END) portal_order_scope,
@@ -166,16 +167,26 @@ export async function action({ request }: Route.ActionArgs) {
       department_id: string;
     }>();
     const membership = await env.DB.prepare(
-      "SELECT id FROM memberships WHERE id=? AND organization_id=? AND status='active'",
-    ).bind(membershipId, current.organizationId).first<{ id: string }>();
+      `SELECT m.id,GROUP_CONCAT(DISTINCT r.code) role_codes
+       FROM memberships m LEFT JOIN membership_roles mr ON mr.membership_id=m.id
+       LEFT JOIN roles r ON r.id=mr.role_id
+       WHERE m.id=? AND m.organization_id=? AND m.status='active' GROUP BY m.id`,
+    ).bind(membershipId, current.organizationId).first<{ id: string; role_codes: string | null }>();
     if (!position || !membership) return { formError: "请选择有效账号和岗位" };
-    const roleCode = positionRoleMap[position.code] ?? position.code.toLowerCase();
+    if (isProtectedAccessRole((membership.role_codes ?? "").split(",").filter(Boolean))) {
+      return { formError: "老板/所有者账户的岗位和角色不可修改" };
+    }
+    if (["BOSS", "DEVELOPER"].includes(position.code) && !isProtectedAccessRole(current.roleCodes)) {
+      return { formError: "只有老板/所有者可以分配受保护岗位" };
+    }
+    const roleCode = roleCodeForPosition(position.code);
     const role = await env.DB.prepare(
-      "SELECT id FROM roles WHERE organization_id=? AND code=?",
+      "SELECT id FROM roles WHERE organization_id=? AND code=? AND status='active'",
     ).bind(current.organizationId, roleCode).first<{ id: string }>();
     if (!role) return { formError: `岗位 ${position.name} 还没有对应角色，请先执行数据库迁移或在角色权限中补齐` };
     await env.DB.batch([
       env.DB.prepare("UPDATE memberships SET department_id=?,position_id=?,title=?,updated_at=? WHERE id=? AND organization_id=?").bind(position.department_id, position.id, position.name, now, membershipId, current.organizationId),
+      env.DB.prepare("DELETE FROM membership_roles WHERE membership_id=? AND role_id IN (SELECT id FROM roles WHERE organization_id=? AND (code LIKE 'pos_%' OR code IN ('boss','developer','warehouse_operator','overseas_warehouse_operator')))").bind(membershipId, current.organizationId),
       env.DB.prepare("INSERT OR IGNORE INTO membership_roles(membership_id,role_id) VALUES(?,?)").bind(membershipId, role.id),
     ]);
     await writeAudit({
@@ -220,9 +231,8 @@ export async function action({ request }: Route.ActionArgs) {
 
   if (intent === "portal_settings") {
     const positionId = valueOf(form, "positionId");
-    const orderScope = valueOf(form, "orderScope");
     const defaultFilter = valueOf(form, "defaultFilter");
-    if (!["current_position", "all_orders"].includes(orderScope) || !["open", "all", "blocked", "overdue"].includes(defaultFilter))
+    if (!["open", "all", "blocked", "overdue"].includes(defaultFilter))
       return { formError: "任务工作台配置无效" };
     const position = await env.DB.prepare("SELECT id FROM positions WHERE id=? AND organization_id=?").bind(positionId, current.organizationId).first();
     if (!position) return { formError: "岗位不存在" };
@@ -232,8 +242,8 @@ export async function action({ request }: Route.ActionArgs) {
        ON CONFLICT(organization_id,position_id) DO UPDATE SET
          order_scope=excluded.order_scope,default_filter=excluded.default_filter,
          updated_by_user_id=excluded.updated_by_user_id,updated_at=excluded.updated_at`,
-    ).bind(crypto.randomUUID(), current.organizationId, positionId, orderScope, defaultFilter, current.userId, now, now).run();
-    return { success: "任务工作台查看范围与默认筛选已更新" };
+    ).bind(crypto.randomUUID(), current.organizationId, positionId, "current_position", defaultFilter, current.userId, now, now).run();
+    return { success: "任务工作台默认筛选已更新；订单范围由角色/账户权限积木控制" };
   }
 
   const code = valueOf(form, "code").toUpperCase();
@@ -422,10 +432,7 @@ export default function Positions({ loaderData, actionData }: Route.ComponentPro
                       {canManage ? <Form method="post" className="portal-setting-form">
                         <input type="hidden" name="intent" value="portal_settings" />
                         <input type="hidden" name="positionId" value={position.id} />
-                        <select name="orderScope" defaultValue={position.portal_order_scope}>
-                          <option value="current_position">仅当前岗位待办</option>
-                          <option value="all_orders">全部订单</option>
-                        </select>
+                        <span className="field-static-note">范围由权限积木控制</span>
                         <select name="defaultFilter" defaultValue={position.portal_default_filter}>
                           <option value="open">默认：未完成</option>
                           <option value="all">默认：全部</option>
@@ -433,7 +440,7 @@ export default function Positions({ loaderData, actionData }: Route.ComponentPro
                           <option value="overdue">默认：即将/已经超时</option>
                         </select>
                         <button className="text-button" disabled={busy}>保存</button>
-                      </Form> : <small>{position.portal_order_scope === "all_orders" ? "全部订单" : "当前岗位待办"}</small>}
+                      </Form> : <small>范围由权限积木控制</small>}
                     </td>
                     <td>
                       <span className={`status-pill ${position.status !== "active" ? "off" : ""}`}>
@@ -468,16 +475,17 @@ async function ensurePositionsSeed(organizationId: string) {
   const defaults: Array<[string, string, string, number]> = [
     ["BOSS", "老板", "ZJB", 1],
     ["DEVELOPER", "开发者", "ZJB", 2],
-    ["DOC", "单证", "OP", 10],
-    ["CS", "客服", "OP", 20],
-    ["FINANCE", "财务", "ACC", 30],
-    ["SALES", "业务员", "SALER", 40],
-    ["OVERSEAS", "海外人员", "OP", 50],
-    ["CONTAINER", "箱管", "OP", 60],
-    ["SALES_ASSISTANT", "业务助理", "SALER", 70],
-    ["OPERATION", "操作", "OP", 80],
-    ["BUSINESS_ROUTE", "商务/航线", "BUS", 90],
-    ["BOOKING", "订舱人员", "BUS", 100],
+    ["SALES", "业务岗", "SALER", 10],
+    ["OPERATION", "单证（操作岗）", "OP", 20],
+    ["TRACKING", "运踪岗", "OP", 30],
+    ["CS", "客服岗", "OP", 40],
+    ["BUSINESS_ROUTE", "商务报价岗", "BUS", 50],
+    ["LOADING", "前端配载岗", "OP", 60],
+    ["FINANCE_ACCOUNTING", "财务会计岗", "ACC", 70],
+    ["CASHIER", "出纳岗", "ACC", 80],
+    ["HR_ADMIN", "人事行政岗", "HR", 90],
+    ["WAREHOUSE", "仓库岗", "OP", 110],
+    ["OVERSEAS_WAREHOUSE", "境外仓库岗", "OP", 120],
   ];
   await env.DB.batch(defaults.map(([code, name, departmentCode, sort]) =>
     env.DB.prepare(

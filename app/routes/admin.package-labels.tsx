@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { Link } from "react-router";
 import type { Route } from "./+types/admin.package-labels";
 import { requireSessionUser } from "../lib/auth.server";
+import { requireOrderAccess } from "../lib/order-access.server";
 
 type Label = {
   package_code: string;
@@ -23,6 +24,7 @@ type Label = {
 export async function loader({ request, params }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "order.view"),
     orderId = params.orderId;
+  await requireOrderAccess(current, orderId);
   const rows = await env.DB.prepare(
     `SELECT p.package_code,i.cargo_name_cn,i.cargo_name_en,i.hs_code,i.package_type,i.gross_weight_per_package_kg,i.length_cm,i.width_cm,i.height_cm,i.volume_per_package_cbm,i.marks,o.order_number,c.name customer_name,o.origin_city,o.destination_city FROM order_cargo_packages p JOIN order_cargo_items i ON i.id=p.cargo_item_id JOIN transport_orders o ON o.id=p.order_id JOIN customers c ON c.id=o.customer_id WHERE p.order_id=? AND p.organization_id=? AND p.status!='cancelled' ORDER BY p.package_code`,
   )

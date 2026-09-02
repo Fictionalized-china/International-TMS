@@ -3,6 +3,7 @@ import { Form, Link, redirect, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.order-operations";
 import { ensureOrderModules } from "../lib/order-modules.server";
 import { requireSessionUser } from "../lib/auth.server";
+import { requireOrderAccess } from "../lib/order-access.server";
 import { valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 
@@ -108,6 +109,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "order.view"),
     orderId = params.orderId,
     returnTo = safeReturnTo(new URL(request.url).searchParams.get("returnTo"), orderId);
+  await requireOrderAccess(current, orderId);
   const order = await env.DB.prepare(
     `SELECT o.id,o.order_number,c.name customer_name,o.origin_city,o.destination_city,o.status FROM transport_orders o JOIN customers c ON c.id=o.customer_id WHERE o.id=? AND o.organization_id=?`,
   )
@@ -200,6 +202,7 @@ export async function action({ request, params }: Route.ActionArgs) {
     form = await request.formData(),
     intent = valueOf(form, "intent"),
     now = new Date().toISOString();
+  await requireOrderAccess(current, orderId);
   if (intent)
     return {
       formError:

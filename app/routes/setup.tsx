@@ -11,6 +11,7 @@ import {
   type FieldErrors,
 } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
+import { accessModelBootstrapStatements } from "../lib/access-model-seed.server";
 
 export function meta() {
   return [{ title: "初始化 | International TMS" }];
@@ -147,6 +148,7 @@ export async function action({ request }: Route.ActionArgs) {
             now,
           ),
       ),
+      ...accessModelBootstrapStatements(env.DB, organizationId, userId, now),
     ]);
   } catch (error) {
     return bootstrapFailure("DATABASE_BATCH", error);

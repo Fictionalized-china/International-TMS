@@ -10,6 +10,7 @@ import { writeAudit } from "../lib/audit.server";
 import { recordWorkflowEvent } from "../lib/business-workflow.server";
 import { statusLabel as orderStatusLabel } from "../lib/order-workflow";
 import { loadOrderGuidance } from "../lib/order-guidance.server";
+import { orderVisibilitySql, requireOrderAccess } from "../lib/order-access.server";
 
 type Shipment = {
   id: string;
@@ -92,6 +93,9 @@ export async function loader({ request }: Route.LoaderArgs) {
   };
   const where = ["s.organization_id = ?"];
   const bindings: Array<string | number> = [current.organizationId];
+  const visibility = orderVisibilitySql(current, "o");
+  where.push(visibility.sql);
+  bindings.push(...visibility.values);
   if (filters.q) {
     where.push(`(s.shipment_number LIKE ? OR s.master_tracking_number LIKE ? OR o.order_number LIKE ? OR c.name LIKE ? OR c.identity_code LIKE ? OR o.cargo_description LIKE ? OR s.current_location LIKE ? OR o.current_step_name LIKE ?)`);
     const keyword = `%${filters.q}%`;
@@ -219,7 +223,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       LEFT JOIN users creator ON creator.id=o.created_by_user_id
       WHERE ${whereSql}
       ORDER BY s.updated_at DESC,s.created_at DESC LIMIT ? OFFSET ?`).bind(...bindings,pageSize,offset).all<Shipment>(),
-    env.DB.prepare(`SELECT o.id, o.order_number, c.name AS customer_name FROM transport_orders o JOIN customers c ON c.id = o.customer_id WHERE o.organization_id = ? AND o.status = 'confirmed' AND NOT EXISTS (SELECT 1 FROM shipments s WHERE s.order_id = o.id) ORDER BY o.confirmed_at DESC`).bind(current.organizationId).all<{ id: string; order_number: string; customer_name: string }>(),
+    env.DB.prepare(`SELECT o.id, o.order_number, c.name AS customer_name FROM transport_orders o JOIN customers c ON c.id = o.customer_id WHERE o.organization_id = ? AND ${visibility.sql} AND o.status = 'confirmed' AND NOT EXISTS (SELECT 1 FROM shipments s WHERE s.order_id = o.id) ORDER BY o.confirmed_at DESC`).bind(current.organizationId,...visibility.values).all<{ id: string; order_number: string; customer_name: string }>(),
     env.DB.prepare("SELECT id, code, name, status FROM carriers WHERE organization_id = ? ORDER BY name").bind(current.organizationId).all<{ id: string; code: string; name: string; status: string }>(),
     env.DB.prepare(`SELECT DISTINCT u.id,u.display_name FROM users u JOIN memberships m ON m.user_id=u.id WHERE m.organization_id=? AND m.status='active' ORDER BY u.display_name`).bind(current.organizationId).all<{id:string;display_name:string}>(),
   ]);
@@ -258,6 +262,7 @@ export async function action({ request }: Route.ActionArgs) {
   }
   if (intent === "create") {
     const orderId = valueOf(form, "orderId"), tracking = valueOf(form, "tracking"), eta = valueOf(form, "eta");
+    await requireOrderAccess(current, orderId);
     const order = await env.DB.prepare("SELECT customer_id, origin_city FROM transport_orders WHERE id = ? AND organization_id = ? AND status = 'confirmed' AND NOT EXISTS (SELECT 1 FROM shipments WHERE order_id = transport_orders.id)").bind(orderId, current.organizationId).first<{ customer_id: string; origin_city: string }>();
     if (!order) return { formError: "订单无效、未确认或已生成运单" };
     const id = crypto.randomUUID(), number = await nextDocumentNumber(current.organizationId, "shipment");
@@ -272,7 +277,9 @@ export async function action({ request }: Route.ActionArgs) {
   }
   if (intent === "leg") {
     const shipmentId = valueOf(form, "shipmentId"), carrierId = valueOf(form, "carrierId"), origin = valueOf(form, "origin"), destination = valueOf(form, "destination"), departure = valueOf(form, "departure"), arrival = valueOf(form, "arrival"), reference = valueOf(form, "reference");
-    if (!(await ownedShipment(shipmentId, current.organizationId)) || !origin || !destination) return { formError: "运单或运输分段信息无效" };
+    const owned = await ownedShipment(shipmentId, current.organizationId);
+    if (!owned || !origin || !destination) return { formError: "运单或运输分段信息无效" };
+    await requireOrderAccess(current, owned.order_id);
     if (carrierId && !(await env.DB.prepare("SELECT 1 FROM carriers WHERE id = ? AND organization_id = ? AND status = 'active'").bind(carrierId, current.organizationId).first())) return { formError: "承运商无效" };
     const row = await env.DB.prepare("SELECT COALESCE(MAX(sequence_no), 0) + 1 AS sequence_no FROM shipment_legs WHERE shipment_id = ?").bind(shipmentId).first<{ sequence_no: number }>();
     const id = crypto.randomUUID();
@@ -283,6 +290,7 @@ export async function action({ request }: Route.ActionArgs) {
   const id = valueOf(form, "id"), status = valueOf(form, "status"), location = valueOf(form, "location"), description = valueOf(form, "description"), eventAt = valueOf(form, "eventAt") || now, signedBy = valueOf(form, "signedBy"), exceptionReason = valueOf(form, "exceptionReason");
   const shipment = await env.DB.prepare("SELECT status, order_id, customer_id FROM shipments WHERE id = ? AND organization_id = ?").bind(id, current.organizationId).first<{ status: string; order_id: string; customer_id:string }>();
   if (!shipment || !canTransition("shipment", shipment.status, status) || !description) return { formError: "运单状态流转或轨迹说明无效" };
+  await requireOrderAccess(current, shipment.order_id);
   const statements = [
     env.DB.prepare(`UPDATE shipments SET status = ?, current_location = COALESCE(NULLIF(?, ''), current_location), actual_pickup_at = CASE WHEN ? = 'picked_up' THEN ? ELSE actual_pickup_at END, actual_delivery_at = CASE WHEN ? = 'delivered' THEN ? ELSE actual_delivery_at END, signed_by = CASE WHEN ? = 'delivered' THEN ? ELSE signed_by END, exception_reason = CASE WHEN ? = 'exception' THEN ? ELSE exception_reason END, updated_at = ? WHERE id = ? AND organization_id = ?`).bind(status, location, status, eventAt, status, eventAt, status, signedBy || null, status, exceptionReason || description, now, id, current.organizationId),
     env.DB.prepare("INSERT INTO shipment_events (id, shipment_id, status, location, description, event_at, visible_to_customer, created_by_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), id, status, location || null, description, eventAt, form.has("internal") ? 0 : 1, current.userId, now),
@@ -292,7 +300,7 @@ export async function action({ request }: Route.ActionArgs) {
   await writeAudit({ request, action: "shipment.status", resourceType: "shipment", resourceId: id, organizationId: current.organizationId, actorUserId: current.userId, metadata: { from: shipment.status, to: status } });
   return { success: "运单状态与轨迹已更新" };
 }
-async function ownedShipment(id: string, org: string) { return env.DB.prepare("SELECT 1 FROM shipments WHERE id = ? AND organization_id = ?").bind(id, org).first(); }
+async function ownedShipment(id: string, org: string) { return env.DB.prepare("SELECT order_id FROM shipments WHERE id = ? AND organization_id = ?").bind(id, org).first<{order_id:string}>(); }
 export function meta() { return [{ title: "运单列表 | International TMS" }]; }
 const labels: Record<string,string> = { booked:"已订舱", picked_up:"已提货", in_transit:"运输中", customs:"清关中", out_for_delivery:"运输中", delivered:"已签收", exception:"异常", cancelled:"已取消" };
 const businessTypeLabels: Record<string,string> = { ltl:"零担/拼车", ftl:"整车", warehouse:"仓到仓" };

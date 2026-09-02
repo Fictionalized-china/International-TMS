@@ -528,7 +528,7 @@ export async function syncOrderWorkflowSnapshot(
       next
         ? `${next.module_name} · ${next.current_step_name || "待处理"}`
         : "已启用模块全部完成",
-      next?.assignee_user_id ?? order.current_assignee_user_id ?? null,
+      next?.assignee_user_id ?? null,
       now,
       now,
       organizationId,

@@ -9,6 +9,11 @@ import {
 } from "./portal-session-context";
 import type { Site } from "./site.server";
 import { siteFromRequest, siteLogin } from "./site.server";
+import {
+  effectivePermissionCodes,
+  isProtectedAccessRole,
+  type PermissionOverride,
+} from "./permission-blocks";
 
 const SITE_COOKIE_NAMES: Record<Exclude<Site, "warehouse">, string> = {
   admin: "itms_admin_session",
@@ -117,7 +122,8 @@ export async function getSessionUser(
           (s.site = 'warehouse' AND EXISTS (
             SELECT 1 FROM memberships m
             JOIN membership_roles mr ON mr.membership_id=m.id
-            JOIN role_permissions rp ON rp.role_id=mr.role_id AND rp.permission_code='warehouse.view'
+            JOIN roles r ON r.id=mr.role_id AND r.organization_id=m.organization_id AND r.status='active'
+            JOIN role_permissions rp ON rp.role_id=r.id AND rp.permission_code='warehouse.view'
             WHERE m.user_id=u.id AND m.organization_id=o.id AND m.status='active'
           ))
         )`,
@@ -125,30 +131,46 @@ export async function getSessionUser(
     .bind(tokenHash, new Date().toISOString())
     .first<Record<string, string>>();
   if (!row || row.site !== site) return null;
-  const [permissionRows, accessProfile] = await Promise.all([
+  const [permissionRows, accessProfile, overrideRows, allPermissionRows] = await Promise.all([
     env.DB.prepare(
     `SELECT DISTINCT rp.permission_code AS code
        FROM memberships m
        JOIN membership_roles mr ON mr.membership_id = m.id
-       JOIN roles r ON r.id = mr.role_id AND r.organization_id = m.organization_id
+       JOIN roles r ON r.id = mr.role_id AND r.organization_id = m.organization_id AND r.status='active'
        JOIN role_permissions rp ON rp.role_id = r.id
       WHERE m.user_id = ? AND m.organization_id = ? AND m.status = 'active'`,
   )
     .bind(row.user_id, row.organization_id)
     .all<{ code: string }>(),
     env.DB.prepare(
-      `SELECT p.code position_code,GROUP_CONCAT(DISTINCT r.code) role_codes
+      `SELECT m.id membership_id,p.code position_code,GROUP_CONCAT(DISTINCT r.code) role_codes
        FROM memberships m
        LEFT JOIN positions p ON p.id=m.position_id AND p.organization_id=m.organization_id
        LEFT JOIN membership_roles mr ON mr.membership_id=m.id
-       LEFT JOIN roles r ON r.id=mr.role_id AND r.organization_id=m.organization_id
+       LEFT JOIN roles r ON r.id=mr.role_id AND r.organization_id=m.organization_id AND r.status='active'
        WHERE m.user_id=? AND m.organization_id=? AND m.status='active'
        GROUP BY m.id
        LIMIT 1`,
     )
       .bind(row.user_id, row.organization_id)
-      .first<{ position_code: string | null; role_codes: string | null }>(),
+      .first<{ membership_id: string; position_code: string | null; role_codes: string | null }>(),
+    env.DB.prepare(
+      `SELECT mpo.permission_code code,mpo.effect
+       FROM memberships m
+       JOIN membership_permission_overrides mpo ON mpo.membership_id=m.id
+       WHERE m.user_id=? AND m.organization_id=? AND m.status='active'`,
+    )
+      .bind(row.user_id, row.organization_id)
+      .all<PermissionOverride>(),
+    env.DB.prepare("SELECT code FROM permissions ORDER BY code").all<{ code: string }>(),
   ]);
+  const roleCodes = (accessProfile?.role_codes ?? "").split(",").filter(Boolean);
+  const permissions = effectivePermissionCodes({
+    inherited: permissionRows.results.map((item) => item.code),
+    overrides: overrideRows.results,
+    allPermissions: allPermissionRows.results.map((item) => item.code),
+    protectedRole: isProtectedAccessRole(roleCodes),
+  });
   return {
     sessionId: row.session_id,
     userId: row.user_id,
@@ -157,9 +179,9 @@ export async function getSessionUser(
     email: row.email,
     displayName: row.display_name,
     site: row.site as Site,
-    permissions: permissionRows.results.map((item) => item.code),
+    permissions,
     positionCode: accessProfile?.position_code ?? null,
-    roleCodes: (accessProfile?.role_codes ?? "").split(",").filter(Boolean),
+    roleCodes,
   };
 }
 

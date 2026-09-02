@@ -4,6 +4,7 @@ import { env } from "cloudflare:workers";
 import type { Route } from "./+types/admin.order-module";
 import { BatchNumberLink, OrderNumberLink } from "../components/EntityNumberLink";
 import { requireSessionUser } from "../lib/auth.server";
+import { requireOrderAccess } from "../lib/order-access.server";
 import { validatePhone, valueOf } from "../lib/validation";
 import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 import { writeAudit } from "../lib/audit.server";
@@ -641,6 +642,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "order.view"),
     orderId = params.orderId,
     moduleCode = params.moduleCode;
+  await requireOrderAccess(current, orderId);
   const definition = orderModuleDefinition(moduleCode);
   if (!definition) throw new Response("订单模块不存在", { status: 404 });
   const requestUrl = new URL(request.url);
@@ -1231,6 +1233,7 @@ export async function action({ request, params }: Route.ActionArgs) {
     moduleCode = params.moduleCode,
     form = await request.formData(),
     intent = valueOf(form, "intent");
+  await requireOrderAccess(current, orderId);
   const expenseEntryContext = valueOf(form, "expenseEntryContext");
   const expensePolicyModuleCode =
     intent === "expense_add" && canCreateExpenseFromModule(moduleCode, expenseEntryContext)

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Form, Link, redirect, useNavigate, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.order-detail";
 import { canEditWorkflowDefinition, requireSessionUser } from "../lib/auth.server";
+import { requireOrderAccess } from "../lib/order-access.server";
 import {
   statusLabel,
   type OrderWorkflowTransition,
@@ -248,6 +249,7 @@ function isOrderMarkLabelReady(order: Pick<Order, "status" | "quote_number" | "q
 export async function loader({ request, params, context }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "order.view"),
     id = params.orderId;
+  await requireOrderAccess(current, id);
   const order = await env.DB.prepare(
     `SELECT o.id,o.order_number,o.order_date,o.business_nature,o.business_type,o.transport_terms,o.trade_terms,
       o.exit_port,bp.name exit_port_name,o.overseas_warehouse_id,ow.name overseas_warehouse_name,
@@ -525,6 +527,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
   const moduleRequest = request.clone();
   const current = await requireSessionUser(request, "order.manage"),
     form = await request.formData();
+  await requireOrderAccess(current, params.orderId);
   const intent = valueOf(form, "intent");
   if(intent==="workflow_supplement_complete"){
     try{

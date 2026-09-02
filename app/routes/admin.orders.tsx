@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { Form, Link } from "react-router";
 import type { Route } from "./+types/admin.orders";
 import { requireSessionUser } from "../lib/auth.server";
+import { orderVisibilitySql } from "../lib/order-access.server";
 
 type OrderRow = {
   id: string;
@@ -42,6 +43,9 @@ export async function loader({ request }: Route.LoaderArgs) {
   const pageSize = 30;
   const where = ["o.organization_id=?"];
   const values: unknown[] = [current.organizationId];
+  const visibility = orderVisibilitySql(current, "o");
+  where.push(visibility.sql);
+  values.push(...visibility.values);
   if (keyword) {
     where.push("(o.order_number LIKE ? OR c.name LIKE ? OR o.cargo_description LIKE ? OR q.quote_number LIKE ?)");
     const pattern = `%${keyword}%`;
@@ -85,10 +89,11 @@ export async function loader({ request }: Route.LoaderArgs) {
        WHERE ${clause}`,
     ).bind(...values).first<{ count: number }>(),
     env.DB.prepare(
-      `SELECT DISTINCT current_step_name value,current_step_name label
-       FROM transport_orders WHERE organization_id=? AND current_step_name IS NOT NULL
+      `SELECT DISTINCT o.current_step_name value,o.current_step_name label
+       FROM transport_orders o
+       WHERE o.organization_id=? AND ${visibility.sql} AND o.current_step_name IS NOT NULL
        ORDER BY current_step_name`,
-    ).bind(current.organizationId).all<FilterOption>(),
+    ).bind(current.organizationId, ...visibility.values).all<FilterOption>(),
   ]);
   const total = countRow?.count || 0;
   return {

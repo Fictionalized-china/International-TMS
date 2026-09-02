@@ -16,6 +16,11 @@ import {
   legacyCustomerTypeForRoles,
   type CustomerBusinessRoleCode,
 } from "../lib/customer-business-roles";
+import {
+  canViewAllCustomers,
+  customerVisibilitySql,
+  requireCustomerAccess,
+} from "../lib/customer-access.server";
 
 const customerPartyCategories = [
   { value: "customer", label: "客户" },
@@ -108,6 +113,8 @@ async function validateCustomerDefaultProfile(profile: CustomerDefaultProfile, o
 
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "customer.view");
+  const visibility = customerVisibilitySql(current, "c");
+  const canViewSensitive = current.permissions.includes("customer.sensitive.view");
   const [customers, contacts, addresses, portals] = await Promise.all([
     env.DB.prepare(`SELECT c.id, c.code, c.identity_code, c.name, c.short_name, COALESCE(c.party_category,'customer') AS party_category, c.status, c.notes, c.sales_owner_user_id, u.display_name AS sales_owner_name, COALESCE(GROUP_CONCAT(DISTINCT cbr.role_code), '') AS business_role_codes, COUNT(DISTINCT cc.id) AS contact_count, COUNT(DISTINCT ca.id) AS address_count,
       (SELECT x.id FROM customer_contacts x WHERE x.customer_id=c.id ORDER BY x.is_primary DESC,x.updated_at DESC LIMIT 1) AS primary_contact_id,
@@ -120,7 +127,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       (SELECT x.state FROM customer_addresses x WHERE x.customer_id=c.id AND x.type='shipping' ORDER BY x.is_default DESC,x.updated_at DESC LIMIT 1) AS default_address_state,
       (SELECT x.city FROM customer_addresses x WHERE x.customer_id=c.id AND x.type='shipping' ORDER BY x.is_default DESC,x.updated_at DESC LIMIT 1) AS default_address_city,
       (SELECT x.address_line1 FROM customer_addresses x WHERE x.customer_id=c.id AND x.type='shipping' ORDER BY x.is_default DESC,x.updated_at DESC LIMIT 1) AS default_address_line1
-      FROM customers c LEFT JOIN users u ON u.id = c.sales_owner_user_id LEFT JOIN customer_contacts cc ON cc.customer_id = c.id LEFT JOIN customer_addresses ca ON ca.customer_id = c.id LEFT JOIN customer_business_role_assignments cbr ON cbr.customer_id = c.id AND cbr.organization_id = c.organization_id WHERE c.organization_id = ? GROUP BY c.id ORDER BY c.created_at DESC LIMIT 200`).bind(current.organizationId).all<CustomerRow>(),
+      FROM customers c LEFT JOIN users u ON u.id = c.sales_owner_user_id LEFT JOIN customer_contacts cc ON cc.customer_id = c.id LEFT JOIN customer_addresses ca ON ca.customer_id = c.id LEFT JOIN customer_business_role_assignments cbr ON cbr.customer_id = c.id AND cbr.organization_id = c.organization_id WHERE c.organization_id = ? AND ${visibility.sql} GROUP BY c.id ORDER BY c.created_at DESC LIMIT 200`).bind(current.organizationId,...visibility.values).all<CustomerRow>(),
     env.DB.prepare(`SELECT cc.id, cc.customer_id, cc.name, cc.title, cc.email, cc.phone, cc.is_primary FROM customer_contacts cc JOIN customers c ON c.id = cc.customer_id WHERE c.organization_id = ? AND cc.customer_id IN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) ORDER BY cc.is_primary DESC, cc.name`).bind(current.organizationId,current.organizationId).all<ContactRow>(),
     env.DB.prepare(`SELECT ca.id, ca.customer_id, ca.label, ca.type, ca.country_code, ca.state, ca.city, ca.address_line1, ca.contact_name, ca.contact_phone, ca.is_default FROM customer_addresses ca JOIN customers c ON c.id = ca.customer_id WHERE c.organization_id = ? AND ca.customer_id IN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) ORDER BY ca.is_default DESC, ca.label`).bind(current.organizationId,current.organizationId).all<AddressRow>(),
     env.DB.prepare(`SELECT cpa.id, cpa.customer_id, cpa.user_id, u.display_name, u.email, cpa.status, u.last_login_at FROM customer_portal_accounts cpa JOIN users u ON u.id = cpa.user_id WHERE cpa.organization_id = ? AND cpa.customer_id IN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) ORDER BY u.display_name`).bind(current.organizationId,current.organizationId).all<PortalRow>(),
@@ -135,14 +142,61 @@ export async function loader({ request }: Route.LoaderArgs) {
     env.DB.prepare("SELECT code, name, parent_code FROM reference_data WHERE organization_id = ? AND category = 'province' AND status = 'active' ORDER BY sort_order, code").bind(current.organizationId).all<GeoReference>(),
     env.DB.prepare("SELECT code, name, parent_code FROM reference_data WHERE organization_id = ? AND category = 'city' AND status = 'active' ORDER BY sort_order, code").bind(current.organizationId).all<GeoReference>(),
   ]);
-  return { current, customers: customers.results, contacts: contacts.results, addresses: addresses.results, portals: portals.results, registrations: registrations.results, contracts: contracts.results, owners: owners.results, countries: countries.results, provinces: provinces.results, cities: cities.results };
+  const visibleCustomerIds = new Set(customers.results.map((customer) => customer.id));
+  const visibleCustomers = canViewSensitive ? customers.results : customers.results.map((customer) => ({
+    ...customer,
+    notes: null,
+    contact_count: 0,
+    address_count: 0,
+    primary_contact_id: null,
+    primary_contact_name: null,
+    primary_contact_title: null,
+    primary_contact_email: null,
+    primary_contact_phone: null,
+    default_address_id: null,
+    default_address_country_code: null,
+    default_address_state: null,
+    default_address_city: null,
+    default_address_line1: null,
+  }));
+  return {
+    current,
+    customers: visibleCustomers,
+    contacts: canViewSensitive ? contacts.results.filter((row) => visibleCustomerIds.has(row.customer_id)) : [],
+    addresses: canViewSensitive ? addresses.results.filter((row) => visibleCustomerIds.has(row.customer_id)) : [],
+    portals: canViewSensitive ? portals.results.filter((row) => visibleCustomerIds.has(row.customer_id)) : [],
+    registrations: canViewSensitive && canViewAllCustomers(current)
+      ? registrations.results
+      : registrations.results.filter((row) => Boolean(row.candidate_customer_id && visibleCustomerIds.has(row.candidate_customer_id))),
+    contracts: canViewSensitive ? contracts.results.filter((row) => visibleCustomerIds.has(row.customer_id)) : [],
+    owners: canViewAllCustomers(current) ? owners.results : owners.results.filter((owner) => owner.id === current.userId),
+    countries: countries.results,
+    provinces: provinces.results,
+    cities: cities.results,
+  };
 }
 
 export async function action({ request }: Route.ActionArgs) {
   const current = await requireSessionUser(request, "customer.manage");
+  if (!current.permissions.includes("customer.sensitive.view")) {
+    throw new Response("没有权限查看或修改客户敏感资料", { status: 403 });
+  }
   const form = await request.formData();
   const intent = valueOf(form, "intent");
   const now = new Date().toISOString();
+
+  if (["portal_registration_approve", "portal_registration_reject"].includes(intent) && !canViewAllCustomers(current)) {
+    throw new Response("只有全部客户范围的账号可以审核门户注册", { status: 403 });
+  }
+  const targetCustomerId = valueOf(form, "customerId");
+  if (targetCustomerId) await requireCustomerAccess(current, targetCustomerId);
+  if (intent === "contract_archive") {
+    const contract = await env.DB.prepare(
+      "SELECT customer_id FROM customer_contracts WHERE id=? AND organization_id=?",
+    ).bind(valueOf(form, "contractId"), current.organizationId).first<{ customer_id: string }>();
+    if (!contract) throw new Response("合同不存在", { status: 404 });
+    await requireCustomerAccess(current, contract.customer_id);
+  }
 
   const result = await runCustomerAction({ request, current, form, intent, now });
   return {
@@ -314,6 +368,7 @@ async function runCustomerAction({ request, current, form, intent, now }: {
     const ownerId = valueOf(form, "ownerId");
     const status = valueOf(form, "status");
     const notes = valueOf(form, "notes");
+    const effectiveOwnerId = canViewAllCustomers(current) ? ownerId : current.userId;
     const profile = customerDefaultProfile(form);
     const submittedRoles = [...new Set(form.getAll("businessRoles").map(String))];
     const businessRoles = submittedRoles.filter(isCustomerBusinessRoleCode);
@@ -342,7 +397,7 @@ async function runCustomerAction({ request, current, form, intent, now }: {
     try {
       await env.DB.batch([
         env.DB.prepare("UPDATE customers SET code=?,name=?,short_name=?,party_category=?,type=?,sales_owner_user_id=?,status=?,notes=?,updated_at=? WHERE id=? AND organization_id=?")
-          .bind(effectiveCode, name, shortName || null, partyCategory, legacyCustomerTypeForRoles(businessRoles), ownerId || null, status, notes || null, now, customerId, current.organizationId),
+          .bind(effectiveCode, name, shortName || null, partyCategory, legacyCustomerTypeForRoles(businessRoles), effectiveOwnerId, status, notes || null, now, customerId, current.organizationId),
         env.DB.prepare("DELETE FROM customer_business_role_assignments WHERE organization_id=? AND customer_id=?").bind(current.organizationId, customerId),
         ...businessRoles.map((roleCode) => env.DB.prepare("INSERT INTO customer_business_role_assignments(id,organization_id,customer_id,role_code,created_at) VALUES(?,?,?,?,?)").bind(crypto.randomUUID(), current.organizationId, customerId, roleCode, now)),
         env.DB.prepare("UPDATE customer_contacts SET is_primary=0,updated_at=? WHERE customer_id=?").bind(now, customerId),
@@ -366,6 +421,7 @@ async function runCustomerAction({ request, current, form, intent, now }: {
   }
 
   const code = valueOf(form, "code").toLowerCase(), name = valueOf(form, "name"), shortName = valueOf(form, "shortName"), partyCategory = valueOf(form, "partyCategory"), ownerId = valueOf(form, "ownerId"), notes = valueOf(form, "notes"), profile = customerDefaultProfile(form);
+  const effectiveOwnerId = canViewAllCustomers(current) ? (ownerId || null) : current.userId;
   const submittedRoles = [...new Set(form.getAll("businessRoles").map(String))];
   const businessRoles = submittedRoles.filter(isCustomerBusinessRoleCode);
   const errors: Record<string, string> = {};
@@ -383,7 +439,7 @@ async function runCustomerAction({ request, current, form, intent, now }: {
   const contactId = crypto.randomUUID(), addressId = crypto.randomUUID();
   try {
     await env.DB.batch([
-      env.DB.prepare(`INSERT INTO customers (id, organization_id, code, identity_code, name, short_name, party_category, type, sales_owner_user_id, status, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`).bind(id, current.organizationId, effectiveCode, identityCode, name, shortName || null, partyCategory, legacyCustomerTypeForRoles(businessRoles), ownerId || null, notes || null, now, now),
+      env.DB.prepare(`INSERT INTO customers (id, organization_id, code, identity_code, name, short_name, party_category, type, sales_owner_user_id, status, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`).bind(id, current.organizationId, effectiveCode, identityCode, name, shortName || null, partyCategory, legacyCustomerTypeForRoles(businessRoles), effectiveOwnerId, notes || null, now, now),
       ...businessRoles.map((roleCode) => env.DB.prepare("INSERT INTO customer_business_role_assignments(id,organization_id,customer_id,role_code,created_at) VALUES(?,?,?,?,?)").bind(crypto.randomUUID(), current.organizationId, id, roleCode, now)),
       env.DB.prepare("INSERT INTO customer_contacts(id,customer_id,name,title,email,phone,is_primary,created_at,updated_at) VALUES(?,?,?,?,?,?,1,?,?)")
         .bind(contactId, id, profile.contactName, profile.contactTitle || null, profile.contactEmail || null, profile.contactPhone, now, now),
