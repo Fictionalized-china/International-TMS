@@ -79,6 +79,17 @@ import {
   type WorkflowFieldState,
 } from "../lib/workflow-fields.server";
 import { workflowFieldConfigurationHref } from "../lib/workflow-field-locator";
+import {
+  hasVisibleRuntimeWorkflowField,
+  runtimeWorkflowFieldPolicy,
+} from "../lib/workflow-field-runtime";
+import {
+  cargoDetailFieldGroups,
+  orderCreationConsignmentPresentationKeys,
+  quotationCargoPresentationKeys,
+  quotationConsignmentPresentationKeys,
+  quotationCostsPresentationKeys,
+} from "../lib/order-workflow-field-presentation";
 
 type OrderSummary = {
   id: string;
@@ -91,12 +102,26 @@ type OrderSummary = {
   quotation_tax_amount: number | null;
   quotation_total_amount: number | null;
   quotation_status: string | null;
+  quotation_customer_contact_name: string | null;
+  quotation_customer_contact_phone: string | null;
+  quotation_salesperson_name: string | null;
+  quotation_cargo_description: string | null;
+  quotation_notes: string | null;
+  quotation_pieces: number | null;
+  quotation_gross_weight_kg: number | null;
+  quotation_length_cm: number | null;
+  quotation_width_cm: number | null;
+  quotation_height_cm: number | null;
+  quotation_volume_cbm: number | null;
+  quotation_valid_until: string | null;
   customer_id: string;
   customer_name: string;
   customer_reference: string | null;
   shipper_name: string;
   shipper_contact: string | null;
   shipper_phone: string | null;
+  pickup_address_id: string | null;
+  pickup_address_name: string | null;
   origin_country: string;
   origin_state: string | null;
   origin_city: string;
@@ -201,6 +226,7 @@ type Cargo = {
   brand_model: string | null;
   marks: string | null;
   special_attributes: string | null;
+  notes: string | null;
   image_count: number;
 };
 type Attachment = {
@@ -624,7 +650,27 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     throw redirect(`/admin/orders/${orderId}?${query}#module-business-data`);
   }
   const order = await env.DB.prepare(
-    `SELECT o.id,o.order_number,o.order_date,o.quotation_id,q.quote_number,q.currency quotation_currency,q.subtotal quotation_subtotal,q.tax_amount quotation_tax_amount,q.total_amount quotation_total_amount,q.status quotation_status,o.customer_id,c.name customer_name,o.customer_reference,o.shipper_name,o.shipper_contact,o.shipper_phone,o.origin_country,o.origin_state,o.origin_city,o.origin_address,o.consignee_name,o.consignee_contact,o.consignee_phone,o.destination_country,o.destination_state,o.destination_city,o.destination_address,o.business_nature,o.business_type,o.transport_mode,o.transport_terms,o.trade_terms,o.exit_port,o.overseas_warehouse_id,ow.name overseas_warehouse_name,ow.code overseas_warehouse_code,ow.address overseas_warehouse_address,o.overseas_warehouse_address_note,o.transit_locations,o.customs_location,o.customs_clearance_mode,o.route_notes,o.requested_pickup_date,o.requested_delivery_date,o.cargo_ready_at,o.ro_agent,o.special_instructions,o.requires_transloading,o.requires_transit_customs,o.current_assignee_user_id,o.status FROM transport_orders o JOIN customers c ON c.id=o.customer_id LEFT JOIN quotations q ON q.id=o.quotation_id AND q.organization_id=o.organization_id LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id WHERE o.id=? AND o.organization_id=?`,
+    `SELECT o.id,o.order_number,o.order_date,o.quotation_id,q.quote_number,q.currency quotation_currency,q.subtotal quotation_subtotal,q.tax_amount quotation_tax_amount,q.total_amount quotation_total_amount,q.status quotation_status,
+            COALESCE(q.customer_contact_name,o.shipper_contact) quotation_customer_contact_name,
+            COALESCE(q.customer_contact_phone,o.shipper_phone) quotation_customer_contact_phone,
+            salesperson.display_name quotation_salesperson_name,
+            COALESCE(q.cargo_description,o.cargo_description) quotation_cargo_description,
+            COALESCE(q.notes,o.special_instructions) quotation_notes,
+            COALESCE(q.pieces,o.pieces) quotation_pieces,
+            COALESCE(q.gross_weight_kg,o.gross_weight_kg) quotation_gross_weight_kg,
+            q.estimated_length_cm quotation_length_cm,q.estimated_width_cm quotation_width_cm,
+            q.estimated_height_cm quotation_height_cm,COALESCE(q.volume_cbm,o.volume_cbm) quotation_volume_cbm,
+            q.valid_until quotation_valid_until,
+            o.customer_id,c.name customer_name,o.customer_reference,o.shipper_name,o.shipper_contact,o.shipper_phone,
+            o.pickup_address_id,pickup_address.label pickup_address_name,
+            o.origin_country,o.origin_state,o.origin_city,o.origin_address,o.consignee_name,o.consignee_contact,o.consignee_phone,o.destination_country,o.destination_state,o.destination_city,o.destination_address,o.business_nature,o.business_type,o.transport_mode,o.transport_terms,o.trade_terms,o.exit_port,o.overseas_warehouse_id,ow.name overseas_warehouse_name,ow.code overseas_warehouse_code,ow.address overseas_warehouse_address,o.overseas_warehouse_address_note,o.transit_locations,o.customs_location,o.customs_clearance_mode,o.route_notes,o.requested_pickup_date,o.requested_delivery_date,o.cargo_ready_at,o.ro_agent,o.special_instructions,o.requires_transloading,o.requires_transit_customs,o.current_assignee_user_id,o.status
+     FROM transport_orders o
+     JOIN customers c ON c.id=o.customer_id
+     LEFT JOIN quotations q ON q.id=o.quotation_id AND q.organization_id=o.organization_id
+     LEFT JOIN users salesperson ON salesperson.id=COALESCE(q.salesperson_user_id,o.salesperson_user_id)
+     LEFT JOIN customer_addresses pickup_address ON pickup_address.id=o.pickup_address_id AND pickup_address.customer_id=o.customer_id
+     LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id
+     WHERE o.id=? AND o.organization_id=?`,
   )
     .bind(orderId, current.organizationId)
     .first<OrderSummary>();
@@ -697,7 +743,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
       .bind(module.id, current.organizationId)
       .all<History>(),
     env.DB.prepare(
-      `SELECT i.id,i.cargo_name_cn,i.cargo_name_en,i.hs_code,i.overseas_hs_code,i.package_type,i.package_count,i.pieces_per_package,i.gross_weight_per_package_kg,i.net_weight_per_package_kg,i.length_cm,i.width_cm,i.height_cm,i.volume_per_package_cbm,i.declared_value,i.currency,i.origin_country,i.brand_model,i.marks,i.special_attributes,(SELECT COUNT(*) FROM order_cargo_images img WHERE img.cargo_item_id=i.id) image_count FROM order_cargo_items i WHERE i.order_id=? AND i.organization_id=? ORDER BY i.line_no`,
+      `SELECT i.id,i.cargo_name_cn,i.cargo_name_en,i.hs_code,i.overseas_hs_code,i.package_type,i.package_count,i.pieces_per_package,i.gross_weight_per_package_kg,i.net_weight_per_package_kg,i.length_cm,i.width_cm,i.height_cm,i.volume_per_package_cbm,i.declared_value,i.currency,i.origin_country,i.brand_model,i.marks,i.special_attributes,i.notes,(SELECT COUNT(*) FROM order_cargo_images img WHERE img.cargo_item_id=i.id) image_count FROM order_cargo_items i WHERE i.order_id=? AND i.organization_id=? ORDER BY i.line_no`,
     )
       .bind(orderId, current.organizationId)
       .all<Cargo>(),
@@ -1110,6 +1156,9 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     orderId,
     definition.code,
   );
+  const quotationCostWorkflowFields = definition.code === "consignment"
+    ? await loadOrderModuleWorkflowFields(current.organizationId, orderId, "costs")
+    : [];
   const workflowStageAccess = await loadModuleWorkflowStageAccess(
     current.organizationId,
     orderId,
@@ -1164,6 +1213,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     orderReview,
     trackingDepartureGate,
     workflowFields,
+    quotationCostWorkflowFields,
   };
 }
 
@@ -4315,14 +4365,7 @@ function workflowFieldPolicy(
   fieldKey: string,
   fallbackRequired = false,
 ) {
-  const configured = fields.find((field) => field.fieldKey === fieldKey);
-  return {
-    visible: configured ? configured.isActive : true,
-    required: configured
-      ? configured.isActive && configured.isRequired
-      : fallbackRequired,
-    label: configured?.label,
-  };
+  return runtimeWorkflowFieldPolicy(fields, fieldKey, fallbackRequired);
 }
 
 function ModuleField({
@@ -4660,6 +4703,147 @@ function AssignmentManifestWorkbench({
   );
 }
 
+type WorkflowDisplayItem = {
+  fieldKey: string;
+  label: string;
+  value: ReactNode;
+  present: boolean;
+};
+
+function WorkflowFieldValueList({
+  fields,
+  items,
+}: {
+  fields: WorkflowFieldState[];
+  items: WorkflowDisplayItem[];
+}) {
+  const visibleItems = items.filter((item) =>
+    workflowFieldPolicy(fields, item.fieldKey).visible,
+  );
+  if (!visibleItems.length) return null;
+  return <div className="cargo-workflow-values">
+    {visibleItems.map((item) => {
+      const policy = workflowFieldPolicy(fields, item.fieldKey);
+      return <div
+        className={policy.required && !item.present ? "required-missing" : item.present ? "filled" : "optional-empty"}
+        data-workflow-field={item.fieldKey}
+        key={item.fieldKey}
+      >
+        <small>{policy.label || item.label}{policy.required ? " *" : ""}</small>
+        <strong>{item.present ? item.value : "—"}</strong>
+      </div>;
+    })}
+  </div>;
+}
+
+function cargoWorkflowDisplayItems(item: Cargo): WorkflowDisplayItem[] {
+  const text = (value: string | null | undefined) => Boolean(value?.trim());
+  const positive = (value: number) => Number.isFinite(value) && value > 0;
+  return [
+    { fieldKey: "cargo_name_cn", label: "中文品名", value: item.cargo_name_cn, present: text(item.cargo_name_cn) },
+    { fieldKey: "cargo_name_en", label: "英文品名", value: item.cargo_name_en, present: text(item.cargo_name_en) },
+    { fieldKey: "hs_code", label: "国内 HS Code", value: item.hs_code, present: text(item.hs_code) },
+    { fieldKey: "overseas_hs_code", label: "境外 HS Code", value: item.overseas_hs_code, present: text(item.overseas_hs_code) },
+    { fieldKey: "package_type", label: "包装类型", value: warehousePackageTypeLabel(item.package_type), present: text(item.package_type) },
+    { fieldKey: "package_count", label: "包装数", value: item.package_count, present: positive(item.package_count) },
+    { fieldKey: "pieces_per_package", label: "每包装件数", value: item.pieces_per_package, present: positive(item.pieces_per_package) },
+    { fieldKey: "gross_weight_per_package_kg", label: "单包装毛重 KG", value: `${item.gross_weight_per_package_kg} KG`, present: positive(item.gross_weight_per_package_kg) },
+    { fieldKey: "net_weight_per_package_kg", label: "单包装净重 KG", value: `${item.net_weight_per_package_kg} KG`, present: positive(item.net_weight_per_package_kg) },
+    { fieldKey: "length_cm", label: "长度 CM", value: `${item.length_cm} CM`, present: positive(item.length_cm) },
+    { fieldKey: "width_cm", label: "宽度 CM", value: `${item.width_cm} CM`, present: positive(item.width_cm) },
+    { fieldKey: "height_cm", label: "高度 CM", value: `${item.height_cm} CM`, present: positive(item.height_cm) },
+    { fieldKey: "volume_per_package_cbm", label: "单包装体积 CBM", value: `${item.volume_per_package_cbm.toFixed(4)} CBM`, present: positive(item.volume_per_package_cbm) },
+    { fieldKey: "declared_value", label: "申报货值", value: item.declared_value.toLocaleString(), present: positive(item.declared_value) },
+    { fieldKey: "currency", label: "货值币种", value: item.currency, present: text(item.currency) },
+    { fieldKey: "origin_country_cargo", label: "货物原产国", value: item.origin_country, present: text(item.origin_country) },
+    { fieldKey: "brand_model", label: "品牌 / 型号", value: item.brand_model, present: text(item.brand_model) },
+    { fieldKey: "marks", label: "唛头", value: item.marks, present: text(item.marks) },
+    { fieldKey: "special_attributes", label: "货物属性", value: item.special_attributes, present: text(item.special_attributes) },
+    { fieldKey: "cargo_images", label: "货物图片", value: `${item.image_count} 张`, present: item.image_count > 0 },
+    { fieldKey: "cargo_notes", label: "货物备注", value: item.notes, present: text(item.notes) },
+  ];
+}
+
+function CargoWorkflowData({
+  data,
+}: {
+  data: Route.ComponentProps["loaderData"];
+}) {
+  const fields = data.workflowFields;
+  const visibleGroups = cargoDetailFieldGroups.filter((group) =>
+    hasVisibleRuntimeWorkflowField(fields, group.fieldKeys),
+  );
+  const showQuotationSummary = hasVisibleRuntimeWorkflowField(
+    fields,
+    quotationCargoPresentationKeys,
+  );
+  const showDetailFields = visibleGroups.length > 0;
+  const totalPackages = data.cargo.reduce((sum, item) => sum + item.package_count, 0);
+  const totalWeight = data.cargo.reduce(
+    (sum, item) => sum + item.package_count * item.gross_weight_per_package_kg,
+    0,
+  );
+  const totalVolume = data.cargo.reduce(
+    (sum, item) => sum + item.package_count * item.volume_per_package_cbm,
+    0,
+  );
+  return <div className="module-business-stack">
+    {showQuotationSummary && <WorkflowInformationGroup
+      title="询价报价确认的货物摘要"
+      hint="以下内容来自订单锁定的询价报价节点，并严格按该工作流版本的显示和必填规则呈现。"
+      fields={fields}
+      items={[
+        { fieldKey: "quotation_cargo_description", label: "货物描述", value: data.order.quotation_cargo_description || "" },
+        { fieldKey: "quotation_notes", label: "报价备注", value: data.order.quotation_notes || "" },
+        { fieldKey: "quotation_pieces", label: "预计件数", value: data.order.quotation_pieces ? `${data.order.quotation_pieces} 件` : "" },
+        { fieldKey: "quotation_gross_weight_kg", label: "预计重量 KG", value: data.order.quotation_gross_weight_kg ? `${data.order.quotation_gross_weight_kg} KG` : "" },
+        { fieldKey: "quotation_length_cm", label: "预计长度 CM", value: data.order.quotation_length_cm ? `${data.order.quotation_length_cm} CM` : "" },
+        { fieldKey: "quotation_width_cm", label: "预计宽度 CM", value: data.order.quotation_width_cm ? `${data.order.quotation_width_cm} CM` : "" },
+        { fieldKey: "quotation_height_cm", label: "预计高度 CM", value: data.order.quotation_height_cm ? `${data.order.quotation_height_cm} CM` : "" },
+        { fieldKey: "quotation_volume_cbm", label: "预计体积 CBM", value: data.order.quotation_volume_cbm ? `${data.order.quotation_volume_cbm} CBM` : "" },
+      ]}
+    />}
+    <WorkflowInformationGroup
+      title="货物明细合计"
+      hint="合计值只在对应明细字段设置为显示时出现；隐藏字段的数据仍保留审计，不在页面泄露。"
+      fields={fields}
+      items={[
+        { fieldKey: "cargo_name_cn", label: "货物明细", value: data.cargo.length ? `${data.cargo.length} 条` : "" },
+        { fieldKey: "package_count", label: "包装数", value: totalPackages ? `${totalPackages} 箱/托/件` : "" },
+        { fieldKey: "gross_weight_per_package_kg", label: "总毛重", value: totalWeight ? `${totalWeight.toFixed(3)} KG` : "" },
+        { fieldKey: "volume_per_package_cbm", label: "总体积", value: totalVolume ? `${totalVolume.toFixed(4)} CBM` : "" },
+      ]}
+    />
+    {showDetailFields ? <div className="table-wrap module-record-table cargo-workflow-table">
+      <table>
+        <thead><tr>{visibleGroups.map((group) => <th key={group.label}>{group.label}</th>)}</tr></thead>
+        <tbody>
+          {data.cargo.map((item) => {
+            const displayItems = cargoWorkflowDisplayItems(item);
+            return <tr key={item.id}>{visibleGroups.map((group) => <td key={group.label}>
+              <WorkflowFieldValueList
+                fields={fields}
+                items={displayItems.filter((displayItem) => group.fieldKeys.some((fieldKey) => fieldKey === displayItem.fieldKey))}
+              />
+            </td>)}</tr>;
+          })}
+          {!data.cargo.length && <tr><td colSpan={visibleGroups.length} className="empty-state">暂无货物明细。</td></tr>}
+        </tbody>
+      </table>
+    </div> : (
+      <div className="alert workflow-hidden-data-note">
+        当前工作流已将委托资料补充中的货物明细字段全部设为隐藏；历史数据仍保留，只是不在本节点显示。
+      </div>
+    )}
+    {showDetailFields && <Link
+      className="secondary module-external-link"
+      to={`/admin/orders/${data.order.id}/operations#cargo`}
+    >
+      查看历史货物明细
+    </Link>}
+  </div>;
+}
+
 function ModuleBusinessData({
   code,
   data,
@@ -4703,83 +4887,7 @@ function ModuleBusinessData({
   }, [code, moduleActionData]);
 
   if (code === "cargo")
-    return (
-      <div className="module-business-stack">
-        <div className="table-wrap cargo-summary-table">
-          <table>
-            <thead><tr><th>货物明细</th><th>包装数</th><th>总毛重</th><th>总体积</th></tr></thead>
-            <tbody><tr>
-              <td><strong>{data.cargo.length}</strong> 条</td>
-              <td><strong>{data.cargo.reduce((sum, x) => sum + x.package_count, 0)}</strong> 箱/托/件</td>
-              <td><strong>{data.cargo.reduce((sum, x) => sum + x.package_count * x.gross_weight_per_package_kg, 0).toFixed(3)}</strong> KG</td>
-              <td><strong>{data.cargo.reduce((sum, x) => sum + x.package_count * x.volume_per_package_cbm, 0).toFixed(4)}</strong> CBM</td>
-            </tr></tbody>
-          </table>
-        </div>
-        <div className="table-wrap module-record-table">
-          <table>
-            <thead>
-              <tr>
-                <th>品名/HS</th>
-                <th>包装</th>
-                <th>毛重/净重</th>
-                <th>尺寸/体积</th>
-                <th>货值</th>
-                <th>品牌/原产国</th>
-                <th>属性/图片</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.cargo.map((item) => (
-                <tr key={item.id}>
-                  <td>
-                    <strong>{item.cargo_name_cn}</strong>
-                    <small>
-                      {item.cargo_name_en || "—"} · HS {item.hs_code || "—"} /{" "}
-                      {item.overseas_hs_code || "—"}
-                    </small>
-                  </td>
-                  <td>
-                    {item.package_type} × {item.package_count}
-                    <small>每包装 {item.pieces_per_package} 件</small>
-                  </td>
-                  <td>
-                    {item.gross_weight_per_package_kg} /{" "}
-                    {item.net_weight_per_package_kg} KG<small>单包装</small>
-                  </td>
-                  <td>
-                    {item.length_cm}×{item.width_cm}×{item.height_cm} cm
-                    <small>
-                      {item.volume_per_package_cbm.toFixed(4)} CBM/包装
-                    </small>
-                  </td>
-                  <td>
-                    {item.currency} {item.declared_value.toLocaleString()}
-                  </td>
-                  <td>
-                    {item.brand_model || "—"}
-                    <small>
-                      {item.origin_country || "—"} · 唛头 {item.marks || "—"}
-                    </small>
-                  </td>
-                  <td>
-                    {item.special_attributes || "普通货物"}
-                    <small>{item.image_count} 张图片</small>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        {!data.cargo.length && <p className="empty-state">暂无货物明细。</p>}
-        <Link
-          className="secondary module-external-link"
-          to={`/admin/orders/${data.order.id}/operations#cargo`}
-        >
-          新增或维护货物
-        </Link>
-      </div>
-    );
+    return <CargoWorkflowData data={data} />;
   if (code === "documents")
     return (
       <div className="module-business-stack dense-module-stack">
@@ -6004,6 +6112,27 @@ function ModuleBusinessData({
     );
     const showInfo = !consignmentSection || consignmentSection === "info";
     const showCosts = !consignmentSection || consignmentSection === "costs";
+    const showQuotationInformation = hasVisibleRuntimeWorkflowField(
+      data.workflowFields,
+      quotationConsignmentPresentationKeys,
+    );
+    const showOrderCreationInformation = hasVisibleRuntimeWorkflowField(
+      data.workflowFields,
+      orderCreationConsignmentPresentationKeys,
+    );
+    const showQuotationCosts = hasVisibleRuntimeWorkflowField(
+      data.quotationCostWorkflowFields,
+      quotationCostsPresentationKeys,
+    );
+    const quotationChargePolicy = workflowFieldPolicy(
+      data.quotationCostWorkflowFields,
+      "quotation_charge_items",
+    );
+    const inheritedReceivablePolicy = workflowFieldPolicy(
+      data.quotationCostWorkflowFields,
+      "pre_receivable_expenses",
+    );
+    const showQuotationChargeTable = quotationChargePolicy.visible || inheritedReceivablePolicy.visible;
     return (
       <div className="module-business-stack consignment-business-stack">
         {showInfo && <section className="consignment-form-sheet" aria-label="委托信息">
@@ -6015,49 +6144,80 @@ function ModuleBusinessData({
             <OrderNumberLink className="status-pill" id={data.order.id} number={data.order.order_number}/>
           </header>
 
-          <div className="consignment-form-group">
-            <h4>订单基础</h4>
-            <InformationTable fields={data.workflowFields} items={[
+          {showQuotationInformation && <WorkflowInformationGroup
+            title="询价报价确认资料"
+            hint="只展示当前订单锁定工作流在第一步设为显示的字段；必填状态沿用该版本规则。"
+            fields={data.workflowFields}
+            items={[
+              { fieldKey: "quotation_customer_contact_name", label: "客户联系人", value: data.order.quotation_customer_contact_name || "" },
+              { fieldKey: "quotation_customer_contact_phone", label: "联系电话", value: data.order.quotation_customer_contact_phone || "" },
+              { fieldKey: "quotation_salesperson_user_id", label: "业务员", value: data.order.quotation_salesperson_name || "" },
+              { fieldKey: "quotation_customs_clearance_mode", label: "清关办理方式", value: data.order.customs_clearance_mode === "customer" ? "客户自理清关" : "公司代办清关" },
+              { fieldKey: "quotation_origin_region", label: "起运地区", value: [data.order.origin_country,data.order.origin_state,data.order.origin_city].filter(Boolean).join(" / ") },
+              { fieldKey: "quotation_pickup_address", label: "提货地址", value: data.order.origin_address || "" },
+              { fieldKey: "quotation_destination_region", label: "目的地区", value: [data.order.destination_country,data.order.destination_state,data.order.destination_city].filter(Boolean).join(" / ") },
+              { fieldKey: "quotation_destination_warehouse_id", label: "目的仓库", value: data.order.overseas_warehouse_name || "" },
+              { fieldKey: "quotation_destination_warehouse_note", label: "目的地备注", value: data.order.overseas_warehouse_address_note || "" },
+            ]}
+          />}
+
+          {showOrderCreationInformation && <WorkflowInformationGroup
+            title="订单基础"
+            fields={data.workflowFields}
+            items={[
               { fieldKey: "customer_id", label: "委托客户", value: data.order.customer_name || "" },
+              { fieldKey: "quotation_id", label: "已接受报价", value: data.order.quote_number || "" },
               { fieldKey: "order_date", label: "接单日期", value: data.order.order_date || "" },
               { fieldKey: "business_nature", label: "业务性质", value: businessNatureLabels[data.order.business_nature] || data.order.business_nature || "" },
-            ]} />
-          </div>
+            ]}
+          />}
 
-          <div className="consignment-form-group">
-            <h4>客户与起运地</h4>
-            <InformationTable fields={data.workflowFields} items={[
+          {showOrderCreationInformation && <WorkflowInformationGroup
+            title="客户与起运地"
+            fields={data.workflowFields}
+            items={[
               { fieldKey: "shipper_customer_id", label: "发货方", value: data.order.shipper_name || "" },
+              { fieldKey: "pickup_address_id", label: "常用提货地", value: data.order.pickup_address_name || data.order.origin_address || "" },
               { fieldKey: "shipper_contact", label: "客户联系人", value: data.order.shipper_contact || "" },
               { fieldKey: "shipper_phone", label: "联系电话", value: data.order.shipper_phone || "" },
               { fieldKey: "origin_country", label: "起运国家/地区", value: data.order.origin_country || "" },
               { fieldKey: "origin_state", label: "起运省/州", value: data.order.origin_state || "" },
               { fieldKey: "origin_city", label: "起运城市", value: data.order.origin_city || "" },
-            ]} />
-          </div>
+              { fieldKey: "origin_address", label: "提货地址", value: data.order.origin_address || "" },
+            ]}
+          />}
 
-          <div className="consignment-form-group">
-            <h4>清关与境外目的仓</h4>
-            <InformationTable fields={data.workflowFields} items={[
+          {showOrderCreationInformation && <WorkflowInformationGroup
+            title="收货人与境外目的仓"
+            fields={data.workflowFields}
+            items={[
+              { fieldKey: "consignee_name", label: "收货人", value: data.order.consignee_name || "" },
+              { fieldKey: "consignee_contact", label: "收货联系人", value: data.order.consignee_contact || "" },
+              { fieldKey: "consignee_phone", label: "收货联系电话", value: data.order.consignee_phone || "" },
               { fieldKey: "destination_country", label: "目的国家/地区", value: data.order.destination_country || "" },
               { fieldKey: "destination_state", label: "目的省/州", value: data.order.destination_state || "" },
               { fieldKey: "destination_city", label: "目的城市", value: data.order.destination_city || "" },
+              { fieldKey: "destination_address", label: "送货地址", value: data.order.destination_address || "" },
               { fieldKey: "overseas_warehouse_id", label: "境外目的仓", value: data.order.overseas_warehouse_name || "" },
-              { label: "清关责任", value: data.order.customs_clearance_mode === "customer" ? "客户自理清关" : "公司代办清关" },
               { fieldKey: "overseas_warehouse_address_note", label: "目的仓地址备注", value: data.order.overseas_warehouse_address_note || "" },
-            ]} />
-          </div>
+            ]}
+          />}
 
-          <div className="consignment-form-group">
-            <h4>时间与备注</h4>
-            <InformationTable fields={data.workflowFields} items={[
+          {showOrderCreationInformation && <WorkflowInformationGroup
+            title="时间与备注"
+            fields={data.workflowFields}
+            items={[
               { fieldKey: "requested_pickup_date", label: "预约提货时间", value: data.order.requested_pickup_date || "" },
               { fieldKey: "cargo_ready_at", label: "货好时间", value: data.order.cargo_ready_at ? formatDateTime(data.order.cargo_ready_at) : "" },
               { fieldKey: "requested_delivery_date", label: "要求送达日", value: data.order.requested_delivery_date || "" },
               { fieldKey: "ro_agent", label: "RO 代理", value: data.order.ro_agent || "" },
               { fieldKey: "special_instructions", label: "备注", value: data.order.special_instructions || "" },
-            ]} />
-          </div>
+            ]}
+          />}
+
+          {!showQuotationInformation && !showOrderCreationInformation && !customFields.length && (
+            <div className="alert workflow-hidden-data-note">当前工作流已将本节标准字段全部设为隐藏；历史值仍保留审计。</div>
+          )}
 
           {customFields.length > 0 && (
             <div className="consignment-form-group">
@@ -6078,21 +6238,28 @@ function ModuleBusinessData({
           )}
         </section>}
 
-        {showCosts && <section className="consignment-form-sheet" aria-label="订单费用">
+        {showCosts && showQuotationCosts && <section className="consignment-form-sheet" aria-label="订单费用">
           <header>
             <div><h3>订单费用</h3><p>客户已接受的报价费用自动继承，只读展示并进入后续结算。</p></div>
-            <strong className="consignment-total-amount">{data.order.quotation_currency && data.order.quotation_total_amount != null ? `${data.order.quotation_currency} ${Number(data.order.quotation_total_amount).toLocaleString()}` : "—"}</strong>
+            {showQuotationChargeTable && <strong className="consignment-total-amount">{data.order.quotation_currency && data.order.quotation_total_amount != null ? `${data.order.quotation_currency} ${Number(data.order.quotation_total_amount).toLocaleString()}` : "—"}</strong>}
           </header>
-          <div className="table-wrap consignment-charge-table">
+          <WorkflowInformationGroup
+            title="报价时效"
+            fields={data.quotationCostWorkflowFields}
+            items={[{ fieldKey: "quotation_valid_until", label: "报价有效期", value: data.order.quotation_valid_until || "" }]}
+          />
+          {showQuotationChargeTable && <div className="table-wrap consignment-charge-table" data-workflow-field={quotationChargePolicy.visible ? "quotation_charge_items" : "pre_receivable_expenses"}>
             <table>
-              <thead><tr><th>费用名称</th><th>费用代码</th><th>币种</th><th>汇率</th><th>数量</th><th>单价</th><th>金额</th></tr></thead>
+              <thead><tr><th>{quotationChargePolicy.label || inheritedReceivablePolicy.label || "费用名称"}{quotationChargePolicy.required || inheritedReceivablePolicy.required ? " *" : ""}</th><th>费用代码</th><th>币种</th><th>汇率</th><th>数量</th><th>单价</th><th>金额</th></tr></thead>
               <tbody>
                 {data.quotationCharges.map((charge) => <tr key={charge.id}><td><strong>{charge.description}</strong></td><td>{charge.charge_code}</td><td>{data.order.quotation_currency || ""}</td><td>{Number(charge.exchange_rate).toLocaleString()}</td><td>{Number(charge.quantity).toLocaleString()}</td><td>{Number(charge.unit_price).toLocaleString()}</td><td><strong>{Number(charge.amount).toLocaleString()}</strong></td></tr>)}
                 {!data.quotationCharges.length && <tr><td colSpan={7} className="empty-state">关联报价尚无费用明细</td></tr>}
               </tbody>
             </table>
-          </div>
+          </div>}
         </section>}
+
+        {showCosts && !showQuotationCosts && <div className="alert workflow-hidden-data-note">当前工作流已将询价报价中的费用与有效期设为隐藏；金额仍保留用于后续结算和审计。</div>}
 
         {showConsignmentActionBar && <ConsignmentReviewActionBar data={data} busy={busy} />}
       </div>
@@ -6950,6 +7117,34 @@ function ModuleSummaryTable({
   </div>;
 }
 
+function WorkflowInformationGroup({
+  title,
+  hint,
+  items,
+  fields,
+}: {
+  title: string;
+  hint?: string;
+  items: Array<{ label: string; value: ReactNode; fieldKey: string }>;
+  fields: WorkflowFieldState[];
+}) {
+  const hasVisibleItems = items.some((item) =>
+    workflowFieldPolicy(fields, item.fieldKey).visible,
+  );
+  if (!hasVisibleItems) return null;
+  return <section className="consignment-form-group workflow-information-group">
+    <h4>{title}</h4>
+    {hint && <p>{hint}</p>}
+    <InformationTable fields={fields} items={items} />
+  </section>;
+}
+
+function workflowDisplayValuePresent(value: ReactNode) {
+  if (value === null || value === undefined || value === false) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  return true;
+}
+
 function InformationTable({
   items,
   fields,
@@ -6960,13 +7155,22 @@ function InformationTable({
   className?: string;
 }) {
   const visibleItems = items.filter((item) => !item.fieldKey || !fields || workflowFieldPolicy(fields, item.fieldKey).visible);
+  if (!visibleItems.length) return null;
   return <div className={["table-wrap", "module-record-table", "information-table", className].filter(Boolean).join(" ")}>
     <table>
       <thead><tr>{visibleItems.map((item) => {
         const policy = item.fieldKey && fields ? workflowFieldPolicy(fields, item.fieldKey) : null;
         return <th key={item.fieldKey || item.label}>{policy?.label || item.label}{policy?.required ? " *" : ""}</th>;
       })}</tr></thead>
-      <tbody><tr>{visibleItems.map((item) => <td key={item.fieldKey || item.label}>{item.value || "—"}</td>)}</tr></tbody>
+      <tbody><tr>{visibleItems.map((item) => {
+        const policy = item.fieldKey && fields ? workflowFieldPolicy(fields, item.fieldKey) : null;
+        const present = workflowDisplayValuePresent(item.value);
+        return <td
+          className={policy?.required && !present ? "required-missing" : present ? "filled" : "optional-empty"}
+          data-workflow-field={item.fieldKey}
+          key={item.fieldKey || item.label}
+        >{present ? item.value : "—"}</td>;
+      })}</tr></tbody>
     </table>
   </div>;
 }

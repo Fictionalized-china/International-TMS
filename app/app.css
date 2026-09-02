@@ -18955,6 +18955,56 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   color: var(--ink);
   font-size: 12px;
 }
+.linear-order-page .workflow-information-group > p {
+  margin: -2px 0 8px;
+  color: #64748b;
+  font-size: 11px;
+}
+.linear-order-page .information-table td.required-missing,
+.linear-order-page .cargo-workflow-values > .required-missing {
+  background: #fff4f1;
+  color: #a8321d;
+}
+.linear-order-page .information-table td.optional-empty,
+.linear-order-page .cargo-workflow-values > .optional-empty {
+  color: #7b8b9d;
+}
+.linear-order-page .cargo-workflow-table th {
+  min-width: 150px;
+  white-space: nowrap;
+}
+.linear-order-page .cargo-workflow-table td {
+  min-width: 170px;
+  padding: 0;
+  vertical-align: top;
+}
+.linear-order-page .cargo-workflow-values {
+  display: grid;
+}
+.linear-order-page .cargo-workflow-values > div {
+  display: grid;
+  grid-template-columns: minmax(72px, .8fr) minmax(70px, 1.2fr);
+  gap: 8px;
+  align-items: baseline;
+  min-height: 32px;
+  padding: 6px 9px;
+  border-bottom: 1px solid #edf1f5;
+}
+.linear-order-page .cargo-workflow-values > div:last-child { border-bottom: 0; }
+.linear-order-page .cargo-workflow-values small {
+  color: #64748b;
+  font-size: 10px;
+}
+.linear-order-page .cargo-workflow-values strong {
+  color: var(--ink);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.linear-order-page .workflow-hidden-data-note {
+  margin: 0;
+  color: #5f7184;
+  font-size: 11px;
+}
 .linear-order-page .node-panel > .consignment-submit-bar {
   min-height: 58px;
   position: relative;
