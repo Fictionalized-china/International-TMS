@@ -22419,15 +22419,96 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
   white-space: nowrap;
   text-decoration: none;
 }
+.loading-document-orders-cell {
+  min-width: 320px;
+}
+.loading-document-order-summary,
+.loading-document-orders > summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.loading-document-orders > summary {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  list-style: none;
+  cursor: pointer;
+}
+.loading-document-orders > summary::-webkit-details-marker {
+  display: none;
+}
+.loading-document-order-count {
+  color: #274968;
+  font-size: 9px;
+  white-space: nowrap;
+}
 .loading-document-order-list {
-  max-width: 280px;
+  display: block;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
   color: #1e5c94;
   font-size: 10.5px;
   font-weight: 700;
   line-height: 1.45;
   letter-spacing: 0.005em;
-  white-space: normal;
-  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.loading-document-order-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 24px;
+  padding: 0 7px;
+  border: 1px solid #bdd1e3;
+  border-radius: 3px;
+  background: #f4f9fe;
+  color: #315d83;
+  font-size: 9px;
+  font-weight: 700;
+  white-space: nowrap;
+  transition: background-color 160ms ease, border-color 160ms ease;
+}
+.loading-document-order-toggle::after {
+  width: 5px;
+  height: 5px;
+  border-right: 1px solid currentColor;
+  border-bottom: 1px solid currentColor;
+  content: "";
+  transform: rotate(45deg) translateY(-1px);
+  transition: transform 160ms ease;
+}
+.loading-document-orders > summary:hover .loading-document-order-toggle,
+.loading-document-orders > summary:focus-visible .loading-document-order-toggle {
+  border-color: #86add0;
+  background: #e8f3fd;
+}
+.loading-document-orders > summary:focus-visible {
+  outline: 2px solid #8fc2ec;
+  outline-offset: 2px;
+}
+.loading-document-orders[open] .loading-document-order-toggle::after {
+  transform: rotate(225deg) translate(-1px, -1px);
+}
+.loading-document-order-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  gap: 3px 8px;
+  margin-top: 5px;
+  padding: 6px 8px;
+  border: 1px solid #c8d8e6;
+  border-radius: 3px;
+  background: #f8fbfe;
+}
+.loading-document-order-options span {
+  overflow: hidden;
+  color: #1e5c94;
+  font-size: 10px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .warehouse-app-shell a.secondary.warehouse-loading-open-button {
   min-width: 64px;

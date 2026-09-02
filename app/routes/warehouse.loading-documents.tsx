@@ -335,7 +335,7 @@ export default function WarehouseLoadingDocuments({ loaderData, actionData }: Ro
           return <tr key={batch.id} className={selected?.id === batch.id ? "selected-row" : undefined}>
             <td><strong>{batch.batch_number}</strong><small>{batch.batch_name || "未命名配载批次"}</small></td>
             <td>{batch.origin_location}<small>至 {batch.destination_location}</small></td>
-            <td><strong>{batch.order_count} 票</strong><small className="loading-document-order-list">{batch.order_numbers}</small></td>
+            <td className="loading-document-orders-cell"><LoadingDocumentOrders count={batch.order_count} numbers={batch.order_numbers}/></td>
             <td><span className={`status-pill ${missing ? "danger" : "success"}`}>{summary.requiredCount === 0 ? "无必填文件" : missing ? `缺 ${missing} 项` : `${summary.requiredCount}/${summary.requiredCount} 已上传`}</span><small>仅统计当前工作流必填项</small></td>
             <td>{summary.rejectedRequiredCount ? <span className="status-pill danger">{summary.rejectedRequiredCount} 项必填文件已退回</span> : summary.requiredCount === 0 ? <span className="status-pill success">无需审核</span> : summary.approvedRequiredCount === summary.requiredCount ? <span className="status-pill success">全部通过</span> : <span className="status-pill">{summary.approvedRequiredCount}/{summary.requiredCount} 已通过</span>}</td>
             <td><span className={`status-pill ${batch.status === "completed" ? "success" : ""}`}>{batchStatusLabel(batch.status)}</span><small>{roadStatusLabels[batch.road_status] ?? batch.road_status}</small></td>
@@ -506,6 +506,19 @@ function OrderDocumentPreview({ documentType, selectedFile, current, warehouseId
     <header><strong>{documentType.name}</strong><span>{selectedFile ? "本次选择" : current ? "当前版本" : "尚未上传"}</span></header>
     {previewUrl && contentType.startsWith("image/") ? <img src={previewUrl} alt={`${documentType.name}预览`}/> : previewUrl && contentType === "application/pdf" ? <iframe src={previewUrl} title={`${documentType.name} PDF 预览`}/> : <div><b>{selectedFile?.name || current?.file_name || "无文件"}</b><small>{previewUrl ? "该格式请在新窗口打开检查" : "本次仍未提供该文件"}</small>{previewUrl && <a href={previewUrl} target="_blank" rel="noreferrer">{selectedFile ? "打开本次文件" : "打开当前文件"}</a>}</div>}
   </article>;
+}
+
+function LoadingDocumentOrders({ count, numbers }: { count: number; numbers: string }) {
+  const orders = numbers.split(/[,、]/).map((number) => number.trim()).filter(Boolean);
+  const readableNumbers = orders.join("、") || "暂无挂载订单";
+  const summary = <><strong className="loading-document-order-count">{count} 票</strong><span className="loading-document-order-list" title={readableNumbers}>{readableNumbers}</span></>;
+  if (orders.length <= 1) return <div className="loading-document-order-summary">{summary}</div>;
+  return <details className="loading-document-orders">
+    <summary>{summary}<span className="loading-document-order-toggle">查看全部</span></summary>
+    <div className="loading-document-order-options" role="list" aria-label={`${count} 票挂载订单`}>
+      {orders.map((number, index) => <span role="listitem" key={`${number}-${index}`}>{number}</span>)}
+    </div>
+  </details>;
 }
 
 function warehouseDocumentHref(document: DocumentRow, warehouseId: string) {
