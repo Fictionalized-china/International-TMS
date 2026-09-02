@@ -683,12 +683,11 @@ function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,busy,
           </div>}
         </Modal>
       </div>
-      {inspection.allUploaded&&<Modal title={`文件总览 · ${taskLabel}`} triggerLabel="查看文件总览" triggerClassName="secondary" size="xwide" openSignal={reviewOpenSignal}>
+      {inspection.allUploaded&&<Modal title={`装车任务确认 · ${taskLabel}`} triggerLabel="查看文件总览" triggerClassName="secondary" size="xwide" dialogClassName="outbound-review-modal" openSignal={reviewOpenSignal} initialFocusSelector={isFtl?'select[name="outboundCarrierId"]':".outbound-review-confirm button"}>
         <Form method="post" className="outbound-review-create-form" onKeyDown={event=>{if(event.key==="Enter")event.preventDefault();}}>
           <input type="hidden" name="intent" value="create"/><input type="hidden" name="batchId" value={inspection.batch.id}/><input type="hidden" name="orderNumber" value={isFtl?inspection.batch.order_number:""}/><input type="hidden" name="customerIdentityCode" value={isFtl?inspection.batch.customer_identity_code:""}/>
-          <div className="outbound-document-review-grid">{inspection.documents.filter(document=>document.attachmentId).map(document=><OutboundDocumentPreview key={`${document.orderId}:${document.code}`} warehouseId={warehouseId} document={document}/>)}</div>
           {isFtl&&<section className="ftl-outbound-resource-confirmation">
-            <header><div><strong>仓库确认整车出境运输资源</strong><span>这里确认的是离开国内仓后的出境运输车辆，不会沿用国内提货车辆；创建后自动同步管理端。</span></div><span className="status-pill warning">装车前必填</span></header>
+            <header><div><strong>1. 确认整车出境运输资源</strong><span>优先确认离开国内仓后的承运商、车辆、司机与计划时间；创建后自动同步管理端。</span></div><span className="status-pill warning">当前任务</span></header>
             {!outboundMasterDataReady&&<div className="alert error" role="alert">境外承运商、车辆或司机主数据不完整，暂不能创建整车装车任务。请先在管理端承运商台账补齐。</div>}
             <div className="ftl-outbound-resource-grid">
               <label className="field"><span>境外承运商 *</span><select name="outboundCarrierId" value={carrierId} required onChange={event=>{setCarrierId(event.target.value);setVehicleId("");setDriverId("");}}><option value="">请选择境外承运商</option>{outboundResources.carriers.map(carrier=><option key={carrier.id} value={carrier.id}>{carrier.name}</option>)}</select></label>
@@ -697,11 +696,15 @@ function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,busy,
               <label className="field"><span>计划出境发车时间 *</span><input type="datetime-local" name="plannedDepartureAt" required/></label>
             </div>
           </section>}
-          {!isFtl&&inspection.resourcePolicyError&&<div className="alert error" role="alert">{inspection.resourcePolicyError}</div>}
-          {!isFtl&&inspection.resourceDifferences.length>0&&<div className="alert warning" role="status"><strong>非必填运输信息未登记：</strong>{inspection.resourceDifferences.map(item=>`${item.label}（${item.mode==="hidden"?"工作流已隐藏":"选填"}）`).join("、")}。可以继续创建装车任务，但系统会记录本次差异与确认人。</div>}
-          {inspection.notesActive&&<label className="field outbound-handover-notes"><span>交接备注{inspection.notesRequired?" *":""}</span><textarea name="notes" rows={3} required={inspection.notesRequired} placeholder="填写装车交接、装载要求或出库注意事项"/></label>}
+          <div className="outbound-review-scroll-region">
+            <header className="outbound-review-section-heading"><div><strong>{isFtl?"2. 核对装车文件":"核对装车文件"}</strong><span>文件预览集中在此区域滚动，不影响上方资源录入和下方任务创建。</span></div><span className="status-pill">{inspection.documents.filter(document=>document.attachmentId).length} 份</span></header>
+            <div className="outbound-document-review-grid">{inspection.documents.filter(document=>document.attachmentId).map(document=><OutboundDocumentPreview key={`${document.orderId}:${document.code}`} warehouseId={warehouseId} document={document}/>)}</div>
+            {!isFtl&&inspection.resourcePolicyError&&<div className="alert error" role="alert">{inspection.resourcePolicyError}</div>}
+            {!isFtl&&inspection.resourceDifferences.length>0&&<div className="alert warning" role="status"><strong>非必填运输信息未登记：</strong>{inspection.resourceDifferences.map(item=>`${item.label}（${item.mode==="hidden"?"工作流已隐藏":"选填"}）`).join("、")}。可以继续创建装车任务，但系统会记录本次差异与确认人。</div>}
+            {inspection.notesActive&&<label className="field outbound-handover-notes"><span>交接备注{inspection.notesRequired?" *":""}</span><textarea name="notes" rows={3} required={inspection.notesRequired} placeholder="填写装车交接、装载要求或出库注意事项"/></label>}
+          </div>
           {resourceDifferenceAcknowledged&&<input type="hidden" name="resourceDifferenceConfirmed" value="yes"/>}
-          <div className="outbound-review-confirm"><p>{isFtl?"确认文件与出境车辆信息后，系统创建整车装车任务，并把承运商、车辆、司机和计划时间同步到管理端。":inspection.resourceDifferences.length&&!resourceDifferenceAcknowledged?"请先明确确认非必填运输信息为空；确认后还需再次点击最终创建按钮。":"确认文件清晰、归属正确后，系统按 PZ 配载单创建装车任务。"}</p>{!isFtl&&inspection.resourceDifferences.length>0&&!resourceDifferenceAcknowledged?<button type="button" className="secondary" disabled={busy||Boolean(inspection.resourcePolicyError)} onClick={()=>setResourceDifferenceAcknowledged(true)}>我已核对缺失信息，继续</button>:<button type="submit" className="primary warehouse-primary" disabled={busy||(isFtl&&!outboundMasterDataReady)||Boolean(inspection.resourcePolicyError)}>确认无误并创建装车任务</button>}</div>
+          <div className="outbound-review-confirm"><p>{isFtl?"填写上方出境资源后即可创建；文件核对区可独立滚动查看。":inspection.resourceDifferences.length&&!resourceDifferenceAcknowledged?"请先明确确认非必填运输信息为空；确认后还需再次点击最终创建按钮。":"确认文件清晰、归属正确后，系统按 PZ 配载单创建装车任务。"}</p>{!isFtl&&inspection.resourceDifferences.length>0&&!resourceDifferenceAcknowledged?<button type="button" className="secondary" disabled={busy||Boolean(inspection.resourcePolicyError)} onClick={()=>setResourceDifferenceAcknowledged(true)}>我已核对缺失信息，继续</button>:<button type="submit" className="primary warehouse-primary" disabled={busy||(isFtl&&!outboundMasterDataReady)||Boolean(inspection.resourcePolicyError)}>确认并创建装车任务</button>}</div>
         </Form>
       </Modal>}
     </>}
