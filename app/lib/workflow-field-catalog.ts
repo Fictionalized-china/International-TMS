@@ -277,6 +277,8 @@ export const workflowFieldCatalog: WorkflowFieldCatalogItem[] = [
   field("overseas_pickup", "overseas_warehouse", "overseas_arrival_notes", "到仓说明", "textarea", "optional", "卸车、入仓或换装说明。"),
   field("overseas_pickup", "overseas_warehouse", "customer_notified_at", "系统通知时间", "datetime", "required", "境外仓完成入库清点后由系统自动记录。"),
   field("overseas_pickup", "overseas_warehouse", "customer_notification_notes", "通知说明", "textarea", "optional", "电话、邮件或客户门户通知结果。"),
+  field("overseas_pickup", "overseas_warehouse", "pickup_appointment_at", "客户预约提货日期", "date", "optional", "客户在门户选择的自提日期；未预约时显示未预约。"),
+  field("overseas_pickup", "overseas_warehouse", "pickup_appointment_period", "预约提货时段", "select", "optional", "客户预约的提货时段，精确到上午、下午或晚上。", "morning|上午\nafternoon|下午\nevening|晚上"),
   field("overseas_pickup", "overseas_warehouse", "overseas_pickup_contact", "提货人/签收人", "text", "required", "客户实际提货人或签收人。"),
   field("overseas_pickup", "overseas_warehouse", "pickup_proof", "提货凭证", "attachment", "optional", "扫码、自提或签收凭证。"),
   field("overseas_pickup", "overseas_warehouse", "pickup_completed_at", "提货完成时间", "datetime", "required", "全部货物提走后记录完成时间。"),

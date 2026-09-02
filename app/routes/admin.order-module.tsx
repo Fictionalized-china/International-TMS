@@ -56,6 +56,7 @@ import {
   overseasOperationProgress,
   overseasOperationStatusLabels,
 } from "../lib/overseas-warehouse";
+import { formatPickupAppointment } from "../lib/pickup-appointment";
 import { customsProcessGuideState, type CustomsProcessPhase } from "../lib/customs-process-guide";
 import {
   automaticallyNotifyOverseasArrival,
@@ -631,12 +632,15 @@ type OverseasOperation = {
   actual_arrival_at: string | null;
   notified_at: string | null;
   appointment_at: string | null;
+  appointment_period: string | null;
   pickup_at: string | null;
   pickup_contact: string | null;
   pickup_proof_reference: string | null;
   notes: string | null;
   batch_order_count: number;
   picked_up_order_count: number;
+  warehouse_package_count: number;
+  in_warehouse_package_count: number;
 };
 
 export async function loader({ request, params }: Route.LoaderArgs) {
@@ -957,18 +961,21 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     env.DB.prepare(
       `SELECT op.id,op.batch_id,b.batch_number,b.road_status,op.warehouse_id,w.name warehouse_name,op.status,
               COALESCE(op.batch_id,b.id) batch_id,
-              op.actual_arrival_at,op.notified_at,op.appointment_at,op.pickup_at,op.pickup_contact,
+              op.actual_arrival_at,op.notified_at,op.appointment_at,op.appointment_period,op.pickup_at,op.pickup_contact,
               op.pickup_proof_reference,op.notes,
               (SELECT COUNT(*) FROM transport_batch_orders bo WHERE bo.batch_id=b.id AND bo.status!='removed') batch_order_count,
-              (SELECT COUNT(*) FROM overseas_warehouse_operations x WHERE x.batch_id=b.id AND x.status='picked_up') picked_up_order_count
+              (SELECT COUNT(*) FROM overseas_warehouse_operations x WHERE x.batch_id=b.id AND x.status='picked_up') picked_up_order_count,
+              (SELECT COUNT(*) FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id WHERE p.organization_id=bo.organization_id AND s.order_id=bo.order_id AND p.warehouse_id=COALESCE(op.warehouse_id,target_order.overseas_warehouse_id)) warehouse_package_count,
+              (SELECT COUNT(*) FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id WHERE p.organization_id=bo.organization_id AND s.order_id=bo.order_id AND p.warehouse_id=COALESCE(op.warehouse_id,target_order.overseas_warehouse_id) AND p.status IN ('in_stock','allocated','exception')) in_warehouse_package_count
        FROM transport_batch_orders bo
        JOIN transport_batches b ON b.id=bo.batch_id AND b.organization_id=bo.organization_id
+       JOIN transport_orders target_order ON target_order.id=bo.order_id AND target_order.organization_id=bo.organization_id
        LEFT JOIN overseas_warehouse_operations op ON op.batch_id=b.id AND op.order_id=bo.order_id AND op.organization_id=bo.organization_id
-       LEFT JOIN warehouses w ON w.id=COALESCE(op.warehouse_id,?) AND w.organization_id=bo.organization_id
+       LEFT JOIN warehouses w ON w.id=COALESCE(op.warehouse_id,target_order.overseas_warehouse_id) AND w.organization_id=bo.organization_id
        WHERE bo.organization_id=? AND bo.order_id=? AND bo.status!='removed' AND b.status!='cancelled'
        ORDER BY b.created_at DESC LIMIT 1`,
     )
-      .bind(order.overseas_warehouse_id, current.organizationId, orderId)
+      .bind(current.organizationId, orderId)
       .first<OverseasOperation>(),
     env.DB.prepare(
       `SELECT direction,confirmed,business_reviewed,finance_reviewed,business_locked,finance_locked
@@ -5779,8 +5786,8 @@ function ModuleBusinessData({
       waiting_arrival: 0,
       arrived: 1,
       notified: 2,
-      appointment: 2,
-      picked_up: 3,
+      appointment: 3,
+      picked_up: 4,
     };
     const operationStepDone = (status: string) =>
       (operationRank[operationStatus] || 0) >= operationRank[status];
@@ -5791,6 +5798,17 @@ function ModuleBusinessData({
         ) &&
         operationStatus === "waiting_arrival",
     );
+    const cargoWarehouseStatus = operationStatus === "picked_up"
+      ? "已完成自提出库"
+      : operation?.warehouse_package_count
+        ? `${operation.in_warehouse_package_count}/${operation.warehouse_package_count} 件在仓`
+        : operationStatus === "waiting_arrival"
+          ? "等待境外仓扫码到仓"
+          : "已到仓，货物明细待同步";
+    const appointmentStatus = formatPickupAppointment(
+      operation?.appointment_at,
+      operation?.appointment_period,
+    );
     return (
       <div className="module-business-stack dense-module-stack">
         <BusinessSubsection
@@ -5799,9 +5817,11 @@ function ModuleBusinessData({
         >
           <div className="table-wrap module-record-table overseas-progress-table" aria-live="polite">
             <table>
-              <thead><tr><th>当前状态</th><th>完成进度</th><th>下一步</th></tr></thead>
+              <thead><tr><th>当前状态</th><th>货物在仓状态</th><th>客户预约状态</th><th>完成进度</th><th>下一步</th></tr></thead>
               <tbody><tr>
                 <td><strong>{selfPickupCompleted ? "客户已自提并签收" : overseasOperationStatusLabels[operationStatus] || operationStatus}</strong></td>
+                <td><span className={`status-pill ${operation?.in_warehouse_package_count ? "success" : "off"}`}>{cargoWarehouseStatus}</span></td>
+                <td><span className={`pickup-status-summary compact ${operation?.appointment_at ? "appointed" : ""}`}>{appointmentStatus}</span></td>
                 <td>{progress}%</td>
                 <td>{selfPickupCompleted ? "进入费用结算" : nextOverseasAction(operationStatus)}</td>
               </tr></tbody>
@@ -5813,6 +5833,7 @@ function ModuleBusinessData({
               <tbody>{[
                 ["arrived", "目的仓到仓", operationStepDone("arrived")],
                 ["notified", "自动通知客户", operationStepDone("notified")],
+                ["appointment", "客户预约提货", operationStepDone("appointment")],
                 ["signed", "扫码自提签收", operationStepDone("picked_up")],
               ].map(([status, label, done], index) => <tr className={done ? "completed-row" : ""} key={String(status)}>
                 <td>{String(index + 1).padStart(2, "0")}</td>
@@ -5855,7 +5876,7 @@ function ModuleBusinessData({
         {manage && canConfirmArrival && data.order.overseas_warehouse_id && (
           <BusinessSubsection
             title="1. 境外目的仓收货清点"
-            hint="到仓状态只由境外目的仓扫码入库和清点确认触发；拼车运输单全部子订单清点完成后统一结束境外运输。"
+            hint="到仓状态只由境外目的仓扫码入库和清点确认触发；每票到仓后立即推进订单并通知客户，整批到齐后再结束配载单运输。"
           >
             <div className="loading-next-action">
               <strong>下一步由境外目的仓办理</strong>
@@ -5873,10 +5894,10 @@ function ModuleBusinessData({
         )}
 
         {manage && ["notified", "appointment"].includes(operationStatus) && (
-          <BusinessSubsection title="2. 客户扫码自提签收" hint={`系统已于 ${formatDateTime(operation?.notified_at) || "到仓时"} 自动通知客户；无需登记预约，客户到仓后逐件扫码并在弹窗内确认收货。`}>
+          <BusinessSubsection title="2. 客户扫码自提签收" hint={`系统已于 ${formatDateTime(operation?.notified_at) || "到仓时"} 自动通知客户；当前预约：${appointmentStatus}。客户可在门户预约，也可由仓库处理现场到仓自提。`}>
             <div className="loading-next-action">
               <strong>下一步由境外目的仓办理</strong>
-              <span>客户到仓后扫描本票全部货物条码，并在货物核对弹窗内确认收货；此处无需重复确认。</span>
+              <span>{operation?.appointment_at ? `客户预约 ${appointmentStatus} 提货；` : "客户尚未预约；"}到仓后扫描本票全部货物条码，并在货物核对弹窗内确认收货。</span>
               {data.order.overseas_warehouse_id && <WarehouseSiteButton
                 orderId={data.order.id}
                 targetPath={`/warehouse/pickup?warehouseId=${encodeURIComponent(data.order.overseas_warehouse_id)}`}
@@ -5893,7 +5914,7 @@ function ModuleBusinessData({
           <BusinessSubsection title="3. 扫码自提签收记录" hint="客户已在境外仓核对全部货物条码并确认收货；系统一次完成自提出库、签收并进入费用结算。签收单可后续在文件中心补充归档，但不再阻断流程。">
             <div className="table-wrap overseas-completion-table">
               <table>
-                <thead><tr><th>订单</th><th>客户</th><th>配载/运输单</th><th>目的仓</th><th>到仓</th><th>通知</th><th>扫码确认收货</th><th>签收单归档</th><th>结果</th></tr></thead>
+                <thead><tr><th>订单</th><th>客户</th><th>配载/运输单</th><th>目的仓</th><th>到仓</th><th>通知</th><th>预约</th><th>扫码确认收货</th><th>签收单归档</th><th>结果</th></tr></thead>
                 <tbody><tr>
                   <td><strong><OrderNumberLink id={data.order.id} number={data.order.order_number}/></strong></td>
                   <td>{data.order.customer_name}</td>
@@ -5901,6 +5922,7 @@ function ModuleBusinessData({
                   <td>{data.order.overseas_warehouse_name || "—"}</td>
                   <td>{formatDateTime(operation?.actual_arrival_at) || "—"}</td>
                   <td>{formatDateTime(operation?.notified_at) || "—"}</td>
+                  <td>{appointmentStatus}</td>
                   <td><strong>{formatDateTime(operation?.pickup_at) || "—"}</strong><small>{operation?.pickup_contact || "客户自提"}</small></td>
                   <td><span className={`status-pill ${signedReceiptApproved ? "" : "off"}`}>{signedReceiptApproved ? "已归档" : "选填"}</span></td>
                   <td><span className={`status-pill ${selfPickupCompleted ? "" : "off"}`}>{selfPickupCompleted ? "自提签收完成" : "正在同步"}</span></td>

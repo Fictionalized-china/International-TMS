@@ -504,7 +504,7 @@ export async function advanceOverseasOrder(input: AdvanceInput) {
   const progress = input.action === "notify" ? 60 : 100;
   const moduleStepCode = input.action === "notify" ? "notified" : "signed";
   const moduleStepName = input.action === "notify"
-    ? "等待客户扫码确认收货"
+    ? "等待客户预约或扫码自提"
     : "扫码自提签收完成";
   const moduleStatus=input.action === "pickup" ? "completed" : "in_progress";
   const now = new Date().toISOString();
@@ -738,8 +738,8 @@ export async function reconcileOverseasOrderDeliveryState(input: {
     : ({
         waiting_arrival: ["in_progress", "waiting_arrival", "等待到仓", 0],
         arrived: ["in_progress", "arrived", "等待系统通知客户", 25],
-        notified: ["in_progress", "notified", "等待客户扫码确认收货", 60],
-        appointment: ["in_progress", "notified", "等待客户扫码确认收货", 60],
+        notified: ["in_progress", "notified", "等待客户预约或扫码自提", 60],
+        appointment: ["in_progress", "appointment", "客户已预约，等待扫码自提", 75],
       } as Record<string, readonly [string, string, string, number]>)[operation.status];
   if (!state) return;
   if (

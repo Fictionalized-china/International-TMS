@@ -658,14 +658,17 @@ async function syncModuleStateFromTransportBatch(organizationId: string, orderId
     const operationStatus = batch.overseas_operation_status || "arrived";
     const pickupCompleted = operationStatus === "picked_up";
     const notified = ["notified", "appointment"].includes(operationStatus);
+    const appointed = operationStatus === "appointment";
     const moduleStatus = pickupCompleted ? "completed" : "in_progress";
-    const moduleStepCode = pickupCompleted ? "signed" : notified ? "notified" : "arrived";
+    const moduleStepCode = pickupCompleted ? "signed" : appointed ? "appointment" : notified ? "notified" : "arrived";
     const moduleStepName = pickupCompleted
       ? "扫码自提签收完成"
-      : notified
-        ? "等待客户扫码确认收货"
+      : appointed
+        ? "客户已预约，等待扫码自提"
+        : notified
+          ? "等待客户预约或扫码自提"
         : "等待系统自动通知客户";
-    const progress = pickupCompleted ? 100 : notified ? 60 : 25;
+    const progress = pickupCompleted ? 100 : appointed ? 75 : notified ? 60 : 25;
     statements.push(
       env.DB.prepare(
         `UPDATE order_module_instances

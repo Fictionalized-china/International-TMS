@@ -84,6 +84,10 @@ export default [
     route("portal/quotes", "routes/portal.quotes.tsx"),
     route("portal/orders", "routes/portal.orders.tsx"),
     route(
+      "portal/pickup-appointment",
+      "routes/portal.pickup-appointment.tsx",
+    ),
+    route(
       "portal/orders/:orderId/mark-label",
       "routes/portal.order-mark-label.tsx",
     ),

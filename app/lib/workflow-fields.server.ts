@@ -1100,6 +1100,7 @@ async function resolveFieldPresence(
     const operation = await env.DB.prepare(
       `SELECT actual_arrival_at overseas_arrival_at,notes overseas_arrival_notes,
               notified_at customer_notified_at,appointment_at pickup_appointment_at,
+              appointment_period pickup_appointment_period,
               pickup_contact overseas_pickup_contact,pickup_proof_reference pickup_proof,pickup_at pickup_completed_at,
               notes customer_notification_notes,notes pickup_appointment_notes,notes pickup_completion_notes
        FROM overseas_warehouse_operations

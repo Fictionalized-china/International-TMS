@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import type { Route } from "./+types/portal.index";
 import { PortalLink as Link } from "../components/PortalNavigation";
 import { OrderMarkLabelModal } from "../components/OrderMarkLabelModal";
+import { PortalPickupAppointment } from "../components/PortalPickupAppointment";
 import type { OrderMarkLabel } from "../lib/order-mark-label.server";
 import { requirePortalCustomer } from "../lib/portal.server";
 import { normalizePortalNotificationLink } from "../lib/portal-notification-links";
@@ -15,6 +16,9 @@ type RecentOrder = OrderMarkLabel & {
   exception_status: string | null;
   quote_withdrawn: number;
   updated_at: string;
+  overseas_operation_status: string | null;
+  pickup_appointment_at: string | null;
+  pickup_appointment_period: string | null;
 };
 type PendingQuote = {
   id: string;
@@ -31,6 +35,7 @@ type Notice = { id: string; type: string; title: string; message: string; link: 
 
 export async function loader({ request }: Route.LoaderArgs) {
   const { user, customer } = await requirePortalCustomer(request);
+  const url = new URL(request.url);
   const [contacts, addresses, summary] = await Promise.all([
     env.DB.prepare("SELECT id,name,title,email,phone,is_primary FROM customer_contacts WHERE customer_id=? ORDER BY is_primary DESC,name LIMIT 4").bind(customer.id).all<Contact>(),
     env.DB.prepare("SELECT id,label,country_code,city,address_line1,is_default FROM customer_addresses WHERE customer_id=? ORDER BY is_default DESC,label LIMIT 4").bind(customer.id).all<Address>(),
@@ -53,6 +58,8 @@ export async function loader({ request }: Route.LoaderArgs) {
               o.pieces,o.gross_weight_kg,o.volume_cbm,o.origin_country,o.origin_state,o.origin_city,
               o.destination_country,o.destination_state,o.destination_city,w.name overseas_warehouse_name,
               o.current_step_name,o.status,o.exception_status,o.updated_at,
+              op.status overseas_operation_status,op.appointment_at pickup_appointment_at,
+              op.appointment_period pickup_appointment_period,
               CASE
                 WHEN q.accepted_at IS NOT NULL THEN q.accepted_at
                 WHEN o.quotation_id IS NULL AND o.status IN ('confirmed','in_execution','completed') THEN o.created_at
@@ -62,6 +69,12 @@ export async function loader({ request }: Route.LoaderArgs) {
          JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
          LEFT JOIN quotations q ON q.id=o.quotation_id AND q.organization_id=o.organization_id
          LEFT JOIN warehouses w ON w.id=o.overseas_warehouse_id AND w.organization_id=o.organization_id
+         LEFT JOIN overseas_warehouse_operations op ON op.id=(
+           SELECT latest.id FROM overseas_warehouse_operations latest
+           WHERE latest.organization_id=o.organization_id AND latest.order_id=o.id
+             AND latest.status!='cancelled'
+           ORDER BY latest.created_at DESC LIMIT 1
+         )
         WHERE o.organization_id=? AND o.customer_id=?
         ORDER BY o.updated_at DESC LIMIT 8`,
     ).bind(user.organizationId, customer.id).all<RecentOrder>(),
@@ -82,6 +95,8 @@ export async function loader({ request }: Route.LoaderArgs) {
     recentOrders: recentOrders.results,
     pendingQuotes: pendingQuotes.results,
     notices: notices.results,
+    appointmentResult: url.searchParams.get("appointmentResult") || "",
+    appointmentError: url.searchParams.get("appointmentError") || "",
     summary: {
       orders: Number(summary?.orders ?? 0),
       shipments: Number(summary?.shipments ?? 0),
@@ -99,6 +114,8 @@ export default function PortalIndex({ loaderData }: Route.ComponentProps) {
       <div><p className="prototype-kicker">CUSTOMER PORTAL</p><h1>{loaderData.customer.name}</h1><p>客户代码 {loaderData.customer.code} · 账户状态 {loaderData.customer.status === "active" ? "正常" : loaderData.customer.status}</p></div>
       <span className="pill portal-enabled">门户已启用</span>
     </header>
+    {loaderData.appointmentResult && <p className="alert success">{loaderData.appointmentResult}</p>}
+    {loaderData.appointmentError && <p className="alert error">{loaderData.appointmentError}</p>}
 
     <section className="kpis portal-home-kpis" aria-label="业务摘要">
       <div><span>执行中订单</span><b>{loaderData.summary.orders}</b><small>{loaderData.summary.pendingQuotes ? `另有 ${loaderData.summary.pendingQuotes} 份报价待确认` : "当前无待确认报价"}</small></div>
@@ -126,7 +143,7 @@ export default function PortalIndex({ loaderData }: Route.ComponentProps) {
           <td>{order.origin_city} → {order.destination_city}</td>
           <td>{order.current_step_name || "待同步"}</td>
           <td><span className={`status ${statusTone(order.status, order.exception_status)}`}>{statusLabel(order.status)}</span></td>
-          <td><div className="portal-order-actions"><Link className="btn small" to={`/portal/tracking?order=${encodeURIComponent(order.order_number)}`}>查看轨迹</Link>{markLabelAvailable(order) && <OrderMarkLabelModal order={order} />}</div></td>
+          <td><div className="portal-order-actions"><PortalPickupAppointment order={order} returnTo="/portal"/><Link className="btn small" to={`/portal/tracking?order=${encodeURIComponent(order.order_number)}`}>查看轨迹</Link>{markLabelAvailable(order) && <OrderMarkLabelModal order={order} />}</div></td>
         </tr>)}
         {!loaderData.pendingQuotes.length && !loaderData.recentOrders.length && <tr><td className="empty" colSpan={7}>暂无待确认报价或订单。</td></tr>}
       </tbody></table></div>

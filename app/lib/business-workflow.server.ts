@@ -223,14 +223,14 @@ async function ensureRoadWorkflowTemplates(organizationId: string) {
        WHERE workflow_id IN (
          SELECT id FROM workflow_definitions
          WHERE organization_id=? AND code IN ('tms-road-pending','tms-default','tms-ftl-standard')
-       ) AND field_key IN ('pickup_appointment_at','pickup_appointment_notes')`,
+       ) AND field_key='pickup_appointment_notes'`,
     ).bind(now, organizationId),
     env.DB.prepare(
       `UPDATE workflow_instance_fields SET is_active=0
        WHERE workflow_id IN (
          SELECT id FROM workflow_definitions
          WHERE organization_id=? AND code IN ('tms-road-pending','tms-default','tms-ftl-standard')
-       ) AND field_key IN ('pickup_appointment_at','pickup_appointment_notes')`,
+       ) AND field_key='pickup_appointment_notes'`,
     ).bind(organizationId),
   ]);
 

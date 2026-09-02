@@ -8,6 +8,7 @@ import { Modal } from "../components/Modal";
 import { valueOf } from "../lib/validation";
 import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
+import { formatPickupAppointment } from "../lib/pickup-appointment";
 
 type PickupPackage = {
   id: string;
@@ -25,6 +26,8 @@ type PickupOrder = {
   customer_name: string;
   batch_number: string;
   notified_at: string | null;
+  appointment_at: string | null;
+  appointment_period: string | null;
   pickup_at: string | null;
   operation_status: string;
   package_count: number;
@@ -44,7 +47,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const [orders, packages] = await Promise.all([
     env.DB.prepare(
       `SELECT op.order_id,o.order_number,c.name customer_name,b.batch_number,
-               op.notified_at,op.pickup_at,op.status operation_status,
+               op.notified_at,op.appointment_at,op.appointment_period,op.pickup_at,op.status operation_status,
               COUNT(p.id) package_count,
               SUM(CASE WHEN p.status='allocated' THEN 1 ELSE 0 END) scanned_count,
               SUM(CASE WHEN p.status='dispatched' THEN 1 ELSE 0 END) dispatched_count
@@ -55,7 +58,7 @@ export async function loader({ request }: Route.LoaderArgs) {
          LEFT JOIN shipments s ON s.order_id=o.id AND s.organization_id=o.organization_id
          LEFT JOIN warehouse_packages p ON p.shipment_id=s.id AND p.organization_id=s.organization_id AND p.warehouse_id=op.warehouse_id
          WHERE op.organization_id=? AND op.warehouse_id=? AND op.status IN ('notified','appointment','picked_up')
-         GROUP BY op.order_id,o.order_number,c.name,b.batch_number,op.notified_at,op.pickup_at,op.status
+         GROUP BY op.order_id,o.order_number,c.name,b.batch_number,op.notified_at,op.appointment_at,op.appointment_period,op.pickup_at,op.status
          ORDER BY CASE WHEN op.status IN ('notified','appointment') THEN 0 ELSE 1 END,op.notified_at DESC
         LIMIT 100`,
     ).bind(user.organizationId, warehouse.id).all<PickupOrder>(),
@@ -253,7 +256,7 @@ export default function WarehousePickup({ loaderData, actionData }: Route.Compon
     </section>
 
     {loaderData.activeOrder && <section className="panel overseas-pickup-progress-panel">
-      <div className="panel-header"><div><h2>{loaderData.activeOrder.order_number}</h2><p>{loaderData.activeOrder.customer_name} · {loaderData.activeOrder.batch_number}</p></div><strong>{loaderData.activeOrder.scanned_count}/{loaderData.activeOrder.package_count} 已扫描</strong></div>
+      <div className="panel-header"><div><h2>{loaderData.activeOrder.order_number}</h2><p>{loaderData.activeOrder.customer_name} · {loaderData.activeOrder.batch_number}</p><span className={`pickup-status-summary ${loaderData.activeOrder.appointment_at ? "appointed" : ""}`}><b>预约状态</b>{formatPickupAppointment(loaderData.activeOrder.appointment_at, loaderData.activeOrder.appointment_period)}</span></div><strong>{loaderData.activeOrder.scanned_count}/{loaderData.activeOrder.package_count} 已扫描</strong></div>
       <div className="table-wrap"><table><thead><tr><th>货物标签</th><th>包装号</th><th>件数</th><th>重量 / 体积</th><th>状态</th></tr></thead><tbody>
         {loaderData.packages.map((item) => <tr key={item.id}><td><strong>{item.barcode}</strong></td><td>{item.package_number}</td><td>{item.pieces}</td><td>{item.weight_kg ?? "—"} KG · {item.volume_cbm ?? "—"} CBM</td><td><span className={`status-pill ${item.status === "exception" ? "danger" : ""}`}>{packageStatusLabels[item.status] || item.status}</span></td></tr>)}
       </tbody></table></div>
@@ -262,9 +265,9 @@ export default function WarehousePickup({ loaderData, actionData }: Route.Compon
 
     <section className="panel overseas-pickup-queue-panel">
       <div className="panel-header"><div><h2>境外仓自提队列</h2><p>统一显示已入库待自提和已自提出库的订单。</p></div><span className="status-pill">{loaderData.orders.length} 票</span></div>
-      <div className="table-wrap"><table><thead><tr><th>状态</th><th>订单 / 配载单</th><th>客户</th><th>通知状态</th><th>标签进度</th><th>自提出库时间</th></tr></thead><tbody>
-        {loaderData.orders.map((item) => <tr key={item.order_id}><td><span className={`status-pill ${item.operation_status === "picked_up" ? "" : "off"}`}>{item.operation_status === "picked_up" ? "已自提出库" : "已入库待自提"}</span></td><td><strong>{item.order_number}</strong><small>{item.batch_number}</small></td><td>{item.customer_name}</td><td>{item.notified_at ? new Date(item.notified_at).toLocaleString("zh-CN") : "客户已通知"}</td><td>{item.dispatched_count}/{item.package_count} 已出库</td><td>{item.pickup_at ? new Date(item.pickup_at).toLocaleString("zh-CN") : "—"}</td></tr>)}
-        {!loaderData.orders.length && <tr><td colSpan={6} className="empty-state">当前仓库暂无待自提订单。</td></tr>}
+      <div className="table-wrap"><table><thead><tr><th>货物状态</th><th>订单 / 配载单</th><th>客户</th><th>通知时间</th><th>客户预约</th><th>标签进度</th><th>自提出库时间</th></tr></thead><tbody>
+        {loaderData.orders.map((item) => <tr key={item.order_id}><td><span className={`status-pill ${item.operation_status === "picked_up" ? "" : "off"}`}>{item.operation_status === "picked_up" ? "已自提出库" : "已入库待自提"}</span></td><td><strong>{item.order_number}</strong><small>{item.batch_number}</small></td><td>{item.customer_name}</td><td>{item.notified_at ? new Date(item.notified_at).toLocaleString("zh-CN") : "客户已通知"}</td><td><span className={`pickup-status-summary compact ${item.appointment_at ? "appointed" : ""}`}>{formatPickupAppointment(item.appointment_at, item.appointment_period)}</span></td><td>{item.dispatched_count}/{item.package_count} 已出库</td><td>{item.pickup_at ? new Date(item.pickup_at).toLocaleString("zh-CN") : "—"}</td></tr>)}
+        {!loaderData.orders.length && <tr><td colSpan={7} className="empty-state">当前仓库暂无待自提订单。</td></tr>}
       </tbody></table></div>
     </section>
   </>;
