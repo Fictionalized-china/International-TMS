@@ -1064,7 +1064,7 @@ function BatchOrderCustomsWorkbench({orderId,declarations,manage,busy,closeSigna
   const released=active.filter(item=>item.status==="released").length;
   return <section className="batch-order-customs-workbench">
     <header><div><strong>本票报关与放行</strong><span>{manage?"在当前配载单内办理":"只读汇总；办理操作在订单报关作业中完成"}</span></div><span className={`status-pill ${active.length>0&&released===active.length?"success":""}`}>{active.length?`${released}/${active.length} 张放行`:"尚无有效报关单"}</span></header>
-    {declarations.length>0&&<div className="batch-customs-list">{declarations.map(declaration=><div className="batch-customs-row" key={declaration.id}>
+    {declarations.length>0&&<div className="batch-customs-list"><div className="batch-customs-list-header" aria-hidden="true"><span>报关单 / 作业阶段</span><span>申报主体</span><span>金额 / 毛重</span><span>状态</span><span>操作</span></div>{declarations.map(declaration=><div className="batch-customs-row" key={declaration.id}>
       <div><strong>{declaration.declaration_number}</strong><small>{customsStageLabel(declaration.clearance_stage)} · {declaration.declaration_type}</small></div>
       <div><span>{declaration.declaration_title}</span><small>{declaration.declaring_company}</small></div>
       <div><span>{declaration.currency} {Number(declaration.declared_amount).toLocaleString()}</span><small>{Number(declaration.gross_weight_kg).toLocaleString()} KG</small></div>
@@ -1072,7 +1072,7 @@ function BatchOrderCustomsWorkbench({orderId,declarations,manage,busy,closeSigna
       <div className="batch-customs-actions">
         <Modal title={`查看报关单 · ${declaration.declaration_number}`} triggerLabel="查看" triggerClassName="text-button" size="wide"><BatchCustomsDeclarationView declaration={declaration}/></Modal>
         {manage&&<Modal title={`编辑报关单 · ${declaration.declaration_number}`} triggerLabel="编辑" triggerClassName="text-button" size="wide" closeSignal={closeSignal}><BatchCustomsDeclarationForm orderId={orderId} declaration={declaration} busy={busy}/></Modal>}
-        {manage&&declaration.status!=="released"&&declaration.status!=="cancelled"&&declaration.is_deleted!==1&&<Modal title={`确认海关放行 · ${declaration.declaration_number}`} triggerLabel="放行" triggerClassName="text-button" closeSignal={closeSignal}><BatchCustomsReleaseForm orderId={orderId} declaration={declaration} busy={busy}/></Modal>}
+        {manage&&declaration.status!=="released"&&declaration.status!=="cancelled"&&declaration.is_deleted!==1&&<Modal title={`确认海关放行 · ${declaration.declaration_number}`} triggerLabel="确认放行" triggerClassName="primary batch-customs-release-button" closeSignal={closeSignal}><BatchCustomsReleaseForm orderId={orderId} declaration={declaration} busy={busy}/></Modal>}
       </div>
     </div>)}</div>}
     {!declarations.length&&<p className="empty-state">本票尚未登记报关单。先上传“报关资料”，再新增申报单。</p>}

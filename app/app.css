@@ -15148,9 +15148,21 @@ a.order-module-card.read-only:hover {
 .batch-order-customs-workbench > header > div { display: grid; gap: 2px; }
 .batch-order-customs-workbench > header span:not(.status-pill) { color: #63758d; font-size: 12px; }
 .batch-customs-list { border: 1px solid #dce5f1; background: #fff; }
+.batch-customs-list-header {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.1fr) minmax(150px, 1.2fr) minmax(120px, .8fr) auto minmax(190px, auto);
+  gap: 10px;
+  align-items: center;
+  padding: 6px 10px;
+  color: #62748b;
+  border-bottom: 1px solid #dce5f1;
+  background: #f2f6fb;
+  font-size: 11px;
+  font-weight: 700;
+}
 .batch-customs-row {
   display: grid;
-  grid-template-columns: minmax(150px, 1.1fr) minmax(150px, 1.2fr) minmax(120px, .8fr) auto auto;
+  grid-template-columns: minmax(150px, 1.1fr) minmax(150px, 1.2fr) minmax(120px, .8fr) auto minmax(190px, auto);
   gap: 10px;
   align-items: center;
   padding: 9px 10px;
@@ -15159,7 +15171,12 @@ a.order-module-card.read-only:hover {
 .batch-customs-row:last-child { border-bottom: 0; }
 .batch-customs-row > div:not(.batch-customs-actions) { display: grid; gap: 2px; min-width: 0; }
 .batch-customs-row small { color: #63758d; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.batch-customs-actions { display: flex; align-items: center; gap: 6px; }
+.batch-customs-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.batch-customs-release-button {
+  min-height: 30px;
+  padding: 5px 12px;
+  white-space: nowrap;
+}
 .batch-order-customs-workbench > .secondary { justify-self: start; }
 
 @media (max-width: 900px) {
@@ -15172,6 +15189,7 @@ a.order-module-card.read-only:hover {
   .batch-order-file-upload { grid-template-columns: 1fr; }
   .batch-order-file-list { grid-template-columns: 1fr; }
   .batch-order-file-list > div { grid-template-columns: 88px minmax(0, 1fr) auto; }
+  .batch-customs-list-header { display: none; }
   .batch-customs-row { grid-template-columns: 1fr auto; }
   .batch-customs-row > div:not(.batch-customs-actions) { grid-column: 1 / -1; }
   .batch-order-file-panel { width: calc(100vw - 24px); max-height: 88vh; padding: 0 12px 14px; }
