@@ -22420,9 +22420,32 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
   text-decoration: none;
 }
 .loading-document-order-list {
-  max-width: 260px;
+  max-width: 280px;
+  color: #1e5c94;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1.45;
+  letter-spacing: 0.005em;
   white-space: normal;
   overflow-wrap: anywhere;
+}
+.warehouse-app-shell a.secondary.warehouse-loading-open-button {
+  min-width: 64px;
+  border-color: #8db5da;
+  background: #eaf4ff;
+  color: #174f80;
+  font-weight: 750;
+  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+.warehouse-app-shell a.secondary.warehouse-loading-open-button:hover {
+  border-color: #5f94c3;
+  background: #dcecff;
+  color: #0f426f;
+}
+.warehouse-app-shell a.secondary.warehouse-loading-open-button:focus-visible {
+  border-color: #3c7caf;
+  outline: 2px solid #8fc2ec;
+  outline-offset: 2px;
 }
 .warehouse-loading-document-dialog { min-width: 0; }
 .warehouse-loading-document-dialog-head {
