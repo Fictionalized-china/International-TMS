@@ -934,8 +934,8 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
   const [pickupAddress, setPickupAddress] = useState(loaderData.customers[0]?.pickup_address || "");
   const [customerContactName, setCustomerContactName] = useState(loaderData.customers[0]?.contact_name || "");
   const [customerContactPhone, setCustomerContactPhone] = useState(loaderData.customers[0]?.contact_phone || "");
-  const [roadLoadType, setRoadLoadType] = useState<"ltl" | "ftl">("ltl");
-  const [workflowDefinitionId, setWorkflowDefinitionId] = useState(loaderData.workflows.find((workflow) => workflow.road_load_type === "ltl")?.id || "");
+  const [roadLoadType, setRoadLoadType] = useState<"" | "ltl" | "ftl">("");
+  const [workflowDefinitionId, setWorkflowDefinitionId] = useState("");
   const [pieces, setPieces] = useState("1");
   const [lengthCm, setLengthCm] = useState("");
   const [widthCm, setWidthCm] = useState("");
@@ -1005,6 +1005,10 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
     setCustomerContactName(customer?.contact_name || "");
     setCustomerContactPhone(customer?.contact_phone || "");
   };
+  const selectRoadLoadType = (value: "" | "ltl" | "ftl") => {
+    setRoadLoadType(value);
+    setWorkflowDefinitionId("");
+  };
   return <Form method="post" encType="multipart/form-data" className="prototype-quote-form" data-keyboard-submit data-enter-flow>
     <input type="hidden" name="intent" value="create"/>
     {formError && <div ref={errorSummaryRef} className="alert error" role="alert" tabIndex={-1}><strong>报价尚未保存</strong><span>{formError}</span><small>已填写内容仍保留在当前弹窗，请按提示修改后重试。</small></div>}
@@ -1017,15 +1021,17 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
         {policies.contactPhone.isActive && <Field label="联系电话"><ContactCombobox name="customerContactPhone" value={customerContactPhone} contacts={selectedCustomerContacts} mode="phone" required={policies.contactPhone.isRequired} onChange={(value, contact) => { setCustomerContactPhone(value); if (contact) setCustomerContactName(contact.name); }} /></Field>}
         {policies.salesperson.isActive && <Field label="业务员"><select className="control" name="salespersonId" defaultValue={loaderData.current.userId} required={policies.salesperson.isRequired}><option value="">请选择业务员</option>{loaderData.users.map((user) => <option key={user.id} value={user.id}>{user.display_name} · {user.email}</option>)}</select></Field>}
         <Field label="运输方式"><select className="control" name="transportMode" defaultValue="ROAD" required><option value="ROAD">汽运</option><option value="RAIL" disabled>铁运（流程未开放）</option><option value="AIR" disabled>空运（流程未开放）</option></select></Field>
-        <Field label="订单类型"><select className="control" name="roadLoadType" value={roadLoadType} onChange={(event) => setRoadLoadType(event.target.value as "ltl" | "ftl")} required><option value="ltl">拼车</option><option value="ftl">整车</option></select></Field>
+        <Field label="订单类型"><select className="control" name="roadLoadType" value={roadLoadType} onChange={(event) => selectRoadLoadType(event.target.value as "" | "ltl" | "ftl")} required><option value="" disabled>请选择订单类型</option><option value="ltl">拼车</option><option value="ftl">整车</option></select></Field>
         {policies.customsMode.isActive && <Field label="清关办理方式"><select className="control" name="customsClearanceMode" defaultValue="company" required={policies.customsMode.isRequired}><option value="company">公司代办清关</option><option value="customer">客户自理清关</option></select></Field>}
-        <Field label="工作流版本"><select className="control" name="workflowDefinitionId" value={workflowDefinitionId} onChange={(event) => setWorkflowDefinitionId(event.target.value)} required><option value="">{compatibleWorkflows.length ? "请选择工作流版本" : "当前类型暂无可用工作流"}</option>{compatibleWorkflows.map((workflow) => <option key={workflow.id} value={workflow.id}>{workflow.name} · v{workflow.version_number}{workflow.lifecycle_status === "published" ? " · 当前发布" : " · 历史版本"}</option>)}</select></Field>
+        <Field label="工作流版本"><select className="control" name="workflowDefinitionId" value={workflowDefinitionId} onChange={(event) => setWorkflowDefinitionId(event.target.value)} disabled={!roadLoadType} required><option value="">{!roadLoadType ? "请先选择订单类型" : compatibleWorkflows.length ? "请选择工作流版本" : "当前类型暂无可用工作流"}</option>{compatibleWorkflows.map((workflow) => <option key={workflow.id} value={workflow.id}>{workflow.name} · v{workflow.version_number}{workflow.lifecycle_status === "published" ? " · 当前发布" : " · 历史版本"}</option>)}</select></Field>
       </div>
     </QuoteLedgerSection>
-    <QuoteLedgerSection className="quote-workflow-fields-section" title="工作流配置项" note={selectedWorkflow ? `${selectedWorkflow.name} v${selectedWorkflow.version_number} · 随订单类型和版本切换` : "请先选择工作流版本"}>
-      {selectedCustomWorkflowFields.length
-        ? <QuotationWorkflowFieldInputs fields={selectedCustomWorkflowFields} values={[]} customers={loaderData.customers} warehouses={loaderData.warehouses}/>
-        : <div className="quote-workflow-empty">当前版本没有额外自定义项；下方标准报价字段的显示与必填状态已由本工作流实时控制。</div>}
+    <QuoteLedgerSection className="quote-workflow-fields-section" title="工作流配置项" note={selectedWorkflow ? `${selectedWorkflow.name} v${selectedWorkflow.version_number} · 随订单类型和版本切换` : roadLoadType ? "请先选择工作流版本" : "请先选择订单类型"}>
+      {!selectedWorkflow
+        ? <div className="quote-workflow-empty">选择订单类型后，系统将自动载入该类型当前发布的工作流。</div>
+        : selectedCustomWorkflowFields.length
+          ? <QuotationWorkflowFieldInputs fields={selectedCustomWorkflowFields} values={[]} customers={loaderData.customers} warehouses={loaderData.warehouses}/>
+          : <div className="quote-workflow-empty">当前版本没有额外自定义项；下方标准报价字段的显示与必填状态已由本工作流实时控制。</div>}
     </QuoteLedgerSection>
     {routeFieldsVisible && <QuoteLedgerSection className="quote-route-section" title="运输路线" note="地区按国家 / 地区 → 省 / 州 → 城市逐级选择">
       <div className="quote-route-matrix" role="group" aria-label="报价运输路线">
