@@ -20067,6 +20067,93 @@ html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animatio
   padding: 4px 9px;
 }
 
+.warehouse-consolidation-page .consolidation-view-panel {
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.consolidation-view-tabs {
+  display: flex;
+  gap: 4px;
+  align-items: flex-end;
+  margin: 0;
+  padding: 7px 10px 0;
+  border-bottom: 1px solid #d6e5f2;
+}
+
+.consolidation-view-tabs a {
+  min-width: 118px;
+  min-height: 31px;
+  padding: 0 12px;
+  display: inline-flex;
+  gap: 7px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #d6e5f2;
+  border-bottom: 0;
+  border-radius: 3px 3px 0 0;
+  background: #fff;
+  color: #708296;
+  font-size: 10px;
+  font-weight: 650;
+  text-decoration: none;
+  transition: color 160ms ease, background-color 160ms ease, border-color 160ms ease;
+}
+
+.consolidation-view-tabs a span {
+  color: inherit;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.78;
+}
+
+.consolidation-view-tabs a:hover {
+  border-color: #b7cee2;
+  color: #234d75;
+}
+
+.consolidation-view-tabs a.active {
+  border-color: #173654;
+  background: var(--navy);
+  color: #fff;
+}
+
+.consolidation-view-tabs a:focus-visible {
+  outline: 2px solid #2f80c9;
+  outline-offset: 2px;
+}
+
+.consolidation-view-content {
+  min-width: 0;
+  animation: consolidation-view-enter 180ms cubic-bezier(0.2, 0.72, 0.25, 1) both;
+}
+
+.consolidation-view-content.stock {
+  --consolidation-enter-x: -8px;
+}
+
+.consolidation-view-content.batches {
+  --consolidation-enter-x: 8px;
+}
+
+@keyframes consolidation-view-enter {
+  from { opacity: 0.7; transform: translateX(var(--consolidation-enter-x)); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.warehouse-consolidation-page .consolidation-tab-filter {
+  border-bottom: 1px solid #d6e5f2;
+}
+
+.warehouse-consolidation-page .consolidation-tab-panel {
+  min-width: 0;
+}
+
+.warehouse-consolidation-page .consolidation-batch-panel {
+  padding: 0 10px 5px;
+}
+
 .warehouse-consolidation-page .panel-header {
   gap: 8px;
   padding-block: 6px;
@@ -20156,6 +20243,54 @@ html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animatio
   height: 34px;
 }
 
+.warehouse-consolidation-page .consolidation-batch-table table {
+  width: 100%;
+  min-width: 1480px;
+  table-layout: fixed;
+}
+
+.warehouse-consolidation-page .consolidation-batch-table th:nth-child(1) { width: 150px; }
+.warehouse-consolidation-page .consolidation-batch-table th:nth-child(2) { width: 170px; }
+.warehouse-consolidation-page .consolidation-batch-table th:nth-child(3) { width: 105px; }
+.warehouse-consolidation-page .consolidation-batch-table th:nth-child(4) { width: 190px; }
+.warehouse-consolidation-page .consolidation-batch-table th:nth-child(5) { width: 190px; }
+.warehouse-consolidation-page .consolidation-batch-table th:nth-child(6) { width: 180px; }
+.warehouse-consolidation-page .consolidation-batch-table th:nth-child(7) { width: 115px; }
+.warehouse-consolidation-page .consolidation-batch-table th:nth-child(8) { width: 350px; }
+
+.warehouse-consolidation-page .consolidation-batch-table tbody tr {
+  height: 44px;
+}
+
+.warehouse-consolidation-page .consolidation-batch-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.warehouse-consolidation-page .consolidation-batch-table td small {
+  display: block;
+  margin-top: 2px;
+  overflow: hidden;
+  color: #64748b;
+  font-size: 10px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.warehouse-consolidation-page .consolidation-batch-actions {
+  flex-wrap: nowrap;
+  gap: 5px;
+}
+
+.warehouse-consolidation-page .consolidation-batch-actions > * {
+  flex: 0 0 auto;
+  min-height: 27px;
+  padding: 3px 7px;
+  font-size: 10px;
+}
+
 .warehouse-consolidation-page .consolidation-stock-table .consolidation-order-cell,
 .warehouse-consolidation-page .consolidation-stock-table .consolidation-receipt-cell,
 .warehouse-consolidation-page .consolidation-stock-table .consolidation-destination-cell,
@@ -20218,6 +20353,14 @@ html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animatio
   cursor: not-allowed;
   opacity: 0.65;
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .consolidation-view-tabs a { transition: none; }
+  .consolidation-view-content { animation: none; }
+}
+
+html[data-motion="off"] .consolidation-view-tabs a { transition: none; }
+html[data-motion="off"] .consolidation-view-content { animation: none; }
 
 .consolidation-create-form {
   gap: 9px;

@@ -29,6 +29,7 @@ import { valueOf } from "../lib/validation";
 import { chunkD1Rows, chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 
 const PAGE_SIZE=10;
+type ConsolidationView="stock"|"batches";
 
 type StockRow={
   order_id:string;order_number:string;business_type:string;customer_name:string;
@@ -47,6 +48,7 @@ type BatchRow={
   carrier_id:string|null;overseas_carrier_name:string|null;overseas_vehicle_plate:string|null;
   overseas_driver_name:string|null;vehicle_master_id:string|null;driver_master_id:string|null;
 };
+type AvailableBatch=Pick<BatchRow,"id"|"batch_number"|"destination_location">;
 
 type BatchOrder={batch_id:string;order_id:string;order_number:string;customer_name:string;cargo_names:string|null;weight_kg:number;volume_cbm:number};
 type LatestRequiredDocument={order_id:string;attachment_id:string;document_category:string;review_status:string};
@@ -105,7 +107,8 @@ export async function loader({request}:Route.LoaderArgs){
   const user=await requireSessionUser(request,"warehouse.view","warehouse");
   const context=await loadWarehouseContext(request,user),warehouse=context.selected;
   if(warehouse.warehouse_role==="overseas_destination")throw new Response("境外目的仓不办理货物配载",{status:403});
-  const url=new URL(request.url),page=Math.max(1,Number(url.searchParams.get("page"))||1),pageSize=PAGE_SIZE;
+  const url=new URL(request.url),view:ConsolidationView=url.searchParams.get("view")==="batches"?"batches":"stock";
+  const page=Math.max(1,Number(url.searchParams.get("page"))||1),batchPage=Math.max(1,Number(url.searchParams.get("batchPage"))||1),pageSize=PAGE_SIZE;
   const filters={warehouse:url.searchParams.get("destinationWarehouse")?.trim()??"",country:url.searchParams.get("country")?.trim()??"",state:url.searchParams.get("state")?.trim()??"",city:url.searchParams.get("city")?.trim()??"",customer:url.searchParams.get("customer")?.trim()??"",eligibility:url.searchParams.get("eligibility")?.trim()??"",keyword:url.searchParams.get("q")?.trim()??""};
   const clauses:string[]=[],bindings:string[]=[];
   const like=(column:string,value:string)=>{if(value){clauses.push(`${column} LIKE ?`);bindings.push(`%${value}%`)}};
@@ -117,7 +120,11 @@ export async function loader({request}:Route.LoaderArgs){
   const filterSql=clauses.length?` AND ${clauses.join(" AND ")}`:"",baseBindings=stockBindings(user.organizationId,warehouse.id);
   const totalRow=await env.DB.prepare(`${stockCtes} SELECT COUNT(*) total ${stockFrom}${filterSql}`).bind(...baseBindings,...bindings).first<{total:number}>();
   const total=totalRow?.total??0,pages=Math.max(1,Math.ceil(total/pageSize)),safePage=Math.min(page,pages);
-  const [rows,options,batches,batchOrders]=await Promise.all([
+  const batchTotalRow=await env.DB.prepare(`SELECT COUNT(*) total FROM transport_batches b
+    WHERE b.organization_id=? AND b.warehouse_id=? AND b.batch_number LIKE 'PZ-%' AND b.status!='cancelled'
+      AND EXISTS(SELECT 1 FROM transport_batch_orders bo WHERE bo.organization_id=b.organization_id AND bo.batch_id=b.id AND bo.status!='removed')`).bind(user.organizationId,warehouse.id).first<{total:number}>();
+  const batchTotal=batchTotalRow?.total??0,batchPages=Math.max(1,Math.ceil(batchTotal/pageSize)),safeBatchPage=Math.min(batchPage,batchPages);
+  const [rows,options,batches,availableBatches,batchOrders]=await Promise.all([
     env.DB.prepare(`${stockCtes} ${rowSelectSql()} ${stockFrom}${filterSql} ORDER BY CASE WHEN ab.batch_id IS NULL THEN 0 ELSE 1 END,o.updated_at DESC LIMIT ? OFFSET ?`).bind(...baseBindings,...bindings,pageSize,(safePage-1)*pageSize).all<StockRow>(),
     env.DB.prepare(`${stockCtes} SELECT DISTINCT COALESCE(ow.name,'') overseas_warehouse_name,o.destination_country,o.destination_state,o.destination_city,c.name customer_name ${stockFrom} ORDER BY overseas_warehouse_name,o.destination_country,o.destination_state,o.destination_city`).bind(...baseBindings).all<StockRow&{customer_name:string}>(),
     env.DB.prepare(`SELECT b.id,b.batch_number,b.batch_name,b.destination_location,b.border_port,b.customs_location,b.planned_loading_at,b.planned_departure_at,b.status,b.road_status,b.created_at,
@@ -132,7 +139,13 @@ export async function loader({request}:Route.LoaderArgs){
         WHERE d.transport_batch_id=b.id AND d.status!='cancelled' AND (d.status='dispatched' OR di.status!='pending')) has_started
       FROM transport_batches b JOIN transport_batch_orders bo ON bo.batch_id=b.id AND bo.status!='removed'
       JOIN transport_orders o ON o.id=bo.order_id WHERE b.organization_id=? AND b.warehouse_id=? AND b.batch_number LIKE 'PZ-%' AND b.status!='cancelled'
-      GROUP BY b.id ORDER BY b.updated_at DESC LIMIT 30`).bind(user.organizationId,warehouse.id).all<BatchRow>(),
+      GROUP BY b.id ORDER BY b.updated_at DESC LIMIT ? OFFSET ?`).bind(user.organizationId,warehouse.id,pageSize,(safeBatchPage-1)*pageSize).all<BatchRow>(),
+    env.DB.prepare(`SELECT b.id,b.batch_number,b.destination_location FROM transport_batches b
+      WHERE b.organization_id=? AND b.warehouse_id=? AND b.batch_number LIKE 'PZ-%' AND b.status IN ('planning','loading')
+        AND EXISTS(SELECT 1 FROM transport_batch_orders bo WHERE bo.organization_id=b.organization_id AND bo.batch_id=b.id AND bo.status!='removed')
+        AND NOT EXISTS(SELECT 1 FROM warehouse_dispatches d LEFT JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id
+          WHERE d.transport_batch_id=b.id AND d.status!='cancelled' AND (d.status='dispatched' OR di.status!='pending'))
+      ORDER BY b.updated_at DESC LIMIT 100`).bind(user.organizationId,warehouse.id).all<AvailableBatch>(),
     env.DB.prepare(`SELECT bo.batch_id,o.id order_id,o.order_number,c.name customer_name,
       (SELECT GROUP_CONCAT(NULLIF(TRIM(i.cargo_name_cn),''),'、') FROM order_cargo_items i WHERE i.organization_id=o.organization_id AND i.order_id=o.id) cargo_names,
       COALESCE((SELECT SUM(p.weight_kg) FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id WHERE s.order_id=o.id AND p.warehouse_id=b.warehouse_id AND p.status IN ('in_stock','allocated')),0) weight_kg,
@@ -154,7 +167,7 @@ export async function loader({request}:Route.LoaderArgs){
     loadLatestRequiredDocuments(user.organizationId,orderIds),
     loadLoadingBatchWorkflowOrders(user.organizationId,orderIds),
   ]);
-  return{user,warehouse,rows:rows.results,options:options.results,batches:batches.results,batchOrders:batchOrders.results,carriers:carriers.results,carrierVehicles:carrierVehicles.results,carrierDrivers:carrierDrivers.results,borderPorts:routeOptions.results.filter(item=>item.category==="border_port"),customsPlaces:routeOptions.results.filter(item=>item.category==="customs_place"),orderDocumentRequirements,latestRequiredDocuments,loadingWorkflowOrders,filters,page:safePage,pageSize,pages,total};
+  return{user,warehouse,view,rows:rows.results,options:options.results,batches:batches.results,availableBatches:availableBatches.results,batchOrders:batchOrders.results,carriers:carriers.results,carrierVehicles:carrierVehicles.results,carrierDrivers:carrierDrivers.results,borderPorts:routeOptions.results.filter(item=>item.category==="border_port"),customsPlaces:routeOptions.results.filter(item=>item.category==="customs_place"),orderDocumentRequirements,latestRequiredDocuments,loadingWorkflowOrders,filters,page:safePage,pageSize,pages,total,batchPage:safeBatchPage,batchPages,batchTotal};
 }
 
 export async function action({request}:Route.ActionArgs){
@@ -338,15 +351,22 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
   const selectedIds=new Set(selected.map(row=>row.orderId));
   const toggle=(row:StockRow,checked:boolean)=>setSelected(current=>checked?[...current.filter(item=>item.orderId!==row.order_id),toSelection(row,loaderData.loadingWorkflowOrders.find(item=>item.orderId===row.order_id)??{orderId:row.order_id,appliesToCurrentOrFuture:true,fields:[]})]:current.filter(item=>item.orderId!==row.order_id));
   const values=<K extends keyof (typeof loaderData.options)[number]>(key:K)=>[...new Set(loaderData.options.map(row=>row[key]).filter(Boolean) as string[])];
-  const availableBatches=loaderData.batches.filter(batch=>!batch.has_started&&["planning","loading"].includes(batch.status));
+  const activeView:ConsolidationView=loaderData.view;
   return <div className="warehouse-consolidation-page">
     <header className="warehouse-page-header ltl-loading-header">
       <div><p className="eyebrow">CARGO CONSOLIDATION</p><h1>货物配载</h1><p>勾选完整拼车订单并生成正式 PZ 配载单；本页仅查看文件齐套状态，不再上传订单文件。</p></div>
       <Link className="secondary" to={`/warehouse/loading-documents?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}`}>进入配载文件</Link>
     </header>
     {actionData?.formError&&<div className="alert error">{actionData.formError}</div>}{actionData?.success&&<div className="alert success">{actionData.success}{actionData.batchId&&<> · <Link to={`/admin/loading/${actionData.batchId}`}>打开配载单</Link></>}</div>}
-    <section className="panel ltl-filter-panel"><FilterForm loaderData={loaderData} values={values}/></section>
-    <section className="panel consolidation-stock-panel">
+    <section className="panel consolidation-view-panel">
+      <nav className="consolidation-view-tabs" aria-label="货物配载页面">
+        <Link className={activeView==="stock"?"active":""} aria-current={activeView==="stock"?"page":undefined} to={consolidationViewHref(loaderData,"stock")} viewTransition>在库货物 <span>{loaderData.total}</span></Link>
+        <Link className={activeView==="batches"?"active":""} aria-current={activeView==="batches"?"page":undefined} to={consolidationViewHref(loaderData,"batches")} viewTransition>当前配载单 <span>{loaderData.batchTotal}</span></Link>
+      </nav>
+      <div className={`consolidation-view-content ${activeView}`}>
+      {activeView==="stock"?<>
+      <section className="ltl-filter-panel consolidation-tab-filter"><FilterForm loaderData={loaderData} values={values}/></section>
+      <section className="consolidation-tab-panel consolidation-stock-panel">
       <div className="panel-header">
         <div>
           <h2>当前仓库全部在库货物</h2>
@@ -355,7 +375,7 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
         <div className="consolidation-selection-actions">
           <span className="status-pill">已选 {selected.length} / 在库 {loaderData.total} 票</span>
           <button type="button" className="secondary" disabled={!selected.length} onClick={()=>setSelected([])}>清空</button>
-          {selected.length>0&&availableBatches.length>0&&<Modal title="加入已有配载单" triggerLabel="加入已有" triggerClassName="secondary" size="xwide" closeSignal={actionData?.success}><AddToBatchForm selected={selected} batches={availableBatches} busy={busy}/></Modal>}
+          {selected.length>0&&loaderData.availableBatches.length>0&&<Modal title="加入已有配载单" triggerLabel="加入已有" triggerClassName="secondary" size="xwide" closeSignal={actionData?.success}><AddToBatchForm selected={selected} batches={loaderData.availableBatches} busy={busy}/></Modal>}
           <Modal title="生成配载单" triggerLabel={`生成配载（${selected.length}）`} size="xwide" closeSignal={actionData?.success}><ConsolidationForm selected={selected} totals={totals} warehouseName={loaderData.warehouse.name} policies={fieldPolicies} carriers={loaderData.carriers} vehicles={loaderData.carrierVehicles} drivers={loaderData.carrierDrivers} borderPorts={loaderData.borderPorts} customsPlaces={loaderData.customsPlaces} busy={busy}/></Modal>
         </div>
       </div>
@@ -403,11 +423,11 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
         </table>
       </div>
       {!loaderData.rows.length&&<p className="empty-state">当前仓库没有符合筛选条件的在库货物。</p>}
-      <Pagination loaderData={loaderData}/>
+      <Pagination loaderData={loaderData} view="stock"/>
     </section>
-    <section className="panel">
+    </>:<section className="consolidation-tab-panel consolidation-batch-panel">
       <div className="panel-header"><div><h2>当前仓库配载单</h2><p>配载单已包含口岸与清关地；请直接从对应行进入下一步，不再返回页面顶部寻找入口。</p></div></div>
-      <div className="table-wrap"><table><thead><tr><th>配载单</th><th>订单</th><th>实收汇总</th><th>承运商 / 车辆 / 司机</th><th>境外目的地</th><th>计划装车 / 出境</th><th>状态</th><th>操作</th></tr></thead><tbody>{loaderData.batches.map(batch=><tr key={batch.id}>
+      <div className="table-wrap consolidation-batch-table"><table><thead><tr><th>配载单</th><th>订单</th><th>实收汇总</th><th>承运商 / 车辆 / 司机</th><th>境外目的地</th><th>计划装车 / 出境</th><th>状态</th><th>操作</th></tr></thead><tbody>{loaderData.batches.map(batch=><tr key={batch.id}>
         <td><strong>{batch.batch_number}</strong><small>{batch.batch_name}</small></td>
         <td><strong>{batch.order_count} 票</strong><small>{batch.order_numbers}</small></td>
         <td>{batch.total_weight.toFixed(2)} KG<small>{batch.total_volume.toFixed(3)} CBM</small></td>
@@ -418,6 +438,9 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
         <td><div className="button-row consolidation-batch-actions"><Link className="text-button" to={`/admin/loading/${batch.id}`}>查看配载单</Link><Link className="primary warehouse-primary" to={`/warehouse/outbound?warehouseId=${loaderData.warehouse.id}&view=${batch.has_dispatch?"execution":"pending"}`}>{batch.has_dispatch?"进入装车与出库":"创建装车任务"}</Link>{!batch.has_started&&<Modal title={`车辆安排 · ${batch.batch_number}`} triggerLabel={batch.carrier_id&&batch.vehicle_master_id&&batch.driver_master_id?"修改车辆":"补充车辆"} triggerClassName="text-button" closeSignal={actionData?.success}><BatchResourceForm batch={batch} carriers={loaderData.carriers} vehicles={loaderData.carrierVehicles} drivers={loaderData.carrierDrivers} busy={busy}/></Modal>}{!batch.has_started&&<Modal title={`调整 ${batch.batch_number}`} triggerLabel="调整订单" triggerClassName="text-button" closeSignal={actionData?.success}><BatchAdjustment batch={batch} orders={loaderData.batchOrders.filter(row=>row.batch_id===batch.id)} busy={busy}/></Modal>}</div></td>
       </tr>)}</tbody></table></div>
       {!loaderData.batches.length&&<p className="empty-state">当前仓库尚未生成配载单。</p>}
+      <Pagination loaderData={loaderData} view="batches"/>
+    </section>}
+      </div>
     </section>
   </div>;
 }
@@ -479,7 +502,7 @@ function BatchResourceFields({carriers,vehicles,drivers,policies,carrierId:initi
   </section>
 }
 
-function AddToBatchForm({selected,batches,busy}:{selected:Selection[];batches:BatchRow[];busy:boolean}){
+function AddToBatchForm({selected,batches,busy}:{selected:Selection[];batches:AvailableBatch[];busy:boolean}){
   return <Form method="post" className="stack ltl-task-form">
     <input type="hidden" name="intent" value="add"/>
     {selected.map(row=><input key={row.orderId} type="hidden" name="orderId" value={row.orderId}/>)}
@@ -500,11 +523,13 @@ function FilterForm({loaderData,values}:{loaderData:Route.ComponentProps["loader
   const hasAdvanced=Boolean(loaderData.filters.country||loaderData.filters.state||loaderData.filters.city||loaderData.filters.customer);
   return <Form method="get" action="." className="consolidation-filter-form">
     <input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/>
+    <input type="hidden" name="view" value="stock"/>
+    <input type="hidden" name="batchPage" value={loaderData.batchPage}/>
     <div className="consolidation-filter-primary">
       <label className="consolidation-filter-search"><span>订单 / 客户 / 货物</span><input name="q" defaultValue={loaderData.filters.keyword} placeholder="输入订单号、客户或货物名称"/></label>
       <Select label="境外目的仓" name="destinationWarehouse" current={loaderData.filters.warehouse} values={values("overseas_warehouse_name")}/>
       <label><span>配载状态</span><select name="eligibility" defaultValue={loaderData.filters.eligibility}><option value="">全部</option><option value="eligible">仅可配载</option><option value="assigned">仅已配载</option><option value="blocked">仅不可配载</option></select></label>
-      <div className="consolidation-filter-actions"><button className="primary">筛选</button><Link className="secondary" to={`/warehouse/consolidation?warehouseId=${loaderData.warehouse.id}`}>重置</Link></div>
+      <div className="consolidation-filter-actions"><button className="primary">筛选</button><Link className="secondary" to={`/warehouse/consolidation?warehouseId=${loaderData.warehouse.id}&view=stock&batchPage=${loaderData.batchPage}`}>重置</Link></div>
     </div>
     <details className="consolidation-advanced-filters" open={hasAdvanced||undefined}>
       <summary>更多筛选条件</summary>
@@ -545,7 +570,35 @@ function DocumentStatusCell({row,warehouseId,requirements,documents}:{row:StockR
 }
 
 function Select({label,name,current,values}:{label:string;name:string;current:string;values:string[]}){return<label><span>{label}</span><select name={name} defaultValue={current}><option value="">全部</option>{values.map(value=><option key={value}>{value}</option>)}</select></label>}
-function Pagination({loaderData}:{loaderData:{page:number;pages:number;total:number;warehouse:{id:string};filters:Record<string,string>}}){const href=(page:number)=>{const params=new URLSearchParams({warehouseId:loaderData.warehouse.id,page:String(page)}),names:Record<string,string>={warehouse:"destinationWarehouse",keyword:"q"};Object.entries(loaderData.filters).forEach(([key,value])=>{if(value)params.set(names[key]||key,value)});return`/warehouse/consolidation?${params}`};const previous=loaderData.page-1,next=loaderData.page+1,count=Math.min(5,loaderData.pages),start=Math.max(1,Math.min(loaderData.page-2,loaderData.pages-count+1)),pageNumbers=Array.from({length:count},(_,index)=>start+index);return<footer className="pagination consolidation-pagination" aria-label="在库订单分页"><span>每页 10 票 · 第 {loaderData.page} / {loaderData.pages} 页 · 共 {loaderData.total} 票</span><div>{previous>=1?<Link className="secondary" to={href(previous)}>上一页</Link>:<span className="secondary disabled" aria-disabled="true">上一页</span>}{pageNumbers.map(page=>page===loaderData.page?<span key={page} className="consolidation-pagination-current" aria-current="page">{page}</span>:<Link key={page} className="secondary" to={href(page)} aria-label={`第 ${page} 页`}>{page}</Link>)}{next<=loaderData.pages?<Link className="secondary" to={href(next)}>下一页</Link>:<span className="secondary disabled" aria-disabled="true">下一页</span>}</div></footer>}
+function consolidationViewHref(loaderData:Route.ComponentProps["loaderData"],view:ConsolidationView,nextPage?:number){
+  const params=new URLSearchParams({
+    warehouseId:loaderData.warehouse.id,
+    view,
+    page:String(view==="stock"&&nextPage?nextPage:loaderData.page),
+    batchPage:String(view==="batches"&&nextPage?nextPage:loaderData.batchPage),
+  });
+  const names:Record<string,string>={warehouse:"destinationWarehouse",keyword:"q"};
+  Object.entries(loaderData.filters).forEach(([key,value])=>{if(value)params.set(names[key]||key,value)});
+  return `/warehouse/consolidation?${params}`;
+}
+
+function Pagination({loaderData,view}:{loaderData:Route.ComponentProps["loaderData"];view:ConsolidationView}){
+  const page=view==="stock"?loaderData.page:loaderData.batchPage;
+  const pages=view==="stock"?loaderData.pages:loaderData.batchPages;
+  const total=view==="stock"?loaderData.total:loaderData.batchTotal;
+  const unit=view==="stock"?"票":"张";
+  const previous=page-1,next=page+1,count=Math.min(5,pages),start=Math.max(1,Math.min(page-2,pages-count+1));
+  const pageNumbers=Array.from({length:count},(_,index)=>start+index);
+  const href=(targetPage:number)=>consolidationViewHref(loaderData,view,targetPage);
+  return <footer className="pagination consolidation-pagination" aria-label={view==="stock"?"在库订单分页":"配载单分页"}>
+    <span>每页 10 {unit} · 第 {page} / {pages} 页 · 共 {total} {unit}</span>
+    <div>
+      {previous>=1?<Link className="secondary" to={href(previous)}>上一页</Link>:<span className="secondary disabled" aria-disabled="true">上一页</span>}
+      {pageNumbers.map(pageNumber=>pageNumber===page?<span key={pageNumber} className="consolidation-pagination-current" aria-current="page">{pageNumber}</span>:<Link key={pageNumber} className="secondary" to={href(pageNumber)} aria-label={`第 ${pageNumber} 页`}>{pageNumber}</Link>)}
+      {next<=pages?<Link className="secondary" to={href(next)}>下一页</Link>:<span className="secondary disabled" aria-disabled="true">下一页</span>}
+    </div>
+  </footer>;
+}
 
 function toSelection(row:StockRow,loadingWorkflow:LoadingBatchWorkflowOrder):Selection{return{orderId:row.order_id,orderNumber:row.order_number,customerName:row.customer_name,packages:row.package_count,pieces:row.pieces,weight:row.weight_kg,volume:row.volume_cbm,loadingWorkflow}}
 function isSelection(value:unknown):value is Selection{
