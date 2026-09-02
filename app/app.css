@@ -8134,16 +8134,18 @@ body.modal-scroll-locked {
   font-weight: 700;
 }
 
-.consolidation-col-select { width: 46px; }
-.consolidation-col-status { width: 100px; }
-.consolidation-col-order { width: 270px; }
-.consolidation-col-receipt { width: 155px; }
-.consolidation-col-destination { width: 230px; }
-.consolidation-col-location { width: 90px; }
-.consolidation-col-documents { width: 300px; }
+.consolidation-col-select { width: 44px; }
+.consolidation-col-status { width: 96px; }
+.consolidation-col-order { width: 245px; }
+.consolidation-col-receipt { width: 145px; }
+.consolidation-col-origin { width: 150px; }
+.consolidation-col-destination { width: 205px; }
+.consolidation-col-location { width: 80px; }
+.consolidation-col-documents { width: 210px; }
 
 .consolidation-order-cell,
 .consolidation-receipt-cell,
+.consolidation-origin-warehouse-cell,
 .consolidation-destination-cell,
 .consolidation-location-cell {
   min-width: 0;
@@ -8174,6 +8176,7 @@ body.modal-scroll-locked {
   line-height: inherit;
 }
 
+.consolidation-origin-warehouse-cell,
 .consolidation-location-cell {
   color: #475569;
   font-weight: 700;

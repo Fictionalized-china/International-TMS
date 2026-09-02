@@ -366,6 +366,7 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
             <col className="consolidation-col-status" />
             <col className="consolidation-col-order" />
             <col className="consolidation-col-receipt" />
+            <col className="consolidation-col-origin" />
             <col className="consolidation-col-destination" />
             <col className="consolidation-col-location" />
             <col className="consolidation-col-documents" />
@@ -376,6 +377,7 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
               <th>配载状态</th>
               <th>订单 / 客户 / 货物</th>
               <th>实收数据</th>
+              <th>国内起点仓</th>
               <th>境外目的地</th>
               <th>库位</th>
               <th>文件准备</th>
@@ -391,6 +393,7 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
                 <td>{assigned?<span className="status-pill" title={row.active_batch_number??"已加入配载单"}>已配载 · {row.active_batch_number}</span>:<span className={`status-pill ${blockers.length?"off":"success"}`} title={blockers.join("；")}>{blockers.length?"不可配载":"可配载"}</span>}</td>
                 <td className="consolidation-order-cell" title={`${row.order_number} · ${row.customer_name} · ${row.cargo_names||"未填写货名"}`}><strong>{row.order_number}</strong><span>· {row.customer_name}</span><small>· {row.cargo_names||"未填写货名"}</small></td>
                 <td className="consolidation-receipt-cell" title={`${row.package_count} 包装 / ${row.pieces} 件 · ${row.weight_kg.toFixed(2)} KG · ${row.volume_cbm.toFixed(3)} CBM`}><strong>{row.package_count} 包装 / {row.pieces} 件</strong><span>· {row.weight_kg.toFixed(2)} KG · {row.volume_cbm.toFixed(3)} CBM</span></td>
+                <td className="consolidation-origin-warehouse-cell" title={loaderData.warehouse.name}>{loaderData.warehouse.name}</td>
                 <td className="consolidation-destination-cell" title={`${row.overseas_warehouse_name||"目的仓未设置"} · ${[row.destination_country,row.destination_state,row.destination_city].filter(Boolean).join(" ")||"地区未填写"}`}><strong>{row.overseas_warehouse_name||"目的仓未设置"}</strong><span>· {[row.destination_country,row.destination_state,row.destination_city].filter(Boolean).join(" ")||"地区未填写"}</span></td>
                 <td className="consolidation-location-cell" title={row.location_names||"未分配库位"}>{row.location_names||"—"}</td>
                 <td><DocumentStatusCell row={row} warehouseId={loaderData.warehouse.id} requirements={requirements} documents={documents}/></td>
@@ -522,7 +525,7 @@ function DocumentStatusCell({row,warehouseId,requirements,documents}:{row:StockR
   const missingRequiredCount=activeRequirements.filter(requirement=>requirement.isRequired&&!uploadedCodes.has(requirement.code)).length;
   const triggerLabel=!activeRequirements.length?"无文件要求":missingRequiredCount?`${uploadedCount}/${activeRequirements.length} 已传 · 缺 ${missingRequiredCount} 必传`:`${uploadedCount}/${activeRequirements.length} 已传 · 必传已齐`;
   const triggerState=!activeRequirements.length?"empty":missingRequiredCount?"missing":"ready";
-  return <div className="consolidation-document-status"><Modal title={`文件齐套状态 · ${row.order_number}`} triggerLabel={triggerLabel} triggerClassName={`consolidation-document-trigger ${triggerState}`}>
+  return <div className="consolidation-document-status" title={triggerLabel}><Modal title={`文件齐套状态 · ${row.order_number}`} triggerLabel={triggerLabel} triggerClassName={`consolidation-document-trigger ${triggerState}`}>
     <div className="consolidation-document-dialog">
       <div className="consolidation-document-summary">
         <span>{uploadedCount}/{activeRequirements.length} 已上传</span>
