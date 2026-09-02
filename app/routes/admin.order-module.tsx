@@ -5101,13 +5101,15 @@ function ModuleBusinessData({
     const activeOriginDeclarations = activeDeclarations.filter((item) => item.clearance_stage === "origin");
     const releasedOriginCount = activeOriginDeclarations.filter((item) => item.status === "released").length;
     const deletedCount = data.customsDeclarations.length - activeDeclarations.length;
+    const createPanelResetKey = data.customsDeclarations.map((item) => item.id).sort().join(":") || "empty";
     return (
       <div className="module-business-stack dense-module-stack">
         {manage && (
-          <details className="expandable module-create-dialog" open={!activeDeclarations.length}>
-            <summary>新增报关单</summary>
-            <CustomsDeclarationForm busy={busy} fields={data.workflowFields} />
-          </details>
+          <NewCustomsDeclarationPanel
+            key={createPanelResetKey}
+            busy={busy}
+            fields={data.workflowFields}
+          />
         )}
         <ModuleSummaryTable items={[
           { label: "有效起运地报关单", value: activeOriginDeclarations.length, detail: "张" },
@@ -6625,10 +6627,25 @@ function CustomsMissingValue({ label }: { label?: string }) {
   return <span className="customs-missing-value">{label ? `${label}未填写` : "未填写"}</span>;
 }
 
+function NewCustomsDeclarationPanel({ busy, fields }: { busy: boolean; fields: WorkflowFieldState[] }) {
+  const [formRevision, setFormRevision] = useState(0);
+  return (
+    <details
+      className="expandable module-create-dialog"
+      onToggle={(event) => {
+        if (event.currentTarget.open) setFormRevision((current) => current + 1);
+      }}
+    >
+      <summary>新增报关单</summary>
+      <CustomsDeclarationForm key={formRevision} busy={busy} fields={fields} />
+    </details>
+  );
+}
+
 function CustomsDeclarationForm({ busy, declaration, fields, lockStatus = false, submitLabel }: { busy: boolean; declaration?: CustomsDeclaration; fields: WorkflowFieldState[]; lockStatus?: boolean; submitLabel?: string }) {
   const [status, setStatus] = useState(declaration?.status === "released" ? "released" : "declared");
   const [isDeleted, setIsDeleted] = useState(declaration?.is_deleted === 1);
-  return <Form method="post" className="form-grid compact customs-declaration-form">
+  return <Form method="post" className="form-grid compact customs-declaration-form" autoComplete={declaration ? undefined : "off"}>
     <input type="hidden" name="intent" value="customs_declaration_save" />
     {declaration?.id && <input type="hidden" name="declarationId" value={declaration.id} />}
     {!workflowFieldPolicy(fields, "declaration_stage").visible && <input type="hidden" name="clearanceStage" value={declaration?.clearance_stage ?? "origin"} />}
@@ -6673,13 +6690,13 @@ function CustomsDeclarationForm({ busy, declaration, fields, lockStatus = false,
       {(required) => <input name="declaredAt" type="datetime-local" defaultValue={toDateTimeInput(declaration?.declared_at) || toDateTimeInput(new Date().toISOString())} required={required} />}
     </ModuleField>
     <ModuleField fields={fields} fieldKey="declared_amount" label="申报金额" fallbackRequired>
-      {(required) => <input name="declaredAmount" type="number" min="0" step="0.01" defaultValue={declaration?.declared_amount ?? 0} required={required} />}
+      {(required) => <input name="declaredAmount" type="number" min="0" step="0.01" defaultValue={declaration?.declared_amount ?? ""} required={required} />}
     </ModuleField>
     <ModuleField fields={fields} fieldKey="declaration_currency" label="申报币种" fallbackRequired>
       {(required) => <select name="currency" defaultValue={declaration?.currency ?? "USD"} required={required}>{["USD","CNY","RUB","KZT","UZS","EUR"].map((currency) => <option key={currency} value={currency}>{currency}</option>)}</select>}
     </ModuleField>
     <ModuleField fields={fields} fieldKey="declaration_gross_weight" label="申报毛重（KG）" fallbackRequired>
-      {(required) => <input name="grossWeightKg" type="number" min="0" step="0.001" defaultValue={declaration?.gross_weight_kg ?? 0} required={required} />}
+      {(required) => <input name="grossWeightKg" type="number" min="0" step="0.001" defaultValue={declaration?.gross_weight_kg ?? ""} required={required} />}
     </ModuleField>
     {status === "released" && !isDeleted && !lockStatus && <ModuleField fields={fields} fieldKey="customs_release" label="放行日期" fallbackRequired>
       {(required) => <input name="releasedAt" type="datetime-local" defaultValue={toDateTimeInput(declaration?.released_at) || toDateTimeInput(new Date().toISOString())} required={required} />}
