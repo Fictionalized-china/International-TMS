@@ -22766,7 +22766,7 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
 .warehouse-order-document-picker-row > span > a { color: var(--blue); font-weight: 700; text-decoration: none; }
 .warehouse-order-document-picker-row > span > small { margin-top: 3px; color: #8b9aa8; }
 .warehouse-order-document-picker-row > span > em { color: #9aa6b2; font-style: normal; }
-.warehouse-order-document-picker-row > span.selected { color: #0e7049; background: #f2fbf6; }
+.warehouse-order-document-picker-row > span.selected { color: #0e7049; background: transparent; }
 .warehouse-order-document-picker-row input[type="file"] {
   position: absolute;
   width: 1px;
