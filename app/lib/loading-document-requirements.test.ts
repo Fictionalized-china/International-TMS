@@ -172,4 +172,52 @@ describe("loading document requirements", () => {
     expect(summaries.flatMap((summary) => summary.incompleteCodes)).toEqual([]);
     expect(summaries.reduce((sum, summary) => sum + summary.requiredCount, 0)).toBe(2);
   });
+
+  it("keeps warehouse task creation blocked until uploaded files are confirmed", () => {
+    const requirements = resolveLoadingDocumentRequirements({
+      orderId: "warehouse-remediation",
+      customsEnabled: false,
+      fieldsByModule: {
+        consignment: [
+          {
+            fieldKey: "document_consignment_letter",
+            isActive: true,
+            isRequired: true,
+          },
+        ],
+      },
+    });
+
+    expect(
+      summarizeLoadingDocumentRequirements(requirements.documents, []),
+    ).toMatchObject({
+      missingUploadCodes: ["consignment_letter"],
+      incompleteCodes: ["consignment_letter"],
+      complete: false,
+    });
+    expect(
+      summarizeLoadingDocumentRequirements(requirements.documents, [
+        {
+          document_category: "consignment_letter",
+          review_status: "pending",
+        },
+      ]),
+    ).toMatchObject({
+      missingUploadCodes: [],
+      incompleteCodes: ["consignment_letter"],
+      complete: false,
+    });
+    expect(
+      summarizeLoadingDocumentRequirements(requirements.documents, [
+        {
+          document_category: "consignment_letter",
+          review_status: "approved",
+        },
+      ]),
+    ).toMatchObject({
+      missingUploadCodes: [],
+      incompleteCodes: [],
+      complete: true,
+    });
+  });
 });

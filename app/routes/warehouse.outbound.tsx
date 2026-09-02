@@ -132,7 +132,7 @@ export async function loader({request}:Route.LoaderArgs){
   }
   const requestedBatchId=url.searchParams.get("batchId");
   const selectedLoadUnit=requestedBatchId?loadUnits.find(batch=>batch.id===requestedBatchId)??null:null;
-  const requestedInspection=selectedLoadUnit?.ready
+  const requestedInspection=selectedLoadUnit
     ?await loadOutboundInspection(user.organizationId,warehouse.id,selectedLoadUnit)
     :null;
   const view=requestedView==="execution"||requestedView==="pending"||requestedView==="create"
@@ -504,11 +504,11 @@ export default function WarehouseOutbound({loaderData,actionData}:Route.Componen
       <header className="page-header" id="warehouse-outbound-workbench"><div><p className="eyebrow">CREATE LOADING TASK</p><h1>创建装车任务</h1><p>{unit?`${isLtl?unit.batch_number:unit.order_number} · ${isLtl?`${unit.order_count} 票拼车订单`:unit.customer_name}`:"请从在仓订单列表选择要办理的订单。"}</p></div><Link className="secondary" to={loaderData.pendingHref}>返回在仓订单</Link></header>
       <ol className="outbound-create-rhythm" aria-label="创建装车任务步骤">
         <li className={unit?"complete":"current"}><span>1</span><div><strong>选择在仓订单</strong><small>{unit?"已选定":"当前步骤"}</small></div></li>
-        <li className={unit?.ready?"current":"upcoming"}><span>2</span><div><strong>核验发运文件</strong><small>{unit?.ready?"当前步骤":"等待装车条件"}</small></div></li>
+        <li className={unit?"current":"upcoming"}><span>2</span><div><strong>核验发运文件</strong><small>{unit?.ready?"文件条件已满足":"补齐缺失文件与条件"}</small></div></li>
         <li className={inspection?.allUploaded?"current":"upcoming"}><span>3</span><div><strong>{isLtl?"确认创建任务":"确认出境车辆并创建"}</strong><small>{inspection?.allUploaded?(isLtl?"文件已齐":"仓库确认车辆、司机与计划时间"):"文件齐全后开放"}</small></div></li>
       </ol>
       {!unit&&<div className="alert error" role="alert">未找到对应的在仓订单，该订单可能已创建装车任务或已离仓。<Link to={loaderData.pendingHref}>返回列表重新选择</Link></div>}
-      {unit&&!unit.ready&&<section className="panel outbound-create-blocked"><div className="panel-header"><div><h2>暂不能创建装车任务</h2><p>订单仍保留在仓，补齐以下条件后即可返回列表继续办理。</p></div><span className="status-pill warning">待补条件</span></div><ul>{unit.reasons.map(reason=><li key={reason}>{reason}</li>)}</ul><div className="panel-footer"><Link className="secondary" to={loaderData.pendingHref}>返回在仓订单</Link></div></section>}
+      {unit&&!unit.ready&&<BlockedLoadingDocumentRemediation key={unit.id} inspection={inspection} reasons={unit.reasons} pendingHref={loaderData.pendingHref} canOperate={canOperate} busy={busy} actionSuccess={actionSuccess} actionError={actionError}/>}
       {unit?.ready&&<section className="panel outbound-create-section"><div className="panel-header"><div><h2>核验发运文件</h2><p>已有文件自动沿用；只需补齐或替换问题文件，确认总览后创建任务。</p></div><span className="status-pill success">装车条件已满足</span></div>{canOperate?<CreateDispatchWorkbench warehouseId={loaderData.warehouse.id} inspection={inspection} outboundResources={loaderData.outboundResources} busy={busy} actionSuccess={actionSuccess} actionError={actionError} uploadOpenSignal={uploadOpenSignal}/>:<div className="alert warning">当前账户可查看装车条件，但不能创建任务。</div>}</section>}
     </>;
   }
@@ -524,7 +524,7 @@ export default function WarehouseOutbound({loaderData,actionData}:Route.Componen
         <div className="outbound-order-filter-actions"><button className="primary warehouse-primary">查询</button><Link className="secondary" to={clearOutboundFiltersHref(loaderData.pendingHref)}>重置</Link></div>
       </Form>
       <div className="outbound-list-summary" aria-live="polite"><span>全部 <strong>{loaderData.loadUnitCounts.all}</strong></span><span>可创建 <strong>{loaderData.loadUnitCounts.ready}</strong></span><span>待补条件 <strong>{loaderData.loadUnitCounts.blocked}</strong></span></div>
-      <div className="table-wrap"><table className="outbound-load-units-table"><thead><tr><th>订单 / PZ 配载单</th><th>客户</th><th>类型</th><th>入仓 / 库位</th><th>待装货物</th><th>目的地</th><th>装车条件</th><th>操作</th></tr></thead><tbody>{loaderData.loadUnits.map(unit=>{const unitIsLtl=unit.business_type==="ltl"&&Boolean(unit.transport_batch_id),createHref=createLoadUnitHref(loaderData.pendingHref,unit.id);return <tr key={unit.transport_batch_id||unit.id} className={unit.ready?"":"blocked-row"}><td><Link className="outbound-order-number-link" to={createHref}><strong>{unitIsLtl?unit.batch_number:unit.order_number}</strong><small>{unitIsLtl?unit.order_numbers:unit.batch_number}</small></Link></td><td><strong>{unitIsLtl?`${unit.order_count} 票 · ${unit.customer_names.split("、").filter(Boolean).length} 个客户`:unit.customer_name}</strong><small title={unitIsLtl?unit.customer_names:unit.customer_identity_code}>{unitIsLtl?unit.customer_names:unit.customer_identity_code}</small></td><td><span className={`status-pill ${unitIsLtl?"":"off"}`}>{unitIsLtl?"拼车配载":"整车订单"}</span></td><td><strong>{formatWarehouseTime(unit.received_at||unit.verified_at)}</strong><small title={unit.storage_locations}>{unit.storage_locations||"待分配库位"}</small></td><td><strong>{unit.item_count} 个货物码 · {unit.total_pieces} 件</strong><small>{Number(unit.total_weight_kg).toFixed(2)} KG · {Number(unit.total_volume_cbm).toFixed(3)} CBM</small></td><td>{unit.destination_location}</td><td><span className={`status-pill ${unit.ready?"success":"warning"}`}>{unit.ready?"可创建任务":"待补条件"}</span><small className="outbound-block-reason" title={unit.reasons.join("；")}>{unit.ready?"点击订单号继续":unit.reasons[0]}</small></td><td><Link className={unit.ready?"primary warehouse-primary":"secondary"} to={createHref}>{unit.ready?"创建装车任务":"查看阻断"}</Link></td></tr>})}{!loaderData.loadUnits.length&&<tr><td colSpan={8} className="empty-state">没有符合当前筛选条件的在仓订单。请调整筛选条件或重置查询。</td></tr>}</tbody></table></div>
+      <div className="table-wrap"><table className="outbound-load-units-table"><thead><tr><th>订单 / PZ 配载单</th><th>客户</th><th>类型</th><th>入仓 / 库位</th><th>待装货物</th><th>目的地</th><th>装车条件</th><th>操作</th></tr></thead><tbody>{loaderData.loadUnits.map(unit=>{const unitIsLtl=unit.business_type==="ltl"&&Boolean(unit.transport_batch_id),createHref=createLoadUnitHref(loaderData.pendingHref,unit.id);return <tr key={unit.transport_batch_id||unit.id} className={unit.ready?"":"blocked-row"}><td><Link className="outbound-order-number-link" to={createHref}><strong>{unitIsLtl?unit.batch_number:unit.order_number}</strong><small>{unitIsLtl?unit.order_numbers:unit.batch_number}</small></Link></td><td><strong>{unitIsLtl?`${unit.order_count} 票 · ${unit.customer_names.split("、").filter(Boolean).length} 个客户`:unit.customer_name}</strong><small title={unitIsLtl?unit.customer_names:unit.customer_identity_code}>{unitIsLtl?unit.customer_names:unit.customer_identity_code}</small></td><td><span className={`status-pill ${unitIsLtl?"":"off"}`}>{unitIsLtl?"拼车配载":"整车订单"}</span></td><td><strong>{formatWarehouseTime(unit.received_at||unit.verified_at)}</strong><small title={unit.storage_locations}>{unit.storage_locations||"待分配库位"}</small></td><td><strong>{unit.item_count} 个货物码 · {unit.total_pieces} 件</strong><small>{Number(unit.total_weight_kg).toFixed(2)} KG · {Number(unit.total_volume_cbm).toFixed(3)} CBM</small></td><td>{unit.destination_location}</td><td><span className={`status-pill ${unit.ready?"success":"warning"}`}>{unit.ready?"可创建任务":"待补条件"}</span><small className="outbound-block-reason" title={unit.reasons.join("；")}>{unit.ready?"点击订单号继续":unit.reasons[0]}</small></td><td><Link className={unit.ready?"primary warehouse-primary":"secondary"} to={createHref}>创建装车任务</Link></td></tr>})}{!loaderData.loadUnits.length&&<tr><td colSpan={8} className="empty-state">没有符合当前筛选条件的在仓订单。请调整筛选条件或重置查询。</td></tr>}</tbody></table></div>
     </section>
   </>;
   return <>
@@ -570,6 +570,70 @@ function DispatchNodeStrip({task,scanPolicy}:{task:Dispatch;scanPolicy?:Warehous
   return <section className="outbound-node-table" aria-label="装车出库任务节点"><div className="table-wrap"><table><thead><tr>{nodes.map((node,index)=><th key={node.label}>{index+1}. {node.label}</th>)}</tr></thead><tbody><tr>{nodes.map(node=><td key={node.label} className={node.state}><span className={`status-pill ${node.state==="complete"?"success":node.state==="current"?"":"off"}`}>{node.state==="complete"?"已完成":node.state==="current"?"当前节点":"未开始"}</span><small>{node.hint}</small></td>)}</tr></tbody></table></div></section>;
 }
 
+function BlockedLoadingDocumentRemediation({inspection,reasons,pendingHref,canOperate,busy,actionSuccess,actionError}:{inspection:OutboundInspection|null;reasons:string[];pendingHref:string;canOperate:boolean;busy:boolean;actionSuccess?:string;actionError?:string}){
+  const unresolvedRequired=inspection?.documents.filter(document=>document.required&&!['approved','archived'].includes(document.reviewStatus||""))??[];
+  const missingRequired=unresolvedRequired.filter(document=>!document.attachmentId);
+  const [open,setOpen]=useState(unresolvedRequired.length>0);
+  const taskLabel=inspection?.batch.business_type==="ltl"?inspection.batch.batch_number:inspection?.batch.order_number;
+  useEffect(()=>{
+    if(actionError||(actionSuccess&&inspection&&!inspection.allApproved))setOpen(true);
+  },[actionError,actionSuccess,inspection?.allApproved]);
+  return <section className="panel outbound-create-blocked">
+    <div className="panel-header"><div><h2>暂不能创建装车任务</h2><p>{unresolvedRequired.length?"请在当前页面补齐以下必需文件；上传并确认后系统立即重新核验装车条件。":"文件条件已经满足，仍需处理下列其他装车条件。"}</p></div><span className="status-pill warning">待补条件</span></div>
+    {(actionSuccess||actionError)&&<div className={`alert ${actionError?"error":"success"}`} role={actionError?"alert":"status"} aria-live="polite">{actionError??actionSuccess}</div>}
+    {unresolvedRequired.length>0&&<div className="outbound-blocked-document-summary"><strong>需要补充或确认以下文件</strong><span>{unresolvedRequired.map(document=>`${document.orderNumber} ${document.name}`).join("、")}</span></div>}
+    <ul>{reasons.map(reason=><li key={reason}>{reason}</li>)}</ul>
+    <div className="panel-footer">
+      <Link className="secondary" to={pendingHref}>返回在仓订单</Link>
+      {canOperate&&inspection&&unresolvedRequired.length>0&&<Modal
+        title={`补充装车必需文件 · ${taskLabel}`}
+        triggerLabel={missingRequired.length?`补充必需文件 ${missingRequired.length}`:`核验必需文件 ${unresolvedRequired.length}`}
+        triggerClassName="primary warehouse-primary"
+        size="xwide"
+        isOpen={open}
+        onOpenChange={setOpen}
+        closeSignal={inspection.allApproved?actionSuccess:undefined}
+        initialFocusSelector=".outbound-document-name-upload.missing input"
+      >
+        <div className="outbound-upload-modal outbound-blocked-upload-modal">
+          <OutboundDocumentUploadList inspection={inspection} busy={busy} onlyRequiredUnresolved/>
+          <Form method="post" className="outbound-upload-modal-actions">
+            <input type="hidden" name="intent" value="loading_documents_approve"/>
+            <input type="hidden" name="inspectionOrderId" value={inspection.batch.order_id}/>
+            <input type="hidden" name="batchId" value={inspection.batch.id}/>
+            <span>{inspection.allUploaded?"必需文件已上传，可完成补充并重新核验。":`还需上传 ${missingRequired.length} 份必需文件。`}</span>
+            <button className="primary warehouse-primary" disabled={!inspection.allUploaded||busy}>完成补充并重新核验</button>
+          </Form>
+        </div>
+      </Modal>}
+    </div>
+  </section>;
+}
+
+function OutboundDocumentUploadList({inspection,busy,onlyRequiredUnresolved=false}:{inspection:OutboundInspection;busy:boolean;onlyRequiredUnresolved?:boolean}){
+  const visibleGroups=inspection.documentGroups.map(group=>({
+    ...group,
+    documents:onlyRequiredUnresolved
+      ?group.documents.filter(document=>document.required&&!['approved','archived'].includes(document.reviewStatus||""))
+      :group.documents,
+  })).filter(group=>group.documents.length>0);
+  return <>
+    <div className="outbound-upload-modal-intro"><strong>{onlyRequiredUnresolved?"需要补充以下文件":"装车任务文件"}</strong><span>点击文件名称即可选择上传；系统沿用已有有效版本，上传成功后会立即刷新当前清单。</span></div>
+    {visibleGroups.map(group=><section className="outbound-upload-order" key={group.orderId}>
+      <header><strong>{group.orderNumber} · {group.customerName}</strong><span>{group.documents.filter(document=>document.attachmentId).length}/{group.documents.length} 已上传</span></header>
+      <div className="table-wrap outbound-document-table"><table><thead><tr><th>点击文件名选择上传</th><th>当前状态</th><th>当前文件</th><th>说明</th></tr></thead><tbody>{group.documents.map(document=><tr className={document.attachmentId?"completed-row":""} key={`${document.orderId}:${document.code}`}>
+        <td><Form method="post" encType="multipart/form-data" className="outbound-document-upload-form">
+          <input type="hidden" name="intent" value="loading_document_upload"/><input type="hidden" name="inspectionOrderId" value={inspection.batch.order_id}/><input type="hidden" name="orderId" value={document.orderId}/><input type="hidden" name="batchId" value={inspection.batch.id}/><input type="hidden" name="documentCategory" value={document.code}/>
+          <label className={`outbound-document-name-upload${document.attachmentId?"":" missing"}`}><input className="document-upload-input" name="attachment" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" required disabled={busy} onChange={(event)=>submitForm(event.currentTarget.form)}/><strong>{document.name}</strong><small>{document.required?"必需文件":"选填文件"} · 点击选择{document.attachmentId?"替换":"上传"}</small></label>
+        </Form></td>
+        <td><span className={`status-pill ${document.attachmentId?"":"warning"}`}>{outboundDocumentStatus(document)}</span></td>
+        <td title={document.fileName??undefined}>{document.fileName||"尚未上传"}</td>
+        <td>{document.attachmentId?"可点击文件名替换当前版本":"选择后自动上传并刷新"}</td>
+      </tr>)}</tbody></table></div>
+    </section>)}
+  </>;
+}
+
 function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,busy,actionSuccess,actionError,uploadOpenSignal}:{warehouseId:string;inspection:OutboundInspection|null;outboundResources:OutboundResources;busy:boolean;actionSuccess?:string;actionError?:string;uploadOpenSignal?:unknown}){
   const [reviewOpenSignal,setReviewOpenSignal]=useState<number>();
   const [carrierId,setCarrierId]=useState("");
@@ -596,17 +660,7 @@ function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,busy,
       <div className="outbound-create-entry-actions">
         <Modal title={`上传装车任务文件 · ${taskLabel}`} triggerLabel="继续上传文件" triggerClassName="primary warehouse-primary" size="xwide" openSignal={uploadOpenSignal}>
           {({close})=><div className="outbound-upload-modal">
-            <div className="outbound-upload-modal-intro"><strong>创建任务前补齐仍缺失的必需文件</strong><span>系统会沿用“配载文件”中的现有版本；这里只补缺或纠正文件。报关单/预录报关单可选，正式海关放行仍在后续报关作业登记。</span></div>
-            {inspection.documentGroups.map(group=><section className="outbound-upload-order" key={group.orderId}>
-              <header><strong>{group.orderNumber} · {group.customerName}</strong><span>{group.documents.filter(document=>document.attachmentId).length}/{group.documents.length} 已上传</span></header>
-              <div className="table-wrap outbound-document-table"><table><thead><tr><th>文件类型</th><th>当前状态</th><th>文件名</th><th>选择文件即上传</th></tr></thead><tbody>{group.documents.map(document=><tr className={document.attachmentId?"completed-row":""} key={`${document.orderId}:${document.code}`}>
-                <td><strong>{document.name}</strong></td><td><span className="status-pill">{outboundDocumentStatus(document)}</span></td><td title={document.fileName??undefined}>{document.fileName||"尚未上传"}</td>
-                <td><Form method="post" encType="multipart/form-data" className="outbound-document-upload-form">
-                  <input type="hidden" name="intent" value="loading_document_upload"/><input type="hidden" name="inspectionOrderId" value={inspection.batch.order_id}/><input type="hidden" name="orderId" value={document.orderId}/><input type="hidden" name="batchId" value={inspection.batch.id}/><input type="hidden" name="documentCategory" value={document.code}/>
-                  <label className="document-upload-button"><input className="document-upload-input" name="attachment" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" required disabled={busy} onChange={(event)=>submitForm(event.currentTarget.form)}/><span>{document.attachmentId?"选择替换文件":"选择文件"}</span></label>
-                </Form></td>
-              </tr>)}</tbody></table></div>
-            </section>)}
+            <OutboundDocumentUploadList inspection={inspection} busy={busy}/>
             <div className="outbound-upload-modal-actions"><span>{inspection.allUploaded?"必需文件已收齐，可以进入总览确认。":`还需上传 ${Math.max(0,requiredCount-uploadedCount)} 份必需文件。`}</span><button type="button" className="primary warehouse-primary" disabled={!inspection.allUploaded||busy} onClick={()=>{close();setReviewOpenSignal(Date.now());}}>完成上传</button></div>
           </div>}
         </Modal>

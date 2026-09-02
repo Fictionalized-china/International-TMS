@@ -2892,9 +2892,26 @@ td small {
 }
 .outbound-create-blocked .panel-footer {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   padding: 10px 14px;
   border-top: 1px solid #e6dfd4;
+}
+.outbound-blocked-document-summary {
+  display: grid;
+  gap: 4px;
+  margin: 0 14px;
+  padding: 10px 12px;
+  border: 1px solid #e4c47c;
+  border-left: 4px solid #c98522;
+  background: #fffaf0;
+}
+.outbound-blocked-document-summary strong { color: #77420f; }
+.outbound-blocked-document-summary span {
+  color: #8a5a25;
+  font-size: 12px;
+  line-height: 1.6;
 }
 .outbound-task-center {
   overflow: hidden;
@@ -20378,6 +20395,53 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .outbound-upload-modal .outbound-document-table th:nth-child(4),
 .outbound-upload-modal .outbound-document-table td:nth-child(4) { width: 18%; }
 .outbound-upload-modal .document-upload-button { width: 100%; min-height: 34px; }
+.outbound-document-name-upload {
+  position: relative;
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  min-height: 48px;
+  padding: 8px 10px;
+  border: 1px solid #b9cde1;
+  border-radius: 2px;
+  background: #f7fbff;
+  cursor: pointer;
+  transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+}
+.outbound-document-name-upload:hover {
+  border-color: #3978b8;
+  background: #eef6ff;
+}
+.outbound-document-name-upload:focus-within {
+  border-color: #2569ad;
+  box-shadow: 0 0 0 3px rgb(37 105 173 / 16%);
+  outline: none;
+}
+.outbound-document-name-upload.missing {
+  border-color: #dda94d;
+  background: #fff9ed;
+}
+.outbound-document-name-upload strong {
+  color: #1c5d99;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+.outbound-document-name-upload small {
+  color: #64748b;
+  font-size: 11px;
+}
+.outbound-document-name-upload .document-upload-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+}
+.outbound-blocked-upload-modal .outbound-upload-modal-intro {
+  border-color: #e4c47c;
+  background: #fffaf0;
+}
 .outbound-upload-modal-actions {
   position: sticky;
   bottom: 0;
