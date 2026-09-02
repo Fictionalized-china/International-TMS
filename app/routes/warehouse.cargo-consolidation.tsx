@@ -28,8 +28,8 @@ import { loadLoadingBatchWorkflowOrders } from "../lib/loading-batch-field-polic
 import { valueOf } from "../lib/validation";
 import { chunkD1Rows, chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 
-const DEFAULT_PAGE_SIZE=30;
-const PAGE_SIZES=[30,50,100];
+const DEFAULT_PAGE_SIZE=10;
+const PAGE_SIZES=[10,20,30,50,100];
 
 type StockRow={
   order_id:string;order_number:string;business_type:string;customer_name:string;
@@ -392,7 +392,7 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
               return <tr key={row.order_id} className={checked?"selected-row":""}>
                 <td><input type="checkbox" checked={checked} disabled={assigned||blockers.length>0} onChange={event=>toggle(row,event.target.checked)} aria-label={`选择订单 ${row.order_number}`}/></td>
                 <td>{assigned?<span className="status-pill" title={row.active_batch_number??"已加入配载单"}>已配载<small>{row.active_batch_number}</small></span>:<span className={`status-pill ${blockers.length?"off":"success"}`} title={blockers.join("；")}>{blockers.length?"不可配载":"可配载"}</span>}</td>
-                <td className="consolidation-order-cell"><strong>{row.order_number}</strong><span>{row.customer_name}</span><small>{row.cargo_names||"未填写货名"}</small></td>
+                <td className="consolidation-order-cell"><div><strong>{row.order_number}</strong><span>{row.customer_name}</span></div><small>{row.cargo_names||"未填写货名"}</small></td>
                 <td className="consolidation-receipt-cell"><strong>{row.package_count} 包装 · {row.pieces} 件</strong><small>{row.weight_kg.toFixed(2)} KG · {row.volume_cbm.toFixed(3)} CBM</small></td>
                 <td className="consolidation-destination-cell"><strong>{row.overseas_warehouse_name||"目的仓未设置"}</strong><small>{[row.destination_country,row.destination_state,row.destination_city].filter(Boolean).join(" ")||"地区未填写"}</small></td>
                 <td className="consolidation-location-cell">{row.location_names||"—"}</td>
@@ -524,27 +524,29 @@ function DocumentStatusCell({row,warehouseId,requirements,documents}:{row:StockR
   const uploadedCodes=new Set(documents.map(document=>document.document_category));
   const uploadedCount=activeRequirements.filter(requirement=>uploadedCodes.has(requirement.code)).length;
   const missingRequiredCount=activeRequirements.filter(requirement=>requirement.isRequired&&!uploadedCodes.has(requirement.code)).length;
-  return <div className="consolidation-document-status">
-    {activeRequirements.length?<>
+  const triggerLabel=!activeRequirements.length?"无文件要求":missingRequiredCount?`${uploadedCount}/${activeRequirements.length} 已传 · 缺 ${missingRequiredCount} 必传`:`${uploadedCount}/${activeRequirements.length} 已传 · 必传已齐`;
+  const triggerState=!activeRequirements.length?"empty":missingRequiredCount?"missing":"ready";
+  return <div className="consolidation-document-status"><Modal title={`文件齐套状态 · ${row.order_number}`} triggerLabel={triggerLabel} triggerClassName={`consolidation-document-trigger ${triggerState}`}>
+    <div className="consolidation-document-dialog">
       <div className="consolidation-document-summary">
         <span>{uploadedCount}/{activeRequirements.length} 已上传</span>
         <strong className={missingRequiredCount?"missing":"ready"}>{missingRequiredCount?`缺 ${missingRequiredCount} 项必传`:"必传已齐"}</strong>
       </div>
-      <div className="consolidation-document-list">
+      {activeRequirements.length?<div className="consolidation-document-list">
         {activeRequirements.map(requirement=>{
           const uploaded=uploadedCodes.has(requirement.code);
           const className=uploaded?"confirmed":requirement.isRequired?"missing":"optional";
           const stateLabel=uploaded?"已上传":requirement.isRequired?"缺少":"选填未传";
           return <span key={requirement.code} className={`document-state ${className}`} title={`${requirement.name}：${stateLabel}`}><strong>{requirement.name}</strong><small>{stateLabel}</small></span>;
         })}
-      </div>
-    </>:<span className="consolidation-document-empty">当前工作流无生效文件</span>}
-    <div className="consolidation-document-next">{row.active_batch_id?<Link className="text-button" to={`/warehouse/loading-documents?warehouseId=${encodeURIComponent(warehouseId)}&batchId=${encodeURIComponent(row.active_batch_id)}`}>进入配载文件</Link>:<small>生成配载单后统一补传</small>}</div>
-  </div>
+      </div>:<span className="consolidation-document-empty">当前工作流无生效文件。</span>}
+      <div className="consolidation-document-next">{row.active_batch_id?<Link className="text-button" to={`/warehouse/loading-documents?warehouseId=${encodeURIComponent(warehouseId)}&batchId=${encodeURIComponent(row.active_batch_id)}`}>进入配载文件</Link>:<small>文件状态只读且不阻断配载；生成配载单后统一补传。</small>}</div>
+    </div>
+  </Modal></div>
 }
 
 function Select({label,name,current,values}:{label:string;name:string;current:string;values:string[]}){return<label><span>{label}</span><select name={name} defaultValue={current}><option value="">全部</option>{values.map(value=><option key={value}>{value}</option>)}</select></label>}
-function Pagination({loaderData}:{loaderData:{page:number;pages:number;pageSize:number;warehouse:{id:string};filters:Record<string,string>}}){if(loaderData.pages<=1)return null;const href=(page:number)=>{const params=new URLSearchParams({warehouseId:loaderData.warehouse.id,page:String(page),pageSize:String(loaderData.pageSize)}),names:Record<string,string>={warehouse:"destinationWarehouse",keyword:"q"};Object.entries(loaderData.filters).forEach(([key,value])=>{if(value)params.set(names[key]||key,value)});return`/warehouse/consolidation?${params}`};return<footer className="pagination"><span>第 {loaderData.page} / {loaderData.pages} 页</span><div>{loaderData.page>1&&<Link className="secondary" to={href(loaderData.page-1)}>上一页</Link>}{loaderData.page<loaderData.pages&&<Link className="secondary" to={href(loaderData.page+1)}>下一页</Link>}</div></footer>}
+function Pagination({loaderData}:{loaderData:{page:number;pages:number;pageSize:number;total:number;warehouse:{id:string};filters:Record<string,string>}}){const href=(page:number)=>{const params=new URLSearchParams({warehouseId:loaderData.warehouse.id,page:String(page),pageSize:String(loaderData.pageSize)}),names:Record<string,string>={warehouse:"destinationWarehouse",keyword:"q"};Object.entries(loaderData.filters).forEach(([key,value])=>{if(value)params.set(names[key]||key,value)});return`/warehouse/consolidation?${params}`};const previous=loaderData.page-1,next=loaderData.page+1;return<footer className="pagination consolidation-pagination" aria-label="在库订单分页"><span>第 {loaderData.page} / {loaderData.pages} 页 · 共 {loaderData.total} 票</span><div>{previous>=1?<Link className="secondary" to={href(previous)}>上一页</Link>:<span className="secondary disabled" aria-disabled="true">上一页</span>}<span className="consolidation-pagination-current" aria-current="page">{loaderData.page}</span>{next<=loaderData.pages?<Link className="secondary" to={href(next)}>下一页</Link>:<span className="secondary disabled" aria-disabled="true">下一页</span>}</div></footer>}
 
 function toSelection(row:StockRow,loadingWorkflow:LoadingBatchWorkflowOrder):Selection{return{orderId:row.order_id,orderNumber:row.order_number,customerName:row.customer_name,packages:row.package_count,pieces:row.pieces,weight:row.weight_kg,volume:row.volume_cbm,loadingWorkflow}}
 function isSelection(value:unknown):value is Selection{

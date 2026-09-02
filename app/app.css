@@ -7981,7 +7981,7 @@ body.modal-scroll-locked {
 
 .consolidation-stock-table table {
   width: 100%;
-  min-width: 1400px;
+  min-width: 1200px;
   table-layout: fixed;
 }
 
@@ -8134,13 +8134,13 @@ body.modal-scroll-locked {
   font-weight: 700;
 }
 
-.consolidation-col-select { width: 50px; }
-.consolidation-col-status { width: 108px; }
-.consolidation-col-order { width: 260px; }
-.consolidation-col-receipt { width: 165px; }
-.consolidation-col-destination { width: 250px; }
-.consolidation-col-location { width: 105px; }
-.consolidation-col-documents { width: 430px; }
+.consolidation-col-select { width: 46px; }
+.consolidation-col-status { width: 100px; }
+.consolidation-col-order { width: 270px; }
+.consolidation-col-receipt { width: 155px; }
+.consolidation-col-destination { width: 230px; }
+.consolidation-col-location { width: 90px; }
+.consolidation-col-documents { width: 300px; }
 
 .consolidation-order-cell,
 .consolidation-receipt-cell,
@@ -8148,8 +8148,7 @@ body.modal-scroll-locked {
   min-width: 0;
 }
 
-.consolidation-order-cell > strong,
-.consolidation-order-cell > span,
+.consolidation-order-cell > div,
 .consolidation-order-cell > small,
 .consolidation-receipt-cell > strong,
 .consolidation-receipt-cell > small,
@@ -8158,22 +8157,40 @@ body.modal-scroll-locked {
   display: block;
 }
 
-.consolidation-order-cell > :not(:last-child),
+.consolidation-order-cell > div,
 .consolidation-receipt-cell > :not(:last-child),
 .consolidation-destination-cell > :not(:last-child) {
-  margin-bottom: 4px;
+  margin-bottom: 2px;
 }
 
-.consolidation-order-cell strong {
+.consolidation-order-cell > div {
+  display: flex;
+  gap: 7px;
+  align-items: baseline;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.consolidation-order-cell > div strong {
   color: #1e5c94;
   letter-spacing: 0.015em;
+  white-space: nowrap;
 }
 
-.consolidation-order-cell span,
+.consolidation-order-cell > div span,
 .consolidation-receipt-cell strong,
 .consolidation-destination-cell strong {
   color: #0f2740;
   font-weight: 700;
+}
+
+.consolidation-order-cell > div span,
+.consolidation-destination-cell strong,
+.consolidation-location-cell {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .consolidation-order-cell small,
@@ -8181,10 +8198,12 @@ body.modal-scroll-locked {
 .consolidation-destination-cell small {
   display: block;
   margin: 0;
+  overflow: hidden;
   color: #64748b;
   font-size: 11px;
   line-height: 1.4;
-  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .consolidation-location-cell {
@@ -8193,11 +8212,54 @@ body.modal-scroll-locked {
 }
 
 .consolidation-document-status {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 7px;
+  display: flex;
+  align-items: center;
   width: 100%;
   min-width: 0;
+}
+
+.consolidation-document-trigger {
+  width: 100%;
+  min-height: 28px;
+  padding: 4px 8px;
+  overflow: hidden;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #f8fafc;
+  color: #475569;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.3;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 160ms ease, background-color 160ms ease;
+}
+
+.consolidation-document-trigger:hover,
+.consolidation-document-trigger:focus-visible {
+  border-color: #6f9dcc;
+  background: #eef6ff;
+  outline: none;
+}
+
+.consolidation-document-trigger.missing {
+  border-color: #efb4b0;
+  background: #fff1f0;
+  color: #b42318;
+}
+
+.consolidation-document-trigger.ready {
+  border-color: #b9d7c8;
+  background: #effaf4;
+  color: #08754b;
+}
+
+.consolidation-document-dialog {
+  display: grid;
+  gap: 10px;
 }
 
 .consolidation-document-summary {
@@ -8347,7 +8409,7 @@ body.modal-scroll-locked {
 .consolidation-document-next {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   min-height: 22px;
 }
 
@@ -19984,7 +20046,7 @@ html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animatio
 }
 
 .warehouse-consolidation-page .consolidation-stock-table table {
-  min-width: 1400px;
+  min-width: 1200px;
 }
 
 .warehouse-consolidation-page th,
@@ -20002,42 +20064,93 @@ html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animatio
 /* Cargo consolidation: keep selection, actions and dense data in one visual lane. */
 .warehouse-consolidation-page {
   display: grid;
-  gap: 10px;
+  gap: 6px;
 }
 
 .warehouse-consolidation-page .warehouse-page-header {
   min-height: 0;
-  padding-block: 4px 6px;
+  margin-bottom: 0;
+  padding-block: 0 4px;
 }
 
 .warehouse-consolidation-page .warehouse-page-header h1 {
-  margin-block: 1px;
+  margin-block: 0;
+  font-size: clamp(25px, 2vw, 32px);
+  line-height: 1.05;
+}
+
+.warehouse-consolidation-page .warehouse-page-header .eyebrow {
+  margin-bottom: 1px;
+  font-size: 9px;
+  line-height: 1.2;
+}
+
+.warehouse-consolidation-page .warehouse-page-header p:not(.eyebrow) {
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.warehouse-consolidation-page .warehouse-page-header > .secondary {
+  min-height: 30px;
+  padding: 4px 9px;
 }
 
 .warehouse-consolidation-page .panel-header {
-  gap: 12px;
-  padding-block: 10px;
+  gap: 8px;
+  padding-block: 6px;
+}
+
+.warehouse-consolidation-page .panel-header h2 {
+  font-size: 14px;
+  line-height: 1.25;
+}
+
+.warehouse-consolidation-page .panel-header p {
+  margin-top: 2px;
+  font-size: 10px;
+  line-height: 1.3;
 }
 
 .warehouse-consolidation-page .consolidation-stock-panel {
   padding-top: 0;
-  padding-bottom: 8px;
+  padding-right: 10px;
+  padding-bottom: 5px;
+  padding-left: 10px;
 }
 
 .consolidation-filter-primary {
-  gap: 8px;
-  padding: 10px 12px;
+  gap: 6px;
+  padding: 6px 10px;
+}
+
+.warehouse-consolidation-page .consolidation-filter-primary label,
+.warehouse-consolidation-page .consolidation-advanced-filters label {
+  gap: 3px;
+}
+
+.warehouse-consolidation-page .consolidation-filter-primary label > span,
+.warehouse-consolidation-page .consolidation-advanced-filters label > span {
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.warehouse-consolidation-page .consolidation-advanced-filters > div {
+  gap: 6px 8px;
+  padding: 6px 10px 8px;
 }
 
 .consolidation-filter-primary input,
 .consolidation-filter-primary select,
 .consolidation-filter-actions .primary,
 .consolidation-filter-actions .secondary {
-  min-height: 36px;
+  min-height: 31px;
+  padding-block: 4px;
 }
 
 .consolidation-advanced-filters summary {
-  padding-block: 7px;
+  padding: 5px 10px;
+  font-size: 11px;
 }
 
 .consolidation-selection-actions {
@@ -20052,18 +20165,70 @@ html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animatio
 .consolidation-selection-actions button,
 .consolidation-selection-actions > .primary,
 .consolidation-selection-actions > .secondary {
-  min-height: 34px;
-  padding: 6px 11px;
+  min-height: 30px;
+  padding: 4px 9px;
 }
 
 .warehouse-consolidation-page th,
 .warehouse-consolidation-page td {
-  padding-block: 8px;
-  line-height: 1.35;
+  padding: 5px 8px;
+  font-size: 11px;
+  line-height: 1.25;
+  vertical-align: middle;
 }
 
 .warehouse-consolidation-page .consolidation-stock-table td:last-child {
   white-space: normal;
+}
+
+.warehouse-consolidation-page .consolidation-stock-table tbody tr {
+  height: 44px;
+}
+
+.warehouse-consolidation-page .consolidation-stock-table small {
+  font-size: 9px;
+  line-height: 1.25;
+}
+
+.consolidation-pagination {
+  min-height: 32px;
+  padding-top: 5px;
+  border-top: 1px solid #e2e8f0;
+  color: #526176;
+  font-size: 11px;
+}
+
+.consolidation-pagination > div {
+  gap: 5px;
+}
+
+.consolidation-pagination .secondary,
+.consolidation-pagination-current {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  min-height: 27px;
+  padding: 3px 7px;
+  border: 1px solid #cbd5e1;
+  border-radius: 3px;
+  background: #fff;
+  color: #31506f;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.consolidation-pagination-current {
+  border-color: #7aa5d3;
+  background: #eef6ff;
+  color: #174f85;
+  font-weight: 800;
+}
+
+.consolidation-pagination .secondary.disabled {
+  color: #94a3b8;
+  cursor: not-allowed;
+  opacity: 0.65;
 }
 
 .consolidation-create-form {
