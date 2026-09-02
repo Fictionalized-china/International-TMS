@@ -9588,6 +9588,36 @@ body.modal-scroll-locked {
   color: #64748b;
 }
 
+.warehouse-cargo-identifiers {
+  min-width: 210px;
+}
+
+.warehouse-cargo-identifiers > code,
+.warehouse-cargo-identifiers > div code {
+  display: block;
+  width: fit-content;
+  margin-top: 4px;
+  padding: 3px 6px;
+  border: 1px solid #cbd9e8;
+  border-radius: 3px;
+  background: #f4f8fc;
+  color: #0f3b62;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.warehouse-cargo-identifiers > small:not(:first-child) {
+  margin-top: 9px;
+}
+
+.warehouse-cargo-identifiers > em {
+  display: block;
+  margin-top: 4px;
+  color: #64748b;
+  font-style: normal;
+}
+
 .warehouse-cargo-empty {
   display: grid;
   gap: 5px;

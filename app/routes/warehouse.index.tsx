@@ -4,6 +4,10 @@ import type { Route } from "./+types/warehouse.index";
 import { Modal } from "../components/Modal";
 import { requireSessionUser } from "../lib/auth.server";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
+import {
+  resolveWarehouseCargoIdentifiers,
+  type WarehouseCargoPackageIdentifier,
+} from "../lib/warehouse-cargo-identifiers";
 
 type WarehouseQueue = "inbound" | "counting" | "inventory" | "outbound" | "exception";
 
@@ -147,23 +151,36 @@ export async function loader({ request }: Route.LoaderArgs) {
   ) as Record<WarehouseQueue, number>;
   const orderIds = [...new Set(scoped.map((row) => row.order_id))];
   const cargoItems: WarehouseCargoItem[] = [];
+  const cargoPackages: WarehouseCargoPackageIdentifier[] = [];
   for (const ids of chunk(orderIds, 80)) {
-    const cargoResult = await env.DB.prepare(
-      `SELECT id,order_id,line_no,cargo_name_cn,cargo_name_en,hs_code,overseas_hs_code,
+    const [cargoResult, packageResult] = await Promise.all([
+      env.DB.prepare(
+        `SELECT id,order_id,line_no,cargo_name_cn,cargo_name_en,hs_code,overseas_hs_code,
               package_type,package_count,pieces_per_package,gross_weight_per_package_kg,
               net_weight_per_package_kg,length_cm,width_cm,height_cm,volume_per_package_cbm,
               declared_value,currency,origin_country,brand_model,marks,special_attributes,notes
          FROM order_cargo_items
         WHERE organization_id=? AND order_id IN (${ids.map(() => "?").join(",")})
         ORDER BY order_id,line_no,id`,
-    ).bind(user.organizationId, ...ids).all<WarehouseCargoItem>();
+      ).bind(user.organizationId, ...ids).all<WarehouseCargoItem>(),
+      env.DB.prepare(
+        `SELECT p.id,s.order_id,p.cargo_item_id,p.package_number,p.barcode,p.status
+           FROM warehouse_packages p
+           JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id
+          WHERE p.organization_id=? AND s.order_id IN (${ids.map(() => "?").join(",")})
+            AND p.status!='cancelled'
+          ORDER BY s.order_id,p.package_number,p.created_at`,
+      ).bind(user.organizationId, ...ids).all<WarehouseCargoPackageIdentifier>(),
+    ]);
     cargoItems.push(...cargoResult.results);
+    cargoPackages.push(...packageResult.results);
   }
   return {
     user,
     warehouse,
     rows: scoped,
     cargoItems,
+    cargoPackages,
     counts,
     view,
     q,
@@ -199,7 +216,7 @@ export default function WarehouseIndex({ loaderData }: Route.ComponentProps) {
         <td className="sticky-action"><div className="warehouse-queue-actions">
           <Link className="warehouse-queue-action primary-action" to={warehouseQueueHref(row, loaderData.warehouse.id, loaderData.warehouse.warehouse_role === "overseas_destination")}>进入办理</Link>
           <Modal title={`货物详情 · ${row.order_number}`} triggerLabel="查看货物" triggerClassName="warehouse-queue-action" size="xwide">
-            <WarehouseCargoDetails row={row} items={loaderData.cargoItems.filter((item) => item.order_id === row.order_id)} />
+            <WarehouseCargoDetails row={row} items={loaderData.cargoItems.filter((item) => item.order_id === row.order_id)} packages={loaderData.cargoPackages.filter((item) => item.order_id === row.order_id)} />
           </Modal>
         </div></td>
       </tr>)}</tbody></table></div>
@@ -208,7 +225,7 @@ export default function WarehouseIndex({ loaderData }: Route.ComponentProps) {
   </div>;
 }
 
-function WarehouseCargoDetails({ row, items }: { row: CategorizedWarehouseRow; items: WarehouseCargoItem[] }) {
+function WarehouseCargoDetails({ row, items, packages }: { row: CategorizedWarehouseRow; items: WarehouseCargoItem[]; packages: WarehouseCargoPackageIdentifier[] }) {
   const totals = items.reduce((sum, item) => ({
     packages: sum.packages + item.package_count,
     pieces: sum.pieces + item.package_count * item.pieces_per_package,
@@ -226,18 +243,30 @@ function WarehouseCargoDetails({ row, items }: { row: CategorizedWarehouseRow; i
       <span><small>总体积</small><strong>{(items.length ? totals.volume : Number(row.volume_cbm || 0)).toFixed(3)} CBM</strong></span>
     </div>
     {items.length ? <div className="table-wrap warehouse-cargo-detail-table"><table>
-      <thead><tr><th>序号 / 品名</th><th>HS Code</th><th>包装</th><th>重量</th><th>尺寸 / 体积</th><th>申报信息</th><th>标识与备注</th></tr></thead>
-      <tbody>{items.map((item) => <tr key={item.id}>
+      <thead><tr><th>序号 / 品名</th><th>HS Code</th><th>包装</th><th>重量</th><th>尺寸 / 体积</th><th>申报信息</th><th>唛头号 / 货物条码</th><th>属性与备注</th></tr></thead>
+      <tbody>{items.map((item) => {
+        const identifiers = resolveWarehouseCargoIdentifiers({
+          orderNumber: row.order_number,
+          cargoItemId: item.id,
+          customMarks: item.marks,
+          packages,
+          singleCargoItem: items.length === 1,
+        });
+        return <tr key={item.id}>
         <td><strong>{item.line_no}. {item.cargo_name_cn}</strong><small>{item.cargo_name_en || "英文品名未填"}</small></td>
         <td><strong>{item.hs_code || "—"}</strong><small>境外：{item.overseas_hs_code || "—"}</small></td>
         <td><strong>{packageTypeLabel(item.package_type)} · {item.package_count} 包装</strong><small>{item.pieces_per_package} 件/包装，共 {item.package_count * item.pieces_per_package} 件</small></td>
         <td><strong>毛重 {item.gross_weight_per_package_kg.toFixed(2)} KG/包装</strong><small>净重 {item.net_weight_per_package_kg.toFixed(2)} KG/包装</small></td>
         <td><strong>{item.length_cm} × {item.width_cm} × {item.height_cm} cm</strong><small>{item.volume_per_package_cbm.toFixed(4)} CBM/包装</small></td>
         <td><strong>{item.currency} {item.declared_value.toLocaleString("zh-CN")}</strong><small>{item.origin_country || "原产国未填"}{item.brand_model ? ` · ${item.brand_model}` : ""}</small></td>
-        <td><strong>{item.marks || "无唛头"}</strong><small>{[item.special_attributes, item.notes].filter(Boolean).join(" · ") || "无备注"}</small></td>
-      </tr>)}</tbody>
+        <td className="warehouse-cargo-identifiers"><small>唛头号（订单号）</small><code>{identifiers.markNumber}</code><small>货物条码</small>{identifiers.packages.length ? <div>{identifiers.packages.map((pkg) => <code key={pkg.id} title={`包装号 ${pkg.package_number}`}>{pkg.barcode}</code>)}</div> : <em>尚未生成（国内仓收货时生成）</em>}</td>
+        <td><strong>{identifiers.customMarks ? `货物标记：${identifiers.customMarks}` : "无额外货物标记"}</strong><small>{[item.special_attributes, item.notes].filter(Boolean).join(" · ") || "无备注"}</small></td>
+      </tr>;
+      })}</tbody>
     </table></div> : <div className="warehouse-cargo-empty">
       <strong>{row.cargo_description || "货物名称待补"}</strong>
+      <span>唛头号（订单号）：<code>{row.order_number}</code></span>
+      <span>货物条码：{packages.length ? packages.map((item) => item.barcode).join("、") : "尚未生成（国内仓收货时生成）"}</span>
       <span>该订单尚无逐项货物明细，当前仅有订单汇总：{row.pieces || 0} 件 · {Number(row.gross_weight_kg || 0).toFixed(2)} KG · {Number(row.volume_cbm || 0).toFixed(3)} CBM。</span>
     </div>}
   </div>;
