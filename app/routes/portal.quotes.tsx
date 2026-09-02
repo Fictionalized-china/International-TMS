@@ -60,8 +60,13 @@ export async function loader({ request }: Route.LoaderArgs) {
   const { user, customer } = await requirePortalCustomer(request);
   const url = new URL(request.url);
   const lifecycle = url.searchParams.get("status") || "";
+  const quotationId = url.searchParams.get("quote")?.trim() || "";
   const params: unknown[] = [user.organizationId, customer.id];
   let where = "q.organization_id=? AND q.customer_id=?";
+  if (quotationId) {
+    where += " AND q.id=?";
+    params.push(quotationId);
+  }
   if (["pending", "accepted", "withdrawn", "void"].includes(lifecycle)) {
     where += " AND q.lifecycle_status=?";
     params.push(lifecycle);
@@ -103,6 +108,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     quotes: quoteRows.results,
     charges: Object.fromEntries(charges),
     lifecycle,
+    quotationId,
     workflowFields,
     quotationWorkflowFields,
   };
@@ -153,7 +159,13 @@ export default function PortalQuotes({ loaderData, actionData }: Route.Component
         <div><h1>报价确认</h1><p>查看完整运输条件与费用，接受后系统自动生成唯一订单。</p></div>
       </header>
       {(actionData?.success || actionData?.formError) && (
-        <div className={`alert ${actionData.formError ? "error" : "success"}`}>{actionData.formError || actionData.success}</div>
+        <div className={`alert ${actionData.formError ? "error" : "success"}`} role="alert">{actionData.formError || actionData.success}</div>
+      )}
+      {loaderData.quotationId && !actionData?.success && (
+        <div className="alert portal-quote-focus-notice" role="status">
+          <span>已从首页打开指定报价，请核对运输条件与费用后确认。</span>
+          <Link className="btn small" to="/portal/quotes">返回全部报价</Link>
+        </div>
       )}
       <Form method="get" action="." className="filters quotation-filters">
         <label className="field"><span>报价状态</span><select className="control filled" name="status" defaultValue={loaderData.lifecycle}><option value="">全部</option><option value="pending">待确认</option><option value="accepted">已接受</option><option value="withdrawn">接受已撤回</option><option value="void">已作废</option></select></label>
@@ -178,7 +190,7 @@ export default function PortalQuotes({ loaderData, actionData }: Route.Component
                   visible("quotation_width_cm","required")?quote.estimated_width_cm:null,
                   visible("quotation_height_cm","required")?quote.estimated_height_cm:null,
                 ];
-                return <tr key={quote.id}>
+                return <tr key={quote.id} id={`quote-${quote.id}`} className={loaderData.quotationId === quote.id ? "portal-quote-focus-row" : undefined}>
                   <td><b className="order-id">{quote.quote_number}</b><small className="subline">{new Date(quote.created_at).toLocaleString("zh-CN")}</small></td>
                   <td><span className={`pill ${quote.road_load_type === "ltl" ? "ltl" : ""}`}>{quote.road_load_type === "ltl" ? "拼车" : "整车"}</span>{visible("quotation_customs_clearance_mode","required")&&<small className="subline">汽运 · {quote.customs_clearance_mode === "company" ? "公司代办清关" : "客户自理清关"}</small>}</td>
                   <td>{(visible("quotation_origin_region","required")||visible("quotation_destination_region","required"))&&<b>{quote.origin_state || ""}{quote.origin_city} → {quote.destination_state || ""}{quote.destination_city}</b>}{visible("quotation_pickup_address","required")&&<small className="subline">提货：{quote.pickup_address || "未填写"}</small>}{visible("quotation_destination_warehouse_id","required")&&<small className="subline">目的仓：{quote.destination_warehouse_name || "未填写"}</small>}{visible("quotation_destination_warehouse_note","optional")&&quote.destination_warehouse_note&&<small className="subline">目的备注：{quote.destination_warehouse_note}</small>}</td>
@@ -188,7 +200,7 @@ export default function PortalQuotes({ loaderData, actionData }: Route.Component
                   <td><QuoteActions quote={quote} busy={busy} /></td>
                 </tr>;
               })}
-              {!loaderData.quotes.length && <tr><td className="empty" colSpan={7}>暂无报价</td></tr>}
+              {!loaderData.quotes.length && <tr><td className="empty" colSpan={7}>{loaderData.quotationId ? "未找到该报价，报价可能已被删除或不属于当前客户。" : "暂无报价"}</td></tr>}
             </tbody>
           </table>
         </div>

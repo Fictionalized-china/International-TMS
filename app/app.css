@@ -22281,6 +22281,19 @@ button {
   max-height: 240px;
 }
 
+.portal-home-page .portal-quote-pending-row,
+.prototype-page .portal-quote-focus-row {
+  box-shadow: inset 3px 0 0 var(--orange);
+  background: #fffaf7;
+}
+
+.prototype-page .portal-quote-focus-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .portal-home-lower {
   grid-template-columns: minmax(0, 1.25fr) minmax(300px, .75fr);
   gap: 0;
