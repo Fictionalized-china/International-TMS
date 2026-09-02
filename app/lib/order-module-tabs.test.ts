@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { orderModuleTabDescriptors, resolveCustomsSection } from "./order-module-tabs";
+import { orderModuleTabDescriptors, resolveCostsSection, resolveCustomsSection } from "./order-module-tabs";
 
 describe("orderModuleTabDescriptors", () => {
   it("splits customs documents and declarations into sibling tabs", () => {
@@ -22,6 +22,17 @@ describe("orderModuleTabDescriptors", () => {
       { key: "tracking-row", label: "运输执行与跟踪", moduleCode: "tracking", section: null },
     ]);
   });
+
+  it("splits settlement documents and expenses into sibling tabs", () => {
+    expect(orderModuleTabDescriptors({
+      key: "costs-row",
+      moduleCode: "costs",
+      moduleName: "对账结算",
+    })).toEqual([
+      { key: "costs-row:files", label: "文件", moduleCode: "costs", section: "files" },
+      { key: "costs-row:expenses", label: "费用", moduleCode: "costs", section: "expenses" },
+    ]);
+  });
 });
 
 describe("resolveCustomsSection", () => {
@@ -29,5 +40,13 @@ describe("resolveCustomsSection", () => {
     expect(resolveCustomsSection(null)).toBe("files");
     expect(resolveCustomsSection("unknown")).toBe("files");
     expect(resolveCustomsSection("declarations")).toBe("declarations");
+  });
+});
+
+describe("resolveCostsSection", () => {
+  it("defaults direct settlement links to the files view", () => {
+    expect(resolveCostsSection(null)).toBe("files");
+    expect(resolveCostsSection("unknown")).toBe("files");
+    expect(resolveCostsSection("expenses")).toBe("expenses");
   });
 });

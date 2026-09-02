@@ -1,4 +1,6 @@
-export type OrderModuleTabSection = "files" | "declarations" | null;
+export type CustomsModuleTabSection = "files" | "declarations";
+export type CostsModuleTabSection = "files" | "expenses";
+export type OrderModuleTabSection = CustomsModuleTabSection | CostsModuleTabSection | null;
 
 export type OrderModuleTabDescriptor = {
   key: string;
@@ -7,8 +9,12 @@ export type OrderModuleTabDescriptor = {
   section: OrderModuleTabSection;
 };
 
-export function resolveCustomsSection(value: string | null): Exclude<OrderModuleTabSection, null> {
+export function resolveCustomsSection(value: string | null): CustomsModuleTabSection {
   return value === "declarations" ? "declarations" : "files";
+}
+
+export function resolveCostsSection(value: string | null): CostsModuleTabSection {
+  return value === "expenses" ? "expenses" : "files";
 }
 
 export function orderModuleTabDescriptors({
@@ -24,6 +30,13 @@ export function orderModuleTabDescriptors({
     return [
       { key: `${key}:files`, label: "报关文件", moduleCode, section: "files" },
       { key: `${key}:declarations`, label: "报关单", moduleCode, section: "declarations" },
+    ];
+  }
+
+  if (moduleCode === "costs") {
+    return [
+      { key: `${key}:files`, label: "文件", moduleCode, section: "files" },
+      { key: `${key}:expenses`, label: "费用", moduleCode, section: "expenses" },
     ];
   }
 

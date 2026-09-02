@@ -40,7 +40,7 @@ import {
 } from "../lib/order-guidance";
 import { orderResponsiblePosition } from "../lib/order-responsibility";
 import { orderModuleTabAttention } from "../lib/order-module-tab-attention";
-import { orderModuleTabDescriptors, resolveCustomsSection, type OrderModuleTabSection } from "../lib/order-module-tabs";
+import { orderModuleTabDescriptors, resolveCostsSection, resolveCustomsSection, type OrderModuleTabSection } from "../lib/order-module-tabs";
 import { canManageOrderModule } from "../lib/position-portal";
 import { completionStatusLabels, type OrderCompletionStatus } from "../lib/order-review";
 import {
@@ -465,6 +465,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
     ? (requestedModuleSection as "info" | "files" | "costs")
     : "info";
   const selectedCustomsSection = resolveCustomsSection(requestedModuleSection);
+  const selectedCostsSection = resolveCostsSection(requestedModuleSection);
   const embeddedModuleCode = requestedModuleCode && currentWorkflowModuleCodes.includes(requestedModuleCode)
     ? requestedModuleCode
     : currentWorkflowModuleCodes[0] || null;
@@ -500,6 +501,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
     embeddedModuleCode,
     selectedConsignmentSection,
     selectedCustomsSection,
+    selectedCostsSection,
     embeddedModuleData,
     embeddedModuleRedirect,
     modules,
@@ -747,7 +749,10 @@ export default function OrderDetail({ loaderData, actionData }: Route.ComponentP
   const navigate = useNavigate();
   const currentStepKey = loaderData.businessWorkflow?.current_step_key || "";
   const previousStepKey = useRef(currentStepKey);
-  const success = actionData && "success" in actionData ? actionData.success : undefined;
+  const success = actionData && "success" in actionData &&
+    (!("actionKind" in actionData) || actionData.actionKind !== "expense_direction_control")
+    ? actionData.success
+    : undefined;
   const formError = actionData && "formError" in actionData ? actionData.formError : undefined;
   const documentReviewSignal = actionData && "documentReviewSignal" in actionData
     ? actionData.documentReviewSignal
@@ -1127,6 +1132,7 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, 
   const isOrderCreation = selectedStep.step_key === "order_creation";
   const selectedSection = selectedModuleCode === "cargo" ? "cargo" : data.selectedConsignmentSection;
   const selectedCustomsSection = data.selectedCustomsSection;
+  const selectedCostsSection = data.selectedCostsSection;
   const orderCreationFields = data.currentWorkflowFields.filter(
     (field) => field.stepKey === "order_creation" && field.isActive,
   );
@@ -1141,15 +1147,18 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, 
   const moduleHasRequiredMissing = (moduleCode: string | null, section: OrderModuleTabSection = null) => data.currentWorkflowFields.some(
     (field) => {
       if (!field.isActive || field.stepKey !== selectedStep.step_key || field.moduleCode !== moduleCode || !field.isRequired || field.present) return false;
-      if (moduleCode !== "customs" || !section) return true;
       const isDocument = field.fieldType === "attachment" || field.fieldKey.startsWith("document_");
-      return section === "files" ? isDocument : !isDocument;
+      if (moduleCode === "customs" && section) return section === "files" ? isDocument : !isDocument;
+      if (moduleCode === "costs" && section) return section === "files" ? isDocument : !isDocument;
+      return true;
     },
   );
   const selectedModuleSection = selectedModuleCode === "consignment"
     ? data.selectedConsignmentSection
     : selectedModuleCode === "customs"
       ? selectedCustomsSection
+      : selectedModuleCode === "costs"
+        ? selectedCostsSection
       : null;
   const actionUrl = `/admin/orders/${data.order.id}?stage=${encodeURIComponent(selectedStep.step_key)}&module=${encodeURIComponent(selectedModuleCode || "")}${selectedModuleSection ? `&section=${encodeURIComponent(selectedModuleSection)}` : ""}`;
   const orderCreationTabs = [
@@ -1174,9 +1183,12 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, 
         const attention = tab.moduleCode === "customs" && tab.section === "files"
           ? missing ? "required" : null
           : orderModuleTabAttention(tab.moduleCode, missing);
-        const isActive = tab.moduleCode === selectedModuleCode && (
-          tab.moduleCode !== "customs" || tab.section === selectedCustomsSection
-        );
+        const activeSection = tab.moduleCode === "customs"
+          ? selectedCustomsSection
+          : tab.moduleCode === "costs"
+            ? selectedCostsSection
+            : null;
+        const isActive = tab.moduleCode === selectedModuleCode && (tab.section === null || tab.section === activeSection);
         return <Link
           key={tab.key}
           className={isActive ? "active" : ""}
@@ -1188,7 +1200,7 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, 
         </Link>;
       })}</nav>
     ) : null}
-    {data.embeddedModuleRedirect ? <section className="section"><div className="section-title"><b>{selectedRow.module_name || "关联业务单"}</b><span>该节点按配载单统一推进</span></div><div className="linear-external-work"><p>拼车订单在仓库生成 PZ 配载单后，由配载单统一记录出境运输并同步全部子订单。</p><Link className="btn primary" to={data.embeddedModuleRedirect}>打开配载单跟踪</Link></div></section> : data.embeddedModuleData ? <EmbeddedOrderModule data={data.embeddedModuleData} busy={busy} actionUrl={actionUrl} workflowStepKey={selectedStep.step_key} consignmentSection={data.selectedConsignmentSection} customsSection={selectedCustomsSection} hideConsignmentActionBar={isOrderCreation} approvalMode={selectedStep.step_key === "consignment_approval"} reviewCloseSignal={documentReviewSignal}/> : <section className="section"><div className="section-title"><b>{selectedRow.module_name || selectedRow.module_code || "业务数据"}</b><span>{viewingCurrent ? "当前节点" : "历史节点"}</span></div><div className="grid">{selectedFields.map((field) => {
+    {data.embeddedModuleRedirect ? <section className="section"><div className="section-title"><b>{selectedRow.module_name || "关联业务单"}</b><span>该节点按配载单统一推进</span></div><div className="linear-external-work"><p>拼车订单在仓库生成 PZ 配载单后，由配载单统一记录出境运输并同步全部子订单。</p><Link className="btn primary" to={data.embeddedModuleRedirect}>打开配载单跟踪</Link></div></section> : data.embeddedModuleData ? <EmbeddedOrderModule data={data.embeddedModuleData} busy={busy} actionUrl={actionUrl} workflowStepKey={selectedStep.step_key} consignmentSection={data.selectedConsignmentSection} customsSection={selectedCustomsSection} costsSection={selectedCostsSection} hideConsignmentActionBar={isOrderCreation} approvalMode={selectedStep.step_key === "consignment_approval"} reviewCloseSignal={documentReviewSignal}/> : <section className="section"><div className="section-title"><b>{selectedRow.module_name || selectedRow.module_code || "业务数据"}</b><span>{viewingCurrent ? "当前节点" : "历史节点"}</span></div><div className="grid">{selectedFields.map((field) => {
       const fieldState = field.present ? "filled" : field.isRequired ? "required-missing" : "optional-empty";
       return <div className={`read-cell workflow-cell ${field.present ? "complete" : field.isRequired ? "missing" : "optional"}`} key={field.id}><span>{field.label}{field.isRequired ? " *" : ""}</span><b>{field.displayValue || "—"}</b><em className={`field-state ${fieldState}`}>{field.present ? "已填" : field.isRequired ? "必填但未填" : "未填"}</em></div>;
     })}</div></section>}

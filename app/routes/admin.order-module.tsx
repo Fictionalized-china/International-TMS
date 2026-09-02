@@ -2938,7 +2938,10 @@ export async function action({ request, params }: Route.ActionArgs) {
         business_lock: "业务已锁定",
         finance_lock: "财务已锁定",
       };
-      return { success: `${direction === "receivable" ? "应收" : "应付"}${labels[controlAction]}` };
+      return {
+        actionKind: "expense_direction_control",
+        success: `${direction === "receivable" ? "应收" : "应付"}${labels[controlAction]}`,
+      };
     }
     if (intent === "expense_control") {
       return { formError: "旧版费用锁定入口已停用，请按费用确认、业务审核、财务审核、业务锁定、财务锁定的顺序办理" };
@@ -4020,6 +4023,7 @@ export function EmbeddedOrderModule({
   workflowStepKey,
   consignmentSection = "info",
   customsSection = "declarations",
+  costsSection = "files",
   hideConsignmentActionBar = false,
   approvalMode = false,
   reviewCloseSignal,
@@ -4030,6 +4034,7 @@ export function EmbeddedOrderModule({
   workflowStepKey?: string | null;
   consignmentSection?: "info" | "files" | "costs";
   customsSection?: "files" | "declarations";
+  costsSection?: "files" | "expenses";
   hideConsignmentActionBar?: boolean;
   approvalMode?: boolean;
   reviewCloseSignal?: unknown;
@@ -4075,7 +4080,8 @@ export function EmbeddedOrderModule({
           (definition.code !== "consignment" ||
             !hideConsignmentActionBar ||
             consignmentSection === "files") &&
-          (definition.code !== "customs" || customsSection === "files") && (
+          (definition.code !== "customs" || customsSection === "files") &&
+          (definition.code !== "costs" || costsSection === "files") && (
           <ModuleSourceDocuments
             code={definition.code}
             data={scopedData}
@@ -4092,7 +4098,8 @@ export function EmbeddedOrderModule({
             canApproveConsignment={canApproveConsignment}
             busy={busy}
           />
-        ) : definition.code === "customs" && customsSection === "files" ? null : (
+        ) : (definition.code === "customs" && customsSection === "files") ||
+          (definition.code === "costs" && costsSection === "files") ? null : (
           <ModuleBusinessData
             code={definition.code}
             data={scopedData}
@@ -4105,7 +4112,8 @@ export function EmbeddedOrderModule({
           />
         )}
         {!(["consignment", "transport", "loading"] as OrderModuleCode[]).includes(definition.code) &&
-          (definition.code !== "customs" || customsSection === "declarations") && (
+          (definition.code !== "customs" || customsSection === "declarations") &&
+          (definition.code !== "costs" || costsSection === "expenses") && (
           <WorkflowFieldChecklist
             fields={scopedData.workflowFields.filter(
               (field) =>
