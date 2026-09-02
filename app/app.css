@@ -22751,8 +22751,8 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
 }
 .warehouse-order-document-picker-row { min-height: 54px; border-bottom: 1px solid var(--line2); }
 .warehouse-order-document-picker-row:last-child { border-bottom: 0; }
-.warehouse-order-document-picker-row.required > * { background: #fff2f0; }
-.warehouse-order-document-picker-row.optional > * { background: #f1f7ff; }
+.warehouse-order-document-picker-row.required { background: #fff2f0; }
+.warehouse-order-document-picker-row.optional { background: #f1f7ff; }
 .warehouse-order-document-picker-head > *,
 .warehouse-order-document-picker-row > * { min-width: 0; padding: 7px 9px; border-right: 1px solid var(--line2); }
 .warehouse-order-document-picker-head > *:last-child,
