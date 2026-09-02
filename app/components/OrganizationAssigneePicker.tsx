@@ -1,5 +1,7 @@
 import { Check, ChevronDown, ChevronRight } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import {
   buildOrganizationAssigneeTree,
   findOrganizationAssigneePath,
@@ -18,6 +20,40 @@ type OrganizationAssigneePickerProps = {
   disabled?: boolean;
   personLabel?: string;
 };
+
+type AssigneeCascadePlacement = {
+  left: number;
+  top: number;
+  width: number;
+  listHeight: number;
+  direction: "above" | "below";
+};
+
+export function calculateAssigneeCascadePlacement(
+  anchor: { top: number; right: number; bottom: number },
+  viewport: { width: number; height: number },
+): AssigneeCascadePlacement {
+  const margin = 8;
+  const gap = 5;
+  const headerAndBorderHeight = 33;
+  const preferredListHeight = 224;
+  const width = Math.min(660, Math.max(0, viewport.width - margin * 2));
+  const spaceBelow = Math.max(0, viewport.height - anchor.bottom - margin - gap);
+  const spaceAbove = Math.max(0, anchor.top - margin - gap);
+  const preferredHeight = headerAndBorderHeight + preferredListHeight;
+  const direction = spaceBelow >= preferredHeight || spaceBelow >= spaceAbove ? "below" : "above";
+  const availableHeight = direction === "below" ? spaceBelow : spaceAbove;
+  const listHeight = Math.max(96, Math.min(preferredListHeight, availableHeight - headerAndBorderHeight));
+  const panelHeight = headerAndBorderHeight + listHeight;
+  const left = Math.max(
+    margin,
+    Math.min(anchor.right - width, viewport.width - margin - width),
+  );
+  const top = direction === "below"
+    ? Math.max(margin, Math.min(anchor.bottom + gap, viewport.height - margin - panelHeight))
+    : Math.max(margin, anchor.top - gap - panelHeight);
+  return { left, top, width, listHeight, direction };
+}
 
 export function OrganizationAssigneePicker({
   members,
@@ -40,8 +76,10 @@ export function OrganizationAssigneePicker({
   const [positionId, setPositionId] = useState(initialPath?.positionId ?? "");
   const [internalUserId, setInternalUserId] = useState(initialPath?.userId ?? "");
   const [isOpen, setIsOpen] = useState(false);
+  const [cascadePlacement, setCascadePlacement] = useState<AssigneeCascadePlacement | null>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const cascadeRef = useRef<HTMLDivElement>(null);
   const selectedUserId = value === undefined ? internalUserId : value;
   const selectedDepartment = tree.find((item) => item.id === departmentId);
   const positions = selectedDepartment?.positions ?? [];
@@ -67,7 +105,8 @@ export function OrganizationAssigneePicker({
   useEffect(() => {
     if (!isOpen) return;
     const closeOnOutsideClick = (event: MouseEvent) => {
-      if (!pickerRef.current?.contains(event.target as Node)) setIsOpen(false);
+      const target = event.target as Node;
+      if (!pickerRef.current?.contains(target) && !cascadeRef.current?.contains(target)) setIsOpen(false);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
@@ -79,6 +118,28 @@ export function OrganizationAssigneePicker({
     return () => {
       document.removeEventListener("mousedown", closeOnOutsideClick);
       document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setCascadePlacement(null);
+      return;
+    }
+    const updatePlacement = () => {
+      const anchor = triggerRef.current?.getBoundingClientRect();
+      if (!anchor) return;
+      setCascadePlacement(calculateAssigneeCascadePlacement(anchor, {
+        width: window.innerWidth,
+        height: window.innerHeight,
+      }));
+    };
+    updatePlacement();
+    window.addEventListener("resize", updatePlacement);
+    window.addEventListener("scroll", updatePlacement, true);
+    return () => {
+      window.removeEventListener("resize", updatePlacement);
+      window.removeEventListener("scroll", updatePlacement, true);
     };
   }, [isOpen]);
 
@@ -110,11 +171,19 @@ export function OrganizationAssigneePicker({
         </strong>
         <ChevronDown aria-hidden="true" size={14} />
       </button>
-      {isOpen && <div
+      {isOpen && cascadePlacement && createPortal(<div
+        ref={cascadeRef}
         className="organization-assignee-cascade"
         id={panelId}
         role="group"
         aria-label={`选择${personLabel}`}
+        data-direction={cascadePlacement.direction}
+        style={{
+          left: cascadePlacement.left,
+          top: cascadePlacement.top,
+          width: cascadePlacement.width,
+          "--assignee-list-height": `${cascadePlacement.listHeight}px`,
+        } as CSSProperties}
       >
         <OrganizationAssigneePanel
           title="1  部门"
@@ -158,7 +227,7 @@ export function OrganizationAssigneePicker({
             triggerRef.current?.focus();
           }}
         />
-      </div>}
+      </div>, document.body)}
       <select
         className="organization-assignee-native-validator"
         id={`${baseId}-person`}

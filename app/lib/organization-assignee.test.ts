@@ -1,7 +1,10 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { OrganizationAssigneePicker } from "../components/OrganizationAssigneePicker";
+import {
+  calculateAssigneeCascadePlacement,
+  OrganizationAssigneePicker,
+} from "../components/OrganizationAssigneePicker";
 import {
   buildOrganizationAssigneeTree,
   findOrganizationAssigneePath,
@@ -44,6 +47,33 @@ const members: OrganizationAssigneeMember[] = [
 ];
 
 describe("organization assignee hierarchy", () => {
+  it("opens below the trigger when the lower viewport has enough room", () => {
+    expect(calculateAssigneeCascadePlacement(
+      { top: 360, right: 1140, bottom: 402 },
+      { width: 1600, height: 1000 },
+    )).toMatchObject({ direction: "below", left: 480, top: 407, listHeight: 224 });
+  });
+
+  it("opens above the trigger when lower space is insufficient", () => {
+    const placement = calculateAssigneeCascadePlacement(
+      { top: 650, right: 900, bottom: 684 },
+      { width: 1000, height: 720 },
+    );
+    expect(placement.direction).toBe("above");
+    expect(placement.top).toBeGreaterThanOrEqual(8);
+    expect(placement.listHeight).toBe(224);
+  });
+
+  it("limits panel height when neither side has the preferred room", () => {
+    const placement = calculateAssigneeCascadePlacement(
+      { top: 170, right: 500, bottom: 204 },
+      { width: 600, height: 400 },
+    );
+    expect(placement.direction).toBe("below");
+    expect(placement.listHeight).toBeLessThan(224);
+    expect(placement.top + placement.listHeight + 33).toBeLessThanOrEqual(392);
+  });
+
   it("groups concrete accounts by department and position without merging same-name positions", () => {
     const tree = buildOrganizationAssigneeTree(members);
 
