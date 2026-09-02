@@ -31,6 +31,7 @@ import {
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
 import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
 import {
+  findWarehouseOutboundLoadUnit,
   filterWarehouseOutboundLoadUnits,
   isConsolidatedOutboundTask,
   normalizeWarehouseOutboundListFilters,
@@ -136,7 +137,7 @@ export async function loader({request}:Route.LoaderArgs){
     if(manifest)manifestsByOrder[manifest.order_id]=manifest;
   }
   const requestedBatchId=url.searchParams.get("batchId");
-  const selectedLoadUnit=requestedBatchId?loadUnits.find(batch=>batch.id===requestedBatchId)??null:null;
+  const selectedLoadUnit=findWarehouseOutboundLoadUnit(loadUnits,requestedBatchId);
   const requestedInspection=selectedLoadUnit
     ?await loadOutboundInspection(user.organizationId,warehouse.id,selectedLoadUnit)
     :null;

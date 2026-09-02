@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  findWarehouseOutboundLoadUnit,
   filterWarehouseOutboundLoadUnits,
   isConsolidatedOutboundTask,
   normalizeWarehouseOutboundListFilters,
@@ -54,6 +55,16 @@ describe("warehouse outbound order list", () => {
     expect(isConsolidatedOutboundTask("ftl", "legacy-batch-id")).toBe(false);
     expect(isConsolidatedOutboundTask("ltl", "pz-batch-id")).toBe(true);
     expect(isConsolidatedOutboundTask("ltl", null)).toBe(false);
+  });
+
+  it("opens the same loading-task unit from either the warehouse batch or PZ batch id", () => {
+    const loadUnits = [
+      { id: "sorting-batch-1", transport_batch_id: "pz-batch-1" },
+      { id: "sorting-batch-2", transport_batch_id: null },
+    ];
+    expect(findWarehouseOutboundLoadUnit(loadUnits, "sorting-batch-1")).toBe(loadUnits[0]);
+    expect(findWarehouseOutboundLoadUnit(loadUnits, "pz-batch-1")).toBe(loadUnits[0]);
+    expect(findWarehouseOutboundLoadUnit(loadUnits, "missing")).toBeNull();
   });
 
   it("requires the warehouse to confirm all outbound resources for a full-truck task", () => {

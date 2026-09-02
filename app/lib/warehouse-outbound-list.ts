@@ -17,6 +17,11 @@ type FilterableLoadUnit = {
   ready: boolean;
 };
 
+type IdentifiableLoadUnit = {
+  id: string;
+  transport_batch_id?: string | null;
+};
+
 export function normalizeWarehouseOutboundListFilters(
   searchParams: URLSearchParams,
 ): WarehouseOutboundListFilters {
@@ -57,6 +62,16 @@ export function isConsolidatedOutboundTask(
   transportBatchId: string | null | undefined,
 ) {
   return businessType === "ltl" && Boolean(transportBatchId);
+}
+
+export function findWarehouseOutboundLoadUnit<T extends IdentifiableLoadUnit>(
+  units: T[],
+  requestedId: string | null | undefined,
+) {
+  if (!requestedId) return null;
+  return units.find(
+    (unit) => unit.id === requestedId || unit.transport_batch_id === requestedId,
+  ) ?? null;
 }
 
 export function validateFtlOutboundResourceSelection(input: {

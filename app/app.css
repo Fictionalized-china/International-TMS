@@ -22550,6 +22550,32 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
 .warehouse-loading-document-list .selected-row td {
   background: #eff6ff;
 }
+.warehouse-loading-document-list th:last-child,
+.warehouse-loading-document-list td:last-child {
+  min-width: 190px;
+}
+.loading-document-progress-feedback {
+  margin-top: 4px;
+  font-weight: 700;
+}
+.loading-document-progress-feedback.success { color: #0c7047; }
+.loading-document-progress-feedback.pending { color: #9a6510; }
+.warehouse-loading-document-actions {
+  min-width: 182px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  white-space: nowrap;
+}
+.warehouse-loading-document-actions > a {
+  min-height: 28px;
+  padding: 0 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  font-size: 9px;
+}
 .warehouse-loading-open-button,
 .warehouse-order-upload-trigger {
   min-height: 28px;
@@ -22696,6 +22722,23 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
 }
 .warehouse-loading-document-message.success { color: #0c7047; border-color: #b9dfc9; background: #f1fbf5; }
 .warehouse-loading-document-message.error { color: #a53c2b; border-color: #efc0b7; background: #fff5f3; }
+.warehouse-loading-document-completion {
+  min-height: 52px;
+  padding: 8px 10px;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+  border: 1px solid;
+}
+.warehouse-loading-document-completion.success { border-color: #b9dfc9; background: #f1fbf5; }
+.warehouse-loading-document-completion.pending { border-color: #ead6ac; background: #fffaf0; }
+.warehouse-loading-document-completion div { min-width: 0; }
+.warehouse-loading-document-completion strong,
+.warehouse-loading-document-completion span { display: block; }
+.warehouse-loading-document-completion strong { color: #123f31; font-size: 11px; }
+.warehouse-loading-document-completion span { margin-top: 2px; color: #657b8d; font-size: 9px; }
+.warehouse-loading-document-completion > a { flex: 0 0 auto; }
 .warehouse-loading-document-matrix table { min-width: 1040px; }
 .warehouse-loading-document-matrix th:last-child,
 .warehouse-loading-document-matrix td:last-child { position: sticky; right: 0; z-index: 1; background: #fff; box-shadow: -1px 0 var(--line); }
@@ -22910,6 +22953,7 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
 @media (max-width: 680px) {
   .warehouse-loading-document-dialog-head { align-items: flex-start; flex-direction: column; gap: 4px; }
   .warehouse-loading-document-dialog-head p { text-align: left; }
+  .warehouse-loading-document-completion { align-items: stretch; flex-direction: column; gap: 8px; }
   .warehouse-order-document-picker-head { display: none; }
   .warehouse-order-document-picker-row { grid-template-columns: 105px minmax(0, 1fr); }
   .warehouse-order-document-picker-row > *:nth-child(2),

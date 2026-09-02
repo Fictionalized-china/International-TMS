@@ -39,6 +39,7 @@ type BatchRow = {
   uploaded_count: number;
   approved_count: number;
   rejected_count: number;
+  dispatch_id: string | null;
 };
 type OrderRow = {
   order_id: string;
@@ -83,6 +84,7 @@ export async function loader({ request }: Route.LoaderArgs) {
        WHERE bo.organization_id=? AND bo.status!='removed' AND m.document_category IN (${documentCodes})
      )
      SELECT b.id,b.batch_number,b.batch_name,b.origin_location,b.destination_location,b.status,b.road_status,b.updated_at,
+       (SELECT d.id FROM warehouse_dispatches d WHERE d.organization_id=b.organization_id AND d.transport_batch_id=b.id AND d.status!='cancelled' ORDER BY d.updated_at DESC LIMIT 1) dispatch_id,
        COUNT(DISTINCT bo.order_id) order_count,GROUP_CONCAT(DISTINCT bo.order_id) order_ids,
        GROUP_CONCAT(DISTINCT o.order_number) order_numbers,
        COUNT(CASE WHEN rd.row_no=1 THEN 1 END) uploaded_count,
@@ -161,7 +163,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       status,
     ]);
   }
-  const batchDocumentSummaries = batches.results.map((batch) => {
+  const batchDocumentSummaries = contextBatches.map((batch) => {
     const orderIds = batch.order_ids.split(",").filter(Boolean);
     const orderSummaries = orderIds.map((orderId) =>
       summarizeLoadingDocumentRequirements(
@@ -334,6 +336,16 @@ export default function WarehouseLoadingDocuments({ loaderData, actionData }: Ro
   const navigation = useNavigation();
   const busy = navigation.state !== "idle";
   const selected = loaderData.selectedBatch;
+  const selectedSummary = selected
+    ? loaderData.batchDocumentSummaries.find((item) => item.batchId === selected.id)
+    : undefined;
+  const selectedMissing = selectedSummary
+    ? Math.max(0, selectedSummary.requiredCount - selectedSummary.uploadedRequiredCount)
+    : null;
+  const selectedReady = Boolean(selectedSummary && (
+    selectedSummary.requiredCount === 0 ||
+    (selectedSummary.approvedRequiredCount === selectedSummary.requiredCount && selectedSummary.rejectedRequiredCount === 0)
+  ));
   return <>
     <header className="page-header warehouse-loading-documents-header">
       <div><p className="eyebrow">LOAD DOCUMENTS</p><h1>配载文件</h1><p>拼车发运文件的统一管理入口：按 PZ 配载单集中上传并查看齐套状态，文件仍按订单归档和追溯。</p></div>
@@ -355,15 +367,20 @@ export default function WarehouseLoadingDocuments({ loaderData, actionData }: Ro
             0,
             summary.requiredCount - summary.uploadedRequiredCount,
           );
+          const pendingReview = Math.max(0, summary.requiredCount - summary.approvedRequiredCount);
+          const filesReady = summary.requiredCount === 0 || (
+            summary.approvedRequiredCount === summary.requiredCount && summary.rejectedRequiredCount === 0
+          );
+          const taskHref = loadingTaskHref(loaderData.warehouse.id, batch.id, batch.dispatch_id);
           return <tr key={batch.id} className={selected?.id === batch.id ? "selected-row" : undefined}>
             <td><strong>{batch.batch_number}</strong><small>{batch.batch_name || "未命名配载批次"}</small></td>
             <td>{batch.origin_location}<small>至 {batch.destination_location}</small></td>
             <td className="loading-document-orders-cell"><LoadingDocumentOrders count={batch.order_count} numbers={batch.order_numbers}/></td>
-            <td><span className={`status-pill ${missing ? "danger" : "success"}`}>{summary.requiredCount === 0 ? "无必填文件" : missing ? `缺 ${missing} 项` : `${summary.requiredCount}/${summary.requiredCount} 已上传`}</span><small>仅统计当前工作流必填项</small></td>
+            <td><span className={`status-pill ${missing ? "danger" : "success"}`}>{summary.requiredCount === 0 ? "无必填文件" : missing ? `缺 ${missing} 项` : `${summary.requiredCount}/${summary.requiredCount} 已上传`}</span><small className={`loading-document-progress-feedback ${missing ? "" : filesReady ? "success" : "pending"}`}>{missing ? "仅统计当前工作流必填项" : summary.rejectedRequiredCount ? `上传完成，${summary.rejectedRequiredCount} 项已退回` : filesReady ? "文件齐套，可新建装车任务" : `上传完成，待审核 ${pendingReview} 项`}</small></td>
             <td>{summary.rejectedRequiredCount ? <span className="status-pill danger">{summary.rejectedRequiredCount} 项必填文件已退回</span> : summary.requiredCount === 0 ? <span className="status-pill success">无需审核</span> : summary.approvedRequiredCount === summary.requiredCount ? <span className="status-pill success">全部通过</span> : <span className="status-pill">{summary.approvedRequiredCount}/{summary.requiredCount} 已通过</span>}</td>
             <td><span className={`status-pill ${batch.status === "completed" ? "success" : ""}`}>{batchStatusLabel(batch.status)}</span><small>{roadStatusLabels[batch.road_status] ?? batch.road_status}</small></td>
             <td>{formatDateTime(batch.updated_at)}</td>
-            <td><Link className="secondary warehouse-loading-open-button" to={loadingDocumentsHref(loaderData.warehouse.id, loaderData.page, batch.id)}>打开文件</Link></td>
+            <td><div className="warehouse-loading-document-actions"><Link className="secondary warehouse-loading-open-button" to={loadingDocumentsHref(loaderData.warehouse.id, loaderData.page, batch.id)}>打开文件</Link><Link className={batch.dispatch_id || !filesReady ? "secondary" : "primary warehouse-primary"} to={taskHref}>{batch.dispatch_id ? "进入装车与出库" : "新建装车任务"}</Link></div></td>
           </tr>;
         })}
         {!loaderData.batches.length && <tr><td colSpan={8} className="empty-state">当前仓库还没有 PZ 配载单。</td></tr>}
@@ -383,6 +400,7 @@ export default function WarehouseLoadingDocuments({ loaderData, actionData }: Ro
           <p>在对应订单行点击“上传文件”；新文件成为当前版本，历史版本继续保留。</p>
         </header>
         {(actionData?.success || actionData?.formError) && <div className={`warehouse-loading-document-message ${actionData.formError ? "error" : "success"}`} role={actionData.formError ? "alert" : "status"} aria-live="polite">{actionData.formError ?? actionData.success}</div>}
+        {selectedSummary && selectedMissing === 0 && selected && <div className={`warehouse-loading-document-completion ${selectedReady ? "success" : "pending"}`} role="status" aria-live="polite"><div><strong>{selected.dispatch_id ? "装车任务已创建" : selectedSummary.rejectedRequiredCount ? "必填文件已被退回" : selectedReady ? "文件齐套完成" : "全部必填文件已上传"}</strong><span>{selected.dispatch_id ? "可直接进入装车与出库继续办理。" : selectedSummary.rejectedRequiredCount ? `${selectedSummary.rejectedRequiredCount} 项文件需重新上传并通过审核，完成后即可创建装车任务。` : selectedReady ? "当前配载单的必填文件已全部通过，可直接新建装车任务。" : `还有 ${Math.max(0, selectedSummary.requiredCount - selectedSummary.approvedRequiredCount)} 项待审核，审核通过后即可创建装车任务。`}</span></div><Link className={selectedReady ? "primary warehouse-primary" : "secondary"} to={loadingTaskHref(loaderData.warehouse.id, selected.id, selected.dispatch_id)}>{selected.dispatch_id ? "进入装车与出库" : "新建装车任务"}</Link></div>}
         <div className="table-wrap warehouse-loading-document-matrix"><table><thead><tr><th>订单 / 客户</th><th>货物</th>{loaderData.selectedDocumentTypes.map((item) => <th key={item.code}>{item.name}</th>)}<th>操作</th></tr></thead><tbody>
           {loaderData.orders.map((order) => {
             const requirements = loaderData.selectedDocumentRequirements.find(
@@ -549,6 +567,16 @@ function loadingDocumentsHref(warehouseId: string, page: number, batchId?: strin
   const params = new URLSearchParams({ warehouseId, page: String(page) });
   if (batchId) params.set("batchId", batchId);
   return `/warehouse/loading-documents?${params}`;
+}
+
+function loadingTaskHref(warehouseId: string, batchId: string, dispatchId?: string | null) {
+  const params = new URLSearchParams({
+    warehouseId,
+    view: dispatchId ? "execution" : "create",
+  });
+  if (dispatchId) params.set("dispatchId", dispatchId);
+  else params.set("batchId", batchId);
+  return `/warehouse/outbound?${params}`;
 }
 
 function LoadingDocumentsPagination({ loaderData }: { loaderData: Route.ComponentProps["loaderData"] }) {
