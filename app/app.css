@@ -20637,9 +20637,13 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   box-shadow: 0 0 0 3px rgb(37 105 173 / 16%);
   outline: none;
 }
-.outbound-document-name-upload.missing {
+.outbound-document-name-upload.required-missing {
   border-color: #dda94d;
   background: #fff9ed;
+}
+.outbound-document-name-upload.optional-missing {
+  border-color: #b9cde1;
+  background: #f7fbff;
 }
 .outbound-document-name-upload strong {
   color: #1c5d99;

@@ -40,6 +40,7 @@ const database = vi.hoisted(() => {
 vi.mock("cloudflare:workers", () => ({ env: { DB: database.DB } }));
 
 import {
+  ftlOutboundWorkflowFieldValues,
   mergeWorkflowFieldCatalogBaseline,
   synchronizeWorkflowFieldDefinitionForInstances,
   synchronizeWorkflowFieldPolicyForInstances,
@@ -87,6 +88,28 @@ describe("stage-aware workflow field synchronization", () => {
     expect(rows.find((field) => field.field_key === "document_consignment_letter")).toMatchObject({
       is_active: 1,
       is_required: 1,
+    });
+  });
+
+  it("maps one full-truck outbound assignment to both loading field vocabularies", () => {
+    expect(ftlOutboundWorkflowFieldValues({
+      carrier_id: "carrier-1",
+      carrier_name: "境外承运商",
+      vehicle_type: "高栏车",
+      plate_number: "粤A111XT",
+      driver_name: "张伟",
+      driver_phone: "13800001111",
+      planned_departure_at: "2026-09-02T21:50",
+    })).toMatchObject({
+      main_carrier_id: "carrier-1",
+      main_vehicle_type: "高栏车",
+      main_plate_number: "粤A111XT",
+      overseas_carrier_name: "境外承运商",
+      overseas_vehicle_type: "高栏车",
+      overseas_vehicle_count: 1,
+      overseas_vehicle_plate: "粤A111XT",
+      overseas_driver_name: "张伟",
+      overseas_driver_phone: "13800001111",
     });
   });
 

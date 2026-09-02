@@ -709,6 +709,31 @@ function toRule(row: RawField): WorkflowFieldRule {
 
 type Presence = { present: boolean; displayValue: string | null };
 
+export function ftlOutboundWorkflowFieldValues(
+  assignment: Record<string, unknown> | null | undefined,
+) {
+  if (!assignment) return {} as Record<string, unknown>;
+  const carrier = assignment.carrier_id || assignment.carrier_name;
+  const vehiclePresent = Boolean(assignment.vehicle_type || assignment.plate_number);
+  return {
+    main_carrier_id: carrier,
+    main_vehicle_type: assignment.vehicle_type,
+    main_plate_number: assignment.plate_number,
+    main_driver_name: assignment.driver_name,
+    main_driver_phone: assignment.driver_phone,
+    planned_exit_at: assignment.planned_departure_at,
+    planned_arrival_at: assignment.planned_arrival_at,
+    loading_instruction: assignment.loading_requirements,
+    loading_notes: assignment.notes,
+    overseas_carrier_name: assignment.carrier_name || assignment.carrier_id,
+    overseas_vehicle_type: assignment.vehicle_type,
+    overseas_vehicle_count: vehiclePresent ? 1 : null,
+    overseas_vehicle_plate: assignment.plate_number,
+    overseas_driver_name: assignment.driver_name,
+    overseas_driver_phone: assignment.driver_phone,
+  } satisfies Record<string, unknown>;
+}
+
 async function resolveFieldPresence(
   organizationId: string,
   orderId: string,
@@ -974,18 +999,16 @@ async function resolveFieldPresence(
     for (const rule of rules) if (batch && rule.fieldKey in batch) setPresence(result, rule.fieldKey, batch[rule.fieldKey], rule.fieldKey === "cost_allocation");
     if (!batch && routeSelection?.business_type === "ftl") {
       const assignment = await env.DB.prepare(
-        `SELECT COALESCE(carrier_id,carrier_name) main_carrier_id,
-                vehicle_type main_vehicle_type,plate_number main_plate_number,
-                driver_name main_driver_name,driver_phone main_driver_phone,
-                planned_departure_at planned_exit_at,planned_arrival_at planned_arrival_at,
-                loading_requirements loading_instruction,notes loading_notes
+        `SELECT carrier_id,carrier_name,vehicle_type,plate_number,driver_name,driver_phone,
+                planned_departure_at,planned_arrival_at,loading_requirements,notes
          FROM order_transport_assignments
          WHERE organization_id=? AND order_id=? AND status!='cancelled'
          ORDER BY CASE leg_type WHEN 'main' THEN 0 WHEN 'first_mile' THEN 1 ELSE 2 END,created_at DESC LIMIT 1`,
       ).bind(organizationId, orderId).first<Record<string, unknown>>();
+      const assignmentValues = ftlOutboundWorkflowFieldValues(assignment);
       for (const rule of rules)
-        if (assignment && rule.fieldKey in assignment)
-          setPresence(result, rule.fieldKey, assignment[rule.fieldKey]);
+        if (rule.fieldKey in assignmentValues)
+          setPresence(result, rule.fieldKey, assignmentValues[rule.fieldKey]);
     }
     const dispatch = await env.DB.prepare(
       `SELECT d.notes loading_handover_notes,

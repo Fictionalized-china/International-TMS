@@ -379,8 +379,14 @@ export async function action({request}:Route.ActionArgs){
         .bind(exitPort||null,now,user.organizationId,dispatch.order_id),
     ]);
     const warnings:string[]=[];
-    try{await syncOrderWorkflowSnapshot(user.organizationId,dispatch.order_id)}catch(error){console.error("dispatch route workflow sync failed",error);warnings.push("工作流同步待重试")}
-    try{await writeAudit({request,action:"warehouse.dispatch.route_fields",resourceType:"warehouse_dispatch",resourceId:dispatch.id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{dispatchNumber:dispatch.dispatch_number,orderId:dispatch.order_id,exitPort,customsLocation,workflowResynchronized:warnings.length===0}})}catch(error){console.error("dispatch route audit write failed",error);warnings.push("审计记录待重试")}
+    let workflowStepKey:string|null=null;
+    try{
+      await syncOrderWorkflowSnapshot(user.organizationId,dispatch.order_id);
+      const workflowState=await env.DB.prepare(`SELECT wi.current_step_key FROM transport_orders o LEFT JOIN workflow_instances wi ON wi.id=o.workflow_instance_id AND wi.organization_id=o.organization_id WHERE o.organization_id=? AND o.id=?`).bind(user.organizationId,dispatch.order_id).first<{current_step_key:string|null}>();
+      workflowStepKey=workflowState?.current_step_key??null;
+      if(workflowStepKey==="port_loading")warnings.push("当前节点仍有其他工作流必填项待补")
+    }catch(error){console.error("dispatch route workflow sync failed",error);warnings.push("工作流同步待重试")}
+    try{await writeAudit({request,action:"warehouse.dispatch.route_fields",resourceType:"warehouse_dispatch",resourceId:dispatch.id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{dispatchNumber:dispatch.dispatch_number,orderId:dispatch.order_id,exitPort,customsLocation,workflowStepKey,workflowResynchronized:workflowStepKey!=="port_loading"}})}catch(error){console.error("dispatch route audit write failed",error);warnings.push("审计记录待重试")}
     return{success:`${dispatch.dispatch_number} 的出境口岸与清关地已保存${warnings.length?`；${warnings.join("、")}`:"，业务工作流已重新同步"}`};
   }
   if(intent==="schedule"){
@@ -680,12 +686,12 @@ function OutboundDocumentUploadList({inspection,busy,onlyRequiredUnresolved=fals
     <div className="outbound-upload-modal-intro"><strong>{onlyRequiredUnresolved?"需要补充以下文件":"装车任务文件"}</strong><span>点击文件名称即可选择上传；系统沿用已有有效版本，上传成功后会立即刷新当前清单。</span></div>
     {visibleGroups.map(group=><section className="outbound-upload-order" key={group.orderId}>
       <header><strong>{group.orderNumber} · {group.customerName}</strong><span>{group.documents.filter(document=>document.attachmentId).length}/{group.documents.length} 已上传</span></header>
-      <div className="table-wrap outbound-document-table"><table><thead><tr><th>点击文件名选择上传</th><th>当前状态</th><th>当前文件</th><th>说明</th></tr></thead><tbody>{group.documents.map(document=><tr className={document.attachmentId?"completed-row":""} key={`${document.orderId}:${document.code}`}>
+      <div className="table-wrap outbound-document-table"><table><thead><tr><th>点击文件名选择上传</th><th>当前状态</th><th>当前文件</th><th>说明</th></tr></thead><tbody>{group.documents.map(document=><tr className={document.attachmentId?"completed-row":document.required?"required-missing-row":"optional-missing-row"} key={`${document.orderId}:${document.code}`}>
         <td><Form method="post" encType="multipart/form-data" className="outbound-document-upload-form">
           <input type="hidden" name="intent" value="loading_document_upload"/><input type="hidden" name="inspectionOrderId" value={inspection.batch.order_id}/><input type="hidden" name="orderId" value={document.orderId}/><input type="hidden" name="batchId" value={inspection.batch.id}/><input type="hidden" name="documentCategory" value={document.code}/>
-          <label className={`outbound-document-name-upload${document.attachmentId?"":" missing"}`}><input className="document-upload-input" name="attachment" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" required disabled={busy} onChange={(event)=>submitForm(event.currentTarget.form)}/><strong>{document.name}</strong><small>{document.required?"必需文件":"选填文件"} · 点击选择{document.attachmentId?"替换":"上传"}</small></label>
+          <label className={`outbound-document-name-upload${document.attachmentId?"":document.required?" missing required-missing":" optional-missing"}`}><input className="document-upload-input" name="attachment" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" required disabled={busy} onChange={(event)=>submitForm(event.currentTarget.form)}/><strong>{document.name}</strong><small>{document.required?"必需文件":"选填文件"} · 点击选择{document.attachmentId?"替换":"上传"}</small></label>
         </Form></td>
-        <td><span className={`status-pill ${document.attachmentId?"":"warning"}`}>{outboundDocumentStatus(document)}</span></td>
+        <td><span className={`status-pill ${document.attachmentId?"":document.required?"warning":"off"}`}>{outboundDocumentStatus(document)}</span></td>
         <td title={document.fileName??undefined}>{document.fileName||"尚未上传"}</td>
         <td>{document.attachmentId?"可点击文件名替换当前版本":"选择后自动上传并刷新"}</td>
       </tr>)}</tbody></table></div>
@@ -763,13 +769,14 @@ function FtlOutboundRouteEditor({task,workflowPolicy,borderPorts,customsPlaces,b
   const exitPolicy=workflowPolicy.batchFields.exit_port,customsPolicy=workflowPolicy.batchFields.customs_location;
   if(!exitPolicy.isActive&&!customsPolicy.isActive)return null;
   const routeError=validateFtlOutboundRouteFields({exitPort:task.exit_port||"",customsLocation:task.customs_location||"",policies:workflowPolicy.batchFields});
-  return <section className={`panel outbound-route-field-editor${routeError?" needs-attention":""}`}>
-    <div className="panel-header"><div><h2>出境路线信息</h2><p>来源于当前订单“出口准备与装车出库”节点；保存后立即同步管理端并重新计算业务工作流门禁。</p></div><span className={`status-pill ${routeError?"warning":"success"}`}>{routeError?"必填项待补":"已同步"}</span></div>
+  const workflowSyncPending=task.status==="dispatched";
+  return <section className={`panel outbound-route-field-editor${routeError||workflowSyncPending?" needs-attention":""}`}>
+    <div className="panel-header"><div><h2>出境路线信息</h2><p>来源于当前订单“出口准备与装车出库”节点；保存后立即同步管理端并重新计算业务工作流门禁。</p></div><span className={`status-pill ${routeError||workflowSyncPending?"warning":"success"}`}>{routeError?"必填项待补":workflowSyncPending?"工作流待同步":"已同步"}</span></div>
     <Form method="post" className="ftl-outbound-route-form">
       <input type="hidden" name="intent" value="route_fields"/><input type="hidden" name="dispatchId" value={task.id}/>
       {exitPolicy.isActive&&<label className="field"><span>出境口岸{exitPolicy.isRequired?" *":"（选填）"}</span><select name="exitPort" defaultValue={task.exit_port||""} required={exitPolicy.isRequired} disabled={!canOperate||busy}><option value="">请选择出境口岸</option><ReferenceOptions currentValue={task.exit_port} options={borderPorts}/></select></label>}
       {customsPolicy.isActive&&<label className="field"><span>起运地清关地{customsPolicy.isRequired?" *":"（选填）"}</span><select name="customsLocation" defaultValue={task.customs_location||""} required={customsPolicy.isRequired} disabled={!canOperate||busy}><option value="">请选择起运地清关地</option><ReferenceOptions currentValue={task.customs_location} options={customsPlaces}/></select></label>}
-      {canOperate&&<button className="primary warehouse-primary" disabled={busy}>{routeError?"补齐并重新同步":"保存路线信息"}</button>}
+      {canOperate&&<button className="primary warehouse-primary" disabled={busy}>{routeError?"补齐并重新同步":workflowSyncPending?"重新同步业务工作流":"保存路线信息"}</button>}
     </Form>
   </section>;
 }
