@@ -1,4 +1,7 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { OrganizationAssigneePicker } from "../components/OrganizationAssigneePicker";
 import {
   buildOrganizationAssigneeTree,
   findOrganizationAssigneePath,
@@ -79,5 +82,19 @@ describe("organization assignee hierarchy", () => {
       userName: "a3",
     });
     expect(findOrganizationAssigneePath(members, "missing-user")).toBeNull();
+  });
+
+  it("uses one cascade trigger while submitting the selected concrete account", () => {
+    const html = renderToStaticMarkup(createElement(OrganizationAssigneePicker, {
+      members,
+      name: "assigneeUserId",
+      defaultValue: "user-a3",
+      personLabel: "审批负责人",
+    }));
+
+    expect(html).toContain("organization-assignee-trigger");
+    expect(html).toContain("A 部门 / 2 岗位 / a3");
+    expect(html).toContain('name="assigneeUserId"');
+    expect(html).not.toContain('aria-label="选择部门"');
   });
 });
