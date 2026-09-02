@@ -21681,6 +21681,18 @@ html[data-motion="off"] .outbound-order-document-panel { animation: none; }
   border-color: #1f9d6a;
   background: #fff;
 }
+.dispatch-sheet > .outbound-loading-scan.scan-complete {
+  background: #eefaf4;
+}
+.dispatch-sheet > .outbound-loading-scan.scan-complete .field input {
+  color: #176b4c;
+  border-color: #8bcdb0;
+  background: #f8fffb;
+  font-weight: 700;
+}
+.dispatch-sheet > .outbound-loading-scan.scan-complete .warehouse-primary {
+  min-width: 230px;
+}
 .outbound-scan-code-field > span:first-child::after {
   content: none !important;
 }
