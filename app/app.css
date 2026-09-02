@@ -15059,6 +15059,15 @@ a.order-module-card.read-only:hover {
 
 .batch-order-documents table { min-width: 1180px; }
 .batch-order-documents td { vertical-align: top; }
+.batch-order-documents .blocked-row td {
+  background: #fff5f3;
+}
+.batch-order-documents .blocked-row td:first-child {
+  box-shadow: inset 3px 0 #e27a68;
+}
+.batch-order-documents .completed-row td {
+  background: #f2faf6;
+}
 .batch-order-documents td > small,
 .batch-order-documents td > strong + small { display: block; margin-top: 4px; color: #63758d; }
 .loading-cargo-names { color: #102f5d; line-height: 1.45; }

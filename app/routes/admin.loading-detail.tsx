@@ -953,7 +953,8 @@ function BatchDocumentWorkbench({batchId,orders,batchDocuments,orderDocuments,or
         const customsFilesReady=requiredCustomsDocuments.every(document=>files.some(item=>item.document_category===document.code&&["approved","archived"].includes(item.review_status)));
         const customsDeclarationsReady=Boolean(customs&&customs.total>0&&customs.released===customs.total);
         const customsReady=!requirementGroup?.customsEnabled||(customsFilesReady&&customsDeclarationsReady);
-        return <tr key={order.order_id} id={`batch-customs-${order.order_id}`}>
+        const orderGateReady=documentSummary.complete&&customsReady;
+        return <tr className={orderGateReady?"completed-row":"blocked-row"} key={order.order_id} id={`batch-customs-${order.order_id}`}>
           <td><strong><OrderNumberLink id={order.order_id} number={order.order_number}/></strong><small>{order.customer_name}</small></td>
           <td><strong className="loading-cargo-names">{order.cargo_names||order.cargo_description||"未填写"}</strong></td>
           <td>{order.pieces} 件 · {order.gross_weight_kg.toFixed(2)} KG · {order.volume_cbm.toFixed(3)} CBM</td>
