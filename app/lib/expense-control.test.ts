@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  canCreateExpenseFromModule,
   emptyExpenseDirectionControl,
   expenseDirectionNextAction,
   expenseDirectionProgress,
@@ -24,5 +25,12 @@ describe("expense direction controls", () => {
     };
     expect(expenseDirectionProgress(control)).toBe(100);
     expect(expenseDirectionNextAction(control)).toBe("已完成并锁定");
+  });
+
+  it("allows early expense entry only from the consignment costs section", () => {
+    expect(canCreateExpenseFromModule("costs", "")).toBe(true);
+    expect(canCreateExpenseFromModule("consignment", "consignment_costs")).toBe(true);
+    expect(canCreateExpenseFromModule("consignment", "info")).toBe(false);
+    expect(canCreateExpenseFromModule("warehouse", "consignment_costs")).toBe(false);
   });
 });

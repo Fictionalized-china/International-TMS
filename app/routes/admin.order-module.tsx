@@ -61,6 +61,7 @@ import {
   reconcileOverseasOrderDeliveryState,
 } from "../lib/overseas-warehouse.server";
 import {
+  canCreateExpenseFromModule,
   emptyExpenseDirectionControl,
   expenseDirectionNextAction,
   expenseDirectionProgress,
@@ -1230,6 +1231,11 @@ export async function action({ request, params }: Route.ActionArgs) {
     moduleCode = params.moduleCode,
     form = await request.formData(),
     intent = valueOf(form, "intent");
+  const expenseEntryContext = valueOf(form, "expenseEntryContext");
+  const expensePolicyModuleCode =
+    intent === "expense_add" && canCreateExpenseFromModule(moduleCode, expenseEntryContext)
+      ? "costs"
+      : moduleCode;
   if (!orderModuleDefinition(moduleCode)) return { formError: "模块不存在" };
   if (
     moduleCode === "loading" &&
@@ -1276,8 +1282,15 @@ export async function action({ request, params }: Route.ActionArgs) {
     orderId,
     moduleCode as Parameters<typeof loadOrderModuleWorkflowFields>[2],
   );
+  const expenseValidationWorkflowFields = expensePolicyModuleCode === moduleCode
+    ? moduleWorkflowFields
+    : await loadOrderModuleWorkflowFields(
+      current.organizationId,
+      orderId,
+      expensePolicyModuleCode as Parameters<typeof loadOrderModuleWorkflowFields>[2],
+    );
   const fieldPolicy = (fieldKey: string, fallbackRequired = false) =>
-    workflowFieldPolicy(moduleWorkflowFields, fieldKey, fallbackRequired);
+    workflowFieldPolicy(expenseValidationWorkflowFields, fieldKey, fallbackRequired);
   const requiredFieldMissing = (
     fieldKey: string,
     value: unknown,
@@ -2666,7 +2679,11 @@ export async function action({ request, params }: Route.ActionArgs) {
       };
     }
     if (intent === "expense_add" || intent === "expense_update") {
-      if (moduleCode !== "costs") return { formError: "只能在费用模块录入" };
+      if (
+        intent === "expense_update"
+          ? moduleCode !== "costs"
+          : !canCreateExpenseFromModule(moduleCode, expenseEntryContext)
+      ) return { formError: "只能在订单费用或费用结算模块录入" };
       const direction = valueOf(form, "direction") || "receivable";
       if (!["receivable", "payable"].includes(direction))
         return { formError: "费用方向无效" };
@@ -2716,14 +2733,19 @@ export async function action({ request, params }: Route.ActionArgs) {
         .map(([fieldKey]) => fieldPolicy(fieldKey).label || fieldKey);
       if (missingExpenseFields.length)
         return { formError: `请填写当前模板要求的字段：${missingExpenseFields.join("、")}` };
-      const quantity = Math.max(0.0001, Number(valueOf(form, "quantity") || 1));
-      const unitPrice = Math.max(0, Number(valueOf(form, "unitPrice") || 0));
+      const quantity = Number(valueOf(form, "quantity") || 1);
+      const unitPrice = Number(valueOf(form, "unitPrice") || 0);
+      const exchangeRate = Number(valueOf(form, "exchangeRate") || 1);
+      const taxRate = Number(valueOf(form, "taxRate") || 0);
+      if (!Number.isFinite(quantity) || quantity <= 0)
+        return { formError: "费用数量必须是大于 0 的数字" };
+      if (!Number.isFinite(unitPrice) || unitPrice < 0)
+        return { formError: "费用单价必须是大于或等于 0 的数字" };
+      if (!Number.isFinite(exchangeRate) || exchangeRate <= 0)
+        return { formError: "费用汇率必须是大于 0 的数字" };
+      if (!Number.isFinite(taxRate) || taxRate < 0)
+        return { formError: "费用税率必须是大于或等于 0 的数字" };
       const amount = quantity * unitPrice;
-      const exchangeRate = Math.max(
-        0.000001,
-        Number(valueOf(form, "exchangeRate") || 1),
-      );
-      const taxRate = Math.max(0, Number(valueOf(form, "taxRate") || 0));
       const now = new Date().toISOString();
       const values = {
         chargeCode: valueOf(form, "chargeCode") || "OTHER",
@@ -2735,6 +2757,7 @@ export async function action({ request, params }: Route.ActionArgs) {
         isInternal: valueOf(form, "isInternal") === "1" ? 1 : 0,
         foreignAccountNo: valueOf(form, "foreignAccountNo") || null,
       };
+      const targetExpenseId = existingExpense?.id || crypto.randomUUID();
       if (existingExpense) {
         await env.DB.prepare(
           `UPDATE business_expenses
@@ -2746,7 +2769,7 @@ export async function action({ request, params }: Route.ActionArgs) {
             values.currency, quantity, unitPrice, amount, exchangeRate,
             amount * exchangeRate, values.notes, now, taxRate,
             (amount * taxRate) / 100, values.occurredOn, values.isInternal,
-            values.foreignAccountNo, existingExpense.id, current.organizationId, orderId,
+            values.foreignAccountNo, targetExpenseId, current.organizationId, orderId,
           )
           .run();
       } else {
@@ -2755,7 +2778,7 @@ export async function action({ request, params }: Route.ActionArgs) {
            VALUES(?,?,?,?,'estimated',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
           .bind(
-            crypto.randomUUID(), current.organizationId, orderId, direction,
+            targetExpenseId, current.organizationId, orderId, direction,
             values.chargeCode, values.chargeName, values.counterpartyName,
             values.currency, quantity, unitPrice, amount, exchangeRate,
             amount * exchangeRate, values.notes, current.userId, now, now,
@@ -2766,7 +2789,30 @@ export async function action({ request, params }: Route.ActionArgs) {
       }
       await syncCostsModuleStatus(current.organizationId, orderId, now);
       await syncOrderWorkflowSnapshot(current.organizationId, orderId);
-      return { success: existingExpense ? "费用已更新" : "应收/应付费用已录入" };
+      await writeAudit({
+        request,
+        action: existingExpense ? "expense.update" : "expense.create",
+        resourceType: "business_expense",
+        resourceId: targetExpenseId,
+        organizationId: current.organizationId,
+        actorUserId: current.userId,
+        metadata: {
+          orderId,
+          direction,
+          chargeCode: values.chargeCode,
+          chargeName: values.chargeName,
+          currency: values.currency,
+          quantity,
+          unitPrice,
+          amount,
+          exchangeRate,
+          entryContext: expenseEntryContext || "costs",
+        },
+      });
+      return {
+        actionKind: existingExpense ? "expense_updated" : "expense_added",
+        success: existingExpense ? "费用已更新" : "应收/应付费用已录入",
+      };
     }
     if (intent === "expense_direction_control") {
       if (moduleCode !== "costs") return { formError: "只能在费用模块审核" };
@@ -4870,7 +4916,7 @@ function ModuleBusinessData({
     manage ? "create" : "records",
   );
   const moduleActionData = useActionData() as
-    | { actionKind?: string; success?: string }
+    | { actionKind?: string; success?: string; formError?: string }
     | undefined;
   const domesticVehicle = data.carrierVehicles.find((item) => item.id === domesticVehicleId);
   const domesticDriver = data.carrierDrivers.find((item) => item.id === domesticDriverId);
@@ -5881,98 +5927,7 @@ function ModuleBusinessData({
           {manage && settlementOpen && (
             <details className="expandable module-create-dialog">
               <summary>新增费用</summary>
-              <Form method="post" className="form-grid compact">
-                <input type="hidden" name="intent" value="expense_add" />
-                {!workflowFieldPolicy(data.workflowFields, "expense_direction").visible && <input type="hidden" name="direction" value="receivable" />}
-                {!workflowFieldPolicy(data.workflowFields, "expense_charge_code").visible && <input type="hidden" name="chargeCode" value="FREIGHT" />}
-                {!workflowFieldPolicy(data.workflowFields, "expense_charge_name").visible && <input type="hidden" name="chargeName" value="运费" />}
-                {!workflowFieldPolicy(data.workflowFields, "expense_currency").visible && <input type="hidden" name="currency" value="CNY" />}
-                {!workflowFieldPolicy(data.workflowFields, "expense_exchange_rate").visible && <input type="hidden" name="exchangeRate" value="1" />}
-                {!workflowFieldPolicy(data.workflowFields, "expense_quantity").visible && <input type="hidden" name="quantity" value="1" />}
-                {!workflowFieldPolicy(data.workflowFields, "expense_unit_price").visible && <input type="hidden" name="unitPrice" value="0" />}
-                {!workflowFieldPolicy(data.workflowFields, "expense_tax_rate").visible && <input type="hidden" name="taxRate" value="0" />}
-                {!workflowFieldPolicy(data.workflowFields, "expense_is_internal").visible && <input type="hidden" name="isInternal" value="0" />}
-                <ModuleField fields={data.workflowFields} fieldKey="expense_direction" label="费用方向" fallbackRequired>
-                  {(required) => <select name="direction" required={required}>
-                    <option value="receivable">应收</option>
-                    <option value="payable">应付</option>
-                  </select>}
-                </ModuleField>
-                <ModuleField fields={data.workflowFields} fieldKey="expense_charge_code" label="费用代码">
-                  {(required) => <input name="chargeCode" defaultValue="FREIGHT" required={required} />}
-                </ModuleField>
-                <ModuleField fields={data.workflowFields} fieldKey="expense_charge_name" label="费用名称" fallbackRequired>
-                  {(required) => <input name="chargeName" defaultValue="运费" required={required} />}
-                </ModuleField>
-                <ModuleField fields={data.workflowFields} fieldKey="expense_counterparty" label="往来单位/联系人" fallbackRequired>
-                  {(required) => <input name="counterpartyName" required={required} />}
-                </ModuleField>
-                <ModuleField fields={data.workflowFields} fieldKey="expense_currency" label="币种" fallbackRequired>
-                  {(required) => <select name="currency" defaultValue="CNY" required={required}>
-                    <option value="CNY">CNY 人民币</option>
-                    <option value="USD">USD 美元</option>
-                    <option value="KZT">KZT 坚戈</option>
-                    <option value="UZS">UZS 苏姆</option>
-                    <option value="EUR">EUR 欧元</option>
-                    <option value="RUB">RUB 卢布</option>
-                  </select>}
-                </ModuleField>
-                <ModuleField fields={data.workflowFields} fieldKey="expense_exchange_rate" label="汇率" fallbackRequired>
-                  {(required) => <input
-                    name="exchangeRate"
-                    type="number"
-                    min="0.000001"
-                    step="0.000001"
-                    defaultValue="1"
-                    required={required}
-                  />}
-                </ModuleField>
-                <ModuleField fields={data.workflowFields} fieldKey="expense_quantity" label="数量" fallbackRequired>
-                  {(required) => <input
-                    name="quantity"
-                    type="number"
-                    min="0.0001"
-                    step="0.0001"
-                    defaultValue="1"
-                    required={required}
-                  />}
-                </ModuleField>
-                <ModuleField fields={data.workflowFields} fieldKey="expense_unit_price" label="单价" fallbackRequired>
-                  {(required) => <input
-                    name="unitPrice"
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    defaultValue="0"
-                    required={required}
-                  />}
-                </ModuleField>
-                <ModuleField fields={data.workflowFields} fieldKey="expense_tax_rate" label="税率 %">
-                  {(required) => <input
-                    name="taxRate"
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    defaultValue="0"
-                    required={required}
-                  />}
-                </ModuleField>
-                <ModuleField fields={data.workflowFields} fieldKey="expense_occurred_on" label="发生日期">
-                  {(required) => <input name="occurredOn" type="date" required={required} />}
-                </ModuleField>
-                <ModuleField fields={data.workflowFields} fieldKey="expense_foreign_account_no" label="国外账单号">
-                  {(required) => <input name="foreignAccountNo" required={required} />}
-                </ModuleField>
-                <ModuleField fields={data.workflowFields} fieldKey="expense_is_internal" label="内部费用">
-                  {(required) => <select name="isInternal" defaultValue="0" required={required}><option value="0">否</option><option value="1">是</option></select>}
-                </ModuleField>
-                <ModuleField fields={data.workflowFields} fieldKey="expense_notes" label="费用备注" className="field span-2">
-                  {(required) => <textarea name="notes" rows={3} required={required} />}
-                </ModuleField>
-                <button className="primary" disabled={busy}>
-                  保存费用
-                </button>
-              </Form>
+              <ExpenseCreateForm fields={data.workflowFields} busy={busy}/>
             </details>
           )}
           <span className="status-pill">应收、应付分别确认和锁定</span>
@@ -6132,6 +6087,9 @@ function ModuleBusinessData({
       "pre_receivable_expenses",
     );
     const showQuotationChargeTable = quotationChargePolicy.visible || inheritedReceivablePolicy.visible;
+    const supplementalExpenses = data.expenses.filter(
+      (expense) => !["quotation", "quotation_charge"].includes(expense.source_type || ""),
+    );
     return (
       <div className="module-business-stack consignment-business-stack">
         {showInfo && <section className="consignment-form-sheet" aria-label="委托信息">
@@ -6237,28 +6195,47 @@ function ModuleBusinessData({
           )}
         </section>}
 
-        {showCosts && showQuotationCosts && <section className="consignment-form-sheet" aria-label="订单费用">
+        {showCosts && <section className="consignment-form-sheet" aria-label="订单费用">
           <header>
-            <div><h3>订单费用</h3><p>客户已接受的报价费用自动继承，只读展示并进入后续结算。</p></div>
-            {showQuotationChargeTable && <strong className="consignment-total-amount">{data.order.quotation_currency && data.order.quotation_total_amount != null ? `${data.order.quotation_currency} ${Number(data.order.quotation_total_amount).toLocaleString()}` : "—"}</strong>}
+            <div><h3>订单费用</h3><p>报价费用自动继承且保持只读；业务员可新增本订单后续产生的应收或应付费用。</p></div>
+            <div className="consignment-cost-actions">
+              {showQuotationChargeTable && <strong className="consignment-total-amount">{data.order.quotation_currency && data.order.quotation_total_amount != null ? `${data.order.quotation_currency} ${Number(data.order.quotation_total_amount).toLocaleString()}` : "—"}</strong>}
+              {manage&&<Modal title="新增订单费用" triggerLabel="新增费用" triggerClassName="primary" size="wide" closeSignal={moduleActionData?.success}>
+                {moduleActionData?.formError&&<div className="alert error" role="alert">{moduleActionData.formError}</div>}
+                <div className="alert">新增费用会进入订单费用台账，后续在“对账结算”节点统一确认、审核和锁定。</div>
+                <ExpenseCreateForm fields={data.quotationCostWorkflowFields} busy={busy} entryContext="consignment_costs"/>
+              </Modal>}
+            </div>
           </header>
-          <WorkflowInformationGroup
-            title="报价时效"
-            fields={data.quotationCostWorkflowFields}
-            items={[{ fieldKey: "quotation_valid_until", label: "报价有效期", value: data.order.quotation_valid_until || "" }]}
-          />
-          {showQuotationChargeTable && <div className="table-wrap consignment-charge-table" data-workflow-field={quotationChargePolicy.visible ? "quotation_charge_items" : "pre_receivable_expenses"}>
-            <table>
-              <thead><tr><th>{quotationChargePolicy.label || inheritedReceivablePolicy.label || "费用名称"}{quotationChargePolicy.required || inheritedReceivablePolicy.required ? " *" : ""}</th><th>费用代码</th><th>币种</th><th>汇率</th><th>数量</th><th>单价</th><th>金额</th></tr></thead>
-              <tbody>
-                {data.quotationCharges.map((charge) => <tr key={charge.id}><td><strong>{charge.description}</strong></td><td>{charge.charge_code}</td><td>{data.order.quotation_currency || ""}</td><td>{Number(charge.exchange_rate).toLocaleString()}</td><td>{Number(charge.quantity).toLocaleString()}</td><td>{Number(charge.unit_price).toLocaleString()}</td><td><strong>{Number(charge.amount).toLocaleString()}</strong></td></tr>)}
-                {!data.quotationCharges.length && <tr><td colSpan={7} className="empty-state">关联报价尚无费用明细</td></tr>}
-              </tbody>
-            </table>
-          </div>}
+          {showQuotationCosts?<>
+            <WorkflowInformationGroup
+              title="报价时效"
+              fields={data.quotationCostWorkflowFields}
+              items={[{ fieldKey: "quotation_valid_until", label: "报价有效期", value: data.order.quotation_valid_until || "" }]}
+            />
+            {showQuotationChargeTable && <div className="table-wrap consignment-charge-table" data-workflow-field={quotationChargePolicy.visible ? "quotation_charge_items" : "pre_receivable_expenses"}>
+              <table>
+                <thead><tr><th>{quotationChargePolicy.label || inheritedReceivablePolicy.label || "费用名称"}{quotationChargePolicy.required || inheritedReceivablePolicy.required ? " *" : ""}</th><th>费用代码</th><th>币种</th><th>汇率</th><th>数量</th><th>单价</th><th>金额</th></tr></thead>
+                <tbody>
+                  {data.quotationCharges.map((charge) => <tr key={charge.id}><td><strong>{charge.description}</strong></td><td>{charge.charge_code}</td><td>{data.order.quotation_currency || ""}</td><td>{Number(charge.exchange_rate).toLocaleString()}</td><td>{Number(charge.quantity).toLocaleString()}</td><td>{Number(charge.unit_price).toLocaleString()}</td><td><strong>{Number(charge.amount).toLocaleString()}</strong></td></tr>)}
+                  {!data.quotationCharges.length && <tr><td colSpan={7} className="empty-state">关联报价尚无费用明细</td></tr>}
+                </tbody>
+              </table>
+            </div>}
+          </>:<div className="alert workflow-hidden-data-note">当前工作流已隐藏询价报价费用与有效期；历史金额仍保留用于结算和审计。</div>}
+          <section className="consignment-form-group consignment-supplemental-expenses">
+            <h4>新增订单费用 <span>{supplementalExpenses.length} 项</span></h4>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>方向</th><th>费用名称</th><th>往来单位</th><th>币种</th><th>汇率</th><th>数量</th><th>单价</th><th>金额</th><th>状态</th><th>备注</th></tr></thead>
+                <tbody>
+                  {supplementalExpenses.map((expense)=><tr key={expense.id}><td><span className={`status-pill ${expense.direction==="payable"?"warning":"success"}`}>{expense.direction==="receivable"?"应收":"应付"}</span></td><td><strong>{expense.charge_name}</strong><small>{expense.charge_code}</small></td><td>{expense.counterparty_name||"—"}</td><td>{expense.currency}</td><td>{expense.exchange_rate}</td><td>{expense.quantity}</td><td>{expense.unit_price.toLocaleString()}</td><td><strong>{expense.amount.toLocaleString()}</strong></td><td>{expenseStageLabel(expense.stage)}</td><td>{expense.notes||"—"}</td></tr>)}
+                  {!supplementalExpenses.length&&<tr><td colSpan={10} className="empty-state">暂无新增费用；如报价之外产生其他费用，请点击右上角“新增费用”。</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </section>
         </section>}
-
-        {showCosts && !showQuotationCosts && <div className="alert workflow-hidden-data-note">当前工作流已将询价报价中的费用与有效期设为隐藏；金额仍保留用于后续结算和审计。</div>}
 
         {showConsignmentActionBar && <ConsignmentReviewActionBar data={data} busy={busy} />}
       </div>
@@ -7172,6 +7149,82 @@ function InformationTable({
       })}</tr></tbody>
     </table>
   </div>;
+}
+
+function ExpenseCreateForm({
+  fields,
+  busy,
+  entryContext,
+}: {
+  fields: WorkflowFieldState[];
+  busy: boolean;
+  entryContext?: "consignment_costs";
+}) {
+  const [currency,setCurrency]=useState("CNY");
+  const [exchangeRate,setExchangeRate]=useState("1");
+  const [quantity,setQuantity]=useState("1");
+  const [unitPrice,setUnitPrice]=useState("");
+  const [taxRate,setTaxRate]=useState("0");
+  const amount=Math.max(0,Number(quantity)||0)*Math.max(0,Number(unitPrice)||0);
+  const taxAmount=amount*Math.max(0,Number(taxRate)||0)/100;
+  return <Form method="post" className="form-grid compact expense-create-form">
+    <input type="hidden" name="intent" value="expense_add" />
+    {entryContext&&<input type="hidden" name="expenseEntryContext" value={entryContext}/>}
+    {!workflowFieldPolicy(fields,"expense_direction").visible&&<input type="hidden" name="direction" value="receivable"/>}
+    {!workflowFieldPolicy(fields,"expense_charge_code").visible&&<input type="hidden" name="chargeCode" value="OTHER"/>}
+    {!workflowFieldPolicy(fields,"expense_charge_name").visible&&<input type="hidden" name="chargeName" value="其他费用"/>}
+    {!workflowFieldPolicy(fields,"expense_currency").visible&&<input type="hidden" name="currency" value={currency}/>}
+    {!workflowFieldPolicy(fields,"expense_exchange_rate").visible&&<input type="hidden" name="exchangeRate" value={exchangeRate}/>}
+    {!workflowFieldPolicy(fields,"expense_quantity").visible&&<input type="hidden" name="quantity" value={quantity}/>}
+    {!workflowFieldPolicy(fields,"expense_unit_price").visible&&<input type="hidden" name="unitPrice" value={unitPrice||"0"}/>}
+    {!workflowFieldPolicy(fields,"expense_tax_rate").visible&&<input type="hidden" name="taxRate" value={taxRate}/>}
+    {!workflowFieldPolicy(fields,"expense_is_internal").visible&&<input type="hidden" name="isInternal" value="0"/>}
+    <ModuleField fields={fields} fieldKey="expense_direction" label="费用方向" fallbackRequired>
+      {(required)=><select name="direction" defaultValue="receivable" required={required}><option value="receivable">应收</option><option value="payable">应付</option></select>}
+    </ModuleField>
+    <ModuleField fields={fields} fieldKey="expense_charge_code" label="费用代码">
+      {(required)=><input name="chargeCode" placeholder="例如 OTHER" required={required}/>}
+    </ModuleField>
+    <ModuleField fields={fields} fieldKey="expense_charge_name" label="费用名称" fallbackRequired>
+      {(required)=><><input name="chargeName" list="expense-charge-name-options" placeholder="请选择或输入费用名称" autoComplete="off" required={required}/><datalist id="expense-charge-name-options">{transportChargeNameOptions.map(([value,label])=><option key={value} value={value}>{label}</option>)}</datalist></>}
+    </ModuleField>
+    <ModuleField fields={fields} fieldKey="expense_counterparty" label="往来单位/联系人" fallbackRequired>
+      {(required)=><input name="counterpartyName" placeholder="应收客户或应付供应商" required={required}/>}
+    </ModuleField>
+    <ModuleField fields={fields} fieldKey="expense_currency" label="币种" fallbackRequired>
+      {(required)=><select name="currency" value={currency} onChange={(event)=>setCurrency(event.target.value)} required={required}><option value="CNY">CNY 人民币</option><option value="USD">USD 美元</option><option value="KZT">KZT 坚戈</option><option value="UZS">UZS 苏姆</option><option value="EUR">EUR 欧元</option><option value="RUB">RUB 卢布</option></select>}
+    </ModuleField>
+    <ModuleField fields={fields} fieldKey="expense_exchange_rate" label="汇率" fallbackRequired>
+      {(required)=><input name="exchangeRate" type="number" min="0.000001" step="0.000001" value={exchangeRate} onChange={(event)=>setExchangeRate(event.target.value)} required={required}/>}
+    </ModuleField>
+    <ModuleField fields={fields} fieldKey="expense_quantity" label="数量" fallbackRequired>
+      {(required)=><input name="quantity" type="number" min="0.0001" step="0.0001" value={quantity} onChange={(event)=>setQuantity(event.target.value)} required={required}/>}
+    </ModuleField>
+    <ModuleField fields={fields} fieldKey="expense_unit_price" label="单价" fallbackRequired>
+      {(required)=><input name="unitPrice" type="number" min="0" step="0.01" value={unitPrice} onChange={(event)=>setUnitPrice(event.target.value)} placeholder="0.00" required={required}/>}
+    </ModuleField>
+    <ModuleField fields={fields} fieldKey="expense_tax_rate" label="税率 %">
+      {(required)=><input name="taxRate" type="number" min="0" step="0.01" value={taxRate} onChange={(event)=>setTaxRate(event.target.value)} required={required}/>}
+    </ModuleField>
+    <ModuleField fields={fields} fieldKey="expense_occurred_on" label="发生日期">
+      {(required)=><input name="occurredOn" type="date" required={required}/>}
+    </ModuleField>
+    <ModuleField fields={fields} fieldKey="expense_foreign_account_no" label="国外账单号">
+      {(required)=><input name="foreignAccountNo" required={required}/>}
+    </ModuleField>
+    <ModuleField fields={fields} fieldKey="expense_is_internal" label="内部费用">
+      {(required)=><select name="isInternal" defaultValue="0" required={required}><option value="0">否</option><option value="1">是</option></select>}
+    </ModuleField>
+    <ModuleField fields={fields} fieldKey="expense_notes" label="费用备注" className="field span-2">
+      {(required)=><textarea name="notes" rows={2} placeholder="费用产生原因或计价说明" required={required}/>}
+    </ModuleField>
+    <div className="expense-create-summary span-2" aria-live="polite">
+      <span>金额由数量 × 单价自动计算</span>
+      <strong>{currency} {amount.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</strong>
+      {taxAmount>0&&<small>税额 {currency} {taxAmount.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</small>}
+    </div>
+    <button className="primary span-2" disabled={busy}>{busy?"正在保存…":"保存费用"}</button>
+  </Form>;
 }
 
 function ExpenseEditForm({

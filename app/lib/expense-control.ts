@@ -38,3 +38,12 @@ export function expenseDirectionProgress(control: ExpenseDirectionControl) {
     control.finance_locked,
   ].filter(Boolean).length * 20;
 }
+
+export function canCreateExpenseFromModule(
+  moduleCode: string | null | undefined,
+  entryContext: string,
+) {
+  return moduleCode === "costs" || (
+    moduleCode === "consignment" && entryContext === "consignment_costs"
+  );
+}

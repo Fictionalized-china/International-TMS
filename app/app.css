@@ -4064,6 +4064,13 @@ td small {
   color: #64748b;
   font-size: 12px;
 }
+.consignment-cost-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex: 0 0 auto;
+}
 .consignment-form-group {
   padding: 0 12px 10px;
   border-bottom: 1px solid #dbe4ef;
@@ -4146,6 +4153,51 @@ td small {
 }
 .consignment-charge-table .blank-row td {
   height: 34px;
+}
+.consignment-supplemental-expenses > h4 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.consignment-supplemental-expenses > h4 span {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 600;
+}
+.consignment-supplemental-expenses table {
+  min-width: 1120px;
+  font-size: 12px;
+}
+.consignment-supplemental-expenses th,
+.consignment-supplemental-expenses td {
+  padding: 7px 9px;
+  white-space: nowrap;
+}
+.consignment-supplemental-expenses td:last-child {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.expense-create-summary {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  min-height: 42px;
+  padding: 8px 12px;
+  border: 1px solid #cbd9e8;
+  border-radius: 7px;
+  background: #f4f8fd;
+}
+.expense-create-summary span,
+.expense-create-summary small {
+  color: #64748b;
+  font-size: 11px;
+}
+.expense-create-summary strong {
+  color: #153b72;
+  font-size: 16px;
 }
 .consignment-form-grid.consignment-custom-fields {
   gap: 0;
