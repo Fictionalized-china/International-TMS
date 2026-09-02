@@ -11,6 +11,7 @@ import {
   workflowFieldCatalog,
   workflowFieldCatalogByKey,
   workflowFieldMode,
+  workflowFieldModeFlags,
   type WorkflowFieldMode,
 } from "./workflow-field-catalog";
 
@@ -55,26 +56,51 @@ const loadingTypeFixedField = new Set(["business_type"]);
 const retiredWorkflowFields = new Set(["loading_seal_number"]);
 
 export async function ensureWorkflowCatalogFields(organizationId: string) {
-  const workflows = await env.DB.prepare(
-    "SELECT id,code,road_load_type FROM workflow_definitions WHERE organization_id=?",
-  )
-    .bind(organizationId)
-    .all<{ id: string; code: string; road_load_type: string | null }>();
+  const [workflows, existingFields] = await Promise.all([
+    env.DB.prepare(
+      "SELECT id,code,road_load_type FROM workflow_definitions WHERE organization_id=?",
+    )
+      .bind(organizationId)
+      .all<{ id: string; code: string; road_load_type: string | null }>(),
+    env.DB.prepare(
+      `SELECT field.workflow_id,step.step_key,
+              COALESCE(field.module_code,'consignment') module_code,field.field_key
+       FROM workflow_step_fields field
+       JOIN workflow_steps step ON step.id=field.step_id
+       JOIN workflow_definitions workflow ON workflow.id=field.workflow_id
+       WHERE workflow.organization_id=?`,
+    )
+      .bind(organizationId)
+      .all<{
+        workflow_id: string;
+        step_key: string;
+        module_code: OrderModuleCode;
+        field_key: string;
+      }>(),
+  ]);
+  const existingFieldKeys = new Set(
+    existingFields.results.map(
+      (item) => `${item.workflow_id}:${item.step_key}:${item.module_code}:${item.field_key}`,
+    ),
+  );
   const now = new Date().toISOString();
   const statements: D1PreparedStatement[] = [];
   for (const workflow of workflows.results) {
     for (const item of workflowFieldCatalog) {
-      // Full catalog seeding remains limited to the canonical templates. The
-      // quotation registry, however, must exist on every FTL/LTL version: the
-      // quote form is the first node of the version selected by the user.
-      // INSERT OR IGNORE preserves every boss-authored required/optional/
-      // hidden choice on versions that already contain the field.
-      const shouldSeed = standardWorkflowCodes.has(workflow.code) || (
-        item.stepKey === "quotation" &&
-        ["ftl", "ltl"].includes(workflow.road_load_type || "")
-      );
+      // Every road workflow starts from the system field baseline. Workflow
+      // configuration is an overlay for required/optional/hidden choices, not
+      // a blank form builder. INSERT OR IGNORE preserves every boss-authored
+      // choice while filling catalog gaps in old or copied versions.
+      const shouldSeed =
+        standardWorkflowCodes.has(workflow.code) ||
+        ["ftl", "ltl"].includes(workflow.road_load_type || "");
       if (!shouldSeed) continue;
       if (retiredWorkflowFields.has(item.fieldKey)) continue;
+      if (
+        existingFieldKeys.has(
+          `${workflow.id}:${item.stepKey}:${item.moduleCode}:${item.fieldKey}`,
+        )
+      ) continue;
       const isFtlLoadingField =
         workflow.code === "tms-ftl-standard" && item.moduleCode === "loading";
       if (isFtlLoadingField && loadingTypeLockedFields.has(item.fieldKey)) continue;
@@ -478,6 +504,7 @@ export async function loadOrderModuleWorkflowFields(
       .all<RawField>();
     raw = live.results;
   }
+  raw = mergeWorkflowFieldCatalogBaseline(raw, binding.workflow_id, moduleCode);
   if (moduleCode === "loading") {
     const order = await env.DB.prepare(
       "SELECT business_type FROM transport_orders WHERE organization_id=? AND id=?",
@@ -605,6 +632,60 @@ type RawField = {
   options_text: string | null;
   help_text: string | null;
 };
+
+const workflowStepDefaultNames: Record<string, string> = {
+  quotation: "询价报价",
+  order_creation: "委托资料补充",
+  consignment_approval: "委托审核",
+  task_assignment: "任务分配",
+  domestic_execution: "国内运输",
+  warehouse_receiving: "国内仓入库",
+  port_loading: "出口准备与装车出库",
+  outbound_transport: "出境运输",
+  overseas_pickup: "客户扫码自提签收",
+  reconciliation: "对账结算",
+  completion_review: "完成复盘",
+};
+
+/**
+ * Fill gaps from the system business-field baseline, then let concrete
+ * workflow rows override it. An explicit hidden row therefore stays hidden;
+ * an old or copied workflow that omitted a standard field no longer empties
+ * the business page or silently bypasses its default gate.
+ */
+export function mergeWorkflowFieldCatalogBaseline(
+  rows: RawField[],
+  workflowId: string,
+  moduleCode: OrderModuleCode,
+): RawField[] {
+  const existing = new Set(
+    rows.map((row) => `${row.step_key}:${row.module_code}:${row.field_key}`),
+  );
+  const baseline = workflowFieldCatalog.flatMap((item, catalogIndex) => {
+    const identity = `${item.stepKey}:${item.moduleCode}:${item.fieldKey}`;
+    if (item.moduleCode !== moduleCode || existing.has(identity)) return [];
+    const flags = workflowFieldModeFlags(item.defaultMode);
+    return [{
+      id: `${workflowId}:runtime-catalog:${item.moduleCode}:${item.fieldKey}`,
+      workflow_id: workflowId,
+      step_key: item.stepKey,
+      step_name: workflowStepDefaultNames[item.stepKey] ?? item.stepKey,
+      module_code: item.moduleCode,
+      field_key: item.fieldKey,
+      label: item.label,
+      field_type: item.fieldType,
+      is_required: flags.isRequired,
+      is_active: flags.isActive,
+      sort_order: catalogIndex * 10 + 10,
+      options_text: item.optionsText ?? null,
+      help_text: item.helpText,
+    } satisfies RawField];
+  });
+  return [...rows, ...baseline].sort(
+    (left, right) =>
+      left.sort_order - right.sort_order || left.field_key.localeCompare(right.field_key),
+  );
+}
 
 function toRule(row: RawField): WorkflowFieldRule {
   return {

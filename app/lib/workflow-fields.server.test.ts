@@ -40,6 +40,7 @@ const database = vi.hoisted(() => {
 vi.mock("cloudflare:workers", () => ({ env: { DB: database.DB } }));
 
 import {
+  mergeWorkflowFieldCatalogBaseline,
   synchronizeWorkflowFieldDefinitionForInstances,
   synchronizeWorkflowFieldPolicyForInstances,
   workflowFieldPolicyAppliesAtStage,
@@ -49,6 +50,44 @@ describe("stage-aware workflow field synchronization", () => {
   beforeEach(() => {
     database.prepared.length = 0;
     database.batches.length = 0;
+  });
+
+  it("fills missing standard fields from the business baseline without overriding configured rows", () => {
+    const rows = mergeWorkflowFieldCatalogBaseline(
+      [
+        {
+          id: "configured-customer",
+          workflow_id: "workflow-1",
+          step_key: "order_creation",
+          step_name: "委托资料补充",
+          module_code: "consignment",
+          field_key: "customer_id",
+          label: "委托客户",
+          field_type: "customer",
+          is_required: 0,
+          is_active: 0,
+          sort_order: 10,
+          options_text: null,
+          help_text: null,
+        },
+      ],
+      "workflow-1",
+      "consignment",
+    );
+
+    expect(rows.find((field) => field.field_key === "customer_id")).toMatchObject({
+      id: "configured-customer",
+      is_active: 0,
+      is_required: 0,
+    });
+    expect(rows.find((field) => field.field_key === "quotation_id")).toMatchObject({
+      is_active: 1,
+      is_required: 0,
+    });
+    expect(rows.find((field) => field.field_key === "document_consignment_letter")).toMatchObject({
+      is_active: 1,
+      is_required: 1,
+    });
   });
 
   it("applies a changed rule only to future and current stages", () => {

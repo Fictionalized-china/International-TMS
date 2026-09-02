@@ -36,7 +36,7 @@ describe("workflow field building blocks", () => {
     }
   });
 
-  it("inherits accepted quote data and keeps only the consignment letter as the order-creation gate", () => {
+  it("shows the order-creation baseline but keeps only the consignment letter as its gate", () => {
     const orderCreationFields = workflowFieldCatalog.filter(
       (field) => field.stepKey === "order_creation",
     );
@@ -46,15 +46,17 @@ describe("workflow field building blocks", () => {
         .map((field) => field.fieldKey),
     ).toEqual(["document_consignment_letter"]);
     expect(
-      orderCreationFields.filter((field) => field.defaultMode !== "hidden"),
-    ).toMatchObject([
-      {
-        fieldKey: "document_consignment_letter",
-        moduleCode: "consignment",
-        fieldType: "attachment",
-        defaultMode: "required",
-      },
-    ]);
+      orderCreationFields.find((field) => field.fieldKey === "customer_id"),
+    ).toMatchObject({ defaultMode: "optional" });
+    expect(
+      orderCreationFields.find((field) => field.fieldKey === "cargo_name_cn"),
+    ).toMatchObject({ defaultMode: "optional" });
+    expect(
+      orderCreationFields.find((field) => field.fieldKey === "document_consignment_letter"),
+    ).toMatchObject({ defaultMode: "required" });
+    expect(
+      orderCreationFields.find((field) => field.fieldKey === "pre_receivable_expenses"),
+    ).toMatchObject({ defaultMode: "hidden" });
   });
 
   it("maps required, optional and hidden without ambiguous states", () => {

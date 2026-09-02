@@ -85,7 +85,11 @@ const field = (
   defaultMode: stepKey === "quotation"
     ? defaultMode
     : stepKey === "order_creation"
-    ? fieldKey === "document_consignment_letter" ? "required" : "hidden"
+    ? fieldKey === "document_consignment_letter"
+      ? "required"
+      : ["document_contract", "pre_receivable_expenses"].includes(fieldKey)
+        ? "hidden"
+        : "optional"
     : legacyRequiredWorkflowFieldKeys.has(fieldKey)
       ? "required"
       : defaultMode === "hidden"
