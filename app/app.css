@@ -18985,21 +18985,139 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .linear-order-page .linear-module-tabs a.active .tab-required-star {
   color: #ffb7b7;
 }
-.linear-order-page .linear-module-tabs a.requires-action,
-.linear-order-page .linear-module-tabs a.requires-action.active {
-  color: #fff;
-  border-color: #bd3618;
-  background: #d74420;
+.customs-process-guide {
+  display: grid;
+  gap: 8px;
+  padding: 9px 10px 10px;
+  border: 1px solid #d9e4f1;
+  border-left: 3px solid #e59a18;
+  border-radius: 3px;
+  background: #fbfcfe;
+}
+.customs-process-guide > header {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.customs-process-guide > header > span {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  color: #865300;
+  border: 1px solid #edc570;
+  border-radius: 3px;
+  background: #fff7df;
+  font-size: 9px;
   font-weight: 800;
 }
-.linear-order-page .linear-module-tabs a.requires-action:hover {
-  color: #fff;
-  border-color: #9f2d14;
-  background: #bd3618;
+.customs-process-guide > header > div,
+.customs-process-guide > header strong,
+.customs-process-guide > header small,
+.customs-process-guide li span,
+.customs-process-guide li strong,
+.customs-process-guide li small {
+  display: block;
 }
-.linear-order-page .linear-module-tabs a.requires-action:focus-visible {
-  outline: 2px solid #d74420;
-  outline-offset: 2px;
+.customs-process-guide > header strong {
+  color: #173654;
+  font-size: 12px;
+}
+.customs-process-guide > header small {
+  margin-top: 2px;
+  color: #65788d;
+  font-size: 9px;
+}
+.customs-process-guide ol {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 15px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.customs-process-guide li {
+  position: relative;
+  min-width: 0;
+  min-height: 46px;
+  padding: 7px 8px;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 7px;
+  align-items: center;
+  border: 1px solid #d9e2ec;
+  border-radius: 3px;
+  background: #fff;
+}
+.customs-process-guide li:not(:last-child)::after {
+  content: "→";
+  position: absolute;
+  top: 50%;
+  right: -13px;
+  z-index: 1;
+  color: #9babbc;
+  font-size: 12px;
+  font-weight: 800;
+  transform: translateY(-50%);
+}
+.customs-process-guide li > b {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  color: #718296;
+  border: 1px solid #bdc9d6;
+  border-radius: 50%;
+  background: #f7f9fb;
+  font-size: 9px;
+}
+.customs-process-guide li strong {
+  color: #344a61;
+  font-size: 10px;
+}
+.customs-process-guide li small {
+  margin-top: 2px;
+  overflow: hidden;
+  color: #7c8b9b;
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.customs-process-guide li.done {
+  border-color: #b8dfd0;
+  background: #f2fbf7;
+}
+.customs-process-guide li.done > b {
+  color: #fff;
+  border-color: #17966a;
+  background: #17966a;
+}
+.customs-process-guide li.current {
+  border-color: #e5a32d;
+  background: #fff9e9;
+  box-shadow: inset 3px 0 0 #e59a18;
+}
+.customs-process-guide li.current > b {
+  color: #fff;
+  border-color: #d9870b;
+  background: #d9870b;
+}
+.customs-process-guide li.current strong {
+  color: #754800;
+}
+.customs-process-guide.is-tracking {
+  border-left-color: #17966a;
+}
+.customs-process-guide.is-tracking > header > span {
+  color: #0b6c4b;
+  border-color: #a9d9c8;
+  background: #eefaf5;
+}
+@media (max-width: 960px) {
+  .customs-process-guide ol {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .customs-process-guide li::after {
+    display: none;
+  }
 }
 .linear-order-page .linear-module-embedded {
   min-width: 0;

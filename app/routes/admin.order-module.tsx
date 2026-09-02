@@ -56,6 +56,7 @@ import {
   overseasOperationProgress,
   overseasOperationStatusLabels,
 } from "../lib/overseas-warehouse";
+import { customsProcessGuideState, type CustomsProcessPhase } from "../lib/customs-process-guide";
 import {
   automaticallyNotifyOverseasArrival,
   completeOverseasOrderDelivery,
@@ -3950,18 +3951,21 @@ export default function OrderModulePage({
           {loaderData.workflowStageAccess.available || canApproveConsignment ? (
             <>
               {definition.code !== "loading" && definition.code !== "overseas_warehouse" && (
-                <ModuleSourceDocuments
-                  code={definition.code}
-                  data={loaderData}
-                  manage={manage}
-                  canApproveConsignment={canApproveConsignment}
-                  busy={busy}
-                  reviewCloseSignal={
-                    actionData && "documentReviewSignal" in actionData
-                      ? actionData.documentReviewSignal
-                      : undefined
-                  }
-                />
+                <>
+                  {definition.code === "customs" && <CustomsProcessGuide data={loaderData} />}
+                  <ModuleSourceDocuments
+                    code={definition.code}
+                    data={loaderData}
+                    manage={manage}
+                    canApproveConsignment={canApproveConsignment}
+                    busy={busy}
+                    reviewCloseSignal={
+                      actionData && "documentReviewSignal" in actionData
+                        ? actionData.documentReviewSignal
+                        : undefined
+                    }
+                  />
+                </>
               )}
               <ModuleBusinessData
                 code={definition.code}
@@ -4062,14 +4066,17 @@ export function EmbeddedOrderModule({
           (definition.code !== "consignment" ||
             !hideConsignmentActionBar ||
             consignmentSection === "files") && (
-          <ModuleSourceDocuments
-            code={definition.code}
-            data={scopedData}
-            manage={manage}
-            canApproveConsignment={canApproveConsignment}
-            busy={busy}
-            reviewCloseSignal={reviewCloseSignal}
-          />
+          <>
+            {definition.code === "customs" && <CustomsProcessGuide data={scopedData} />}
+            <ModuleSourceDocuments
+              code={definition.code}
+              data={scopedData}
+              manage={manage}
+              canApproveConsignment={canApproveConsignment}
+              busy={busy}
+              reviewCloseSignal={reviewCloseSignal}
+            />
+          </>
         )}
         {compactApproval ? (
           <OrderApprovalReview
@@ -4392,6 +4399,103 @@ function WorkflowInfo({
       className={[className, "workflow-info-cell", state].filter(Boolean).join(" ")}
       state={state}
     />
+  );
+}
+
+function CustomsProcessGuide({ data }: { data: Route.ComponentProps["loaderData"] }) {
+  const requiredDocuments = orderDocumentsForModule("customs")
+    .map((placement) => ({
+      ...placement,
+      policy: workflowFieldPolicy(
+        data.workflowFields,
+        placement.fieldKey,
+        placement.requiredByDefault,
+      ),
+    }))
+    .filter((placement) => placement.policy.visible && placement.policy.required);
+  const readyDocumentCodes = data.attachments
+    .filter((attachment) => ["approved", "archived"].includes(attachment.review_status || ""))
+    .map((attachment) => attachment.document_category)
+    .filter((code): code is string => Boolean(code));
+  const guide = customsProcessGuideState({
+    requiredDocumentCodes: requiredDocuments.map((item) => item.documentCode),
+    readyDocumentCodes,
+    declarations: data.customsDeclarations.map((item) => ({
+      clearanceStage: item.clearance_stage,
+      status: item.status,
+      isDeleted: item.is_deleted === 1,
+    })),
+  });
+  const readyRequiredDocumentCount = requiredDocuments.filter((item) =>
+    readyDocumentCodes.includes(item.documentCode),
+  ).length;
+  const currentCopy: Record<CustomsProcessPhase, { title: string; hint: string }> = {
+    documents: {
+      title: "先补齐并审核必需文件",
+      hint: "在下方“本节点文件”中上传缺失资料，审核通过后再办理申报。",
+    },
+    declaration: {
+      title: "现在新增起运地报关单",
+      hint: "点击下方“新增报关单”，填写申报信息并保存。",
+    },
+    release: {
+      title: "等待结果并确认海关放行",
+      hint: "收到海关或报关代理的放行结果后，在报关单操作区确认放行。",
+    },
+    tracking: {
+      title: "报关已完成，可以进入运输跟踪",
+      hint: "起运地放行门禁已经通过，后续运输节点可以继续登记。",
+    },
+  };
+  const stepState = (phase: CustomsProcessPhase, complete: boolean) =>
+    complete ? "done" : guide.currentPhase === phase ? "current" : "upcoming";
+  const steps: Array<{ phase: CustomsProcessPhase; label: string; detail: string; complete: boolean }> = [
+    {
+      phase: "documents",
+      label: "核对必需文件",
+      detail: requiredDocuments.length
+        ? `${readyRequiredDocumentCount}/${requiredDocuments.length} 项已通过审核`
+        : "当前没有必需文件",
+      complete: guide.documentsReady,
+    },
+    {
+      phase: "declaration",
+      label: "新增报关单",
+      detail: guide.declarationReady ? `${guide.activeDeclarationCount} 张有效起运地报关单` : "尚未录入有效报关单",
+      complete: guide.declarationReady,
+    },
+    {
+      phase: "release",
+      label: "确认海关放行",
+      detail: guide.releaseReady ? `${guide.releasedDeclarationCount} 张已放行` : guide.declarationReady ? "当前等待确认放行" : "完成申报后开放",
+      complete: guide.releaseReady,
+    },
+    {
+      phase: "tracking",
+      label: "进入运输跟踪",
+      detail: guide.releaseReady ? "报关门禁已通过" : "海关放行后开放",
+      complete: false,
+    },
+  ];
+  return (
+    <section className={`customs-process-guide is-${guide.currentPhase}`} aria-label="报关作业办理顺序">
+      <header>
+        <span>当前应办理</span>
+        <div>
+          <strong>{currentCopy[guide.currentPhase].title}</strong>
+          <small>{currentCopy[guide.currentPhase].hint}</small>
+        </div>
+      </header>
+      <ol>
+        {steps.map((step, index) => {
+          const state = stepState(step.phase, step.complete);
+          return <li key={step.phase} className={state} aria-current={state === "current" ? "step" : undefined}>
+            <b aria-hidden="true">{state === "done" ? "✓" : index + 1}</b>
+            <span><strong>{step.label}</strong><small>{step.detail}</small></span>
+          </li>;
+        })}
+      </ol>
+    </section>
   );
 }
 

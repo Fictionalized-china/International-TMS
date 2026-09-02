@@ -1159,12 +1159,11 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, 
         const label = row.module_name || row.module_code || "业务分区";
         return <Link
           key={row.module_state_id || row.module_code}
-          className={[isActive ? "active" : "", attention === "action" ? "requires-action" : ""].filter(Boolean).join(" ")}
+          className={isActive ? "active" : ""}
           to={`?stage=${encodeURIComponent(selectedStep.step_key)}&module=${encodeURIComponent(row.module_code || "")}`}
-          title={attention === "action" ? `${label}待办理` : undefined}
-          aria-label={attention === "action" ? `${label}，待办理` : undefined}
         >
           {label}
+          {attention === "action" && <b className="tab-required-star" title="报关作业待办理" aria-label="报关作业待办理">*</b>}
           {attention === "required" && <b className="tab-required-star" title="存在必填但未填内容" aria-label="存在必填但未填内容">*</b>}
         </Link>;
       })}</nav>
