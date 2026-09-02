@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  customerFacingOrderStatusLabel,
   nextOverseasAction,
   overseasOperationProgress,
 } from "./overseas-warehouse";
@@ -19,5 +20,23 @@ describe("overseas warehouse flow", () => {
     expect(overseasOperationProgress.notified).toBe(60);
     expect(overseasOperationProgress.appointment).toBe(75);
     expect(overseasOperationProgress.picked_up).toBe(100);
+  });
+
+  it("shows the customer-facing warehouse status after arrival", () => {
+    expect(customerFacingOrderStatusLabel("in_execution", "arrived")).toBe(
+      "已到仓待自提",
+    );
+    expect(customerFacingOrderStatusLabel("in_execution", "notified")).toBe(
+      "已到仓待自提",
+    );
+    expect(customerFacingOrderStatusLabel("in_execution", "appointment")).toBe(
+      "已到仓待自提",
+    );
+    expect(customerFacingOrderStatusLabel("in_execution", "picked_up")).toBe(
+      "已自提签收",
+    );
+    expect(customerFacingOrderStatusLabel("in_execution", null)).toBe(
+      "运输执行中",
+    );
   });
 });

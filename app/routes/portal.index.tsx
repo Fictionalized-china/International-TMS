@@ -6,6 +6,7 @@ import { PortalPickupAppointment } from "../components/PortalPickupAppointment";
 import type { OrderMarkLabel } from "../lib/order-mark-label.server";
 import { requirePortalCustomer } from "../lib/portal.server";
 import { normalizePortalNotificationLink } from "../lib/portal-notification-links";
+import { customerFacingOrderStatusLabel } from "../lib/overseas-warehouse";
 
 type Contact = { id: string; name: string; title: string | null; email: string | null; phone: string | null; is_primary: number };
 type Address = { id: string; label: string; country_code: string; city: string; address_line1: string; is_default: number };
@@ -142,7 +143,7 @@ export default function PortalIndex({ loaderData }: Route.ComponentProps) {
           <td><span className="cell-main">{order.cargo_description || "货物待补充"}</span></td>
           <td>{order.origin_city} → {order.destination_city}</td>
           <td>{order.current_step_name || "待同步"}</td>
-          <td><span className={`status ${statusTone(order.status, order.exception_status)}`}>{statusLabel(order.status)}</span></td>
+          <td><span className={`status ${statusTone(order.status, order.exception_status)}`}>{customerFacingOrderStatusLabel(order.status, order.overseas_operation_status)}</span></td>
           <td><div className="portal-order-actions"><PortalPickupAppointment order={order} returnTo="/portal"/><Link className="btn small" to={`/portal/tracking?order=${encodeURIComponent(order.order_number)}`}>查看轨迹</Link>{markLabelAvailable(order) && <OrderMarkLabelModal order={order} />}</div></td>
         </tr>)}
         {!loaderData.pendingQuotes.length && !loaderData.recentOrders.length && <tr><td className="empty" colSpan={7}>暂无待确认报价或订单。</td></tr>}
@@ -165,9 +166,6 @@ export default function PortalIndex({ loaderData }: Route.ComponentProps) {
   </div>;
 }
 
-function statusLabel(status: string) {
-  return ({ draft: "待补充委托资料", submitted: "待审核", confirmed: "已审核，待派单", in_execution: "运输执行中", completed: "已完成", cancelled: "已取消" } as Record<string, string>)[status] || status;
-}
 function statusTone(status: string, exceptionStatus: string | null) {
   if (status === "completed") return "green";
   if ((exceptionStatus && exceptionStatus !== "normal") || status === "cancelled") return "red";

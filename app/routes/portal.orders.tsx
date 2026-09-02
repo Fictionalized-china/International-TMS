@@ -5,6 +5,7 @@ import { OrderMarkLabelModal } from "../components/OrderMarkLabelModal";
 import { PortalPickupAppointment } from "../components/PortalPickupAppointment";
 import type { OrderMarkLabel } from "../lib/order-mark-label.server";
 import { requirePortalCustomer } from "../lib/portal.server";
+import { customerFacingOrderStatusLabel } from "../lib/overseas-warehouse";
 
 type PortalOrder = OrderMarkLabel & {
   quote_number: string | null;
@@ -88,7 +89,7 @@ export default function PortalOrders({ loaderData }: Route.ComponentProps) {
             <td><b>{order.cargo_description}</b><small className="subline">{order.pieces} 件 · {order.gross_weight_kg} KG · {order.volume_cbm} CBM</small></td>
             <td><b>{order.origin_state || ""}{order.origin_city} → {order.destination_state || ""}{order.destination_city}</b><small className="subline">{order.overseas_warehouse_name || "目的仓待补"}</small></td>
             <td>{order.current_step_name || "待同步"}</td>
-            <td><span className={`status ${statusTone(order.status, order.exception_status)}`}>{statusLabel(order.status)}</span></td>
+            <td><span className={`status ${statusTone(order.status, order.exception_status)}`}>{customerFacingOrderStatusLabel(order.status, order.overseas_operation_status)}</span></td>
             <td><div className="portal-order-actions"><PortalPickupAppointment order={order} returnTo="/portal/orders"/><Link className="btn small" to={`/portal/tracking?order=${encodeURIComponent(order.order_number)}`}>查看轨迹</Link>{markLabelAvailable(order) && <OrderMarkLabelModal order={order} />}</div></td>
           </tr>)}
           {!loaderData.orders.length && <tr><td className="empty" colSpan={7}>暂无订单；接受有效报价后系统会自动创建。</td></tr>}
@@ -107,7 +108,6 @@ const statusOptions = [
   { value: "cancelled", label: "已取消" },
 ];
 
-function statusLabel(status: string) { return statusOptions.find((option) => option.value === status)?.label || status; }
 function statusTone(status: string, exceptionStatus: string | null) {
   if (status === "completed") return "green";
   if (exceptionStatus && exceptionStatus !== "normal") return "red";

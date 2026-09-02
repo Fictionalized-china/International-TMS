@@ -3,6 +3,7 @@ import { chunkD1Values, d1Placeholders } from "./d1-bindings";
 import type { OrderModuleCode } from "./order-modules";
 import { domesticTransportPayableWorkflowValues } from "./transport-workflow";
 import { orderDocumentPlacements } from "./order-documents";
+import { isActualExitTrackingMilestone } from "./batch-tracking.shared";
 import {
   quotationNativeFieldKeySet,
   quotationNativeFieldPresent,
@@ -1084,7 +1085,9 @@ async function resolveFieldPresence(
     ).bind(organizationId, orderId).all<Record<string, unknown>>();
     const first = milestones.results[0];
     const latest = milestones.results[milestones.results.length - 1];
-    const exit = milestones.results.find((row) => ["exit", "departed", "actual_departure"].includes(String(row.milestone_code)));
+    const exit = milestones.results.find((row) =>
+      isActualExitTrackingMilestone(row.milestone_code),
+    );
     setPresence(result, "actual_departure_at", first?.event_at);
     setPresence(result, "actual_exit_at", exit?.event_at);
     setPresence(result, "tracking_milestone", latest?.milestone_code);

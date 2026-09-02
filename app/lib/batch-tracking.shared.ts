@@ -25,6 +25,16 @@ export const BATCH_TRACKING_MAIN_CODES = [
 
 export const BATCH_TRACKING_OPTIONAL_CODES = ["transloaded", "transit_customs"];
 
+export const ACTUAL_EXIT_TRACKING_MILESTONE_CODES = new Set([
+  "exported",
+  "exit",
+  "actual_exit",
+]);
+
+export function isActualExitTrackingMilestone(code: unknown) {
+  return ACTUAL_EXIT_TRACKING_MILESTONE_CODES.has(String(code ?? ""));
+}
+
 export const BATCH_TRACKING_REQUIRED_PREVIOUS: Record<string, string[]> = {
   exported: ["border_arrived"],
   transloaded: ["exported"],
