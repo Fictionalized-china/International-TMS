@@ -59,18 +59,20 @@ type Charge = {
 export async function loader({ request }: Route.LoaderArgs) {
   const { user, customer } = await requirePortalCustomer(request);
   const url = new URL(request.url);
-  const lifecycle = url.searchParams.get("status") || "";
+  const requestedLifecycle = url.searchParams.get("status");
+  const lifecycle = requestedLifecycle === null ? "pending" : requestedLifecycle;
   const quotationId = url.searchParams.get("quote")?.trim() || "";
   const params: unknown[] = [user.organizationId, customer.id];
   let where = "q.organization_id=? AND q.customer_id=?";
-  if (quotationId) {
-    where += " AND q.id=?";
-    params.push(quotationId);
-  }
   if (["pending", "accepted", "withdrawn", "void"].includes(lifecycle)) {
     where += " AND q.lifecycle_status=?";
     params.push(lifecycle);
   }
+  const orderParams: unknown[] = [];
+  const orderBy = quotationId
+    ? "CASE WHEN q.id=? THEN 0 ELSE 1 END,q.created_at DESC"
+    : "q.created_at DESC";
+  if (quotationId) orderParams.push(quotationId);
   const [quoteRows, chargeRows] = await Promise.all([
     env.DB.prepare(
       `SELECT q.id,q.quote_number,q.workflow_definition_id,q.origin_country,q.origin_state,q.origin_city,q.pickup_address,
@@ -83,8 +85,8 @@ export async function loader({ request }: Route.LoaderArgs) {
        LEFT JOIN warehouses w ON w.id=q.destination_warehouse_id AND w.organization_id=q.organization_id
        LEFT JOIN transport_orders o ON o.organization_id=q.organization_id AND o.quotation_id=q.id
        WHERE ${where}
-       ORDER BY q.created_at DESC`,
-    ).bind(...params).all<Quote>(),
+       ORDER BY ${orderBy}`,
+    ).bind(...params, ...orderParams).all<Quote>(),
     env.DB.prepare(
       `SELECT qc.quotation_id,qc.description,qc.quantity,qc.unit_price,qc.amount,qc.sort_order
        FROM quotation_charges qc
@@ -163,8 +165,8 @@ export default function PortalQuotes({ loaderData, actionData }: Route.Component
       )}
       {loaderData.quotationId && !actionData?.success && (
         <div className="alert portal-quote-focus-notice" role="status">
-          <span>已从首页打开指定报价，请核对运输条件与费用后确认。</span>
-          <Link className="btn small" to="/portal/quotes">返回全部报价</Link>
+          <span>已定位从首页选择的报价；本页同时显示当前客户的全部待确认报价。</span>
+          <Link className="btn small" to="/portal/quotes?status=pending">取消定位</Link>
         </div>
       )}
       <Form method="get" action="." className="filters quotation-filters">

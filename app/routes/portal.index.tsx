@@ -166,7 +166,7 @@ function markLabelAvailable(order: RecentOrder) {
 }
 
 export function quotationDetailLink(quotationId: string) {
-  return `/portal/quotes?quote=${encodeURIComponent(quotationId)}`;
+  return `/portal/quotes?status=pending&quote=${encodeURIComponent(quotationId)}`;
 }
 
 export function meta() { return [{ title: "客户门户 | 新翎航 TMS" }]; }

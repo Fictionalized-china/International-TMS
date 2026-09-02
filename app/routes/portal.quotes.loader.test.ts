@@ -12,7 +12,10 @@ const d1 = vi.hoisted(() => {
             return {
               all: async () => ({
                 results: sql.includes("FROM quotations q")
-                  ? [{ id: "quote-1", quote_number: "QT-001", lifecycle_status: "pending" }]
+                  ? [
+                    { id: "quote-1", quote_number: "QT-001", lifecycle_status: "pending" },
+                    { id: "quote-2", quote_number: "QT-002", lifecycle_status: "pending" },
+                  ]
                   : [],
               }),
             };
@@ -38,7 +41,7 @@ vi.mock("../lib/quotation-workflow-fields.server", () => ({
 import { loader } from "./portal.quotes";
 
 describe("portal quotation direct view", () => {
-  it("scopes the requested quotation to the signed-in customer", async () => {
+  it("keeps the selected quotation as focus while listing every pending quotation", async () => {
     const result = await loader({
       request: new Request("http://local.test/portal/quotes?quote=quote-1"),
       params: {},
@@ -46,10 +49,14 @@ describe("portal quotation direct view", () => {
     } as never);
 
     expect(result.quotationId).toBe("quote-1");
+    expect(result.lifecycle).toBe("pending");
     expect(result.quotes).toEqual([
       expect.objectContaining({ id: "quote-1", lifecycle_status: "pending" }),
+      expect.objectContaining({ id: "quote-2", lifecycle_status: "pending" }),
     ]);
-    expect(d1.calls[0].sql).toContain("q.organization_id=? AND q.customer_id=? AND q.id=?");
-    expect(d1.calls[0].binds).toEqual(["org-1", "customer-1", "quote-1"]);
+    expect(d1.calls[0].sql).toContain("q.organization_id=? AND q.customer_id=? AND q.lifecycle_status=?");
+    expect(d1.calls[0].sql).not.toContain("AND q.id=?");
+    expect(d1.calls[0].sql).toContain("ORDER BY CASE WHEN q.id=? THEN 0 ELSE 1 END");
+    expect(d1.calls[0].binds).toEqual(["org-1", "customer-1", "pending", "quote-1"]);
   });
 });
