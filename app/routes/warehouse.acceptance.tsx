@@ -2,6 +2,11 @@ import { env } from "cloudflare:workers";
 import { Form, Link, redirect, useNavigation } from "react-router";
 import { useEffect, useState, type ReactElement } from "react";
 import type { Route } from "./+types/warehouse.acceptance";
+import {
+  WarehouseReceiptResultSelector,
+  WarehouseReceivingOrderStrip,
+  WarehouseReceivingScanPanel,
+} from "../components/WarehouseReceivingFlow";
 import { requireSessionUser } from "../lib/auth.server";
 import { valueOf } from "../lib/validation";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
@@ -665,24 +670,24 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
     <header className="page-header acceptance-header"><div><p className="eyebrow">ACCEPTANCE RECEIVING</p><h1>验收收货</h1><p>扫描订单号，逐条核对预录与实收数据，选择库位入库后打印每个实际包装的仓库标签。</p></div>{labels.length > 0 && <button type="button" className="primary no-print" onClick={() => window.print()}>打印本次 {labels.length} 张标签</button>}</header>
     {(loaderData.resultMessage || actionData?.formError) && <div className={`alert ${actionData?.formError ? "error" : "success"}`}>{actionData?.formError ?? loaderData.resultMessage}</div>}
     {!loaderData.locations.length && <div className="alert error">当前仓库没有可用库位，请先<Link to={`/warehouse/locations?warehouseId=${loaderData.warehouse.id}`}>配置仓库与库位</Link>。</div>}
-    <section className="panel acceptance-scan-panel no-print">
-      <Form method="get" action="." className="acceptance-scan-form">
-        <input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/>
-        <label className="field scan-field"><span>扫描订单号</span><input name="reference" data-keyboard-search defaultValue={loaderData.reference} autoFocus autoComplete="off" placeholder="扫描订单号条码后回车"/></label>
-        <button className="primary">调出验收信息</button>
-        <small>扫描枪输入订单号并发送回车后，系统自动读取客户、货物、运输和累计收货信息。</small>
-      </Form>
-    </section>
+    <WarehouseReceivingScanPanel
+      warehouseId={loaderData.warehouse.id}
+      reference={loaderData.reference}
+      inputLabel="扫描订单号"
+      placeholder="扫描订单号条码后回车"
+      submitLabel="调出验收信息"
+      hint="扫描枪输入订单号并发送回车后，系统自动读取客户、货物、运输和累计收货信息。"
+    />
     {loaderData.lookupError && <div className="alert error no-print">{loaderData.lookupError}</div>}
     {loaderData.order && loaderData.cargoItems.length > 0 && <Form method="post" className="acceptance-workbench no-print">
       <input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/><input type="hidden" name="orderId" value={loaderData.order.id}/><input type="hidden" name="reference" value={loaderData.order.order_number}/>
-      <section className="panel acceptance-order-strip">
-        <span><small>订单 / 类型</small><strong>{loaderData.order.order_number} · {loaderData.order.business_type === "ftl" ? "整车" : "拼车"}</strong></span>
-        <span><small>客户</small><strong>[{loaderData.order.customer_identity_code}] {loaderData.order.customer_name}</strong></span>
-        <span><small>发货联系人</small><strong>{loaderData.order.shipper_contact || "未填写"} · {loaderData.order.shipper_phone || "未填写"}</strong></span>
-        <span><small>国内运输</small><strong>{loaderData.order.carrier_name || "承运商未填写"}</strong><em>{loaderData.order.vehicle_summary || "车辆与司机未填写"}</em></span>
-        <span><small>提货地</small><strong>{loaderData.order.origin_city} · {loaderData.order.origin_address}</strong></span>
-      </section>
+      <WarehouseReceivingOrderStrip facts={[
+        { label: "订单 / 类型", value: `${loaderData.order.order_number} · ${loaderData.order.business_type === "ftl" ? "整车" : "拼车"}` },
+        { label: "客户", value: `[${loaderData.order.customer_identity_code}] ${loaderData.order.customer_name}` },
+        { label: "发货联系人", value: `${loaderData.order.shipper_contact || "未填写"} · ${loaderData.order.shipper_phone || "未填写"}` },
+        { label: "国内运输", value: loaderData.order.carrier_name || "承运商未填写", detail: loaderData.order.vehicle_summary || "车辆与司机未填写" },
+        { label: "提货地", value: `${loaderData.order.origin_city} · ${loaderData.order.origin_address}` },
+      ]}/>
       <section className="panel acceptance-cargo-panel">
         <div className="panel-header"><div><h2>预录货物与本次实收</h2><p>每条货物按本次实际到仓填写；未在本批到仓的货物全部填 0。长宽高用于生成实物库存与标签，固定为系统必填。</p></div><span className="status-pill">{loaderData.cargoItems.length} 条货物</span></div>
         {!policies.actualPackages.isActive && <div className="alert info">实收包装数已在当前订单工作流中隐藏；系统将按每条货物的“计划包装数 − 当前仓累计实收包装数”推导本次包装数，最低为 0。</div>}
@@ -713,8 +718,16 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
       </section>
       <section className="panel acceptance-confirm-panel">
         {policies.location.isActive ? <label className="field"><span>入库库位{acceptanceRequiredMarker(policies.location)}</span><select name="locationId" required={policies.location.isRequired}><option value="">{policies.location.isRequired ? "请选择库位" : "未选则使用首个启用库位"}</option>{loaderData.locations.map((item) => <option key={item.id} value={item.id}>{item.warehouse_name} / {item.zone_name} / {item.name}（{item.code}）</option>)}</select></label> : <div className="alert info">入库库位已在当前工作流中隐藏，系统将使用当前仓库首个启用库位。</div>}
-        {policies.cargoComplete.isActive ? <fieldset className="acceptance-result"><legend>本次验收结果{acceptanceRequiredMarker(policies.cargoComplete)}</legend><label><input type="radio" name="receiptResult" value="partial" checked={receiptResult === "partial"} required={policies.cargoComplete.isRequired} onChange={() => setReceiptResult("partial")}/><span><b>分批正常入库</b><small>本批货物无异常，订单尚未全部到齐</small></span></label><label><input type="radio" name="receiptResult" value="ready" checked={receiptResult === "ready"} required={policies.cargoComplete.isRequired} onChange={() => setReceiptResult("ready")}/><span><b>订单货齐</b><small>本次入库后，订单全部货物已经到齐</small></span></label><label><input type="radio" name="receiptResult" value="exception" checked={receiptResult === "exception"} required={policies.cargoComplete.isRequired} onChange={() => setReceiptResult("exception")}/><span><b>异常入库</b><small>允许入库但冻结后续装车和配载</small></span></label></fieldset> : <div className="alert info">货齐选择已在当前工作流中隐藏：系统依据累计包装数和已填的实收数据自动判定分批、货齐或异常。</div>}
-        {policies.cargoComplete.isActive && receiptResult === "exception" && <label className="field span-2"><span>异常说明 *</span><textarea name="exceptionNotes" rows={3} required placeholder="填写短少、破损、错货、超差等具体情况"/></label>}
+        {policies.cargoComplete.isActive ? <WarehouseReceiptResultSelector
+          value={receiptResult}
+          onChange={(value) => value && setReceiptResult(value)}
+          showPartial
+          readyLabel="订单货齐"
+          readyHint="本次入库后，订单全部货物已经到齐"
+          required={policies.cargoComplete.isRequired}
+          exceptionHint="允许入库但冻结后续装车和配载"
+          exceptionFooter="填写短少、破损、错货、超差等具体情况"
+        /> : <div className="alert info">货齐选择已在当前工作流中隐藏：系统依据累计包装数和已填的实收数据自动判定分批、货齐或异常。</div>}
         {policies.evidence.isActive && <label className="field span-2"><span>收货凭证{acceptanceRequiredMarker(policies.evidence)}</span><textarea name="evidenceNote" rows={2} required={policies.evidence.isRequired} placeholder="照片、单证或现场凭证的索引/说明"/></label>}
         {policies.notes.isActive && <label className="field span-2"><span>收货备注{acceptanceRequiredMarker(policies.notes)}</span><textarea name="notes" rows={2} required={policies.notes.isRequired} placeholder="本次到货车辆、现场情况等"/></label>}
         <button className="primary acceptance-submit" disabled={busy || !canOperate || !loaderData.locations.length}>{busy ? "正在验收入库…" : "确认验收、入库并生成标签"}</button>

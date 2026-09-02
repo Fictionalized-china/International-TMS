@@ -1,8 +1,12 @@
 import { env } from "cloudflare:workers";
 import { Form, Link, redirect, useNavigation } from "react-router";
-import { useEffect, useState, type ReactElement } from "react";
+import { useEffect, useState } from "react";
 import type { Route } from "./+types/warehouse.inbound";
-import { Modal } from "../components/Modal";
+import {
+  WarehouseReceiptResultSelector,
+  WarehouseReceivingOrderStrip,
+  WarehouseReceivingScanPanel,
+} from "../components/WarehouseReceivingFlow";
 import { requireSessionUser } from "../lib/auth.server";
 import { valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
@@ -17,6 +21,10 @@ import { syncOrderWorkflowSnapshot } from "../lib/order-modules.server";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
 import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
 import { confirmOverseasBatchArrival } from "../lib/overseas-warehouse.server";
+import {
+  acceptanceRequiredMarker,
+  resolveWarehouseAcceptancePolicies,
+} from "../lib/warehouse-acceptance-policy";
 
 type Shipment = {
   id: string;
@@ -70,39 +78,6 @@ type Location = {
   warehouse_name: string;
   warehouse_role: string;
 };
-type Receipt = {
-  id: string;
-  receipt_number: string;
-  shipment_number: string;
-  order_number: string;
-  customer_name: string;
-  customer_identity_code: string;
-  warehouse_name: string;
-  zone_name: string;
-  location_name: string;
-  total_pieces: number;
-  total_weight_kg: number;
-  total_volume_cbm: number;
-  package_type: string | null;
-  max_difference_percent: number | null;
-  difference_status: string | null;
-  received_at: string;
-  operator_name: string | null;
-};
-type Package = {
-  id: string;
-  barcode: string;
-  package_number: string;
-  shipment_number: string;
-  order_number: string;
-  customer_name: string;
-  customer_identity_code: string;
-  location_name: string;
-  pieces: number;
-  weight_kg: number | null;
-  volume_cbm: number | null;
-  created_at: string;
-};
 type ResolvedShipment = {
   id: string;
   status: string;
@@ -133,7 +108,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const orderId = url.searchParams.get("orderId");
   const returnTo = url.searchParams.get("returnTo") || "";
   const reference = (url.searchParams.get("reference") || "").trim();
-  const [shipments, locations, receipts, packages] = await Promise.all([
+  const [shipments, locations] = await Promise.all([
     env.DB.prepare(
       `SELECT s.id,s.order_id,s.shipment_number,s.status,o.order_number,c.name customer_name,c.identity_code customer_identity_code,o.origin_city,o.destination_city,
               o.business_type,o.cargo_description,o.pieces,o.gross_weight_kg,o.volume_cbm,
@@ -162,16 +137,6 @@ export async function loader({ request }: Route.LoaderArgs) {
     )
       .bind(user.organizationId, warehouse.id)
       .all<Location>(),
-    env.DB.prepare(
-      `SELECT r.id,r.receipt_number,s.shipment_number,o.order_number,c.name customer_name,c.identity_code customer_identity_code,w.name warehouse_name,z.name zone_name,l.name location_name,r.total_pieces,r.total_weight_kg,r.total_volume_cbm,r.package_type,d.max_difference_percent,d.status difference_status,r.received_at,u.display_name operator_name FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id JOIN transport_orders o ON o.id=s.order_id JOIN customers c ON c.id=s.customer_id JOIN warehouses w ON w.id=r.warehouse_id JOIN warehouse_locations l ON l.id=r.location_id JOIN warehouse_zones z ON z.id=l.zone_id LEFT JOIN users u ON u.id=r.received_by_user_id LEFT JOIN warehouse_receipt_differences d ON d.receipt_id=r.id WHERE r.organization_id=? AND r.warehouse_id=? ORDER BY r.received_at DESC LIMIT 50`,
-    )
-      .bind(user.organizationId, warehouse.id)
-      .all<Receipt>(),
-    env.DB.prepare(
-      `SELECT p.id,p.barcode,p.package_number,s.shipment_number,o.order_number,c.name customer_name,c.identity_code customer_identity_code,l.name location_name,p.pieces,p.weight_kg,p.volume_cbm,p.created_at FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id JOIN transport_orders o ON o.id=s.order_id JOIN customers c ON c.id=s.customer_id JOIN warehouse_locations l ON l.id=p.location_id WHERE p.organization_id=? AND p.warehouse_id=? ORDER BY p.created_at DESC LIMIT 12`,
-    )
-      .bind(user.organizationId, warehouse.id)
-      .all<Package>(),
   ]);
   const directlyScannedPackage = reference
     ? await env.DB.prepare(
@@ -263,10 +228,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     user,
     warehouse,
     isOverseasWarehouse,
-    shipments: shipments.results,
     locations: locations.results,
-    receipts: receipts.results,
-    packages: packages.results,
     orderId,
     returnTo,
     reference,
@@ -305,7 +267,8 @@ export async function action({ request }: Route.ActionArgs) {
     hasException = receiptResult === "exception",
     exceptionNotes = valueOf(form, "exceptionNotes").trim(),
     now = new Date().toISOString();
-  const pieces = positiveInt(form, "pieces") ?? 1,
+  const submittedPieces = positiveInt(form, "pieces");
+  const pieces = submittedPieces ?? 1,
     weight = positive(form, "weight"),
     volume = truncateVolume(positive(form, "volume")),
     length = positive(form, "length"),
@@ -457,38 +420,20 @@ export async function action({ request }: Route.ActionArgs) {
     orderId,
     isOverseasWarehouse ? "overseas_warehouse" : "warehouse",
   );
-  const locationPolicy = workflowFieldPolicy(
-    workflowFields,
-    "warehouse_location",
-    "required",
-  );
+  const acceptancePolicies = resolveWarehouseAcceptancePolicies(workflowFields);
+  const locationPolicy = acceptancePolicies.location;
   const packageTypePolicy = workflowFieldPolicy(
     workflowFields,
     "actual_package_type",
     "required",
   );
-  const piecesPolicy = workflowFieldPolicy(
-    workflowFields,
-    "actual_pieces",
-    "required",
-  );
-  const weightPolicy = workflowFieldPolicy(
-    workflowFields,
-    "actual_weight_kg",
-    "required",
-  );
-  const volumePolicy = workflowFieldPolicy(
-    workflowFields,
-    "actual_volume_cbm",
-    "required",
-  );
-  const evidencePolicy = workflowFieldPolicy(
-    workflowFields,
-    "receipt_evidence",
-    "optional",
-  );
+  const piecesPolicy = acceptancePolicies.actualPieces;
+  const weightPolicy = acceptancePolicies.actualWeight;
+  const volumePolicy = acceptancePolicies.actualVolume;
+  const evidencePolicy = acceptancePolicies.evidence;
+  const notesPolicy = acceptancePolicies.notes;
   let effectiveLocationId = locationId;
-  if (!locationPolicy.isActive && !effectiveLocationId) {
+  if (!effectiveLocationId && (!locationPolicy.isActive || !locationPolicy.isRequired)) {
     const defaultLocation = await env.DB.prepare(
       `SELECT l.id FROM warehouse_locations l JOIN warehouses w ON w.id=l.warehouse_id JOIN warehouse_zones z ON z.id=l.zone_id WHERE l.organization_id=? AND l.warehouse_id=? AND l.status='active' AND w.status='active' AND z.status='active' ORDER BY z.code,l.code LIMIT 1`,
     )
@@ -521,7 +466,7 @@ export async function action({ request }: Route.ActionArgs) {
     !packageType
   )
     return { formError: "请选择实际包装类型" };
-  if (piecesPolicy.isActive && piecesPolicy.isRequired && !pieces)
+  if (piecesPolicy.isActive && piecesPolicy.isRequired && submittedPieces == null)
     return { formError: "请填写实收件数" };
   if (weightPolicy.isActive && weightPolicy.isRequired && weight == null)
     return { formError: "请填写实收重量" };
@@ -535,6 +480,8 @@ export async function action({ request }: Route.ActionArgs) {
     !evidenceNote.trim()
   )
     return { formError: "请填写收货凭证或现场凭证索引" };
+  if (notesPolicy.isActive && notesPolicy.isRequired && !notes.trim())
+    return { formError: "请填写收货备注" };
   const shipmentBootstrap: D1PreparedStatement[] = [];
   let createdShipmentNumber: string | null = null;
   if (!shipment && pendingOrder) {
@@ -1034,93 +981,39 @@ export default function WarehouseInbound({
   const [receiptResult, setReceiptResult] = useState<"" | "ready" | "exception">(
     "",
   );
-  const [scanConfirmed, setScanConfirmed] = useState(false);
   useEffect(() => {
-    setScanConfirmed(false);
     setReceiptResult("");
   }, [loaderData.reference]);
   useEffect(() => {
     if (actionData?.success) {
-      setScanConfirmed(false);
       setReceiptResult("");
     }
   }, [actionData?.success]);
-  const locationPolicy = workflowFieldPolicy(
-    loaderData.workflowFields,
-    "warehouse_location",
-    "required",
-  );
-  const barcodePolicy = workflowFieldPolicy(
-    loaderData.workflowFields,
-    "warehouse_barcode",
-    "optional",
-  );
+  const acceptancePolicies = resolveWarehouseAcceptancePolicies(loaderData.workflowFields);
+  const locationPolicy = acceptancePolicies.location;
   const packageTypePolicy = workflowFieldPolicy(
     loaderData.workflowFields,
     "actual_package_type",
     "required",
   );
-  const piecesPolicy = workflowFieldPolicy(
-    loaderData.workflowFields,
-    "actual_pieces",
-    "required",
-  );
-  const weightPolicy = workflowFieldPolicy(
-    loaderData.workflowFields,
-    "actual_weight_kg",
-    "required",
-  );
-  const volumePolicy = workflowFieldPolicy(
-    loaderData.workflowFields,
-    "actual_volume_cbm",
-    "required",
-  );
-  const evidencePolicy = workflowFieldPolicy(
-    loaderData.workflowFields,
-    "receipt_evidence",
-    "optional",
-  );
-  const notesPolicy = workflowFieldPolicy(
-    loaderData.workflowFields,
-    "warehouse_receipt_notes",
-    "optional",
-  );
-  const selectedShipment = loaderData.selectedShipment?.id ?? "";
-  if (loaderData.isOverseasWarehouse && !selectedShipment) {
-    return (
-      <>
-        <header className="page-header acceptance-header">
-          <div>
-            <p className="eyebrow">ACCEPTANCE RECEIVING</p>
-            <h1>验收收货</h1>
-            <p>扫描国内仓生成的货物标签；单件装车任务也可扫描 OUT 装车任务码，核对订单和货物信息后再收货。</p>
-          </div>
-        </header>
-        {actionData?.success && <div className="alert success">{actionData.success}</div>}
-        {!actionData?.success && loaderData.lookupError && <div className="alert error">{loaderData.lookupError}</div>}
-        <OverseasReceivingScan warehouseId={loaderData.warehouse.id} reference={actionData?.success ? "" : loaderData.reference} orderId={loaderData.orderId} returnTo={loaderData.returnTo} />
-      </>
-    );
-  }
+  const piecesPolicy = acceptancePolicies.actualPieces;
+  const weightPolicy = acceptancePolicies.actualWeight;
+  const volumePolicy = acceptancePolicies.actualVolume;
+  const evidencePolicy = acceptancePolicies.evidence;
+  const notesPolicy = acceptancePolicies.notes;
   const selectedShipmentRecord = loaderData.selectedShipment;
   const scannedPackageRecord = loaderData.scannedPackage;
+  const showReceivingWorkbench = Boolean(
+    selectedShipmentRecord && scannedPackageRecord && !actionData?.success,
+  );
   return (
     <>
-      <header className="page-header">
+      <header className="page-header acceptance-header">
         <div>
-          <p className="eyebrow">SCAN & RECEIVE</p>
+          <p className="eyebrow">ACCEPTANCE RECEIVING</p>
           <h1>验收收货</h1>
-          <p>{loaderData.isOverseasWarehouse
-            ? `当前仓库：${loaderData.warehouse.name}。逐票扫码并清点；同一运输单全部货物确认无误后，系统自动结束境外运输并通知客户。`
-            : `当前仓库：${loaderData.warehouse.name}。扫描客户标签或自动生成欧凌标签，完成收货、入库和国内运输状态同步。`}</p>
+          <p>当前仓库：{loaderData.warehouse.name}。扫描国内仓生成的原货物标签，核对实收并选择库位；同一运输单全部货物清点完成后自动结束境外运输。</p>
         </div>
-        {!loaderData.isOverseasWarehouse && <button
-          className="secondary no-print"
-          type="button"
-          onClick={() => window.print()}
-        >
-          打印最近标签
-        </button>}
       </header>
       {(actionData?.success || actionData?.formError) && (
         <div className={`alert ${actionData.formError ? "error" : "success"}`}>
@@ -1133,442 +1026,74 @@ export default function WarehouseInbound({
           <Link to={`/warehouse/locations?warehouseId=${loaderData.warehouse.id}`}>前往“仓库与库位”完成配置</Link>。
         </div>
       )}
-      {loaderData.isOverseasWarehouse && (
-        <OverseasReceivingScan
-          key={actionData?.success ? `completed:${actionData.success}` : loaderData.reference}
-          warehouseId={loaderData.warehouse.id}
-          reference={actionData?.success ? "" : loaderData.reference}
-          orderId={loaderData.orderId}
-          returnTo={loaderData.returnTo}
-        />
+      {!actionData?.success && loaderData.lookupError && <div className="alert error no-print">{loaderData.lookupError}</div>}
+      <WarehouseReceivingScanPanel
+        key={actionData?.success ? `completed:${actionData.success}` : loaderData.reference}
+        warehouseId={loaderData.warehouse.id}
+        reference={actionData?.success ? "" : loaderData.reference}
+        inputLabel="扫描货物标签 / 装车任务码"
+        placeholder="扫描国内仓货物条码、包装号或 OUT 装车任务码后回车"
+        submitLabel="调出验收信息"
+        hint="单件装车任务可扫描 OUT 任务码；多件任务逐件扫描原货物标签。系统自动核对订单、客户、运单和目的仓。"
+        hiddenFields={[
+          { name: "orderId", value: loaderData.orderId || "" },
+          { name: "returnTo", value: loaderData.returnTo },
+        ]}
+      />
+      {showReceivingWorkbench && selectedShipmentRecord && scannedPackageRecord && canOperate && (
+        <Form method="post" className="acceptance-workbench no-print">
+          <input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/>
+          <input type="hidden" name="shipmentId" value={selectedShipmentRecord.id}/>
+          <input type="hidden" name="barcode" value={scannedPackageRecord.barcode}/>
+          <WarehouseReceivingOrderStrip facts={[
+            { label: "订单 / 类型", value: `${selectedShipmentRecord.order_number} · ${selectedShipmentRecord.business_type === "ftl" ? "整车" : "拼车"}` },
+            { label: "客户", value: `[${selectedShipmentRecord.customer_identity_code}] ${selectedShipmentRecord.customer_name}` },
+            { label: "系统运单", value: selectedShipmentRecord.shipment_number },
+            { label: "发出仓库", value: scannedPackageRecord.source_warehouse_name, detail: "上一仓已出库" },
+            { label: "目的仓", value: selectedShipmentRecord.expected_warehouse_name || loaderData.warehouse.name },
+          ]}/>
+          <section className="panel acceptance-cargo-panel">
+            <div className="panel-header"><div><h2>标签货物与本次实收</h2><p>沿用国内仓原货物码；核对标签记录并填写本次实际到仓数据，不会生成重复标签。</p></div><span className="status-pill success">原标签复用</span></div>
+            <div className="table-wrap acceptance-cargo-table overseas-acceptance-cargo-table"><table><thead><tr>
+              <th>标签货物</th><th>订单预录</th><th>货物标签</th>
+              <th>实际包装类型{packageTypePolicy.isRequired ? " *" : ""}</th>
+              <th>实收件数{acceptanceRequiredMarker(piecesPolicy)}</th>
+              <th>实际重量 KG{acceptanceRequiredMarker(weightPolicy)}</th>
+              <th>实际体积 CBM{acceptanceRequiredMarker(volumePolicy)}</th>
+              <th>实际长×宽×高 CM{acceptanceRequiredMarker(acceptancePolicies.actualDimensions)}</th>
+            </tr></thead><tbody><tr>
+              <td><strong>{scannedPackageRecord.cargo_name || selectedShipmentRecord.cargo_description || "货物名称未填写"}</strong><small>{scannedPackageRecord.package_number}</small></td>
+              <td><strong>{selectedShipmentRecord.pieces} 件 · {Number(selectedShipmentRecord.gross_weight_kg || 0).toFixed(3)} KG</strong><small>{formatVolume(selectedShipmentRecord.volume_cbm)} CBM</small></td>
+              <td><strong>{scannedPackageRecord.barcode}</strong><small>上一仓已出库</small></td>
+              <td>{packageTypePolicy.isActive ? <select name="packageType" aria-label="实际包装类型" defaultValue={scannedPackageRecord.package_type ?? ""} required={packageTypePolicy.isRequired}><option value="">请选择</option><option value="carton">纸箱</option><option value="pallet">托盘</option><option value="wooden_case">木箱</option><option value="bag">袋装</option><option value="drum">桶装</option><option value="bundle">捆装</option><option value="mixed">混合包装</option><option value="other">其他</option></select> : <span className="muted">工作流已隐藏</span>}</td>
+              <td>{piecesPolicy.isActive ? <input name="pieces" aria-label="实收件数" type="number" min="1" step="1" defaultValue={scannedPackageRecord.pieces ?? 1} required={piecesPolicy.isRequired}/> : <span className="muted">工作流已隐藏</span>}</td>
+              <td>{weightPolicy.isActive ? <input name="weight" aria-label="实际重量 KG" type="number" min="0" step="0.001" defaultValue={scannedPackageRecord.weight_kg ?? ""} required={weightPolicy.isRequired}/> : <span className="muted">工作流已隐藏</span>}</td>
+              <td>{volumePolicy.isActive ? <input name="volume" aria-label="实际体积 CBM" type="number" min="0" step="0.001" defaultValue={scannedPackageRecord.volume_cbm != null ? formatVolume(scannedPackageRecord.volume_cbm) : ""} required={volumePolicy.isRequired}/> : <span className="muted">工作流已隐藏</span>}</td>
+              <td><div className="acceptance-dimensions"><input name="length" aria-label="实际长度" type="number" min="0" step="0.1" defaultValue={scannedPackageRecord.length_cm ?? ""} required/><span>×</span><input name="width" aria-label="实际宽度" type="number" min="0" step="0.1" defaultValue={scannedPackageRecord.width_cm ?? ""} required/><span>×</span><input name="height" aria-label="实际高度" type="number" min="0" step="0.1" defaultValue={scannedPackageRecord.height_cm ?? ""} required/></div></td>
+            </tr></tbody></table></div>
+          </section>
+          <section className="panel acceptance-confirm-panel">
+            {locationPolicy.isActive ? <label className="field"><span>入库库位{acceptanceRequiredMarker(locationPolicy)}</span><select name="locationId" required={locationPolicy.isRequired}><option value="">{locationPolicy.isRequired ? "请选择库位" : "未选则使用首个启用库位"}</option>{loaderData.locations.map((item) => <option key={item.id} value={item.id}>{item.warehouse_name} / {item.zone_name} / {item.name}（{item.code}）</option>)}</select></label> : <div className="alert info">入库库位已在当前工作流中隐藏，系统将使用当前仓库首个启用库位。</div>}
+            <WarehouseReceiptResultSelector
+              value={receiptResult}
+              onChange={(value) => setReceiptResult(value === "partial" ? "" : value)}
+              showPartial={false}
+              readyLabel="清点无误"
+              readyHint="本票货物已入仓；同一运输单全部订单清点后自动结束境外运输"
+              exceptionHint="数量、重量、包装或货况异常；保存本次收货但不结束运输阶段"
+              exceptionFooter="填写短少、破损、错货、超差等具体情况"
+            />
+            {evidencePolicy.isActive && <label className="field span-2"><span>收货凭证{acceptanceRequiredMarker(evidencePolicy)}</span><textarea name="evidenceNote" rows={2} required={evidencePolicy.isRequired} placeholder="照片、单证或现场凭证的索引/说明"/></label>}
+            {notesPolicy.isActive && <label className="field span-2"><span>收货备注{acceptanceRequiredMarker(notesPolicy)}</span><textarea name="notes" rows={2} required={notesPolicy.isRequired} placeholder="本次到货车辆、现场情况等"/></label>}
+            <button className="primary acceptance-submit" disabled={busy || !loaderData.locations.length}>{busy ? "正在验收入库…" : "确认验收并扫码入库"}</button>
+          </section>
+        </Form>
       )}
-      {loaderData.isOverseasWarehouse && selectedShipmentRecord && scannedPackageRecord && (
-        <Modal
-          title="核对境外目的仓到货信息"
-          openSignal={`${loaderData.reference}:${selectedShipmentRecord.id}`}
-          size="wide"
-        >
-          {({ close }) => <div className="overseas-receiving-confirmation">
-            <div className="table-wrap overseas-receiving-confirmation-table">
-              <table>
-                <thead><tr><th>核对项目</th><th>系统记录</th><th>核对项目</th><th>系统记录</th></tr></thead>
-                <tbody>
-                  <tr><td>货物标签</td><td><strong>{scannedPackageRecord.barcode}</strong><small>{scannedPackageRecord.package_number}</small></td><td>标签状态</td><td><span className="status-pill success">上一仓已出库</span></td></tr>
-                  <tr><td>订单</td><td><strong>{selectedShipmentRecord.order_number}</strong><small>{selectedShipmentRecord.business_type === "ftl" ? "整车" : "拼车"}</small></td><td>系统运单</td><td><strong>{selectedShipmentRecord.shipment_number}</strong></td></tr>
-                  <tr><td>客户</td><td><strong>[{selectedShipmentRecord.customer_identity_code}] {selectedShipmentRecord.customer_name}</strong></td><td>目的仓</td><td><strong>{selectedShipmentRecord.expected_warehouse_name || loaderData.warehouse.name}</strong></td></tr>
-                  <tr><td>标签货物</td><td><strong>{scannedPackageRecord.cargo_name || selectedShipmentRecord.cargo_description || "货物名称未填写"}</strong><small>{scannedPackageRecord.pieces} 件 · {Number(scannedPackageRecord.weight_kg || 0).toFixed(3)} KG · {formatVolume(scannedPackageRecord.volume_cbm)} CBM</small></td><td>订单预录</td><td><strong>{selectedShipmentRecord.pieces} 件 · {Number(selectedShipmentRecord.gross_weight_kg || 0).toFixed(3)} KG</strong><small>{formatVolume(selectedShipmentRecord.volume_cbm)} CBM</small></td></tr>
-                  <tr><td>发出仓库</td><td><strong>{scannedPackageRecord.source_warehouse_name}</strong></td><td>标签尺寸</td><td>{[scannedPackageRecord.length_cm,scannedPackageRecord.width_cm,scannedPackageRecord.height_cm].every((value) => value != null) ? `${scannedPackageRecord.length_cm} × ${scannedPackageRecord.width_cm} × ${scannedPackageRecord.height_cm} CM` : "未记录"}</td></tr>
-                </tbody>
-              </table>
-            </div>
-            <p className="overseas-receiving-confirmation-note">请核对货物标签、订单、客户和目的仓均与现场来货一致。确认后才能填写实收数据并入库。</p>
-            <div className="row-actions overseas-receiving-confirmation-actions">
-              <button type="button" className="secondary" onClick={close}>返回重新扫描</button>
-              <button type="button" className="primary" onClick={() => { setScanConfirmed(true); close(); }}>信息无误，开始收货</button>
-            </div>
-          </div>}
-        </Modal>
-      )}
-      {(!loaderData.isOverseasWarehouse || scanConfirmed) && <div className="inbound-layout">
-        <section className="panel inbound-scan">
-          <div className="panel-header">
-            <div>
-              <h2>收货登记</h2>
-              <p>
-                {loaderData.isOverseasWarehouse
-                  ? "已根据扫描结果锁定订单和货物；公司代办清关订单须先完成目的地清关。"
-                  : "扫描订单号、运单号或选择待收货运单，并可使用客户识别码核对货物归属。"}
-              </p>
-            </div>
-            <span className="status-pill">防重复扫描</span>
-          </div>
-          {canOperate ? (
-            <Form method="post" className="warehouse-inbound-form">
-              <input type="hidden" name="warehouseId" value={loaderData.warehouse.id} />
-              {loaderData.isOverseasWarehouse ? (
-                <div className="inherited-data-strip span-2">
-                  <span>订单<strong>{loaderData.selectedShipment?.order_number}</strong></span>
-                  <span>客户<strong>{loaderData.selectedShipment?.customer_name}</strong></span>
-                  <span>系统运单<strong>{loaderData.selectedShipment?.shipment_number}</strong></span>
-                  <span>目的仓<strong>{loaderData.selectedShipment?.expected_warehouse_name}</strong></span>
-                  <input type="hidden" name="shipmentId" value={selectedShipment} />
-                </div>
-              ) : <><label className="field scan-field">
-                <span>订单号 / 运单号快速收货</span>
-                <input
-                  name="shipmentReference"
-                  data-keyboard-search
-                  autoFocus
-                  autoComplete="off"
-                  placeholder="扫描或输入订单号、系统运单号或业务运单号"
-                />
-                <small>
-                  {loaderData.isOverseasWarehouse
-                    ? "仅允许本仓对应且已登记实际出境的订单入库；客户自理清关不受目的地清关门禁限制。"
-                    : "订单尚未生成系统运单时，首次按订单收货会自动生成；一个订单关联多个运单时需从列表选择。"}
-                </small>
-              </label>
-              <label className="field scan-field">
-                <span>客户识别码（可选核对）</span>
-                <input
-                  name="customerIdentityCode"
-                  autoComplete="off"
-                  maxLength={5}
-                  placeholder="例如 A2B3C"
-                />
-                <small>填写后只允许该客户名下货物入库，避免串货。</small>
-              </label>
-              <label className="field">
-                <span>待收货运单（可选）</span>
-                <select name="shipmentId" defaultValue={selectedShipment}>
-                  <option value="">通过订单号或运单号收货时无需选择</option>
-                    {loaderData.shipments.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      [{item.customer_identity_code}] {item.order_number} ·{" "}
-                      {item.shipment_number} · {item.customer_name} · 计划入库：
-                      {item.expected_warehouse_name || "待确认仓库"}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {selectedShipment && (
-                <div className="inherited-data-strip">
-                  <span>
-                    计划入库仓库
-                    <strong>
-                      {loaderData.shipments.find(
-                        (item) => item.id === selectedShipment,
-                      )?.expected_warehouse_name || "运输安排尚未选择仓库"}
-                    </strong>
-                    <small>当前页面只显示所选仓库的可用库位。</small>
-                  </span>
-                </div>
-              )}</>}
-              {(loaderData.isOverseasWarehouse || barcodePolicy.isActive) && (
-                <label className="field scan-field">
-                  <span>货物标签条码</span>
-                  <input
-                    name="barcode"
-                    autoComplete="off"
-                    defaultValue={loaderData.isOverseasWarehouse ? loaderData.scannedPackage?.barcode ?? "" : ""}
-                    placeholder={loaderData.isOverseasWarehouse ? "扫描国内仓生成的货物标签" : "扫描现有条码；留空自动生成"}
-                    required={loaderData.isOverseasWarehouse || barcodePolicy.isRequired}
-                    readOnly={loaderData.isOverseasWarehouse}
-                  />
-                  {loaderData.isOverseasWarehouse && <small>使用国内仓装车出库时的原标签；系统会迁移货物位置，不会生成重复标签。</small>}
-                </label>
-              )}
-              {locationPolicy.isActive && (
-                <label className="field">
-                  <span>入库库位</span>
-                  <select
-                    name="locationId"
-                    required={locationPolicy.isRequired}
-                  >
-                    <option value="">请选择库位</option>
-                    {loaderData.locations.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.warehouse_name} / {item.zone_name} / {item.name}（
-                        {item.code}）
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
-              {packageTypePolicy.isActive && (
-                <label className="field">
-                  <span>实际包装类型</span>
-                  <select
-                    name="packageType"
-                    defaultValue={loaderData.isOverseasWarehouse ? loaderData.scannedPackage?.package_type ?? "" : ""}
-                    required={packageTypePolicy.isRequired}
-                  >
-                    <option value="">请选择</option>
-                    <option value="carton">纸箱</option>
-                    <option value="pallet">托盘</option>
-                    <option value="wooden_case">木箱</option>
-                    <option value="bag">袋装</option>
-                    <option value="drum">桶装</option>
-                    <option value="bundle">捆装</option>
-                    <option value="mixed">混合包装</option>
-                    <option value="other">其他</option>
-                  </select>
-                </label>
-              )}
-              <div className="form-grid compact">
-                {piecesPolicy.isActive && (
-                  <Num
-                    name="pieces"
-                    label="实收件数"
-                    defaultValue={loaderData.isOverseasWarehouse ? String(loaderData.scannedPackage?.pieces ?? 1) : "1"}
-                    step="1"
-                    required={piecesPolicy.isRequired}
-                  />
-                )}{" "}
-                {weightPolicy.isActive && (
-                  <Num
-                    name="weight"
-                    label="实重 KG"
-                    defaultValue={loaderData.isOverseasWarehouse && loaderData.scannedPackage?.weight_kg != null ? String(loaderData.scannedPackage.weight_kg) : undefined}
-                    required={weightPolicy.isRequired}
-                  />
-                )}{" "}
-                {volumePolicy.isActive && (
-                  <Num
-                    name="volume"
-                    label="实测体积 CBM"
-                    defaultValue={loaderData.isOverseasWarehouse && loaderData.scannedPackage?.volume_cbm != null ? formatVolume(loaderData.scannedPackage.volume_cbm) : undefined}
-                    step="0.001"
-                    required={volumePolicy.isRequired}
-                  />
-                )}
-                <Num name="length" label="实际长 CM" step="0.1" defaultValue={loaderData.isOverseasWarehouse && loaderData.scannedPackage?.length_cm != null ? String(loaderData.scannedPackage.length_cm) : undefined} required />
-                <Num name="width" label="实际宽 CM" step="0.1" defaultValue={loaderData.isOverseasWarehouse && loaderData.scannedPackage?.width_cm != null ? String(loaderData.scannedPackage.width_cm) : undefined} required />
-                <Num name="height" label="实际高 CM" step="0.1" defaultValue={loaderData.isOverseasWarehouse && loaderData.scannedPackage?.height_cm != null ? String(loaderData.scannedPackage.height_cm) : undefined} required />
-              </div>
-              {evidencePolicy.isActive && (
-                <label className="field">
-                  <span>货物 / 单证照片说明</span>
-                  <input
-                    name="evidenceNote"
-                    placeholder="填写文件中心名称、照片编号或现场凭证说明"
-                    required={evidencePolicy.isRequired}
-                  />
-                  <small>
-                    照片与单证在订单文件中心统一归档，仓库只记录现场凭证索引，避免重复上传。
-                  </small>
-                </label>
-              )}
-              {notesPolicy.isActive && (
-                <label className="field">
-                  <span>收货备注</span>
-                  <textarea
-                    name="notes"
-                    rows={2}
-                    required={notesPolicy.isRequired}
-                  />
-                </label>
-              )}
-              <fieldset className="warehouse-receipt-result">
-                <legend>本次收货结果</legend>
-                <label className="check-field">
-                  <input
-                    type="radio"
-                    name="receiptResult"
-                    value="ready"
-                    checked={receiptResult === "ready"}
-                    onChange={(event) =>
-                      event.currentTarget.checked && setReceiptResult("ready")
-                    }
-                    required={!receiptResult}
-                  />
-                  <span><b>{loaderData.isOverseasWarehouse ? "清点无误" : "货齐"}</b><small>{loaderData.isOverseasWarehouse ? "本票货物已经全部入仓并核对无误；同运输单全部订单清点完成后自动结束境外运输。" : "本订单全部货物已经到齐，允许进入装车或拼车。"}</small></span>
-                </label>
-                <label className="check-field">
-                  <input
-                    type="radio"
-                    name="receiptResult"
-                    value="exception"
-                    checked={receiptResult === "exception"}
-                    onChange={(event) =>
-                      event.currentTarget.checked && setReceiptResult("exception")
-                    }
-                    required={!receiptResult}
-                  />
-                  <span><b>异常</b><small>数量、重量、包装或货况存在异常。</small></span>
-                </label>
-                {receiptResult === "exception" && (
-                  <label className="field warehouse-exception-note">
-                    <span>异常说明 <b>*</b></span>
-                    <textarea name="exceptionNotes" rows={3} required placeholder="请填写短少、破损、超差等具体情况" />
-                  </label>
-                )}
-                <p>选择“异常”时，本次作为累计收货保存，不会完成当前运输阶段。</p>
-              </fieldset>
-              <button
-                className="primary warehouse-primary scan-submit"
-                disabled={busy || !loaderData.locations.length}
-              >
-                {busy ? "正在入库…" : loaderData.isOverseasWarehouse ? "确认扫码入库与清点结果" : "确认收货并生成标签"}
-              </button>
-            </Form>
-          ) : (
-            <p className="empty-state">当前账号没有仓库操作权限。</p>
-          )}
-        </section>
-      </div>}
-      {!loaderData.isOverseasWarehouse && <section className="panel label-section">
-        <div className="panel-header no-print">
-          <div>
-            <h2>最近货物标签</h2>
-            <p>打印后粘贴到外包装，后续分拣和出库继续扫描此标签。</p>
-          </div>
-          <span>{loaderData.packages.length} 张</span>
-        </div>
-        <div className="package-labels">
-          {loaderData.packages.map((item) => (
-            <PackageLabel key={item.id} item={item} />
-          ))}
-        </div>
-        {!loaderData.packages.length && (
-          <p className="empty-state">完成首次收货后将在这里生成标签。</p>
-        )}
-      </section>}
+      {showReceivingWorkbench && !canOperate && <p className="empty-state">当前账号没有仓库操作权限。</p>}
     </>
   );
 }
 
-function OverseasReceivingScan({ warehouseId, reference, orderId, returnTo }: { warehouseId: string; reference: string; orderId: string | null; returnTo: string }) {
-  return <section className="panel acceptance-scan-panel overseas-receiving-scan-panel">
-    <Form method="get" action="." className="acceptance-scan-form">
-      <input type="hidden" name="warehouseId" value={warehouseId} />
-      {orderId && <input type="hidden" name="orderId" value={orderId} />}
-      {returnTo && <input type="hidden" name="returnTo" value={returnTo} />}
-      <label className="field scan-field">
-        <span>扫描货物标签 / 装车任务码</span>
-        <input
-          name="reference"
-          defaultValue={reference}
-          autoFocus
-          autoComplete="off"
-          placeholder="扫描国内仓货物条码、包装号或 OUT 装车任务码后回车"
-          required
-        />
-      </label>
-      <button className="primary">核对到货信息</button>
-      <small>单件装车任务可直接扫描 OUT 任务码；多件任务须逐件扫描货物标签。扫描后先核对订单、客户、运单、目的仓和货物信息。</small>
-    </Form>
-  </section>;
-}
-
-function PackageLabel({ item }: { item: Package }) {
-  return (
-    <article className="package-label warehouse-package-label">
-      <header>
-        <strong>OULING 国际物流</strong>
-        <span>货物条码标签</span>
-      </header>
-      <Code39 value={item.barcode} />
-      <b>{item.barcode}</b>
-      <dl>
-        <div>
-          <dt>订单</dt>
-          <dd>{item.order_number}</dd>
-        </div>
-        <div>
-          <dt>货物条码</dt>
-          <dd><strong>{item.barcode}</strong></dd>
-        </div>
-        <div>
-          <dt>客户</dt>
-          <dd>[{item.customer_identity_code}] {item.customer_name}</dd>
-        </div>
-        <div>
-          <dt>库位</dt>
-          <dd>{item.location_name}</dd>
-        </div>
-        <div>
-          <dt>实收</dt>
-          <dd>{item.pieces} 件 · {item.weight_kg?.toFixed(2) || "0.00"} KG · {formatVolume(item.volume_cbm)} CBM</dd>
-        </div>
-      </dl>
-    </article>
-  );
-}
-function Code39({ value }: { value: string }) {
-  const patterns: Record<string, string> = {
-    "0": "nnnwwnwnn",
-    "1": "wnnwnnnnw",
-    "2": "nnwwnnnnw",
-    "3": "wnwwnnnnn",
-    "4": "nnnwwnnnw",
-    "5": "wnnwwnnnn",
-    "6": "nnwwwnnnn",
-    "7": "nnnwnnwnw",
-    "8": "wnnwnnwnn",
-    "9": "nnwwnnwnn",
-    A: "wnnnnwnnw",
-    B: "nnwnnwnnw",
-    C: "wnwnnwnnn",
-    D: "nnnnwwnnw",
-    E: "wnnnwwnnn",
-    F: "nnwnwwnnn",
-    G: "nnnnnwwnw",
-    H: "wnnnnwwnn",
-    I: "nnwnnwwnn",
-    J: "nnnnwwwnn",
-    K: "wnnnnnnww",
-    L: "nnwnnnnww",
-    M: "wnwnnnnwn",
-    N: "nnnnwnnww",
-    O: "wnnnwnnwn",
-    P: "nnwnwnnwn",
-    Q: "nnnnnnwww",
-    R: "wnnnnnwwn",
-    S: "nnwnnnwwn",
-    T: "nnnnwnwwn",
-    U: "wwnnnnnnw",
-    V: "nwwnnnnnw",
-    W: "wwwnnnnnn",
-    X: "nwnnwnnnw",
-    Y: "wwnnwnnnn",
-    Z: "nwwnwnnnn",
-    "-": "nwnnnnwnw",
-    "*": "nwnnwnwnn",
-  };
-  let x = 0;
-  const bars: ReactElement[] = [];
-  for (const char of `*${value}*`) {
-    for (const [index, width] of [
-      ...(patterns[char] ?? patterns["-"]),
-    ].entries()) {
-      const size = width === "w" ? 3 : 1;
-      if (index % 2 === 0)
-        bars.push(
-          <rect key={`${x}-${index}`} x={x} y="0" width={size} height="42" />,
-        );
-      x += size;
-    }
-    x += 1;
-  }
-  return (
-    <svg
-      className="code39"
-      viewBox={`0 0 ${x} 42`}
-      preserveAspectRatio="none"
-      aria-label={`条码 ${value}`}
-    >
-      {bars}
-    </svg>
-  );
-}
-function Num({
-  name,
-  label,
-  step = "0.01",
-  defaultValue,
-  required = false,
-}: {
-  name: string;
-  label: string;
-  step?: string;
-  defaultValue?: string;
-  required?: boolean;
-}) {
-  return (
-    <label className="field">
-      <span>{label}</span>
-      <input
-        name={name}
-        type="number"
-        min="0"
-        step={step}
-        defaultValue={defaultValue}
-        required={required}
-      />
-    </label>
-  );
-}
 function positive(form: FormData, name: string) {
   const raw = valueOf(form, name);
   if (!raw) return null;
