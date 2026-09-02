@@ -21714,6 +21714,96 @@ button {
   overflow-x: auto;
   border: 1px solid #d8e1ec;
 }
+
+.workflow-field-locator {
+  margin-bottom: 10px;
+  padding: 9px 10px;
+  border: 1px solid #c9dcef;
+  background: #f7fbff;
+}
+
+.workflow-field-locator > label {
+  display: grid;
+  grid-template-columns: 92px minmax(0,1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.workflow-field-locator > label span {
+  color: #28445f;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.workflow-field-locator > label input {
+  min-height: 34px;
+}
+
+.workflow-field-locator > p,
+.workflow-field-locator-results p {
+  margin: 6px 0 0 100px;
+  color: #607086;
+  font-size: 10px;
+}
+
+.workflow-field-locator-results {
+  margin: 7px 0 0 100px;
+  display: grid;
+  max-height: 180px;
+  overflow: auto;
+  border: 1px solid #d8e1ec;
+  background: #fff;
+}
+
+.workflow-field-locator-results button {
+  min-height: 38px;
+  padding: 6px 9px;
+  display: grid;
+  grid-template-columns: minmax(140px,.8fr) minmax(220px,1.4fr) auto;
+  gap: 8px;
+  align-items: center;
+  border: 0;
+  border-bottom: 1px solid #edf1f5;
+  background: #fff;
+  color: #52657b;
+  text-align: left;
+  cursor: pointer;
+}
+
+.workflow-field-locator-results button:hover,
+.workflow-field-locator-results button:focus-visible {
+  background: #edf6ff;
+}
+
+.workflow-field-locator-results button strong { color: #17324d; }
+.workflow-field-locator-results button em { color: #1769aa; font-size: 10px; font-style: normal; }
+.workflow-field-table tr.workflow-field-locator-target { background: #fff8ec; box-shadow: inset 3px 0 0 var(--orange); }
+.workflow-field-table tr.workflow-field-locator-target:focus { outline: 2px solid #1769aa; outline-offset: -2px; }
+
+.consignment-custom-field-control,
+.consignment-custom-field-source {
+  display: grid;
+  gap: 5px;
+}
+
+.consignment-custom-field-source {
+  grid-template-columns: minmax(0,1fr) auto;
+  align-items: center;
+  color: #607086;
+  font-size: 10px;
+}
+
+.workflow-field-runtime-source {
+  margin-top: 5px;
+  display: block;
+  color: #607086;
+  font-size: 10px;
+}
+
+.workflow-field-runtime-source a {
+  color: #1769aa;
+  font-weight: 700;
+}
 .workflow-node-config-table-head,
 .workflow-node-config > summary {
   display: grid;

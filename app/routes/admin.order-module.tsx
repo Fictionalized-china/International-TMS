@@ -78,6 +78,7 @@ import {
   saveOrderCustomWorkflowFieldValue,
   type WorkflowFieldState,
 } from "../lib/workflow-fields.server";
+import { workflowFieldConfigurationHref } from "../lib/workflow-field-locator";
 
 type OrderSummary = {
   id: string;
@@ -4265,6 +4266,7 @@ function WorkflowFieldChecklist({
                 {field.isRequired && <b className="required-mark" aria-label="必填">*</b>}
               </span>
               {manage ? <CustomWorkflowFieldForm field={field} busy={busy} /> : <strong>{field.displayValue || ""}</strong>}
+              <small className="workflow-field-runtime-source">来源节点：{field.stepName || field.stepKey} · <Link to={workflowFieldConfigurationHref({workflowId:field.workflowId,stepKey:field.stepKey,moduleCode:field.moduleCode,fieldKey:field.fieldKey})}>配置显示规则</Link></small>
             </div>
           ),
         )}
@@ -6067,7 +6069,7 @@ function ModuleBusinessData({
                     <tr key={field.id} className={field.present ? "ready" : field.isRequired ? "missing" : ""}>
                       <td><strong>{field.label}{field.isRequired && <sup>*</sup>}</strong><small className="subline">{field.helpText || "业务补充信息"}</small></td>
                       <td><span className={`field-state ${field.present && field.isRequired ? "filled" : field.isRequired ? "required-missing" : "optional-empty"}`}>{field.present ? "已填" : field.isRequired ? "必填但未填" : "未填"}</span></td>
-                      <td>{manage ? <CustomWorkflowFieldForm field={field} busy={busy} /> : <span>{field.displayValue || ""}</span>}</td>
+                      <td><div className="consignment-custom-field-control">{manage ? <CustomWorkflowFieldForm field={field} busy={busy} /> : <span>{field.displayValue || ""}</span>}<div className="consignment-custom-field-source"><span>来源节点：{field.stepName || field.stepKey}</span><Link className="text-button" to={workflowFieldConfigurationHref({workflowId:field.workflowId,stepKey:field.stepKey,moduleCode:field.moduleCode,fieldKey:field.fieldKey})}>配置显示规则</Link></div></div></td>
                     </tr>
                   ))}</tbody>
                 </table>

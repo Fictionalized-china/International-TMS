@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { useEffect, useState } from "react";
+import { useDeferredValue, useEffect, useState } from "react";
 import { Form, Link, redirect, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.workflow";
 import { canEditWorkflowDefinition, requireSessionUser } from "../lib/auth.server";
@@ -47,6 +47,11 @@ import {
   workflowIntentAllowedForUsage,
   workflowFieldPlacementLock,
 } from "../lib/workflow-edit-policy";
+import {
+  filterWorkflowFieldLocatorItems,
+  workflowFieldIdentityMatches,
+  type WorkflowFieldLocatorItem,
+} from "../lib/workflow-field-locator";
 
 type Definition = {
   id: string;
@@ -148,7 +153,12 @@ export async function loader({ request }: Route.LoaderArgs) {
   const defaultWorkflowId = await ensureDefaultWorkflow(current.organizationId);
   const url = new URL(request.url);
   const requestedWorkflowId = url.searchParams.get("workflowId");
-  const openEditor = url.searchParams.get("edit") === "1";
+  const requestedFieldId = url.searchParams.get("fieldId");
+  const requestedStepKey = url.searchParams.get("stepKey");
+  const requestedModuleCode = url.searchParams.get("moduleCode");
+  const requestedFieldKey = url.searchParams.get("fieldKey");
+  const fieldDeepLinkRequested = Boolean(requestedFieldId || requestedFieldKey);
+  const openEditor = url.searchParams.get("edit") === "1" || fieldDeepLinkRequested;
 
   const definitions = await env.DB.prepare(
     `SELECT wd.id,wd.code,wd.name,wd.status,wd.updated_at,
@@ -240,9 +250,20 @@ export async function loader({ request }: Route.LoaderArgs) {
       await inspectWorkflowFieldPolicyImpact(workflowId,step.step_key),
     ] as const);
   }
+  const focusedField = fields.results.find((field) => field.id === requestedFieldId) ??
+    fields.results.find((field) => workflowFieldIdentityMatches({
+      fieldKey:field.field_key,
+      moduleCode:field.module_code,
+      stepKey:steps.results.find((step) => step.id === field.step_id)?.step_key || "",
+    },{
+      fieldKey:requestedFieldKey || undefined,
+      moduleCode:requestedModuleCode || undefined,
+      stepKey:requestedStepKey || undefined,
+    }));
   return {
     current,
     openEditor,
+    focusedFieldId: focusedField?.id ?? null,
     definitions: definitions.results,
     definitionSteps: definitionSteps.results,
     definition: selected,
@@ -1659,6 +1680,7 @@ export default function Workflow({ loaderData, actionData }: Route.ComponentProp
                   tasksByModule={tasksByModule}
                   positions={loaderData.positions}
                   fieldPolicyImpacts={loaderData.fieldPolicyImpacts}
+                  focusedFieldId={loaderData.focusedFieldId}
                 />
               </Modal>
             )}
@@ -1965,6 +1987,7 @@ function NodeConfigDialog({
   tasksByModule,
   positions,
   fieldPolicyImpacts,
+  focusedFieldId,
 }: {
   workflowId: string;
   steps: Step[];
@@ -1978,7 +2001,41 @@ function NodeConfigDialog({
   tasksByModule: Map<string, ModuleTask[]>;
   positions: PositionOption[];
   fieldPolicyImpacts:Record<string,WorkflowFieldPolicyImpact>;
+  focusedFieldId:string|null;
 }) {
+  const stepNames = new Map(steps.map((step) => [step.id, step.name]));
+  const locatorItems: WorkflowFieldLocatorItem[] = allFields.map((field) => ({
+    id: field.id,
+    label: field.label,
+    fieldKey: field.field_key,
+    moduleLabel: moduleLabels[field.module_code],
+    stepId: field.step_id,
+    stepName: stepNames.get(field.step_id) || "未知节点",
+    modeLabel: workflowFieldModes.find((item) => item.value === workflowFieldMode(field))?.label || "未知规则",
+  }));
+  const focusedField = locatorItems.find((field) => field.id === focusedFieldId);
+  const [fieldQuery,setFieldQuery] = useState(focusedField?.label || "");
+  const [highlightedFieldId,setHighlightedFieldId] = useState(focusedFieldId);
+  const deferredQuery = useDeferredValue(fieldQuery);
+  const matches = filterWorkflowFieldLocatorItems(locatorItems,deferredQuery);
+  const revealField = (field:WorkflowFieldLocatorItem) => {
+    setHighlightedFieldId(field.id);
+    const node=document.getElementById(`workflow-node-${field.stepId}`) as HTMLDetailsElement|null;
+    if(node)node.open=true;
+    window.requestAnimationFrame(()=>{
+      const row=document.getElementById(`workflow-field-${field.id}`);
+      row?.scrollIntoView({behavior:"smooth",block:"center"});
+      row?.focus({preventScroll:true});
+    });
+  };
+  useEffect(()=>{
+    if(!focusedField)return;
+    setFieldQuery(focusedField.label);
+    const frame=window.requestAnimationFrame(()=>revealField(focusedField));
+    return()=>window.cancelAnimationFrame(frame);
+  // The deep link should reveal the field once when the dialog is mounted.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[focusedFieldId]);
   return (
     <div className="workflow-config-dialog">
       <div className="workflow-config-dialog-header">
@@ -1995,12 +2052,22 @@ function NodeConfigDialog({
           )}
         </div>
       </div>
+      <section className="workflow-field-locator" aria-label="查找工作流字段">
+        <label>
+          <span>查找字段</span>
+          <input type="search" value={fieldQuery} onChange={(event)=>setFieldQuery(event.target.value)} placeholder="输入字段名称、编码或来源节点，例如：二次核验结论" autoComplete="off"/>
+        </label>
+        {fieldQuery.trim() ? <div className="workflow-field-locator-results" aria-live="polite">
+          {matches.map((field)=><button type="button" key={field.id} onClick={()=>revealField(field)}><strong>{field.label}</strong><span>{field.stepName} · {field.moduleLabel} · {field.modeLabel}</span><em>定位并展开</em></button>)}
+          {!matches.length&&<p>没有匹配字段，请尝试字段名称、字段编码或节点名称。</p>}
+        </div>:<p>可从整个工作流直接定位字段，不必逐个展开节点查找。</p>}
+      </section>
       <div className="workflow-node-config-list">
         <div className="workflow-node-config-table-head" aria-hidden="true">
           <span>顺序</span><span>节点</span><span>执行角色</span><span>模组</span><span>字段</span><span>状态 / 操作</span>
         </div>
         {steps.map((step) => (
-          <details className="workflow-node-config" key={step.id}>
+          <details className="workflow-node-config" id={`workflow-node-${step.id}`} key={step.id}>
             <summary>
               <span className="workflow-field-order">{step.sort_order}</span>
               <strong>{step.name}</strong>
@@ -2035,6 +2102,7 @@ function NodeConfigDialog({
               busy={busy}
               closeSignal={closeSignal}
               impact={fieldPolicyImpacts[step.step_key]??{total:0,future:0,current:0,historical:0,auditOnly:0}}
+              highlightedFieldId={highlightedFieldId}
             />
           </details>
         ))}
@@ -2231,6 +2299,7 @@ function FieldList({
   busy,
   closeSignal,
   impact,
+  highlightedFieldId,
 }: {
   workflowId: string;
   step: Step;
@@ -2243,6 +2312,7 @@ function FieldList({
   busy: boolean;
   closeSignal?: unknown;
   impact:WorkflowFieldPolicyImpact;
+  highlightedFieldId:string|null;
 }) {
   return (
     <div className="workflow-field-config">
@@ -2260,7 +2330,7 @@ function FieldList({
             {fields.map((field) => {
               const mode = workflowFieldMode(field);
               return (
-                <tr key={field.id}>
+                <tr key={field.id} id={`workflow-field-${field.id}`} tabIndex={-1} className={highlightedFieldId===field.id?"workflow-field-locator-target":undefined}>
                   <td>{field.sort_order}</td>
                   <td><strong>{field.label}</strong><small>{field.field_key}</small></td>
                   <td>{moduleLabels[field.module_code]}</td>

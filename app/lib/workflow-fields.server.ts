@@ -18,6 +18,7 @@ export type WorkflowFieldRule = {
   id: string;
   workflowId: string;
   stepKey: string;
+  stepName: string;
   moduleCode: OrderModuleCode;
   fieldKey: string;
   label: string;
@@ -420,7 +421,7 @@ export async function listTemplateWorkflowFields(workflowIds: string[]) {
   const fields: RawField[] = [];
   for (const workflowChunk of chunkD1Values([...new Set(workflowIds)])) {
     const rows = await env.DB.prepare(
-      `SELECT f.id,f.workflow_id,s.step_key,COALESCE(f.module_code,'consignment') module_code,
+      `SELECT f.id,f.workflow_id,s.step_key,s.name step_name,COALESCE(f.module_code,'consignment') module_code,
               f.field_key,f.label,f.field_type,f.is_required,f.is_active,f.sort_order,
               f.options_text,f.help_text
        FROM workflow_step_fields f
@@ -451,11 +452,13 @@ export async function loadOrderModuleWorkflowFields(
   let raw: RawField[] = [];
   if (binding.workflow_instance_id) {
     const snapshot = await env.DB.prepare(
-      `SELECT id,workflow_id,step_key,module_code,field_key,label,field_type,is_required,
-              is_active,sort_order,options_text,help_text
-       FROM workflow_instance_fields
-       WHERE instance_id=? AND module_code=?
-       ORDER BY sort_order,field_key`,
+      `SELECT f.id,f.workflow_id,f.step_key,COALESCE(s.name,f.step_key) step_name,
+              f.module_code,f.field_key,f.label,f.field_type,f.is_required,
+              f.is_active,f.sort_order,f.options_text,f.help_text
+       FROM workflow_instance_fields f
+       LEFT JOIN workflow_steps s ON s.workflow_id=f.workflow_id AND s.step_key=f.step_key
+       WHERE f.instance_id=? AND f.module_code=?
+       ORDER BY f.sort_order,f.field_key`,
     )
       .bind(binding.workflow_instance_id, moduleCode)
       .all<RawField>();
@@ -463,7 +466,7 @@ export async function loadOrderModuleWorkflowFields(
   }
   if (!raw.length) {
     const live = await env.DB.prepare(
-      `SELECT f.id,f.workflow_id,s.step_key,COALESCE(f.module_code,'consignment') module_code,
+      `SELECT f.id,f.workflow_id,s.step_key,s.name step_name,COALESCE(f.module_code,'consignment') module_code,
               f.field_key,f.label,f.field_type,f.is_required,f.is_active,f.sort_order,
               f.options_text,f.help_text
        FROM workflow_step_fields f
@@ -591,6 +594,7 @@ type RawField = {
   id: string;
   workflow_id: string;
   step_key: string;
+  step_name: string;
   module_code: OrderModuleCode;
   field_key: string;
   label: string;
@@ -607,6 +611,7 @@ function toRule(row: RawField): WorkflowFieldRule {
     id: row.id,
     workflowId: row.workflow_id,
     stepKey: row.step_key,
+    stepName: row.step_name,
     moduleCode: row.module_code,
     fieldKey: row.field_key,
     label: row.label,
