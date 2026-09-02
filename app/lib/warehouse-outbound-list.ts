@@ -72,3 +72,17 @@ export function validateFtlOutboundResourceSelection(input: {
   if (!input.plannedDepartureAt.trim()) missing.push("计划出境发车时间");
   return missing.length ? `请由仓库确认：${missing.join("、")}` : null;
 }
+
+export function validateFtlOutboundRouteFields(input: {
+  exitPort: string;
+  customsLocation: string;
+  policies: {
+    exit_port: { isRequired: boolean };
+    customs_location: { isRequired: boolean };
+  };
+}) {
+  const missing: string[] = [];
+  if (input.policies.exit_port.isRequired && !input.exitPort.trim()) missing.push("出境口岸");
+  if (input.policies.customs_location.isRequired && !input.customsLocation.trim()) missing.push("起运地清关地");
+  return missing.length ? `请补齐工作流必填项：${missing.join("、")}` : null;
+}

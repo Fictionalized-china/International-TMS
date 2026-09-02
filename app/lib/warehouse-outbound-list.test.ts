@@ -3,6 +3,7 @@ import {
   filterWarehouseOutboundLoadUnits,
   isConsolidatedOutboundTask,
   normalizeWarehouseOutboundListFilters,
+  validateFtlOutboundRouteFields,
   validateFtlOutboundResourceSelection,
 } from "./warehouse-outbound-list";
 
@@ -67,6 +68,25 @@ describe("warehouse outbound order list", () => {
       vehicleId: "vehicle-1",
       driverId: "driver-1",
       plannedDepartureAt: "2026-09-02T09:00",
+    })).toBeNull();
+  });
+
+  it("validates full-truck route fields against the effective workflow rules", () => {
+    expect(validateFtlOutboundRouteFields({
+      exitPort: "",
+      customsLocation: "",
+      policies: {
+        exit_port: { isRequired: true },
+        customs_location: { isRequired: false },
+      },
+    })).toBe("请补齐工作流必填项：出境口岸");
+    expect(validateFtlOutboundRouteFields({
+      exitPort: "霍尔果斯口岸",
+      customsLocation: "",
+      policies: {
+        exit_port: { isRequired: true },
+        customs_location: { isRequired: false },
+      },
     })).toBeNull();
   });
 });

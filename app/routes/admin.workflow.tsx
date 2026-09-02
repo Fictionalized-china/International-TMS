@@ -2234,7 +2234,7 @@ function NodeConfigDialog({
       <section className="workflow-field-locator" aria-label="查找工作流字段">
         <label>
           <span>查找字段</span>
-          <input type="search" value={fieldQuery} onChange={(event)=>setFieldQuery(event.target.value)} placeholder="输入字段名称、编码或来源节点，例如：二次核验结论" autoComplete="off"/>
+          <input type="search" value={fieldQuery} onChange={(event)=>setFieldQuery(event.target.value)} placeholder="输入名称或编码，例如：逐件扫码装车 / loading_scan_confirmation" autoComplete="off"/>
         </label>
         {fieldQuery.trim() ? <div className="workflow-field-locator-results" aria-live="polite">
           {matches.map((field)=><button type="button" key={field.id} onClick={()=>revealField(field)}><strong>{field.label}</strong><span>{field.stepName} · {field.moduleLabel} · {field.modeLabel}</span><em>定位并展开</em></button>)}
