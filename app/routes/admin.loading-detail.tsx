@@ -50,6 +50,7 @@ import { broadcastInternalNotification } from "../lib/internal-notifications.ser
 import { isActiveExceptionStatus } from "../lib/batch-exception-policy";
 import { synchronizeBatchTransport } from "../lib/batch-transport-sync.server";
 import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
+import { customsDeclarationNextAction } from "../lib/customs-declarations";
 
 const WAREHOUSE_OWNED_BATCH_INTENTS = new Set([
   "arrangement",
@@ -946,6 +947,7 @@ function BatchDocumentWorkbench({batchId,orders,batchDocuments,orderDocuments,or
         const files=orderDocuments.filter(item=>item.order_id===order.order_id);
         const orderCustomsDeclarations=customsDeclarations.filter(item=>item.order_id===order.order_id);
         const pendingCustomsDeclarations=orderCustomsDeclarations.filter(item=>item.is_deleted!==1&&item.status!=="released"&&item.status!=="cancelled");
+        const customsNextAction=customsDeclarationNextAction(orderCustomsDeclarations);
         const requirementGroup=orderDocumentRequirements.find(group=>group.orderId===order.order_id);
         const activeRequirements=requirementGroup?.documents.filter(document=>document.isActive)??[];
         const documentSummary=summarizeLoadingDocumentRequirements(activeRequirements,files);
@@ -967,7 +969,7 @@ function BatchDocumentWorkbench({batchId,orders,batchDocuments,orderDocuments,or
             <div className="batch-order-file-list">{activeRequirements.map(requirement=>{const current=files.find(item=>item.document_category===requirement.code);return <div key={requirement.code}><strong>{requirement.name}{requirement.isRequired&&<b className="required-mark"> *</b>}</strong>{current?<><a href={`/admin/document-files/order/${current.id}?mode=view`} target="_blank" rel="noreferrer">{current.file_name}</a><span className={`status-pill ${["approved","archived"].includes(current.review_status)?"success":""}`}>{documentReviewLabel(current.review_status)}</span></>:<span className={`status-pill ${requirement.isRequired?"off":""}`}>{requirement.isRequired?"待仓库上传":"选填未提供"}</span>}</div>})}{!activeRequirements.length&&<span className="status-pill success">当前工作流未启用逐票文件</span>}</div>
             <BatchOrderCustomsWorkbench orderId={order.order_id} declarations={orderCustomsDeclarations} manage={manageCustoms} busy={busy} closeSignal={customsCloseSignal}/>
             <div className="batch-order-file-links"><Link className="secondary" to={`/admin/orders/${order.order_id}/modules/documents`}>查看完整文件中心</Link></div>
-          </div></details>{manageCustoms&&pendingCustomsDeclarations.length>0&&<Modal title={`确认本票报关放行 · ${order.order_number}`} triggerLabel={`确认放行${pendingCustomsDeclarations.length>1?`（${pendingCustomsDeclarations.length}）`:""}`} triggerClassName="primary batch-order-direct-release-button" closeSignal={customsCloseSignal}>{pendingCustomsDeclarations.map(declaration=><section className="batch-direct-release-item" key={declaration.id}><header><strong>{declaration.declaration_number}</strong><span>{customsStageLabel(declaration.clearance_stage)} · {declaration.declaration_title}</span></header><BatchCustomsReleaseForm orderId={order.order_id} declaration={declaration} busy={busy}/></section>)}</Modal>}</div></td>
+          </div></details>{manageCustoms&&requirementGroup?.customsEnabled&&customsNextAction==="create"&&<Modal title={`新增本票报关单 · ${order.order_number}`} triggerLabel="新增报关单" triggerClassName="primary batch-order-direct-customs-button" size="wide" closeSignal={customsCloseSignal}><BatchCustomsDeclarationForm orderId={order.order_id} busy={busy}/></Modal>}{manageCustoms&&requirementGroup?.customsEnabled&&customsNextAction==="release"&&<Modal title={`确认本票报关放行 · ${order.order_number}`} triggerLabel={`确认放行${pendingCustomsDeclarations.length>1?`（${pendingCustomsDeclarations.length}）`:""}`} triggerClassName="primary batch-order-direct-customs-button" closeSignal={customsCloseSignal}>{pendingCustomsDeclarations.map(declaration=><section className="batch-direct-release-item" key={declaration.id}><header><strong>{declaration.declaration_number}</strong><span>{customsStageLabel(declaration.clearance_stage)} · {declaration.declaration_title}</span></header><BatchCustomsReleaseForm orderId={order.order_id} declaration={declaration} busy={busy}/></section>)}</Modal>}</div></td>
         </tr>})}</tbody></table></div>
     </section>
     </div>

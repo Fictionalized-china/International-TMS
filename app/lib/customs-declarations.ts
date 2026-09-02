@@ -11,6 +11,20 @@ export type CustomsDeclarationGate = {
   ready: boolean;
 };
 
+export type CustomsDeclarationNextAction = "create" | "release" | "complete";
+
+export function customsDeclarationNextAction(
+  rows: Pick<CustomsDeclarationGateRow, "status" | "is_deleted">[],
+): CustomsDeclarationNextAction {
+  const active = rows.filter(
+    (row) => row.is_deleted !== 1 && row.status !== "cancelled",
+  );
+  if (active.length === 0) return "create";
+  return active.some((row) => row.status !== "released")
+    ? "release"
+    : "complete";
+}
+
 export function customsDeclarationGate(
   rows: CustomsDeclarationGateRow[],
   clearanceStage = "origin",

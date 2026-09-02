@@ -15073,7 +15073,7 @@ a.order-module-card.read-only:hover {
 .loading-cargo-names { color: #102f5d; line-height: 1.45; }
 .loading-row-actions { display: grid; gap: 4px; }
 .batch-order-row-actions { display: grid; gap: 6px; min-width: 132px; }
-.batch-order-direct-release-button {
+.batch-order-direct-customs-button {
   width: 100%;
   min-height: 32px;
   padding: 6px 10px;
