@@ -4013,6 +4013,7 @@ export function EmbeddedOrderModule({
   actionUrl,
   workflowStepKey,
   consignmentSection = "info",
+  customsSection = "declarations",
   hideConsignmentActionBar = false,
   approvalMode = false,
   reviewCloseSignal,
@@ -4022,6 +4023,7 @@ export function EmbeddedOrderModule({
   actionUrl: string;
   workflowStepKey?: string | null;
   consignmentSection?: "info" | "files" | "costs";
+  customsSection?: "files" | "declarations";
   hideConsignmentActionBar?: boolean;
   approvalMode?: boolean;
   reviewCloseSignal?: unknown;
@@ -4061,22 +4063,21 @@ export function EmbeddedOrderModule({
             <span>{scopedData.access.reason}</span>
           </div>
         )}
+        {!compactApproval && definition.code === "customs" && <CustomsProcessGuide data={scopedData} />}
         {!compactApproval && definition.code !== "loading" &&
           definition.code !== "overseas_warehouse" &&
           (definition.code !== "consignment" ||
             !hideConsignmentActionBar ||
-            consignmentSection === "files") && (
-          <>
-            {definition.code === "customs" && <CustomsProcessGuide data={scopedData} />}
-            <ModuleSourceDocuments
-              code={definition.code}
-              data={scopedData}
-              manage={manage}
-              canApproveConsignment={canApproveConsignment}
-              busy={busy}
-              reviewCloseSignal={reviewCloseSignal}
-            />
-          </>
+            consignmentSection === "files") &&
+          (definition.code !== "customs" || customsSection === "files") && (
+          <ModuleSourceDocuments
+            code={definition.code}
+            data={scopedData}
+            manage={manage}
+            canApproveConsignment={canApproveConsignment}
+            busy={busy}
+            reviewCloseSignal={reviewCloseSignal}
+          />
         )}
         {compactApproval ? (
           <OrderApprovalReview
@@ -4085,7 +4086,7 @@ export function EmbeddedOrderModule({
             canApproveConsignment={canApproveConsignment}
             busy={busy}
           />
-        ) : (
+        ) : definition.code === "customs" && customsSection === "files" ? null : (
           <ModuleBusinessData
             code={definition.code}
             data={scopedData}
@@ -4097,7 +4098,8 @@ export function EmbeddedOrderModule({
             showConsignmentActionBar={!hideConsignmentActionBar}
           />
         )}
-        {!(["consignment", "transport", "loading"] as OrderModuleCode[]).includes(definition.code) && (
+        {!(["consignment", "transport", "loading"] as OrderModuleCode[]).includes(definition.code) &&
+          (definition.code !== "customs" || customsSection === "declarations") && (
           <WorkflowFieldChecklist
             fields={scopedData.workflowFields.filter(
               (field) =>
@@ -4432,11 +4434,11 @@ function CustomsProcessGuide({ data }: { data: Route.ComponentProps["loaderData"
   const currentCopy: Record<CustomsProcessPhase, { title: string; hint: string }> = {
     documents: {
       title: "先补齐并审核必需文件",
-      hint: "在下方“本节点文件”中上传缺失资料，审核通过后再办理申报。",
+      hint: "在“报关文件”页签上传缺失资料，审核通过后再办理申报。",
     },
     declaration: {
       title: "现在新增起运地报关单",
-      hint: "点击下方“新增报关单”，填写申报信息并保存。",
+      hint: "切换到“报关单”页签，点击“新增报关单”填写并保存。",
     },
     release: {
       title: "等待结果并确认海关放行",

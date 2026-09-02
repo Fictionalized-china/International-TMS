@@ -1,0 +1,33 @@
+import { describe, expect, it } from "vitest";
+import { orderModuleTabDescriptors, resolveCustomsSection } from "./order-module-tabs";
+
+describe("orderModuleTabDescriptors", () => {
+  it("splits customs documents and declarations into sibling tabs", () => {
+    expect(orderModuleTabDescriptors({
+      key: "customs-row",
+      moduleCode: "customs",
+      moduleName: "报关作业",
+    })).toEqual([
+      { key: "customs-row:files", label: "报关文件", moduleCode: "customs", section: "files" },
+      { key: "customs-row:declarations", label: "报关单", moduleCode: "customs", section: "declarations" },
+    ]);
+  });
+
+  it("keeps other workflow modules as one tab", () => {
+    expect(orderModuleTabDescriptors({
+      key: "tracking-row",
+      moduleCode: "tracking",
+      moduleName: "运输执行与跟踪",
+    })).toEqual([
+      { key: "tracking-row", label: "运输执行与跟踪", moduleCode: "tracking", section: null },
+    ]);
+  });
+});
+
+describe("resolveCustomsSection", () => {
+  it("defaults direct customs links to the files view", () => {
+    expect(resolveCustomsSection(null)).toBe("files");
+    expect(resolveCustomsSection("unknown")).toBe("files");
+    expect(resolveCustomsSection("declarations")).toBe("declarations");
+  });
+});
