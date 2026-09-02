@@ -1155,9 +1155,16 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, 
           row.module_code,
           moduleHasRequiredMissing(row.module_code),
         );
-        return <Link key={row.module_state_id || row.module_code} className={row.module_code === selectedModuleCode ? "active" : ""} to={`?stage=${encodeURIComponent(selectedStep.step_key)}&module=${encodeURIComponent(row.module_code || "")}`}>
-          {row.module_name || row.module_code}
-          {attention === "action" && <span className="tab-action-badge" title="存在待办理的报关作业" aria-label="存在待办理的报关作业"><i aria-hidden="true">!</i>待办理</span>}
+        const isActive = row.module_code === selectedModuleCode;
+        const label = row.module_name || row.module_code || "业务分区";
+        return <Link
+          key={row.module_state_id || row.module_code}
+          className={[isActive ? "active" : "", attention === "action" ? "requires-action" : ""].filter(Boolean).join(" ")}
+          to={`?stage=${encodeURIComponent(selectedStep.step_key)}&module=${encodeURIComponent(row.module_code || "")}`}
+          title={attention === "action" ? `${label}待办理` : undefined}
+          aria-label={attention === "action" ? `${label}，待办理` : undefined}
+        >
+          {label}
           {attention === "required" && <b className="tab-required-star" title="存在必填但未填内容" aria-label="存在必填但未填内容">*</b>}
         </Link>;
       })}</nav>
