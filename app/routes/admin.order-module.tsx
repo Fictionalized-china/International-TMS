@@ -72,6 +72,12 @@ import {
 } from "../lib/order-review.server";
 import { syncCustomsModuleFromRecords } from "../lib/customs-status.server";
 import { Modal } from "../components/Modal";
+import { OrganizationAssigneePicker } from "../components/OrganizationAssigneePicker";
+import type { OrganizationAssigneeMember } from "../lib/organization-assignee";
+import {
+  isActiveOrganizationAssignee,
+  listActiveOrganizationAssigneeIds,
+} from "../lib/organization-assignee.server";
 import {
   loadOrderModuleWorkflowFields,
   missingRequiredModuleFields,
@@ -170,12 +176,7 @@ type OrderService = {
   service_name: string;
   status: string;
 };
-type Member = {
-  id: string;
-  display_name: string;
-  department_name: string | null;
-  position_name: string | null;
-};
+type Member = OrganizationAssigneeMember;
 function canEditWorkflowDefinitionInUi(user: {
   positionCode?: string | null;
   roleCodes: string[];
@@ -722,13 +723,18 @@ export async function loader({ request, params }: Route.LoaderArgs) {
       : [orderId, current.organizationId, moduleCode];
   const [members, tasks, history, cargo] = await Promise.all([
     env.DB.prepare(
-      `SELECT u.id,u.display_name,d.name department_name,p.name position_name
+      `SELECT u.id,u.display_name,
+              d.id department_id,d.name department_name,
+              p.id position_id,p.name position_name
        FROM memberships m
        JOIN users u ON u.id=m.user_id
-       LEFT JOIN departments d ON d.id=m.department_id
-       LEFT JOIN positions p ON p.id=m.position_id AND p.organization_id=m.organization_id
+       JOIN departments d
+         ON d.id=m.department_id AND d.organization_id=m.organization_id AND d.status='active'
+       JOIN positions p
+         ON p.id=m.position_id AND p.organization_id=m.organization_id AND p.status='active'
+        AND p.department_code=d.code
        WHERE m.organization_id=? AND m.status='active' AND u.status='active'
-       ORDER BY p.sort_order,d.sort_order,u.display_name`,
+       ORDER BY d.sort_order,p.sort_order,u.display_name`,
     )
       .bind(current.organizationId)
       .all<Member>(),
@@ -1651,7 +1657,9 @@ export async function action({ request, params }: Route.ActionArgs) {
       const targetModuleCode = valueOf(form, "targetModuleCode");
       const targetDefinition = orderModuleDefinition(targetModuleCode);
       if (!targetDefinition) return { formError: "目标模块不存在" };
-      const assigneeUserId = valueOf(form, "assigneeUserId") || current.userId;
+      const assigneeUserId = valueOf(form, "assigneeUserId");
+      if (!assigneeUserId)
+        return { formError: "请按部门、岗位选择具体个人账户" };
       const assignmentValues = [
         ["module_assignees", assigneeUserId],
         ["assignment_due_at", valueOf(form, "dueAt")],
@@ -1688,7 +1696,9 @@ export async function action({ request, params }: Route.ActionArgs) {
       };
     }
     if (intent === "assign_bulk" && moduleCode === "assignment") {
-      const assigneeUserId = valueOf(form, "assigneeUserId") || current.userId;
+      const assigneeUserId = valueOf(form, "assigneeUserId");
+      if (!assigneeUserId)
+        return { formError: "请按部门、岗位选择具体个人账户" };
       let targetCodes = Array.from(
         new Set(form.getAll("targetModuleCode").map(String).filter(Boolean)),
       );
@@ -1765,12 +1775,9 @@ export async function action({ request, params }: Route.ActionArgs) {
             .map((item) => item.module.module_name)
             .join("、")}`,
         };
-      const activeMembers = await env.DB.prepare(
-        "SELECT m.user_id id FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=? AND m.status='active' AND u.status='active'",
-      )
-        .bind(current.organizationId)
-        .all<{ id: string }>();
-      const activeMemberIds = new Set(activeMembers.results.map((item) => item.id));
+      const activeMemberIds = await listActiveOrganizationAssigneeIds(
+        current.organizationId,
+      );
       const invalid = selections.find((item) => !activeMemberIds.has(item.assigneeUserId));
       if (invalid)
         return { formError: `${invalid.module.module_name}选择的负责人不是当前组织有效成员` };
@@ -1851,12 +1858,8 @@ export async function action({ request, params }: Route.ActionArgs) {
             .map((item) => item.module_name)
             .join("、")}`,
         };
-      const isMember = await env.DB.prepare(
-        "SELECT 1 FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=? AND m.user_id=? AND m.status='active' AND u.status='active'",
-      )
-        .bind(current.organizationId, assigneeUserId)
-        .first();
-      if (!isMember) return { formError: "请选择有效的岗位人员" };
+      if (!(await isActiveOrganizationAssignee(current.organizationId, assigneeUserId)))
+        return { formError: "请选择部门、岗位下的有效个人账户" };
       const now = new Date().toISOString();
       await env.DB.batch([
         env.DB.prepare(
@@ -4070,15 +4073,12 @@ export function ConsignmentReviewActionBar({
         <div>
           <input type="hidden" name="intent" value="workflow_action" />
           <input type="hidden" name="actionCode" value="submit" />
-          <select name="assigneeUserId" required defaultValue="">
-            <option value="">选择审批人</option>
-            {data.members.map((member) => (
-              <option key={member.id} value={member.id}>
-                {member.display_name}
-                {member.department_name ? ` · ${member.department_name}` : ""}
-              </option>
-            ))}
-          </select>
+          <OrganizationAssigneePicker
+            members={data.members}
+            name="assigneeUserId"
+            idPrefix="consignment-approver"
+            personLabel="审批负责人"
+          />
           <button className="primary" disabled={busy}>提交审批</button>
         </div>
       </Form>
@@ -4630,21 +4630,6 @@ function AssignmentManifestWorkbench({
     tracking: "出境运输",
     costs: "对账结算",
   };
-  const memberById = useMemo(() => new Map(members.map((member) => [member.id, member])), [members]);
-  const positions = useMemo(
-    () => Array.from(new Set(members.map((member) => member.position_name || "未设置岗位"))),
-    [members],
-  );
-  const [roles, setRoles] = useState<Record<string, string>>(() =>
-    Object.fromEntries(
-      modules.map((module) => [
-        module.module_code,
-        module.assignee_user_id
-          ? memberById.get(module.assignee_user_id)?.position_name || "未设置岗位"
-          : "",
-      ]),
-    ),
-  );
   const [assignees, setAssignees] = useState<Record<string, string>>(() =>
     Object.fromEntries(modules.map((module) => [module.module_code, module.assignee_user_id || ""])),
   );
@@ -4661,29 +4646,26 @@ function AssignmentManifestWorkbench({
         <header><strong>业务模组负责人</strong><span>按业务顺序流转到具体人员</span></header>
         <div className="table-wrap">
           <table className="assignment-manifest-table">
-            <thead><tr><th>业务模组</th><th>负责岗位</th><th>具体负责人</th><th>顺序</th><th>状态</th></tr></thead>
+            <thead><tr><th>业务模组</th><th>执行人（部门 → 岗位 → 个人）</th><th>顺序</th><th>状态</th></tr></thead>
             <tbody>
               {modules.map((module, index) => {
-                const role = roles[module.module_code] || "";
-                const availableMembers = role
-                  ? members.filter((member) => (member.position_name || "未设置岗位") === role)
-                  : members;
                 return <tr key={module.id}>
                   <td><strong>{moduleLabels[module.module_code] || module.module_name}</strong><small>{module.current_step_name || "未开始"}</small></td>
-                  <td><select className="control filled" value={role} onChange={(event) => {
-                    const nextRole = event.currentTarget.value;
-                    setRoles((current) => ({ ...current, [module.module_code]: nextRole }));
-                    setAssignees((current) => ({ ...current, [module.module_code]: "" }));
-                  }} required><option value="">选择负责岗位</option>{positions.map((position) => <option key={position} value={position}>{position}</option>)}</select></td>
-                  <td><select className="control editing" name={`moduleAssignee_${module.module_code}`} value={assignees[module.module_code] || ""} onChange={(event) => {
-                    const nextAssignee = event.currentTarget.value;
-                    setAssignees((current) => ({ ...current, [module.module_code]: nextAssignee }));
-                  }} required><option value="">选择具体负责人</option>{availableMembers.map((member) => <option key={member.id} value={member.id}>{member.display_name}</option>)}</select></td>
+                  <td><OrganizationAssigneePicker
+                    members={members}
+                    name={`moduleAssignee_${module.module_code}`}
+                    idPrefix={`module-assignee-${module.module_code}`}
+                    value={assignees[module.module_code] || ""}
+                    onChange={(nextAssignee) => {
+                      setAssignees((current) => ({ ...current, [module.module_code]: nextAssignee }));
+                    }}
+                    personLabel="具体负责人"
+                  /></td>
                   <td>{String(index + 1).padStart(2, "0")}</td>
                   <td><span className={`assignment-row-status${assignees[module.module_code] ? " ready" : ""}`}>{assignees[module.module_code] ? "待确认" : "待分配"}</span></td>
                 </tr>;
               })}
-              {!modules.length && <tr><td colSpan={5} className="empty-state">当前没有需要分配的业务模组</td></tr>}
+              {!modules.length && <tr><td colSpan={4} className="empty-state">当前没有需要分配的业务模组</td></tr>}
             </tbody>
           </table>
         </div>
@@ -4691,7 +4673,14 @@ function AssignmentManifestWorkbench({
       <section className="assignment-manifest-section assignment-manifest-extra">
         <header><strong>派单补充</strong><span>办理期限第一期不显示</span></header>
         <div className="assignment-manifest-fields">
-          <label><span>主操作员 <b>*</b></span><select className="control editing" name="assigneeUserId" value={mainAssignee} onChange={(event) => setMainAssignee(event.currentTarget.value)} required><option value="">选择主操作员</option>{members.map((member) => <option key={member.id} value={member.id}>{member.display_name}{member.position_name ? ` · ${member.position_name}` : ""}</option>)}</select></label>
+          <OrganizationAssigneePicker
+            members={members}
+            name="assigneeUserId"
+            idPrefix="assignment-main-assignee"
+            value={mainAssignee}
+            onChange={setMainAssignee}
+            personLabel="主操作员"
+          />
           <label className="wide"><span>派单说明</span><textarea className="control filled" name="notes" rows={2} placeholder="如需特别说明可填写" /></label>
         </div>
       </section>

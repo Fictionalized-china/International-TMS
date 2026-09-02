@@ -12,6 +12,8 @@ import { runOrderWorkflowAction } from "../lib/order-workflow-action.server";
 import { valueOf } from "../lib/validation";
 import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 import { Modal } from "../components/Modal";
+import { OrganizationAssigneePicker } from "../components/OrganizationAssigneePicker";
+import type { OrganizationAssigneeMember } from "../lib/organization-assignee";
 import { ConfirmAction } from "../components/ConfirmAction";
 import { writeAudit } from "../lib/audit.server";
 import {
@@ -184,11 +186,7 @@ type TaskSummary = {
   overdue_count: number;
 };
 type Service = { service_code: string; service_name: string; status: string };
-type Member = {
-  id: string;
-  display_name: string;
-  department_name: string | null;
-};
+type Member = OrganizationAssigneeMember;
 type CustomerOption = { id: string; code: string; name: string };
 type ExpenseRisk = {
   receivable_count: number;
@@ -365,7 +363,18 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
   ]);
   const [members, customers, transitions, expenseRisk] = await Promise.all([
     env.DB.prepare(
-      "SELECT u.id,u.display_name,d.name department_name FROM memberships m JOIN users u ON u.id=m.user_id LEFT JOIN departments d ON d.id=m.department_id WHERE m.organization_id=? AND m.status='active' AND u.status='active' ORDER BY d.sort_order,u.display_name",
+      `SELECT u.id,u.display_name,
+              d.id department_id,d.name department_name,
+              p.id position_id,p.name position_name
+         FROM memberships m
+         JOIN users u ON u.id=m.user_id AND u.status='active'
+         JOIN departments d
+           ON d.id=m.department_id AND d.organization_id=m.organization_id AND d.status='active'
+         JOIN positions p
+           ON p.id=m.position_id AND p.organization_id=m.organization_id AND p.status='active'
+          AND p.department_code=d.code
+        WHERE m.organization_id=? AND m.status='active'
+        ORDER BY d.sort_order,p.sort_order,u.display_name`,
     )
       .bind(current.organizationId)
       .all<Member>(),
@@ -851,7 +860,21 @@ function LinearOrderWorkspace({
             <div className="action-buttons">
               {!viewingCurrent && <Link className="btn" to={`?stage=${encodeURIComponent(currentStepKey)}`}>返回当前节点</Link>}
               {viewingCurrent && !orderCompleted && (directAction && !guidance.blocker ? (
-                <Form method="post" className="linear-primary-form"><input type="hidden" name="intent" value="workflow_action"/><input type="hidden" name="actionCode" value={directAction.actionCode}/>{directAction.assigneeUserId ? <input type="hidden" name="assigneeUserId" value={directAction.assigneeUserId}/> : directAction.requiresAssignee ? <select className="control" name="assigneeUserId" required defaultValue=""><option value="">选择下一处理人</option>{data.members.map((member) => <option key={member.id} value={member.id}>{member.display_name}{member.department_name ? ` · ${member.department_name}` : ""}</option>)}</select> : null}<button className="btn primary" disabled={busy}>{directAction.label}</button></Form>
+                <Form method="post" className="linear-primary-form">
+                  <input type="hidden" name="intent" value="workflow_action"/>
+                  <input type="hidden" name="actionCode" value={directAction.actionCode}/>
+                  {directAction.assigneeUserId ? (
+                    <input type="hidden" name="assigneeUserId" value={directAction.assigneeUserId}/>
+                  ) : directAction.requiresAssignee ? (
+                    <OrganizationAssigneePicker
+                      members={data.members}
+                      name="assigneeUserId"
+                      idPrefix="linear-next-assignee"
+                      personLabel="下一处理人"
+                    />
+                  ) : null}
+                  <button className="btn primary" disabled={busy}>{directAction.label}</button>
+                </Form>
               ) : data.embeddedModuleRedirect ? (
                 <Link className="btn primary" to={data.embeddedModuleRedirect}>打开关联业务单</Link>
               ) : data.embeddedModuleData ? (
@@ -1317,14 +1340,12 @@ function OrderBusinessForm({
               {directAction.assigneeUserId ? (
                 <input type="hidden" name="assigneeUserId" value={directAction.assigneeUserId} />
               ) : directAction.requiresAssignee ? (
-                <select name="assigneeUserId" required defaultValue="">
-                  <option value="">选择下一处理人</option>
-                  {data.members.map((member) => (
-                    <option key={member.id} value={member.id}>
-                      {member.display_name}{member.department_name ? ` · ${member.department_name}` : ""}
-                    </option>
-                  ))}
-                </select>
+                <OrganizationAssigneePicker
+                  members={data.members}
+                  name="assigneeUserId"
+                  idPrefix="sticky-next-assignee"
+                  personLabel="下一处理人"
+                />
               ) : null}
               <button className="primary" disabled={busy}>{directAction.label}</button>
             </Form>
@@ -1970,15 +1991,12 @@ function OrderCommandCenter({
                       value={directAction.assigneeUserId}
                     />
                   ) : directAction.requiresAssignee ? (
-                    <select name="assigneeUserId" required defaultValue="">
-                      <option value="">选择下一处理人</option>
-                      {data.members.map((member) => (
-                        <option key={member.id} value={member.id}>
-                          {member.display_name}
-                          {member.department_name ? ` · ${member.department_name}` : ""}
-                        </option>
-                      ))}
-                    </select>
+                    <OrganizationAssigneePicker
+                      members={data.members}
+                      name="assigneeUserId"
+                      idPrefix="console-next-assignee"
+                      personLabel="下一处理人"
+                    />
                   ) : null}
                   <button className="primary" disabled={busy}>
                     {directAction.label}
@@ -2603,18 +2621,12 @@ function OrderDetailAction({
             </p>
           )}
           {Boolean(transition.requires_assignee) && (
-            <label className="field">
-              <span>下一处理人</span>
-              <select name="assigneeUserId" required>
-                <option value="">请选择</option>
-                {members.map((member) => (
-                  <option key={member.id} value={member.id}>
-                    {member.display_name}
-                    {member.department_name ? ` · ${member.department_name}` : ""}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <OrganizationAssigneePicker
+              members={members}
+              name="assigneeUserId"
+              idPrefix={`workflow-action-${transition.action_code}`}
+              personLabel="下一处理人"
+            />
           )}
           <label className="field">
             <span>流转备注</span>

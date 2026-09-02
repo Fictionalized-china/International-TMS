@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { requireActiveOrganizationAssignee } from "./organization-assignee.server";
 import {
   loadOrderModuleWorkflowFields,
   missingRequiredModuleFields,
@@ -819,12 +820,10 @@ export async function assignOrderModule(input: {
 }) {
   const module = await moduleRow(input);
   if (!module.enabled) throw new Error("该模块未启用");
-  const user = await env.DB.prepare(
-    "SELECT 1 FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=? AND m.user_id=? AND m.status='active' AND u.status='active'",
-  )
-    .bind(input.organizationId, input.assigneeUserId)
-    .first();
-  if (!user) throw new Error("负责人无效");
+  await requireActiveOrganizationAssignee(
+    input.organizationId,
+    input.assigneeUserId,
+  );
   const definition = orderModuleDefinition(input.moduleCode);
   if (!definition) throw new Error("模块不存在");
   const now = new Date().toISOString();

@@ -5,6 +5,7 @@ import {
 } from "./order-modules.server";
 import { missingRequiredWorkflowStepFields } from "./workflow-fields.server";
 import { isAssignedOrderApprover } from "./order-workflow";
+import { isActiveOrganizationAssignee } from "./organization-assignee.server";
 
 export type OrderWorkflowTransition = {
   action_code: string;
@@ -171,15 +172,14 @@ export async function validateOrderWorkflowAction(input: {
     }
   }
   if (input.assigneeUserId) {
-    const member = await env.DB.prepare(
-      "SELECT 1 FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=? AND m.user_id=? AND m.status='active' AND u.status='active'",
-    )
-      .bind(input.organizationId, input.assigneeUserId)
-      .first();
-    if (!member)
+    const validAssignee = await isActiveOrganizationAssignee(
+      input.organizationId,
+      input.assigneeUserId,
+    );
+    if (!validAssignee)
       return {
         ok: false as const,
-        reason: "指定的处理人无效",
+        reason: "请选择部门、岗位下的有效个人账户",
         order,
         transition,
       };

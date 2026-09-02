@@ -153,8 +153,18 @@ export async function action({ request }: Route.ActionArgs) {
     const membershipId = valueOf(form, "membershipId");
     const positionId = valueOf(form, "positionId");
     const position = await env.DB.prepare(
-      "SELECT id,code,name FROM positions WHERE id=? AND organization_id=? AND status='active'",
-    ).bind(positionId, current.organizationId).first<{ id: string; code: string; name: string }>();
+      `SELECT p.id,p.code,p.name,p.department_code,d.id department_id
+         FROM positions p
+         JOIN departments d
+           ON d.organization_id=p.organization_id AND d.code=p.department_code AND d.status='active'
+        WHERE p.id=? AND p.organization_id=? AND p.status='active'`,
+    ).bind(positionId, current.organizationId).first<{
+      id: string;
+      code: string;
+      name: string;
+      department_code: string;
+      department_id: string;
+    }>();
     const membership = await env.DB.prepare(
       "SELECT id FROM memberships WHERE id=? AND organization_id=? AND status='active'",
     ).bind(membershipId, current.organizationId).first<{ id: string }>();
@@ -165,7 +175,7 @@ export async function action({ request }: Route.ActionArgs) {
     ).bind(current.organizationId, roleCode).first<{ id: string }>();
     if (!role) return { formError: `岗位 ${position.name} 还没有对应角色，请先执行数据库迁移或在角色权限中补齐` };
     await env.DB.batch([
-      env.DB.prepare("UPDATE memberships SET position_id=?,updated_at=? WHERE id=? AND organization_id=?").bind(position.id, now, membershipId, current.organizationId),
+      env.DB.prepare("UPDATE memberships SET department_id=?,position_id=?,title=?,updated_at=? WHERE id=? AND organization_id=?").bind(position.department_id, position.id, position.name, now, membershipId, current.organizationId),
       env.DB.prepare("INSERT OR IGNORE INTO membership_roles(membership_id,role_id) VALUES(?,?)").bind(membershipId, role.id),
     ]);
     await writeAudit({
@@ -175,7 +185,11 @@ export async function action({ request }: Route.ActionArgs) {
       resourceId: membershipId,
       organizationId: current.organizationId,
       actorUserId: current.userId,
-      metadata: { positionCode: position.code, roleCode },
+      metadata: {
+        departmentCode: position.department_code,
+        positionCode: position.code,
+        roleCode,
+      },
     });
     return { success: `已把账号绑定到岗位：${position.name}` };
   }
@@ -228,6 +242,12 @@ export async function action({ request }: Route.ActionArgs) {
   const sortOrder = Number(valueOf(form, "sortOrder") || 100);
   if (!/^[A-Z0-9-_]{2,32}$/.test(code) || name.length < 2 || name.length > 40 || !Number.isSafeInteger(sortOrder))
     return { formError: "请填写有效的岗位代码、岗位名称和排序" };
+  if (!departmentCode)
+    return { formError: "岗位必须归属到具体部门" };
+  const department = await env.DB.prepare(
+    "SELECT id FROM departments WHERE organization_id=? AND code=? AND status='active'",
+  ).bind(current.organizationId, departmentCode).first<{ id: string }>();
+  if (!department) return { formError: "请选择有效的归属部门" };
   await env.DB.prepare(
     `INSERT INTO positions(id,organization_id,code,name,department_code,status,sort_order,created_at,updated_at)
      VALUES(?,?,?,?,?,'active',?,?,?)
@@ -235,6 +255,14 @@ export async function action({ request }: Route.ActionArgs) {
        name=excluded.name,department_code=excluded.department_code,status='active',
        sort_order=excluded.sort_order,updated_at=excluded.updated_at`,
   ).bind(crypto.randomUUID(), current.organizationId, code, name, departmentCode, sortOrder, now, now).run();
+  const savedPosition = await env.DB.prepare(
+    "SELECT id FROM positions WHERE organization_id=? AND code=?",
+  ).bind(current.organizationId, code).first<{ id: string }>();
+  if (savedPosition) {
+    await env.DB.prepare(
+      "UPDATE memberships SET department_id=?,title=?,updated_at=? WHERE organization_id=? AND position_id=?",
+    ).bind(department.id, name, now, current.organizationId, savedPosition.id).run();
+  }
   await writeAudit({
     request,
     action: "position.upsert",
@@ -299,7 +327,7 @@ export default function Positions({ loaderData, actionData }: Route.ComponentPro
                         <select name="positionId" defaultValue={member.position_id || ""} required>
                           <option value="">选择岗位</option>
                           {loaderData.positions.filter((position) => position.status === "active").map((position) => (
-                            <option key={position.id} value={position.id}>{position.name}</option>
+                            <option key={position.id} value={position.id}>{position.department_name} / {position.name}</option>
                           ))}
                         </select>
                         <button className="secondary" disabled={busy}>保存</button>
@@ -329,8 +357,8 @@ export default function Positions({ loaderData, actionData }: Route.ComponentPro
             </label>
             <label className="field">
               <span>归属部门</span>
-              <select name="departmentCode">
-                <option value="">暂不指定</option>
+              <select name="departmentCode" required>
+                <option value="">选择归属部门</option>
                 {loaderData.departments.map((department) => (
                   <option key={department.code} value={department.code}>{department.code} · {department.name}</option>
                 ))}
