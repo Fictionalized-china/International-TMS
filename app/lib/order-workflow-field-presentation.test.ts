@@ -4,6 +4,7 @@ import {
   cargoDetailFieldGroups,
   orderWorkflowPresentationKeys,
   quotationCargoPresentationKeys,
+  workflowFieldsForStep,
 } from "./order-workflow-field-presentation";
 import { hasVisibleRuntimeWorkflowField } from "./workflow-field-runtime";
 
@@ -51,5 +52,17 @@ describe("order workflow field presentation contract", () => {
         hasVisibleRuntimeWorkflowField(fields, group.fieldKeys),
       ),
     ).toEqual([]);
+  });
+
+  it("does not show a later workflow node field inside the second step", () => {
+    const fields = [
+      { fieldKey:"document_consignment_letter", stepKey:"order_creation" },
+      { fieldKey:"e2e_secondary_review_result", stepKey:"custom_secondary_review" },
+    ];
+
+    expect(workflowFieldsForStep(fields,"order_creation").map((field) => field.fieldKey))
+      .toEqual(["document_consignment_letter"]);
+    expect(workflowFieldsForStep(fields,"custom_secondary_review").map((field) => field.fieldKey))
+      .toEqual(["e2e_secondary_review_result"]);
   });
 });

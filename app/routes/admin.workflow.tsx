@@ -13,6 +13,7 @@ import { Modal } from "../components/Modal";
 import { ConfirmAction } from "../components/ConfirmAction";
 import { OrderNumberLink } from "../components/EntityNumberLink";
 import { orderModuleDefinitions, type OrderModuleCode } from "../lib/order-modules";
+import { chunkD1Rows, chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 import {
   workflowFieldCatalog,
   workflowFieldCatalogByKey,
@@ -37,6 +38,7 @@ import { reconcileWorkflowFieldRuntimeStatus } from "../lib/workflow-field-runti
 import {
   editableWorkflowFieldFlags,
   editableWorkflowFieldMode,
+  parseWorkflowFieldModeChanges,
   normalizedWorkflowSortOrders,
   parseWorkflowSortOrder,
   normalizeWorkflowStepRequiredFlag,
@@ -46,6 +48,7 @@ import {
   workflowInsertionSortOrder,
   workflowIntentAllowedForUsage,
   workflowFieldPlacementLock,
+  type EditableWorkflowFieldMode,
 } from "../lib/workflow-edit-policy";
 import {
   filterWorkflowFieldLocatorItems,
@@ -107,6 +110,15 @@ type StepField = {
   help_text: string | null;
   module_code: OrderModuleCode;
   updated_at: string;
+};
+type BatchEditableStepField = StepField & {
+  step_key: string;
+  step_name: string;
+};
+type StagedWorkflowFieldModeChange = {
+  field: StepField;
+  currentMode: EditableWorkflowFieldMode;
+  mode: EditableWorkflowFieldMode;
 };
 type StepModule = {
   id: string;
@@ -396,6 +408,162 @@ export async function action({ request }: Route.ActionArgs) {
       ).bind(now,current.userId,now,definition.id,current.organizationId),
     ]);
     return { success: `工作流 v${definition.version_number} 已发布；旧订单继续使用原版本` };
+  }
+
+  if (intent === "field_modes_batch_update") {
+    const requestedChanges = parseWorkflowFieldModeChanges(
+      valueOf(form,"fieldChanges"),
+      500,
+    );
+    if (!requestedChanges)
+      return { formError:"字段规则变更清单无效或超过 500 项，请刷新页面后核对" };
+    const requestedById = new Map(requestedChanges.map((item)=>[item.fieldId,item]));
+    const fields: BatchEditableStepField[] = [];
+    for (const idChunk of chunkD1Values(requestedChanges.map((item)=>item.fieldId),1)) {
+      const rows = await env.DB.prepare(
+        `SELECT f.id,f.step_id,s.step_key,s.name step_name,f.field_key,f.label,f.field_type,
+          f.is_required,f.is_active,f.sort_order,f.options_text,f.help_text,
+          COALESCE(f.module_code,'consignment') module_code,f.updated_at
+         FROM workflow_step_fields f JOIN workflow_steps s ON s.id=f.step_id
+         WHERE f.workflow_id=? AND f.id IN (${d1Placeholders(idChunk.length)})`,
+      ).bind(workflowId,...idChunk).all<BatchEditableStepField>();
+      fields.push(...rows.results);
+    }
+    if (fields.length !== requestedChanges.length)
+      return { formError:"部分字段不存在或已不属于当前工作流，请刷新后重新配置" };
+    const staleFields = fields.filter((field)=>
+      requestedById.get(field.id)?.updatedAt !== field.updated_at,
+    );
+    if (staleFields.length)
+      return { formError:`${staleFields.map((field)=>`“${field.label}”`).join("、")} 已被其他窗口修改，本次没有应用任何变更，请刷新后重试` };
+    const changes = fields.map((field)=>({
+      field,
+      previousMode:workflowFieldMode(field),
+      mode:requestedById.get(field.id)!.mode,
+      updatedAt:requestedById.get(field.id)!.updatedAt,
+    })).filter((item)=>item.previousMode!==item.mode);
+    if (!changes.length) return { success:"字段规则没有变化，无需应用" };
+    const impacts = new Map<string,WorkflowFieldPolicyImpact>();
+    for (const stepKey of [...new Set(changes.map((item)=>item.field.step_key))]) {
+      impacts.set(stepKey,await inspectWorkflowFieldPolicyImpact(workflowId,stepKey));
+    }
+    if ([...impacts.values()].some((impact)=>impact.total>0)&&valueOf(form,"impactConfirmed")!=="1")
+      return { formError:"本次变更会影响现有订单，请先预览影响并在弹窗中二次确认" };
+
+    const updateStatements: D1PreparedStatement[] = [];
+    for (const mode of ["required","optional","hidden"] as const) {
+      const modeChanges = changes.filter((item)=>item.mode===mode);
+      const flags = editableWorkflowFieldFlags(mode);
+      for (const changeChunk of chunkD1Rows(modeChanges,2,4)) {
+        updateStatements.push(env.DB.prepare(
+          `UPDATE workflow_step_fields SET is_required=?,is_active=?,updated_at=?
+           WHERE workflow_id=? AND (${changeChunk.map(()=>"(id=? AND updated_at=?)").join(" OR ")})`,
+        ).bind(
+          flags.isRequired,flags.isActive,now,workflowId,
+          ...changeChunk.flatMap((item)=>[item.field.id,item.updatedAt]),
+        ));
+      }
+    }
+    const updateResults = await env.DB.batch(updateStatements);
+    const appliedCount = updateResults.reduce((sum,result)=>sum+Number(result.meta.changes||0),0);
+    if (appliedCount !== changes.length)
+      return { formError:"应用过程中检测到字段版本冲突，请刷新工作流核对最新规则" };
+
+    let supplementCreated=0,supplementCancelled=0,preservedFiles=0,preservedValues=0;
+    const auditChanges: Record<string,unknown>[] = [];
+    for (const change of changes) {
+      const {field,mode,previousMode}=change;
+      const flags=editableWorkflowFieldFlags(mode);
+      await synchronizeWorkflowFieldDefinitionForInstances({
+        workflowId,
+        stepKey:field.step_key,
+        fieldKey:field.field_key,
+        moduleCode:field.module_code,
+        label:field.label,
+        fieldType:field.field_type,
+        isRequired:flags.isRequired,
+        isActive:flags.isActive,
+        sortOrder:field.sort_order,
+        optionsText:field.options_text,
+        helpText:field.help_text,
+      });
+      if (flags.isActive)
+        await ensureFieldPolicyModule(workflowId,field.step_id,field.module_code,flags.isRequired,now);
+      await reconcileFieldPolicyModule(workflowId,field.step_id,field.module_code,now);
+      const supplementTasks=await synchronizeWorkflowSupplementTasks({
+        organizationId:current.organizationId,
+        workflowId,
+        targetStepKey:field.step_key,
+        moduleCode:field.module_code,
+        fieldKey:field.field_key,
+        fieldLabel:field.label,
+        mode,
+        actorUserId:current.userId,
+      });
+      supplementCreated+=supplementTasks.created;
+      supplementCancelled+=supplementTasks.cancelled;
+      const runtimeStatus=await reconcileWorkflowFieldRuntimeStatus({
+        organizationId:current.organizationId,
+        workflowId,
+        targetStepKey:field.step_key,
+        moduleCode:field.module_code,
+        fieldKey:field.field_key,
+        actorUserId:current.userId,
+        now,
+      });
+      const preserved=flags.preservesStoredValue
+        ?await inspectHiddenWorkflowFieldData({
+          organizationId:current.organizationId,
+          workflowId,
+          fieldKey:field.field_key,
+          moduleCode:field.module_code,
+        })
+        :null;
+      preservedFiles+=preserved?.preservedFiles??0;
+      preservedValues+=preserved?.preservedCustomValues??0;
+      auditChanges.push({
+        fieldId:field.id,
+        fieldKey:field.field_key,
+        fieldLabel:field.label,
+        stepKey:field.step_key,
+        previousMode,
+        mode,
+        impact:impacts.get(field.step_key),
+        supplementTasks,
+        runtimeStatus,
+        preserved,
+      });
+    }
+    await writeAudit({
+      request,
+      action:"workflow.field.requirement.batch_update",
+      resourceType:"workflow_definition",
+      resourceId:workflowId,
+      organizationId:current.organizationId,
+      actorUserId:current.userId,
+      metadata:{workflowId,lifecycleStatus:definition.lifecycle_status,changes:auditChanges},
+    });
+    const summary=changes.slice(0,8).map((item)=>
+      `${item.field.label}：${workflowModeLabel(item.previousMode)}→${workflowModeLabel(item.mode)}`,
+    ).join("；");
+    await broadcastInternalNotification({
+      organizationId:current.organizationId,
+      actorUserId:current.userId,
+      category:"workflow_field_policy_changed",
+      severity:changes.some((item)=>item.mode==="required")?"critical":"warning",
+      title:`工作流字段规则已批量变更：${changes.length} 项`,
+      message:`${summary}${changes.length>8?`；另有 ${changes.length-8} 项` : ""}。历史节点不会回退，后续门禁已同步。`,
+      link:`/admin/workflow?workflowId=${encodeURIComponent(workflowId)}`,
+      requiresLeadershipAck:true,
+    });
+    const taskText=[
+      supplementCreated?`新增 ${supplementCreated} 项补录任务`:"",
+      supplementCancelled?`关闭 ${supplementCancelled} 项旧补录任务`:"",
+    ].filter(Boolean).join("，");
+    const preservedText=preservedFiles||preservedValues
+      ?`；保留 ${preservedFiles} 个历史文件和 ${preservedValues} 条历史值`
+      :"";
+    return { success:`已一次应用 ${changes.length} 项字段规则，现有订单后续门禁已同步${taskText?`；${taskText}`:""}${preservedText}` };
   }
 
   if (intent === "field_mode_update") {
@@ -2004,6 +2172,17 @@ function NodeConfigDialog({
   focusedFieldId:string|null;
 }) {
   const stepNames = new Map(steps.map((step) => [step.id, step.name]));
+  const [draftModes,setDraftModes] = useState<Record<string,EditableWorkflowFieldMode>>(()=>
+    Object.fromEntries(allFields.map((field)=>[field.id,workflowFieldMode(field)])),
+  );
+  const stagedChanges = allFields.map((field)=>({
+    field,
+    currentMode:workflowFieldMode(field),
+    mode:draftModes[field.id]??workflowFieldMode(field),
+  })).filter((item)=>item.currentMode!==item.mode);
+  const stageFieldMode = (fieldId:string,mode:EditableWorkflowFieldMode) => {
+    setDraftModes((current)=>({...current,[fieldId]:mode}));
+  };
   const locatorItems: WorkflowFieldLocatorItem[] = allFields.map((field) => ({
     id: field.id,
     label: field.label,
@@ -2044,7 +2223,7 @@ function NodeConfigDialog({
           <span>{structureEditable ? "该工作流尚无订单，可像积木一样插入、删除节点并配置字段。" : "该工作流已有订单：节点、模组和步骤锁定，仍可在既有节点新增字段并设置为必填、选填或隐藏。"}</span>
         </div>
         <div className="workflow-config-dialog-tools">
-          <small>{structureEditable ? "首份报价保存后自动锁定节点结构。" : "保存即同步到既有业务实例和后续门禁；隐藏只影响显示，历史值和附件永久保留审计。"}</small>
+          <small>{structureEditable ? "首份报价保存后自动锁定节点结构。" : "字段修改先暂存，点击确认应用后一次性同步到既有业务实例和后续门禁；隐藏只影响显示，历史值和附件永久保留审计。"}</small>
           {structureEditable && (
             <Modal title="新增流程节点" triggerLabel="新增节点" triggerClassName="secondary" closeSignal={closeSignal}>
               <NodeCreateForm workflowId={workflowId} activeSteps={steps.filter((step) => step.is_active)} busy={busy} />
@@ -2103,10 +2282,19 @@ function NodeConfigDialog({
               closeSignal={closeSignal}
               impact={fieldPolicyImpacts[step.step_key]??{total:0,future:0,current:0,historical:0,auditOnly:0}}
               highlightedFieldId={highlightedFieldId}
+              draftModes={draftModes}
+              onModeChange={stageFieldMode}
             />
           </details>
         ))}
       </div>
+      {requirementEditable&&<WorkflowFieldBatchActions
+        workflowId={workflowId}
+        changes={stagedChanges}
+        steps={steps}
+        fieldPolicyImpacts={fieldPolicyImpacts}
+        busy={busy}
+      />}
     </div>
   );
 }
@@ -2300,6 +2488,8 @@ function FieldList({
   closeSignal,
   impact,
   highlightedFieldId,
+  draftModes,
+  onModeChange,
 }: {
   workflowId: string;
   step: Step;
@@ -2313,6 +2503,8 @@ function FieldList({
   closeSignal?: unknown;
   impact:WorkflowFieldPolicyImpact;
   highlightedFieldId:string|null;
+  draftModes:Record<string,EditableWorkflowFieldMode>;
+  onModeChange:(fieldId:string,mode:EditableWorkflowFieldMode)=>void;
 }) {
   return (
     <div className="workflow-field-config">
@@ -2329,8 +2521,14 @@ function FieldList({
           <tbody>
             {fields.map((field) => {
               const mode = workflowFieldMode(field);
+              const draftMode=draftModes[field.id]??mode;
+              const modeChanged=draftMode!==mode;
+              const rowClassName=[
+                highlightedFieldId===field.id?"workflow-field-locator-target":"",
+                modeChanged?"workflow-field-mode-pending":"",
+              ].filter(Boolean).join(" ")||undefined;
               return (
-                <tr key={field.id} id={`workflow-field-${field.id}`} tabIndex={-1} className={highlightedFieldId===field.id?"workflow-field-locator-target":undefined}>
+                <tr key={field.id} id={`workflow-field-${field.id}`} tabIndex={-1} className={rowClassName}>
                   <td>{field.sort_order}</td>
                   <td><strong>{field.label}</strong><small>{field.field_key}</small></td>
                   <td>{moduleLabels[field.module_code]}</td>
@@ -2340,7 +2538,7 @@ function FieldList({
                   <td>
                     <div className="workflow-field-row-actions">
                       {requirementEditable && (
-                        <RequirementModeForm workflowId={workflowId} field={field} impact={impact} busy={busy} />
+                        <RequirementModeSelect field={field} mode={draftMode} changed={modeChanged} busy={busy} onModeChange={onModeChange}/>
                       )}
                       {structureEditable && (
                         <Modal title={`编辑字段 · ${field.label}`} triggerLabel="编辑结构" triggerClassName="text-button" size="wide" closeSignal={closeSignal}>
@@ -2374,51 +2572,90 @@ function FieldList({
   );
 }
 
-function RequirementModeForm({
-  workflowId,
+function RequirementModeSelect({
   field,
-  impact,
+  mode,
+  changed,
   busy,
+  onModeChange,
 }: {
-  workflowId: string;
   field: StepField;
-  impact:WorkflowFieldPolicyImpact;
+  mode:EditableWorkflowFieldMode;
+  changed:boolean;
   busy: boolean;
+  onModeChange:(fieldId:string,mode:EditableWorkflowFieldMode)=>void;
 }) {
-  const [mode,setMode]=useState(workflowFieldMode(field));
-  const formId=`workflow-field-mode-${field.id}`;
-  const modeLabel=mode==="required"?"必填":mode==="optional"?"选填":"隐藏";
-  const description=mode==="required"
-    ? `改为必填后：${impact.current} 张当前节点订单与 ${impact.future} 张未到达订单启用门禁；${impact.historical} 张已通过节点订单生成资料补录；${impact.auditOnly} 张已出境或完成订单只生成审计补录。历史节点不会回退。`
-    : mode==="hidden"
-      ? `改为隐藏后，${impact.total} 张订单停止显示和校验该字段；已有值与附件永久保留审计，相关未完成补录任务关闭。`
-      : `改为选填后，${impact.total} 张订单不再因该字段阻断，相关未完成补录任务关闭；已有数据保持不变。`;
   return (
-    <Form id={formId} method="post" className="workflow-requirement-form">
-      <input type="hidden" name="intent" value="field_mode_update" />
-      <input type="hidden" name="workflowId" value={workflowId} />
-      <input type="hidden" name="fieldId" value={field.id} />
-      <input type="hidden" name="fieldUpdatedAt" value={field.updated_at} />
-      <select name="fieldMode" value={mode} onChange={(event)=>setMode(editableWorkflowFieldMode(event.target.value)??"optional")} aria-label={`${field.label}填写规则`}>
+    <div className="workflow-requirement-form">
+      <select value={mode} disabled={busy} onChange={(event)=>onModeChange(field.id,editableWorkflowFieldMode(event.target.value)??"optional")} aria-label={`${field.label}填写规则`}>
         <option value="required">必填</option>
         <option value="optional">选填</option>
         <option value="hidden">隐藏</option>
       </select>
+      {changed&&<span className="workflow-field-pending-label">待应用</span>}
+    </div>
+  );
+}
+
+function WorkflowFieldBatchActions({
+  workflowId,
+  changes,
+  steps,
+  fieldPolicyImpacts,
+  busy,
+}: {
+  workflowId:string;
+  changes:StagedWorkflowFieldModeChange[];
+  steps:Step[];
+  fieldPolicyImpacts:Record<string,WorkflowFieldPolicyImpact>;
+  busy:boolean;
+}) {
+  const formId=`workflow-field-mode-batch-${workflowId}`;
+  const stepById=new Map(steps.map((step)=>[step.id,step]));
+  const payload=JSON.stringify(changes.map(({field,mode})=>({
+    fieldId:field.id,
+    mode,
+    updatedAt:field.updated_at,
+  })));
+  const affectedStepCount=new Set(changes.map((item)=>item.field.step_id)).size;
+  return <div className="workflow-field-batch-bar" role="region" aria-label="字段规则批量操作">
+    <Form id={formId} method="post" hidden>
+      <input type="hidden" name="intent" value="field_modes_batch_update"/>
+      <input type="hidden" name="workflowId" value={workflowId}/>
+      <input type="hidden" name="fieldChanges" value={payload}/>
+    </Form>
+    <div className="workflow-field-batch-status" aria-live="polite">
+      <strong>{changes.length?`${changes.length} 项待应用变更`:"尚未修改字段规则"}</strong>
+      <span>{changes.length?`涉及 ${affectedStepCount} 个节点；确认前不会改变实际工作流。`:"在任意字段下拉框选择新规则后，可统一预览和应用。"}</span>
+    </div>
+    <div className="workflow-field-batch-buttons">
+      {changes.length?<Modal title={`预览字段规则变更 · ${changes.length} 项`} triggerLabel="预览" triggerClassName="secondary" size="wide">
+        <div className="workflow-field-batch-preview">
+          <div className="alert warning" role="status">这里只预览，不会保存。确认应用后，全部变更作为一次提交同步到实际工作流、现有订单门禁和补录任务。</div>
+          <div className="table-wrap"><table><thead><tr><th>节点 / 字段</th><th>规则变化</th><th>现有订单影响</th></tr></thead><tbody>{changes.map(({field,currentMode,mode})=>{
+            const step=stepById.get(field.step_id);
+            const impact=fieldPolicyImpacts[step?.step_key??""]??{total:0,future:0,current:0,historical:0,auditOnly:0};
+            return <tr key={field.id}><td><strong>{field.label}</strong><small>{step?.name??"未知节点"} · 顺序 {step?.sort_order??"—"}</small></td><td><span className={`status-pill workflow-mode-${currentMode}`}>{workflowModeLabel(currentMode)}</span><b className="workflow-field-change-arrow">→</b><span className={`status-pill workflow-mode-${mode}`}>{workflowModeLabel(mode)}</span></td><td>{impact.total?`${impact.total} 张：当前 ${impact.current}、未来 ${impact.future}、历史补录 ${impact.historical}、仅审计 ${impact.auditOnly}`:"当前没有既有订单受影响"}</td></tr>;
+          })}</tbody></table></div>
+        </div>
+      </Modal>:<button type="button" className="secondary" disabled>预览</button>}
       <ConfirmAction
-        title={`确认将“${field.label}”设为${modeLabel}`}
-        description={description}
-        triggerLabel="预览影响"
-        confirmLabel="确认应用规则"
-        className="text-button"
+        title={`确认一次应用 ${changes.length} 项字段规则`}
+        description={`系统会把当前页面暂存的 ${changes.length} 项变化一次提交，并按订单阶段同步门禁与补录任务；历史节点不会回退，隐藏字段的历史数据永久保留。`}
+        triggerLabel="确认应用"
+        confirmLabel="确认应用全部变更"
+        className="primary"
         confirmClassName="primary"
         formId={formId}
         name="impactConfirmed"
         value="1"
         formNoValidate={false}
+        disabled={!changes.length}
         pending={busy}
+        pendingLabel="正在应用…"
       />
-    </Form>
-  );
+    </div>
+  </div>;
 }
 
 function FieldForm({

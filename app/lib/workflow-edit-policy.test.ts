@@ -4,6 +4,7 @@ import {
   editableWorkflowFieldMode,
   normalizeWorkflowStepRequiredFlag,
   normalizedWorkflowSortOrders,
+  parseWorkflowFieldModeChanges,
   parseWorkflowSortOrder,
   partitionWorkflowDefinitionsByRoadType,
   workflowEditCapabilities,
@@ -41,6 +42,7 @@ describe("workflow edit policy", () => {
     expect(workflowIntentAllowedForUsage("create", 0)).toBe(true);
     expect(workflowIntentAllowedForUsage("create", 1)).toBe(false);
     expect(workflowIntentAllowedForUsage("field_mode_update", 1200)).toBe(true);
+    expect(workflowIntentAllowedForUsage("field_modes_batch_update", 1200)).toBe(true);
     expect(workflowIntentAllowedForUsage("field_catalog_assign", 1200)).toBe(true);
     expect(workflowIntentAllowedForUsage("field_create", 1200)).toBe(true);
     expect(workflowIntentAllowedForUsage("field_update", 1200)).toBe(false);
@@ -72,6 +74,25 @@ describe("workflow edit policy", () => {
     expect(editableWorkflowFieldMode("HIDDEN")).toBeNull();
     expect(editableWorkflowFieldMode("0")).toBeNull();
     expect(editableWorkflowFieldMode("O")).toBeNull();
+  });
+
+  it("parses one field-mode change set and rejects ambiguous payloads", () => {
+    expect(parseWorkflowFieldModeChanges(JSON.stringify([
+      { fieldId:"field-a", mode:"required", updatedAt:"2026-09-02T00:00:00.000Z" },
+      { fieldId:"field-b", mode:"hidden", updatedAt:"2026-09-02T00:00:01.000Z" },
+    ]))).toEqual([
+      { fieldId:"field-a", mode:"required", updatedAt:"2026-09-02T00:00:00.000Z" },
+      { fieldId:"field-b", mode:"hidden", updatedAt:"2026-09-02T00:00:01.000Z" },
+    ]);
+    expect(parseWorkflowFieldModeChanges("[]")).toBeNull();
+    expect(parseWorkflowFieldModeChanges("not-json")).toBeNull();
+    expect(parseWorkflowFieldModeChanges(JSON.stringify([
+      { fieldId:"field-a", mode:"required", updatedAt:"v1" },
+      { fieldId:"field-a", mode:"optional", updatedAt:"v1" },
+    ]))).toBeNull();
+    expect(parseWorkflowFieldModeChanges(JSON.stringify([
+      { fieldId:"field-a", mode:"unknown", updatedAt:"v1" },
+    ]))).toBeNull();
   });
 
   it("locks the position and sort of fields after the workflow is used", () => {

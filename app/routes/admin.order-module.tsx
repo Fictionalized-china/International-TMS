@@ -95,6 +95,7 @@ import {
   quotationCargoPresentationKeys,
   quotationConsignmentPresentationKeys,
   quotationCostsPresentationKeys,
+  workflowFieldsForStep,
 } from "../lib/order-workflow-field-presentation";
 
 type OrderSummary = {
@@ -3957,6 +3958,7 @@ export function EmbeddedOrderModule({
   data,
   busy,
   actionUrl,
+  workflowStepKey,
   consignmentSection = "info",
   hideConsignmentActionBar = false,
   approvalMode = false,
@@ -3965,26 +3967,34 @@ export function EmbeddedOrderModule({
   data: Route.ComponentProps["loaderData"];
   busy: boolean;
   actionUrl: string;
+  workflowStepKey?: string | null;
   consignmentSection?: "info" | "files" | "costs";
   hideConsignmentActionBar?: boolean;
   approvalMode?: boolean;
   reviewCloseSignal?: unknown;
 }) {
-  const { order, definition } = data;
+  const scopedData = {
+    ...data,
+    workflowFields: workflowFieldsForStep(
+      data.workflowFields,
+      workflowStepKey ?? data.workflowStageAccess.currentStepKey,
+    ),
+  };
+  const { order, definition } = scopedData;
   const manage =
-    (canManageOrderModule(data.current, definition.code) || canEditWorkflowDefinitionInUi(data.current)) && data.access.canEdit;
+    (canManageOrderModule(scopedData.current, definition.code) || canEditWorkflowDefinitionInUi(scopedData.current)) && scopedData.access.canEdit;
   const canApproveConsignment = isAssignedOrderApprover({
     status: order.status,
     currentAssigneeUserId: order.current_assignee_user_id,
-    currentUserId: data.current.userId,
-  }) || (order.status === "submitted" && canEditWorkflowDefinitionInUi(data.current));
+    currentUserId: scopedData.current.userId,
+  }) || (order.status === "submitted" && canEditWorkflowDefinitionInUi(scopedData.current));
   const compactApproval = definition.code === "consignment" && approvalMode && order.status === "submitted";
 
-  if (!data.workflowStageAccess.available && !canApproveConsignment) {
+  if (!scopedData.workflowStageAccess.available && !canApproveConsignment) {
     return (
       <div className="module-future-stage">
         <strong>当前节点尚未开放办理</strong>
-        <p>{data.workflowStageAccess.reason}</p>
+        <p>{scopedData.workflowStageAccess.reason}</p>
       </div>
     );
   }
@@ -3992,10 +4002,10 @@ export function EmbeddedOrderModule({
   return (
     <embeddedModuleFormAction.Provider value={actionUrl}>
       <div className="linear-module-embedded" id="module-business-data">
-        {!data.access.canEdit && (
+        {!scopedData.access.canEdit && (
           <div className="alert module-access-note">
             <strong>当前为只读状态</strong>
-            <span>{data.access.reason}</span>
+            <span>{scopedData.access.reason}</span>
           </div>
         )}
         {!compactApproval && definition.code !== "loading" &&
@@ -4005,7 +4015,7 @@ export function EmbeddedOrderModule({
             consignmentSection === "files") && (
           <ModuleSourceDocuments
             code={definition.code}
-            data={data}
+            data={scopedData}
             manage={manage}
             canApproveConsignment={canApproveConsignment}
             busy={busy}
@@ -4014,7 +4024,7 @@ export function EmbeddedOrderModule({
         )}
         {compactApproval ? (
           <OrderApprovalReview
-            data={data}
+            data={scopedData}
             manage={manage}
             canApproveConsignment={canApproveConsignment}
             busy={busy}
@@ -4022,7 +4032,7 @@ export function EmbeddedOrderModule({
         ) : (
           <ModuleBusinessData
             code={definition.code}
-            data={data}
+            data={scopedData}
             manage={manage}
             canApproveConsignment={canApproveConsignment}
             busy={busy}
@@ -4033,7 +4043,7 @@ export function EmbeddedOrderModule({
         )}
         {!(["consignment", "transport", "loading"] as OrderModuleCode[]).includes(definition.code) && (
           <WorkflowFieldChecklist
-            fields={data.workflowFields.filter(
+            fields={scopedData.workflowFields.filter(
               (field) =>
                 !field.isBuiltIn &&
                 (definition.code !== "assignment" ||

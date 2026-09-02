@@ -94,3 +94,10 @@ export const orderWorkflowPresentationKeys = new Set<string>([
   ...cargoDetailFieldGroups.flatMap((group) => group.fieldKeys),
   ...quotationCostsPresentationKeys,
 ]);
+
+export function workflowFieldsForStep<T extends { stepKey: string }>(
+  fields: readonly T[],
+  stepKey: string | null | undefined,
+): T[] {
+  return stepKey ? fields.filter((field) => field.stepKey === stepKey) : [...fields];
+}

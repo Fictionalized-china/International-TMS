@@ -1,5 +1,11 @@
 export type EditableWorkflowFieldMode = "required" | "optional" | "hidden";
 
+export type WorkflowFieldModeChangeInput = {
+  fieldId: string;
+  mode: EditableWorkflowFieldMode;
+  updatedAt: string;
+};
+
 export function partitionWorkflowDefinitionsByRoadType<T extends { road_load_type: string }>(definitions: T[]) {
   return {
     ftl: definitions.filter((item) => item.road_load_type === "ftl"),
@@ -65,6 +71,34 @@ export function editableWorkflowFieldFlags(mode: EditableWorkflowFieldMode) {
     isActive: mode === "hidden" ? 0 : 1,
     preservesStoredValue: mode === "hidden",
   } as const;
+}
+
+export function parseWorkflowFieldModeChanges(
+  rawValue: string,
+  maxChanges = 500,
+): WorkflowFieldModeChangeInput[] | null {
+  try {
+    const parsed: unknown = JSON.parse(rawValue);
+    if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > maxChanges)
+      return null;
+    const normalized: WorkflowFieldModeChangeInput[] = [];
+    const fieldIds = new Set<string>();
+    for (const item of parsed) {
+      if (!item || typeof item !== "object") return null;
+      const candidate = item as Record<string, unknown>;
+      const fieldId = typeof candidate.fieldId === "string" ? candidate.fieldId.trim() : "";
+      const updatedAt = typeof candidate.updatedAt === "string" ? candidate.updatedAt.trim() : "";
+      const mode = typeof candidate.mode === "string"
+        ? editableWorkflowFieldMode(candidate.mode)
+        : null;
+      if (!fieldId || !updatedAt || !mode || fieldIds.has(fieldId)) return null;
+      fieldIds.add(fieldId);
+      normalized.push({ fieldId, mode, updatedAt });
+    }
+    return normalized;
+  } catch {
+    return null;
+  }
 }
 
 export function normalizeWorkflowStepRequiredFlag(value: unknown) {

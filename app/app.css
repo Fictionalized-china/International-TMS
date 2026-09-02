@@ -22137,6 +22137,72 @@ button {
   border-radius: 2px;
   background: #fff;
 }
+.workflow-field-table tr.workflow-field-mode-pending td {
+  background: #fff9ed;
+}
+.workflow-field-table tr.workflow-field-mode-pending td:first-child {
+  box-shadow: inset 3px 0 0 #d48a20;
+}
+.workflow-field-pending-label {
+  color: #95540f;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.workflow-field-batch-bar {
+  position: sticky;
+  z-index: 4;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 10px;
+  padding: 11px 12px;
+  border: 1px solid #b8cadc;
+  border-left: 4px solid #226eac;
+  background: #f8fbff;
+  box-shadow: 0 -5px 16px rgb(22 52 80 / 10%);
+}
+.workflow-field-batch-status {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.workflow-field-batch-status strong { color: #183b5a; }
+.workflow-field-batch-status span {
+  color: #586d82;
+  font-size: 11px;
+}
+.workflow-field-batch-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.workflow-field-batch-buttons > button {
+  min-width: 92px;
+  min-height: 34px;
+}
+.workflow-field-batch-preview {
+  display: grid;
+  gap: 10px;
+}
+.workflow-field-batch-preview table {
+  min-width: 720px;
+  table-layout: fixed;
+}
+.workflow-field-batch-preview th:nth-child(1) { width: 31%; }
+.workflow-field-batch-preview th:nth-child(2) { width: 28%; }
+.workflow-field-batch-preview td:nth-child(3) {
+  color: #52657b;
+  font-size: 11px;
+}
+.workflow-field-change-arrow {
+  display: inline-block;
+  margin: 0 7px;
+  color: #64748b;
+}
 .workflow-field-actions {
   padding-bottom: 0;
 }
@@ -24845,6 +24911,9 @@ html[data-motion="off"] *::after {
   .workflow-inspect-actions > * { width: 100%; justify-content: center; }
   .workflow-config-dialog-tools { max-width: none; align-items: stretch; flex-direction: column; }
   .workflow-config-dialog-tools small { text-align: left; }
+  .workflow-field-batch-bar { align-items: stretch; flex-direction: column; }
+  .workflow-field-batch-buttons { width: 100%; }
+  .workflow-field-batch-buttons > * { flex: 1; }
 }
 
 .prototype-quote-form .quote-form-note b { color: #174f79; }
