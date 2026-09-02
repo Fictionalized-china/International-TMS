@@ -11,7 +11,6 @@ import { valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import { Modal } from "../components/Modal";
 import { ConfirmAction } from "../components/ConfirmAction";
-import { OrderNumberLink } from "../components/EntityNumberLink";
 import { orderModuleDefinitions, type OrderModuleCode } from "../lib/order-modules";
 import { chunkD1Rows, chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 import {
@@ -145,20 +144,6 @@ type ModuleTask = {
   instructions: string | null;
 };
 type PositionOption = { code: string; name: string; department_name: string | null };
-type Instance = {
-  id: string;
-  customer_name: string;
-  quote_number: string | null;
-  order_id: string | null;
-  order_number: string | null;
-  shipment_number: string | null;
-  invoice_number: string | null;
-  current_step_key: string;
-  current_step_name: string;
-  status: string;
-  updated_at: string;
-};
-
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "workflow.view");
   await ensureWorkflowCatalogFields(current.organizationId);
@@ -216,23 +201,12 @@ export async function loader({ request }: Route.LoaderArgs) {
        FROM workflow_module_tasks WHERE workflow_id=? ORDER BY step_module_id,sort_order,task_key`,
     ).bind(workflowId).all<ModuleTask>(),
   ]);
-  const [positions, instances, definitionSteps] = await Promise.all([
+  const [positions, definitionSteps] = await Promise.all([
     env.DB.prepare(
       `SELECT p.code,p.name,d.name department_name
        FROM positions p LEFT JOIN departments d ON d.organization_id=p.organization_id AND d.code=p.department_code
        WHERE p.organization_id=? AND p.status='active' ORDER BY p.sort_order,p.name`,
     ).bind(current.organizationId).all<PositionOption>(),
-    env.DB.prepare(
-      `SELECT wi.id,c.name AS customer_name,q.quote_number,o.id order_id,o.order_number,s.shipment_number,i.invoice_number,
-        wi.current_step_key,ws.name AS current_step_name,wi.status,wi.updated_at
-       FROM workflow_instances wi JOIN customers c ON c.id=wi.customer_id
-       JOIN workflow_steps ws ON ws.workflow_id=wi.workflow_id AND ws.step_key=wi.current_step_key
-       LEFT JOIN quotations q ON q.id=wi.quotation_id LEFT JOIN transport_orders o ON o.id=wi.order_id
-       LEFT JOIN shipments s ON s.id=wi.shipment_id LEFT JOIN invoices i ON i.id=wi.invoice_id
-       WHERE wi.organization_id=? AND wi.workflow_id=? ORDER BY wi.updated_at DESC LIMIT 200`,
-    )
-      .bind(current.organizationId, workflowId)
-      .all<Instance>(),
     env.DB.prepare(
       `SELECT ws.workflow_id,ws.id,ws.name,ws.sort_order,ws.actor_scope,ws.is_active,
         COALESCE(GROUP_CONCAT(DISTINCT CASE WHEN wsm.is_active=1 THEN wsm.display_name END),'') module_names,
@@ -290,7 +264,6 @@ export async function loader({ request }: Route.LoaderArgs) {
       moduleTasks.results,
       fields.results,
     ),
-    instances: instances.results,
     fieldPolicyImpacts:Object.fromEntries(impactRows) as Record<string,WorkflowFieldPolicyImpact>,
     canEdit: canEditWorkflowDefinition(current),
   };
@@ -1693,7 +1666,6 @@ export default function Workflow({ loaderData, actionData }: Route.ComponentProp
   const isDraft = loaderData.definition.lifecycle_status === "draft";
   const busy = useNavigation().state !== "idle";
   const [editorOpen, setEditorOpen] = useState(loaderData.openEditor);
-  const activeSteps = loaderData.steps.filter((step) => step.is_active);
   const successMessage = actionData && "success" in actionData ? actionData.success : null;
   const formError = actionData && "formError" in actionData ? actionData.formError : null;
   useEffect(() => {
@@ -1804,151 +1776,45 @@ export default function Workflow({ loaderData, actionData }: Route.ComponentProp
         <div className="alert error">发现 {workflowGroups.unclassified.length} 个未标记整车/拼车类型的历史工作流，已从候选列表隔离，请先修复类型后再使用。</div>
       )}
 
-      <section className="panel" id="workflow-editor">
-        <div className="panel-header">
-          <div>
-            <h2>{loaderData.definition.name}</h2>
-            <p>v{loaderData.definition.version_number} · {capabilities.usedByOrders ? "已有订单：节点结构锁定，字段可实时设为必填、选填或隐藏" : "尚无订单：可自由增删节点、模组、办理步骤和字段积木"}</p>
-          </div>
-          <div className="page-actions">
-            <span className={`status-pill ${loaderData.definition.status !== "active" ? "off" : ""}`}>
-              {lifecycleLabel(loaderData.definition.lifecycle_status)}
-            </span>
-            {manage && capabilities.usedByOrders && (
+      {manage && (
+        <Modal
+          title={`节点配置 · ${loaderData.definition.name}`}
+          size="xwide"
+          isOpen={editorOpen}
+          onOpenChange={setEditorOpen}
+        >
+          {structureEditable && <DefinitionForm definition={loaderData.definition} busy={busy} />}
+          {structureEditable && isDraft && (
+            <div className="workflow-definition-form">
+              <div className={`alert ${loaderData.validationIssues.length ? "warning" : "success"}`}>
+                {loaderData.validationIssues.length
+                  ? `待处理：${loaderData.validationIssues.join("；")}`
+                  : "结构校验通过：节点、模组与办理步骤完整。"}
+              </div>
               <Form method="post">
-                <input type="hidden" name="intent" value="version_create" />
                 <input type="hidden" name="workflowId" value={loaderData.definition.id} />
-                <button className="primary" disabled={busy}>创建新版本</button>
+                <button className="secondary" name="intent" value="validate" disabled={busy}>校验并模拟</button>
+                <button className="primary" name="intent" value="publish" disabled={busy || loaderData.validationIssues.length > 0}>发布版本</button>
               </Form>
-            )}
-            {structureEditable && (
-              <Modal title="新增流程节点" triggerLabel="新增节点" triggerClassName="secondary" closeSignal={successMessage}>
-                <NodeCreateForm workflowId={loaderData.definition.id} activeSteps={activeSteps} busy={busy} />
-              </Modal>
-            )}
-            {manage && (
-              <Modal
-                title={`节点配置 · ${loaderData.definition.name}`}
-                triggerLabel="节点配置"
-                triggerClassName="secondary"
-                size="xwide"
-                isOpen={editorOpen}
-                onOpenChange={setEditorOpen}
-              >
-                <NodeConfigDialog
-                  workflowId={loaderData.definition.id}
-                  steps={loaderData.steps}
-                  fieldsByStep={fieldsByStep}
-                  allFields={loaderData.fields}
-                  structureEditable={structureEditable}
-                  requirementEditable={manage}
-                  busy={busy}
-                  closeSignal={successMessage}
-                  modulesByStep={modulesByStep}
-                  tasksByModule={tasksByModule}
-                  positions={loaderData.positions}
-                  fieldPolicyImpacts={loaderData.fieldPolicyImpacts}
-                  focusedFieldId={loaderData.focusedFieldId}
-                />
-              </Modal>
-            )}
-          </div>
-        </div>
-        {structureEditable && <DefinitionForm definition={loaderData.definition} busy={busy} />}
-        {structureEditable && isDraft && (
-          <div className="workflow-definition-form">
-            <div className={`alert ${loaderData.validationIssues.length ? "warning" : "success"}`}>
-              {loaderData.validationIssues.length
-                ? `待处理：${loaderData.validationIssues.join("；")}`
-                : "结构校验通过：节点、模组与办理步骤完整。"}
             </div>
-            <Form method="post">
-              <input type="hidden" name="workflowId" value={loaderData.definition.id} />
-              <button className="secondary" name="intent" value="validate" disabled={busy}>校验并模拟</button>
-              <button className="primary" name="intent" value="publish" disabled={busy || loaderData.validationIssues.length > 0}>发布版本</button>
-            </Form>
-          </div>
-        )}
-        <div className="table-wrap workflow-track">
-          <table>
-            <thead><tr><th>顺序</th><th>流程节点</th><th>执行角色</th><th>功能模组</th><th>字段规则</th><th>状态</th></tr></thead>
-            <tbody>
-              {activeSteps.map((step, index) => {
-                const stepFields = fieldsByStep.get(step.id) ?? [];
-                const requiredCount = stepFields.filter((field) => field.is_active && field.is_required).length;
-                const optionalCount = stepFields.filter((field) => field.is_active && !field.is_required).length;
-                return (
-                  <tr key={step.id}>
-                    <td>{String(index + 1).padStart(2, "0")}</td>
-                    <td><strong>{step.name}</strong></td>
-                    <td>{scopeLabels[step.actor_scope]}</td>
-                    <td>{(modulesByStep.get(step.id) ?? []).filter((item) => item.is_active).map((item) => item.display_name).join(" / ") || "未配置"}</td>
-                    <td>{requiredCount} 必填 · {optionalCount} 选填</td>
-                    <td><span className="status-pill success">启用</span></td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <section className="panel">
-        <h2>订单流程实例</h2>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>客户</th>
-                <th>报价</th>
-                <th>订单</th>
-                <th>运单</th>
-                <th>账单</th>
-                <th>当前节点</th>
-                <th>更新时间</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {loaderData.instances.map((row) => {
-                const current = activeSteps.find((step) => step.step_key === row.current_step_key);
-                const next = activeSteps.find((step) => (current?.sort_order ?? -1) < step.sort_order);
-                return (
-                  <tr key={row.id}>
-                    <td>
-                      <strong>{row.customer_name}</strong>
-                    </td>
-                    <td>{row.quote_number || "—"}</td>
-                    <td>{row.order_id&&row.order_number?<OrderNumberLink id={row.order_id} number={row.order_number}/>:"—"}</td>
-                    <td>{row.shipment_number || "—"}</td>
-                    <td>{row.invoice_number || "—"}</td>
-                    <td>
-                      <span className={`status-pill ${row.status === "cancelled" ? "off" : ""}`}>
-                        {row.current_step_name}
-                      </span>
-                      {next && !next.is_required && <small>下一步：{next.name}（人工）</small>}
-                    </td>
-                    <td>{new Date(row.updated_at).toLocaleString("zh-CN")}</td>
-                    <td>
-                      {manage && row.status === "active" && next && !next.is_required && (
-                        <Form method="post">
-                          <input type="hidden" name="intent" value="advance" />
-                          <input type="hidden" name="workflowId" value={loaderData.definition.id} />
-                          <input type="hidden" name="instanceId" value={row.id} />
-                          <button className="text-button" disabled={busy}>
-                            推进
-                          </button>
-                        </Form>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-        {!loaderData.instances.length && <p className="empty-state">该模板还没有订单实例。</p>}
-      </section>
+          )}
+          <NodeConfigDialog
+            workflowId={loaderData.definition.id}
+            steps={loaderData.steps}
+            fieldsByStep={fieldsByStep}
+            allFields={loaderData.fields}
+            structureEditable={structureEditable}
+            requirementEditable={manage}
+            busy={busy}
+            closeSignal={successMessage}
+            modulesByStep={modulesByStep}
+            tasksByModule={tasksByModule}
+            positions={loaderData.positions}
+            fieldPolicyImpacts={loaderData.fieldPolicyImpacts}
+            focusedFieldId={loaderData.focusedFieldId}
+          />
+        </Modal>
+      )}
     </>
   );
 }
@@ -2107,7 +1973,7 @@ function WorkflowDefinitionCard({
                 </button>
               )}
               {manage && editorEntryMode === "navigate_and_open" && (
-                <Link className="primary workflow-inspect-primary" to={`/admin/workflow?workflowId=${encodeURIComponent(definition.id)}&edit=1#workflow-editor`} onClick={() => close()}>编辑</Link>
+                <Link className="primary workflow-inspect-primary" to={`/admin/workflow?workflowId=${encodeURIComponent(definition.id)}&edit=1`} onClick={() => close()}>编辑</Link>
               )}
               {manage && <button type="button" className="secondary" onClick={() => setShowClone((current) => !current)}>{showClone ? "收起新建表单" : "以此工作流为基础创建新工作流"}</button>}
               <button type="button" className="secondary" onClick={close}>取消</button>
