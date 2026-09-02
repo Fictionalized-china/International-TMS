@@ -540,7 +540,6 @@ export default function WarehouseOutbound({loaderData,actionData}:Route.Componen
   const inspection=actionData&&"inspection" in actionData
     ?actionData.inspection??loaderData.requestedInspection
     :loaderData.requestedInspection;
-  const uploadOpenSignal=actionData&&"uploadOpenSignal" in actionData?actionData.uploadOpenSignal:undefined;
   useEffect(()=>{
     if(!printHandoverSignal)return;
     const timer=window.setTimeout(()=>window.print(),120);
@@ -557,7 +556,7 @@ export default function WarehouseOutbound({loaderData,actionData}:Route.Componen
       </ol>
       {!unit&&<div className="alert error" role="alert">未找到对应的在仓订单，该订单可能已创建装车任务或已离仓。<Link to={loaderData.pendingHref}>返回列表重新选择</Link></div>}
       {unit&&!unit.ready&&<BlockedLoadingDocumentRemediation key={unit.id} inspection={inspection} reasons={unit.reasons} pendingHref={loaderData.pendingHref} canOperate={canOperate} busy={busy} actionSuccess={actionSuccess} actionError={actionError}/>}
-      {unit?.ready&&<section className="panel outbound-create-section"><div className="panel-header"><div><h2>核验发运文件</h2><p>已有文件自动沿用；只需补齐或替换问题文件，确认总览后创建任务。</p></div><span className="status-pill success">装车条件已满足</span></div>{canOperate?<CreateDispatchWorkbench warehouseId={loaderData.warehouse.id} inspection={inspection} outboundResources={loaderData.outboundResources} borderPorts={loaderData.borderPorts} customsPlaces={loaderData.customsPlaces} busy={busy} actionSuccess={actionSuccess} actionError={actionError} uploadOpenSignal={uploadOpenSignal}/>:<div className="alert warning">当前账户可查看装车条件，但不能创建任务。</div>}</section>}
+      {unit?.ready&&<section className="panel outbound-create-section"><div className="panel-header"><div><h2>核验发运文件</h2><p>按订单页签查看和上传对应文件；全部必需文件齐全后，可在右下角直接创建装车任务。</p></div><span className="status-pill success">装车条件已满足</span></div>{canOperate?<CreateDispatchWorkbench warehouseId={loaderData.warehouse.id} inspection={inspection} outboundResources={loaderData.outboundResources} borderPorts={loaderData.borderPorts} customsPlaces={loaderData.customsPlaces} busy={busy} actionSuccess={actionSuccess} actionError={actionError}/>:<div className="alert warning">当前账户可查看装车条件，但不能创建任务。</div>}</section>}
     </>;
   }
   if(loaderData.view==="pending")return <>
@@ -676,15 +675,15 @@ function BlockedLoadingDocumentRemediation({inspection,reasons,pendingHref,canOp
   </section>;
 }
 
-function OutboundDocumentUploadList({inspection,busy,onlyRequiredUnresolved=false}:{inspection:OutboundInspection;busy:boolean;onlyRequiredUnresolved?:boolean}){
-  const visibleGroups=inspection.documentGroups.map(group=>({
+function OutboundDocumentUploadList({inspection,busy,onlyRequiredUnresolved=false,orderId,warehouseId,showIntro=true}:{inspection:OutboundInspection;busy:boolean;onlyRequiredUnresolved?:boolean;orderId?:string;warehouseId?:string;showIntro?:boolean}){
+  const visibleGroups=inspection.documentGroups.filter(group=>!orderId||group.orderId===orderId).map(group=>({
     ...group,
     documents:onlyRequiredUnresolved
       ?group.documents.filter(document=>document.required&&!['approved','archived'].includes(document.reviewStatus||""))
       :group.documents,
   })).filter(group=>group.documents.length>0);
   return <>
-    <div className="outbound-upload-modal-intro"><strong>{onlyRequiredUnresolved?"需要补充以下文件":"装车任务文件"}</strong><span>点击文件名称即可选择上传；系统沿用已有有效版本，上传成功后会立即刷新当前清单。</span></div>
+    {showIntro&&<div className="outbound-upload-modal-intro"><strong>{onlyRequiredUnresolved?"需要补充以下文件":"装车任务文件"}</strong><span>点击文件名称即可选择上传；系统沿用已有有效版本，上传成功后会立即刷新当前清单。</span></div>}
     {visibleGroups.map(group=><section className="outbound-upload-order" key={group.orderId}>
       <header><strong>{group.orderNumber} · {group.customerName}</strong><span>{group.documents.filter(document=>document.attachmentId).length}/{group.documents.length} 已上传</span></header>
       <div className="table-wrap outbound-document-table"><table><thead><tr><th>点击文件名选择上传</th><th>当前状态</th><th>当前文件</th><th>说明</th></tr></thead><tbody>{group.documents.map(document=><tr className={document.attachmentId?"completed-row":document.required?"required-missing-row":"optional-missing-row"} key={`${document.orderId}:${document.code}`}>
@@ -693,15 +692,68 @@ function OutboundDocumentUploadList({inspection,busy,onlyRequiredUnresolved=fals
           <label className={`outbound-document-name-upload${document.attachmentId?"":document.required?" missing required-missing":" optional-missing"}`}><input className="document-upload-input" name="attachment" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" required disabled={busy} onChange={(event)=>submitForm(event.currentTarget.form)}/><strong>{document.name}</strong><small>{document.required?"必需文件":"选填文件"} · 点击选择{document.attachmentId?"替换":"上传"}</small></label>
         </Form></td>
         <td><span className={`status-pill ${document.attachmentId?"":document.required?"warning":"off"}`}>{outboundDocumentStatus(document)}</span></td>
-        <td title={document.fileName??undefined}>{document.fileName||"尚未上传"}</td>
-        <td>{document.attachmentId?"可点击文件名替换当前版本":"选择后自动上传并刷新"}</td>
+        <td title={document.fileName??undefined}>{document.attachmentId&&warehouseId?<a className="outbound-document-current-file" href={warehouseOrderDocumentHref(document.attachmentId,warehouseId)} target="_blank" rel="noreferrer"><strong>{document.fileName}</strong><small>{formatBytes(document.sizeBytes)}</small></a>:document.fileName||"尚未上传"}</td>
+        <td>{document.attachmentId&&warehouseId?<a className="secondary outbound-document-view-button" href={warehouseOrderDocumentHref(document.attachmentId,warehouseId)} target="_blank" rel="noreferrer">查看文件</a>:document.attachmentId?"可点击文件名替换当前版本":"选择后自动上传并刷新"}</td>
       </tr>)}</tbody></table></div>
     </section>)}
   </>;
 }
 
-function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,borderPorts,customsPlaces,busy,actionSuccess,actionError,uploadOpenSignal}:{warehouseId:string;inspection:OutboundInspection|null;outboundResources:OutboundResources;borderPorts:ReferenceOption[];customsPlaces:ReferenceOption[];busy:boolean;actionSuccess?:string;actionError?:string;uploadOpenSignal?:unknown}){
-  const [reviewOpenSignal,setReviewOpenSignal]=useState<number>();
+function OutboundOrderDocumentWorkspace({inspection,warehouseId,busy}:{inspection:OutboundInspection;warehouseId:string;busy:boolean}){
+  const groups=inspection.documentGroups;
+  const [activeOrderId,setActiveOrderId]=useState(groups[0]?.orderId??"");
+  const activeGroup=groups.find(group=>group.orderId===activeOrderId)??groups[0];
+  useEffect(()=>{
+    if(activeGroup&&activeOrderId!==activeGroup.orderId)setActiveOrderId(activeGroup.orderId);
+  },[activeGroup?.orderId,activeOrderId]);
+  if(!activeGroup)return <div className="empty-state">当前装车单位没有需要核验的订单文件。</div>;
+  const focusTab=(nextIndex:number)=>{
+    const next=groups[nextIndex];
+    if(!next)return;
+    setActiveOrderId(next.orderId);
+    window.requestAnimationFrame(()=>document.getElementById(`outbound-order-tab-${next.orderId}`)?.focus());
+  };
+  return <section className="outbound-order-document-workspace" aria-label="按订单核验发运文件">
+    <div className="outbound-order-document-tabs" role="tablist" aria-label="装车订单">
+      {groups.map((group,index)=>{
+        const required=group.documents.filter(document=>document.required);
+        const uploaded=required.filter(document=>document.attachmentId).length;
+        const active=group.orderId===activeGroup.orderId;
+        return <button
+          key={group.orderId}
+          id={`outbound-order-tab-${group.orderId}`}
+          type="button"
+          role="tab"
+          aria-selected={active}
+          aria-controls={`outbound-order-panel-${group.orderId}`}
+          tabIndex={active?0:-1}
+          className={active?"active":undefined}
+          onClick={()=>setActiveOrderId(group.orderId)}
+          onKeyDown={event=>{
+            if(event.key==="ArrowRight"){event.preventDefault();focusTab((index+1)%groups.length);}
+            if(event.key==="ArrowLeft"){event.preventDefault();focusTab((index-1+groups.length)%groups.length);}
+            if(event.key==="Home"){event.preventDefault();focusTab(0);}
+            if(event.key==="End"){event.preventDefault();focusTab(groups.length-1);}
+          }}
+        ><strong>{group.orderNumber}</strong><small>{group.customerName} · {uploaded}/{required.length} 必需文件</small></button>;
+      })}
+    </div>
+    <div className="outbound-order-document-viewport">
+      <section
+        key={activeGroup.orderId}
+        id={`outbound-order-panel-${activeGroup.orderId}`}
+        role="tabpanel"
+        aria-labelledby={`outbound-order-tab-${activeGroup.orderId}`}
+        className="outbound-order-document-panel"
+      >
+        <header><div><strong>{activeGroup.orderNumber}</strong><span>{activeGroup.customerName} · 当前仅显示本订单文件</span></div><span className={`status-pill ${activeGroup.allUploaded?"success":"warning"}`}>{activeGroup.allUploaded?"必需文件已齐":`待补 ${activeGroup.documents.filter(document=>document.required&&!document.attachmentId).length} 份`}</span></header>
+        <OutboundDocumentUploadList inspection={inspection} warehouseId={warehouseId} busy={busy} orderId={activeGroup.orderId} showIntro={false}/>
+      </section>
+    </div>
+  </section>;
+}
+
+function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,borderPorts,customsPlaces,busy,actionSuccess,actionError}:{warehouseId:string;inspection:OutboundInspection|null;outboundResources:OutboundResources;borderPorts:ReferenceOption[];customsPlaces:ReferenceOption[];busy:boolean;actionSuccess?:string;actionError?:string}){
   const [carrierId,setCarrierId]=useState("");
   const [vehicleId,setVehicleId]=useState("");
   const [driverId,setDriverId]=useState("");
@@ -713,6 +765,7 @@ function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,borde
   const carrierVehicles=outboundResources.vehicles.filter(vehicle=>vehicle.carrier_id===carrierId);
   const carrierDrivers=outboundResources.drivers.filter(driver=>driver.carrier_id===carrierId);
   const outboundMasterDataReady=outboundResources.carriers.length>0&&outboundResources.vehicles.length>0&&outboundResources.drivers.length>0;
+  const remainingRequired=Math.max(0,requiredCount-uploadedCount);
   return <div className="outbound-create-workbench">
     {!inspection&&<div className="alert error" role="alert">无法读取该订单的装车文件清单，请返回在仓订单列表重新进入。</div>}
     {(actionSuccess||actionError)&&<div className={`alert ${actionError?"error":"success"}`} role={actionError?"alert":"status"} aria-live="polite">{actionError??actionSuccess}</div>}
@@ -723,40 +776,30 @@ function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,borde
         <span>运输类型<strong>{isFtl?"整车":"拼车"}</strong></span>
         <span>文件进度<strong>{uploadedCount}/{requiredCount} 已上传</strong></span>
       </div>
-      <div className="outbound-create-entry-actions">
-        <Modal title={`上传装车任务文件 · ${taskLabel}`} triggerLabel="继续上传文件" triggerClassName="primary warehouse-primary" size="xwide" openSignal={uploadOpenSignal}>
-          {({close})=><div className="outbound-upload-modal">
-            <OutboundDocumentUploadList inspection={inspection} busy={busy}/>
-            <div className="outbound-upload-modal-actions"><span>{inspection.allUploaded?"必需文件已收齐，可以进入总览确认。":`还需上传 ${Math.max(0,requiredCount-uploadedCount)} 份必需文件。`}</span><button type="button" className="primary warehouse-primary" disabled={!inspection.allUploaded||busy} onClick={()=>{close();setReviewOpenSignal(Date.now());}}>完成上传</button></div>
-          </div>}
-        </Modal>
-      </div>
-      {inspection.allUploaded&&<Modal title={`装车任务确认 · ${taskLabel}`} triggerLabel="查看文件总览" triggerClassName="secondary" size="xwide" dialogClassName="outbound-review-modal" openSignal={reviewOpenSignal} initialFocusSelector={isFtl?'select[name="outboundCarrierId"]':".outbound-review-confirm button"}>
-        <Form method="post" className="outbound-review-create-form" onKeyDown={event=>{if(event.key==="Enter")event.preventDefault();}}>
-          <input type="hidden" name="intent" value="create"/><input type="hidden" name="batchId" value={inspection.batch.id}/><input type="hidden" name="orderNumber" value={isFtl?inspection.batch.order_number:""}/><input type="hidden" name="customerIdentityCode" value={isFtl?inspection.batch.customer_identity_code:""}/>
-          {isFtl&&<section className="ftl-outbound-resource-confirmation">
-            <header><div><strong>1. 确认整车出境路线与运输资源</strong><span>本区字段直接采用当前订单的工作流显示/必填规则；创建后原子同步到管理端。</span></div><span className="status-pill warning">当前任务</span></header>
-            {!outboundMasterDataReady&&<div className="alert error" role="alert">境外承运商、车辆或司机主数据不完整，暂不能创建整车装车任务。请先在管理端承运商台账补齐。</div>}
-            <div className="ftl-outbound-resource-grid">
-              {inspection.executionPolicy.batchFields.exit_port.isActive&&<label className="field"><span>出境口岸{inspection.executionPolicy.batchFields.exit_port.isRequired?" *":"（选填）"}</span><select name="exitPort" defaultValue={inspection.batch.exit_port||""} required={inspection.executionPolicy.batchFields.exit_port.isRequired}><option value="">请选择出境口岸</option><ReferenceOptions currentValue={inspection.batch.exit_port} options={borderPorts}/></select></label>}
-              {inspection.executionPolicy.batchFields.customs_location.isActive&&<label className="field"><span>起运地清关地{inspection.executionPolicy.batchFields.customs_location.isRequired?" *":"（选填）"}</span><select name="customsLocation" defaultValue={inspection.batch.customs_location||""} required={inspection.executionPolicy.batchFields.customs_location.isRequired}><option value="">请选择起运地清关地</option><ReferenceOptions currentValue={inspection.batch.customs_location} options={customsPlaces}/></select></label>}
-              <label className="field"><span>境外承运商 *</span><select name="outboundCarrierId" value={carrierId} required onChange={event=>{setCarrierId(event.target.value);setVehicleId("");setDriverId("");}}><option value="">请选择境外承运商</option>{outboundResources.carriers.map(carrier=><option key={carrier.id} value={carrier.id}>{carrier.name}</option>)}</select></label>
-              <label className="field"><span>出境车辆 *</span><select name="outboundVehicleId" value={vehicleId} required disabled={!carrierId} onChange={event=>setVehicleId(event.target.value)}><option value="">{carrierId?"请选择该承运商车辆":"请先选择承运商"}</option>{carrierVehicles.map(vehicle=><option key={vehicle.id} value={vehicle.id}>{vehicle.plate_number} · {vehicle.vehicle_type||"车型未登记"}</option>)}</select></label>
-              <label className="field"><span>出境司机 *</span><select name="outboundDriverId" value={driverId} required disabled={!carrierId} onChange={event=>setDriverId(event.target.value)}><option value="">{carrierId?"请选择该承运商司机":"请先选择承运商"}</option>{carrierDrivers.map(driver=><option key={driver.id} value={driver.id}>{driver.name} · {driver.phone||"电话未登记"}</option>)}</select></label>
-              <label className="field"><span>计划出境发车时间 *</span><input type="datetime-local" name="plannedDepartureAt" required/></label>
-            </div>
-          </section>}
-          <div className="outbound-review-scroll-region">
-            <header className="outbound-review-section-heading"><div><strong>{isFtl?"2. 核对装车文件":"核对装车文件"}</strong><span>文件预览集中在此区域滚动，不影响上方资源录入和下方任务创建。</span></div><span className="status-pill">{inspection.documents.filter(document=>document.attachmentId).length} 份</span></header>
-            <div className="outbound-document-review-grid">{inspection.documents.filter(document=>document.attachmentId).map(document=><OutboundDocumentPreview key={`${document.orderId}:${document.code}`} warehouseId={warehouseId} document={document}/>)}</div>
-            {!isFtl&&inspection.resourcePolicyError&&<div className="alert error" role="alert">{inspection.resourcePolicyError}</div>}
-            {!isFtl&&inspection.resourceDifferences.length>0&&<div className="alert warning" role="status"><strong>非必填运输信息未登记：</strong>{inspection.resourceDifferences.map(item=>`${item.label}（${item.mode==="hidden"?"工作流已隐藏":"选填"}）`).join("、")}。可以继续创建装车任务，但系统会记录本次差异与确认人。</div>}
-            {inspection.notesActive&&<label className="field outbound-handover-notes"><span>交接备注{inspection.notesRequired?" *":""}</span><textarea name="notes" rows={3} required={inspection.notesRequired} placeholder="填写装车交接、装载要求或出库注意事项"/></label>}
+      <OutboundOrderDocumentWorkspace inspection={inspection} warehouseId={warehouseId} busy={busy}/>
+      <Form method="post" className="outbound-inline-create-form" onKeyDown={event=>{if(event.key==="Enter")event.preventDefault();}}>
+        <input type="hidden" name="intent" value="create"/><input type="hidden" name="batchId" value={inspection.batch.id}/><input type="hidden" name="orderNumber" value={isFtl?inspection.batch.order_number:""}/><input type="hidden" name="customerIdentityCode" value={isFtl?inspection.batch.customer_identity_code:""}/>
+        {isFtl&&<section className="ftl-outbound-resource-confirmation">
+          <header><div><strong>确认整车出境路线与运输资源</strong><span>本区字段直接采用当前订单的工作流显示/必填规则；创建后原子同步到管理端。</span></div><span className="status-pill warning">创建前确认</span></header>
+          {!outboundMasterDataReady&&<div className="alert error" role="alert">境外承运商、车辆或司机主数据不完整，暂不能创建整车装车任务。请先在管理端承运商台账补齐。</div>}
+          <div className="ftl-outbound-resource-grid">
+            {inspection.executionPolicy.batchFields.exit_port.isActive&&<label className="field"><span>出境口岸{inspection.executionPolicy.batchFields.exit_port.isRequired?" *":"（选填）"}</span><select name="exitPort" defaultValue={inspection.batch.exit_port||""} required={inspection.executionPolicy.batchFields.exit_port.isRequired}><option value="">请选择出境口岸</option><ReferenceOptions currentValue={inspection.batch.exit_port} options={borderPorts}/></select></label>}
+            {inspection.executionPolicy.batchFields.customs_location.isActive&&<label className="field"><span>起运地清关地{inspection.executionPolicy.batchFields.customs_location.isRequired?" *":"（选填）"}</span><select name="customsLocation" defaultValue={inspection.batch.customs_location||""} required={inspection.executionPolicy.batchFields.customs_location.isRequired}><option value="">请选择起运地清关地</option><ReferenceOptions currentValue={inspection.batch.customs_location} options={customsPlaces}/></select></label>}
+            <label className="field"><span>境外承运商 *</span><select name="outboundCarrierId" value={carrierId} required onChange={event=>{setCarrierId(event.target.value);setVehicleId("");setDriverId("");}}><option value="">请选择境外承运商</option>{outboundResources.carriers.map(carrier=><option key={carrier.id} value={carrier.id}>{carrier.name}</option>)}</select></label>
+            <label className="field"><span>出境车辆 *</span><select name="outboundVehicleId" value={vehicleId} required disabled={!carrierId} onChange={event=>setVehicleId(event.target.value)}><option value="">{carrierId?"请选择该承运商车辆":"请先选择承运商"}</option>{carrierVehicles.map(vehicle=><option key={vehicle.id} value={vehicle.id}>{vehicle.plate_number} · {vehicle.vehicle_type||"车型未登记"}</option>)}</select></label>
+            <label className="field"><span>出境司机 *</span><select name="outboundDriverId" value={driverId} required disabled={!carrierId} onChange={event=>setDriverId(event.target.value)}><option value="">{carrierId?"请选择该承运商司机":"请先选择承运商"}</option>{carrierDrivers.map(driver=><option key={driver.id} value={driver.id}>{driver.name} · {driver.phone||"电话未登记"}</option>)}</select></label>
+            <label className="field"><span>计划出境发车时间 *</span><input type="datetime-local" name="plannedDepartureAt" required/></label>
           </div>
-          {resourceDifferenceAcknowledged&&<input type="hidden" name="resourceDifferenceConfirmed" value="yes"/>}
-          <div className="outbound-review-confirm"><p>{isFtl?"填写上方出境资源后即可创建；文件核对区可独立滚动查看。":inspection.resourceDifferences.length&&!resourceDifferenceAcknowledged?"请先明确确认非必填运输信息为空；确认后还需再次点击最终创建按钮。":"确认文件清晰、归属正确后，系统按 PZ 配载单创建装车任务。"}</p>{!isFtl&&inspection.resourceDifferences.length>0&&!resourceDifferenceAcknowledged?<button type="button" className="secondary" disabled={busy||Boolean(inspection.resourcePolicyError)} onClick={()=>setResourceDifferenceAcknowledged(true)}>我已核对缺失信息，继续</button>:<button type="submit" className="primary warehouse-primary" disabled={busy||(isFtl&&!outboundMasterDataReady)||Boolean(inspection.resourcePolicyError)}>确认并创建装车任务</button>}</div>
-        </Form>
-      </Modal>}
+        </section>}
+        {!isFtl&&inspection.resourcePolicyError&&<div className="alert error" role="alert">{inspection.resourcePolicyError}</div>}
+        {!isFtl&&inspection.resourceDifferences.length>0&&<div className="alert warning" role="status"><strong>非必填运输信息未登记：</strong>{inspection.resourceDifferences.map(item=>`${item.label}（${item.mode==="hidden"?"工作流已隐藏":"选填"}）`).join("、")}。可以继续创建装车任务，但系统会记录本次差异与确认人。</div>}
+        {inspection.notesActive&&<label className="field outbound-handover-notes"><span>交接备注{inspection.notesRequired?" *":""}</span><textarea name="notes" rows={3} required={inspection.notesRequired} placeholder="填写装车交接、装载要求或出库注意事项"/></label>}
+        {resourceDifferenceAcknowledged&&<input type="hidden" name="resourceDifferenceConfirmed" value="yes"/>}
+        <div className="outbound-inline-create-footer">
+          <div role="status" aria-live="polite"><strong>{inspection.allUploaded?"文件核验已完成":"必需文件尚未齐全"}</strong><span>{inspection.allUploaded?(isFtl?"确认出境资源后即可创建装车任务。":"全部订单文件已齐，可按当前 PZ 配载单统一创建装车任务。"):`还需上传 ${remainingRequired} 份必需文件；可切换上方订单页签逐票补齐。`}</span></div>
+          {!isFtl&&inspection.resourceDifferences.length>0&&!resourceDifferenceAcknowledged?<button type="button" className="secondary" disabled={!inspection.allUploaded||busy||Boolean(inspection.resourcePolicyError)} onClick={()=>setResourceDifferenceAcknowledged(true)}>我已核对缺失信息，继续</button>:<button type="submit" className="primary warehouse-primary" disabled={!inspection.allUploaded||busy||(isFtl&&!outboundMasterDataReady)||Boolean(inspection.resourcePolicyError)}>确认并创建装车任务</button>}
+        </div>
+      </Form>
     </>}
   </div>;
 }
@@ -780,12 +823,6 @@ function FtlOutboundRouteEditor({task,workflowPolicy,borderPorts,customsPlaces,b
       {canOperate&&<button className="primary warehouse-primary" disabled={busy}>{routeError?"补齐并重新同步":workflowSyncPending?"重新同步业务工作流":"保存路线信息"}</button>}
     </Form>
   </section>;
-}
-
-function OutboundDocumentPreview({document,warehouseId}:{document:OutboundDocument;warehouseId:string}){
-  const isImage=document.contentType?.startsWith("image/")??false,isPdf=document.contentType==="application/pdf";
-  const fileHref=document.attachmentId?warehouseOrderDocumentHref(document.attachmentId,warehouseId):"";
-  return <article className="outbound-document-preview"><header><div><strong>{document.orderNumber} · {document.name}</strong><span>{document.customerName} · {document.fileName} · {formatBytes(document.sizeBytes)}</span></div><span className="status-pill">{outboundDocumentStatus(document)}</span></header><div className={`outbound-document-canvas ${!isImage&&!isPdf?"unsupported":""}`}>{isImage&&fileHref&&<img loading="lazy" src={fileHref} alt={document.fileName||document.name}/>} {isPdf&&fileHref&&<object data={fileHref} type="application/pdf" aria-label={document.fileName||document.name}><p>当前浏览器无法页内预览 PDF。</p></object>} {!isImage&&!isPdf&&<p>该格式不支持页内预览，请打开原文件检查。</p>}</div>{fileHref&&<a className="secondary" href={fileHref} target="_blank" rel="noreferrer">打开原文件</a>}</article>;
 }
 
 function outboundDocumentStatus(document:OutboundDocument){if(!document.attachmentId)return document.required?"待上传":"选填";if(["approved","archived"].includes(document.reviewStatus||""))return"已确认";if(document.reviewStatus==="rejected")return"已退回";return"待检查";}
