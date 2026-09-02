@@ -66,8 +66,12 @@ import {
 import {
   canCreateExpenseFromModule,
   emptyExpenseDirectionControl,
+  expenseDirectionActionAccess,
   expenseDirectionNextAction,
+  expenseDirectionNextActionCode,
   expenseDirectionProgress,
+  type ExpenseDirectionAction,
+  type ExpenseDirectionActionAccess,
   type ExpenseDirectionControl,
 } from "../lib/expense-control";
 import {
@@ -2835,6 +2839,25 @@ export async function action({ request, params }: Route.ActionArgs) {
         return { formError: "费用方向无效" };
       if (!["confirm", "business_review", "finance_review", "business_lock", "finance_lock"].includes(controlAction))
         return { formError: "费用审核动作无效" };
+      const expenseAssignee = await env.DB.prepare(
+        `SELECT m.assignee_user_id,u.display_name assignee_name
+         FROM order_module_instances m
+         LEFT JOIN users u ON u.id=m.assignee_user_id
+         WHERE m.organization_id=? AND m.order_id=? AND m.module_code='costs' AND m.enabled=1`,
+      )
+        .bind(current.organizationId, orderId)
+        .first<{ assignee_user_id: string | null; assignee_name: string | null }>();
+      const actionAccess = expenseDirectionActionAccess({
+        action: controlAction as ExpenseDirectionAction,
+        currentUserId: current.userId,
+        assignedUserId: expenseAssignee?.assignee_user_id ?? null,
+        assignedUserName: expenseAssignee?.assignee_name ?? null,
+        positionCode: current.positionCode,
+        roleCodes: current.roleCodes,
+        permissions: current.permissions,
+      });
+      if (!actionAccess.allowed)
+        return { formError: actionAccess.reason || `当前步骤仅允许${actionAccess.ownerLabel}办理` };
       const expenses = await env.DB.prepare(
         "SELECT COUNT(*) total,SUM(CASE WHEN counterparty_name IS NULL OR TRIM(counterparty_name)='' THEN 1 ELSE 0 END) missing_counterparty FROM business_expenses WHERE organization_id=? AND order_id=? AND direction=? AND stage!='cancelled'",
       )
@@ -2850,14 +2873,11 @@ export async function action({ request, params }: Route.ActionArgs) {
         )
           .bind(current.organizationId, orderId, direction)
           .first<ExpenseDirectionControl>()) || emptyExpenseDirectionControl(direction);
-      if (controlAction === "business_review" && !existing.confirmed)
-        return { formError: "请先确认该方向费用" };
-      if (controlAction === "finance_review" && !existing.business_reviewed)
-        return { formError: "请先完成业务审核" };
-      if (controlAction === "business_lock" && !existing.business_reviewed)
-        return { formError: "请先完成业务审核" };
-      if (controlAction === "finance_lock" && !existing.finance_reviewed)
-        return { formError: "请先完成财务审核" };
+      const expectedAction = expenseDirectionNextActionCode(existing);
+      if (!expectedAction)
+        return { formError: "该方向费用已经完成全部确认、审核与锁定" };
+      if (expectedAction !== controlAction)
+        return { formError: `当前应办理“${expenseDirectionNextAction(existing)}”，不能跳过或重复办理其他步骤` };
       const now = new Date().toISOString();
       await env.DB.prepare(
         `INSERT INTO order_expense_direction_controls(organization_id,order_id,direction,updated_at)
@@ -2872,8 +2892,15 @@ export async function action({ request, params }: Route.ActionArgs) {
         business_lock: "business_locked=1,business_locked_by_user_id=?,business_locked_at=?",
         finance_lock: "finance_locked=1,finance_locked_by_user_id=?,finance_locked_at=?",
       } as const;
-      await env.DB.prepare(
-        `UPDATE order_expense_direction_controls SET ${updates[controlAction as keyof typeof updates]},notes=COALESCE(?,notes),updated_at=? WHERE organization_id=? AND order_id=? AND direction=?`,
+      const completionColumns = {
+        confirm: "confirmed",
+        business_review: "business_reviewed",
+        finance_review: "finance_reviewed",
+        business_lock: "business_locked",
+        finance_lock: "finance_locked",
+      } as const;
+      const updateResult = await env.DB.prepare(
+        `UPDATE order_expense_direction_controls SET ${updates[controlAction as keyof typeof updates]},notes=COALESCE(?,notes),updated_at=? WHERE organization_id=? AND order_id=? AND direction=? AND ${completionColumns[controlAction as keyof typeof completionColumns]}=0`,
       )
         .bind(
           current.userId,
@@ -2885,6 +2912,8 @@ export async function action({ request, params }: Route.ActionArgs) {
           direction,
         )
         .run();
+      if (!Number(updateResult.meta?.changes || 0))
+        return { formError: "费用状态已由其他人员更新，请刷新后查看当前办理步骤" };
       if (controlAction === "confirm")
         await env.DB.prepare(
           "UPDATE business_expenses SET stage='confirmed',updated_at=? WHERE organization_id=? AND order_id=? AND direction=? AND stage='estimated'",
@@ -2912,37 +2941,7 @@ export async function action({ request, params }: Route.ActionArgs) {
       return { success: `${direction === "receivable" ? "应收" : "应付"}${labels[controlAction]}` };
     }
     if (intent === "expense_control") {
-      if (moduleCode !== "costs") return { formError: "只能在费用模块锁定" };
-      const now = new Date().toISOString();
-      const lockType = valueOf(form, "lockType");
-      const business = lockType === "business" ? 1 : 0;
-      const finance = lockType === "finance" ? 1 : 0;
-      await env.DB.prepare(
-        `INSERT INTO order_expense_controls(order_id,organization_id,business_locked,finance_locked,business_locked_by_user_id,finance_locked_by_user_id,business_locked_at,finance_locked_at,notes,updated_at)
-         VALUES(?,?,?,?,?,?,?,?,?,?)
-         ON CONFLICT(order_id) DO UPDATE SET
-           business_locked=CASE WHEN excluded.business_locked=1 THEN 1 ELSE order_expense_controls.business_locked END,
-           finance_locked=CASE WHEN excluded.finance_locked=1 THEN 1 ELSE order_expense_controls.finance_locked END,
-           business_locked_by_user_id=COALESCE(excluded.business_locked_by_user_id,order_expense_controls.business_locked_by_user_id),
-           finance_locked_by_user_id=COALESCE(excluded.finance_locked_by_user_id,order_expense_controls.finance_locked_by_user_id),
-           business_locked_at=COALESCE(excluded.business_locked_at,order_expense_controls.business_locked_at),
-           finance_locked_at=COALESCE(excluded.finance_locked_at,order_expense_controls.finance_locked_at),
-           notes=COALESCE(excluded.notes,order_expense_controls.notes),updated_at=excluded.updated_at`,
-      )
-        .bind(
-          orderId,
-          current.organizationId,
-          business,
-          finance,
-          business ? current.userId : null,
-          finance ? current.userId : null,
-          business ? now : null,
-          finance ? now : null,
-          valueOf(form, "notes") || null,
-          now,
-        )
-        .run();
-      return { success: lockType === "finance" ? "财务已锁定" : "业务已锁定" };
+      return { formError: "旧版费用锁定入口已停用，请按费用确认、业务审核、财务审核、业务锁定、财务锁定的顺序办理" };
     }
     if (intent === "document_upload") {
       const quickReviewAttachmentId = valueOf(form, "quickReviewAttachmentId");
@@ -5977,6 +5976,18 @@ function ModuleBusinessData({
           const control = directionControl(direction);
           const rows = data.expenses.filter((item) => item.direction === direction);
           const locked = Boolean(control.business_locked || control.finance_locked);
+          const nextControlAction = expenseDirectionNextActionCode(control);
+          const actionAccess = nextControlAction
+            ? expenseDirectionActionAccess({
+                action: nextControlAction,
+                currentUserId: data.current.userId,
+                assignedUserId: data.module.assignee_user_id,
+                assignedUserName: data.module.assignee_name,
+                positionCode: data.current.positionCode,
+                roleCodes: data.current.roleCodes,
+                permissions: data.current.permissions,
+              })
+            : null;
           return (
             <BusinessSubsection
               key={direction}
@@ -6060,7 +6071,9 @@ function ModuleBusinessData({
                 direction={direction}
                 control={control}
                 hasExpenses={rows.length > 0}
-                manage={manage && settlementOpen}
+                settlementOpen={settlementOpen}
+                canOperate={manage && settlementOpen && Boolean(actionAccess?.allowed)}
+                actionAccess={actionAccess}
                 busy={busy}
               />
             </BusinessSubsection>
@@ -7359,28 +7372,22 @@ function ExpenseDirectionWorkflow({
   direction,
   control,
   hasExpenses,
-  manage,
+  settlementOpen,
+  canOperate,
+  actionAccess,
   busy,
 }: {
   direction: "receivable" | "payable";
   control: ExpenseDirectionControl;
   hasExpenses: boolean;
-  manage: boolean;
+  settlementOpen: boolean;
+  canOperate: boolean;
+  actionAccess: ExpenseDirectionActionAccess | null;
   busy: boolean;
 }) {
   const progress = expenseDirectionProgress(control);
   const nextAction = expenseDirectionNextAction(control);
-  const action = !control.confirmed
-    ? "confirm"
-    : !control.business_reviewed
-      ? "business_review"
-      : !control.finance_reviewed
-        ? "finance_review"
-        : !control.business_locked
-          ? "business_lock"
-          : !control.finance_locked
-            ? "finance_lock"
-            : null;
+  const action = expenseDirectionNextActionCode(control);
   const steps = [
     ["费用确认", control.confirmed],
     ["业务审核", control.business_reviewed],
@@ -7396,7 +7403,7 @@ function ExpenseDirectionWorkflow({
           <tbody><tr><td><strong>{progress}%</strong></td>{steps.map(([label, complete]) => <td className={complete ? "completed-cell" : "pending-cell"} key={label}><span className={`status-pill ${complete ? "success" : "off"}`}>{complete ? "已完成" : "待办理"}</span></td>)}<td>{hasExpenses ? nextAction : "先录入费用"}</td></tr></tbody>
         </table>
       </div>
-      {manage && hasExpenses && action && (
+      {canOperate && hasExpenses && action && (
         <Form method="post" className="expense-direction-action">
           <input type="hidden" name="intent" value="expense_direction_control" />
           <input type="hidden" name="direction" value={direction} />
@@ -7404,6 +7411,12 @@ function ExpenseDirectionWorkflow({
           <input name="notes" placeholder={`${nextAction}说明（可选）`} />
           <button className="secondary" disabled={busy}>{nextAction}</button>
         </Form>
+      )}
+      {settlementOpen && hasExpenses && action && !canOperate && (
+        <div className="expense-direction-waiting" role="status">
+          <strong>等待{actionAccess?.ownerLabel || "对应负责人"}办理“{nextAction}”</strong>
+          <span>{actionAccess?.reason || "当前账号只能查看本步骤，不能代替负责人确认。"}</span>
+        </div>
       )}
       {!hasExpenses && <p className="alert warning">尚未预录该方向费用，不能进入确认和审核。</p>}
       {control.finance_locked === 1 && (

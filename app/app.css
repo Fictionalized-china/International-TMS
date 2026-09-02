@@ -20400,6 +20400,36 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   color: #8593a1;
   background: #fafbfc;
 }
+.linear-order-page .expense-direction-table .pending-cell {
+  color: #9f1d1d;
+  background: #fff1f1;
+  box-shadow: inset 0 0 0 1px #fecaca;
+}
+.linear-order-page .expense-direction-table .pending-cell .status-pill.off {
+  color: #a61b1b;
+  border-color: #f3b8b8;
+  background: #ffe5e5;
+}
+.linear-order-page .expense-direction-waiting {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0;
+  padding: 9px 11px;
+  border-top: 1px solid #f3caca;
+  background: #fff8f8;
+  color: #7f1d1d;
+}
+.linear-order-page .expense-direction-waiting strong,
+.linear-order-page .expense-direction-waiting span {
+  display: block;
+}
+.linear-order-page .expense-direction-waiting span {
+  color: #8c4b4b;
+  font-size: 12px;
+  text-align: right;
+}
 .linear-order-page .dense-module-stack .loading-next-action {
   margin: 0;
   border-width: 1px 0 0;
