@@ -7908,7 +7908,7 @@ body.modal-scroll-locked {
 
 .consolidation-filter-primary {
   display: grid;
-  grid-template-columns: minmax(260px, 2fr) minmax(170px, 1fr) minmax(140px, 0.8fr) minmax(92px, 0.45fr) auto;
+  grid-template-columns: minmax(300px, 2fr) minmax(180px, 1fr) minmax(150px, 0.8fr) auto;
   gap: 12px;
   align-items: end;
   padding: 16px 18px;
@@ -8144,48 +8144,7 @@ body.modal-scroll-locked {
 
 .consolidation-order-cell,
 .consolidation-receipt-cell,
-.consolidation-destination-cell {
-  min-width: 0;
-}
-
-.consolidation-order-cell > div,
-.consolidation-order-cell > small,
-.consolidation-receipt-cell > strong,
-.consolidation-receipt-cell > small,
-.consolidation-destination-cell > strong,
-.consolidation-destination-cell > small {
-  display: block;
-}
-
-.consolidation-order-cell > div,
-.consolidation-receipt-cell > :not(:last-child),
-.consolidation-destination-cell > :not(:last-child) {
-  margin-bottom: 2px;
-}
-
-.consolidation-order-cell > div {
-  display: flex;
-  gap: 7px;
-  align-items: baseline;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.consolidation-order-cell > div strong {
-  color: #1e5c94;
-  letter-spacing: 0.015em;
-  white-space: nowrap;
-}
-
-.consolidation-order-cell > div span,
-.consolidation-receipt-cell strong,
-.consolidation-destination-cell strong {
-  color: #0f2740;
-  font-weight: 700;
-}
-
-.consolidation-order-cell > div span,
-.consolidation-destination-cell strong,
+.consolidation-destination-cell,
 .consolidation-location-cell {
   min-width: 0;
   overflow: hidden;
@@ -8193,17 +8152,26 @@ body.modal-scroll-locked {
   white-space: nowrap;
 }
 
+.consolidation-order-cell strong {
+  color: #1e5c94;
+  letter-spacing: 0.015em;
+}
+
+.consolidation-order-cell span,
+.consolidation-receipt-cell strong,
+.consolidation-destination-cell strong {
+  color: #0f2740;
+  font-weight: 700;
+}
+
 .consolidation-order-cell small,
-.consolidation-receipt-cell small,
-.consolidation-destination-cell small {
-  display: block;
+.consolidation-receipt-cell span,
+.consolidation-destination-cell span {
+  display: inline;
   margin: 0;
-  overflow: hidden;
   color: #64748b;
-  font-size: 11px;
-  line-height: 1.4;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: inherit;
+  line-height: inherit;
 }
 
 .consolidation-location-cell {
@@ -8220,8 +8188,8 @@ body.modal-scroll-locked {
 
 .consolidation-document-trigger {
   width: 100%;
-  min-height: 28px;
-  padding: 4px 8px;
+  min-height: 24px;
+  padding: 2px 6px;
   overflow: hidden;
   border: 1px solid #cbd5e1;
   border-radius: 4px;
@@ -20171,9 +20139,9 @@ html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animatio
 
 .warehouse-consolidation-page th,
 .warehouse-consolidation-page td {
-  padding: 5px 8px;
+  padding: 3px 6px;
   font-size: 11px;
-  line-height: 1.25;
+  line-height: 1.2;
   vertical-align: middle;
 }
 
@@ -20182,12 +20150,29 @@ html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animatio
 }
 
 .warehouse-consolidation-page .consolidation-stock-table tbody tr {
-  height: 44px;
+  height: 34px;
 }
 
-.warehouse-consolidation-page .consolidation-stock-table small {
-  font-size: 9px;
-  line-height: 1.25;
+.warehouse-consolidation-page .consolidation-stock-table .consolidation-order-cell,
+.warehouse-consolidation-page .consolidation-stock-table .consolidation-receipt-cell,
+.warehouse-consolidation-page .consolidation-stock-table .consolidation-destination-cell,
+.warehouse-consolidation-page .consolidation-stock-table .consolidation-location-cell {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.warehouse-consolidation-page .consolidation-stock-table .status-pill {
+  display: inline-block;
+  max-width: 100%;
+  min-height: 22px;
+  padding: 2px 5px;
+  overflow: hidden;
+  font-size: 10px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+  white-space: nowrap;
 }
 
 .consolidation-pagination {

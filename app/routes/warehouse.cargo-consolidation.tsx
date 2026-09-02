@@ -28,8 +28,7 @@ import { loadLoadingBatchWorkflowOrders } from "../lib/loading-batch-field-polic
 import { valueOf } from "../lib/validation";
 import { chunkD1Rows, chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 
-const DEFAULT_PAGE_SIZE=10;
-const PAGE_SIZES=[10,20,30,50,100];
+const PAGE_SIZE=10;
 
 type StockRow={
   order_id:string;order_number:string;business_type:string;customer_name:string;
@@ -106,9 +105,7 @@ export async function loader({request}:Route.LoaderArgs){
   const user=await requireSessionUser(request,"warehouse.view","warehouse");
   const context=await loadWarehouseContext(request,user),warehouse=context.selected;
   if(warehouse.warehouse_role==="overseas_destination")throw new Response("境外目的仓不办理货物配载",{status:403});
-  const url=new URL(request.url),page=Math.max(1,Number(url.searchParams.get("page"))||1);
-  const requestedSize=Number(url.searchParams.get("pageSize"))||DEFAULT_PAGE_SIZE;
-  const pageSize=PAGE_SIZES.includes(requestedSize)?requestedSize:DEFAULT_PAGE_SIZE;
+  const url=new URL(request.url),page=Math.max(1,Number(url.searchParams.get("page"))||1),pageSize=PAGE_SIZE;
   const filters={warehouse:url.searchParams.get("destinationWarehouse")?.trim()??"",country:url.searchParams.get("country")?.trim()??"",state:url.searchParams.get("state")?.trim()??"",city:url.searchParams.get("city")?.trim()??"",customer:url.searchParams.get("customer")?.trim()??"",eligibility:url.searchParams.get("eligibility")?.trim()??"",keyword:url.searchParams.get("q")?.trim()??""};
   const clauses:string[]=[],bindings:string[]=[];
   const like=(column:string,value:string)=>{if(value){clauses.push(`${column} LIKE ?`);bindings.push(`%${value}%`)}};
@@ -391,11 +388,11 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
               const documents=loaderData.latestRequiredDocuments.filter(document=>document.order_id===row.order_id);
               return <tr key={row.order_id} className={checked?"selected-row":""}>
                 <td><input type="checkbox" checked={checked} disabled={assigned||blockers.length>0} onChange={event=>toggle(row,event.target.checked)} aria-label={`选择订单 ${row.order_number}`}/></td>
-                <td>{assigned?<span className="status-pill" title={row.active_batch_number??"已加入配载单"}>已配载<small>{row.active_batch_number}</small></span>:<span className={`status-pill ${blockers.length?"off":"success"}`} title={blockers.join("；")}>{blockers.length?"不可配载":"可配载"}</span>}</td>
-                <td className="consolidation-order-cell"><div><strong>{row.order_number}</strong><span>{row.customer_name}</span></div><small>{row.cargo_names||"未填写货名"}</small></td>
-                <td className="consolidation-receipt-cell"><strong>{row.package_count} 包装 · {row.pieces} 件</strong><small>{row.weight_kg.toFixed(2)} KG · {row.volume_cbm.toFixed(3)} CBM</small></td>
-                <td className="consolidation-destination-cell"><strong>{row.overseas_warehouse_name||"目的仓未设置"}</strong><small>{[row.destination_country,row.destination_state,row.destination_city].filter(Boolean).join(" ")||"地区未填写"}</small></td>
-                <td className="consolidation-location-cell">{row.location_names||"—"}</td>
+                <td>{assigned?<span className="status-pill" title={row.active_batch_number??"已加入配载单"}>已配载 · {row.active_batch_number}</span>:<span className={`status-pill ${blockers.length?"off":"success"}`} title={blockers.join("；")}>{blockers.length?"不可配载":"可配载"}</span>}</td>
+                <td className="consolidation-order-cell" title={`${row.order_number} · ${row.customer_name} · ${row.cargo_names||"未填写货名"}`}><strong>{row.order_number}</strong><span>· {row.customer_name}</span><small>· {row.cargo_names||"未填写货名"}</small></td>
+                <td className="consolidation-receipt-cell" title={`${row.package_count} 包装 / ${row.pieces} 件 · ${row.weight_kg.toFixed(2)} KG · ${row.volume_cbm.toFixed(3)} CBM`}><strong>{row.package_count} 包装 / {row.pieces} 件</strong><span>· {row.weight_kg.toFixed(2)} KG · {row.volume_cbm.toFixed(3)} CBM</span></td>
+                <td className="consolidation-destination-cell" title={`${row.overseas_warehouse_name||"目的仓未设置"} · ${[row.destination_country,row.destination_state,row.destination_city].filter(Boolean).join(" ")||"地区未填写"}`}><strong>{row.overseas_warehouse_name||"目的仓未设置"}</strong><span>· {[row.destination_country,row.destination_state,row.destination_city].filter(Boolean).join(" ")||"地区未填写"}</span></td>
+                <td className="consolidation-location-cell" title={row.location_names||"未分配库位"}>{row.location_names||"—"}</td>
                 <td><DocumentStatusCell row={row} warehouseId={loaderData.warehouse.id} requirements={requirements} documents={documents}/></td>
               </tr>
             })}
@@ -504,7 +501,6 @@ function FilterForm({loaderData,values}:{loaderData:Route.ComponentProps["loader
       <label className="consolidation-filter-search"><span>订单 / 客户 / 货物</span><input name="q" defaultValue={loaderData.filters.keyword} placeholder="输入订单号、客户或货物名称"/></label>
       <Select label="境外目的仓" name="destinationWarehouse" current={loaderData.filters.warehouse} values={values("overseas_warehouse_name")}/>
       <label><span>配载状态</span><select name="eligibility" defaultValue={loaderData.filters.eligibility}><option value="">全部</option><option value="eligible">仅可配载</option><option value="assigned">仅已配载</option><option value="blocked">仅不可配载</option></select></label>
-      <label><span>每页</span><select name="pageSize" defaultValue={loaderData.pageSize}>{PAGE_SIZES.map(size=><option key={size} value={size}>{size} 条</option>)}</select></label>
       <div className="consolidation-filter-actions"><button className="primary">筛选</button><Link className="secondary" to={`/warehouse/consolidation?warehouseId=${loaderData.warehouse.id}`}>重置</Link></div>
     </div>
     <details className="consolidation-advanced-filters" open={hasAdvanced||undefined}>
@@ -546,7 +542,7 @@ function DocumentStatusCell({row,warehouseId,requirements,documents}:{row:StockR
 }
 
 function Select({label,name,current,values}:{label:string;name:string;current:string;values:string[]}){return<label><span>{label}</span><select name={name} defaultValue={current}><option value="">全部</option>{values.map(value=><option key={value}>{value}</option>)}</select></label>}
-function Pagination({loaderData}:{loaderData:{page:number;pages:number;pageSize:number;total:number;warehouse:{id:string};filters:Record<string,string>}}){const href=(page:number)=>{const params=new URLSearchParams({warehouseId:loaderData.warehouse.id,page:String(page),pageSize:String(loaderData.pageSize)}),names:Record<string,string>={warehouse:"destinationWarehouse",keyword:"q"};Object.entries(loaderData.filters).forEach(([key,value])=>{if(value)params.set(names[key]||key,value)});return`/warehouse/consolidation?${params}`};const previous=loaderData.page-1,next=loaderData.page+1;return<footer className="pagination consolidation-pagination" aria-label="在库订单分页"><span>第 {loaderData.page} / {loaderData.pages} 页 · 共 {loaderData.total} 票</span><div>{previous>=1?<Link className="secondary" to={href(previous)}>上一页</Link>:<span className="secondary disabled" aria-disabled="true">上一页</span>}<span className="consolidation-pagination-current" aria-current="page">{loaderData.page}</span>{next<=loaderData.pages?<Link className="secondary" to={href(next)}>下一页</Link>:<span className="secondary disabled" aria-disabled="true">下一页</span>}</div></footer>}
+function Pagination({loaderData}:{loaderData:{page:number;pages:number;total:number;warehouse:{id:string};filters:Record<string,string>}}){const href=(page:number)=>{const params=new URLSearchParams({warehouseId:loaderData.warehouse.id,page:String(page)}),names:Record<string,string>={warehouse:"destinationWarehouse",keyword:"q"};Object.entries(loaderData.filters).forEach(([key,value])=>{if(value)params.set(names[key]||key,value)});return`/warehouse/consolidation?${params}`};const previous=loaderData.page-1,next=loaderData.page+1,count=Math.min(5,loaderData.pages),start=Math.max(1,Math.min(loaderData.page-2,loaderData.pages-count+1)),pageNumbers=Array.from({length:count},(_,index)=>start+index);return<footer className="pagination consolidation-pagination" aria-label="在库订单分页"><span>每页 10 票 · 第 {loaderData.page} / {loaderData.pages} 页 · 共 {loaderData.total} 票</span><div>{previous>=1?<Link className="secondary" to={href(previous)}>上一页</Link>:<span className="secondary disabled" aria-disabled="true">上一页</span>}{pageNumbers.map(page=>page===loaderData.page?<span key={page} className="consolidation-pagination-current" aria-current="page">{page}</span>:<Link key={page} className="secondary" to={href(page)} aria-label={`第 ${page} 页`}>{page}</Link>)}{next<=loaderData.pages?<Link className="secondary" to={href(next)}>下一页</Link>:<span className="secondary disabled" aria-disabled="true">下一页</span>}</div></footer>}
 
 function toSelection(row:StockRow,loadingWorkflow:LoadingBatchWorkflowOrder):Selection{return{orderId:row.order_id,orderNumber:row.order_number,customerName:row.customer_name,packages:row.package_count,pieces:row.pieces,weight:row.weight_kg,volume:row.volume_cbm,loadingWorkflow}}
 function isSelection(value:unknown):value is Selection{
