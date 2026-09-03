@@ -26538,3 +26538,165 @@ html[data-motion="off"] *::after {
     grid-template-columns: 1fr;
   }
 }
+
+/* Create-loading-task density: keep the complete document gate and action in
+   one desktop viewport without changing any workflow or validation behavior. */
+.warehouse-app-shell .outbound-create-page {
+  --ui-cell-y: 4px;
+  display: grid;
+  gap: 7px;
+}
+
+.warehouse-app-shell .outbound-create-page > .page-header {
+  margin: 0;
+  padding-bottom: 4px;
+}
+
+.warehouse-app-shell .outbound-create-page > .page-header h1 {
+  margin-block: 1px;
+  font-size: 21px;
+}
+
+.warehouse-app-shell .outbound-create-page > .page-header p {
+  line-height: 1.25;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-create-rhythm {
+  margin: 0;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-create-rhythm li {
+  min-height: 42px;
+  padding: 5px 10px;
+  gap: 8px;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-create-rhythm li > span {
+  width: 22px;
+  height: 22px;
+  font-size: 10px;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-create-rhythm li > div {
+  gap: 0;
+  line-height: 1.2;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-create-rhythm small {
+  font-size: 9px;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-create-section {
+  margin: 0;
+  padding: 7px;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-create-section > .panel-header {
+  min-height: 34px;
+  padding: 4px 7px;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-create-section > .outbound-create-workbench {
+  padding: 7px;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-create-workbench {
+  gap: 7px;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-create-workbench > .alert {
+  margin: 0;
+  padding: 6px 8px;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-inspection-summary {
+  border-radius: 3px;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-inspection-summary > span {
+  gap: 1px;
+  min-height: 42px;
+  padding: 5px 8px;
+  font-size: 9px;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-inspection-summary strong {
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-order-document-tabs {
+  padding: 4px 6px 0;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-order-document-tabs button {
+  min-height: 34px;
+  padding: 4px 9px;
+  gap: 0;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-order-document-panel > header {
+  min-height: 32px;
+  padding: 4px 8px;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-document-table th,
+.warehouse-app-shell .outbound-create-page .outbound-document-table td {
+  padding: 4px 7px;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-document-name-upload {
+  min-height: 34px;
+  padding: 4px 7px;
+  gap: 0;
+  align-content: center;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-document-name-upload small,
+.warehouse-app-shell .outbound-create-page .outbound-document-current-file small {
+  font-size: 9px;
+  line-height: 1.2;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-document-view-button {
+  min-height: 26px;
+  padding-inline: 8px;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-inline-create-form,
+.warehouse-app-shell .outbound-create-page .ftl-outbound-resource-confirmation {
+  gap: 7px;
+}
+
+.warehouse-app-shell .outbound-create-page .ftl-outbound-resource-confirmation {
+  padding: 8px;
+}
+
+.warehouse-app-shell .outbound-create-page .ftl-outbound-resource-grid {
+  gap: 7px;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-inline-create-form > .outbound-handover-notes textarea {
+  min-height: 48px;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-inline-create-footer {
+  bottom: 4px;
+  min-height: 48px;
+  padding: 6px 8px;
+  gap: 12px;
+}
+
+.warehouse-app-shell .outbound-create-page .outbound-inline-create-footer button {
+  min-height: 32px;
+}
+
+@media (max-width: 860px) {
+  .warehouse-app-shell .outbound-create-page {
+    gap: 9px;
+  }
+
+  .warehouse-app-shell .outbound-create-page .outbound-create-rhythm li {
+    min-height: 40px;
+  }
+}

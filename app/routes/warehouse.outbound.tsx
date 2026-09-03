@@ -547,7 +547,7 @@ export default function WarehouseOutbound({loaderData,actionData}:Route.Componen
   },[printHandoverSignal]);
   if(loaderData.view==="create"){
     const unit=loaderData.selectedLoadUnit,isLtl=unit?.business_type==="ltl"&&Boolean(unit.transport_batch_id);
-    return <>
+    return <div className="outbound-create-page">
       <header className="page-header" id="warehouse-outbound-workbench"><div><p className="eyebrow">CREATE LOADING TASK</p><h1>创建装车任务</h1><p>{unit?`${isLtl?unit.batch_number:unit.order_number} · ${isLtl?`${unit.order_count} 票拼车订单`:unit.customer_name}`:"请从在仓订单列表选择要办理的订单。"}</p></div><Link className="secondary" to={loaderData.pendingHref}>返回在仓订单</Link></header>
       <ol className="outbound-create-rhythm" aria-label="创建装车任务步骤">
         <li className={unit?"complete":"current"}><span>1</span><div><strong>选择在仓订单</strong><small>{unit?"已选定":"当前步骤"}</small></div></li>
@@ -557,7 +557,7 @@ export default function WarehouseOutbound({loaderData,actionData}:Route.Componen
       {!unit&&<div className="alert error" role="alert">未找到对应的在仓订单，该订单可能已创建装车任务或已离仓。<Link to={loaderData.pendingHref}>返回列表重新选择</Link></div>}
       {unit&&!unit.ready&&<BlockedLoadingDocumentRemediation key={unit.id} inspection={inspection} reasons={unit.reasons} pendingHref={loaderData.pendingHref} canOperate={canOperate} busy={busy} actionSuccess={actionSuccess} actionError={actionError}/>}
       {unit?.ready&&<section className="panel outbound-create-section"><div className="panel-header"><div><h2>核验发运文件</h2><p>按订单页签查看和上传对应文件；全部必需文件齐全后，可在右下角直接创建装车任务。</p></div><span className="status-pill success">装车条件已满足</span></div>{canOperate?<CreateDispatchWorkbench warehouseId={loaderData.warehouse.id} inspection={inspection} outboundResources={loaderData.outboundResources} borderPorts={loaderData.borderPorts} customsPlaces={loaderData.customsPlaces} busy={busy} actionSuccess={actionSuccess} actionError={actionError}/>:<div className="alert warning">当前账户可查看装车条件，但不能创建任务。</div>}</section>}
-    </>;
+    </div>;
   }
   if(loaderData.view==="pending")return <>
     <header className="page-header" id="warehouse-outbound-workbench"><div><p className="eyebrow">IN-WAREHOUSE ORDERS</p><h1>在仓订单</h1><p>先筛选并选定订单，再进入独立页面核验文件、创建装车任务。拼车订单仍按 PZ 配载单整批办理。</p></div><Link className="secondary" to={loaderData.executionHref}>查看装车与出库</Link></header>
