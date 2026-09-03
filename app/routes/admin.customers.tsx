@@ -21,6 +21,7 @@ import {
   customerVisibilitySql,
   requireCustomerAccess,
 } from "../lib/customer-access.server";
+import { describeCustomerAccess } from "../lib/customer-access-view";
 
 const customerPartyCategories = [
   { value: "customer", label: "客户" },
@@ -114,6 +115,7 @@ async function validateCustomerDefaultProfile(profile: CustomerDefaultProfile, o
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "customer.view");
   const visibility = customerVisibilitySql(current, "c");
+  const customerAccess = describeCustomerAccess(current);
   const canViewSensitive = current.permissions.includes("customer.sensitive.view");
   const [customers, contacts, addresses, portals] = await Promise.all([
     env.DB.prepare(`SELECT c.id, c.code, c.identity_code, c.name, c.short_name, COALESCE(c.party_category,'customer') AS party_category, c.status, c.notes, c.sales_owner_user_id, u.display_name AS sales_owner_name, COALESCE(GROUP_CONCAT(DISTINCT cbr.role_code), '') AS business_role_codes, COUNT(DISTINCT cc.id) AS contact_count, COUNT(DISTINCT ca.id) AS address_count,
@@ -161,6 +163,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   }));
   return {
     current,
+    customerAccess,
     customers: visibleCustomers,
     contacts: canViewSensitive ? contacts.results.filter((row) => visibleCustomerIds.has(row.customer_id)) : [],
     addresses: canViewSensitive ? addresses.results.filter((row) => visibleCustomerIds.has(row.customer_id)) : [],
@@ -511,7 +514,8 @@ function CustomerModalActionError({ actionData, intent, customerId, accountId }:
 }
 
 export default function Customers({ loaderData, actionData }: Route.ComponentProps) {
-  const busy = useNavigation().state !== "idle", canManage = loaderData.current.permissions.includes("customer.manage");
+  const busy = useNavigation().state !== "idle", canManage = loaderData.customerAccess.canManage;
+  const canReviewRegistrations = loaderData.customerAccess.canReviewRegistrations;
   const bindableCustomers = loaderData.customers.filter((customer) => customer.status !== "archived");
   const modalCloseSignal = actionData?.success ? actionData : undefined;
   const submittedValues = actionData && "values" in actionData ? actionData.values : undefined;
@@ -519,8 +523,11 @@ export default function Customers({ loaderData, actionData }: Route.ComponentPro
   const submittedCustomerId = submittedValues && "customerId" in submittedValues ? submittedValues.customerId : undefined;
   return <>
     <header className="page-header customer-page-header">
-      <div><p className="eyebrow">CUSTOMER 360</p><h1>客户管理</h1><p>统一维护客商分类、业务身份、联系人、常用地址和门户账号。</p></div>
-      <div className="page-actions"><span className="status-pill">{loaderData.customers.length} 家客商</span></div>
+      <div><p className="eyebrow">CUSTOMER 360</p><h1>客户管理</h1><p>{loaderData.customerAccess.description}</p></div>
+      <div className="page-actions">
+        <span className="status-pill">{loaderData.customerAccess.scopeLabel} · {loaderData.customers.length} 家</span>
+        <span className={`status-pill ${canManage ? "success" : "off"}`}>{loaderData.customerAccess.operationLabel}</span>
+      </div>
     </header>
     {(actionData?.success || actionData?.formError) && <div className={`alert ${actionData.formError ? "error" : "success"}`}>{actionData.formError ?? actionData.success}</div>}
     <section className="panel portal-registration-review" id="portal-registration-requests">
@@ -530,7 +537,7 @@ export default function Customers({ loaderData, actionData }: Route.ComponentPro
         <td><strong>{registration.company_name}</strong><small>{registration.customer_identity_code ? `客户识别码 ${registration.customer_identity_code}` : "未填写客户识别码"}</small></td>
         <td><strong>{registration.contact_name}</strong><small>{registration.email}{registration.contact_phone ? ` · ${registration.contact_phone}` : ""}</small></td>
         <td>{registration.candidate_customer_id ? <><span className="status-pill">已预匹配</span><small>{registration.candidate_customer_name}</small></> : <><span className="status-pill off">未匹配</span><small>请人工选择客户</small></>}</td>
-        <td>{canManage ? <div className="portal-registration-actions">
+        <td>{canReviewRegistrations ? <div className="portal-registration-actions">
           <Form method="post" className="portal-registration-approve-form"><input type="hidden" name="intent" value="portal_registration_approve"/><input type="hidden" name="requestId" value={registration.id}/><label><span>最终绑定客户</span><select name="customerId" defaultValue={registration.candidate_customer_id ?? ""} required><option value="">请选择客户档案</option>{bindableCustomers.map((customer) => <option key={customer.id} value={customer.id}>{customer.identity_code} · {customer.name}</option>)}</select></label><button className="primary" disabled={busy}>批准并绑定</button></Form>
           <Form method="post" className="portal-registration-reject-form"><input type="hidden" name="intent" value="portal_registration_reject"/><input type="hidden" name="requestId" value={registration.id}/><label><span>拒绝原因</span><input name="reviewNotes" required minLength={2} maxLength={240} placeholder="例如：企业资料与客户档案不一致"/></label><button className="secondary danger" disabled={busy}>拒绝</button></Form>
         </div> : <span className="muted">仅可查看</span>}</td>
