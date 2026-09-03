@@ -556,7 +556,7 @@ export default function WarehouseOutbound({loaderData,actionData}:Route.Componen
       </ol>
       {!unit&&<div className="alert error" role="alert">未找到对应的在仓订单，该订单可能已创建装车任务或已离仓。<Link to={loaderData.pendingHref}>返回列表重新选择</Link></div>}
       {unit&&!unit.ready&&<BlockedLoadingDocumentRemediation key={unit.id} inspection={inspection} reasons={unit.reasons} pendingHref={loaderData.pendingHref} canOperate={canOperate} busy={busy} actionSuccess={actionSuccess} actionError={actionError}/>}
-      {unit?.ready&&<section className="panel outbound-create-section"><div className="panel-header"><div><h2>核验发运文件</h2><p>按订单页签查看和上传对应文件；全部必需文件齐全后，可在右下角直接创建装车任务。</p></div><span className="status-pill success">装车条件已满足</span></div>{canOperate?<CreateDispatchWorkbench warehouseId={loaderData.warehouse.id} inspection={inspection} outboundResources={loaderData.outboundResources} borderPorts={loaderData.borderPorts} customsPlaces={loaderData.customsPlaces} busy={busy} actionSuccess={actionSuccess} actionError={actionError}/>:<div className="alert warning">当前账户可查看装车条件，但不能创建任务。</div>}</section>}
+      {unit?.ready&&<section className="panel outbound-create-section"><div className="panel-header"><div><h2>核验发运文件</h2><p>按订单页签查看和上传对应文件；全部必需文件齐全后，可在右下角直接创建装车任务。</p></div><span className="status-pill success">装车条件已满足</span></div>{canOperate?<CreateDispatchWorkbench warehouseId={loaderData.warehouse.id} inspection={inspection} outboundResources={loaderData.outboundResources} borderPorts={loaderData.borderPorts} customsPlaces={loaderData.customsPlaces} busy={busy} actionError={actionError}/>:<div className="alert warning">当前账户可查看装车条件，但不能创建任务。</div>}</section>}
     </div>;
   }
   if(loaderData.view==="pending")return <>
@@ -753,7 +753,7 @@ function OutboundOrderDocumentWorkspace({inspection,warehouseId,busy}:{inspectio
   </section>;
 }
 
-function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,borderPorts,customsPlaces,busy,actionSuccess,actionError}:{warehouseId:string;inspection:OutboundInspection|null;outboundResources:OutboundResources;borderPorts:ReferenceOption[];customsPlaces:ReferenceOption[];busy:boolean;actionSuccess?:string;actionError?:string}){
+function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,borderPorts,customsPlaces,busy,actionError}:{warehouseId:string;inspection:OutboundInspection|null;outboundResources:OutboundResources;borderPorts:ReferenceOption[];customsPlaces:ReferenceOption[];busy:boolean;actionError?:string}){
   const [carrierId,setCarrierId]=useState("");
   const [vehicleId,setVehicleId]=useState("");
   const [driverId,setDriverId]=useState("");
@@ -768,7 +768,7 @@ function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,borde
   const remainingRequired=Math.max(0,requiredCount-uploadedCount);
   return <div className="outbound-create-workbench">
     {!inspection&&<div className="alert error" role="alert">无法读取该订单的装车文件清单，请返回在仓订单列表重新进入。</div>}
-    {(actionSuccess||actionError)&&<div className={`alert ${actionError?"error":"success"}`} role={actionError?"alert":"status"} aria-live="polite">{actionError??actionSuccess}</div>}
+    {actionError&&<div className="alert error" role="alert" aria-live="assertive">{actionError}</div>}
     {inspection&&<>
       <div className="outbound-inspection-summary">
         <span>{isFtl?"订单":"PZ 配载单"}<strong>{taskLabel}</strong></span>
