@@ -6,13 +6,16 @@ import { verifyPassword } from "../lib/crypto.server";
 import { valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import { siteFromRequest, siteLogin } from "../lib/site.server";
+import { createSessionSlot, sessionSlotFromUrl, withSessionSlot } from "../lib/session-slot";
 
 export function meta() { return [{ title: "登录 | International TMS" }]; }
 
 export async function loader({ request }: Route.LoaderArgs) {
   const site=siteFromRequest(request); if(site!=="admin")throw redirect(siteLogin(site));
-  if ((await getSessionUser(request))?.site === "admin") throw redirect("/admin/portal");
-  return null;
+  const sessionSlot=sessionSlotFromUrl(request.url);
+  if(!sessionSlot)throw redirect(withSessionSlot("/login",createSessionSlot()));
+  if ((await getSessionUser(request))?.site === "admin") throw redirect(withSessionSlot("/admin/portal",sessionSlot));
+  return { sessionSlot };
 }
 
 export async function action({ request }: Route.ActionArgs) {
@@ -44,14 +47,15 @@ export async function action({ request }: Route.ActionArgs) {
   }
   await clearLoginFailures(user.id);
   await writeAudit({ request, action: "auth.login", resourceType: "session", organizationId: user.organization_id, actorUserId: user.id });
-  return redirect("/admin/portal", { headers: { "Set-Cookie": await createSession(user.id, user.organization_id, "admin") } });
+  const sessionSlot=sessionSlotFromUrl(request.url)||createSessionSlot();
+  return redirect(withSessionSlot("/admin/portal",sessionSlot), { headers: { "Set-Cookie": await createSession(user.id, user.organization_id, "admin", null, sessionSlot) } });
 }
 
-export default function Login({ actionData }: Route.ComponentProps) {
+export default function Login({ loaderData, actionData }: Route.ComponentProps) {
   const busy = useNavigation().state !== "idle";
   return <main className="auth-page"><section className="auth-card">
     <div className="brand-mark">IT</div><p className="eyebrow">INTERNATIONAL TMS</p><h1>欢迎回来</h1><p className="muted">登录运输管理工作台</p>
     {actionData?.error && <div className="alert error">{actionData.error}</div>}
-    <Form method="post" className="stack"><label className="field"><span>邮箱</span><input name="email" type="email" defaultValue={actionData?.email} required autoComplete="email" /></label><label className="field"><span>密码</span><input name="password" type="password" required autoComplete="current-password" /></label><button className="primary" disabled={busy}>{busy ? "正在登录…" : "登录后台"}</button></Form><div className="site-links"><a className="site-switch" href="/portal/login">客户门户登录 →</a><a className="site-switch" href="/warehouse/login">仓库作业登录 →</a></div>
+    <Form method="post" action={withSessionSlot("/login",loaderData.sessionSlot)} className="stack"><label className="field"><span>邮箱</span><input name="email" type="email" defaultValue={actionData?.email} required autoComplete="email" /></label><label className="field"><span>密码</span><input name="password" type="password" required autoComplete="current-password" /></label><button className="primary" disabled={busy}>{busy ? "正在登录…" : "登录后台"}</button></Form><div className="site-links"><a className="site-switch" href="/portal/login">客户门户登录 →</a><a className="site-switch" href="/warehouse/login">仓库作业登录 →</a></div>
   </section></main>;
 }

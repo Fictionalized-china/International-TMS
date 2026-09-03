@@ -17,6 +17,49 @@ import { GlobalInteractionFeedback } from "./components/InteractionFeedback";
 import { useExpandableDialogScrollLock } from "./components/Modal";
 import "./app.css";
 
+const sessionSlotBootstrap = `(() => {
+  const param = "itmsTab";
+  const storageKey = "international-tms-tab-session";
+  const valid = value => typeof value === "string" && /^[a-zA-Z0-9_-]{12,64}$/.test(value);
+  const current = new URL(window.location.href);
+  let slot = current.searchParams.get(param);
+  if (!valid(slot)) {
+    try { slot = window.sessionStorage.getItem(storageKey); } catch { slot = null; }
+  }
+  if (!valid(slot)) return;
+  try { window.sessionStorage.setItem(storageKey, slot); } catch {}
+  if (current.searchParams.get(param) !== slot) {
+    current.searchParams.set(param, slot);
+    window.history.replaceState(window.history.state, "", current.pathname + current.search + current.hash);
+  }
+  const addSlot = value => {
+    if (value == null || value === "") return value;
+    try {
+      const url = new URL(String(value), window.location.href);
+      if (url.origin !== window.location.origin) return value;
+      url.searchParams.set(param, slot);
+      return url.pathname + url.search + url.hash;
+    } catch { return value; }
+  };
+  for (const method of ["pushState", "replaceState"]) {
+    const original = window.history[method].bind(window.history);
+    window.history[method] = (state, unused, url) => original(state, unused, addSlot(url));
+  }
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = (input, init = {}) => {
+    try {
+      const target = new URL(input instanceof Request ? input.url : String(input), window.location.href);
+      if (target.origin === window.location.origin) {
+        const headers = new Headers(input instanceof Request ? input.headers : undefined);
+        new Headers(init.headers).forEach((value, key) => headers.set(key, value));
+        headers.set("X-ITMS-Tab", slot);
+        init = { ...init, headers };
+      }
+    } catch {}
+    return originalFetch(input, init);
+  };
+})();`;
+
 export const links: Route.LinksFunction = () => [];
 
 export function Layout({ children }: { children: React.ReactNode }) {
@@ -26,6 +69,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta name="theme-color" content="#0d263b" />
+        <script dangerouslySetInnerHTML={{ __html: sessionSlotBootstrap }} />
         <Meta />
         <Links />
       </head>

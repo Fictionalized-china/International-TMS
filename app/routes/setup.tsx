@@ -12,6 +12,7 @@ import {
 } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import { accessModelBootstrapStatements } from "../lib/access-model-seed.server";
+import { createSessionSlot, withSessionSlot } from "../lib/session-slot";
 
 export function meta() {
   return [{ title: "初始化 | International TMS" }];
@@ -168,8 +169,9 @@ export async function action({ request }: Route.ActionArgs) {
   }
 
   try {
-    return redirect("/dashboard", {
-      headers: { "Set-Cookie": await createSession(userId, organizationId) },
+    const sessionSlot = createSessionSlot();
+    return redirect(withSessionSlot("/dashboard", sessionSlot), {
+      headers: { "Set-Cookie": await createSession(userId, organizationId, "admin", null, sessionSlot) },
     });
   } catch (error) {
     return bootstrapFailure("SESSION", error);

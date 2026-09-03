@@ -15,11 +15,7 @@ import {
   isProtectedAccessRole,
   type PermissionOverride,
 } from "./permission-blocks";
-
-const SITE_COOKIE_NAMES: Record<Exclude<Site, "warehouse">, string> = {
-  admin: "itms_admin_session",
-  portal: "itms_portal_session",
-};
+import { sessionCookieName, sessionSlotFromRequest, withSessionSlot } from "./session-slot";
 
 let warnedAboutMissingPermissionOverrides = false;
 
@@ -77,11 +73,9 @@ export function warehouseIdFromRequest(request: Request): string | null {
   );
 }
 
-function cookieName(site: Site, warehouseId?: string | null, portalContextId?: string | null): string | null {
-  if (site === "portal") return portalSessionCookieName(portalContextId);
-  if (site !== "warehouse") return SITE_COOKIE_NAMES[site];
-  if (!warehouseId) return "itms_warehouse_session";
-  return `itms_warehouse_session_${warehouseId.replace(/[^a-zA-Z0-9_-]/g, "")}`;
+function cookieName(site: Site, warehouseId?: string | null, contextId?: string | null): string | null {
+  if (site === "portal") return portalSessionCookieName(contextId);
+  return sessionCookieName(site, warehouseId, contextId);
 }
 
 export async function createSession(
@@ -89,10 +83,10 @@ export async function createSession(
   organizationId: string,
   site: Site = "admin",
   warehouseId?: string | null,
-  portalContextId?: string | null,
+  contextId?: string | null,
 ): Promise<string> {
-  const name = cookieName(site, warehouseId, portalContextId);
-  if (!name) throw new Error("创建客户门户会话时缺少有效的窗口上下文");
+  const name = cookieName(site, warehouseId, contextId);
+  if (!name) throw new Error("创建会话时缺少有效的窗口上下文");
   const token = randomToken();
   const tokenHash = await sha256(token);
   const now = new Date();
@@ -111,15 +105,15 @@ export async function getSessionUser(
   request: Request,
   site: Site = siteFromRequest(request),
   warehouseId?: string | null,
-  portalContextId?: string | null,
+  contextId?: string | null,
 ): Promise<SessionUser | null> {
   const resolvedWarehouseId = site === "warehouse"
     ? warehouseId || warehouseIdFromRequest(request)
     : null;
-  const resolvedPortalContextId = site === "portal"
-    ? portalContextId || portalContextIdFromRequest(request)
-    : null;
-  const name = cookieName(site, resolvedWarehouseId, resolvedPortalContextId);
+  const resolvedContextId = site === "portal"
+    ? contextId || portalContextIdFromRequest(request)
+    : contextId || sessionSlotFromRequest(request);
+  const name = cookieName(site, resolvedWarehouseId, resolvedContextId);
   if (!name) return null;
   const token = cookieValue(request, name);
   if (!token) return null;
@@ -218,12 +212,19 @@ export function canEditWorkflowDefinition(user: SessionUser) {
 
 export async function requireSessionUser(request: Request, permission?: string, site: Site = "admin"): Promise<SessionUser> {
   const user = await getSessionUser(request, site);
+  const sessionSlot = sessionSlotFromRequest(request);
+  const portalContextId = site === "portal" ? portalContextIdFromRequest(request) : null;
+  const loginLocation = portalContextId
+    ? portalContextualPath(siteLogin(site), portalContextId)
+    : withSessionSlot(siteLogin(site), sessionSlot);
   const requestedSite=siteFromRequest(request);
-  if (requestedSite!==site) throw redirect(siteLogin(requestedSite));
-  if (!user || user.site !== site) {
-    const portalContextId = site === "portal" ? portalContextIdFromRequest(request) : null;
-    throw redirect(portalContextId ? portalContextualPath(siteLogin(site), portalContextId) : siteLogin(site));
+  if (requestedSite!==site) {
+    const requestedLogin = requestedSite === "portal" && portalContextId
+      ? portalContextualPath(siteLogin(requestedSite), portalContextId)
+      : withSessionSlot(siteLogin(requestedSite), sessionSlot);
+    throw redirect(requestedLogin);
   }
+  if (!user || user.site !== site) throw redirect(loginLocation);
   if (permission && !user.permissions.includes(permission)) throw new Response("没有权限执行此操作", { status: 403 });
   return user;
 }
@@ -232,15 +233,15 @@ export async function destroySession(
   request: Request,
   site: Site = siteFromRequest(request),
   warehouseId?: string | null,
-  portalContextId?: string | null,
+  contextId?: string | null,
 ): Promise<string> {
   const resolvedWarehouseId = site === "warehouse"
     ? warehouseId || warehouseIdFromRequest(request)
     : null;
-  const resolvedPortalContextId = site === "portal"
-    ? portalContextId || portalContextIdFromRequest(request)
-    : null;
-  const name = cookieName(site, resolvedWarehouseId, resolvedPortalContextId);
+  const resolvedContextId = site === "portal"
+    ? contextId || portalContextIdFromRequest(request)
+    : contextId || sessionSlotFromRequest(request);
+  const name = cookieName(site, resolvedWarehouseId, resolvedContextId);
   if (!name) return "itms_portal_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0";
   const token = cookieValue(request, name);
   if (token) await env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(await sha256(token)).run();

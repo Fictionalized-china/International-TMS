@@ -6,12 +6,15 @@ import { verifyPassword } from "../lib/crypto.server";
 import { valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import { siteFromRequest, siteLogin } from "../lib/site.server";
+import { createSessionSlot, sessionSlotFromUrl, withSessionSlot } from "../lib/session-slot";
 
 export function meta(){return[{title:"仓库作业登录 | International TMS"}]}
 
 export async function loader({request}:Route.LoaderArgs){
   const site=siteFromRequest(request);if(site!=="warehouse")throw redirect(siteLogin(site));
-  return null;
+  const sessionSlot=sessionSlotFromUrl(request.url);
+  if(!sessionSlot)throw redirect(withSessionSlot("/warehouse/login",createSessionSlot()));
+  return { sessionSlot };
 }
 
 export async function action({request}:Route.ActionArgs){
@@ -48,11 +51,12 @@ export async function action({request}:Route.ActionArgs){
     .first<{id:string}>();
   if(!warehouse)return{error:"当前账号没有可进入的启用仓库，请联系管理员检查仓库绑定",email};
   await writeAudit({request,action:"warehouse.login",resourceType:"session",organizationId:user.organization_id,actorUserId:user.id});
-  return redirect(`/warehouse?warehouseId=${encodeURIComponent(warehouse.id)}`,{headers:{"Set-Cookie":await createSession(user.id,user.organization_id,"warehouse",warehouse.id)}});
+  const sessionSlot=sessionSlotFromUrl(request.url)||createSessionSlot();
+  return redirect(withSessionSlot(`/warehouse?warehouseId=${encodeURIComponent(warehouse.id)}`,sessionSlot),{headers:{"Set-Cookie":await createSession(user.id,user.organization_id,"warehouse",warehouse.id,sessionSlot)}});
 }
 
-export default function WarehouseLogin({actionData}:Route.ComponentProps){
+export default function WarehouseLogin({loaderData,actionData}:Route.ComponentProps){
   const busy=useNavigation().state!=="idle";
   return <main className="auth-page warehouse-auth"><section className="auth-card"><div className="brand-mark warehouse-mark">WH</div><p className="eyebrow">OULING WAREHOUSE</p><h1>仓库作业</h1><p className="muted">现场人员独立登录入口</p>{actionData?.error&&<div className="alert error">{actionData.error}</div>}
-    <Form method="post" className="stack"><label className="field"><span>员工邮箱</span><input name="email" type="email" defaultValue={actionData?.email||""} required autoComplete="email" autoFocus/></label><label className="field"><span>密码</span><input name="password" type="password" required autoComplete="current-password"/></label><button className="primary warehouse-primary" disabled={busy}>{busy?"正在登录…":"进入仓库作业"}</button></Form><a className="site-switch" href="/login">运营后台登录 →</a></section></main>;
+    <Form method="post" action={withSessionSlot("/warehouse/login",loaderData.sessionSlot)} className="stack"><label className="field"><span>员工邮箱</span><input name="email" type="email" defaultValue={actionData?.email||""} required autoComplete="email" autoFocus/></label><label className="field"><span>密码</span><input name="password" type="password" required autoComplete="current-password"/></label><button className="primary warehouse-primary" disabled={busy}>{busy?"正在登录…":"进入仓库作业"}</button></Form><a className="site-switch" href="/login">运营后台登录 →</a></section></main>;
 }

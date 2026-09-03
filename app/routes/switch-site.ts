@@ -4,11 +4,13 @@ import type { Route } from "./+types/switch-site";
 import { createSession, getSessionUser, warehouseIdFromRequest } from "../lib/auth.server";
 import { writeAudit } from "../lib/audit.server";
 import { valueOf } from "../lib/validation";
+import { sessionSlotFromRequest, withSessionSlot } from "../lib/session-slot";
 
-export async function loader(){throw redirect("/login")}
+export async function loader({request}:Route.LoaderArgs){throw redirect(withSessionSlot("/login",sessionSlotFromRequest(request)))}
 
 export async function action({request}:Route.ActionArgs){
   const form=await request.formData(),target=valueOf(form,"target");
+  const sessionSlot=sessionSlotFromRequest(request);
   if(!["admin","warehouse"].includes(target))return new Response("不支持的站点",{status:400});
   const sourceSite=target==="warehouse"?"admin":"warehouse";
   const current=await getSessionUser(request,sourceSite,sourceSite==="warehouse"?warehouseIdFromRequest(request):null);
@@ -43,10 +45,10 @@ export async function action({request}:Route.ActionArgs){
     warehouseUrl.searchParams.set("warehouseId",warehouse.id);
     const warehouseTo=`${warehouseUrl.pathname}?${warehouseUrl.searchParams.toString()}`;
     await writeAudit({request,action:"auth.site.switch",resourceType:"session",organizationId:current.organizationId,actorUserId:current.userId,metadata:{from:current.site,to:"warehouse"}});
-    return redirect(warehouseTo,{headers:{"Set-Cookie":await createSession(current.userId,current.organizationId,"warehouse",warehouse.id)}});
+    return redirect(withSessionSlot(warehouseTo,sessionSlot),{headers:{"Set-Cookie":await createSession(current.userId,current.organizationId,"warehouse",warehouse.id,sessionSlot)}});
   }
   await writeAudit({request,action:"auth.site.switch",resourceType:"session",organizationId:current.organizationId,actorUserId:current.userId,metadata:{from:current.site,to:"admin"}});
   const requestedReturn=valueOf(form,"returnTo");
   const returnTo=(requestedReturn==="/admin"||requestedReturn.startsWith("/admin/")||requestedReturn.startsWith("/admin?"))&&!requestedReturn.startsWith("//")?requestedReturn:"/admin";
-  return redirect(returnTo,{headers:{"Set-Cookie":await createSession(current.userId,current.organizationId,"admin")}});
+  return redirect(withSessionSlot(returnTo,sessionSlot),{headers:{"Set-Cookie":await createSession(current.userId,current.organizationId,"admin",null,sessionSlot)}});
 }
