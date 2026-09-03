@@ -782,7 +782,7 @@ function CustomerForm({
       </div>
       {errors?.profile && <small className="field-error">{errors.profile}</small>}
     </section>
-    <section className="customer-form-section customer-notes-section"><div className="customer-form-grid"><label className="field span-all"><span>备注 <em>选填</em></span><textarea name="notes" rows={3} maxLength={1000} defaultValue={values?.notes ?? customer?.notes ?? ""} placeholder="填写结算习惯、沟通偏好或其他客户说明"/></label></div></section>
+    <section className="customer-form-section customer-notes-section"><div className="customer-form-grid"><label className="field span-all"><span>备注 <em>选填</em></span><textarea name="notes" rows={2} maxLength={1000} defaultValue={values?.notes ?? customer?.notes ?? ""} placeholder="填写结算习惯、沟通偏好或其他客户说明"/></label></div></section>
     <div className="customer-form-actions"><span>确认后将同时创建客户、默认联系人和默认提货地址。</span><button className="primary" disabled={busy}>{editing ? "确认保存客户信息" : "确认创建客户"}</button></div>
   </Form>;
 }
@@ -790,8 +790,13 @@ function CustomerForm({
 function CustomerBusinessRolePicker({ selected = [], error }: { selected?: CustomerBusinessRoleCode[]; error?: string }) {
   const [checkedRoles, setCheckedRoles] = useState<CustomerBusinessRoleCode[]>(selected);
   const selectedSet = new Set(checkedRoles);
-  return <details className="customer-role-dropdown" aria-required="true">
-    <summary><span>业务身份{checkedRoles.length === 0 && <b aria-hidden="true"> *</b>}</span><strong>{checkedRoles.length ? checkedRoles.map(customerBusinessRoleLabel).join("、") : "点击展开选择"}</strong></summary>
+  const missingRequiredRole = checkedRoles.length === 0;
+  return <details
+    className={`customer-role-dropdown ${missingRequiredRole ? "is-missing-required" : "is-complete"}${error ? " has-error" : ""}`}
+    aria-required="true"
+    aria-invalid={missingRequiredRole || Boolean(error)}
+  >
+    <summary><span>业务身份</span><strong>{checkedRoles.length ? checkedRoles.map(customerBusinessRoleLabel).join("、") : "请选择业务身份"}</strong></summary>
     <div className="customer-role-drawer"><p>可多选，用于发货人、收货人、代理、仓库等业务选择。</p><div className="customer-role-options">
       {customerBusinessRoles.map((item) => <label key={item.code}>
         <input

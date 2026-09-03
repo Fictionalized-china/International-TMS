@@ -26706,3 +26706,120 @@ html[data-motion="off"] *::after {
     min-height: 40px;
   }
 }
+
+/* Customer editor: compact, aligned and consistent with production forms. */
+.customer-editor-modal {
+  width: min(1320px, calc(100vw - 16px)) !important;
+  max-width: min(1320px, calc(100vw - 16px)) !important;
+  max-height: calc(100vh - 16px) !important;
+  border: 1px solid #c7d7e6 !important;
+  border-radius: 6px !important;
+  box-shadow: 0 18px 48px rgba(13, 38, 59, .2) !important;
+}
+
+.customer-editor-modal .modal-header {
+  min-height: 42px;
+  padding: 6px 10px;
+  border-bottom-color: #d6e2ed;
+  background: #fff;
+}
+
+.customer-editor-modal .modal-header h2 {
+  color: #173654;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.customer-editor-modal .modal-body {
+  padding: 6px 8px 8px;
+  background: #f5f8fb;
+}
+
+.customer-editor-form { gap: 6px; }
+
+.customer-editor-form .customer-form-section {
+  border-color: #cbdbe9;
+  border-radius: 4px;
+}
+
+.customer-editor-form .customer-form-section-title {
+  min-height: 28px;
+  padding: 3px 8px 3px 7px;
+  border-left: 3px solid #397bb9;
+  background: #f2f7fb;
+}
+
+.customer-editor-form .customer-form-section-title strong {
+  color: #173e66;
+  font-size: 11px;
+}
+
+.customer-editor-form .customer-form-section-title span { font-size: 9px; }
+
+.customer-editor-form .customer-form-grid {
+  gap: 5px 7px;
+  padding: 6px 8px;
+}
+
+.customer-editor-form .customer-form-grid .field > span,
+.customer-editor-form .customer-role-dropdown > summary > span {
+  margin-bottom: 2px;
+  color: #405a72;
+  font-size: 10px;
+}
+
+.customer-editor-form .customer-form-grid input:not([type="checkbox"], [type="radio"]),
+.customer-editor-form .customer-form-grid select,
+.customer-editor-form .customer-role-dropdown > summary > strong {
+  min-height: 32px;
+  height: 32px;
+  padding-block: 4px;
+}
+
+.customer-editor-form .customer-role-dropdown > summary { grid-template-rows: auto 32px; }
+.customer-editor-form .customer-role-dropdown > summary::after { bottom: 7px; }
+
+.customer-editor-form .customer-role-dropdown.is-missing-required > summary > strong,
+.customer-editor-form .customer-role-dropdown.has-error > summary > strong {
+  border-color: #e5bcbc;
+  background: #fff3f3;
+  color: #8a3131;
+}
+
+.customer-editor-form .customer-role-dropdown.is-complete > summary > strong {
+  border-color: #c8d3df;
+  background: #fff;
+  color: #24374a;
+}
+
+.customer-editor-form .customer-role-dropdown[open] > summary > strong,
+.customer-editor-form .customer-role-dropdown > summary:focus-visible > strong {
+  border-color: #2f72c4;
+  outline: 2px solid rgba(47, 114, 196, .14);
+}
+
+.customer-editor-form .customer-role-drawer {
+  padding: 6px;
+  border-color: #9eb5ca;
+}
+
+.customer-editor-form .customer-role-drawer .customer-role-options label {
+  min-height: 28px;
+  padding: 4px 7px;
+}
+
+.customer-editor-form .customer-notes-section textarea {
+  min-height: 46px;
+  height: 46px;
+  resize: none;
+}
+
+.customer-editor-form .customer-form-actions {
+  bottom: -8px;
+  min-height: 38px;
+  padding: 4px 6px;
+  border-color: #cbdbe9;
+  background: rgba(255, 255, 255, .98);
+}
+
+.customer-editor-form .customer-form-actions button { min-height: 30px; }
