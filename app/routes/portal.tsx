@@ -52,7 +52,7 @@ export default function PortalLayout({ loaderData }: Route.ComponentProps) {
           <PortalLink to="/portal/tracking" icon="map">运输轨迹</PortalLink>
           <PortalLink to="/portal/billing" icon="billing">账单与文件</PortalLink>
           <PortalLink to="/portal/notifications" icon="documents">
-            消息中心{unread > 0 && <b className="nav-badge">{unread > 99 ? "99+" : unread}</b>}
+            通知{unread > 0 && <b className="nav-badge">{unread > 99 ? "99+" : unread}</b>}
           </PortalLink>
           <PortalLink to="/portal/account" icon="userSettings">账户中心</PortalLink>
         </nav>

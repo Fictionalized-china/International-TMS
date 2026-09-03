@@ -11,6 +11,8 @@ import { PrototypeBrandMark } from "../components/PrototypeBrandMark";
 import { ConnectionStatus } from "../components/InteractionFeedback";
 import { WorkspacePreferences } from "../components/WorkspacePreferences";
 import { submitForm } from "../lib/form-submit";
+import { InternalNotificationCenter } from "../components/InternalNotificationCenter";
+import { loadInternalNotificationSummary } from "../lib/internal-notifications.server";
 
 type WarehouseOrder = {
   id: string;
@@ -93,6 +95,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const outboundView = requestedOutboundView === "pending" || requestedOutboundView === "execution"
     ? requestedOutboundView
     : warehouseFlow?.dispatchStatus === "loading" ? "execution" : "pending";
+  const notifications=await loadInternalNotificationSummary(user.organizationId,user.userId);
   return {
     user,
     warehouses: warehouseContext.warehouses,
@@ -106,6 +109,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     query,
     result: url.searchParams.get("warehouseResult"),
     error: url.searchParams.get("warehouseError"),
+    notifications,
   };
 }
 
@@ -151,6 +155,11 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
           <small>{loaderData.warehouse.code} · 仅显示当前账号获授权的仓库</small>
         </Form>
         <nav className="nav" aria-label="仓库作业导航">
+          <span className="warehouse-nav-group nav-title">工作台</span>
+          <NavLink to={warehouseLink("/warehouse/notifications", loaderData.query)}>
+            <span><AppIcon name="bell" size={17} /></span>通知
+            {loaderData.notifications.unreadCount>0&&<b className="nav-badge">{loaderData.notifications.unreadCount>99?"99+":loaderData.notifications.unreadCount}</b>}
+          </NavLink>
           <span className="warehouse-nav-group nav-title">现场作业</span>
           <NavLink to={warehouseLink("/warehouse", loaderData.query)} end>
             <span><AppIcon name="dashboard" size={17} /></span>仓库作业总表
@@ -226,7 +235,7 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
       <div className="warehouse-main-column">
         <header className="warehouse-topbar topbar">
           <div className="workspace-switch"><span className="active"><AppIcon name="warehouse" size={14} />{warehouseRoleLabels[loaderData.warehouse.warehouse_role]}</span></div>
-          <div className="top-actions"><ConnectionStatus className="warehouse-sync-state" /><WorkspacePreferences /><span className="warehouse-topbar-user top-user"><span className="warehouse-avatar avatar">{user.displayName.slice(0, 1).toUpperCase()}</span><span><strong>{user.displayName}</strong><small>{loaderData.warehouseName}</small></span></span></div>
+          <div className="top-actions"><ConnectionStatus className="warehouse-sync-state" /><WorkspacePreferences /><InternalNotificationCenter {...loaderData.notifications} historyPath={warehouseLink("/warehouse/notifications",loaderData.query)} actionPath={warehouseLink("/warehouse/notifications",loaderData.query)} allowObjectLink={false}/><span className="warehouse-topbar-user top-user"><span className="warehouse-avatar avatar">{user.displayName.slice(0, 1).toUpperCase()}</span><span><strong>{user.displayName}</strong><small>{loaderData.warehouseName}</small></span></span></div>
         </header>
       <main className="warehouse-content" id="warehouse-main-content">
         {orderContext && (

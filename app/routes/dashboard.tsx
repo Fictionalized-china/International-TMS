@@ -42,6 +42,9 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
         <nav className="nav" aria-label="运营管理导航">
           <span className="nav-group nav-title">工作台</span>
           <SideLink to="/admin/portal" icon="layout">任务工作台</SideLink>
+          <SideLink to="/admin/notifications" icon="bell">
+            通知{loaderData.notifications.unreadCount>0&&<b className="nav-badge">{loaderData.notifications.unreadCount>99?"99+":loaderData.notifications.unreadCount}</b>}
+          </SideLink>
           {can("dashboard.view") && <SideLink to="/admin" icon="dashboard" end>运营总览</SideLink>}
 
           <span className="nav-group nav-title">汽运业务</span>

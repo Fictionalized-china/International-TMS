@@ -7,11 +7,17 @@ import { Modal } from "./Modal";
 export function InternalNotificationCenter({
   unreadCount,
   latest,
+  historyPath="/admin/notifications",
+  actionPath=historyPath,
+  allowObjectLink=true,
 }: {
   unreadCount:number;
   latest:InternalNotification|null;
+  historyPath?:string;
+  actionPath?:string;
+  allowObjectLink?:boolean;
 }) {
-  const fetcher = useFetcher<{success?:string}>();
+  const fetcher = useFetcher<{success?:string;notificationId?:string}>();
   const [open,setOpen] = useState(false);
   useEffect(() => {
     if (!latest) return;
@@ -37,18 +43,21 @@ export function InternalNotificationCenter({
     return () => document.removeEventListener("focusout",showAtSafePoint);
   },[latest?.id]);
   useEffect(() => {
-    if (fetcher.state === "idle" && fetcher.data?.success) setOpen(false);
-  },[fetcher.state,fetcher.data]);
+    if (
+      fetcher.state === "idle" &&
+      fetcher.data?.success &&
+      fetcher.data.notificationId === latest?.id
+    ) setOpen(false);
+  },[fetcher.state,fetcher.data,latest?.id]);
   return <>
-    <button
-      type="button"
+    <Link
       className="admin-topbar-link internal-notification-trigger"
-      onClick={() => setOpen(true)}
+      to={historyPath}
       aria-label={`站内通知，${unreadCount} 条未读`}
     >
       <AppIcon name="bell" size={16}/><span>通知</span>
       {unreadCount>0 && <b>{unreadCount>99?"99+":unreadCount}</b>}
-    </button>
+    </Link>
     {latest && <Modal
       title={latest.requires_ack?"重要变更 · 请确认知悉":"站内通知"}
       isOpen={open}
@@ -63,9 +72,9 @@ export function InternalNotificationCenter({
         <p>{latest.message}</p>
         <time>{new Date(latest.created_at).toLocaleString("zh-CN")}</time>
         <div className="confirm-action-buttons">
-          <Link className="secondary" to="/admin/notifications" onClick={() => setOpen(false)}>查看全部</Link>
-          {latest.link && <Link className="secondary" to={latest.link} onClick={() => setOpen(false)}>查看影响对象</Link>}
-          <fetcher.Form method="post" action="/admin/notifications">
+          <Link className="secondary" to={historyPath} onClick={() => setOpen(false)}>查看全部</Link>
+          {allowObjectLink && latest.link && <Link className="secondary" to={latest.link} onClick={() => setOpen(false)}>查看影响对象</Link>}
+          <fetcher.Form method="post" action={actionPath}>
             <input type="hidden" name="intent" value={latest.requires_ack?"acknowledge":"read"}/>
             <input type="hidden" name="notificationId" value={latest.id}/>
             <button className="primary" data-notification-ack disabled={fetcher.state!=="idle"}>
