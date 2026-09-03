@@ -83,12 +83,23 @@ def main() -> None:
     if not target_match:
         raise RuntimeError("账号初始化 SQL 缺少目标组织代码标记，请重新运行账号生成器")
     target_organization_code = target_match.group(1)
+    password_mode_match = re.search(
+        r"^-- Credential password mode: (fixed|unique)$", provision_sql, flags=re.MULTILINE
+    )
+    if not password_mode_match:
+        raise RuntimeError("账号初始化 SQL 缺少密码模式标记，请重新运行账号生成器")
+    password_mode = password_mode_match.group(1)
 
     credentials = credential_rows()
     if len(credentials) != 16 or len({email for email, _ in credentials}) != 16:
         raise RuntimeError("桌面账密本必须包含 16 个唯一账号")
-    if len({password for _, password in credentials}) != 16:
-        raise RuntimeError("16 个账号必须使用互不相同的密码")
+    password_count = len({password for _, password in credentials})
+    expected_password_count = 1 if password_mode == "fixed" else 16
+    if password_count != expected_password_count:
+        raise RuntimeError(
+            f"密码模式 {password_mode!r} 应包含 {expected_password_count} 个不同密码，"
+            f"实际为 {password_count} 个"
+        )
 
     temp_root = Path(tempfile.mkdtemp(prefix="international-tms-account-audit-"))
     isolated_database = temp_root / "audit.sqlite"

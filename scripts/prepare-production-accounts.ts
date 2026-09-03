@@ -19,6 +19,7 @@ type Options = {
   sqlPath: string;
   auditSqlPath: string;
   credentialsPath: string;
+  fixedPassword?: string;
 };
 
 const defaultSecretDirectory = resolve(".local-secrets");
@@ -36,6 +37,13 @@ function optionsFromArguments(): Options {
   if (!/^[a-z0-9][a-z0-9_-]{1,62}$/i.test(organizationCode)) {
     throw new Error("--organization-code 只能包含字母、数字、下划线或连字符，长度为 2-63 位");
   }
+  const fixedPassword = argumentValue("--password");
+  if (
+    fixedPassword &&
+    (fixedPassword.length < 12 || !/[a-z]/.test(fixedPassword) || !/[A-Z]/.test(fixedPassword) || !/\d/.test(fixedPassword))
+  ) {
+    throw new Error("--password 至少 12 位，并同时包含大小写字母和数字");
+  }
   return {
     organizationCode,
     sqlPath: resolve(argumentValue("--sql") || `${defaultSecretDirectory}/aliyun-production-accounts.sql`),
@@ -43,6 +51,7 @@ function optionsFromArguments(): Options {
     credentialsPath: resolve(
       argumentValue("--credentials") || `${homedir()}/Desktop/International-TMS-阿里云测试账密.md`,
     ),
+    fixedPassword,
   };
 }
 
@@ -73,14 +82,14 @@ function organizationIdExpression(organizationCode: string) {
   return `(SELECT id FROM organizations WHERE lower(code)=lower(${sqlText(organizationCode)}) LIMIT 1)`;
 }
 
-function prepareAccounts(): PreparedAccount[] {
+function prepareAccounts(fixedPassword?: string): PreparedAccount[] {
   return productionAccountBlueprint.map((account) => {
-    const password = generatePassword();
+    const password = fixedPassword || generatePassword();
     return { ...account, password, passwordHash: hashPassword(password) };
   });
 }
 
-function buildProvisionSql(accounts: PreparedAccount[], organizationCode: string) {
+function buildProvisionSql(accounts: PreparedAccount[], organizationCode: string, passwordMode: "fixed" | "unique") {
   const now = new Date().toISOString();
   const organizationId = organizationIdExpression(organizationCode);
   const allowedEmails = sqlList(accounts.map((account) => account.email));
@@ -89,6 +98,7 @@ function buildProvisionSql(accounts: PreparedAccount[], organizationCode: string
 
   const statements: string[] = [
     `-- Target organization code: ${organizationCode}`,
+    `-- Credential password mode: ${passwordMode}`,
     "PRAGMA foreign_keys=ON;",
     "-- Apply only after migrations and /setup have created the target organization and owner.",
     "-- Existing identities outside this allowlist are disabled, not deleted, so audit references remain intact.",
@@ -219,7 +229,7 @@ function accountNote(account: PreparedAccount) {
   return "管理后台；按岗位权限与订单范围显示";
 }
 
-function buildCredentialsMarkdown(accounts: PreparedAccount[], organizationCode: string) {
+function buildCredentialsMarkdown(accounts: PreparedAccount[], organizationCode: string, passwordMode: "fixed" | "unique") {
   const lines = [
     "# International TMS 阿里云测试账密",
     "",
@@ -228,7 +238,9 @@ function buildCredentialsMarkdown(accounts: PreparedAccount[], organizationCode:
     "- 管理后台入口：`/login`",
     "- 客户门户入口：`/portal/login`",
     "- 仓库端入口：`/warehouse/login`",
-    "- 说明：每个账号使用独立随机强密码；不要把本文件提交到 Git 或发到公开群聊。",
+    passwordMode === "fixed"
+      ? "- 说明：本地与阿里云测试环境使用统一测试密码；不要把本文件提交到 Git 或发到公开群聊。"
+      : "- 说明：每个账号使用独立随机强密码；不要把本文件提交到 Git 或发到公开群聊。",
     "",
     "| 端 | 部门 | 岗位/客户 | 登录邮箱 | 密码 | 权限说明 |",
     "|---|---|---|---|---|---|",
@@ -242,11 +254,12 @@ function buildCredentialsMarkdown(accounts: PreparedAccount[], organizationCode:
 }
 
 export function prepareProductionAccountArtifacts(options: Options) {
-  const accounts = prepareAccounts();
+  const accounts = prepareAccounts(options.fixedPassword);
+  const passwordMode = options.fixedPassword ? "fixed" : "unique";
   for (const path of [options.sqlPath, options.auditSqlPath, options.credentialsPath]) mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(options.sqlPath, buildProvisionSql(accounts, options.organizationCode), { encoding: "utf8", mode: 0o600 });
+  writeFileSync(options.sqlPath, buildProvisionSql(accounts, options.organizationCode, passwordMode), { encoding: "utf8", mode: 0o600 });
   writeFileSync(options.auditSqlPath, buildAuditSql(accounts, options.organizationCode), { encoding: "utf8", mode: 0o600 });
-  writeFileSync(options.credentialsPath, `\uFEFF${buildCredentialsMarkdown(accounts, options.organizationCode)}`, { encoding: "utf8", mode: 0o600 });
+  writeFileSync(options.credentialsPath, `\uFEFF${buildCredentialsMarkdown(accounts, options.organizationCode, passwordMode)}`, { encoding: "utf8", mode: 0o600 });
   return options;
 }
 
