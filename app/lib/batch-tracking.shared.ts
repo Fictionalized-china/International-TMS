@@ -43,3 +43,13 @@ export const BATCH_TRACKING_REQUIRED_PREVIOUS: Record<string, string[]> = {
   customs_cleared: ["foreign_entered"],
   station_arrived: ["customs_cleared"],
 };
+
+export function missingBatchTrackingPrerequisites(
+  completedCodes: Iterable<string>,
+  milestoneCode: string,
+): string[] {
+  const completed = new Set(completedCodes);
+  return (BATCH_TRACKING_REQUIRED_PREVIOUS[milestoneCode] ?? []).filter(
+    (code) => !completed.has(code),
+  );
+}

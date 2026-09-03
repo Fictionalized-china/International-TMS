@@ -86,6 +86,7 @@ export async function validateBatchTrackingRequiredPrevious(
   organizationId: string,
   orderIds: string[],
   milestoneCode: string,
+  eventAt?: string,
 ): Promise<{ missingOrders: number; sampleOrderNumber: string | null } | null> {
   const required = BATCH_TRACKING_REQUIRED_PREVIOUS[milestoneCode];
   if (!required || required.length === 0 || !orderIds.length) return null;
@@ -94,7 +95,10 @@ export async function validateBatchTrackingRequiredPrevious(
   let missingOrders = 0;
   let sampleOrderNumber: string | null = null;
 
-  for (const chunk of chunkD1Values(orderIds, 1 + required.length)) {
+  for (const chunk of chunkD1Values(
+    orderIds,
+    1 + required.length + (eventAt ? 1 : 0),
+  )) {
     const placeholders = d1Placeholders(chunk.length);
     const missingRows = await env.DB.prepare(
       `SELECT o.order_number
@@ -104,9 +108,10 @@ export async function validateBatchTrackingRequiredPrevious(
            SELECT 1 FROM order_tracking_milestones m
            WHERE m.organization_id=o.organization_id AND m.order_id=o.id
              AND m.milestone_code IN (${requiredPlaceholders})
+             ${eventAt ? "AND m.event_at<=?" : ""}
          )`,
     )
-      .bind(organizationId, ...chunk, ...required)
+      .bind(organizationId, ...chunk, ...required, ...(eventAt ? [eventAt] : []))
       .all<{ order_number: string }>();
 
     if (missingRows.results.length) {
