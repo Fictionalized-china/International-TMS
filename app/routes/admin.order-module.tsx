@@ -6717,15 +6717,18 @@ function CustomsMissingValue({ label }: { label?: string }) {
 function NewCustomsDeclarationPanel({ busy, fields }: { busy: boolean; fields: WorkflowFieldState[] }) {
   const [formRevision, setFormRevision] = useState(0);
   return (
-    <details
-      className="expandable module-create-dialog"
-      onToggle={(event) => {
-        if (event.currentTarget.open) setFormRevision((current) => current + 1);
+    <Modal
+      title="新增报关单"
+      triggerLabel="新增报关单"
+      triggerClassName="primary"
+      size="wide"
+      initialFocusSelector="[name='clearanceStage']"
+      onOpenChange={(open) => {
+        if (open) setFormRevision((current) => current + 1);
       }}
     >
-      <summary>新增报关单</summary>
       <CustomsDeclarationForm key={formRevision} busy={busy} fields={fields} />
-    </details>
+    </Modal>
   );
 }
 
