@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { orderModuleTabDescriptors, orderModuleTabHref, resolveCostsSection, resolveCustomsSection } from "./order-module-tabs";
+import { orderModuleTabDescriptors, orderModuleTabHref, orderWorkflowModuleTabs, resolveCostsSection, resolveCustomsSection } from "./order-module-tabs";
 
 describe("orderModuleTabHref", () => {
   it("builds an absolute section link so sibling tabs keep the order route", () => {
@@ -59,5 +59,25 @@ describe("resolveCostsSection", () => {
     expect(resolveCostsSection(null)).toBe("files");
     expect(resolveCostsSection("unknown")).toBe("files");
     expect(resolveCostsSection("expenses")).toBe("expenses");
+  });
+});
+
+describe("orderWorkflowModuleTabs", () => {
+  const tabs = [
+    { key: "tracking", label: "运输执行与跟踪", moduleCode: "tracking", section: null },
+    { key: "customs:files", label: "报关文件", moduleCode: "customs", section: "files" as const },
+    { key: "customs:declarations", label: "报关单", moduleCode: "customs", section: "declarations" as const },
+  ];
+
+  it("orders outbound transport tabs by the handling sequence", () => {
+    expect(orderWorkflowModuleTabs("outbound_transport", tabs).map((tab) => tab.label)).toEqual([
+      "报关单",
+      "运输执行与跟踪",
+      "报关文件",
+    ]);
+  });
+
+  it("keeps the configured order for other workflow steps", () => {
+    expect(orderWorkflowModuleTabs("reconciliation", tabs)).toEqual(tabs);
   });
 });

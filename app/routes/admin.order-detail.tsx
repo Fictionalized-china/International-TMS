@@ -41,7 +41,7 @@ import {
 } from "../lib/order-guidance";
 import { orderResponsiblePosition } from "../lib/order-responsibility";
 import { orderModuleTabAttention } from "../lib/order-module-tab-attention";
-import { orderModuleTabDescriptors, orderModuleTabHref, resolveCostsSection, resolveCustomsSection, type OrderModuleTabSection } from "../lib/order-module-tabs";
+import { orderModuleTabDescriptors, orderModuleTabHref, orderWorkflowModuleTabs, resolveCostsSection, resolveCustomsSection, type OrderModuleTabSection } from "../lib/order-module-tabs";
 import { canManageOrderModule } from "../lib/position-portal";
 import { completionStatusLabels, type OrderCompletionStatus } from "../lib/order-review";
 import {
@@ -1178,11 +1178,14 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, 
     { key: "files", label: "文件管理", module: "consignment", section: "files" },
     { key: "costs", label: "订单费用", module: "consignment", section: "costs" },
   ];
-  const businessTabs = rows.flatMap((row) => orderModuleTabDescriptors({
-    key: row.module_state_id || row.module_code || "module",
-    moduleCode: row.module_code,
-    moduleName: row.module_name,
-  }));
+  const businessTabs = orderWorkflowModuleTabs(
+    selectedStep.step_key,
+    rows.flatMap((row) => orderModuleTabDescriptors({
+      key: row.module_state_id || row.module_code || "module",
+      moduleCode: row.module_code,
+      moduleName: row.module_name,
+    })),
+  );
   const activateTab = (moduleCode: string | null, section: string | null) => {
     if (moduleCode === "consignment" && ["info", "files", "costs"].includes(section || "")) {
       setSelectedConsignmentSection(section as "info" | "files" | "costs");

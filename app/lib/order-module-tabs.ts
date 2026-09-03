@@ -9,6 +9,25 @@ export type OrderModuleTabDescriptor = {
   section: OrderModuleTabSection;
 };
 
+export function orderWorkflowModuleTabs(
+  stepKey: string,
+  tabs: readonly OrderModuleTabDescriptor[],
+): OrderModuleTabDescriptor[] {
+  if (stepKey !== "outbound_transport") return [...tabs];
+
+  const priority = (tab: OrderModuleTabDescriptor) => {
+    if (tab.moduleCode === "customs" && tab.section === "declarations") return 0;
+    if (tab.moduleCode === "tracking") return 1;
+    if (tab.moduleCode === "customs" && tab.section === "files") return 2;
+    return 3;
+  };
+
+  return tabs
+    .map((tab, index) => ({ tab, index }))
+    .sort((left, right) => priority(left.tab) - priority(right.tab) || left.index - right.index)
+    .map(({ tab }) => tab);
+}
+
 export function orderModuleTabHref({
   orderId,
   stepKey,
