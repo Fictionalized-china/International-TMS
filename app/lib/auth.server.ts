@@ -136,6 +136,13 @@ export async function getSessionUser(
           (s.site = 'admin' AND EXISTS (
             SELECT 1 FROM memberships m
             WHERE m.user_id = u.id AND m.organization_id = o.id AND m.status = 'active'
+              AND EXISTS (
+                SELECT 1 FROM membership_roles mr
+                JOIN roles r ON r.id=mr.role_id AND r.organization_id=m.organization_id
+                WHERE mr.membership_id=m.id
+                  AND r.status='active'
+                  AND r.code NOT IN ('warehouse_operator','overseas_warehouse_operator')
+              )
           ))
           OR
           (s.site = 'portal' AND EXISTS (

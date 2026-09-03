@@ -51,8 +51,27 @@ type PortalSettings = {
 };
 
 export async function loader({ request }: Route.LoaderArgs) {
-  const current = await requireSessionUser(request, "order.view");
+  const current = await requireSessionUser(request);
   const url = new URL(request.url);
+  if (!current.permissions.includes("order.view")) {
+    return {
+      current,
+      orders: [] as never[],
+      canViewAll: false,
+      accessLimited: true,
+      summary: { open: 0, blocked: 0, overdue: 0 },
+      positions: [] as FilterOption[],
+      assignees: [] as FilterOption[],
+      filters: {
+        state: "open",
+        stage: "",
+        businessType: "",
+        position: "",
+        assignee: "",
+        q: "",
+      },
+    };
+  }
   const settings = current.positionCode
     ? await env.DB.prepare(
       `SELECT pps.order_scope,pps.default_filter
@@ -205,6 +224,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     current,
     orders: visible,
     canViewAll,
+    accessLimited: false,
     summary: {
       open: scopedOrders.filter((order) => !["completed", "cancelled"].includes(order.order_status)).length,
       blocked: scopedOrders.filter((order) => Boolean(order.blocker)).length,
@@ -228,7 +248,7 @@ export function meta() {
 }
 
 export default function PositionPortal({ loaderData }: Route.ComponentProps) {
-  const { current, orders, canViewAll, filters, summary } = loaderData;
+  const { current, orders, canViewAll, filters, summary, accessLimited } = loaderData;
   const advancedFilterCount = [filters.stage, filters.businessType, filters.position, filters.assignee].filter(Boolean).length;
   return <>
     <header className="page-header position-portal-header">
@@ -236,7 +256,7 @@ export default function PositionPortal({ loaderData }: Route.ComponentProps) {
       <div className="page-actions"><span className="status-pill">当前显示 {orders.length} 条</span></div>
     </header>
 
-    <section className="panel position-order-ledger">
+    {accessLimited ? <section className="panel"><div className="empty-state"><strong>当前岗位仅用于组织与薪资归类</strong><p>尚未配置订单或业务数据权限；如需承担业务，请由人事行政岗或老板增加对应权限积木。</p></div></section> : <section className="panel position-order-ledger">
       <div className="position-ledger-summary" aria-label="待办概况"><span>未完成 <strong>{summary.open}</strong></span><span>有阻断 <strong>{summary.blocked}</strong></span><span>已超时 <strong>{summary.overdue}</strong></span><span>当前视图 <strong>{orders.length}</strong></span></div>
       <Form method="get" action="." className="position-ledger-filters">
         <div className="position-primary-filters">
@@ -263,7 +283,7 @@ export default function PositionPortal({ loaderData }: Route.ComponentProps) {
         <td><strong>{order.next_action}</strong><small className={order.blocker?"danger-text":""}>{order.blocker||"当前节点暂无阻断"}</small></td>
         <td className="sticky-action"><Link className="text-button" to={order.href}>{order.blocker?"查看阻断并处理":"打开当前节点"}</Link></td>
       </tr>)}</tbody></table>{!orders.length&&<p className="empty-state">当前筛选条件下没有订单。</p>}</div>
-    </section>
+    </section>}
   </>;
 }
 

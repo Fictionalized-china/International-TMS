@@ -42,17 +42,17 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
         <nav className="nav" aria-label="运营管理导航">
           <span className="nav-group nav-title">工作台</span>
           <SideLink to="/admin/portal" icon="layout">任务工作台</SideLink>
-          <SideLink to="/admin" icon="dashboard" end>运营总览</SideLink>
+          {can("dashboard.view") && <SideLink to="/admin" icon="dashboard" end>运营总览</SideLink>}
 
           <span className="nav-group nav-title">汽运业务</span>
           {can("quote.view") && <SideLink to="/admin/quotations" icon="receipt">询价与报价</SideLink>}
           {can("order.view") && <SideLink to="/admin/orders" icon="clipboard">运输订单</SideLink>}
           {can("shipment.view") && <SideLink to="/admin/domestic-tracking" icon="map">在途车辆</SideLink>}
-          {can("order.view") && <SideLink to="/admin/loading" icon="truck">配载单跟踪</SideLink>}
-          {can("order.view") && <SideLink to="/admin/documents" icon="documents">文件中心</SideLink>}
+          {can("order.module.loading.manage") && <SideLink to="/admin/loading" icon="truck">配载单跟踪</SideLink>}
+          {can("order.module.documents.manage") && <SideLink to="/admin/documents" icon="documents">文件中心</SideLink>}
           {can("shipment.view") && <SideLink to="/admin/shipments" icon="packageCheck">运单列表</SideLink>}
           {can("billing.view") && <SideLink to="/admin/billing" icon="billing">费用结算</SideLink>}
-          {can("order.view") && <SideLink to="/admin/cargo" icon="boxes">货物信息</SideLink>}
+          {can("order.module.cargo.manage") && <SideLink to="/admin/cargo" icon="boxes">货物信息</SideLink>}
 
           <span className="nav-group nav-title">业务资料</span>
           {can("customer.view") && <SideLink to="/admin/customers" icon="building">客户管理</SideLink>}

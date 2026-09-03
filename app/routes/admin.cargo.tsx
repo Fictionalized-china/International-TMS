@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { Link } from "react-router";
 import type { Route } from "./+types/admin.cargo";
 import { requireSessionUser } from "../lib/auth.server";
+import { orderVisibilitySql } from "../lib/order-access.server";
 import { statusLabel } from "../lib/order-workflow";
 
 const PAGE_SIZE = 15;
@@ -51,15 +52,19 @@ const packageLabels: Record<string, string> = {
 };
 
 export async function loader({ request }: Route.LoaderArgs) {
-  const current = await requireSessionUser(request, "order.view");
+  const current = await requireSessionUser(request, "order.module.cargo.manage");
+  const visibility = orderVisibilitySql(current, "o");
   const requestedPage = Math.max(
     1,
     Number(new URL(request.url).searchParams.get("page")) || 1,
   );
   const count = await env.DB.prepare(
-    "SELECT COUNT(*) total FROM order_cargo_items i JOIN transport_orders o ON o.id=i.order_id WHERE i.organization_id=? AND o.organization_id=?",
+    `SELECT COUNT(*) total
+       FROM order_cargo_items i
+       JOIN transport_orders o ON o.id=i.order_id AND o.organization_id=i.organization_id
+      WHERE i.organization_id=? AND ${visibility.sql}`,
   )
-    .bind(current.organizationId, current.organizationId)
+    .bind(current.organizationId, ...visibility.values)
     .first<{ total: number }>();
   const total = count?.total ?? 0;
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -69,11 +74,11 @@ export async function loader({ request }: Route.LoaderArgs) {
      FROM order_cargo_items i
      JOIN transport_orders o ON o.id=i.order_id AND o.organization_id=i.organization_id
      JOIN customers c ON c.id=o.customer_id AND c.organization_id=i.organization_id
-     WHERE i.organization_id=?
+     WHERE i.organization_id=? AND ${visibility.sql}
      ORDER BY i.created_at DESC,i.id DESC
      LIMIT ? OFFSET ?`,
   )
-    .bind(current.organizationId, PAGE_SIZE, (page - 1) * PAGE_SIZE)
+    .bind(current.organizationId, ...visibility.values, PAGE_SIZE, (page - 1) * PAGE_SIZE)
     .all<CargoRow>();
   const ids = cargo.results.map((item) => item.id);
   const images = ids.length

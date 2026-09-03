@@ -15,6 +15,7 @@ import { allocationMethodLabel, type AllocationMethod } from "../lib/cost-alloca
 import { confirmCostAllocation, createCostAllocation, loadCostAllocations, updateCostAllocation } from "../lib/cost-allocation.server";
 import { canManageOrderModule } from "../lib/position-portal";
 import { maxInlineOrderDocumentBytes, orderDocumentTypeCodes, orderDocumentTypeLabel } from "../lib/order-documents";
+import { batchVisibilitySql } from "../lib/order-access.server";
 import {
   loadingOrderDocumentDefinitions,
   summarizeLoadingDocumentRequirements,
@@ -171,9 +172,10 @@ const VEHICLE_TYPE_OPTIONS=[
 ];
 
 export async function loader({request,params}:Route.LoaderArgs){
-  const current=await requireSessionUser(request,"order.view"),batchId=params.batchId;
+  const current=await requireSessionUser(request,"order.module.loading.manage"),batchId=params.batchId;
+  const batchVisibility=batchVisibilitySql(current,"b");
   const fromOrderId = new URL(request.url).searchParams.get("fromOrderId");
-  const batch=await env.DB.prepare(`SELECT b.id,b.batch_number,b.batch_name,b.origin_location,b.destination_location,b.planned_departure_at,b.planned_arrival_at,b.status,b.road_status,b.carrier_id,b.warehouse_id,b.border_port,b.customs_location,b.transit_location,b.route_notes,b.notes,b.overseas_carrier_name,b.overseas_vehicle_type,b.overseas_vehicle_count,b.overseas_vehicle_plate,b.overseas_driver_name,b.overseas_driver_phone,c.name carrier_name,w.name warehouse_name FROM transport_batches b LEFT JOIN carriers c ON c.id=b.carrier_id LEFT JOIN warehouses w ON w.id=b.warehouse_id WHERE b.id=? AND b.organization_id=?`).bind(batchId,current.organizationId).first<Batch>();
+  const batch=await env.DB.prepare(`SELECT b.id,b.batch_number,b.batch_name,b.origin_location,b.destination_location,b.planned_departure_at,b.planned_arrival_at,b.status,b.road_status,b.carrier_id,b.warehouse_id,b.border_port,b.customs_location,b.transit_location,b.route_notes,b.notes,b.overseas_carrier_name,b.overseas_vehicle_type,b.overseas_vehicle_count,b.overseas_vehicle_plate,b.overseas_driver_name,b.overseas_driver_phone,c.name carrier_name,w.name warehouse_name FROM transport_batches b LEFT JOIN carriers c ON c.id=b.carrier_id LEFT JOIN warehouses w ON w.id=b.warehouse_id WHERE b.id=? AND b.organization_id=? AND ${batchVisibility.sql}`).bind(batchId,current.organizationId,...batchVisibility.values).first<Batch>();
   if(!batch)throw new Response("配载批次不存在",{status:404});
   // D1 allows only a small number of simultaneous connections per Worker
   // invocation. Load the workspace in groups of four instead of opening every
@@ -302,6 +304,7 @@ export async function loader({request,params}:Route.LoaderArgs){
 
 export async function action({request,params}:Route.ActionArgs){
   const current=await requireSessionUser(request,"order.view"),batchId=params.batchId,form=await request.formData(),intent=valueOf(form,"intent"),now=new Date().toISOString();
+  const batchVisibility=batchVisibilitySql(current,"b");
   const customsIntent=intent==="batch_order_customs_declaration_save";
   const exceptionIntent=["batch_exception_create","batch_exception_progress","batch_exception_resolve"].includes(intent);
   const allowed=customsIntent
@@ -310,7 +313,7 @@ export async function action({request,params}:Route.ActionArgs){
       ? canManageOrderModule(current,"loading")||canManageOrderModule(current,"exceptions")
       : canManageOrderModule(current,"loading");
   if(!allowed)throw new Response(customsIntent?"无权办理报关作业":exceptionIntent?"无权办理配载异常":"无权办理拼车配载",{status:403});
-  const batch=await env.DB.prepare("SELECT id,batch_number,status,road_status,border_port,customs_location,route_notes,warehouse_id,overseas_carrier_name,overseas_vehicle_type,overseas_vehicle_count,overseas_vehicle_plate,overseas_driver_name,overseas_driver_phone FROM transport_batches WHERE id=? AND organization_id=? AND status!='cancelled'").bind(batchId,current.organizationId).first<{id:string;batch_number:string;status:string;road_status:string;border_port:string|null;customs_location:string|null;route_notes:string|null;warehouse_id:string|null;overseas_carrier_name:string|null;overseas_vehicle_type:string|null;overseas_vehicle_count:number;overseas_vehicle_plate:string|null;overseas_driver_name:string|null;overseas_driver_phone:string|null}>();
+  const batch=await env.DB.prepare(`SELECT b.id,b.batch_number,b.status,b.road_status,b.border_port,b.customs_location,b.route_notes,b.warehouse_id,b.overseas_carrier_name,b.overseas_vehicle_type,b.overseas_vehicle_count,b.overseas_vehicle_plate,b.overseas_driver_name,b.overseas_driver_phone FROM transport_batches b WHERE b.id=? AND b.organization_id=? AND b.status!='cancelled' AND ${batchVisibility.sql}`).bind(batchId,current.organizationId,...batchVisibility.values).first<{id:string;batch_number:string;status:string;road_status:string;border_port:string|null;customs_location:string|null;route_notes:string|null;warehouse_id:string|null;overseas_carrier_name:string|null;overseas_vehicle_type:string|null;overseas_vehicle_count:number;overseas_vehicle_plate:string|null;overseas_driver_name:string|null;overseas_driver_phone:string|null}>();
   if(!batch)return{formError:"配载批次无效"};
   if(intent==="batch_exception_create"){
     try{

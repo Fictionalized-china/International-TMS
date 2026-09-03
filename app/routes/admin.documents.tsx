@@ -4,6 +4,7 @@ import type { Route } from "./+types/admin.documents";
 import { requireSessionUser } from "../lib/auth.server";
 import { orderDocumentPlacement, orderDocumentTypeLabel } from "../lib/order-documents";
 import { BatchNumberLink, OrderNumberLink, OrderNumberLinkList } from "../components/EntityNumberLink";
+import { batchVisibilitySql, orderVisibilitySql } from "../lib/order-access.server";
 
 type FileRow = {
   id: string;
@@ -27,7 +28,9 @@ type FileRow = {
 const pageSize = 50;
 
 export async function loader({ request }: Route.LoaderArgs) {
-  const current = await requireSessionUser(request, "order.view");
+  const current = await requireSessionUser(request, "order.module.documents.manage");
+  const orderVisibility = orderVisibilitySql(current, "o");
+  const batchVisibility = batchVisibilitySql(current, "b");
   const url = new URL(request.url);
   const q = (url.searchParams.get("q") || "").trim();
   const status = url.searchParams.get("status") || "all";
@@ -45,7 +48,7 @@ export async function loader({ request }: Route.LoaderArgs) {
          LEFT JOIN order_document_metadata m ON m.attachment_id=a.id
          LEFT JOIN users up ON up.id=a.uploaded_by_user_id
          LEFT JOIN users rv ON rv.id=m.reviewed_by_user_id
-        WHERE a.organization_id=?
+        WHERE a.organization_id=? AND ${orderVisibility.sql}
        UNION ALL
        SELECT d.id,'batch' source_type,NULL order_id,
               COALESCE((SELECT GROUP_CONCAT(o.order_number) FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id WHERE bo.batch_id=d.batch_id AND bo.status!='removed'),'') order_numbers,
@@ -56,7 +59,7 @@ export async function loader({ request }: Route.LoaderArgs) {
          JOIN transport_batches b ON b.id=d.batch_id AND b.organization_id=d.organization_id
          LEFT JOIN users up ON up.id=d.uploaded_by_user_id
          LEFT JOIN users rv ON rv.id=d.reviewed_by_user_id
-        WHERE d.organization_id=?
+        WHERE d.organization_id=? AND ${batchVisibility.sql}
      )
      SELECT * FROM files
       WHERE source_type=?
@@ -65,27 +68,27 @@ export async function loader({ request }: Route.LoaderArgs) {
         AND (?='all' OR document_category=?)
       ORDER BY created_at DESC LIMIT ? OFFSET ?`,
   ).bind(
-    current.organizationId,current.organizationId,
+    current.organizationId,...orderVisibility.values,current.organizationId,...batchVisibility.values,
     scope,q,q,q,q,status,status,category,category,pageSize,(page - 1) * pageSize,
   ).all<FileRow>();
   const total = await env.DB.prepare(
     `SELECT COUNT(*) total FROM (
        SELECT a.id,'order' source_type,o.order_number order_numbers,NULL batch_number,COALESCE(m.document_category,'other') document_category,COALESCE(m.review_status,'pending') review_status,a.file_name
-         FROM order_attachments a JOIN transport_orders o ON o.id=a.order_id LEFT JOIN order_document_metadata m ON m.attachment_id=a.id
-        WHERE a.organization_id=?
+         FROM order_attachments a JOIN transport_orders o ON o.id=a.order_id AND o.organization_id=a.organization_id LEFT JOIN order_document_metadata m ON m.attachment_id=a.id
+        WHERE a.organization_id=? AND ${orderVisibility.sql}
        UNION ALL
        SELECT d.id,'batch' source_type,COALESCE((SELECT GROUP_CONCAT(o.order_number) FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id WHERE bo.batch_id=d.batch_id AND bo.status!='removed'),''),b.batch_number,d.document_category,d.review_status,d.file_name
-         FROM transport_batch_documents d JOIN transport_batches b ON b.id=d.batch_id WHERE d.organization_id=?
+         FROM transport_batch_documents d JOIN transport_batches b ON b.id=d.batch_id AND b.organization_id=d.organization_id WHERE d.organization_id=? AND ${batchVisibility.sql}
      ) files
      WHERE source_type=?
        AND (?='' OR order_numbers LIKE '%'||?||'%' OR COALESCE(batch_number,'') LIKE '%'||?||'%' OR file_name LIKE '%'||?||'%')
        AND (?='all' OR review_status=?) AND (?='all' OR document_category=?)`,
-  ).bind(current.organizationId,current.organizationId,scope,q,q,q,q,status,status,category,category).first<{ total: number }>();
+  ).bind(current.organizationId,...orderVisibility.values,current.organizationId,...batchVisibility.values,scope,q,q,q,q,status,status,category,category).first<{ total: number }>();
   const scopeCounts = await env.DB.prepare(
     `SELECT
-       (SELECT COUNT(*) FROM order_attachments WHERE organization_id=?) order_total,
-       (SELECT COUNT(*) FROM transport_batch_documents WHERE organization_id=?) batch_total`,
-  ).bind(current.organizationId,current.organizationId).first<{ order_total: number; batch_total: number }>();
+       (SELECT COUNT(*) FROM order_attachments a JOIN transport_orders o ON o.id=a.order_id AND o.organization_id=a.organization_id WHERE a.organization_id=? AND ${orderVisibility.sql}) order_total,
+       (SELECT COUNT(*) FROM transport_batch_documents d JOIN transport_batches b ON b.id=d.batch_id AND b.organization_id=d.organization_id WHERE d.organization_id=? AND ${batchVisibility.sql}) batch_total`,
+  ).bind(current.organizationId,...orderVisibility.values,current.organizationId,...batchVisibility.values).first<{ order_total: number; batch_total: number }>();
   const categories = await env.DB.prepare(
     `SELECT document_category FROM order_document_metadata WHERE organization_id=?
      UNION SELECT document_category FROM transport_batch_documents WHERE organization_id=?

@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { Form, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.sales";
 import { requireSessionUser } from "../lib/auth.server";
+import { canViewAllCustomers, customerVisibilitySql } from "../lib/customer-access.server";
 import { validateEmail, valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 
@@ -11,14 +12,16 @@ type Activity = { id: string; type: string; subject: string; owner_name: string 
 
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "sales.view");
+  const canViewAll = canViewAllCustomers(current);
+  const customerScope = customerVisibilitySql(current, "c");
   const [leads, opportunities, activities, owners] = await Promise.all([
-    env.DB.prepare(`SELECT l.id, l.company_name, l.contact_name, l.email, l.phone, l.source_code, u.display_name AS owner_name, l.status, l.estimated_monthly_shipments, l.created_at FROM sales_leads l LEFT JOIN users u ON u.id = l.owner_user_id WHERE l.organization_id = ? ORDER BY l.created_at DESC LIMIT 200`).bind(current.organizationId).all<Lead>(),
-    env.DB.prepare(`SELECT o.id, o.name, c.name AS customer_name, l.company_name AS lead_name, u.display_name AS owner_name, o.stage, o.estimated_value, o.currency, o.probability, o.expected_close_date FROM sales_opportunities o LEFT JOIN customers c ON c.id = o.customer_id LEFT JOIN sales_leads l ON l.id = o.lead_id LEFT JOIN users u ON u.id = o.owner_user_id WHERE o.organization_id = ? ORDER BY o.updated_at DESC LIMIT 200`).bind(current.organizationId).all<Opportunity>(),
-    env.DB.prepare(`SELECT a.id, a.type, a.subject, u.display_name AS owner_name, a.due_at, a.completed_at, COALESCE(c.name, l.company_name, o.name) AS target_name FROM sales_activities a LEFT JOIN users u ON u.id = a.owner_user_id LEFT JOIN customers c ON c.id = a.customer_id LEFT JOIN sales_leads l ON l.id = a.lead_id LEFT JOIN sales_opportunities o ON o.id = a.opportunity_id WHERE a.organization_id = ? ORDER BY COALESCE(a.due_at, a.created_at) DESC LIMIT 100`).bind(current.organizationId).all<Activity>(),
-    env.DB.prepare(`SELECT u.id, u.display_name FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.organization_id = ? AND m.status = 'active' ORDER BY u.display_name`).bind(current.organizationId).all<{ id: string; display_name: string }>(),
+    env.DB.prepare(`SELECT l.id, l.company_name, l.contact_name, l.email, l.phone, l.source_code, u.display_name AS owner_name, l.status, l.estimated_monthly_shipments, l.created_at FROM sales_leads l LEFT JOIN users u ON u.id = l.owner_user_id WHERE l.organization_id = ? AND (?=1 OR l.owner_user_id=?) ORDER BY l.created_at DESC LIMIT 200`).bind(current.organizationId,canViewAll?1:0,current.userId).all<Lead>(),
+    env.DB.prepare(`SELECT o.id, o.name, c.name AS customer_name, l.company_name AS lead_name, u.display_name AS owner_name, o.stage, o.estimated_value, o.currency, o.probability, o.expected_close_date FROM sales_opportunities o LEFT JOIN customers c ON c.id = o.customer_id LEFT JOIN sales_leads l ON l.id = o.lead_id LEFT JOIN users u ON u.id = o.owner_user_id WHERE o.organization_id = ? AND (?=1 OR o.owner_user_id=? OR c.sales_owner_user_id=?) ORDER BY o.updated_at DESC LIMIT 200`).bind(current.organizationId,canViewAll?1:0,current.userId,current.userId).all<Opportunity>(),
+    env.DB.prepare(`SELECT a.id, a.type, a.subject, u.display_name AS owner_name, a.due_at, a.completed_at, COALESCE(c.name, l.company_name, o.name) AS target_name FROM sales_activities a LEFT JOIN users u ON u.id = a.owner_user_id LEFT JOIN customers c ON c.id = a.customer_id LEFT JOIN sales_leads l ON l.id = a.lead_id LEFT JOIN sales_opportunities o ON o.id = a.opportunity_id WHERE a.organization_id = ? AND (?=1 OR a.owner_user_id=?) ORDER BY COALESCE(a.due_at, a.created_at) DESC LIMIT 100`).bind(current.organizationId,canViewAll?1:0,current.userId).all<Activity>(),
+    env.DB.prepare(`SELECT u.id, u.display_name FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.organization_id = ? AND m.status = 'active' AND (?=1 OR u.id=?) ORDER BY u.display_name`).bind(current.organizationId,canViewAll?1:0,current.userId).all<{ id: string; display_name: string }>(),
   ]);
   const [customers, sources, currencies] = await Promise.all([
-    env.DB.prepare("SELECT id, code, name FROM customers WHERE organization_id = ? AND status IN ('prospect', 'active') ORDER BY name").bind(current.organizationId).all<{ id: string; code: string; name: string }>(),
+    env.DB.prepare(`SELECT c.id, c.code, c.name FROM customers c WHERE c.organization_id = ? AND c.status IN ('prospect', 'active') AND ${customerScope.sql} ORDER BY c.name`).bind(current.organizationId,...customerScope.values).all<{ id: string; code: string; name: string }>(),
     env.DB.prepare("SELECT code, name FROM reference_data WHERE organization_id = ? AND category = 'lead_source' AND status = 'active' ORDER BY sort_order").bind(current.organizationId).all<{ code: string; name: string }>(),
     env.DB.prepare("SELECT code, name FROM reference_data WHERE organization_id = ? AND category = 'currency' AND status = 'active' ORDER BY sort_order").bind(current.organizationId).all<{ code: string; name: string }>(),
   ]);
@@ -27,11 +30,13 @@ export async function loader({ request }: Route.LoaderArgs) {
 
 export async function action({ request }: Route.ActionArgs) {
   const current = await requireSessionUser(request, "sales.manage");
+  const canManageAll = canViewAllCustomers(current);
+  const customerScope = customerVisibilitySql(current, "c");
   const form = await request.formData(), intent = valueOf(form, "intent"), now = new Date().toISOString();
   if (intent === "lead-stage") {
     const id = valueOf(form, "id"), status = valueOf(form, "status");
     if (!['new', 'contacted', 'qualified', 'converted', 'lost'].includes(status)) return { formError: "线索状态无效" };
-    const result = await env.DB.prepare("UPDATE sales_leads SET status = ?, updated_at = ? WHERE id = ? AND organization_id = ?").bind(status, now, id, current.organizationId).run();
+    const result = await env.DB.prepare("UPDATE sales_leads SET status = ?, updated_at = ? WHERE id = ? AND organization_id = ? AND (?=1 OR owner_user_id=?)").bind(status, now, id, current.organizationId,canManageAll?1:0,current.userId).run();
     if (!result.meta.changes) return { formError: "线索不存在" };
     await writeAudit({ request, action: "sales.lead.stage", resourceType: "sales_lead", resourceId: id, organizationId: current.organizationId, actorUserId: current.userId, metadata: { status } });
     return { success: "线索状态已更新" };
@@ -40,7 +45,7 @@ export async function action({ request }: Route.ActionArgs) {
     const id = valueOf(form, "id"), stage = valueOf(form, "stage");
     if (!['discovery', 'solution', 'quotation', 'negotiation', 'won', 'lost'].includes(stage)) return { formError: "商机阶段无效" };
     const probabilities: Record<string, number> = { discovery: 10, solution: 30, quotation: 50, negotiation: 75, won: 100, lost: 0 };
-    const result = await env.DB.prepare("UPDATE sales_opportunities SET stage = ?, probability = ?, updated_at = ? WHERE id = ? AND organization_id = ?").bind(stage, probabilities[stage], now, id, current.organizationId).run();
+    const result = await env.DB.prepare("UPDATE sales_opportunities SET stage = ?, probability = ?, updated_at = ? WHERE id = ? AND organization_id = ? AND (?=1 OR owner_user_id=?)").bind(stage, probabilities[stage], now, id, current.organizationId,canManageAll?1:0,current.userId).run();
     if (!result.meta.changes) return { formError: "商机不存在" };
     await writeAudit({ request, action: "sales.opportunity.stage", resourceType: "sales_opportunity", resourceId: id, organizationId: current.organizationId, actorUserId: current.userId, metadata: { stage } });
     return { success: "商机阶段已更新" };
@@ -48,35 +53,34 @@ export async function action({ request }: Route.ActionArgs) {
   if (intent === "activity") {
     const type = valueOf(form, "type"), subject = valueOf(form, "subject"), customerId = valueOf(form, "customerId"), ownerId = valueOf(form, "ownerId"), dueAt = valueOf(form, "dueAt"), notes = valueOf(form, "notes");
     if (!['call', 'email', 'meeting', 'task', 'note'].includes(type) || subject.length < 2) return { formError: "活动类型或主题无效" };
-    if (customerId && !(await validEntity("customers", customerId, current.organizationId))) return { formError: "关联客户无效" };
-    if (ownerId && !(await validOwner(ownerId, current.organizationId))) return { formError: "负责人无效" };
+    if (customerId && !(await env.DB.prepare(`SELECT c.id FROM customers c WHERE c.id=? AND c.organization_id=? AND ${customerScope.sql}`).bind(customerId,current.organizationId,...customerScope.values).first())) return { formError: "关联客户无效或不在本人范围内" };
+    if (canManageAll && ownerId && !(await validOwner(ownerId, current.organizationId))) return { formError: "负责人无效" };
+    const effectiveOwnerId = canManageAll ? (ownerId || current.userId) : current.userId;
     const id = crypto.randomUUID();
-    await env.DB.prepare("INSERT INTO sales_activities (id, organization_id, customer_id, owner_user_id, type, subject, due_at, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, current.organizationId, customerId || null, ownerId || current.userId, type, subject, dueAt || null, notes || null, now, now).run();
+    await env.DB.prepare("INSERT INTO sales_activities (id, organization_id, customer_id, owner_user_id, type, subject, due_at, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, current.organizationId, customerId || null, effectiveOwnerId, type, subject, dueAt || null, notes || null, now, now).run();
     await writeAudit({ request, action: "sales.activity.create", resourceType: "sales_activity", resourceId: id, organizationId: current.organizationId, actorUserId: current.userId });
     return { success: "销售活动已创建" };
   }
   if (intent === "opportunity") {
     const name = valueOf(form, "name"), customerId = valueOf(form, "customerId"), leadId = valueOf(form, "leadId"), ownerId = valueOf(form, "ownerId"), currency = valueOf(form, "currency") || "USD", closeDate = valueOf(form, "closeDate"), notes = valueOf(form, "notes"), estimatedValue = Number(valueOf(form, "estimatedValue") || 0);
     if (name.length < 2 || (!customerId && !leadId) || !Number.isFinite(estimatedValue) || estimatedValue < 0) return { formError: "请填写商机名称、关联客户或线索以及有效金额" };
-    if (customerId && !(await validEntity("customers", customerId, current.organizationId))) return { formError: "关联客户无效" };
-    if (leadId && !(await validEntity("sales_leads", leadId, current.organizationId))) return { formError: "关联线索无效" };
-    if (ownerId && !(await validOwner(ownerId, current.organizationId))) return { formError: "负责人无效" };
+    if (customerId && !(await env.DB.prepare(`SELECT c.id FROM customers c WHERE c.id=? AND c.organization_id=? AND ${customerScope.sql}`).bind(customerId,current.organizationId,...customerScope.values).first())) return { formError: "关联客户无效或不在本人范围内" };
+    if (leadId && !(await env.DB.prepare("SELECT id FROM sales_leads WHERE id=? AND organization_id=? AND (?=1 OR owner_user_id=?)").bind(leadId,current.organizationId,canManageAll?1:0,current.userId).first())) return { formError: "关联线索无效或不在本人范围内" };
+    if (canManageAll && ownerId && !(await validOwner(ownerId, current.organizationId))) return { formError: "负责人无效" };
+    const effectiveOwnerId = canManageAll ? (ownerId || current.userId) : current.userId;
     const id = crypto.randomUUID();
-    await env.DB.prepare("INSERT INTO sales_opportunities (id, organization_id, customer_id, lead_id, name, owner_user_id, estimated_value, currency, probability, expected_close_date, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 10, ?, ?, ?, ?)").bind(id, current.organizationId, customerId || null, leadId || null, name, ownerId || current.userId, estimatedValue, currency, closeDate || null, notes || null, now, now).run();
+    await env.DB.prepare("INSERT INTO sales_opportunities (id, organization_id, customer_id, lead_id, name, owner_user_id, estimated_value, currency, probability, expected_close_date, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 10, ?, ?, ?, ?)").bind(id, current.organizationId, customerId || null, leadId || null, name, effectiveOwnerId, estimatedValue, currency, closeDate || null, notes || null, now, now).run();
     await writeAudit({ request, action: "sales.opportunity.create", resourceType: "sales_opportunity", resourceId: id, organizationId: current.organizationId, actorUserId: current.userId });
     return { success: "商机已创建" };
   }
   const companyName = valueOf(form, "companyName"), contactName = valueOf(form, "contactName"), email = valueOf(form, "email").toLowerCase(), phone = valueOf(form, "phone"), sourceCode = valueOf(form, "sourceCode"), ownerId = valueOf(form, "ownerId"), notes = valueOf(form, "notes"), shipments = Number(valueOf(form, "shipments") || 0);
   if (companyName.length < 2 || (email && validateEmail(email)) || !Number.isInteger(shipments) || shipments < 0) return { formError: "请填写有效公司名称、邮箱和预计月票数" };
-  if (ownerId && !(await validOwner(ownerId, current.organizationId))) return { formError: "负责人无效" };
+  if (canManageAll && ownerId && !(await validOwner(ownerId, current.organizationId))) return { formError: "负责人无效" };
+  const effectiveOwnerId = canManageAll ? (ownerId || current.userId) : current.userId;
   const id = crypto.randomUUID();
-  await env.DB.prepare("INSERT INTO sales_leads (id, organization_id, company_name, contact_name, email, phone, source_code, owner_user_id, estimated_monthly_shipments, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, current.organizationId, companyName, contactName || null, email || null, phone || null, sourceCode || null, ownerId || current.userId, shipments, notes || null, now, now).run();
+  await env.DB.prepare("INSERT INTO sales_leads (id, organization_id, company_name, contact_name, email, phone, source_code, owner_user_id, estimated_monthly_shipments, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, current.organizationId, companyName, contactName || null, email || null, phone || null, sourceCode || null, effectiveOwnerId, shipments, notes || null, now, now).run();
   await writeAudit({ request, action: "sales.lead.create", resourceType: "sales_lead", resourceId: id, organizationId: current.organizationId, actorUserId: current.userId });
   return { success: "销售线索已创建" };
-}
-
-async function validEntity(table: "customers" | "sales_leads", id: string, organizationId: string) {
-  return env.DB.prepare(`SELECT 1 FROM ${table} WHERE id = ? AND organization_id = ?`).bind(id, organizationId).first();
 }
 
 async function validOwner(userId: string, organizationId: string) {

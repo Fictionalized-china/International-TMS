@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "react-router build",
+    "build": "react-router build && node scripts/sanitize-build.mjs",
     "ci": "npm run typecheck && npm run test && npm run build",
     "dev": "npm run db:migrate:local && react-router dev",
     "dev:win": "npm run db:migrate:local && react-router dev --clearScreen=false --host 127.0.0.1 --port 5189 --strictPort",
@@ -15,6 +15,8 @@
     "test": "vitest run",
     "test:stress": "node scripts/http-stress.mjs",
     "test:win": "vitest run --pool=threads --maxWorkers=1",
+    "accounts:prepare": "node scripts/prepare-production-accounts.ts",
+    "accounts:audit": "python scripts/audit-production-account-artifacts.py",
     "cf-typegen": "wrangler types",
     "postinstall": "wrangler types"
   },

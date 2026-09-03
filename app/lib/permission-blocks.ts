@@ -3,8 +3,8 @@ export type PermissionOverride = {
   effect: "allow" | "deny";
 };
 
-export function isProtectedAccessRole(roleCodes: string[]) {
-  return roleCodes.some((code) => code === "owner" || code === "boss");
+export function isProtectedAccessRole(roleCodes: readonly string[] | null | undefined) {
+  return (roleCodes ?? []).some((code) => code === "owner" || code === "boss");
 }
 export function effectivePermissionCodes(input: {
   inherited: Iterable<string>;

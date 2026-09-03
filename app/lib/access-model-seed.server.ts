@@ -1,7 +1,7 @@
 type PositionSeed = [code: string, name: string, departmentCode: string, sortOrder: number];
 type RoleSeed = [code: string, name: string, description: string];
 
-const departments = [
+export const accessModelDepartments = [
   ["SALER", "业务部", 10],
   ["BUS", "商务部", 20],
   ["OP", "操作部", 30],
@@ -10,7 +10,7 @@ const departments = [
   ["ZJB", "总经办", 60],
 ] as const;
 
-const positions: PositionSeed[] = [
+export const accessModelPositions: PositionSeed[] = [
   ["BOSS", "老板", "ZJB", 1],
   ["DEVELOPER", "开发者", "ZJB", 2],
   ["SALES", "业务岗", "SALER", 10],
@@ -26,7 +26,7 @@ const positions: PositionSeed[] = [
   ["OVERSEAS_WAREHOUSE", "境外仓库岗", "OP", 120],
 ];
 
-const roles: RoleSeed[] = [
+export const accessModelRoles: RoleSeed[] = [
   ["boss", "老板", "拥有全部权限且不可抽走"],
   ["developer", "开发者", "维护工作流、字段积木和系统配置"],
   ["pos_sales", "业务岗", "开发本人客户、创建报价、查看本人订单全程"],
@@ -42,7 +42,7 @@ const roles: RoleSeed[] = [
   ["overseas_warehouse_operator", "境外仓库作业账号", "境外仓到仓、通知与提货"],
 ];
 
-const rolePermissions: Record<string, string[]> = {
+export const accessModelRolePermissions: Record<string, string[]> = {
   developer: ["dashboard.view", "workflow.view", "workflow.manage", "workflow.field.manage", "master.view", "user.view", "role.view", "audit.view", "order.view", "order.scope.all"],
   pos_sales: ["dashboard.view", "customer.view", "customer.manage", "customer.scope.own", "customer.sensitive.view", "sales.view", "sales.manage", "quote.view", "quote.manage", "order.view", "order.scope.assigned", "order.scope.sales_own"],
   pos_operation: ["dashboard.view", "order.view", "order.manage", "order.scope.assigned", "shipment.view", "shipment.manage", "carrier.view", "order.module.assignment.manage", "order.module.transport.manage", "order.module.warehouse.manage", "order.module.loading.manage", "order.module.documents.manage", "order.module.customs.manage", "order.module.overseas_warehouse.manage", "order.module.exceptions.manage", "order.module.review.manage"],
@@ -62,19 +62,19 @@ export function accessModelBootstrapStatements(
   now: string,
 ) {
   const statements: D1PreparedStatement[] = [];
-  for (const [code, name, sortOrder] of departments) {
+  for (const [code, name, sortOrder] of accessModelDepartments) {
     statements.push(db.prepare(
       `INSERT INTO departments(id,organization_id,parent_id,code,name,status,sort_order,created_at,updated_at)
        VALUES(?,?,?,?,?,'active',?,?,?)`,
     ).bind(`${organizationId}:department:${code}`, organizationId, null, code, name, sortOrder, now, now));
   }
-  for (const [code, name, departmentCode, sortOrder] of positions) {
+  for (const [code, name, departmentCode, sortOrder] of accessModelPositions) {
     statements.push(db.prepare(
       `INSERT INTO positions(id,organization_id,code,name,department_code,status,sort_order,created_at,updated_at)
        VALUES(?,?,?,?,?,'active',?,?,?)`,
     ).bind(`${organizationId}:position:${code}`, organizationId, code, name, departmentCode, sortOrder, now, now));
   }
-  for (const [code, name, description] of roles) {
+  for (const [code, name, description] of accessModelRoles) {
     const roleId = `${organizationId}:role:${code}`;
     statements.push(db.prepare(
       `INSERT INTO roles(id,organization_id,code,name,description,is_system,status,created_at,updated_at)
@@ -86,7 +86,7 @@ export function accessModelBootstrapStatements(
       ).bind(roleId));
       continue;
     }
-    const permissions = rolePermissions[code] ?? [];
+    const permissions = accessModelRolePermissions[code] ?? [];
     if (permissions.length) {
       statements.push(db.prepare(
         `INSERT INTO role_permissions(role_id,permission_code)
@@ -94,7 +94,7 @@ export function accessModelBootstrapStatements(
       ).bind(roleId, ...permissions));
     }
   }
-  for (const [code] of positions) {
+  for (const [code] of accessModelPositions) {
     statements.push(db.prepare(
       `INSERT INTO position_portal_settings(
         id,organization_id,position_id,order_scope,default_filter,created_at,updated_at

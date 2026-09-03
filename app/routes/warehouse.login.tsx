@@ -1,5 +1,4 @@
 import { env } from "cloudflare:workers";
-import { useState } from "react";
 import { Form, redirect, useNavigation } from "react-router";
 import type { Route } from "./+types/warehouse.login";
 import { clearLoginFailures, createSession, isLoginLocked, recordLoginFailure } from "../lib/auth.server";
@@ -12,25 +11,12 @@ export function meta(){return[{title:"仓库作业登录 | International TMS"}]}
 
 export async function loader({request}:Route.LoaderArgs){
   const site=siteFromRequest(request);if(site!=="warehouse")throw redirect(siteLogin(site));
-  const hostname=new URL(request.url).hostname;
-  const isLocal=hostname==="127.0.0.1"||hostname==="localhost";
-  if(!isLocal)return{presets:[]};
-  const accounts=await env.DB.prepare(`SELECT u.email,u.display_name,w.id warehouse_id,w.name warehouse_name,w.warehouse_role
-    FROM warehouse_user_access a
-    JOIN users u ON u.id=a.user_id AND u.status='active'
-    JOIN warehouses w ON w.id=a.warehouse_id AND w.status='active'
-    WHERE a.organization_id=w.organization_id AND u.email LIKE '%@e2e.test'
-    ORDER BY CASE w.warehouse_role WHEN 'domestic_collection' THEN 1 WHEN 'port' THEN 2 ELSE 3 END,w.code,u.email`)
-    .all<{email:string;display_name:string;warehouse_id:string;warehouse_name:string;warehouse_role:string}>();
-  return{presets:accounts.results.map(account=>({
-    ...account,
-    password:"OulingTMS2026!",
-  }))};
+  return null;
 }
 
 export async function action({request}:Route.ActionArgs){
   const site=siteFromRequest(request);if(site!=="warehouse")throw redirect(siteLogin(site));
-  const form=await request.formData(),email=valueOf(form,"email").toLowerCase(),password=valueOf(form,"password"),requestedWarehouseId=valueOf(form,"warehouseId");
+  const form=await request.formData(),email=valueOf(form,"email").toLowerCase(),password=valueOf(form,"password");
   const user=await env.DB.prepare(`SELECT u.id,u.password_hash,u.failed_login_count,u.locked_until,m.organization_id
     FROM users u JOIN memberships m ON m.user_id=u.id AND m.status='active'
     WHERE u.email=? AND u.status='active' AND EXISTS(
@@ -47,7 +33,6 @@ export async function action({request}:Route.ActionArgs){
   const warehouse=await env.DB.prepare(`SELECT w.id
     FROM warehouses w
     WHERE w.organization_id=? AND w.status='active'
-      AND (?='' OR w.id=?)
       AND (
         EXISTS(SELECT 1 FROM warehouse_user_access a WHERE a.organization_id=w.organization_id AND a.warehouse_id=w.id AND a.user_id=?)
         OR EXISTS(
@@ -59,28 +44,15 @@ export async function action({request}:Route.ActionArgs){
       )
     ORDER BY CASE w.warehouse_role WHEN 'domestic_collection' THEN 1 WHEN 'port' THEN 2 ELSE 3 END,w.code
     LIMIT 1`)
-    .bind(user.organization_id,requestedWarehouseId,requestedWarehouseId,user.id,user.id)
+    .bind(user.organization_id,user.id,user.id)
     .first<{id:string}>();
   if(!warehouse)return{error:"当前账号没有可进入的启用仓库，请联系管理员检查仓库绑定",email};
   await writeAudit({request,action:"warehouse.login",resourceType:"session",organizationId:user.organization_id,actorUserId:user.id});
   return redirect(`/warehouse?warehouseId=${encodeURIComponent(warehouse.id)}`,{headers:{"Set-Cookie":await createSession(user.id,user.organization_id,"warehouse",warehouse.id)}});
 }
 
-export default function WarehouseLogin({loaderData,actionData}:Route.ComponentProps){
+export default function WarehouseLogin({actionData}:Route.ComponentProps){
   const busy=useNavigation().state!=="idle";
-  const [email,setEmail]=useState(actionData?.email||"");
-  const [password,setPassword]=useState("");
-  const [warehouseId,setWarehouseId]=useState("");
   return <main className="auth-page warehouse-auth"><section className="auth-card"><div className="brand-mark warehouse-mark">WH</div><p className="eyebrow">OULING WAREHOUSE</p><h1>仓库作业</h1><p className="muted">现场人员独立登录入口</p>{actionData?.error&&<div className="alert error">{actionData.error}</div>}
-    {loaderData.presets.length>0&&<details className="warehouse-login-presets">
-      <summary>选择测试仓库账号</summary>
-      <label className="field"><span>仓库账号</span><select defaultValue="" onChange={event=>{
-        const preset=loaderData.presets.find(item=>item.warehouse_id===event.currentTarget.value);
-        setEmail(preset?.email||"");
-        setPassword(preset?.password||"");
-        setWarehouseId(preset?.warehouse_id||"");
-      }}><option value="">请选择国内仓或境外仓</option>{loaderData.presets.map(item=><option key={`${item.email}-${item.warehouse_id}`} value={item.warehouse_id}>{item.warehouse_role==="overseas_destination"?"境外仓":"国内仓"} · {item.warehouse_name} · {item.display_name}</option>)}</select></label>
-      <small>选择后自动填入测试邮箱和密码；登录后只能进入该账号绑定的仓库。</small>
-    </details>}
-    <Form method="post" className="stack"><input type="hidden" name="warehouseId" value={warehouseId}/><label className="field"><span>员工邮箱</span><input name="email" type="email" value={email} onChange={event=>{setEmail(event.currentTarget.value);setWarehouseId("")}} required autoComplete="email"/></label><label className="field"><span>密码</span><input name="password" type="password" value={password} onChange={event=>setPassword(event.currentTarget.value)} required autoComplete="current-password"/></label><button className="primary warehouse-primary" disabled={busy}>{busy?"正在登录…":"进入仓库作业"}</button></Form><a className="site-switch" href="/login">运营后台登录 →</a></section></main>;
+    <Form method="post" className="stack"><label className="field"><span>员工邮箱</span><input name="email" type="email" defaultValue={actionData?.email||""} required autoComplete="email" autoFocus/></label><label className="field"><span>密码</span><input name="password" type="password" required autoComplete="current-password"/></label><button className="primary warehouse-primary" disabled={busy}>{busy?"正在登录…":"进入仓库作业"}</button></Form><a className="site-switch" href="/login">运营后台登录 →</a></section></main>;
 }

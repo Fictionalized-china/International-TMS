@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canSeeScopedOrder, orderVisibilitySql } from "./order-access";
+import { batchVisibilitySql, canSeeScopedOrder, orderVisibilitySql } from "./order-access";
 
 const baseUser = {
   userId: "user-a",
@@ -44,5 +44,12 @@ describe("order access", () => {
       ...baseUser,
       permissions: ["order.view", "order.scope.all"],
     }, {})).toBe(true);
+  });
+
+  it("limits a transport batch to batches containing at least one visible order", () => {
+    const visibility = batchVisibilitySql(baseUser, "batch");
+    expect(visibility.sql).toContain("access_batch_order.batch_id=batch.id");
+    expect(visibility.sql).toContain("access_order.current_assignee_user_id");
+    expect(visibility.values).toEqual(["user-a", "user-a", "OPERATION"]);
   });
 });

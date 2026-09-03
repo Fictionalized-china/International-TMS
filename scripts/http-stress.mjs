@@ -2,7 +2,10 @@ import { performance } from "node:perf_hooks";
 
 const baseUrl = process.env.BASE_URL || "http://127.0.0.1:5189";
 const email = process.env.STRESS_EMAIL || "admin@e2e.test";
-const password = process.env.STRESS_PASSWORD || "OulingTMS2026!";
+const password = process.env.STRESS_PASSWORD;
+if (!password) {
+  throw new Error("STRESS_PASSWORD is required; fixed test passwords are not allowed.");
+}
 const concurrency = positiveInteger(process.env.CONCURRENCY,20);
 const rounds = positiveInteger(process.env.ROUNDS,25);
 const timeoutMs = positiveInteger(process.env.REQUEST_TIMEOUT_MS,10_000);

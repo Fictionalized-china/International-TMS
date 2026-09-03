@@ -3,6 +3,7 @@ import { Form, Link } from "react-router";
 import type { Route } from "./+types/admin.loading";
 import { BatchNumberLink, OrderNumberLinkList } from "../components/EntityNumberLink";
 import { requireSessionUser } from "../lib/auth.server";
+import { batchVisibilitySql } from "../lib/order-access.server";
 
 type BatchRow = {
   id: string;
@@ -26,7 +27,8 @@ type BatchRow = {
 const pageSize = 30;
 
 export async function loader({ request }: Route.LoaderArgs) {
-  const current = await requireSessionUser(request, "order.view");
+  const current = await requireSessionUser(request, "order.module.loading.manage");
+  const visibility = batchVisibilitySql(current, "b");
   const url = new URL(request.url);
   const q = (url.searchParams.get("q") || "").trim();
   const status = url.searchParams.get("status") || "all";
@@ -49,8 +51,8 @@ export async function loader({ request }: Route.LoaderArgs) {
   const searchBinds = q ? [q, q, q] : [];
   const count = await env.DB.prepare(
     `SELECT COUNT(*) total FROM transport_batches b
-      WHERE b.organization_id=? AND b.batch_number LIKE 'PZ%' ${statusSql} ${searchSql}`,
-  ).bind(current.organizationId, ...searchBinds).first<{ total: number }>();
+      WHERE b.organization_id=? AND b.batch_number LIKE 'PZ%' AND ${visibility.sql} ${statusSql} ${searchSql}`,
+  ).bind(current.organizationId, ...visibility.values, ...searchBinds).first<{ total: number }>();
   const rows = await env.DB.prepare(
     `SELECT b.id,b.batch_number,b.batch_name,b.origin_location,b.destination_location,
             b.planned_departure_at,b.status,b.road_status,c.name carrier_name,w.name warehouse_name,
@@ -65,11 +67,11 @@ export async function loader({ request }: Route.LoaderArgs) {
        JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
        LEFT JOIN carriers c ON c.id=b.carrier_id
        LEFT JOIN warehouses w ON w.id=b.warehouse_id
-      WHERE b.organization_id=? AND b.batch_number LIKE 'PZ%' ${statusSql} ${searchSql}
+      WHERE b.organization_id=? AND b.batch_number LIKE 'PZ%' AND ${visibility.sql} ${statusSql} ${searchSql}
       GROUP BY b.id
       ORDER BY b.created_at DESC
       LIMIT ? OFFSET ?`,
-  ).bind(current.organizationId, ...searchBinds, pageSize, (page - 1) * pageSize).all<BatchRow>();
+  ).bind(current.organizationId, ...visibility.values, ...searchBinds, pageSize, (page - 1) * pageSize).all<BatchRow>();
 
   return {
     batches: rows.results,

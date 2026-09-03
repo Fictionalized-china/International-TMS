@@ -21,10 +21,8 @@ echo 后台/登录: http://127.0.0.1:5189/login
 echo 后台订单:   http://127.0.0.1:5189/admin/orders
 echo 仓库端:     http://127.0.0.1:5189/warehouse
 echo.
-echo 后台账号: admin@e2e.test
-echo 后台密码: OulingTMS2026!
-echo 仓库账号: ucrstore01@e2e.test
-echo 仓库密码: OulingTMS2026!
+echo 账号与随机密码请查看桌面的 International-TMS-阿里云测试账密.md
+echo 不要继续使用旧版测试包中的固定密码。
 echo.
 
 call npm run dev:win
@@ -38,4 +36,3 @@ exit /b 1
 
 :end
 pause
-

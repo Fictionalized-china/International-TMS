@@ -72,6 +72,24 @@ export function orderVisibilitySql(user: OrderAccessUser, alias = "o") {
   };
 }
 
+export function batchVisibilitySql(user: OrderAccessUser, alias = "b") {
+  const orderVisibility = orderVisibilitySql(user, "access_order");
+  return {
+    sql: `EXISTS(
+      SELECT 1
+      FROM transport_batch_orders access_batch_order
+      JOIN transport_orders access_order
+        ON access_order.id=access_batch_order.order_id
+       AND access_order.organization_id=access_batch_order.organization_id
+      WHERE access_batch_order.batch_id=${alias}.id
+        AND access_batch_order.organization_id=${alias}.organization_id
+        AND access_batch_order.status!='removed'
+        AND ${orderVisibility.sql}
+    )`,
+    values: orderVisibility.values,
+  };
+}
+
 export function canSeeScopedOrder(user: OrderAccessUser, order: {
   salesperson_user_id?: string | null;
   created_by_user_id?: string | null;

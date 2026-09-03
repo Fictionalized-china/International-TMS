@@ -6,6 +6,7 @@ import type { Route } from "./+types/admin.quotations";
 import { Modal } from "../components/Modal";
 import { ConfirmAction } from "../components/ConfirmAction";
 import { requireSessionUser } from "../lib/auth.server";
+import { canViewAllCustomers, customerVisibilitySql } from "../lib/customer-access.server";
 import { writeAudit } from "../lib/audit.server";
 import { transportChargeNameOptions } from "../lib/charge-options";
 import { nextDocumentNumber } from "../lib/documents.server";
@@ -129,11 +130,13 @@ type WorkflowOption = {
 
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "quote.view");
+  const customerScope = customerVisibilitySql(current, "c");
+  const canViewAll = canViewAllCustomers(current);
   const url = new URL(request.url);
   const keyword = (url.searchParams.get("q") || "").trim();
   const lifecycle = (url.searchParams.get("status") || "").trim();
-  const where = ["q.organization_id=?"];
-  const binds: unknown[] = [current.organizationId];
+  const where = ["q.organization_id=?", customerScope.sql];
+  const binds: unknown[] = [current.organizationId, ...customerScope.values];
   if (keyword) {
     where.push("(q.quote_number LIKE ? OR c.name LIKE ? OR q.cargo_description LIKE ? OR o.order_number LIKE ?)");
     const like = `%${keyword}%`;
@@ -169,12 +172,14 @@ export async function loader({ request }: Route.LoaderArgs) {
        ORDER BY q.created_at DESC LIMIT 200`,
     ).bind(...binds).all<Quote>(),
     env.DB.prepare(
-      `SELECT id,quotation_id,description,quantity,unit_price,notes,sort_order
-       FROM quotation_charges
-       WHERE quotation_id IN (
-         SELECT id FROM quotations WHERE organization_id=?
+      `SELECT qc.id,qc.quotation_id,qc.description,qc.quantity,qc.unit_price,qc.notes,qc.sort_order
+       FROM quotation_charges qc
+       WHERE qc.quotation_id IN (
+         SELECT q.id FROM quotations q
+         JOIN customers c ON c.id=q.customer_id AND c.organization_id=q.organization_id
+         WHERE q.organization_id=? AND ${customerScope.sql}
        ) ORDER BY quotation_id,sort_order,id`,
-    ).bind(current.organizationId).all<QuoteCharge>(),
+    ).bind(current.organizationId,...customerScope.values).all<QuoteCharge>(),
     env.DB.prepare(
       `SELECT c.id,c.name,
         (SELECT a.address_line1 FROM customer_addresses a WHERE a.customer_id=c.id AND a.type='shipping' ORDER BY a.is_default DESC,a.updated_at DESC,a.created_at DESC LIMIT 1) pickup_address,
@@ -183,21 +188,23 @@ export async function loader({ request }: Route.LoaderArgs) {
         (SELECT a.city FROM customer_addresses a WHERE a.customer_id=c.id AND a.type='shipping' ORDER BY a.is_default DESC,a.updated_at DESC,a.created_at DESC LIMIT 1) pickup_city,
         (SELECT cc.name FROM customer_contacts cc WHERE cc.customer_id=c.id ORDER BY cc.is_primary DESC,cc.created_at LIMIT 1) contact_name,
         (SELECT cc.phone FROM customer_contacts cc WHERE cc.customer_id=c.id ORDER BY cc.is_primary DESC,cc.created_at LIMIT 1) contact_phone
-       FROM customers c WHERE c.organization_id=? AND c.status='active' ORDER BY c.name`,
-    ).bind(current.organizationId).all<CustomerOption>(),
+       FROM customers c WHERE c.organization_id=? AND c.status='active' AND ${customerScope.sql} ORDER BY c.name`,
+    ).bind(current.organizationId,...customerScope.values).all<CustomerOption>(),
     env.DB.prepare(
       `SELECT cc.id,cc.customer_id,cc.name,cc.phone,cc.is_primary
        FROM customer_contacts cc
        JOIN customers c ON c.id=cc.customer_id
-       WHERE c.organization_id=? AND c.status='active'
+       WHERE c.organization_id=? AND c.status='active' AND ${customerScope.sql}
        ORDER BY cc.customer_id,cc.is_primary DESC,cc.updated_at DESC,cc.name`,
-    ).bind(current.organizationId).all<CustomerContactOption>(),
+    ).bind(current.organizationId,...customerScope.values).all<CustomerContactOption>(),
   ]);
   const [users, warehouses, countries, provinces] = await Promise.all([
     env.DB.prepare(
       `SELECT u.id,u.display_name,u.email FROM memberships m JOIN users u ON u.id=m.user_id
-       WHERE m.organization_id=? AND m.status='active' AND u.status='active' ORDER BY u.display_name,u.email`,
-    ).bind(current.organizationId).all<UserOption>(),
+       WHERE m.organization_id=? AND m.status='active' AND u.status='active'
+         AND (?=1 OR u.id=?)
+       ORDER BY u.display_name,u.email`,
+    ).bind(current.organizationId,canViewAll?1:0,current.userId).all<UserOption>(),
     env.DB.prepare(
       `SELECT id,name,country_code,city,address FROM warehouses
        WHERE organization_id=? AND warehouse_role='overseas_destination' AND status='active' ORDER BY name`,
@@ -249,6 +256,8 @@ export async function loader({ request }: Route.LoaderArgs) {
 
 export async function action({ request }: Route.ActionArgs) {
   const current = await requireSessionUser(request, "quote.manage");
+  const customerScope = customerVisibilitySql(current, "c");
+  const canViewAll = canViewAllCustomers(current);
   const form = await request.formData();
   const intent = valueOf(form, "intent");
   const actionQuotationId = valueOf(form, "id") || undefined;
@@ -259,8 +268,10 @@ export async function action({ request }: Route.ActionArgs) {
         `SELECT q.*,
           (SELECT COUNT(*) FROM quotation_charges c
            WHERE c.quotation_id=q.id AND c.quantity>0 AND c.unit_price>0) quotation_charge_items
-         FROM quotations q WHERE q.id=? AND q.organization_id=?`,
-      ).bind(quotationId,current.organizationId).first<Record<string, unknown> & {
+         FROM quotations q
+         JOIN customers c ON c.id=q.customer_id AND c.organization_id=q.organization_id
+         WHERE q.id=? AND q.organization_id=? AND ${customerScope.sql}`,
+      ).bind(quotationId,current.organizationId,...customerScope.values).first<Record<string, unknown> & {
         id:string; workflow_definition_id:string|null; lifecycle_status:string;
       }>();
       if (!quote?.workflow_definition_id) throw new Error("报价未锁定工作流版本");
@@ -357,7 +368,7 @@ export async function action({ request }: Route.ActionArgs) {
       }
       if (!workflowDefinitionId) throw new Error("请选择本报价使用的工作流版本");
       const [customer, workflow] = await Promise.all([
-        env.DB.prepare("SELECT id FROM customers WHERE id=? AND organization_id=? AND status='active'").bind(customerId,current.organizationId).first(),
+        env.DB.prepare(`SELECT c.id FROM customers c WHERE c.id=? AND c.organization_id=? AND c.status='active' AND ${customerScope.sql}`).bind(customerId,current.organizationId,...customerScope.values).first(),
         env.DB.prepare(
           `SELECT id FROM workflow_definitions
            WHERE id=? AND organization_id=? AND lifecycle_status IN ('published','retired')
@@ -392,7 +403,8 @@ export async function action({ request }: Route.ActionArgs) {
         return integer ? requirePositiveInteger(raw,label) : requirePositiveNumber(raw,label);
       };
 
-      const effectiveSalespersonId = activeValue("quotation_salesperson_user_id",salespersonId,"required") || current.userId;
+      const configuredSalespersonId = activeValue("quotation_salesperson_user_id",salespersonId,"required") || current.userId;
+      const effectiveSalespersonId = canViewAll ? configuredSalespersonId : current.userId;
       const effectiveContactName = activeValue("quotation_customer_contact_name",customerContactName,"required");
       const effectiveContactPhone = activeValue("quotation_customer_contact_phone",customerContactPhone,"required");
       const effectivePickupAddress = activeValue("quotation_pickup_address",pickupAddress,"required");
@@ -542,6 +554,12 @@ export async function action({ request }: Route.ActionArgs) {
     }
     const quotationId = valueOf(form, "id");
     if (!quotationId) throw new Error("缺少报价编号");
+    const accessibleQuotation = await env.DB.prepare(
+      `SELECT q.id FROM quotations q
+       JOIN customers c ON c.id=q.customer_id AND c.organization_id=q.organization_id
+       WHERE q.id=? AND q.organization_id=? AND ${customerScope.sql}`,
+    ).bind(quotationId,current.organizationId,...customerScope.values).first();
+    if (!accessibleQuotation) throw new Error("报价不存在或不在您的客户范围内");
     if (intent === "accept") {
       const result = await acceptQuotation({ organizationId: current.organizationId, quotationId, actorUserId: current.userId, source: "admin", request });
       return { intent, quotationId: actionQuotationId, success: `客户报价已确认，${result.created ? "自动创建" : "恢复"}订单 ${result.orderNumber}，入仓唛头已生成` };

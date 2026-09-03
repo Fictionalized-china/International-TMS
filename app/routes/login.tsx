@@ -23,7 +23,15 @@ export async function action({ request }: Route.ActionArgs) {
   const user = await env.DB.prepare(
     `SELECT u.id, u.password_hash, u.failed_login_count, u.locked_until, m.organization_id
        FROM users u JOIN memberships m ON m.user_id = u.id
-      WHERE u.email = ? AND u.status = 'active' AND m.status = 'active' LIMIT 1`,
+      WHERE u.email = ? AND u.status = 'active' AND m.status = 'active'
+        AND EXISTS (
+          SELECT 1 FROM membership_roles mr
+          JOIN roles r ON r.id=mr.role_id AND r.organization_id=m.organization_id
+          WHERE mr.membership_id=m.id
+            AND r.status='active'
+            AND r.code NOT IN ('warehouse_operator','overseas_warehouse_operator')
+        )
+      LIMIT 1`,
   ).bind(email).first<{ id: string; password_hash: string; failed_login_count: number; locked_until: string | null; organization_id: string }>();
   if (user && isLoginLocked(user.locked_until)) {
     await writeAudit({ request, action: "auth.locked", resourceType: "session", outcome: "failure", organizationId: user.organization_id, actorUserId: user.id });
@@ -32,7 +40,7 @@ export async function action({ request }: Route.ActionArgs) {
   if (!user || !(await verifyPassword(password, user.password_hash))) {
     if (user) await recordLoginFailure(user.id, user.failed_login_count);
     await writeAudit({ request, action: "auth.login", resourceType: "session", outcome: "failure", metadata: { email } });
-    return { error: "邮箱或密码不正确", email };
+    return { error: "邮箱或密码不正确，或该账号不属于管理后台", email };
   }
   await clearLoginFailures(user.id);
   await writeAudit({ request, action: "auth.login", resourceType: "session", organizationId: user.organization_id, actorUserId: user.id });
