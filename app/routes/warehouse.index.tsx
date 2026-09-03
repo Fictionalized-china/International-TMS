@@ -2,8 +2,10 @@ import { env } from "cloudflare:workers";
 import { Form, Link } from "react-router";
 import type { Route } from "./+types/warehouse.index";
 import { Modal } from "../components/Modal";
+import { OrderRouteFilterFields } from "../components/OrderRouteFilterFields";
 import { requireSessionUser } from "../lib/auth.server";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
+import { matchesOrderRouteFilters, orderRouteFilterCount, readOrderRouteFilters } from "../lib/order-route-filters";
 import {
   resolveWarehouseCargoIdentifiers,
   type WarehouseCargoPackageIdentifier,
@@ -20,6 +22,17 @@ type WarehouseQueueRow = {
   customer_identity_code: string;
   business_type: string;
   cargo_description: string;
+  origin_country: string | null;
+  origin_state: string | null;
+  origin_city: string | null;
+  origin_address: string | null;
+  exit_port: string | null;
+  exit_port_name: string | null;
+  destination_country: string | null;
+  destination_state: string | null;
+  destination_city: string | null;
+  destination_address: string | null;
+  overseas_warehouse_name: string | null;
   pieces: number;
   gross_weight_kg: number;
   volume_cbm: number;
@@ -87,9 +100,14 @@ export async function loader({ request }: Route.LoaderArgs) {
   const requestedView = url.searchParams.get("view") || "all";
   const view = requestedView === "all" || requestedView in queueMeta ? requestedView : "all";
   const q = (url.searchParams.get("q") || "").trim().toLowerCase();
+  const routeFilters = readOrderRouteFilters(url.searchParams);
   const rows = await env.DB.prepare(
     `SELECT s.order_id,s.id shipment_id,s.shipment_number,o.order_number,c.name customer_name,
             c.identity_code customer_identity_code,o.business_type,o.cargo_description,
+            o.origin_country,o.origin_state,o.origin_city,o.origin_address,
+            o.exit_port,route_port.name exit_port_name,
+            o.destination_country,o.destination_state,o.destination_city,o.destination_address,
+            ow.name overseas_warehouse_name,
             o.pieces,o.gross_weight_kg,o.volume_cbm,
             EXISTS(SELECT 1 FROM warehouse_receipts wr WHERE wr.organization_id=s.organization_id AND wr.shipment_id=s.id AND wr.warehouse_id=?) received,
             EXISTS(SELECT 1 FROM warehouse_receipts wr WHERE wr.organization_id=s.organization_id AND wr.shipment_id=s.id AND wr.warehouse_id=? AND wr.status='completed' AND wr.cargo_complete=1) cargo_complete,
@@ -114,6 +132,8 @@ export async function loader({ request }: Route.LoaderArgs) {
        FROM shipments s
        JOIN transport_orders o ON o.id=s.order_id AND o.organization_id=s.organization_id
        JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
+       LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id
+       LEFT JOIN reference_data route_port ON route_port.organization_id=o.organization_id AND route_port.category='border_port' AND route_port.code=o.exit_port
       WHERE s.organization_id=? AND o.status NOT IN ('cancelled','completed')
         AND ${warehouse.warehouse_role === "overseas_destination"
           ? `o.overseas_warehouse_id=? AND (
@@ -143,8 +163,9 @@ export async function loader({ request }: Route.LoaderArgs) {
   const categorized = activeRows.map((row) => ({ ...row, queue: warehouseQueue(row) }));
   const scoped = categorized.filter((row) => {
     if (view !== "all" && row.queue !== view) return false;
-    if (!q) return true;
-    return `${row.order_number} ${row.shipment_number} ${row.customer_name} ${row.customer_identity_code} ${row.cargo_description}`.toLowerCase().includes(q);
+    if (!matchesOrderRouteFilters(row, routeFilters)) return false;
+    if (q && !`${row.order_number} ${row.shipment_number} ${row.customer_name} ${row.customer_identity_code} ${row.cargo_description}`.toLowerCase().includes(q)) return false;
+    return true;
   });
   const counts = Object.fromEntries(
     Object.keys(queueMeta).map((key) => [key, categorized.filter((row) => row.queue === key).length]),
@@ -184,10 +205,12 @@ export async function loader({ request }: Route.LoaderArgs) {
     counts,
     view,
     q,
+    routeFilters,
   };
 }
 
 export default function WarehouseIndex({ loaderData }: Route.ComponentProps) {
+  const advancedFilterCount = orderRouteFilterCount(loaderData.routeFilters);
   return <div className="page prototype-page warehouse-queue-page">
     <div className="breadcrumb">仓库作业 / 作业总览 / {loaderData.warehouse.name}</div>
     <header className="page-head">
@@ -205,6 +228,10 @@ export default function WarehouseIndex({ loaderData }: Route.ComponentProps) {
         <input name="q" defaultValue={loaderData.q} placeholder="订单、运单、客户、识别码或货物名称" />
         <button className="secondary">筛选</button>
         <Link className="text-button" to={warehousePath("/warehouse", loaderData.warehouse.id, loaderData.view === "all" ? undefined : { view: loaderData.view })}>重置</Link>
+        <details className="order-route-advanced-filter" open={advancedFilterCount > 0}>
+          <summary><span>更多筛选条件</span><small>{advancedFilterCount ? `已启用 ${advancedFilterCount} 项` : "出发地、出境口岸、目的地"}</small></summary>
+          <div className="order-route-filter-grid"><OrderRouteFilterFields filters={loaderData.routeFilters}/></div>
+        </details>
       </Form>
       <div className="table-wrap warehouse-queue-table"><table><thead><tr><th>作业状态</th><th>订单 / 运单</th><th>客户</th><th>货物与实收</th><th>入库时间</th><th>当前处理</th><th className="sticky-action">操作</th></tr></thead><tbody>{loaderData.rows.map((row) => <tr key={row.shipment_id} className={row.queue === "exception" ? "row-blocked" : ""}>
         <td><span className={`status-pill warehouse-queue-${row.queue}`}>{queueMeta[row.queue].label}</span><small>{row.business_type === "ftl" ? "整车" : "拼车"}</small></td>

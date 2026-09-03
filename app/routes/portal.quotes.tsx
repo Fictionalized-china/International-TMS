@@ -2,23 +2,33 @@ import { env } from "cloudflare:workers";
 import { useNavigation } from "react-router";
 import type { Route } from "./+types/portal.quotes";
 import { PortalForm as Form, PortalLink as Link } from "../components/PortalNavigation";
+import { Modal } from "../components/Modal";
 import { acceptQuotation, withdrawQuotationAcceptance } from "../lib/quotation-lifecycle.server";
 import { requirePortalCustomer } from "../lib/portal.server";
 import { valueOf } from "../lib/validation";
 import { ConfirmAction } from "../components/ConfirmAction";
 import {
   listQuotationWorkflowFields,
+  listQuotationWorkflowFieldValues,
   listQuotationWorkflowInstanceFields,
 } from "../lib/quotation-workflow-fields.server";
 import {
+  activeQuotationCustomWorkflowFields,
   quotationWorkflowFieldPolicy,
+  quotationWorkflowDisplayValue,
 } from "../lib/quotation-workflow-fields";
 import type { QuotationNativeFieldKey } from "../lib/quotation-native-field-catalog";
 
 type Quote = {
   id: string;
   quote_number: string;
+  customer_name: string;
+  customer_contact_name: string | null;
+  customer_contact_phone: string | null;
+  salesperson_name: string | null;
   workflow_definition_id: string | null;
+  workflow_name: string | null;
+  workflow_version_number: number | null;
   origin_country: string;
   origin_state: string | null;
   origin_city: string;
@@ -39,6 +49,7 @@ type Quote = {
   estimated_height_cm: number;
   total_amount: number;
   valid_until: string | null;
+  notes: string | null;
   lifecycle_status: "pending" | "accepted" | "withdrawn" | "void";
   order_id: string | null;
   order_number: string | null;
@@ -75,13 +86,18 @@ export async function loader({ request }: Route.LoaderArgs) {
   if (quotationId) orderParams.push(quotationId);
   const [quoteRows, chargeRows] = await Promise.all([
     env.DB.prepare(
-      `SELECT q.id,q.quote_number,q.workflow_definition_id,q.origin_country,q.origin_state,q.origin_city,q.pickup_address,
+      `SELECT q.id,q.quote_number,c.name customer_name,q.customer_contact_name,q.customer_contact_phone,
+        u.display_name salesperson_name,q.workflow_definition_id,wd.name workflow_name,wd.version_number workflow_version_number,
+        q.origin_country,q.origin_state,q.origin_city,q.pickup_address,
         q.destination_country,q.destination_state,q.destination_city,w.name destination_warehouse_name,
         q.destination_warehouse_note,q.customs_clearance_mode,q.road_load_type,q.cargo_description,
         q.pieces,q.gross_weight_kg,q.volume_cbm,q.estimated_length_cm,q.estimated_width_cm,
-        q.estimated_height_cm,q.total_amount,q.valid_until,q.lifecycle_status,
+        q.estimated_height_cm,q.total_amount,q.valid_until,q.notes,q.lifecycle_status,
         o.id order_id,o.order_number,o.status order_status,o.current_step_code,q.created_at
        FROM quotations q
+       JOIN customers c ON c.id=q.customer_id AND c.organization_id=q.organization_id
+       LEFT JOIN users u ON u.id=q.salesperson_user_id
+       LEFT JOIN workflow_definitions wd ON wd.id=q.workflow_definition_id AND wd.organization_id=q.organization_id
        LEFT JOIN warehouses w ON w.id=q.destination_warehouse_id AND w.organization_id=q.organization_id
        LEFT JOIN transport_orders o ON o.organization_id=q.organization_id AND o.quotation_id=q.id
        WHERE ${where}
@@ -99,9 +115,13 @@ export async function loader({ request }: Route.LoaderArgs) {
   for (const charge of chargeRows.results) {
     charges.set(charge.quotation_id, [...(charges.get(charge.quotation_id) || []), charge]);
   }
-  const [workflowFields,quotationWorkflowFields] = await Promise.all([
+  const [workflowFields,quotationWorkflowFields,workflowValues] = await Promise.all([
     listQuotationWorkflowFields(user.organizationId),
     listQuotationWorkflowInstanceFields(
+      user.organizationId,
+      quoteRows.results.map((quote) => quote.id),
+    ),
+    listQuotationWorkflowFieldValues(
       user.organizationId,
       quoteRows.results.map((quote) => quote.id),
     ),
@@ -113,6 +133,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     quotationId,
     workflowFields,
     quotationWorkflowFields,
+    workflowValues,
   };
 }
 
@@ -199,7 +220,7 @@ export default function PortalQuotes({ loaderData, actionData }: Route.Component
                   <td>{visible("quotation_cargo_description","required")&&<b>{quote.cargo_description}</b>}{measures&&<small className="subline">{measures}</small>}{dimensions.some(value=>value!==null)&&<small className="subline">预计 {dimensions.map(value=>value??"—").join(" × ")} CM</small>}</td>
                   <td>{visible("quotation_charge_items","required")?<><b>CNY {quote.total_amount.toLocaleString()}</b><QuoteChargeSummary charges={loaderData.charges[quote.id] || []} /></>:<span className="subline">当前工作流不展示费用</span>}</td>
                   <td><span className={`status ${statusTone(quote.lifecycle_status)}`}>{statusLabel(quote.lifecycle_status)}</span>{visible("quotation_valid_until","optional")&&quote.valid_until && <small className="subline">有效期至 {quote.valid_until}</small>}{quote.order_id && <Link className="subline order-id" to="/portal/orders">订单 {quote.order_number}</Link>}</td>
-                  <td><QuoteActions quote={quote} busy={busy} /></td>
+                  <td><QuoteActions quote={quote} charges={loaderData.charges[quote.id] || []} fields={fields} values={loaderData.workflowValues.filter((value) => value.quotation_id === quote.id)} busy={busy} closeSignal={actionData?.success} /></td>
                 </tr>;
               })}
               {!loaderData.quotes.length && <tr><td className="empty" colSpan={7}>{loaderData.quotationId ? "未找到该报价，报价可能已被删除或不属于当前客户。" : "暂无报价"}</td></tr>}
@@ -216,14 +237,78 @@ function QuoteChargeSummary({ charges }: { charges: Charge[] }) {
   return <details><summary>查看 {charges.length} 项费用</summary>{charges.map((charge) => <small className="subline" key={`${charge.sort_order}-${charge.description}`}>{charge.description}：{charge.quantity} × {charge.unit_price} = {charge.amount}</small>)}</details>;
 }
 
-function QuoteActions({ quote, busy }: { quote: Quote; busy: boolean }) {
-  if (quote.lifecycle_status === "pending" || quote.lifecycle_status === "withdrawn") {
-    return <Form method="post"><input type="hidden" name="intent" value="accept"/><input type="hidden" name="id" value={quote.id}/><button className="btn primary" disabled={busy}>{quote.lifecycle_status === "withdrawn" ? "重新接受" : "接受报价"}</button></Form>;
-  }
-  if (quote.lifecycle_status === "accepted" && quote.order_status === "draft") {
-    return <Form method="post"><input type="hidden" name="intent" value="withdraw"/><input type="hidden" name="id" value={quote.id}/><ConfirmAction className="btn" title="撤回报价接受" description={`撤回后 ${quote.quote_number} 将恢复为可重新接受状态；已经生成的订单保留为草稿并留下审计记录。`} triggerLabel="撤回接受" confirmLabel="确认撤回" pending={busy}/></Form>;
-  }
-  return quote.lifecycle_status === "accepted" ? <span className="subline">订单已进入业务流程</span> : <span className="subline">无可用操作</span>;
+function QuoteActions({ quote, charges, fields, values, busy, closeSignal }: {
+  quote: Quote;
+  charges: Charge[];
+  fields: Awaited<ReturnType<typeof listQuotationWorkflowFields>>;
+  values: Awaited<ReturnType<typeof listQuotationWorkflowFieldValues>>;
+  busy: boolean;
+  closeSignal?: unknown;
+}) {
+  const canAccept = quote.lifecycle_status === "pending" || quote.lifecycle_status === "withdrawn";
+  const visible = (key: QuotationNativeFieldKey, fallback: "required" | "optional") =>
+    quotationWorkflowFieldPolicy(fields, key, fallback).isActive;
+  const route = [quote.origin_country, quote.origin_state, quote.origin_city].filter(Boolean).join(" ") +
+    " → " + [quote.destination_country, quote.destination_state, quote.destination_city].filter(Boolean).join(" ");
+  const dimensions = [quote.estimated_length_cm, quote.estimated_width_cm, quote.estimated_height_cm].join(" × ");
+  const customFacts = activeQuotationCustomWorkflowFields(fields).map((field) => ({
+    id: field.id,
+    label: field.label,
+    value: quotationWorkflowDisplayValue(
+      field,
+      values.find((value) => value.field_id === field.id || value.field_key === field.field_key) || null,
+    ),
+  }));
+  return <Modal
+    title={`报价详情 · ${quote.quote_number}`}
+    triggerLabel={canAccept ? "查看并确认" : "查看详情"}
+    triggerClassName={canAccept ? "btn primary" : "btn"}
+    size="wide"
+    dialogClassName="quote-review-modal"
+    closeSignal={closeSignal}
+  >
+    <div className="quote-review-sheet">
+      <header className="quote-review-hero">
+        <div><span>{quote.road_load_type === "ltl" ? "拼车运输报价" : "整车运输报价"}</span><strong>{route}</strong><small>{quote.workflow_name ? `${quote.workflow_name} · v${quote.workflow_version_number}` : "历史报价"}</small></div>
+        <div><span>报价总额</span><strong>CNY {quote.total_amount.toLocaleString()}</strong><small>{quote.valid_until ? `有效期至 ${quote.valid_until}` : "未设置有效期"}</small></div>
+      </header>
+      <div className="quote-review-sections">
+        <section><h3>客户与服务</h3><div className="quote-review-facts">
+          <QuoteReviewCell label="客户" value={quote.customer_name}/>
+          {visible("quotation_salesperson_user_id","required") && <QuoteReviewCell label="业务员" value={quote.salesperson_name || "—"}/>}
+          {visible("quotation_customer_contact_name","required") && <QuoteReviewCell label="联系人" value={quote.customer_contact_name || "—"}/>}
+          {visible("quotation_customer_contact_phone","required") && <QuoteReviewCell label="联系电话" value={quote.customer_contact_phone || "—"}/>}
+          {visible("quotation_customs_clearance_mode","required") && <QuoteReviewCell label="清关责任" value={quote.customs_clearance_mode === "company" ? "公司代办清关" : "客户自理清关"}/>}
+        </div></section>
+        <section><h3>运输路线</h3><div className="quote-review-facts">
+          <QuoteReviewCell label="起运地区" value={[quote.origin_country, quote.origin_state, quote.origin_city].filter(Boolean).join(" ")}/>
+          {visible("quotation_pickup_address","required") && <QuoteReviewCell label="提货地址" value={quote.pickup_address || "—"}/>}
+          <QuoteReviewCell label="目的地区" value={[quote.destination_country, quote.destination_state, quote.destination_city].filter(Boolean).join(" ")}/>
+          {visible("quotation_destination_warehouse_id","required") && <QuoteReviewCell label="目的仓" value={quote.destination_warehouse_name || "—"}/>}
+          {visible("quotation_destination_warehouse_note","optional") && <QuoteReviewCell label="目的仓备注" value={quote.destination_warehouse_note || "—"}/>}
+        </div></section>
+        <section><h3>货物概况</h3><div className="quote-review-facts">
+          {visible("quotation_cargo_description","required") && <QuoteReviewCell label="货物" value={quote.cargo_description || "—"}/>}
+          {visible("quotation_pieces","required") && <QuoteReviewCell label="预计件数" value={`${quote.pieces} 件`}/>}
+          {visible("quotation_gross_weight_kg","required") && <QuoteReviewCell label="预计重量" value={`${quote.gross_weight_kg} KG`}/>}
+          {visible("quotation_volume_cbm","required") && <QuoteReviewCell label="预计体积" value={`${quote.volume_cbm} CBM`}/>}
+          {(visible("quotation_length_cm","required") || visible("quotation_width_cm","required") || visible("quotation_height_cm","required")) && <QuoteReviewCell label="预计尺寸" value={`${dimensions} CM`}/>}
+          {visible("quotation_notes","optional") && <QuoteReviewCell label="报价备注" value={quote.notes || "—"}/>}
+        </div></section>
+        <section><h3>费用明细</h3>{charges.length ? <div className="table-wrap"><table className="quote-review-charges"><thead><tr><th>费用名称</th><th>数量</th><th>单价</th><th>金额</th></tr></thead><tbody>{charges.map((charge) => <tr key={`${charge.sort_order}-${charge.description}`}><td>{charge.description}</td><td>{charge.quantity}</td><td>{charge.unit_price.toLocaleString()}</td><td><strong>{charge.amount.toLocaleString()}</strong></td></tr>)}</tbody><tfoot><tr><td colSpan={3}>合计</td><td><strong>CNY {quote.total_amount.toLocaleString()}</strong></td></tr></tfoot></table></div> : <p className="empty-state">当前报价没有费用明细。</p>}</section>
+        {customFacts.length > 0 && <section className="span-2"><h3>其他报价信息</h3><div className="quote-review-facts">{customFacts.map((fact) => <QuoteReviewCell key={fact.id} label={fact.label} value={fact.value}/>)}</div></section>}
+      </div>
+      <footer className="quote-review-actions">
+        <div><strong>{canAccept ? "请确认运输条件与费用后再接受" : statusLabel(quote.lifecycle_status)}</strong><span>{canAccept ? "接受后系统将生成唯一运输订单，并进入委托资料补充。" : quote.order_number ? `已生成订单 ${quote.order_number}` : "报价信息仅供查看。"}</span></div>
+        {canAccept && <Form method="post"><input type="hidden" name="intent" value="accept"/><input type="hidden" name="id" value={quote.id}/><button className="btn primary" disabled={busy}>{quote.lifecycle_status === "withdrawn" ? "确认重新接受报价" : "确认接受报价"}</button></Form>}
+        {quote.lifecycle_status === "accepted" && quote.order_status === "draft" && <Form method="post"><input type="hidden" name="intent" value="withdraw"/><input type="hidden" name="id" value={quote.id}/><ConfirmAction className="btn" title="撤回报价接受" description={`撤回后 ${quote.quote_number} 将恢复为可重新接受状态；已经生成的订单保留为草稿并留下审计记录。`} triggerLabel="撤回接受" confirmLabel="确认撤回" pending={busy}/></Form>}
+      </footer>
+    </div>
+  </Modal>;
+}
+
+function QuoteReviewCell({ label, value }: { label: string; value: string }) {
+  return <div><span>{label}</span><strong>{value || "—"}</strong></div>;
 }
 
 function statusLabel(status: Quote["lifecycle_status"]) {

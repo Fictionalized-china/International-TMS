@@ -894,7 +894,7 @@ function QuoteActions({ quote, fields, values, charges, loaderData, actionData, 
         )
   ));
   return <div className="toolbar-actions quotation-table-actions">
-    <Modal title={`报价详情 · ${quote.quote_number}`} triggerLabel="查看" triggerClassName="btn"><QuoteDetail quote={quote} fields={fields} values={values} customers={loaderData.customers} warehouses={loaderData.warehouses} /></Modal>
+    <Modal title={`报价详情 · ${quote.quote_number}`} triggerLabel="查看" triggerClassName="btn" size="wide" dialogClassName="quote-review-modal"><QuoteDetail quote={quote} fields={fields} values={values} charges={charges} customers={loaderData.customers} warehouses={loaderData.warehouses} /></Modal>
     {activeFields.length > 0 && ["pending","withdrawn"].includes(quote.lifecycle_status) && <Modal title={`补充第一步配置项 · ${quote.quote_number}`} triggerLabel={missing.length ? `补充配置项 ${missing.length}` : "配置项"} triggerClassName={missing.length ? "btn danger" : "btn"} closeSignal={workflowSuccess} isOpen={workflowEditorOpen} onOpenChange={updateWorkflowEditorOpen} size="xwide" guardFormChanges><Form method="post" encType="multipart/form-data" className="quotation-workflow-update-form" data-enter-flow><input type="hidden" name="intent" value="workflow_fields_update"/><input type="hidden" name="id" value={quote.id}/><input type="hidden" name="nativeFieldsIncluded" value="1"/>{workflowError&&<div ref={workflowErrorRef} className="alert error" role="alert" tabIndex={-1}><strong>配置项尚未保存</strong><span>{workflowError}</span><small>已填写内容仍保留，请按提示修改后重试。</small></div>}<div className="quote-workflow-form-head"><strong>第 1 步 · 询价报价</strong><span>{quote.workflow_name} v{quote.workflow_version_number} · 版本已锁定</span></div>{nativeFields.length > 0 && <QuotationNativeWorkflowInputs quote={quote} fields={nativeFields} charges={charges} users={loaderData.users} warehouses={loaderData.warehouses} countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities}/>}<QuotationWorkflowFieldInputs fields={customFields} values={values} customers={loaderData.customers} warehouses={loaderData.warehouses}/><div className="modal-form-actions"><button className="btn primary" disabled={busy}>保存配置项</button></div></Form></Modal>}
     {quote.lifecycle_status === "pending" && <Form method="post"><input type="hidden" name="intent" value="accept"/><input type="hidden" name="id" value={quote.id}/><button className="btn primary" disabled={busy || missing.length > 0} title={missing.length ? `尚缺：${missing.map((field) => field.label).join("、")}` : undefined}>代客户确认</button></Form>}
     {quote.lifecycle_status === "accepted" && quote.order_status === "draft" && <Form method="post"><input type="hidden" name="intent" value="withdraw"/><input type="hidden" name="id" value={quote.id}/><ConfirmAction className="btn" title="撤回报价接受" description={`将撤回 ${quote.quote_number} 的客户接受状态；已生成订单会保留为草稿并留下审计记录。`} triggerLabel="撤回接受" confirmLabel="确认撤回" pending={busy}/></Form>}
@@ -903,10 +903,11 @@ function QuoteActions({ quote, fields, values, charges, loaderData, actionData, 
   </div>;
 }
 
-function QuoteDetail({ quote, fields, values, customers, warehouses }: {
+function QuoteDetail({ quote, fields, values, charges, customers, warehouses }: {
   quote: Quote;
   fields: QuotationWorkflowField[];
   values: QuotationWorkflowFieldValue[];
+  charges: QuoteCharge[];
   customers: CustomerOption[];
   warehouses: WarehouseOption[];
 }) {
@@ -914,31 +915,45 @@ function QuoteDetail({ quote, fields, values, customers, warehouses }: {
     quotationWorkflowFieldPolicy(fields,key,fallback).isActive;
   const customFields = activeQuotationCustomWorkflowFields(fields);
   const detailFacts = quotationDetailFacts(quote,visible);
-  return <div className="drawer-grid quote-detail-grid">
-    <ReadCell label="客户" value={quote.customer_name}/>
-    {visible("quotation_salesperson_user_id","required") && <ReadCell label="业务员" value={quote.salesperson_name || "—"}/>}
-    {visible("quotation_customer_contact_name","required") && <ReadCell label="客户联系人" value={quote.customer_contact_name || "—"}/>}
-    {visible("quotation_customer_contact_phone","required") && <ReadCell label="联系电话" value={quote.customer_contact_phone || "—"}/>}
-    <ReadCell label="运输方案" value={`汽运 · ${quote.road_load_type === "ltl" ? "拼车" : "整车"}`}/>
-    {visible("quotation_customs_clearance_mode","required") && <ReadCell label="清关责任" value={quote.customs_clearance_mode === "company" ? "公司代办清关" : "客户自理清关"}/>}
-    <ReadCell label="工作流版本" value={quote.workflow_name ? `${quote.workflow_name} · v${quote.workflow_version_number}` : "历史报价 · 接受时自动匹配"}/>
-    {visible("quotation_pickup_address","required") && <ReadCell label="提货地址" value={quote.pickup_address || "—"}/>}
-    {visible("quotation_destination_warehouse_id","required") && <ReadCell label="目的仓" value={quote.destination_warehouse_name || "—"}/>}
-    {detailFacts.map((fact) => <ReadCell key={fact.key} label={fact.label} value={fact.value}/>)}
-    {visible("quotation_destination_warehouse_note","optional") && <ReadCell label="目的仓备注" value={quote.destination_warehouse_note || "—"}/>}
-    {visible("quotation_cargo_description","required") && <ReadCell label="货物" value={quote.cargo_description}/>}
-    {visible("quotation_charge_items","required") && <ReadCell label="应收总额" value={`CNY ${quote.total_amount.toLocaleString()}`}/>}
-    {visible("quotation_notes","optional") && <ReadCell label="报价备注" value={quote.notes || "—"}/>}
-    {visible("quotation_valid_until","optional") && <ReadCell label="报价有效期" value={quote.valid_until || "—"}/>}
-    {customFields.map((field) => {
+  const routeFacts = detailFacts.filter((fact) => ["quotation_origin_region", "quotation_destination_region"].includes(fact.key));
+  const cargoFacts = detailFacts.filter((fact) => !["quotation_origin_region", "quotation_destination_region"].includes(fact.key));
+  const customFactCells = customFields.map((field) => {
       const value = values.find((item) => item.field_id === field.id || item.field_key === field.field_key) || null;
       const referenced = field.field_type === "customer"
         ? customers.find((item) => item.id === value?.value_text)?.name
         : field.field_type === "warehouse"
           ? warehouses.find((item) => item.id === value?.value_text)?.name
           : null;
-      return <ReadCell key={field.id} label={`${field.label}${field.is_required ? "（必填）" : ""}`} value={referenced || quotationWorkflowDisplayValue(field,value)}/>;
-    })}
+      return <ReadCell key={field.id} label={field.label} value={referenced || quotationWorkflowDisplayValue(field,value)}/>;
+    });
+  return <div className="quote-detail-sheet">
+    <header className="quote-review-hero">
+      <div><span>{quote.road_load_type === "ltl" ? "拼车运输报价" : "整车运输报价"}</span><strong>{quote.quote_number}</strong><small>{quote.workflow_name ? `${quote.workflow_name} · v${quote.workflow_version_number}` : "历史报价 · 接受时自动匹配"}</small></div>
+      <div><span>应收总额</span><strong>CNY {quote.total_amount.toLocaleString()}</strong><small>{statusLabel(quote.lifecycle_status)}{quote.valid_until ? ` · 有效期至 ${quote.valid_until}` : ""}</small></div>
+    </header>
+    <div className="quote-detail-sections">
+      <section className="quote-detail-section"><header><h3>客户与负责人</h3><span>报价归属</span></header><div className="drawer-grid quote-detail-grid">
+        <ReadCell label="客户" value={quote.customer_name}/>
+        {visible("quotation_salesperson_user_id","required") && <ReadCell label="业务员" value={quote.salesperson_name || "—"}/>}
+        {visible("quotation_customer_contact_name","required") && <ReadCell label="客户联系人" value={quote.customer_contact_name || "—"}/>}
+        {visible("quotation_customer_contact_phone","required") && <ReadCell label="联系电话" value={quote.customer_contact_phone || "—"}/>}
+        <ReadCell label="运输方案" value={`汽运 · ${quote.road_load_type === "ltl" ? "拼车" : "整车"}`}/>
+        {visible("quotation_customs_clearance_mode","required") && <ReadCell label="清关责任" value={quote.customs_clearance_mode === "company" ? "公司代办清关" : "客户自理清关"}/>}
+      </div></section>
+      <section className="quote-detail-section"><header><h3>运输路线</h3><span>起运与交付</span></header><div className="drawer-grid quote-detail-grid">
+        {routeFacts.map((fact) => <ReadCell key={fact.key} label={fact.label} value={fact.value}/>)}
+        {visible("quotation_pickup_address","required") && <ReadCell label="提货地址" value={quote.pickup_address || "—"}/>}
+        {visible("quotation_destination_warehouse_id","required") && <ReadCell label="目的仓" value={quote.destination_warehouse_name || "—"}/>}
+        {visible("quotation_destination_warehouse_note","optional") && <ReadCell label="目的仓备注" value={quote.destination_warehouse_note || "—"}/>}
+      </div></section>
+      <section className="quote-detail-section"><header><h3>货物概况</h3><span>预计数据</span></header><div className="drawer-grid quote-detail-grid">
+        {visible("quotation_cargo_description","required") && <ReadCell label="货物" value={quote.cargo_description}/>}
+        {cargoFacts.map((fact) => <ReadCell key={fact.key} label={fact.label} value={fact.value}/>)}
+        {visible("quotation_notes","optional") && <ReadCell label="报价备注" value={quote.notes || "—"}/>}
+      </div></section>
+      <section className="quote-detail-section"><header><h3>费用明细</h3><span>{charges.length} 项</span></header>{charges.length ? <div className="table-wrap"><table className="quote-review-charges"><thead><tr><th>费用名称</th><th>数量</th><th>单价</th><th>金额</th></tr></thead><tbody>{charges.map((charge)=><tr key={charge.id}><td>{charge.description}</td><td>{charge.quantity}</td><td>{charge.unit_price.toLocaleString()}</td><td><strong>{(charge.quantity * charge.unit_price).toLocaleString()}</strong></td></tr>)}</tbody><tfoot><tr><td colSpan={3}>合计</td><td><strong>CNY {quote.total_amount.toLocaleString()}</strong></td></tr></tfoot></table></div> : <p className="empty-state">当前报价没有费用明细。</p>}</section>
+      {customFactCells.length > 0 && <section className="quote-detail-section span-2"><header><h3>工作流补充信息</h3><span>{customFactCells.length} 项</span></header><div className="drawer-grid quote-detail-grid">{customFactCells}</div></section>}
+    </div>
   </div>;
 }
 

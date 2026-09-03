@@ -2,8 +2,10 @@ import { env } from "cloudflare:workers";
 import { Form, Link } from "react-router";
 import type { Route } from "./+types/admin.domestic-tracking";
 import { BatchNumberLink, OrderNumberLink } from "../components/EntityNumberLink";
+import { OrderRouteFilterFields } from "../components/OrderRouteFilterFields";
 import { requireSessionUser } from "../lib/auth.server";
 import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
+import { matchesOrderRouteFilters, orderRouteFilterCount, readOrderRouteFilters } from "../lib/order-route-filters";
 
 type DomesticRow = {
   order_id: string;
@@ -11,6 +13,17 @@ type DomesticRow = {
   customer_name: string;
   business_type: string;
   order_status: string;
+  origin_country: string | null;
+  origin_state: string | null;
+  origin_city: string | null;
+  origin_address: string | null;
+  exit_port: string | null;
+  exit_port_name: string | null;
+  destination_country: string | null;
+  destination_state: string | null;
+  destination_city: string | null;
+  destination_address: string | null;
+  overseas_warehouse_name: string | null;
   assignment_id: string | null;
   carrier_name: string | null;
   vehicle_count: number | null;
@@ -66,8 +79,13 @@ export async function loader({ request }: Route.LoaderArgs) {
   const q = (url.searchParams.get("q") || "").trim();
   const status = url.searchParams.get("status") || "";
   const businessType = url.searchParams.get("businessType") || "";
+  const routeFilters = readOrderRouteFilters(url.searchParams);
   const rows = await env.DB.prepare(
     `SELECT o.id order_id,o.order_number,c.name customer_name,o.business_type,o.status order_status,
+            o.origin_country,o.origin_state,o.origin_city,o.origin_address,
+            o.exit_port,route_port.name exit_port_name,
+            o.destination_country,o.destination_state,o.destination_city,o.destination_address,
+            ow.name overseas_warehouse_name,
             a.id assignment_id,COALESCE(ca.name,a.carrier_name) carrier_name,a.vehicle_count,
             a.origin_location,a.destination_location,w.name warehouse_name,
             a.planned_departure_at,a.planned_arrival_at,a.actual_departure_at,a.actual_arrival_at,a.status assignment_status,
@@ -94,6 +112,8 @@ export async function loader({ request }: Route.LoaderArgs) {
        )
        LEFT JOIN carriers ca ON ca.id=a.carrier_id
        LEFT JOIN warehouses w ON w.id=a.destination_warehouse_id
+       LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id
+       LEFT JOIN reference_data route_port ON route_port.organization_id=o.organization_id AND route_port.category='border_port' AND route_port.code=o.exit_port
        LEFT JOIN shipments s ON s.id=(
          SELECT sx.id FROM shipments sx WHERE sx.organization_id=o.organization_id AND sx.order_id=o.id
          ORDER BY COALESCE(sx.updated_at,sx.created_at) DESC,sx.created_at DESC LIMIT 1
@@ -132,17 +152,19 @@ export async function loader({ request }: Route.LoaderArgs) {
   })).filter((row) => {
     if (status && row.transit_status.code !== status) return false;
     if (businessType && row.business_type !== businessType) return false;
+    if (!matchesOrderRouteFilters(row, routeFilters)) return false;
     if (q && !`${row.order_number} ${row.customer_name} ${row.carrier_name || ""} ${row.warehouse_name || ""} ${row.outbound_batch_number || ""} ${row.outbound_carrier_name || ""} ${row.outbound_vehicle_plate || ""} ${row.outbound_driver_name || ""} ${row.vehicles.map((vehicle) => `${vehicle.plate_number} ${vehicle.driver_name || ""}`).join(" ")}`.toLowerCase().includes(q.toLowerCase())) return false;
     return true;
   });
-  return { current, rows: mapped, filters: { q, status, businessType } };
+  return { current, rows: mapped, filters: { q, status, businessType, ...routeFilters } };
 }
 
 export default function DomesticTracking({ loaderData }: Route.ComponentProps) {
+  const advancedFilterCount = orderRouteFilterCount(loaderData.filters);
   return <>
     <header className="page-header"><div><p className="eyebrow">IN-TRANSIT VEHICLES</p><h1>在途车辆</h1><p>统一查看国内提货车辆、出境配载车辆和国内外轨迹；订单全程保持一行，历史不丢失。</p></div><span className="status-pill">{loaderData.rows.length} 票</span></header>
     <section className="panel domestic-tracking-ledger">
-      <Form method="get" action="." className="domestic-tracking-filters"><input name="q" defaultValue={loaderData.filters.q} placeholder="订单、客户、承运商、配载单、车牌或司机"/><select name="status" defaultValue={loaderData.filters.status}><option value="">全部在途状态</option><option value="waiting_arrangement">国内待安排</option><option value="planned">国内待提货</option><option value="domestic_in_transit">国内运输中</option><option value="waiting_receipt">国内仓待收货</option><option value="warehouse_check">国内仓清点中</option><option value="domestic_completed">国内运输完成</option><option value="waiting_outbound">等待出境</option><option value="outbound_in_transit">出境运输中</option><option value="overseas_arrived">已到境外仓</option><option value="completed">客户已自提</option><option value="exception">异常</option></select><select name="businessType" defaultValue={loaderData.filters.businessType}><option value="">全部订单类型</option><option value="ftl">整车</option><option value="ltl">拼车</option></select><button className="secondary">筛选</button><Link className="text-button" to="/admin/domestic-tracking">重置</Link></Form>
+      <Form method="get" action="." className="domestic-tracking-filters"><input name="q" defaultValue={loaderData.filters.q} placeholder="订单、客户、承运商、配载单、车牌或司机"/><select name="status" defaultValue={loaderData.filters.status}><option value="">全部在途状态</option><option value="waiting_arrangement">国内待安排</option><option value="planned">国内待提货</option><option value="domestic_in_transit">国内运输中</option><option value="waiting_receipt">国内仓待收货</option><option value="warehouse_check">国内仓清点中</option><option value="domestic_completed">国内运输完成</option><option value="waiting_outbound">等待出境</option><option value="outbound_in_transit">出境运输中</option><option value="overseas_arrived">已到境外仓</option><option value="completed">客户已自提</option><option value="exception">异常</option></select><select name="businessType" defaultValue={loaderData.filters.businessType}><option value="">全部订单类型</option><option value="ftl">整车</option><option value="ltl">拼车</option></select><button className="secondary">筛选</button><Link className="text-button" to="/admin/domestic-tracking">重置</Link><details className="order-route-advanced-filter" open={advancedFilterCount > 0}><summary><span>更多筛选条件</span><small>{advancedFilterCount ? `已启用 ${advancedFilterCount} 项` : "出发地、出境口岸、目的地"}</small></summary><div className="order-route-filter-grid"><OrderRouteFilterFields filters={loaderData.filters}/></div></details></Form>
       <div className="table-wrap domestic-tracking-table"><table><thead><tr><th>当前状态</th><th>订单 / 客户</th><th>类型</th><th>国内承运商 / 运单</th><th>国内车辆</th><th>国内仓实收</th><th>出境批次 / 承运商</th><th>出境车辆 / 司机</th><th>最近动态</th><th className="sticky-action">操作</th></tr></thead><tbody>{loaderData.rows.map(row=><tr key={row.order_id}>
         <td><span className={`status-pill ${row.transit_status.tone}`}>{row.transit_status.label}</span><small>{row.transport_step_name||"等待业务安排"}</small></td>
         <td><strong><OrderNumberLink id={row.order_id} number={row.order_number}/></strong><small>{row.customer_name}</small></td>

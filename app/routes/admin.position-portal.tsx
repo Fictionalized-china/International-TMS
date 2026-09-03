@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { Form, Link } from "react-router";
 import type { Route } from "./+types/admin.position-portal";
 import { OrderNumberLink } from "../components/EntityNumberLink";
+import { OrderRouteFilterFields } from "../components/OrderRouteFilterFields";
 import { requireSessionUser } from "../lib/auth.server";
 import { canSeeScopedOrder, canViewAllOrders } from "../lib/order-access.server";
 import {
@@ -10,6 +11,7 @@ import {
 } from "../lib/order-guidance";
 import { orderResponsiblePosition } from "../lib/order-responsibility";
 import type { OrderModuleCode } from "../lib/order-modules";
+import { matchesOrderRouteFilters, orderRouteFilterCount, readOrderRouteFilters } from "../lib/order-route-filters";
 
 type PortalModuleRow = GuidanceModule & {
   order_id: string;
@@ -17,8 +19,17 @@ type PortalModuleRow = GuidanceModule & {
   order_status: string;
   business_type: string;
   customer_name: string;
+  origin_country: string;
+  origin_state: string | null;
   origin_city: string;
+  origin_address: string | null;
+  exit_port: string | null;
+  exit_port_name: string | null;
+  destination_country: string;
+  destination_state: string | null;
   destination_city: string;
+  destination_address: string | null;
+  overseas_warehouse_name: string | null;
   pieces: number;
   gross_weight_kg: number;
   volume_cbm: number;
@@ -53,6 +64,7 @@ type PortalSettings = {
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request);
   const url = new URL(request.url);
+  const routeFilters = readOrderRouteFilters(url.searchParams);
   if (!current.permissions.includes("order.view")) {
     return {
       current,
@@ -69,6 +81,7 @@ export async function loader({ request }: Route.LoaderArgs) {
         position: "",
         assignee: "",
         q: "",
+        ...routeFilters,
       },
     };
   }
@@ -94,7 +107,9 @@ export async function loader({ request }: Route.LoaderArgs) {
   const [rows, workflowTasks, positions, assignees] = await env.DB.batch([
     env.DB.prepare(
     `SELECT o.id order_id,o.order_number,o.status order_status,o.business_type,
-            o.origin_city,o.destination_city,o.pieces,o.gross_weight_kg,o.volume_cbm,
+            o.origin_country,o.origin_state,o.origin_city,o.origin_address,o.exit_port,bp.name exit_port_name,
+            o.destination_country,o.destination_state,o.destination_city,o.destination_address,
+            ow.name overseas_warehouse_name,o.pieces,o.gross_weight_kg,o.volume_cbm,
             o.is_overdue,o.salesperson_user_id,o.created_by_user_id,
             c.sales_owner_user_id customer_sales_owner_user_id,c.name customer_name,
             m.module_code,m.module_name,m.enabled,m.is_required,m.status,
@@ -105,6 +120,8 @@ export async function loader({ request }: Route.LoaderArgs) {
        JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
        JOIN order_module_instances m ON m.order_id=o.id AND m.organization_id=o.organization_id
        LEFT JOIN users u ON u.id=m.assignee_user_id
+       LEFT JOIN reference_data bp ON bp.organization_id=o.organization_id AND bp.category='border_port' AND bp.code=o.exit_port
+       LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id
       WHERE o.organization_id=? AND m.enabled=1
       ORDER BY o.is_overdue DESC,o.updated_at DESC,m.updated_at DESC`,
     ).bind(current.organizationId),
@@ -178,7 +195,16 @@ export async function loader({ request }: Route.LoaderArgs) {
       business_type: order.business_type,
       is_overdue: order.is_overdue,
       origin_city: order.origin_city,
+      origin_country: order.origin_country,
+      origin_state: order.origin_state,
+      origin_address: order.origin_address,
+      exit_port: order.exit_port,
+      exit_port_name: order.exit_port_name,
       destination_city: order.destination_city,
+      destination_country: order.destination_country,
+      destination_state: order.destination_state,
+      destination_address: order.destination_address,
+      overseas_warehouse_name: order.overseas_warehouse_name,
       pieces: order.pieces,
       gross_weight_kg: order.gross_weight_kg,
       volume_cbm: order.volume_cbm,
@@ -212,6 +238,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     if (businessTypeFilter && order.business_type !== businessTypeFilter) return false;
     if (positionFilter && order.responsible_position_code !== positionFilter) return false;
     if (assigneeFilter && order.assignee_user_id !== assigneeFilter) return false;
+    if (!matchesOrderRouteFilters(order, routeFilters)) return false;
     if (query && !`${order.order_number} ${order.customer_name} ${order.origin_city} ${order.destination_city} ${order.current_stage_name} ${order.current_module_name} ${order.current_step_name} ${order.responsible_position_name} ${order.assignee_name || ""}`.toLowerCase().includes(query)) return false;
     return true;
   }).sort((left, right) => {
@@ -239,6 +266,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       position: positionFilter,
       assignee: assigneeFilter,
       q: url.searchParams.get("q") || "",
+      ...routeFilters,
     },
   };
 }
@@ -249,7 +277,7 @@ export function meta() {
 
 export default function PositionPortal({ loaderData }: Route.ComponentProps) {
   const { current, orders, canViewAll, filters, summary, accessLimited } = loaderData;
-  const advancedFilterCount = [filters.stage, filters.businessType, filters.position, filters.assignee].filter(Boolean).length;
+  const advancedFilterCount = [filters.stage, filters.businessType, filters.position, filters.assignee].filter(Boolean).length + orderRouteFilterCount(filters);
   return <>
     <header className="page-header position-portal-header">
       <div><p className="eyebrow">TASK WORKBENCH</p><h1>任务工作台</h1><p>{current.displayName} · {canViewAll ? "可查看全部订单" : "只显示当前由本岗位负责推进的订单"} · 点击订单直接进入对应办理模组</p></div>
@@ -265,8 +293,9 @@ export default function PositionPortal({ loaderData }: Route.ComponentProps) {
           <button className="primary">查询任务</button><Link className="text-button" to="/admin/portal">重置</Link>
         </div>
         <details className="position-advanced-filters" open={advancedFilterCount > 0}>
-          <summary><span>更多筛选条件</span><small>{advancedFilterCount ? `已启用 ${advancedFilterCount} 项` : "阶段、类型、岗位和负责人"}</small></summary>
+          <summary><span>更多筛选条件</span><small>{advancedFilterCount ? `已启用 ${advancedFilterCount} 项` : "路线、阶段、类型、岗位和负责人"}</small></summary>
           <div className="position-advanced-filter-grid">
+            <OrderRouteFilterFields filters={filters}/>
             <label><span>业务阶段</span><select name="stage" defaultValue={filters.stage}><option value="">全部阶段</option><option value="order_creation">订单创建</option><option value="consignment_approval">委托审核</option><option value="task_assignment">任务分配</option><option value="domestic_execution">国内运输</option><option value="warehouse_receiving">仓库入库</option><option value="port_loading">出口准备</option><option value="outbound_transport">出境运输</option><option value="overseas_pickup">境外仓自提</option><option value="reconciliation">对账结算</option><option value="completion_review">完成复盘</option></select></label>
             <label><span>订单类型</span><select name="businessType" defaultValue={filters.businessType}><option value="">全部类型</option><option value="ftl">整车</option><option value="ltl">拼车</option></select></label>
             <label><span>负责岗位</span><select name="position" defaultValue={filters.position}><option value="">全部负责岗位</option>{loaderData.positions.map((item)=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
@@ -277,7 +306,7 @@ export default function PositionPortal({ loaderData }: Route.ComponentProps) {
       <div className="table-wrap position-ledger-table"><table><thead><tr><th>状态</th><th>订单 / 客户</th><th>线路 / 货量</th><th>当前节点 / 模组</th><th>负责岗位 / 人员</th><th>下一步与阻断</th><th className="sticky-action">操作</th></tr></thead><tbody>{orders.map(order=><tr key={order.order_id} className={order.blocker?"row-blocked":""}>
         <td><span className={`status-pill ${order.is_overdue?"danger":""}`}>{order.is_overdue?"超时":orderStatusLabel(order.order_status)}</span></td>
         <td><strong><OrderNumberLink id={order.order_id} number={order.order_number}/></strong><small>{order.customer_name}</small></td>
-        <td><strong>{order.origin_city || "起运地待补"} → {order.destination_city || "目的地待补"}</strong><small>{order.business_type==="ftl"?"整车":order.business_type==="ltl"?"拼车":"待确定"} · {order.pieces || 0} 件 · {Number(order.gross_weight_kg || 0).toFixed(2)} KG · {Number(order.volume_cbm || 0).toFixed(3)} CBM</small></td>
+        <td><strong>{order.origin_city || "起运地待补"} → {order.destination_city || "目的地待补"}</strong><small>{order.exit_port_name || order.exit_port || "口岸待定"} · {order.business_type==="ftl"?"整车":order.business_type==="ltl"?"拼车":"待确定"} · {order.pieces || 0} 件 · {Number(order.gross_weight_kg || 0).toFixed(2)} KG · {Number(order.volume_cbm || 0).toFixed(3)} CBM</small></td>
         <td><strong>{order.current_stage_name}</strong><small>{order.current_module_name} · {order.current_step_name}</small></td>
         <td><strong>{order.responsible_position_name}</strong><small>{order.assignee_name||"待分配"}</small></td>
         <td><strong>{order.next_action}</strong><small className={order.blocker?"danger-text":""}>{order.blocker||"当前节点暂无阻断"}</small></td>

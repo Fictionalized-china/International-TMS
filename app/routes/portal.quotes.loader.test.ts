@@ -35,6 +35,7 @@ vi.mock("../lib/portal.server", () => ({
 }));
 vi.mock("../lib/quotation-workflow-fields.server", () => ({
   listQuotationWorkflowFields: vi.fn().mockResolvedValue([]),
+  listQuotationWorkflowFieldValues: vi.fn().mockResolvedValue([]),
   listQuotationWorkflowInstanceFields: vi.fn().mockResolvedValue([]),
 }));
 
@@ -50,6 +51,7 @@ describe("portal quotation direct view", () => {
 
     expect(result.quotationId).toBe("quote-1");
     expect(result.lifecycle).toBe("pending");
+    expect(result.workflowValues).toEqual([]);
     expect(result.quotes).toEqual([
       expect.objectContaining({ id: "quote-1", lifecycle_status: "pending" }),
       expect.objectContaining({ id: "quote-2", lifecycle_status: "pending" }),

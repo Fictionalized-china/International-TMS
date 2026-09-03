@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { Form, Link, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.shipments";
 import { OrderNumberLink } from "../components/EntityNumberLink";
+import { OrderRouteFilterFields } from "../components/OrderRouteFilterFields";
 import { requireSessionUser } from "../lib/auth.server";
 import { nextDocumentNumber } from "../lib/documents.server";
 import { canTransition, nextStates } from "../lib/workflow";
@@ -11,6 +12,7 @@ import { recordWorkflowEvent } from "../lib/business-workflow.server";
 import { statusLabel as orderStatusLabel } from "../lib/order-workflow";
 import { loadOrderGuidance } from "../lib/order-guidance.server";
 import { orderVisibilitySql, requireOrderAccess } from "../lib/order-access.server";
+import { orderRouteFilterCount, readOrderRouteFilters, type OrderRouteFilters } from "../lib/order-route-filters";
 
 type Shipment = {
   id: string;
@@ -66,7 +68,7 @@ type Shipment = {
   next_href: string;
 };
 
-type ShipmentFilters = {
+type ShipmentFilters = OrderRouteFilters & {
   q: string;
   status: string;
   workflowStatus: string;
@@ -90,6 +92,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     creator: url.searchParams.get("creator") || "",
     dateFrom: url.searchParams.get("dateFrom") || "",
     dateTo: url.searchParams.get("dateTo") || "",
+    ...readOrderRouteFilters(url.searchParams),
   };
   const where = ["s.organization_id = ?"];
   const bindings: Array<string | number> = [current.organizationId];
@@ -124,6 +127,21 @@ export async function loader({ request }: Route.LoaderArgs) {
   if (filters.dateTo) {
     where.push("substr(o.created_at, 1, 10) <= ?");
     bindings.push(filters.dateTo);
+  }
+  if (filters.origin) {
+    const pattern = `%${filters.origin}%`;
+    where.push("(o.origin_country LIKE ? OR o.origin_state LIKE ? OR o.origin_city LIKE ? OR o.origin_address LIKE ?)");
+    bindings.push(pattern, pattern, pattern, pattern);
+  }
+  if (filters.exitPort) {
+    const pattern = `%${filters.exitPort}%`;
+    where.push("(o.exit_port LIKE ? OR EXISTS (SELECT 1 FROM reference_data route_port WHERE route_port.organization_id=o.organization_id AND route_port.category='border_port' AND route_port.code=o.exit_port AND route_port.name LIKE ?))");
+    bindings.push(pattern, pattern);
+  }
+  if (filters.destination) {
+    const pattern = `%${filters.destination}%`;
+    where.push("(o.destination_country LIKE ? OR o.destination_state LIKE ? OR o.destination_city LIKE ? OR o.destination_address LIKE ? OR EXISTS (SELECT 1 FROM warehouses route_warehouse WHERE route_warehouse.organization_id=o.organization_id AND route_warehouse.id=o.overseas_warehouse_id AND route_warehouse.name LIKE ?))");
+    bindings.push(pattern, pattern, pattern, pattern, pattern);
   }
   const whereSql = where.join(" AND ");
   const totalRow = await env.DB.prepare(`SELECT COUNT(*) total FROM shipments s JOIN transport_orders o ON o.id=s.order_id JOIN customers c ON c.id=s.customer_id WHERE ${whereSql}`).bind(...bindings).first<{total:number}>();
@@ -309,6 +327,8 @@ const orderWorkflowStatuses = ["draft","submitted","confirmed","in_execution","c
 export default function Shipments({ loaderData, actionData }: Route.ComponentProps) {
   const busy = useNavigation().state !== "idle";
   const manage = loaderData.current.permissions.includes("shipment.manage");
+  const advancedFilterCount = orderRouteFilterCount(loaderData.filters)
+    + [loaderData.filters.workflowStatus, loaderData.filters.source, loaderData.filters.creator, loaderData.filters.dateFrom, loaderData.filters.dateTo].filter(Boolean).length;
   return <>
     <header className="page-header">
       <div>
@@ -334,18 +354,20 @@ export default function Shipments({ loaderData, actionData }: Route.ComponentPro
         <Form method="get" action="." className="shipment-filters">
           <input name="q" defaultValue={loaderData.filters.q} placeholder="运单号、订单号、客户、识别码、货物、位置"/>
           <select name="status" defaultValue={loaderData.filters.status}><option value="">全部运单状态</option>{Object.entries(labels).map(([value,label])=><option key={value} value={value}>{label}</option>)}</select>
-          <select name="workflowStatus" defaultValue={loaderData.filters.workflowStatus}><option value="">全部工作流状态</option>{orderWorkflowStatuses.map(value=><option key={value} value={value}>{orderStatusLabel(value)}</option>)}</select>
-          <select name="source" defaultValue={loaderData.filters.source}><option value="">全部来源</option><option value="admin">后台创建</option><option value="portal">客户门户</option></select>
-          <select name="creator" defaultValue={loaderData.filters.creator}><option value="">全部创建人</option>{loaderData.creators.map(item=><option key={item.id} value={item.id}>{item.display_name}</option>)}</select>
-          <div className="shipment-date-range">
-            <span>订单创建日期</span>
-            <input type="date" name="dateFrom" defaultValue={loaderData.filters.dateFrom}/>
-            <em>至</em>
-            <input type="date" name="dateTo" defaultValue={loaderData.filters.dateTo}/>
-          </div>
           <select name="pageSize" defaultValue={loaderData.pageSize}><option value="20">20 条/页</option><option value="50">50 条/页</option><option value="100">100 条/页</option></select>
           <button className="secondary">筛选</button>
           <Link className="text-button" to="/admin/shipments">重置</Link>
+          <details className="order-route-advanced-filter" open={advancedFilterCount > 0}>
+            <summary><span>更多筛选条件</span><small>{advancedFilterCount ? `已启用 ${advancedFilterCount} 项` : "路线、工作流、来源、创建人和日期"}</small></summary>
+            <div className="order-route-filter-grid shipment-advanced-filter-grid">
+              <OrderRouteFilterFields filters={loaderData.filters}/>
+              <label className="field"><span>工作流状态</span><select name="workflowStatus" defaultValue={loaderData.filters.workflowStatus}><option value="">全部</option>{orderWorkflowStatuses.map(value=><option key={value} value={value}>{orderStatusLabel(value)}</option>)}</select></label>
+              <label className="field"><span>订单来源</span><select name="source" defaultValue={loaderData.filters.source}><option value="">全部</option><option value="admin">后台创建</option><option value="portal">客户门户</option></select></label>
+              <label className="field"><span>订单创建人</span><select name="creator" defaultValue={loaderData.filters.creator}><option value="">全部</option>{loaderData.creators.map(item=><option key={item.id} value={item.id}>{item.display_name}</option>)}</select></label>
+              <label className="field"><span>创建日期（起）</span><input type="date" name="dateFrom" defaultValue={loaderData.filters.dateFrom}/></label>
+              <label className="field"><span>创建日期（止）</span><input type="date" name="dateTo" defaultValue={loaderData.filters.dateTo}/></label>
+            </div>
+          </details>
         </Form>
         {manage && (
           <ShipmentOperations

@@ -1,8 +1,10 @@
 import { env } from "cloudflare:workers";
 import { Form, Link } from "react-router";
 import type { Route } from "./+types/admin.orders";
+import { OrderRouteFilterFields } from "../components/OrderRouteFilterFields";
 import { requireSessionUser } from "../lib/auth.server";
 import { orderVisibilitySql } from "../lib/order-access.server";
+import { orderRouteFilterCount, readOrderRouteFilters } from "../lib/order-route-filters";
 
 type OrderRow = {
   id: string;
@@ -17,6 +19,8 @@ type OrderRow = {
   volume_cbm: number;
   origin_state: string | null;
   origin_city: string;
+  exit_port: string | null;
+  exit_port_name: string | null;
   destination_state: string | null;
   destination_city: string;
   overseas_warehouse_name: string | null;
@@ -39,6 +43,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const status = url.searchParams.get("status") || "";
   const step = url.searchParams.get("step") || "";
   const exception = url.searchParams.get("exception") || "";
+  const routeFilters = readOrderRouteFilters(url.searchParams);
   const page = Math.max(1, Number(url.searchParams.get("page") || 1));
   const pageSize = 30;
   const where = ["o.organization_id=?"];
@@ -65,18 +70,34 @@ export async function loader({ request }: Route.LoaderArgs) {
   }
   if (exception === "yes") where.push("COALESCE(o.exception_status,'normal')!='normal'");
   if (exception === "no") where.push("COALESCE(o.exception_status,'normal')='normal'");
+  if (routeFilters.origin) {
+    const pattern = `%${routeFilters.origin}%`;
+    where.push("(o.origin_country LIKE ? OR o.origin_state LIKE ? OR o.origin_city LIKE ? OR o.origin_address LIKE ?)");
+    values.push(pattern, pattern, pattern, pattern);
+  }
+  if (routeFilters.exitPort) {
+    const pattern = `%${routeFilters.exitPort}%`;
+    where.push("(o.exit_port LIKE ? OR EXISTS (SELECT 1 FROM reference_data route_port WHERE route_port.organization_id=o.organization_id AND route_port.category='border_port' AND route_port.code=o.exit_port AND route_port.name LIKE ?))");
+    values.push(pattern, pattern);
+  }
+  if (routeFilters.destination) {
+    const pattern = `%${routeFilters.destination}%`;
+    where.push("(o.destination_country LIKE ? OR o.destination_state LIKE ? OR o.destination_city LIKE ? OR o.destination_address LIKE ? OR EXISTS (SELECT 1 FROM warehouses route_warehouse WHERE route_warehouse.organization_id=o.organization_id AND route_warehouse.id=o.overseas_warehouse_id AND route_warehouse.name LIKE ?))");
+    values.push(pattern, pattern, pattern, pattern, pattern);
+  }
   const clause = where.join(" AND ");
   const [rows, countRow, stepRows] = await Promise.all([
     env.DB.prepare(
       `SELECT o.id,o.order_number,o.order_date,c.name customer_name,q.quote_number,o.business_type,
         o.cargo_description,o.pieces,o.gross_weight_kg,o.volume_cbm,o.origin_state,o.origin_city,
-        o.destination_state,o.destination_city,ow.name overseas_warehouse_name,o.status,
+        o.exit_port,bp.name exit_port_name,o.destination_state,o.destination_city,ow.name overseas_warehouse_name,o.status,
         o.current_step_name,u.display_name assignee_name,o.exception_status,o.completion_status,
         COALESCE(o.quote_withdrawn,0) quote_withdrawn,o.created_at
        FROM transport_orders o
        JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
        LEFT JOIN quotations q ON q.id=o.quotation_id AND q.organization_id=o.organization_id
        LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id
+       LEFT JOIN reference_data bp ON bp.organization_id=o.organization_id AND bp.category='border_port' AND bp.code=o.exit_port
        LEFT JOIN users u ON u.id=o.current_assignee_user_id
        WHERE ${clause}
        ORDER BY o.created_at DESC
@@ -98,7 +119,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const total = countRow?.count || 0;
   return {
     orders: rows.results,
-    filters: { keyword, type, status, step, exception },
+    filters: { keyword, type, status, step, exception, ...routeFilters },
     steps: stepRows.results,
     page,
     pageSize,
@@ -111,6 +132,7 @@ export default function Orders({ loaderData }: Route.ComponentProps) {
   const active = loaderData.orders.filter((order) => !["completed", "cancelled"].includes(order.status)).length;
   const completed = loaderData.orders.filter((order) => order.status === "completed").length;
   const exceptions = loaderData.orders.filter((order) => order.exception_status && order.exception_status !== "normal").length;
+  const advancedFilterCount = orderRouteFilterCount(loaderData.filters);
   return (
     <div className="page prototype-page order-list-page">
       <div className="breadcrumb">汽运业务 / 运输订单</div>
@@ -132,6 +154,10 @@ export default function Orders({ loaderData }: Route.ComponentProps) {
         <FilterSelect name="exception" label="异常" value={loaderData.filters.exception} options={[{ value: "no", label: "无异常" }, { value: "yes", label: "有异常" }]}/>
         <button className="btn primary">筛选</button>
         <Link className="btn" to="/admin/orders">重置</Link>
+        <details className="order-route-advanced-filter" open={advancedFilterCount > 0}>
+          <summary><span>更多筛选条件</span><small>{advancedFilterCount ? `已启用 ${advancedFilterCount} 项` : "出发地、出境口岸、目的地"}</small></summary>
+          <div className="order-route-filter-grid"><OrderRouteFilterFields filters={loaderData.filters}/></div>
+        </details>
       </Form>
       <section className="table-panel order-table-panel">
         <div className="table-panel-head"><div><b>订单主表</b><span>每行是一张订单，橙色动作直接进入该订单当前节点。</span></div><span>{loaderData.total} 单</span></div>
@@ -145,7 +171,7 @@ export default function Orders({ loaderData }: Route.ComponentProps) {
                   <td><b>{order.customer_name}</b><small className="subline">{order.order_date || order.created_at.slice(0, 10)}</small></td>
                   <td><span className={`pill ${order.business_type === "ltl" ? "ltl" : ""}`}>{order.business_type === "ltl" ? "拼车" : "整车"}</span></td>
                   <td><b>{order.cargo_description || "未填写"}</b><small className="subline">{order.pieces} 件 · {order.gross_weight_kg} KG · {order.volume_cbm} CBM</small></td>
-                  <td><b>{order.origin_state || ""}{order.origin_city} → {order.destination_state || ""}{order.destination_city}</b><small className="subline">{order.overseas_warehouse_name || "目的仓未填写"}</small></td>
+                  <td><b>{order.origin_state || ""}{order.origin_city} → {order.destination_state || ""}{order.destination_city}</b><small className="subline">{order.exit_port_name || order.exit_port || "口岸待定"} · {order.overseas_warehouse_name || "目的仓未填写"}</small></td>
                   <td><b>{order.quote_withdrawn ? "报价接受已撤回" : order.current_step_name || "待同步"}</b><small className="subline">{order.completion_status === "completed" ? "业务与结算已完成" : "按工作流推进"}</small></td>
                   <td>{order.assignee_name || "待分配"}</td>
                   <td><span className={`status ${statusTone(order.status, order.exception_status)}`}>{statusLabel(order.status)}</span></td>

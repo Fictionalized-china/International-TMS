@@ -1296,6 +1296,19 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, 
         </Link>;
       })}</nav>
     ) : null}
+    {isOrderCreation && viewingCurrent && <div className="order-creation-context-bar" aria-label="委托资料快捷操作">
+      <div>
+        <strong>{selectedSection === "info" ? "委托信息已从报价继承" : selectedSection === "cargo" ? "在这里维护订单货物" : selectedSection === "files" ? "在这里补充订单文件" : "在这里查看并新增订单费用"}</strong>
+        <span>{selectedSection === "info" ? "无需重复填写报价中已经确认的资料，可继续核对货物。" : selectedSection === "cargo" ? "新增、拆分或修正货物后会立即回写本节点。" : selectedSection === "files" ? "点击文件名称即可上传或替换；必填缺失会阻断提交。" : "报价费用只读；新增费用会进入后续对账结算。"}</span>
+      </div>
+      <div className="order-creation-context-actions">
+        {selectedSection === "info" && <Link className="btn" to={orderModuleTabHref({ orderId: data.order.id, stepKey: selectedStep.step_key, moduleCode: "cargo", section: null })}>继续货物信息</Link>}
+        {selectedSection === "cargo" && <Link className="btn" to={`/admin/orders/${data.order.id}/operations#cargo`}>新增 / 维护货物</Link>}
+        {selectedSection === "files" && <a className="btn" href="#module-source-documents">上传 / 替换文件</a>}
+        {selectedSection === "costs" && <a className="btn" href="#consignment-cost-actions">新增费用</a>}
+        <a className="btn primary" href="#consignment-stage-action">提交审批</a>
+      </div>
+    </div>}
     <div className="linear-module-tab-viewport">
       <div className="linear-module-tab-panel" key={activeTabKey}>
     {data.embeddedModuleRedirect ? <section className="section"><div className="section-title"><b>{selectedRow.module_name || "关联业务单"}</b><span>该节点按配载单统一推进</span></div><div className="linear-external-work"><p>拼车订单在仓库生成 PZ 配载单后，由配载单统一记录出境运输并同步全部子订单。</p><Link className="btn primary" to={data.embeddedModuleRedirect}>打开配载单跟踪</Link></div></section> : data.embeddedModuleData ? <EmbeddedOrderModule data={data.embeddedModuleData} busy={busy} actionUrl={actionUrl} workflowStepKey={selectedStep.step_key} consignmentSection={selectedConsignmentSection} customsSection={selectedCustomsSection} costsSection={selectedCostsSection} hideConsignmentActionBar={isOrderCreation} approvalMode={selectedStep.step_key === "consignment_approval"} reviewCloseSignal={documentReviewSignal}/> : <section className="section"><div className="section-title"><b>{selectedRow.module_name || selectedRow.module_code || "业务数据"}</b><span>{viewingCurrent ? "当前节点" : "历史节点"}</span></div><div className="grid">{selectedFields.map((field) => {

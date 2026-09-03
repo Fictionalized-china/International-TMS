@@ -26823,3 +26823,273 @@ html[data-motion="off"] *::after {
 }
 
 .customer-editor-form .customer-form-actions button { min-height: 30px; }
+
+/* Shared order-route filters: keep the common fields behind one compact expander. */
+.order-route-advanced-filter {
+  grid-column: 1 / -1;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid #d7e4ef;
+  border-radius: 3px;
+  background: #fff;
+}
+
+.order-route-advanced-filter > summary {
+  min-height: 30px;
+  padding: 5px 9px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #31506d;
+  background: #f5f9fc;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.order-route-advanced-filter > summary small {
+  color: #788da0;
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.order-route-filter-grid {
+  padding: 8px 9px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  border-top: 1px solid #e3ebf2;
+}
+
+.order-route-filter-grid label,
+.position-advanced-filter-grid > label {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.order-route-filter-grid label > span,
+.position-advanced-filter-grid > label > span {
+  color: #60768b;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.order-route-filter-grid input,
+.order-route-filter-grid select,
+.position-advanced-filter-grid > label input {
+  width: 100%;
+  min-height: 32px;
+  height: 32px;
+  padding: 5px 8px;
+  border: 1px solid #c7d5e2;
+  border-radius: 3px;
+  background: #fff;
+}
+
+.shipment-filters > .order-route-advanced-filter {
+  flex: 1 1 100%;
+}
+
+/* Quote review is a decision sheet: summary first, grouped facts second, action last. */
+.modal-card.quote-review-modal {
+  width: min(1060px, calc(100vw - 34px));
+  max-height: calc(100vh - 34px);
+}
+
+.quote-review-modal .modal-body { padding: 0; }
+
+.quote-review-sheet,
+.quote-detail-sheet {
+  min-width: 0;
+  background: #f5f8fb;
+}
+
+.quote-review-hero {
+  padding: 14px 16px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(220px, .7fr);
+  gap: 10px;
+  color: #fff;
+  background: #102b46;
+}
+
+.quote-review-hero > div {
+  min-width: 0;
+  display: grid;
+  align-content: center;
+  gap: 3px;
+}
+
+.quote-review-hero > div:last-child {
+  padding-left: 16px;
+  border-left: 1px solid rgba(255,255,255,.2);
+}
+
+.quote-review-hero span,
+.quote-review-hero small { color: #b9cee0; font-size: 10px; }
+.quote-review-hero strong { font-size: 18px; line-height: 1.3; overflow-wrap: anywhere; }
+.quote-review-hero > div:last-child strong { color: #fff1d8; font-size: 22px; }
+
+.quote-review-sections,
+.quote-detail-sections {
+  padding: 10px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.quote-review-sections > section,
+.quote-detail-section {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid #cfdeea;
+  border-radius: 3px;
+  background: #fff;
+}
+
+.quote-detail-section.span-2,
+.quote-review-sections > section.span-2,
+.quote-review-sections > section:last-child:nth-child(odd) { grid-column: 1 / -1; }
+
+.quote-review-sections > section > h3,
+.quote-detail-section > header {
+  min-height: 33px;
+  margin: 0;
+  padding: 7px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid #e0e9f1;
+  background: #f5f9fc;
+}
+
+.quote-review-sections > section > h3,
+.quote-detail-section > header h3 {
+  margin: 0;
+  color: #173e66;
+  font-size: 11px;
+}
+
+.quote-detail-section > header span { color: #8192a2; font-size: 9px; }
+
+.quote-review-facts,
+.quote-detail-section .quote-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+  margin: 0;
+  border: 0;
+}
+
+.quote-review-facts > div,
+.quote-detail-section .quote-detail-grid > div {
+  min-width: 0;
+  padding: 8px 10px;
+  display: grid;
+  gap: 3px;
+  border: 0;
+  border-right: 1px solid #edf2f6;
+  border-bottom: 1px solid #edf2f6;
+}
+
+.quote-review-facts > div:nth-child(even),
+.quote-detail-section .quote-detail-grid > div:nth-child(even) { border-right: 0; }
+
+.quote-review-facts span,
+.quote-detail-section .quote-detail-grid span { color: #73879a; font-size: 9px; }
+
+.quote-review-facts strong,
+.quote-detail-section .quote-detail-grid b {
+  min-width: 0;
+  color: #172f48;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.quote-review-charges {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 10px;
+}
+
+.quote-review-charges th,
+.quote-review-charges td { padding: 7px 9px; border-bottom: 1px solid #e7edf3; text-align: left; }
+.quote-review-charges th { color: #64788c; background: #fafcfd; }
+.quote-review-charges tfoot td { color: #173e66; background: #f5f9fc; }
+
+.quote-review-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  min-height: 58px;
+  padding: 9px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border-top: 1px solid #cbdbe8;
+  background: rgba(255,255,255,.98);
+  box-shadow: 0 -6px 16px rgba(20,46,73,.06);
+}
+
+.quote-review-actions > div { min-width: 0; display: grid; gap: 3px; }
+.quote-review-actions strong { color: #173e66; font-size: 11px; }
+.quote-review-actions span { color: #6b7f92; font-size: 9px; }
+.quote-review-actions form { margin: 0; flex: 0 0 auto; }
+
+/* Keep the next action visible while switching consignment sub-pages. */
+.linear-order-page .order-creation-context-bar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  min-height: 43px;
+  margin: -1px 0 7px;
+  padding: 6px 8px 6px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #c8ddeb;
+  border-left: 3px solid #2e77b8;
+  background: rgba(247,251,254,.98);
+  box-shadow: 0 3px 8px rgba(29,68,102,.04);
+}
+
+.linear-order-page .order-creation-context-bar > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.linear-order-page .order-creation-context-bar strong { color: #173e66; font-size: 10px; }
+.linear-order-page .order-creation-context-bar span { color: #6d8295; font-size: 9px; }
+
+.linear-order-page .order-creation-context-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.linear-order-page .order-creation-context-actions .btn { min-height: 29px; padding: 5px 9px; }
+#module-source-documents,
+#consignment-cost-actions,
+#consignment-stage-action { scroll-margin-top: 74px; }
+
+@media (max-width: 900px) {
+  .order-route-filter-grid,
+  .quote-review-sections,
+  .quote-detail-sections { grid-template-columns: 1fr; }
+  .quote-detail-section.span-2,
+  .quote-review-sections > section.span-2,
+  .quote-review-sections > section:last-child:nth-child(odd) { grid-column: auto; }
+  .quote-review-hero { grid-template-columns: 1fr; }
+  .quote-review-hero > div:last-child { padding: 8px 0 0; border: 0; border-top: 1px solid rgba(255,255,255,.2); }
+  .linear-order-page .order-creation-context-bar { align-items: stretch; flex-direction: column; }
+  .linear-order-page .order-creation-context-actions { justify-content: flex-end; }
+}

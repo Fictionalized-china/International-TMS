@@ -4189,7 +4189,7 @@ export function ConsignmentReviewActionBar({
 
   if (manage && data.order.status === "draft") {
     return (
-      <Form method="post" className="consignment-submit-bar">
+      <Form method="post" className="consignment-submit-bar" id="consignment-stage-action">
         <div>
           <strong>委托资料复核完成后，直接提交审批</strong>
           <span>系统只检查当前有效必填项；选填项和已停用的旧字段不会阻断。</span>
@@ -4210,7 +4210,7 @@ export function ConsignmentReviewActionBar({
   }
   if (canApproveConsignment) {
     return (
-      <Form method="post" className="consignment-submit-bar">
+      <Form method="post" className="consignment-submit-bar" id="consignment-stage-action">
         <div>
           <strong>委托资料审批</strong>
           <span>请核对委托信息、货物信息、订单费用和委托书后审批。</span>
@@ -6296,7 +6296,7 @@ function ModuleBusinessData({
         {showCosts && <section className="consignment-form-sheet" aria-label="订单费用">
           <header>
             <div><h3>订单费用</h3><p>报价费用自动继承且保持只读；业务员可新增本订单后续产生的应收或应付费用。</p></div>
-            <div className="consignment-cost-actions">
+            <div className="consignment-cost-actions" id="consignment-cost-actions">
               {showQuotationChargeTable && <strong className="consignment-total-amount">{data.order.quotation_currency && data.order.quotation_total_amount != null ? `${data.order.quotation_currency} ${Number(data.order.quotation_total_amount).toLocaleString()}` : "—"}</strong>}
               {manage&&<Modal title="新增订单费用" triggerLabel="新增费用" triggerClassName="primary" size="wide" closeSignal={moduleActionData?.success}>
                 {moduleActionData?.formError&&<div className="alert error" role="alert">{moduleActionData.formError}</div>}
