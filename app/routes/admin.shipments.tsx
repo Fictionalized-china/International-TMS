@@ -11,7 +11,7 @@ import { writeAudit } from "../lib/audit.server";
 import { recordWorkflowEvent } from "../lib/business-workflow.server";
 import { statusLabel as orderStatusLabel } from "../lib/order-workflow";
 import { loadOrderGuidance } from "../lib/order-guidance.server";
-import { orderVisibilitySql, requireOrderAccess } from "../lib/order-access.server";
+import { canOperateCurrentOrder, orderVisibilitySql, requireOrderAccess } from "../lib/order-access.server";
 import { orderRouteFilterCount, readOrderRouteFilters, type OrderRouteFilters } from "../lib/order-route-filters";
 
 type Shipment = {
@@ -46,6 +46,7 @@ type Shipment = {
   order_creator_name: string | null;
   order_created_at: string;
   order_status: string;
+  current_assignee_user_id: string | null;
   order_current_step_name: string | null;
   order_workflow_updated_at: string | null;
   order_is_overdue: number;
@@ -81,8 +82,7 @@ type ShipmentFilters = OrderRouteFilters & {
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "shipment.view");
   const url = new URL(request.url);
-  const pageSizeValue = Number(url.searchParams.get("pageSize") || 20);
-  const pageSize = [20, 50, 100].includes(pageSizeValue) ? pageSizeValue : 20;
+  const pageSize = 10;
   const requestedPage = Math.max(1, Number(url.searchParams.get("page") || 1));
   const filters: ShipmentFilters = {
     q: (url.searchParams.get("q") || "").trim(),
@@ -156,7 +156,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       o.origin_country,o.origin_state,o.origin_city,o.destination_country,o.destination_state,o.destination_city,
       o.cargo_description,o.pieces,o.gross_weight_kg,o.volume_cbm,o.transport_mode,o.business_type,o.service_level,
       o.source order_source,creator.display_name order_creator_name,o.created_at order_created_at,
-      o.status order_status,o.current_step_name order_current_step_name,o.workflow_updated_at order_workflow_updated_at,
+      o.status order_status,o.current_assignee_user_id,o.current_step_name order_current_step_name,o.workflow_updated_at order_workflow_updated_at,
       o.is_overdue order_is_overdue,o.exception_status order_exception_status,
       (SELECT COUNT(*) FROM order_module_instances m
         WHERE m.order_id=o.id AND m.organization_id=o.organization_id AND m.enabled=1
@@ -257,6 +257,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     const guidance = guidanceByOrder.get(shipment.order_id)!;
     return {
       ...shipment,
+      can_operate_current_node: canOperateCurrentOrder(current, shipment),
       next_stage: guidance.stage.shortTitle,
       next_action: guidance.action,
       next_owner: guidance.owner,
@@ -354,7 +355,7 @@ export default function Shipments({ loaderData, actionData }: Route.ComponentPro
         <Form method="get" action="." className="shipment-filters">
           <input name="q" defaultValue={loaderData.filters.q} placeholder="运单号、订单号、客户、识别码、货物、位置"/>
           <select name="status" defaultValue={loaderData.filters.status}><option value="">全部运单状态</option>{Object.entries(labels).map(([value,label])=><option key={value} value={value}>{label}</option>)}</select>
-          <select name="pageSize" defaultValue={loaderData.pageSize}><option value="20">20 条/页</option><option value="50">50 条/页</option><option value="100">100 条/页</option></select>
+          <select name="pageSize" defaultValue="10" aria-label="每页数量"><option value="10">10 条/页</option></select>
           <button className="secondary">筛选</button>
           <Link className="text-button" to="/admin/shipments">重置</Link>
           <details className="order-route-advanced-filter" open={advancedFilterCount > 0}>
@@ -381,8 +382,8 @@ export default function Shipments({ loaderData, actionData }: Route.ComponentPro
       <div className="table-wrap shipment-table">
         <table>
           <thead><tr><th>运单状态</th><th>订单工作流</th><th>运单 / 订单</th><th>客户</th><th>业务 / 线路</th><th>货物汇总</th><th>运输资源</th><th>计划 / 实际</th><th>订单创建信息</th><th>最近动态</th><th className="sticky-action">操作</th></tr></thead>
-          <tbody>{loaderData.shipments.map(s=><tr key={s.id}>
-            <td><span className={`status-pill shipment-status-${s.status}`}>{labels[s.status]||s.status}</span>{s.exception_reason&&<small className="danger-text">{s.exception_reason}</small>}</td>
+          <tbody>{loaderData.shipments.map(s=><tr key={s.id} className={s.can_operate_current_node ? "order-todo-row" : ""}>
+            <td><div className="shipment-task-status"><span className={`status-pill shipment-status-${s.status}`}>{labels[s.status]||s.status}</span>{s.can_operate_current_node&&<span className="order-todo-badge">待办</span>}</div>{s.exception_reason&&<small className="danger-text">{s.exception_reason}</small>}</td>
             <td><ShipmentWorkflow shipment={s}/></td>
             <td><strong>{s.shipment_number}</strong><small>订单 <OrderNumberLink id={s.order_id} number={s.order_number}/></small>{s.master_tracking_number&&<small>追踪号 {s.master_tracking_number}</small>}</td>
             <td><strong>{s.customer_name}</strong><small>识别码 {s.customer_code}</small></td>

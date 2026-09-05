@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  loadingDispatchPlanPolicyIssues,
   loadingBatchRequiredValueError,
   loadingBatchResourcePolicy,
   resolveLoadingBatchFieldPolicies,
@@ -87,5 +88,26 @@ describe("resolveLoadingBatchFieldPolicies", () => {
       .toBe("请填写计划境外到仓时间");
     expect(loadingBatchRequiredValueError(policies, { ...otherwiseComplete, planned_arrival_at: "2026-09-03T08:00" }))
       .toBe("");
+  });
+
+  it("treats hidden, optional and required transport resources as distinct modes", () => {
+    const policies = resolveLoadingBatchFieldPolicies([
+      order("one", [
+        { fieldKey: "main_carrier_id", isActive: false, isRequired: false },
+        { fieldKey: "main_vehicle_type", isActive: true, isRequired: false },
+        { fieldKey: "main_plate_number", isActive: true, isRequired: true },
+        { fieldKey: "main_driver_name", isActive: true, isRequired: false },
+        { fieldKey: "main_driver_phone", isActive: false, isRequired: false },
+        { fieldKey: "planned_exit_at", isActive: false, isRequired: false },
+      ]),
+    ]);
+
+    expect(loadingDispatchPlanPolicyIssues(policies, {})).toEqual({
+      requiredMissing: ["出境车牌号"],
+      optionalMissing: [
+        { fieldKey: "main_vehicle_type", label: "出境车型" },
+        { fieldKey: "main_driver_name", label: "出境司机姓名" },
+      ],
+    });
   });
 });

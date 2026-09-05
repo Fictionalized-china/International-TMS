@@ -5,7 +5,10 @@ import {
 } from "./workflow-fields.server";
 import type { OrderModuleCode } from "./order-modules";
 import { workflowVersionSwitchDecision } from "./workflow-version-policy";
-import { selectWorkflowExecutionCurrentStep } from "./workflow-execution";
+import {
+  selectWorkflowExecutionCurrentStep,
+  workflowExecutionModuleIsComplete,
+} from "./workflow-execution";
 
 type ModuleFact = { module_code:string; status:string };
 
@@ -76,19 +79,8 @@ export async function synchronizeWorkflowExecution(input:{
   workflowId:string;
   targetStepKey:string;
   orderStatus:string;
-  mandatoryModuleCodes?:string[];
 }) {
   await ensureWorkflowExecutionSnapshot({instanceId:input.instanceId,workflowId:input.workflowId});
-  const mandatoryModuleCodes = [...new Set(input.mandatoryModuleCodes ?? [])];
-  if (mandatoryModuleCodes.length) {
-    await env.DB.prepare(
-      `UPDATE workflow_instance_module_states SET is_required=1,updated_at=?
-       WHERE module_code IN (${mandatoryModuleCodes.map(() => "?").join(",")})
-         AND instance_step_state_id IN (
-           SELECT id FROM workflow_instance_step_states WHERE instance_id=?
-         )`,
-    ).bind(new Date().toISOString(), ...mandatoryModuleCodes, input.instanceId).run();
-  }
   const [target,moduleFacts,rows] = await Promise.all([
     env.DB.prepare(
       "SELECT sort_order FROM workflow_steps WHERE workflow_id=? AND step_key=? AND is_active=1",
@@ -160,7 +152,7 @@ export async function synchronizeWorkflowExecution(input:{
   if (taskUpdates.length) await env.DB.batch(taskUpdates);
 
   const modules = await env.DB.prepare(
-    `SELECT ms.id,ms.instance_step_state_id,ms.is_required,ms.completion_mode,ms.module_code,ss.step_key,
+    `SELECT ms.id,ms.instance_step_state_id,ms.is_required,ms.completion_mode,ms.module_code,ss.step_key,ss.sort_order step_sort_order,
       ss.status step_status,
       COUNT(ts.id) task_count,
       SUM(CASE WHEN ts.is_required=1 AND ts.status!='completed' THEN 1 ELSE 0 END) pending_required
@@ -170,7 +162,7 @@ export async function synchronizeWorkflowExecution(input:{
      WHERE ss.instance_id=? GROUP BY ms.id`,
   ).bind(input.instanceId).all<{
     id:string;instance_step_state_id:string;is_required:number;completion_mode:string;
-    module_code:string;step_key:string;step_status:string;
+    module_code:string;step_key:string;step_sort_order:number;step_status:string;
     task_count:number;pending_required:number;
   }>();
   const fieldBlockers = new Set<string>();
@@ -184,11 +176,16 @@ export async function synchronizeWorkflowExecution(input:{
     if (missing.length) fieldBlockers.add(item.id);
   }
   const moduleUpdates = modules.results.map((item) => {
-    const taskComplete = item.completion_mode === "automatic"
-      ? item.task_count === 0 || item.pending_required === 0
-      : item.task_count > 0 && item.pending_required === 0;
-    const completed = item.step_status === "completed" ||
-      (taskComplete && !fieldBlockers.has(item.id));
+    const completed = workflowExecutionModuleIsComplete({
+      existingStepStatus:item.step_status,
+      stepSortOrder:item.step_sort_order,
+      targetSortOrder:target.sort_order,
+      sourceModuleStatus:moduleStatus.get(item.module_code) || "not_started",
+      completionMode:item.completion_mode,
+      taskCount:item.task_count,
+      pendingRequired:item.pending_required,
+      hasMissingRequiredFields:fieldBlockers.has(item.id),
+    });
     return env.DB.prepare(
       "UPDATE workflow_instance_module_states SET status=?,updated_at=? WHERE id=?",
     ).bind(completed?"completed":"pending",now,item.id);
@@ -256,17 +253,26 @@ export type CurrentWorkflowTask = {
   task_type:string;
   status:string;
   position_name:string|null;
+  assignee_user_id:string|null;
+  task_assignee_user_id:string|null;
+  assignee_name:string|null;
   instructions:string|null;
 };
 
 export async function listCurrentWorkflowTasks(organizationId:string,orderId:string) {
   return (await env.DB.prepare(
     `SELECT ts.id,ss.step_key,ss.step_name,ms.module_code,ms.display_name module_name,ts.task_key,ts.name,ts.task_type,ts.status,
-      p.name position_name,ts.instructions
+      p.name position_name,
+      COALESCE(ts.assignee_user_id,omi.assignee_user_id) assignee_user_id,
+      ts.assignee_user_id task_assignee_user_id,
+      assignee.display_name assignee_name,
+      ts.instructions
      FROM workflow_instances wi
      JOIN workflow_instance_step_states ss ON ss.instance_id=wi.id AND ss.step_key=wi.current_step_key
      JOIN workflow_instance_module_states ms ON ms.instance_step_state_id=ss.id
      JOIN workflow_instance_task_states ts ON ts.instance_module_state_id=ms.id
+     LEFT JOIN order_module_instances omi ON omi.organization_id=wi.organization_id AND omi.order_id=wi.order_id AND omi.module_code=ms.module_code AND omi.enabled=1
+     LEFT JOIN users assignee ON assignee.id=COALESCE(ts.assignee_user_id,omi.assignee_user_id)
      LEFT JOIN positions p ON p.organization_id=wi.organization_id AND p.code=COALESCE(ts.responsibility_position_code,ms.responsibility_position_code)
      WHERE wi.organization_id=? AND wi.order_id=? ORDER BY ms.sort_order,ts.sort_order`,
   ).bind(organizationId,orderId).all<CurrentWorkflowTask>()).results;

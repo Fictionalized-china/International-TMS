@@ -5,17 +5,73 @@ import {
   Outlet,
   Scripts,
   ScrollRestoration,
+  useFetchers,
   useLocation,
   useNavigation,
   useRevalidator,
 } from "react-router";
 import { isSqliteSchemaMismatchError } from "./lib/d1-errors";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { Route } from "./+types/root";
 import { GlobalInteractionFeedback } from "./components/InteractionFeedback";
 import { useExpandableDialogScrollLock } from "./components/Modal";
+import {
+  canRequestLiveDataRefresh,
+  isLiveDataRoute,
+} from "./lib/live-data-refresh";
 import "./app.css";
+
+type DataMutationSource = {
+  source: "warehouse" | "admin" | "portal";
+  path: string;
+  intent: string;
+};
+
+const DATA_SYNC_CHANNEL = "international-tms-data-sync";
+
+function resolveDataMutation({
+  method,
+  action,
+  currentPath,
+  formData,
+}: {
+  method?: string;
+  action?: string;
+  currentPath: string;
+  formData?: FormData;
+}): DataMutationSource | null {
+  if (!method || method.toUpperCase() === "GET") return null;
+  const actionPath = new URL(action || currentPath, window.location.origin).pathname;
+  const source = (["warehouse", "admin", "portal"] as const).find((item) =>
+    actionPath.startsWith(`/${item}`),
+  );
+  if (!source) return null;
+  return {
+    source,
+    path: actionPath,
+    intent: String(formData?.get("intent") || ""),
+  };
+}
+
+function publishDataMutation(mutation: DataMutationSource) {
+  const sessionSlot = new URL(window.location.href).searchParams.get("itmsTab");
+  const signal = JSON.stringify({ ...mutation, sessionSlot, occurredAt: Date.now() });
+  try {
+    if ("BroadcastChannel" in window) {
+      const channel = new BroadcastChannel(DATA_SYNC_CHANNEL);
+      channel.postMessage(signal);
+      channel.close();
+    }
+  } catch {
+    // Cross-tab refresh is an enhancement; a restricted browser must not break the mutation itself.
+  }
+  try {
+    window.localStorage.setItem(DATA_SYNC_CHANNEL, signal);
+  } catch {
+    // Keep the successful server mutation when local storage is unavailable.
+  }
+}
 
 const sessionSlotBootstrap = `(() => {
   const param = "itmsTab";
@@ -58,6 +114,26 @@ const sessionSlotBootstrap = `(() => {
     } catch {}
     return originalFetch(input, init);
   };
+  document.addEventListener("click", event => {
+    const target = event.target;
+    const anchor = target && typeof target.closest === "function"
+      ? target.closest("a[href]")
+      : null;
+    if (!anchor) return;
+    const href = anchor.getAttribute("href");
+    if (!href || /^(#|mailto:|tel:|javascript:)/i.test(href)) return;
+    const next = addSlot(href);
+    if (typeof next === "string" && next !== href) anchor.setAttribute("href", next);
+  }, true);
+  document.addEventListener("submit", event => {
+    const form = event.target;
+    if (!form || form.tagName !== "FORM") return;
+    const action = form.getAttribute("action") || window.location.href;
+    const next = addSlot(action);
+    if (typeof next === "string") form.setAttribute("action", next);
+  }, true);
+  const originalOpen = window.open.bind(window);
+  window.open = (url, target, features) => originalOpen(addSlot(url), target, features);
 })();`;
 
 export const links: Route.LinksFunction = () => [];
@@ -88,8 +164,12 @@ export function Layout({ children }: { children: React.ReactNode }) {
 export default function App() {
   const location = useLocation();
   const navigation = useNavigation();
+  const fetchers = useFetchers();
   const revalidator = useRevalidator();
-  const warehouseMutation = useRef(false);
+  const dataMutationSource = useRef<DataMutationSource | null>(null);
+  const fetcherMutationSources = useRef(new Map<string, DataMutationSource>());
+  const [remoteMutationVersion, setRemoteMutationVersion] = useState(0);
+  const handledRemoteMutationVersion = useRef(0);
   useExpandableDialogScrollLock();
 
   useEffect(() => {
@@ -104,62 +184,111 @@ export default function App() {
 
   useEffect(() => {
     if (navigation.state === "submitting") {
-      const action = navigation.formAction || location.pathname;
-      warehouseMutation.current =
-        navigation.formMethod?.toUpperCase() !== "GET" &&
-        new URL(action, window.location.origin).pathname.startsWith("/warehouse");
+      dataMutationSource.current = resolveDataMutation({
+        method: navigation.formMethod,
+        action: navigation.formAction,
+        currentPath: location.pathname,
+        formData: navigation.formData,
+      });
       return;
     }
-    if (navigation.state !== "idle" || !warehouseMutation.current) return;
-    warehouseMutation.current = false;
-    const signal = JSON.stringify({ source: "warehouse", occurredAt: Date.now() });
-    try {
-      if ("BroadcastChannel" in window) {
-        const channel = new BroadcastChannel("international-tms-data-sync");
-        channel.postMessage(signal);
-        channel.close();
-      }
-    } catch {
-      // 跨标签同步是增强能力，隐私模式拒绝该 API 时不能影响主业务提交。
-    }
-    try {
-      window.localStorage.setItem("international-tms-data-sync", signal);
-    } catch {
-      // 本地存储不可用时保留本次服务端提交结果。
-    }
-  }, [location.pathname, navigation.formAction, navigation.formMethod, navigation.state]);
+    if (navigation.state !== "idle" || !dataMutationSource.current) return;
+    const mutation = dataMutationSource.current;
+    dataMutationSource.current = null;
+    publishDataMutation(mutation);
+  }, [location.pathname, navigation.formAction, navigation.formData, navigation.formMethod, navigation.state]);
 
   useEffect(() => {
-    if (!location.pathname.startsWith("/admin")) return;
-    const refresh = () => {
-      if (revalidator.state === "idle") revalidator.revalidate();
-    };
+    const visibleFetcherKeys = new Set(fetchers.map((fetcher) => fetcher.key));
+    for (const fetcher of fetchers) {
+      if (fetcher.state === "submitting") {
+        const mutation = resolveDataMutation({
+          method: fetcher.formMethod,
+          action: fetcher.formAction,
+          currentPath: location.pathname,
+          formData: fetcher.formData,
+        });
+        if (mutation) fetcherMutationSources.current.set(fetcher.key, mutation);
+        continue;
+      }
+      if (fetcher.state === "idle") {
+        const mutation = fetcherMutationSources.current.get(fetcher.key);
+        if (mutation) {
+          fetcherMutationSources.current.delete(fetcher.key);
+          publishDataMutation(mutation);
+        }
+      }
+    }
+    for (const [key, mutation] of fetcherMutationSources.current) {
+      if (!visibleFetcherKeys.has(key)) {
+        fetcherMutationSources.current.delete(key);
+        publishDataMutation(mutation);
+      }
+    }
+  }, [fetchers, location.pathname]);
+
+  useEffect(() => {
+    if (!isLiveDataRoute(location.pathname)) return;
+    const refresh = () => setRemoteMutationVersion((version) => version + 1);
     let channel: BroadcastChannel | null = null;
     try {
       channel = "BroadcastChannel" in window
-        ? new BroadcastChannel("international-tms-data-sync")
+        ? new BroadcastChannel(DATA_SYNC_CHANNEL)
         : null;
     } catch {
       channel = null;
     }
     if (channel) channel.onmessage = refresh;
     const onStorage = (event: StorageEvent) => {
-      if (event.key === "international-tms-data-sync") refresh();
+      if (event.key === DATA_SYNC_CHANNEL) refresh();
     };
     window.addEventListener("storage", onStorage);
-    window.addEventListener("focus", refresh);
-    const polling = location.pathname.startsWith("/admin/orders/")
-      ? window.setInterval(() => {
-          if (document.visibilityState === "visible") refresh();
-        }, 2500)
-      : null;
     return () => {
       channel?.close();
-      if (polling !== null) window.clearInterval(polling);
       window.removeEventListener("storage", onStorage);
-      window.removeEventListener("focus", refresh);
     };
-  }, [location.pathname, revalidator]);
+  }, [location.pathname]);
+
+  useEffect(() => {
+    if (!isLiveDataRoute(location.pathname)) return;
+    if (remoteMutationVersion <= handledRemoteMutationVersion.current) return;
+    if (!canRequestLiveDataRefresh({
+      visibilityState: document.visibilityState,
+      navigationState: navigation.state,
+      revalidationState: revalidator.state,
+    })) return;
+    const pendingVersion = remoteMutationVersion;
+    const timer = window.setTimeout(() => {
+      handledRemoteMutationVersion.current = pendingVersion;
+      revalidator.revalidate();
+    }, 120);
+    return () => window.clearTimeout(timer);
+  }, [location.pathname, navigation.state, remoteMutationVersion, revalidator]);
+
+  useEffect(() => {
+    if (!isLiveDataRoute(location.pathname)) return;
+    const requestRefresh = () => {
+      if (!canRequestLiveDataRefresh({
+        visibilityState: document.visibilityState,
+        navigationState: navigation.state,
+        revalidationState: revalidator.state,
+      })) return;
+      setRemoteMutationVersion((version) => version + 1);
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") requestRefresh();
+    };
+    window.addEventListener("focus", requestRefresh);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") requestRefresh();
+    }, 10_000);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", requestRefresh);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [location.pathname, navigation.state, revalidator.state]);
 
   return (
     <>
@@ -175,9 +304,12 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
 
   if (isRouteErrorResponse(error)) {
     title = error.status === 404 ? "找不到该页面" : `请求失败（${error.status}）`;
+    const responseMessage = typeof error.data === "string"
+      ? error.data.trim()
+      : null;
     details = error.status === 404
       ? "页面地址可能已变更，请返回工作台重新进入。"
-      : error.statusText || details;
+      : responseMessage || error.statusText || details;
   } else if (error instanceof Error) {
     console.error("Unhandled application error", error);
     if (isSqliteSchemaMismatchError(error)) {

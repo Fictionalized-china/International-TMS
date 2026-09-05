@@ -4,8 +4,11 @@ import { flushSync } from "react-dom";
 import { Form, Link, redirect, useNavigate, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.order-detail";
 import { canEditWorkflowDefinition, requireSessionUser } from "../lib/auth.server";
+import { canOperateCurrentOrder, canReadFullOrderLifecycle } from "../lib/order-access";
 import { requireOrderAccess } from "../lib/order-access.server";
 import {
+  canRunOrderWorkflowAction,
+  canSubmitSalesOrderForApproval,
   statusLabel,
   type OrderWorkflowTransition,
 } from "../lib/order-workflow";
@@ -13,7 +16,7 @@ import { listOrderWorkflowTransitions } from "../lib/order-workflow.server";
 import { runOrderWorkflowAction } from "../lib/order-workflow-action.server";
 import { valueOf } from "../lib/validation";
 import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
-import { Modal } from "../components/Modal";
+import { Modal, useModalScrollLock } from "../components/Modal";
 import { OrganizationAssigneePicker } from "../components/OrganizationAssigneePicker";
 import type { OrganizationAssigneeMember } from "../lib/organization-assignee";
 import { ConfirmAction } from "../components/ConfirmAction";
@@ -39,10 +42,13 @@ import {
   buildStageSnapshots,
   orderNextGuidance,
 } from "../lib/order-guidance";
+import { orderCollaborationNotice } from "../lib/order-collaboration";
 import { orderResponsiblePosition } from "../lib/order-responsibility";
 import { orderModuleTabAttention } from "../lib/order-module-tab-attention";
-import { orderModuleTabDescriptors, orderModuleTabHref, orderWorkflowModuleTabs, resolveCostsSection, resolveCustomsSection, type OrderModuleTabSection } from "../lib/order-module-tabs";
+import { costsTabHasPendingAction, orderEntryPreference, orderModuleTabDescriptors, orderModuleTabHref, orderWorkflowModuleTabs, resolveCostsSection, resolveCustomsSection, type OrderModuleTabSection } from "../lib/order-module-tabs";
 import { canManageOrderModule } from "../lib/position-portal";
+import { canViewAssignedOrderExpenseSummary } from "../lib/billing-access";
+import { canReadScopedDocument } from "../lib/order-document-visibility";
 import { completionStatusLabels, type OrderCompletionStatus } from "../lib/order-review";
 import {
   completeWorkflowTask,
@@ -119,7 +125,12 @@ type Order = {
   source: string;
   special_instructions: string | null;
   current_step_name: string;
+  current_assignee_user_id: string | null;
   assignee_name: string | null;
+  assignee_email: string | null;
+  salesperson_user_id: string | null;
+  salesperson_name: string | null;
+  salesperson_email: string | null;
   workflow_updated_at: string | null;
   is_overdue: number;
   exception_status: string;
@@ -145,6 +156,7 @@ type Attachment = {
   content_type: string;
   size_bytes: number;
   created_at: string;
+  document_category: string;
 };
 type WarehousePackageLabel = {
   id: string;
@@ -159,6 +171,50 @@ type WarehousePackageLabel = {
   warehouse_name: string | null;
   zone_name: string | null;
   location_name: string | null;
+};
+type CargoItem = {
+  id: string;
+  line_no: number;
+  cargo_name_cn: string;
+  cargo_name_en: string | null;
+  hs_code: string | null;
+  overseas_hs_code: string | null;
+  package_type: string;
+  package_count: number;
+  pieces_per_package: number;
+  gross_weight_per_package_kg: number;
+  net_weight_per_package_kg: number;
+  length_cm: number;
+  width_cm: number;
+  height_cm: number;
+  volume_per_package_cbm: number;
+  declared_value: number;
+  currency: string;
+  origin_country: string | null;
+  brand_model: string | null;
+  marks: string | null;
+  special_attributes: string | null;
+  notes: string | null;
+};
+type WarehouseReceiptSnapshot = {
+  id: string;
+  receipt_number: string;
+  status: string;
+  total_packages: number;
+  total_pieces: number;
+  total_weight_kg: number;
+  total_volume_cbm: number;
+  cargo_complete: number;
+  has_exception: number;
+  exception_notes: string | null;
+  notes: string | null;
+  received_at: string;
+  warehouse_code: string | null;
+  warehouse_name: string | null;
+  warehouse_country_code: string | null;
+  zone_name: string | null;
+  location_name: string | null;
+  received_by_name: string | null;
 };
 type MacroHistory = {
   id: string;
@@ -199,8 +255,10 @@ type ExpenseRisk = {
   payable_total: number;
   receivable_confirmed: number;
   payable_confirmed: number;
-  receivable_finance_locked: number;
-  payable_finance_locked: number;
+  receivable_business_reviewed: number;
+  payable_business_reviewed: number;
+  receivable_finance_reviewed: number;
+  payable_finance_reviewed: number;
   pending_warehouse_differences: number;
 };
 type WorkflowFormRow = {
@@ -241,7 +299,7 @@ type OrderDetailTab =
   | "costs"
   | "history";
 
-type LinearOrderDrawerTab = "dossier" | "cargo" | "attachments" | "supplements" | "history";
+type LinearOrderDrawerTab = "dossier" | "responsibility" | "cargo" | "attachments" | "supplements" | "history";
 
 function isOrderMarkLabelReady(order: Pick<Order, "status" | "quote_number" | "quote_accepted_at" | "quote_withdrawn">) {
   if (order.quote_withdrawn === 1 || order.status === "cancelled") return false;
@@ -253,6 +311,13 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "order.view"),
     id = params.orderId;
   await requireOrderAccess(current, id);
+  // Reconcile before reading the order snapshot. Reading first returned the
+  // previous node in the same response even though reconciliation succeeded.
+  await reconcileOverseasOrderDeliveryState({
+    organizationId: current.organizationId,
+    orderId: id,
+    actorUserId: current.userId,
+  });
   const order = await env.DB.prepare(
     `SELECT o.id,o.order_number,o.order_date,o.business_nature,o.business_type,o.transport_terms,o.trade_terms,
       o.exit_port,bp.name exit_port_name,o.overseas_warehouse_id,ow.name overseas_warehouse_name,
@@ -263,13 +328,15 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
       o.origin_state,o.origin_city,o.origin_address,o.consignee_name,o.consignee_contact,o.consignee_phone,
       o.destination_country,o.destination_state,o.destination_city,o.destination_address,o.cargo_description,
       o.pieces,o.gross_weight_kg,o.volume_cbm,o.transport_mode,o.service_level,o.requested_pickup_date,
-      o.requested_delivery_date,o.status,o.source,o.special_instructions,o.current_step_name,
-      au.display_name assignee_name,o.workflow_updated_at,o.is_overdue,o.exception_status,o.completion_status,
+      o.requested_delivery_date,o.status,o.source,o.special_instructions,o.current_step_name,o.current_assignee_user_id,
+      au.display_name assignee_name,au.email assignee_email,COALESCE(q.salesperson_user_id,o.salesperson_user_id) salesperson_user_id,
+      sales.display_name salesperson_name,sales.email salesperson_email,o.workflow_updated_at,o.is_overdue,o.exception_status,o.completion_status,
       o.business_completed_at,o.settlement_completed_at,o.created_at
      FROM transport_orders o
      JOIN customers c ON c.id=o.customer_id
      LEFT JOIN quotations q ON q.id=o.quotation_id
      LEFT JOIN users au ON au.id=o.current_assignee_user_id
+     LEFT JOIN users sales ON sales.id=COALESCE(q.salesperson_user_id,o.salesperson_user_id)
      LEFT JOIN reference_data bp ON bp.organization_id=o.organization_id AND bp.category='border_port' AND bp.code=o.exit_port
      LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id
      WHERE o.id=? AND o.organization_id=?`,
@@ -277,10 +344,10 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
     .bind(id, current.organizationId)
     .first<Order>();
   if (!order) throw new Response("订单不存在", { status: 404 });
-  await reconcileOverseasOrderDeliveryState({
-    organizationId: current.organizationId,
-    orderId: id,
-    actorUserId: current.userId,
+  const canViewExpenseSummary = canViewAssignedOrderExpenseSummary({
+    permissions: current.permissions,
+    currentUserId: current.userId,
+    salespersonUserId: order.salesperson_user_id,
   });
   const [modules,currentWorkflowTasks,supplementTasks] = await Promise.all([
     listOrderModules(current.organizationId,id),
@@ -295,7 +362,15 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
       .bind(id, current.organizationId)
       .all<History>(),
     env.DB.prepare(
-      "SELECT id,file_name,content_type,size_bytes,created_at FROM order_attachments WHERE order_id=? AND organization_id=? ORDER BY created_at DESC",
+      `SELECT a.id,a.file_name,a.content_type,a.size_bytes,a.created_at,
+              COALESCE(m.document_category,'other') document_category
+       FROM order_attachments a
+       LEFT JOIN order_document_metadata m
+         ON m.attachment_id=a.id
+        AND m.order_id=a.order_id
+        AND m.organization_id=a.organization_id
+       WHERE a.order_id=? AND a.organization_id=?
+       ORDER BY a.created_at DESC`,
     )
       .bind(id, current.organizationId)
       .all<Attachment>(),
@@ -366,6 +441,31 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
       .bind(id, current.organizationId)
       .all<Service>(),
   ]);
+  const expenseRiskPromise: Promise<ExpenseRisk | null> = canViewExpenseSummary
+    ? env.DB.prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM business_expenses e WHERE e.organization_id=? AND e.order_id=? AND e.direction='receivable' AND e.stage!='cancelled') receivable_count,
+         (SELECT COUNT(*) FROM business_expenses e WHERE e.organization_id=? AND e.order_id=? AND e.direction='payable' AND e.stage!='cancelled') payable_count,
+         COALESCE((SELECT SUM(e.base_amount) FROM business_expenses e WHERE e.organization_id=? AND e.order_id=? AND e.direction='receivable' AND e.stage!='cancelled'),0) receivable_total,
+         COALESCE((SELECT SUM(e.base_amount) FROM business_expenses e WHERE e.organization_id=? AND e.order_id=? AND e.direction='payable' AND e.stage!='cancelled'),0) payable_total,
+         COALESCE((SELECT confirmed FROM order_expense_direction_controls x WHERE x.organization_id=? AND x.order_id=? AND x.direction='receivable'),0) receivable_confirmed,
+         COALESCE((SELECT confirmed FROM order_expense_direction_controls x WHERE x.organization_id=? AND x.order_id=? AND x.direction='payable'),0) payable_confirmed,
+         COALESCE((SELECT business_reviewed FROM order_expense_direction_controls x WHERE x.organization_id=? AND x.order_id=? AND x.direction='receivable'),0) receivable_business_reviewed,
+         COALESCE((SELECT business_reviewed FROM order_expense_direction_controls x WHERE x.organization_id=? AND x.order_id=? AND x.direction='payable'),0) payable_business_reviewed,
+         COALESCE((SELECT finance_reviewed FROM order_expense_direction_controls x WHERE x.organization_id=? AND x.order_id=? AND x.direction='receivable'),0) receivable_finance_reviewed,
+         COALESCE((SELECT finance_reviewed FROM order_expense_direction_controls x WHERE x.organization_id=? AND x.order_id=? AND x.direction='payable'),0) payable_finance_reviewed,
+         (SELECT COUNT(*) FROM warehouse_receipt_differences d WHERE d.organization_id=? AND d.order_id=? AND d.status='pending') pending_warehouse_differences`,
+    )
+      .bind(
+        current.organizationId,id,current.organizationId,id,
+        current.organizationId,id,current.organizationId,id,
+        current.organizationId,id,current.organizationId,id,
+        current.organizationId,id,current.organizationId,id,
+        current.organizationId,id,current.organizationId,id,
+        current.organizationId,id,
+      )
+      .first<ExpenseRisk>()
+    : Promise.resolve(null);
   const [members, customers, transitions, expenseRisk] = await Promise.all([
     env.DB.prepare(
       `SELECT u.id,u.display_name,
@@ -389,28 +489,9 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
       .bind(current.organizationId)
       .all<CustomerOption>(),
     listOrderWorkflowTransitions(current.organizationId),
-    env.DB.prepare(
-      `SELECT
-         (SELECT COUNT(*) FROM business_expenses e WHERE e.organization_id=? AND e.order_id=? AND e.direction='receivable' AND e.stage!='cancelled') receivable_count,
-         (SELECT COUNT(*) FROM business_expenses e WHERE e.organization_id=? AND e.order_id=? AND e.direction='payable' AND e.stage!='cancelled') payable_count,
-         COALESCE((SELECT SUM(e.base_amount) FROM business_expenses e WHERE e.organization_id=? AND e.order_id=? AND e.direction='receivable' AND e.stage!='cancelled'),0) receivable_total,
-         COALESCE((SELECT SUM(e.base_amount) FROM business_expenses e WHERE e.organization_id=? AND e.order_id=? AND e.direction='payable' AND e.stage!='cancelled'),0) payable_total,
-         COALESCE((SELECT confirmed FROM order_expense_direction_controls x WHERE x.organization_id=? AND x.order_id=? AND x.direction='receivable'),0) receivable_confirmed,
-         COALESCE((SELECT confirmed FROM order_expense_direction_controls x WHERE x.organization_id=? AND x.order_id=? AND x.direction='payable'),0) payable_confirmed,
-         COALESCE((SELECT finance_locked FROM order_expense_direction_controls x WHERE x.organization_id=? AND x.order_id=? AND x.direction='receivable'),0) receivable_finance_locked,
-         COALESCE((SELECT finance_locked FROM order_expense_direction_controls x WHERE x.organization_id=? AND x.order_id=? AND x.direction='payable'),0) payable_finance_locked,
-         (SELECT COUNT(*) FROM warehouse_receipt_differences d WHERE d.organization_id=? AND d.order_id=? AND d.status='pending') pending_warehouse_differences`,
-    )
-      .bind(
-        current.organizationId,id,current.organizationId,id,
-        current.organizationId,id,current.organizationId,id,
-        current.organizationId,id,current.organizationId,id,
-        current.organizationId,id,current.organizationId,id,
-        current.organizationId,id,
-      )
-      .first<ExpenseRisk>(),
+    expenseRiskPromise,
   ]);
-  const [packageLabels, workflowVersions] = await Promise.all([
+  const [packageLabels, workflowVersions, cargoItems, warehouseReceipts] = await Promise.all([
     env.DB.prepare(
       `SELECT p.id,p.barcode,p.package_number,p.status,p.pieces,p.weight_kg,p.volume_cbm,p.created_at,
               i.cargo_name_cn cargo_name,w.name warehouse_name,z.name zone_name,l.name location_name
@@ -430,14 +511,45 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
        WHERE organization_id=? AND lifecycle_status='published' AND validation_status='valid'
          AND status='active' AND road_load_type=? ORDER BY updated_at DESC,version_number DESC`,
     ).bind(current.organizationId,order.business_type).all<WorkflowVersionOption>(),
+    env.DB.prepare(
+      `SELECT id,line_no,cargo_name_cn,cargo_name_en,hs_code,overseas_hs_code,package_type,
+              package_count,pieces_per_package,gross_weight_per_package_kg,net_weight_per_package_kg,
+              length_cm,width_cm,height_cm,volume_per_package_cbm,declared_value,currency,
+              origin_country,brand_model,marks,special_attributes,notes
+         FROM order_cargo_items
+        WHERE organization_id=? AND order_id=?
+        ORDER BY line_no,id`,
+    ).bind(current.organizationId,id).all<CargoItem>(),
+    env.DB.prepare(
+      `SELECT r.id,r.receipt_number,r.status,r.total_packages,r.total_pieces,r.total_weight_kg,
+              r.total_volume_cbm,r.cargo_complete,r.has_exception,r.exception_notes,r.notes,r.received_at,
+              w.code warehouse_code,w.name warehouse_name,w.country_code warehouse_country_code,
+              z.name zone_name,l.name location_name,u.display_name received_by_name
+         FROM warehouse_receipts r
+         JOIN shipments s ON s.id=r.shipment_id AND s.organization_id=r.organization_id
+         LEFT JOIN warehouses w ON w.id=r.warehouse_id AND w.organization_id=r.organization_id
+         LEFT JOIN warehouse_locations l ON l.id=r.location_id AND l.organization_id=r.organization_id
+         LEFT JOIN warehouse_zones z ON z.id=l.zone_id AND z.organization_id=r.organization_id
+         LEFT JOIN users u ON u.id=r.received_by_user_id
+        WHERE r.organization_id=? AND s.order_id=? AND r.status='completed'
+        ORDER BY r.received_at DESC,r.id DESC`,
+    ).bind(current.organizationId,id).all<WarehouseReceiptSnapshot>(),
   ]);
   const requestUrl = new URL(request.url);
-  const requestedStepKey = requestUrl.searchParams.get("stage");
+  const entryPreference = orderEntryPreference(current.positionCode);
+  const preferenceAvailable = Boolean(entryPreference && workflowFormRows.results.some(
+    (row) => row.step_key === entryPreference.stepKey && row.module_code === entryPreference.moduleCode,
+  ));
+  const requestedStepKey = requestUrl.searchParams.get("stage") || (
+    preferenceAvailable ? entryPreference!.stepKey : null
+  );
   const requestedStepRows = requestedStepKey
     ? workflowFormRows.results.filter((row) => row.step_key === requestedStepKey)
     : [];
-  const requestedStepAllowed = requestedStepRows.some((row) =>
-    row.step_status === "active" || row.step_status === "completed",
+  const requestedStepAllowed = requestedStepRows.length > 0 && (
+    canReadFullOrderLifecycle(current) || requestedStepRows.some((row) =>
+      row.step_status === "active" || row.step_status === "completed"
+    )
   );
   const selectedStepKey = requestedStepAllowed
     ? requestedStepKey!
@@ -458,8 +570,18 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
     );
   }
   const currentWorkflowFields = currentWorkflowFieldGroups.flat();
-  const requestedModuleCode = requestUrl.searchParams.get("module") as OrderModuleCode | null;
-  const requestedModuleSection = requestUrl.searchParams.get("section");
+  const requestedModuleCode = (
+    requestUrl.searchParams.get("module") || (
+      preferenceAvailable && selectedStepKey === entryPreference!.stepKey
+        ? entryPreference!.moduleCode
+        : null
+    )
+  ) as OrderModuleCode | null;
+  const requestedModuleSection = requestUrl.searchParams.get("section") || (
+    preferenceAvailable && selectedStepKey === entryPreference!.stepKey && requestedModuleCode === entryPreference!.moduleCode
+      ? entryPreference!.section
+      : null
+  );
   const selectedConsignmentSection = ["info", "files", "costs"].includes(
     requestedModuleSection || "",
   )
@@ -490,9 +612,12 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
   return {
     current,
     canManage: current.permissions.includes("order.manage"),
+    canOperateCurrentNode: canOperateCurrentOrder(current, order),
     order,
     history: history.results,
-    attachments: attachments.results,
+    attachments: attachments.results.filter((attachment) =>
+      canReadScopedDocument(current, attachment.document_category),
+    ),
     macro: macro.results,
     businessWorkflow,
     workflowSteps: workflowSteps.results,
@@ -515,6 +640,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
     members: members.results,
     customers: customers.results,
     transitions,
+    canViewExpenseSummary,
     expenseRisk: expenseRisk || {
       receivable_count: 0,
       payable_count: 0,
@@ -522,20 +648,29 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
       payable_total: 0,
       receivable_confirmed: 0,
       payable_confirmed: 0,
-      receivable_finance_locked: 0,
-      payable_finance_locked: 0,
+      receivable_business_reviewed: 0,
+      payable_business_reviewed: 0,
+      receivable_finance_reviewed: 0,
+      payable_finance_reviewed: 0,
       pending_warehouse_differences: 0,
     },
     packageLabels: packageLabels.results,
+    cargoItems: cargoItems.results,
+    warehouseReceipts: warehouseReceipts.results,
   };
 }
 
 export async function action({ request, params, context }: Route.ActionArgs) {
   const moduleRequest = request.clone();
-  const current = await requireSessionUser(request, "order.manage"),
-    form = await request.formData();
-  await requireOrderAccess(current, params.orderId);
+  const form = await request.formData();
   const intent = valueOf(form, "intent");
+  const current = await requireSessionUser(
+    request,
+    ["workflow_action", "expense_direction_control"].includes(intent)
+      ? "order.view"
+      : "order.manage",
+  );
+  await requireOrderAccess(current, params.orderId);
   if(intent==="workflow_supplement_complete"){
     try{
       await completeWorkflowSupplementTask({
@@ -789,6 +924,7 @@ function LinearOrderWorkspace({
   documentReviewSignal?: unknown;
 }) {
   const [drawerTab, setDrawerTab] = useState<LinearOrderDrawerTab | null>(null);
+  useModalScrollLock(Boolean(drawerTab));
   const order = data.order;
   const currentStepKey = data.businessWorkflow?.current_step_key || "";
   const stepRows = new Map<string, WorkflowFormRow[]>();
@@ -800,17 +936,58 @@ function LinearOrderWorkspace({
   const selectedIndex = Math.max(0, steps.findIndex((step) => step.step_key === selectedStep?.step_key));
   const orderCompleted = order.status === "completed";
   const viewingCurrent = orderCompleted || selectedStep?.step_key === currentStepKey;
+  const parallelCostsActive =
+    currentStepKey === "reconciliation" && data.embeddedModuleCode === "costs";
+  const parallelCostsAssigneeIds = data.embeddedModuleData
+    ? [
+        data.embeddedModuleData.order.salesperson_user_id,
+        data.embeddedModuleData.modules.find((module) => module.module_code === "costs")?.assignee_user_id,
+        data.embeddedModuleData.modules.find((module) => module.module_code === "review")?.assignee_user_id,
+      ].filter((userId): userId is string => Boolean(userId))
+    : [];
+  const canOperateParallelCosts =
+    parallelCostsActive && parallelCostsAssigneeIds.includes(data.current.userId);
+  const canSubmitCurrentDraft =
+    currentStepKey === "order_creation" &&
+    canSubmitSalesOrderForApproval({
+      status: order.status,
+      positionCode: data.current.positionCode,
+      permissions: data.current.permissions,
+      salespersonUserId: order.salesperson_user_id,
+      currentUserId: data.current.userId,
+    });
+  const readOnly =
+    orderCompleted ||
+    !viewingCurrent ||
+    !(data.canOperateCurrentNode || canOperateParallelCosts || canSubmitCurrentDraft);
+  const canReadFullLifecycle = canReadFullOrderLifecycle(data.current);
+  const viewingPast = !viewingCurrent && selectedIndex < currentIndex;
   const guidance = orderNextGuidance({ orderId: order.id, orderStatus: order.status, modules: data.modules });
   const directAction = directOrderWorkflowAction(data);
   const pendingTasks = selectedStep
     ? uniqueWorkflowTasks(selectedStep.rows).filter((task) => !orderCompleted && task.task_status !== "completed")
     : [];
   const progress = orderCompleted ? 100 : steps.length ? Math.round((currentIndex / steps.length) * 100) : 0;
-  const showOuterActionBar = !data.embeddedModuleData;
-  const showConsignmentActionBar =
-    selectedStep?.step_key === "order_creation" && Boolean(data.embeddedModuleData);
-  const responsiblePosition = data.currentWorkflowTasks.find((task) => !orderCompleted && task.status !== "completed")?.position_name
-    || orderResponsiblePosition(guidance.moduleCode, order.status).name;
+  const showOuterActionBar = !data.embeddedModuleData && !readOnly;
+  const responsiblePosition = parallelCostsActive
+    ? "客服 / 业务 / 财务"
+    : data.currentWorkflowTasks.find((task) => !orderCompleted && task.status !== "completed")?.position_name
+      || orderResponsiblePosition(guidance.moduleCode, order.status).name;
+  const responsibleAssignee = parallelCostsActive
+    ? "三方独立签核"
+    : order.assignee_name || "待分配";
+  const currentWorkflowTask = data.currentWorkflowTasks.find(
+    (task) => !orderCompleted && task.status !== "completed",
+  );
+  const collaborationNotice = orderCollaborationNotice({
+    orderStatus: order.status,
+    currentStepKey,
+    moduleCode: guidance.moduleCode,
+    assigneeName: currentWorkflowTask?.assignee_name || null,
+    currentUserId: data.current.userId,
+    assigneeUserId: currentWorkflowTask?.assignee_user_id || order.current_assignee_user_id || null,
+    taskAssigneeUserId: currentWorkflowTask?.task_assignee_user_id || null,
+  });
 
   return (
     <div className="page prototype-page linear-order-page">
@@ -819,12 +996,12 @@ function LinearOrderWorkspace({
         <div className="order-title"><span className="eyebrow">TRANSPORT ORDER / {order.business_type === "ltl" ? "拼车订单" : "整车订单"}</span><h1>{order.order_number}</h1><p>{order.customer_name} · {order.origin_state || ""}{order.origin_city} → {order.destination_state || ""}{order.destination_city}</p></div>
         <div className="current-summary">
           <div className="summary-cell"><span>当前办理</span><b>{orderCompleted ? "订单已完成" : data.businessWorkflow?.current_step_name || order.current_step_name}</b></div>
-          <div className="summary-cell"><span>负责岗位 / 人员</span><b>{orderCompleted ? "已归档" : `${responsiblePosition} · ${order.assignee_name || "待分配"}`}</b></div>
+          <div className="summary-cell"><span>负责岗位 / 人员</span><b>{orderCompleted ? "已归档" : `${responsiblePosition} · ${responsibleAssignee}`}</b></div>
           <div className="summary-cell"><span>办理条件</span><b className={guidance.blocker ? "danger" : "ok"}>{orderCompleted ? "全部节点已完成" : guidance.blocker || "当前节点暂无阻断"}</b></div>
         </div>
         <div className="head-actions">
           <span className={`status ${orderCompleted ? "green" : "blue"}`}>{statusLabel(order.status)}</span>
-          {data.canManage && <Modal title={`工作流版本 · ${order.order_number}`} triggerLabel="工作流版本" triggerClassName="btn" closeSignal={success} size="wide" dialogClassName="workflow-switch-modal"><WorkflowVersionSwitchForm current={data.businessWorkflow} options={data.workflowVersions} impact={data.workflowSwitchImpact} busy={busy}/></Modal>}
+          {data.canManage && !readOnly && <Modal title={`工作流版本 · ${order.order_number}`} triggerLabel="工作流版本" triggerClassName="btn" closeSignal={success} size="wide" dialogClassName="workflow-switch-modal"><WorkflowVersionSwitchForm current={data.businessWorkflow} options={data.workflowVersions} impact={data.workflowSwitchImpact} busy={busy}/></Modal>}
           <button className="btn head-detail-trigger" type="button" onClick={() => setDrawerTab("dossier")}>订单关键资料</button>
           <Link className="btn" to="/admin/orders">返回订单列表</Link>
         </div>
@@ -835,7 +1012,7 @@ function LinearOrderWorkspace({
         <div className="steps">
           {steps.map((step, index) => {
             const state = step.rows[0]?.step_status || (index < currentIndex ? "completed" : index === currentIndex ? "active" : "pending");
-            const accessible = orderCompleted || state === "completed" || step.step_key === currentStepKey;
+            const accessible = canReadFullLifecycle || orderCompleted || state === "completed" || step.step_key === currentStepKey;
             const className = `step ${state === "completed" ? "done" : step.step_key === currentStepKey ? "current" : ""}${step.step_key === selectedStep?.step_key ? " selected" : ""}`;
             const content = <><i>{state === "completed" ? "✓" : index + 1}</i><span>{step.name}</span></>;
             return accessible
@@ -851,9 +1028,9 @@ function LinearOrderWorkspace({
       <div className="workspace">
         <section className={`node-panel panel${showOuterActionBar ? "" : " without-actionbar"}`}>
           <header className="node-header">
-            <div className="node-title"><span className="node-number">{selectedIndex + 1}</span><div><h2>{selectedStep?.name || "订单资料"}</h2><p>{orderCompleted ? "订单已归档；页面内容仅供查看。" : viewingCurrent ? "本页只显示当前节点需要查看和处理的数据。" : "正在查看已完成节点；历史数据只读。"}</p></div></div>
+            <div className="node-title"><span className="node-number">{selectedIndex + 1}</span><div><h2>{selectedStep?.name || "订单资料"}</h2><p>{orderCompleted ? "订单已归档；页面内容仅供查看。" : viewingCurrent && !readOnly ? "本页只显示当前节点需要查看和处理的数据。" : viewingCurrent ? "当前节点不由本账号办理；订单信息仅供查看。" : viewingPast ? "正在查看已完成节点；历史数据只读。" : "正在查看后续节点；当前仅可查看，不能提前办理。"}</p></div></div>
             <div className="node-header-tools">
-              <div className="owner-chips"><span className="active">{responsiblePosition}</span><span>{order.assignee_name || "待分配人员"}</span><span>{viewingCurrent ? `${pendingTasks.length} 项待办` : "历史节点"}</span></div>
+              <div className="owner-chips"><span className="active">{responsiblePosition}</span><span>{responsibleAssignee}</span><span>{readOnly ? "只读" : parallelCostsActive ? "并行办理" : `${pendingTasks.length} 项待办`}</span></div>
               <div className="node-reference-actions" aria-label="订单辅助资料">
                 <button type="button" onClick={() => setDrawerTab("cargo")}>货物与标签</button>
                 <button type="button" onClick={() => setDrawerTab("attachments")}>文件 {data.attachments.length}</button>
@@ -861,13 +1038,16 @@ function LinearOrderWorkspace({
               </div>
             </div>
           </header>
-          <div className="node-scroll">
-            <SelectedStepSections data={data} rows={selectedRows} selectedStep={selectedStep} viewingCurrent={viewingCurrent} busy={busy} documentReviewSignal={documentReviewSignal} />
-            {viewingCurrent && guidance.blocker && <div className="gate"><b>当前阻断</b><span>{guidance.blocker}</span></div>}
-          </div>
-          {showConsignmentActionBar && data.embeddedModuleData && (
-            <ConsignmentReviewActionBar data={data.embeddedModuleData} busy={busy} />
+          {viewingCurrent && !readOnly && collaborationNotice && (
+            <aside className="order-collaboration-banner" aria-live="polite">
+              <strong>{collaborationNotice.title}</strong>
+              <span>{collaborationNotice.progress}</span>
+            </aside>
           )}
+          <div className="node-scroll">
+            <SelectedStepSections data={data} rows={selectedRows} selectedStep={selectedStep} viewingCurrent={viewingCurrent} readOnly={readOnly} busy={busy} documentReviewSignal={documentReviewSignal} actionError={formError} />
+            {viewingCurrent && !readOnly && guidance.blocker && <div className="gate"><b>当前阻断</b><span>{guidance.blocker}</span></div>}
+          </div>
           {showOuterActionBar && <footer className="actionbar">
             <div className="action-note"><b>{viewingCurrent ? (orderCompleted ? "订单已完成" : guidance.action) : `查看：${selectedStep?.name}`}</b><span>{viewingCurrent ? (guidance.blocker || "保存本节点完整数据后，系统自动重新校验并推进。") : "已完成节点不可重复推进，可查看其业务数据与记录。"}</span></div>
             <div className="action-buttons">
@@ -898,7 +1078,7 @@ function LinearOrderWorkspace({
         </section>
         <LinearOrderSideRail data={data} blocker={guidance.blocker} onOpen={setDrawerTab} />
       </div>
-      {drawerTab && <LinearOrderDrawer data={data} activeTab={drawerTab} onTabChange={setDrawerTab} onClose={() => setDrawerTab(null)} />}
+      {drawerTab && <LinearOrderDrawer data={data} activeTab={drawerTab} readOnly={readOnly} onTabChange={setDrawerTab} onClose={() => setDrawerTab(null)} />}
     </div>
   );
 }
@@ -956,7 +1136,7 @@ function LinearOrderSideRail({
   onOpen: (tab: LinearOrderDrawerTab) => void;
 }) {
   const order = data.order;
-  const received = data.packageLabels.reduce(
+  const labelReceived = data.packageLabels.reduce(
     (total, label) => ({
       pieces: total.pieces + Number(label.pieces || 0),
       weight: total.weight + Number(label.weight_kg || 0),
@@ -964,8 +1144,11 @@ function LinearOrderSideRail({
     }),
     { pieces: 0, weight: 0, volume: 0 },
   );
-  const receivedSummary = data.packageLabels.length
-    ? `${received.pieces} 件 · ${received.weight.toFixed(2)} KG · ${received.volume.toFixed(3)} CBM`
+  const latestReceipt = data.warehouseReceipts[0];
+  const receivedSummary = latestReceipt
+    ? `${latestReceipt.total_pieces} 件 · ${Number(latestReceipt.total_weight_kg).toFixed(2)} KG · ${Number(latestReceipt.total_volume_cbm).toFixed(3)} CBM`
+    : data.packageLabels.length
+    ? `${labelReceived.pieces} 件 · ${labelReceived.weight.toFixed(2)} KG · ${labelReceived.volume.toFixed(3)} CBM`
     : "等待仓库实收";
   const markLabelReady = isOrderMarkLabelReady(order);
 
@@ -974,8 +1157,10 @@ function LinearOrderSideRail({
       <header><b>订单关键资料</b><span>展开 →</span></header>
       <dl className="linear-side-facts">
         <div><dt>客户</dt><dd title={order.customer_name}>{order.customer_name || "—"}</dd></div>
-        <div><dt>报价</dt><dd title={order.quote_number || ""}>{order.quote_number || "历史订单"}</dd></div>
+        <div><dt>订单号</dt><dd className="order-number-only" title={order.order_number}>{order.order_number}</dd></div>
         <div><dt>类型</dt><dd>{order.business_type === "ltl" ? "拼车 · 已锁定" : "整车 · 已锁定"}</dd></div>
+        <div><dt>当前节点</dt><dd title={order.current_step_name}>{order.current_step_name || "—"}</dd></div>
+        <div><dt>负责人</dt><dd title={order.assignee_name || ""}>{order.assignee_name || "待分配"}</dd></div>
         <div><dt>货物</dt><dd title={order.cargo_description}>{order.cargo_description || "—"}</dd></div>
         <div><dt>实收</dt><dd title={receivedSummary}>{receivedSummary}</dd></div>
       </dl>
@@ -985,6 +1170,7 @@ function LinearOrderSideRail({
       <div className="linear-side-links">
         <button type="button" onClick={() => onOpen("dossier")}><span>订单全部资料</span><i>→</i></button>
         <button type="button" onClick={() => onOpen("dossier")}><span>入仓唛头标签</span><small>{markLabelReady ? "已生成" : "待接受报价"}</small><i>→</i></button>
+        <button type="button" onClick={() => onOpen("responsibility")}><span>负责人</span><small>{data.modules.filter((module) => module.enabled && module.assignee_user_id).length + (data.order.salesperson_user_id ? 1 : 0)} 人</small><i>→</i></button>
         <button type="button" onClick={() => onOpen("cargo")}><span>货物与标签</span><small>{data.packageLabels.length} 张</small><i>→</i></button>
         <button type="button" onClick={() => onOpen("attachments")}><span>文件汇总</span><small>{data.attachments.length} 个</small><i>→</i></button>
         <button type="button" onClick={() => onOpen("supplements")}><span>资料补录</span><small>{data.supplementTasks.filter((item)=>item.status==="open").length} 项待办</small><i>→</i></button>
@@ -1001,16 +1187,19 @@ function LinearOrderSideRail({
 function LinearOrderDrawer({
   data,
   activeTab,
+  readOnly,
   onTabChange,
   onClose,
 }: {
   data: Route.ComponentProps["loaderData"];
   activeTab: LinearOrderDrawerTab;
+  readOnly: boolean;
   onTabChange: (tab: LinearOrderDrawerTab) => void;
   onClose: () => void;
 }) {
   const order = data.order;
   const markLabelReady = isOrderMarkLabelReady(order);
+  const assignedModules = data.modules.filter((module) => module.enabled && module.assignee_user_id);
   return (
     <div className="linear-drawer-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <aside className="linear-order-drawer" role="dialog" aria-modal="true" aria-label="订单辅助资料">
@@ -1020,6 +1209,7 @@ function LinearOrderDrawer({
         </header>
         <nav className="linear-drawer-tabs" aria-label="订单资料分类">
           <DrawerTab active={activeTab === "dossier"} onClick={() => onTabChange("dossier")}>关键资料</DrawerTab>
+          <DrawerTab active={activeTab === "responsibility"} onClick={() => onTabChange("responsibility")}>负责人</DrawerTab>
           <DrawerTab active={activeTab === "cargo"} onClick={() => onTabChange("cargo")}>货物与标签</DrawerTab>
           <DrawerTab active={activeTab === "attachments"} onClick={() => onTabChange("attachments")}>文件 {data.attachments.length}</DrawerTab>
           <DrawerTab active={activeTab === "supplements"} onClick={() => onTabChange("supplements")}>资料补录 {data.supplementTasks.filter((item)=>item.status==="open").length}</DrawerTab>
@@ -1041,13 +1231,13 @@ function LinearOrderDrawer({
                 </div>}
               </div>
             </section>
-            <DrawerSection title="订单来源与责任">
+            <DrawerSection title="订单来源">
               <DrawerFact label="客户" value={`${order.customer_code} · ${order.customer_name}`} />
-              <DrawerFact label="关联报价" value={order.quote_number || "历史订单"} />
+              <DrawerFact label="订单号" value={order.order_number} />
               <DrawerFact label="订单类型" value={order.business_type === "ltl" ? "拼车" : "整车"} />
               <DrawerFact label="清关责任" value={order.customs_clearance_mode === "company" ? "公司代办清关" : "客户自理清关"} />
               <DrawerFact label="接单日期" value={order.order_date} />
-              <DrawerFact label="当前负责人" value={order.assignee_name || "待分配"} />
+              <DrawerFact label="当前节点" value={order.current_step_name} />
             </DrawerSection>
             <DrawerSection title="提货信息">
               <DrawerFact label="发货方" value={order.shipper_name} />
@@ -1067,15 +1257,66 @@ function LinearOrderDrawer({
               <DrawerFact label="运输线路" value={order.route_notes} wide />
               <DrawerFact label="订单备注" value={order.special_instructions} wide />
             </DrawerSection>
+            <section className="linear-drawer-section">
+              <h3>仓库实收与核实 <span>{data.warehouseReceipts.length ? `${data.warehouseReceipts.length} 次收货` : "待仓库入库"}</span></h3>
+              <div className="linear-warehouse-receipt-list">
+                {data.warehouseReceipts.map((receipt) => <article key={receipt.id}>
+                  <div className="linear-receipt-head">
+                    <div><strong>{receipt.warehouse_name || receipt.warehouse_code || "仓库"}</strong><span>{receipt.receipt_number} · {new Date(receipt.received_at).toLocaleString("zh-CN")}</span></div>
+                    <em className={receipt.has_exception ? "exception" : "ok"}>{receipt.has_exception ? "异常收货" : "已核对"}</em>
+                  </div>
+                  <dl>
+                    <div><dt>实收</dt><dd>{receipt.total_packages} 包 / {receipt.total_pieces} 件</dd></div>
+                    <div><dt>重量</dt><dd>{Number(receipt.total_weight_kg).toFixed(2)} KG</dd></div>
+                    <div><dt>体积</dt><dd>{Number(receipt.total_volume_cbm).toFixed(3)} CBM</dd></div>
+                    <div><dt>库位</dt><dd>{[receipt.zone_name, receipt.location_name].filter(Boolean).join(" / ") || "未登记"}</dd></div>
+                    <div><dt>核实人</dt><dd>{receipt.received_by_name || "仓库账号"}</dd></div>
+                    <div><dt>结果</dt><dd>{receipt.cargo_complete ? "货物齐全" : "待补齐"}</dd></div>
+                  </dl>
+                  {(receipt.exception_notes || receipt.notes) && <p>{receipt.exception_notes || receipt.notes}</p>}
+                </article>)}
+                {!data.warehouseReceipts.length && <p className="linear-drawer-empty">国内仓或境外仓完成扫码收货后，收货时间、仓库、库位、件数、重量和体积会自动补充到这里。</p>}
+              </div>
+            </section>
           </>}
+          {activeTab === "responsibility" && <section className="linear-drawer-section">
+            <h3>当前办理与全流程负责人 <span>随订单进度自动更新</span></h3>
+            <div className="linear-responsibility-list">
+              <article>
+                <div><strong>当前办理</strong><span>{order.current_step_name || "等待开始"}</span></div>
+                <b>{accountDisplay(order.assignee_name, order.assignee_email, "待分配")}</b>
+                <small>{order.assignee_name || order.assignee_email ? "当前负责" : "待分配"}</small>
+              </article>
+              <article>
+                <div><strong>业务员</strong><span>客户、报价及订单全流程跟进</span></div>
+                <b>{accountDisplay(order.salesperson_name, order.salesperson_email, "待绑定")}</b>
+                <small>{order.salesperson_user_id ? "已绑定" : "待分配"}</small>
+              </article>
+              {assignedModules.map((module) => <article key={module.id}>
+                <div><strong>{module.module_name}</strong><span>{module.current_step_name || "等待开始"}</span></div>
+                <b>{accountDisplay(module.assignee_name, module.assignee_email, "待分配")}</b>
+                <small>{module.assignee_position_name || moduleStatusLabels[module.status] || module.status}</small>
+              </article>)}
+              {!assignedModules.length && <p className="linear-drawer-empty">任务分配后，操作、单证、客服和财务等具体账号会显示在这里。</p>}
+            </div>
+          </section>}
           {activeTab === "cargo" && <>
-            <DrawerSection title="货物摘要">
-              <DrawerFact label="货物名称" value={order.cargo_description} wide />
-              <DrawerFact label="件数" value={`${order.pieces} 件`} />
-              <DrawerFact label="毛重" value={`${order.gross_weight_kg} KG`} />
-              <DrawerFact label="体积" value={`${order.volume_cbm} CBM`} />
-              <DrawerFact label="要求送达" value={order.requested_delivery_date} />
-            </DrawerSection>
+            <section className="linear-drawer-section"><h3>货物明细 <span>{data.cargoItems.length} 项</span></h3><div className="linear-cargo-item-list">
+              {data.cargoItems.map((item) => <article key={item.id}>
+                <header><div><strong>{item.cargo_name_cn}</strong>{item.cargo_name_en && <span>{item.cargo_name_en}</span>}</div><b>#{item.line_no}</b></header>
+                <dl>
+                  <div><dt>HS Code</dt><dd>{item.hs_code || "—"}{item.overseas_hs_code ? ` / ${item.overseas_hs_code}` : ""}</dd></div>
+                  <div><dt>包装 / 数量</dt><dd>{item.package_type || "其他"} · {item.package_count} 包 · 每包 {item.pieces_per_package} 件</dd></div>
+                  <div><dt>毛重 / 净重</dt><dd>{Number(item.gross_weight_per_package_kg).toFixed(2)} / {Number(item.net_weight_per_package_kg).toFixed(2)} KG/包</dd></div>
+                  <div><dt>尺寸 / 体积</dt><dd>{item.length_cm} × {item.width_cm} × {item.height_cm} CM · {Number(item.volume_per_package_cbm).toFixed(4)} CBM/包</dd></div>
+                  <div><dt>申报价值</dt><dd>{item.currency || "CNY"} {Number(item.declared_value).toLocaleString("zh-CN")}</dd></div>
+                  <div><dt>产地 / 品牌</dt><dd>{[item.origin_country, item.brand_model].filter(Boolean).join(" · ") || "—"}</dd></div>
+                  <div className="wide"><dt>唛头 / 属性</dt><dd>{[item.marks, item.special_attributes].filter(Boolean).join(" · ") || "—"}</dd></div>
+                  <div className="wide"><dt>备注</dt><dd>{item.notes || "—"}</dd></div>
+                </dl>
+              </article>)}
+              {!data.cargoItems.length && <p className="linear-drawer-empty">当前订单尚无结构化货物明细，仅显示报价继承的摘要数据。</p>}
+            </div></section>
             <section className="linear-drawer-section"><h3>仓库货物标签 <span>{data.packageLabels.length} 张</span></h3><div className="linear-drawer-list">
               {data.packageLabels.map((label) => <article key={label.id}><div><strong>{label.barcode}</strong><span>{label.cargo_name || order.cargo_description} · {label.package_number}</span></div><small>{label.pieces} 件 · {label.weight_kg ?? "—"} KG · {label.volume_cbm ?? "—"} CBM<br/>{label.warehouse_name || "仓库待定"} · {warehousePackageStatusLabel(label.status)}</small></article>)}
               {!data.packageLabels.length && <p className="linear-drawer-empty">尚未生成仓库货物标签。</p>}
@@ -1089,7 +1330,7 @@ function LinearOrderDrawer({
             {data.supplementTasks.map((task)=><article key={task.id} className={task.status==="open"?"open":"resolved"}>
               <div><strong>{task.field_label}</strong><span>{task.target_step_name||task.target_step_key} · {task.task_kind==="audit_only"?"审计补录":"资料补录"}</span><p>{task.reason}</p>{task.resolution_note&&<p>处理说明：{task.resolution_note}</p>}</div>
               <small>{task.status==="open"?"待处理":task.status==="completed"?`已完成 · ${task.completed_by_name||"系统"}`:"已关闭"}<br/>{new Date(task.created_at).toLocaleString("zh-CN")}</small>
-              {task.status==="open"&&<Form method="post" className="supplement-task-form"><input type="hidden" name="intent" value="workflow_supplement_complete"/><input type="hidden" name="taskId" value={task.id}/><input name="resolutionNote" aria-label={`${task.field_label}补录说明`} placeholder="填写补录/复核说明" minLength={2} required/><div><Link className="text-button" to={`/admin/orders/${order.id}/modules/${task.module_code}`}>查看办理位置</Link><button className="text-button">完成补录</button></div></Form>}
+              {task.status==="open"&&!readOnly&&<Form method="post" className="supplement-task-form"><input type="hidden" name="intent" value="workflow_supplement_complete"/><input type="hidden" name="taskId" value={task.id}/><input name="resolutionNote" aria-label={`${task.field_label}补录说明`} placeholder="填写补录/复核说明" minLength={2} required/><div><Link className="text-button" to={`/admin/orders/${order.id}/modules/${task.module_code}`}>查看办理位置</Link><button className="text-button">完成补录</button></div></Form>}
             </article>)}
             {!data.supplementTasks.length&&<p className="linear-drawer-empty">当前订单没有资料补录任务。</p>}
           </div></section>}
@@ -1121,11 +1362,17 @@ function DrawerFact({ label, value, wide = false }: { label: string; value: stri
   return <div className={wide ? "wide" : ""}><span>{label}</span><b>{value || "—"}</b></div>;
 }
 
-function OrderDossierSection({ order }: { order: Order }) {
-  return <section className="section" id="order-dossier"><div className="section-title"><b>订单资料</b><span>报价已确定的资料自动继承，无需重复录入</span></div><div className="grid"><ReadCell label="客户 / 发货方" value={order.customer_name}/><ReadCell label="关联报价" value={order.quote_number}/><ReadCell label="订单类型" value={order.business_type === "ltl" ? "拼车" : "整车"}/><ReadCell label="清关责任" value={order.customs_clearance_mode === "company" ? "公司代办清关" : "客户自理清关"}/><ReadCell label="发货联系人" value={[order.shipper_contact,order.shipper_phone].filter(Boolean).join(" · ")}/><ReadCell label="预约提货" value={order.requested_pickup_date}/><ReadCell label="提货地址" value={[order.origin_state,order.origin_city,order.origin_address].filter(Boolean).join(" ")} className="span2"/><ReadCell label="境外联系人" value={[order.consignee_contact,order.consignee_phone].filter(Boolean).join(" · ")}/><ReadCell label="境外目的仓" value={order.overseas_warehouse_name}/><ReadCell label="货物" value={`${order.cargo_description} · ${order.pieces} 件 · ${order.gross_weight_kg} KG · ${order.volume_cbm} CBM`} className="span2"/><ReadCell label="备注" value={order.special_instructions} className="span2"/></div></section>;
+function accountDisplay(name: string | null | undefined, email: string | null | undefined, fallback: string) {
+  if (!name && !email) return fallback;
+  if (!email || name === email) return name || email || fallback;
+  return `${name || "未命名账号"} · ${email}`;
 }
 
-function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, documentReviewSignal }: { data: Route.ComponentProps["loaderData"]; rows: WorkflowFormRow[]; selectedStep: (BusinessWorkflowStep & { rows: WorkflowFormRow[] }) | null; viewingCurrent: boolean; busy: boolean; documentReviewSignal?: unknown }) {
+function OrderDossierSection({ order }: { order: Order }) {
+  return <section className="section" id="order-dossier"><div className="section-title"><b>订单资料</b><span>报价已确定的资料自动继承，无需重复录入</span></div><div className="grid"><ReadCell label="客户 / 发货方" value={order.customer_name}/><ReadCell label="订单号" value={order.order_number}/><ReadCell label="订单类型" value={order.business_type === "ltl" ? "拼车" : "整车"}/><ReadCell label="清关责任" value={order.customs_clearance_mode === "company" ? "公司代办清关" : "客户自理清关"}/><ReadCell label="发货联系人" value={[order.shipper_contact,order.shipper_phone].filter(Boolean).join(" · ")}/><ReadCell label="预约提货" value={order.requested_pickup_date}/><ReadCell label="提货地址" value={[order.origin_state,order.origin_city,order.origin_address].filter(Boolean).join(" ")} className="span2"/><ReadCell label="境外联系人" value={[order.consignee_contact,order.consignee_phone].filter(Boolean).join(" · ")}/><ReadCell label="境外目的仓" value={order.overseas_warehouse_name}/><ReadCell label="货物" value={`${order.cargo_description} · ${order.pieces} 件 · ${order.gross_weight_kg} KG · ${order.volume_cbm} CBM`} className="span2"/><ReadCell label="备注" value={order.special_instructions} className="span2"/></div></section>;
+}
+
+function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, readOnly, busy, documentReviewSignal, actionError }: { data: Route.ComponentProps["loaderData"]; rows: WorkflowFormRow[]; selectedStep: (BusinessWorkflowStep & { rows: WorkflowFormRow[] }) | null; viewingCurrent: boolean; readOnly: boolean; busy: boolean; documentReviewSignal?: unknown; actionError?: string }) {
   const navigate = useNavigate();
   const selectedModuleCode = data.embeddedModuleCode;
   const [selectedConsignmentSection, setSelectedConsignmentSection] = useState(data.selectedConsignmentSection);
@@ -1172,6 +1419,30 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, 
     moduleCode: selectedModuleCode,
     section: selectedModuleSection,
   });
+  const canAdministerWorkflowInUi = Boolean(
+    data.embeddedModuleData &&
+    (["BOSS", "DEVELOPER"].includes(
+      data.embeddedModuleData.current.positionCode ?? "",
+    ) ||
+      data.embeddedModuleData.current.roleCodes.some((code) =>
+        ["boss", "developer", "owner"].includes(code),
+      )),
+  );
+  const canSubmitConsignment = Boolean(
+    isOrderCreation &&
+    viewingCurrent &&
+    data.embeddedModuleData?.order.status === "draft" &&
+    data.embeddedModuleData.access.canEdit &&
+    (canManageOrderModule(data.embeddedModuleData.current, "consignment") ||
+      canAdministerWorkflowInUi ||
+      canSubmitSalesOrderForApproval({
+        status: data.embeddedModuleData.order.status,
+        positionCode: data.embeddedModuleData.current.positionCode,
+        permissions: data.embeddedModuleData.current.permissions,
+        salespersonUserId: data.embeddedModuleData.order.salesperson_user_id,
+        currentUserId: data.embeddedModuleData.current.userId,
+      })),
+  );
   const orderCreationTabs = [
     { key: "info", label: "委托信息", module: "consignment", section: "info" },
     { key: "cargo", label: "货物信息", module: "cargo", section: "" },
@@ -1186,6 +1457,8 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, 
       moduleName: row.module_name,
     })),
   );
+  const costsNeedAttention = selectedStep.step_key === "reconciliation"
+    && data.modules.some((module) => module.module_code === "costs" && module.status !== "completed");
   const activateTab = (moduleCode: string | null, section: string | null) => {
     if (moduleCode === "consignment" && ["info", "files", "costs"].includes(section || "")) {
       setSelectedConsignmentSection(section as "info" | "files" | "costs");
@@ -1270,7 +1543,10 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, 
     ) : businessTabs.length > 1 ? (
       <nav className="linear-module-tabs" aria-label="本节点业务分区">{businessTabs.map((tab, tabIndex) => {
         const missing = moduleHasRequiredMissing(tab.moduleCode, tab.section);
-        const attention = tab.moduleCode === "customs" && tab.section === "files"
+        const pendingCosts = tab.moduleCode === "costs" && costsTabHasPendingAction(tab.section, costsNeedAttention);
+        const attention = pendingCosts
+          ? "action"
+          : tab.moduleCode === "customs" && tab.section === "files"
           ? missing ? "required" : null
           : orderModuleTabAttention(tab.moduleCode, missing);
         const activeSection = tab.moduleCode === "customs"
@@ -1283,7 +1559,7 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, 
         const localSwitch = canActivateTabLocally(tab.moduleCode, tab.section);
         return <Link
           key={tab.key}
-          className={isActive ? "active" : ""}
+          className={`${isActive ? "active" : ""}${pendingCosts ? " pending-costs" : ""}`.trim()}
           aria-current={isActive ? "page" : undefined}
           viewTransition={!localSwitch}
           preventScrollReset
@@ -1291,12 +1567,12 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, 
           to={tabHref}
         >
           {tab.label}
-          {attention === "action" && <b className="tab-required-star" title="报关单待办理" aria-label="报关单待办理">*</b>}
+          {attention === "action" && <b className="tab-required-star" title={pendingCosts ? "费用签核待办理" : "报关单待办理"} aria-label={pendingCosts ? "费用签核待办理" : "报关单待办理"}>*</b>}
           {attention === "required" && <b className="tab-required-star" title="存在必填但未填内容" aria-label="存在必填但未填内容">*</b>}
         </Link>;
       })}</nav>
     ) : null}
-    {isOrderCreation && viewingCurrent && <div className="order-creation-context-bar" aria-label="委托资料快捷操作">
+    {isOrderCreation && viewingCurrent && !readOnly && <div className="order-creation-context-bar" aria-label="委托资料快捷操作">
       <div>
         <strong>{selectedSection === "info" ? "委托信息已从报价继承" : selectedSection === "cargo" ? "在这里维护订单货物" : selectedSection === "files" ? "在这里补充订单文件" : "在这里查看并新增订单费用"}</strong>
         <span>{selectedSection === "info" ? "无需重复填写报价中已经确认的资料，可继续核对货物。" : selectedSection === "cargo" ? "新增、拆分或修正货物后会立即回写本节点。" : selectedSection === "files" ? "点击文件名称即可上传或替换；必填缺失会阻断提交。" : "报价费用只读；新增费用会进入后续对账结算。"}</span>
@@ -1306,12 +1582,32 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, busy, 
         {selectedSection === "cargo" && <Link className="btn" to={`/admin/orders/${data.order.id}/operations#cargo`}>新增 / 维护货物</Link>}
         {selectedSection === "files" && <a className="btn" href="#module-source-documents">上传 / 替换文件</a>}
         {selectedSection === "costs" && <a className="btn" href="#consignment-cost-actions">新增费用</a>}
-        <a className="btn primary" href="#consignment-stage-action">提交审批</a>
+        {canSubmitConsignment && data.embeddedModuleData && <Modal
+          title={`提交审批 · ${data.order.order_number}`}
+          triggerLabel="提交审批"
+          triggerClassName="btn primary"
+          dialogClassName="consignment-submit-dialog"
+        >
+          <div className="consignment-submit-dialog-note">
+            请选择具体审批负责人。提交成功后，订单将自动进入“委托审核”节点。
+          </div>
+          {actionError && <div className="alert error" role="alert"><b>提交未完成：</b>{actionError}</div>}
+          <ConsignmentReviewActionBar
+            data={data.embeddedModuleData}
+            busy={busy}
+            actionUrl={orderModuleTabHref({
+              orderId: data.order.id,
+              stepKey: "order_creation",
+              moduleCode: "consignment",
+              section: selectedConsignmentSection,
+            })}
+          />
+        </Modal>}
       </div>
     </div>}
     <div className="linear-module-tab-viewport">
       <div className="linear-module-tab-panel" key={activeTabKey}>
-    {data.embeddedModuleRedirect ? <section className="section"><div className="section-title"><b>{selectedRow.module_name || "关联业务单"}</b><span>该节点按配载单统一推进</span></div><div className="linear-external-work"><p>拼车订单在仓库生成 PZ 配载单后，由配载单统一记录出境运输并同步全部子订单。</p><Link className="btn primary" to={data.embeddedModuleRedirect}>打开配载单跟踪</Link></div></section> : data.embeddedModuleData ? <EmbeddedOrderModule data={data.embeddedModuleData} busy={busy} actionUrl={actionUrl} workflowStepKey={selectedStep.step_key} consignmentSection={selectedConsignmentSection} customsSection={selectedCustomsSection} costsSection={selectedCostsSection} hideConsignmentActionBar={isOrderCreation} approvalMode={selectedStep.step_key === "consignment_approval"} reviewCloseSignal={documentReviewSignal}/> : <section className="section"><div className="section-title"><b>{selectedRow.module_name || selectedRow.module_code || "业务数据"}</b><span>{viewingCurrent ? "当前节点" : "历史节点"}</span></div><div className="grid">{selectedFields.map((field) => {
+    {data.embeddedModuleRedirect ? <section className="section"><div className="section-title"><b>{selectedRow.module_name || "关联业务单"}</b><span>该节点按配载单统一推进</span></div><div className="linear-external-work"><p>拼车订单在仓库生成 PZ 配载单后，由配载单统一记录出境运输并同步全部子订单。</p><Link className={`btn${readOnly ? "" : " primary"}`} to={data.embeddedModuleRedirect}>{readOnly ? "查看关联配载单" : "打开配载单跟踪"}</Link></div></section> : data.embeddedModuleData ? <EmbeddedOrderModule data={data.embeddedModuleData} busy={busy} actionUrl={actionUrl} workflowStepKey={selectedStep.step_key} consignmentSection={selectedConsignmentSection} customsSection={selectedCustomsSection} costsSection={selectedCostsSection} hideConsignmentActionBar={isOrderCreation} approvalMode={selectedStep.step_key === "consignment_approval"} reviewCloseSignal={documentReviewSignal} readOnly={readOnly}/> : <section className="section"><div className="section-title"><b>{selectedRow.module_name || selectedRow.module_code || "业务数据"}</b><span>{viewingCurrent ? "当前节点" : "历史节点"}</span></div><div className="grid">{selectedFields.map((field) => {
       const fieldState = field.present ? "filled" : field.isRequired ? "required-missing" : "optional-empty";
       return <div className={`read-cell workflow-cell ${field.present ? "complete" : field.isRequired ? "missing" : "optional"}`} key={field.id}><span>{field.label}{field.isRequired ? " *" : ""}</span><b>{field.displayValue || "—"}</b><em className={`field-state ${fieldState}`}>{field.present ? "已填" : field.isRequired ? "必填但未填" : "未填"}</em></div>;
     })}</div></section>}
@@ -1383,7 +1679,9 @@ function OrderBusinessForm({
     { key: "transport", label: "运输", meta: "国内与出境" },
     { key: "warehouse", label: "仓库", meta: `${data.packageLabels.length} 张标签` },
     { key: "attachments", label: "文件", meta: `${data.attachments.length} 个` },
-    { key: "costs", label: "费用", meta: `${data.expenseRisk.receivable_count + data.expenseRisk.payable_count} 项` },
+    ...(data.canViewExpenseSummary
+      ? [{ key: "costs" as const, label: "费用", meta: `${data.expenseRisk.receivable_count + data.expenseRisk.payable_count} 项` }]
+      : []),
     { key: "history", label: "日志", meta: `${data.history.length + data.macro.length} 条` },
   ];
 
@@ -1768,7 +2066,7 @@ function OrderBusinessSummary({ data }: { data: Route.ComponentProps["loaderData
       <div className="order-form-basics-body">
         <div className="order-form-data-grid">
           <Info label="客户" value={order.customer_name} />
-          <Info label="关联报价" value={order.quote_number} />
+          <Info label="订单号" value={order.order_number} />
           <Info label="订单类型" value={businessTypeLabels[order.business_type] ?? order.business_type} />
           <Info label="发货方" value={order.shipper_name} />
           <Info label="发货联系人" value={[order.shipper_contact, order.shipper_phone].filter(Boolean).join(" · ") || null} />
@@ -2065,12 +2363,18 @@ function OrderCommandCenter({
   });
   const currentWorkflowStep = data.businessWorkflow?.current_step_key ?? null;
   const expenseMode = expenseWarningMode(currentWorkflowStep);
-  const expenseWarnings = expenseWarningList(data.expenseRisk, expenseMode);
+  const costsModule = data.modules.find(
+    (module) => module.enabled === 1 && module.module_code === "costs",
+  );
+  const expenseWarnings = data.canViewExpenseSummary
+    ? expenseWarningList(data.expenseRisk, expenseMode, costsModule)
+    : [];
   const gateRows = buildStageGateRows(
     data.modules,
     data.expenseRisk,
     currentWorkflowStep,
-  );
+    data.workflowFormRows,
+  ).filter((item) => data.canViewExpenseSummary || item.kind !== "expense");
   const gateWarnings = gateRows
     .filter((item) => item.blocked && item.kind !== "expense")
     .map((item) => item.message);
@@ -2256,6 +2560,15 @@ function orderPrimaryActionLabel(guidance: ReturnType<typeof orderNextGuidance>)
 }
 
 function directOrderWorkflowAction(data: Route.ComponentProps["loaderData"]) {
+  const actorCanRun = (actionCode: string) => canRunOrderWorkflowAction({
+    actionCode,
+    positionCode: data.current.positionCode,
+    currentAssigneeUserId: data.order.current_assignee_user_id,
+    currentUserId: data.current.userId,
+    bypassAssigneeRestriction: data.current.roleCodes.some((code) =>
+      ["owner", "boss", "developer"].includes(code),
+    ),
+  });
   const module = (code: string) =>
     data.modules.find((item) => item.enabled === 1 && item.module_code === code);
   const transition = (actionCode: string) =>
@@ -2266,7 +2579,7 @@ function directOrderWorkflowAction(data: Route.ComponentProps["loaderData"]) {
     );
   if (data.order.status === "draft") {
     const submit = transition("submit");
-    if (!submit) return null;
+    if (!submit || !actorCanRun("submit")) return null;
     // 货物信息改为常驻查看按钮，不再作为工作流门禁阻断提交审批
     const hasOrderBasics = [
       data.order.shipper_name,
@@ -2289,7 +2602,7 @@ function directOrderWorkflowAction(data: Route.ComponentProps["loaderData"]) {
   }
   if (data.order.status === "confirmed") {
     const dispatch = transition("dispatch");
-    if (!dispatch || module("assignment")?.status !== "completed") return null;
+    if (!dispatch || !actorCanRun("dispatch") || module("assignment")?.status !== "completed") return null;
     const preferredAssignee =
       ["transport", "warehouse", "documents", "customs", "loading", "tracking"]
         .map((code) => module(code)?.assignee_user_id)
@@ -2360,7 +2673,7 @@ function OrderMountedPanel({
             <Info label="客户" value={`${order.customer_code} · ${order.customer_name}`} />
             <Info label="接单日期" value={order.order_date} />
             {showDomesticDecision && <Info label="仓库分流结果" value={businessTypeLabels[order.business_type] ?? order.business_type} />}
-            <Info label="关联报价" value={order.quote_number} />
+            <Info label="订单号" value={order.order_number} />
             <Info label="业务工作流" value={data.businessWorkflow?.workflow_name ?? null} />
             <Info label="当前节点" value={data.businessWorkflow?.current_step_name || order.current_step_name} />
             <Info label="当前负责人" value={order.assignee_name} />
@@ -2403,10 +2716,17 @@ function OrderMountedPanel({
           <OrderPackageLabels labels={data.packageLabels} />
         </>
       )}
-      {panel === "costs" && (
+      {panel === "costs" && data.canViewExpenseSummary && (
         <>
           <PanelTitle title="费用状态" subtitle="只显示费用门禁摘要；明细进入费用结算模块处理。" />
-          <OrderExpenseRisk orderId={order.id} risk={data.expenseRisk} mode={expenseMode} />
+          <OrderExpenseRisk
+            orderId={order.id}
+            risk={data.expenseRisk}
+            mode={expenseMode}
+            costsModule={data.modules.find(
+              (module) => module.enabled === 1 && module.module_code === "costs",
+            )}
+          />
         </>
       )}
       {panel === "history" && (
@@ -2621,43 +2941,61 @@ function expenseWarningMode(stepKey: string | null): ExpenseWarningMode {
   return "hidden";
 }
 
-function expenseWarningList(risk: ExpenseRisk, mode: ExpenseWarningMode) {
+function expenseWarningList(
+  risk: ExpenseRisk,
+  mode: ExpenseWarningMode,
+  costsModule?: OrderModuleInstance,
+) {
   if (mode === "hidden") return [];
   const preEntry = [
     risk.receivable_count === 0 ? "未从已接受报价继承应收费用" : null,
   ];
   if (mode === "pre_entry") return preEntry.filter(Boolean) as string[];
+  if (!costsModule || costsModule.status === "completed") return [];
   return [
-    ...preEntry,
-    risk.payable_count === 0 ? "应付未录入" : null,
-    risk.receivable_count > 0 && !risk.receivable_confirmed ? "应收未确认" : null,
-    risk.payable_count > 0 && !risk.payable_confirmed ? "应付未确认" : null,
-    risk.pending_warehouse_differences > 0 ? `${risk.pending_warehouse_differences} 条实收差异待确认` : null,
-    risk.receivable_total - risk.payable_total < 0 ? "预计毛利为负" : null,
-    !risk.receivable_finance_locked || !risk.payable_finance_locked ? "费用尚未全部财务锁定" : null,
-  ].filter(Boolean) as string[];
+    costsModule.blocking_reason || "费用结算仍有当前工作流配置的必办项未完成",
+  ];
 }
 
-function departureGateWarningList(modules: OrderModuleInstance[]) {
-  const module = (code: string) =>
-    modules.find((item) => item.enabled === 1 && item.module_code === code);
-  return [
-    module("warehouse") && module("warehouse")?.status !== "completed"
-      ? "装车出库交接未完成"
-      : null,
-    module("customs") && module("customs")?.status !== "completed"
-      ? "报关/转关尚未放行"
-      : null,
-    module("loading") && module("loading")?.status !== "completed"
-      ? "配载批次未确认"
-      : null,
-  ].filter(Boolean) as string[];
+function moduleHasConfiguredGate(
+  module: OrderModuleInstance,
+  workflowFormRows: WorkflowFormRow[],
+) {
+  return module.is_required === 1 || workflowFormRows.some(
+    (row) =>
+      row.module_code === module.module_code &&
+      row.required_field_count > 0,
+  );
+}
+
+function departureGateWarningList(
+  modules: OrderModuleInstance[],
+  workflowFormRows: WorkflowFormRow[],
+) {
+  const fallbackMessages: Partial<Record<OrderModuleCode, string>> = {
+    warehouse: "装车出库交接未完成",
+    customs: "报关/转关尚未放行",
+    loading: "配载批次未确认",
+  };
+  return modules
+    .filter(
+      (item) =>
+        item.enabled === 1 &&
+        moduleHasConfiguredGate(item, workflowFormRows) &&
+        item.status !== "completed" &&
+        item.module_code in fallbackMessages,
+    )
+    .map((item) => ({
+      moduleCode: item.module_code,
+      message: item.blocking_reason || fallbackMessages[item.module_code]!,
+    }));
 }
 
 function buildStageGateRows(
   modules: OrderModuleInstance[],
   risk: ExpenseRisk,
   stepKey: string | null,
+  workflowFormRows: WorkflowFormRow[],
 ) {
   const rows: Array<{
     kind: "business" | "expense";
@@ -2669,36 +3007,50 @@ function buildStageGateRows(
     modules.find((item) => item.enabled === 1 && item.module_code === code);
   if (stepKey === "domestic_execution") {
     const warehouse = module("warehouse");
-    rows.push({
-      kind: "business",
-      label: "到仓与实收",
-      message: warehouse?.status === "completed" ? "到仓、齐套和出库已完成" : "等待到仓收货、实收复核和齐套",
-      blocked: Boolean(warehouse && warehouse.status === "blocked"),
-    });
+    if (warehouse && moduleHasConfiguredGate(warehouse, workflowFormRows)) {
+      const blocked = warehouse.status !== "completed";
+      rows.push({
+        kind: "business",
+        label: "到仓与实收",
+        message: blocked
+          ? warehouse.blocking_reason || "等待到仓收货、实收复核和齐套"
+          : "到仓、齐套和出库已完成",
+        blocked,
+      });
+    }
   }
   if (["port_loading", "outbound_transport"].includes(stepKey ?? "")) {
-    const warnings = departureGateWarningList(modules);
+    const warnings = departureGateWarningList(modules, workflowFormRows);
     const definitions = [
-      ["装车出库", "装车", "装车出库已完成"],
-      ["配载确认", "配载", "已确认或本单无需拼车配载"],
-      ["报关放行", "报关", "全部有效报关单已放行"],
+      ["warehouse", "装车出库", "装车出库已完成"],
+      ["loading", "配载确认", "已确认或本单无需拼车配载"],
+      ["customs", "报关放行", "全部有效报关单已放行"],
     ] as const;
-    for (const [label, keyword, clearMessage] of definitions) {
-      const warning = warnings.find((item) => item.includes(keyword));
+    for (const [moduleCode, label, clearMessage] of definitions) {
+      const configuredModule = module(moduleCode);
+      if (
+        !configuredModule ||
+        !moduleHasConfiguredGate(configuredModule, workflowFormRows)
+      ) continue;
+      const warning = warnings.find((item) => item.moduleCode === moduleCode);
       rows.push({
         kind: "business",
         label,
-        message: warning || clearMessage,
+        message: warning?.message || clearMessage,
         blocked: Boolean(warning),
       });
     }
   }
-  const expenseWarnings = expenseWarningList(risk, expenseWarningMode(stepKey));
+  const expenseWarnings = expenseWarningList(
+    risk,
+    expenseWarningMode(stepKey),
+    module("costs"),
+  );
   if (expenseWarningMode(stepKey) !== "hidden") {
     rows.push({
       kind: "expense",
       label: stepKey === "order_creation" ? "报价应收" : "费用结算",
-      message: expenseWarnings.join("；") || (stepKey === "order_creation" ? "已从接受报价继承应收费用" : "应收应付已确认并锁定"),
+      message: expenseWarnings.join("；") || (stepKey === "order_creation" ? "已从接受报价继承应收费用" : "当前工作流配置的费用必办项已完成"),
       blocked: expenseWarnings.length > 0,
     });
   }
@@ -2937,12 +3289,22 @@ function Info({
     </div>
   );
 }
-function OrderExpenseRisk({ orderId, risk, mode }: { orderId: string; risk: ExpenseRisk; mode: ExpenseWarningMode }) {
-  const warnings = expenseWarningList(risk, mode);
+function OrderExpenseRisk({
+  orderId,
+  risk,
+  mode,
+  costsModule,
+}: {
+  orderId: string;
+  risk: ExpenseRisk;
+  mode: ExpenseWarningMode;
+  costsModule?: OrderModuleInstance;
+}) {
+  const warnings = expenseWarningList(risk, mode, costsModule);
   return (
     <section className="panel order-expense-risk-table">
       <div className="table-wrap"><table><thead><tr><th>费用阶段</th><th>应收</th><th>应付</th><th>风险状态</th><th>风险说明</th><th>操作</th></tr></thead><tbody><tr>
-        <td><strong>{mode === "settlement" ? "费用结算" : "报价应收"}</strong></td><td>{risk.receivable_count} 项<small>折算 {risk.receivable_total.toFixed(2)}</small></td><td>{risk.payable_count} 项<small>折算 {risk.payable_total.toFixed(2)}</small></td><td><span className={`status-pill ${warnings.length ? "danger" : "success"}`}>{warnings.length ? `${warnings.length} 项待处理` : "无待处理风险"}</span></td><td>{warnings.join("；") || (mode === "settlement" ? "应收、应付均已确认并锁定" : "已从接受报价继承应收费用")}</td><td><Link className="secondary" to={`/admin/orders/${orderId}/modules/costs#module-business-data`}>{mode === "settlement" ? "进入费用结算" : "查看报价应收"}</Link></td>
+        <td><strong>{mode === "settlement" ? "费用结算" : "报价应收"}</strong></td><td>{risk.receivable_count} 项<small>折算 {risk.receivable_total.toFixed(2)}</small></td><td>{risk.payable_count} 项<small>折算 {risk.payable_total.toFixed(2)}</small></td><td><span className={`status-pill ${warnings.length ? "danger" : "success"}`}>{warnings.length ? `${warnings.length} 项待处理` : "无工作流阻断"}</span></td><td>{warnings.join("；") || (mode === "settlement" ? "当前工作流配置的费用必办项已完成" : "已从接受报价继承应收费用")}</td><td><Link className="secondary" to={`/admin/orders/${orderId}/modules/costs#module-business-data`}>{mode === "settlement" ? "进入费用结算" : "查看报价应收"}</Link></td>
       </tr></tbody></table></div>
     </section>
   );

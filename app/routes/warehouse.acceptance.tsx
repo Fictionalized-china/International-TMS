@@ -26,6 +26,11 @@ import {
   warehouseAcceptancePackageCount,
   warehouseAcceptanceReadyIsBlocked,
 } from "../lib/warehouse-acceptance-policy";
+import {
+  calculateWarehouseVolumeCbm,
+  formatWarehouseVolumeCbm,
+  synchronizeWarehouseVolumeRow,
+} from "../lib/warehouse-volume";
 
 type AcceptanceOrder = {
   id: string;
@@ -337,13 +342,17 @@ export async function action({ request }: Route.ActionArgs) {
     const submittedPackages = packageRaw === ""
       ? null
       : nonNegativeInteger(form, packageFieldName);
+    const actualPackages = warehouseAcceptancePackageCount({
+      plannedPackages: item.package_count,
+      receivedPackages: item.received_packages,
+      submittedPackages,
+    });
+    const actualLength = nonNegativeNumber(form, `actualLength_${index}`);
+    const actualWidth = nonNegativeNumber(form, `actualWidth_${index}`);
+    const actualHeight = nonNegativeNumber(form, `actualHeight_${index}`);
     return {
       ...item,
-      actualPackages: warehouseAcceptancePackageCount({
-        plannedPackages: item.package_count,
-        receivedPackages: item.received_packages,
-        submittedPackages,
-      }),
+      actualPackages,
       packageCountProvided: packageRaw !== "",
       packageCountInvalid: packageRaw !== "" && submittedPackages === null,
       actualPieces: policies.actualPieces.isActive
@@ -353,11 +362,16 @@ export async function action({ request }: Route.ActionArgs) {
         ? nonNegativeNumber(form, `actualWeight_${index}`)
         : null,
       actualVolume: policies.actualVolume.isActive
-        ? nonNegativeNumber(form, `actualVolume_${index}`)
+        ? calculateWarehouseVolumeCbm({
+            lengthCm: actualLength,
+            widthCm: actualWidth,
+            heightCm: actualHeight,
+            packageCount: actualPackages,
+          })
         : null,
-      actualLength: nonNegativeNumber(form, `actualLength_${index}`),
-      actualWidth: nonNegativeNumber(form, `actualWidth_${index}`),
-      actualHeight: nonNegativeNumber(form, `actualHeight_${index}`),
+      actualLength,
+      actualWidth,
+      actualHeight,
       itemNotes: valueOf(form, `itemNotes_${index}`).trim(),
     };
   });
@@ -679,7 +693,7 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
       hint="扫描枪输入订单号并发送回车后，系统自动读取客户、货物、运输和累计收货信息。"
     />
     {loaderData.lookupError && <div className="alert error no-print">{loaderData.lookupError}</div>}
-    {loaderData.order && loaderData.cargoItems.length > 0 && <Form method="post" className="acceptance-workbench no-print">
+    {loaderData.order && loaderData.cargoItems.length > 0 && <Form method="post" className="acceptance-workbench no-print" onInput={(event) => synchronizeWarehouseVolumeRow(event.target)}>
       <input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/><input type="hidden" name="orderId" value={loaderData.order.id}/><input type="hidden" name="reference" value={loaderData.order.order_number}/>
       <WarehouseReceivingOrderStrip facts={[
         { label: "订单 / 类型", value: `${loaderData.order.order_number} · ${loaderData.order.business_type === "ftl" ? "整车" : "拼车"}` },
@@ -697,21 +711,28 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
           {policies.actualPieces.isActive && <th>本次件数{acceptanceRequiredMarker(policies.actualPieces)}</th>}
           {policies.actualWeight.isActive && <th>实际重量 KG{acceptanceRequiredMarker(policies.actualWeight)}</th>}
           <th>实际长×宽×高 CM{acceptanceRequiredMarker(policies.actualDimensions)}</th>
-          {policies.actualVolume.isActive && <th>实际体积 CBM{acceptanceRequiredMarker(policies.actualVolume)}</th>}
+          {policies.actualVolume.isActive && <th>实际体积 CBM（自动计算）{acceptanceRequiredMarker(policies.actualVolume)}</th>}
           <th>本行备注</th>
         </tr></thead><tbody>{loaderData.cargoItems.map((item,index) => {
           const expectedPieces = item.package_count * item.pieces_per_package;
           const expectedWeight = item.package_count * item.gross_weight_per_package_kg;
           const expectedVolume = item.package_count * item.volume_per_package_cbm;
-          return <tr key={item.id}>
+          const remainingPackages = Math.max(0,item.package_count-item.received_packages);
+          const calculatedVolume = calculateWarehouseVolumeCbm({
+            lengthCm: item.length_cm,
+            widthCm: item.width_cm,
+            heightCm: item.height_cm,
+            packageCount: remainingPackages,
+          });
+          return <tr key={item.id} data-warehouse-volume-row data-warehouse-volume-packages={remainingPackages}>
             <td><strong>{item.line_no}. {item.cargo_name_cn}</strong><small>{item.cargo_name_en || "—"} · HS {item.hs_code || "—"}</small><small>{packageTypeLabel(item.package_type)} · {item.length_cm}×{item.width_cm}×{item.height_cm} cm</small></td>
             <td><strong>{item.package_count} 包 / {expectedPieces} 件</strong><small>{expectedWeight.toFixed(2)} KG · {expectedVolume.toFixed(3)} CBM</small></td>
             <td><strong>{item.received_packages} 包 / {item.received_pieces} 件</strong><small>{item.received_weight_kg.toFixed(2)} KG · {item.received_volume_cbm.toFixed(3)} CBM</small></td>
-            {policies.actualPackages.isActive && <td><input name={`actualPackages_${index}`} type="number" min="0" step="1" defaultValue={Math.max(0,item.package_count-item.received_packages)} required={policies.actualPackages.isRequired}/></td>}
+            {policies.actualPackages.isActive && <td><input name={`actualPackages_${index}`} type="number" min="0" step="1" defaultValue={remainingPackages} required={policies.actualPackages.isRequired} data-warehouse-volume-packages/></td>}
             {policies.actualPieces.isActive && <td><input name={`actualPieces_${index}`} type="number" min="0" step="1" defaultValue={Math.max(0,expectedPieces-item.received_pieces)} required={policies.actualPieces.isRequired}/></td>}
             {policies.actualWeight.isActive && <td><input name={`actualWeight_${index}`} type="number" min="0" step="0.001" defaultValue={Math.max(0,expectedWeight-item.received_weight_kg).toFixed(3)} required={policies.actualWeight.isRequired}/></td>}
-            <td><div className="acceptance-dimensions"><input name={`actualLength_${index}`} type="number" min="0" step="0.1" defaultValue={item.length_cm} aria-label="实际长度" required/><span>×</span><input name={`actualWidth_${index}`} type="number" min="0" step="0.1" defaultValue={item.width_cm} aria-label="实际宽度" required/><span>×</span><input name={`actualHeight_${index}`} type="number" min="0" step="0.1" defaultValue={item.height_cm} aria-label="实际高度" required/></div></td>
-            {policies.actualVolume.isActive && <td><input name={`actualVolume_${index}`} type="number" min="0" step="0.0001" defaultValue={Math.max(0,expectedVolume-item.received_volume_cbm).toFixed(4)} required={policies.actualVolume.isRequired}/></td>}
+            <td><div className="acceptance-dimensions"><input name={`actualLength_${index}`} type="number" min="0" step="0.1" defaultValue={item.length_cm} aria-label="实际长度" required data-warehouse-volume-length/><span>×</span><input name={`actualWidth_${index}`} type="number" min="0" step="0.1" defaultValue={item.width_cm} aria-label="实际宽度" required data-warehouse-volume-width/><span>×</span><input name={`actualHeight_${index}`} type="number" min="0" step="0.1" defaultValue={item.height_cm} aria-label="实际高度" required data-warehouse-volume-height/></div></td>
+            {policies.actualVolume.isActive && <td><input name={`actualVolume_${index}`} aria-label="实际体积 CBM（自动计算）" type="number" min="0" step="0.0001" defaultValue={formatWarehouseVolumeCbm(calculatedVolume)} required={policies.actualVolume.isRequired} readOnly data-warehouse-volume-output/></td>}
             <td><input name={`itemNotes_${index}`} placeholder="选填"/></td>
           </tr>;
         })}</tbody></table></div>

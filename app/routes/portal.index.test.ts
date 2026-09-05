@@ -83,6 +83,6 @@ describe("portal home quotation entry", () => {
   });
 
   it("links a pending quotation to its exact customer confirmation view", () => {
-    expect(quotationDetailLink("quote 1/2")).toBe("/portal/quotes?status=pending&quote=quote%201%2F2");
+    expect(quotationDetailLink("quote 1/2")).toBe("/portal/orders?status=quote_pending&quote=quote%201%2F2");
   });
 });

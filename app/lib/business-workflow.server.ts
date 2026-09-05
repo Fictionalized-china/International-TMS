@@ -1,6 +1,9 @@
 import { env } from "cloudflare:workers";
 import { orderBusinessStages } from "./order-stage-flow";
-import type { OrderModuleCode } from "./order-modules";
+import {
+  pickNextRequiredWorkflowModule,
+  type OrderModuleCode,
+} from "./order-modules";
 import {
   ensureWorkflowCatalogFields,
   snapshotWorkflowFieldsForInstance,
@@ -482,7 +485,6 @@ export async function syncOrderBusinessWorkflow(input: OrderBusinessWorkflowSync
       workflowId,
       targetStepKey:targetStep.step_key,
       orderStatus:order.status,
-      mandatoryModuleCodes:["ftl", "ltl"].includes(order.business_type) ? ["warehouse"] : [],
     });
     return actualStepKey;
   }
@@ -495,7 +497,6 @@ export async function syncOrderBusinessWorkflow(input: OrderBusinessWorkflowSync
       workflowId,
       targetStepKey,
       orderStatus:order.status,
-      mandatoryModuleCodes:["ftl", "ltl"].includes(order.business_type) ? ["warehouse"] : [],
     });
     if (actualStepKey !== previousStepKey) {
       const actual = await env.DB.prepare(
@@ -620,25 +621,17 @@ function resolveOrderBusinessStep(
   if (status === "confirmed") return "task_assignment";
   if (status === "completed") return "completion_review";
   if (status !== "in_execution") return "order_creation";
-  const activeModules = modules.filter(
-    (module) =>
-      module.enabled === 1 &&
-      (module.is_required === 1 ||
-        !["not_started", "not_applicable"].includes(module.status)),
+  const mainlineStages = orderBusinessStages.slice(2);
+  const next = pickNextRequiredWorkflowModule(
+    modules,
+    mainlineStages.map((stage) => stage.modules),
   );
-  for (const stage of orderBusinessStages.slice(2)) {
-    const stageModules = activeModules.filter((module) =>
-      stage.modules.includes(module.module_code),
-    );
-    if (!stageModules.length) continue;
-    if (stageModules.some((module) => !isStageModuleComplete(stage.code, module)))
-      return stage.code;
-  }
-  return "completion_review";
-}
-
-function isStageModuleComplete(stageCode: string, module: ModuleSnapshot) {
-  return module.status === "completed";
+  if (!next) return "completion_review";
+  return (
+    mainlineStages.find((stage) =>
+      stage.modules.includes(next.module_code),
+    )?.code ?? "completion_review"
+  );
 }
 
 async function findInstance(organizationId: string, refs: WorkflowRefs): Promise<Instance | null> {

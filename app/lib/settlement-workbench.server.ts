@@ -1,5 +1,7 @@
 import{allocateToOutstanding,settlementDocumentNumber}from"./settlement";
 import{refreshOrderCompletionStatus}from"./order-review.server";
+import{syncCostsModuleStatus,syncOrderWorkflowSnapshot}from"./order-modules.server";
+import{refreshSettlementAffectedOrders}from"./settlement-order-refresh";
 import{chunkD1Rows,chunkD1Values,d1Placeholders}from"./d1-bindings";
 
 export type SettlementExpense={
@@ -82,6 +84,7 @@ export async function createReconciliation(db:D1Database,input:{organizationId:s
     db.prepare(`INSERT INTO settlement_reconciliations(id,organization_id,document_number,direction,counterparty_name,customer_id,settlement_entity,currency,total_amount,status,notes,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,'draft',?,?,?,?)`).bind(id,input.organizationId,number,input.direction,counterparty,customerId,org.name,currency,total,input.notes||null,input.userId,input.now,input.now),
     ...lineStatements,
   ]);
+  await syncSettlementOrderStates(db,input.organizationId,rows.map(row=>row.order_id),input.now);
   return{id,number};
 }
 
@@ -94,6 +97,7 @@ export async function confirmReconciliation(db:D1Database,input:{organizationId:
   ];
   if(row.direction==="receivable")statements.push(db.prepare(`UPDATE order_tasks SET status='completed',completed_at=?,updated_at=? WHERE organization_id=? AND task_type='start_receivable_reconciliation' AND status IN ('pending','in_progress') AND order_id IN (SELECT e.order_id FROM settlement_reconciliation_lines l JOIN business_expenses e ON e.id=l.expense_id WHERE l.reconciliation_id=?)`).bind(input.now,input.now,input.organizationId,input.id));
   await db.batch(statements);
+  await syncSettlementOrderStates(db,input.organizationId,await loadReconciliationOrderIds(db,input.organizationId,input.id),input.now);
 }
 
 export async function recordSettlementInvoice(db:D1Database,input:{organizationId:string;reconciliationId:string;amount:number;invoiceCompany:string;invoiceType:string;invoiceNumber:string;invoiceCode?:string;invoiceDate:string;taxRate:number;titleName:string;taxNumber?:string;addressPhone?:string;bankAccount?:string;exchangeRate:number;attachmentReference?:string;notes?:string;userId:string;now:string}){
@@ -110,6 +114,7 @@ export async function recordSettlementInvoice(db:D1Database,input:{organizationI
     ...allocationStatements,
   ]);
   await refreshExpenseStages(db,input.organizationId,allocations.map(item=>item.id),input.now);
+  await syncSettlementOrderStates(db,input.organizationId,await loadExpenseOrderIds(db,input.organizationId,allocations.map(item=>item.id)),input.now);
   return{id,recordNumber};
 }
 
@@ -141,12 +146,7 @@ export async function allocateCashTransaction(db:D1Database,input:{organizationI
   const status=(allocated?.total??0)>=cash.amount-0.009?"allocated":"partially_allocated";
   await db.prepare("UPDATE settlement_cash_transactions SET status=?,updated_at=? WHERE id=? AND organization_id=?").bind(status,input.now,input.transactionId,input.organizationId).run();
   await refreshExpenseStages(db,input.organizationId,allocations.map(item=>item.id),input.now);
-  const affectedOrderIds:string[]=[];
-  for(const allocationChunk of chunkD1Values(allocations,1)){
-    const affectedOrders=await db.prepare(`SELECT DISTINCT order_id FROM business_expenses WHERE organization_id=? AND id IN (${d1Placeholders(allocationChunk.length)}) AND order_id IS NOT NULL`).bind(input.organizationId,...allocationChunk.map(item=>item.id)).all<{order_id:string}>();
-    affectedOrderIds.push(...affectedOrders.results.map(row=>row.order_id));
-  }
-  await refreshOrderCompletionStatus(db,input.organizationId,[...new Set(affectedOrderIds)],input.now);
+  await syncSettlementOrderStates(db,input.organizationId,await loadExpenseOrderIds(db,input.organizationId,allocations.map(item=>item.id)),input.now);
 }
 
 async function loadReconciliationOutstanding(db:D1Database,organizationId:string,reconciliationId:string,type:"invoice"|"cash"){
@@ -163,4 +163,27 @@ async function refreshExpenseStages(db:D1Database,organizationId:string,expenseI
       ELSE 'reconciled' END,updated_at=?
       WHERE e.organization_id=? AND e.id IN (${d1Placeholders(chunk.length)})`).bind(now,organizationId,...chunk).run();
   }
+}
+
+async function loadReconciliationOrderIds(db:D1Database,organizationId:string,reconciliationId:string){
+  const rows=await db.prepare(`SELECT DISTINCT e.order_id FROM settlement_reconciliation_lines l JOIN business_expenses e ON e.id=l.expense_id WHERE l.organization_id=? AND l.reconciliation_id=? AND e.organization_id=? AND e.order_id IS NOT NULL`).bind(organizationId,reconciliationId,organizationId).all<{order_id:string}>();
+  return rows.results.map(row=>row.order_id);
+}
+
+async function loadExpenseOrderIds(db:D1Database,organizationId:string,expenseIds:string[]){
+  const orderIds:string[]=[];
+  for(const expenseChunk of chunkD1Values([...new Set(expenseIds)],1)){
+    const rows=await db.prepare(`SELECT DISTINCT order_id FROM business_expenses WHERE organization_id=? AND id IN (${d1Placeholders(expenseChunk.length)}) AND order_id IS NOT NULL`).bind(organizationId,...expenseChunk).all<{order_id:string}>();
+    orderIds.push(...rows.results.map(row=>row.order_id));
+  }
+  return [...new Set(orderIds)];
+}
+
+async function syncSettlementOrderStates(db:D1Database,organizationId:string,orderIds:string[],now:string){
+  await refreshSettlementAffectedOrders({
+    orderIds,
+    syncCostsModuleStatus:(orderId)=>syncCostsModuleStatus(organizationId,orderId,now),
+    syncOrderWorkflowSnapshot:(orderId)=>syncOrderWorkflowSnapshot(organizationId,orderId),
+    refreshOrderCompletionStatus:(ids)=>refreshOrderCompletionStatus(db,organizationId,[...ids],now),
+  });
 }

@@ -3,8 +3,9 @@ import {
   composeOrderWorkflow,
   composedWorkflowProgress,
   enabledOrderModules,
-  isRuntimeMandatoryOrderModule,
   orderModuleDefinition,
+  pickNextRequiredWorkflowModule,
+  workflowConfiguredModuleFlags,
   type OrderWorkflowModuleSnapshot,
 } from "./order-modules";
 
@@ -81,17 +82,85 @@ describe("order module activation", () => {
     expect(composeOrderWorkflow([exception])).toHaveLength(1);
   });
 
+  it.each(["not_started", "in_progress", "blocked"])(
+    "keeps an optional %s module actionable without making it the mainline next step",
+    (optionalStatus) => {
+      const optional = {
+        module_code: "exceptions",
+        module_name: "异常处理",
+        enabled: 1,
+        is_required: 0,
+        status: optionalStatus,
+        current_step_name: "异常处理",
+        progress_percent: 25,
+      } satisfies OrderWorkflowModuleSnapshot;
+      const required = {
+        module_code: "review",
+        module_name: "订单复盘",
+        enabled: 1,
+        is_required: 1,
+        status: "not_started",
+        current_step_name: "等待复盘",
+        progress_percent: 0,
+      } satisfies OrderWorkflowModuleSnapshot;
+
+      // The module remains enabled/actionable. Once work starts, the existing
+      // overview behavior also keeps it visible without promoting it to the
+      // mainline.
+      expect(optional.enabled).toBe(1);
+      if (optionalStatus !== "not_started") {
+        expect(composeOrderWorkflow([optional, required])).toContain(optional);
+      }
+      // Only required modules are candidates for advancing the order mainline.
+      expect(
+        pickNextRequiredWorkflowModule(
+          [optional, required],
+          [["exceptions", "review"]],
+        ),
+      ).toBe(required);
+    },
+  );
+
+  it("returns no mainline next step when only optional modules remain", () => {
+    expect(
+      pickNextRequiredWorkflowModule(
+        [
+          {
+            module_code: "exceptions",
+            enabled: 1,
+            is_required: 0,
+            status: "blocked",
+          },
+        ],
+        [["exceptions"]],
+      ),
+    ).toBeNull();
+  });
+
   it("enables the loading module for both quote types", () => {
     expect(enabledOrderModules("ltl", []).find((item) => item.code === "loading")?.enabled).toBe(true);
     expect(enabledOrderModules("ftl", []).find((item) => item.code === "loading")?.enabled).toBe(true);
   });
 
-  it("keeps domestic warehouse receiving mandatory for road orders", () => {
+  it("enables domestic warehouse receiving by default for road orders", () => {
     expect(enabledOrderModules("ltl", []).find((item) => item.code === "warehouse")?.enabled).toBe(true);
     expect(enabledOrderModules("ftl", []).find((item) => item.code === "warehouse")?.enabled).toBe(true);
-    expect(isRuntimeMandatoryOrderModule("ltl", "warehouse")).toBe(true);
-    expect(isRuntimeMandatoryOrderModule("ftl", "warehouse")).toBe(true);
-    expect(isRuntimeMandatoryOrderModule("parcel", "warehouse")).toBe(false);
+    expect(enabledOrderModules("parcel", []).find((item) => item.code === "warehouse")?.enabled).toBe(false);
+  });
+
+  it("keeps runtime module gates aligned with the workflow configuration", () => {
+    expect(workflowConfiguredModuleFlags({
+      moduleCode: "warehouse",
+      rule: { enabled: 1, is_required: 1 },
+    })).toEqual({ enabled: 1, required: 1 });
+    expect(workflowConfiguredModuleFlags({
+      moduleCode: "warehouse",
+      rule: { enabled: 1, is_required: 0 },
+    })).toEqual({ enabled: 1, required: 0 });
+    expect(workflowConfiguredModuleFlags({
+      moduleCode: "warehouse",
+      rule: { enabled: 0, is_required: 1 },
+    })).toEqual({ enabled: 0, required: 0 });
   });
 
   it("distinguishes pre-departure planning from post-loading execution", () => {

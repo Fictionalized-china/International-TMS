@@ -5,7 +5,9 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 import type { Route } from "./+types/admin.quotations";
 import { Modal } from "../components/Modal";
 import { ConfirmAction } from "../components/ConfirmAction";
+import { QueryPagination } from "../components/QueryPagination";
 import { requireSessionUser } from "../lib/auth.server";
+import { paginateList, readListPage } from "../lib/list-pagination";
 import { canViewAllCustomers, customerVisibilitySql } from "../lib/customer-access.server";
 import { writeAudit } from "../lib/audit.server";
 import { transportChargeNameOptions } from "../lib/charge-options";
@@ -135,6 +137,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const url = new URL(request.url);
   const keyword = (url.searchParams.get("q") || "").trim();
   const lifecycle = (url.searchParams.get("status") || "").trim();
+  const page = readListPage(url.searchParams);
   const where = ["q.organization_id=?", customerScope.sql];
   const binds: unknown[] = [current.organizationId, ...customerScope.values];
   if (keyword) {
@@ -225,19 +228,27 @@ export async function loader({ request }: Route.LoaderArgs) {
     listQuotationWorkflowFields(current.organizationId),
   ]);
   const quoteRows = quotes.results ?? [];
+  const pagination = paginateList(quoteRows, page);
+  const visibleQuoteRows = pagination.items;
   const [workflowValues,quotationWorkflowFields] = await Promise.all([
     listQuotationWorkflowFieldValues(
       current.organizationId,
-      quoteRows.map((quote) => quote.id),
+      visibleQuoteRows.map((quote) => quote.id),
     ),
     listQuotationWorkflowInstanceFields(
       current.organizationId,
-      quoteRows.map((quote) => quote.id),
+      visibleQuoteRows.map((quote) => quote.id),
     ),
   ]);
   return {
     current,
-    quotes: quoteRows,
+    quotes: visibleQuoteRows,
+    pagination,
+    quoteStats: {
+      pending: quoteRows.filter((quote) => quote.lifecycle_status === "pending").length,
+      accepted: quoteRows.filter((quote) => quote.lifecycle_status === "accepted").length,
+      orders: quoteRows.filter((quote) => quote.order_id).length,
+    },
     quotationCharges: quotationCharges.results ?? [],
     customers: customers.results ?? [],
     contacts: contacts.results ?? [],
@@ -519,7 +530,7 @@ export async function action({ request }: Route.ActionArgs) {
             `INSERT INTO portal_notifications(
               id,organization_id,customer_id,user_id,type,title,message,link,is_read,created_at
              ) VALUES(?,?,?,?,?,?,?,?,0,?)`,
-          ).bind(notificationId,current.organizationId,customerId,null,"quote","新报价待确认",`报价 ${number} 等待确认。`,`/portal/quotes`,now),
+          ).bind(notificationId,current.organizationId,customerId,null,"quote","新报价待确认",`报价 ${number} 等待确认。`,`/portal/orders?status=quote_pending&quote=${encodeURIComponent(id)}`,now),
         ]);
         await savePreparedQuotationWorkflowFieldValues({
           organizationId:current.organizationId,
@@ -553,7 +564,7 @@ export async function action({ request }: Route.ActionArgs) {
       return { intent, quotationId: actionQuotationId, success: `报价 ${number} 已保存并进入待客户确认` };
     }
     const quotationId = valueOf(form, "id");
-    if (!quotationId) throw new Error("缺少报价编号");
+    if (!quotationId) throw new Error("缺少报价记录");
     const accessibleQuotation = await env.DB.prepare(
       `SELECT q.id FROM quotations q
        JOIN customers c ON c.id=q.customer_id AND c.organization_id=q.organization_id
@@ -809,11 +820,7 @@ export default function QuotationsPage({ loaderData, actionData }: Route.Compone
     if(!nextOpen)dismissedCreateResult.current=actionData;
     setCreateQuoteOpen(nextOpen);
   };
-  const stats = useMemo(() => ({
-    pending: loaderData.quotes.filter((quote) => quote.lifecycle_status === "pending").length,
-    accepted: loaderData.quotes.filter((quote) => quote.lifecycle_status === "accepted").length,
-    orders: loaderData.quotes.filter((quote) => quote.order_id).length,
-  }), [loaderData.quotes]);
+  const stats = loaderData.quoteStats;
   return <div className="page prototype-page">
     <div className="breadcrumb">管理后台 / 工作台 / <b>询价与报价</b></div>
     <div className="page-head">
@@ -828,13 +835,13 @@ export default function QuotationsPage({ loaderData, actionData }: Route.Compone
       <div className="panel"><span>规则</span><b>一报一单</b></div>
     </div>
     <Form className="panel filters quotation-filters" method="get" action=".">
-      <div className="field"><label>报价号 / 客户 / 货物 / 订单号</label><input className="control" name="q" defaultValue={loaderData.filters.keyword} /></div>
+      <div className="field"><label>订单号 / 客户 / 货物</label><input className="control" name="q" defaultValue={loaderData.filters.keyword} /></div>
       <div className="field"><label>状态</label><select className="control" name="status" defaultValue={loaderData.filters.lifecycle}><option value="">全部</option><option value="pending">待确认</option><option value="accepted">已接受</option><option value="withdrawn">已撤回</option><option value="void">已作废</option></select></div>
       <button className="btn primary">筛选</button><Link className="btn" to="/admin/quotations">重置</Link>
     </Form>
     <section className="panel table-panel">
-      <div className="panel-head"><div><h2>报价单 <span className="count">{loaderData.quotes.length}</span></h2><p>首次保存即锁定整车/拼车工作流版本；接受后自动进入第二步“委托资料补充”。</p></div></div>
-      <div className="table-wrap"><table><thead><tr><th>报价单号</th><th>客户 / 业务员</th><th>运输方案</th><th>货物 / 线路</th><th>应收总额</th><th>状态</th><th>关联订单</th><th>操作</th></tr></thead><tbody>
+      <div className="panel-head"><div><h2>报价单 <span className="count">{loaderData.pagination.total}</span></h2><p>首次保存即锁定整车/拼车工作流版本；接受后自动进入第二步“委托资料补充”。</p></div></div>
+      <div className="table-wrap"><table><thead><tr><th>报价记录</th><th>客户 / 业务员</th><th>运输方案</th><th>货物 / 线路</th><th>应收总额</th><th>状态</th><th>订单号</th><th>操作</th></tr></thead><tbody>
         {loaderData.quotes.map((quote) => {
           const snapshotFields = loaderData.quotationWorkflowFields.filter((field) => field.quotation_id === quote.id);
           const fields = snapshotFields.length
@@ -849,10 +856,11 @@ export default function QuotationsPage({ loaderData, actionData }: Route.Compone
             visible("quotation_gross_weight_kg","required")?`${quote.gross_weight_kg} KG`:null,
             visible("quotation_volume_cbm","required")?`${quote.volume_cbm} CBM`:null,
           ].filter(Boolean).join(" · ");
-          return <tr key={quote.id}><td><span className="order-id">{quote.quote_number}</span><span className="subline">{new Date(quote.created_at).toLocaleString("zh-CN")}</span></td><td><span className="cell-main">{quote.customer_name}</span>{visible("quotation_salesperson_user_id","required")&&<span className="subline">{quote.salesperson_name || "待指定业务员"}</span>}</td><td><span className={`pill ${quote.road_load_type === "ltl" ? "ltl" : ""}`}>{quote.road_load_type === "ltl" ? "拼车" : "整车"}</span><span className="subline">{quote.workflow_name ? `${quote.workflow_name} v${quote.workflow_version_number} · 已锁定` : "历史报价 · 接受时自动匹配流程"}</span></td><td>{visible("quotation_cargo_description","required")&&<span className="cell-main">{quote.cargo_description}</span>}{routeVisible&&<span className="subline">{quote.origin_city} → {quote.destination_city}{visible("quotation_destination_warehouse_id","required")?` · ${quote.destination_warehouse_name || "目的仓待补"}`:""}</span>}</td><td>{visible("quotation_charge_items","required")&&<span className="cell-main">CNY {quote.total_amount.toLocaleString()}</span>}{measures&&<span className="subline">{measures}</span>}</td><td><span className={`status ${statusTone(quote.lifecycle_status)}`}>{statusLabel(quote.lifecycle_status)}</span></td><td>{quote.order_id ? <Link className="order-id" to={`/admin/orders/${quote.order_id}`}>{quote.order_number}</Link> : <span className="subline">尚未生成</span>}</td><td><QuoteActions quote={quote} fields={fields} values={values} charges={charges} loaderData={loaderData} actionData={actionData} busy={busy} /></td></tr>;
+          return <tr key={quote.id}><td><span className="cell-main">{statusLabel(quote.lifecycle_status)}报价</span><span className="subline">{new Date(quote.created_at).toLocaleString("zh-CN")}</span></td><td><span className="cell-main">{quote.customer_name}</span>{visible("quotation_salesperson_user_id","required")&&<span className="subline">{quote.salesperson_name || "待指定业务员"}</span>}</td><td><span className={`pill ${quote.road_load_type === "ltl" ? "ltl" : ""}`}>{quote.road_load_type === "ltl" ? "拼车" : "整车"}</span><span className="subline">{quote.workflow_name ? `${quote.workflow_name} v${quote.workflow_version_number} · 已锁定` : "历史报价 · 接受时自动匹配流程"}</span></td><td>{visible("quotation_cargo_description","required")&&<span className="cell-main">{quote.cargo_description}</span>}{routeVisible&&<span className="subline">{quote.origin_city} → {quote.destination_city}{visible("quotation_destination_warehouse_id","required")?` · ${quote.destination_warehouse_name || "目的仓待补"}`:""}</span>}</td><td>{visible("quotation_charge_items","required")&&<span className="cell-main">CNY {quote.total_amount.toLocaleString()}</span>}{measures&&<span className="subline">{measures}</span>}</td><td><span className={`status ${statusTone(quote.lifecycle_status)}`}>{statusLabel(quote.lifecycle_status)}</span></td><td>{quote.order_id ? <Link className="order-id order-number-only" title={quote.order_number || ""} to={`/admin/orders/${quote.order_id}`}>{quote.order_number}</Link> : <span className="subline">确认后生成</span>}</td><td><QuoteActions quote={quote} fields={fields} values={values} charges={charges} loaderData={loaderData} actionData={actionData} busy={busy} /></td></tr>;
         })}
       </tbody></table></div>
       {!loaderData.quotes.length && <div className="empty-state">暂无符合条件的报价。</div>}
+      <QueryPagination {...loaderData.pagination} />
     </section>
   </div>;
 }
@@ -894,12 +902,12 @@ function QuoteActions({ quote, fields, values, charges, loaderData, actionData, 
         )
   ));
   return <div className="toolbar-actions quotation-table-actions">
-    <Modal title={`报价详情 · ${quote.quote_number}`} triggerLabel="查看" triggerClassName="btn" size="wide" dialogClassName="quote-review-modal"><QuoteDetail quote={quote} fields={fields} values={values} charges={charges} customers={loaderData.customers} warehouses={loaderData.warehouses} /></Modal>
-    {activeFields.length > 0 && ["pending","withdrawn"].includes(quote.lifecycle_status) && <Modal title={`补充第一步配置项 · ${quote.quote_number}`} triggerLabel={missing.length ? `补充配置项 ${missing.length}` : "配置项"} triggerClassName={missing.length ? "btn danger" : "btn"} closeSignal={workflowSuccess} isOpen={workflowEditorOpen} onOpenChange={updateWorkflowEditorOpen} size="xwide" guardFormChanges><Form method="post" encType="multipart/form-data" className="quotation-workflow-update-form" data-enter-flow><input type="hidden" name="intent" value="workflow_fields_update"/><input type="hidden" name="id" value={quote.id}/><input type="hidden" name="nativeFieldsIncluded" value="1"/>{workflowError&&<div ref={workflowErrorRef} className="alert error" role="alert" tabIndex={-1}><strong>配置项尚未保存</strong><span>{workflowError}</span><small>已填写内容仍保留，请按提示修改后重试。</small></div>}<div className="quote-workflow-form-head"><strong>第 1 步 · 询价报价</strong><span>{quote.workflow_name} v{quote.workflow_version_number} · 版本已锁定</span></div>{nativeFields.length > 0 && <QuotationNativeWorkflowInputs quote={quote} fields={nativeFields} charges={charges} users={loaderData.users} warehouses={loaderData.warehouses} countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities}/>}<QuotationWorkflowFieldInputs fields={customFields} values={values} customers={loaderData.customers} warehouses={loaderData.warehouses}/><div className="modal-form-actions"><button className="btn primary" disabled={busy}>保存配置项</button></div></Form></Modal>}
+    <Modal title={quote.order_number ? `报价详情 · ${quote.order_number}` : "报价详情"} triggerLabel="查看" triggerClassName="btn" size="wide" dialogClassName="quote-review-modal"><QuoteDetail quote={quote} fields={fields} values={values} charges={charges} customers={loaderData.customers} warehouses={loaderData.warehouses} /></Modal>
+    {activeFields.length > 0 && ["pending","withdrawn"].includes(quote.lifecycle_status) && <Modal title={quote.order_number ? `补充第一步配置项 · ${quote.order_number}` : "补充第一步配置项"} triggerLabel={missing.length ? `补充配置项 ${missing.length}` : "配置项"} triggerClassName={missing.length ? "btn danger" : "btn"} closeSignal={workflowSuccess} isOpen={workflowEditorOpen} onOpenChange={updateWorkflowEditorOpen} size="xwide" guardFormChanges><Form method="post" encType="multipart/form-data" className="quotation-workflow-update-form" data-enter-flow><input type="hidden" name="intent" value="workflow_fields_update"/><input type="hidden" name="id" value={quote.id}/><input type="hidden" name="nativeFieldsIncluded" value="1"/>{workflowError&&<div ref={workflowErrorRef} className="alert error" role="alert" tabIndex={-1}><strong>配置项尚未保存</strong><span>{workflowError}</span><small>已填写内容仍保留，请按提示修改后重试。</small></div>}<div className="quote-workflow-form-head"><strong>第 1 步 · 询价报价</strong><span>{quote.workflow_name} v{quote.workflow_version_number} · 版本已锁定</span></div>{nativeFields.length > 0 && <QuotationNativeWorkflowInputs quote={quote} fields={nativeFields} charges={charges} users={loaderData.users} warehouses={loaderData.warehouses} countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities}/>}<QuotationWorkflowFieldInputs fields={customFields} values={values} customers={loaderData.customers} warehouses={loaderData.warehouses}/><div className="modal-form-actions"><button className="btn primary" disabled={busy}>保存配置项</button></div></Form></Modal>}
     {quote.lifecycle_status === "pending" && <Form method="post"><input type="hidden" name="intent" value="accept"/><input type="hidden" name="id" value={quote.id}/><button className="btn primary" disabled={busy || missing.length > 0} title={missing.length ? `尚缺：${missing.map((field) => field.label).join("、")}` : undefined}>代客户确认</button></Form>}
-    {quote.lifecycle_status === "accepted" && quote.order_status === "draft" && <Form method="post"><input type="hidden" name="intent" value="withdraw"/><input type="hidden" name="id" value={quote.id}/><ConfirmAction className="btn" title="撤回报价接受" description={`将撤回 ${quote.quote_number} 的客户接受状态；已生成订单会保留为草稿并留下审计记录。`} triggerLabel="撤回接受" confirmLabel="确认撤回" pending={busy}/></Form>}
+    {quote.lifecycle_status === "accepted" && quote.order_status === "draft" && <Form method="post"><input type="hidden" name="intent" value="withdraw"/><input type="hidden" name="id" value={quote.id}/><ConfirmAction className="btn" title="撤回报价接受" description="将撤回该报价的客户接受状态；已生成订单会保留为草稿并留下审计记录。" triggerLabel="撤回接受" confirmLabel="确认撤回" pending={busy}/></Form>}
     {quote.lifecycle_status === "withdrawn" && <Form method="post"><input type="hidden" name="intent" value="accept"/><input type="hidden" name="id" value={quote.id}/><button className="btn primary" disabled={busy}>重新接受</button></Form>}
-    {["pending", "withdrawn"].includes(quote.lifecycle_status) && <Form method="post"><input type="hidden" name="intent" value="void"/><input type="hidden" name="id" value={quote.id}/><ConfirmAction className="btn danger" title="作废报价" description={`作废后 ${quote.quote_number} 不能再被客户接受；报价资料和审计记录仍会永久保留。`} triggerLabel="作废" confirmLabel="确认作废" pending={busy}/></Form>}
+    {["pending", "withdrawn"].includes(quote.lifecycle_status) && <Form method="post"><input type="hidden" name="intent" value="void"/><input type="hidden" name="id" value={quote.id}/><ConfirmAction className="btn danger" title="作废报价" description="作废后该报价不能再被客户接受；报价资料和审计记录仍会永久保留。" triggerLabel="作废" confirmLabel="确认作废" pending={busy}/></Form>}
   </div>;
 }
 
@@ -928,7 +936,7 @@ function QuoteDetail({ quote, fields, values, charges, customers, warehouses }: 
     });
   return <div className="quote-detail-sheet">
     <header className="quote-review-hero">
-      <div><span>{quote.road_load_type === "ltl" ? "拼车运输报价" : "整车运输报价"}</span><strong>{quote.quote_number}</strong><small>{quote.workflow_name ? `${quote.workflow_name} · v${quote.workflow_version_number}` : "历史报价 · 接受时自动匹配"}</small></div>
+      <div><span>{quote.road_load_type === "ltl" ? "拼车运输报价" : "整车运输报价"}</span><strong>{quote.order_number || "待确认报价"}</strong><small>{quote.workflow_name ? `${quote.workflow_name} · v${quote.workflow_version_number}` : "历史报价 · 接受时自动匹配"}</small></div>
       <div><span>应收总额</span><strong>CNY {quote.total_amount.toLocaleString()}</strong><small>{statusLabel(quote.lifecycle_status)}{quote.valid_until ? ` · 有效期至 ${quote.valid_until}` : ""}</small></div>
     </header>
     <div className="quote-detail-sections">

@@ -15,8 +15,12 @@ describe("portal notification links", () => {
       .toBe("/portal/orders?keyword=SO2026082600138");
   });
 
+  it("repairs legacy quotation links to the unified order view", () => {
+    expect(normalizePortalNotificationLink("/portal/quotes?status=pending&quote=quote-1"))
+      .toBe("/portal/orders?status=quote_pending&quote=quote-1");
+  });
+
   it("leaves unrelated and external links unchanged", () => {
-    expect(normalizePortalNotificationLink("/portal/quotes")).toBe("/portal/quotes");
     expect(normalizePortalNotificationLink("https://example.com/orders?order=1"))
       .toBe("https://example.com/orders?order=1");
   });

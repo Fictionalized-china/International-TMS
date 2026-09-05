@@ -4,6 +4,7 @@ import type { Route } from "./+types/admin.loading";
 import { BatchNumberLink, OrderNumberLinkList } from "../components/EntityNumberLink";
 import { requireSessionUser } from "../lib/auth.server";
 import { batchVisibilitySql } from "../lib/order-access.server";
+import { canAccessBatchWorkspace } from "../lib/order-access";
 
 type BatchRow = {
   id: string;
@@ -14,6 +15,9 @@ type BatchRow = {
   planned_departure_at: string | null;
   status: string;
   road_status: string;
+  approval_status: string;
+  operation_supervisor_name: string | null;
+  operation_assignee_name: string | null;
   carrier_name: string | null;
   warehouse_name: string | null;
   order_count: number;
@@ -24,10 +28,13 @@ type BatchRow = {
   vehicle_count: number;
 };
 
-const pageSize = 30;
+const pageSize = 10;
 
 export async function loader({ request }: Route.LoaderArgs) {
-  const current = await requireSessionUser(request, "order.module.loading.manage");
+  const current = await requireSessionUser(request, "order.view");
+  if (!canAccessBatchWorkspace(current)) {
+    throw new Response("当前岗位没有配载单工作台访问权限", { status: 403 });
+  }
   const visibility = batchVisibilitySql(current, "b");
   const url = new URL(request.url);
   const q = (url.searchParams.get("q") || "").trim();
@@ -55,7 +62,8 @@ export async function loader({ request }: Route.LoaderArgs) {
   ).bind(current.organizationId, ...visibility.values, ...searchBinds).first<{ total: number }>();
   const rows = await env.DB.prepare(
     `SELECT b.id,b.batch_number,b.batch_name,b.origin_location,b.destination_location,
-            b.planned_departure_at,b.status,b.road_status,c.name carrier_name,w.name warehouse_name,
+            b.planned_departure_at,b.status,b.road_status,b.approval_status,c.name carrier_name,w.name warehouse_name,
+            supervisor.display_name operation_supervisor_name,operator.display_name operation_assignee_name,
             COUNT(DISTINCT bo.order_id) order_count,
             GROUP_CONCAT(DISTINCT o.order_number) order_numbers,
             GROUP_CONCAT(DISTINCT o.id||'|'||o.order_number) order_refs,
@@ -67,6 +75,8 @@ export async function loader({ request }: Route.LoaderArgs) {
        JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
        LEFT JOIN carriers c ON c.id=b.carrier_id
        LEFT JOIN warehouses w ON w.id=b.warehouse_id
+       LEFT JOIN users supervisor ON supervisor.id=b.operation_supervisor_user_id
+       LEFT JOIN users operator ON operator.id=b.operation_assignee_user_id
       WHERE b.organization_id=? AND b.batch_number LIKE 'PZ%' AND ${visibility.sql} ${statusSql} ${searchSql}
       GROUP BY b.id
       ORDER BY b.created_at DESC
@@ -103,16 +113,16 @@ export default function LoadingTracking({ loaderData }: Route.ComponentProps) {
       </Form>
     </section>
     <section className="panel">
-      <div className="table-wrap"><table><thead><tr><th>配载单</th><th>线路</th><th>挂载订单</th><th>实收重量/体积</th><th>承运商/仓库</th><th>车辆</th><th>计划发车</th><th>状态</th><th>操作</th></tr></thead><tbody>{loaderData.batches.map((batch) => <tr key={batch.id}>
+      <div className="table-wrap"><table><thead><tr><th>配载单</th><th>线路</th><th>挂载订单</th><th>实收重量/体积</th><th>负责人</th><th>车辆</th><th>计划发车</th><th>审核 / 状态</th><th>操作</th></tr></thead><tbody>{loaderData.batches.map((batch) => <tr key={batch.id}>
         <td><strong><BatchNumberLink id={batch.id} number={batch.batch_number}/></strong><small>{batch.batch_name}</small></td>
         <td>{batch.origin_location}<small>→ {batch.destination_location}</small></td>
         <td><strong>{batch.order_count} 票</strong><small className="entity-number-list"><OrderNumberLinkList orders={orderReferences(batch.order_refs)}/></small></td>
         <td>{Number(batch.total_weight || 0).toFixed(2)} KG<small>{Number(batch.total_volume || 0).toFixed(3)} CBM</small></td>
-        <td>{batch.carrier_name || "待仓库补齐"}<small>{batch.warehouse_name || "仓库未记录"}</small></td>
+        <td>{batch.operation_assignee_name || batch.operation_supervisor_name || "待指派"}<small>{batch.operation_assignee_name?"整单操作负责人":batch.operation_supervisor_name?"待操作主管审核":"尚未绑定主管"}</small></td>
         <td>{batch.vehicle_count} 辆</td>
         <td>{formatDate(batch.planned_departure_at)}</td>
-        <td><span className="status-pill">{roadStatusLabel(batch.road_status)}</span></td>
-        <td><Link className="text-button" to={`/admin/loading/${batch.id}`}>查看配载单</Link></td>
+        <td><span className={`status-pill ${batch.approval_status==="approved"?"success":batch.approval_status==="rejected"?"danger":""}`}>{batchApprovalLabel(batch.approval_status)}</span><small>{roadStatusLabel(batch.road_status)}</small></td>
+        <td><Link className={batch.approval_status==="submitted"?"primary":"text-button"} to={`/admin/loading/${batch.id}`}>{batch.approval_status==="submitted"?"审核并指派":"查看配载单"}</Link></td>
       </tr>)}</tbody></table></div>
       {!loaderData.batches.length && <p className="empty-state">没有找到符合条件的已生成配载单。</p>}
       {loaderData.pageCount > 1 && <div className="pagination">
@@ -150,6 +160,10 @@ function roadStatusLabel(value: string) {
     pickup_completed: "已完成自提",
     cancelled: "已取消",
   } as Record<string, string>)[value] || value;
+}
+
+function batchApprovalLabel(value: string) {
+  return ({ draft: "草稿", submitted: "待操作主管审核", approved: "已审核", rejected: "已退回" } as Record<string, string>)[value] || value;
 }
 
 export function meta() { return [{ title: "配载单跟踪 | International TMS" }]; }

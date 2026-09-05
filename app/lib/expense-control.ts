@@ -10,9 +10,23 @@ export type ExpenseDirectionControl = {
 export type ExpenseDirectionAction =
   | "confirm"
   | "business_review"
-  | "finance_review"
-  | "business_lock"
-  | "finance_lock";
+  | "finance_review";
+
+export type ExpenseDirectionWorkflowField = {
+  fieldKey: string;
+  isActive: boolean;
+  isRequired: boolean;
+};
+
+export type ExpenseDirectionActionMode = "required" | "optional" | "hidden";
+
+export type ExpenseDirectionActionPolicy = {
+  action: ExpenseDirectionAction;
+  fieldKey: string;
+  mode: ExpenseDirectionActionMode;
+  active: boolean;
+  required: boolean;
+};
 
 export type ExpenseDirectionActionAccess = {
   allowed: boolean;
@@ -33,24 +47,61 @@ export function emptyExpenseDirectionControl(
   };
 }
 
-export function expenseDirectionNextAction(control: ExpenseDirectionControl) {
-  if (!control.confirmed) return "确认费用";
-  if (!control.business_reviewed) return "业务审核";
-  if (!control.finance_reviewed) return "财务审核";
-  if (!control.business_locked) return "业务锁定";
-  if (!control.finance_locked) return "财务锁定";
-  return "已完成并锁定";
+export const expenseDirectionActions: readonly ExpenseDirectionAction[] = [
+  "confirm",
+  "business_review",
+  "finance_review",
+] as const;
+
+export const expenseDirectionActionFieldKeys = {
+  confirm: "customer_service_confirmation",
+  business_review: "business_review",
+  finance_review: "finance_review",
+} as const satisfies Record<ExpenseDirectionAction, string>;
+
+export function expenseDirectionActionPolicies(
+  fields: readonly ExpenseDirectionWorkflowField[] = [],
+): ExpenseDirectionActionPolicy[] {
+  const legacyFallback = fields.length === 0;
+  return expenseDirectionActions.map((action) => {
+    const fieldKey = expenseDirectionActionFieldKeys[action];
+    const configured = fields.find((field) => field.fieldKey === fieldKey);
+    const active = configured ? configured.isActive : legacyFallback;
+    const required = active && (configured ? configured.isRequired : true);
+    return {
+      action,
+      fieldKey,
+      mode: !active ? "hidden" : required ? "required" : "optional",
+      active,
+      required,
+    };
+  });
 }
 
-export function expenseDirectionNextActionCode(
+export function expenseDirectionActionLabel(action: ExpenseDirectionAction) {
+  if (action === "confirm") return "费用确认";
+  if (action === "business_review") return "业务审核";
+  return "财务审核";
+}
+
+export function expenseDirectionActionCompleted(
   control: ExpenseDirectionControl,
-): ExpenseDirectionAction | null {
-  if (!control.confirmed) return "confirm";
-  if (!control.business_reviewed) return "business_review";
-  if (!control.finance_reviewed) return "finance_review";
-  if (!control.business_locked) return "business_lock";
-  if (!control.finance_locked) return "finance_lock";
-  return null;
+  action: ExpenseDirectionAction,
+) {
+  if (action === "confirm") return control.confirmed === 1;
+  if (action === "business_review") return control.business_reviewed === 1;
+  return control.finance_reviewed === 1;
+}
+
+export function expenseDirectionComplete(
+  control: ExpenseDirectionControl,
+  fields: readonly ExpenseDirectionWorkflowField[] = [],
+) {
+  return expenseDirectionActionPolicies(fields)
+    .filter((policy) => policy.required)
+    .every((policy) =>
+      expenseDirectionActionCompleted(control, policy.action),
+  );
 }
 
 export function expenseDirectionActionAccess(input: {
@@ -69,52 +120,56 @@ export function expenseDirectionActionAccess(input: {
     return { allowed: true, ownerLabel: "老板或开发者", reason: null };
   }
 
-  if (!input.permissions.includes("order.module.costs.manage")) {
-    return {
-      allowed: false,
-      ownerLabel: "已授权的费用办理人员",
-      reason: "当前账号没有费用模块办理权限",
-    };
-  }
-
-  if (["finance_review", "finance_lock"].includes(input.action)) {
-    const financeOperator = input.permissions.includes("billing.expense.approve");
-    return financeOperator
-      ? { allowed: true, ownerLabel: "财务会计岗", reason: null }
-      : {
-          allowed: false,
-          ownerLabel: "财务会计岗",
-          reason: "当前步骤由具有费用审批权限的财务会计岗办理",
-        };
-  }
-
+  const roleName = input.action === "confirm"
+    ? "客服费用负责人"
+    : input.action === "business_review"
+      ? "订单业务员"
+      : "财务审核负责人";
   const ownerLabel = input.assignedUserName
-    ? `费用负责人 ${input.assignedUserName}`
-    : "已分配的费用负责人";
+    ? `${roleName} ${input.assignedUserName}`
+    : `已分配的${roleName}`;
   if (!input.assignedUserId) {
     return {
       allowed: false,
       ownerLabel,
-      reason: "尚未分配费用负责人，请先在任务分配中指定具体个人账户",
+      reason: `尚未分配${roleName}，请先在任务分配中指定具体个人账户`,
     };
   }
-  return input.assignedUserId === input.currentUserId
+  if (input.assignedUserId !== input.currentUserId) {
+    return {
+      allowed: false,
+      ownerLabel,
+      reason: `当前签核由${ownerLabel}办理`,
+    };
+  }
+
+  const qualified = input.action === "confirm"
+    ? input.positionCode === "CS" && input.permissions.includes("order.module.costs.manage")
+    : input.action === "business_review"
+      ? input.positionCode === "SALES"
+      : input.positionCode === "FINANCE_ACCOUNTING" &&
+        input.permissions.includes("billing.expense.approve");
+  return qualified
     ? { allowed: true, ownerLabel, reason: null }
     : {
         allowed: false,
         ownerLabel,
-        reason: `当前步骤由${ownerLabel}办理`,
+        reason: `当前账号不是有效的${roleName}账号`,
       };
 }
 
-export function expenseDirectionProgress(control: ExpenseDirectionControl) {
-  return [
-    control.confirmed,
-    control.business_reviewed,
-    control.finance_reviewed,
-    control.business_locked,
-    control.finance_locked,
-  ].filter(Boolean).length * 20;
+export function expenseDirectionProgress(
+  control: ExpenseDirectionControl,
+  fields: readonly ExpenseDirectionWorkflowField[] = [],
+) {
+  const activePolicies = expenseDirectionActionPolicies(fields).filter(
+    (policy) => policy.active,
+  );
+  if (!activePolicies.length) return 100;
+  const completed = activePolicies.filter((policy) =>
+    expenseDirectionActionCompleted(control, policy.action),
+  ).length;
+  return Math.round((completed / activePolicies.length) * 100);
 }
 
 export function canCreateExpenseFromModule(
@@ -124,4 +179,13 @@ export function canCreateExpenseFromModule(
   return moduleCode === "costs" || (
     moduleCode === "consignment" && entryContext === "consignment_costs"
   );
+}
+
+export function expenseDirectionActionStageAccess(currentStepKey: string | null) {
+  return ["reconciliation", "completion_review"].includes(currentStepKey ?? "")
+    ? { allowed: true as const, reason: null }
+    : {
+        allowed: false as const,
+        reason: "客户自提签收完成并进入对账结算节点后，才可执行费用确认与三方审核",
+      };
 }

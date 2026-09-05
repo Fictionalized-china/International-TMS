@@ -3,7 +3,10 @@ import { Form, Link } from "react-router";
 import type { Route } from "./+types/admin.position-portal";
 import { OrderNumberLink } from "../components/EntityNumberLink";
 import { OrderRouteFilterFields } from "../components/OrderRouteFilterFields";
+import { QueryPagination } from "../components/QueryPagination";
 import { requireSessionUser } from "../lib/auth.server";
+import { paginateList, readListPage } from "../lib/list-pagination";
+import { canOperateCurrentOrder } from "../lib/order-access";
 import { canSeeScopedOrder, canViewAllOrders } from "../lib/order-access.server";
 import {
   orderNextGuidance,
@@ -11,6 +14,7 @@ import {
 } from "../lib/order-guidance";
 import { orderResponsiblePosition } from "../lib/order-responsibility";
 import type { OrderModuleCode } from "../lib/order-modules";
+import { orderEntryPreference, orderModuleTabHref } from "../lib/order-module-tabs";
 import { matchesOrderRouteFilters, orderRouteFilterCount, readOrderRouteFilters } from "../lib/order-route-filters";
 
 type PortalModuleRow = GuidanceModule & {
@@ -38,6 +42,8 @@ type PortalModuleRow = GuidanceModule & {
   salesperson_user_id: string | null;
   created_by_user_id: string | null;
   customer_sales_owner_user_id: string | null;
+  current_assignee_user_id: string | null;
+  module_assignee_user_id: string | null;
 };
 
 type WorkflowTaskRow = {
@@ -65,13 +71,15 @@ export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request);
   const url = new URL(request.url);
   const routeFilters = readOrderRouteFilters(url.searchParams);
+  const requestedPage = readListPage(url.searchParams);
   if (!current.permissions.includes("order.view")) {
     return {
       current,
       orders: [] as never[],
       canViewAll: false,
       accessLimited: true,
-      summary: { open: 0, blocked: 0, overdue: 0 },
+      summary: { open: 0, blocked: 0, overdue: 0, actionable: 0, readonly: 0 },
+      pagination: { page: 1, pageCount: 1, pageSize: 10, total: 0 },
       positions: [] as FilterOption[],
       assignees: [] as FilterOption[],
       filters: {
@@ -80,6 +88,7 @@ export async function loader({ request }: Route.LoaderArgs) {
         businessType: "",
         position: "",
         assignee: "",
+        work: "all",
         q: "",
         ...routeFilters,
       },
@@ -95,9 +104,11 @@ export async function loader({ request }: Route.LoaderArgs) {
     : null;
   const canViewAll = canViewAllOrders(current);
   const requestedFilter = url.searchParams.get("state");
-  const stateFilter = ["open", "all", "blocked", "overdue"].includes(requestedFilter || "")
+  const stateFilter = ["open", "all", "blocked", "overdue", "pending_review", "reviewed"].includes(requestedFilter || "")
     ? requestedFilter!
     : settings?.default_filter || "open";
+  const requestedWork = url.searchParams.get("work");
+  const workFilter = ["all", "actionable", "readonly"].includes(requestedWork || "") ? requestedWork! : "all";
   const stageFilter = url.searchParams.get("stage") || "";
   const businessTypeFilter = url.searchParams.get("businessType") || "";
   const positionFilter = url.searchParams.get("position") || "";
@@ -110,10 +121,10 @@ export async function loader({ request }: Route.LoaderArgs) {
             o.origin_country,o.origin_state,o.origin_city,o.origin_address,o.exit_port,bp.name exit_port_name,
             o.destination_country,o.destination_state,o.destination_city,o.destination_address,
             ow.name overseas_warehouse_name,o.pieces,o.gross_weight_kg,o.volume_cbm,
-            o.is_overdue,o.salesperson_user_id,o.created_by_user_id,
+            o.is_overdue,o.salesperson_user_id,o.created_by_user_id,o.current_assignee_user_id,
             c.sales_owner_user_id customer_sales_owner_user_id,c.name customer_name,
             m.module_code,m.module_name,m.enabled,m.is_required,m.status,
-            m.current_step_code,m.current_step_name,m.blocking_reason,
+            m.current_step_code,m.current_step_name,m.blocking_reason,m.assignee_user_id module_assignee_user_id,
             m.progress_percent,u.display_name assignee_name,
             MAX(o.updated_at,m.updated_at) updated_at
        FROM transport_orders o
@@ -187,6 +198,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     const target = effectiveModuleCode
       ? modules.find((module) => module.module_code === effectiveModuleCode)
       : null;
+    const entryPreference = orderEntryPreference(current.positionCode);
     return {
       order_id: order.order_id,
       order_number: order.order_number,
@@ -222,9 +234,25 @@ export async function loader({ request }: Route.LoaderArgs) {
       salesperson_user_id: order.salesperson_user_id,
       created_by_user_id: order.created_by_user_id,
       customer_sales_owner_user_id: order.customer_sales_owner_user_id,
-      href: effectiveModuleCode
-        ? `/admin/orders/${order.order_id}/modules/${effectiveModuleCode}#module-business-data`
-        : guidance.href,
+      current_module_assignee_user_ids: [
+        workflowTask?.assignee_user_id,
+        target?.module_assignee_user_id,
+      ],
+      lifecycle_assignee_user_ids: modules.map((module) => module.module_assignee_user_id),
+      can_operate_current_node: canOperateCurrentOrder(current, {
+        status: order.order_status,
+        current_assignee_user_id: order.current_assignee_user_id,
+      }),
+      href: entryPreference
+        ? orderModuleTabHref({
+          orderId: order.order_id,
+          stepKey: entryPreference.stepKey,
+          moduleCode: entryPreference.moduleCode,
+          section: entryPreference.section,
+        })
+        : effectiveModuleCode
+          ? `/admin/orders/${order.order_id}/modules/${effectiveModuleCode}#module-business-data`
+          : guidance.href,
       updated_at: order.updated_at,
     };
   });
@@ -234,6 +262,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     if (stateFilter === "open" && ["completed", "cancelled"].includes(order.order_status)) return false;
     if (stateFilter === "blocked" && !order.blocker) return false;
     if (stateFilter === "overdue" && !order.is_overdue) return false;
+    if (stateFilter === "pending_review" && order.order_status !== "submitted") return false;
+    if (stateFilter === "reviewed" && ["draft", "submitted", "cancelled"].includes(order.order_status)) return false;
+    if (workFilter === "actionable" && !order.can_operate_current_node) return false;
+    if (workFilter === "readonly" && order.can_operate_current_node) return false;
     if (stageFilter && order.current_stage_code !== stageFilter) return false;
     if (businessTypeFilter && order.business_type !== businessTypeFilter) return false;
     if (positionFilter && order.responsible_position_code !== positionFilter) return false;
@@ -242,20 +274,30 @@ export async function loader({ request }: Route.LoaderArgs) {
     if (query && !`${order.order_number} ${order.customer_name} ${order.origin_city} ${order.destination_city} ${order.current_stage_name} ${order.current_module_name} ${order.current_step_name} ${order.responsible_position_name} ${order.assignee_name || ""}`.toLowerCase().includes(query)) return false;
     return true;
   }).sort((left, right) => {
+    if (left.can_operate_current_node !== right.can_operate_current_node) return left.can_operate_current_node ? -1 : 1;
     if (left.is_overdue !== right.is_overdue) return right.is_overdue - left.is_overdue;
     if (Boolean(left.blocker) !== Boolean(right.blocker)) return left.blocker ? -1 : 1;
     return right.updated_at.localeCompare(left.updated_at);
   });
+  const pagination = paginateList(visible, requestedPage);
 
   return {
     current,
-    orders: visible,
+    orders: pagination.items,
     canViewAll,
     accessLimited: false,
     summary: {
       open: scopedOrders.filter((order) => !["completed", "cancelled"].includes(order.order_status)).length,
       blocked: scopedOrders.filter((order) => Boolean(order.blocker)).length,
       overdue: scopedOrders.filter((order) => Boolean(order.is_overdue)).length,
+      actionable: scopedOrders.filter((order) => order.can_operate_current_node).length,
+      readonly: scopedOrders.filter((order) => !order.can_operate_current_node).length,
+    },
+    pagination: {
+      page: pagination.page,
+      pageCount: pagination.pageCount,
+      pageSize: pagination.pageSize,
+      total: pagination.total,
     },
     positions: portalPositions.results,
     assignees: portalAssignees.results,
@@ -265,6 +307,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       businessType: businessTypeFilter,
       position: positionFilter,
       assignee: assigneeFilter,
+      work: workFilter,
       q: url.searchParams.get("q") || "",
       ...routeFilters,
     },
@@ -281,15 +324,16 @@ export default function PositionPortal({ loaderData }: Route.ComponentProps) {
   return <>
     <header className="page-header position-portal-header">
       <div><p className="eyebrow">TASK WORKBENCH</p><h1>任务工作台</h1><p>{current.displayName} · {canViewAll ? "可查看全部订单" : "只显示当前由本岗位负责推进的订单"} · 点击订单直接进入对应办理模组</p></div>
-      <div className="page-actions"><span className="status-pill">当前显示 {orders.length} 条</span></div>
+      <div className="page-actions"><span className="status-pill">当前筛选 {loaderData.pagination.total} 单</span></div>
     </header>
 
     {accessLimited ? <section className="panel"><div className="empty-state"><strong>当前岗位仅用于组织与薪资归类</strong><p>尚未配置订单或业务数据权限；如需承担业务，请由人事行政岗或老板增加对应权限积木。</p></div></section> : <section className="panel position-order-ledger">
-      <div className="position-ledger-summary" aria-label="待办概况"><span>未完成 <strong>{summary.open}</strong></span><span>有阻断 <strong>{summary.blocked}</strong></span><span>已超时 <strong>{summary.overdue}</strong></span><span>当前视图 <strong>{orders.length}</strong></span></div>
+      <div className="position-ledger-summary" aria-label="待办概况"><span className="position-summary-actionable">待我办理 <strong>{summary.actionable}</strong></span><span>只读跟踪 <strong>{summary.readonly}</strong></span><span>未完成 <strong>{summary.open}</strong></span><span>有阻断 <strong>{summary.blocked}</strong></span><span>已超时 <strong>{summary.overdue}</strong></span><span>当前筛选 <strong>{loaderData.pagination.total}</strong></span></div>
       <Form method="get" action="." className="position-ledger-filters">
         <div className="position-primary-filters">
           <input name="q" defaultValue={filters.q} placeholder="订单、客户、线路、节点、岗位或人员" />
-          <select name="state" defaultValue={filters.state}><option value="open">未完成</option><option value="blocked">有阻断</option><option value="overdue">即将/已经超时</option>{canViewAll&&<option value="all">全部订单</option>}</select>
+          <select name="work" defaultValue={filters.work} aria-label="办理范围"><option value="all">全部办理范围</option><option value="actionable">待我办理</option><option value="readonly">只读跟踪</option></select>
+          <select name="state" defaultValue={filters.state} aria-label="订单状态"><option value="open">未完成</option><option value="pending_review">待审核</option><option value="reviewed">已审核</option><option value="blocked">有阻断</option><option value="overdue">即将/已经超时</option>{canViewAll&&<option value="all">全部订单</option>}</select>
           <button className="primary">查询任务</button><Link className="text-button" to="/admin/portal">重置</Link>
         </div>
         <details className="position-advanced-filters" open={advancedFilterCount > 0}>
@@ -303,15 +347,16 @@ export default function PositionPortal({ loaderData }: Route.ComponentProps) {
           </div>
         </details>
       </Form>
-      <div className="table-wrap position-ledger-table"><table><thead><tr><th>状态</th><th>订单 / 客户</th><th>线路 / 货量</th><th>当前节点 / 模组</th><th>负责岗位 / 人员</th><th>下一步与阻断</th><th className="sticky-action">操作</th></tr></thead><tbody>{orders.map(order=><tr key={order.order_id} className={order.blocker?"row-blocked":""}>
-        <td><span className={`status-pill ${order.is_overdue?"danger":""}`}>{order.is_overdue?"超时":orderStatusLabel(order.order_status)}</span></td>
+      <div className="table-wrap position-ledger-table"><table><thead><tr><th>办理属性 / 状态</th><th>订单 / 客户</th><th>线路 / 货量</th><th>当前节点 / 模组</th><th>负责岗位 / 人员</th><th>下一步与阻断</th><th className="sticky-action">操作</th></tr></thead><tbody>{orders.map(order=><tr key={order.order_id} className={`${order.can_operate_current_node?"row-actionable":"row-readonly"} ${order.blocker?"row-blocked":""}`}>
+        <td><strong className={`work-scope-badge ${order.can_operate_current_node?"actionable":"readonly"}`}>{order.can_operate_current_node?"待我办理":"只读跟踪"}</strong><small><span className={`status-pill ${order.is_overdue?"danger":""}`}>{order.is_overdue?"超时":orderStatusLabel(order.order_status)}</span></small></td>
         <td><strong><OrderNumberLink id={order.order_id} number={order.order_number}/></strong><small>{order.customer_name}</small></td>
         <td><strong>{order.origin_city || "起运地待补"} → {order.destination_city || "目的地待补"}</strong><small>{order.exit_port_name || order.exit_port || "口岸待定"} · {order.business_type==="ftl"?"整车":order.business_type==="ltl"?"拼车":"待确定"} · {order.pieces || 0} 件 · {Number(order.gross_weight_kg || 0).toFixed(2)} KG · {Number(order.volume_cbm || 0).toFixed(3)} CBM</small></td>
         <td><strong>{order.current_stage_name}</strong><small>{order.current_module_name} · {order.current_step_name}</small></td>
         <td><strong>{order.responsible_position_name}</strong><small>{order.assignee_name||"待分配"}</small></td>
         <td><strong>{order.next_action}</strong><small className={order.blocker?"danger-text":""}>{order.blocker||"当前节点暂无阻断"}</small></td>
-        <td className="sticky-action"><Link className="text-button" to={order.href}>{order.blocker?"查看阻断并处理":"打开当前节点"}</Link></td>
+        <td className="sticky-action"><Link className="text-button" to={order.href}>{order.can_operate_current_node?(order.blocker?"查看阻断并处理":"办理当前节点"):"查看订单"}</Link></td>
       </tr>)}</tbody></table>{!orders.length&&<p className="empty-state">当前筛选条件下没有订单。</p>}</div>
+      <QueryPagination {...loaderData.pagination}/>
     </section>}
   </>;
 }

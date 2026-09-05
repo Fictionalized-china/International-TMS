@@ -1,4 +1,5 @@
 import type { OrderModuleCode } from "./order-modules";
+import { canAccessSettlementWorkbench } from "./billing-access";
 
 export type PositionPortalLink = {
   label: string;
@@ -79,6 +80,7 @@ const portalConfigs: Record<string, PositionPortalConfig> = {
     quickLinks: [
       { label: "单证待办", description: "处理文件资料", href: "/admin/workbenches/documents", permission: "order.view" },
       { label: "报关待办", description: "处理申报与放行", href: "/admin/workbenches/customs", permission: "order.view" },
+      { label: "配载订单", description: "处理分配给本人的整批单证与报关", href: "/admin/loading", permission: "transport.batch.assigned.view" },
       { label: "运单列表", description: "核对关联运单", href: "/admin/shipments", permission: "shipment.view" },
     ],
   },
@@ -133,6 +135,30 @@ const portalConfigs: Record<string, PositionPortalConfig> = {
       { label: "运输订单", description: "创建并跟进本人订单", href: "/admin/orders", permission: "order.view" },
     ],
   },
+  BUSINESS_SUPERVISOR: {
+    code: "BUSINESS_SUPERVISOR",
+    title: "业务主管门户",
+    description: "查看全部业务订单，并审批明确提交给本人的委托资料。",
+    viewAreas: ["全部订单", "委托资料", "报价与客户摘要"],
+    operateAreas: ["审批本人待办", "指定下一步操作主管"],
+    moduleCodes: ["consignment"],
+    quickLinks: [
+      { label: "审批待办", description: "审批提交给本人的委托", href: "/admin/workbenches/tasks", permission: "order.view" },
+      { label: "运输订单", description: "只读查看全部订单", href: "/admin/orders", permission: "order.view" },
+    ],
+  },
+  OPERATION_SUPERVISOR: {
+    code: "OPERATION_SUPERVISOR",
+    title: "操作主管门户",
+    description: "接收业务主管转交的订单，分配具体操作岗，并审核拼车配载单。",
+    viewAreas: ["本人审批订单", "本人审批配载单", "执行人员与进度"],
+    operateAreas: ["任务分配", "拼车配载审批", "指定整单操作负责人"],
+    moduleCodes: ["assignment", "loading"],
+    quickLinks: [
+      { label: "任务分配", description: "处理本人待派订单", href: "/admin/workbenches/tasks", permission: "order.view" },
+      { label: "配载审批", description: "审核仓库提交的拼车配载单", href: "/admin/loading", permission: "order.view" },
+    ],
+  },
   OVERSEAS: {
     code: "OVERSEAS",
     title: "海外人员门户",
@@ -163,15 +189,15 @@ const portalConfigs: Record<string, PositionPortalConfig> = {
   OPERATION: {
     code: "OPERATION",
     title: "操作门户",
-    description: "从审核派单到境外到仓统筹订单执行，是汽运主流程的核心岗位。",
-    viewAreas: ["本岗位待认领订单", "派给本人的订单", "任务与负责人", "仓配、单证、报关和异常"],
-    operateAreas: ["审批与派单", "国内运输安排", "协调仓库与配载", "单证报关", "异常处理"],
-    moduleCodes: ["assignment", "transport", "warehouse", "loading", "documents", "customs", "overseas_warehouse", "exceptions", "review"],
+    description: "连续负责分配给本人的运输安排、车辆轨迹和执行异常。",
+    viewAreas: ["派给本人的订单", "本人负责配载单", "运输资源", "轨迹和异常"],
+    operateAreas: ["国内运输安排", "登记全程运踪", "异常处理"],
+    moduleCodes: ["transport", "tracking", "exceptions"],
     quickLinks: [
       { label: "业务待办", description: "按下一步处理订单", href: "/admin/workbenches/tasks", permission: "order.view" },
       { label: "运输订单", description: "查看全部执行订单", href: "/admin/orders", permission: "order.view" },
       { label: "运单列表", description: "查看运输资源与轨迹", href: "/admin/shipments", permission: "shipment.view" },
-      { label: "拼车配载", description: "处理跨订单高级配载", href: "/admin/loading", permission: "order.view" },
+      { label: "配载单跟踪", description: "处理分配给本人的整批运输", href: "/admin/loading", permission: "transport.batch.assigned.view" },
     ],
   },
   BUSINESS_ROUTE: {
@@ -220,7 +246,9 @@ export function positionPortalForUser(user: PortalUser): PositionPortalConfig {
 
 export function visiblePortalLinks(config: PositionPortalConfig, permissions: string[]) {
   return config.quickLinks.filter(
-    (link) => !link.permission || permissions.includes(link.permission),
+    (link) =>
+      (!link.permission || permissions.includes(link.permission)) &&
+      (link.href !== "/admin/billing" || canAccessSettlementWorkbench(permissions)),
   );
 }
 
@@ -230,7 +258,8 @@ export function moduleManagePermission(moduleCode: string) {
 
 export function canManageOrderModule(user: PortalUser, moduleCode: string) {
   return (
-    user.roleCodes.some((code) => code === "owner" || code === "boss") ||
+    ["BOSS", "DEVELOPER"].includes(user.positionCode ?? "") ||
+    user.roleCodes.some((code) => code === "owner" || code === "boss" || code === "developer") ||
     user.permissions.includes(moduleManagePermission(moduleCode))
   );
 }

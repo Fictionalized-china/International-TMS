@@ -10,7 +10,6 @@ import { AppIcon } from "../components/AppIcon";
 import { PrototypeBrandMark } from "../components/PrototypeBrandMark";
 import { ConnectionStatus } from "../components/InteractionFeedback";
 import { WorkspacePreferences } from "../components/WorkspacePreferences";
-import { submitForm } from "../lib/form-submit";
 import { InternalNotificationCenter } from "../components/InternalNotificationCenter";
 import { loadInternalNotificationSummary } from "../lib/internal-notifications.server";
 
@@ -145,15 +144,11 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
             <small>WAREHOUSE OPERATIONS</small>
           </div>
         </div>
-        <Form method="get" action="/warehouse" className="warehouse-context-switcher warehouse-account-context">
-          {orderContext&&<input type="hidden" name="orderId" value={orderContext.id}/>}
-          {loaderData.returnTo!=="/admin"&&<input type="hidden" name="returnTo" value={loaderData.returnTo}/>}
-          <label htmlFor="authorized-warehouse"><span>当前授权仓库</span></label>
-          <select id="authorized-warehouse" name="warehouseId" defaultValue={loaderData.warehouse.id} onChange={event=>submitForm(event.currentTarget.form)} disabled={loaderData.warehouses.length<2}>
-            {loaderData.warehouses.map(item=><option key={item.id} value={item.id}>{item.name} · {warehouseRoleLabels[item.warehouse_role]}</option>)}
-          </select>
-          <small>{loaderData.warehouse.code} · 仅显示当前账号获授权的仓库</small>
-        </Form>
+        <div className="warehouse-context-switcher warehouse-account-context" aria-label="当前账号绑定仓库">
+          <span>当前账号专属仓库</span>
+          <strong>{loaderData.warehouse.name}</strong>
+          <small>{loaderData.warehouse.code} · {warehouseRoleLabels[loaderData.warehouse.warehouse_role]} · 登录自动进入</small>
+        </div>
         <nav className="nav" aria-label="仓库作业导航">
           <span className="warehouse-nav-group nav-title">工作台</span>
           <NavLink to={warehouseLink("/warehouse/notifications", loaderData.query)}>

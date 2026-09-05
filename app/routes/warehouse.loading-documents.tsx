@@ -1,8 +1,9 @@
 import { env } from "cloudflare:workers";
 import { useEffect, useId, useRef, useState } from "react";
-import { Link, useNavigate, useNavigation, useSubmit } from "react-router";
+import { Link, useNavigate, useNavigation, useSearchParams, useSubmit } from "react-router";
 import type { Route } from "./+types/warehouse.loading-documents";
 import { Modal } from "../components/Modal";
+import { QueryPagination } from "../components/QueryPagination";
 import { writeAudit } from "../lib/audit.server";
 import { requireSessionUser } from "../lib/auth.server";
 import { synchronizeOrderDocumentsModuleStatus } from "../lib/documents-module-status.server";
@@ -20,6 +21,7 @@ import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
 import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 import { valueOf } from "../lib/validation";
+import { paginateList, readListPage } from "../lib/list-pagination";
 
 const LOADING_DOCUMENTS = loadingOrderDocumentDefinitions;
 const PAGE_SIZE = 10;
@@ -332,6 +334,7 @@ export async function action({ request }: Route.ActionArgs) {
 }
 
 export default function WarehouseLoadingDocuments({ loaderData, actionData }: Route.ComponentProps) {
+  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const navigation = useNavigation();
   const busy = navigation.state !== "idle";
@@ -346,6 +349,7 @@ export default function WarehouseLoadingDocuments({ loaderData, actionData }: Ro
     selectedSummary.requiredCount === 0 ||
     (selectedSummary.approvedRequiredCount === selectedSummary.requiredCount && selectedSummary.rejectedRequiredCount === 0)
   ));
+  const orderPagination = paginateList(loaderData.orders, readListPage(searchParams, "orderPage"));
   return <>
     <header className="page-header warehouse-loading-documents-header">
       <div><p className="eyebrow">LOAD DOCUMENTS</p><h1>配载文件</h1><p>拼车发运文件的统一管理入口：按 PZ 配载单集中上传并查看齐套状态，文件仍按订单归档和追溯。</p></div>
@@ -402,7 +406,7 @@ export default function WarehouseLoadingDocuments({ loaderData, actionData }: Ro
         {(actionData?.success || actionData?.formError) && <div className={`warehouse-loading-document-message ${actionData.formError ? "error" : "success"}`} role={actionData.formError ? "alert" : "status"} aria-live="polite">{actionData.formError ?? actionData.success}</div>}
         {selectedSummary && selectedMissing === 0 && selected && <div className={`warehouse-loading-document-completion ${selectedReady ? "success" : "pending"}`} role="status" aria-live="polite"><div><strong>{selected.dispatch_id ? "装车任务已创建" : selectedSummary.rejectedRequiredCount ? "必填文件已被退回" : selectedReady ? "文件齐套完成" : "全部必填文件已上传"}</strong><span>{selected.dispatch_id ? "可直接进入装车与出库继续办理。" : selectedSummary.rejectedRequiredCount ? `${selectedSummary.rejectedRequiredCount} 项文件需重新上传并通过审核，完成后即可创建装车任务。` : selectedReady ? "当前配载单的必填文件已全部通过，可直接新建装车任务。" : `还有 ${Math.max(0, selectedSummary.requiredCount - selectedSummary.approvedRequiredCount)} 项待审核，审核通过后即可创建装车任务。`}</span></div><Link className={selectedReady ? "primary warehouse-primary" : "secondary"} to={loadingTaskHref(loaderData.warehouse.id, selected.id, selected.dispatch_id)}>{selected.dispatch_id ? "进入装车与出库" : "新建装车任务"}</Link></div>}
         <div className="table-wrap warehouse-loading-document-matrix"><table><thead><tr><th>订单 / 客户</th><th>货物</th>{loaderData.selectedDocumentTypes.map((item) => <th key={item.code}>{item.name}</th>)}<th>操作</th></tr></thead><tbody>
-          {loaderData.orders.map((order) => {
+          {orderPagination.items.map((order) => {
             const requirements = loaderData.selectedDocumentRequirements.find(
               (group) => group.orderId === order.order_id,
             )?.documents ?? [];
@@ -425,6 +429,7 @@ export default function WarehouseLoadingDocuments({ loaderData, actionData }: Ro
             /></td></tr>;
           })}
         </tbody></table></div>
+        <QueryPagination {...orderPagination} pageParam="orderPage" unit="票订单"/>
       </section>
     </Modal>}
   </>;

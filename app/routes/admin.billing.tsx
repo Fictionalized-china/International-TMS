@@ -1,97 +1,841 @@
-import{env}from"cloudflare:workers";
-import{Form,Link,useNavigation}from"react-router";
-import type{Route}from"./+types/admin.billing";
-import{requireSessionUser}from"../lib/auth.server";
-import{writeAudit}from"../lib/audit.server";
-import{valueOf}from"../lib/validation";
-import{allocateCashTransaction,confirmReconciliation,createReconciliation,loadSettlementWorkbench,recordCashTransaction,recordSettlementInvoice,type ReconciliationRow,type SettlementExpense}from"../lib/settlement-workbench.server";
-import{OrderNumberLink,OrderNumberLinkList}from"../components/EntityNumberLink";
+import { env } from "cloudflare:workers";
+import { Form, Link, useNavigation } from "react-router";
+import type { Route } from "./+types/admin.billing";
+import { QueryPagination } from "../components/QueryPagination";
+import { OrderNumberLink, OrderNumberLinkList } from "../components/EntityNumberLink";
+import { writeAudit } from "../lib/audit.server";
+import { requireSessionUser } from "../lib/auth.server";
+import { canAccessSettlementWorkbench } from "../lib/billing-access";
+import {
+  BILLING_PAGE_SIZE,
+  billingTabs,
+  readBillingView,
+  settlementExpenseGroupKey,
+  type BillingHistoryType,
+  type BillingTab,
+  type BillingView,
+} from "../lib/billing-view";
+import {
+  emptySettlementPage,
+  loadAvailableCashTransactions,
+  loadCashHistoryPage,
+  loadEligibleExpensePage,
+  loadInvoiceHistoryPage,
+  loadLegacyInvoicePage,
+  loadReconciliationPage,
+  loadSettlementSummary,
+  type LegacyInvoiceRow,
+  type SettlementPage,
+} from "../lib/settlement-workbench-pages.server";
+import {
+  allocateCashTransaction,
+  confirmReconciliation,
+  createReconciliation,
+  recordCashTransaction,
+  recordSettlementInvoice,
+  type CashTransactionRow,
+  type InvoiceRecordRow,
+  type ReconciliationRow,
+  type SettlementExpense,
+} from "../lib/settlement-workbench.server";
+import { valueOf } from "../lib/validation";
 
-type UserOption={id:string;display_name:string};
-type LegacyInvoice={id:string;invoice_number:string;customer_name:string;currency:string;total_amount:number;paid_amount:number;status:string;created_at:string};
+type UserOption = { id: string; display_name: string };
 
-export async function loader({request}:Route.LoaderArgs){
-  const current=await requireSessionUser(request,"billing.view");
-  if(!current.permissions.includes("billing.sensitive.view"))throw new Response("没有权限查看应收、应付和利润数据",{status:403});
-  const [workbench,organization,users,legacyInvoices]=await Promise.all([
-    loadSettlementWorkbench(env.DB,current.organizationId),
-    env.DB.prepare("SELECT name FROM organizations WHERE id=?").bind(current.organizationId).first<{name:string}>(),
-    env.DB.prepare("SELECT u.id,u.display_name FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=? AND m.status='active' AND u.status='active' ORDER BY u.display_name").bind(current.organizationId).all<UserOption>(),
-    env.DB.prepare("SELECT i.id,i.invoice_number,c.name customer_name,i.currency,i.total_amount,i.paid_amount,i.status,i.created_at FROM invoices i JOIN customers c ON c.id=i.customer_id WHERE i.organization_id=? ORDER BY i.created_at DESC LIMIT 50").bind(current.organizationId).all<LegacyInvoice>(),
+const tabCopy: Record<BillingTab, { label: string; description: string }> = {
+  pending: { label: "待对账", description: "从已确认费用生成对账单" },
+  reconciliations: { label: "对账单", description: "复核草稿并查看对账进度" },
+  cash: { label: "收付款核销", description: "登记真实流水并完成核销" },
+  invoices: { label: "发票", description: "按对账单登记开票或收票" },
+  history: { label: "历史记录", description: "查询流水、发票和旧账单" },
+};
+
+export async function loader({ request }: Route.LoaderArgs) {
+  const current = await requireSessionUser(request);
+  if (!canAccessSettlementWorkbench(current.permissions)) {
+    return { accessDenied: true as const, current };
+  }
+
+  const view = readBillingView(new URL(request.url).searchParams);
+  const [summary, organization, users] = await Promise.all([
+    loadSettlementSummary(env.DB, current.organizationId),
+    env.DB.prepare("SELECT name FROM organizations WHERE id=?")
+      .bind(current.organizationId)
+      .first<{ name: string }>(),
+    env.DB.prepare(
+      "SELECT u.id,u.display_name FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=? AND m.status='active' AND u.status='active' ORDER BY u.display_name",
+    ).bind(current.organizationId).all<UserOption>(),
   ]);
-  return{current,...workbench,organizationName:organization?.name||"当前组织",users:users.results,legacyInvoices:legacyInvoices.results};
+  const pageQuery = {
+    page: view.page,
+    pageSize: BILLING_PAGE_SIZE,
+    query: view.query,
+    direction: view.direction,
+    currency: view.currency,
+    status: view.status,
+  };
+  let eligiblePage = emptySettlementPage<SettlementExpense>(view.page, BILLING_PAGE_SIZE);
+  let reconciliationPage = emptySettlementPage<ReconciliationRow>(view.page, BILLING_PAGE_SIZE);
+  let cashWorkPage = emptySettlementPage<ReconciliationRow>(view.page, BILLING_PAGE_SIZE);
+  let invoiceWorkPage = emptySettlementPage<ReconciliationRow>(view.page, BILLING_PAGE_SIZE);
+  let cashHistoryPage = emptySettlementPage<CashTransactionRow>(view.page, BILLING_PAGE_SIZE);
+  let invoiceHistoryPage = emptySettlementPage<InvoiceRecordRow>(view.page, BILLING_PAGE_SIZE);
+  let legacyHistoryPage = emptySettlementPage<LegacyInvoiceRow>(view.page, BILLING_PAGE_SIZE);
+  let availableCashTransactions: CashTransactionRow[] = [];
+
+  if (view.tab === "pending") {
+    eligiblePage = await loadEligibleExpensePage(env.DB, current.organizationId, pageQuery);
+  } else if (view.tab === "reconciliations") {
+    reconciliationPage = await loadReconciliationPage(env.DB, current.organizationId, pageQuery);
+  } else if (view.tab === "cash") {
+    cashWorkPage = await loadReconciliationPage(env.DB, current.organizationId, pageQuery, "cash");
+    availableCashTransactions = await loadAvailableCashTransactions(
+      env.DB,
+      current.organizationId,
+      cashWorkPage.items,
+    );
+  } else if (view.tab === "invoices") {
+    invoiceWorkPage = await loadReconciliationPage(env.DB, current.organizationId, pageQuery, "invoice");
+  } else if (view.historyType === "cash") {
+    cashHistoryPage = await loadCashHistoryPage(env.DB, current.organizationId, pageQuery);
+  } else if (view.historyType === "invoices") {
+    invoiceHistoryPage = await loadInvoiceHistoryPage(env.DB, current.organizationId, pageQuery);
+  } else {
+    legacyHistoryPage = await loadLegacyInvoicePage(env.DB, current.organizationId, pageQuery);
+  }
+
+  return {
+    accessDenied: false as const,
+    current,
+    view,
+    organizationName: organization?.name || "当前组织",
+    users: users.results,
+    eligiblePage,
+    reconciliationPage,
+    cashWorkPage,
+    invoiceWorkPage,
+    cashHistoryPage,
+    invoiceHistoryPage,
+    legacyHistoryPage,
+    availableCashTransactions,
+    counts: summary.counts,
+    balances: summary.balances,
+  };
 }
 
-export async function action({request}:Route.ActionArgs){
-  const current=await requireSessionUser(request,"billing.view"),form=await request.formData(),intent=valueOf(form,"intent"),now=new Date().toISOString();
-  if(!current.permissions.includes("billing.sensitive.view"))throw new Response("没有权限查看或处理敏感费用",{status:403});
-  const cashIntent=intent==="record_cash"||intent==="allocate_cash";
-  if(cashIntent&&!current.permissions.includes("billing.cash.manage"))throw new Response("没有收付款与核销权限",{status:403});
-  if(!cashIntent&&!current.permissions.includes("billing.manage"))throw new Response("没有对账与发票管理权限",{status:403});
-  try{
-    if(intent==="create_reconciliation"){
-      const direction=valueOf(form,"direction");
-      if(direction!=="receivable"&&direction!=="payable")return{formError:"对账方向无效"};
-      const result=await createReconciliation(env.DB,{organizationId:current.organizationId,expenseIds:form.getAll("expenseId").map(String),direction,notes:valueOf(form,"notes"),userId:current.userId,now});
-      await audit(request,current,"settlement.reconciliation.create","settlement_reconciliation",result.id,{number:result.number,direction});
-      return{success:`对账单 ${result.number} 已生成草稿，请复核后确认`};
+export async function action({ request }: Route.ActionArgs) {
+  const current = await requireSessionUser(request, "billing.view");
+  const form = await request.formData();
+  const intent = valueOf(form, "intent");
+  const now = new Date().toISOString();
+  if (!current.permissions.includes("billing.sensitive.view")) {
+    throw new Response("没有权限查看或处理敏感费用", { status: 403 });
+  }
+  const cashIntent = intent === "record_cash" || intent === "allocate_cash";
+  if (cashIntent && !current.permissions.includes("billing.cash.manage")) {
+    throw new Response("没有收付款与核销权限", { status: 403 });
+  }
+  if (!cashIntent && !current.permissions.includes("billing.manage")) {
+    throw new Response("没有对账与发票管理权限", { status: 403 });
+  }
+
+  try {
+    if (intent === "create_reconciliation") {
+      const direction = valueOf(form, "direction");
+      if (direction !== "receivable" && direction !== "payable") {
+        return { formError: "对账方向无效" };
+      }
+      const result = await createReconciliation(env.DB, {
+        organizationId: current.organizationId,
+        expenseIds: form.getAll("expenseId").map(String),
+        direction,
+        notes: valueOf(form, "notes"),
+        userId: current.userId,
+        now,
+      });
+      await audit(request, current, "settlement.reconciliation.create", "settlement_reconciliation", result.id, {
+        number: result.number,
+        direction,
+      });
+      return { success: `对账单 ${result.number} 已生成草稿，请到“对账单”页签复核确认` };
     }
-    if(intent==="confirm_reconciliation"){
-      const id=valueOf(form,"id");
-      await confirmReconciliation(env.DB,{organizationId:current.organizationId,id,userId:current.userId,now});
-      await audit(request,current,"settlement.reconciliation.confirm","settlement_reconciliation",id,{});
-      return{success:"对账单已确认；现在可以登记发票和匹配收付款流水"};
+    if (intent === "confirm_reconciliation") {
+      const id = valueOf(form, "id");
+      await confirmReconciliation(env.DB, {
+        organizationId: current.organizationId,
+        id,
+        userId: current.userId,
+        now,
+      });
+      await audit(request, current, "settlement.reconciliation.confirm", "settlement_reconciliation", id, {});
+      return { success: "对账单已确认；发票与收付款核销现在可以并行办理" };
     }
-    if(intent==="record_invoice"){
-      const reconciliationId=valueOf(form,"reconciliationId");
-      const result=await recordSettlementInvoice(env.DB,{organizationId:current.organizationId,reconciliationId,amount:positive(form,"amount"),invoiceCompany:valueOf(form,"invoiceCompany"),invoiceType:valueOf(form,"invoiceType"),invoiceNumber:valueOf(form,"invoiceNumber"),invoiceCode:valueOf(form,"invoiceCode"),invoiceDate:valueOf(form,"invoiceDate"),taxRate:nonNegative(form,"taxRate"),titleName:valueOf(form,"titleName"),taxNumber:valueOf(form,"taxNumber"),addressPhone:valueOf(form,"addressPhone"),bankAccount:valueOf(form,"bankAccount"),exchangeRate:positive(form,"exchangeRate",1),attachmentReference:valueOf(form,"attachmentReference"),notes:valueOf(form,"invoiceNotes"),userId:current.userId,now});
-      await audit(request,current,"settlement.invoice.record","settlement_invoice_record",result.id,{recordNumber:result.recordNumber,reconciliationId});
-      return{success:`发票记录 ${result.recordNumber} 已保存`};
+    if (intent === "record_invoice") {
+      const reconciliationId = valueOf(form, "reconciliationId");
+      const result = await recordSettlementInvoice(env.DB, {
+        organizationId: current.organizationId,
+        reconciliationId,
+        amount: positive(form, "amount"),
+        invoiceCompany: valueOf(form, "invoiceCompany"),
+        invoiceType: valueOf(form, "invoiceType"),
+        invoiceNumber: valueOf(form, "invoiceNumber"),
+        invoiceCode: valueOf(form, "invoiceCode"),
+        invoiceDate: valueOf(form, "invoiceDate"),
+        taxRate: nonNegative(form, "taxRate"),
+        titleName: valueOf(form, "titleName"),
+        taxNumber: valueOf(form, "taxNumber"),
+        addressPhone: valueOf(form, "addressPhone"),
+        bankAccount: valueOf(form, "bankAccount"),
+        exchangeRate: positive(form, "exchangeRate", 1),
+        attachmentReference: valueOf(form, "attachmentReference"),
+        notes: valueOf(form, "invoiceNotes"),
+        userId: current.userId,
+        now,
+      });
+      await audit(request, current, "settlement.invoice.record", "settlement_invoice_record", result.id, {
+        recordNumber: result.recordNumber,
+        reconciliationId,
+      });
+      return { success: `发票记录 ${result.recordNumber} 已保存` };
     }
-    if(intent==="record_cash"){
-      const direction=valueOf(form,"direction");
-      if(direction!=="receipt"&&direction!=="payment")return{formError:"收付款方向无效"};
-      const result=await recordCashTransaction(env.DB,{organizationId:current.organizationId,direction,counterpartyName:valueOf(form,"counterpartyName"),currency:valueOf(form,"currency"),amount:positive(form,"amount"),occurredOn:valueOf(form,"occurredOn"),settlementEntity:valueOf(form,"settlementEntity"),accountName:valueOf(form,"accountName"),handledByUserId:valueOf(form,"handledByUserId"),evidenceReference:valueOf(form,"evidenceReference"),notes:valueOf(form,"cashNotes"),userId:current.userId,now});
-      await audit(request,current,"settlement.cash.record","settlement_cash_transaction",result.id,{number:result.number,direction});
-      return{success:`流水 ${result.number} 已登记；可继续匹配对账单进行核销`};
+    if (intent === "record_cash") {
+      const direction = valueOf(form, "direction");
+      if (direction !== "receipt" && direction !== "payment") {
+        return { formError: "收付款方向无效" };
+      }
+      const result = await recordCashTransaction(env.DB, {
+        organizationId: current.organizationId,
+        direction,
+        counterpartyName: valueOf(form, "counterpartyName"),
+        currency: valueOf(form, "currency"),
+        amount: positive(form, "amount"),
+        occurredOn: valueOf(form, "occurredOn"),
+        settlementEntity: valueOf(form, "settlementEntity"),
+        accountName: valueOf(form, "accountName"),
+        handledByUserId: valueOf(form, "handledByUserId"),
+        evidenceReference: valueOf(form, "evidenceReference"),
+        notes: valueOf(form, "cashNotes"),
+        userId: current.userId,
+        now,
+      });
+      await audit(request, current, "settlement.cash.record", "settlement_cash_transaction", result.id, {
+        number: result.number,
+        direction,
+      });
+      return { success: `流水 ${result.number} 已登记；可在当前页匹配对账单并核销` };
     }
-    if(intent==="allocate_cash"){
-      const transactionId=valueOf(form,"transactionId"),reconciliationId=valueOf(form,"reconciliationId");
-      await allocateCashTransaction(env.DB,{organizationId:current.organizationId,transactionId,reconciliationId,amount:positive(form,"amount"),userId:current.userId,now});
-      await audit(request,current,"settlement.cash.allocate","settlement_cash_transaction",transactionId,{reconciliationId});
-      return{success:"收付款流水已核销到费用；未分配余额和费用未核销余额已同步更新"};
+    if (intent === "allocate_cash") {
+      const transactionId = valueOf(form, "transactionId");
+      const reconciliationId = valueOf(form, "reconciliationId");
+      await allocateCashTransaction(env.DB, {
+        organizationId: current.organizationId,
+        transactionId,
+        reconciliationId,
+        amount: positive(form, "amount"),
+        userId: current.userId,
+        now,
+      });
+      await audit(request, current, "settlement.cash.allocate", "settlement_cash_transaction", transactionId, {
+        reconciliationId,
+      });
+      return { success: "核销完成；流水未分配余额和订单费用余额已同步更新" };
     }
-    return{formError:"操作无效"};
-  }catch(error){return{formError:error instanceof Error?error.message:"操作失败，请稍后重试"}}
+    return { formError: "操作无效" };
+  } catch (error) {
+    return { formError: error instanceof Error ? error.message : "操作失败，请稍后重试" };
+  }
 }
 
-export default function Billing({loaderData,actionData}:Route.ComponentProps){
-  const busy=useNavigation().state!=="idle",manage=loaderData.current.permissions.includes("billing.manage"),cashManage=loaderData.current.permissions.includes("billing.cash.manage"),eligibleReceivable=loaderData.eligibleExpenses.filter(item=>item.direction==="receivable"),eligiblePayable=loaderData.eligibleExpenses.filter(item=>item.direction==="payable");
-  const outstanding=loaderData.reconciliations.reduce((sum,item)=>sum+Math.max(0,item.total_amount-item.settled_amount),0);
-  return <><header className="page-header"><div><p className="eyebrow">FINANCE SETTLEMENT</p><h1>费用结算</h1><p>一条主线完成费用对账、发票、收付款和核销；应收与应付独立推进。</p></div><span className="status-pill">未核销 {outstanding.toFixed(2)}</span></header>{(actionData?.success||actionData?.formError)&&<div className={`alert ${actionData.formError?"error":"success"}`}>{actionData.formError??actionData.success}</div>}
-    <section className="panel settlement-summary-table"><div className="table-wrap"><table><thead><tr><th>待对账费用</th><th>对账单</th><th>发票记录</th><th>收付款流水</th></tr></thead><tbody><tr><td><strong>{loaderData.eligibleExpenses.length}</strong><small>仅已确认费用</small></td><td><strong>{loaderData.reconciliations.length}</strong><small>应收 / 应付</small></td><td><strong>{loaderData.invoices.length}</strong><small>销项 / 进项</small></td><td><strong>{loaderData.cashTransactions.length}</strong><small>可分次核销</small></td></tr></tbody></table></div></section>
-    <section className="panel settlement-step"><div className="panel-header"><div><h2>1. 从已确认费用发起对账</h2><p>应收只可选择同客户、同币种且已出境的费用；应付只可选择同供应商、同币种的费用。</p></div></div>{manage?<div className="settlement-two-column"><ExpenseSelection direction="receivable" expenses={eligibleReceivable} busy={busy}/><ExpenseSelection direction="payable" expenses={eligiblePayable} busy={busy}/></div>:<p className="muted">当前账号只有查看权限。</p>}</section>
-    <section className="panel settlement-step"><div className="panel-header"><div><h2>2. 对账单复核与后续办理</h2><p>确认后可登记部分发票、登记银行流水，并将同往来单位同币种的流水分次核销。</p></div></div><div className="reconciliation-list">{loaderData.reconciliations.map(row=><ReconciliationSheet key={row.id} row={row} manage={manage} cashManage={cashManage} busy={busy} cash={loaderData.cashTransactions}/>)}</div>{!loaderData.reconciliations.length&&<p className="empty-state">暂无对账单。</p>}</section>
-    {cashManage&&<section className="panel settlement-step"><div className="panel-header"><div><h2>3. 独立登记收付款流水</h2><p>先登记真实银行/现金流水，之后再匹配对账单；一笔流水可以分多次核销。</p></div></div><Form method="post" className="form-grid compact settlement-cash-form"><input type="hidden" name="intent" value="record_cash"/><Sel name="direction" label="方向" items={[["receipt","客户收款"],["payment","供应商付款"]]}/><Text name="counterpartyName" label="往来单位" required/><Text name="currency" label="币种" required defaultValue="CNY"/><Num name="amount" label="金额" required/><label className="field"><span>收 / 付款日期</span><input name="occurredOn" type="date" required/></label><Text name="settlementEntity" label="所属公司" required defaultValue={loaderData.organizationName}/><Text name="accountName" label="银行 / 现金账户" required/><Sel name="handledByUserId" label="经办人" items={loaderData.users.map(item=>[item.id,item.display_name])}/><Text name="evidenceReference" label="凭证附件 / 编号"/><label className="field settlement-cash-notes"><span>备注</span><textarea name="cashNotes" rows={2}/></label><button className="primary" disabled={busy}>登记收付款流水</button></Form></section>}
-    <section className="panel settlement-step"><div className="panel-header"><div><h2>4. 收付款流水</h2><p>清楚区分流水总额、已分配金额和未分配余额。</p></div></div><div className="table-wrap"><table><thead><tr><th>流水号 / 日期</th><th>方向</th><th>往来单位</th><th>金额</th><th>已分配 / 未分配</th><th>账户 / 公司</th><th>状态</th></tr></thead><tbody>{loaderData.cashTransactions.map(row=><tr key={row.id}><td><strong>{row.transaction_number}</strong><small>{row.occurred_on}</small></td><td>{row.direction==="receipt"?"收款":"付款"}</td><td>{row.counterparty_name}</td><td>{row.currency} {row.amount.toFixed(2)}</td><td>{row.allocated_amount.toFixed(2)} / {(row.amount-row.allocated_amount).toFixed(2)}</td><td>{row.account_name}<small>{row.settlement_entity}</small></td><td><span className="status-pill">{cashStatus(row.status)}</span></td></tr>)}</tbody></table></div>{!loaderData.cashTransactions.length&&<p className="empty-state">暂无收付款流水。</p>}</section>
-    <section className="panel settlement-step"><div className="panel-header"><div><h2>5. 发票记录</h2><p>销项和进项均来源于已确认对账单，支持部分开票/收票。</p></div></div><div className="table-wrap"><table><thead><tr><th>内部记录号</th><th>发票号码</th><th>方向 / 类别</th><th>往来单位</th><th>开票/收票公司</th><th>金额</th><th>日期</th></tr></thead><tbody>{loaderData.invoices.map(row=><tr key={row.id}><td>{row.record_number}</td><td><strong>{row.invoice_number}</strong></td><td>{row.direction==="receivable"?"销项":"进项"} · {row.invoice_type}</td><td>{row.counterparty_name}</td><td>{row.invoice_company}</td><td>{row.currency} {row.amount.toFixed(2)}</td><td>{row.invoice_date}</td></tr>)}</tbody></table></div>{!loaderData.invoices.length&&<p className="empty-state">暂无发票记录。</p>}</section>
-    {loaderData.legacyInvoices.length>0&&<details className="panel expandable"><summary>查看升级前历史应收账单（{loaderData.legacyInvoices.length}）</summary><div className="table-wrap"><table><thead><tr><th>账单号</th><th>客户</th><th>金额</th><th>已收</th><th>状态</th></tr></thead><tbody>{loaderData.legacyInvoices.map(row=><tr key={row.id}><td>{row.invoice_number}</td><td>{row.customer_name}</td><td>{row.currency} {row.total_amount.toFixed(2)}</td><td>{row.paid_amount.toFixed(2)}</td><td>{row.status}</td></tr>)}</tbody></table></div></details>}
+export default function Billing({ loaderData, actionData }: Route.ComponentProps) {
+  if (loaderData.accessDenied) return <BillingAccessHandoff />;
+
+  const busy = useNavigation().state !== "idle";
+  const manage = loaderData.current.permissions.includes("billing.manage");
+  const cashManage = loaderData.current.permissions.includes("billing.cash.manage");
+
+  return <>
+    <header className="page-header billing-page-header">
+      <div>
+        <p className="eyebrow">FINANCE SETTLEMENT</p>
+        <h1>费用结算</h1>
+        <p>按业务阶段逐页办理；应收与应付分开筛选，发票和收付款在对账确认后并行推进。</p>
+      </div>
+      <span className="status-pill">
+        {manage && cashManage ? "全流程办理" : manage ? "财务办理" : cashManage ? "出纳办理" : "只读"}
+      </span>
+    </header>
+
+    {loaderData.balances.length > 0 && <div className="billing-balance-strip" aria-label="未核销余额">
+      {loaderData.balances.map((item) => <span key={`${item.direction}-${item.currency}`}>
+        <small>{item.direction === "receivable" ? "应收未核销" : "应付未核销"}</small>
+        <strong>{item.currency} {item.amount.toFixed(2)}</strong>
+      </span>)}
+    </div>}
+
+    <BillingTabs active={loaderData.view.tab} counts={loaderData.counts} />
+
+    {(actionData?.success || actionData?.formError) && <div className={`alert ${actionData.formError ? "error" : "success"}`} role="status">
+      {actionData.formError ?? actionData.success}
+    </div>}
+
+    {loaderData.view.tab === "pending" && <PendingReconciliationPage
+      view={loaderData.view}
+      page={loaderData.eligiblePage}
+      canManage={manage}
+      busy={busy}
+    />}
+    {loaderData.view.tab === "reconciliations" && <ReconciliationPage
+      view={loaderData.view}
+      page={loaderData.reconciliationPage}
+      canManage={manage}
+      busy={busy}
+    />}
+    {loaderData.view.tab === "cash" && <CashSettlementPage
+      view={loaderData.view}
+      page={loaderData.cashWorkPage}
+      cash={loaderData.availableCashTransactions}
+      users={loaderData.users}
+      organizationName={loaderData.organizationName}
+      canManage={cashManage}
+      busy={busy}
+    />}
+    {loaderData.view.tab === "invoices" && <InvoicePage
+      view={loaderData.view}
+      page={loaderData.invoiceWorkPage}
+      canManage={manage}
+      busy={busy}
+    />}
+    {loaderData.view.tab === "history" && <HistoryPage
+      view={loaderData.view}
+      cashPage={loaderData.cashHistoryPage}
+      invoicePage={loaderData.invoiceHistoryPage}
+      legacyPage={loaderData.legacyHistoryPage}
+    />}
   </>;
 }
 
-function ExpenseSelection({direction,expenses,busy}:{direction:"receivable"|"payable";expenses:SettlementExpense[];busy:boolean}){return <section className="settlement-selector"><header><strong>{direction==="receivable"?"客户应收对账":"供应商应付对账"}</strong><span>{expenses.length} 条可选</span></header><Form method="post"><input type="hidden" name="intent" value="create_reconciliation"/><input type="hidden" name="direction" value={direction}/><div className="settlement-expense-list">{expenses.map(item=><label key={item.id}><input type="checkbox" name="expenseId" value={item.id}/><span><strong><OrderNumberLink id={item.order_id} number={item.order_number}/> · {item.charge_name}</strong><small>{item.counterparty_name} · {item.currency} {item.amount.toFixed(2)}{direction==="receivable"&&!item.outbound_ready?" · 尚未出境":""}</small></span></label>)}</div>{!expenses.length&&<p className="empty-state">暂无符合条件的已确认费用。</p>}<label className="field"><span>对账备注</span><textarea name="notes" rows={2}/></label><button className="primary" disabled={busy||!expenses.length}>生成对账草稿</button></Form></section>}
-
-function ReconciliationSheet({row,manage,cashManage,busy,cash}:{row:ReconciliationRow;manage:boolean;cashManage:boolean;busy:boolean;cash:{id:string;direction:"receipt"|"payment";counterparty_name:string;currency:string;amount:number;allocated_amount:number;transaction_number:string}[]}){
-  const invoiceRemaining=Math.max(0,row.total_amount-row.invoiced_amount),settlementRemaining=Math.max(0,row.total_amount-row.settled_amount),matchingCash=cash.filter(item=>item.direction===(row.direction==="receivable"?"receipt":"payment")&&item.counterparty_name===row.counterparty_name&&item.currency===row.currency&&item.amount-item.allocated_amount>0.009);
-  return <section className="reconciliation-sheet"><div className="table-wrap reconciliation-summary-table"><table><thead><tr><th>对账单</th><th>方向</th><th>往来单位</th><th>订单</th><th>对账总额</th><th>已开 / 收票</th><th>已核销</th><th>费用行</th><th>状态</th></tr></thead><tbody><tr><td><strong>{row.document_number}</strong></td><td>{row.direction==="receivable"?"客户应收":"供应商应付"}</td><td>{row.counterparty_name}</td><td><OrderNumberLinkList orders={orderReferences(row.order_refs)}/></td><td>{row.currency} {row.total_amount.toFixed(2)}</td><td>{row.invoiced_amount.toFixed(2)}<small>剩余 {invoiceRemaining.toFixed(2)}</small></td><td>{row.settled_amount.toFixed(2)}<small>剩余 {settlementRemaining.toFixed(2)}</small></td><td>{row.expense_count}</td><td><span className={`status-pill ${row.status==="confirmed"?"success":"off"}`}>{row.status==="confirmed"?"已确认":"草稿待确认"}</span></td></tr></tbody></table></div>{row.status==="draft"&&manage?<Form method="post" className="reconciliation-row-action"><input type="hidden" name="intent" value="confirm_reconciliation"/><input type="hidden" name="id" value={row.id}/><p>确认后，费用将进入正式对账状态。</p><button className="primary" disabled={busy}>确认对账单</button></Form>:row.status==="confirmed"&&manage?<div className="reconciliation-actions">{invoiceRemaining>0.009&&<details><summary>登记{row.direction==="receivable"?"销项开票":"进项收票"}</summary><Form method="post" className="form-grid compact"><input type="hidden" name="intent" value="record_invoice"/><input type="hidden" name="reconciliationId" value={row.id}/><Num name="amount" label={`本次金额（剩余 ${invoiceRemaining.toFixed(2)}）`} required max={invoiceRemaining}/><Text name="invoiceCompany" label="开票 / 收票公司" required defaultValue={row.settlement_entity}/><Text name="invoiceType" label="发票类别" required defaultValue="增值税发票"/><Text name="invoiceNumber" label="发票号码" required/><Text name="invoiceCode" label="发票代码"/><label className="field"><span>开票日期</span><input name="invoiceDate" type="date" required/></label><Num name="taxRate" label="税率 %"/><Text name="titleName" label="抬头 / 销方" required defaultValue={row.direction==="receivable"?row.settlement_entity:row.counterparty_name}/><Text name="taxNumber" label="税号"/><Text name="addressPhone" label="地址电话"/><Text name="bankAccount" label="开户行账号"/><Num name="exchangeRate" label="汇率" required defaultValue="1"/><Text name="attachmentReference" label="附件 / 凭证编号"/><label className="field span-2"><span>备注</span><input name="invoiceNotes"/></label><button className="primary" disabled={busy}>保存发票记录</button></Form></details>}{cashManage&&settlementRemaining>0.009&&<details><summary>匹配收付款并核销</summary><Form method="post" className="form-grid compact"><input type="hidden" name="intent" value="allocate_cash"/><input type="hidden" name="reconciliationId" value={row.id}/><Sel name="transactionId" label="可用流水" items={matchingCash.map(item=>[item.id,`${item.transaction_number} · 剩余 ${(item.amount-item.allocated_amount).toFixed(2)}`])}/><Num name="amount" label={`本次核销（剩余 ${settlementRemaining.toFixed(2)}）`} required max={settlementRemaining}/><button className="primary" disabled={busy||!matchingCash.length}>确认核销</button>{!matchingCash.length&&<small className="field-error">请先在下方登记同往来单位、同币种的收付款流水。</small>}</Form></details>}</div>:null}</section>
+function BillingTabs({ active, counts }: {
+  active: BillingTab;
+  counts: Record<BillingTab, number>;
+}) {
+  return <nav className="billing-workspace-tabs" aria-label="费用结算工作区">
+    {billingTabs.map((tab) => <Link
+      key={tab}
+      to={`/admin/billing?tab=${tab}`}
+      className={active === tab ? "active" : undefined}
+      aria-current={active === tab ? "page" : undefined}
+    >
+      <span>{tabCopy[tab].label}<b>{counts[tab]}</b></span>
+      <small>{tabCopy[tab].description}</small>
+    </Link>)}
+  </nav>;
 }
 
-function Text({name,label,required,defaultValue}:{name:string;label:string;required?:boolean;defaultValue?:string}){return <label className="field"><span>{label}</span><input name={name} required={required} defaultValue={defaultValue}/></label>}
-function Num({name,label,required,defaultValue="0",max}:{name:string;label:string;required?:boolean;defaultValue?:string;max?:number}){return <label className="field"><span>{label}</span><input name={name} type="number" min="0" max={max} step="0.01" required={required} defaultValue={defaultValue}/></label>}
-function Sel({name,label,items}:{name:string;label:string;items:string[][]}){return <label className="field"><span>{label}</span><select name={name} required><option value="">请选择</option>{items.map(([value,text])=><option key={value} value={value}>{text}</option>)}</select></label>}
-function orderReferences(value:string|null){return(value||"").split(",").flatMap(reference=>{const separator=reference.indexOf("|");return separator>0?[{id:reference.slice(0,separator),number:reference.slice(separator+1)}]:[]})}
-function positive(form:FormData,name:string,fallback=0){const value=Number(valueOf(form,name)||fallback);return Number.isFinite(value)&&value>0?value:0}
-function nonNegative(form:FormData,name:string){const value=Number(valueOf(form,name)||0);return Number.isFinite(value)&&value>=0?value:-1}
-function cashStatus(status:string){return{unallocated:"未分配",partially_allocated:"部分分配",allocated:"已分配"}[status]||status}
-async function audit(request:Request,current:{organizationId:string;userId:string},action:string,resourceType:string,resourceId:string,metadata:Record<string,unknown>){await writeAudit({request,action,resourceType,resourceId,organizationId:current.organizationId,actorUserId:current.userId,metadata})}
-export function meta(){return[{title:"费用结算 | International TMS"}]}
+function PendingReconciliationPage({ view, page, canManage, busy }: {
+  view: BillingView;
+  page: SettlementPage<SettlementExpense>;
+  canManage: boolean;
+  busy: boolean;
+}) {
+  const groups = groupExpenses(page.items);
+  return <section className="panel billing-workspace-page">
+    <WorkspaceHeading
+      title="待对账费用"
+      description="只展示已完成订单费用确认、尚未进入有效对账单的费用。每组只能包含同一往来单位和同一币种。"
+      count={`${page.total} 条`}
+    />
+    <BillingFilters view={view} mode="pending" />
+    {!canManage && <ReadOnlyNotice>当前账号只能查看待对账费用，不能生成对账单。</ReadOnlyNotice>}
+    {canManage && groups.map((group) => <ExpenseSelection
+      key={group.key}
+      direction={group.direction}
+      counterparty={group.counterparty}
+      currency={group.currency}
+      expenses={group.expenses}
+      busy={busy}
+    />)}
+    {!page.items.length && <EmptyState>没有符合当前筛选条件的待对账费用。</EmptyState>}
+    <QueryPagination {...page} unit="条" />
+  </section>;
+}
+
+function ReconciliationPage({ view, page, canManage, busy }: {
+  view: BillingView;
+  page: SettlementPage<ReconciliationRow>;
+  canManage: boolean;
+  busy: boolean;
+}) {
+  return <section className="panel billing-workspace-page">
+    <WorkspaceHeading
+      title="对账单"
+      description="在这里复核并确认草稿。确认后，发票与收付款进入各自页签继续办理。"
+      count={`${page.total} 张`}
+    />
+    <BillingFilters view={view} mode="reconciliations" />
+    {!canManage && <ReadOnlyNotice>当前账号只能查看对账单状态。</ReadOnlyNotice>}
+    <div className="reconciliation-list">
+      {page.items.map((row) => <ReconciliationSheet
+        key={row.id}
+        row={row}
+        mode="review"
+        canManage={canManage}
+        busy={busy}
+      />)}
+    </div>
+    {!page.items.length && <EmptyState>没有符合当前筛选条件的对账单。</EmptyState>}
+    <QueryPagination {...page} unit="张" />
+  </section>;
+}
+
+function CashSettlementPage({ view, page, cash, users, organizationName, canManage, busy }: {
+  view: BillingView;
+  page: SettlementPage<ReconciliationRow>;
+  cash: CashTransactionRow[];
+  users: UserOption[];
+  organizationName: string;
+  canManage: boolean;
+  busy: boolean;
+}) {
+  return <section className="panel billing-workspace-page">
+    <WorkspaceHeading
+      title="收付款与核销"
+      description="先登记真实收付款流水，再匹配同方向、同往来单位、同币种的已确认对账单。"
+      count={`${page.total} 张待核销`}
+    />
+    {canManage ? <CashEntryForm users={users} organizationName={organizationName} busy={busy} />
+      : <ReadOnlyNotice>当前账号只能查看核销进度；请由出纳岗登记流水并完成核销。</ReadOnlyNotice>}
+    <BillingFilters view={view} mode="cash" />
+    <div className="reconciliation-list">
+      {page.items.map((row) => <ReconciliationSheet
+        key={row.id}
+        row={row}
+        mode="cash"
+        canManage={canManage}
+        busy={busy}
+        cash={cash}
+      />)}
+    </div>
+    {!page.items.length && <EmptyState>当前筛选条件下没有待核销对账单。</EmptyState>}
+    <QueryPagination {...page} unit="张" />
+  </section>;
+}
+
+function InvoicePage({ view, page, canManage, busy }: {
+  view: BillingView;
+  page: SettlementPage<ReconciliationRow>;
+  canManage: boolean;
+  busy: boolean;
+}) {
+  return <section className="panel billing-workspace-page">
+    <WorkspaceHeading
+      title="发票办理"
+      description="从已确认对账单登记销项开票或进项收票，支持按实际进度分次登记。"
+      count={`${page.total} 张待登记`}
+    />
+    <BillingFilters view={view} mode="invoices" />
+    {!canManage && <ReadOnlyNotice>当前账号只能查看发票进度，不能登记发票。</ReadOnlyNotice>}
+    <div className="reconciliation-list">
+      {page.items.map((row) => <ReconciliationSheet
+        key={row.id}
+        row={row}
+        mode="invoice"
+        canManage={canManage}
+        busy={busy}
+      />)}
+    </div>
+    {!page.items.length && <EmptyState>当前筛选条件下没有待登记发票的对账单。</EmptyState>}
+    <QueryPagination {...page} unit="张" />
+  </section>;
+}
+
+function HistoryPage({ view, cashPage, invoicePage, legacyPage }: {
+  view: BillingView;
+  cashPage: SettlementPage<CashTransactionRow>;
+  invoicePage: SettlementPage<InvoiceRecordRow>;
+  legacyPage: SettlementPage<LegacyInvoiceRow>;
+}) {
+  return <section className="panel billing-workspace-page">
+    <WorkspaceHeading
+      title="历史记录"
+      description="历史页只负责查询和追溯，不与当前办理表单混排。"
+      count="只读"
+    />
+    <HistoryTypeSwitch active={view.historyType} />
+    <BillingFilters view={view} mode="history" />
+    {view.historyType === "cash" && <CashHistoryTable page={cashPage} />}
+    {view.historyType === "invoices" && <InvoiceHistoryTable page={invoicePage} />}
+    {view.historyType === "legacy" && <LegacyHistoryTable page={legacyPage} />}
+  </section>;
+}
+
+function BillingFilters({ view, mode }: {
+  view: BillingView;
+  mode: "pending" | "reconciliations" | "cash" | "invoices" | "history";
+}) {
+  const cashHistory = mode === "history" && view.historyType === "cash";
+  const showDirection = mode !== "history" || view.historyType !== "legacy";
+  const statusOptions = mode === "reconciliations"
+    ? [["", "全部状态"], ["draft", "草稿待确认"], ["unsettled", "已确认未结清"], ["settled", "已结清"]]
+    : cashHistory
+      ? [["", "全部状态"], ["unallocated", "未分配"], ["partially_allocated", "部分分配"], ["allocated", "已分配"]]
+      : [];
+  const directionOptions = mode === "pending"
+    ? [["receivable", "客户应收"], ["payable", "供应商应付"]]
+    : cashHistory
+      ? [["", "全部方向"], ["receipt", "客户收款"], ["payment", "供应商付款"]]
+      : [["", "全部方向"], ["receivable", "客户应收"], ["payable", "供应商应付"]];
+
+  return <Form method="get" className="billing-workspace-filters" aria-label="结算记录筛选">
+    <input type="hidden" name="tab" value={view.tab} />
+    {mode === "history" && <input type="hidden" name="historyType" value={view.historyType} />}
+    <label className="field billing-filter-search">
+      <span>搜索</span>
+      <input name="q" defaultValue={view.query} placeholder="订单号、单据号或往来单位" />
+    </label>
+    {showDirection && <label className="field">
+      <span>方向</span>
+      <select name="direction" defaultValue={view.direction}>
+        {directionOptions.map(([value, label]) => <option key={value || "all"} value={value}>{label}</option>)}
+      </select>
+    </label>}
+    <label className="field billing-filter-currency">
+      <span>币种</span>
+      <input name="currency" defaultValue={view.currency} placeholder="全部" maxLength={3} />
+    </label>
+    {statusOptions.length > 0 && <label className="field">
+      <span>状态</span>
+      <select name="status" defaultValue={view.status}>
+        {statusOptions.map(([value, label]) => <option key={value || "all"} value={value}>{label}</option>)}
+      </select>
+    </label>}
+    <div className="billing-filter-actions">
+      <button className="primary" type="submit">筛选</button>
+      <Link className="secondary" to={historyResetHref(view, mode)}>重置</Link>
+    </div>
+  </Form>;
+}
+
+function HistoryTypeSwitch({ active }: { active: BillingHistoryType }) {
+  const items: Array<[BillingHistoryType, string]> = [
+    ["cash", "收付款流水"],
+    ["invoices", "发票记录"],
+    ["legacy", "升级前账单"],
+  ];
+  return <nav className="billing-history-switch" aria-label="历史记录类型">
+    {items.map(([value, label]) => <Link
+      key={value}
+      to={`/admin/billing?tab=history&historyType=${value}`}
+      className={active === value ? "active" : undefined}
+      aria-current={active === value ? "page" : undefined}
+    >{label}</Link>)}
+  </nav>;
+}
+
+function ExpenseSelection({ direction, counterparty, currency, expenses, busy }: {
+  direction: "receivable" | "payable";
+  counterparty: string;
+  currency: string;
+  expenses: SettlementExpense[];
+  busy: boolean;
+}) {
+  const total = expenses.reduce((sum, item) => sum + item.amount, 0);
+  return <section className="settlement-selector">
+    <header>
+      <div>
+        <span className={`billing-flow-chip ${direction}`}>{direction === "receivable" ? "客户应收" : "供应商应付"}</span>
+        <strong>{counterparty}</strong>
+        <small>{currency} · 本页 {expenses.length} 条 · 合计 {total.toFixed(2)}</small>
+      </div>
+    </header>
+    <Form method="post">
+      <input type="hidden" name="intent" value="create_reconciliation" />
+      <input type="hidden" name="direction" value={direction} />
+      <div className="settlement-expense-list">
+        {expenses.map((item) => <label key={item.id}>
+          <input type="checkbox" name="expenseId" value={item.id} />
+          <span>
+            <strong><OrderNumberLink id={item.order_id} number={item.order_number} /> · {item.charge_name}</strong>
+            <small>{item.currency} {item.amount.toFixed(2)}{direction === "receivable" && !item.outbound_ready ? " · 尚未出境" : ""}</small>
+          </span>
+        </label>)}
+      </div>
+      <div className="settlement-selector-footer">
+        <label className="field">
+          <span>对账备注</span>
+          <input name="notes" placeholder="选填" />
+        </label>
+        <button className="primary" disabled={busy}>生成对账草稿</button>
+      </div>
+    </Form>
+  </section>;
+}
+
+function ReconciliationSheet({ row, mode, canManage, busy, cash = [] }: {
+  row: ReconciliationRow;
+  mode: "review" | "cash" | "invoice";
+  canManage: boolean;
+  busy: boolean;
+  cash?: CashTransactionRow[];
+}) {
+  const invoiceRemaining = Math.max(0, row.total_amount - row.invoiced_amount);
+  const settlementRemaining = Math.max(0, row.total_amount - row.settled_amount);
+  const matchingCash = cash.filter((item) =>
+    item.direction === (row.direction === "receivable" ? "receipt" : "payment") &&
+    item.counterparty_name === row.counterparty_name &&
+    item.currency === row.currency &&
+    item.amount - item.allocated_amount > 0.009);
+  const visualStatus = reconciliationStatus(row, settlementRemaining);
+
+  return <article className="reconciliation-card">
+    <header>
+      <div>
+        <span className={`billing-flow-chip ${row.direction}`}>{row.direction === "receivable" ? "客户应收" : "供应商应付"}</span>
+        <strong>{row.document_number}</strong>
+        <small>{row.counterparty_name} · {row.currency} · {row.created_at.slice(0, 10)}</small>
+      </div>
+      <span className={`status-pill ${visualStatus.className}`}>{visualStatus.label}</span>
+    </header>
+    <div className="reconciliation-reference-row">
+      <span>订单 <OrderNumberLinkList orders={orderReferences(row.order_refs)} /></span>
+      <span>{row.expense_count} 条费用</span>
+    </div>
+    <div className="reconciliation-money">
+      <span>对账金额<strong>{row.currency} {row.total_amount.toFixed(2)}</strong></span>
+      <span>已开 / 收票<strong>{row.invoiced_amount.toFixed(2)}</strong><small>剩余 {invoiceRemaining.toFixed(2)}</small></span>
+      <span>已核销<strong>{row.settled_amount.toFixed(2)}</strong><small>剩余 {settlementRemaining.toFixed(2)}</small></span>
+    </div>
+
+    {mode === "review" && row.status === "draft" && canManage && <Form method="post" className="card-action">
+      <input type="hidden" name="intent" value="confirm_reconciliation" />
+      <input type="hidden" name="id" value={row.id} />
+      <p>确认后费用进入正式对账，不能再按草稿修改。</p>
+      <button className="primary" disabled={busy}>确认对账单</button>
+    </Form>}
+
+    {mode === "invoice" && canManage && invoiceRemaining > 0.009 && <details className="billing-card-operation">
+      <summary>登记{row.direction === "receivable" ? "销项开票" : "进项收票"}</summary>
+      <Form method="post" className="form-grid compact billing-invoice-form">
+        <input type="hidden" name="intent" value="record_invoice" />
+        <input type="hidden" name="reconciliationId" value={row.id} />
+        <Num name="amount" label={`本次金额（剩余 ${invoiceRemaining.toFixed(2)}）`} required max={invoiceRemaining} />
+        <Text name="invoiceCompany" label="开票 / 收票公司" required defaultValue={row.settlement_entity} />
+        <Text name="invoiceType" label="发票类别" required defaultValue="增值税发票" />
+        <Text name="invoiceNumber" label="发票号码" required />
+        <Text name="invoiceCode" label="发票代码" />
+        <label className="field"><span>开票日期</span><input name="invoiceDate" type="date" required /></label>
+        <Num name="taxRate" label="税率 %" />
+        <Text name="titleName" label="抬头 / 销方" required defaultValue={row.direction === "receivable" ? row.settlement_entity : row.counterparty_name} />
+        <Text name="taxNumber" label="税号" />
+        <Text name="addressPhone" label="地址电话" />
+        <Text name="bankAccount" label="开户行账号" />
+        <Num name="exchangeRate" label="汇率" required defaultValue="1" />
+        <Text name="attachmentReference" label="附件 / 凭证编号" />
+        <label className="field span-2"><span>备注</span><input name="invoiceNotes" /></label>
+        <button className="primary" disabled={busy}>保存发票记录</button>
+      </Form>
+    </details>}
+
+    {mode === "cash" && canManage && settlementRemaining > 0.009 && <details className="billing-card-operation">
+      <summary>匹配收付款流水并核销</summary>
+      <Form method="post" className="form-grid compact billing-allocation-form">
+        <input type="hidden" name="intent" value="allocate_cash" />
+        <input type="hidden" name="reconciliationId" value={row.id} />
+        <Sel name="transactionId" label="可用流水" items={matchingCash.map((item) => [
+          item.id,
+          `${item.transaction_number} · 剩余 ${(item.amount - item.allocated_amount).toFixed(2)}`,
+        ])} />
+        <Num name="amount" label={`本次核销（剩余 ${settlementRemaining.toFixed(2)}）`} required max={settlementRemaining} />
+        <button className="primary" disabled={busy || !matchingCash.length}>确认核销</button>
+        {!matchingCash.length && <small className="field-error">尚无同方向、同往来单位、同币种的可用流水，请先登记。</small>}
+      </Form>
+    </details>}
+  </article>;
+}
+
+function CashEntryForm({ users, organizationName, busy }: {
+  users: UserOption[];
+  organizationName: string;
+  busy: boolean;
+}) {
+  return <details className="billing-entry-disclosure">
+    <summary><span>登记一笔新流水</span><small>客户收款或供应商付款</small></summary>
+    <Form method="post" className="form-grid compact settlement-cash-form">
+      <input type="hidden" name="intent" value="record_cash" />
+      <Sel name="direction" label="方向" items={[["receipt", "客户收款"], ["payment", "供应商付款"]]} />
+      <Text name="counterpartyName" label="往来单位" required />
+      <Text name="currency" label="币种" required defaultValue="CNY" />
+      <Num name="amount" label="金额" required />
+      <label className="field"><span>收 / 付款日期</span><input name="occurredOn" type="date" required /></label>
+      <Text name="settlementEntity" label="所属公司" required defaultValue={organizationName} />
+      <Text name="accountName" label="银行 / 现金账户" required />
+      <Sel name="handledByUserId" label="经办人" items={users.map((item) => [item.id, item.display_name])} />
+      <Text name="evidenceReference" label="凭证附件 / 编号" />
+      <label className="field settlement-cash-notes"><span>备注</span><textarea name="cashNotes" rows={2} /></label>
+      <button className="primary" disabled={busy}>登记收付款流水</button>
+    </Form>
+  </details>;
+}
+
+function CashHistoryTable({ page }: { page: SettlementPage<CashTransactionRow> }) {
+  return <>
+    <div className="table-wrap billing-history-table"><table>
+      <thead><tr><th>流水号 / 日期</th><th>方向</th><th>往来单位</th><th>金额</th><th>已分配 / 未分配</th><th>账户 / 公司</th><th>状态</th></tr></thead>
+      <tbody>{page.items.map((row) => <tr key={row.id}>
+        <td><strong>{row.transaction_number}</strong><small>{row.occurred_on}</small></td>
+        <td>{row.direction === "receipt" ? "收款" : "付款"}</td>
+        <td>{row.counterparty_name}</td>
+        <td>{row.currency} {row.amount.toFixed(2)}</td>
+        <td>{row.allocated_amount.toFixed(2)} / {(row.amount - row.allocated_amount).toFixed(2)}</td>
+        <td>{row.account_name}<small>{row.settlement_entity}</small></td>
+        <td><span className="status-pill">{cashStatus(row.status)}</span></td>
+      </tr>)}</tbody>
+    </table></div>
+    {!page.items.length && <EmptyState>没有符合筛选条件的收付款流水。</EmptyState>}
+    <QueryPagination {...page} unit="笔" />
+  </>;
+}
+
+function InvoiceHistoryTable({ page }: { page: SettlementPage<InvoiceRecordRow> }) {
+  return <>
+    <div className="table-wrap billing-history-table"><table>
+      <thead><tr><th>内部记录号</th><th>发票号码</th><th>方向 / 类别</th><th>往来单位</th><th>开票 / 收票公司</th><th>金额</th><th>日期</th></tr></thead>
+      <tbody>{page.items.map((row) => <tr key={row.id}>
+        <td>{row.record_number}</td><td><strong>{row.invoice_number}</strong></td>
+        <td>{row.direction === "receivable" ? "销项" : "进项"} · {row.invoice_type}</td>
+        <td>{row.counterparty_name}</td><td>{row.invoice_company}</td>
+        <td>{row.currency} {row.amount.toFixed(2)}</td><td>{row.invoice_date}</td>
+      </tr>)}</tbody>
+    </table></div>
+    {!page.items.length && <EmptyState>没有符合筛选条件的发票记录。</EmptyState>}
+    <QueryPagination {...page} unit="张" />
+  </>;
+}
+
+function LegacyHistoryTable({ page }: { page: SettlementPage<LegacyInvoiceRow> }) {
+  return <>
+    <ReadOnlyNotice>这里保留系统升级前的历史应收账单，只供查询，不再参与当前核销流程。</ReadOnlyNotice>
+    <div className="table-wrap billing-history-table"><table>
+      <thead><tr><th>账单号</th><th>客户</th><th>金额</th><th>已收</th><th>状态</th><th>创建时间</th></tr></thead>
+      <tbody>{page.items.map((row) => <tr key={row.id}>
+        <td><strong>{row.invoice_number}</strong></td><td>{row.customer_name}</td>
+        <td>{row.currency} {row.total_amount.toFixed(2)}</td><td>{row.paid_amount.toFixed(2)}</td>
+        <td>{row.status}</td><td>{row.created_at.slice(0, 10)}</td>
+      </tr>)}</tbody>
+    </table></div>
+    {!page.items.length && <EmptyState>没有符合筛选条件的升级前账单。</EmptyState>}
+    <QueryPagination {...page} unit="张" />
+  </>;
+}
+
+function WorkspaceHeading({ title, description, count }: { title: string; description: string; count: string }) {
+  return <div className="panel-header billing-workspace-heading">
+    <div><h2>{title}</h2><p>{description}</p></div>
+    <span>{count}</span>
+  </div>;
+}
+
+function ReadOnlyNotice({ children }: { children: React.ReactNode }) {
+  return <div className="billing-readonly-notice">{children}</div>;
+}
+
+function EmptyState({ children }: { children: React.ReactNode }) {
+  return <p className="empty-state billing-empty-state">{children}</p>;
+}
+
+function BillingAccessHandoff() {
+  return <>
+    <header className="page-header"><div><p className="eyebrow">FINANCE HANDOFF</p><h1>费用结算</h1><p>当前节点已转交财务相关岗位，本账号无需在这里继续办理。</p></div><span className="status-pill off">当前账号只读隔离</span></header>
+    <section className="panel settlement-access-handoff"><div><strong>请切换到对应岗位继续</strong><p>财务会计岗负责费用复核、对账和发票；客服岗负责客户对账与收款协同；出纳岗负责登记收付款流水和核销。当前页面不会向无敏感财务权限的账号加载应收、应付或利润数据。</p></div><Link className="primary" to="/admin/portal">返回当前岗位工作台</Link></section>
+  </>;
+}
+
+function Text({ name, label, required, defaultValue }: { name: string; label: string; required?: boolean; defaultValue?: string }) {
+  return <label className="field"><span>{label}</span><input name={name} required={required} defaultValue={defaultValue} /></label>;
+}
+
+function Num({ name, label, required, defaultValue = "0", max }: { name: string; label: string; required?: boolean; defaultValue?: string; max?: number }) {
+  return <label className="field"><span>{label}</span><input name={name} type="number" min="0" max={max} step="0.01" required={required} defaultValue={defaultValue} /></label>;
+}
+
+function Sel({ name, label, items }: { name: string; label: string; items: string[][] }) {
+  return <label className="field"><span>{label}</span><select name={name} required><option value="">请选择</option>{items.map(([value, text]) => <option key={value} value={value}>{text}</option>)}</select></label>;
+}
+
+function groupExpenses(expenses: SettlementExpense[]) {
+  const groups = new Map<string, {
+    key: string;
+    direction: "receivable" | "payable";
+    counterparty: string;
+    currency: string;
+    expenses: SettlementExpense[];
+  }>();
+  for (const expense of expenses) {
+    const key = settlementExpenseGroupKey(expense);
+    const group = groups.get(key) || {
+      key,
+      direction: expense.direction,
+      counterparty: expense.counterparty_name,
+      currency: expense.currency,
+      expenses: [],
+    };
+    group.expenses.push(expense);
+    groups.set(key, group);
+  }
+  return [...groups.values()];
+}
+
+function reconciliationStatus(row: ReconciliationRow, remaining: number) {
+  if (row.status === "draft") return { label: "草稿待确认", className: "off" };
+  if (remaining <= 0.009) return { label: "已结清", className: "success" };
+  return { label: "已确认未结清", className: "" };
+}
+
+function historyResetHref(view: BillingView, mode: string) {
+  return mode === "history"
+    ? `/admin/billing?tab=history&historyType=${view.historyType}`
+    : `/admin/billing?tab=${view.tab}`;
+}
+
+function orderReferences(value: string | null) {
+  return (value || "").split(",").flatMap((reference) => {
+    const separator = reference.indexOf("|");
+    return separator > 0 ? [{ id: reference.slice(0, separator), number: reference.slice(separator + 1) }] : [];
+  });
+}
+
+function positive(form: FormData, name: string, fallback = 0) {
+  const value = Number(valueOf(form, name) || fallback);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function nonNegative(form: FormData, name: string) {
+  const value = Number(valueOf(form, name) || 0);
+  return Number.isFinite(value) && value >= 0 ? value : -1;
+}
+
+function cashStatus(status: string) {
+  return { unallocated: "未分配", partially_allocated: "部分分配", allocated: "已分配" }[status] || status;
+}
+
+async function audit(
+  request: Request,
+  current: { organizationId: string; userId: string },
+  action: string,
+  resourceType: string,
+  resourceId: string,
+  metadata: Record<string, unknown>,
+) {
+  await writeAudit({
+    request,
+    action,
+    resourceType,
+    resourceId,
+    organizationId: current.organizationId,
+    actorUserId: current.userId,
+    metadata,
+  });
+}
+
+export function meta() {
+  return [{ title: "费用结算 | International TMS" }];
+}

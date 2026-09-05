@@ -19,6 +19,8 @@ describe("cloud production account blueprint", () => {
     expect(adminAccounts).toHaveLength(officePositionCodes.length);
     expect(adminAccounts.map((account) => account.positionCode).sort()).toEqual([...officePositionCodes].sort());
     expect(warehouseAccounts.map((account) => account.warehouseRole).sort()).toEqual(["domestic_collection", "overseas_destination"]);
+    expect(warehouseAccounts.map((account) => account.warehouseCode).sort()).toEqual(["HRG-01", "UZ-TAS-01"]);
+    expect(new Set(warehouseAccounts.map((account) => account.warehouseCode)).size).toBe(warehouseAccounts.length);
     expect(portalAccounts.map((account) => account.customerNumber).sort()).toEqual([1, 2, 3]);
     expect(new Set(productionAccountBlueprint.map((account) => account.email)).size).toBe(productionAccountBlueprint.length);
   });
@@ -58,14 +60,30 @@ describe("cloud production account blueprint", () => {
   it("keeps order visibility aligned with each position", () => {
     expect(accessModelRolePermissions.developer).toContain("order.scope.all");
     expect(accessModelRolePermissions.pos_sales).toContain("order.scope.sales_own");
+    expect(accessModelRolePermissions.pos_sales).toContain("billing.assigned_expense.review");
+    expect(accessModelRolePermissions.pos_sales).not.toContain("billing.sensitive.view");
+    expect(accessModelRolePermissions.pos_sales).not.toContain("order.manage");
     expect(accessModelRolePermissions.pos_sales).not.toContain("order.scope.all");
 
-    for (const role of ["pos_operation", "pos_tracking", "pos_customer_service", "warehouse_operator", "overseas_warehouse_operator"]) {
+    expect(accessModelRolePermissions.pos_business_supervisor).toContain("order.scope.all");
+    expect(accessModelRolePermissions.pos_operation_supervisor).toContain("transport.batch.approve");
+
+    for (const role of ["pos_operation_supervisor", "pos_operation", "pos_doc", "pos_customer_service", "pos_finance", "warehouse_operator", "overseas_warehouse_operator"]) {
       expect(accessModelRolePermissions[role]).toContain("order.scope.assigned");
       expect(accessModelRolePermissions[role]).not.toContain("order.scope.all");
     }
 
-    expect(accessModelRolePermissions.pos_finance).toContain("order.scope.all");
+    expect(accessModelRolePermissions.pos_operation).not.toContain("order.module.documents.manage");
+    expect(accessModelRolePermissions.pos_operation).not.toContain("order.module.customs.manage");
+    expect(accessModelRolePermissions.pos_operation).toContain("order.module.tracking.manage");
+    expect(accessModelRolePermissions.pos_operation).toContain("transport.batch.assigned.view");
+    expect(accessModelRolePermissions.pos_doc).toContain("order.module.documents.manage");
+    expect(accessModelRolePermissions.pos_doc).toContain("order.module.customs.manage");
+    expect(accessModelRolePermissions.pos_doc).toContain("transport.batch.assigned.view");
+    expect(accessModelRolePermissions.pos_operation).not.toContain("order.module.loading.manage");
+    expect(accessModelRolePermissions.pos_doc).not.toContain("order.module.loading.manage");
+    expect(accessModelRolePermissions.pos_tracking).toBeUndefined();
+
     expect(accessModelRolePermissions.pos_cashier).toContain("order.scope.all");
     expect(accessModelRolePermissions.pos_hr_admin).not.toContain("order.view");
   });

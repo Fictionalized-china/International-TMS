@@ -37,6 +37,14 @@ export type BatchExceptionPackage={
   package_number:string;
   order_id:string;
   order_number:string;
+  cargo_item_id:string|null;
+  cargo_name:string|null;
+  pieces:number;
+  weight_kg:number|null;
+  volume_cbm:number|null;
+  status:string;
+  warehouse_name:string|null;
+  location_name:string|null;
 };
 
 export async function listBatchExceptions(organizationId:string,batchId:string){
@@ -60,11 +68,16 @@ export async function listBatchExceptions(organizationId:string,batchId:string){
 
 export async function listBatchExceptionPackages(organizationId:string,batchId:string){
   return (await env.DB.prepare(
-    `SELECT DISTINCT p.id,p.barcode,p.package_number,o.id order_id,o.order_number
+    `SELECT DISTINCT p.id,p.barcode,p.package_number,o.id order_id,o.order_number,
+       p.cargo_item_id,i.cargo_name_cn cargo_name,p.pieces,p.weight_kg,p.volume_cbm,p.status,
+       w.name warehouse_name,l.name location_name
      FROM transport_batch_orders bo
      JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
      JOIN shipments s ON s.order_id=o.id AND s.organization_id=o.organization_id
      JOIN warehouse_packages p ON p.shipment_id=s.id AND p.organization_id=s.organization_id
+     LEFT JOIN order_cargo_items i ON i.id=p.cargo_item_id AND i.organization_id=p.organization_id
+     LEFT JOIN warehouses w ON w.id=p.warehouse_id AND w.organization_id=p.organization_id
+     LEFT JOIN warehouse_locations l ON l.id=p.location_id AND l.organization_id=p.organization_id
      WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
      ORDER BY o.order_number,p.barcode`,
   ).bind(organizationId,batchId).all<BatchExceptionPackage>()).results;

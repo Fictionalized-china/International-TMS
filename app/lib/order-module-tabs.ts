@@ -9,6 +9,27 @@ export type OrderModuleTabDescriptor = {
   section: OrderModuleTabSection;
 };
 
+export type OrderEntryPreference = {
+  stepKey: string;
+  moduleCode: string;
+  section: string;
+};
+
+/**
+ * A role-specific landing target only changes the first view shown to the
+ * handler. It does not grant access or action permissions.
+ */
+export function orderEntryPreference(positionCode: string | null | undefined): OrderEntryPreference | null {
+  if (positionCode === "DOC") {
+    return {
+      stepKey: "outbound_transport",
+      moduleCode: "customs",
+      section: "declarations",
+    };
+  }
+  return null;
+}
+
 export function orderWorkflowModuleTabs(
   stepKey: string,
   tabs: readonly OrderModuleTabDescriptor[],
@@ -51,6 +72,13 @@ export function resolveCustomsSection(value: string | null): CustomsModuleTabSec
 
 export function resolveCostsSection(value: string | null): CostsModuleTabSection {
   return value === "expenses" ? "expenses" : "files";
+}
+
+export function costsTabHasPendingAction(
+  section: OrderModuleTabSection,
+  costsModuleIncomplete: boolean,
+) {
+  return section === "expenses" && costsModuleIncomplete;
 }
 
 export function orderModuleTabDescriptors({

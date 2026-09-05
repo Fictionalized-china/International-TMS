@@ -98,6 +98,48 @@ export function loadingBatchResourcePolicy(policies: LoadingBatchFieldPolicies) 
   return { carrier, vehicle, driver } as const;
 }
 
+export type LoadingDispatchPlanValues = {
+  carrier_name?: string | null;
+  vehicle_type?: string | null;
+  vehicle_plate?: string | null;
+  driver_name?: string | null;
+  driver_phone?: string | null;
+  planned_departure_at?: string | null;
+};
+
+const loadingDispatchPlanFields = [
+  ["main_carrier_id", "出境承运商", "carrier_name"],
+  ["main_vehicle_type", "出境车型", "vehicle_type"],
+  ["main_plate_number", "出境车牌号", "vehicle_plate"],
+  ["main_driver_name", "出境司机姓名", "driver_name"],
+  ["main_driver_phone", "出境司机电话", "driver_phone"],
+  ["planned_exit_at", "计划出境发车时间", "planned_departure_at"],
+] as const satisfies readonly (readonly [
+  LoadingBatchFieldKey,
+  string,
+  keyof LoadingDispatchPlanValues,
+])[];
+
+/**
+ * Separates workflow gates from informational gaps. Hidden fields disappear,
+ * optional fields remain actionable without blocking, and only required fields
+ * are returned as blockers.
+ */
+export function loadingDispatchPlanPolicyIssues(
+  policies: LoadingBatchFieldPolicies,
+  values: LoadingDispatchPlanValues,
+) {
+  const requiredMissing: string[] = [];
+  const optionalMissing: Array<{ fieldKey: LoadingBatchFieldKey; label: string }> = [];
+  for (const [fieldKey, label, valueKey] of loadingDispatchPlanFields) {
+    const policy = policies[fieldKey];
+    if (!policy.isActive || String(values[valueKey] ?? "").trim()) continue;
+    if (policy.isRequired) requiredMissing.push(label);
+    else optionalMissing.push({ fieldKey, label });
+  }
+  return { requiredMissing, optionalMissing };
+}
+
 export function loadingBatchRequiredValueError(
   policies: LoadingBatchFieldPolicies,
   values: Partial<Record<LoadingBatchFieldKey, string | null | undefined>>,

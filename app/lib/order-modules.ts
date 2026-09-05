@@ -179,14 +179,12 @@ export const orderModuleDefinitions: OrderModuleDefinition[] = [
   {
     code: "costs",
     name: "费用结算",
-    description: "费用预录、应收应付、审批、收付款与业务财务锁；配载成本分摊只影响内部毛利和应付，不改客户应收",
+    description: "应收应付由客服、订单业务员和财务并行签核；三方各自完成即锁定签核结果，全部完成后进入下一节点",
     icon: "▣",
     required: true,
     steps: [
       { code: "waiting", name: "等待录入" },
-      { code: "business_review", name: "业务审核" },
-      { code: "finance_review", name: "财务审核" },
-      { code: "settling", name: "结算处理" },
+      { code: "parallel_review", name: "三方并行签核" },
       { code: "settled", name: "结算完成" },
     ],
   },
@@ -233,11 +231,22 @@ export function orderModuleDefinition(code: string) {
   return orderModuleDefinitions.find((item) => item.code === code);
 }
 
-export function isRuntimeMandatoryOrderModule(
-  businessType: string,
-  moduleCode: string,
-) {
-  return ["ftl", "ltl"].includes(businessType) && moduleCode === "warehouse";
+export function workflowConfiguredModuleFlags(input: {
+  moduleCode: string;
+  rule?: { enabled: number; is_required: number } | null;
+}) {
+  // The document module is an index over files owned by their business
+  // modules. Every other module follows the bound workflow configuration
+  // exactly; transport type must never silently turn an optional/hidden
+  // module back into a runtime gate.
+  if (input.moduleCode === "documents") {
+    return { enabled: 0 as const, required: 0 as const };
+  }
+  const enabled = input.rule?.enabled ? 1 : 0;
+  return {
+    enabled,
+    required: enabled && input.rule?.is_required ? 1 : 0,
+  };
 }
 
 export type OrderWorkflowModuleSnapshot = {
@@ -249,6 +258,40 @@ export type OrderWorkflowModuleSnapshot = {
   current_step_name: string | null;
   progress_percent: number;
 };
+
+export type RequiredWorkflowModuleCandidate = Pick<
+  OrderWorkflowModuleSnapshot,
+  "module_code" | "enabled" | "is_required" | "status"
+>;
+
+/**
+ * Selects the next module that participates in the order's mainline workflow.
+ *
+ * Optional modules deliberately remain outside this selector regardless of
+ * their own status. They can still be shown and edited on their own pages, but
+ * starting or blocking optional work must never take over the order's current
+ * step or hold back a later required module.
+ */
+export function pickNextRequiredWorkflowModule<
+  T extends RequiredWorkflowModuleCandidate,
+>(
+  modules: readonly T[],
+  stageModuleOrder: readonly (readonly OrderModuleCode[])[],
+) {
+  for (const stageModules of stageModuleOrder) {
+    for (const moduleCode of stageModules) {
+      const pending = modules.find(
+        (module) =>
+          module.module_code === moduleCode &&
+          module.enabled === 1 &&
+          module.is_required === 1 &&
+          module.status !== "completed",
+      );
+      if (pending) return pending;
+    }
+  }
+  return null;
+}
 
 export function composeOrderWorkflow<
   T extends OrderWorkflowModuleSnapshot,

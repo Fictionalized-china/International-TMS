@@ -72,6 +72,8 @@ export async function loader({ request }: Route.LoaderArgs) {
                 WHEN 'CS' THEN 'pos_customer_service'
                 WHEN 'FINANCE' THEN 'pos_finance'
                 WHEN 'SALES' THEN 'pos_sales'
+                WHEN 'BUSINESS_SUPERVISOR' THEN 'pos_business_supervisor'
+                WHEN 'OPERATION_SUPERVISOR' THEN 'pos_operation_supervisor'
                 WHEN 'OVERSEAS' THEN 'pos_overseas'
                 WHEN 'CONTAINER' THEN 'pos_container'
                 WHEN 'SALES_ASSISTANT' THEN 'pos_sales_assistant'
@@ -98,6 +100,8 @@ export async function loader({ request }: Route.LoaderArgs) {
                     WHEN 'CS' THEN 'pos_customer_service'
                     WHEN 'FINANCE' THEN 'pos_finance'
                     WHEN 'SALES' THEN 'pos_sales'
+                    WHEN 'BUSINESS_SUPERVISOR' THEN 'pos_business_supervisor'
+                    WHEN 'OPERATION_SUPERVISOR' THEN 'pos_operation_supervisor'
                     WHEN 'OVERSEAS' THEN 'pos_overseas'
                     WHEN 'CONTAINER' THEN 'pos_container'
                     WHEN 'SALES_ASSISTANT' THEN 'pos_sales_assistant'
@@ -479,16 +483,18 @@ async function ensurePositionsSeed(organizationId: string) {
     ["BOSS", "老板", "ZJB", 1],
     ["DEVELOPER", "开发者", "ZJB", 2],
     ["SALES", "业务岗", "SALER", 10],
-    ["OPERATION", "单证（操作岗）", "OP", 20],
-    ["TRACKING", "运踪岗", "OP", 30],
-    ["CS", "客服岗", "OP", 40],
-    ["BUSINESS_ROUTE", "商务报价岗", "BUS", 50],
-    ["LOADING", "前端配载岗", "OP", 60],
-    ["FINANCE_ACCOUNTING", "财务会计岗", "ACC", 70],
-    ["CASHIER", "出纳岗", "ACC", 80],
-    ["HR_ADMIN", "人事行政岗", "HR", 90],
-    ["WAREHOUSE", "仓库岗", "OP", 110],
-    ["OVERSEAS_WAREHOUSE", "境外仓库岗", "OP", 120],
+    ["BUSINESS_SUPERVISOR", "业务主管", "SALER", 20],
+    ["OPERATION_SUPERVISOR", "操作主管", "OP", 30],
+    ["OPERATION", "操作岗（含运踪）", "OP", 40],
+    ["DOC", "单证岗", "OP", 50],
+    ["CS", "客服岗", "OP", 60],
+    ["BUSINESS_ROUTE", "商务报价岗", "BUS", 70],
+    ["LOADING", "前端配载岗", "OP", 80],
+    ["FINANCE_ACCOUNTING", "财务会计岗", "ACC", 90],
+    ["CASHIER", "出纳岗", "ACC", 100],
+    ["HR_ADMIN", "人事行政岗", "HR", 110],
+    ["WAREHOUSE", "仓库岗", "OP", 120],
+    ["OVERSEAS_WAREHOUSE", "境外仓库岗", "OP", 130],
   ];
   await env.DB.batch(defaults.map(([code, name, departmentCode, sort]) =>
     env.DB.prepare(

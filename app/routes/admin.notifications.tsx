@@ -3,14 +3,15 @@ import { InternalNotificationHistory } from "../components/InternalNotificationH
 import { requireSessionUser } from "../lib/auth.server";
 import { valueOf } from "../lib/validation";
 import {
-  listInternalNotifications,
+  listInternalNotificationPage,
   markAllOrdinaryInternalNotificationsRead,
   markInternalNotification,
 } from "../lib/internal-notifications.server";
 
 export async function loader({request}:Route.LoaderArgs) {
   const current=await requireSessionUser(request);
-  return {notifications:await listInternalNotifications(current.organizationId,current.userId)};
+  const requestedPage=Number.parseInt(new URL(request.url).searchParams.get("page")||"1",10);
+  return listInternalNotificationPage(current.organizationId,current.userId,requestedPage);
 }
 
 export async function action({request}:Route.ActionArgs) {
@@ -35,5 +36,5 @@ export async function action({request}:Route.ActionArgs) {
 }
 
 export default function AdminNotifications({loaderData,actionData}:Route.ComponentProps) {
-  return <InternalNotificationHistory notifications={loaderData.notifications} actionData={actionData}/>;
+  return <InternalNotificationHistory {...loaderData} actionData={actionData}/>;
 }

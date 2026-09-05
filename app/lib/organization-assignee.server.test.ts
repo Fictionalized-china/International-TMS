@@ -37,6 +37,7 @@ vi.mock("cloudflare:workers", () => ({ env: { DB: database.DB } }));
 
 import {
   isActiveOrganizationAssignee,
+  isActiveOrganizationAssigneeForPositions,
   listActiveOrganizationAssigneeIds,
   requireActiveOrganizationAssignee,
 } from "./organization-assignee.server";
@@ -65,5 +66,13 @@ describe("organization assignee server guard", () => {
     await expect(
       requireActiveOrganizationAssignee("org-a", "user-missing"),
     ).rejects.toThrow("请选择部门、岗位下的有效个人账户");
+  });
+
+  it("can restrict an assignee to one or more position codes", async () => {
+    await expect(
+      isActiveOrganizationAssigneeForPositions("org-a", "user-a3", ["OPERATION"]),
+    ).resolves.toBe(true);
+    expect(database.queries.at(-1)?.sql).toContain("p.code IN (?)");
+    expect(database.queries.at(-1)?.bindings).toEqual(["org-a", "user-a3", "OPERATION"]);
   });
 });

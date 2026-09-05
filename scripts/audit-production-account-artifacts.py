@@ -91,10 +91,11 @@ def main() -> None:
     password_mode = password_mode_match.group(1)
 
     credentials = credential_rows()
-    if len(credentials) != 16 or len({email for email, _ in credentials}) != 16:
-        raise RuntimeError("桌面账密本必须包含 16 个唯一账号")
+    expected_account_count = 18
+    if len(credentials) != expected_account_count or len({email for email, _ in credentials}) != expected_account_count:
+        raise RuntimeError(f"桌面账密本必须包含 {expected_account_count} 个唯一账号")
     password_count = len({password for _, password in credentials})
-    expected_password_count = 1 if password_mode == "fixed" else 16
+    expected_password_count = 1 if password_mode == "fixed" else expected_account_count
     if password_count != expected_password_count:
         raise RuntimeError(
             f"密码模式 {password_mode!r} 应包含 {expected_password_count} 个不同密码，"
@@ -129,8 +130,8 @@ def main() -> None:
                     raise RuntimeError(f"账号审计第 {index} 项发现 {len(findings)} 条异常")
 
             account_matrix = connection.execute(statements[-1]).fetchall()
-            if len(account_matrix) != 16:
-                raise RuntimeError(f"账号矩阵应为 16 行，实际为 {len(account_matrix)} 行")
+            if len(account_matrix) != expected_account_count:
+                raise RuntimeError(f"账号矩阵应为 {expected_account_count} 行，实际为 {len(account_matrix)} 行")
 
             password_rows = dict(
                 connection.execute(
@@ -143,13 +144,13 @@ def main() -> None:
                 password_matches(password, password_rows.get(email, ""))
                 for email, password in credentials
             )
-            if verified != 16:
-                raise RuntimeError(f"密码哈希兼容校验应为 16 个，实际通过 {verified} 个")
+            if verified != expected_account_count:
+                raise RuntimeError(f"密码哈希兼容校验应为 {expected_account_count} 个，实际通过 {verified} 个")
             connection.commit()
 
         print(
             "ACCOUNT_ARTIFACT_AUDIT_OK "
-            f"finding_queries={len(statements) - 1} accounts=16 passwords=16"
+            f"finding_queries={len(statements) - 1} accounts={expected_account_count} passwords={expected_account_count}"
         )
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)

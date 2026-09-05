@@ -2,7 +2,7 @@ import type { Route } from "./+types/warehouse.notifications";
 import { InternalNotificationHistory } from "../components/InternalNotificationHistory";
 import { requireSessionUser } from "../lib/auth.server";
 import {
-  listInternalNotifications,
+  listInternalNotificationPage,
   markAllOrdinaryInternalNotificationsRead,
   markInternalNotification,
 } from "../lib/internal-notifications.server";
@@ -10,7 +10,8 @@ import { valueOf } from "../lib/validation";
 
 export async function loader({request}:Route.LoaderArgs) {
   const current=await requireSessionUser(request,undefined,"warehouse");
-  return {notifications:await listInternalNotifications(current.organizationId,current.userId)};
+  const requestedPage=Number.parseInt(new URL(request.url).searchParams.get("page")||"1",10);
+  return listInternalNotificationPage(current.organizationId,current.userId,requestedPage);
 }
 
 export async function action({request}:Route.ActionArgs) {
@@ -35,7 +36,7 @@ export async function action({request}:Route.ActionArgs) {
 
 export default function WarehouseNotifications({loaderData,actionData}:Route.ComponentProps) {
   return <InternalNotificationHistory
-    notifications={loaderData.notifications}
+    {...loaderData}
     actionData={actionData}
     allowObjectLinks={false}
   />;

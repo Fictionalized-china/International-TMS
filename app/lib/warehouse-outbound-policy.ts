@@ -3,6 +3,7 @@ import {
   type WorkflowFieldMode,
   type WorkflowFieldPolicyLike,
 } from "./workflow-field-catalog";
+import type { LoadingBatchWorkflowOrder } from "./loading-batch-field-policy";
 
 export type WarehouseOutboundFieldPolicy = {
   isActive: boolean;
@@ -54,4 +55,37 @@ export function resolveWarehouseOutboundWorkflowPolicy(
       "required",
     ),
   };
+}
+
+/**
+ * Resolves execution fields for orders at or before port loading. Once every
+ * attached order has moved past this stage, old loading fields must not reopen
+ * a completed gate. An actually empty order set still uses legacy-safe catalog
+ * fallbacks because there is no workflow snapshot to evaluate.
+ */
+export function resolveWarehouseOutboundWorkflowPolicyForOrders(
+  orders: readonly LoadingBatchWorkflowOrder[],
+): WarehouseOutboundWorkflowPolicy {
+  const applicableOrders = orders.filter(
+    (order) => order.appliesToCurrentOrFuture,
+  );
+  if (orders.length > 0 && applicableOrders.length === 0) {
+    return resolveWarehouseOutboundWorkflowPolicy([
+      [
+        {
+          fieldKey: "loading_handover_notes",
+          isActive: false,
+          isRequired: false,
+        },
+        {
+          fieldKey: "loading_scan_confirmation",
+          isActive: false,
+          isRequired: false,
+        },
+      ],
+    ]);
+  }
+  return resolveWarehouseOutboundWorkflowPolicy(
+    applicableOrders.map((order) => order.fields),
+  );
 }

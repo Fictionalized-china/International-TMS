@@ -1,13 +1,16 @@
-"""Create four LTL demo orders already received and waiting for consolidation.
+"""Create configurable LTL demo orders already received and waiting for consolidation.
 
 The script targets the local Miniflare D1 database. It is intentionally
 idempotent: existing demo orders are repaired to the same post-receipt state
 instead of creating a second set.
+
+Use LTL_DEMO_COUNT and LTL_DEMO_PREFIX to create an isolated test set.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -16,7 +19,7 @@ from pathlib import Path
 
 ORGANIZATION_ID = "33de8358-0f85-4526-8ab8-9f94ed2aafcc"
 SOURCE_ORDER_NUMBER = "SO2026082500120"
-DEMO_REFERENCES = [f"LTL-WAREHOUSE-DEMO-20260826-{index}" for index in range(1, 5)]
+DEFAULT_REFERENCE_PREFIX = "LTL-WAREHOUSE-DEMO-20260826"
 
 
 def uid() -> str:
@@ -270,6 +273,13 @@ def ensure_warehouse_received(
 
 
 def main() -> None:
+    requested_count = int(os.environ.get("LTL_DEMO_COUNT", "4"))
+    if requested_count < 1 or requested_count > 20:
+        raise ValueError("LTL_DEMO_COUNT must be between 1 and 20")
+    reference_prefix = os.environ.get("LTL_DEMO_PREFIX", DEFAULT_REFERENCE_PREFIX).strip()
+    if not reference_prefix:
+        raise ValueError("LTL_DEMO_PREFIX cannot be empty")
+    demo_references = [f"{reference_prefix}-{index}" for index in range(1, requested_count + 1)]
     connection = connect()
     organization_id = ORGANIZATION_ID
     source = first(
@@ -314,6 +324,11 @@ def main() -> None:
     customer = first(connection, "SELECT id,name FROM customers WHERE id=?", (source["customer_id"],))
     admin = first(connection, "SELECT id FROM users WHERE email='admin@e2e.test'")
     salesperson = first(connection, "SELECT id FROM users WHERE email='sales@e2e.test'")
+    operation_supervisor = first(connection, "SELECT id FROM users WHERE email='operation-supervisor@e2e.test'")
+    operation_user = first(connection, "SELECT id FROM users WHERE email='operation@e2e.test'")
+    document_user = first(connection, "SELECT id FROM users WHERE email='doc@e2e.test'")
+    customer_service_user = first(connection, "SELECT id FROM users WHERE email='cs@e2e.test'")
+    finance_user = first(connection, "SELECT id FROM users WHERE email='finance@e2e.test'")
     domestic_warehouse = first(
         connection,
         "SELECT id,name FROM warehouses WHERE organization_id=? AND code='HRG-01'",
@@ -321,25 +336,47 @@ def main() -> None:
     )
     overseas_warehouse = first(
         connection,
-        "SELECT id,name,address FROM warehouses WHERE organization_id=? AND code='UZ-TAS-90861'",
+        "SELECT id,name,address FROM warehouses WHERE organization_id=? AND code='UZ-TAS-01' AND status='active'",
         (organization_id,),
     )
     workflow = first(
         connection,
-        "SELECT id FROM workflow_definitions WHERE organization_id=? AND code='tms-default' AND status='active'",
+        """SELECT id FROM workflow_definitions
+           WHERE organization_id=? AND road_load_type='ltl' AND status='active'
+             AND lifecycle_status='published'
+           ORDER BY version_number DESC, updated_at DESC LIMIT 1""",
         (organization_id,),
     )
 
-    markers = ",".join("?" for _ in DEMO_REFERENCES)
+    markers = ",".join("?" for _ in demo_references)
     existing = connection.execute(
         f"SELECT * FROM transport_orders WHERE organization_id=? AND customer_reference IN ({markers}) ORDER BY customer_reference",
-        [organization_id, *DEMO_REFERENCES],
+        [organization_id, *demo_references],
     ).fetchall()
     if existing:
-        if len(existing) != len(DEMO_REFERENCES):
+        if len(existing) != len(demo_references):
             raise RuntimeError("Only part of the stable LTL demo set exists; repair the incomplete set before reseeding")
         repaired = []
         for order in existing:
+            connection.execute(
+                "UPDATE transport_orders SET operation_supervisor_user_id=?,current_assignee_user_id=NULL,updated_at=? WHERE id=?",
+                (operation_supervisor["id"], iso(), order["id"]),
+            )
+            module_assignees = {
+                "consignment": salesperson["id"],
+                "assignment": operation_supervisor["id"],
+                "transport": operation_user["id"],
+                "tracking": operation_user["id"],
+                "exceptions": operation_user["id"],
+                "customs": document_user["id"],
+                "costs": customer_service_user["id"],
+                "review": finance_user["id"],
+            }
+            for module_code, assignee_user_id in module_assignees.items():
+                connection.execute(
+                    "UPDATE order_module_instances SET assignee_user_id=?,updated_at=? WHERE order_id=? AND module_code=? AND enabled=1",
+                    (assignee_user_id, iso(), order["id"], module_code),
+                )
             receipt_state = ensure_warehouse_received(
                 connection,
                 order,
@@ -366,8 +403,8 @@ def main() -> None:
         )
         sequence[document_type] = int(row["next_value"])
         connection.execute(
-            "UPDATE document_sequences SET next_value=next_value+4 WHERE organization_id=? AND document_type=?",
-            (organization_id, document_type),
+            "UPDATE document_sequences SET next_value=next_value+? WHERE organization_id=? AND document_type=?",
+            (requested_count, organization_id, document_type),
         )
 
     module_state = {
@@ -388,7 +425,8 @@ def main() -> None:
     day = datetime.now(timezone.utc).strftime("%Y%m%d")
     created: list[dict] = []
 
-    for index, cargo_name in enumerate(("demo1", "demo2", "demo3", "demo4"), 1):
+    for index in range(1, requested_count + 1):
+        cargo_name = f"LTL ready cargo {index}"
         now = iso(index)
         quote_id, charge_id, order_id = uid(), uid(), uid()
         instance_id, assignment_id, shipment_id = uid(), uid(), uid()
@@ -400,7 +438,7 @@ def main() -> None:
         volume = round(length * width * height / 1_000_000, 4)
         receivable, payable = 1200.0 + index * 150, 650.0 + index * 75
         pickup = f"中国 广东省 深圳市 南山区拼车测试提货点 {index}"
-        destination_note = f"塔什干演示目的仓 · 拼车测试 {cargo_name}"
+        destination_note = f"塔什干目的仓 · 拼车测试 {cargo_name}"
 
         insert(connection, "quotations", clone(
             source_quote,
@@ -423,7 +461,7 @@ def main() -> None:
         insert(connection, "transport_orders", clone(
             source,
             id=order_id, order_number=order_number, quotation_id=quote_id,
-            customer_reference=DEMO_REFERENCES[index - 1], shipper_contact="拼车测试联系人",
+            customer_reference=demo_references[index - 1], shipper_contact="拼车测试联系人",
             shipper_phone=f"1380000000{index}", origin_country="中国", origin_state="广东省",
             origin_city="深圳市", origin_address=pickup, consignee_contact="塔什干收货联系人",
             consignee_phone=f"99890000000{index}", destination_country="乌兹别克斯坦",
@@ -433,10 +471,11 @@ def main() -> None:
             status="in_execution", special_instructions="四票拼车测试；请从国内仓扫码收货开始继续",
             created_by_user_id=admin["id"], confirmed_at=iso(-25), created_at=now, updated_at=now,
             workflow_instance_id=None, current_step_code="module:warehouse",
-            current_step_name="仓库入库 · 待仓库扫码收货", current_assignee_user_id=admin["id"],
+            current_step_name="仓库入库 · 待仓库扫码收货", current_assignee_user_id=None,
             workflow_updated_at=now, order_date=f"{day[:4]}-{day[4:6]}-{day[6:]}", business_type="ltl",
             route_notes="深圳 → 霍尔果斯 → 塔什干", overseas_warehouse_id=overseas_warehouse["id"],
             overseas_warehouse_address_note=destination_note, salesperson_user_id=salesperson["id"],
+            operation_supervisor_user_id=operation_supervisor["id"],
         ))
         insert(connection, "workflow_instances", {
             "id": instance_id, "organization_id": organization_id, "workflow_id": workflow["id"],
@@ -447,6 +486,16 @@ def main() -> None:
         connection.execute("UPDATE transport_orders SET workflow_instance_id=? WHERE id=?", (instance_id, order_id))
 
         module_ids: dict[str, str] = {}
+        module_assignees = {
+            "consignment": salesperson["id"],
+            "assignment": operation_supervisor["id"],
+            "transport": operation_user["id"],
+            "tracking": operation_user["id"],
+            "exceptions": operation_user["id"],
+            "customs": document_user["id"],
+            "costs": customer_service_user["id"],
+            "review": finance_user["id"],
+        }
         for template in source_modules:
             code = template["module_code"]
             status, step, label, progress, started, completed = module_state[code]
@@ -455,7 +504,7 @@ def main() -> None:
             insert(connection, "order_module_instances", clone(
                 template, id=module_id, order_id=order_id, status=status,
                 current_step_code=step, current_step_name=label, progress_percent=progress,
-                assignee_user_id=admin["id"], blocking_reason=None, started_at=started,
+                assignee_user_id=module_assignees.get(code), blocking_reason=None, started_at=started,
                 completed_at=completed, created_at=now, updated_at=now,
             ))
         for service in source_services:

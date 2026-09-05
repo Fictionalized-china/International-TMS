@@ -1,5 +1,7 @@
 import { env } from "cloudflare:workers";
 import { syncOrderWorkflowSnapshot } from "./order-modules.server";
+import { deriveCustomsModuleAutomationState } from "./customs-module-policy";
+import { loadOrderModuleWorkflowFields } from "./workflow-fields.server";
 
 export async function syncCustomsModuleFromRecords(
   organizationId: string,
@@ -72,13 +74,16 @@ export async function syncCustomsModuleFromRecords(
   ).bind(organizationId, orderId).first<{ total: number; released: number | null }>();
   const total = gate?.total ?? 0;
   const released = gate?.released ?? 0;
-  const pending = total - released;
-  const ready = total > 0 && pending === 0;
-  const next = ready
-    ? { status: "completed", step: "released", name: "全部申报单已放行", progress: 100, blocker: null }
-    : total > 0
-      ? { status: "in_progress", step: "review", name: `海关审核（${released}/${total}）`, progress: 80, blocker: `还有 ${pending} 张有效起运地报关单未放行` }
-      : { status: "in_progress", step: "documents", name: "等待申报单", progress: 20, blocker: "尚未录入有效起运地报关单" };
+  const configuredFields = await loadOrderModuleWorkflowFields(
+    organizationId,
+    orderId,
+    "customs",
+  );
+  const next = deriveCustomsModuleAutomationState({
+    total,
+    released,
+    fields: configuredFields,
+  });
   const module = await env.DB.prepare(
     "SELECT id,status,current_step_code,current_step_name,progress_percent,blocking_reason FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='customs' AND enabled=1",
   ).bind(organizationId, orderId).first<{
@@ -107,7 +112,7 @@ export async function syncCustomsModuleFromRecords(
       ).bind(
         crypto.randomUUID(),organizationId,orderId,module.id,"customs_declarations_sync","申报单门禁自动同步",
         module.current_step_code,next.step,next.name,actorUserId,
-        ready ? `有效起运地报关单 ${released}/${total} 已全部放行` : next.blocker,now,
+        next.blocker ?? next.name,now,
       ),
     ]);
   }

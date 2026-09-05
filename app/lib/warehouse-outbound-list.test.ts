@@ -4,6 +4,7 @@ import {
   filterWarehouseOutboundLoadUnits,
   isConsolidatedOutboundTask,
   normalizeWarehouseOutboundListFilters,
+  validateFtlOutboundRouteSubmission,
   validateFtlOutboundRouteFields,
   validateFtlOutboundResourceSelection,
 } from "./warehouse-outbound-list";
@@ -67,19 +68,46 @@ describe("warehouse outbound order list", () => {
     expect(findWarehouseOutboundLoadUnit(loadUnits, "missing")).toBeNull();
   });
 
-  it("requires the warehouse to confirm all outbound resources for a full-truck task", () => {
+  it("requires only workflow-required outbound resources for a full-truck task", () => {
     expect(validateFtlOutboundResourceSelection({
       carrierId: "",
       vehicleId: "vehicle-1",
       driverId: "",
       plannedDepartureAt: "",
-    })).toBe("请由仓库确认：境外承运商、出境司机、计划出境发车时间");
+      policies: {
+        carrier: { isActive: true, isRequired: false },
+        vehicle: { isActive: true, isRequired: true },
+        driver: { isActive: true, isRequired: false },
+        plannedDeparture: { isActive: false, isRequired: false },
+      },
+    })).toBeNull();
+    expect(validateFtlOutboundResourceSelection({
+      carrierId: "",
+      vehicleId: "",
+      driverId: "",
+      plannedDepartureAt: "",
+      policies: {
+        carrier: { isActive: true, isRequired: false },
+        vehicle: { isActive: true, isRequired: true },
+        driver: { isActive: true, isRequired: false },
+        plannedDeparture: { isActive: false, isRequired: false },
+      },
+    })).toBe("请由仓库确认工作流必填项：出境车辆");
+  });
+
+  it("rejects attempts to submit fields hidden by the workflow", () => {
     expect(validateFtlOutboundResourceSelection({
       carrierId: "carrier-1",
-      vehicleId: "vehicle-1",
-      driverId: "driver-1",
+      vehicleId: "",
+      driverId: "",
       plannedDepartureAt: "2026-09-02T09:00",
-    })).toBeNull();
+      policies: {
+        carrier: { isActive: false, isRequired: false },
+        vehicle: { isActive: false, isRequired: false },
+        driver: { isActive: false, isRequired: false },
+        plannedDeparture: { isActive: false, isRequired: false },
+      },
+    })).toBe("当前工作流已隐藏：境外承运商、计划出境发车时间，不能提交这些字段");
   });
 
   it("validates full-truck route fields against the effective workflow rules", () => {
@@ -99,5 +127,16 @@ describe("warehouse outbound order list", () => {
         customs_location: { isRequired: false },
       },
     })).toBeNull();
+  });
+
+  it("rejects a route-field mutation when that field is hidden", () => {
+    expect(validateFtlOutboundRouteSubmission({
+      exitPort: "HORGOS",
+      customsLocation: "",
+      policies: {
+        exit_port: { isActive: false },
+        customs_location: { isActive: true },
+      },
+    })).toBe("当前工作流已隐藏出境口岸，不能在此登记");
   });
 });

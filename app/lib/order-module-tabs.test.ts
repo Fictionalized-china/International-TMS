@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { orderModuleTabDescriptors, orderModuleTabHref, orderWorkflowModuleTabs, resolveCostsSection, resolveCustomsSection } from "./order-module-tabs";
+import { costsTabHasPendingAction, orderEntryPreference, orderModuleTabDescriptors, orderModuleTabHref, orderWorkflowModuleTabs, resolveCostsSection, resolveCustomsSection } from "./order-module-tabs";
+
+describe("orderEntryPreference", () => {
+  it("lands document handlers directly on customs declarations", () => {
+    expect(orderEntryPreference("DOC")).toEqual({
+      stepKey: "outbound_transport",
+      moduleCode: "customs",
+      section: "declarations",
+    });
+  });
+
+  it("keeps the normal workflow landing target for other positions", () => {
+    expect(orderEntryPreference("OPERATION")).toBeNull();
+  });
+});
 
 describe("orderModuleTabHref", () => {
   it("builds an absolute section link so sibling tabs keep the order route", () => {
@@ -59,6 +73,14 @@ describe("resolveCostsSection", () => {
     expect(resolveCostsSection(null)).toBe("files");
     expect(resolveCostsSection("unknown")).toBe("files");
     expect(resolveCostsSection("expenses")).toBe("expenses");
+  });
+});
+
+describe("costsTabHasPendingAction", () => {
+  it("marks only the expenses tab when settlement sign-offs are pending", () => {
+    expect(costsTabHasPendingAction("expenses", true)).toBe(true);
+    expect(costsTabHasPendingAction("files", true)).toBe(false);
+    expect(costsTabHasPendingAction("expenses", false)).toBe(false);
   });
 });
 

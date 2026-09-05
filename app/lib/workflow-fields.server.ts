@@ -56,6 +56,22 @@ const loadingTypeLockedFields = new Set([
 const loadingTypeFixedField = new Set(["business_type"]);
 const retiredWorkflowFields = new Set(["loading_seal_number"]);
 
+export const assignmentManagedModuleCodes = [
+  "transport",
+  "tracking",
+  "exceptions",
+  "documents",
+  "customs",
+  "costs",
+] as const satisfies readonly OrderModuleCode[];
+
+export function assignmentCoverageIsComplete(
+  assigned: number,
+  total: number,
+) {
+  return total > 0 && assigned >= total;
+}
+
 export async function ensureWorkflowCatalogFields(organizationId: string) {
   const [workflows, existingFields] = await Promise.all([
     env.DB.prepare(
@@ -845,11 +861,17 @@ async function resolveFieldPresence(
   }
 
   if (moduleCode === "assignment") {
+    const assignmentModuleList = assignmentManagedModuleCodes
+      .map((code) => `'${code}'`)
+      .join(",");
     const assignment = await env.DB.prepare(
       `SELECT o.status,o.current_assignee_user_id,
               MAX(CASE WHEN m.module_code='assignment' THEN m.assignee_user_id END) assignment_assignee_user_id,
-              COUNT(CASE WHEN m.enabled=1 AND m.is_required=1 AND m.assignee_user_id IS NOT NULL THEN 1 END) assigned,
-              COUNT(CASE WHEN m.enabled=1 AND m.is_required=1 THEN 1 END) required_total
+              COUNT(CASE WHEN m.enabled=1
+                AND m.module_code IN (${assignmentModuleList})
+                AND m.assignee_user_id IS NOT NULL THEN 1 END) assigned,
+              COUNT(CASE WHEN m.enabled=1
+                AND m.module_code IN (${assignmentModuleList}) THEN 1 END) required_total
        FROM transport_orders o
        LEFT JOIN order_module_instances m ON m.order_id=o.id AND m.organization_id=o.organization_id
        WHERE o.id=? AND o.organization_id=? GROUP BY o.id`,
@@ -866,8 +888,12 @@ async function resolveFieldPresence(
       "primary_operator",
       assignment?.assignment_assignee_user_id ?? assignment?.current_assignee_user_id,
     );
-    setPresence(result, "module_assignees", assignment && assignment.required_total > 0 && assignment.assigned >= assignment.required_total ? assignment.assigned : null);
-    setPresence(result, "assignment_scope", assignment && assignment.required_total > 0 && assignment.assigned >= assignment.required_total ? assignment.assigned : null);
+    const assignmentComplete = assignmentCoverageIsComplete(
+      assignment?.assigned ?? 0,
+      assignment?.required_total ?? 0,
+    );
+    setPresence(result, "module_assignees", assignmentComplete ? assignment?.assigned : null);
+    setPresence(result, "assignment_scope", assignmentComplete ? assignment?.assigned : null);
     const assignmentTask = await env.DB.prepare(
       `SELECT due_at,
               (SELECT notes FROM order_module_history h
@@ -1121,16 +1147,25 @@ async function resolveFieldPresence(
          EXISTS(SELECT 1 FROM business_expenses WHERE organization_id=? AND order_id=? AND direction='payable' AND stage!='cancelled') payable_expenses,
          EXISTS(SELECT 1 FROM business_expenses WHERE organization_id=? AND order_id=? AND currency!='') expense_currency,
          EXISTS(SELECT 1 FROM business_expenses WHERE organization_id=? AND order_id=? AND exchange_rate>0) expense_exchange_rate,
-         EXISTS(SELECT 1 FROM order_expense_direction_controls WHERE organization_id=? AND order_id=? AND business_reviewed=1) business_review,
-         EXISTS(SELECT 1 FROM order_expense_direction_controls WHERE organization_id=? AND order_id=? AND finance_reviewed=1) finance_review,
+         (EXISTS(SELECT 1 FROM order_expense_direction_controls WHERE organization_id=? AND order_id=? AND direction='receivable' AND confirmed=1)
+          AND EXISTS(SELECT 1 FROM order_expense_direction_controls WHERE organization_id=? AND order_id=? AND direction='payable' AND confirmed=1)) customer_service_confirmation,
+         (EXISTS(SELECT 1 FROM order_expense_direction_controls WHERE organization_id=? AND order_id=? AND direction='receivable' AND business_reviewed=1)
+          AND EXISTS(SELECT 1 FROM order_expense_direction_controls WHERE organization_id=? AND order_id=? AND direction='payable' AND business_reviewed=1)) business_review,
+         (EXISTS(SELECT 1 FROM order_expense_direction_controls WHERE organization_id=? AND order_id=? AND direction='receivable' AND finance_reviewed=1)
+          AND EXISTS(SELECT 1 FROM order_expense_direction_controls WHERE organization_id=? AND order_id=? AND direction='payable' AND finance_reviewed=1)) finance_review,
          EXISTS(SELECT 1 FROM settlement_reconciliation_lines l JOIN settlement_reconciliations r ON r.id=l.reconciliation_id JOIN business_expenses e ON e.id=l.expense_id WHERE r.organization_id=? AND e.order_id=?) reconciliation_statement,
          EXISTS(SELECT 1 FROM settlement_invoice_allocations a JOIN business_expenses e ON e.id=a.expense_id WHERE e.order_id=?) invoice_records,
          EXISTS(SELECT 1 FROM settlement_cash_allocations a JOIN business_expenses e ON e.id=a.expense_id WHERE e.order_id=?) cash_records,
          EXISTS(SELECT 1 FROM settlement_cash_allocations a JOIN business_expenses e ON e.id=a.expense_id WHERE e.order_id=?) writeoff_records`,
     ).bind(
       organizationId,orderId,organizationId,orderId,
-      organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId,
-      organizationId,orderId,organizationId,orderId,organizationId,orderId,orderId,orderId,orderId,
+      organizationId,orderId,organizationId,orderId,
+      organizationId,orderId,organizationId,orderId,
+      organizationId,orderId,organizationId,orderId,
+      organizationId,orderId,organizationId,orderId,
+      organizationId,orderId,organizationId,orderId,
+      organizationId,orderId,
+      orderId,orderId,orderId,
     ).first<Record<string, unknown>>();
     for (const rule of rules) if (costs && rule.fieldKey in costs) setPresence(result, rule.fieldKey, costs[rule.fieldKey], true);
     const expenseRows = await env.DB.prepare(

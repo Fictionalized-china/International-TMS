@@ -49,6 +49,7 @@ const database=vi.hoisted(()=>{
 vi.mock("cloudflare:workers",()=>({env:{DB:database.DB}}));
 
 import {
+  assignedOrderNotificationStatement,
   listInternalNotifications,
   loadInternalNotificationSummary,
   markInternalNotification,
@@ -66,6 +67,7 @@ describe("internal notification delivery",()=>{
     expect(second.latest).toBeNull();
     const claim=database.queries.find((query)=>query.sql.includes("RETURNING"));
     expect(claim?.sql).toContain("popup_shown_at IS NULL");
+    expect(claim?.sql).toContain("category!='order_assignment'");
     expect(claim?.bindings.slice(1)).toEqual(["org-1","user-1","org-1","user-1"]);
   });
 
@@ -94,5 +96,23 @@ describe("internal notification delivery",()=>{
     expect(result).toMatchObject({ok:true,notificationId:"notice-1"});
     const update=database.queries.find((query)=>query.sql.includes("acknowledged_at=CASE"));
     expect(update?.bindings.slice(-3)).toEqual(["notice-1","org-1","user-1"]);
+  });
+
+  it("targets one assigned account and deduplicates the same order step",async()=>{
+    const statement=assignedOrderNotificationStatement(database.DB as unknown as D1Database,{
+      organizationId:"org-1",
+      orderId:"order-1",
+      assigneeUserId:"user-2",
+      actorUserId:"user-1",
+      stepName:"委托审核",
+      now:"2026-09-04T00:00:00.000Z",
+    });
+    await statement.run();
+    const query=database.queries.at(-1);
+    expect(query?.sql).toContain("m.user_id=?");
+    expect(query?.sql).toContain("NOT EXISTS");
+    expect(query?.bindings).toEqual([
+      "委托审核","user-1","2026-09-04T00:00:00.000Z","order-1","org-1","user-2","委托审核",
+    ]);
   });
 });

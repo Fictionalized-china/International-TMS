@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { selectWorkflowExecutionCurrentStep } from "./workflow-execution";
+import {
+  selectWorkflowExecutionCurrentStep,
+  workflowExecutionModuleIsComplete,
+} from "./workflow-execution";
 
 const step = (
   stepKey: string,
@@ -54,5 +57,46 @@ describe("selectWorkflowExecutionCurrentStep", () => {
     );
 
     expect(current?.step_key).toBe("reconciliation");
+  });
+});
+
+describe("workflowExecutionModuleIsComplete", () => {
+  it("does not let missing required fields pass at the current target step", () => {
+    expect(workflowExecutionModuleIsComplete({
+      existingStepStatus: "active",
+      stepSortOrder: 80,
+      targetSortOrder: 80,
+      sourceModuleStatus: "completed",
+      completionMode: "all_tasks",
+      taskCount: 1,
+      pendingRequired: 0,
+      hasMissingRequiredFields: true,
+    })).toBe(false);
+  });
+
+  it("does not rewind a completed historical module after a later real node is reached", () => {
+    expect(workflowExecutionModuleIsComplete({
+      existingStepStatus: "active",
+      stepSortOrder: 80,
+      targetSortOrder: 90,
+      sourceModuleStatus: "completed",
+      completionMode: "all_tasks",
+      taskCount: 1,
+      pendingRequired: 0,
+      hasMissingRequiredFields: true,
+    })).toBe(true);
+  });
+
+  it("completes a normally satisfied current-step module", () => {
+    expect(workflowExecutionModuleIsComplete({
+      existingStepStatus: "active",
+      stepSortOrder: 80,
+      targetSortOrder: 80,
+      sourceModuleStatus: "in_progress",
+      completionMode: "all_tasks",
+      taskCount: 1,
+      pendingRequired: 0,
+      hasMissingRequiredFields: false,
+    })).toBe(true);
   });
 });

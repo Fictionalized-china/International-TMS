@@ -28,6 +28,12 @@ import {
   acceptanceRequiredMarker,
   resolveWarehouseAcceptancePolicies,
 } from "../lib/warehouse-acceptance-policy";
+import {
+  calculateWarehouseVolumeCbm,
+  formatWarehouseVolumeCbm,
+  synchronizeWarehouseVolumeRow,
+} from "../lib/warehouse-volume";
+import { overseasInboundRequiresCustomsClearance } from "../lib/overseas-inbound-policy";
 
 type Shipment = {
   id: string;
@@ -273,7 +279,6 @@ export async function action({ request }: Route.ActionArgs) {
   const submittedPieces = positiveInt(form, "pieces");
   const pieces = submittedPieces ?? 1,
     weight = positive(form, "weight"),
-    volume = truncateVolume(positive(form, "volume")),
     length = positive(form, "length"),
     width = positive(form, "width"),
     height = positive(form, "height");
@@ -415,7 +420,12 @@ export async function action({ request }: Route.ActionArgs) {
       return { formError: `该订单的境外目的仓不是“${selectedWarehouse.name}”，请切换到正确仓库` };
     if (!overseasGate.exited)
       return { formError: "该订单尚未登记实际出境，不能办理境外目的仓入库" };
-    if (overseasGate.customs_clearance_mode !== "customer" && !overseasGate.customs_cleared)
+    const customsClearanceRequired = await requiresOrderCustomsClearanceForOverseasInbound(
+      user.organizationId,
+      orderId,
+      overseasGate.customs_clearance_mode,
+    );
+    if (customsClearanceRequired && !overseasGate.customs_cleared)
       return { formError: "该订单由公司代办清关，尚未完成目的地清关，不能办理境外目的仓入库" };
   }
   const workflowFields = await loadOrderModuleWorkflowFields(
@@ -473,10 +483,13 @@ export async function action({ request }: Route.ActionArgs) {
     return { formError: "请填写实收件数" };
   if (weightPolicy.isActive && weightPolicy.isRequired && weight == null)
     return { formError: "请填写实收重量" };
-  if (volumePolicy.isActive && volumePolicy.isRequired && volume == null)
-    return { formError: "请填写实测体积" };
   if (length == null || width == null || height == null)
     return { formError: "请填写货物实际长、宽、高" };
+  const volume = volumePolicy.isActive
+    ? calculateWarehouseVolumeCbm({ lengthCm: length, widthCm: width, heightCm: height })
+    : null;
+  if (volumePolicy.isActive && volumePolicy.isRequired && volume == null)
+    return { formError: "系统无法根据实际长、宽、高计算实测体积" };
   if (
     evidencePolicy.isActive &&
     evidencePolicy.isRequired &&
@@ -1020,7 +1033,11 @@ async function confirmSingleOrderOverseasArrival(input: {
   }>();
   if (!order) throw new Error("当前订单不属于该运输批次");
   if (!order.overseas_warehouse_id) throw new Error("订单尚未指定境外目的仓");
-  if (order.customs_clearance_mode !== "customer") {
+  if (await requiresOrderCustomsClearanceForOverseasInbound(
+    input.organizationId,
+    input.orderId,
+    order.customs_clearance_mode === "customer" ? "customer" : "company",
+  )) {
     const customsCleared = await env.DB.prepare(
       `SELECT 1 FROM order_tracking_milestones
         WHERE organization_id=? AND order_id=? AND milestone_code='customs_cleared' LIMIT 1`,
@@ -1116,6 +1133,27 @@ async function confirmSingleOrderOverseasArrival(input: {
   }
 }
 
+async function requiresOrderCustomsClearanceForOverseasInbound(
+  organizationId: string,
+  orderId: string,
+  customsClearanceMode: "company" | "customer",
+) {
+  const [customsModule, customsWorkflowFields] = await Promise.all([
+    env.DB.prepare(
+      `SELECT enabled,is_required
+       FROM order_module_instances
+       WHERE organization_id=? AND order_id=? AND module_code='customs'`,
+    ).bind(organizationId, orderId).first<{ enabled: number; is_required: number }>(),
+    loadOrderModuleWorkflowFields(organizationId, orderId, "customs"),
+  ]);
+  return overseasInboundRequiresCustomsClearance({
+    customsClearanceMode,
+    moduleEnabled: customsModule?.enabled === 1,
+    moduleRequired: customsModule?.is_required === 1,
+    fields: customsWorkflowFields,
+  });
+}
+
 export default function WarehouseInbound({
   loaderData,
   actionData,
@@ -1185,7 +1223,11 @@ export default function WarehouseInbound({
         ]}
       />
       {showReceivingWorkbench && selectedShipmentRecord && scannedPackageRecord && canOperate && (
-        <Form method="post" className="acceptance-workbench no-print">
+        <Form
+          method="post"
+          className="acceptance-workbench no-print"
+          onInput={(event) => synchronizeWarehouseVolumeRow(event.target)}
+        >
           <input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/>
           <input type="hidden" name="shipmentId" value={selectedShipmentRecord.id}/>
           <input type="hidden" name="barcode" value={scannedPackageRecord.barcode}/>
@@ -1203,17 +1245,17 @@ export default function WarehouseInbound({
               <th>实际包装类型{packageTypePolicy.isRequired ? " *" : ""}</th>
               <th>实收件数{acceptanceRequiredMarker(piecesPolicy)}</th>
               <th>实际重量 KG{acceptanceRequiredMarker(weightPolicy)}</th>
-              <th>实际体积 CBM{acceptanceRequiredMarker(volumePolicy)}</th>
+              <th>实际体积 CBM（自动计算）{acceptanceRequiredMarker(volumePolicy)}</th>
               <th>实际长×宽×高 CM{acceptanceRequiredMarker(acceptancePolicies.actualDimensions)}</th>
-            </tr></thead><tbody><tr>
+            </tr></thead><tbody><tr data-warehouse-volume-row data-warehouse-volume-packages="1">
               <td><strong>{scannedPackageRecord.cargo_name || selectedShipmentRecord.cargo_description || "货物名称未填写"}</strong><small>{scannedPackageRecord.package_number}</small></td>
               <td><strong>{selectedShipmentRecord.pieces} 件 · {Number(selectedShipmentRecord.gross_weight_kg || 0).toFixed(3)} KG</strong><small>{formatVolume(selectedShipmentRecord.volume_cbm)} CBM</small></td>
               <td><strong>{scannedPackageRecord.barcode}</strong><small>上一仓已出库</small></td>
               <td>{packageTypePolicy.isActive ? <select name="packageType" aria-label="实际包装类型" defaultValue={scannedPackageRecord.package_type ?? ""} required={packageTypePolicy.isRequired}><option value="">请选择</option><option value="carton">纸箱</option><option value="pallet">托盘</option><option value="wooden_case">木箱</option><option value="bag">袋装</option><option value="drum">桶装</option><option value="bundle">捆装</option><option value="mixed">混合包装</option><option value="other">其他</option></select> : <span className="muted">工作流已隐藏</span>}</td>
               <td>{piecesPolicy.isActive ? <input name="pieces" aria-label="实收件数" type="number" min="1" step="1" defaultValue={scannedPackageRecord.pieces ?? 1} required={piecesPolicy.isRequired}/> : <span className="muted">工作流已隐藏</span>}</td>
               <td>{weightPolicy.isActive ? <input name="weight" aria-label="实际重量 KG" type="number" min="0" step="0.001" defaultValue={scannedPackageRecord.weight_kg ?? ""} required={weightPolicy.isRequired}/> : <span className="muted">工作流已隐藏</span>}</td>
-              <td>{volumePolicy.isActive ? <input name="volume" aria-label="实际体积 CBM" type="number" min="0" step="0.001" defaultValue={scannedPackageRecord.volume_cbm != null ? formatVolume(scannedPackageRecord.volume_cbm) : ""} required={volumePolicy.isRequired}/> : <span className="muted">工作流已隐藏</span>}</td>
-              <td><div className="acceptance-dimensions"><input name="length" aria-label="实际长度" type="number" min="0" step="0.1" defaultValue={scannedPackageRecord.length_cm ?? ""} required/><span>×</span><input name="width" aria-label="实际宽度" type="number" min="0" step="0.1" defaultValue={scannedPackageRecord.width_cm ?? ""} required/><span>×</span><input name="height" aria-label="实际高度" type="number" min="0" step="0.1" defaultValue={scannedPackageRecord.height_cm ?? ""} required/></div></td>
+              <td>{volumePolicy.isActive ? <input name="volume" aria-label="实际体积 CBM（自动计算）" type="number" min="0" step="0.0001" defaultValue={formatWarehouseVolumeCbm(calculateWarehouseVolumeCbm({ lengthCm: scannedPackageRecord.length_cm, widthCm: scannedPackageRecord.width_cm, heightCm: scannedPackageRecord.height_cm }))} required={volumePolicy.isRequired} readOnly data-warehouse-volume-output/> : <span className="muted">工作流已隐藏</span>}</td>
+              <td><div className="acceptance-dimensions"><input name="length" aria-label="实际长度" type="number" min="0" step="0.1" defaultValue={scannedPackageRecord.length_cm ?? ""} required data-warehouse-volume-length/><span>×</span><input name="width" aria-label="实际宽度" type="number" min="0" step="0.1" defaultValue={scannedPackageRecord.width_cm ?? ""} required data-warehouse-volume-width/><span>×</span><input name="height" aria-label="实际高度" type="number" min="0" step="0.1" defaultValue={scannedPackageRecord.height_cm ?? ""} required data-warehouse-volume-height/></div></td>
             </tr></tbody></table></div>
           </section>
           <section className="panel acceptance-confirm-panel">
@@ -1248,11 +1290,8 @@ function positiveInt(form: FormData, name: string) {
   const value = positive(form, name);
   return value !== null && Number.isInteger(value) ? value : null;
 }
-function truncateVolume(value: number | null) {
-  return value === null ? null : Math.trunc(value * 1000) / 1000;
-}
 function formatVolume(value: number | null | undefined) {
-  return (truncateVolume(Number(value ?? 0)) ?? 0).toFixed(3);
+  return formatWarehouseVolumeCbm(Number(value ?? 0));
 }
 function generateCode(prefix: string) {
   return `${prefix}-${Date.now().toString(36).toUpperCase()}-${crypto.randomUUID().slice(0, 5).toUpperCase()}`;

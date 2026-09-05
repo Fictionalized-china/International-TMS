@@ -1,4 +1,4 @@
-import { Form, Link } from "react-router";
+import { Form, Link, useSearchParams } from "react-router";
 import type { InternalNotification } from "../lib/internal-notifications.server";
 
 type NotificationActionData = {
@@ -8,14 +8,32 @@ type NotificationActionData = {
 
 export function InternalNotificationHistory({
   notifications,
+  page,
+  pageCount,
+  pageSize,
+  total,
+  ordinaryUnreadCount,
   actionData,
   allowObjectLinks=true,
 }: {
   notifications:InternalNotification[];
+  page:number;
+  pageCount:number;
+  pageSize:number;
+  total:number;
+  ordinaryUnreadCount:number;
   actionData?:NotificationActionData;
   allowObjectLinks?:boolean;
 }) {
-  const ordinaryUnread=notifications.filter((item)=>!item.is_read&&!item.requires_ack).length;
+  const [searchParams]=useSearchParams();
+  const pageHref=(nextPage:number)=>{
+    const next=new URLSearchParams(searchParams);
+    next.set("page",String(nextPage));
+    return `?${next.toString()}`;
+  };
+  const pageNumbers=Array.from(new Set([1,page-1,page,page+1,pageCount]))
+    .filter((value)=>value>=1&&value<=pageCount)
+    .sort((left,right)=>left-right);
   return <div className="page prototype-page">
     <header className="page-header">
       <div>
@@ -25,7 +43,7 @@ export function InternalNotificationHistory({
       </div>
       <Form method="post">
         <input type="hidden" name="intent" value="read_all"/>
-        <button className="secondary" disabled={!ordinaryUnread}>普通通知全部已读（{ordinaryUnread}）</button>
+        <button className="secondary" disabled={!ordinaryUnreadCount}>普通通知全部已读（{ordinaryUnreadCount}）</button>
       </Form>
     </header>
     {actionData?.success&&<div className="alert" role="status">{actionData.success}</div>}
@@ -52,6 +70,25 @@ export function InternalNotificationHistory({
         </div>
       </article>)}
       {!notifications.length&&<p className="empty-state">暂无通知。</p>}
+      <footer className="pagination consolidation-pagination internal-notification-pagination" aria-label="通知分页">
+        <span>每页 {pageSize} 条 · 第 {page} / {pageCount} 页 · 共 {total} 条</span>
+        <div>
+          {page>1
+            ? <Link className="secondary" to={pageHref(page-1)}>上一页</Link>
+            : <span className="secondary disabled" aria-disabled="true">上一页</span>}
+          {pageNumbers.map((pageNumber,index)=>[
+            index>0&&pageNumber-pageNumbers[index-1]>1
+              ? <span key={`gap-${pageNumber}`} aria-hidden="true">…</span>
+              : null,
+            pageNumber===page
+              ? <span key={pageNumber} className="consolidation-pagination-current" aria-current="page">{pageNumber}</span>
+              : <Link key={pageNumber} className="secondary" to={pageHref(pageNumber)} aria-label={`第 ${pageNumber} 页`}>{pageNumber}</Link>,
+          ])}
+          {page<pageCount
+            ? <Link className="secondary" to={pageHref(page+1)}>下一页</Link>
+            : <span className="secondary disabled" aria-disabled="true">下一页</span>}
+        </div>
+      </footer>
     </section>
   </div>;
 }

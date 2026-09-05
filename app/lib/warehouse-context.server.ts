@@ -34,6 +34,8 @@ export async function loadWarehouseContext(request: Request, user: SessionUser) 
     ).bind(user.organizationId, user.userId).all<WarehouseContextOption>();
   if (!result.results.length)
     throw new Response("当前没有可访问的启用仓库", { status: 403 });
+  if (!access.all && result.results.length !== 1)
+    throw new Response("当前账号绑定了多个仓库，请联系管理员按“一仓一号”修正", { status: 409 });
 
   const requestedWarehouseId = new URL(request.url).searchParams.get("warehouseId");
   const selected = requestedWarehouseId

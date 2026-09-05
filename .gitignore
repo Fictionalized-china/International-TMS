@@ -39,3 +39,6 @@ Thumbs.db
 *.log
 playwright-report/
 test-results/
+output/
+.local-backups/
+.tmp_*

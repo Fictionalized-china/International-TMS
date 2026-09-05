@@ -8,6 +8,8 @@ import { ConnectionStatus } from "../components/InteractionFeedback";
 import { InternalNotificationCenter } from "../components/InternalNotificationCenter";
 import { WorkspacePreferences } from "../components/WorkspacePreferences";
 import { loadInternalNotificationSummary } from "../lib/internal-notifications.server";
+import { canAccessSettlementWorkbench } from "../lib/billing-access";
+import { canAccessBatchWorkspace } from "../lib/order-access";
 
 export async function loader({ request }: Route.LoaderArgs) {
   const user = await requireSessionUser(request);
@@ -20,6 +22,8 @@ export async function loader({ request }: Route.LoaderArgs) {
 export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
   const { user } = loaderData;
   const can = (permission: string) => user.permissions.includes(permission);
+  const canAccessBilling = canAccessSettlementWorkbench(user.permissions);
+  const canAccessBatches = canAccessBatchWorkspace(user);
 
   return (
     <div className="shell admin-app-shell">
@@ -51,10 +55,10 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
           {can("quote.view") && <SideLink to="/admin/quotations" icon="receipt">询价与报价</SideLink>}
           {can("order.view") && <SideLink to="/admin/orders" icon="clipboard">运输订单</SideLink>}
           {can("shipment.view") && <SideLink to="/admin/domestic-tracking" icon="map">在途车辆</SideLink>}
-          {can("order.module.loading.manage") && <SideLink to="/admin/loading" icon="truck">配载单跟踪</SideLink>}
+          {canAccessBatches && <SideLink to="/admin/loading" icon="truck">配载单跟踪</SideLink>}
           {can("order.module.documents.manage") && <SideLink to="/admin/documents" icon="documents">文件中心</SideLink>}
           {can("shipment.view") && <SideLink to="/admin/shipments" icon="packageCheck">运单列表</SideLink>}
-          {can("billing.view") && <SideLink to="/admin/billing" icon="billing">费用结算</SideLink>}
+          {canAccessBilling && <SideLink to="/admin/billing" icon="billing">费用结算</SideLink>}
           {can("order.module.cargo.manage") && <SideLink to="/admin/cargo" icon="boxes">货物信息</SideLink>}
 
           <span className="nav-group nav-title">业务资料</span>

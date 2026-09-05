@@ -3,7 +3,9 @@ import { Form, Link } from "react-router";
 import type { Route } from "./+types/warehouse.index";
 import { Modal } from "../components/Modal";
 import { OrderRouteFilterFields } from "../components/OrderRouteFilterFields";
+import { QueryPagination } from "../components/QueryPagination";
 import { requireSessionUser } from "../lib/auth.server";
+import { paginateList, readListPage } from "../lib/list-pagination";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
 import { matchesOrderRouteFilters, orderRouteFilterCount, readOrderRouteFilters } from "../lib/order-route-filters";
 import {
@@ -11,7 +13,7 @@ import {
   type WarehouseCargoPackageIdentifier,
 } from "../lib/warehouse-cargo-identifiers";
 
-type WarehouseQueue = "inbound" | "counting" | "inventory" | "outbound" | "exception";
+type WarehouseQueue = "inbound" | "counting" | "inventory" | "outbound" | "exception" | "history";
 
 type WarehouseQueueRow = {
   order_id: string;
@@ -43,6 +45,7 @@ type WarehouseQueueRow = {
   in_stock_count: number;
   overseas_operation_status: string | null;
   dispatch_status: string | null;
+  package_barcodes: string | null;
   active_exception_count: number;
   updated_at: string;
 };
@@ -81,6 +84,7 @@ const queueMeta: Record<WarehouseQueue, { label: string; hint: string }> = {
   inventory: { label: "在库货物", hint: "已完成实收，等待配载或整车装车" },
   outbound: { label: "装车与出库", hint: "已有装车任务，等待扫码与交接" },
   exception: { label: "异常处理", hint: "货物被冻结，需先处理异常" },
+  history: { label: "已出库", hint: "本仓作业已完成，记录永久保留" },
 };
 
 function queueHint(queue: WarehouseQueue, overseas: boolean) {
@@ -100,6 +104,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const requestedView = url.searchParams.get("view") || "all";
   const view = requestedView === "all" || requestedView in queueMeta ? requestedView : "all";
   const q = (url.searchParams.get("q") || "").trim().toLowerCase();
+  const requestedPage = readListPage(url.searchParams);
   const routeFilters = readOrderRouteFilters(url.searchParams);
   const rows = await env.DB.prepare(
     `SELECT s.order_id,s.id shipment_id,s.shipment_number,o.order_number,c.name customer_name,
@@ -127,6 +132,9 @@ export async function loader({ request }: Route.LoaderArgs) {
                JOIN warehouse_locations dl ON dl.id=dsb.target_location_id
               WHERE wd.organization_id=s.organization_id AND dl.warehouse_id=?
               ORDER BY wd.created_at DESC LIMIT 1) dispatch_status,
+            (SELECT GROUP_CONCAT(DISTINCT wp.barcode)
+               FROM warehouse_packages wp
+              WHERE wp.organization_id=s.organization_id AND wp.shipment_id=s.id AND wp.status!='cancelled') package_barcodes,
             (SELECT COUNT(*) FROM warehouse_exceptions we JOIN warehouse_packages wp ON wp.id=we.package_id WHERE we.organization_id=s.organization_id AND we.shipment_id=s.id AND wp.warehouse_id=? AND we.status IN ('open','processing')) active_exception_count,
             MAX(o.updated_at,s.updated_at) updated_at
        FROM shipments s
@@ -134,7 +142,7 @@ export async function loader({ request }: Route.LoaderArgs) {
        JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
        LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id
        LEFT JOIN reference_data route_port ON route_port.organization_id=o.organization_id AND route_port.category='border_port' AND route_port.code=o.exit_port
-      WHERE s.organization_id=? AND o.status NOT IN ('cancelled','completed')
+      WHERE s.organization_id=? AND o.status!='cancelled'
         AND ${warehouse.warehouse_role === "overseas_destination"
           ? `o.overseas_warehouse_id=? AND (
                EXISTS(SELECT 1 FROM transport_batch_orders bo JOIN transport_batches b ON b.id=bo.batch_id AND b.organization_id=bo.organization_id WHERE bo.organization_id=o.organization_id AND bo.order_id=o.id AND bo.status!='removed' AND b.road_status IN ('outbound_in_transit','overseas_arrived','waiting_pickup','pickup_completed'))
@@ -157,20 +165,18 @@ export async function loader({ request }: Route.LoaderArgs) {
     warehouse.id,
   ).all<WarehouseQueueRow>();
 
-  const activeRows = warehouse.warehouse_role === "overseas_destination"
-    ? rows.results.filter((row) => row.overseas_operation_status !== "picked_up")
-    : rows.results.filter((row) => row.dispatch_status !== "dispatched");
-  const categorized = activeRows.map((row) => ({ ...row, queue: warehouseQueue(row) }));
+  const categorized = rows.results.map((row) => ({ ...row, queue: warehouseQueue(row) }));
   const scoped = categorized.filter((row) => {
     if (view !== "all" && row.queue !== view) return false;
     if (!matchesOrderRouteFilters(row, routeFilters)) return false;
-    if (q && !`${row.order_number} ${row.shipment_number} ${row.customer_name} ${row.customer_identity_code} ${row.cargo_description}`.toLowerCase().includes(q)) return false;
+    if (q && !`${row.order_number} ${row.shipment_number} ${row.customer_name} ${row.customer_identity_code} ${row.cargo_description} ${row.package_barcodes || ""}`.toLowerCase().includes(q)) return false;
     return true;
   });
   const counts = Object.fromEntries(
     Object.keys(queueMeta).map((key) => [key, categorized.filter((row) => row.queue === key).length]),
   ) as Record<WarehouseQueue, number>;
-  const orderIds = [...new Set(scoped.map((row) => row.order_id))];
+  const pagination = paginateList(scoped, requestedPage);
+  const orderIds = [...new Set(pagination.items.map((row) => row.order_id))];
   const cargoItems: WarehouseCargoItem[] = [];
   const cargoPackages: WarehouseCargoPackageIdentifier[] = [];
   for (const ids of chunk(orderIds, 80)) {
@@ -199,7 +205,13 @@ export async function loader({ request }: Route.LoaderArgs) {
   return {
     user,
     warehouse,
-    rows: scoped,
+    rows: pagination.items,
+    pagination: {
+      page: pagination.page,
+      pageCount: pagination.pageCount,
+      pageSize: pagination.pageSize,
+      total: pagination.total,
+    },
     cargoItems,
     cargoPackages,
     counts,
@@ -214,8 +226,7 @@ export default function WarehouseIndex({ loaderData }: Route.ComponentProps) {
   return <div className="page prototype-page warehouse-queue-page">
     <div className="breadcrumb">仓库作业 / 作业总览 / {loaderData.warehouse.name}</div>
     <header className="page-head">
-      <div><p className="prototype-kicker">WAREHOUSE WORK QUEUE</p><h1>仓库作业总表</h1><p>一行一票货；系统根据收货、实收、库存、装车和异常记录自动归类。</p></div>
-      <Link className="btn" to={warehousePath("/warehouse/inventory", loaderData.warehouse.id, { status: "dispatched" })}>查看已出库记录</Link>
+      <div><p className="prototype-kicker">WAREHOUSE WORK QUEUE</p><h1>仓库作业总表</h1><p>一行一票货；完整保留该仓待入库、在库、装车、异常与已出库记录。</p></div>
     </header>
     <nav className="warehouse-queue-tabs" aria-label="仓库作业分类">
       <Link className={loaderData.view === "all" ? "active" : ""} to={warehousePath("/warehouse", loaderData.warehouse.id)}>全部 <strong>{Object.values(loaderData.counts).reduce((sum, count) => sum + count, 0)}</strong></Link>
@@ -225,7 +236,7 @@ export default function WarehouseIndex({ loaderData }: Route.ComponentProps) {
       <Form method="get" action="." className="warehouse-queue-filter">
         {loaderData.view !== "all" && <input type="hidden" name="view" value={loaderData.view} />}
         <input type="hidden" name="warehouseId" value={loaderData.warehouse.id} />
-        <input name="q" defaultValue={loaderData.q} placeholder="订单、运单、客户、识别码或货物名称" />
+        <input name="q" defaultValue={loaderData.q} placeholder="订单、运单、OUL 货物码、客户、识别码或货物名称" />
         <button className="secondary">筛选</button>
         <Link className="text-button" to={warehousePath("/warehouse", loaderData.warehouse.id, loaderData.view === "all" ? undefined : { view: loaderData.view })}>重置</Link>
         <details className="order-route-advanced-filter" open={advancedFilterCount > 0}>
@@ -233,21 +244,22 @@ export default function WarehouseIndex({ loaderData }: Route.ComponentProps) {
           <div className="order-route-filter-grid"><OrderRouteFilterFields filters={loaderData.routeFilters}/></div>
         </details>
       </Form>
-      <div className="table-wrap warehouse-queue-table"><table><thead><tr><th>作业状态</th><th>订单 / 运单</th><th>客户</th><th>货物与实收</th><th>入库时间</th><th>当前处理</th><th className="sticky-action">操作</th></tr></thead><tbody>{loaderData.rows.map((row) => <tr key={row.shipment_id} className={row.queue === "exception" ? "row-blocked" : ""}>
+      <div className="table-wrap warehouse-queue-table"><table><thead><tr><th>作业状态</th><th>订单 / 运单</th><th>客户</th><th>货物与实收</th><th>入库时间</th><th>当前处理</th><th className="sticky-action">操作</th></tr></thead><tbody>{loaderData.rows.map((row) => <tr key={row.shipment_id} className={row.queue === "exception" ? "row-blocked" : row.queue === "history" ? "row-history" : ""}>
         <td><span className={`status-pill warehouse-queue-${row.queue}`}>{queueMeta[row.queue].label}</span><small>{row.business_type === "ftl" ? "整车" : "拼车"}</small></td>
         <td><strong>{row.order_number}</strong><small>{row.shipment_number}</small></td>
         <td><strong>{row.customer_name}</strong><small>识别码 {row.customer_identity_code}</small></td>
-        <td><strong>{row.cargo_description || "货物名称待补"}</strong><small>{row.pieces || 0} 件 · {Number(row.gross_weight_kg || 0).toFixed(2)} KG · {Number(row.volume_cbm || 0).toFixed(3)} CBM · {row.package_count} 个标签</small></td>
+        <td><strong>{row.cargo_description || "货物名称待补"}</strong><small>{row.pieces || 0} 件 · {Number(row.gross_weight_kg || 0).toFixed(2)} KG · {Number(row.volume_cbm || 0).toFixed(3)} CBM · {row.package_count} 个标签</small>{row.package_barcodes && <small className="warehouse-cargo-code-summary">仓库货物码 {summarizePackageBarcodes(row.package_barcodes)}</small>}</td>
         <td>{row.receipt_time ? new Date(row.receipt_time).toLocaleString("zh-CN") : "尚未入库"}</td>
         <td><strong>{queueHint(row.queue, loaderData.warehouse.warehouse_role === "overseas_destination")}</strong><small>{warehouseQueueDetail(row)}</small></td>
-        <td className="sticky-action"><div className="warehouse-queue-actions">
-          <Link className="warehouse-queue-action primary-action" to={warehouseQueueHref(row, loaderData.warehouse.id, loaderData.warehouse.warehouse_role === "overseas_destination")}>进入办理</Link>
-          <Modal title={`货物详情 · ${row.order_number}`} triggerLabel="查看货物" triggerClassName="warehouse-queue-action" size="xwide">
+        <td className="sticky-action"><div className="warehouse-queue-actions compact-action-row">
+          {row.queue !== "history" && <Link className="warehouse-queue-action primary-action" to={warehouseQueueHref(row, loaderData.warehouse.id, loaderData.warehouse.warehouse_role === "overseas_destination")}>进入办理</Link>}
+          <Modal title={`货物详情 · ${row.order_number}`} triggerLabel={row.queue === "history" ? "查看记录" : "查看货物"} triggerClassName="warehouse-queue-action" size="xwide">
             <WarehouseCargoDetails row={row} items={loaderData.cargoItems.filter((item) => item.order_id === row.order_id)} packages={loaderData.cargoPackages.filter((item) => item.order_id === row.order_id)} />
           </Modal>
         </div></td>
       </tr>)}</tbody></table></div>
       {!loaderData.rows.length && <p className="empty-state">当前筛选条件下没有仓库作业。</p>}
+      <QueryPagination {...loaderData.pagination}/>
     </section>
   </div>;
 }
@@ -261,6 +273,7 @@ function WarehouseCargoDetails({ row, items, packages }: { row: CategorizedWareh
   }), { packages: 0, pieces: 0, grossWeight: 0, volume: 0 });
 
   return <div className="warehouse-cargo-dialog">
+    <div className="warehouse-cargo-code-guide"><strong>扫码标识说明</strong><span>唛头号等于订单号，用于识别整票订单；OUL 为实体包装的仓库货物主码，同一包装在国内仓、运输和境外仓全程复用，不会重复生成。</span></div>
     <div className="warehouse-cargo-summary">
       <span><small>客户</small><strong>{row.customer_name}</strong></span>
       <span><small>运单号</small><strong>{row.shipment_number}</strong></span>
@@ -270,7 +283,7 @@ function WarehouseCargoDetails({ row, items, packages }: { row: CategorizedWareh
       <span><small>总体积</small><strong>{(items.length ? totals.volume : Number(row.volume_cbm || 0)).toFixed(3)} CBM</strong></span>
     </div>
     {items.length ? <div className="table-wrap warehouse-cargo-detail-table"><table>
-      <thead><tr><th>序号 / 品名</th><th>HS Code</th><th>包装</th><th>重量</th><th>尺寸 / 体积</th><th>申报信息</th><th>唛头号 / 货物条码</th><th>属性与备注</th></tr></thead>
+      <thead><tr><th>序号 / 品名</th><th>HS Code</th><th>包装</th><th>重量</th><th>尺寸 / 体积</th><th>申报信息</th><th>唛头号 / 仓库货物主码</th><th>属性与备注</th></tr></thead>
       <tbody>{items.map((item) => {
         const identifiers = resolveWarehouseCargoIdentifiers({
           orderNumber: row.order_number,
@@ -286,14 +299,14 @@ function WarehouseCargoDetails({ row, items, packages }: { row: CategorizedWareh
         <td><strong>毛重 {item.gross_weight_per_package_kg.toFixed(2)} KG/包装</strong><small>净重 {item.net_weight_per_package_kg.toFixed(2)} KG/包装</small></td>
         <td><strong>{item.length_cm} × {item.width_cm} × {item.height_cm} cm</strong><small>{item.volume_per_package_cbm.toFixed(4)} CBM/包装</small></td>
         <td><strong>{item.currency} {item.declared_value.toLocaleString("zh-CN")}</strong><small>{item.origin_country || "原产国未填"}{item.brand_model ? ` · ${item.brand_model}` : ""}</small></td>
-        <td className="warehouse-cargo-identifiers"><small>唛头号（订单号）</small><code>{identifiers.markNumber}</code><small>货物条码</small>{identifiers.packages.length ? <div>{identifiers.packages.map((pkg) => <code key={pkg.id} title={`包装号 ${pkg.package_number}`}>{pkg.barcode}</code>)}</div> : <em>尚未生成（国内仓收货时生成）</em>}</td>
+        <td className="warehouse-cargo-identifiers"><small>唛头号（订单号）</small><code>{identifiers.markNumber}</code><small>仓库货物主码（OUL）</small>{identifiers.packages.length ? <div>{identifiers.packages.map((pkg) => <code key={pkg.id} title={`包装号 ${pkg.package_number}`}>{pkg.barcode}</code>)}</div> : <em>尚未生成（国内仓收货时生成）</em>}</td>
         <td><strong>{identifiers.customMarks ? `货物标记：${identifiers.customMarks}` : "无额外货物标记"}</strong><small>{[item.special_attributes, item.notes].filter(Boolean).join(" · ") || "无备注"}</small></td>
       </tr>;
       })}</tbody>
     </table></div> : <div className="warehouse-cargo-empty">
       <strong>{row.cargo_description || "货物名称待补"}</strong>
       <span>唛头号（订单号）：<code>{row.order_number}</code></span>
-      <span>货物条码：{packages.length ? packages.map((item) => item.barcode).join("、") : "尚未生成（国内仓收货时生成）"}</span>
+      <span>仓库货物主码（OUL）：{packages.length ? [...new Set(packages.map((item) => item.barcode))].join("、") : "尚未生成（国内仓收货时生成）"}</span>
       <span>该订单尚无逐项货物明细，当前仅有订单汇总：{row.pieces || 0} 件 · {Number(row.gross_weight_kg || 0).toFixed(2)} KG · {Number(row.volume_cbm || 0).toFixed(3)} CBM。</span>
     </div>}
   </div>;
@@ -307,8 +320,15 @@ function chunk<T>(items: T[], size: number) {
   return Array.from({ length: Math.ceil(items.length / size) }, (_, index) => items.slice(index * size, (index + 1) * size));
 }
 
+function summarizePackageBarcodes(value: string) {
+  const barcodes = [...new Set(value.split(",").map((item) => item.trim()).filter(Boolean))];
+  if (barcodes.length <= 1) return barcodes[0] || "—";
+  return `${barcodes[0]} 等 ${barcodes.length} 个包装码`;
+}
+
 function warehouseQueue(row: WarehouseQueueRow): WarehouseQueue {
   if (row.active_exception_count > 0) return "exception";
+  if (row.dispatch_status === "dispatched" || row.overseas_operation_status === "picked_up") return "history";
   if (row.dispatch_status === "loading") return "outbound";
   if (!row.received) return "inbound";
   if (!row.cargo_complete) return "counting";
@@ -317,6 +337,7 @@ function warehouseQueue(row: WarehouseQueueRow): WarehouseQueue {
 
 function warehouseQueueDetail(row: CategorizedWarehouseRow) {
   if (row.active_exception_count) return `${row.active_exception_count} 条未结案异常`;
+  if (row.queue === "history") return "已完成本仓出库，历史记录可随时查询";
   if (row.dispatch_status === "loading") return "装车任务进行中";
   if (!row.received) return "尚无仓库收货记录";
   if (!row.cargo_complete) return "已收货，尚未确认货齐";

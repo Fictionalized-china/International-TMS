@@ -36,6 +36,24 @@ describe("workflow field building blocks", () => {
     }
   });
 
+  it("keeps settlement actions and evidence configurable", () => {
+    expect(
+      workflowFieldCatalog.find((item) => item.fieldKey === "customer_service_confirmation"),
+    ).toMatchObject({ defaultMode: "required" });
+    expect(
+      workflowFieldCatalog.find((item) => item.fieldKey === "business_review"),
+    ).toMatchObject({ defaultMode: "optional" });
+    expect(
+      workflowFieldCatalog.find((item) => item.fieldKey === "finance_review"),
+    ).toMatchObject({ defaultMode: "optional" });
+    expect(
+      workflowFieldCatalog.find((item) => item.fieldKey === "document_billing_statement"),
+    ).toMatchObject({ defaultMode: "optional" });
+    expect(
+      workflowFieldCatalog.find((item) => item.fieldKey === "document_payment_receipt"),
+    ).toMatchObject({ defaultMode: "optional" });
+  });
+
   it("shows the order-creation baseline but keeps only the consignment letter as its gate", () => {
     const orderCreationFields = workflowFieldCatalog.filter(
       (field) => field.stepKey === "order_creation",

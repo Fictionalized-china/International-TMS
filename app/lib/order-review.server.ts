@@ -1,7 +1,13 @@
 import {
   completionStatusLabels,
+  configuredModuleRequiresCompletion,
+  costsModuleReviewBlocker,
   currencyFinance,
   orderCompletionStatus,
+  orderReviewModuleState,
+  orderReviewSettlementBlockers,
+  pickupCompletionRequired,
+  pickupCompletionReviewBlocker,
   type CurrencyFinance,
   type OrderCompletionStatus,
 } from "./order-review";
@@ -60,6 +66,7 @@ export type OrderReviewView = {
   people: ReviewPeople;
   blockers: ReviewBlocker[];
   pickupComplete: boolean;
+  pickupRequired: boolean;
   customerDisputeSummary: string | null;
   reviewConclusion: string | null;
   improvementNotes: string | null;
@@ -112,10 +119,15 @@ export async function generateOrderReview(
   });
   const completionStatus = orderCompletionStatus({
     pickupComplete: draft.pickupComplete,
+    pickupRequired: draft.pickupRequired,
     blockers: draft.blockers.map((item) => item.message),
     reviewGenerated: true,
     finance: draft.finance,
   });
+  const reviewModuleState = orderReviewModuleState(
+    completionStatus,
+    draft.blockers.map((item) => item.message),
+  );
   const readinessStatus = completionStatus === "in_progress" ? "blocked" : completionStatus;
   const id = previous?.id ?? crypto.randomUUID();
   const revision = (previous?.revision ?? 0) + 1;
@@ -163,12 +175,12 @@ export async function generateOrderReview(
       db.prepare(`UPDATE order_module_instances SET status=?,current_step_code=?,current_step_name=?,progress_percent=?,blocking_reason=?,
         started_at=COALESCE(started_at,?),completed_at=?,updated_at=? WHERE id=? AND organization_id=?`)
         .bind(
-          completionStatus === "in_progress" ? "blocked" : "completed",
-          completionStatus === "in_progress" ? "reviewing" : "confirmed",
-          completionStatus === "in_progress" ? "复盘中" : "复盘确认",
-          completionStatus === "in_progress" ? 67 : 100,
-          draft.blockers.map((item)=>item.message).join("；") || null,
-          input.now,completionStatus === "in_progress" ? null : input.now,input.now,module.id,input.organizationId,
+          reviewModuleState.status,
+          reviewModuleState.stepCode,
+          reviewModuleState.stepName,
+          reviewModuleState.progressPercent,
+          reviewModuleState.blockingReason,
+          input.now,reviewModuleState.completed ? input.now : null,input.now,module.id,input.organizationId,
         ),
       db.prepare(`INSERT INTO order_module_history(id,organization_id,order_id,module_instance_id,action_code,action_name,from_step_code,to_step_code,to_step_name,actor_user_id,notes,occurred_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
@@ -194,7 +206,8 @@ export async function refreshOrderCompletionStatus(
       .bind(organizationId,orderId).first();
     if (!snapshot) continue;
     const draft = await buildOrderReview(db,organizationId,orderId,null);
-    const status = orderCompletionStatus({pickupComplete:draft.pickupComplete,blockers:draft.blockers.map(x=>x.message),reviewGenerated:true,finance:draft.finance});
+    const status = orderCompletionStatus({pickupComplete:draft.pickupComplete,pickupRequired:draft.pickupRequired,blockers:draft.blockers.map(x=>x.message),reviewGenerated:true,finance:draft.finance});
+    const reviewModuleState = orderReviewModuleState(status,draft.blockers.map(x=>x.message));
     await db.batch([
       db.prepare(`UPDATE transport_orders SET completion_status=?,status=CASE WHEN ?='completed_settled' THEN 'completed' WHEN status='completed' THEN 'in_execution' ELSE status END,
         settlement_completed_at=CASE WHEN ?='completed_settled' THEN COALESCE(settlement_completed_at,?) ELSE NULL END,
@@ -206,10 +219,11 @@ export async function refreshOrderCompletionStatus(
         .bind(status,status,status,now,status,status,status,status,now,now,orderId,organizationId),
       db.prepare(`UPDATE order_review_snapshots SET readiness_status=?,finance_json=?,blocker_json=?,updated_at=? WHERE organization_id=? AND order_id=?`)
         .bind(status==="in_progress"?"blocked":status,JSON.stringify(draft.finance),JSON.stringify(draft.blockers),now,organizationId,orderId),
-      db.prepare(`UPDATE order_module_instances SET status='completed',current_step_code='settled',current_step_name='结算完成',progress_percent=100,
-        blocking_reason=NULL,completed_at=COALESCE(completed_at,?),updated_at=?
-        WHERE organization_id=? AND order_id=? AND module_code='costs' AND ?='completed_settled'`)
-        .bind(now,now,organizationId,orderId,status),
+      db.prepare(`UPDATE order_module_instances SET status=?,current_step_code=?,current_step_name=?,progress_percent=?,blocking_reason=?,
+        started_at=COALESCE(started_at,?),completed_at=CASE WHEN ?=1 THEN COALESCE(completed_at,?) ELSE NULL END,updated_at=?
+        WHERE organization_id=? AND order_id=? AND module_code='review' AND enabled=1`)
+        .bind(reviewModuleState.status,reviewModuleState.stepCode,reviewModuleState.stepName,reviewModuleState.progressPercent,
+          reviewModuleState.blockingReason,now,reviewModuleState.completed?1:0,now,now,organizationId,orderId),
     ]);
     await syncSettlementFollowUpTask(db,organizationId,orderId,null,now,status);
   }
@@ -251,7 +265,18 @@ async function buildOrderReview(
       WHERE di.organization_id=? AND package_shipment.order_id=? AND di.status='loaded'`).bind(organizationId,orderId)
       .first<{pieces:number;weight:number;volume:number;loading_at:string|null}>(),
   ]);
-  const [timing,financeRows,controls,exceptionRow] = await Promise.all([
+  const [
+    timing,
+    financeRows,
+    controls,
+    exceptionRow,
+    settlementWorkflowFields,
+    pickupWorkflowFields,
+    costsModule,
+    pickupModule,
+    warehouseModule,
+    exceptionsModule,
+  ] = await Promise.all([
     db.prepare(`SELECT
       (SELECT MIN(s.actual_pickup_at) FROM shipments s WHERE s.organization_id=? AND s.order_id=?) pickup_at,
       COALESCE(
@@ -294,6 +319,34 @@ async function buildOrderReview(
         ))) open_exception_count`)
       .bind(organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId,orderId)
       .first<{cargo_difference_count:number;max_difference:number;pending_difference_count:number;open_exception_count:number}>(),
+    db.prepare(`SELECT f.field_key,f.label,f.is_active,f.is_required
+      FROM transport_orders o
+      JOIN workflow_instance_fields f ON f.instance_id=o.workflow_instance_id
+      WHERE o.organization_id=? AND o.id=?
+        AND f.module_code='costs' AND f.step_key='reconciliation'
+      ORDER BY f.sort_order,f.field_key`)
+      .bind(organizationId,orderId)
+      .all<{field_key:string;label:string;is_active:number;is_required:number}>(),
+    db.prepare(`SELECT f.field_key,f.label,f.is_active,f.is_required
+      FROM transport_orders o
+      JOIN workflow_instance_fields f ON f.instance_id=o.workflow_instance_id
+      WHERE o.organization_id=? AND o.id=?
+        AND f.module_code='overseas_warehouse' AND f.step_key='overseas_pickup'
+      ORDER BY f.sort_order,f.field_key`)
+      .bind(organizationId,orderId)
+      .all<{field_key:string;label:string;is_active:number;is_required:number}>(),
+    db.prepare(`SELECT enabled,is_required,status,blocking_reason FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='costs'`)
+      .bind(organizationId,orderId)
+      .first<{enabled:number;is_required:number;status:string;blocking_reason:string|null}>(),
+    db.prepare(`SELECT enabled,is_required FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='overseas_warehouse'`)
+      .bind(organizationId,orderId)
+      .first<{enabled:number;is_required:number}>(),
+    db.prepare(`SELECT enabled,is_required FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='warehouse'`)
+      .bind(organizationId,orderId)
+      .first<{enabled:number;is_required:number}>(),
+    db.prepare(`SELECT enabled,is_required FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='exceptions'`)
+      .bind(organizationId,orderId)
+      .first<{enabled:number;is_required:number}>(),
   ]);
   const [people] = await Promise.all([
     db.prepare(`SELECT
@@ -305,28 +358,94 @@ async function buildOrderReview(
   const finance=financeRows.results.map(row=>currencyFinance(row));
   const hasReceivable=financeRows.results.some(row=>row.receivable_count>0);
   const hasPayable=financeRows.results.some(row=>row.payable_count>0);
-  const control=(direction:string)=>controls.results.find(row=>row.direction===direction);
   const blockers:ReviewBlocker[]=[];
-  if (!timing?.pickup_complete) blockers.push({code:"pickup",message:"客户自提/签收尚未完成",href:`/admin/orders/${orderId}/modules/overseas_warehouse#module-business-data`});
-  if (!hasReceivable) blockers.push({code:"receivable_missing",message:"尚未录入应收费用",href:`/admin/orders/${orderId}/modules/costs#module-business-data`});
-  if (!hasPayable) blockers.push({code:"payable_missing",message:"尚未录入应付费用",href:`/admin/orders/${orderId}/modules/costs#module-business-data`});
-  for (const direction of ["receivable","payable"] as const) {
-    if ((direction==="receivable"?hasReceivable:hasPayable) && !control(direction)?.finance_locked)
-      blockers.push({code:`${direction}_unlocked`,message:`${direction==="receivable"?"应收":"应付"}费用尚未完成财务锁定`,href:`/admin/orders/${orderId}/modules/costs#module-business-data`});
+  const pickupComplete = Boolean(timing?.pickup_complete);
+  const pickupFields = pickupWorkflowFields.results.map((field) => ({
+    fieldKey: field.field_key,
+    label: field.label,
+    isActive: field.is_active === 1,
+    isRequired: field.is_required === 1,
+  }));
+  const pickupReviewState = {
+    module: pickupModule ? {
+      enabled: pickupModule.enabled === 1,
+      isRequired: pickupModule.is_required === 1,
+    } : null,
+    fields: pickupFields,
+    pickupComplete,
+  };
+  const pickupRequired = pickupCompletionRequired(pickupReviewState);
+  const pickupBlocker = pickupCompletionReviewBlocker(pickupReviewState);
+  if (pickupBlocker) blockers.push({
+    code: pickupBlocker.code,
+    message: pickupBlocker.message,
+    href: `/admin/orders/${orderId}/modules/overseas_warehouse#module-business-data`,
+  });
+  const settlementBlockers = orderReviewSettlementBlockers({
+      fields: settlementWorkflowFields.results.map((field) => ({
+        fieldKey: field.field_key,
+        label: field.label,
+        isActive: field.is_active === 1,
+        isRequired: field.is_required === 1,
+      })),
+      hasReceivable,
+      hasPayable,
+      controls: controls.results
+        .filter((row) => ["receivable", "payable"].includes(row.direction))
+        .map((row) => ({
+          direction: row.direction as "receivable" | "payable",
+          confirmed: row.confirmed === 1,
+          businessReviewed: row.business_reviewed === 1,
+          financeReviewed: row.finance_reviewed === 1,
+        })),
+      finance,
+    });
+  const configuredCostsBlocker = costsModuleReviewBlocker(costsModule ? {
+    enabled: costsModule.enabled === 1,
+    isRequired: costsModule.is_required === 1,
+    status: costsModule.status,
+    blockingReason: costsModule.blocking_reason,
+  } : null);
+  if (configuredCostsBlocker) {
+    blockers.push({
+      code: configuredCostsBlocker.code,
+      message: configuredCostsBlocker.message,
+      href: `/admin/orders/${orderId}/modules/costs#module-business-data`,
+    });
   }
-  for (const line of finance) {
-    if (line.receivableBalance > 0.009)
-      blockers.push({code:`receivable_balance_${line.currency}`,message:`${line.currency} 应收尚有 ${line.receivableBalance.toFixed(2)} 未收款或未核销`,href:"/admin/billing"});
-    if (line.payableBalance > 0.009)
-      blockers.push({code:`payable_balance_${line.currency}`,message:`${line.currency} 应付尚有 ${line.payableBalance.toFixed(2)} 未付款或未核销`,href:"/admin/billing"});
-  }
-  if ((exceptionRow?.pending_difference_count??0)>0) blockers.push({code:"cargo_difference",message:"仓库实收差异或费用影响尚未确认",href:`/admin/orders/${orderId}/modules/warehouse#module-business-data`});
-  if ((exceptionRow?.open_exception_count??0)>0) blockers.push({code:"open_exception",message:"仍有未关闭的仓库异常",href:`/admin/orders/${orderId}/modules/exceptions#module-business-data`});
+  const applicableSettlementBlockers = costsModule
+    ? costsModule.enabled === 1 && costsModule.is_required === 1
+      ? settlementBlockers.filter((blocker) => blocker.area === "billing")
+      : []
+    : settlementBlockers;
+  blockers.push(
+    ...applicableSettlementBlockers.map((blocker) => ({
+      code: blocker.code,
+      message: blocker.message,
+      href: blocker.area === "billing"
+        ? "/admin/billing"
+        : `/admin/orders/${orderId}/modules/costs#module-business-data`,
+    })),
+  );
+  if (
+    (exceptionRow?.pending_difference_count ?? 0) > 0 &&
+    configuredModuleRequiresCompletion(warehouseModule ? {
+      enabled: warehouseModule.enabled === 1,
+      isRequired: warehouseModule.is_required === 1,
+    } : null)
+  ) blockers.push({code:"cargo_difference",message:"仓库实收差异或费用影响尚未确认",href:`/admin/orders/${orderId}/modules/warehouse#module-business-data`});
+  if (
+    (exceptionRow?.open_exception_count ?? 0) > 0 &&
+    configuredModuleRequiresCompletion(exceptionsModule ? {
+      enabled: exceptionsModule.enabled === 1,
+      isRequired: exceptionsModule.is_required === 1,
+    } : null)
+  ) blockers.push({code:"open_exception",message:"仍有未关闭的仓库异常",href:`/admin/orders/${orderId}/modules/exceptions#module-business-data`});
   const dispute=manual?.customerDisputeSummary ?? snapshot?.customer_dispute_summary ?? null;
   const pickupCompletedAt=timing?.pickup_completed_at??null;
   const delayDays=order.requested_delivery_date&&pickupCompletedAt
     ? Math.max(0,Math.ceil((new Date(pickupCompletedAt).getTime()-new Date(order.requested_delivery_date).getTime())/86400000)) : 0;
-  const completionStatus=orderCompletionStatus({pickupComplete:Boolean(timing?.pickup_complete),blockers:blockers.map(x=>x.message),reviewGenerated:Boolean(snapshot),finance});
+  const completionStatus=orderCompletionStatus({pickupComplete,pickupRequired,blockers:blockers.map(x=>x.message),reviewGenerated:Boolean(snapshot),finance});
   return {
     snapshotId:snapshot?.id??null,revision:snapshot?.revision??0,generatedAt:snapshot?.generated_at??null,generatedBy:snapshot?.generated_by??null,
     completionStatus,completionLabel:completionStatusLabels[completionStatus],
@@ -335,7 +454,7 @@ async function buildOrderReview(
     finance,
     exceptions:{cargoDifferenceCount:exceptionRow?.cargo_difference_count??0,maxCargoDifferencePercent:exceptionRow?.max_difference??0,openWarehouseExceptionCount:exceptionRow?.open_exception_count??0,delayDays,costAdjustmentCount:financeRows.results.reduce((s,r)=>s+r.adjustment_count,0),customerDisputeSummary:dispute},
     people:{salesperson:order.salesperson||order.creator,mainOperator:people?.main_operator??null,warehouseHandler:actual?.warehouse_handler??null,financeHandler:people?.finance_handler??null},
-    blockers,pickupComplete:Boolean(timing?.pickup_complete),customerDisputeSummary:dispute,
+    blockers,pickupComplete,pickupRequired,customerDisputeSummary:dispute,
     reviewConclusion:manual?.reviewConclusion??snapshot?.review_conclusion??null,
     improvementNotes:manual?.improvementNotes??snapshot?.improvement_notes??null,
   };

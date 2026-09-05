@@ -4,8 +4,16 @@ import {
   syncOrderWorkflowSnapshot,
 } from "./order-modules.server";
 import { missingRequiredWorkflowStepFields } from "./workflow-fields.server";
-import { isAssignedOrderApprover } from "./order-workflow";
-import { isActiveOrganizationAssignee } from "./organization-assignee.server";
+import {
+  assignmentModuleBlocksDispatch,
+  canRunOrderWorkflowAction,
+  shouldRefreshOrderModulesBeforeWorkflowGate,
+} from "./order-workflow";
+import { assignedOrderNotificationStatement } from "./internal-notifications.server";
+import {
+  isActiveOrganizationAssignee,
+  isActiveOrganizationAssigneeForPositions,
+} from "./organization-assignee.server";
 
 export type OrderWorkflowTransition = {
   action_code: string;
@@ -24,6 +32,7 @@ type OrderRow = {
   status: string;
   current_step_code: string;
   current_assignee_user_id: string | null;
+  salesperson_user_id: string | null;
   shipper_name: string;
   shipper_contact: string | null;
   shipper_phone: string | null;
@@ -61,7 +70,9 @@ export async function validateOrderWorkflowAction(input: {
   allowPendingAssignment?: boolean;
 }) {
   const order = await env.DB.prepare(
-    `SELECT o.id,o.order_number,o.status,o.current_step_code,o.current_assignee_user_id,o.shipper_name,o.shipper_contact,o.shipper_phone,o.consignee_name,
+    `SELECT o.id,o.order_number,o.status,o.current_step_code,o.current_assignee_user_id,
+      COALESCE(q.salesperson_user_id,o.salesperson_user_id) salesperson_user_id,
+      o.shipper_name,o.shipper_contact,o.shipper_phone,o.consignee_name,
       o.origin_city,o.origin_address,o.destination_city,o.destination_address,o.cargo_description,o.transport_mode,
       o.requested_pickup_date,o.exit_port,o.overseas_warehouse_id,
       CASE WHEN EXISTS(
@@ -73,7 +84,9 @@ export async function validateOrderWorkflowAction(input: {
         WHERE w.organization_id=o.organization_id AND w.id=o.overseas_warehouse_id
           AND w.warehouse_role='overseas_destination' AND w.status='active'
       ) THEN 1 ELSE 0 END overseas_warehouse_valid
-     FROM transport_orders o WHERE o.id=? AND o.organization_id=?`,
+     FROM transport_orders o
+     LEFT JOIN quotations q ON q.id=o.quotation_id AND q.organization_id=o.organization_id
+     WHERE o.id=? AND o.organization_id=?`,
   )
     .bind(input.orderId, input.organizationId)
     .first<OrderRow>();
@@ -89,23 +102,37 @@ export async function validateOrderWorkflowAction(input: {
       reason: `当前状态“${statusLabel(order.status)}”不能执行该动作`,
       order,
     };
-  if (
-    input.actionCode === "approve" &&
-    !input.bypassAssigneeRestriction &&
-    !isAssignedOrderApprover({
-      status: order.status,
-      currentAssigneeUserId: order.current_assignee_user_id,
-      currentUserId: input.actorUserId,
-    })
-  )
+  const actorPosition = await env.DB.prepare(
+    `SELECT p.code FROM memberships m
+     JOIN positions p ON p.id=m.position_id AND p.organization_id=m.organization_id
+     WHERE m.organization_id=? AND m.user_id=? AND m.status='active' AND p.status='active'
+     LIMIT 1`,
+  ).bind(input.organizationId,input.actorUserId).first<{code:string}>();
+  if (!canRunOrderWorkflowAction({
+    actionCode: input.actionCode,
+    positionCode: actorPosition?.code,
+    currentAssigneeUserId: order.current_assignee_user_id,
+    salespersonUserId: order.salesperson_user_id,
+    currentUserId: input.actorUserId,
+    bypassAssigneeRestriction: input.bypassAssigneeRestriction,
+  })) {
+    const actionOwner: Record<string, string> = {
+      submit: "当前订单的业务员",
+      cancel_draft: "当前订单的业务员",
+      approve: "提交审批时指定的业务主管",
+      reject: "提交审批时指定的业务主管",
+      cancel_submitted: "提交审批时指定的业务主管",
+      dispatch: "业务主管指定的操作主管",
+      cancel_confirmed: "业务主管指定的操作主管",
+      complete: "当前订单指定的财务会计",
+    };
     return {
       ok: false as const,
-      reason: order.current_assignee_user_id
-        ? "仅提交审批时指定的审批负责人可以审批委托"
-        : "当前订单尚未指定审批负责人，请退回草稿后重新提交审批",
+      reason: `仅${actionOwner[input.actionCode] ?? "当前节点指定负责人"}可以执行“${transition.action_name}”`,
       order,
       transition,
     };
+  }
   if (transition.requires_assignee && !input.assigneeUserId)
     return {
       ok: false as const,
@@ -121,7 +148,8 @@ export async function validateOrderWorkflowAction(input: {
   };
   const gateStepKey = gateStepByAction[input.actionCode];
   if (gateStepKey) {
-    await ensureOrderModules(input.organizationId, input.orderId);
+    if (shouldRefreshOrderModulesBeforeWorkflowGate(input))
+      await ensureOrderModules(input.organizationId, input.orderId);
     const missing = await missingRequiredWorkflowStepFields(
       input.organizationId,
       input.orderId,
@@ -139,36 +167,43 @@ export async function validateOrderWorkflowAction(input: {
   }
   if (input.actionCode === "dispatch") {
     const assignment = await env.DB.prepare(
-      "SELECT assignee_user_id,status FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='assignment' AND enabled=1",
+      "SELECT assignee_user_id,status,enabled,is_required FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='assignment'",
     )
       .bind(input.organizationId, input.orderId)
-      .first<{ assignee_user_id: string | null; status: string | null }>();
-    if (
-      !assignment ||
-      (!input.allowPendingAssignment && assignment.status !== "completed")
-    ) {
-      return {
-        ok: false as const,
-        reason: "请先完成任务分配并确认派单后再推进订单。",
-        order,
-        transition,
-      };
-    }
-    if (!assignment.assignee_user_id) {
-      return {
-        ok: false as const,
-        reason: "任务分配未设置派单主负责人，请先确认派单。",
-        order,
-        transition,
-      };
-    }
-    if (input.assigneeUserId && input.assigneeUserId !== assignment.assignee_user_id) {
-      return {
-        ok: false as const,
-        reason: "派单负责人与任务分配不一致，请从任务分配页重新确认。",
-        order,
-        transition,
-      };
+      .first<{
+        assignee_user_id: string | null;
+        status: string | null;
+        enabled: number;
+        is_required: number;
+      }>();
+    if (assignmentModuleBlocksDispatch(assignment ? {
+      enabled: assignment.enabled,
+      isRequired: assignment.is_required,
+    } : null)) {
+      if (!input.allowPendingAssignment && assignment?.status !== "completed") {
+        return {
+          ok: false as const,
+          reason: "请先完成当前工作流要求的任务分配并确认派单后再推进订单。",
+          order,
+          transition,
+        };
+      }
+      if (!assignment?.assignee_user_id) {
+        return {
+          ok: false as const,
+          reason: "当前工作流要求任务分配，但尚未设置派单主负责人。",
+          order,
+          transition,
+        };
+      }
+      if (input.assigneeUserId && input.assigneeUserId !== assignment.assignee_user_id) {
+        return {
+          ok: false as const,
+          reason: "派单负责人与任务分配不一致，请从任务分配页重新确认。",
+          order,
+          transition,
+        };
+      }
     }
   }
   if (input.assigneeUserId) {
@@ -183,6 +218,32 @@ export async function validateOrderWorkflowAction(input: {
         order,
         transition,
       };
+    const expectedPositions: Record<string, readonly string[]> = {
+      submit: ["BUSINESS_SUPERVISOR"],
+      approve: ["OPERATION_SUPERVISOR"],
+      dispatch: ["OPERATION"],
+    };
+    const expectedPositionCodes = expectedPositions[input.actionCode];
+    if (
+      expectedPositionCodes &&
+      !(await isActiveOrganizationAssigneeForPositions(
+        input.organizationId,
+        input.assigneeUserId,
+        expectedPositionCodes,
+      ))
+    ) {
+      const label = input.actionCode === "submit"
+        ? "业务主管"
+        : input.actionCode === "approve"
+          ? "操作主管"
+          : "操作岗";
+      return {
+        ok: false as const,
+        reason: `下一处理人必须是有效的${label}个人账户`,
+        order,
+        transition,
+      };
+    }
   }
   if (input.actionCode === "complete") {
     await ensureOrderModules(input.organizationId, input.orderId);
@@ -234,6 +295,11 @@ export async function executeOrderWorkflowAction(input: {
     assignee = input.assigneeUserId || null;
   await env.DB.batch([
     ...(input.atomicStatements ?? []),
+    ...(input.actionCode === "approve" && assignee
+      ? [env.DB.prepare(
+          "UPDATE transport_orders SET operation_supervisor_user_id=? WHERE id=? AND organization_id=?",
+        ).bind(assignee, order.id, input.organizationId)]
+      : []),
     env.DB.prepare(
       `UPDATE transport_orders SET status=?,current_step_code=?,current_step_name=?,current_assignee_user_id=?,workflow_updated_at=?,is_overdue=0,confirmed_at=CASE WHEN ?='confirmed' THEN COALESCE(confirmed_at,?) ELSE confirmed_at END,updated_at=? WHERE id=? AND organization_id=? AND status=?`,
     ).bind(
@@ -266,6 +332,16 @@ export async function executeOrderWorkflowAction(input: {
       input.notes || null,
       now,
     ),
+    ...(assignee && transition.to_status !== "in_execution"
+      ? [assignedOrderNotificationStatement(env.DB, {
+          organizationId: input.organizationId,
+          orderId: order.id,
+          assigneeUserId: assignee,
+          actorUserId: input.actorUserId,
+          stepName: transition.target_step_name,
+          now,
+        })]
+      : []),
   ]);
   await ensureOrderModules(input.organizationId, order.id);
   if (transition.to_status === "in_execution")

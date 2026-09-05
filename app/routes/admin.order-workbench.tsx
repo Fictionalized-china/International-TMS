@@ -15,7 +15,7 @@ import {
   type WorkbenchCode,
 } from "../lib/workbench-batch";
 
-const PAGE_SIZE = 15;
+const PAGE_SIZE = 10;
 const workspaces = {
   tasks: {
     title: "我的任务",
@@ -35,7 +35,7 @@ const workspaces = {
   },
   costs: {
     title: "费用",
-    description: "集中查看应收、应付、毛利以及业务和财务锁定状态。",
+    description: "集中查看应收、应付、毛利以及客服、业务和财务三方并行签核状态。",
   },
 } as const;
 
@@ -352,7 +352,7 @@ function workspaceQuery(workspace: Workspace, organizationId: string) {
     cte: `WITH rows AS (
       SELECT mi.id row_id,o.id order_id,o.order_number,c.name customer_name,'costs' module_code,mi.current_step_name state,
         '应收 '||printf('%.2f',COALESCE((SELECT SUM(e.amount) FROM business_expenses e WHERE e.order_id=o.id AND e.direction='receivable' AND e.stage!='cancelled'),0))||' / 应付 '||printf('%.2f',COALESCE((SELECT SUM(e.amount) FROM business_expenses e WHERE e.order_id=o.id AND e.direction='payable' AND e.stage!='cancelled'),0)) primary_text,
-        CASE WHEN COALESCE(ec.finance_locked,0)=1 THEN '财务已锁定' WHEN COALESCE(ec.business_locked,0)=1 THEN '业务已锁定' ELSE '未锁定' END secondary_text,
+        CAST(COALESCE((SELECT SUM(dc.confirmed+dc.business_reviewed+dc.finance_reviewed) FROM order_expense_direction_controls dc WHERE dc.organization_id=o.organization_id AND dc.order_id=o.id),0) AS TEXT)||'/6 项并行签核完成' secondary_text,
         u.id owner_id,u.display_name owner_name,
         CASE WHEN EXISTS(SELECT 1 FROM business_expenses e WHERE e.order_id=o.id) THEN 0 ELSE 1 END pending_count,
         0 overdue_count,mi.updated_at
@@ -360,7 +360,6 @@ function workspaceQuery(workspace: Workspace, organizationId: string) {
       JOIN transport_orders o ON o.id=mi.order_id
       JOIN customers c ON c.id=o.customer_id
       LEFT JOIN users u ON u.id=mi.assignee_user_id
-      LEFT JOIN order_expense_controls ec ON ec.order_id=o.id
       WHERE mi.organization_id=? AND mi.module_code='costs' AND mi.enabled=1 AND o.status NOT IN ('completed','cancelled')
     )`,
   };

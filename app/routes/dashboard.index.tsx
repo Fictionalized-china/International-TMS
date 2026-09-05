@@ -5,6 +5,8 @@ import { requireSessionUser } from "../lib/auth.server";
 import { loadOrderGuidance } from "../lib/order-guidance.server";
 import { AppIcon } from "../components/AppIcon";
 import { orderVisibilitySql } from "../lib/order-access.server";
+import { QueryPagination } from "../components/QueryPagination";
+import { paginateList, readListPage } from "../lib/list-pagination";
 
 const dashboardViewCodes = ["todo", "blocked", "in_progress", "unsettled"] as const;
 type DashboardViewCode = (typeof dashboardViewCodes)[number];
@@ -26,6 +28,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const user = await requireSessionUser(request, "dashboard.view");
   const url = new URL(request.url);
   const requestedView = url.searchParams.get("view");
+  const requestedPage = readListPage(url.searchParams);
   const selectedView: DashboardViewCode = dashboardViewCodes.includes(requestedView as DashboardViewCode)
     ? requestedView as DashboardViewCode
     : "todo";
@@ -55,6 +58,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       : selectedView === "unsettled"
         ? unsettledOrders
         : currentTodos;
+  const pagination = paginateList(selectedOrders, requestedPage);
   return {
     user,
     selectedView,
@@ -64,7 +68,8 @@ export async function loader({ request }: Route.LoaderArgs) {
       in_progress: inProgressOrders.length,
       unsettled: unsettledOrders.length,
     },
-    selectedOrders,
+    selectedOrders: pagination.items,
+    pagination,
   };
 }
 
@@ -92,7 +97,7 @@ export default function DashboardIndex({ loaderData }: Route.ComponentProps) {
     </nav>
 
     <section className="panel ops-filter-order-panel">
-      <div className="panel-header"><div><h2>{activeView.label} <span className="count">{loaderData.selectedOrders.length}</span></h2><p>当前仅显示“{activeView.label}”订单；点击任意订单进入订单详情。</p></div><Link className="text-button" to="/admin/orders">打开订单台账</Link></div>
+      <div className="panel-header"><div><h2>{activeView.label} <span className="count">{loaderData.pagination.total}</span></h2><p>当前仅显示“{activeView.label}”订单；点击任意订单进入订单详情。</p></div><Link className="text-button" to="/admin/orders">打开订单台账</Link></div>
       <div className="ops-filter-order-head" aria-hidden="true"><span>订单 / 客户</span><span>线路 / 类型</span><span>当前节点</span><span>下一步 / 阻断</span><span>更新时间</span><span>操作</span></div>
       <div className="ops-filter-order-list">
         {loaderData.selectedOrders.map((item) => <Link className={item.blocker ? "blocked" : ""} key={item.order.id} to={`/admin/orders/${item.order.id}`}>
@@ -105,6 +110,7 @@ export default function DashboardIndex({ loaderData }: Route.ComponentProps) {
         </Link>)}
         {!loaderData.selectedOrders.length && <p className="empty-state">当前筛选条件下没有订单。</p>}
       </div>
+      <QueryPagination {...loaderData.pagination} unit="票订单"/>
     </section>
   </div>;
 }

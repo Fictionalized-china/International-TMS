@@ -5,7 +5,7 @@ import { requireSessionUser } from "../lib/auth.server";
 import { orderVisibilitySql } from "../lib/order-access.server";
 import { statusLabel } from "../lib/order-workflow";
 
-const PAGE_SIZE = 15;
+const PAGE_SIZE = 10;
 
 type CargoRow = {
   id: string;

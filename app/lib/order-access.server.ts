@@ -5,7 +5,15 @@ import {
   type OrderAccessUser,
 } from "./order-access";
 
-export { batchVisibilitySql, canSeeScopedOrder, canViewAllOrders, orderVisibilitySql } from "./order-access";
+export {
+  assignedBatchViewPermission,
+  batchVisibilitySql,
+  canAccessBatchWorkspace,
+  canOperateCurrentOrder,
+  canSeeScopedOrder,
+  canViewAllOrders,
+  orderVisibilitySql,
+} from "./order-access";
 
 export async function requireOrderAccess(user: OrderAccessUser, orderId: string | undefined) {
   if (!orderId) throw new Response("订单不存在", { status: 404 });

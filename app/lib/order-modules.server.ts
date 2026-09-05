@@ -6,12 +6,14 @@ import {
 } from "./workflow-fields.server";
 import {
   enabledOrderModules,
-  isRuntimeMandatoryOrderModule,
   orderModuleDefinition,
+  pickNextRequiredWorkflowModule,
+  workflowConfiguredModuleFlags,
   type OrderModuleCode,
 } from "./order-modules";
 import { orderBusinessStages } from "./order-stage-flow";
 import { syncOrderBusinessWorkflow } from "./business-workflow.server";
+import { assignedOrderNotificationStatement } from "./internal-notifications.server";
 import {
   checkOrderLoadPlan,
   checkOrderPreDepartureDocuments,
@@ -21,6 +23,8 @@ import {
   preDepartureDocumentTypeCodes,
   orderDocumentTypeLabel,
 } from "./order-documents";
+import { evaluateCostsCompletionGate } from "./costs-completion-gate";
+import { customsModuleGateRequirements } from "./customs-module-policy";
 
 export type OrderModuleInstance = {
   id: string;
@@ -35,6 +39,7 @@ export type OrderModuleInstance = {
   blocking_reason: string | null;
   assignee_user_id: string | null;
   assignee_name: string | null;
+  assignee_email: string | null;
   assignee_position_name: string | null;
   started_at: string | null;
   completed_at: string | null;
@@ -50,6 +55,8 @@ type WorkflowSnapshotModule = {
   assignee_user_id: string | null;
   status: string;
   progress_percent: number;
+  enabled: number;
+  is_required: number;
 };
 
 type OrderSeed = {
@@ -63,6 +70,7 @@ type OrderSeed = {
 export async function ensureOrderModules(
   organizationId: string,
   orderId: string,
+  options: { syncBusinessWorkflow?: boolean } = {},
 ) {
   const order = await env.DB.prepare(
     `SELECT o.id,o.business_type,o.status,o.current_assignee_user_id,
@@ -114,7 +122,13 @@ export async function ensureOrderModules(
            WHEN order_module_instances.module_code='loading' AND excluded.enabled=0 THEN '本单无需拼车配载'
            WHEN order_module_instances.status='not_applicable' AND excluded.enabled=1 THEN excluded.current_step_name
            ELSE order_module_instances.current_step_name END,
-         assignee_user_id=COALESCE(order_module_instances.assignee_user_id,excluded.assignee_user_id),
+          assignee_user_id=CASE
+            WHEN order_module_instances.module_code='assignment'
+              AND order_module_instances.status!='completed'
+              AND excluded.assignee_user_id IS NOT NULL
+              THEN excluded.assignee_user_id
+            ELSE COALESCE(order_module_instances.assignee_user_id,excluded.assignee_user_id)
+          END,
          updated_at=excluded.updated_at`,
     ).bind(
       crypto.randomUUID(),
@@ -128,7 +142,7 @@ export async function ensureOrderModules(
       initial.stepCode,
       initial.stepName,
       initial.progress,
-      order.current_assignee_user_id,
+      initialModuleAssigneeUserId(definition.code, order),
       initial.status === "in_progress" ? now : null,
       initial.status === "completed" ? now : null,
       now,
@@ -136,27 +150,81 @@ export async function ensureOrderModules(
     );
   });
   if (statements.length) await env.DB.batch(statements);
+  await clearPrematureModuleAssignments(organizationId, orderId, now);
   await applyWorkflowModuleConfiguration(
     organizationId,
     orderId,
     order.workflow_id,
-    order.business_type,
     now,
   );
   await synchronizeGovernanceModules(organizationId, orderId, order, now);
   await synchronizeDataDrivenModules(organizationId, orderId, metrics, now);
-  await syncOrderBusinessWorkflow({
-    organizationId,
-    orderId,
-    source: "system",
-  });
+  if (options.syncBusinessWorkflow !== false) {
+    await syncOrderBusinessWorkflow({
+      organizationId,
+      orderId,
+      source: "system",
+    });
+  }
+}
+
+/**
+ * The order-level current assignee owns the workflow hand-off, not every future
+ * business module.  Only the salesperson's opening module and the operation
+ * supervisor's assignment module may inherit that value automatically.  All
+ * operational module owners must come from an explicit task assignment.
+ */
+function initialModuleAssigneeUserId(
+  code: OrderModuleCode,
+  order: OrderSeed,
+) {
+  if (!order.current_assignee_user_id) return null;
+  if (code === "consignment" && order.status === "draft")
+    return order.current_assignee_user_id;
+  if (code === "assignment" && order.status === "confirmed")
+    return order.current_assignee_user_id;
+  return null;
+}
+
+/**
+ * Older orders may already contain the former blanket assignment.  Before the
+ * operation supervisor confirms dispatch, clear any future-module owner that
+ * has no corresponding module_owner task.  Explicit assignments are preserved.
+ */
+async function clearPrematureModuleAssignments(
+  organizationId: string,
+  orderId: string,
+  now: string,
+) {
+  await env.DB.prepare(
+    `UPDATE order_module_instances AS target
+     SET assignee_user_id=NULL,updated_at=?
+     WHERE target.organization_id=? AND target.order_id=?
+       AND target.module_code NOT IN ('consignment','cargo','assignment')
+       AND target.assignee_user_id IS NOT NULL
+       AND EXISTS(
+         SELECT 1 FROM order_module_instances assignment
+         WHERE assignment.organization_id=target.organization_id
+           AND assignment.order_id=target.order_id
+           AND assignment.module_code='assignment'
+           AND assignment.enabled=1
+           AND assignment.status!='completed'
+       )
+       AND NOT EXISTS(
+         SELECT 1 FROM order_tasks task
+         WHERE task.organization_id=target.organization_id
+           AND task.order_id=target.order_id
+           AND task.module_code=target.module_code
+           AND task.task_type='module_owner'
+           AND task.status!='cancelled'
+       )`,
+  ).bind(now, organizationId, orderId).run();
 }
 
 async function applyWorkflowModuleConfiguration(
   organizationId:string,
   orderId:string,
   workflowId:string|null,
-  businessType:string,
   now:string,
 ) {
   if (!workflowId) return;
@@ -174,10 +242,11 @@ async function applyWorkflowModuleConfiguration(
   ).bind(organizationId,orderId).all<{id:string;module_code:string;status:string}>();
   const updates = rows.results.map((row) => {
     const rule = byCode.get(row.module_code);
-    const mandatory = isRuntimeMandatoryOrderModule(businessType, row.module_code);
     const fileIndexOnly = row.module_code === "documents";
-    const enabled = fileIndexOnly ? 0 : mandatory || rule?.enabled ? 1 : 0;
-    const required = fileIndexOnly ? 0 : mandatory || rule?.is_required ? 1 : 0;
+    const { enabled, required } = workflowConfiguredModuleFlags({
+      moduleCode: row.module_code,
+      rule,
+    });
     return env.DB.prepare(
       `UPDATE order_module_instances SET module_name=COALESCE(?,module_name),enabled=?,is_required=?,
         status=CASE WHEN ?=0 THEN 'not_applicable' WHEN status='not_applicable' THEN 'not_started' ELSE status END,
@@ -300,34 +369,16 @@ async function synchronizeLoadingModuleFromBatch(
   const plan = await env.DB.prepare(
       `SELECT b.id,
         MAX(o.business_type) business_type,
-        COUNT(DISTINCT v.id) vehicle_count,
-        COUNT(DISTINCT CASE WHEN NULLIF(TRIM(v.plate_number),'') IS NOT NULL AND NULLIF(TRIM(v.driver_name),'') IS NOT NULL THEN v.id END) staffed_vehicle_count,
          MAX(CASE WHEN EXISTS(
            SELECT 1 FROM warehouse_dispatches d
            JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id
            JOIN warehouse_packages wp ON wp.id=di.package_id
            JOIN shipments sx ON sx.id=wp.shipment_id
            WHERE d.organization_id=bo.organization_id AND sx.order_id=bo.order_id AND d.status='dispatched'
-         ) THEN 1 ELSE 0 END) warehouse_dispatched,
-         MAX(CASE
-           WHEN o.business_type='ftl'
-            AND NULLIF(TRIM(b.overseas_carrier_name),'') IS NOT NULL
-            AND NULLIF(TRIM(b.overseas_vehicle_type),'') IS NOT NULL
-            AND COALESCE(b.overseas_vehicle_count,0)>0
-            AND NULLIF(TRIM(b.overseas_vehicle_plate),'') IS NOT NULL
-            AND NULLIF(TRIM(b.overseas_driver_name),'') IS NOT NULL
-            AND NULLIF(TRIM(b.overseas_driver_phone),'') IS NOT NULL THEN 1
-           WHEN COALESCE(o.business_type,'ltl')!='ftl'
-            AND b.carrier_id IS NOT NULL
-            AND b.warehouse_id IS NOT NULL
-            AND b.border_port IS NOT NULL
-            AND b.planned_departure_at IS NOT NULL THEN 1
-           ELSE 0
-         END) plan_complete
+         ) THEN 1 ELSE 0 END) warehouse_dispatched
        FROM transport_batch_orders bo
        JOIN transport_batches b ON b.id=bo.batch_id AND b.status!='cancelled'
        JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
-       LEFT JOIN transport_batch_vehicles v ON v.batch_id=b.id AND v.organization_id=b.organization_id AND v.status!='cancelled'
        WHERE bo.organization_id=? AND bo.order_id=? AND bo.status!='removed'
        GROUP BY b.id
        ORDER BY b.created_at DESC LIMIT 1`,
@@ -336,10 +387,7 @@ async function synchronizeLoadingModuleFromBatch(
     .first<{
       id: string;
       business_type: string | null;
-      vehicle_count: number;
-      staffed_vehicle_count: number;
       warehouse_dispatched: number;
-      plan_complete: number;
     }>();
   if (!plan) return;
   const isFtl = plan.business_type === "ftl";
@@ -353,27 +401,13 @@ async function synchronizeLoadingModuleFromBatch(
     ).bind(now, now, now, organizationId, orderId).run();
     return;
   }
-  const batchBaseReady = Boolean(
-    plan.plan_complete &&
-      plan.vehicle_count &&
-      plan.staffed_vehicle_count === plan.vehicle_count,
-  );
-  const orderReady = batchBaseReady;
-  const blockers = [
-    !plan.plan_complete
-      ? isFtl
-        ? "整车运输单车辆信息未完整"
-        : "配载运输单基础信息未完整"
-      : null,
-    !plan.vehicle_count
-      ? isFtl
-        ? "整车运输单尚未生成车辆"
-        : "配载运输单尚未添加车辆"
-      : null,
-    plan.vehicle_count && plan.staffed_vehicle_count !== plan.vehicle_count
-      ? "车辆车牌/司机未完整"
-      : null,
-  ].filter(Boolean);
+  // The batch record is evidence that a plan exists; completeness is derived
+  // exclusively from the current order's workflow-field snapshot. This avoids
+  // silently recreating carrier/vehicle/driver/time requirements that an
+  // administrator made optional or hidden.
+  const readiness = await checkOrderLoadPlan(organizationId, orderId);
+  const orderReady = readiness.ready;
+  const blockers = readiness.reasons;
   const currentStepName = orderReady
     ? isFtl
       ? "整车运输单已安排，待装车出库"
@@ -488,24 +522,28 @@ export async function syncOrderWorkflowSnapshot(
   organizationId: string,
   orderId: string,
 ) {
-  await ensureOrderModules(organizationId, orderId);
+  await ensureOrderModules(organizationId, orderId, { syncBusinessWorkflow: false });
   await syncModuleStateFromTransportBatch(organizationId, orderId);
   const order = await env.DB.prepare(
-    "SELECT status,business_type,current_assignee_user_id FROM transport_orders WHERE organization_id=? AND id=?",
+    `SELECT o.status,o.business_type,o.current_assignee_user_id,
+            COALESCE(q.salesperson_user_id,o.salesperson_user_id) salesperson_user_id
+     FROM transport_orders o
+     LEFT JOIN quotations q ON q.organization_id=o.organization_id AND q.id=o.quotation_id
+     WHERE o.organization_id=? AND o.id=?`,
   )
     .bind(organizationId, orderId)
     .first<{
       status: string;
       business_type: string;
       current_assignee_user_id: string | null;
+      salesperson_user_id: string | null;
     }>();
   if (!order || order.status !== "in_execution") return;
   const modules = (
     await env.DB.prepare(
-      `SELECT id,module_code,module_name,current_step_code,current_step_name,assignee_user_id,status,progress_percent
+      `SELECT id,module_code,module_name,current_step_code,current_step_name,assignee_user_id,status,progress_percent,enabled,is_required
      FROM order_module_instances
      WHERE organization_id=? AND order_id=? AND enabled=1
-       AND (is_required=1 OR status NOT IN ('not_started','not_applicable'))
      ORDER BY module_code`,
     )
       .bind(organizationId, orderId)
@@ -520,21 +558,58 @@ export async function syncOrderWorkflowSnapshot(
       .bind(now, now, next.id)
       .run();
   }
-  await env.DB.prepare(
-    "UPDATE transport_orders SET current_step_code=?,current_step_name=?,current_assignee_user_id=?,workflow_updated_at=?,updated_at=? WHERE organization_id=? AND id=? AND status='in_execution'",
-  )
-    .bind(
+  const nextStepName = next
+    ? `${next.module_name} · ${next.current_step_name || "待处理"}`
+    : "已启用模块全部完成";
+  const notificationStatements = [];
+  if (next?.module_code === "costs") {
+    const parallelStepName = "对账结算 · 三方并行签核";
+    const financeAssigneeUserId = modules.find(
+      (item) => item.module_code === "review",
+    )?.assignee_user_id;
+    const parallelAssignees = [
+      next.assignee_user_id,
+      order.salesperson_user_id,
+      financeAssigneeUserId,
+    ].filter((userId): userId is string => Boolean(userId));
+    for (const assigneeUserId of new Set(parallelAssignees)) {
+      notificationStatements.push(
+        assignedOrderNotificationStatement(env.DB, {
+          organizationId,
+          orderId,
+          assigneeUserId,
+          actorUserId: null,
+          stepName: parallelStepName,
+          now,
+        }),
+      );
+    }
+  } else if (next?.assignee_user_id && next.assignee_user_id !== order.current_assignee_user_id) {
+    notificationStatements.push(
+      assignedOrderNotificationStatement(env.DB, {
+        organizationId,
+        orderId,
+        assigneeUserId: next.assignee_user_id,
+        actorUserId: null,
+        stepName: nextStepName,
+        now,
+      }),
+    );
+  }
+  await env.DB.batch([
+    env.DB.prepare(
+      "UPDATE transport_orders SET current_step_code=?,current_step_name=?,current_assignee_user_id=?,workflow_updated_at=?,updated_at=? WHERE organization_id=? AND id=? AND status='in_execution'",
+    ).bind(
       next ? `module:${next.module_code}` : "ready_to_complete",
-      next
-        ? `${next.module_name} · ${next.current_step_name || "待处理"}`
-        : "已启用模块全部完成",
+      nextStepName,
       next?.assignee_user_id ?? null,
       now,
       now,
       organizationId,
       orderId,
-    )
-    .run();
+    ),
+    ...notificationStatements,
+  ]);
   await syncOrderBusinessWorkflow({
     organizationId,
     orderId,
@@ -546,33 +621,10 @@ function pickNextWorkflowModule(
   modules: WorkflowSnapshotModule[],
   _businessType: string,
 ) {
-  const pendingByStage = new Map(
-    orderBusinessStages.map((stage) => [
-      stage.code,
-      modules
-        .filter((module) => stage.modules.includes(module.module_code))
-        .sort(
-          (left, right) =>
-            stage.modules.indexOf(left.module_code) -
-            stage.modules.indexOf(right.module_code),
-        ),
-    ]),
+  return pickNextRequiredWorkflowModule(
+    modules,
+    orderBusinessStages.map((stage) => stage.modules),
   );
-  for (const stage of orderBusinessStages) {
-    const stageModules = pendingByStage.get(stage.code) ?? [];
-    const pending = stageModules.find(
-      (module) => !isWorkflowModuleCompleteForStage(stage.code, module),
-    );
-    if (pending) return pending;
-  }
-  return null;
-}
-
-function isWorkflowModuleCompleteForStage(
-  _stageCode: string,
-  module: WorkflowSnapshotModule,
-) {
-  return module.status === "completed";
 }
 
 async function syncModuleStateFromTransportBatch(organizationId: string, orderId: string) {
@@ -700,7 +752,7 @@ export async function syncCostsModuleStatus(
   now = new Date().toISOString(),
 ) {
   await ensureOrderModules(organizationId, orderId);
-  const [expenses, controls] = await Promise.all([
+  const [expenses, controls, workflowFields] = await Promise.all([
     env.DB.prepare(
       `SELECT direction,COUNT(*) total
        FROM business_expenses
@@ -723,69 +775,52 @@ export async function syncCostsModuleStatus(
         business_locked: number;
         finance_locked: number;
       }>(),
+    loadOrderModuleWorkflowFields(organizationId, orderId, "costs"),
   ]);
   const expenseDirections = new Set(
     expenses.results
       .filter((item) => item.total > 0)
       .map((item) => item.direction),
   );
-  const presentDirections = [...expenseDirections];
   const controlByDirection = new Map(
     controls.results.map((item) => [item.direction, item]),
   );
-  const allPresent = (
-    field:
-      | "confirmed"
-      | "business_reviewed"
-      | "finance_reviewed"
-      | "finance_locked",
-  ) =>
-    presentDirections.length > 0 &&
-    presentDirections.every(
-      (direction) => (controlByDirection.get(direction)?.[field] ?? 0) === 1,
-    );
+  const gate = evaluateCostsCompletionGate({
+    fields: workflowFields,
+    directions: (["receivable", "payable"] as const).map((direction) => {
+      const control = controlByDirection.get(direction);
+      return {
+        direction,
+        hasExpenses: expenseDirections.has(direction),
+        customerServiceConfirmed: Boolean(control?.confirmed),
+        businessReviewed: Boolean(control?.business_reviewed),
+        financeReviewed: Boolean(control?.finance_reviewed),
+      };
+    }),
+  });
 
   const definition = orderModuleDefinition("costs");
   if (!definition) return;
-  let stepIndex = 0;
-  let status = presentDirections.length ? "in_progress" : "not_started";
-  let progress = presentDirections.length ? 20 : 0;
-  if (
-    expenseDirections.has("receivable") &&
-    expenseDirections.has("payable") &&
-    allPresent("finance_locked")
-  ) {
-    stepIndex = 4;
-    status = "completed";
-    progress = 100;
-  } else if (allPresent("finance_reviewed")) {
-    stepIndex = 3;
-    progress = 80;
-  } else if (allPresent("business_reviewed")) {
-    stepIndex = 2;
-    progress = 60;
-  } else if (allPresent("confirmed")) {
-    stepIndex = 1;
-    progress = 40;
-  }
-  const step = definition.steps[Math.min(stepIndex, definition.steps.length - 1)];
+  const step = definition.steps.find((item) => item.code === gate.currentStepCode) ??
+    definition.steps[0];
   await env.DB.prepare(
     `UPDATE order_module_instances
      SET status=?,current_step_code=?,current_step_name=?,progress_percent=?,
          started_at=CASE WHEN ?!='not_started' THEN COALESCE(started_at,?) ELSE started_at END,
          completed_at=CASE WHEN ?='completed' THEN COALESCE(completed_at,?) ELSE NULL END,
-         blocking_reason=NULL,updated_at=?
+         blocking_reason=?,updated_at=?
      WHERE organization_id=? AND order_id=? AND module_code='costs' AND enabled=1`,
   )
     .bind(
-      status,
+      gate.status,
       step.code,
       step.name,
-      progress,
-      status,
+      gate.progressPercent,
+      gate.status,
       now,
-      status,
+      gate.status,
       now,
+      gate.blockingReason,
       now,
       organizationId,
       orderId,
@@ -799,7 +834,7 @@ export async function listOrderModules(
 ) {
   await ensureOrderModules(organizationId, orderId);
   const rows = await env.DB.prepare(
-    `SELECT m.id,m.module_code,m.module_name,m.enabled,m.is_required,m.status,m.current_step_code,m.current_step_name,m.progress_percent,m.blocking_reason,m.assignee_user_id,u.display_name assignee_name,p.name assignee_position_name,m.started_at,m.completed_at,m.updated_at
+    `SELECT m.id,m.module_code,m.module_name,m.enabled,m.is_required,m.status,m.current_step_code,m.current_step_name,m.progress_percent,m.blocking_reason,m.assignee_user_id,u.display_name assignee_name,u.email assignee_email,p.name assignee_position_name,m.started_at,m.completed_at,m.updated_at
      FROM order_module_instances m
      LEFT JOIN users u ON u.id=m.assignee_user_id
      LEFT JOIN memberships ms ON ms.organization_id=m.organization_id AND ms.user_id=m.assignee_user_id AND ms.status='active'
@@ -1073,11 +1108,7 @@ async function validateModuleGate(
         ? "receipt"
         : currentStep === "ready"
           ? "sorting"
-          : currentStep === "loading"
-            ? "loading"
-            : currentStep === "outbound"
-              ? "dispatched"
-              : null;
+          : null;
     const warehouseGateRequired =
       requiredStatus === "receipt"
         ? anyRequired(
@@ -1101,23 +1132,19 @@ async function validateModuleGate(
               ],
               true,
             )
-          : Boolean(requiredStatus);
+          : false;
     if (requiredStatus && warehouseGateRequired) {
       const row = await env.DB.prepare(
         `SELECT
           CASE ?
             WHEN 'receipt' THEN EXISTS(SELECT 1 FROM warehouse_receipts wr JOIN shipments s ON s.id=wr.shipment_id WHERE s.order_id=? AND wr.organization_id=?)
             WHEN 'sorting' THEN EXISTS(SELECT 1 FROM warehouse_sorting_batches wb JOIN shipments s ON s.id=wb.shipment_id WHERE s.order_id=? AND wb.organization_id=? AND wb.status='verified')
-            WHEN 'loading' THEN EXISTS(SELECT 1 FROM warehouse_dispatches d JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id JOIN warehouse_packages wp ON wp.id=di.package_id JOIN shipments s ON s.id=wp.shipment_id WHERE s.order_id=? AND d.organization_id=? AND d.status IN ('loading','dispatched'))
-            WHEN 'dispatched' THEN EXISTS(SELECT 1 FROM warehouse_dispatches d JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id JOIN warehouse_packages wp ON wp.id=di.package_id JOIN shipments s ON s.id=wp.shipment_id WHERE s.order_id=? AND d.organization_id=? AND d.status='dispatched')
             ELSE 0 END ready`,
-      ).bind(requiredStatus, orderId, organizationId, orderId, organizationId, orderId, organizationId, orderId, organizationId).first<{ ready: number }>();
+      ).bind(requiredStatus, orderId, organizationId, orderId, organizationId).first<{ ready: number }>();
       if (!row?.ready)
         throw new Error(
           requiredStatus === "receipt" ? "请先完成仓库实际收货" :
-          requiredStatus === "sorting" ? "请先完成货物齐套与分拣复核" :
-          requiredStatus === "loading" ? "请先创建仓库扫码装车任务" :
-          "请先完成仓库出库交接",
+          "请先完成货物齐套与分拣复核",
         );
     }
   }
@@ -1147,8 +1174,11 @@ async function validateModuleGate(
           throw new Error(`报关资料尚未审核通过：${missing.map(orderDocumentTypeLabel).join("、")}`);
       }
     }
-    // 推进到"海关放行"步骤前，要求至少一张报关单已放行
+    // Declaration and release are workflow-field gates. Optional work remains
+    // actionable without blocking; hidden actions are rejected by the module
+    // workbench and are not recreated as a transition gate here.
     if (currentStep === "review") {
+      const gateRequirements = customsModuleGateRequirements(configuredFields);
       const customsGate = await env.DB.prepare(
         `SELECT COUNT(*) total,
                 SUM(CASE WHEN d.status='released' THEN 1 ELSE 0 END) released
@@ -1158,8 +1188,10 @@ async function validateModuleGate(
       ).bind(organizationId, orderId).first<{ total: number; released: number | null }>();
       const total = customsGate?.total ?? 0;
       const released = customsGate?.released ?? 0;
-      if (total === 0) throw new Error("请先录入至少一张有效报关单");
-      if (released !== total) throw new Error(`报关单尚未全部放行（已放行 ${released}/${total} 张）`);
+      if ((gateRequirements.declarationsRequired || gateRequirements.releaseRequired) && total === 0)
+        throw new Error("请先录入至少一张有效报关单");
+      if (gateRequirements.releaseRequired && released !== total)
+        throw new Error(`报关单尚未全部放行（已放行 ${released}/${total} 张）`);
     }
   }
   if (
@@ -1252,7 +1284,7 @@ function initialModuleState(
     index = steps.length - 1;
     completed = true;
   }
-  else if (code === "assignment" && order.current_assignee_user_id) index = 1;
+  else if (code === "assignment" && order.status === "confirmed") index = 1;
   else if (code === "documents" && metrics.attachments > 0) index = 1;
   else if (code === "transport" && metrics.bookings + metrics.transportAssignments > 0) {
     index = steps.length - 1;

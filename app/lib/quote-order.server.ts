@@ -224,7 +224,7 @@ export async function createOrderFromAcceptedQuote(input: {
     ).bind(
       crypto.randomUUID(),input.organizationId,orderId,"quote_accepted_auto_create","客户接受报价，系统自动创建订单",
       "draft","draft","order_creation",input.actorUserId,quote.salesperson_user_id,
-      `来源报价 ${quote.quote_number}`,now,
+      "来源报价已确认",now,
     ),
     env.DB.prepare(
       `INSERT INTO order_workflow_history(
@@ -436,7 +436,7 @@ function receivableStatements(input: {
     ).bind(
       crypto.randomUUID(),input.organizationId,input.orderId,charge.charge_code,charge.description,
       input.quote.customer_name,input.quote.currency,charge.quantity,charge.unit_price,charge.amount,
-      charge.exchange_rate,charge.amount * charge.exchange_rate,`继承已接受报价 ${input.quote.quote_number}`,
+      charge.exchange_rate,charge.amount * charge.exchange_rate,"继承已接受报价",
       input.actorUserId,input.now,input.now,charge.id,
     ));
   }
@@ -449,7 +449,7 @@ function receivableStatements(input: {
   ).bind(
     crypto.randomUUID(),input.organizationId,input.orderId,input.quote.customer_name,input.quote.currency,
     input.quote.total_amount,input.quote.total_amount,input.quote.total_amount,
-    `继承已接受报价 ${input.quote.quote_number}`,input.actorUserId,input.now,input.now,input.quote.id,
+    "继承已接受报价",input.actorUserId,input.now,input.now,input.quote.id,
   )];
 }
 

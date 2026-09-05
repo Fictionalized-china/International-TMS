@@ -8,16 +8,16 @@ export type OrderResponsiblePosition = {
 const modulePositions: Record<OrderModuleCode, OrderResponsiblePosition> = {
   consignment: { code: "SALES", name: "业务员" },
   cargo: { code: "SALES", name: "业务员" },
-  assignment: { code: "OPERATION", name: "操作" },
-  transport: { code: "SALES", name: "业务员" },
+  assignment: { code: "OPERATION_SUPERVISOR", name: "操作主管" },
+  transport: { code: "OPERATION", name: "操作岗（含运踪）" },
   warehouse: { code: "WAREHOUSE", name: "仓库岗" },
-  loading: { code: "LOADING", name: "前端配载岗" },
-  documents: { code: "DOC", name: "单证" },
-  customs: { code: "DOC", name: "单证" },
-  tracking: { code: "TRACKING", name: "运踪岗" },
+  loading: { code: "WAREHOUSE", name: "仓库岗" },
+  documents: { code: "DOC", name: "单证岗" },
+  customs: { code: "DOC", name: "单证岗" },
+  tracking: { code: "OPERATION", name: "操作岗（含运踪）" },
   overseas_warehouse: { code: "OVERSEAS_WAREHOUSE", name: "境外仓库岗" },
-  costs: { code: "FINANCE_ACCOUNTING", name: "财务会计岗" },
-  exceptions: { code: "OPERATION", name: "操作" },
+  costs: { code: "CS", name: "客服岗" },
+  exceptions: { code: "OPERATION", name: "操作岗（含运踪）" },
   review: { code: "FINANCE_ACCOUNTING", name: "财务会计岗" },
 };
 
@@ -35,5 +35,5 @@ export function orderResponsiblePosition(
     return { code: "OPERATION_SUPERVISOR", name: "操作主管" };
   }
   if (moduleCode) return modulePositions[moduleCode];
-  return { code: "OPERATION", name: "操作" };
+  return { code: "OPERATION", name: "操作岗（含运踪）" };
 }

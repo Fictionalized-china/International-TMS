@@ -26,6 +26,11 @@ import {
   inspectHiddenWorkflowFieldData,
   synchronizeWorkflowFieldDefinitionForInstances,
 } from "../lib/workflow-fields.server";
+import {
+  syncCostsModuleStatus,
+  syncOrderWorkflowSnapshot,
+} from "../lib/order-modules.server";
+import { refreshOrdersForWorkflowFieldChanges } from "../lib/workflow-field-order-refresh";
 import { ensureWorkflowExecutionSnapshot } from "../lib/workflow-execution.server";
 import { broadcastInternalNotification } from "../lib/internal-notifications.server";
 import {
@@ -507,6 +512,15 @@ export async function action({ request }: Route.ActionArgs) {
         preserved,
       });
     }
+    const orderRefresh = await refreshOrdersAffectedByWorkflowFields({
+      organizationId: current.organizationId,
+      workflowId,
+      changes: changes.map(({ field }) => ({
+        moduleCode: field.module_code,
+        stepKey: field.step_key,
+      })),
+      now,
+    });
     await writeAudit({
       request,
       action:"workflow.field.requirement.batch_update",
@@ -514,7 +528,7 @@ export async function action({ request }: Route.ActionArgs) {
       resourceId:workflowId,
       organizationId:current.organizationId,
       actorUserId:current.userId,
-      metadata:{workflowId,lifecycleStatus:definition.lifecycle_status,changes:auditChanges},
+      metadata:{workflowId,lifecycleStatus:definition.lifecycle_status,changes:auditChanges,orderRefresh},
     });
     const summary=changes.slice(0,8).map((item)=>
       `${item.field.label}：${workflowModeLabel(item.previousMode)}→${workflowModeLabel(item.mode)}`,
@@ -627,6 +641,12 @@ export async function action({ request }: Route.ActionArgs) {
           moduleCode: field.module_code,
         })
       : null;
+    const orderRefresh = await refreshOrdersAffectedByWorkflowFields({
+      organizationId: current.organizationId,
+      workflowId,
+      changes: [{ moduleCode: field.module_code, stepKey: field.step_key }],
+      now,
+    });
     await writeAudit({
       request,
       action: "workflow.field.requirement.update",
@@ -644,6 +664,7 @@ export async function action({ request }: Route.ActionArgs) {
         impact,
         supplementTasks,
         runtimeStatus,
+        orderRefresh,
       },
     });
     await broadcastInternalNotification({
@@ -862,6 +883,12 @@ export async function action({ request }: Route.ActionArgs) {
       actorUserId:current.userId,
       now,
     });
+    const orderRefresh = await refreshOrdersAffectedByWorkflowFields({
+      organizationId: current.organizationId,
+      workflowId,
+      changes: [{ moduleCode: parsed.moduleCode, stepKey: step.step_key }],
+      now,
+    });
     await writeAudit({
       request,
       action:"workflow.field.create",
@@ -869,7 +896,7 @@ export async function action({ request }: Route.ActionArgs) {
       resourceId:id,
       organizationId:current.organizationId,
       actorUserId:current.userId,
-      metadata:{workflowId,stepKey:step.step_key,fieldKey:parsed.fieldKey,mode:parsed.mode,impact,supplementTasks,runtimeStatus},
+      metadata:{workflowId,stepKey:step.step_key,fieldKey:parsed.fieldKey,mode:parsed.mode,impact,supplementTasks,runtimeStatus,orderRefresh},
     });
     await broadcastInternalNotification({
       organizationId:current.organizationId,
@@ -988,6 +1015,12 @@ export async function action({ request }: Route.ActionArgs) {
       actorUserId:current.userId,
       now,
     });
+    const orderRefresh = await refreshOrdersAffectedByWorkflowFields({
+      organizationId: current.organizationId,
+      workflowId,
+      changes: [{ moduleCode: catalog.moduleCode, stepKey: step.step_key }],
+      now,
+    });
     await writeAudit({
       request,
       action: "workflow.field.block.assign",
@@ -995,7 +1028,7 @@ export async function action({ request }: Route.ActionArgs) {
       resourceId: fieldId,
       organizationId: current.organizationId,
       actorUserId: current.userId,
-      metadata: { workflowId, stepKey: step.step_key, fieldKey: catalog.fieldKey, mode, moved: Boolean(exists&&exists.step_id!==step.id), impact, supplementTasks, runtimeStatus },
+      metadata: { workflowId, stepKey: step.step_key, fieldKey: catalog.fieldKey, mode, moved: Boolean(exists&&exists.step_id!==step.id), impact, supplementTasks, runtimeStatus, orderRefresh },
     });
     await broadcastInternalNotification({
       organizationId:current.organizationId,
@@ -1372,6 +1405,49 @@ async function synchronizeWorkflowExecutionSnapshots(
       ),
     );
   }
+}
+
+async function refreshOrdersAffectedByWorkflowFields(input: {
+  organizationId: string;
+  workflowId: string;
+  changes: readonly { moduleCode: OrderModuleCode; stepKey: string }[];
+  now: string;
+}) {
+  return refreshOrdersForWorkflowFieldChanges({
+    changes: input.changes,
+    listAffectedOrderIds: async (targetStepKeys) => {
+      if (!targetStepKeys.length) return [];
+      const affected = await env.DB.prepare(
+        `SELECT DISTINCT wi.order_id
+         FROM workflow_instances wi
+         JOIN workflow_steps current_step
+           ON current_step.workflow_id=wi.workflow_id
+          AND current_step.step_key=wi.current_step_key
+         JOIN workflow_steps target_step
+           ON target_step.workflow_id=wi.workflow_id
+         JOIN transport_orders o
+           ON o.id=wi.order_id
+          AND o.organization_id=wi.organization_id
+         WHERE wi.organization_id=?
+           AND wi.workflow_id=?
+           AND wi.status='active'
+           AND wi.order_id IS NOT NULL
+           AND target_step.step_key IN (${d1Placeholders(targetStepKeys.length)})
+           AND current_step.sort_order<=target_step.sort_order
+           AND o.status NOT IN ('completed','cancelled')
+         ORDER BY wi.order_id`,
+      ).bind(
+        input.organizationId,
+        input.workflowId,
+        ...targetStepKeys,
+      ).all<{ order_id: string }>();
+      return affected.results.map((item) => item.order_id);
+    },
+    syncCostsModuleStatus: (orderId) =>
+      syncCostsModuleStatus(input.organizationId, orderId, input.now),
+    syncOrderWorkflowSnapshot: (orderId) =>
+      syncOrderWorkflowSnapshot(input.organizationId, orderId),
+  });
 }
 
 async function ensureFieldPolicyModule(

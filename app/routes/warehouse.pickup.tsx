@@ -1,6 +1,8 @@
 import { env } from "cloudflare:workers";
-import { Form, redirect, useNavigation } from "react-router";
+import { useEffect } from "react";
+import { Form, Link, redirect, useNavigation } from "react-router";
 import type { Route } from "./+types/warehouse.pickup";
+import { QueryPagination } from "../components/QueryPagination";
 import { requireSessionUser } from "../lib/auth.server";
 import { writeAudit } from "../lib/audit.server";
 import { advanceOverseasOrder } from "../lib/overseas-warehouse.server";
@@ -9,6 +11,7 @@ import { valueOf } from "../lib/validation";
 import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
 import { formatPickupAppointment } from "../lib/pickup-appointment";
+import { paginateList, readListPage } from "../lib/list-pagination";
 
 type PickupPackage = {
   id: string;
@@ -44,6 +47,9 @@ export async function loader({ request }: Route.LoaderArgs) {
 
   const url = new URL(request.url);
   const orderId = url.searchParams.get("orderId") || "";
+  const q = (url.searchParams.get("q") || "").trim().toLowerCase();
+  const pickupState = url.searchParams.get("pickupState") || "all";
+  const requestedPage = readListPage(url.searchParams);
   const [orders, packages] = await Promise.all([
     env.DB.prepare(
       `SELECT op.order_id,o.order_number,c.name customer_name,b.batch_number,
@@ -60,7 +66,7 @@ export async function loader({ request }: Route.LoaderArgs) {
          WHERE op.organization_id=? AND op.warehouse_id=? AND op.status IN ('notified','appointment','picked_up')
          GROUP BY op.order_id,o.order_number,c.name,b.batch_number,op.notified_at,op.appointment_at,op.appointment_period,op.pickup_at,op.status
          ORDER BY CASE WHEN op.status IN ('notified','appointment') THEN 0 ELSE 1 END,op.notified_at DESC
-        LIMIT 100`,
+         `,
     ).bind(user.organizationId, warehouse.id).all<PickupOrder>(),
     orderId
       ? env.DB.prepare(
@@ -72,13 +78,33 @@ export async function loader({ request }: Route.LoaderArgs) {
         ).bind(user.organizationId, warehouse.id, orderId).all<PickupPackage>()
       : Promise.resolve({ results: [] as PickupPackage[] }),
   ]);
+  const filteredOrders = orders.results.filter((item) => {
+    if (pickupState === "waiting" && item.operation_status === "picked_up") return false;
+    if (pickupState === "picked_up" && item.operation_status !== "picked_up") return false;
+    if (q && !`${item.order_number} ${item.batch_number} ${item.customer_name}`.toLowerCase().includes(q)) return false;
+    return true;
+  });
+  const pagination = paginateList(filteredOrders, requestedPage);
   return {
     user,
     warehouse,
-    orders: orders.results,
+    orders: pagination.items,
+    pagination: {
+      page: pagination.page,
+      pageCount: pagination.pageCount,
+      pageSize: pagination.pageSize,
+      total: pagination.total,
+    },
+    filters: { q: url.searchParams.get("q") || "", pickupState },
     packages: packages.results,
     activeOrder: orders.results.find((item) => item.order_id === orderId) ?? null,
     result: url.searchParams.get("pickupResult") || "",
+    pickupCompletion: url.searchParams.get("pickupCompleted") === "1"
+      ? {
+          orderNumber: url.searchParams.get("pickupOrderNumber") || "",
+          packageCount: Number(url.searchParams.get("pickupPackageCount") || 0),
+        }
+      : null,
   };
 }
 
@@ -114,7 +140,13 @@ export async function action({ request }: Route.ActionArgs) {
     ]);
     await advanceOverseasOrder({organizationId:user.organizationId,orderId,actorUserId:user.userId,action:"pickup",occurredAt:now,pickupContact:pickup.pickup_contact,pickupProofReference:`WAREHOUSE-CONFIRM:${pickup.order_number}`,notes:`${warehouse.name} 已核对整票货物并完成客户自提出库`});
     await writeAudit({request,action:"warehouse.overseas.pickup",resourceType:"transport_order",resourceId:orderId,organizationId:user.organizationId,actorUserId:user.userId,metadata:{warehouseId:warehouse.id,orderNumber:pickup.order_number,confirmedPackages:packageStats.total}});
-    const params=new URLSearchParams({warehouseId:warehouse.id,pickupResult:`${pickup.order_number} 已复核并完成自提签收，订单进入费用结算`});
+    const params=new URLSearchParams({
+      warehouseId:warehouse.id,
+      pickupResult:`${pickup.order_number} 已复核并完成自提签收，订单进入费用结算`,
+      pickupCompleted:"1",
+      pickupOrderNumber:pickup.order_number,
+      pickupPackageCount:String(packageStats.total),
+    });
     return redirect(`/warehouse/pickup?${params.toString()}`);
   }
   const barcode = valueOf(form, "barcode").trim();
@@ -228,11 +260,26 @@ const packageStatusLabels: Record<string, string> = {
 
 export default function WarehousePickup({ loaderData, actionData }: Route.ComponentProps) {
   const busy = useNavigation().state !== "idle";
+  const pickupCompletion = loaderData.pickupCompletion;
   const readyToConfirm = Boolean(
     loaderData.activeOrder &&
     loaderData.packages.length > 0 &&
     loaderData.packages.every((item) => item.status === "allocated"),
   );
+
+  useEffect(() => {
+    if (!pickupCompletion || typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("pickupCompleted");
+    url.searchParams.delete("pickupOrderNumber");
+    url.searchParams.delete("pickupPackageCount");
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${url.pathname}${url.search}${url.hash}`,
+    );
+  }, [pickupCompletion]);
+
   return <>
     <header className="page-header overseas-pickup-header">
       <div>
@@ -243,6 +290,22 @@ export default function WarehousePickup({ loaderData, actionData }: Route.Compon
     </header>
     {loaderData.result && !readyToConfirm && <p className="alert success">{loaderData.result}</p>}
     {actionData?.formError && <p className="alert warning">{actionData.formError}</p>}
+    {pickupCompletion && <Modal
+      title="出库成功"
+      openSignal={`${pickupCompletion.orderNumber}:${pickupCompletion.packageCount}`}
+      dialogClassName="pickup-success-dialog"
+      initialFocusSelector="[data-pickup-success-close]"
+    >
+      {({ close }) => <div className="pickup-success-content" role="status" aria-live="polite">
+        <span className="pickup-success-icon" aria-hidden="true">✓</span>
+        <div className="pickup-success-message">
+          <strong>{pickupCompletion.orderNumber} 已完成自提出库</strong>
+          <p>本次已核销并出库 {pickupCompletion.packageCount} 个货物标签，签收结果已同步管理端。</p>
+          <small>订单已自动进入对账结算，无需重复扫描。</small>
+        </div>
+        <button type="button" className="primary warehouse-primary" data-pickup-success-close onClick={close}>知道了</button>
+      </div>}
+    </Modal>}
     <section className="panel overseas-pickup-scan-panel">
       <Form method="post" className="scan-inline overseas-pickup-scan-form">
         <input type="hidden" name="intent" value="scan"/>
@@ -260,15 +323,27 @@ export default function WarehousePickup({ loaderData, actionData }: Route.Compon
       <div className="table-wrap"><table><thead><tr><th>货物标签</th><th>包装号</th><th>件数</th><th>重量 / 体积</th><th>状态</th></tr></thead><tbody>
         {loaderData.packages.map((item) => <tr key={item.id}><td><strong>{item.barcode}</strong></td><td>{item.package_number}</td><td>{item.pieces}</td><td>{item.weight_kg ?? "—"} KG · {item.volume_cbm ?? "—"} CBM</td><td><span className={`status-pill ${item.status === "exception" ? "danger" : ""}`}>{packageStatusLabels[item.status] || item.status}</span></td></tr>)}
       </tbody></table></div>
-      {readyToConfirm&&<Modal title={`核对货物并确认收货 · ${loaderData.activeOrder.order_number}`} openSignal={loaderData.result||loaderData.activeOrder.order_id} size="wide"><div className="stack"><div className="alert warning">请客户当面核对订单、客户和下列全部货物条码。点击“确认收货”后，系统将立即完成自提出库与签收。</div><div className="table-wrap"><table><thead><tr><th>货物条码</th><th>包装号</th><th>件数</th><th>重量 / 体积</th></tr></thead><tbody>{loaderData.packages.map(item=><tr key={item.id}><td><strong>{item.barcode}</strong></td><td>{item.package_number}</td><td>{item.pieces}</td><td>{item.weight_kg??"—"} KG · {item.volume_cbm??"—"} CBM</td></tr>)}</tbody></table></div><Form method="post" className="overseas-pickup-confirm-form"><input type="hidden" name="intent" value="confirm_pickup"/><input type="hidden" name="orderId" value={loaderData.activeOrder.order_id}/><button className="primary" disabled={busy}>确认收货</button></Form></div></Modal>}
+      {readyToConfirm&&<Modal title={`核对货物并确认收货 · ${loaderData.activeOrder.order_number}`} openSignal={loaderData.result||loaderData.activeOrder.order_id} size="wide"><div className="stack"><div className="alert warning">请客户当面核对订单、客户和下列全部货物条码。点击“确认收货”后，系统将立即完成自提出库与签收。</div><div className="table-wrap"><table><thead><tr><th>货物条码</th><th>包装号</th><th>件数</th><th>重量 / 体积</th></tr></thead><tbody>{loaderData.packages.map(item=><tr key={item.id}><td><strong>{item.barcode}</strong></td><td>{item.package_number}</td><td>{item.pieces}</td><td>{item.weight_kg??"—"} KG · {item.volume_cbm??"—"} CBM</td></tr>)}</tbody></table></div><Form method="post" className="overseas-pickup-confirm-form"><input type="hidden" name="intent" value="confirm_pickup"/><input type="hidden" name="orderId" value={loaderData.activeOrder.order_id}/><button className="primary" disabled={busy}>{busy ? "正在出库并同步订单…" : "确认收货"}</button></Form></div></Modal>}
     </section>}
 
     <section className="panel overseas-pickup-queue-panel">
-      <div className="panel-header"><div><h2>境外仓自提队列</h2><p>统一显示已入库待自提和已自提出库的订单。</p></div><span className="status-pill">{loaderData.orders.length} 票</span></div>
+      <div className="panel-header"><div><h2>境外仓自提队列</h2><p>统一显示已入库待自提和已自提出库的订单。</p></div><span className="status-pill">{loaderData.pagination.total} 票</span></div>
+      <Form method="get" action="." className="warehouse-queue-filter">
+        <input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/>
+        <input name="q" defaultValue={loaderData.filters.q} placeholder="订单号、配载单或客户"/>
+        <select name="pickupState" defaultValue={loaderData.filters.pickupState}>
+          <option value="all">全部自提状态</option>
+          <option value="waiting">已到仓待自提</option>
+          <option value="picked_up">已自提出库</option>
+        </select>
+        <button className="secondary">筛选</button>
+        <Link className="text-button" to={`?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}`}>重置</Link>
+      </Form>
       <div className="table-wrap"><table><thead><tr><th>货物状态</th><th>订单 / 配载单</th><th>客户</th><th>通知时间</th><th>客户预约</th><th>标签进度</th><th>自提出库时间</th></tr></thead><tbody>
         {loaderData.orders.map((item) => <tr key={item.order_id}><td><span className={`status-pill ${item.operation_status === "picked_up" ? "" : "off"}`}>{item.operation_status === "picked_up" ? "已自提出库" : "已入库待自提"}</span></td><td><strong>{item.order_number}</strong><small>{item.batch_number}</small></td><td>{item.customer_name}</td><td>{item.notified_at ? new Date(item.notified_at).toLocaleString("zh-CN") : "客户已通知"}</td><td><span className={`pickup-status-summary compact ${item.appointment_at ? "appointed" : ""}`}>{formatPickupAppointment(item.appointment_at, item.appointment_period)}</span></td><td>{item.dispatched_count}/{item.package_count} 已出库</td><td>{item.pickup_at ? new Date(item.pickup_at).toLocaleString("zh-CN") : "—"}</td></tr>)}
         {!loaderData.orders.length && <tr><td colSpan={7} className="empty-state">当前仓库暂无待自提订单。</td></tr>}
       </tbody></table></div>
+      <QueryPagination {...loaderData.pagination}/>
     </section>
   </>;
 }

@@ -746,7 +746,13 @@ export async function reconcileOverseasOrderDeliveryState(input: {
     operation.module_status === state[0] &&
     operation.current_step_code === state[1] &&
     operation.progress_percent === state[3]
-  ) return;
+  ) {
+    // The delivery module can already be correct while an older macro workflow
+    // snapshot is still stale. Re-run the idempotent snapshot synchronization
+    // so opening the order repairs every projection, not only this module row.
+    await syncOrderWorkflowSnapshot(input.organizationId, input.orderId);
+    return;
+  }
 
   const now = new Date().toISOString();
   await env.DB.prepare(

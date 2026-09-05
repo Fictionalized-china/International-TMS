@@ -40,6 +40,8 @@ const database = vi.hoisted(() => {
 vi.mock("cloudflare:workers", () => ({ env: { DB: database.DB } }));
 
 import {
+  assignmentCoverageIsComplete,
+  assignmentManagedModuleCodes,
   ftlOutboundWorkflowFieldValues,
   mergeWorkflowFieldCatalogBaseline,
   synchronizeWorkflowFieldDefinitionForInstances,
@@ -111,6 +113,23 @@ describe("stage-aware workflow field synchronization", () => {
       overseas_driver_name: "张伟",
       overseas_driver_phone: "13800001111",
     });
+  });
+
+  it("only requires the modules that are actually assigned on the task-assignment page", () => {
+    expect(assignmentManagedModuleCodes).toEqual([
+      "transport",
+      "tracking",
+      "exceptions",
+      "documents",
+      "customs",
+      "costs",
+    ]);
+    expect(assignmentManagedModuleCodes).not.toContain("warehouse");
+    expect(assignmentManagedModuleCodes).not.toContain("loading");
+    expect(assignmentManagedModuleCodes).not.toContain("overseas_warehouse");
+    expect(assignmentCoverageIsComplete(5, 5)).toBe(true);
+    expect(assignmentCoverageIsComplete(4, 5)).toBe(false);
+    expect(assignmentCoverageIsComplete(0, 0)).toBe(false);
   });
 
   it("applies a changed rule only to future and current stages", () => {

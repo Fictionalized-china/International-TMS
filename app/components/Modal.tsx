@@ -247,6 +247,7 @@ export function Modal({
   const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
   const [formDirty, setFormDirty] = useState(false);
   const [longSubmission, setLongSubmission] = useState(false);
+  const [discardConfirmationOpen, setDiscardConfirmationOpen] = useState(false);
   const open = isOpen ?? uncontrolledOpen;
   const hasUnsavedChanges = dirty || (guardFormChanges && formDirty);
   const navigation = useNavigation();
@@ -267,10 +268,14 @@ export function Modal({
   const close = useCallback((force = false) => {
     if (!force && submissionCloseLocked) return;
     if(!force&&!dismissible)return;
-    if (!force && hasUnsavedChanges && typeof window !== "undefined" && !window.confirm(discardMessage)) return;
+    if (!force && hasUnsavedChanges) {
+      setDiscardConfirmationOpen(true);
+      return;
+    }
+    setDiscardConfirmationOpen(false);
     updateOpen(false);
     onClose?.();
-  }, [dismissible, discardMessage, hasUnsavedChanges, onClose, submissionCloseLocked, updateOpen]);
+  }, [dismissible, hasUnsavedChanges, onClose, submissionCloseLocked, updateOpen]);
 
   useEffect(() => {
     if (!submissionPending) {
@@ -286,9 +291,18 @@ export function Modal({
     setFormDirty(false);
     const dialog = dialogRef.current;
     if (!dialog) return;
-    const baseline = serializeModalForms(dialog);
+    let baseline = "";
+    let ready = false;
     let pendingFrame: number | null = null;
+    let baselineFrame: number | null = window.requestAnimationFrame(() => {
+      baselineFrame = window.requestAnimationFrame(() => {
+        baselineFrame = null;
+        baseline = serializeModalForms(dialog);
+        ready = true;
+      });
+    });
     const detectChanges = (event: Event) => {
+      if (!ready) return;
       const target = event.target instanceof HTMLElement ? event.target : null;
       if (target?.closest("[data-ignore-dirty]")) return;
       if (!target?.closest("form")) return;
@@ -303,11 +317,16 @@ export function Modal({
     dialog.addEventListener("click", detectChanges);
     return () => {
       if (pendingFrame !== null) window.cancelAnimationFrame(pendingFrame);
+      if (baselineFrame !== null) window.cancelAnimationFrame(baselineFrame);
       dialog.removeEventListener("input", detectChanges);
       dialog.removeEventListener("change", detectChanges);
       dialog.removeEventListener("click", detectChanges);
     };
   }, [guardFormChanges, open]);
+
+  useEffect(() => {
+    if (!open) setDiscardConfirmationOpen(false);
+  }, [open]);
 
   useEffect(() => {
     if (!open || !hasUnsavedChanges) return;
@@ -386,6 +405,10 @@ export function Modal({
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
+        if (discardConfirmationOpen) {
+          setDiscardConfirmationOpen(false);
+          return;
+        }
         close();
         return;
       }
@@ -412,7 +435,7 @@ export function Modal({
     };
     document.addEventListener("keydown", keepFocusInside, true);
     return () => document.removeEventListener("keydown", keepFocusInside, true);
-  }, [close, modalId, open]);
+  }, [close, discardConfirmationOpen, modalId, open]);
 
   const dialog = open && typeof document !== "undefined"
     ? createPortal(
@@ -453,6 +476,18 @@ export function Modal({
             <div className="modal-body">
               {typeof children === "function" ? children({ close: () => close() }) : children}
             </div>
+            {discardConfirmationOpen && (
+              <div className="modal-discard-layer" role="presentation">
+                <section className="modal-discard-card" role="alertdialog" aria-modal="true" aria-labelledby={`${titleId}-discard-title`}>
+                  <strong id={`${titleId}-discard-title`}>放弃未保存内容？</strong>
+                  <p>{discardMessage}</p>
+                  <div>
+                    <button type="button" className="secondary" autoFocus onClick={() => setDiscardConfirmationOpen(false)}>继续编辑</button>
+                    <button type="button" className="primary" onClick={() => close(true)}>确认放弃</button>
+                  </div>
+                </section>
+              </div>
+            )}
           </section>
         </div>,
         document.body,

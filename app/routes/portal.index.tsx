@@ -127,18 +127,18 @@ export default function PortalIndex({ loaderData }: Route.ComponentProps) {
 
     <section className="table-panel portal-home-orders">
       <div className="table-panel-head"><div><b>待确认与最近订单</b><span>待确认报价优先显示；接受后系统自动生成正式订单。</span></div><Link className="btn small" to="/portal/orders">查看全部订单</Link></div>
-      <div className="table-wrap"><table><thead><tr><th>订单 / 报价</th><th>类型</th><th>货物</th><th>线路</th><th>当前节点</th><th>状态</th><th>操作</th></tr></thead><tbody>
+      <div className="table-wrap"><table><thead><tr><th>订单号</th><th>类型</th><th>货物</th><th>线路</th><th>当前节点</th><th>状态</th><th>操作</th></tr></thead><tbody>
         {loaderData.pendingQuotes.map((quote) => <tr key={`quote-${quote.id}`} className="portal-quote-pending-row">
-          <td><Link className="order-id" to={quotationDetailLink(quote.id)}>{quote.quote_number}</Link><small className="subline">报价待确认</small></td>
+          <td><Link className="pending-order-label" to={quotationDetailLink(quote.id)}>待确认报价</Link><small className="subline">确认后生成订单号</small></td>
           <td><span className={`pill ${quote.road_load_type === "ltl" ? "ltl" : ""}`}>{quote.road_load_type === "ltl" ? "拼车" : "整车"}</span></td>
           <td><span className="cell-main">{quote.cargo_description || "货物待补充"}</span><small className="subline">CNY {Number(quote.total_amount || 0).toLocaleString()}</small></td>
           <td>{quote.origin_city} → {quote.destination_city}</td>
           <td>客户确认报价</td>
           <td><span className="status orange">待确认</span>{quote.valid_until && <small className="subline">有效期至 {quote.valid_until}</small>}</td>
-          <td><Link className="btn primary small" to={quotationDetailLink(quote.id)}>查看并确认</Link></td>
+          <td><Link className="btn primary small" to={quotationDetailLink(quote.id)}>查看信息</Link></td>
         </tr>)}
         {loaderData.recentOrders.map((order) => <tr key={order.id} className={order.exception_status && order.exception_status !== "normal" ? "row-alert" : ""}>
-          <td><b className="order-id">{order.order_number}</b><small className="subline">{order.quote_number || "历史订单"}</small></td>
+          <td><b className="order-id order-number-only" title={order.order_number}>{order.order_number}</b></td>
           <td><span className={`pill ${order.business_type === "ltl" ? "ltl" : ""}`}>{order.business_type === "ltl" ? "拼车" : "整车"}</span></td>
           <td><span className="cell-main">{order.cargo_description || "货物待补充"}</span></td>
           <td>{order.origin_city} → {order.destination_city}</td>
@@ -181,7 +181,7 @@ function markLabelAvailable(order: RecentOrder) {
 }
 
 export function quotationDetailLink(quotationId: string) {
-  return `/portal/quotes?status=pending&quote=${encodeURIComponent(quotationId)}`;
+  return `/portal/orders?status=quote_pending&quote=${encodeURIComponent(quotationId)}`;
 }
 
 export function meta() { return [{ title: "客户门户 | 新翎航 TMS" }]; }

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveWarehouseOutboundWorkflowPolicy } from "./warehouse-outbound-policy";
+import {
+  resolveWarehouseOutboundWorkflowPolicy,
+  resolveWarehouseOutboundWorkflowPolicyForOrders,
+} from "./warehouse-outbound-policy";
 
 const field = (
   fieldKey: string,
@@ -55,5 +58,42 @@ describe("resolveWarehouseOutboundWorkflowPolicy", () => {
 
     expect(policy.handoverNotes.mode).toBe("optional");
     expect(policy.scanConfirmation.mode).toBe("required");
+  });
+
+  it("does not reopen loading gates after every attached order passed the stage", () => {
+    const policy = resolveWarehouseOutboundWorkflowPolicyForOrders([
+      {
+        orderId: "order-past-loading",
+        appliesToCurrentOrFuture: false,
+        fields: [
+          field("loading_handover_notes", "required"),
+          field("loading_scan_confirmation", "required"),
+        ],
+      },
+    ]);
+
+    expect(policy.handoverNotes.mode).toBe("hidden");
+    expect(policy.scanConfirmation.mode).toBe("hidden");
+  });
+
+  it("uses only current or future orders when a batch mixes workflow stages", () => {
+    const policy = resolveWarehouseOutboundWorkflowPolicyForOrders([
+      {
+        orderId: "order-past-loading",
+        appliesToCurrentOrFuture: false,
+        fields: [field("loading_scan_confirmation", "required")],
+      },
+      {
+        orderId: "order-at-loading",
+        appliesToCurrentOrFuture: true,
+        fields: [
+          field("loading_handover_notes", "optional"),
+          field("loading_scan_confirmation", "hidden"),
+        ],
+      },
+    ]);
+
+    expect(policy.handoverNotes.mode).toBe("optional");
+    expect(policy.scanConfirmation.mode).toBe("hidden");
   });
 });

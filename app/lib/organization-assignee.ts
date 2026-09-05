@@ -2,8 +2,10 @@ export type OrganizationAssigneeMember = {
   id: string;
   display_name: string;
   department_id: string | null;
+  department_code?: string | null;
   department_name: string | null;
   position_id: string | null;
+  position_code?: string | null;
   position_name: string | null;
 };
 

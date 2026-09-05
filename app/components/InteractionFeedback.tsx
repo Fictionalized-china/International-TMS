@@ -19,6 +19,7 @@ export function GlobalInteractionFeedback() {
   const [slow, setSlow] = useState(false);
   const [announcement, setAnnouncement] = useState("");
   const unsavedRegistry = useRef(new Map<string, string>());
+  const formSubmissionInProgress = useRef(false);
   const [unsavedMessage, setUnsavedMessage] = useState("");
 
   useEffect(() => {
@@ -37,8 +38,24 @@ export function GlobalInteractionFeedback() {
     return () => window.removeEventListener("itms:unsaved-changes", updateUnsavedRegistry);
   }, []);
 
+  useEffect(() => {
+    let releaseTimer: number | undefined;
+    const allowFormSubmission = () => {
+      formSubmissionInProgress.current = true;
+      if (releaseTimer) window.clearTimeout(releaseTimer);
+      releaseTimer = window.setTimeout(() => {
+        formSubmissionInProgress.current = false;
+      }, 1000);
+    };
+    document.addEventListener("submit", allowFormSubmission, true);
+    return () => {
+      document.removeEventListener("submit", allowFormSubmission, true);
+      if (releaseTimer) window.clearTimeout(releaseTimer);
+    };
+  }, []);
+
   const blocker = useBlocker(useCallback<BlockerFunction>(({ currentLocation, nextLocation }) => {
-    if (!unsavedMessage || navigation.state !== "idle") return false;
+    if (!unsavedMessage || navigation.state !== "idle" || formSubmissionInProgress.current) return false;
     return `${currentLocation.pathname}${currentLocation.search}${currentLocation.hash}` !==
       `${nextLocation.pathname}${nextLocation.search}${nextLocation.hash}`;
   }, [navigation.state, unsavedMessage]));
