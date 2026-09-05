@@ -7,6 +7,7 @@ export type OrganizationAssigneeMember = {
   position_id: string | null;
   position_code?: string | null;
   position_name: string | null;
+  permission_codes?: string | null;
 };
 
 export type OrganizationPositionNode = {
@@ -31,6 +32,39 @@ export function isStructurallyAssignableMember(
       member.department_name &&
       member.position_id &&
       member.position_name,
+  );
+}
+
+export function organizationAssigneePermissionCodes(
+  member: Pick<OrganizationAssigneeMember, "permission_codes">,
+) {
+  return new Set(
+    (member.permission_codes ?? "")
+      .split(",")
+      .map((code) => code.trim())
+      .filter(Boolean),
+  );
+}
+
+/** Every inner list is OR; all outer requirements must be satisfied. */
+export function satisfiesOrganizationAssigneePermissionRequirements(
+  permissionCodes: Iterable<string>,
+  requirements: readonly (readonly string[])[],
+) {
+  const granted = new Set(permissionCodes);
+  if (granted.has("*")) return true;
+  return requirements.every((alternatives) =>
+    alternatives.length === 0 || alternatives.some((code) => granted.has(code)),
+  );
+}
+
+export function organizationAssigneeCanHandle(
+  member: Pick<OrganizationAssigneeMember, "permission_codes">,
+  requirements: readonly (readonly string[])[],
+) {
+  return satisfiesOrganizationAssigneePermissionRequirements(
+    organizationAssigneePermissionCodes(member),
+    requirements,
   );
 }
 

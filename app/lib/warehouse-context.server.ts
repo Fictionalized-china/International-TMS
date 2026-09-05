@@ -43,5 +43,8 @@ export async function loadWarehouseContext(request: Request, user: SessionUser) 
     : result.results[0];
   if (!selected)
     throw new Response("当前登录账号无权访问所选仓库，请使用该仓库绑定账号重新登录", { status: 403 });
-  return { warehouses: result.results, selected };
+  const selectedAccessLevel = access.all
+    ? "manager"
+    : access.levels.get(selected.id) ?? "viewer";
+  return { warehouses: result.results, selected, selectedAccessLevel };
 }

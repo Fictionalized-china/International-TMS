@@ -21,6 +21,7 @@ from tms_ui_harness import (
     RoleBrowserSession,
     RunJournal,
     TmsUIHarness,
+    require_certified_summary,
     redact_evidence_text,
 )
 from ui_only_guard import scan_source
@@ -110,6 +111,27 @@ class _LocatorStub:
 
     def is_visible(self) -> bool:
         return False
+
+
+class _InteractiveLocatorStub:
+    first: "_InteractiveLocatorStub"
+
+    def __init__(self) -> None:
+        self.first = self
+        self.clicked = 0
+        self.waits: list[tuple[str, int]] = []
+
+    def count(self) -> int:
+        return 1
+
+    def is_visible(self) -> bool:
+        return True
+
+    def click(self, **_options: object) -> None:
+        self.clicked += 1
+
+    def wait_for(self, *, state: str, timeout: int) -> None:
+        self.waits.append((state, timeout))
 
 
 class _SegmentedInputStub:
@@ -215,6 +237,28 @@ class _PageStub:
     def screenshot(self, *, path: str, **_options: object) -> None:
         Path(path).write_bytes(b"png")
 
+    def wait_for_timeout(self, _milliseconds: int) -> None:
+        pass
+
+
+class _ResponseStub:
+    def __init__(self, status: int) -> None:
+        self.status = status
+
+
+class _NegativeGatePageStub(_PageStub):
+    def __init__(self, response: _ResponseStub | None) -> None:
+        self.response = response
+
+    def goto(self, url: str, **_options: object) -> _ResponseStub | None:
+        self.url = url
+        return self.response
+
+
+class _ScreenshotFailurePageStub(_PageStub):
+    def screenshot(self, *, path: str, **_options: object) -> None:
+        raise OSError("evidence disk unavailable")
+
 
 class _TracingStub:
     def start(self, **_options: object) -> None:
@@ -244,8 +288,9 @@ class _ContextStub:
 
 
 class _BrowserStub:
-    def __init__(self) -> None:
+    def __init__(self, *, fail_close: bool = False) -> None:
         self.contexts: list[_ContextStub] = []
+        self.fail_close = fail_close
 
     def new_context(self, **_options: object) -> _ContextStub:
         context = _ContextStub()
@@ -253,7 +298,8 @@ class _BrowserStub:
         return context
 
     def close(self) -> None:
-        pass
+        if self.fail_close:
+            raise OSError("browser close failed")
 
 
 class _ChromiumStub:
@@ -424,6 +470,141 @@ class HarnessEvidenceTests(unittest.TestCase):
         self.assertIsNot(sales.context, finance.context)
         self.assertEqual(len(browser.contexts), 2)
         self.assertTrue(all(context.closed for context in browser.contexts))
+
+    def test_negative_gate_requires_response_and_captures_immediate_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            journal = RunJournal("negative-gate", directory)
+            missing_response = RoleBrowserSession(
+                role="operation",
+                email="operation@example.test",
+                site="admin",
+                base_url="http://127.0.0.1:5189",
+                context=_ContextStub(),
+                page=_NegativeGatePageStub(None),
+                journal=journal,
+            )
+            with self.assertRaisesRegex(AssertionError, "HTTP 响应"):
+                missing_response.goto_for_negative_gate(
+                    "/admin/loading/forbidden",
+                    reason="验证旧负责人无法通过配载单深链越权访问",
+                    expected_status=(403, 404),
+                )
+
+            denied = RoleBrowserSession(
+                role="document",
+                email="document@example.test",
+                site="admin",
+                base_url="http://127.0.0.1:5189",
+                context=_ContextStub(),
+                page=_NegativeGatePageStub(_ResponseStub(403)),
+                journal=journal,
+            )
+            denied.goto_for_negative_gate(
+                "/admin/loading/forbidden",
+                reason="验证旧单证负责人无法通过配载单深链越权访问",
+                expected_status=(403, 404),
+            )
+            evidence = denied.capture_gate_evidence("old-document-denied")
+
+        self.assertTrue(evidence.name.endswith("gate-old-document-denied.png"))
+        self.assertEqual(journal.evidence[-1]["label"], "gate-old-document-denied")
+
+    def test_negative_gate_recovery_clicks_visible_return_and_asserts_navigation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            page = _PageStub()
+            session = RoleBrowserSession(
+                role="operation",
+                email="operation@example.test",
+                site="admin",
+                base_url="http://127.0.0.1:5189",
+                context=_ContextStub(),
+                page=page,
+                journal=RunJournal("negative-recovery", directory),
+            )
+            return_control = _InteractiveLocatorStub()
+            restored = _InteractiveLocatorStub()
+            session.recover_from_negative_gate(
+                return_control=return_control,
+                restored_locator=restored,
+                target="旧负责人 PZ 越权",
+            )
+
+        self.assertEqual(return_control.clicked, 1)
+        self.assertEqual(restored.waits, [("visible", 15_000)])
+
+    def test_step_evidence_failure_marks_step_and_gate_failed_and_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            journal = RunJournal("evidence-failure", directory)
+            session = RoleBrowserSession(
+                role="finance",
+                email="finance@example.test",
+                site="admin",
+                base_url="http://127.0.0.1:5189",
+                context=_ContextStub(),
+                page=_ScreenshotFailurePageStub(),
+                journal=journal,
+            )
+            gate = GateExpectation(
+                "证据门禁",
+                "system_integrity_invariant",
+                "required",
+                "allow",
+                "成功态必须留图",
+                "证据失败不得签发通过",
+            )
+            with self.assertRaisesRegex(RuntimeError, "证据截图失败"):
+                with session.step(
+                    "截图必须成功",
+                    expected_result="步骤和门禁均有可核验证据",
+                    gate=gate,
+                ) as observation:
+                    observation.observe("业务断言通过", gate_passed=True)
+
+        self.assertEqual(journal.steps[-1]["status"], "failed")
+        self.assertFalse(journal.gates[-1]["passed"])
+
+    def test_close_downgrades_nominal_pass_and_flushes_before_browser_close_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            browser = _BrowserStub(fail_close=True)
+            harness = TmsUIHarness(
+                _PlaywrightStub(browser),
+                run_id="close-failure",
+                output_dir=directory,
+                headless=True,
+            )
+            harness.journal.record_gate(
+                role="finance",
+                name="失败门禁",
+                expected="应通过",
+                passed=False,
+                actual="未通过",
+            )
+            summary = harness.close(status="passed")
+            payload = json.loads(summary.read_text(encoding="utf-8-sig"))
+
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["metrics"]["gates_failed"], 1)
+        self.assertEqual(harness.last_status, "failed")
+        self.assertIn("browser", harness.finalization_error)
+
+    def test_certified_summary_rejects_failed_metrics_and_requires_fresh_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "summary.json"
+            payload = {
+                "status": "passed",
+                "run_id": "phase1-a001",
+                "metrics": {"steps_failed": 0, "steps_blocked": 0, "gates_failed": 1},
+            }
+            with self.assertRaisesRegex(ValueError, "gates_failed=1"):
+                require_certified_summary(payload, source=source, label="Phase 1")
+            payload["metrics"]["gates_failed"] = 0
+            with self.assertRaisesRegex(ValueError, "fresh attempt"):
+                require_certified_summary(
+                    payload,
+                    source=source,
+                    label="Phase 1",
+                    require_fresh_attempt=True,
+                )
 
 
 class BlueprintTests(unittest.TestCase):

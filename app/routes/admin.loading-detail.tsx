@@ -17,7 +17,8 @@ import { allocationMethodLabel, type AllocationMethod } from "../lib/cost-alloca
 import { confirmCostAllocation, createCostAllocation, loadCostAllocations, updateCostAllocation } from "../lib/cost-allocation.server";
 import { canManageOrderModule } from "../lib/position-portal";
 import { maxInlineOrderDocumentBytes, orderDocumentTypeCodes, orderDocumentTypeLabel } from "../lib/order-documents";
-import { batchVisibilitySql, canAccessBatchWorkspace } from "../lib/order-access.server";
+import { loadOrderDocumentWorkflowMutationAccess } from "../lib/order-document-access.server";
+import { batchCostsManageScopeSql, batchVisibilitySql, canAccessBatchWorkspace } from "../lib/order-access.server";
 import {
   loadingOrderDocumentDefinitions,
   summarizeLoadingDocumentRequirements,
@@ -25,6 +26,8 @@ import {
   type OrderLoadingDocumentRequirements,
 } from "../lib/loading-document-requirements";
 import { loadOrderLoadingDocumentRequirements } from "../lib/loading-document-requirements.server";
+import type { BatchOrderCustomsAccess } from "../lib/loading-batch-customs-access";
+import { loadBatchCustomsAccess } from "../lib/loading-batch-customs-access.server";
 import { syncCustomsModuleFromRecords } from "../lib/customs-status.server";
 import {
   BATCH_TRACKING_MILESTONES,
@@ -59,8 +62,10 @@ import {
 import { isActiveExceptionStatus } from "../lib/batch-exception-policy";
 import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 import {
+  BATCH_RESPONSIBILITY_PERMISSION_REQUIREMENTS,
   BATCH_RESPONSIBILITY_POSITION_CODES,
   batchInitialResponsibilityDisabledReasons,
+  batchResponsibilityPermissionDisabledReasons,
   batchRequiresSupervisorApproval,
   batchSharedResponsibilityIsActive,
   buildConfiguredBatchResponsibilityTargets,
@@ -296,6 +301,8 @@ type Batch={id:string;batch_number:string;batch_name:string;origin_location:stri
 type BatchWorkflowPolicyRow={
   order_id:string;
   business_type:string;
+  bound_workflow_instance_id:string|null;
+  matched_workflow_instance_id:string|null;
   module_code:BatchWorkflowModuleCode;
   enabled:number;
   module_required:number;
@@ -315,34 +322,41 @@ async function loadBatchOrderWorkflowPolicies(
   batchId:string,
 ):Promise<BatchOrderWorkflowPolicy[]> {
   const rows=await env.DB.prepare(`WITH batch_orders AS (
-      SELECT bo.order_id,o.business_type,o.workflow_instance_id,wi.workflow_id
+      SELECT bo.order_id,o.business_type,
+        o.workflow_instance_id bound_workflow_instance_id,
+        wi.id matched_workflow_instance_id,wi.workflow_id
       FROM transport_batch_orders bo
       JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
-      LEFT JOIN workflow_instances wi ON wi.id=o.workflow_instance_id AND wi.organization_id=o.organization_id
+      LEFT JOIN workflow_instances wi ON wi.id=o.workflow_instance_id
+        AND wi.organization_id=o.organization_id AND wi.order_id=o.id
       WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
     ), module_codes(module_code) AS (
       VALUES ('loading'),('tracking'),('customs')
     ), modules AS (
-      SELECT bo.order_id,bo.business_type,bo.workflow_instance_id,bo.workflow_id,c.module_code,
+      SELECT bo.order_id,bo.business_type,bo.bound_workflow_instance_id,
+        bo.matched_workflow_instance_id,bo.workflow_id,c.module_code,
         COALESCE(mi.enabled,0) enabled,COALESCE(mi.is_required,0) module_required
       FROM batch_orders bo CROSS JOIN module_codes c
       LEFT JOIN order_module_instances mi
         ON mi.organization_id=? AND mi.order_id=bo.order_id AND mi.module_code=c.module_code
     ), snapshot_fields AS (
-      SELECT m.order_id,m.business_type,m.module_code,m.enabled,m.module_required,
+      SELECT m.order_id,m.business_type,m.bound_workflow_instance_id,
+        m.matched_workflow_instance_id,m.module_code,m.enabled,m.module_required,
         f.field_key,f.label,f.is_active,f.is_required field_required
       FROM modules m
       LEFT JOIN workflow_instance_fields f
-        ON f.instance_id=m.workflow_instance_id AND f.module_code=m.module_code
+        ON f.instance_id=m.matched_workflow_instance_id AND f.module_code=m.module_code
     ), live_fields AS (
-      SELECT m.order_id,m.business_type,m.module_code,m.enabled,m.module_required,
+      SELECT m.order_id,m.business_type,m.bound_workflow_instance_id,
+        m.matched_workflow_instance_id,m.module_code,m.enabled,m.module_required,
         f.field_key,f.label,f.is_active,f.is_required field_required
       FROM modules m
       JOIN workflow_step_fields f
         ON f.workflow_id=m.workflow_id AND COALESCE(f.module_code,'consignment')=m.module_code
-      WHERE NOT EXISTS(
+      WHERE m.bound_workflow_instance_id IS NULL
+        AND NOT EXISTS(
         SELECT 1 FROM workflow_instance_fields snapshot
-        WHERE snapshot.instance_id=m.workflow_instance_id AND snapshot.module_code=m.module_code
+        WHERE snapshot.instance_id=m.matched_workflow_instance_id AND snapshot.module_code=m.module_code
       )
     )
     SELECT * FROM snapshot_fields
@@ -351,6 +365,11 @@ async function loadBatchOrderWorkflowPolicies(
     ORDER BY order_id,module_code,field_key`).bind(
       organizationId,batchId,organizationId,
     ).all<BatchWorkflowPolicyRow>();
+  const invalidBinding=rows.results.find(row=>
+    row.bound_workflow_instance_id!==null&&row.matched_workflow_instance_id===null);
+  if(invalidBinding){
+    throw new Error(`订单 ${invalidBinding.order_id} 的工作流实例绑定异常，不能办理配载单`);
+  }
   const policies=new Map<string,BatchOrderWorkflowPolicy>();
   const configuredPolicies=new Set<string>();
   for(const row of rows.results){
@@ -359,7 +378,9 @@ async function loadBatchOrderWorkflowPolicies(
       orderId:row.order_id,businessType:row.business_type,moduleCode:row.module_code,
       enabled:row.enabled===1,required:row.enabled===1&&row.module_required===1,fields:[],
     };
-    if(row.field_key)configuredPolicies.add(identity);
+    if(row.bound_workflow_instance_id!==null||row.field_key){
+      configuredPolicies.add(identity);
+    }
     if(row.field_key&&!(row.business_type==="ftl"&&row.module_code==="loading"&&ftlBatchHiddenLoadingFields.has(row.field_key))){
       current.fields.push({
         fieldKey:row.field_key,label:row.label??undefined,
@@ -490,6 +511,18 @@ const VEHICLE_TYPE_OPTIONS=[
   "冷藏车",
 ];
 
+async function hasFrozenBatchCostsManageScope(
+  current: Parameters<typeof batchCostsManageScopeSql>[0],
+  batchId: string,
+) {
+  const scope = batchCostsManageScopeSql(current, "cost_scope_batch");
+  if(scope.sql==="0=1")return false;
+  return Boolean(await env.DB.prepare(`SELECT 1 allowed
+    FROM transport_batches cost_scope_batch
+    WHERE cost_scope_batch.id=? AND cost_scope_batch.organization_id=?
+      AND ${scope.sql}`).bind(batchId,current.organizationId,...scope.values).first<{allowed:number}>());
+}
+
 export async function loader({request,params}:Route.LoaderArgs){
   const current=await requireSessionUser(request,"order.view"),batchId=params.batchId;
   if(!canAccessBatchWorkspace(current))throw new Response("当前岗位没有配载单工作台访问权限",{status:403});
@@ -497,6 +530,7 @@ export async function loader({request,params}:Route.LoaderArgs){
   const fromOrderId = new URL(request.url).searchParams.get("fromOrderId");
   const batch=await env.DB.prepare(`SELECT b.id,b.batch_number,b.batch_name,b.origin_location,b.destination_location,b.planned_departure_at,b.planned_arrival_at,b.actual_departure_at,b.status,b.road_status,b.carrier_id,b.warehouse_id,b.border_port,b.customs_location,b.transit_location,b.route_notes,b.notes,b.overseas_carrier_name,b.overseas_vehicle_type,b.overseas_vehicle_count,b.overseas_vehicle_plate,b.overseas_driver_name,b.overseas_driver_phone,b.approval_status,b.operation_supervisor_user_id,b.operation_assignee_user_id,b.document_assignee_user_id,b.responsibility_revision,b.submitted_at,b.approved_at,c.name carrier_name,w.name warehouse_name,supervisor.display_name operation_supervisor_name,operator.display_name operation_assignee_name,document_owner.display_name document_assignee_name FROM transport_batches b LEFT JOIN carriers c ON c.id=b.carrier_id LEFT JOIN warehouses w ON w.id=b.warehouse_id LEFT JOIN users supervisor ON supervisor.id=b.operation_supervisor_user_id LEFT JOIN users operator ON operator.id=b.operation_assignee_user_id LEFT JOIN users document_owner ON document_owner.id=b.document_assignee_user_id WHERE b.id=? AND b.organization_id=? AND ${batchVisibility.sql}`).bind(batchId,current.organizationId,...batchVisibility.values).first<Batch>();
   if(!batch)throw new Response("配载批次不存在",{status:404});
+  const canManageBatchCosts=await hasFrozenBatchCostsManageScope(current,batchId);
   // D1 allows only a small number of simultaneous connections per Worker
   // invocation. Load the workspace in groups of four instead of opening every
   // independent query at once.
@@ -576,17 +610,11 @@ export async function loader({request,params}:Route.LoaderArgs){
     fromOrderId && orders.results.some((item) => item.order_id === fromOrderId)
       ? fromOrderId
       : (orders.results[0]?.order_id ?? null);
-  const outboundStatuses=await env.DB.prepare(`SELECT bo.order_id,
-      CASE WHEN EXISTS(
-        SELECT 1 FROM warehouse_dispatches d
-        JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id
-        JOIN warehouse_packages p ON p.id=di.package_id
-        JOIN shipments s ON s.id=p.shipment_id
-        WHERE d.organization_id=bo.organization_id AND d.transport_batch_id=bo.batch_id AND s.order_id=bo.order_id AND d.status='dispatched'
-      ) THEN 1 ELSE 0 END dispatched
-    FROM transport_batch_orders bo
-    WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed'
-    ORDER BY bo.sequence_no`).bind(batchId,current.organizationId).all<BatchOutboundStatus>();
+  const batchCustomsAccess=await loadBatchCustomsAccess(env.DB,current.organizationId,batchId);
+  const outboundStatuses={results:batchCustomsAccess.orders.map((order):BatchOutboundStatus=>({
+    order_id:order.orderId,
+    dispatched:order.dispatched?1:0,
+  }))};
   const departureGateStatuses:DepartureGateStatus[]=[];
   for(const item of orders.results){
     departureGateStatuses.push({
@@ -631,7 +659,33 @@ export async function loader({request,params}:Route.LoaderArgs){
       ORDER BY c.name,d.name`).bind(current.organizationId).all<CarrierDriverOption>(),
     env.DB.prepare(`SELECT u.id,u.display_name,
         d.id department_id,d.code department_code,d.name department_name,
-        p.id position_id,p.code position_code,p.name position_name
+        p.id position_id,p.code position_code,p.name position_name,
+        (SELECT GROUP_CONCAT(DISTINCT effective_permission.code)
+           FROM (
+             SELECT rp.permission_code code
+               FROM membership_roles effective_mr
+               JOIN roles effective_role
+                 ON effective_role.id=effective_mr.role_id AND effective_role.status='active'
+               JOIN role_permissions rp ON rp.role_id=effective_role.id
+              WHERE effective_mr.membership_id=m.id
+                AND NOT EXISTS (
+                  SELECT 1 FROM membership_permission_overrides denied
+                   WHERE denied.membership_id=m.id
+                     AND denied.permission_code=rp.permission_code
+                     AND denied.effect='deny'
+                )
+             UNION
+             SELECT allowed.permission_code
+               FROM membership_permission_overrides allowed
+              WHERE allowed.membership_id=m.id AND allowed.effect='allow'
+             UNION
+             SELECT '*'
+               FROM membership_roles protected_mr
+               JOIN roles protected_role
+                 ON protected_role.id=protected_mr.role_id AND protected_role.status='active'
+              WHERE protected_mr.membership_id=m.id
+                AND protected_role.code IN ('owner','boss')
+           ) effective_permission) permission_codes
       FROM memberships m
       JOIN users u ON u.id=m.user_id AND u.status='active'
       JOIN departments d ON d.id=m.department_id AND d.organization_id=m.organization_id AND d.status='active'
@@ -640,10 +694,18 @@ export async function loader({request,params}:Route.LoaderArgs){
       WHERE m.organization_id=? AND m.status='active' AND p.code IN ('OPERATION','DOC')
       ORDER BY d.sort_order,p.sort_order,u.display_name`).bind(current.organizationId).all<OrganizationAssigneeMember>(),
   ]);
+  responsibilityMembers.results=responsibilityMembers.results.filter((member)=>{
+    const kind=member.position_code==="OPERATION"
+      ? "operation"
+      : member.position_code==="DOC"
+        ? "document"
+        : null;
+    return kind!==null&&!batchResponsibilityPermissionDisabledReasons([member],kind)[member.id];
+  });
   const initialResponsibilityRestrictions=batch.approval_status==="submitted"
     ? await loadBatchInitialResponsibilityRestrictions(env.DB,current.organizationId,batchId)
     : buildBatchInitialResponsibilityRestrictions([]);
-  return{current,batch,orders:orders.results,batchWorkflowPolicies,batchCargoItems,vehicles:vehicles.results,carriers:carriers.results,warehouses:warehouses.results,borderPorts:borderPorts.results,costAllocations,batchDocuments:batchDocuments.results,orderDocuments:orderDocuments.results,orderDocumentRequirements,customsSummaries:customsSummaries.results,customsDeclarations:customsDeclarations.results,batchExceptions,exceptionPackages,outboundStatuses:outboundStatuses.results,departureGateStatuses,returnOrderId,trackingMilestones,trackingFlags:trackingFlags.results,batchVehiclePlate,carrierVehicles:carrierVehicles.results,carrierDrivers:carrierDrivers.results,operationMembers:responsibilityMembers.results.filter(member=>member.position_code==="OPERATION"),documentMembers:responsibilityMembers.results.filter(member=>member.position_code==="DOC"),initialResponsibilityRestrictions};
+  return{current,batch,canManageBatchCosts,orders:orders.results,batchWorkflowPolicies,batchCargoItems,vehicles:vehicles.results,carriers:carriers.results,warehouses:warehouses.results,borderPorts:borderPorts.results,costAllocations,batchDocuments:batchDocuments.results,orderDocuments:orderDocuments.results,orderDocumentRequirements,customsSummaries:customsSummaries.results,customsDeclarations:customsDeclarations.results,batchExceptions,exceptionPackages,outboundStatuses:outboundStatuses.results,batchCustomsAccess,departureGateStatuses,returnOrderId,trackingMilestones,trackingFlags:trackingFlags.results,batchVehiclePlate,carrierVehicles:carrierVehicles.results,carrierDrivers:carrierDrivers.results,operationMembers:responsibilityMembers.results.filter(member=>member.position_code==="OPERATION"),documentMembers:responsibilityMembers.results.filter(member=>member.position_code==="DOC"),initialResponsibilityRestrictions};
 }
 
 export async function action({request,params}:Route.ActionArgs){
@@ -696,6 +758,18 @@ export async function action({request,params}:Route.ActionArgs){
     if(reassigning&&batchApproval.approval_status!=="approved")return{formError:"仅已审核配载单可以变更负责人"};
     const operationAssigneeUserId=valueOf(form,"operationAssigneeUserId");
     const documentAssigneeUserId=valueOf(form,"documentAssigneeUserId");
+    if(!(await isActiveOrganizationAssigneeForPositions(
+      current.organizationId,
+      operationAssigneeUserId,
+      ["OPERATION"],
+      BATCH_RESPONSIBILITY_PERMISSION_REQUIREMENTS.operation,
+    )))return{formError:"\u8bf7\u9009\u62e9\u540c\u65f6\u5177\u5907\u914d\u8f7d\u67e5\u770b\u3001\u8fd0\u8e2a\u548c\u5f02\u5e38\u5904\u7406\u6743\u9650\u7684\u6709\u6548\u64cd\u4f5c\u5c97\u4e2a\u4eba\u8d26\u6237"};
+    if(!(await isActiveOrganizationAssigneeForPositions(
+      current.organizationId,
+      documentAssigneeUserId,
+      ["DOC"],
+      BATCH_RESPONSIBILITY_PERMISSION_REQUIREMENTS.document,
+    )))return{formError:"\u8bf7\u9009\u62e9\u540c\u65f6\u5177\u5907\u914d\u8f7d\u67e5\u770b\u3001\u6587\u4ef6\u548c\u62a5\u5173\u6743\u9650\u7684\u6709\u6548\u5355\u8bc1\u5c97\u4e2a\u4eba\u8d26\u6237"};
     if(!(await isActiveOrganizationAssigneeForPositions(current.organizationId,operationAssigneeUserId,["OPERATION"])))return{formError:"请选择操作岗下的有效个人账户"};
     if(!(await isActiveOrganizationAssigneeForPositions(current.organizationId,documentAssigneeUserId,["DOC"])))return{formError:"请选择单证岗下的有效个人账户"};
     const ordinaryReassignmentAllowed=canOrdinaryReassignBatchResponsibility({
@@ -750,6 +824,36 @@ export async function action({request,params}:Route.ActionArgs){
       await writeAudit({request,action:reassigning?"transport.batch.reassign":"transport.batch.approve",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{batchNumber:batch.batch_number,operationAssigneeUserId,documentAssigneeUserId,previousOperationAssigneeUserId:batchApproval.operation_assignee_user_id,previousDocumentAssigneeUserId:batchApproval.document_assignee_user_id,orderCount:orderIds.length,reassignReason:reassignReason||null,exceptionReassignment:reassigning&&!ordinaryReassignmentAllowed}});
       return{success:reassigning?`${batch.batch_number} 已完成整批改派，旧负责人保留历史只读记录`:`${batch.batch_number} 已审核通过，${orderIds.length} 票订单的操作与单证职责已统一交接`};
     }catch(error){return{formError:errorMessage(error)}}
+  }
+  if(costIntent){
+    if(batchRequiresSupervisorApproval(batchApproval.batch_number)&&batchApproval.approval_status!=="approved"){
+      return{formError:"配载单尚未审核通过，费用分摊暂不可办理"};
+    }
+    if(!(await hasFrozenBatchCostsManageScope(current,batchId))){
+      return{formError:"整批费用分摊仅允许由全部挂载订单共同的冻结费用负责人办理；当前账号的负责范围不完整"};
+    }
+    const dispatchGate=await env.DB.prepare(`SELECT COUNT(*) total,COALESCE(SUM(CASE WHEN EXISTS(
+        SELECT 1 FROM warehouse_dispatches d
+        JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id
+        JOIN warehouse_packages p ON p.id=di.package_id
+        JOIN shipments s ON s.id=p.shipment_id
+        WHERE d.organization_id=bo.organization_id AND d.transport_batch_id=bo.batch_id
+          AND s.order_id=bo.order_id AND d.status='dispatched'
+      ) THEN 1 ELSE 0 END),0) dispatched
+      FROM transport_batch_orders bo
+      WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed'`)
+      .bind(batchId,current.organizationId).first<{total:number;dispatched:number}>();
+    const total=Number(dispatchGate?.total||0),dispatched=Number(dispatchGate?.dispatched||0);
+    if(!total||dispatched!==total){
+      return{formError:`全部挂载订单完成装车出库后，才能办理整批费用分摊（当前 ${dispatched}/${total} 票）`};
+    }
+    if(intent!=="create_cost_allocation"){
+      const allocationId=valueOf(form,"allocationId");
+      const allocation=allocationId?await env.DB.prepare(`SELECT id FROM transport_cost_allocations
+        WHERE id=? AND organization_id=? AND batch_id=? AND status!='cancelled'`)
+        .bind(allocationId,current.organizationId,batchId).first<{id:string}>():null;
+      if(!allocation)return{formError:"费用分摊记录不存在或不属于当前配载单"};
+    }
   }
   if(batchRequiresSupervisorApproval(batchApproval.batch_number)&&batchApproval.approval_status!=="approved"&&!costIntent)return{formError:"配载单须由操作主管审核并同时指定整单操作与单证负责人后才能继续办理"};
   if(batchRequiresSupervisorApproval(batchApproval.batch_number)&&!batchSharedResponsibilityIsActive(batchApproval.road_status)&&!privileged&&(trackingIntent||exceptionIntent||customsIntent||documentIntent))return{formError:"配载单已到达境外仓，整批操作与单证负责人现为只读；后续由各订单客服和财务继续办理"};
@@ -850,6 +954,14 @@ export async function action({request,params}:Route.ActionArgs){
     const fileError=validateDocumentFile(file);if(fileError)return{formError:fileError};
     const order=await env.DB.prepare(`SELECT o.customer_id FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id WHERE bo.batch_id=? AND bo.order_id=? AND bo.organization_id=? AND bo.status!='removed'`).bind(batchId,orderId,current.organizationId).first<{customer_id:string}>();
     if(!order)return{formError:"该订单不属于当前配载单"};
+    const workflowAccess=await loadOrderDocumentWorkflowMutationAccess(
+      env.DB,current.organizationId,orderId,documentCategory,
+    );
+    if(!workflowAccess.allowed){
+      return{
+        formError:workflowAccess.reason||"当前订单冻结工作流不允许上传该文件",
+      };
+    }
     const attachmentId=crypto.randomUUID();
     await env.DB.batch([
       env.DB.prepare("INSERT INTO order_attachments(id,organization_id,order_id,customer_id,file_name,content_type,size_bytes,data_url,uploaded_by_user_id,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,'admin',?)").bind(attachmentId,current.organizationId,orderId,order.customer_id,file.name,file.type,file.size,await toDataUrl(file),current.userId,now),
@@ -887,6 +999,18 @@ export async function action({request,params}:Route.ActionArgs){
   if(intent==="batch_order_document_review"){
     const orderId=valueOf(form,"orderId"),attachmentId=valueOf(form,"attachmentId"),reviewStatus=valueOf(form,"reviewStatus");
     if(!["approved","rejected"].includes(reviewStatus))return{formError:"请选择有效的审核结果"};
+    const target=await env.DB.prepare(`SELECT m.document_category
+      FROM order_document_metadata m
+      WHERE m.attachment_id=? AND m.order_id=? AND m.organization_id=?
+        AND EXISTS(SELECT 1 FROM transport_batch_orders bo WHERE bo.batch_id=? AND bo.order_id=m.order_id AND bo.organization_id=m.organization_id AND bo.status!='removed')`)
+      .bind(attachmentId,orderId,current.organizationId,batchId).first<{document_category:string}>();
+    if(!target)return{formError:"订单文件不存在或不属于当前配载单"};
+    const workflowAccess=await loadOrderDocumentWorkflowMutationAccess(
+      env.DB,current.organizationId,orderId,target.document_category,
+    );
+    if(!workflowAccess.allowed){
+      return{formError:workflowAccess.reason||"当前订单冻结工作流不允许审核该文件"};
+    }
     const result=await env.DB.prepare(`UPDATE order_document_metadata SET review_status=?,reviewed_by_user_id=?,reviewed_at=?,updated_at=? WHERE attachment_id=? AND order_id=? AND organization_id=? AND EXISTS(SELECT 1 FROM transport_batch_orders bo WHERE bo.batch_id=? AND bo.order_id=? AND bo.organization_id=? AND bo.status!='removed')`).bind(reviewStatus,current.userId,now,now,attachmentId,orderId,current.organizationId,batchId,orderId,current.organizationId).run();
     if(!result.meta.changes)return{formError:"订单文件不存在或不属于当前配载单"};
     await synchronizeOrderDocumentsModuleStatus({organizationId:current.organizationId,orderId,actorUserId:current.userId,now,source:"admin_review"});
@@ -895,8 +1019,17 @@ export async function action({request,params}:Route.ActionArgs){
   }
   if(intent==="batch_order_customs_declaration_save"){
     const orderId=valueOf(form,"orderId"),declarationId=valueOf(form,"declarationId")||null;
-    const batchOrder=await env.DB.prepare("SELECT 1 FROM transport_batch_orders WHERE batch_id=? AND order_id=? AND organization_id=? AND status!='removed'").bind(batchId,orderId,current.organizationId).first();
-    if(!batchOrder)return{formError:"该订单不属于当前配载单"};
+    const releaseRequested=valueOf(form,"releaseDeclaration")==="1";
+    const customsAccess=await loadBatchCustomsAccess(env.DB,current.organizationId,batchId);
+    const orderCustomsAccess=customsAccess.orders.find(item=>item.orderId===orderId);
+    if(!orderCustomsAccess)return{formError:"该订单不属于当前配载单"};
+    if(releaseRequested&&!declarationId){
+      return{formError:"确认放行必须选择当前订单已有的有效报关单"};
+    }
+    if(releaseRequested?!orderCustomsAccess.canRelease:!orderCustomsAccess.canManageDeclarations){
+      const access=releaseRequested?orderCustomsAccess.releaseAccess:orderCustomsAccess.declarationAccess;
+      return{formError:access.reason||`当前冻结工作流节点不允许${releaseRequested?"确认海关放行":"办理报关申报"}`};
+    }
     const workflowPolicies=await loadBatchOrderWorkflowPolicies(current.organizationId,batchId);
     const customsPolicy=orderBatchWorkflowPolicy(workflowPolicies,orderId,"customs");
     if(!customsPolicy.enabled)return{formError:"当前订单工作流未启用报关模块"};
@@ -907,6 +1040,9 @@ export async function action({request,params}:Route.ActionArgs){
         declarationId,current.organizationId,orderId,
       ).first<ExistingCustomsDeclarationInput&{customs_record_id:string}>():null;
     if(declarationId&&!existingDeclaration)return{formError:"要更新的申报单不存在"};
+    if(releaseRequested&&(existingDeclaration?.is_deleted===1||existingDeclaration?.status==="cancelled")){
+      return{formError:"已删单或已取消的报关记录不能确认放行，请先新增有效报关单"};
+    }
     const resolved=resolveCustomsDeclarationWorkflowInput({
       form,fields:customsPolicy.fields,existing:existingDeclaration,now,
       autoDeclarationNumber:`AUTO-CUS-${orderId.slice(0,8)}-${Date.now().toString(36).toUpperCase()}`,
@@ -915,6 +1051,9 @@ export async function action({request,params}:Route.ActionArgs){
     const {clearanceStage,declarationNumber,declarationType,declarationTitle,declaringCompany,
       declaredAt,currency,declaredAmount,grossWeightKg,isDeleted,changeReason,declarationStatus,
       releasedAt,isRedeclared,isAmended,isInspected}=resolved.value;
+    if(declarationStatus==="released"&&!orderCustomsAccess.canRelease){
+      return{formError:orderCustomsAccess.releaseAccess.reason||"当前冻结工作流节点不允许确认海关放行"};
+    }
     if(declarationStatus==="released"){
       const documentGate=await checkOrderPreDepartureDocuments(current.organizationId,orderId);
       if(!documentGate.ready)return{formError:`确认放行前请先处理文件：${documentGate.reasons.join("；")}`};
@@ -1243,10 +1382,14 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   const currentIsBatchDocumentOwner=privileged||loaderData.batch.document_assignee_user_id===loaderData.current.userId;
   const canManageBatchResponsibility=requiresSupervisorApproval&&(privileged||(loaderData.current.permissions.includes("transport.batch.approve")&&loaderData.batch.operation_supervisor_user_id===loaderData.current.userId));
   const canReviewBatch=loaderData.batch.approval_status==="submitted"&&canManageBatchResponsibility;
-  const initialOperationDisabledReasons=batchInitialResponsibilityDisabledReasons(loaderData.initialResponsibilityRestrictions,"operation");
-  const initialDocumentDisabledReasons=batchInitialResponsibilityDisabledReasons(loaderData.initialResponsibilityRestrictions,"document");
+  const operationPermissionDisabledReasons=batchResponsibilityPermissionDisabledReasons(loaderData.operationMembers,"operation");
+  const documentPermissionDisabledReasons=batchResponsibilityPermissionDisabledReasons(loaderData.documentMembers,"document");
+  const initialOperationDisabledReasons={...operationPermissionDisabledReasons,...batchInitialResponsibilityDisabledReasons(loaderData.initialResponsibilityRestrictions,"operation")};
+  const initialDocumentDisabledReasons={...documentPermissionDisabledReasons,...batchInitialResponsibilityDisabledReasons(loaderData.initialResponsibilityRestrictions,"document")};
   const hasFreshOperationCandidate=loaderData.operationMembers.some(member=>!initialOperationDisabledReasons[member.id]);
   const hasFreshDocumentCandidate=loaderData.documentMembers.some(member=>!initialDocumentDisabledReasons[member.id]);
+  const hasQualifiedOperationCandidate=loaderData.operationMembers.some(member=>!operationPermissionDisabledReasons[member.id]);
+  const hasQualifiedDocumentCandidate=loaderData.documentMembers.some(member=>!documentPermissionDisabledReasons[member.id]);
   const initialResponsibilityConfigurationReady=loaderData.initialResponsibilityRestrictions.configurationErrors.length===0;
   const freshInitialAssigneesAvailable=hasFreshOperationCandidate&&hasFreshDocumentCandidate&&initialResponsibilityConfigurationReady;
   const ordinaryReassignmentAllowed=canOrdinaryReassignBatchResponsibility({batchNumber:loaderData.batch.batch_number,approvalStatus:loaderData.batch.approval_status,roadStatus:loaderData.batch.road_status,actualDepartureAt:loaderData.batch.actual_departure_at});
@@ -1255,7 +1398,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   const manageTracking=batchApproved&&(sharedResponsibilityActive||privileged)&&currentIsBatchOperator&&canManageOrderModule(loaderData.current,"tracking");
   const manageCustoms=batchApproved&&(sharedResponsibilityActive||privileged)&&currentIsBatchDocumentOwner&&canManageOrderModule(loaderData.current,"customs");
   const manageExceptions=batchApproved&&(sharedResponsibilityActive||privileged)&&currentIsBatchOperator&&canManageOrderModule(loaderData.current,"exceptions");
-  const manageCosts=canManageOrderModule(loaderData.current,"costs");
+  const manageCosts=batchApproved&&loaderData.canManageBatchCosts;
   const totals=summarizeBatch(loaderData.orders,loaderData.vehicles);
   const orderPagination=paginateList(loaderData.orders,readListPage(searchParams,"orderPage"));
   const visibleOrders=orderPagination.items;
@@ -1264,8 +1407,8 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   const loadPlanReady=planReady&&loaderData.vehicles.length>0;
   const flagsByOrder=new Map(loaderData.trackingFlags.map(item=>[item.order_id,item]));
   const requiresTransloading=loaderData.orders.some(o=>flagsByOrder.get(o.order_id)?.requires_transloading===1);
-  const dispatchedCount=loaderData.outboundStatuses.filter(item=>item.dispatched===1).length;
-  const allDispatched=loaderData.orders.length>0&&dispatchedCount===loaderData.orders.length;
+  const dispatchedCount=loaderData.batchCustomsAccess.dispatched;
+  const allDispatched=loaderData.batchCustomsAccess.allDispatched;
   const pendingDispatchOrders=loaderData.orders.filter(order=>!loaderData.outboundStatuses.find(item=>item.order_id===order.order_id)?.dispatched);
   const customsPolicyFor=(orderId:string)=>orderBatchWorkflowPolicy(loaderData.batchWorkflowPolicies,orderId,"customs");
   // Only a required customs module may block batch progress. Visible optional
@@ -1337,7 +1480,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
     <BatchWorkspaceTabs status={loaderData.batch.road_status} documentGateReady={allDocumentGateReady} loadPlanReady={loadPlanReady} warehouseReady={allDispatched} borderArrivalReady={borderArrivalReady} exceptionCount={activeExceptions.length} activeTab={activeTab} tabHref={tabHref}/>
   </section>
   {activeTab==="tracking"&&<BatchTrackingWorkbench batchId={loaderData.batch.id} batchNumber={loaderData.batch.batch_number} orders={loaderData.orders} visibleOrders={visibleOrders} orderPagination={orderPagination} trackingMilestones={loaderData.trackingMilestones} trackingFlags={loaderData.trackingFlags} workflowPolicies={loaderData.batchWorkflowPolicies} batchVehiclePlate={loaderData.batchVehiclePlate} overseasVehiclePlate={loaderData.batch.overseas_vehicle_plate||null} borderPort={loaderData.batch.border_port||null} customsLocation={loaderData.batch.customs_location||null} busy={busy} manage={manageTracking&&allDispatched} warehouseReady={allDispatched} documentGateReady={allDocumentGateReady} exitConfirmed={exited} canConfirmExit={canConfirmExit} exitBlockers={Array.from(new Set(exitBlockers))} borderPorts={loaderData.borderPorts} documentsHref={tabHref("documents")} actionCloseSignal={actionData?.success?actionData:undefined}/>} 
-  {activeTab==="documents"&&<BatchDocumentWorkbench batchId={loaderData.batch.id} orders={loaderData.orders} visibleOrders={visibleOrders} orderPagination={orderPagination} batchDocuments={loaderData.batchDocuments} orderDocuments={loaderData.orderDocuments} orderDocumentRequirements={loaderData.orderDocumentRequirements} customsSummaries={loaderData.customsSummaries} customsDeclarations={loaderData.customsDeclarations} workflowPolicies={loaderData.batchWorkflowPolicies} busy={busy} manageCustoms={manageCustoms} currentUserId={loaderData.current.userId} documentOwnerUserId={loaderData.batch.document_assignee_user_id} documentOwnerName={loaderData.batch.document_assignee_name} privileged={privileged} requiresTransloading={requiresTransloading} ready={allDocumentGateReady} customsCloseSignal={actionData?.success?actionData:undefined}/>} 
+  {activeTab==="documents"&&<BatchDocumentWorkbench batchId={loaderData.batch.id} orders={loaderData.orders} visibleOrders={visibleOrders} orderPagination={orderPagination} batchDocuments={loaderData.batchDocuments} orderDocuments={loaderData.orderDocuments} orderDocumentRequirements={loaderData.orderDocumentRequirements} customsSummaries={loaderData.customsSummaries} customsDeclarations={loaderData.customsDeclarations} workflowPolicies={loaderData.batchWorkflowPolicies} customsAccesses={loaderData.batchCustomsAccess.orders} busy={busy} manageCustoms={manageCustoms} currentUserId={loaderData.current.userId} documentOwnerUserId={loaderData.batch.document_assignee_user_id} documentOwnerName={loaderData.batch.document_assignee_name} privileged={privileged} requiresTransloading={requiresTransloading} ready={allDocumentGateReady} customsCloseSignal={actionData?.success?actionData:undefined}/>} 
   {activeTab==="exceptions"&&<BatchExceptionWorkbench batch={loaderData.batch} orders={loaderData.orders} packages={loaderData.exceptionPackages} exceptions={loaderData.batchExceptions} busy={busy} manage={manageExceptions} closeSignal={actionData?.success?actionData:undefined}/>}
   {activeTab==="batch"&&<><section className="panel loading-sheet batch-tab-panel" id="batch-arrangement">
     <div className="batch-detail-summary"><div><h2>仓库配载结果</h2><p>由仓库端自动同步，管理后台只读查看。</p></div><div className="loading-sheet-state batch-detail-summary-status"><span>{loaderData.orders.length} 票</span><span>{loaderData.vehicles.length} 车</span><b>{allDispatched?"仓库已出库":loadPlanReady&&allDocumentGateReady?"待仓库装车":"待仓库补齐"}</b></div></div>
@@ -1371,7 +1514,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
     </div>
     </div>
   </section>
-  <CostAllocationSection allocations={loaderData.costAllocations} busy={busy} manage={manageCosts&&allDispatched}/></>}
+  <CostAllocationSection allocations={loaderData.costAllocations} busy={busy} manage={manageCosts&&allDispatched} blockedReason={!batchApproved?"配载单审核通过后才开放费用分摊。":!loaderData.canManageBatchCosts?"当前账号不是全部挂载订单共同的冻结费用负责人，本区只读。":!allDispatched?`全部挂载订单完成装车出库后才开放费用分摊（当前 ${dispatchedCount}/${loaderData.orders.length} 票）。`:null}/></>}
   {activeTab==="outbound"&&<section className="panel batch-tab-panel" id="batch-exit-gate"><div className="panel-header"><div><h2>装车出库</h2><p>本页只核对仓库装车和出库交接结果；后续报关、口岸到达与实际出境按页签顺序办理。</p></div><span className={`status-pill ${allDispatched?"success":""}`}>{allDispatched?"已完成":"待仓库办理"}</span></div>
     <div className="table-wrap batch-exit-gate-table"><table><thead><tr><th>装车项目</th><th>当前状态</th><th>核对结果</th></tr></thead><tbody>
       <tr className="completed-row"><td><strong>配载单同步</strong></td><td><span className="status-pill success">已通过</span></td><td>{loaderData.batch.batch_number} 已由仓库生成</td></tr>
@@ -1577,11 +1720,14 @@ function BatchExceptionWorkbench({batch,orders,packages,exceptions,busy,manage,c
   </section>;
 }
 
-function BatchDocumentWorkbench({batchId,orders,visibleOrders,orderPagination,batchDocuments,orderDocuments,orderDocumentRequirements,customsSummaries,customsDeclarations,workflowPolicies,busy,manageCustoms,currentUserId,documentOwnerUserId,documentOwnerName,privileged,requiresTransloading,ready,customsCloseSignal}:{batchId:string;orders:BatchOrder[];visibleOrders:BatchOrder[];orderPagination:BatchOrderPagination;batchDocuments:BatchDocument[];orderDocuments:OrderDocument[];orderDocumentRequirements:OrderLoadingDocumentRequirements[];customsSummaries:CustomsSummary[];customsDeclarations:BatchCustomsDeclaration[];workflowPolicies:BatchOrderWorkflowPolicy[];busy:boolean;manageCustoms:boolean;currentUserId:string;documentOwnerUserId:string|null;documentOwnerName:string|null;privileged:boolean;requiresTransloading:boolean;ready:boolean;customsCloseSignal?:unknown}){
+function BatchDocumentWorkbench({batchId,orders,visibleOrders,orderPagination,batchDocuments,orderDocuments,orderDocumentRequirements,customsSummaries,customsDeclarations,workflowPolicies,customsAccesses,busy,manageCustoms,currentUserId,documentOwnerUserId,documentOwnerName,privileged,requiresTransloading,ready,customsCloseSignal}:{batchId:string;orders:BatchOrder[];visibleOrders:BatchOrder[];orderPagination:BatchOrderPagination;batchDocuments:BatchDocument[];orderDocuments:OrderDocument[];orderDocumentRequirements:OrderLoadingDocumentRequirements[];customsSummaries:CustomsSummary[];customsDeclarations:BatchCustomsDeclaration[];workflowPolicies:BatchOrderWorkflowPolicy[];customsAccesses:BatchOrderCustomsAccess[];busy:boolean;manageCustoms:boolean;currentUserId:string;documentOwnerUserId:string|null;documentOwnerName:string|null;privileged:boolean;requiresTransloading:boolean;ready:boolean;customsCloseSignal?:unknown}){
   const visibleBatchDocTypes=BATCH_DOCUMENT_TYPES.filter(type=>requiresTransloading||!["border_handover","transshipment_order"].includes(type.code));
   const systemDocumentCodes=new Set(["loading_manifest","vehicle_manifest","batch_waybill"]);
   const currentIsDocumentOwner=privileged||documentOwnerUserId===currentUserId;
   const hasRequiredCustomsWork=orders.some(order=>{const policy=orderBatchWorkflowPolicy(workflowPolicies,order.order_id,"customs");return policy.enabled&&policy.required;});
+  const hasActionableCustoms=customsAccesses.some(access=>access.canManageDeclarations||access.canRelease);
+  const customsBlockReason=customsAccesses.find(access=>access.declarationAccess.reason)?.declarationAccess.reason
+    ??customsAccesses.find(access=>access.releaseAccess.reason)?.releaseAccess.reason;
   const [searchParams]=useSearchParams();
   const documentView=searchParams.get("documentView")==="shared"?"shared":"orders";
   const documentViewHref=(view:"orders"|"shared")=>{
@@ -1600,7 +1746,8 @@ function BatchDocumentWorkbench({batchId,orders,visibleOrders,orderPagination,ba
       <Link to={documentViewHref("shared")} className={documentView==="shared"?"active":""} aria-current={documentView==="shared"?"page":undefined}><strong>整批共用文件</strong><span>{visibleBatchDocTypes.length} 份</span></Link>
     </nav>
     {documentView==="orders"&&<>
-    {!ready&&hasRequiredCustomsWork&&manageCustoms&&<div className="alert warning batch-customs-guidance" role="status"><strong>当前由你办理：</strong><span>仅处理工作流标为必填的报关文件、申报与放行；选填项不会阻断交接。</span></div>}
+    {!ready&&hasRequiredCustomsWork&&manageCustoms&&hasActionableCustoms&&<div className="alert warning batch-customs-guidance" role="status"><strong>当前由你办理：</strong><span>仅处理当前冻结工作流节点开放的报关申报或放行；选填项不会阻断交接。</span></div>}
+    {!ready&&hasRequiredCustomsWork&&manageCustoms&&!hasActionableCustoms&&<div className="alert info batch-customs-guidance" role="status"><strong>当前只读：</strong><span>{customsBlockReason||"报关操作将在冻结工作流到达对应节点后自动开放。"}</span></div>}
     {!ready&&hasRequiredCustomsWork&&!manageCustoms&&currentIsDocumentOwner&&<div className="alert error batch-customs-guidance" role="alert"><strong>缺少办理权限：</strong><span>当前单证岗位未开放报关办理权限，请联系管理员。</span></div>}
     {!ready&&hasRequiredCustomsWork&&!manageCustoms&&!currentIsDocumentOwner&&<div className="alert info batch-customs-guidance" role="status"><strong>当前只读：</strong><span>由整批单证负责人“{documentOwnerName||"待分配"}”办理工作流必填报关事项。</span></div>}
     {!ready&&!hasRequiredCustomsWork&&<div className="alert warning batch-customs-guidance" role="status"><strong>仍有必填文件待处理：</strong><span>当前报关模块不构成门禁，请按各票订单显示的文件状态补齐并审核。</span></div>}
@@ -1624,19 +1771,24 @@ function BatchDocumentWorkbench({batchId,orders,visibleOrders,orderPagination,ba
         const customsDeclarationsReady=(!declarationsField.required||Boolean(customs&&customs.total>0))&&(!releaseField.required||Boolean(customs&&customs.total>0&&customs.released===customs.total));
         const customsReady=!customsPolicy.enabled||!customsPolicy.required||(customsFilesReady&&customsDeclarationsReady);
         const orderGateReady=documentSummary.complete&&customsReady;
-        const canManageThisOrder=manageCustoms&&customsPolicy.enabled&&declarationsField.visible&&(privileged||order.customs_assignee_user_id===currentUserId);
+        const workflowAccess=customsAccesses.find(access=>access.orderId===order.order_id);
+        const ownsCustoms=privileged||order.customs_assignee_user_id===currentUserId;
+        const canManageThisOrder=manageCustoms&&customsPolicy.enabled&&declarationsField.visible&&ownsCustoms&&Boolean(workflowAccess?.canManageDeclarations);
+        const canReleaseThisOrder=manageCustoms&&customsPolicy.enabled&&releaseField.visible&&ownsCustoms&&Boolean(workflowAccess?.canRelease);
+        const canActOnThisOrder=canManageThisOrder||canReleaseThisOrder;
         const customsStatus=!customsPolicy.enabled?"本单未启用报关":!declarationsField.visible?"工作流未展示报关申报明细":!customsPolicy.required?(customs?.total?`选办 · ${customs.released}/${customs.total} 张放行`:"选办 · 尚未登记"):!customsFilesReady?"必填报关文件待审核":customs?.total?`${customs.released}/${customs.total} 张放行`:"待登记并放行正式报关单";
-        return <tr className={orderGateReady?"completed-row":canManageThisOrder?"blocked-row":"readonly-row"} key={order.order_id} id={`batch-customs-${order.order_id}`}>
+        return <tr className={orderGateReady?"completed-row":canActOnThisOrder?"blocked-row":"readonly-row"} key={order.order_id} id={`batch-customs-${order.order_id}`}>
           <td><strong><OrderNumberLink id={order.order_id} number={order.order_number}/></strong><small>{order.customer_name}</small></td>
           <td><strong className="loading-cargo-names">{order.cargo_names||order.cargo_description||"未填写"}</strong><small>{order.pieces} 件 · {order.gross_weight_kg.toFixed(2)} KG · {order.volume_cbm.toFixed(3)} CBM</small></td>
           <td><span className={`status-pill ${documentSummary.complete?"success":""}`}>{documentSummary.requiredCount===0?"无必填文件":incompleteCodes.length?`待处理 ${incompleteCodes.length} 项`:`${documentSummary.requiredCount} 项必填文件已齐`}</span>{incompleteCodes.length>0&&<small>{incompleteCodes.map(orderDocumentTypeLabel).join("、")}</small>}</td>
           <td><span className={`status-pill ${customsPolicy.required&&customsReady?"success":!customsPolicy.required?"off":""}`}>{customsStatus}</span></td>
-          <td><div className="batch-order-row-actions"><details className="batch-order-file-details"><summary className={canManageThisOrder?"primary batch-customs-open-action":"secondary batch-customs-open-action"}>{canManageThisOrder?"办理本票报关":"查看本票文件"}</summary><div className="batch-order-file-panel">
-            <header className="batch-order-file-panel-header"><div><strong>{canManageThisOrder?"办理本票报关":"查看本票文件"}</strong><span><OrderNumberLink id={order.order_id} number={order.order_number}/> · {order.customer_name}</span></div><button type="button" aria-label="关闭文件查看窗口" onClick={event=>(event.currentTarget.closest("details") as HTMLDetailsElement|null)?.removeAttribute("open")}>×</button></header>
+          <td><div className="batch-order-row-actions"><details className="batch-order-file-details"><summary className={canActOnThisOrder?"primary batch-customs-open-action":"secondary batch-customs-open-action"}>{canActOnThisOrder?"办理本票报关":"查看本票文件"}</summary><div className="batch-order-file-panel">
+            <header className="batch-order-file-panel-header"><div><strong>{canActOnThisOrder?"办理本票报关":"查看本票文件"}</strong><span><OrderNumberLink id={order.order_id} number={order.order_number}/> · {order.customer_name}</span></div><button type="button" aria-label="关闭文件查看窗口" onClick={event=>(event.currentTarget.closest("details") as HTMLDetailsElement|null)?.removeAttribute("open")}>×</button></header>
+            {!canActOnThisOrder&&workflowAccess?.declarationAccess.reason&&<div className="alert info">{workflowAccess.declarationAccess.reason}</div>}
             <div className="batch-order-file-list">{activeRequirements.map(requirement=>{const current=files.find(item=>item.document_category===requirement.code);const blocks=requirement.isRequired&&(requirement.moduleCode!=="customs"||customsPolicy.required);return <div key={requirement.code}><strong>{requirement.name}{blocks?<b className="required-mark"> *</b>:<small> · 选填</small>}</strong>{current?<><a href={`/admin/document-files/order/${current.id}?mode=view`} target="_blank" rel="noreferrer">{current.file_name}</a><span className={`status-pill ${["approved","archived"].includes(current.review_status)?"success":""}`}>{documentReviewLabel(current.review_status)}</span></>:<span className={`status-pill ${blocks?"off":""}`}>{blocks?"待仓库上传":"选填未提供"}</span>}</div>})}{!activeRequirements.length&&<span className="status-pill success">当前工作流未启用逐票文件</span>}</div>
-            <BatchOrderCustomsWorkbench orderId={order.order_id} declarations={orderCustomsDeclarations} fields={customsPolicy.fields} manage={canManageThisOrder} busy={busy} closeSignal={customsCloseSignal}/>
+            <BatchOrderCustomsWorkbench orderId={order.order_id} declarations={orderCustomsDeclarations} fields={customsPolicy.fields} manage={canManageThisOrder} allowRelease={canReleaseThisOrder} busy={busy} closeSignal={customsCloseSignal}/>
             <div className="batch-order-file-links"><Link className="secondary" to={`/admin/orders/${order.order_id}/modules/documents`}>仅查看完整文件归档</Link></div>
-          </div></details>{canManageThisOrder&&releaseField.visible&&pendingCustomsDeclarations.map(declaration=><Modal key={declaration.id} title={`确认报关放行 · ${declaration.declaration_number}`} triggerLabel={pendingCustomsDeclarations.length>1?`确认放行 · ${declaration.declaration_number}`:"确认放行"} triggerClassName="primary batch-order-direct-customs-button" closeSignal={customsCloseSignal}><section className="batch-direct-release-item"><header><strong>{declaration.declaration_number}</strong><span>{customsStageLabel(declaration.clearance_stage)} · {declaration.declaration_title}</span></header><BatchCustomsReleaseForm orderId={order.order_id} declaration={declaration} fields={customsPolicy.fields} busy={busy}/></section></Modal>)}</div></td>
+          </div></details>{canReleaseThisOrder&&pendingCustomsDeclarations.map(declaration=><Modal key={declaration.id} title={`确认报关放行 · ${declaration.declaration_number}`} triggerLabel={pendingCustomsDeclarations.length>1?`确认放行 · ${declaration.declaration_number}`:"确认放行"} triggerClassName="primary batch-order-direct-customs-button" closeSignal={customsCloseSignal}><section className="batch-direct-release-item"><header><strong>{declaration.declaration_number}</strong><span>{customsStageLabel(declaration.clearance_stage)} · {declaration.declaration_title}</span></header><BatchCustomsReleaseForm orderId={order.order_id} declaration={declaration} fields={customsPolicy.fields} busy={busy}/></section></Modal>)}</div></td>
         </tr>})}</tbody></table></div>
       <QueryPagination {...orderPagination} pageParam="orderPage" unit="票订单"/>
     </section>
@@ -1796,7 +1948,7 @@ function BatchTrackingNodeForm({nodeCode,total,fields,defaultEventAt,defaultLoca
   </Form>;
 }
 
-function BatchOrderCustomsWorkbench({orderId,declarations,fields,manage,busy,closeSignal}:{orderId:string;declarations:BatchCustomsDeclaration[];fields:BatchOrderWorkflowPolicy["fields"];manage:boolean;busy:boolean;closeSignal?:unknown}){
+function BatchOrderCustomsWorkbench({orderId,declarations,fields,manage,allowRelease,busy,closeSignal}:{orderId:string;declarations:BatchCustomsDeclaration[];fields:BatchOrderWorkflowPolicy["fields"];manage:boolean;allowRelease:boolean;busy:boolean;closeSignal?:unknown}){
   const declarationsField=runtimeWorkflowFieldPolicy(fields,"customs_declarations",true);
   if(!declarationsField.visible)return null;
   const active=declarations.filter(item=>item.is_deleted!==1&&item.status!=="cancelled");
@@ -1812,11 +1964,11 @@ function BatchOrderCustomsWorkbench({orderId,declarations,fields,manage,busy,clo
       <span className={`status-pill ${declaration.status==="released"&&releaseVisible?"success":""}`}>{show("declaration_status",true)||releaseVisible?customsDeclarationStatusLabel(declaration):"已保存"}</span>
       <div className="batch-customs-actions">
         <Modal title={`查看报关单 · ${declaration.declaration_number}`} triggerLabel="查看" triggerClassName="text-button" size="wide"><BatchCustomsDeclarationView declaration={declaration} fields={fields}/></Modal>
-        {manage&&<Modal title={`编辑报关单 · ${declaration.declaration_number}`} triggerLabel="编辑" triggerClassName="text-button" size="wide" dialogClassName="customs-declaration-modal" closeSignal={closeSignal}><BatchCustomsDeclarationForm orderId={orderId} declaration={declaration} fields={fields} busy={busy}/></Modal>}
+        {manage&&<Modal title={`编辑报关单 · ${declaration.declaration_number}`} triggerLabel="编辑" triggerClassName="text-button" size="wide" dialogClassName="customs-declaration-modal" closeSignal={closeSignal}><BatchCustomsDeclarationForm orderId={orderId} declaration={declaration} fields={fields} allowRelease={allowRelease} busy={busy}/></Modal>}
       </div>
     </div>)}</div>}
     {!declarations.length&&<p className="empty-state">本票尚未登记报关单。先上传“报关资料”，再新增申报单。</p>}
-    {manage&&<Modal title="新增本票报关单" triggerLabel="新增报关单" triggerClassName="primary batch-customs-create-button" size="wide" dialogClassName="customs-declaration-modal" closeSignal={closeSignal}><BatchCustomsDeclarationForm orderId={orderId} fields={fields} busy={busy}/></Modal>}
+    {manage&&<Modal title="新增本票报关单" triggerLabel="新增报关单" triggerClassName="primary batch-customs-create-button" size="wide" dialogClassName="customs-declaration-modal" closeSignal={closeSignal}><BatchCustomsDeclarationForm orderId={orderId} fields={fields} allowRelease={allowRelease} busy={busy}/></Modal>}
   </section>;
 }
 
@@ -1833,7 +1985,7 @@ function BatchCustomsDeclarationView({declaration,fields}:{declaration:BatchCust
   </dl>;
 }
 
-function BatchCustomsDeclarationForm({orderId,declaration,fields,busy}:{orderId:string;declaration?:BatchCustomsDeclaration;fields:BatchOrderWorkflowPolicy["fields"];busy:boolean}){
+function BatchCustomsDeclarationForm({orderId,declaration,fields,allowRelease,busy}:{orderId:string;declaration?:BatchCustomsDeclaration;fields:BatchOrderWorkflowPolicy["fields"];allowRelease:boolean;busy:boolean}){
   const policy=(fieldKey:string,fallbackRequired=false)=>runtimeWorkflowFieldPolicy(fields,fieldKey,fallbackRequired);
   const mark=(label:string,required:boolean)=>`${label}${required?" *":""}`;
   const stage=policy("declaration_stage",true),status=policy("declaration_status",true),number=policy("declaration_number",true),type=policy("declaration_type",true),title=policy("declaration_title",true),company=policy("declaring_company",true),declaredAt=policy("declared_at",true),amount=policy("declared_amount",true),currency=policy("declaration_currency",true),weight=policy("declaration_gross_weight",true),flagsPolicy=policy("declaration_change_flags"),reason=policy("declaration_change_reason"),release=policy("customs_release",true);
@@ -1846,7 +1998,7 @@ function BatchCustomsDeclarationForm({orderId,declaration,fields,busy}:{orderId:
       <header><div><b>申报信息</b><span>字段显示和必填状态来自当前订单工作流</span></div><small>* 为工作流必填项</small></header>
       <div className="customs-form-field-grid">
         {stage.visible&&<label className="field customs-field-half"><span>{stage.label||"报关作业阶段"}{stage.required&&<b className="required-mark"> *</b>}</span><select name="clearanceStage" defaultValue={declaration?.clearance_stage||"origin"} required={stage.required}><option value="origin">起运地报关</option><option value="transit">过境地报关/清关</option><option value="destination">目的地清关</option></select></label>}
-        {status.visible&&<label className="field customs-field-half"><span>{status.label||"申报单状态"}{status.required&&<b className="required-mark"> *</b>}</span><select name="status" defaultValue={declaration?.status==="released"?"released":"declared"} required={status.required}><option value="declared">已申报，待放行</option>{release.visible&&<option value="released">已放行</option>}</select></label>}
+        {status.visible&&<label className="field customs-field-half"><span>{status.label||"申报单状态"}{status.required&&<b className="required-mark"> *</b>}</span><select name="status" defaultValue={declaration?.status==="released"&&allowRelease?"released":"declared"} required={status.required}><option value="declared">已申报，待放行</option>{release.visible&&allowRelease&&<option value="released">已放行</option>}</select></label>}
         {number.visible&&<Field className="customs-field-half" name="declarationNumber" label={mark(number.label||"报关单号",number.required)} required={number.required} defaultValue={declaration?.declaration_number||""}/>} {type.visible&&<Field className="customs-field-half" name="declarationType" label={mark(type.label||"报关单类型",type.required)} required={type.required} defaultValue={declaration?.declaration_type||""}/>} 
         {title.visible&&<Field className="customs-field-half" name="declarationTitle" label={mark(title.label||"申报抬头",title.required)} required={title.required} defaultValue={declaration?.declaration_title||""}/>} {company.visible&&<Field className="customs-field-half" name="declaringCompany" label={mark(company.label||"申报公司",company.required)} required={company.required} defaultValue={declaration?.declaring_company||""}/>} 
         {declaredAt.visible&&<Field className="customs-field-quarter" name="declaredAt" label={mark(declaredAt.label||"申报时间",declaredAt.required)} type="datetime-local" required={declaredAt.required} defaultValue={dateTimeLocal(declaration?.declared_at||new Date().toISOString())}/>} {amount.visible&&<Field className="customs-field-quarter" name="declaredAmount" label={mark(amount.label||"申报金额",amount.required)} type="number" required={amount.required} defaultValue={String(declaration?.declared_amount??0)}/>} 
@@ -1922,9 +2074,10 @@ function WarehouseOverseasInboundAction({orderId,batchId,warehouseId}:{orderId:s
   return <Form method="post" action="/switch-site"><input type="hidden" name="target" value="warehouse"/><input type="hidden" name="warehouseTo" value={warehouseTo}/><button className="secondary">去目的仓扫码收货</button></Form>;
 }
 
-function CostAllocationSection({allocations,busy,manage}:{allocations:Awaited<ReturnType<typeof loadCostAllocations>>;busy:boolean;manage:boolean}){
+export function CostAllocationSection({allocations,busy,manage,blockedReason}:{allocations:Awaited<ReturnType<typeof loadCostAllocations>>;busy:boolean;manage:boolean;blockedReason:string|null}){
   const draftCount=allocations.filter(item=>item.status==="draft").length;
   return <details className="panel cost-allocation-section batch-detail-disclosure"><summary className="batch-detail-summary"><div><h2>拼车成本分摊</h2><p>仅影响内部应付与毛利，不改变客户应收。</p></div><div className="batch-detail-summary-status"><span>{allocations.length} 条</span><b>{draftCount} 个待确认</b><em aria-hidden="true"/></div></summary><div className="batch-detail-disclosure-body">
+    {!manage&&blockedReason&&<div className="alert warning">{blockedReason}</div>}
     {manage&&<details className="inline-details"><summary>新增分摊草稿</summary><Form method="post" className="form-grid compact"><input type="hidden" name="intent" value="create_cost_allocation"/><label className="field"><span>费用项目</span><select name="chargeCode" required><option value="">请选择</option>{COST_CHARGES.map(item=><option key={item.code} value={item.code}>{item.name}</option>)}</select></label><Field name="counterpartyName" label="往来单位 / 供应商" required/><Field name="totalAmount" label="费用总额" type="number" required/><Field name="currency" label="币种" required defaultValue="CNY"/><Field name="exchangeRate" label="折本位币汇率" type="number" required defaultValue="1"/><label className="field"><span>分摊方式</span><select name="method" defaultValue="auto"><option value="auto">系统建议（推荐）</option><option value="weight">按实收重量</option><option value="volume">按实收体积</option><option value="equal">按订单均分</option></select></label><label className="field span-2"><span>费用备注</span><input name="allocationNotes" placeholder="例如口岸换装运费、报关费等"/></label><button className="primary" disabled={busy}>生成分摊草稿</button></Form></details>}
     {!allocations.length&&<p className="empty-state">暂无成本分摊。仓库完成实收后，可在这里生成分摊草稿。</p>}
     <div className="cost-allocation-list">{allocations.map(allocation=><section className="cost-allocation-sheet" key={allocation.id}><div className="table-wrap cost-allocation-summary-table"><table><thead><tr><th>费用项目</th><th>往来单位</th><th>总额</th><th>分摊方式</th><th>实收重量</th><th>实收体积</th><th>密度</th><th>状态</th></tr></thead><tbody><tr><td><strong>{allocation.charge_name}</strong></td><td>{allocation.counterparty_name}</td><td>{allocation.currency} {allocation.total_amount.toFixed(2)}</td><td>{allocationMethodLabel(allocation.allocation_method)}</td><td>{allocation.total_actual_weight_kg.toFixed(2)} KG</td><td>{allocation.total_actual_volume_cbm.toFixed(3)} CBM</td><td>{allocation.density_kg_per_cbm.toFixed(2)} KG/CBM<small>{allocation.density_result}</small></td><td><span className={`status-pill ${allocation.status==="confirmed"?"success":""}`}>{allocation.status==="confirmed"?"已确认入账":"草稿待复核"}</span><small>{allocation.confirmed_at?`确认时间 ${allocation.confirmed_at}`:"系统建议可人工调整"}</small></td></tr></tbody></table></div>

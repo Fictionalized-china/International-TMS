@@ -188,6 +188,7 @@ export function canCreateExpenseFromModule(
 
 export type ExpenseDirectionActionStageInput = {
   action: ExpenseDirectionAction;
+  orderStatus: string;
   workflow: LockedWorkflowStageContext;
 };
 
@@ -195,6 +196,17 @@ export function expenseDirectionActionStageAccess(
   currentStepKeyOrInput: string | null | ExpenseDirectionActionStageInput,
 ) {
   if (typeof currentStepKeyOrInput === "object" && currentStepKeyOrInput) {
+    if (["completed", "cancelled"].includes(currentStepKeyOrInput.orderStatus)) {
+      return {
+        allowed: false as const,
+        visible: true,
+        targetStepKey: null,
+        targetStepName: null,
+        reason: currentStepKeyOrInput.orderStatus === "completed"
+          ? "订单已完成，费用签核仅供查看"
+          : "订单已取消，费用签核仅供查看",
+      };
+    }
     const access = workflowInstanceCapabilityStageAccess({
       context: currentStepKeyOrInput.workflow,
       moduleCode: "costs",

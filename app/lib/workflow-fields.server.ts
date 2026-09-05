@@ -16,6 +16,9 @@ import {
   workflowFieldModeFlags,
   type WorkflowFieldMode,
 } from "./workflow-field-catalog";
+import { frozenWorkflowFieldScopeMarkerKey } from "./workflow-field-runtime";
+import { workflowInstanceCapabilityStageAccess } from "./workflow-instance-stage-gate";
+import { loadLockedWorkflowStageContext } from "./workflow-instance-stage-gate.server";
 
 export type WorkflowFieldRule = {
   id: string;
@@ -479,36 +482,65 @@ export async function listTemplateWorkflowFields(workflowIds: string[]) {
   return fields.map(toRule);
 }
 
+type FrozenModuleFieldPlacement = {
+  step_key: string;
+  step_name: string;
+  sort_order: number;
+};
+
 export async function loadOrderModuleWorkflowFields(
   organizationId: string,
   orderId: string,
   moduleCode: OrderModuleCode,
 ): Promise<WorkflowFieldState[]> {
   const binding = await env.DB.prepare(
-    `SELECT o.workflow_instance_id,wi.workflow_id
+    `SELECT o.workflow_instance_id,wi.id matched_instance_id,wi.workflow_id
      FROM transport_orders o
-     LEFT JOIN workflow_instances wi ON wi.id=o.workflow_instance_id
+     LEFT JOIN workflow_instances wi
+       ON wi.id=o.workflow_instance_id
+      AND wi.organization_id=o.organization_id
+      AND wi.order_id=o.id
      WHERE o.id=? AND o.organization_id=?`,
   )
     .bind(orderId, organizationId)
-    .first<{ workflow_instance_id: string | null; workflow_id: string | null }>();
-  if (!binding?.workflow_id) return [];
+    .first<{
+      workflow_instance_id: string | null;
+      matched_instance_id: string | null;
+      workflow_id: string | null;
+    }>();
+  if (!binding) return [];
   let raw: RawField[] = [];
-  if (binding.workflow_instance_id) {
-    const snapshot = await env.DB.prepare(
-      `SELECT f.id,f.workflow_id,f.step_key,COALESCE(s.name,f.step_key) step_name,
-              f.module_code,f.field_key,f.label,f.field_type,f.is_required,
-              f.is_active,f.sort_order,f.options_text,f.help_text
-       FROM workflow_instance_fields f
-       LEFT JOIN workflow_steps s ON s.workflow_id=f.workflow_id AND s.step_key=f.step_key
-       WHERE f.instance_id=? AND f.module_code=?
-       ORDER BY f.sort_order,f.field_key`,
-    )
-      .bind(binding.workflow_instance_id, moduleCode)
-      .all<RawField>();
+  let frozenPlacements: FrozenModuleFieldPlacement[] = [];
+  if (binding.workflow_instance_id && binding.matched_instance_id) {
+    const [snapshot, placements] = await Promise.all([
+      env.DB.prepare(
+        `SELECT f.id,f.workflow_id,f.step_key,COALESCE(ss.step_name,f.step_key) step_name,
+                f.module_code,f.field_key,f.label,f.field_type,f.is_required,
+                f.is_active,f.sort_order,f.options_text,f.help_text
+         FROM workflow_instance_fields f
+         LEFT JOIN workflow_instance_step_states ss
+           ON ss.instance_id=f.instance_id AND ss.step_key=f.step_key
+         WHERE f.instance_id=? AND f.module_code=?
+         ORDER BY f.sort_order,f.field_key`,
+      )
+        .bind(binding.matched_instance_id, moduleCode)
+        .all<RawField>(),
+      env.DB.prepare(
+        `SELECT ss.step_key,ss.step_name,ss.sort_order
+         FROM workflow_instance_module_states ms
+         JOIN workflow_instance_step_states ss
+           ON ss.id=ms.instance_step_state_id
+         WHERE ss.instance_id=? AND ms.module_code=?
+         ORDER BY ss.sort_order,ms.sort_order,ms.id`,
+      )
+        .bind(binding.matched_instance_id, moduleCode)
+        .all<FrozenModuleFieldPlacement>(),
+    ]);
     raw = snapshot.results;
-  }
-  if (!raw.length) {
+    frozenPlacements = placements.results;
+  } else if (!binding.workflow_instance_id) {
+    if (!binding.workflow_id) return [];
+
     const live = await env.DB.prepare(
       `SELECT f.id,f.workflow_id,s.step_key,s.name step_name,COALESCE(f.module_code,'consignment') module_code,
               f.field_key,f.label,f.field_type,f.is_required,f.is_active,f.sort_order,
@@ -521,8 +553,8 @@ export async function loadOrderModuleWorkflowFields(
       .bind(binding.workflow_id, moduleCode)
       .all<RawField>();
     raw = live.results;
+    raw = mergeWorkflowFieldCatalogBaseline(raw, binding.workflow_id, moduleCode);
   }
-  raw = mergeWorkflowFieldCatalogBaseline(raw, binding.workflow_id, moduleCode);
   if (moduleCode === "loading") {
     const order = await env.DB.prepare(
       "SELECT business_type FROM transport_orders WHERE organization_id=? AND id=?",
@@ -536,11 +568,43 @@ export async function loadOrderModuleWorkflowFields(
   }
   const rules = raw.map(toRule);
   const presence = await resolveFieldPresence(organizationId, orderId, moduleCode, rules);
-  return rules.map((rule) => ({
+  const states = rules.map((rule) => ({
     ...rule,
     present: presence.get(rule.fieldKey)?.present ?? false,
     displayValue: presence.get(rule.fieldKey)?.displayValue ?? null,
   }));
+  if (!binding.workflow_instance_id) return states;
+
+  const markerPlacements = frozenPlacements.length
+    ? [...new Map(
+        frozenPlacements.map((placement) => [placement.step_key, placement]),
+      ).values()]
+    : [{
+        step_key: "__frozen_unplaced_module__",
+        step_name: "Frozen module without a valid placement",
+        sort_order: -1,
+      }];
+  const workflowId = binding.workflow_id ?? binding.workflow_instance_id;
+  const markers: WorkflowFieldState[] = markerPlacements.map((placement) => ({
+    id: `${binding.workflow_instance_id}:scope:${moduleCode}:${placement.step_key}`,
+    workflowId,
+    stepKey: placement.step_key,
+    stepName: placement.step_name,
+    moduleCode,
+    fieldKey: frozenWorkflowFieldScopeMarkerKey,
+    label: "",
+    fieldType: "scope",
+    isRequired: false,
+    isActive: false,
+    mode: "hidden",
+    sortOrder: placement.sort_order,
+    optionsText: null,
+    helpText: null,
+    isBuiltIn: true,
+    present: true,
+    displayValue: null,
+  }));
+  return [...states, ...markers];
 }
 
 export async function missingRequiredModuleFields(
@@ -606,22 +670,78 @@ export async function missingRequiredWorkflowStepFields(
 export async function saveOrderCustomWorkflowFieldValue(input: {
   organizationId: string;
   orderId: string;
+  moduleCode: OrderModuleCode;
   fieldId: string;
   value: string | null;
   actorUserId: string;
 }) {
+  const workflow = await loadLockedWorkflowStageContext(
+    env.DB,
+    input.organizationId,
+    input.orderId,
+    input.moduleCode,
+  );
+  // Custom values are keyed to a frozen field instance. Legacy orders do not
+  // have such a key, so consulting a mutable template would violate the
+  // order's locked contract and the value table's foreign-key boundary.
+  if (!workflow.locked)
+    throw new Error("历史订单没有冻结的自定义字段快照，不能修改该字段");
   const field = await env.DB.prepare(
-    `SELECT f.id,f.field_key,f.is_active
+    `SELECT f.id,f.module_code,f.step_key,f.field_key,f.is_active,o.status order_status
      FROM workflow_instance_fields f
      JOIN workflow_instances wi ON wi.id=f.instance_id
+     JOIN transport_orders o
+       ON o.id=wi.order_id AND o.organization_id=wi.organization_id
+      AND o.workflow_instance_id=wi.id
      WHERE f.id=? AND wi.organization_id=? AND wi.order_id=?`,
   ).bind(input.fieldId, input.organizationId, input.orderId).first<{
     id: string;
+    module_code: OrderModuleCode;
+    step_key: string;
     field_key: string;
     is_active: number;
+    order_status: string;
   }>();
   if (!field?.is_active || workflowFieldCatalogByKey.has(field.field_key))
     throw new Error("该字段不是可编辑的自定义字段");
+  if (["completed", "cancelled"].includes(field.order_status))
+    throw new Error("订单已完成或取消，自定义字段仅供查看，不能继续修改");
+  if (field.module_code !== input.moduleCode)
+    throw new Error("该自定义字段不属于当前模块");
+  const capability = workflowInstanceCapabilityStageAccess({
+    context: workflow,
+    moduleCode: input.moduleCode,
+    fieldKeys: [field.field_key],
+  });
+  const currentStep = workflow.steps.find(
+    (step) => step.stepKey === workflow.currentStepKey,
+  );
+  const fieldStep = workflow.steps.find(
+    (step) => step.stepKey === field.step_key,
+  );
+  const exactFieldPlacement = workflow.fields.some(
+    (placement) =>
+      placement.moduleCode === input.moduleCode &&
+      placement.fieldKey === field.field_key &&
+      placement.stepKey === field.step_key &&
+      placement.isActive,
+  );
+  const modulePlacedAtFieldStep = workflow.modulePlacements.some(
+    (placement) =>
+      placement.moduleCode === input.moduleCode &&
+      placement.stepKey === field.step_key,
+  );
+  if (
+    !capability.visible ||
+    !capability.available ||
+    !exactFieldPlacement ||
+    !modulePlacedAtFieldStep ||
+    !currentStep ||
+    !fieldStep ||
+    currentStep.sortOrder < fieldStep.sortOrder
+  ) {
+    throw new Error(capability.reason || "该自定义字段在当前冻结工作流节点尚未开放");
+  }
   const now = new Date().toISOString();
   await env.DB.prepare(
     `INSERT INTO order_custom_workflow_field_values(
@@ -762,7 +882,10 @@ async function resolveFieldPresence(
   const order = await env.DB.prepare(
     `SELECT o.*,wi.id bound_instance_id
      FROM transport_orders o
-     LEFT JOIN workflow_instances wi ON wi.id=o.workflow_instance_id
+     LEFT JOIN workflow_instances wi
+       ON wi.id=o.workflow_instance_id
+      AND wi.organization_id=o.organization_id
+      AND wi.order_id=o.id
      WHERE o.id=? AND o.organization_id=?`,
   )
     .bind(orderId, organizationId)
@@ -894,12 +1017,17 @@ async function resolveFieldPresence(
     );
     const usesLockedManifest = Boolean(assignmentManifest.workflowInstanceId);
     const manifestAssigned = assignmentManifest.groups.filter(
-      (group) => group.assignmentState === "assigned",
+      (group) =>
+        group.assignmentMode === "site_queue" ||
+        group.assignmentState === "assigned",
     ).length;
     const assignmentComplete = usesLockedManifest
       ? assignmentManifest.configurationErrors.length === 0 &&
         assignmentManifest.groups.every(
-          (group) => !group.required || group.assignmentState === "assigned",
+          (group) =>
+            !group.required ||
+            group.assignmentMode === "site_queue" ||
+            group.assignmentState === "assigned",
         )
       : assignmentCoverageIsComplete(
           assignment?.assigned ?? 0,

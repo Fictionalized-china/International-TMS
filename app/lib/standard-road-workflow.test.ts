@@ -94,12 +94,14 @@ describe("standard road workflow factory defaults", () => {
       module_code: module.moduleCode,
       display_name: module.displayName,
       is_active: 1,
+      is_required: module.required ? 1 : 0,
       responsibility_position_code: module.responsibilityPositionCode,
       completion_mode: module.completionMode,
     }));
     const tasks = standardRoadWorkflowModules.map((module) => ({
       id: `task:${module.stepKey}:${module.moduleCode}`,
       step_module_id: `module:${module.stepKey}:${module.moduleCode}`,
+      task_key: module.taskKey,
       name: module.taskName,
       task_type: module.taskType,
       is_required: module.taskRequired ? 1 : 0,

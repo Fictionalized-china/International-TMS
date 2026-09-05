@@ -7,6 +7,7 @@ import {
 
 export {
   assignedBatchViewPermission,
+  batchCostsManageScopeSql,
   batchVisibilitySql,
   canAccessBatchWorkspace,
   canOperateCurrentOrder,

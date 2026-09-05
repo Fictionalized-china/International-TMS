@@ -17,6 +17,31 @@ export type WorkflowExecutionModuleCompletion = {
   hasMissingRequiredFields: boolean;
 };
 
+export function workflowSystemTaskHasAutoHandler(
+  stepKey: string,
+  taskKey: string,
+) {
+  return taskKey.startsWith("handle_") && !stepKey.startsWith("custom_");
+}
+
+export function workflowSystemTaskShouldAutoComplete(
+  stepKey: string,
+  taskKey: string,
+  orderStatus: string,
+  moduleStatus: string,
+) {
+  if (!workflowSystemTaskHasAutoHandler(stepKey, taskKey)) return false;
+  if (stepKey === "quotation") return true;
+  if (stepKey === "order_creation") return orderStatus !== "draft";
+  if (stepKey === "consignment_approval") {
+    return ["confirmed", "in_execution", "completed"].includes(orderStatus);
+  }
+  if (stepKey === "task_assignment") {
+    return ["in_execution", "completed"].includes(orderStatus);
+  }
+  return moduleStatus === "completed";
+}
+
 export function workflowExecutionModuleIsComplete(
   input: WorkflowExecutionModuleCompletion,
 ) {

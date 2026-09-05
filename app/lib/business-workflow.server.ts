@@ -6,6 +6,7 @@ import {
 } from "./order-modules";
 import { snapshotWorkflowFieldsForInstance } from "./workflow-fields.server";
 import { workflowFieldCatalog } from "./workflow-field-catalog";
+import { resolveConfiguredOrderBusinessTarget } from "./order-business-workflow-target";
 import {
   ensureWorkflowExecutionSnapshot,
   synchronizeWorkflowExecution,
@@ -524,9 +525,14 @@ export async function syncOrderBusinessWorkflow(input: OrderBusinessWorkflowSync
       .bind(input.organizationId, input.orderId)
       .all<ModuleSnapshot>()
   ).results;
-  const targetStepKey = resolveOrderBusinessStep(
+  const targetStepKey = await resolveOrderBusinessStep(
     order.status,
     modules,
+    {
+      workflowId,
+      instanceId: instance?.id ?? null,
+      currentStepKey: instance?.current_step_key ?? null,
+    },
   );
   if (!targetStepKey) return null;
   const targetStep = await env.DB.prepare(
@@ -723,9 +729,14 @@ export async function syncOrderBusinessWorkflow(input: OrderBusinessWorkflowSync
   return targetStepResolved.step_key;
 }
 
-function resolveOrderBusinessStep(
+async function resolveOrderBusinessStep(
   status: string,
   modules: ModuleSnapshot[],
+  workflow: {
+    workflowId: string;
+    instanceId: string | null;
+    currentStepKey: string | null;
+  },
 ) {
   if (status === "cancelled") return null;
   if (status === "draft") return "order_creation";
@@ -733,6 +744,48 @@ function resolveOrderBusinessStep(
   if (status === "confirmed") return "task_assignment";
   if (status === "completed") return "completion_review";
   if (status !== "in_execution") return "order_creation";
+
+  const placements = workflow.instanceId
+    ? await env.DB.prepare(
+        `SELECT ss.step_key,ss.sort_order,ms.module_code,
+                ms.is_required module_required,ms.status module_state_status
+           FROM workflow_instance_step_states ss
+           JOIN workflow_instance_module_states ms
+             ON ms.instance_step_state_id=ss.id
+          WHERE ss.instance_id=?
+          ORDER BY ss.sort_order,ms.sort_order,ms.id`,
+      ).bind(workflow.instanceId).all<{
+        step_key: string;
+        sort_order: number;
+        module_code: string;
+        module_required: number;
+        module_state_status: string;
+      }>()
+    : await env.DB.prepare(
+        `SELECT s.step_key,s.sort_order,m.module_code,
+                m.is_required module_required,NULL module_state_status
+           FROM workflow_steps s
+           JOIN workflow_step_modules m
+             ON m.workflow_id=s.workflow_id AND m.step_id=s.id
+          WHERE s.workflow_id=? AND s.is_active=1 AND m.is_active=1
+          ORDER BY s.sort_order,m.sort_order,m.id`,
+      ).bind(workflow.workflowId).all<{
+        step_key: string;
+        sort_order: number;
+        module_code: string;
+        module_required: number;
+        module_state_status: null;
+      }>();
+  const configured = resolveConfiguredOrderBusinessTarget({
+    modules,
+    placements: placements.results,
+    currentStepKey: workflow.currentStepKey,
+  });
+  if (configured.stepKey) return configured.stepKey;
+
+  // Only a genuinely unbound legacy order may use the static stage map. A
+  // bound instance with an unresolved frozen placement must remain blocked.
+  if (workflow.instanceId) return null;
   const mainlineStages = orderBusinessStages.slice(2);
   const next = pickNextRequiredWorkflowModule(
     modules,

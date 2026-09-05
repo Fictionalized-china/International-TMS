@@ -3,6 +3,7 @@ import { isActiveOrganizationAssigneeForPositions } from "./organization-assigne
 import {
   buildOrderAssignmentManifest,
   nextRequiredOrderAssignmentGroup,
+  orderAssignmentGroupPermissionRequirements,
   type OrderAssignmentManifest,
   type OrderAssignmentManifestGroup,
   type WorkflowAssignmentSnapshotRow,
@@ -77,11 +78,32 @@ export async function loadOrderAssignmentManifest(
   options: OrderAssignmentManifestOptions = {},
 ): Promise<LoadedOrderAssignmentManifest> {
   const order = await env.DB.prepare(
-    "SELECT workflow_instance_id FROM transport_orders WHERE organization_id=? AND id=?",
-  ).bind(organizationId, orderId).first<{ workflow_instance_id: string | null }>();
+    `SELECT o.workflow_instance_id,wi.id matched_instance_id,wi.status matched_instance_status
+       FROM transport_orders o
+       LEFT JOIN workflow_instances wi
+         ON wi.id=o.workflow_instance_id
+        AND wi.organization_id=o.organization_id
+        AND wi.order_id=o.id
+      WHERE o.organization_id=? AND o.id=?`,
+  ).bind(organizationId, orderId).first<{
+    workflow_instance_id: string | null;
+    matched_instance_id: string | null;
+    matched_instance_status: string | null;
+  }>();
   if (!order) throw new Error("订单不存在");
-  if (!order.workflow_instance_id) {
+  if (order.workflow_instance_id === null) {
     return { workflowInstanceId: null, groups: [], configurationErrors: [] };
+  }
+  if (
+    !order.workflow_instance_id.trim() ||
+    !order.matched_instance_id ||
+    order.matched_instance_status !== "active"
+  ) {
+    return {
+      workflowInstanceId: order.workflow_instance_id,
+      groups: [],
+      configurationErrors: ["订单工作流实例绑定异常，请联系管理员修复后再分配任务"],
+    };
   }
   const rows = await env.DB.prepare(
     `SELECT ms.id module_state_id,ms.module_code,ms.display_name module_name,
@@ -100,7 +122,7 @@ export async function loadOrderAssignmentManifest(
          ON omi.organization_id=? AND omi.order_id=? AND omi.module_code=ms.module_code
       WHERE ss.instance_id=?
       ORDER BY ss.sort_order,ms.sort_order,ts.sort_order,ms.id,ts.id`,
-  ).bind(organizationId, orderId, order.workflow_instance_id)
+  ).bind(organizationId, orderId, order.matched_instance_id)
     .all<WorkflowAssignmentSnapshotDbRow>();
   const excluded = new Set(options.excludeModuleCodes ?? defaultExcludedModuleCodes);
   const manifest = buildOrderAssignmentManifest(
@@ -176,6 +198,14 @@ export async function validateOrderAssignmentManifestSelections(input: {
   const resolvedGroups: ResolvedOrderAssignmentGroup[] = [];
   for (const group of manifest.groups) {
     const selectedAssignee = selectionsByGroup.get(group.key);
+    if (group.assignmentMode === "site_queue") {
+      if (selectedAssignee) {
+        throw new Error(
+          `${group.positionCode ?? "仓库"}由订单目标仓的岗位队列办理，不接受个人指派`,
+        );
+      }
+      continue;
+    }
     const assigneeUserId = selectedAssignee ?? group.assigneeUserId;
     if (!assigneeUserId) {
       if (group.required) {
@@ -190,6 +220,7 @@ export async function validateOrderAssignmentManifestSelections(input: {
       input.organizationId,
       assigneeUserId,
       [group.positionCode],
+      orderAssignmentGroupPermissionRequirements(group),
     ))) {
       throw new Error(`${group.positionCode}负责人必须是该岗位下的有效个人账户`);
     }
@@ -239,12 +270,19 @@ export async function resolveOrderModuleAssignmentTarget(input: {
       throw new Error("提交的责任岗位不属于当前模块的锁定工作流配置");
     throw new Error("该模块包含多个责任岗位，请按工作流分配组分别指定负责人");
   }
+  if (target.assignmentMode === "site_queue") {
+    throw new Error(
+      `${target.positionCode ?? "仓库"}由订单目标仓的岗位队列办理，不能改派给个人账户`,
+    );
+  }
+
   if (!target.positionCode)
     throw new Error("当前模块未配置责任岗位，不能分配个人账户");
   if (!(await isActiveOrganizationAssigneeForPositions(
     input.organizationId,
     input.assigneeUserId,
     [target.positionCode],
+    orderAssignmentGroupPermissionRequirements(target),
   ))) {
     throw new Error(`${target.positionCode}负责人必须是该岗位下的有效个人账户`);
   }

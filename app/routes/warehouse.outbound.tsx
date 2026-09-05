@@ -11,13 +11,15 @@ import { syncOrderWorkflowSnapshot } from "../lib/order-modules.server";
 import { isValidCustomerIdentityCode } from "../lib/customer-identity";
 import { maxInlineOrderDocumentBytes } from "../lib/order-documents";
 import { submitForm } from "../lib/form-submit";
-import { checkOrderLoadPlan, checkOrderPreDepartureDocuments } from "../lib/order-readiness.server";
+import { checkOrderLoadPlan } from "../lib/order-readiness.server";
 import { refreshLoadingManifest } from "../lib/loading-manifest.server";
 import {
+  currentStageLoadingDocumentRequirements,
   loadingOrderDocumentDefinitions,
   type LoadingOrderDocumentCode,
 } from "../lib/loading-document-requirements";
 import { loadOrderLoadingDocumentRequirements } from "../lib/loading-document-requirements.server";
+import { loadOrderDocumentWorkflowMutationAccess } from "../lib/order-document-access.server";
 import {
   loadingDispatchPlanPolicyIssues,
   loadingBatchResourcePolicy,
@@ -230,6 +232,8 @@ export async function action({request}:Route.ActionArgs){
     if(!documentGroup)return{formError:"该订单不属于当前待创建的装车任务",inspection};
     const documentType=LOADING_DOCUMENTS.find(item=>item.code===documentCategory);
     if(!documentType)return{formError:`请选择有效文件类型：${LOADING_DOCUMENTS.map(item=>item.name).join("、")}`,inspection};
+    const workflowAccess=await loadOrderDocumentWorkflowMutationAccess(env.DB,user.organizationId,orderId,documentCategory);
+    if(!workflowAccess.allowed)return{formError:workflowAccess.reason||"当前冻结工作流未开放该文件，不能上传",inspection};
     const file=form.get("attachment");
     if(!(file instanceof File)||file.size<=0)return{formError:`请选择要上传的${documentType.name}`,inspection};
     const fileError=validateOutboundDocumentFile(file);
@@ -314,12 +318,6 @@ export async function action({request}:Route.ActionArgs){
       const pending=inspection.documents.filter(document=>document.required&&!["approved","archived"].includes(document.reviewStatus||""));
       return rejectCreate(`请先上传、检查并确认：${pending.map(document=>`${document.orderNumber} ${document.name}`).join("、")}`);
     }
-    const documentGateResults:Array<{group:(typeof inspection.documentGroups)[number];gate:Awaited<ReturnType<typeof checkOrderPreDepartureDocuments>>}>=[];
-    for(const group of inspection.documentGroups){
-      documentGateResults.push({group,gate:await checkOrderPreDepartureDocuments(user.organizationId,group.orderId)});
-    }
-    const documentGateBlockers=documentGateResults.filter(item=>!item.gate.ready).flatMap(item=>item.gate.reasons.map(reason=>`${item.group.orderNumber}：${reason}`));
-    if(documentGateBlockers.length)return rejectCreate(`暂不能创建装车任务：${documentGateBlockers.join("；")}`);
     if(inspection.notesActive&&inspection.notesRequired&&!notes.trim())return rejectCreate("请填写装车交接备注");
     if(batch.business_type==="ftl"){
       const resourceError=validateFtlOutboundResourceSelection({
@@ -430,7 +428,13 @@ export async function action({request}:Route.ActionArgs){
     let workflowStepKey:string|null=null;
     try{
       await syncOrderWorkflowSnapshot(user.organizationId,dispatch.order_id);
-      const workflowState=await env.DB.prepare(`SELECT wi.current_step_key FROM transport_orders o LEFT JOIN workflow_instances wi ON wi.id=o.workflow_instance_id AND wi.organization_id=o.organization_id WHERE o.organization_id=? AND o.id=?`).bind(user.organizationId,dispatch.order_id).first<{current_step_key:string|null}>();
+      const workflowState=await env.DB.prepare(`SELECT wi.current_step_key
+        FROM transport_orders o
+        LEFT JOIN workflow_instances wi
+          ON wi.id=o.workflow_instance_id
+         AND wi.organization_id=o.organization_id
+         AND wi.order_id=o.id
+        WHERE o.organization_id=? AND o.id=?`).bind(user.organizationId,dispatch.order_id).first<{current_step_key:string|null}>();
       workflowStepKey=workflowState?.current_step_key??null;
       if(workflowStepKey==="port_loading")warnings.push("当前节点仍有其他工作流必填项待补")
     }catch(error){console.error("dispatch route workflow sync failed",error);warnings.push("工作流同步待重试")}
@@ -1074,7 +1078,7 @@ async function loadOutboundInspection(organizationId:string,warehouseId:string,b
   for(const row of documentRows){const key=`${row.order_id}:${row.document_category}`;if(!latestByOrderCode.has(key))latestByOrderCode.set(key,row);}
   const documentGroups=orderRows.map(order=>{
     const requirements=requirementsByOrder.get(order.order_id);
-    const documents=(requirements?.documents??[]).filter(type=>type.isActive).map(type=>{
+    const documents=currentStageLoadingDocumentRequirements(requirements?.documents??[]).map(type=>{
       const row=latestByOrderCode.get(`${order.order_id}:${type.code}`);
       const required=type.isRequired;
       return{orderId:order.order_id,orderNumber:order.order_number,customerId:order.customer_id,customerName:order.customer_name,required,attachmentId:row?.attachment_id??null,code:type.code,name:type.name,fileName:row?.file_name??null,contentType:row?.content_type??null,sizeBytes:row?.size_bytes??null,reviewStatus:row?.review_status??null};

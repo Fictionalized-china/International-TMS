@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  currentStageLoadingDocumentRequirements,
+  loadingDocumentFieldPolicy,
   resolveLoadingDocumentRequirements,
   summarizeLoadingDocumentRequirements,
+  warehouseLoadingDocumentMutationPolicy,
 } from "./loading-document-requirements";
 
 describe("loading document requirements", () => {
@@ -124,6 +127,23 @@ describe("loading document requirements", () => {
       incompleteCodes: ["packing_list"],
       complete: false,
     });
+
+    expect(loadingDocumentFieldPolicy(
+      requirements.documents,
+      "commercial_invoice",
+    )).toMatchObject({ visible: true, required: false, configured: true });
+    expect(loadingDocumentFieldPolicy(
+      requirements.documents,
+      "packing_list",
+    )).toMatchObject({ visible: true, required: true, configured: true });
+    expect(loadingDocumentFieldPolicy(
+      requirements.documents,
+      "customs_document",
+    )).toMatchObject({ visible: false, required: false, configured: true });
+    expect(loadingDocumentFieldPolicy(
+      requirements.documents,
+      "not_configured",
+    )).toMatchObject({ visible: false, required: false, configured: false });
   });
 
   it("evaluates mixed orders independently inside one consolidation batch", () => {
@@ -218,6 +238,66 @@ describe("loading document requirements", () => {
       missingUploadCodes: [],
       incompleteCodes: [],
       complete: true,
+    });
+  });
+
+  it("does not let future customs files block the earlier loading stage", () => {
+    const requirements = resolveLoadingDocumentRequirements({
+      orderId: "stage-aware-order",
+      customsEnabled: true,
+      fieldsByModule: {
+        consignment: [{
+          fieldKey: "document_consignment_letter",
+          isActive: true,
+          isRequired: true,
+          stageAvailable: true,
+        }],
+        customs: [
+          {
+            fieldKey: "document_commercial_invoice",
+            isActive: true,
+            isRequired: true,
+            stageAvailable: false,
+          },
+          {
+            fieldKey: "document_packing_list",
+            isActive: true,
+            isRequired: true,
+            stageAvailable: false,
+          },
+          {
+            fieldKey: "document_customs_document",
+            isActive: true,
+            isRequired: true,
+            stageAvailable: false,
+          },
+          {
+            fieldKey: "document_customs_declaration_file",
+            isActive: true,
+            isRequired: false,
+            stageAvailable: false,
+          },
+        ],
+      },
+    });
+
+    const dueNow = currentStageLoadingDocumentRequirements(requirements.documents);
+    expect(dueNow.map((document) => document.code)).toEqual([
+      "consignment_letter",
+    ]);
+    expect(summarizeLoadingDocumentRequirements(dueNow, [{
+      document_category: "consignment_letter",
+      review_status: "approved",
+    }])).toMatchObject({
+      requiredCount: 1,
+      incompleteCodes: [],
+      complete: true,
+    });
+  });
+
+  it("keeps the warehouse loading-document surface read-only", () => {
+    expect(warehouseLoadingDocumentMutationPolicy).toMatchObject({
+      allowed: false,
     });
   });
 });

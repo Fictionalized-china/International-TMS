@@ -4,6 +4,8 @@ import type { LoadingBatchWorkflowOrder } from "./loading-batch-field-policy";
 
 type StageRow = {
   order_id: string;
+  bound_instance_id: string | null;
+  matched_instance_id: string | null;
   applies_to_current_or_future: number;
 };
 
@@ -34,15 +36,20 @@ export async function loadLoadingBatchWorkflowOrders(
     // one effective-field query. Chunks themselves are processed in order.
     const [stages, fields] = await Promise.all([
       env.DB.prepare(
-        `SELECT o.id order_id,
+        `SELECT o.id order_id,o.workflow_instance_id bound_instance_id,
+                wi.id matched_instance_id,
                 CASE
-                  WHEN wi.id IS NULL OR current_step.sort_order IS NULL OR target_step.sort_order IS NULL THEN 1
+                  WHEN o.workflow_instance_id IS NULL THEN 1
+                  WHEN wi.id IS NULL THEN 0
+                  WHEN current_step.sort_order IS NULL OR target_step.sort_order IS NULL THEN 1
                   WHEN current_step.sort_order<=target_step.sort_order THEN 1
                   ELSE 0
                 END applies_to_current_or_future
          FROM transport_orders o
          LEFT JOIN workflow_instances wi
-           ON wi.id=o.workflow_instance_id AND wi.organization_id=o.organization_id
+           ON wi.id=o.workflow_instance_id
+          AND wi.organization_id=o.organization_id
+          AND wi.order_id=o.id
          LEFT JOIN workflow_steps current_step
            ON current_step.workflow_id=wi.workflow_id AND current_step.step_key=wi.current_step_key
          LEFT JOIN workflow_steps target_step
@@ -51,10 +58,13 @@ export async function loadLoadingBatchWorkflowOrders(
       ).bind(organizationId, ...chunk).all<StageRow>(),
       env.DB.prepare(
         `WITH bindings AS (
-           SELECT o.id order_id,wi.id instance_id,wi.workflow_id
+           SELECT o.id order_id,o.workflow_instance_id bound_instance_id,
+                  wi.id instance_id,wi.workflow_id
            FROM transport_orders o
            LEFT JOIN workflow_instances wi
-             ON wi.id=o.workflow_instance_id AND wi.organization_id=o.organization_id
+             ON wi.id=o.workflow_instance_id
+            AND wi.organization_id=o.organization_id
+            AND wi.order_id=o.id
            WHERE o.organization_id=? AND o.id IN (${placeholders})
          )
          SELECT b.order_id,f.field_key,f.is_active,f.is_required
@@ -66,12 +76,21 @@ export async function loadLoadingBatchWorkflowOrders(
          FROM bindings b
          JOIN workflow_step_fields f
            ON f.workflow_id=b.workflow_id AND COALESCE(f.module_code,'consignment')='loading'
-         WHERE NOT EXISTS(
+         WHERE b.bound_instance_id IS NULL
+           AND NOT EXISTS(
            SELECT 1 FROM workflow_instance_fields snapshot
            WHERE snapshot.instance_id=b.instance_id AND snapshot.module_code='loading'
          )`,
       ).bind(organizationId, ...chunk).all<FieldRow>(),
     ]);
+    const invalidBinding = stages.results.find(
+      (row) => row.bound_instance_id !== null && row.matched_instance_id === null,
+    );
+    if (invalidBinding) {
+      throw new Error(
+        `订单 ${invalidBinding.order_id} 的工作流实例绑定异常，不能继续办理装车与出库`,
+      );
+    }
     stageRows.push(...stages.results);
     fieldRows.push(...fields.results);
   }
@@ -84,6 +103,7 @@ export async function loadLoadingBatchWorkflowOrders(
   }
   return uniqueOrderIds.map((orderId) => ({
     orderId,
+    usesFrozenSnapshot: stageRows.find((row) => row.order_id === orderId)?.bound_instance_id !== null,
     appliesToCurrentOrFuture: stageByOrder.get(orderId) ?? true,
     fields: (fieldsByOrder.get(orderId) ?? []).map((field) => ({
       fieldKey: field.field_key,

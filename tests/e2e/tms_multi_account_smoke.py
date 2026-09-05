@@ -42,6 +42,11 @@ OVERSEAS_WAREHOUSE_CONTRACT = NavigationContract(
     ("货物配载", "配载文件", "在仓待装", "装车与出库"),
 )
 ADMIN_BASE = ("任务工作台", "通知")
+HOME_MENU_BY_SITE = {
+    "admin": "任务工作台",
+    "portal": "我的首页",
+    "warehouse": "仓库作业总表",
+}
 
 # These are deliberate baseline contracts, derived from the repository's
 # published position/permission model.  They are not business workflow gates.
@@ -200,15 +205,32 @@ def run_account_smoke(
                 expected_result="应有菜单可见；无权菜单完全隐藏而非禁用；页面无 403。",
                 gate=_permission_expectation(record, "导航菜单可见性"),
             ) as observation:
-                nav = session.locator(f'nav[aria-label="{contract.navigation_name}"]')
+                nav_selector = f'nav[aria-label="{contract.navigation_name}"]'
+                nav = session.locator(nav_selector)
                 session.expect_visible(nav, contract.navigation_name)
+                home_label = HOME_MENU_BY_SITE[record.site]
                 for label in contract.required:
-                    session.expect_visible(_nav_link(nav, label), f"应显示菜单：{label}")
+                    nav = session.locator(nav_selector)
+                    target = _nav_link(nav, label)
+                    session.expect_visible(target, f"应显示菜单：{label}")
+                    session.click(target.first, f"打开应有菜单：{label}")
+                    session.page.wait_for_timeout(120)
+                    _assert_no_error_page(session)
+                    if label != home_label:
+                        nav = session.locator(nav_selector)
+                        home = _nav_link(nav, home_label)
+                        session.expect_visible(home, f"返回首页菜单：{home_label}")
+                        session.click(home.first, f"从 {label} 返回首页：{home_label}")
+                        session.page.wait_for_timeout(120)
+                        _assert_no_error_page(session)
                 for label in contract.forbidden:
-                    session.expect_hidden(_nav_link(nav, label), f"应隐藏菜单：{label}")
+                    nav = session.locator(nav_selector)
+                    session.expect_not_rendered(
+                        _nav_link(nav, label), f"无权菜单不得进入 DOM：{label}"
+                    )
                 _assert_no_error_page(session)
                 observation.observe(
-                    f"核对 {len(contract.required)} 个应显示菜单和 {len(contract.forbidden)} 个应隐藏菜单。",
+                    f"逐个点击 {len(contract.required)} 个应显示菜单并返回首页；核对 {len(contract.forbidden)} 个无权菜单未渲染。",
                     gate_passed=True,
                 )
             outcomes.append({"alias": record.alias, "site": record.site, "status": "passed", "stage": "complete", "error": ""})
@@ -258,6 +280,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             outcomes = run_account_smoke(harness, records)
             failed = [item for item in outcomes if item["status"] != "passed"]
             summary = harness.close(status="failed" if failed else "passed")
+            final_status = str(harness.last_status)
             harness = None
     except Exception as error:
         if harness is not None:
@@ -269,14 +292,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     failed = [item for item in outcomes if item["status"] != "passed"]
+    failed_run = bool(failed) or final_status != "passed"
     print(json.dumps({
-        "status": "FAILED" if failed else "PASSED",
+        "status": "FAILED" if failed_run else "PASSED",
         "accounts": len(outcomes),
         "failed": len(failed),
         "outcomes": outcomes,
         "summary": str(summary),
     }, ensure_ascii=False, indent=2))
-    return 1 if failed else 0
+    return 1 if failed_run else 0
 
 
 if __name__ == "__main__":

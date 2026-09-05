@@ -8,6 +8,8 @@ import { workflowVersionSwitchDecision } from "./workflow-version-policy";
 import {
   selectWorkflowExecutionCurrentStep,
   workflowExecutionModuleIsComplete,
+  workflowSystemTaskHasAutoHandler,
+  workflowSystemTaskShouldAutoComplete,
 } from "./workflow-execution";
 import { canCompleteWorkflowTask } from "./workflow-task-access";
 
@@ -141,7 +143,7 @@ export async function synchronizeWorkflowExecution(input:{
   const taskUpdates = [];
   for (const row of rows.results) {
     if (!row.task_state_id || row.task_status === "completed") continue;
-    const autoComplete = shouldAutoCompleteTemplateTask(
+    const autoComplete = workflowSystemTaskShouldAutoComplete(
       row.step_key,row.task_key || "",input.orderStatus,moduleStatus.get(row.module_code || "") || "not_started",
     );
     if (autoComplete) {
@@ -228,21 +230,6 @@ export async function synchronizeWorkflowExecution(input:{
   return current.step_key;
 }
 
-function shouldAutoCompleteTemplateTask(
-  stepKey:string,
-  taskKey:string,
-  orderStatus:string,
-  moduleStatus:string,
-) {
-  if (!taskKey.startsWith("handle_")) return false;
-  if (stepKey === "quotation") return true;
-  if (stepKey === "order_creation") return orderStatus !== "draft";
-  if (stepKey === "consignment_approval") return ["confirmed","in_execution","completed"].includes(orderStatus);
-  if (stepKey === "task_assignment") return ["in_execution","completed"].includes(orderStatus);
-  if (stepKey.startsWith("custom_")) return false;
-  return moduleStatus === "completed";
-}
-
 export type CurrentWorkflowTask = {
   id:string;
   step_key:string;
@@ -307,7 +294,7 @@ export async function completeWorkflowTask(input:{
     responsibility_position_code:string|null;
   }>();
   if (!task) throw new Error("该办理步骤不在当前节点，或已经完成");
-  if (task.task_key.startsWith("handle_") && !task.step_key.startsWith("custom_"))
+  if (workflowSystemTaskHasAutoHandler(task.step_key, task.task_key))
     throw new Error("该步骤由对应业务模组自动完成，不能人工跳过");
   const actorPositions = await env.DB.prepare(
     `SELECT DISTINCT p.code

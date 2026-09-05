@@ -19,6 +19,7 @@ import { workflowFieldPolicy } from "../lib/workflow-field-catalog";
 import { loadOrderModuleWorkflowFields } from "../lib/workflow-fields.server";
 import { syncOrderWorkflowSnapshot } from "../lib/order-modules.server";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
+import { canOperateWarehouseUi } from "../lib/warehouse-ui-access";
 import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
 import {
   automaticallyNotifyOverseasArrival,
@@ -33,6 +34,10 @@ import {
   formatWarehouseVolumeCbm,
   synchronizeWarehouseVolumeRow,
 } from "../lib/warehouse-volume";
+import {
+  loadWarehousePhysicalWorkflowAccess,
+  warehousePhysicalWorkflowAccessSql,
+} from "../lib/warehouse-workflow-access.server";
 import { overseasInboundRequiresCustomsClearance } from "../lib/overseas-inbound-policy";
 
 type Shipment = {
@@ -58,6 +63,7 @@ type ScannedPackage = {
   barcode: string;
   package_number: string;
   status: string;
+  order_id: string;
   warehouse_id: string;
   source_warehouse_name: string;
   receipt_number: string | null;
@@ -117,6 +123,11 @@ export async function loader({ request }: Route.LoaderArgs) {
   const orderId = url.searchParams.get("orderId");
   const returnTo = url.searchParams.get("returnTo") || "";
   const reference = (url.searchParams.get("reference") || "").trim();
+  const workflowGate = warehousePhysicalWorkflowAccessSql(
+    "o",
+    "overseas_warehouse",
+    { userId: user.userId, positionCode: user.positionCode },
+  );
   const [shipments, locations] = await Promise.all([
     env.DB.prepare(
       `SELECT s.id,s.order_id,s.shipment_number,s.status,o.order_number,c.name customer_name,c.identity_code customer_identity_code,o.origin_city,o.destination_city,
@@ -137,9 +148,10 @@ export async function loader({ request }: Route.LoaderArgs) {
                EXISTS(SELECT 1 FROM order_transport_assignments a WHERE a.organization_id=o.organization_id AND a.order_id=o.id AND a.leg_type='first_mile' AND a.status!='cancelled' AND a.destination_warehouse_id=?)
                OR EXISTS(SELECT 1 FROM warehouse_receipts wr WHERE wr.organization_id=o.organization_id AND wr.shipment_id=s.id AND wr.warehouse_id=?)
              )`}
+        AND ${workflowGate.sql}
       ORDER BY s.updated_at DESC`,
     )
-      .bind(user.organizationId, warehouse.id, ...(isOverseasWarehouse ? [] : [warehouse.id]))
+      .bind(user.organizationId, warehouse.id, ...(isOverseasWarehouse ? [] : [warehouse.id]), ...workflowGate.values)
       .all<Shipment>(),
     env.DB.prepare(
       `SELECT l.id,l.warehouse_id,l.code,l.name,z.name zone_name,w.name warehouse_name,w.warehouse_role FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id JOIN warehouses w ON w.id=l.warehouse_id WHERE l.organization_id=? AND l.warehouse_id=? AND l.status='active' AND z.status='active' AND w.status='active' ORDER BY z.code,l.code`,
@@ -149,7 +161,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   ]);
   const directlyScannedPackage = reference
     ? await env.DB.prepare(
-        `SELECT p.id,p.shipment_id,p.barcode,p.package_number,p.status,p.warehouse_id,
+        `SELECT p.id,p.shipment_id,o.id order_id,p.barcode,p.package_number,p.status,p.warehouse_id,
                 w.name source_warehouse_name,
                 COALESCE(NULLIF(TRIM(i.cargo_name_cn),''),NULLIF(TRIM(o.cargo_description),'')) cargo_name,
                  COALESCE(r.package_type,i.package_type) package_type,
@@ -183,7 +195,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     : null;
   const dispatchPackage = scannedDispatch?.package_count === 1
     ? await env.DB.prepare(
-        `SELECT p.id,p.shipment_id,p.barcode,p.package_number,p.status,p.warehouse_id,
+        `SELECT p.id,p.shipment_id,o.id order_id,p.barcode,p.package_number,p.status,p.warehouse_id,
                 w.name source_warehouse_name,
                 COALESCE(NULLIF(TRIM(i.cargo_name_cn),''),NULLIF(TRIM(o.cargo_description),'')) cargo_name,
                  COALESCE(r.package_type,i.package_type) package_type,
@@ -212,6 +224,15 @@ export async function loader({ request }: Route.LoaderArgs) {
     ? shipments.results.find((item) => item.id === scannedPackage?.shipment_id)
     : undefined;
   let lookupError = "";
+  const scannedPackageWorkflowAccess = reference && scannedPackage && packageReady && !selectedShipment
+    ? await loadWarehousePhysicalWorkflowAccess(
+        env.DB,
+        user.organizationId,
+        scannedPackage.order_id,
+        "overseas_warehouse",
+        { userId: user.userId, positionCode: user.positionCode },
+      )
+    : null;
   if (reference && scannedDispatch && scannedDispatch.status !== "dispatched")
     lookupError = `装车任务 ${scannedDispatch.dispatch_number} 尚未完成出库交接，暂不能办理境外目的仓收货`;
   else if (reference && scannedDispatch && scannedDispatch.package_count > 1)
@@ -222,6 +243,8 @@ export async function loader({ request }: Route.LoaderArgs) {
     lookupError = `货物标签 ${scannedPackage.barcode} 已归属“${warehouse.name}”，但未找到已完成入库单，请联系管理员检查仓库数据`;
   else if (reference && scannedPackage && scannedPackage.status !== "dispatched")
     lookupError = `货物标签 ${scannedPackage.barcode} 尚未完成上一仓库出库，暂不能办理境外目的仓收货`;
+  else if (reference && scannedPackageWorkflowAccess && !scannedPackageWorkflowAccess.available)
+    lookupError = scannedPackageWorkflowAccess.reason || "当前订单的冻结工作流尚未开放境外仓入库";
   else if (reference && scannedPackage && !selectedShipment)
     lookupError = `货物标签 ${scannedPackage.barcode} 不属于当前目的仓，或对应运输单尚未进入可收货阶段`;
   else if (reference && !scannedPackage)
@@ -236,6 +259,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   return {
     user,
     warehouse,
+    warehouseAccessLevel: warehouseContext.selectedAccessLevel,
     isOverseasWarehouse,
     locations: locations.results,
     orderId,
@@ -407,6 +431,16 @@ export async function action({ request }: Route.ActionArgs) {
     };
   const orderId = shipment?.order_id ?? pendingOrder?.order_id;
   if (!orderId) return { formError: "无法识别收货订单，请重新选择订单或运单" };
+  const workflowAccess = await loadWarehousePhysicalWorkflowAccess(
+    env.DB,
+    user.organizationId,
+    orderId,
+    "overseas_warehouse",
+    { userId: user.userId, positionCode: user.positionCode },
+  );
+  if (!workflowAccess.available)
+    return { formError: workflowAccess.reason || "当前订单的冻结工作流尚未开放境外仓入库" };
+
   if (isOverseasWarehouse) {
     const overseasGate = await env.DB.prepare(
       `SELECT
@@ -1158,8 +1192,11 @@ export default function WarehouseInbound({
   loaderData,
   actionData,
 }: Route.ComponentProps) {
-  const busy = useNavigation().state !== "idle",
-    canOperate = loaderData.user.permissions.includes("warehouse.operate");
+  const busy = useNavigation().state !== "idle";
+  const canOperate = canOperateWarehouseUi(
+    loaderData.user,
+    loaderData.warehouseAccessLevel,
+  );
   const [receiptResult, setReceiptResult] = useState<"" | "ready" | "exception">(
     "",
   );
@@ -1209,7 +1246,8 @@ export default function WarehouseInbound({
         </div>
       )}
       {!actionData?.success && loaderData.lookupError && <div className="alert error no-print">{loaderData.lookupError}</div>}
-      <WarehouseReceivingScanPanel
+      {!canOperate && <div className="alert info">当前账号为仓库只读视角，可查看收货结果；货物扫描、实收录入和入库提交仅向有操作权限的冻结任务负责人开放。</div>}
+      {canOperate && <WarehouseReceivingScanPanel
         key={actionData?.success ? `completed:${actionData.success}` : loaderData.reference}
         warehouseId={loaderData.warehouse.id}
         reference={actionData?.success ? "" : loaderData.reference}
@@ -1221,7 +1259,7 @@ export default function WarehouseInbound({
           { name: "orderId", value: loaderData.orderId || "" },
           { name: "returnTo", value: loaderData.returnTo },
         ]}
-      />
+      />}
       {showReceivingWorkbench && selectedShipmentRecord && scannedPackageRecord && canOperate && (
         <Form
           method="post"

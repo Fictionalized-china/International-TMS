@@ -7,6 +7,7 @@ import { missingRequiredWorkflowStepFields } from "./workflow-fields.server";
 import {
   assignmentModuleBlocksDispatch,
   canRunOrderWorkflowAction,
+  orderWorkflowTargetAssigneeRequirements,
   shouldRefreshOrderModulesBeforeWorkflowGate,
 } from "./order-workflow";
 import { assignedOrderNotificationStatement } from "./internal-notifications.server";
@@ -232,22 +233,30 @@ export async function validateOrderWorkflowAction(input: {
     const expectedPositionCodes = dispatchPolicy
       ? [dispatchPolicy.positionCode]
       : expectedPositions[input.actionCode];
+    const permissionRequirements = dispatchPolicy
+      ? []
+      : orderWorkflowTargetAssigneeRequirements(input.actionCode);
+    const validTargetAssignee = expectedPositionCodes
+      ? permissionRequirements.length
+        ? await isActiveOrganizationAssigneeForPositions(
+            input.organizationId,input.assigneeUserId,expectedPositionCodes,permissionRequirements,
+          )
+        : await isActiveOrganizationAssigneeForPositions(
+            input.organizationId,input.assigneeUserId,expectedPositionCodes,
+          )
+      : true;
     if (
       expectedPositionCodes &&
-      !(await isActiveOrganizationAssigneeForPositions(
-        input.organizationId,
-        input.assigneeUserId,
-        expectedPositionCodes,
-      ))
+      !validTargetAssignee
     ) {
       const label = dispatchPolicy
         ? dispatchPolicy.source === "legacy"
           ? "操作岗个人账户（旧订单兼容规则）"
           : `锁定工作流首个必办岗位（${dispatchPolicy.positionCode}）个人账户`
         : input.actionCode === "submit"
-        ? "业务主管"
+        ? "具备订单查看权限的业务主管"
         : input.actionCode === "approve"
-          ? "操作主管"
+          ? "具备派单及配载审批权限的操作主管"
           : "配置岗位";
       return {
         ok: false as const,

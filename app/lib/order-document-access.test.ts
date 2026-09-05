@@ -3,6 +3,7 @@ import {
   canReviewOrderModuleDocument,
   canUploadOrderModuleDocument,
   isSettlementDocumentStageOpen,
+  orderDocumentWorkflowMutationAccess,
   settlementDocumentStageAccess,
 } from "./order-document-access";
 
@@ -219,5 +220,106 @@ describe("order document access", () => {
         false,
       ),
     ).toBe(true);
+  });
+
+  const lockedDocumentWorkflow = (
+    fieldKey: string,
+    mode: "required" | "optional" | "hidden",
+  ) => ({
+    locked: true,
+    currentStepKey: "outbound_transport",
+    steps: [
+      { stepKey: "order_creation", stepName: "委托资料补充", sortOrder: 10 },
+      { stepKey: "outbound_transport", stepName: "报关放行", sortOrder: 20 },
+    ],
+    modulePlacements: [
+      { moduleCode: "consignment", stepKey: "order_creation" },
+      { moduleCode: "customs", stepKey: "outbound_transport" },
+    ],
+    fields: [{
+      moduleCode: fieldKey === "document_consignment_letter" ? "consignment" : "customs",
+      fieldKey,
+      stepKey: fieldKey === "document_consignment_letter" ? "order_creation" : "outbound_transport",
+      isActive: mode !== "hidden",
+      isRequired: mode === "required",
+    }],
+  } as const);
+
+  it.each([
+    ["required", true],
+    ["optional", true],
+    ["hidden", false],
+  ] as const)(
+    "enforces the frozen %s mode for an order document mutation",
+    (mode, allowed) => {
+      expect(orderDocumentWorkflowMutationAccess({
+        documentCategory: "commercial_invoice",
+        workflow: lockedDocumentWorkflow("document_commercial_invoice", mode),
+      })).toMatchObject({
+        allowed,
+        visible: allowed,
+        required: mode === "required",
+        mode,
+        fieldKey: "document_commercial_invoice",
+        moduleCode: "customs",
+      });
+    },
+  );
+
+  it("fails closed when a forged document category is absent from the frozen instance", () => {
+    expect(orderDocumentWorkflowMutationAccess({
+      documentCategory: "packing_list",
+      workflow: lockedDocumentWorkflow("document_commercial_invoice", "required"),
+    })).toMatchObject({
+      allowed: false,
+      visible: false,
+      mode: "hidden",
+      fieldKey: "document_packing_list",
+    });
+  });
+
+  it("fails closed when the order has no frozen workflow instance", () => {
+    expect(orderDocumentWorkflowMutationAccess({
+      documentCategory: "consignment_letter",
+      workflow: {
+        locked: false,
+        currentStepKey: null,
+        steps: [],
+        modulePlacements: [],
+        fields: [],
+      },
+    })).toMatchObject({
+      allowed: false,
+      visible: false,
+      configured: false,
+      mode: "hidden",
+    });
+  });
+
+  it("fails closed for a document type without a workflow field placement", () => {
+    expect(orderDocumentWorkflowMutationAccess({
+      documentCategory: "waybill",
+      workflow: lockedDocumentWorkflow("document_commercial_invoice", "required"),
+    })).toMatchObject({
+      allowed: false,
+      visible: false,
+      configured: false,
+      mode: "hidden",
+      fieldKey: null,
+      moduleCode: null,
+    });
+  });
+
+  it("does not open a visible file field before its frozen workflow node", () => {
+    const workflow = lockedDocumentWorkflow("document_commercial_invoice", "required");
+    expect(orderDocumentWorkflowMutationAccess({
+      documentCategory: "commercial_invoice",
+      workflow: { ...workflow, currentStepKey: "order_creation" },
+    })).toMatchObject({
+      allowed: false,
+      visible: true,
+      required: true,
+      mode: "required",
+    });
   });
 });

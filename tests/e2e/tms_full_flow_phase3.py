@@ -35,7 +35,13 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from tms_ui_credentials import CredentialRecord, CredentialVault, load_credentials
-from tms_ui_harness import GateExpectation, RoleBrowserSession, TmsUIHarness, safe_artifact_name
+from tms_ui_harness import (
+    GateExpectation,
+    RoleBrowserSession,
+    TmsUIHarness,
+    require_certified_summary,
+    safe_artifact_name,
+)
 from tms_pz_account_prep import build_pz_runtime_credentials
 
 
@@ -44,6 +50,16 @@ LTL_KEYS = ("ltl1", "ltl2", "ltl3")
 REQUIRED_ACCOUNT_ALIASES = ("operation", "document", "overseas_warehouse", "customer")
 PHASE2_HANDOFF_SCHEMA = "international-tms-full-flow-phase2-handoff/v1"
 PHASE3_HANDOFF_SCHEMA = "international-tms-full-flow-phase3-handoff/v1"
+PHASE2_STAGE_ORDER = (
+    "secondary_pz_account_preparation",
+    "domestic_transport",
+    "domestic_receiving",
+    "ftl_loading_outbound",
+    "ltl_consolidation",
+    "batch_assignment",
+    "batch_loading_outbound",
+    "batch_sync_and_drawer_assertions",
+)
 PHASE3_STAGE_ORDER = (
     "customs_permission_alignment",
     "ftl_customs_release",
@@ -54,6 +70,12 @@ PHASE3_STAGE_ORDER = (
     "customer_notification_and_optional_appointment",
     "overseas_pickup_scan_and_signoff",
 )
+PHASE3_PERMISSION_AND_NEGATIVE_CASES = (
+    "P3-PERM-PZ-NEW-DOCUMENT",
+    "P3-NEG-PZ-OLD-DOCUMENT-DEEP-LINK",
+    "P3-NEG-PZ-PARTIAL-CUSTOMS-EXIT",
+    "P3-NEG-CHILD-OLD-DOCUMENT",
+)
 
 ORDER_NUMBER_RE = re.compile(r"^SO[0-9A-Z-]{6,}$", re.I)
 PZ_NUMBER_RE = re.compile(r"^PZ-[0-9A-Z-]{4,}$", re.I)
@@ -63,6 +85,7 @@ PHASE1_RUN_ID_RE = re.compile(
     r"-a(?P<attempt>[0-9]{3})-(?P<stamp>[0-9]{14})-(?P<nonce>[0-9a-f]{8})$",
     re.I,
 )
+DENIED_PAGE_RE = re.compile(r"请求失败|不存在|尚未分配|没有.*权限|Forbidden|403|404", re.I)
 ERROR_PAGE_RE = re.compile(
     r"请求失败|SYSTEM RECOVERY|Forbidden|Internal Server Error|请求失败\s*\(403\)",
     re.I,
@@ -97,6 +120,7 @@ class Phase2Handoff:
     dispatches: Mapping[str, str]
     batch_operation_alias: str = "operation_2"
     batch_document_alias: str = "document_2"
+    certification_lineage: Mapping[str, Any] = field(default_factory=dict)
 
     def order(self, key: str) -> Phase3Order:
         try:
@@ -167,16 +191,25 @@ def load_phase2_handoff(path: Path | str) -> Phase2Handoff:
     if not source.is_file():
         raise FileNotFoundError(f"第二阶段结果文件不存在：{source}")
     payload = _mapping(json.loads(source.read_text(encoding="utf-8-sig")), "第二阶段结果")
-    if str(payload.get("status", "")).strip().lower() != "passed":
-        raise ValueError("第二阶段必须为 passed，第三阶段不能接续失败或未完成的数据")
-    source_run_id = str(payload.get("run_id", "")).strip()
+    evidence = require_certified_summary(
+        payload,
+        source=source,
+        label="第二阶段",
+    )
+    source_run_id = str(evidence.get("run_id", "")).strip()
     if not source_run_id:
         raise ValueError("第二阶段结果缺少 run_id")
-    handoff = _mapping(payload.get("handoff"), "handoff")
+    envelope_run_id = str(payload.get("run_id", "")).strip()
+    if envelope_run_id and envelope_run_id != source_run_id:
+        raise ValueError("第二阶段结果 envelope.run_id 与 summary.run_id 不一致")
+    handoff = _mapping(evidence.get("handoff"), "handoff")
     if handoff.get("schema") != PHASE2_HANDOFF_SCHEMA:
         raise ValueError("第二阶段 handoff schema 不受支持")
     if handoff.get("ready_for_phase3") is not True:
         raise ValueError("第二阶段尚未明确 ready_for_phase3")
+    completed_stages = tuple(str(item) for item in handoff.get("completed_stages", ()))
+    if completed_stages != PHASE2_STAGE_ORDER:
+        raise ValueError("第二阶段 completed_stages 不完整或顺序不一致")
 
     raw_orders = _mapping(handoff.get("orders"), "handoff.orders")
     orders: list[Phase3Order] = []
@@ -241,6 +274,19 @@ def load_phase2_handoff(path: Path | str) -> Phase2Handoff:
     ).strip()
     if batch_operation_alias != "operation_2" or batch_document_alias != "document_2":
         raise ValueError("第二阶段 PZ 必须交接给 operation_2 和 document_2")
+    lineage = _mapping(
+        handoff.get("certification_lineage"), "handoff.certification_lineage"
+    )
+    if (
+        lineage.get("mode") != "fresh-from-phase1"
+        or lineage.get("fresh_phase1_attempt") is not True
+        or lineage.get("recovery_branches_used") is not False
+    ):
+        raise ValueError("第二阶段认证链路不是无恢复分支的 Phase 1 fresh attempt")
+    if str(lineage.get("root_phase1_run_id", "")).strip() != source_phase1_run_id:
+        raise ValueError("第二阶段认证链路的 Phase 1 run_id 不一致")
+    if str(lineage.get("root_entity_prefix", "")).strip() != entity_prefix:
+        raise ValueError("第二阶段认证链路的 fresh entity_prefix 不一致")
     return Phase2Handoff(
         source_run_id=source_run_id,
         source_phase1_run_id=source_phase1_run_id,
@@ -251,6 +297,7 @@ def load_phase2_handoff(path: Path | str) -> Phase2Handoff:
         dispatches=dispatches,
         batch_operation_alias=batch_operation_alias,
         batch_document_alias=batch_document_alias,
+        certification_lineage=dict(lineage),
     )
 
 
@@ -260,6 +307,10 @@ def build_handoff_payload(
     *,
     ready_for_phase4: bool,
 ) -> dict[str, Any]:
+    if ready_for_phase4 and not source.certification_lineage:
+        raise ValueError("正式 Phase 3 交接缺少 Phase 1 fresh attempt 认证链路")
+    lineage = dict(source.certification_lineage)
+    lineage["source_phase2_run_id"] = source.source_run_id
     return {
         "schema": PHASE3_HANDOFF_SCHEMA,
         "source_phase2_run_id": source.source_run_id,
@@ -275,6 +326,7 @@ def build_handoff_payload(
         },
         "transport_batch": {"batch_number": source.batch_number},
         "dispatches": dict(source.dispatches),
+        "certification_lineage": lineage,
         "oul_numbers": list(source.all_cargo_codes),
         "customs_declarations": dict(artifacts.customs_declarations),
         "tracking_nodes": {
@@ -696,7 +748,7 @@ class Phase3Flow:
         session.page.wait_for_timeout(180)
         self._assert_no_error_page(session)
 
-    def _open_batch(self, session: RoleBrowserSession) -> None:
+    def _open_batch(self, session: RoleBrowserSession) -> str:
         self._click_navigation(session, "运输订单")
         self._click_workload_tab(session, "配载订单")
         form = session.page.locator("form.batch-workload-filters")
@@ -726,9 +778,17 @@ class Phase3Flow:
         link = row.first.get_by_role("link", name=self.source.batch_number, exact=True)
         if not self._is_visible(link):
             link = row.first.get_by_role("link", name=re.compile(r"^(办理配载单|查看详情)$"))
+        href = link.first.get_attribute("href") or ""
+        if not href.startswith("/"):
+            raise BusinessBlocker(
+                f"{self.source.batch_number} 办理链接不是站内路径",
+                owner="配载订单路由维护人",
+                remediation="列表办理入口必须使用可审计的站内相对路径。",
+            )
         session.click(link.first, f"打开配载单 {self.source.batch_number}")
         session.page.wait_for_timeout(180)
         self._assert_no_error_page(session)
+        return href
 
     def _open_batch_tab(self, session: RoleBrowserSession, label: str) -> None:
         tabs = session.page.get_by_role("navigation", name="配载单工作区")
@@ -936,6 +996,179 @@ class Phase3Flow:
             )
             observation.observe("PZ 三票报关可读，整批办理控件均未渲染", gate_passed=True)
 
+        batch_href = ""
+        child_order_href = ""
+        with self.batch_document.step(
+            "PZ 新整批单证负责人核对可见办理入口",
+            case_id=PHASE3_PERMISSION_AND_NEGATIVE_CASES[0],
+            stage="报关权限一致性",
+            priority="P0",
+            preconditions=("PZ 已换人分配", "当前账号是整批单证负责人"),
+            inputs={"batch_number": self.source.batch_number},
+            expected_result="新负责人可以从配载订单列表进入，并看到逐票新增报关单入口",
+            gate=_permission_gate(
+                "PZ 新整批单证负责人可办理",
+                ui="新负责人从配载列表进入后显示逐票报关办理控件。",
+                server="PZ 数据范围和 action 均按当前 document_assignee_user_id 授权。",
+                owner="整批单证负责人",
+            ),
+        ) as observation:
+            batch_href = self._open_batch(self.batch_document)
+            self._open_batch_tab(self.batch_document, "报关与文件")
+            first_order = self.source.order(LTL_KEYS[0])
+            row = self.batch_document.page.locator(
+                "section.batch-order-documents tbody tr"
+            ).filter(has_text=first_order.order_number)
+            self._expect_visible_or_block(
+                self.batch_document,
+                row,
+                f"新负责人挂载订单 {first_order.order_number}",
+                owner="PZ 单证范围维护人",
+                remediation="整批单证负责人必须看到全部有效挂载订单。",
+            )
+            disclosure = row.locator("details.batch-order-file-details")
+            self.batch_document.click(
+                disclosure.locator("summary"),
+                f"展开 {first_order.order_number} 报关办理区",
+            )
+            self._expect_visible_or_block(
+                self.batch_document,
+                disclosure.get_by_role("button", name="新增报关单", exact=True),
+                f"新负责人 {first_order.order_number} 新增报关单入口",
+                owner="PZ 单证权限维护人",
+                remediation="新负责人应有操作控件，不能只显示只读状态。",
+            )
+            child_link = disclosure.get_by_role(
+                "link", name=first_order.order_number, exact=True
+            )
+            self._expect_visible_or_block(
+                self.batch_document,
+                child_link,
+                f"新负责人挂载订单 {first_order.order_number} 详情入口",
+                owner="PZ 挂载订单展示维护人",
+                remediation="逐票报关面板必须提供挂载订单的可见详情入口。",
+            )
+            child_order_href = child_link.first.get_attribute("href") or ""
+            if not child_order_href.startswith("/"):
+                raise BusinessBlocker(
+                    f"挂载订单 {first_order.order_number} 详情链接不是站内路径",
+                    owner="PZ 挂载订单路由维护人",
+                    remediation="挂载订单详情入口必须使用可审计的站内相对路径。",
+                )
+            observation.observe("新整批单证负责人可见逐票报关办理入口", gate_passed=True)
+
+        with self.document.step(
+            "PZ 原单证负责人通过已知深链尝试越权",
+            case_id=PHASE3_PERMISSION_AND_NEGATIVE_CASES[1],
+            stage="报关权限一致性",
+            priority="P0",
+            preconditions=("整批分配已解除原单证负责人关系", "PZ 路径由新负责人可见列表取得"),
+            inputs={"batch_number": self.source.batch_number},
+            expected_result="原单证负责人即使知道 PZ 地址也得到 403/404，不能查看或办理逐票报关",
+            gate=GateExpectation(
+                name="PZ 原单证负责人深链越权门禁",
+                source="role_permission_configuration",
+                configured_mode="read_only",
+                expected_behavior="block",
+                ui_expectation="原负责人列表不显示 PZ，已知深链也进入明确拒绝页。",
+                server_expectation="配载单查询按当前 document_assignee_user_id 精确授权。",
+                owner_role="原单证负责人",
+                remediation="统一配载列表、详情 loader 和 action 的当前单证负责人校验。",
+            ),
+        ) as observation:
+            self.document.goto_for_negative_gate(
+                batch_href,
+                reason="验证原单证负责人解除后不能通过配载单深链读取或办理新负责人的业务",
+                expected_status=(403, 404),
+            )
+            body = self._locator_text(self.document.page.locator("body"), 4_000)
+            if not DENIED_PAGE_RE.search(body):
+                raise BusinessBlocker(
+                    "原单证负责人深链返回拒绝状态，但页面没有可理解的拒绝说明",
+                    owner="配载单权限错误页维护人",
+                    remediation="403/404 页面应明确说明无权或资源不可见。",
+                )
+            self.document.capture_gate_evidence(PHASE3_PERMISSION_AND_NEGATIVE_CASES[1])
+            observation.observe("原单证负责人 PZ 深链被服务端拒绝且页面有明确说明", gate_passed=True)
+            back = self.document.page.get_by_role(
+                "button", name="返回上一页", exact=True
+            )
+            self.document.recover_from_negative_gate(
+                return_control=back,
+                restored_locator=self.document.page.get_by_role(
+                    "link", name="运输订单", exact=True
+                ),
+                target="原单证负责人 PZ 越权",
+            )
+            observation.add_note("负向深链验证后已通过可见返回动作恢复原账号会话")
+
+        with self.document.step(
+            "PZ 原单证负责人通过挂载子订单地址尝试越权",
+            case_id=PHASE3_PERMISSION_AND_NEGATIVE_CASES[3],
+            stage="报关权限一致性",
+            priority="P0",
+            preconditions=("PZ 换人已解除子订单原单证负责人关系", "子订单路径来自新负责人可见详情"),
+            inputs={"order_number": self.source.order(LTL_KEYS[0]).order_number},
+            expected_result="原单证负责人访问子订单时只得到 403/404 或严格只读页面，不能新增、申报或放行",
+            gate=GateExpectation(
+                name="PZ 挂载子订单原单证负责人写权限门禁",
+                source="role_permission_configuration",
+                configured_mode="read_only",
+                expected_behavior="read_only",
+                ui_expectation="旧负责人不可见任何子订单报关新增、申报或放行控件。",
+                server_expectation="子订单 loader/action 均按 PZ 当前整批 document_assignee_user_id 授权。",
+                owner_role="原单证负责人",
+                remediation="统一子订单详情、报关模块 loader 和 action 的当前整批负责人校验。",
+            ),
+        ) as observation:
+            response = self.document.goto_for_negative_gate(
+                child_order_href,
+                reason="验证 PZ 换人后原单证负责人不能通过挂载子订单深链继续申报或放行",
+                expected_status=(200, 403, 404),
+            )
+            body = self._locator_text(self.document.page.locator("body"), 8_000)
+            if response.status == 200:
+                if not re.search(r"只读|仅供查看|不由本账号办理|无权", body):
+                    raise BusinessBlocker(
+                        "挂载子订单向原单证负责人返回 200，但没有明确只读说明",
+                        owner="子订单权限与提示维护人",
+                        remediation="旧负责人可查看时必须明确标注只读，并移除全部报关办理控件。",
+                    )
+                self.document.expect_not_rendered(
+                    self.document.page.get_by_role(
+                        "button", name="新增报关单", exact=True
+                    ),
+                    "原单证负责人不渲染挂载子订单新增报关单入口",
+                )
+                self.document.expect_not_rendered(
+                    self.document.page.locator(
+                        ".customs-inline-release-form button, "
+                        ".customs-release-inline button, "
+                        "form.customs-declaration-form button[type='submit']"
+                    ),
+                    "原单证负责人不渲染挂载子订单报关编辑或提交控件",
+                )
+            elif not DENIED_PAGE_RE.search(body):
+                raise BusinessBlocker(
+                    "挂载子订单拒绝页没有可理解的无权或资源不可见说明",
+                    owner="子订单权限错误页维护人",
+                    remediation="403/404 页面应明确说明当前账号无权办理该挂载订单。",
+                )
+            self.document.capture_gate_evidence(PHASE3_PERMISSION_AND_NEGATIVE_CASES[3])
+            observation.observe(
+                f"原单证负责人挂载子订单深链为 HTTP {response.status}，且无申报/放行能力",
+                gate_passed=True,
+            )
+            self.document.recover_from_negative_gate(
+                return_control=self.document.page.get_by_role(
+                    "button", name="返回上一页", exact=True
+                ),
+                restored_locator=self.document.page.get_by_role(
+                    "link", name="运输订单", exact=True
+                ),
+                target="原单证负责人挂载子订单越权",
+            )
+
     def complete_ftl_customs(self) -> None:
         order = self.source.order("ftl")
         declaration_number = self._declaration_number("ftl", 1)
@@ -962,9 +1195,11 @@ class Phase3Flow:
             if not self._is_visible(create):
                 released = self.document.page.get_by_text("报关已放行", exact=False)
                 if self._is_visible(released):
-                    observation.add_note("整车报关已完成；本轮只核对结果，不重复申报。")
-                    observation.observe("整车报关已放行", gate_passed=True)
-                    return
+                    raise BusinessBlocker(
+                        f"{order.order_number} 在本轮到达前已经报关放行，不能作为 fresh 全流程认证数据",
+                        owner="全流程认证数据隔离维护人",
+                        remediation="废弃本轮续跑，从 Phase 1 创建全新客户和全新订单后重新认证。",
+                    )
                 raise BusinessBlocker(
                     "单证岗未显示整车“新增报关单”入口",
                     owner="单证权限与报关页面维护人",
@@ -1008,6 +1243,54 @@ class Phase3Flow:
                 f"整车报关单 {declaration_number} 已申报并放行", gate_passed=True
             )
 
+    def _assert_batch_exit_blocked_before_all_customs(
+        self,
+        released_order_number: str,
+    ) -> None:
+        session = self.batch_operation
+        self._open_batch(session)
+        self._open_batch_tab(session, "口岸到达与实际出境")
+        blocker = session.page.get_by_text(
+            "当前待办：完成工作流要求的逐票报关与文件",
+            exact=False,
+        )
+        self._expect_visible_or_block(
+            session,
+            blocker,
+            "PZ 部分报关放行时的出境前置提示",
+            owner="PZ 出境门禁维护人",
+            remediation="逐票必办报关未全部放行时必须继续停留在报关前置门禁。",
+        )
+        session.expect_hidden(
+            session.page.get_by_role("button", name="登记口岸到达", exact=True),
+            "部分报关放行时不开放口岸到达按钮",
+        )
+        session.expect_hidden(
+            session.page.locator("form.batch-inline-exit-form"),
+            "部分报关放行时不开放实际出境表单",
+        )
+        session.capture_gate_evidence(PHASE3_PERMISSION_AND_NEGATIVE_CASES[2])
+        expectation = GateExpectation(
+            name="PZ 未全部报关放行不得进入出境办理",
+            source="workflow_instance_module_state",
+            configured_mode="required",
+            expected_behavior="block",
+            ui_expectation="逐票必办报关未全部完成时只显示返回报关页的前置提示。",
+            server_expectation="整批出境前按每票冻结工作流重算文件和报关放行门禁。",
+            owner_role="整批操作负责人",
+            remediation="统一报关完成统计、出境页按钮显示和 action 服务端门禁。",
+        )
+        session.record_gate(
+            name=expectation.name,
+            expected=f"UI：{expectation.ui_expectation}；服务端：{expectation.server_expectation}",
+            passed=True,
+            actual=f"仅 {released_order_number} 已放行时，口岸到达和实际出境入口均未开放",
+            owner=expectation.owner_role,
+            remediation=expectation.remediation,
+            expectation=expectation,
+            case_id=PHASE3_PERMISSION_AND_NEGATIVE_CASES[2],
+        )
+
     def complete_batch_customs(self) -> None:
         session = self.batch_document
         with session.step(
@@ -1050,8 +1333,11 @@ class Phase3Flow:
                         remediation="回到 PZ 装车文件步骤，通过可见上传和审核完成必填项。",
                     )
                 if "张放行" in row_text and not "0/" in row_text:
-                    observation.add_note(f"{order.order_number} 已存在放行记录，不重复申报。")
-                    continue
+                    raise BusinessBlocker(
+                        f"{order.order_number} 在本轮到达前已有报关放行记录，不能作为 fresh 全流程认证数据",
+                        owner="全流程认证数据隔离维护人",
+                        remediation="废弃本轮续跑，从 Phase 1 创建全新客户和全新订单后重新认证。",
+                    )
                 disclosure = row.locator("details.batch-order-file-details")
                 session.click(disclosure.locator("summary"), f"展开 {order.order_number} 报关")
                 panel = disclosure.locator(".batch-order-file-panel")
@@ -1124,6 +1410,8 @@ class Phase3Flow:
                 self.harness.journal.register_entity(
                     "customs_declaration", key, declaration_number
                 )
+                if key == LTL_KEYS[0]:
+                    self._assert_batch_exit_blocked_before_all_customs(order.order_number)
             ready = session.page.get_by_text("门禁已通过", exact=False)
             self._expect_visible_or_block(
                 session,
@@ -1243,9 +1531,11 @@ class Phase3Flow:
                     "table.tracking-progress-table tbody tr"
                 ).filter(has_text=label)
                 if self._is_visible(progress_row) and "已完成" in self._locator_text(progress_row):
-                    observation.add_note(f"{label}已登记，本轮不重复写入。")
-                    self.artifacts.completed_tracking_nodes["ftl"].append(code)
-                    continue
+                    raise BusinessBlocker(
+                        f"{order.order_number} 的{label}在本轮到达前已经登记，不能作为 fresh 全流程认证数据",
+                        owner="全流程认证数据隔离维护人",
+                        remediation="废弃本轮续跑，从 Phase 1 创建全新客户和全新订单后重新认证。",
+                    )
                 self._submit_ftl_tracking_node(
                     code=code,
                     label=label,
@@ -1848,6 +2138,7 @@ class Phase3Flow:
         self.complete_overseas_inbound()
         self.verify_portal_and_optional_appointment()
         self.complete_pickup_signoff()
+        self.harness.assert_certifiable()
         return self.artifacts
 
 
@@ -1964,6 +2255,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     reason, tuple(credentials.values()), portal_email=portal_email
                 )
                 summary_path = harness.close(status=status)  # type: ignore[arg-type]
+                if harness.last_status != status:
+                    status = str(harness.last_status)
+                    if not reason:
+                        reason = harness.finalization_error or "步骤、门禁或证据汇总未通过"
     except Exception as error:
         status = "failed"
         reason = _redact_reason(

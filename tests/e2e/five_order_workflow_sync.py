@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# LEGACY / NON-CERTIFICATION ONLY: this historical 2 FTL + 3 LTL script does
+# not satisfy the current UI-only guard. Do not run it for acceptance evidence.
+# 正式认证只使用 tms_multi_account_smoke.py、tms_pz_account_prep.py 和 phase1..phase4。
+
 """2 整车 + 3 拼车工作流及门户关键功能真实 UI 回归。
 
 所有业务写入都由 Playwright 的 click/fill/select_option/set_input_files/

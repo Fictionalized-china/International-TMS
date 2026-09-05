@@ -41,6 +41,7 @@ LANDING_PATTERN_BY_SITE: dict[Site, re.Pattern[str]] = {
 SENSITIVE_TARGET = re.compile(r"(?i)(?:password|secret|token|密码|凭证)")
 SENSITIVE_INPUT_KEY = re.compile(r"(?i)(?:password|secret|token|email|account|密码|凭证|邮箱|账号)")
 EMAIL_TEXT = re.compile(r"(?i)(?<![\w.+-])[\w.+-]+@[\w.-]+\.[a-z]{2,}(?![\w.-])")
+FAILED_CERTIFICATION_METRICS = ("steps_failed", "steps_blocked", "gates_failed")
 
 GateSource = Literal[
     "workflow_instance_field_configuration",
@@ -253,6 +254,69 @@ def redact_evidence_text(value: str) -> str:
     return EMAIL_TEXT.sub("<redacted-email>", value)
 
 
+def require_certified_summary(
+    payload: Mapping[str, Any],
+    *,
+    source: Path | str,
+    label: str,
+    require_fresh_attempt: bool = False,
+) -> Mapping[str, Any]:
+    """Resolve an envelope/summary and reject nominal passes with failed evidence."""
+
+    source_path = Path(source).resolve()
+    if str(payload.get("status", "")).strip().lower() != "passed":
+        raise ValueError(f"{label}必须为 passed，不能接续失败、阻断或未完成的数据")
+
+    evidence: Mapping[str, Any] = payload
+    if not isinstance(evidence.get("metrics"), Mapping):
+        summary_value = str(payload.get("summary", "")).strip()
+        if not summary_value:
+            raise ValueError(f"{label}缺少可核验的 metrics 与 summary 证据")
+        summary_path = Path(summary_value)
+        if not summary_path.is_absolute():
+            summary_path = source_path.parent / summary_path
+        summary_path = summary_path.resolve()
+        if not summary_path.is_file() or summary_path == source_path:
+            raise ValueError(f"{label}引用的 summary 证据不存在或形成自引用")
+        loaded = json.loads(summary_path.read_text(encoding="utf-8-sig"))
+        if not isinstance(loaded, Mapping):
+            raise ValueError(f"{label}引用的 summary 必须为 JSON 对象")
+        evidence = loaded
+        if str(evidence.get("status", "")).strip().lower() != "passed":
+            raise ValueError(f"{label}引用的 summary 未通过")
+
+    metrics = evidence.get("metrics")
+    if not isinstance(metrics, Mapping):
+        raise ValueError(f"{label}summary 缺少 metrics，不能证明本轮无失败门禁")
+    failures: dict[str, int] = {}
+    for key in FAILED_CERTIFICATION_METRICS:
+        value = metrics.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{label}summary.metrics.{key} 必须是非负整数")
+        if value:
+            failures[key] = value
+    if failures:
+        rendered = "、".join(f"{key}={value}" for key, value in failures.items())
+        raise ValueError(f"{label}虽然标记 passed，但仍有失败证据：{rendered}")
+
+    if require_fresh_attempt:
+        scenario = evidence.get("scenario")
+        attempt = scenario.get("attempt") if isinstance(scenario, Mapping) else None
+        constraints = evidence.get("certification_constraints")
+        run_id = str(evidence.get("run_id", "")).strip()
+        if not isinstance(attempt, Mapping):
+            raise ValueError(f"{label}缺少 fresh attempt 元数据，禁止把旧订单续跑当成本轮认证")
+        if str(attempt.get("run_id", "")).strip() != run_id:
+            raise ValueError(f"{label}attempt.run_id 与 summary.run_id 不一致")
+        if not str(attempt.get("entity_prefix", "")).strip():
+            raise ValueError(f"{label}fresh attempt 缺少唯一 entity_prefix")
+        if not isinstance(attempt.get("attempt"), int) or int(attempt["attempt"]) < 1:
+            raise ValueError(f"{label}fresh attempt 序号无效")
+        if not isinstance(constraints, Mapping) or constraints.get("failure_requires_fresh_entities") is not True:
+            raise ValueError(f"{label}未声明失败后必须重建全新业务实体")
+    return evidence
+
+
 class RunJournal:
     """Append-only in-memory journal with atomic JSON snapshots."""
 
@@ -395,6 +459,18 @@ class RunJournal:
         if note.strip():
             self.notes.append(note.strip())
 
+    def certification_failure_counts(self) -> dict[str, int]:
+        return {
+            "steps_failed": sum(item.get("status") == "failed" for item in self.steps),
+            "steps_blocked": sum(item.get("status") == "blocked" for item in self.steps),
+            "gates_failed": sum(not item["passed"] for item in self.gates),
+        }
+
+    def resolve_status(self, requested: RunStatus | str) -> RunStatus | str:
+        if requested == "passed" and any(self.certification_failure_counts().values()):
+            return "failed"
+        return requested
+
     def payload(self, status: str) -> dict[str, Any]:
         by_role = Counter(item["role"] for item in self.actions)
         by_kind = Counter(item["kind"] for item in self.actions)
@@ -402,10 +478,12 @@ class RunJournal:
             bool(item["url_before"] and item["url_after"] and item["url_before"] != item["url_after"])
             for item in self.actions
         )
+        failures = self.certification_failure_counts()
+        resolved_status = self.resolve_status(status)
         return {
             "schema": self.schema,
             "run_id": self.run_id,
-            "status": status,
+            "status": resolved_status,
             "started_at": self.started_at,
             "generated_at": utc_now(),
             "scenario": {
@@ -435,10 +513,10 @@ class RunJournal:
                 "actions_by_kind": dict(sorted(by_kind.items())),
                 "navigation_hops": navigation_hops,
                 "gates_total": len(self.gates),
-                "gates_failed": sum(not item["passed"] for item in self.gates),
+                "gates_failed": failures["gates_failed"],
                 "steps_total": len(self.steps),
-                "steps_failed": sum(item.get("status") == "failed" for item in self.steps),
-                "steps_blocked": sum(item.get("status") == "blocked" for item in self.steps),
+                "steps_failed": failures["steps_failed"],
+                "steps_blocked": failures["steps_blocked"],
                 "thought_events": len(self.thought_events),
                 "avoidable_thought_events": sum(item["avoidable"] for item in self.thought_events),
             },
@@ -810,6 +888,14 @@ class RoleBrowserSession:
 
         self._perform(kind="assert_hidden", target=target, operation=operation)
 
+    def expect_not_rendered(self, locator: Any, target: str) -> None:
+        def operation() -> None:
+            count = int(locator.count())
+            if count:
+                raise AssertionError(f"{target}应完全不渲染，实际 DOM 中仍有 {count} 个")
+
+        self._perform(kind="assert_not_rendered", target=target, operation=operation)
+
     def expect_url_path(self, pattern: re.Pattern[str], target: str) -> None:
         def operation() -> None:
             path = urlparse(str(getattr(self.page, "url", ""))).path
@@ -856,7 +942,7 @@ class RoleBrowserSession:
         path: str,
         *,
         reason: str,
-        expected_status: int | Sequence[int] | None = None,
+        expected_status: int | Sequence[int],
     ) -> Any:
         if len(reason.strip()) < 12:
             raise ValueError("负向深链必须记录具体门禁目的")
@@ -872,13 +958,35 @@ class RoleBrowserSession:
             ),
             detail={"reason": reason},
         )
-        if expected_status is not None and response is not None:
-            allowed = {expected_status} if isinstance(expected_status, int) else set(expected_status)
-            if response.status not in allowed:
-                raise AssertionError(
-                    f"负向门禁返回 HTTP {response.status}，期望 {sorted(allowed)}"
-                )
+        allowed = {expected_status} if isinstance(expected_status, int) else set(expected_status)
+        if not allowed:
+            raise ValueError("负向门禁必须声明至少一个期望 HTTP 状态")
+        if response is None:
+            raise AssertionError("负向门禁未取得主文档 HTTP 响应，不能仅凭页面宽泛文案判定通过")
+        if response.status not in allowed:
+            raise AssertionError(
+                f"负向门禁返回 HTTP {response.status}，期望 {sorted(allowed)}"
+            )
         return response
+
+    def capture_gate_evidence(self, label: str) -> Path:
+        """Capture the denial/blocker state before any recovery action clears it."""
+
+        return self.screenshot(f"gate-{safe_artifact_name(label)}")
+
+    def recover_from_negative_gate(
+        self,
+        *,
+        return_control: Any,
+        restored_locator: Any,
+        target: str,
+    ) -> None:
+        if return_control.count() > 0 and bool(return_control.first.is_visible()):
+            self.click(return_control.first, f"从{target}拒绝页返回上一页")
+        else:
+            self.press("Alt+Left", f"通过浏览器后退恢复{target}业务页面")
+        self.page.wait_for_timeout(180)
+        self.expect_visible(restored_locator, f"{target}恢复后的站点主导航")
 
     def record_gate(
         self,
@@ -1011,6 +1119,8 @@ class RoleBrowserSession:
         started = time.perf_counter()
         status = "passed"
         error = ""
+        caught_error = False
+        deferred_error: Exception | None = None
         observation = StepObservation()
         action_start = len(self.journal.actions)
         evidence_start = len(self.journal.evidence)
@@ -1022,6 +1132,7 @@ class RoleBrowserSession:
         try:
             yield observation
         except Exception as caught:
+            caught_error = True
             status = "failed"
             error = str(caught)[:6000]
             self.capture_failure(
@@ -1036,12 +1147,18 @@ class RoleBrowserSession:
                 except Exception as caught:
                     status = "failed"
                     error = f"步骤证据截图失败：{caught}"[:6000]
+                    deferred_error = RuntimeError(error)
             step_actions = self.journal.actions[action_start:]
             action_kinds = Counter(item["kind"] for item in step_actions)
             gate_passed = observation.gate_passed
             if gate is not None:
                 if gate_passed is None:
                     gate_passed = status == "passed"
+                gate_passed = bool(gate_passed) and status == "passed"
+                if not gate_passed and status == "passed":
+                    status = "failed"
+                    error = observation.actual_result or "门禁断言未通过"
+                    deferred_error = AssertionError(error)
                 self.record_gate(
                     name=gate.name,
                     expected=(
@@ -1089,6 +1206,8 @@ class RoleBrowserSession:
                     "error": error,
                 }
             )
+            if deferred_error is not None and not caught_error:
+                raise deferred_error
 
     def close(self) -> None:
         try:
@@ -1126,6 +1245,16 @@ class TmsUIHarness:
         self.action_timeout_ms = action_timeout_ms
         self.navigation_timeout_ms = navigation_timeout_ms
         self.sessions: dict[str, RoleBrowserSession] = {}
+        self.last_status: RunStatus | str = "running"
+        self.finalization_error = ""
+
+    def assert_certifiable(self) -> None:
+        failures = self.journal.certification_failure_counts()
+        if any(failures.values()):
+            rendered = "、".join(
+                f"{key}={value}" for key, value in failures.items() if value
+            )
+            raise AssertionError(f"本轮认证存在失败步骤或门禁：{rendered}")
 
     def add_role(self, role: str, email: str, site: Site = "admin") -> RoleBrowserSession:
         if role in self.sessions:
@@ -1152,10 +1281,25 @@ class TmsUIHarness:
         return session
 
     def close(self, *, status: RunStatus) -> Path:
+        close_errors: list[str] = []
         for session in self.sessions.values():
             try:
                 session.close()
             except Exception as error:
                 self.journal.add_note(f"{session.role} 关闭失败：{error}")
-        self.browser.close()
-        return self.journal.flush(status=status)
+                close_errors.append(f"{session.role}: {error}")
+        provisional: RunStatus | str = self.journal.resolve_status(status)
+        if close_errors and provisional == "passed":
+            provisional = "failed"
+        summary = self.journal.flush(status=provisional)
+        try:
+            self.browser.close()
+        except Exception as error:
+            close_errors.append(f"browser: {error}")
+            self.journal.add_note(f"浏览器关闭失败：{error}")
+        final_status: RunStatus | str = self.journal.resolve_status(provisional)
+        if close_errors and final_status == "passed":
+            final_status = "failed"
+        self.last_status = final_status
+        self.finalization_error = "；".join(close_errors)
+        return self.journal.flush(status=final_status)

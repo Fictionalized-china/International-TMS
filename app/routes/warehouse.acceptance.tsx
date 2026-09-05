@@ -19,6 +19,8 @@ import { syncOrderWorkflowSnapshot } from "../lib/order-modules.server";
 import { writeAudit } from "../lib/audit.server";
 import { synchronizeOrderExceptionStatuses } from "../lib/order-exception-status.server";
 import { loadOrderModuleWorkflowFields } from "../lib/workflow-fields.server";
+import { canOperateWarehouseUi } from "../lib/warehouse-ui-access";
+import { loadWarehousePhysicalWorkflowAccess } from "../lib/warehouse-workflow-access.server";
 import {
   acceptanceRequiredMarker,
   automaticWarehouseAcceptanceResult,
@@ -181,35 +183,48 @@ export async function loader({ request }: Route.LoaderArgs) {
     else if (!matches.results.length) lookupError = `未找到计划进入“${warehouse.name}”且可验收的订单：${reference}`;
     else {
       order = matches.results[0];
-      const cargo = await env.DB.prepare(
-        `SELECT i.id,i.line_no,i.cargo_name_cn,i.cargo_name_en,i.hs_code,i.package_type,
-                i.package_count,i.pieces_per_package,i.gross_weight_per_package_kg,
-                i.net_weight_per_package_kg,i.length_cm,i.width_cm,i.height_cm,
-                i.volume_per_package_cbm,i.marks,i.notes,
-                COALESCE(SUM(CASE WHEN r.id IS NOT NULL THEN ri.actual_packages ELSE 0 END),0) received_packages,
-                COALESCE(SUM(CASE WHEN r.id IS NOT NULL THEN ri.actual_pieces ELSE 0 END),0) received_pieces,
-                COALESCE(SUM(CASE WHEN r.id IS NOT NULL THEN ri.actual_weight_kg ELSE 0 END),0) received_weight_kg,
-                COALESCE(SUM(CASE WHEN r.id IS NOT NULL THEN ri.actual_volume_cbm ELSE 0 END),0) received_volume_cbm
-           FROM order_cargo_items i
-           LEFT JOIN warehouse_receipt_items ri ON ri.cargo_item_id=i.id AND ri.organization_id=i.organization_id
-           LEFT JOIN warehouse_receipts r ON r.id=ri.receipt_id AND r.status='completed' AND r.warehouse_id=?
-          WHERE i.organization_id=? AND i.order_id=?
-          GROUP BY i.id
-          ORDER BY i.line_no,i.id`,
-      ).bind(warehouse.id, user.organizationId, order.id).all<CargoItem>();
-      cargoItems = cargo.results;
-      workflowFields = await loadOrderModuleWorkflowFields(
+      const workflowAccess = await loadWarehousePhysicalWorkflowAccess(
+        env.DB,
         user.organizationId,
         order.id,
         "warehouse",
+        { userId: user.userId, positionCode: user.positionCode },
       );
-      if (!cargoItems.length) lookupError = "该订单没有货物明细，不能办理逐条验收，请先在订单中补充货物";
+      if (!workflowAccess.available) {
+        lookupError = workflowAccess.reason || "当前订单的冻结工作流尚未开放国内仓入库";
+        order = null;
+      } else {
+        const cargo = await env.DB.prepare(
+          `SELECT i.id,i.line_no,i.cargo_name_cn,i.cargo_name_en,i.hs_code,i.package_type,
+                  i.package_count,i.pieces_per_package,i.gross_weight_per_package_kg,
+                  i.net_weight_per_package_kg,i.length_cm,i.width_cm,i.height_cm,
+                  i.volume_per_package_cbm,i.marks,i.notes,
+                  COALESCE(SUM(CASE WHEN r.id IS NOT NULL THEN ri.actual_packages ELSE 0 END),0) received_packages,
+                  COALESCE(SUM(CASE WHEN r.id IS NOT NULL THEN ri.actual_pieces ELSE 0 END),0) received_pieces,
+                  COALESCE(SUM(CASE WHEN r.id IS NOT NULL THEN ri.actual_weight_kg ELSE 0 END),0) received_weight_kg,
+                  COALESCE(SUM(CASE WHEN r.id IS NOT NULL THEN ri.actual_volume_cbm ELSE 0 END),0) received_volume_cbm
+             FROM order_cargo_items i
+             LEFT JOIN warehouse_receipt_items ri ON ri.cargo_item_id=i.id AND ri.organization_id=i.organization_id
+             LEFT JOIN warehouse_receipts r ON r.id=ri.receipt_id AND r.status='completed' AND r.warehouse_id=?
+            WHERE i.organization_id=? AND i.order_id=?
+            GROUP BY i.id
+            ORDER BY i.line_no,i.id`,
+        ).bind(warehouse.id, user.organizationId, order.id).all<CargoItem>();
+        cargoItems = cargo.results;
+        workflowFields = await loadOrderModuleWorkflowFields(
+          user.organizationId,
+          order.id,
+          "warehouse",
+        );
+        if (!cargoItems.length) lookupError = "该订单没有货物明细，不能办理逐条验收，请先在订单中补充货物";
+      }
     }
   }
 
   return {
     user,
     warehouse,
+    warehouseAccessLevel: warehouseContext.selectedAccessLevel,
     reference,
     order,
     cargoItems,
@@ -264,6 +279,16 @@ export async function action({ request }: Route.ActionArgs) {
     shipment_id: string | null; shipment_number: string | null;
   }>();
   if (!order) return { formError: "订单不存在、状态不可收货，或计划入库仓库与当前仓库不一致" };
+
+  const workflowAccess = await loadWarehousePhysicalWorkflowAccess(
+    env.DB,
+    user.organizationId,
+    order.id,
+    "warehouse",
+    { userId: user.userId, positionCode: user.positionCode },
+  );
+  if (!workflowAccess.available)
+    return { formError: workflowAccess.reason || "当前订单的冻结工作流尚未开放国内仓入库" };
 
   const workflowFields = await loadOrderModuleWorkflowFields(
     user.organizationId,
@@ -675,7 +700,10 @@ export async function action({ request }: Route.ActionArgs) {
 
 export default function WarehouseAcceptance({ loaderData, actionData }: Route.ComponentProps) {
   const busy = useNavigation().state !== "idle";
-  const canOperate = loaderData.user.permissions.includes("warehouse.operate");
+  const canOperate = canOperateWarehouseUi(
+    loaderData.user,
+    loaderData.warehouseAccessLevel,
+  );
   const [receiptResult, setReceiptResult] = useState<"partial" | "ready" | "exception">("partial");
   const labels = loaderData.receiptId ? loaderData.recentLabels : [];
   const policies = resolveWarehouseAcceptancePolicies(loaderData.workflowFields);
@@ -684,16 +712,16 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
     <header className="page-header acceptance-header"><div><p className="eyebrow">ACCEPTANCE RECEIVING</p><h1>验收收货</h1><p>扫描订单号，逐条核对预录与实收数据，选择库位入库后打印每个实际包装的仓库标签。</p></div>{labels.length > 0 && <button type="button" className="primary no-print" onClick={() => window.print()}>打印本次 {labels.length} 张标签</button>}</header>
     {(loaderData.resultMessage || actionData?.formError) && <div className={`alert ${actionData?.formError ? "error" : "success"}`}>{actionData?.formError ?? loaderData.resultMessage}</div>}
     {!loaderData.locations.length && <div className="alert error">当前仓库没有可用库位，请先<Link to={`/warehouse/locations?warehouseId=${loaderData.warehouse.id}`}>配置仓库与库位</Link>。</div>}
-    <WarehouseReceivingScanPanel
+    {canOperate ? <WarehouseReceivingScanPanel
       warehouseId={loaderData.warehouse.id}
       reference={loaderData.reference}
       inputLabel="扫描订单号"
       placeholder="扫描订单号条码后回车"
       submitLabel="调出验收信息"
       hint="扫描枪输入订单号并发送回车后，系统自动读取客户、货物、运输和累计收货信息。"
-    />
+    /> : <div className="alert info">当前账号为仓库只读视角，可查看入库结果与历史标签；验收扫描和入库提交仅向有操作权限的冻结任务负责人开放。</div>}
     {loaderData.lookupError && <div className="alert error no-print">{loaderData.lookupError}</div>}
-    {loaderData.order && loaderData.cargoItems.length > 0 && <Form method="post" className="acceptance-workbench no-print" onInput={(event) => synchronizeWarehouseVolumeRow(event.target)}>
+    {canOperate && loaderData.order && loaderData.cargoItems.length > 0 && <Form method="post" className="acceptance-workbench no-print" onInput={(event) => synchronizeWarehouseVolumeRow(event.target)}>
       <input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/><input type="hidden" name="orderId" value={loaderData.order.id}/><input type="hidden" name="reference" value={loaderData.order.order_number}/>
       <WarehouseReceivingOrderStrip facts={[
         { label: "订单 / 类型", value: `${loaderData.order.order_number} · ${loaderData.order.business_type === "ftl" ? "整车" : "拼车"}` },

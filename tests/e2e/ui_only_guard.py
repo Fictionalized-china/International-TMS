@@ -26,9 +26,47 @@ DEFAULT_IGNORES = {
     "tms_ui_harness.py",
     "ui_only_guard.py",
     "test_ui_only_guard.py",
+    # Historical reference only; its own header explicitly excludes it from
+    # certification.  Direct scans of the file still report every violation.
+    "five_order_workflow_sync.py",
 }
 LOGIN_PATHS = {"/login", "/portal/login", "/warehouse/login"}
 MIN_NEGATIVE_REASON_LENGTH = 12
+RAW_PLAYWRIGHT_ACTIONS = {
+    "click",
+    "dblclick",
+    "fill",
+    "type",
+    "press",
+    "press_sequentially",
+    "insert_text",
+    "check",
+    "uncheck",
+    "set_checked",
+    "select_option",
+    "clear",
+    "tap",
+    "drag_to",
+}
+PLAYWRIGHT_HANDLE_NAMES = re.compile(
+    r"(?i)(?:page|locator|element|button|row|field|input|checkbox|radio|select|"
+    r"link|form|dialog|modal|control|trigger|option|nav|tab|entry|disclosure|panel)$"
+)
+LOCATOR_FACTORY_METHODS = {
+    "locator",
+    "get_by_alt_text",
+    "get_by_label",
+    "get_by_placeholder",
+    "get_by_role",
+    "get_by_test_id",
+    "get_by_text",
+    "get_by_title",
+    "filter",
+    "nth",
+    "and_",
+    "or_",
+}
+PLAYWRIGHT_HANDLE_ANNOTATIONS = {"Locator", "Page", "ElementHandle", "Frame", "Keyboard"}
 
 FORBIDDEN_IMPORTS = {
     "sqlite3": ("IMPORT_DB", "禁止导入 sqlite3 直接读写业务数据"),
@@ -84,6 +122,19 @@ def _attribute_chain(node: ast.AST) -> list[str]:
     return list(reversed(chain))
 
 
+def _dotted_name(node: ast.AST) -> str:
+    chain = _attribute_chain(node)
+    return ".".join(chain)
+
+
+def _annotation_name(node: ast.AST | None) -> str:
+    if node is None:
+        return ""
+    if isinstance(node, ast.Subscript):
+        return _annotation_name(node.value)
+    return _attribute_chain(node)[-1] if _attribute_chain(node) else ""
+
+
 def _literal_string(node: ast.AST | None) -> str | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
@@ -126,6 +177,86 @@ class _GuardVisitor(ast.NodeVisitor):
         self.path = path
         self.docstrings = _docstring_nodes(tree)
         self.violations: list[Violation] = []
+        self.handle_scopes: list[set[str]] = [
+            {"page", "locator", "context", "browser", "keyboard"}
+        ]
+        self.handle_attributes: set[str] = set()
+        self.class_stack: list[str] = []
+
+    @property
+    def handles(self) -> set[str]:
+        return self.handle_scopes[-1]
+
+    def _is_harness_internal(self) -> bool:
+        return "RoleBrowserSession" in self.class_stack
+
+    def _is_handle_expression(self, node: ast.AST) -> bool:
+        dotted = _dotted_name(node)
+        if dotted and (dotted in self.handles or dotted in self.handle_attributes):
+            return True
+        if isinstance(node, ast.Name):
+            return bool(PLAYWRIGHT_HANDLE_NAMES.fullmatch(node.id))
+        if isinstance(node, ast.Attribute):
+            if node.attr in {"first", "last"}:
+                return self._is_handle_expression(node.value)
+            return bool(PLAYWRIGHT_HANDLE_NAMES.fullmatch(node.attr))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            method = node.func.attr
+            if method == "locator" or method.startswith("get_by_"):
+                return True
+            if method in LOCATOR_FACTORY_METHODS:
+                return self._is_handle_expression(node.func.value)
+        return False
+
+    def _set_handle_target(self, target: ast.AST, is_handle: bool) -> None:
+        dotted = _dotted_name(target)
+        if not dotted:
+            return
+        destination = self.handle_attributes if "." in dotted else self.handles
+        if is_handle:
+            destination.add(dotted)
+        else:
+            destination.discard(dotted)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.class_stack.append(node.name)
+        self.generic_visit(node)
+        self.class_stack.pop()
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self.handle_scopes.append(
+            {"page", "locator", "context", "browser", "keyboard"}
+        )
+        for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
+            if _annotation_name(argument.annotation) in PLAYWRIGHT_HANDLE_ANNOTATIONS:
+                self.handles.add(argument.arg)
+        if node.args.vararg and _annotation_name(node.args.vararg.annotation) in PLAYWRIGHT_HANDLE_ANNOTATIONS:
+            self.handles.add(node.args.vararg.arg)
+        if node.args.kwarg and _annotation_name(node.args.kwarg.annotation) in PLAYWRIGHT_HANDLE_ANNOTATIONS:
+            self.handles.add(node.args.kwarg.arg)
+        for statement in node.body:
+            self.visit(statement)
+        self.handle_scopes.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self.visit(node.value)
+        is_handle = self._is_handle_expression(node.value)
+        for target in node.targets:
+            self._set_handle_target(target, is_handle)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if node.value is not None:
+            self.visit(node.value)
+        is_handle = _annotation_name(node.annotation) in PLAYWRIGHT_HANDLE_ANNOTATIONS
+        if node.value is not None:
+            is_handle = is_handle or self._is_handle_expression(node.value)
+        self._set_handle_target(node.target, is_handle)
 
     def add(self, node: ast.AST, code: str, message: str) -> None:
         self.violations.append(
@@ -168,19 +299,13 @@ class _GuardVisitor(ast.NodeVisitor):
         chain = _attribute_chain(node.func)
         name = chain[-1] if chain else ""
 
-        if chain and chain[0] in {"page", "locator", "context", "browser", "keyboard"} and name in {
-            "click",
-            "dblclick",
-            "fill",
-            "type",
-            "press",
-            "insert_text",
-            "check",
-            "uncheck",
-            "set_checked",
-            "select_option",
-            "tap",
-        }:
+        receiver = node.func.value if isinstance(node.func, ast.Attribute) else None
+        if (
+            not self._is_harness_internal()
+            and receiver is not None
+            and name in RAW_PLAYWRIGHT_ACTIONS
+            and self._is_handle_expression(receiver)
+        ):
             self.add(
                 node,
                 "RAW_PLAYWRIGHT_ACTION",
@@ -233,6 +358,16 @@ class _GuardVisitor(ast.NodeVisitor):
                     node,
                     "NEGATIVE_GOTO_REASON",
                     f"负向深链测试必须写明至少 {MIN_NEGATIVE_REASON_LENGTH} 个字符的具体门禁目的",
+                )
+            status_node = next(
+                (keyword.value for keyword in node.keywords if keyword.arg == "expected_status"),
+                None,
+            )
+            if status_node is None:
+                self.add(
+                    node,
+                    "NEGATIVE_GOTO_STATUS",
+                    "负向深链测试必须声明 expected_status，不能只凭页面文案判定通过",
                 )
 
         for keyword in node.keywords:

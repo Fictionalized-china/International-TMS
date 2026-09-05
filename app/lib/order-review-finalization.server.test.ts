@@ -140,6 +140,8 @@ describe("order review finalization gate", () => {
     const dbForRow = (row: Record<string, unknown>) => ({
       prepare(sql: string) {
         expect(sql).toContain("workflow_instance_module_states");
+        expect(sql).toContain("wi.organization_id=o.organization_id");
+        expect(sql).toContain("wi.order_id=o.id");
         return {
           bind() {
             return { async first() { return row; } };

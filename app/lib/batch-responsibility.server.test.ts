@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("cloudflare:workers", () => ({ env: { DB: {} } }));
 import {
   batchInitialResponsibilityAssignmentGuard,
   loadBatchInitialResponsibilityRestrictions,
@@ -88,7 +90,12 @@ describe("batch initial responsibility server policy", () => {
       orderNumbers: ["SO2026090400229"],
       moduleCodes: ["configured-document-module"],
     });
-    expect(restrictions.configurationErrors).toEqual([]);
+    expect(restrictions.configurationErrors).toContain(
+      "SO2026090400228 冻结工作流中没有未完成的单证职责（DOC）",
+    );
+    expect(restrictions.configurationErrors).toContain(
+      "SO2026090400229 冻结工作流中没有未完成的操作职责（OPERATION）",
+    );
     expect(query.bindings).toEqual(["org-a", "batch-a"]);
     expect(query.sql).toContain("bo.status!='removed'");
     expect(query.sql).toContain("LEFT JOIN workflow_instances wi");
@@ -169,7 +176,7 @@ describe("batch initial responsibility server policy", () => {
     expect(query.bindings).toEqual(["org-a", "batch-a", "batch-b"]);
     expect(byBatch["batch-a"].operation[0].userId).toBe("operator-a");
     expect(byBatch["batch-a"].configurationErrors).toContain(
-      "挂载订单冻结工作流中没有未完成的单证职责（DOC）",
+      "SO-A 冻结工作流中没有未完成的单证职责（DOC）",
     );
     expect(byBatch["batch-b"].configurationErrors).toContain("SO-B 尚未锁定工作流实例");
   });

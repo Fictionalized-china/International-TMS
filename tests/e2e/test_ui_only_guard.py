@@ -33,6 +33,7 @@ def run(ui, customer_link):
     ui.goto_for_negative_gate(
         "/admin/orders/not-in-scope",
         reason="验证非当前负责人无法绕过订单范围门禁",
+        expected_status=(403, 404),
     )
 """
         self.assertEqual(self.codes(source), set())
@@ -92,6 +93,45 @@ ui.goto_for_negative_gate("/admin/orders/123", reason="short")
             [item.code for item in violations].count("NEGATIVE_GOTO_REASON"),
             2,
         )
+        self.assertEqual(
+            [item.code for item in violations].count("NEGATIVE_GOTO_STATUS"),
+            2,
+        )
+
+    def test_rejects_locator_aliases_and_nested_locator_actions(self) -> None:
+        source = """
+button = page.get_by_role("button", name="提交")
+button.click()
+row = page.locator("tbody tr").first
+row.locator("button").click()
+field = row.locator("input")
+field.fill("business value")
+checkbox: Locator = page.locator("input[type=checkbox]")
+checkbox.check()
+element = page.locator("select")
+element.select_option("approved")
+"""
+        violations = scan_source(source, Path("scenario.py"))
+        self.assertEqual(
+            [item.code for item in violations].count("RAW_PLAYWRIGHT_ACTION"),
+            5,
+        )
+
+    def test_allows_role_session_helpers_and_harness_internal_actions(self) -> None:
+        source = """
+class RoleBrowserSession:
+    def click(self, locator):
+        locator.click()
+
+def run(session, button):
+    session.click(button, "提交业务")
+    session.set_checked(button, True, "确认")
+
+class Flow:
+    def run(self):
+        self.operation.click(self.button, "提交业务")
+"""
+        self.assertNotIn("RAW_PLAYWRIGHT_ACTION", self.codes(source))
 
     def test_directory_scan_skips_guard_infrastructure_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

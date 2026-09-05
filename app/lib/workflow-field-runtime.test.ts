@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  frozenWorkflowFieldScopeMarkerKey,
   hasVisibleRuntimeWorkflowField,
   runtimeWorkflowFieldPolicy,
 } from "./workflow-field-runtime";
@@ -39,6 +40,23 @@ describe("runtimeWorkflowFieldPolicy", () => {
     expect(runtimeWorkflowFieldPolicy([], "legacy", true)).toMatchObject({
       visible: true,
       required: true,
+      configured: false,
+    });
+  });
+
+  it("does not treat an explicit frozen scope marker as a legacy empty array", () => {
+    const frozenEmptyScope = [{
+      fieldKey: frozenWorkflowFieldScopeMarkerKey,
+      isActive: false,
+      isRequired: false,
+    }];
+    expect(runtimeWorkflowFieldPolicy(
+      frozenEmptyScope,
+      "document_commercial_invoice",
+      true,
+    )).toMatchObject({
+      visible: false,
+      required: false,
       configured: false,
     });
   });

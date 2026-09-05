@@ -37,7 +37,13 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from tms_ui_credentials import CredentialRecord, CredentialVault, load_credentials
-from tms_ui_harness import GateExpectation, RoleBrowserSession, TmsUIHarness, safe_artifact_name
+from tms_ui_harness import (
+    GateExpectation,
+    RoleBrowserSession,
+    TmsUIHarness,
+    require_certified_summary,
+    safe_artifact_name,
+)
 from tms_pz_account_prep import (
     build_pz_runtime_credentials,
     prepare_secondary_pz_accounts,
@@ -63,12 +69,19 @@ PHASE2_STAGE_ORDER = (
     "batch_loading_outbound",
     "batch_sync_and_drawer_assertions",
 )
+PHASE2_NEGATIVE_GATE_CASES = (
+    "P2-NEG-SCAN-CROSS-ORDER",
+    "P2-NEG-SCAN-DUPLICATE",
+    "P2-NEG-PZ-OLD-OWNER-DEEP-LINK",
+    "P2-NEG-CHILD-OLD-OPERATION",
+)
 HANDOFF_SCHEMA = "international-tms-full-flow-phase2-handoff/v1"
 
 ORDER_NUMBER_RE = re.compile(r"^SO[0-9A-Z-]{6,}$", re.I)
 PZ_NUMBER_RE = re.compile(r"\bPZ-[0-9A-Z-]{4,}\b", re.I)
 OUT_NUMBER_RE = re.compile(r"\bOUT-[0-9A-Z-]{4,}\b", re.I)
 OUL_NUMBER_RE = re.compile(r"\bOUL-[0-9A-Z-]+\b", re.I)
+DENIED_PAGE_RE = re.compile(r"请求失败|不存在|尚未分配|没有.*权限|Forbidden|403|404", re.I)
 ERROR_PAGE_RE = re.compile(
     r"请求失败|SYSTEM RECOVERY|Forbidden|Internal Server Error|请求失败\s*\(403\)",
     re.I,
@@ -91,6 +104,7 @@ class Phase1Handoff:
     customer_name: str = ""
     source_entity_prefix: str = ""
     original_assignees: dict[str, dict[str, str]] = field(default_factory=dict)
+    fresh_attempt_verified: bool = False
 
 
 @dataclass(slots=True)
@@ -118,13 +132,20 @@ def load_phase1_handoff(path: Path | str) -> Phase1Handoff:
     if not source.is_file():
         raise FileNotFoundError(f"第一阶段结果文件不存在：{source}")
     payload = _mapping(json.loads(source.read_text(encoding="utf-8-sig")), "第一阶段结果")
-    if str(payload.get("status", "")).strip().lower() != "passed":
-        raise ValueError("第一阶段必须为 passed，第二阶段不能接续失败或未完成的数据")
-    source_run_id = str(payload.get("run_id", "")).strip()
+    evidence = require_certified_summary(
+        payload,
+        source=source,
+        label="第一阶段",
+        require_fresh_attempt=True,
+    )
+    source_run_id = str(evidence.get("run_id", "")).strip()
     if not source_run_id:
         raise ValueError("第一阶段结果缺少 run_id")
+    envelope_run_id = str(payload.get("run_id", "")).strip()
+    if envelope_run_id and envelope_run_id != source_run_id:
+        raise ValueError("第一阶段结果 envelope.run_id 与 summary.run_id 不一致")
 
-    entities = _mapping(payload.get("entities"), "entities")
+    entities = _mapping(evidence.get("entities"), "entities")
     raw_orders = entities.get("order")
     if not isinstance(raw_orders, Mapping):
         raw_orders = entities.get("orders")
@@ -143,7 +164,7 @@ def load_phase1_handoff(path: Path | str) -> Phase1Handoff:
         customer_name = str(raw_customer.get("primary", "")).strip()
     else:
         customer_name = str(raw_customer).strip()
-    scenario = payload.get("scenario")
+    scenario = evidence.get("scenario")
     attempt = scenario.get("attempt") if isinstance(scenario, Mapping) else None
     source_entity_prefix = (
         str(attempt.get("entity_prefix", "")).strip()
@@ -166,6 +187,7 @@ def load_phase1_handoff(path: Path | str) -> Phase1Handoff:
         customer_name,
         source_entity_prefix,
         original_assignees,
+        True,
     )
 
 
@@ -176,6 +198,9 @@ def build_handoff_payload(
     ready_for_phase3: bool,
 ) -> dict[str, Any]:
     """Build the stable machine-readable contract consumed by later phases."""
+
+    if ready_for_phase3 and not phase1.fresh_attempt_verified:
+        raise ValueError("正式 Phase 2 交接必须来自通过核验的 Phase 1 fresh attempt")
 
     orders = {
         key: {
@@ -205,6 +230,13 @@ def build_handoff_payload(
             "document": artifacts.document_assignee,
             "operation_alias": "operation_2",
             "document_alias": "document_2",
+        },
+        "certification_lineage": {
+            "mode": "fresh-from-phase1",
+            "root_phase1_run_id": phase1.source_run_id,
+            "root_entity_prefix": phase1.source_entity_prefix,
+            "fresh_phase1_attempt": phase1.fresh_attempt_verified,
+            "recovery_branches_used": False,
         },
         "completed_stages": list(PHASE2_STAGE_ORDER) if ready_for_phase3 else [],
         "ready_for_phase3": ready_for_phase3,
@@ -594,9 +626,11 @@ class Phase2Flow:
                 self._open_ordinary_order(self.operation, order_number)
                 already_done = self.operation.page.get_by_text("国内运输安排已完成", exact=False)
                 if self._is_visible(already_done):
-                    observation.add_note("订单已经存在国内运输安排；本轮仅核对结果，不重复写入。")
-                    observation.observe("国内运输安排已存在且页面可见", gate_passed=True)
-                    continue
+                    raise BusinessBlocker(
+                        f"{order_number} 在本轮到达前已经完成国内运输安排，不能作为 fresh 全流程认证数据",
+                        owner="全流程认证数据隔离维护人",
+                        remediation="废弃本轮续跑，从 Phase 1 创建全新客户和全新订单后重新认证。",
+                    )
                 form = self.operation.page.locator("form.transport-arrangement-form")
                 self._expect_visible_or_block(
                     self.operation,
@@ -938,6 +972,78 @@ class Phase2Flow:
             "填写装车交接备注",
         )
 
+    def _assert_rejected_loading_scan(
+        self,
+        *,
+        subject: str,
+        code: str,
+        expected_message: str,
+        case_id: str,
+        label: str,
+    ) -> None:
+        session = self.domestic_warehouse
+        progress = session.page.locator(
+            ".outbound-task-detail-workbench .dispatch-progress strong"
+        )
+        self._expect_visible_or_block(
+            session,
+            progress,
+            f"{subject} 装车进度",
+            owner="仓库装车页面维护人",
+            remediation="装车任务详情必须持续显示已扫/总数，供防重校验。",
+        )
+        before = self._locator_text(progress, 200)
+        scan_form = session.page.locator("form.outbound-loading-scan")
+        barcode = scan_form.locator('input[name="barcode"]')
+        self._expect_visible_or_block(
+            session,
+            barcode,
+            f"{subject} {label}扫码框",
+            owner="仓库扫码工作流维护人",
+            remediation="当前实例启用逐件扫码时必须提供可见扫码框。",
+        )
+        session.type_text(barcode.first, code, f"{label}输入货物码 {code}")
+        session.click(
+            scan_form.get_by_role("button", name="确认装车"),
+            f"{label}尝试确认装车",
+        )
+        rejected = session.page.get_by_text(expected_message, exact=False)
+        self._expect_visible_or_block(
+            session,
+            rejected,
+            f"{label}扫码拒绝提示",
+            owner="仓库扫码完整性门禁维护人",
+            remediation="跨任务或重复货物码必须明确拒绝，且不得累计装车进度。",
+        )
+        after = self._locator_text(progress, 200)
+        if after != before:
+            raise BusinessBlocker(
+                f"{label}扫码被提示拒绝，但装车进度仍从 {before} 变为 {after}",
+                owner="仓库扫码事务维护人",
+                remediation="拒绝分支不得更新装车明细、包装状态或累计数量。",
+            )
+        session.capture_gate_evidence(case_id)
+        expectation = GateExpectation(
+            name=f"{subject} {label}扫码完整性门禁",
+            source="system_integrity_invariant",
+            configured_mode="required",
+            expected_behavior="block",
+            ui_expectation=f"{label}扫码就地明确拒绝，装车进度保持 {before}。",
+            server_expectation="dispatch、仓库、包装归属和已装车状态必须在写入前原子校验。",
+            owner_role="国内仓库岗",
+            remediation="修复扫码归属/幂等门禁，拒绝时不得留下部分写入。",
+        )
+        session.record_gate(
+            name=expectation.name,
+            expected=f"UI：{expectation.ui_expectation}；服务端：{expectation.server_expectation}",
+            passed=True,
+            actual=f"页面提示“{expected_message}”，进度保持 {before}",
+            owner=expectation.owner_role,
+            remediation=expectation.remediation,
+            expectation=expectation,
+            case_id=case_id,
+        )
+
     def _create_dispatch(self, subject: str, cargo_codes: Sequence[str], *, ftl: bool) -> str:
         self._open_pending_load_unit(subject)
         form = self._resolve_loading_documents(subject)
@@ -992,13 +1098,16 @@ class Phase2Flow:
         elif hidden_by_workflow:
             scan_mode = "hidden"
         else:
-            # A previously completed scan set replaces the barcode input with the
-            # final handover button.  Treat it as the configured active policy,
-            # not as an unexplained missing control.
             final_ready = self.domestic_warehouse.page.get_by_role(
                 "button", name=re.compile(r"^确认出库并打印交接单")
             )
-            scan_mode = "required" if self._is_visible(final_ready) else "optional"
+            if self._is_visible(final_ready):
+                raise BusinessBlocker(
+                    f"{subject} 新建任务进入时已完成全部扫码，疑似沿用了旧装车任务，不能作为 fresh 全流程认证数据",
+                    owner="全流程认证数据隔离维护人",
+                    remediation="废弃本轮续跑，从 Phase 1 创建全新客户和全新订单后重新认证。",
+                )
+            scan_mode = "optional"
 
         scan_expectation = GateExpectation(
             name=f"{subject} 逐件扫码门禁",
@@ -1029,6 +1138,18 @@ class Phase2Flow:
             case_id="P2-OUTBOUND-SCAN-GATE-01",
         )
 
+        exercise_negative_scans = not ftl and scan_is_visible and len(unique_codes) >= 2
+        if exercise_negative_scans:
+            foreign_codes = self.artifacts.cargo_codes.get("ftl", [])
+            foreign_code = foreign_codes[0] if foreign_codes else f"OUL-FOREIGN-{dispatch_number}"
+            self._assert_rejected_loading_scan(
+                subject=subject,
+                code=foreign_code,
+                expected_message="该货物不属于当前装车任务",
+                case_id=PHASE2_NEGATIVE_GATE_CASES[0],
+                label="跨任务",
+            )
+
         if scan_is_visible and unique_codes:
             for index, code in enumerate(unique_codes, start=1):
                 # The scan form is keyed by loaded_count and is replaced after
@@ -1052,6 +1173,14 @@ class Phase2Flow:
                     f"确认货物码 {code} 装车",
                 )
                 self.domestic_warehouse.page.wait_for_timeout(150)
+                if exercise_negative_scans and index == 1:
+                    self._assert_rejected_loading_scan(
+                        subject=subject,
+                        code=code,
+                        expected_message="该货物已经装车，请勿重复扫描",
+                        case_id=PHASE2_NEGATIVE_GATE_CASES[1],
+                        label="重复",
+                    )
         elif scan_mode == "required":
             raise BusinessBlocker(
                 f"{subject} 的逐件扫码为必填，但没有可用于真实扫码的 OUL 货物码",
@@ -1511,6 +1640,8 @@ class Phase2Flow:
             )
 
     def assert_mounted_orders_leave_ordinary_table(self) -> None:
+        batch_href = ""
+        child_order_href = ""
         with self.operation.step(
             "原操作岗核对三票挂载订单已解除普通订单办理关系",
             case_id="P2-BATCH-VISIBILITY-OLD-OWNER",
@@ -1589,7 +1720,153 @@ class Phase2Flow:
                     owner="配载订单列表维护人",
                     remediation="配载行应集中展示所有有效挂载订单号。",
                 )
+            batch_link = row.first.get_by_role(
+                "link", name=self.artifacts.batch_number, exact=True
+            )
+            self._expect_visible_or_block(
+                self.batch_operation,
+                batch_link,
+                f"新负责人 {self.artifacts.batch_number} 办理链接",
+                owner="配载单负责人范围维护人",
+                remediation="新负责人列表必须提供同一 PZ 的可见办理入口。",
+            )
+            batch_href = batch_link.first.get_attribute("href") or ""
+            if not batch_href.startswith("/"):
+                raise BusinessBlocker(
+                    f"{self.artifacts.batch_number} 办理链接不是站内路径",
+                    owner="配载订单路由维护人",
+                    remediation="列表办理入口必须使用可审计的站内相对路径。",
+                )
+            self.batch_operation.click(
+                batch_link.first, f"进入 {self.artifacts.batch_number} 取得挂载订单详情入口"
+            )
+            child_number = self.phase1.orders[LTL_KEYS[0]]
+            child_link = self.batch_operation.page.get_by_role(
+                "link", name=child_number, exact=True
+            )
+            self._expect_visible_or_block(
+                self.batch_operation,
+                child_link,
+                f"{self.artifacts.batch_number} 挂载订单 {child_number} 详情入口",
+                owner="配载单挂载订单展示维护人",
+                remediation="配载单详情必须提供挂载订单的可见详情入口。",
+            )
+            child_order_href = child_link.first.get_attribute("href") or ""
+            if not child_order_href.startswith("/"):
+                raise BusinessBlocker(
+                    f"挂载订单 {child_number} 详情链接不是站内路径",
+                    owner="配载单挂载订单路由维护人",
+                    remediation="挂载订单详情入口必须使用可审计的站内相对路径。",
+                )
             observation.observe("新整批操作负责人可见唯一 PZ 和三票挂载订单", gate_passed=True)
+
+        with self.operation.step(
+            "原操作负责人通过已知 PZ 深链尝试越权",
+            case_id=PHASE2_NEGATIVE_GATE_CASES[2],
+            stage="配载单列表与权限",
+            priority="P0",
+            preconditions=("整批分配已经解除原操作负责人关系", "PZ 路径由新负责人可见列表取得"),
+            inputs={"batch_number": self.artifacts.batch_number},
+            expected_result="原负责人即使知道 PZ 地址也得到 403/404，不能读取或办理整批业务",
+            gate=GateExpectation(
+                name="PZ 原操作负责人深链越权门禁",
+                source="role_permission_configuration",
+                configured_mode="read_only",
+                expected_behavior="block",
+                ui_expectation="原负责人列表不显示 PZ，已知深链也进入明确拒绝页。",
+                server_expectation="配载单查询按当前 operation_assignee_user_id 精确授权。",
+                owner_role="原操作负责人",
+                remediation="统一列表范围与详情 loader 的精确配载负责人校验。",
+            ),
+        ) as observation:
+            self.operation.goto_for_negative_gate(
+                batch_href,
+                reason="验证原操作负责人解除后不能通过配载单深链读取或办理新负责人的业务",
+                expected_status=(403, 404),
+            )
+            body = self._locator_text(self.operation.page.locator("body"), 4_000)
+            if not DENIED_PAGE_RE.search(body):
+                raise BusinessBlocker(
+                    "原操作负责人深链返回拒绝状态，但页面没有可理解的拒绝说明",
+                    owner="配载单权限错误页维护人",
+                    remediation="403/404 页面应说明无权或资源不可见，不能显示空白恢复页。",
+                )
+            self.operation.capture_gate_evidence(PHASE2_NEGATIVE_GATE_CASES[2])
+            observation.observe("原操作负责人 PZ 深链被服务端拒绝且页面有明确说明", gate_passed=True)
+            back = self.operation.page.get_by_role(
+                "button", name="返回上一页", exact=True
+            )
+            self.operation.recover_from_negative_gate(
+                return_control=back,
+                restored_locator=self.operation.page.get_by_role(
+                    "link", name="运输订单", exact=True
+                ),
+                target="原操作负责人 PZ 越权",
+            )
+            observation.add_note("负向深链验证后已通过可见返回动作恢复原账号会话")
+
+        with self.operation.step(
+            "原操作负责人通过挂载子订单地址尝试越权",
+            case_id=PHASE2_NEGATIVE_GATE_CASES[3],
+            stage="配载单列表与权限",
+            priority="P0",
+            preconditions=("PZ 换人已解除子订单原操作负责人关系", "子订单路径来自新负责人可见详情"),
+            inputs={"order_number": self.phase1.orders[LTL_KEYS[0]]},
+            expected_result="原操作负责人访问子订单时只得到 403/404 或严格只读页面，不能编辑或提交",
+            gate=GateExpectation(
+                name="PZ 挂载子订单原操作负责人写权限门禁",
+                source="role_permission_configuration",
+                configured_mode="read_only",
+                expected_behavior="read_only",
+                ui_expectation="旧负责人不可见任何子订单编辑或提交控件。",
+                server_expectation="子订单 loader/action 均按 PZ 当前整批 operation_assignee_user_id 授权。",
+                owner_role="原操作负责人",
+                remediation="统一子订单详情、模块 loader 和 action 的当前整批负责人校验。",
+            ),
+        ) as observation:
+            response = self.operation.goto_for_negative_gate(
+                child_order_href,
+                reason="验证 PZ 换人后原操作负责人不能通过挂载子订单深链继续编辑或提交",
+                expected_status=(200, 403, 404),
+            )
+            body = self._locator_text(self.operation.page.locator("body"), 8_000)
+            if response.status == 200:
+                if not re.search(r"只读|仅供查看|不由本账号办理|无权", body):
+                    raise BusinessBlocker(
+                        "挂载子订单向原操作负责人返回 200，但没有明确只读说明",
+                        owner="子订单权限与提示维护人",
+                        remediation="旧负责人可查看时必须明确标注只读，并移除全部办理控件。",
+                    )
+                self.operation.expect_not_rendered(
+                    self.operation.page.locator(
+                        "form.transport-arrangement-form button[type='submit'], "
+                        "form.tracking-node-entry-form button[type='submit'], "
+                        "form.order-module-data-form button[type='submit'], "
+                        ".order-module-action button[type='submit'], "
+                        "main form[method='post'] button[type='submit']"
+                    ),
+                    "原操作负责人不渲染挂载子订单编辑或提交控件",
+                )
+            elif not DENIED_PAGE_RE.search(body):
+                raise BusinessBlocker(
+                    "挂载子订单拒绝页没有可理解的无权或资源不可见说明",
+                    owner="子订单权限错误页维护人",
+                    remediation="403/404 页面应明确说明当前账号无权办理该挂载订单。",
+                )
+            self.operation.capture_gate_evidence(PHASE2_NEGATIVE_GATE_CASES[3])
+            observation.observe(
+                f"原操作负责人挂载子订单深链为 HTTP {response.status}，且无编辑/提交能力",
+                gate_passed=True,
+            )
+            self.operation.recover_from_negative_gate(
+                return_control=self.operation.page.get_by_role(
+                    "button", name="返回上一页", exact=True
+                ),
+                restored_locator=self.operation.page.get_by_role(
+                    "link", name="运输订单", exact=True
+                ),
+                target="原操作负责人挂载子订单越权",
+            )
 
     def complete_ltl_batch_outbound(self) -> None:
         codes = [
@@ -1763,6 +2040,7 @@ class Phase2Flow:
         self.assert_mounted_orders_leave_ordinary_table()
         self.complete_ltl_batch_outbound()
         self.assert_batch_sync_and_drawer()
+        self.harness.assert_certifiable()
         return self.artifacts
 
 
@@ -1889,6 +2167,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                 reason = _redact_reason(reason, tuple(credentials.values()))
                 summary_path = harness.close(status=status)  # type: ignore[arg-type]
+                if harness.last_status != status:
+                    status = str(harness.last_status)
+                    if not reason:
+                        reason = harness.finalization_error or "步骤、门禁或证据汇总未通过"
     except Exception as error:
         status = "failed"
         reason = _redact_reason(

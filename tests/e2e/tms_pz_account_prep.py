@@ -496,6 +496,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 harness.journal.add_note("账号准备失败：" + reason)
             finally:
                 summary_path = harness.close(status=status)  # type: ignore[arg-type]
+                if harness.last_status != status:
+                    status = str(harness.last_status)
+                    if not reason:
+                        reason = harness.finalization_error or "步骤、门禁或证据汇总未通过"
     except Exception as error:
         reason = _redact_reason(
             f"{type(error).__name__}: {error}", tuple(credentials.values())

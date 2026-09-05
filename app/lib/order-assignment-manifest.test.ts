@@ -3,6 +3,8 @@ import {
   buildOrderAssignmentManifest,
   missingRequiredOrderAssignmentGroupKeys,
   nextRequiredOrderAssignmentGroup,
+  orderAssignmentCandidateConfigurationErrors,
+  orderAssignmentGroupPermissionRequirements,
   orderAssignmentAssigneeFieldName,
   type WorkflowAssignmentSnapshotRow,
 } from "./order-assignment-manifest";
@@ -79,10 +81,80 @@ describe("order assignment manifest", () => {
     expect(nextRequiredOrderAssignmentGroup(manifest.groups)?.positionCode).toBe("DOC");
   });
 
+  it("uses the selected warehouse site and frozen position as a queue instead of requiring a person", () => {
+    const manifest = buildOrderAssignmentManifest([
+      row({
+        moduleStateId: "module-warehouse",
+        moduleCode: "warehouse",
+        moduleName: "国内仓入库",
+        modulePositionCode: "WAREHOUSE",
+        taskStateId: "task-warehouse",
+        taskPositionCode: "WAREHOUSE",
+      }),
+      row({
+        moduleStateId: "module-transport",
+        moduleCode: "transport",
+        moduleName: "国内运输",
+        stepSortOrder: 50,
+      }),
+    ]);
+
+    expect(manifest.groups[0]).toMatchObject({
+      positionCode: "WAREHOUSE",
+      assignmentMode: "site_queue",
+      assignmentState: "assigned",
+      assigneeUserId: null,
+    });
+    expect(missingRequiredOrderAssignmentGroupKeys(manifest.groups, {})).toEqual([
+      "position:OPERATION",
+    ]);
+    expect(nextRequiredOrderAssignmentGroup(manifest.groups)?.positionCode).toBe("OPERATION");
+  });
+
+  it("derives every runtime permission required by a frozen responsibility group", () => {
+    const finance = buildOrderAssignmentManifest([row({
+      moduleStateId: "module-review",
+      moduleCode: "review",
+      modulePositionCode: "FINANCE_ACCOUNTING",
+      taskStateId: "task-review",
+      taskPositionCode: "FINANCE_ACCOUNTING",
+    })]).groups[0];
+    expect(orderAssignmentGroupPermissionRequirements(finance)).toEqual([
+      ["order.module.review.manage"],
+      ["billing.expense.approve"],
+    ]);
+
+    const warehouse = buildOrderAssignmentManifest([row({
+      moduleStateId: "module-warehouse",
+      moduleCode: "warehouse",
+      modulePositionCode: "WAREHOUSE",
+      taskStateId: "task-warehouse",
+      taskPositionCode: "WAREHOUSE",
+    })]).groups[0];
+    expect(orderAssignmentGroupPermissionRequirements(warehouse)).toEqual([]);
+  });
+
   it("uses a stable form field name for each frozen assignment group", () => {
     expect(orderAssignmentAssigneeFieldName("position:OPERATION")).toBe(
       "assignmentAssignee:position%3AOPERATION",
     );
+  });
+
+  it("对无岗位成员和全员被 deny 的必填责任给出不同配置错误", () => {
+    const group = buildOrderAssignmentManifest([row()]).groups;
+    expect(orderAssignmentCandidateConfigurationErrors(group, [])).toEqual([
+      "OPERATION 岗位暂无有效个人账户",
+    ]);
+    expect(orderAssignmentCandidateConfigurationErrors(group, [{
+      position_code: "OPERATION",
+      permission_codes: "order.view",
+    }])).toEqual([
+      "OPERATION 岗位现有账户均不具备该责任所需的有效权限（含个人拒绝覆盖）",
+    ]);
+    expect(orderAssignmentCandidateConfigurationErrors(group, [{
+      position_code: "OPERATION",
+      permission_codes: "order.module.transport.manage",
+    }])).toEqual([]);
   });
 
   it("builds a required assignment group from the frozen workflow snapshot", () => {

@@ -6,6 +6,7 @@ const database = vi.hoisted(() => {
       enabled: number;
       assignee_user_id: string | null;
       workflow_instance_id: string | null;
+      matched_instance_id: string | null;
     },
     workflowModule: null as null | {
       id: string;
@@ -54,6 +55,7 @@ describe("order module action scope", () => {
       enabled: 1,
       assignee_user_id: null,
       workflow_instance_id: "workflow-instance-1",
+      matched_instance_id: "workflow-instance-1",
     };
     database.state.workflowModule = {
       id: "review-module-state",
@@ -67,6 +69,7 @@ describe("order module action scope", () => {
       enabled: 0,
       assignee_user_id: "finance-user",
       workflow_instance_id: "workflow-instance-1",
+      matched_instance_id: "workflow-instance-1",
     };
     database.state.tasks = [
       {
@@ -106,6 +109,7 @@ describe("order module action scope", () => {
       enabled: 1,
       assignee_user_id: null,
       workflow_instance_id: null,
+      matched_instance_id: null,
     };
     database.state.workflowModule = null;
 
@@ -114,5 +118,27 @@ describe("order module action scope", () => {
       "order-1",
       "exceptions",
     )).resolves.toMatchObject({ enabled: true });
+  });
+
+  it("fails closed instead of resolving another order's frozen instance", async () => {
+    database.state.module = {
+      enabled: 1,
+      assignee_user_id: "foreign-owner",
+      workflow_instance_id: "foreign-instance",
+      matched_instance_id: null,
+    };
+
+    await expect(loadOrderModuleActionScope(
+      "organization-1",
+      "order-1",
+      "review",
+    )).resolves.toEqual({
+      moduleCode: "review",
+      enabled: false,
+      assigneeUserId: null,
+      taskAssigneeUserIds: [],
+      responsibilityPositionCodes: [],
+    });
+    expect(database.state.queries.join("\n")).toContain("wi.order_id=o.id");
   });
 });

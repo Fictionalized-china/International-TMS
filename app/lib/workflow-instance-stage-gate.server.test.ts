@@ -35,6 +35,7 @@ describe("locked workflow stage context loader", () => {
       "SELECT o.workflow_instance_id": {
         first: {
           workflow_instance_id: "instance-1",
+          matched_instance_id: "instance-1",
           current_step_key: "custom_settlement",
         },
       },
@@ -103,7 +104,11 @@ describe("locked workflow stage context loader", () => {
   it("marks orders without a workflow instance as legacy", async () => {
     const database = databaseFor({
       "SELECT o.workflow_instance_id": {
-        first: { workflow_instance_id: null, current_step_key: null },
+        first: {
+          workflow_instance_id: null,
+          matched_instance_id: null,
+          current_step_key: null,
+        },
       },
     });
 
@@ -122,5 +127,51 @@ describe("locked workflow stage context loader", () => {
       fields: [],
     });
     expect(database.sql).toHaveLength(1);
+  });
+
+  it.each([
+    ["empty string", "", null],
+    ["cross-order reference", "instance-for-other-order", null],
+  ])("fails closed for a non-null %s workflow binding", async (
+    _label,
+    workflowInstanceId,
+    matchedInstanceId,
+  ) => {
+    const database = databaseFor({
+      "SELECT o.workflow_instance_id": {
+        first: {
+          workflow_instance_id: workflowInstanceId,
+          matched_instance_id: matchedInstanceId,
+          current_step_key: null,
+        },
+      },
+    });
+
+    await expect(loadLockedWorkflowStageContext(
+      database.DB,
+      "organization-1",
+      "order-1",
+      "costs",
+    )).resolves.toEqual({
+      locked: true,
+      currentStepKey: null,
+      steps: [],
+      modulePlacements: [],
+      fields: [],
+    });
+    expect(database.sql).toHaveLength(1);
+    expect(database.sql[0]).toContain("wi.order_id=o.id");
+  });
+
+  it("validates organization and order ownership in the binding join", async () => {
+    const database = databaseFor({
+      "SELECT o.workflow_instance_id": {
+        first: null,
+      },
+    });
+
+    await loadLockedWorkflowStageContext(database.DB, "org-1", "order-1", "costs");
+    expect(database.sql[0]).toContain("wi.organization_id=o.organization_id");
+    expect(database.sql[0]).toContain("wi.order_id=o.id");
   });
 });

@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   selectWorkflowExecutionCurrentStep,
   workflowExecutionModuleIsComplete,
+  workflowSystemTaskHasAutoHandler,
+  workflowSystemTaskShouldAutoComplete,
 } from "./workflow-execution";
 
 const step = (
@@ -98,5 +100,47 @@ describe("workflowExecutionModuleIsComplete", () => {
       pendingRequired: 0,
       hasMissingRequiredFields: false,
     })).toBe(true);
+  });
+});
+
+describe("workflow system-task auto-handler", () => {
+  it("uses one shared handler predicate for publication and runtime execution", () => {
+    expect(workflowSystemTaskHasAutoHandler("quotation", "handle_any_quotation_adapter")).toBe(true);
+    expect(workflowSystemTaskHasAutoHandler("outbound_transport", "handle_runtime_bridge")).toBe(true);
+    expect(workflowSystemTaskHasAutoHandler("outbound_transport", "sync_tracking")).toBe(false);
+    expect(workflowSystemTaskHasAutoHandler("custom_clearance", "handle_tracking")).toBe(false);
+  });
+
+  it("keeps the runtime status thresholds behind the shared handler predicate", () => {
+    expect(workflowSystemTaskShouldAutoComplete(
+      "quotation", "handle_any_quotation_adapter", "draft", "not_started",
+    )).toBe(true);
+    expect(workflowSystemTaskShouldAutoComplete(
+      "order_creation", "handle_consignment", "draft", "completed",
+    )).toBe(false);
+    expect(workflowSystemTaskShouldAutoComplete(
+      "order_creation", "handle_consignment", "confirmed", "not_started",
+    )).toBe(true);
+    expect(workflowSystemTaskShouldAutoComplete(
+      "consignment_approval", "handle_consignment", "pending_confirmation", "completed",
+    )).toBe(false);
+    expect(workflowSystemTaskShouldAutoComplete(
+      "consignment_approval", "handle_consignment", "confirmed", "not_started",
+    )).toBe(true);
+    expect(workflowSystemTaskShouldAutoComplete(
+      "task_assignment", "handle_assignment", "confirmed", "completed",
+    )).toBe(false);
+    expect(workflowSystemTaskShouldAutoComplete(
+      "task_assignment", "handle_assignment", "in_execution", "not_started",
+    )).toBe(true);
+    expect(workflowSystemTaskShouldAutoComplete(
+      "outbound_transport", "handle_tracking", "in_execution", "in_progress",
+    )).toBe(false);
+    expect(workflowSystemTaskShouldAutoComplete(
+      "outbound_transport", "handle_tracking", "in_execution", "completed",
+    )).toBe(true);
+    expect(workflowSystemTaskShouldAutoComplete(
+      "custom_clearance", "handle_tracking", "completed", "completed",
+    )).toBe(false);
   });
 });

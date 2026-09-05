@@ -4,6 +4,7 @@ import {
   canRunOrderWorkflowAction,
   canSubmitSalesOrderForApproval,
   isAssignedOrderApprover,
+  orderWorkflowTargetAssigneeRequirements,
   shouldRefreshOrderModulesBeforeWorkflowGate,
 } from "./order-workflow";
 
@@ -140,6 +141,21 @@ describe("workflow action ownership", () => {
       currentAssigneeUserId: "finance-1",
       currentUserId: "finance-1",
     })).toBe(true);
+  });
+});
+
+describe("workflow target assignee permissions", () => {
+  it("requires approval recipients to be able to open and finish their next work", () => {
+    expect(orderWorkflowTargetAssigneeRequirements("submit")).toEqual([["order.view"]]);
+    expect(orderWorkflowTargetAssigneeRequirements("approve")).toEqual([
+      ["order.view"],
+      ["order.module.assignment.manage"],
+      ["transport.batch.approve"],
+    ]);
+  });
+
+  it("does not invent extra target permissions for actions with a frozen dispatch policy", () => {
+    expect(orderWorkflowTargetAssigneeRequirements("dispatch")).toEqual([]);
   });
 });
 

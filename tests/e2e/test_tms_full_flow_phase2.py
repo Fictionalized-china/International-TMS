@@ -15,6 +15,7 @@ from tms_full_flow_phase2 import (
     HANDOFF_SCHEMA,
     LTL_KEYS,
     ORDER_KEYS,
+    PHASE2_NEGATIVE_GATE_CASES,
     PHASE2_STAGE_ORDER,
     REQUIRED_ACCOUNT_ALIASES,
     Phase1Handoff,
@@ -35,6 +36,30 @@ ORDERS = {
     "ltl2": "SO2026090501003",
     "ltl3": "SO2026090501004",
 }
+
+
+def certified_phase1_payload(
+    *,
+    run_id: str = "phase1-a001-test",
+    orders: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return {
+        "status": "passed",
+        "run_id": run_id,
+        "metrics": {"steps_failed": 0, "steps_blocked": 0, "gates_failed": 0},
+        "scenario": {
+            "attempt": {
+                "attempt": 1,
+                "run_id": run_id,
+                "entity_prefix": "UIE2E-20260905-A001-ABCDEF01",
+            }
+        },
+        "certification_constraints": {"failure_requires_fresh_entities": True},
+        "entities": {
+            "order": orders or ORDERS,
+            "customer": {"primary": "UI全流程验收客户"},
+        },
+    }
 
 
 def write_json(path: Path, payload: object) -> None:
@@ -63,39 +88,32 @@ class Phase1HandoffTests(unittest.TestCase):
             path = Path(directory) / "summary.json"
             write_json(
                 path,
-                {
-                    "status": "passed",
-                    "run_id": "phase1-a001-test",
-                    "scenario": {
-                        "attempt": {"entity_prefix": "UIE2E-20260905-A001-ABCDEF01"}
-                    },
-                    "entities": {
-                        "order": ORDERS,
-                        "customer": {"primary": "UI全流程验收客户"},
-                    },
-                },
+                certified_phase1_payload(),
             )
             result = load_phase1_handoff(path)
         self.assertEqual(result.source_run_id, "phase1-a001-test")
         self.assertEqual(result.source_entity_prefix, "UIE2E-20260905-A001-ABCDEF01")
         self.assertEqual(result.customer_name, "UI全流程验收客户")
         self.assertEqual(result.orders, ORDERS)
+        self.assertTrue(result.fresh_attempt_verified)
 
     def test_reads_phase1_cli_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "phase1-result.json"
+            summary = Path(directory) / "phase1-summary.json"
+            write_json(summary, certified_phase1_payload(run_id="phase1-a002-test"))
             write_json(
                 path,
                 {
                     "status": "PASSED",
                     "run_id": "phase1-a002-test",
-                    "entities": {"orders": ORDERS, "customer": "客户甲"},
+                    "summary": summary.name,
                 },
             )
             result = load_phase1_handoff(path)
         self.assertEqual(result.orders, ORDERS)
-        self.assertEqual(result.customer_name, "客户甲")
-        self.assertEqual(result.source_entity_prefix, "")
+        self.assertEqual(result.customer_name, "UI全流程验收客户")
+        self.assertEqual(result.source_entity_prefix, "UIE2E-20260905-A001-ABCDEF01")
 
     def test_rejects_failed_phase1(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -114,9 +132,27 @@ class Phase1HandoffTests(unittest.TestCase):
             path = Path(directory) / "summary.json"
             write_json(
                 path,
-                {"status": "passed", "run_id": "phase1-a004", "entities": {"order": duplicated}},
+                certified_phase1_payload(run_id="phase1-a004", orders=duplicated),
             )
             with self.assertRaisesRegex(ValueError, "互不相同"):
+                load_phase1_handoff(path)
+
+    def test_rejects_nominal_pass_with_failed_metrics(self) -> None:
+        payload = certified_phase1_payload()
+        payload["metrics"]["gates_failed"] = 1  # type: ignore[index]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "summary.json"
+            write_json(path, payload)
+            with self.assertRaisesRegex(ValueError, "失败证据"):
+                load_phase1_handoff(path)
+
+    def test_rejects_pass_without_fresh_attempt_lineage(self) -> None:
+        payload = certified_phase1_payload()
+        payload["scenario"] = {"attempt": None}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "summary.json"
+            write_json(path, payload)
+            with self.assertRaisesRegex(ValueError, "fresh attempt"):
                 load_phase1_handoff(path)
 
 
@@ -127,6 +163,7 @@ class Phase2HandoffTests(unittest.TestCase):
             orders=dict(ORDERS),
             customer_name="客户甲",
             source_entity_prefix="UIE2E-20260905-A001-ABCDEF01",
+            fresh_attempt_verified=True,
         )
         artifacts = Phase2Artifacts(
             cargo_codes={
@@ -162,6 +199,8 @@ class Phase2HandoffTests(unittest.TestCase):
         self.assertEqual(payload["assignees"]["document_alias"], "document_2")
         self.assertEqual(payload["completed_stages"], list(PHASE2_STAGE_ORDER))
         self.assertTrue(payload["ready_for_phase3"])
+        self.assertTrue(payload["certification_lineage"]["fresh_phase1_attempt"])
+        self.assertFalse(payload["certification_lineage"]["recovery_branches_used"])
 
     def test_incomplete_handoff_never_claims_phase3_ready(self) -> None:
         phase1 = Phase1Handoff("phase1-a001", dict(ORDERS))
@@ -185,6 +224,17 @@ class Phase2HandoffTests(unittest.TestCase):
 
 
 class Phase2SafetyTests(unittest.TestCase):
+    def test_formal_flow_executes_scan_and_old_owner_negative_gates(self) -> None:
+        self.assertEqual(
+            PHASE2_NEGATIVE_GATE_CASES,
+            (
+                "P2-NEG-SCAN-CROSS-ORDER",
+                "P2-NEG-SCAN-DUPLICATE",
+                "P2-NEG-PZ-OLD-OWNER-DEEP-LINK",
+                "P2-NEG-CHILD-OLD-OPERATION",
+            ),
+        )
+
     def test_execute_is_opt_in_and_phase1_summary_is_required(self) -> None:
         args = build_parser().parse_args(["--phase1-summary", "phase1.json"])
         self.assertFalse(args.execute)

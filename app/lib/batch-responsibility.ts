@@ -1,3 +1,46 @@
+import {
+  organizationAssigneeCanHandle,
+  type OrganizationAssigneeMember,
+} from "./organization-assignee";
+import { assignedBatchViewPermission } from "./order-access";
+
+export const BATCH_RESPONSIBILITY_PERMISSION_REQUIREMENTS: Record<
+  BatchResponsibilityKind,
+  readonly (readonly string[])[]
+> = {
+  operation: [
+    [assignedBatchViewPermission],
+    ["order.module.tracking.manage"],
+    ["order.module.exceptions.manage"],
+  ],
+  document: [
+    [assignedBatchViewPermission],
+    ["order.module.documents.manage"],
+    ["order.module.customs.manage"],
+  ],
+};
+
+export function batchResponsibilityPermissionDisabledReasons(
+  members: readonly OrganizationAssigneeMember[],
+  kind: BatchResponsibilityKind,
+) {
+  const requirementLabel = kind === "operation"
+    ? "\u914d\u8f7d\u5355\u67e5\u770b\u3001\u8fd0\u8e2a\u529e\u7406\u548c\u5f02\u5e38\u5904\u7406\u6743\u9650"
+    : "\u914d\u8f7d\u5355\u67e5\u770b\u3001\u6587\u4ef6\u529e\u7406\u548c\u62a5\u5173\u529e\u7406\u6743\u9650";
+  const responsibilityLabel = kind === "operation" ? "\u64cd\u4f5c" : "\u5355\u8bc1";
+  return Object.fromEntries(
+    members
+      .filter((member) => !organizationAssigneeCanHandle(
+        member,
+        BATCH_RESPONSIBILITY_PERMISSION_REQUIREMENTS[kind],
+      ))
+      .map((member) => [
+        member.id,
+        `\u8be5\u8d26\u53f7\u672a\u540c\u65f6\u5177\u5907${requirementLabel}\uff0c\u4e0d\u80fd\u6307\u6d3e\u4e3a\u6574\u6279${responsibilityLabel}\u8d1f\u8d23\u4eba`,
+      ]),
+  );
+}
+
 export type BatchResponsibilityKind = "operation" | "document";
 
 export const BATCH_RESPONSIBILITY_POSITION_CODES: Record<
@@ -175,6 +218,35 @@ export function findBatchInitialResponsibilityConflict(
   }
   return null;
 }
+export function eligibleBatchInitialResponsibilityCandidates(
+  members: readonly OrganizationAssigneeMember[],
+  restrictions: BatchInitialResponsibilityRestrictions,
+  kind: BatchResponsibilityKind,
+) {
+  const excluded = new Set(restrictions[kind].map((item) => item.userId));
+  const positionCode = BATCH_RESPONSIBILITY_POSITION_CODES[kind];
+  return members.filter(
+    (member) =>
+      member.position_code === positionCode &&
+      !excluded.has(member.id) &&
+      organizationAssigneeCanHandle(
+        member,
+        BATCH_RESPONSIBILITY_PERMISSION_REQUIREMENTS[kind],
+      ),
+  );
+}
+
+export function batchInitialResponsibilityReadiness(
+  members: readonly OrganizationAssigneeMember[],
+  restrictions: BatchInitialResponsibilityRestrictions,
+) {
+  return {
+    operation: eligibleBatchInitialResponsibilityCandidates(members, restrictions, "operation"),
+    document: eligibleBatchInitialResponsibilityCandidates(members, restrictions, "document"),
+    configurationErrors: restrictions.configurationErrors,
+  };
+}
+
 
 export function batchRequiresSupervisorApproval(batchNumber: string) {
   return batchNumber.startsWith("PZ-");

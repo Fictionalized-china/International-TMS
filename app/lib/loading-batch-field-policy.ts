@@ -27,6 +27,7 @@ export type LoadingBatchWorkflowField = {
 
 export type LoadingBatchWorkflowOrder = {
   orderId: string;
+  usesFrozenSnapshot?: boolean;
   appliesToCurrentOrFuture: boolean;
   fields: readonly LoadingBatchWorkflowField[];
 };
@@ -50,6 +51,7 @@ function policyForOrder(
     if (configured.isRequired) return { isActive: true, isRequired: true, mode: "required" };
     return { isActive: true, isRequired: false, mode: "optional" };
   }
+  if (order.usesFrozenSnapshot) return { isActive: false, isRequired: false, mode: "hidden" };
   const fallback = loadingBatchFieldDefinitions[fieldKey];
   return fallback === "required"
     ? { isActive: true, isRequired: true, mode: "required" }

@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const database = vi.hoisted(() => {
   const state = {
     workflowInstanceId: "workflow-instance-1" as string | null,
+    matchedWorkflowInstanceId: "workflow-instance-1" as string | null,
+    matchedWorkflowInstanceStatus: "active" as string | null,
     rows: [] as Array<Record<string, unknown>>,
     calls: [] as Array<{ sql: string; values: unknown[] }>,
     batchSizes: [] as number[],
@@ -14,8 +16,11 @@ const database = vi.hoisted(() => {
           state.calls.push({ sql, values });
           return {
             async first() {
-              if (sql.includes("SELECT workflow_instance_id FROM transport_orders"))
-                return { workflow_instance_id: state.workflowInstanceId };
+              if (sql.includes("workflow_instance_id") && sql.includes("transport_orders")) return {
+                workflow_instance_id: state.workflowInstanceId,
+                matched_instance_id: state.matchedWorkflowInstanceId,
+                matched_instance_status: state.matchedWorkflowInstanceStatus,
+              };
               return null;
             },
             async all() {
@@ -79,6 +84,8 @@ function dbRow(overrides: Record<string, unknown> = {}) {
 describe("frozen order assignment manifest server", () => {
   beforeEach(() => {
     database.state.workflowInstanceId = "workflow-instance-1";
+    database.state.matchedWorkflowInstanceId = "workflow-instance-1";
+    database.state.matchedWorkflowInstanceStatus = "active";
     database.state.rows = [
       dbRow(),
       dbRow({
@@ -140,6 +147,7 @@ describe("frozen order assignment manifest server", () => {
 
   it("uses the explicit OPERATION legacy fallback only when the order has no snapshot", async () => {
     database.state.workflowInstanceId = null;
+    database.state.matchedWorkflowInstanceId = null;
 
     await expect(loadOrderDispatchResponsibilityPolicy(
       "organization-1",
@@ -151,6 +159,48 @@ describe("frozen order assignment manifest server", () => {
       positionCode: "OPERATION",
     });
   });
+
+  it("fails closed when the pointer does not match the same organization and order", async () => {
+    database.state.workflowInstanceId = "foreign-instance";
+    database.state.matchedWorkflowInstanceId = null;
+
+    const manifest = await loadOrderAssignmentManifest("organization-1", "order-1");
+
+    expect(manifest.workflowInstanceId).toBe("foreign-instance");
+    expect(manifest.groups).toEqual([]);
+    expect(manifest.configurationErrors.join("\n")).toContain("工作流实例绑定异常");
+    const bindingQuery = database.state.calls.find((call) =>
+      call.sql.includes("FROM transport_orders o"),
+    )?.sql;
+    expect(bindingQuery).toContain("wi.organization_id=o.organization_id");
+    expect(bindingQuery).toContain("wi.order_id=o.id");
+  });
+
+  it("fails closed instead of treating a non-null blank workflow pointer as legacy", async () => {
+    database.state.workflowInstanceId = "";
+    database.state.matchedWorkflowInstanceId = null;
+    database.state.matchedWorkflowInstanceStatus = null;
+
+    const manifest = await loadOrderAssignmentManifest("organization-1", "order-1");
+
+    expect(manifest.workflowInstanceId).toBe("");
+    expect(manifest.groups).toEqual([]);
+    expect(manifest.configurationErrors.join("\n")).toContain("工作流实例绑定异常");
+  });
+
+  it.each(["completed", "cancelled"])(
+    "fails closed for a %s frozen workflow instance",
+    async (status) => {
+      database.state.matchedWorkflowInstanceStatus = status;
+
+      const manifest = await loadOrderAssignmentManifest("organization-1", "order-1");
+
+      expect(manifest.workflowInstanceId).toBe("workflow-instance-1");
+      expect(manifest.groups).toEqual([]);
+      expect(manifest.configurationErrors.join("\n")).toContain("工作流实例绑定异常");
+      expect(database.state.calls[0].sql).toContain("wi.status matched_instance_status");
+    },
+  );
 
   it("rejects a frozen workflow that has no unfinished required human responsibility", async () => {
     database.state.rows = [dbRow({ module_required: 0 })];
@@ -193,7 +243,42 @@ describe("frozen order assignment manifest server", () => {
       "organization-1",
       "operator-1",
       ["OPERATION"],
+      [["order.module.exceptions.manage"], ["order.module.transport.manage"]],
     );
+  });
+
+  it("does not require or accept a personal assignee for a physical warehouse queue", async () => {
+    database.state.rows = [dbRow({
+      module_state_id: "module-warehouse",
+      module_code: "warehouse",
+      module_name: "国内仓入库",
+      module_position_code: "WAREHOUSE",
+      task_state_id: "task-warehouse",
+      task_position_code: "WAREHOUSE",
+    })];
+
+    await expect(validateOrderAssignmentManifestSelections({
+      organizationId: "organization-1",
+      orderId: "order-1",
+      selections: [],
+    })).resolves.toMatchObject({ resolvedGroups: [] });
+    expect(assignees.valid).not.toHaveBeenCalled();
+
+    await expect(validateOrderAssignmentManifestSelections({
+      organizationId: "organization-1",
+      orderId: "order-1",
+      selections: [{
+        groupKey: "position:WAREHOUSE",
+        assigneeUserId: "warehouse-user",
+      }],
+    })).rejects.toThrow("岗位队列办理");
+
+    await expect(resolveOrderModuleAssignmentTarget({
+      organizationId: "organization-1",
+      orderId: "order-1",
+      moduleCode: "warehouse",
+      assigneeUserId: "warehouse-user",
+    })).rejects.toThrow("不能改派给个人账户");
   });
 
   it("rejects a person outside the responsibility position configured in the snapshot", async () => {

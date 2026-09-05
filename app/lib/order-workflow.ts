@@ -20,6 +20,22 @@ const workflowActionPositionCodes: Record<string, readonly string[]> = {
   complete: ["FINANCE_ACCOUNTING"],
 };
 
+const workflowTargetAssigneePermissionRequirements: Record<
+  string,
+  readonly (readonly string[])[]
+> = {
+  submit: [["order.view"]],
+  approve: [
+    ["order.view"],
+    ["order.module.assignment.manage"],
+    ["transport.batch.approve"],
+  ],
+};
+
+export function orderWorkflowTargetAssigneeRequirements(actionCode: string) {
+  return workflowTargetAssigneePermissionRequirements[actionCode] ?? [];
+}
+
 export function canRunOrderWorkflowAction(input: {
   actionCode: string;
   positionCode: string | null | undefined;

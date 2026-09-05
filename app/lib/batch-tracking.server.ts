@@ -1,12 +1,14 @@
 ﻿import { env } from "cloudflare:workers";
 import { syncOrderWorkflowSnapshot } from "./order-modules.server";
 import { chunkD1Values, d1Placeholders } from "./d1-bindings";
+import { loadOrderModuleWorkflowFields } from "./workflow-fields.server";
 import {
   type BatchTrackingMilestone,
   BATCH_TRACKING_MILESTONES,
   BATCH_TRACKING_MAIN_CODES,
   BATCH_TRACKING_OPTIONAL_CODES,
   BATCH_TRACKING_REQUIRED_PREVIOUS,
+  resolveTrackingWorkflowHandoff,
 } from "./batch-tracking.shared";
 export const BATCH_SYNCED_TRACKING_MILESTONES = new Set([
   "departed",
@@ -196,25 +198,38 @@ export async function syncTrackingModuleStatusForOrder(
   const next = MILESTONE_MODULE_MAPPING[milestoneCode];
   if (!next) return;
 
-  const recorded = await env.DB.prepare(
-    `SELECT MAX(CASE milestone_code
-       WHEN 'departed' THEN 15
-       WHEN 'border_arrived' THEN 28
-       WHEN 'exported' THEN 40
-       WHEN 'transloaded' THEN 46
-       WHEN 'transit_customs' THEN 52
-       WHEN 'foreign_entered' THEN 64
-       WHEN 'customs_cleared' THEN 82
-       WHEN 'station_arrived' THEN 100
-       ELSE 0 END) progress
-     FROM order_tracking_milestones
-     WHERE organization_id=? AND order_id=?`,
-  )
-    .bind(organizationId, orderId)
-    .first<{ progress: number | null }>();
+  const [recorded, recordedMilestones, workflowFields] = await Promise.all([
+    env.DB.prepare(
+      `SELECT MAX(CASE milestone_code
+         WHEN 'departed' THEN 15
+         WHEN 'border_arrived' THEN 28
+         WHEN 'exported' THEN 40
+         WHEN 'transloaded' THEN 46
+         WHEN 'transit_customs' THEN 52
+         WHEN 'foreign_entered' THEN 64
+         WHEN 'customs_cleared' THEN 82
+         WHEN 'station_arrived' THEN 100
+         ELSE 0 END) progress
+       FROM order_tracking_milestones
+       WHERE organization_id=? AND order_id=?`,
+    ).bind(organizationId, orderId).first<{ progress: number | null }>(),
+    env.DB.prepare(
+      `SELECT DISTINCT milestone_code
+       FROM order_tracking_milestones
+       WHERE organization_id=? AND order_id=?`,
+    ).bind(organizationId, orderId).all<{ milestone_code: string }>(),
+    loadOrderModuleWorkflowFields(organizationId, orderId, "tracking"),
+  ]);
 
   const effectiveProgress = Math.max(next.progress, recorded?.progress ?? 0);
-  const effectiveComplete = effectiveProgress >= 100 || Boolean(next.complete);
+  const handoff = resolveTrackingWorkflowHandoff({
+    fields: workflowFields,
+    recordedCodes: recordedMilestones.results.map((item) => item.milestone_code),
+  });
+  // A warehouse-owned arrival can only be written after the next module's
+  // physical gate has opened. Preserve that terminal fact for legacy orders
+  // without making it part of the gate that opens the warehouse itself.
+  const effectiveComplete = handoff.ready || Boolean(next.complete);
   const effectiveStep =
     effectiveProgress >= 100
       ? "arrived"
@@ -245,7 +260,8 @@ export async function syncTrackingModuleStatusForOrder(
     }>();
   if (!module) return;
 
-  if (module.status === "completed" && module.current_step_code === effectiveStep) return;
+  if (effectiveComplete && module.status === "completed" && module.current_step_code === effectiveStep)
+    return;
   if ((module.progress_percent ?? 0) > effectiveProgress && module.current_step_code === effectiveStep)
     return;
 
@@ -281,7 +297,9 @@ export async function syncTrackingModuleStatusForOrder(
       effectiveStep,
       effectiveName,
       actorUserId,
-      `tracking milestone: ${milestoneCode}`,
+      `tracking milestone: ${milestoneCode}; handoff: ${
+        effectiveComplete ? "ready" : `waiting ${handoff.missingCodes.join(",")}`
+      }`,
       now,
     ),
   ]);

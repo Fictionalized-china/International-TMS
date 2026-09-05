@@ -2,6 +2,7 @@ import type { LockedWorkflowStageContext } from "./workflow-instance-stage-gate"
 
 type WorkflowBindingRow = {
   workflow_instance_id: string | null;
+  matched_instance_id: string | null;
   current_step_key: string | null;
 };
 
@@ -31,14 +32,16 @@ export async function loadLockedWorkflowStageContext(
   moduleCode: string,
 ): Promise<LockedWorkflowStageContext> {
   const binding = await db.prepare(
-    `SELECT o.workflow_instance_id,wi.current_step_key
+    `SELECT o.workflow_instance_id,wi.id matched_instance_id,wi.current_step_key
      FROM transport_orders o
      LEFT JOIN workflow_instances wi
-       ON wi.id=o.workflow_instance_id AND wi.organization_id=o.organization_id
+       ON wi.id=o.workflow_instance_id
+      AND wi.organization_id=o.organization_id
+      AND wi.order_id=o.id
      WHERE o.organization_id=? AND o.id=?`,
   ).bind(organizationId, orderId).first<WorkflowBindingRow>();
 
-  if (!binding?.workflow_instance_id) {
+  if (!binding || binding.workflow_instance_id === null) {
     return {
       locked: false,
       currentStepKey: binding?.current_step_key ?? null,
@@ -48,7 +51,20 @@ export async function loadLockedWorkflowStageContext(
     };
   }
 
-  const instanceId = binding.workflow_instance_id;
+  // A non-NULL binding is an explicit frozen-workflow contract.  Empty,
+  // cross-organization and cross-order references must therefore fail closed;
+  // treating them as legacy-unbound would silently bypass every frozen gate.
+  if (!binding.workflow_instance_id.trim() || !binding.matched_instance_id) {
+    return {
+      locked: true,
+      currentStepKey: null,
+      steps: [],
+      modulePlacements: [],
+      fields: [],
+    };
+  }
+
+  const instanceId = binding.matched_instance_id;
   const [steps, modules, fields] = await Promise.all([
     db.prepare(
       `SELECT step_key,step_name,sort_order

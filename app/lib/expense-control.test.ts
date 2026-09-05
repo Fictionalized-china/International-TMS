@@ -163,15 +163,29 @@ describe("expense direction controls", () => {
     expect(
       expenseDirectionActionStageAccess({
         action: "finance_review",
+        orderStatus: "in_progress",
         workflow,
       }),
     ).toMatchObject({ allowed: true, reason: null });
     expect(
       expenseDirectionActionStageAccess({
         action: "business_review",
+        orderStatus: "in_progress",
         workflow,
       }).allowed,
     ).toBe(false);
+    for (const orderStatus of ["completed", "cancelled"]) {
+      expect(
+        expenseDirectionActionStageAccess({
+          action: "finance_review",
+          orderStatus,
+          workflow,
+        }),
+      ).toMatchObject({
+        allowed: false,
+        visible: true,
+      });
+    }
   });
   it("keeps receivable and payable independent and allows parallel sign-off", () => {
     const receivable = emptyExpenseDirectionControl("receivable");

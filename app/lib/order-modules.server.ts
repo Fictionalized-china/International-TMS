@@ -14,6 +14,11 @@ import {
 } from "./order-modules";
 import { orderBusinessStages } from "./order-stage-flow";
 import { syncOrderBusinessWorkflow } from "./business-workflow.server";
+import {
+  resolveFrozenSettlementNotificationAssignees,
+  resolveFrozenWorkflowCurrentOwner,
+  type FrozenWorkflowCurrentOwnerRow,
+} from "./order-workflow-current-owner";
 import { assignedOrderNotificationStatement } from "./internal-notifications.server";
 import {
   checkOrderLoadPlan,
@@ -71,16 +76,31 @@ export async function loadOrderModuleActionScope(
   moduleCode: OrderModuleCode,
 ): Promise<OrderModuleActionScope | null> {
   const module = await env.DB.prepare(
-    `SELECT m.enabled,m.assignee_user_id,o.workflow_instance_id
+    `SELECT m.enabled,m.assignee_user_id,o.workflow_instance_id,
+            wi.id matched_instance_id
      FROM order_module_instances m
      JOIN transport_orders o ON o.organization_id=m.organization_id AND o.id=m.order_id
+     LEFT JOIN workflow_instances wi
+       ON wi.id=o.workflow_instance_id
+      AND wi.organization_id=o.organization_id
+      AND wi.order_id=o.id
      WHERE m.organization_id=? AND m.order_id=? AND m.module_code=?`,
   ).bind(organizationId, orderId, moduleCode).first<{
     enabled: number;
     assignee_user_id: string | null;
     workflow_instance_id: string | null;
+    matched_instance_id: string | null;
   }>();
   if (!module) return null;
+  if (module.workflow_instance_id && !module.matched_instance_id) {
+    return {
+      moduleCode,
+      enabled: false,
+      assigneeUserId: null,
+      taskAssigneeUserIds: [],
+      responsibilityPositionCodes: [],
+    };
+  }
   const workflowModule = await env.DB.prepare(
     `SELECT ms.id,ms.responsibility_position_code
      FROM workflow_instances wi
@@ -89,7 +109,7 @@ export async function loadOrderModuleActionScope(
        ON current_ss.instance_id=wi.id AND current_ss.step_key=wi.current_step_key
      JOIN workflow_instance_module_states ms
        ON ms.instance_step_state_id=ss.id AND ms.module_code=?
-     WHERE wi.organization_id=? AND wi.order_id=?
+     WHERE wi.id=? AND wi.organization_id=? AND wi.order_id=?
      ORDER BY
        CASE
          WHEN current_ss.sort_order IS NULL THEN 0
@@ -99,7 +119,12 @@ export async function loadOrderModuleActionScope(
          WHEN ss.sort_order<=current_ss.sort_order THEN -ss.sort_order ELSE ss.sort_order END,
        ms.sort_order,ms.id
      LIMIT 1`,
-  ).bind(moduleCode, organizationId, orderId).first<{
+  ).bind(
+    moduleCode,
+    module.matched_instance_id,
+    organizationId,
+    orderId,
+  ).first<{
     id: string;
     responsibility_position_code: string | null;
   }>();
@@ -153,6 +178,7 @@ type OrderSeed = {
   status: string;
   current_assignee_user_id: string | null;
   workflow_instance_id: string | null;
+  matched_instance_id: string | null;
   workflow_id: string | null;
 };
 
@@ -162,14 +188,26 @@ export async function ensureOrderModules(
   options: { syncBusinessWorkflow?: boolean } = {},
 ) {
   const order = await env.DB.prepare(
-    `SELECT o.id,o.business_type,o.status,o.current_assignee_user_id,o.workflow_instance_id,
-      COALESCE(wi.workflow_id,(SELECT workflow_id FROM workflow_instances x WHERE x.order_id=o.id LIMIT 1)) workflow_id
-     FROM transport_orders o LEFT JOIN workflow_instances wi ON wi.id=o.workflow_instance_id
+    `SELECT o.id,o.business_type,o.status,o.current_assignee_user_id,
+            o.workflow_instance_id,wi.id matched_instance_id,
+            CASE WHEN o.workflow_instance_id IS NULL THEN (
+              SELECT x.workflow_id FROM workflow_instances x
+              WHERE x.organization_id=o.organization_id AND x.order_id=o.id
+              LIMIT 1
+            ) ELSE wi.workflow_id END workflow_id
+     FROM transport_orders o
+     LEFT JOIN workflow_instances wi
+       ON wi.id=o.workflow_instance_id
+      AND wi.organization_id=o.organization_id
+      AND wi.order_id=o.id
      WHERE o.id=? AND o.organization_id=?`,
   )
     .bind(orderId, organizationId)
     .first<OrderSeed>();
   if (!order) throw new Error("订单不存在");
+  if (order.workflow_instance_id && !order.matched_instance_id) {
+    throw new Error("订单工作流实例绑定异常，不能同步业务模块");
+  }
   const [services, metrics] = await Promise.all([
     env.DB.prepare("SELECT service_code FROM order_services WHERE order_id=?")
       .bind(orderId)
@@ -628,7 +666,7 @@ export async function syncOrderWorkflowSnapshot(
   await ensureOrderModules(organizationId, orderId, { syncBusinessWorkflow: false });
   await syncModuleStateFromTransportBatch(organizationId, orderId);
   const order = await env.DB.prepare(
-    `SELECT o.status,o.business_type,o.current_assignee_user_id,
+    `SELECT o.status,o.business_type,o.current_assignee_user_id,o.workflow_instance_id,
             COALESCE(q.salesperson_user_id,o.salesperson_user_id) salesperson_user_id
      FROM transport_orders o
      LEFT JOIN quotations q ON q.organization_id=o.organization_id AND q.id=o.quotation_id
@@ -640,6 +678,7 @@ export async function syncOrderWorkflowSnapshot(
       business_type: string;
       current_assignee_user_id: string | null;
       salesperson_user_id: string | null;
+      workflow_instance_id: string | null;
     }>();
   if (!order || order.status !== "in_execution") return;
   const modules = (
@@ -652,60 +691,151 @@ export async function syncOrderWorkflowSnapshot(
       .bind(organizationId, orderId)
       .all<WorkflowSnapshotModule>()
   ).results;
-  const next = pickNextWorkflowModule(modules, order.business_type);
+  const synchronizedStepKey = await syncOrderBusinessWorkflow({
+    organizationId,
+    orderId,
+    source: "system",
+  });
+  const frozenRows = await env.DB.prepare(
+    `SELECT wi.current_step_key step_key,ss.step_name,
+            ms.id module_state_id,ms.module_code,ms.display_name module_name,
+            ms.sort_order module_sort_order,ms.is_required module_required,
+            ms.status module_state_status,
+            omi.id module_instance_id,omi.enabled module_instance_enabled,
+            omi.status module_instance_status,
+            omi.current_step_name module_current_step_name,
+            omi.assignee_user_id module_assignee_user_id,
+            ts.id task_state_id,ts.sort_order task_sort_order,
+            ts.is_required task_required,ts.task_type,ts.status task_status,
+            ts.assignee_user_id task_assignee_user_id
+       FROM workflow_instances wi
+       JOIN workflow_instance_step_states ss
+         ON ss.instance_id=wi.id AND ss.step_key=wi.current_step_key
+       LEFT JOIN workflow_instance_module_states ms
+         ON ms.instance_step_state_id=ss.id
+       LEFT JOIN order_module_instances omi
+         ON omi.organization_id=wi.organization_id AND omi.order_id=wi.order_id
+        AND omi.module_code=ms.module_code
+       LEFT JOIN workflow_instance_task_states ts
+         ON ts.instance_module_state_id=ms.id
+      WHERE wi.id=? AND wi.organization_id=? AND wi.order_id=?
+      ORDER BY ms.sort_order,ts.sort_order,ts.id`,
+  ).bind(order.workflow_instance_id, organizationId, orderId).all<FrozenWorkflowCurrentOwnerRow>();
+  const frozenCurrent = resolveFrozenWorkflowCurrentOwner(frozenRows.results);
+  const legacyNext =
+    !frozenCurrent &&
+    !synchronizedStepKey &&
+    !order.workflow_instance_id
+    ? pickLegacyNextWorkflowModule(modules, order.business_type)
+    : null;
   const now = new Date().toISOString();
-  if (next?.status === "not_started") {
-    await env.DB.prepare(
-      "UPDATE order_module_instances SET status='in_progress',started_at=COALESCE(started_at,?),progress_percent=CASE WHEN progress_percent>0 THEN progress_percent ELSE 1 END,updated_at=? WHERE id=?",
-    )
-      .bind(now, now, next.id)
-      .run();
+  const activeModuleIds = frozenCurrent?.activeModuleInstanceIds ??
+    (legacyNext?.status === "not_started" ? [legacyNext.id] : []);
+  if (activeModuleIds.length) {
+    await env.DB.batch(activeModuleIds.map((moduleId) => env.DB.prepare(
+      `UPDATE order_module_instances
+          SET status='in_progress',started_at=COALESCE(started_at,?),
+              progress_percent=CASE WHEN progress_percent>0 THEN progress_percent ELSE 1 END,
+              updated_at=?
+        WHERE id=? AND status='not_started'`,
+    ).bind(now, now, moduleId)));
   }
-  const nextStepName = next
-    ? `${next.module_name} · ${next.current_step_name || "待处理"}`
-    : "已启用模块全部完成";
+  const primaryModuleCode = frozenCurrent?.primaryModuleCode ?? legacyNext?.module_code ?? null;
+  const primaryAssigneeUserId = frozenCurrent?.primaryAssigneeUserId ?? legacyNext?.assignee_user_id ?? null;
+  const nextStepName = frozenCurrent
+    ? `${frozenCurrent.stepName}${frozenCurrent.primaryModuleName ? ` · ${frozenCurrent.primaryModuleName}` : ""}`
+    : legacyNext
+      ? `${legacyNext.module_name} · ${legacyNext.current_step_name || "待处理"}`
+      : order.workflow_instance_id
+        ? "工作流实例当前节点配置异常"
+        : "已启用模块全部完成";
   const notificationStatements = [];
-  if (next?.module_code === "costs") {
-    const parallelStepName = "对账结算 · 三方并行签核";
-    const financeAssigneeUserId = modules.find(
-      (item) => item.module_code === "review",
-    )?.assignee_user_id;
-    const parallelAssignees = [
-      next.assignee_user_id,
-      order.salesperson_user_id,
-      financeAssigneeUserId,
-    ].filter((userId): userId is string => Boolean(userId));
-    for (const assigneeUserId of new Set(parallelAssignees)) {
-      notificationStatements.push(
-        assignedOrderNotificationStatement(env.DB, {
-          organizationId,
-          orderId,
-          assigneeUserId,
-          actorUserId: null,
-          stepName: parallelStepName,
-          now,
-        }),
-      );
-    }
-  } else if (next?.assignee_user_id && next.assignee_user_id !== order.current_assignee_user_id) {
+  let notificationAssigneeUserIds =
+    frozenCurrent?.notificationAssigneeUserIds ??
+      (primaryAssigneeUserId ? [primaryAssigneeUserId] : []);
+  if (
+    primaryModuleCode === "costs" &&
+    frozenCurrent &&
+    order.workflow_instance_id
+  ) {
+    const [activeSettlementFields, frozenFinanceOwner] = await Promise.all([
+      env.DB.prepare(
+        `SELECT field_key
+           FROM workflow_instance_fields
+          WHERE instance_id=? AND step_key=? AND module_code='costs'
+            AND is_active=1
+            AND field_key IN (
+              'customer_service_confirmation','business_review','finance_review'
+            )
+          ORDER BY sort_order,field_key`,
+      ).bind(order.workflow_instance_id, frozenCurrent.stepKey).all<{ field_key: string }>(),
+      env.DB.prepare(
+        `SELECT COALESCE(ts.assignee_user_id,omi.assignee_user_id) assignee_user_id
+           FROM workflow_instance_step_states ss
+           JOIN workflow_instance_module_states ms
+             ON ms.instance_step_state_id=ss.id AND ms.module_code='review'
+           LEFT JOIN workflow_instance_task_states ts
+             ON ts.instance_module_state_id=ms.id AND ts.task_type<>'system'
+           LEFT JOIN order_module_instances omi
+             ON omi.organization_id=? AND omi.order_id=?
+            AND omi.module_code=ms.module_code AND omi.enabled=1
+          WHERE ss.instance_id=?
+            AND COALESCE(
+              ts.responsibility_position_code,
+              ms.responsibility_position_code
+            )='FINANCE_ACCOUNTING'
+            AND COALESCE(ts.assignee_user_id,omi.assignee_user_id) IS NOT NULL
+          ORDER BY
+            CASE WHEN ts.status IN ('active','pending','blocked') THEN 0 ELSE 1 END,
+            CASE WHEN ts.is_required=1 THEN 0 ELSE 1 END,
+            ss.sort_order,ms.sort_order,ts.sort_order,ts.id
+          LIMIT 1`,
+      ).bind(
+        organizationId,
+        orderId,
+        order.workflow_instance_id,
+      ).first<{ assignee_user_id: string | null }>(),
+    ]);
+    notificationAssigneeUserIds = resolveFrozenSettlementNotificationAssignees({
+      baseAssigneeUserIds: notificationAssigneeUserIds,
+      activeFieldKeys: activeSettlementFields.results.map((field) => field.field_key),
+      salespersonUserId: order.salesperson_user_id,
+      financeAssigneeUserId: frozenFinanceOwner?.assignee_user_id ?? null,
+    });
+  }
+  const notificationAssignees = new Set(notificationAssigneeUserIds);
+  for (const assigneeUserId of notificationAssignees) {
+    if (
+      notificationAssignees.size === 1 &&
+      assigneeUserId === order.current_assignee_user_id
+    ) continue;
     notificationStatements.push(
       assignedOrderNotificationStatement(env.DB, {
         organizationId,
         orderId,
-        assigneeUserId: next.assignee_user_id,
+        assigneeUserId,
         actorUserId: null,
         stepName: nextStepName,
         now,
       }),
     );
   }
+  const nextStepCode = frozenCurrent
+    ? primaryModuleCode
+      ? `module:${primaryModuleCode}`
+      : `workflow:${frozenCurrent.stepKey}`
+    : legacyNext
+      ? `module:${legacyNext.module_code}`
+      : order.workflow_instance_id
+        ? "workflow_configuration_error"
+        : "ready_to_complete";
   await env.DB.batch([
     env.DB.prepare(
       "UPDATE transport_orders SET current_step_code=?,current_step_name=?,current_assignee_user_id=?,workflow_updated_at=?,updated_at=? WHERE organization_id=? AND id=? AND status='in_execution'",
     ).bind(
-      next ? `module:${next.module_code}` : "ready_to_complete",
+      nextStepCode,
       nextStepName,
-      next?.assignee_user_id ?? null,
+      primaryAssigneeUserId,
       now,
       now,
       organizationId,
@@ -713,14 +843,9 @@ export async function syncOrderWorkflowSnapshot(
     ),
     ...notificationStatements,
   ]);
-  await syncOrderBusinessWorkflow({
-    organizationId,
-    orderId,
-    source: "system",
-  });
 }
 
-function pickNextWorkflowModule(
+function pickLegacyNextWorkflowModule(
   modules: WorkflowSnapshotModule[],
   _businessType: string,
 ) {

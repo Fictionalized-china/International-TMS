@@ -32,6 +32,7 @@ export type OrderAssignmentManifestModule = {
 export type OrderAssignmentManifestGroup = {
   key: string;
   positionCode: string | null;
+  assignmentMode: "person" | "site_queue";
   required: boolean;
   assignmentState: "unassigned" | "partial" | "assigned" | "mixed";
   assigneeUserId: string | null;
@@ -43,8 +44,90 @@ export type OrderAssignmentManifest = {
   configurationErrors: string[];
 };
 
+export const physicalWarehouseQueuePositionCodes = [
+  "WAREHOUSE",
+  "OVERSEAS_WAREHOUSE",
+] as const;
+
+export function orderAssignmentMode(positionCode: string | null) {
+  return positionCode && physicalWarehouseQueuePositionCodes.includes(
+    positionCode as (typeof physicalWarehouseQueuePositionCodes)[number],
+  ) ? "site_queue" as const : "person" as const;
+}
+
+export function orderAssignmentPermissionRequirements(input: {
+  assignmentMode: "person" | "site_queue";
+  positionCode: string | null;
+  moduleCodes: readonly string[];
+}): string[][] {
+  if (input.assignmentMode === "site_queue") return [];
+  const requirements: string[][] = [];
+  for (const moduleCode of input.moduleCodes) {
+    if (["warehouse", "loading", "overseas_warehouse"].includes(moduleCode)) {
+      requirements.push([`order.module.${moduleCode}.manage`, "warehouse.operate"]);
+      continue;
+    }
+    if (moduleCode === "consignment" && input.positionCode === "BUSINESS_SUPERVISOR") {
+      requirements.push(["order.view"]);
+      continue;
+    }
+    requirements.push([`order.module.${moduleCode}.manage`]);
+    if (moduleCode === "review" && input.positionCode === "FINANCE_ACCOUNTING") {
+      requirements.push(["billing.expense.approve"]);
+    }
+  }
+  const seen = new Set<string>();
+  return requirements.filter((alternatives) => {
+    const key = [...alternatives].sort().join("\u0000");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+export function orderAssignmentGroupPermissionRequirements(
+  group: Pick<OrderAssignmentManifestGroup, "assignmentMode" | "positionCode" | "modules">,
+): string[][] {
+  return orderAssignmentPermissionRequirements({
+    assignmentMode: group.assignmentMode,
+    positionCode: group.positionCode,
+    moduleCodes: group.modules.map((module) => module.moduleCode),
+  });
+}
+
 export function orderAssignmentAssigneeFieldName(groupKey: string) {
   return `assignmentAssignee:${encodeURIComponent(groupKey)}`;
+}
+
+export function orderAssignmentCandidateConfigurationErrors(
+  groups: readonly OrderAssignmentManifestGroup[],
+  members: readonly Pick<
+    OrganizationAssigneeMember,
+    "position_code" | "permission_codes"
+  >[],
+) {
+  return groups.flatMap((group) => {
+    if (
+      !group.required ||
+      group.assignmentMode !== "person" ||
+      !group.positionCode
+    ) return [];
+    const positionMembers = members.filter(
+      (member) => member.position_code === group.positionCode,
+    );
+    if (!positionMembers.length) {
+      return [`${group.positionCode} 岗位暂无有效个人账户`];
+    }
+    const requirements = orderAssignmentGroupPermissionRequirements(group);
+    if (!positionMembers.some((member) =>
+      organizationAssigneeCanHandle(member, requirements)
+    )) {
+      return [
+        `${group.positionCode} 岗位现有账户均不具备该责任所需的有效权限（含个人拒绝覆盖）`,
+      ];
+    }
+    return [];
+  });
 }
 
 export function missingRequiredOrderAssignmentGroupKeys(
@@ -54,6 +137,7 @@ export function missingRequiredOrderAssignmentGroupKeys(
   return groups
     .filter((group) =>
       group.required &&
+      group.assignmentMode === "person" &&
       !(assigneeUserIds[group.key] || group.assigneeUserId),
     )
     .map((group) => group.key);
@@ -62,7 +146,11 @@ export function missingRequiredOrderAssignmentGroupKeys(
 export function nextRequiredOrderAssignmentGroup(
   groups: readonly OrderAssignmentManifestGroup[],
 ) {
-  return groups.find((group) => group.required && Boolean(group.positionCode)) ?? null;
+  return groups.find((group) =>
+    group.required &&
+    group.assignmentMode === "person" &&
+    Boolean(group.positionCode),
+  ) ?? null;
 }
 
 export function buildOrderAssignmentManifest(
@@ -94,6 +182,7 @@ export function buildOrderAssignmentManifest(
       group = {
         key,
         positionCode,
+        assignmentMode: orderAssignmentMode(positionCode),
         required,
         assignmentState: "unassigned",
         assigneeUserId: null,
@@ -141,6 +230,11 @@ export function buildOrderAssignmentManifest(
   }
 
   for (const [key, group] of groupMap) {
+    if (group.assignmentMode === "site_queue") {
+      group.assignmentState = "assigned";
+      group.assigneeUserId = null;
+      continue;
+    }
     const assignments = assignmentIds.get(key) ?? [];
     const assigned = assignments.filter((userId): userId is string => Boolean(userId));
     const unique = [...new Set(assigned)];
@@ -179,3 +273,7 @@ export function buildOrderAssignmentManifest(
       .map((group) => `${group.modules.map((module) => module.moduleName).join("、")}未配置责任岗位`),
   };
 }
+import {
+  organizationAssigneeCanHandle,
+  type OrganizationAssigneeMember,
+} from "./organization-assignee";

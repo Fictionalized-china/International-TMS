@@ -15,6 +15,7 @@ from tms_full_flow_phase4 import (
     HANDOFF_SCHEMA,
     ORDER_KEYS,
     PHASE3_HANDOFF_SCHEMA,
+    PHASE3_STAGE_ORDER,
     PHASE4_STAGE_ORDER,
     REQUIRED_ACCOUNT_ALIASES,
     Phase3Handoff,
@@ -65,13 +66,21 @@ def phase3_handoff_payload(*, ready: bool = True, orders: dict[str, str] | None 
             "ftl": "OUT-260905-FTL09",
             "ltl_batch": "OUT-260905-LTL09",
         },
+        "certification_lineage": {
+            "mode": "fresh-from-phase1",
+            "root_phase1_run_id": "phase1-a001-test",
+            "root_entity_prefix": "UIE2E-20260905-A001-ABCDEF01",
+            "fresh_phase1_attempt": True,
+            "recovery_branches_used": False,
+            "source_phase2_run_id": "phase2-a001-test",
+        },
         "oul_numbers": [f"OUL-{key.upper()}-001" for key in ORDER_KEYS],
         "customs_declarations": {key: f"CD-{key}" for key in ORDER_KEYS},
         "tracking_nodes": {"ftl": ["目的仓到达"], "ltl_batch": ["目的仓到达"]},
         "overseas_inbound": [f"OUL-{key.upper()}-001" for key in ORDER_KEYS],
         "appointed_order": selected["ftl"],
         "pickup_signed_orders": list(selected.values()),
-        "completed_stages": ["pickup_sign"],
+        "completed_stages": list(PHASE3_STAGE_ORDER),
         "ready_for_phase4": ready,
     }
 
@@ -93,6 +102,14 @@ def phase3_source() -> Phase3Handoff:
         transport_batch_number="PZ-20260905-009",
         dispatches={"ftl": "OUT-260905-FTL09", "ltl_batch": "OUT-260905-LTL09"},
         oul_numbers={key: (f"OUL-{key.upper()}-001",) for key in ORDER_KEYS},
+        certification_lineage={
+            "mode": "fresh-from-phase1",
+            "root_phase1_run_id": "phase1-a001-test",
+            "root_entity_prefix": "UIE2E-20260905-A001-ABCDEF01",
+            "fresh_phase1_attempt": True,
+            "recovery_branches_used": False,
+            "source_phase2_run_id": "phase2-a001-test",
+        },
     )
 
 
@@ -131,6 +148,7 @@ class Phase3HandoffTests(unittest.TestCase):
                 {
                     "status": "passed",
                     "run_id": "phase3-a001-test",
+                    "metrics": {"steps_failed": 0, "steps_blocked": 0, "gates_failed": 0},
                     "entities": {"order": ORDERS},
                     "handoff": phase3_handoff_payload(),
                 },
@@ -146,6 +164,16 @@ class Phase3HandoffTests(unittest.TestCase):
     def test_reads_phase3_cli_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "phase3-result.json"
+            summary = Path(directory) / "some-summary.json"
+            write_json(
+                summary,
+                {
+                    "status": "passed",
+                    "run_id": "phase3-a002-test",
+                    "metrics": {"steps_failed": 0, "steps_blocked": 0, "gates_failed": 0},
+                    "handoff": phase3_handoff_payload(),
+                },
+            )
             write_json(
                 path,
                 {
@@ -169,6 +197,7 @@ class Phase3HandoffTests(unittest.TestCase):
                 {
                     "status": "passed",
                     "run_id": "phase3-a003",
+                    "metrics": {"steps_failed": 0, "steps_blocked": 0, "gates_failed": 0},
                     "handoff": phase3_handoff_payload(ready=False),
                 },
             )
@@ -182,7 +211,7 @@ class Phase3HandoffTests(unittest.TestCase):
             path = Path(directory) / "summary.json"
             write_json(
                 path,
-                {"status": "passed", "run_id": "phase3-a004", "handoff": payload},
+                {"status": "passed", "run_id": "phase3-a004", "metrics": {"steps_failed": 0, "steps_blocked": 0, "gates_failed": 0}, "handoff": payload},
             )
             with self.assertRaisesRegex(ValueError, "四票境外仓扫码自提签收"):
                 load_phase3_handoff(path)
@@ -197,10 +226,43 @@ class Phase3HandoffTests(unittest.TestCase):
                 {
                     "status": "passed",
                     "run_id": "phase3-a005",
+                    "metrics": {"steps_failed": 0, "steps_blocked": 0, "gates_failed": 0},
                     "handoff": phase3_handoff_payload(orders=duplicated),
                 },
             )
             with self.assertRaisesRegex(ValueError, "互不相同"):
+                load_phase3_handoff(path)
+
+    def test_rejects_nominal_pass_with_failed_phase3_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "summary.json"
+            write_json(
+                path,
+                {
+                    "status": "passed",
+                    "run_id": "phase3-a006",
+                    "metrics": {"steps_failed": 0, "steps_blocked": 1, "gates_failed": 0},
+                    "handoff": phase3_handoff_payload(),
+                },
+            )
+            with self.assertRaisesRegex(ValueError, "失败证据"):
+                load_phase3_handoff(path)
+
+    def test_rejects_phase3_recovery_lineage(self) -> None:
+        handoff = phase3_handoff_payload()
+        handoff["certification_lineage"]["recovery_branches_used"] = True  # type: ignore[index]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "summary.json"
+            write_json(
+                path,
+                {
+                    "status": "passed",
+                    "run_id": "phase3-a007",
+                    "metrics": {"steps_failed": 0, "steps_blocked": 0, "gates_failed": 0},
+                    "handoff": handoff,
+                },
+            )
+            with self.assertRaisesRegex(ValueError, "fresh attempt"):
                 load_phase3_handoff(path)
 
 
@@ -271,6 +333,10 @@ class Phase4HandoffTests(unittest.TestCase):
         self.assertEqual(payload["archived_orders"], list(ORDERS.values()))
         self.assertEqual(payload["completed_stages"], list(PHASE4_STAGE_ORDER))
         self.assertTrue(payload["ready_for_final_acceptance"])
+        self.assertEqual(
+            payload["certification_lineage"]["source_phase3_run_id"],
+            "phase3-a001-test",
+        )
 
     def test_incomplete_handoff_never_claims_final_acceptance(self) -> None:
         payload = build_handoff_payload(

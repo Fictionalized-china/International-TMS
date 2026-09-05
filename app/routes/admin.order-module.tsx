@@ -23,10 +23,12 @@ import {
   syncCostsModuleStatus,
   syncOrderWorkflowSnapshot,
 } from "../lib/order-modules.server";
+import { assignOrderModulesBulk } from "../lib/order-module-bulk-assignment.server";
 import { runOrderWorkflowAction } from "../lib/order-workflow-action.server";
 import {
   canSubmitSalesOrderForApproval,
   isAssignedOrderApprover,
+  orderWorkflowTargetAssigneeRequirements,
 } from "../lib/order-workflow";
 import {
   composeOrderWorkflow,
@@ -50,9 +52,11 @@ import {
 } from "../lib/billing-access";
 import {
   canReviewOrderModuleDocument,
+  orderDocumentWorkflowMutationAccess,
   canUploadOrderModuleDocument,
-  isSettlementDocumentStageOpen,
+  settlementDocumentStageAccess,
 } from "../lib/order-document-access";
+import { loadOrderDocumentWorkflowMutationAccess } from "../lib/order-document-access.server";
 import { canReadScopedDocument } from "../lib/order-document-visibility";
 import { transportChargeNameOptions } from "../lib/charge-options";
 import { ensureFtlVehicleAndLoads } from "../lib/ftl-vehicle-loads.server";
@@ -70,13 +74,19 @@ import {
   orderDocumentTypeCodes,
   orderDocumentTypeLabel,
 } from "../lib/order-documents";
+import { loadingDocumentFieldPolicy } from "../lib/loading-document-requirements";
+import { loadOrderLoadingDocumentRequirements } from "../lib/loading-document-requirements.server";
 import {
   checkOrderDeparture,
   checkOrderLoadPlan,
   resolveOrderTrackingVehicleReference,
 } from "../lib/order-readiness.server";
 import { roadStatusLabels } from "../lib/warehouse-actual";
-import { syncBatchRoadStatusFromTracking } from "../lib/batch-tracking.server";
+import {
+  syncBatchRoadStatusFromTracking,
+  syncTrackingModuleStatusForOrder,
+} from "../lib/batch-tracking.server";
+import { resolveTrackingWorkflowHandoff } from "../lib/batch-tracking.shared";
 import {
   nextOverseasAction,
   overseasOperationProgress,
@@ -120,10 +130,15 @@ import { refreshSettlementAffectedOrders } from "../lib/settlement-order-refresh
 import { syncCustomsModuleFromRecords } from "../lib/customs-status.server";
 import { Modal } from "../components/Modal";
 import { OrganizationAssigneePicker } from "../components/OrganizationAssigneePicker";
-import type { OrganizationAssigneeMember } from "../lib/organization-assignee";
+import {
+  organizationAssigneeCanHandle,
+  type OrganizationAssigneeMember,
+} from "../lib/organization-assignee";
 import {
   missingRequiredOrderAssignmentGroupKeys,
   nextRequiredOrderAssignmentGroup,
+  orderAssignmentCandidateConfigurationErrors,
+  orderAssignmentGroupPermissionRequirements,
   orderAssignmentAssigneeFieldName,
 } from "../lib/order-assignment-manifest";
 import {
@@ -133,6 +148,7 @@ import {
 import {
   isActiveOrganizationAssignee,
   isActiveOrganizationAssigneeForPositions,
+  listActiveOrganizationAssignees,
 } from "../lib/organization-assignee.server";
 import {
   loadOrderModuleWorkflowFields,
@@ -140,6 +156,7 @@ import {
   saveOrderCustomWorkflowFieldValue,
   type WorkflowFieldState,
 } from "../lib/workflow-fields.server";
+import { canCompleteWorkflowTask } from "../lib/workflow-task-access";
 import { workflowFieldConfigurationHref } from "../lib/workflow-field-locator";
 import {
   hasVisibleRuntimeWorkflowField,
@@ -592,7 +609,9 @@ async function loadModuleWorkflowStageAccess(
     moduleCode,
     frozenContext,
   );
-  if (frozenAccess) return frozenAccess;
+  if (frozenAccess) {
+    return { ...frozenAccess, workflowContext: frozenContext };
+  }
 
   // Legacy orders created before execution snapshots retain the previous
   // definition-based lookup. Instance-bound orders must never reach this path.
@@ -604,7 +623,12 @@ async function loadModuleWorkflowStageAccess(
   )
     .bind(organizationId, orderId)
     .first<{ workflow_id: string; current_step_key: string | null }>();
-  if (!state) return orderModuleWorkflowStageAccess(moduleCode, null, []);
+  if (!state) {
+    return {
+      ...orderModuleWorkflowStageAccess(moduleCode, null, []),
+      workflowContext: frozenContext,
+    };
+  }
   const steps = await env.DB.prepare(
     `SELECT step_key,name AS step_name,sort_order
      FROM workflow_steps
@@ -625,12 +649,18 @@ async function loadModuleWorkflowStageAccess(
     stepName: step.step_name,
     sortOrder: step.sort_order,
   }));
-  return orderModuleWorkflowStageAccess(
-    moduleCode,
-    state.current_step_key,
-    positions,
-    configuredPlacement?.step_key ?? null,
-  );
+  return {
+    ...orderModuleWorkflowStageAccess(
+      moduleCode,
+      state.current_step_key,
+      positions,
+      configuredPlacement?.step_key ?? null,
+    ),
+    workflowContext: {
+      ...frozenContext,
+      currentStepKey: state.current_step_key,
+    },
+  };
 }
 
 function canOperateLoadedConfiguredModule(
@@ -880,22 +910,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
       ? [orderId, current.organizationId]
       : [orderId, current.organizationId, moduleCode];
   const [members, tasks, history, cargo, approvalHistory] = await Promise.all([
-    env.DB.prepare(
-      `SELECT u.id,u.display_name,
-              d.id department_id,d.code department_code,d.name department_name,
-              p.id position_id,p.code position_code,p.name position_name
-       FROM memberships m
-       JOIN users u ON u.id=m.user_id
-       JOIN departments d
-         ON d.id=m.department_id AND d.organization_id=m.organization_id AND d.status='active'
-       JOIN positions p
-         ON p.id=m.position_id AND p.organization_id=m.organization_id AND p.status='active'
-        AND p.department_code=d.code
-       WHERE m.organization_id=? AND m.status='active' AND u.status='active'
-       ORDER BY d.sort_order,p.sort_order,u.display_name`,
-    )
-      .bind(current.organizationId)
-      .all<Member>(),
+    listActiveOrganizationAssignees(current.organizationId),
     env.DB.prepare(
       `SELECT t.id,t.module_code,t.title,t.priority,t.status,u.display_name assignee_name,t.due_at,t.created_at FROM order_tasks t LEFT JOIN users u ON u.id=t.assignee_user_id WHERE t.order_id=? AND t.organization_id=? ${taskFilter} ORDER BY CASE t.status WHEN 'pending' THEN 0 WHEN 'in_progress' THEN 1 ELSE 2 END,t.created_at DESC`,
     )
@@ -1369,6 +1384,12 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     orderId,
     definition.code,
   );
+  const loadingDocumentRequirements = definition.code === "loading"
+    ? (await loadOrderLoadingDocumentRequirements(
+        current.organizationId,
+        [orderId],
+      ))[0] ?? null
+    : null;
   const quotationCostWorkflowFields = definition.code === "consignment"
     ? await loadOrderModuleWorkflowFields(current.organizationId, orderId, "costs")
     : [];
@@ -1408,7 +1429,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     definition,
     modules,
     assignmentManifest,
-    members: members.results,
+    members,
     tasks: tasks.results,
     history: history.results,
     approvalHistory: approvalHistory.results,
@@ -1444,6 +1465,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     trackingDepartureGate,
     trackingVehicleReference,
     workflowFields,
+    loadingDocumentRequirements,
     quotationCostWorkflowFields,
   };
 }
@@ -1477,7 +1499,8 @@ export async function action({ request, params }: Route.ActionArgs) {
     `SELECT status,business_type,shipper_name,origin_country,origin_state,origin_city,origin_address,
             consignee_name,destination_country,destination_state,destination_city,destination_address,
             exit_port,transit_locations,customs_location,route_notes,overseas_warehouse_id,
-            requires_transloading,requires_transit_customs,current_assignee_user_id,salesperson_user_id
+            requires_transloading,requires_transit_customs,current_assignee_user_id,salesperson_user_id,
+            workflow_instance_id
      FROM transport_orders WHERE id=? AND organization_id=?`,
   )
     .bind(orderId, current.organizationId)
@@ -1486,6 +1509,7 @@ export async function action({ request, params }: Route.ActionArgs) {
       consignee_name:string;destination_country:string;destination_state:string|null;destination_city:string;destination_address:string;
       exit_port:string|null;transit_locations:string|null;customs_location:string|null;route_notes:string|null;overseas_warehouse_id:string|null;
       requires_transloading:number;requires_transit_customs:number;current_assignee_user_id:string|null;salesperson_user_id:string|null;
+      workflow_instance_id:string|null;
     }>();
   if (!order) return { formError: "订单不存在" };
   await ensureOrderModules(current.organizationId, orderId);
@@ -1526,9 +1550,54 @@ export async function action({ request, params }: Route.ActionArgs) {
     });
   const workflowAdministratorActionAccess =
     workflowAdministrator && !usesModuleScopedAuthorization;
-  const isSettlementDocumentAction =
-    moduleCode === "costs" &&
-    ["document_upload", "document_review", "document_metadata_update"].includes(intent);
+  const isDocumentAction = [
+    "document_upload",
+    "document_review",
+    "document_metadata_update",
+  ].includes(intent);
+  const quickReviewAttachmentId = valueOf(form, "quickReviewAttachmentId");
+  const documentReviewAction = intent === "document_review" || Boolean(quickReviewAttachmentId);
+  const actionDocumentCategory = !isDocumentAction
+    ? null
+    : intent === "document_upload" && !quickReviewAttachmentId
+      ? valueOf(form, "documentCategory")
+      : (await env.DB.prepare(
+          "SELECT document_category FROM order_document_metadata WHERE attachment_id=? AND order_id=? AND organization_id=?",
+        )
+          .bind(valueOf(form, "attachmentId") || quickReviewAttachmentId, orderId, current.organizationId)
+          .first<{ document_category: string }>())?.document_category ?? null;
+  const actionDocumentPlacement = actionDocumentCategory
+    ? orderDocumentPlacement(actionDocumentCategory)
+    : null;
+  if (isDocumentAction && !actionDocumentPlacement) {
+    return {
+      formError: intent === "document_upload" && !quickReviewAttachmentId
+        ? "文件类型无效，请从对应的专用上传框提交"
+        : documentReviewAction
+          ? "要审核的文件不存在"
+          : "要修改的文件不存在",
+    };
+  }
+  if (
+    isDocumentAction &&
+    actionDocumentPlacement &&
+    actionDocumentPlacement.moduleCode !== moduleCode
+  ) {
+    return { formError: "该文件属于其他业务模块，不能跨模块办理" };
+  }
+  const isSettlementDocumentAction = actionDocumentPlacement?.moduleCode === "costs";
+  const documentWorkflowMutationAccess =
+    isDocumentAction && actionDocumentCategory
+      ? await loadOrderDocumentWorkflowMutationAccess(
+          env.DB,
+          current.organizationId,
+          orderId,
+          actionDocumentCategory,
+        )
+      : null;
+  if (isDocumentAction && !documentWorkflowMutationAccess?.allowed) {
+    return { formError: documentWorkflowMutationAccess?.reason || "当前工作流未开放该文件操作" };
+  }
   const settlementDocumentOwners = isSettlementDocumentAction
     ? await env.DB.prepare(
         `SELECT costs.assignee_user_id customer_service_assignee_user_id,
@@ -1552,16 +1621,24 @@ export async function action({ request, params }: Route.ActionArgs) {
           finance_assignee_user_id: string | null;
         }>()
     : null;
-  const settlementDocumentStageAccess = isSettlementDocumentAction
+  const settlementWorkflowStageAccess = isSettlementDocumentAction
     ? await loadModuleWorkflowStageAccess(current.organizationId, orderId, "costs")
     : null;
-  const settlementDocumentStageOpen = isSettlementDocumentStageOpen(
-    settlementDocumentStageAccess?.currentStepKey,
-    order.status,
-  );
+  const settlementDocumentWorkflowAccess =
+    isSettlementDocumentAction &&
+    actionDocumentPlacement &&
+    settlementWorkflowStageAccess
+      ? settlementDocumentStageAccess({
+          orderStatus: order.status,
+          fieldKey: actionDocumentPlacement.fieldKey,
+          workflow: settlementWorkflowStageAccess.workflowContext,
+        })
+      : null;
+  const settlementDocumentStageOpen =
+    settlementDocumentWorkflowAccess?.allowed ?? false;
   const canUploadSettlementDocument = canUploadOrderModuleDocument(
     current,
-    moduleCode,
+    "costs",
     moduleManageAccess,
     settlementDocumentOwners
       ? {
@@ -1574,7 +1651,7 @@ export async function action({ request, params }: Route.ActionArgs) {
   );
   const canReviewSettlementDocument = canReviewOrderModuleDocument(
     current,
-    moduleCode,
+    "costs",
     moduleManageAccess,
     settlementDocumentOwners
       ? {
@@ -1587,18 +1664,21 @@ export async function action({ request, params }: Route.ActionArgs) {
   );
   const isAuthorizedSettlementDocumentAction =
     isSettlementDocumentAction && settlementDocumentStageOpen &&
-    (intent === "document_review"
+    (documentReviewAction
       ? canReviewSettlementDocument
       : canUploadSettlementDocument);
   if (isSettlementDocumentAction && !settlementDocumentStageOpen) {
-    return { formError: "当前订单尚未进入对账结算，或已经完结，文件仅供查看。" };
+    return {
+      formError: settlementDocumentWorkflowAccess?.reason ||
+        "当前工作流尚未开放该结算文件，文件仅供查看。",
+    };
   }
   if (isSettlementDocumentAction && !isAuthorizedSettlementDocumentAction) {
     return {
       formError:
-        intent === "document_review"
-          ? "对账结算文件仅可由本单已分配的财务会计审核。"
-          : "对账结算文件仅可由本单已分配的客服或财务会计上传和维护。",
+        documentReviewAction
+          ? "结算文件仅可由本单已分配的财务会计审核。"
+          : "结算文件仅可由本单已分配的客服或财务会计上传和维护。",
     };
   }
   if (!canOperateCurrentOrder(current, order) && !isSalesConsignmentSubmitAction && !workflowAdministratorActionAccess && !moduleScopedActionAccess && !isExpenseDirectionControlAction && !isAuthorizedSettlementDocumentAction) {
@@ -1689,12 +1769,13 @@ export async function action({ request, params }: Route.ActionArgs) {
   )).length > 0 && !["completed","cancelled"].includes(order.status);
   const isSubmittedConsignmentApproval =
     canApproveConsignment && order.status === "submitted";
-  if (!stageAccess.available && !isSubmittedConsignmentApproval)
+  if (!stageAccess.available && !isSubmittedConsignmentApproval && !isAuthorizedSettlementDocumentAction)
     return { formError: stageAccess.reason || "当前业务阶段尚未开放本模块" };
   if (
     !access.canEdit && !dynamicStageEdit && !policyRemediationEdit &&
     !isSubmittedConsignmentApproval &&
-    !(moduleCode === "review" && intent === "generate_order_review")
+    !(moduleCode === "review" && intent === "generate_order_review") &&
+    !isAuthorizedSettlementDocumentAction
   )
     return { formError: access.reason || "当前订单状态不允许办理该模块" };
   if (intent === "workflow_action") {
@@ -1732,6 +1813,7 @@ export async function action({ request, params }: Route.ActionArgs) {
       await saveOrderCustomWorkflowFieldValue({
         organizationId: current.organizationId,
         orderId,
+        moduleCode: moduleCode as OrderModuleCode,
         fieldId: valueOf(form, "fieldId"),
         value: valueOf(form, "fieldValue"),
         actorUserId: current.userId,
@@ -2077,6 +2159,9 @@ export async function action({ request, params }: Route.ActionArgs) {
       };
     }
     if (intent === "assign_bulk" && moduleCode === "assignment") {
+      if (order.workflow_instance_id !== null) {
+        return { formError: "该订单已绑定工作流实例，请按冻结责任组分配" };
+      }
       const assigneeUserId = valueOf(form, "assigneeUserId");
       if (!assigneeUserId)
         return { formError: "请按部门、岗位选择具体个人账户" };
@@ -2100,26 +2185,31 @@ export async function action({ request, params }: Route.ActionArgs) {
       if (missingAssignmentFields.length)
         return { formError: `请填写当前模板要求的字段：${missingAssignmentFields.join("、")}` };
       if (!targetCodes.length) return { formError: "当前没有可分配的模块" };
-      const assignable = modules.filter(
-        (item) =>
-          item.enabled === 1 &&
-          item.module_code !== "assignment" &&
-          targetCodes.includes(item.module_code) &&
-          !["completed", "not_applicable"].includes(item.status),
+      const moduleByCode = new Map<string, (typeof modules)[number]>(
+        modules.map((item) => [item.module_code, item]),
       );
-      if (!assignable.length)
-        return { formError: "选中的模块无需分配或已经完成" };
-      for (const item of assignable) {
-        await assignOrderModule({
-          organizationId: current.organizationId,
-          orderId,
+      const invalidTargetCodes = targetCodes.filter((targetCode) => {
+        const item = moduleByCode.get(targetCode);
+        return !item || item.enabled !== 1 || item.module_code === "assignment" ||
+          ["completed", "not_applicable"].includes(item.status);
+      });
+      if (invalidTargetCodes.length) {
+        return {
+          formError: `选中的模块不存在、未启用或已完成：${invalidTargetCodes.join("、")}`,
+        };
+      }
+      const assignable = targetCodes.map((targetCode) => moduleByCode.get(targetCode)!);
+      await assignOrderModulesBulk({
+        organizationId: current.organizationId,
+        orderId,
+        actorUserId: current.userId,
+        assignments: assignable.map((item) => ({
           moduleCode: item.module_code,
           assigneeUserId,
-          actorUserId: current.userId,
-          dueAt: valueOf(form, "dueAt") || null,
-          notes: valueOf(form, "notes"),
-        });
-      }
+        })),
+        dueAt: valueOf(form, "dueAt") || null,
+        notes: valueOf(form, "notes"),
+      });
       await writeAudit({
         request,
         action: "order.module.assign.bulk",
@@ -2341,6 +2431,9 @@ export async function action({ request, params }: Route.ActionArgs) {
     if (intent === "confirm_dispatch" && moduleCode === "assignment") {
       if (order.status !== "confirmed")
         return { formError: "订单当前状态不是“待派单”，无法确认派单" };
+      if (order.workflow_instance_id !== null) {
+        return { formError: "该订单已绑定工作流实例，请使用工作流责任分配确认派单" };
+      }
       const assigneeUserId = valueOf(form, "assigneeUserId");
       if (!assigneeUserId) return { formError: "请选择派单主负责人" };
       const modules = await listOrderModules(current.organizationId, orderId);
@@ -2360,7 +2453,15 @@ export async function action({ request, params }: Route.ActionArgs) {
       if (!(await isActiveOrganizationAssignee(current.organizationId, assigneeUserId)))
         return { formError: "请选择部门、岗位下的有效个人账户" };
       const now = new Date().toISOString();
-      await env.DB.batch([
+      const workflowResult = await runOrderWorkflowAction({
+        request,
+        organizationId: current.organizationId,
+        actorUserId: current.userId,
+        orderId,
+        actionCode: "dispatch",
+        assigneeUserId,
+        notes: valueOf(form, "notes"),
+        atomicStatements: [
         env.DB.prepare(
           "UPDATE order_module_instances SET status='completed',current_step_code='assigned',current_step_name='分配完成',progress_percent=100,assignee_user_id=?,started_at=COALESCE(started_at,?),completed_at=COALESCE(completed_at,?),blocking_reason=NULL,updated_at=? WHERE organization_id=? AND order_id=? AND module_code='assignment' AND enabled=1",
         ).bind(
@@ -2374,7 +2475,9 @@ export async function action({ request, params }: Route.ActionArgs) {
         env.DB.prepare(
           "UPDATE order_tasks SET status='completed',completed_at=?,updated_at=? WHERE organization_id=? AND order_id=? AND module_code='assignment' AND status IN ('pending','in_progress')",
         ).bind(now, now, current.organizationId, orderId),
-      ]);
+        ],
+      });
+      if ("formError" in workflowResult) return workflowResult;
       await writeAudit({
         request,
         action: "order.module.assignment.confirm_dispatch",
@@ -2387,15 +2490,7 @@ export async function action({ request, params }: Route.ActionArgs) {
           status: "confirmed",
         },
       });
-      return runOrderWorkflowAction({
-        request,
-        organizationId: current.organizationId,
-        actorUserId: current.userId,
-        orderId,
-        actionCode: "dispatch",
-        assigneeUserId,
-        notes: valueOf(form, "notes"),
-      });
+      return workflowResult;
     }
     if (intent === "warehouse_difference_confirm" && moduleCode === "warehouse") {
       const now = new Date().toISOString();
@@ -2431,11 +2526,85 @@ export async function action({ request, params }: Route.ActionArgs) {
     if (intent === "task_complete") {
       const taskId = valueOf(form, "taskId"),
         now = new Date().toISOString();
-      await env.DB.prepare(
-        "UPDATE order_tasks SET status='completed',completed_at=?,updated_at=? WHERE id=? AND order_id=? AND organization_id=?",
-      )
-        .bind(now, now, taskId, orderId, current.organizationId)
-        .run();
+      const task = await env.DB.prepare(
+        `SELECT t.id,t.module_code,t.status,
+                t.assignee_user_id task_assignee_user_id,
+                omi.assignee_user_id module_assignee_user_id,
+                o.workflow_instance_id,o.current_step_code,
+                wi.current_step_key,
+                ms.responsibility_position_code,
+                CASE WHEN o.workflow_instance_id IS NOT NULL
+                           AND wi.id IS NOT NULL AND ss.id IS NOT NULL AND ms.id IS NOT NULL
+                     THEN 1 ELSE 0 END frozen_current_module
+         FROM order_tasks t
+         JOIN transport_orders o
+           ON o.id=t.order_id AND o.organization_id=t.organization_id
+         LEFT JOIN workflow_instances wi
+           ON wi.id=o.workflow_instance_id
+          AND wi.organization_id=o.organization_id
+          AND wi.order_id=o.id
+         LEFT JOIN workflow_instance_step_states ss
+           ON ss.instance_id=wi.id AND ss.step_key=wi.current_step_key
+         LEFT JOIN workflow_instance_module_states ms
+           ON ms.instance_step_state_id=ss.id AND ms.module_code=t.module_code
+         LEFT JOIN order_module_instances omi
+           ON omi.organization_id=t.organization_id AND omi.order_id=t.order_id
+          AND omi.module_code=t.module_code AND omi.enabled=1
+         WHERE t.id=? AND t.order_id=? AND t.organization_id=?
+         LIMIT 1`,
+      ).bind(taskId, orderId, current.organizationId).first<{
+        id:string;
+        module_code:string;
+        status:string;
+        task_assignee_user_id:string|null;
+        module_assignee_user_id:string|null;
+        workflow_instance_id:string|null;
+        current_step_code:string|null;
+        current_step_key:string|null;
+        responsibility_position_code:string|null;
+        frozen_current_module:number;
+      }>();
+      if (!task || task.module_code !== moduleCode || !["pending", "in_progress"].includes(task.status))
+        return { formError: "该待办不属于当前模块、已完成或不存在" };
+      if (task.workflow_instance_id) {
+        if (!task.frozen_current_module)
+          return { formError: "该待办不属于当前冻结工作流节点" };
+      } else if (task.current_step_code !== `module:${moduleCode}`) {
+        // Explicit compatibility boundary for pre-snapshot orders only.
+        return { formError: "历史待办不在订单当前模块" };
+      }
+      const actorPositions = await env.DB.prepare(
+        `SELECT DISTINCT p.code
+         FROM memberships membership
+         JOIN positions p
+           ON p.id=membership.position_id AND p.organization_id=membership.organization_id
+         WHERE membership.organization_id=? AND membership.user_id=?
+           AND membership.status='active' AND p.status='active'`,
+      ).bind(current.organizationId, current.userId).all<{code:string}>();
+      if (!canCompleteWorkflowTask({
+        actorUserId: current.userId,
+        actorPositionCodes: actorPositions.results.map((item) => item.code),
+        taskAssigneeUserId: task.task_assignee_user_id,
+        moduleAssigneeUserId: task.module_assignee_user_id,
+        responsibilityPositionCode: task.responsibility_position_code,
+      })) return { formError: "当前账号不是该待办的指定负责人" };
+      const completed = await env.DB.prepare(
+        `UPDATE order_tasks
+         SET status='completed',completed_at=?,updated_at=?
+         WHERE id=? AND order_id=? AND organization_id=? AND module_code=?
+           AND status IN ('pending','in_progress')`,
+      ).bind(now, now, taskId, orderId, current.organizationId, moduleCode).run();
+      if (Number(completed.meta?.changes || 0) !== 1)
+        return { formError: "待办状态已变化，请刷新后重试" };
+      await writeAudit({
+        request,
+        action:"order.task.complete",
+        resourceType:"order_task",
+        resourceId:taskId,
+        organizationId:current.organizationId,
+        actorUserId:current.userId,
+        metadata:{orderId,moduleCode},
+      });
       return { success: "任务已完成" };
     }
     if (intent === "customs_declaration_save") {
@@ -3279,9 +3448,6 @@ export async function action({ request, params }: Route.ActionArgs) {
       if (moduleCode !== "costs") return { formError: "只能在费用模块审核" };
       if (order.status === "draft")
         return { formError: "草稿阶段只允许预录费用；订单进入执行后再确认、审核和锁定" };
-      const signoffStageAccess = expenseDirectionActionStageAccess(stageAccess.currentStepKey);
-      if (!signoffStageAccess.allowed)
-        return { formError: signoffStageAccess.reason };
       const direction = valueOf(form, "direction") as "receivable" | "payable";
       const controlAction = valueOf(form, "controlAction");
       if (!["receivable", "payable"].includes(direction))
@@ -3289,6 +3455,16 @@ export async function action({ request, params }: Route.ActionArgs) {
       if (!["confirm", "business_review", "finance_review"].includes(controlAction))
         return { formError: "费用审核动作无效" };
       const action = controlAction as ExpenseDirectionAction;
+      const signoffStageAccess = expenseDirectionActionStageAccess({
+        action,
+        orderStatus: order.status,
+        workflow: stageAccess.workflowContext,
+      });
+      if (!signoffStageAccess.allowed) {
+        return {
+          formError: signoffStageAccess.reason || "当前工作流尚未开放该费用签核",
+        };
+      }
       const actionPolicy = expenseDirectionActionPolicies(
         moduleWorkflowFields,
       ).find((item) => item.action === action);
@@ -3564,7 +3740,7 @@ export async function action({ request, params }: Route.ActionArgs) {
         return { formError: "仅提交审批时指定的审批负责人可以审核委托书" };
       if (
         target.document_category !== "consignment_letter" &&
-        !(moduleCode === "costs"
+        !(isSettlementDocumentAction
           ? canReviewSettlementDocument
           : canReviewOrderModuleDocument(current, moduleCode, moduleManageAccess))
       )
@@ -3682,100 +3858,13 @@ async function syncTrackingModuleStatus(
   milestoneCode: string,
   now: string,
 ) {
-  const mapping: Record<string, { step: string; name: string; progress: number; complete?: boolean }> = {
-    departed: { step: "departed", name: "已登记发车", progress: 15 },
-    border_arrived: { step: "transit", name: "到达出境口岸", progress: 28 },
-    exported: { step: "transit", name: "已出境", progress: 40 },
-    transloaded: { step: "transit", name: "已换装", progress: 46 },
-    transit_customs: { step: "transit", name: "转关处理中", progress: 52 },
-    foreign_entered: { step: "transit", name: "国外已入境", progress: 64 },
-    customs_cleared: { step: "customs_cleared", name: "目的地清关完成", progress: 82 },
-    station_arrived: { step: "arrived", name: "到达境外目的仓", progress: 100, complete: true },
-  };
-  const next = mapping[milestoneCode];
-  if (!next) return;
-  const recorded = await env.DB.prepare(
-    `SELECT MAX(CASE milestone_code
-       WHEN 'departed' THEN 15
-       WHEN 'border_arrived' THEN 28
-       WHEN 'exported' THEN 40
-       WHEN 'transloaded' THEN 46
-       WHEN 'transit_customs' THEN 52
-       WHEN 'foreign_entered' THEN 64
-       WHEN 'customs_cleared' THEN 82
-       WHEN 'station_arrived' THEN 100
-       ELSE 0 END) progress
-     FROM order_tracking_milestones
-     WHERE organization_id=? AND order_id=?`,
-  )
-    .bind(organizationId, orderId)
-    .first<{ progress: number | null }>();
-  const effectiveProgress = Math.max(next.progress, recorded?.progress ?? 0);
-  const effectiveComplete = effectiveProgress >= 100 || Boolean(next.complete);
-  const effectiveStep = effectiveProgress >= 100
-    ? "arrived"
-    : effectiveProgress >= 82
-      ? "customs_cleared"
-      : effectiveProgress >= 28
-        ? "transit"
-        : next.step;
-  const effectiveName = effectiveProgress >= 100
-    ? "到达境外目的仓"
-    : effectiveProgress >= 82
-      ? "目的地清关完成"
-      : effectiveProgress >= 40
-        ? "出境运输中"
-        : next.name;
-  const module = await env.DB.prepare(
-    "SELECT id,status,current_step_code,progress_percent FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='tracking' AND enabled=1",
-  )
-    .bind(organizationId, orderId)
-    .first<{
-      id: string;
-      status: string;
-      current_step_code: string | null;
-      progress_percent: number;
-    }>();
-  if (!module) return;
-  if (module.status === "completed" && module.current_step_code === effectiveStep) return;
-  if ((module.progress_percent ?? 0) > effectiveProgress && module.current_step_code === effectiveStep) return;
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE order_module_instances
-       SET status=?,current_step_code=?,current_step_name=?,progress_percent=?,
-         blocking_reason=NULL,started_at=COALESCE(started_at,?),
-         completed_at=CASE WHEN ?='completed' THEN COALESCE(completed_at,?) ELSE completed_at END,
-         updated_at=?
-       WHERE id=?`,
-    ).bind(
-      effectiveComplete ? "completed" : "in_progress",
-      effectiveStep,
-      effectiveName,
-      effectiveProgress,
-      now,
-      effectiveComplete ? "completed" : "in_progress",
-      now,
-      now,
-      module.id,
-    ),
-    env.DB.prepare(
-      "INSERT INTO order_module_history(id,organization_id,order_id,module_instance_id,action_code,action_name,from_step_code,to_step_code,to_step_name,actor_user_id,notes,occurred_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-    ).bind(
-      crypto.randomUUID(),
-      organizationId,
-      orderId,
-      module.id,
-      "tracking_status_sync",
-      "保存运输节点后自动同步",
-      module.current_step_code,
-      effectiveStep,
-      effectiveName,
-      actorUserId,
-      `运输节点：${milestoneCode}`,
-      now,
-    ),
-  ]);
-  await syncOrderWorkflowSnapshot(organizationId, orderId);
+  return syncTrackingModuleStatusForOrder(
+    organizationId,
+    orderId,
+    milestoneCode,
+    actorUserId,
+    now,
+  );
 }
 
 async function syncTrackingModuleFromMilestones(
@@ -4674,14 +4763,14 @@ function CostsCompletionReviewEntry({
       {costsCompleted ? (
         <Link
           className="primary"
-          to={`/admin/orders/${orderId}?stage=completion_review&module=review#module-business-data`}
+          to={`/admin/orders/${orderId}/modules/review#module-business-data`}
         >
           进入完成复盘
         </Link>
       ) : (
         <Link
           className="secondary"
-          to={`/admin/orders/${orderId}?stage=reconciliation&module=costs&section=expenses#module-business-data`}
+          to={`/admin/orders/${orderId}/modules/costs?section=expenses#module-business-data`}
         >
           去完成费用
         </Link>
@@ -4700,10 +4789,20 @@ export function ConsignmentReviewActionBar({
   actionUrl?: string;
 }) {
   const businessSupervisors = data.members.filter(
-    (member) => member.position_code === "BUSINESS_SUPERVISOR",
+    (member) =>
+      member.position_code === "BUSINESS_SUPERVISOR" &&
+      organizationAssigneeCanHandle(
+        member,
+        orderWorkflowTargetAssigneeRequirements("submit"),
+      ),
   );
   const operationSupervisors = data.members.filter(
-    (member) => member.position_code === "OPERATION_SUPERVISOR",
+    (member) =>
+      member.position_code === "OPERATION_SUPERVISOR" &&
+      organizationAssigneeCanHandle(
+        member,
+        orderWorkflowTargetAssigneeRequirements("approve"),
+      ),
   );
   const manage =
     (canManageOrderModule(data.current, "consignment") ||
@@ -4723,6 +4822,8 @@ export function ConsignmentReviewActionBar({
 
   if (manage && data.order.status === "draft") {
     return (
+      <>
+      {!businessSupervisors.length && <div className="alert error" role="alert">没有具备订单查看权限的有效业务主管；请先调整组织人员或个人权限。</div>}
       <Form method="post" action={actionUrl} className="consignment-submit-bar" id="consignment-stage-action">
         <div>
           <strong>委托资料复核完成后，直接提交审批</strong>
@@ -4740,6 +4841,7 @@ export function ConsignmentReviewActionBar({
           <button className="primary" disabled={busy || !businessSupervisors.length}>提交审批</button>
         </div>
       </Form>
+      </>
     );
   }
   if (canApproveConsignment) {
@@ -5142,14 +5244,21 @@ function ModuleSourceDocuments({
 }) {
   if (code === "documents" || code === "transport") return null;
   const placements = orderDocumentsForModule(code)
-    .map((placement) => ({
-      ...placement,
-      policy: workflowFieldPolicy(
-        data.workflowFields,
-        placement.fieldKey,
-        placement.requiredByDefault,
-      ),
-    }))
+    .map((placement) => {
+      return {
+        ...placement,
+        policy: code === "loading"
+          ? loadingDocumentFieldPolicy(
+              data.loadingDocumentRequirements?.documents,
+              placement.documentCode,
+            )
+          : workflowFieldPolicy(
+              data.workflowFields,
+              placement.fieldKey,
+              placement.requiredByDefault,
+            ),
+      };
+    })
     .filter((placement) => {
       if (placement.documentCode === "transshipment_order" && !data.order.requires_transloading)
         return false;
@@ -5176,17 +5285,10 @@ function ModuleSourceDocuments({
             ?.assignee_user_id ?? null,
       }
     : null;
-  const settlementDocumentStageOpen =
-    code === "costs" &&
-    isSettlementDocumentStageOpen(
-      data.workflowStageAccess.currentStepKey,
-      data.order.status,
-    );
   const canEditDocs =
     code !== "loading" &&
     (code === "costs"
-      ? settlementDocumentStageOpen &&
-        canUploadOrderModuleDocument(
+      ? canUploadOrderModuleDocument(
           data.current,
           code,
           canManageDocuments,
@@ -5196,8 +5298,7 @@ function ModuleSourceDocuments({
   const canReviewDocs =
     code !== "loading" &&
     (code === "costs"
-      ? settlementDocumentStageOpen &&
-        canReviewOrderModuleDocument(
+      ? canReviewOrderModuleDocument(
           data.current,
           code,
           canManageDocuments,
@@ -5218,6 +5319,22 @@ function ModuleSourceDocuments({
       </header>
       <div className="source-document-grid">
         {placements.map((placement) => {
+          const workflowDocumentAccess = code === "loading"
+            ? null
+            : orderDocumentWorkflowMutationAccess({
+                documentCategory: placement.documentCode,
+                workflow: data.workflowStageAccess.workflowContext,
+              });
+          const settlementStatusAccess = code === "costs"
+            ? settlementDocumentStageAccess({
+                orderStatus: data.order.status,
+                fieldKey: placement.fieldKey,
+                workflow: data.workflowStageAccess.workflowContext,
+              })
+            : null;
+          const documentStageAccess = workflowDocumentAccess?.allowed ? settlementStatusAccess ?? workflowDocumentAccess : workflowDocumentAccess;
+          const canEditDocument = canEditDocs && (documentStageAccess?.allowed ?? true);
+          const canReviewDocumentAtStage = canReviewDocs && (documentStageAccess?.allowed ?? true);
           const files = data.attachments.filter(
             (attachment) => attachment.document_category === placement.documentCode,
           );
@@ -5250,7 +5367,7 @@ function ModuleSourceDocuments({
             code !== "loading" &&
             (placement.documentCode === "consignment_letter"
               ? canApproveConsignment
-              : canReviewDocs);
+              : canReviewDocumentAtStage);
           return (
             <article
               key={placement.documentCode}
@@ -5273,7 +5390,7 @@ function ModuleSourceDocuments({
               </div>
               {latest ? <div className="row-actions source-document-actions">
                 <a className="text-button" href={`/admin/document-files/order/${latest.id}?mode=view`} target="_blank" rel="noreferrer">查看</a>
-                {canEditDocs && !lockedAfterApproval ? <Modal title={`编辑文件 · ${placement.document.name}`} triggerLabel="编辑" triggerClassName="text-button">
+                {canEditDocument && !lockedAfterApproval ? <Modal title={`编辑文件 · ${placement.document.name}`} triggerLabel="编辑" triggerClassName="text-button">
                   <div className="stack">
                     <Form method="post" className="stack">
                       <input type="hidden" name="intent" value="document_metadata_update" />
@@ -5300,8 +5417,8 @@ function ModuleSourceDocuments({
                     <label className="field"><span>审核结果</span><select name="reviewStatus" defaultValue={latest.review_status === "rejected" ? "rejected" : "approved"}><option value="approved">审核通过</option><option value="rejected">退回修改</option></select></label>
                     <button className="primary" disabled={busy}>确认审核结果</button>
                   </Form>
-                </Modal> : code === "loading" ? <span className="muted">仓库已同步</span> : null}
-              </div> : canEditDocs ? <Form method="post" encType="multipart/form-data" className="source-document-upload-form">
+                </Modal> : code === "loading" ? <span className="muted">仓库已同步</span> : documentStageAccess?.reason ? <span className="muted">{documentStageAccess.reason}</span> : null}
+              </div> : canEditDocument ? <Form method="post" encType="multipart/form-data" className="source-document-upload-form">
                 <input type="hidden" name="intent" value="document_upload" />
                 <input type="hidden" name="documentCategory" value={placement.documentCode} />
                 <input type="hidden" name="documentDescription" value="" />
@@ -5310,7 +5427,7 @@ function ModuleSourceDocuments({
                   <input className="document-upload-input" name="attachments" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" required disabled={busy} onChange={(event) => { if (event.currentTarget.files?.length) submitForm(event.currentTarget.form); }} />
                   <span>{busy ? "正在上传…" : "选择并上传"}</span>
                 </label>
-              </Form> : <span className="muted">只读</span>}
+              </Form> : <span className="muted">{documentStageAccess?.reason || "只读"}</span>}
             </article>
           );
         })}
@@ -5342,16 +5459,10 @@ function AssignmentManifestWorkbench({
     assigneeUserIds,
   );
   const nextResponsibilityGroup = nextRequiredOrderAssignmentGroup(manifest.groups);
-  const configurationErrors = [
+  const configurationErrors = [...new Set([
     ...manifest.configurationErrors,
-    ...manifest.groups.flatMap((group) =>
-      group.required && group.positionCode && !members.some(
-        (member) => member.position_code === group.positionCode,
-      )
-        ? [`${group.positionCode} 岗位暂无有效个人账户`]
-        : [],
-    ),
-  ];
+    ...orderAssignmentCandidateConfigurationErrors(manifest.groups, members),
+  ])];
 
   return (
     <Form method="post" className="assignment-manifest" data-assignment-source="workflow-instance">
@@ -5385,13 +5496,18 @@ function AssignmentManifestWorkbench({
             <tbody>
               {manifest.groups.map((group) => {
                 const eligibleMembers = group.positionCode
-                  ? members.filter((member) => member.position_code === group.positionCode)
+                  ? members.filter((member) =>
+                      member.position_code === group.positionCode &&
+                      organizationAssigneeCanHandle(member, orderAssignmentGroupPermissionRequirements(group)),
+                    )
                   : [];
                 const positionName = eligibleMembers[0]?.position_name
                   ?? group.positionCode
                   ?? "未配置责任岗位";
                 const assigneeUserId = assigneeUserIds[group.key] ?? "";
-                const status = assigneeUserId
+                const status = group.assignmentMode === "site_queue"
+                  ? "目标仓岗位队列"
+                  : assigneeUserId
                   ? group.assignmentState === "assigned" && assigneeUserId === group.assigneeUserId
                     ? "已分配"
                     : "待确认"
@@ -5402,6 +5518,7 @@ function AssignmentManifestWorkbench({
                   <tr
                     key={group.key}
                     data-assignment-position={group.positionCode ?? "UNCONFIGURED"}
+                    data-assignment-mode={group.assignmentMode}
                     data-assignment-required={group.required ? "true" : "false"}
                     data-assignment-next-owner={
                       group.key === nextResponsibilityGroup?.key ? "true" : "false"
@@ -5415,6 +5532,12 @@ function AssignmentManifestWorkbench({
                       </small>
                     </td>
                     <td>
+                      {group.assignmentMode === "site_queue" ? (
+                        <div className="assignment-site-queue" role="status">
+                          <strong>自动进入目标仓岗位队列</strong>
+                          <small>无需选择个人；登录对应仓库的有效岗位成员均可办理</small>
+                        </div>
+                      ) : (
                       <OrganizationAssigneePicker
                         members={eligibleMembers}
                         name={orderAssignmentAssigneeFieldName(group.key)}
@@ -5428,6 +5551,7 @@ function AssignmentManifestWorkbench({
                         required={group.required}
                         disabled={!group.positionCode || eligibleMembers.length === 0}
                       />
+                      )}
                     </td>
                     <td>
                       {group.modules.map((module) => (
@@ -5507,7 +5631,9 @@ function AssignmentManifestReadOnly({
         </thead>
         <tbody>
           {manifest.groups.map((group) => {
-            const member = members.find((item) => item.id === group.assigneeUserId);
+            const member = group.assignmentMode === "site_queue"
+              ? { display_name: "目标仓岗位队列" }
+              : members.find((item) => item.id === group.assigneeUserId);
             const positionName = members.find(
               (item) => item.position_code === group.positionCode,
             )?.position_name ?? group.positionCode ?? "未配置责任岗位";
@@ -5515,6 +5641,7 @@ function AssignmentManifestReadOnly({
               <tr
                 key={group.key}
                 data-assignment-position={group.positionCode ?? "UNCONFIGURED"}
+                data-assignment-mode={group.assignmentMode}
                 data-assignment-next-owner={
                   group.key === nextResponsibilityGroup?.key ? "true" : "false"
                 }
@@ -6344,7 +6471,7 @@ function ModuleBusinessData({
                 <strong>国内运输安排已完成</strong>
                 <span>运输信息已保存，可以进入仓库验收收货。</span>
               </div>
-              <Link className="btn primary" to={`/admin/orders/${data.order.id}?stage=warehouse_receiving&module=warehouse`}>
+              <Link className="btn primary" to={`/admin/orders/${data.order.id}/modules/warehouse#module-business-data`}>
                 下一步：仓库验收收货 →
               </Link>
             </div>
@@ -6539,12 +6666,21 @@ function ModuleBusinessData({
     const completedTrackingMilestoneCodes = new Set(
       data.trackingMilestones.map((item) => item.milestone_code),
     );
-    const nextTrackingMilestone = selectableTrackingMilestones.find(
-      ([value]) => !completedTrackingMilestoneCodes.has(value),
+    const trackingHandoff = resolveTrackingWorkflowHandoff({
+      fields: data.workflowFields,
+      recordedCodes: completedTrackingMilestoneCodes,
+    });
+    const nextTrackingMilestone = trackingManualMilestoneOptions.find(
+      ([value]) => trackingHandoff.missingCodes.includes(value),
     );
     const nextTrackingMilestoneCode =
       nextTrackingMilestone?.[0] || selectableTrackingMilestones.at(-1)?.[0] || "border_arrived";
-    const nextTrackingMilestoneLabel = nextTrackingMilestone?.[1] || "人工节点已全部登记";
+    const nextTrackingMilestoneLabel = trackingHandoff.ready
+      ? "在途运踪门禁已完成，等待境外仓扫码入库"
+      : nextTrackingMilestone?.[1] || trackingHandoff.missingCodes[0] || "等待必需节点";
+    const stationArrived = completedTrackingMilestoneCodes.has(
+      trackingHandoff.warehouseOwnedCode,
+    );
     const primaryShipment = data.shipments[0];
     const latestTrackingMilestone = data.trackingMilestones[0];
     return (
@@ -6580,13 +6716,21 @@ function ModuleBusinessData({
               <tbody>{displayedTrackingMilestones.map(([value, label], index) => {
                 const item = data.trackingMilestones.find((x) => x.milestone_code === value);
                 const isNextMilestone = !item && value === nextTrackingMilestone?.[0];
+                const isWarehouseOwned = value === trackingHandoff.warehouseOwnedCode;
+                const isRequiredInTransit = trackingHandoff.requiredCodes.includes(value);
                 return <tr className={item ? "completed-row" : isNextMilestone ? "tracking-next-row" : ""} key={value}>
                   <td>{String(index + 1).padStart(2, "0")}</td>
                   <td>
                     <strong className="tracking-progress-primary">{label}</strong>
-                    <small className="tracking-progress-secondary">{trackingOptionalMilestones.has(value) ? "可选节点" : "必经节点"}</small>
+                    <small className="tracking-progress-secondary">{
+                      isWarehouseOwned
+                        ? "境外仓接棒节点"
+                        : isRequiredInTransit
+                          ? "当前工作流必经节点"
+                          : "选填节点"
+                    }</small>
                   </td>
-                  <td><span className={`status-pill ${item ? "success" : isNextMilestone ? "tracking-next" : "off"}`}>{item ? "已完成" : isNextMilestone ? "下一节点" : trackingOptionalMilestones.has(value) ? "待实际发生" : "待更新"}</span></td>
+                  <td><span className={`status-pill ${item ? "success" : isNextMilestone ? "tracking-next" : "off"}`}>{item ? "已完成" : isWarehouseOwned ? "待境外仓扫码" : isNextMilestone ? "下一必需节点" : "待实际发生"}</span></td>
                   <td>
                     <strong className="tracking-progress-primary">{item ? formatDateTime(item.event_at) : "—"}</strong>
                     <small className="tracking-progress-secondary">{item?.location || "地点待更新"}</small>
@@ -6601,15 +6745,28 @@ function ModuleBusinessData({
             </table>
           </div>
 
+          <div className={`alert ${trackingHandoff.ready ? "success" : "info"}`} role="status">
+            <strong>{stationArrived
+              ? "境外仓已扫码接棒"
+              : trackingHandoff.ready
+                ? "在途运踪已完成，工作流已具备交棒条件"
+                : "当前冻结工作流的运踪门禁尚未完成"}</strong>
+            {stationArrived
+              ? "：目的仓到达节点已由境外仓生成。"
+              : trackingHandoff.ready
+                ? "：系统推进到境外仓节点后，由境外仓扫码生成“目的仓到达”，操作岗无需也不能代填。"
+                : `：还需登记 ${trackingHandoff.missingCodes.map((code) => trackingManualMilestoneOptions.find(([value]) => value === code)?.[1] || code).join("、")}。`}
+          </div>
           {manage && (!data.trackingDepartureGate || data.trackingDepartureGate.ready) && (
             <div className="tracking-node-entry-inline">
+
               <div className="tracking-node-entry-heading">
                 <div className="tracking-node-entry-title">
                   <strong>登记运输进度</strong>
                   <span>按实际发生登记；目的仓到仓由境外仓扫码自动完成。</span>
                 </div>
-                <div className={`tracking-next-guidance${nextTrackingMilestone ? "" : " complete"}`}>
-                  <small>{nextTrackingMilestone ? "系统已定位下一节点" : "当前进度"}</small>
+                <div className={`tracking-next-guidance${trackingHandoff.ready ? " complete" : ""}`}>
+                  <small>{trackingHandoff.ready ? "当前交棒状态" : "系统已定位下一必需节点"}</small>
                   <strong>{nextTrackingMilestoneLabel}</strong>
                 </div>
               </div>
@@ -6893,12 +7050,21 @@ function ModuleBusinessData({
       (policy) => policy.required,
     ).length;
     const optionalActionCount = activeActionPolicies.length - requiredActionCount;
-    const activeActionLabels = activeActionPolicies.map((policy) =>
-      expenseDirectionActionLabel(policy.action),
-    );
-    const settlementOpen = ["reconciliation", "completion_review"].includes(
-      data.workflowStageAccess.currentStepKey ?? "",
-    );
+    const actionStageAccessByAction = Object.fromEntries(
+      expenseDirectionActions.map((action) => [
+        action,
+        expenseDirectionActionStageAccess({
+          action,
+          orderStatus: data.order.status,
+          workflow: data.workflowStageAccess.workflowContext,
+        }),
+      ]),
+    ) as Record<ExpenseDirectionAction, ReturnType<typeof expenseDirectionActionStageAccess>>;
+    const pendingActionStageHints = activeActionPolicies
+      .filter((policy) => !actionStageAccessByAction[policy.action].allowed)
+      .map((policy) =>
+        `${expenseDirectionActionLabel(policy.action)}：${actionStageAccessByAction[policy.action].reason || "当前节点尚未开放"}`,
+      );
     return (
       <div className="module-business-stack dense-module-stack">
         {data.order.status === "draft" && (
@@ -6906,16 +7072,13 @@ function ModuleBusinessData({
             提交审批前的应收费用由“已接受报价”自动继承；应付费用在国内运输安排确定承运商和运价时自动生成。
           </div>
         )}
-        {!settlementOpen && data.order.status !== "draft" && (
+        {pendingActionStageHints.length > 0 && data.order.status !== "draft" && (
           <div className="alert">
-            当前阶段只显示并允许费用预录；进入“对账结算”后，
-            {activeActionLabels.length
-              ? `${activeActionLabels.join("、")}将同时开放。`
-              : "当前工作流无需费用签核。"}
+            本单签核按冻结工作流节点分别开放：{pendingActionStageHints.join("；")}。
           </div>
         )}
         <div className="module-toolbar">
-          {manage && settlementOpen && (
+          {manage && (
             <details className="expandable module-create-dialog">
               <summary>新增费用</summary>
               <ExpenseCreateForm fields={data.workflowFields} busy={busy}/>
@@ -6931,7 +7094,7 @@ function ModuleBusinessData({
           { label: "应收", value: moneyTotal(data.expenses, "receivable").toFixed(2), detail: "折算汇总" },
           { label: "应付", value: moneyTotal(data.expenses, "payable").toFixed(2), detail: "折算汇总" },
           { label: "预计利润", value: (moneyTotal(data.expenses, "receivable") - moneyTotal(data.expenses, "payable")).toFixed(2), detail: "未含跨币种展示差异" },
-          { label: "费用风险", value: data.expenses.length === 0 ? "尚未预录" : ["receivable", "payable"].some((direction) => !expenseDirectionComplete(directionControl(direction as "receivable" | "payable"), data.workflowFields)) ? "存在必办签核" : "必办签核已完成", detail: "正式门禁在对账环节校验" },
+          { label: "费用风险", value: data.expenses.length === 0 ? "尚未预录" : ["receivable", "payable"].some((direction) => !expenseDirectionComplete(directionControl(direction as "receivable" | "payable"), data.workflowFields)) ? "存在必办签核" : "必办签核已完成", detail: "正式门禁按本单冻结工作流及必办字段校验" },
         ]} />
         {(["receivable", "payable"] as const).map((direction) => {
           const control = directionControl(direction);
@@ -7040,7 +7203,7 @@ function ModuleBusinessData({
                 direction={direction}
                 control={control}
                 hasExpenses={rows.length > 0}
-                settlementOpen={settlementOpen}
+                actionStageAccessByAction={actionStageAccessByAction}
                 actionAccessByAction={actionAccessByAction}
                 workflowFields={data.workflowFields}
                 busy={busy}
@@ -8118,6 +8281,13 @@ function OrderApprovalReview({
   if (!canApproveConsignment) {
     return <ConsignmentApprovalStatusTable data={data} />;
   }
+  const operationSupervisors = data.members.filter((member) =>
+    member.position_code === "OPERATION_SUPERVISOR" &&
+    organizationAssigneeCanHandle(
+      member,
+      orderWorkflowTargetAssigneeRequirements("approve"),
+    )
+  );
   const cargoTotals = cargo.reduce((total, item) => ({
     pieces: total.pieces + item.package_count * item.pieces_per_package,
     grossWeight: total.grossWeight + item.package_count * item.gross_weight_per_package_kg,
@@ -8151,20 +8321,21 @@ function OrderApprovalReview({
     />
     <section className="approval-section approval-decision">
       <header><strong>审批办理</strong><span>确认意见并指定下一步具体操作主管</span></header>
+      {!operationSupervisors.length && <div className="alert error" role="alert">没有同时具备订单查看、任务分配和配载审批权限的有效操作主管；请先调整组织人员或个人权限。</div>}
       <Form method="post" id="consignment-approval-form" className="approval-inline-form">
         <input type="hidden" name="intent" value="workflow_action" />
         <input type="hidden" name="actionCode" value="approve" />
         <label className="approval-result-field"><span>审批结果 <b>*</b></span><select className="control filled" aria-label="审批结果" defaultValue="approved"><option value="approved">通过</option></select></label>
         <label className="approval-notes-field"><span>审批意见</span><input className="control editing" name="notes" defaultValue="资料完整，同意进入任务分配" /></label>
         <OrganizationAssigneePicker
-          members={data.members.filter((member) => member.position_code === "OPERATION_SUPERVISOR")}
+          members={operationSupervisors}
           name="assigneeUserId"
           idPrefix="approval-operation-supervisor"
           className="approval-next-assignee"
           personLabel="下一步操作主管"
           required
         />
-        <button className="primary approval-submit-button" disabled={busy || !cargo.length || !canApproveConsignment || !data.members.some((member) => member.position_code === "OPERATION_SUPERVISOR")}>审批通过并进入任务分配 →</button>
+        <button className="primary approval-submit-button" disabled={busy || !cargo.length || !canApproveConsignment || !operationSupervisors.length}>审批通过并进入任务分配 →</button>
       </Form>
     </section>
   </div>;
@@ -8491,7 +8662,7 @@ function ExpenseDirectionWorkflow({
   direction,
   control,
   hasExpenses,
-  settlementOpen,
+  actionStageAccessByAction,
   actionAccessByAction,
   workflowFields,
   busy,
@@ -8499,7 +8670,7 @@ function ExpenseDirectionWorkflow({
   direction: "receivable" | "payable";
   control: ExpenseDirectionControl;
   hasExpenses: boolean;
-  settlementOpen: boolean;
+  actionStageAccessByAction: Record<ExpenseDirectionAction, ReturnType<typeof expenseDirectionActionStageAccess>>;
   actionAccessByAction: Record<ExpenseDirectionAction, ExpenseDirectionActionAccess>;
   workflowFields: WorkflowFieldState[];
   busy: boolean;
@@ -8553,6 +8724,7 @@ function ExpenseDirectionWorkflow({
           const action = policy.action;
           const actionComplete = expenseDirectionActionCompleted(control, action);
           const actionAccess = actionAccessByAction[action];
+          const actionStageAccess = actionStageAccessByAction[action];
           const label = expenseDirectionActionLabel(action);
           return (
             <section
@@ -8576,7 +8748,7 @@ function ExpenseDirectionWorkflow({
               </header>
               {actionComplete ? (
                 <p>本签核结果已锁定，不受另外两方办理顺序影响。</p>
-              ) : settlementOpen && hasExpenses && actionAccess.allowed ? (
+              ) : actionStageAccess.allowed && hasExpenses && actionAccess.allowed ? (
                 <Form method="post" className="expense-parallel-action">
                   <input type="hidden" name="intent" value="expense_direction_control" />
                   <input type="hidden" name="direction" value={direction} />
@@ -8585,7 +8757,7 @@ function ExpenseDirectionWorkflow({
                   <button className="secondary expense-signoff-submit" disabled={busy}>{label}通过</button>
                 </Form>
               ) : (
-                <p>{!settlementOpen ? "进入对账结算节点后自动开放" : !hasExpenses ? "请先录入本方向费用" : actionAccess.reason || "等待对应负责人办理"}</p>
+                <p>{!actionStageAccess.allowed ? actionStageAccess.reason || "当前工作流节点尚未开放" : !hasExpenses ? "请先录入本方向费用" : actionAccess.reason || "等待对应负责人办理"}</p>
               )}
             </section>
           );
@@ -8939,7 +9111,6 @@ const trackingManualMilestoneOptions: [string, string][] = [
   ["customs_cleared", "目的地清关完成"],
   ["station_arrived", "到达境外目的仓"],
 ];
-const trackingOptionalMilestones = new Set(["transloaded", "transit_customs"]);
 function formatDateTime(value: string | null | undefined) {
   return value ? new Date(value).toLocaleString("zh-CN") : "—";
 }

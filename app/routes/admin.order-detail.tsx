@@ -50,6 +50,7 @@ import { orderCollaborationNotice } from "../lib/order-collaboration";
 import { orderResponsiblePosition } from "../lib/order-responsibility";
 import { orderModuleTabAttention } from "../lib/order-module-tab-attention";
 import { costsTabHasPendingAction, orderEntryPreference, orderModuleTabDescriptors, orderModuleTabHref, orderWorkflowModuleTabs, resolveCostsSection, resolveCustomsSection, type OrderModuleTabSection } from "../lib/order-module-tabs";
+import { frozenExpenseWarningMode, frozenWorkflowModuleStage, type ExpenseWarningMode } from "../lib/order-detail-workflow-settlement";
 import { canManageOrderModule } from "../lib/position-portal";
 import { canViewAssignedOrderExpenseSummary } from "../lib/billing-access";
 import { canReadScopedDocument } from "../lib/order-document-visibility";
@@ -413,9 +414,9 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
               ms.is_required module_required,ms.status module_status,ms.responsibility_position_code,
               p.name position_name,omi.assignee_user_id,u.display_name assignee_name,
               (SELECT COUNT(*) FROM workflow_instance_fields f
-                WHERE f.instance_id=wi.id AND f.module_code=ms.module_code AND f.is_active=1 AND f.is_required=1) required_field_count,
+                WHERE f.instance_id=wi.id AND f.step_key=ss.step_key AND f.module_code=ms.module_code AND f.is_active=1 AND f.is_required=1) required_field_count,
               (SELECT COUNT(*) FROM workflow_instance_fields f
-                WHERE f.instance_id=wi.id AND f.module_code=ms.module_code AND f.is_active=1 AND f.is_required=0) optional_field_count,
+                WHERE f.instance_id=wi.id AND f.step_key=ss.step_key AND f.module_code=ms.module_code AND f.is_active=1 AND f.is_required=0) optional_field_count,
               ts.id task_state_id,ts.task_key,ts.name task_name,ts.status task_status,ts.task_type,
               ts.responsibility_position_code task_position_code,tp.name task_position_name,
               ts.assignee_user_id task_assignee_user_id,
@@ -942,8 +943,11 @@ function LinearOrderWorkspace({
   const selectedIndex = Math.max(0, steps.findIndex((step) => step.step_key === selectedStep?.step_key));
   const orderCompleted = order.status === "completed";
   const viewingCurrent = orderCompleted || selectedStep?.step_key === currentStepKey;
+  const currentCostsStage = frozenWorkflowModuleStage(
+    data.workflowFormRows, currentStepKey, "costs",
+  );
   const parallelCostsActive =
-    currentStepKey === "reconciliation" && data.embeddedModuleCode === "costs";
+    currentCostsStage.currentStepHasModule && data.embeddedModuleCode === "costs";
   const parallelCostsAssigneeIds = data.embeddedModuleData
     ? [
         data.embeddedModuleData.order.salesperson_user_id,
@@ -1472,7 +1476,11 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, readOn
       moduleName: row.module_name,
     })),
   );
-  const costsNeedAttention = selectedStep.step_key === "reconciliation"
+  const selectedCostsStage = frozenWorkflowModuleStage(
+    data.workflowFormRows, selectedStep.step_key, "costs",
+  );
+  const costsNeedAttention = selectedCostsStage.currentStepHasModule
+    && selectedCostsStage.gateConfigured
     && data.modules.some((module) => module.module_code === "costs" && module.status !== "completed");
   const activateTab = (moduleCode: string | null, section: string | null) => {
     if (moduleCode === "consignment" && ["info", "files", "costs"].includes(section || "")) {
@@ -2385,12 +2393,13 @@ function OrderCommandCenter({
     modules: data.modules,
   });
   const currentWorkflowStep = data.businessWorkflow?.current_step_key ?? null;
-  const expenseMode = expenseWarningMode(currentWorkflowStep);
+  const costsStage = frozenWorkflowModuleStage(data.workflowFormRows, currentWorkflowStep, "costs");
+  const expenseMode = frozenExpenseWarningMode(data.workflowFormRows, currentWorkflowStep);
   const costsModule = data.modules.find(
     (module) => module.enabled === 1 && module.module_code === "costs",
   );
   const expenseWarnings = data.canViewExpenseSummary
-    ? expenseWarningList(data.expenseRisk, expenseMode, costsModule)
+    ? expenseWarningList(data.expenseRisk, expenseMode, costsStage.gateConfigured ? costsModule : undefined)
     : [];
   const gateRows = buildStageGateRows(
     data.modules,
@@ -2664,7 +2673,8 @@ function OrderMountedPanel({
     currentStepKey,
     "port_loading",
   );
-  const expenseMode = expenseWarningMode(currentStepKey);
+  const costsStage = frozenWorkflowModuleStage(data.workflowFormRows, currentStepKey, "costs");
+  const expenseMode = frozenExpenseWarningMode(data.workflowFormRows, currentStepKey);
   return (
     <section className="panel order-mounted-panel">
       {panel === "modules" && (
@@ -2746,9 +2756,9 @@ function OrderMountedPanel({
             orderId={order.id}
             risk={data.expenseRisk}
             mode={expenseMode}
-            costsModule={data.modules.find(
+            costsModule={costsStage.gateConfigured ? data.modules.find(
               (module) => module.enabled === 1 && module.module_code === "costs",
-            )}
+            ) : undefined}
           />
         </>
       )}
@@ -2947,8 +2957,6 @@ function PanelTitle({ title, subtitle }: { title: string; subtitle: string }) {
   );
 }
 
-type ExpenseWarningMode = "hidden" | "pre_entry" | "settlement";
-
 function workflowStepReached(
   steps: BusinessWorkflowStep[],
   currentStepKey: string,
@@ -2957,11 +2965,6 @@ function workflowStepReached(
   const current = steps.find((step) => step.step_key === currentStepKey);
   const target = steps.find((step) => step.step_key === targetStepKey);
   return !current || !target || current.sort_order >= target.sort_order;
-}
-
-function expenseWarningMode(stepKey: string | null): ExpenseWarningMode {
-  if (["reconciliation", "completion_review"].includes(stepKey ?? "")) return "settlement";
-  return "hidden";
 }
 
 function expenseWarningList(
@@ -3064,16 +3067,18 @@ function buildStageGateRows(
       });
     }
   }
+  const costsStage = frozenWorkflowModuleStage(workflowFormRows, stepKey, "costs");
+  const expenseMode = frozenExpenseWarningMode(workflowFormRows, stepKey);
   const expenseWarnings = expenseWarningList(
     risk,
-    expenseWarningMode(stepKey),
-    module("costs"),
+    expenseMode,
+    costsStage.gateConfigured ? module("costs") : undefined,
   );
-  if (expenseWarningMode(stepKey) !== "hidden") {
+  if (expenseMode !== "hidden") {
     rows.push({
       kind: "expense",
-      label: stepKey === "order_creation" ? "报价应收" : "费用结算",
-      message: expenseWarnings.join("；") || (stepKey === "order_creation" ? "已从接受报价继承应收费用" : "当前工作流配置的费用必办项已完成"),
+      label: expenseMode === "pre_entry" ? "报价应收" : "费用结算",
+      message: expenseWarnings.join("；") || (expenseMode === "pre_entry" ? "已从接受报价继承应收费用" : "当前工作流配置的费用必办项已完成"),
       blocked: expenseWarnings.length > 0,
     });
   }

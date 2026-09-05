@@ -39,12 +39,14 @@ export type LoadingDocumentWorkflowField = {
   fieldKey: string;
   isActive: boolean;
   isRequired: boolean;
+  stageAvailable?: boolean;
 };
 
 export type EffectiveLoadingDocumentRequirement =
   (typeof loadingOrderDocumentDefinitions)[number] & {
     isActive: boolean;
     isRequired: boolean;
+    stageAvailable: boolean;
   };
 
 export type OrderLoadingDocumentRequirements = {
@@ -69,6 +71,11 @@ export type LoadingDocumentRequirementSummary = {
   complete: boolean;
 };
 
+export const warehouseLoadingDocumentMutationPolicy = {
+  allowed: false,
+  reason: "订单文件由冻结工作流当前节点指定的业务或单证负责人办理；仓库端仅查看齐套状态",
+} as const;
+
 export function resolveLoadingDocumentRequirements(input: {
   orderId: string;
   customsEnabled: boolean;
@@ -78,7 +85,12 @@ export function resolveLoadingDocumentRequirements(input: {
 }): OrderLoadingDocumentRequirements {
   const documents = loadingOrderDocumentDefinitions.map((definition) => {
     if (definition.moduleCode === "customs" && !input.customsEnabled) {
-      return { ...definition, isActive: false, isRequired: false };
+      return {
+        ...definition,
+        isActive: false,
+        isRequired: false,
+        stageAvailable: false,
+      };
     }
     const configured = (input.fieldsByModule[definition.moduleCode] ?? []).find(
       (field) => field.fieldKey === definition.fieldKey,
@@ -90,6 +102,7 @@ export function resolveLoadingDocumentRequirements(input: {
       ? {
           isActive: configured.isActive,
           isRequired: configured.isActive && configured.isRequired,
+          stageAvailable: configured.stageAvailable ?? true,
         }
       : {
           // Visibility comes from the catalog (for example, contract is hidden
@@ -98,11 +111,13 @@ export function resolveLoadingDocumentRequirements(input: {
           isActive: defaultMode !== "hidden",
           isRequired:
             defaultMode !== "hidden" && definition.requiredByDefault,
+          stageAvailable: true,
         };
     return {
       ...definition,
       isActive: policy.isActive,
       isRequired: policy.isRequired,
+      stageAvailable: policy.stageAvailable,
     };
   });
   return {
@@ -110,6 +125,14 @@ export function resolveLoadingDocumentRequirements(input: {
     customsEnabled: input.customsEnabled,
     documents,
   };
+}
+
+export function currentStageLoadingDocumentRequirements(
+  requirements: readonly EffectiveLoadingDocumentRequirement[],
+) {
+  return requirements.filter(
+    (requirement) => requirement.isActive && requirement.stageAvailable,
+  );
 }
 
 export function summarizeLoadingDocumentRequirements(
@@ -151,4 +174,19 @@ export function loadingDocumentRequirement(
   code: string,
 ) {
   return requirements.find((requirement) => requirement.code === code);
+}
+
+export function loadingDocumentFieldPolicy(
+  requirements: readonly EffectiveLoadingDocumentRequirement[] | null | undefined,
+  code: string,
+) {
+  const requirement = requirements
+    ? loadingDocumentRequirement(requirements, code)
+    : undefined;
+  return {
+    visible: requirement?.isActive ?? false,
+    required: requirement?.isRequired ?? false,
+    label: undefined,
+    configured: Boolean(requirement),
+  };
 }

@@ -311,9 +311,12 @@ export async function finalizeOrderReview(
          (o.workflow_instance_id IS NULL AND m.enabled=1)
          OR EXISTS(
            SELECT 1
-           FROM workflow_instance_step_states ss
+           FROM workflow_instances wi
+           JOIN workflow_instance_step_states ss ON ss.instance_id=wi.id
            JOIN workflow_instance_module_states ms ON ms.instance_step_state_id=ss.id
-           WHERE ss.instance_id=o.workflow_instance_id AND ms.module_code='review'
+           WHERE wi.id=o.workflow_instance_id
+             AND wi.organization_id=o.organization_id AND wi.order_id=o.id
+             AND ms.module_code='review'
          )
        )`,
   ).bind(input.organizationId,input.orderId).first<{
@@ -470,13 +473,19 @@ export async function loadConfiguredReviewModuleState(
     `SELECT o.workflow_instance_id,m.enabled stored_enabled,m.is_required stored_required,
       m.status,m.blocking_reason,
       (SELECT COUNT(*)
-       FROM workflow_instance_step_states ss
+       FROM workflow_instances wi
+       JOIN workflow_instance_step_states ss ON ss.instance_id=wi.id
        JOIN workflow_instance_module_states ms ON ms.instance_step_state_id=ss.id
-       WHERE ss.instance_id=o.workflow_instance_id AND ms.module_code=?) configured_count,
+       WHERE wi.id=o.workflow_instance_id
+         AND wi.organization_id=o.organization_id AND wi.order_id=o.id
+         AND ms.module_code=?) configured_count,
       (SELECT COALESCE(MAX(ms.is_required),0)
-       FROM workflow_instance_step_states ss
+       FROM workflow_instances wi
+       JOIN workflow_instance_step_states ss ON ss.instance_id=wi.id
        JOIN workflow_instance_module_states ms ON ms.instance_step_state_id=ss.id
-       WHERE ss.instance_id=o.workflow_instance_id AND ms.module_code=?) configured_required
+       WHERE wi.id=o.workflow_instance_id
+         AND wi.organization_id=o.organization_id AND wi.order_id=o.id
+         AND ms.module_code=?) configured_required
      FROM transport_orders o
      LEFT JOIN order_module_instances m
        ON m.organization_id=o.organization_id AND m.order_id=o.id AND m.module_code=?
@@ -592,7 +601,10 @@ async function buildOrderReview(
       .first<{cargo_difference_count:number;max_difference:number;pending_difference_count:number;open_exception_count:number}>(),
     db.prepare(`SELECT f.field_key,f.label,f.is_active,f.is_required
       FROM transport_orders o
-      JOIN workflow_instance_fields f ON f.instance_id=o.workflow_instance_id
+      JOIN workflow_instances wi
+        ON wi.id=o.workflow_instance_id
+       AND wi.organization_id=o.organization_id AND wi.order_id=o.id
+      JOIN workflow_instance_fields f ON f.instance_id=wi.id
       WHERE o.organization_id=? AND o.id=?
         AND f.module_code='costs'
       ORDER BY f.sort_order,f.field_key`)
@@ -600,7 +612,10 @@ async function buildOrderReview(
       .all<{field_key:string;label:string;is_active:number;is_required:number}>(),
     db.prepare(`SELECT f.field_key,f.label,f.is_active,f.is_required
       FROM transport_orders o
-      JOIN workflow_instance_fields f ON f.instance_id=o.workflow_instance_id
+      JOIN workflow_instances wi
+        ON wi.id=o.workflow_instance_id
+       AND wi.organization_id=o.organization_id AND wi.order_id=o.id
+      JOIN workflow_instance_fields f ON f.instance_id=wi.id
       WHERE o.organization_id=? AND o.id=?
         AND f.module_code='overseas_warehouse'
       ORDER BY f.sort_order,f.field_key`)

@@ -13,6 +13,7 @@ export function canViewAllOrders(user: OrderAccessUser) {
 }
 
 export const assignedBatchViewPermission = "transport.batch.assigned.view";
+export const batchCostsManagePermission = "order.module.costs.manage";
 
 /**
  * Entering the PZ workspace is separate from editing a loading plan.  The
@@ -30,6 +31,7 @@ export function canAccessBatchWorkspace(
       assignedBatchViewPermission,
       "transport.batch.approve",
       "order.module.loading.manage",
+      batchCostsManagePermission,
     ].includes(permission))
   );
 }
@@ -204,6 +206,110 @@ export function orderVisibilitySql(user: OrderAccessUser, alias = "o") {
   };
 }
 
+/**
+ * Cost allocation mutates every active child order in the batch. Therefore a
+ * permission on one child order is never sufficient: every mounted order must
+ * authorize the same account from its frozen costs responsibility. Select the
+ * same applicable costs module that loadOrderModuleActionScope uses: the latest
+ * configured module at or before the current step, otherwise the first future
+ * one. Mutable workflow templates never participate in this decision.
+ */
+export function batchCostsManageScopeSql(user: OrderAccessUser, alias = "b") {
+  if (!user.permissions.includes(batchCostsManagePermission))
+    return { sql: "0=1", values: [] as string[] };
+  const positionPoolSql = user.positionCode
+    ? `OR (
+          cost_module_instance.assignee_user_id IS NULL
+          AND NOT EXISTS(
+            SELECT 1 FROM workflow_instance_task_states assigned_cost_task
+            WHERE assigned_cost_task.instance_module_state_id=cost_module_state.id
+              AND assigned_cost_task.status!='completed'
+              AND assigned_cost_task.assignee_user_id IS NOT NULL
+          )
+          AND (
+            cost_module_state.responsibility_position_code=?
+            OR EXISTS(
+              SELECT 1 FROM workflow_instance_task_states responsible_cost_task
+              WHERE responsible_cost_task.instance_module_state_id=cost_module_state.id
+                AND responsible_cost_task.status!='completed'
+                AND responsible_cost_task.responsibility_position_code=?
+            )
+          )
+        )`
+    : "";
+  return {
+    sql: `(EXISTS(
+      SELECT 1
+      FROM transport_batch_orders present_cost_batch_order
+      WHERE present_cost_batch_order.batch_id=${alias}.id
+        AND present_cost_batch_order.organization_id=${alias}.organization_id
+        AND present_cost_batch_order.status!='removed'
+    ) AND NOT EXISTS(
+      SELECT 1
+      FROM transport_batch_orders cost_batch_order
+      JOIN transport_orders cost_order
+        ON cost_order.id=cost_batch_order.order_id
+       AND cost_order.organization_id=cost_batch_order.organization_id
+      WHERE cost_batch_order.batch_id=${alias}.id
+        AND cost_batch_order.organization_id=${alias}.organization_id
+        AND cost_batch_order.status!='removed'
+        AND NOT EXISTS(
+      SELECT 1
+      FROM workflow_instances cost_instance
+      JOIN workflow_instance_module_states cost_module_state
+        ON cost_instance.id=cost_order.workflow_instance_id
+       AND cost_instance.organization_id=cost_order.organization_id
+       AND cost_instance.order_id=cost_order.id
+       AND cost_module_state.id=(
+          SELECT candidate_cost_module.id
+          FROM workflow_instance_step_states candidate_cost_step
+          JOIN workflow_instance_module_states candidate_cost_module
+            ON candidate_cost_module.instance_step_state_id=candidate_cost_step.id
+           AND candidate_cost_module.module_code='costs'
+          LEFT JOIN workflow_instance_step_states current_cost_step
+            ON current_cost_step.instance_id=cost_instance.id
+           AND current_cost_step.step_key=cost_instance.current_step_key
+          WHERE candidate_cost_step.instance_id=cost_instance.id
+          ORDER BY
+            CASE
+              WHEN current_cost_step.sort_order IS NULL THEN 0
+              WHEN candidate_cost_step.sort_order<=current_cost_step.sort_order THEN 0 ELSE 1 END,
+            CASE
+              WHEN current_cost_step.sort_order IS NULL THEN -candidate_cost_step.sort_order
+              WHEN candidate_cost_step.sort_order<=current_cost_step.sort_order
+                THEN -candidate_cost_step.sort_order ELSE candidate_cost_step.sort_order END,
+            candidate_cost_module.sort_order,candidate_cost_module.id
+          LIMIT 1
+        )
+      JOIN order_module_instances cost_module_instance
+        ON cost_module_instance.organization_id=cost_order.organization_id
+       AND cost_module_instance.order_id=cost_order.id
+       AND cost_module_instance.module_code='costs'
+       AND cost_module_instance.enabled=1
+      WHERE (
+          cost_module_instance.assignee_user_id=?
+          OR EXISTS(
+            SELECT 1 FROM workflow_instance_task_states cost_task_state
+            WHERE cost_task_state.instance_module_state_id=cost_module_state.id
+              AND cost_task_state.status!='completed'
+              AND cost_task_state.assignee_user_id=?
+          )
+          ${positionPoolSql}
+        )
+      )
+    ))`,
+    values: user.positionCode
+      ? [user.userId, user.userId, user.positionCode, user.positionCode]
+      : [user.userId, user.userId],
+  };
+}
+
+function frozenCostsBatchVisibilitySql(user: OrderAccessUser, alias: string) {
+  return user.permissions.includes(batchCostsManagePermission)
+    ? batchCostsManageScopeSql(user, alias)
+    : null;
+}
+
 export function batchVisibilitySql(user: OrderAccessUser, alias = "b") {
   const exactBatchOwnerColumn = user.permissions.includes(assignedBatchViewPermission)
     ? user.positionCode === "OPERATION"
@@ -221,8 +327,23 @@ export function batchVisibilitySql(user: OrderAccessUser, alias = "b") {
     };
   }
   const orderVisibility = orderVisibilitySql(user, "access_order");
+  const costsVisibility = frozenCostsBatchVisibilitySql(user, alias);
+  const hasIndependentBatchWorkspaceAccess =
+    ["BOSS", "DEVELOPER"].includes(user.positionCode ?? "") ||
+    user.roleCodes.some((code) => ["owner", "boss", "developer"].includes(code)) ||
+    user.permissions.some((permission) => [
+      assignedBatchViewPermission,
+      "transport.batch.approve",
+      "order.module.loading.manage",
+    ].includes(permission));
+  // An account whose only PZ capability is costs management must not use the
+  // ordinary any-child order scope as a back door into the other mounted
+  // orders. Independent PZ workspace capabilities retain their existing read
+  // visibility, while every cost mutation is checked again by the route.
+  if (costsVisibility && !hasIndependentBatchWorkspaceAccess)
+    return costsVisibility;
   return {
-    sql: `EXISTS(
+    sql: `(${costsVisibility ? `${costsVisibility.sql} OR ` : ""}EXISTS(
       SELECT 1
       FROM transport_batch_orders access_batch_order
       JOIN transport_orders access_order
@@ -232,8 +353,8 @@ export function batchVisibilitySql(user: OrderAccessUser, alias = "b") {
         AND access_batch_order.organization_id=${alias}.organization_id
         AND access_batch_order.status!='removed'
         AND ${orderVisibility.sql}
-    )`,
-    values: orderVisibility.values,
+    ))`,
+    values: [...(costsVisibility?.values ?? []), ...orderVisibility.values],
   };
 }
 

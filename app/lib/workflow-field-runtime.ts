@@ -5,6 +5,15 @@ export type RuntimeWorkflowFieldLike = {
   isRequired: boolean;
 };
 
+export const frozenWorkflowFieldScopeMarkerKey =
+  "__frozen_workflow_field_scope__";
+
+export function isFrozenWorkflowFieldScopeMarker(
+  field: Pick<RuntimeWorkflowFieldLike, "fieldKey">,
+) {
+  return field.fieldKey === frozenWorkflowFieldScopeMarkerKey;
+}
+
 /**
  * Resolve one field exactly as the bound workflow snapshot defines it.
  *
@@ -17,7 +26,10 @@ export function runtimeWorkflowFieldPolicy(
   fieldKey: string,
   fallbackRequired = false,
 ) {
-  const configured = fields.find((field) => field.fieldKey === fieldKey);
+  const configured = fields.find(
+    (field) =>
+      !isFrozenWorkflowFieldScopeMarker(field) && field.fieldKey === fieldKey,
+  );
   if (configured) {
     return {
       visible: configured.isActive,
@@ -26,7 +38,11 @@ export function runtimeWorkflowFieldPolicy(
       configured: true,
     };
   }
-  const legacyFallback = fields.length === 0;
+  const frozenScope = fields.some(isFrozenWorkflowFieldScopeMarker);
+  const configuredFieldCount = fields.filter(
+    (field) => !isFrozenWorkflowFieldScopeMarker(field),
+  ).length;
+  const legacyFallback = !frozenScope && configuredFieldCount === 0;
   return {
     visible: legacyFallback,
     required: legacyFallback && fallbackRequired,

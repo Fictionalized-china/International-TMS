@@ -51,11 +51,25 @@ QUOTE_NUMBER_RE = re.compile(r"\bQT[0-9A-Z-]{6,}\b")
 ERROR_PAGE_RE = re.compile(r"请求失败|SYSTEM RECOVERY|Forbidden|Internal Server Error", re.I)
 
 REQUIRED_ACCOUNT_ALIASES = (
+    "hr_admin",
     "sales",
     "business_supervisor",
     "operation_supervisor",
+    "operation",
+    "document",
+    "customer_service",
+    "finance",
+    "cashier",
+    "domestic_warehouse",
+    "overseas_warehouse",
     "customer",
 )
+EXPECTED_ACCOUNT_SITES = {
+    "domestic_warehouse": "warehouse",
+    "overseas_warehouse": "warehouse",
+    "customer": "portal",
+}
+
 PHASE1_STAGE_ORDER = (
     "customer_binding",
     "quotation_creation",
@@ -63,6 +77,9 @@ PHASE1_STAGE_ORDER = (
     "consignment_submission",
     "business_approval",
     "ordinary_order_assignment",
+)
+PHASE1_NEGATIVE_GATE_CASES = (
+    "P1-NEG-CONSIGN-REQUIRED",
 )
 ASSIGNMENT_POSITION_CREDENTIAL_ALIASES = {
     "SALES": "sales",
@@ -132,8 +149,35 @@ def phase1_records(attempt: AttemptIdentity) -> list[Phase1Order]:
     ]
 
 
-def _public_preflight(vault: CredentialVault, *, base_url: str) -> dict[str, Any]:
+def validate_full_flow_credentials(
+    vault: CredentialVault,
+) -> tuple[CredentialRecord, ...]:
+    """Fail before Phase 1 writes when any downstream actor is unusable."""
+
     selected = vault.select(REQUIRED_ACCOUNT_ALIASES)
+    invalid = [
+        item.alias
+        for item in selected
+        if not item.email.strip() or not item.password
+    ]
+    if invalid:
+        raise ValueError(
+            "全流程账号缺少非空登录邮箱或密码：" + "、".join(invalid)
+        )
+    wrong_sites = [
+        item.alias
+        for item in selected
+        if item.site != EXPECTED_ACCOUNT_SITES.get(item.alias, "admin")
+    ]
+    if wrong_sites:
+        raise ValueError(
+            "全流程账号登录站点配置不正确：" + "、".join(wrong_sites)
+        )
+    return selected
+
+
+def _public_preflight(vault: CredentialVault, *, base_url: str) -> dict[str, Any]:
+    selected = validate_full_flow_credentials(vault)
     return {
         "status": "READY_NOT_EXECUTED",
         "base_url": base_url.rstrip("/"),
@@ -1043,6 +1087,126 @@ class Phase1Flow:
             remediation="检查保存后 present 状态与实例字段值是否实时刷新。",
         )
 
+    def _open_consignment_submit_form(
+        self,
+        record: Phase1Order,
+    ) -> tuple[Locator, Locator | None]:
+        form = self.sales.page.locator(
+            'form.consignment-submit-bar:has(input[name="actionCode"][value="submit"])'
+        )
+        if self._is_visible(form):
+            return form.first, None
+        quick_actions = self.sales.page.locator(
+            '[aria-label="委托资料快捷操作"]'
+        )
+        self.sales.click(
+            quick_actions.get_by_role("button", name="提交审批", exact=True),
+            f"打开 {record.order_number} 提交审批弹窗",
+        )
+        dialog = self.sales.page.get_by_role(
+            "dialog",
+            name=re.compile(
+                rf"^提交审批\s*·\s*{re.escape(record.order_number)}$"
+            ),
+        )
+        self.sales.expect_visible(dialog, f"{record.order_number} 提交审批弹窗")
+        return (
+            dialog.locator(
+                'form.consignment-submit-bar:has(input[name="actionCode"][value="submit"])'
+            ).first,
+            dialog,
+        )
+
+    def _assert_required_consignment_rejected(self, record: Phase1Order) -> None:
+        """Exercise one non-mutating, workflow-derived missing-field gate."""
+
+        missing = self.sales.page.locator(
+            ".consignment-custom-table tbody tr.missing"
+        )
+        form, dialog = self._open_consignment_submit_form(record)
+        self.sales.expect_visible(form, f"{record.order_number} 提交审批栏")
+        if missing.count() > 0:
+            missing_labels = [
+                missing.nth(index).locator("td").first.inner_text().splitlines()[0].strip()
+                for index in range(missing.count())
+            ]
+            self._select_assignee(
+                self.sales,
+                form.locator(".organization-assignee-picker"),
+                person_label="业务主管",
+                preferred_person=self.credentials["business_supervisor"].role,
+            )
+            self.sales.click(
+                form.get_by_role("button", name="提交审批"),
+                f"缺少必填资料时尝试提交 {record.order_number}",
+            )
+            rejected = self.sales.page.get_by_text(
+                re.compile(r"请先补齐当前工作流要求的字段"),
+                exact=False,
+            )
+            self.sales.expect_visible(
+                rejected,
+                f"{record.order_number} 缺必填资料阻断提示",
+            )
+            self._expect_current_step(
+                self.sales, "委托资料补充", record.order_number
+            )
+            actual = "服务端拒绝提交；仍缺：" + "、".join(missing_labels)
+            expectation = GateExpectation(
+                name="委托资料缺必填时禁止提请审批",
+                source="workflow_instance_field_configuration",
+                configured_mode="required",
+                expected_behavior="block",
+                ui_expectation="缺失当前实例必填字段时留在本节点并明确提示。",
+                server_expectation="只按订单冻结工作流的启用必填字段校验，失败不得推进订单。",
+                owner_role="业务岗",
+                remediation="统一委托页必填标记、错误提示与服务端冻结实例校验。",
+            )
+        else:
+            # A workflow may legitimately configure every consignment field as
+            # optional/hidden. The next-handler selector remains structurally
+            # required, so exercise that visible native-form gate instead.
+            self.sales.click(
+                form.get_by_role("button", name="提交审批"),
+                f"未选择业务主管时尝试提交 {record.order_number}",
+            )
+            invalid_assignee = form.locator(
+                "select.organization-assignee-native-validator:invalid"
+            )
+            self.sales.expect_visible(
+                invalid_assignee,
+                f"{record.order_number} 下一处理人必选门禁",
+            )
+            self._expect_current_step(
+                self.sales, "委托资料补充", record.order_number
+            )
+            actual = "当前实例没有缺失业务字段；浏览器拒绝未选择下一处理人的提交"
+            expectation = GateExpectation(
+                name="委托提交必须指定下一处理人",
+                source="system_integrity_invariant",
+                configured_mode="required",
+                expected_behavior="block",
+                ui_expectation="未选择下一处理人时由可见表单校验阻止提交，并留在本节点。",
+                server_expectation="提交 action 必须再次校验下一处理人有效且属于可选范围。",
+                owner_role="业务岗",
+                remediation="保持浏览器校验与提交 action 的下一处理人约束一致。",
+            )
+        self.sales.capture_gate_evidence(PHASE1_NEGATIVE_GATE_CASES[0])
+        self.sales.record_gate(
+            name=expectation.name,
+            expected=(
+                f"UI：{expectation.ui_expectation}；服务端：{expectation.server_expectation}"
+            ),
+            passed=True,
+            actual=actual,
+            owner=expectation.owner_role,
+            remediation=expectation.remediation,
+            expectation=expectation,
+            case_id=PHASE1_NEGATIVE_GATE_CASES[0],
+        )
+        if dialog is not None and self._is_visible(dialog):
+            self.sales.press("Escape", "关闭缺必填提交弹窗", dialog)
+
     def submit_consignments(self) -> None:
         gate = _workflow_gate(
             "委托资料提请审批门禁",
@@ -1067,6 +1231,8 @@ class Phase1Flow:
                 gate=gate,
             ) as observation:
                 self._open_order_from_list(self.sales, record)
+                if record.key == "ftl":
+                    self._assert_required_consignment_rejected(record)
                 self._fill_missing_custom_consignment_fields(self.sales, record)
                 sections = self.sales.page.get_by_role(
                     "navigation", name="委托资料补充分区"
@@ -1356,6 +1522,7 @@ class Phase1Flow:
         self.submit_consignments()
         self.approve_consignments()
         self.assign_ordinary_orders()
+        self.harness.assert_certifiable()
 
 
 def _redact_reason(reason: str, records: Sequence[CredentialRecord], identity: FreshBusinessIdentity | None) -> str:
@@ -1397,7 +1564,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     vault = load_credentials(args.credentials_file)
-    required = vault.select(REQUIRED_ACCOUNT_ALIASES)
+    required = validate_full_flow_credentials(vault)
     if not args.execute:
         print(json.dumps(_public_preflight(vault, base_url=args.base_url), ensure_ascii=False, indent=2))
         return 0
@@ -1452,6 +1619,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             finally:
                 reason = _redact_reason(reason, required, identity)
                 summary_path = harness.close(status=status)  # type: ignore[arg-type]
+                if harness.last_status != status:
+                    status = str(harness.last_status)
+                    if not reason:
+                        reason = harness.finalization_error or "步骤、门禁或证据汇总未通过"
     except Exception as error:
         status = "failed"
         reason = _redact_reason(f"{type(error).__name__}: {error}", required, identity)

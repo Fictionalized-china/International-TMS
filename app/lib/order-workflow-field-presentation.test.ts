@@ -4,9 +4,14 @@ import {
   cargoDetailFieldGroups,
   orderWorkflowPresentationKeys,
   quotationCargoPresentationKeys,
+  workflowFieldsForPresentation,
   workflowFieldsForStep,
 } from "./order-workflow-field-presentation";
-import { hasVisibleRuntimeWorkflowField } from "./workflow-field-runtime";
+import {
+  frozenWorkflowFieldScopeMarkerKey,
+  hasVisibleRuntimeWorkflowField,
+  runtimeWorkflowFieldPolicy,
+} from "./workflow-field-runtime";
 
 describe("order workflow field presentation contract", () => {
   it("has an actual-order presentation for every quotation and order-creation fact", () => {
@@ -64,5 +69,22 @@ describe("order workflow field presentation contract", () => {
       .toEqual(["document_consignment_letter"]);
     expect(workflowFieldsForStep(fields,"custom_secondary_review").map((field) => field.fieldKey))
       .toEqual(["e2e_secondary_review_result"]);
+  });
+
+  it("preserves frozen scope while removing its marker from display rows", () => {
+    const fields = [{
+      fieldKey: frozenWorkflowFieldScopeMarkerKey,
+      stepKey: "custom_empty_step",
+      isActive: false,
+      isRequired: false,
+    }];
+
+    const scoped = workflowFieldsForStep(fields, "custom_empty_step");
+    expect(runtimeWorkflowFieldPolicy(
+      scoped,
+      "document_commercial_invoice",
+      true,
+    )).toMatchObject({ visible: false, required: false });
+    expect(workflowFieldsForPresentation(scoped)).toEqual([]);
   });
 });

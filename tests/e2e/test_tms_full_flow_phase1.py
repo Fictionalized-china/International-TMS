@@ -12,12 +12,15 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from tms_full_flow_phase1 import (
+    EXPECTED_ACCOUNT_SITES,
+    PHASE1_NEGATIVE_GATE_CASES,
     PHASE1_STAGE_ORDER,
     REQUIRED_ACCOUNT_ALIASES,
     _public_preflight,
     build_fresh_identity,
     build_parser,
     phase1_records,
+    validate_full_flow_credentials,
 )
 from tms_ui_credentials import CredentialRecord, CredentialVault
 from tms_ui_harness import AttemptIdentity
@@ -63,6 +66,12 @@ class Phase1IdentityTests(unittest.TestCase):
 
 
 class Phase1SafetyTests(unittest.TestCase):
+    def test_formal_flow_executes_missing_required_negative_gate(self) -> None:
+        self.assertEqual(
+            PHASE1_NEGATIVE_GATE_CASES,
+            ("P1-NEG-CONSIGN-REQUIRED",),
+        )
+
     def test_execute_is_opt_in(self) -> None:
         args = build_parser().parse_args([])
         self.assertFalse(args.execute)
@@ -75,7 +84,7 @@ class Phase1SafetyTests(unittest.TestCase):
         records = [
             CredentialRecord(
                 alias=alias,
-                site="portal" if alias == "customer" else "admin",
+                site=EXPECTED_ACCOUNT_SITES.get(alias, "admin"),
                 department="测试部门",
                 role=alias,
                 email=f"{alias}@secret.test",
@@ -91,6 +100,58 @@ class Phase1SafetyTests(unittest.TestCase):
         self.assertFalse(payload["business_writes"])
         self.assertNotIn("@secret.test", rendered)
         self.assertNotIn("Secret-", rendered)
+
+    def test_preflight_requires_every_full_flow_actor_before_business_writes(self) -> None:
+        self.assertEqual(
+            set(REQUIRED_ACCOUNT_ALIASES),
+            {
+                "hr_admin",
+                "sales",
+                "business_supervisor",
+                "operation_supervisor",
+                "operation",
+                "document",
+                "customer_service",
+                "finance",
+                "cashier",
+                "domestic_warehouse",
+                "overseas_warehouse",
+                "customer",
+            },
+        )
+
+        def records(*, missing: str = "", blank: str = "", wrong_site: str = "") -> list[CredentialRecord]:
+            return [
+                CredentialRecord(
+                    alias=alias,
+                    site=(
+                        "admin"
+                        if alias == wrong_site
+                        else EXPECTED_ACCOUNT_SITES.get(alias, "admin")
+                    ),
+                    department="测试部门",
+                    role=alias,
+                    email="" if alias == blank else f"{alias}@secret.test",
+                    password="" if alias == blank else f"Secret-{alias}-123A",
+                )
+                for alias in REQUIRED_ACCOUNT_ALIASES
+                if alias != missing
+            ]
+
+        selected = validate_full_flow_credentials(CredentialVault(records()))
+        self.assertEqual(tuple(item.alias for item in selected), REQUIRED_ACCOUNT_ALIASES)
+        with self.assertRaises(ValueError):
+            validate_full_flow_credentials(
+                CredentialVault(records(missing="customer_service"))
+            )
+        with self.assertRaises(ValueError):
+            validate_full_flow_credentials(
+                CredentialVault(records(blank="finance"))
+            )
+        with self.assertRaises(ValueError):
+            validate_full_flow_credentials(
+                CredentialVault(records(wrong_site="domestic_warehouse"))
+            )
 
     def test_certification_scenario_passes_ui_only_static_guard(self) -> None:
         violations = scan_path(HERE / "tms_full_flow_phase1.py")

@@ -8,6 +8,7 @@ import {
   buildOrderAssignmentManifest,
   type WorkflowAssignmentSnapshotRow,
 } from "./order-assignment-manifest";
+import { loadOrderAssignmentManifest } from "./order-assignment-manifest.server";
 
 type BatchOriginalResponsibilityRow = {
   batch_id: string;
@@ -111,7 +112,88 @@ export async function loadBatchInitialResponsibilityRestrictions(
   );
   return byBatch[batchId] ?? buildBatchInitialResponsibilityRestrictions([]);
 }
+export async function loadOrdersInitialResponsibilityRestrictions(
+  db: D1Database,
+  organizationId: string,
+  orderIds: readonly string[],
+): Promise<BatchInitialResponsibilityRestrictions> {
+  const uniqueOrderIds = [...new Set(orderIds.filter(Boolean))];
+  if (!uniqueOrderIds.length) {
+    const empty = buildBatchInitialResponsibilityRestrictions([]);
+    empty.configurationErrors = ["配载单没有可交接职责的挂载订单"];
+    return empty;
+  }
+  const [owners, manifests] = await Promise.all([
+    db.prepare(
+      `SELECT o.id order_id,o.order_number,ms.module_code,
+              CASE WHEN ts.id IS NULL
+                THEN ms.responsibility_position_code
+                ELSE COALESCE(ts.responsibility_position_code,ms.responsibility_position_code)
+              END position_code,
+              COALESCE(ts.assignee_user_id,omi.assignee_user_id) assignee_user_id,
+              assignee.display_name assignee_name
+         FROM transport_orders o
+         JOIN workflow_instances wi
+           ON wi.id=o.workflow_instance_id
+          AND wi.organization_id=o.organization_id
+          AND wi.order_id=o.id
+         JOIN workflow_instance_step_states ss ON ss.instance_id=wi.id
+         JOIN workflow_instance_module_states ms ON ms.instance_step_state_id=ss.id
+         LEFT JOIN workflow_instance_task_states ts ON ts.instance_module_state_id=ms.id
+         LEFT JOIN order_module_instances omi
+           ON omi.order_id=o.id
+          AND omi.organization_id=o.organization_id
+          AND omi.module_code=ms.module_code
+         LEFT JOIN users assignee
+           ON assignee.id=COALESCE(ts.assignee_user_id,omi.assignee_user_id)
+        WHERE o.organization_id=?
+          AND o.id IN (${uniqueOrderIds.map(() => "?").join(",")})
+          AND ms.status NOT IN ('completed','not_applicable')
+          AND (ts.id IS NULL OR ts.status NOT IN ('completed','not_applicable'))
+        ORDER BY o.order_number,ss.sort_order,ms.sort_order,ts.sort_order`,
+    ).bind(organizationId, ...uniqueOrderIds).all<{
+      order_id: string;
+      order_number: string;
+      module_code: string;
+      position_code: string | null;
+      assignee_user_id: string | null;
+      assignee_name: string | null;
+    }>(),
+    Promise.all(uniqueOrderIds.map(async (orderId) => ({
+      orderId,
+      manifest: await loadOrderAssignmentManifest(organizationId, orderId),
+    }))),
+  ]);
+  const configurationErrors: string[] = [];
+  for (const { orderId, manifest } of manifests) {
+    const orderNumber = owners.results.find((row) => row.order_id === orderId)?.order_number ?? orderId;
+    if (!manifest.workflowInstanceId) {
+      configurationErrors.push(`${orderNumber} 尚未锁定工作流实例`);
+    }
+    configurationErrors.push(...manifest.configurationErrors.map((error) => `${orderNumber}：${error}`));
+    const positions = new Set(manifest.groups.map((group) => group.positionCode).filter(Boolean));
+    for (const [kind, positionCode] of Object.entries(BATCH_RESPONSIBILITY_POSITION_CODES)) {
+      if (!positions.has(positionCode)) {
+        configurationErrors.push(
+          `${orderNumber} 冻结工作流中没有未完成的${kind === "operation" ? "操作" : "单证"}职责（${positionCode}）`,
+        );
+      }
+    }
+  }
+  const restrictions = buildBatchInitialResponsibilityRestrictions(
+    owners.results.map((row) => ({
+      orderId: row.order_id,
+      orderNumber: row.order_number,
+      moduleCode: row.module_code,
+      positionCode: row.position_code ?? "",
+      assigneeUserId: row.assignee_user_id,
+      assigneeName: row.assignee_name,
+    })),
 
+  );
+  restrictions.configurationErrors = [...new Set(configurationErrors)];
+  return restrictions;
+}
 export async function loadBatchesInitialResponsibilityRestrictions(
   db: D1Database,
   organizationId: string,
@@ -158,7 +240,6 @@ export async function loadBatchesInitialResponsibilityRestrictions(
     const batchRows = rows.results.filter((row) => row.batch_id === batchId);
     const assignments: BatchOriginalResponsibilityAssignment[] = [];
     const configurationErrors: string[] = [];
-    const positions = new Set<string>();
     const orderIds = [...new Set(batchRows.map((row) => row.order_id))];
     for (const orderId of orderIds) {
       const orderRows = batchRows.filter((row) => row.order_id === orderId);
@@ -192,8 +273,13 @@ export async function loadBatchesInitialResponsibilityRestrictions(
         }));
       const manifest = buildOrderAssignmentManifest(snapshotRows);
       configurationErrors.push(...manifest.configurationErrors.map((error) => `${orderNumber}：${error}`));
-      for (const group of manifest.groups) {
-        if (group.positionCode) positions.add(group.positionCode);
+      const positions = new Set(manifest.groups.map((group) => group.positionCode).filter(Boolean));
+      for (const [kind, positionCode] of Object.entries(BATCH_RESPONSIBILITY_POSITION_CODES)) {
+        if (!positions.has(positionCode)) {
+          configurationErrors.push(
+            `${orderNumber} 冻结工作流中没有未完成的${kind === "operation" ? "操作" : "单证"}职责（${positionCode}）`,
+          );
+        }
       }
       for (const row of orderRows) {
         if (!row.module_code || !row.module_status) continue;
@@ -211,13 +297,6 @@ export async function loadBatchesInitialResponsibilityRestrictions(
           assigneeUserId: row.assignee_user_id,
           assigneeName: row.assignee_name,
         });
-      }
-    }
-    for (const [kind, positionCode] of Object.entries(BATCH_RESPONSIBILITY_POSITION_CODES)) {
-      if (!positions.has(positionCode)) {
-        configurationErrors.push(
-          `挂载订单冻结工作流中没有未完成的${kind === "operation" ? "操作" : "单证"}职责（${positionCode}）`,
-        );
       }
     }
     const restrictions = buildBatchInitialResponsibilityRestrictions(assignments);

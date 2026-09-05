@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  BATCH_RESPONSIBILITY_PERMISSION_REQUIREMENTS,
   batchInitialResponsibilityDisabledReasons,
+  batchInitialResponsibilityReadiness,
+  batchResponsibilityPermissionDisabledReasons,
   buildBatchInitialResponsibilityRestrictions,
   buildConfiguredBatchResponsibilityTargets,
   findBatchInitialResponsibilityConflict,
@@ -10,6 +13,49 @@ import {
 } from "./batch-responsibility";
 
 describe("batch responsibility policy", () => {
+  it("requires full downstream permissions for PZ assignees", () => {
+    expect(BATCH_RESPONSIBILITY_PERMISSION_REQUIREMENTS.operation).toEqual([
+      ["transport.batch.assigned.view"],
+      ["order.module.tracking.manage"],
+      ["order.module.exceptions.manage"],
+    ]);
+    expect(BATCH_RESPONSIBILITY_PERMISSION_REQUIREMENTS.document).toEqual([
+      ["transport.batch.assigned.view"],
+      ["order.module.documents.manage"],
+      ["order.module.customs.manage"],
+    ]);
+
+    const baseMember = {
+      display_name: "candidate",
+      department_id: "department-1",
+      department_name: "transport",
+      position_id: "position-1",
+      position_name: "position",
+    };
+    const operationMembers = [
+      {
+        ...baseMember,
+        id: "qualified-operation",
+        permission_codes: "transport.batch.assigned.view,order.module.tracking.manage,order.module.exceptions.manage",
+      },
+      {
+        ...baseMember,
+        id: "missing-exceptions",
+        permission_codes: "transport.batch.assigned.view,order.module.tracking.manage",
+      },
+      { ...baseMember, id: "protected-owner", permission_codes: "*" },
+    ];
+    expect(Object.keys(batchResponsibilityPermissionDisabledReasons(
+      operationMembers,
+      "operation",
+    ))).toEqual(["missing-exceptions"]);
+    expect(Object.keys(batchResponsibilityPermissionDisabledReasons([{
+      ...baseMember,
+      id: "missing-customs",
+      permission_codes: "transport.batch.assigned.view,order.module.documents.manage",
+    }], "document"))).toEqual(["missing-customs"]);
+  });
+
   it("applies supervisor approval only to consolidated PZ batches", () => {
     expect(batchRequiresSupervisorApproval("PZ-20260905-001")).toBe(true);
     expect(batchRequiresSupervisorApproval("FTL-20260905-001")).toBe(false);
@@ -200,4 +246,81 @@ describe("batch responsibility policy", () => {
       }),
     ]);
   });
+  it("rejects split permissions when no operation account has the complete PZ set", () => {
+    const restrictions = buildBatchInitialResponsibilityRestrictions([]);
+    const readiness = batchInitialResponsibilityReadiness([
+      {
+        id: "operation-view-tracking",
+        display_name: "操作甲",
+        department_id: "department-operation",
+        department_name: "操作部",
+        position_id: "position-operation",
+        position_code: "OPERATION",
+        position_name: "操作岗",
+        permission_codes: "transport.batch.assigned.view,order.module.tracking.manage",
+      },
+      {
+        id: "operation-exception",
+        display_name: "操作乙",
+        department_id: "department-operation",
+        department_name: "操作部",
+        position_id: "position-operation",
+        position_code: "OPERATION",
+        position_name: "操作岗",
+        permission_codes: "order.module.exceptions.manage",
+      },
+    ], restrictions);
+    expect(readiness.operation).toEqual([]);
+  });
+
+  it("rejects complete candidates when every candidate is an original order owner", () => {
+    const restrictions = buildBatchInitialResponsibilityRestrictions([{
+      orderId: "order-1",
+      orderNumber: "SO-001",
+      moduleCode: "tracking",
+      positionCode: "OPERATION",
+      assigneeUserId: "operation-original",
+      assigneeName: "原操作员",
+    }]);
+    const readiness = batchInitialResponsibilityReadiness([{
+      id: "operation-original",
+      display_name: "原操作员",
+      department_id: "department-operation",
+      department_name: "操作部",
+      position_id: "position-operation",
+      position_code: "OPERATION",
+      position_name: "操作岗",
+      permission_codes: "transport.batch.assigned.view,order.module.tracking.manage,order.module.exceptions.manage",
+    }], restrictions);
+    expect(readiness.operation).toEqual([]);
+  });
+
+  it("accepts fresh operation and document candidates with complete permissions", () => {
+    const restrictions = buildBatchInitialResponsibilityRestrictions([]);
+    const common = {
+      department_id: "department",
+      department_name: "运输部",
+      position_id: "position",
+      position_name: "岗位",
+    };
+    const readiness = batchInitialResponsibilityReadiness([
+      {
+        ...common,
+        id: "operation-fresh",
+        display_name: "新操作员",
+        position_code: "OPERATION",
+        permission_codes: "transport.batch.assigned.view,order.module.tracking.manage,order.module.exceptions.manage",
+      },
+      {
+        ...common,
+        id: "document-fresh",
+        display_name: "新单证员",
+        position_code: "DOC",
+        permission_codes: "transport.batch.assigned.view,order.module.documents.manage,order.module.customs.manage",
+      },
+    ], restrictions);
+    expect(readiness.operation.map((member) => member.id)).toEqual(["operation-fresh"]);
+    expect(readiness.document.map((member) => member.id)).toEqual(["document-fresh"]);
+  });
+
 });

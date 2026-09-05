@@ -14,6 +14,8 @@ if str(HERE) not in sys.path:
 from tms_full_flow_phase3 import (
     LTL_KEYS,
     ORDER_KEYS,
+    PHASE2_STAGE_ORDER,
+    PHASE3_PERMISSION_AND_NEGATIVE_CASES,
     PHASE3_HANDOFF_SCHEMA,
     PHASE3_STAGE_ORDER,
     REQUIRED_ACCOUNT_ALIASES,
@@ -77,7 +79,14 @@ def valid_phase2_payload(*, include_prefix: bool = True) -> dict[str, object]:
             "operation_alias": "operation_2",
             "document_alias": "document_2",
         },
-        "completed_stages": ["domestic_transport", "batch_loading_outbound"],
+        "certification_lineage": {
+            "mode": "fresh-from-phase1",
+            "root_phase1_run_id": "phase1-one-ftl-three-ltl-a003-20260905150000-abcdef12",
+            "root_entity_prefix": "UIE2E-20260905150000-A003-ABCDEF12",
+            "fresh_phase1_attempt": True,
+            "recovery_branches_used": False,
+        },
+        "completed_stages": list(PHASE2_STAGE_ORDER),
         "ready_for_phase3": True,
     }
     if include_prefix:
@@ -88,6 +97,7 @@ def valid_phase2_payload(*, include_prefix: bool = True) -> dict[str, object]:
         "schema": "international-tms-ui-only-run/v2",
         "run_id": "phase2-source-20260905160000-12345678",
         "status": "passed",
+        "metrics": {"steps_failed": 0, "steps_blocked": 0, "gates_failed": 0},
         "handoff": handoff,
     }
 
@@ -192,8 +202,35 @@ class Phase3HandoffInputTests(unittest.TestCase):
     def test_run_id_derivation_rejects_unstructured_value(self) -> None:
         self.assertEqual(derive_phase1_entity_prefix("legacy-run"), "")
 
+    def test_rejects_nominal_pass_with_failed_phase2_metrics(self) -> None:
+        payload = valid_phase2_payload()
+        payload["metrics"]["steps_failed"] = 1  # type: ignore[index]
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_payload(Path(directory), payload)
+            with self.assertRaisesRegex(ValueError, "失败证据"):
+                load_phase2_handoff(path)
+
+    def test_rejects_recovery_or_missing_fresh_lineage(self) -> None:
+        payload = valid_phase2_payload()
+        payload["handoff"]["certification_lineage"]["recovery_branches_used"] = True  # type: ignore[index]
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_payload(Path(directory), payload)
+            with self.assertRaisesRegex(ValueError, "fresh attempt"):
+                load_phase2_handoff(path)
+
 
 class Phase3SafetyAndOutputTests(unittest.TestCase):
+    def test_formal_flow_executes_pz_permission_and_exit_negative_gates(self) -> None:
+        self.assertEqual(
+            PHASE3_PERMISSION_AND_NEGATIVE_CASES,
+            (
+                "P3-PERM-PZ-NEW-DOCUMENT",
+                "P3-NEG-PZ-OLD-DOCUMENT-DEEP-LINK",
+                "P3-NEG-PZ-PARTIAL-CUSTOMS-EXIT",
+                "P3-NEG-CHILD-OLD-DOCUMENT",
+            ),
+        )
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -261,7 +298,10 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
         self.assertEqual(payload["completed_stages"], list(PHASE3_STAGE_ORDER))
         self.assertEqual(len(payload["oul_numbers"]), 4)
         self.assertEqual(len(payload["pickup_signed_orders"]), 4)
-        self.assertNotIn("entity_prefix", rendered)
+        self.assertEqual(
+            payload["certification_lineage"]["source_phase2_run_id"],
+            self.source.source_run_id,
+        )
         self.assertNotIn("@example.test", rendered)
 
     def test_stage_order_ends_at_pickup_signoff(self) -> None:

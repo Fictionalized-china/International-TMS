@@ -1,3 +1,5 @@
+import { isFrozenWorkflowFieldScopeMarker } from "./workflow-field-runtime";
+
 export const quotationConsignmentPresentationKeys = [
   "quotation_customer_contact_name",
   "quotation_customer_contact_phone",
@@ -100,4 +102,10 @@ export function workflowFieldsForStep<T extends { stepKey: string }>(
   stepKey: string | null | undefined,
 ): T[] {
   return stepKey ? fields.filter((field) => field.stepKey === stepKey) : [...fields];
+}
+
+export function workflowFieldsForPresentation<
+  T extends { fieldKey: string },
+>(fields: readonly T[]): T[] {
+  return fields.filter((field) => !isFrozenWorkflowFieldScopeMarker(field));
 }

@@ -38,7 +38,13 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from tms_ui_credentials import CredentialRecord, CredentialVault, load_credentials
-from tms_ui_harness import GateExpectation, RoleBrowserSession, TmsUIHarness, safe_artifact_name
+from tms_ui_harness import (
+    GateExpectation,
+    RoleBrowserSession,
+    TmsUIHarness,
+    require_certified_summary,
+    safe_artifact_name,
+)
 
 
 ORDER_KEYS = ("ftl", "ltl1", "ltl2", "ltl3")
@@ -56,6 +62,16 @@ PHASE4_STAGE_ORDER = (
 )
 PHASE3_HANDOFF_SCHEMA = "international-tms-full-flow-phase3-handoff/v1"
 HANDOFF_SCHEMA = "international-tms-full-flow-phase4-handoff/v1"
+PHASE3_STAGE_ORDER = (
+    "customs_permission_alignment",
+    "ftl_customs_release",
+    "batch_customs_release",
+    "ftl_actual_exit_and_tracking",
+    "batch_actual_exit_and_tracking",
+    "overseas_original_label_inbound",
+    "customer_notification_and_optional_appointment",
+    "overseas_pickup_scan_and_signoff",
+)
 
 ORDER_NUMBER_RE = re.compile(r"^SO[0-9A-Z-]{6,}$", re.I)
 PZ_NUMBER_RE = re.compile(r"^PZ-[0-9A-Z-]{4,}$", re.I)
@@ -108,6 +124,7 @@ class Phase3Handoff:
     transport_batch_number: str
     dispatches: dict[str, str]
     oul_numbers: dict[str, tuple[str, ...]]
+    certification_lineage: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,17 +189,26 @@ def load_phase3_handoff(path: Path | str) -> Phase3Handoff:
     if not source.is_file():
         raise FileNotFoundError(f"第三阶段结果文件不存在：{source}")
     payload = _mapping(json.loads(source.read_text(encoding="utf-8-sig")), "第三阶段结果")
-    if str(payload.get("status", "")).strip().lower() != "passed":
-        raise ValueError("第三阶段必须为 passed，第四阶段不能接续失败或未完成的数据")
-    source_run_id = str(payload.get("run_id", "")).strip()
+    evidence = require_certified_summary(
+        payload,
+        source=source,
+        label="第三阶段",
+    )
+    source_run_id = str(evidence.get("run_id", "")).strip()
     if not source_run_id:
         raise ValueError("第三阶段结果缺少 run_id")
-    raw_handoff = payload.get("handoff")
+    envelope_run_id = str(payload.get("run_id", "")).strip()
+    if envelope_run_id and envelope_run_id != source_run_id:
+        raise ValueError("第三阶段结果 envelope.run_id 与 summary.run_id 不一致")
+    raw_handoff = evidence.get("handoff")
     handoff = _mapping(raw_handoff, "handoff")
     if str(handoff.get("schema", "")).strip() != PHASE3_HANDOFF_SCHEMA:
         raise ValueError("第三阶段 handoff schema 不受支持")
     if handoff.get("ready_for_phase4") is not True:
         raise ValueError("第三阶段尚未声明 ready_for_phase4")
+    completed_stages = tuple(str(item) for item in handoff.get("completed_stages", ()))
+    if completed_stages != PHASE3_STAGE_ORDER:
+        raise ValueError("第三阶段 completed_stages 不完整或顺序不一致")
 
     raw_orders = _mapping(handoff.get("orders"), "handoff.orders")
     orders: dict[str, Phase3Order] = {}
@@ -226,15 +252,32 @@ def load_phase3_handoff(path: Path | str) -> Phase3Handoff:
     else:
         oul_numbers = {key: orders[key].cargo_codes for key in ORDER_KEYS}
 
+    source_phase2_run_id = str(handoff.get("source_phase2_run_id", "")).strip()
+    source_phase1_run_id = str(handoff.get("source_phase1_run_id", "")).strip()
+    lineage = _mapping(
+        handoff.get("certification_lineage"), "handoff.certification_lineage"
+    )
+    if (
+        lineage.get("mode") != "fresh-from-phase1"
+        or lineage.get("fresh_phase1_attempt") is not True
+        or lineage.get("recovery_branches_used") is not False
+    ):
+        raise ValueError("第三阶段认证链路不是无恢复分支的 Phase 1 fresh attempt")
+    if str(lineage.get("root_phase1_run_id", "")).strip() != source_phase1_run_id:
+        raise ValueError("第三阶段认证链路的 Phase 1 run_id 不一致")
+    if str(lineage.get("source_phase2_run_id", "")).strip() != source_phase2_run_id:
+        raise ValueError("第三阶段认证链路的 Phase 2 run_id 不一致")
+
     return Phase3Handoff(
         source_run_id=source_run_id,
-        source_phase2_run_id=str(handoff.get("source_phase2_run_id", "")).strip(),
-        source_phase1_run_id=str(handoff.get("source_phase1_run_id", "")).strip(),
+        source_phase2_run_id=source_phase2_run_id,
+        source_phase1_run_id=source_phase1_run_id,
         customer_name=str(customer.get("name", "")).strip(),
         orders=orders,
         transport_batch_number=batch_number,
         dispatches=dispatches,
         oul_numbers=oul_numbers,
+        certification_lineage=dict(lineage),
     )
 
 
@@ -251,6 +294,8 @@ def build_handoff_payload(
     *,
     ready_for_final_acceptance: bool,
 ) -> dict[str, Any]:
+    if ready_for_final_acceptance and not phase3.certification_lineage:
+        raise ValueError("最终认证交接缺少 Phase 1 fresh attempt 认证链路")
     orders = {
         key: {
             "order_number": item.order_number,
@@ -271,6 +316,8 @@ def build_handoff_payload(
         }
         for item in artifacts.reconciliations.values()
     ]
+    lineage = dict(phase3.certification_lineage)
+    lineage["source_phase3_run_id"] = phase3.source_run_id
     return {
         "schema": HANDOFF_SCHEMA,
         "source_phase3_run_id": phase3.source_run_id,
@@ -280,6 +327,7 @@ def build_handoff_payload(
         "orders": orders,
         "transport_batch": {"batch_number": phase3.transport_batch_number},
         "dispatches": dict(phase3.dispatches),
+        "certification_lineage": lineage,
         "workflow_gates": artifacts.workflow_gates,
         "reconciliations": reconciliations,
         "document_evidence": {
@@ -390,6 +438,7 @@ class Phase4Flow:
         self.phase3 = phase3
         self.fixture_file = fixture_file.resolve()
         self.artifacts = Phase4Artifacts()
+        self._generated_reconciliation_orders: set[str] = set()
         self.customer_service = self._add_role("customer_service")
         self.sales = self._add_role("sales")
         self.finance = self._add_role("finance")
@@ -884,6 +933,12 @@ class Phase4Flow:
                             owner="费用状态同步维护人",
                             remediation="检查费用保存后 workflow field presence 与 costs 模块状态同步。",
                         )
+                elif observation and observation.required and observation.present:
+                    raise BusinessBlocker(
+                        f"{order.order_number} 在本轮到达前已有{FIELD_LABELS[field_key]}，不能作为 fresh 全流程认证数据",
+                        owner="全流程认证数据隔离维护人",
+                        remediation="废弃本轮续跑，从 Phase 1 创建全新客户和全新订单后重新认证。",
+                    )
                 else:
                     self._record_field_gate(
                         self.customer_service,
@@ -929,6 +984,7 @@ class Phase4Flow:
                 return
             completed = 0
             for direction_title in ("应收费用台账", "应付费用台账"):
+                clicked_in_this_direction = False
                 for _ in range(3):
                     section = session.page.locator(".module-business-section").filter(
                         has_text=direction_title
@@ -942,6 +998,12 @@ class Phase4Flow:
                         )
                     card_text = self._text(card, 2_000)
                     if "已完成并锁定" in card_text:
+                        if not clicked_in_this_direction:
+                            raise BusinessBlocker(
+                                f"{order.order_number} 的{direction_title}{action_label}在本轮到达前已经完成，不能作为 fresh 全流程认证数据",
+                                owner="全流程认证数据隔离维护人",
+                                remediation="废弃本轮续跑，从 Phase 1 创建全新客户和全新订单后重新认证。",
+                            )
                         completed += 1
                         break
                     button = card.get_by_role("button", name=f"{action_label}通过", exact=True)
@@ -952,6 +1014,7 @@ class Phase4Flow:
                             remediation="核对任务分配到的具体个人账号、岗位权限和页面 access.canEdit。",
                         )
                     session.click(button.first, f"{order.order_number} {direction_title} {action_label}通过")
+                    clicked_in_this_direction = True
                     session.page.wait_for_timeout(240)
                     self._assert_no_error_page(session)
                 else:
@@ -1054,6 +1117,7 @@ class Phase4Flow:
                 target_form.get_by_role("button", name="生成对账草稿", exact=True),
                 f"为 {order_number} 生成{direction}对账草稿",
             )
+            self._generated_reconciliation_orders.add(order_number)
             self.finance.page.wait_for_timeout(220)
             feedback = self._text(self.finance.page.locator(".alert"), 1_000)
             matched = RECONCILIATION_NUMBER_RE.search(feedback)
@@ -1113,12 +1177,18 @@ class Phase4Flow:
             has_text=document_number
         ).first
         if not self._is_visible(card):
-            artifact.invoice_record_number = artifact.invoice_record_number or "ALREADY_COMPLETE"
-            return
+            raise BusinessBlocker(
+                f"{document_number} 在本轮发票办理前已经离开待办理列表，不能作为 fresh 全流程认证数据",
+                owner="全流程认证数据隔离维护人",
+                remediation="废弃本轮续跑，从 Phase 1 创建全新客户和全新订单后重新认证。",
+            )
         operation = card.locator("details.billing-card-operation")
         if not self._is_visible(operation):
-            artifact.invoice_record_number = artifact.invoice_record_number or "ALREADY_COMPLETE"
-            return
+            raise BusinessBlocker(
+                f"{document_number} 没有本轮可见发票办理入口，疑似沿用了已完成数据",
+                owner="全流程认证数据隔离维护人",
+                remediation="废弃本轮续跑，从 Phase 1 创建全新客户和全新订单后重新认证。",
+            )
         if operation.get_attribute("open") is None:
             self.finance.click(operation.locator("summary"), f"展开 {document_number} 发票办理")
         form = operation.locator("form.billing-invoice-form")
@@ -1170,7 +1240,11 @@ class Phase4Flow:
             return False
         text = self._text(row, 2_000)
         if "已填" in text or "已上传待审核" in text:
-            return True
+            raise BusinessBlocker(
+                f"{order_number} 的{label}在本轮上传前已经存在，不能作为 fresh 全流程认证数据",
+                owner="全流程认证数据隔离维护人",
+                remediation="废弃本轮续跑，从 Phase 1 创建全新客户和全新订单后重新认证。",
+            )
         if "审核退回" in text:
             edit = row.get_by_role("button", name="编辑", exact=True)
             if not self._is_visible(edit):
@@ -1208,7 +1282,13 @@ class Phase4Flow:
             return False
         text = self._text(row, 2_000)
         if "已填" in text and "待审核" not in text:
-            return True
+            if label in self.artifacts.document_evidence[order_key]:
+                return True
+            raise BusinessBlocker(
+                f"{order_number} 的{label}在本轮审核前已经通过，不能作为 fresh 全流程认证数据",
+                owner="全流程认证数据隔离维护人",
+                remediation="废弃本轮续跑，从 Phase 1 创建全新客户和全新订单后重新认证。",
+            )
         review = row.get_by_role("button", name="审核", exact=True)
         if not self._is_visible(review):
             raise BusinessBlocker(
@@ -1289,6 +1369,12 @@ class Phase4Flow:
             ) as step:
                 self._create_pending_reconciliations(order_key, "receivable")
                 self._create_pending_reconciliations(order_key, "payable")
+                if order_number not in self._generated_reconciliation_orders:
+                    raise BusinessBlocker(
+                        f"{order_number} 本轮没有生成任何对账草稿，不能把既有对账单作为 fresh 认证结果",
+                        owner="全流程认证数据隔离维护人",
+                        remediation="废弃本轮续跑，从 Phase 1 创建全新客户和全新订单后重新认证。",
+                    )
                 documents = self._collect_and_confirm_reconciliations(order_key)
                 if not documents:
                     raise BusinessBlocker(
@@ -1320,8 +1406,11 @@ class Phase4Flow:
         self._filter_billing(self.cashier, document_number)
         card = self._cash_card(document_number)
         if not self._is_visible(card):
-            artifact.settled = True
-            return
+            raise BusinessBlocker(
+                f"{document_number} 在本轮流水登记前已离开核销列表，不能作为 fresh 全流程认证数据",
+                owner="全流程认证数据隔离维护人",
+                remediation="废弃本轮续跑，从 Phase 1 创建全新客户和全新订单后重新认证。",
+            )
         text = self._text(card, 4_000)
         direction = "receipt" if "客户应收" in text else "payment"
         header = self._text(card.locator("header small"), 1_000)
@@ -1335,15 +1424,21 @@ class Phase4Flow:
         counterparty, currency = parts[0], parts[1]
         operation = card.locator("details.billing-card-operation")
         if not self._is_visible(operation):
-            artifact.settled = True
-            return
+            raise BusinessBlocker(
+                f"{document_number} 在本轮流水登记前没有可见核销入口，疑似沿用了已结清数据",
+                owner="全流程认证数据隔离维护人",
+                remediation="废弃本轮续跑，从 Phase 1 创建全新客户和全新订单后重新认证。",
+            )
         if operation.get_attribute("open") is None:
             self.cashier.click(operation.locator("summary"), f"展开 {document_number} 核销")
         allocation = operation.locator("form.billing-allocation-form")
         maximum = str(allocation.locator('input[name="amount"]').get_attribute("max") or "").strip()
         if not maximum or float(maximum) <= 0:
-            artifact.settled = True
-            return
+            raise BusinessBlocker(
+                f"{document_number} 在本轮流水登记前已无待核销金额，不能作为 fresh 全流程认证数据",
+                owner="全流程认证数据隔离维护人",
+                remediation="废弃本轮续跑，从 Phase 1 创建全新客户和全新订单后重新认证。",
+            )
 
         entry = self.cashier.page.locator("details.billing-entry-disclosure")
         if entry.get_attribute("open") is None:
@@ -1389,12 +1484,18 @@ class Phase4Flow:
         self._filter_billing(self.cashier, document_number)
         card = self._cash_card(document_number)
         if not self._is_visible(card):
-            artifact.settled = True
-            return
+            raise BusinessBlocker(
+                f"{document_number} 在本轮核销前已离开待核销列表，不能作为 fresh 全流程认证数据",
+                owner="全流程认证数据隔离维护人",
+                remediation="废弃本轮续跑，从 Phase 1 创建全新客户和全新订单后重新认证。",
+            )
         operation = card.locator("details.billing-card-operation")
         if not self._is_visible(operation):
-            artifact.settled = True
-            return
+            raise BusinessBlocker(
+                f"{document_number} 在本轮核销前没有可见办理入口，疑似沿用了已结清数据",
+                owner="全流程认证数据隔离维护人",
+                remediation="废弃本轮续跑，从 Phase 1 创建全新客户和全新订单后重新认证。",
+            )
         if operation.get_attribute("open") is None:
             self.cashier.click(operation.locator("summary"), f"展开 {document_number} 流水核销")
         form = operation.locator("form.billing-allocation-form")
@@ -1524,10 +1625,11 @@ class Phase4Flow:
                 self._open_order(self.finance, order_number)
                 body = self._text(self.finance.page.locator("body"), 14_000)
                 if "订单已归档" in body or "订单已完成" in body:
-                    if order_number not in self.artifacts.archived_orders:
-                        self.artifacts.archived_orders.append(order_number)
-                    step.observe("订单此前已完成归档", gate_passed=True)
-                    continue
+                    raise BusinessBlocker(
+                        f"{order_number} 在本轮到达前已经完成归档，不能作为 fresh 全流程认证数据",
+                        owner="全流程认证数据隔离维护人",
+                        remediation="废弃本轮续跑，从 Phase 1 创建全新客户和全新订单后重新认证。",
+                    )
                 if not self._click_business_tab(self.finance, "订单复盘"):
                     raise BusinessBlocker(
                         f"{order_number} 未完成但当前节点没有订单复盘页签",
@@ -1621,6 +1723,7 @@ class Phase4Flow:
                 owner="财务审核负责人",
                 remediation="逐票核对复盘、余额和工作流完成状态。",
             )
+        self.harness.assert_certifiable()
         return self.artifacts
 
 
@@ -1722,6 +1825,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             finally:
                 reason = _redact_reason(reason, required)
                 summary_path = harness.close(status=status)  # type: ignore[arg-type]
+                if harness.last_status != status:
+                    status = str(harness.last_status)
+                    if not reason:
+                        reason = harness.finalization_error or "步骤、门禁或证据汇总未通过"
     except Exception as error:
         status = "failed"
         reason = _redact_reason(f"{type(error).__name__}: {error}", required)
