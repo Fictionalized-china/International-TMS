@@ -198,10 +198,10 @@ class _KeyboardSelectStub:
         self.options = [
             _OptionStub("", "请选择", disabled=True),
             _OptionStub("first", "第一个岗位"),
+            _OptionStub("middle", "中间岗位"),
             _OptionStub("target", "目标岗位"),
         ]
         self.current = current
-        self.highlighted = current
         self.events: list[tuple[str, str]] = []
 
     def locator(self, selector: str) -> _OptionListStub:
@@ -214,12 +214,12 @@ class _KeyboardSelectStub:
 
     def press(self, key: str, **_kwargs: object) -> None:
         self.events.append(("press", key))
-        if key == "ArrowDown":
-            self.highlighted = min(len(self.options) - 1, self.highlighted + 1)
-        elif key == "ArrowUp":
-            self.highlighted = max(1, self.highlighted - 1)
-        elif key == "Enter":
-            self.current = self.highlighted
+        direction = 1 if key == "ArrowDown" else -1 if key == "ArrowUp" else 0
+        candidate = self.current + direction
+        while 0 <= candidate < len(self.options) and self.options[candidate].disabled:
+            candidate += direction
+        if direction and 0 <= candidate < len(self.options):
+            self.current = candidate
 
     def input_value(self, **_kwargs: object) -> str:
         return self.options[self.current].value
@@ -339,7 +339,7 @@ class HarnessEvidenceTests(unittest.TestCase):
         self.assertEqual(selected, ["target"])
         self.assertEqual(
             control.events,
-            [("click", ""), ("press", "ArrowDown"), ("press", "Enter")],
+            [("press", "ArrowDown"), ("press", "ArrowDown")],
         )
         self.assertEqual(journal.actions[-1]["detail"]["keyboard_only"], True)
 
@@ -355,15 +355,34 @@ class HarnessEvidenceTests(unittest.TestCase):
                 page=_PageStub(),
                 journal=journal,
             )
-            control = _KeyboardSelectStub(current=2)
+            control = _KeyboardSelectStub(current=3)
             selected = session.select(control, "订单类型", value="first")
 
         self.assertEqual(selected, ["first"])
         self.assertEqual(
             control.events,
-            [("click", ""), ("press", "ArrowUp"), ("press", "Enter")],
+            [("press", "ArrowUp"), ("press", "ArrowUp")],
         )
         self.assertEqual(journal.actions[-1]["detail"]["keyboard_only"], True)
+
+    def test_select_verifies_an_already_selected_value_without_extra_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            journal = RunJournal("select-current", directory, scenario_name="下拉框当前值校验")
+            session = RoleBrowserSession(
+                role="operation",
+                email="select@example.test",
+                site="admin",
+                base_url="http://127.0.0.1:5189",
+                context=_ContextStub(),
+                page=_PageStub(),
+                journal=journal,
+            )
+            control = _KeyboardSelectStub(current=1)
+            selected = session.select(control, "国内运费币种", value="first")
+
+        self.assertEqual(selected, ["first"])
+        self.assertEqual(control.events, [])
+        self.assertEqual(journal.actions[-1]["detail"]["pointer_clicks"], 0)
 
     def test_hidden_assertion_waits_for_async_ui_close(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

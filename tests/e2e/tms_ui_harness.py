@@ -816,27 +816,45 @@ class RoleBrowserSession:
             raise AssertionError(f"{target} 找不到目标选项")
 
         def operation() -> list[str]:
-            # Use the same pointer and keyboard events as a human operator.
-            # Reading option metadata is allowed; changing the value through
-            # select_option/DOM mutation is deliberately forbidden.
+            # Keep the native select closed and move it with visible keyboard
+            # events. An opened native popup is delegated to the operating
+            # system, where locator.press() can miss repeated navigation keys.
+            # Reading option metadata/value is allowed; direct DOM mutation and
+            # Playwright's direct option-selection shortcuts remain forbidden.
             current_value = str(locator.input_value(timeout=self.action_timeout_ms))
             try:
                 current_index = option_values.index(current_value)
             except ValueError as error:
                 raise AssertionError(f"{target} 当前选项不在可见选项列表中") from error
-            locator.click(timeout=self.action_timeout_ms)
-            # Chromium delegates an opened native select to the operating
-            # system. Home is not reliable there, so move from the currently
-            # selected option in the shortest direction and commit with Enter.
+
             if current_index < target_index:
-                steps = sum(option_enabled[current_index + 1 : target_index + 1])
-                for _ in range(steps):
-                    locator.press("ArrowDown", timeout=self.action_timeout_ms)
+                key = "ArrowDown"
+                expected_indices = [
+                    option_index
+                    for option_index in range(current_index + 1, target_index + 1)
+                    if option_enabled[option_index]
+                ]
             elif current_index > target_index:
-                steps = sum(option_enabled[target_index:current_index])
-                for _ in range(steps):
-                    locator.press("ArrowUp", timeout=self.action_timeout_ms)
-            locator.press("Enter", timeout=self.action_timeout_ms)
+                key = "ArrowUp"
+                expected_indices = [
+                    option_index
+                    for option_index in range(current_index - 1, target_index - 1, -1)
+                    if option_enabled[option_index]
+                ]
+            else:
+                key = ""
+                expected_indices = []
+
+            for step_number, expected_index in enumerate(expected_indices, start=1):
+                locator.press(key, timeout=self.action_timeout_ms)
+                actual_step_value = str(
+                    locator.input_value(timeout=self.action_timeout_ms)
+                )
+                if actual_step_value != option_values[expected_index]:
+                    raise AssertionError(
+                        f"{target} 第 {step_number} 次 {key} 后未到达预期选项："
+                        f"期望 {option_values[expected_index]!r}，实际 {actual_step_value!r}"
+                    )
             actual = str(locator.input_value(timeout=self.action_timeout_ms))
             if actual != target_value:
                 raise AssertionError(
@@ -848,7 +866,7 @@ class RoleBrowserSession:
             "value": target_value,
             "label": target_label,
             "index": target_index,
-            "pointer_clicks": 1,
+            "pointer_clicks": 0,
             "keyboard_only": True,
         }
         return self._perform(
