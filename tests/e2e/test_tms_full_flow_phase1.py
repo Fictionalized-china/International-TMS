@@ -62,6 +62,10 @@ class Phase1IdentityTests(unittest.TestCase):
             [item.business_type for item in phase1_records(first)],
             ["ftl", "ltl", "ltl", "ltl"],
         )
+        self.assertEqual(
+            [item.expected_pieces for item in phase1_records(first)],
+            [2, 3, 4, 5],
+        )
         self.assertEqual(len({item.cargo_marker for item in phase1_records(first)}), 4)
 
     def test_stage_order_stops_at_ordinary_order_assignment(self) -> None:

@@ -21,9 +21,11 @@ from tms_full_flow_phase2 import (
     Phase1Handoff,
     Phase2Artifacts,
     _public_preflight,
+    acceptance_rejection_message,
     augment_summary,
     build_handoff_payload,
     build_parser,
+    certify_oul_label_counts,
     load_phase1_handoff,
 )
 from tms_ui_credentials import CredentialRecord, CredentialVault
@@ -36,6 +38,7 @@ ORDERS = {
     "ltl2": "SO2026090501003",
     "ltl3": "SO2026090501004",
 }
+EXPECTED_PIECES = {"ftl": 2, "ltl1": 3, "ltl2": 4, "ltl3": 5}
 
 
 def certified_phase1_payload(
@@ -57,6 +60,9 @@ def certified_phase1_payload(
         "certification_constraints": {"failure_requires_fresh_entities": True},
         "entities": {
             "order": orders or ORDERS,
+            "expected_pieces": {
+                key: str(value) for key, value in EXPECTED_PIECES.items()
+            },
             "customer": {"primary": "UI全流程验收客户"},
         },
     }
@@ -95,6 +101,7 @@ class Phase1HandoffTests(unittest.TestCase):
         self.assertEqual(result.source_entity_prefix, "UIE2E-20260905-A001-ABCDEF01")
         self.assertEqual(result.customer_name, "UI全流程验收客户")
         self.assertEqual(result.orders, ORDERS)
+        self.assertEqual(result.expected_pieces, EXPECTED_PIECES)
         self.assertTrue(result.fresh_attempt_verified)
 
     def test_reads_phase1_cli_envelope(self) -> None:
@@ -155,6 +162,37 @@ class Phase1HandoffTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "fresh attempt"):
                 load_phase1_handoff(path)
 
+    def test_rejects_old_summary_without_expected_pieces(self) -> None:
+        payload = certified_phase1_payload()
+        payload["entities"].pop("expected_pieces")  # type: ignore[union-attr]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "summary.json"
+            write_json(path, payload)
+            with self.assertRaisesRegex(ValueError, "entities.expected_pieces"):
+                load_phase1_handoff(path)
+
+    def test_rejects_missing_or_invalid_expected_piece_values(self) -> None:
+        invalid_values = {
+            "missing": None,
+            "zero": 0,
+            "boolean": True,
+            "float": 2.0,
+            "fraction": "2.5",
+        }
+        for label, invalid in invalid_values.items():
+            with self.subTest(label=label):
+                payload = certified_phase1_payload()
+                expected = payload["entities"]["expected_pieces"]  # type: ignore[index]
+                if label == "missing":
+                    expected.pop("ftl")
+                else:
+                    expected["ftl"] = invalid
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "summary.json"
+                    write_json(path, payload)
+                    with self.assertRaisesRegex(ValueError, "ftl.*正整数"):
+                        load_phase1_handoff(path)
+
 
 class Phase2HandoffTests(unittest.TestCase):
     def test_handoff_has_stable_phase3_contract(self) -> None:
@@ -163,6 +201,7 @@ class Phase2HandoffTests(unittest.TestCase):
             orders=dict(ORDERS),
             customer_name="客户甲",
             source_entity_prefix="UIE2E-20260905-A001-ABCDEF01",
+            expected_pieces=dict(EXPECTED_PIECES),
             fresh_attempt_verified=True,
         )
         artifacts = Phase2Artifacts(
@@ -190,6 +229,7 @@ class Phase2HandoffTests(unittest.TestCase):
             [ORDERS[key] for key in LTL_KEYS],
         )
         self.assertEqual(payload["orders"]["ftl"]["business_type"], "ftl")
+        self.assertEqual(payload["orders"]["ftl"]["expected_pieces"], 2)
         self.assertEqual(payload["orders"]["ltl2"]["cargo_codes"], ["OUL-LTL-2"])
         self.assertEqual(
             payload["dispatches"]["ltl_batch"]["dispatch_number"],
@@ -203,7 +243,11 @@ class Phase2HandoffTests(unittest.TestCase):
         self.assertFalse(payload["certification_lineage"]["recovery_branches_used"])
 
     def test_incomplete_handoff_never_claims_phase3_ready(self) -> None:
-        phase1 = Phase1Handoff("phase1-a001", dict(ORDERS))
+        phase1 = Phase1Handoff(
+            "phase1-a001",
+            dict(ORDERS),
+            expected_pieces=dict(EXPECTED_PIECES),
+        )
         payload = build_handoff_payload(
             phase1,
             Phase2Artifacts(),
@@ -243,7 +287,12 @@ class Phase2SafetyTests(unittest.TestCase):
 
     def test_preflight_has_no_business_writes_or_credentials(self) -> None:
         vault = credential_vault()
-        phase1 = Phase1Handoff("phase1-a001", dict(ORDERS), "客户甲")
+        phase1 = Phase1Handoff(
+            "phase1-a001",
+            dict(ORDERS),
+            "客户甲",
+            expected_pieces=dict(EXPECTED_PIECES),
+        )
         with tempfile.TemporaryDirectory() as directory:
             fixture = Path(directory) / "fixture.pdf"
             fixture.write_bytes(b"%PDF-1.1\n%%EOF\n")
@@ -259,6 +308,7 @@ class Phase2SafetyTests(unittest.TestCase):
         self.assertNotIn("@secret.test", rendered)
         self.assertNotIn("Secret-", rendered)
         self.assertEqual(payload["orders"], ORDERS)
+        self.assertEqual(payload["expected_pieces"], EXPECTED_PIECES)
         self.assertEqual(payload["derived_runtime_roles"], ["operation_2", "document_2"])
         self.assertEqual(payload["stage_order"], list(PHASE2_STAGE_ORDER))
 
@@ -293,6 +343,46 @@ class Phase2SafetyTests(unittest.TestCase):
             'self.credentials.get("operation_2", self.credentials["operation"])',
             source,
         )
+
+    def test_acceptance_rejection_is_reported_as_business_blocker_detail(self) -> None:
+        self.assertEqual(
+            acceptance_rejection_message(
+                "SO2026090501001",
+                "累计实收与预录差异较大\n请选择异常入库",
+            ),
+            "SO2026090501001 验收入库被系统拒绝：累计实收与预录差异较大 请选择异常入库",
+        )
+        self.assertEqual(
+            acceptance_rejection_message("SO2026090501001", "  "),
+            "SO2026090501001 验收入库被系统拒绝：页面没有返回可读的错误详情",
+        )
+
+    def test_exact_label_and_unique_oul_counts_are_certified(self) -> None:
+        self.assertEqual(
+            certify_oul_label_counts(
+                "SO2026090501001",
+                expected_pieces=2,
+                rendered_label_count=2,
+                rendered_codes=["oul-a-1", "OUL-A-1", "OUL-B-2", "OUL-B-2"],
+            ),
+            ["OUL-A-1", "OUL-B-2"],
+        )
+
+    def test_missing_extra_or_duplicate_oul_labels_are_rejected(self) -> None:
+        cases = (
+            (1, ["OUL-A-1", "OUL-B-2"], "页面 1 张，唯一 OUL 2 个"),
+            (3, ["OUL-A-1", "OUL-B-2"], "页面 3 张，唯一 OUL 2 个"),
+            (2, ["OUL-A-1", "OUL-A-1"], "页面 2 张，唯一 OUL 1 个"),
+        )
+        for label_count, codes, expected_detail in cases:
+            with self.subTest(label_count=label_count, codes=codes):
+                with self.assertRaisesRegex(ValueError, expected_detail):
+                    certify_oul_label_counts(
+                        "SO2026090501001",
+                        expected_pieces=2,
+                        rendered_label_count=label_count,
+                        rendered_codes=codes,
+                    )
 
 
 if __name__ == "__main__":

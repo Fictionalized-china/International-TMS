@@ -131,6 +131,7 @@ class Phase1Order:
     key: str
     business_type: str
     cargo_marker: str
+    expected_pieces: int
     quote_number: str = ""
     order_number: str = ""
 
@@ -154,10 +155,10 @@ def build_fresh_identity(attempt: AttemptIdentity) -> FreshBusinessIdentity:
 def phase1_records(attempt: AttemptIdentity) -> list[Phase1Order]:
     prefix = attempt.entity_prefix
     return [
-        Phase1Order("ftl", "ftl", f"{prefix}-FTL-货物"),
-        Phase1Order("ltl1", "ltl", f"{prefix}-LTL-01-货物"),
-        Phase1Order("ltl2", "ltl", f"{prefix}-LTL-02-货物"),
-        Phase1Order("ltl3", "ltl", f"{prefix}-LTL-03-货物"),
+        Phase1Order("ftl", "ftl", f"{prefix}-FTL-货物", 2),
+        Phase1Order("ltl1", "ltl", f"{prefix}-LTL-01-货物", 3),
+        Phase1Order("ltl2", "ltl", f"{prefix}-LTL-02-货物", 4),
+        Phase1Order("ltl3", "ltl", f"{prefix}-LTL-03-货物", 5),
     ]
 
 
@@ -800,7 +801,11 @@ class Phase1Flow:
             stage="询价报价",
             priority="P0",
             preconditions=("全新客户与门户账号已创建", "对应类型存在已发布工作流"),
-            inputs={"business_type": record.business_type, "cargo_marker": record.cargo_marker},
+            inputs={
+                "business_type": record.business_type,
+                "cargo_marker": record.cargo_marker,
+                "expected_pieces": record.expected_pieces,
+            },
             expected_result="报价保存为待客户确认，并在页面返回唯一报价号。",
             gate=gate,
         ) as observation:
@@ -868,7 +873,7 @@ class Phase1Flow:
                 "destinationWarehouseNote": f"{self.attempt.run_id} 第 {sequence} 票",
                 "cargoDescription": record.cargo_marker,
                 "notes": f"{record.key} 纯 UI 全流程验收",
-                "pieces": str(sequence + 1),
+                "pieces": str(record.expected_pieces),
                 "weight": str(100 + sequence * 10),
                 "length": "120",
                 "width": "80",
@@ -926,6 +931,9 @@ class Phase1Flow:
                 )
             record.quote_number = match.group(0)
             self.harness.journal.register_entity("quotation", record.key, record.quote_number)
+            self.harness.journal.register_entity(
+                "expected_pieces", record.key, str(record.expected_pieces)
+            )
             observation.add_note(f"工作流：{workflow_label}")
             observation.observe(
                 f"报价 {record.quote_number} 已进入待客户确认", gate_passed=True
@@ -1685,6 +1693,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "customer": identity.customer_name,
                     "quotes": {item.key: item.quote_number for item in records},
                     "orders": {item.key: item.order_number for item in records},
+                    "expected_pieces": {
+                        item.key: item.expected_pieces for item in records
+                    },
                 },
             },
             ensure_ascii=False,

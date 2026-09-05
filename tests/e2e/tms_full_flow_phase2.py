@@ -88,6 +88,37 @@ ERROR_PAGE_RE = re.compile(
 )
 
 
+def acceptance_rejection_message(order_number: str, raw_error: str) -> str:
+    """Return one stable, human-readable diagnosis for a rejected receipt."""
+
+    detail = " ".join(raw_error.split()) or "页面没有返回可读的错误详情"
+    return f"{order_number} 验收入库被系统拒绝：{detail}"
+
+
+def certify_oul_label_counts(
+    order_number: str,
+    *,
+    expected_pieces: int,
+    rendered_label_count: int,
+    rendered_codes: Sequence[str],
+) -> list[str]:
+    """Require one rendered label and one unique OUL for every expected piece."""
+
+    if isinstance(expected_pieces, bool) or expected_pieces < 1:
+        raise ValueError(f"{order_number} 的预计件数必须是正整数")
+    codes = list(
+        dict.fromkeys(
+            str(code).strip().upper() for code in rendered_codes if str(code).strip()
+        )
+    )
+    if rendered_label_count != expected_pieces or len(codes) != expected_pieces:
+        raise ValueError(
+            f"{order_number} 验收入库标签数量不一致：预计 {expected_pieces} 件/标签，"
+            f"页面 {rendered_label_count} 张，唯一 OUL {len(codes)} 个"
+        )
+    return codes
+
+
 class BusinessBlocker(RuntimeError):
     """A real UI, workflow or permission gate that prevents phase two."""
 
@@ -103,6 +134,7 @@ class Phase1Handoff:
     orders: dict[str, str]
     customer_name: str = ""
     source_entity_prefix: str = ""
+    expected_pieces: dict[str, int] = field(default_factory=dict)
     original_assignees: dict[str, dict[str, str]] = field(default_factory=dict)
     fresh_attempt_verified: bool = False
 
@@ -123,6 +155,18 @@ def _mapping(value: object, label: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{label} 必须是 JSON 对象")
     return value
+
+
+def _required_expected_pieces(value: object) -> dict[str, int]:
+    payload = _mapping(value, "entities.expected_pieces")
+    result: dict[str, int] = {}
+    for key in ORDER_KEYS:
+        raw = payload.get(key)
+        rendered = str(raw).strip()
+        if isinstance(raw, bool) or not re.fullmatch(r"[1-9]\d*", rendered):
+            raise ValueError(f"第一阶段预计件数 {key} 缺失或不是正整数")
+        result[key] = int(rendered)
+    return result
 
 
 def load_phase1_handoff(path: Path | str) -> Phase1Handoff:
@@ -158,6 +202,7 @@ def load_phase1_handoff(path: Path | str) -> Phase1Handoff:
         orders[key] = value
     if len(set(orders.values())) != len(ORDER_KEYS):
         raise ValueError("第一阶段的四个订单号必须互不相同")
+    expected_pieces = _required_expected_pieces(entities.get("expected_pieces"))
 
     raw_customer = entities.get("customer", "")
     if isinstance(raw_customer, Mapping):
@@ -182,12 +227,13 @@ def load_phase1_handoff(path: Path | str) -> Phase1Handoff:
             if str(value).strip()
         }
     return Phase1Handoff(
-        source_run_id,
-        orders,
-        customer_name,
-        source_entity_prefix,
-        original_assignees,
-        True,
+        source_run_id=source_run_id,
+        orders=orders,
+        customer_name=customer_name,
+        source_entity_prefix=source_entity_prefix,
+        expected_pieces=expected_pieces,
+        original_assignees=original_assignees,
+        fresh_attempt_verified=True,
     )
 
 
@@ -201,11 +247,13 @@ def build_handoff_payload(
 
     if ready_for_phase3 and not phase1.fresh_attempt_verified:
         raise ValueError("正式 Phase 2 交接必须来自通过核验的 Phase 1 fresh attempt")
+    expected_pieces = _required_expected_pieces(phase1.expected_pieces)
 
     orders = {
         key: {
             "order_number": phase1.orders[key],
             "business_type": "ftl" if key == "ftl" else "ltl",
+            "expected_pieces": expected_pieces[key],
             "cargo_codes": list(artifacts.cargo_codes.get(key, ())),
         }
         for key in ORDER_KEYS
@@ -267,6 +315,7 @@ def _public_preflight(
     fixture_file: Path | str,
 ) -> dict[str, Any]:
     selected = vault.select(REQUIRED_ACCOUNT_ALIASES)
+    expected_pieces = _required_expected_pieces(phase1.expected_pieces)
     fixture = Path(fixture_file).resolve()
     if not fixture.is_file():
         raise FileNotFoundError(f"原生文件选择器测试附件不存在：{fixture}")
@@ -276,6 +325,7 @@ def _public_preflight(
         "base_url": base_url.rstrip("/"),
         "source_phase1_run_id": phase1.source_run_id,
         "orders": dict(phase1.orders),
+        "expected_pieces": expected_pieces,
         "required_roles": [item.public_summary() for item in selected],
         "derived_runtime_roles": ["operation_2", "document_2"],
         "stage_order": list(PHASE2_STAGE_ORDER),
@@ -747,14 +797,21 @@ class Phase2Flow:
         self._click_navigation(self.domestic_warehouse, "验收收货")
         for sequence, key in enumerate(ORDER_KEYS, start=1):
             order_number = self.phase1.orders[key]
+            expected_pieces = self.phase1.expected_pieces[key]
             with self.domestic_warehouse.step(
                 f"国内仓扫码验收 {order_number} 并确认货齐",
                 case_id=f"P2-RECEIVE-{sequence:02d}",
                 stage="国内仓入库",
                 priority="P0",
                 preconditions=("操作岗已经保存国内入仓终点", "当前仓库存在可用库位"),
-                inputs={"order_number": order_number},
-                expected_result="扫描订单后按工作流显示验收字段，入库成功并生成至少一个 OUL 货物码",
+                inputs={
+                    "order_number": order_number,
+                    "expected_pieces": expected_pieces,
+                },
+                expected_result=(
+                    "扫描订单后按工作流显示验收字段，入库成功并精确生成 "
+                    f"{expected_pieces} 张标签及 {expected_pieces} 个唯一 OUL"
+                ),
                 gate=_workflow_gate(
                     f"{order_number} 国内仓验收与货齐门禁",
                     ui="工作流隐藏字段不出现，可见必填字段必须完成后才允许确认验收入库。",
@@ -807,26 +864,54 @@ class Phase2Flow:
                     form.get_by_role("button", name="确认验收、入库并生成标签"),
                     f"确认 {order_number} 验收入库",
                 )
-                labels = self.domestic_warehouse.page.locator(".acceptance-label-section")
+                labels = self.domestic_warehouse.page.locator(
+                    ".acceptance-label-section:visible"
+                )
+                acceptance_error = self.domestic_warehouse.page.locator(
+                    '[data-acceptance-feedback="error"][role="alert"]:visible'
+                )
                 self._expect_visible_or_block(
                     self.domestic_warehouse,
-                    labels,
-                    f"{order_number} 本次货物标签",
+                    labels.or_(acceptance_error),
+                    f"{order_number} 验收入库响应（标签或错误提示）",
                     owner="仓库验收入库维护人",
                     remediation="检查验收原子写入、货齐判定和 OUL 标签生成。",
                 )
-                label_text = self._locator_text(labels, 20_000)
-                codes = list(dict.fromkeys(code.upper() for code in OUL_NUMBER_RE.findall(label_text)))
-                if not codes:
+                if self._is_visible(acceptance_error):
+                    error_text = self._locator_text(acceptance_error.first, 1_200)
                     raise BusinessBlocker(
-                        f"{order_number} 验收成功页没有生成 OUL 货物码",
-                        owner="仓库标签生成维护人",
-                        remediation="保证每个实际包装生成可扫码 OUL 标签并在当前页展示。",
+                        acceptance_rejection_message(order_number, error_text),
+                        owner="仓库验收入库维护人",
+                        remediation=(
+                            "按页面提示修正预录/实收数据或工作流配置；"
+                            "不得把业务门禁误判为标签生成超时。"
+                        ),
                     )
+                label_text = self._locator_text(labels, 20_000)
+                rendered_label_count = labels.locator(
+                    ".warehouse-package-label"
+                ).count()
+                try:
+                    codes = certify_oul_label_counts(
+                        order_number,
+                        expected_pieces=expected_pieces,
+                        rendered_label_count=rendered_label_count,
+                        rendered_codes=OUL_NUMBER_RE.findall(label_text),
+                    )
+                except ValueError as error:
+                    raise BusinessBlocker(
+                        str(error),
+                        owner="仓库标签生成维护人",
+                        remediation=(
+                            "核对报价转订单的逐件包装拆分、验收实收包装数和 OUL 唯一性；"
+                            "修复后必须用全新同类型订单重新认证。"
+                        ),
+                    ) from error
                 self.artifacts.cargo_codes[key] = codes
                 self.harness.journal.register_entity("cargo_codes", key, ",".join(codes))
                 observation.observe(
-                    f"验收入库完成并生成 {len(codes)} 个 OUL 货物码",
+                    f"验收入库完成，{expected_pieces} 件货物精确生成 "
+                    f"{rendered_label_count} 张标签和 {len(codes)} 个唯一 OUL",
                     gate_passed=True,
                 )
 
