@@ -194,7 +194,9 @@ class _OptionListStub:
 
 
 class _KeyboardSelectStub:
-    def __init__(self, current: int = 1) -> None:
+    def __init__(
+        self, current: int = 1, *, disabled: bool = False, allow_change: bool = True
+    ) -> None:
         self.options = [
             _OptionStub("", "请选择", disabled=True),
             _OptionStub("first", "第一个岗位"),
@@ -202,7 +204,12 @@ class _KeyboardSelectStub:
             _OptionStub("target", "目标岗位"),
         ]
         self.current = current
+        self.disabled = disabled
+        self.allow_change = allow_change
         self.events: list[tuple[str, str]] = []
+
+    def is_disabled(self, **_kwargs: object) -> bool:
+        return self.disabled
 
     def locator(self, selector: str) -> _OptionListStub:
         if selector != "option":
@@ -214,6 +221,8 @@ class _KeyboardSelectStub:
 
     def press(self, key: str, **_kwargs: object) -> None:
         self.events.append(("press", key))
+        if not self.allow_change:
+            return
         direction = 1 if key == "ArrowDown" else -1 if key == "ArrowUp" else 0
         candidate = self.current + direction
         while 0 <= candidate < len(self.options) and self.options[candidate].disabled:
@@ -365,9 +374,80 @@ class HarnessEvidenceTests(unittest.TestCase):
         )
         self.assertEqual(journal.actions[-1]["detail"]["keyboard_only"], True)
 
+    def test_select_skips_a_disabled_option_in_one_keyboard_step(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            journal = RunJournal(
+                "select-disabled-option",
+                directory,
+                scenario_name="键盘越过禁用选项",
+            )
+            session = RoleBrowserSession(
+                role="operation",
+                email="select@example.test",
+                site="admin",
+                base_url="http://127.0.0.1:5189",
+                context=_ContextStub(),
+                page=_PageStub(),
+                journal=journal,
+            )
+            control = _KeyboardSelectStub(current=1)
+            control.options[2].disabled = True
+            selected = session.select(control, "目标仓", value="target")
+
+        self.assertEqual(selected, ["target"])
+        self.assertEqual(control.events, [("press", "ArrowDown")])
+
+    def test_select_fails_on_the_first_keyboard_step_that_does_not_advance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            journal = RunJournal(
+                "select-stuck",
+                directory,
+                scenario_name="下拉框按键反馈失败",
+            )
+            session = RoleBrowserSession(
+                role="operation",
+                email="select@example.test",
+                site="admin",
+                base_url="http://127.0.0.1:5189",
+                context=_ContextStub(),
+                page=_PageStub(),
+                journal=journal,
+            )
+            control = _KeyboardSelectStub(current=1, allow_change=False)
+            with self.assertRaisesRegex(AssertionError, "第 1 次 ArrowDown"):
+                session.select(control, "国内运费币种", value="target")
+
+        self.assertEqual(control.events, [("press", "ArrowDown")])
+        self.assertEqual(journal.actions[-1]["status"], "failed")
+
+    def test_select_rejects_a_disabled_control_even_when_value_already_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            journal = RunJournal(
+                "select-disabled-control",
+                directory,
+                scenario_name="禁用下拉框门禁",
+            )
+            session = RoleBrowserSession(
+                role="operation",
+                email="select@example.test",
+                site="admin",
+                base_url="http://127.0.0.1:5189",
+                context=_ContextStub(),
+                page=_PageStub(),
+                journal=journal,
+            )
+            control = _KeyboardSelectStub(current=1, disabled=True)
+            with self.assertRaisesRegex(AssertionError, "当前不可操作"):
+                session.select(control, "国内运费币种", value="first")
+
+        self.assertEqual(control.events, [])
+        self.assertEqual(journal.actions[-1]["status"], "failed")
+
     def test_select_verifies_an_already_selected_value_without_extra_input(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            journal = RunJournal("select-current", directory, scenario_name="下拉框当前值校验")
+            journal = RunJournal(
+                "select-current", directory, scenario_name="下拉框当前值校验"
+            )
             session = RoleBrowserSession(
                 role="operation",
                 email="select@example.test",

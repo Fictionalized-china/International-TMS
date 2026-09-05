@@ -821,6 +821,8 @@ class RoleBrowserSession:
             # system, where locator.press() can miss repeated navigation keys.
             # Reading option metadata/value is allowed; direct DOM mutation and
             # Playwright's direct option-selection shortcuts remain forbidden.
+            if bool(locator.is_disabled(timeout=self.action_timeout_ms)):
+                raise AssertionError(f"{target} 当前不可操作")
             current_value = str(locator.input_value(timeout=self.action_timeout_ms))
             try:
                 current_index = option_values.index(current_value)
