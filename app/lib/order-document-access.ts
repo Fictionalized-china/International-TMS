@@ -1,3 +1,8 @@
+import {
+  workflowInstanceCapabilityStageAccess,
+  type LockedWorkflowStageContext,
+} from "./workflow-instance-stage-gate";
+
 export type OrderDocumentAccessUser = {
   userId?: string | null;
   positionCode?: string | null;
@@ -14,13 +19,71 @@ const settlementDocumentOpenSteps = new Set([
   "completion_review",
 ]);
 
-export function isSettlementDocumentStageOpen(
-  currentStepKey: string | null | undefined,
-  orderStatus: string,
+export type SettlementDocumentStageInput = {
+  orderStatus: string;
+  fieldKey: string;
+  workflow: LockedWorkflowStageContext;
+};
+
+export function settlementDocumentStageAccess(
+  input: SettlementDocumentStageInput,
 ) {
+  const access = workflowInstanceCapabilityStageAccess({
+    context: input.workflow,
+    moduleCode: "costs",
+    fieldKeys: [input.fieldKey],
+  });
+  if (access.configured && !access.visible) {
+    return {
+      allowed: false,
+      visible: false,
+      targetStepKey: null,
+      targetStepName: null,
+      reason: access.reason,
+    };
+  }
+  if (["completed", "cancelled"].includes(input.orderStatus)) {
+    return {
+      allowed: false,
+      visible: true,
+      targetStepKey: null,
+      targetStepName: null,
+      reason: "订单已完成或取消，结算单据仅供查看",
+    };
+  }
+  if (access.configured) {
+    return {
+      allowed: access.available,
+      visible: access.visible,
+      targetStepKey: access.targetStepKey,
+      targetStepName: access.targetStepName,
+      reason: access.reason,
+    };
+  }
+  const allowed = settlementDocumentOpenSteps.has(
+    input.workflow.currentStepKey ?? "",
+  );
+  return {
+    allowed,
+    visible: true,
+    targetStepKey: null,
+    targetStepName: null,
+    reason: allowed
+      ? null
+      : "进入当前工作流的结算单据节点后自动开放",
+  };
+}
+
+export function isSettlementDocumentStageOpen(
+  currentStepKeyOrInput: string | null | undefined | SettlementDocumentStageInput,
+  orderStatus?: string,
+) {
+  if (typeof currentStepKeyOrInput === "object" && currentStepKeyOrInput) {
+    return settlementDocumentStageAccess(currentStepKeyOrInput).allowed;
+  }
   return (
-    settlementDocumentOpenSteps.has(currentStepKey ?? "") &&
-    !["completed", "cancelled"].includes(orderStatus)
+    settlementDocumentOpenSteps.has(currentStepKeyOrInput ?? "") &&
+    !["completed", "cancelled"].includes(orderStatus ?? "")
   );
 }
 

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { refreshOrdersForWorkflowFieldChanges } from "./workflow-field-order-refresh";
 
 describe("workflow field order refresh", () => {
-  it("does not query or refresh orders for fields outside costs reconciliation", async () => {
+  it("does not query or refresh orders for fields outside the costs module", async () => {
     const listAffectedOrderIds = vi.fn(async () => ["order-1"]);
     const syncCostsModuleStatus = vi.fn(async () => undefined);
     const syncOrderWorkflowSnapshot = vi.fn(async () => undefined);
@@ -10,7 +10,6 @@ describe("workflow field order refresh", () => {
     const result = await refreshOrdersForWorkflowFieldChanges({
       changes: [
         { moduleCode: "tracking", stepKey: "outbound_transport" },
-        { moduleCode: "costs", stepKey: "order_creation" },
       ],
       listAffectedOrderIds,
       syncCostsModuleStatus,
@@ -21,6 +20,28 @@ describe("workflow field order refresh", () => {
     expect(listAffectedOrderIds).not.toHaveBeenCalled();
     expect(syncCostsModuleStatus).not.toHaveBeenCalled();
     expect(syncOrderWorkflowSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("refreshes a costs gate placed on a custom workflow step", async () => {
+    const listAffectedOrderIds = vi.fn(async () => ["order-1"]);
+    const syncCostsModuleStatus = vi.fn(async () => undefined);
+    const syncOrderWorkflowSnapshot = vi.fn(async () => undefined);
+
+    const result = await refreshOrdersForWorkflowFieldChanges({
+      changes: [
+        { moduleCode: "costs", stepKey: "customer_defined_settlement" },
+      ],
+      listAffectedOrderIds,
+      syncCostsModuleStatus,
+      syncOrderWorkflowSnapshot,
+    });
+
+    expect(listAffectedOrderIds).toHaveBeenCalledWith([
+      "customer_defined_settlement",
+    ]);
+    expect(syncCostsModuleStatus).toHaveBeenCalledWith("order-1");
+    expect(syncOrderWorkflowSnapshot).toHaveBeenCalledWith("order-1");
+    expect(result).toEqual({ matchedOrders: 1, refreshedOrders: 1 });
   });
 
   it("deduplicates affected orders and refreshes costs before each workflow snapshot", async () => {

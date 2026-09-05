@@ -59,10 +59,23 @@ import {
 import { isActiveExceptionStatus } from "../lib/batch-exception-policy";
 import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 import {
+  BATCH_RESPONSIBILITY_POSITION_CODES,
+  batchInitialResponsibilityDisabledReasons,
   batchRequiresSupervisorApproval,
   batchSharedResponsibilityIsActive,
+  buildConfiguredBatchResponsibilityTargets,
   canOrdinaryReassignBatchResponsibility,
+  buildBatchInitialResponsibilityRestrictions,
+  findBatchInitialResponsibilityConflict,
+  type BatchResponsibilityTransferTarget,
 } from "../lib/batch-responsibility";
+import {
+  batchInitialResponsibilityAssignmentGuard,
+  loadBatchInitialResponsibilityRestrictions,
+} from "../lib/batch-responsibility.server";
+import {
+  loadOrderAssignmentManifest,
+} from "../lib/order-assignment-manifest.server";
 import {
   batchWorkflowFieldPolicy,
   batchWorkflowModulePolicy,
@@ -110,6 +123,49 @@ async function syncCostModuleStatusSafe(organizationId: string, orderId: string,
   await modules.syncCostsModuleStatus(organizationId, orderId, now);
 }
 
+async function loadBatchResponsibilityTransferTargets(input: {
+  organizationId: string;
+  orderIds: readonly string[];
+  operationAssigneeUserId: string;
+  documentAssigneeUserId: string;
+}) {
+  const targets: BatchResponsibilityTransferTarget[] = [];
+  // D1 queries are kept sequential. A PZ can mount many orders, and issuing
+  // every snapshot read concurrently can exhaust a production Worker's D1
+  // connection budget.
+  for (const orderId of input.orderIds) {
+    const manifest = await loadOrderAssignmentManifest(input.organizationId, orderId);
+    targets.push(...buildConfiguredBatchResponsibilityTargets({
+      orderId,
+      manifest,
+      operationAssigneeUserId: input.operationAssigneeUserId,
+      documentAssigneeUserId: input.documentAssigneeUserId,
+    }));
+  }
+  for (const [kind, positionCode] of Object.entries(BATCH_RESPONSIBILITY_POSITION_CODES)) {
+    if (!targets.some((target) => target.positionCode === positionCode)) {
+      throw new Error(
+        `挂载订单冻结工作流中没有未完成的${kind === "operation" ? "操作" : "单证"}职责（${positionCode}）`,
+      );
+    }
+  }
+  return targets;
+}
+
+function responsibilityRevisionGuard() {
+  return `EXISTS(
+    SELECT 1 FROM transport_batches responsibility_guard
+    WHERE responsibility_guard.id=? AND responsibility_guard.organization_id=?
+      AND responsibility_guard.responsibility_revision=?
+      AND responsibility_guard.operation_assignee_user_id=?
+      AND responsibility_guard.document_assignee_user_id=?
+  )`;
+}
+
+function uniqueTargetModuleCodes(targets: readonly BatchResponsibilityTransferTarget[]) {
+  return [...new Set(targets.flatMap((target) => target.moduleCodes))];
+}
+
 async function assignBatchResponsibilities(input:{
   organizationId:string;
   batchId:string;
@@ -122,14 +178,22 @@ async function assignBatchResponsibilities(input:{
   previousOperationAssigneeUserId?:string|null;
   previousDocumentAssigneeUserId?:string|null;
   allowAfterDeparture?:boolean;
+  targets:readonly BatchResponsibilityTransferTarget[];
 }) {
   const revision=crypto.randomUUID();
+  const initialResponsibilityGuard=input.mode==="approve"
+    ? batchInitialResponsibilityAssignmentGuard({
+        operationAssigneeUserId:input.operationAssigneeUserId,
+        documentAssigneeUserId:input.documentAssigneeUserId,
+      })
+    : null;
   const assignmentUpdate=input.mode==="approve"
     ? env.DB.prepare(`UPDATE transport_batches
         SET approval_status='approved',operation_assignee_user_id=?,document_assignee_user_id=?,
             approved_by_user_id=?,approved_at=?,approval_notes=NULL,responsibility_revision=?,updated_at=?
-        WHERE id=? AND organization_id=? AND batch_number LIKE 'PZ-%' AND approval_status='submitted'`)
-      .bind(input.operationAssigneeUserId,input.documentAssigneeUserId,input.actorUserId,input.now,revision,input.now,input.batchId,input.organizationId)
+        WHERE id=? AND organization_id=? AND batch_number LIKE 'PZ-%' AND approval_status='submitted'
+          AND ${initialResponsibilityGuard!.sql}`)
+      .bind(input.operationAssigneeUserId,input.documentAssigneeUserId,input.actorUserId,input.now,revision,input.now,input.batchId,input.organizationId,...initialResponsibilityGuard!.values)
     : env.DB.prepare(`UPDATE transport_batches
         SET operation_assignee_user_id=?,document_assignee_user_id=?,responsibility_revision=?,updated_at=?
         WHERE id=? AND organization_id=? AND batch_number LIKE 'PZ-%' AND approval_status='approved'
@@ -139,64 +203,90 @@ async function assignBatchResponsibilities(input:{
             AND road_status NOT IN ('outbound_in_transit','overseas_arrived','waiting_pickup','pickup_completed')
           ))`)
       .bind(input.operationAssigneeUserId,input.documentAssigneeUserId,revision,input.now,input.batchId,input.organizationId,input.previousOperationAssigneeUserId??null,input.previousDocumentAssigneeUserId??null,input.allowAfterDeparture?1:0);
-  const guard=`EXISTS(
-    SELECT 1 FROM transport_batches responsibility_guard
-    WHERE responsibility_guard.id=? AND responsibility_guard.organization_id=?
-      AND responsibility_guard.responsibility_revision=?
-      AND responsibility_guard.operation_assignee_user_id=?
-      AND responsibility_guard.document_assignee_user_id=?
-  )`;
+  const guard=responsibilityRevisionGuard();
   const guardValues=[input.batchId,input.organizationId,revision,input.operationAssigneeUserId,input.documentAssigneeUserId];
+  const taskStateStatements:D1PreparedStatement[]=[];
+  const moduleOwnerStatements:D1PreparedStatement[]=[];
+  const cancelStatements:D1PreparedStatement[]=[];
+  const historyStatements:D1PreparedStatement[]=[];
+  const insertStatements:D1PreparedStatement[]=[];
+  const orderIds=[...new Set(input.targets.map(target=>target.orderId))];
+  for(const orderId of orderIds){
+    const orderTargets=input.targets.filter(target=>target.orderId===orderId);
+    for(const target of orderTargets){
+      for(const taskStateIds of chunkD1Values(target.taskStateIds,10)){
+        taskStateStatements.push(env.DB.prepare(`UPDATE workflow_instance_task_states
+          SET assignee_user_id=?,updated_at=?
+          WHERE id IN (${d1Placeholders(taskStateIds.length)})
+            AND status NOT IN ('completed','not_applicable')
+            AND instance_module_state_id IN(
+              SELECT ms.id FROM workflow_instance_module_states ms
+              JOIN workflow_instance_step_states ss ON ss.id=ms.instance_step_state_id
+              JOIN workflow_instances wi ON wi.id=ss.instance_id
+              WHERE wi.id=? AND wi.organization_id=? AND wi.order_id=?
+            ) AND ${guard}`)
+          .bind(target.assigneeUserId,input.now,...taskStateIds,target.workflowInstanceId,input.organizationId,orderId,...guardValues));
+      }
+      for(const moduleCodes of chunkD1Values(target.primaryModuleCodes,12)){
+        moduleOwnerStatements.push(env.DB.prepare(`UPDATE order_module_instances
+          SET assignee_user_id=?,blocking_reason=NULL,updated_at=?
+          WHERE organization_id=? AND order_id=?
+            AND module_code IN (${d1Placeholders(moduleCodes.length)})
+            AND status NOT IN ('completed','not_applicable')
+            AND EXISTS(
+              SELECT 1 FROM workflow_instance_module_states ms
+              JOIN workflow_instance_step_states ss ON ss.id=ms.instance_step_state_id
+              JOIN workflow_instances wi ON wi.id=ss.instance_id
+              WHERE wi.id=? AND wi.organization_id=? AND wi.order_id=?
+                AND ms.module_code=order_module_instances.module_code
+                AND ms.status NOT IN ('completed','not_applicable')
+            ) AND ${guard}`)
+          .bind(target.assigneeUserId,input.now,input.organizationId,orderId,...moduleCodes,target.workflowInstanceId,input.organizationId,orderId,...guardValues));
+      }
+      for(const moduleCodes of chunkD1Values(target.moduleCodes,12)){
+        insertStatements.push(env.DB.prepare(`INSERT INTO order_tasks(
+            id,organization_id,order_id,module_code,task_type,title,status,assignee_user_id,
+            assigned_by_user_id,due_at,created_at,updated_at
+          )
+          SELECT lower(hex(randomblob(16))),m.organization_id,m.order_id,m.module_code,'module_owner',
+            m.module_name||?,'pending',?,?,NULL,?,?
+          FROM order_module_instances m
+          WHERE m.organization_id=? AND m.order_id=?
+            AND m.module_code IN (${d1Placeholders(moduleCodes.length)})
+            AND m.status NOT IN ('completed','not_applicable')
+            AND ${guard}`)
+          .bind(`处理任务（${target.positionCode}）`,target.assigneeUserId,input.actorUserId,input.now,input.now,input.organizationId,orderId,...moduleCodes,...guardValues));
+      }
+    }
+    const moduleCodes=uniqueTargetModuleCodes(orderTargets);
+    for(const moduleCodeChunk of chunkD1Values(moduleCodes,8)){
+      cancelStatements.push(env.DB.prepare(`UPDATE order_tasks SET status='cancelled',updated_at=?
+        WHERE organization_id=? AND order_id=? AND task_type='module_owner'
+          AND status IN ('pending','in_progress')
+          AND module_code IN (${d1Placeholders(moduleCodeChunk.length)})
+          AND ${guard}`)
+        .bind(input.now,input.organizationId,orderId,...moduleCodeChunk,...guardValues));
+      historyStatements.push(env.DB.prepare(`INSERT INTO order_module_history(
+          id,organization_id,order_id,module_instance_id,action_code,action_name,
+          from_step_code,to_step_code,to_step_name,actor_user_id,notes,occurred_at
+        )
+        SELECT lower(hex(randomblob(16))),m.organization_id,m.order_id,m.id,'assign',
+          ?,m.current_step_code,m.current_step_code,m.current_step_name,?,?,?
+        FROM order_module_instances m
+        WHERE m.organization_id=? AND m.order_id=?
+          AND m.module_code IN (${d1Placeholders(moduleCodeChunk.length)})
+          AND m.status NOT IN ('completed','not_applicable')
+          AND ${guard}`)
+        .bind(input.mode==="approve"?"配载单统一分配":"配载单负责人变更",input.actorUserId,`${input.batchNumber}：操作与单证职责按冻结工作流配置统一交接`,input.now,input.organizationId,orderId,...moduleCodeChunk,...guardValues));
+    }
+  }
   const results=await env.DB.batch([
     assignmentUpdate,
-    env.DB.prepare(`UPDATE order_module_instances
-      SET assignee_user_id=CASE WHEN module_code IN ('tracking','exceptions') THEN ? ELSE ? END,
-          blocking_reason=NULL,updated_at=?
-      WHERE organization_id=?
-        AND module_code IN ('tracking','exceptions','documents','customs')
-        AND order_id IN(
-          SELECT order_id FROM transport_batch_orders
-          WHERE organization_id=? AND batch_id=? AND status!='removed'
-        ) AND ${guard}`)
-      .bind(input.operationAssigneeUserId,input.documentAssigneeUserId,input.now,input.organizationId,input.organizationId,input.batchId,...guardValues),
-    env.DB.prepare(`UPDATE order_tasks SET status='cancelled',updated_at=?
-      WHERE organization_id=? AND task_type='module_owner' AND status IN ('pending','in_progress')
-        AND module_code IN ('tracking','exceptions','documents','customs')
-        AND order_id IN(
-          SELECT order_id FROM transport_batch_orders
-          WHERE organization_id=? AND batch_id=? AND status!='removed'
-        ) AND ${guard}`)
-      .bind(input.now,input.organizationId,input.organizationId,input.batchId,...guardValues),
-    env.DB.prepare(`INSERT INTO order_tasks(
-        id,organization_id,order_id,module_code,task_type,title,status,assignee_user_id,
-        assigned_by_user_id,due_at,created_at,updated_at
-      )
-      SELECT lower(hex(randomblob(16))),m.organization_id,m.order_id,m.module_code,'module_owner',
-        m.module_name||'处理任务','pending',
-        CASE WHEN m.module_code IN ('tracking','exceptions') THEN ? ELSE ? END,
-        ?,NULL,?,?
-      FROM order_module_instances m
-      WHERE m.organization_id=? AND m.enabled=1 AND m.status!='not_applicable'
-        AND m.module_code IN ('tracking','exceptions','documents','customs')
-        AND m.order_id IN(
-          SELECT order_id FROM transport_batch_orders
-          WHERE organization_id=? AND batch_id=? AND status!='removed'
-        ) AND ${guard}`)
-      .bind(input.operationAssigneeUserId,input.documentAssigneeUserId,input.actorUserId,input.now,input.now,input.organizationId,input.organizationId,input.batchId,...guardValues),
-    env.DB.prepare(`INSERT INTO order_module_history(
-        id,organization_id,order_id,module_instance_id,action_code,action_name,
-        from_step_code,to_step_code,to_step_name,actor_user_id,notes,occurred_at
-      )
-      SELECT lower(hex(randomblob(16))),m.organization_id,m.order_id,m.id,'assign',
-        ?,m.current_step_code,m.current_step_code,m.current_step_name,?,?,?
-      FROM order_module_instances m
-      WHERE m.organization_id=?
-        AND m.module_code IN ('tracking','exceptions','documents','customs')
-        AND m.order_id IN(
-          SELECT order_id FROM transport_batch_orders
-          WHERE organization_id=? AND batch_id=? AND status!='removed'
-        ) AND ${guard}`)
-      .bind(input.mode==="approve"?"配载单统一分配":"配载单负责人变更",input.actorUserId,`${input.batchNumber}：操作与单证职责按整张配载单统一交接`,input.now,input.organizationId,input.organizationId,input.batchId,...guardValues),
+    ...taskStateStatements,
+    ...moduleOwnerStatements,
+    ...cancelStatements,
+    ...historyStatements,
+    ...insertStatements,
   ]);
   return Number(results[0]?.meta?.changes||0)>0;
 }
@@ -550,7 +640,10 @@ export async function loader({request,params}:Route.LoaderArgs){
       WHERE m.organization_id=? AND m.status='active' AND p.code IN ('OPERATION','DOC')
       ORDER BY d.sort_order,p.sort_order,u.display_name`).bind(current.organizationId).all<OrganizationAssigneeMember>(),
   ]);
-  return{current,batch,orders:orders.results,batchWorkflowPolicies,batchCargoItems,vehicles:vehicles.results,carriers:carriers.results,warehouses:warehouses.results,borderPorts:borderPorts.results,costAllocations,batchDocuments:batchDocuments.results,orderDocuments:orderDocuments.results,orderDocumentRequirements,customsSummaries:customsSummaries.results,customsDeclarations:customsDeclarations.results,batchExceptions,exceptionPackages,outboundStatuses:outboundStatuses.results,departureGateStatuses,returnOrderId,trackingMilestones,trackingFlags:trackingFlags.results,batchVehiclePlate,carrierVehicles:carrierVehicles.results,carrierDrivers:carrierDrivers.results,operationMembers:responsibilityMembers.results.filter(member=>member.position_code==="OPERATION"),documentMembers:responsibilityMembers.results.filter(member=>member.position_code==="DOC")};
+  const initialResponsibilityRestrictions=batch.approval_status==="submitted"
+    ? await loadBatchInitialResponsibilityRestrictions(env.DB,current.organizationId,batchId)
+    : buildBatchInitialResponsibilityRestrictions([]);
+  return{current,batch,orders:orders.results,batchWorkflowPolicies,batchCargoItems,vehicles:vehicles.results,carriers:carriers.results,warehouses:warehouses.results,borderPorts:borderPorts.results,costAllocations,batchDocuments:batchDocuments.results,orderDocuments:orderDocuments.results,orderDocumentRequirements,customsSummaries:customsSummaries.results,customsDeclarations:customsDeclarations.results,batchExceptions,exceptionPackages,outboundStatuses:outboundStatuses.results,departureGateStatuses,returnOrderId,trackingMilestones,trackingFlags:trackingFlags.results,batchVehiclePlate,carrierVehicles:carrierVehicles.results,carrierDrivers:carrierDrivers.results,operationMembers:responsibilityMembers.results.filter(member=>member.position_code==="OPERATION"),documentMembers:responsibilityMembers.results.filter(member=>member.position_code==="DOC"),initialResponsibilityRestrictions};
 }
 
 export async function action({request,params}:Route.ActionArgs){
@@ -620,6 +713,18 @@ export async function action({request,params}:Route.ActionArgs){
     try{
       const modules=await ensureOrderModulesModule();
       for(const orderId of orderIds)await modules.ensureOrderModules(current.organizationId,orderId);
+      if(!reassigning){
+        const restrictions=await loadBatchInitialResponsibilityRestrictions(env.DB,current.organizationId,batchId);
+        if(restrictions.configurationErrors.length)return{formError:`工作流配置阻断：${restrictions.configurationErrors.join("；")}`};
+        const conflict=findBatchInitialResponsibilityConflict(restrictions,{operationAssigneeUserId,documentAssigneeUserId});
+        if(conflict)return{formError:conflict.reason};
+      }
+      const targets=await loadBatchResponsibilityTransferTargets({
+        organizationId:current.organizationId,
+        orderIds,
+        operationAssigneeUserId,
+        documentAssigneeUserId,
+      });
       const changed=await assignBatchResponsibilities({
         organizationId:current.organizationId,batchId,batchNumber:batch.batch_number,
         operationAssigneeUserId,documentAssigneeUserId,actorUserId:current.userId,now,
@@ -627,8 +732,16 @@ export async function action({request,params}:Route.ActionArgs){
         previousOperationAssigneeUserId:batchApproval.operation_assignee_user_id,
         previousDocumentAssigneeUserId:batchApproval.document_assignee_user_id,
         allowAfterDeparture:reassigning&&!ordinaryReassignmentAllowed&&privileged,
+        targets,
       });
-      if(!changed)return{formError:"配载单状态或负责人已被其他人更新，请刷新后重试"};
+      if(!changed){
+        if(!reassigning){
+          const latestRestrictions=await loadBatchInitialResponsibilityRestrictions(env.DB,current.organizationId,batchId);
+          const latestConflict=findBatchInitialResponsibilityConflict(latestRestrictions,{operationAssigneeUserId,documentAssigneeUserId});
+          if(latestConflict)return{formError:latestConflict.reason};
+        }
+        return{formError:"配载单状态或负责人已被其他人更新，请刷新后重试"};
+      }
       for(const orderId of orderIds)await syncOrderWorkflowSnapshotSafe(current.organizationId,orderId);
       await env.DB.batch([
         assignedBatchNotificationStatement(env.DB,{organizationId:current.organizationId,batchId,batchNumber:batch.batch_number,assigneeUserId:operationAssigneeUserId,actorUserId:current.userId,responsibilityLabel:"操作职责",now}),
@@ -1130,6 +1243,12 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   const currentIsBatchDocumentOwner=privileged||loaderData.batch.document_assignee_user_id===loaderData.current.userId;
   const canManageBatchResponsibility=requiresSupervisorApproval&&(privileged||(loaderData.current.permissions.includes("transport.batch.approve")&&loaderData.batch.operation_supervisor_user_id===loaderData.current.userId));
   const canReviewBatch=loaderData.batch.approval_status==="submitted"&&canManageBatchResponsibility;
+  const initialOperationDisabledReasons=batchInitialResponsibilityDisabledReasons(loaderData.initialResponsibilityRestrictions,"operation");
+  const initialDocumentDisabledReasons=batchInitialResponsibilityDisabledReasons(loaderData.initialResponsibilityRestrictions,"document");
+  const hasFreshOperationCandidate=loaderData.operationMembers.some(member=>!initialOperationDisabledReasons[member.id]);
+  const hasFreshDocumentCandidate=loaderData.documentMembers.some(member=>!initialDocumentDisabledReasons[member.id]);
+  const initialResponsibilityConfigurationReady=loaderData.initialResponsibilityRestrictions.configurationErrors.length===0;
+  const freshInitialAssigneesAvailable=hasFreshOperationCandidate&&hasFreshDocumentCandidate&&initialResponsibilityConfigurationReady;
   const ordinaryReassignmentAllowed=canOrdinaryReassignBatchResponsibility({batchNumber:loaderData.batch.batch_number,approvalStatus:loaderData.batch.approval_status,roadStatus:loaderData.batch.road_status,actualDepartureAt:loaderData.batch.actual_departure_at});
   const canReassignBatch=loaderData.batch.approval_status==="approved"&&canManageBatchResponsibility&&(ordinaryReassignmentAllowed||privileged);
   const manage=batchApproved&&currentIsBatchOperator&&canManageOrderModule(loaderData.current,"loading");
@@ -1209,7 +1328,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   <div className="batch-detail-layout"><main className="batch-detail-main">
   {requiresSupervisorApproval&&loaderData.batch.approval_status==="submitted"&&<section className="panel batch-command-panel">
     <div className="panel-header"><div><h2>配载单待操作主管审核与统一分配</h2><p>一次选择整批操作负责人和整批单证负责人；提交成功后，两人分别接管本 PZ 下全部订单的后续共同业务。</p></div><span className="status-pill warning">待审核</span></div>
-    {canReviewBatch?<><Form method="post" className="form-grid compact"><input type="hidden" name="intent" value="batch_approve"/><OrganizationAssigneePicker members={loaderData.operationMembers} name="operationAssigneeUserId" idPrefix="batch-operation-owner" personLabel="整批操作负责人" required/><OrganizationAssigneePicker members={loaderData.documentMembers} name="documentAssigneeUserId" idPrefix="batch-document-owner" personLabel="整批单证负责人" required/><button className="primary span-2" disabled={busy}>审核通过并统一交接全部订单</button></Form><Form method="post" className="form-grid compact"><input type="hidden" name="intent" value="batch_reject"/><label className="field span-2"><span>退回原因</span><input name="rejectionNotes" placeholder="如需退回，请说明仓库应调整的内容"/></label><button className="secondary span-2" disabled={busy}>退回仓库调整</button></Form></>:<div className="alert warning">本配载单已提交给 {loaderData.batch.operation_supervisor_name||"指定操作主管"}；当前账号仅可查看，等待主管审核。</div>}
+    {canReviewBatch?<><div className="alert info"><strong>首次交接必须换人：</strong>系统按每票订单锁定的工作流快照识别未完成操作/单证职责；原负责人在候选项中禁用并显示关联订单。新负责人接管整张 PZ，旧负责人仅保留历史订单只读权限。</div>{loaderData.initialResponsibilityRestrictions.configurationErrors.length>0?<div className="alert error" role="alert"><strong>工作流配置阻断：</strong>{loaderData.initialResponsibilityRestrictions.configurationErrors.join("；")}</div>:!freshInitialAssigneesAvailable&&<div className="alert warning" role="alert">当前组织没有同时可用的新操作负责人和新单证负责人；请先在组织架构中新增或启用其他人员。</div>}<Form method="post" className="form-grid compact"><input type="hidden" name="intent" value="batch_approve"/><OrganizationAssigneePicker members={loaderData.operationMembers} name="operationAssigneeUserId" idPrefix="batch-operation-owner" personLabel="整批操作负责人" disabledUserReasons={initialOperationDisabledReasons} required/><OrganizationAssigneePicker members={loaderData.documentMembers} name="documentAssigneeUserId" idPrefix="batch-document-owner" personLabel="整批单证负责人" disabledUserReasons={initialDocumentDisabledReasons} required/><button className="primary span-2" disabled={busy||!freshInitialAssigneesAvailable}>审核通过并统一交接全部订单</button></Form><Form method="post" className="form-grid compact"><input type="hidden" name="intent" value="batch_reject"/><label className="field span-2"><span>退回原因</span><input name="rejectionNotes" placeholder="如需退回，请说明仓库应调整的内容"/></label><button className="secondary span-2" disabled={busy}>退回仓库调整</button></Form></>:<div className="alert warning">本配载单已提交给 {loaderData.batch.operation_supervisor_name||"指定操作主管"}；当前账号仅可查看，等待主管审核。</div>}
   </section>}
   {requiresSupervisorApproval&&loaderData.batch.approval_status==="approved"&&<section className="panel batch-command-panel batch-responsibility-panel"><div className="alert success batch-responsibility-status">已审核 · 操作：<strong>{loaderData.batch.operation_assignee_name||"待补充分配"}</strong> · 单证：<strong>{loaderData.batch.document_assignee_name||"待补充分配"}</strong><span>境外仓入库后转为只读</span></div>{canReassignBatch&&<details><summary>{loaderData.batch.operation_assignee_user_id&&loaderData.batch.document_assignee_user_id?"变更整批负责人":"补全整批负责人"}</summary><Form method="post" className="form-grid compact"><input type="hidden" name="intent" value="batch_reassign"/><OrganizationAssigneePicker members={loaderData.operationMembers} name="operationAssigneeUserId" idPrefix="batch-reassign-operation" personLabel="整批操作负责人" required/><OrganizationAssigneePicker members={loaderData.documentMembers} name="documentAssigneeUserId" idPrefix="batch-reassign-document" personLabel="整批单证负责人" required/><label className="field span-2"><span>{ordinaryReassignmentAllowed?"变更说明（可选）":"异常改派原因（必填）"}</span><input name="reassignReason" required={!ordinaryReassignmentAllowed} placeholder="系统将通知新负责人并保留旧负责人历史只读记录"/></label><button className="primary span-2" disabled={busy}>确认统一改派</button></Form></details>}</section>}
   {requiresSupervisorApproval&&loaderData.batch.approval_status==="rejected"&&<div className="alert warning">配载单已退回仓库调整，重新提交审核前管理端保持只读。</div>}

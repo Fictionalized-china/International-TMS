@@ -48,7 +48,14 @@ GateSource = Literal[
     "role_permission_configuration",
     "system_integrity_invariant",
 ]
-GateMode = Literal["required", "optional", "hidden", "read_only", "not_applicable"]
+GateMode = Literal[
+    "required",
+    "optional",
+    "hidden",
+    "operate",
+    "read_only",
+    "not_applicable",
+]
 ExpectedGateBehavior = Literal["allow", "block", "hide", "read_only"]
 CasePriority = Literal["P0", "P1", "P2", "P3"]
 RunStatus = Literal["running", "passed", "failed", "blocked", "aborted", "planned"]
@@ -585,12 +592,13 @@ class RoleBrowserSession:
         *,
         sensitive: bool | None = None,
     ) -> Any:
-        masked = bool(SENSITIVE_TARGET.search(target)) if sensitive is None else sensitive
-        return self._perform(
-            kind="fill",
-            target=target,
-            operation=lambda: locator.fill(value, timeout=self.action_timeout_ms),
-            detail={"value": value, "sensitive": masked},
+        """Backward-compatible keyboard entry; never call Playwright fill()."""
+
+        return self.type_text(
+            locator,
+            value,
+            target,
+            sensitive=sensitive,
         )
 
     def type_text(
@@ -626,6 +634,65 @@ class RoleBrowserSession:
             },
         )
 
+    def type_date(self, locator: Any, value: str, target: str) -> Any:
+        """Enter an ISO date through the browser's visible date segments."""
+
+        try:
+            parsed = datetime.strptime(value, "%Y-%m-%d")
+        except ValueError as error:
+            raise ValueError("日期必须使用 YYYY-MM-DD") from error
+
+        def operation() -> None:
+            locator.click(timeout=self.action_timeout_ms)
+            locator.press("Control+A", timeout=self.action_timeout_ms)
+            locator.press("Backspace", timeout=self.action_timeout_ms)
+            locator.type(f"{parsed.year:04d}", delay=12, timeout=self.action_timeout_ms)
+            locator.press("ArrowRight", timeout=self.action_timeout_ms)
+            locator.type(f"{parsed.month:02d}", delay=12, timeout=self.action_timeout_ms)
+            locator.type(f"{parsed.day:02d}", delay=12, timeout=self.action_timeout_ms)
+            actual = locator.input_value(timeout=self.action_timeout_ms)
+            if actual != value:
+                raise AssertionError(f"{target} 实际值无效")
+
+        return self._perform(
+            kind="type_date",
+            target=target,
+            operation=operation,
+            detail={"value": value, "pointer_clicks": 1, "keystrokes": 8},
+        )
+
+    def type_datetime_local(self, locator: Any, value: str, target: str) -> Any:
+        """Enter a local date-time through its visible year/month/day/time segments."""
+
+        try:
+            parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M")
+        except ValueError as error:
+            raise ValueError("本地日期时间必须使用 YYYY-MM-DDTHH:MM") from error
+
+        def operation() -> None:
+            locator.click(timeout=self.action_timeout_ms)
+            locator.press("Control+A", timeout=self.action_timeout_ms)
+            locator.press("Backspace", timeout=self.action_timeout_ms)
+            locator.type(f"{parsed.year:04d}", delay=12, timeout=self.action_timeout_ms)
+            locator.press("ArrowRight", timeout=self.action_timeout_ms)
+            for segment in (
+                f"{parsed.month:02d}",
+                f"{parsed.day:02d}",
+                f"{parsed.hour:02d}",
+                f"{parsed.minute:02d}",
+            ):
+                locator.type(segment, delay=12, timeout=self.action_timeout_ms)
+            actual = locator.input_value(timeout=self.action_timeout_ms)
+            if actual != value:
+                raise AssertionError(f"{target} 实际值无效")
+
+        return self._perform(
+            kind="type_datetime_local",
+            target=target,
+            operation=operation,
+            detail={"value": value, "pointer_clicks": 1, "keystrokes": 12},
+        )
+
     def select(
         self,
         locator: Any,
@@ -638,12 +705,65 @@ class RoleBrowserSession:
         supplied = sum(item is not None for item in (value, label, index))
         if supplied != 1:
             raise ValueError("select 必须且只能指定 value、label 或 index 中的一项")
-        options = {key: item for key, item in {"value": value, "label": label, "index": index}.items() if item is not None}
+
+        option_list = locator.locator("option")
+        option_count = option_list.count()
+        if option_count <= 0:
+            raise AssertionError(f"{target} 没有可选项")
+
+        target_index = -1
+        target_value = ""
+        target_label = ""
+        for option_index in range(option_count):
+            option = option_list.nth(option_index)
+            option_value = str(option.get_attribute("value") or "")
+            option_label = str(option.text_content() or "").strip()
+            matches = (
+                (value is not None and option_value == value)
+                or (label is not None and option_label == label)
+                or (index is not None and option_index == index)
+            )
+            if not matches:
+                continue
+            if option.is_disabled():
+                raise AssertionError(f"{target} 的目标选项不可用")
+            target_index = option_index
+            target_value = option_value
+            target_label = option_label
+            break
+        if target_index < 0:
+            raise AssertionError(f"{target} 找不到目标选项")
+
+        def operation() -> list[str]:
+            # Use the same pointer and keyboard events as a human operator.
+            # Reading option metadata is allowed; changing the value through
+            # select_option/DOM mutation is deliberately forbidden.
+            locator.click(timeout=self.action_timeout_ms)
+            locator.press("Home", timeout=self.action_timeout_ms)
+            for _ in range(option_count + 1):
+                if str(locator.input_value(timeout=self.action_timeout_ms)) == target_value:
+                    break
+                locator.press("ArrowDown", timeout=self.action_timeout_ms)
+            else:
+                raise AssertionError(f"{target} 无法通过键盘定位目标选项")
+            locator.press("Enter", timeout=self.action_timeout_ms)
+            actual = str(locator.input_value(timeout=self.action_timeout_ms))
+            if actual != target_value:
+                raise AssertionError(f"{target} 键盘选择后实际值不一致")
+            return [actual]
+
+        detail = {
+            "value": target_value,
+            "label": target_label,
+            "index": target_index,
+            "pointer_clicks": 1,
+            "keyboard_only": True,
+        }
         return self._perform(
             kind="select",
             target=target,
-            operation=lambda: locator.select_option(timeout=self.action_timeout_ms, **options),
-            detail=options,
+            operation=operation,
+            detail=detail,
         )
 
     def press(self, key: str, target: str, locator: Any | None = None) -> Any:
@@ -679,8 +799,10 @@ class RoleBrowserSession:
 
     def expect_hidden(self, locator: Any, target: str) -> None:
         def operation() -> None:
-            if locator.count() > 0 and bool(locator.first.is_visible()):
-                raise AssertionError(f"{target} 应隐藏，而不是只禁用")
+            if locator.count() > 0:
+                locator.first.wait_for(
+                    state="hidden", timeout=self.action_timeout_ms
+                )
 
         self._perform(kind="assert_hidden", target=target, operation=operation)
 

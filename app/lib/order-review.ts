@@ -62,19 +62,101 @@ export function configuredModuleRequiresCompletion(
   return state ? state.enabled && state.isRequired : true;
 }
 
+/**
+ * @deprecated Generating a review is only preparation. Completion requires the
+ * separately authorized final-confirmation action.
+ */
 export function orderReviewModuleState(
+  completionStatus: OrderCompletionStatus,
+  blockerMessages: readonly string[],
+) {
+  return orderReviewPreparationModuleState(completionStatus, blockerMessages);
+}
+
+export function orderReviewPreparationModuleState(
   completionStatus: OrderCompletionStatus,
   blockerMessages: readonly string[],
 ) {
   const blocked = completionStatus === "in_progress";
   return {
-    status: blocked ? "blocked" as const : "completed" as const,
-    stepCode: blocked ? "reviewing" : "confirmed",
-    stepName: blocked ? "复盘中" : "复盘确认",
-    progressPercent: blocked ? 67 : 100,
+    status: blocked ? "blocked" as const : "in_progress" as const,
+    stepCode: blocked ? "reviewing" : "ready_to_finalize",
+    stepName: blocked ? "复盘中" : "待最终确认归档",
+    progressPercent: blocked ? 67 : 90,
     blockingReason: blocked ? blockerMessages.join("；") || null : null,
-    completed: !blocked,
+    completed: false,
   };
+}
+
+export function orderReviewFinalizationDecision(input: {
+  confirmed: boolean;
+  snapshotId: string | null;
+  completionStatus: OrderCompletionStatus;
+  blockers: readonly string[];
+}) {
+  if (!input.confirmed)
+    return { allowed: false as const, reason: "请明确确认最终归档" };
+  if (!input.snapshotId)
+    return { allowed: false as const, reason: "请先生成订单复盘" };
+  if (input.blockers.length)
+    return { allowed: false as const, reason: input.blockers.join("；") };
+  if (input.completionStatus === "in_progress")
+    return { allowed: false as const, reason: "当前仍有必办门禁未完成" };
+  return { allowed: true as const, reason: null };
+}
+
+export function finalizedOrderReviewState(
+  completionStatus: Exclude<OrderCompletionStatus, "in_progress">,
+) {
+  const settled = completionStatus === "completed_settled";
+  return {
+    completionStatus,
+    settlementCompleted: settled,
+    currentStepName: settled
+      ? "订单完成 · 已完成并结清"
+      : "业务已归档 · 财务跟进中",
+  };
+}
+
+export function pendingOrderReviewCompletionStatus(
+  completionStatus: OrderCompletionStatus,
+): OrderCompletionStatus {
+  return completionStatus === "completed_settled"
+    ? "business_complete_unsettled"
+    : completionStatus;
+}
+
+export function pendingOrderReviewCurrentStep(
+  completionStatus: OrderCompletionStatus,
+) {
+  if (completionStatus === "in_progress") return null;
+  return {
+    code: "module:review",
+    name: completionStatus === "business_complete_unsettled"
+      ? "完成复盘 · 待最终确认归档（可选结算未完成）"
+      : "完成复盘 · 待最终确认归档",
+  };
+}
+
+export function refreshedArchivedOrderCompletionStatus(
+  _archivedStatus: OrderCompletionStatus,
+  latestReadiness: OrderCompletionStatus,
+): OrderCompletionStatus {
+  return latestReadiness === "completed_settled"
+    ? "completed_settled"
+    : "business_complete_unsettled";
+}
+
+export function refreshedArchivedSettlementCompletedAt(input: {
+  archived: boolean;
+  previousStatus: OrderCompletionStatus;
+  latestStatus: OrderCompletionStatus;
+  previousCompletedAt: string | null;
+  now: string;
+}) {
+  if (!input.archived || input.latestStatus !== "completed_settled") return null;
+  if (input.previousStatus !== "completed_settled") return input.now;
+  return input.previousCompletedAt ?? input.now;
 }
 
 export function costsModuleReviewBlocker(

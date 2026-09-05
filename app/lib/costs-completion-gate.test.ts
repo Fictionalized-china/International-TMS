@@ -94,7 +94,36 @@ describe("costs completion gate", () => {
     ]);
   });
 
-  it("does not block on optional, hidden, or non-reconciliation fields", () => {
+  it("does not require a direction sign-off when that direction has no expenses", () => {
+    const result = evaluateCostsCompletionGate({
+      fields: [
+        requiredField("customer_service_confirmation", true, "客服确认"),
+      ],
+      directions: [
+        {
+          direction: "receivable",
+          hasExpenses: true,
+          customerServiceConfirmed: true,
+          businessReviewed: false,
+          financeReviewed: false,
+        },
+        {
+          direction: "payable",
+          hasExpenses: false,
+          customerServiceConfirmed: false,
+          businessReviewed: false,
+          financeReviewed: false,
+        },
+      ],
+    });
+
+    expect(result).toMatchObject({
+      complete: true,
+      blockers: [],
+    });
+  });
+
+  it("does not block on optional or hidden fields", () => {
     const result = evaluateCostsCompletionGate({
       fields: [
         {
@@ -104,10 +133,6 @@ describe("costs completion gate", () => {
         {
           ...requiredField("finance_review", false, "财务审核"),
           isActive: false,
-        },
-        {
-          ...requiredField("pre_receivable_expenses", false, "报价应收"),
-          stepKey: "order_creation",
         },
       ],
       directions: [],
@@ -119,6 +144,26 @@ describe("costs completion gate", () => {
       progressPercent: 100,
       blockingReason: null,
       blockers: [],
+    });
+  });
+
+  it("uses the locked field placement instead of a hard-coded settlement step", () => {
+    const result = evaluateCostsCompletionGate({
+      fields: [
+        {
+          ...requiredField("reconciliation_statement", false, "对账单"),
+          stepKey: "customer_defined_settlement",
+        },
+      ],
+      directions: [],
+    });
+
+    expect(result).toMatchObject({
+      complete: false,
+      status: "not_started",
+      blockers: [
+        { fieldKey: "reconciliation_statement", label: "对账单" },
+      ],
     });
   });
 
@@ -141,5 +186,47 @@ describe("costs completion gate", () => {
         { fieldKey: "invoice_records", label: "开票/收票记录" },
       ],
     });
+  });
+
+  it("keeps a required cash gate open until the direction balance is fully settled", () => {
+    const result = evaluateCostsCompletionGate({
+      fields: [
+        requiredField("cash_records", true, "收付款流水"),
+        {
+          ...requiredField("writeoff_records", false, "核销记录"),
+          isRequired: false,
+        },
+      ],
+      directions: [
+        {
+          direction: "receivable",
+          hasExpenses: true,
+          outstandingBalance: 125,
+          customerServiceConfirmed: true,
+          businessReviewed: true,
+          financeReviewed: true,
+        },
+        {
+          direction: "payable",
+          hasExpenses: false,
+          outstandingBalance: 0,
+          customerServiceConfirmed: false,
+          businessReviewed: false,
+          financeReviewed: false,
+        },
+      ],
+    });
+
+    expect(result).toMatchObject({
+      complete: false,
+      blockers: [
+        {
+          fieldKey: "cash_records",
+          direction: "receivable",
+        },
+      ],
+    });
+    expect(result.blockingReason).toContain("收付款流水");
+    expect(result.blockingReason).toContain("应收");
   });
 });

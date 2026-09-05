@@ -3,6 +3,7 @@ import {
   canReviewOrderModuleDocument,
   canUploadOrderModuleDocument,
   isSettlementDocumentStageOpen,
+  settlementDocumentStageAccess,
 } from "./order-document-access";
 
 describe("order document access", () => {
@@ -90,13 +91,96 @@ describe("order document access", () => {
   });
 
   it.each(["reconciliation", "completion_review"])(
-    "opens settlement document maintenance during %s",
+    "keeps the legacy settlement document fallback during %s",
     (currentStepKey) => {
       expect(isSettlementDocumentStageOpen(currentStepKey, "in_execution")).toBe(
         true,
       );
     },
   );
+
+  it("opens a settlement document at its locked custom field placement", () => {
+    const workflow = {
+      locked: true,
+      currentStepKey: "custom_document_gate",
+      steps: [
+        { stepKey: "pickup", stepName: "客户提货", sortOrder: 10 },
+        {
+          stepKey: "custom_document_gate",
+          stepName: "自定义结算单据",
+          sortOrder: 20,
+        },
+      ],
+      modulePlacements: [
+        { moduleCode: "costs", stepKey: "custom_document_gate" },
+      ],
+      fields: [
+        {
+          moduleCode: "costs",
+          fieldKey: "document_billing_statement",
+          stepKey: "custom_document_gate",
+          isActive: true,
+          isRequired: false,
+        },
+      ],
+    } as const;
+
+    expect(
+      isSettlementDocumentStageOpen({
+        orderStatus: "in_execution",
+        fieldKey: "document_billing_statement",
+        workflow,
+      }),
+    ).toBe(true);
+    expect(
+      isSettlementDocumentStageOpen({
+        orderStatus: "in_execution",
+        fieldKey: "document_payment_receipt",
+        workflow,
+      }),
+    ).toBe(false);
+    expect(
+      isSettlementDocumentStageOpen({
+        orderStatus: "completed",
+        fieldKey: "document_billing_statement",
+        workflow,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps a hidden locked document field invisible after completion", () => {
+    const workflow = {
+      locked: true,
+      currentStepKey: "custom_document_gate",
+      steps: [
+        {
+          stepKey: "custom_document_gate",
+          stepName: "自定义结算单据",
+          sortOrder: 20,
+        },
+      ],
+      modulePlacements: [
+        { moduleCode: "costs", stepKey: "custom_document_gate" },
+      ],
+      fields: [
+        {
+          moduleCode: "costs",
+          fieldKey: "document_billing_statement",
+          stepKey: "custom_document_gate",
+          isActive: false,
+          isRequired: false,
+        },
+      ],
+    } as const;
+
+    expect(
+      settlementDocumentStageAccess({
+        orderStatus: "completed",
+        fieldKey: "document_billing_statement",
+        workflow,
+      }),
+    ).toMatchObject({ allowed: false, visible: false });
+  });
 
   it.each([
     ["domestic_transport", "in_execution"],

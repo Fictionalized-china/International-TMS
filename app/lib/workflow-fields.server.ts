@@ -4,6 +4,7 @@ import type { OrderModuleCode } from "./order-modules";
 import { domesticTransportPayableWorkflowValues } from "./transport-workflow";
 import { orderDocumentPlacements } from "./order-documents";
 import { isActualExitTrackingMilestone } from "./batch-tracking.shared";
+import { loadOrderAssignmentManifest } from "./order-assignment-manifest.server";
 import {
   quotationNativeFieldKeySet,
   quotationNativeFieldPresent,
@@ -676,10 +677,10 @@ export function mergeWorkflowFieldCatalogBaseline(
   moduleCode: OrderModuleCode,
 ): RawField[] {
   const existing = new Set(
-    rows.map((row) => `${row.step_key}:${row.module_code}:${row.field_key}`),
+    rows.map((row) => `${row.module_code}:${row.field_key}`),
   );
   const baseline = workflowFieldCatalog.flatMap((item, catalogIndex) => {
-    const identity = `${item.stepKey}:${item.moduleCode}:${item.fieldKey}`;
+    const identity = `${item.moduleCode}:${item.fieldKey}`;
     if (item.moduleCode !== moduleCode || existing.has(identity)) return [];
     const flags = workflowFieldModeFlags(item.defaultMode);
     return [{
@@ -864,7 +865,8 @@ async function resolveFieldPresence(
     const assignmentModuleList = assignmentManagedModuleCodes
       .map((code) => `'${code}'`)
       .join(",");
-    const assignment = await env.DB.prepare(
+    const [assignment, assignmentManifest] = await Promise.all([
+      env.DB.prepare(
       `SELECT o.status,o.current_assignee_user_id,
               MAX(CASE WHEN m.module_code='assignment' THEN m.assignee_user_id END) assignment_assignee_user_id,
               COUNT(CASE WHEN m.enabled=1
@@ -875,25 +877,41 @@ async function resolveFieldPresence(
        FROM transport_orders o
        LEFT JOIN order_module_instances m ON m.order_id=o.id AND m.organization_id=o.organization_id
        WHERE o.id=? AND o.organization_id=? GROUP BY o.id`,
-    ).bind(orderId, organizationId).first<{
+      ).bind(orderId, organizationId).first<{
       status: string;
       current_assignee_user_id: string | null;
       assignment_assignee_user_id: string | null;
       assigned: number;
       required_total: number;
-    }>();
+      }>(),
+      loadOrderAssignmentManifest(organizationId, orderId),
+    ]);
     setPresence(result, "approval_result", assignment && !["draft", "submitted"].includes(assignment.status) ? "approved" : null);
     setPresence(
       result,
       "primary_operator",
       assignment?.assignment_assignee_user_id ?? assignment?.current_assignee_user_id,
     );
-    const assignmentComplete = assignmentCoverageIsComplete(
-      assignment?.assigned ?? 0,
-      assignment?.required_total ?? 0,
-    );
-    setPresence(result, "module_assignees", assignmentComplete ? assignment?.assigned : null);
-    setPresence(result, "assignment_scope", assignmentComplete ? assignment?.assigned : null);
+    const usesLockedManifest = Boolean(assignmentManifest.workflowInstanceId);
+    const manifestAssigned = assignmentManifest.groups.filter(
+      (group) => group.assignmentState === "assigned",
+    ).length;
+    const assignmentComplete = usesLockedManifest
+      ? assignmentManifest.configurationErrors.length === 0 &&
+        assignmentManifest.groups.every(
+          (group) => !group.required || group.assignmentState === "assigned",
+        )
+      : assignmentCoverageIsComplete(
+          assignment?.assigned ?? 0,
+          assignment?.required_total ?? 0,
+        );
+    const assignedCount = usesLockedManifest ? manifestAssigned : assignment?.assigned ?? 0;
+    const assignmentPresence: Presence = {
+      present: assignmentComplete,
+      displayValue: assignmentComplete ? `${assignedCount} 个责任组已确认` : null,
+    };
+    result.set("module_assignees", assignmentPresence);
+    result.set("assignment_scope", assignmentPresence);
     const assignmentTask = await env.DB.prepare(
       `SELECT due_at,
               (SELECT notes FROM order_module_history h

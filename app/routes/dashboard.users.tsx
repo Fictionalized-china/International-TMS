@@ -10,6 +10,7 @@ import { Modal } from "../components/Modal";
 import { roleCodeForPosition } from "../lib/position-role";
 import { isProtectedAccessRole } from "../lib/permission-blocks";
 import { inspectAccessControlSchema } from "../lib/access-control-schema.server";
+import { loadWorkflowPositionRemovalBlocker } from "../lib/workflow-position-coverage.server";
 
 type MemberRow = { membership_id: string; user_id: string; display_name: string; email: string; title: string | null; department_id:string|null; department_name:string|null; position_id:string|null; position_name:string|null; status: string; roles: string | null; role_ids: string | null; role_codes: string | null; last_login_at: string | null };
 type Department = { id:string; parent_id:string|null; name:string; status:string; sort_order:number };
@@ -42,6 +43,17 @@ export async function action({ request }: Route.ActionArgs) {
     if(!membership||!placement)return{formError:"请选择有效的部门和岗位"};
     if(isProtectedAccessRole((membership.role_codes??"").split(",").filter(Boolean)))return{formError:"老板/所有者账户的岗位和角色不可修改"};
     if(["BOSS","DEVELOPER"].includes(placement.position_code)&&!isProtectedAccessRole(current.roleCodes))return{formError:"只有老板/所有者可以分配受保护岗位"};
+    const currentPlacement = await env.DB.prepare(
+      "SELECT position_id FROM memberships WHERE id=? AND organization_id=?",
+    ).bind(membershipId,current.organizationId).first<{position_id:string|null}>();
+    if (currentPlacement?.position_id && currentPlacement.position_id !== placement.position_id) {
+      const blocker = await loadWorkflowPositionRemovalBlocker(
+        env.DB,
+        current.organizationId,
+        membershipId,
+      );
+      if (blocker) return { formError: blocker };
+    }
     const roleCode=roleCodeForPosition(placement.position_code);
     const role=await env.DB.prepare("SELECT id FROM roles WHERE organization_id=? AND code=? AND status='active'").bind(current.organizationId,roleCode).first<{id:string}>();
     if(!role)return{formError:`岗位 ${placement.position_name} 尚未配置可用角色`};
@@ -59,6 +71,14 @@ export async function action({ request }: Route.ActionArgs) {
     if (!membership || membership.user_id === current.userId) return { formError: "不能停用当前登录用户" };
     const protectedRoles=await env.DB.prepare(`SELECT GROUP_CONCAT(r.code) role_codes FROM membership_roles mr JOIN roles r ON r.id=mr.role_id WHERE mr.membership_id=?`).bind(membershipId).first<{role_codes:string|null}>();
     if(isProtectedAccessRole((protectedRoles?.role_codes??"").split(",").filter(Boolean)))return{formError:"老板/所有者账户不能停用"};
+    if (membership.status === "active") {
+      const blocker = await loadWorkflowPositionRemovalBlocker(
+        env.DB,
+        current.organizationId,
+        membershipId,
+      );
+      if (blocker) return { formError: blocker };
+    }
     const next = membership.status === "active" ? "disabled" : "active";
     await env.DB.prepare("UPDATE memberships SET status = ?, updated_at = ? WHERE id = ? AND organization_id = ?").bind(next, new Date().toISOString(), membershipId, current.organizationId).run();
     await writeAudit({ request, action: `membership.${next}`, resourceType: "membership", resourceId: membershipId, organizationId: current.organizationId, actorUserId: current.userId });

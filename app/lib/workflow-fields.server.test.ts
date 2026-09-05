@@ -93,6 +93,39 @@ describe("stage-aware workflow field synchronization", () => {
     });
   });
 
+  it("does not recreate a catalog field at its default step after it was placed elsewhere", () => {
+    const rows = mergeWorkflowFieldCatalogBaseline(
+      [
+        {
+          id: "moved-finance-review",
+          workflow_id: "workflow-1",
+          step_key: "custom_settlement",
+          step_name: "自定义结算",
+          module_code: "costs",
+          field_key: "finance_review",
+          label: "财务审核",
+          field_type: "select",
+          is_required: 1,
+          is_active: 1,
+          sort_order: 10,
+          options_text: null,
+          help_text: null,
+        },
+      ],
+      "workflow-1",
+      "costs",
+    );
+
+    expect(
+      rows.filter((field) => field.field_key === "finance_review"),
+    ).toEqual([
+      expect.objectContaining({
+        id: "moved-finance-review",
+        step_key: "custom_settlement",
+      }),
+    ]);
+  });
+
   it("maps one full-truck outbound assignment to both loading field vocabularies", () => {
     expect(ftlOutboundWorkflowFieldValues({
       carrier_id: "carrier-1",

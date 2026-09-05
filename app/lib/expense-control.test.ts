@@ -128,10 +128,50 @@ describe("expense direction controls", () => {
     expect(expenseDirectionComplete(control, hiddenFields)).toBe(true);
   });
 
-  it("opens sign-off during reconciliation and completion review", () => {
+  it("keeps the historical stage fallback only for orders without a locked snapshot", () => {
     expect(expenseDirectionActionStageAccess("overseas_pickup").allowed).toBe(false);
     expect(expenseDirectionActionStageAccess("reconciliation").allowed).toBe(true);
     expect(expenseDirectionActionStageAccess("completion_review").allowed).toBe(true);
+  });
+
+  it("opens each sign-off from its locked workflow field placement", () => {
+    const workflow = {
+      locked: true,
+      currentStepKey: "custom_finance_gate",
+      steps: [
+        { stepKey: "pickup", stepName: "客户提货", sortOrder: 10 },
+        {
+          stepKey: "custom_finance_gate",
+          stepName: "自定义财务审核",
+          sortOrder: 20,
+        },
+      ],
+      modulePlacements: [
+        { moduleCode: "costs", stepKey: "custom_finance_gate" },
+      ],
+      fields: [
+        {
+          moduleCode: "costs",
+          fieldKey: "finance_review",
+          stepKey: "custom_finance_gate",
+          isActive: true,
+          isRequired: false,
+        },
+      ],
+    } as const;
+
+    expect(
+      expenseDirectionActionStageAccess({
+        action: "finance_review",
+        workflow,
+      }),
+    ).toMatchObject({ allowed: true, reason: null });
+    expect(
+      expenseDirectionActionStageAccess({
+        action: "business_review",
+        workflow,
+      }).allowed,
+    ).toBe(false);
   });
   it("keeps receivable and payable independent and allows parallel sign-off", () => {
     const receivable = emptyExpenseDirectionControl("receivable");

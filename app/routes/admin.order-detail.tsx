@@ -4,7 +4,11 @@ import { flushSync } from "react-dom";
 import { Form, Link, redirect, useNavigate, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.order-detail";
 import { canEditWorkflowDefinition, requireSessionUser } from "../lib/auth.server";
-import { canOperateCurrentOrder, canReadFullOrderLifecycle } from "../lib/order-access";
+import {
+  canEditCurrentOrderWorkspace,
+  canOperateCurrentOrder,
+  canReadFullOrderLifecycle,
+} from "../lib/order-access";
 import { requireOrderAccess } from "../lib/order-access.server";
 import {
   canRunOrderWorkflowAction,
@@ -666,9 +670,11 @@ export async function action({ request, params, context }: Route.ActionArgs) {
   const intent = valueOf(form, "intent");
   const current = await requireSessionUser(
     request,
-    ["workflow_action", "expense_direction_control"].includes(intent)
-      ? "order.view"
-      : "order.manage",
+    intent === "workflow_version_switch"
+      ? "workflow.manage"
+      : ["workflow_action", "expense_direction_control"].includes(intent)
+        ? "order.view"
+        : "order.manage",
   );
   await requireOrderAccess(current, params.orderId);
   if(intent==="workflow_supplement_complete"){
@@ -906,7 +912,7 @@ export default function OrderDetail({ loaderData, actionData }: Route.ComponentP
     }
   }, [currentStepKey, loaderData.selectedStepKey, navigate]);
   return (
-    <LinearOrderWorkspace data={loaderData} busy={busy} success={success} formError={formError} documentReviewSignal={documentReviewSignal} />
+    <LinearOrderWorkspace data={loaderData} busy={busy} success={success} formError={formError ?? undefined} documentReviewSignal={documentReviewSignal} />
   );
 }
 
@@ -956,10 +962,19 @@ function LinearOrderWorkspace({
       salespersonUserId: order.salesperson_user_id,
       currentUserId: data.current.userId,
     });
-  const readOnly =
-    orderCompleted ||
-    !viewingCurrent ||
-    !(data.canOperateCurrentNode || canOperateParallelCosts || canSubmitCurrentDraft);
+  const canOperateScopedEmbeddedModule = Boolean(
+    data.embeddedModuleData?.moduleActionCanOperate &&
+    data.embeddedModuleData.access.canEdit &&
+    ["review", "exceptions"].includes(data.embeddedModuleCode ?? ""),
+  );
+  const readOnly = !canEditCurrentOrderWorkspace({
+    orderCompleted,
+    viewingCurrentStep: viewingCurrent,
+    canOperateCurrentNode: data.canOperateCurrentNode,
+    canOperateParallelCosts,
+    canSubmitCurrentDraft,
+    canOperateScopedModule: canOperateScopedEmbeddedModule,
+  });
   const canReadFullLifecycle = canReadFullOrderLifecycle(data.current);
   const viewingPast = !viewingCurrent && selectedIndex < currentIndex;
   const guidance = orderNextGuidance({ orderId: order.id, orderStatus: order.status, modules: data.modules });
@@ -1001,7 +1016,7 @@ function LinearOrderWorkspace({
         </div>
         <div className="head-actions">
           <span className={`status ${orderCompleted ? "green" : "blue"}`}>{statusLabel(order.status)}</span>
-          {data.canManage && !readOnly && <Modal title={`工作流版本 · ${order.order_number}`} triggerLabel="工作流版本" triggerClassName="btn" closeSignal={success} size="wide" dialogClassName="workflow-switch-modal"><WorkflowVersionSwitchForm current={data.businessWorkflow} options={data.workflowVersions} impact={data.workflowSwitchImpact} busy={busy}/></Modal>}
+          {data.current.permissions.includes("workflow.manage") && !readOnly && <Modal title={`工作流版本 · ${order.order_number}`} triggerLabel="工作流版本" triggerClassName="btn" closeSignal={success} size="wide" dialogClassName="workflow-switch-modal"><WorkflowVersionSwitchForm current={data.businessWorkflow} options={data.workflowVersions} impact={data.workflowSwitchImpact} busy={busy}/></Modal>}
           <button className="btn head-detail-trigger" type="button" onClick={() => setDrawerTab("dossier")}>订单关键资料</button>
           <Link className="btn" to="/admin/orders">返回订单列表</Link>
         </div>
@@ -2008,13 +2023,21 @@ function CurrentNodeWorksheet({
                         <strong>{task.task_name}</strong>
                         <small>{task.task_position_name || task.task_position_code || row.position_name || "按模组岗位"}{task.task_instructions ? ` · ${task.task_instructions}` : ""}</small>
                       </div>
-                      {task.task_status !== "completed" && isWorkflowTaskManual(step.step_key, task.task_key || "") ? (
+                      {task.task_status !== "completed" && isWorkflowTaskManual(step.step_key, task.task_key || "") && (
+                        task.task_assignee_user_id
+                          ? task.task_assignee_user_id === data.current.userId
+                          : row.assignee_user_id
+                            ? row.assignee_user_id === data.current.userId
+                            : (task.task_position_code || row.responsibility_position_code) === data.current.positionCode
+                      ) ? (
                         <Form method="post">
                           <input type="hidden" name="intent" value="workflow_task_complete" />
                           <input type="hidden" name="taskStateId" value={task.task_state_id || ""} />
                           <button className="secondary" disabled={busy}>{workflowTaskActionLabel(task.task_type || "manual")}</button>
                         </Form>
-                      ) : task.task_status !== "completed" ? <small>保存完整数据后自动完成</small> : <small>已完成</small>}
+                      ) : task.task_status !== "completed" ? (
+                        <small>{isWorkflowTaskManual(step.step_key, task.task_key || "") ? "由当前责任人办理" : "保存完整数据后自动完成"}</small>
+                      ) : <small>已完成</small>}
                     </li>
                   ))}
                 </ol>

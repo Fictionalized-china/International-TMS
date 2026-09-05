@@ -3,14 +3,22 @@ import {
   configuredModuleRequiresCompletion,
   costsModuleReviewBlocker,
   currencyFinance,
+  finalizedOrderReviewState,
   orderCompletionStatus,
-  orderReviewModuleState,
+  orderReviewFinalizationDecision,
+  orderReviewPreparationModuleState,
   orderReviewSettlementBlockers,
+  pendingOrderReviewCurrentStep,
+  pendingOrderReviewCompletionStatus,
   pickupCompletionRequired,
   pickupCompletionReviewBlocker,
+  refreshedArchivedOrderCompletionStatus,
+  refreshedArchivedSettlementCompletedAt,
   type CurrencyFinance,
   type OrderCompletionStatus,
 } from "./order-review";
+import { syncOrderBusinessWorkflow } from "./business-workflow.server";
+import { missingRequiredModuleFields } from "./workflow-fields.server";
 
 export type ReviewTiming = {
   orderAt: string | null;
@@ -72,6 +80,11 @@ export type OrderReviewView = {
   improvementNotes: string | null;
 };
 
+export type OrderReviewFinalizationGate = {
+  allowed: boolean;
+  reason: string | null;
+};
+
 type SnapshotRow = {
   id: string;
   revision: number;
@@ -124,11 +137,13 @@ export async function generateOrderReview(
     reviewGenerated: true,
     finance: draft.finance,
   });
-  const reviewModuleState = orderReviewModuleState(
+  const reviewModuleState = orderReviewPreparationModuleState(
     completionStatus,
     draft.blockers.map((item) => item.message),
   );
   const readinessStatus = completionStatus === "in_progress" ? "blocked" : completionStatus;
+  const persistedCompletionStatus = pendingOrderReviewCompletionStatus(completionStatus);
+  const pendingStep = pendingOrderReviewCurrentStep(completionStatus);
   const id = previous?.id ?? crypto.randomUUID();
   const revision = (previous?.revision ?? 0) + 1;
   const statements = [
@@ -157,15 +172,24 @@ export async function generateOrderReview(
       ),
     db.prepare(`UPDATE transport_orders SET
       completion_status=?,
-      business_completed_at=CASE WHEN ?!='in_progress' THEN COALESCE(business_completed_at,?) ELSE business_completed_at END,
-      settlement_completed_at=CASE WHEN ?='completed_settled' THEN COALESCE(settlement_completed_at,?) ELSE NULL END,
-      status=CASE WHEN ?='completed_settled' THEN 'completed' ELSE status END,
-      current_step_code=CASE WHEN ?='completed_settled' THEN 'completed' ELSE current_step_code END,
-      current_step_name=CASE WHEN ?='completed_settled' THEN '订单完成 · 已完成并结清' WHEN ?!='in_progress' THEN '订单完成 · 待结算跟进' ELSE current_step_name END,
+      settlement_completed_at=NULL,
+      current_step_code=CASE WHEN ?=1 THEN ? ELSE current_step_code END,
+      current_step_name=CASE WHEN ?=1 THEN ? ELSE current_step_name END,
       workflow_updated_at=CASE WHEN ?!='in_progress' THEN ? ELSE workflow_updated_at END,
       updated_at=?
-      WHERE id=? AND organization_id=?`)
-      .bind(completionStatus,completionStatus,input.now,completionStatus,input.now,completionStatus,completionStatus,completionStatus,completionStatus,completionStatus,input.now,input.now,input.orderId,input.organizationId),
+      WHERE id=? AND organization_id=? AND status!='completed'`)
+      .bind(
+        persistedCompletionStatus,
+        pendingStep?1:0,
+        pendingStep?.code??null,
+        pendingStep?1:0,
+        pendingStep?.name??null,
+        completionStatus,
+        input.now,
+        input.now,
+        input.orderId,
+        input.organizationId,
+      ),
   ];
   const module = await db.prepare(
     "SELECT id,current_step_code FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='review'",
@@ -180,19 +204,186 @@ export async function generateOrderReview(
           reviewModuleState.stepName,
           reviewModuleState.progressPercent,
           reviewModuleState.blockingReason,
-          input.now,reviewModuleState.completed ? input.now : null,input.now,module.id,input.organizationId,
+          input.now,null,input.now,module.id,input.organizationId,
         ),
       db.prepare(`INSERT INTO order_module_history(id,organization_id,order_id,module_instance_id,action_code,action_name,from_step_code,to_step_code,to_step_name,actor_user_id,notes,occurred_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
         .bind(crypto.randomUUID(),input.organizationId,input.orderId,module.id,"generate_review","生成订单复盘",module.current_step_code,
-          completionStatus === "in_progress" ? "reviewing" : "confirmed",
-          completionStatus === "in_progress" ? "复盘中" : "复盘确认",input.userId,
+          reviewModuleState.stepCode,
+          reviewModuleState.stepName,input.userId,
           completionStatusLabels[completionStatus],input.now),
     );
   }
   await db.batch(statements);
   await syncSettlementFollowUpTask(db,input.organizationId,input.orderId,input.userId,input.now,completionStatus);
+  await syncOrderBusinessWorkflow({
+    organizationId: input.organizationId,
+    orderId: input.orderId,
+    actorUserId: input.userId,
+    source: "admin",
+  });
   return { completionStatus, label: completionStatusLabels[completionStatus], blockers: draft.blockers };
+}
+
+export async function loadOrderReviewFinalizationGate(
+  db: D1Database,
+  organizationId: string,
+  orderId: string,
+  review?: OrderReviewView,
+): Promise<OrderReviewFinalizationGate> {
+  const currentReview = review ?? await loadOrderReview(db,organizationId,orderId);
+  const missingFields = await missingRequiredModuleFields(
+    organizationId,
+    orderId,
+    "review",
+  );
+  if (missingFields.length) {
+    return {
+      allowed: false,
+      reason: `请先补齐当前模板要求的字段：${missingFields.map((field) => field.label).join("、")}`,
+    };
+  }
+  const pendingRequiredModules = await db.prepare(
+    `WITH instance_modules AS (
+       SELECT ms.module_code,ms.display_name,ms.is_required,ms.status
+       FROM workflow_instances wi
+       JOIN workflow_instance_step_states ss ON ss.instance_id=wi.id
+       JOIN workflow_instance_module_states ms ON ms.instance_step_state_id=ss.id
+       WHERE wi.organization_id=? AND wi.order_id=?
+     ), pending AS (
+       SELECT module_code,MIN(display_name) module_name
+       FROM instance_modules
+       WHERE is_required=1 AND module_code!='review' AND status!='completed'
+       GROUP BY module_code
+       UNION ALL
+       SELECT m.module_code,m.module_name
+       FROM order_module_instances m
+       WHERE m.organization_id=? AND m.order_id=?
+         AND m.enabled=1 AND m.is_required=1 AND m.module_code!='review'
+         AND m.status NOT IN ('completed','not_applicable')
+         AND NOT EXISTS(SELECT 1 FROM instance_modules)
+     )
+     SELECT module_code,module_name FROM pending ORDER BY module_code`,
+  ).bind(organizationId,orderId,organizationId,orderId).all<{
+    module_code: string;
+    module_name: string;
+  }>();
+  if (pendingRequiredModules.results.length) {
+    return {
+      allowed: false,
+      reason: `当前工作流仍有必办模块未完成：${pendingRequiredModules.results.map((item) => item.module_name).join("、")}`,
+    };
+  }
+  return orderReviewFinalizationDecision({
+    confirmed: true,
+    snapshotId: currentReview.snapshotId,
+    completionStatus: currentReview.completionStatus,
+    blockers: currentReview.blockers.map((blocker) => blocker.message),
+  });
+}
+
+export async function finalizeOrderReview(
+  db: D1Database,
+  input: {
+    organizationId: string;
+    orderId: string;
+    userId: string;
+    now: string;
+    confirmed: boolean;
+  },
+) {
+  const order = await db.prepare(
+    "SELECT status FROM transport_orders WHERE organization_id=? AND id=?",
+  ).bind(input.organizationId,input.orderId).first<{ status: string }>();
+  if (!order) return { completed: false as const, reason: "订单不存在" };
+  if (order.status !== "in_execution") {
+    return {
+      completed: false as const,
+      reason: order.status === "completed" ? "订单已经完成归档" : "当前订单状态不能最终确认归档",
+    };
+  }
+  const module = await db.prepare(
+    `SELECT m.id,m.current_step_code
+     FROM order_module_instances m
+     JOIN transport_orders o ON o.organization_id=m.organization_id AND o.id=m.order_id
+     WHERE m.organization_id=? AND m.order_id=? AND m.module_code='review'
+       AND (
+         (o.workflow_instance_id IS NULL AND m.enabled=1)
+         OR EXISTS(
+           SELECT 1
+           FROM workflow_instance_step_states ss
+           JOIN workflow_instance_module_states ms ON ms.instance_step_state_id=ss.id
+           WHERE ss.instance_id=o.workflow_instance_id AND ms.module_code='review'
+         )
+       )`,
+  ).bind(input.organizationId,input.orderId).first<{
+    id: string;
+    current_step_code: string | null;
+  }>();
+  if (!module) return { completed: false as const, reason: "当前工作流未启用订单复盘" };
+  const review = await loadOrderReview(db,input.organizationId,input.orderId);
+  if (!input.confirmed)
+    return { completed: false as const, reason: "请明确确认最终归档" };
+  const decision = await loadOrderReviewFinalizationGate(
+    db,
+    input.organizationId,
+    input.orderId,
+    review,
+  );
+  if (!decision.allowed)
+    return { completed: false as const, reason: decision.reason };
+  if (review.completionStatus === "in_progress")
+    return { completed: false as const, reason: "当前仍有必办门禁未完成" };
+  const finalState = finalizedOrderReviewState(review.completionStatus);
+  await db.batch([
+    db.prepare(`UPDATE transport_orders SET
+      completion_status=?,status='completed',
+      business_completed_at=COALESCE(business_completed_at,?),
+      settlement_completed_at=CASE WHEN ?=1 THEN COALESCE(settlement_completed_at,?) ELSE NULL END,
+      current_step_code='completed',current_step_name=?,
+      current_assignee_user_id=NULL,workflow_updated_at=?,updated_at=?
+      WHERE id=? AND organization_id=? AND status='in_execution'`)
+      .bind(
+        finalState.completionStatus,
+        input.now,
+        finalState.settlementCompleted ? 1 : 0,
+        input.now,
+        finalState.currentStepName,
+        input.now,
+        input.now,
+        input.orderId,
+        input.organizationId,
+      ),
+    db.prepare(`UPDATE order_module_instances SET
+      status='completed',current_step_code='confirmed',current_step_name='复盘确认',
+      progress_percent=100,blocking_reason=NULL,started_at=COALESCE(started_at,?),
+      completed_at=COALESCE(completed_at,?),updated_at=?
+      WHERE id=? AND organization_id=? AND status!='completed'`)
+      .bind(input.now,input.now,input.now,module.id,input.organizationId),
+    db.prepare(`INSERT INTO order_module_history(
+      id,organization_id,order_id,module_instance_id,action_code,action_name,
+      from_step_code,to_step_code,to_step_name,actor_user_id,notes,occurred_at
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .bind(
+        crypto.randomUUID(),input.organizationId,input.orderId,module.id,
+        "finalize_review","最终确认并归档",module.current_step_code,
+        "confirmed","复盘确认",input.userId,"全部当前工作流门禁已通过",input.now,
+      ),
+  ]);
+  await syncSettlementFollowUpTask(
+    db,input.organizationId,input.orderId,input.userId,input.now,finalState.completionStatus,
+  );
+  await syncOrderBusinessWorkflow({
+    organizationId: input.organizationId,
+    orderId: input.orderId,
+    actorUserId: input.userId,
+    source: "admin",
+  });
+  return {
+    completed: true as const,
+    reason: null,
+    completionStatus: finalState.completionStatus,
+  };
 }
 
 export async function refreshOrderCompletionStatus(
@@ -202,31 +393,111 @@ export async function refreshOrderCompletionStatus(
   now:string,
 ) {
   for (const orderId of [...new Set(orderIds)]) {
-    const snapshot = await db.prepare("SELECT 1 FROM order_review_snapshots WHERE organization_id=? AND order_id=?")
-      .bind(organizationId,orderId).first();
-    if (!snapshot) continue;
+    const order = await db.prepare(
+      `SELECT status,completion_status,settlement_completed_at,
+        EXISTS(SELECT 1 FROM order_review_snapshots r WHERE r.organization_id=o.organization_id AND r.order_id=o.id) has_snapshot
+       FROM transport_orders o WHERE organization_id=? AND id=?`,
+    ).bind(organizationId,orderId).first<{
+      status: string;
+      completion_status: OrderCompletionStatus;
+      settlement_completed_at: string | null;
+      has_snapshot: number;
+    }>();
+    if (!order?.has_snapshot) continue;
     const draft = await buildOrderReview(db,organizationId,orderId,null);
     const status = orderCompletionStatus({pickupComplete:draft.pickupComplete,pickupRequired:draft.pickupRequired,blockers:draft.blockers.map(x=>x.message),reviewGenerated:true,finance:draft.finance});
-    const reviewModuleState = orderReviewModuleState(status,draft.blockers.map(x=>x.message));
+    const reviewModuleState = orderReviewPreparationModuleState(status,draft.blockers.map(x=>x.message));
+    const archived = order.status === "completed";
+    const persistedCompletionStatus = archived
+      ? refreshedArchivedOrderCompletionStatus(order.completion_status,status)
+      : pendingOrderReviewCompletionStatus(status);
+    const pendingStep = pendingOrderReviewCurrentStep(status);
+    const settlementCompletedAt = refreshedArchivedSettlementCompletedAt({
+      archived,
+      previousStatus: order.completion_status,
+      latestStatus: persistedCompletionStatus,
+      previousCompletedAt: order.settlement_completed_at,
+      now,
+    });
     await db.batch([
-      db.prepare(`UPDATE transport_orders SET completion_status=?,status=CASE WHEN ?='completed_settled' THEN 'completed' WHEN status='completed' THEN 'in_execution' ELSE status END,
-        settlement_completed_at=CASE WHEN ?='completed_settled' THEN COALESCE(settlement_completed_at,?) ELSE NULL END,
-        current_step_code=CASE WHEN ?='completed_settled' THEN 'completed' ELSE current_step_code END,
-        current_step_name=CASE WHEN ?='completed_settled' THEN '订单完成 · 已完成并结清' WHEN ?!='in_progress' THEN '订单完成 · 待结算跟进' ELSE current_step_name END,
-        workflow_updated_at=CASE WHEN ?!='in_progress' THEN ? ELSE workflow_updated_at END,
+      db.prepare(`UPDATE transport_orders SET completion_status=?,
+        settlement_completed_at=?,
+        current_step_code=CASE WHEN status!='completed' AND ?=1 THEN ? ELSE current_step_code END,
+        current_step_name=CASE WHEN status!='completed' AND ?=1 THEN ? ELSE current_step_name END,
+        workflow_updated_at=CASE WHEN status!='completed' AND ?!='in_progress' THEN ? ELSE workflow_updated_at END,
         updated_at=?
         WHERE id=? AND organization_id=?`)
-        .bind(status,status,status,now,status,status,status,status,now,now,orderId,organizationId),
+        .bind(
+          persistedCompletionStatus,
+          settlementCompletedAt,
+          pendingStep?1:0,
+          pendingStep?.code??null,
+          pendingStep?1:0,
+          pendingStep?.name??null,
+          status,
+          now,
+          now,
+          orderId,
+          organizationId,
+        ),
       db.prepare(`UPDATE order_review_snapshots SET readiness_status=?,finance_json=?,blocker_json=?,updated_at=? WHERE organization_id=? AND order_id=?`)
         .bind(status==="in_progress"?"blocked":status,JSON.stringify(draft.finance),JSON.stringify(draft.blockers),now,organizationId,orderId),
       db.prepare(`UPDATE order_module_instances SET status=?,current_step_code=?,current_step_name=?,progress_percent=?,blocking_reason=?,
-        started_at=COALESCE(started_at,?),completed_at=CASE WHEN ?=1 THEN COALESCE(completed_at,?) ELSE NULL END,updated_at=?
-        WHERE organization_id=? AND order_id=? AND module_code='review' AND enabled=1`)
+        started_at=COALESCE(started_at,?),completed_at=NULL,updated_at=?
+        WHERE organization_id=? AND order_id=? AND module_code='review' AND status!='completed'`)
         .bind(reviewModuleState.status,reviewModuleState.stepCode,reviewModuleState.stepName,reviewModuleState.progressPercent,
-          reviewModuleState.blockingReason,now,reviewModuleState.completed?1:0,now,now,organizationId,orderId),
+          reviewModuleState.blockingReason,now,now,organizationId,orderId),
     ]);
     await syncSettlementFollowUpTask(db,organizationId,orderId,null,now,status);
+    await syncOrderBusinessWorkflow({ organizationId, orderId, source: "system" });
   }
+}
+
+type ConfiguredReviewModuleState = {
+  enabled: number;
+  is_required: number;
+  status: string;
+  blocking_reason: string | null;
+};
+
+export async function loadConfiguredReviewModuleState(
+  db: D1Database,
+  organizationId: string,
+  orderId: string,
+  moduleCode: string,
+): Promise<ConfiguredReviewModuleState | null> {
+  const row = await db.prepare(
+    `SELECT o.workflow_instance_id,m.enabled stored_enabled,m.is_required stored_required,
+      m.status,m.blocking_reason,
+      (SELECT COUNT(*)
+       FROM workflow_instance_step_states ss
+       JOIN workflow_instance_module_states ms ON ms.instance_step_state_id=ss.id
+       WHERE ss.instance_id=o.workflow_instance_id AND ms.module_code=?) configured_count,
+      (SELECT COALESCE(MAX(ms.is_required),0)
+       FROM workflow_instance_step_states ss
+       JOIN workflow_instance_module_states ms ON ms.instance_step_state_id=ss.id
+       WHERE ss.instance_id=o.workflow_instance_id AND ms.module_code=?) configured_required
+     FROM transport_orders o
+     LEFT JOIN order_module_instances m
+       ON m.organization_id=o.organization_id AND m.order_id=o.id AND m.module_code=?
+     WHERE o.organization_id=? AND o.id=?`,
+  ).bind(moduleCode,moduleCode,moduleCode,organizationId,orderId).first<{
+    workflow_instance_id: string | null;
+    stored_enabled: number | null;
+    stored_required: number | null;
+    status: string | null;
+    blocking_reason: string | null;
+    configured_count: number;
+    configured_required: number;
+  }>();
+  if (!row) return null;
+  const frozen = Boolean(row.workflow_instance_id);
+  return {
+    enabled: frozen ? Number(row.configured_count > 0) : row.stored_enabled ?? 0,
+    is_required: frozen ? Number(row.configured_required > 0) : row.stored_required ?? 0,
+    status: row.status ?? "not_started",
+    blocking_reason: row.blocking_reason,
+  };
 }
 
 async function buildOrderReview(
@@ -323,7 +594,7 @@ async function buildOrderReview(
       FROM transport_orders o
       JOIN workflow_instance_fields f ON f.instance_id=o.workflow_instance_id
       WHERE o.organization_id=? AND o.id=?
-        AND f.module_code='costs' AND f.step_key='reconciliation'
+        AND f.module_code='costs'
       ORDER BY f.sort_order,f.field_key`)
       .bind(organizationId,orderId)
       .all<{field_key:string;label:string;is_active:number;is_required:number}>(),
@@ -331,22 +602,14 @@ async function buildOrderReview(
       FROM transport_orders o
       JOIN workflow_instance_fields f ON f.instance_id=o.workflow_instance_id
       WHERE o.organization_id=? AND o.id=?
-        AND f.module_code='overseas_warehouse' AND f.step_key='overseas_pickup'
+        AND f.module_code='overseas_warehouse'
       ORDER BY f.sort_order,f.field_key`)
       .bind(organizationId,orderId)
       .all<{field_key:string;label:string;is_active:number;is_required:number}>(),
-    db.prepare(`SELECT enabled,is_required,status,blocking_reason FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='costs'`)
-      .bind(organizationId,orderId)
-      .first<{enabled:number;is_required:number;status:string;blocking_reason:string|null}>(),
-    db.prepare(`SELECT enabled,is_required FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='overseas_warehouse'`)
-      .bind(organizationId,orderId)
-      .first<{enabled:number;is_required:number}>(),
-    db.prepare(`SELECT enabled,is_required FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='warehouse'`)
-      .bind(organizationId,orderId)
-      .first<{enabled:number;is_required:number}>(),
-    db.prepare(`SELECT enabled,is_required FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='exceptions'`)
-      .bind(organizationId,orderId)
-      .first<{enabled:number;is_required:number}>(),
+    loadConfiguredReviewModuleState(db,organizationId,orderId,"costs"),
+    loadConfiguredReviewModuleState(db,organizationId,orderId,"overseas_warehouse"),
+    loadConfiguredReviewModuleState(db,organizationId,orderId,"warehouse"),
+    loadConfiguredReviewModuleState(db,organizationId,orderId,"exceptions"),
   ]);
   const [people] = await Promise.all([
     db.prepare(`SELECT

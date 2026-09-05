@@ -38,17 +38,23 @@ if str(HERE) not in sys.path:
 
 from tms_ui_credentials import CredentialRecord, CredentialVault, load_credentials
 from tms_ui_harness import GateExpectation, RoleBrowserSession, TmsUIHarness, safe_artifact_name
+from tms_pz_account_prep import (
+    build_pz_runtime_credentials,
+    prepare_secondary_pz_accounts,
+)
 
 
 ORDER_KEYS = ("ftl", "ltl1", "ltl2", "ltl3")
 LTL_KEYS = ("ltl1", "ltl2", "ltl3")
 REQUIRED_ACCOUNT_ALIASES = (
+    "hr_admin",
     "operation",
     "operation_supervisor",
     "document",
     "domestic_warehouse",
 )
 PHASE2_STAGE_ORDER = (
+    "secondary_pz_account_preparation",
     "domestic_transport",
     "domestic_receiving",
     "ftl_loading_outbound",
@@ -84,6 +90,7 @@ class Phase1Handoff:
     orders: dict[str, str]
     customer_name: str = ""
     source_entity_prefix: str = ""
+    original_assignees: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -143,7 +150,23 @@ def load_phase1_handoff(path: Path | str) -> Phase1Handoff:
         if isinstance(attempt, Mapping)
         else ""
     )
-    return Phase1Handoff(source_run_id, orders, customer_name, source_entity_prefix)
+    original_assignees: dict[str, dict[str, str]] = {}
+    for role in ("operation", "document", "customer_service", "finance"):
+        raw_role_assignees = entities.get(f"{role}_assignee")
+        if not isinstance(raw_role_assignees, Mapping):
+            continue
+        original_assignees[role] = {
+            str(key): str(value).strip()
+            for key, value in raw_role_assignees.items()
+            if str(value).strip()
+        }
+    return Phase1Handoff(
+        source_run_id,
+        orders,
+        customer_name,
+        source_entity_prefix,
+        original_assignees,
+    )
 
 
 def build_handoff_payload(
@@ -180,6 +203,8 @@ def build_handoff_payload(
         "assignees": {
             "operation": artifacts.operation_assignee,
             "document": artifacts.document_assignee,
+            "operation_alias": "operation_2",
+            "document_alias": "document_2",
         },
         "completed_stages": list(PHASE2_STAGE_ORDER) if ready_for_phase3 else [],
         "ready_for_phase3": ready_for_phase3,
@@ -220,6 +245,7 @@ def _public_preflight(
         "source_phase1_run_id": phase1.source_run_id,
         "orders": dict(phase1.orders),
         "required_roles": [item.public_summary() for item in selected],
+        "derived_runtime_roles": ["operation_2", "document_2"],
         "stage_order": list(PHASE2_STAGE_ORDER),
         "file_chooser_fixture": fixture.name,
         "next_action": "仅在服务、主数据和第一阶段结果确认无误后显式传入 --execute。",
@@ -232,13 +258,15 @@ def _workflow_gate(
     ui: str,
     server: str,
     owner: str,
-    source: str = "workflow_instance_field_configuration",
+    source: str = "workflow_instance_module_state",
+    configured_mode: str = "required",
+    expected_behavior: str = "allow",
 ) -> GateExpectation:
     return GateExpectation(
         name=name,
         source=source,  # type: ignore[arg-type]
-        configured_mode="required",
-        expected_behavior="allow",
+        configured_mode=configured_mode,  # type: ignore[arg-type]
+        expected_behavior=expected_behavior,  # type: ignore[arg-type]
         ui_expectation=ui,
         server_expectation=server,
         owner_role=owner,
@@ -246,12 +274,19 @@ def _workflow_gate(
     )
 
 
-def _permission_gate(name: str, *, ui: str, server: str, owner: str) -> GateExpectation:
+def _permission_gate(
+    name: str,
+    *,
+    ui: str,
+    server: str,
+    owner: str,
+    writable: bool = True,
+) -> GateExpectation:
     return GateExpectation(
         name=name,
         source="role_permission_configuration",
-        configured_mode="read_only",
-        expected_behavior="allow",
+        configured_mode="operate" if writable else "read_only",
+        expected_behavior="allow" if writable else "read_only",
         ui_expectation=ui,
         server_expectation=server,
         owner_role=owner,
@@ -278,6 +313,7 @@ class Phase2Flow:
         self.domestic_warehouse_id = ""
         self.domestic_warehouse_name = ""
         self.operation = self._add_role("operation")
+        self.batch_operation = self._add_role("operation_2")
         self.operation_supervisor = self._add_role("operation_supervisor")
         self.domestic_warehouse = self._add_role("domestic_warehouse")
         for key, number in phase1.orders.items():
@@ -379,7 +415,7 @@ class Phase2Flow:
 
     def _click_workload_tab(self, session: RoleBrowserSession, label: str) -> None:
         tabs = session.page.get_by_role("navigation", name="普通订单与配载订单分类")
-        link = tabs.get_by_role("link", name=re.compile(rf"^{re.escape(label)}\b"))
+        link = tabs.get_by_role("link", name=re.compile(rf"^{re.escape(label)}"))
         if not self._is_visible(link):
             raise BusinessBlocker(
                 f"{session.role} 未显示“{label}”页签",
@@ -447,18 +483,26 @@ class Phase2Flow:
         name: str,
         value: str,
         target: str,
-        *,
-        keyboard: bool = True,
     ) -> None:
         control = form.locator(f'[name="{name}"]')
         if not self._is_visible(control):
             return
         if control.first.get_attribute("readonly") is not None:
             return
-        if keyboard:
-            session.type_text(control.first, value, target)
-        else:
-            session.fill(control.first, value, target)
+        session.type_text(control.first, value, target)
+
+    def _type_datetime_if_visible(
+        self,
+        session: RoleBrowserSession,
+        form: Locator,
+        name: str,
+        value: str,
+        target: str,
+    ) -> None:
+        control = form.locator(f'input[type="datetime-local"][name="{name}"]')
+        if not self._is_visible(control):
+            return
+        session.type_datetime_local(control.first, value, target)
 
     def _visible_error_text(self, session: RoleBrowserSession) -> str:
         errors = session.page.locator(
@@ -621,21 +665,19 @@ class Phase2Flow:
                 )
                 planned_departure = datetime.now() + timedelta(hours=1)
                 planned_arrival = planned_departure + timedelta(hours=4)
-                self._fill_if_visible(
+                self._type_datetime_if_visible(
                     self.operation,
                     form,
                     "plannedDepartureAt",
                     planned_departure.strftime("%Y-%m-%dT%H:%M"),
                     "填写计划提货时间",
-                    keyboard=False,
                 )
-                self._fill_if_visible(
+                self._type_datetime_if_visible(
                     self.operation,
                     form,
                     "plannedArrivalAt",
                     planned_arrival.strftime("%Y-%m-%dT%H:%M"),
                     "填写计划到仓时间",
-                    keyboard=False,
                 )
                 self._fill_if_visible(
                     self.operation,
@@ -881,13 +923,12 @@ class Phase2Flow:
             "整车出境车辆",
             excluded_values=(),
         )
-        self._fill_if_visible(
+        self._type_datetime_if_visible(
             session,
             form,
             "plannedDepartureAt",
             (datetime.now() + timedelta(hours=8)).strftime("%Y-%m-%dT%H:%M"),
             "填写整车计划出境发车时间",
-            keyboard=False,
         )
         self._fill_if_visible(
             session,
@@ -937,39 +978,123 @@ class Phase2Flow:
         dispatch_number = dispatch_numbers[0].upper()
 
         unique_codes = list(dict.fromkeys(code.upper() for code in cargo_codes))
-        if not unique_codes:
-            raise BusinessBlocker(
-                f"{subject} 没有可用于真实扫码的 OUL 货物码",
-                owner="仓库标签生成维护人",
-                remediation="返回验收入库页生成完整 OUL 标签后重新从头测试。",
+        scan_form = self.domestic_warehouse.page.locator("form.outbound-loading-scan")
+        barcode = scan_form.locator('input[name="barcode"]')
+        hidden_notice = self.domestic_warehouse.page.get_by_text(
+            re.compile(r"当前工作流已隐藏逐件扫码")
+        )
+        scan_is_visible = self._is_visible(barcode)
+        hidden_by_workflow = self._is_visible(hidden_notice)
+
+        if scan_is_visible:
+            scan_label = self._locator_text(scan_form.locator("label").first, 1_000)
+            scan_mode = "optional" if "选填" in scan_label else "required"
+        elif hidden_by_workflow:
+            scan_mode = "hidden"
+        else:
+            # A previously completed scan set replaces the barcode input with the
+            # final handover button.  Treat it as the configured active policy,
+            # not as an unexplained missing control.
+            final_ready = self.domestic_warehouse.page.get_by_role(
+                "button", name=re.compile(r"^确认出库并打印交接单")
             )
-        for index, code in enumerate(unique_codes, start=1):
-            scan_form = self.domestic_warehouse.page.locator("form.outbound-loading-scan")
-            barcode = scan_form.locator('input[name="barcode"]')
-            if not self._is_visible(barcode):
-                raise BusinessBlocker(
-                    f"{subject} 第 {index}/{len(unique_codes)} 个货物待扫码，但工作台没有可见扫码框",
-                    owner="出库工作流配置与仓库装车页面维护人",
-                    remediation="本认证要求逐件扫码；确认当前工作流开启扫码并同步显示 UI。",
+            scan_mode = "required" if self._is_visible(final_ready) else "optional"
+
+        scan_expectation = GateExpectation(
+            name=f"{subject} 逐件扫码门禁",
+            source="workflow_instance_field_configuration",
+            configured_mode=scan_mode,  # type: ignore[arg-type]
+            expected_behavior="hide" if scan_mode == "hidden" else "allow",
+            ui_expectation=(
+                "隐藏模式不渲染扫码框并提供双确认差异出库；选填模式可扫码也可双确认；必填模式必须全部扫码"
+            ),
+            server_expectation=(
+                "出库服务端读取同一锁定实例策略：仅必填模式以未扫货物阻断，隐藏/选填模式要求差异二次确认"
+            ),
+            owner_role="国内仓库岗",
+            remediation="统一工作流实例字段策略、页面提示和出库 action 的扫码判断。",
+        )
+        self.domestic_warehouse.record_gate(
+            name=scan_expectation.name,
+            expected=scan_expectation.ui_expectation,
+            passed=(scan_is_visible and not hidden_by_workflow)
+            or (scan_mode == "hidden" and hidden_by_workflow and not scan_is_visible)
+            or self._is_visible(
+                self.domestic_warehouse.page.get_by_role(
+                    "button", name=re.compile(r"^确认出库并打印交接单")
                 )
-            self.domestic_warehouse.type_text(barcode.first, code, f"扫描货物码 {code}")
-            self.domestic_warehouse.click(
-                scan_form.get_by_role("button", name="确认装车"),
-                f"确认货物码 {code} 装车",
+            ),
+            actual=f"页面解析到逐件扫码策略：{scan_mode}",
+            expectation=scan_expectation,
+            case_id="P2-OUTBOUND-SCAN-GATE-01",
+        )
+
+        if scan_is_visible and unique_codes:
+            for index, code in enumerate(unique_codes, start=1):
+                # The scan form is keyed by loaded_count and is replaced after
+                # each submit, so reacquire it before every visible interaction.
+                scan_form = self.domestic_warehouse.page.locator(
+                    "form.outbound-loading-scan"
+                )
+                barcode = scan_form.locator('input[name="barcode"]')
+                self._expect_visible_or_block(
+                    self.domestic_warehouse,
+                    barcode,
+                    f"{subject} 第 {index}/{len(unique_codes)} 个货物扫码框",
+                    owner="出库工作流配置与仓库装车页面维护人",
+                    remediation="核对逐件扫码策略和装车累计状态是否使用同一任务。",
+                )
+                self.domestic_warehouse.type_text(
+                    barcode.first, code, f"扫描货物码 {code}"
+                )
+                self.domestic_warehouse.click(
+                    scan_form.get_by_role("button", name="确认装车"),
+                    f"确认货物码 {code} 装车",
+                )
+                self.domestic_warehouse.page.wait_for_timeout(150)
+        elif scan_mode == "required":
+            raise BusinessBlocker(
+                f"{subject} 的逐件扫码为必填，但没有可用于真实扫码的 OUL 货物码",
+                owner="仓库标签生成维护人",
+                remediation="返回验收入库页生成完整 OUL 标签后，以全新同类型订单重新测试。",
             )
-            self.domestic_warehouse.page.wait_for_timeout(150)
 
         final_button = self.domestic_warehouse.page.get_by_role(
             "button", name=re.compile(r"^确认出库并打印交接单")
         )
-        self._expect_visible_or_block(
-            self.domestic_warehouse,
-            final_button,
-            f"{subject} 最终出库交接入口",
-            owner="仓库装车进度维护人",
-            remediation="确认每个 OUL 扫码状态已累计到同一装车任务。",
-        )
-        self.domestic_warehouse.click(final_button.first, f"确认 {subject} 出库并打印交接单")
+        if self._is_visible(final_button):
+            self.domestic_warehouse.click(
+                final_button.first, f"确认 {subject} 出库并打印交接单"
+            )
+        else:
+            # Hidden and optional policies deliberately allow a recorded scan
+            # difference.  Both confirmations are visible human actions.
+            acknowledge = self.domestic_warehouse.page.get_by_role(
+                "button", name="我已核对，继续办理出库"
+            )
+            self._expect_visible_or_block(
+                self.domestic_warehouse,
+                acknowledge,
+                f"{subject} 未扫码差异首次确认",
+                owner="仓库出库门禁维护人",
+                remediation="隐藏/选填扫码必须显示差异说明和两次显式确认，不能静默放行。",
+            )
+            self.domestic_warehouse.click(
+                acknowledge.first, f"核对 {subject} 未扫码差异并继续"
+            )
+            confirm_difference = self.domestic_warehouse.page.get_by_role(
+                "button", name="确认差异并出库"
+            )
+            self._expect_visible_or_block(
+                self.domestic_warehouse,
+                confirm_difference,
+                f"{subject} 未扫码差异最终确认",
+                owner="仓库出库门禁维护人",
+                remediation="首次确认后必须出现最终出库按钮并由操作员再次确认。",
+            )
+            self.domestic_warehouse.click(
+                confirm_difference.first, f"确认 {subject} 差异并出库"
+            )
         completed = self.domestic_warehouse.page.get_by_role(
             "heading", name="出库交接已完成"
         )
@@ -1141,13 +1266,12 @@ class Phase2Flow:
                 ("plannedDepartureAt", 8, "填写计划出境发车时间"),
                 ("plannedArrivalAt", 72, "填写计划境外到仓时间"),
             ):
-                self._fill_if_visible(
+                self._type_datetime_if_visible(
                     self.domestic_warehouse,
                     form,
                     name,
                     (now + timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M"),
                     target,
-                    keyboard=False,
                 )
             self._fill_if_visible(
                 self.domestic_warehouse,
@@ -1193,7 +1317,13 @@ class Phase2Flow:
                 gate_passed=True,
             )
 
-    def _pick_batch_assignee(self, person_label: str, preferred_person: str) -> str:
+    def _pick_batch_assignee(
+        self,
+        person_label: str,
+        preferred_person: str,
+        *,
+        excluded_people: Sequence[str] = (),
+    ) -> str:
         session = self.operation_supervisor
         dialog = session.page.get_by_role(
             "dialog", name=f"配载单一键分配 · {self.artifacts.batch_number}"
@@ -1252,12 +1382,27 @@ class Phase2Flow:
                 owner="组织与人员维护人",
                 remediation=f"为{person_label}岗位绑定至少一个启用用户。",
             )
-        selected = people.first
-        if preferred_person:
-            preferred = people.filter(has_text=preferred_person)
-            if preferred.count() > 0:
-                selected = preferred.first
+        excluded = {item.strip() for item in excluded_people if item.strip()}
+        candidates: list[Locator] = []
+        preferred_candidates: list[Locator] = []
+        for index in range(people.count()):
+            candidate = people.nth(index)
+            candidate_name = self._locator_text(candidate, 300).splitlines()[0].strip()
+            if candidate.is_disabled() or candidate_name in excluded:
+                continue
+            candidates.append(candidate)
+            if preferred_person and preferred_person in self._locator_text(candidate, 500):
+                preferred_candidates.append(candidate)
+        if not candidates:
+            raise BusinessBlocker(
+                f"{person_label}没有区别于挂载订单原负责人的可选新人员",
+                owner="组织与人员维护人",
+                remediation=f"为{person_label}岗位至少维护两名可登录人员；PZ 首次分配不得沿用任一子订单原负责人。",
+            )
+        selected = preferred_candidates[0] if preferred_candidates else candidates[0]
         selected_name = self._locator_text(selected, 300).splitlines()[0].strip()
+        if selected_name in excluded:
+            raise AssertionError(f"{person_label}错误选择了挂载订单原负责人")
         session.click(selected, f"选择{person_label}个人账户 {selected_name}")
         validator = picker.locator("select.organization-assignee-native-validator")
         if not validator.input_value():
@@ -1309,11 +1454,29 @@ class Phase2Flow:
                 remediation="统一配载状态、当前主管与按钮可见/服务端授权规则。",
             )
             self.operation_supervisor.click(action.first, f"打开 {pz} 整批分配")
+            original_operation_people = tuple(
+                self.phase1.original_assignees.get("operation", {}).get(key, "")
+                for key in LTL_KEYS
+            )
+            original_document_people = tuple(
+                self.phase1.original_assignees.get("document", {}).get(key, "")
+                for key in LTL_KEYS
+            )
+            if not any(original_operation_people) or not any(original_document_people):
+                raise BusinessBlocker(
+                    "第一阶段交接结果缺少三票挂载订单的原操作/单证负责人证据",
+                    owner="纯 UI 验收例程维护人",
+                    remediation="必须用新版 Phase1 从全新客户重新执行并记录每票原负责人，禁止复用旧摘要。",
+                )
             self.artifacts.operation_assignee = self._pick_batch_assignee(
-                "整批操作负责人", self.credentials["operation"].role
+                "整批操作负责人",
+                self.credentials["operation_2"].role,
+                excluded_people=original_operation_people,
             )
             self.artifacts.document_assignee = self._pick_batch_assignee(
-                "整批单证负责人", self.credentials["document"].role
+                "整批单证负责人",
+                self.credentials["document_2"].role,
+                excluded_people=original_document_people,
             )
             dialog = self.operation_supervisor.page.get_by_role(
                 "dialog", name=f"配载单一键分配 · {pz}"
@@ -1349,18 +1512,19 @@ class Phase2Flow:
 
     def assert_mounted_orders_leave_ordinary_table(self) -> None:
         with self.operation.step(
-            "操作岗核对三票挂载订单不再作为普通订单重复出现",
-            case_id="P2-BATCH-VISIBILITY-01",
+            "原操作岗核对三票挂载订单已解除普通订单办理关系",
+            case_id="P2-BATCH-VISIBILITY-OLD-OWNER",
             stage="配载单列表与权限",
             priority="P0",
             preconditions=("操作主管已完成整批分配",),
             inputs={"order_numbers": [self.phase1.orders[key] for key in LTL_KEYS]},
-            expected_result="三票订单从普通订单办理表消失，只在唯一 PZ 配载订单行集中出现",
+            expected_result="原操作岗的普通订单办理表不再出现三票挂载订单",
             gate=_permission_gate(
-                "挂载订单去重与配载单可见范围",
-                ui="普通订单页不显示已挂载子订单，配载订单页显示 PZ 及全部三票订单号。",
-                server="查询范围按有效 PZ 挂载关系去重，并按整批负责人授权。",
-                owner="操作岗",
+                "PZ 首次换人后原操作关系解除",
+                ui="原操作岗普通订单页不再提供挂载子订单的办理行。",
+                server="整批审批原子解除子订单原操作关系，历史只读记录单独保留。",
+                owner="原操作岗",
+                writable=False,
             ),
         ) as observation:
             for key in LTL_KEYS:
@@ -1378,24 +1542,42 @@ class Phase2Flow:
                 self.operation.expect_hidden(
                     rows, f"挂载订单 {order_number} 不在普通订单表"
                 )
+            observation.observe("原操作岗普通订单表已移除三票挂载订单", gate_passed=True)
 
-            self._click_workload_tab(self.operation, "配载订单")
-            batch_form = self.operation.page.locator("form.batch-workload-filters")
-            self.operation.type_text(
+        with self.batch_operation.step(
+            "新整批操作负责人核对唯一 PZ 和三票挂载范围",
+            case_id="P2-BATCH-VISIBILITY-NEW-OWNER",
+            stage="配载单列表与权限",
+            priority="P0",
+            preconditions=("操作主管已把 PZ 分配给 operation_2",),
+            inputs={"batch_number": self.artifacts.batch_number},
+            expected_result="新负责人只在配载订单页看到唯一 PZ，且 PZ 行集中包含三票订单",
+            gate=_permission_gate(
+                "PZ 新整批操作负责人可见范围",
+                ui="新操作负责人配载订单页显示 PZ 及全部三票订单号。",
+                server="查询范围严格按 transport_batches.operation_assignee_user_id 授权。",
+                owner="整批操作负责人",
+                writable=False,
+            ),
+        ) as observation:
+            self._click_navigation(self.batch_operation, "运输订单")
+            self._click_workload_tab(self.batch_operation, "配载订单")
+            batch_form = self.batch_operation.page.locator("form.batch-workload-filters")
+            self.batch_operation.type_text(
                 batch_form.locator('input[name="batchKeyword"]'),
                 self.artifacts.batch_number,
                 "查询已分配 PZ",
             )
-            self.operation.click(
+            self.batch_operation.click(
                 batch_form.get_by_role("button", name="查询"), "筛选配载订单"
             )
-            row = self.operation.page.locator("table tbody tr").filter(
+            row = self.batch_operation.page.locator("table tbody tr").filter(
                 has_text=self.artifacts.batch_number
             )
             self._expect_visible_or_block(
-                self.operation,
+                self.batch_operation,
                 row,
-                f"操作岗配载单 {self.artifacts.batch_number}",
+                f"新负责人配载单 {self.artifacts.batch_number}",
                 owner="配载单负责人范围维护人",
                 remediation="确认整批操作负责人绑定已生效并纳入操作岗数据范围。",
             )
@@ -1407,7 +1589,7 @@ class Phase2Flow:
                     owner="配载订单列表维护人",
                     remediation="配载行应集中展示所有有效挂载订单号。",
                 )
-            observation.observe("普通订单已去重，PZ 行包含三票挂载订单", gate_passed=True)
+            observation.observe("新整批操作负责人可见唯一 PZ 和三票挂载订单", gate_passed=True)
 
     def complete_ltl_batch_outbound(self) -> None:
         codes = [
@@ -1442,8 +1624,9 @@ class Phase2Flow:
 
     def assert_batch_sync_and_drawer(self) -> None:
         pz = self.artifacts.batch_number
-        with self.operation.step(
-            f"操作岗核对 {pz} 三票出库同步与右侧资料抽屉",
+        session = self.batch_operation
+        with session.step(
+            f"新整批操作负责人核对 {pz} 三票出库同步与右侧资料抽屉",
             case_id="P2-BATCH-SYNC-DRAWER-01",
             stage="配载单同步与资料可见性",
             priority="P0",
@@ -1454,37 +1637,38 @@ class Phase2Flow:
                 f"{pz} 出库同步和操作岗资料可见性",
                 ui="配载与车辆页实时显示三票已出库，侧栏就地打开抽屉并展开逐票货物资料。",
                 server="整批出库同步每票装车模块；操作负责人可读但不越权修改仓库事实。",
-                owner="操作岗",
+                owner="整批操作负责人",
+                writable=False,
             ),
         ) as observation:
-            self._click_navigation(self.operation, "运输订单")
-            self._click_workload_tab(self.operation, "配载订单")
-            form = self.operation.page.locator("form.batch-workload-filters")
-            self.operation.type_text(
+            self._click_navigation(session, "运输订单")
+            self._click_workload_tab(session, "配载订单")
+            form = session.page.locator("form.batch-workload-filters")
+            session.type_text(
                 form.locator('input[name="batchKeyword"]'), pz, "查询出库后的 PZ"
             )
-            self.operation.click(form.get_by_role("button", name="查询"), "筛选配载订单")
-            row = self.operation.page.locator("table tbody tr").filter(has_text=pz)
+            session.click(form.get_by_role("button", name="查询"), "筛选配载订单")
+            row = session.page.locator("table tbody tr").filter(has_text=pz)
             self._expect_visible_or_block(
-                self.operation,
+                session,
                 row,
                 f"出库后的配载单 {pz}",
                 owner="配载单负责人范围维护人",
                 remediation="保证整批职责在出库后仍保留历史可读范围。",
             )
             pz_link = row.first.get_by_role("link", name=pz, exact=True)
-            self.operation.click(pz_link, f"打开配载单 {pz}")
-            self._assert_no_error_page(self.operation)
-            workspace_tabs = self.operation.page.get_by_role(
+            session.click(pz_link, f"打开配载单 {pz}")
+            self._assert_no_error_page(session)
+            workspace_tabs = session.page.get_by_role(
                 "navigation", name="配载单工作区"
             )
             batch_tab = workspace_tabs.get_by_role("link", name=re.compile(r"配载与车辆"))
-            self.operation.click(batch_tab.first, "切换到配载与车辆")
-            mounted = self.operation.page.locator(".loading-sheet-section").filter(
-                has=self.operation.page.get_by_role("heading", name="挂载订单")
+            session.click(batch_tab.first, "切换到配载与车辆")
+            mounted = session.page.locator(".loading-sheet-section").filter(
+                has=session.page.get_by_role("heading", name="挂载订单")
             )
             self._expect_visible_or_block(
-                self.operation,
+                session,
                 mounted,
                 "挂载订单状态表",
                 owner="配载单详情维护人",
@@ -1494,7 +1678,7 @@ class Phase2Flow:
                 order_number = self.phase1.orders[key]
                 order_row = mounted.locator("tbody tr").filter(has_text=order_number)
                 self._expect_visible_or_block(
-                    self.operation,
+                    session,
                     order_row,
                     f"挂载订单 {order_number}",
                     owner="整批出库同步维护人",
@@ -1507,14 +1691,14 @@ class Phase2Flow:
                         remediation="修复 PZ dispatch 完成后对子订单、shipment 和 package 状态的同步。",
                     )
 
-            side = self.operation.page.get_by_role(
+            side = session.page.get_by_role(
                 "complementary", name="配载单关键资料与快捷查看"
             )
             open_drawer = side.get_by_role("button", name="展开 →")
-            self.operation.click(open_drawer, "展开配载单右侧资料抽屉")
-            drawer = self.operation.page.get_by_role("dialog", name=f"配载单资料 · {pz}")
+            session.click(open_drawer, "展开配载单右侧资料抽屉")
+            drawer = session.page.get_by_role("dialog", name=f"配载单资料 · {pz}")
             self._expect_visible_or_block(
-                self.operation,
+                session,
                 drawer,
                 f"{pz} 右侧资料抽屉",
                 owner="配载单详情体验维护人",
@@ -1526,14 +1710,14 @@ class Phase2Flow:
                     has_text=order_number
                 )
                 self._expect_visible_or_block(
-                    self.operation,
+                    session,
                     disclosure,
                     f"{order_number} 抽屉订单详情",
                     owner="配载单资料抽屉维护人",
                     remediation="挂载订单必须提供可展开的逐票货物详情。",
                 )
                 summary = disclosure.locator("summary")
-                self.operation.click(summary, f"展开 {order_number} 货物详情")
+                session.click(summary, f"展开 {order_number} 货物详情")
                 detail_text = self._locator_text(disclosure, 20_000)
                 required_text = ("货物信息", "货物标签与货物码")
                 if any(item not in detail_text for item in required_text):
@@ -1557,6 +1741,7 @@ class Phase2Flow:
 
     def run(self) -> Phase2Artifacts:
         self._login(self.operation, "操作岗")
+        self._login(self.batch_operation, "PZ 新整批操作负责人")
         self._login(self.operation_supervisor, "操作主管")
         self._login(self.domestic_warehouse, "国内仓库岗")
         warehouse_name = self.domestic_warehouse.page.locator(
@@ -1629,7 +1814,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(preflight, ensure_ascii=False, indent=2))
         return 0
 
-    credentials = {item.alias: item for item in vault.records}
+    credentials = build_pz_runtime_credentials(vault)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     run_id = (
         f"phase2-{safe_artifact_name(phase1.source_run_id)}-"
@@ -1654,22 +1839,35 @@ def main(argv: Sequence[str] | None = None) -> int:
                 navigation_timeout_ms=args.navigation_timeout_ms,
                 scenario_name="1 FTL + 3 LTL 全流程第二阶段：国内入库、配载与装车出库",
             )
-            flow = Phase2Flow(
-                harness=harness,
-                credentials=credentials,
-                phase1=phase1,
-                fixture_file=args.fixture_file,
-            )
+            flow: Phase2Flow | None = None
             try:
+                credentials, prepared_accounts = prepare_secondary_pz_accounts(
+                    harness=harness,
+                    credentials=credentials,
+                )
+                harness.journal.add_note(
+                    "PZ 独立负责人账号准备完成："
+                    + "、".join(
+                        f"{item.alias}={item.outcome}" for item in prepared_accounts
+                    )
+                )
+                flow = Phase2Flow(
+                    harness=harness,
+                    credentials=credentials,
+                    phase1=phase1,
+                    fixture_file=args.fixture_file,
+                )
                 artifacts = flow.run()
                 status = "passed"
             except BusinessBlocker as error:
-                artifacts = flow.artifacts
+                if flow is not None:
+                    artifacts = flow.artifacts
                 status = "blocked"
                 reason = f"{error}；责任方：{error.owner}；建议：{error.remediation}"
                 harness.journal.add_note(reason)
             except Exception as error:
-                artifacts = flow.artifacts
+                if flow is not None:
+                    artifacts = flow.artifacts
                 status = "failed"
                 reason = f"{type(error).__name__}: {error}"
                 harness.journal.add_note("未预期异常：" + reason)
@@ -1689,11 +1887,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     harness.journal.register_entity(
                         "dispatch", "ltl_batch", artifacts.ltl_dispatch_number
                     )
-                reason = _redact_reason(reason, required)
+                reason = _redact_reason(reason, tuple(credentials.values()))
                 summary_path = harness.close(status=status)  # type: ignore[arg-type]
     except Exception as error:
         status = "failed"
-        reason = _redact_reason(f"{type(error).__name__}: {error}", required)
+        reason = _redact_reason(
+            f"{type(error).__name__}: {error}", tuple(credentials.values())
+        )
 
     handoff = build_handoff_payload(
         phase1,

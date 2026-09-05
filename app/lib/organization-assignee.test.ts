@@ -127,4 +127,20 @@ describe("organization assignee hierarchy", () => {
     expect(html).toContain('name="assigneeUserId"');
     expect(html).not.toContain('aria-label="选择部门"');
   });
+
+  it("does not submit an excluded former owner and explains why candidates are excluded", () => {
+    const html = renderToStaticMarkup(createElement(OrganizationAssigneePicker, {
+      members,
+      name: "assigneeUserId",
+      defaultValue: "user-a1",
+      personLabel: "整批操作负责人",
+      disabledUserReasons: {
+        "user-a1": "a1 是挂载订单的原操作负责人；PZ 首次分配必须换人。",
+      },
+    }));
+
+    expect(html).toContain("已禁用 1 名挂载订单原负责人");
+    expect(html).toContain("原负责人，不可选");
+    expect(html).not.toContain("A 部门 / 1 岗位 / a1");
+  });
 });

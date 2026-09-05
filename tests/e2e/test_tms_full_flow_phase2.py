@@ -158,6 +158,8 @@ class Phase2HandoffTests(unittest.TestCase):
             payload["dispatches"]["ltl_batch"]["dispatch_number"],
             "OUT-260905-LTL01",
         )
+        self.assertEqual(payload["assignees"]["operation_alias"], "operation_2")
+        self.assertEqual(payload["assignees"]["document_alias"], "document_2")
         self.assertEqual(payload["completed_stages"], list(PHASE2_STAGE_ORDER))
         self.assertTrue(payload["ready_for_phase3"])
 
@@ -207,6 +209,7 @@ class Phase2SafetyTests(unittest.TestCase):
         self.assertNotIn("@secret.test", rendered)
         self.assertNotIn("Secret-", rendered)
         self.assertEqual(payload["orders"], ORDERS)
+        self.assertEqual(payload["derived_runtime_roles"], ["operation_2", "document_2"])
         self.assertEqual(payload["stage_order"], list(PHASE2_STAGE_ORDER))
 
     def test_stage_order_has_one_closed_batch_path(self) -> None:
@@ -229,6 +232,16 @@ class Phase2SafetyTests(unittest.TestCase):
                 f"{item.line}:{item.column} [{item.code}] {item.message}"
                 for item in violations
             ),
+        )
+
+    def test_phase2_uses_primary_for_ordinary_and_secondary_for_pz(self) -> None:
+        source = (HERE / "tms_full_flow_phase2.py").read_text(encoding="utf-8")
+        self.assertIn('self.operation = self._add_role("operation")', source)
+        self.assertIn('self.batch_operation = self._add_role("operation_2")', source)
+        self.assertIn('self.credentials["document_2"].role', source)
+        self.assertNotIn(
+            'self.credentials.get("operation_2", self.credentials["operation"])',
+            source,
         )
 
 

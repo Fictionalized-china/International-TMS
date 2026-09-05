@@ -9,6 +9,7 @@ import {
   orderModuleDefinition,
   pickNextRequiredWorkflowModule,
   workflowConfiguredModuleFlags,
+  workflowModuleConfigurationSource,
   type OrderModuleCode,
 } from "./order-modules";
 import { orderBusinessStages } from "./order-stage-flow";
@@ -25,6 +26,10 @@ import {
 } from "./order-documents";
 import { evaluateCostsCompletionGate } from "./costs-completion-gate";
 import { customsModuleGateRequirements } from "./customs-module-policy";
+import {
+  frozenWorkflowTaskAssignmentStatements,
+  resolveOrderModuleAssignmentTarget,
+} from "./order-assignment-manifest.server";
 
 export type OrderModuleInstance = {
   id: string;
@@ -46,6 +51,89 @@ export type OrderModuleInstance = {
   updated_at: string;
 };
 
+export type OrderModuleActionScope = {
+  moduleCode: OrderModuleCode;
+  enabled: boolean;
+  assigneeUserId: string | null;
+  taskAssigneeUserIds: string[];
+  responsibilityPositionCodes: string[];
+};
+
+/**
+ * Load the frozen workflow-instance ownership used to authorize a module
+ * action. This deliberately does not fall back to the mutable workflow
+ * definition: an in-flight order keeps the responsibility rules it started
+ * with, exactly like its field gates and UI prompts.
+ */
+export async function loadOrderModuleActionScope(
+  organizationId: string,
+  orderId: string,
+  moduleCode: OrderModuleCode,
+): Promise<OrderModuleActionScope | null> {
+  const module = await env.DB.prepare(
+    `SELECT m.enabled,m.assignee_user_id,o.workflow_instance_id
+     FROM order_module_instances m
+     JOIN transport_orders o ON o.organization_id=m.organization_id AND o.id=m.order_id
+     WHERE m.organization_id=? AND m.order_id=? AND m.module_code=?`,
+  ).bind(organizationId, orderId, moduleCode).first<{
+    enabled: number;
+    assignee_user_id: string | null;
+    workflow_instance_id: string | null;
+  }>();
+  if (!module) return null;
+  const workflowModule = await env.DB.prepare(
+    `SELECT ms.id,ms.responsibility_position_code
+     FROM workflow_instances wi
+     JOIN workflow_instance_step_states ss ON ss.instance_id=wi.id
+     LEFT JOIN workflow_instance_step_states current_ss
+       ON current_ss.instance_id=wi.id AND current_ss.step_key=wi.current_step_key
+     JOIN workflow_instance_module_states ms
+       ON ms.instance_step_state_id=ss.id AND ms.module_code=?
+     WHERE wi.organization_id=? AND wi.order_id=?
+     ORDER BY
+       CASE
+         WHEN current_ss.sort_order IS NULL THEN 0
+         WHEN ss.sort_order<=current_ss.sort_order THEN 0 ELSE 1 END,
+       CASE
+         WHEN current_ss.sort_order IS NULL THEN -ss.sort_order
+         WHEN ss.sort_order<=current_ss.sort_order THEN -ss.sort_order ELSE ss.sort_order END,
+       ms.sort_order,ms.id
+     LIMIT 1`,
+  ).bind(moduleCode, organizationId, orderId).first<{
+    id: string;
+    responsibility_position_code: string | null;
+  }>();
+  const tasks = workflowModule
+    ? await env.DB.prepare(
+        `SELECT assignee_user_id,responsibility_position_code
+         FROM workflow_instance_task_states
+         WHERE instance_module_state_id=? AND status!='completed'
+         ORDER BY sort_order,id`,
+      ).bind(workflowModule.id).all<{
+        assignee_user_id: string | null;
+        responsibility_position_code: string | null;
+      }>()
+    : { results: [] };
+  return {
+    moduleCode,
+    enabled: module.workflow_instance_id
+      ? Boolean(workflowModule)
+      : module.enabled === 1,
+    assigneeUserId: module.assignee_user_id,
+    taskAssigneeUserIds: [...new Set(
+      tasks.results
+        .map((task) => task.assignee_user_id)
+        .filter((userId): userId is string => Boolean(userId)),
+    )],
+    responsibilityPositionCodes: [...new Set(
+      [
+        workflowModule?.responsibility_position_code,
+        ...tasks.results.map((task) => task.responsibility_position_code),
+      ].filter((code): code is string => Boolean(code)),
+    )],
+  };
+}
+
 type WorkflowSnapshotModule = {
   id: string;
   module_code: OrderModuleCode;
@@ -64,6 +152,7 @@ type OrderSeed = {
   business_type: string;
   status: string;
   current_assignee_user_id: string | null;
+  workflow_instance_id: string | null;
   workflow_id: string | null;
 };
 
@@ -73,7 +162,7 @@ export async function ensureOrderModules(
   options: { syncBusinessWorkflow?: boolean } = {},
 ) {
   const order = await env.DB.prepare(
-    `SELECT o.id,o.business_type,o.status,o.current_assignee_user_id,
+    `SELECT o.id,o.business_type,o.status,o.current_assignee_user_id,o.workflow_instance_id,
       COALESCE(wi.workflow_id,(SELECT workflow_id FROM workflow_instances x WHERE x.order_id=o.id LIMIT 1)) workflow_id
      FROM transport_orders o LEFT JOIN workflow_instances wi ON wi.id=o.workflow_instance_id
      WHERE o.id=? AND o.organization_id=?`,
@@ -154,6 +243,7 @@ export async function ensureOrderModules(
   await applyWorkflowModuleConfiguration(
     organizationId,
     orderId,
+    order.workflow_instance_id,
     order.workflow_id,
     now,
   );
@@ -224,17 +314,30 @@ async function clearPrematureModuleAssignments(
 async function applyWorkflowModuleConfiguration(
   organizationId:string,
   orderId:string,
+  workflowInstanceId:string|null,
   workflowId:string|null,
   now:string,
 ) {
-  if (!workflowId) return;
-  const configured = await env.DB.prepare(
-    `SELECT m.module_code,MAX(m.is_required) is_required,
-      MAX(CASE WHEN m.is_active=1 AND s.is_active=1 THEN 1 ELSE 0 END) enabled,
-      MIN(CASE WHEN m.is_active=1 AND s.is_active=1 THEN m.display_name END) display_name
-     FROM workflow_step_modules m JOIN workflow_steps s ON s.id=m.step_id AND s.workflow_id=m.workflow_id
-     WHERE m.workflow_id=? GROUP BY m.module_code`,
-  ).bind(workflowId).all<{module_code:string;is_required:number;enabled:number;display_name:string|null}>();
+  const source = workflowModuleConfigurationSource(workflowInstanceId, workflowId);
+  if (!source) return;
+  const configurationSql = source.kind === "workflow_instance"
+    ? `SELECT ms.module_code,MAX(ms.is_required) is_required,
+         1 enabled,
+         MIN(ms.display_name) display_name
+       FROM workflow_instance_step_states ss
+       JOIN workflow_instance_module_states ms ON ms.instance_step_state_id=ss.id
+       WHERE ss.instance_id=?
+       GROUP BY ms.module_code`
+    : `SELECT m.module_code,MAX(m.is_required) is_required,
+         MAX(CASE WHEN m.is_active=1 AND s.is_active=1 THEN 1 ELSE 0 END) enabled,
+         MIN(CASE WHEN m.is_active=1 AND s.is_active=1 THEN m.display_name END) display_name
+       FROM workflow_step_modules m
+       JOIN workflow_steps s ON s.id=m.step_id AND s.workflow_id=m.workflow_id
+       WHERE m.workflow_id=?
+       GROUP BY m.module_code`;
+  const configured = await env.DB.prepare(configurationSql)
+    .bind(source.id)
+    .all<{module_code:string;is_required:number;enabled:number;display_name:string|null}>();
   if (!configured.results.length) return;
   const byCode = new Map(configured.results.map((item)=>[item.module_code,item]));
   const rows = await env.DB.prepare(
@@ -754,13 +857,27 @@ export async function syncCostsModuleStatus(
   await ensureOrderModules(organizationId, orderId);
   const [expenses, controls, workflowFields] = await Promise.all([
     env.DB.prepare(
-      `SELECT direction,COUNT(*) total
-       FROM business_expenses
-       WHERE organization_id=? AND order_id=? AND stage!='cancelled'
-       GROUP BY direction`,
+      `SELECT e.direction,COUNT(*) total,
+              COALESCE(SUM(MAX(
+                e.amount-COALESCE((
+                  SELECT SUM(a.amount)
+                  FROM settlement_cash_allocations a
+                  JOIN settlement_cash_transactions t
+                    ON t.id=a.cash_transaction_id AND t.status!='void'
+                  WHERE a.expense_id=e.id
+                ),0),
+                0
+              )),0) outstanding_balance
+       FROM business_expenses e
+       WHERE e.organization_id=? AND e.order_id=? AND e.stage!='cancelled'
+       GROUP BY e.direction`,
     )
       .bind(organizationId, orderId)
-      .all<{ direction: "receivable" | "payable"; total: number }>(),
+      .all<{
+        direction: "receivable" | "payable";
+        total: number;
+        outstanding_balance: number;
+      }>(),
     env.DB.prepare(
       `SELECT direction,confirmed,business_reviewed,finance_reviewed,business_locked,finance_locked
        FROM order_expense_direction_controls
@@ -777,10 +894,8 @@ export async function syncCostsModuleStatus(
       }>(),
     loadOrderModuleWorkflowFields(organizationId, orderId, "costs"),
   ]);
-  const expenseDirections = new Set(
-    expenses.results
-      .filter((item) => item.total > 0)
-      .map((item) => item.direction),
+  const expenseByDirection = new Map(
+    expenses.results.map((item) => [item.direction, item]),
   );
   const controlByDirection = new Map(
     controls.results.map((item) => [item.direction, item]),
@@ -789,9 +904,11 @@ export async function syncCostsModuleStatus(
     fields: workflowFields,
     directions: (["receivable", "payable"] as const).map((direction) => {
       const control = controlByDirection.get(direction);
+      const expense = expenseByDirection.get(direction);
       return {
         direction,
-        hasExpenses: expenseDirections.has(direction),
+        hasExpenses: Number(expense?.total ?? 0) > 0,
+        outstandingBalance: Number(expense?.outstanding_balance ?? 0),
         customerServiceConfirmed: Boolean(control?.confirmed),
         businessReviewed: Boolean(control?.business_reviewed),
         financeReviewed: Boolean(control?.finance_reviewed),
@@ -855,27 +972,63 @@ export async function assignOrderModule(input: {
   actorUserId: string;
   dueAt?: string | null;
   notes?: string;
+  responsibilityPositionCode?: string | null;
 }) {
   const module = await moduleRow(input);
   if (!module.enabled) throw new Error("该模块未启用");
-  await requireActiveOrganizationAssignee(
-    input.organizationId,
-    input.assigneeUserId,
-  );
   const definition = orderModuleDefinition(input.moduleCode);
   if (!definition) throw new Error("模块不存在");
-  const now = new Date().toISOString();
-  await env.DB.batch([
-    env.DB.prepare(
-      "UPDATE order_module_instances SET assignee_user_id=?,blocking_reason=NULL,updated_at=? WHERE id=?",
-    ).bind(
+  const workflowAssignmentTarget = await resolveOrderModuleAssignmentTarget({
+    organizationId: input.organizationId,
+    orderId: input.orderId,
+    moduleCode: input.moduleCode,
+    assigneeUserId: input.assigneeUserId,
+    responsibilityPositionCode: input.responsibilityPositionCode,
+  });
+  if (!workflowAssignmentTarget) {
+    await requireActiveOrganizationAssignee(
+      input.organizationId,
       input.assigneeUserId,
-      now,
-      module.id,
+    );
+  }
+  const now = new Date().toISOString();
+  const legacyTaskTitle = `${definition.name}处理任务`;
+  const taskTitle = workflowAssignmentTarget
+    ? `${legacyTaskTitle}（${workflowAssignmentTarget.positionCode}）`
+    : legacyTaskTitle;
+  const moduleOwnerStatements = !workflowAssignmentTarget || workflowAssignmentTarget.primaryOwner
+    ? [env.DB.prepare(
+        "UPDATE order_module_instances SET assignee_user_id=?,blocking_reason=NULL,updated_at=? WHERE id=?",
+      ).bind(input.assigneeUserId, now, module.id)]
+    : [];
+  const cancelTaskStatement = workflowAssignmentTarget
+    ? env.DB.prepare(
+        "UPDATE order_tasks SET status='cancelled',updated_at=? WHERE organization_id=? AND order_id=? AND module_code=? AND task_type='module_owner' AND status IN ('pending','in_progress') AND title IN (?,?)",
+      ).bind(
+        now,
+        input.organizationId,
+        input.orderId,
+        input.moduleCode,
+        legacyTaskTitle,
+        taskTitle,
+      )
+    : env.DB.prepare(
+        "UPDATE order_tasks SET status='cancelled',updated_at=? WHERE organization_id=? AND order_id=? AND module_code=? AND task_type='module_owner' AND status IN ('pending','in_progress')",
+      ).bind(now, input.organizationId, input.orderId, input.moduleCode);
+  await env.DB.batch([
+    ...moduleOwnerStatements,
+    ...(
+      workflowAssignmentTarget
+        ? frozenWorkflowTaskAssignmentStatements({
+            organizationId: input.organizationId,
+            orderId: input.orderId,
+            assigneeUserId: input.assigneeUserId,
+            now,
+            target: workflowAssignmentTarget,
+          })
+        : []
     ),
-    env.DB.prepare(
-      "UPDATE order_tasks SET status='cancelled',updated_at=? WHERE organization_id=? AND order_id=? AND module_code=? AND task_type='module_owner' AND status IN ('pending','in_progress')",
-    ).bind(now, input.organizationId, input.orderId, input.moduleCode),
+    cancelTaskStatement,
     env.DB.prepare(
       "INSERT INTO order_tasks(id,organization_id,order_id,module_code,task_type,title,status,assignee_user_id,assigned_by_user_id,due_at,created_at,updated_at) VALUES(?,?,?,?,? ,?,'pending',?,?,?,?,?)",
     ).bind(
@@ -884,7 +1037,7 @@ export async function assignOrderModule(input: {
       input.orderId,
       input.moduleCode,
       "module_owner",
-      `${definition.name}处理任务`,
+      taskTitle,
       input.assigneeUserId,
       input.actorUserId,
       input.dueAt || null,
@@ -896,7 +1049,9 @@ export async function assignOrderModule(input: {
       orderId: input.orderId,
       moduleId: module.id,
       actionCode: "assign",
-      actionName: "分配负责人",
+      actionName: workflowAssignmentTarget
+        ? `分配${workflowAssignmentTarget.positionCode}负责人`
+        : "分配负责人",
       fromStepCode: module.current_step_code,
       toStepCode: module.current_step_code || definition.steps[0].code,
       toStepName: module.current_step_name || definition.steps[0].name,

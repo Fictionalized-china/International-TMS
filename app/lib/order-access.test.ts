@@ -3,6 +3,8 @@ import {
   assignedBatchViewPermission,
   batchVisibilitySql,
   canAccessBatchWorkspace,
+  canEditCurrentOrderWorkspace,
+  canOperateEnabledOrderModule,
   canOperateCurrentOrder,
   canReadFullOrderLifecycle,
   canSeeScopedOrder,
@@ -169,6 +171,103 @@ describe("order access", () => {
       status: "completed",
       current_assignee_user_id: "user-a",
     })).toBe(false);
+  });
+
+  it("lets the assigned review owner operate an enabled module after the order-level handoff is cleared", () => {
+    expect(canOperateEnabledOrderModule({
+      user: {
+        ...baseUser,
+        positionCode: "FINANCE_ACCOUNTING",
+        roleCodes: ["pos_finance"],
+        permissions: ["order.module.review.manage"],
+      },
+      orderStatus: "in_execution",
+      moduleCode: "review",
+      moduleEnabled: true,
+      moduleAssigneeUserId: "user-a",
+      taskAssigneeUserIds: [],
+      responsibilityPositionCodes: ["FINANCE_ACCOUNTING"],
+    })).toBe(true);
+  });
+
+  it("does not let module permission bypass the configured owner or a disabled module", () => {
+    const input = {
+      user: {
+        ...baseUser,
+        positionCode: "FINANCE_ACCOUNTING",
+        roleCodes: ["pos_finance"],
+        permissions: ["order.module.review.manage"],
+      },
+      orderStatus: "in_execution",
+      moduleCode: "review",
+      moduleEnabled: true,
+      moduleAssigneeUserId: "user-b",
+      taskAssigneeUserIds: [] as string[],
+      responsibilityPositionCodes: ["FINANCE_ACCOUNTING"],
+    };
+    expect(canOperateEnabledOrderModule(input)).toBe(false);
+    expect(canOperateEnabledOrderModule({
+      ...input,
+      moduleEnabled: false,
+      moduleAssigneeUserId: "user-a",
+    })).toBe(false);
+    expect(canOperateEnabledOrderModule({
+      ...input,
+      moduleAssigneeUserId: "user-a",
+      user: { ...input.user, permissions: [] },
+    })).toBe(false);
+  });
+
+  it("uses the workflow-instance responsibility pool only while the module is unassigned", () => {
+    const input = {
+      user: {
+        ...baseUser,
+        positionCode: "OPERATION",
+        permissions: ["order.module.exceptions.manage"],
+      },
+      orderStatus: "in_execution",
+      moduleCode: "exceptions",
+      moduleEnabled: true,
+      moduleAssigneeUserId: null,
+      taskAssigneeUserIds: [] as string[],
+      responsibilityPositionCodes: ["OPERATION"],
+    };
+    expect(canOperateEnabledOrderModule(input)).toBe(true);
+    expect(canOperateEnabledOrderModule({
+      ...input,
+      taskAssigneeUserIds: ["user-b"],
+    })).toBe(false);
+    expect(canOperateEnabledOrderModule({
+      ...input,
+      responsibilityPositionCodes: ["DOC"],
+    })).toBe(false);
+  });
+
+  it("keeps the current workspace editable for an authorized scoped module owner", () => {
+    expect(canEditCurrentOrderWorkspace({
+      orderCompleted: false,
+      viewingCurrentStep: true,
+      canOperateCurrentNode: false,
+      canOperateParallelCosts: false,
+      canSubmitCurrentDraft: false,
+      canOperateScopedModule: true,
+    })).toBe(true);
+    expect(canEditCurrentOrderWorkspace({
+      orderCompleted: true,
+      viewingCurrentStep: true,
+      canOperateCurrentNode: false,
+      canOperateParallelCosts: false,
+      canSubmitCurrentDraft: false,
+      canOperateScopedModule: true,
+    })).toBe(false);
+    expect(canEditCurrentOrderWorkspace({
+      orderCompleted: false,
+      viewingCurrentStep: false,
+      canOperateCurrentNode: false,
+      canOperateParallelCosts: false,
+      canSubmitCurrentDraft: false,
+      canOperateScopedModule: true,
+    })).toBe(true);
   });
 
   it("keeps the boss and developer current-node bypass", () => {

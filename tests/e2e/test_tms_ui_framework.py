@@ -112,6 +112,94 @@ class _LocatorStub:
         return False
 
 
+class _SegmentedInputStub:
+    def __init__(self, final_value: str) -> None:
+        self.final_value = final_value
+        self.events: list[tuple[str, str]] = []
+
+    def click(self, **_kwargs: object) -> None:
+        self.events.append(("click", ""))
+
+    def press(self, key: str, **_kwargs: object) -> None:
+        self.events.append(("press", key))
+
+    def type(self, value: str, **_kwargs: object) -> None:
+        self.events.append(("type", value))
+
+    def input_value(self, **_kwargs: object) -> str:
+        return self.final_value
+
+
+class _DelayedHiddenLocatorStub:
+    first: "_DelayedHiddenLocatorStub"
+
+    def __init__(self) -> None:
+        self.first = self
+        self.waits: list[tuple[str, int]] = []
+
+    def count(self) -> int:
+        return 1
+
+    def wait_for(self, *, state: str, timeout: int) -> None:
+        self.waits.append((state, timeout))
+
+
+class _OptionStub:
+    def __init__(self, value: str, label: str, *, disabled: bool = False) -> None:
+        self.value = value
+        self.label = label
+        self.disabled = disabled
+
+    def get_attribute(self, name: str) -> str | None:
+        return self.value if name == "value" else None
+
+    def text_content(self) -> str:
+        return self.label
+
+    def is_disabled(self) -> bool:
+        return self.disabled
+
+
+class _OptionListStub:
+    def __init__(self, options: list[_OptionStub]) -> None:
+        self.options = options
+
+    def count(self) -> int:
+        return len(self.options)
+
+    def nth(self, index: int) -> _OptionStub:
+        return self.options[index]
+
+
+class _KeyboardSelectStub:
+    def __init__(self) -> None:
+        self.options = [
+            _OptionStub("", "请选择", disabled=True),
+            _OptionStub("first", "第一个岗位"),
+            _OptionStub("target", "目标岗位"),
+        ]
+        self.current = 1
+        self.events: list[tuple[str, str]] = []
+
+    def locator(self, selector: str) -> _OptionListStub:
+        if selector != "option":
+            raise AssertionError(selector)
+        return _OptionListStub(self.options)
+
+    def click(self, **_kwargs: object) -> None:
+        self.events.append(("click", ""))
+
+    def press(self, key: str, **_kwargs: object) -> None:
+        self.events.append(("press", key))
+        if key == "Home":
+            self.current = 1
+        elif key == "ArrowDown":
+            self.current = min(len(self.options) - 1, self.current + 1)
+
+    def input_value(self, **_kwargs: object) -> str:
+        return self.options[self.current].value
+
+
 class _PageStub:
     url = "http://127.0.0.1:5189/admin/orders"
 
@@ -179,6 +267,77 @@ class _PlaywrightStub:
 
 
 class HarnessEvidenceTests(unittest.TestCase):
+    def test_harness_does_not_mutate_text_or_select_values_directly(self) -> None:
+        source = (HERE / "tms_ui_harness.py").read_text(encoding="utf-8")
+        self.assertNotIn("locator.fill(", source)
+        self.assertNotIn("select_option(", source)
+
+    def test_select_uses_visible_keyboard_events_without_select_option(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            journal = RunJournal("select", directory, scenario_name="键盘选择")
+            session = RoleBrowserSession(
+                role="supervisor",
+                email="select@example.test",
+                site="admin",
+                base_url="http://127.0.0.1:5189",
+                context=_ContextStub(),
+                page=_PageStub(),
+                journal=journal,
+            )
+            control = _KeyboardSelectStub()
+            selected = session.select(control, "负责人岗位", value="target")
+
+        self.assertEqual(selected, ["target"])
+        self.assertEqual(
+            control.events,
+            [("click", ""), ("press", "Home"), ("press", "ArrowDown"), ("press", "Enter")],
+        )
+        self.assertEqual(journal.actions[-1]["detail"]["keyboard_only"], True)
+
+    def test_hidden_assertion_waits_for_async_ui_close(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            journal = RunJournal("hidden", directory, scenario_name="异步弹窗关闭")
+            session = RoleBrowserSession(
+                role="sales",
+                email="hidden@example.test",
+                site="admin",
+                base_url="http://127.0.0.1:5189",
+                context=_ContextStub(),
+                page=_PageStub(),
+                journal=journal,
+                action_timeout_ms=8_000,
+            )
+            locator = _DelayedHiddenLocatorStub()
+            session.expect_hidden(locator, "审核弹窗")
+
+        self.assertEqual(locator.waits, [("hidden", 8_000)])
+
+    def test_segmented_date_controls_use_visible_keyboard_events(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            journal = RunJournal("dates", directory, scenario_name="日期输入", base_url="http://127.0.0.1:5189")
+            session = RoleBrowserSession(
+                role="sales",
+                email="date@example.test",
+                site="admin",
+                base_url="http://127.0.0.1:5189",
+                context=_ContextStub(),
+                page=_PageStub(),
+                journal=journal,
+            )
+            date_control = _SegmentedInputStub("2026-10-05")
+            datetime_control = _SegmentedInputStub("2026-10-05T15:30")
+            session.type_date(date_control, "2026-10-05", "有效期")
+            session.type_datetime_local(datetime_control, "2026-10-05T15:30", "预约时间")
+
+        self.assertEqual(
+            [event for event in date_control.events if event[0] == "type"],
+            [("type", "2026"), ("type", "10"), ("type", "05")],
+        )
+        self.assertEqual(
+            [event for event in datetime_control.events if event[0] == "type"],
+            [("type", "2026"), ("type", "10"), ("type", "05"), ("type", "15"), ("type", "30")],
+        )
+
     def test_summary_uses_utf8_bom_and_keeps_chinese_readable_on_windows(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             journal = RunJournal("encoding", directory, scenario_name="多账号权限冒烟")

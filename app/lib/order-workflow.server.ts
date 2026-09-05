@@ -14,6 +14,7 @@ import {
   isActiveOrganizationAssignee,
   isActiveOrganizationAssigneeForPositions,
 } from "./organization-assignee.server";
+import { loadOrderDispatchResponsibilityPolicy } from "./order-assignment-manifest.server";
 
 export type OrderWorkflowTransition = {
   action_code: string;
@@ -218,12 +219,19 @@ export async function validateOrderWorkflowAction(input: {
         order,
         transition,
       };
+    const dispatchPolicy = input.actionCode === "dispatch"
+      ? await loadOrderDispatchResponsibilityPolicy(
+          input.organizationId,
+          input.orderId,
+        )
+      : null;
     const expectedPositions: Record<string, readonly string[]> = {
       submit: ["BUSINESS_SUPERVISOR"],
       approve: ["OPERATION_SUPERVISOR"],
-      dispatch: ["OPERATION"],
     };
-    const expectedPositionCodes = expectedPositions[input.actionCode];
+    const expectedPositionCodes = dispatchPolicy
+      ? [dispatchPolicy.positionCode]
+      : expectedPositions[input.actionCode];
     if (
       expectedPositionCodes &&
       !(await isActiveOrganizationAssigneeForPositions(
@@ -232,14 +240,20 @@ export async function validateOrderWorkflowAction(input: {
         expectedPositionCodes,
       ))
     ) {
-      const label = input.actionCode === "submit"
+      const label = dispatchPolicy
+        ? dispatchPolicy.source === "legacy"
+          ? "操作岗个人账户（旧订单兼容规则）"
+          : `锁定工作流首个必办岗位（${dispatchPolicy.positionCode}）个人账户`
+        : input.actionCode === "submit"
         ? "业务主管"
         : input.actionCode === "approve"
           ? "操作主管"
-          : "操作岗";
+          : "配置岗位";
       return {
         ok: false as const,
-        reason: `下一处理人必须是有效的${label}个人账户`,
+        reason: dispatchPolicy
+          ? `下一处理人必须是有效的${label}`
+          : `下一处理人必须是有效的${label}个人账户`,
         order,
         transition,
       };

@@ -249,6 +249,21 @@ export function workflowConfiguredModuleFlags(input: {
   };
 }
 
+export type WorkflowModuleConfigurationSource =
+  | { kind: "workflow_instance"; id: string }
+  | { kind: "definition"; id: string };
+
+export function workflowModuleConfigurationSource(
+  workflowInstanceId: string | null,
+  workflowDefinitionId: string | null,
+): WorkflowModuleConfigurationSource | null {
+  if (workflowInstanceId)
+    return { kind: "workflow_instance", id: workflowInstanceId };
+  if (workflowDefinitionId)
+    return { kind: "definition", id: workflowDefinitionId };
+  return null;
+}
+
 export type OrderWorkflowModuleSnapshot = {
   module_code: OrderModuleCode;
   module_name: string;

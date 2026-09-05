@@ -66,6 +66,10 @@ class Phase1SafetyTests(unittest.TestCase):
     def test_execute_is_opt_in(self) -> None:
         args = build_parser().parse_args([])
         self.assertFalse(args.execute)
+        self.assertEqual(
+            (args.destination_country, args.destination_state, args.destination_city),
+            ("乌兹别克斯坦", "塔什干市", "塔什干"),
+        )
 
     def test_preflight_never_serializes_email_or_password(self) -> None:
         records = [

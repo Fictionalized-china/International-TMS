@@ -59,6 +59,10 @@ import {
   workflowFieldIdentityMatches,
   type WorkflowFieldLocatorItem,
 } from "../lib/workflow-field-locator";
+import {
+  validateWorkflowResponsibilityReadiness,
+  type PublicationPositionReadiness,
+} from "../lib/workflow-publication-validation";
 
 type Definition = {
   id: string;
@@ -206,12 +210,13 @@ export async function loader({ request }: Route.LoaderArgs) {
        FROM workflow_module_tasks WHERE workflow_id=? ORDER BY step_module_id,sort_order,task_key`,
     ).bind(workflowId).all<ModuleTask>(),
   ]);
-  const [positions, definitionSteps] = await Promise.all([
+  const [positions, positionReadiness, definitionSteps] = await Promise.all([
     env.DB.prepare(
       `SELECT p.code,p.name,d.name department_name
        FROM positions p LEFT JOIN departments d ON d.organization_id=p.organization_id AND d.code=p.department_code
        WHERE p.organization_id=? AND p.status='active' ORDER BY p.sort_order,p.name`,
     ).bind(current.organizationId).all<PositionOption>(),
+    loadPublicationPositionReadiness(current.organizationId),
     env.DB.prepare(
       `SELECT ws.workflow_id,ws.id,ws.name,ws.sort_order,ws.actor_scope,ws.is_active,
         COALESCE(GROUP_CONCAT(DISTINCT CASE WHEN wsm.is_active=1 THEN wsm.display_name END),'') module_names,
@@ -268,6 +273,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       stepModules.results,
       moduleTasks.results,
       fields.results,
+      positionReadiness.results,
     ),
     fieldPolicyImpacts:Object.fromEntries(impactRows) as Record<string,WorkflowFieldPolicyImpact>,
     canEdit: canEditWorkflowDefinition(current),
@@ -368,7 +374,7 @@ export async function action({ request }: Route.ActionArgs) {
 
   if (intent === "validate" || intent === "publish") {
     if (definition.lifecycle_status !== "draft") return { formError: "只有草稿版本可以校验或发布" };
-    const issues = await loadWorkflowValidationIssues(definition.id);
+    const issues = await loadWorkflowValidationIssues(definition.id, current.organizationId);
     const validationStatus = issues.length ? "invalid" : "valid";
     await env.DB.prepare(
       "UPDATE workflow_definitions SET validation_status=?,validation_message=?,updated_at=? WHERE id=? AND organization_id=?",
@@ -1543,6 +1549,7 @@ function validateWorkflowConfiguration(
   modules: StepModule[],
   tasks: ModuleTask[],
   fields: StepField[] = [],
+  positions: PublicationPositionReadiness[] = [],
 ) {
   const issues: string[] = [];
   const activeSteps = steps.filter((item) => item.is_active).sort((a,b) => a.sort_order-b.sort_order);
@@ -1588,11 +1595,12 @@ function validateWorkflowConfiguration(
         issues.push(`模组“${stepModule.display_name}”没有办理步骤`);
     }
   }
+  issues.push(...validateWorkflowResponsibilityReadiness({ steps, modules, tasks, positions }));
   return [...new Set(issues)];
 }
 
-async function loadWorkflowValidationIssues(workflowId: string) {
-  const [steps,modules,tasks,fields] = await Promise.all([
+async function loadWorkflowValidationIssues(workflowId: string, organizationId: string) {
+  const [steps,modules,tasks,fields,positions] = await Promise.all([
     env.DB.prepare(
       "SELECT id,step_key,name,entity_type,trigger_event,sort_order,is_required,is_active,actor_scope FROM workflow_steps WHERE workflow_id=? ORDER BY sort_order,step_key",
     ).bind(workflowId).all<Step>(),
@@ -1611,8 +1619,62 @@ async function loadWorkflowValidationIssues(workflowId: string) {
         options_text,help_text,COALESCE(module_code,'consignment') module_code
        FROM workflow_step_fields WHERE workflow_id=? ORDER BY sort_order,field_key`,
     ).bind(workflowId).all<StepField>(),
+    loadPublicationPositionReadiness(organizationId),
   ]);
-  return validateWorkflowConfiguration(steps.results,modules.results,tasks.results,fields.results);
+  return validateWorkflowConfiguration(
+    steps.results,
+    modules.results,
+    tasks.results,
+    fields.results,
+    positions.results,
+  );
+}
+
+function loadPublicationPositionReadiness(organizationId: string) {
+  return env.DB.prepare(
+    `SELECT p.code,p.name,p.status,
+       COUNT(DISTINCT CASE WHEN m.status='active' AND u.status='active' THEN m.user_id END) active_member_count,
+       GROUP_CONCAT(DISTINCT CASE
+         WHEN m.status='active' AND u.status='active'
+         THEN effective_permission.permission_code END) permission_codes
+     FROM positions p
+     LEFT JOIN memberships m
+       ON m.organization_id=p.organization_id AND m.position_id=p.id
+     LEFT JOIN users u ON u.id=m.user_id
+     LEFT JOIN (
+       SELECT effective_membership.position_id,role_permission.permission_code
+       FROM memberships effective_membership
+       JOIN users effective_user
+         ON effective_user.id=effective_membership.user_id
+        AND effective_user.status='active'
+       JOIN membership_roles effective_membership_role
+         ON effective_membership_role.membership_id=effective_membership.id
+       JOIN roles effective_role
+         ON effective_role.id=effective_membership_role.role_id
+        AND effective_role.organization_id=effective_membership.organization_id
+        AND effective_role.status='active'
+       JOIN role_permissions role_permission ON role_permission.role_id=effective_role.id
+       WHERE effective_membership.status='active'
+         AND NOT EXISTS (
+           SELECT 1 FROM membership_permission_overrides denied
+           WHERE denied.membership_id=effective_membership.id
+             AND denied.permission_code=role_permission.permission_code
+             AND denied.effect='deny'
+         )
+       UNION
+       SELECT effective_membership.position_id,allowed.permission_code
+       FROM memberships effective_membership
+       JOIN users effective_user
+         ON effective_user.id=effective_membership.user_id
+        AND effective_user.status='active'
+       JOIN membership_permission_overrides allowed
+         ON allowed.membership_id=effective_membership.id AND allowed.effect='allow'
+       WHERE effective_membership.status='active'
+     ) effective_permission ON effective_permission.position_id=p.id
+     WHERE p.organization_id=?
+     GROUP BY p.id,p.code,p.name,p.status
+     ORDER BY p.sort_order,p.name`,
+  ).bind(organizationId).all<PublicationPositionReadiness>();
 }
 
 async function validPosition(organizationId: string, code: string) {

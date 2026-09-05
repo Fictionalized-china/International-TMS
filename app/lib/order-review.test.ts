@@ -3,8 +3,15 @@ import {
   configuredModuleRequiresCompletion,
   costsModuleReviewBlocker,
   currencyFinance,
+  finalizedOrderReviewState,
   orderCompletionStatus,
   orderReviewModuleState,
+  orderReviewPreparationModuleState,
+  orderReviewFinalizationDecision,
+  pendingOrderReviewCurrentStep,
+  pendingOrderReviewCompletionStatus,
+  refreshedArchivedOrderCompletionStatus,
+  refreshedArchivedSettlementCompletedAt,
   orderReviewSettlementBlockers,
   pickupCompletionReviewBlocker,
 } from "./order-review";
@@ -97,13 +104,115 @@ describe("order review completion", () => {
       });
     expect(orderReviewModuleState("business_complete_unsettled", []))
       .toMatchObject({
-        status: "completed",
-        stepCode: "confirmed",
+        status: "in_progress",
+        stepCode: "ready_to_finalize",
         blockingReason: null,
-        completed: true,
+        completed: false,
       });
     expect(orderReviewModuleState("completed_settled", []))
-      .toMatchObject({ status: "completed", completed: true });
+      .toMatchObject({ status: "in_progress", completed: false });
+  });
+
+  it("keeps a generated review pending until its assigned owner explicitly finalizes it", () => {
+    expect(orderReviewPreparationModuleState("completed_settled", []))
+      .toEqual({
+        status: "in_progress",
+        stepCode: "ready_to_finalize",
+        stepName: "待最终确认归档",
+        progressPercent: 90,
+        blockingReason: null,
+        completed: false,
+      });
+    expect(orderReviewFinalizationDecision({
+      confirmed: true,
+      snapshotId: "review-snapshot",
+      completionStatus: "completed_settled",
+      blockers: [],
+    })).toEqual({ allowed: true, reason: null });
+  });
+
+  it("refuses final confirmation when no review exists or any current gate remains open", () => {
+    expect(orderReviewFinalizationDecision({
+      confirmed: true,
+      snapshotId: null,
+      completionStatus: "completed_settled",
+      blockers: [],
+    })).toEqual({ allowed: false, reason: "请先生成订单复盘" });
+    expect(orderReviewFinalizationDecision({
+      confirmed: true,
+      snapshotId: "review-snapshot",
+      completionStatus: "in_progress",
+      blockers: ["应收费用尚未核销"],
+    })).toEqual({ allowed: false, reason: "应收费用尚未核销" });
+    expect(orderReviewFinalizationDecision({
+      confirmed: true,
+      snapshotId: "review-snapshot",
+      completionStatus: "business_complete_unsettled",
+      blockers: [],
+    })).toEqual({ allowed: true, reason: null });
+    expect(orderReviewFinalizationDecision({
+      confirmed: false,
+      snapshotId: "review-snapshot",
+      completionStatus: "completed_settled",
+      blockers: [],
+    })).toEqual({ allowed: false, reason: "请明确确认最终归档" });
+  });
+
+  it("preserves optional unsettled balances as an audit fact after final archive", () => {
+    expect(finalizedOrderReviewState("business_complete_unsettled")).toEqual({
+      completionStatus: "business_complete_unsettled",
+      settlementCompleted: false,
+      currentStepName: "业务已归档 · 财务跟进中",
+    });
+    expect(finalizedOrderReviewState("completed_settled")).toEqual({
+      completionStatus: "completed_settled",
+      settlementCompleted: true,
+      currentStepName: "订单完成 · 已完成并结清",
+    });
+    expect(pendingOrderReviewCompletionStatus("completed_settled"))
+      .toBe("business_complete_unsettled");
+    expect(pendingOrderReviewCurrentStep("business_complete_unsettled"))
+      .toEqual({
+        code: "module:review",
+        name: "完成复盘 · 待最终确认归档（可选结算未完成）",
+      });
+    expect(refreshedArchivedOrderCompletionStatus(
+      "business_complete_unsettled",
+      "completed_settled",
+    )).toBe("completed_settled");
+    expect(refreshedArchivedOrderCompletionStatus(
+      "business_complete_unsettled",
+      "in_progress",
+    )).toBe("business_complete_unsettled");
+    expect(refreshedArchivedOrderCompletionStatus(
+      "completed_settled",
+      "business_complete_unsettled",
+    )).toBe("business_complete_unsettled");
+    expect(refreshedArchivedOrderCompletionStatus(
+      "completed_settled",
+      "in_progress",
+    )).toBe("business_complete_unsettled");
+    expect(refreshedArchivedSettlementCompletedAt({
+      archived: true,
+      previousStatus: "business_complete_unsettled",
+      latestStatus: "completed_settled",
+      previousCompletedAt: "2026-09-04T08:00:00.000Z",
+      now: "2026-09-05T09:00:00.000Z",
+    })).toBe("2026-09-05T09:00:00.000Z");
+    expect(refreshedArchivedSettlementCompletedAt({
+      archived: true,
+      previousStatus: "completed_settled",
+      latestStatus: "completed_settled",
+      previousCompletedAt: "2026-09-04T08:00:00.000Z",
+      now: "2026-09-05T09:00:00.000Z",
+    })).toBe("2026-09-04T08:00:00.000Z");
+    expect(refreshedArchivedSettlementCompletedAt({
+      archived: true,
+      previousStatus: "completed_settled",
+      latestStatus: "business_complete_unsettled",
+      previousCompletedAt: "2026-09-04T08:00:00.000Z",
+      now: "2026-09-05T09:00:00.000Z",
+    })).toBeNull();
   });
 
   it("keeps an order in progress while a business blocker exists", () => {

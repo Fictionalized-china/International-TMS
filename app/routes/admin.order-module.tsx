@@ -4,7 +4,11 @@ import { env } from "cloudflare:workers";
 import type { Route } from "./+types/admin.order-module";
 import { BatchNumberLink, OrderNumberLink } from "../components/EntityNumberLink";
 import { requireSessionUser } from "../lib/auth.server";
-import { canOperateCurrentOrder, canReadFullOrderLifecycle } from "../lib/order-access";
+import {
+  canOperateCurrentOrder,
+  canOperateEnabledOrderModule,
+  canReadFullOrderLifecycle,
+} from "../lib/order-access";
 import { requireOrderAccess } from "../lib/order-access.server";
 import { validatePhone, valueOf } from "../lib/validation";
 import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
@@ -15,6 +19,7 @@ import {
   assignOrderModule,
   ensureOrderModules,
   listOrderModules,
+  loadOrderModuleActionScope,
   syncCostsModuleStatus,
   syncOrderWorkflowSnapshot,
 } from "../lib/order-modules.server";
@@ -35,6 +40,8 @@ import {
   orderModuleWorkflowStageAccess,
   type WorkflowStepPosition,
 } from "../lib/order-stage-flow";
+import { frozenOrderModuleWorkflowStageAccess } from "../lib/order-module-workflow-stage";
+import { loadLockedWorkflowStageContext } from "../lib/workflow-instance-stage-gate.server";
 import { canManageOrderModule } from "../lib/position-portal";
 import {
   canAccessSettlementWorkbench,
@@ -104,7 +111,9 @@ import {
 import { ftlBatchTrackingState } from "../lib/ftl-tracking";
 import {
   generateOrderReview,
+  finalizeOrderReview,
   loadOrderReview,
+  loadOrderReviewFinalizationGate,
   refreshOrderCompletionStatus,
 } from "../lib/order-review.server";
 import { refreshSettlementAffectedOrders } from "../lib/settlement-order-refresh";
@@ -112,6 +121,15 @@ import { syncCustomsModuleFromRecords } from "../lib/customs-status.server";
 import { Modal } from "../components/Modal";
 import { OrganizationAssigneePicker } from "../components/OrganizationAssigneePicker";
 import type { OrganizationAssigneeMember } from "../lib/organization-assignee";
+import {
+  missingRequiredOrderAssignmentGroupKeys,
+  nextRequiredOrderAssignmentGroup,
+  orderAssignmentAssigneeFieldName,
+} from "../lib/order-assignment-manifest";
+import {
+  applyOrderAssignmentManifest,
+  loadOrderAssignmentManifest,
+} from "../lib/order-assignment-manifest.server";
 import {
   isActiveOrganizationAssignee,
   isActiveOrganizationAssigneeForPositions,
@@ -131,6 +149,7 @@ import {
   consignmentApprovalStatusRows,
   type ConsignmentApprovalHistoryEntry,
 } from "../lib/consignment-approval-status";
+import { documentReviewCloseSignal } from "../lib/document-review-state";
 import {
   cargoDetailFieldGroups,
   orderCreationConsignmentPresentationKeys,
@@ -563,6 +582,20 @@ async function loadModuleWorkflowStageAccess(
   orderId: string,
   moduleCode: OrderModuleCode,
 ) {
+  const frozenContext = await loadLockedWorkflowStageContext(
+    env.DB,
+    organizationId,
+    orderId,
+    moduleCode,
+  );
+  const frozenAccess = frozenOrderModuleWorkflowStageAccess(
+    moduleCode,
+    frozenContext,
+  );
+  if (frozenAccess) return frozenAccess;
+
+  // Legacy orders created before execution snapshots retain the previous
+  // definition-based lookup. Instance-bound orders must never reach this path.
   const state = await env.DB.prepare(
     `SELECT wi.workflow_id,wi.current_step_key
      FROM workflow_instances wi
@@ -598,6 +631,19 @@ async function loadModuleWorkflowStageAccess(
     positions,
     configuredPlacement?.step_key ?? null,
   );
+}
+
+function canOperateLoadedConfiguredModule(
+  data: Route.ComponentProps["loaderData"],
+) {
+  return data.moduleActionCanOperate;
+}
+
+function canManageLoadedModule(data: Route.ComponentProps["loaderData"]) {
+  if (["review", "exceptions"].includes(data.definition.code))
+    return canOperateLoadedConfiguredModule(data);
+  return canManageOrderModule(data.current, data.definition.code) ||
+    canEditWorkflowDefinitionInUi(data.current);
 }
 type CustomsRecord = {
   id: string;
@@ -766,8 +812,31 @@ export async function loader({ request, params }: Route.LoaderArgs) {
   const modules = await listOrderModules(current.organizationId, orderId);
   const module = modules.find((item) => item.module_code === moduleCode);
   if (!module) throw new Response("订单模块不存在", { status: 404 });
-  if (module.enabled !== 1)
+  const assignmentManifest = moduleCode === "assignment"
+    ? await loadOrderAssignmentManifest(current.organizationId, orderId)
+    : null;
+  const moduleActionScope = await loadOrderModuleActionScope(
+    current.organizationId,
+    orderId,
+    moduleCode as OrderModuleCode,
+  );
+  const moduleEnabled = ["review", "exceptions"].includes(moduleCode)
+    ? moduleActionScope?.enabled
+    : module.enabled === 1;
+  if (!moduleEnabled)
     throw new Response("当前工作流未启用该模块", { status: 404 });
+  const moduleActionCanOperate = Boolean(
+    moduleActionScope &&
+    canOperateEnabledOrderModule({
+      user: current,
+      orderStatus: order.status,
+      moduleCode: moduleActionScope.moduleCode,
+      moduleEnabled: moduleActionScope.enabled,
+      moduleAssigneeUserId: moduleActionScope.assigneeUserId,
+      taskAssigneeUserIds: moduleActionScope.taskAssigneeUserIds,
+      responsibilityPositionCodes: moduleActionScope.responsibilityPositionCodes,
+    }),
+  );
   if (moduleCode === "tracking" && order.business_type === "ltl") {
     const activeBatch = await env.DB.prepare(
       `SELECT b.id
@@ -1270,6 +1339,14 @@ export async function loader({ request, params }: Route.LoaderArgs) {
   const loadedOrderReview = moduleCode === "review"
     ? await loadOrderReview(env.DB, current.organizationId, orderId)
     : null;
+  const orderReviewFinalizationGate = loadedOrderReview
+    ? await loadOrderReviewFinalizationGate(
+        env.DB,
+        current.organizationId,
+        orderId,
+        loadedOrderReview,
+      )
+    : null;
   const orderReview = loadedOrderReview && !canViewFullExpenseDetails
     ? {
         ...loadedOrderReview,
@@ -1326,8 +1403,11 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     },
     workflowStageAccess,
     module,
+    moduleActionScope,
+    moduleActionCanOperate,
     definition,
     modules,
+    assignmentManifest,
     members: members.results,
     tasks: tasks.results,
     history: history.results,
@@ -1360,6 +1440,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     warehouseDispatches: warehouseDispatches.results,
     loadingReferences,
     orderReview,
+    orderReviewFinalizationGate,
     trackingDepartureGate,
     trackingVehicleReference,
     workflowFields,
@@ -1408,15 +1489,13 @@ export async function action({ request, params }: Route.ActionArgs) {
     }>();
   if (!order) return { formError: "订单不存在" };
   await ensureOrderModules(current.organizationId, orderId);
-  const currentModule = await env.DB.prepare(
-    `SELECT enabled
-     FROM order_module_instances
-     WHERE organization_id=? AND order_id=? AND module_code=?`,
-  )
-    .bind(current.organizationId, orderId, moduleCode)
-    .first<{ enabled: number }>();
+  const currentModule = await loadOrderModuleActionScope(
+    current.organizationId,
+    orderId,
+    moduleCode as OrderModuleCode,
+  );
   if (!currentModule) return { formError: "订单模块不存在" };
-  if (currentModule.enabled !== 1)
+  if (!currentModule.enabled)
     return { formError: "当前工作流未启用该模块" };
   const isSalesConsignmentSubmitAction =
     moduleCode === "consignment" &&
@@ -1434,6 +1513,19 @@ export async function action({ request, params }: Route.ActionArgs) {
     intent === "document_review";
   const workflowAdministrator = canEditWorkflowDefinitionInUi(current);
   const moduleManageAccess = canManageOrderModule(current, moduleCode);
+  const usesModuleScopedAuthorization = ["review", "exceptions"].includes(moduleCode);
+  const moduleScopedActionAccess = usesModuleScopedAuthorization &&
+    canOperateEnabledOrderModule({
+      user: current,
+      orderStatus: order.status,
+      moduleCode,
+      moduleEnabled: currentModule.enabled,
+      moduleAssigneeUserId: currentModule.assigneeUserId,
+      taskAssigneeUserIds: currentModule.taskAssigneeUserIds,
+      responsibilityPositionCodes: currentModule.responsibilityPositionCodes,
+    });
+  const workflowAdministratorActionAccess =
+    workflowAdministrator && !usesModuleScopedAuthorization;
   const isSettlementDocumentAction =
     moduleCode === "costs" &&
     ["document_upload", "document_review", "document_metadata_update"].includes(intent);
@@ -1509,7 +1601,7 @@ export async function action({ request, params }: Route.ActionArgs) {
           : "对账结算文件仅可由本单已分配的客服或财务会计上传和维护。",
     };
   }
-  if (!canOperateCurrentOrder(current, order) && !isSalesConsignmentSubmitAction && !workflowAdministrator && !isExpenseDirectionControlAction && !isAuthorizedSettlementDocumentAction) {
+  if (!canOperateCurrentOrder(current, order) && !isSalesConsignmentSubmitAction && !workflowAdministratorActionAccess && !moduleScopedActionAccess && !isExpenseDirectionControlAction && !isAuthorizedSettlementDocumentAction) {
     return { formError: "当前节点不由本账号办理，订单信息仅供查看" };
   }
   const isAssignedConsignmentApprover = isAssignedOrderApprover({
@@ -1520,7 +1612,7 @@ export async function action({ request, params }: Route.ActionArgs) {
   const canApproveConsignment =
     (isConsignmentApprovalAction || isConsignmentDocumentReviewAction) &&
     isAssignedConsignmentApprover;
-  if (!moduleManageAccess && !canApproveConsignment && !isSalesConsignmentSubmitAction && !workflowAdministrator && !isExpenseDirectionControlAction && !isAuthorizedSettlementDocumentAction) {
+  if (!moduleManageAccess && !canApproveConsignment && !isSalesConsignmentSubmitAction && !workflowAdministratorActionAccess && !moduleScopedActionAccess && !isExpenseDirectionControlAction && !isAuthorizedSettlementDocumentAction) {
     return { formError: "当前岗位可以查看本模块，但没有提交业务操作的权限" };
   }
   const moduleWorkflowFields = await loadOrderModuleWorkflowFields(
@@ -1887,7 +1979,36 @@ export async function action({ request, params }: Route.ActionArgs) {
       return {
         success: result.blockers.length
           ? `复盘已生成，仍有 ${result.blockers.length} 项阻断，请按提示处理后重新生成`
-          : `复盘已生成：${result.label}`,
+          : result.completionStatus !== "in_progress"
+            ? "复盘已生成，全部门禁已通过；请核对后点击“最终确认并归档”完成订单"
+            : `复盘已生成：${result.label}`,
+      };
+    }
+    if (intent === "finalize_order_review" && moduleCode === "review") {
+      if (valueOf(form, "confirmFinalReview") !== "1")
+        return { formError: "请先确认已核对复盘结论和全部归档门禁" };
+      const result = await finalizeOrderReview(env.DB, {
+        organizationId: current.organizationId,
+        orderId,
+        userId: current.userId,
+        now: new Date().toISOString(),
+        confirmed: true,
+      });
+      if (!result.completed)
+        return { formError: result.reason || "当前尚不能最终确认归档" };
+      await writeAudit({
+        request,
+        action: "order.review.finalize",
+        resourceType: "transport_order",
+        resourceId: orderId,
+        organizationId: current.organizationId,
+        actorUserId: current.userId,
+        metadata: { completionStatus: result.completionStatus },
+      });
+      return {
+        success: result.completionStatus === "completed_settled"
+          ? "最终确认已完成，订单已归档并结清"
+          : "最终确认已完成，订单已归档；可选结算仍可继续补录",
       };
     }
     if (intent === "assign") {
@@ -2016,6 +2137,86 @@ export async function action({ request, params }: Route.ActionArgs) {
   if (intent === "assign_manifest_confirm" && moduleCode === "assignment") {
       if (order.status !== "confirmed")
         return { formError: "订单当前状态不是“待派单”，无法确认派单" };
+      const frozenManifest = await loadOrderAssignmentManifest(
+        current.organizationId,
+        orderId,
+      );
+      if (frozenManifest.workflowInstanceId) {
+        const manifestSelections = frozenManifest.groups.flatMap((group) => {
+          const assigneeUserId = valueOf(
+            form,
+            orderAssignmentAssigneeFieldName(group.key),
+          );
+          return assigneeUserId ? [{ groupKey: group.key, assigneeUserId }] : [];
+        });
+        const selectionByGroup = new Map(
+          manifestSelections.map((selection) => [selection.groupKey, selection.assigneeUserId]),
+        );
+        const primaryGroup = nextRequiredOrderAssignmentGroup(frozenManifest.groups);
+        const proposedMainAssigneeUserId = primaryGroup
+          ? selectionByGroup.get(primaryGroup.key) ?? primaryGroup.assigneeUserId
+          : null;
+        if (!proposedMainAssigneeUserId) {
+          return {
+            formError: "锁定工作流没有可作为下一处理人的负责人，请检查责任岗位配置。",
+          };
+        }
+        const now = new Date().toISOString();
+        const manifestResult = await applyOrderAssignmentManifest({
+          organizationId: current.organizationId,
+          orderId,
+          actorUserId: current.userId,
+          selections: manifestSelections,
+          notes: valueOf(form, "notes"),
+          now,
+        });
+        const mainAssigneeUserId = manifestResult.primaryAssigneeUserId
+          ?? proposedMainAssigneeUserId;
+        await env.DB.prepare(
+          "UPDATE order_module_instances SET assignee_user_id=?,blocking_reason=NULL,updated_at=? WHERE organization_id=? AND order_id=? AND module_code='assignment' AND enabled=1",
+        )
+          .bind(mainAssigneeUserId, now, current.organizationId, orderId)
+          .run();
+        const workflowResult = await runOrderWorkflowAction({
+          request,
+          organizationId: current.organizationId,
+          actorUserId: current.userId,
+          orderId,
+          actionCode: "dispatch",
+          assigneeUserId: mainAssigneeUserId,
+          notes: valueOf(form, "notes"),
+          bypassAssigneeRestriction: canEditWorkflowDefinitionInUi(current),
+          allowPendingAssignment: true,
+          atomicStatements: [
+            env.DB.prepare(
+              "UPDATE order_module_instances SET status='completed',current_step_code='assigned',current_step_name='分配完成',progress_percent=100,assignee_user_id=?,started_at=COALESCE(started_at,?),completed_at=COALESCE(completed_at,?),blocking_reason=NULL,updated_at=? WHERE organization_id=? AND order_id=? AND module_code='assignment' AND enabled=1",
+            ).bind(mainAssigneeUserId, now, now, now, current.organizationId, orderId),
+            env.DB.prepare(
+              "UPDATE order_tasks SET status='completed',completed_at=?,updated_at=? WHERE organization_id=? AND order_id=? AND module_code='assignment' AND status IN ('pending','in_progress')",
+            ).bind(now, now, current.organizationId, orderId),
+          ],
+        });
+        if ("formError" in workflowResult) return workflowResult;
+        await writeAudit({
+          request,
+          action: "order.module.assignment.manifest_confirm",
+          resourceType: "transport_order",
+          resourceId: orderId,
+          organizationId: current.organizationId,
+          actorUserId: current.userId,
+          metadata: {
+            workflowInstanceId: frozenManifest.workflowInstanceId,
+            mainAssigneeUserId,
+            assignedGroupCount: manifestResult.assignedGroupCount,
+            assignedModuleCodes: manifestResult.assignedModuleCodes,
+            assignments: manifestSelections,
+          },
+        });
+        return redirect(`/admin/orders/${orderId}`);
+      }
+
+      // Only orders created before workflow-instance locking use this fixed
+      // compatibility path. New orders are always assigned from the snapshot.
       const modules = await listOrderModules(current.organizationId, orderId);
       const operationModuleCodes = new Set(["transport", "tracking", "exceptions"]);
       const documentModuleCodes = new Set(["documents", "customs"]);
@@ -4091,9 +4292,7 @@ export default function OrderModulePage({
 }: Route.ComponentProps) {
   const { order, module, definition } = loaderData,
     busy = useNavigation().state !== "idle",
-    manage =
-      (canManageOrderModule(loaderData.current, definition.code) || canEditWorkflowDefinitionInUi(loaderData.current)) &&
-      loaderData.access.canEdit,
+    manage = canManageLoadedModule(loaderData) && loaderData.access.canEdit,
     canApproveConsignment =
       isAssignedOrderApprover({
         status: order.status,
@@ -4353,7 +4552,7 @@ export function EmbeddedOrderModule({
   const { order, definition } = scopedData;
   const manage =
     !readOnly &&
-    (canManageOrderModule(scopedData.current, definition.code) || canEditWorkflowDefinitionInUi(scopedData.current)) && scopedData.access.canEdit;
+    canManageLoadedModule(scopedData) && scopedData.access.canEdit;
   const canApproveConsignment = !readOnly && (isAssignedOrderApprover({
     status: order.status,
     currentAssigneeUserId: order.current_assignee_user_id,
@@ -4415,6 +4614,7 @@ export function EmbeddedOrderModule({
             manage={manage}
             canApproveConsignment={canApproveConsignment}
             busy={busy}
+            reviewCloseSignal={reviewCloseSignal}
           />
         ) : (definition.code === "customs" && customsSection === "files") ||
           (definition.code === "costs" && costsSection === "files") ? null : (
@@ -4925,12 +5125,6 @@ function DocumentReviewPreview({ attachment }: { attachment: Attachment }) {
   </section>;
 }
 
-function documentReviewCloseSignal(signal: unknown, attachmentId: string) {
-  return typeof signal === "string" && signal.startsWith(`${attachmentId}:`)
-    ? signal
-    : undefined;
-}
-
 function ModuleSourceDocuments({
   code,
   data,
@@ -5126,6 +5320,229 @@ function ModuleSourceDocuments({
 }
 
 function AssignmentManifestWorkbench({
+  manifest,
+  members,
+  canSubmit,
+  busy,
+  formError,
+}: {
+  manifest: NonNullable<Route.ComponentProps["loaderData"]["assignmentManifest"]>;
+  members: Member[];
+  canSubmit: boolean;
+  busy: boolean;
+  formError?: string;
+}) {
+  const [assigneeUserIds, setAssigneeUserIds] = useState<Record<string, string>>(
+    () => Object.fromEntries(
+      manifest.groups.map((group) => [group.key, group.assigneeUserId ?? ""]),
+    ),
+  );
+  const missingRequiredGroups = missingRequiredOrderAssignmentGroupKeys(
+    manifest.groups,
+    assigneeUserIds,
+  );
+  const nextResponsibilityGroup = nextRequiredOrderAssignmentGroup(manifest.groups);
+  const configurationErrors = [
+    ...manifest.configurationErrors,
+    ...manifest.groups.flatMap((group) =>
+      group.required && group.positionCode && !members.some(
+        (member) => member.position_code === group.positionCode,
+      )
+        ? [`${group.positionCode} 岗位暂无有效个人账户`]
+        : [],
+    ),
+  ];
+
+  return (
+    <Form method="post" className="assignment-manifest" data-assignment-source="workflow-instance">
+      <input type="hidden" name="intent" value="assign_manifest_confirm" />
+      {formError && (
+        <div className="assignment-manifest-feedback" role="alert" aria-live="assertive">
+          <strong>派单未完成</strong>
+          <span>{formError}</span>
+        </div>
+      )}
+      {configurationErrors.length > 0 && (
+        <div className="assignment-manifest-feedback" role="alert">
+          <strong>工作流配置待修正</strong>
+          <span>{configurationErrors.join("；")}</span>
+        </div>
+      )}
+      <div className="assignment-manifest-gate">
+        <span>✓</span>
+        <p>以下岗位、模块和任务来自本订单锁定的工作流实例；必填项完成后可推进，可选项不阻断。</p>
+      </div>
+      <section className="assignment-manifest-section">
+        <header>
+          <strong>工作流责任分配</strong>
+          <span>隐藏项不展示；工作流配置变化仅影响新锁定的订单实例</span>
+        </header>
+        <div className="table-wrap">
+          <table className="assignment-manifest-table">
+            <thead>
+              <tr><th>责任岗位</th><th>执行人（部门 → 岗位 → 个人）</th><th>模块与任务</th><th>状态</th></tr>
+            </thead>
+            <tbody>
+              {manifest.groups.map((group) => {
+                const eligibleMembers = group.positionCode
+                  ? members.filter((member) => member.position_code === group.positionCode)
+                  : [];
+                const positionName = eligibleMembers[0]?.position_name
+                  ?? group.positionCode
+                  ?? "未配置责任岗位";
+                const assigneeUserId = assigneeUserIds[group.key] ?? "";
+                const status = assigneeUserId
+                  ? group.assignmentState === "assigned" && assigneeUserId === group.assigneeUserId
+                    ? "已分配"
+                    : "待确认"
+                  : group.required
+                    ? "待分配"
+                    : "可选未分配";
+                return (
+                  <tr
+                    key={group.key}
+                    data-assignment-position={group.positionCode ?? "UNCONFIGURED"}
+                    data-assignment-required={group.required ? "true" : "false"}
+                    data-assignment-next-owner={
+                      group.key === nextResponsibilityGroup?.key ? "true" : "false"
+                    }
+                  >
+                    <td>
+                      <strong>{positionName}{group.required ? " *" : ""}</strong>
+                      <small>
+                        {group.required ? "必填责任" : "可选责任，不阻断推进"}
+                        {group.key === nextResponsibilityGroup?.key ? " · 下一处理人" : ""}
+                      </small>
+                    </td>
+                    <td>
+                      <OrganizationAssigneePicker
+                        members={eligibleMembers}
+                        name={orderAssignmentAssigneeFieldName(group.key)}
+                        idPrefix={`assignment-${encodeURIComponent(group.key)}`}
+                        value={assigneeUserId}
+                        onChange={(nextUserId) => setAssigneeUserIds((current) => ({
+                          ...current,
+                          [group.key]: nextUserId,
+                        }))}
+                        personLabel={`${positionName}个人账户`}
+                        required={group.required}
+                        disabled={!group.positionCode || eligibleMembers.length === 0}
+                      />
+                    </td>
+                    <td>
+                      {group.modules.map((module) => (
+                        <span className="assignment-module-coverage" key={`${group.key}:${module.moduleCode}`}>
+                          <strong>{module.moduleName}</strong>
+                          <small>
+                            {module.required ? "必填" : "可选"}
+                            {module.taskNames.length > 0
+                              ? ` · ${module.taskNames.join("、")}`
+                              : " · 模块负责人"}
+                          </small>
+                        </span>
+                      ))}
+                    </td>
+                    <td>
+                      <span className={`assignment-row-status${assigneeUserId ? " ready" : ""}`}>
+                        {status}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+              {manifest.groups.length === 0 && (
+                <tr><td colSpan={4} className="muted">当前锁定工作流没有待分配责任。</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section className="assignment-manifest-section assignment-manifest-extra">
+        <header><strong>派单说明</strong><span>需要交代的特殊事项可在这里补充</span></header>
+        <div className="assignment-manifest-fields">
+          <label className="wide"><span>派单说明</span><textarea className="control filled" name="notes" rows={2} placeholder="如需特别说明可填写" /></label>
+        </div>
+      </section>
+      <footer className="assignment-manifest-footer">
+        <div>
+          <strong>确认派单并进入下一业务节点</strong>
+          <span>系统按锁定工作流一次保存全部负责人，并同步模块、任务与实例状态。</span>
+        </div>
+        <button
+          type="submit"
+          className="primary"
+          disabled={
+            busy ||
+            !canSubmit ||
+            configurationErrors.length > 0 ||
+            missingRequiredGroups.length > 0
+          }
+        >
+          {busy ? "正在保存派单并推进…" : "确认派单并进入下一业务节点 →"}
+        </button>
+      </footer>
+    </Form>
+  );
+}
+
+function AssignmentManifestReadOnly({
+  manifest,
+  members,
+}: {
+  manifest: NonNullable<Route.ComponentProps["loaderData"]["assignmentManifest"]>;
+  members: Member[];
+}) {
+  const statusLabels = {
+    assigned: "已分配",
+    partial: "部分已分配",
+    mixed: "负责人不一致",
+    unassigned: "待分配",
+  } as const;
+  const nextResponsibilityGroup = nextRequiredOrderAssignmentGroup(manifest.groups);
+  return (
+    <div className="table-wrap module-record-table" data-assignment-source="workflow-instance">
+      <table>
+        <thead>
+          <tr><th>责任岗位</th><th>业务模块</th><th>工作流任务</th><th>具体负责人</th><th>状态</th></tr>
+        </thead>
+        <tbody>
+          {manifest.groups.map((group) => {
+            const member = members.find((item) => item.id === group.assigneeUserId);
+            const positionName = members.find(
+              (item) => item.position_code === group.positionCode,
+            )?.position_name ?? group.positionCode ?? "未配置责任岗位";
+            return (
+              <tr
+                key={group.key}
+                data-assignment-position={group.positionCode ?? "UNCONFIGURED"}
+                data-assignment-next-owner={
+                  group.key === nextResponsibilityGroup?.key ? "true" : "false"
+                }
+              >
+                <td>
+                  <strong>{positionName}</strong>
+                  <small>
+                    {group.required ? "必填" : "可选"}
+                    {group.key === nextResponsibilityGroup?.key ? " · 下一处理人" : ""}
+                  </small>
+                </td>
+                <td>{group.modules.map((item) => item.moduleName).join("、")}</td>
+                <td>{group.modules.flatMap((item) => item.taskNames).join("、") || "模块负责人"}</td>
+                <td>{member?.display_name ?? "待分配"}</td>
+                <td>{statusLabels[group.assignmentState]}</td>
+              </tr>
+            );
+          })}
+          {manifest.groups.length === 0 && (
+            <tr><td colSpan={5} className="muted">当前锁定工作流没有待分配责任。</td></tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function LegacyAssignmentManifestWorkbench({
   modules,
   members,
   canSubmit,
@@ -5160,7 +5577,7 @@ function AssignmentManifestWorkbench({
   );
 
   return (
-    <Form method="post" className="assignment-manifest">
+    <Form method="post" className="assignment-manifest" data-assignment-source="legacy-compatibility">
       <input type="hidden" name="intent" value="assign_manifest_confirm" />
       {formError && (
         <div className="assignment-manifest-feedback" role="alert" aria-live="assertive">
@@ -5168,6 +5585,10 @@ function AssignmentManifestWorkbench({
           <span>{formError}</span>
         </div>
       )}
+      <div className="assignment-manifest-feedback" role="status">
+        <strong>旧订单兼容模式</strong>
+        <span>该历史订单没有锁定工作流实例，暂按旧版四岗规则派单；新订单不会进入此模式。</span>
+      </div>
       <div className="assignment-manifest-gate">
         <span>!</span>
         <p>操作主管把运输、单证、客服结算和财务审核分别派到具体个人账户；确认后订单进入国内运输。</p>
@@ -6652,9 +7073,16 @@ function ModuleBusinessData({
         <div className="module-business-stack dense-module-stack">
           <BusinessSubsection
             title="任务分配信息"
-            hint="当前账号仅可查看已经分配的岗位、负责人和办理状态。"
+            hint={data.assignmentManifest?.workflowInstanceId
+              ? "当前账号只读查看本订单锁定工作流中的岗位、模块、任务和负责人。"
+              : "当前账号只读查看旧订单兼容派单记录。"}
           >
-            <div className="table-wrap module-record-table">
+            {data.assignmentManifest?.workflowInstanceId ? (
+              <AssignmentManifestReadOnly
+                manifest={data.assignmentManifest}
+                members={data.members}
+              />
+            ) : <div className="table-wrap module-record-table" data-assignment-source="legacy-compatibility">
               <table>
                 <thead>
                   <tr>
@@ -6680,7 +7108,7 @@ function ModuleBusinessData({
                   )}
                 </tbody>
               </table>
-            </div>
+            </div>}
           </BusinessSubsection>
         </div>
       );
@@ -6688,13 +7116,21 @@ function ModuleBusinessData({
     if (data.order.status === "submitted") {
       return <div className="assignment-waiting-note"><strong>等待委托审核</strong><span>委托审批通过后，本页自动开放任务分配。</span></div>;
     }
-    return <AssignmentManifestWorkbench
-      modules={assignableModules}
-      members={data.members}
-      canSubmit={data.order.status === "confirmed"}
-      busy={busy}
-      formError={moduleActionData?.formError}
-    />;
+    return data.assignmentManifest?.workflowInstanceId
+      ? <AssignmentManifestWorkbench
+          manifest={data.assignmentManifest}
+          members={data.members}
+          canSubmit={data.order.status === "confirmed"}
+          busy={busy}
+          formError={moduleActionData?.formError}
+        />
+      : <LegacyAssignmentManifestWorkbench
+          modules={assignableModules}
+          members={data.members}
+          canSubmit={data.order.status === "confirmed"}
+          busy={busy}
+          formError={moduleActionData?.formError}
+        />;
   }
   if (code === "consignment") {
     const customFields = data.workflowFields.filter(
@@ -7015,6 +7451,7 @@ function ModuleBusinessData({
   }
   if (code === "review" && data.orderReview) {
     const review = data.orderReview;
+    const finalizationGate = data.orderReviewFinalizationGate;
     const canGenerate = manage;
     const canOpenSettlement = canAccessSettlementWorkbench(data.current.permissions);
     const timings = [
@@ -7030,11 +7467,15 @@ function ModuleBusinessData({
       <div className="module-business-stack dense-module-stack order-review-workbench">
         <BusinessSubsection
           title="复盘结论与完成判定"
-          hint="完成复盘前必须完成应收、应付的收付款与核销，并确保所有币种未结余额为零。"
+          hint="系统只按本订单锁定的工作流实例校验启用且必办的模块、字段与资料；可选结算余额会保留事实，但不阻断最终归档。"
         >
           <div className="order-review-status-row">
             <span className={`status-pill review-status-${review.completionStatus}`}>
-              {review.completionLabel}
+              {data.order.status === "completed" && review.completionStatus !== "completed_settled"
+                ? "业务已归档 · 财务跟进中"
+                : finalizationGate?.allowed && data.order.status !== "completed"
+                  ? "待最终确认归档"
+                  : review.completionLabel}
             </span>
             <span>
               {review.snapshotId
@@ -7060,7 +7501,13 @@ function ModuleBusinessData({
               })}
             </div>
           ) : (
-            <p className="alert success">业务条件、收付款与核销均已闭环；生成复盘后可完成订单。</p>
+            <p className="alert success">
+              {review.completionStatus === "business_complete_unsettled"
+                ? "当前工作流必办门禁已通过；仍有可选结算余额，可归档并在之后继续补录。"
+                : review.snapshotId
+                  ? "业务条件及当前工作流要求的结算门禁均已闭环，可最终确认归档。"
+                  : "业务条件及当前工作流门禁已通过，请先生成复盘草稿并核对结论。"}
+            </p>
           )}
         </BusinessSubsection>
 
@@ -7127,7 +7574,7 @@ function ModuleBusinessData({
         </BusinessSubsection>
 
         {canGenerate && (
-          <BusinessSubsection title="生成订单复盘" hint="可以重复生成新版本；每次均重新读取业务模块实际数据。">
+          <BusinessSubsection title="生成订单复盘草稿" hint="可以重复生成新版本；每次均重新读取业务模块实际数据，但不会直接完成订单。">
             <Form method="post" className="review-generation-form">
               <input type="hidden" name="intent" value="generate_order_review" />
               <ModuleField fields={data.workflowFields} fieldKey="customer_dispute_summary" label="客户异议摘要">
@@ -7139,8 +7586,29 @@ function ModuleBusinessData({
               <ModuleField fields={data.workflowFields} fieldKey="review_improvements" label="改进建议">
                 {(required) => <textarea name="improvementNotes" required={required} defaultValue={review.improvementNotes || ""} placeholder="后续可复用的改进动作" />}
               </ModuleField>
-              <button className="primary" disabled={busy}>生成并判定订单完成状态</button>
+              <button className="primary" disabled={busy}>生成 / 更新复盘草稿</button>
             </Form>
+          </BusinessSubsection>
+        )}
+        {canGenerate && review.snapshotId && (
+          <BusinessSubsection
+            title="最终确认归档"
+            hint="这是独立的最终动作；系统会在提交时重新校验当前工作流的模块、文件、字段和结算门禁。"
+          >
+            {finalizationGate?.allowed ? (
+              <Form method="post" className="review-generation-form">
+                <input type="hidden" name="intent" value="finalize_order_review" />
+                <label className="checkbox-line">
+                  <input type="checkbox" name="confirmFinalReview" value="1" required />
+                  <span>我已核对复盘结论及全部业务、结算和归档资料，确认完成本订单。</span>
+                </label>
+                <button className="primary" disabled={busy}>最终确认并归档订单</button>
+              </Form>
+            ) : (
+              <p className="alert warning">
+                {finalizationGate?.reason || "当前仍有门禁未通过，处理完成并重新生成复盘草稿后才能最终确认。"}
+              </p>
+            )}
           </BusinessSubsection>
         )}
         {manage && <Link className="secondary module-external-link" to="/admin/billing">进入费用结算与核销</Link>}
@@ -7638,11 +8106,13 @@ function OrderApprovalReview({
   manage,
   canApproveConsignment,
   busy,
+  reviewCloseSignal,
 }: {
   data: Route.ComponentProps["loaderData"];
   manage: boolean;
   canApproveConsignment: boolean;
   busy: boolean;
+  reviewCloseSignal: unknown;
 }) {
   const { order, cargo } = data;
   if (!canApproveConsignment) {
@@ -7677,6 +8147,7 @@ function OrderApprovalReview({
       manage={manage}
       canApproveConsignment={canApproveConsignment}
       busy={busy}
+      reviewCloseSignal={reviewCloseSignal}
     />
     <section className="approval-section approval-decision">
       <header><strong>审批办理</strong><span>确认意见并指定下一步具体操作主管</span></header>

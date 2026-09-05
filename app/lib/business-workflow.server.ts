@@ -4,14 +4,17 @@ import {
   pickNextRequiredWorkflowModule,
   type OrderModuleCode,
 } from "./order-modules";
-import {
-  ensureWorkflowCatalogFields,
-  snapshotWorkflowFieldsForInstance,
-} from "./workflow-fields.server";
+import { snapshotWorkflowFieldsForInstance } from "./workflow-fields.server";
+import { workflowFieldCatalog } from "./workflow-field-catalog";
 import {
   ensureWorkflowExecutionSnapshot,
   synchronizeWorkflowExecution,
 } from "./workflow-execution.server";
+import {
+  standardRoadWorkflowModules,
+  standardRoadWorkflowType,
+  type StandardRoadWorkflowCode,
+} from "./standard-road-workflow";
 
 export type WorkflowEvent =
   | "customer.ready"
@@ -42,6 +45,11 @@ type RecordEventInput = WorkflowRefs & {
 };
 
 type Definition = { id: string };
+type WorkflowDefinitionIdentity = Definition & {
+  lifecycle_status: string;
+  validation_status: string;
+  template_family_id: string | null;
+};
 type Step = { step_key: string; name: string; sort_order: number };
 type Instance = { id: string; workflow_id: string; current_step_key: string };
 
@@ -104,7 +112,10 @@ const workflowDefinitions = {
     name: "整车型汽运订单标准流程",
     steps: defaultWorkflowSteps,
   },
-} as const;
+} as const satisfies Record<
+  string,
+  { code: StandardRoadWorkflowCode; name: string; steps: typeof defaultWorkflowSteps }
+>;
 
 export async function ensureDefaultWorkflow(organizationId: string): Promise<string> {
   const existingId = await findPublishedWorkflowId(
@@ -112,11 +123,10 @@ export async function ensureDefaultWorkflow(organizationId: string): Promise<str
     workflowDefinitions.ltl.code,
   );
   if (existingId) return existingId;
-  await ensureRoadWorkflowTemplates(organizationId);
-  return (
-    (await findPublishedWorkflowId(organizationId, workflowDefinitions.ltl.code)) ??
-    `${organizationId}:tms-default`
-  );
+  const templates = await ensureRoadWorkflowTemplates(organizationId);
+  return (await findPublishedWorkflowId(organizationId, workflowDefinitions.ltl.code)) ??
+    templates.get(workflowDefinitions.ltl.code) ??
+    failMissingWorkflowTemplate(workflowDefinitions.ltl.code);
 }
 
 export async function ensureWorkflowForBusinessType(
@@ -131,40 +141,140 @@ export async function ensureWorkflowForBusinessType(
   const existingId = await findPublishedWorkflowId(organizationId, code);
   if (existingId) return existingId;
   await ensureRoadWorkflowTemplates(organizationId);
-  return (
-    (await findPublishedWorkflowId(organizationId, code)) ??
-    ensureDefaultWorkflow(organizationId)
+  const publishedId = await findPublishedWorkflowId(organizationId, code);
+  if (publishedId) return publishedId;
+  const typeLabel = code === workflowDefinitions.ftl.code
+    ? "整车"
+    : code === workflowDefinitions.ltl.code
+      ? "拼车"
+      : "待分流";
+  throw new Error(
+    `当前组织尚未发布且校验通过${typeLabel}工作流。请老板或开发者前往“系统 → 工作流配置”，补齐岗位负责人和必填规则，校验通过后发布再继续业务。`,
   );
 }
 
-async function findPublishedWorkflowId(organizationId: string, code: string) {
+async function findPublishedWorkflowId(
+  organizationId: string,
+  code: StandardRoadWorkflowCode,
+) {
+  const base = await findWorkflowDefinitionByCode(organizationId, code);
+  const familyId = base?.template_family_id || base?.id || `${organizationId}:${code}`;
   const existing = await env.DB.prepare(
     `SELECT id FROM workflow_definitions
      WHERE organization_id=? AND lifecycle_status='published' AND status='active'
+       AND validation_status='valid'
        AND (code=? OR template_family_id=?)
      ORDER BY version_number DESC,updated_at DESC LIMIT 1`,
-  ).bind(organizationId,code,`${organizationId}:${code}`).first<Definition>();
+  ).bind(organizationId,code,familyId).first<Definition>();
   return existing?.id ?? null;
+}
+
+function failMissingWorkflowTemplate(code: StandardRoadWorkflowCode): never {
+  throw new Error(`标准工作流模板 ${code} 初始化失败，请刷新工作流配置页重试。`);
+}
+
+async function findWorkflowDefinitionByCode(
+  organizationId: string,
+  code: StandardRoadWorkflowCode,
+) {
+  return env.DB.prepare(
+    `SELECT id,lifecycle_status,validation_status,template_family_id
+       FROM workflow_definitions
+      WHERE organization_id=? AND code=?
+      LIMIT 1`,
+  ).bind(organizationId, code).first<WorkflowDefinitionIdentity>();
+}
+
+const ftlLoadingTypeLockedFields = new Set([
+  "business_type",
+  "loading_batch",
+  "consolidation_warehouse",
+  "cost_allocation",
+  "vehicle_capacity_weight",
+  "vehicle_capacity_volume",
+]);
+
+async function ensureDraftWorkflowCatalogFields(input: {
+  workflowId: string;
+  code: StandardRoadWorkflowCode;
+  now: string;
+}) {
+  const statements: D1PreparedStatement[] = [];
+  for (const [index, item] of workflowFieldCatalog.entries()) {
+    if (
+      input.code === workflowDefinitions.ftl.code &&
+      item.moduleCode === "loading" &&
+      ftlLoadingTypeLockedFields.has(item.fieldKey)
+    ) continue;
+    statements.push(
+      env.DB.prepare(
+        `INSERT OR IGNORE INTO workflow_step_fields(
+           id,workflow_id,step_id,field_key,label,field_type,is_required,is_active,
+           sort_order,options_text,help_text,module_code,created_at,updated_at
+         )
+         SELECT ?,?,s.id,?,?,?,?,?,?,?,?,?,?,?
+           FROM workflow_steps s
+          WHERE s.workflow_id=? AND s.step_key=?`,
+      ).bind(
+        `${input.workflowId}:catalog:${item.moduleCode}:${item.fieldKey}`,
+        input.workflowId,
+        item.fieldKey,
+        item.label,
+        item.fieldType,
+        item.defaultMode === "required" ? 1 : 0,
+        item.defaultMode === "hidden" ? 0 : 1,
+        index * 10 + 10,
+        item.optionsText ?? null,
+        item.helpText,
+        item.moduleCode,
+        input.now,
+        input.now,
+        input.workflowId,
+        item.stepKey,
+      ),
+    );
+  }
+  for (let index = 0; index < statements.length; index += 80) {
+    await env.DB.batch(statements.slice(index, index + 80));
+  }
 }
 
 async function ensureRoadWorkflowTemplates(organizationId: string) {
   const now = new Date().toISOString();
-  const statements: D1PreparedStatement[] = [];
+  const templates = new Map<StandardRoadWorkflowCode, string>();
+  const editableTemplates: Array<{
+    code: StandardRoadWorkflowCode;
+    workflowId: string;
+  }> = [];
   for (const config of Object.values(workflowDefinitions)) {
-    const workflowId = `${organizationId}:${config.code}`;
-    statements.push(
-      env.DB.prepare(
-        "INSERT OR IGNORE INTO workflow_definitions (id, organization_id, code, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-      ).bind(workflowId, organizationId, config.code, config.name, now, now),
-      env.DB.prepare(
-        "UPDATE workflow_definitions SET name=?,updated_at=? WHERE organization_id=? AND code=? AND name IN ('汽运订单标准流程','国际零担标准流程')",
-      ).bind(config.name, now, organizationId, config.code),
+    const deterministicId = `${organizationId}:${config.code}`;
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO workflow_definitions(
+         id,organization_id,code,name,status,template_family_id,version_number,
+         lifecycle_status,validation_status,road_load_type,created_at,updated_at
+       ) VALUES(?,?,?,?,'active',?,1,'draft','pending',?,?,?)`,
+    ).bind(
+      deterministicId,
+      organizationId,
+      config.code,
+      config.name,
+      deterministicId,
+      standardRoadWorkflowType(config.code),
+      now,
+      now,
+    ).run();
+    const definition = await findWorkflowDefinitionByCode(organizationId, config.code);
+    if (!definition) failMissingWorkflowTemplate(config.code);
+    templates.set(config.code, definition.id);
+    if (definition.lifecycle_status !== "draft") continue;
+    editableTemplates.push({ code: config.code, workflowId: definition.id });
+    await env.DB.batch([
       ...config.steps.map(([key, name, entity, event, order, scope]) =>
         env.DB.prepare(
           "INSERT OR IGNORE INTO workflow_steps (id, workflow_id, step_key, name, entity_type, trigger_event, sort_order, actor_scope, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ).bind(
-          `${organizationId}:wf:${config.code}:${key}`,
-          workflowId,
+          `${definition.id}:step:${key}`,
+          definition.id,
           key,
           name,
           entity,
@@ -175,72 +285,63 @@ async function ensureRoadWorkflowTemplates(organizationId: string) {
           now,
         ),
       ),
-      ...config.steps.map(([key, name, entity, event, order, scope]) =>
-        env.DB.prepare(
-          `UPDATE workflow_steps
-           SET name=?,entity_type=?,trigger_event=?,sort_order=?,actor_scope=?,is_active=1,updated_at=?
-           WHERE workflow_id=? AND step_key=?`,
-        ).bind(name, entity, event, order, scope, now, workflowId, key),
+    ]);
+    const moduleStatements = standardRoadWorkflowModules.flatMap((module) => [
+      env.DB.prepare(
+        `INSERT OR IGNORE INTO workflow_step_modules(
+           id,workflow_id,step_id,module_code,display_name,sort_order,is_required,is_active,
+           responsibility_position_code,completion_mode,created_at,updated_at
+         )
+         SELECT ?,s.workflow_id,s.id,?,?,?,?,1,?,?,?,?
+           FROM workflow_steps s
+          WHERE s.workflow_id=? AND s.step_key=? AND s.is_active=1`,
+      ).bind(
+        `${definition.id}:module:${module.stepKey}:${module.moduleCode}`,
+        module.moduleCode,
+        module.displayName,
+        module.sortOrder,
+        module.required ? 1 : 0,
+        module.responsibilityPositionCode,
+        module.completionMode,
+        now,
+        now,
+        definition.id,
+        module.stepKey,
       ),
-    );
+      env.DB.prepare(
+        `INSERT OR IGNORE INTO workflow_module_tasks(
+           id,workflow_id,step_module_id,task_key,name,task_type,sort_order,is_required,is_active,
+           responsibility_position_code,instructions,created_at,updated_at
+         )
+         SELECT ?,m.workflow_id,m.id,?,?,?,10,?,1,?,?,?,?
+           FROM workflow_step_modules m
+           JOIN workflow_steps s ON s.id=m.step_id AND s.workflow_id=m.workflow_id
+          WHERE m.workflow_id=? AND s.step_key=? AND m.module_code=? AND m.is_active=1`,
+      ).bind(
+        `${definition.id}:task:${module.stepKey}:${module.moduleCode}:${module.taskKey}`,
+        module.taskKey,
+        module.taskName,
+        module.taskType,
+        module.taskRequired ? 1 : 0,
+        module.responsibilityPositionCode,
+        module.instructions,
+        now,
+        now,
+        definition.id,
+        module.stepKey,
+        module.moduleCode,
+      ),
+    ]);
+    await env.DB.batch(moduleStatements);
   }
-  await env.DB.batch(statements);
 
-  await env.DB.batch([
-    env.DB.prepare(
-      `INSERT OR IGNORE INTO workflow_step_modules(
-        id,workflow_id,step_id,module_code,display_name,sort_order,is_required,is_active,
-        responsibility_position_code,completion_mode,created_at,updated_at
-       )
-       SELECT s.id||':module:consignment',s.workflow_id,s.id,'consignment','询价与报价',10,1,1,
-         'SALES','all_tasks',?,?
-       FROM workflow_steps s
-       JOIN workflow_definitions wd ON wd.id=s.workflow_id
-       WHERE wd.organization_id=? AND s.step_key='quotation' AND s.is_active=1`,
-    ).bind(now,now,organizationId),
-    env.DB.prepare(
-      `INSERT OR IGNORE INTO workflow_module_tasks(
-        id,workflow_id,step_module_id,task_key,name,task_type,sort_order,is_required,is_active,
-        responsibility_position_code,instructions,created_at,updated_at
-       )
-       SELECT m.id||':task:handle_quotation',m.workflow_id,m.id,'handle_quotation',
-         '填写询价并完成报价','system',10,1,1,'SALES',?, ?,?
-       FROM workflow_step_modules m
-       JOIN workflow_steps s ON s.id=m.step_id AND s.workflow_id=m.workflow_id
-       JOIN workflow_definitions wd ON wd.id=m.workflow_id
-       WHERE wd.organization_id=? AND s.step_key='quotation' AND m.module_code='consignment'`,
-    ).bind("首次保存报价时锁定工作流版本；客户接受后完成本节点。",now,now,organizationId),
-  ]);
-
-  await env.DB.prepare(
-    `UPDATE workflow_steps SET is_active=0,updated_at=?
-     WHERE workflow_id IN (
-       SELECT id FROM workflow_definitions
-       WHERE organization_id=? AND code IN ('tms-road-pending','tms-default','tms-ftl-standard')
-     ) AND step_key='review_assignment'`,
-  ).bind(now, organizationId).run();
-
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE workflow_step_fields SET is_active=0,updated_at=?
-       WHERE workflow_id IN (
-         SELECT id FROM workflow_definitions
-         WHERE organization_id=? AND code IN ('tms-road-pending','tms-default','tms-ftl-standard')
-       ) AND field_key='pickup_appointment_notes'`,
-    ).bind(now, organizationId),
-    env.DB.prepare(
-      `UPDATE workflow_instance_fields SET is_active=0
-       WHERE workflow_id IN (
-         SELECT id FROM workflow_definitions
-         WHERE organization_id=? AND code IN ('tms-road-pending','tms-default','tms-ftl-standard')
-       ) AND field_key='pickup_appointment_notes'`,
-    ).bind(organizationId),
-  ]);
-
-  const ltlWorkflowId = `${organizationId}:${workflowDefinitions.ltl.code}`;
-  const ftlWorkflowId = `${organizationId}:${workflowDefinitions.ftl.code}`;
-  const ltlFields = await env.DB.prepare(
-    `SELECT f.field_key,f.label,f.field_type,f.is_required,f.is_active,f.sort_order,f.options_text,f.help_text,s.step_key
+  const ltlWorkflowId = templates.get(workflowDefinitions.ltl.code);
+  const ftlWorkflowId = templates.get(workflowDefinitions.ftl.code);
+  const ftlIsEditable = editableTemplates.some((item) => item.code === workflowDefinitions.ftl.code);
+  if (ltlWorkflowId && ftlWorkflowId && ftlIsEditable) {
+    const ltlFields = await env.DB.prepare(
+    `SELECT f.field_key,f.label,f.field_type,f.is_required,f.is_active,f.sort_order,f.options_text,f.help_text,
+            COALESCE(f.module_code,'consignment') module_code,s.step_key
      FROM workflow_step_fields f
      JOIN workflow_steps s ON s.id=f.step_id
      WHERE f.workflow_id=? AND s.step_key<>'port_loading'`,
@@ -255,37 +356,48 @@ async function ensureRoadWorkflowTemplates(organizationId: string) {
       sort_order: number;
       options_text: string | null;
       help_text: string | null;
+      module_code: OrderModuleCode;
       step_key: string;
     }>();
-  if (ltlFields.results.length) {
-    const copyStatements = ltlFields.results.map((field) =>
-      env.DB.prepare(
-        `INSERT OR IGNORE INTO workflow_step_fields(
-          id,workflow_id,step_id,field_key,label,field_type,is_required,is_active,sort_order,options_text,help_text,created_at,updated_at
-        )
-        SELECT ?,?,?,?, ?,?,?,?,?,?,?,?,?
-        WHERE EXISTS(SELECT 1 FROM workflow_steps WHERE id=? AND workflow_id=?)`,
-      ).bind(
-        `${organizationId}:wf-field:${workflowDefinitions.ftl.code}:${field.step_key}:${field.field_key}`,
-        ftlWorkflowId,
-        `${organizationId}:wf:${workflowDefinitions.ftl.code}:${field.step_key}`,
-        field.field_key,
-        field.label,
-        field.field_type,
-        field.is_required,
-        field.is_active,
-        field.sort_order,
-        field.options_text,
-        field.help_text,
-        now,
-        now,
-        `${organizationId}:wf:${workflowDefinitions.ftl.code}:${field.step_key}`,
-        ftlWorkflowId,
-      ),
-    );
-    await env.DB.batch(copyStatements);
+    if (ltlFields.results.length) {
+      const copyStatements = ltlFields.results.map((field) =>
+        env.DB.prepare(
+          `INSERT OR IGNORE INTO workflow_step_fields(
+            id,workflow_id,step_id,field_key,label,field_type,is_required,is_active,sort_order,
+            options_text,help_text,module_code,created_at,updated_at
+          )
+          SELECT ?,?,target.id,?,?,?,?,?,?,?,?,?,?,?
+          FROM workflow_steps target
+          WHERE target.workflow_id=? AND target.step_key=?`,
+        ).bind(
+          `${ftlWorkflowId}:copied:${field.step_key}:${field.field_key}`,
+          ftlWorkflowId,
+          field.field_key,
+          field.label,
+          field.field_type,
+          field.is_required,
+          field.is_active,
+          field.sort_order,
+          field.options_text,
+          field.help_text,
+          field.module_code,
+          now,
+          now,
+          ftlWorkflowId,
+          field.step_key,
+        ),
+      );
+      await env.DB.batch(copyStatements);
+    }
   }
-  await ensureWorkflowCatalogFields(organizationId);
+  for (const template of editableTemplates) {
+    await ensureDraftWorkflowCatalogFields({
+      workflowId: template.workflowId,
+      code: template.code,
+      now,
+    });
+  }
+  return templates;
 }
 
 export async function recordWorkflowEvent(input: RecordEventInput): Promise<string | null> {
@@ -301,10 +413,10 @@ export async function recordWorkflowEvent(input: RecordEventInput): Promise<stri
         ).bind(input.workflowId, input.organizationId).first<Definition>()
       : null) ??
     (await env.DB.prepare(
-      "SELECT id FROM workflow_definitions WHERE organization_id=? AND code='tms-default' AND status='active' AND lifecycle_status='published' LIMIT 1",
+      "SELECT id FROM workflow_definitions WHERE organization_id=? AND code='tms-default' AND status='active' AND lifecycle_status='published' AND validation_status='valid' LIMIT 1",
     ).bind(input.organizationId).first<Definition>()) ??
     (await env.DB.prepare(
-      "SELECT id FROM workflow_definitions WHERE organization_id=? AND status='active' AND lifecycle_status='published' ORDER BY created_at LIMIT 1",
+      "SELECT id FROM workflow_definitions WHERE organization_id=? AND status='active' AND lifecycle_status='published' AND validation_status='valid' ORDER BY created_at LIMIT 1",
     ).bind(input.organizationId).first<Definition>());
   if (!definition) return null;
 
@@ -391,7 +503,6 @@ export async function syncOrderBusinessWorkflow(input: OrderBusinessWorkflowSync
     .bind(input.organizationId, input.orderId)
     .first<OrderWorkflowSnapshot>();
   if (!order) return null;
-  let workflowId = await ensureWorkflowForBusinessType(input.organizationId, order.business_type);
   let instance = await env.DB.prepare(
     `SELECT id,workflow_id,current_step_key
      FROM workflow_instances
@@ -402,7 +513,8 @@ export async function syncOrderBusinessWorkflow(input: OrderBusinessWorkflowSync
     .first<Instance>();
   // Existing orders are version-frozen. A separate explicit migration action
   // is required before an order may use a newer published workflow version.
-  if (instance?.workflow_id) workflowId = instance.workflow_id;
+  let workflowId = instance?.workflow_id ??
+    await ensureWorkflowForBusinessType(input.organizationId, order.business_type);
   const modules = (
     await env.DB.prepare(
       `SELECT module_code,enabled,is_required,status,current_step_code

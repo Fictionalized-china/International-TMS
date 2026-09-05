@@ -18,7 +18,7 @@ export async function refreshOrdersForWorkflowFieldChanges(input: {
     input.changes
       .filter(
         (change) =>
-          change.moduleCode === "costs" && change.stepKey === "reconciliation",
+          change.moduleCode === "costs",
       )
       .map((change) => change.stepKey),
   )];

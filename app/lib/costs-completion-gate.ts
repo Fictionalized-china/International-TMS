@@ -14,6 +14,7 @@ export type CostsCompletionFieldState = Pick<
 export type CostsCompletionDirectionState = {
   direction: "receivable" | "payable";
   hasExpenses: boolean;
+  outstandingBalance?: number;
   customerServiceConfirmed: boolean;
   businessReviewed: boolean;
   financeReviewed: boolean;
@@ -46,6 +47,8 @@ const signOffFieldChecks = {
   >
 >;
 
+const balanceFieldKeys = new Set(["cash_records", "writeoff_records"]);
+
 function directionLabel(direction: CostsCompletionDirectionState["direction"]) {
   return direction === "receivable" ? "应收" : "应付";
 }
@@ -57,7 +60,6 @@ export function evaluateCostsCompletionGate(input: {
   const requiredFields = input.fields.filter(
     (field) =>
       field.moduleCode === "costs" &&
-      field.stepKey === "reconciliation" &&
       field.isActive &&
       field.isRequired,
   );
@@ -67,7 +69,14 @@ export function evaluateCostsCompletionGate(input: {
   const blockers: CostsCompletionBlocker[] = [];
   let requiredCheckCount = 0;
   let completedRequiredCheckCount = 0;
+  const requiredBalanceFields = requiredFields.filter((field) =>
+    balanceFieldKeys.has(field.fieldKey),
+  );
+  const hasBalanceFacts = input.directions.some(
+    (direction) => direction.outstandingBalance !== undefined,
+  );
   for (const field of requiredFields) {
+    if (hasBalanceFacts && balanceFieldKeys.has(field.fieldKey)) continue;
     const check = signOffFieldChecks[field.fieldKey as keyof typeof signOffFieldChecks];
     if (!check) {
       requiredCheckCount += 1;
@@ -76,14 +85,35 @@ export function evaluateCostsCompletionGate(input: {
       continue;
     }
     for (const direction of ["receivable", "payable"] as const) {
+      const directionState = directionByCode.get(direction);
+      if (!directionState?.hasExpenses) continue;
       requiredCheckCount += 1;
-      if (directionByCode.get(direction)?.[check]) {
+      if (directionState[check]) {
         completedRequiredCheckCount += 1;
       } else {
         blockers.push({
           fieldKey: field.fieldKey,
           label: `${field.label}（${directionLabel(direction)}）`,
           direction,
+        });
+      }
+    }
+  }
+  if (hasBalanceFacts && requiredBalanceFields.length) {
+    const balanceLabel = requiredBalanceFields.map((field) => field.label).join("、");
+    for (const direction of input.directions) {
+      if (!direction.hasExpenses) continue;
+      requiredCheckCount += 1;
+      if (
+        direction.outstandingBalance !== undefined &&
+        direction.outstandingBalance <= 0.009
+      ) {
+        completedRequiredCheckCount += 1;
+      } else {
+        blockers.push({
+          fieldKey: requiredBalanceFields[0].fieldKey,
+          label: `${balanceLabel}（${directionLabel(direction.direction)}未结清）`,
+          direction: direction.direction,
         });
       }
     }

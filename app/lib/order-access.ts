@@ -65,6 +65,59 @@ export function canOperateCurrentOrder(
   );
 }
 
+export type EnabledOrderModuleActionInput = {
+  user: Pick<OrderAccessUser, "userId" | "positionCode" | "permissions" | "roleCodes">;
+  orderStatus: string;
+  moduleCode: string;
+  moduleEnabled: boolean;
+  moduleAssigneeUserId: string | null;
+  taskAssigneeUserIds: readonly string[];
+  responsibilityPositionCodes: readonly string[];
+};
+
+/**
+ * Optional/collaborative modules do not always own the order-level handoff.
+ * Their mutations are therefore authorized from the frozen workflow instance:
+ * the module must be enabled, the account must hold the module permission, and
+ * it must either be the explicit module/task owner or belong to the configured
+ * responsibility pool while the work is still unassigned.
+ */
+export function canOperateEnabledOrderModule(
+  input: EnabledOrderModuleActionInput,
+) {
+  if (!input.moduleEnabled || ["completed", "cancelled"].includes(input.orderStatus))
+    return false;
+  if (!input.user.permissions.includes(`order.module.${input.moduleCode}.manage`))
+    return false;
+  const assignedUserIds = new Set(
+    [input.moduleAssigneeUserId, ...input.taskAssigneeUserIds].filter(
+      (userId): userId is string => Boolean(userId),
+    ),
+  );
+  if (assignedUserIds.size > 0) return assignedUserIds.has(input.user.userId);
+  return Boolean(
+    input.user.positionCode &&
+    input.responsibilityPositionCodes.includes(input.user.positionCode),
+  );
+}
+
+export function canEditCurrentOrderWorkspace(input: {
+  orderCompleted: boolean;
+  viewingCurrentStep: boolean;
+  canOperateCurrentNode: boolean;
+  canOperateParallelCosts: boolean;
+  canSubmitCurrentDraft: boolean;
+  canOperateScopedModule: boolean;
+}) {
+  if (input.orderCompleted) return false;
+  if (input.canOperateScopedModule) return true;
+  return input.viewingCurrentStep && (
+    input.canOperateCurrentNode ||
+    input.canOperateParallelCosts ||
+    input.canSubmitCurrentDraft
+  );
+}
+
 export function orderVisibilitySql(user: OrderAccessUser, alias = "o") {
   if (canViewAllOrders(user)) return { sql: "1=1", values: [] as string[] };
 

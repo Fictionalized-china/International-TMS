@@ -19,6 +19,7 @@ type OrganizationAssigneePickerProps = {
   required?: boolean;
   disabled?: boolean;
   personLabel?: string;
+  disabledUserReasons?: Readonly<Record<string, string>>;
 };
 
 type AssigneeCascadePlacement = {
@@ -28,6 +29,8 @@ type AssigneeCascadePlacement = {
   listHeight: number;
   direction: "above" | "below";
 };
+
+const EMPTY_DISABLED_USER_REASONS: Readonly<Record<string, string>> = {};
 
 export function calculateAssigneeCascadePlacement(
   anchor: { top: number; right: number; bottom: number },
@@ -66,6 +69,7 @@ export function OrganizationAssigneePicker({
   required = true,
   disabled = false,
   personLabel = "个人账户",
+  disabledUserReasons = EMPTY_DISABLED_USER_REASONS,
 }: OrganizationAssigneePickerProps) {
   const generatedId = useId().replace(/:/g, "");
   const baseId = idPrefix || `organization-assignee-${generatedId}`;
@@ -81,17 +85,25 @@ export function OrganizationAssigneePicker({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const cascadeRef = useRef<HTMLDivElement>(null);
   const selectedUserId = value === undefined ? internalUserId : value;
+  const selectedUserIsDisabled = Boolean(selectedUserId && disabledUserReasons[selectedUserId]);
+  const effectiveSelectedUserId = selectedUserIsDisabled ? "" : selectedUserId;
   const selectedDepartment = tree.find((item) => item.id === departmentId);
   const positions = selectedDepartment?.positions ?? [];
   const selectedPosition = positions.find((item) => item.id === positionId);
   const people = selectedPosition?.members ?? [];
-  const selectedPath = findOrganizationAssigneePath(members, selectedUserId);
+  const selectedPath = findOrganizationAssigneePath(members, effectiveSelectedUserId);
   const panelId = `${baseId}-cascade`;
+  const assignableMembers = tree.flatMap((department) =>
+    department.positions.flatMap((position) => position.members),
+  );
+  const disabledUserCount = assignableMembers.filter(
+    (member) => Boolean(disabledUserReasons[member.id]),
+  ).length;
 
   useEffect(() => {
     if (!selectedUserId) return;
     const nextPath = findOrganizationAssigneePath(members, selectedUserId);
-    if (!nextPath) {
+    if (!nextPath || disabledUserReasons[selectedUserId]) {
       setDepartmentId("");
       setPositionId("");
       if (value === undefined) setInternalUserId("");
@@ -100,7 +112,7 @@ export function OrganizationAssigneePicker({
     }
     setDepartmentId(nextPath.departmentId);
     setPositionId(nextPath.positionId);
-  }, [members, onChange, selectedUserId, value]);
+  }, [disabledUserReasons, members, onChange, selectedUserId, value]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -144,6 +156,7 @@ export function OrganizationAssigneePicker({
   }, [isOpen]);
 
   const changeUser = (nextUserId: string) => {
+    if (nextUserId && disabledUserReasons[nextUserId]) return;
     if (value === undefined) setInternalUserId(nextUserId);
     onChange?.(nextUserId);
   };
@@ -218,8 +231,13 @@ export function OrganizationAssigneePicker({
         />
         <OrganizationAssigneePanel
           title={`3  ${personLabel}`}
-          options={people.map((member) => ({ id: member.id, name: member.display_name }))}
-          activeValue={selectedUserId}
+          options={people.map((member) => ({
+            id: member.id,
+            name: member.display_name,
+            disabled: Boolean(disabledUserReasons[member.id]),
+            description: disabledUserReasons[member.id],
+          }))}
+          activeValue={effectiveSelectedUserId}
           emptyText={positionId ? "该岗位暂无可派遣个人账户" : "请先选择岗位"}
           onSelect={(nextUserId) => {
             changeUser(nextUserId);
@@ -233,7 +251,7 @@ export function OrganizationAssigneePicker({
         id={`${baseId}-person`}
         aria-label={`已选择${personLabel}`}
         name={name}
-        value={selectedUserId}
+        value={effectiveSelectedUserId}
         required={required}
         disabled={disabled}
         tabIndex={-1}
@@ -241,7 +259,13 @@ export function OrganizationAssigneePicker({
         onInvalid={() => setIsOpen(true)}
       >
         <option value="" />
-        {selectedPath && <option value={selectedUserId}>{selectedPath.userName}</option>}
+        {assignableMembers.map((member) => <option
+          key={member.id}
+          value={member.id}
+          disabled={Boolean(disabledUserReasons[member.id])}
+        >
+          {member.display_name}{disabledUserReasons[member.id] ? "（原负责人，不可选）" : ""}
+        </option>)}
       </select>
       <small className={selectedPath ? "organization-assignee-path ready" : "organization-assignee-path"}>
         {selectedPath
@@ -250,6 +274,9 @@ export function OrganizationAssigneePicker({
             ? "必须选择到具体个人账户，部门和岗位仅用于定位。"
             : "暂无同时绑定部门和岗位的有效个人账户，请先维护组织成员。"}
       </small>
+      {disabledUserCount > 0 && <small className="organization-assignee-exclusion-note">
+        已禁用 {disabledUserCount} 名挂载订单原负责人；展开候选项可查看具体原因。
+      </small>}
     </div>
   );
 }
@@ -263,7 +290,7 @@ function OrganizationAssigneePanel({
   onSelect,
 }: {
   title: string;
-  options: { id: string; name: string; count?: number }[];
+  options: { id: string; name: string; count?: number; disabled?: boolean; description?: string }[];
   activeValue: string;
   emptyText: string;
   showNext?: boolean;
@@ -277,10 +304,13 @@ function OrganizationAssigneePanel({
         type="button"
         role="option"
         aria-selected={activeValue === option.id}
-        className={activeValue === option.id ? "selected" : ""}
+        aria-disabled={option.disabled || undefined}
+        disabled={option.disabled}
+        title={option.description}
+        className={`${activeValue === option.id ? "selected" : ""}${option.disabled ? " disabled" : ""}`.trim()}
         onClick={() => onSelect(option.id)}
       >
-        <span>{option.name}{option.count != null && <small>{option.count} 人</small>}</span>
+        <span>{option.name}{option.count != null && <small>{option.count} 人</small>}{option.description && <small>{option.description}</small>}</span>
         {activeValue === option.id
           ? <Check aria-hidden="true" size={13} />
           : showNext && <ChevronRight aria-hidden="true" size={13} />}

@@ -1,3 +1,8 @@
+import {
+  workflowInstanceCapabilityStageAccess,
+  type LockedWorkflowStageContext,
+} from "./workflow-instance-stage-gate";
+
 export type ExpenseDirectionControl = {
   direction: "receivable" | "payable";
   confirmed: number;
@@ -181,11 +186,47 @@ export function canCreateExpenseFromModule(
   );
 }
 
-export function expenseDirectionActionStageAccess(currentStepKey: string | null) {
+export type ExpenseDirectionActionStageInput = {
+  action: ExpenseDirectionAction;
+  workflow: LockedWorkflowStageContext;
+};
+
+export function expenseDirectionActionStageAccess(
+  currentStepKeyOrInput: string | null | ExpenseDirectionActionStageInput,
+) {
+  if (typeof currentStepKeyOrInput === "object" && currentStepKeyOrInput) {
+    const access = workflowInstanceCapabilityStageAccess({
+      context: currentStepKeyOrInput.workflow,
+      moduleCode: "costs",
+      fieldKeys: [expenseDirectionActionFieldKeys[currentStepKeyOrInput.action]],
+    });
+    if (access.configured) {
+      return {
+        allowed: access.available,
+        visible: access.visible,
+        targetStepKey: access.targetStepKey,
+        targetStepName: access.targetStepName,
+        reason: access.reason,
+      };
+    }
+  }
+
+  const currentStepKey = typeof currentStepKeyOrInput === "string"
+    ? currentStepKeyOrInput
+    : currentStepKeyOrInput?.workflow.currentStepKey ?? null;
   return ["reconciliation", "completion_review"].includes(currentStepKey ?? "")
-    ? { allowed: true as const, reason: null }
+    ? {
+        allowed: true as const,
+        visible: true,
+        targetStepKey: null,
+        targetStepName: null,
+        reason: null,
+      }
     : {
         allowed: false as const,
+        visible: true,
+        targetStepKey: null,
+        targetStepName: null,
         reason: "客户自提签收完成并进入对账结算节点后，才可执行费用确认与三方审核",
       };
 }

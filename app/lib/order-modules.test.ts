@@ -6,6 +6,7 @@ import {
   orderModuleDefinition,
   pickNextRequiredWorkflowModule,
   workflowConfiguredModuleFlags,
+  workflowModuleConfigurationSource,
   type OrderWorkflowModuleSnapshot,
 } from "./order-modules";
 
@@ -161,6 +162,18 @@ describe("order module activation", () => {
       moduleCode: "warehouse",
       rule: { enabled: 0, is_required: 1 },
     })).toEqual({ enabled: 0, required: 0 });
+  });
+
+  it("uses the frozen instance as the module-configuration source", () => {
+    expect(workflowModuleConfigurationSource("instance-1", "definition-2")).toEqual({
+      kind: "workflow_instance",
+      id: "instance-1",
+    });
+    expect(workflowModuleConfigurationSource(null, "definition-2")).toEqual({
+      kind: "definition",
+      id: "definition-2",
+    });
+    expect(workflowModuleConfigurationSource(null, null)).toBeNull();
   });
 
   it("distinguishes pre-departure planning from post-loading execution", () => {

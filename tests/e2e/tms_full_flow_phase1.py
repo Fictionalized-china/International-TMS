@@ -8,7 +8,7 @@
 3. 新客户在独立客户门户上下文逐份核对并确认报价，生成 4 张订单；
 4. 业务岗逐单补齐当前工作流要求的委托资料并提请业务主管审批；
 5. 业务主管逐单审核委托书、审批委托并指定下一步操作主管；
-6. 操作主管在“普通订单”页逐单分配操作、单证、客服和财务负责人。
+6. 操作主管在“普通订单”页按订单锁定的工作流逐单分配必填责任岗位。
 
 本文件是认证级业务场景，所有业务写入必须经 ``RoleBrowserSession`` 记录的
 可见控件和键鼠动作完成。脚本不直接访问数据库或 HTTP API，不注入 DOM、
@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from playwright.sync_api import Locator, sync_playwright
+from playwright.sync_api import Locator, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 
 HERE = Path(__file__).resolve().parent
@@ -64,6 +64,18 @@ PHASE1_STAGE_ORDER = (
     "business_approval",
     "ordinary_order_assignment",
 )
+ASSIGNMENT_POSITION_CREDENTIAL_ALIASES = {
+    "SALES": "sales",
+    "BUSINESS_SUPERVISOR": "business_supervisor",
+    "OPERATION_SUPERVISOR": "operation_supervisor",
+    "OPERATION": "operation",
+    "DOC": "document",
+    "CS": "customer_service",
+    "FINANCE_ACCOUNTING": "finance",
+    "CASHIER": "cashier",
+    "WAREHOUSE": "domestic_warehouse",
+    "OVERSEAS_WAREHOUSE": "overseas_warehouse",
+}
 
 
 class BusinessBlocker(RuntimeError):
@@ -159,7 +171,7 @@ def _permission_gate(name: str, *, ui: str, server: str, owner: str) -> GateExpe
     return GateExpectation(
         name=name,
         source="role_permission_configuration",
-        configured_mode="read_only",
+        configured_mode="operate",
         expected_behavior="allow",
         ui_expectation=ui,
         server_expectation=server,
@@ -198,6 +210,12 @@ class Phase1Flow:
         self.destination_state = destination_state
         self.destination_city = destination_city
         self.fixture_path: Path | None = None
+        self.assignees: dict[str, dict[str, str]] = {
+            "operation": {},
+            "document": {},
+            "customer_service": {},
+            "finance": {},
+        }
 
         self.sales = self._add_role(self.credentials["sales"])
         self.business_supervisor = self._add_role(self.credentials["business_supervisor"])
@@ -320,6 +338,34 @@ class Phase1Flow:
                 ) from original
             raise
         return success.inner_text()[:2_000]
+
+    def _expect_current_step(
+        self,
+        session: RoleBrowserSession,
+        step_name: str,
+        order_number: str,
+    ) -> None:
+        current = session.page.locator(".workflow-meta").get_by_text(
+            f"当前节点：{step_name}", exact=True
+        )
+        try:
+            session.expect_visible(
+                current, f"{order_number} 当前节点更新为{step_name}"
+            )
+        except Exception as original:
+            errors = session.page.locator(".alert.error, [role='alert']")
+            visible_errors = [
+                errors.nth(index).inner_text()[:1_500]
+                for index in range(errors.count())
+                if errors.nth(index).is_visible()
+            ]
+            if visible_errors:
+                raise BusinessBlocker(
+                    f"订单 {order_number} 未进入{step_name}：{'；'.join(visible_errors)}",
+                    owner="当前工作流节点维护者",
+                    remediation="核对页面动作、服务端门禁与工作流实例是否使用同一配置快照。",
+                ) from original
+            raise
 
     @staticmethod
     def _option_rows(select: Locator) -> list[tuple[str, str]]:
@@ -488,13 +534,13 @@ class Phase1Flow:
                     f"报价自定义必填附件 {index + 1}",
                 )
             elif input_type == "date":
-                session.type_text(
+                session.type_date(
                     control,
                     (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d"),
                     f"报价自定义日期 {index + 1}",
                 )
             elif input_type == "datetime-local":
-                session.type_text(
+                session.type_datetime_local(
                     control,
                     (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M"),
                     f"报价自定义时间 {index + 1}",
@@ -561,6 +607,10 @@ class Phase1Flow:
                 True,
                 "业务身份：委托客户",
             )
+            self.sales.click(
+                dialog.locator("details.customer-role-dropdown summary"),
+                "收起客户业务身份",
+            )
             self.sales.type_text(
                 dialog.locator('input[name="shortName"]'),
                 self.identity.customer_short_name,
@@ -603,9 +653,10 @@ class Phase1Flow:
                 "默认提货详细地址",
             )
             self.sales.screenshot("customer-before-create")
-            self.sales.click(
-                dialog.get_by_role("button", name="确认创建客户"),
+            self.sales.press(
+                "Enter",
                 "确认创建客户",
+                locator=dialog.get_by_role("button", name="确认创建客户"),
             )
             self._expect_success(self.sales, "客户已创建", "客户创建成功提示")
 
@@ -640,10 +691,10 @@ class Phase1Flow:
                 "客户门户初始密码",
                 sensitive=True,
             )
-            self.sales.click(
-                portal_dialog.get_by_role("button", name="确认开通门户"),
+            self.sales.press(
+                "Enter",
                 "确认开通客户门户",
-                sensitive=True,
+                locator=portal_dialog.get_by_role("button", name="确认开通门户"),
             )
             self._expect_success(
                 self.sales,
@@ -681,6 +732,7 @@ class Phase1Flow:
     def _create_quote(self, record: Phase1Order, sequence: int) -> None:
         gate = _workflow_gate(
             "询价报价字段随工作流实例配置",
+            source="workflow_instance_module_state",
             ui="仅显示当前工作流启用字段，必填标记与控件状态即时一致。",
             server="只校验当前工作流实例中启用且必填的报价字段。",
             owner="业务岗",
@@ -774,7 +826,13 @@ class Phase1Flow:
                     and not control.is_disabled()
                     and control.get_attribute("readonly") is None
                 ):
-                    self.sales.type_text(control, value, f"{record.key} {name}")
+                    input_type = (control.get_attribute("type") or "").lower()
+                    if input_type == "date":
+                        self.sales.type_date(control, value, f"{record.key} {name}")
+                    elif input_type == "datetime-local":
+                        self.sales.type_datetime_local(control, value, f"{record.key} {name}")
+                    else:
+                        self.sales.type_text(control, value, f"{record.key} {name}")
             warehouse = form.locator('select[name="destinationWarehouseId"]')
             if self._is_visible(warehouse):
                 self._select_first_nonempty(
@@ -873,13 +931,10 @@ class Phase1Flow:
                     dialog.get_by_role("button", name="确认报价"),
                     f"确认{record.key}报价",
                 )
-                self._expect_success(
-                    self.customer,
-                    re.compile(r"订单|接受|确认"),
-                    f"{record.key}客户确认成功提示",
-                )
-                row = self.customer.page.get_by_role("row").filter(
-                    has_text=record.cargo_marker
+                row = (
+                    self.customer.page.get_by_role("row")
+                    .filter(has_text=record.cargo_marker)
+                    .filter(has_text=ORDER_NUMBER_RE)
                 )
                 self.customer.expect_visible(row, f"{record.key}已生成订单行")
                 match = ORDER_NUMBER_RE.search(row.first.inner_text())
@@ -904,12 +959,14 @@ class Phase1Flow:
         expected_actionable: bool = True,
     ) -> None:
         filters = session.page.locator("form.order-table-filters")
-        if filters.count() == 0:
+        try:
+            session.expect_visible(filters, "普通订单筛选栏")
+        except PlaywrightTimeoutError as error:
             raise BusinessBlocker(
                 "运输订单页缺少普通订单筛选栏。",
                 owner="订单列表维护者",
                 remediation="恢复普通订单页签及订单号筛选入口。",
-            )
+            ) from error
         keyword = filters.locator('input[name="keyword"]')
         session.type_text(keyword, record.order_number, f"筛选订单 {record.order_number}")
         session.click(filters.get_by_role("button", name="筛选"), "执行普通订单筛选")
@@ -959,13 +1016,13 @@ class Phase1Flow:
             if control.locator("option").count() > 0:
                 self._select_first_nonempty(session, control, f"委托字段：{label}")
             elif input_type == "date":
-                session.type_text(
+                session.type_date(
                     control,
                     (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d"),
                     f"委托字段：{label}",
                 )
             elif input_type == "datetime-local":
-                session.type_text(
+                session.type_datetime_local(
                     control,
                     (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M"),
                     f"委托字段：{label}",
@@ -989,6 +1046,7 @@ class Phase1Flow:
     def submit_consignments(self) -> None:
         gate = _workflow_gate(
             "委托资料提请审批门禁",
+            source="workflow_instance_module_state",
             ui="必填项缺失时明确指出；选填或隐藏字段不使用红色阻断。",
             server="只依据订单锁定工作流实例中的启用必填字段和模块规则决定是否允许提交。",
             owner="业务岗",
@@ -1010,6 +1068,21 @@ class Phase1Flow:
             ) as observation:
                 self._open_order_from_list(self.sales, record)
                 self._fill_missing_custom_consignment_fields(self.sales, record)
+                sections = self.sales.page.get_by_role(
+                    "navigation", name="委托资料补充分区"
+                )
+                files_tab = sections.get_by_role(
+                    "link", name=re.compile(r"^文件管理")
+                )
+                self.sales.expect_visible(files_tab, f"{record.order_number} 文件管理页签")
+                if files_tab.get_attribute("aria-current") != "page":
+                    self.sales.click(
+                        files_tab, f"切换 {record.order_number} 到文件管理"
+                    )
+                self.sales.expect_visible(
+                    self.sales.page.locator("#module-source-documents"),
+                    f"{record.order_number} 本节点文件区",
+                )
                 document_row = self.sales.page.locator("article.source-document-row").filter(
                     has_text="委托书"
                 )
@@ -1027,8 +1100,30 @@ class Phase1Flow:
                             f"{record.order_number} 委托书上传结果",
                         )
                 form = self.sales.page.locator(
-                    'form.consignment-submit-bar:has(input[value="submit"])'
+                    'form.consignment-submit-bar:has(input[name="actionCode"][value="submit"])'
                 )
+                if not self._is_visible(form):
+                    quick_actions = self.sales.page.locator(
+                        '[aria-label="委托资料快捷操作"]'
+                    )
+                    self.sales.click(
+                        quick_actions.get_by_role(
+                            "button", name="提交审批", exact=True
+                        ),
+                        f"打开 {record.order_number} 提交审批弹窗",
+                    )
+                    dialog = self.sales.page.get_by_role(
+                        "dialog",
+                        name=re.compile(
+                            rf"^提交审批\s*·\s*{re.escape(record.order_number)}$"
+                        ),
+                    )
+                    self.sales.expect_visible(
+                        dialog, f"{record.order_number} 提交审批弹窗"
+                    )
+                    form = dialog.locator(
+                        'form.consignment-submit-bar:has(input[name="actionCode"][value="submit"])'
+                    )
                 self.sales.expect_visible(form, f"{record.order_number} 提交审批栏")
                 picker = form.locator(".organization-assignee-picker")
                 self._select_assignee(
@@ -1041,9 +1136,8 @@ class Phase1Flow:
                     form.get_by_role("button", name="提交审批"),
                     f"提交 {record.order_number} 委托审批",
                 )
-                self.sales.expect_visible(
-                    self.sales.page.get_by_text("委托审核", exact=True).first,
-                    f"{record.order_number} 进入委托审核",
+                self._expect_current_step(
+                    self.sales, "委托审核", record.order_number
                 )
                 observation.observe(
                     f"订单 {record.order_number} 已提交业务主管审核", gate_passed=True
@@ -1099,6 +1193,9 @@ class Phase1Flow:
                             f"确认 {record.order_number} 委托书审核通过",
                         )
                         self.business_supervisor.page.wait_for_timeout(180)
+                        self.business_supervisor.expect_hidden(
+                            dialog, f"{record.order_number} 委托书审核弹窗已关闭"
+                        )
                 form = self.business_supervisor.page.locator(
                     "form#consignment-approval-form"
                 )
@@ -1122,9 +1219,8 @@ class Phase1Flow:
                     approve,
                     f"审批通过 {record.order_number}",
                 )
-                self.business_supervisor.expect_visible(
-                    self.business_supervisor.page.get_by_text("任务分配", exact=True).first,
-                    f"{record.order_number} 进入任务分配",
+                self._expect_current_step(
+                    self.business_supervisor, "任务分配", record.order_number
                 )
                 observation.observe(
                     f"订单 {record.order_number} 审批完成并指定操作主管", gate_passed=True
@@ -1138,7 +1234,7 @@ class Phase1Flow:
         gate = _workflow_gate(
             "普通订单任务分配门禁",
             source="workflow_instance_module_state",
-            ui="任务分配模块启用时显示四类具体个人负责人；必填状态随实例配置。",
+            ui="只显示锁定实例中的岗位、模块和任务；必填项阻断，可选项不阻断。",
             server="仅在当前实例要求的分配信息齐全后确认派单并进入国内运输。",
             owner="操作主管",
             remediation="核对 assignment 模块启用/必填状态、组织成员和派单责任人。",
@@ -1157,7 +1253,7 @@ class Phase1Flow:
                 priority="P0",
                 preconditions=("业务主管已审批并指定当前操作主管", "当前位于普通订单页签"),
                 inputs={"order_number": record.order_number},
-                expected_result="操作、单证、客服、财务落实到个人，订单进入国内运输。",
+                expected_result="实例要求的全部必填责任岗位落实到个人，订单进入国内运输。",
                 gate=gate,
             ) as observation:
                 self._open_order_from_list(self.operation_supervisor, record)
@@ -1165,24 +1261,46 @@ class Phase1Flow:
                 self.operation_supervisor.expect_visible(
                     form, f"{record.order_number} 任务分配清单"
                 )
-                assignments = (
-                    ("操作岗个人账户", "operation"),
-                    ("单证岗个人账户", "document"),
-                    ("客服岗个人账户", "customer_service"),
-                    ("财务会计岗个人账户", "finance"),
-                )
+                source = form.get_attribute("data-assignment-source")
+                if source != "workflow-instance":
+                    raise BusinessBlocker(
+                        f"新订单 {record.order_number} 未进入冻结工作流派单模式。",
+                        owner="工作流实例维护者",
+                        remediation="确认订单创建时已锁定 workflow_instance_id，且派单页从实例快照加载。",
+                    )
+                assignment_rows = form.locator("tr[data-assignment-position]")
+                if assignment_rows.count() == 0:
+                    raise BusinessBlocker(
+                        f"订单 {record.order_number} 的锁定工作流没有显示任何责任分配组。",
+                        owner="工作流配置维护者",
+                        remediation="检查锁定实例中的待办模块、任务和责任岗位配置。",
+                    )
                 assigned_people: list[str] = []
-                for label, alias in assignments:
-                    picker = form.locator(
-                        ".organization-assignee-picker"
-                    ).filter(has_text=label)
-                    assigned_people.append(
-                        self._select_assignee(
-                            self.operation_supervisor,
-                            picker,
-                            person_label=label,
-                            preferred_person=self.credentials.get(alias, self.credentials["sales"]).role,
-                        )
+                for index in range(assignment_rows.count()):
+                    row = assignment_rows.nth(index)
+                    if row.get_attribute("data-assignment-required") != "true":
+                        continue
+                    position_code = row.get_attribute("data-assignment-position") or ""
+                    alias = ASSIGNMENT_POSITION_CREDENTIAL_ALIASES.get(position_code)
+                    credential = self.credentials.get(alias) if alias else None
+                    picker = row.locator(".organization-assignee-picker")
+                    person_label = (
+                        picker.locator(".organization-assignee-trigger > span")
+                        .inner_text()
+                        .replace("*", "")
+                        .strip()
+                    )
+                    assigned_name = self._select_assignee(
+                        self.operation_supervisor,
+                        picker,
+                        person_label=person_label,
+                        preferred_person=credential.role if credential else "",
+                    )
+                    assigned_people.append(assigned_name)
+                    journal_alias = alias or f"position_{position_code.lower()}"
+                    self.assignees.setdefault(journal_alias, {})[record.key] = assigned_name
+                    self.harness.journal.register_entity(
+                        f"{journal_alias}_assignee", record.key, assigned_name
                     )
                 notes = form.locator('textarea[name="notes"]')
                 if self._is_visible(notes):
@@ -1197,13 +1315,12 @@ class Phase1Flow:
                     ),
                     f"确认派单 {record.order_number}",
                 )
-                self.operation_supervisor.expect_visible(
-                    self.operation_supervisor.page.get_by_text("国内运输", exact=True).first,
-                    f"{record.order_number} 进入国内运输",
+                self._expect_current_step(
+                    self.operation_supervisor, "国内运输", record.order_number
                 )
                 observation.add_note("分配角色数量：" + str(len(assigned_people)))
                 observation.observe(
-                    f"订单 {record.order_number} 已完成四岗分配并进入国内运输",
+                    f"订单 {record.order_number} 已完成锁定工作流必填岗位分配并进入国内运输",
                     gate_passed=True,
                 )
                 self.operation_supervisor.click(
@@ -1266,9 +1383,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--origin-country", default="中国")
     parser.add_argument("--origin-state", default="广东省")
     parser.add_argument("--origin-city", default="深圳市")
-    parser.add_argument("--destination-country", default="俄罗斯")
-    parser.add_argument("--destination-state", default="莫斯科州")
-    parser.add_argument("--destination-city", default="莫斯科")
+    parser.add_argument("--destination-country", default="乌兹别克斯坦")
+    parser.add_argument("--destination-state", default="塔什干市")
+    parser.add_argument("--destination-city", default="塔什干")
     parser.add_argument(
         "--execute",
         action="store_true",

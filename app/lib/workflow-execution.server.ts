@@ -9,6 +9,7 @@ import {
   selectWorkflowExecutionCurrentStep,
   workflowExecutionModuleIsComplete,
 } from "./workflow-execution";
+import { canCompleteWorkflowTask } from "./workflow-task-access";
 
 type ModuleFact = { module_code:string; status:string };
 
@@ -285,15 +286,44 @@ export async function completeWorkflowTask(input:{
   actorUserId:string;
 }) {
   const task = await env.DB.prepare(
-    `SELECT ts.id,ts.task_key,ss.step_key FROM workflow_instance_task_states ts
+    `SELECT ts.id,ts.task_key,ss.step_key,
+      ts.assignee_user_id task_assignee_user_id,
+      omi.assignee_user_id module_assignee_user_id,
+      COALESCE(ts.responsibility_position_code,ms.responsibility_position_code) responsibility_position_code
+     FROM workflow_instance_task_states ts
      JOIN workflow_instance_module_states ms ON ms.id=ts.instance_module_state_id
      JOIN workflow_instance_step_states ss ON ss.id=ms.instance_step_state_id
      JOIN workflow_instances wi ON wi.id=ss.instance_id AND wi.current_step_key=ss.step_key
+     LEFT JOIN order_module_instances omi
+       ON omi.organization_id=wi.organization_id AND omi.order_id=wi.order_id
+      AND omi.module_code=ms.module_code AND omi.enabled=1
      WHERE ts.id=? AND wi.organization_id=? AND wi.order_id=? AND ts.status!='completed'`,
-  ).bind(input.taskStateId,input.organizationId,input.orderId).first<{id:string;task_key:string;step_key:string}>();
+  ).bind(input.taskStateId,input.organizationId,input.orderId).first<{
+    id:string;
+    task_key:string;
+    step_key:string;
+    task_assignee_user_id:string|null;
+    module_assignee_user_id:string|null;
+    responsibility_position_code:string|null;
+  }>();
   if (!task) throw new Error("该办理步骤不在当前节点，或已经完成");
   if (task.task_key.startsWith("handle_") && !task.step_key.startsWith("custom_"))
     throw new Error("该步骤由对应业务模组自动完成，不能人工跳过");
+  const actorPositions = await env.DB.prepare(
+    `SELECT DISTINCT p.code
+     FROM memberships membership
+     JOIN positions p
+       ON p.id=membership.position_id AND p.organization_id=membership.organization_id
+     WHERE membership.organization_id=? AND membership.user_id=?
+       AND membership.status='active' AND p.status='active'`,
+  ).bind(input.organizationId,input.actorUserId).all<{code:string}>();
+  if (!canCompleteWorkflowTask({
+    actorUserId: input.actorUserId,
+    actorPositionCodes: actorPositions.results.map((item) => item.code),
+    taskAssigneeUserId: task.task_assignee_user_id,
+    moduleAssigneeUserId: task.module_assignee_user_id,
+    responsibilityPositionCode: task.responsibility_position_code,
+  })) throw new Error("当前账号不是该办理步骤的负责人，无权完成");
   const now = new Date().toISOString();
   await env.DB.prepare(
     `UPDATE workflow_instance_task_states SET status='completed',completed_by_user_id=?,completed_at=?,updated_at=? WHERE id=?`,

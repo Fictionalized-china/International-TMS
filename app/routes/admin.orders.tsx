@@ -5,6 +5,12 @@ import type { Route } from "./+types/admin.orders";
 import { Modal } from "../components/Modal";
 import { OrganizationAssigneePicker } from "../components/OrganizationAssigneePicker";
 import type { OrganizationAssigneeMember } from "../lib/organization-assignee";
+import {
+  batchInitialResponsibilityDisabledReasons,
+  buildBatchInitialResponsibilityRestrictions,
+  type BatchInitialResponsibilityRestrictions,
+} from "../lib/batch-responsibility";
+import { loadBatchesInitialResponsibilityRestrictions } from "../lib/batch-responsibility.server";
 import { OrderRouteFilterFields } from "../components/OrderRouteFilterFields";
 import { requireSessionUser } from "../lib/auth.server";
 import { assignedBatchViewPermission, canOperateCurrentOrder, orderVisibilitySql } from "../lib/order-access.server";
@@ -68,6 +74,10 @@ type BatchAssignmentRow = {
   submitted_at: string | null;
   approved_at: string | null;
   updated_at: string;
+};
+
+type BatchAssignmentViewRow = BatchAssignmentRow & {
+  initialResponsibilityRestrictions: BatchInitialResponsibilityRestrictions;
 };
 
 type BatchAssignmentActionData = { success?: string; formError?: string };
@@ -291,6 +301,21 @@ export async function loader({ request }: Route.LoaderArgs) {
         { results: [] as OrganizationAssigneeMember[] },
       ];
   const total = countRow?.count || 0;
+  const initialResponsibilityRestrictionsByBatch = canApproveBatches
+    ? await loadBatchesInitialResponsibilityRestrictions(
+        env.DB,
+        current.organizationId,
+        batchAssignmentRows.results
+          .filter((batch) => batch.approval_status === "submitted")
+          .map((batch) => batch.id),
+      )
+    : {};
+  const batchAssignments: BatchAssignmentViewRow[] = batchAssignmentRows.results.map((batch) => ({
+    ...batch,
+    initialResponsibilityRestrictions:
+      initialResponsibilityRestrictionsByBatch[batch.id]
+      ?? buildBatchInitialResponsibilityRestrictions([]),
+  }));
   const orders = rows.results.map((order) => ({
     ...order,
     can_operate_current_node: canOperateCurrentOrder(current, order),
@@ -311,7 +336,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     canApproveBatches,
     canViewBatchWorkload,
     batchWorkloadRole,
-    batchAssignments: batchAssignmentRows.results,
+    batchAssignments,
     batchPage,
     batchPages: Math.max(1, Math.ceil((batchCountRow?.count || 0) / batchPageSize)),
     batchTotal: batchCountRow?.count || 0,
@@ -436,7 +461,7 @@ function OrderWorkloadTabs({ active, batchCount, orderCount, filters }: { active
 }
 
 function BatchAssignmentQueue({ batches, operationMembers, documentMembers, pendingCount, total, page, pages, filters }: {
-  batches: BatchAssignmentRow[];
+  batches: BatchAssignmentViewRow[];
   operationMembers: OrganizationAssigneeMember[];
   documentMembers: OrganizationAssigneeMember[];
   pendingCount: number;
@@ -446,9 +471,19 @@ function BatchAssignmentQueue({ batches, operationMembers, documentMembers, pend
   filters: Record<string, string>;
 }) {
   const fetcher = useFetcher<BatchAssignmentActionData>();
-  const [selected, setSelected] = useState<BatchAssignmentRow | null>(null);
+  const [selected, setSelected] = useState<BatchAssignmentViewRow | null>(null);
   const success = fetcher.data?.success;
   const busy = fetcher.state !== "idle";
+  const operationDisabledReasons = selected
+    ? batchInitialResponsibilityDisabledReasons(selected.initialResponsibilityRestrictions, "operation")
+    : {};
+  const documentDisabledReasons = selected
+    ? batchInitialResponsibilityDisabledReasons(selected.initialResponsibilityRestrictions, "document")
+    : {};
+  const hasFreshOperationCandidate = operationMembers.some((member) => !operationDisabledReasons[member.id]);
+  const hasFreshDocumentCandidate = documentMembers.some((member) => !documentDisabledReasons[member.id]);
+  const responsibilityConfigurationErrors = selected?.initialResponsibilityRestrictions.configurationErrors ?? [];
+  const freshInitialAssigneesAvailable = hasFreshOperationCandidate && hasFreshDocumentCandidate && responsibilityConfigurationErrors.length === 0;
 
   useEffect(() => {
     if (success) setSelected(null);
@@ -500,13 +535,16 @@ function BatchAssignmentQueue({ batches, operationMembers, documentMembers, pend
           <div><span>挂载范围</span><b>{selected.order_count} 票订单</b></div>
           <div><span>线路</span><b>{selected.origin_location} → {selected.destination_location}</b></div>
         </div>
-        <div className="alert info batch-assignment-rule">本次同时指定整批操作负责人和整批单证负责人；原订单操作、单证负责人解除后续办理关系但保留历史只读记录。客服与财务仍沿用订单原分配。</div>
-        <OrganizationAssigneePicker members={operationMembers} name="operationAssigneeUserId" idPrefix={`orders-batch-operation-${selected.id}`} personLabel="整批操作负责人" required/>
-        <OrganizationAssigneePicker members={documentMembers} name="documentAssigneeUserId" idPrefix={`orders-batch-document-${selected.id}`} personLabel="整批单证负责人" required/>
+        <div className="alert info batch-assignment-rule">系统按每票订单锁定的工作流快照识别未完成操作/单证职责；首次统一分配必须同时换人。原负责人保留在候选项中但不可选，并显示关联订单原因；旧负责人仅保留历史订单只读权限。</div>
+        {responsibilityConfigurationErrors.length > 0
+          ? <div className="alert error" role="alert"><strong>工作流配置阻断：</strong>{responsibilityConfigurationErrors.join("；")}</div>
+          : !freshInitialAssigneesAvailable && <div className="alert warning" role="alert">当前组织没有同时可用的新操作负责人和新单证负责人；请先在组织架构中新增或启用其他人员。</div>}
+        <OrganizationAssigneePicker members={operationMembers} name="operationAssigneeUserId" idPrefix={`orders-batch-operation-${selected.id}`} personLabel="整批操作负责人" disabledUserReasons={operationDisabledReasons} required/>
+        <OrganizationAssigneePicker members={documentMembers} name="documentAssigneeUserId" idPrefix={`orders-batch-document-${selected.id}`} personLabel="整批单证负责人" disabledUserReasons={documentDisabledReasons} required/>
         {fetcher.data?.formError && <div className="alert error">{fetcher.data.formError}</div>}
         <div className="batch-assignment-actions">
           <button type="button" className="btn" onClick={() => setSelected(null)} disabled={busy}>取消</button>
-          <button className="btn primary" disabled={busy}>{busy ? "正在同步分配…" : `审核通过并同步 ${selected.order_count} 票订单`}</button>
+          <button className="btn primary" disabled={busy || !freshInitialAssigneesAvailable}>{busy ? "正在同步分配…" : `审核通过并同步 ${selected.order_count} 票订单`}</button>
         </div>
       </fetcher.Form>}
     </Modal>
