@@ -93,6 +93,9 @@ ASSIGNMENT_POSITION_CREDENTIAL_ALIASES = {
     "WAREHOUSE": "domestic_warehouse",
     "OVERSEAS_WAREHOUSE": "overseas_warehouse",
 }
+ASSIGNMENT_SUBMIT_BUTTON_RE = re.compile(
+    r"^确认派单并进入下一业务节点(?:\s*→)?$"
+)
 
 
 def assignment_mode_requires_person(mode: str) -> bool:
@@ -1410,7 +1413,7 @@ class Phase1Flow:
             "普通订单任务分配门禁",
             source="workflow_instance_module_state",
             ui="只显示锁定实例中的岗位、模块和任务；必填项阻断，可选项不阻断。",
-            server="仅在当前实例要求的分配信息齐全后确认派单并进入国内运输。",
+            server="仅在当前实例要求的分配信息齐全后确认派单并进入锁定工作流的下一业务节点。",
             owner="操作主管",
             remediation="核对 assignment 模块启用/必填状态、组织成员和派单责任人。",
         )
@@ -1502,10 +1505,21 @@ class Phase1Flow:
                         f"{self.attempt.run_id} {record.key} 纯 UI 派单",
                         "派单说明",
                     )
+                submit_button = form.get_by_role(
+                    "button", name=ASSIGNMENT_SUBMIT_BUTTON_RE
+                )
+                self.operation_supervisor.expect_visible(
+                    submit_button,
+                    f"{record.order_number} 动态工作流派单提交按钮",
+                )
+                if submit_button.is_disabled():
+                    raise BusinessBlocker(
+                        f"订单 {record.order_number} 的工作流责任已按页面逐项填写，但派单提交按钮仍被门禁阻断。",
+                        owner="工作流配置维护者",
+                        remediation="核对当前锁定实例的必填责任、候选人权限、配置错误及当前账号提交权限。",
+                    )
                 self.operation_supervisor.click(
-                    form.get_by_role(
-                        "button", name=re.compile(r"确认派单并进入国内运输")
-                    ),
+                    submit_button,
                     f"确认派单 {record.order_number}",
                 )
                 self._expect_current_step(

@@ -12,6 +12,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from tms_full_flow_phase1 import (
+    ASSIGNMENT_SUBMIT_BUTTON_RE,
     EXPECTED_ACCOUNT_SITES,
     PHASE1_NEGATIVE_GATE_CASES,
     PHASE1_STAGE_ORDER,
@@ -39,6 +40,17 @@ def attempt(number: int, suffix: str) -> AttemptIdentity:
 
 
 class Phase1IdentityTests(unittest.TestCase):
+    def test_assignment_submit_locator_uses_dynamic_workflow_next_node_copy(self) -> None:
+        self.assertIsNotNone(
+            ASSIGNMENT_SUBMIT_BUTTON_RE.fullmatch("确认派单并进入下一业务节点 →")
+        )
+        self.assertIsNotNone(
+            ASSIGNMENT_SUBMIT_BUTTON_RE.fullmatch("确认派单并进入下一业务节点")
+        )
+        self.assertIsNone(
+            ASSIGNMENT_SUBMIT_BUTTON_RE.fullmatch("确认派单并进入国内运输 →")
+        )
+
     def test_retry_always_uses_fresh_customer_email_and_cargo_markers(self) -> None:
         first = attempt(1, "ABCDEF01")
         second = attempt(2, "ABCDEF02")
