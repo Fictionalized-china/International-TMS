@@ -714,6 +714,8 @@ class RoleBrowserSession:
         target_index = -1
         target_value = ""
         target_label = ""
+        target_navigation_steps = -1
+        enabled_option_count = 0
         for option_index in range(option_count):
             option = option_list.nth(option_index)
             option_value = str(option.get_attribute("value") or "")
@@ -724,12 +726,15 @@ class RoleBrowserSession:
                 or (index is not None and option_index == index)
             )
             if not matches:
+                if not option.is_disabled():
+                    enabled_option_count += 1
                 continue
             if option.is_disabled():
                 raise AssertionError(f"{target} 的目标选项不可用")
             target_index = option_index
             target_value = option_value
             target_label = option_label
+            target_navigation_steps = enabled_option_count
             break
         if target_index < 0:
             raise AssertionError(f"{target} 找不到目标选项")
@@ -740,12 +745,11 @@ class RoleBrowserSession:
             # select_option/DOM mutation is deliberately forbidden.
             locator.click(timeout=self.action_timeout_ms)
             locator.press("Home", timeout=self.action_timeout_ms)
-            for _ in range(option_count + 1):
-                if str(locator.input_value(timeout=self.action_timeout_ms)) == target_value:
-                    break
+            # Windows native selects keep the committed value unchanged while
+            # the popup highlight moves. Navigate by the enabled-option index,
+            # then commit once with Enter just as a keyboard user would.
+            for _ in range(target_navigation_steps):
                 locator.press("ArrowDown", timeout=self.action_timeout_ms)
-            else:
-                raise AssertionError(f"{target} 无法通过键盘定位目标选项")
             locator.press("Enter", timeout=self.action_timeout_ms)
             actual = str(locator.input_value(timeout=self.action_timeout_ms))
             if actual != target_value:

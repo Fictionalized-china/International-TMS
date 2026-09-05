@@ -179,6 +179,7 @@ class _KeyboardSelectStub:
             _OptionStub("target", "目标岗位"),
         ]
         self.current = 1
+        self.highlighted = 1
         self.events: list[tuple[str, str]] = []
 
     def locator(self, selector: str) -> _OptionListStub:
@@ -192,9 +193,11 @@ class _KeyboardSelectStub:
     def press(self, key: str, **_kwargs: object) -> None:
         self.events.append(("press", key))
         if key == "Home":
-            self.current = 1
+            self.highlighted = 1
         elif key == "ArrowDown":
-            self.current = min(len(self.options) - 1, self.current + 1)
+            self.highlighted = min(len(self.options) - 1, self.highlighted + 1)
+        elif key == "Enter":
+            self.current = self.highlighted
 
     def input_value(self, **_kwargs: object) -> str:
         return self.options[self.current].value
