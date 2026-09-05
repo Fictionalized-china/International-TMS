@@ -194,14 +194,14 @@ class _OptionListStub:
 
 
 class _KeyboardSelectStub:
-    def __init__(self) -> None:
+    def __init__(self, current: int = 1) -> None:
         self.options = [
             _OptionStub("", "请选择", disabled=True),
             _OptionStub("first", "第一个岗位"),
             _OptionStub("target", "目标岗位"),
         ]
-        self.current = 1
-        self.highlighted = 1
+        self.current = current
+        self.highlighted = current
         self.events: list[tuple[str, str]] = []
 
     def locator(self, selector: str) -> _OptionListStub:
@@ -214,10 +214,10 @@ class _KeyboardSelectStub:
 
     def press(self, key: str, **_kwargs: object) -> None:
         self.events.append(("press", key))
-        if key == "Home":
-            self.highlighted = 1
-        elif key == "ArrowDown":
+        if key == "ArrowDown":
             self.highlighted = min(len(self.options) - 1, self.highlighted + 1)
+        elif key == "ArrowUp":
+            self.highlighted = max(1, self.highlighted - 1)
         elif key == "Enter":
             self.current = self.highlighted
 
@@ -339,7 +339,29 @@ class HarnessEvidenceTests(unittest.TestCase):
         self.assertEqual(selected, ["target"])
         self.assertEqual(
             control.events,
-            [("click", ""), ("press", "Home"), ("press", "ArrowDown"), ("press", "Enter")],
+            [("click", ""), ("press", "ArrowDown"), ("press", "Enter")],
+        )
+        self.assertEqual(journal.actions[-1]["detail"]["keyboard_only"], True)
+
+    def test_select_can_move_backwards_from_a_retained_later_value(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            journal = RunJournal("select-backwards", directory, scenario_name="键盘反向选择")
+            session = RoleBrowserSession(
+                role="sales",
+                email="select@example.test",
+                site="admin",
+                base_url="http://127.0.0.1:5189",
+                context=_ContextStub(),
+                page=_PageStub(),
+                journal=journal,
+            )
+            control = _KeyboardSelectStub(current=2)
+            selected = session.select(control, "订单类型", value="first")
+
+        self.assertEqual(selected, ["first"])
+        self.assertEqual(
+            control.events,
+            [("click", ""), ("press", "ArrowUp"), ("press", "Enter")],
         )
         self.assertEqual(journal.actions[-1]["detail"]["keyboard_only"], True)
 

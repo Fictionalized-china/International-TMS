@@ -792,8 +792,8 @@ class RoleBrowserSession:
         target_index = -1
         target_value = ""
         target_label = ""
-        target_navigation_steps = -1
-        enabled_option_count = 0
+        option_values: list[str] = []
+        option_enabled: list[bool] = []
         for option_index in range(option_count):
             option = option_list.nth(option_index)
             option_value = str(option.get_attribute("value") or "")
@@ -803,17 +803,15 @@ class RoleBrowserSession:
                 or (label is not None and option_label == label)
                 or (index is not None and option_index == index)
             )
+            option_values.append(option_value)
+            option_enabled.append(not option.is_disabled())
             if not matches:
-                if not option.is_disabled():
-                    enabled_option_count += 1
                 continue
             if option.is_disabled():
                 raise AssertionError(f"{target} 的目标选项不可用")
             target_index = option_index
             target_value = option_value
             target_label = option_label
-            target_navigation_steps = enabled_option_count
-            break
         if target_index < 0:
             raise AssertionError(f"{target} 找不到目标选项")
 
@@ -821,17 +819,29 @@ class RoleBrowserSession:
             # Use the same pointer and keyboard events as a human operator.
             # Reading option metadata is allowed; changing the value through
             # select_option/DOM mutation is deliberately forbidden.
+            current_value = str(locator.input_value(timeout=self.action_timeout_ms))
+            try:
+                current_index = option_values.index(current_value)
+            except ValueError as error:
+                raise AssertionError(f"{target} 当前选项不在可见选项列表中") from error
             locator.click(timeout=self.action_timeout_ms)
-            locator.press("Home", timeout=self.action_timeout_ms)
-            # Windows native selects keep the committed value unchanged while
-            # the popup highlight moves. Navigate by the enabled-option index,
-            # then commit once with Enter just as a keyboard user would.
-            for _ in range(target_navigation_steps):
-                locator.press("ArrowDown", timeout=self.action_timeout_ms)
+            # Chromium delegates an opened native select to the operating
+            # system. Home is not reliable there, so move from the currently
+            # selected option in the shortest direction and commit with Enter.
+            if current_index < target_index:
+                steps = sum(option_enabled[current_index + 1 : target_index + 1])
+                for _ in range(steps):
+                    locator.press("ArrowDown", timeout=self.action_timeout_ms)
+            elif current_index > target_index:
+                steps = sum(option_enabled[target_index:current_index])
+                for _ in range(steps):
+                    locator.press("ArrowUp", timeout=self.action_timeout_ms)
             locator.press("Enter", timeout=self.action_timeout_ms)
             actual = str(locator.input_value(timeout=self.action_timeout_ms))
             if actual != target_value:
-                raise AssertionError(f"{target} 键盘选择后实际值不一致")
+                raise AssertionError(
+                    f"{target} 键盘选择后实际值不一致：期望 {target_value!r}，实际 {actual!r}"
+                )
             return [actual]
 
         detail = {
