@@ -1163,7 +1163,10 @@ class FiveOrderWorkflowSync:
         if notes.count():
             notes.fill(f"{self.args.run_id} {record.case_id} 自动化派单")
         self.screenshot(case, "admin", f"{record.case_id}-assignment-ready")
-        form.get_by_role("button", name=re.compile(r"确认派单并进入国内运输")).click()
+        form.get_by_role(
+            "button",
+            name=re.compile(r"确认派单并进入(?:下一业务节点|国内运输)"),
+        ).click()
         expect(page).to_have_url(
             re.compile(rf"/admin/orders/{re.escape(record.order_id)}(?:\?|$)")
         )
