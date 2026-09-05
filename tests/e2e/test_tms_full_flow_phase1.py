@@ -17,6 +17,7 @@ from tms_full_flow_phase1 import (
     PHASE1_STAGE_ORDER,
     REQUIRED_ACCOUNT_ALIASES,
     _public_preflight,
+    assignment_mode_requires_person,
     build_fresh_identity,
     build_parser,
     phase1_records,
@@ -63,6 +64,13 @@ class Phase1IdentityTests(unittest.TestCase):
                 "ordinary_order_assignment",
             ),
         )
+
+    def test_assignment_mode_only_selects_people_for_person_responsibilities(self) -> None:
+        self.assertTrue(assignment_mode_requires_person("person"))
+        self.assertTrue(assignment_mode_requires_person(""))
+        self.assertFalse(assignment_mode_requires_person("site_queue"))
+        with self.assertRaisesRegex(ValueError, "未知工作流责任分配模式"):
+            assignment_mode_requires_person("external_queue")
 
 
 class Phase1SafetyTests(unittest.TestCase):

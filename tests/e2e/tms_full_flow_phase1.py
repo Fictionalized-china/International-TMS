@@ -95,6 +95,15 @@ ASSIGNMENT_POSITION_CREDENTIAL_ALIASES = {
 }
 
 
+def assignment_mode_requires_person(mode: str) -> bool:
+    normalized = mode.strip() or "person"
+    if normalized == "person":
+        return True
+    if normalized == "site_queue":
+        return False
+    raise ValueError(f"未知工作流责任分配模式：{normalized}")
+
+
 class BusinessBlocker(RuntimeError):
     """A real UI/business gate that prevents the scenario from advancing."""
 
@@ -1445,6 +1454,24 @@ class Phase1Flow:
                 for index in range(assignment_rows.count()):
                     row = assignment_rows.nth(index)
                     if row.get_attribute("data-assignment-required") != "true":
+                        continue
+                    assignment_mode = row.get_attribute("data-assignment-mode") or "person"
+                    try:
+                        requires_person = assignment_mode_requires_person(assignment_mode)
+                    except ValueError as error:
+                        raise BusinessBlocker(
+                            str(error),
+                            owner="工作流配置维护者",
+                            remediation="将责任分配模式配置为 person 或 site_queue。",
+                        ) from error
+                    if not requires_person:
+                        self.operation_supervisor.expect_visible(
+                            row.locator(".assignment-site-queue"),
+                            "目标仓岗位队列提示",
+                        )
+                        observation.add_note(
+                            f"{row.get_attribute('data-assignment-position') or '未配置岗位'} 自动进入目标仓岗位队列"
+                        )
                         continue
                     position_code = row.get_attribute("data-assignment-position") or ""
                     alias = ASSIGNMENT_POSITION_CREDENTIAL_ALIASES.get(position_code)
