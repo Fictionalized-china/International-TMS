@@ -65,6 +65,7 @@ import {
   validateWorkflowCoreModuleBindings,
   type PublicationPositionReadiness,
 } from "../lib/workflow-publication-validation";
+import { listActiveOrganizationAssignees } from "../lib/organization-assignee.server";
 
 type Definition = {
   id: string;
@@ -1679,62 +1680,15 @@ async function loadPublicationPositionReadiness(organizationId: string) {
      GROUP BY p.id,p.code,p.name,p.status
      ORDER BY p.sort_order,p.name`,
   ).bind(organizationId).all<PublicationPositionReadiness>();
-  const members = await env.DB.prepare(
-    `SELECT m.id membership_id,p.code position_code,
-       COALESCE((
-         SELECT GROUP_CONCAT(DISTINCT effective_permission.permission_code)
-         FROM (
-           SELECT role_permission.permission_code
-           FROM membership_roles membership_role
-           JOIN roles role
-             ON role.id=membership_role.role_id
-            AND role.organization_id=m.organization_id
-            AND role.status='active'
-           JOIN role_permissions role_permission ON role_permission.role_id=role.id
-           WHERE membership_role.membership_id=m.id
-             AND NOT EXISTS (
-               SELECT 1 FROM membership_permission_overrides denied
-               WHERE denied.membership_id=m.id
-                 AND denied.permission_code=role_permission.permission_code
-                 AND denied.effect='deny'
-             )
-           UNION
-           SELECT allowed.permission_code
-           FROM membership_permission_overrides allowed
-           WHERE allowed.membership_id=m.id AND allowed.effect='allow'
-           UNION
-           SELECT '*'
-           FROM membership_roles protected_membership_role
-           JOIN roles protected_role
-             ON protected_role.id=protected_membership_role.role_id
-            AND protected_role.organization_id=m.organization_id
-            AND protected_role.status='active'
-           WHERE protected_membership_role.membership_id=m.id
-             AND protected_role.code IN ('owner','boss')
-         ) effective_permission
-       ),'') permission_codes
-     FROM memberships m
-     JOIN users u ON u.id=m.user_id AND u.status='active'
-     JOIN departments d
-       ON d.id=m.department_id
-      AND d.organization_id=m.organization_id
-      AND d.status='active'
-     JOIN positions p
-       ON p.id=m.position_id
-      AND p.organization_id=m.organization_id
-      AND p.department_id=m.department_id
-      AND p.status='active'
-     WHERE m.organization_id=? AND m.status='active'
-     ORDER BY p.sort_order,p.name,m.id`,
-  ).bind(organizationId).all<{
-    membership_id: string;
-    position_code: string;
-    permission_codes: string;
-  }>();
+  const members = await listActiveOrganizationAssignees(organizationId);
   const membersByPosition = new Map<string, Array<{ membershipId: string; permissionCodes: string[] }>>();
-  for (const member of members.results) {
+  for (const member of members) {
+    if (!member.position_code) continue;
     const list = membersByPosition.get(member.position_code) ?? [];
-    list.push({ membershipId: member.membership_id, permissionCodes: member.permission_codes.split(",").filter(Boolean) });
+    list.push({
+      membershipId: member.id,
+      permissionCodes: (member.permission_codes ?? "").split(",").filter(Boolean),
+    });
     membersByPosition.set(member.position_code, list);
   }
   return {
