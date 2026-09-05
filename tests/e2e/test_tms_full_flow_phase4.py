@@ -40,10 +40,43 @@ ORDERS = {
     "ltl2": "SO2026090502003",
     "ltl3": "SO2026090502004",
 }
+EXPECTED_PIECES = {"ftl": 2, "ltl1": 3, "ltl2": 4, "ltl3": 5}
+TRACKING_NODES = [
+    "border_arrived",
+    "exported",
+    "foreign_entered",
+    "customs_cleared",
+]
+
+
+def cargo_codes(key: str) -> list[str]:
+    return [
+        f"OUL-{key.upper()}-{index:03d}"
+        for index in range(1, EXPECTED_PIECES[key] + 1)
+    ]
 
 
 def write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8-sig")
+
+
+def load_phase3_payload(handoff: dict[str, object]) -> Phase3Handoff:
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "summary.json"
+        write_json(
+            path,
+            {
+                "status": "passed",
+                "run_id": "phase3-contract-test",
+                "metrics": {
+                    "steps_failed": 0,
+                    "steps_blocked": 0,
+                    "gates_failed": 0,
+                },
+                "handoff": handoff,
+            },
+        )
+        return load_phase3_handoff(path)
 
 
 def phase3_handoff_payload(*, ready: bool = True, orders: dict[str, str] | None = None) -> dict[str, object]:
@@ -52,16 +85,22 @@ def phase3_handoff_payload(*, ready: bool = True, orders: dict[str, str] | None 
         "schema": PHASE3_HANDOFF_SCHEMA,
         "source_phase2_run_id": "phase2-a001-test",
         "source_phase1_run_id": "phase1-a001-test",
+        "source_phase1_entity_prefix": "UIE2E-20260905-A001-ABCDEF01",
         "customer": {"name": "Phase4验收客户"},
         "orders": {
             key: {
                 "order_number": value,
                 "business_type": "ftl" if key == "ftl" else "ltl",
-                "cargo_codes": [f"OUL-{key.upper()}-001"],
+                "expected_pieces": EXPECTED_PIECES[key],
+                "cargo_codes": cargo_codes(key),
             }
             for key, value in selected.items()
         },
-        "transport_batch": {"batch_number": "PZ-20260905-009"},
+        "transport_batch": {
+            "batch_number": "PZ-20260905-009",
+            "order_keys": ["ltl1", "ltl2", "ltl3"],
+            "order_numbers": [selected[key] for key in ("ltl1", "ltl2", "ltl3")],
+        },
         "dispatches": {
             "ftl": "OUT-260905-FTL09",
             "ltl_batch": "OUT-260905-LTL09",
@@ -74,11 +113,17 @@ def phase3_handoff_payload(*, ready: bool = True, orders: dict[str, str] | None 
             "recovery_branches_used": False,
             "source_phase2_run_id": "phase2-a001-test",
         },
-        "oul_numbers": [f"OUL-{key.upper()}-001" for key in ORDER_KEYS],
+        "oul_numbers": {key: cargo_codes(key) for key in ORDER_KEYS},
         "customs_declarations": {key: f"CD-{key}" for key in ORDER_KEYS},
-        "tracking_nodes": {"ftl": ["目的仓到达"], "ltl_batch": ["目的仓到达"]},
-        "overseas_inbound": [f"OUL-{key.upper()}-001" for key in ORDER_KEYS],
+        "tracking_nodes": {
+            "ftl": list(TRACKING_NODES),
+            "ltl_batch": list(TRACKING_NODES),
+        },
+        "overseas_inbound": [code for key in ORDER_KEYS for code in cargo_codes(key)],
         "appointed_order": selected["ftl"],
+        "pickup_cargo_codes": [
+            code for key in ORDER_KEYS for code in cargo_codes(key)
+        ],
         "pickup_signed_orders": list(selected.values()),
         "completed_stages": list(PHASE3_STAGE_ORDER),
         "ready_for_phase4": ready,
@@ -90,18 +135,37 @@ def phase3_source() -> Phase3Handoff:
         source_run_id="phase3-a001-test",
         source_phase2_run_id="phase2-a001-test",
         source_phase1_run_id="phase1-a001-test",
+        source_phase1_entity_prefix="UIE2E-20260905-A001-ABCDEF01",
         customer_name="Phase4验收客户",
         orders={
             key: Phase3Order(
                 order_number=number,
                 business_type="ftl" if key == "ftl" else "ltl",
-                cargo_codes=(f"OUL-{key.upper()}-001",),
+                expected_pieces=EXPECTED_PIECES[key],
+                cargo_codes=tuple(cargo_codes(key)),
             )
             for key, number in ORDERS.items()
         },
         transport_batch_number="PZ-20260905-009",
+        transport_batch_order_keys=("ltl1", "ltl2", "ltl3"),
+        transport_batch_order_numbers=tuple(
+            ORDERS[key] for key in ("ltl1", "ltl2", "ltl3")
+        ),
         dispatches={"ftl": "OUT-260905-FTL09", "ltl_batch": "OUT-260905-LTL09"},
-        oul_numbers={key: (f"OUL-{key.upper()}-001",) for key in ORDER_KEYS},
+        oul_numbers={key: tuple(cargo_codes(key)) for key in ORDER_KEYS},
+        customs_declarations={key: f"CD-{key}" for key in ORDER_KEYS},
+        tracking_nodes={
+            "ftl": tuple(TRACKING_NODES),
+            "ltl_batch": tuple(TRACKING_NODES),
+        },
+        overseas_inbound=tuple(
+            code for key in ORDER_KEYS for code in cargo_codes(key)
+        ),
+        pickup_cargo_codes=tuple(
+            code for key in ORDER_KEYS for code in cargo_codes(key)
+        ),
+        appointed_order=ORDERS["ftl"],
+        pickup_signed_orders=tuple(ORDERS.values()),
         certification_lineage={
             "mode": "fresh-from-phase1",
             "root_phase1_run_id": "phase1-a001-test",
@@ -158,7 +222,8 @@ class Phase3HandoffTests(unittest.TestCase):
         self.assertEqual(result.source_phase2_run_id, "phase2-a001-test")
         self.assertEqual(result.customer_name, "Phase4验收客户")
         self.assertEqual(result.orders["ftl"].business_type, "ftl")
-        self.assertEqual(result.orders["ltl2"].cargo_codes, ("OUL-LTL2-001",))
+        self.assertEqual(result.orders["ltl2"].cargo_codes, tuple(cargo_codes("ltl2")))
+        self.assertEqual(result.orders["ltl2"].expected_pieces, 4)
         self.assertEqual(result.transport_batch_number, "PZ-20260905-009")
 
     def test_reads_phase3_cli_envelope(self) -> None:
@@ -265,6 +330,115 @@ class Phase3HandoffTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "fresh attempt"):
                 load_phase3_handoff(path)
 
+    def test_rejects_pz_membership_or_oul_contract_drift(self) -> None:
+        cases = (
+            ("pz_membership", "PZ 挂载订单号"),
+            ("flat_oul", "handoff.oul_numbers.*JSON 对象"),
+            ("oul_mismatch", "OUL 汇总.*cargo_codes"),
+            ("cross_order_oul", "不同订单之间不能复用"),
+        )
+        for case, expected_error in cases:
+            with self.subTest(case=case):
+                handoff = phase3_handoff_payload()
+                if case == "pz_membership":
+                    handoff["transport_batch"]["order_numbers"][0] = ORDERS["ftl"]  # type: ignore[index]
+                elif case == "flat_oul":
+                    handoff["oul_numbers"] = [
+                        code for key in ORDER_KEYS for code in cargo_codes(key)
+                    ]
+                elif case == "oul_mismatch":
+                    handoff["oul_numbers"]["ltl3"].pop()  # type: ignore[index]
+                else:
+                    duplicate = cargo_codes("ltl1")[0]
+                    handoff["orders"]["ltl3"]["cargo_codes"][0] = duplicate  # type: ignore[index]
+                with self.assertRaisesRegex(ValueError, expected_error):
+                    load_phase3_payload(handoff)
+
+    def test_rejects_missing_phase3_business_evidence(self) -> None:
+        cases = (
+            ("customs", "报关单交接键"),
+            ("tracking", "必经运踪节点"),
+            ("inbound", "境外入库 OUL"),
+            ("pickup", "自提扫码 OUL"),
+            ("dispatch", "有效装车任务号"),
+        )
+        for case, expected_error in cases:
+            with self.subTest(case=case):
+                handoff = phase3_handoff_payload()
+                if case == "customs":
+                    handoff["customs_declarations"].pop("ltl3")  # type: ignore[union-attr]
+                elif case == "tracking":
+                    handoff["tracking_nodes"]["ftl"].pop()  # type: ignore[index]
+                elif case == "inbound":
+                    handoff["overseas_inbound"].pop()  # type: ignore[union-attr]
+                elif case == "pickup":
+                    handoff["pickup_cargo_codes"].pop()  # type: ignore[union-attr]
+                else:
+                    handoff["dispatches"]["ftl"] = ""  # type: ignore[index]
+                with self.assertRaisesRegex(ValueError, expected_error):
+                    load_phase3_payload(handoff)
+
+    def test_rejects_empty_or_inconsistent_certification_lineage(self) -> None:
+        cases = (
+            ("phase1", "Phase 1/2 run_id"),
+            ("phase2", "Phase 1/2 run_id"),
+            ("prefix_missing", "fresh entity_prefix"),
+            ("prefix_mismatch", "entity_prefix.*认证链路"),
+        )
+        for case, expected_error in cases:
+            with self.subTest(case=case):
+                handoff = phase3_handoff_payload()
+                if case == "phase1":
+                    handoff["source_phase1_run_id"] = ""
+                    handoff["certification_lineage"]["root_phase1_run_id"] = ""  # type: ignore[index]
+                elif case == "phase2":
+                    handoff["source_phase2_run_id"] = ""
+                    handoff["certification_lineage"]["source_phase2_run_id"] = ""  # type: ignore[index]
+                elif case == "prefix_missing":
+                    handoff["source_phase1_entity_prefix"] = ""
+                    handoff["certification_lineage"]["root_entity_prefix"] = ""  # type: ignore[index]
+                else:
+                    handoff["source_phase1_entity_prefix"] = "UIE2E-MISMATCH"
+                with self.assertRaisesRegex(ValueError, expected_error):
+                    load_phase3_payload(handoff)
+
+    def test_rejects_missing_short_long_or_invalid_expected_piece_contract(self) -> None:
+        cases = (
+            ("missing", "expected_pieces.*正整数"),
+            ("short", "OUL 数量.*预计件数"),
+            ("long", "OUL 数量.*预计件数"),
+            ("invalid_mapping", "expected_pieces.*正整数"),
+        )
+        for case, expected_error in cases:
+            with self.subTest(case=case):
+                handoff = phase3_handoff_payload()
+                order = handoff["orders"]["ftl"]  # type: ignore[index]
+                if case == "missing":
+                    order.pop("expected_pieces")
+                elif case == "short":
+                    order["cargo_codes"].pop()
+                elif case == "long":
+                    order["cargo_codes"].append("OUL-FTL-999")
+                else:
+                    order["expected_pieces"] = {"count": 2}
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "summary.json"
+                    write_json(
+                        path,
+                        {
+                            "status": "passed",
+                            "run_id": f"phase3-{case}",
+                            "metrics": {
+                                "steps_failed": 0,
+                                "steps_blocked": 0,
+                                "gates_failed": 0,
+                            },
+                            "handoff": handoff,
+                        },
+                    )
+                    with self.assertRaisesRegex(ValueError, expected_error):
+                        load_phase3_handoff(path)
+
 
 class WorkflowGateTests(unittest.TestCase):
     def test_required_visible_field_requests_action(self) -> None:
@@ -328,7 +502,26 @@ class Phase4HandoffTests(unittest.TestCase):
         self.assertEqual(payload["schema"], HANDOFF_SCHEMA)
         self.assertEqual(payload["source_phase3_run_id"], "phase3-a001-test")
         self.assertEqual(payload["orders"]["ltl3"]["business_type"], "ltl")
+        self.assertEqual(payload["orders"]["ltl3"]["expected_pieces"], 5)
         self.assertEqual(payload["transport_batch"]["batch_number"], "PZ-20260905-009")
+        self.assertEqual(
+            payload["transport_batch"]["order_numbers"],
+            [ORDERS[key] for key in ("ltl1", "ltl2", "ltl3")],
+        )
+        self.assertEqual(
+            payload["oul_numbers"],
+            {key: cargo_codes(key) for key in ORDER_KEYS},
+        )
+        self.assertEqual(
+            payload["pickup_cargo_codes"],
+            [code for key in ORDER_KEYS for code in cargo_codes(key)],
+        )
+        self.assertEqual(
+            payload["tracking_nodes"]["ftl"], list(TRACKING_NODES)
+        )
+        self.assertEqual(
+            set(payload["customs_declarations"]), set(ORDER_KEYS)
+        )
         self.assertTrue(payload["reconciliations"][0]["settled"])
         self.assertEqual(payload["archived_orders"], list(ORDERS.values()))
         self.assertEqual(payload["completed_stages"], list(PHASE4_STAGE_ORDER))
@@ -383,6 +576,7 @@ class Phase4SafetyTests(unittest.TestCase):
         self.assertNotIn("@secret.test", rendered)
         self.assertNotIn("Secret-", rendered)
         self.assertEqual(payload["stage_order"], list(PHASE4_STAGE_ORDER))
+        self.assertEqual(payload["expected_pieces"], EXPECTED_PIECES)
         self.assertIn("隐藏项", payload["workflow_gate_policy"])
 
     def test_stage_order_preserves_financial_and_review_dependencies(self) -> None:

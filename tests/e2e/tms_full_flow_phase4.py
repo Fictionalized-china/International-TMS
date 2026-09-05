@@ -48,6 +48,7 @@ from tms_ui_harness import (
 
 
 ORDER_KEYS = ("ftl", "ltl1", "ltl2", "ltl3")
+LTL_KEYS = ("ltl1", "ltl2", "ltl3")
 REQUIRED_ACCOUNT_ALIASES = ("customer_service", "sales", "finance", "cashier")
 OPTIONAL_WAREHOUSE_ALIASES = ("domestic_warehouse", "overseas_warehouse")
 PHASE4_STAGE_ORDER = (
@@ -75,6 +76,14 @@ PHASE3_STAGE_ORDER = (
 
 ORDER_NUMBER_RE = re.compile(r"^SO[0-9A-Z-]{6,}$", re.I)
 PZ_NUMBER_RE = re.compile(r"^PZ-[0-9A-Z-]{4,}$", re.I)
+OUT_NUMBER_RE = re.compile(r"^OUT-[0-9A-Z-]{4,}$", re.I)
+OUL_NUMBER_RE = re.compile(r"^OUL-[0-9A-Z-]+$", re.I)
+TRACKING_NODE_ORDER = (
+    "border_arrived",
+    "exported",
+    "foreign_entered",
+    "customs_cleared",
+)
 RECONCILIATION_NUMBER_RE = re.compile(r"\b(?:REC|PAY)[0-9A-Z]{8,}\b", re.I)
 INVOICE_RECORD_RE = re.compile(r"\bTAX[0-9A-Z]{8,}\b", re.I)
 CASH_TRANSACTION_RE = re.compile(r"\bCASH[0-9A-Z]{8,}\b", re.I)
@@ -111,6 +120,7 @@ class BusinessBlocker(RuntimeError):
 class Phase3Order:
     order_number: str
     business_type: str
+    expected_pieces: int
     cargo_codes: tuple[str, ...] = ()
 
 
@@ -119,11 +129,20 @@ class Phase3Handoff:
     source_run_id: str
     source_phase2_run_id: str
     source_phase1_run_id: str
+    source_phase1_entity_prefix: str
     customer_name: str
     orders: dict[str, Phase3Order]
     transport_batch_number: str
+    transport_batch_order_keys: tuple[str, ...]
+    transport_batch_order_numbers: tuple[str, ...]
     dispatches: dict[str, str]
     oul_numbers: dict[str, tuple[str, ...]]
+    customs_declarations: dict[str, str]
+    tracking_nodes: dict[str, tuple[str, ...]]
+    overseas_inbound: tuple[str, ...]
+    pickup_cargo_codes: tuple[str, ...]
+    appointed_order: str
+    pickup_signed_orders: tuple[str, ...]
     certification_lineage: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -176,6 +195,31 @@ def _string_list(value: object) -> tuple[str, ...]:
     return tuple(str(item).strip() for item in value if str(item).strip())
 
 
+def _required_string_list(value: object, label: str) -> tuple[str, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise ValueError(f"{label} 必须是数组")
+    result = tuple(str(item).strip() for item in value)
+    if not result or any(not item for item in result):
+        raise ValueError(f"{label} 缺失或包含空值")
+    return result
+
+
+def _oul_codes(value: object, label: str) -> tuple[str, ...]:
+    result = tuple(item.upper() for item in _required_string_list(value, label))
+    if any(not OUL_NUMBER_RE.fullmatch(item) for item in result):
+        raise ValueError(f"{label} 包含无效 OUL 货物码")
+    if len(set(result)) != len(result):
+        raise ValueError(f"{label} 包含重复 OUL 货物码")
+    return result
+
+
+def _expected_pieces(value: object, label: str) -> int:
+    rendered = str(value).strip()
+    if isinstance(value, bool) or not re.fullmatch(r"[1-9]\d*", rendered):
+        raise ValueError(f"{label} 缺失或不是正整数")
+    return int(rendered)
+
+
 def _dispatch_number(value: object) -> str:
     if isinstance(value, Mapping):
         return str(value.get("dispatch_number", "")).strip()
@@ -221,39 +265,127 @@ def load_phase3_handoff(path: Path | str) -> Phase3Handoff:
             raise ValueError(f"第三阶段订单 {key} 缺失或格式无效")
         if business_type != expected_type:
             raise ValueError(f"第三阶段订单 {key} 类型应为 {expected_type}")
+        expected_pieces = _expected_pieces(
+            raw_order.get("expected_pieces"),
+            f"第三阶段订单 {key} expected_pieces",
+        )
+        cargo_codes = _oul_codes(
+            raw_order.get("cargo_codes"), f"第三阶段订单 {key} cargo_codes"
+        )
+        if len(cargo_codes) != expected_pieces:
+            raise ValueError(
+                f"第三阶段订单 {key} OUL 数量与预计件数不一致："
+                f"expected_pieces={expected_pieces}，OUL={len(cargo_codes)}"
+            )
         orders[key] = Phase3Order(
             order_number=number,
             business_type=business_type,
-            cargo_codes=_string_list(raw_order.get("cargo_codes")),
+            expected_pieces=expected_pieces,
+            cargo_codes=cargo_codes,
         )
     if len({item.order_number for item in orders.values()}) != len(ORDER_KEYS):
         raise ValueError("第三阶段的四个订单号必须互不相同")
+    all_order_codes = tuple(
+        code for key in ORDER_KEYS for code in orders[key].cargo_codes
+    )
+    if len(set(all_order_codes)) != len(all_order_codes):
+        raise ValueError("第三阶段不同订单之间不能复用同一 OUL 货物码")
 
     customer = _mapping(handoff.get("customer"), "handoff.customer")
+    customer_name = str(customer.get("name", "")).strip()
+    if not customer_name:
+        raise ValueError("第三阶段交接缺少客户名称")
     batch = _mapping(handoff.get("transport_batch"), "handoff.transport_batch")
     batch_number = str(batch.get("batch_number", "")).strip().upper()
     if not PZ_NUMBER_RE.fullmatch(batch_number):
         raise ValueError("第三阶段结果缺少有效 PZ 配载单号")
+    batch_order_keys = _required_string_list(
+        batch.get("order_keys"), "handoff.transport_batch.order_keys"
+    )
+    batch_order_numbers = tuple(
+        item.upper()
+        for item in _required_string_list(
+            batch.get("order_numbers"), "handoff.transport_batch.order_numbers"
+        )
+    )
+    if batch_order_keys != LTL_KEYS:
+        raise ValueError("第三阶段 PZ 配载范围必须严格包含 ltl1、ltl2、ltl3")
+    expected_batch_numbers = tuple(orders[key].order_number for key in LTL_KEYS)
+    if batch_order_numbers != expected_batch_numbers:
+        raise ValueError("第三阶段 PZ 挂载订单号与 orders 交接不一致")
     dispatch_payload = _mapping(handoff.get("dispatches"), "handoff.dispatches")
     dispatches = {
-        "ftl": _dispatch_number(dispatch_payload.get("ftl")),
-        "ltl_batch": _dispatch_number(dispatch_payload.get("ltl_batch")),
+        "ftl": _dispatch_number(dispatch_payload.get("ftl")).upper(),
+        "ltl_batch": _dispatch_number(dispatch_payload.get("ltl_batch")).upper(),
     }
-    signed = set(_string_list(handoff.get("pickup_signed_orders")))
-    expected_signed = {item.order_number for item in orders.values()}
-    if not expected_signed.issubset(signed):
+    if any(not OUT_NUMBER_RE.fullmatch(value) for value in dispatches.values()):
+        raise ValueError("第三阶段交接缺少有效装车任务号")
+    if len(set(dispatches.values())) != len(dispatches):
+        raise ValueError("第三阶段整车与 PZ 装车任务号必须互不相同")
+    signed = tuple(
+        item.upper()
+        for item in _required_string_list(
+            handoff.get("pickup_signed_orders"), "handoff.pickup_signed_orders"
+        )
+    )
+    expected_signed = tuple(orders[key].order_number for key in ORDER_KEYS)
+    if signed != expected_signed:
         raise ValueError("第三阶段必须完成四票境外仓扫码自提签收")
 
     raw_oul = handoff.get("oul_numbers")
+    oul_payload = _mapping(raw_oul, "handoff.oul_numbers")
     oul_numbers: dict[str, tuple[str, ...]] = {}
-    if isinstance(raw_oul, Mapping):
-        for key in ORDER_KEYS:
-            oul_numbers[key] = _string_list(raw_oul.get(key))
-    else:
-        oul_numbers = {key: orders[key].cargo_codes for key in ORDER_KEYS}
+    for key in ORDER_KEYS:
+        codes = _oul_codes(oul_payload.get(key), f"handoff.oul_numbers.{key}")
+        if codes != orders[key].cargo_codes:
+            raise ValueError(f"第三阶段订单 {key} 的 OUL 汇总与 cargo_codes 不一致")
+        oul_numbers[key] = codes
+
+    customs_payload = _mapping(
+        handoff.get("customs_declarations"), "handoff.customs_declarations"
+    )
+    if set(customs_payload) != set(ORDER_KEYS):
+        raise ValueError("第三阶段四票报关单交接键不完整")
+    customs_declarations = {
+        key: str(customs_payload.get(key, "")).strip() for key in ORDER_KEYS
+    }
+    if any(not value for value in customs_declarations.values()):
+        raise ValueError("第三阶段四票报关单号必须全部非空")
+    if len(set(customs_declarations.values())) != len(ORDER_KEYS):
+        raise ValueError("第三阶段四票报关单号必须互不相同")
+
+    tracking_payload = _mapping(
+        handoff.get("tracking_nodes"), "handoff.tracking_nodes"
+    )
+    if set(tracking_payload) != {"ftl", "ltl_batch"}:
+        raise ValueError("第三阶段运踪交接必须严格包含 ftl 与 ltl_batch")
+    tracking_nodes = {
+        key: _required_string_list(
+            tracking_payload.get(key), f"handoff.tracking_nodes.{key}"
+        )
+        for key in ("ftl", "ltl_batch")
+    }
+    if any(nodes != TRACKING_NODE_ORDER for nodes in tracking_nodes.values()):
+        raise ValueError("第三阶段整车与 PZ 必经运踪节点不完整或顺序不一致")
+
+    overseas_inbound = _oul_codes(
+        handoff.get("overseas_inbound"), "handoff.overseas_inbound"
+    )
+    if overseas_inbound != all_order_codes:
+        raise ValueError("第三阶段境外入库 OUL 与订单交接不一致")
+    pickup_cargo_codes = _oul_codes(
+        handoff.get("pickup_cargo_codes"), "handoff.pickup_cargo_codes"
+    )
+    if pickup_cargo_codes != all_order_codes:
+        raise ValueError("第三阶段自提扫码 OUL 与订单交接不一致")
+    appointed_order = str(handoff.get("appointed_order", "")).strip().upper()
+    if appointed_order and appointed_order not in expected_signed:
+        raise ValueError("第三阶段预约订单不属于本轮四票订单")
 
     source_phase2_run_id = str(handoff.get("source_phase2_run_id", "")).strip()
     source_phase1_run_id = str(handoff.get("source_phase1_run_id", "")).strip()
+    if not source_phase2_run_id or not source_phase1_run_id:
+        raise ValueError("第三阶段交接缺少 Phase 1/2 run_id")
     lineage = _mapping(
         handoff.get("certification_lineage"), "handoff.certification_lineage"
     )
@@ -267,16 +399,33 @@ def load_phase3_handoff(path: Path | str) -> Phase3Handoff:
         raise ValueError("第三阶段认证链路的 Phase 1 run_id 不一致")
     if str(lineage.get("source_phase2_run_id", "")).strip() != source_phase2_run_id:
         raise ValueError("第三阶段认证链路的 Phase 2 run_id 不一致")
+    root_entity_prefix = str(lineage.get("root_entity_prefix", "")).strip()
+    if not root_entity_prefix:
+        raise ValueError("第三阶段认证链路缺少 fresh entity_prefix")
+    explicit_entity_prefix = str(
+        handoff.get("source_phase1_entity_prefix", "")
+    ).strip()
+    if explicit_entity_prefix and explicit_entity_prefix != root_entity_prefix:
+        raise ValueError("第三阶段交接的 Phase 1 entity_prefix 与认证链路不一致")
 
     return Phase3Handoff(
         source_run_id=source_run_id,
         source_phase2_run_id=source_phase2_run_id,
         source_phase1_run_id=source_phase1_run_id,
-        customer_name=str(customer.get("name", "")).strip(),
+        source_phase1_entity_prefix=root_entity_prefix,
+        customer_name=customer_name,
         orders=orders,
         transport_batch_number=batch_number,
+        transport_batch_order_keys=batch_order_keys,
+        transport_batch_order_numbers=batch_order_numbers,
         dispatches=dispatches,
         oul_numbers=oul_numbers,
+        customs_declarations=customs_declarations,
+        tracking_nodes=tracking_nodes,
+        overseas_inbound=overseas_inbound,
+        pickup_cargo_codes=pickup_cargo_codes,
+        appointed_order=appointed_order,
+        pickup_signed_orders=signed,
         certification_lineage=dict(lineage),
     )
 
@@ -300,6 +449,7 @@ def build_handoff_payload(
         key: {
             "order_number": item.order_number,
             "business_type": item.business_type,
+            "expected_pieces": item.expected_pieces,
             "cargo_codes": list(item.cargo_codes),
         }
         for key, item in phase3.orders.items()
@@ -323,11 +473,27 @@ def build_handoff_payload(
         "source_phase3_run_id": phase3.source_run_id,
         "source_phase2_run_id": phase3.source_phase2_run_id,
         "source_phase1_run_id": phase3.source_phase1_run_id,
+        "source_phase1_entity_prefix": phase3.source_phase1_entity_prefix,
         "customer": {"name": phase3.customer_name},
         "orders": orders,
-        "transport_batch": {"batch_number": phase3.transport_batch_number},
+        "transport_batch": {
+            "batch_number": phase3.transport_batch_number,
+            "order_keys": list(phase3.transport_batch_order_keys),
+            "order_numbers": list(phase3.transport_batch_order_numbers),
+        },
         "dispatches": dict(phase3.dispatches),
         "certification_lineage": lineage,
+        "oul_numbers": {
+            key: list(values) for key, values in phase3.oul_numbers.items()
+        },
+        "customs_declarations": dict(phase3.customs_declarations),
+        "tracking_nodes": {
+            key: list(values) for key, values in phase3.tracking_nodes.items()
+        },
+        "overseas_inbound": list(phase3.overseas_inbound),
+        "pickup_cargo_codes": list(phase3.pickup_cargo_codes),
+        "appointed_order": phase3.appointed_order,
+        "pickup_signed_orders": list(phase3.pickup_signed_orders),
         "workflow_gates": artifacts.workflow_gates,
         "reconciliations": reconciliations,
         "document_evidence": {
@@ -378,6 +544,9 @@ def _public_preflight(
         "source_phase3_run_id": phase3.source_run_id,
         "orders": {
             key: item.order_number for key, item in phase3.orders.items()
+        },
+        "expected_pieces": {
+            key: item.expected_pieces for key, item in phase3.orders.items()
         },
         "required_roles": [item.public_summary() for item in selected],
         "optional_exception_roles": optional,

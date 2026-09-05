@@ -31,28 +31,27 @@ from tms_ui_credentials import CredentialRecord, CredentialVault
 from ui_only_guard import scan_path
 
 
+ORDER_NUMBERS = {
+    "ftl": "SO2026090500101",
+    "ltl1": "SO2026090500102",
+    "ltl2": "SO2026090500103",
+    "ltl3": "SO2026090500104",
+}
+EXPECTED_PIECES = {"ftl": 2, "ltl1": 3, "ltl2": 4, "ltl3": 5}
+
+
 def valid_phase2_payload(*, include_prefix: bool = True) -> dict[str, object]:
     orders = {
-        "ftl": {
-            "order_number": "SO2026090500101",
-            "business_type": "ftl",
-            "cargo_codes": ["OUL-20260905-FTL01"],
-        },
-        "ltl1": {
-            "order_number": "SO2026090500102",
-            "business_type": "ltl",
-            "cargo_codes": ["OUL-20260905-LTL01"],
-        },
-        "ltl2": {
-            "order_number": "SO2026090500103",
-            "business_type": "ltl",
-            "cargo_codes": ["OUL-20260905-LTL02"],
-        },
-        "ltl3": {
-            "order_number": "SO2026090500104",
-            "business_type": "ltl",
-            "cargo_codes": ["OUL-20260905-LTL03"],
-        },
+        key: {
+            "order_number": ORDER_NUMBERS[key],
+            "business_type": "ftl" if key == "ftl" else "ltl",
+            "expected_pieces": EXPECTED_PIECES[key],
+            "cargo_codes": [
+                f"OUL-20260905-{key.upper()}-{index:02d}"
+                for index in range(1, EXPECTED_PIECES[key] + 1)
+            ],
+        }
+        for key in ORDER_KEYS
     }
     handoff: dict[str, object] = {
         "schema": "international-tms-full-flow-phase2-handoff/v1",
@@ -136,8 +135,9 @@ class Phase3HandoffInputTests(unittest.TestCase):
         self.assertEqual([item.key for item in source.orders], list(ORDER_KEYS))
         self.assertEqual(source.batch_number, "PZ-20260905-001")
         self.assertEqual(source.dispatches["ftl"], "OUT-20260905-FTL01")
-        self.assertEqual(len(source.all_cargo_codes), 4)
+        self.assertEqual(len(source.all_cargo_codes), sum(EXPECTED_PIECES.values()))
         self.assertEqual(source.order("ltl3").business_type, "ltl")
+        self.assertEqual(source.order("ltl3").expected_pieces, 5)
         self.assertEqual(source.batch_operation_alias, "operation_2")
         self.assertEqual(source.batch_document_alias, "document_2")
 
@@ -174,9 +174,8 @@ class Phase3HandoffInputTests(unittest.TestCase):
 
     def test_rejects_duplicate_oul_across_orders(self) -> None:
         payload = valid_phase2_payload()
-        payload["handoff"]["orders"]["ltl3"]["cargo_codes"] = [  # type: ignore[index]
-            "OUL-20260905-LTL01"
-        ]
+        ltl3_codes = payload["handoff"]["orders"]["ltl3"]["cargo_codes"]  # type: ignore[index]
+        ltl3_codes[0] = payload["handoff"]["orders"]["ltl1"]["cargo_codes"][0]  # type: ignore[index]
         with tempfile.TemporaryDirectory() as directory:
             path = write_payload(Path(directory), payload)
             with self.assertRaisesRegex(ValueError, "不能复用"):
@@ -218,6 +217,52 @@ class Phase3HandoffInputTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "fresh attempt"):
                 load_phase2_handoff(path)
 
+    def test_rejects_empty_phase1_run_id_even_when_lineage_matches(self) -> None:
+        payload = valid_phase2_payload()
+        payload["handoff"]["source_phase1_run_id"] = ""  # type: ignore[index]
+        payload["handoff"]["certification_lineage"]["root_phase1_run_id"] = ""  # type: ignore[index]
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_payload(Path(directory), payload)
+            with self.assertRaisesRegex(ValueError, "source_phase1_run_id"):
+                load_phase2_handoff(path)
+
+    def test_rejects_phase1_entity_prefix_that_disagrees_with_run_id(self) -> None:
+        payload = valid_phase2_payload()
+        payload["handoff"]["source_phase1_entity_prefix"] = (  # type: ignore[index]
+            "UIE2E-20260905150000-A003-DEADBEEF"
+        )
+        payload["handoff"]["certification_lineage"]["root_entity_prefix"] = (  # type: ignore[index]
+            "UIE2E-20260905150000-A003-DEADBEEF"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_payload(Path(directory), payload)
+            with self.assertRaisesRegex(ValueError, "entity_prefix.*run_id"):
+                load_phase2_handoff(path)
+
+    def test_rejects_missing_short_long_or_invalid_expected_piece_contract(self) -> None:
+        cases = (
+            ("missing", "expected_pieces.*正整数"),
+            ("short", "OUL 数量.*预计件数"),
+            ("long", "OUL 数量.*预计件数"),
+            ("invalid_mapping", "expected_pieces.*正整数"),
+        )
+        for case, expected_error in cases:
+            with self.subTest(case=case):
+                payload = valid_phase2_payload()
+                order = payload["handoff"]["orders"]["ftl"]  # type: ignore[index]
+                if case == "missing":
+                    order.pop("expected_pieces")
+                elif case == "short":
+                    order["cargo_codes"].pop()
+                elif case == "long":
+                    order["cargo_codes"].append("OUL-20260905-FTL-99")
+                else:
+                    order["expected_pieces"] = {"count": 2}
+                with tempfile.TemporaryDirectory() as directory:
+                    path = write_payload(Path(directory), payload)
+                    with self.assertRaisesRegex(ValueError, expected_error):
+                        load_phase2_handoff(path)
+
 
 class Phase3SafetyAndOutputTests(unittest.TestCase):
     def test_formal_flow_executes_pz_permission_and_exit_negative_gates(self) -> None:
@@ -258,6 +303,7 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
         self.assertFalse(payload["business_writes"])
         self.assertTrue(payload["portal_identity_reconstructable"])
         self.assertEqual(payload["pz_runtime_roles"], ["operation_2", "document_2"])
+        self.assertEqual(payload["expected_pieces"], EXPECTED_PIECES)
         self.assertNotIn("@secret.test", rendered)
         self.assertNotIn("Secret-", rendered)
         self.assertNotIn("uie2e.phase1", rendered)
@@ -296,7 +342,20 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
         self.assertEqual(payload["schema"], PHASE3_HANDOFF_SCHEMA)
         self.assertTrue(payload["ready_for_phase4"])
         self.assertEqual(payload["completed_stages"], list(PHASE3_STAGE_ORDER))
-        self.assertEqual(len(payload["oul_numbers"]), 4)
+        self.assertEqual(
+            payload["oul_numbers"],
+            {
+                item.key: list(item.cargo_codes) for item in self.source.orders
+            },
+        )
+        self.assertEqual(payload["orders"]["ltl3"]["expected_pieces"], 5)
+        self.assertEqual(
+            payload["transport_batch"]["order_numbers"],
+            [self.source.order(key).order_number for key in LTL_KEYS],
+        )
+        self.assertEqual(
+            payload["pickup_cargo_codes"], list(self.source.all_cargo_codes)
+        )
         self.assertEqual(len(payload["pickup_signed_orders"]), 4)
         self.assertEqual(
             payload["certification_lineage"]["source_phase2_run_id"],

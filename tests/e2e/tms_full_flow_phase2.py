@@ -220,7 +220,21 @@ def load_phase1_handoff(path: Path | str) -> Phase1Handoff:
     for role in ("operation", "document", "customer_service", "finance"):
         raw_role_assignees = entities.get(f"{role}_assignee")
         if not isinstance(raw_role_assignees, Mapping):
+            if role in {"operation", "document"}:
+                raise ValueError(f"第一阶段交接缺少 {role} 三票拼车原负责人映射")
             continue
+        if role in {"operation", "document"}:
+            missing_ltl_keys = [
+                key
+                for key in LTL_KEYS
+                if not isinstance(raw_role_assignees.get(key), str)
+                or not raw_role_assignees[key].strip()
+            ]
+            if missing_ltl_keys:
+                raise ValueError(
+                    f"第一阶段交接的 {role} 原负责人映射缺少非空票据："
+                    + "、".join(missing_ltl_keys)
+                )
         original_assignees[role] = {
             str(key): str(value).strip()
             for key, value in raw_role_assignees.items()
@@ -248,13 +262,33 @@ def build_handoff_payload(
     if ready_for_phase3 and not phase1.fresh_attempt_verified:
         raise ValueError("正式 Phase 2 交接必须来自通过核验的 Phase 1 fresh attempt")
     expected_pieces = _required_expected_pieces(phase1.expected_pieces)
+    cargo_codes = {
+        key: [str(code).strip().upper() for code in artifacts.cargo_codes.get(key, ())]
+        for key in ORDER_KEYS
+    }
+    if ready_for_phase3:
+        for key in ORDER_KEYS:
+            codes = certify_oul_label_counts(
+                phase1.orders[key],
+                expected_pieces=expected_pieces[key],
+                rendered_label_count=len(cargo_codes[key]),
+                rendered_codes=cargo_codes[key],
+            )
+            if any(not OUL_NUMBER_RE.fullmatch(code) for code in codes):
+                raise ValueError(
+                    f"{phase1.orders[key]} 的正式交接包含无效 OUL 货物码"
+                )
+            cargo_codes[key] = codes
+        all_codes = [code for key in ORDER_KEYS for code in cargo_codes[key]]
+        if len(set(all_codes)) != len(all_codes):
+            raise ValueError("正式 Phase 2 交接不同订单之间不能复用同一 OUL 货物码")
 
     orders = {
         key: {
             "order_number": phase1.orders[key],
             "business_type": "ftl" if key == "ftl" else "ltl",
             "expected_pieces": expected_pieces[key],
-            "cargo_codes": list(artifacts.cargo_codes.get(key, ())),
+            "cargo_codes": cargo_codes[key],
         }
         for key in ORDER_KEYS
     }
@@ -1676,7 +1710,7 @@ class Phase2Flow:
                 self.phase1.original_assignees.get("document", {}).get(key, "")
                 for key in LTL_KEYS
             )
-            if not any(original_operation_people) or not any(original_document_people):
+            if not all(original_operation_people) or not all(original_document_people):
                 raise BusinessBlocker(
                     "第一阶段交接结果缺少三票挂载订单的原操作/单证负责人证据",
                     owner="纯 UI 验收例程维护人",

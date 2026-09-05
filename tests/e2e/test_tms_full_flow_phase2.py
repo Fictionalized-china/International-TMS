@@ -28,6 +28,7 @@ from tms_full_flow_phase2 import (
     certify_oul_label_counts,
     load_phase1_handoff,
 )
+from tms_full_flow_phase3 import load_phase2_handoff as load_phase2_for_phase3
 from tms_ui_credentials import CredentialRecord, CredentialVault
 from ui_only_guard import scan_path
 
@@ -39,6 +40,24 @@ ORDERS = {
     "ltl3": "SO2026090501004",
 }
 EXPECTED_PIECES = {"ftl": 2, "ltl1": 3, "ltl2": 4, "ltl3": 5}
+
+
+def cargo_codes(key: str) -> list[str]:
+    return [
+        f"OUL-{key.upper()}-{index:03d}"
+        for index in range(1, EXPECTED_PIECES[key] + 1)
+    ]
+
+
+def ready_phase2_artifacts() -> Phase2Artifacts:
+    return Phase2Artifacts(
+        cargo_codes={key: cargo_codes(key) for key in ORDER_KEYS},
+        batch_number="PZ-20260905-001",
+        ftl_dispatch_number="OUT-260905-FTL01",
+        ltl_dispatch_number="OUT-260905-LTL01",
+        operation_assignee="操作员甲",
+        document_assignee="单证员甲",
+    )
 
 
 def certified_phase1_payload(
@@ -64,6 +83,18 @@ def certified_phase1_payload(
                 key: str(value) for key, value in EXPECTED_PIECES.items()
             },
             "customer": {"primary": "UI全流程验收客户"},
+            "operation_assignee": {
+                "ftl": "整车操作员",
+                "ltl1": "拼车操作员一",
+                "ltl2": "拼车操作员二",
+                "ltl3": "拼车操作员三",
+            },
+            "document_assignee": {
+                "ftl": "整车单证员",
+                "ltl1": "拼车单证员一",
+                "ltl2": "拼车单证员二",
+                "ltl3": "拼车单证员三",
+            },
         },
     }
 
@@ -102,7 +133,42 @@ class Phase1HandoffTests(unittest.TestCase):
         self.assertEqual(result.customer_name, "UI全流程验收客户")
         self.assertEqual(result.orders, ORDERS)
         self.assertEqual(result.expected_pieces, EXPECTED_PIECES)
+        self.assertEqual(
+            tuple(result.original_assignees["operation"][key] for key in LTL_KEYS),
+            ("拼车操作员一", "拼车操作员二", "拼车操作员三"),
+        )
+        self.assertEqual(
+            tuple(result.original_assignees["document"][key] for key in LTL_KEYS),
+            ("拼车单证员一", "拼车单证员二", "拼车单证员三"),
+        )
         self.assertTrue(result.fresh_attempt_verified)
+
+    def test_rejects_phase1_when_one_ltl_operation_assignee_is_missing(self) -> None:
+        payload = certified_phase1_payload()
+        payload["entities"]["operation_assignee"].pop("ltl2")  # type: ignore[index]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "summary.json"
+            write_json(path, payload)
+            with self.assertRaisesRegex(ValueError, "operation.*ltl2"):
+                load_phase1_handoff(path)
+
+    def test_rejects_phase1_when_document_assignee_role_mapping_is_missing(self) -> None:
+        payload = certified_phase1_payload()
+        payload["entities"].pop("document_assignee")  # type: ignore[union-attr]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "summary.json"
+            write_json(path, payload)
+            with self.assertRaisesRegex(ValueError, "document.*负责人映射"):
+                load_phase1_handoff(path)
+
+    def test_rejects_phase1_when_one_ltl_document_assignee_is_blank(self) -> None:
+        payload = certified_phase1_payload()
+        payload["entities"]["document_assignee"]["ltl3"] = "   "  # type: ignore[index]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "summary.json"
+            write_json(path, payload)
+            with self.assertRaisesRegex(ValueError, "document.*ltl3"):
+                load_phase1_handoff(path)
 
     def test_reads_phase1_cli_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -204,19 +270,7 @@ class Phase2HandoffTests(unittest.TestCase):
             expected_pieces=dict(EXPECTED_PIECES),
             fresh_attempt_verified=True,
         )
-        artifacts = Phase2Artifacts(
-            cargo_codes={
-                "ftl": ["OUL-FTL-1"],
-                "ltl1": ["OUL-LTL-1"],
-                "ltl2": ["OUL-LTL-2"],
-                "ltl3": ["OUL-LTL-3"],
-            },
-            batch_number="PZ-20260905-001",
-            ftl_dispatch_number="OUT-260905-FTL01",
-            ltl_dispatch_number="OUT-260905-LTL01",
-            operation_assignee="操作员甲",
-            document_assignee="单证员甲",
-        )
+        artifacts = ready_phase2_artifacts()
         payload = build_handoff_payload(phase1, artifacts, ready_for_phase3=True)
         self.assertEqual(payload["schema"], HANDOFF_SCHEMA)
         self.assertEqual(
@@ -230,7 +284,9 @@ class Phase2HandoffTests(unittest.TestCase):
         )
         self.assertEqual(payload["orders"]["ftl"]["business_type"], "ftl")
         self.assertEqual(payload["orders"]["ftl"]["expected_pieces"], 2)
-        self.assertEqual(payload["orders"]["ltl2"]["cargo_codes"], ["OUL-LTL-2"])
+        self.assertEqual(
+            payload["orders"]["ltl2"]["cargo_codes"], cargo_codes("ltl2")
+        )
         self.assertEqual(
             payload["dispatches"]["ltl_batch"]["dispatch_number"],
             "OUT-260905-LTL01",
@@ -241,6 +297,67 @@ class Phase2HandoffTests(unittest.TestCase):
         self.assertTrue(payload["ready_for_phase3"])
         self.assertTrue(payload["certification_lineage"]["fresh_phase1_attempt"])
         self.assertFalse(payload["certification_lineage"]["recovery_branches_used"])
+
+    def test_ready_handoff_round_trips_into_phase3_consumer(self) -> None:
+        phase1 = Phase1Handoff(
+            source_run_id="phase1-series-a001-20260905150000-abcdef01",
+            orders=dict(ORDERS),
+            customer_name="客户甲",
+            source_entity_prefix="UIE2E-20260905150000-A001-ABCDEF01",
+            expected_pieces=dict(EXPECTED_PIECES),
+            fresh_attempt_verified=True,
+        )
+        payload = build_handoff_payload(
+            phase1,
+            ready_phase2_artifacts(),
+            ready_for_phase3=True,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "phase2-summary.json"
+            write_json(
+                path,
+                {
+                    "status": "passed",
+                    "run_id": "phase2-contract-roundtrip",
+                    "metrics": {
+                        "steps_failed": 0,
+                        "steps_blocked": 0,
+                        "gates_failed": 0,
+                    },
+                    "handoff": payload,
+                },
+            )
+            source = load_phase2_for_phase3(path)
+        self.assertEqual(
+            {item.key: item.expected_pieces for item in source.orders},
+            EXPECTED_PIECES,
+        )
+        self.assertEqual(
+            {item.key: list(item.cargo_codes) for item in source.orders},
+            {key: cargo_codes(key) for key in ORDER_KEYS},
+        )
+
+    def test_ready_handoff_rejects_count_and_cross_order_oul_drift(self) -> None:
+        phase1 = Phase1Handoff(
+            source_run_id="phase1-a001-test",
+            orders=dict(ORDERS),
+            customer_name="客户甲",
+            source_entity_prefix="UIE2E-20260905-A001-ABCDEF01",
+            expected_pieces=dict(EXPECTED_PIECES),
+            fresh_attempt_verified=True,
+        )
+        for case, expected_error in (
+            ("short", "标签数量不一致"),
+            ("cross_order_duplicate", "不同订单之间不能复用"),
+        ):
+            with self.subTest(case=case):
+                artifacts = ready_phase2_artifacts()
+                if case == "short":
+                    artifacts.cargo_codes["ltl2"].pop()
+                else:
+                    artifacts.cargo_codes["ltl3"][0] = artifacts.cargo_codes["ltl1"][0]
+                with self.assertRaisesRegex(ValueError, expected_error):
+                    build_handoff_payload(phase1, artifacts, ready_for_phase3=True)
 
     def test_incomplete_handoff_never_claims_phase3_ready(self) -> None:
         phase1 = Phase1Handoff(

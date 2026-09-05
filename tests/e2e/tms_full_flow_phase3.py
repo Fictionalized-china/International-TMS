@@ -106,6 +106,7 @@ class Phase3Order:
     key: str
     order_number: str
     business_type: str
+    expected_pieces: int
     cargo_codes: tuple[str, ...]
 
 
@@ -184,6 +185,13 @@ def _cargo_codes(value: object, label: str) -> tuple[str, ...]:
     return result
 
 
+def _expected_pieces(value: object, label: str) -> int:
+    rendered = str(value).strip()
+    if isinstance(value, bool) or not re.fullmatch(r"[1-9]\d*", rendered):
+        raise ValueError(f"{label} 缺失或不是正整数")
+    return int(rendered)
+
+
 def load_phase2_handoff(path: Path | str) -> Phase2Handoff:
     """Load and strictly validate a passed phase-two summary/envelope."""
 
@@ -222,12 +230,22 @@ def load_phase2_handoff(path: Path | str) -> Phase2Handoff:
             raise ValueError(f"第二阶段订单 {key} 缺失或格式无效")
         if business_type != expected_type:
             raise ValueError(f"第二阶段订单 {key} 的业务类型应为 {expected_type}")
+        expected_pieces = _expected_pieces(
+            item.get("expected_pieces"), f"第二阶段订单 {key} expected_pieces"
+        )
+        cargo_codes = _cargo_codes(item.get("cargo_codes"), f"订单 {key}")
+        if len(cargo_codes) != expected_pieces:
+            raise ValueError(
+                f"第二阶段订单 {key} OUL 数量与预计件数不一致："
+                f"expected_pieces={expected_pieces}，OUL={len(cargo_codes)}"
+            )
         orders.append(
             Phase3Order(
                 key=key,
                 order_number=number,
                 business_type=business_type,
-                cargo_codes=_cargo_codes(item.get("cargo_codes"), f"订单 {key}"),
+                expected_pieces=expected_pieces,
+                cargo_codes=cargo_codes,
             )
         )
     if len({item.order_number for item in orders}) != len(ORDER_KEYS):
@@ -257,9 +275,14 @@ def load_phase2_handoff(path: Path | str) -> Phase2Handoff:
         dispatches[key] = number
 
     source_phase1_run_id = str(handoff.get("source_phase1_run_id", "")).strip()
+    if not source_phase1_run_id:
+        raise ValueError("第二阶段交接缺少 source_phase1_run_id")
     entity_prefix = str(handoff.get("source_phase1_entity_prefix", "")).strip()
+    derived_entity_prefix = derive_phase1_entity_prefix(source_phase1_run_id)
+    if entity_prefix and derived_entity_prefix and entity_prefix != derived_entity_prefix:
+        raise ValueError("第二阶段交接的 Phase 1 entity_prefix 与 run_id 不一致")
     if not entity_prefix:
-        entity_prefix = derive_phase1_entity_prefix(source_phase1_run_id)
+        entity_prefix = derived_entity_prefix
     portal_email_from_entity_prefix(entity_prefix)
     customer = _mapping(handoff.get("customer", {}), "handoff.customer")
     customer_name = str(customer.get("name", "")).strip()
@@ -315,25 +338,34 @@ def build_handoff_payload(
         "schema": PHASE3_HANDOFF_SCHEMA,
         "source_phase2_run_id": source.source_run_id,
         "source_phase1_run_id": source.source_phase1_run_id,
+        "source_phase1_entity_prefix": source.source_phase1_entity_prefix,
         "customer": {"name": source.customer_name},
         "orders": {
             item.key: {
                 "order_number": item.order_number,
                 "business_type": item.business_type,
+                "expected_pieces": item.expected_pieces,
                 "cargo_codes": list(item.cargo_codes),
             }
             for item in source.orders
         },
-        "transport_batch": {"batch_number": source.batch_number},
+        "transport_batch": {
+            "batch_number": source.batch_number,
+            "order_keys": list(LTL_KEYS),
+            "order_numbers": [source.order(key).order_number for key in LTL_KEYS],
+        },
         "dispatches": dict(source.dispatches),
         "certification_lineage": lineage,
-        "oul_numbers": list(source.all_cargo_codes),
+        "oul_numbers": {
+            item.key: list(item.cargo_codes) for item in source.orders
+        },
         "customs_declarations": dict(artifacts.customs_declarations),
         "tracking_nodes": {
             key: list(values) for key, values in artifacts.completed_tracking_nodes.items()
         },
         "overseas_inbound": list(artifacts.inbound_cargo_codes),
         "appointed_order": artifacts.appointed_order,
+        "pickup_cargo_codes": list(artifacts.pickup_cargo_codes),
         "pickup_signed_orders": list(artifacts.signed_orders),
         "completed_stages": list(PHASE3_STAGE_ORDER) if ready_for_phase4 else [],
         "ready_for_phase4": ready_for_phase4,
@@ -368,6 +400,9 @@ def _public_preflight(
         "base_url": base_url.rstrip("/"),
         "source_phase2_run_id": source.source_run_id,
         "orders": {item.key: item.order_number for item in source.orders},
+        "expected_pieces": {
+            item.key: item.expected_pieces for item in source.orders
+        },
         "transport_batch": source.batch_number,
         "dispatches": dict(source.dispatches),
         "oul_count": len(source.all_cargo_codes),
