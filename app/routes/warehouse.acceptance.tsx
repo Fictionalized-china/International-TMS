@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { Form, Link, redirect, useNavigation } from "react-router";
-import { useEffect, useState, type ReactElement } from "react";
+import { useEffect, useRef, useState, type ReactElement } from "react";
 import type { Route } from "./+types/warehouse.acceptance";
 import {
   WarehouseReceiptResultSelector,
@@ -700,6 +700,8 @@ export async function action({ request }: Route.ActionArgs) {
 
 export default function WarehouseAcceptance({ loaderData, actionData }: Route.ComponentProps) {
   const busy = useNavigation().state !== "idle";
+  const feedbackRef = useRef<HTMLDivElement>(null);
+  const actionError = actionData?.formError;
   const canOperate = canOperateWarehouseUi(
     loaderData.user,
     loaderData.warehouseAccessLevel,
@@ -708,9 +710,22 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
   const labels = loaderData.receiptId ? loaderData.recentLabels : [];
   const policies = resolveWarehouseAcceptancePolicies(loaderData.workflowFields);
   useEffect(() => setReceiptResult("partial"), [loaderData.order?.id]);
+  useEffect(() => {
+    if (actionError) feedbackRef.current?.focus();
+  }, [actionError]);
   return <>
     <header className="page-header acceptance-header"><div><p className="eyebrow">ACCEPTANCE RECEIVING</p><h1>验收收货</h1><p>扫描订单号，逐条核对预录与实收数据，选择库位入库后打印每个实际包装的仓库标签。</p></div>{labels.length > 0 && <button type="button" className="primary no-print" onClick={() => window.print()}>打印本次 {labels.length} 张标签</button>}</header>
-    {(loaderData.resultMessage || actionData?.formError) && <div className={`alert ${actionData?.formError ? "error" : "success"}`}>{actionData?.formError ?? loaderData.resultMessage}</div>}
+    {(loaderData.resultMessage || actionError) && <div
+      ref={feedbackRef}
+      className={`alert ${actionError ? "error" : "success"}`}
+      role={actionError ? "alert" : "status"}
+      aria-live={actionError ? "assertive" : "polite"}
+      aria-atomic="true"
+      tabIndex={actionError ? -1 : undefined}
+      data-acceptance-feedback={actionError ? "error" : "success"}
+    >
+      {actionError ?? loaderData.resultMessage}
+    </div>}
     {!loaderData.locations.length && <div className="alert error">当前仓库没有可用库位，请先<Link to={`/warehouse/locations?warehouseId=${loaderData.warehouse.id}`}>配置仓库与库位</Link>。</div>}
     {canOperate ? <WarehouseReceivingScanPanel
       warehouseId={loaderData.warehouse.id}

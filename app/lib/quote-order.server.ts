@@ -10,6 +10,10 @@ import {
 } from "./business-workflow.server";
 import { nextDocumentNumber } from "./documents.server";
 import { ensureShipmentForOrder } from "./shipment-sync.server";
+import {
+  INSERT_QUOTE_CARGO_PACKAGES_SQL,
+  quoteCargoProjection,
+} from "./quote-cargo-projection";
 
 type QuoteReceivable = {
   id: string;
@@ -134,7 +138,12 @@ export async function createOrderFromAcceptedQuote(input: {
   const destinationAddress = quote.warehouse_address || quote.destination_warehouse_note || quote.warehouse_name || quote.destination_city || "待补充目的地";
   const contactName = quote.customer_contact_name || contact?.name || quote.customer_name;
   const contactPhone = quote.customer_contact_phone || contact?.phone || null;
-  const pieces = Math.max(1, Number(quote.pieces || 1));
+  const cargoProjection = quoteCargoProjection({
+    pieces: Number(quote.pieces),
+    totalGrossWeightKg: Number(quote.gross_weight_kg),
+    totalVolumeCbm: Number(quote.volume_cbm),
+  });
+  const pieces = cargoProjection.totalPieces;
 
   const snapshotJson = JSON.stringify({
     quoteNumber: quote.quote_number,
@@ -198,15 +207,18 @@ export async function createOrderFromAcceptedQuote(input: {
          id,organization_id,order_id,line_no,cargo_name_cn,package_type,package_count,pieces_per_package,
          gross_weight_per_package_kg,net_weight_per_package_kg,length_cm,width_cm,height_cm,
          volume_per_package_cbm,declared_value,currency,origin_country,notes,created_at,updated_at
-       ) VALUES(?,?,?,?,?,'other',1,?,?,?,?,?,?,?,0,?,?,?,?,?)`,
+       ) VALUES(?,?,?,?,?,'other',?,?,?,?,?,?,?,?,0,?,?,?,?,?)`,
     ).bind(
-      cargoId,input.organizationId,orderId,1,quote.cargo_description,pieces,
-      quote.gross_weight_kg,quote.gross_weight_kg,quote.estimated_length_cm,quote.estimated_width_cm,
-      quote.estimated_height_cm,quote.volume_cbm,quote.currency,quote.origin_country,"由已接受报价自动生成",now,now,
+      cargoId,input.organizationId,orderId,1,quote.cargo_description,
+      cargoProjection.packageCount,cargoProjection.piecesPerPackage,
+      cargoProjection.grossWeightPerPackageKg,cargoProjection.netWeightPerPackageKg,
+      quote.estimated_length_cm,quote.estimated_width_cm,quote.estimated_height_cm,
+      cargoProjection.volumePerPackageCbm,quote.currency,quote.origin_country,"由已接受报价自动生成",now,now,
     ),
-    env.DB.prepare(
-      "INSERT INTO order_cargo_packages(id,organization_id,order_id,cargo_item_id,package_code,package_sequence,created_at) VALUES(?,?,?,?,?,1,?)",
-    ).bind(crypto.randomUUID(),input.organizationId,orderId,cargoId,`${orderNumber}-P001`,now),
+    env.DB.prepare(INSERT_QUOTE_CARGO_PACKAGES_SQL).bind(
+      cargoProjection.packageCount,cargoId,input.organizationId,orderId,cargoId,
+      orderNumber,now,cargoProjection.packageCount,
+    ),
     env.DB.prepare(
       `INSERT INTO transport_order_quote_snapshots(
          order_id,organization_id,quotation_id,quote_number,road_load_type,currency,
