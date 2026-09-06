@@ -659,6 +659,10 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
         self.assertIn('get_by_text(', helper)
         self.assertIn('"实际出境已确认", exact=False', helper)
         self.assertIn("exit_form.or_(exit_confirmed)", helper)
+        self.assertLess(
+            helper.index("exit_form.or_(exit_confirmed)"),
+            helper.index("if self._is_visible(exit_form):"),
+        )
 
     def test_batch_tracking_rows_use_container_class_and_exact_labels(self) -> None:
         source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
@@ -672,10 +676,18 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
         self.assertIn("get_by_text(row_label, exact=True)", helper)
         self.assertIn('get_by_text("口岸到达", exact=True)', helper)
         self.assertIn('get_by_text("目的仓到达", exact=True)', helper)
-        self.assertLess(
-            helper.index("exit_form.or_(exit_confirmed)"),
-            helper.index("if self._is_visible(exit_form):"),
+
+    def test_portal_appointment_recovery_does_not_create_a_second_appointment(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def verify_portal_and_optional_appointment(")
+        end = source.index("    def complete_pickup_signoff(", start)
+        helper = source[start:end]
+
+        self.assertIn(
+            "appointment_done = bool(self.artifacts.appointed_order)",
+            helper,
         )
+        self.assertIn("expect_hidden(\n                        dialog", helper)
 
     def test_pz_read_only_audit_checks_capabilities_not_transient_copy(self) -> None:
         source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")

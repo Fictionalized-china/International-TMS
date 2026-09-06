@@ -2271,7 +2271,7 @@ class Phase3Flow:
                 "客户门户绑定范围",
             )
             self._click_navigation(self.customer, "我的订单")
-            appointment_done = False
+            appointment_done = bool(self.artifacts.appointed_order)
             for order in self.source.orders:
                 filters = self.customer.page.locator("form.order-table-filters")
                 self.customer.type_text(
@@ -2326,6 +2326,10 @@ class Phase3Flow:
                         self.customer,
                         re.compile(rf"{re.escape(order.order_number)} 已预约.*仓库已同步"),
                         "客户预约同步成功提示",
+                    )
+                    self.customer.expect_hidden(
+                        dialog,
+                        "客户提货预约保存成功后弹窗关闭",
                     )
                     self.artifacts.appointed_order = order.order_number
                     appointment_done = True
