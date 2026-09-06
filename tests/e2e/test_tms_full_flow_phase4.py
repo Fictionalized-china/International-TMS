@@ -582,6 +582,7 @@ class Phase4SafetyTests(unittest.TestCase):
         self.assertIn('recovery_branches_used") is True', upload)
         self.assertIn("document_evidence[order_key].append(label)", upload)
         self.assertIn("except Exception as original:", signoff)
+        self.assertIn('self._open_costs(session, order.order_number, "费用")', signoff)
         self.assertIn('has_text="已完成并锁定"', signoff)
         self.assertIn("raise original", signoff)
 

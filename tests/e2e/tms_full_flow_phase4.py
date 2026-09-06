@@ -1226,6 +1226,8 @@ class Phase4Flow:
                             f"{order.order_number} {direction_title} {action_label}通过",
                         )
                     except Exception as original:
+                        self._assert_no_error_page(session)
+                        self._open_costs(session, order.order_number, "费用")
                         completed_card = session.page.locator(
                             ".module-business-section"
                         ).filter(has_text=direction_title).first.locator(
