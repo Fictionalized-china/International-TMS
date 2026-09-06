@@ -33,17 +33,32 @@ describe("system-wide peer page tab contract", () => {
     expect(documents).toContain('className="document-scope-peer-page-tabs peer-page-tabs"');
   });
 
-  it("makes page switching and the current page unmistakable", () => {
+  it("renders sibling pages as a compact left-aligned button row", () => {
     const marker = css.lastIndexOf("System-wide peer page navigation");
     const contract = marker >= 0 ? css.slice(marker) : "";
     expect(marker).toBeGreaterThan(css.lastIndexOf("System-wide form geometry contract"));
-    expect(contract).toContain('content: "页面导航｜以下为同级页面，点击名称切换";');
+    expect(contract).toContain("display: flex !important;");
+    expect(contract).toContain("justify-content: flex-start !important;");
+    expect(contract).toContain("flex: 0 0 auto !important;");
+    expect(contract).toContain("width: auto !important;");
+    expect(contract).toContain("content: none !important;");
     expect(contract).toContain(".peer-page-tabs > :is(a, button)");
     expect(contract).toContain(".peer-page-tabs > :is(.active, [aria-current=\"page\"], [aria-selected=\"true\"])");
-    expect(contract).toContain("box-shadow: inset 0 4px 0 #ff6b3d");
+    expect(contract).toContain("box-shadow: inset 0 -3px 0 #ff6b3d");
     expect(contract).toContain("background: #0b2f52 !important;");
     expect(contract).toContain("cursor: pointer;");
-    expect(contract).toContain("overflow-x: auto;");
-    expect(contract).toContain(".peer-page-tabs > input:checked + label");
+    expect(contract).toContain("flex-wrap: wrap !important;");
+  });
+
+  it("keeps tabbed dialogs at a stable size while only their content scrolls", () => {
+    const marker = css.lastIndexOf("System-wide peer page navigation");
+    const contract = marker >= 0 ? css.slice(marker) : "";
+    expect(contract).toContain(".modal-card:has(.peer-page-tabs)");
+    expect(contract).toContain("height: min(640px, calc(100dvh - 32px));");
+    expect(contract).toContain(".customer-editor-modal:has(.peer-page-tabs)");
+    expect(contract).toContain("height: min(640px, calc(100dvh - 24px));");
+    expect(contract).toContain(".customer-editor-modal .customer-editor-panel");
+    expect(contract).toContain("align-items: stretch !important;");
+    expect(contract).toContain("overflow-y: auto !important;");
   });
 });

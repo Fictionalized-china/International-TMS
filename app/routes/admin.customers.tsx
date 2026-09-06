@@ -425,7 +425,6 @@ async function runCustomerAction({ request, current, form, intent, now }: {
   }
 
   const code = valueOf(form, "code").toLowerCase(), name = valueOf(form, "name"), shortName = valueOf(form, "shortName"), partyCategory = valueOf(form, "partyCategory"), ownerId = valueOf(form, "ownerId"), notes = valueOf(form, "notes"), profile = customerDefaultProfile(form);
-  const createPortal = form.has("createPortal");
   const portalDisplayName = valueOf(form, "portalDisplayName");
   const portalEmail = valueOf(form, "portalEmail").toLowerCase();
   const portalPassword = valueOf(form, "portalPassword");
@@ -447,15 +446,13 @@ async function runCustomerAction({ request, current, form, intent, now }: {
   if (ownerId && !(await env.DB.prepare("SELECT 1 FROM memberships WHERE user_id = ? AND organization_id = ? AND status = 'active'").bind(ownerId, current.organizationId).first())) errors.ownerId = "销售负责人无效";
   const profileError = await validateCustomerDefaultProfile(profile, current.organizationId);
   if (profileError) errors.profile = profileError;
-  if (createPortal) {
-    if (portalDisplayName.length < 2) errors.portalDisplayName = "门户用户姓名至少 2 个字符";
-    const emailError = validateEmail(portalEmail);
-    if (emailError) errors.portalEmail = emailError;
-    const passwordError = validatePassword(portalPassword);
-    if (passwordError) errors.portalPassword = passwordError;
-    if (portalPassword !== portalConfirmPassword) errors.portalConfirmPassword = "两次输入的密码不一致";
-    if (!errors.portalEmail && await env.DB.prepare("SELECT id FROM users WHERE email=?").bind(portalEmail).first()) errors.portalEmail = "该邮箱已被使用";
-  }
+  if (portalDisplayName.length < 2) errors.portalDisplayName = "门户用户姓名至少 2 个字符";
+  const emailError = validateEmail(portalEmail);
+  if (emailError) errors.portalEmail = emailError;
+  const passwordError = validatePassword(portalPassword);
+  if (passwordError) errors.portalPassword = passwordError;
+  if (portalPassword !== portalConfirmPassword) errors.portalConfirmPassword = "两次输入的密码不一致";
+  if (!errors.portalEmail && await env.DB.prepare("SELECT id FROM users WHERE email=?").bind(portalEmail).first()) errors.portalEmail = "该邮箱已被使用";
   if (archiveContract) {
     if (contractTitle.length < 2) errors.contractTitle = "合同名称至少 2 个字符";
     if (!(contractAttachment instanceof File) || contractAttachment.size <= 0) errors.contractAttachment = "请选择要上传的合同文件";
@@ -467,7 +464,7 @@ async function runCustomerAction({ request, current, form, intent, now }: {
   }
   const values = {
     code, name, shortName, partyCategory, businessRoles, ownerId, notes, ...profile,
-    createPortal, portalDisplayName, portalEmail,
+    portalDisplayName, portalEmail,
     archiveContract, contractTitle, contractEffectiveAt, contractExpiresAt, contractNotes,
   };
   if (Object.keys(errors).length) return { errors, values };
@@ -475,10 +472,10 @@ async function runCustomerAction({ request, current, form, intent, now }: {
   if (!identityCode) return { formError: "暂时无法生成客户识别码，请重试", values };
   const effectiveCode = resolveCustomerCode(code, identityCode);
   const contactId = crypto.randomUUID(), addressId = crypto.randomUUID();
-  const portalUserId = createPortal ? crypto.randomUUID() : null;
-  const portalAccountId = createPortal ? crypto.randomUUID() : null;
+  const portalUserId = crypto.randomUUID();
+  const portalAccountId = crypto.randomUUID();
   const contractId = archiveContract ? crypto.randomUUID() : null;
-  const portalPasswordHash = createPortal ? await hashPassword(portalPassword) : null;
+  const portalPasswordHash = await hashPassword(portalPassword);
   const contractDataUrl = archiveContract && contractAttachment instanceof File ? await toDataUrl(contractAttachment) : null;
   try {
     await env.DB.batch([
@@ -488,12 +485,10 @@ async function runCustomerAction({ request, current, form, intent, now }: {
         .bind(contactId, id, profile.contactName, profile.contactTitle || null, profile.contactEmail || null, profile.contactPhone, now, now),
       env.DB.prepare("INSERT INTO customer_addresses(id,customer_id,type,label,country_code,state,city,address_line1,contact_name,contact_phone,is_default,created_at,updated_at) VALUES(?,?,'shipping','默认提货地',?,?,?,?,?,?,1,?,?)")
         .bind(addressId, id, profile.addressCountryCode, profile.addressState, profile.addressCity, profile.addressLine1, profile.contactName, profile.contactPhone, now, now),
-      ...(createPortal && portalUserId && portalAccountId ? [
-        env.DB.prepare("INSERT INTO users (id,email,password_hash,display_name,created_at,updated_at) VALUES (?,?,?,?,?,?)")
-          .bind(portalUserId, portalEmail, portalPasswordHash, portalDisplayName, now, now),
-        env.DB.prepare("INSERT INTO customer_portal_accounts (id,organization_id,customer_id,user_id,created_at,updated_at) VALUES (?,?,?,?,?,?)")
-          .bind(portalAccountId, current.organizationId, id, portalUserId, now, now),
-      ] : []),
+      env.DB.prepare("INSERT INTO users (id,email,password_hash,display_name,created_at,updated_at) VALUES (?,?,?,?,?,?)")
+        .bind(portalUserId, portalEmail, portalPasswordHash, portalDisplayName, now, now),
+      env.DB.prepare("INSERT INTO customer_portal_accounts (id,organization_id,customer_id,user_id,created_at,updated_at) VALUES (?,?,?,?,?,?)")
+        .bind(portalAccountId, current.organizationId, id, portalUserId, now, now),
       ...(archiveContract && contractId && contractAttachment instanceof File ? [
         env.DB.prepare("INSERT INTO customer_contracts (id,organization_id,customer_id,title,file_name,content_type,size_bytes,data_url,effective_at,expires_at,status,notes,uploaded_by_user_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,'active',?,?,?,?)")
           .bind(contractId, current.organizationId, id, contractTitle, contractAttachment.name, contractAttachment.type, contractAttachment.size, contractDataUrl, contractEffectiveAt || null, contractExpiresAt || null, contractNotes || null, current.userId, now, now),
@@ -501,7 +496,7 @@ async function runCustomerAction({ request, current, form, intent, now }: {
     ]);
   } catch { return { formError: "客户代码、识别码或门户邮箱不能重复", values }; }
   await writeAudit({ request, action: "customer.create", resourceType: "customer", resourceId: id, organizationId: current.organizationId, actorUserId: current.userId, metadata: { code: effectiveCode, identityCode, partyCategory, businessRoles } });
-  if (portalAccountId) await writeAudit({ request, action: "portal.account.create", resourceType: "customer_portal_account", resourceId: portalAccountId, organizationId: current.organizationId, actorUserId: current.userId, metadata: { customerId: id, email: portalEmail, source: "customer.create" } });
+  await writeAudit({ request, action: "portal.account.create", resourceType: "customer_portal_account", resourceId: portalAccountId, organizationId: current.organizationId, actorUserId: current.userId, metadata: { customerId: id, email: portalEmail, source: "customer.create" } });
   if (contractId) await writeAudit({ request, action: "customer.contract.upload", resourceType: "customer_contract", resourceId: contractId, organizationId: current.organizationId, actorUserId: current.userId, metadata: { customerId: id, title: contractTitle, source: "customer.create" } });
   return { success: "客户已创建", customerId: id };
 }

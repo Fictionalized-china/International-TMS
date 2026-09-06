@@ -27,8 +27,17 @@ describe("customer creation experience contract", () => {
     expect(css).toContain("max-width: none !important;");
     expect(css.slice(finalAlignment)).toContain("grid-column: span 6 !important;");
     expect(css.slice(finalAlignment)).toContain(".customer-editor-form .customer-role-dropdown[open] { grid-column: span 3 !important; }");
+    expect(css.slice(finalAlignment)).toContain("position: absolute !important;");
+    expect(css.slice(finalAlignment)).toContain("max-height: min(272px, calc(100dvh - 180px));");
     expect(editor).toContain('editing ? "field-span-3" : "field-span-6"');
     expect(editor.indexOf("{editing && <label className=\"field field-span-3\"><span>状态</span>")).toBeLessThan(editor.indexOf("<span>客户简称"));
+  });
+
+  it("dismisses the business-role picker when focus moves outside its popup", () => {
+    expect(editor).toContain('document.addEventListener("pointerdown", closeOnOutsidePointer, true)');
+    expect(editor).toContain('document.addEventListener("keydown", closeOnEscape, true)');
+    expect(editor).toContain("!dropdownRef.current?.contains(target)");
+    expect(editor).toContain("open={open}");
   });
 
   it("can create a customer from the quotation form and select the created record", () => {
@@ -40,7 +49,13 @@ describe("customer creation experience contract", () => {
   });
 
   it("returns the created customer id and can atomically create initial dossier records", () => {
-    expect(customersRoute).toContain('form.has("createPortal")');
+    expect(editor).not.toContain('name="createPortal"');
+    expect(editor).toContain('name="portalDisplayName" autoComplete="name" required');
+    expect(editor).toContain("completedRequiredTabs");
+    expect(editor).toContain("requiredIncomplete");
+    expect(editor).toContain('input[required], select[required], textarea[required]');
+    expect(customersRoute).not.toContain('form.has("createPortal")');
+    expect(customersRoute).toContain("const portalUserId = crypto.randomUUID()");
     expect(customersRoute).toContain('form.has("archiveContract")');
     expect(customersRoute).toContain("customer_portal_accounts");
     expect(customersRoute).toContain("customer_contracts");

@@ -62,6 +62,109 @@ def clone(row: sqlite3.Row, **changes) -> dict:
     return data
 
 
+def ensure_workflow_snapshot(
+    connection: sqlite3.Connection,
+    order_id: str,
+) -> None:
+    """Freeze the configured workflow exactly as a normal order creation does."""
+    instance = first(
+        connection,
+        "SELECT id,workflow_id,current_step_key,started_at,updated_at FROM workflow_instances WHERE order_id=?",
+        (order_id,),
+    )
+    now = iso()
+    connection.execute(
+        """INSERT OR IGNORE INTO workflow_instance_step_states(
+             id,instance_id,workflow_id,step_id,step_key,step_name,sort_order,status,
+             started_at,completed_at,updated_at
+           )
+           SELECT lower(hex(randomblob(16))),?,?,s.id,s.step_key,s.name,s.sort_order,
+             CASE
+               WHEN s.sort_order<current.sort_order THEN 'completed'
+               WHEN s.step_key=? THEN 'active'
+               ELSE 'pending'
+             END,
+             CASE WHEN s.sort_order<=current.sort_order THEN ? ELSE NULL END,
+             CASE WHEN s.sort_order<current.sort_order THEN ? ELSE NULL END,
+             ?
+           FROM workflow_steps s
+           JOIN workflow_steps current
+             ON current.workflow_id=s.workflow_id AND current.step_key=? AND current.is_active=1
+           WHERE s.workflow_id=? AND s.is_active=1""",
+        (
+            instance["id"], instance["workflow_id"], instance["current_step_key"],
+            instance["started_at"], instance["updated_at"], now,
+            instance["current_step_key"], instance["workflow_id"],
+        ),
+    )
+    connection.execute(
+        """INSERT OR IGNORE INTO workflow_instance_module_states(
+             id,instance_step_state_id,step_module_id,module_code,display_name,sort_order,
+             is_required,status,responsibility_position_code,completion_mode,updated_at
+           )
+           SELECT lower(hex(randomblob(16))),ss.id,m.id,m.module_code,m.display_name,m.sort_order,
+             m.is_required,
+             CASE ss.status WHEN 'completed' THEN 'completed' WHEN 'active' THEN 'active' ELSE 'pending' END,
+             m.responsibility_position_code,m.completion_mode,?
+           FROM workflow_instance_step_states ss
+           JOIN workflow_step_modules m
+             ON m.workflow_id=ss.workflow_id AND m.step_id=ss.step_id AND m.is_active=1
+           WHERE ss.instance_id=?""",
+        (now, instance["id"]),
+    )
+    connection.execute(
+        """INSERT OR IGNORE INTO workflow_instance_task_states(
+             id,instance_module_state_id,module_task_id,task_key,name,task_type,sort_order,
+             is_required,status,responsibility_position_code,instructions,completed_at,updated_at
+           )
+           SELECT lower(hex(randomblob(16))),ms.id,t.id,t.task_key,t.name,t.task_type,t.sort_order,
+             t.is_required,
+             CASE ss.status WHEN 'completed' THEN 'completed' WHEN 'active' THEN 'active' ELSE 'pending' END,
+             COALESCE(t.responsibility_position_code,ms.responsibility_position_code),t.instructions,
+             CASE WHEN ss.status='completed' THEN ? ELSE NULL END,?
+           FROM workflow_instance_module_states ms
+           JOIN workflow_instance_step_states ss ON ss.id=ms.instance_step_state_id
+           JOIN workflow_module_tasks t
+             ON t.workflow_id=ss.workflow_id AND t.step_module_id=ms.step_module_id AND t.is_active=1
+           WHERE ss.instance_id=?""",
+        (now, now, instance["id"]),
+    )
+    connection.execute(
+        """UPDATE workflow_instance_task_states
+           SET assignee_user_id=(
+             SELECT omi.assignee_user_id
+             FROM workflow_instance_module_states ms
+             JOIN workflow_instance_step_states ss ON ss.id=ms.instance_step_state_id
+             JOIN workflow_instances wi ON wi.id=ss.instance_id
+             JOIN order_module_instances omi
+               ON omi.organization_id=wi.organization_id
+              AND omi.order_id=wi.order_id
+              AND omi.module_code=ms.module_code
+              AND omi.enabled=1
+             WHERE ms.id=workflow_instance_task_states.instance_module_state_id
+           )
+           WHERE instance_module_state_id IN (
+             SELECT ms.id FROM workflow_instance_module_states ms
+             JOIN workflow_instance_step_states ss ON ss.id=ms.instance_step_state_id
+             WHERE ss.instance_id=?
+           )""",
+        (instance["id"],),
+    )
+    connection.execute(
+        """INSERT OR IGNORE INTO workflow_instance_fields(
+             id,instance_id,workflow_id,step_key,module_code,field_key,label,field_type,
+             is_required,is_active,sort_order,options_text,help_text,created_at
+           )
+           SELECT lower(hex(randomblob(16))),?,f.workflow_id,s.step_key,
+             COALESCE(f.module_code,'consignment'),f.field_key,f.label,f.field_type,
+             f.is_required,f.is_active,f.sort_order,f.options_text,f.help_text,?
+           FROM workflow_step_fields f
+           JOIN workflow_steps s ON s.id=f.step_id AND s.workflow_id=f.workflow_id
+           WHERE f.workflow_id=?""",
+        (instance["id"], now, instance["workflow_id"]),
+    )
+
+
 def ensure_warehouse_received(
     connection: sqlite3.Connection,
     order: sqlite3.Row,
@@ -383,6 +486,7 @@ def main() -> None:
                 domestic_warehouse,
                 admin["id"],
             )
+            ensure_workflow_snapshot(connection, order["id"])
             repaired.append({
                 "订单号": order["order_number"],
                 "货物": order["cargo_description"],
@@ -609,6 +713,7 @@ def main() -> None:
             domestic_warehouse,
             admin["id"],
         )
+        ensure_workflow_snapshot(connection, order_id)
         created.append({
             "订单号": order_number, "报价号": quote_number, "运单号": shipment_number,
             "货物": cargo_name, "重量KG": weight, "体积CBM": volume,

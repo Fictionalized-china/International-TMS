@@ -699,6 +699,11 @@ class Phase1Flow:
                 self.identity.customer_short_name,
                 "客户简称",
             )
+            customer_tabs = dialog.get_by_role("tablist", name="客户资料分页")
+            self.sales.click(
+                customer_tabs.get_by_role("tab", name=re.compile(r"^联系与提货")),
+                "切换到联系与提货",
+            )
             self.sales.type_text(
                 dialog.locator('input[name="contactName"]'),
                 self.identity.contact_name,
@@ -735,6 +740,33 @@ class Phase1Flow:
                 f"{self.origin_city} UI 全流程验收园区 {self.attempt.attempt} 号",
                 "默认提货详细地址",
             )
+            self.sales.click(
+                customer_tabs.get_by_role("tab", name=re.compile(r"^门户账号")),
+                "切换到门户账号",
+            )
+            self.sales.type_text(
+                dialog.locator('input[name="portalDisplayName"]'),
+                self.identity.portal_display_name,
+                "客户门户用户姓名",
+            )
+            self.sales.type_text(
+                dialog.locator('input[name="portalEmail"]'),
+                self.identity.portal_email,
+                "客户门户登录邮箱",
+                sensitive=True,
+            )
+            self.sales.type_text(
+                dialog.locator('input[name="portalPassword"]'),
+                self.credentials["customer"].password,
+                "客户门户初始密码",
+                sensitive=True,
+            )
+            self.sales.type_text(
+                dialog.locator('input[name="portalConfirmPassword"]'),
+                self.credentials["customer"].password,
+                "确认客户门户初始密码",
+                sensitive=True,
+            )
             self.sales.screenshot("customer-before-create")
             self.sales.press(
                 "Enter",
@@ -747,50 +779,10 @@ class Phase1Flow:
                 "row"
             ).filter(has_text=self.identity.customer_name)
             self.sales.expect_visible(row, "新客户台账行")
-            self.sales.click(row.get_by_role("button", name="客户档案"), "打开新客户档案")
-            dossier = self.sales.page.get_by_role(
-                "dialog", name=re.compile(rf"客户档案.*{re.escape(self.identity.customer_name)}")
-            )
-            self.sales.expect_visible(dossier, "新客户档案")
-            self.sales.click(dossier.get_by_role("button", name="开通门户"), "开通客户门户")
-            portal_dialog = self.sales.page.get_by_role(
-                "dialog", name=re.compile(rf"开通客户门户.*{re.escape(self.identity.customer_name)}")
-            )
-            self.sales.expect_visible(portal_dialog, "开通客户门户弹窗")
-            self.sales.type_text(
-                portal_dialog.locator('input[name="displayName"]'),
-                self.identity.portal_display_name,
-                "客户门户用户姓名",
-            )
-            self.sales.type_text(
-                portal_dialog.locator('input[name="email"]'),
-                self.identity.portal_email,
-                "客户门户登录邮箱",
-                sensitive=True,
-            )
-            self.sales.type_text(
-                portal_dialog.locator('input[name="password"]'),
-                self.credentials["customer"].password,
-                "客户门户初始密码",
-                sensitive=True,
-            )
-            self.sales.press(
-                "Enter",
-                "确认开通客户门户",
-                locator=portal_dialog.get_by_role("button", name="确认开通门户"),
-            )
-            self._expect_success(
-                self.sales,
-                "客户门户账号已开通",
-                "门户账号开通成功提示",
-            )
             self.harness.journal.register_entity(
                 "customer", "primary", self.identity.customer_name
             )
             observation.observe("客户档案与门户账号创建并绑定完成", gate_passed=True)
-            close_dossier = dossier.get_by_role("button", name="关闭")
-            if self._is_visible(close_dossier):
-                self.sales.click(close_dossier, "关闭新客户档案")
 
         with self.customer.step(
             "新客户从可见门户登录页验证绑定范围",

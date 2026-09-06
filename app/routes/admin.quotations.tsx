@@ -1079,6 +1079,7 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
   const cargoFieldsVisible = policies.cargoDescription.isActive || policies.notes.isActive ||
     policies.pieces.isActive || policies.weight.isActive || policies.length.isActive ||
     policies.width.isActive || policies.height.isActive || policies.volume.isActive;
+  const cargoNarrativeVisible = policies.cargoDescription.isActive || policies.notes.isActive;
   const cargoMetricsVisible = policies.pieces.isActive || policies.weight.isActive ||
     policies.length.isActive || policies.width.isActive || policies.height.isActive || policies.volume.isActive;
   const volumeCanAutoCalculate = policies.pieces.isActive && policies.length.isActive &&
@@ -1111,9 +1112,8 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
   return <Form method="post" encType="multipart/form-data" className="prototype-quote-form" data-keyboard-submit data-enter-flow>
     <input type="hidden" name="intent" value="create"/>
     {formError && <div ref={errorSummaryRef} className="alert error" role="alert" tabIndex={-1}><strong>报价尚未保存</strong><span>{formError}</span><small>已填写内容仍保留在当前弹窗，请按提示修改后重试。</small></div>}
-    <div className="quote-form-note"><b>第 1 步 · 询价报价</b>　选择整车或拼车后加载对应流程；首次保存即锁定所选版本，后续发布新版本不会改动本报价。</div>
     <div className="quote-ledger">
-    <QuoteLedgerSection className="quote-plan-section" title="客户与运输方案" note="报价确认后不再重复创建订单">
+    <QuoteLedgerSection className="quote-plan-section" title="客户与运输方案">
       <div className="quote-field-grid quote-plan-grid">
         <Field label="客户" className="quote-customer-picker-field"><div className="quote-customer-picker-row"><select className="control" name="customerId" value={customerId} onChange={(event) => selectCustomer(event.target.value)} required><option value="">请选择客户</option>{loaderData.customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name}</option>)}</select>{canCreateCustomer && <Modal title="新增客户" triggerLabel="＋ 新增客户" triggerClassName="secondary" size="xwide" dialogClassName="customer-editor-modal" closeSignal={createdCustomerId || undefined} guardFormChanges><CustomerEditorForm intent="customer" owners={loaderData.users} countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} busy={customerFetcher.state !== "idle"} values={customerFetcher.data?.values} errors={customerFetcher.data?.errors} formError={customerFetcher.data?.formError} formComponent={customerFetcher.Form} action="/admin/customers"/></Modal>}</div>{createdCustomerId && <small className="quote-customer-created">新客户已创建并自动选中</small>}</Field>
         {policies.contactName.isActive && <Field label="客户联系人"><ContactCombobox name="customerContactName" value={customerContactName} contacts={selectedCustomerContacts} mode="name" required={policies.contactName.isRequired} onChange={(value, contact) => { setCustomerContactName(value); if (contact?.phone) setCustomerContactPhone(contact.phone); }} /></Field>}
@@ -1125,19 +1125,16 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
         <Field label="工作流版本"><select className="control" name="workflowDefinitionId" value={workflowDefinitionId} onChange={(event) => setWorkflowDefinitionId(event.target.value)} disabled={!roadLoadType} required><option value="">{!roadLoadType ? "请先选择订单类型" : compatibleWorkflows.length ? "请选择工作流版本" : "当前类型暂无可用工作流"}</option>{compatibleWorkflows.map((workflow) => <option key={workflow.id} value={workflow.id}>{workflow.name} · v{workflow.version_number}{workflow.lifecycle_status === "published" ? " · 当前发布" : " · 历史版本"}</option>)}</select></Field>
       </div>
     </QuoteLedgerSection>
-    <QuoteLedgerSection className="quote-workflow-fields-section" title="工作流配置项" note={selectedWorkflow ? `${selectedWorkflow.name} v${selectedWorkflow.version_number} · 随订单类型和版本切换` : roadLoadType ? "请先选择工作流版本" : "请先选择订单类型"}>
-      {!selectedWorkflow
-        ? <div className="quote-workflow-empty">选择订单类型后，系统将自动载入该类型当前发布的工作流。</div>
-        : selectedCustomWorkflowFields.length
-          ? <QuotationWorkflowFieldInputs fields={selectedCustomWorkflowFields} values={[]} customers={loaderData.customers} warehouses={loaderData.warehouses}/>
-          : <div className="quote-workflow-empty">当前版本没有额外自定义项；下方标准报价字段的显示与必填状态已由本工作流实时控制。</div>}
-    </QuoteLedgerSection>
-    {routeFieldsVisible && <QuoteLedgerSection className="quote-route-section" title="运输路线" note="地区按国家 / 地区 → 省 / 州 → 城市逐级选择">
-      <div className="quote-route-matrix" role="group" aria-label="报价运输路线">
+    {selectedWorkflow && selectedCustomWorkflowFields.length > 0 && <QuoteLedgerSection className="quote-workflow-fields-section" title="工作流配置项" note={`${selectedWorkflow.name} v${selectedWorkflow.version_number}`}>
+      <QuotationWorkflowFieldInputs fields={selectedCustomWorkflowFields} values={[]} customers={loaderData.customers} warehouses={loaderData.warehouses}/>
+    </QuoteLedgerSection>}
+    {routeFieldsVisible && <QuoteLedgerSection className="quote-route-section" title="运输路线与货物">
+      <div className={`quote-route-matrix ${cargoNarrativeVisible ? "with-cargo" : ""}`} role="group" aria-label="报价运输路线与货物">
         <div className="quote-route-matrix-row quote-route-matrix-head" aria-hidden="true">
           <span>填写项目</span>
           <b>起运信息</b>
           <b>目的信息</b>
+          {cargoNarrativeVisible && <b>货物描述</b>}
         </div>
         <div className="quote-route-matrix-row">
           <span className="quote-route-matrix-label">地区</span>
@@ -1147,6 +1144,11 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
           <div className="quote-route-matrix-cell" data-column="目的信息">{policies.destinationRegion.isActive
             ? <GeoCascadeFields prefix="destination" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} required={policies.destinationRegion.isRequired} />
             : <span className="muted">工作流已隐藏</span>}</div>
+          {cargoNarrativeVisible && <div className="quote-route-matrix-cell quote-route-cargo-cell" data-column="货物描述">
+            {policies.cargoDescription.isActive
+              ? <Field label="货物描述"><textarea className="control textarea" name="cargoDescription" rows={3} placeholder="填写货物名称、品类、材质、用途等说明" required={policies.cargoDescription.isRequired} /></Field>
+              : <span className="muted">工作流已隐藏</span>}
+          </div>}
         </div>
         <div className="quote-route-matrix-row">
           <span className="quote-route-matrix-label">交接地点</span>
@@ -1157,10 +1159,34 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
             {policies.destinationWarehouse.isActive && <Field label="目的仓库" className="quote-route-warehouse"><select className="control quote-warehouse-select" name="destinationWarehouseId" required={policies.destinationWarehouse.isRequired}><option value="">请选择境外目的仓</option>{loaderData.warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></Field>}
             {policies.destinationNote.isActive && <Field label="目的地备注" className="quote-route-note"><textarea className="control textarea" name="destinationWarehouseNote" rows={2} required={policies.destinationNote.isRequired} /></Field>}
           </div>
+          {cargoNarrativeVisible && <div className="quote-route-matrix-cell quote-route-cargo-cell" data-column="报价备注">
+            {policies.notes.isActive
+              ? <Field label="报价备注"><textarea className="control textarea" name="notes" rows={3} placeholder="填写报价范围、特殊约定或其他说明" required={policies.notes.isRequired} /></Field>
+              : <span className="muted">无额外报价备注</span>}
+          </div>}
         </div>
       </div>
+      {cargoMetricsVisible && <div className="quote-cargo-grid quote-route-cargo-metrics">
+        <div className="table-wrap quote-cargo-metrics-table"><table className="inline-table"><thead><tr>
+          {policies.pieces.isActive && <th>预计件数</th>}
+          {policies.weight.isActive && <th>预计重量 KG</th>}
+          {policies.length.isActive && <th>预计长度 CM</th>}
+          {policies.width.isActive && <th>预计宽度 CM</th>}
+          {policies.height.isActive && <th>预计高度 CM</th>}
+          {policies.volume.isActive && <th>预计体积 CBM{volumeCanAutoCalculate ? "（自动计算）" : ""}</th>}
+        </tr></thead><tbody><tr>
+          {policies.pieces.isActive && <td><input aria-label="预计件数" className="control" name="pieces" type="number" min="1" max={MAX_QUOTE_AUTO_PACKAGES} step="1" value={pieces} onChange={(event) => setPieces(event.target.value)} required={policies.pieces.isRequired}/></td>}
+          {policies.weight.isActive && <td><input aria-label="预计重量 KG" className="control" name="weight" type="number" min="0.001" step="0.001" required={policies.weight.isRequired}/></td>}
+          {policies.length.isActive && <td><input aria-label="预计长度 CM" className="control" name="length" type="number" min="0.01" step="0.01" value={lengthCm} onChange={(event) => setLengthCm(event.target.value)} required={policies.length.isRequired}/></td>}
+          {policies.width.isActive && <td><input aria-label="预计宽度 CM" className="control" name="width" type="number" min="0.01" step="0.01" value={widthCm} onChange={(event) => setWidthCm(event.target.value)} required={policies.width.isRequired}/></td>}
+          {policies.height.isActive && <td><input aria-label="预计高度 CM" className="control" name="height" type="number" min="0.01" step="0.01" value={heightCm} onChange={(event) => setHeightCm(event.target.value)} required={policies.height.isRequired}/></td>}
+          {policies.volume.isActive && <td>{volumeCanAutoCalculate
+            ? <input aria-label="预计体积 CBM" className="control quote-calculated-volume" name="volume" type="number" min="0.0001" step="0.0001" value={calculatedVolume} readOnly required={policies.volume.isRequired}/>
+            : <input aria-label="预计体积 CBM" className="control" name="volume" type="number" min="0.0001" step="0.0001" required={policies.volume.isRequired}/>}</td>}
+        </tr></tbody></table></div>
+      </div>}
     </QuoteLedgerSection>}
-    {cargoFieldsVisible && <QuoteLedgerSection title="货物预估与报价说明" note="货物数据为预估值，仓库收货后登记实际数据">
+    {!routeFieldsVisible && cargoFieldsVisible && <QuoteLedgerSection title="货物预估与报价说明">
       <div className="quote-description-grid">
         {policies.cargoDescription.isActive && <Field label="货物描述"><textarea className="control textarea" name="cargoDescription" rows={3} placeholder="填写货物名称、品类、材质、用途等说明" required={policies.cargoDescription.isRequired} /></Field>}
         {policies.notes.isActive && <Field label="报价备注"><textarea className="control textarea" name="notes" rows={3} placeholder="填写报价范围、特殊约定或其他说明" required={policies.notes.isRequired} /></Field>}
@@ -1187,7 +1213,6 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
     </QuoteLedgerSection>}
     {(policies.charges.isActive || policies.validUntil.isActive) && <QuoteLedgerSection
       title="客户应收费用"
-      note="接受后直接继承到订单结算"
       action={policies.charges.isActive ? <button className="btn quote-charge-add" type="button" onClick={() => setCharges((rows) => [...rows, { name: transportChargeNameOptions[0]?.[0] || "国际汽运费", quantity: 1, unitPrice: 0, notes: "" }])}>＋ 添加费用</button> : undefined}
     >
       {policies.charges.isActive && <><div className="table-wrap quote-charge-table-wrap"><table className="inline-table quote-charge-table"><thead><tr><th>费用名称</th><th>数量</th><th>单价</th><th>金额</th><th>备注</th><th>操作</th></tr></thead><tbody>{charges.map((charge, index) => <tr key={index}><td><select className="control" name="chargeName" value={charge.name} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, name: event.target.value } : row))} required={policies.charges.isRequired}>{transportChargeNameOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td><td><input className="control" name="chargeQuantity" type="number" min="0.01" step="0.01" value={charge.quantity} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: Number(event.target.value) } : row))} required={policies.charges.isRequired}/></td><td><input className="control" name="chargeUnitPrice" type="number" min="0.01" step="0.01" value={charge.unitPrice} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, unitPrice: Number(event.target.value) } : row))} required={policies.charges.isRequired}/></td><td><b>{(charge.quantity * charge.unitPrice).toLocaleString()}</b></td><td><input className="control" name="chargeNotes" value={charge.notes} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, notes: event.target.value } : row))}/></td><td><button className="btn danger" type="button" disabled={charges.length === 1} onClick={() => setCharges((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>删除</button></td></tr>)}</tbody></table></div>
@@ -1373,8 +1398,8 @@ function parseStoredMultipleValues(value: string | null | undefined) {
   }
 }
 
-function QuoteLedgerSection({ title, note, action, className = "", children }: { title: string; note: string; action?: React.ReactNode; className?: string; children: React.ReactNode }) {
-  return <section className={`quote-ledger-section ${className}`}><div className="quote-ledger-heading"><b>{title}</b><div className="quote-section-heading"><span>{note}</span>{action}</div></div><div className="quote-ledger-body">{children}</div></section>;
+function QuoteLedgerSection({ title, note, action, className = "", children }: { title: string; note?: string; action?: React.ReactNode; className?: string; children: React.ReactNode }) {
+  return <section className={`quote-ledger-section ${className}`}><div className="quote-ledger-heading"><b>{title}</b>{(note || action) && <div className="quote-section-heading">{note && <span>{note}</span>}{action}</div>}</div><div className="quote-ledger-body">{children}</div></section>;
 }
 
 function Field({ label, className = "", children }: { label: string; className?: string; children: React.ReactNode }) {

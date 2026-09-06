@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ElementType, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type ElementType, type FormEvent } from "react";
 import { Form } from "react-router";
 import {
   customerBusinessRoleLabel,
@@ -46,7 +46,6 @@ export type CustomerEditorValues = {
   addressState?: string;
   addressCity?: string;
   addressLine1?: string;
-  createPortal?: boolean;
   portalDisplayName?: string;
   portalEmail?: string;
   archiveContract?: boolean;
@@ -104,8 +103,10 @@ export function CustomerEditorForm({
   const editing = intent === "customer_update";
   const FormRoot = formComponent ?? Form;
   const roles = values?.businessRoles ?? selectedRoles;
+  const formRef = useRef<HTMLFormElement>(null);
+  const completionFrameRef = useRef<number | null>(null);
   const [activeTab, setActiveTab] = useState<CustomerEditorTab>(() => tabForErrors(errors));
-  const [createPortal, setCreatePortal] = useState(Boolean(values?.createPortal));
+  const [completedRequiredTabs, setCompletedRequiredTabs] = useState<Partial<Record<CustomerEditorTab, boolean>>>({});
   const [archiveContract, setArchiveContract] = useState(Boolean(values?.archiveContract));
   const errorFields = Object.keys(errors ?? {});
   const errorSummary = formError || (errorFields.length
@@ -123,12 +124,45 @@ export function CustomerEditorForm({
     return () => window.cancelAnimationFrame(frame);
   }, [errorSummary, errors]);
 
-  const tabs: { id: CustomerEditorTab; label: string; hint: string }[] = [
-    { id: "profile", label: "基本资料", hint: "必填" },
-    { id: "operations", label: "联系与提货", hint: "必填" },
+  const scheduleTabCompletionCheck = useCallback(() => {
+    if (typeof window === "undefined") return;
+    if (completionFrameRef.current !== null) window.cancelAnimationFrame(completionFrameRef.current);
+    completionFrameRef.current = window.requestAnimationFrame(() => {
+      completionFrameRef.current = null;
+      const form = formRef.current;
+      if (!form) return;
+      const next: Partial<Record<CustomerEditorTab, boolean>> = {};
+      for (const tabId of ["profile", "operations", "portal"] as const) {
+        const panel = form.querySelector<HTMLElement>(`[data-customer-tab="${tabId}"]`);
+        if (!panel) continue;
+        const requiredControls = Array.from(
+          panel.querySelectorAll("input[required], select[required], textarea[required]"),
+        ) as unknown as Array<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>;
+        const nativeFieldsComplete = requiredControls.every((control) => control.disabled || control.validity.valid);
+        const compositeFieldsComplete = !panel.querySelector('[aria-required="true"][aria-invalid="true"]');
+        next[tabId] = nativeFieldsComplete && compositeFieldsComplete;
+      }
+      setCompletedRequiredTabs((current) => (
+        current.profile === next.profile && current.operations === next.operations && current.portal === next.portal
+          ? current
+          : next
+      ));
+    });
+  }, []);
+
+  useEffect(() => {
+    scheduleTabCompletionCheck();
+    return () => {
+      if (completionFrameRef.current !== null) window.cancelAnimationFrame(completionFrameRef.current);
+    };
+  }, [customer, errors, scheduleTabCompletionCheck, values]);
+
+  const tabs: { id: CustomerEditorTab; label: string; required: boolean }[] = [
+    { id: "profile", label: "基本资料", required: true },
+    { id: "operations", label: "联系与提货", required: true },
     ...(!editing ? [
-      { id: "portal" as const, label: "门户账号", hint: "选填" },
-      { id: "contract" as const, label: "合同归档", hint: "选填" },
+      { id: "portal" as const, label: "门户账号", required: true },
+      { id: "contract" as const, label: "合同归档", required: false },
     ] : []),
   ];
 
@@ -149,6 +183,7 @@ export function CustomerEditorForm({
   };
 
   return <FormRoot
+    ref={formRef}
     method="post"
     action={action}
     encType="multipart/form-data"
@@ -156,22 +191,29 @@ export function CustomerEditorForm({
     data-enter-flow
     noValidate
     onSubmitCapture={revealInvalidPanel}
+    onInputCapture={scheduleTabCompletionCheck}
+    onChangeCapture={scheduleTabCompletionCheck}
+    onClickCapture={scheduleTabCompletionCheck}
   >
     <input type="hidden" name="intent" value={intent} />
     {customer && <input type="hidden" name="customerId" value={customer.id} />}
     {errorSummary && <div ref={errorSummaryRef} className="alert error" role="alert" tabIndex={-1}><strong>客户资料尚未保存</strong><span>{errorSummary}</span><small>已填写内容仍保留，请按提示修改后重试。</small></div>}
 
     <div className={`customer-editor-tabs peer-page-tabs columns-${tabs.length}`} role="tablist" aria-label="客户资料分页">
-      {tabs.map((tab) => <button
-        key={tab.id}
-        type="button"
-        role="tab"
-        id={`customer-editor-tab-${tab.id}`}
-        aria-selected={activeTab === tab.id}
-        aria-controls={`customer-editor-panel-${tab.id}`}
-        className={activeTab === tab.id ? "active" : ""}
-        onClick={() => setActiveTab(tab.id)}
-      ><span>{tab.label}</span><small>{tab.hint}</small></button>)}
+      {tabs.map((tab) => {
+        const requiredIncomplete = tab.required && !completedRequiredTabs[tab.id];
+        return <button
+          key={tab.id}
+          type="button"
+          role="tab"
+          id={`customer-editor-tab-${tab.id}`}
+          aria-label={`${tab.label}，${tab.required ? (requiredIncomplete ? "存在未完成必填项" : "必填项已完成") : "选填"}`}
+          aria-selected={activeTab === tab.id}
+          aria-controls={`customer-editor-panel-${tab.id}`}
+          className={activeTab === tab.id ? "active" : ""}
+          onClick={() => setActiveTab(tab.id)}
+        ><span>{tab.label}</span>{requiredIncomplete ? <small className="required-mark" aria-hidden="true">*</small> : !tab.required ? <small>选填</small> : null}</button>;
+      })}
     </div>
 
     <section
@@ -231,13 +273,12 @@ export function CustomerEditorForm({
       data-customer-tab="portal"
       hidden={activeTab !== "portal"}
     >
-      <div className="customer-form-section-title"><strong>客户门户账号</strong><span>可稍后在客户档案中开通</span></div>
+      <div className="customer-form-section-title"><strong>客户门户账号</strong><span>创建客户时同步开通</span></div>
       <div className="customer-form-grid">
-        <label className="check-field span-all customer-addon-toggle"><input name="createPortal" type="checkbox" checked={createPortal} onChange={(event) => setCreatePortal(event.target.checked)}/><span><b>创建客户时同步开通门户</b><small>客户可确认报价、下载唛头并接收自提提醒</small></span></label>
-        <label className="field field-span-3"><span>用户姓名</span><input name="portalDisplayName" autoComplete="name" required={createPortal} disabled={!createPortal} maxLength={80} defaultValue={values?.portalDisplayName ?? ""}/>{errors?.portalDisplayName && <small className="field-error">{errors.portalDisplayName}</small>}</label>
-        <label className="field field-span-3"><span>登录邮箱</span><input name="portalEmail" type="email" autoComplete="email" required={createPortal} disabled={!createPortal} maxLength={254} defaultValue={values?.portalEmail ?? ""}/>{errors?.portalEmail && <small className="field-error">{errors.portalEmail}</small>}</label>
-        <label className="field field-span-3"><span>初始密码</span><input name="portalPassword" type="password" autoComplete="new-password" required={createPortal} disabled={!createPortal} minLength={12} maxLength={128}/>{errors?.portalPassword && <small className="field-error">{errors.portalPassword}</small>}</label>
-        <label className="field field-span-3"><span>确认密码</span><input name="portalConfirmPassword" type="password" autoComplete="new-password" required={createPortal} disabled={!createPortal} minLength={12} maxLength={128}/>{errors?.portalConfirmPassword && <small className="field-error">{errors.portalConfirmPassword}</small>}</label>
+        <label className="field field-span-3"><span>用户姓名</span><input name="portalDisplayName" autoComplete="name" required maxLength={80} defaultValue={values?.portalDisplayName ?? ""}/>{errors?.portalDisplayName && <small className="field-error">{errors.portalDisplayName}</small>}</label>
+        <label className="field field-span-3"><span>登录邮箱</span><input name="portalEmail" type="email" autoComplete="email" required maxLength={254} defaultValue={values?.portalEmail ?? ""}/>{errors?.portalEmail && <small className="field-error">{errors.portalEmail}</small>}</label>
+        <label className="field field-span-3"><span>初始密码</span><input name="portalPassword" type="password" autoComplete="new-password" required minLength={12} maxLength={128}/>{errors?.portalPassword && <small className="field-error">{errors.portalPassword}</small>}</label>
+        <label className="field field-span-3"><span>确认密码</span><input name="portalConfirmPassword" type="password" autoComplete="new-password" required minLength={12} maxLength={128}/>{errors?.portalConfirmPassword && <small className="field-error">{errors.portalConfirmPassword}</small>}</label>
       </div>
     </section>}
 
@@ -260,15 +301,41 @@ export function CustomerEditorForm({
       </div>
     </section>}
 
-    <div className="customer-form-actions"><span>{editing ? "保存后，报价和订单会读取最新的默认联系与提货资料。" : "一次保存客户、默认联系人和默认提货地；门户及合同按需同步创建。"}</span><button className="primary" disabled={busy}>{editing ? "确认保存客户信息" : "确认创建客户"}</button></div>
+    <div className="customer-form-actions"><span>{editing ? "保存后，报价和订单会读取最新的默认联系与提货资料。" : "一次保存客户、默认联系人、默认提货地和门户账号；合同按需同步归档。"}</span><button className="primary" disabled={busy}>{editing ? "确认保存客户信息" : "确认创建客户"}</button></div>
   </FormRoot>;
 }
 
 function CustomerBusinessRolePicker({ selected = [], error }: { selected?: CustomerBusinessRoleCode[]; error?: string }) {
   const [checkedRoles, setCheckedRoles] = useState<CustomerBusinessRoleCode[]>(selected);
+  const [open, setOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDetailsElement>(null);
   const selectedSet = new Set(checkedRoles);
   const missingRequiredRole = checkedRoles.length === 0;
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && !dropdownRef.current?.contains(target)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setOpen(false);
+      dropdownRef.current?.querySelector<HTMLElement>("summary")?.focus();
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer, true);
+    document.addEventListener("keydown", closeOnEscape, true);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer, true);
+      document.removeEventListener("keydown", closeOnEscape, true);
+    };
+  }, [open]);
+
   return <details
+    ref={dropdownRef}
+    open={open}
+    onToggle={(event) => setOpen(event.currentTarget.open)}
     className={`customer-role-dropdown field-span-3 ${missingRequiredRole ? "is-missing-required" : "is-complete"}${error ? " has-error" : ""}`}
     aria-required="true"
     aria-invalid={missingRequiredRole || Boolean(error)}

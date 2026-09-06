@@ -30387,47 +30387,55 @@ html[data-motion="off"] *::after {
 }
 .customer-editor-form .customer-role-dropdown[open] { grid-column: span 3 !important; }
 .customer-editor-form .customer-role-drawer {
-  position: static !important;
-  width: 100% !important;
+  position: absolute !important;
+  z-index: 80;
+  top: calc(100% + 4px) !important;
+  right: 0 !important;
+  left: auto !important;
+  width: min(480px, calc(100vw - 64px)) !important;
   max-width: none !important;
-  margin-top: 4px;
+  max-height: min(272px, calc(100dvh - 180px));
+  margin: 0;
+  overflow-y: auto;
+  background: #fff;
+  box-shadow: 0 10px 28px rgba(13, 38, 59, .2);
 }
 
-/* System-wide peer page navigation: always explain that the row switches sibling pages. */
+/* System-wide peer page navigation: compact left-aligned buttons, never table-like cells. */
 .peer-page-tabs {
   position: relative !important;
+  display: flex !important;
+  flex-wrap: wrap !important;
+  align-items: stretch !important;
+  justify-content: flex-start !important;
+  gap: 8px !important;
   min-width: 0;
-  padding-top: 35px !important;
-  overflow-x: auto;
-  overflow-y: hidden;
-  border: 1px solid #c5d3df !important;
-  border-radius: 5px !important;
-  background: #fff !important;
-  isolation: isolate;
+  padding: 0 !important;
+  overflow: visible !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  isolation: auto;
 }
 
 .peer-page-tabs::before {
-  content: "页面导航｜以下为同级页面，点击名称切换";
-  position: absolute;
-  z-index: 3;
-  top: 0;
-  right: 0;
-  left: 0;
-  height: 34px;
-  padding: 0 10px;
-  display: flex;
-  align-items: center;
-  color: #294861;
-  border-bottom: 1px solid #c5d3df;
-  background: #eaf1f7;
-  font-size: 12px;
-  font-weight: 800;
-  letter-spacing: .04em;
-  pointer-events: none;
+  content: none !important;
+  display: none !important;
 }
 
 .peer-page-tabs > :is(a, button) {
   position: relative;
+  flex: 0 0 auto !important;
+  width: auto !important;
+  min-width: 132px;
+  max-width: 100%;
+  min-height: 40px;
+  padding: 7px 14px !important;
+  color: #294861 !important;
+  border: 1px solid #c5d3df !important;
+  border-radius: 4px !important;
+  background: #fff !important;
+  text-decoration: none;
   cursor: pointer;
   transition: color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
 }
@@ -30442,7 +30450,7 @@ html[data-motion="off"] *::after {
   background: #0b2f52 !important;
   outline: 2px solid #173f63;
   outline-offset: -2px;
-  box-shadow: inset 0 4px 0 #ff6b3d !important;
+  box-shadow: inset 0 -3px 0 #ff6b3d !important;
 }
 
 .peer-page-tabs > :is(a, button):focus-visible {
@@ -30451,21 +30459,172 @@ html[data-motion="off"] *::after {
   outline-offset: -3px !important;
 }
 
-.peer-page-tabs > input:checked + label {
-  z-index: 2;
-  outline: 2px solid #173f63;
-  outline-offset: -2px;
-  box-shadow: inset 0 4px 0 #ff6b3d !important;
-}
-
 .document-scope-peer-page-tabs {
-  width: min(100%, 420px);
+  width: auto;
 }
 
 .document-scope-peer-page-tabs > .document-scope-switch {
-  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: auto;
   border: 0;
   border-radius: 0;
+  background: transparent;
+}
+
+.document-scope-peer-page-tabs > .document-scope-switch::before {
+  content: none;
+  display: none;
+}
+
+.document-scope-peer-page-tabs > .document-scope-switch > label {
+  flex: 0 0 auto;
+  min-width: 132px;
+  min-height: 40px;
+  padding: 7px 14px;
+  color: #294861;
+  border: 1px solid #c5d3df;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.document-scope-peer-page-tabs > .document-scope-switch > input:checked + label {
+  color: #fff;
+  border-color: #173f63;
+  background: #0b2f52;
+  box-shadow: inset 0 -3px 0 #ff6b3d;
+}
+
+/* A tab switch changes content, never the dialog's outer geometry. */
+.modal-card:has(.peer-page-tabs) {
+  height: min(640px, calc(100vh - 32px));
+  height: min(640px, calc(100dvh - 32px));
+  max-height: calc(100vh - 32px) !important;
+  max-height: calc(100dvh - 32px) !important;
+}
+
+.modal-card:has(.peer-page-tabs) > .modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.customer-editor-modal:has(.peer-page-tabs) {
+  height: min(640px, calc(100vh - 24px));
+  height: min(640px, calc(100dvh - 24px));
+}
+
+.customer-editor-modal:has(.peer-page-tabs) > .modal-body {
+  overflow: hidden;
+}
+
+.customer-editor-tabs > button small.required-mark,
+.customer-editor-tabs > button.active small.required-mark {
+  color: #d92d20;
+  font-size: 14px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.customer-editor-modal .customer-editor-form {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch !important;
+  overflow: hidden;
+}
+
+.customer-editor-modal .customer-editor-tabs,
+.customer-editor-modal .customer-form-actions,
+.customer-editor-modal .customer-editor-form > .alert {
+  flex: 0 0 auto;
+}
+
+.customer-editor-modal .customer-editor-panel {
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto !important;
+  scrollbar-gutter: stable;
+}
+
+/* Quotation entry: use the full dialog width and combine route and cargo facts. */
+.prototype-quote-form .quote-ledger-heading {
+  min-height: 22px;
+  padding-block: 2px;
+}
+
+.prototype-quote-form .quote-plan-grid {
+  grid-template-columns: repeat(6, minmax(0, 1fr)) !important;
+}
+
+.prototype-quote-form .quote-plan-grid > .field {
+  padding: 3px 5px;
+}
+
+.prototype-quote-form .quote-route-matrix.with-cargo {
+  width: calc(100% - 12px);
+  margin: 6px;
+}
+
+.prototype-quote-form .quote-route-matrix.with-cargo .quote-route-matrix-row {
+  grid-template-columns: 72px repeat(3, minmax(0, 1fr));
+}
+
+.prototype-quote-form .quote-route-cargo-cell {
+  align-self: stretch;
+}
+
+.prototype-quote-form .quote-route-cargo-cell > .field {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+}
+
+.prototype-quote-form .quote-route-cargo-cell textarea {
+  width: 100% !important;
+  max-width: none !important;
+}
+
+.prototype-quote-form .quote-route-cargo-metrics {
+  border-top: 1px solid #d7e1e9;
+}
+
+@media (max-width: 1100px) {
+  .prototype-quote-form .quote-plan-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  }
+  .prototype-quote-form .quote-route-matrix.with-cargo .quote-route-matrix-row {
+    grid-template-columns: 72px repeat(2, minmax(0, 1fr));
+  }
+  .prototype-quote-form .quote-route-matrix.with-cargo .quote-route-matrix-head > :last-child {
+    display: none;
+  }
+  .prototype-quote-form .quote-route-matrix.with-cargo .quote-route-matrix-row:not(.quote-route-matrix-head) > .quote-route-matrix-label {
+    grid-row: 1 / span 2;
+  }
+  .prototype-quote-form .quote-route-matrix.with-cargo .quote-route-cargo-cell {
+    grid-column: 2 / -1 !important;
+    border-top: 1px solid #edf1f4;
+  }
+}
+
+@media (max-width: 620px) {
+  .prototype-quote-form .quote-plan-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .prototype-quote-form .quote-route-matrix.with-cargo .quote-route-matrix-row:not(.quote-route-matrix-head) {
+    grid-template-columns: 72px minmax(0, 1fr);
+  }
+  .prototype-quote-form .quote-route-matrix.with-cargo .quote-route-matrix-row:not(.quote-route-matrix-head) > .quote-route-matrix-label {
+    grid-row: 1 / span 3;
+  }
+  .prototype-quote-form .quote-route-matrix.with-cargo .quote-route-cargo-cell {
+    grid-column: 2 !important;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -30486,6 +30645,6 @@ html[data-motion="off"] *::after {
   .customer-editor-form .customer-form-grid > .field-span-6,
   .customer-editor-form .customer-form-grid > .customer-role-dropdown,
   .customer-editor-form .customer-role-dropdown[open] { grid-column: 1 / -1 !important; }
-  .peer-page-tabs { padding-top: 39px !important; }
-  .peer-page-tabs::before { height: 38px; }
+  .peer-page-tabs > :is(a, button),
+  .document-scope-peer-page-tabs > .document-scope-switch > label { min-width: min(132px, 100%); }
 }
