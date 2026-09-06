@@ -436,6 +436,24 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
             helper,
         )
 
+    def test_ftl_customs_documents_open_files_then_return_to_declarations(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def _ensure_ftl_customs_documents(")
+        end = source.index("    def _declaration_number(", start)
+        helper = source[start:end]
+        self.assertIn(
+            'self._open_ordinary_business_tab(self.document, "报关文件")',
+            helper,
+        )
+        self.assertIn(
+            'self._open_ordinary_business_tab(self.document, "报关单")',
+            helper,
+        )
+        self.assertNotIn(
+            "if not self._is_visible(section):\n            return",
+            helper,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -850,16 +850,43 @@ class Phase3Flow:
         session.page.wait_for_timeout(150)
         self._assert_no_error_page(session)
 
+    def _open_ordinary_business_tab(
+        self,
+        session: RoleBrowserSession,
+        label: str,
+    ) -> None:
+        tabs = session.page.get_by_role("navigation", name="本节点业务分区")
+        link = tabs.get_by_role("link", name=re.compile(rf"^{re.escape(label)}"))
+        self._expect_visible_or_block(
+            session,
+            link,
+            f"普通订单页签：{label}",
+            owner="普通订单工作台维护人",
+            remediation="按当前业务顺序提供可见同级页签，并保持页签状态实时同步。",
+        )
+        session.click(link.first, f"切换到{label}")
+        session.page.wait_for_timeout(150)
+        self._assert_no_error_page(session)
+
     def _ensure_ftl_customs_documents(self) -> None:
         section = self.document.page.get_by_role("region", name="本节点文件")
         if not self._is_visible(section):
-            return
+            self._open_ordinary_business_tab(self.document, "报关文件")
+            section = self.document.page.get_by_role("region", name="本节点文件")
+            self._expect_visible_or_block(
+                self.document,
+                section,
+                "整车报关文件办理区",
+                owner="普通订单报关页签维护人",
+                remediation="报关文件页签必须展示工作流要求的文件与就地上传、审核入口。",
+            )
         for _ in range(12):
             required_missing = section.locator("article.source-document-row.required-missing")
             pending = section.locator("article.source-document-row.optional-empty").filter(
                 has_text="已上传待审核"
             )
             if required_missing.count() == 0 and pending.count() == 0:
+                self._open_ordinary_business_tab(self.document, "报关单")
                 return
             candidate = required_missing.first if required_missing.count() else pending.first
             upload = candidate.locator("label.document-upload-button")
