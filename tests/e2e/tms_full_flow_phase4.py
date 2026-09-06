@@ -877,7 +877,7 @@ class Phase4Flow:
             _ = direction
 
         for field_key, label in (
-            ("customer_service_confirmation", "客服费用确认"),
+            ("customer_service_confirmation", "费用确认"),
             ("business_review", "业务审核"),
             ("finance_review", "财务审核"),
         ):
@@ -1172,6 +1172,9 @@ class Phase4Flow:
                 step.observe("当前实例为选办，未阻断后续", gate_passed=True)
                 return
             completed = 0
+            recovery_mode = (
+                self.phase3.certification_lineage.get("recovery_branches_used") is True
+            )
             for direction_title in ("应收费用台账", "应付费用台账"):
                 clicked_in_this_direction = False
                 for _ in range(3):
@@ -1187,7 +1190,7 @@ class Phase4Flow:
                         )
                     card_text = self._text(card, 2_000)
                     if "已完成并锁定" in card_text:
-                        if not clicked_in_this_direction:
+                        if not clicked_in_this_direction and not recovery_mode:
                             raise BusinessBlocker(
                                 f"{order.order_number} 的{direction_title}{action_label}在本轮到达前已经完成，不能作为 fresh 全流程认证数据",
                                 owner="全流程认证数据隔离维护人",
@@ -1429,6 +1432,10 @@ class Phase4Flow:
             return False
         text = self._text(row, 2_000)
         if "已填" in text or "已上传待审核" in text:
+            if self.phase3.certification_lineage.get("recovery_branches_used") is True:
+                if label not in self.artifacts.document_evidence[order_key]:
+                    self.artifacts.document_evidence[order_key].append(label)
+                return True
             raise BusinessBlocker(
                 f"{order_number} 的{label}在本轮上传前已经存在，不能作为 fresh 全流程认证数据",
                 owner="全流程认证数据隔离维护人",
@@ -1872,7 +1879,7 @@ class Phase4Flow:
                 self.customer_service,
                 order_key,
                 "customer_service_confirmation",
-                "客服费用确认",
+                "费用确认",
                 "客服结算",
             )
         for order_key in ORDER_KEYS:

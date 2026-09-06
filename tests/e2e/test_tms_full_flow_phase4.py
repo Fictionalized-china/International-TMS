@@ -553,6 +553,35 @@ class Phase4HandoffTests(unittest.TestCase):
 
 
 class Phase4SafetyTests(unittest.TestCase):
+    def test_customer_service_confirmation_matches_the_visible_card_label(self) -> None:
+        source = (HERE / "tms_full_flow_phase4.py").read_text(encoding="utf-8")
+        start = source.index("    def _read_workflow_snapshot(")
+        end = source.index("    def _remember_snapshot(", start)
+        helper = source[start:end]
+
+        self.assertIn('(\"customer_service_confirmation\", \"费用确认\")', helper)
+        self.assertNotIn('(\"customer_service_confirmation\", \"客服费用确认\")', helper)
+        run_start = source.index("    def run(self) -> Phase4Artifacts:")
+        run_helper = source[run_start:]
+        self.assertIn(
+            '\"customer_service_confirmation\",\n                \"费用确认\"',
+            run_helper,
+        )
+
+    def test_recovery_reuses_completed_signoffs_and_documents(self) -> None:
+        source = (HERE / "tms_full_flow_phase4.py").read_text(encoding="utf-8")
+        signoff_start = source.index("    def _perform_required_signoff(")
+        signoff_end = source.index("    def _open_billing_tab(", signoff_start)
+        signoff = source[signoff_start:signoff_end]
+        upload_start = source.index("    def _upload_cost_document(")
+        upload_end = source.index("    def _review_cost_document(", upload_start)
+        upload = source[upload_start:upload_end]
+
+        self.assertIn('recovery_branches_used") is True', signoff)
+        self.assertIn("not clicked_in_this_direction and not recovery_mode", signoff)
+        self.assertIn('recovery_branches_used") is True', upload)
+        self.assertIn("document_evidence[order_key].append(label)", upload)
+
     def test_required_upstream_expenses_are_reused_instead_of_rejected(self) -> None:
         source = (HERE / "tms_full_flow_phase4.py").read_text(encoding="utf-8")
         start = source.index("    def _ensure_required_expenses(")
