@@ -29814,3 +29814,377 @@ html[data-motion="off"] *::after {
 @media (prefers-reduced-motion: reduce) {
   .billing-workspace-tabs a { transition: none; }
 }
+
+/* --------------------------------------------------------------------------
+   System-wide form geometry contract
+   One visual rhythm for every editable surface. Page-specific rules may
+   choose a semantic width, but they must not invent another control height.
+   -------------------------------------------------------------------------- */
+:where(
+  .admin-app-shell,
+  .warehouse-app-shell,
+  .prototype-portal-shell,
+  .prototype-page,
+  .shell,
+  .warehouse-shell,
+  .modal-card .modal-body,
+  .auth-card,
+  .portal-register-card,
+  .setup-card
+) {
+  --form-control-height: var(--ui-control-height, 32px);
+  --form-textarea-height: calc(var(--form-control-height) + var(--form-control-height) + var(--form-control-height));
+  --form-width-micro: 8rem;
+  --form-width-short: 12rem;
+  --form-width-medium: 18rem;
+  --form-width-long: 26rem;
+}
+
+:where(
+  .admin-app-shell,
+  .warehouse-app-shell,
+  .prototype-portal-shell,
+  .prototype-page,
+  .shell,
+  .warehouse-shell,
+  .modal-card .modal-body,
+  .auth-card,
+  .portal-register-card,
+  .setup-card
+) :is(
+  input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not(.organization-assignee-native-validator):not(.document-upload-input),
+  select:not([multiple]):not(.quote-geo-native-validator)
+) {
+  box-sizing: border-box;
+  min-width: 0;
+  height: var(--form-control-height) !important;
+  min-height: var(--form-control-height) !important;
+  max-height: var(--form-control-height) !important;
+  padding-block: 0 !important;
+  border-radius: 3px;
+  vertical-align: top;
+}
+
+:where(
+  .admin-app-shell,
+  .warehouse-app-shell,
+  .prototype-portal-shell,
+  .prototype-page,
+  .shell,
+  .warehouse-shell,
+  .modal-card .modal-body,
+  .auth-card,
+  .portal-register-card,
+  .setup-card
+) input[type="file"]:not(.document-upload-input) {
+  padding-block: 3px !important;
+}
+
+:where(
+  .admin-app-shell,
+  .warehouse-app-shell,
+  .prototype-portal-shell,
+  .prototype-page,
+  .shell,
+  .warehouse-shell,
+  .modal-card .modal-body,
+  .auth-card,
+  .portal-register-card,
+  .setup-card
+) :is(textarea, select[multiple]) {
+  box-sizing: border-box;
+  width: min(100%, 52rem) !important;
+  min-width: 0;
+  height: var(--form-textarea-height) !important;
+  min-height: var(--form-textarea-height) !important;
+  max-height: var(--form-textarea-height) !important;
+  padding: 8px 10px !important;
+  overflow-y: auto;
+  border-radius: 3px;
+  line-height: 1.5;
+  resize: none !important;
+  justify-self: start;
+  vertical-align: top;
+}
+
+/* Custom single-value pickers use the same outside dimensions as native
+   controls. Hidden native validators are explicitly excluded above. */
+:where(
+  .admin-app-shell,
+  .warehouse-app-shell,
+  .prototype-portal-shell,
+  .prototype-page,
+  .shell,
+  .warehouse-shell,
+  .modal-card .modal-body
+) :is(
+  .organization-assignee-trigger,
+  .quote-geo-trigger,
+  .customer-role-dropdown > summary > strong
+) {
+  box-sizing: border-box;
+  height: var(--form-control-height) !important;
+  min-height: var(--form-control-height) !important;
+  max-height: var(--form-control-height) !important;
+}
+
+:where(
+  .admin-app-shell,
+  .warehouse-app-shell,
+  .prototype-portal-shell,
+  .prototype-page,
+  .shell,
+  .warehouse-shell,
+  .modal-card .modal-body
+) .customer-role-dropdown > summary {
+  grid-template-rows: auto var(--form-control-height) !important;
+}
+
+:where(
+  .admin-app-shell,
+  .warehouse-app-shell,
+  .prototype-portal-shell,
+  .prototype-page,
+  .shell,
+  .warehouse-shell,
+  .modal-card .modal-body
+) .quote-contact-combobox {
+  box-sizing: border-box;
+  height: var(--form-control-height) !important;
+  min-height: var(--form-control-height) !important;
+  max-height: var(--form-control-height) !important;
+}
+
+:where(
+  .admin-app-shell,
+  .warehouse-app-shell,
+  .prototype-portal-shell,
+  .prototype-page,
+  .shell,
+  .warehouse-shell,
+  .modal-card .modal-body
+) .quote-contact-combobox > :is(input, button) {
+  height: calc(var(--form-control-height) - 2px) !important;
+  min-height: calc(var(--form-control-height) - 2px) !important;
+  max-height: calc(var(--form-control-height) - 2px) !important;
+}
+
+/* Keep form rows square: controls share a top edge and validation/help text
+   grows below the row instead of moving neighbouring controls vertically. */
+:where(
+  .admin-app-shell,
+  .warehouse-app-shell,
+  .prototype-portal-shell,
+  .prototype-page,
+  .shell,
+  .warehouse-shell,
+  .modal-card .modal-body,
+  .auth-card,
+  .portal-register-card,
+  .setup-card
+) :is(.form-grid, .stack, .customer-form-grid) {
+  align-items: start;
+}
+
+:where(
+  .admin-app-shell,
+  .warehouse-app-shell,
+  .prototype-portal-shell,
+  .prototype-page,
+  .shell,
+  .warehouse-shell,
+  .modal-card .modal-body,
+  .auth-card,
+  .portal-register-card,
+  .setup-card
+) .field {
+  min-width: 0;
+  align-self: start;
+}
+
+/* Semantic widths: the frame follows the amount of information entered.
+   Search, address, description and name fields deliberately remain flexible. */
+:where(
+  .admin-app-shell,
+  .warehouse-app-shell,
+  .prototype-portal-shell,
+  .prototype-page,
+  .shell,
+  .warehouse-shell,
+  .modal-card .modal-body,
+  .auth-card,
+  .portal-register-card,
+  .setup-card
+) .field-short > :is(input, select) {
+  width: min(100%, var(--form-width-short)) !important;
+  justify-self: start;
+}
+
+:where(
+  .admin-app-shell,
+  .warehouse-app-shell,
+  .prototype-portal-shell,
+  .prototype-page,
+  .shell,
+  .warehouse-shell,
+  .modal-card .modal-body,
+  .auth-card,
+  .portal-register-card,
+  .setup-card
+) .field-medium > :is(input, select) {
+  width: min(100%, var(--form-width-medium)) !important;
+  justify-self: start;
+}
+
+:where(
+  .admin-app-shell,
+  .warehouse-app-shell,
+  .prototype-portal-shell,
+  .prototype-page,
+  .shell,
+  .warehouse-shell,
+  .modal-card .modal-body,
+  .auth-card,
+  .portal-register-card,
+  .setup-card
+) .field-wide > :is(input, select) {
+  width: min(100%, var(--form-width-long)) !important;
+  justify-self: start;
+}
+
+:where(
+  .admin-app-shell,
+  .warehouse-app-shell,
+  .prototype-portal-shell,
+  .prototype-page,
+  .shell,
+  .warehouse-shell,
+  .modal-card .modal-body,
+  .auth-card,
+  .portal-register-card,
+  .setup-card
+) :is(
+  input[type="number"],
+  input[name$="Rate" i],
+  input[name$="Amount" i],
+  input[name$="Weight" i],
+  input[name$="Volume" i],
+  select[name$="Status" i],
+  select[name$="Type" i],
+  select[name$="Mode" i],
+  select[name$="Scope" i],
+  select[name="category" i],
+  select[name="method" i],
+  select[name="severity" i],
+  select[name="stage" i],
+  select[name="readiness" i],
+  select[name="eligibility" i],
+  select[name="accessLevel" i],
+  select[name="publicToCustomer" i],
+  select[name="visibleToCustomer" i],
+  select[name="isInternal" i],
+  select[name="fieldMode" i],
+  select[name="padding" i],
+  select[name="work" i],
+  select[name="view" i]
+) {
+  width: min(100%, var(--form-width-short)) !important;
+  justify-self: start;
+}
+
+:where(
+  .admin-app-shell,
+  .warehouse-app-shell,
+  .prototype-portal-shell,
+  .prototype-page,
+  .shell,
+  .warehouse-shell,
+  .modal-card .modal-body,
+  .auth-card,
+  .portal-register-card,
+  .setup-card
+) :is(
+  input[name="pieces" i],
+  input[name="quantity" i],
+  input[name$="Count" i],
+  input[name$="SortOrder" i],
+  input[name="currency" i],
+  input[name="postal" i],
+  select[name="currency" i],
+  select[name="direction" i],
+  select[name="pageSize" i]
+) {
+  width: min(100%, var(--form-width-micro)) !important;
+  justify-self: start;
+}
+
+:where(
+  .admin-app-shell,
+  .warehouse-app-shell,
+  .prototype-portal-shell,
+  .prototype-page,
+  .shell,
+  .warehouse-shell,
+  .modal-card .modal-body,
+  .auth-card,
+  .portal-register-card,
+  .setup-card
+) :is(
+  input[type="date"],
+  input[type="time"],
+  input[type="datetime-local"],
+  input[name$="Code" i],
+  input[name$="Phone" i],
+  input[name$="Number" i],
+  select[name$="Country" i],
+  select[name$="State" i],
+  select[name$="City" i],
+  select[name$="Province" i],
+  select[name$="Role" i],
+  select[name="country" i],
+  select[name="state" i],
+  select[name="city" i],
+  select[name="province" i]
+) {
+  width: min(100%, var(--form-width-medium)) !important;
+  justify-self: start;
+}
+
+:where(
+  .admin-app-shell,
+  .warehouse-app-shell,
+  .prototype-portal-shell,
+  .prototype-page,
+  .shell,
+  .warehouse-shell,
+  .modal-card .modal-body,
+  .auth-card,
+  .portal-register-card,
+  .setup-card
+) :is(
+  select[name$="Id" i],
+  select[name="assignedTo" i],
+  select[name="assignee" i],
+  select[name="creator" i],
+  select[name="position" i]
+) {
+  width: min(100%, var(--form-width-long)) !important;
+  justify-self: start;
+}
+
+@media (max-width: 620px) {
+  :where(
+    .admin-app-shell,
+    .warehouse-app-shell,
+    .prototype-portal-shell,
+    .prototype-page,
+    .shell,
+    .warehouse-shell,
+    .modal-card .modal-body,
+    .auth-card,
+    .portal-register-card,
+    .setup-card
+  ) :is(input, select, textarea, .organization-assignee-trigger, .quote-geo-trigger, .quote-contact-combobox) {
+    max-width: 100%;
+  }
+}
