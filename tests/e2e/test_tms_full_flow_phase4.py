@@ -645,8 +645,9 @@ class Phase4SafetyTests(unittest.TestCase):
         self.assertEqual(PHASE4_STAGE_ORDER[0], "warehouse_difference_confirmation")
         self.assertIn('item.role == "overseas_warehouse"', helper)
         self.assertIn('name="确认差异及费用影响"', helper)
-        self.assertIn("self._switch_warehouse_to_admin(session)", helper)
-        self.assertIn("self._switch_admin_to_warehouse(session)", helper)
+        self.assertIn('self._click_navigation(session, "异常处理")', helper)
+        self.assertIn('".warehouse-difference-confirmation-table tbody tr"', helper)
+        self.assertNotIn("_switch_warehouse_to_admin", source)
         self.assertLess(
             run_helper.index("self._confirm_warehouse_differences()"),
             run_helper.index("self._ensure_required_expenses"),
