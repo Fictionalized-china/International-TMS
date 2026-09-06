@@ -52,7 +52,6 @@ export async function loadBatchCustomsAccess(
       orderId: row.order_id,
       businessType: row.business_type,
       dispatched: row.dispatched === 1,
-      allDispatched,
       workflow,
     }));
   }

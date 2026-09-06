@@ -167,7 +167,6 @@ export function resolveBatchOrderCustomsAccess(input: {
   orderId: string;
   businessType?: string | null;
   dispatched: boolean;
-  allDispatched: boolean;
   workflow: LockedWorkflowStageContext;
 }): BatchOrderCustomsAccess {
   const declarationStage = fieldCapability({
@@ -181,22 +180,13 @@ export function resolveBatchOrderCustomsAccess(input: {
     fieldKey: "customs_release",
     label: "海关放行",
   });
-  const dispatchReason = input.allDispatched && input.dispatched
-    ? null
-    : "全部有效挂载订单完成装车出库后，才开放报关申报与放行";
-  const declarationAccess = dispatchReason
-    ? { ...declarationStage, stageReady: false, reason: declarationStage.reason ?? dispatchReason }
-    : declarationStage;
-  const releaseAccess = dispatchReason
-    ? { ...releaseStage, stageReady: false, reason: releaseStage.reason ?? dispatchReason }
-    : releaseStage;
   return {
     orderId: input.orderId,
     businessType: input.businessType ?? null,
     dispatched: input.dispatched,
-    canManageDeclarations: declarationAccess.stageReady,
-    canRelease: releaseAccess.stageReady,
-    declarationAccess,
-    releaseAccess,
+    canManageDeclarations: declarationStage.stageReady,
+    canRelease: releaseStage.stageReady,
+    declarationAccess: declarationStage,
+    releaseAccess: releaseStage,
   };
 }
