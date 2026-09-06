@@ -891,10 +891,17 @@ class Phase3Flow:
             candidate = required_missing.first if required_missing.count() else pending.first
             upload = candidate.locator("label.document-upload-button")
             if self._is_visible(upload):
+                document_name = candidate.locator(".source-document-name strong").inner_text()
+                uploaded_missing = section.locator(
+                    "article.source-document-row.required-missing"
+                ).filter(has_text=document_name)
                 self.document.choose_files(
                     upload.first, self.fixture_file, "选择报关必填文件并上传"
                 )
-                self.document.page.wait_for_timeout(350)
+                self.document.expect_hidden(
+                    uploaded_missing,
+                    f"{document_name.strip()} 上传完成并退出缺失状态",
+                )
                 section = self.document.page.get_by_role("region", name="本节点文件")
                 continue
             review = candidate.get_by_role("button", name="审核", exact=True)
@@ -912,7 +919,7 @@ class Phase3Flow:
                     dialog.get_by_role("button", name="确认审核结果"),
                     "确认文件审核通过",
                 )
-                self.document.page.wait_for_timeout(300)
+                self.document.expect_hidden(dialog, "报关文件审核提交完成")
                 section = self.document.page.get_by_role("region", name="本节点文件")
                 continue
             raise BusinessBlocker(

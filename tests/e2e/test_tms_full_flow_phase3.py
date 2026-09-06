@@ -454,6 +454,35 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
             helper,
         )
 
+    def test_ftl_customs_document_upload_waits_for_the_selected_row_to_refresh(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def _ensure_ftl_customs_documents(")
+        end = source.index("    def _declaration_number(", start)
+        helper = source[start:end]
+
+        self.assertIn(
+            'document_name = candidate.locator(".source-document-name strong").inner_text()',
+            helper,
+        )
+        self.assertIn("uploaded_missing = section.locator(", helper)
+        self.assertIn(
+            'self.document.expect_hidden(\n                    uploaded_missing,',
+            helper,
+        )
+        self.assertNotIn("self.document.page.wait_for_timeout(350)", helper)
+
+    def test_ftl_customs_document_review_waits_for_the_dialog_to_close(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def _ensure_ftl_customs_documents(")
+        end = source.index("    def _declaration_number(", start)
+        helper = source[start:end]
+
+        self.assertIn(
+            'self.document.expect_hidden(dialog, "报关文件审核提交完成")',
+            helper,
+        )
+        self.assertNotIn("self.document.page.wait_for_timeout(300)", helper)
+
     def test_batch_customs_uses_durable_rows_instead_of_transient_toasts(self) -> None:
         source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
         start = source.index("    def complete_batch_customs(")
