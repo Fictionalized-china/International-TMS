@@ -43,6 +43,22 @@ export type PublicationField = {
   is_active: number;
 };
 
+const customsDeclarationMutationFieldKeys = new Set([
+  "customs_declarations",
+  "declaration_stage",
+  "declaration_status",
+  "declaration_number",
+  "declaration_type",
+  "declaration_title",
+  "declaring_company",
+  "declared_at",
+  "declared_amount",
+  "declaration_currency",
+  "declaration_gross_weight",
+  "declaration_change_flags",
+  "declaration_change_reason",
+]);
+
 export type PublicationPositionReadiness = {
   code: string;
   name: string;
@@ -85,6 +101,124 @@ export function validateWorkflowCoreStepOrder(
     ? ["基础业务节点必须保持询价、委托、审批、分配、运输、仓库、出境、签收、结算、复盘的先后顺序；可在其间插入自定义节点，但不能倒置基础节点"]
     : [];
 }
+export function validateWorkflowOperationalGateStructure(input: {
+  steps: readonly (PublicationStep & { sort_order?: number })[];
+  modules: readonly PublicationModule[];
+  fields: readonly PublicationField[];
+}) {
+  const activeStepIds = new Set(
+    input.steps.filter((step) => step.is_active === 1).map((step) => step.id),
+  );
+  const activeStepById = new Map(
+    input.steps
+      .filter((step) => step.is_active === 1)
+      .map((step) => [step.id, step]),
+  );
+  const activeFields = input.fields.filter(
+    (field) => field.is_active === 1 && activeStepIds.has(field.step_id),
+  );
+  const activeModulePlacements = new Set(
+    input.modules
+      .filter((module) => module.is_active === 1 && activeStepIds.has(module.step_id))
+      .map((module) => `${module.step_id}:${module.module_code}`),
+  );
+  const release = activeFields.find((field) => field.field_key === "customs_release");
+  const declarations = activeFields.find(
+    (field) => field.field_key === "customs_declarations",
+  );
+  const issues: string[] = [];
+  for (const field of activeFields.filter((item) => item.module_code === "customs")) {
+    if (!activeModulePlacements.has(`${field.step_id}:customs`)) {
+      const stepName = activeStepById.get(field.step_id)?.name ?? field.step_id;
+      issues.push(
+        `节点“${stepName}”的 ${field.field_key} 已启用，但同节点未启用 customs 模块`,
+      );
+    }
+  }
+  if (release && !declarations) {
+    issues.push("已启用 customs_release，但未启用其申报来源 customs_declarations");
+  }
+  if (release && declarations) {
+    const releaseOrder = Number(activeStepById.get(release.step_id)?.sort_order ?? 0);
+    const declarationOrder = Number(activeStepById.get(declarations.step_id)?.sort_order ?? 0);
+    if (releaseOrder < declarationOrder) {
+      issues.push("customs_release 不能早于 customs_declarations");
+    }
+  }
+  const activeMutationFields = activeFields.filter((field) =>
+    customsDeclarationMutationFieldKeys.has(field.field_key)
+  );
+  if (!declarations && activeMutationFields.length) {
+    issues.push(
+      `报关申报写入字段 ${activeMutationFields.map((field) => field.field_key).join("、")} 已启用，但未启用 customs_declarations`,
+    );
+  } else if (declarations) {
+    const misplacedMutationFields = activeMutationFields.filter(
+      (field) =>
+        field.step_id !== declarations.step_id,
+    );
+    if (misplacedMutationFields.length) {
+      issues.push(
+        `报关申报写入字段必须与 customs_declarations 所在节点一致：${misplacedMutationFields
+          .map((field) => field.field_key)
+          .join("、")}`,
+      );
+    }
+  }
+  const loadingConfirmation = activeFields.find(
+    (field) => field.field_key === "loading_scan_confirmation",
+  );
+  if (
+    loadingConfirmation &&
+    !activeModulePlacements.has(`${loadingConfirmation.step_id}:loading`)
+  ) {
+    const stepName = activeStepById.get(loadingConfirmation.step_id)?.name ?? loadingConfirmation.step_id;
+    issues.push(
+      `节点“${stepName}”的 loading_scan_confirmation 已启用，但同节点未启用 loading 模块`,
+    );
+  }
+  const actualExit = activeFields.find((field) => field.field_key === "actual_exit_at");
+  if (
+    actualExit &&
+    !activeModulePlacements.has(`${actualExit.step_id}:tracking`)
+  ) {
+    const stepName = activeStepById.get(actualExit.step_id)?.name ?? actualExit.step_id;
+    issues.push(
+      `节点“${stepName}”的 actual_exit_at 已启用，但同节点未启用 tracking 模块`,
+    );
+  }
+  const requiredLoadingModules = input.modules.filter(
+    (module) =>
+      module.is_active === 1 &&
+      module.is_required === 1 &&
+      module.module_code === "loading" &&
+      activeStepIds.has(module.step_id),
+  );
+  if (actualExit) {
+    if (!requiredLoadingModules.length) {
+      issues.push("actual_exit_at 已启用，但没有启用且必办的 loading 模块");
+    } else {
+      const exitOrder = Number(activeStepById.get(actualExit.step_id)?.sort_order ?? 0);
+      const latestLoadingOrder = Math.max(
+        ...requiredLoadingModules.map((module) =>
+          Number(activeStepById.get(module.step_id)?.sort_order ?? 0)
+        ),
+      );
+      if (exitOrder <= latestLoadingOrder) {
+        issues.push("actual_exit_at 必须位于必办 loading 模块之后");
+      }
+    }
+  }
+  if (release?.is_required === 1 && actualExit) {
+    const releaseOrder = Number(activeStepById.get(release.step_id)?.sort_order ?? 0);
+    const exitOrder = Number(activeStepById.get(actualExit.step_id)?.sort_order ?? 0);
+    if (releaseOrder > exitOrder) {
+      issues.push("必填 customs_release 不能位于 actual_exit_at 之后");
+    }
+  }
+  return issues;
+}
+
 export function validateWorkflowCoreModuleBindings(
   steps: readonly PublicationStep[],
   modules: readonly PublicationModule[],

@@ -60,6 +60,7 @@ import {
   type WorkflowFieldLocatorItem,
 } from "../lib/workflow-field-locator";
 import {
+  validateWorkflowOperationalGateStructure,
   validateWorkflowResponsibilityReadiness,
   validateWorkflowCoreStepOrder,
   validateWorkflowCoreModuleBindings,
@@ -1575,6 +1576,9 @@ function validateWorkflowConfiguration(
     issues.push(`第一版运行链缺少基础节点：${missingRuntimeSteps.join("、")}`);
   issues.push(...validateWorkflowCoreStepOrder(activeSteps));
   issues.push(...validateWorkflowCoreModuleBindings(activeSteps, modules, tasks));
+  issues.push(
+    ...validateWorkflowOperationalGateStructure({ steps, modules, fields }),
+  );
   const quotationStep = activeSteps.find((step) => step.step_key === "quotation");
   if (quotationStep) {
     const quotationKeys = new Set(

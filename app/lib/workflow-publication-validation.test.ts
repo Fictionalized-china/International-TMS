@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  validateWorkflowOperationalGateStructure,
   validateWorkflowCoreStepOrder,
   validateWorkflowCoreModuleBindings,
   validateWorkflowResponsibilityReadiness,
@@ -724,4 +725,497 @@ describe("workflow core step order", () => {
     ).join("\n")).toContain("必办审核任务");
   });
 
+});
+
+describe("workflow operational gate structure", () => {
+  it("rejects customs release without a declaration source", () => {
+    const outboundStep = {
+      id: "outbound",
+      step_key: "outbound_transport",
+      name: "Outbound transport",
+      is_active: 1,
+      sort_order: 80,
+    };
+    const customsModule = {
+      id: "customs-outbound",
+      step_id: outboundStep.id,
+      module_code: "customs",
+      display_name: "Customs",
+      is_active: 1,
+      is_required: 1,
+      responsibility_position_code: "DOC",
+      completion_mode: "all_tasks" as const,
+    };
+
+    const issues = validateWorkflowOperationalGateStructure({
+      steps: [outboundStep],
+      modules: [customsModule],
+      fields: [{
+        step_id: outboundStep.id,
+        module_code: "customs",
+        field_key: "customs_release",
+        is_required: 1,
+        is_active: 1,
+      }],
+    });
+
+    expect(issues.join("\n")).toContain("customs_release");
+    expect(issues.join("\n")).toContain("customs_declarations");
+  });
+
+  it("rejects customs release before declaration entry", () => {
+    const releaseStep = {
+      id: "release",
+      step_key: "customs_release_gate",
+      name: "Release",
+      is_active: 1,
+      sort_order: 50,
+    };
+    const declarationStep = {
+      id: "declaration",
+      step_key: "customs_declaration_entry",
+      name: "Declaration",
+      is_active: 1,
+      sort_order: 60,
+    };
+    const modules = [releaseStep, declarationStep].map((step) => ({
+      id: `customs-${step.id}`,
+      step_id: step.id,
+      module_code: "customs",
+      display_name: "Customs",
+      is_active: 1,
+      is_required: 0,
+      responsibility_position_code: "DOC",
+      completion_mode: "all_tasks" as const,
+    }));
+
+    const issues = validateWorkflowOperationalGateStructure({
+      steps: [releaseStep, declarationStep],
+      modules,
+      fields: [
+        {
+          step_id: releaseStep.id,
+          module_code: "customs",
+          field_key: "customs_release",
+          is_required: 0,
+          is_active: 1,
+        },
+        {
+          step_id: declarationStep.id,
+          module_code: "customs",
+          field_key: "customs_declarations",
+          is_required: 0,
+          is_active: 1,
+        },
+      ],
+    });
+
+    expect(issues.join("\n")).toContain(
+      "customs_release 不能早于 customs_declarations",
+    );
+  });
+
+  it("rejects an active customs field without an active customs module on its node", () => {
+    const customsStep = {
+      id: "customs",
+      step_key: "customs_entry",
+      name: "Customs entry",
+      is_active: 1,
+      sort_order: 60,
+    };
+
+    const issues = validateWorkflowOperationalGateStructure({
+      steps: [customsStep],
+      modules: [],
+      fields: [{
+        step_id: customsStep.id,
+        module_code: "customs",
+        field_key: "customs_declarations",
+        is_required: 1,
+        is_active: 1,
+      }],
+    });
+
+    expect(issues.join("\n")).toContain("customs_declarations");
+    expect(issues.join("\n")).toContain("customs 模块");
+  });
+
+  it("keeps declaration mutation fields on the declaration-entry node", () => {
+    const declarationStep = {
+      id: "declaration",
+      step_key: "customs_declaration_entry",
+      name: "Declaration entry",
+      is_active: 1,
+      sort_order: 50,
+    };
+    const amendmentStep = {
+      id: "amendment",
+      step_key: "customs_amendment",
+      name: "Amendment",
+      is_active: 1,
+      sort_order: 60,
+    };
+    const modules = [declarationStep, amendmentStep].map((step) => ({
+      id: `customs-${step.id}`,
+      step_id: step.id,
+      module_code: "customs",
+      display_name: "Customs",
+      is_active: 1,
+      is_required: 0,
+      responsibility_position_code: "DOC",
+      completion_mode: "all_tasks" as const,
+    }));
+
+    const issues = validateWorkflowOperationalGateStructure({
+      steps: [declarationStep, amendmentStep],
+      modules,
+      fields: [
+        {
+          step_id: declarationStep.id,
+          module_code: "customs",
+          field_key: "customs_declarations",
+          is_required: 1,
+          is_active: 1,
+        },
+        {
+          step_id: amendmentStep.id,
+          module_code: "customs",
+          field_key: "declaration_number",
+          is_required: 1,
+          is_active: 1,
+        },
+      ],
+    });
+
+    expect(issues.join("\n")).toContain("declaration_number");
+    expect(issues.join("\n")).toContain("customs_declarations 所在节点");
+  });
+
+  it("keeps actual exit strictly after the required loading operation", () => {
+    const loadingStep = {
+      id: "loading",
+      step_key: "port_loading",
+      name: "Loading",
+      is_active: 1,
+      sort_order: 70,
+    };
+    const exitStep = {
+      id: "exit",
+      step_key: "outbound_transport",
+      name: "Exit",
+      is_active: 1,
+      sort_order: 60,
+    };
+    const modules = [
+      {
+        id: "loading-module",
+        step_id: loadingStep.id,
+        module_code: "loading",
+        display_name: "Loading",
+        is_active: 1,
+        is_required: 1,
+        responsibility_position_code: "WAREHOUSE",
+        completion_mode: "all_tasks" as const,
+      },
+      {
+        id: "tracking-module",
+        step_id: exitStep.id,
+        module_code: "tracking",
+        display_name: "Tracking",
+        is_active: 1,
+        is_required: 1,
+        responsibility_position_code: "OPERATION",
+        completion_mode: "all_tasks" as const,
+      },
+    ];
+
+    const issues = validateWorkflowOperationalGateStructure({
+      steps: [exitStep, loadingStep],
+      modules,
+      fields: [{
+        step_id: exitStep.id,
+        module_code: "tracking",
+        field_key: "actual_exit_at",
+        is_required: 1,
+        is_active: 1,
+      }],
+    });
+
+    expect(issues.join("\n")).toContain(
+      "actual_exit_at 必须位于必办 loading 模块之后",
+    );
+  });
+
+  it("rejects a required origin release gate after actual exit", () => {
+    const steps = [
+      { id: "exit", step_key: "outbound_transport", name: "Exit", is_active: 1, sort_order: 70 },
+      { id: "declaration", step_key: "customs_entry", name: "Declaration", is_active: 1, sort_order: 80 },
+      { id: "release", step_key: "customs_release", name: "Release", is_active: 1, sort_order: 90 },
+    ];
+    const modules = [
+      {
+        id: "tracking-exit",
+        step_id: "exit",
+        module_code: "tracking",
+        display_name: "Tracking",
+        is_active: 1,
+        is_required: 1,
+        responsibility_position_code: "OPERATION",
+        completion_mode: "all_tasks" as const,
+      },
+      ...["declaration", "release"].map((stepId) => ({
+        id: `customs-${stepId}`,
+        step_id: stepId,
+        module_code: "customs",
+        display_name: "Customs",
+        is_active: 1,
+        is_required: 0,
+        responsibility_position_code: "DOC",
+        completion_mode: "all_tasks" as const,
+      })),
+    ];
+
+    const issues = validateWorkflowOperationalGateStructure({
+      steps,
+      modules,
+      fields: [
+        {
+          step_id: "exit",
+          module_code: "tracking",
+          field_key: "actual_exit_at",
+          is_required: 1,
+          is_active: 1,
+        },
+        {
+          step_id: "declaration",
+          module_code: "customs",
+          field_key: "customs_declarations",
+          is_required: 1,
+          is_active: 1,
+        },
+        {
+          step_id: "release",
+          module_code: "customs",
+          field_key: "customs_release",
+          is_required: 1,
+          is_active: 1,
+        },
+      ],
+    });
+
+    expect(issues.join("\n")).toContain(
+      "必填 customs_release 不能位于 actual_exit_at 之后",
+    );
+  });
+
+  it("requires actual exit to stay on a node with an active tracking module", () => {
+    const exitStep = {
+      id: "exit",
+      step_key: "outbound_transport",
+      name: "Exit",
+      is_active: 1,
+      sort_order: 80,
+    };
+
+    const issues = validateWorkflowOperationalGateStructure({
+      steps: [exitStep],
+      modules: [],
+      fields: [{
+        step_id: exitStep.id,
+        module_code: "tracking",
+        field_key: "actual_exit_at",
+        is_required: 1,
+        is_active: 1,
+      }],
+    });
+
+    expect(issues.join("\n")).toContain("actual_exit_at");
+    expect(issues.join("\n")).toContain("tracking 模块");
+  });
+
+  it("requires a required loading operation when actual exit is enabled", () => {
+    const exitStep = {
+      id: "exit",
+      step_key: "outbound_transport",
+      name: "Exit",
+      is_active: 1,
+      sort_order: 80,
+    };
+    const trackingModule = {
+      id: "tracking-exit",
+      step_id: exitStep.id,
+      module_code: "tracking",
+      display_name: "Tracking",
+      is_active: 1,
+      is_required: 1,
+      responsibility_position_code: "OPERATION",
+      completion_mode: "all_tasks" as const,
+    };
+
+    const issues = validateWorkflowOperationalGateStructure({
+      steps: [exitStep],
+      modules: [trackingModule],
+      fields: [{
+        step_id: exitStep.id,
+        module_code: "tracking",
+        field_key: "actual_exit_at",
+        is_required: 1,
+        is_active: 1,
+      }],
+    });
+
+    expect(issues.join("\n")).toContain(
+      "actual_exit_at 已启用，但没有启用且必办的 loading 模块",
+    );
+  });
+
+  it("requires loading confirmation to stay on a node with an active loading module", () => {
+    const loadingStep = {
+      id: "loading",
+      step_key: "port_loading",
+      name: "Loading",
+      is_active: 1,
+      sort_order: 70,
+    };
+
+    const issues = validateWorkflowOperationalGateStructure({
+      steps: [loadingStep],
+      modules: [],
+      fields: [{
+        step_id: loadingStep.id,
+        module_code: "loading",
+        field_key: "loading_scan_confirmation",
+        is_required: 1,
+        is_active: 1,
+      }],
+    });
+
+    expect(issues.join("\n")).toContain("loading_scan_confirmation");
+    expect(issues.join("\n")).toContain("loading 模块");
+  });
+
+  it("rejects declaration mutation fields without the declaration anchor", () => {
+    const customsStep = {
+      id: "customs",
+      step_key: "customs_entry",
+      name: "Customs entry",
+      is_active: 1,
+      sort_order: 60,
+    };
+    const customsModule = {
+      id: "customs-module",
+      step_id: customsStep.id,
+      module_code: "customs",
+      display_name: "Customs",
+      is_active: 1,
+      is_required: 1,
+      responsibility_position_code: "DOC",
+      completion_mode: "all_tasks" as const,
+    };
+
+    const issues = validateWorkflowOperationalGateStructure({
+      steps: [customsStep],
+      modules: [customsModule],
+      fields: [{
+        step_id: customsStep.id,
+        module_code: "customs",
+        field_key: "declaration_number",
+        is_required: 1,
+        is_active: 1,
+      }],
+    });
+
+    expect(issues.join("\n")).toContain("declaration_number");
+    expect(issues.join("\n")).toContain("customs_declarations");
+  });
+
+  it("allows declaration and required release before the loading node", () => {
+    const steps = [
+      { id: "customs", step_key: "origin_customs", name: "Origin customs", is_active: 1, sort_order: 50 },
+      { id: "loading", step_key: "port_loading", name: "Loading", is_active: 1, sort_order: 70 },
+      { id: "exit", step_key: "outbound_transport", name: "Exit", is_active: 1, sort_order: 80 },
+    ];
+    const modules = [
+      {
+        id: "customs-module",
+        step_id: "customs",
+        module_code: "customs",
+        display_name: "Customs",
+        is_active: 1,
+        is_required: 1,
+        responsibility_position_code: "DOC",
+        completion_mode: "all_tasks" as const,
+      },
+      {
+        id: "loading-module",
+        step_id: "loading",
+        module_code: "loading",
+        display_name: "Loading",
+        is_active: 1,
+        is_required: 1,
+        responsibility_position_code: "WAREHOUSE",
+        completion_mode: "all_tasks" as const,
+      },
+      {
+        id: "tracking-module",
+        step_id: "exit",
+        module_code: "tracking",
+        display_name: "Tracking",
+        is_active: 1,
+        is_required: 1,
+        responsibility_position_code: "OPERATION",
+        completion_mode: "all_tasks" as const,
+      },
+    ];
+    const fields = [
+      { step_id: "customs", module_code: "customs", field_key: "customs_declarations", is_required: 1, is_active: 1 },
+      { step_id: "customs", module_code: "customs", field_key: "customs_release", is_required: 1, is_active: 1 },
+      { step_id: "loading", module_code: "loading", field_key: "loading_scan_confirmation", is_required: 1, is_active: 1 },
+      { step_id: "exit", module_code: "tracking", field_key: "actual_exit_at", is_required: 1, is_active: 1 },
+    ];
+
+    expect(validateWorkflowOperationalGateStructure({
+      steps,
+      modules,
+      fields,
+    })).toEqual([]);
+  });
+
+  it("allows an optional destination release after actual exit", () => {
+    const steps = [
+      { id: "loading", step_key: "port_loading", name: "Loading", is_active: 1, sort_order: 70 },
+      { id: "exit", step_key: "outbound_transport", name: "Exit", is_active: 1, sort_order: 80 },
+      { id: "declaration", step_key: "destination_declaration", name: "Destination declaration", is_active: 1, sort_order: 90 },
+      { id: "release", step_key: "destination_release", name: "Destination release", is_active: 1, sort_order: 100 },
+    ];
+    const modules = [
+      {
+        id: "loading-module", step_id: "loading", module_code: "loading",
+        display_name: "Loading", is_active: 1, is_required: 1,
+        responsibility_position_code: "WAREHOUSE", completion_mode: "all_tasks" as const,
+      },
+      {
+        id: "tracking-module", step_id: "exit", module_code: "tracking",
+        display_name: "Tracking", is_active: 1, is_required: 1,
+        responsibility_position_code: "OPERATION", completion_mode: "all_tasks" as const,
+      },
+      ...["declaration", "release"].map((stepId) => ({
+        id: `customs-${stepId}`, step_id: stepId, module_code: "customs",
+        display_name: "Customs", is_active: 1, is_required: 0,
+        responsibility_position_code: "DOC", completion_mode: "all_tasks" as const,
+      })),
+    ];
+    const fields = [
+      { step_id: "loading", module_code: "loading", field_key: "loading_scan_confirmation", is_required: 1, is_active: 1 },
+      { step_id: "exit", module_code: "tracking", field_key: "actual_exit_at", is_required: 1, is_active: 1 },
+      { step_id: "declaration", module_code: "customs", field_key: "customs_declarations", is_required: 0, is_active: 1 },
+      { step_id: "release", module_code: "customs", field_key: "customs_release", is_required: 0, is_active: 1 },
+    ];
+
+    expect(validateWorkflowOperationalGateStructure({
+      steps,
+      modules,
+      fields,
+    })).toEqual([]);
+  });
 });
