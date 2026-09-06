@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { overseasInboundRequiresCustomsClearance } from "./overseas-inbound-policy";
+import { frozenWorkflowFieldScopeMarkerKey } from "./workflow-field-runtime";
 
 const field = (isActive: boolean, isRequired: boolean) => ({
   fieldKey: "customs_release",
@@ -45,5 +46,18 @@ describe("overseasInboundRequiresCustomsClearance", () => {
       moduleRequired: true,
       fields: [],
     })).toBe(true);
+  });
+
+  it("keeps a bound snapshot with no release field non-blocking", () => {
+    expect(overseasInboundRequiresCustomsClearance({
+      customsClearanceMode: "company",
+      moduleEnabled: true,
+      moduleRequired: true,
+      fields: [{
+        fieldKey: frozenWorkflowFieldScopeMarkerKey,
+        isActive: false,
+        isRequired: false,
+      }],
+    })).toBe(false);
   });
 });

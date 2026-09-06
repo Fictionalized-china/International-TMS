@@ -18,6 +18,7 @@ const harness = vi.hoisted(() => {
     cargo_description: "测试货物",
     pieces: 1,
     gross_weight_kg: 10,
+    customs_clearance_mode: "company",
     volume_cbm: 1,
   };
   const pkg = {
@@ -41,7 +42,10 @@ const harness = vi.hoisted(() => {
     width_cm: 100,
     height_cm: 100,
   };
-  const state = { loaderHasShipment: false };
+  const state = {
+    loaderHasShipment: false,
+    customsGates: [] as Array<Record<string, unknown>>,
+  };
   const queries: string[] = [];
   const DB = {
     prepare: vi.fn((sql: string) => {
@@ -51,6 +55,11 @@ const harness = vi.hoisted(() => {
         first: vi.fn(async () => {
           if (sql.includes("FROM warehouse_packages p")) return pkg;
           if (sql.includes("FROM shipments s JOIN transport_orders o") && sql.includes("WHERE s.id=?")) return shipment;
+          if (sql.includes("customs_clearance_mode") && sql.includes("exited")) return {
+            exited: 1,
+            order_number: shipment.order_number,
+            customs_clearance_mode: "company",
+          };
           return null;
         }),
         all: vi.fn(async () => {
@@ -90,10 +99,11 @@ const harness = vi.hoisted(() => {
       available: false,
       targetStepKey: "overseas_pickup",
       targetStepName: "境外仓与自提",
-      reason: gateReason,
+      reason: gateReason as string | null,
       legacyFallback: false,
     })),
     gateSql: vi.fn(() => ({ sql: "FROZEN_WAREHOUSE_GATE", values: ["overseas_warehouse"] })),
+    loadCustomsGates: vi.fn(async () => state.customsGates),
   };
 });
 
@@ -105,6 +115,9 @@ vi.mock("../lib/workflow-fields.server", () => ({ loadOrderModuleWorkflowFields:
 vi.mock("../lib/warehouse-workflow-access.server", () => ({
   loadWarehousePhysicalWorkflowAccess: harness.loadGate,
   warehousePhysicalWorkflowAccessSql: harness.gateSql,
+}));
+vi.mock("../lib/overseas-inbound-policy.server", () => ({
+  loadOverseasInboundCustomsGates: harness.loadCustomsGates,
 }));
 
 import { action, loader } from "./warehouse.inbound";
@@ -127,6 +140,7 @@ describe("overseas warehouse inbound frozen workflow gate", () => {
     vi.clearAllMocks();
     harness.queries.length = 0;
     harness.state.loaderHasShipment = false;
+    harness.state.customsGates = [];
   });
 
   it("rejects a forged inbound POST before any warehouse mutation", async () => {
@@ -167,5 +181,92 @@ describe("overseas warehouse inbound frozen workflow gate", () => {
       "overseas_warehouse",
       { userId: "warehouse-user", positionCode: "OVERSEAS_WAREHOUSE" },
     );
+  });
+
+  it("shows the shared customs blocker at lookup time and does not open the receiving form", async () => {
+    harness.state.loaderHasShipment = true;
+    harness.state.customsGates = [{
+      orderId: "order-1",
+      required: true,
+      cleared: false,
+      blocked: true,
+      configurationValid: true,
+      targetStepKey: "destination_clearance",
+      targetStepName: "目的地清关",
+      message: "订单 SO-001 的冻结工作流要求先完成“目的地海关放行”（节点“目的地清关”）",
+    }];
+
+    const result = await loader({
+      request: new Request("http://local.test/warehouse/inbound?warehouseId=overseas-warehouse&reference=PKG-001"),
+      params: {},
+      context: undefined,
+    } as never);
+
+    expect(harness.loadCustomsGates).toHaveBeenCalledWith("org-1", [{
+      orderId: "order-1",
+      orderNumber: "SO-001",
+      customsClearanceMode: "company",
+    }]);
+    expect(result.lookupError).toContain("目的地海关放行");
+    expect(result.selectedShipment).toBeUndefined();
+    expect(result.scannedPackage).toBeNull();
+    expect(harness.loadWorkflowFields).not.toHaveBeenCalled();
+  });
+
+  it("keeps the workbench open when the shared gate says a future or optional field is not blocking", async () => {
+    harness.state.loaderHasShipment = true;
+    harness.state.customsGates = [{
+      orderId: "order-1",
+      required: false,
+      cleared: false,
+      blocked: false,
+      configurationValid: true,
+      targetStepKey: "future_customs",
+      targetStepName: "后续清关",
+      message: null,
+    }];
+
+    const result = await loader({
+      request: new Request("http://local.test/warehouse/inbound?warehouseId=overseas-warehouse&reference=PKG-001"),
+      params: {},
+      context: undefined,
+    } as never);
+
+    expect(result.lookupError).toBe("");
+    expect(result.selectedShipment).toEqual(harness.shipment);
+    expect(result.scannedPackage).toEqual(harness.pkg);
+    expect(harness.loadWorkflowFields).toHaveBeenCalled();
+  });
+
+  it("uses the same dynamic customs reason for a forged POST before mutation", async () => {
+    harness.loadGate.mockResolvedValueOnce({
+      configured: true,
+      visible: true,
+      available: true,
+      targetStepKey: "overseas_pickup",
+      targetStepName: "境外仓与自提",
+      reason: null,
+      legacyFallback: false,
+    });
+    harness.state.customsGates = [{
+      orderId: "order-1",
+      required: true,
+      cleared: false,
+      blocked: true,
+      configurationValid: true,
+      targetStepKey: "destination_clearance",
+      targetStepName: "目的地清关",
+      message: "订单 SO-001 的冻结工作流要求先完成“目的地海关放行”（节点“目的地清关”）",
+    }];
+
+    await expect(action({ request: post(), params: {}, context: undefined } as never))
+      .resolves.toEqual({ formError: harness.state.customsGates[0].message });
+
+    expect(harness.loadCustomsGates).toHaveBeenCalledWith("org-1", [{
+      orderId: "order-1",
+      orderNumber: "SO-001",
+      customsClearanceMode: "company",
+    }]);
+    expect(harness.DB.batch).not.toHaveBeenCalled();
   });
 });

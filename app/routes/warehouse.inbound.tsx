@@ -26,6 +26,9 @@ import {
   confirmOverseasBatchArrival,
 } from "../lib/overseas-warehouse.server";
 import {
+  loadOverseasInboundCustomsGates,
+} from "../lib/overseas-inbound-policy.server";
+import {
   acceptanceRequiredMarker,
   resolveWarehouseAcceptancePolicies,
 } from "../lib/warehouse-acceptance-policy";
@@ -38,7 +41,6 @@ import {
   loadWarehousePhysicalWorkflowAccess,
   warehousePhysicalWorkflowAccessSql,
 } from "../lib/warehouse-workflow-access.server";
-import { overseasInboundRequiresCustomsClearance } from "../lib/overseas-inbound-policy";
 
 type Shipment = {
   id: string;
@@ -52,6 +54,7 @@ type Shipment = {
   destination_city: string;
   expected_warehouse_name: string | null;
   business_type: string;
+  customs_clearance_mode: "company" | "customer";
   cargo_description: string | null;
   pieces: number;
   gross_weight_kg: number;
@@ -131,7 +134,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const [shipments, locations] = await Promise.all([
     env.DB.prepare(
       `SELECT s.id,s.order_id,s.shipment_number,s.status,o.order_number,c.name customer_name,c.identity_code customer_identity_code,o.origin_city,o.destination_city,
-              o.business_type,o.cargo_description,o.pieces,o.gross_weight_kg,o.volume_cbm,
+              o.business_type,o.customs_clearance_mode,o.cargo_description,o.pieces,o.gross_weight_kg,o.volume_cbm,
       ${isOverseasWarehouse
         ? `(SELECT w.name FROM warehouses w WHERE w.id=o.overseas_warehouse_id AND w.organization_id=o.organization_id)`
         : `(SELECT COALESCE(w.name,a.destination_location) FROM order_transport_assignments a
@@ -223,6 +226,16 @@ export async function loader({ request }: Route.LoaderArgs) {
   const selectedShipment = packageReady
     ? shipments.results.find((item) => item.id === scannedPackage?.shipment_id)
     : undefined;
+  const [customsGate] = selectedShipment
+    ? await loadOverseasInboundCustomsGates(user.organizationId, [{
+        orderId: selectedShipment.order_id,
+        orderNumber: selectedShipment.order_number,
+        customsClearanceMode: selectedShipment.customs_clearance_mode,
+      }])
+    : [];
+  const receivableShipment = customsGate?.blocked
+    ? undefined
+    : selectedShipment;
   let lookupError = "";
   const scannedPackageWorkflowAccess = reference && scannedPackage && packageReady && !selectedShipment
     ? await loadWarehousePhysicalWorkflowAccess(
@@ -243,16 +256,18 @@ export async function loader({ request }: Route.LoaderArgs) {
     lookupError = `货物标签 ${scannedPackage.barcode} 已归属“${warehouse.name}”，但未找到已完成入库单，请联系管理员检查仓库数据`;
   else if (reference && scannedPackage && scannedPackage.status !== "dispatched")
     lookupError = `货物标签 ${scannedPackage.barcode} 尚未完成上一仓库出库，暂不能办理境外目的仓收货`;
+  else if (reference && customsGate?.blocked)
+    lookupError = customsGate.message || "当前订单清关门禁尚未通过";
   else if (reference && scannedPackageWorkflowAccess && !scannedPackageWorkflowAccess.available)
     lookupError = scannedPackageWorkflowAccess.reason || "当前订单的冻结工作流尚未开放境外仓入库";
   else if (reference && scannedPackage && !selectedShipment)
     lookupError = `货物标签 ${scannedPackage.barcode} 不属于当前目的仓，或对应运输单尚未进入可收货阶段`;
   else if (reference && !scannedPackage)
     lookupError = `未找到国内仓生成的货物标签或装车任务：${reference}`;
-  const workflowFields = selectedShipment
+  const workflowFields = receivableShipment
     ? await loadOrderModuleWorkflowFields(
         user.organizationId,
-        selectedShipment.order_id,
+        receivableShipment.order_id,
         isOverseasWarehouse ? "overseas_warehouse" : "warehouse",
       )
     : [];
@@ -265,8 +280,8 @@ export async function loader({ request }: Route.LoaderArgs) {
     orderId,
     returnTo,
     reference,
-    selectedShipment,
-    scannedPackage: selectedShipment ? scannedPackage : null,
+    selectedShipment: receivableShipment,
+    scannedPackage: receivableShipment ? scannedPackage : null,
     lookupError,
     workflowFields,
   };
@@ -445,22 +460,24 @@ export async function action({ request }: Route.ActionArgs) {
     const overseasGate = await env.DB.prepare(
       `SELECT
          EXISTS(SELECT 1 FROM transport_batch_orders bo JOIN transport_batches b ON b.id=bo.batch_id AND b.organization_id=bo.organization_id WHERE bo.organization_id=o.organization_id AND bo.order_id=o.id AND bo.status!='removed' AND b.road_status IN ('outbound_in_transit','overseas_arrived','waiting_pickup')) exited,
-         EXISTS(SELECT 1 FROM order_tracking_milestones m WHERE m.organization_id=o.organization_id AND m.order_id=o.id AND m.milestone_code='customs_cleared') customs_cleared,
-         o.customs_clearance_mode
+         o.order_number,o.customs_clearance_mode
        FROM transport_orders o
        WHERE o.organization_id=? AND o.id=? AND o.overseas_warehouse_id=?`,
-    ).bind(user.organizationId, orderId, selectedWarehouse.id).first<{ exited: number; customs_cleared: number; customs_clearance_mode:"company"|"customer" }>();
+    ).bind(user.organizationId, orderId, selectedWarehouse.id).first<{ exited: number; order_number: string; customs_clearance_mode:"company"|"customer" }>();
     if (!overseasGate)
       return { formError: `该订单的境外目的仓不是“${selectedWarehouse.name}”，请切换到正确仓库` };
     if (!overseasGate.exited)
       return { formError: "该订单尚未登记实际出境，不能办理境外目的仓入库" };
-    const customsClearanceRequired = await requiresOrderCustomsClearanceForOverseasInbound(
+    const [customsGate] = await loadOverseasInboundCustomsGates(
       user.organizationId,
-      orderId,
-      overseasGate.customs_clearance_mode,
+      [{
+        orderId,
+        orderNumber: overseasGate.order_number,
+        customsClearanceMode: overseasGate.customs_clearance_mode,
+      }],
     );
-    if (customsClearanceRequired && !overseasGate.customs_cleared)
-      return { formError: "该订单由公司代办清关，尚未完成目的地清关，不能办理境外目的仓入库" };
+    if (!customsGate || customsGate.blocked)
+      return { formError: customsGate?.message || "当前订单清关门禁解析失败" };
   }
   const workflowFields = await loadOrderModuleWorkflowFields(
     user.organizationId,
@@ -1053,13 +1070,14 @@ async function confirmSingleOrderOverseasArrival(input: {
   notes: string;
 }) {
   const order = await env.DB.prepare(
-    `SELECT o.overseas_warehouse_id,o.customs_clearance_mode,
+    `SELECT o.order_number,o.overseas_warehouse_id,o.customs_clearance_mode,
             COALESCE(w.name,'境外目的仓') warehouse_name,w.address warehouse_address
        FROM transport_batch_orders bo
        JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
        LEFT JOIN warehouses w ON w.id=o.overseas_warehouse_id AND w.organization_id=o.organization_id
       WHERE bo.organization_id=? AND bo.batch_id=? AND bo.order_id=? AND bo.status!='removed'`,
   ).bind(input.organizationId, input.batchId, input.orderId).first<{
+    order_number: string;
     overseas_warehouse_id: string | null;
     customs_clearance_mode: string;
     warehouse_name: string;
@@ -1067,17 +1085,16 @@ async function confirmSingleOrderOverseasArrival(input: {
   }>();
   if (!order) throw new Error("当前订单不属于该运输批次");
   if (!order.overseas_warehouse_id) throw new Error("订单尚未指定境外目的仓");
-  if (await requiresOrderCustomsClearanceForOverseasInbound(
+  const [customsGate] = await loadOverseasInboundCustomsGates(
     input.organizationId,
-    input.orderId,
-    order.customs_clearance_mode === "customer" ? "customer" : "company",
-  )) {
-    const customsCleared = await env.DB.prepare(
-      `SELECT 1 FROM order_tracking_milestones
-        WHERE organization_id=? AND order_id=? AND milestone_code='customs_cleared' LIMIT 1`,
-    ).bind(input.organizationId, input.orderId).first();
-    if (!customsCleared) throw new Error("订单尚未完成目的地清关，不能确认境外目的仓到仓");
-  }
+    [{
+      orderId: input.orderId,
+      orderNumber: order.order_number,
+      customsClearanceMode: order.customs_clearance_mode === "customer" ? "customer" : "company",
+    }],
+  );
+  if (!customsGate || customsGate.blocked)
+    throw new Error(customsGate?.message || "当前订单清关门禁解析失败");
 
   const now = new Date().toISOString();
   const location = [order.warehouse_name, order.warehouse_address].filter(Boolean).join(" · ");
@@ -1165,27 +1182,6 @@ async function confirmSingleOrderOverseasArrival(input: {
     const reason = error instanceof Error ? error.message : "客户通知暂未完成";
     return `本票已到仓并推进，客户通知待重试：${reason}`;
   }
-}
-
-async function requiresOrderCustomsClearanceForOverseasInbound(
-  organizationId: string,
-  orderId: string,
-  customsClearanceMode: "company" | "customer",
-) {
-  const [customsModule, customsWorkflowFields] = await Promise.all([
-    env.DB.prepare(
-      `SELECT enabled,is_required
-       FROM order_module_instances
-       WHERE organization_id=? AND order_id=? AND module_code='customs'`,
-    ).bind(organizationId, orderId).first<{ enabled: number; is_required: number }>(),
-    loadOrderModuleWorkflowFields(organizationId, orderId, "customs"),
-  ]);
-  return overseasInboundRequiresCustomsClearance({
-    customsClearanceMode,
-    moduleEnabled: customsModule?.enabled === 1,
-    moduleRequired: customsModule?.is_required === 1,
-    fields: customsWorkflowFields,
-  });
 }
 
 export default function WarehouseInbound({

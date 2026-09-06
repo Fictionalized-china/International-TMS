@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
-import { chunkD1Values, d1Placeholders } from "./d1-bindings";
 import { syncOrderWorkflowSnapshot } from "./order-modules.server";
 import { portalOrderListLink } from "./portal-notification-links";
+import { loadOverseasInboundCustomsGates } from "./overseas-inbound-policy.server";
 
 type ArrivalInput = {
   organizationId: string;
@@ -32,6 +32,7 @@ type AutomaticNoticeInput = {
 
 type BatchOrder = {
   order_id: string;
+  order_number: string;
   overseas_warehouse_id: string | null;
   warehouse_name: string | null;
   warehouse_address: string | null;
@@ -57,7 +58,7 @@ export async function confirmOverseasBatchArrival(input: ArrivalInput) {
     throw new Error("批次尚未确认出境，不能登记境外到仓");
 
   const orders = await env.DB.prepare(
-    `SELECT DISTINCT bo.order_id,o.overseas_warehouse_id,w.name warehouse_name,w.address warehouse_address,o.customs_clearance_mode
+    `SELECT DISTINCT bo.order_id,o.order_number,o.overseas_warehouse_id,w.name warehouse_name,w.address warehouse_address,o.customs_clearance_mode
      FROM transport_batch_orders bo
      JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
      LEFT JOIN warehouses w ON w.id=o.overseas_warehouse_id AND w.organization_id=o.organization_id
@@ -70,21 +71,16 @@ export async function confirmOverseasBatchArrival(input: ArrivalInput) {
     (item) => !item.overseas_warehouse_id,
   );
   if (missingWarehouse) throw new Error("批次内存在未指定境外目的仓的订单");
-  const companyClearanceOrders = orders.results.filter((item) => item.customs_clearance_mode !== "customer");
-  if (companyClearanceOrders.length) {
-    let clearedOrderCount = 0;
-    for (const orderChunk of chunkD1Values(companyClearanceOrders, 1)) {
-      const clearedOrders = await env.DB.prepare(
-        `SELECT COUNT(DISTINCT order_id) total
-         FROM order_tracking_milestones
-         WHERE organization_id=? AND order_id IN (${d1Placeholders(orderChunk.length)})
-           AND milestone_code='customs_cleared'`,
-      ).bind(input.organizationId, ...orderChunk.map((item) => item.order_id)).first<{ total: number }>();
-      clearedOrderCount += clearedOrders?.total ?? 0;
-    }
-    if (clearedOrderCount !== companyClearanceOrders.length)
-      throw new Error("批次内仍有公司代办清关订单未完成目的地清关，不能确认境外目的仓到仓");
-  }
+  const customsGates = await loadOverseasInboundCustomsGates(
+    input.organizationId,
+    orders.results.map((item) => ({
+      orderId: item.order_id,
+      orderNumber: item.order_number,
+      customsClearanceMode: item.customs_clearance_mode,
+    })),
+  );
+  const customsBlocker = customsGates.find((gate) => gate.blocked);
+  if (customsBlocker) throw new Error(customsBlocker.message || "批次清关门禁尚未通过");
 
   const now = new Date().toISOString();
   const statements = [
@@ -266,13 +262,16 @@ async function confirmStandaloneOrderArrival(input: ArrivalInput & { orderId: st
   if (!order) throw new Error("订单不存在");
   if (order.business_type === "ltl") throw new Error("拼车订单必须通过配载单确认境外到仓");
   if (!order.overseas_warehouse_id) throw new Error("订单尚未指定境外目的仓");
-  const destinationCustomsCleared = order.customs_clearance_mode === "customer" ? true : await env.DB.prepare(
-    `SELECT 1 FROM order_tracking_milestones
-     WHERE organization_id=? AND order_id=? AND milestone_code='customs_cleared'
-     LIMIT 1`,
-  ).bind(input.organizationId, input.orderId).first();
-  if (!destinationCustomsCleared)
-    throw new Error("整车订单尚未完成目的地清关，不能确认境外目的仓到仓");
+  const [customsGate] = await loadOverseasInboundCustomsGates(
+    input.organizationId,
+    [{
+      orderId: order.id,
+      orderNumber: order.order_number,
+      customsClearanceMode: order.customs_clearance_mode,
+    }],
+  );
+  if (!customsGate || customsGate.blocked)
+    throw new Error(customsGate?.message || "整车订单清关门禁解析失败");
 
   const now = new Date().toISOString();
   const batch = await ensureStandaloneBatch(input.organizationId, input.orderId, input.actorUserId, now);
