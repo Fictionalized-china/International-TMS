@@ -124,3 +124,19 @@ export function orderTrackingActionForMilestone(
 ) {
   return actions[orderTrackingActionFieldKey(milestoneCode)];
 }
+
+/**
+ * Departure readiness is a one-way gate. Once port arrival has been persisted,
+ * later tracking nodes must rely on their sequence prerequisite instead of
+ * reopening a gate whose planning data may already have been archived or
+ * projected into a tracking batch.
+ */
+export function trackingMilestoneNeedsDepartureReadiness(
+  milestoneCode: string,
+  recordedCodes: Iterable<string>,
+) {
+  return (
+    milestoneCode === "border_arrived" &&
+    !new Set(recordedCodes).has("border_arrived")
+  );
+}

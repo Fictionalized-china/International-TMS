@@ -87,7 +87,10 @@ import {
   syncTrackingModuleStatusForOrder,
 } from "../lib/batch-tracking.server";
 import { resolveTrackingWorkflowHandoff } from "../lib/batch-tracking.shared";
-import { orderTrackingActionForMilestone } from "../lib/order-tracking-action-policy";
+import {
+  orderTrackingActionForMilestone,
+  trackingMilestoneNeedsDepartureReadiness,
+} from "../lib/order-tracking-action-policy";
 import { loadOrderTrackingActionAccess } from "../lib/order-tracking-action-policy.server";
 import {
   nextOverseasAction,
@@ -3224,7 +3227,18 @@ export async function action({ request, params }: Route.ActionArgs) {
         .map(([fieldKey]) => fieldPolicy(fieldKey).label || fieldKey);
       if (missingTrackingFields.length)
         return { formError: `请填写当前模板要求的字段：${missingTrackingFields.join("、")}` };
-      if (milestoneCode === "border_arrived") {
+      const recorded = await env.DB.prepare(
+        `SELECT milestone_code
+         FROM order_tracking_milestones
+         WHERE organization_id=? AND order_id=?`,
+      )
+        .bind(current.organizationId, orderId)
+        .all<{ milestone_code: string }>();
+      const recordedCodes = new Set(recorded.results.map((item) => item.milestone_code));
+      if (recordedCodes.has(milestoneCode)) {
+        return { success: `${milestoneName}已登记，无需重复提交` };
+      }
+      if (trackingMilestoneNeedsDepartureReadiness(milestoneCode, recordedCodes)) {
         const departureReadiness = await checkOrderDeparture(
           current.organizationId,
           orderId,
@@ -3235,14 +3249,6 @@ export async function action({ request, params }: Route.ActionArgs) {
             formError: `尚不能登记到达出境口岸：${departureReadiness.reasons.join("；")}`,
           };
       } else {
-        const recorded = await env.DB.prepare(
-          `SELECT milestone_code
-           FROM order_tracking_milestones
-           WHERE organization_id=? AND order_id=?`,
-        )
-          .bind(current.organizationId, orderId)
-          .all<{ milestone_code: string }>();
-        const recordedCodes = new Set(recorded.results.map((item) => item.milestone_code));
         const requiredPrevious: Record<string, string> = {
           exported: "border_arrived",
           transloaded: "exported",
@@ -3258,19 +3264,6 @@ export async function action({ request, params }: Route.ActionArgs) {
           )?.[1];
           return { formError: `请先完成“${previousName || previousCode}”，再登记当前节点` };
         }
-      }
-      if (milestoneCode === "exported") {
-        const blockers: string[] = [];
-        for (const targetOrderId of linkedOrderIds) {
-          const readiness = await checkOrderDeparture(
-            current.organizationId,
-            targetOrderId,
-            vehicleReference || undefined,
-          );
-          if (!readiness.ready) blockers.push(...readiness.reasons);
-        }
-        if (blockers.length)
-          return { formError: `尚不能登记出境：${[...new Set(blockers)].join("；")}` };
       }
       const now = new Date().toISOString();
       const shipmentStatus = milestoneCode === "border_arrived" ? "customs" : "in_transit";
@@ -6751,6 +6744,11 @@ function ModuleBusinessData({
     const nextTrackingMilestoneCode =
       nextTrackingMilestone?.[0] || selectableTrackingMilestones.at(-1)?.[0] || "border_arrived";
     const nextTrackingAction = actionForMilestone(nextTrackingMilestoneCode);
+    const nextTrackingMilestoneNeedsDepartureReadiness =
+      trackingMilestoneNeedsDepartureReadiness(
+        nextTrackingMilestoneCode,
+        completedTrackingMilestoneCodes,
+      );
     const editableTrackingMilestones = selectableTrackingMilestones.filter(
       ([milestoneCode]) => actionForMilestone(milestoneCode)?.editable,
     );
@@ -6841,6 +6839,14 @@ function ModuleBusinessData({
               <strong>运踪操作门禁加载失败</strong>：为避免越权或错节点写入，当前仅可查看。
             </div>
           )}
+          {nextTrackingMilestoneNeedsDepartureReadiness &&
+            data.trackingDepartureGate &&
+            !data.trackingDepartureGate.ready && (
+              <div className="alert danger" role="status">
+                <strong>尚不能登记到达出境口岸</strong>：
+                {data.trackingDepartureGate.reasons.join("；")}
+              </div>
+            )}
           {nextTrackingAction &&
             !nextTrackingAction.editable &&
             nextTrackingAction.status !== "hidden" && (
@@ -6850,7 +6856,9 @@ function ModuleBusinessData({
             )}
           {nextTrackingAction?.editable &&
             editableTrackingMilestones.length > 0 &&
-            (!data.trackingDepartureGate || data.trackingDepartureGate.ready) && (
+            (!nextTrackingMilestoneNeedsDepartureReadiness ||
+              !data.trackingDepartureGate ||
+              data.trackingDepartureGate.ready) && (
             <div className="tracking-node-entry-inline">
 
               <div className="tracking-node-entry-heading">

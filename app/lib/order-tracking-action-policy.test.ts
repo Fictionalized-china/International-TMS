@@ -4,6 +4,7 @@ import {
   orderTrackingActionForMilestone,
   orderTrackingActionFieldKey,
   resolveOrderTrackingActionAccess,
+  trackingMilestoneNeedsDepartureReadiness,
   type OrderTrackingActionAccessMap,
 } from "./order-tracking-action-policy";
 
@@ -28,6 +29,16 @@ function policy(
 }
 
 describe("ordinary-order tracking action policy", () => {
+  it("locks the departure-readiness gate after port arrival is persisted", () => {
+    expect(trackingMilestoneNeedsDepartureReadiness("border_arrived", [])).toBe(true);
+    expect(
+      trackingMilestoneNeedsDepartureReadiness("border_arrived", ["border_arrived"]),
+    ).toBe(false);
+    expect(
+      trackingMilestoneNeedsDepartureReadiness("exported", ["border_arrived"]),
+    ).toBe(false);
+  });
+
   it.each([
     ["exported", "actual_exit_at"],
     ["actual_exit", "actual_exit_at"],
