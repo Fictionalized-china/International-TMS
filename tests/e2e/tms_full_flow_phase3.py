@@ -1571,31 +1571,52 @@ class Phase3Flow:
                 session.click(disclosure.locator("summary"), f"展开 {order.order_number} 报关")
                 panel = disclosure.locator(".batch-order-file-panel")
                 session.expect_visible(panel, f"{order.order_number} 报关办理面板")
-                create = panel.get_by_role("button", name="新增报关单", exact=True)
-                self._expect_visible_or_block(
-                    session,
-                    create,
-                    f"{order.order_number} 新增报关单入口",
-                    owner="PZ 单证权限维护人",
-                    remediation="整批单证负责人应能在当前 PZ 页逐票办理。",
+                pending_declarations = panel.locator(".batch-customs-row").filter(
+                    has_text="已申报"
                 )
-                declaration_number = self._declaration_number(key, sequence)
-                session.click(create.first, f"新增 {order.order_number} 报关单")
-                dialog = session.page.get_by_role(
-                    "dialog", name="新增本票报关单"
-                )
-                session.expect_visible(dialog, f"{order.order_number} 新增报关单弹窗")
-                form = dialog.locator("form.customs-declaration-form")
-                self._fill_customs_form(
-                    session,
-                    form,
-                    declaration_number=declaration_number,
-                    sequence=sequence,
-                )
-                session.click(
-                    form.get_by_role("button", name="保存报关单"),
-                    f"保存 {order.order_number} 正式报关单",
-                )
+                if pending_declarations.count() > 1:
+                    raise BusinessBlocker(
+                        f"{order.order_number} 存在多张待放行报关单，无法安全自动续办",
+                        owner="报关数据完整性维护人",
+                        remediation="先在当前页面核对并取消无效申报，仅保留一张有效待放行记录。",
+                    )
+                if pending_declarations.count() == 1:
+                    pending_declaration = pending_declarations.first
+                    declaration_number = (
+                        pending_declaration.locator("strong").first.inner_text().strip()
+                    )
+                    if not declaration_number:
+                        raise BusinessBlocker(
+                            f"{order.order_number} 待放行申报缺少可见报关单号",
+                            owner="报关数据完整性维护人",
+                            remediation="确保待放行记录在办理面板展示唯一报关单号。",
+                        )
+                else:
+                    create = panel.get_by_role("button", name="新增报关单", exact=True)
+                    self._expect_visible_or_block(
+                        session,
+                        create,
+                        f"{order.order_number} 新增报关单入口",
+                        owner="PZ 单证权限维护人",
+                        remediation="整批单证负责人应能在当前 PZ 页逐票办理。",
+                    )
+                    declaration_number = self._declaration_number(key, sequence)
+                    session.click(create.first, f"新增 {order.order_number} 报关单")
+                    dialog = session.page.get_by_role(
+                        "dialog", name="新增本票报关单"
+                    )
+                    session.expect_visible(dialog, f"{order.order_number} 新增报关单弹窗")
+                    form = dialog.locator("form.customs-declaration-form")
+                    self._fill_customs_form(
+                        session,
+                        form,
+                        declaration_number=declaration_number,
+                        sequence=sequence,
+                    )
+                    session.click(
+                        form.get_by_role("button", name="保存报关单"),
+                        f"保存 {order.order_number} 正式报关单",
+                    )
                 table = session.page.locator("section.batch-order-documents")
                 row = table.locator("tbody tr").filter(has_text=order.order_number)
                 saved_row = row.filter(has_text=declaration_number)
@@ -1603,6 +1624,20 @@ class Phase3Flow:
                     saved_row.first,
                     f"{order.order_number} 报关单保存后的持久记录",
                 )
+                disclosure = saved_row.locator("details.batch-order-file-details")
+                panel = disclosure.locator(".batch-order-file-panel")
+                if self._is_visible(panel):
+                    session.click(
+                        disclosure.locator(".batch-order-file-panel-header button"),
+                        f"收起 {order.order_number} 报关办理面板",
+                    )
+                    session.expect_hidden(
+                        panel,
+                        f"{order.order_number} 报关办理面板已收起",
+                    )
+                table = session.page.locator("section.batch-order-documents")
+                row = table.locator("tbody tr").filter(has_text=order.order_number)
+                saved_row = row.filter(has_text=declaration_number)
                 release = saved_row.get_by_role("button", name="确认放行", exact=True)
                 self._expect_visible_or_block(
                     session,

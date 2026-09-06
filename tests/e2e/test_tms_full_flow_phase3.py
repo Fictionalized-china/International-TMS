@@ -581,6 +581,21 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
             helper,
         )
 
+    def test_batch_customs_resumes_one_pending_declaration_and_closes_the_panel(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def complete_batch_customs(")
+        end = source.index("    @staticmethod\n    def _event_time", start)
+        helper = source[start:end]
+
+        self.assertIn("pending_declarations = panel.locator", helper)
+        self.assertIn("if pending_declarations.count() == 1:", helper)
+        self.assertIn('pending_declaration.locator("strong")', helper)
+        self.assertIn(".batch-order-file-panel-header button", helper)
+        self.assertLess(
+            helper.index(".batch-order-file-panel-header button"),
+            helper.index("release = saved_row.get_by_role"),
+        )
+
     def test_phase3_preserves_valid_prefilled_datetime_controls(self) -> None:
         source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
 
