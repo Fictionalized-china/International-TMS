@@ -58,7 +58,7 @@ export async function loadSettlementWorkbenchActionAccess(
     );
   }
 
-  const scope = settlementAssignedScope(input.actor);
+  const scope = settlementOrderScopeSql(input.actor);
   const scopeRows: Array<{
     order_id: string;
     assigned_to_actor: number;
@@ -177,7 +177,10 @@ async function loadLinkedOrderRows(
   ).bind(organizationId, sourceIds[0]).all<LinkedOrderRow>()).results;
 }
 
-function settlementAssignedScope(actor: SettlementWorkbenchActor) {
+export function settlementOrderScopeSql(
+  actor: SettlementWorkbenchActor,
+  alias = "o",
+) {
   if (hasFullSettlementScope(actor)) {
     return { sql: "1=1", values: [] as string[] };
   }
@@ -187,7 +190,7 @@ function settlementAssignedScope(actor: SettlementWorkbenchActor) {
       ? ["order.scope.assigned"]
       : [],
   };
-  return orderVisibilitySql(assignedActor, "o");
+  return orderVisibilitySql(assignedActor, alias);
 }
 
 function normalizeIds(ids: readonly string[]) {

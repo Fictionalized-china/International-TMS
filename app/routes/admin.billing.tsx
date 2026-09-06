@@ -16,6 +16,13 @@ import {
   type BillingView,
 } from "../lib/billing-view";
 import {
+  hasFullSettlementScope,
+  type SettlementMultiOrderActionAccess,
+  type SettlementWorkbenchAction,
+  type SettlementWorkbenchActor,
+} from "../lib/settlement-workbench-access";
+import { loadSettlementWorkbenchActionAccess } from "../lib/settlement-workbench-access.server";
+import {
   emptySettlementPage,
   loadAvailableCashTransactions,
   loadCashHistoryPage,
@@ -41,6 +48,20 @@ import {
 import { valueOf } from "../lib/validation";
 
 type UserOption = { id: string; display_name: string };
+type SettlementUiAccess = Pick<SettlementMultiOrderActionAccess, "visible" | "canWrite" | "reason">;
+type SettlementActionAccessIndex = {
+  createReconciliationByGroup: Record<string, SettlementMultiOrderActionAccess>;
+  confirmReconciliationById: Record<string, SettlementMultiOrderActionAccess>;
+  allocateCashById: Record<string, SettlementMultiOrderActionAccess>;
+  recordInvoiceById: Record<string, SettlementMultiOrderActionAccess>;
+  recordCash: SettlementUiAccess;
+};
+
+const emptyActionAccessIndex = (): SettlementActionAccessIndex => ({
+  createReconciliationByGroup: {}, confirmReconciliationById: {},
+  allocateCashById: {}, recordInvoiceById: {},
+  recordCash: { visible: true, canWrite: false, reason: "当前页没有可办理的收付款流水" },
+});
 
 const tabCopy: Record<BillingTab, { label: string; description: string }> = {
   pending: { label: "待对账", description: "从已确认费用生成对账单" },
@@ -58,7 +79,7 @@ export async function loader({ request }: Route.LoaderArgs) {
 
   const view = readBillingView(new URL(request.url).searchParams);
   const [summary, organization, users] = await Promise.all([
-    loadSettlementSummary(env.DB, current.organizationId),
+    loadSettlementSummary(env.DB, current),
     env.DB.prepare("SELECT name FROM organizations WHERE id=?")
       .bind(current.organizationId)
       .first<{ name: string }>(),
@@ -82,26 +103,54 @@ export async function loader({ request }: Route.LoaderArgs) {
   let invoiceHistoryPage = emptySettlementPage<InvoiceRecordRow>(view.page, BILLING_PAGE_SIZE);
   let legacyHistoryPage = emptySettlementPage<LegacyInvoiceRow>(view.page, BILLING_PAGE_SIZE);
   let availableCashTransactions: CashTransactionRow[] = [];
+  const actionAccess = emptyActionAccessIndex();
 
   if (view.tab === "pending") {
-    eligiblePage = await loadEligibleExpensePage(env.DB, current.organizationId, pageQuery);
+    eligiblePage = await loadEligibleExpensePage(env.DB, current, pageQuery);
+    for (const group of groupExpenses(eligiblePage.items)) {
+      actionAccess.createReconciliationByGroup[group.key] = await loadSettlementWorkbenchActionAccess(env.DB, {
+        actor: current,
+        action: "create_reconciliation",
+        source: { kind: "expense_ids", ids: group.expenses.map((item) => item.id) },
+        legacyFallback: "deny",
+      });
+    }
   } else if (view.tab === "reconciliations") {
-    reconciliationPage = await loadReconciliationPage(env.DB, current.organizationId, pageQuery);
+    reconciliationPage = await loadReconciliationPage(env.DB, current, pageQuery);
+    for (const row of reconciliationPage.items) {
+      actionAccess.confirmReconciliationById[row.id] = await loadSettlementWorkbenchActionAccess(env.DB, {
+        actor: current, action: "confirm_reconciliation",
+        source: { kind: "reconciliation_id", id: row.id }, legacyFallback: "deny",
+      });
+    }
   } else if (view.tab === "cash") {
-    cashWorkPage = await loadReconciliationPage(env.DB, current.organizationId, pageQuery, "cash");
+    cashWorkPage = await loadReconciliationPage(env.DB, current, pageQuery, "cash");
     availableCashTransactions = await loadAvailableCashTransactions(
       env.DB,
-      current.organizationId,
+      current,
       cashWorkPage.items,
     );
+    actionAccess.recordCash = recordCashUiAccess(current);
+    for (const row of cashWorkPage.items) {
+      actionAccess.allocateCashById[row.id] = await loadSettlementWorkbenchActionAccess(env.DB, {
+        actor: current, action: "allocate_cash",
+        source: { kind: "reconciliation_id", id: row.id }, legacyFallback: "deny",
+      });
+    }
   } else if (view.tab === "invoices") {
-    invoiceWorkPage = await loadReconciliationPage(env.DB, current.organizationId, pageQuery, "invoice");
+    invoiceWorkPage = await loadReconciliationPage(env.DB, current, pageQuery, "invoice");
+    for (const row of invoiceWorkPage.items) {
+      actionAccess.recordInvoiceById[row.id] = await loadSettlementWorkbenchActionAccess(env.DB, {
+        actor: current, action: "record_invoice",
+        source: { kind: "reconciliation_id", id: row.id }, legacyFallback: "deny",
+      });
+    }
   } else if (view.historyType === "cash") {
-    cashHistoryPage = await loadCashHistoryPage(env.DB, current.organizationId, pageQuery);
+    cashHistoryPage = await loadCashHistoryPage(env.DB, current, pageQuery);
   } else if (view.historyType === "invoices") {
-    invoiceHistoryPage = await loadInvoiceHistoryPage(env.DB, current.organizationId, pageQuery);
+    invoiceHistoryPage = await loadInvoiceHistoryPage(env.DB, current, pageQuery);
   } else {
-    legacyHistoryPage = await loadLegacyInvoicePage(env.DB, current.organizationId, pageQuery);
+    legacyHistoryPage = await loadLegacyInvoicePage(env.DB, current, pageQuery);
   }
 
   return {
@@ -118,6 +167,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     invoiceHistoryPage,
     legacyHistoryPage,
     availableCashTransactions,
+    actionAccess,
     counts: summary.counts,
     balances: summary.balances,
   };
@@ -131,13 +181,6 @@ export async function action({ request }: Route.ActionArgs) {
   if (!current.permissions.includes("billing.sensitive.view")) {
     throw new Response("没有权限查看或处理敏感费用", { status: 403 });
   }
-  const cashIntent = intent === "record_cash" || intent === "allocate_cash";
-  if (cashIntent && !current.permissions.includes("billing.cash.manage")) {
-    throw new Response("没有收付款与核销权限", { status: 403 });
-  }
-  if (!cashIntent && !current.permissions.includes("billing.manage")) {
-    throw new Response("没有对账与发票管理权限", { status: 403 });
-  }
 
   try {
     if (intent === "create_reconciliation") {
@@ -145,9 +188,14 @@ export async function action({ request }: Route.ActionArgs) {
       if (direction !== "receivable" && direction !== "payable") {
         return { formError: "对账方向无效" };
       }
+      const expenseIds = form.getAll("expenseId").map(String);
+      const blocked = await settlementActionBlocked(current, "create_reconciliation", {
+        kind: "expense_ids", ids: expenseIds,
+      });
+      if (blocked) return { formError: blocked };
       const result = await createReconciliation(env.DB, {
         organizationId: current.organizationId,
-        expenseIds: form.getAll("expenseId").map(String),
+        expenseIds,
         direction,
         notes: valueOf(form, "notes"),
         userId: current.userId,
@@ -161,6 +209,10 @@ export async function action({ request }: Route.ActionArgs) {
     }
     if (intent === "confirm_reconciliation") {
       const id = valueOf(form, "id");
+      const blocked = await settlementActionBlocked(current, "confirm_reconciliation", {
+        kind: "reconciliation_id", id,
+      });
+      if (blocked) return { formError: blocked };
       await confirmReconciliation(env.DB, {
         organizationId: current.organizationId,
         id,
@@ -172,6 +224,10 @@ export async function action({ request }: Route.ActionArgs) {
     }
     if (intent === "record_invoice") {
       const reconciliationId = valueOf(form, "reconciliationId");
+      const blocked = await settlementActionBlocked(current, "record_invoice", {
+        kind: "reconciliation_id", id: reconciliationId,
+      });
+      if (blocked) return { formError: blocked };
       const result = await recordSettlementInvoice(env.DB, {
         organizationId: current.organizationId,
         reconciliationId,
@@ -199,6 +255,8 @@ export async function action({ request }: Route.ActionArgs) {
       return { success: `发票记录 ${result.recordNumber} 已保存` };
     }
     if (intent === "record_cash") {
+      const cashAccess = recordCashUiAccess(current);
+      if (!cashAccess.canWrite) return { formError: cashAccess.reason ?? "当前不可登记收付款流水" };
       const direction = valueOf(form, "direction");
       if (direction !== "receipt" && direction !== "payment") {
         return { formError: "收付款方向无效" };
@@ -227,6 +285,10 @@ export async function action({ request }: Route.ActionArgs) {
     if (intent === "allocate_cash") {
       const transactionId = valueOf(form, "transactionId");
       const reconciliationId = valueOf(form, "reconciliationId");
+      const blocked = await settlementActionBlocked(current, "allocate_cash", {
+        kind: "reconciliation_id", id: reconciliationId,
+      });
+      if (blocked) return { formError: blocked };
       await allocateCashTransaction(env.DB, {
         organizationId: current.organizationId,
         transactionId,
@@ -244,6 +306,31 @@ export async function action({ request }: Route.ActionArgs) {
   } catch (error) {
     return { formError: error instanceof Error ? error.message : "操作失败，请稍后重试" };
   }
+}
+
+function recordCashUiAccess(actor: SettlementWorkbenchActor): SettlementUiAccess {
+  if (!actor.permissions.includes("billing.cash.manage")) {
+    return { visible: true, canWrite: false, reason: "当前账号没有收付款流水登记权限" };
+  }
+  if (!hasFullSettlementScope(actor)) {
+    return {
+      visible: true,
+      canWrite: false,
+      reason: "当前账号没有组织级结算范围，不能登记组织收付款流水",
+    };
+  }
+  return { visible: true, canWrite: true, reason: null };
+}
+
+async function settlementActionBlocked(
+  actor: Parameters<typeof loadSettlementWorkbenchActionAccess>[1]["actor"],
+  action: SettlementWorkbenchAction,
+  source: Parameters<typeof loadSettlementWorkbenchActionAccess>[1]["source"],
+) {
+  const access = await loadSettlementWorkbenchActionAccess(env.DB, {
+    actor, action, source, legacyFallback: "deny",
+  });
+  return access.canWrite ? null : access.reason ?? "当前冻结工作流不允许办理该结算操作";
 }
 
 export default function Billing({ loaderData, actionData }: Route.ComponentProps) {
@@ -281,13 +368,13 @@ export default function Billing({ loaderData, actionData }: Route.ComponentProps
     {loaderData.view.tab === "pending" && <PendingReconciliationPage
       view={loaderData.view}
       page={loaderData.eligiblePage}
-      canManage={manage}
+      accessByGroup={loaderData.actionAccess.createReconciliationByGroup}
       busy={busy}
     />}
     {loaderData.view.tab === "reconciliations" && <ReconciliationPage
       view={loaderData.view}
       page={loaderData.reconciliationPage}
-      canManage={manage}
+      accessById={loaderData.actionAccess.confirmReconciliationById}
       busy={busy}
     />}
     {loaderData.view.tab === "cash" && <CashSettlementPage
@@ -296,13 +383,14 @@ export default function Billing({ loaderData, actionData }: Route.ComponentProps
       cash={loaderData.availableCashTransactions}
       users={loaderData.users}
       organizationName={loaderData.organizationName}
-      canManage={cashManage}
+      recordCashAccess={loaderData.actionAccess.recordCash}
+      accessById={loaderData.actionAccess.allocateCashById}
       busy={busy}
     />}
     {loaderData.view.tab === "invoices" && <InvoicePage
       view={loaderData.view}
       page={loaderData.invoiceWorkPage}
-      canManage={manage}
+      accessById={loaderData.actionAccess.recordInvoiceById}
       busy={busy}
     />}
     {loaderData.view.tab === "history" && <HistoryPage
@@ -331,10 +419,10 @@ function BillingTabs({ active, counts }: {
   </nav>;
 }
 
-function PendingReconciliationPage({ view, page, canManage, busy }: {
+function PendingReconciliationPage({ view, page, accessByGroup, busy }: {
   view: BillingView;
   page: SettlementPage<SettlementExpense>;
-  canManage: boolean;
+  accessByGroup: Record<string, SettlementUiAccess>;
   busy: boolean;
 }) {
   const groups = groupExpenses(page.items);
@@ -345,9 +433,9 @@ function PendingReconciliationPage({ view, page, canManage, busy }: {
       count={`${page.total} 条`}
     />
     <BillingFilters view={view} mode="pending" />
-    {!canManage && <ReadOnlyNotice>当前账号只能查看待对账费用，不能生成对账单。</ReadOnlyNotice>}
-    {canManage && groups.map((group) => <ExpenseSelection
+    {groups.map((group) => <ExpenseSelection
       key={group.key}
+      access={accessByGroup[group.key] ?? { visible: false, canWrite: false, reason: "当前结算办理项不可用" }}
       direction={group.direction}
       counterparty={group.counterparty}
       currency={group.currency}
@@ -359,10 +447,10 @@ function PendingReconciliationPage({ view, page, canManage, busy }: {
   </section>;
 }
 
-function ReconciliationPage({ view, page, canManage, busy }: {
+function ReconciliationPage({ view, page, accessById, busy }: {
   view: BillingView;
   page: SettlementPage<ReconciliationRow>;
-  canManage: boolean;
+  accessById: Record<string, SettlementUiAccess>;
   busy: boolean;
 }) {
   return <section className="panel billing-workspace-page">
@@ -372,13 +460,12 @@ function ReconciliationPage({ view, page, canManage, busy }: {
       count={`${page.total} 张`}
     />
     <BillingFilters view={view} mode="reconciliations" />
-    {!canManage && <ReadOnlyNotice>当前账号只能查看对账单状态。</ReadOnlyNotice>}
     <div className="reconciliation-list">
       {page.items.map((row) => <ReconciliationSheet
         key={row.id}
         row={row}
         mode="review"
-        canManage={canManage}
+        access={accessById[row.id] ?? { visible: false, canWrite: false, reason: "当前对账确认项不可用" }}
         busy={busy}
       />)}
     </div>
@@ -387,13 +474,14 @@ function ReconciliationPage({ view, page, canManage, busy }: {
   </section>;
 }
 
-function CashSettlementPage({ view, page, cash, users, organizationName, canManage, busy }: {
+function CashSettlementPage({ view, page, cash, users, organizationName, recordCashAccess, accessById, busy }: {
   view: BillingView;
   page: SettlementPage<ReconciliationRow>;
   cash: CashTransactionRow[];
   users: UserOption[];
   organizationName: string;
-  canManage: boolean;
+  recordCashAccess: SettlementUiAccess;
+  accessById: Record<string, SettlementUiAccess>;
   busy: boolean;
 }) {
   return <section className="panel billing-workspace-page">
@@ -402,15 +490,16 @@ function CashSettlementPage({ view, page, cash, users, organizationName, canMana
       description="先登记真实收付款流水，再匹配同方向、同往来单位、同币种的已确认对账单。"
       count={`${page.total} 张待核销`}
     />
-    {canManage ? <CashEntryForm users={users} organizationName={organizationName} busy={busy} />
-      : <ReadOnlyNotice>当前账号只能查看核销进度；请由出纳岗登记流水并完成核销。</ReadOnlyNotice>}
+    {recordCashAccess.canWrite
+      ? <CashEntryForm users={users} organizationName={organizationName} busy={busy} />
+      : <ReadOnlyNotice>{recordCashAccess.reason ?? "当前账号不能登记收付款流水。"}</ReadOnlyNotice>}
     <BillingFilters view={view} mode="cash" />
     <div className="reconciliation-list">
       {page.items.map((row) => <ReconciliationSheet
         key={row.id}
         row={row}
         mode="cash"
-        canManage={canManage}
+        access={accessById[row.id] ?? { visible: false, canWrite: false, reason: "当前核销项不可用" }}
         busy={busy}
         cash={cash}
       />)}
@@ -420,10 +509,10 @@ function CashSettlementPage({ view, page, cash, users, organizationName, canMana
   </section>;
 }
 
-function InvoicePage({ view, page, canManage, busy }: {
+function InvoicePage({ view, page, accessById, busy }: {
   view: BillingView;
   page: SettlementPage<ReconciliationRow>;
-  canManage: boolean;
+  accessById: Record<string, SettlementUiAccess>;
   busy: boolean;
 }) {
   return <section className="panel billing-workspace-page">
@@ -433,13 +522,12 @@ function InvoicePage({ view, page, canManage, busy }: {
       count={`${page.total} 张待登记`}
     />
     <BillingFilters view={view} mode="invoices" />
-    {!canManage && <ReadOnlyNotice>当前账号只能查看发票进度，不能登记发票。</ReadOnlyNotice>}
     <div className="reconciliation-list">
       {page.items.map((row) => <ReconciliationSheet
         key={row.id}
         row={row}
         mode="invoice"
-        canManage={canManage}
+        access={accessById[row.id] ?? { visible: false, canWrite: false, reason: "当前发票办理项不可用" }}
         busy={busy}
       />)}
     </div>
@@ -531,14 +619,29 @@ function HistoryTypeSwitch({ active }: { active: BillingHistoryType }) {
   </nav>;
 }
 
-function ExpenseSelection({ direction, counterparty, currency, expenses, busy }: {
+export function ExpenseSelection({ direction, counterparty, currency, expenses, busy, access }: {
   direction: "receivable" | "payable";
   counterparty: string;
   currency: string;
   expenses: SettlementExpense[];
   busy: boolean;
+  access: SettlementUiAccess;
 }) {
   const total = expenses.reduce((sum, item) => sum + item.amount, 0);
+  if (!access.canWrite) return <section className="settlement-selector">
+    <header><div>
+      <span className={`billing-flow-chip ${direction}`}>{direction === "receivable" ? "客户应收" : "供应商应付"}</span>
+      <strong>{counterparty}</strong>
+      <small>{currency} · 本页 {expenses.length} 条 · 合计 {total.toFixed(2)}</small>
+    </div></header>
+    <div className="settlement-expense-list" aria-label="只读费用明细">
+      {expenses.map((item) => <div key={item.id} className="settlement-expense-readonly"><span>
+        <strong><OrderNumberLink id={item.order_id} number={item.order_number} /> · {item.charge_name}</strong>
+        <small>{item.currency} {item.amount.toFixed(2)}</small>
+      </span></div>)}
+    </div>
+    <ReadOnlyNotice>{access.reason ?? "当前冻结工作流不允许生成对账单。"}</ReadOnlyNotice>
+  </section>;
   return <section className="settlement-selector">
     <header>
       <div>
@@ -570,10 +673,10 @@ function ExpenseSelection({ direction, counterparty, currency, expenses, busy }:
   </section>;
 }
 
-function ReconciliationSheet({ row, mode, canManage, busy, cash = [] }: {
+export function ReconciliationSheet({ row, mode, access, busy, cash = [] }: {
   row: ReconciliationRow;
   mode: "review" | "cash" | "invoice";
-  canManage: boolean;
+  access: SettlementUiAccess;
   busy: boolean;
   cash?: CashTransactionRow[];
 }) {
@@ -585,6 +688,7 @@ function ReconciliationSheet({ row, mode, canManage, busy, cash = [] }: {
     item.currency === row.currency &&
     item.amount - item.allocated_amount > 0.009);
   const visualStatus = reconciliationStatus(row, settlementRemaining);
+  const canManage = access.canWrite;
 
   return <article className="reconciliation-card">
     <header>
@@ -611,6 +715,8 @@ function ReconciliationSheet({ row, mode, canManage, busy, cash = [] }: {
       <p>确认后费用进入正式对账，不能再按草稿修改。</p>
       <button className="primary" disabled={busy}>确认对账单</button>
     </Form>}
+    {mode === "review" && row.status === "draft" && !canManage &&
+      <ReadOnlyNotice>{access.reason ?? "当前不可确认该对账单。"}</ReadOnlyNotice>}
 
     {mode === "invoice" && canManage && invoiceRemaining > 0.009 && <details className="billing-card-operation">
       <summary>登记{row.direction === "receivable" ? "销项开票" : "进项收票"}</summary>
@@ -634,6 +740,8 @@ function ReconciliationSheet({ row, mode, canManage, busy, cash = [] }: {
         <button className="primary" disabled={busy}>保存发票记录</button>
       </Form>
     </details>}
+    {mode === "invoice" && invoiceRemaining > 0.009 && !canManage &&
+      <ReadOnlyNotice>{access.reason ?? "当前不可登记发票。"}</ReadOnlyNotice>}
 
     {mode === "cash" && canManage && settlementRemaining > 0.009 && <details className="billing-card-operation">
       <summary>匹配收付款流水并核销</summary>
@@ -649,6 +757,8 @@ function ReconciliationSheet({ row, mode, canManage, busy, cash = [] }: {
         {!matchingCash.length && <small className="field-error">尚无同方向、同往来单位、同币种的可用流水，请先登记。</small>}
       </Form>
     </details>}
+    {mode === "cash" && settlementRemaining > 0.009 && !canManage &&
+      <ReadOnlyNotice>{access.reason ?? "当前不可核销该对账单。"}</ReadOnlyNotice>}
   </article>;
 }
 

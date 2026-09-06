@@ -38,6 +38,7 @@ describe("cloud production account blueprint", () => {
       "billing.sensitive.view": ["pos_customer_service", "pos_finance", "pos_cashier"],
       "billing.expense.approve": ["pos_finance"],
       "billing.cash.manage": ["pos_cashier"],
+      "billing.scope.all": ["pos_finance", "pos_cashier"],
       "analytics.profit.view": ["pos_finance"],
       "role.manage": ["pos_hr_admin"],
       "security.manage": ["pos_hr_admin"],
@@ -67,6 +68,9 @@ describe("cloud production account blueprint", () => {
     expect(accessModelRolePermissions.pos_customer_service).not.toContain("billing.cash.manage");
     expect(accessModelRolePermissions.pos_cashier).toContain("billing.cash.manage");
 
+    expect(accessModelRolePermissions.pos_customer_service).not.toContain("billing.scope.all");
+    expect(accessModelRolePermissions.pos_finance).toContain("billing.scope.all");
+    expect(accessModelRolePermissions.pos_cashier).toContain("billing.scope.all");
     expect(accessModelRolePermissions.pos_business_supervisor).toContain("order.scope.all");
     expect(accessModelRolePermissions.pos_operation_supervisor).toContain("transport.batch.approve");
 

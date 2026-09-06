@@ -1,3 +1,7 @@
+import { hasFullSettlementScope, type SettlementWorkbenchActor } from "./settlement-workbench-access";
+import {
+  settlementOrderScopeSql,
+} from "./settlement-workbench-access.server";
 import type {
   CashTransactionRow,
   InvoiceRecordRow,
@@ -44,88 +48,177 @@ const outboundReadySql = `EXISTS(
   FROM transport_batch_orders bo
   JOIN transport_batches b ON b.id=bo.batch_id
   WHERE bo.order_id=o.id
+    AND bo.organization_id=o.organization_id
+    AND b.organization_id=bo.organization_id
     AND bo.status!='removed'
     AND b.road_status IN ('outbound_in_transit','overseas_arrived','waiting_pickup','pickup_completed')
 )`;
 
-const eligibleBaseSql = `
+function eligibleBaseSql(scopeSql: string) {
+  return `
   FROM business_expenses e
-  JOIN transport_orders o ON o.id=e.order_id
-  JOIN customers c ON c.id=o.customer_id
+  JOIN transport_orders o ON o.id=e.order_id AND o.organization_id=e.organization_id
+  JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
   WHERE e.organization_id=?
+    AND ${scopeSql}
     AND e.stage='confirmed'
     AND e.amount>0
     AND NOT EXISTS(
       SELECT 1
       FROM settlement_reconciliation_lines l
-      JOIN settlement_reconciliations r ON r.id=l.reconciliation_id
-      WHERE l.expense_id=e.id AND r.status!='withdrawn'
+      JOIN settlement_reconciliations r
+        ON r.id=l.reconciliation_id AND r.organization_id=l.organization_id
+      WHERE l.expense_id=e.id AND l.organization_id=e.organization_id AND r.status!='withdrawn'
     )
     AND (e.direction='payable' OR ${outboundReadySql})`;
+}
 
-const reconciliationCte = `WITH reconciliation_data AS (
-  SELECT r.id,r.document_number,r.direction,r.counterparty_name,r.settlement_entity,r.currency,
-    r.total_amount,r.status,r.notes,r.confirmed_at,r.created_at,
-    COUNT(DISTINCT l.expense_id) expense_count,
-    GROUP_CONCAT(DISTINCT o.order_number) orders,
-    GROUP_CONCAT(DISTINCT o.id||'|'||o.order_number) order_refs,
-    COALESCE((
-      SELECT SUM(i.amount)
-      FROM settlement_invoice_records i
-      WHERE i.reconciliation_id=r.id AND i.status!='void'
-    ),0) invoiced_amount,
-    COALESCE((
-      SELECT SUM(a.amount)
-      FROM settlement_cash_allocations a
-      JOIN settlement_cash_transactions t ON t.id=a.cash_transaction_id AND t.status!='void'
-      WHERE a.reconciliation_id=r.id
-    ),0) settled_amount
-  FROM settlement_reconciliations r
-  JOIN settlement_reconciliation_lines l ON l.reconciliation_id=r.id
-  JOIN business_expenses e ON e.id=l.expense_id
-  LEFT JOIN transport_orders o ON o.id=e.order_id
-  WHERE r.organization_id=? AND r.status!='withdrawn'
-  GROUP BY r.id
-)`;
+function reconciliationCte(actor: SettlementWorkbenchActor) {
+  const scope = settlementOrderScopeSql(actor, "scope_order");
+  return { sql: `WITH reconciliation_data AS (
+    SELECT r.id,r.document_number,r.direction,r.counterparty_name,r.settlement_entity,r.currency,
+      r.total_amount,r.status,r.notes,r.confirmed_at,r.created_at,
+      COUNT(DISTINCT l.expense_id) expense_count,
+      GROUP_CONCAT(DISTINCT o.order_number) orders,
+      GROUP_CONCAT(DISTINCT o.id||'|'||o.order_number) order_refs,
+      COALESCE((
+        SELECT SUM(i.amount)
+        FROM settlement_invoice_records i
+        WHERE i.reconciliation_id=r.id AND i.organization_id=r.organization_id AND i.status!='void'
+      ),0) invoiced_amount,
+      COALESCE((
+        SELECT SUM(a.amount)
+        FROM settlement_cash_allocations a
+        JOIN settlement_cash_transactions t
+          ON t.id=a.cash_transaction_id AND t.organization_id=a.organization_id AND t.status!='void'
+        WHERE a.reconciliation_id=r.id AND a.organization_id=r.organization_id
+      ),0) settled_amount
+    FROM settlement_reconciliations r
+    JOIN settlement_reconciliation_lines l
+      ON l.reconciliation_id=r.id AND l.organization_id=r.organization_id
+    JOIN business_expenses e
+      ON e.id=l.expense_id AND e.organization_id=r.organization_id
+    JOIN transport_orders o
+      ON o.id=e.order_id AND o.organization_id=e.organization_id
+    WHERE r.organization_id=? AND r.status!='withdrawn'
+      AND NOT EXISTS(
+        SELECT 1
+        FROM settlement_reconciliation_lines scope_line
+        LEFT JOIN business_expenses scope_expense
+          ON scope_expense.id=scope_line.expense_id
+         AND scope_expense.organization_id=r.organization_id
+        LEFT JOIN transport_orders scope_order
+          ON scope_order.id=scope_expense.order_id
+         AND scope_order.organization_id=r.organization_id
+        WHERE scope_line.reconciliation_id=r.id
+          AND (
+            scope_line.organization_id<>r.organization_id OR
+            scope_expense.id IS NULL OR
+            scope_order.id IS NULL OR
+            NOT (${scope.sql})
+          )
+      )
+    GROUP BY r.id
+  )`, bindings: [actor.organizationId, ...scope.values] };
+}
 
-const cashCte = `WITH cash_data AS (
-  SELECT t.id,t.transaction_number,t.direction,t.counterparty_name,t.currency,t.amount,t.occurred_on,
-    t.settlement_entity,t.account_name,t.created_at,COALESCE(SUM(a.amount),0) allocated_amount,
-    CASE
-      WHEN COALESCE(SUM(a.amount),0)>=t.amount-0.009 THEN 'allocated'
-      WHEN COALESCE(SUM(a.amount),0)>0.009 THEN 'partially_allocated'
-      ELSE 'unallocated'
-    END status
-  FROM settlement_cash_transactions t
-  LEFT JOIN settlement_cash_allocations a ON a.cash_transaction_id=t.id
-  WHERE t.organization_id=? AND t.status!='void'
-  GROUP BY t.id
-)`;
+function cashCte(actor: SettlementWorkbenchActor) {
+  const reconciliation = reconciliationCte(actor);
+  const limitedScope = hasFullSettlementScope(actor) ? "" : `
+      AND EXISTS(
+        SELECT 1 FROM settlement_cash_allocations cash_scope
+        JOIN reconciliation_data scoped_reconciliation
+          ON scoped_reconciliation.id=cash_scope.reconciliation_id
+        WHERE cash_scope.cash_transaction_id=t.id
+          AND cash_scope.organization_id=t.organization_id
+      )
+      AND NOT EXISTS(
+        SELECT 1 FROM settlement_cash_allocations cash_outside
+        WHERE cash_outside.cash_transaction_id=t.id
+          AND (
+            cash_outside.organization_id<>t.organization_id OR
+            NOT EXISTS(
+            SELECT 1 FROM reconciliation_data allowed_reconciliation
+            WHERE allowed_reconciliation.id=cash_outside.reconciliation_id
+            )
+          )
+      )`;
+  return { sql: `${reconciliation.sql}, cash_data AS (
+    SELECT t.id,t.transaction_number,t.direction,t.counterparty_name,t.currency,t.amount,t.occurred_on,
+      t.settlement_entity,t.account_name,t.created_at,COALESCE(SUM(a.amount),0) allocated_amount,
+      CASE
+        WHEN COALESCE(SUM(a.amount),0)>=t.amount-0.009 THEN 'allocated'
+        WHEN COALESCE(SUM(a.amount),0)>0.009 THEN 'partially_allocated'
+        ELSE 'unallocated'
+      END status
+    FROM settlement_cash_transactions t
+    LEFT JOIN settlement_cash_allocations a
+      ON a.cash_transaction_id=t.id AND a.organization_id=t.organization_id
+    WHERE t.organization_id=? AND t.status!='void'${limitedScope}
+    GROUP BY t.id
+  )`, bindings: [...reconciliation.bindings, actor.organizationId] };
+}
 
 export function emptySettlementPage<T>(requestedPage = 1, pageSize = 10): SettlementPage<T> {
   return { items: [], page: Math.max(1, requestedPage), pageCount: 1, pageSize, total: 0 };
 }
 
-export async function loadSettlementSummary(db: D1Database, organizationId: string) {
+export async function loadSettlementSummary(db: D1Database, actor: SettlementWorkbenchActor) {
+  const eligibleScope = settlementOrderScopeSql(actor, "o");
+  const eligibleSql = eligibleBaseSql(eligibleScope.sql);
+  const reconciliation = reconciliationCte(actor);
+  const fullScope = hasFullSettlementScope(actor);
+  const limitedCashScope = fullScope ? "" : `
+        AND EXISTS(
+          SELECT 1 FROM settlement_cash_allocations cash_scope
+          JOIN reconciliation_data scoped_reconciliation
+            ON scoped_reconciliation.id=cash_scope.reconciliation_id
+          WHERE cash_scope.cash_transaction_id=cash.id
+            AND cash_scope.organization_id=cash.organization_id
+        )
+        AND NOT EXISTS(
+          SELECT 1 FROM settlement_cash_allocations cash_outside
+          WHERE cash_outside.cash_transaction_id=cash.id
+            AND (
+              cash_outside.organization_id<>cash.organization_id OR
+              NOT EXISTS(
+              SELECT 1 FROM reconciliation_data allowed_reconciliation
+              WHERE allowed_reconciliation.id=cash_outside.reconciliation_id
+              )
+            )
+        )`;
+  const legacyCountSql = fullScope
+    ? "(SELECT COUNT(*) FROM invoices WHERE organization_id=?)"
+    : "0";
   const [pending, reconciliationStats, historyStats, balances] = await Promise.all([
-    db.prepare(`SELECT COUNT(*) total ${eligibleBaseSql}`).bind(organizationId).first<{ total: number }>(),
-    db.prepare(`${reconciliationCte}
+    db.prepare(`SELECT COUNT(*) total ${eligibleSql}`)
+      .bind(actor.organizationId, ...eligibleScope.values).first<{ total: number }>(),
+    db.prepare(`${reconciliation.sql}
       SELECT COUNT(*) total,
         SUM(CASE WHEN status='confirmed' AND total_amount-settled_amount>0.009 THEN 1 ELSE 0 END) cash_open,
         SUM(CASE WHEN status='confirmed' AND total_amount-invoiced_amount>0.009 THEN 1 ELSE 0 END) invoice_open
-      FROM reconciliation_data`).bind(organizationId).first<{ total: number; cash_open: number; invoice_open: number }>(),
-    db.prepare(`SELECT
-      (SELECT COUNT(*) FROM settlement_cash_transactions WHERE organization_id=? AND status!='void') cash_total,
-      (SELECT COUNT(*) FROM settlement_invoice_records WHERE organization_id=? AND status!='void') invoice_total,
-      (SELECT COUNT(*) FROM invoices WHERE organization_id=?) legacy_total`)
-      .bind(organizationId, organizationId, organizationId)
+      FROM reconciliation_data`).bind(...reconciliation.bindings)
+      .first<{ total: number; cash_open: number; invoice_open: number }>(),
+    db.prepare(`${reconciliation.sql}
+      SELECT
+        (SELECT COUNT(*) FROM settlement_cash_transactions cash
+          WHERE cash.organization_id=? AND cash.status!='void'${limitedCashScope}) cash_total,
+        (SELECT COUNT(*) FROM settlement_invoice_records invoice
+          WHERE invoice.organization_id=? AND invoice.status!='void'
+            AND EXISTS(
+              SELECT 1 FROM reconciliation_data scoped_invoice_reconciliation
+              WHERE scoped_invoice_reconciliation.id=invoice.reconciliation_id
+            )) invoice_total,
+        ${legacyCountSql} legacy_total`)
+      .bind(...reconciliation.bindings, actor.organizationId, actor.organizationId,
+        ...(fullScope ? [actor.organizationId] : []))
       .first<{ cash_total: number; invoice_total: number; legacy_total: number }>(),
-    db.prepare(`${reconciliationCte}
+    db.prepare(`${reconciliation.sql}
       SELECT direction,currency,SUM(total_amount-settled_amount) amount
       FROM reconciliation_data
       WHERE status='confirmed' AND total_amount-settled_amount>0.009
       GROUP BY direction,currency
-      ORDER BY direction,currency`).bind(organizationId).all<SettlementBalance>(),
+      ORDER BY direction,currency`).bind(...reconciliation.bindings).all<SettlementBalance>(),
   ]);
 
   return {
@@ -142,11 +235,13 @@ export async function loadSettlementSummary(db: D1Database, organizationId: stri
 
 export async function loadEligibleExpensePage(
   db: D1Database,
-  organizationId: string,
+  actor: SettlementWorkbenchActor,
   query: SettlementPageQuery,
 ) {
+  const scope = settlementOrderScopeSql(actor, "o");
+  const baseSql = eligibleBaseSql(scope.sql);
   const where: string[] = [];
-  const bindings: unknown[] = [organizationId];
+  const bindings: unknown[] = [actor.organizationId, ...scope.values];
   if (query.direction) {
     where.push("e.direction=?");
     bindings.push(query.direction);
@@ -161,16 +256,24 @@ export async function loadEligibleExpensePage(
     bindings.push(pattern, pattern, pattern, pattern);
   }
   const filterSql = where.length ? ` AND ${where.join(" AND ")}` : "";
-  const count = await db.prepare(`SELECT COUNT(*) total ${eligibleBaseSql}${filterSql}`)
+  const count = await db.prepare(`SELECT COUNT(*) total ${baseSql}${filterSql}`)
     .bind(...bindings).first<{ total: number }>();
   const page = pageBounds(Number(count?.total || 0), query);
   const rows = await db.prepare(`SELECT e.id,e.order_id,o.order_number,c.name customer_name,e.direction,e.charge_name,
       CASE WHEN e.direction='receivable' THEN c.name ELSE COALESCE(NULLIF(TRIM(e.counterparty_name),''),'未指定供应商') END counterparty_name,
       e.currency,e.amount,e.stage,
-      COALESCE((SELECT SUM(a.amount) FROM settlement_invoice_allocations a JOIN settlement_invoice_records i ON i.id=a.invoice_record_id AND i.status!='void' WHERE a.expense_id=e.id),0) invoiced_amount,
-      COALESCE((SELECT SUM(a.amount) FROM settlement_cash_allocations a JOIN settlement_cash_transactions t ON t.id=a.cash_transaction_id AND t.status!='void' WHERE a.expense_id=e.id),0) settled_amount,
+      COALESCE((SELECT SUM(a.amount)
+        FROM settlement_invoice_allocations a
+        JOIN settlement_invoice_records i
+          ON i.id=a.invoice_record_id AND i.organization_id=a.organization_id AND i.status!='void'
+        WHERE a.expense_id=e.id AND a.organization_id=e.organization_id),0) invoiced_amount,
+      COALESCE((SELECT SUM(a.amount)
+        FROM settlement_cash_allocations a
+        JOIN settlement_cash_transactions t
+          ON t.id=a.cash_transaction_id AND t.organization_id=a.organization_id AND t.status!='void'
+        WHERE a.expense_id=e.id AND a.organization_id=e.organization_id),0) settled_amount,
       CASE WHEN ${outboundReadySql} THEN 1 ELSE 0 END outbound_ready
-      ${eligibleBaseSql}${filterSql}
+      ${baseSql}${filterSql}
       ORDER BY e.direction,c.name,e.currency,o.order_number,e.created_at
       LIMIT ? OFFSET ?`)
     .bind(...bindings, page.pageSize, page.offset)
@@ -180,12 +283,13 @@ export async function loadEligibleExpensePage(
 
 export async function loadReconciliationPage(
   db: D1Database,
-  organizationId: string,
+  actor: SettlementWorkbenchActor,
   query: SettlementPageQuery,
   purpose: "all" | "cash" | "invoice" = "all",
 ) {
+  const cte = reconciliationCte(actor);
   const where: string[] = [];
-  const bindings: unknown[] = [organizationId];
+  const bindings: unknown[] = [...cte.bindings];
   if (query.direction) {
     where.push("direction=?");
     bindings.push(query.direction);
@@ -212,10 +316,10 @@ export async function loadReconciliationPage(
     bindings.push(query.status);
   }
   const filterSql = where.length ? ` WHERE ${where.join(" AND ")}` : "";
-  const count = await db.prepare(`${reconciliationCte} SELECT COUNT(*) total FROM reconciliation_data${filterSql}`)
+  const count = await db.prepare(`${cte.sql} SELECT COUNT(*) total FROM reconciliation_data${filterSql}`)
     .bind(...bindings).first<{ total: number }>();
   const page = pageBounds(Number(count?.total || 0), query);
-  const rows = await db.prepare(`${reconciliationCte}
+  const rows = await db.prepare(`${cte.sql}
       SELECT * FROM reconciliation_data${filterSql}
       ORDER BY created_at DESC LIMIT ? OFFSET ?`)
     .bind(...bindings, page.pageSize, page.offset)
@@ -225,11 +329,12 @@ export async function loadReconciliationPage(
 
 export async function loadCashHistoryPage(
   db: D1Database,
-  organizationId: string,
+  actor: SettlementWorkbenchActor,
   query: SettlementPageQuery,
 ) {
+  const cte = cashCte(actor);
   const where: string[] = [];
-  const bindings: unknown[] = [organizationId];
+  const bindings: unknown[] = [...cte.bindings];
   if (query.direction) {
     where.push("direction=?");
     bindings.push(query.direction);
@@ -248,10 +353,10 @@ export async function loadCashHistoryPage(
     bindings.push(pattern, pattern, pattern, pattern);
   }
   const filterSql = where.length ? ` WHERE ${where.join(" AND ")}` : "";
-  const count = await db.prepare(`${cashCte} SELECT COUNT(*) total FROM cash_data${filterSql}`)
+  const count = await db.prepare(`${cte.sql} SELECT COUNT(*) total FROM cash_data${filterSql}`)
     .bind(...bindings).first<{ total: number }>();
   const page = pageBounds(Number(count?.total || 0), query);
-  const rows = await db.prepare(`${cashCte} SELECT * FROM cash_data${filterSql} ORDER BY occurred_on DESC,created_at DESC LIMIT ? OFFSET ?`)
+  const rows = await db.prepare(`${cte.sql} SELECT * FROM cash_data${filterSql} ORDER BY occurred_on DESC,created_at DESC LIMIT ? OFFSET ?`)
     .bind(...bindings, page.pageSize, page.offset)
     .all<CashTransactionRow>();
   return toPage(rows.results, page);
@@ -259,30 +364,32 @@ export async function loadCashHistoryPage(
 
 export async function loadInvoiceHistoryPage(
   db: D1Database,
-  organizationId: string,
+  actor: SettlementWorkbenchActor,
   query: SettlementPageQuery,
 ) {
-  const where = ["organization_id=?", "status!='void'"];
-  const bindings: unknown[] = [organizationId];
+  const cte = reconciliationCte(actor);
+  const where = ["invoice.organization_id=?", "invoice.status!='void'",
+    "EXISTS(SELECT 1 FROM reconciliation_data scoped_invoice_reconciliation WHERE scoped_invoice_reconciliation.id=invoice.reconciliation_id)"];
+  const bindings: unknown[] = [...cte.bindings, actor.organizationId];
   if (query.direction) {
-    where.push("direction=?");
+    where.push("invoice.direction=?");
     bindings.push(query.direction);
   }
   if (query.currency) {
-    where.push("UPPER(currency)=?");
+    where.push("UPPER(invoice.currency)=?");
     bindings.push(query.currency);
   }
   if (query.query) {
     const pattern = `%${query.query}%`;
-    where.push("(record_number LIKE ? OR invoice_number LIKE ? OR counterparty_name LIKE ? OR invoice_company LIKE ? OR invoice_type LIKE ?)");
+    where.push("(invoice.record_number LIKE ? OR invoice.invoice_number LIKE ? OR invoice.counterparty_name LIKE ? OR invoice.invoice_company LIKE ? OR invoice.invoice_type LIKE ?)");
     bindings.push(pattern, pattern, pattern, pattern, pattern);
   }
   const filterSql = ` WHERE ${where.join(" AND ")}`;
-  const count = await db.prepare(`SELECT COUNT(*) total FROM settlement_invoice_records${filterSql}`)
+  const count = await db.prepare(`${cte.sql} SELECT COUNT(*) total FROM settlement_invoice_records invoice${filterSql}`)
     .bind(...bindings).first<{ total: number }>();
   const page = pageBounds(Number(count?.total || 0), query);
-  const rows = await db.prepare(`SELECT id,record_number,reconciliation_id,direction,counterparty_name,invoice_company,invoice_type,invoice_number,invoice_date,currency,amount,status,created_at
-      FROM settlement_invoice_records${filterSql} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
+  const rows = await db.prepare(`${cte.sql} SELECT invoice.id,invoice.record_number,invoice.reconciliation_id,invoice.direction,invoice.counterparty_name,invoice.invoice_company,invoice.invoice_type,invoice.invoice_number,invoice.invoice_date,invoice.currency,invoice.amount,invoice.status,invoice.created_at
+      FROM settlement_invoice_records invoice${filterSql} ORDER BY invoice.created_at DESC LIMIT ? OFFSET ?`)
     .bind(...bindings, page.pageSize, page.offset)
     .all<InvoiceRecordRow>();
   return toPage(rows.results, page);
@@ -290,11 +397,12 @@ export async function loadInvoiceHistoryPage(
 
 export async function loadLegacyInvoicePage(
   db: D1Database,
-  organizationId: string,
+  actor: SettlementWorkbenchActor,
   query: SettlementPageQuery,
 ) {
+  if (!hasFullSettlementScope(actor)) return emptySettlementPage<LegacyInvoiceRow>(query.page, query.pageSize);
   const where = ["i.organization_id=?"];
-  const bindings: unknown[] = [organizationId];
+  const bindings: unknown[] = [actor.organizationId];
   if (query.currency) {
     where.push("UPPER(i.currency)=?");
     bindings.push(query.currency);
@@ -309,11 +417,11 @@ export async function loadLegacyInvoicePage(
     bindings.push(pattern, pattern);
   }
   const filterSql = ` WHERE ${where.join(" AND ")}`;
-  const count = await db.prepare(`SELECT COUNT(*) total FROM invoices i JOIN customers c ON c.id=i.customer_id${filterSql}`)
+  const count = await db.prepare(`SELECT COUNT(*) total FROM invoices i JOIN customers c ON c.id=i.customer_id AND c.organization_id=i.organization_id${filterSql}`)
     .bind(...bindings).first<{ total: number }>();
   const page = pageBounds(Number(count?.total || 0), query);
   const rows = await db.prepare(`SELECT i.id,i.invoice_number,c.name customer_name,i.currency,i.total_amount,i.paid_amount,i.status,i.created_at
-      FROM invoices i JOIN customers c ON c.id=i.customer_id${filterSql}
+      FROM invoices i JOIN customers c ON c.id=i.customer_id AND c.organization_id=i.organization_id${filterSql}
       ORDER BY i.created_at DESC LIMIT ? OFFSET ?`)
     .bind(...bindings, page.pageSize, page.offset)
     .all<LegacyInvoiceRow>();
@@ -322,9 +430,10 @@ export async function loadLegacyInvoicePage(
 
 export async function loadAvailableCashTransactions(
   db: D1Database,
-  organizationId: string,
+  actor: SettlementWorkbenchActor,
   reconciliations: ReconciliationRow[],
 ) {
+  const cte = cashCte(actor);
   const keys = [...new Map(reconciliations.map((row) => {
     const direction = row.direction === "receivable" ? "receipt" : "payment";
     const key = `${direction}\u0000${row.counterparty_name}\u0000${row.currency}`;
@@ -333,11 +442,11 @@ export async function loadAvailableCashTransactions(
   if (!keys.length) return [];
   const matchingSql = keys.map(() => "(direction=? AND counterparty_name=? AND currency=?)").join(" OR ");
   const bindings = keys.flatMap((key) => [key.direction, key.counterparty, key.currency]);
-  const rows = await db.prepare(`${cashCte}
+  const rows = await db.prepare(`${cte.sql}
       SELECT * FROM cash_data
       WHERE amount-allocated_amount>0.009 AND (${matchingSql})
       ORDER BY occurred_on DESC,created_at DESC LIMIT 500`)
-    .bind(organizationId, ...bindings)
+    .bind(...cte.bindings, ...bindings)
     .all<CashTransactionRow>();
   return rows.results;
 }
