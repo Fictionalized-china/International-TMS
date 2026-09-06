@@ -412,6 +412,21 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
         self.assertIn('name=f"查看订单 {first_order.order_number}"', source)
         self.assertIn("exact=True", source)
 
+    def test_permission_probe_closes_batch_disclosure_before_reusing_session(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index('            disclosure = row.locator("details.batch-order-file-details")')
+        end = source.index('        with self.document.step(', start)
+        permission_probe = source[start:end]
+
+        self.assertIn(
+            'f"收起 {first_order.order_number} 报关办理区"',
+            permission_probe,
+        )
+        self.assertIn(
+            'f"{first_order.order_number} 报关办理区已关闭"',
+            permission_probe,
+        )
+
     def test_ordinary_order_navigation_waits_for_the_destination_heading(self) -> None:
         source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
         start = source.index("    def _open_ordinary_order(")

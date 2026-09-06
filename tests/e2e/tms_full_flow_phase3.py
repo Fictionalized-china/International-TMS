@@ -1165,6 +1165,14 @@ class Phase3Flow:
                     owner="PZ 挂载订单路由维护人",
                     remediation="挂载订单详情入口必须使用可审计的站内相对路径。",
                 )
+            self.batch_document.click(
+                disclosure.locator("summary"),
+                f"收起 {first_order.order_number} 报关办理区",
+            )
+            self.batch_document.expect_hidden(
+                disclosure.locator(".batch-order-file-panel"),
+                f"{first_order.order_number} 报关办理区已关闭",
+            )
             observation.observe("新整批单证负责人可见逐票报关办理入口", gate_passed=True)
 
         with self.document.step(
