@@ -624,6 +624,16 @@ class Phase4SafetyTests(unittest.TestCase):
         self.assertIn('"打开已完成的对账结算节点"', helper)
         self.assertGreaterEqual(helper.count("self._click_business_tab(session, section)"), 3)
 
+    def test_business_tab_navigation_waits_for_the_active_tab(self) -> None:
+        source = (HERE / "tms_full_flow_phase4.py").read_text(encoding="utf-8")
+        start = source.index("    def _click_business_tab(")
+        end = source.index("    def _open_costs(", start)
+        helper = source[start:end]
+
+        self.assertIn('a[aria-current="page"]', helper)
+        self.assertIn('f"本节点{label}活动页签"', helper)
+        self.assertNotIn("wait_for_timeout(150)", helper)
+
     def test_execute_is_opt_in_and_phase3_summary_is_required(self) -> None:
         args = build_parser().parse_args(["--phase3-summary", "phase3.json"])
         self.assertFalse(args.execute)

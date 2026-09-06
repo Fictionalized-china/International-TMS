@@ -792,7 +792,14 @@ class Phase4Flow:
         if not self._is_visible(link):
             return False
         session.click(link.first, f"切换本节点{label}分区")
-        session.page.wait_for_timeout(150)
+        active = tabs.locator('a[aria-current="page"]').filter(has_text=label)
+        self._expect_visible_or_block(
+            session,
+            active,
+            f"本节点{label}活动页签",
+            owner="订单同级页签维护人",
+            remediation="等待页签视图切换与 URL 同步完成后再读取目标业务表单。",
+        )
         self._assert_no_error_page(session)
         return True
 
