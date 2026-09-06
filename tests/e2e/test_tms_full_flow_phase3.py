@@ -422,6 +422,20 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
             helper,
         )
 
+    def test_ftl_customs_save_waits_for_durable_declaration_row(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def complete_ftl_customs(")
+        end = source.index("    def _assert_batch_exit_blocked_before_all_customs(", start)
+        helper = source[start:end]
+        self.assertIn(
+            'filter(has_text=declaration_number)',
+            helper,
+        )
+        self.assertNotIn(
+            'self.document, "申报单已保存", "整车报关单保存成功提示"',
+            helper,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1266,10 +1266,13 @@ class Phase3Flow:
             self.document.click(
                 form.get_by_role("button", name="保存申报单"), "保存整车正式申报单"
             )
-            self._expect_success(
-                self.document, "申报单已保存", "整车报关单保存成功提示"
+            saved_row = self.document.page.locator(
+                ".module-record-table tbody tr"
+            ).filter(has_text=declaration_number)
+            self.document.expect_visible(
+                saved_row.first, "整车报关单保存后的持久记录"
             )
-            release = self.document.page.locator(
+            release = saved_row.locator(
                 ".customs-inline-release-form button"
             ).filter(has_text="确认放行")
             self._expect_visible_or_block(
@@ -1280,8 +1283,12 @@ class Phase3Flow:
                 remediation="申报保存后应立即按工作流开放放行入口。",
             )
             self.document.click(release.first, "确认整车报关放行")
-            self._expect_success(
-                self.document, "申报单已确认放行", "整车报关放行成功提示"
+            released_row = self.document.page.locator(
+                ".module-record-table tbody tr"
+            ).filter(has_text=declaration_number).filter(has_text="已放行")
+            self.document.expect_visible(
+                released_row.first,
+                "整车报关单放行后的持久状态",
             )
             self.artifacts.customs_declarations["ftl"] = declaration_number
             self.harness.journal.register_entity(
