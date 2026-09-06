@@ -647,6 +647,27 @@ class Phase4Flow:
         except Exception:
             return ""
 
+    def _expect_visible_or_block(
+        self,
+        session: RoleBrowserSession,
+        locator: Locator,
+        target: str,
+        *,
+        owner: str,
+        remediation: str,
+    ) -> None:
+        try:
+            session.expect_visible(locator, target)
+        except Exception as original:
+            body = self._text(session.page.locator("body"), 14_000)
+            if ERROR_PAGE_RE.search(body):
+                self._assert_no_error_page(session)
+            raise BusinessBlocker(
+                f"{target}未出现",
+                owner=owner,
+                remediation=remediation,
+            ) from original
+
     def _assert_no_error_page(self, session: RoleBrowserSession) -> None:
         body = self._text(session.page.locator("body"), 14_000)
         if ERROR_PAGE_RE.search(body):
@@ -726,12 +747,13 @@ class Phase4Flow:
             if self._is_visible(ordinary):
                 session.click(ordinary.first, "切换普通订单")
         filters = session.page.locator("form.order-table-filters")
-        if not self._is_visible(filters):
-            raise BusinessBlocker(
-                "运输订单页没有普通订单筛选表单",
-                owner="订单列表维护人",
-                remediation="核对普通订单页签、岗位范围和列表筛选组件。",
-            )
+        self._expect_visible_or_block(
+            session,
+            filters,
+            "普通订单筛选表单",
+            owner="订单列表维护人",
+            remediation="核对普通订单页签、岗位范围和列表筛选组件。",
+        )
         session.type_text(
             filters.locator('input[name="keyword"]'), order_number, f"筛选订单 {order_number}"
         )
@@ -740,21 +762,23 @@ class Phase4Flow:
         row = session.page.locator(".order-table-panel tbody tr").filter(
             has_text=order_number
         )
-        if not self._is_visible(row):
-            raise BusinessBlocker(
-                f"{session.role} 普通订单表未显示 {order_number}",
-                owner="订单范围与任务分配维护人",
-                remediation="核对 Phase 3 是否已结束 PZ 自提、订单是否回到普通订单表及当前账号的数据范围。",
-            )
+        self._expect_visible_or_block(
+            session,
+            row,
+            f"{session.role} 普通订单 {order_number}",
+            owner="订单范围与任务分配维护人",
+            remediation="核对 Phase 3 是否已结束 PZ 自提、订单是否回到普通订单表及当前账号的数据范围。",
+        )
         action = row.first.get_by_role(
             "link", name=re.compile(r"^(办理当前节点|查看订单)$")
         )
-        if not self._is_visible(action):
-            raise BusinessBlocker(
-                f"{order_number} 行缺少可见查看/办理入口",
-                owner="订单列表维护人",
-                remediation="确保订单行使用统一的可见详情入口。",
-            )
+        self._expect_visible_or_block(
+            session,
+            action,
+            f"{order_number} 查看/办理入口",
+            owner="订单列表维护人",
+            remediation="确保订单行使用统一的可见详情入口。",
+        )
         session.click(action.first, f"打开订单 {order_number}")
         heading = session.page.get_by_role("heading", name=order_number, exact=True)
         session.expect_visible(heading, f"{order_number} 订单详情标题")

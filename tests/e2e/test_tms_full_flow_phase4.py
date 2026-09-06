@@ -570,6 +570,11 @@ class Phase4SafetyTests(unittest.TestCase):
 
         self.assertIn("session.expect_visible(heading", helper)
         self.assertNotIn("if not self._is_visible(heading)", helper)
+        self.assertIn('"普通订单筛选表单"', helper)
+        self.assertIn('f"{session.role} 普通订单 {order_number}"', helper)
+        self.assertIn('f"{order_number} 查看/办理入口"', helper)
+        self.assertGreaterEqual(helper.count("self._expect_visible_or_block("), 3)
+        self.assertIn("def _expect_visible_or_block(", source)
         self.assertGreater(
             helper.index("session.expect_visible(heading"),
             helper.index("session.click(action.first"),
