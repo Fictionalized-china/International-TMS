@@ -756,15 +756,9 @@ class Phase4Flow:
                 remediation="确保订单行使用统一的可见详情入口。",
             )
         session.click(action.first, f"打开订单 {order_number}")
-        session.page.wait_for_timeout(180)
-        self._assert_no_error_page(session)
         heading = session.page.get_by_role("heading", name=order_number, exact=True)
-        if not self._is_visible(heading):
-            raise BusinessBlocker(
-                f"进入详情后未核对到订单号 {order_number}",
-                owner="订单路由维护人",
-                remediation="核对列表入口与订单详情数据范围。",
-            )
+        session.expect_visible(heading, f"{order_number} 订单详情标题")
+        self._assert_no_error_page(session)
 
     def _click_business_tab(self, session: RoleBrowserSession, label: str) -> bool:
         tabs = session.page.get_by_role("navigation", name="本节点业务分区")

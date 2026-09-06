@@ -553,6 +553,19 @@ class Phase4HandoffTests(unittest.TestCase):
 
 
 class Phase4SafetyTests(unittest.TestCase):
+    def test_order_navigation_waits_for_the_detail_heading(self) -> None:
+        source = (HERE / "tms_full_flow_phase4.py").read_text(encoding="utf-8")
+        start = source.index("    def _open_order(")
+        end = source.index("    def _click_business_tab(", start)
+        helper = source[start:end]
+
+        self.assertIn("session.expect_visible(heading", helper)
+        self.assertNotIn("if not self._is_visible(heading)", helper)
+        self.assertGreater(
+            helper.index("session.expect_visible(heading"),
+            helper.index("session.click(action.first"),
+        )
+
     def test_execute_is_opt_in_and_phase3_summary_is_required(self) -> None:
         args = build_parser().parse_args(["--phase3-summary", "phase3.json"])
         self.assertFalse(args.execute)
