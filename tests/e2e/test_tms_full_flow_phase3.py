@@ -22,6 +22,7 @@ from tms_full_flow_phase3 import (
     REQUIRED_ACCOUNT_ALIASES,
     Phase3Artifacts,
     _public_preflight,
+    batch_tab_name_pattern,
     build_handoff_payload,
     build_parser,
     derive_phase1_entity_prefix,
@@ -399,6 +400,12 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
         self.assertIn('self.batch_document = self._add_role(source.batch_document_alias)', source)
         self.assertIn("session = self.batch_operation", source)
         self.assertIn("session = self.batch_document", source)
+
+    def test_batch_tab_locator_accepts_status_prefix_in_accessible_name(self) -> None:
+        pattern = batch_tab_name_pattern("报关与文件")
+        self.assertRegex("待处理 报关与文件 逐票文件、申报、编辑与放行", pattern)
+        self.assertRegex("已完成 报关与文件", pattern)
+        self.assertNotRegex("进入报关与文件前置说明", pattern)
 
 
 if __name__ == "__main__":

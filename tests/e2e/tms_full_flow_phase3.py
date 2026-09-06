@@ -460,6 +460,12 @@ def _permission_gate(
     )
 
 
+def batch_tab_name_pattern(label: str) -> re.Pattern[str]:
+    """Match a tab label even when its status pill leads the accessible name."""
+
+    return re.compile(rf"(?:^|\s){re.escape(label)}(?:\s|$)")
+
+
 class Phase3Flow:
     """Visible-browser continuation from customs through pickup sign-off."""
 
@@ -827,7 +833,9 @@ class Phase3Flow:
 
     def _open_batch_tab(self, session: RoleBrowserSession, label: str) -> None:
         tabs = session.page.get_by_role("navigation", name="配载单工作区")
-        link = tabs.get_by_role("link", name=re.compile(rf"^{re.escape(label)}"))
+        link = tabs.get_by_role(
+            "link", name=batch_tab_name_pattern(label)
+        )
         self._expect_visible_or_block(
             session,
             link,
