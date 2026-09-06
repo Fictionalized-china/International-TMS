@@ -46,8 +46,9 @@ export async function loader({request}:Route.LoaderArgs){
   ]);
   const summary={open:exceptions.results.filter(x=>x.status==="open").length,processing:exceptions.results.filter(x=>x.status==="processing").length,critical:exceptions.results.filter(x=>x.severity==="critical"&&x.status!=="resolved").length};
   const pagination=paginateList(exceptions.results,requestedPage);
+  const differenceModuleCode=warehouse.warehouse_role==="overseas_destination"?"overseas_warehouse":"warehouse";
   const differences=await Promise.all(differenceRows.results.map(async row=>{
-    const scope=await loadOrderModuleActionScope(user.organizationId,row.order_id,"warehouse");
+    const scope=await loadOrderModuleActionScope(user.organizationId,row.order_id,differenceModuleCode);
     const canConfirm=Boolean(scope?.enabled&&user.positionCode&&scope.responsibilityPositionCodes.includes(user.positionCode));
     return{...row,can_confirm:canConfirm,access_reason:canConfirm?null:"当前订单冻结工作流未将仓库差异确认分配给本岗位"};
   }));
@@ -59,7 +60,8 @@ export async function action({request}:Route.ActionArgs){
   await requireWarehouseAssignment(user,warehouse.id,"operator");
   if(intent==="confirm_receipt_difference"){
     const orderId=valueOf(form,"orderId");
-    const scope=await loadOrderModuleActionScope(user.organizationId,orderId,"warehouse");
+    const differenceModuleCode=warehouse.warehouse_role==="overseas_destination"?"overseas_warehouse":"warehouse";
+    const scope=await loadOrderModuleActionScope(user.organizationId,orderId,differenceModuleCode);
     if(!scope?.enabled)return{formError:"当前订单冻结工作流未启用仓库差异确认"};
     if(!user.positionCode||!scope.responsibilityPositionCodes.includes(user.positionCode))return{formError:"当前订单冻结工作流未将仓库差异确认分配给本岗位"};
     const pending=await env.DB.prepare(`SELECT COUNT(*) count FROM warehouse_receipt_differences d

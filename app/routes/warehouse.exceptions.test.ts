@@ -34,7 +34,7 @@ const harness = vi.hoisted(() => {
     requireSessionUser: vi.fn(async () => ({
       organizationId: "org-1",
       userId: "warehouse-user",
-      positionCode: "WAREHOUSE",
+      positionCode: "OVERSEAS_WAREHOUSE",
       permissions: ["warehouse.view", "warehouse.operate"],
     })),
     loadWarehouseContext: vi.fn(async () => ({
@@ -43,7 +43,7 @@ const harness = vi.hoisted(() => {
     requireWarehouseAssignment: vi.fn(async () => undefined),
     loadScope: vi.fn(async () => ({
       enabled: state.allowed,
-      responsibilityPositionCodes: state.allowed ? ["WAREHOUSE"] : ["FINANCE_ACCOUNTING"],
+      responsibilityPositionCodes: state.allowed ? ["OVERSEAS_WAREHOUSE"] : ["FINANCE_ACCOUNTING"],
     })),
     writeAudit: vi.fn(async () => undefined),
   };
@@ -80,7 +80,7 @@ describe("warehouse receipt difference confirmation", () => {
     expect(result.differences).toHaveLength(1);
     expect(result.differences[0].can_confirm).toBe(true);
     expect(harness.queries.some(sql => sql.includes("r.warehouse_id=?"))).toBe(true);
-    expect(harness.loadScope).toHaveBeenCalledWith("org-1", "order-1", "warehouse");
+    expect(harness.loadScope).toHaveBeenCalledWith("org-1", "order-1", "overseas_warehouse");
   });
 
   it("confirms only the current warehouse's pending differences", async () => {
