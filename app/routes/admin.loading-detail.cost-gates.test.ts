@@ -5,7 +5,7 @@ const harness = vi.hoisted(() => {
   const current = {
     organizationId: "org-1",
     userId: "cs-1",
-    permissions: ["order.view", "order.scope.assigned", "order.module.costs.manage"],
+    permissions: ["order.view", "order.scope.assigned", "billing.view", "billing.sensitive.view", "billing.manage", "order.module.costs.manage"],
     positionCode: "CS",
     roleCodes: ["pos_customer_service"],
   };
@@ -91,6 +91,13 @@ const harness = vi.hoisted(() => {
     state,
     DB,
     requireSessionUser: vi.fn(async () => current),
+    loadCostAllocations: vi.fn(async () => []),
+    loadBatchCostAllocationActionPolicy: vi.fn(async () => ({
+      rows: [{ order_id: "order-1" }, { order_id: "order-2" }],
+      policy: state.dispatched===state.dispatchTotal
+        ? { configured: true, visible: true, editable: true, required: false, reason: null, orderReasons: {} }
+        : { configured: true, visible: true, editable: false, required: false, reason: "订单 SO-2：尚未完成装车出库，全部挂载订单出库后才能办理", orderReasons: { "order-2": "尚未完成装车出库" } },
+    })),
     createCostAllocation: vi.fn(async () => "allocation-1"),
     updateCostAllocation: vi.fn(async () => undefined),
     confirmCostAllocation: vi.fn(async () => undefined),
@@ -102,10 +109,13 @@ vi.mock("cloudflare:workers", () => ({ env: { DB: harness.DB } }));
 vi.mock("../lib/auth.server", () => ({ requireSessionUser: harness.requireSessionUser }));
 vi.mock("../lib/audit.server", () => ({ writeAudit: harness.writeAudit }));
 vi.mock("../lib/cost-allocation.server", () => ({
-  loadCostAllocations: vi.fn(async () => []),
+  loadCostAllocations: harness.loadCostAllocations,
   createCostAllocation: harness.createCostAllocation,
   updateCostAllocation: harness.updateCostAllocation,
   confirmCostAllocation: harness.confirmCostAllocation,
+}));
+vi.mock("../lib/batch-cost-allocation-action-policy.server", () => ({
+  loadBatchCostAllocationActionPolicy: harness.loadBatchCostAllocationActionPolicy,
 }));
 
 import { action, CostAllocationSection, loader } from "./admin.loading-detail";
@@ -131,8 +141,28 @@ describe("PZ cost allocation gates", () => {
     harness.current.permissions = [
       "order.view",
       "order.scope.assigned",
+      "billing.view",
+      "billing.sensitive.view",
+      "billing.manage",
       "order.module.costs.manage",
     ];
+  });
+
+  it.each([
+    ["billing.view", ["order.view", "order.scope.assigned", "order.module.costs.manage", "billing.sensitive.view"]],
+    ["billing.sensitive.view", ["order.view", "order.scope.assigned", "order.module.costs.manage", "billing.view"]],
+  ])("does not query or return cost data without %s", async (_permission, permissions) => {
+    harness.current.permissions = permissions;
+    const result = await loader({
+      request: new Request("http://local.test/admin/loading/batch-1"),
+      params: { batchId: "batch-1" },
+      context: undefined,
+    } as never);
+    expect(result.canViewBatchCosts).toBe(false);
+    expect(result.showBatchCosts).toBe(false);
+    expect(result.costAllocations).toBeNull();
+    expect(harness.loadCostAllocations).not.toHaveBeenCalled();
+    expect(harness.loadBatchCostAllocationActionPolicy).not.toHaveBeenCalled();
   });
 
   it("keeps the real loader read-only when frozen cost responsibility is split", async () => {
@@ -198,7 +228,7 @@ describe("PZ cost allocation gates", () => {
       params: { batchId: "batch-1" },
       context: undefined,
     } as never)).resolves.toEqual({
-      formError: "全部挂载订单完成装车出库后，才能办理整批费用分摊（当前 1/2 票）",
+      formError: "订单 SO-2：尚未完成装车出库，全部挂载订单出库后才能办理",
     });
     expect(harness.updateCostAllocation).not.toHaveBeenCalled();
   });
@@ -231,5 +261,18 @@ describe("PZ cost allocation gates", () => {
       success: "分摊草稿已生成；请逐票检查后再确认入账",
     });
     expect(harness.createCostAllocation).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a forged cost POST without all three finance permissions", async () => {
+    harness.current.permissions = [
+      "order.view", "order.scope.assigned", "billing.view",
+      "billing.sensitive.view", "order.module.costs.manage",
+    ];
+    await expect(action({
+      request: post("create_cost_allocation"),
+      params: { batchId: "batch-1" },
+      context: undefined,
+    } as never)).rejects.toMatchObject({ status: 403 });
+    expect(harness.createCostAllocation).not.toHaveBeenCalled();
   });
 });

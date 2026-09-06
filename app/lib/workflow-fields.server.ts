@@ -20,6 +20,18 @@ import { frozenWorkflowFieldScopeMarkerKey } from "./workflow-field-runtime";
 import { workflowInstanceCapabilityStageAccess } from "./workflow-instance-stage-gate";
 import { loadLockedWorkflowStageContext } from "./workflow-instance-stage-gate.server";
 
+export const confirmedBatchCostAllocationPresenceSql=`EXISTS(
+  SELECT 1
+  FROM transport_cost_allocations ca
+  JOIN transport_cost_allocation_lines line
+    ON line.allocation_id=ca.id
+   AND line.organization_id=ca.organization_id
+   AND line.order_id=bo.order_id
+   AND line.expense_id IS NOT NULL
+  WHERE ca.organization_id=bo.organization_id
+    AND ca.batch_id=b.id AND ca.status='confirmed'
+)`;
+
 export type WorkflowFieldRule = {
   id: string;
   workflowId: string;
@@ -1163,9 +1175,12 @@ async function resolveFieldPresence(
               v.driver_name main_driver_name,v.driver_phone main_driver_phone,
               v.capacity_weight_kg vehicle_capacity_weight,v.capacity_volume_cbm vehicle_capacity_volume,
               b.planned_departure_at planned_exit_at,b.route_notes loading_instruction,b.notes loading_notes,
-              (SELECT COUNT(*) FROM transport_cost_allocations ca WHERE ca.batch_id=b.id AND ca.status='confirmed') cost_allocation
-       FROM transport_batch_orders bo JOIN transport_batches b ON b.id=bo.batch_id
-       LEFT JOIN transport_batch_vehicles v ON v.batch_id=b.id AND v.status!='cancelled'
+              ${confirmedBatchCostAllocationPresenceSql} cost_allocation
+       FROM transport_batch_orders bo
+       JOIN transport_batches b
+         ON b.id=bo.batch_id AND b.organization_id=bo.organization_id
+       LEFT JOIN transport_batch_vehicles v
+         ON v.batch_id=b.id AND v.organization_id=b.organization_id AND v.status!='cancelled'
        WHERE bo.organization_id=? AND bo.order_id=? AND bo.status!='removed' AND b.status!='cancelled'
        ORDER BY b.created_at DESC,v.created_at LIMIT 1`,
     ).bind(organizationId, orderId).first<Record<string, unknown>>();

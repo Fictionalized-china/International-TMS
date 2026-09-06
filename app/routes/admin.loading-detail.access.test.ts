@@ -4,7 +4,7 @@ const harness = vi.hoisted(() => {
   const current = {
     organizationId: "org-1",
     userId: "cs-1",
-    permissions: ["order.view", "order.scope.assigned", "order.module.costs.manage"],
+    permissions: ["order.view", "order.scope.assigned", "billing.view", "billing.sensitive.view", "billing.manage", "order.module.costs.manage"],
     positionCode: "CS",
     roleCodes: ["pos_customer_service"],
   };
@@ -44,6 +44,9 @@ describe("batch workspace customer-service access", () => {
     harness.current.permissions = [
       "order.view",
       "order.scope.assigned",
+      "billing.view",
+      "billing.sensitive.view",
+      "billing.manage",
       "order.module.costs.manage",
     ];
   });

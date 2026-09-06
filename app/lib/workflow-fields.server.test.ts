@@ -42,6 +42,7 @@ vi.mock("cloudflare:workers", () => ({ env: { DB: database.DB } }));
 import {
   assignmentCoverageIsComplete,
   assignmentManagedModuleCodes,
+  confirmedBatchCostAllocationPresenceSql,
   ftlOutboundWorkflowFieldValues,
   mergeWorkflowFieldCatalogBaseline,
   synchronizeWorkflowFieldDefinitionForInstances,
@@ -146,6 +147,14 @@ describe("stage-aware workflow field synchronization", () => {
       overseas_driver_name: "张伟",
       overseas_driver_phone: "13800001111",
     });
+  });
+
+  it("counts cost allocation presence only for this order's confirmed expense-backed line", () => {
+    expect(confirmedBatchCostAllocationPresenceSql).toContain("line.organization_id=ca.organization_id");
+    expect(confirmedBatchCostAllocationPresenceSql).toContain("line.order_id=bo.order_id");
+    expect(confirmedBatchCostAllocationPresenceSql).toContain("line.expense_id IS NOT NULL");
+    expect(confirmedBatchCostAllocationPresenceSql).toContain("ca.organization_id=bo.organization_id");
+    expect(confirmedBatchCostAllocationPresenceSql).toContain("ca.status='confirmed'");
   });
 
   it("only requires the modules that are actually assigned on the task-assignment page", () => {
