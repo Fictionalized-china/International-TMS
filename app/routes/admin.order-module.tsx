@@ -93,7 +93,12 @@ import {
   overseasOperationStatusLabels,
 } from "../lib/overseas-warehouse";
 import { formatPickupAppointment } from "../lib/pickup-appointment";
-import { customsProcessGuideState, type CustomsProcessPhase } from "../lib/customs-process-guide";
+import {
+  customsDeclarationReleaseActionMode,
+  customsProcessGuideState,
+  customsReleaseDocumentGate,
+  type CustomsProcessPhase,
+} from "../lib/customs-process-guide";
 import {
   resolveCustomsDeclarationWorkflowInput,
   type ExistingCustomsDeclarationInput,
@@ -1384,6 +1389,9 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     orderId,
     definition.code,
   );
+  const customsReleaseDocumentGateState = definition.code === "customs"
+    ? resolveCustomsReleaseDocumentGate(workflowFields, attachments.results)
+    : null;
   const loadingDocumentRequirements = definition.code === "loading"
     ? (await loadOrderLoadingDocumentRequirements(
         current.organizationId,
@@ -1465,6 +1473,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     trackingDepartureGate,
     trackingVehicleReference,
     workflowFields,
+    customsReleaseDocumentGateState,
     loadingDocumentRequirements,
     quotationCostWorkflowFields,
   };
@@ -1724,31 +1733,34 @@ export async function action({ request, params }: Route.ActionArgs) {
   const missingRequiredDocumentUploads = async (
     sourceModule: OrderModuleCode,
   ) => {
-    const requiredPlacements = orderDocumentPlacements.filter(
-      (placement) =>
-        placement.moduleCode === sourceModule &&
-        (sourceModule !== "customs" ||
-          preDepartureDocumentTypeCodes.has(placement.documentCode)) &&
-        fieldPolicy(
+    const requiredPlacements = orderDocumentPlacements
+      .filter((placement) => placement.moduleCode === sourceModule)
+      .filter((placement) => {
+        const policy = fieldPolicy(
           placement.fieldKey,
           placement.requiredByDefault,
-        ).visible &&
-        fieldPolicy(
-          placement.fieldKey,
-          placement.requiredByDefault,
-        ).required,
-    );
+        );
+        return policy.visible && policy.required;
+      });
     if (!requiredPlacements.length) return [];
     const uploaded = await env.DB.prepare(
-      `SELECT DISTINCT document_category
+      `SELECT DISTINCT document_category,review_status
        FROM order_document_metadata
-       WHERE organization_id=? AND order_id=?
-         AND review_status IN ('approved','archived')`,
+       WHERE organization_id=? AND order_id=?`,
     )
       .bind(current.organizationId, orderId)
-      .all<{ document_category: string }>();
+      .all<{ document_category: string; review_status: string | null }>();
+    if (sourceModule === "customs") {
+      const releaseGate = resolveCustomsReleaseDocumentGate(
+        expenseValidationWorkflowFields,
+        uploaded.results,
+      );
+      return releaseGate.missingDocumentCodes.map(orderDocumentTypeLabel);
+    }
     const uploadedCodes = new Set(
-      uploaded.results.map((item) => item.document_category),
+      uploaded.results
+        .filter((item) => ["approved", "archived"].includes(item.review_status || ""))
+        .map((item) => item.document_category),
     );
     return requiredPlacements
       .filter((placement) => !uploadedCodes.has(placement.documentCode))
@@ -5042,6 +5054,31 @@ function workflowFieldPolicy(
   return runtimeWorkflowFieldPolicy(fields, fieldKey, fallbackRequired);
 }
 
+function resolveCustomsReleaseDocumentGate(
+  fields: WorkflowFieldState[],
+  documents: readonly Pick<Attachment, "document_category" | "review_status">[],
+) {
+  return customsReleaseDocumentGate({
+    requirements: orderDocumentsForModule("customs").map((placement) => {
+      const policy = workflowFieldPolicy(
+        fields,
+        placement.fieldKey,
+        placement.requiredByDefault,
+      );
+      return {
+        documentCode: placement.documentCode,
+        isPreDeparture: preDepartureDocumentTypeCodes.has(placement.documentCode),
+        visible: policy.visible,
+        required: policy.required,
+      };
+    }),
+    documents: documents.map((document) => ({
+      documentCode: document.document_category || "",
+      reviewStatus: document.review_status,
+    })),
+  });
+}
+
 function ModuleField({
   fields,
   fieldKey,
@@ -5103,32 +5140,21 @@ function WorkflowInfo({
 }
 
 function CustomsProcessGuide({ data }: { data: Route.ComponentProps["loaderData"] }) {
-  const requiredDocuments = orderDocumentsForModule("customs")
-    .map((placement) => ({
-      ...placement,
-      policy: workflowFieldPolicy(
-        data.workflowFields,
-        placement.fieldKey,
-        placement.requiredByDefault,
-      ),
-    }))
-    .filter((placement) => placement.policy.visible && placement.policy.required);
-  const readyDocumentCodes = data.attachments
-    .filter((attachment) => ["approved", "archived"].includes(attachment.review_status || ""))
-    .map((attachment) => attachment.document_category)
-    .filter((code): code is string => Boolean(code));
+  const releaseDocumentGate = data.customsReleaseDocumentGateState ??
+    resolveCustomsReleaseDocumentGate(data.workflowFields, data.attachments);
+  const requiredDocuments = orderDocumentsForModule("customs").filter((placement) =>
+    releaseDocumentGate.requiredDocumentCodes.includes(placement.documentCode)
+  );
   const guide = customsProcessGuideState({
-    requiredDocumentCodes: requiredDocuments.map((item) => item.documentCode),
-    readyDocumentCodes,
+    requiredDocumentCodes: releaseDocumentGate.requiredDocumentCodes,
+    readyDocumentCodes: releaseDocumentGate.readyDocumentCodes,
     declarations: data.customsDeclarations.map((item) => ({
       clearanceStage: item.clearance_stage,
       status: item.status,
       isDeleted: item.is_deleted === 1,
     })),
   });
-  const readyRequiredDocumentCount = requiredDocuments.filter((item) =>
-    readyDocumentCodes.includes(item.documentCode),
-  ).length;
+  const readyRequiredDocumentCount = releaseDocumentGate.readyDocumentCodes.length;
   const currentCopy: Record<CustomsProcessPhase, { title: string; hint: string }> = {
     documents: {
       title: "先补齐并审核必需文件",
@@ -6118,6 +6144,8 @@ function ModuleBusinessData({
     const activeOriginDeclarations = activeDeclarations.filter((item) => item.clearance_stage === "origin");
     const releasedOriginCount = activeOriginDeclarations.filter((item) => item.status === "released").length;
     const deletedCount = data.customsDeclarations.length - activeDeclarations.length;
+    const releaseDocumentGate = data.customsReleaseDocumentGateState ??
+      resolveCustomsReleaseDocumentGate(data.workflowFields, data.attachments);
     const createPanelResetKey = data.customsDeclarations.map((item) => item.id).sort().join(":") || "empty";
     return (
       <div className="module-business-stack dense-module-stack">
@@ -6180,7 +6208,13 @@ function ModuleBusinessData({
                     </span>
                   </td>}
                   <td>
-                    <CustomsDeclarationAction declaration={x} manage={manage} busy={busy} fields={data.workflowFields} />
+                    <CustomsDeclarationAction
+                      declaration={x}
+                      manage={manage}
+                      busy={busy}
+                      fields={data.workflowFields}
+                      releaseDocumentsReady={releaseDocumentGate.ready}
+                    />
                   </td>
                 </tr>;
               })}
@@ -7819,8 +7853,20 @@ function CustomsDeclarationFlags({ declaration }: { declaration: CustomsDeclarat
   return <div className="customs-declaration-flags">{flags.length ? flags.map((flag) => <span key={flag}>{flag}</span>) : <span className="muted">无</span>}</div>;
 }
 
-function CustomsDeclarationAction({ declaration, manage, busy, fields }: { declaration: CustomsDeclaration; manage: boolean; busy: boolean; fields: WorkflowFieldState[] }) {
-  const canRelease = workflowFieldPolicy(fields, "customs_release", true).visible && declaration.status !== "released" && declaration.status !== "cancelled" && declaration.is_deleted !== 1;
+function CustomsDeclarationAction({ declaration, manage, busy, fields, releaseDocumentsReady }: {
+  declaration: CustomsDeclaration;
+  manage: boolean;
+  busy: boolean;
+  fields: WorkflowFieldState[];
+  releaseDocumentsReady: boolean;
+}) {
+  const releaseActionMode = customsDeclarationReleaseActionMode({
+    manage,
+    releaseFieldVisible: workflowFieldPolicy(fields, "customs_release", true).visible,
+    declarationStatus: declaration.status,
+    declarationDeleted: declaration.is_deleted === 1,
+    documentsReady: releaseDocumentsReady,
+  });
   return <div className="row-actions customs-row-actions">
     <Modal title={`查看报关单 · ${declaration.declaration_number}`} triggerLabel="查看" triggerClassName="text-button" size="wide">
       <CustomsDeclarationView declaration={declaration} fields={fields} />
@@ -7828,7 +7874,10 @@ function CustomsDeclarationAction({ declaration, manage, busy, fields }: { decla
     {manage && <Modal title={`编辑报关单 · ${declaration.declaration_number}`} triggerLabel="编辑" triggerClassName="text-button" size="wide">
       <CustomsDeclarationForm declaration={declaration} busy={busy} fields={fields} lockStatus submitLabel="保存修改" />
     </Modal>}
-    {manage && canRelease && <CustomsDeclarationInlineRelease declaration={declaration} busy={busy} />}
+    {releaseActionMode === "available" && <CustomsDeclarationInlineRelease declaration={declaration} busy={busy} />}
+    {releaseActionMode === "blocked" && (
+      <span className="status-pill off customs-release-blocked-note">先补齐并审核报关文件</span>
+    )}
   </div>;
 }
 

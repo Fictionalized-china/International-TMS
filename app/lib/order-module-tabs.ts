@@ -24,7 +24,7 @@ export function orderEntryPreference(positionCode: string | null | undefined): O
     return {
       stepKey: "outbound_transport",
       moduleCode: "customs",
-      section: "declarations",
+      section: "files",
     };
   }
   return null;
@@ -37,9 +37,9 @@ export function orderWorkflowModuleTabs(
   if (stepKey !== "outbound_transport") return [...tabs];
 
   const priority = (tab: OrderModuleTabDescriptor) => {
-    if (tab.moduleCode === "customs" && tab.section === "declarations") return 0;
-    if (tab.moduleCode === "tracking") return 1;
-    if (tab.moduleCode === "customs" && tab.section === "files") return 2;
+    if (tab.moduleCode === "customs" && tab.section === "files") return 0;
+    if (tab.moduleCode === "customs" && tab.section === "declarations") return 1;
+    if (tab.moduleCode === "tracking") return 2;
     return 3;
   };
 

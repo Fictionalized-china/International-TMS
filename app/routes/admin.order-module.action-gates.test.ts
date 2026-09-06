@@ -44,6 +44,8 @@ const harness = vi.hoisted(() => {
     updateRuns: 0,
     batchRuns: 0,
     modules: [] as Array<Record<string, unknown>>,
+    workflowFields: [] as Array<Record<string, unknown>>,
+    documentReviews: [] as Array<{ document_category: string; review_status: string | null }>,
   };
   const sql: string[] = [];
   const DB = {
@@ -69,6 +71,9 @@ const harness = vi.hoisted(() => {
         async all() {
           if (query.includes("FROM positions p")) {
             return { results: state.actorPositions };
+          }
+          if (query.includes("FROM order_document_metadata")) {
+            return { results: state.documentReviews };
           }
           return { results: [] };
         },
@@ -141,7 +146,7 @@ vi.mock("../lib/organization-assignee.server", () => ({
   listActiveOrganizationAssignees: vi.fn(async () => []),
 }));
 vi.mock("../lib/workflow-fields.server", () => ({
-  loadOrderModuleWorkflowFields: vi.fn(async () => []),
+  loadOrderModuleWorkflowFields: vi.fn(async () => harness.state.workflowFields),
   missingRequiredModuleFields: vi.fn(async () => []),
   saveOrderCustomWorkflowFieldValue: vi.fn(),
 }));
@@ -207,6 +212,15 @@ describe("order module action mutation gates", () => {
     harness.order.status = "in_execution";
     harness.order.workflow_instance_id = null;
     harness.sql.length = 0;
+    harness.current.permissions = [
+      "order.view",
+      "order.scope.assigned",
+      "order.module.transport.manage",
+      "order.module.assignment.manage",
+    ];
+    harness.current.positionCode = "OPERATION";
+    harness.state.workflowFields = [];
+    harness.state.documentReviews = [];
   });
 
   it("rejects a forged document upload through a different module URL", async () => {
@@ -356,5 +370,42 @@ describe("order module action mutation gates", () => {
       formError: "该订单已绑定工作流实例，请按冻结责任组分配",
     });
     expect(harness.assignOrderModulesBulk).not.toHaveBeenCalled();
+  });
+
+  it("uses the frozen workflow document policy to block customs release", async () => {
+    harness.current.permissions = [
+      "order.view",
+      "order.scope.assigned",
+      "order.module.customs.manage",
+    ];
+    harness.current.positionCode = "DOC";
+    harness.state.workflowFields = [
+      {
+        fieldKey: "document_commercial_invoice",
+        isActive: true,
+        isRequired: true,
+      },
+      {
+        fieldKey: "document_packing_list",
+        isActive: true,
+        isRequired: false,
+      },
+    ];
+    harness.state.documentReviews = [
+      { document_category: "commercial_invoice", review_status: "pending" },
+    ];
+
+    await expect(invoke(post("customs_save", {
+      status: "released",
+      declarationNumber: "CUS-001",
+    }), "customs")).resolves.toEqual({
+      formError: "确认报关放行前请先上传并审核：发票",
+    });
+    expect(harness.sql.some((query) =>
+      query.includes("SELECT DISTINCT document_category,review_status"),
+    )).toBe(true);
+    expect(harness.sql.some((query) =>
+      query.includes("INSERT INTO order_customs_records"),
+    )).toBe(false);
   });
 });

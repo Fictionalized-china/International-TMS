@@ -2,11 +2,11 @@ import { describe, expect, it } from "vitest";
 import { costsTabHasPendingAction, orderEntryPreference, orderModuleTabDescriptors, orderModuleTabHref, orderWorkflowModuleTabs, resolveCostsSection, resolveCustomsSection } from "./order-module-tabs";
 
 describe("orderEntryPreference", () => {
-  it("lands document handlers directly on customs declarations", () => {
+  it("lands document handlers on customs files before declarations", () => {
     expect(orderEntryPreference("DOC")).toEqual({
       stepKey: "outbound_transport",
       moduleCode: "customs",
-      section: "declarations",
+      section: "files",
     });
   });
 
@@ -93,9 +93,9 @@ describe("orderWorkflowModuleTabs", () => {
 
   it("orders outbound transport tabs by the handling sequence", () => {
     expect(orderWorkflowModuleTabs("outbound_transport", tabs).map((tab) => tab.label)).toEqual([
+      "报关文件",
       "报关单",
       "运输执行与跟踪",
-      "报关文件",
     ]);
   });
 
