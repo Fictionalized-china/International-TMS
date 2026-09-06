@@ -1963,9 +1963,40 @@ class Phase4Flow:
                 self._fill_visible(self.finance, form, "reviewConclusion", "业务、时效、货量、费用、凭证和异常均已按当前工作流完成。", "复盘结论")
                 self._fill_visible(self.finance, form, "improvementNotes", "持续保持岗位待办与工作流配置实时同步。", "改进建议")
                 self.finance.click(
-                    form.get_by_role("button", name="生成并判定订单完成状态", exact=True),
-                    f"生成 {order_number} 订单复盘",
+                    form.get_by_role("button", name="生成 / 更新复盘草稿", exact=True),
+                    f"生成 {order_number} 订单复盘草稿",
                 )
+                final_form = self.finance.page.locator(
+                    'form.review-generation-form:has(input[name="confirmFinalReview"])'
+                )
+                self._expect_visible_or_block(
+                    self.finance,
+                    final_form,
+                    f"{order_number} 最终确认归档表单",
+                    owner="复盘与归档页面维护人",
+                    remediation="复盘草稿生成后应显示独立的最终确认归档动作。",
+                )
+                self.finance.set_checked(
+                    final_form.locator('input[name="confirmFinalReview"]'),
+                    True,
+                    f"核对 {order_number} 复盘与归档门禁",
+                )
+                try:
+                    self.finance.click(
+                        final_form.get_by_role("button", name="最终确认并归档订单", exact=True),
+                        f"最终确认并归档 {order_number}",
+                    )
+                except Exception as original:
+                    self._assert_no_error_page(self.finance)
+                    self._open_order(self.finance, order_number)
+                    persisted_body = self._text(
+                        self.finance.page.locator("body"), 16_000
+                    )
+                    if not any(
+                        value in persisted_body
+                        for value in ("已完成并结清", "订单已完成", "订单已归档")
+                    ):
+                        raise original
                 self.finance.page.wait_for_timeout(300)
                 body = self._text(self.finance.page.locator("body"), 16_000)
                 if not any(value in body for value in ("已完成并结清", "订单已完成", "订单已归档")):
@@ -1976,7 +2007,7 @@ class Phase4Flow:
                     )
                 if order_number not in self.artifacts.archived_orders:
                     self.artifacts.archived_orders.append(order_number)
-                step.observe("复盘已生成，订单显示已完成并结清/已归档", gate_passed=True)
+                step.observe("复盘草稿已生成并完成独立最终确认，订单已归档", gate_passed=True)
 
     def run(self) -> Phase4Artifacts:
         self._login(self.customer_service, "客服岗")

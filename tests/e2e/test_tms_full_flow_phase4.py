@@ -653,6 +653,21 @@ class Phase4SafetyTests(unittest.TestCase):
             run_helper.index("self._ensure_required_expenses"),
         )
 
+    def test_completion_review_uses_draft_then_explicit_final_confirmation(self) -> None:
+        source = (HERE / "tms_full_flow_phase4.py").read_text(encoding="utf-8")
+        start = source.index("    def _complete_reviews(")
+        end = source.index("    def run(self) -> Phase4Artifacts:", start)
+        helper = source[start:end]
+
+        self.assertIn('name="生成 / 更新复盘草稿"', helper)
+        self.assertIn('input[name="confirmFinalReview"]', helper)
+        self.assertIn('name="最终确认并归档订单"', helper)
+        self.assertNotIn("生成并判定订单完成状态", helper)
+        self.assertLess(
+            helper.index('name="生成 / 更新复盘草稿"'),
+            helper.index('name="最终确认并归档订单"'),
+        )
+
     def test_execute_is_opt_in_and_phase3_summary_is_required(self) -> None:
         args = build_parser().parse_args(["--phase3-summary", "phase3.json"])
         self.assertFalse(args.execute)
