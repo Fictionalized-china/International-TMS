@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigation } from "react-router";
+import { useLocation, useNavigation } from "react-router";
 import { Modal } from "./Modal";
 import { PortalForm as Form } from "./PortalNavigation";
 import {
@@ -23,6 +23,7 @@ export function PortalPickupAppointment({
   returnTo: "/portal" | "/portal/orders";
 }) {
   const navigation = useNavigation();
+  const location = useLocation();
   const [period, setPeriod] = useState(
     order.pickup_appointment_period || "morning",
   );
@@ -36,6 +37,7 @@ export function PortalPickupAppointment({
       triggerLabel={hasAppointment ? "修改预约" : "预约提货"}
       triggerClassName="btn small pickup-appointment-trigger"
       initialFocusSelector="input[name='appointmentDate']"
+      closeSignal={location.key}
     >
       <Form method="post" action="/portal/pickup-appointment" className="pickup-appointment-form">
         <input type="hidden" name="orderId" value={order.id} />
