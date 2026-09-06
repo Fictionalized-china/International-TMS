@@ -46,6 +46,10 @@ import {
   buildStageSnapshots,
   orderNextGuidance,
 } from "../lib/order-guidance";
+import {
+  enabledWorkflowModuleCodes,
+  resolveEmbeddedWorkflowModuleCode,
+} from "../lib/order-detail-module-selection";
 import { orderCollaborationNotice } from "../lib/order-collaboration";
 import { orderResponsiblePosition } from "../lib/order-responsibility";
 import { orderModuleTabAttention } from "../lib/order-module-tab-attention";
@@ -278,6 +282,7 @@ type WorkflowFormRow = {
   module_sort_order: number | null;
   module_required: number | null;
   module_status: string | null;
+  module_enabled: number | null;
   responsibility_position_code: string | null;
   position_name: string | null;
   assignee_user_id: string | null;
@@ -415,7 +420,8 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
     env.DB.prepare(
       `SELECT ss.id step_state_id,ss.step_key,ss.step_name,ss.sort_order step_sort_order,ss.status step_status,
               ms.id module_state_id,ms.module_code,ms.display_name module_name,ms.sort_order module_sort_order,
-              ms.is_required module_required,ms.status module_status,ms.responsibility_position_code,
+              ms.is_required module_required,ms.status module_status,
+              COALESCE(omi.enabled,0) module_enabled,ms.responsibility_position_code,
               p.name position_name,omi.assignee_user_id,u.display_name assignee_name,
               (SELECT COUNT(*) FROM workflow_instance_fields f
                 WHERE f.instance_id=wi.id AND f.step_key=ss.step_key AND f.module_code=ms.module_code AND f.is_active=1 AND f.is_required=1) required_field_count,
@@ -563,13 +569,10 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
   const selectedStepKey = requestedStepAllowed
     ? requestedStepKey!
     : businessWorkflow?.current_step_key || workflowSteps.results[0]?.step_key || "";
-  const currentWorkflowModuleCodes = [
-    ...new Set(
-      workflowFormRows.results
-        .filter((row) => row.step_key === selectedStepKey && row.module_code)
-        .map((row) => row.module_code as OrderModuleCode),
-    ),
-  ];
+  const currentWorkflowModuleCodes = enabledWorkflowModuleCodes(
+    workflowFormRows.results,
+    selectedStepKey,
+  ) as OrderModuleCode[];
   const currentWorkflowFieldGroups: Awaited<
     ReturnType<typeof loadOrderModuleWorkflowFields>
   >[] = [];
@@ -598,9 +601,10 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
     : "info";
   const selectedCustomsSection = resolveCustomsSection(requestedModuleSection);
   const selectedCostsSection = resolveCostsSection(requestedModuleSection);
-  const embeddedModuleCode = requestedModuleCode && currentWorkflowModuleCodes.includes(requestedModuleCode)
-    ? requestedModuleCode
-    : currentWorkflowModuleCodes[0] || null;
+  const embeddedModuleCode = resolveEmbeddedWorkflowModuleCode({
+    requestedModuleCode,
+    enabledModuleCodes: currentWorkflowModuleCodes,
+  }) as OrderModuleCode | null;
   let embeddedModuleData: Awaited<ReturnType<typeof orderModuleLoader>> | null = null;
   let embeddedModuleRedirect: string | null = null;
   if (embeddedModuleCode) {
