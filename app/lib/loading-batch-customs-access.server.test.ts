@@ -20,6 +20,7 @@ vi.mock("./workflow-instance-stage-gate.server", () => ({
 }));
 
 import { loadBatchCustomsAccess } from "./loading-batch-customs-access.server";
+import { batchOrderCustomsReleaseActionAvailable } from "./loading-batch-customs-access";
 
 function frozenCustomsContext(
   currentStepKey: string | null,
@@ -86,6 +87,30 @@ describe("loading batch customs access", () => {
     harness.rows = [];
     harness.contexts.clear();
     harness.sql.length = 0;
+  });
+
+  it("does not expose a release action until frozen required customs files are ready", () => {
+    const base = {
+      manageCustoms: true,
+      customsEnabled: true,
+      releaseFieldVisible: true,
+      ownsCustoms: true,
+      workflowCanRelease: true,
+    };
+
+    expect(batchOrderCustomsReleaseActionAvailable({
+      ...base,
+      customsFilesReady: false,
+    })).toBe(false);
+    expect(batchOrderCustomsReleaseActionAvailable({
+      ...base,
+      customsFilesReady: true,
+    })).toBe(true);
+    expect(batchOrderCustomsReleaseActionAvailable({
+      ...base,
+      ownsCustoms: false,
+      customsFilesReady: true,
+    })).toBe(false);
   });
 
   it("keeps a fully dispatched order read-only before its frozen customs stage", async () => {

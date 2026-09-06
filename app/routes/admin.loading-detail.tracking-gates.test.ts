@@ -406,6 +406,8 @@ describe("PZ frozen tracking route gates", () => {
     );
     expect(update?.bindings).toContain("order-1");
     expect(update?.bindings).not.toContain("order-2");
+    expect(update?.sql).toContain("EXISTS(SELECT 1 FROM transport_batch_orders");
+    expect(update?.bindings).toContain("batch-1");
   });
 
   it("writes actual-exit order state only to frozen-policy participants", async () => {

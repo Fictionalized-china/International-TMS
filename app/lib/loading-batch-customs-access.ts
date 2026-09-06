@@ -41,6 +41,24 @@ export type BatchCustomsAccess = {
   orders: BatchOrderCustomsAccess[];
 };
 
+export function batchOrderCustomsReleaseActionAvailable(input: {
+  manageCustoms: boolean;
+  customsEnabled: boolean;
+  releaseFieldVisible: boolean;
+  ownsCustoms: boolean;
+  workflowCanRelease: boolean;
+  customsFilesReady: boolean;
+}) {
+  return (
+    input.manageCustoms &&
+    input.customsEnabled &&
+    input.releaseFieldVisible &&
+    input.ownsCustoms &&
+    input.workflowCanRelease &&
+    input.customsFilesReady
+  );
+}
+
 function closedCapability(reason: string): FrozenCustomsCapability {
   return {
     visible: false,

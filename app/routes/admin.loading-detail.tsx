@@ -26,7 +26,10 @@ import {
   type OrderLoadingDocumentRequirements,
 } from "../lib/loading-document-requirements";
 import { loadOrderLoadingDocumentRequirements } from "../lib/loading-document-requirements.server";
-import type { BatchOrderCustomsAccess } from "../lib/loading-batch-customs-access";
+import {
+  batchOrderCustomsReleaseActionAvailable,
+  type BatchOrderCustomsAccess,
+} from "../lib/loading-batch-customs-access";
 import { loadBatchCustomsAccess } from "../lib/loading-batch-customs-access.server";
 import { syncCustomsModuleFromRecords } from "../lib/customs-status.server";
 import {
@@ -1336,7 +1339,13 @@ export async function action({request,params}:Route.ActionArgs){
     const orderIds=trackingActionPolicy.participatingOrderIds;
     if(!orderIds.length)return{formError:"当前批次没有可操作的订单"};
     for(const chunk of chunkD1Values(orderIds,3)){
-      await env.DB.prepare(`UPDATE transport_orders SET ${column}=?,updated_at=? WHERE organization_id=? AND id IN (${d1Placeholders(chunk.length)})`).bind(enable?1:0,now,current.organizationId,...chunk).run();
+      await env.DB.prepare(`UPDATE transport_orders SET ${column}=?,updated_at=?
+        WHERE organization_id=? AND id IN (${d1Placeholders(chunk.length)})
+          AND EXISTS(SELECT 1 FROM transport_batch_orders bo
+            WHERE bo.organization_id=transport_orders.organization_id
+              AND bo.order_id=transport_orders.id
+              AND bo.batch_id=? AND bo.status!='removed')`)
+        .bind(enable?1:0,now,current.organizationId,...chunk,batchId).run();
     }
     await writeAudit({request,action:"transport.batch.tracking_option.toggle",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{optionCode,enable,orders:orderIds.length}});
     return{success:enable?`已为 ${orderIds.length} 票订单开启"${optionCode==="transloaded"?"可换装":"可转运"}"`:`已为 ${orderIds.length} 票订单关闭"${optionCode==="transloaded"?"可换装":"可转运"}"`};
@@ -1848,7 +1857,14 @@ function BatchDocumentWorkbench({batchId,orders,visibleOrders,orderPagination,ba
         const workflowAccess=customsAccesses.find(access=>access.orderId===order.order_id);
         const ownsCustoms=privileged||order.customs_assignee_user_id===currentUserId;
         const canManageThisOrder=manageCustoms&&customsPolicy.enabled&&declarationsField.visible&&ownsCustoms&&Boolean(workflowAccess?.canManageDeclarations);
-        const canReleaseThisOrder=manageCustoms&&customsPolicy.enabled&&releaseField.visible&&ownsCustoms&&Boolean(workflowAccess?.canRelease);
+        const canReleaseThisOrder=batchOrderCustomsReleaseActionAvailable({
+          manageCustoms,
+          customsEnabled:customsPolicy.enabled,
+          releaseFieldVisible:releaseField.visible,
+          ownsCustoms,
+          workflowCanRelease:Boolean(workflowAccess?.canRelease),
+          customsFilesReady,
+        });
         const canActOnThisOrder=canManageThisOrder||canReleaseThisOrder;
         const customsStatus=!customsPolicy.enabled?"本单未启用报关":!declarationsField.visible?"工作流未展示报关申报明细":!customsPolicy.required?(customs?.total?`选办 · ${customs.released}/${customs.total} 张放行`:"选办 · 尚未登记"):!customsFilesReady?"必填报关文件待审核":customs?.total?`${customs.released}/${customs.total} 张放行`:"待登记并放行正式报关单";
         return <tr className={orderGateReady?"completed-row":canActOnThisOrder?"blocked-row":"readonly-row"} key={order.order_id} id={`batch-customs-${order.order_id}`}>
