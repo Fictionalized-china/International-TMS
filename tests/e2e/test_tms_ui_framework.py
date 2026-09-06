@@ -135,6 +135,29 @@ class _InteractiveLocatorStub:
         self.waits.append((state, timeout))
 
 
+class _HydratingReturnLocatorStub(_InteractiveLocatorStub):
+    def __init__(self) -> None:
+        super().__init__()
+        self.visible = False
+
+    def is_visible(self) -> bool:
+        return self.visible
+
+    def wait_for(self, *, state: str, timeout: int) -> None:
+        super().wait_for(state=state, timeout=timeout)
+        if state == "visible":
+            self.visible = True
+
+
+class _UnexpectedTimeoutReturnLocatorStub(_InteractiveLocatorStub):
+    def is_visible(self) -> bool:
+        return False
+
+    def wait_for(self, *, state: str, timeout: int) -> None:
+        super().wait_for(state=state, timeout=timeout)
+        raise TimeoutError("unexpected non-Playwright timeout")
+
+
 class _SegmentedInputStub:
     def __init__(self, final_value: str) -> None:
         self.final_value = final_value
@@ -249,6 +272,19 @@ class _PageStub:
 
     def wait_for_timeout(self, _milliseconds: int) -> None:
         pass
+
+
+class _KeyboardStub:
+    def __init__(self) -> None:
+        self.pressed: list[str] = []
+
+    def press(self, key: str) -> None:
+        self.pressed.append(key)
+
+
+class _RecoveryPageStub(_PageStub):
+    def __init__(self) -> None:
+        self.keyboard = _KeyboardStub()
 
 
 class _ResponseStub:
@@ -716,6 +752,82 @@ class HarnessEvidenceTests(unittest.TestCase):
 
         self.assertEqual(return_control.clicked, 1)
         self.assertEqual(restored.waits, [("visible", 15_000)])
+
+    def test_negative_gate_recovery_uses_supported_browser_back_key_and_logs_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            page = _RecoveryPageStub()
+            journal = RunJournal("negative-recovery-keyboard", directory)
+            session = RoleBrowserSession(
+                role="operation",
+                email="operation@example.test",
+                site="admin",
+                base_url="http://127.0.0.1:5189",
+                context=_ContextStub(),
+                page=page,
+                journal=journal,
+            )
+            restored = _InteractiveLocatorStub()
+            session.recover_from_negative_gate(
+                return_control=_LocatorStub(),
+                restored_locator=restored,
+                target="旧负责人 PZ 越权",
+            )
+
+        self.assertEqual(page.keyboard.pressed, ["Alt+ArrowLeft"])
+        self.assertEqual(journal.actions[0]["kind"], "keypress")
+        self.assertEqual(journal.actions[0]["detail"], {"key": "Alt+ArrowLeft"})
+        self.assertEqual(restored.waits, [("visible", 15_000)])
+
+    def test_negative_gate_recovery_waits_briefly_for_hydrated_return_control(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            page = _RecoveryPageStub()
+            journal = RunJournal("negative-recovery-hydration", directory)
+            session = RoleBrowserSession(
+                role="operation",
+                email="operation@example.test",
+                site="admin",
+                base_url="http://127.0.0.1:5189",
+                context=_ContextStub(),
+                page=page,
+                journal=journal,
+            )
+            return_control = _HydratingReturnLocatorStub()
+            session.recover_from_negative_gate(
+                return_control=return_control,
+                restored_locator=_InteractiveLocatorStub(),
+                target="旧负责人 PZ 越权",
+            )
+
+        self.assertEqual(return_control.clicked, 1)
+        self.assertEqual(page.keyboard.pressed, [])
+        self.assertEqual(return_control.waits[0][0], "visible")
+        self.assertGreater(return_control.waits[0][1], 0)
+        self.assertLessEqual(return_control.waits[0][1], 1_000)
+        self.assertEqual(journal.actions[0]["kind"], "click")
+
+    def test_negative_gate_recovery_does_not_hide_non_playwright_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            page = _RecoveryPageStub()
+            session = RoleBrowserSession(
+                role="operation",
+                email="operation@example.test",
+                site="admin",
+                base_url="http://127.0.0.1:5189",
+                context=_ContextStub(),
+                page=page,
+                journal=RunJournal("negative-recovery-unexpected-timeout", directory),
+            )
+            return_control = _UnexpectedTimeoutReturnLocatorStub()
+            with self.assertRaisesRegex(
+                TimeoutError, "unexpected non-Playwright timeout"
+            ):
+                session.recover_from_negative_gate(
+                    return_control=return_control,
+                    restored_locator=_InteractiveLocatorStub(),
+                    target="旧负责人 PZ 越权",
+                )
+
+        self.assertEqual(page.keyboard.pressed, [])
 
     def test_step_evidence_failure_marks_step_and_gate_failed_and_raises(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

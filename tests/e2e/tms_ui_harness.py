@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Mapping, Sequence
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 Site = Literal["admin", "portal", "warehouse"]
 LOGIN_PATH_BY_SITE: dict[Site, str] = {
@@ -1039,10 +1040,17 @@ class RoleBrowserSession:
         restored_locator: Any,
         target: str,
     ) -> None:
-        if return_control.count() > 0 and bool(return_control.first.is_visible()):
-            self.click(return_control.first, f"从{target}拒绝页返回上一页")
+        return_button = return_control.first
+        has_return_control = return_control.count() > 0
+        if has_return_control:
+            try:
+                return_button.wait_for(state="visible", timeout=min(self.action_timeout_ms, 500))
+            except PlaywrightTimeoutError:
+                pass
+        if has_return_control and bool(return_button.is_visible()):
+            self.click(return_button, f"从{target}拒绝页返回上一页")
         else:
-            self.press("Alt+Left", f"通过浏览器后退恢复{target}业务页面")
+            self.press("Alt+ArrowLeft", f"通过浏览器后退恢复{target}业务页面")
         self.page.wait_for_timeout(180)
         self.expect_visible(restored_locator, f"{target}恢复后的站点主导航")
 
