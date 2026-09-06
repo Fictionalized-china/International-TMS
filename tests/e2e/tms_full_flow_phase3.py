@@ -1166,7 +1166,7 @@ class Phase3Flow:
                     remediation="挂载订单详情入口必须使用可审计的站内相对路径。",
                 )
             self.batch_document.click(
-                disclosure.locator("summary"),
+                disclosure.get_by_role("button", name="关闭文件查看窗口", exact=True),
                 f"收起 {first_order.order_number} 报关办理区",
             )
             self.batch_document.expect_hidden(

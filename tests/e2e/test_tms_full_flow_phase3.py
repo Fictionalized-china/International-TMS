@@ -423,6 +423,10 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
             permission_probe,
         )
         self.assertIn(
+            'disclosure.get_by_role("button", name="关闭文件查看窗口", exact=True)',
+            permission_probe,
+        )
+        self.assertIn(
             'f"{first_order.order_number} 报关办理区已关闭"',
             permission_probe,
         )
