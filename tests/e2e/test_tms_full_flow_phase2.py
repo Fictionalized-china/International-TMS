@@ -459,6 +459,25 @@ class Phase2SafetyTests(unittest.TestCase):
             ),
         )
 
+    def test_mounted_order_detail_link_uses_its_row_and_accessible_name(self) -> None:
+        source = inspect.getsource(
+            phase2.Phase2Flow.assert_mounted_orders_leave_ordinary_table
+        )
+        self.assertIn(
+            'child_row = self.batch_operation.page.locator("table tbody tr").filter(',
+            source,
+        )
+        self.assertIn("has_text=child_number", source)
+        self.assertIn("child_link = child_row.first.get_by_role(", source)
+        self.assertIn(
+            '"link", name=f"查看订单 {child_number}", exact=True',
+            source,
+        )
+        self.assertIn(
+            'child_order_href = child_link.first.get_attribute("href") or ""',
+            source,
+        )
+
     def test_execute_is_opt_in_and_phase1_summary_is_required(self) -> None:
         args = build_parser().parse_args(["--phase1-summary", "phase1.json"])
         self.assertFalse(args.execute)

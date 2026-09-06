@@ -1993,8 +1993,11 @@ class Phase2Flow:
                 batch_link.first, f"进入 {self.artifacts.batch_number} 取得挂载订单详情入口"
             )
             child_number = self.phase1.orders[LTL_KEYS[0]]
-            child_link = self.batch_operation.page.get_by_role(
-                "link", name=child_number, exact=True
+            child_row = self.batch_operation.page.locator("table tbody tr").filter(
+                has_text=child_number
+            )
+            child_link = child_row.first.get_by_role(
+                "link", name=f"查看订单 {child_number}", exact=True
             )
             self._expect_visible_or_block(
                 self.batch_operation,
