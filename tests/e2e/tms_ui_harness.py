@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Mapping, Sequence
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse
 
 
 Site = Literal["admin", "portal", "warehouse"]
@@ -42,6 +42,8 @@ SENSITIVE_TARGET = re.compile(r"(?i)(?:password|secret|token|密码|凭证)")
 SENSITIVE_INPUT_KEY = re.compile(r"(?i)(?:password|secret|token|email|account|密码|凭证|邮箱|账号)")
 EMAIL_TEXT = re.compile(r"(?i)(?<![\w.+-])[\w.+-]+@[\w.-]+\.[a-z]{2,}(?![\w.-])")
 FAILED_CERTIFICATION_METRICS = ("steps_failed", "steps_blocked", "gates_failed")
+SESSION_SLOT_PARAM = "itmsTab"
+SESSION_SLOT_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{12,64}$")
 
 GateSource = Literal[
     "workflow_instance_field_configuration",
@@ -60,6 +62,31 @@ GateMode = Literal[
 ExpectedGateBehavior = Literal["allow", "block", "hide", "read_only"]
 CasePriority = Literal["P0", "P1", "P2", "P3"]
 RunStatus = Literal["running", "passed", "failed", "blocked", "aborted", "planned"]
+
+
+def negative_gate_path_with_current_session_slot(
+    current_page_url: str,
+    path: str,
+) -> str:
+    """Preserve the authenticated tab session for an explicit negative gate.
+
+    The current page is the only source of truth. Any target ``itmsTab`` is
+    replaced so a copied href cannot switch the actor being audited.
+    """
+
+    current = urlparse(current_page_url)
+    current_slots = [
+        value for key, value in parse_qsl(current.query, keep_blank_values=True)
+        if key == SESSION_SLOT_PARAM
+    ]
+    if len(current_slots) != 1 or not SESSION_SLOT_PATTERN.fullmatch(current_slots[0]):
+        raise ValueError("当前页面缺少唯一有效的 itmsTab，不能执行负向深链门禁")
+    target = urlparse(path)
+    if target.scheme or target.netloc or not target.path.startswith("/"):
+        raise ValueError("负向深链只允许当前 TMS 站内路径")
+    query = [(key, value) for key, value in parse_qsl(target.query, keep_blank_values=True) if key != SESSION_SLOT_PARAM]
+    query.append((SESSION_SLOT_PARAM, current_slots[0]))
+    return target._replace(query=urlencode(query)).geturl()
 
 
 @dataclass(frozen=True, slots=True)
@@ -979,12 +1006,13 @@ class RoleBrowserSession:
         parsed = urlparse(path)
         if parsed.scheme or parsed.netloc or not parsed.path.startswith("/"):
             raise ValueError("负向深链只允许当前 TMS 站内路径")
+        authenticated_path = negative_gate_path_with_current_session_slot(str(self.page.url), path)
 
         response = self._perform(
             kind="negative_deep_link",
             target=parsed.path,
             operation=lambda: self.page.goto(
-                self._url(path), wait_until="domcontentloaded", timeout=self.navigation_timeout_ms
+                self._url(authenticated_path), wait_until="domcontentloaded", timeout=self.navigation_timeout_ms
             ),
             detail={"reason": reason},
         )

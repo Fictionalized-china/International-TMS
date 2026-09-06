@@ -12,6 +12,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
+import tms_ui_harness as harness_module
 from tms_full_flow_blueprint import FULL_FLOW_CASES, planned_payload, validate_blueprint
 from tms_multi_account_smoke import contract_for
 from tms_ui_credentials import CredentialRecord, load_credentials, parse_markdown_credentials
@@ -256,10 +257,18 @@ class _ResponseStub:
 
 
 class _NegativeGatePageStub(_PageStub):
-    def __init__(self, response: _ResponseStub | None) -> None:
+    def __init__(
+        self,
+        response: _ResponseStub | None,
+        *,
+        current_url: str = "http://127.0.0.1:5189/admin/orders?itmsTab=active-session-0001",
+    ) -> None:
         self.response = response
+        self.url = current_url
+        self.visited_urls: list[str] = []
 
     def goto(self, url: str, **_options: object) -> _ResponseStub | None:
+        self.visited_urls.append(url)
         self.url = url
         return self.response
 
@@ -591,6 +600,61 @@ class HarnessEvidenceTests(unittest.TestCase):
         self.assertIsNot(sales.context, finance.context)
         self.assertEqual(len(browser.contexts), 2)
         self.assertTrue(all(context.closed for context in browser.contexts))
+
+    def test_negative_gate_path_uses_the_current_valid_session_slot(self) -> None:
+        preserve_slot = getattr(
+            harness_module,
+            "negative_gate_path_with_current_session_slot",
+            None,
+        )
+        self.assertTrue(callable(preserve_slot))
+
+        current_slot = "current-session-0001"
+        self.assertEqual(
+            preserve_slot(
+                f"http://127.0.0.1:5189/admin/orders?view=orders&itmsTab={current_slot}",
+                "/admin/loading/batch-1?tab=documents&itmsTab=stale-session-0002#files",
+            ),
+            f"/admin/loading/batch-1?tab=documents&itmsTab={current_slot}#files",
+        )
+        with self.assertRaisesRegex(ValueError, "有效的 itmsTab"):
+            preserve_slot(
+                "http://127.0.0.1:5189/admin/orders?itmsTab=short",
+                "/admin/loading/batch-1",
+            )
+
+    def test_negative_gate_navigation_keeps_authentication_without_logging_the_slot_as_target(self) -> None:
+        current_slot = "current-session-0001"
+        page = _NegativeGatePageStub(
+            _ResponseStub(403),
+            current_url=(
+                "http://127.0.0.1:5189/admin/orders"
+                f"?view=orders&itmsTab={current_slot}"
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            journal = RunJournal("negative-gate-session", directory)
+            session = RoleBrowserSession(
+                role="operation",
+                email="operation@example.test",
+                site="admin",
+                base_url="http://127.0.0.1:5189",
+                context=_ContextStub(),
+                page=page,
+                journal=journal,
+            )
+            session.goto_for_negative_gate(
+                "/admin/loading/forbidden",
+                reason="验证旧负责人以当前已认证会话访问真实配载单门禁",
+                expected_status=(403, 404),
+            )
+
+        self.assertEqual(
+            page.visited_urls,
+            [f"http://127.0.0.1:5189/admin/loading/forbidden?itmsTab={current_slot}"],
+        )
+        self.assertEqual(journal.actions[-1]["target"], "/admin/loading/forbidden")
+        self.assertNotIn("itmsTab", json.dumps(journal.actions[-1]["detail"]))
 
     def test_negative_gate_requires_response_and_captures_immediate_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
