@@ -46,6 +46,10 @@ const harness = vi.hoisted(() => {
     modules: [] as Array<Record<string, unknown>>,
     workflowFields: [] as Array<Record<string, unknown>>,
     documentReviews: [] as Array<{ document_category: string; review_status: string | null }>,
+    moduleAssigneeUserId: "user-a" as string | null,
+    moduleTaskAssigneeUserIds: ["user-a"] as string[],
+    trackingActionEditable: true,
+    trackingActionReason: null as string | null,
   };
   const sql: string[] = [];
   const DB = {
@@ -104,10 +108,34 @@ const harness = vi.hoisted(() => {
     ) => ({
       moduleCode,
       enabled: true,
-      assigneeUserId: "user-a",
-      taskAssigneeUserIds: ["user-a"],
+      assigneeUserId: state.moduleAssigneeUserId,
+      taskAssigneeUserIds: state.moduleTaskAssigneeUserIds,
       responsibilityPositionCodes: ["OPERATION"],
     })),
+    loadOrderTrackingActionAccess: vi.fn(async (input: { canOperate: boolean }) => {
+      const editable = state.trackingActionEditable && input.canOperate;
+      const reason = !input.canOperate
+        ? "当前账号不是本单已分配的运踪负责人，或缺少运踪办理权限"
+        : state.trackingActionReason;
+      const action = (fieldKey: "tracking_milestone" | "actual_exit_at") => ({
+        fieldKey,
+        source: "frozen",
+        status: editable ? "editable" : "read_only",
+        configured: true,
+        configurationValid: true,
+        visible: true,
+        editable,
+        required: true,
+        stageRelation: editable ? "current" : "before",
+        targetStepKey: "module:tracking",
+        targetStepName: "实际出境及运踪",
+        reason,
+      });
+      return {
+        tracking_milestone: action("tracking_milestone"),
+        actual_exit_at: action("actual_exit_at"),
+      };
+    }),
     writeAudit: vi.fn(async () => undefined),
     assignOrderModule: vi.fn(async () => undefined),
     assignOrderModulesBulk: vi.fn(async () => ({ assignedCount: 0 })),
@@ -171,6 +199,9 @@ vi.mock("../lib/workflow-instance-stage-gate.server", () => ({
     fields: [],
   })),
 }));
+vi.mock("../lib/order-tracking-action-policy.server", () => ({
+  loadOrderTrackingActionAccess: harness.loadOrderTrackingActionAccess,
+}));
 
 import { action } from "./admin.order-module";
 
@@ -221,6 +252,10 @@ describe("order module action mutation gates", () => {
     harness.current.positionCode = "OPERATION";
     harness.state.workflowFields = [];
     harness.state.documentReviews = [];
+    harness.state.moduleAssigneeUserId = "user-a";
+    harness.state.moduleTaskAssigneeUserIds = ["user-a"];
+    harness.state.trackingActionEditable = true;
+    harness.state.trackingActionReason = null;
   });
 
   it("rejects a forged document upload through a different module URL", async () => {
@@ -407,5 +442,80 @@ describe("order module action mutation gates", () => {
     expect(harness.sql.some((query) =>
       query.includes("INSERT INTO order_customs_records"),
     )).toBe(false);
+  });
+
+  it.each([
+    ["border_arrived", "tracking_milestone"],
+    ["exported", "actual_exit_at"],
+  ] as const)(
+    "rechecks the %s frozen action field before any tracking write",
+    async (milestoneCode, fieldKey) => {
+      harness.current.permissions = [
+        "order.view",
+        "order.scope.assigned",
+        "order.module.tracking.manage",
+      ];
+      harness.state.trackingActionEditable = false;
+      harness.state.trackingActionReason = "当前尚未进入实际出境及运踪";
+
+      await expect(invoke(post("tracking_add", {
+        milestoneCode,
+        eventAt: "2026-09-06T12:00",
+        location: "Horgos",
+        visibleToCustomer: "1",
+      }), "tracking")).resolves.toEqual({
+        formError: "当前尚未进入实际出境及运踪",
+      });
+
+      expect(harness.loadOrderTrackingActionAccess).toHaveBeenCalledWith(
+        expect.objectContaining({
+          organizationId: "org-1",
+          orderId: "order-1",
+          canOperate: true,
+          legacyCompatibility: "deny",
+        }),
+      );
+      const access = await harness.loadOrderTrackingActionAccess.mock.results.at(-1)?.value;
+      expect(access[fieldKey].editable).toBe(false);
+      expect(harness.state.batchRuns).toBe(0);
+    },
+  );
+
+  it("uses the same frozen tracking gate for option mutations", async () => {
+    harness.current.permissions = [
+      "order.view",
+      "order.scope.assigned",
+      "order.module.tracking.manage",
+    ];
+    harness.state.trackingActionEditable = false;
+    harness.state.trackingActionReason = "运踪节点已经结束，仅供查看";
+
+    await expect(invoke(post("tracking_option_toggle", {
+      optionCode: "transloaded",
+      enabled: "1",
+    }), "tracking")).resolves.toEqual({
+      formError: "运踪节点已经结束，仅供查看",
+    });
+    expect(harness.sql.some((query) => query.includes("UPDATE transport_orders SET"))).toBe(false);
+  });
+
+  it("passes exact module assignment into the shared gate instead of trusting page visibility", async () => {
+    harness.current.permissions = [
+      "order.view",
+      "order.scope.assigned",
+      "order.module.tracking.manage",
+    ];
+    harness.state.moduleAssigneeUserId = "user-b";
+    harness.state.moduleTaskAssigneeUserIds = ["user-b"];
+
+    await expect(invoke(post("tracking_add", {
+      milestoneCode: "border_arrived",
+    }), "tracking")).resolves.toEqual({
+      formError: "当前账号不是本单已分配的运踪负责人，或缺少运踪办理权限",
+    });
+    expect(harness.loadOrderTrackingActionAccess).toHaveBeenCalledWith(
+      expect.objectContaining({ canOperate: false }),
+    );
+    expect(harness.state.batchRuns).toBe(0);
   });
 });

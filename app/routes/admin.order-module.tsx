@@ -87,6 +87,8 @@ import {
   syncTrackingModuleStatusForOrder,
 } from "../lib/batch-tracking.server";
 import { resolveTrackingWorkflowHandoff } from "../lib/batch-tracking.shared";
+import { orderTrackingActionForMilestone } from "../lib/order-tracking-action-policy";
+import { loadOrderTrackingActionAccess } from "../lib/order-tracking-action-policy.server";
 import {
   nextOverseasAction,
   overseasOperationProgress,
@@ -1389,6 +1391,15 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     orderId,
     definition.code,
   );
+  const orderTrackingActions = definition.code === "tracking"
+    ? await loadOrderTrackingActionAccess({
+        db: env.DB,
+        organizationId: current.organizationId,
+        orderId,
+        canOperate: moduleActionCanOperate,
+        legacyCompatibility: "deny",
+      })
+    : null;
   const customsReleaseDocumentGateState = definition.code === "customs"
     ? resolveCustomsReleaseDocumentGate(workflowFields, attachments.results)
     : null;
@@ -1463,6 +1474,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     trackingMilestones: trackingMilestones.results,
     expenseControl: expenseControl ?? null,
     overseasOperation: overseasOperation ?? null,
+    orderTrackingActions,
     expenseDirectionControls: expenseDirectionControls.results,
     warehouseFlow,
     warehouseActuals,
@@ -1530,6 +1542,18 @@ export async function action({ request, params }: Route.ActionArgs) {
   if (!currentModule) return { formError: "订单模块不存在" };
   if (!currentModule.enabled)
     return { formError: "当前工作流未启用该模块" };
+  const isOrdinaryTrackingMutation =
+    moduleCode === "tracking" &&
+    ["tracking_add", "tracking_option_toggle"].includes(intent);
+  const currentModuleActionCanOperate = canOperateEnabledOrderModule({
+    user: current,
+    orderStatus: order.status,
+    moduleCode: currentModule.moduleCode,
+    moduleEnabled: currentModule.enabled,
+    moduleAssigneeUserId: currentModule.assigneeUserId,
+    taskAssigneeUserIds: currentModule.taskAssigneeUserIds,
+    responsibilityPositionCodes: currentModule.responsibilityPositionCodes,
+  });
   const isSalesConsignmentSubmitAction =
     moduleCode === "consignment" &&
     intent === "workflow_action" &&
@@ -1690,7 +1714,7 @@ export async function action({ request, params }: Route.ActionArgs) {
           : "结算文件仅可由本单已分配的客服或财务会计上传和维护。",
     };
   }
-  if (!canOperateCurrentOrder(current, order) && !isSalesConsignmentSubmitAction && !workflowAdministratorActionAccess && !moduleScopedActionAccess && !isExpenseDirectionControlAction && !isAuthorizedSettlementDocumentAction) {
+  if (!canOperateCurrentOrder(current, order) && !isOrdinaryTrackingMutation && !isSalesConsignmentSubmitAction && !workflowAdministratorActionAccess && !moduleScopedActionAccess && !isExpenseDirectionControlAction && !isAuthorizedSettlementDocumentAction) {
     return { formError: "当前节点不由本账号办理，订单信息仅供查看" };
   }
   const isAssignedConsignmentApprover = isAssignedOrderApprover({
@@ -1701,7 +1725,7 @@ export async function action({ request, params }: Route.ActionArgs) {
   const canApproveConsignment =
     (isConsignmentApprovalAction || isConsignmentDocumentReviewAction) &&
     isAssignedConsignmentApprover;
-  if (!moduleManageAccess && !canApproveConsignment && !isSalesConsignmentSubmitAction && !workflowAdministratorActionAccess && !moduleScopedActionAccess && !isExpenseDirectionControlAction && !isAuthorizedSettlementDocumentAction) {
+  if (!moduleManageAccess && !isOrdinaryTrackingMutation && !canApproveConsignment && !isSalesConsignmentSubmitAction && !workflowAdministratorActionAccess && !moduleScopedActionAccess && !isExpenseDirectionControlAction && !isAuthorizedSettlementDocumentAction) {
     return { formError: "当前岗位可以查看本模块，但没有提交业务操作的权限" };
   }
   const moduleWorkflowFields = await loadOrderModuleWorkflowFields(
@@ -1771,6 +1795,31 @@ export async function action({ request, params }: Route.ActionArgs) {
     orderId,
     moduleCode as OrderModuleCode,
   );
+  const submittedTrackingMilestoneCode =
+    moduleCode === "tracking" && intent === "tracking_add"
+      ? valueOf(form, "milestoneCode") || "border_arrived"
+      : null;
+  if (
+    submittedTrackingMilestoneCode &&
+    !trackingManualMilestoneOptions.some(([code]) => code === submittedTrackingMilestoneCode)
+  ) {
+    return { formError: "运输节点无效，请从当前工作流提供的节点中选择" };
+  }
+  if (isOrdinaryTrackingMutation) {
+    const actions = await loadOrderTrackingActionAccess({
+      db: env.DB,
+      organizationId: current.organizationId,
+      orderId,
+      canOperate: currentModuleActionCanOperate,
+      legacyCompatibility: "deny",
+    });
+    const actionAccess = intent === "tracking_option_toggle"
+      ? actions.tracking_milestone
+      : orderTrackingActionForMilestone(actions, submittedTrackingMilestoneCode!);
+    if (!actionAccess.editable) {
+      return { formError: actionAccess.reason || "当前冻结工作流不允许办理该运踪动作" };
+    }
+  }
   const access = orderModuleAccess(order.status, moduleCode);
   const dynamicStageEdit = stageAccess.customPlacement &&
     stageAccess.available && !["completed","cancelled"].includes(order.status);
@@ -3151,7 +3200,7 @@ export async function action({ request, params }: Route.ActionArgs) {
       if (moduleCode !== "tracking")
         return { formError: "只能在运输执行与跟踪模块更新节点" };
       const eventAt = valueOf(form, "eventAt") || new Date().toISOString();
-      const milestoneCode = valueOf(form, "milestoneCode") || "border_arrived";
+      const milestoneCode = submittedTrackingMilestoneCode!;
       if (milestoneCode === "transloaded" && !order.requires_transloading)
         return { formError: "换装节点尚未开启，请先打开换装开关" };
       if (milestoneCode === "transit_customs" && !order.requires_transit_customs)
@@ -6687,6 +6736,10 @@ function ModuleBusinessData({
         (value !== "transloaded" || Boolean(data.order.requires_transloading)) &&
         (value !== "transit_customs" || Boolean(data.order.requires_transit_customs)),
     );
+    const actionForMilestone = (milestoneCode: string) =>
+      data.orderTrackingActions
+        ? orderTrackingActionForMilestone(data.orderTrackingActions, milestoneCode)
+        : null;
     const displayedTrackingMilestones = trackingManualMilestoneOptions.filter(
       ([value]) =>
         value !== "transloaded" && value !== "transit_customs" ||
@@ -6709,6 +6762,10 @@ function ModuleBusinessData({
     );
     const nextTrackingMilestoneCode =
       nextTrackingMilestone?.[0] || selectableTrackingMilestones.at(-1)?.[0] || "border_arrived";
+    const nextTrackingAction = actionForMilestone(nextTrackingMilestoneCode);
+    const editableTrackingMilestones = selectableTrackingMilestones.filter(
+      ([milestoneCode]) => actionForMilestone(milestoneCode)?.editable,
+    );
     const nextTrackingMilestoneLabel = trackingHandoff.ready
       ? "在途运踪门禁已完成，等待境外仓扫码入库"
       : nextTrackingMilestone?.[1] || trackingHandoff.missingCodes[0] || "等待必需节点";
@@ -6791,7 +6848,21 @@ function ModuleBusinessData({
                 ? "：系统推进到境外仓节点后，由境外仓扫码生成“目的仓到达”，操作岗无需也不能代填。"
                 : `：还需登记 ${trackingHandoff.missingCodes.map((code) => trackingManualMilestoneOptions.find(([value]) => value === code)?.[1] || code).join("、")}。`}
           </div>
-          {manage && (!data.trackingDepartureGate || data.trackingDepartureGate.ready) && (
+          {!data.orderTrackingActions && (
+            <div className="alert danger" role="status">
+              <strong>运踪操作门禁加载失败</strong>：为避免越权或错节点写入，当前仅可查看。
+            </div>
+          )}
+          {nextTrackingAction &&
+            !nextTrackingAction.editable &&
+            nextTrackingAction.status !== "hidden" && (
+              <div className="alert info" role="status">
+                <strong>当前仅可查看</strong>：{nextTrackingAction.reason || "当前冻结工作流未开放该运踪动作"}
+              </div>
+            )}
+          {nextTrackingAction?.editable &&
+            editableTrackingMilestones.length > 0 &&
+            (!data.trackingDepartureGate || data.trackingDepartureGate.ready) && (
             <div className="tracking-node-entry-inline">
 
               <div className="tracking-node-entry-heading">
@@ -6800,7 +6871,9 @@ function ModuleBusinessData({
                   <span>按实际发生登记；目的仓到仓由境外仓扫码自动完成。</span>
                 </div>
                 <div className={`tracking-next-guidance${trackingHandoff.ready ? " complete" : ""}`}>
-                  <small>{trackingHandoff.ready ? "当前交棒状态" : "系统已定位下一必需节点"}</small>
+                  <small>{trackingHandoff.ready
+                    ? "当前交棒状态"
+                    : `系统已定位下一${nextTrackingAction.required ? "必办" : "选办"}节点`}</small>
                   <strong>{nextTrackingMilestoneLabel}</strong>
                 </div>
               </div>
@@ -6810,7 +6883,7 @@ function ModuleBusinessData({
               {!workflowFieldPolicy(data.workflowFields, "visible_to_customer").visible && <input type="hidden" name="visibleToCustomer" value="1" />}
               <ModuleField fields={data.workflowFields} fieldKey="tracking_milestone" label="运输节点" className="field tracking-node-milestone" fallbackRequired>
                 {(required) => <select name="milestoneCode" defaultValue={nextTrackingMilestoneCode} required={required}>
-                  {selectableTrackingMilestones.map(([value, label]) => (
+                  {editableTrackingMilestones.map(([value, label]) => (
                     <option key={value} value={value}>
                       {label}
                     </option>
@@ -6874,7 +6947,7 @@ function ModuleBusinessData({
             </div>
           </details>
         </BusinessSubsection>
-        {manage && (
+        {data.orderTrackingActions?.tracking_milestone.visible && (
           <details className="tracking-option-table tracking-option-settings" aria-label="可选运输节点">
             <summary><span>可选运输节点设置</span><small>换装、转关仅在实际发生时启用</small></summary>
             <div className="table-wrap module-record-table">
@@ -6888,12 +6961,15 @@ function ModuleBusinessData({
                     <td><strong>{label}</strong></td>
                     <td>{hint}</td>
                     <td><span className={`status-pill ${enabled ? "success" : "off"}`}>{enabled ? "已启用" : "未启用"}</span></td>
-                    <td><Form method="post">
-                      <input type="hidden" name="intent" value="tracking_option_toggle" />
-                      <input type="hidden" name="optionCode" value={optionCode} />
-                      <input type="hidden" name="enabled" value={enabled ? "0" : "1"} />
-                      <button type="submit" className="text-button" disabled={busy}>{enabled ? "停用" : "启用"}</button>
-                    </Form></td>
+                    <td>{data.orderTrackingActions?.tracking_milestone.editable
+                      ? <Form method="post">
+                          <input type="hidden" name="intent" value="tracking_option_toggle" />
+                          <input type="hidden" name="optionCode" value={optionCode} />
+                          <input type="hidden" name="enabled" value={enabled ? "0" : "1"} />
+                          <button type="submit" className="text-button" disabled={busy}>{enabled ? "停用" : "启用"}</button>
+                        </Form>
+                      : <span className="status-pill off" title={data.orderTrackingActions?.tracking_milestone.reason || undefined}>只读</span>}
+                    </td>
                   </tr>)}
                 </tbody>
               </table>
