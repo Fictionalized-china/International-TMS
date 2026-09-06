@@ -628,6 +628,17 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
         self.assertIn(open_tab, helper)
         self.assertLess(helper.index(open_tab), helper.index('name="运输进度与运单跟踪"'))
 
+    def test_pz_read_only_audit_checks_capabilities_not_transient_copy(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def assert_customs_permission_alignment(")
+        end = source.index("    def complete_ftl_customs(", start)
+        helper = source[start:end]
+
+        self.assertIn('locator("section.batch-order-documents")', helper)
+        self.assertNotIn('get_by_text("当前只读"', helper)
+        self.assertIn('locator(".batch-customs-create-button")', helper)
+        self.assertIn('locator(".batch-order-direct-customs-button")', helper)
+
 
 if __name__ == "__main__":
     unittest.main()

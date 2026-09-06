@@ -1086,8 +1086,8 @@ class Phase3Flow:
             self._open_batch(self.batch_operation)
             self._open_batch_tab(self.batch_operation, "报关与文件")
             self.batch_operation.expect_visible(
-                self.batch_operation.page.get_by_text("当前只读", exact=False),
-                "PZ 报关只读提示",
+                self.batch_operation.page.locator("section.batch-order-documents"),
+                "PZ 报关只读数据表",
             )
             self._expect_not_rendered_or_block(
                 self.batch_operation,
