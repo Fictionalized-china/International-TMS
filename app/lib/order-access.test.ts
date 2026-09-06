@@ -110,6 +110,27 @@ describe("order access", () => {
     expect(scoped.values.slice(-2)).toEqual(["user-a", "user-a"]);
   });
 
+  it("keeps a customer-service handler's assigned order visible after settlement handoff", () => {
+    const customerService = {
+      ...baseUser,
+      positionCode: "CS",
+      roleCodes: ["pos_customer_service"],
+    };
+    expect(canSeeScopedOrder(customerService, {
+      assignee_user_id: "user-b",
+      responsible_position_code: "FINANCE_ACCOUNTING",
+      lifecycle_assignee_user_ids: ["user-a"],
+    })).toBe(true);
+    expect(canOperateCurrentOrder(customerService, {
+      status: "in_execution",
+      current_assignee_user_id: "user-b",
+    })).toBe(false);
+    const scoped = orderVisibilitySql(customerService);
+    expect(scoped.sql).toContain("retained_module.assignee_user_id=?");
+    expect(scoped.sql).toContain("retained_task.assignee_user_id=?");
+    expect(scoped.values.slice(-2)).toEqual(["user-a", "user-a"]);
+  });
+
   it("keeps an assigned finance reviewer's order visible as read-only after both finance reviews", () => {
     const financeUser = {
       ...baseUser,

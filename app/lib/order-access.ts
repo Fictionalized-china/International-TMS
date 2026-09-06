@@ -167,7 +167,7 @@ export function orderVisibilitySql(user: OrderAccessUser, alias = "o") {
         )
       )`
       : "";
-    const retainsModuleAssignment = ["OPERATION", "DOC", "FINANCE_ACCOUNTING"].includes(
+    const retainsModuleAssignment = ["OPERATION", "DOC", "CS", "FINANCE_ACCOUNTING"].includes(
       user.positionCode ?? "",
     );
     const retainedModuleAssignment = retainsModuleAssignment
@@ -381,7 +381,7 @@ export function canSeeScopedOrder(user: OrderAccessUser, order: {
   ) return true;
   if (order.current_module_assignee_user_ids?.includes(user.userId)) return true;
   if (
-    ["OPERATION", "DOC", "FINANCE_ACCOUNTING"].includes(user.positionCode ?? "") &&
+    ["OPERATION", "DOC", "CS", "FINANCE_ACCOUNTING"].includes(user.positionCode ?? "") &&
     order.lifecycle_assignee_user_ids?.includes(user.userId)
   ) return true;
   if (order.assignee_user_id) return order.assignee_user_id === user.userId;
