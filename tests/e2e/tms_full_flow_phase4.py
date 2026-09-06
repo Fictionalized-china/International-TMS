@@ -798,6 +798,20 @@ class Phase4Flow:
 
     def _open_costs(self, session: RoleBrowserSession, order_number: str, section: str) -> None:
         self._open_order(session, order_number)
+        if self._click_business_tab(session, section):
+            return
+        settlement_step = session.page.get_by_role(
+            "navigation", name="订单工作流"
+        ).get_by_role("link", name=re.compile(r"对账结算$"))
+        if self._is_visible(settlement_step):
+            session.click(settlement_step.first, "打开已完成的对账结算节点")
+            session.expect_visible(
+                session.page.get_by_role("heading", name="对账结算", exact=True),
+                "对账结算历史节点标题",
+            )
+            self._assert_no_error_page(session)
+            if self._click_business_tab(session, section):
+                return
         if not self._click_business_tab(session, section):
             body = self._text(session.page.locator("body"), 10_000)
             if "订单已归档" in body or "订单已完成" in body:

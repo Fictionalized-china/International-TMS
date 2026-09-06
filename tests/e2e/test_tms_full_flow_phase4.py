@@ -612,6 +612,17 @@ class Phase4SafetyTests(unittest.TestCase):
             helper.index("session.click(action.first"),
         )
 
+    def test_cost_navigation_reopens_the_completed_settlement_step(self) -> None:
+        source = (HERE / "tms_full_flow_phase4.py").read_text(encoding="utf-8")
+        start = source.index("    def _open_costs(")
+        end = source.index("    def _read_workflow_snapshot(", start)
+        helper = source[start:end]
+
+        self.assertIn('name="订单工作流"', helper)
+        self.assertIn('name=re.compile(r"对账结算$")', helper)
+        self.assertIn('"打开已完成的对账结算节点"', helper)
+        self.assertGreaterEqual(helper.count("self._click_business_tab(session, section)"), 3)
+
     def test_execute_is_opt_in_and_phase3_summary_is_required(self) -> None:
         args = build_parser().parse_args(["--phase3-summary", "phase3.json"])
         self.assertFalse(args.execute)
