@@ -19,6 +19,7 @@ import { useExpandableDialogScrollLock } from "./components/Modal";
 import {
   canRequestLiveDataRefresh,
   isLiveDataRoute,
+  shouldRefreshForDataMutationSignal,
 } from "./lib/live-data-refresh";
 import "./app.css";
 
@@ -54,9 +55,18 @@ function resolveDataMutation({
   };
 }
 
-function publishDataMutation(mutation: DataMutationSource) {
+function createDataMutationSenderId() {
+  try {
+    if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
+  } catch {
+    // Fall back for older or restricted browsers.
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function publishDataMutation(mutation: DataMutationSource, senderId: string) {
   const sessionSlot = new URL(window.location.href).searchParams.get("itmsTab");
-  const signal = JSON.stringify({ ...mutation, sessionSlot, occurredAt: Date.now() });
+  const signal = JSON.stringify({ ...mutation, sessionSlot, senderId, occurredAt: Date.now() });
   try {
     if ("BroadcastChannel" in window) {
       const channel = new BroadcastChannel(DATA_SYNC_CHANNEL);
@@ -170,6 +180,9 @@ export default function App() {
   const fetcherMutationSources = useRef(new Map<string, DataMutationSource>());
   const [remoteMutationVersion, setRemoteMutationVersion] = useState(0);
   const handledRemoteMutationVersion = useRef(0);
+  const senderIdRef = useRef<string | null>(null);
+  const senderId = senderIdRef.current ?? createDataMutationSenderId();
+  senderIdRef.current = senderId;
   useExpandableDialogScrollLock();
 
   useEffect(() => {
@@ -195,8 +208,8 @@ export default function App() {
     if (navigation.state !== "idle" || !dataMutationSource.current) return;
     const mutation = dataMutationSource.current;
     dataMutationSource.current = null;
-    publishDataMutation(mutation);
-  }, [location.pathname, navigation.formAction, navigation.formData, navigation.formMethod, navigation.state]);
+    publishDataMutation(mutation, senderId);
+  }, [location.pathname, navigation.formAction, navigation.formData, navigation.formMethod, navigation.state, senderId]);
 
   useEffect(() => {
     const visibleFetcherKeys = new Set(fetchers.map((fetcher) => fetcher.key));
@@ -215,21 +228,24 @@ export default function App() {
         const mutation = fetcherMutationSources.current.get(fetcher.key);
         if (mutation) {
           fetcherMutationSources.current.delete(fetcher.key);
-          publishDataMutation(mutation);
+          publishDataMutation(mutation, senderId);
         }
       }
     }
     for (const [key, mutation] of fetcherMutationSources.current) {
       if (!visibleFetcherKeys.has(key)) {
         fetcherMutationSources.current.delete(key);
-        publishDataMutation(mutation);
+        publishDataMutation(mutation, senderId);
       }
     }
-  }, [fetchers, location.pathname]);
+  }, [fetchers, location.pathname, senderId]);
 
   useEffect(() => {
     if (!isLiveDataRoute(location.pathname)) return;
-    const refresh = () => setRemoteMutationVersion((version) => version + 1);
+    const refresh = (signal: unknown) => {
+      if (!shouldRefreshForDataMutationSignal(signal, senderId)) return;
+      setRemoteMutationVersion((version) => version + 1);
+    };
     let channel: BroadcastChannel | null = null;
     try {
       channel = "BroadcastChannel" in window
@@ -238,16 +254,16 @@ export default function App() {
     } catch {
       channel = null;
     }
-    if (channel) channel.onmessage = refresh;
+    if (channel) channel.onmessage = (event) => refresh(event.data);
     const onStorage = (event: StorageEvent) => {
-      if (event.key === DATA_SYNC_CHANNEL) refresh();
+      if (event.key === DATA_SYNC_CHANNEL) refresh(event.newValue);
     };
     window.addEventListener("storage", onStorage);
     return () => {
       channel?.close();
       window.removeEventListener("storage", onStorage);
     };
-  }, [location.pathname]);
+  }, [location.pathname, senderId]);
 
   useEffect(() => {
     if (!isLiveDataRoute(location.pathname)) return;

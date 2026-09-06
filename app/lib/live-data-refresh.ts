@@ -24,3 +24,21 @@ export function canRequestLiveDataRefresh(input: {
     input.revalidationState === "idle"
   );
 }
+
+export function shouldRefreshForDataMutationSignal(
+  signal: unknown,
+  currentSenderId: string,
+) {
+  let payload: unknown = signal;
+  if (typeof signal === "string") {
+    try {
+      payload = JSON.parse(signal);
+    } catch {
+      return true;
+    }
+  }
+  if (!payload || typeof payload !== "object") return true;
+  const senderId = (payload as { senderId?: unknown }).senderId;
+  if (typeof senderId !== "string" || !senderId) return true;
+  return senderId !== currentSenderId;
+}

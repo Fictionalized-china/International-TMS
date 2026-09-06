@@ -1,9 +1,19 @@
 import { describe, expect, it } from "vitest";
 
+import * as liveDataRefresh from "./live-data-refresh";
 import {
   canRequestLiveDataRefresh,
   isLiveDataRoute,
 } from "./live-data-refresh";
+
+type LiveDataRefreshTestExports = {
+  shouldRefreshForDataMutationSignal?: (
+    signal: unknown,
+    currentSenderId: string,
+  ) => boolean;
+};
+
+const testExports = liveDataRefresh as typeof liveDataRefresh & LiveDataRefreshTestExports;
 
 describe("isLiveDataRoute", () => {
   it.each([
@@ -59,5 +69,34 @@ describe("canRequestLiveDataRefresh", () => {
       navigationState: "idle",
       revalidationState: "loading",
     })).toBe(false);
+  });
+});
+
+describe("shouldRefreshForDataMutationSignal", () => {
+  it("ignores a signal emitted by the same App instance", () => {
+    expect(testExports.shouldRefreshForDataMutationSignal).toBeTypeOf("function");
+
+    expect(testExports.shouldRefreshForDataMutationSignal?.(
+      JSON.stringify({ sessionSlot: "shared-slot-001", senderId: "app-instance-001" }),
+      "app-instance-001",
+    )).toBe(false);
+  });
+
+  it("refreshes for another App instance even when a copied tab shares the same session slot", () => {
+    expect(testExports.shouldRefreshForDataMutationSignal).toBeTypeOf("function");
+
+    expect(testExports.shouldRefreshForDataMutationSignal?.(
+      JSON.stringify({ sessionSlot: "shared-slot-001", senderId: "app-instance-002" }),
+      "app-instance-001",
+    )).toBe(true);
+  });
+
+  it("refreshes for a legacy signal without a sender id", () => {
+    expect(testExports.shouldRefreshForDataMutationSignal).toBeTypeOf("function");
+
+    expect(testExports.shouldRefreshForDataMutationSignal?.(
+      JSON.stringify({ sessionSlot: "shared-slot-001", occurredAt: 1 }),
+      "app-instance-001",
+    )).toBe(true);
   });
 });
