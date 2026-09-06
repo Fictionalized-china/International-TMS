@@ -1568,8 +1568,12 @@ class Phase3Flow:
                         remediation="废弃本轮续跑，从 Phase 1 创建全新客户和全新订单后重新认证。",
                     )
                 disclosure = row.locator("details.batch-order-file-details")
-                session.click(disclosure.locator("summary"), f"展开 {order.order_number} 报关")
                 panel = disclosure.locator(".batch-order-file-panel")
+                if not self._is_visible(panel):
+                    session.click(
+                        disclosure.locator("summary"),
+                        f"展开 {order.order_number} 报关",
+                    )
                 session.expect_visible(panel, f"{order.order_number} 报关办理面板")
                 pending_declarations = panel.locator(".batch-customs-row").filter(
                     has_text="已申报"
