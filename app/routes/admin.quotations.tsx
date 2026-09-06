@@ -1,9 +1,10 @@
 import { env } from "cloudflare:workers";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Form, Link, useNavigation } from "react-router";
+import { Form, Link, useFetcher, useNavigation } from "react-router";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import type { Route } from "./+types/admin.quotations";
 import { Modal } from "../components/Modal";
+import { CustomerEditorForm, type CustomerEditorValues } from "../components/CustomerEditorForm";
 import { ConfirmAction } from "../components/ConfirmAction";
 import { QueryPagination } from "../components/QueryPagination";
 import { requireSessionUser } from "../lib/auth.server";
@@ -123,6 +124,15 @@ type CustomerContactOption = {
   name: string;
   phone: string | null;
   is_primary: number;
+};
+
+type CustomerCreateActionData = {
+  intent?: string;
+  customerId?: string;
+  success?: string;
+  formError?: string;
+  values?: CustomerEditorValues;
+  errors?: Record<string, string>;
 };
 
 type UserOption = { id: string; display_name: string; email: string };
@@ -1005,6 +1015,8 @@ function ReadCell({ label, value }: { label: string; value: string }) {
 
 function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<ReturnType<typeof loader>>; busy: boolean; formError?: string }) {
   const errorSummaryRef=useRef<HTMLDivElement>(null);
+  const autoSelectedCustomerRef = useRef("");
+  const customerFetcher = useFetcher<CustomerCreateActionData>();
   const [customerId, setCustomerId] = useState(loaderData.customers[0]?.id || "");
   const [pickupAddress, setPickupAddress] = useState(loaderData.customers[0]?.pickup_address || "");
   const [customerContactName, setCustomerContactName] = useState(loaderData.customers[0]?.contact_name || "");
@@ -1024,6 +1036,10 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
   const calculatedVolume = calculatedVolumeValue == null ? "" : calculatedVolumeValue.toFixed(4);
   const selectedCustomerContacts = loaderData.contacts.filter((contact) => contact.customer_id === customerId);
   const selectedCustomer = loaderData.customers.find((customer) => customer.id === customerId);
+  const createdCustomerId = customerFetcher.data?.intent === "customer" && customerFetcher.data.success
+    ? customerFetcher.data.customerId || ""
+    : "";
+  const canCreateCustomer = loaderData.current.permissions.includes("customer.manage") && loaderData.current.permissions.includes("customer.sensitive.view");
   const compatibleWorkflows = useMemo(
     () => loaderData.workflows.filter((workflow) => workflow.road_load_type === roadLoadType),
     [loaderData.workflows, roadLoadType],
@@ -1082,6 +1098,12 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
     setCustomerContactName(customer?.contact_name || "");
     setCustomerContactPhone(customer?.contact_phone || "");
   };
+  useEffect(() => {
+    if (!createdCustomerId || autoSelectedCustomerRef.current === createdCustomerId) return;
+    if (!loaderData.customers.some((customer) => customer.id === createdCustomerId)) return;
+    autoSelectedCustomerRef.current = createdCustomerId;
+    selectCustomer(createdCustomerId);
+  }, [createdCustomerId, loaderData.customers]);
   const selectRoadLoadType = (value: "" | "ltl" | "ftl") => {
     setRoadLoadType(value);
     setWorkflowDefinitionId("");
@@ -1093,7 +1115,7 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
     <div className="quote-ledger">
     <QuoteLedgerSection className="quote-plan-section" title="客户与运输方案" note="报价确认后不再重复创建订单">
       <div className="quote-field-grid quote-plan-grid">
-        <Field label="客户"><select className="control" name="customerId" value={customerId} onChange={(event) => selectCustomer(event.target.value)} required><option value="">请选择客户</option>{loaderData.customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name}</option>)}</select></Field>
+        <Field label="客户" className="quote-customer-picker-field"><div className="quote-customer-picker-row"><select className="control" name="customerId" value={customerId} onChange={(event) => selectCustomer(event.target.value)} required><option value="">请选择客户</option>{loaderData.customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name}</option>)}</select>{canCreateCustomer && <Modal title="新增客户" triggerLabel="＋ 新增客户" triggerClassName="secondary" size="xwide" dialogClassName="customer-editor-modal" closeSignal={createdCustomerId || undefined} guardFormChanges><CustomerEditorForm intent="customer" owners={loaderData.users} countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} busy={customerFetcher.state !== "idle"} values={customerFetcher.data?.values} errors={customerFetcher.data?.errors} formError={customerFetcher.data?.formError} formComponent={customerFetcher.Form} action="/admin/customers"/></Modal>}</div>{createdCustomerId && <small className="quote-customer-created">新客户已创建并自动选中</small>}</Field>
         {policies.contactName.isActive && <Field label="客户联系人"><ContactCombobox name="customerContactName" value={customerContactName} contacts={selectedCustomerContacts} mode="name" required={policies.contactName.isRequired} onChange={(value, contact) => { setCustomerContactName(value); if (contact?.phone) setCustomerContactPhone(contact.phone); }} /></Field>}
         {policies.contactPhone.isActive && <Field label="联系电话"><ContactCombobox name="customerContactPhone" value={customerContactPhone} contacts={selectedCustomerContacts} mode="phone" required={policies.contactPhone.isRequired} onChange={(value, contact) => { setCustomerContactPhone(value); if (contact) setCustomerContactName(contact.name); }} /></Field>}
         {policies.salesperson.isActive && <Field label="业务员"><select className="control" name="salespersonId" defaultValue={loaderData.current.userId} required={policies.salesperson.isRequired}><option value="">请选择业务员</option>{loaderData.users.map((user) => <option key={user.id} value={user.id}>{user.display_name} · {user.email}</option>)}</select></Field>}
