@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -579,6 +580,24 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
             "self._expect_success(",
             helper,
         )
+
+    def test_phase3_preserves_valid_prefilled_datetime_controls(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+
+        for field_name, expected_count in {
+            "declaredAt": 1,
+            "releasedAt": 1,
+            "eventAt": 2,
+            "actualExitAt": 1,
+        }.items():
+            pattern = re.compile(
+                rf'"{field_name}",\n\s+[^\n]+,\n\s+[^\n]+,\n\s+only_if_empty=True,'
+            )
+            self.assertEqual(
+                len(pattern.findall(source)),
+                expected_count,
+                f"{field_name} must preserve a valid prefilled value",
+            )
 
 
 if __name__ == "__main__":

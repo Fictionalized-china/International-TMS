@@ -991,6 +991,7 @@ class Phase3Flow:
             "declaredAt",
             datetime.now().strftime("%Y-%m-%dT%H:%M"),
             "填写申报时间",
+            only_if_empty=True,
         )
         self._fill_if_visible(
             session, form, "declarationTitle", "UI全流程验收申报", "填写申报抬头"
@@ -1624,6 +1625,7 @@ class Phase3Flow:
                     "releasedAt",
                     datetime.now().strftime("%Y-%m-%dT%H:%M"),
                     "填写报关放行时间",
+                    only_if_empty=True,
                 )
                 session.click(
                     release_form.get_by_role("button", name="确认放行并同步工作流"),
@@ -1694,6 +1696,7 @@ class Phase3Flow:
             "eventAt",
             self._event_time(offset_minutes),
             f"填写{label}时间",
+            only_if_empty=True,
         )
         self._fill_if_visible(
             self.operation, form, "location", location, f"填写{label}地点"
@@ -1799,6 +1802,7 @@ class Phase3Flow:
             "eventAt",
             self._event_time(offset_minutes),
             f"填写 PZ {label}时间",
+            only_if_empty=True,
         )
         self._fill_if_visible(
             session, form, "location", location, f"填写 PZ {label}地点"
@@ -1942,6 +1946,7 @@ class Phase3Flow:
                     "actualExitAt",
                     self._event_time(6),
                     "填写 PZ 实际出境时间",
+                    only_if_empty=True,
                 )
                 exit_port = exit_form.locator('select[name="exitPort"]')
                 if self._is_visible(exit_port) and not exit_port.first.input_value().strip():
