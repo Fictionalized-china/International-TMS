@@ -103,8 +103,8 @@ import {
 } from "../lib/customs-process-guide";
 import {
   resolveCustomsDeclarationWorkflowInput,
-  type ExistingCustomsDeclarationInput,
 } from "../lib/customs-declaration-workflow";
+import { loadExistingCustomsDeclarationForMutation } from "../lib/customs-declaration-store.server";
 import {
   automaticallyNotifyOverseasArrival,
   completeOverseasOrderDelivery,
@@ -2663,14 +2663,11 @@ export async function action({ request, params }: Route.ActionArgs) {
       if (moduleCode !== "customs") return { formError: "只能在报关模块登记申报单" };
       const declarationId = valueOf(form, "declarationId") || null;
       const existingDeclaration = declarationId
-        ? await env.DB.prepare(
-            `SELECT customs_record_id,clearance_stage,status,declaration_number,declaration_type,
-                    declaration_title,declaring_company,declared_at,declared_amount,currency,
-                    gross_weight_kg,released_at,is_deleted,is_redeclared,is_amended,is_inspected,
-                    change_reason
-             FROM order_customs_declarations
-             WHERE id=? AND organization_id=? AND order_id=?`,
-          ).bind(declarationId, current.organizationId, orderId).first<ExistingCustomsDeclarationInput & { customs_record_id: string }>()
+        ? await loadExistingCustomsDeclarationForMutation(env.DB, {
+            declarationId,
+            organizationId: current.organizationId,
+            orderId,
+          })
         : null;
       if (declarationId && !existingDeclaration)
         return { formError: "要更新的申报单不存在" };
