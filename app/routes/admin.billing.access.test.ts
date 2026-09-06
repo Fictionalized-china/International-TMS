@@ -69,11 +69,25 @@ const harness = vi.hoisted(() => {
       items: [], page: 1, pageCount: 1, pageSize: 10, total: 0,
     })),
     loadAccess: vi.fn(async () => ({ ...access })),
-    createReconciliation: vi.fn(async () => ({ id: "rec-1", number: "REC-001" })),
-    confirmReconciliation: vi.fn(async () => undefined),
-    recordSettlementInvoice: vi.fn(async () => ({ id: "invoice-1", recordNumber: "TAX-001" })),
-    recordCashTransaction: vi.fn(async () => ({ id: "cash-1", number: "CASH-001" })),
-    allocateCashTransaction: vi.fn(async () => undefined),
+    loadFreshActor: vi.fn(async (): Promise<typeof current | null> => ({
+      ...current,
+      roleCodes: [...current.roleCodes],
+      permissions: [...current.permissions],
+    })),
+    createReconciliation: vi.fn(async (_db, input) => {
+      await input.assertCanMutate();
+      return { id: "rec-1", number: "REC-001" };
+    }),
+    confirmReconciliation: vi.fn(async (_db, input) => { await input.assertCanMutate(); }),
+    recordSettlementInvoice: vi.fn(async (_db, input) => {
+      await input.assertCanMutate();
+      return { id: "invoice-1", recordNumber: "TAX-001" };
+    }),
+    recordCashTransaction: vi.fn(async (_db, input) => {
+      await input.assertCanMutate();
+      return { id: "cash-1", number: "CASH-001" };
+    }),
+    allocateCashTransaction: vi.fn(async (_db, input) => { await input.assertCanMutate(); }),
     writeAudit: vi.fn(async () => undefined),
   };
 });
@@ -83,6 +97,7 @@ vi.mock("../lib/auth.server", () => ({ requireSessionUser: harness.requireSessio
 vi.mock("../lib/audit.server", () => ({ writeAudit: harness.writeAudit }));
 vi.mock("../lib/settlement-workbench-access.server", () => ({
   loadSettlementWorkbenchActionAccess: harness.loadAccess,
+  loadFreshSettlementWorkbenchActor: harness.loadFreshActor,
 }));
 vi.mock("../lib/settlement-workbench-pages.server", () => ({
   emptySettlementPage: (page = 1, pageSize = 10) => ({ items: [], page, pageCount: 1, pageSize, total: 0 }),
@@ -138,6 +153,11 @@ describe("central settlement workbench access integration", () => {
       reason: null,
       orders: [],
     });
+    harness.loadFreshActor.mockImplementation(async () => ({
+      ...harness.current,
+      roleCodes: [...harness.current.roleCodes],
+      permissions: [...harness.current.permissions],
+    }));
   });
 
   it("uses actor-scoped pages and returns the current frozen gate for each expense group", async () => {
@@ -161,7 +181,7 @@ describe("central settlement workbench access integration", () => {
     });
     expect(result.accessDenied).toBe(false);
     if (result.accessDenied) throw new Error("expected settlement workbench access");
-    expect(Object.values(result.actionAccess.createReconciliationByGroup)[0])
+    expect(result.actionAccess.createReconciliationByExpenseId["expense-1"])
       .toMatchObject({ visible: true, canWrite: true });
   });
 
@@ -207,7 +227,13 @@ describe("central settlement workbench access integration", () => {
       source: { kind: "reconciliation_id", id: "rec-1" },
       legacyFallback: "deny",
     });
+    expect(harness.loadAccess).toHaveBeenCalledTimes(2);
     expect(harness[mutation]).toHaveBeenCalledTimes(1);
+    expect(harness.loadFreshActor).toHaveBeenCalledWith(harness.DB, {
+      sessionId: "session-1",
+      organizationId: "org-1",
+      userId: "finance-1",
+    });
   });
 
   it("does not let order.scope.all authorize organization-level cash entry", async () => {
@@ -230,4 +256,42 @@ describe("central settlement workbench access integration", () => {
     await invokeAction(post({ intent: "record_cash", direction: "receipt", counterpartyName: "客户甲", currency: "CNY", amount: "100", occurredOn: "2026-09-06", settlementEntity: "测试组织", accountName: "银行", handledByUserId: "cashier-1" }));
     expect(harness.recordCashTransaction).toHaveBeenCalledTimes(1);
   });
+
+  it("fails closed at the critical write guard when the live identity was revoked", async () => {
+    harness.loadFreshActor.mockResolvedValueOnce(null);
+
+    const result = await invokeAction(post({
+      intent: "create_reconciliation",
+      direction: "receivable",
+      expenseId: ["expense-1"],
+    }));
+
+    expect(result).toEqual({
+      formError: "当前会话、岗位或角色已失效，请重新登录后再试",
+    });
+    expect(harness.loadFreshActor).toHaveBeenCalledWith(harness.DB, {
+      sessionId: "session-1",
+      organizationId: "org-1",
+      userId: "finance-1",
+    });
+    expect(harness.loadAccess).toHaveBeenCalledTimes(1);
+    expect(harness.writeAudit).not.toHaveBeenCalled();
+  });
+
+  it("does not write a success audit when reconciliation confirmation loses a race", async () => {
+    harness.confirmReconciliation.mockRejectedValueOnce(
+      new Error("对账单状态已变化，请刷新后重试"),
+    );
+
+    const result = await invokeAction(post({
+      intent: "confirm_reconciliation",
+      id: "rec-1",
+    }));
+
+    expect(result).toEqual({
+      formError: "对账单状态已变化，请刷新后重试",
+    });
+    expect(harness.writeAudit).not.toHaveBeenCalled();
+  });
+
 });

@@ -74,11 +74,21 @@ describe("settlement workbench page scope", () => {
 
     expect(calls).toHaveLength(2);
     for (const call of calls) {
+      expect(call.sql).toContain("e.stage='confirmed'");
+      expect(call.sql).toContain("e.amount>0");
       expect(call.sql).toContain("o.organization_id=e.organization_id");
       expect(call.sql).toContain("c.organization_id=o.organization_id");
       expect(call.sql).toContain("l.organization_id=e.organization_id");
       expect(call.sql).toContain("workflow_instance_task_states");
       expect(call.sql).not.toContain("AND 1=1");
+      expect(call.sql).not.toContain("road_status");
+      expect(call.sql).not.toContain("transport_batches");
+      expect(call.sql).toContain("workflow_instances visible_instance");
+      expect(call.sql).toContain("workflow_instance_fields visible_field");
+      expect(call.sql).toContain("visible_field.field_key='reconciliation_statement'");
+      expect(call.sql).toContain("visible_field.module_code='costs'");
+      expect(call.sql).toContain("visible_field.is_active=1");
+      expect(call.sql).not.toContain("AND NOT EXISTS(\n    AND EXISTS(");
       expect(call.bindings).toContain("org-1");
       expect(call.bindings).toContain("finance-1");
     }

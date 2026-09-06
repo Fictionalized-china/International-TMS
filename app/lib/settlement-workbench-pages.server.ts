@@ -43,17 +43,6 @@ export type SettlementBalance = {
   amount: number;
 };
 
-const outboundReadySql = `EXISTS(
-  SELECT 1
-  FROM transport_batch_orders bo
-  JOIN transport_batches b ON b.id=bo.batch_id
-  WHERE bo.order_id=o.id
-    AND bo.organization_id=o.organization_id
-    AND b.organization_id=bo.organization_id
-    AND bo.status!='removed'
-    AND b.road_status IN ('outbound_in_transit','overseas_arrived','waiting_pickup','pickup_completed')
-)`;
-
 function eligibleBaseSql(scopeSql: string) {
   return `
   FROM business_expenses e
@@ -63,14 +52,25 @@ function eligibleBaseSql(scopeSql: string) {
     AND ${scopeSql}
     AND e.stage='confirmed'
     AND e.amount>0
+    AND EXISTS(
+      SELECT 1
+      FROM workflow_instances visible_instance
+      JOIN workflow_instance_fields visible_field
+        ON visible_field.instance_id=visible_instance.id
+      WHERE visible_instance.id=o.workflow_instance_id
+        AND visible_instance.organization_id=o.organization_id
+        AND visible_instance.order_id=o.id
+        AND visible_field.module_code='costs'
+        AND visible_field.field_key='reconciliation_statement'
+        AND visible_field.is_active=1
+    )
     AND NOT EXISTS(
       SELECT 1
       FROM settlement_reconciliation_lines l
       JOIN settlement_reconciliations r
         ON r.id=l.reconciliation_id AND r.organization_id=l.organization_id
       WHERE l.expense_id=e.id AND l.organization_id=e.organization_id AND r.status!='withdrawn'
-    )
-    AND (e.direction='payable' OR ${outboundReadySql})`;
+    )`;
 }
 
 function reconciliationCte(actor: SettlementWorkbenchActor) {
@@ -271,8 +271,7 @@ export async function loadEligibleExpensePage(
         FROM settlement_cash_allocations a
         JOIN settlement_cash_transactions t
           ON t.id=a.cash_transaction_id AND t.organization_id=a.organization_id AND t.status!='void'
-        WHERE a.expense_id=e.id AND a.organization_id=e.organization_id),0) settled_amount,
-      CASE WHEN ${outboundReadySql} THEN 1 ELSE 0 END outbound_ready
+        WHERE a.expense_id=e.id AND a.organization_id=e.organization_id),0) settled_amount
       ${baseSql}${filterSql}
       ORDER BY e.direction,c.name,e.currency,o.order_number,e.created_at
       LIMIT ? OFFSET ?`)

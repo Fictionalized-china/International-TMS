@@ -4,7 +4,7 @@ import type { Route } from "./+types/admin.billing";
 import { QueryPagination } from "../components/QueryPagination";
 import { OrderNumberLink, OrderNumberLinkList } from "../components/EntityNumberLink";
 import { writeAudit } from "../lib/audit.server";
-import { requireSessionUser } from "../lib/auth.server";
+import { requireSessionUser, type SessionUser } from "../lib/auth.server";
 import { canAccessSettlementWorkbench } from "../lib/billing-access";
 import {
   BILLING_PAGE_SIZE,
@@ -21,7 +21,10 @@ import {
   type SettlementWorkbenchAction,
   type SettlementWorkbenchActor,
 } from "../lib/settlement-workbench-access";
-import { loadSettlementWorkbenchActionAccess } from "../lib/settlement-workbench-access.server";
+import {
+  loadFreshSettlementWorkbenchActor,
+  loadSettlementWorkbenchActionAccess,
+} from "../lib/settlement-workbench-access.server";
 import {
   emptySettlementPage,
   loadAvailableCashTransactions,
@@ -50,7 +53,7 @@ import { valueOf } from "../lib/validation";
 type UserOption = { id: string; display_name: string };
 type SettlementUiAccess = Pick<SettlementMultiOrderActionAccess, "visible" | "canWrite" | "reason">;
 type SettlementActionAccessIndex = {
-  createReconciliationByGroup: Record<string, SettlementMultiOrderActionAccess>;
+  createReconciliationByExpenseId: Record<string, SettlementMultiOrderActionAccess>;
   confirmReconciliationById: Record<string, SettlementMultiOrderActionAccess>;
   allocateCashById: Record<string, SettlementMultiOrderActionAccess>;
   recordInvoiceById: Record<string, SettlementMultiOrderActionAccess>;
@@ -58,7 +61,7 @@ type SettlementActionAccessIndex = {
 };
 
 const emptyActionAccessIndex = (): SettlementActionAccessIndex => ({
-  createReconciliationByGroup: {}, confirmReconciliationById: {},
+  createReconciliationByExpenseId: {}, confirmReconciliationById: {},
   allocateCashById: {}, recordInvoiceById: {},
   recordCash: { visible: true, canWrite: false, reason: "当前页没有可办理的收付款流水" },
 });
@@ -107,11 +110,11 @@ export async function loader({ request }: Route.LoaderArgs) {
 
   if (view.tab === "pending") {
     eligiblePage = await loadEligibleExpensePage(env.DB, current, pageQuery);
-    for (const group of groupExpenses(eligiblePage.items)) {
-      actionAccess.createReconciliationByGroup[group.key] = await loadSettlementWorkbenchActionAccess(env.DB, {
+    for (const expense of eligiblePage.items) {
+      actionAccess.createReconciliationByExpenseId[expense.id] = await loadSettlementWorkbenchActionAccess(env.DB, {
         actor: current,
         action: "create_reconciliation",
-        source: { kind: "expense_ids", ids: group.expenses.map((item) => item.id) },
+        source: { kind: "expense_ids", ids: [expense.id] },
         legacyFallback: "deny",
       });
     }
@@ -189,9 +192,10 @@ export async function action({ request }: Route.ActionArgs) {
         return { formError: "对账方向无效" };
       }
       const expenseIds = form.getAll("expenseId").map(String);
-      const blocked = await settlementActionBlocked(current, "create_reconciliation", {
+      const source = {
         kind: "expense_ids", ids: expenseIds,
-      });
+      } as const;
+      const blocked = await settlementActionBlocked(current, "create_reconciliation", source);
       if (blocked) return { formError: blocked };
       const result = await createReconciliation(env.DB, {
         organizationId: current.organizationId,
@@ -199,6 +203,7 @@ export async function action({ request }: Route.ActionArgs) {
         direction,
         notes: valueOf(form, "notes"),
         userId: current.userId,
+        assertCanMutate: () => assertSettlementActionAllowed(current, "create_reconciliation", source),
         now,
       });
       await audit(request, current, "settlement.reconciliation.create", "settlement_reconciliation", result.id, {
@@ -209,14 +214,14 @@ export async function action({ request }: Route.ActionArgs) {
     }
     if (intent === "confirm_reconciliation") {
       const id = valueOf(form, "id");
-      const blocked = await settlementActionBlocked(current, "confirm_reconciliation", {
-        kind: "reconciliation_id", id,
-      });
+      const source = { kind: "reconciliation_id", id } as const;
+      const blocked = await settlementActionBlocked(current, "confirm_reconciliation", source);
       if (blocked) return { formError: blocked };
       await confirmReconciliation(env.DB, {
         organizationId: current.organizationId,
         id,
         userId: current.userId,
+        assertCanMutate: () => assertSettlementActionAllowed(current, "confirm_reconciliation", source),
         now,
       });
       await audit(request, current, "settlement.reconciliation.confirm", "settlement_reconciliation", id, {});
@@ -224,9 +229,8 @@ export async function action({ request }: Route.ActionArgs) {
     }
     if (intent === "record_invoice") {
       const reconciliationId = valueOf(form, "reconciliationId");
-      const blocked = await settlementActionBlocked(current, "record_invoice", {
-        kind: "reconciliation_id", id: reconciliationId,
-      });
+      const source = { kind: "reconciliation_id", id: reconciliationId } as const;
+      const blocked = await settlementActionBlocked(current, "record_invoice", source);
       if (blocked) return { formError: blocked };
       const result = await recordSettlementInvoice(env.DB, {
         organizationId: current.organizationId,
@@ -246,6 +250,7 @@ export async function action({ request }: Route.ActionArgs) {
         attachmentReference: valueOf(form, "attachmentReference"),
         notes: valueOf(form, "invoiceNotes"),
         userId: current.userId,
+        assertCanMutate: () => assertSettlementActionAllowed(current, "record_invoice", source),
         now,
       });
       await audit(request, current, "settlement.invoice.record", "settlement_invoice_record", result.id, {
@@ -274,6 +279,7 @@ export async function action({ request }: Route.ActionArgs) {
         evidenceReference: valueOf(form, "evidenceReference"),
         notes: valueOf(form, "cashNotes"),
         userId: current.userId,
+        assertCanMutate: () => assertRecordCashAllowed(current),
         now,
       });
       await audit(request, current, "settlement.cash.record", "settlement_cash_transaction", result.id, {
@@ -285,9 +291,8 @@ export async function action({ request }: Route.ActionArgs) {
     if (intent === "allocate_cash") {
       const transactionId = valueOf(form, "transactionId");
       const reconciliationId = valueOf(form, "reconciliationId");
-      const blocked = await settlementActionBlocked(current, "allocate_cash", {
-        kind: "reconciliation_id", id: reconciliationId,
-      });
+      const source = { kind: "reconciliation_id", id: reconciliationId } as const;
+      const blocked = await settlementActionBlocked(current, "allocate_cash", source);
       if (blocked) return { formError: blocked };
       await allocateCashTransaction(env.DB, {
         organizationId: current.organizationId,
@@ -295,6 +300,7 @@ export async function action({ request }: Route.ActionArgs) {
         reconciliationId,
         amount: positive(form, "amount"),
         userId: current.userId,
+        assertCanMutate: () => assertSettlementActionAllowed(current, "allocate_cash", source),
         now,
       });
       await audit(request, current, "settlement.cash.allocate", "settlement_cash_transaction", transactionId, {
@@ -322,6 +328,14 @@ function recordCashUiAccess(actor: SettlementWorkbenchActor): SettlementUiAccess
   return { visible: true, canWrite: true, reason: null };
 }
 
+async function assertRecordCashAllowed(actor: SettlementWorkbenchActor & Pick<SessionUser, "sessionId">) {
+  const freshActor = await freshSettlementActor(actor);
+  const access = recordCashUiAccess(freshActor);
+  if (!access.canWrite) {
+    throw new Error(access.reason ?? "当前不可登记收付款流水");
+  }
+}
+
 async function settlementActionBlocked(
   actor: Parameters<typeof loadSettlementWorkbenchActionAccess>[1]["actor"],
   action: SettlementWorkbenchAction,
@@ -333,13 +347,36 @@ async function settlementActionBlocked(
   return access.canWrite ? null : access.reason ?? "当前冻结工作流不允许办理该结算操作";
 }
 
+async function assertSettlementActionAllowed(
+  actor: Parameters<typeof loadSettlementWorkbenchActionAccess>[1]["actor"] & Pick<SessionUser, "sessionId">,
+  action: SettlementWorkbenchAction,
+  source: Parameters<typeof loadSettlementWorkbenchActionAccess>[1]["source"],
+) {
+  const freshActor = await freshSettlementActor(actor);
+  const blocked = await settlementActionBlocked(freshActor, action, source);
+  if (blocked) throw new Error(blocked);
+}
+
+async function freshSettlementActor(
+  actor: SettlementWorkbenchActor & Pick<SessionUser, "sessionId">,
+) {
+  const freshActor = await loadFreshSettlementWorkbenchActor(env.DB, {
+    sessionId: actor.sessionId,
+    organizationId: actor.organizationId,
+    userId: actor.userId,
+  });
+  if (!freshActor) {
+    throw new Error("当前会话、岗位或角色已失效，请重新登录后再试");
+  }
+  return freshActor;
+}
+
 export default function Billing({ loaderData, actionData }: Route.ComponentProps) {
   if (loaderData.accessDenied) return <BillingAccessHandoff />;
 
   const busy = useNavigation().state !== "idle";
   const manage = loaderData.current.permissions.includes("billing.manage");
   const cashManage = loaderData.current.permissions.includes("billing.cash.manage");
-
   return <>
     <header className="page-header billing-page-header">
       <div>
@@ -368,7 +405,7 @@ export default function Billing({ loaderData, actionData }: Route.ComponentProps
     {loaderData.view.tab === "pending" && <PendingReconciliationPage
       view={loaderData.view}
       page={loaderData.eligiblePage}
-      accessByGroup={loaderData.actionAccess.createReconciliationByGroup}
+      accessByExpenseId={loaderData.actionAccess.createReconciliationByExpenseId}
       busy={busy}
     />}
     {loaderData.view.tab === "reconciliations" && <ReconciliationPage
@@ -419,32 +456,61 @@ function BillingTabs({ active, counts }: {
   </nav>;
 }
 
-function PendingReconciliationPage({ view, page, accessByGroup, busy }: {
+export function PendingReconciliationPage({ view, page, accessByExpenseId, busy }: {
   view: BillingView;
   page: SettlementPage<SettlementExpense>;
-  accessByGroup: Record<string, SettlementUiAccess>;
+  accessByExpenseId: Record<string, SettlementUiAccess>;
   busy: boolean;
 }) {
   const groups = groupExpenses(page.items);
+  const visibleCount = page.items.filter((expense) => accessByExpenseId[expense.id]?.visible).length;
   return <section className="panel billing-workspace-page">
     <WorkspaceHeading
       title="待对账费用"
       description="只展示已完成订单费用确认、尚未进入有效对账单的费用。每组只能包含同一往来单位和同一币种。"
-      count={`${page.total} 条`}
+      count={visibleCount === page.items.length ? `${page.total} 条` : `当前页 ${visibleCount} 条`}
     />
     <BillingFilters view={view} mode="pending" />
-    {groups.map((group) => <ExpenseSelection
+    {groups.map((group) => <PendingExpenseGroup
       key={group.key}
-      access={accessByGroup[group.key] ?? { visible: false, canWrite: false, reason: "当前结算办理项不可用" }}
+      group={group}
+      accessByExpenseId={accessByExpenseId}
+      busy={busy}
+    />)}
+    {!visibleCount && <EmptyState>没有符合当前筛选条件的待对账费用。</EmptyState>}
+    <QueryPagination {...page} unit="条" />
+  </section>;
+}
+
+function PendingExpenseGroup({ group, accessByExpenseId, busy }: {
+  group: ReturnType<typeof groupExpenses>[number];
+  accessByExpenseId: Record<string, SettlementUiAccess>;
+  busy: boolean;
+}) {
+  const writableExpenses = group.expenses.filter((expense) => accessByExpenseId[expense.id]?.canWrite);
+  const readonlyExpenses = group.expenses.filter((expense) => {
+    const access = accessByExpenseId[expense.id];
+    return access?.visible && !access.canWrite;
+  });
+  return <>
+    {writableExpenses.length > 0 && <ExpenseSelection
+      access={{ visible: true, canWrite: true, reason: null }}
       direction={group.direction}
       counterparty={group.counterparty}
       currency={group.currency}
-      expenses={group.expenses}
+      expenses={writableExpenses}
+      busy={busy}
+    />}
+    {readonlyExpenses.map((expense) => <ExpenseSelection
+      key={expense.id}
+      access={accessByExpenseId[expense.id]}
+      direction={group.direction}
+      counterparty={group.counterparty}
+      currency={group.currency}
+      expenses={[expense]}
       busy={busy}
     />)}
-    {!page.items.length && <EmptyState>没有符合当前筛选条件的待对账费用。</EmptyState>}
-    <QueryPagination {...page} unit="条" />
-  </section>;
+  </>;
 }
 
 function ReconciliationPage({ view, page, accessById, busy }: {
@@ -490,9 +556,9 @@ function CashSettlementPage({ view, page, cash, users, organizationName, recordC
       description="先登记真实收付款流水，再匹配同方向、同往来单位、同币种的已确认对账单。"
       count={`${page.total} 张待核销`}
     />
-    {recordCashAccess.canWrite
+    {recordCashAccess.visible && (recordCashAccess.canWrite
       ? <CashEntryForm users={users} organizationName={organizationName} busy={busy} />
-      : <ReadOnlyNotice>{recordCashAccess.reason ?? "当前账号不能登记收付款流水。"}</ReadOnlyNotice>}
+      : <ReadOnlyNotice>{recordCashAccess.reason ?? "当前账号不能登记收付款流水。"}</ReadOnlyNotice>)}
     <BillingFilters view={view} mode="cash" />
     <div className="reconciliation-list">
       {page.items.map((row) => <ReconciliationSheet
@@ -627,6 +693,7 @@ export function ExpenseSelection({ direction, counterparty, currency, expenses, 
   busy: boolean;
   access: SettlementUiAccess;
 }) {
+  if (!access.visible) return null;
   const total = expenses.reduce((sum, item) => sum + item.amount, 0);
   if (!access.canWrite) return <section className="settlement-selector">
     <header><div>
@@ -658,7 +725,7 @@ export function ExpenseSelection({ direction, counterparty, currency, expenses, 
           <input type="checkbox" name="expenseId" value={item.id} />
           <span>
             <strong><OrderNumberLink id={item.order_id} number={item.order_number} /> · {item.charge_name}</strong>
-            <small>{item.currency} {item.amount.toFixed(2)}{direction === "receivable" && !item.outbound_ready ? " · 尚未出境" : ""}</small>
+            <small>{item.currency} {item.amount.toFixed(2)}</small>
           </span>
         </label>)}
       </div>
@@ -681,6 +748,7 @@ export function ReconciliationSheet({ row, mode, access, busy, cash = [] }: {
   cash?: CashTransactionRow[];
 }) {
   const invoiceRemaining = Math.max(0, row.total_amount - row.invoiced_amount);
+  if (!access.visible) return null;
   const settlementRemaining = Math.max(0, row.total_amount - row.settled_amount);
   const matchingCash = cash.filter((item) =>
     item.direction === (row.direction === "receivable" ? "receipt" : "payment") &&
