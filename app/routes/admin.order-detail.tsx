@@ -306,6 +306,10 @@ type OrderDetailTab =
 
 type LinearOrderDrawerTab = "dossier" | "responsibility" | "cargo" | "attachments" | "supplements" | "history";
 
+export function ordinaryOrderListHref() {
+  return "/admin/orders?view=orders";
+}
+
 function isOrderMarkLabelReady(order: Pick<Order, "status" | "quote_number" | "quote_accepted_at" | "quote_withdrawn">) {
   if (order.quote_withdrawn === 1 || order.status === "cancelled") return false;
   return Boolean(order.quote_accepted_at)
@@ -1022,7 +1026,7 @@ function LinearOrderWorkspace({
           <span className={`status ${orderCompleted ? "green" : "blue"}`}>{statusLabel(order.status)}</span>
           {data.current.permissions.includes("workflow.manage") && !readOnly && <Modal title={`工作流版本 · ${order.order_number}`} triggerLabel="工作流版本" triggerClassName="btn" closeSignal={success} size="wide" dialogClassName="workflow-switch-modal"><WorkflowVersionSwitchForm current={data.businessWorkflow} options={data.workflowVersions} impact={data.workflowSwitchImpact} busy={busy}/></Modal>}
           <button className="btn head-detail-trigger" type="button" onClick={() => setDrawerTab("dossier")}>订单关键资料</button>
-          <Link className="btn" to="/admin/orders">返回订单列表</Link>
+          <Link className="btn" to={ordinaryOrderListHref()}>返回订单列表</Link>
         </div>
       </header>
 
