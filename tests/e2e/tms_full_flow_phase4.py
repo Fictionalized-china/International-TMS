@@ -52,6 +52,7 @@ LTL_KEYS = ("ltl1", "ltl2", "ltl3")
 REQUIRED_ACCOUNT_ALIASES = ("customer_service", "sales", "finance", "cashier")
 OPTIONAL_WAREHOUSE_ALIASES = ("domestic_warehouse", "overseas_warehouse")
 PHASE4_STAGE_ORDER = (
+    "warehouse_difference_confirmation",
     "customer_service_expense_confirmation",
     "business_expense_review",
     "finance_expense_review",
@@ -725,9 +726,20 @@ class Phase4Flow:
         session.start_trace("phase4-visible-actions")
 
     def _click_navigation(self, session: RoleBrowserSession, label: str) -> None:
-        navigation_name = "仓库作业导航" if session.site == "warehouse" else "运营管理导航"
-        navigation = session.page.get_by_role("navigation", name=navigation_name)
-        link = navigation.get_by_role("link", name=label, exact=True)
+        navigations = (
+            session.page.get_by_role("navigation", name="运营管理导航"),
+            session.page.get_by_role("navigation", name="仓库作业导航"),
+        )
+        link = next(
+            (
+                navigation.get_by_role("link", name=label, exact=True)
+                for navigation in navigations
+                if self._is_visible(
+                    navigation.get_by_role("link", name=label, exact=True)
+                )
+            ),
+            session.page.get_by_role("link", name=label, exact=True),
+        )
         if not self._is_visible(link):
             raise BusinessBlocker(
                 f"{session.role} 工作台没有显示“{label}”菜单",
@@ -737,6 +749,44 @@ class Phase4Flow:
         session.click(link.first, f"导航到{label}")
         session.page.wait_for_timeout(180)
         self._dismiss_required_notifications(session)
+        self._assert_no_error_page(session)
+
+    def _switch_warehouse_to_admin(self, session: RoleBrowserSession) -> None:
+        admin_navigation = session.page.get_by_role("navigation", name="运营管理导航")
+        if self._is_visible(admin_navigation):
+            return
+        switch = session.page.get_by_role("button", name=re.compile(r"管理后台$"))
+        self._expect_visible_or_block(
+            session,
+            switch,
+            f"{session.role} 切换管理后台入口",
+            owner="站点切换与仓库权限维护人",
+            remediation="仓库账号必须可通过页面按钮回到管理后台处理本仓差异。",
+        )
+        session.click(switch.first, "切换回管理后台")
+        session.expect_visible(
+            session.page.get_by_role("navigation", name="运营管理导航"),
+            "管理后台运营导航",
+        )
+        self._assert_no_error_page(session)
+
+    def _switch_admin_to_warehouse(self, session: RoleBrowserSession) -> None:
+        warehouse_navigation = session.page.get_by_role("navigation", name="仓库作业导航")
+        if self._is_visible(warehouse_navigation):
+            return
+        switch = session.page.get_by_role("button", name="登录仓库管理", exact=True)
+        self._expect_visible_or_block(
+            session,
+            switch,
+            f"{session.role} 返回仓库作业入口",
+            owner="站点切换与仓库权限维护人",
+            remediation="管理后台必须提供使用当前账号返回绑定仓库的可见入口。",
+        )
+        session.click(switch.first, "返回绑定仓库")
+        session.expect_visible(
+            session.page.get_by_role("navigation", name="仓库作业导航"),
+            "仓库作业导航",
+        )
         self._assert_no_error_page(session)
 
     def _open_order(self, session: RoleBrowserSession, order_number: str) -> None:
@@ -1784,6 +1834,81 @@ class Phase4Flow:
         for document in documents:
             self._allocate_cash_for_reconciliation(document)
 
+    def _confirm_warehouse_differences(self) -> None:
+        session = next(
+            (
+                item
+                for item in self.warehouse_sessions
+                if item.role == "overseas_warehouse"
+            ),
+            None,
+        )
+        if session is None:
+            raise BusinessBlocker(
+                "缺少产生境外实收差异的仓库账号",
+                owner="仓库账号维护人",
+                remediation="Phase 4 必须提供绑定目的仓且可切换管理后台的仓库账号。",
+            )
+        self._switch_warehouse_to_admin(session)
+        for order_key in ORDER_KEYS:
+            order_number = self.phase3.orders[order_key].order_number
+            with session.step(
+                f"境外仓核对 {order_number} 实收差异及费用影响",
+                case_id=f"P4-WAREHOUSE-DIFF-{order_key.upper()}",
+                stage="仓库差异确认",
+                priority="P0",
+                preconditions=("目的仓已完成扫码清点", "账号仅查看本仓产生差异的订单"),
+                inputs={"order_number": order_number},
+                expected_result="存在差异时明确确认费用影响；无差异时不增加操作",
+                gate=_workflow_gate(
+                    f"{order_number} 仓库差异确认门禁",
+                    mode="required",
+                    source="workflow_instance_module_state",
+                    ui="仓库模块必办且本仓存在待确认差异时显示确认按钮。",
+                    server="只允许当前工作流仓库责任岗和本仓订单范围提交。",
+                    owner="境外仓岗",
+                ),
+            ) as step:
+                self._open_order(session, order_number)
+                workflow = session.page.get_by_role("navigation", name="订单工作流")
+                warehouse_step = workflow.get_by_role(
+                    "link", name=re.compile(r"国内仓入库$")
+                )
+                self._expect_visible_or_block(
+                    session,
+                    warehouse_step,
+                    f"{order_number} 已完成国内仓入库节点",
+                    owner="工作流实例维护人",
+                    remediation="完成复盘前必须允许责任岗回看已完成的仓库模块。",
+                )
+                session.click(warehouse_step.first, "打开已完成的国内仓入库节点")
+                session.expect_visible(
+                    session.page.get_by_role("heading", name="国内仓入库", exact=True),
+                    "国内仓入库历史节点标题",
+                )
+                button = session.page.get_by_role(
+                    "button", name="确认差异及费用影响", exact=True
+                )
+                warning = session.page.get_by_text("实收差异待确认：", exact=False)
+                if self._is_visible(button):
+                    session.click(button.first, f"确认 {order_number} 实收差异及费用影响")
+                    session.expect_visible(
+                        session.page.get_by_text(
+                            "仓库实收差异及费用影响已确认", exact=False
+                        ),
+                        f"{order_number} 差异确认成功提示",
+                    )
+                    step.observe("已确认本仓实收差异及费用影响", gate_passed=True)
+                elif self._is_visible(warning):
+                    raise BusinessBlocker(
+                        f"{order_number} 存在待确认差异但当前仓库账号没有确认按钮",
+                        owner="仓库模块权限维护人",
+                        remediation="核对本仓订单范围、warehouse 模块责任岗位和 manage 权限。",
+                    )
+                else:
+                    step.observe("本仓无待确认实收差异，未增加操作", gate_passed=True)
+        self._switch_admin_to_warehouse(session)
+
     def _find_target_exception_row(self, session: RoleBrowserSession) -> Locator | None:
         for _ in range(30):
             rows = session.page.locator(".warehouse-exception-table tbody tr")
@@ -1913,6 +2038,8 @@ class Phase4Flow:
         self._login(self.cashier, "出纳岗")
         for session in self.warehouse_sessions:
             self._login(session, "国内仓岗" if session.role == "domestic_warehouse" else "境外仓岗")
+
+        self._confirm_warehouse_differences()
 
         for sequence, order_key in enumerate(ORDER_KEYS, start=1):
             self._ensure_required_expenses(order_key, sequence)

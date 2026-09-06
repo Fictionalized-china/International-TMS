@@ -634,6 +634,24 @@ class Phase4SafetyTests(unittest.TestCase):
         self.assertIn('f"本节点{label}活动页签"', helper)
         self.assertNotIn("wait_for_timeout(150)", helper)
 
+    def test_warehouse_differences_are_resolved_before_settlement(self) -> None:
+        source = (HERE / "tms_full_flow_phase4.py").read_text(encoding="utf-8")
+        start = source.index("    def _confirm_warehouse_differences(")
+        end = source.index("    def _find_target_exception_row(", start)
+        helper = source[start:end]
+        run_start = source.index("    def run(self) -> Phase4Artifacts:")
+        run_helper = source[run_start:]
+
+        self.assertEqual(PHASE4_STAGE_ORDER[0], "warehouse_difference_confirmation")
+        self.assertIn('item.role == "overseas_warehouse"', helper)
+        self.assertIn('name="确认差异及费用影响"', helper)
+        self.assertIn("self._switch_warehouse_to_admin(session)", helper)
+        self.assertIn("self._switch_admin_to_warehouse(session)", helper)
+        self.assertLess(
+            run_helper.index("self._confirm_warehouse_differences()"),
+            run_helper.index("self._ensure_required_expenses"),
+        )
+
     def test_execute_is_opt_in_and_phase3_summary_is_required(self) -> None:
         args = build_parser().parse_args(["--phase3-summary", "phase3.json"])
         self.assertFalse(args.execute)
