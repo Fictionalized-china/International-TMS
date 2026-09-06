@@ -42,6 +42,8 @@ import {
   syncTrackingModuleStatusForOrder,
   syncBatchRoadStatusFromTracking,
 } from "../lib/batch-tracking.server";
+import type { BatchTrackingActionPolicy } from "../lib/batch-tracking-action-policy";
+import { loadBatchTrackingActionPolicy } from "../lib/batch-tracking-action-policy.server";
 import { Modal, useModalScrollLock } from "../components/Modal";
 import { QueryPagination } from "../components/QueryPagination";
 import { paginateList, readListPage } from "../lib/list-pagination";
@@ -407,6 +409,37 @@ async function loadBatchOrderWorkflowPolicies(
   }
   return [...policies.values()];
 }
+
+type BatchTrackingPolicyOrder = { order_id: string; order_number: string };
+
+function batchTrackingPolicyOrders(orders: readonly BatchTrackingPolicyOrder[]) {
+  return orders.map((order) => ({
+    orderId: order.order_id,
+    orderNumber: order.order_number,
+  }));
+}
+
+async function loadFreshBatchTrackingAction(
+  organizationId: string,
+  batchId: string,
+  fieldKey: "tracking_milestone" | "actual_exit_at",
+): Promise<BatchTrackingActionPolicy> {
+  const orders = await env.DB.prepare(
+    `SELECT bo.order_id,o.order_number
+     FROM transport_batch_orders bo
+     JOIN transport_orders o
+       ON o.id=bo.order_id AND o.organization_id=bo.organization_id
+     WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
+     ORDER BY bo.sequence_no,bo.order_id`,
+  ).bind(organizationId, batchId).all<BatchTrackingPolicyOrder>();
+  const loaded = await loadBatchTrackingActionPolicy({
+    db: env.DB,
+    organizationId,
+    orders: batchTrackingPolicyOrders(orders.results),
+    fieldKey,
+  });
+  return loaded.batch;
+}
 type BatchOrder={order_id:string;order_number:string;business_type:string|null;work_number:string;customer_name:string;cargo_description:string|null;cargo_names:string|null;pieces:number;gross_weight_kg:number;volume_cbm:number;declared_weight_kg:number;declared_volume_cbm:number;inbound_at:string|null;dispatched_packages:number;in_stock_packages:number;overseas_warehouse_id:string|null;overseas_warehouse_name:string|null;overseas_status:string|null;overseas_arrival_at:string|null;document_assignee_user_id:string|null;customs_assignee_user_id:string|null};
 type BatchCargoItem={id:string;order_id:string;line_no:number;cargo_name_cn:string;cargo_name_en:string|null;hs_code:string|null;overseas_hs_code:string|null;package_type:string;package_count:number;pieces_per_package:number;gross_weight_per_package_kg:number;length_cm:number;width_cm:number;height_cm:number;volume_per_package_cbm:number;declared_value:number;currency:string;brand_model:string|null;marks:string|null;special_attributes:string|null};
 type BatchOrderPagination={page:number;pageCount:number;pageSize:number;total:number};
@@ -624,6 +657,21 @@ export async function loader({request,params}:Route.LoaderArgs){
   }
   const batchOrderIds=orders.results.map((item)=>item.order_id);
   const batchWorkflowPolicies=await loadBatchOrderWorkflowPolicies(current.organizationId,batchId);
+  // Resolve both write surfaces from the same frozen order contracts that the
+  // POST handlers will reload. Resolve sequentially to keep D1 connections
+  // bounded for large PZ batches.
+  const trackingMilestoneAction=(await loadBatchTrackingActionPolicy({
+    db:env.DB,
+    organizationId:current.organizationId,
+    orders:batchTrackingPolicyOrders(orders.results),
+    fieldKey:"tracking_milestone",
+  })).batch;
+  const actualExitAction=(await loadBatchTrackingActionPolicy({
+    db:env.DB,
+    organizationId:current.organizationId,
+    orders:batchTrackingPolicyOrders(orders.results),
+    fieldKey:"actual_exit_at",
+  })).batch;
   const batchCargoItems=(await env.DB.prepare(`SELECT i.id,i.order_id,i.line_no,i.cargo_name_cn,i.cargo_name_en,i.hs_code,i.overseas_hs_code,
       i.package_type,i.package_count,i.pieces_per_package,i.gross_weight_per_package_kg,
       i.length_cm,i.width_cm,i.height_cm,i.volume_per_package_cbm,i.declared_value,i.currency,
@@ -705,7 +753,7 @@ export async function loader({request,params}:Route.LoaderArgs){
   const initialResponsibilityRestrictions=batch.approval_status==="submitted"
     ? await loadBatchInitialResponsibilityRestrictions(env.DB,current.organizationId,batchId)
     : buildBatchInitialResponsibilityRestrictions([]);
-  return{current,batch,canManageBatchCosts,orders:orders.results,batchWorkflowPolicies,batchCargoItems,vehicles:vehicles.results,carriers:carriers.results,warehouses:warehouses.results,borderPorts:borderPorts.results,costAllocations,batchDocuments:batchDocuments.results,orderDocuments:orderDocuments.results,orderDocumentRequirements,customsSummaries:customsSummaries.results,customsDeclarations:customsDeclarations.results,batchExceptions,exceptionPackages,outboundStatuses:outboundStatuses.results,batchCustomsAccess,departureGateStatuses,returnOrderId,trackingMilestones,trackingFlags:trackingFlags.results,batchVehiclePlate,carrierVehicles:carrierVehicles.results,carrierDrivers:carrierDrivers.results,operationMembers:responsibilityMembers.results.filter(member=>member.position_code==="OPERATION"),documentMembers:responsibilityMembers.results.filter(member=>member.position_code==="DOC"),initialResponsibilityRestrictions};
+  return{current,batch,canManageBatchCosts,orders:orders.results,batchWorkflowPolicies,trackingMilestoneAction,actualExitAction,batchCargoItems,vehicles:vehicles.results,carriers:carriers.results,warehouses:warehouses.results,borderPorts:borderPorts.results,costAllocations,batchDocuments:batchDocuments.results,orderDocuments:orderDocuments.results,orderDocumentRequirements,customsSummaries:customsSummaries.results,customsDeclarations:customsDeclarations.results,batchExceptions,exceptionPackages,outboundStatuses:outboundStatuses.results,batchCustomsAccess,departureGateStatuses,returnOrderId,trackingMilestones,trackingFlags:trackingFlags.results,batchVehiclePlate,carrierVehicles:carrierVehicles.results,carrierDrivers:carrierDrivers.results,operationMembers:responsibilityMembers.results.filter(member=>member.position_code==="OPERATION"),documentMembers:responsibilityMembers.results.filter(member=>member.position_code==="DOC"),initialResponsibilityRestrictions};
 }
 
 export async function action({request,params}:Route.ActionArgs){
@@ -858,6 +906,17 @@ export async function action({request,params}:Route.ActionArgs){
   if(batchRequiresSupervisorApproval(batchApproval.batch_number)&&batchApproval.approval_status!=="approved"&&!costIntent)return{formError:"配载单须由操作主管审核并同时指定整单操作与单证负责人后才能继续办理"};
   if(batchRequiresSupervisorApproval(batchApproval.batch_number)&&!batchSharedResponsibilityIsActive(batchApproval.road_status)&&!privileged&&(trackingIntent||exceptionIntent||customsIntent||documentIntent))return{formError:"配载单已到达境外仓，整批操作与单证负责人现为只读；后续由各订单客服和财务继续办理"};
   if((trackingIntent||exceptionIntent)&&!privileged&&batchApproval.operation_assignee_user_id!==current.userId)return{formError:"本配载单的运踪与异常只允许已指派的整单操作负责人办理"};
+  // Resolve the exact frozen field after ownership is checked. This prevents
+  // a previous PZ owner from probing the replacement owner's workflow and
+  // ensures client-supplied order ids never determine mutation targets.
+  const trackingActionPolicy=trackingIntent
+    ? await loadFreshBatchTrackingAction(
+        current.organizationId,
+        batchId,
+        intent==="exit_confirm"?"actual_exit_at":"tracking_milestone",
+      )
+    : null;
+  if(trackingActionPolicy&&!trackingActionPolicy.editable)return{formError:trackingActionPolicy.reason??"当前冻结工作流不允许办理该运踪动作"};
   if((customsIntent||documentIntent)&&!privileged){
     if(batchRequiresSupervisorApproval(batchApproval.batch_number)&&batchApproval.document_assignee_user_id!==current.userId)return{formError:"本配载单的逐票文件与报关仅允许已指派的整单单证负责人办理"};
     if(!batchRequiresSupervisorApproval(batchApproval.batch_number)){
@@ -1121,10 +1180,12 @@ export async function action({request,params}:Route.ActionArgs){
     }catch(error){return{formError:errorMessage(error)}}
   }
   if(intent==="exit_confirm"){
-    const workflowPolicies=await loadBatchOrderWorkflowPolicies(current.organizationId,batchId);
+    if(!trackingActionPolicy)return{formError:"当前冻结工作流无法核验实际出境动作"};
+    const participatingOrderIds=new Set(trackingActionPolicy.participatingOrderIds);
+    const workflowPolicies=(await loadBatchOrderWorkflowPolicies(current.organizationId,batchId)).filter(policy=>participatingOrderIds.has(policy.orderId));
     const trackingModule=batchWorkflowModulePolicy(workflowPolicies,"tracking");
     const actualExitField=batchWorkflowFieldPolicy(workflowPolicies,"tracking","actual_exit_at",true);
-    if(!trackingModule.enabled||!actualExitField.visible)return{formError:"当前配载单工作流未开放实际出境登记"};
+    if(!trackingModule.enabled||!actualExitField.visible||!trackingActionPolicy.participatingOrderIds.length)return{formError:"当前配载单工作流未开放实际出境登记"};
     const submissionError=validateBatchWorkflowFormSubmission(workflowPolicies,form,exitFormBindings);
     if(submissionError)return{formError:submissionError};
     const mainVehiclePlate=await getBatchMainVehiclePlate(current.organizationId,batchId);
@@ -1139,13 +1200,14 @@ export async function action({request,params}:Route.ActionArgs){
     const blockingExceptions=await listBlockingBatchExceptions(current.organizationId,batchId);
     if(blockingExceptions.length)return{formError:`暂不能确认出境：仍有 ${blockingExceptions.length} 个阻断异常（${blockingExceptions.slice(0,3).map(item=>item.exception_number).join("、")}）`};
     const orders=await env.DB.prepare(`SELECT bo.order_id,o.order_number,s.id shipment_id,s.customer_id,s.current_location FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id LEFT JOIN shipments s ON s.id=(SELECT id FROM shipments WHERE order_id=bo.order_id ORDER BY created_at DESC LIMIT 1) WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed' ORDER BY bo.sequence_no`).bind(batchId,current.organizationId).all<{order_id:string;order_number:string;shipment_id:string|null;customer_id:string|null;current_location:string|null}>();
-    if(!orders.results.length)return{formError:"当前批次没有有效订单"};
-    const exitTrackingOrderIds=workflowPolicies.filter(policy=>policy.moduleCode==="tracking"&&policy.enabled&&runtimeWorkflowFieldPolicy(policy.fields,"actual_exit_at",true).visible).map(policy=>policy.orderId);
+    const participatingOrders=orders.results.filter(order=>participatingOrderIds.has(order.order_id));
+    if(participatingOrders.length!==trackingActionPolicy.participatingOrderIds.length)return{formError:"配载单挂载订单已变化，请刷新页面后重新办理实际出境"};
+    const exitTrackingOrderIds=trackingActionPolicy.participatingOrderIds;
     const sequenceOrderIds=workflowPolicies.filter(policy=>policy.moduleCode==="tracking"&&policy.enabled&&runtimeWorkflowFieldPolicy(policy.fields,"actual_exit_at",true).visible&&orderWorkflowFieldBlocksBatch(workflowPolicies,policy.orderId,"tracking","tracking_milestone",true)).map(policy=>policy.orderId);
     const exitSequenceMissing=sequenceOrderIds.length?await validateBatchTrackingRequiredPrevious(current.organizationId,sequenceOrderIds,"exported",actualExitAt):null;
     if(exitSequenceMissing)return{formError:`暂不能确认出境：运输事件顺序要求已开放运踪节点的订单先登记不晚于实际出境时间的“口岸到达”；仍有 ${exitSequenceMissing.missingOrders} 票未满足${exitSequenceMissing.sampleOrderNumber?`（示例：${exitSequenceMissing.sampleOrderNumber}）` : ""}`};
     const blockers:string[]=[];
-    for(const item of orders.results){
+    for(const item of participatingOrders){
       const dispatched=await env.DB.prepare(`SELECT 1 FROM warehouse_dispatches d JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id JOIN warehouse_packages p ON p.id=di.package_id JOIN shipments s ON s.id=p.shipment_id WHERE d.organization_id=? AND d.transport_batch_id=? AND s.order_id=? AND d.status='dispatched' LIMIT 1`).bind(current.organizationId,batchId,item.order_id).first();
       if(!dispatched){blockers.push("存在尚未完成仓库装车出库交接的订单");continue;}
       const readiness=await checkOrderDeparture(current.organizationId,item.order_id,undefined,{warehouseDispatchConfirmed:true});
@@ -1163,22 +1225,26 @@ export async function action({request,params}:Route.ActionArgs){
       group.orderIds.push(orderId);
       exitMilestoneGroups.set(key,group);
     }
-    // Keep the complete exit hand-off in one small transactional batch. The
-    // order-level work is expressed as set-based SQL, so the statement count
-    // no longer grows with the number of orders in the batch.
+    // Keep the physical batch transition atomic, but constrain every order
+    // mutation to the ids re-authorised by the frozen actual_exit_at policy.
+    const exitOrderChunks=chunkD1Values(exitTrackingOrderIds,8);
     const statements:D1PreparedStatement[]=[
       env.DB.prepare("INSERT INTO transport_exit_confirmations(id,organization_id,batch_id,actual_exit_at,exit_port,exit_vehicle_plate,overseas_vehicle_plate,overseas_carrier_name,overseas_vehicle_type,overseas_driver_name,overseas_driver_phone,proof_reference,notes,confirmed_by_user_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(crypto.randomUUID(),current.organizationId,batchId,actualExitAt,exitPort,exitVehiclePlate,overseasVehiclePlate||null,overseasCarrierName||null,overseasVehicleType||null,overseasDriverName||null,overseasDriverPhone||null,valueOf(form,"proofReference")||null,valueOf(form,"exitNotes")||null,current.userId,now),
       env.DB.prepare("UPDATE transport_batches SET status='departed',road_status='outbound_in_transit',actual_departure_at=?,border_port=?,updated_at=? WHERE id=? AND organization_id=?").bind(actualExitAt,exitPort,now,batchId,current.organizationId),
       env.DB.prepare("UPDATE transport_batch_vehicles SET status='departed',updated_at=? WHERE batch_id=? AND organization_id=? AND status!='cancelled'").bind(now,batchId,current.organizationId),
-      env.DB.prepare("UPDATE transport_batch_orders SET status='departed',updated_at=? WHERE batch_id=? AND organization_id=? AND status!='removed'").bind(now,batchId,current.organizationId),
-      env.DB.prepare(`UPDATE order_module_instances
+      ...exitOrderChunks.map(chunk=>env.DB.prepare(`UPDATE transport_batch_orders
+        SET status='departed',updated_at=?
+        WHERE batch_id=? AND organization_id=? AND status!='removed'
+          AND order_id IN (${d1Placeholders(chunk.length)})`).bind(now,batchId,current.organizationId,...chunk)),
+      ...exitOrderChunks.map(chunk=>env.DB.prepare(`UPDATE order_module_instances
         SET status='in_progress',current_step_code='transit',current_step_name='出境运输中',progress_percent=50,
             started_at=COALESCE(started_at,?),blocking_reason=NULL,updated_at=?
         WHERE organization_id=? AND module_code='tracking' AND enabled=1
-          AND order_id IN (
-            SELECT bo.order_id FROM transport_batch_orders bo
-            WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
-          )`).bind(now,now,current.organizationId,current.organizationId,batchId),
+          AND order_id IN (${d1Placeholders(chunk.length)})
+          AND EXISTS(SELECT 1 FROM transport_batch_orders bo
+            WHERE bo.organization_id=order_module_instances.organization_id
+              AND bo.order_id=order_module_instances.order_id
+              AND bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed')`).bind(now,now,current.organizationId,...chunk,current.organizationId,batchId)),
       ...Array.from(exitMilestoneGroups.values()).flatMap(group=>chunkD1Values(group.orderIds,12).map(chunk=>env.DB.prepare(`INSERT INTO order_tracking_milestones(
           id,organization_id,order_id,milestone_code,milestone_name,event_at,
           location,vehicle_reference,notes,visible_to_customer,created_by_user_id,created_at
@@ -1192,14 +1258,15 @@ export async function action({request,params}:Route.ActionArgs){
             WHERE existing.organization_id=bo.organization_id AND existing.order_id=bo.order_id
               AND existing.milestone_code='exported' AND existing.event_at=?
           )`).bind(actualExitAt,exitPort,exitVehiclePlate,group.notes,current.userId,now,current.organizationId,batchId,...chunk,actualExitAt))),
-      env.DB.prepare(`UPDATE order_cargo_packages
+      ...exitOrderChunks.map(chunk=>env.DB.prepare(`UPDATE order_cargo_packages
         SET status='in_transit'
         WHERE organization_id=? AND status NOT IN ('cancelled','delivered')
-          AND order_id IN (
-            SELECT bo.order_id FROM transport_batch_orders bo
-            WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
-          )`).bind(current.organizationId,current.organizationId,batchId),
-      env.DB.prepare(`INSERT INTO order_tasks(
+          AND order_id IN (${d1Placeholders(chunk.length)})
+          AND EXISTS(SELECT 1 FROM transport_batch_orders bo
+            WHERE bo.organization_id=order_cargo_packages.organization_id
+              AND bo.order_id=order_cargo_packages.order_id
+              AND bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed')`).bind(current.organizationId,...chunk,current.organizationId,batchId)),
+      ...exitOrderChunks.map(chunk=>env.DB.prepare(`INSERT INTO order_tasks(
           id,organization_id,order_id,module_code,task_type,title,priority,status,
           assignee_user_id,assigned_by_user_id,created_at,updated_at
         )
@@ -1207,13 +1274,14 @@ export async function action({request,params}:Route.ActionArgs){
           '发起客户应收对账','normal','pending',NULL,?,?,?
         FROM transport_batch_orders bo
         WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
+          AND bo.order_id IN (${d1Placeholders(chunk.length)})
           AND NOT EXISTS(
             SELECT 1 FROM order_tasks existing
             WHERE existing.organization_id=bo.organization_id AND existing.order_id=bo.order_id
               AND existing.task_type='start_receivable_reconciliation'
               AND existing.status IN ('pending','in_progress')
-          )`).bind(current.userId,now,now,current.organizationId,batchId),
-      env.DB.prepare(`UPDATE shipments
+          )`).bind(current.userId,now,now,current.organizationId,batchId,...chunk)),
+      ...exitOrderChunks.map(chunk=>env.DB.prepare(`UPDATE shipments
         SET status='in_transit',current_location=?,updated_at=?
         WHERE organization_id=? AND id IN (
           SELECT (
@@ -1223,8 +1291,9 @@ export async function action({request,params}:Route.ActionArgs){
           )
           FROM transport_batch_orders bo
           WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
-        )`).bind(exitPort,now,current.organizationId,current.organizationId,batchId),
-      env.DB.prepare(`INSERT INTO shipment_events(
+            AND bo.order_id IN (${d1Placeholders(chunk.length)})
+        )`).bind(exitPort,now,current.organizationId,current.organizationId,batchId,...chunk)),
+      ...exitOrderChunks.map(chunk=>env.DB.prepare(`INSERT INTO shipment_events(
           id,shipment_id,status,location,description,event_at,visible_to_customer,created_by_user_id,created_at
         )
         SELECT lower(hex(randomblob(16))),latest.id,'in_transit',?,?,?,1,?,?
@@ -1234,12 +1303,13 @@ export async function action({request,params}:Route.ActionArgs){
           WHERE candidate.organization_id=bo.organization_id AND candidate.order_id=bo.order_id
           ORDER BY candidate.created_at DESC LIMIT 1
         )
-        WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'`).bind(exitPort,description,actualExitAt,current.userId,now,current.organizationId,batchId),
+        WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
+          AND bo.order_id IN (${d1Placeholders(chunk.length)})`).bind(exitPort,description,actualExitAt,current.userId,now,current.organizationId,batchId,...chunk)),
     ];
     await env.DB.batch(statements);
     const postCommitWarnings:string[]=[];
-    try{await writeAudit({request,action:"transport.batch.exit.confirm",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{actualExitAt,exitPort,exitVehiclePlate,orders:orders.results.length}})}catch{postCommitWarnings.push("审计记录暂未写入")}
-    const workflowEventFailures=(await mapWithConcurrency(orders.results,2,async item=>{
+    try{await writeAudit({request,action:"transport.batch.exit.confirm",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{actualExitAt,exitPort,exitVehiclePlate,orders:participatingOrders.length}})}catch{postCommitWarnings.push("审计记录暂未写入")}
+    const workflowEventFailures=(await mapWithConcurrency(participatingOrders,2,async item=>{
       if(!item.shipment_id||!item.customer_id)return null;
       try{
         await recordWorkflowEvent({organizationId:current.organizationId,event:"shipment.in_transit",customerId:item.customer_id,orderId:item.order_id,shipmentId:item.shipment_id,actorUserId:current.userId,source:"admin",metadata:{batchId,batchNumber:batch.batch_number,exitPort,exitVehiclePlate,overseasVehiclePlate:overseasVehiclePlate||null,overseasCarrierName:overseasCarrierName||null,overseasDriverName:overseasDriverName||null}});
@@ -1253,7 +1323,9 @@ export async function action({request,params}:Route.ActionArgs){
     return{formError:"到达境外目的仓不能在配载单中手工确认，请由各订单指定的境外目的仓扫码入库并完成清点"};
   }
   if(intent==="batch_tracking_option_toggle"){
-    const workflowPolicies=await loadBatchOrderWorkflowPolicies(current.organizationId,batchId);
+    if(!trackingActionPolicy)return{formError:"当前冻结工作流无法核验运踪节点设置"};
+    const participatingOrderIds=new Set(trackingActionPolicy.participatingOrderIds);
+    const workflowPolicies=(await loadBatchOrderWorkflowPolicies(current.organizationId,batchId)).filter(policy=>participatingOrderIds.has(policy.orderId));
     const trackingModule=batchWorkflowModulePolicy(workflowPolicies,"tracking");
     const milestoneField=batchWorkflowFieldPolicy(workflowPolicies,"tracking","tracking_milestone",true);
     if(!trackingModule.enabled||!milestoneField.visible)return{formError:"当前配载单工作流未开放运输节点设置"};
@@ -1261,7 +1333,7 @@ export async function action({request,params}:Route.ActionArgs){
     if(!BATCH_TRACKING_OPTIONAL_CODES.includes(optionCode))return{formError:"可选节点类型无效"};
     const enable=form.get("enable")==="on";
     const column=optionCode==="transloaded"?"requires_transloading":"requires_transit_customs";
-    const orderIds=workflowPolicies.filter(policy=>policy.moduleCode==="tracking"&&policy.enabled&&runtimeWorkflowFieldPolicy(policy.fields,"tracking_milestone",true).visible).map(policy=>policy.orderId);
+    const orderIds=trackingActionPolicy.participatingOrderIds;
     if(!orderIds.length)return{formError:"当前批次没有可操作的订单"};
     for(const chunk of chunkD1Values(orderIds,3)){
       await env.DB.prepare(`UPDATE transport_orders SET ${column}=?,updated_at=? WHERE organization_id=? AND id IN (${d1Placeholders(chunk.length)})`).bind(enable?1:0,now,current.organizationId,...chunk).run();
@@ -1270,7 +1342,9 @@ export async function action({request,params}:Route.ActionArgs){
     return{success:enable?`已为 ${orderIds.length} 票订单开启"${optionCode==="transloaded"?"可换装":"可转运"}"`:`已为 ${orderIds.length} 票订单关闭"${optionCode==="transloaded"?"可换装":"可转运"}"`};
   }
   if(intent==="batch_tracking_add"){
-    const workflowPolicies=await loadBatchOrderWorkflowPolicies(current.organizationId,batchId);
+    if(!trackingActionPolicy)return{formError:"当前冻结工作流无法核验运踪节点登记"};
+    const participatingOrderIds=new Set(trackingActionPolicy.participatingOrderIds);
+    const workflowPolicies=(await loadBatchOrderWorkflowPolicies(current.organizationId,batchId)).filter(policy=>participatingOrderIds.has(policy.orderId));
     const trackingModule=batchWorkflowModulePolicy(workflowPolicies,"tracking");
     if(!trackingModule.enabled)return{formError:"当前配载单工作流未启用运踪模块"};
     const submissionError=validateBatchWorkflowFormSubmission(workflowPolicies,form,trackingFormBindings);
@@ -1286,7 +1360,7 @@ export async function action({request,params}:Route.ActionArgs){
     if(milestoneCode==="exported")return{formError:"请切换到“装车出库与出境确认”，填写实际出境时间并确认；系统会自动登记出境节点"};
     if(milestoneCode==="station_arrived")return{formError:"到达境外目的仓不能手工登记，请由各订单指定的境外目的仓扫码入库并完成清点"};
     const eventAt=valueOf(form,"eventAt")||now;
-    const orderIds=workflowPolicies.filter(policy=>policy.moduleCode==="tracking"&&policy.enabled&&runtimeWorkflowFieldPolicy(policy.fields,"tracking_milestone",true).visible).map(policy=>policy.orderId);
+    const orderIds=trackingActionPolicy.participatingOrderIds;
     if(!orderIds.length)return{formError:"当前批次没有可操作的订单"};
     // Structural integrity gate: configured fields decide whether the action
     // exists; once it exists, event chronology must remain coherent.
@@ -1479,7 +1553,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
     <div className="panel-header"><div><h2>配载单执行</h2></div><span className="status-pill">{roadStatusLabels[loaderData.batch.road_status]||loaderData.batch.road_status}</span></div>
     <BatchWorkspaceTabs status={loaderData.batch.road_status} documentGateReady={allDocumentGateReady} loadPlanReady={loadPlanReady} warehouseReady={allDispatched} borderArrivalReady={borderArrivalReady} exceptionCount={activeExceptions.length} activeTab={activeTab} tabHref={tabHref}/>
   </section>
-  {activeTab==="tracking"&&<BatchTrackingWorkbench batchId={loaderData.batch.id} batchNumber={loaderData.batch.batch_number} orders={loaderData.orders} visibleOrders={visibleOrders} orderPagination={orderPagination} trackingMilestones={loaderData.trackingMilestones} trackingFlags={loaderData.trackingFlags} workflowPolicies={loaderData.batchWorkflowPolicies} batchVehiclePlate={loaderData.batchVehiclePlate} overseasVehiclePlate={loaderData.batch.overseas_vehicle_plate||null} borderPort={loaderData.batch.border_port||null} customsLocation={loaderData.batch.customs_location||null} busy={busy} manage={manageTracking&&allDispatched} warehouseReady={allDispatched} documentGateReady={allDocumentGateReady} exitConfirmed={exited} canConfirmExit={canConfirmExit} exitBlockers={Array.from(new Set(exitBlockers))} borderPorts={loaderData.borderPorts} documentsHref={tabHref("documents")} actionCloseSignal={actionData?.success?actionData:undefined}/>} 
+  {activeTab==="tracking"&&<BatchTrackingWorkbench batchId={loaderData.batch.id} batchNumber={loaderData.batch.batch_number} orders={loaderData.orders} visibleOrders={visibleOrders} orderPagination={orderPagination} trackingMilestones={loaderData.trackingMilestones} trackingFlags={loaderData.trackingFlags} workflowPolicies={loaderData.batchWorkflowPolicies} milestoneAction={loaderData.trackingMilestoneAction} actualExitAction={loaderData.actualExitAction} batchVehiclePlate={loaderData.batchVehiclePlate} overseasVehiclePlate={loaderData.batch.overseas_vehicle_plate||null} borderPort={loaderData.batch.border_port||null} customsLocation={loaderData.batch.customs_location||null} busy={busy} manage={manageTracking&&allDispatched} warehouseReady={allDispatched} documentGateReady={allDocumentGateReady} exitConfirmed={exited} canConfirmExit={canConfirmExit} exitBlockers={Array.from(new Set(exitBlockers))} borderPorts={loaderData.borderPorts} documentsHref={tabHref("documents")} actionCloseSignal={actionData?.success?actionData:undefined}/>} 
   {activeTab==="documents"&&<BatchDocumentWorkbench batchId={loaderData.batch.id} orders={loaderData.orders} visibleOrders={visibleOrders} orderPagination={orderPagination} batchDocuments={loaderData.batchDocuments} orderDocuments={loaderData.orderDocuments} orderDocumentRequirements={loaderData.orderDocumentRequirements} customsSummaries={loaderData.customsSummaries} customsDeclarations={loaderData.customsDeclarations} workflowPolicies={loaderData.batchWorkflowPolicies} customsAccesses={loaderData.batchCustomsAccess.orders} busy={busy} manageCustoms={manageCustoms} currentUserId={loaderData.current.userId} documentOwnerUserId={loaderData.batch.document_assignee_user_id} documentOwnerName={loaderData.batch.document_assignee_name} privileged={privileged} requiresTransloading={requiresTransloading} ready={allDocumentGateReady} customsCloseSignal={actionData?.success?actionData:undefined}/>} 
   {activeTab==="exceptions"&&<BatchExceptionWorkbench batch={loaderData.batch} orders={loaderData.orders} packages={loaderData.exceptionPackages} exceptions={loaderData.batchExceptions} busy={busy} manage={manageExceptions} closeSignal={actionData?.success?actionData:undefined}/>}
   {activeTab==="batch"&&<><section className="panel loading-sheet batch-tab-panel" id="batch-arrangement">
@@ -1825,7 +1899,32 @@ function ActionToast({signal,message,tone}:{signal?:unknown;message?:string;tone
   </div>;
 }
 
-function BatchTrackingWorkbench({batchId,batchNumber,orders,visibleOrders,orderPagination,trackingMilestones,trackingFlags,workflowPolicies,batchVehiclePlate,overseasVehiclePlate,borderPort,customsLocation,busy,manage,warehouseReady,documentGateReady,exitConfirmed,canConfirmExit,exitBlockers,borderPorts,documentsHref,actionCloseSignal}:{batchId:string;batchNumber:string;orders:BatchOrder[];visibleOrders:BatchOrder[];orderPagination:BatchOrderPagination;trackingMilestones:BatchTrackingMilestone[];trackingFlags:BatchTrackingFlag[];workflowPolicies:BatchOrderWorkflowPolicy[];batchVehiclePlate:string|null;overseasVehiclePlate:string|null;borderPort:string|null;customsLocation:string|null;busy:boolean;manage:boolean;warehouseReady:boolean;documentGateReady:boolean;exitConfirmed:boolean;canConfirmExit:boolean;exitBlockers:string[];borderPorts:ReferenceOption[];documentsHref:string;actionCloseSignal?:unknown}){
+export function BatchTrackingWorkbench({batchId,batchNumber,orders,visibleOrders,orderPagination,trackingMilestones,trackingFlags,workflowPolicies,milestoneAction,actualExitAction,batchVehiclePlate,overseasVehiclePlate,borderPort,customsLocation,busy,manage,warehouseReady,documentGateReady,exitConfirmed,canConfirmExit,exitBlockers,borderPorts,documentsHref,actionCloseSignal}:{
+  batchId:string;
+  batchNumber:string;
+  orders:BatchOrder[];
+  visibleOrders:BatchOrder[];
+  orderPagination:BatchOrderPagination;
+  trackingMilestones:BatchTrackingMilestone[];
+  trackingFlags:BatchTrackingFlag[];
+  workflowPolicies:BatchOrderWorkflowPolicy[];
+  milestoneAction:BatchTrackingActionPolicy;
+  actualExitAction:BatchTrackingActionPolicy;
+  batchVehiclePlate:string|null;
+  overseasVehiclePlate:string|null;
+  borderPort:string|null;
+  customsLocation:string|null;
+  busy:boolean;
+  manage:boolean;
+  warehouseReady:boolean;
+  documentGateReady:boolean;
+  exitConfirmed:boolean;
+  canConfirmExit:boolean;
+  exitBlockers:string[];
+  borderPorts:ReferenceOption[];
+  documentsHref:string;
+  actionCloseSignal?:unknown;
+}){
   // 各订单的最新里程碑（按 progress 权重排序）
   const milestoneProgressWeight:Record<string,number>={departed:15,border_arrived:28,exported:40,transloaded:46,transit_customs:52,foreign_entered:64,customs_cleared:82,station_arrived:100};
   const trackingOrders=orders.filter(order=>orderBatchWorkflowPolicy(workflowPolicies,order.order_id,"tracking").enabled);
@@ -1833,9 +1932,19 @@ function BatchTrackingWorkbench({batchId,batchNumber,orders,visibleOrders,orderP
   const visibleTrackingOrders=trackingPagination.items;
   const milestoneField=batchWorkflowFieldPolicy(workflowPolicies,"tracking","tracking_milestone",true);
   const actualExitField=batchWorkflowFieldPolicy(workflowPolicies,"tracking","actual_exit_at",true);
-  const nodeOrders=trackingOrders.filter(order=>runtimeWorkflowFieldPolicy(orderBatchWorkflowPolicy(workflowPolicies,order.order_id,"tracking").fields,"tracking_milestone",true).visible);
+  const milestoneParticipants=new Set(milestoneAction.participatingOrderIds);
+  const actualExitParticipants=new Set(actualExitAction.participatingOrderIds);
+  const milestoneSurfaceVisible=milestoneAction.visible&&milestoneField.visible;
+  const actualExitSurfaceVisible=actualExitAction.visible&&actualExitField.visible;
+  const milestoneCanWrite=manage&&milestoneAction.editable;
+  const actualExitCanWrite=manage&&actualExitAction.editable;
+  const actionPolicyReasons=Array.from(new Set([
+    !milestoneAction.editable?milestoneAction.reason:null,
+    !actualExitAction.editable?actualExitAction.reason:null,
+  ].filter((reason):reason is string=>Boolean(reason))));
+  const nodeOrders=trackingOrders.filter(order=>milestoneParticipants.has(order.order_id)&&runtimeWorkflowFieldPolicy(orderBatchWorkflowPolicy(workflowPolicies,order.order_id,"tracking").fields,"tracking_milestone",true).visible);
   const milestoneGateRequired=nodeOrders.some(order=>orderWorkflowFieldBlocksBatch(workflowPolicies,order.order_id,"tracking","tracking_milestone",true));
-  const exitSequenceOrders=nodeOrders.filter(order=>runtimeWorkflowFieldPolicy(orderBatchWorkflowPolicy(workflowPolicies,order.order_id,"tracking").fields,"actual_exit_at",true).visible&&orderWorkflowFieldBlocksBatch(workflowPolicies,order.order_id,"tracking","tracking_milestone",true));
+  const exitSequenceOrders=nodeOrders.filter(order=>actualExitParticipants.has(order.order_id)&&runtimeWorkflowFieldPolicy(orderBatchWorkflowPolicy(workflowPolicies,order.order_id,"tracking").fields,"actual_exit_at",true).visible&&orderWorkflowFieldBlocksBatch(workflowPolicies,order.order_id,"tracking","tracking_milestone",true));
   const visibleTrackingMilestones=trackingMilestones.filter(item=>trackingOrders.some(order=>order.order_id===item.order_id));
   const milestonesByOrder=new Map<string,BatchTrackingMilestone[]>();
   for(const m of visibleTrackingMilestones){
@@ -1856,34 +1965,35 @@ function BatchTrackingWorkbench({batchId,batchNumber,orders,visibleOrders,orderP
   const requiresTransloading=nodeOrders.some(o=>flagsByOrder.get(o.order_id)?.requires_transloading===1);
   const requiresTransitCustoms=nodeOrders.some(o=>flagsByOrder.get(o.order_id)?.requires_transit_customs===1);
   // 5 个主节点 + 2 个可选节点（按开关状态决定是否暴露）
-  const visibleMilestones=milestoneField.visible?BATCH_TRACKING_MILESTONES.filter(item=>!item.optional||(item.code==="transloaded"&&requiresTransloading)||(item.code==="transit_customs"&&requiresTransitCustoms)):[];
+  const visibleMilestones=milestoneSurfaceVisible?BATCH_TRACKING_MILESTONES.filter(item=>!item.optional||(item.code==="transloaded"&&requiresTransloading)||(item.code==="transit_customs"&&requiresTransitCustoms)):[];
   const defaultVehicle=batchVehiclePlate||overseasVehiclePlate||"";
   const defaultEventAt=dateTimeLocal(new Date().toISOString());
   const defaultLocation=(nodeCode:string)=>["border_arrived","exported"].includes(nodeCode)?borderPort||"":nodeCode==="customs_cleared"?customsLocation||"":"";
   const borderArrivalNode=visibleMilestones.find(node=>node.code==="border_arrived");
   return <section className="panel batch-tracking-workbench" id="batch-tracking">
-    <div className="panel-header"><div><h2>口岸到达、实际出境与运踪</h2><p>页面操作项、必填状态和推进门禁均来自挂载订单的当前工作流配置。</p></div><div className="batch-tracking-header-actions"><span className="status-pill">{trackingOrders.length} 票启用 · {visibleTrackingMilestones.length} 条节点</span>{manage&&milestoneField.visible&&<Modal title="可选运输节点设置" triggerLabel={`可选节点${requiresTransloading||requiresTransitCustoms?" · 已启用":""}`} triggerClassName="text-button batch-optional-node-trigger" closeSignal={actionCloseSignal}>
+    <div className="panel-header"><div><h2>口岸到达、实际出境与运踪</h2><p>页面操作项、必填状态和推进门禁均来自挂载订单的冻结工作流。</p></div><div className="batch-tracking-header-actions"><span className="status-pill">{trackingOrders.length} 票启用 · {visibleTrackingMilestones.length} 条节点</span>{milestoneCanWrite&&milestoneSurfaceVisible&&<Modal title="可选运输节点设置" triggerLabel={`可选节点${requiresTransloading||requiresTransitCustoms?" · 已启用":""}`} triggerClassName="text-button batch-optional-node-trigger" closeSignal={actionCloseSignal}>
       <div className="batch-optional-node-dialog"><p className="muted">仅在运输途中实际发生换装或转关时启用；默认不参与主流程。</p><div className="table-wrap batch-tracking-option-table"><table><thead><tr><th>可选节点</th><th>适用范围</th><th>当前设置</th><th>操作</th></tr></thead><tbody>
-        <tr><td><strong>换装</strong></td><td>给本批全部订单开放“换装”节点</td><td><span className={`status-pill ${requiresTransloading?"success":"off"}`}>{requiresTransloading?"已启用":"未启用"}</span></td><td><Form method="post"><input type="hidden" name="intent" value="batch_tracking_option_toggle"/><input type="hidden" name="optionCode" value="transloaded"/><label className="toggle-label"><input type="checkbox" name="enable" defaultChecked={requiresTransloading}/><span>启用</span></label><button className="text-button" disabled={busy}>应用</button></Form></td></tr>
-        <tr><td><strong>转关</strong></td><td>给本批全部订单开放“转关”节点</td><td><span className={`status-pill ${requiresTransitCustoms?"success":"off"}`}>{requiresTransitCustoms?"已启用":"未启用"}</span></td><td><Form method="post"><input type="hidden" name="intent" value="batch_tracking_option_toggle"/><input type="hidden" name="optionCode" value="transit_customs"/><label className="toggle-label"><input type="checkbox" name="enable" defaultChecked={requiresTransitCustoms}/><span>启用</span></label><button className="text-button" disabled={busy}>应用</button></Form></td></tr>
+        <tr><td><strong>换装</strong></td><td>给本批参与运踪的订单开放“换装”节点</td><td><span className={`status-pill ${requiresTransloading?"success":"off"}`}>{requiresTransloading?"已启用":"未启用"}</span></td><td><Form method="post"><input type="hidden" name="intent" value="batch_tracking_option_toggle"/><input type="hidden" name="optionCode" value="transloaded"/><label className="toggle-label"><input type="checkbox" name="enable" defaultChecked={requiresTransloading}/><span>启用</span></label><button className="text-button" disabled={busy}>应用</button></Form></td></tr>
+        <tr><td><strong>转关</strong></td><td>给本批参与运踪的订单开放“转关”节点</td><td><span className={`status-pill ${requiresTransitCustoms?"success":"off"}`}>{requiresTransitCustoms?"已启用":"未启用"}</span></td><td><Form method="post"><input type="hidden" name="intent" value="batch_tracking_option_toggle"/><input type="hidden" name="optionCode" value="transit_customs"/><label className="toggle-label"><input type="checkbox" name="enable" defaultChecked={requiresTransitCustoms}/><span>启用</span></label><button className="text-button" disabled={busy}>应用</button></Form></td></tr>
       </tbody></table></div></div>
     </Modal>}</div></div>
+    {actionPolicyReasons.map(reason=><div className="alert info" role="status" key={reason}>{reason}</div>)}
     {!trackingOrders.length&&<div className="alert info">当前配载单挂载订单均未启用运踪模块，本页不显示也不接受运踪办理操作。</div>}
     {trackingOrders.length>0&&<div className="batch-transport-sequence" aria-label="出境办理顺序">
       <div className={warehouseReady?"done":"current"}><span>1</span><div><strong>装车出库</strong><small>{warehouseReady?"已完成":"待仓库办理"}</small></div></div>
       <div className={documentGateReady?"done":warehouseReady?"current":"locked"}><span>2</span><div><strong>报关放行</strong><small>{documentGateReady?"已完成":warehouseReady?"待单证办理":"等待装车"}</small></div></div>
-      {milestoneField.visible&&<div className={milestoneGateRequired?(borderArrivalReady?"done":warehouseReady&&documentGateReady?"current":"locked"):"optional"}><span>3</span><div><strong>口岸到达</strong><small>{milestoneGateRequired?(borderArrivalReady?"已登记":warehouseReady&&documentGateReady?"当前待办":"等待前置步骤"):"选填，不阻断实际出境"}</small></div></div>}
-      {actualExitField.visible&&<div className={exitConfirmed?"done":borderArrivalReady&&documentGateReady?"current":"locked"}><span>{milestoneField.visible?4:3}</span><div><strong>实际出境</strong><small>{exitConfirmed?"已确认":borderArrivalReady&&documentGateReady?"当前待办":milestoneField.visible?"完成口岸到达后开放":"等待前置步骤"}</small></div></div>}
+      {milestoneSurfaceVisible&&<div className={milestoneGateRequired?(borderArrivalReady?"done":warehouseReady&&documentGateReady?"current":"locked"):"optional"}><span>3</span><div><strong>口岸到达</strong><small>{milestoneGateRequired?(borderArrivalReady?"已登记":warehouseReady&&documentGateReady?"当前待办":"等待前置步骤"):"选填，不阻断实际出境"}</small></div></div>}
+      {actualExitSurfaceVisible&&<div className={exitConfirmed?"done":borderArrivalReady&&documentGateReady?"current":"locked"}><span>{milestoneSurfaceVisible?4:3}</span><div><strong>实际出境</strong><small>{exitConfirmed?"已确认":borderArrivalReady&&documentGateReady?"当前待办":milestoneSurfaceVisible?"完成口岸到达后开放":"等待前置步骤"}</small></div></div>}
     </div>}
-    {trackingOrders.length>0&&!milestoneField.visible&&!actualExitField.visible&&<div className="alert info">当前工作流未展示运输节点和实际出境登记，本页仅保留历史只读信息。</div>}
-    {trackingOrders.length>0&&(milestoneField.visible||actualExitField.visible)&&!warehouseReady&&<div className="alert warning">仓库端尚未完成整批装车出库。当前仅可查看，完成出库后系统会按工作流开放相应登记项。</div>}
-    {warehouseReady&&!documentGateReady&&!exitConfirmed&&(milestoneField.visible||actualExitField.visible)&&<div className="batch-exit-prerequisite" role="status"><div><strong>当前待办：完成工作流要求的逐票报关与文件</strong><span>必填门禁通过后回到本页继续办理；选填项目不会阻断。</span></div><Link className="primary" to={documentsHref}>进入报关与文件</Link></div>}
-    {warehouseReady&&documentGateReady&&!exitConfirmed&&!borderArrivalReady&&borderArrivalNode&&milestoneField.visible&&<div className="batch-exit-prerequisite" role="status"><div><strong>当前待办：登记口岸到达</strong><span>这是运输事件顺序完整性要求；一次登记同步已开放该节点的挂载订单。</span></div>{manage?<Modal title="登记运输节点 · 口岸到达" triggerLabel="登记口岸到达" triggerClassName="primary" size="wide" closeSignal={actionCloseSignal}><BatchTrackingNodeForm nodeCode={borderArrivalNode.code} total={nodeOrders.length} fields={workflowPolicies} defaultEventAt={defaultEventAt} defaultLocation={defaultLocation(borderArrivalNode.code)} defaultVehicle={defaultVehicle} busy={busy}/></Modal>:<span className="status-pill off">由操作负责人办理</span>}</div>}
-    {actualExitField.visible&&warehouseReady&&documentGateReady&&!exitConfirmed&&borderArrivalReady&&canConfirmExit&&manage&&<BatchExitConfirmForm workflowPolicies={workflowPolicies} defaultEventAt={defaultEventAt} borderPort={borderPort} borderPorts={borderPorts} defaultVehicle={defaultVehicle} busy={busy}/>} 
-    {actualExitField.visible&&warehouseReady&&documentGateReady&&!exitConfirmed&&borderArrivalReady&&(!canConfirmExit||!manage)&&<div className="batch-gate-blocker batch-inline-exit-blocker"><div><strong>{canConfirmExit?"当前账号只读":"实际出境仍有前置事项"}</strong>{exitBlockers.length?<ul>{exitBlockers.map(reason=><li key={reason}>{reason}</li>)}</ul>:<p>请由本配载单的操作负责人确认实际出境。</p>}</div></div>}
-    {actualExitField.visible&&exitConfirmed&&borderArrivalReady&&<div className="alert success">实际出境已确认{milestoneField.visible?"；可继续登记境外运输节点":""}。</div>}
+    {trackingOrders.length>0&&!milestoneSurfaceVisible&&!actualExitSurfaceVisible&&<div className="alert info">当前冻结工作流未展示运输节点和实际出境登记，本页仅保留历史只读信息。</div>}
+    {trackingOrders.length>0&&(milestoneSurfaceVisible||actualExitSurfaceVisible)&&!warehouseReady&&<div className="alert warning">仓库端尚未完成整批装车出库。当前仅可查看，完成出库后系统会按冻结工作流开放相应登记项。</div>}
+    {warehouseReady&&!documentGateReady&&!exitConfirmed&&(milestoneSurfaceVisible||actualExitSurfaceVisible)&&<div className="batch-exit-prerequisite" role="status"><div><strong>当前待办：完成工作流要求的逐票报关与文件</strong><span>必填门禁通过后回到本页继续办理；选填项目不会阻断。</span></div><Link className="primary" to={documentsHref}>进入报关与文件</Link></div>}
+    {warehouseReady&&documentGateReady&&!exitConfirmed&&!borderArrivalReady&&borderArrivalNode&&milestoneSurfaceVisible&&<div className="batch-exit-prerequisite" role="status"><div><strong>当前待办：登记口岸到达</strong><span>这是运输事件顺序完整性要求；一次登记只同步冻结工作流开放该节点的挂载订单。</span></div>{milestoneCanWrite?<Modal title="登记运输节点 · 口岸到达" triggerLabel="登记口岸到达" triggerClassName="primary" size="wide" closeSignal={actionCloseSignal}><BatchTrackingNodeForm nodeCode={borderArrivalNode.code} total={nodeOrders.length} fields={workflowPolicies} defaultEventAt={defaultEventAt} defaultLocation={defaultLocation(borderArrivalNode.code)} defaultVehicle={defaultVehicle} busy={busy}/></Modal>:<span className="status-pill off">当前冻结工作流只读</span>}</div>}
+    {actualExitSurfaceVisible&&warehouseReady&&documentGateReady&&!exitConfirmed&&borderArrivalReady&&canConfirmExit&&actualExitCanWrite&&<BatchExitConfirmForm workflowPolicies={workflowPolicies} defaultEventAt={defaultEventAt} borderPort={borderPort} borderPorts={borderPorts} defaultVehicle={defaultVehicle} busy={busy}/>} 
+    {actualExitSurfaceVisible&&warehouseReady&&documentGateReady&&!exitConfirmed&&borderArrivalReady&&(!canConfirmExit||!actualExitCanWrite)&&<div className="batch-gate-blocker batch-inline-exit-blocker"><div><strong>{canConfirmExit?"当前冻结工作流只读":"实际出境仍有前置事项"}</strong>{exitBlockers.length?<ul>{exitBlockers.map(reason=><li key={reason}>{reason}</li>)}</ul>:<p>{actualExitAction.reason||"请由本配载单的操作负责人确认实际出境。"}</p>}</div></div>}
+    {actualExitSurfaceVisible&&exitConfirmed&&borderArrivalReady&&<div className="alert success">实际出境已确认{milestoneSurfaceVisible?"；可继续登记境外运输节点":""}。</div>}
     {exitSequenceAnomaly&&<div className="alert danger" role="alert"><strong>运输节点顺序异常</strong>：批次已经登记出境，但仍有 {exitSequenceOrders.length-exitReadyOrderCount} 票缺少更早的“口岸到达”记录。请补录真实到达时间；系统不会伪造历史时间。</div>}
-    {milestoneField.visible&&<><div className="batch-tracking-note"><strong>配置门禁</strong><span>字段显隐与必填状态来自当前工作流；选填字段不会阻断。</span><strong>结构性顺序</strong><span>一旦登记运输事件，前后节点时间必须连续且幂等，防止产生不可能的轨迹。</span></div>
+    {milestoneSurfaceVisible&&<><div className="batch-tracking-note"><strong>配置门禁</strong><span>字段显隐、当前节点和必填状态来自冻结工作流；选填字段不会阻断。</span><strong>结构性顺序</strong><span>一旦登记运输事件，前后节点时间必须连续且幂等，防止产生不可能的轨迹。</span></div>
     <div className="table-wrap batch-tracking-node-table"><table><thead><tr><th>顺序</th><th>运输节点</th><th>流程进度</th><th>批次登记状态</th><th>最近登记</th><th>操作</th></tr></thead><tbody>{visibleMilestones.map((node,index)=>{
       const count=nodeOrders.filter(o=>{const list=milestonesByOrder.get(o.order_id)||[];return list.some(m=>m.milestone_code===node.code);}).length;
       const total=nodeOrders.length;
@@ -1891,7 +2001,7 @@ function BatchTrackingWorkbench({batchId,batchNumber,orders,visibleOrders,orderP
       const sequenceAnomaly=node.code==="exported"&&count>0&&!borderArrivalReady;
       return <tr className={sequenceAnomaly?"blocked-row":count===total?"completed-row":count>0?"partial-row":""} key={node.code}>
         <td>{String(index+1).padStart(2,"0")}</td><td><strong>{node.name}</strong></td><td>{node.progress}%</td><td><span className={`status-pill ${sequenceAnomaly?"danger":count===total?"success":""}`}>{sequenceAnomaly?`顺序异常 · ${exitReadyOrderCount}/${total} 票口岸到达`:count===total?"全票已登记":count>0?`${count}/${total} 票`:"未登记"}</span></td><td>{sample?formatShortDateTime(sample.event_at):"—"}</td>
-        <td>{node.code==="exported"&&!exitConfirmed?(actualExitField.visible&&borderArrivalReady&&canConfirmExit&&manage?<a className="text-button batch-exit-gate-link" href="#batch-inline-exit-confirm">确认实际出境</a>:<span className="muted">{actualExitField.visible?"完成前置步骤后开放":"当前工作流不登记"}</span>):manage&&node.code!=="station_arrived"&&node.code!=="exported"?<Modal title={`登记运输节点 · ${node.name}`} triggerLabel="登记节点" triggerClassName="text-button" size="wide" closeSignal={actionCloseSignal}><BatchTrackingNodeForm nodeCode={node.code} total={total} fields={workflowPolicies} defaultEventAt={defaultEventAt} defaultLocation={defaultLocation(node.code)} defaultVehicle={defaultVehicle} busy={busy}/></Modal>:<span className="muted">{node.code==="exported"?"出境确认自动登记":"仓库自动登记"}</span>}</td>
+        <td>{node.code==="exported"&&!exitConfirmed?(actualExitSurfaceVisible&&borderArrivalReady&&canConfirmExit&&actualExitCanWrite?<a className="text-button batch-exit-gate-link" href="#batch-inline-exit-confirm">确认实际出境</a>:<span className="muted">{actualExitSurfaceVisible?"完成前置步骤后开放":"当前冻结工作流不登记"}</span>):milestoneCanWrite&&node.code!=="station_arrived"&&node.code!=="exported"?<Modal title={`登记运输节点 · ${node.name}`} triggerLabel="登记节点" triggerClassName="text-button" size="wide" closeSignal={actionCloseSignal}><BatchTrackingNodeForm nodeCode={node.code} total={total} fields={workflowPolicies} defaultEventAt={defaultEventAt} defaultLocation={defaultLocation(node.code)} defaultVehicle={defaultVehicle} busy={busy}/></Modal>:<span className="muted">{node.code==="exported"?"出境确认自动登记":node.code==="station_arrived"?"仓库自动登记":"当前只读"}</span>}</td>
       </tr>;
     })}</tbody></table></div></>}
     {trackingOrders.length>0&&<details className="batch-tracking-orders batch-inline-disclosure"><summary><span><strong>逐票节点状态</strong><small>仅显示当前工作流已启用运踪模块的订单</small></span><em aria-hidden="true"/></summary>
