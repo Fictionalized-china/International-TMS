@@ -412,6 +412,16 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
         self.assertIn('name=f"查看订单 {first_order.order_number}"', source)
         self.assertIn("exact=True", source)
 
+    def test_ordinary_order_navigation_waits_for_the_destination_heading(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def _open_ordinary_order(")
+        end = source.index("    def _open_batch(", start)
+        helper = source[start:end]
+        self.assertIn(
+            'get_by_role("heading", name=order_number, exact=True)',
+            helper,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

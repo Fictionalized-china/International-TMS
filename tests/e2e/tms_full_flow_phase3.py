@@ -786,7 +786,10 @@ class Phase3Flow:
             remediation="保证列表入口与详情页 loader 权限一致。",
         )
         session.click(action.first, f"打开订单 {order_number}")
-        session.page.wait_for_timeout(180)
+        session.expect_visible(
+            session.page.get_by_role("heading", name=order_number, exact=True),
+            f"{order_number} 订单详情标题",
+        )
         self._assert_no_error_page(session)
 
     def _open_batch(self, session: RoleBrowserSession) -> str:
