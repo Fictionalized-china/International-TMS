@@ -794,6 +794,14 @@ class Phase3Flow:
 
     def _open_batch(self, session: RoleBrowserSession) -> str:
         self._click_navigation(session, "运输订单")
+        tabs = session.page.get_by_role("navigation", name="普通订单与配载订单分类")
+        self._expect_visible_or_block(
+            session,
+            tabs,
+            "普通订单与配载订单分类",
+            owner="运输订单页面维护人",
+            remediation="等待运输订单页加载完成后再选择配载订单。",
+        )
         self._click_workload_tab(session, "配载订单")
         form = session.page.locator("form.batch-workload-filters")
         self._expect_visible_or_block(

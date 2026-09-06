@@ -422,6 +422,21 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
             helper,
         )
 
+    def test_batch_navigation_waits_for_the_order_classification_before_selecting_a_tab(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def _open_batch(")
+        end = source.index("    def _open_batch_tab(", start)
+        helper = source[start:end]
+
+        classification = (
+            'tabs = session.page.get_by_role('
+            '"navigation", name="普通订单与配载订单分类"'
+        )
+        wait = 'self._expect_visible_or_block(\n            session,\n            tabs,'
+        self.assertIn(classification, helper)
+        self.assertIn(wait, helper)
+        self.assertLess(helper.index(wait), helper.index('self._click_workload_tab(session, "配载订单")'))
+
     def test_ftl_customs_save_waits_for_durable_declaration_row(self) -> None:
         source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
         start = source.index("    def complete_ftl_customs(")
