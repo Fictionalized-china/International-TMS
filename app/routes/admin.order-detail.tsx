@@ -315,6 +315,13 @@ export function ordinaryOrderListHref() {
   return "/admin/orders?view=orders";
 }
 
+export function canOperateScopedEmbeddedOrderModule(input: {
+  moduleActionCanOperate?: boolean;
+  moduleCanEdit?: boolean;
+}) {
+  return Boolean(input.moduleActionCanOperate && input.moduleCanEdit);
+}
+
 function isOrderMarkLabelReady(order: Pick<Order, "status" | "quote_number" | "quote_accepted_at" | "quote_withdrawn">) {
   if (order.quote_withdrawn === 1 || order.status === "cancelled") return false;
   return Boolean(order.quote_accepted_at)
@@ -974,11 +981,10 @@ function LinearOrderWorkspace({
       salespersonUserId: order.salesperson_user_id,
       currentUserId: data.current.userId,
     });
-  const canOperateScopedEmbeddedModule = Boolean(
-    data.embeddedModuleData?.moduleActionCanOperate &&
-    data.embeddedModuleData.access.canEdit &&
-    ["review", "exceptions"].includes(data.embeddedModuleCode ?? ""),
-  );
+  const canOperateScopedEmbeddedModule = canOperateScopedEmbeddedOrderModule({
+    moduleActionCanOperate: data.embeddedModuleData?.moduleActionCanOperate,
+    moduleCanEdit: data.embeddedModuleData?.access.canEdit,
+  });
   const readOnly = !canEditCurrentOrderWorkspace({
     orderCompleted,
     viewingCurrentStep: viewingCurrent,

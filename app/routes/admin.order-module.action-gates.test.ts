@@ -46,6 +46,8 @@ const harness = vi.hoisted(() => {
     modules: [] as Array<Record<string, unknown>>,
     workflowFields: [] as Array<Record<string, unknown>>,
     documentReviews: [] as Array<{ document_category: string; review_status: string | null }>,
+    attachmentDocumentCategory: "commercial_invoice",
+    documentReviewWrites: 0,
     moduleAssigneeUserId: "user-a" as string | null,
     moduleTaskAssigneeUserIds: ["user-a"] as string[],
     trackingActionEditable: true,
@@ -70,6 +72,9 @@ const harness = vi.hoisted(() => {
           if (query.includes("FROM order_tasks t")) {
             return state.task;
           }
+          if (query.includes("SELECT document_category FROM order_document_metadata")) {
+            return { document_category: state.attachmentDocumentCategory };
+          }
           return null;
         },
         async all() {
@@ -82,6 +87,10 @@ const harness = vi.hoisted(() => {
           return { results: [] };
         },
         async run() {
+          if (query.includes("UPDATE order_document_metadata SET review_status=")) {
+            state.documentReviewWrites += 1;
+            return { meta: { changes: 1 } };
+          }
           if (query.includes("UPDATE order_tasks")) {
             state.updateRuns += 1;
             return { meta: { changes: state.updateChanges } };
@@ -136,6 +145,11 @@ const harness = vi.hoisted(() => {
         actual_exit_at: action("actual_exit_at"),
       };
     }),
+    loadOrderDocumentWorkflowMutationAccess: vi.fn(async () => ({
+      allowed: true,
+      reason: null,
+    })),
+    synchronizeOrderDocumentsModuleStatus: vi.fn(async () => undefined),
     writeAudit: vi.fn(async () => undefined),
     assignOrderModule: vi.fn(async () => undefined),
     assignOrderModulesBulk: vi.fn(async () => ({ assignedCount: 0 })),
@@ -202,6 +216,12 @@ vi.mock("../lib/workflow-instance-stage-gate.server", () => ({
 vi.mock("../lib/order-tracking-action-policy.server", () => ({
   loadOrderTrackingActionAccess: harness.loadOrderTrackingActionAccess,
 }));
+vi.mock("../lib/order-document-access.server", () => ({
+  loadOrderDocumentWorkflowMutationAccess: harness.loadOrderDocumentWorkflowMutationAccess,
+}));
+vi.mock("../lib/documents-module-status.server", () => ({
+  synchronizeOrderDocumentsModuleStatus: harness.synchronizeOrderDocumentsModuleStatus,
+}));
 
 import { action } from "./admin.order-module";
 
@@ -241,6 +261,7 @@ describe("order module action mutation gates", () => {
     harness.state.batchRuns = 0;
     harness.state.modules = [];
     harness.order.status = "in_execution";
+    harness.order.current_assignee_user_id = "user-a";
     harness.order.workflow_instance_id = null;
     harness.sql.length = 0;
     harness.current.permissions = [
@@ -252,6 +273,8 @@ describe("order module action mutation gates", () => {
     harness.current.positionCode = "OPERATION";
     harness.state.workflowFields = [];
     harness.state.documentReviews = [];
+    harness.state.attachmentDocumentCategory = "commercial_invoice";
+    harness.state.documentReviewWrites = 0;
     harness.state.moduleAssigneeUserId = "user-a";
     harness.state.moduleTaskAssigneeUserIds = ["user-a"];
     harness.state.trackingActionEditable = true;
@@ -267,6 +290,46 @@ describe("order module action mutation gates", () => {
     expect(harness.sql.some((query) =>
       query.includes("INSERT INTO order_document_metadata"),
     )).toBe(false);
+  });
+
+  it("allows the exact customs module document owner to review while the order-level owner differs", async () => {
+    harness.current.permissions = [
+      "order.view",
+      "order.scope.assigned",
+      "order.module.customs.manage",
+    ];
+    harness.current.positionCode = "DOC";
+    harness.order.current_assignee_user_id = "user-operation";
+    harness.state.moduleAssigneeUserId = "user-a";
+    harness.state.moduleTaskAssigneeUserIds = ["user-a"];
+
+    await expect(invoke(post("document_review", {
+      attachmentId: "attachment-1",
+      reviewStatus: "approved",
+    }), "customs")).resolves.toEqual(expect.objectContaining({
+      success: "文件审核状态已更新",
+    }));
+    expect(harness.state.documentReviewWrites).toBe(1);
+  });
+
+  it("denies customs document review when the module is assigned to another user", async () => {
+    harness.current.permissions = [
+      "order.view",
+      "order.scope.assigned",
+      "order.module.customs.manage",
+    ];
+    harness.current.positionCode = "DOC";
+    harness.order.current_assignee_user_id = "user-operation";
+    harness.state.moduleAssigneeUserId = "user-other";
+    harness.state.moduleTaskAssigneeUserIds = ["user-other"];
+
+    await expect(invoke(post("document_review", {
+      attachmentId: "attachment-1",
+      reviewStatus: "approved",
+    }), "customs")).resolves.toEqual({
+      formError: "当前节点不由本账号办理，订单信息仅供查看",
+    });
+    expect(harness.state.documentReviewWrites).toBe(0);
   });
 
   it("rejects completion of a task belonging to another module", async () => {

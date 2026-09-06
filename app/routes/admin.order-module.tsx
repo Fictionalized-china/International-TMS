@@ -1570,19 +1570,10 @@ export async function action({ request, params }: Route.ActionArgs) {
     intent === "document_review";
   const workflowAdministrator = canEditWorkflowDefinitionInUi(current);
   const moduleManageAccess = canManageOrderModule(current, moduleCode);
-  const usesModuleScopedAuthorization = ["review", "exceptions"].includes(moduleCode);
-  const moduleScopedActionAccess = usesModuleScopedAuthorization &&
-    canOperateEnabledOrderModule({
-      user: current,
-      orderStatus: order.status,
-      moduleCode,
-      moduleEnabled: currentModule.enabled,
-      moduleAssigneeUserId: currentModule.assigneeUserId,
-      taskAssigneeUserIds: currentModule.taskAssigneeUserIds,
-      responsibilityPositionCodes: currentModule.responsibilityPositionCodes,
-    });
+  const restrictsWorkflowAdministratorBypass = ["review", "exceptions"].includes(moduleCode);
+  const moduleScopedActionAccess = currentModuleActionCanOperate;
   const workflowAdministratorActionAccess =
-    workflowAdministrator && !usesModuleScopedAuthorization;
+    workflowAdministrator && !restrictsWorkflowAdministratorBypass;
   const isDocumentAction = [
     "document_upload",
     "document_review",
