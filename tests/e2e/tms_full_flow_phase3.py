@@ -1935,8 +1935,10 @@ class Phase3Flow:
         offset_minutes: int,
         location: str,
     ) -> None:
-        table = session.page.locator("table.batch-tracking-node-table")
-        row = table.locator("tbody tr").filter(has_text=row_label)
+        table = session.page.locator(".batch-tracking-node-table")
+        row = table.locator("tbody tr").filter(
+            has=session.page.get_by_text(row_label, exact=True)
+        )
         self._expect_visible_or_block(
             session,
             row,
@@ -1998,8 +2000,8 @@ class Phase3Flow:
             self._open_batch(session)
             self._open_batch_tab(session, "口岸到达与实际出境")
             arrived_row = session.page.locator(
-                "table.batch-tracking-node-table tbody tr"
-            ).filter(has_text="口岸到达")
+                ".batch-tracking-node-table tbody tr"
+            ).filter(has=session.page.get_by_text("口岸到达", exact=True))
             if not (self._is_visible(arrived_row) and "全票已登记" in self._locator_text(arrived_row)):
                 trigger = session.page.get_by_role(
                     "button", name="登记口岸到达", exact=True
@@ -2105,8 +2107,8 @@ class Phase3Flow:
                 location="目的地海关",
             )
             station_row = session.page.locator(
-                "table.batch-tracking-node-table tbody tr"
-            ).filter(has_text="目的仓到达")
+                ".batch-tracking-node-table tbody tr"
+            ).filter(has=session.page.get_by_text("目的仓到达", exact=True))
             session.expect_hidden(
                 station_row.get_by_role("button", name="登记节点"),
                 "PZ 目的仓到达不提供手工登记按钮",

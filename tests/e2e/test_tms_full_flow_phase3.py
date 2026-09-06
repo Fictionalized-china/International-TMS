@@ -659,6 +659,19 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
         self.assertIn('get_by_text(', helper)
         self.assertIn('"实际出境已确认", exact=False', helper)
         self.assertIn("exit_form.or_(exit_confirmed)", helper)
+
+    def test_batch_tracking_rows_use_container_class_and_exact_labels(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def _submit_batch_node(")
+        end = source.index("    def _prepare_overseas_receipt(", start)
+        helper = source[start:end]
+
+        self.assertIn('locator(".batch-tracking-node-table")', helper)
+        self.assertIn('".batch-tracking-node-table tbody tr"', helper)
+        self.assertNotIn('"table.batch-tracking-node-table', helper)
+        self.assertIn("get_by_text(row_label, exact=True)", helper)
+        self.assertIn('get_by_text("口岸到达", exact=True)', helper)
+        self.assertIn('get_by_text("目的仓到达", exact=True)', helper)
         self.assertLess(
             helper.index("exit_form.or_(exit_confirmed)"),
             helper.index("if self._is_visible(exit_form):"),
