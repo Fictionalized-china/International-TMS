@@ -15327,6 +15327,26 @@ a.order-module-card.read-only:hover {
 .batch-order-file-list > div { display: grid; grid-template-columns: 100px minmax(0, 1fr) auto auto; gap: 8px; align-items: center; padding: 8px; border-bottom: 1px solid #dce5f1; }
 .batch-order-file-list > div:nth-last-child(-n+2) { border-bottom: 0; }
 .batch-order-file-list a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.batch-order-file-inline-action,
+.batch-order-file-review-action {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  padding-top: 6px;
+}
+.batch-order-file-inline-action label { flex: 1; }
+.batch-order-file-inline-action input[type="file"] {
+  width: 100%;
+  min-width: 0;
+  padding: 6px;
+  border: 1px solid #c9d8ea;
+  border-radius: 4px;
+  background: #f8fbff;
+}
+.batch-order-file-inline-action button,
+.batch-order-file-review-action button { white-space: nowrap; }
 .batch-order-file-upload { display: grid; grid-template-columns: 150px minmax(190px, 1fr) minmax(160px, 1fr) auto; gap: 8px; align-items: end; margin-top: 12px; }
 .batch-order-file-upload label { display: grid; gap: 4px; font-size: 12px; }
 .batch-order-file-links { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }

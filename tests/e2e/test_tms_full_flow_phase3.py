@@ -431,6 +431,26 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
             permission_probe,
         )
 
+    def test_batch_document_owner_has_a_visible_upload_path_in_the_batch_workbench(self) -> None:
+        route_source = (
+            HERE.parents[1] / "app" / "routes" / "admin.loading-detail.tsx"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("manageDocuments={manageDocuments}", route_source)
+        self.assertIn('value="batch_order_document_upload"', route_source)
+        self.assertIn('name="approveImmediately" value="1"', route_source)
+        self.assertIn('valueOf(form,"approveImmediately")==="1"', route_source)
+        self.assertIn("上传并通过", route_source)
+        self.assertIn("待整单单证负责人上传", route_source)
+        self.assertNotIn('blocks?"待仓库上传"', route_source)
+
+    def test_phase3_recovers_missing_batch_documents_through_visible_ui(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        self.assertIn("def _ensure_batch_order_documents(", source)
+        self.assertIn("session.choose_files(", source)
+        self.assertIn('name=re.compile(r"^上传.*通过$")', source)
+        self.assertIn("self._ensure_batch_order_documents(session, order)", source)
+
     def test_ordinary_order_navigation_waits_for_the_destination_heading(self) -> None:
         source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
         start = source.index("    def _open_ordinary_order(")

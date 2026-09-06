@@ -1416,6 +1416,103 @@ class Phase3Flow:
             case_id=PHASE3_PERMISSION_AND_NEGATIVE_CASES[2],
         )
 
+    def _ensure_batch_order_documents(
+        self,
+        session: RoleBrowserSession,
+        order: Phase3Order,
+    ) -> None:
+        """Complete current frozen document requirements through visible controls."""
+
+        for _ in range(12):
+            table = session.page.locator("section.batch-order-documents")
+            row = table.locator("tbody tr").filter(has_text=order.order_number)
+            self._expect_visible_or_block(
+                session,
+                row,
+                f"PZ 挂载订单 {order.order_number}",
+                owner="PZ 报关列表维护人",
+                remediation="配载单报关页必须显示全部有效挂载订单。",
+            )
+            if "待处理" not in self._locator_text(row, 8_000):
+                return
+
+            disclosure = row.locator("details.batch-order-file-details")
+            panel = disclosure.locator(".batch-order-file-panel")
+            if not self._is_visible(panel):
+                session.click(
+                    disclosure.locator("summary"),
+                    f"展开 {order.order_number} 文件办理",
+                )
+            session.expect_visible(panel, f"{order.order_number} 文件办理面板")
+
+            upload_forms = panel.locator("form.batch-order-file-inline-action")
+            visible_upload = next(
+                (
+                    upload_forms.nth(index)
+                    for index in range(upload_forms.count())
+                    if upload_forms.nth(index).is_visible()
+                ),
+                None,
+            )
+            if visible_upload is not None:
+                document_name = (
+                    visible_upload.locator('input[name="documentDescription"]')
+                    .get_attribute("value")
+                    or "必填文件"
+                )
+                session.choose_files(
+                    visible_upload.locator('input[type="file"]'),
+                    self.fixture_file,
+                    f"选择 {order.order_number} {document_name}",
+                )
+                session.click(
+                    visible_upload.get_by_role(
+                        "button", name=re.compile(r"^上传.*通过$")
+                    ),
+                    f"上传并通过 {order.order_number} {document_name}",
+                )
+                session.expect_hidden(
+                    session.page.get_by_role(
+                        "progressbar", name="系统正在处理请求"
+                    ),
+                    f"{order.order_number} {document_name} 保存完成",
+                )
+                continue
+
+            review_forms = panel.locator("form.batch-order-file-review-action")
+            visible_review = next(
+                (
+                    review_forms.nth(index)
+                    for index in range(review_forms.count())
+                    if review_forms.nth(index).is_visible()
+                ),
+                None,
+            )
+            if visible_review is not None:
+                session.click(
+                    visible_review.get_by_role("button", name="审核通过"),
+                    f"审核通过 {order.order_number} 既有待审文件",
+                )
+                session.expect_hidden(
+                    session.page.get_by_role(
+                        "progressbar", name="系统正在处理请求"
+                    ),
+                    f"{order.order_number} 既有文件审核完成",
+                )
+                continue
+
+            raise BusinessBlocker(
+                f"{order.order_number} 存在必填文件门禁，但整批单证负责人没有可见上传或审核入口",
+                owner="PZ 文件工作台维护人",
+                remediation="让冻结工作流当前节点的整批单证负责人可以逐票补齐必填文件。",
+            )
+
+        raise BusinessBlocker(
+            f"{order.order_number} 连续办理 12 次后仍未完成必填文件",
+            owner="PZ 文件工作台维护人",
+            remediation="检查文件保存后的审核状态和工作流门禁是否实时同步。",
+        )
+
     def complete_batch_customs(self) -> None:
         session = self.batch_document
         with session.step(
@@ -1442,6 +1539,8 @@ class Phase3Flow:
             session.expect_visible(table, "PZ 逐票报关表")
             for sequence, key in enumerate(LTL_KEYS, start=2):
                 order = self.source.order(key)
+                self._ensure_batch_order_documents(session, order)
+                table = session.page.locator("section.batch-order-documents")
                 row = table.locator("tbody tr").filter(has_text=order.order_number)
                 self._expect_visible_or_block(
                     session,
@@ -1451,11 +1550,15 @@ class Phase3Flow:
                     remediation="配载单报关页必须显示全部有效挂载订单。",
                 )
                 row_text = self._locator_text(row, 8_000)
-                if "待处理" in row_text or "待仓库上传" in row_text:
+                if (
+                    "待处理" in row_text
+                    or "待仓库上传" in row_text
+                    or "待整单单证负责人上传" in row_text
+                ):
                     raise BusinessBlocker(
-                        f"{order.order_number} 仍有装车阶段必填文件未就绪",
-                        owner="国内仓文件交接维护人",
-                        remediation="回到 PZ 装车文件步骤，通过可见上传和审核完成必填项。",
+                        f"{order.order_number} 仍有当前冻结节点必填文件未就绪",
+                        owner="整批单证负责人",
+                        remediation="在 PZ 报关与文件页面通过可见上传和审核完成必填项。",
                     )
                 if "张放行" in row_text and not "0/" in row_text:
                     raise BusinessBlocker(
