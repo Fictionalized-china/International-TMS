@@ -1832,6 +1832,7 @@ class Phase3Flow:
             ),
         ) as observation:
             self._open_ordinary_order(self.operation, order.order_number)
+            self._open_ordinary_business_tab(self.operation, "出境运输与运踪")
             self.operation.expect_visible(
                 self.operation.page.get_by_role(
                     "heading", name="运输进度与运单跟踪", exact=True

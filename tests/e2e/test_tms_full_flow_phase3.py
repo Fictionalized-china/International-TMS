@@ -618,6 +618,16 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
                 f"{field_name} must preserve a valid prefilled value",
             )
 
+    def test_ftl_tracking_opens_its_peer_tab_before_waiting_for_the_workbench(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def complete_ftl_tracking(")
+        end = source.index("    def _fill_batch_tracking_form(", start)
+        helper = source[start:end]
+
+        open_tab = 'self._open_ordinary_business_tab(self.operation, "出境运输与运踪")'
+        self.assertIn(open_tab, helper)
+        self.assertLess(helper.index(open_tab), helper.index('name="运输进度与运单跟踪"'))
+
 
 if __name__ == "__main__":
     unittest.main()
