@@ -437,6 +437,27 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
         self.assertIn(wait, helper)
         self.assertLess(helper.index(wait), helper.index('self._click_workload_tab(session, "配载订单")'))
 
+    def test_tab_switches_wait_for_the_target_url_and_app_idle_state(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def _activate_tab_and_wait(")
+        end = source.index("    def _open_batch_tab(", start)
+        helper = source[start:end]
+
+        self.assertIn("href = link.first.get_attribute(\"href\") or \"\"", helper)
+        self.assertIn("session.page.wait_for_url(", helper)
+        self.assertIn("re.compile(re.escape(href))", helper)
+        self.assertIn(
+            'session.page.get_by_role("progressbar", name="系统正在处理请求")',
+            helper,
+        )
+        self.assertIn("session.expect_hidden(", helper)
+
+        ordinary_start = source.index("    def _open_ordinary_business_tab(")
+        ordinary_end = source.index("    def _ensure_ftl_customs_documents(", ordinary_start)
+        ordinary_helper = source[ordinary_start:ordinary_end]
+        self.assertIn("self._activate_tab_and_wait(session, link, label)", ordinary_helper)
+        self.assertNotIn("wait_for_timeout", ordinary_helper)
+
     def test_ftl_customs_save_waits_for_durable_declaration_row(self) -> None:
         source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
         start = source.index("    def complete_ftl_customs(")

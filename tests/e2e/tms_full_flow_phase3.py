@@ -842,6 +842,30 @@ class Phase3Flow:
         self._assert_no_error_page(session)
         return href
 
+    def _activate_tab_and_wait(
+        self,
+        session: RoleBrowserSession,
+        link: Locator,
+        label: str,
+    ) -> None:
+        href = link.first.get_attribute("href") or ""
+        if not href.startswith("/"):
+            raise BusinessBlocker(
+                f"{label}页签不是站内路径",
+                owner="工作台页签路由维护人",
+                remediation="页签必须使用可审计的站内相对路径。",
+            )
+        session.click(link.first, f"切换到{label}")
+        session.page.wait_for_url(
+            re.compile(re.escape(href)),
+            timeout=session.navigation_timeout_ms,
+        )
+        session.expect_hidden(
+            session.page.get_by_role("progressbar", name="系统正在处理请求"),
+            f"{label}页签数据同步完成",
+        )
+        self._assert_no_error_page(session)
+
     def _open_batch_tab(self, session: RoleBrowserSession, label: str) -> None:
         tabs = session.page.get_by_role("navigation", name="配载单工作区")
         link = tabs.get_by_role(
@@ -854,9 +878,7 @@ class Phase3Flow:
             owner="配载单工作台维护人",
             remediation="保证 PZ 工作台按业务顺序展示同级页签。",
         )
-        session.click(link.first, f"切换到{label}")
-        session.page.wait_for_timeout(150)
-        self._assert_no_error_page(session)
+        self._activate_tab_and_wait(session, link, label)
 
     def _open_ordinary_business_tab(
         self,
@@ -872,9 +894,7 @@ class Phase3Flow:
             owner="普通订单工作台维护人",
             remediation="按当前业务顺序提供可见同级页签，并保持页签状态实时同步。",
         )
-        session.click(link.first, f"切换到{label}")
-        session.page.wait_for_timeout(150)
-        self._assert_no_error_page(session)
+        self._activate_tab_and_wait(session, link, label)
 
     def _ensure_ftl_customs_documents(self) -> None:
         section = self.document.page.get_by_role("region", name="本节点文件")
