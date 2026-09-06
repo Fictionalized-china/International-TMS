@@ -664,10 +664,11 @@ class Phase4SafetyTests(unittest.TestCase):
         self.assertIn('name="最终确认并归档订单"', helper)
         self.assertGreaterEqual(
             helper.count('name="系统正在处理请求"'),
-            2,
+            1,
         )
         self.assertIn("复盘草稿保存完成", helper)
-        self.assertIn("最终归档提交完成", helper)
+        self.assertIn('get_by_text("订单已完成", exact=True)', helper)
+        self.assertIn("最终归档结果可见", helper)
         self.assertIn('get("recovery_branches_used") is True', helper)
         self.assertIn("恢复链复用既有归档结果", helper)
         self.assertNotIn("生成并判定订单完成状态", helper)

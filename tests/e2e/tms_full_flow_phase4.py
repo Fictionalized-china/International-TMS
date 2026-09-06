@@ -1997,11 +1997,9 @@ class Phase4Flow:
                         final_form.get_by_role("button", name="最终确认并归档订单", exact=True),
                         f"最终确认并归档 {order_number}",
                     )
-                    self.finance.expect_hidden(
-                        self.finance.page.get_by_role(
-                            "progressbar", name="系统正在处理请求"
-                        ),
-                        f"{order_number} 最终归档提交完成",
+                    self.finance.expect_visible(
+                        self.finance.page.get_by_text("订单已完成", exact=True),
+                        f"{order_number} 最终归档结果可见",
                     )
                 except Exception as original:
                     self._assert_no_error_page(self.finance)
