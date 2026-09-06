@@ -81,6 +81,9 @@ ORDER_NUMBER_RE = re.compile(r"^SO[0-9A-Z-]{6,}$", re.I)
 PZ_NUMBER_RE = re.compile(r"\bPZ-[0-9A-Z-]{4,}\b", re.I)
 OUT_NUMBER_RE = re.compile(r"\bOUT-[0-9A-Z-]{4,}\b", re.I)
 OUL_NUMBER_RE = re.compile(r"\bOUL-[0-9A-Z-]+\b", re.I)
+FINAL_DISPATCH_BUTTON_RE = re.compile(
+    r"^确认出库(?:交接|并打印交接单)$"
+)
 DENIED_PAGE_RE = re.compile(r"请求失败|不存在|尚未分配|没有.*权限|Forbidden|403|404", re.I)
 ERROR_PAGE_RE = re.compile(
     r"请求失败|SYSTEM RECOVERY|Forbidden|Internal Server Error|请求失败\s*\(403\)",
@@ -117,6 +120,50 @@ def certify_oul_label_counts(
             f"页面 {rendered_label_count} 张，唯一 OUL {len(codes)} 个"
         )
     return codes
+
+
+def certify_dispatch_scan_progress(
+    subject: str,
+    *,
+    progress_text: str,
+    expected_count: int,
+) -> tuple[int, int]:
+    """Require the rendered loaded count and task total to match every OUL."""
+
+    if isinstance(expected_count, bool) or expected_count < 1:
+        raise ValueError(f"{subject} 的期望扫码数必须是正整数")
+    match = re.fullmatch(r"\s*(\d+)\s*/\s*(\d+)\s*", progress_text)
+    if not match:
+        raise ValueError(f"{subject} 无法读取装车进度：{progress_text or '空白'}")
+    loaded_count, item_count = (int(value) for value in match.groups())
+    if loaded_count != expected_count or item_count != expected_count:
+        raise ValueError(
+            f"{subject} 装车扫码数量不一致：实际已扫 {loaded_count}/{item_count}，"
+            f"期望 {expected_count}/{expected_count}"
+        )
+    return loaded_count, item_count
+
+
+def dispatch_scan_completion_path(
+    subject: str,
+    *,
+    scan_mode: str,
+    scan_is_visible: bool,
+    progress_text: str,
+    expected_count: int,
+) -> str:
+    """Choose the only valid completion path for the rendered scan policy."""
+
+    if scan_mode == "hidden":
+        if scan_is_visible:
+            raise ValueError(f"{subject} 扫码策略为隐藏，但页面仍显示扫码框")
+        return "difference"
+    if not scan_is_visible:
+        raise ValueError(f"{subject} 扫码策略为 {scan_mode}，但页面没有扫码框")
+    certify_dispatch_scan_progress(
+        subject, progress_text=progress_text, expected_count=expected_count
+    )
+    return "exact"
 
 
 class BusinessBlocker(RuntimeError):
@@ -1163,6 +1210,51 @@ class Phase2Flow:
             case_id=case_id,
         )
 
+    def _wait_for_loading_scan_commit(
+        self,
+        *,
+        subject: str,
+        code: str,
+        previous_loaded: int,
+        item_count: int,
+    ) -> int:
+        """Wait until revalidation renders the next persisted loaded count."""
+
+        session = self.domestic_warehouse
+        expected_loaded = previous_loaded + 1
+        progress = session.page.locator(
+            ".outbound-task-detail-workbench .dispatch-progress strong"
+        )
+        expected_progress = progress.filter(
+            has_text=re.compile(
+                rf"^\s*{expected_loaded}\s*/\s*{item_count}\s*$"
+            )
+        )
+        try:
+            expected_progress.first.wait_for(
+                state="visible", timeout=session.action_timeout_ms
+            )
+        except Exception as error:
+            actual = self._locator_text(progress, 200) or "无法读取"
+            page_error = self._visible_error_text(session)
+            raise BusinessBlocker(
+                f"{subject} 扫描 {code} 后未确认持久化："
+                f"期望进度 {expected_loaded}/{item_count}，页面为 {actual}"
+                f"{f'；{page_error}' if page_error else ''}",
+                owner="仓库装车重验证维护人",
+                remediation="每次扫码 action 完成后必须返回成功并刷新已装数量，再开放下一码输入。",
+            ) from error
+        actual = self._locator_text(progress, 200)
+        if not re.fullmatch(
+            rf"\s*{expected_loaded}\s*/\s*{item_count}\s*", actual
+        ):
+            raise BusinessBlocker(
+                f"{subject} 扫描 {code} 后装车进度异常：{actual or '无法读取'}",
+                owner="仓库装车计数维护人",
+                remediation="核对扫码写入与 loader 重验证后的 loaded_count/item_count。",
+            )
+        return expected_loaded
+
     def _create_dispatch(self, subject: str, cargo_codes: Sequence[str], *, ftl: bool) -> str:
         self._open_pending_load_unit(subject)
         form = self._resolve_loading_documents(subject)
@@ -1203,6 +1295,25 @@ class Phase2Flow:
         dispatch_number = dispatch_numbers[0].upper()
 
         unique_codes = list(dict.fromkeys(code.upper() for code in cargo_codes))
+        if not unique_codes:
+            raise BusinessBlocker(
+                f"{subject} 没有可用于正式全扫的 OUL 货物码",
+                owner="仓库标签生成维护人",
+                remediation="返回验收入库页生成完整 OUL 标签后，以全新同类型订单重新测试。",
+            )
+        progress = self.domestic_warehouse.page.locator(
+            ".outbound-task-detail-workbench .dispatch-progress strong"
+        )
+        initial_progress = self._locator_text(progress, 200)
+        initial_match = re.fullmatch(r"\s*(\d+)\s*/\s*(\d+)\s*", initial_progress)
+        if not initial_match or tuple(map(int, initial_match.groups())) != (0, len(unique_codes)):
+            raise BusinessBlocker(
+                f"{subject} 新建任务进度不是 fresh 0/{len(unique_codes)}："
+                f"{initial_progress or '无法读取'}",
+                owner="全流程认证数据隔离维护人",
+                remediation="废弃本轮续跑，从 Phase 1 创建全新订单并核对任务货物总数后重测。",
+            )
+        loaded_count = 0
         scan_form = self.domestic_warehouse.page.locator("form.outbound-loading-scan")
         barcode = scan_form.locator('input[name="barcode"]')
         hidden_notice = self.domestic_warehouse.page.get_by_text(
@@ -1218,7 +1329,7 @@ class Phase2Flow:
             scan_mode = "hidden"
         else:
             final_ready = self.domestic_warehouse.page.get_by_role(
-                "button", name=re.compile(r"^确认出库并打印交接单")
+                "button", name=FINAL_DISPATCH_BUTTON_RE
             )
             if self._is_visible(final_ready):
                 raise BusinessBlocker(
@@ -1249,7 +1360,7 @@ class Phase2Flow:
             or (scan_mode == "hidden" and hidden_by_workflow and not scan_is_visible)
             or self._is_visible(
                 self.domestic_warehouse.page.get_by_role(
-                    "button", name=re.compile(r"^确认出库并打印交接单")
+                    "button", name=FINAL_DISPATCH_BUTTON_RE
                 )
             ),
             actual=f"页面解析到逐件扫码策略：{scan_mode}",
@@ -1291,7 +1402,12 @@ class Phase2Flow:
                     scan_form.get_by_role("button", name="确认装车"),
                     f"确认货物码 {code} 装车",
                 )
-                self.domestic_warehouse.page.wait_for_timeout(150)
+                loaded_count = self._wait_for_loading_scan_commit(
+                    subject=subject,
+                    code=code,
+                    previous_loaded=loaded_count,
+                    item_count=len(unique_codes),
+                )
                 if exercise_negative_scans and index == 1:
                     self._assert_rejected_loading_scan(
                         subject=subject,
@@ -1300,23 +1416,40 @@ class Phase2Flow:
                         case_id=PHASE2_NEGATIVE_GATE_CASES[1],
                         label="重复",
                     )
-        elif scan_mode == "required":
-            raise BusinessBlocker(
-                f"{subject} 的逐件扫码为必填，但没有可用于真实扫码的 OUL 货物码",
-                owner="仓库标签生成维护人",
-                remediation="返回验收入库页生成完整 OUL 标签后，以全新同类型订单重新测试。",
+
+        progress_text = self._locator_text(progress, 200)
+        try:
+            completion_path = dispatch_scan_completion_path(
+                subject,
+                scan_mode=scan_mode,
+                scan_is_visible=scan_is_visible,
+                progress_text=progress_text,
+                expected_count=len(unique_codes),
             )
+        except ValueError as error:
+            raise BusinessBlocker(
+                str(error),
+                owner="仓库装车计数维护人",
+                remediation="逐码等待重验证，并确保最终 loaded_count 与 OUL 数量及任务 item_count 完全一致。",
+            ) from error
 
         final_button = self.domestic_warehouse.page.get_by_role(
-            "button", name=re.compile(r"^确认出库并打印交接单")
+            "button", name=FINAL_DISPATCH_BUTTON_RE
         )
-        if self._is_visible(final_button):
+        if completion_path == "exact":
+            self._expect_visible_or_block(
+                self.domestic_warehouse,
+                final_button,
+                f"{subject} 全部扫码后的正式出库按钮",
+                owner="仓库出库门禁维护人",
+                remediation="精确达到全部扫码后必须开放正式出库，不能要求差异确认。",
+            )
             self.domestic_warehouse.click(
-                final_button.first, f"确认 {subject} 出库并打印交接单"
+                final_button.first, f"确认 {subject} 出库交接"
             )
         else:
-            # Hidden and optional policies deliberately allow a recorded scan
-            # difference.  Both confirmations are visible human actions.
+            # Only a workflow-hidden scan field may use the recorded difference
+            # path. Visible optional/required certification must be exact n/n.
             acknowledge = self.domestic_warehouse.page.get_by_role(
                 "button", name="我已核对，继续办理出库"
             )

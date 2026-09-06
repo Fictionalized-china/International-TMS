@@ -67,6 +67,16 @@ type OutboundExecutionPolicy=WarehouseOutboundWorkflowPolicy&{batchFields:Loadin
 type OutboundPolicyDifference={fieldKey:string;label:string;mode:"optional"};
 type OutboundInspection={batch:Batch;documentGroups:OutboundDocumentGroup[];documents:OutboundDocument[];allUploaded:boolean;allApproved:boolean;notesActive:boolean;notesRequired:boolean;scanActive:boolean;scanRequired:boolean;executionPolicy:OutboundExecutionPolicy;resourceDifferences:OutboundPolicyDifference[];resourcePolicyError:string|null};
 
+export function warehouseDispatchCompletionResult({dispatchNumber,businessType,completionWarningText}:{dispatchNumber:string;businessType:string;completionWarningText:string}){
+  return{success:(businessType==="ltl"
+    ?`${dispatchNumber} 已完成装车出库交接，交接数据已同步管理端；请回 PZ 配载单执行实际出境确认，运单此时尚未进入在途`
+    :`${dispatchNumber} 已完成整车装车出库交接，车辆与司机信息已同步管理端；后续由订单的报关及出境运输节点确认实际出境`)+completionWarningText};
+}
+
+export function OutboundBarcodeInput({busy}:{busy:boolean}){
+  return <input name="barcode" placeholder="扫描或输入本任务中的货物标签条码" autoComplete="off" autoFocus required disabled={busy}/>;
+}
+
 function groupPendingLoadUnits(rows:Batch[]){
   const groups=new Map<string,Batch[]>();
   for(const row of rows){
@@ -597,9 +607,7 @@ export async function action({request}:Route.ActionArgs){
       await writeAudit({request,action:"warehouse.dispatch.complete",resourceType:"warehouse_dispatch",resourceId:dispatch.id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{dispatchNumber:dispatch.dispatch_number,packages:counts.total,scanPolicy:executionPolicy?.scanConfirmation.mode??"required",scannedPackages:loadedCount,unscannedPackages:missingScanCount,scanDifferenceConfirmed:missingScanCount>0&&scanDifferenceConfirmed,resourcePolicyDifferences:resourceDifferences}});
     }catch(error){console.error("completed dispatch audit write failed",error);completionWarnings.push("审计记录待重试")}
     const completionWarningText=completionWarnings.length?`；${[...new Set(completionWarnings)].join("、")}`:"";
-    return{success:(dispatch.business_type==="ltl"
-      ?`${dispatch.dispatch_number} 已完成装车出库交接，交接数据已同步管理端；请回 PZ 配载单执行实际出境确认，运单此时尚未进入在途`
-      :`${dispatch.dispatch_number} 已完成整车装车出库交接，车辆与司机信息已同步管理端；后续由订单的报关及出境运输节点确认实际出境`)+completionWarningText,printHandoverSignal:now};
+    return warehouseDispatchCompletionResult({dispatchNumber:dispatch.dispatch_number,businessType:dispatch.business_type,completionWarningText});
   }
   return{formError:"无效的出库操作"};
 }
@@ -612,15 +620,9 @@ export default function WarehouseOutbound({loaderData,actionData}:Route.Componen
   const actionError=actionData&&"formError" in actionData?actionData.formError:undefined;
   const scannedBarcode=actionData&&"scannedBarcode" in actionData?actionData.scannedBarcode:undefined;
   const scannedDispatchId=actionData&&"scannedDispatchId" in actionData?actionData.scannedDispatchId:undefined;
-  const printHandoverSignal=actionData&&"printHandoverSignal" in actionData?actionData.printHandoverSignal:undefined;
   const inspection=actionData&&"inspection" in actionData
     ?actionData.inspection??loaderData.requestedInspection
     :loaderData.requestedInspection;
-  useEffect(()=>{
-    if(!printHandoverSignal)return;
-    const timer=window.setTimeout(()=>window.print(),120);
-    return()=>window.clearTimeout(timer);
-  },[printHandoverSignal]);
   if(loaderData.view==="create"){
     const unit=loaderData.selectedLoadUnit,isLtl=unit?.business_type==="ltl"&&Boolean(unit.transport_batch_id);
     return <div className="outbound-create-page">
@@ -931,7 +933,7 @@ function DispatchCard({warehouseId,task,items,itemPagination,manifest,busy,workf
     {manifest&&<div className="table-wrap dispatch-manifest-table"><table><thead><tr><th>配载单</th><th>数据来源</th></tr></thead><tbody><tr><td><a href={warehouseBatchDocumentHref(manifest.id,warehouseId)} target="_blank" rel="noreferrer">{manifest.file_name}</a></td><td>工作台自动生成，点击打开对照装车</td></tr></tbody></table></div>}
     {resourcePolicyError&&<div className="alert error" role="alert">{resourcePolicyError}</div>}
     {!resourcePolicyError&&resourceDifferences.length>0&&<div className="alert info" role="status"><strong>选填运输信息未登记：</strong>{resourceDifferences.map(item=>item.label).join("、")}。该差异仅记录审计，不阻断扫码或出库。</div>}
-    {scanPolicy.isActive&&!resourcePolicyError&&<Form key={task.loaded_count} method="post" className={`scan-inline outbound-loading-scan${allLoaded?" scan-complete":""}`}><input type="hidden" name="intent" value={allLoaded?"dispatch":"load"}/><input type="hidden" name="dispatchId" value={task.id}/>{allLoaded?<div className="outbound-final-action-guide" role="status" aria-live="polite"><span className="outbound-final-action-step" aria-hidden="true">3</span><span className="outbound-final-action-copy"><span className="outbound-final-action-kicker">下一步 · 出库交接</span><strong>全部货物已扫码，等待最终确认</strong><small>确认后同步管理端并打开交接单打印窗口；可直接按 Enter。</small></span></div>:<label className="field outbound-scan-code-field"><span>{`扫描货物码${scanPolicy.isRequired?" *":"（选填）"}`}</span><input name="barcode" placeholder="扫描或输入本任务中的货物标签条码" autoComplete="off" autoFocus required/></label>}<button type="submit" className={`primary warehouse-primary${allLoaded?" outbound-finalize-button":""}`} autoFocus={allLoaded} aria-keyshortcuts={allLoaded?"Enter":undefined} disabled={busy}>{allLoaded?<><span>确认出库并打印交接单</span><span className="outbound-finalize-arrow" aria-hidden="true">→</span></>:"确认装车"}</button></Form>}
+    {scanPolicy.isActive&&!resourcePolicyError&&<Form key={task.loaded_count} method="post" className={`scan-inline outbound-loading-scan${allLoaded?" scan-complete":""}`}><input type="hidden" name="intent" value={allLoaded?"dispatch":"load"}/><input type="hidden" name="dispatchId" value={task.id}/>{allLoaded?<div className="outbound-final-action-guide" role="status" aria-live="polite"><span className="outbound-final-action-step" aria-hidden="true">3</span><span className="outbound-final-action-copy"><span className="outbound-final-action-kicker">下一步 · 出库交接</span><strong>全部货物已扫码，等待最终确认</strong><small>确认后同步管理端；如需纸质交接单，可在成功页点击“打印交接单”。可直接按 Enter。</small></span></div>:<label className="field outbound-scan-code-field"><span>{`扫描货物码${scanPolicy.isRequired?" *":"（选填）"}`}</span><OutboundBarcodeInput busy={busy}/></label>}<button type="submit" className={`primary warehouse-primary${allLoaded?" outbound-finalize-button":""}`} autoFocus={allLoaded} aria-keyshortcuts={allLoaded?"Enter":undefined} disabled={busy}>{allLoaded?<><span>确认出库交接</span><span className="outbound-finalize-arrow" aria-hidden="true">→</span></>:"确认装车"}</button></Form>}
     {!scanPolicy.isActive&&<div className="alert warning" role="status">当前工作流已隐藏逐件扫码。系统不会以扫描数量阻断出库，但会在出库审计中记录全部未扫描差异。</div>}
     <section className="dispatch-cargo-list"><header><div><h3>订单货物列表</h3><p>{scanPolicy.isActive?"扫描成功后，对应货物状态会由“待装车”更新为“已装车”。":"逐件扫码已隐藏，货物清单仍完整保留用于交接与审计。"}</p></div><span>{task.loaded_count}/{task.item_count} 已扫描</span></header><div className="table-wrap"><table><thead><tr><th>状态</th><th>货物名称</th><th>标签号 / 条码</th><th>订单</th><th>包装 / 件数</th><th>重量 KG</th><th>体积 CBM</th><th>长 × 宽 × 高</th><th>装车时间</th></tr></thead><tbody aria-live="polite">{items.map(item=><tr key={item.id} className={item.barcode===highlightedBarcode?"current-scan":""}><td><span className={`status-pill ${item.status!=="loaded"?"off":"success"}`}>{item.status==="loaded"?"已扫描":"未扫描"}</span></td><td><strong>{item.cargo_name_cn||"未关联货物明细"}</strong></td><td><strong>{item.package_number}</strong><small>{item.barcode}</small></td><td>{item.order_number}</td><td>{packageTypeLabel(item.package_type)} · {item.pieces} 件</td><td>{item.weight_kg?.toFixed(3)??"—"}</td><td>{item.volume_cbm?.toFixed(4)??"—"}</td><td>{cargoDimensions(item)}</td><td>{cargoLoadedAt(item.loaded_at)}</td></tr>)}</tbody></table></div><QueryPagination {...itemPagination} pageParam="itemPage" unit="条货物"/></section>
     {canDispatch&&(!scanPolicy.isActive||!allLoaded)&&!resourcePolicyError&&<DispatchConfirmation task={task} busy={busy} scanPolicy={scanPolicy} missingScanCount={missingScanCount}/>}

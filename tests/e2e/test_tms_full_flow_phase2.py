@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import sys
 import tempfile
@@ -31,6 +32,7 @@ from tms_full_flow_phase2 import (
 from tms_full_flow_phase3 import load_phase2_handoff as load_phase2_for_phase3
 from tms_ui_credentials import CredentialRecord, CredentialVault
 from ui_only_guard import scan_path
+import tms_full_flow_phase2 as phase2
 
 
 ORDERS = {
@@ -385,6 +387,67 @@ class Phase2HandoffTests(unittest.TestCase):
 
 
 class Phase2SafetyTests(unittest.TestCase):
+    def test_dispatch_scan_certification_requires_exact_loaded_count(self) -> None:
+        self.assertEqual(
+            phase2.certify_dispatch_scan_progress(
+                "整车装车",
+                progress_text="2/2",
+                expected_count=2,
+            ),
+            (2, 2),
+        )
+        for progress_text, expected_detail in (
+            ("1/2", "实际已扫 1/2.*期望 2/2"),
+            ("3/3", "实际已扫 3/3.*期望 2/2"),
+            ("无法解析", "无法读取装车进度"),
+        ):
+            with self.subTest(progress_text=progress_text):
+                with self.assertRaisesRegex(ValueError, expected_detail):
+                    phase2.certify_dispatch_scan_progress(
+                        "整车装车",
+                        progress_text=progress_text,
+                        expected_count=2,
+                    )
+
+    def test_formal_dispatch_waits_for_each_scan_and_never_uses_difference_fallback(self) -> None:
+        source = inspect.getsource(phase2.Phase2Flow._create_dispatch)
+        self.assertIn("self._wait_for_loading_scan_commit(", source)
+        self.assertIn("dispatch_scan_completion_path(", source)
+        self.assertIsNotNone(
+            phase2.FINAL_DISPATCH_BUTTON_RE.fullmatch("确认出库交接")
+        )
+        self.assertIsNotNone(phase2.FINAL_DISPATCH_BUTTON_RE.fullmatch("确认出库并打印交接单"))
+        self.assertEqual(
+            phase2.dispatch_scan_completion_path(
+                "隐藏扫码任务",
+                scan_mode="hidden",
+                scan_is_visible=False,
+                progress_text="0/2",
+                expected_count=2,
+            ),
+            "difference",
+        )
+        for mode in ("optional", "required"):
+            with self.subTest(mode=mode):
+                with self.assertRaisesRegex(ValueError, "实际已扫 1/2.*期望 2/2"):
+                    phase2.dispatch_scan_completion_path(
+                        f"{mode} 扫码任务",
+                        scan_mode=mode,
+                        scan_is_visible=True,
+                        progress_text="1/2",
+                        expected_count=2,
+                    )
+        self.assertEqual(
+            phase2.dispatch_scan_completion_path(
+                "选填扫码任务",
+                scan_mode="optional",
+                scan_is_visible=True,
+                progress_text="2/2",
+                expected_count=2,
+            ),
+            "exact",
+        )
+
     def test_formal_flow_executes_scan_and_old_owner_negative_gates(self) -> None:
         self.assertEqual(
             PHASE2_NEGATIVE_GATE_CASES,
