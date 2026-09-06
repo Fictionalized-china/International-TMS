@@ -131,6 +131,28 @@ describe("order access", () => {
     expect(scoped.values.slice(-2)).toEqual(["user-a", "user-a"]);
   });
 
+  it("keeps only the discrepancy warehouse's order visible for fee-impact confirmation", () => {
+    const warehouseUser = {
+      ...baseUser,
+      positionCode: "WAREHOUSE",
+      roleCodes: ["pos_warehouse"],
+    };
+    expect(canSeeScopedOrder(warehouseUser, {
+      assignee_user_id: "finance-user",
+      responsible_position_code: "FINANCE_ACCOUNTING",
+      warehouse_difference_handler_user_ids: ["user-a"],
+    })).toBe(true);
+    expect(canSeeScopedOrder({ ...warehouseUser, userId: "other-warehouse" }, {
+      assignee_user_id: "finance-user",
+      responsible_position_code: "FINANCE_ACCOUNTING",
+      warehouse_difference_handler_user_ids: ["user-a"],
+    })).toBe(false);
+    const scoped = orderVisibilitySql(warehouseUser);
+    expect(scoped.sql).toContain("warehouse_receipt_differences retained_difference");
+    expect(scoped.sql).toContain("warehouse_user_access retained_warehouse_access");
+    expect(scoped.values.at(-1)).toBe("user-a");
+  });
+
   it("keeps an assigned finance reviewer's order visible as read-only after both finance reviews", () => {
     const financeUser = {
       ...baseUser,

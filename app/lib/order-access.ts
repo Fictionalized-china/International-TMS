@@ -187,17 +187,34 @@ export function orderVisibilitySql(user: OrderAccessUser, alias = "o") {
     const retainedSupervisorAssignment = user.positionCode === "OPERATION_SUPERVISOR"
       ? `OR ${alias}.operation_supervisor_user_id=?`
       : "";
+    const retainedWarehouseDifference = user.positionCode === "WAREHOUSE"
+      ? `OR EXISTS(
+          SELECT 1
+          FROM warehouse_receipt_differences retained_difference
+          JOIN warehouse_receipts retained_receipt
+            ON retained_receipt.id=retained_difference.receipt_id
+           AND retained_receipt.organization_id=retained_difference.organization_id
+          JOIN warehouse_user_access retained_warehouse_access
+            ON retained_warehouse_access.organization_id=retained_receipt.organization_id
+           AND retained_warehouse_access.warehouse_id=retained_receipt.warehouse_id
+           AND retained_warehouse_access.user_id=?
+          WHERE retained_difference.organization_id=${alias}.organization_id
+            AND retained_difference.order_id=${alias}.id
+        )`
+      : "";
     conditions.push(`(
       ${alias}.current_assignee_user_id=?
       OR ${currentSpecificAssignment}
       ${positionPool}
       ${retainedModuleAssignment}
       ${retainedSupervisorAssignment}
+      ${retainedWarehouseDifference}
     )`);
     values.push(user.userId, user.userId);
     if (user.positionCode) values.push(user.positionCode);
     if (retainedModuleAssignment) values.push(user.userId, user.userId);
     if (retainedSupervisorAssignment) values.push(user.userId);
+    if (retainedWarehouseDifference) values.push(user.userId);
   }
 
   return {
@@ -366,6 +383,7 @@ export function canSeeScopedOrder(user: OrderAccessUser, order: {
   assignee_user_id?: string | null;
   current_module_assignee_user_ids?: readonly (string | null | undefined)[];
   lifecycle_assignee_user_ids?: readonly (string | null | undefined)[];
+  warehouse_difference_handler_user_ids?: readonly (string | null | undefined)[];
   responsible_position_code?: string | null;
 }) {
   if (canViewAllOrders(user)) return true;
@@ -383,6 +401,10 @@ export function canSeeScopedOrder(user: OrderAccessUser, order: {
   if (
     ["OPERATION", "DOC", "CS", "FINANCE_ACCOUNTING"].includes(user.positionCode ?? "") &&
     order.lifecycle_assignee_user_ids?.includes(user.userId)
+  ) return true;
+  if (
+    user.positionCode === "WAREHOUSE" &&
+    order.warehouse_difference_handler_user_ids?.includes(user.userId)
   ) return true;
   if (order.assignee_user_id) return order.assignee_user_id === user.userId;
   return Boolean(user.positionCode && order.responsible_position_code === user.positionCode);
