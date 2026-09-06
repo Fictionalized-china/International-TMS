@@ -1205,9 +1205,27 @@ class Phase4Flow:
                             owner=role_label,
                             remediation="核对任务分配到的具体个人账号、岗位权限和页面 access.canEdit。",
                         )
-                    session.click(button.first, f"{order.order_number} {direction_title} {action_label}通过")
                     clicked_in_this_direction = True
-                    session.page.wait_for_timeout(240)
+                    try:
+                        session.click(
+                            button.first,
+                            f"{order.order_number} {direction_title} {action_label}通过",
+                        )
+                    except Exception as original:
+                        completed_card = session.page.locator(
+                            ".module-business-section"
+                        ).filter(has_text=direction_title).first.locator(
+                            ".expense-parallel-card"
+                        ).filter(has_text=action_label).filter(
+                            has_text="已完成并锁定"
+                        ).first
+                        try:
+                            session.expect_visible(
+                                completed_card,
+                                f"{order.order_number} {direction_title} {action_label}持久完成状态",
+                            )
+                        except Exception:
+                            raise original
                     self._assert_no_error_page(session)
                 else:
                     raise BusinessBlocker(

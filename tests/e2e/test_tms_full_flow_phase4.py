@@ -581,6 +581,9 @@ class Phase4SafetyTests(unittest.TestCase):
         self.assertIn("not clicked_in_this_direction and not recovery_mode", signoff)
         self.assertIn('recovery_branches_used") is True', upload)
         self.assertIn("document_evidence[order_key].append(label)", upload)
+        self.assertIn("except Exception as original:", signoff)
+        self.assertIn('has_text="已完成并锁定"', signoff)
+        self.assertIn("raise original", signoff)
 
     def test_required_upstream_expenses_are_reused_instead_of_rejected(self) -> None:
         source = (HERE / "tms_full_flow_phase4.py").read_text(encoding="utf-8")
