@@ -485,6 +485,14 @@ class Phase2SafetyTests(unittest.TestCase):
             source,
         )
 
+    def test_navigation_waits_for_visible_data_sync_before_reading_tabs(self) -> None:
+        navigation = inspect.getsource(phase2.Phase2Flow._click_navigation)
+        workload_tab = inspect.getsource(phase2.Phase2Flow._click_workload_tab)
+
+        for helper in (navigation, workload_tab):
+            self.assertIn('name="系统正在处理请求"', helper)
+            self.assertIn("expect_hidden", helper)
+
     def test_execute_is_opt_in_and_phase1_summary_is_required(self) -> None:
         args = build_parser().parse_args(["--phase1-summary", "phase1.json"])
         self.assertFalse(args.execute)

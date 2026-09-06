@@ -572,7 +572,10 @@ class Phase2Flow:
                 remediation=f"核对 {session.role} 的菜单权限和“{label}”页面服务端权限。",
             )
         session.click(link.first, f"导航到{label}")
-        session.page.wait_for_timeout(180)
+        session.expect_hidden(
+            session.page.get_by_role("progressbar", name="系统正在处理请求"),
+            f"{label}页面数据同步完成",
+        )
         self._dismiss_required_notifications(session)
         self._assert_no_error_page(session)
 
@@ -586,7 +589,10 @@ class Phase2Flow:
                 remediation="核对普通订单/配载订单页签的岗位可见规则。",
             )
         session.click(link.first, f"切换到{label}页签")
-        session.page.wait_for_timeout(150)
+        session.expect_hidden(
+            session.page.get_by_role("progressbar", name="系统正在处理请求"),
+            f"{label}页签数据同步完成",
+        )
         self._assert_no_error_page(session)
 
     @staticmethod
