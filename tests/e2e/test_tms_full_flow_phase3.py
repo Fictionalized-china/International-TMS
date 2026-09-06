@@ -639,6 +639,14 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
         self.assertIn('locator(".batch-customs-create-button")', helper)
         self.assertIn('locator(".batch-order-direct-customs-button")', helper)
 
+    def test_ftl_border_tracking_uses_the_live_batch_order_status_constraint(self) -> None:
+        route_source = (
+            HERE.parents[1] / "app" / "routes" / "admin.order-module.tsx"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("WHEN ?='assigned' AND status IN ('departed','arrived')", route_source)
+        self.assertNotIn("WHEN ?='loaded' AND status IN ('departed','arrived')", route_source)
+
 
 if __name__ == "__main__":
     unittest.main()

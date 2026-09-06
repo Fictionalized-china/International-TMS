@@ -1,6 +1,6 @@
 export type FtlBatchTrackingState = {
   batchStatus: "loading" | "departed" | "arrived";
-  orderStatus: "loaded" | "departed" | "arrived";
+  orderStatus: "assigned" | "departed" | "arrived";
   roadStatus: "loaded_waiting_exit" | "outbound_in_transit" | "overseas_arrived";
   recordsActualDeparture: boolean;
   recordsActualArrival: boolean;
@@ -16,7 +16,7 @@ export function ftlBatchTrackingState(
   if (milestoneCode === "border_arrived") {
     return {
       batchStatus: "loading",
-      orderStatus: "loaded",
+      orderStatus: "assigned",
       roadStatus: "loaded_waiting_exit",
       recordsActualDeparture: false,
       recordsActualArrival: false,

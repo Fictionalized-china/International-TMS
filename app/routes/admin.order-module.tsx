@@ -4176,7 +4176,7 @@ async function ensureFtlBatchFromTracking(
     env.DB.prepare(
       `UPDATE transport_batch_orders
        SET status=CASE
-             WHEN ?='loaded' AND status IN ('departed','arrived') THEN status
+             WHEN ?='assigned' AND status IN ('departed','arrived') THEN status
              ELSE ? END,
            updated_at=?
        WHERE batch_id=? AND organization_id=? AND status!='removed'`,

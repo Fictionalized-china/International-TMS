@@ -5,7 +5,7 @@ describe("FTL batch tracking state", () => {
   it("does not mark an FTL batch departed merely because it reached the border", () => {
     expect(ftlBatchTrackingState("border_arrived")).toEqual({
       batchStatus: "loading",
-      orderStatus: "loaded",
+      orderStatus: "assigned",
       roadStatus: "loaded_waiting_exit",
       recordsActualDeparture: false,
       recordsActualArrival: false,
