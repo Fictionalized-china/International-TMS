@@ -50,6 +50,32 @@ ORDER_NUMBER_RE = re.compile(r"\bSO[0-9A-Z-]{6,}\b")
 QUOTE_NUMBER_RE = re.compile(r"\bQT[0-9A-Z-]{6,}\b")
 ERROR_PAGE_RE = re.compile(r"请求失败|SYSTEM RECOVERY|Forbidden|Internal Server Error", re.I)
 
+
+def quote_number_from_cargo_rows(
+    cargo_marker: str,
+    row_texts: Sequence[str],
+) -> str:
+    matching_rows = [text for text in row_texts if cargo_marker in text]
+    if len(matching_rows) != 1:
+        raise ValueError(
+            f"货物标识 {cargo_marker} 应对应唯一报价行，实际为 {len(matching_rows)} 行"
+        )
+    quote_numbers = tuple(dict.fromkeys(QUOTE_NUMBER_RE.findall(matching_rows[0])))
+    if len(quote_numbers) != 1:
+        raise ValueError(
+            f"货物标识 {cargo_marker} 的报价行应包含唯一报价号，实际为 {len(quote_numbers)} 个"
+        )
+    return quote_numbers[0]
+
+
+def exact_quote_success_pattern(quote_number: str) -> re.Pattern[str]:
+    if QUOTE_NUMBER_RE.fullmatch(quote_number) is None:
+        raise ValueError(f"无效报价号：{quote_number}")
+    return re.compile(
+        rf"(?<![0-9A-Z-]){re.escape(quote_number)}(?![0-9A-Z-])"
+    )
+
+
 REQUIRED_ACCOUNT_ALIASES = (
     "hr_admin",
     "sales",
@@ -911,25 +937,33 @@ class Phase1Flow:
                 form.get_by_role("button", name="保存报价并等待客户确认"),
                 f"保存{record.key}报价",
             )
-            feedback = self._expect_success(
-                self.sales,
-                "待客户确认",
-                f"{record.key}报价保存成功提示",
+            row = self.sales.page.get_by_role("row").filter(
+                has_text=record.cargo_marker
             )
-            match = QUOTE_NUMBER_RE.search(feedback)
-            if not match:
-                row = self.sales.page.get_by_role("row").filter(
-                    has_text=record.cargo_marker
+            self.sales.expect_visible(
+                row,
+                f"{record.key}当前货物标识对应报价行",
+            )
+            try:
+                quote_number = quote_number_from_cargo_rows(
+                    record.cargo_marker,
+                    tuple(
+                        row.nth(index).inner_text()
+                        for index in range(row.count())
+                    ),
                 )
-                if row.count() > 0:
-                    match = QUOTE_NUMBER_RE.search(row.first.inner_text())
-            if not match:
+            except ValueError as error:
                 raise BusinessBlocker(
-                    f"{record.key} 报价保存成功但页面没有展示唯一报价号。",
+                    f"{record.key} 报价保存后无法绑定当前货物标识与唯一报价号：{error}",
                     owner="询价报价页面维护者",
-                    remediation="在保存成功反馈或报价台账中展示可复制的报价号。",
-                )
-            record.quote_number = match.group(0)
+                    remediation="确保报价台账仅显示一条当前货物标识记录，且该行展示唯一可复制的报价号。",
+                ) from error
+            self._expect_success(
+                self.sales,
+                exact_quote_success_pattern(quote_number),
+                f"{record.key}报价 {quote_number} 保存成功提示",
+            )
+            record.quote_number = quote_number
             self.harness.journal.register_entity("quotation", record.key, record.quote_number)
             self.harness.journal.register_entity(
                 "expected_pieces", record.key, str(record.expected_pieces)

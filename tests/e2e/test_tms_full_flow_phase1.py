@@ -11,6 +11,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
+import tms_full_flow_phase1 as phase1
 from tms_full_flow_phase1 import (
     ASSIGNMENT_SUBMIT_BUTTON_RE,
     EXPECTED_ACCOUNT_SITES,
@@ -87,6 +88,44 @@ class Phase1IdentityTests(unittest.TestCase):
         self.assertFalse(assignment_mode_requires_person("site_queue"))
         with self.assertRaisesRegex(ValueError, "未知工作流责任分配模式"):
             assignment_mode_requires_person("external_queue")
+
+
+class Phase1QuotationEvidenceTests(unittest.TestCase):
+    def test_extracts_the_quote_only_from_the_current_cargo_marker_row(self) -> None:
+        extract = getattr(phase1, "quote_number_from_cargo_rows", None)
+        self.assertTrue(callable(extract))
+
+        current_marker = "UIE2E-A002-LTL-01-货物"
+        self.assertEqual(
+            extract(
+                current_marker,
+                (
+                    "QT2026090400228 UIE2E-A001-FTL-货物 待客户确认",
+                    f"QT2026090400229 {current_marker} 待客户确认",
+                ),
+            ),
+            "QT2026090400229",
+        )
+
+    def test_rejects_ambiguous_current_cargo_rows_or_quote_numbers(self) -> None:
+        extract = getattr(phase1, "quote_number_from_cargo_rows", None)
+        self.assertTrue(callable(extract))
+
+        marker = "UIE2E-A002-LTL-01-货物"
+        with self.assertRaisesRegex(ValueError, "唯一报价行"):
+            extract(marker, (f"QT2026090400229 {marker}", f"QT2026090400230 {marker}"))
+        with self.assertRaisesRegex(ValueError, "唯一报价号"):
+            extract(marker, (f"QT2026090400229 QT2026090400230 {marker}",))
+
+    def test_success_evidence_requires_the_exact_current_quote_number(self) -> None:
+        build_pattern = getattr(phase1, "exact_quote_success_pattern", None)
+        self.assertTrue(callable(build_pattern))
+
+        pattern = build_pattern("QT2026090400229")
+        self.assertIsNotNone(pattern.search("报价 QT2026090400229 已保存为待客户确认"))
+        self.assertIsNone(pattern.search("报价 QT2026090400228 已保存为待客户确认"))
+        self.assertIsNone(pattern.search("报价已保存为待客户确认"))
+        self.assertIsNone(pattern.search("报价 QT20260904002290 已保存为待客户确认"))
 
 
 class Phase1SafetyTests(unittest.TestCase):
