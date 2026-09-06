@@ -1449,14 +1449,14 @@ class Phase3Flow:
                     form.get_by_role("button", name="保存报关单"),
                     f"保存 {order.order_number} 正式报关单",
                 )
-                self._expect_success(
-                    session,
-                    "本票报关单已保存",
-                    f"{order.order_number} 报关单保存提示",
-                )
                 table = session.page.locator("section.batch-order-documents")
                 row = table.locator("tbody tr").filter(has_text=order.order_number)
-                release = row.get_by_role("button", name="确认放行", exact=True)
+                saved_row = row.filter(has_text=declaration_number)
+                session.expect_visible(
+                    saved_row.first,
+                    f"{order.order_number} 报关单保存后的持久记录",
+                )
+                release = saved_row.get_by_role("button", name="确认放行", exact=True)
                 self._expect_visible_or_block(
                     session,
                     release,
@@ -1483,10 +1483,13 @@ class Phase3Flow:
                     release_form.get_by_role("button", name="确认放行并同步工作流"),
                     f"确认 {order.order_number} 放行",
                 )
-                self._expect_success(
-                    session,
-                    "本票报关单已保存",
-                    f"{order.order_number} 放行同步提示",
+                table = session.page.locator("section.batch-order-documents")
+                released_row = table.locator("tbody tr").filter(
+                    has_text=order.order_number
+                ).filter(has_text=declaration_number).filter(has_text="1/1 张放行")
+                session.expect_visible(
+                    released_row.first,
+                    f"{order.order_number} 报关放行后的持久状态",
                 )
                 self.artifacts.customs_declarations[key] = declaration_number
                 self.harness.journal.register_entity(

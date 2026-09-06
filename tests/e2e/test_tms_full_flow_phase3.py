@@ -454,6 +454,28 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
             helper,
         )
 
+    def test_batch_customs_uses_durable_rows_instead_of_transient_toasts(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def complete_batch_customs(")
+        end = source.index("    @staticmethod\n    def _event_time", start)
+        helper = source[start:end]
+        self.assertIn(
+            'filter(has_text=declaration_number)',
+            helper,
+        )
+        self.assertIn(
+            'filter(has_text="1/1 张放行")',
+            helper,
+        )
+        self.assertNotIn(
+            '"本票报关单已保存"',
+            helper,
+        )
+        self.assertNotIn(
+            "self._expect_success(",
+            helper,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
