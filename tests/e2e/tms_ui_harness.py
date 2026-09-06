@@ -682,12 +682,22 @@ class RoleBrowserSession:
         )
         self._authenticated = True
 
-    def click(self, locator: Any, target: str, *, sensitive: bool = False) -> Any:
+    def click(
+        self,
+        locator: Any,
+        target: str,
+        *,
+        sensitive: bool = False,
+        no_wait_after: bool = False,
+    ) -> Any:
         return self._perform(
             kind="click",
             target=target,
-            operation=lambda: locator.click(timeout=self.action_timeout_ms),
-            detail={"sensitive": sensitive},
+            operation=lambda: locator.click(
+                timeout=self.action_timeout_ms,
+                no_wait_after=no_wait_after,
+            ),
+            detail={"sensitive": sensitive, "no_wait_after": no_wait_after},
         )
 
     def fill(

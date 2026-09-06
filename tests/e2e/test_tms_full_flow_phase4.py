@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import sys
 import tempfile
 import unittest
@@ -21,6 +22,7 @@ from tms_full_flow_phase4 import (
     Phase3Handoff,
     Phase3Order,
     Phase4Artifacts,
+    Phase4Flow,
     ReconciliationArtifact,
     WorkflowFieldObservation,
     _public_preflight,
@@ -676,6 +678,13 @@ class Phase4SafetyTests(unittest.TestCase):
             helper.index('name="生成 / 更新复盘草稿"'),
             helper.index('name="最终确认并归档订单"'),
         )
+
+    def test_expense_signoff_does_not_wait_on_spa_navigation_and_waits_for_result(self) -> None:
+        source = inspect.getsource(Phase4Flow._perform_required_signoff)
+
+        self.assertIn("no_wait_after=True", source)
+        self.assertIn("提交结果可见", source)
+        self.assertIn("session.expect_visible", source)
 
     def test_execute_is_opt_in_and_phase3_summary_is_required(self) -> None:
         args = build_parser().parse_args(["--phase3-summary", "phase3.json"])

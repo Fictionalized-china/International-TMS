@@ -1243,6 +1243,18 @@ class Phase4Flow:
                         session.click(
                             button.first,
                             f"{order.order_number} {direction_title} {action_label}通过",
+                            no_wait_after=True,
+                        )
+                        completed_card = session.page.locator(
+                            ".module-business-section"
+                        ).filter(has_text=direction_title).first.locator(
+                            ".expense-parallel-card"
+                        ).filter(has_text=action_label).filter(
+                            has_text="已完成并锁定"
+                        ).first
+                        session.expect_visible(
+                            completed_card,
+                            f"{order.order_number} {direction_title} {action_label}提交结果可见",
                         )
                     except Exception as original:
                         self._assert_no_error_page(session)
