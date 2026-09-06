@@ -89,6 +89,7 @@ vi.mock("cloudflare:workers", () => ({
 import {
   checkOrderDeparture,
   checkOrderLoadPlan,
+  checkOrderPreDepartureDocuments,
 } from "./order-readiness.server";
 
 function field(
@@ -121,6 +122,19 @@ function field(
 
 function setFields(moduleCode: string, fields: Array<Record<string, unknown>>) {
   state.workflowFields.set(moduleCode, fields);
+}
+
+function frozenModule(
+  moduleCode: string,
+  stepKey: string,
+  stepName: string,
+) {
+  return {
+    ...field(moduleCode, "__frozen_workflow_field_scope__", "hidden", true, stepKey),
+    id: `${moduleCode}-scope-${stepKey}`,
+    stepName,
+    fieldType: "scope",
+  };
 }
 
 function baseOrder(overrides: Partial<OperationalOrder> = {}): OperationalOrder {
@@ -188,6 +202,36 @@ describe("order readiness follows the bound workflow field modes", () => {
     expect(result.reasons).toContain("订单尚未确定出境口岸");
   });
 
+  it("keeps required consignment gates when the frozen module legitimately spans multiple steps", async () => {
+    state.order = baseOrder({ overseas_warehouse_id: null });
+    setFields("consignment", [
+      field("consignment", "overseas_warehouse_id", "required", false, "order_creation"),
+      frozenModule("consignment", "quotation", "询价报价"),
+      frozenModule("consignment", "order_creation", "委托资料补充"),
+      frozenModule("consignment", "consignment_approval", "委托审核"),
+    ]);
+
+    const result = await checkOrderLoadPlan("org-1", "order-1");
+
+    expect(result.ready).toBe(false);
+    expect(result.reasons).toContain("订单尚未确定境外目的仓");
+    expect(result.reasons.some((reason)=>reason.includes("重复办理节点"))).toBe(false);
+  });
+
+  it("fails pre-departure documents closed when a frozen module placement is malformed", async () => {
+    setFields("transport", [
+      frozenModule("transport", "domestic_execution", "国内运输"),
+      frozenModule("transport", "duplicate_transport", "重复国内运输"),
+    ]);
+
+    const result = await checkOrderPreDepartureDocuments("org-1", "order-1");
+
+    expect(result).toEqual({
+      ready: false,
+      reasons: ["国内运输冻结工作流配置异常：模块存在重复办理节点"],
+    });
+  });
+
   it("lets an unresolved transport type pass only when that field is non-required", async () => {
     state.order = baseOrder({ business_type: "pending" });
     setFields("consignment", [
@@ -218,6 +262,43 @@ describe("order readiness follows the bound workflow field modes", () => {
     expect(optional.ready).toBe(true);
     expect(required.ready).toBe(false);
     expect(required.reasons).toContain("国内仓入库必填项未完成：warehouse_receipt");
+  });
+
+  it("uses a custom frozen warehouse target instead of the canonical warehouse step", async () => {
+    state.order = baseOrder({ warehouse_enabled: 1 });
+    setFields("warehouse", [
+      field("warehouse", "warehouse_receipt", "required", false, "custom_inbound"),
+      frozenModule("warehouse", "custom_inbound", "自定义入仓复核"),
+    ]);
+
+    const result = await checkOrderLoadPlan("org-1", "order-1");
+
+    expect(result.ready).toBe(false);
+    expect(result.reasons).toContain("“自定义入仓复核”必填项未完成：warehouse_receipt");
+  });
+
+  it("uses a custom frozen loading target instead of port_loading", async () => {
+    state.order = baseOrder({ business_type: "ftl" });
+    setFields("loading", [
+      field("loading", "loading_instruction", "required", false, "custom_loading"),
+      frozenModule("loading", "custom_loading", "自定义装车复核"),
+    ]);
+
+    const result = await checkOrderLoadPlan("org-1", "order-1");
+
+    expect(result.ready).toBe(false);
+    expect(result.reasons).toContain("“自定义装车复核”必填项未完成：loading_instruction");
+  });
+
+  it("fails closed when a frozen loading module has no valid placement", async () => {
+    setFields("loading", [
+      frozenModule("loading", "__frozen_unplaced_module__", "无有效节点"),
+    ]);
+
+    const result = await checkOrderLoadPlan("org-1", "order-1");
+
+    expect(result.ready).toBe(false);
+    expect(result.reasons).toContain("装车与出库冻结工作流配置异常：模块缺少有效办理节点");
   });
 
   it("does not query or block customs when declaration and release are optional or hidden", async () => {
@@ -537,5 +618,20 @@ describe("order readiness follows the bound workflow field modes", () => {
         expect(result).toEqual({ ready: true, reasons: [] });
       },
     );
+  });
+
+  it("uses the custom frozen customs target for departure readiness", async () => {
+    state.order = baseOrder({ customs_enabled: 1 });
+    setFields("customs", [
+      field("customs", "customs_declarations", "optional", true, "custom_customs"),
+      field("customs", "customs_release", "optional", true, "custom_customs"),
+      field("customs", "declaration_number", "required", false, "custom_customs"),
+      frozenModule("customs", "custom_customs", "自定义报关核验"),
+    ]);
+
+    const result = await checkOrderDeparture("org-1", "order-1");
+
+    expect(result.ready).toBe(false);
+    expect(result.reasons).toContain("“自定义报关核验”必填资料未补齐：declaration_number");
   });
 });

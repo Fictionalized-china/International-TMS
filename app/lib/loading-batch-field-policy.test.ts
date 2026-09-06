@@ -3,6 +3,7 @@ import {
   loadingDispatchPlanPolicyIssues,
   loadingBatchRequiredValueError,
   loadingBatchResourcePolicy,
+  resolveLoadingBatchStageGate,
   resolveLoadingBatchFieldPolicies,
   type LoadingBatchWorkflowOrder,
 } from "./loading-batch-field-policy";
@@ -132,5 +133,53 @@ describe("resolveLoadingBatchFieldPolicies", () => {
     expect(loadingDispatchPlanPolicyIssues(policies, {
       planned_arrival_at: "2026-09-09T09:00",
     })).toEqual({ requiredMissing: [], optionalMissing: [] });
+  });
+});
+
+describe("resolveLoadingBatchStageGate", () => {
+  it("opens a shared warehouse action only when every order is at its own frozen loading node", () => {
+    expect(resolveLoadingBatchStageGate([
+      {
+        ...order("order-1", []),
+        loadingStageAvailable: true,
+        loadingTargetStepKey: "custom_loading_a",
+        loadingTargetStepName: "甲类装车",
+        loadingStageReason: null,
+      },
+      {
+        ...order("order-2", []),
+        loadingStageAvailable: true,
+        loadingTargetStepKey: "custom_loading_b",
+        loadingTargetStepName: "乙类装车",
+        loadingStageReason: null,
+      },
+    ])).toEqual({
+      available: true,
+      targetStepKey: null,
+      targetStepName: "甲类装车 / 乙类装车",
+      reason: null,
+    });
+  });
+
+  it("uses the exact per-order frozen reason and fails closed when stage data is absent", () => {
+    expect(resolveLoadingBatchStageGate([
+      {
+        ...order("order-1", []),
+        loadingStageAvailable: false,
+        loadingTargetStepKey: "custom_loading",
+        loadingTargetStepName: "自定义装车",
+        loadingStageReason: "当前处于“入仓复核”，进入“自定义装车”后开放装车与出库办理",
+      },
+    ], new Map([["order-1", "SO-001"]]))).toEqual({
+      available: false,
+      targetStepKey: "custom_loading",
+      targetStepName: "自定义装车",
+      reason: "SO-001：当前处于“入仓复核”，进入“自定义装车”后开放装车与出库办理",
+    });
+
+    expect(resolveLoadingBatchStageGate([order("unknown", [])])).toMatchObject({
+      available: false,
+      reason: "unknown：无法确认冻结工作流的装车与出库办理节点，请刷新后重试",
+    });
   });
 });

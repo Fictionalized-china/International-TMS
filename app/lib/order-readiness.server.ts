@@ -9,7 +9,10 @@ import {
   loadOrderModuleWorkflowFields,
   type WorkflowFieldState,
 } from "./workflow-fields.server";
-import { runtimeWorkflowFieldPolicy } from "./workflow-field-runtime";
+import {
+  isFrozenWorkflowFieldScopeMarker,
+  runtimeWorkflowFieldPolicy,
+} from "./workflow-field-runtime";
 import type { OrderModuleCode } from "./order-modules";
 import {
   domesticTransportGateFieldLabel,
@@ -78,7 +81,10 @@ async function operationalOrder(organizationId: string, orderId: string) {
 
 type ReadinessWorkflowRequirements = {
   fields(moduleCode: OrderModuleCode): readonly WorkflowFieldState[];
+  scopedFields(moduleCode: OrderModuleCode): readonly WorkflowFieldState[];
   moduleRequired(moduleCode: OrderModuleCode): boolean;
+  targetStepName(moduleCode: OrderModuleCode): string | null;
+  configurationReasons(moduleCode: OrderModuleCode): string[];
   required(
     moduleCode: OrderModuleCode,
     fieldKey: string,
@@ -86,8 +92,14 @@ type ReadinessWorkflowRequirements = {
   ): boolean;
   missingRequired(
     moduleCode: OrderModuleCode,
-    stepKey?: string,
   ): WorkflowFieldState[];
+};
+
+const readinessModuleLabels: Partial<Record<OrderModuleCode, string>> = {
+  warehouse: "国内仓入库",
+  loading: "装车与出库",
+  transport: "国内运输",
+  customs: "报关",
 };
 
 async function workflowRequirements(
@@ -116,24 +128,126 @@ async function workflowRequirements(
     // Orders created before module-instance snapshots retain the legacy gate.
     return configured ? configured.enabled === 1 && configured.is_required === 1 : true;
   };
+  const scopes = new Map<OrderModuleCode, {
+    fields: WorkflowFieldState[];
+    targetStepName: string | null;
+    reasons: string[];
+  }>();
+  for (const moduleCode of moduleCodes) {
+    const fields = fieldsByModule.get(moduleCode) ?? [];
+    const markers = fields.filter(isFrozenWorkflowFieldScopeMarker);
+    if (!markers.length) {
+      scopes.set(moduleCode, { fields, targetStepName: null, reasons: [] });
+      continue;
+    }
+    const uniquePlacements = [...new Map(
+      markers.map((marker) => [marker.stepKey, marker]),
+    ).values()];
+    const label = readinessModuleLabels[moduleCode] ?? moduleCode;
+    if (
+      moduleCode === "consignment" &&
+      uniquePlacements.length > 1 &&
+      uniquePlacements.every((placement) => placement.stepKey !== "__frozen_unplaced_module__")
+    ) {
+      const placementKeys = new Set(uniquePlacements.map((placement) => placement.stepKey));
+      const configuredFields = fields.filter((field) => !isFrozenWorkflowFieldScopeMarker(field));
+      const misplaced = configuredFields.filter((field) => field.isActive && !placementKeys.has(field.stepKey));
+      const duplicatePlacementKeys = configuredFields
+        .map((field) => `${field.stepKey}:${field.fieldKey}`)
+        .filter((key, index, values) => values.indexOf(key) !== index);
+      const reasons = [
+        ...(misplaced.length ? ["委托冻结工作流配置异常：字段未放在委托模块办理节点"] : []),
+        ...(duplicatePlacementKeys.length ? ["委托冻结工作流配置异常：同一节点存在重复字段"] : []),
+      ];
+      scopes.set(moduleCode, {
+        fields: reasons.length ? markers : fields,
+        targetStepName: null,
+        reasons,
+      });
+      continue;
+    }
+    if (
+      uniquePlacements.length !== 1 ||
+      uniquePlacements[0].stepKey === "__frozen_unplaced_module__"
+    ) {
+      scopes.set(moduleCode, {
+        fields: markers,
+        targetStepName: null,
+        reasons: [uniquePlacements.length > 1
+          ? `${label}冻结工作流配置异常：模块存在重复办理节点`
+          : `${label}冻结工作流配置异常：模块缺少有效办理节点`],
+      });
+      continue;
+    }
+    const placement = uniquePlacements[0];
+    const misplaced = fields.filter(
+      (field) =>
+        !isFrozenWorkflowFieldScopeMarker(field) &&
+        field.isActive &&
+        field.stepKey !== placement.stepKey,
+    );
+    const duplicateKeys = [...new Set(
+      fields
+        .filter((field) => !isFrozenWorkflowFieldScopeMarker(field))
+        .map((field) => field.fieldKey)
+        .filter((fieldKey, index, values) => values.indexOf(fieldKey) !== index),
+    )];
+    const reasons = [
+      ...(misplaced.length
+        ? [`${label}冻结工作流配置异常：字段未放在“${placement.stepName}”办理节点`]
+        : []),
+      ...(duplicateKeys.length
+        ? [`${label}冻结工作流配置异常：字段重复（${duplicateKeys.join("、")}）`]
+        : []),
+    ];
+    scopes.set(moduleCode, {
+      fields: reasons.length
+        ? markers
+        : fields.filter(
+            (field) =>
+              isFrozenWorkflowFieldScopeMarker(field) ||
+              field.stepKey === placement.stepKey,
+          ),
+      targetStepName: placement.stepName,
+      reasons,
+    });
+  }
   return {
     fields(moduleCode) {
       return fieldsByModule.get(moduleCode) ?? [];
     },
+    scopedFields(moduleCode) {
+      return scopes.get(moduleCode)?.fields ?? [];
+    },
     moduleRequired,
+    targetStepName(moduleCode) {
+      return scopes.get(moduleCode)?.targetStepName ?? null;
+    },
+    configurationReasons(moduleCode) {
+      return moduleRequired(moduleCode)
+        ? scopes.get(moduleCode)?.reasons ?? []
+        : [];
+    },
     required(moduleCode, fieldKey, fallbackRequired = false) {
       if (!moduleRequired(moduleCode)) return false;
+      const scopedFields = scopes.get(moduleCode)?.fields ?? [];
+      if (moduleCode === "consignment" && scopedFields.some(isFrozenWorkflowFieldScopeMarker)) {
+        const configured = scopedFields.filter(
+          (field) => !isFrozenWorkflowFieldScopeMarker(field) && field.fieldKey === fieldKey,
+        );
+        return configured.some((field) => field.isActive && field.isRequired);
+      }
       return runtimeWorkflowFieldPolicy(
-        fieldsByModule.get(moduleCode) ?? [],
+        scopedFields,
         fieldKey,
         fallbackRequired,
       ).required;
     },
-    missingRequired(moduleCode, stepKey) {
+    missingRequired(moduleCode) {
       if (!moduleRequired(moduleCode)) return [];
-      return (fieldsByModule.get(moduleCode) ?? []).filter(
+      return (scopes.get(moduleCode)?.fields ?? []).filter(
         (field) =>
-          (!stepKey || field.stepKey === stepKey) &&
+          !isFrozenWorkflowFieldScopeMarker(field) &&
           field.isActive &&
           field.isRequired &&
           !field.present,
@@ -231,6 +345,12 @@ export async function checkOrderLoadPlan(
   ) => workflow.required(moduleCode, fieldKey, fallbackRequired);
 
   const reasons: string[] = [];
+  reasons.push(
+    ...workflow.configurationReasons("consignment"),
+    ...workflow.configurationReasons("warehouse"),
+    ...workflow.configurationReasons("loading"),
+    ...workflow.configurationReasons("transport"),
+  );
   const blocker = await env.DB.prepare(
     `SELECT module_name FROM order_module_instances
      WHERE organization_id=? AND order_id=? AND enabled=1 AND is_required=1
@@ -241,13 +361,12 @@ export async function checkOrderLoadPlan(
   if (blocker) reasons.push(`${blocker.module_name}存在当前阶段阻断或异常`);
 
   if (order.warehouse_enabled === 1) {
-    const missingWarehouseFields = workflow.missingRequired(
-      "warehouse",
-      "warehouse_receiving",
-    );
+    const missingWarehouseFields = workflow.missingRequired("warehouse");
     if (missingWarehouseFields.length) {
       reasons.push(
-        `国内仓入库必填项未完成：${missingWarehouseFields
+        `${workflow.targetStepName("warehouse")
+          ? `“${workflow.targetStepName("warehouse")}”`
+          : "国内仓入库"}必填项未完成：${missingWarehouseFields
           .map((field) => field.label)
           .join("、")}`,
       );
@@ -255,7 +374,7 @@ export async function checkOrderLoadPlan(
       // Historical orders without a workflow-field snapshot retain the former
       // warehouse receipt gate. Once a snapshot exists it is authoritative.
       const actual = await env.DB.prepare(
-        "SELECT 1 FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE r.organization_id=? AND s.order_id=? AND r.status='completed' AND r.cargo_complete=1 LIMIT 1",
+        "SELECT 1 FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id AND s.organization_id=r.organization_id WHERE r.organization_id=? AND s.order_id=? AND r.status='completed' AND r.cargo_complete=1 LIMIT 1",
       ).bind(organizationId, orderId).first();
       if (!actual) reasons.push("仓库尚未登记实际收货数量、重量和体积");
     }
@@ -286,7 +405,7 @@ export async function checkOrderLoadPlan(
     reasons.push("订单尚未确定境外目的仓");
 
   let missingLoadPlanFields = workflow
-    .missingRequired("loading", "port_loading")
+    .missingRequired("loading")
     .filter((field) => loadPlanLoadingFieldKeys.has(field.fieldKey));
   if (order.business_type === "ftl" && ftlContext.mode === "entry") {
     missingLoadPlanFields = missingLoadPlanFields.filter(
@@ -297,9 +416,9 @@ export async function checkOrderLoadPlan(
     ftlContext.mode === "submit" &&
     workflow.moduleRequired("loading")
   ) {
-    missingLoadPlanFields = workflow.fields("loading").filter(
+    missingLoadPlanFields = workflow.scopedFields("loading").filter(
       (field) =>
-        field.stepKey === "port_loading" &&
+        !isFrozenWorkflowFieldScopeMarker(field) &&
         field.isActive &&
         field.isRequired &&
         loadPlanLoadingFieldKeys.has(field.fieldKey) &&
@@ -325,8 +444,8 @@ export async function checkOrderLoadPlan(
          MAX(CASE WHEN b.planned_arrival_at IS NOT NULL THEN 1 ELSE 0 END) arrival_ready,
          MAX(CASE WHEN UPPER(v.plate_number)=UPPER(?) THEN 1 ELSE 0 END) plate_match
        FROM transport_batch_orders bo
-       JOIN transport_batches b ON b.id=bo.batch_id AND b.status!='cancelled'
-       LEFT JOIN transport_batch_vehicles v ON v.batch_id=b.id AND v.status!='cancelled'
+       JOIN transport_batches b ON b.id=bo.batch_id AND b.organization_id=bo.organization_id AND b.status!='cancelled'
+       LEFT JOIN transport_batch_vehicles v ON v.batch_id=b.id AND v.organization_id=b.organization_id AND v.status!='cancelled'
        WHERE bo.organization_id=? AND bo.order_id=? AND bo.status!='removed'
          AND (?='' OR b.id=?)
        GROUP BY b.id LIMIT 1`,
@@ -376,8 +495,9 @@ export async function checkOrderLoadPlan(
         (field) => !specificallyCheckedLtlLoadPlanFields.has(field.fieldKey),
       );
       if (otherMissingFields.length) {
+        const loadingGateName = workflow.targetStepName("loading");
         reasons.push(
-          `配载方案必填项未完成：${otherMissingFields
+          `${loadingGateName ? `“${loadingGateName}”` : "配载方案"}必填项未完成：${otherMissingFields
             .map((field) => field.label)
             .join("、")}`,
         );
@@ -425,8 +545,9 @@ export async function checkOrderLoadPlan(
       (field) => field.fieldKey !== "exit_port",
     );
     if (otherMissingFields.length) {
+      const loadingGateName = workflow.targetStepName("loading");
       reasons.push(
-        `整车装车方案必填项未完成：${otherMissingFields
+        `${loadingGateName ? `“${loadingGateName}”` : "整车装车方案"}必填项未完成：${otherMissingFields
           .map((field) => field.label)
           .join("、")}`,
       );
@@ -457,9 +578,10 @@ export async function checkOrderDeparture(
     fieldKey: string,
     fallbackRequired = false,
   ) => workflow.required(moduleCode, fieldKey, fallbackRequired);
+  reasons.push(...workflow.configurationReasons("customs"));
 
   const missingDepartureLoadingFields = workflow
-    .missingRequired("loading", "port_loading")
+    .missingRequired("loading")
     .filter((field) => !loadPlanLoadingFieldKeys.has(field.fieldKey))
     .filter(
       (field) =>
@@ -472,8 +594,9 @@ export async function checkOrderDeparture(
         field.fieldKey !== "loading_scan_confirmation",
     );
   if (missingDepartureLoadingFields.length) {
+    const loadingGateName = workflow.targetStepName("loading");
     reasons.push(
-      `装车出库必填项未完成：${missingDepartureLoadingFields
+      `${loadingGateName ? `“${loadingGateName}”` : "装车出库"}必填项未完成：${missingDepartureLoadingFields
         .map((field) => field.label)
         .join("、")}`,
     );
@@ -487,7 +610,7 @@ export async function checkOrderDeparture(
     );
     const releaseRequired = required("customs", "customs_release", true);
     const missingCustomsFields = workflow
-      .missingRequired("customs", "outbound_transport")
+      .missingRequired("customs")
       .filter((field) => field.fieldType !== "attachment");
     if (
       declarationsRequired ||
@@ -529,8 +652,9 @@ export async function checkOrderDeparture(
           !["customs_declarations", "customs_release"].includes(field.fieldKey),
       );
       if (otherMissingFields.length) {
+        const customsGateName = workflow.targetStepName("customs");
         reasons.push(
-          `报关必填资料未补齐：${otherMissingFields
+          `${customsGateName ? `“${customsGateName}”` : "报关"}必填资料未补齐：${otherMissingFields
             .map((field) => field.label)
             .join("、")}`,
         );
@@ -558,9 +682,9 @@ export async function checkOrderDeparture(
            OR EXISTS(
              SELECT 1
              FROM warehouse_dispatches d
-             JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id
-             JOIN warehouse_packages p ON p.id=di.package_id
-             JOIN shipments s ON s.id=p.shipment_id
+             JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id AND di.organization_id=d.organization_id
+             JOIN warehouse_packages p ON p.id=di.package_id AND p.organization_id=di.organization_id
+             JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id
              WHERE d.organization_id=mi.organization_id
                AND s.order_id=mi.order_id
                AND d.status='dispatched'
@@ -649,6 +773,14 @@ export async function checkOrderPreDepartureDocuments(
     "customs",
   ]);
   const preDepartureModules = new Set<OrderModuleCode>(["consignment", "transport", "customs"]);
+  const configurationReasons = [
+    ...workflow.configurationReasons("consignment"),
+    ...workflow.configurationReasons("transport"),
+    ...(order.customs_enabled === 1 ? workflow.configurationReasons("customs") : []),
+  ];
+  if (configurationReasons.length) {
+    return { ready: false, reasons: [...new Set(configurationReasons)] };
+  }
   const requiredDocuments = orderDocumentPlacements
     .filter((placement) => preDepartureDocumentTypeCodes.has(placement.documentCode))
     .filter((placement) => preDepartureModules.has(placement.moduleCode))

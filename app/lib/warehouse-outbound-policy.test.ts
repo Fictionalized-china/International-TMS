@@ -96,4 +96,30 @@ describe("resolveWarehouseOutboundWorkflowPolicy", () => {
     expect(policy.handoverNotes.mode).toBe("optional");
     expect(policy.scanConfirmation.mode).toBe("hidden");
   });
+
+  it("treats fields absent from a frozen loading node as hidden", () => {
+    const policy = resolveWarehouseOutboundWorkflowPolicyForOrders([{
+      orderId: "frozen-order",
+      usesFrozenSnapshot: true,
+      appliesToCurrentOrFuture: true,
+      loadingStageAvailable: true,
+      fields: [],
+    }]);
+
+    expect(policy.handoverNotes.mode).toBe("hidden");
+    expect(policy.scanConfirmation.mode).toBe("hidden");
+  });
+
+  it("uses catalog fallbacks only for an explicitly legacy SQL-NULL binding", () => {
+    const policy = resolveWarehouseOutboundWorkflowPolicyForOrders([{
+      orderId: "legacy-order",
+      usesFrozenSnapshot: false,
+      appliesToCurrentOrFuture: true,
+      loadingStageAvailable: true,
+      fields: [],
+    }]);
+
+    expect(policy.handoverNotes.mode).toBe("optional");
+    expect(policy.scanConfirmation.mode).toBe("required");
+  });
 });

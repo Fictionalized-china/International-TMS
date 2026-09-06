@@ -85,7 +85,35 @@ export function resolveWarehouseOutboundWorkflowPolicyForOrders(
       ],
     ]);
   }
-  return resolveWarehouseOutboundWorkflowPolicy(
-    applicableOrders.map((order) => order.fields),
-  );
+  const aggregateFrozenField = (
+    fieldKey: string,
+    fallbackMode: WorkflowFieldMode,
+  ): WarehouseOutboundFieldPolicy => {
+    const policies = applicableOrders.map((order) => {
+      const configured = order.fields.find((field) => field.fieldKey === fieldKey);
+      if (configured) {
+        return {
+          isActive: configured.isActive,
+          isRequired: configured.isActive && configured.isRequired,
+        };
+      }
+      // Only an explicit SQL-NULL legacy binding may use catalog fallbacks.
+      // A valid frozen snapshot with no row means the field is hidden.
+      if (order.usesFrozenSnapshot === true) {
+        return { isActive: false, isRequired: false };
+      }
+      return workflowFieldPolicy([], fieldKey, fallbackMode);
+    });
+    const isRequired = policies.some((policy) => policy.isActive && policy.isRequired);
+    const isActive = isRequired || policies.some((policy) => policy.isActive);
+    return {
+      isActive,
+      isRequired,
+      mode: !isActive ? "hidden" : isRequired ? "required" : "optional",
+    };
+  };
+  return {
+    handoverNotes: aggregateFrozenField("loading_handover_notes", "optional"),
+    scanConfirmation: aggregateFrozenField("loading_scan_confirmation", "required"),
+  };
 }

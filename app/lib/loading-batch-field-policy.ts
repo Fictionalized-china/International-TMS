@@ -28,9 +28,62 @@ export type LoadingBatchWorkflowField = {
 export type LoadingBatchWorkflowOrder = {
   orderId: string;
   usesFrozenSnapshot?: boolean;
+  currentStepKey?: string | null;
   appliesToCurrentOrFuture: boolean;
+  loadingStageAvailable?: boolean;
+  loadingTargetStepKey?: string | null;
+  loadingTargetStepName?: string | null;
+  loadingStageReason?: string | null;
   fields: readonly LoadingBatchWorkflowField[];
 };
+
+export type LoadingBatchStageGate = {
+  available: boolean;
+  targetStepKey: string | null;
+  targetStepName: string | null;
+  reason: string | null;
+};
+
+/**
+ * A shared warehouse write is safe only when every mounted order is at its
+ * own frozen loading node. Mixed custom step names are valid; mixed readiness
+ * is not, because a partial dispatch would split one physical load operation.
+ */
+export function resolveLoadingBatchStageGate(
+  orders: readonly LoadingBatchWorkflowOrder[],
+  orderLabels: ReadonlyMap<string, string> = new Map(),
+): LoadingBatchStageGate {
+  const targetKeys = [...new Set(
+    orders.map((order) => order.loadingTargetStepKey).filter(Boolean),
+  )] as string[];
+  const targetNames = [...new Set(
+    orders.map((order) => order.loadingTargetStepName).filter(Boolean),
+  )] as string[];
+  if (!orders.length) {
+    return {
+      available: false,
+      targetStepKey: null,
+      targetStepName: null,
+      reason: "当前装车任务没有可核验的订单，不能继续办理",
+    };
+  }
+  const blocked = orders.find((order) => order.loadingStageAvailable !== true);
+  if (blocked) {
+    const label = orderLabels.get(blocked.orderId)?.trim() || blocked.orderId;
+    return {
+      available: false,
+      targetStepKey: targetKeys.length === 1 ? targetKeys[0] : null,
+      targetStepName: targetNames.length ? targetNames.join(" / ") : null,
+      reason: `${label}：${blocked.loadingStageReason ?? "无法确认冻结工作流的装车与出库办理节点，请刷新后重试"}`,
+    };
+  }
+  return {
+    available: true,
+    targetStepKey: targetKeys.length === 1 ? targetKeys[0] : null,
+    targetStepName: targetNames.length ? targetNames.join(" / ") : null,
+    reason: null,
+  };
+}
 
 export type LoadingBatchFieldPolicy = {
   isActive: boolean;
