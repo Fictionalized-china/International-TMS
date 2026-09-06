@@ -1052,7 +1052,7 @@ function OutboundOrderDocumentWorkspace({inspection,warehouseId,busy}:{inspectio
     window.requestAnimationFrame(()=>document.getElementById(`outbound-order-tab-${next.orderId}`)?.focus());
   };
   return <section className="outbound-order-document-workspace" aria-label="按订单核验发运文件">
-    <div className="outbound-order-document-tabs" role="tablist" aria-label="装车订单">
+    <div className="outbound-order-document-tabs peer-page-tabs" role="tablist" aria-label="装车订单">
       {groups.map((group,index)=>{
         const required=group.documents.filter(document=>document.required);
         const uploaded=required.filter(document=>document.attachmentId).length;

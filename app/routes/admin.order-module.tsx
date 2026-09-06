@@ -6270,7 +6270,7 @@ function ModuleBusinessData({
   if (code === "transport")
     return (
       <div className="module-business-stack dense-module-stack transport-operation-workbench">
-        <nav className="transport-view-tabs" role="tablist" aria-label="国内运输业务分区">
+        <nav className="transport-view-tabs peer-page-tabs" role="tablist" aria-label="国内运输业务分区">
           {manage && <button
             type="button"
             id="transport-create-tab"

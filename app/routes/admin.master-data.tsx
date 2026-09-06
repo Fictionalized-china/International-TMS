@@ -323,7 +323,7 @@ export default function MasterData({
           )}
         </div>
       </header>
-      <nav className="tabs master-tabs">
+      <nav className="tabs master-tabs peer-page-tabs">
         {categories.map(([code, label]) => (
           <Link
             key={code}

@@ -443,7 +443,7 @@ function BillingTabs({ active, counts }: {
   active: BillingTab;
   counts: Record<BillingTab, number>;
 }) {
-  return <nav className="billing-workspace-tabs" aria-label="费用结算工作区">
+  return <nav className="billing-workspace-tabs peer-page-tabs" aria-label="费用结算工作区">
     {billingTabs.map((tab) => <Link
       key={tab}
       to={`/admin/billing?tab=${tab}`}
@@ -675,7 +675,7 @@ function HistoryTypeSwitch({ active }: { active: BillingHistoryType }) {
     ["invoices", "发票记录"],
     ["legacy", "升级前账单"],
   ];
-  return <nav className="billing-history-switch" aria-label="历史记录类型">
+  return <nav className="billing-history-switch peer-page-tabs" aria-label="历史记录类型">
     {items.map(([value, label]) => <Link
       key={value}
       to={`/admin/billing?tab=history&historyType=${value}`}

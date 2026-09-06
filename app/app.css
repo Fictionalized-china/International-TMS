@@ -30338,3 +30338,154 @@ html[data-motion="off"] *::after {
     max-width: 100%;
   }
 }
+
+/* Customer editor final alignment override: this must remain after legacy form rules. */
+.customer-editor-form .customer-form-grid {
+  grid-template-columns: repeat(12, minmax(0, 1fr)) !important;
+  align-items: stretch !important;
+}
+
+.customer-editor-form .customer-form-grid > .field {
+  display: grid;
+  grid-template-rows: 16px auto auto;
+  align-content: start;
+  align-items: start;
+}
+
+.customer-editor-form .customer-form-grid > .field > span {
+  min-height: 16px;
+  margin: 0 !important;
+  line-height: 16px;
+}
+
+.customer-editor-form .customer-form-grid > .field-span-3,
+.customer-editor-form .customer-form-grid > .customer-role-dropdown {
+  grid-column: span 3 !important;
+}
+.customer-editor-form .customer-form-grid > .field-span-4 { grid-column: span 4 !important; }
+.customer-editor-form .customer-form-grid > .field-span-6 { grid-column: span 6 !important; }
+.customer-editor-form .customer-form-grid > .span-all { grid-column: 1 / -1 !important; }
+
+.customer-editor-form .customer-form-grid :is(
+  input:not([type="checkbox"]):not([type="radio"]),
+  select,
+  textarea,
+  .customer-role-dropdown > summary > strong
+) {
+  width: 100% !important;
+  max-width: none !important;
+  justify-self: stretch !important;
+}
+
+.customer-editor-form .customer-role-dropdown > summary {
+  grid-template-rows: 16px var(--form-control-height, 32px) !important;
+}
+.customer-editor-form .customer-role-dropdown > summary > span {
+  min-height: 16px;
+  margin: 0 !important;
+  line-height: 16px;
+}
+.customer-editor-form .customer-role-dropdown[open] { grid-column: span 3 !important; }
+.customer-editor-form .customer-role-drawer {
+  position: static !important;
+  width: 100% !important;
+  max-width: none !important;
+  margin-top: 4px;
+}
+
+/* System-wide peer page navigation: always explain that the row switches sibling pages. */
+.peer-page-tabs {
+  position: relative !important;
+  min-width: 0;
+  padding-top: 35px !important;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid #c5d3df !important;
+  border-radius: 5px !important;
+  background: #fff !important;
+  isolation: isolate;
+}
+
+.peer-page-tabs::before {
+  content: "页面导航｜以下为同级页面，点击名称切换";
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 34px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  color: #294861;
+  border-bottom: 1px solid #c5d3df;
+  background: #eaf1f7;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  pointer-events: none;
+}
+
+.peer-page-tabs > :is(a, button) {
+  position: relative;
+  cursor: pointer;
+  transition: color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+}
+
+.peer-page-tabs > :is(a, button):not(.active):not([aria-current="page"]):not([aria-selected="true"]):hover {
+  background-color: #eef5fb !important;
+}
+
+.peer-page-tabs > :is(.active, [aria-current="page"], [aria-selected="true"]) {
+  z-index: 2;
+  color: #fff !important;
+  background: #0b2f52 !important;
+  outline: 2px solid #173f63;
+  outline-offset: -2px;
+  box-shadow: inset 0 4px 0 #ff6b3d !important;
+}
+
+.peer-page-tabs > :is(a, button):focus-visible {
+  z-index: 4;
+  outline: 3px solid #2d7dd2 !important;
+  outline-offset: -3px !important;
+}
+
+.peer-page-tabs > input:checked + label {
+  z-index: 2;
+  outline: 2px solid #173f63;
+  outline-offset: -2px;
+  box-shadow: inset 0 4px 0 #ff6b3d !important;
+}
+
+.document-scope-peer-page-tabs {
+  width: min(100%, 420px);
+}
+
+.document-scope-peer-page-tabs > .document-scope-switch {
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .peer-page-tabs > :is(a, button) { transition: none; }
+}
+
+@media (max-width: 900px) {
+  .customer-editor-form .customer-form-grid > .field-span-3,
+  .customer-editor-form .customer-form-grid > .field-span-4,
+  .customer-editor-form .customer-form-grid > .field-span-6,
+  .customer-editor-form .customer-form-grid > .customer-role-dropdown,
+  .customer-editor-form .customer-role-dropdown[open] { grid-column: span 6 !important; }
+}
+
+@media (max-width: 620px) {
+  .customer-editor-form .customer-form-grid > .field-span-3,
+  .customer-editor-form .customer-form-grid > .field-span-4,
+  .customer-editor-form .customer-form-grid > .field-span-6,
+  .customer-editor-form .customer-form-grid > .customer-role-dropdown,
+  .customer-editor-form .customer-role-dropdown[open] { grid-column: 1 / -1 !important; }
+  .peer-page-tabs { padding-top: 39px !important; }
+  .peer-page-tabs::before { height: 38px; }
+}

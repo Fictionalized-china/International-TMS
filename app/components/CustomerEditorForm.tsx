@@ -161,7 +161,7 @@ export function CustomerEditorForm({
     {customer && <input type="hidden" name="customerId" value={customer.id} />}
     {errorSummary && <div ref={errorSummaryRef} className="alert error" role="alert" tabIndex={-1}><strong>客户资料尚未保存</strong><span>{errorSummary}</span><small>已填写内容仍保留，请按提示修改后重试。</small></div>}
 
-    <div className={`customer-editor-tabs columns-${tabs.length}`} role="tablist" aria-label="客户资料分页">
+    <div className={`customer-editor-tabs peer-page-tabs columns-${tabs.length}`} role="tablist" aria-label="客户资料分页">
       {tabs.map((tab) => <button
         key={tab.id}
         type="button"
@@ -184,14 +184,14 @@ export function CustomerEditorForm({
     >
       <div className="customer-form-section-title"><strong>客户基本资料</strong><span>代码选填；识别码创建后自动生成</span></div>
       <div className="customer-form-grid customer-basic-grid">
-        <label className="field field-span-6"><span>客户全称</span><input name="name" required maxLength={120} defaultValue={values?.name ?? customer?.name}/>{errors?.name && <small className="field-error">{errors.name}</small>}</label>
+        <label className={`field ${editing ? "field-span-3" : "field-span-6"}`}><span>客户全称</span><input name="name" required maxLength={120} defaultValue={values?.name ?? customer?.name}/>{errors?.name && <small className="field-error">{errors.name}</small>}</label>
         <label className="field field-span-3"><span>客商分类</span><select name="partyCategory" required defaultValue={values?.partyCategory ?? customer?.party_category ?? "customer"}><option value="">请选择</option>{partyCategories.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select>{errors?.partyCategory && <small className="field-error">{errors.partyCategory}</small>}</label>
         <CustomerBusinessRolePicker selected={roles} error={errors?.businessRoles}/>
+        {editing && <label className="field field-span-3"><span>状态</span><select name="status" required defaultValue={values?.status ?? customer?.status ?? "active"}><option value="active">正常</option><option value="suspended">暂停</option><option value="archived">归档</option></select>{errors?.status && <small className="field-error">{errors.status}</small>}</label>}
         <label className="field field-span-3"><span>客户简称 <em>选填</em></span><input name="shortName" maxLength={80} defaultValue={values?.shortName ?? customer?.short_name ?? ""}/></label>
         <label className="field field-span-3"><span>销售负责人 <em>选填</em></span><select name="ownerId" defaultValue={values?.ownerId ?? customer?.sales_owner_user_id ?? ""}><option value="">未指定</option>{owners.map((owner) => <option key={owner.id} value={owner.id}>{owner.display_name}</option>)}</select>{errors?.ownerId && <small className="field-error">{errors.ownerId}</small>}</label>
         <label className="field field-span-3"><span>客户代码 <em>选填</em></span><input name="code" maxLength={40} placeholder="留空自动生成" defaultValue={values?.code ?? customer?.code}/>{errors?.code && <small className="field-error">{errors.code}</small>}</label>
         <label className="field field-span-3"><span>客户识别码</span><input value={customer?.identity_code ?? "创建后自动生成"} disabled/><small>{editing ? "不可修改" : "排除 O、0、1、L"}</small></label>
-        {editing && <label className="field field-span-3"><span>状态</span><select name="status" required defaultValue={values?.status ?? customer?.status ?? "active"}><option value="active">正常</option><option value="suspended">暂停</option><option value="archived">归档</option></select>{errors?.status && <small className="field-error">{errors.status}</small>}</label>}
         <label className="field span-all"><span>备注 <em>选填</em></span><textarea name="notes" rows={3} maxLength={1000} defaultValue={values?.notes ?? customer?.notes ?? ""} placeholder="填写结算习惯、沟通偏好或其他客户说明"/></label>
       </div>
     </section>

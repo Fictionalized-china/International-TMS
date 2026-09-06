@@ -1892,7 +1892,7 @@ function BatchDocumentWorkbench({batchId,orders,visibleOrders,orderPagination,ba
   return <section className="panel batch-document-workbench batch-tab-panel" id="batch-files">
     <div className="batch-detail-summary"><div><h2>报关与文件</h2></div><div className="batch-detail-summary-status"><span>{orders.length} 票订单</span><b>{ready?"门禁已通过":"存在待办资料"}</b></div></div>
     <div className="batch-detail-disclosure-body">
-    <nav className="batch-document-view-tabs" aria-label="报关与文件子页面">
+    <nav className="batch-document-view-tabs peer-page-tabs" aria-label="报关与文件子页面">
       <Link to={documentViewHref("orders")} className={documentView==="orders"?"active":""} aria-current={documentView==="orders"?"page":undefined}><strong>逐票报关办理</strong><span>{ready?"已通过":`${orders.length} 票`}</span></Link>
       <Link to={documentViewHref("shared")} className={documentView==="shared"?"active":""} aria-current={documentView==="shared"?"page":undefined}><strong>整批共用文件</strong><span>{visibleBatchDocTypes.length} 份</span></Link>
     </nav>
@@ -2271,7 +2271,7 @@ function BatchWorkspaceTabs({status,documentGateReady,loadPlanReady,warehouseRea
     {code:"exceptions",title:"异常处理",body:exceptionCount?`${exceptionCount} 项待处理 · 批次/订单/OUL`:"批次、订单或 OUL 就地登记",done:exceptionCount===0},
   ];
   const currentWork=getBatchCurrentWork({status,documentGateReady,loadPlanReady,warehouseReady,borderArrivalReady,exceptionCount});
-  return <><div className="batch-current-node"><span>当前业务节点</span><strong>{currentWork.title}</strong><small>{currentWork.hint}</small></div><nav className="batch-workspace-tabs" aria-label="配载单工作区">{tabs.map(tab=><Link key={tab.code} to={tabHref(tab.code)} className={`${activeTab===tab.code?"active":""} ${tab.done?"done":""}`.trim()} aria-current={activeTab===tab.code?"page":undefined}><span className={`status-pill ${tab.done?"success":"off"}`}>{tab.done?"已完成":"待处理"}</span><strong>{tab.title}</strong><small>{tab.body}</small></Link>)}</nav></>;
+  return <><div className="batch-current-node"><span>当前业务节点</span><strong>{currentWork.title}</strong><small>{currentWork.hint}</small></div><nav className="batch-workspace-tabs peer-page-tabs" aria-label="配载单工作区">{tabs.map(tab=><Link key={tab.code} to={tabHref(tab.code)} className={`${activeTab===tab.code?"active":""} ${tab.done?"done":""}`.trim()} aria-current={activeTab===tab.code?"page":undefined}><span className={`status-pill ${tab.done?"success":"off"}`}>{tab.done?"已完成":"待处理"}</span><strong>{tab.title}</strong><small>{tab.body}</small></Link>)}</nav></>;
 }
 
 function BatchCustomsPortal({orders,customsSummaries}:{orders:BatchOrder[];customsSummaries:CustomsSummary[]}){

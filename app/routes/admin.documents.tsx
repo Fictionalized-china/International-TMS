@@ -110,11 +110,13 @@ export default function DocumentCenter({ loaderData }: Route.ComponentProps) {
     <section className="panel"><Form method="get" action="." className="filter-bar compact document-center-filters">
       <fieldset className="document-scope-filter">
         <legend>文件归属</legend>
-        <div className="document-scope-switch" data-scope={loaderData.scope}>
-          <input id="document-scope-order" type="radio" name="scope" value="order" checked={loaderData.scope === "order"} onChange={(event) => event.currentTarget.form?.requestSubmit()} />
-          <label htmlFor="document-scope-order"><span>订单文件</span><small>{loaderData.scopeCounts.order}</small></label>
-          <input id="document-scope-batch" type="radio" name="scope" value="batch" checked={loaderData.scope === "batch"} onChange={(event) => event.currentTarget.form?.requestSubmit()} />
-          <label htmlFor="document-scope-batch"><span>配载单文件</span><small>{loaderData.scopeCounts.batch}</small></label>
+        <div className="document-scope-peer-page-tabs peer-page-tabs">
+          <div className="document-scope-switch" data-scope={loaderData.scope}>
+            <input id="document-scope-order" type="radio" name="scope" value="order" checked={loaderData.scope === "order"} onChange={(event) => event.currentTarget.form?.requestSubmit()} />
+            <label htmlFor="document-scope-order"><span>订单文件</span><small>{loaderData.scopeCounts.order}</small></label>
+            <input id="document-scope-batch" type="radio" name="scope" value="batch" checked={loaderData.scope === "batch"} onChange={(event) => event.currentTarget.form?.requestSubmit()} />
+            <label htmlFor="document-scope-batch"><span>配载单文件</span><small>{loaderData.scopeCounts.batch}</small></label>
+          </div>
         </div>
       </fieldset>
       <label className="field"><span>{loaderData.scope === "order" ? "订单号 / 文件名" : "配载单号 / 挂载订单号 / 文件名"}</span><input name="q" defaultValue={loaderData.q} placeholder="输入关键词" /></label>

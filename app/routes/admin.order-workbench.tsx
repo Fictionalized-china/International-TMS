@@ -434,7 +434,7 @@ export default function OrderWorkbench({
         </div>
       </header>
 
-      <nav className="tabs module-workbench-tabs" aria-label="业务工作台分类">
+      <nav className="tabs module-workbench-tabs peer-page-tabs" aria-label="业务工作台分类">
         {Object.entries(workspaces).map(([key, item]) => (
           <Link
             key={key}

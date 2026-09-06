@@ -228,7 +228,7 @@ export default function WarehouseIndex({ loaderData }: Route.ComponentProps) {
     <header className="page-head">
       <div><p className="prototype-kicker">WAREHOUSE WORK QUEUE</p><h1>仓库作业总表</h1><p>一行一票货；完整保留该仓待入库、在库、装车、异常与已出库记录。</p></div>
     </header>
-    <nav className="warehouse-queue-tabs" aria-label="仓库作业分类">
+    <nav className="warehouse-queue-tabs peer-page-tabs" aria-label="仓库作业分类">
       <Link className={loaderData.view === "all" ? "active" : ""} to={warehousePath("/warehouse", loaderData.warehouse.id)}>全部 <strong>{Object.values(loaderData.counts).reduce((sum, count) => sum + count, 0)}</strong></Link>
       {(Object.keys(queueMeta) as WarehouseQueue[]).map((key) => <Link key={key} className={loaderData.view === key ? "active" : ""} to={warehousePath("/warehouse", loaderData.warehouse.id, { view: key })}>{queueMeta[key].label} <strong>{loaderData.counts[key]}</strong></Link>)}
     </nav>

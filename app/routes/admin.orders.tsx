@@ -450,7 +450,7 @@ function OrderWorkloadTabs({ active, batchCount, orderCount, filters }: { active
     { key: "orders", label: "普通订单", count: orderCount },
     { key: "batches", label: "配载订单", count: batchCount },
   ];
-  return <nav className="order-workload-tabs" aria-label="普通订单与配载订单分类">
+  return <nav className="order-workload-tabs peer-page-tabs" aria-label="普通订单与配载订单分类">
     {tabs.map((tab) => <Link
       key={tab.key}
       className={active === tab.key ? "active" : ""}

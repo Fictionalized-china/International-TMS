@@ -477,7 +477,7 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
     </header>
     {actionData?.formError&&<div className="alert error">{actionData.formError}</div>}{actionData?.success&&<div className="alert success">{actionData.success}{actionData.batchId&&<> · <Link to={`/admin/loading/${actionData.batchId}`}>打开配载单</Link></>}</div>}
     <section className="panel consolidation-view-panel">
-      <nav className="consolidation-view-tabs" aria-label="货物配载页面">
+      <nav className="consolidation-view-tabs peer-page-tabs" aria-label="货物配载页面">
         <Link className={activeView==="stock"?"active":""} aria-current={activeView==="stock"?"page":undefined} to={consolidationViewHref(loaderData,"stock")} viewTransition>在库货物 <span>{loaderData.total}</span></Link>
         <Link className={activeView==="batches"?"active":""} aria-current={activeView==="batches"?"page":undefined} to={consolidationViewHref(loaderData,"batches")} viewTransition>当前配载单 <span>{loaderData.batchTotal}</span></Link>
       </nav>

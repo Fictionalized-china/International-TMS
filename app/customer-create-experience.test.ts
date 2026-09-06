@@ -19,11 +19,16 @@ describe("customer creation experience contract", () => {
   });
 
   it("keeps the customer editor on a strict left-aligned grid", () => {
-    expect(css).toContain("Customer editor alignment contract");
+    const finalAlignment = css.lastIndexOf("Customer editor final alignment override");
+    expect(finalAlignment).toBeGreaterThan(css.lastIndexOf("Final semantic-width pass"));
     expect(css).toContain(".customer-editor-form .customer-form-grid");
     expect(css).toContain("grid-template-columns: repeat(12, minmax(0, 1fr));");
     expect(css).toContain("justify-self: stretch !important;");
     expect(css).toContain("max-width: none !important;");
+    expect(css.slice(finalAlignment)).toContain("grid-column: span 6 !important;");
+    expect(css.slice(finalAlignment)).toContain(".customer-editor-form .customer-role-dropdown[open] { grid-column: span 3 !important; }");
+    expect(editor).toContain('editing ? "field-span-3" : "field-span-6"');
+    expect(editor.indexOf("{editing && <label className=\"field field-span-3\"><span>状态</span>")).toBeLessThan(editor.indexOf("<span>客户简称"));
   });
 
   it("can create a customer from the quotation form and select the created record", () => {

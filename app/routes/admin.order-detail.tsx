@@ -1240,7 +1240,7 @@ function LinearOrderDrawer({
           <div><span>TRANSPORT ORDER</span><h2>{order.order_number}</h2></div>
           <button type="button" aria-label="关闭订单资料" title="关闭" onClick={onClose}>×</button>
         </header>
-        <nav className="linear-drawer-tabs" aria-label="订单资料分类">
+        <nav className="linear-drawer-tabs peer-page-tabs" aria-label="订单资料分类">
           <DrawerTab active={activeTab === "dossier"} onClick={() => onTabChange("dossier")}>关键资料</DrawerTab>
           <DrawerTab active={activeTab === "responsibility"} onClick={() => onTabChange("responsibility")}>负责人</DrawerTab>
           <DrawerTab active={activeTab === "cargo"} onClick={() => onTabChange("cargo")}>货物与标签</DrawerTab>
@@ -1569,7 +1569,7 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, readOn
   });
   return <div id="node-fields">
     {isOrderCreation ? (
-      <nav className="linear-module-tabs" aria-label="委托资料补充分区">
+      <nav className="linear-module-tabs peer-page-tabs" aria-label="委托资料补充分区">
         {orderCreationTabs.map((tab, tabIndex) => {
           const isActive = selectedSection === tab.key;
           const tabHref = orderModuleTabHref({ orderId: data.order.id, stepKey: selectedStep.step_key, moduleCode: tab.module, section: tab.section || null });
@@ -1578,7 +1578,7 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, readOn
         })}
       </nav>
     ) : businessTabs.length > 1 ? (
-      <nav className="linear-module-tabs" aria-label="本节点业务分区">{businessTabs.map((tab, tabIndex) => {
+      <nav className="linear-module-tabs peer-page-tabs" aria-label="本节点业务分区">{businessTabs.map((tab, tabIndex) => {
         const missing = moduleHasRequiredMissing(tab.moduleCode, tab.section);
         const pendingCosts = tab.moduleCode === "costs" && costsTabHasPendingAction(tab.section, costsNeedAttention);
         const attention = pendingCosts
@@ -1774,7 +1774,7 @@ function OrderBusinessForm({
               workflowSteps={data.workflowSteps}
               workflowFormRows={data.workflowFormRows}
             />
-            <nav className="order-detail-tabs" aria-label="订单全貌内容" role="tablist">
+            <nav className="order-detail-tabs peer-page-tabs" aria-label="订单全貌内容" role="tablist">
               {tabItems.map((item) => (
                 <button
                   key={item.key}
@@ -2572,7 +2572,7 @@ function OrderCommandCenter({
           )}
         </aside>
       </div>
-      <nav className="order-mount-tabs" aria-label="订单挂载内容">
+      <nav className="order-mount-tabs peer-page-tabs" aria-label="订单挂载内容">
         {[
           ["modules", "模块", `${data.modules.filter((item) => item.enabled === 1).length} 个 · 展开查看`],
           ["dossier", "资料", "展开订单资料"],
