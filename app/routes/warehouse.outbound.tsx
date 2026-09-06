@@ -52,9 +52,9 @@ const LOADING_DOCUMENTS=loadingOrderDocumentDefinitions;
 const LOADING_DOCUMENT_PLACEHOLDERS=LOADING_DOCUMENTS.map(()=>"?").join(",");
 type LoadingDocumentCode=LoadingOrderDocumentCode;
 type Batch={id:string;batch_number:string;shipment_id:string;shipment_number:string;order_id:string;order_number:string;customer_id:string;customer_name:string;customer_identity_code:string;business_type:string;exit_port:string|null;customs_location:string|null;destination_location:string;item_count:number;total_pieces:number;total_weight_kg:number;total_volume_cbm:number;received_at:string|null;verified_at:string|null;storage_locations:string;transport_batch_id:string|null;transport_batch_number:string|null;transport_batch_approval_status:string|null;related_order_ids:string;order_count:number;order_numbers:string;customer_names:string;customer_identity_codes:string};
-type Dispatch={id:string;dispatch_number:string;batch_number:string;shipment_id:string;shipment_number:string;order_id:string;order_number:string;business_type:string;outbound_resource_confirmed:number;order_numbers:string|null;related_order_ids:string|null;customer_id:string;customer_name:string;customer_names:string|null;customer_identity_code:string;exit_port:string|null;customs_location:string|null;vehicle_plate:string;driver_name:string;driver_phone:string|null;carrier_name:string|null;notes:string|null;destination:string;status:string;item_count:number;loaded_count:number;pieces:number;weight_kg:number;volume_cbm:number;created_at:string;dispatched_at:string|null;creator_name:string|null;transport_batch_id:string|null;planned_departure_at:string|null;road_status:string|null;actual_departure_at:string|null};
+type Dispatch={id:string;dispatch_number:string;batch_number:string;shipment_id:string;shipment_number:string;order_id:string;order_number:string;business_type:string;outbound_resource_confirmed:number;order_numbers:string|null;related_order_ids:string|null;customer_id:string;customer_name:string;customer_names:string|null;customer_identity_code:string;exit_port:string|null;customs_location:string|null;vehicle_plate:string;driver_name:string;driver_phone:string|null;carrier_name:string|null;notes:string|null;destination:string;status:string;item_count:number;loaded_count:number;pieces:number;weight_kg:number;volume_cbm:number;created_at:string;dispatched_at:string|null;creator_name:string|null;transport_batch_id:string|null;planned_departure_at:string|null;planned_arrival_at:string|null;road_status:string|null;actual_departure_at:string|null};
 type Item={id:string;dispatch_id:string;order_number:string;barcode:string;package_number:string;cargo_name_cn:string|null;package_type:string|null;pieces:number;weight_kg:number|null;volume_cbm:number|null;length_cm:number|null;width_cm:number|null;height_cm:number|null;status:string;loaded_at:string|null};
-type DispatchPlan={batch_id:string|null;carrier_id:string|null;vehicle_id:string|null;vehicle_type:string|null;vehicle_plate:string|null;driver_id:string|null;driver_name:string|null;driver_phone:string|null;carrier_name:string|null;planned_departure_at:string|null};
+type DispatchPlan={batch_id:string|null;carrier_id:string|null;vehicle_id:string|null;vehicle_type:string|null;vehicle_plate:string|null;driver_id:string|null;driver_name:string|null;driver_phone:string|null;carrier_name:string|null;planned_departure_at:string|null;planned_arrival_at:string|null};
 type CarrierOption={id:string;name:string};
 type VehicleOption={id:string;carrier_id:string;carrier_name:string;plate_number:string;vehicle_type:string|null};
 type DriverOption={id:string;carrier_id:string;carrier_name:string;name:string;phone:string|null};
@@ -91,7 +91,7 @@ export async function loader({request}:Route.LoaderArgs){
       (SELECT tb.batch_number FROM transport_batch_orders bo JOIN transport_batches tb ON tb.id=bo.batch_id AND tb.organization_id=bo.organization_id WHERE bo.organization_id=o.organization_id AND bo.order_id=o.id AND bo.status!='removed' AND tb.batch_number LIKE 'PZ-%' AND tb.status IN ('planning','loading') ORDER BY tb.updated_at DESC LIMIT 1) transport_batch_number,
       (SELECT CASE WHEN tb.approval_status='approved' AND tb.operation_assignee_user_id IS NOT NULL AND tb.document_assignee_user_id IS NOT NULL THEN 'approved' WHEN tb.approval_status='approved' THEN 'assignment_incomplete' ELSE tb.approval_status END FROM transport_batch_orders bo JOIN transport_batches tb ON tb.id=bo.batch_id AND tb.organization_id=bo.organization_id WHERE bo.organization_id=o.organization_id AND bo.order_id=o.id AND bo.status!='removed' AND tb.batch_number LIKE 'PZ-%' AND tb.status IN ('planning','loading') ORDER BY tb.updated_at DESC LIMIT 1) transport_batch_approval_status
       FROM warehouse_sorting_batches b JOIN shipments s ON s.id=b.shipment_id JOIN transport_orders o ON o.id=s.order_id JOIN customers c ON c.id=s.customer_id JOIN warehouse_sorting_items i ON i.batch_id=b.id JOIN warehouse_packages bp ON bp.id=i.package_id AND bp.warehouse_id=? LEFT JOIN warehouse_locations wl ON wl.id=bp.location_id AND wl.organization_id=bp.organization_id WHERE b.organization_id=? AND b.status='verified' AND NOT EXISTS (SELECT 1 FROM warehouse_sorting_items xi JOIN warehouse_dispatch_items xdi ON xdi.package_id=xi.package_id JOIN warehouse_dispatches xd ON xd.id=xdi.dispatch_id WHERE xi.batch_id=b.id AND xd.status!='cancelled') GROUP BY b.id ORDER BY b.verified_at DESC`).bind(warehouse.id,warehouse.id,user.organizationId).all<Batch>(),
-    env.DB.prepare(`SELECT d.id,d.dispatch_number,COALESCE(tb.batch_number,b.batch_number) batch_number,d.shipment_id,s.shipment_number,o.id order_id,o.order_number,o.business_type,CASE WHEN o.business_type='ltl' AND d.transport_batch_id IS NOT NULL THEN 1 WHEN EXISTS(SELECT 1 FROM order_transport_assignments confirmed WHERE confirmed.organization_id=d.organization_id AND confirmed.order_id=o.id AND confirmed.leg_type='main' AND confirmed.status!='cancelled') THEN 1 ELSE 0 END outbound_resource_confirmed,GROUP_CONCAT(DISTINCT po.order_number) order_numbers,GROUP_CONCAT(DISTINCT ps.order_id) related_order_ids,c.id customer_id,c.name customer_name,GROUP_CONCAT(DISTINCT pc.name) customer_names,c.identity_code customer_identity_code,o.exit_port,o.customs_location,d.vehicle_plate,d.driver_name,d.driver_phone,d.carrier_name,d.notes,d.destination,d.status,COUNT(di.id) item_count,SUM(CASE WHEN di.status='loaded' THEN 1 ELSE 0 END) loaded_count,COALESCE(SUM(p.pieces),0) pieces,COALESCE(SUM(p.weight_kg),0) weight_kg,COALESCE(SUM(p.volume_cbm),0) volume_cbm,d.created_at,d.dispatched_at,u.display_name creator_name,tb.id transport_batch_id,COALESCE(tb.planned_departure_at,(SELECT a.planned_departure_at FROM order_transport_assignments a WHERE a.organization_id=d.organization_id AND a.order_id=o.id AND a.leg_type='main' AND a.status!='cancelled' ORDER BY a.updated_at DESC LIMIT 1)) planned_departure_at,tb.road_status,tb.actual_departure_at FROM warehouse_dispatches d JOIN warehouse_sorting_batches b ON b.id=d.sorting_batch_id JOIN shipments s ON s.id=d.shipment_id JOIN transport_orders o ON o.id=s.order_id LEFT JOIN transport_batches tb ON tb.id=d.transport_batch_id AND tb.organization_id=d.organization_id JOIN customers c ON c.id=s.customer_id LEFT JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id LEFT JOIN warehouse_packages p ON p.id=di.package_id LEFT JOIN shipments ps ON ps.id=p.shipment_id LEFT JOIN transport_orders po ON po.id=ps.order_id LEFT JOIN customers pc ON pc.id=po.customer_id LEFT JOIN users u ON u.id=d.created_by_user_id WHERE d.organization_id=? AND EXISTS(SELECT 1 FROM warehouse_dispatch_items wi JOIN warehouse_packages wp ON wp.id=wi.package_id WHERE wi.dispatch_id=d.id AND wp.warehouse_id=?) GROUP BY d.id ORDER BY CASE d.status WHEN 'loading' THEN 1 ELSE 2 END,d.updated_at DESC`).bind(user.organizationId,warehouse.id).all<Dispatch>(),
+    env.DB.prepare(`SELECT d.id,d.dispatch_number,COALESCE(tb.batch_number,b.batch_number) batch_number,d.shipment_id,s.shipment_number,o.id order_id,o.order_number,o.business_type,CASE WHEN o.business_type='ltl' AND d.transport_batch_id IS NOT NULL THEN 1 WHEN EXISTS(SELECT 1 FROM order_transport_assignments confirmed WHERE confirmed.organization_id=d.organization_id AND confirmed.order_id=o.id AND confirmed.leg_type='main' AND confirmed.status!='cancelled') THEN 1 ELSE 0 END outbound_resource_confirmed,GROUP_CONCAT(DISTINCT po.order_number) order_numbers,GROUP_CONCAT(DISTINCT ps.order_id) related_order_ids,c.id customer_id,c.name customer_name,GROUP_CONCAT(DISTINCT pc.name) customer_names,c.identity_code customer_identity_code,o.exit_port,o.customs_location,d.vehicle_plate,d.driver_name,d.driver_phone,d.carrier_name,d.notes,d.destination,d.status,COUNT(di.id) item_count,SUM(CASE WHEN di.status='loaded' THEN 1 ELSE 0 END) loaded_count,COALESCE(SUM(p.pieces),0) pieces,COALESCE(SUM(p.weight_kg),0) weight_kg,COALESCE(SUM(p.volume_cbm),0) volume_cbm,d.created_at,d.dispatched_at,u.display_name creator_name,tb.id transport_batch_id,COALESCE(tb.planned_departure_at,(SELECT a.planned_departure_at FROM order_transport_assignments a WHERE a.organization_id=d.organization_id AND a.order_id=o.id AND a.leg_type='main' AND a.status!='cancelled' ORDER BY a.updated_at DESC LIMIT 1)) planned_departure_at,COALESCE(tb.planned_arrival_at,(SELECT a.planned_arrival_at FROM order_transport_assignments a WHERE a.organization_id=d.organization_id AND a.order_id=o.id AND a.leg_type='main' AND a.status!='cancelled' ORDER BY a.updated_at DESC LIMIT 1)) planned_arrival_at,tb.road_status,tb.actual_departure_at FROM warehouse_dispatches d JOIN warehouse_sorting_batches b ON b.id=d.sorting_batch_id JOIN shipments s ON s.id=d.shipment_id JOIN transport_orders o ON o.id=s.order_id LEFT JOIN transport_batches tb ON tb.id=d.transport_batch_id AND tb.organization_id=d.organization_id JOIN customers c ON c.id=s.customer_id LEFT JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id LEFT JOIN warehouse_packages p ON p.id=di.package_id LEFT JOIN shipments ps ON ps.id=p.shipment_id LEFT JOIN transport_orders po ON po.id=ps.order_id LEFT JOIN customers pc ON pc.id=po.customer_id LEFT JOIN users u ON u.id=d.created_by_user_id WHERE d.organization_id=? AND EXISTS(SELECT 1 FROM warehouse_dispatch_items wi JOIN warehouse_packages wp ON wp.id=wi.package_id WHERE wi.dispatch_id=d.id AND wp.warehouse_id=?) GROUP BY d.id ORDER BY CASE d.status WHEN 'loading' THEN 1 ELSE 2 END,d.updated_at DESC`).bind(user.organizationId,warehouse.id).all<Dispatch>(),
     env.DB.prepare("SELECT id,name FROM carriers WHERE organization_id=? AND status='active' AND carrier_scope='overseas' ORDER BY name").bind(user.organizationId).all<CarrierOption>(),
     env.DB.prepare(`SELECT v.id,v.carrier_id,c.name carrier_name,v.plate_number,v.vehicle_type FROM carrier_vehicles v JOIN carriers c ON c.id=v.carrier_id AND c.organization_id=v.organization_id WHERE v.organization_id=? AND v.status='active' AND c.status='active' AND c.carrier_scope='overseas' ORDER BY c.name,v.plate_number`).bind(user.organizationId).all<VehicleOption>(),
     env.DB.prepare(`SELECT d.id,d.carrier_id,c.name carrier_name,d.name,d.phone FROM carrier_drivers d JOIN carriers c ON c.id=d.carrier_id AND c.organization_id=d.organization_id WHERE d.organization_id=? AND d.status='active' AND c.status='active' AND c.carrier_scope='overseas' ORDER BY c.name,d.name`).bind(user.organizationId).all<DriverOption>(),
@@ -137,7 +137,7 @@ export async function loader({request}:Route.LoaderArgs){
       const approvalReasons=batch.transport_batch_approval_status==="approved"?[]:["配载单待操作主管审核并同时指定整单操作与单证负责人"];
       evaluated.push({batch,readiness:{ready:blocked.length===0&&approvalReasons.length===0,reasons:[...approvalReasons,...blocked.flatMap(item=>item.reasons.map(reason=>`${item.orderNumber}：${reason}`))]}});
     }else{
-      evaluated.push({batch,readiness:await checkOrderLoadPlan(user.organizationId,batch.order_id)});
+      evaluated.push({batch,readiness:await checkOrderLoadPlan(user.organizationId,batch.order_id,undefined,undefined,{mode:"entry"})});
     }
   }
   const loadUnits=evaluated.map(item=>({...item.batch,ready:item.readiness.ready,reasons:item.readiness.reasons}));
@@ -266,7 +266,7 @@ export async function action({request}:Route.ActionArgs){
   }
   if(intent==="create"){
     const batchId=valueOf(form,"batchId"),orderNumber=valueOf(form,"orderNumber").trim(),customerIdentityCode=valueOf(form,"customerIdentityCode").trim().toUpperCase(),notes=valueOf(form,"notes");
-    const carrierId=valueOf(form,"outboundCarrierId"),vehicleId=valueOf(form,"outboundVehicleId"),driverId=valueOf(form,"outboundDriverId"),plannedDepartureAt=valueOf(form,"plannedDepartureAt");
+    const carrierId=valueOf(form,"outboundCarrierId"),vehicleId=valueOf(form,"outboundVehicleId"),driverId=valueOf(form,"outboundDriverId"),plannedDepartureAt=valueOf(form,"plannedDepartureAt"),plannedArrivalAt=valueOf(form,"plannedArrivalAt");
     const requestedExitPort=valueOf(form,"exitPort").trim(),requestedCustomsLocation=valueOf(form,"customsLocation").trim();
     if(!batchId&&!orderNumber)return{formError:"请输入订单号或选择货齐入库记录"};
     if(customerIdentityCode&&!isValidCustomerIdentityCode(customerIdentityCode))return{formError:"客户识别码应为5位字母与数字混合，且不包含 O、0、1、L"};
@@ -321,16 +321,17 @@ export async function action({request}:Route.ActionArgs){
     if(inspection.notesActive&&inspection.notesRequired&&!notes.trim())return rejectCreate("请填写装车交接备注");
     if(batch.business_type==="ftl"){
       const resourceError=validateFtlOutboundResourceSelection({
-        carrierId,vehicleId,driverId,plannedDepartureAt,
+        carrierId,vehicleId,driverId,plannedDepartureAt,plannedArrivalAt,
         policies:{
           ...inspection.executionPolicy.resources,
           plannedDeparture:inspection.executionPolicy.batchFields.planned_exit_at,
+          plannedArrival:inspection.executionPolicy.batchFields.planned_arrival_at,
         },
       });
       if(resourceError)return rejectCreate(resourceError);
     }
     const planned=batch.business_type==="ftl"
-      ?await resolveFtlDispatchPlan(user.organizationId,{carrierId,vehicleId,driverId,plannedDepartureAt},inspection.executionPolicy.batchFields)
+      ?await resolveFtlDispatchPlan(user.organizationId,{carrierId,vehicleId,driverId,plannedDepartureAt,plannedArrivalAt},inspection.executionPolicy.batchFields)
       :await resolveDispatchPlan(user.organizationId,batch.order_id,batch.business_type,inspection.batch.transport_batch_id,inspection.executionPolicy.batchFields);
     if("error" in planned)return rejectCreate(planned.error);
     const plate=planned.vehicle_plate?.trim().toUpperCase()||"",driver=planned.driver_name?.trim()||"",phone=planned.driver_phone?.trim()||"",carrier=planned.carrier_name?.trim()||"",destination=batch.destination_location;
@@ -339,7 +340,19 @@ export async function action({request}:Route.ActionArgs){
     // Optional gaps are audit context, not gates. Hidden fields are excluded by
     // dispatchPlanPolicyIssues and cannot be submitted by the action above.
     const resourceDifferences=planIssues.differences;
-    const loadReadiness=await checkOrderLoadPlan(user.organizationId,batch.order_id,planned.batch_id?plate:undefined,planned.batch_id);
+    const loadReadiness=batch.business_type==="ftl"
+      ?await checkOrderLoadPlan(user.organizationId,batch.order_id,undefined,null,{mode:"submit",values:{
+        exitPort:exitPort||null,
+        customsLocation:customsLocation||null,
+        carrierId:planned.carrier_id,
+        vehicleType:planned.vehicle_type,
+        vehiclePlate:plate||null,
+        driverName:driver||null,
+        driverPhone:phone||null,
+        plannedDepartureAt:planned.planned_departure_at,
+        plannedArrivalAt:planned.planned_arrival_at,
+      }})
+      :await checkOrderLoadPlan(user.organizationId,batch.order_id,planned.batch_id?plate:undefined,planned.batch_id);
     if(!loadReadiness.ready)return rejectCreate(`暂不能创建装车任务：${loadReadiness.reasons.join("；")}`);
     if(planned.batch_id){
       const readiness=await checkBatchWarehouseReadiness(user.organizationId,warehouse.id,planned.batch_id,plate);
@@ -364,8 +377,8 @@ export async function action({request}:Route.ActionArgs){
     ]:[];
     const mainAssignmentStatements=batch.business_type==="ftl"?[
       env.DB.prepare("UPDATE order_transport_assignments SET status='cancelled',updated_at=? WHERE organization_id=? AND order_id=? AND leg_type='main' AND status!='cancelled'").bind(now,user.organizationId,batch.order_id),
-      env.DB.prepare(`INSERT INTO order_transport_assignments(id,organization_id,order_id,leg_type,carrier_id,carrier_name,vehicle_type,plate_number,driver_name,driver_phone,freight_amount,freight_currency,origin_location,destination_location,border_port,planned_departure_at,loading_requirements,notes,status,created_by_user_id,created_at,updated_at)
-        VALUES(?,?,?,'main',?,?,?,?,?,?,0,'CNY',?,?,?,?,?,'仓库装车前确认并同步管理端','planned',?,?,?)`).bind(mainAssignmentId,user.organizationId,batch.order_id,planned.carrier_id,carrier,planned.vehicle_type,plate,driver,phone||null,warehouse.name,batch.destination_location,exitPort||null,planned.planned_departure_at,"整车出境运输资源由仓库装车前确认",user.userId,now,now),
+      env.DB.prepare(`INSERT INTO order_transport_assignments(id,organization_id,order_id,leg_type,carrier_id,carrier_name,vehicle_type,plate_number,driver_name,driver_phone,freight_amount,freight_currency,origin_location,destination_location,border_port,planned_departure_at,planned_arrival_at,loading_requirements,notes,status,created_by_user_id,created_at,updated_at)
+        VALUES(?,?,?,'main',?,?,?,?,?,?,0,'CNY',?,?,?,?,?,?,'仓库装车前确认并同步管理端','planned',?,?,?)`).bind(mainAssignmentId,user.organizationId,batch.order_id,planned.carrier_id,carrier,planned.vehicle_type,plate,driver,phone||null,warehouse.name,batch.destination_location,exitPort||null,planned.planned_departure_at,planned.planned_arrival_at,"整车出境运输资源由仓库装车前确认",user.userId,now,now),
     ]:[];
     const workflowFieldStatements=batch.business_type==="ftl"?[
       env.DB.prepare("UPDATE transport_orders SET exit_port=?,customs_location=?,updated_at=? WHERE organization_id=? AND id=?")
@@ -388,7 +401,7 @@ export async function action({request}:Route.ActionArgs){
       }catch(error){console.error("dispatch order progress sync failed",error);postCreateWarnings.push(`${group.orderNumber} 进度待重试`)}
     }
     try{
-      await writeAudit({request,action:"warehouse.dispatch.create",resourceType:"warehouse_dispatch",resourceId:dispatchId,organizationId:user.organizationId,actorUserId:user.userId,metadata:{number,batchId:batch.id,transportBatchId:planned.batch_id,orderNumbers:inspection.documentGroups.map(group=>group.orderNumber),businessType:batch.business_type,exitPort,customsLocation,carrier,plate,driver,plannedDepartureAt:planned.planned_departure_at,resourceSource:planned.batch_id?"ltl_batch":"warehouse_ftl_confirmation",resourcePolicyDifferences:resourceDifferences}});
+      await writeAudit({request,action:"warehouse.dispatch.create",resourceType:"warehouse_dispatch",resourceId:dispatchId,organizationId:user.organizationId,actorUserId:user.userId,metadata:{number,batchId:batch.id,transportBatchId:planned.batch_id,orderNumbers:inspection.documentGroups.map(group=>group.orderNumber),businessType:batch.business_type,exitPort,customsLocation,carrier,plate,driver,plannedDepartureAt:planned.planned_departure_at,plannedArrivalAt:planned.planned_arrival_at,resourceSource:planned.batch_id?"ltl_batch":"warehouse_ftl_confirmation",resourcePolicyDifferences:resourceDifferences}});
     }catch(error){console.error("dispatch audit write failed",error);postCreateWarnings.push("审计记录待重试")}
     const sourceUrl=new URL(request.url),redirectParams=new URLSearchParams();
     for(const key of ["warehouseId","returnTo","orderId"]){const value=sourceUrl.searchParams.get(key);if(value)redirectParams.set(key,value);}
@@ -400,8 +413,9 @@ export async function action({request}:Route.ActionArgs){
   const dispatchId=valueOf(form,"dispatchId");
   let dispatch=await env.DB.prepare(`SELECT d.id,d.shipment_id,s.order_id,o.business_type,o.exit_port,o.customs_location,d.status,d.dispatch_number,d.vehicle_plate,d.driver_name,d.driver_phone,d.carrier_name,d.destination,d.transport_batch_id,
       COALESCE((SELECT a.vehicle_type FROM order_transport_assignments a WHERE a.organization_id=d.organization_id AND a.order_id=s.order_id AND a.leg_type='main' AND a.status!='cancelled' ORDER BY a.updated_at DESC LIMIT 1),(SELECT v.vehicle_type FROM transport_batch_vehicles v WHERE v.organization_id=d.organization_id AND v.batch_id=d.transport_batch_id AND v.status!='cancelled' ORDER BY v.created_at LIMIT 1)) vehicle_type,
-      COALESCE((SELECT a.planned_departure_at FROM order_transport_assignments a WHERE a.organization_id=d.organization_id AND a.order_id=s.order_id AND a.leg_type='main' AND a.status!='cancelled' ORDER BY a.updated_at DESC LIMIT 1),(SELECT b.planned_departure_at FROM transport_batches b WHERE b.organization_id=d.organization_id AND b.id=d.transport_batch_id)) planned_departure_at
-    FROM warehouse_dispatches d JOIN shipments s ON s.id=d.shipment_id JOIN transport_orders o ON o.id=s.order_id AND o.organization_id=d.organization_id WHERE d.id=? AND d.organization_id=? AND EXISTS(SELECT 1 FROM warehouse_dispatch_items wi JOIN warehouse_packages wp ON wp.id=wi.package_id WHERE wi.dispatch_id=d.id AND wp.warehouse_id=?)`).bind(dispatchId,user.organizationId,warehouse.id).first<{id:string;shipment_id:string;order_id:string;business_type:string;exit_port:string|null;customs_location:string|null;status:string;dispatch_number:string;vehicle_plate:string;vehicle_type:string|null;driver_name:string;driver_phone:string|null;carrier_name:string|null;destination:string;transport_batch_id:string|null;planned_departure_at:string|null}>();
+      COALESCE((SELECT a.planned_departure_at FROM order_transport_assignments a WHERE a.organization_id=d.organization_id AND a.order_id=s.order_id AND a.leg_type='main' AND a.status!='cancelled' ORDER BY a.updated_at DESC LIMIT 1),(SELECT b.planned_departure_at FROM transport_batches b WHERE b.organization_id=d.organization_id AND b.id=d.transport_batch_id)) planned_departure_at,
+      COALESCE((SELECT a.planned_arrival_at FROM order_transport_assignments a WHERE a.organization_id=d.organization_id AND a.order_id=s.order_id AND a.leg_type='main' AND a.status!='cancelled' ORDER BY a.updated_at DESC LIMIT 1),(SELECT b.planned_arrival_at FROM transport_batches b WHERE b.organization_id=d.organization_id AND b.id=d.transport_batch_id)) planned_arrival_at
+    FROM warehouse_dispatches d JOIN shipments s ON s.id=d.shipment_id JOIN transport_orders o ON o.id=s.order_id AND o.organization_id=d.organization_id WHERE d.id=? AND d.organization_id=? AND EXISTS(SELECT 1 FROM warehouse_dispatch_items wi JOIN warehouse_packages wp ON wp.id=wi.package_id WHERE wi.dispatch_id=d.id AND wp.warehouse_id=?)`).bind(dispatchId,user.organizationId,warehouse.id).first<{id:string;shipment_id:string;order_id:string;business_type:string;exit_port:string|null;customs_location:string|null;status:string;dispatch_number:string;vehicle_plate:string;vehicle_type:string|null;driver_name:string;driver_phone:string|null;carrier_name:string|null;destination:string;transport_batch_id:string|null;planned_departure_at:string|null;planned_arrival_at:string|null}>();
   if(!dispatch)return{formError:"装车任务不存在"};
   const executionPolicy=["route_fields","schedule","load","dispatch"].includes(intent)
     ?await loadDispatchWorkflowPolicy(user.organizationId,dispatch.id)
@@ -480,6 +494,7 @@ export async function action({request}:Route.ActionArgs){
         vehicle_plate:dispatch.vehicle_plate,driver_id:null,driver_name:dispatch.driver_name,
         driver_phone:dispatch.driver_phone,carrier_name:dispatch.carrier_name,
         planned_departure_at:dispatch.planned_departure_at,
+        planned_arrival_at:dispatch.planned_arrival_at,
       } satisfies DispatchPlan;
     if("error" in currentPlan)return{formError:currentPlan.error};
     const planIssues=dispatchPlanPolicyIssues(executionPolicy.batchFields,currentPlan);
@@ -827,6 +842,7 @@ function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,borde
   const carrierDrivers=outboundResources.drivers.filter(driver=>driver.carrier_id===carrierId);
   const resourcePolicy=inspection?.executionPolicy.resources;
   const plannedDeparturePolicy=inspection?.executionPolicy.batchFields.planned_exit_at;
+  const plannedArrivalPolicy=inspection?.executionPolicy.batchFields.planned_arrival_at;
   const requiredOutboundMasterDataReady=!resourcePolicy||(
     (!resourcePolicy.carrier.isRequired||outboundResources.carriers.length>0)&&
     (!resourcePolicy.vehicle.isRequired||outboundResources.vehicles.length>0)&&
@@ -859,6 +875,7 @@ function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,borde
               {resourcePolicy?.driver.isActive&&<label className="field"><span>出境司机{resourcePolicy.driver.isRequired?" *":"（选填）"}</span><select name="outboundDriverId" value={driverId} required={resourcePolicy.driver.isRequired} disabled={!carrierId} onChange={event=>setDriverId(event.target.value)}><option value="">{carrierId?"请选择该承运商司机":"请先选择承运商"}</option>{carrierDrivers.map(driver=><option key={driver.id} value={driver.id}>{driver.name} · {driver.phone||"电话未登记"}</option>)}</select></label>}
               {resourcePolicy?.vehicle.isActive&&<label className="field"><span>出境车辆{resourcePolicy.vehicle.isRequired?" *":"（选填）"}</span><select name="outboundVehicleId" value={vehicleId} required={resourcePolicy.vehicle.isRequired} disabled={!carrierId} onChange={event=>setVehicleId(event.target.value)}><option value="">{carrierId?"请选择该承运商车辆":"请先选择承运商"}</option>{carrierVehicles.map(vehicle=><option key={vehicle.id} value={vehicle.id}>{vehicle.plate_number} · {vehicle.vehicle_type||"车型未登记"}</option>)}</select></label>}
               {plannedDeparturePolicy?.isActive&&<label className="field"><span>计划出境发车时间{plannedDeparturePolicy.isRequired?" *":"（选填）"}</span><input type="datetime-local" name="plannedDepartureAt" required={plannedDeparturePolicy.isRequired}/></label>}
+              {plannedArrivalPolicy?.isActive&&<label className="field"><span>计划境外到仓时间{plannedArrivalPolicy.isRequired?" *":"（选填）"}</span><input type="datetime-local" name="plannedArrivalAt" required={plannedArrivalPolicy.isRequired}/></label>}
             </div>
           </div>
         </section>}
@@ -1130,7 +1147,7 @@ function dispatchPlanPolicyIssues(policies:LoadingBatchFieldPolicies,plan:Dispat
 }
 async function resolveDispatchPlan(organizationId:string,orderId:string,businessType:string,transportBatchId?:string|null,policies?:LoadingBatchFieldPolicies):Promise<DispatchPlan|{error:string}>{
   if(businessType==="ltl"){
-    const rows=await env.DB.prepare(`SELECT b.id batch_id,COALESCE(v.carrier_id,b.carrier_id) carrier_id,v.id vehicle_id,v.vehicle_type,v.vehicle_master_id,v.driver_master_id driver_id,v.plate_number vehicle_plate,v.driver_name,v.driver_phone,COALESCE(vc.name,bc.name) carrier_name,b.planned_departure_at
+    const rows=await env.DB.prepare(`SELECT b.id batch_id,COALESCE(v.carrier_id,b.carrier_id) carrier_id,v.id vehicle_id,v.vehicle_type,v.vehicle_master_id,v.driver_master_id driver_id,v.plate_number vehicle_plate,v.driver_name,v.driver_phone,COALESCE(vc.name,bc.name) carrier_name,b.planned_departure_at,b.planned_arrival_at
       FROM transport_batch_orders bo
       JOIN transport_batches b ON b.id=bo.batch_id AND b.status IN ('planning','loading') AND b.approval_status='approved' AND b.operation_assignee_user_id IS NOT NULL AND b.document_assignee_user_id IS NOT NULL
       LEFT JOIN transport_batch_vehicles v ON v.batch_id=b.id AND v.organization_id=b.organization_id AND v.status!='cancelled'
@@ -1152,7 +1169,7 @@ async function resolveDispatchPlan(organizationId:string,orderId:string,business
 }
 async function resolveFtlDispatchPlan(
   organizationId:string,
-  input:{carrierId:string;vehicleId:string;driverId:string;plannedDepartureAt:string},
+  input:{carrierId:string;vehicleId:string;driverId:string;plannedDepartureAt:string;plannedArrivalAt:string},
   policies:LoadingBatchFieldPolicies,
 ):Promise<DispatchPlan|{error:string}>{
   const carrierId=input.carrierId.trim(),vehicleId=input.vehicleId.trim(),driverId=input.driverId.trim();
@@ -1160,6 +1177,7 @@ async function resolveFtlDispatchPlan(
     batch_id:null,carrier_id:null,vehicle_id:null,vehicle_type:null,vehicle_plate:null,
     driver_id:null,driver_name:null,driver_phone:null,carrier_name:null,
     planned_departure_at:policies.planned_exit_at.isActive?input.plannedDepartureAt.trim()||null:null,
+    planned_arrival_at:policies.planned_arrival_at.isActive?input.plannedArrivalAt.trim()||null:null,
   };
   if(!carrierId){
     if(vehicleId||driverId)return{error:"请先选择承运商，再选择其名下车辆或司机"};

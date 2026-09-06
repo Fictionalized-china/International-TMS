@@ -24,6 +24,23 @@ export type ReadinessResult = {
   reasons: string[];
 };
 
+export type FtlLoadPlanSubmissionValues = {
+  exitPort: string | null;
+  customsLocation: string | null;
+  carrierId: string | null;
+  vehicleType: string | null;
+  vehiclePlate: string | null;
+  driverName: string | null;
+  driverPhone: string | null;
+  plannedDepartureAt: string | null;
+  plannedArrivalAt: string | null;
+};
+
+export type FtlLoadPlanContext =
+  | { mode: "strict" }
+  | { mode: "entry" }
+  | { mode: "submit"; values: FtlLoadPlanSubmissionValues };
+
 const LOAD_PLAN_GATE_MODULES = [
   "consignment",
   "cargo",
@@ -165,11 +182,39 @@ const specificallyCheckedLtlLoadPlanFields = new Set([
   "planned_arrival_at",
 ]);
 
+const ftlCreationFieldValueKeys = {
+  exit_port: "exitPort",
+  customs_location: "customsLocation",
+  main_carrier_id: "carrierId",
+  main_vehicle_type: "vehicleType",
+  main_plate_number: "vehiclePlate",
+  main_driver_name: "driverName",
+  main_driver_phone: "driverPhone",
+  planned_exit_at: "plannedDepartureAt",
+  planned_arrival_at: "plannedArrivalAt",
+} as const satisfies Record<string, keyof FtlLoadPlanSubmissionValues>;
+
+function isFtlCreationField(
+  fieldKey: string,
+): fieldKey is keyof typeof ftlCreationFieldValueKeys {
+  return fieldKey in ftlCreationFieldValueKeys;
+}
+
+function submittedFtlCreationFieldPresent(
+  context: Extract<FtlLoadPlanContext, { mode: "submit" }>,
+  fieldKey: keyof typeof ftlCreationFieldValueKeys,
+) {
+  return Boolean(
+    String(context.values[ftlCreationFieldValueKeys[fieldKey]] ?? "").trim(),
+  );
+}
+
 export async function checkOrderLoadPlan(
   organizationId: string,
   orderId: string,
   vehiclePlate?: string,
   transportBatchId?: string | null,
+  context: FtlLoadPlanContext = { mode: "strict" },
 ): Promise<ReadinessResult> {
   const order = await operationalOrder(organizationId, orderId);
   if (!order) return { ready: false, reasons: ["订单不存在"] };
@@ -221,10 +266,17 @@ export async function checkOrderLoadPlan(
     required("consignment", "business_type", true)
   )
     reasons.push("已接受报价尚未确定本单是整车还是拼车");
+  const ftlContext = order.business_type === "ftl" ? context : { mode: "strict" as const };
+  const loadingExitPortMissing = required("loading", "exit_port", true) && (
+    ftlContext.mode === "entry"
+      ? false
+      : ftlContext.mode === "submit"
+        ? !submittedFtlCreationFieldPresent(ftlContext, "exit_port")
+        : !order.exit_port
+  );
   if (
-    !order.exit_port &&
-    (required("consignment", "exit_port", true) ||
-      required("loading", "exit_port", true))
+    (!order.exit_port && required("consignment", "exit_port", true)) ||
+    loadingExitPortMissing
   )
     reasons.push("订单尚未确定出境口岸");
   if (
@@ -233,9 +285,29 @@ export async function checkOrderLoadPlan(
   )
     reasons.push("订单尚未确定境外目的仓");
 
-  const missingLoadPlanFields = workflow
+  let missingLoadPlanFields = workflow
     .missingRequired("loading", "port_loading")
     .filter((field) => loadPlanLoadingFieldKeys.has(field.fieldKey));
+  if (order.business_type === "ftl" && ftlContext.mode === "entry") {
+    missingLoadPlanFields = missingLoadPlanFields.filter(
+      (field) => !isFtlCreationField(field.fieldKey),
+    );
+  } else if (
+    order.business_type === "ftl" &&
+    ftlContext.mode === "submit" &&
+    workflow.moduleRequired("loading")
+  ) {
+    missingLoadPlanFields = workflow.fields("loading").filter(
+      (field) =>
+        field.stepKey === "port_loading" &&
+        field.isActive &&
+        field.isRequired &&
+        loadPlanLoadingFieldKeys.has(field.fieldKey) &&
+        (isFtlCreationField(field.fieldKey)
+          ? !submittedFtlCreationFieldPresent(ftlContext, field.fieldKey)
+          : !field.present),
+    );
+  }
 
   if (order.business_type === "ltl") {
     const plan = await env.DB.prepare(

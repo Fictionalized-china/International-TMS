@@ -107,6 +107,7 @@ export type LoadingDispatchPlanValues = {
   driver_name?: string | null;
   driver_phone?: string | null;
   planned_departure_at?: string | null;
+  planned_arrival_at?: string | null;
 };
 
 const loadingDispatchPlanFields = [
@@ -116,6 +117,7 @@ const loadingDispatchPlanFields = [
   ["main_driver_name", "出境司机姓名", "driver_name"],
   ["main_driver_phone", "出境司机电话", "driver_phone"],
   ["planned_exit_at", "计划出境发车时间", "planned_departure_at"],
+  ["planned_arrival_at", "计划境外到仓时间", "planned_arrival_at"],
 ] as const satisfies readonly (readonly [
   LoadingBatchFieldKey,
   string,

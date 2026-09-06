@@ -107,7 +107,30 @@ describe("resolveLoadingBatchFieldPolicies", () => {
       optionalMissing: [
         { fieldKey: "main_vehicle_type", label: "出境车型" },
         { fieldKey: "main_driver_name", label: "出境司机姓名" },
+        { fieldKey: "planned_arrival_at", label: "计划境外到仓时间" },
       ],
     });
+  });
+
+  it("includes a required planned arrival in dispatch-plan policy issues", () => {
+    const policies = resolveLoadingBatchFieldPolicies([
+      order("one", [
+        { fieldKey: "main_carrier_id", isActive: false, isRequired: false },
+        { fieldKey: "main_vehicle_type", isActive: false, isRequired: false },
+        { fieldKey: "main_plate_number", isActive: false, isRequired: false },
+        { fieldKey: "main_driver_name", isActive: false, isRequired: false },
+        { fieldKey: "main_driver_phone", isActive: false, isRequired: false },
+        { fieldKey: "planned_exit_at", isActive: false, isRequired: false },
+        { fieldKey: "planned_arrival_at", isActive: true, isRequired: true },
+      ]),
+    ]);
+
+    expect(loadingDispatchPlanPolicyIssues(policies, {})).toEqual({
+      requiredMissing: ["计划境外到仓时间"],
+      optionalMissing: [],
+    });
+    expect(loadingDispatchPlanPolicyIssues(policies, {
+      planned_arrival_at: "2026-09-09T09:00",
+    })).toEqual({ requiredMissing: [], optionalMissing: [] });
   });
 });

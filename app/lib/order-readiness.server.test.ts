@@ -379,4 +379,163 @@ describe("order readiness follows the bound workflow field modes", () => {
     );
     expect(blockerQuery).toContain("is_required=1");
   });
+
+  describe("full-truck warehouse creation context", () => {
+    const completeSubmission = {
+      exitPort: "HORGOS",
+      customsLocation: "URUMQI",
+      carrierId: "carrier-1",
+      vehicleType: "厢式货车",
+      vehiclePlate: "粤B12345",
+      driverName: "测试司机",
+      driverPhone: "13800000000",
+      plannedDepartureAt: "2026-09-06T09:00",
+      plannedArrivalAt: "2026-09-09T09:00",
+    };
+
+    const creationFieldModes = (
+      mode: "required" | "optional" | "hidden" = "required",
+    ) => [
+      field("loading", "exit_port", mode, false),
+      field("loading", "customs_location", mode, false),
+      field("loading", "main_carrier_id", mode, false),
+      field("loading", "main_vehicle_type", mode, false),
+      field("loading", "main_plate_number", mode, false),
+      field("loading", "main_driver_name", mode, false),
+      field("loading", "main_driver_phone", mode, false),
+      field("loading", "planned_exit_at", mode, false),
+      field("loading", "planned_arrival_at", mode, false),
+    ];
+
+    beforeEach(() => {
+      state.order = baseOrder({ business_type: "ftl", exit_port: null });
+      setFields("loading", creationFieldModes());
+    });
+
+    it("keeps strict readiness as the default for existing callers", async () => {
+      const result = await checkOrderLoadPlan("org-1", "order-1");
+
+      expect(result.ready).toBe(false);
+      expect(result.reasons).toContain("订单尚未确定出境口岸");
+      expect(result.reasons.some((reason) => reason.includes("整车装车方案必填项未完成")))
+        .toBe(true);
+    });
+
+    it("lets the warehouse enter an FTL creation page when every blocker is supplied on that page", async () => {
+      const result = await checkOrderLoadPlan(
+        "org-1",
+        "order-1",
+        undefined,
+        undefined,
+        { mode: "entry" },
+      );
+
+      expect(result).toEqual({ ready: true, reasons: [] });
+    });
+
+    it("does not defer a required consignment exit port at FTL creation entry", async () => {
+      setFields("consignment", [
+        field("consignment", "business_type", "optional", true, "order_creation"),
+        field("consignment", "exit_port", "required", false, "order_creation"),
+        field("consignment", "overseas_warehouse_id", "optional", true, "order_creation"),
+      ]);
+
+      const result = await checkOrderLoadPlan(
+        "org-1",
+        "order-1",
+        undefined,
+        undefined,
+        { mode: "entry" },
+      );
+
+      expect(result).toEqual({
+        ready: false,
+        reasons: ["订单尚未确定出境口岸"],
+      });
+    });
+
+    it("does not defer a loading field that the FTL creation page does not provide", async () => {
+      setFields("loading", [
+        ...creationFieldModes(),
+        field("loading", "loading_instruction", "required", false),
+      ]);
+
+      const result = await checkOrderLoadPlan(
+        "org-1",
+        "order-1",
+        undefined,
+        undefined,
+        { mode: "entry" },
+      );
+
+      expect(result).toEqual({
+        ready: false,
+        reasons: ["整车装车方案必填项未完成：loading_instruction"],
+      });
+    });
+
+    it("prevalidates an FTL submit from the current resolved values instead of stale database presence", async () => {
+      const result = await checkOrderLoadPlan(
+        "org-1",
+        "order-1",
+        undefined,
+        undefined,
+        { mode: "submit", values: completeSubmission },
+      );
+
+      expect(result).toEqual({ ready: true, reasons: [] });
+    });
+
+    it.each([
+      ["exitPort", "exit_port"],
+      ["customsLocation", "customs_location"],
+      ["carrierId", "main_carrier_id"],
+      ["vehicleType", "main_vehicle_type"],
+      ["vehiclePlate", "main_plate_number"],
+      ["driverName", "main_driver_name"],
+      ["driverPhone", "main_driver_phone"],
+      ["plannedDepartureAt", "planned_exit_at"],
+      ["plannedArrivalAt", "planned_arrival_at"],
+    ] as const)("blocks submit when current %s is missing", async (valueKey, fieldKey) => {
+      const result = await checkOrderLoadPlan(
+        "org-1",
+        "order-1",
+        undefined,
+        undefined,
+        {
+          mode: "submit",
+          values: { ...completeSubmission, [valueKey]: "" },
+        },
+      );
+
+      expect(result).toEqual({
+        ready: false,
+        reasons: valueKey === "exitPort"
+          ? ["订单尚未确定出境口岸"]
+          : [`整车装车方案必填项未完成：${fieldKey}`],
+      });
+    });
+
+    it.each(["optional", "hidden"] as const)(
+      "does not block submit when current creation fields are %s and empty",
+      async (mode) => {
+        setFields("loading", creationFieldModes(mode));
+
+        const result = await checkOrderLoadPlan(
+          "org-1",
+          "order-1",
+          undefined,
+          undefined,
+          {
+            mode: "submit",
+            values: Object.fromEntries(
+              Object.keys(completeSubmission).map((key) => [key, ""]),
+            ) as typeof completeSubmission,
+          },
+        );
+
+        expect(result).toEqual({ ready: true, reasons: [] });
+      },
+    );
+  });
 });

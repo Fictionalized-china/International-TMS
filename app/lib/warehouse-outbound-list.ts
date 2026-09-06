@@ -79,11 +79,13 @@ export function validateFtlOutboundResourceSelection(input: {
   vehicleId: string;
   driverId: string;
   plannedDepartureAt: string;
+  plannedArrivalAt: string;
   policies: {
     carrier: { isActive: boolean; isRequired: boolean };
     vehicle: { isActive: boolean; isRequired: boolean };
     driver: { isActive: boolean; isRequired: boolean };
     plannedDeparture: { isActive: boolean; isRequired: boolean };
+    plannedArrival: { isActive: boolean; isRequired: boolean };
   };
 }) {
   const hiddenSubmitted: string[] = [];
@@ -98,6 +100,11 @@ export function validateFtlOutboundResourceSelection(input: {
     input.plannedDepartureAt.trim()
   )
     hiddenSubmitted.push("计划出境发车时间");
+  if (
+    !input.policies.plannedArrival.isActive &&
+    input.plannedArrivalAt.trim()
+  )
+    hiddenSubmitted.push("计划境外到仓时间");
   if (hiddenSubmitted.length)
     return `当前工作流已隐藏：${hiddenSubmitted.join("、")}，不能提交这些字段`;
 
@@ -113,6 +120,11 @@ export function validateFtlOutboundResourceSelection(input: {
     !input.plannedDepartureAt.trim()
   )
     missing.push("计划出境发车时间");
+  if (
+    input.policies.plannedArrival.isRequired &&
+    !input.plannedArrivalAt.trim()
+  )
+    missing.push("计划境外到仓时间");
   return missing.length
     ? `请由仓库确认工作流必填项：${missing.join("、")}`
     : null;

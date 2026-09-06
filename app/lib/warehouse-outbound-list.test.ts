@@ -74,11 +74,13 @@ describe("warehouse outbound order list", () => {
       vehicleId: "vehicle-1",
       driverId: "",
       plannedDepartureAt: "",
+      plannedArrivalAt: "",
       policies: {
         carrier: { isActive: true, isRequired: false },
         vehicle: { isActive: true, isRequired: true },
         driver: { isActive: true, isRequired: false },
         plannedDeparture: { isActive: false, isRequired: false },
+        plannedArrival: { isActive: false, isRequired: false },
       },
     })).toBeNull();
     expect(validateFtlOutboundResourceSelection({
@@ -86,11 +88,13 @@ describe("warehouse outbound order list", () => {
       vehicleId: "",
       driverId: "",
       plannedDepartureAt: "",
+      plannedArrivalAt: "",
       policies: {
         carrier: { isActive: true, isRequired: false },
         vehicle: { isActive: true, isRequired: true },
         driver: { isActive: true, isRequired: false },
         plannedDeparture: { isActive: false, isRequired: false },
+        plannedArrival: { isActive: false, isRequired: false },
       },
     })).toBe("请由仓库确认工作流必填项：出境车辆");
   });
@@ -101,13 +105,46 @@ describe("warehouse outbound order list", () => {
       vehicleId: "",
       driverId: "",
       plannedDepartureAt: "2026-09-02T09:00",
+      plannedArrivalAt: "",
       policies: {
         carrier: { isActive: false, isRequired: false },
         vehicle: { isActive: false, isRequired: false },
         driver: { isActive: false, isRequired: false },
         plannedDeparture: { isActive: false, isRequired: false },
+        plannedArrival: { isActive: false, isRequired: false },
       },
     })).toBe("当前工作流已隐藏：境外承运商、计划出境发车时间，不能提交这些字段");
+  });
+
+  it("validates planned arrival with the same hidden, optional and required workflow policy", () => {
+    const base = {
+      carrierId: "",
+      vehicleId: "",
+      driverId: "",
+      plannedDepartureAt: "",
+      plannedArrivalAt: "",
+      policies: {
+        carrier: { isActive: false, isRequired: false },
+        vehicle: { isActive: false, isRequired: false },
+        driver: { isActive: false, isRequired: false },
+        plannedDeparture: { isActive: false, isRequired: false },
+        plannedArrival: { isActive: true, isRequired: true },
+      },
+    };
+    expect(validateFtlOutboundResourceSelection(base))
+      .toBe("请由仓库确认工作流必填项：计划境外到仓时间");
+    expect(validateFtlOutboundResourceSelection({
+      ...base,
+      plannedArrivalAt: "2026-09-09T09:00",
+    })).toBeNull();
+    expect(validateFtlOutboundResourceSelection({
+      ...base,
+      plannedArrivalAt: "2026-09-09T09:00",
+      policies: {
+        ...base.policies,
+        plannedArrival: { isActive: false, isRequired: false },
+      },
+    })).toBe("当前工作流已隐藏：计划境外到仓时间，不能提交这些字段");
   });
 
   it("validates full-truck route fields against the effective workflow rules", () => {
