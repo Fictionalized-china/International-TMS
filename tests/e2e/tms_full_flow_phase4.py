@@ -1097,10 +1097,12 @@ class Phase4Flow:
                             remediation="检查费用保存后 workflow field presence 与 costs 模块状态同步。",
                         )
                 elif observation and observation.required and observation.present:
-                    raise BusinessBlocker(
-                        f"{order.order_number} 在本轮到达前已有{FIELD_LABELS[field_key]}，不能作为 fresh 全流程认证数据",
-                        owner="全流程认证数据隔离维护人",
-                        remediation="废弃本轮续跑，从 Phase 1 创建全新客户和全新订单后重新认证。",
+                    self._record_field_gate(
+                        self.customer_service,
+                        order.order_number,
+                        field_key,
+                        observation,
+                        "上游业务已生成既有费用，未重复创建",
                     )
                 else:
                     self._record_field_gate(

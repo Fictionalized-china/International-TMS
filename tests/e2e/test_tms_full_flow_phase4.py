@@ -553,6 +553,15 @@ class Phase4HandoffTests(unittest.TestCase):
 
 
 class Phase4SafetyTests(unittest.TestCase):
+    def test_required_upstream_expenses_are_reused_instead_of_rejected(self) -> None:
+        source = (HERE / "tms_full_flow_phase4.py").read_text(encoding="utf-8")
+        start = source.index("    def _ensure_required_expenses(")
+        end = source.index("    def _perform_required_signoff(", start)
+        helper = source[start:end]
+
+        self.assertIn("上游业务已生成既有费用，未重复创建", helper)
+        self.assertNotIn("在本轮到达前已有{FIELD_LABELS[field_key]}", helper)
+
     def test_order_navigation_waits_for_the_detail_heading(self) -> None:
         source = (HERE / "tms_full_flow_phase4.py").read_text(encoding="utf-8")
         start = source.index("    def _open_order(")
