@@ -1561,7 +1561,11 @@ class Phase3Flow:
                         owner="整批单证负责人",
                         remediation="在 PZ 报关与文件页面通过可见上传和审核完成必填项。",
                     )
-                if "张放行" in row_text and not "0/" in row_text:
+                recovery_mode = (
+                    self.source.certification_lineage.get("recovery_branches_used") is True
+                )
+                already_released = "张放行" in row_text and "0/" not in row_text
+                if already_released and not recovery_mode:
                     raise BusinessBlocker(
                         f"{order.order_number} 在本轮到达前已有报关放行记录，不能作为 fresh 全流程认证数据",
                         owner="全流程认证数据隔离维护人",
@@ -1575,6 +1579,41 @@ class Phase3Flow:
                         f"展开 {order.order_number} 报关",
                     )
                 session.expect_visible(panel, f"{order.order_number} 报关办理面板")
+                released_declarations = panel.locator(".batch-customs-row").filter(
+                    has_text="已放行"
+                )
+                if already_released and recovery_mode:
+                    if released_declarations.count() != 1:
+                        raise BusinessBlocker(
+                            f"{order.order_number} 已放行汇总与可见报关记录不一致",
+                            owner="报关数据完整性维护人",
+                            remediation="在当前页面核对放行汇总与有效报关单，恢复为唯一一致记录。",
+                        )
+                    declaration_number = (
+                        released_declarations.first.locator("strong")
+                        .first.inner_text()
+                        .strip()
+                    )
+                    if not declaration_number:
+                        raise BusinessBlocker(
+                            f"{order.order_number} 已放行记录缺少可见报关单号",
+                            owner="报关数据完整性维护人",
+                            remediation="确保已放行记录展示唯一报关单号。",
+                        )
+                    if self._is_visible(panel):
+                        session.click(
+                            disclosure.locator(".batch-order-file-panel-header button"),
+                            f"收起 {order.order_number} 已完成报关面板",
+                        )
+                        session.expect_hidden(
+                            panel,
+                            f"{order.order_number} 已完成报关面板已收起",
+                        )
+                    self.artifacts.customs_declarations[key] = declaration_number
+                    self.harness.journal.register_entity(
+                        "customs_declaration", key, declaration_number
+                    )
+                    continue
                 pending_declarations = panel.locator(".batch-customs-row").filter(
                     has_text="已申报"
                 )

@@ -590,6 +590,9 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
         self.assertIn("pending_declarations = panel.locator", helper)
         self.assertIn("if pending_declarations.count() == 1:", helper)
         self.assertIn('pending_declaration.locator("strong")', helper)
+        self.assertIn('recovery_branches_used") is True', helper)
+        self.assertIn("released_declarations = panel.locator", helper)
+        self.assertIn("if already_released and recovery_mode:", helper)
         self.assertIn("if not self._is_visible(panel):", helper)
         self.assertIn(".batch-order-file-panel-header button", helper)
         self.assertLess(
