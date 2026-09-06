@@ -84,7 +84,7 @@ OUL_NUMBER_RE = re.compile(r"\bOUL-[0-9A-Z-]+\b", re.I)
 FINAL_DISPATCH_BUTTON_RE = re.compile(
     r"^确认出库(?:交接|并打印交接单)$"
 )
-DENIED_PAGE_RE = re.compile(r"请求失败|不存在|尚未分配|没有.*权限|Forbidden|403|404", re.I)
+DENIED_PAGE_RE = re.compile(r"请求失败|不存在|找不到该页面|尚未分配|没有.*权限|Forbidden|403|404", re.I)
 ERROR_PAGE_RE = re.compile(
     r"请求失败|SYSTEM RECOVERY|Forbidden|Internal Server Error|请求失败\s*\(403\)",
     re.I,

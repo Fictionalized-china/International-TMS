@@ -459,6 +459,13 @@ class Phase2SafetyTests(unittest.TestCase):
             ),
         )
 
+    def test_denied_page_accepts_resource_hiding_not_found_copy(self) -> None:
+        body = (
+            "SYSTEM RECOVERY\n找不到该页面\n"
+            "页面地址可能已变更，请返回工作台重新进入。"
+        )
+        self.assertIsNotNone(phase2.DENIED_PAGE_RE.search(body))
+
     def test_mounted_order_detail_link_uses_its_row_and_accessible_name(self) -> None:
         source = inspect.getsource(
             phase2.Phase2Flow.assert_mounted_orders_leave_ordinary_table

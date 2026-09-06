@@ -12,6 +12,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from tms_full_flow_phase3 import (
+    DENIED_PAGE_RE,
     LTL_KEYS,
     ORDER_KEYS,
     PHASE2_STAGE_ORDER,
@@ -275,6 +276,13 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
                 "P3-NEG-CHILD-OLD-DOCUMENT",
             ),
         )
+
+    def test_denied_page_accepts_resource_hiding_not_found_copy(self) -> None:
+        body = (
+            "SYSTEM RECOVERY\n找不到该页面\n"
+            "页面地址可能已变更，请返回工作台重新进入。"
+        )
+        self.assertIsNotNone(DENIED_PAGE_RE.search(body))
 
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()

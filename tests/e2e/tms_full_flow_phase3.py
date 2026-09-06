@@ -85,7 +85,7 @@ PHASE1_RUN_ID_RE = re.compile(
     r"-a(?P<attempt>[0-9]{3})-(?P<stamp>[0-9]{14})-(?P<nonce>[0-9a-f]{8})$",
     re.I,
 )
-DENIED_PAGE_RE = re.compile(r"请求失败|不存在|尚未分配|没有.*权限|Forbidden|403|404", re.I)
+DENIED_PAGE_RE = re.compile(r"请求失败|不存在|找不到该页面|尚未分配|没有.*权限|Forbidden|403|404", re.I)
 ERROR_PAGE_RE = re.compile(
     r"请求失败|SYSTEM RECOVERY|Forbidden|Internal Server Error|请求失败\s*\(403\)",
     re.I,
