@@ -1802,8 +1802,16 @@ class Phase3Flow:
         self.operation.click(
             form.get_by_role("button", name="保存运输节点"), f"保存整车{label}"
         )
-        self._expect_success(
-            self.operation, "运输节点已更新", f"整车{label}保存成功提示"
+        completed_row = self.operation.page.locator(
+            ".tracking-progress-table tbody tr"
+        ).filter(
+            has=self.operation.page.get_by_text(label, exact=True)
+        ).filter(has_text="已完成")
+        confirmation = self.operation.page.get_by_text(
+            "运输节点已更新", exact=False
+        ).or_(completed_row)
+        self.operation.expect_visible(
+            confirmation, f"整车{label}保存结果已反馈"
         )
         self.artifacts.completed_tracking_nodes["ftl"].append(code)
 
@@ -1839,11 +1847,21 @@ class Phase3Flow:
                 ),
                 "整车运踪工作台",
             )
+            recovery_mode = (
+                self.source.certification_lineage.get("recovery_branches_used") is True
+            )
             for code, label, offset, location in nodes:
                 progress_row = self.operation.page.locator(
-                    "table.tracking-progress-table tbody tr"
-                ).filter(has_text=label)
-                if self._is_visible(progress_row) and "已完成" in self._locator_text(progress_row):
+                    ".tracking-progress-table tbody tr"
+                ).filter(
+                    has=self.operation.page.get_by_text(label, exact=True)
+                )
+                completed = self._is_visible(progress_row) and "已完成" in self._locator_text(progress_row)
+                if completed and recovery_mode:
+                    if code not in self.artifacts.completed_tracking_nodes["ftl"]:
+                        self.artifacts.completed_tracking_nodes["ftl"].append(code)
+                    continue
+                if completed:
                     raise BusinessBlocker(
                         f"{order.order_number} 的{label}在本轮到达前已经登记，不能作为 fresh 全流程认证数据",
                         owner="全流程认证数据隔离维护人",

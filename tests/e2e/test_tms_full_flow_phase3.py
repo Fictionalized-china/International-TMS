@@ -628,6 +628,27 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
         self.assertIn(open_tab, helper)
         self.assertLess(helper.index(open_tab), helper.index('name="运输进度与运单跟踪"'))
 
+    def test_ftl_tracking_recovery_skips_completed_nodes_but_fresh_certification_rejects_them(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        submit_start = source.index("    def _submit_ftl_tracking_node(")
+        complete_start = source.index("    def complete_ftl_tracking(", submit_start)
+        complete_end = source.index("    def _fill_batch_tracking_form(", complete_start)
+        submit_helper = source[submit_start:complete_start]
+        complete_helper = source[complete_start:complete_end]
+
+        self.assertIn('get_by_text(', submit_helper)
+        self.assertIn('"运输节点已更新", exact=False', submit_helper)
+        self.assertIn(").or_(completed_row)", submit_helper)
+        self.assertIn('filter(has_text="已完成")', submit_helper)
+        self.assertIn('".tracking-progress-table tbody tr"', submit_helper)
+        self.assertNotIn('"table.tracking-progress-table tbody tr"', submit_helper)
+        self.assertIn("get_by_text(label, exact=True)", submit_helper)
+        self.assertIn("get_by_text(label, exact=True)", complete_helper)
+        self.assertIn('recovery_branches_used") is True', complete_helper)
+        self.assertIn("if completed and recovery_mode:", complete_helper)
+        self.assertIn("continue", complete_helper)
+        self.assertIn("不能作为 fresh 全流程认证数据", complete_helper)
+
     def test_pz_read_only_audit_checks_capabilities_not_transient_copy(self) -> None:
         source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
         start = source.index("    def assert_customs_permission_alignment(")
