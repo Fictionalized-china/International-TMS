@@ -890,7 +890,7 @@ export default function QuotationsPage({ loaderData, actionData }: Route.Compone
             visible("quotation_gross_weight_kg","required")?`${quote.gross_weight_kg} KG`:null,
             visible("quotation_volume_cbm","required")?`${quote.volume_cbm} CBM`:null,
           ].filter(Boolean).join(" · ");
-          return <tr key={quote.id}><td><span className="cell-main">{statusLabel(quote.lifecycle_status)}报价</span><span className="subline">{new Date(quote.created_at).toLocaleString("zh-CN")}</span></td><td><span className="cell-main">{quote.customer_name}</span>{visible("quotation_salesperson_user_id","required")&&<span className="subline">{quote.salesperson_name || "待指定业务员"}</span>}</td><td><span className={`pill ${quote.road_load_type === "ltl" ? "ltl" : ""}`}>{quote.road_load_type === "ltl" ? "拼车" : "整车"}</span><span className="subline">{quote.workflow_name ? `${quote.workflow_name} v${quote.workflow_version_number} · 已锁定` : "历史报价 · 接受时自动匹配流程"}</span></td><td>{visible("quotation_cargo_description","required")&&<span className="cell-main">{quote.cargo_description}</span>}{routeVisible&&<span className="subline">{quote.origin_city} → {quote.destination_city}{visible("quotation_destination_warehouse_id","required")?` · ${quote.destination_warehouse_name || "目的仓待补"}`:""}</span>}</td><td>{visible("quotation_charge_items","required")&&<span className="cell-main">CNY {quote.total_amount.toLocaleString()}</span>}{measures&&<span className="subline">{measures}</span>}</td><td><span className={`status ${statusTone(quote.lifecycle_status)}`}>{statusLabel(quote.lifecycle_status)}</span></td><td>{quote.order_id ? <Link className="order-id order-number-only" title={quote.order_number || ""} to={`/admin/orders/${quote.order_id}`}>{quote.order_number}</Link> : <span className="subline">确认后生成</span>}</td><td><QuoteActions quote={quote} fields={fields} values={values} charges={charges} loaderData={loaderData} actionData={actionData} busy={busy} /></td></tr>;
+          return <tr key={quote.id}><td><span className="cell-main">{quotationRecordPrimaryText(quote)}</span><span className="subline">{new Date(quote.created_at).toLocaleString("zh-CN")}</span></td><td><span className="cell-main">{quote.customer_name}</span>{visible("quotation_salesperson_user_id","required")&&<span className="subline">{quote.salesperson_name || "待指定业务员"}</span>}</td><td><span className={`pill ${quote.road_load_type === "ltl" ? "ltl" : ""}`}>{quote.road_load_type === "ltl" ? "拼车" : "整车"}</span><span className="subline">{quote.workflow_name ? `${quote.workflow_name} v${quote.workflow_version_number} · 已锁定` : "历史报价 · 接受时自动匹配流程"}</span></td><td>{visible("quotation_cargo_description","required")&&<span className="cell-main">{quote.cargo_description}</span>}{routeVisible&&<span className="subline">{quote.origin_city} → {quote.destination_city}{visible("quotation_destination_warehouse_id","required")?` · ${quote.destination_warehouse_name || "目的仓待补"}`:""}</span>}</td><td>{visible("quotation_charge_items","required")&&<span className="cell-main">CNY {quote.total_amount.toLocaleString()}</span>}{measures&&<span className="subline">{measures}</span>}</td><td><span className={`status ${statusTone(quote.lifecycle_status)}`}>{statusLabel(quote.lifecycle_status)}</span></td><td>{quote.order_id ? <Link className="order-id order-number-only" title={quote.order_number || ""} to={`/admin/orders/${quote.order_id}`}>{quote.order_number}</Link> : <span className="subline">确认后生成</span>}</td><td><QuoteActions quote={quote} fields={fields} values={values} charges={charges} loaderData={loaderData} actionData={actionData} busy={busy} /></td></tr>;
         })}
       </tbody></table></div>
       {!loaderData.quotes.length && <div className="empty-state">暂无符合条件的报价。</div>}
@@ -1606,6 +1606,12 @@ async function assertGeoHierarchy(organizationId: string, countryName: string, p
      LIMIT 1`,
   ).bind(organizationId, countryName, provinceName, cityName).first();
   if (!row) throw new Error(`${label}的国家、省州和城市不属于同一条地理层级，请重新选择`);
+}
+
+export function quotationRecordPrimaryText(
+  quote: Pick<Quote, "quote_number">,
+) {
+  return quote.quote_number;
 }
 
 function statusLabel(status: Quote["lifecycle_status"]) {

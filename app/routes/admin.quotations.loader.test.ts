@@ -61,7 +61,7 @@ vi.mock("../lib/quotation-workflow-fields.server", () => ({
   savePreparedQuotationWorkflowFieldValues: vi.fn(),
 }));
 
-import { loader } from "./admin.quotations";
+import { loader, quotationRecordPrimaryText } from "./admin.quotations";
 
 describe("quotation loader D1 concurrency", () => {
   beforeEach(() => d1.reset());
@@ -77,5 +77,10 @@ describe("quotation loader D1 concurrency", () => {
     expect(d1.snapshot().calls).toBe(13);
     expect(d1.snapshot().maxActive).toBeLessThanOrEqual(4);
     expect(d1.snapshot().active).toBe(0);
+  });
+
+  it("uses the unique quote number as the primary quotation record label", () => {
+    expect(quotationRecordPrimaryText({ quote_number: "QT202609060001" }))
+      .toBe("QT202609060001");
   });
 });
