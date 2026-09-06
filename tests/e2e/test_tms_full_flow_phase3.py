@@ -649,6 +649,21 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
         self.assertIn("continue", complete_helper)
         self.assertIn("不能作为 fresh 全流程认证数据", complete_helper)
 
+    def test_batch_tracking_waits_for_exit_form_or_persisted_confirmation(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def complete_batch_tracking(")
+        end = source.index("    def _prepare_overseas_receipt(", start)
+        helper = source[start:end]
+
+        self.assertIn('locator("form.batch-inline-exit-form")', helper)
+        self.assertIn('get_by_text(', helper)
+        self.assertIn('"实际出境已确认", exact=False', helper)
+        self.assertIn("exit_form.or_(exit_confirmed)", helper)
+        self.assertLess(
+            helper.index("exit_form.or_(exit_confirmed)"),
+            helper.index("if self._is_visible(exit_form):"),
+        )
+
     def test_pz_read_only_audit_checks_capabilities_not_transient_copy(self) -> None:
         source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
         start = source.index("    def assert_customs_permission_alignment(")

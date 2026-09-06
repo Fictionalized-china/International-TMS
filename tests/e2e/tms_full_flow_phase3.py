@@ -2036,6 +2036,13 @@ class Phase3Flow:
             )
 
             exit_form = session.page.locator("form.batch-inline-exit-form")
+            exit_confirmed = session.page.get_by_text(
+                "实际出境已确认", exact=False
+            )
+            session.expect_visible(
+                exit_form.or_(exit_confirmed),
+                "PZ 实际出境表单或持久确认状态",
+            )
             if self._is_visible(exit_form):
                 self._fill_if_visible(
                     session,
@@ -2076,7 +2083,7 @@ class Phase3Flow:
                 )
             else:
                 session.expect_visible(
-                    session.page.get_by_text("实际出境已确认", exact=False),
+                    exit_confirmed,
                     "PZ 已确认实际出境",
                 )
             self.artifacts.completed_tracking_nodes["ltl_batch"].append("exported")
