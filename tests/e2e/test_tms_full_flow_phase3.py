@@ -407,6 +407,11 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
         self.assertRegex("已完成 报关与文件", pattern)
         self.assertNotRegex("进入报关与文件前置说明", pattern)
 
+    def test_pz_child_link_uses_the_product_accessible_name(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        self.assertIn('name=f"查看订单 {first_order.order_number}"', source)
+        self.assertIn("exact=True", source)
+
 
 if __name__ == "__main__":
     unittest.main()

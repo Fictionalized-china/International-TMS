@@ -1082,7 +1082,9 @@ class Phase3Flow:
                 remediation="新负责人应有操作控件，不能只显示只读状态。",
             )
             child_link = disclosure.get_by_role(
-                "link", name=first_order.order_number, exact=True
+                "link",
+                name=f"查看订单 {first_order.order_number}",
+                exact=True,
             )
             self._expect_visible_or_block(
                 self.batch_document,
