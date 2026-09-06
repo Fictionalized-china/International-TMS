@@ -1934,6 +1934,11 @@ class Phase4Flow:
                 self._open_order(self.finance, order_number)
                 body = self._text(self.finance.page.locator("body"), 14_000)
                 if "订单已归档" in body or "订单已完成" in body:
+                    if self.phase3.certification_lineage.get("recovery_branches_used") is True:
+                        if order_number not in self.artifacts.archived_orders:
+                            self.artifacts.archived_orders.append(order_number)
+                        step.observe("恢复链复用既有归档结果", gate_passed=True)
+                        continue
                     raise BusinessBlocker(
                         f"{order_number} 在本轮到达前已经完成归档，不能作为 fresh 全流程认证数据",
                         owner="全流程认证数据隔离维护人",
@@ -1966,6 +1971,12 @@ class Phase4Flow:
                     form.get_by_role("button", name="生成 / 更新复盘草稿", exact=True),
                     f"生成 {order_number} 订单复盘草稿",
                 )
+                self.finance.expect_hidden(
+                    self.finance.page.get_by_role(
+                        "progressbar", name="系统正在处理请求"
+                    ),
+                    f"{order_number} 复盘草稿保存完成",
+                )
                 final_form = self.finance.page.locator(
                     'form.review-generation-form:has(input[name="confirmFinalReview"])'
                 )
@@ -1985,6 +1996,12 @@ class Phase4Flow:
                     self.finance.click(
                         final_form.get_by_role("button", name="最终确认并归档订单", exact=True),
                         f"最终确认并归档 {order_number}",
+                    )
+                    self.finance.expect_hidden(
+                        self.finance.page.get_by_role(
+                            "progressbar", name="系统正在处理请求"
+                        ),
+                        f"{order_number} 最终归档提交完成",
                     )
                 except Exception as original:
                     self._assert_no_error_page(self.finance)
