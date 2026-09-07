@@ -5933,10 +5933,12 @@ function CargoWorkflowData({
   data,
   manage,
   busy,
+  closeSignal,
 }: {
   data: Route.ComponentProps["loaderData"];
   manage: boolean;
   busy: boolean;
+  closeSignal?: unknown;
 }) {
   const fields = data.workflowFields;
   const visibleGroups = cargoDetailFieldGroups.filter((group) =>
@@ -6006,14 +6008,29 @@ function CargoWorkflowData({
     )}
     {manage && showDetailFields && <section className="cargo-inline-editor" aria-label="货物明细维护">
       <header><strong>货物明细维护</strong><span>在当前订单页内新增或修改，隐藏字段不会被提交。</span></header>
-      <details className="expandable" id="cargo-editor-create">
-        <summary>新增货物明细</summary>
+      <Modal
+        title="新增货物信息"
+        triggerLabel="新增货物信息"
+        triggerClassName="btn primary cargo-editor-create-trigger"
+        dialogClassName="cargo-editor-modal"
+        size="xwide"
+        closeSignal={closeSignal}
+        guardFormChanges
+      >
         <CargoEditorForm fields={fields} busy={busy} />
-      </details>
-      {data.cargo.map((item, index) => <details className="expandable" key={item.id}>
-        <summary>编辑 #{index + 1} · {item.cargo_name_cn}</summary>
+      </Modal>
+      {data.cargo.map((item) => <Modal
+        key={item.id}
+        title={`编辑货物信息 · ${item.cargo_name_cn}`}
+        triggerLabel="编辑货物信息"
+        triggerClassName="btn primary"
+        dialogClassName="cargo-editor-modal"
+        size="xwide"
+        closeSignal={closeSignal}
+        guardFormChanges
+      >
         <CargoEditorForm fields={fields} busy={busy} item={item} />
-      </details>)}
+      </Modal>)}
     </section>}
   </div>;
 }
@@ -6151,7 +6168,11 @@ function ModuleBusinessData({
         salespersonUserId: data.order.salesperson_user_id,
         currentUserId: data.current.userId,
       })
-    )} busy={busy} />;
+    )} busy={busy} closeSignal={
+      moduleActionData?.actionKind === "cargo_editor" && moduleActionData.success
+        ? moduleActionData
+        : undefined
+    } />;
   if (code === "documents")
     return (
       <div className="module-business-stack dense-module-stack">

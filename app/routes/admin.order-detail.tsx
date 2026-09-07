@@ -1639,10 +1639,7 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, readOn
       <div className="order-creation-context-actions">
         {selectedSection === "info" && <Link className="btn" to={orderModuleTabHref({ orderId: data.order.id, stepKey: selectedStep.step_key, moduleCode: "cargo", section: null, navigation: queueTabNavigation })}>继续货物信息</Link>}
         {selectedSection === "cargo" && !readOnly && <button className="btn" type="button" onClick={() => {
-          const editor = document.querySelector<HTMLDetailsElement>("#cargo-editor-create");
-          if (!editor) return;
-          editor.open = true;
-          window.requestAnimationFrame(() => editor.querySelector<HTMLInputElement>("input:not([type='hidden'])")?.focus());
+          document.querySelector<HTMLButtonElement>(".cargo-editor-create-trigger")?.click();
         }}>新增货物</button>}
         {selectedSection === "files" && <a className="btn" href="#module-source-documents">上传 / 替换文件</a>}
         {selectedSection === "costs" && <a className="btn" href="#consignment-cost-actions">新增费用</a>}
