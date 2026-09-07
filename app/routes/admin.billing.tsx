@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { Form, Link, useNavigation } from "react-router";
+import { Form, Link, useLocation, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.billing";
 import { QueryPagination } from "../components/QueryPagination";
 import { OrderNumberLink, OrderNumberLinkList } from "../components/EntityNumberLink";
@@ -51,6 +51,7 @@ import {
 import { valueOf } from "../lib/validation";
 import { loadSettlementTaskPackCount, loadSettlementTaskPackPage } from "../lib/settlement-task-pack.server";
 import { settlementDirectionSignoffComplete, settlementTaskNextAction, type SettlementTaskPackRow } from "../lib/settlement-task-pack";
+import { appendOrderQueueContext, orderDetailQueueHref, orderQueueContextFromList } from "../lib/order-queue-navigation";
 
 type UserOption = { id: string; display_name: string };
 type SettlementUiAccess = Pick<SettlementMultiOrderActionAccess, "visible" | "canWrite" | "reason">;
@@ -458,6 +459,11 @@ function SettlementTaskPackPage({ view, page, positionCode }: {
   page: SettlementPage<SettlementTaskPackRow>;
   positionCode: string | null;
 }) {
+  const location=useLocation();
+  const queueContext=orderQueueContextFromList({
+    returnTo:`${location.pathname}${location.search}`,
+    orderIds:page.items.map(row=>row.id),
+  });
   return <section className="panel billing-workspace-page settlement-task-pack-page">
     <WorkspaceHeading
       title="结算任务包"
@@ -474,17 +480,20 @@ function SettlementTaskPackPage({ view, page, positionCode }: {
       <thead><tr><th>订单 / 客户</th><th>费用</th><th>三方签核</th><th>对账单</th><th>发票 / 核销</th><th>归档资料 / 复盘</th><th>本岗下一步</th></tr></thead>
       <tbody>{page.items.map((row) => {
         const next = settlementTaskNextAction(row, positionCode);
+        const nextHref=next.href.startsWith("/admin/orders/")
+          ?appendOrderQueueContext(next.href,queueContext)
+          :next.href;
         const csDone = settlementDirectionSignoffComplete(row, "confirmed");
         const businessDone = settlementDirectionSignoffComplete(row, "business_reviewed");
         const financeDone = settlementDirectionSignoffComplete(row, "finance_reviewed");
         return <tr key={row.id}>
-          <td><OrderNumberLink id={row.id} number={row.order_number}/><small>{row.customer_name} · {row.business_type === "ltl" ? "拼车" : "整车"}</small></td>
+          <td><Link className="entity-number-link" aria-label={`查看订单 ${row.order_number}`} to={orderDetailQueueHref(row.id,queueContext)}>{row.order_number}</Link><small>{row.customer_name} · {row.business_type === "ltl" ? "拼车" : "整车"}</small></td>
           <td><strong>{row.expense_count} 条</strong><small>应收 {row.receivable_count} · 应付 {row.payable_count}</small></td>
           <td><div className="settlement-signoff-line"><StatusMark done={csDone} label="客服"/><StatusMark done={businessDone} label="业务"/><StatusMark done={financeDone} label="财务"/></div></td>
           <td><strong>{row.reconciliation_count ? `${row.reconciliation_confirmed_count} 已确认` : "未生成"}</strong><small>{row.reconciliation_draft_count ? `${row.reconciliation_draft_count} 张草稿待确认` : "无待确认草稿"}</small></td>
           <td><strong>发票 {moneyProgress(row.invoiced_amount, row.expense_amount)}</strong><small>核销 {moneyProgress(row.settled_amount, row.expense_amount)}</small></td>
           <td><strong>账单 {row.billing_document_count ? "已归集" : "待归集"} · 凭证 {row.payment_receipt_count ? "已归集" : "待归集"}</strong><small>{row.review_conclusion ? "复盘已完成" : row.review_snapshot_count ? "复盘待确认" : "尚未复盘"}</small></td>
-          <td><Link className={`btn small${next.waiting ? "" : " primary"}`} to={next.href}>{next.label}</Link><small>{row.current_step_name || "结算协同"}</small></td>
+          <td><Link className={`btn small${next.waiting ? "" : " primary"}`} to={nextHref}>{next.label}</Link><small>{row.current_step_name || "结算协同"}</small></td>
         </tr>;
       })}</tbody>
     </table></div>

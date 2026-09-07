@@ -26,6 +26,15 @@ describe("order queue navigation", () => {
     expect(navigation.nextOrderId).toBe("c");
   });
 
+  it("allows the internal settlement task pack as a queue return target", () => {
+    const navigation = readOrderQueueNavigation(new URLSearchParams({
+      returnTo: "/admin/billing?tab=tasks&q=SO-001",
+      orderQueue: "a,b",
+    }), "a");
+    expect(navigation.returnTo).toBe("/admin/billing?tab=tasks&q=SO-001");
+    expect(navigation.nextOrderId).toBe("b");
+  });
+
   it("preserves queue context through module tabs and anchors", () => {
     expect(appendOrderQueueContext(
       "/admin/orders/a?stage=reconciliation#module-business-data",

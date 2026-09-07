@@ -13,7 +13,8 @@ export type OrderQueueNavigation = OrderQueueContext & {
 
 function safeOrderListPath(value: string | null | undefined) {
   if (!value) return "/admin/orders?view=orders";
-  if (!value.startsWith("/admin/orders") || value.startsWith("//")) {
+  const allowedReturnPath = value.startsWith("/admin/orders") || value.startsWith("/admin/billing");
+  if (!allowedReturnPath || value.startsWith("//")) {
     return "/admin/orders?view=orders";
   }
   return value;
