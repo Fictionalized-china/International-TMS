@@ -74,6 +74,21 @@ export async function syncCustomsModuleFromRecords(
   ).bind(organizationId, orderId).first<{ total: number; released: number | null }>();
   const total = gate?.total ?? 0;
   const released = gate?.released ?? 0;
+  const module = await env.DB.prepare(
+    "SELECT id,status,current_step_code,current_step_name,progress_percent,blocking_reason,is_required FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='customs' AND enabled=1",
+  ).bind(organizationId, orderId).first<{
+    id: string;
+    status: string;
+    current_step_code: string | null;
+    current_step_name: string | null;
+    progress_percent: number;
+    blocking_reason: string | null;
+    is_required: number;
+  }>();
+  if (!module) {
+    await syncOrderWorkflowSnapshot(organizationId, orderId);
+    return;
+  }
   const configuredFields = await loadOrderModuleWorkflowFields(
     organizationId,
     orderId,
@@ -83,21 +98,8 @@ export async function syncCustomsModuleFromRecords(
     total,
     released,
     fields: configuredFields,
+    moduleRequired: module.is_required === 1,
   });
-  const module = await env.DB.prepare(
-    "SELECT id,status,current_step_code,current_step_name,progress_percent,blocking_reason FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='customs' AND enabled=1",
-  ).bind(organizationId, orderId).first<{
-    id: string;
-    status: string;
-    current_step_code: string | null;
-    current_step_name: string | null;
-    progress_percent: number;
-    blocking_reason: string | null;
-  }>();
-  if (!module) {
-    await syncOrderWorkflowSnapshot(organizationId, orderId);
-    return;
-  }
   const changed = module.status !== next.status || module.current_step_code !== next.step || module.current_step_name !== next.name || module.progress_percent !== next.progress || module.blocking_reason !== next.blocker;
   if (changed) {
     await env.DB.batch([

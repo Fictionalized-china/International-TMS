@@ -301,7 +301,7 @@ describe("order readiness follows the bound workflow field modes", () => {
     expect(result.reasons).toContain("装车与出库冻结工作流配置异常：模块缺少有效办理节点");
   });
 
-  it("does not query or block customs when declaration and release are optional or hidden", async () => {
+  it("requires a visible declaration result when the customs module is required", async () => {
     state.order = baseOrder({ customs_enabled: 1 });
     setFields("customs", [
       field("customs", "customs_declarations", "optional", false, "outbound_transport"),
@@ -313,10 +313,11 @@ describe("order readiness follows the bound workflow field modes", () => {
 
     const result = await checkOrderDeparture("org-1", "order-1");
 
-    expect(result).toEqual({ ready: true, reasons: [] });
+    expect(result.ready).toBe(false);
+    expect(result.reasons).toContain("尚未录入有效报关单");
     expect(
       state.preparedSql.some((sql) => sql.includes("FROM order_customs_declarations d")),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("does not let required fields in an optional customs module block departure", async () => {
@@ -363,7 +364,7 @@ describe("order readiness follows the bound workflow field modes", () => {
     expect(result.reasons).toContain("起运地报关尚未全部放行（已放行 0/1 张）");
   });
 
-  it("allows a transit declaration when declarations are required but origin release is optional", async () => {
+  it("allows a transit declaration when declarations are required but origin release is hidden", async () => {
     state.order = baseOrder({ customs_enabled: 1 });
     state.customsDeclarations.push({
       clearance_stage: "transit",
@@ -372,7 +373,7 @@ describe("order readiness follows the bound workflow field modes", () => {
     });
     setFields("customs", [
       field("customs", "customs_declarations", "required", true, "outbound_transport"),
-      field("customs", "customs_release", "optional", false, "outbound_transport"),
+      field("customs", "customs_release", "hidden", false, "outbound_transport"),
     ]);
 
     const result = await checkOrderDeparture("org-1", "order-1");

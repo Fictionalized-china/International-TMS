@@ -28,16 +28,29 @@ const declarationFieldKeys = new Set([
 
 export function customsModuleGateRequirements(
   fields: readonly CustomsWorkflowFieldPolicy[],
+  options?: { moduleRequired?: boolean },
 ) {
   // Empty snapshots are legacy orders and retain the historical safe baseline.
   const legacy = fields.length === 0;
+  if (options?.moduleRequired === false) {
+    return { declarationsRequired: false, releaseRequired: false };
+  }
+  const declarationField = fields.find(
+    (field) => field.fieldKey === "customs_declarations",
+  );
+  const releaseField = fields.find((field) => field.fieldKey === "customs_release");
+  if (options?.moduleRequired === true) {
+    return {
+      declarationsRequired: legacy || declarationField?.isActive === true,
+      releaseRequired: legacy || releaseField?.isActive === true,
+    };
+  }
   const declarationsRequired = legacy || fields.some(
     (field) =>
       declarationFieldKeys.has(field.fieldKey) &&
       field.isActive &&
       field.isRequired,
   );
-  const releaseField = fields.find((field) => field.fieldKey === "customs_release");
   const releaseRequired = releaseField
     ? releaseField.isActive && releaseField.isRequired
     : legacy;
@@ -46,19 +59,22 @@ export function customsModuleGateRequirements(
 
 /**
  * Derives the automatic customs-module state from the effective workflow
- * snapshot. Optional or hidden customs work may still be recorded, but never
- * holds a required order workflow open. Only required declaration/release
- * fields produce blockers.
+ * snapshot. A required module must produce every visible core result, while
+ * an optional module never blocks and hidden core actions stay absent.
  */
 export function deriveCustomsModuleAutomationState(input: {
   total: number;
   released: number;
   fields: readonly CustomsWorkflowFieldPolicy[];
+  moduleRequired?: boolean;
 }): CustomsModuleAutomationState {
   const total = Math.max(0, Number(input.total || 0));
   const released = Math.max(0, Math.min(total, Number(input.released || 0)));
   const pending = total - released;
-  const { declarationsRequired, releaseRequired } = customsModuleGateRequirements(input.fields);
+  const { declarationsRequired, releaseRequired } = customsModuleGateRequirements(
+    input.fields,
+    { moduleRequired: input.moduleRequired },
+  );
 
   if ((declarationsRequired || releaseRequired) && total === 0) {
     return {

@@ -37,6 +37,7 @@ import {
 } from "../lib/loading-batch-customs-access";
 import { loadBatchCustomsAccess } from "../lib/loading-batch-customs-access.server";
 import { syncCustomsModuleFromRecords } from "../lib/customs-status.server";
+import { customsModuleGateRequirements } from "../lib/customs-module-policy";
 import {
   BATCH_TRACKING_MILESTONES,
   BATCH_TRACKING_OPTIONAL_CODES,
@@ -1585,15 +1586,17 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   const allDispatched=loaderData.batchCustomsAccess.allDispatched;
   const pendingDispatchOrders=loaderData.orders.filter(order=>!loaderData.outboundStatuses.find(item=>item.order_id===order.order_id)?.dispatched);
   const customsPolicyFor=(orderId:string)=>orderBatchWorkflowPolicy(loaderData.batchWorkflowPolicies,orderId,"customs");
-  // Only a required customs module may block batch progress. Visible optional
-  // customs work remains actionable and is presented as optional in the UI.
+  // Only a required customs module may block batch progress. Within it, each
+  // visible core action must produce its business result before handoff.
   const customsReadyForOrder=(orderId:string)=>{
     const requirementGroup=loaderData.orderDocumentRequirements.find(group=>group.orderId===orderId);
     const modulePolicy=customsPolicyFor(orderId);
     if(!modulePolicy.enabled||!modulePolicy.required)return true;
     const customs=loaderData.customsSummaries.find(item=>item.order_id===orderId);
-    const declarationsRequired=runtimeWorkflowFieldPolicy(modulePolicy.fields,"customs_declarations",true).required;
-    const releaseRequired=runtimeWorkflowFieldPolicy(modulePolicy.fields,"customs_release",true).required;
+    const {declarationsRequired,releaseRequired}=customsModuleGateRequirements(
+      modulePolicy.fields,
+      {moduleRequired:modulePolicy.required},
+    );
     const customsDeclReady=(!declarationsRequired||Boolean(customs&&customs.total>0))&&(!releaseRequired||Boolean(customs&&customs.total>0&&customs.released===customs.total));
     const files=loaderData.orderDocuments.filter(item=>item.order_id===orderId);
     const requiredCustomsDocuments=(requirementGroup?.documents??[]).filter(document=>document.moduleCode==="customs"&&document.isActive&&document.isRequired);
@@ -1979,6 +1982,10 @@ function BatchDocumentWorkbench({batchId,orders,visibleOrders,orderPagination,ba
         const customsPolicy=orderBatchWorkflowPolicy(workflowPolicies,order.order_id,"customs");
         const declarationsField=runtimeWorkflowFieldPolicy(customsPolicy.fields,"customs_declarations",true);
         const releaseField=runtimeWorkflowFieldPolicy(customsPolicy.fields,"customs_release",true);
+        const customsGateRequirements=customsModuleGateRequirements(
+          customsPolicy.fields,
+          {moduleRequired:customsPolicy.required},
+        );
         const activeRequirements=requirementGroup?.documents.filter(document=>document.isActive)??[];
         const blockingRequirements=activeRequirements.filter(requirement=>requirement.moduleCode!=="customs"||(customsPolicy.enabled&&customsPolicy.required));
         const documentSummary=summarizeLoadingDocumentRequirements(blockingRequirements,files);
@@ -1986,7 +1993,7 @@ function BatchDocumentWorkbench({batchId,orders,visibleOrders,orderPagination,ba
         const customs=customsSummaries.find(item=>item.order_id===order.order_id);
         const requiredCustomsDocuments=customsPolicy.required?activeRequirements.filter(document=>document.moduleCode==="customs"&&document.isRequired):[];
         const customsFilesReady=requiredCustomsDocuments.every(document=>files.some(item=>item.document_category===document.code&&["approved","archived"].includes(item.review_status)));
-        const customsDeclarationsReady=(!declarationsField.required||Boolean(customs&&customs.total>0))&&(!releaseField.required||Boolean(customs&&customs.total>0&&customs.released===customs.total));
+        const customsDeclarationsReady=(!customsGateRequirements.declarationsRequired||Boolean(customs&&customs.total>0))&&(!customsGateRequirements.releaseRequired||Boolean(customs&&customs.total>0&&customs.released===customs.total));
         const customsReady=!customsPolicy.enabled||!customsPolicy.required||(customsFilesReady&&customsDeclarationsReady);
         const orderGateReady=documentSummary.complete&&customsReady;
         const workflowAccess=customsAccesses.find(access=>access.orderId===order.order_id);
@@ -2002,7 +2009,7 @@ function BatchDocumentWorkbench({batchId,orders,visibleOrders,orderPagination,ba
         });
         const canActOnThisOrder=manageDocuments||canManageThisOrder||canReleaseThisOrder;
         const hasActiveDeclaration=orderCustomsDeclarations.some(item=>item.is_deleted!==1&&item.status!=="cancelled");
-        const autoOpenDeclaration=uploadedOrderId===order.order_id&&documentSummary.complete&&customsPolicy.enabled&&declarationsField.visible&&declarationsField.required&&canManageThisOrder&&!hasActiveDeclaration;
+        const autoOpenDeclaration=uploadedOrderId===order.order_id&&documentSummary.complete&&customsPolicy.enabled&&customsGateRequirements.declarationsRequired&&canManageThisOrder&&!hasActiveDeclaration;
         const customsStatus=!customsPolicy.enabled?"本单未启用报关":!declarationsField.visible?"工作流未展示报关申报明细":!customsPolicy.required?(customs?.total?`选办 · ${customs.released}/${customs.total} 张放行`:"选办 · 尚未登记"):!customsFilesReady?"必填报关文件待审核":customs?.total?`${customs.released}/${customs.total} 张放行`:"待登记并放行正式报关单";
         return <tr className={orderGateReady?"completed-row":canActOnThisOrder?"blocked-row":"readonly-row"} key={order.order_id} id={`batch-customs-${order.order_id}`}>
           <td><strong><OrderNumberLink id={order.order_id} number={order.order_number}/></strong><small>{order.customer_name}</small></td>

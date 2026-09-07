@@ -5,6 +5,7 @@ import {
   orderDocumentTypeLabel,
 } from "./order-documents";
 import { customsDeclarationGate } from "./customs-declarations";
+import { customsModuleGateRequirements } from "./customs-module-policy";
 import {
   loadOrderModuleWorkflowFields,
   type WorkflowFieldState,
@@ -611,12 +612,10 @@ export async function checkOrderDeparture(
   }
 
   if (order.customs_enabled === 1) {
-    const declarationsRequired = required(
-      "customs",
-      "customs_declarations",
-      true,
+    const { declarationsRequired, releaseRequired } = customsModuleGateRequirements(
+      workflow.scopedFields("customs"),
+      { moduleRequired: workflow.moduleRequired("customs") },
     );
-    const releaseRequired = required("customs", "customs_release", true);
     const missingCustomsFields = workflow
       .missingRequired("customs")
       .filter((field) => field.fieldType !== "attachment");

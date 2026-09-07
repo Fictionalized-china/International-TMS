@@ -1454,11 +1454,17 @@ async function validateModuleGate(
           throw new Error(`报关资料尚未审核通过：${missing.map(orderDocumentTypeLabel).join("、")}`);
       }
     }
-    // Declaration and release are workflow-field gates. Optional work remains
-    // actionable without blocking; hidden actions are rejected by the module
-    // workbench and are not recreated as a transition gate here.
+    // A required customs module must produce each visible core business result.
+    // Hidden actions remain absent, while optional modules stay nonblocking.
     if (currentStep === "review") {
-      const gateRequirements = customsModuleGateRequirements(configuredFields);
+      const moduleMode = await env.DB.prepare(
+        "SELECT enabled,is_required FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='customs'",
+      ).bind(organizationId, orderId).first<{ enabled: number; is_required: number }>();
+      const gateRequirements = customsModuleGateRequirements(configuredFields, {
+        moduleRequired: moduleMode
+          ? moduleMode.enabled === 1 && moduleMode.is_required === 1
+          : true,
+      });
       const customsGate = await env.DB.prepare(
         `SELECT COUNT(*) total,
                 SUM(CASE WHEN d.status='released' THEN 1 ELSE 0 END) released

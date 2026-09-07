@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { deriveCustomsModuleAutomationState } from "./customs-module-policy";
+import {
+  customsModuleGateRequirements,
+  deriveCustomsModuleAutomationState,
+} from "./customs-module-policy";
 
 const field = (
   fieldKey: string,
@@ -49,5 +52,37 @@ describe("deriveCustomsModuleAutomationState", () => {
   it("keeps the legacy declaration and release gate when no field snapshot exists", () => {
     expect(deriveCustomsModuleAutomationState({ total: 0, released: 0, fields: [] }))
       .toMatchObject({ status: "in_progress", step: "documents" });
+  });
+
+  it("requires visible core actions when the customs module itself is required", () => {
+    const fields = [
+      field("customs_declarations", "optional"),
+      field("customs_release", "optional"),
+    ];
+
+    expect(customsModuleGateRequirements(fields, { moduleRequired: true }))
+      .toEqual({ declarationsRequired: true, releaseRequired: true });
+    expect(deriveCustomsModuleAutomationState({
+      total: 0,
+      released: 0,
+      fields,
+      moduleRequired: true,
+    })).toMatchObject({ status: "in_progress", step: "documents" });
+  });
+
+  it("never blocks an optional customs module even if its fields are required", () => {
+    const fields = [
+      field("customs_declarations", "required"),
+      field("customs_release", "required"),
+    ];
+
+    expect(customsModuleGateRequirements(fields, { moduleRequired: false }))
+      .toEqual({ declarationsRequired: false, releaseRequired: false });
+    expect(deriveCustomsModuleAutomationState({
+      total: 0,
+      released: 0,
+      fields,
+      moduleRequired: false,
+    })).toMatchObject({ status: "completed", blocker: null });
   });
 });
