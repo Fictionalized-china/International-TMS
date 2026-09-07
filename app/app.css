@@ -30630,9 +30630,178 @@ html[data-motion="off"] *::after {
   border-top: 1px solid #d7e1e9;
 }
 
+/* Quotation entry follows the operator's decision order instead of a matrix. */
+.prototype-quote-form .quote-plan-grid {
+  grid-template-columns: repeat(12, minmax(0, 1fr)) !important;
+  padding: 4px 6px 5px;
+  gap: 3px 6px;
+}
+
+.prototype-quote-form .quote-plan-grid > .field,
+.prototype-quote-form .quote-plan-grid > .field:nth-child(4n),
+.prototype-quote-form .quote-plan-grid > .field:nth-child(n+5) {
+  padding: 3px 4px;
+  border: 0;
+}
+
+.prototype-quote-form .quote-plan-grid > .quote-plan-customer { grid-column: span 4; }
+.prototype-quote-form .quote-plan-grid > .quote-plan-contact,
+.prototype-quote-form .quote-plan-grid > .quote-plan-phone,
+.prototype-quote-form .quote-plan-grid > .quote-plan-order-type,
+.prototype-quote-form .quote-plan-grid > .quote-plan-workflow { grid-column: span 2; }
+.prototype-quote-form .quote-plan-grid > .quote-plan-secondary { grid-column: span 4; }
+
+.prototype-quote-form .quote-route-cards {
+  padding: 6px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.prototype-quote-form .quote-route-cards.with-cargo {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.prototype-quote-form .quote-route-card {
+  min-width: 0;
+  border: 1px solid #dbe4eb;
+  border-radius: 3px;
+  background: #fff;
+}
+
+.prototype-quote-form .quote-route-card > header {
+  min-height: 24px;
+  padding: 4px 7px;
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid #e0e7ed;
+  background: #f7f9fb;
+}
+
+.prototype-quote-form .quote-route-card > header b {
+  color: #244560;
+  font-size: 10px;
+}
+
+.prototype-quote-form .quote-route-card-fields {
+  padding: 5px 7px 7px;
+  display: grid;
+  align-content: start;
+  gap: 5px;
+}
+
+.prototype-quote-form .quote-route-card .quote-geo-trigger {
+  min-height: var(--ui-control-height, 30px);
+  height: var(--ui-control-height, 30px);
+  padding-block: 0;
+  display: flex;
+  align-items: center;
+}
+
+.prototype-quote-form .quote-route-card .quote-geo-trigger-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.prototype-quote-form .quote-route-cargo-card textarea {
+  height: calc(var(--ui-control-height, 30px) * 3);
+  min-height: calc(var(--ui-control-height, 30px) * 3);
+  max-height: calc(var(--ui-control-height, 30px) * 3);
+  resize: none;
+}
+
+.prototype-quote-form .quote-metrics-grid {
+  padding: 5px 7px 6px;
+  display: grid;
+  grid-template-columns: minmax(100px, .7fr) minmax(135px, 1fr) minmax(330px, 2.1fr) minmax(170px, 1.15fr);
+  gap: 7px;
+  align-items: end;
+}
+
+.prototype-quote-form .quote-dimension-group {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.prototype-quote-form .quote-dimension-group > legend {
+  min-height: 11px;
+  margin-bottom: 2px;
+  padding: 0;
+  color: #667a8e;
+  font-size: 9px;
+  line-height: 1.15;
+}
+
+.prototype-quote-form .quote-dimension-inputs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.prototype-quote-form .quote-dimension-field {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+}
+
+.prototype-quote-form .quote-dimension-field > span {
+  color: #718295;
+  font-size: 9px;
+}
+
+.prototype-quote-form .quote-dimension-field:has(.control:required:invalid) > span::after {
+  content: "*";
+  color: #d92d20;
+  font-weight: 800;
+}
+
+.prototype-quote-form .quote-charge-footer {
+  min-height: 42px;
+  padding: 4px 7px 5px;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: end;
+  border-top: 1px solid #dfe7ed;
+  background: #fbfcfd;
+}
+
+.prototype-quote-form .quote-charge-footer .field { width: min(240px, 100%); }
+.prototype-quote-form .quote-charge-footer > strong {
+  padding-bottom: 8px;
+  color: #163b5d;
+  font-size: 12px;
+}
+
 @media (max-width: 1100px) {
   .prototype-quote-form .quote-plan-grid {
-    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    grid-template-columns: repeat(6, minmax(0, 1fr)) !important;
+  }
+  .prototype-quote-form .quote-plan-grid > .quote-plan-customer { grid-column: span 6; }
+  .prototype-quote-form .quote-plan-grid > .quote-plan-contact,
+  .prototype-quote-form .quote-plan-grid > .quote-plan-phone,
+  .prototype-quote-form .quote-plan-grid > .quote-plan-order-type,
+  .prototype-quote-form .quote-plan-grid > .quote-plan-workflow,
+  .prototype-quote-form .quote-plan-grid > .quote-plan-secondary { grid-column: span 3; }
+  .prototype-quote-form .quote-route-cards.with-cargo {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .prototype-quote-form .quote-route-cargo-card {
+    grid-column: 1 / -1;
+  }
+  .prototype-quote-form .quote-route-cargo-card .quote-route-card-fields {
+    grid-template-columns: 2fr 1fr;
+    align-items: end;
+  }
+  .prototype-quote-form .quote-metrics-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .prototype-quote-form .quote-route-matrix.with-cargo .quote-route-matrix-row {
     grid-template-columns: 72px repeat(2, minmax(0, 1fr));
@@ -30653,6 +30822,24 @@ html[data-motion="off"] *::after {
   .prototype-quote-form .quote-plan-grid {
     grid-template-columns: 1fr !important;
   }
+  .prototype-quote-form .quote-plan-grid > .quote-plan-customer,
+  .prototype-quote-form .quote-plan-grid > .quote-plan-contact,
+  .prototype-quote-form .quote-plan-grid > .quote-plan-phone,
+  .prototype-quote-form .quote-plan-grid > .quote-plan-order-type,
+  .prototype-quote-form .quote-plan-grid > .quote-plan-workflow,
+  .prototype-quote-form .quote-plan-grid > .quote-plan-secondary { grid-column: auto; }
+  .prototype-quote-form .quote-route-cards,
+  .prototype-quote-form .quote-route-cards.with-cargo,
+  .prototype-quote-form .quote-metrics-grid,
+  .prototype-quote-form .quote-route-cargo-card .quote-route-card-fields {
+    grid-template-columns: 1fr;
+  }
+  .prototype-quote-form .quote-route-cargo-card { grid-column: auto; }
+  .prototype-quote-form .quote-charge-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .prototype-quote-form .quote-charge-footer > strong { padding-bottom: 0; text-align: right; }
   .prototype-quote-form .quote-route-matrix.with-cargo .quote-route-matrix-row:not(.quote-route-matrix-head) {
     grid-template-columns: 72px minmax(0, 1fr);
   }

@@ -1076,9 +1076,6 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
   };
   const routeFieldsVisible = policies.originRegion.isActive || policies.pickupAddress.isActive ||
     policies.destinationRegion.isActive || policies.destinationWarehouse.isActive || policies.destinationNote.isActive;
-  const cargoFieldsVisible = policies.cargoDescription.isActive || policies.notes.isActive ||
-    policies.pieces.isActive || policies.weight.isActive || policies.length.isActive ||
-    policies.width.isActive || policies.height.isActive || policies.volume.isActive;
   const cargoNarrativeVisible = policies.cargoDescription.isActive || policies.notes.isActive;
   const cargoMetricsVisible = policies.pieces.isActive || policies.weight.isActive ||
     policies.length.isActive || policies.width.isActive || policies.height.isActive || policies.volume.isActive;
@@ -1109,115 +1106,83 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
     setRoadLoadType(value);
     setWorkflowDefinitionId("");
   };
+  const cargoMetrics = cargoMetricsVisible && <div className="quote-metrics-grid">
+    {policies.pieces.isActive && <Field label="预计件数" className="quote-metric-compact"><input className="control" name="pieces" type="number" min="1" max={MAX_QUOTE_AUTO_PACKAGES} step="1" value={pieces} onChange={(event) => setPieces(event.target.value)} required={policies.pieces.isRequired}/></Field>}
+    {policies.weight.isActive && <Field label="预计重量 KG"><input className="control" name="weight" type="number" min="0.001" step="0.001" required={policies.weight.isRequired}/></Field>}
+    {(policies.length.isActive || policies.width.isActive || policies.height.isActive) && <fieldset className="quote-dimension-group">
+      <legend>预计尺寸 CM</legend>
+      <div className="quote-dimension-inputs">
+        {policies.length.isActive && <label className="quote-dimension-field"><span>长</span><input aria-label="预计长度 CM" className="control" name="length" type="number" min="0.01" step="0.01" value={lengthCm} onChange={(event) => setLengthCm(event.target.value)} required={policies.length.isRequired}/></label>}
+        {policies.width.isActive && <label className="quote-dimension-field"><span>宽</span><input aria-label="预计宽度 CM" className="control" name="width" type="number" min="0.01" step="0.01" value={widthCm} onChange={(event) => setWidthCm(event.target.value)} required={policies.width.isRequired}/></label>}
+        {policies.height.isActive && <label className="quote-dimension-field"><span>高</span><input aria-label="预计高度 CM" className="control" name="height" type="number" min="0.01" step="0.01" value={heightCm} onChange={(event) => setHeightCm(event.target.value)} required={policies.height.isRequired}/></label>}
+      </div>
+    </fieldset>}
+    {policies.volume.isActive && <Field label={`预计体积 CBM${volumeCanAutoCalculate ? "（自动计算）" : ""}`}>{volumeCanAutoCalculate
+      ? <input aria-label="预计体积 CBM" className="control quote-calculated-volume" name="volume" type="number" min="0.0001" step="0.0001" value={calculatedVolume} readOnly required={policies.volume.isRequired}/>
+      : <input aria-label="预计体积 CBM" className="control" name="volume" type="number" min="0.0001" step="0.0001" required={policies.volume.isRequired}/>}</Field>}
+  </div>;
   return <Form method="post" encType="multipart/form-data" className="prototype-quote-form" data-keyboard-submit data-enter-flow>
     <input type="hidden" name="intent" value="create"/>
     {formError && <div ref={errorSummaryRef} className="alert error" role="alert" tabIndex={-1}><strong>报价尚未保存</strong><span>{formError}</span><small>已填写内容仍保留在当前弹窗，请按提示修改后重试。</small></div>}
     <div className="quote-ledger">
-    <QuoteLedgerSection className="quote-plan-section" title="客户与运输方案">
+    <QuoteLedgerSection className="quote-plan-section" title="1　客户与运输方案">
       <div className="quote-field-grid quote-plan-grid">
-        <Field label="客户" className="quote-customer-picker-field"><div className="quote-customer-picker-row"><select className="control" name="customerId" value={customerId} onChange={(event) => selectCustomer(event.target.value)} required><option value="">请选择客户</option>{loaderData.customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name}</option>)}</select>{canCreateCustomer && <Modal title="新增客户" triggerLabel="＋ 新增客户" triggerClassName="secondary" size="xwide" dialogClassName="customer-editor-modal" closeSignal={createdCustomerId || undefined} guardFormChanges><CustomerEditorForm intent="customer" owners={loaderData.users} countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} busy={customerFetcher.state !== "idle"} values={customerFetcher.data?.values} errors={customerFetcher.data?.errors} formError={customerFetcher.data?.formError} formComponent={customerFetcher.Form} action="/admin/customers"/></Modal>}</div>{createdCustomerId && <small className="quote-customer-created">新客户已创建并自动选中</small>}</Field>
-        {policies.contactName.isActive && <Field label="客户联系人"><ContactCombobox name="customerContactName" value={customerContactName} contacts={selectedCustomerContacts} mode="name" required={policies.contactName.isRequired} onChange={(value, contact) => { setCustomerContactName(value); if (contact?.phone) setCustomerContactPhone(contact.phone); }} /></Field>}
-        {policies.contactPhone.isActive && <Field label="联系电话"><ContactCombobox name="customerContactPhone" value={customerContactPhone} contacts={selectedCustomerContacts} mode="phone" required={policies.contactPhone.isRequired} onChange={(value, contact) => { setCustomerContactPhone(value); if (contact) setCustomerContactName(contact.name); }} /></Field>}
-        {policies.salesperson.isActive && <Field label="业务员"><select className="control" name="salespersonId" defaultValue={loaderData.current.userId} required={policies.salesperson.isRequired}><option value="">请选择业务员</option>{loaderData.users.map((user) => <option key={user.id} value={user.id}>{user.display_name} · {user.email}</option>)}</select></Field>}
-        <Field label="运输方式"><select className="control" name="transportMode" defaultValue="ROAD" required><option value="ROAD">汽运</option><option value="RAIL" disabled>铁运（流程未开放）</option><option value="AIR" disabled>空运（流程未开放）</option></select></Field>
-        <Field label="订单类型"><select className="control" name="roadLoadType" value={roadLoadType} onChange={(event) => selectRoadLoadType(event.target.value as "" | "ltl" | "ftl")} required><option value="" disabled>请选择订单类型</option><option value="ltl">拼车</option><option value="ftl">整车</option></select></Field>
-        {policies.customsMode.isActive && <Field label="清关办理方式"><select className="control" name="customsClearanceMode" defaultValue="company" required={policies.customsMode.isRequired}><option value="company">公司代办清关</option><option value="customer">客户自理清关</option></select></Field>}
-        <Field label="工作流版本"><select className="control" name="workflowDefinitionId" value={workflowDefinitionId} onChange={(event) => setWorkflowDefinitionId(event.target.value)} disabled={!roadLoadType} required><option value="">{!roadLoadType ? "请先选择订单类型" : compatibleWorkflows.length ? "请选择工作流版本" : "当前类型暂无可用工作流"}</option>{compatibleWorkflows.map((workflow) => <option key={workflow.id} value={workflow.id}>{workflow.name} · v{workflow.version_number}{workflow.lifecycle_status === "published" ? " · 当前发布" : " · 历史版本"}</option>)}</select></Field>
+        <Field label="客户" className="quote-customer-picker-field quote-plan-customer"><div className="quote-customer-picker-row"><select className="control" name="customerId" value={customerId} onChange={(event) => selectCustomer(event.target.value)} required><option value="">请选择客户</option>{loaderData.customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name}</option>)}</select>{canCreateCustomer && <Modal title="新增客户" triggerLabel="＋ 新增客户" triggerClassName="secondary" size="xwide" dialogClassName="customer-editor-modal" closeSignal={createdCustomerId || undefined} guardFormChanges><CustomerEditorForm intent="customer" owners={loaderData.users} countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} busy={customerFetcher.state !== "idle"} values={customerFetcher.data?.values} errors={customerFetcher.data?.errors} formError={customerFetcher.data?.formError} formComponent={customerFetcher.Form} action="/admin/customers"/></Modal>}</div>{createdCustomerId && <small className="quote-customer-created">新客户已创建并自动选中</small>}</Field>
+        {policies.contactName.isActive && <Field label="客户联系人" className="quote-plan-contact"><ContactCombobox name="customerContactName" value={customerContactName} contacts={selectedCustomerContacts} mode="name" required={policies.contactName.isRequired} onChange={(value, contact) => { setCustomerContactName(value); if (contact?.phone) setCustomerContactPhone(contact.phone); }} /></Field>}
+        {policies.contactPhone.isActive && <Field label="联系电话" className="quote-plan-phone"><ContactCombobox name="customerContactPhone" value={customerContactPhone} contacts={selectedCustomerContacts} mode="phone" required={policies.contactPhone.isRequired} onChange={(value, contact) => { setCustomerContactPhone(value); if (contact) setCustomerContactName(contact.name); }} /></Field>}
+        <Field label="订单类型" className="quote-plan-order-type"><select className="control" name="roadLoadType" value={roadLoadType} onChange={(event) => selectRoadLoadType(event.target.value as "" | "ltl" | "ftl")} required><option value="" disabled>请选择订单类型</option><option value="ltl">拼车</option><option value="ftl">整车</option></select></Field>
+        <Field label="工作流版本" className="quote-plan-workflow"><select className="control" name="workflowDefinitionId" value={workflowDefinitionId} onChange={(event) => setWorkflowDefinitionId(event.target.value)} disabled={!roadLoadType} required><option value="">{!roadLoadType ? "请先选择订单类型" : compatibleWorkflows.length ? "请选择工作流版本" : "当前类型暂无可用工作流"}</option>{compatibleWorkflows.map((workflow) => <option key={workflow.id} value={workflow.id}>{workflow.name} · v{workflow.version_number}{workflow.lifecycle_status === "published" ? " · 当前发布" : " · 历史版本"}</option>)}</select></Field>
+        {policies.salesperson.isActive && <Field label="业务员" className="quote-plan-secondary"><select className="control" name="salespersonId" defaultValue={loaderData.current.userId} required={policies.salesperson.isRequired}><option value="">请选择业务员</option>{loaderData.users.map((user) => <option key={user.id} value={user.id}>{user.display_name} · {user.email}</option>)}</select></Field>}
+        <Field label="运输方式" className="quote-plan-secondary"><select className="control" name="transportMode" defaultValue="ROAD" required><option value="ROAD">汽运</option><option value="RAIL" disabled>铁运（流程未开放）</option><option value="AIR" disabled>空运（流程未开放）</option></select></Field>
+        {policies.customsMode.isActive && <Field label="清关办理方式" className="quote-plan-secondary"><select className="control" name="customsClearanceMode" defaultValue="company" required={policies.customsMode.isRequired}><option value="company">公司代办清关</option><option value="customer">客户自理清关</option></select></Field>}
       </div>
     </QuoteLedgerSection>
     {selectedWorkflow && selectedCustomWorkflowFields.length > 0 && <QuoteLedgerSection className="quote-workflow-fields-section" title="工作流配置项" note={`${selectedWorkflow.name} v${selectedWorkflow.version_number}`}>
       <QuotationWorkflowFieldInputs fields={selectedCustomWorkflowFields} values={[]} customers={loaderData.customers} warehouses={loaderData.warehouses}/>
     </QuoteLedgerSection>}
-    {routeFieldsVisible && <QuoteLedgerSection className="quote-route-section" title="运输路线与货物">
-      <div className={`quote-route-matrix ${cargoNarrativeVisible ? "with-cargo" : ""}`} role="group" aria-label="报价运输路线与货物">
-        <div className="quote-route-matrix-row quote-route-matrix-head" aria-hidden="true">
-          <span>填写项目</span>
-          <b>起运信息</b>
-          <b>目的信息</b>
-          {cargoNarrativeVisible && <b>货物描述</b>}
-        </div>
-        <div className="quote-route-matrix-row">
-          <span className="quote-route-matrix-label">地区</span>
-          <div className="quote-route-matrix-cell" data-column="起运信息">{policies.originRegion.isActive
-            ? <GeoCascadeFields key={`origin-${customerId}`} prefix="origin" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} initialCountry={selectedCustomer?.pickup_country_code} initialProvince={selectedCustomer?.pickup_state_code} initialCity={selectedCustomer?.pickup_city} required={policies.originRegion.isRequired} />
-            : <span className="muted">工作流已隐藏</span>}</div>
-          <div className="quote-route-matrix-cell" data-column="目的信息">{policies.destinationRegion.isActive
-            ? <GeoCascadeFields prefix="destination" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} required={policies.destinationRegion.isRequired} />
-            : <span className="muted">工作流已隐藏</span>}</div>
-          {cargoNarrativeVisible && <div className="quote-route-matrix-cell quote-route-cargo-cell" data-column="货物描述">
-            {policies.cargoDescription.isActive
-              ? <Field label="货物描述"><textarea className="control textarea" name="cargoDescription" rows={3} placeholder="填写货物名称、品类、材质、用途等说明" required={policies.cargoDescription.isRequired} /></Field>
-              : <span className="muted">工作流已隐藏</span>}
-          </div>}
-        </div>
-        <div className="quote-route-matrix-row">
-          <span className="quote-route-matrix-label">交接地点</span>
-          {policies.pickupAddress.isActive
-            ? <Field label="提货地址" className="quote-route-matrix-cell quote-route-address"><textarea className="control textarea" name="pickupAddress" rows={2} value={pickupAddress} onChange={(event) => setPickupAddress(event.target.value)} required={policies.pickupAddress.isRequired} /></Field>
-            : <div className="quote-route-matrix-cell quote-route-address"><span className="muted">提货地址已隐藏</span></div>}
-          <div className="quote-route-matrix-cell quote-route-destination-details">
-            {policies.destinationWarehouse.isActive && <Field label="目的仓库" className="quote-route-warehouse"><select className="control quote-warehouse-select" name="destinationWarehouseId" required={policies.destinationWarehouse.isRequired}><option value="">请选择境外目的仓</option>{loaderData.warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></Field>}
-            {policies.destinationNote.isActive && <Field label="目的地备注" className="quote-route-note"><textarea className="control textarea" name="destinationWarehouseNote" rows={2} required={policies.destinationNote.isRequired} /></Field>}
+    {routeFieldsVisible && <QuoteLedgerSection className="quote-route-section" title="2　起运、目的与货物">
+      <div className={`quote-route-cards ${cargoNarrativeVisible ? "with-cargo" : ""}`} role="group" aria-label="报价运输路线与货物">
+        <section className="quote-route-card">
+          <header><b>起运信息</b></header>
+          <div className="quote-route-card-fields">
+            {policies.originRegion.isActive && <div className="field"><span>起运地区</span><GeoCascadeFields key={`origin-${customerId}`} prefix="origin" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} initialCountry={selectedCustomer?.pickup_country_code} initialProvince={selectedCustomer?.pickup_state_code} initialCity={selectedCustomer?.pickup_city} required={policies.originRegion.isRequired} /></div>}
+            {policies.pickupAddress.isActive && <Field label="提货地址"><input className="control" name="pickupAddress" value={pickupAddress} onChange={(event) => setPickupAddress(event.target.value)} required={policies.pickupAddress.isRequired}/></Field>}
           </div>
-          {cargoNarrativeVisible && <div className="quote-route-matrix-cell quote-route-cargo-cell" data-column="报价备注">
-            {policies.notes.isActive
-              ? <Field label="报价备注"><textarea className="control textarea" name="notes" rows={3} placeholder="填写报价范围、特殊约定或其他说明" required={policies.notes.isRequired} /></Field>
-              : <span className="muted">无额外报价备注</span>}
-          </div>}
-        </div>
+        </section>
+        <section className="quote-route-card">
+          <header><b>目的信息</b></header>
+          <div className="quote-route-card-fields quote-destination-card-fields">
+            {policies.destinationRegion.isActive && <div className="field"><span>目的地区</span><GeoCascadeFields prefix="destination" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} required={policies.destinationRegion.isRequired} /></div>}
+            {policies.destinationWarehouse.isActive && <Field label="目的仓库"><select className="control quote-warehouse-select" name="destinationWarehouseId" required={policies.destinationWarehouse.isRequired}><option value="">请选择境外目的仓</option>{loaderData.warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></Field>}
+            {policies.destinationNote.isActive && <Field label="目的地备注"><input className="control" name="destinationWarehouseNote" required={policies.destinationNote.isRequired}/></Field>}
+          </div>
+        </section>
+        {cargoNarrativeVisible && <section className="quote-route-card quote-route-cargo-card">
+          <header><b>货物与说明</b></header>
+          <div className="quote-route-card-fields">
+            {policies.cargoDescription.isActive && <Field label="货物描述"><textarea className="control textarea" name="cargoDescription" rows={3} placeholder="货物名称、品类、材质、用途" required={policies.cargoDescription.isRequired} /></Field>}
+            {policies.notes.isActive && <Field label="报价备注"><input className="control" name="notes" placeholder="特殊约定或其他说明" required={policies.notes.isRequired} /></Field>}
+          </div>
+        </section>}
       </div>
-      {cargoMetricsVisible && <div className="quote-cargo-grid quote-route-cargo-metrics">
-        <div className="table-wrap quote-cargo-metrics-table"><table className="inline-table"><thead><tr>
-          {policies.pieces.isActive && <th>预计件数</th>}
-          {policies.weight.isActive && <th>预计重量 KG</th>}
-          {policies.length.isActive && <th>预计长度 CM</th>}
-          {policies.width.isActive && <th>预计宽度 CM</th>}
-          {policies.height.isActive && <th>预计高度 CM</th>}
-          {policies.volume.isActive && <th>预计体积 CBM{volumeCanAutoCalculate ? "（自动计算）" : ""}</th>}
-        </tr></thead><tbody><tr>
-          {policies.pieces.isActive && <td><input aria-label="预计件数" className="control" name="pieces" type="number" min="1" max={MAX_QUOTE_AUTO_PACKAGES} step="1" value={pieces} onChange={(event) => setPieces(event.target.value)} required={policies.pieces.isRequired}/></td>}
-          {policies.weight.isActive && <td><input aria-label="预计重量 KG" className="control" name="weight" type="number" min="0.001" step="0.001" required={policies.weight.isRequired}/></td>}
-          {policies.length.isActive && <td><input aria-label="预计长度 CM" className="control" name="length" type="number" min="0.01" step="0.01" value={lengthCm} onChange={(event) => setLengthCm(event.target.value)} required={policies.length.isRequired}/></td>}
-          {policies.width.isActive && <td><input aria-label="预计宽度 CM" className="control" name="width" type="number" min="0.01" step="0.01" value={widthCm} onChange={(event) => setWidthCm(event.target.value)} required={policies.width.isRequired}/></td>}
-          {policies.height.isActive && <td><input aria-label="预计高度 CM" className="control" name="height" type="number" min="0.01" step="0.01" value={heightCm} onChange={(event) => setHeightCm(event.target.value)} required={policies.height.isRequired}/></td>}
-          {policies.volume.isActive && <td>{volumeCanAutoCalculate
-            ? <input aria-label="预计体积 CBM" className="control quote-calculated-volume" name="volume" type="number" min="0.0001" step="0.0001" value={calculatedVolume} readOnly required={policies.volume.isRequired}/>
-            : <input aria-label="预计体积 CBM" className="control" name="volume" type="number" min="0.0001" step="0.0001" required={policies.volume.isRequired}/>}</td>}
-        </tr></tbody></table></div>
-      </div>}
     </QuoteLedgerSection>}
-    {!routeFieldsVisible && cargoFieldsVisible && <QuoteLedgerSection title="货物预估与报价说明">
+    {!routeFieldsVisible && cargoNarrativeVisible && <QuoteLedgerSection title="2　货物与报价说明">
       <div className="quote-description-grid">
         {policies.cargoDescription.isActive && <Field label="货物描述"><textarea className="control textarea" name="cargoDescription" rows={3} placeholder="填写货物名称、品类、材质、用途等说明" required={policies.cargoDescription.isRequired} /></Field>}
         {policies.notes.isActive && <Field label="报价备注"><textarea className="control textarea" name="notes" rows={3} placeholder="填写报价范围、特殊约定或其他说明" required={policies.notes.isRequired} /></Field>}
       </div>
-      {cargoMetricsVisible && <div className="quote-cargo-grid">
-        <div className="table-wrap quote-cargo-metrics-table"><table className="inline-table"><thead><tr>
-          {policies.pieces.isActive && <th>预计件数</th>}
-          {policies.weight.isActive && <th>预计重量 KG</th>}
-          {policies.length.isActive && <th>预计长度 CM</th>}
-          {policies.width.isActive && <th>预计宽度 CM</th>}
-          {policies.height.isActive && <th>预计高度 CM</th>}
-          {policies.volume.isActive && <th>预计体积 CBM{volumeCanAutoCalculate ? "（自动计算）" : ""}</th>}
-        </tr></thead><tbody><tr>
-          {policies.pieces.isActive && <td><input aria-label="预计件数" className="control" name="pieces" type="number" min="1" max={MAX_QUOTE_AUTO_PACKAGES} step="1" value={pieces} onChange={(event) => setPieces(event.target.value)} required={policies.pieces.isRequired}/></td>}
-          {policies.weight.isActive && <td><input aria-label="预计重量 KG" className="control" name="weight" type="number" min="0.001" step="0.001" required={policies.weight.isRequired}/></td>}
-          {policies.length.isActive && <td><input aria-label="预计长度 CM" className="control" name="length" type="number" min="0.01" step="0.01" value={lengthCm} onChange={(event) => setLengthCm(event.target.value)} required={policies.length.isRequired}/></td>}
-          {policies.width.isActive && <td><input aria-label="预计宽度 CM" className="control" name="width" type="number" min="0.01" step="0.01" value={widthCm} onChange={(event) => setWidthCm(event.target.value)} required={policies.width.isRequired}/></td>}
-          {policies.height.isActive && <td><input aria-label="预计高度 CM" className="control" name="height" type="number" min="0.01" step="0.01" value={heightCm} onChange={(event) => setHeightCm(event.target.value)} required={policies.height.isRequired}/></td>}
-          {policies.volume.isActive && <td>{volumeCanAutoCalculate
-            ? <input aria-label="预计体积 CBM" className="control quote-calculated-volume" name="volume" type="number" min="0.0001" step="0.0001" value={calculatedVolume} readOnly required={policies.volume.isRequired}/>
-            : <input aria-label="预计体积 CBM" className="control" name="volume" type="number" min="0.0001" step="0.0001" required={policies.volume.isRequired}/>}</td>}
-        </tr></tbody></table></div>
-      </div>}
     </QuoteLedgerSection>}
+    {cargoMetricsVisible && <QuoteLedgerSection className="quote-metrics-section" title="3　货物数量与尺寸">{cargoMetrics}</QuoteLedgerSection>}
     {(policies.charges.isActive || policies.validUntil.isActive) && <QuoteLedgerSection
-      title="客户应收费用"
+      title="4　报价费用与有效期"
       action={policies.charges.isActive ? <button className="btn quote-charge-add" type="button" onClick={() => setCharges((rows) => [...rows, { name: transportChargeNameOptions[0]?.[0] || "国际汽运费", quantity: 1, unitPrice: 0, notes: "" }])}>＋ 添加费用</button> : undefined}
     >
       {policies.charges.isActive && <><div className="table-wrap quote-charge-table-wrap"><table className="inline-table quote-charge-table"><thead><tr><th>费用名称</th><th>数量</th><th>单价</th><th>金额</th><th>备注</th><th>操作</th></tr></thead><tbody>{charges.map((charge, index) => <tr key={index}><td><select className="control" name="chargeName" value={charge.name} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, name: event.target.value } : row))} required={policies.charges.isRequired}>{transportChargeNameOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td><td><input className="control" name="chargeQuantity" type="number" min="0.01" step="0.01" value={charge.quantity} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: Number(event.target.value) } : row))} required={policies.charges.isRequired}/></td><td><input className="control" name="chargeUnitPrice" type="number" min="0.01" step="0.01" value={charge.unitPrice} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, unitPrice: Number(event.target.value) } : row))} required={policies.charges.isRequired}/></td><td><b>{(charge.quantity * charge.unitPrice).toLocaleString()}</b></td><td><input className="control" name="chargeNotes" value={charge.notes} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, notes: event.target.value } : row))}/></td><td><button className="btn danger" type="button" disabled={charges.length === 1} onClick={() => setCharges((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>删除</button></td></tr>)}</tbody></table></div>
-      <div className="quote-charge-summary"><small>共 {charges.length} 个费用项目，系统按“数量 × 单价”自动汇总</small><strong>报价总额 CNY {total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></div></>}
-      {policies.validUntil.isActive && <div className="quote-validity-row"><Field label="报价有效期"><input className="control" name="validUntil" type="date" required={policies.validUntil.isRequired}/></Field></div>}
+      </>}
+      <div className="quote-charge-footer">
+        {policies.validUntil.isActive && <Field label="报价有效期"><input className="control" name="validUntil" type="date" required={policies.validUntil.isRequired}/></Field>}
+        {policies.charges.isActive && <strong>报价总额　CNY {total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>}
+      </div>
     </QuoteLedgerSection>}
     </div>
     <div className="modal-form-actions"><button className="btn primary large" disabled={busy}>保存报价并等待客户确认</button></div>
