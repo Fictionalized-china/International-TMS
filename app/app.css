@@ -15631,6 +15631,7 @@ a.order-module-card.read-only:hover {
 .batch-customs-footer-action { display: flex; justify-content: flex-end; }
 .batch-customs-empty-row .batch-customs-create-button,
 .batch-customs-footer-action .batch-customs-create-button { min-width: 104px; }
+.batch-document-auto-advance { margin: 0 0 10px; padding: 8px 10px; }
 
 @media (max-width: 900px) {
   .loading-batch-entry-files,

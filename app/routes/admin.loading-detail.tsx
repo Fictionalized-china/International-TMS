@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
-import { Form, Link, useNavigation, useSearchParams } from "react-router";
+import { Form, Link, useNavigate, useNavigation, useSearchParams } from "react-router";
 import type { Route } from "./+types/admin.loading-detail";
 import { OrderNumberLink } from "../components/EntityNumberLink";
 import { OrganizationAssigneePicker } from "../components/OrganizationAssigneePicker";
@@ -1118,7 +1118,7 @@ export async function action({request,params}:Route.ActionArgs){
     ]);
     await synchronizeOrderDocumentsModuleStatus({organizationId:current.organizationId,orderId,actorUserId:current.userId,now,source:"admin_upload"});
     await writeAudit({request,action:"transport.batch.order_document.upload",resourceType:"order_attachment",resourceId:attachmentId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{batchId,orderId,documentCategory,automaticReview:true}});
-    return{success:`${orderDocumentTypeLabel(documentCategory)}已上传并自动通过`};
+    return{success:`${orderDocumentTypeLabel(documentCategory)}已上传并自动通过`,uploadedOrderId:orderId};
   }
   if(intent==="generate_manifest"){
     // 配载单由工作台自动生成：仓库按生成的配载单装车出库，不再要求人工上传。
@@ -1541,6 +1541,7 @@ export async function action({request,params}:Route.ActionArgs){
 
 export default function LoadingDetail({loaderData,actionData}:Route.ComponentProps){
   const [searchParams]=useSearchParams();
+  const navigate=useNavigate();
   const [detailDrawerOpen,setDetailDrawerOpen]=useState(false);
   const [detailDrawerOrderId,setDetailDrawerOrderId]=useState<string|null>(null);
   const detailDrawerTriggerRef=useRef<HTMLButtonElement>(null);
@@ -1617,6 +1618,14 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   const requestedTab=searchParams.get("tab");
   const activeTab:BatchWorkspaceTab=isBatchWorkspaceTab(requestedTab)?requestedTab:defaultActiveTab;
   const tabHref=(tab:BatchWorkspaceTab)=>{const next=new URLSearchParams(searchParams);next.set("tab",tab);next.delete("orderPage");next.delete("documentView");return `?${next.toString()}`};
+  const uploadedOrderId=actionData&&"uploadedOrderId" in actionData&&typeof actionData.uploadedOrderId==="string"?actionData.uploadedOrderId:null;
+  const documentUploadSignal=uploadedOrderId?actionData:undefined;
+  const previousDocumentGateReadyRef=useRef(allDocumentGateReady);
+  useEffect(()=>{
+    const justPassed=!previousDocumentGateReadyRef.current&&allDocumentGateReady;
+    previousDocumentGateReadyRef.current=allDocumentGateReady;
+    if(justPassed&&actionData?.success&&activeTab==="documents")navigate(tabHref("tracking"),{replace:true});
+  },[actionData,activeTab,allDocumentGateReady,navigate,searchParams]);
   const orderDepartureReady=loaderData.departureGateStatuses.every(item=>item.ready);
   const transportResourceValues:Record<string,string|number|null>={overseas_carrier_name:loaderData.batch.overseas_carrier_name,overseas_vehicle_type:loaderData.batch.overseas_vehicle_type,overseas_vehicle_count:loaderData.batch.overseas_vehicle_count,overseas_vehicle_plate:loaderData.batch.overseas_vehicle_plate,overseas_driver_name:loaderData.batch.overseas_driver_name,overseas_driver_phone:loaderData.batch.overseas_driver_phone};
   const hasRequiredTransportResources=Object.keys(transportResourceValues).some(fieldKey=>loaderData.batchWorkflowPolicies.some(policy=>orderWorkflowFieldBlocksBatch(loaderData.batchWorkflowPolicies,policy.orderId,"loading",fieldKey,true)));
@@ -1659,7 +1668,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
     <BatchWorkspaceTabs status={loaderData.batch.road_status} documentGateReady={allDocumentGateReady} loadPlanReady={loadPlanReady} warehouseReady={allDispatched} borderArrivalReady={borderArrivalReady} exceptionCount={activeExceptions.length} activeTab={activeTab} tabHref={tabHref}/>
   </section>
   {activeTab==="tracking"&&<BatchTrackingWorkbench batchId={loaderData.batch.id} batchNumber={loaderData.batch.batch_number} orders={loaderData.orders} visibleOrders={visibleOrders} orderPagination={orderPagination} trackingMilestones={loaderData.trackingMilestones} trackingFlags={loaderData.trackingFlags} workflowPolicies={loaderData.batchWorkflowPolicies} milestoneAction={loaderData.trackingMilestoneAction} actualExitAction={loaderData.actualExitAction} batchVehiclePlate={loaderData.batchVehiclePlate} overseasVehiclePlate={loaderData.batch.overseas_vehicle_plate||null} borderPort={loaderData.batch.border_port||null} customsLocation={loaderData.batch.customs_location||null} busy={busy} manage={manageTracking&&allDispatched} warehouseReady={allDispatched} documentGateReady={allDocumentGateReady} exitConfirmed={exited} canConfirmExit={canConfirmExit} exitBlockers={Array.from(new Set(exitBlockers))} borderPorts={loaderData.borderPorts} documentsHref={tabHref("documents")} actionCloseSignal={actionData?.success?actionData:undefined}/>} 
-  {activeTab==="documents"&&<BatchDocumentWorkbench batchId={loaderData.batch.id} orders={loaderData.orders} visibleOrders={visibleOrders} orderPagination={orderPagination} batchDocuments={loaderData.batchDocuments} orderDocuments={loaderData.orderDocuments} orderDocumentRequirements={loaderData.orderDocumentRequirements} customsSummaries={loaderData.customsSummaries} customsDeclarations={loaderData.customsDeclarations} workflowPolicies={loaderData.batchWorkflowPolicies} customsAccesses={loaderData.batchCustomsAccess.orders} busy={busy} manageDocuments={manageDocuments} manageCustoms={manageCustoms} currentUserId={loaderData.current.userId} documentOwnerUserId={loaderData.batch.document_assignee_user_id} documentOwnerName={loaderData.batch.document_assignee_name} privileged={privileged} requiresTransloading={requiresTransloading} ready={allDocumentGateReady} customsCloseSignal={actionData?.success?actionData:undefined} onOpenOrderDossier={orderId=>openDetailDrawer(orderId)}/>} 
+  {activeTab==="documents"&&<BatchDocumentWorkbench batchId={loaderData.batch.id} orders={loaderData.orders} visibleOrders={visibleOrders} orderPagination={orderPagination} batchDocuments={loaderData.batchDocuments} orderDocuments={loaderData.orderDocuments} orderDocumentRequirements={loaderData.orderDocumentRequirements} customsSummaries={loaderData.customsSummaries} customsDeclarations={loaderData.customsDeclarations} workflowPolicies={loaderData.batchWorkflowPolicies} customsAccesses={loaderData.batchCustomsAccess.orders} busy={busy} manageDocuments={manageDocuments} manageCustoms={manageCustoms} currentUserId={loaderData.current.userId} documentOwnerUserId={loaderData.batch.document_assignee_user_id} documentOwnerName={loaderData.batch.document_assignee_name} privileged={privileged} requiresTransloading={requiresTransloading} ready={allDocumentGateReady} customsCloseSignal={actionData?.success?actionData:undefined} uploadedOrderId={uploadedOrderId} documentUploadSignal={documentUploadSignal} onOpenOrderDossier={orderId=>openDetailDrawer(orderId)}/>} 
   {activeTab==="exceptions"&&<BatchExceptionWorkbench batch={loaderData.batch} orders={loaderData.orders} packages={loaderData.exceptionPackages} exceptions={loaderData.batchExceptions} busy={busy} manage={manageExceptions} closeSignal={actionData?.success?actionData:undefined}/>}
   {activeTab==="batch"&&<><section className="panel loading-sheet batch-tab-panel" id="batch-arrangement">
     <div className="batch-detail-summary"><div><h2>仓库配载结果</h2><p>由仓库端自动同步，管理后台只读查看。</p></div><div className="loading-sheet-state batch-detail-summary-status"><span>{loaderData.orders.length} 票</span><span>{loaderData.vehicles.length} 车</span><b>{allDispatched?"仓库已出库":loadPlanReady&&allDocumentGateReady?"待仓库装车":"待仓库补齐"}</b></div></div>
@@ -1922,7 +1931,8 @@ function BatchExceptionWorkbench({batch,orders,packages,exceptions,busy,manage,c
   </section>;
 }
 
-function BatchDocumentWorkbench({batchId,orders,visibleOrders,orderPagination,batchDocuments,orderDocuments,orderDocumentRequirements,customsSummaries,customsDeclarations,workflowPolicies,customsAccesses,busy,manageDocuments,manageCustoms,currentUserId,documentOwnerUserId,documentOwnerName,privileged,requiresTransloading,ready,customsCloseSignal,onOpenOrderDossier}:{batchId:string;orders:BatchOrder[];visibleOrders:BatchOrder[];orderPagination:BatchOrderPagination;batchDocuments:BatchDocument[];orderDocuments:OrderDocument[];orderDocumentRequirements:OrderLoadingDocumentRequirements[];customsSummaries:CustomsSummary[];customsDeclarations:BatchCustomsDeclaration[];workflowPolicies:BatchOrderWorkflowPolicy[];customsAccesses:BatchOrderCustomsAccess[];busy:boolean;manageDocuments:boolean;manageCustoms:boolean;currentUserId:string;documentOwnerUserId:string|null;documentOwnerName:string|null;privileged:boolean;requiresTransloading:boolean;ready:boolean;customsCloseSignal?:unknown;onOpenOrderDossier:(orderId:string)=>void}){
+function BatchDocumentWorkbench({batchId,orders,visibleOrders,orderPagination,batchDocuments,orderDocuments,orderDocumentRequirements,customsSummaries,customsDeclarations,workflowPolicies,customsAccesses,busy,manageDocuments,manageCustoms,currentUserId,documentOwnerUserId,documentOwnerName,privileged,requiresTransloading,ready,customsCloseSignal,uploadedOrderId,documentUploadSignal,onOpenOrderDossier}:{batchId:string;orders:BatchOrder[];visibleOrders:BatchOrder[];orderPagination:BatchOrderPagination;batchDocuments:BatchDocument[];orderDocuments:OrderDocument[];orderDocumentRequirements:OrderLoadingDocumentRequirements[];customsSummaries:CustomsSummary[];customsDeclarations:BatchCustomsDeclaration[];workflowPolicies:BatchOrderWorkflowPolicy[];customsAccesses:BatchOrderCustomsAccess[];busy:boolean;manageDocuments:boolean;manageCustoms:boolean;currentUserId:string;documentOwnerUserId:string|null;documentOwnerName:string|null;privileged:boolean;requiresTransloading:boolean;ready:boolean;customsCloseSignal?:unknown;uploadedOrderId:string|null;documentUploadSignal?:unknown;onOpenOrderDossier:(orderId:string)=>void}){
+  const workbenchRef=useRef<HTMLElement>(null);
   const visibleBatchDocTypes=BATCH_DOCUMENT_TYPES.filter(type=>requiresTransloading||!["border_handover","transshipment_order"].includes(type.code));
   const systemDocumentCodes=new Set(["loading_manifest","vehicle_manifest","batch_waybill"]);
   const currentIsDocumentOwner=privileged||documentOwnerUserId===currentUserId;
@@ -1940,7 +1950,13 @@ function BatchDocumentWorkbench({batchId,orders,visibleOrders,orderPagination,ba
     else next.delete("documentView");
     return `?${next.toString()}`;
   };
-  return <section className="panel batch-document-workbench batch-tab-panel" id="batch-files">
+  useEffect(()=>{
+    if(!uploadedOrderId||!documentUploadSignal)return;
+    const dialogs=workbenchRef.current?.querySelectorAll<HTMLDetailsElement>(".batch-order-file-details");
+    const completedDialog=Array.from(dialogs??[]).find(dialog=>dialog.dataset.orderId===uploadedOrderId&&dialog.dataset.documentsReady==="true");
+    completedDialog?.removeAttribute("open");
+  },[documentUploadSignal,uploadedOrderId]);
+  return <section ref={workbenchRef} className="panel batch-document-workbench batch-tab-panel" id="batch-files">
     <div className="batch-detail-summary"><div><h2>报关与文件</h2></div><div className="batch-detail-summary-status"><span>{orders.length} 票订单</span><b>{ready?"门禁已通过":"存在待办资料"}</b></div></div>
     <div className="batch-detail-disclosure-body">
     <nav className="batch-document-view-tabs peer-page-tabs" aria-label="报关与文件子页面">
@@ -1985,13 +2001,15 @@ function BatchDocumentWorkbench({batchId,orders,visibleOrders,orderPagination,ba
           customsFilesReady,
         });
         const canActOnThisOrder=manageDocuments||canManageThisOrder||canReleaseThisOrder;
+        const hasActiveDeclaration=orderCustomsDeclarations.some(item=>item.is_deleted!==1&&item.status!=="cancelled");
+        const autoOpenDeclaration=uploadedOrderId===order.order_id&&documentSummary.complete&&customsPolicy.enabled&&declarationsField.visible&&declarationsField.required&&canManageThisOrder&&!hasActiveDeclaration;
         const customsStatus=!customsPolicy.enabled?"本单未启用报关":!declarationsField.visible?"工作流未展示报关申报明细":!customsPolicy.required?(customs?.total?`选办 · ${customs.released}/${customs.total} 张放行`:"选办 · 尚未登记"):!customsFilesReady?"必填报关文件待审核":customs?.total?`${customs.released}/${customs.total} 张放行`:"待登记并放行正式报关单";
         return <tr className={orderGateReady?"completed-row":canActOnThisOrder?"blocked-row":"readonly-row"} key={order.order_id} id={`batch-customs-${order.order_id}`}>
           <td><strong><OrderNumberLink id={order.order_id} number={order.order_number}/></strong><small>{order.customer_name}</small></td>
           <td><strong className="loading-cargo-names">{order.cargo_names||order.cargo_description||"未填写"}</strong><small>{order.pieces} 件 · {order.gross_weight_kg.toFixed(2)} KG · {order.volume_cbm.toFixed(3)} CBM</small></td>
           <td><span className={`status-pill ${documentSummary.complete?"success":""}`}>{documentSummary.requiredCount===0?"无必填文件":incompleteCodes.length?`待处理 ${incompleteCodes.length} 项`:`${documentSummary.requiredCount} 项必填文件已齐`}</span>{incompleteCodes.length>0&&<small>{incompleteCodes.map(orderDocumentTypeLabel).join("、")}</small>}</td>
           <td><span className={`status-pill ${customsPolicy.required&&customsReady?"success":!customsPolicy.required?"off":""}`}>{customsStatus}</span></td>
-          <td><div className="batch-order-row-actions"><details className="batch-order-file-details"><summary className={canActOnThisOrder?"primary batch-customs-open-action":"secondary batch-customs-open-action"}>{canActOnThisOrder?"办理本票报关":"查看本票文件"}</summary><div className="batch-order-file-panel">
+          <td><div className="batch-order-row-actions"><details className="batch-order-file-details" data-order-id={order.order_id} data-documents-ready={documentSummary.complete?"true":"false"}><summary className={canActOnThisOrder?"primary batch-customs-open-action":"secondary batch-customs-open-action"}>{canActOnThisOrder?"办理本票报关":"查看本票文件"}</summary><div className="batch-order-file-panel">
             <header className="batch-order-file-panel-header"><div><strong>{canActOnThisOrder?"办理本票报关":"查看本票文件"}</strong><span><OrderNumberLink id={order.order_id} number={order.order_number}/> · {order.customer_name}</span></div><button type="button" aria-label="关闭文件查看窗口" onClick={event=>(event.currentTarget.closest("details") as HTMLDetailsElement|null)?.removeAttribute("open")}>×</button></header>
             {!canActOnThisOrder&&workflowAccess?.declarationAccess.reason&&<div className="alert info">{workflowAccess.declarationAccess.reason}</div>}
             <div className="batch-order-file-list batch-order-file-checklist">
@@ -2027,7 +2045,7 @@ function BatchDocumentWorkbench({batchId,orders,visibleOrders,orderPagination,ba
             })}{!activeRequirements.length&&<span className="status-pill success">当前工作流未启用逐票文件</span>}</div>
             <BatchOrderCustomsWorkbench orderId={order.order_id} declarations={orderCustomsDeclarations} fields={customsPolicy.fields} manage={canManageThisOrder} allowRelease={canReleaseThisOrder} busy={busy} closeSignal={customsCloseSignal}/>
             <div className="batch-order-file-links"><BatchOrderArchiveButton orderId={order.order_id} onOpen={onOpenOrderDossier}/></div>
-          </div></details>{canReleaseThisOrder&&pendingCustomsDeclarations.map(declaration=><Modal key={declaration.id} title={`确认报关放行 · ${declaration.declaration_number}`} triggerLabel={pendingCustomsDeclarations.length>1?`确认放行 · ${declaration.declaration_number}`:"确认放行"} triggerClassName="primary batch-order-direct-customs-button" closeSignal={customsCloseSignal}><section className="batch-direct-release-item"><header><strong>{declaration.declaration_number}</strong><span>{customsStageLabel(declaration.clearance_stage)} · {declaration.declaration_title}</span></header><BatchCustomsReleaseForm orderId={order.order_id} declaration={declaration} fields={customsPolicy.fields} busy={busy}/></section></Modal>)}</div></td>
+          </div></details>{autoOpenDeclaration&&<Modal title={`下一步：新增本票报关单 · ${order.order_number}`} openSignal={documentUploadSignal} size="wide" dialogClassName="customs-declaration-modal" initialFocusSelector="[name='clearanceStage']"><div className="alert success batch-document-auto-advance" role="status">必需文件已齐，继续登记本票报关单。</div><BatchCustomsDeclarationForm orderId={order.order_id} fields={customsPolicy.fields} allowRelease={canReleaseThisOrder} busy={busy}/></Modal>}{canReleaseThisOrder&&pendingCustomsDeclarations.map(declaration=><Modal key={declaration.id} title={`确认报关放行 · ${declaration.declaration_number}`} triggerLabel={pendingCustomsDeclarations.length>1?`确认放行 · ${declaration.declaration_number}`:"确认放行"} triggerClassName="primary batch-order-direct-customs-button" closeSignal={customsCloseSignal}><section className="batch-direct-release-item"><header><strong>{declaration.declaration_number}</strong><span>{customsStageLabel(declaration.clearance_stage)} · {declaration.declaration_title}</span></header><BatchCustomsReleaseForm orderId={order.order_id} declaration={declaration} fields={customsPolicy.fields} busy={busy}/></section></Modal>)}</div></td>
         </tr>})}</tbody></table></div>
       <QueryPagination {...orderPagination} pageParam="orderPage" unit="票订单"/>
     </section>
