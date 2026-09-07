@@ -1015,10 +1015,14 @@ function LinearOrderWorkspace({
     : [];
   const progress = orderCompleted ? 100 : steps.length ? Math.round((currentIndex / steps.length) * 100) : 0;
   const showOuterActionBar = !data.embeddedModuleData && !readOnly;
+  const currentWorkflowTask = data.currentWorkflowTasks.find(
+    (task) => !orderCompleted && task.status !== "completed" && task.module_code === guidance.moduleCode,
+  ) ?? data.currentWorkflowTasks.find(
+    (task) => !orderCompleted && task.status !== "completed",
+  );
   const responsiblePosition = parallelCostsActive
     ? "客服 / 业务 / 财务"
-    : data.currentWorkflowTasks.find((task) => !orderCompleted && task.status !== "completed")?.position_name
-      || orderResponsiblePosition(guidance.moduleCode, order.status).name;
+    : currentWorkflowTask?.position_name || orderResponsiblePosition(guidance.moduleCode, order.status).name;
   const responsibleAssignee = parallelCostsActive
     ? "三方独立签核"
     : orderResponsibilityAssigneeLabel({
@@ -1026,9 +1030,6 @@ function LinearOrderWorkspace({
         moduleCode: guidance.moduleCode,
         assigneeName: order.assignee_name,
       });
-  const currentWorkflowTask = data.currentWorkflowTasks.find(
-    (task) => !orderCompleted && task.status !== "completed",
-  );
   const collaborationNotice = orderCollaborationNotice({
     orderStatus: order.status,
     currentStepKey,

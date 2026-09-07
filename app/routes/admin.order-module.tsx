@@ -7983,8 +7983,8 @@ function ModuleBusinessData({
 
         {canGenerate && (
           <BusinessSubsection
-            title={review.snapshotId ? "更新订单复盘" : "填写订单复盘"}
-            hint="保存草稿不会完成订单；保存后可在下方执行最终确认。"
+            title={review.snapshotId ? "第 1 步 · 更新复盘草稿" : "第 1 步 · 填写复盘草稿"}
+            hint="草稿可反复修改，保存草稿不会完成订单。"
             className="order-review-action-section"
           >
             <Form method="post" className="review-generation-form">
@@ -7998,24 +7998,27 @@ function ModuleBusinessData({
               <ModuleField fields={data.workflowFields} fieldKey="review_improvements" label="改进建议">
                 {(required) => <textarea name="improvementNotes" required={required} defaultValue={review.improvementNotes || ""} placeholder="后续可复用的改进动作" />}
               </ModuleField>
-              <button className="primary" disabled={busy}>{review.snapshotId ? "保存复盘修改" : "保存复盘草稿"}</button>
+              <div className="review-form-actions">
+                <span>{review.snapshotId ? "修改后重新保存，将生成新的复盘版本。" : "先保存草稿，再进行最终归档确认。"}</span>
+                <button className="primary" disabled={busy}>{review.snapshotId ? "保存复盘修改" : "保存复盘草稿"}</button>
+              </div>
             </Form>
           </BusinessSubsection>
         )}
         {canGenerate && review.snapshotId && (
           <BusinessSubsection
-            title="确认完成并归档"
-            hint="最终提交时会重新校验业务、文件和结算门禁。"
+            title="第 2 步 · 最终确认归档"
+            hint="确认后订单完成；提交时系统会再次校验全部门禁。"
             className="order-review-finalize-section"
           >
             {finalizationGate?.allowed ? (
               <Form method="post" className="review-finalize-form">
                 <input type="hidden" name="intent" value="finalize_order_review" />
-                <label className="checkbox-line">
+                <label className="checkbox-line review-finalize-check">
                   <input type="checkbox" name="confirmFinalReview" value="1" required />
-                  <span>我已核对复盘结论及全部业务、结算和归档资料。</span>
+                  <span><strong>归档前最终核对</strong><small>我已核对复盘结论及全部业务、结算和归档资料。</small></span>
                 </label>
-                <button className="primary" disabled={busy}>确认完成并归档</button>
+                <button className="primary" disabled={busy}>完成订单归档</button>
               </Form>
             ) : (
               <p className="alert warning">
