@@ -32,6 +32,7 @@ export type FtlLoadPlanSubmissionValues = {
   customsLocation: string | null;
   carrierId: string | null;
   vehicleType: string | null;
+  vehicleCount: number | null;
   vehiclePlate: string | null;
   driverName: string | null;
   driverPhone: string | null;
@@ -306,6 +307,12 @@ const ftlCreationFieldValueKeys = {
   main_driver_phone: "driverPhone",
   planned_exit_at: "plannedDepartureAt",
   planned_arrival_at: "plannedArrivalAt",
+  overseas_carrier_name: "carrierId",
+  overseas_vehicle_type: "vehicleType",
+  overseas_vehicle_count: "vehicleCount",
+  overseas_vehicle_plate: "vehiclePlate",
+  overseas_driver_name: "driverName",
+  overseas_driver_phone: "driverPhone",
 } as const satisfies Record<string, keyof FtlLoadPlanSubmissionValues>;
 
 function isFtlCreationField(
@@ -318,9 +325,10 @@ function submittedFtlCreationFieldPresent(
   context: Extract<FtlLoadPlanContext, { mode: "submit" }>,
   fieldKey: keyof typeof ftlCreationFieldValueKeys,
 ) {
-  return Boolean(
-    String(context.values[ftlCreationFieldValueKeys[fieldKey]] ?? "").trim(),
-  );
+  const valueKey = ftlCreationFieldValueKeys[fieldKey];
+  const value = context.values[valueKey];
+  if (valueKey === "vehicleCount") return Number(value) > 0;
+  return Boolean(String(value ?? "").trim());
 }
 
 export async function checkOrderLoadPlan(

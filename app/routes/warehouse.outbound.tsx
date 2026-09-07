@@ -510,6 +510,7 @@ export async function action({request}:Route.ActionArgs){
         customsLocation:customsLocation||null,
         carrierId:planned.carrier_id,
         vehicleType:planned.vehicle_type,
+        vehicleCount:planned.vehicle_id?1:null,
         vehiclePlate:plate||null,
         driverName:driver||null,
         driverPhone:phone||null,
@@ -559,7 +560,7 @@ export async function action({request}:Route.ActionArgs){
     carrier=planned.carrier_name?.trim()||"";
     resourceDifferences=finalPlanIssues.differences;
     const finalLoadReadiness=batch.business_type==="ftl"
-      ?await checkOrderLoadPlan(user.organizationId,batch.order_id,undefined,null,{mode:"submit",values:{exitPort:exitPort||null,customsLocation:customsLocation||null,carrierId:planned.carrier_id,vehicleType:planned.vehicle_type,vehiclePlate:plate||null,driverName:driver||null,driverPhone:phone||null,plannedDepartureAt:planned.planned_departure_at,plannedArrivalAt:planned.planned_arrival_at}})
+      ?await checkOrderLoadPlan(user.organizationId,batch.order_id,undefined,null,{mode:"submit",values:{exitPort:exitPort||null,customsLocation:customsLocation||null,carrierId:planned.carrier_id,vehicleType:planned.vehicle_type,vehicleCount:planned.vehicle_id?1:null,vehiclePlate:plate||null,driverName:driver||null,driverPhone:phone||null,plannedDepartureAt:planned.planned_departure_at,plannedArrivalAt:planned.planned_arrival_at}})
       :await checkOrderLoadPlan(user.organizationId,batch.order_id,planned.batch_id?plate:undefined,planned.batch_id);
     if(!finalLoadReadiness.ready)return{formError:`创建前装车条件已变化：${finalLoadReadiness.reasons.join("；")}`,inspection:finalInspection};
     if(planned.batch_id){

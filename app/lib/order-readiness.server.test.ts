@@ -466,6 +466,7 @@ describe("order readiness follows the bound workflow field modes", () => {
       exitPort: "HORGOS",
       customsLocation: "URUMQI",
       carrierId: "carrier-1",
+      vehicleCount: 1,
       vehicleType: "厢式货车",
       vehiclePlate: "粤B12345",
       driverName: "测试司机",
@@ -486,6 +487,17 @@ describe("order readiness follows the bound workflow field modes", () => {
       field("loading", "main_driver_phone", mode, false),
       field("loading", "planned_exit_at", mode, false),
       field("loading", "planned_arrival_at", mode, false),
+    ];
+
+    const overseasCreationFieldModes = (
+      mode: "required" | "optional" | "hidden" = "required",
+    ) => [
+      field("loading", "overseas_carrier_name", mode, false),
+      field("loading", "overseas_vehicle_type", mode, false),
+      field("loading", "overseas_vehicle_count", mode, false),
+      field("loading", "overseas_vehicle_plate", mode, false),
+      field("loading", "overseas_driver_name", mode, false),
+      field("loading", "overseas_driver_phone", mode, false),
     ];
 
     beforeEach(() => {
@@ -512,6 +524,61 @@ describe("order readiness follows the bound workflow field modes", () => {
       );
 
       expect(result).toEqual({ ready: true, reasons: [] });
+    });
+
+    it("also defers overseas transport aliases supplied by the FTL creation page", async () => {
+      setFields("loading", [
+        ...creationFieldModes(),
+        ...overseasCreationFieldModes(),
+      ]);
+
+      const result = await checkOrderLoadPlan(
+        "org-1",
+        "order-1",
+        undefined,
+        undefined,
+        { mode: "entry" },
+      );
+
+      expect(result).toEqual({ ready: true, reasons: [] });
+    });
+
+    it("validates overseas transport aliases from the current FTL selection", async () => {
+      setFields("loading", [
+        ...creationFieldModes(),
+        ...overseasCreationFieldModes(),
+      ]);
+
+      const result = await checkOrderLoadPlan(
+        "org-1",
+        "order-1",
+        undefined,
+        undefined,
+        {
+          mode: "submit",
+          values: completeSubmission,
+        },
+      );
+
+      expect(result).toEqual({ ready: true, reasons: [] });
+    });
+
+    it("rejects a required overseas vehicle count when no vehicle is selected", async () => {
+      setFields("loading", overseasCreationFieldModes());
+
+      const result = await checkOrderLoadPlan(
+        "org-1",
+        "order-1",
+        undefined,
+        undefined,
+        {
+          mode: "submit",
+          values: { ...completeSubmission, vehicleCount: 0 },
+        },
+      );
+
+      expect(result.ready).toBe(false);
+      expect(result.reasons.some((reason) => reason.includes("overseas_vehicle_count"))).toBe(true);
     });
 
     it("does not defer a required consignment exit port at FTL creation entry", async () => {
@@ -609,9 +676,18 @@ describe("order readiness follows the bound workflow field modes", () => {
           undefined,
           {
             mode: "submit",
-            values: Object.fromEntries(
-              Object.keys(completeSubmission).map((key) => [key, ""]),
-            ) as typeof completeSubmission,
+            values: {
+              exitPort: "",
+              customsLocation: "",
+              carrierId: "",
+              vehicleType: "",
+              vehicleCount: 0,
+              vehiclePlate: "",
+              driverName: "",
+              driverPhone: "",
+              plannedDepartureAt: "",
+              plannedArrivalAt: "",
+            },
           },
         );
 

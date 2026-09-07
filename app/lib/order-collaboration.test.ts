@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { orderCollaborationNotice } from "./order-collaboration";
+import {
+  orderCollaborationNotice,
+  orderResponsibilityAssigneeLabel,
+} from "./order-collaboration";
 
 describe("order collaboration notice", () => {
   it("shows the assigned business supervisor while an order is waiting for approval", () => {
@@ -42,5 +45,32 @@ describe("order collaboration notice", () => {
       currentStepKey: "order_creation",
       moduleCode: "consignment",
     })).toBeNull();
+  });
+});
+
+describe("order responsibility assignee label", () => {
+  it.each([
+    ["warehouse_receiving", "warehouse"],
+    ["port_loading", "loading"],
+    ["overseas_pickup", "overseas_warehouse"],
+  ])("uses the target warehouse queue at %s", (currentStepKey, moduleCode) => {
+    expect(orderResponsibilityAssigneeLabel({
+      currentStepKey,
+      moduleCode,
+      assigneeName: null,
+    })).toBe("目标仓自动队列");
+  });
+
+  it("keeps a real assignee and ordinary unassigned work unchanged", () => {
+    expect(orderResponsibilityAssigneeLabel({
+      currentStepKey: "port_loading",
+      moduleCode: "loading",
+      assigneeName: "仓库甲",
+    })).toBe("仓库甲");
+    expect(orderResponsibilityAssigneeLabel({
+      currentStepKey: "outbound_transport",
+      moduleCode: "customs",
+      assigneeName: null,
+    })).toBe("待分配");
   });
 });

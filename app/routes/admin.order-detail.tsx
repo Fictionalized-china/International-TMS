@@ -50,7 +50,10 @@ import {
   enabledWorkflowModuleCodes,
   resolveEmbeddedWorkflowModuleCode,
 } from "../lib/order-detail-module-selection";
-import { orderCollaborationNotice } from "../lib/order-collaboration";
+import {
+  orderCollaborationNotice,
+  orderResponsibilityAssigneeLabel,
+} from "../lib/order-collaboration";
 import { orderResponsiblePosition } from "../lib/order-responsibility";
 import { orderModuleTabAttention } from "../lib/order-module-tab-attention";
 import { costsTabHasPendingAction, orderEntryPreference, orderModuleTabDescriptors, orderModuleTabHref, orderWorkflowModuleTabs, resolveCostsSection, resolveCustomsSection, type OrderModuleTabSection } from "../lib/order-module-tabs";
@@ -1017,7 +1020,11 @@ function LinearOrderWorkspace({
       || orderResponsiblePosition(guidance.moduleCode, order.status).name;
   const responsibleAssignee = parallelCostsActive
     ? "三方独立签核"
-    : order.assignee_name || "待分配";
+    : orderResponsibilityAssigneeLabel({
+        currentStepKey,
+        moduleCode: guidance.moduleCode,
+        assigneeName: order.assignee_name,
+      });
   const currentWorkflowTask = data.currentWorkflowTasks.find(
     (task) => !orderCompleted && task.status !== "completed",
   );
@@ -1731,7 +1738,13 @@ function OrderBusinessForm({
     : data.businessWorkflow?.current_step_name || order.current_step_name;
   const currentAction = orderCompleted ? "查看订单资料与历史记录" : guidance.action;
   const currentPositionDisplay = orderCompleted ? "已归档" : currentPositionName;
-  const currentAssigneeDisplay = orderCompleted ? "无需办理" : order.assignee_name || "待分配";
+  const currentAssigneeDisplay = orderCompleted
+    ? "无需办理"
+    : orderResponsibilityAssigneeLabel({
+        currentStepKey,
+        moduleCode: guidance.moduleCode,
+        assigneeName: order.assignee_name,
+      });
   const currentModuleRows = currentConfiguredStep
     ? uniqueWorkflowModules(currentConfiguredStep.rows)
     : [];
@@ -1845,7 +1858,7 @@ function OrderBusinessForm({
       <footer className={`order-sticky-action-bar ${!orderCompleted && guidance.blocker ? "blocked" : ""}`}>
         <div className="order-sticky-responsibility">
           <span>{orderCompleted ? "订单状态" : "当前责任"}</span>
-          <strong>{orderCompleted ? "业务已完成" : `${currentPositionName} · ${order.assignee_name || "待分配"}`}</strong>
+          <strong>{orderCompleted ? "业务已完成" : `${currentPositionName} · ${currentAssigneeDisplay}`}</strong>
         </div>
         <div className="order-sticky-condition">
           <span>{orderCompleted ? "流程结果" : guidance.blocker ? "阻断原因" : "办理条件"}</span>

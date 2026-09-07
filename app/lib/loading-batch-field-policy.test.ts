@@ -72,6 +72,28 @@ describe("resolveLoadingBatchFieldPolicies", () => {
     });
   });
 
+  it("treats overseas transport fields as aliases of the creation-page resource selectors", () => {
+    const policies = resolveLoadingBatchFieldPolicies([{
+      orderId: "frozen",
+      usesFrozenSnapshot: true,
+      appliesToCurrentOrFuture: true,
+      fields: [
+        { fieldKey: "overseas_carrier_name", isActive: true, isRequired: true },
+        { fieldKey: "overseas_vehicle_type", isActive: true, isRequired: true },
+        { fieldKey: "overseas_vehicle_count", isActive: true, isRequired: true },
+        { fieldKey: "overseas_vehicle_plate", isActive: true, isRequired: true },
+        { fieldKey: "overseas_driver_name", isActive: true, isRequired: true },
+        { fieldKey: "overseas_driver_phone", isActive: true, isRequired: true },
+      ],
+    }]);
+
+    expect(loadingBatchResourcePolicy(policies)).toEqual({
+      carrier: { isActive: true, isRequired: true },
+      vehicle: { isActive: true, isRequired: true },
+      driver: { isActive: true, isRequired: true },
+    });
+  });
+
   it("validates only active required scalar values", () => {
     const policies = resolveLoadingBatchFieldPolicies([
       order("one", [

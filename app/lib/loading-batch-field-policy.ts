@@ -93,16 +93,29 @@ export type LoadingBatchFieldPolicy = {
 
 export type LoadingBatchFieldPolicies = Record<LoadingBatchFieldKey, LoadingBatchFieldPolicy>;
 
+const loadingBatchFieldAliases: Partial<Record<LoadingBatchFieldKey, readonly string[]>> = {
+  main_carrier_id: ["overseas_carrier_name"],
+  main_vehicle_type: ["overseas_vehicle_type", "overseas_vehicle_count"],
+  main_plate_number: ["overseas_vehicle_plate"],
+  main_driver_name: ["overseas_driver_name"],
+  main_driver_phone: ["overseas_driver_phone"],
+};
+
 function policyForOrder(
   order: LoadingBatchWorkflowOrder,
   fieldKey: LoadingBatchFieldKey,
 ): LoadingBatchFieldPolicy | null {
   if (!order.appliesToCurrentOrFuture) return null;
-  const configured = order.fields.find((field) => field.fieldKey === fieldKey);
-  if (configured) {
-    if (!configured.isActive) return { isActive: false, isRequired: false, mode: "hidden" };
-    if (configured.isRequired) return { isActive: true, isRequired: true, mode: "required" };
-    return { isActive: true, isRequired: false, mode: "optional" };
+  const semanticFieldKeys = new Set([fieldKey, ...(loadingBatchFieldAliases[fieldKey] ?? [])]);
+  const configured = order.fields.filter((field) => semanticFieldKeys.has(field.fieldKey));
+  if (configured.length) {
+    const isRequired = configured.some((field) => field.isActive && field.isRequired);
+    const isActive = isRequired || configured.some((field) => field.isActive);
+    return {
+      isActive,
+      isRequired,
+      mode: isRequired ? "required" : isActive ? "optional" : "hidden",
+    };
   }
   if (order.usesFrozenSnapshot) return { isActive: false, isRequired: false, mode: "hidden" };
   const fallback = loadingBatchFieldDefinitions[fieldKey];

@@ -16,6 +16,26 @@ type NoticeInput = {
   taskAssigneeUserId?: string | null;
 };
 
+export function orderResponsibilityAssigneeLabel({
+  currentStepKey,
+  moduleCode,
+  assigneeName,
+}: {
+  currentStepKey: string | null;
+  moduleCode?: string | null;
+  assigneeName?: string | null;
+}) {
+  const assigned = assigneeName?.trim();
+  if (assigned) return assigned;
+  if (
+    ["warehouse_receiving", "port_loading", "overseas_pickup"].includes(currentStepKey ?? "") ||
+    ["warehouse", "loading", "overseas_warehouse"].includes(moduleCode ?? "")
+  ) {
+    return "目标仓自动队列";
+  }
+  return "待分配";
+}
+
 function actor(role: string, assigneeName?: string | null) {
   const name = assigneeName?.trim();
   return name ? `${role}（${name}）` : role;
