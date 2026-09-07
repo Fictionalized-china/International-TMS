@@ -2822,7 +2822,30 @@ td small {
   font-size: 14px;
 }
 .outbound-pending-orders .outbound-load-units-table {
-  min-width: 1480px;
+  width: 100%;
+  min-width: 1260px;
+  table-layout: fixed;
+}
+.outbound-load-units-table .outbound-order-column { width: 15%; }
+.outbound-load-units-table .outbound-customer-column { width: 13%; }
+.outbound-load-units-table .outbound-type-column { width: 7%; }
+.outbound-load-units-table .outbound-storage-column { width: 11%; }
+.outbound-load-units-table .outbound-cargo-column { width: 12%; }
+.outbound-load-units-table .outbound-destination-column { width: 16%; }
+.outbound-load-units-table .outbound-readiness-column { width: 14%; }
+.outbound-load-units-table .outbound-action-column { width: 124px; }
+.outbound-load-units-table .outbound-destination {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.outbound-load-units-table .outbound-action-cell {
+  white-space: nowrap;
+}
+.outbound-load-units-table .outbound-action-cell a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .outbound-load-units-table td {
   vertical-align: middle;
