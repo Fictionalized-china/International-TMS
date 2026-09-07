@@ -10,6 +10,7 @@ type OrderDetailNavigationExports = {
     moduleActionCanOperate?: boolean;
     moduleCanEdit?: boolean;
   }) => boolean;
+  orderDetailActionPermission?: (intent: string) => string;
 };
 
 const navigationExports = orderDetailRoute as typeof orderDetailRoute & OrderDetailNavigationExports;
@@ -26,5 +27,13 @@ describe("ordinary order detail navigation", () => {
     expect(canOperate?.({ moduleActionCanOperate: true, moduleCanEdit: true })).toBe(true);
     expect(canOperate?.({ moduleActionCanOperate: false, moduleCanEdit: true })).toBe(false);
     expect(canOperate?.({ moduleActionCanOperate: true, moduleCanEdit: false })).toBe(false);
+  });
+
+  it("lets cargo mutations reach the frozen module gate without requiring broad order.manage", () => {
+    const permission = navigationExports.orderDetailActionPermission;
+    expect(permission).toBeTypeOf("function");
+    expect(permission?.("cargo_create")).toBe("order.view");
+    expect(permission?.("cargo_update")).toBe("order.view");
+    expect(permission?.("order_update")).toBe("order.manage");
   });
 });

@@ -14,6 +14,7 @@ const harness = vi.hoisted(() => {
     roleCodes: ["pos_operation"],
   };
   const order = {
+    order_number: "SO-001",
     status: "in_execution",
     business_type: "ftl",
     shipper_name: "Shipper",
@@ -34,7 +35,7 @@ const harness = vi.hoisted(() => {
     requires_transloading: 0,
     requires_transit_customs: 0,
     current_assignee_user_id: "user-a",
-    salesperson_user_id: null,
+    salesperson_user_id: null as string | null,
     workflow_instance_id: null as string | null,
   };
   const state = {
@@ -52,6 +53,7 @@ const harness = vi.hoisted(() => {
     moduleTaskAssigneeUserIds: ["user-a"] as string[],
     trackingActionEditable: true,
     trackingActionReason: null as string | null,
+    cargoSaveCalls: 0,
   };
   const sql: string[] = [];
   const DB = {
@@ -154,6 +156,10 @@ const harness = vi.hoisted(() => {
     assignOrderModule: vi.fn(async () => undefined),
     assignOrderModulesBulk: vi.fn(async () => ({ assignedCount: 0 })),
     runOrderWorkflowAction: vi.fn(async () => ({ success: "workflow advanced" })),
+    saveOrderCargoItem: vi.fn(async () => {
+      state.cargoSaveCalls += 1;
+      return { ok: true as const, itemId: "cargo-1", created: true, packageCount: 1 };
+    }),
   };
 });
 
@@ -222,6 +228,9 @@ vi.mock("../lib/order-document-access.server", () => ({
 vi.mock("../lib/documents-module-status.server", () => ({
   synchronizeOrderDocumentsModuleStatus: harness.synchronizeOrderDocumentsModuleStatus,
 }));
+vi.mock("../lib/order-cargo-editor.server", () => ({
+  saveOrderCargoItem: harness.saveOrderCargoItem,
+}));
 
 import { action } from "./admin.order-module";
 
@@ -262,6 +271,7 @@ describe("order module action mutation gates", () => {
     harness.state.modules = [];
     harness.order.status = "in_execution";
     harness.order.current_assignee_user_id = "user-a";
+    harness.order.salesperson_user_id = null;
     harness.order.workflow_instance_id = null;
     harness.sql.length = 0;
     harness.current.permissions = [
@@ -279,6 +289,7 @@ describe("order module action mutation gates", () => {
     harness.state.moduleTaskAssigneeUserIds = ["user-a"];
     harness.state.trackingActionEditable = true;
     harness.state.trackingActionReason = null;
+    harness.state.cargoSaveCalls = 0;
   });
 
   it("rejects a forged document upload through a different module URL", async () => {
@@ -580,5 +591,41 @@ describe("order module action mutation gates", () => {
       expect.objectContaining({ canOperate: false }),
     );
     expect(harness.state.batchRuns).toBe(0);
+  });
+
+  it("lets the owning salesperson edit cargo through the frozen cargo module without order.manage", async () => {
+    harness.current.permissions = ["order.view", "order.scope.sales_own", "quote.manage"];
+    harness.current.positionCode = "SALES";
+    harness.order.status = "draft";
+    harness.order.salesperson_user_id = "user-a";
+    harness.order.current_assignee_user_id = "user-a";
+    harness.state.moduleAssigneeUserId = null;
+    harness.state.moduleTaskAssigneeUserIds = [];
+
+    await expect(invoke(post("cargo_create", {
+      cargoName: "Test cargo",
+      packageType: "carton",
+      packageCount: "1",
+      piecesPerPackage: "1",
+      weight: "1",
+      volume: "0.1",
+    }), "cargo")).resolves.toEqual(expect.objectContaining({
+      actionKind: "cargo_editor",
+    }));
+    expect(harness.saveOrderCargoItem).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let another salesperson mutate cargo by forging the cargo action", async () => {
+    harness.current.permissions = ["order.view", "order.scope.sales_own", "quote.manage"];
+    harness.current.positionCode = "SALES";
+    harness.order.status = "draft";
+    harness.order.salesperson_user_id = "user-other";
+    harness.order.current_assignee_user_id = "user-other";
+    harness.state.moduleAssigneeUserId = "user-other";
+    harness.state.moduleTaskAssigneeUserIds = ["user-other"];
+
+    const result = await invoke(post("cargo_update", { cargoItemId: "cargo-1" }), "cargo");
+    expect(result).toEqual(expect.objectContaining({ formError: expect.any(String) }));
+    expect(harness.saveOrderCargoItem).not.toHaveBeenCalled();
   });
 });

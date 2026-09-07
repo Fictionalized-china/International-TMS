@@ -41,6 +41,10 @@ import {
   loadWarehousePhysicalWorkflowAccess,
   warehousePhysicalWorkflowAccessSql,
 } from "../lib/warehouse-workflow-access.server";
+import {
+  parseBatchInboundOrderIds,
+  resolveBatchInboundOrderFilter,
+} from "../lib/batch-overseas-inbound-navigation";
 
 type Shipment = {
   id: string;
@@ -114,6 +118,13 @@ type ResolvedOrder = {
   origin_city: string;
   match_priority: number;
 };
+type BatchInboundScopeRow = {
+  batch_number: string;
+  road_status: string;
+  order_id: string;
+  order_number: string;
+  overseas_warehouse_id: string | null;
+};
 
 export async function loader({ request }: Route.LoaderArgs) {
   const user = await requireSessionUser(request, "warehouse.view", "warehouse");
@@ -124,8 +135,46 @@ export async function loader({ request }: Route.LoaderArgs) {
   if (!isOverseasWarehouse)
     throw redirect(`/warehouse/acceptance${url.search}`);
   const orderId = url.searchParams.get("orderId");
+  const batchId = (url.searchParams.get("batchId") || "").trim();
+  const requestedBatchOrderIds = parseBatchInboundOrderIds(url.searchParams.get("orderIds"));
   const returnTo = url.searchParams.get("returnTo") || "";
   const reference = (url.searchParams.get("reference") || "").trim();
+  const batchScopeRows = batchId
+    ? (await env.DB.prepare(
+        `SELECT b.batch_number,b.road_status,bo.order_id,o.order_number,o.overseas_warehouse_id
+           FROM transport_batches b
+           JOIN transport_batch_orders bo ON bo.batch_id=b.id AND bo.organization_id=b.organization_id AND bo.status!='removed'
+           JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
+          WHERE b.organization_id=? AND b.id=? AND b.status!='cancelled'
+          ORDER BY bo.sequence_no,bo.created_at`,
+      ).bind(user.organizationId, batchId).all<BatchInboundScopeRow>()).results
+    : [];
+  const batchMemberOrderIds = batchScopeRows.map((row) => row.order_id);
+  const requestedScopeOrderIds = resolveBatchInboundOrderFilter(batchMemberOrderIds, requestedBatchOrderIds);
+  const exactRequestedScope = !requestedBatchOrderIds.length || (
+    requestedBatchOrderIds.length === batchMemberOrderIds.length &&
+    batchMemberOrderIds.every((memberId) => requestedBatchOrderIds.includes(memberId))
+  );
+  const oneDestinationWarehouse = batchScopeRows.length > 0 && batchScopeRows.every(
+    (row) => row.overseas_warehouse_id === warehouse.id,
+  );
+  const batchStageOpen = batchScopeRows.length > 0 && [
+    "outbound_in_transit",
+    "overseas_arrived",
+    "waiting_pickup",
+  ].includes(batchScopeRows[0].road_status);
+  const batchScopeError = !batchId
+    ? ""
+    : !batchScopeRows.length
+      ? "未找到当前组织内的有效 PZ 配载单"
+      : !batchStageOpen
+        ? "本 PZ 尚未进入境外目的仓收货阶段，请先完成装车出库与实际出境"
+        : !oneDestinationWarehouse
+          ? "本 PZ 的挂载订单未统一指向当前境外目的仓，整批收货已阻止"
+          : !exactRequestedScope
+            ? "PZ 预筛订单与数据库挂载订单不一致，请从配载单页面重新进入"
+            : "";
+  const batchOrderIdSet = new Set(batchScopeError ? [] : requestedScopeOrderIds);
   const workflowGate = warehousePhysicalWorkflowAccessSql(
     "o",
     "overseas_warehouse",
@@ -223,8 +272,11 @@ export async function loader({ request }: Route.LoaderArgs) {
       scannedPackage.status === "dispatched" &&
       scannedPackage.warehouse_id !== warehouse.id,
   );
+  const candidateShipments = batchId
+    ? shipments.results.filter((item) => batchOrderIdSet.has(item.order_id))
+    : shipments.results;
   const selectedShipment = packageReady
-    ? shipments.results.find((item) => item.id === scannedPackage?.shipment_id)
+    ? candidateShipments.find((item) => item.id === scannedPackage?.shipment_id)
     : undefined;
   const [customsGate] = selectedShipment
     ? await loadOverseasInboundCustomsGates(user.organizationId, [{
@@ -237,7 +289,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     ? undefined
     : selectedShipment;
   let lookupError = "";
-  const scannedPackageWorkflowAccess = reference && scannedPackage && packageReady && !selectedShipment
+  const scannedPackageWorkflowAccess = reference && scannedPackage && packageReady && !selectedShipment && (!batchId || batchOrderIdSet.has(scannedPackage.order_id))
     ? await loadWarehousePhysicalWorkflowAccess(
         env.DB,
         user.organizationId,
@@ -256,6 +308,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     lookupError = `货物标签 ${scannedPackage.barcode} 已归属“${warehouse.name}”，但未找到已完成入库单，请联系管理员检查仓库数据`;
   else if (reference && scannedPackage && scannedPackage.status !== "dispatched")
     lookupError = `货物标签 ${scannedPackage.barcode} 尚未完成上一仓库出库，暂不能办理境外目的仓收货`;
+  else if (reference && batchScopeError)
+    lookupError = batchScopeError;
+  else if (reference && scannedPackage && batchId && !batchOrderIdSet.has(scannedPackage.order_id))
+    lookupError = `货物标签 ${scannedPackage.barcode} 不属于当前 PZ 配载单，已拒绝调出收货表单`;
   else if (reference && customsGate?.blocked)
     lookupError = customsGate.message || "当前订单清关门禁尚未通过";
   else if (reference && scannedPackageWorkflowAccess && !scannedPackageWorkflowAccess.available)
@@ -278,6 +334,13 @@ export async function loader({ request }: Route.LoaderArgs) {
     isOverseasWarehouse,
     locations: locations.results,
     orderId,
+    batchContext: batchId ? {
+      id: batchId,
+      number: batchScopeRows[0]?.batch_number || batchId,
+      orderIds: [...batchOrderIdSet],
+      orderNumbers: batchScopeRows.filter((row) => batchOrderIdSet.has(row.order_id)).map((row) => row.order_number),
+      error: batchScopeError,
+    } : null,
     returnTo,
     reference,
     selectedShipment: receivableShipment,
@@ -297,6 +360,9 @@ export async function action({ request }: Route.ActionArgs) {
   const selectedWarehouse = warehouseContext.selected;
   await requireWarehouseAssignment(user, selectedWarehouse.id, "operator");
   const isOverseasWarehouse = selectedWarehouse.warehouse_role === "overseas_destination";
+  const actionUrl = new URL(request.url);
+  const batchId = (actionUrl.searchParams.get("batchId") || "").trim();
+  const requestedBatchOrderIds = parseBatchInboundOrderIds(actionUrl.searchParams.get("orderIds"));
   if (!isOverseasWarehouse)
     throw redirect(`/warehouse/acceptance${new URL(request.url).search}`);
   const form = await request.formData(),
@@ -446,6 +512,24 @@ export async function action({ request }: Route.ActionArgs) {
     };
   const orderId = shipment?.order_id ?? pendingOrder?.order_id;
   if (!orderId) return { formError: "无法识别收货订单，请重新选择订单或运单" };
+  if (batchId) {
+    const submittedBatchRows = (await env.DB.prepare(
+      `SELECT bo.order_id,o.overseas_warehouse_id
+         FROM transport_batch_orders bo
+         JOIN transport_batches b ON b.id=bo.batch_id AND b.organization_id=bo.organization_id
+         JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
+        WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
+          AND b.status!='cancelled' AND b.road_status IN ('outbound_in_transit','overseas_arrived','waiting_pickup')`,
+    ).bind(user.organizationId, batchId).all<{ order_id: string; overseas_warehouse_id: string | null }>()).results;
+    const submittedMemberIds = submittedBatchRows.map((row) => row.order_id);
+    const exactSubmittedScope = requestedBatchOrderIds.length === submittedMemberIds.length &&
+      submittedMemberIds.every((memberId) => requestedBatchOrderIds.includes(memberId));
+    if (!submittedBatchRows.length ||
+      !exactSubmittedScope ||
+      !submittedMemberIds.includes(orderId) ||
+      submittedBatchRows.some((row) => row.overseas_warehouse_id !== selectedWarehouse.id))
+      return { formError: "当前 PZ 挂载范围或目的仓与数据库记录不一致，已拒绝收货提交" };
+  }
   const workflowAccess = await loadWarehousePhysicalWorkflowAccess(
     env.DB,
     user.organizationId,
@@ -1235,6 +1319,13 @@ export default function WarehouseInbound({
           {actionData.formError ?? actionData.success}
         </div>
       )}
+      {loaderData.batchContext && (
+        <section className={`alert ${loaderData.batchContext.error ? "error" : "info"}`} aria-label="PZ 配载单收货范围">
+          <strong>{loaderData.batchContext.number} · 整批收货范围</strong>
+          <span>{loaderData.batchContext.error || `已锁定 ${loaderData.batchContext.orderIds.length} 票挂载订单（${loaderData.batchContext.orderNumbers.join("、")} ）。每次仍只调出一个原 OUL 货物码，逐票核对、入库和留痕。`}</span>
+          {loaderData.returnTo && <Link to={loaderData.returnTo}>返回配载单</Link>}
+        </section>
+      )}
       {canOperate && !loaderData.locations.length && (
         <div className="alert error">
           当前没有可用入库库位，收货已暂停。请先
@@ -1243,7 +1334,7 @@ export default function WarehouseInbound({
       )}
       {!actionData?.success && loaderData.lookupError && <div className="alert error no-print">{loaderData.lookupError}</div>}
       {!canOperate && <div className="alert info">当前账号为仓库只读视角，可查看收货结果；货物扫描、实收录入和入库提交仅向有操作权限的冻结任务负责人开放。</div>}
-      {canOperate && <WarehouseReceivingScanPanel
+      {canOperate && !loaderData.batchContext?.error && <WarehouseReceivingScanPanel
         key={actionData?.success ? `completed:${actionData.success}` : loaderData.reference}
         warehouseId={loaderData.warehouse.id}
         reference={actionData?.success ? "" : loaderData.reference}
@@ -1253,6 +1344,8 @@ export default function WarehouseInbound({
         hint="单件装车任务可扫描 OUT 任务码；多件任务逐件扫描原货物标签。系统自动核对订单、客户、运单和目的仓。"
         hiddenFields={[
           { name: "orderId", value: loaderData.orderId || "" },
+          { name: "batchId", value: loaderData.batchContext?.id || "" },
+          { name: "orderIds", value: loaderData.batchContext?.orderIds.join(",") || "" },
           { name: "returnTo", value: loaderData.returnTo },
         ]}
       />}

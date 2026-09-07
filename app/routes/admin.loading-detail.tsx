@@ -54,6 +54,10 @@ import { Modal, useModalScrollLock } from "../components/Modal";
 import { QueryPagination } from "../components/QueryPagination";
 import { paginateList, readListPage } from "../lib/list-pagination";
 import {
+  buildBatchOverseasInboundHref,
+  resolveBatchOverseasInboundHandoff,
+} from "../lib/batch-overseas-inbound-navigation";
+import {
   createBatchException,
   listBatchExceptionPackages,
   listBatchExceptions,
@@ -665,7 +669,7 @@ export async function loader({request,params}:Route.LoaderArgs){
     env.DB.prepare("SELECT id,name FROM carriers WHERE organization_id=? AND status='active' AND carrier_scope='overseas' ORDER BY name").bind(current.organizationId).all<Option>(),
     env.DB.prepare("SELECT id,name FROM warehouses WHERE organization_id=? AND status='active' AND warehouse_role IN ('domestic_collection','port') ORDER BY CASE warehouse_role WHEN 'domestic_collection' THEN 10 ELSE 20 END,code,name").bind(current.organizationId).all<Option>(),
   ]);
-  const [borderPorts,costAllocations,batchDocuments,orderDocuments]=await Promise.all([
+  const [borderPorts,costAllocations,batchDocuments,orderDocuments,orderDocumentArchive]=await Promise.all([
     env.DB.prepare("SELECT code,name FROM reference_data WHERE organization_id=? AND category='border_port' AND status='active' ORDER BY sort_order,code").bind(current.organizationId).all<ReferenceOption>(),
     canViewBatchCosts?loadCostAllocations(env.DB,current.organizationId,batchId):Promise.resolve(null),
     env.DB.prepare(`WITH ranked AS (
@@ -682,6 +686,13 @@ export async function loader({request,params}:Route.LoaderArgs){
       WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed'
     ) SELECT id,order_id,document_category,file_name,content_type,size_bytes,description,review_status,created_at
       FROM ranked WHERE row_no=1 ORDER BY created_at DESC`).bind(batchId,current.organizationId).all<OrderDocument>(),
+    env.DB.prepare(`SELECT a.id,a.order_id,m.document_category,a.file_name,a.content_type,a.size_bytes,
+        m.description,m.review_status,a.created_at
+      FROM transport_batch_orders bo
+      JOIN order_attachments a ON a.order_id=bo.order_id AND a.organization_id=bo.organization_id
+      JOIN order_document_metadata m ON m.attachment_id=a.id AND m.order_id=bo.order_id AND m.organization_id=bo.organization_id
+      WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed'
+      ORDER BY bo.sequence_no,m.document_category,a.created_at DESC,a.id DESC`).bind(batchId,current.organizationId).all<OrderDocument>(),
   ]);
   const [customsSummaries,customsDeclarations,batchExceptions,exceptionPackages]=await Promise.all([
     env.DB.prepare(`SELECT bo.order_id,COUNT(d.id) total,COALESCE(SUM(CASE WHEN d.status='released' THEN 1 ELSE 0 END),0) released
@@ -829,7 +840,7 @@ export async function loader({request,params}:Route.LoaderArgs){
   const initialResponsibilityRestrictions=batch.approval_status==="submitted"
     ? await loadBatchInitialResponsibilityRestrictions(env.DB,current.organizationId,batchId)
     : buildBatchInitialResponsibilityRestrictions([]);
-  return{current,batch,canViewBatchCosts,showBatchCosts,canManageBatchCosts,batchCostBlockedReason,orders:orders.results,batchWorkflowPolicies,trackingMilestoneAction,actualExitAction,batchCargoItems,vehicles:vehicles.results,carriers:carriers.results,warehouses:warehouses.results,borderPorts:borderPorts.results,costAllocations,batchDocuments:batchDocuments.results,orderDocuments:orderDocuments.results,orderDocumentRequirements,customsSummaries:customsSummaries.results,customsDeclarations:customsDeclarations.results,batchExceptions,exceptionPackages,outboundStatuses:outboundStatuses.results,batchCustomsAccess,departureGateStatuses,returnOrderId,trackingMilestones,trackingFlags:trackingFlags.results,batchVehiclePlate,carrierVehicles:carrierVehicles.results,carrierDrivers:carrierDrivers.results,operationMembers:responsibilityMembers.results.filter(member=>member.position_code==="OPERATION"),documentMembers:responsibilityMembers.results.filter(member=>member.position_code==="DOC"),initialResponsibilityRestrictions};
+  return{current,batch,canViewBatchCosts,showBatchCosts,canManageBatchCosts,batchCostBlockedReason,orders:orders.results,batchWorkflowPolicies,trackingMilestoneAction,actualExitAction,batchCargoItems,vehicles:vehicles.results,carriers:carriers.results,warehouses:warehouses.results,borderPorts:borderPorts.results,costAllocations,batchDocuments:batchDocuments.results,orderDocuments:orderDocuments.results,orderDocumentArchive:orderDocumentArchive.results,orderDocumentRequirements,customsSummaries:customsSummaries.results,customsDeclarations:customsDeclarations.results,batchExceptions,exceptionPackages,outboundStatuses:outboundStatuses.results,batchCustomsAccess,departureGateStatuses,returnOrderId,trackingMilestones,trackingFlags:trackingFlags.results,batchVehiclePlate,carrierVehicles:carrierVehicles.results,carrierDrivers:carrierDrivers.results,operationMembers:responsibilityMembers.results.filter(member=>member.position_code==="OPERATION"),documentMembers:responsibilityMembers.results.filter(member=>member.position_code==="DOC"),initialResponsibilityRestrictions};
 }
 
 export async function action({request,params}:Route.ActionArgs){
@@ -1526,6 +1537,7 @@ export async function action({request,params}:Route.ActionArgs){
 export default function LoadingDetail({loaderData,actionData}:Route.ComponentProps){
   const [searchParams]=useSearchParams();
   const [detailDrawerOpen,setDetailDrawerOpen]=useState(false);
+  const [detailDrawerOrderId,setDetailDrawerOrderId]=useState<string|null>(null);
   const detailDrawerTriggerRef=useRef<HTMLButtonElement>(null);
   useModalScrollLock(detailDrawerOpen);
   const busy=useNavigation().state!=="idle";
@@ -1621,8 +1633,14 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   const currentWork=getBatchCurrentWork({status:loaderData.batch.road_status,documentGateReady:allDocumentGateReady,loadPlanReady,warehouseReady:allDispatched,borderArrivalReady,exceptionCount:activeExceptions.length});
   const closeDetailDrawer=()=>{
     setDetailDrawerOpen(false);
+    setDetailDrawerOrderId(null);
     window.requestAnimationFrame(()=>detailDrawerTriggerRef.current?.focus());
   };
+  const openDetailDrawer=(orderId?:string)=>{
+    setDetailDrawerOrderId(orderId||null);
+    setDetailDrawerOpen(true);
+  };
+  const overseasInboundHandoff=resolveBatchOverseasInboundHandoff(loaderData.orders);
   return <><header className="page-header batch-tracking-page-header"><div><p className="eyebrow">PZ LOAD · TRANSPORT TRACKING</p><h1>{loaderData.batch.batch_number}</h1><p>{loaderData.batch.batch_name} · {loaderData.batch.origin_location} → {loaderData.batch.destination_location}</p></div><div className="page-actions">{loaderData.returnOrderId&&<Link className="secondary" to={`/admin/orders/${loaderData.returnOrderId}`}>返回订单详情</Link>}<Link className="secondary" to="/admin/loading">返回配载单跟踪</Link><span className="status-pill">{allDispatched?"后台运输跟踪":"等待仓库出库"}</span><span className="status-pill">{roadStatusLabels[loaderData.batch.road_status]||loaderData.batch.road_status}</span></div></header><ActionToast signal={actionData} message={actionData?.formError??actionData?.success} tone={actionData?.formError?"error":"success"}/>
   <div className="batch-detail-layout"><main className="batch-detail-main">
   {requiresSupervisorApproval&&loaderData.batch.approval_status==="submitted"&&<section className="panel batch-command-panel">
@@ -1636,7 +1654,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
     <BatchWorkspaceTabs status={loaderData.batch.road_status} documentGateReady={allDocumentGateReady} loadPlanReady={loadPlanReady} warehouseReady={allDispatched} borderArrivalReady={borderArrivalReady} exceptionCount={activeExceptions.length} activeTab={activeTab} tabHref={tabHref}/>
   </section>
   {activeTab==="tracking"&&<BatchTrackingWorkbench batchId={loaderData.batch.id} batchNumber={loaderData.batch.batch_number} orders={loaderData.orders} visibleOrders={visibleOrders} orderPagination={orderPagination} trackingMilestones={loaderData.trackingMilestones} trackingFlags={loaderData.trackingFlags} workflowPolicies={loaderData.batchWorkflowPolicies} milestoneAction={loaderData.trackingMilestoneAction} actualExitAction={loaderData.actualExitAction} batchVehiclePlate={loaderData.batchVehiclePlate} overseasVehiclePlate={loaderData.batch.overseas_vehicle_plate||null} borderPort={loaderData.batch.border_port||null} customsLocation={loaderData.batch.customs_location||null} busy={busy} manage={manageTracking&&allDispatched} warehouseReady={allDispatched} documentGateReady={allDocumentGateReady} exitConfirmed={exited} canConfirmExit={canConfirmExit} exitBlockers={Array.from(new Set(exitBlockers))} borderPorts={loaderData.borderPorts} documentsHref={tabHref("documents")} actionCloseSignal={actionData?.success?actionData:undefined}/>} 
-  {activeTab==="documents"&&<BatchDocumentWorkbench batchId={loaderData.batch.id} orders={loaderData.orders} visibleOrders={visibleOrders} orderPagination={orderPagination} batchDocuments={loaderData.batchDocuments} orderDocuments={loaderData.orderDocuments} orderDocumentRequirements={loaderData.orderDocumentRequirements} customsSummaries={loaderData.customsSummaries} customsDeclarations={loaderData.customsDeclarations} workflowPolicies={loaderData.batchWorkflowPolicies} customsAccesses={loaderData.batchCustomsAccess.orders} busy={busy} manageDocuments={manageDocuments} manageCustoms={manageCustoms} currentUserId={loaderData.current.userId} documentOwnerUserId={loaderData.batch.document_assignee_user_id} documentOwnerName={loaderData.batch.document_assignee_name} privileged={privileged} requiresTransloading={requiresTransloading} ready={allDocumentGateReady} customsCloseSignal={actionData?.success?actionData:undefined}/>} 
+  {activeTab==="documents"&&<BatchDocumentWorkbench batchId={loaderData.batch.id} orders={loaderData.orders} visibleOrders={visibleOrders} orderPagination={orderPagination} batchDocuments={loaderData.batchDocuments} orderDocuments={loaderData.orderDocuments} orderDocumentRequirements={loaderData.orderDocumentRequirements} customsSummaries={loaderData.customsSummaries} customsDeclarations={loaderData.customsDeclarations} workflowPolicies={loaderData.batchWorkflowPolicies} customsAccesses={loaderData.batchCustomsAccess.orders} busy={busy} manageDocuments={manageDocuments} manageCustoms={manageCustoms} currentUserId={loaderData.current.userId} documentOwnerUserId={loaderData.batch.document_assignee_user_id} documentOwnerName={loaderData.batch.document_assignee_name} privileged={privileged} requiresTransloading={requiresTransloading} ready={allDocumentGateReady} customsCloseSignal={actionData?.success?actionData:undefined} onOpenOrderDossier={orderId=>openDetailDrawer(orderId)}/>} 
   {activeTab==="exceptions"&&<BatchExceptionWorkbench batch={loaderData.batch} orders={loaderData.orders} packages={loaderData.exceptionPackages} exceptions={loaderData.batchExceptions} busy={busy} manage={manageExceptions} closeSignal={actionData?.success?actionData:undefined}/>}
   {activeTab==="batch"&&<><section className="panel loading-sheet batch-tab-panel" id="batch-arrangement">
     <div className="batch-detail-summary"><div><h2>仓库配载结果</h2><p>由仓库端自动同步，管理后台只读查看。</p></div><div className="loading-sheet-state batch-detail-summary-status"><span>{loaderData.orders.length} 票</span><span>{loaderData.vehicles.length} 车</span><b>{allDispatched?"仓库已出库":loadPlanReady&&allDocumentGateReady?"待仓库装车":"待仓库补齐"}</b></div></div>
@@ -1679,9 +1697,9 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
     </tbody></table></div>
     {allDispatched?<div className="batch-outbound-next"><div><strong>装车出库已完成</strong><span>{allDocumentGateReady?"下一步登记口岸到达并确认实际出境。":"下一步由单证负责人完成逐票报关与放行。"}</span></div><Link className="primary" to={tabHref(allDocumentGateReady?"tracking":"documents")}>{allDocumentGateReady?"进入口岸到达与出境":"进入报关与文件"}</Link></div>:<div className="batch-gate-blocker"><div><strong>等待仓库完成装车出库</strong><p>仓库交接完成后，本配载单会自动进入下一环节。</p></div><div className="batch-gate-actions"><Link className="secondary" to={tabHref("batch")}>查看仓库配载结果</Link></div></div>}
   </section>}
-  {activeTab==="overseas"&&<section className="panel batch-tab-panel" id="overseas-warehouse-receiving"><div className="panel-header"><div><h2>境外目的仓收货清点</h2><p>配载单不能手工确认到仓。仓库逐票扫码入库并清点；全部挂载订单清点无误后，系统统一结束境外运输并自动通知客户。</p></div><span className="status-pill">{loaderData.orders.filter(item=>item.overseas_status&&item.overseas_status!=="waiting_arrival").length}/{loaderData.orders.length} 票到仓</span></div>{loaderData.batch.road_status==="outbound_in_transit"&&manage?<><div className="table-wrap overseas-receiving-table"><table><thead><tr><th>订单</th><th>客户</th><th>境外目的仓</th><th>当前状态</th><th>操作</th></tr></thead><tbody>{visibleOrders.map(item=><tr key={item.order_id}><td><strong><OrderNumberLink id={item.order_id} number={item.order_number}/></strong></td><td>{item.customer_name}</td><td>{item.overseas_warehouse_name||"未指定"}</td><td><span className={`status-pill ${item.overseas_status&&item.overseas_status!=="waiting_arrival"?"success":""}`}>{item.overseas_status&&item.overseas_status!=="waiting_arrival"?"已清点到仓":"待仓库收货"}</span></td><td>{item.overseas_warehouse_id&&(!item.overseas_status||item.overseas_status==="waiting_arrival")?<WarehouseOverseasInboundAction orderId={item.order_id} batchId={loaderData.batch.id} warehouseId={item.overseas_warehouse_id}/>:"—"}</td></tr>)}</tbody></table></div><QueryPagination {...orderPagination} pageParam="orderPage" unit="票订单"/></>:["overseas_arrived","waiting_pickup","pickup_completed"].includes(loaderData.batch.road_status)?<div className="alert success">本配载单全部订单已经境外仓扫码入库并清点，客户通知已由系统自动发送。</div>:<div className="alert warning">当前步骤尚未开放：请先完成装车出库与出境确认。</div>}</section>}
-  </main><BatchDetailSideRail batch={loaderData.batch} totals={totals} vehicles={loaderData.vehicles} packageLabelCount={loaderData.exceptionPackages.length} batchDocuments={loaderData.batchDocuments} orderDocuments={loaderData.orderDocuments} customsReadyCount={customsReadyCount} trackingCount={loaderData.trackingMilestones.length} activeExceptionCount={activeExceptions.length} blockingExceptionCount={blockingExceptions.length} currentWork={currentWork} tabHref={tabHref} onOpen={()=>setDetailDrawerOpen(true)} open={detailDrawerOpen} triggerRef={detailDrawerTriggerRef}/></div>
-  {detailDrawerOpen&&<BatchDetailDrawer batch={loaderData.batch} orders={loaderData.orders} cargoItems={loaderData.batchCargoItems} packageLabels={loaderData.exceptionPackages} totals={totals} vehicles={loaderData.vehicles} batchDocuments={loaderData.batchDocuments} orderDocuments={loaderData.orderDocuments} customsReadyCount={customsReadyCount} trackingCount={loaderData.trackingMilestones.length} activeExceptionCount={activeExceptions.length} blockingExceptionCount={blockingExceptions.length} currentWork={currentWork} onClose={closeDetailDrawer}/>} 
+  {activeTab==="overseas"&&<section className="panel batch-tab-panel" id="overseas-warehouse-receiving"><div className="panel-header"><div><h2>境外目的仓收货清点</h2><p>整张 PZ 一次交接到指定目的仓；仓库仍须逐票扫描原 OUL 货物码并分别留痕。</p></div><span className="status-pill">{loaderData.orders.filter(item=>item.overseas_status&&item.overseas_status!=="waiting_arrival").length}/{loaderData.orders.length} 票到仓</span></div>{loaderData.batch.road_status==="outbound_in_transit"&&manage?<>{overseasInboundHandoff.available?<WarehouseOverseasInboundAction batchId={loaderData.batch.id} batchNumber={loaderData.batch.batch_number} warehouseId={overseasInboundHandoff.warehouseId} orderIds={overseasInboundHandoff.orderIds}/>:<div className="alert error">{overseasInboundHandoff.reason}</div>}<div className="table-wrap overseas-receiving-table"><table><thead><tr><th>订单</th><th>客户</th><th>境外目的仓</th><th>当前状态</th></tr></thead><tbody>{visibleOrders.map(item=><tr key={item.order_id}><td><strong><OrderNumberLink id={item.order_id} number={item.order_number}/></strong></td><td>{item.customer_name}</td><td>{item.overseas_warehouse_name||"未指定"}</td><td><span className={`status-pill ${item.overseas_status&&item.overseas_status!=="waiting_arrival"?"success":""}`}>{item.overseas_status&&item.overseas_status!=="waiting_arrival"?"已清点到仓":"待仓库收货"}</span></td></tr>)}</tbody></table></div><QueryPagination {...orderPagination} pageParam="orderPage" unit="票订单"/></>:["overseas_arrived","waiting_pickup","pickup_completed"].includes(loaderData.batch.road_status)?<div className="alert success">本配载单全部订单已经境外仓扫码入库并清点，客户通知已由系统自动发送。</div>:<div className="alert warning">当前步骤尚未开放：请先完成装车出库与出境确认。</div>}</section>}
+  </main><BatchDetailSideRail batch={loaderData.batch} totals={totals} vehicles={loaderData.vehicles} packageLabelCount={loaderData.exceptionPackages.length} batchDocuments={loaderData.batchDocuments} orderDocuments={loaderData.orderDocuments} customsReadyCount={customsReadyCount} trackingCount={loaderData.trackingMilestones.length} activeExceptionCount={activeExceptions.length} blockingExceptionCount={blockingExceptions.length} currentWork={currentWork} tabHref={tabHref} onOpen={()=>openDetailDrawer()} open={detailDrawerOpen} triggerRef={detailDrawerTriggerRef}/></div>
+  {detailDrawerOpen&&<BatchDetailDrawer batch={loaderData.batch} orders={loaderData.orders} cargoItems={loaderData.batchCargoItems} packageLabels={loaderData.exceptionPackages} totals={totals} vehicles={loaderData.vehicles} batchDocuments={loaderData.batchDocuments} orderDocuments={loaderData.orderDocuments} orderDocumentArchive={loaderData.orderDocumentArchive} customsReadyCount={customsReadyCount} trackingCount={loaderData.trackingMilestones.length} activeExceptionCount={activeExceptions.length} blockingExceptionCount={blockingExceptions.length} currentWork={currentWork} selectedOrderId={detailDrawerOrderId} onClose={closeDetailDrawer}/>} 
   </>}
 
 function BatchDetailSideRail({batch,totals,vehicles,packageLabelCount,batchDocuments,orderDocuments,customsReadyCount,trackingCount,activeExceptionCount,blockingExceptionCount,currentWork,tabHref,onOpen,open,triggerRef}:{batch:Batch;totals:ReturnType<typeof summarizeBatch>;vehicles:Vehicle[];packageLabelCount:number;batchDocuments:BatchDocument[];orderDocuments:OrderDocument[];customsReadyCount:number;trackingCount:number;activeExceptionCount:number;blockingExceptionCount:number;currentWork:{title:string;hint:string};tabHref:(tab:BatchWorkspaceTab)=>string;onOpen:()=>void;open:boolean;triggerRef:RefObject<HTMLButtonElement|null>}){
@@ -1723,15 +1741,26 @@ function BatchDetailSideRail({batch,totals,vehicles,packageLabelCount,batchDocum
   </aside>;
 }
 
-function BatchDetailDrawer({batch,orders,cargoItems,packageLabels,totals,vehicles,batchDocuments,orderDocuments,customsReadyCount,trackingCount,activeExceptionCount,blockingExceptionCount,currentWork,onClose}:{batch:Batch;orders:BatchOrder[];cargoItems:BatchCargoItem[];packageLabels:BatchExceptionPackage[];totals:ReturnType<typeof summarizeBatch>;vehicles:Vehicle[];batchDocuments:BatchDocument[];orderDocuments:OrderDocument[];customsReadyCount:number;trackingCount:number;activeExceptionCount:number;blockingExceptionCount:number;currentWork:{title:string;hint:string};onClose:()=>void}){
+function BatchDetailDrawer({batch,orders,cargoItems,packageLabels,totals,vehicles,batchDocuments,orderDocuments,orderDocumentArchive,customsReadyCount,trackingCount,activeExceptionCount,blockingExceptionCount,currentWork,selectedOrderId,onClose}:{batch:Batch;orders:BatchOrder[];cargoItems:BatchCargoItem[];packageLabels:BatchExceptionPackage[];totals:ReturnType<typeof summarizeBatch>;vehicles:Vehicle[];batchDocuments:BatchDocument[];orderDocuments:OrderDocument[];orderDocumentArchive:OrderDocument[];customsReadyCount:number;trackingCount:number;activeExceptionCount:number;blockingExceptionCount:number;currentWork:{title:string;hint:string};selectedOrderId:string|null;onClose:()=>void}){
   const closeButtonRef=useRef<HTMLButtonElement>(null);
-  const [orderPage,setOrderPage]=useState(1);
+  const drawerBodyRef=useRef<HTMLDivElement>(null);
+  const selectedOrderIndex=selectedOrderId?orders.findIndex(order=>order.order_id===selectedOrderId):-1;
+  const [orderPage,setOrderPage]=useState(selectedOrderIndex>=0?Math.floor(selectedOrderIndex/10)+1:1);
   useEffect(()=>{
     closeButtonRef.current?.focus();
     const handleKeyDown=(event:KeyboardEvent)=>{if(event.key==="Escape")onClose();};
     window.addEventListener("keydown",handleKeyDown);
     return()=>window.removeEventListener("keydown",handleKeyDown);
   },[onClose]);
+  useEffect(()=>{
+    if(!selectedOrderId)return;
+    const frame=window.requestAnimationFrame(()=>{
+      const target=Array.from(drawerBodyRef.current?.querySelectorAll<HTMLElement>("[data-order-archive]")??[])
+        .find(element=>element.dataset.orderArchive===selectedOrderId);
+      target?.scrollIntoView({block:"start"});
+    });
+    return()=>window.cancelAnimationFrame(frame);
+  },[selectedOrderId]);
   const approvalStatus=({draft:"待提交审核",submitted:"待主管审核",approved:"已审核",rejected:"已退回"} as Record<string,string>)[batch.approval_status]||batch.approval_status;
   const vehicleSummary=vehicles.map(vehicle=>[vehicle.plate_number||vehicle.vehicle_no,vehicle.driver_name].filter(Boolean).join(" · ")).filter(Boolean).join("、")||batch.overseas_vehicle_plate||"待仓库补齐";
   const fileCount=batchDocuments.length+orderDocuments.length;
@@ -1743,7 +1772,7 @@ function BatchDetailDrawer({batch,orders,cargoItems,packageLabels,totals,vehicle
         <div><span>PZ LOAD · BATCH DOSSIER</span><h2>{batch.batch_number}</h2></div>
         <button ref={closeButtonRef} type="button" aria-label="关闭配载单资料" title="关闭" onClick={onClose}>×</button>
       </header>
-      <div className="linear-drawer-body is-dossier">
+      <div ref={drawerBodyRef} className="linear-drawer-body is-dossier">
         <section className={`linear-drawer-section batch-drawer-current${blockingExceptionCount?" blocked":""}`}>
           <h3>当前业务节点 <span>{currentWork.title}</span></h3>
           <p>{currentWork.hint}</p>
@@ -1782,7 +1811,7 @@ function BatchDetailDrawer({batch,orders,cargoItems,packageLabels,totals,vehicle
         <section className="linear-drawer-section">
           <h3>挂载订单 <span>{orders.length} 票 · 每页 10 票</span></h3>
           <div className="batch-drawer-order-list">
-            {visibleDrawerOrders.map(order=><BatchDrawerOrderDisclosure key={order.order_id} order={order} cargoItems={cargoItems.filter(item=>item.order_id===order.order_id)} packageLabels={packageLabels.filter(item=>item.order_id===order.order_id)}/>)}
+            {visibleDrawerOrders.map(order=><BatchDrawerOrderDisclosure key={order.order_id} order={order} cargoItems={cargoItems.filter(item=>item.order_id===order.order_id)} packageLabels={packageLabels.filter(item=>item.order_id===order.order_id)} orderDocuments={orderDocumentArchive.filter(item=>item.order_id===order.order_id)} initiallyOpen={order.order_id===selectedOrderId}/>)}
             {!orders.length&&<p className="linear-drawer-empty">当前配载单没有挂载订单。</p>}
           </div>
           {orderPageCount>1&&<nav className="batch-drawer-pagination" aria-label="挂载订单分页"><span>第 {orderPage}/{orderPageCount} 页</span><button type="button" disabled={orderPage<=1} onClick={()=>setOrderPage(page=>Math.max(1,page-1))}>上一页</button><button type="button" disabled={orderPage>=orderPageCount} onClick={()=>setOrderPage(page=>Math.min(orderPageCount,page+1))}>下一页</button></nav>}
@@ -1800,9 +1829,9 @@ function BatchDetailDrawer({batch,orders,cargoItems,packageLabels,totals,vehicle
   </div>;
 }
 
-function BatchDrawerOrderDisclosure({order,cargoItems,packageLabels}:{order:BatchOrder;cargoItems:BatchCargoItem[];packageLabels:BatchExceptionPackage[]}){
+export function BatchDrawerOrderDisclosure({order,cargoItems,packageLabels,orderDocuments,initiallyOpen}:{order:BatchOrder;cargoItems:BatchCargoItem[];packageLabels:BatchExceptionPackage[];orderDocuments:OrderDocument[];initiallyOpen:boolean}){
   const cargoSummary=order.cargo_names||order.cargo_description||"货物待补齐";
-  return <details className="batch-drawer-order-disclosure">
+  return <details className="batch-drawer-order-disclosure" data-order-id={order.order_id} open={initiallyOpen||undefined}>
     <summary>
       <span className="batch-drawer-order-identity"><strong>{order.order_number}</strong><small>{order.customer_name}</small></span>
       <span className="batch-drawer-order-cargo" title={cargoSummary}>{cargoSummary}</span>
@@ -1849,6 +1878,18 @@ function BatchDrawerOrderDisclosure({order,cargoItems,packageLabels}:{order:Batc
           {!packageLabels.length&&<p className="linear-drawer-empty">仓库尚未为本票货物生成可扫描标签和 OUL 货物码。</p>}
         </div>
       </section>
+      <section className="batch-drawer-cargo-block batch-drawer-document-block" data-order-archive={order.order_id}>
+        <header><strong>本票完整文件归档</strong><span>{orderDocuments.length} 份</span></header>
+        <div className="batch-order-file-list">
+          {orderDocuments.map(document=><div key={document.id}>
+            <strong>{orderDocumentTypeLabel(document.document_category)}</strong>
+            <a href={`/admin/document-files/order/${document.id}?mode=view`} target="_blank" rel="noreferrer">{document.file_name}</a>
+            <small>{new Date(document.created_at).toLocaleString("zh-CN")}</small>
+            <span className={`status-pill ${["approved","archived"].includes(document.review_status)?"success":document.review_status==="rejected"?"danger":""}`}>{documentReviewLabel(document.review_status)}</span>
+          </div>)}
+          {!orderDocuments.length&&<p className="linear-drawer-empty">本票尚无已归档文件。</p>}
+        </div>
+      </section>
     </div>
   </details>;
 }
@@ -1876,7 +1917,7 @@ function BatchExceptionWorkbench({batch,orders,packages,exceptions,busy,manage,c
   </section>;
 }
 
-function BatchDocumentWorkbench({batchId,orders,visibleOrders,orderPagination,batchDocuments,orderDocuments,orderDocumentRequirements,customsSummaries,customsDeclarations,workflowPolicies,customsAccesses,busy,manageDocuments,manageCustoms,currentUserId,documentOwnerUserId,documentOwnerName,privileged,requiresTransloading,ready,customsCloseSignal}:{batchId:string;orders:BatchOrder[];visibleOrders:BatchOrder[];orderPagination:BatchOrderPagination;batchDocuments:BatchDocument[];orderDocuments:OrderDocument[];orderDocumentRequirements:OrderLoadingDocumentRequirements[];customsSummaries:CustomsSummary[];customsDeclarations:BatchCustomsDeclaration[];workflowPolicies:BatchOrderWorkflowPolicy[];customsAccesses:BatchOrderCustomsAccess[];busy:boolean;manageDocuments:boolean;manageCustoms:boolean;currentUserId:string;documentOwnerUserId:string|null;documentOwnerName:string|null;privileged:boolean;requiresTransloading:boolean;ready:boolean;customsCloseSignal?:unknown}){
+function BatchDocumentWorkbench({batchId,orders,visibleOrders,orderPagination,batchDocuments,orderDocuments,orderDocumentRequirements,customsSummaries,customsDeclarations,workflowPolicies,customsAccesses,busy,manageDocuments,manageCustoms,currentUserId,documentOwnerUserId,documentOwnerName,privileged,requiresTransloading,ready,customsCloseSignal,onOpenOrderDossier}:{batchId:string;orders:BatchOrder[];visibleOrders:BatchOrder[];orderPagination:BatchOrderPagination;batchDocuments:BatchDocument[];orderDocuments:OrderDocument[];orderDocumentRequirements:OrderLoadingDocumentRequirements[];customsSummaries:CustomsSummary[];customsDeclarations:BatchCustomsDeclaration[];workflowPolicies:BatchOrderWorkflowPolicy[];customsAccesses:BatchOrderCustomsAccess[];busy:boolean;manageDocuments:boolean;manageCustoms:boolean;currentUserId:string;documentOwnerUserId:string|null;documentOwnerName:string|null;privileged:boolean;requiresTransloading:boolean;ready:boolean;customsCloseSignal?:unknown;onOpenOrderDossier:(orderId:string)=>void}){
   const visibleBatchDocTypes=BATCH_DOCUMENT_TYPES.filter(type=>requiresTransloading||!["border_handover","transshipment_order"].includes(type.code));
   const systemDocumentCodes=new Set(["loading_manifest","vehicle_manifest","batch_waybill"]);
   const currentIsDocumentOwner=privileged||documentOwnerUserId===currentUserId;
@@ -1974,7 +2015,7 @@ function BatchDocumentWorkbench({batchId,orders,visibleOrders,orderPagination,ba
               </div>;
             })}{!activeRequirements.length&&<span className="status-pill success">当前工作流未启用逐票文件</span>}</div>
             <BatchOrderCustomsWorkbench orderId={order.order_id} declarations={orderCustomsDeclarations} fields={customsPolicy.fields} manage={canManageThisOrder} allowRelease={canReleaseThisOrder} busy={busy} closeSignal={customsCloseSignal}/>
-            <div className="batch-order-file-links"><Link className="secondary" to={`/admin/orders/${order.order_id}/modules/documents`}>查看完整文件归档</Link></div>
+            <div className="batch-order-file-links"><BatchOrderArchiveButton orderId={order.order_id} onOpen={onOpenOrderDossier}/></div>
           </div></details>{canReleaseThisOrder&&pendingCustomsDeclarations.map(declaration=><Modal key={declaration.id} title={`确认报关放行 · ${declaration.declaration_number}`} triggerLabel={pendingCustomsDeclarations.length>1?`确认放行 · ${declaration.declaration_number}`:"确认放行"} triggerClassName="primary batch-order-direct-customs-button" closeSignal={customsCloseSignal}><section className="batch-direct-release-item"><header><strong>{declaration.declaration_number}</strong><span>{customsStageLabel(declaration.clearance_stage)} · {declaration.declaration_title}</span></header><BatchCustomsReleaseForm orderId={order.order_id} declaration={declaration} fields={customsPolicy.fields} busy={busy}/></section></Modal>)}</div></td>
         </tr>})}</tbody></table></div>
       <QueryPagination {...orderPagination} pageParam="orderPage" unit="票订单"/>
@@ -1994,6 +2035,10 @@ function BatchDocumentWorkbench({batchId,orders,visibleOrders,orderPagination,ba
     </section>}
     </div>
   </section>
+}
+
+export function BatchOrderArchiveButton({orderId,onOpen}:{orderId:string;onOpen:(orderId:string)=>void}){
+  return <button className="secondary" type="button" onClick={()=>onOpen(orderId)} aria-haspopup="dialog">在右侧查看完整归档</button>;
 }
 
 function ActionToast({signal,message,tone}:{signal?:unknown;message?:string;tone:"success"|"error"}){
@@ -2291,10 +2336,13 @@ function WarehouseOutboundAction({orderId,batchId,customsReady}:{orderId:string;
     <div><strong>下一步由仓库办理</strong><span>仓库按已确认的配载车辆扫码拣货、装车并完成出库交接。</span></div><Form method="post" action="/switch-site"><input type="hidden" name="target" value="warehouse"/><input type="hidden" name="warehouseTo" value={warehouseTo}/><button className="primary">去仓库端拣货装车</button></Form></div>;
 }
 
-function WarehouseOverseasInboundAction({orderId,batchId,warehouseId}:{orderId:string;batchId:string;warehouseId:string}){
-  const returnTo=`/admin/loading/${batchId}?fromOrderId=${encodeURIComponent(orderId)}`;
-  const warehouseTo=`/warehouse/inbound?warehouseId=${encodeURIComponent(warehouseId)}&orderId=${encodeURIComponent(orderId)}&returnTo=${encodeURIComponent(returnTo)}`;
-  return <Form method="post" action="/switch-site"><input type="hidden" name="target" value="warehouse"/><input type="hidden" name="warehouseTo" value={warehouseTo}/><button className="secondary">去目的仓扫码收货</button></Form>;
+function WarehouseOverseasInboundAction({batchId,batchNumber,warehouseId,orderIds}:{batchId:string;batchNumber:string;warehouseId:string;orderIds:string[]}){
+  const returnTo=`/admin/loading/${batchId}?tab=overseas`;
+  const warehouseTo=buildBatchOverseasInboundHref({batchId,warehouseId,orderIds,returnTo});
+  return <div className="loading-warehouse-handoff batch-overseas-inbound-handoff">
+    <div><strong>整批交接境外目的仓</strong><span>{batchNumber} 共 {orderIds.length} 票；进入后自动限定本 PZ，仓库仍须逐票扫码清点。</span></div>
+    <Form method="post" action="/switch-site"><input type="hidden" name="target" value="warehouse"/><input type="hidden" name="warehouseTo" value={warehouseTo}/><button className="primary">进入本 PZ 目的仓收货</button></Form>
+  </div>;
 }
 
 export function CostAllocationSection({allocations,busy,manage,blockedReason}:{allocations:Awaited<ReturnType<typeof loadCostAllocations>>;busy:boolean;manage:boolean;blockedReason:string|null}){

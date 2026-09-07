@@ -323,6 +323,13 @@ export function canOperateScopedEmbeddedOrderModule(input: {
   return Boolean(input.moduleActionCanOperate && input.moduleCanEdit);
 }
 
+export function orderDetailActionPermission(intent: string) {
+  if (intent === "workflow_version_switch") return "workflow.manage";
+  if (["workflow_action", "expense_direction_control", "cargo_create", "cargo_update"].includes(intent))
+    return "order.view";
+  return "order.manage";
+}
+
 function isOrderMarkLabelReady(order: Pick<Order, "status" | "quote_number" | "quote_accepted_at" | "quote_withdrawn">) {
   if (order.quote_withdrawn === 1 || order.status === "cancelled") return false;
   return Boolean(order.quote_accepted_at)
@@ -689,11 +696,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
   const intent = valueOf(form, "intent");
   const current = await requireSessionUser(
     request,
-    intent === "workflow_version_switch"
-      ? "workflow.manage"
-      : ["workflow_action", "expense_direction_control"].includes(intent)
-        ? "order.view"
-        : "order.manage",
+    orderDetailActionPermission(intent),
   );
   await requireOrderAccess(current, params.orderId);
   if(intent==="workflow_supplement_complete"){
@@ -1635,7 +1638,12 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, readOn
       </div>
       <div className="order-creation-context-actions">
         {selectedSection === "info" && <Link className="btn" to={orderModuleTabHref({ orderId: data.order.id, stepKey: selectedStep.step_key, moduleCode: "cargo", section: null, navigation: queueTabNavigation })}>继续货物信息</Link>}
-        {selectedSection === "cargo" && <Link className="btn" to={`/admin/orders/${data.order.id}/operations#cargo`}>新增 / 维护货物</Link>}
+        {selectedSection === "cargo" && !readOnly && <button className="btn" type="button" onClick={() => {
+          const editor = document.querySelector<HTMLDetailsElement>("#cargo-editor-create");
+          if (!editor) return;
+          editor.open = true;
+          window.requestAnimationFrame(() => editor.querySelector<HTMLInputElement>("input:not([type='hidden'])")?.focus());
+        }}>新增货物</button>}
         {selectedSection === "files" && <a className="btn" href="#module-source-documents">上传 / 替换文件</a>}
         {selectedSection === "costs" && <a className="btn" href="#consignment-cost-actions">新增费用</a>}
         {canSubmitConsignment && data.embeddedModuleData && <Modal

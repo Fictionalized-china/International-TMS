@@ -185,6 +185,8 @@ import {
   quotationCostsPresentationKeys,
   workflowFieldsForStep,
 } from "../lib/order-workflow-field-presentation";
+import { saveOrderCargoItem } from "../lib/order-cargo-editor.server";
+import { cargoEditorFieldPolicy } from "../lib/order-cargo-editor";
 
 type OrderSummary = {
   id: string;
@@ -1520,7 +1522,7 @@ export async function action({ request, params }: Route.ActionArgs) {
   const isExpenseDirectionControlAction =
     moduleCode === "costs" && intent === "expense_direction_control";
   const order = await env.DB.prepare(
-    `SELECT status,business_type,shipper_name,origin_country,origin_state,origin_city,origin_address,
+    `SELECT order_number,status,business_type,shipper_name,origin_country,origin_state,origin_city,origin_address,
             consignee_name,destination_country,destination_state,destination_city,destination_address,
             exit_port,transit_locations,customs_location,route_notes,overseas_warehouse_id,
             requires_transloading,requires_transit_customs,current_assignee_user_id,salesperson_user_id,
@@ -1529,7 +1531,7 @@ export async function action({ request, params }: Route.ActionArgs) {
   )
     .bind(orderId, current.organizationId)
     .first<{
-      status:string;business_type:string;shipper_name:string;origin_country:string;origin_state:string|null;origin_city:string;origin_address:string;
+      order_number:string;status:string;business_type:string;shipper_name:string;origin_country:string;origin_state:string|null;origin_city:string;origin_address:string;
       consignee_name:string;destination_country:string;destination_state:string|null;destination_city:string;destination_address:string;
       exit_port:string|null;transit_locations:string|null;customs_location:string|null;route_notes:string|null;overseas_warehouse_id:string|null;
       requires_transloading:number;requires_transit_customs:number;current_assignee_user_id:string|null;salesperson_user_id:string|null;
@@ -1561,6 +1563,16 @@ export async function action({ request, params }: Route.ActionArgs) {
     moduleCode === "consignment" &&
     intent === "workflow_action" &&
     valueOf(form, "actionCode") === "submit" &&
+    canSubmitSalesOrderForApproval({
+      status: order.status,
+      positionCode: current.positionCode,
+      permissions: current.permissions,
+      salespersonUserId: order.salesperson_user_id,
+      currentUserId: current.userId,
+    });
+  const isSalesCargoEditAction =
+    moduleCode === "cargo" &&
+    ["cargo_create", "cargo_update"].includes(intent) &&
     canSubmitSalesOrderForApproval({
       status: order.status,
       positionCode: current.positionCode,
@@ -1708,7 +1720,7 @@ export async function action({ request, params }: Route.ActionArgs) {
           : "结算文件仅可由本单已分配的客服或财务会计上传和维护。",
     };
   }
-  if (!canOperateCurrentOrder(current, order) && !isOrdinaryTrackingMutation && !isSalesConsignmentSubmitAction && !workflowAdministratorActionAccess && !moduleScopedActionAccess && !isExpenseDirectionControlAction && !isAuthorizedSettlementDocumentAction) {
+  if (!canOperateCurrentOrder(current, order) && !isOrdinaryTrackingMutation && !isSalesConsignmentSubmitAction && !isSalesCargoEditAction && !workflowAdministratorActionAccess && !moduleScopedActionAccess && !isExpenseDirectionControlAction && !isAuthorizedSettlementDocumentAction) {
     return { formError: "当前节点不由本账号办理，订单信息仅供查看" };
   }
   const isAssignedConsignmentApprover = isAssignedOrderApprover({
@@ -1719,7 +1731,7 @@ export async function action({ request, params }: Route.ActionArgs) {
   const canApproveConsignment =
     (isConsignmentApprovalAction || isConsignmentDocumentReviewAction) &&
     isAssignedConsignmentApprover;
-  if (!moduleManageAccess && !isOrdinaryTrackingMutation && !canApproveConsignment && !isSalesConsignmentSubmitAction && !workflowAdministratorActionAccess && !moduleScopedActionAccess && !isExpenseDirectionControlAction && !isAuthorizedSettlementDocumentAction) {
+  if (!moduleManageAccess && !isOrdinaryTrackingMutation && !canApproveConsignment && !isSalesConsignmentSubmitAction && !isSalesCargoEditAction && !workflowAdministratorActionAccess && !moduleScopedActionAccess && !isExpenseDirectionControlAction && !isAuthorizedSettlementDocumentAction) {
     return { formError: "当前岗位可以查看本模块，但没有提交业务操作的权限" };
   }
   const moduleWorkflowFields = await loadOrderModuleWorkflowFields(
@@ -1864,6 +1876,36 @@ export async function action({ request, params }: Route.ActionArgs) {
   if (intent === "advance" && order.business_type === "ltl" && moduleCode === "loading")
     return { formError: "零担订单的拼车配载由配载批次操作自动推进" };
   try {
+    if (["cargo_create", "cargo_update"].includes(intent) && moduleCode === "cargo") {
+      const saved = await saveOrderCargoItem({
+        db: env.DB,
+        organizationId: current.organizationId,
+        orderId,
+        orderNumber: order.order_number,
+        actorUserId: current.userId,
+        mode: intent === "cargo_update" ? "update" : "create",
+        form,
+        workflowFields: workflowFieldsForStep(
+          moduleWorkflowFields,
+          stageAccess.currentStepKey,
+        ),
+      });
+      if (!saved.ok) return { formError: saved.error };
+      await syncOrderWorkflowSnapshot(current.organizationId, orderId);
+      await writeAudit({
+        request,
+        action: saved.created ? "order.cargo.create" : "order.cargo.update",
+        resourceType: "order_cargo_item",
+        resourceId: saved.itemId,
+        organizationId: current.organizationId,
+        actorUserId: current.userId,
+        metadata: { orderId, packageCount: saved.packageCount, source: "order_detail" },
+      });
+      return {
+        actionKind: "cargo_editor",
+        success: saved.created ? "货物明细已新增，包装编号已生成" : "货物明细已更新",
+      };
+    }
     if (intent === "workflow_field_save") {
       await saveOrderCustomWorkflowFieldValue({
         organizationId: current.organizationId,
@@ -5889,8 +5931,12 @@ function cargoWorkflowDisplayItems(item: Cargo): WorkflowDisplayItem[] {
 
 function CargoWorkflowData({
   data,
+  manage,
+  busy,
 }: {
   data: Route.ComponentProps["loaderData"];
+  manage: boolean;
+  busy: boolean;
 }) {
   const fields = data.workflowFields;
   const visibleGroups = cargoDetailFieldGroups.filter((group) =>
@@ -5958,13 +6004,100 @@ function CargoWorkflowData({
         当前工作流已将委托资料补充中的货物明细字段全部设为隐藏；历史数据仍保留，只是不在本节点显示。
       </div>
     )}
-    {showDetailFields && <Link
-      className="secondary module-external-link"
-      to={`/admin/orders/${data.order.id}/operations#cargo`}
-    >
-      查看历史货物明细
-    </Link>}
+    {manage && showDetailFields && <section className="cargo-inline-editor" aria-label="货物明细维护">
+      <header><strong>货物明细维护</strong><span>在当前订单页内新增或修改，隐藏字段不会被提交。</span></header>
+      <details className="expandable" id="cargo-editor-create">
+        <summary>新增货物明细</summary>
+        <CargoEditorForm fields={fields} busy={busy} />
+      </details>
+      {data.cargo.map((item, index) => <details className="expandable" key={item.id}>
+        <summary>编辑 #{index + 1} · {item.cargo_name_cn}</summary>
+        <CargoEditorForm fields={fields} busy={busy} item={item} />
+      </details>)}
+    </section>}
   </div>;
+}
+
+function CargoEditorForm({
+  fields,
+  busy,
+  item,
+}: {
+  fields: WorkflowFieldState[];
+  busy: boolean;
+  item?: Cargo;
+}) {
+  const options = (fieldKey: string, fallback: Array<[string, string]>) => {
+    const configured = fields.find((field) => field.fieldKey === fieldKey);
+    const parsed = (configured?.optionsText || "")
+      .split(/\r?\n|,/)
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .map((entry): [string, string] => {
+        const [value, label] = entry.split("|");
+        return [value, label || value];
+      });
+    return parsed.length ? parsed : fallback;
+  };
+  const textField = (
+    fieldKey: string,
+    name: string,
+    label: string,
+    defaultValue = "",
+  ) => <ModuleField fields={fields} fieldKey={fieldKey} label={label} fallbackRequired={cargoEditorFieldPolicy(fields, fieldKey).required}>
+    {(required) => <input name={name} defaultValue={defaultValue} required={required} />}
+  </ModuleField>;
+  const numberField = (
+    fieldKey: string,
+    name: string,
+    label: string,
+    defaultValue: number,
+    step = "any",
+    minimum = 0,
+  ) => <ModuleField fields={fields} fieldKey={fieldKey} label={label} fallbackRequired={cargoEditorFieldPolicy(fields, fieldKey).required}>
+    {(required) => <input type="number" name={name} defaultValue={defaultValue} required={required} min={minimum} step={step} />}
+  </ModuleField>;
+  const selectedAttributes = new Set((item?.special_attributes || "").split(",").filter(Boolean));
+  return <Form method="post" encType="multipart/form-data" className="form-grid cargo-editor-form">
+    <input type="hidden" name="intent" value={item ? "cargo_update" : "cargo_create"} />
+    {item && <input type="hidden" name="cargoItemId" value={item.id} />}
+    {textField("cargo_name_cn", "cargoName", "中文品名", item?.cargo_name_cn)}
+    {textField("cargo_name_en", "cargoNameEn", "英文品名", item?.cargo_name_en || "")}
+    {textField("hs_code", "hsCode", "国内 HS Code", item?.hs_code || "")}
+    {textField("overseas_hs_code", "overseasHsCode", "境外 HS Code", item?.overseas_hs_code || "")}
+    <ModuleField fields={fields} fieldKey="package_type" label="包装类型" fallbackRequired>
+      {(required) => <select name="packageType" defaultValue={item?.package_type || "carton"} required={required}>
+        {options("package_type", [["carton", "纸箱"], ["pallet", "托盘"], ["wooden_case", "木箱"], ["bag", "袋装"], ["other", "其他"]]).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+      </select>}
+    </ModuleField>
+    {numberField("package_count", "packageCount", "包装数", item?.package_count ?? 1, "1", 1)}
+    {numberField("pieces_per_package", "piecesPerPackage", "每包装件数", item?.pieces_per_package ?? 1, "1", 1)}
+    {numberField("gross_weight_per_package_kg", "weight", "单包装毛重 KG", item?.gross_weight_per_package_kg ?? 0, "0.001")}
+    {numberField("net_weight_per_package_kg", "netWeight", "单包装净重 KG", item?.net_weight_per_package_kg ?? 0, "0.001")}
+    {numberField("length_cm", "length", "长度 CM", item?.length_cm ?? 0, "0.1")}
+    {numberField("width_cm", "width", "宽度 CM", item?.width_cm ?? 0, "0.1")}
+    {numberField("height_cm", "height", "高度 CM", item?.height_cm ?? 0, "0.1")}
+    {numberField("volume_per_package_cbm", "volume", "单包装体积 CBM（留 0 按尺寸自动计算）", item?.volume_per_package_cbm ?? 0, "0.0001")}
+    {numberField("declared_value", "declaredValue", "申报货值", item?.declared_value ?? 0, "0.01")}
+    <ModuleField fields={fields} fieldKey="currency" label="货值币种">
+      {(required) => <select name="currency" defaultValue={item?.currency || "USD"} required={required}>
+        {options("currency", [["CNY", "CNY"], ["USD", "USD"], ["KZT", "KZT"], ["UZS", "UZS"], ["RUB", "RUB"]]).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+      </select>}
+    </ModuleField>
+    {textField("origin_country_cargo", "originCountry", "货物原产国", item?.origin_country || "")}
+    {textField("brand_model", "brandModel", "品牌 / 型号", item?.brand_model || "")}
+    {textField("marks", "marks", "唛头", item?.marks || "")}
+    <ModuleField fields={fields} fieldKey="special_attributes" label="货物属性" className="field span-2">
+      {() => <div className="check-row">{options("special_attributes", [["fragile", "易碎"], ["dangerous", "危险品"], ["temperature", "温控"], ["battery", "带电"]]).map(([value, label]) => <label key={value}><input type="checkbox" name="specialAttributes" value={value} defaultChecked={selectedAttributes.has(value)} /><span>{label}</span></label>)}</div>}
+    </ModuleField>
+    <ModuleField fields={fields} fieldKey="cargo_notes" label="货物备注" className="field span-2">
+      {(required) => <textarea name="notes" rows={3} defaultValue={item?.notes || ""} required={required} />}
+    </ModuleField>
+    <ModuleField fields={fields} fieldKey="cargo_images" label="货物图片" className="field span-2">
+      {(required) => <><input name="images" type="file" accept="image/jpeg,image/png,image/webp" multiple required={required && !item?.image_count} /><small>单条最多 5 张，单张不超过 600 KB{item?.image_count ? `；已有 ${item.image_count} 张` : ""}</small></>}
+    </ModuleField>
+    <button className="primary span-2" disabled={busy}>{item ? "保存货物修改" : "新增货物并生成包装编号"}</button>
+  </Form>;
 }
 
 function ModuleBusinessData({
@@ -6010,7 +6143,15 @@ function ModuleBusinessData({
   }, [code, moduleActionData]);
 
   if (code === "cargo")
-    return <CargoWorkflowData data={data} />;
+    return <CargoWorkflowData data={data} manage={data.access.canEdit && (
+      manage || data.moduleActionCanOperate || canSubmitSalesOrderForApproval({
+        status: data.order.status,
+        positionCode: data.current.positionCode,
+        permissions: data.current.permissions,
+        salespersonUserId: data.order.salesperson_user_id,
+        currentUserId: data.current.userId,
+      })
+    )} busy={busy} />;
   if (code === "documents")
     return (
       <div className="module-business-stack dense-module-stack">

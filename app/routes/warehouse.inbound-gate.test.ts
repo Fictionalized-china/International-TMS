@@ -45,6 +45,7 @@ const harness = vi.hoisted(() => {
   const state = {
     loaderHasShipment: false,
     customsGates: [] as Array<Record<string, unknown>>,
+    batchRows: [] as Array<Record<string, unknown>>,
   };
   const queries: string[] = [];
   const DB = {
@@ -63,6 +64,9 @@ const harness = vi.hoisted(() => {
           return null;
         }),
         all: vi.fn(async () => {
+          if (sql.includes("SELECT b.batch_number,b.road_status") || sql.includes("SELECT bo.order_id,o.overseas_warehouse_id")) {
+            return { results: state.batchRows };
+          }
           if (sql.includes("FROM shipments s JOIN transport_orders o")) {
             return { results: state.loaderHasShipment ? [shipment] : [] };
           }
@@ -141,6 +145,7 @@ describe("overseas warehouse inbound frozen workflow gate", () => {
     harness.queries.length = 0;
     harness.state.loaderHasShipment = false;
     harness.state.customsGates = [];
+    harness.state.batchRows = [];
   });
 
   it("rejects a forged inbound POST before any warehouse mutation", async () => {
@@ -267,6 +272,144 @@ describe("overseas warehouse inbound frozen workflow gate", () => {
       orderNumber: "SO-001",
       customsClearanceMode: "company",
     }]);
+    expect(harness.DB.batch).not.toHaveBeenCalled();
+  });
+
+  it("limits a PZ warehouse entry to its database-mounted orders", async () => {
+    harness.state.loaderHasShipment = true;
+    harness.state.batchRows = [{
+      batch_number: "PZ-001",
+      road_status: "outbound_in_transit",
+      order_id: "order-2",
+      order_number: "SO-002",
+      overseas_warehouse_id: "overseas-warehouse",
+    }];
+
+    const result = await loader({
+      request: new Request("http://local.test/warehouse/inbound?warehouseId=overseas-warehouse&batchId=batch-1&orderIds=order-2&reference=PKG-001"),
+      params: {},
+      context: undefined,
+    } as never);
+
+    expect(result.batchContext).toEqual({
+      id: "batch-1",
+      number: "PZ-001",
+      orderIds: ["order-2"],
+      orderNumbers: ["SO-002"],
+      error: "",
+    });
+    expect(result.selectedShipment).toBeUndefined();
+    expect(result.lookupError).toContain("不属于当前 PZ 配载单");
+    expect(harness.loadCustomsGates).not.toHaveBeenCalled();
+    expect(harness.loadWorkflowFields).not.toHaveBeenCalled();
+  });
+
+  it("opens one scanned order inside a valid PZ prefilter and keeps customs evaluation", async () => {
+    harness.state.loaderHasShipment = true;
+    harness.state.batchRows = [{
+      batch_number: "PZ-001",
+      road_status: "outbound_in_transit",
+      order_id: "order-1",
+      order_number: "SO-001",
+      overseas_warehouse_id: "overseas-warehouse",
+    }];
+    harness.state.customsGates = [{
+      orderId: "order-1",
+      required: false,
+      cleared: false,
+      blocked: false,
+      configurationValid: true,
+      targetStepKey: "future_customs",
+      targetStepName: "后续清关",
+      message: null,
+    }];
+
+    const result = await loader({
+      request: new Request("http://local.test/warehouse/inbound?warehouseId=overseas-warehouse&batchId=batch-1&orderIds=order-1&reference=PKG-001"),
+      params: {},
+      context: undefined,
+    } as never);
+
+    expect(result.batchContext?.orderIds).toEqual(["order-1"]);
+    expect(result.selectedShipment).toEqual(harness.shipment);
+    expect(result.scannedPackage).toEqual(harness.pkg);
+    expect(result.lookupError).toBe("");
+    expect(harness.loadCustomsGates).toHaveBeenCalledWith("org-1", [{
+      orderId: "order-1",
+      orderNumber: "SO-001",
+      customsClearanceMode: "company",
+    }]);
+  });
+
+  it("blocks the PZ entry explicitly before the overseas receiving stage opens", async () => {
+    harness.state.loaderHasShipment = true;
+    harness.state.batchRows = [{
+      batch_number: "PZ-001",
+      road_status: "loading",
+      order_id: "order-1",
+      order_number: "SO-001",
+      overseas_warehouse_id: "overseas-warehouse",
+    }];
+
+    const result = await loader({
+      request: new Request("http://local.test/warehouse/inbound?warehouseId=overseas-warehouse&batchId=batch-1&orderIds=order-1"),
+      params: {},
+      context: undefined,
+    } as never);
+
+    expect(result.batchContext?.error).toContain("尚未进入境外目的仓收货阶段");
+    expect(result.batchContext?.orderIds).toEqual([]);
+    expect(result.selectedShipment).toBeUndefined();
+  });
+
+  it("rejects a forged POST outside the PZ query scope before workflow mutation", async () => {
+    const request = new Request("http://local.test/warehouse/inbound?warehouseId=overseas-warehouse&batchId=batch-1&orderIds=order-2", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        shipmentId: "shipment-1",
+        receiptResult: "ready",
+        barcode: "PKG-001",
+        locationId: "location-1",
+      }),
+    });
+
+    await expect(action({ request, params: {}, context: undefined } as never)).resolves.toEqual({
+      formError: "当前 PZ 挂载范围或目的仓与数据库记录不一致，已拒绝收货提交",
+    });
+    expect(harness.loadGate).not.toHaveBeenCalled();
+    expect(harness.DB.batch).not.toHaveBeenCalled();
+  });
+
+  it("keeps the frozen workflow gate after a valid PZ scope is verified", async () => {
+    harness.state.batchRows = [{
+      batch_number: "PZ-001",
+      road_status: "outbound_in_transit",
+      order_id: "order-1",
+      order_number: "SO-001",
+      overseas_warehouse_id: "overseas-warehouse",
+    }];
+    const request = new Request("http://local.test/warehouse/inbound?warehouseId=overseas-warehouse&batchId=batch-1&orderIds=order-1", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        shipmentId: "shipment-1",
+        receiptResult: "ready",
+        barcode: "PKG-001",
+        locationId: "location-1",
+      }),
+    });
+
+    await expect(action({ request, params: {}, context: undefined } as never)).resolves.toEqual({
+      formError: harness.gateReason,
+    });
+    expect(harness.loadGate).toHaveBeenCalledWith(
+      harness.DB,
+      "org-1",
+      "order-1",
+      "overseas_warehouse",
+      { userId: "warehouse-user", positionCode: "OVERSEAS_WAREHOUSE" },
+    );
     expect(harness.DB.batch).not.toHaveBeenCalled();
   });
 });

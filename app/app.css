@@ -15477,6 +15477,16 @@ a.order-module-card.read-only:hover {
 .batch-order-file-list > div { display: grid; grid-template-columns: 100px minmax(0, 1fr) auto auto; gap: 8px; align-items: center; padding: 8px; border-bottom: 1px solid #dce5f1; }
 .batch-order-file-list > div:nth-last-child(-n+2) { border-bottom: 0; }
 .batch-order-file-list a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.batch-drawer-document-block .batch-order-file-list { grid-template-columns: 1fr; }
+.batch-drawer-document-block .batch-order-file-list > div {
+  grid-template-columns: 110px minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
+  border-bottom: 1px solid #dce5f1;
+}
+.batch-drawer-document-block .batch-order-file-list > div:last-child { border-bottom: 0; }
+.batch-drawer-document-block .batch-order-file-list > div > strong { grid-row: 1 / span 2; }
+.batch-drawer-document-block .batch-order-file-list > div > small { grid-column: 2; color: #718096; }
+.batch-drawer-document-block .batch-order-file-list > div > .status-pill { grid-column: 3; grid-row: 1 / span 2; }
 .batch-order-file-inline-action,
 .batch-order-file-review-action {
   grid-column: 1 / -1;
