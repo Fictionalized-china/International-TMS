@@ -13,6 +13,18 @@ describe("orderEntryPreference", () => {
   it("keeps the normal workflow landing target for other positions", () => {
     expect(orderEntryPreference("OPERATION")).toBeNull();
   });
+
+  it("lands each handling role on the relevant current-step work surface", () => {
+    expect(orderEntryPreference("OPERATION", "outbound_transport")).toEqual({
+      stepKey: "outbound_transport", moduleCode: "tracking", section: null,
+    });
+    expect(orderEntryPreference("CS", "reconciliation")).toEqual({
+      stepKey: "reconciliation", moduleCode: "costs", section: "expenses",
+    });
+    expect(orderEntryPreference("FINANCE_ACCOUNTING", "completion_review")).toEqual({
+      stepKey: "completion_review", moduleCode: "review", section: null,
+    });
+  });
 });
 
 describe("orderModuleTabHref", () => {
@@ -23,6 +35,16 @@ describe("orderModuleTabHref", () => {
       moduleCode: "costs",
       section: "expenses",
     })).toBe("/admin/orders/order%2F1?stage=reconciliation&module=costs&section=expenses");
+  });
+
+  it("keeps the fixed list queue while switching sibling tabs", () => {
+    expect(orderModuleTabHref({
+      orderId: "order-1",
+      stepKey: "reconciliation",
+      moduleCode: "costs",
+      section: "expenses",
+      navigation: { returnTo: "/admin/orders?view=orders&page=2", orderIds: ["order-1", "order-2"] },
+    })).toContain("orderQueue=order-1%2Corder-2");
   });
 });
 

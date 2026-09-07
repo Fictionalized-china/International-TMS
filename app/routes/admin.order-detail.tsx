@@ -54,6 +54,7 @@ import { orderCollaborationNotice } from "../lib/order-collaboration";
 import { orderResponsiblePosition } from "../lib/order-responsibility";
 import { orderModuleTabAttention } from "../lib/order-module-tab-attention";
 import { costsTabHasPendingAction, orderEntryPreference, orderModuleTabDescriptors, orderModuleTabHref, orderWorkflowModuleTabs, resolveCostsSection, resolveCustomsSection, type OrderModuleTabSection } from "../lib/order-module-tabs";
+import { appendOrderQueueContext, orderDetailQueueHref, readOrderQueueNavigation } from "../lib/order-queue-navigation";
 import { frozenExpenseWarningMode, frozenWorkflowModuleStage, type ExpenseWarningMode } from "../lib/order-detail-workflow-settlement";
 import { canManageOrderModule } from "../lib/position-portal";
 import { canViewAssignedOrderExpenseSummary } from "../lib/billing-access";
@@ -558,7 +559,8 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
     ).bind(current.organizationId,id).all<WarehouseReceiptSnapshot>(),
   ]);
   const requestUrl = new URL(request.url);
-  const entryPreference = orderEntryPreference(current.positionCode);
+  const entryPreference = orderEntryPreference(current.positionCode, businessWorkflow?.current_step_key);
+  const orderQueueNavigation = readOrderQueueNavigation(requestUrl.searchParams, id);
   const preferenceAvailable = Boolean(entryPreference && workflowFormRows.results.some(
     (row) => row.step_key === entryPreference.stepKey && row.module_code === entryPreference.moduleCode,
   ));
@@ -631,6 +633,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
   }
   return {
     current,
+    orderQueueNavigation,
     canManage: current.permissions.includes("order.manage"),
     canOperateCurrentNode: canOperateCurrentOrder(current, order),
     order,
@@ -924,7 +927,10 @@ export default function OrderDetail({ loaderData, actionData }: Route.ComponentP
       previous !== currentStepKey &&
       loaderData.selectedStepKey !== currentStepKey
     ) {
-      navigate(`?stage=${encodeURIComponent(currentStepKey)}#module-business-data`, { replace: true });
+      navigate(appendOrderQueueContext(
+        `?stage=${encodeURIComponent(currentStepKey)}#module-business-data`,
+        loaderData.orderQueueNavigation,
+      ), { replace: true });
     }
   }, [currentStepKey, loaderData.selectedStepKey, navigate]);
   return (
@@ -1021,6 +1027,11 @@ function LinearOrderWorkspace({
     assigneeUserId: currentWorkflowTask?.assignee_user_id || order.current_assignee_user_id || null,
     taskAssigneeUserId: currentWorkflowTask?.task_assignee_user_id || null,
   });
+  const queueNavigation = data.orderQueueNavigation;
+  const queueContext = { returnTo: queueNavigation.returnTo, orderIds: queueNavigation.orderIds };
+  const queuePosition = queueNavigation.currentIndex >= 0
+    ? `${queueNavigation.currentIndex + 1}/${queueNavigation.orderIds.length}`
+    : null;
 
   return (
     <div className="page prototype-page linear-order-page">
@@ -1036,7 +1047,10 @@ function LinearOrderWorkspace({
           <span className={`status ${orderCompleted ? "green" : "blue"}`}>{statusLabel(order.status)}</span>
           {data.current.permissions.includes("workflow.manage") && !readOnly && <Modal title={`工作流版本 · ${order.order_number}`} triggerLabel="工作流版本" triggerClassName="btn" closeSignal={success} size="wide" dialogClassName="workflow-switch-modal"><WorkflowVersionSwitchForm current={data.businessWorkflow} options={data.workflowVersions} impact={data.workflowSwitchImpact} busy={busy}/></Modal>}
           <button className="btn head-detail-trigger" type="button" onClick={() => setDrawerTab("dossier")}>订单关键资料</button>
-          <Link className="btn" to={ordinaryOrderListHref()}>返回订单列表</Link>
+          {queuePosition && <span className="order-queue-position">当前筛选 {queuePosition}</span>}
+          {queueNavigation.previousOrderId && <Link className="btn" to={orderDetailQueueHref(queueNavigation.previousOrderId, queueContext)}>上一票</Link>}
+          {queueNavigation.nextOrderId && <Link className="btn primary" to={orderDetailQueueHref(queueNavigation.nextOrderId, queueContext)}>办理下一票</Link>}
+          <Link className="btn" to={queueNavigation.returnTo || ordinaryOrderListHref()}>返回筛选结果</Link>
         </div>
       </header>
 
@@ -1049,7 +1063,7 @@ function LinearOrderWorkspace({
             const className = `step ${state === "completed" ? "done" : step.step_key === currentStepKey ? "current" : ""}${step.step_key === selectedStep?.step_key ? " selected" : ""}`;
             const content = <><i>{state === "completed" ? "✓" : index + 1}</i><span>{step.name}</span></>;
             return accessible
-              ? <Link className={className} key={step.step_key} to={`?stage=${encodeURIComponent(step.step_key)}`}>{content}</Link>
+              ? <Link className={className} key={step.step_key} to={appendOrderQueueContext(`?stage=${encodeURIComponent(step.step_key)}`, queueContext)}>{content}</Link>
               : <span className={className} key={step.step_key} aria-disabled="true">{content}</span>;
           })}
         </div>
@@ -1084,7 +1098,7 @@ function LinearOrderWorkspace({
           {showOuterActionBar && <footer className="actionbar">
             <div className="action-note"><b>{viewingCurrent ? (orderCompleted ? "订单已完成" : guidance.action) : `查看：${selectedStep?.name}`}</b><span>{viewingCurrent ? (guidance.blocker || "保存本节点完整数据后，系统自动重新校验并推进。") : "已完成节点不可重复推进，可查看其业务数据与记录。"}</span></div>
             <div className="action-buttons">
-              {!viewingCurrent && <Link className="btn" to={`?stage=${encodeURIComponent(currentStepKey)}`}>返回当前节点</Link>}
+              {!viewingCurrent && <Link className="btn" to={appendOrderQueueContext(`?stage=${encodeURIComponent(currentStepKey)}`, queueContext)}>返回当前节点</Link>}
               {viewingCurrent && !orderCompleted && (directAction && !guidance.blocker ? (
                 <Form method="post" className="linear-primary-form">
                   <input type="hidden" name="intent" value="workflow_action"/>
@@ -1407,6 +1421,10 @@ function OrderDossierSection({ order }: { order: Order }) {
 
 function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, readOnly, busy, documentReviewSignal, actionError }: { data: Route.ComponentProps["loaderData"]; rows: WorkflowFormRow[]; selectedStep: (BusinessWorkflowStep & { rows: WorkflowFormRow[] }) | null; viewingCurrent: boolean; readOnly: boolean; busy: boolean; documentReviewSignal?: unknown; actionError?: string }) {
   const navigate = useNavigate();
+  const queueTabNavigation = {
+    returnTo: data.orderQueueNavigation.returnTo,
+    orderIds: data.orderQueueNavigation.orderIds,
+  };
   const selectedModuleCode = data.embeddedModuleCode;
   const [selectedConsignmentSection, setSelectedConsignmentSection] = useState(data.selectedConsignmentSection);
   const [selectedCustomsSection, setSelectedCustomsSection] = useState(data.selectedCustomsSection);
@@ -1451,6 +1469,7 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, readOn
     stepKey: selectedStep.step_key,
     moduleCode: selectedModuleCode,
     section: selectedModuleSection,
+    navigation: queueTabNavigation,
   });
   const canAdministerWorkflowInUi = Boolean(
     data.embeddedModuleData &&
@@ -1572,7 +1591,7 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, readOn
       <nav className="linear-module-tabs peer-page-tabs" aria-label="委托资料补充分区">
         {orderCreationTabs.map((tab, tabIndex) => {
           const isActive = selectedSection === tab.key;
-          const tabHref = orderModuleTabHref({ orderId: data.order.id, stepKey: selectedStep.step_key, moduleCode: tab.module, section: tab.section || null });
+          const tabHref = orderModuleTabHref({ orderId: data.order.id, stepKey: selectedStep.step_key, moduleCode: tab.module, section: tab.section || null, navigation: queueTabNavigation });
           const localSwitch = canActivateTabLocally(tab.module, tab.section || null);
           return <Link key={tab.key} className={isActive ? "active" : ""} aria-current={isActive ? "page" : undefined} viewTransition={!localSwitch} preventScrollReset onClick={(event) => switchLocalTab(event, tab.module, tab.section || null, tabHref, tabIndex, orderCreationActiveIndex)} to={tabHref}>{tab.label}{tabHasRequiredMissing(tab.key) && <b className="tab-required-star" title="存在必填但未填内容" aria-label="存在必填但未填内容">*</b>}</Link>;
         })}
@@ -1592,7 +1611,7 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, readOn
             ? selectedCostsSection
             : null;
         const isActive = tab.moduleCode === selectedModuleCode && (tab.section === null || tab.section === activeSection);
-        const tabHref = orderModuleTabHref({ orderId: data.order.id, stepKey: selectedStep.step_key, moduleCode: tab.moduleCode, section: tab.section });
+        const tabHref = orderModuleTabHref({ orderId: data.order.id, stepKey: selectedStep.step_key, moduleCode: tab.moduleCode, section: tab.section, navigation: queueTabNavigation });
         const localSwitch = canActivateTabLocally(tab.moduleCode, tab.section);
         return <Link
           key={tab.key}
@@ -1615,7 +1634,7 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, readOn
         <span>{selectedSection === "info" ? "无需重复填写报价中已经确认的资料，可继续核对货物。" : selectedSection === "cargo" ? "新增、拆分或修正货物后会立即回写本节点。" : selectedSection === "files" ? "点击文件名称即可上传或替换；必填缺失会阻断提交。" : "报价费用只读；新增费用会进入后续对账结算。"}</span>
       </div>
       <div className="order-creation-context-actions">
-        {selectedSection === "info" && <Link className="btn" to={orderModuleTabHref({ orderId: data.order.id, stepKey: selectedStep.step_key, moduleCode: "cargo", section: null })}>继续货物信息</Link>}
+        {selectedSection === "info" && <Link className="btn" to={orderModuleTabHref({ orderId: data.order.id, stepKey: selectedStep.step_key, moduleCode: "cargo", section: null, navigation: queueTabNavigation })}>继续货物信息</Link>}
         {selectedSection === "cargo" && <Link className="btn" to={`/admin/orders/${data.order.id}/operations#cargo`}>新增 / 维护货物</Link>}
         {selectedSection === "files" && <a className="btn" href="#module-source-documents">上传 / 替换文件</a>}
         {selectedSection === "costs" && <a className="btn" href="#consignment-cost-actions">新增费用</a>}
@@ -1637,6 +1656,7 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, readOn
               stepKey: "order_creation",
               moduleCode: "consignment",
               section: selectedConsignmentSection,
+              navigation: queueTabNavigation,
             })}
           />
         </Modal>}

@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { useEffect, useState } from "react";
-import { Form, Link, useFetcher } from "react-router";
+import { Form, Link, useFetcher, useLocation } from "react-router";
 import type { Route } from "./+types/admin.orders";
 import { Modal } from "../components/Modal";
 import { OrganizationAssigneePicker } from "../components/OrganizationAssigneePicker";
@@ -24,6 +24,7 @@ import {
   type BatchWorkloadRole,
   type OrderWorkloadView,
 } from "../lib/order-workload-view";
+import { orderDetailQueueHref, orderQueueContextFromList } from "../lib/order-queue-navigation";
 
 type OrderRow = {
   id: string;
@@ -348,10 +349,15 @@ export async function loader({ request }: Route.LoaderArgs) {
 }
 
 export default function Orders({ loaderData }: Route.ComponentProps) {
+  const location = useLocation();
   const active = loaderData.orders.filter((order) => !["completed", "cancelled"].includes(order.status)).length;
   const completed = loaderData.orders.filter((order) => order.status === "completed").length;
   const exceptions = loaderData.orders.filter((order) => order.exception_status && order.exception_status !== "normal").length;
   const advancedFilterCount = orderRouteFilterCount(loaderData.filters);
+  const orderQueue = orderQueueContextFromList({
+    returnTo: `${location.pathname}${location.search}`,
+    orderIds: loaderData.orders.map((order) => order.id),
+  });
   return (
     <div className="page prototype-page order-list-page">
       <div className="breadcrumb">汽运业务 / 运输订单</div>
@@ -423,7 +429,7 @@ export default function Orders({ loaderData }: Route.ComponentProps) {
                     order.status !== "completed" && order.exception_status && order.exception_status !== "normal" ? "row-alert" : "",
                   ].filter(Boolean).join(" ")}
                 >
-                  <td><Link className="order-id order-number-only" title={order.order_number} to={`/admin/orders/${order.id}`}>{order.order_number}</Link></td>
+                  <td><Link className="order-id order-number-only" title={order.order_number} to={orderDetailQueueHref(order.id, orderQueue)}>{order.order_number}</Link></td>
                   <td><b>{order.customer_name}</b><small className="subline">{order.order_date || order.created_at.slice(0, 10)}</small></td>
                   <td><span className={`pill ${order.business_type === "ltl" ? "ltl" : ""}`}>{order.business_type === "ltl" ? "拼车" : "整车"}</span></td>
                   <td><b>{order.cargo_description || "未填写"}</b><small className="subline">{order.pieces} 件 · {order.gross_weight_kg} KG · {order.volume_cbm} CBM</small></td>
@@ -431,7 +437,7 @@ export default function Orders({ loaderData }: Route.ComponentProps) {
                   <td><b>{order.quote_withdrawn ? "报价接受已撤回" : order.current_step_name || "待同步"}</b><small className="subline">{order.completion_status === "completed" ? "业务与结算已完成" : "按工作流推进"}</small></td>
                   <td>{order.assignee_name || "待分配"}</td>
                   <td><div className="order-list-status-cell"><span className={`status ${statusTone(order.status, order.exception_status)}`}>{statusLabel(order.status)}</span>{order.can_operate_current_node && <span className="order-todo-badge">待办</span>}</div></td>
-                  <td><Link className={`btn small${order.can_operate_current_node ? " primary" : ""}`} to={`/admin/orders/${order.id}`}>{order.can_operate_current_node ? "办理当前节点" : "查看订单"}</Link></td>
+                  <td><Link className={`btn small${order.can_operate_current_node ? " primary" : ""}`} to={orderDetailQueueHref(order.id, orderQueue)}>{order.can_operate_current_node ? "办理当前节点" : "查看订单"}</Link></td>
                 </tr>
               ))}
               {!loaderData.orders.length && <tr><td className="empty" colSpan={9}>当前筛选条件下没有订单</td></tr>}

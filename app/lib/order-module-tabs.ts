@@ -12,20 +12,32 @@ export type OrderModuleTabDescriptor = {
 export type OrderEntryPreference = {
   stepKey: string;
   moduleCode: string;
-  section: string;
+  section: string | null;
 };
 
 /**
  * A role-specific landing target only changes the first view shown to the
  * handler. It does not grant access or action permissions.
  */
-export function orderEntryPreference(positionCode: string | null | undefined): OrderEntryPreference | null {
-  if (positionCode === "DOC") {
+export function orderEntryPreference(
+  positionCode: string | null | undefined,
+  currentStepKey?: string | null,
+): OrderEntryPreference | null {
+  if (positionCode === "DOC" && (!currentStepKey || currentStepKey === "outbound_transport")) {
     return {
       stepKey: "outbound_transport",
       moduleCode: "customs",
       section: "files",
     };
+  }
+  if (positionCode === "OPERATION" && currentStepKey === "outbound_transport") {
+    return { stepKey: "outbound_transport", moduleCode: "tracking", section: null };
+  }
+  if (["CS", "SALES", "FINANCE_ACCOUNTING"].includes(positionCode || "") && currentStepKey === "reconciliation") {
+    return { stepKey: "reconciliation", moduleCode: "costs", section: "expenses" };
+  }
+  if (positionCode === "FINANCE_ACCOUNTING" && currentStepKey === "completion_review") {
+    return { stepKey: "completion_review", moduleCode: "review", section: null };
   }
   return null;
 }
@@ -54,15 +66,21 @@ export function orderModuleTabHref({
   stepKey,
   moduleCode,
   section,
+  navigation,
 }: {
   orderId: string;
   stepKey: string;
   moduleCode: string | null;
   section: string | null;
+  navigation?: { returnTo: string; orderIds: string[] };
 }) {
   const params = new URLSearchParams({ stage: stepKey });
   if (moduleCode) params.set("module", moduleCode);
   if (section) params.set("section", section);
+  if (navigation?.orderIds.length) {
+    params.set("returnTo", navigation.returnTo);
+    params.set("orderQueue", navigation.orderIds.join(","));
+  }
   return `/admin/orders/${encodeURIComponent(orderId)}?${params.toString()}`;
 }
 

@@ -19344,6 +19344,7 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .linear-order-page .summary-cell .ok { color: var(--green); }
 .linear-order-page .summary-cell .danger { color: var(--red); }
 .linear-order-page .head-actions { display: flex; gap: 8px; align-items: center; }
+.linear-order-page .order-queue-position { padding: 5px 8px; color: #557086; border: 1px solid var(--line); border-radius: 3px; background: #f6f9fc; font-size: 9px; white-space: nowrap; }
 .linear-order-page .workflow { margin-bottom: 10px; padding: 12px 15px 10px; color: #fff; border-radius: 4px; background: var(--navy); }
 .linear-order-page .workflow-meta { margin-bottom: 9px; display: flex; justify-content: space-between; align-items: center; }
 .linear-order-page .workflow-meta b { font-size: 11px; }
