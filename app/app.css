@@ -23556,7 +23556,7 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
   gap: 0;
 }
 .transport-compact-form {
-  grid-template-columns: repeat(8, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   align-items: end;
   gap: 5px 7px;
   padding: 8px 10px 10px;
@@ -23632,11 +23632,32 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
 .transport-compact-form .transport-route-destination small {
   display: none;
 }
-.transport-compact-form .transport-time-field {
-  grid-column: span 2;
+.transport-compact-form .transport-schedule-row,
+.transport-compact-form .transport-notes-row,
+.transport-compact-form .transport-form-actions {
+  grid-column: 1 / -1;
+  min-width: 0;
 }
-.transport-compact-form .transport-compact-note {
-  grid-column: span 1;
+.transport-compact-form .transport-schedule-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(240px, 310px));
+  gap: 7px;
+  align-items: end;
+}
+.transport-compact-form .transport-schedule-row .transport-time-field,
+.transport-compact-form .transport-notes-row .transport-compact-note {
+  grid-column: auto;
+}
+.transport-compact-form .transport-notes-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  align-items: start;
+}
+.transport-compact-form .transport-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 2px;
 }
 .transport-compact-form textarea,
 .linear-order-page .transport-compact-form textarea {
@@ -23645,10 +23666,12 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
   resize: vertical;
 }
 .transport-compact-form > button,
-.linear-order-page .transport-compact-form > button {
+.linear-order-page .transport-compact-form > button,
+.transport-compact-form .transport-form-actions > button {
   grid-column: span 2;
   min-height: 28px;
   margin: 0;
+  min-width: min(320px, 100%);
   padding-block: 4px;
 }
 .transport-records-panel .module-business-section > header {
@@ -23684,7 +23707,7 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
 
 @media (max-width: 1250px) {
   .transport-compact-form {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
   .transport-compact-form .transport-payable-fields {
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -23696,15 +23719,9 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
   .transport-compact-form .transport-payable-notes {
     grid-column: 1 / -1;
   }
-  .transport-compact-form .transport-compact-note {
-    grid-column: span 1;
-  }
-  .transport-compact-form .transport-time-field {
-    grid-column: span 2;
-  }
-  .transport-compact-form > button,
-  .linear-order-page .transport-compact-form > button {
-    grid-column: 4;
+  .transport-compact-form .transport-schedule-row .transport-time-field,
+  .transport-compact-form .transport-notes-row .transport-compact-note {
+    grid-column: auto;
   }
 }
 
@@ -23713,13 +23730,9 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
   .transport-compact-form .transport-payable-fields {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .transport-compact-form .transport-compact-note,
+  .transport-compact-form .transport-notes-row .transport-compact-note,
   .transport-compact-form .transport-payable-notes {
     grid-column: span 2;
-  }
-  .transport-compact-form > button,
-  .linear-order-page .transport-compact-form > button {
-    grid-column: 2;
   }
 }
 
@@ -23729,16 +23742,21 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
     min-width: 0;
   }
   .transport-compact-form,
-  .transport-compact-form .transport-payable-fields {
+  .transport-compact-form .transport-payable-fields,
+  .transport-compact-form .transport-schedule-row,
+  .transport-compact-form .transport-notes-row {
     grid-template-columns: minmax(0, 1fr);
   }
   .transport-compact-form .transport-carrier-field,
   .transport-compact-form .transport-payable-fields > .field:nth-of-type(2),
-  .transport-compact-form .transport-compact-note,
+  .transport-compact-form .transport-notes-row .transport-compact-note,
   .transport-compact-form .transport-payable-notes,
   .transport-compact-form > button,
   .linear-order-page .transport-compact-form > button {
     grid-column: 1;
+  }
+  .transport-compact-form .transport-form-actions > button {
+    width: 100%;
   }
 }
 

@@ -6614,21 +6614,27 @@ function ModuleBusinessData({
                     <small>后续出境运输使用</small>
                   </div>
                 </div>
-                <ModuleField fields={data.workflowFields} fieldKey="domestic_planned_departure_at" label="计划提货时间" className="field transport-time-field" fallbackRequired>
-                  {(required) => <input name="plannedDepartureAt" type="datetime-local" required={required} />}
-                </ModuleField>
-                <ModuleField fields={data.workflowFields} fieldKey="domestic_planned_arrival_at" label="计划到仓时间" className="field transport-time-field" fallbackRequired>
-                  {(required) => <input name="plannedArrivalAt" type="datetime-local" required={required} />}
-                </ModuleField>
-                <ModuleField fields={data.workflowFields} fieldKey="domestic_loading_requirements" label="国内装载要求" className="field transport-compact-note">
-                  {(required) => <textarea name="loadingRequirements" rows={1} required={required} />}
-                </ModuleField>
-                <ModuleField fields={data.workflowFields} fieldKey="domestic_transport_notes" label="国内运输备注" className="field transport-compact-note">
-                  {(required) => <textarea name="notes" rows={1} required={required} />}
-                </ModuleField>
-                <button className="primary" disabled={busy}>
-                  {busy ? "保存中…" : "保存运输安排"}
-                </button>
+                <div className="transport-schedule-row">
+                  <ModuleField fields={data.workflowFields} fieldKey="domestic_planned_departure_at" label="计划提货时间" className="field transport-time-field" fallbackRequired>
+                    {(required) => <input name="plannedDepartureAt" type="datetime-local" required={required} />}
+                  </ModuleField>
+                  <ModuleField fields={data.workflowFields} fieldKey="domestic_planned_arrival_at" label="计划到仓时间" className="field transport-time-field" fallbackRequired>
+                    {(required) => <input name="plannedArrivalAt" type="datetime-local" required={required} />}
+                  </ModuleField>
+                </div>
+                <div className="transport-notes-row">
+                  <ModuleField fields={data.workflowFields} fieldKey="domestic_loading_requirements" label="国内装载要求" className="field transport-compact-note">
+                    {(required) => <textarea name="loadingRequirements" rows={3} required={required} />}
+                  </ModuleField>
+                  <ModuleField fields={data.workflowFields} fieldKey="domestic_transport_notes" label="国内运输备注" className="field transport-compact-note">
+                    {(required) => <textarea name="notes" rows={3} required={required} />}
+                  </ModuleField>
+                </div>
+                <div className="transport-form-actions">
+                  <button className="primary" disabled={busy}>
+                    {busy ? "保存中…" : "保存运输安排"}
+                  </button>
+                </div>
               </Form>
           </div>
         </section>}
