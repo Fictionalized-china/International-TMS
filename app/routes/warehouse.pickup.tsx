@@ -13,6 +13,11 @@ import { loadWarehouseContext } from "../lib/warehouse-context.server";
 import { formatPickupAppointment } from "../lib/pickup-appointment";
 import { paginateList, readListPage } from "../lib/list-pagination";
 import { canOperateWarehouseUi } from "../lib/warehouse-ui-access";
+import { loadOrderModuleWorkflowFields } from "../lib/workflow-fields.server";
+import {
+  resolvePickupWorkflowPolicy,
+  validatePickupWorkflowSubmission,
+} from "../lib/warehouse-pickup-workflow-policy";
 import {
   loadWarehousePhysicalWorkflowAccess,
   warehousePhysicalWorkflowAccessSql,
@@ -39,6 +44,7 @@ type PickupOrder = {
   appointment_period: string | null;
   pickup_at: string | null;
   operation_status: string;
+  suggested_pickup_contact: string | null;
   package_count: number;
   scanned_count: number;
   dispatched_count: number;
@@ -69,7 +75,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     env.DB.prepare(
       `SELECT op.order_id,o.order_number,c.name customer_name,b.batch_number,
                op.notified_at,op.appointment_at,op.appointment_period,op.pickup_at,op.status operation_status,
-              COUNT(p.id) package_count,
+               COALESCE(o.consignee_contact,o.shipper_contact,
+                 (SELECT cc.name FROM customer_contacts cc WHERE cc.customer_id=o.customer_id ORDER BY cc.is_primary DESC,cc.updated_at DESC LIMIT 1)
+               ) suggested_pickup_contact,
+               COUNT(p.id) package_count,
               SUM(CASE WHEN p.status='allocated' THEN 1 ELSE 0 END) scanned_count,
               SUM(CASE WHEN p.status='dispatched' THEN 1 ELSE 0 END) dispatched_count
          FROM overseas_warehouse_operations op
@@ -83,7 +92,7 @@ export async function loader({ request }: Route.LoaderArgs) {
              (op.status='picked_up' AND ${workflowVisibility.sql})
              OR (op.status IN ('notified','appointment') AND ${workflowGate.sql})
            )
-         GROUP BY op.order_id,o.order_number,c.name,b.batch_number,op.notified_at,op.appointment_at,op.appointment_period,op.pickup_at,op.status
+         GROUP BY op.order_id,o.order_number,c.name,b.batch_number,op.notified_at,op.appointment_at,op.appointment_period,op.pickup_at,op.status,o.customer_id,o.consignee_contact,o.shipper_contact
          ORDER BY CASE WHEN op.status IN ('notified','appointment') THEN 0 ELSE 1 END,op.notified_at DESC
          `,
     ).bind(user.organizationId, warehouse.id, ...workflowVisibility.values, ...workflowGate.values).all<PickupOrder>(),
@@ -114,6 +123,14 @@ export async function loader({ request }: Route.LoaderArgs) {
         { userId: user.userId, positionCode: user.positionCode },
       )
     : null;
+  const pickupWorkflowFields = activeOrder && requestedOrderAccess?.available
+    ? await loadOrderModuleWorkflowFields(user.organizationId, orderId, "overseas_warehouse")
+    : [];
+  const pickupWorkflowPolicy = resolvePickupWorkflowPolicy({
+    fields: pickupWorkflowFields,
+    targetStepKey: requestedOrderAccess?.targetStepKey ?? null,
+    legacyFallback: requestedOrderAccess?.legacyFallback ?? false,
+  });
   return {
     user,
     warehouse,
@@ -128,6 +145,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     filters: { q: url.searchParams.get("q") || "", pickupState },
     packages: activeOrder ? packages.results : [],
     activeOrder,
+    pickupWorkflowPolicy,
     workflowGateReason: requestedOrderAccess && !requestedOrderAccess.available
       ? requestedOrderAccess.reason || "当前订单的冻结工作流尚未开放客户自提"
       : "",
@@ -163,9 +181,24 @@ export async function action({ request }: Route.ActionArgs) {
     );
     if (!workflowAccess.available)
       return { formError: workflowAccess.reason || "当前订单的冻结工作流尚未开放客户自提" };
-    const pickup=await env.DB.prepare(`SELECT op.order_id,o.order_number,COALESCE(o.consignee_contact,o.shipper_contact,(SELECT cc.name FROM customer_contacts cc WHERE cc.customer_id=o.customer_id ORDER BY cc.is_primary DESC,cc.updated_at DESC LIMIT 1),'客户自提') pickup_contact,op.status operation_status
+    const pickupWorkflowFields = await loadOrderModuleWorkflowFields(
+      user.organizationId,
+      orderId,
+      "overseas_warehouse",
+    );
+    const pickupWorkflowPolicy = resolvePickupWorkflowPolicy({
+      fields: pickupWorkflowFields,
+      targetStepKey: workflowAccess.targetStepKey,
+      legacyFallback: workflowAccess.legacyFallback,
+    });
+    const submission = validatePickupWorkflowSubmission(pickupWorkflowPolicy, {
+      pickupContact: valueOf(form, "pickupContact"),
+      pickupProofReference: valueOf(form, "pickupProofReference"),
+    });
+    if (submission.error) return { formError: submission.error };
+    const pickup=await env.DB.prepare(`SELECT op.order_id,o.order_number,op.status operation_status
       FROM overseas_warehouse_operations op JOIN transport_orders o ON o.id=op.order_id AND o.organization_id=op.organization_id
-      WHERE op.organization_id=? AND op.warehouse_id=? AND op.order_id=? AND o.status='in_execution' AND op.status!='cancelled' ORDER BY op.created_at DESC LIMIT 1`).bind(user.organizationId,warehouse.id,orderId).first<{order_id:string;order_number:string;pickup_contact:string;operation_status:string}>();
+      WHERE op.organization_id=? AND op.warehouse_id=? AND op.order_id=? AND o.status='in_execution' AND op.status!='cancelled' ORDER BY op.created_at DESC LIMIT 1`).bind(user.organizationId,warehouse.id,orderId).first<{order_id:string;order_number:string;operation_status:string}>();
     if(!pickup)return{formError:"未找到当前境外仓的待自提订单"};
     if(!["notified","appointment"].includes(pickup.operation_status))return{formError:"订单当前状态不能确认自提出库"};
     const packageStats=await env.DB.prepare(`SELECT COUNT(*) total,SUM(CASE WHEN p.status='allocated' THEN 1 ELSE 0 END) scanned,SUM(CASE WHEN p.status='exception' THEN 1 ELSE 0 END) exceptions
@@ -181,7 +214,7 @@ export async function action({ request }: Route.ActionArgs) {
         WHERE p.organization_id=? AND p.warehouse_id=? AND s.order_id=? AND p.status='allocated'`).bind(user.userId,now,now,user.organizationId,warehouse.id,orderId),
       env.DB.prepare(`UPDATE warehouse_packages SET status='dispatched',updated_at=? WHERE organization_id=? AND warehouse_id=? AND status='allocated' AND shipment_id IN (SELECT id FROM shipments WHERE organization_id=? AND order_id=?)`).bind(now,user.organizationId,warehouse.id,user.organizationId,orderId),
     ]);
-    await advanceOverseasOrder({organizationId:user.organizationId,orderId,actorUserId:user.userId,action:"pickup",occurredAt:now,pickupContact:pickup.pickup_contact,pickupProofReference:`WAREHOUSE-CONFIRM:${pickup.order_number}`,notes:`${warehouse.name} 已核对整票货物并完成客户自提出库`});
+    await advanceOverseasOrder({organizationId:user.organizationId,orderId,actorUserId:user.userId,action:"pickup",occurredAt:now,pickupContact:submission.pickupContact ?? undefined,pickupProofReference:submission.pickupProofReference ?? undefined,notes:`${warehouse.name} 已核对整票货物并完成客户自提出库`});
     await writeAudit({request,action:"warehouse.overseas.pickup",resourceType:"transport_order",resourceId:orderId,organizationId:user.organizationId,actorUserId:user.userId,metadata:{warehouseId:warehouse.id,orderNumber:pickup.order_number,confirmedPackages:packageStats.total}});
     const params=new URLSearchParams({
       warehouseId:warehouse.id,
@@ -393,7 +426,7 @@ export default function WarehousePickup({ loaderData, actionData }: Route.Compon
       <div className="table-wrap"><table><thead><tr><th>货物标签</th><th>包装号</th><th>件数</th><th>重量 / 体积</th><th>状态</th></tr></thead><tbody>
         {loaderData.packages.map((item) => <tr key={item.id}><td><strong>{item.barcode}</strong></td><td>{item.package_number}</td><td>{item.pieces}</td><td>{item.weight_kg ?? "—"} KG · {item.volume_cbm ?? "—"} CBM</td><td><span className={`status-pill ${item.status === "exception" ? "danger" : ""}`}>{packageStatusLabels[item.status] || item.status}</span></td></tr>)}
       </tbody></table></div>
-      {readyToConfirm&&<Modal title={`核对货物并确认收货 · ${loaderData.activeOrder.order_number}`} openSignal={loaderData.result||loaderData.activeOrder.order_id} size="wide"><div className="stack"><div className="alert warning">请客户当面核对订单、客户和下列全部货物条码。点击“确认收货”后，系统将立即完成自提出库与签收。</div><div className="table-wrap"><table><thead><tr><th>货物条码</th><th>包装号</th><th>件数</th><th>重量 / 体积</th></tr></thead><tbody>{loaderData.packages.map(item=><tr key={item.id}><td><strong>{item.barcode}</strong></td><td>{item.package_number}</td><td>{item.pieces}</td><td>{item.weight_kg??"—"} KG · {item.volume_cbm??"—"} CBM</td></tr>)}</tbody></table></div><Form method="post" className="overseas-pickup-confirm-form"><input type="hidden" name="intent" value="confirm_pickup"/><input type="hidden" name="orderId" value={loaderData.activeOrder.order_id}/><button className="primary" disabled={busy}>{busy ? "正在出库并同步订单…" : "确认收货"}</button></Form></div></Modal>}
+      {readyToConfirm&&<Modal title={`核对货物并确认收货 · ${loaderData.activeOrder.order_number}`} openSignal={loaderData.result||loaderData.activeOrder.order_id} size="wide"><div className="stack"><div className="alert warning">请客户当面核对订单、客户和下列全部货物条码。点击“确认收货”后，系统将立即完成自提出库与签收。</div><div className="table-wrap"><table><thead><tr><th>货物条码</th><th>包装号</th><th>件数</th><th>重量 / 体积</th></tr></thead><tbody>{loaderData.packages.map(item=><tr key={item.id}><td><strong>{item.barcode}</strong></td><td>{item.package_number}</td><td>{item.pieces}</td><td>{item.weight_kg??"—"} KG · {item.volume_cbm??"—"} CBM</td></tr>)}</tbody></table></div><Form method="post" className="overseas-pickup-confirm-form"><input type="hidden" name="intent" value="confirm_pickup"/><input type="hidden" name="orderId" value={loaderData.activeOrder.order_id}/><div className="overseas-pickup-confirm-fields">{loaderData.pickupWorkflowPolicy.contact.visible&&<label className="field"><span>{loaderData.pickupWorkflowPolicy.contact.label}{loaderData.pickupWorkflowPolicy.contact.required&&<b className="required-mark"> *</b>}</span><input name="pickupContact" defaultValue={loaderData.activeOrder.suggested_pickup_contact||""} required={loaderData.pickupWorkflowPolicy.contact.required} maxLength={120}/>{loaderData.pickupWorkflowPolicy.contact.helpText&&<small>{loaderData.pickupWorkflowPolicy.contact.helpText}</small>}</label>}{loaderData.pickupWorkflowPolicy.proof.visible&&<label className="field"><span>{loaderData.pickupWorkflowPolicy.proof.label}{loaderData.pickupWorkflowPolicy.proof.required&&<b className="required-mark"> *</b>}</span><input name="pickupProofReference" required={loaderData.pickupWorkflowPolicy.proof.required} maxLength={240} placeholder="填写凭证编号、扫码记录或签收凭证引用"/>{loaderData.pickupWorkflowPolicy.proof.helpText&&<small>{loaderData.pickupWorkflowPolicy.proof.helpText}</small>}</label>}</div><button className="primary" disabled={busy}>{busy ? "正在出库并同步订单…" : "确认收货"}</button></Form></div></Modal>}
     </section>}
 
     <section className="panel overseas-pickup-queue-panel">

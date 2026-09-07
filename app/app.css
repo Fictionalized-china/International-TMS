@@ -16976,8 +16976,19 @@ a.order-module-card.read-only:hover {
 }
 
 .overseas-pickup-confirm-form {
-  display: flex;
-  justify-content: flex-end;
+  display: grid;
+  gap: 12px;
+}
+
+.overseas-pickup-confirm-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.overseas-pickup-confirm-form > button {
+  justify-self: end;
+  min-width: 140px;
 }
 
 .pickup-success-dialog {
@@ -17031,6 +17042,10 @@ a.order-module-card.read-only:hover {
 
 @media (max-width: 760px) {
   .overseas-pickup-scan-form {
+    grid-template-columns: 1fr;
+  }
+
+  .overseas-pickup-confirm-fields {
     grid-template-columns: 1fr;
   }
 }

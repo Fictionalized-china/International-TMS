@@ -63,6 +63,14 @@ const harness = vi.hoisted(() => {
       reason: gateReason,
       legacyFallback: false,
     })),
+    loadWorkflowFields: vi.fn(async () => ([{
+      stepKey: "customer_pickup",
+      fieldKey: "overseas_pickup_contact",
+      label: "提货人/签收人",
+      helpText: null,
+      isActive: true,
+      isRequired: true,
+    }])),
     gateSql: vi.fn(() => ({ sql: "FROZEN_PICKUP_GATE", values: ["overseas_warehouse"] })),
     visibilitySql: vi.fn(() => ({ sql: "FROZEN_PICKUP_HISTORY", values: ["overseas_warehouse"] })),
     advanceOverseasOrder: vi.fn(async () => undefined),
@@ -74,6 +82,7 @@ vi.mock("../lib/auth.server", () => ({ requireSessionUser: harness.requireSessio
 vi.mock("../lib/warehouse-context.server", () => ({ loadWarehouseContext: harness.loadWarehouseContext }));
 vi.mock("../lib/warehouse-access.server", () => ({ requireWarehouseAssignment: harness.requireWarehouseAssignment }));
 vi.mock("../lib/overseas-warehouse.server", () => ({ advanceOverseasOrder: harness.advanceOverseasOrder }));
+vi.mock("../lib/workflow-fields.server", () => ({ loadOrderModuleWorkflowFields: harness.loadWorkflowFields }));
 vi.mock("../lib/warehouse-workflow-access.server", () => ({
   loadWarehousePhysicalWorkflowAccess: harness.loadGate,
   warehousePhysicalWorkflowAccessSql: harness.gateSql,
@@ -110,6 +119,29 @@ describe("overseas pickup frozen workflow gate", () => {
       "overseas_warehouse",
       { userId: "warehouse-user", positionCode: "OVERSEAS_WAREHOUSE" },
     );
+    expect(harness.DB.prepare).not.toHaveBeenCalled();
+    expect(harness.DB.batch).not.toHaveBeenCalled();
+    expect(harness.advanceOverseasOrder).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing frozen required pickup field before reading or mutating inventory", async () => {
+    harness.loadGate.mockResolvedValueOnce({
+      configured: true,
+      visible: true,
+      available: true,
+      targetStepKey: "customer_pickup",
+      targetStepName: "客户自提",
+      reason: "",
+      legacyFallback: false,
+    });
+
+    await expect(action({
+      request: post({ intent: "confirm_pickup", orderId: "order-1" }),
+      params: {},
+      context: undefined,
+    } as never)).resolves.toEqual({ formError: "请填写“提货人/签收人”" });
+
+    expect(harness.loadWorkflowFields).toHaveBeenCalledWith("org-1", "order-1", "overseas_warehouse");
     expect(harness.DB.prepare).not.toHaveBeenCalled();
     expect(harness.DB.batch).not.toHaveBeenCalled();
     expect(harness.advanceOverseasOrder).not.toHaveBeenCalled();
