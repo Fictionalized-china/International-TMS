@@ -53,6 +53,7 @@ type OrderRow = {
   completion_status: string | null;
   quote_withdrawn: number;
   created_at: string;
+  updated_at: string;
 };
 
 type FilterOption = { value: string; label: string };
@@ -82,6 +83,10 @@ type BatchAssignmentViewRow = BatchAssignmentRow & {
   initialResponsibilityRestrictions: BatchInitialResponsibilityRestrictions;
 };
 
+type SupervisorWorkItem =
+  | { kind: "order"; sortAt: string; order: OrderRow & { can_operate_current_node: boolean } }
+  | { kind: "batch"; sortAt: string; batch: BatchAssignmentViewRow };
+
 type BatchAssignmentActionData = { success?: string; formError?: string };
 
 export async function loader({ request }: Route.LoaderArgs) {
@@ -89,6 +94,10 @@ export async function loader({ request }: Route.LoaderArgs) {
   const url = new URL(request.url);
   const keyword = (url.searchParams.get("keyword") || "").trim();
   const type = url.searchParams.get("type") || "";
+  const requestedWorkStatus = url.searchParams.get("workStatus") || "";
+  const workStatus = ["pending", "active", "completed", "exception"].includes(requestedWorkStatus)
+    ? requestedWorkStatus
+    : "";
   const status = url.searchParams.get("status") || "";
   const step = url.searchParams.get("step") || "";
   const exception = url.searchParams.get("exception") || "";
@@ -97,7 +106,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const pageSize = 10;
   const batchPage = Math.max(1, Number(url.searchParams.get("batchPage") || 1));
   const batchPageSize = 10;
-  const batchKeyword = (url.searchParams.get("batchKeyword") || "").trim();
+  const legacyBatchKeyword = (url.searchParams.get("batchKeyword") || "").trim();
   const requestedBatchStatus = url.searchParams.get("batchStatus") || "";
   const batchStatus = batchStatusOptions.some((option) => option.value === requestedBatchStatus)
     ? requestedBatchStatus
@@ -113,6 +122,8 @@ export async function loader({ request }: Route.LoaderArgs) {
     canViewAssignedBatches,
   });
   const canViewBatchWorkload = batchWorkloadRole !== null;
+  const unifiedSupervisorWorkload = batchWorkloadRole === "supervisor";
+  const batchKeyword = unifiedSupervisorWorkload ? keyword : legacyBatchKeyword;
   const where = ["o.organization_id=?"];
   const values: unknown[] = [current.organizationId];
   const visibility = orderVisibilitySql(current, "o");
@@ -127,10 +138,19 @@ export async function loader({ request }: Route.LoaderArgs) {
     const pattern = `%${keyword}%`;
     values.push(pattern, pattern, pattern, pattern);
   }
-  if (["ftl", "ltl"].includes(type)) {
+  if (type === "batch" || (unifiedSupervisorWorkload && batchStatus)) {
+    where.push("1=0");
+  } else if (["ftl", "ltl"].includes(type)) {
     where.push("o.business_type=?");
     values.push(type);
   }
+  if (unifiedSupervisorWorkload && workStatus === "pending") {
+    where.push("o.status NOT IN ('completed','cancelled') AND o.current_assignee_user_id=?");
+    values.push(current.userId);
+  }
+  if (unifiedSupervisorWorkload && workStatus === "active") where.push("o.status NOT IN ('completed','cancelled')");
+  if (unifiedSupervisorWorkload && workStatus === "completed") where.push("o.status='completed'");
+  if (unifiedSupervisorWorkload && workStatus === "exception") where.push("(o.status='cancelled' OR COALESCE(o.exception_status,'normal')!='normal')");
   if (status) {
     where.push("o.status=?");
     values.push(status);
@@ -157,13 +177,15 @@ export async function loader({ request }: Route.LoaderArgs) {
     values.push(pattern, pattern, pattern, pattern, pattern);
   }
   const clause = where.join(" AND ");
+  const orderFetchLimit = unifiedSupervisorWorkload ? page * pageSize : pageSize;
+  const orderFetchOffset = unifiedSupervisorWorkload ? 0 : (page - 1) * pageSize;
   const [rows, countRow, stepRows] = await Promise.all([
     env.DB.prepare(
       `SELECT o.id,o.order_number,o.order_date,c.name customer_name,q.quote_number,o.business_type,
         o.cargo_description,o.pieces,o.gross_weight_kg,o.volume_cbm,o.origin_state,o.origin_city,
         o.exit_port,bp.name exit_port_name,o.destination_state,o.destination_city,ow.name overseas_warehouse_name,o.status,
         o.current_step_name,o.current_assignee_user_id,u.display_name assignee_name,o.exception_status,o.completion_status,
-        COALESCE(o.quote_withdrawn,0) quote_withdrawn,o.created_at
+        COALESCE(o.quote_withdrawn,0) quote_withdrawn,o.created_at,o.updated_at
        FROM transport_orders o
        JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
        LEFT JOIN quotations q ON q.id=o.quotation_id AND q.organization_id=o.organization_id
@@ -171,9 +193,9 @@ export async function loader({ request }: Route.LoaderArgs) {
        LEFT JOIN reference_data bp ON bp.organization_id=o.organization_id AND bp.category='border_port' AND bp.code=o.exit_port
        LEFT JOIN users u ON u.id=o.current_assignee_user_id
        WHERE ${clause}
-       ORDER BY o.created_at DESC
+       ORDER BY o.updated_at DESC
        LIMIT ? OFFSET ?`,
-    ).bind(...values, pageSize, (page - 1) * pageSize).all<OrderRow>(),
+    ).bind(...values, orderFetchLimit, orderFetchOffset).all<OrderRow>(),
     env.DB.prepare(
       `SELECT COUNT(*) count FROM transport_orders o
        JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
@@ -198,6 +220,21 @@ export async function loader({ request }: Route.LoaderArgs) {
   const batchScopeBinds = privileged ? [current.organizationId] : [current.organizationId, current.userId];
   const batchFilterConditions: string[] = [];
   const batchFilterBinds: unknown[] = [];
+  if (unifiedSupervisorWorkload && (["ftl", "ltl"].includes(type) || status || step || exception)) {
+    batchFilterConditions.push("1=0");
+  }
+  if (unifiedSupervisorWorkload && workStatus === "pending") {
+    batchFilterConditions.push("b.approval_status='submitted' AND b.status!='cancelled'");
+  }
+  if (unifiedSupervisorWorkload && workStatus === "active") {
+    batchFilterConditions.push("b.approval_status='approved' AND b.status!='cancelled' AND b.road_status NOT IN ('pickup_completed','cancelled')");
+  }
+  if (unifiedSupervisorWorkload && workStatus === "completed") {
+    batchFilterConditions.push("b.approval_status='approved' AND b.road_status='pickup_completed' AND b.status!='cancelled'");
+  }
+  if (unifiedSupervisorWorkload && workStatus === "exception") {
+    batchFilterConditions.push("(b.approval_status='rejected' OR b.status='cancelled' OR b.road_status='cancelled')");
+  }
   if (batchKeyword) {
     const pattern = `%${batchKeyword}%`;
     batchFilterConditions.push(`(
@@ -213,6 +250,18 @@ export async function loader({ request }: Route.LoaderArgs) {
       )
     )`);
     batchFilterBinds.push(pattern, pattern, pattern, pattern, pattern);
+  }
+  if (unifiedSupervisorWorkload && routeFilters.origin) {
+    batchFilterConditions.push("b.origin_location LIKE ?");
+    batchFilterBinds.push(`%${routeFilters.origin}%`);
+  }
+  if (unifiedSupervisorWorkload && routeFilters.exitPort) {
+    batchFilterConditions.push("COALESCE(b.border_port,'') LIKE ?");
+    batchFilterBinds.push(`%${routeFilters.exitPort}%`);
+  }
+  if (unifiedSupervisorWorkload && routeFilters.destination) {
+    batchFilterConditions.push("b.destination_location LIKE ?");
+    batchFilterBinds.push(`%${routeFilters.destination}%`);
   }
   const batchStatusSql: Record<string, string> = {
     draft: "b.approval_status='draft' AND b.status!='cancelled'",
@@ -233,6 +282,13 @@ export async function loader({ request }: Route.LoaderArgs) {
   const batchPrioritySql = batchWorkloadRole === "supervisor"
     ? "b.approval_status='submitted' AND b.status!='cancelled'"
     : "b.approval_status='approved' AND b.status!='cancelled' AND b.road_status NOT IN ('cancelled','overseas_arrived','waiting_pickup','pickup_completed')";
+  const batchFetchLimit = unifiedSupervisorWorkload ? page * batchPageSize : batchPageSize;
+  const batchFetchOffset = unifiedSupervisorWorkload ? 0 : (batchPage - 1) * batchPageSize;
+  const batchOrderSql = unifiedSupervisorWorkload
+    ? "b.updated_at DESC"
+    : `CASE WHEN ${batchPrioritySql} THEN 0 ELSE 1 END,
+       CASE WHEN ${batchPrioritySql} THEN COALESCE(b.submitted_at,b.updated_at) END ASC,
+       COALESCE(b.approved_at,b.updated_at) DESC`;
   const [batchAssignmentRows, batchCountRow, responsibilityMemberRows] = canViewBatchWorkload
     ? await Promise.all([
         env.DB.prepare(
@@ -254,11 +310,9 @@ export async function loader({ request }: Route.LoaderArgs) {
            LEFT JOIN users approved_by ON approved_by.id=b.approved_by_user_id
            WHERE b.organization_id=? AND b.batch_number LIKE 'PZ-%' ${batchOwnerSql} ${batchFilterSql}
            GROUP BY b.id
-           ORDER BY CASE WHEN ${batchPrioritySql} THEN 0 ELSE 1 END,
-                    CASE WHEN ${batchPrioritySql} THEN COALESCE(b.submitted_at,b.updated_at) END ASC,
-                    COALESCE(b.approved_at,b.updated_at) DESC
+           ORDER BY ${batchOrderSql}
            LIMIT ? OFFSET ?`,
-        ).bind(...batchScopeBinds, ...batchFilterBinds, batchPageSize, (batchPage - 1) * batchPageSize).all<BatchAssignmentRow>(),
+        ).bind(...batchScopeBinds, ...batchFilterBinds, batchFetchLimit, batchFetchOffset).all<BatchAssignmentRow>(),
         env.DB.prepare(
           `SELECT COUNT(*) count,
                   SUM(CASE WHEN ${batchPrioritySql} THEN 1 ELSE 0 END) priority_count
@@ -311,6 +365,20 @@ export async function loader({ request }: Route.LoaderArgs) {
     ...order,
     can_operate_current_node: canOperateCurrentOrder(current, order),
   }));
+  const unifiedTotal = total + (batchCountRow?.count || 0);
+  const supervisorWorkItems: SupervisorWorkItem[] = unifiedSupervisorWorkload
+    ? [
+        ...orders.map((order): SupervisorWorkItem => ({ kind: "order", sortAt: order.updated_at, order })),
+        ...batchAssignments.map((batch): SupervisorWorkItem => ({
+          kind: "batch",
+          sortAt: batch.updated_at,
+          batch,
+        })),
+      ]
+        .sort((left, right) => right.sortAt.localeCompare(left.sortAt)
+          || (left.kind === right.kind ? 0 : left.kind === "order" ? -1 : 1))
+        .slice((page - 1) * pageSize, page * pageSize)
+    : [];
   const workloadView = resolveOrderWorkloadView({
     requestedView: url.searchParams.get("view"),
     canViewBatchWorkload,
@@ -318,7 +386,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   });
   return {
     orders,
-    filters: { keyword, type, status, step, exception, batchKeyword, batchStatus, view: workloadView, batchPage: String(batchPage), ...routeFilters },
+    filters: { keyword, type, workStatus, status, step, exception, batchKeyword: unifiedSupervisorWorkload ? "" : batchKeyword, batchStatus, view: workloadView, batchPage: String(batchPage), ...routeFilters },
     steps: stepRows.results,
     page,
     pageSize,
@@ -332,6 +400,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     batchPages: Math.max(1, Math.ceil((batchCountRow?.count || 0) / batchPageSize)),
     batchTotal: batchCountRow?.count || 0,
     priorityBatchCount: batchCountRow?.priority_count || 0,
+    supervisorWorkItems,
+    unifiedSupervisorWorkload,
+    unifiedTotal,
+    unifiedPages: Math.max(1, Math.ceil(unifiedTotal / pageSize)),
     operationMembers: responsibilityMemberRows.results.filter((member) => member.position_code === "OPERATION"),
     documentMembers: responsibilityMemberRows.results.filter((member) => member.position_code === "DOC"),
     workloadView,
@@ -346,7 +418,11 @@ export default function Orders({ loaderData }: Route.ComponentProps) {
   const advancedFilterCount = orderRouteFilterCount(loaderData.filters);
   const orderQueue = orderQueueContextFromList({
     returnTo: `${location.pathname}${location.search}`,
-    orderIds: loaderData.orders.map((order) => order.id),
+    orderIds: loaderData.unifiedSupervisorWorkload
+      ? loaderData.supervisorWorkItems
+          .filter((item): item is Extract<SupervisorWorkItem, { kind: "order" }> => item.kind === "order")
+          .map((item) => item.order.id)
+      : loaderData.orders.map((order) => order.id),
   });
   return (
     <div className="page prototype-page order-list-page">
@@ -355,35 +431,37 @@ export default function Orders({ loaderData }: Route.ComponentProps) {
         <div><h1>运输订单</h1><p>订单由客户接受报价后自动生成；在一张表内筛选、查看并进入当前业务节点。</p></div>
         <Link className="btn primary" to="/admin/quotations">前往询价与报价</Link>
       </header>
-      {loaderData.canViewBatchWorkload && <OrderWorkloadTabs
+      {loaderData.canViewBatchWorkload && !loaderData.unifiedSupervisorWorkload && <OrderWorkloadTabs
         active={loaderData.workloadView}
         batchCount={loaderData.batchTotal}
         orderCount={loaderData.total}
         filters={loaderData.filters}
       />}
-      {loaderData.workloadView === "batches" ? (
-        loaderData.batchWorkloadRole === "supervisor" ? (
-          <BatchAssignmentQueue
-            batches={loaderData.batchAssignments}
-            operationMembers={loaderData.operationMembers}
-            documentMembers={loaderData.documentMembers}
-            pendingCount={loaderData.priorityBatchCount}
-            total={loaderData.batchTotal}
-            page={loaderData.batchPage}
-            pages={loaderData.batchPages}
-            filters={loaderData.filters}
-          />
-        ) : (
-          <BatchExecutionQueue
-            batches={loaderData.batchAssignments}
-            role={loaderData.batchWorkloadRole}
-            activeCount={loaderData.priorityBatchCount}
-            total={loaderData.batchTotal}
-            page={loaderData.batchPage}
-            pages={loaderData.batchPages}
-            filters={loaderData.filters}
-          />
-        )
+      {loaderData.unifiedSupervisorWorkload ? (
+        <SupervisorUnifiedQueue
+          items={loaderData.supervisorWorkItems}
+          operationMembers={loaderData.operationMembers}
+          documentMembers={loaderData.documentMembers}
+          pendingBatchCount={loaderData.priorityBatchCount}
+          orderCount={loaderData.total}
+          batchCount={loaderData.batchTotal}
+          total={loaderData.unifiedTotal}
+          page={loaderData.page}
+          pages={loaderData.unifiedPages}
+          filters={loaderData.filters}
+          steps={loaderData.steps}
+          orderQueue={orderQueue}
+        />
+      ) : loaderData.workloadView === "batches" ? (
+        <BatchExecutionQueue
+          batches={loaderData.batchAssignments}
+          role={loaderData.batchWorkloadRole}
+          activeCount={loaderData.priorityBatchCount}
+          total={loaderData.batchTotal}
+          page={loaderData.batchPage}
+          pages={loaderData.batchPages}
+          filters={loaderData.filters}
+        />
       ) : <>
       <section className="kpis compact-kpis" aria-label="普通订单概览">
         <div><span>当前结果</span><b>{loaderData.total}</b><small>符合筛选条件</small></div>
@@ -456,15 +534,19 @@ function OrderWorkloadTabs({ active, batchCount, orderCount, filters }: { active
   </nav>;
 }
 
-function BatchAssignmentQueue({ batches, operationMembers, documentMembers, pendingCount, total, page, pages, filters }: {
-  batches: BatchAssignmentViewRow[];
+function SupervisorUnifiedQueue({ items, operationMembers, documentMembers, pendingBatchCount, orderCount, batchCount, total, page, pages, filters, steps, orderQueue }: {
+  items: SupervisorWorkItem[];
   operationMembers: OrganizationAssigneeMember[];
   documentMembers: OrganizationAssigneeMember[];
-  pendingCount: number;
+  pendingBatchCount: number;
+  orderCount: number;
+  batchCount: number;
   total: number;
   page: number;
   pages: number;
   filters: Record<string, string>;
+  steps: FilterOption[];
+  orderQueue: ReturnType<typeof orderQueueContextFromList>;
 }) {
   const fetcher = useFetcher<BatchAssignmentActionData>();
   const [selected, setSelected] = useState<BatchAssignmentViewRow | null>(null);
@@ -480,43 +562,97 @@ function BatchAssignmentQueue({ batches, operationMembers, documentMembers, pend
   const hasFreshDocumentCandidate = documentMembers.some((member) => !documentDisabledReasons[member.id]);
   const responsibilityConfigurationErrors = selected?.initialResponsibilityRestrictions.configurationErrors ?? [];
   const freshInitialAssigneesAvailable = hasFreshOperationCandidate && hasFreshDocumentCandidate && responsibilityConfigurationErrors.length === 0;
+  const advancedFilterCount = [
+    filters.step,
+    filters.origin,
+    filters.exitPort,
+    filters.destination,
+  ].filter(Boolean).length;
 
   useEffect(() => {
     if (success) setSelected(null);
   }, [success]);
 
-  return <section className="table-panel batch-assignment-panel" aria-label="待审核配载单一键分配">
-    <div className="table-panel-head">
-      <div><b>配载订单</b><span>待分配优先显示；已分配、已退回和取消记录继续保留，整张 PZ 配载单只分配一次。</span></div>
-      <span>{pendingCount} 张待分配 · 共 {total} 张</span>
+  return <section className="table-panel supervisor-workload-panel" aria-label="操作主管订单与配载单工作清单">
+    <div className="table-panel-head supervisor-workload-head">
+      <div><b>主管工作清单</b><span>普通订单与配载单统一显示，需要办理的项目以橙色入口提示。</span></div>
+      <span className="supervisor-workload-summary">共 {total} 项 · {orderCount} 单 · {batchCount} 张配载 · {pendingBatchCount} 张待分配</span>
     </div>
-    <BatchWorkloadFilters filters={filters}/>
+    <Form method="get" action="." className="supervisor-workload-filters" role="search">
+      <label className="field supervisor-workload-search">
+        <span>统一查找</span>
+        <input
+          className="control"
+          name="keyword"
+          data-keyboard-search
+          defaultValue={filters.keyword}
+          placeholder="订单号、配载单号、客户、货物或线路"
+        />
+      </label>
+      <FilterSelect name="type" label="工作项" value={filters.type} options={[
+        { value: "ftl", label: "整车订单" },
+        { value: "ltl", label: "拼车单票" },
+        { value: "batch", label: "配载单" },
+      ]}/>
+      <FilterSelect name="workStatus" label="办理状态" value={filters.workStatus} options={[
+        { value: "pending", label: "待我办理" },
+        { value: "active", label: "业务进行中" },
+        { value: "completed", label: "已完成" },
+        { value: "exception", label: "异常 / 退回" },
+      ]}/>
+      <button className="btn primary">筛选</button>
+      <Link className="btn" to="/admin/orders">重置</Link>
+      <details className="supervisor-workload-advanced" open={advancedFilterCount > 0}>
+        <summary>更多条件{advancedFilterCount ? `（${advancedFilterCount}）` : ""}</summary>
+        <div className="supervisor-workload-advanced-grid">
+          <FilterSelect name="step" label="普通订单节点" value={filters.step} options={steps}/>
+          <OrderRouteFilterFields filters={{
+            origin: filters.origin || "",
+            exitPort: filters.exitPort || "",
+            destination: filters.destination || "",
+          }}/>
+        </div>
+      </details>
+    </Form>
     {success && <div className="alert success batch-assignment-feedback">{success}</div>}
-    {!!batches.length && <div className="table-wrap"><table className="batch-assignment-table">
-      <thead><tr><th>状态</th><th>配载单</th><th>线路</th><th>挂载订单</th><th>操作 / 单证负责人</th><th>更新时间</th><th>操作</th></tr></thead>
-      <tbody>{batches.map((batch) => {
+    {!!items.length && <div className="table-wrap"><table className="supervisor-workload-table">
+      <thead><tr><th>类型 / 编号</th><th>客户 / 挂载范围</th><th>货物与线路</th><th>当前节点 / 负责人</th><th>状态 / 更新时间</th><th>操作</th></tr></thead>
+      <tbody>{items.map((item) => {
+        if (item.kind === "order") {
+          const order = item.order;
+          return <tr key={`order:${order.id}`} className={[
+            order.can_operate_current_node ? "order-todo-row" : "",
+            order.status !== "completed" && order.exception_status && order.exception_status !== "normal" ? "row-alert" : "",
+          ].filter(Boolean).join(" ")}>
+            <td><span className={`pill ${order.business_type === "ltl" ? "ltl" : ""}`}>{order.business_type === "ltl" ? "拼车单票" : "整车订单"}</span><Link className="order-id supervisor-workload-id" title={order.order_number} to={orderDetailQueueHref(order.id, orderQueue)}>{order.order_number}</Link></td>
+            <td><b>{order.customer_name}</b><small className="subline">{order.order_date || order.created_at.slice(0, 10)}</small></td>
+            <td><b>{order.cargo_description || "未填写货物"}</b><small className="subline">{order.origin_state || ""}{order.origin_city} → {order.destination_state || ""}{order.destination_city} · {order.pieces} 件 / {order.gross_weight_kg} KG / {order.volume_cbm} CBM</small></td>
+            <td><b>{order.quote_withdrawn ? "报价接受已撤回" : order.current_step_name || "待同步"}</b><small className="subline">{order.assignee_name || "负责人待分配"}</small></td>
+            <td><div className="order-list-status-cell"><span className={`status ${statusTone(order.status, order.exception_status)}`}>{statusLabel(order.status)}</span>{order.can_operate_current_node && <span className="order-todo-badge">待办</span>}</div><small className="subline">{batchDate(order.updated_at)}</small></td>
+            <td><Link className={`btn small${order.can_operate_current_node ? " primary" : ""}`} to={orderDetailQueueHref(order.id, orderQueue)}>{order.can_operate_current_node ? "办理当前节点" : "查看订单"}</Link></td>
+          </tr>;
+        }
+        const batch = item.batch;
         const state = batchAssignmentStatus({
           approvalStatus: batch.approval_status,
           batchStatus: batch.status,
           operationAssigneeUserId: batch.operation_assignee_user_id,
           documentAssigneeUserId: batch.document_assignee_user_id,
         });
-        const updatedAt = batch.approved_at || batch.submitted_at || batch.updated_at;
-        return <tr key={batch.id} className={state.actionable ? "order-todo-row" : "batch-history-row"}>
-          <td><span className={`batch-assignment-status ${state.key}`}>{state.label}</span></td>
-          <td>{state.actionable
-            ? <button type="button" className="order-id text-button" onClick={() => setSelected(batch)}>{batch.batch_number}</button>
-            : <Link className="order-id text-button" to={`/admin/loading/${batch.id}`}>{batch.batch_number}</Link>}</td>
-          <td>{batch.origin_location}<span className="batch-route-arrow">→</span>{batch.destination_location}</td>
-          <td><b>{batch.order_count} 票</b><small className="subline batch-order-numbers" title={batch.order_numbers || ""}>{batch.order_numbers || "—"}</small></td>
-          <td><b>操作：{batch.operation_assignee_name || "待分配"}</b><small className="subline">单证：{batch.document_assignee_name || "待分配"}</small></td>
-          <td><b>{batchDate(updatedAt)}</b><small className="subline">{batch.approved_by_name ? `由 ${batch.approved_by_name} 分配` : batch.operation_supervisor_name || "操作主管待处理"}</small></td>
-          <td><div className="button-row">{state.actionable && <button type="button" className="btn small primary" onClick={() => setSelected(batch)}>整批一键分配</button>}<Link className="btn small" to={`/admin/loading/${batch.id}`}>查看详情</Link></div></td>
+        return <tr key={`batch:${batch.id}`} className={state.actionable ? "order-todo-row" : "batch-history-row"}>
+          <td><span className="pill batch">配载单</span>{state.actionable
+            ? <button type="button" className="order-id text-button supervisor-workload-id" onClick={() => setSelected(batch)}>{batch.batch_number}</button>
+            : <Link className="order-id text-button supervisor-workload-id" to={`/admin/loading/${batch.id}`}>{batch.batch_number}</Link>}</td>
+          <td><b>{batch.order_count} 票订单</b><small className="subline batch-order-numbers" title={batch.order_numbers || ""}>{batch.order_numbers || "—"}</small></td>
+          <td><b>{batch.origin_location}<span className="batch-route-arrow">→</span>{batch.destination_location}</b><small className="subline">整张配载单统一推进</small></td>
+          <td><b>{state.actionable ? "待主管统一分配" : state.label}</b><small className="subline">操作：{batch.operation_assignee_name || "待分配"} · 单证：{batch.document_assignee_name || "待分配"}</small></td>
+          <td><span className={`batch-assignment-status ${state.key}`}>{state.label}</span><small className="subline">{batchDate(batch.approved_at || batch.submitted_at || batch.updated_at)}</small></td>
+          <td><div className="button-row">{state.actionable && <button type="button" className="btn small primary" onClick={() => setSelected(batch)}>整批分配</button>}<Link className="btn small" to={`/admin/loading/${batch.id}`}>查看详情</Link></div></td>
         </tr>;
       })}</tbody>
     </table></div>}
-    {!batches.length && <div className="empty-state batch-assignment-empty"><strong>暂无配载订单记录</strong><p>仓库生成并提交 PZ 配载单后，会自动出现在这里并持续保留历史状态。</p></div>}
-    <BatchPagination page={page} pages={pages} filters={filters}/>
+    {!items.length && <div className="empty-state batch-assignment-empty"><strong>没有匹配的工作项</strong><p>可调整统一查找或更多筛选条件后重试。</p></div>}
+    <SupervisorPagination page={page} pages={pages} filters={filters}/>
     <Modal
       title={selected ? `配载单一键分配 · ${selected.batch_number}` : "配载单一键分配"}
       isOpen={Boolean(selected)}
@@ -637,6 +773,19 @@ function BatchPagination({ page, pages, filters }: { page: number; pages: number
     params.set("view", "batches");
     params.delete("page");
     params.set("batchPage", String(target));
+    return `?${params}`;
+  };
+  return <div className="pagination"><Link className={`btn ${page <= 1 ? "disabled" : ""}`} to={href(Math.max(1, page - 1))}>上一页</Link><span>第 {page} / {pages} 页</span><Link className={`btn ${page >= pages ? "disabled" : ""}`} to={href(Math.min(pages, page + 1))}>下一页</Link></div>;
+}
+
+function SupervisorPagination({ page, pages, filters }: { page: number; pages: number; filters: Record<string, string> }) {
+  if (pages <= 1) return null;
+  const href = (target: number) => {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(filters)) {
+      if (value && !["view", "batchPage", "batchKeyword"].includes(key)) params.set(key, value);
+    }
+    params.set("page", String(target));
     return `?${params}`;
   };
   return <div className="pagination"><Link className={`btn ${page <= 1 ? "disabled" : ""}`} to={href(Math.max(1, page - 1))}>上一页</Link><span>第 {page} / {pages} 页</span><Link className={`btn ${page >= pages ? "disabled" : ""}`} to={href(Math.min(pages, page + 1))}>下一页</Link></div>;
