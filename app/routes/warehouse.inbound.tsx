@@ -72,6 +72,8 @@ type ScannedPackage = {
   package_number: string;
   status: string;
   order_id: string;
+  order_number: string;
+  overseas_warehouse_id: string | null;
   warehouse_id: string;
   source_warehouse_name: string;
   receipt_number: string | null;
@@ -214,7 +216,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   ]);
   const directlyScannedPackage = reference
     ? await env.DB.prepare(
-        `SELECT p.id,p.shipment_id,o.id order_id,p.barcode,p.package_number,p.status,p.warehouse_id,
+        `SELECT p.id,p.shipment_id,o.id order_id,o.order_number,o.overseas_warehouse_id,p.barcode,p.package_number,p.status,p.warehouse_id,
                 w.name source_warehouse_name,
                 COALESCE(NULLIF(TRIM(i.cargo_name_cn),''),NULLIF(TRIM(o.cargo_description),'')) cargo_name,
                  COALESCE(r.package_type,i.package_type) package_type,
@@ -248,7 +250,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     : null;
   const dispatchPackage = scannedDispatch?.package_count === 1
     ? await env.DB.prepare(
-        `SELECT p.id,p.shipment_id,o.id order_id,p.barcode,p.package_number,p.status,p.warehouse_id,
+        `SELECT p.id,p.shipment_id,o.id order_id,o.order_number,o.overseas_warehouse_id,p.barcode,p.package_number,p.status,p.warehouse_id,
                 w.name source_warehouse_name,
                 COALESCE(NULLIF(TRIM(i.cargo_name_cn),''),NULLIF(TRIM(o.cargo_description),'')) cargo_name,
                  COALESCE(r.package_type,i.package_type) package_type,
@@ -268,6 +270,14 @@ export async function loader({ request }: Route.LoaderArgs) {
         .first<ScannedPackage>()
     : null;
   const scannedPackage = directlyScannedPackage ?? dispatchPackage;
+  const actualExitRecord = scannedPackage
+    ? await env.DB.prepare(
+        `SELECT event_at
+           FROM order_tracking_milestones
+          WHERE organization_id=? AND order_id=? AND milestone_code='exported'
+          ORDER BY event_at DESC LIMIT 1`,
+      ).bind(user.organizationId, scannedPackage.order_id).first<{ event_at: string }>()
+    : null;
   const packageReady = Boolean(
     scannedPackage &&
       scannedPackage.status === "dispatched" &&
@@ -315,6 +325,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     lookupError = `货物标签 ${scannedPackage.barcode} 不属于当前 PZ 配载单，已拒绝调出收货表单`;
   else if (reference && customsGate?.blocked)
     lookupError = customsGate.message || "当前订单清关门禁尚未通过";
+  else if (reference && scannedPackage && scannedPackage.overseas_warehouse_id !== warehouse.id)
+    lookupError = `货物标签 ${scannedPackage.barcode} 不属于当前目的仓“${warehouse.name}”`;
+  else if (reference && scannedPackage && !actualExitRecord)
+    lookupError = `订单 ${scannedPackage.order_number} 尚未登记实际出境。请先使用操作岗账号，进入该订单的“出境运输 → 运输执行与运踪”，依次登记“口岸到达”和“实际出境”，再回到本页扫码入库`;
   else if (reference && scannedPackageWorkflowAccess && !scannedPackageWorkflowAccess.available)
     lookupError = scannedPackageWorkflowAccess.reason || "当前订单的冻结工作流尚未开放境外仓入库";
   else if (reference && scannedPackage && !selectedShipment)
