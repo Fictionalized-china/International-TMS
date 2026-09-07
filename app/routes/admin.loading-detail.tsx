@@ -2171,7 +2171,7 @@ export function BatchTrackingWorkbench({batchId,batchNumber,orders,visibleOrders
     {actualExitSurfaceVisible&&warehouseReady&&documentGateReady&&!exitConfirmed&&borderArrivalReady&&(!canConfirmExit||!actualExitCanWrite)&&<div className="batch-gate-blocker batch-inline-exit-blocker"><div><strong>{canConfirmExit?"当前冻结工作流只读":"实际出境仍有前置事项"}</strong>{exitBlockers.length?<ul>{exitBlockers.map(reason=><li key={reason}>{reason}</li>)}</ul>:<p>{actualExitAction.reason||"请由本配载单的操作负责人确认实际出境。"}</p>}</div></div>}
     {actualExitSurfaceVisible&&exitConfirmed&&borderArrivalReady&&<div className="alert success">实际出境已确认{milestoneSurfaceVisible?"；可继续登记境外运输节点":""}。</div>}
     {exitSequenceAnomaly&&<div className="alert danger" role="alert"><strong>运输节点顺序异常</strong>：批次已经登记出境，但仍有 {exitSequenceOrders.length-exitReadyOrderCount} 票缺少更早的“口岸到达”记录。请补录真实到达时间；系统不会伪造历史时间。</div>}
-    {milestoneSurfaceVisible&&<><div className="batch-tracking-note"><strong>配置门禁</strong><span>字段显隐、当前节点和必填状态来自冻结工作流；选填字段不会阻断。</span><strong>结构性顺序</strong><span>一旦登记运输事件，前后节点时间必须连续且幂等，防止产生不可能的轨迹。</span></div>
+    {milestoneSurfaceVisible&&<><div className="batch-tracking-note"><strong>此处留出接口后续自动化</strong><span>字段显隐、当前节点和必填状态来自冻结工作流；选填字段不会阻断。</span><strong>结构性顺序</strong><span>一旦登记运输事件，前后节点时间必须连续且幂等，防止产生不可能的轨迹。</span></div>
     <div className="table-wrap batch-tracking-node-table"><table><thead><tr><th>顺序</th><th>运输节点</th><th>流程进度</th><th>批次登记状态</th><th>最近登记</th><th>操作</th></tr></thead><tbody>{visibleMilestones.map((node,index)=>{
       const count=nodeOrders.filter(o=>{const list=milestonesByOrder.get(o.order_id)||[];return list.some(m=>m.milestone_code===node.code);}).length;
       const total=nodeOrders.length;

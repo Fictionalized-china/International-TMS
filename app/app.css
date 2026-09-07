@@ -24043,8 +24043,10 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
   display: inline;
 }
 .batch-drawer-order-detail {
-  padding: 8px;
-  background: #fbfcfd;
+  margin: 0 10px 10px 20px;
+  padding: 8px 0 0 12px;
+  border-left: 2px solid #b9d0e4;
+  background: transparent;
 }
 .batch-drawer-order-facts {
   overflow: hidden;
@@ -25122,6 +25124,10 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
   .batch-drawer-order-cargo {
     grid-column: 1 / -1;
     grid-row: 2;
+  }
+  .batch-drawer-order-detail {
+    margin-left: 10px;
+    padding-left: 8px;
   }
   .batch-drawer-cargo-list dl,
   .batch-drawer-label-list > article {
