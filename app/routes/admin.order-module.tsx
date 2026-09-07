@@ -5547,19 +5547,22 @@ function AssignmentManifestWorkbench({
   busy: boolean;
   formError?: string;
 }) {
+  const personalAssignmentGroups = manifest.groups.filter(
+    (group) => group.assignmentMode === "person",
+  );
   const [assigneeUserIds, setAssigneeUserIds] = useState<Record<string, string>>(
     () => Object.fromEntries(
-      manifest.groups.map((group) => [group.key, group.assigneeUserId ?? ""]),
+      personalAssignmentGroups.map((group) => [group.key, group.assigneeUserId ?? ""]),
     ),
   );
   const missingRequiredGroups = missingRequiredOrderAssignmentGroupKeys(
-    manifest.groups,
+    personalAssignmentGroups,
     assigneeUserIds,
   );
-  const nextResponsibilityGroup = nextRequiredOrderAssignmentGroup(manifest.groups);
+  const nextResponsibilityGroup = nextRequiredOrderAssignmentGroup(personalAssignmentGroups);
   const configurationErrors = [...new Set([
     ...manifest.configurationErrors,
-    ...orderAssignmentCandidateConfigurationErrors(manifest.groups, members),
+    ...orderAssignmentCandidateConfigurationErrors(personalAssignmentGroups, members),
   ])];
 
   return (
@@ -5579,12 +5582,12 @@ function AssignmentManifestWorkbench({
       )}
       <div className="assignment-manifest-gate">
         <span>✓</span>
-        <p>以下岗位、模块和任务来自本订单锁定的工作流实例；必填项完成后可推进，可选项不阻断。</p>
+        <p>这里只分配需要指定个人的责任；国内仓和境外仓按目标仓自动进入岗位队列。</p>
       </div>
       <section className="assignment-manifest-section">
         <header>
           <strong>工作流责任分配</strong>
-          <span>隐藏项不展示；工作流配置变化仅影响新锁定的订单实例</span>
+          <span>工作流配置变化仅影响新锁定的订单实例</span>
         </header>
         <div className="table-wrap">
           <table className="assignment-manifest-table">
@@ -5592,7 +5595,7 @@ function AssignmentManifestWorkbench({
               <tr><th>责任岗位</th><th>执行人（部门 → 岗位 → 个人）</th><th>模块与任务</th><th>状态</th></tr>
             </thead>
             <tbody>
-              {manifest.groups.map((group) => {
+              {personalAssignmentGroups.map((group) => {
                 const eligibleMembers = group.positionCode
                   ? members.filter((member) =>
                       member.position_code === group.positionCode &&
@@ -5603,9 +5606,7 @@ function AssignmentManifestWorkbench({
                   ?? group.positionCode
                   ?? "未配置责任岗位";
                 const assigneeUserId = assigneeUserIds[group.key] ?? "";
-                const status = group.assignmentMode === "site_queue"
-                  ? "目标仓岗位队列"
-                  : assigneeUserId
+                const status = assigneeUserId
                   ? group.assignmentState === "assigned" && assigneeUserId === group.assigneeUserId
                     ? "已分配"
                     : "待确认"
@@ -5630,12 +5631,6 @@ function AssignmentManifestWorkbench({
                       </small>
                     </td>
                     <td>
-                      {group.assignmentMode === "site_queue" ? (
-                        <div className="assignment-site-queue" role="status">
-                          <strong>自动进入目标仓岗位队列</strong>
-                          <small>无需选择个人；登录对应仓库的有效岗位成员均可办理</small>
-                        </div>
-                      ) : (
                       <OrganizationAssigneePicker
                         members={eligibleMembers}
                         name={orderAssignmentAssigneeFieldName(group.key)}
@@ -5649,7 +5644,6 @@ function AssignmentManifestWorkbench({
                         required={group.required}
                         disabled={!group.positionCode || eligibleMembers.length === 0}
                       />
-                      )}
                     </td>
                     <td>
                       <div className="assignment-module-coverage-list">
@@ -5674,8 +5668,8 @@ function AssignmentManifestWorkbench({
                   </tr>
                 );
               })}
-              {manifest.groups.length === 0 && (
-                <tr><td colSpan={4} className="muted">当前锁定工作流没有待分配责任。</td></tr>
+              {personalAssignmentGroups.length === 0 && (
+                <tr><td colSpan={4} className="muted">当前锁定工作流没有需要指定个人的责任。</td></tr>
               )}
             </tbody>
           </table>
@@ -5689,8 +5683,8 @@ function AssignmentManifestWorkbench({
       </section>
       <footer className="assignment-manifest-footer">
         <div>
-          <strong>确认派单并进入下一业务节点</strong>
-          <span>系统按锁定工作流一次保存全部负责人，并同步模块、任务与实例状态。</span>
+          <strong>{personalAssignmentGroups.length > 0 ? "确认派单并进入下一业务节点" : "确认自动归属并进入下一业务节点"}</strong>
+          <span>系统按锁定工作流保存个人负责人，仓库职责自动归入目标仓岗位队列。</span>
         </div>
         <button
           type="submit"
@@ -5702,7 +5696,11 @@ function AssignmentManifestWorkbench({
             missingRequiredGroups.length > 0
           }
         >
-          {busy ? "正在保存派单并推进…" : "确认派单并进入下一业务节点 →"}
+          {busy
+            ? "正在保存并推进…"
+            : personalAssignmentGroups.length > 0
+              ? "确认派单并进入下一业务节点 →"
+              : "确认自动归属并进入下一业务节点 →"}
         </button>
       </footer>
     </Form>
@@ -5722,7 +5720,10 @@ function AssignmentManifestReadOnly({
     mixed: "负责人不一致",
     unassigned: "待分配",
   } as const;
-  const nextResponsibilityGroup = nextRequiredOrderAssignmentGroup(manifest.groups);
+  const personalAssignmentGroups = manifest.groups.filter(
+    (group) => group.assignmentMode === "person",
+  );
+  const nextResponsibilityGroup = nextRequiredOrderAssignmentGroup(personalAssignmentGroups);
   return (
     <div className="table-wrap module-record-table" data-assignment-source="workflow-instance">
       <table>
@@ -5730,10 +5731,8 @@ function AssignmentManifestReadOnly({
           <tr><th>责任岗位</th><th>业务模块</th><th>工作流任务</th><th>具体负责人</th><th>状态</th></tr>
         </thead>
         <tbody>
-          {manifest.groups.map((group) => {
-            const member = group.assignmentMode === "site_queue"
-              ? { display_name: "目标仓岗位队列" }
-              : members.find((item) => item.id === group.assigneeUserId);
+          {personalAssignmentGroups.map((group) => {
+            const member = members.find((item) => item.id === group.assigneeUserId);
             const positionName = members.find(
               (item) => item.position_code === group.positionCode,
             )?.position_name ?? group.positionCode ?? "未配置责任岗位";
@@ -5760,8 +5759,8 @@ function AssignmentManifestReadOnly({
               </tr>
             );
           })}
-          {manifest.groups.length === 0 && (
-            <tr><td colSpan={5} className="muted">当前锁定工作流没有待分配责任。</td></tr>
+          {personalAssignmentGroups.length === 0 && (
+            <tr><td colSpan={5} className="muted">当前锁定工作流没有需要指定个人的责任。</td></tr>
           )}
         </tbody>
       </table>
