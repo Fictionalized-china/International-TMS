@@ -1994,20 +1994,25 @@ function BatchDocumentWorkbench({batchId,orders,visibleOrders,orderPagination,ba
           <td><div className="batch-order-row-actions"><details className="batch-order-file-details"><summary className={canActOnThisOrder?"primary batch-customs-open-action":"secondary batch-customs-open-action"}>{canActOnThisOrder?"办理本票报关":"查看本票文件"}</summary><div className="batch-order-file-panel">
             <header className="batch-order-file-panel-header"><div><strong>{canActOnThisOrder?"办理本票报关":"查看本票文件"}</strong><span><OrderNumberLink id={order.order_id} number={order.order_number}/> · {order.customer_name}</span></div><button type="button" aria-label="关闭文件查看窗口" onClick={event=>(event.currentTarget.closest("details") as HTMLDetailsElement|null)?.removeAttribute("open")}>×</button></header>
             {!canActOnThisOrder&&workflowAccess?.declarationAccess.reason&&<div className="alert info">{workflowAccess.declarationAccess.reason}</div>}
-            <div className="batch-order-file-list">{activeRequirements.map(requirement=>{
+            <div className="batch-order-file-list batch-order-file-checklist">
+              <div className="batch-order-file-list-header" aria-hidden="true"><span>资料</span><span>当前文件</span><span>状态</span><span>操作</span></div>
+              {activeRequirements.map(requirement=>{
               const current=files.find(item=>item.document_category===requirement.code);
               const blocks=requirement.isRequired&&(requirement.moduleCode!=="customs"||customsPolicy.required);
-              const needsUpload=!current||current.review_status==="rejected";
-              return <div key={requirement.code}>
-                <strong>{requirement.name}{blocks?<b className="required-mark"> *</b>:<small> · 选填</small>}</strong>
-                {current?<><a href={`/admin/document-files/order/${current.id}?mode=view`} target="_blank" rel="noreferrer">{current.file_name}</a><span className={`status-pill ${["approved","archived"].includes(current.review_status)?"success":current.review_status==="rejected"?"danger":""}`}>{documentReviewLabel(current.review_status)}</span></>:<span className={`status-pill ${blocks?"off":""}`}>{blocks?"待整单单证负责人上传":"选填未提供"}</span>}
+              const isOwnPendingFile=Boolean(current?.review_status==="pending"&&!privileged&&current.uploaded_by_user_id===currentUserId);
+              const needsUpload=!current||current.review_status==="rejected"||isOwnPendingFile;
+              const ready=Boolean(current&&["approved","archived"].includes(current.review_status));
+              return <div className={`batch-order-file-item ${ready?"is-ready":""}`} key={requirement.code}>
+                <strong>{requirement.name}{blocks?<b className="required-mark"> *</b>:<small>选填</small>}</strong>
+                <div className="batch-order-file-current">{current?<a href={`/admin/document-files/order/${current.id}?mode=view`} target="_blank" rel="noreferrer">{current.file_name}</a>:<span className="muted">尚未上传</span>}</div>
+                <span className={`status-pill ${ready?"success":current?.review_status==="rejected"?"danger":"off"}`}>{current?documentReviewLabel(current.review_status):blocks?"待负责人上传":"无需提供"}</span>
+                <div className="batch-order-file-actions">
                 {manageDocuments&&needsUpload&&<Form method="post" encType="multipart/form-data" className="batch-order-file-inline-action">
                   <input type="hidden" name="intent" value="batch_order_document_upload"/>
                   <input type="hidden" name="orderId" value={order.order_id}/>
                   <input type="hidden" name="documentCategory" value={requirement.code}/>
                   <input type="hidden" name="documentDescription" value={requirement.name}/>
-                  <label><span className="sr-only">选择{requirement.name}文件</span><input type="file" name="attachment" aria-label={`选择${requirement.name}文件`} required/></label>
-                  <button className="secondary" disabled={busy}>{current?.review_status==="rejected"?"重新上传":"上传"}</button>
+                  <label className="primary batch-order-file-picker" title="选择文件后自动上传"><span>{current?.review_status==="rejected"?"重新选择":"选择并上传"}</span><input type="file" name="attachment" aria-label={`选择并自动上传${requirement.name}`} required disabled={busy} onChange={event=>{if(event.currentTarget.files?.length)event.currentTarget.form?.requestSubmit()}}/></label>
                 </Form>}
                 {manageDocuments&&current&&current.review_status!=="archived"&&(privileged||current.uploaded_by_user_id!==currentUserId)&&<Form method="post" className="batch-order-file-review-action">
                   <input type="hidden" name="intent" value="batch_order_document_review"/>
@@ -2016,7 +2021,8 @@ function BatchDocumentWorkbench({batchId,orders,visibleOrders,orderPagination,ba
                   <button className="primary" name="reviewStatus" value="approved" disabled={busy}>审核通过</button>
                   <button className="secondary" name="reviewStatus" value="rejected" disabled={busy}>退回</button>
                 </Form>}
-                {manageDocuments&&current?.review_status==="pending"&&!privileged&&current.uploaded_by_user_id===currentUserId&&<span className="muted">历史待审文件请重新上传，上传后自动通过</span>}
+                {manageDocuments&&isOwnPendingFile&&<span className="muted batch-order-file-self-review-note">重新选择后自动通过</span>}
+                </div>
               </div>;
             })}{!activeRequirements.length&&<span className="status-pill success">当前工作流未启用逐票文件</span>}</div>
             <BatchOrderCustomsWorkbench orderId={order.order_id} declarations={orderCustomsDeclarations} fields={customsPolicy.fields} manage={canManageThisOrder} allowRelease={canReleaseThisOrder} busy={busy} closeSignal={customsCloseSignal}/>
@@ -2213,7 +2219,7 @@ function BatchOrderCustomsWorkbench({orderId,declarations,fields,manage,allowRel
   const show=(fieldKey:string,fallbackRequired=false)=>runtimeWorkflowFieldPolicy(fields,fieldKey,fallbackRequired).visible;
   const releaseVisible=show("customs_release",true);
   return <section className="batch-order-customs-workbench">
-    <header><div><strong>本票报关单</strong><span>{manage?"在这里查看或编辑；待放行操作在外层操作列直接办理":"只读汇总；办理操作在订单报关作业中完成"}</span></div><span className={`status-pill ${active.length>0&&released===active.length?"success":""}`}>{active.length?`${released}/${active.length} 张放行`:"尚无有效报关单"}</span></header>
+    <header><div><strong>本票报关单</strong><span>{manage?"登记或编辑申报信息；放行仍在外层操作列办理":"当前账号仅可查看申报记录"}</span></div><span className={`status-pill ${active.length>0&&released===active.length?"success":"off"}`}>{active.length?`${released}/${active.length} 张放行`:"尚未登记"}</span></header>
     {declarations.length>0&&<div className="batch-customs-list"><div className="batch-customs-list-header" aria-hidden="true"><span>报关单 / 作业阶段</span><span>申报主体</span><span>金额 / 毛重</span><span>状态</span><span>操作</span></div>{declarations.map(declaration=><div className="batch-customs-row" key={declaration.id}>
       <div><strong>{show("declaration_number",true)?declaration.declaration_number:"报关记录"}</strong><small>{show("declaration_stage",true)?customsStageLabel(declaration.clearance_stage):""}{show("declaration_type",true)?` · ${declaration.declaration_type}`:""}</small></div>
       <div><span>{show("declaration_title",true)?declaration.declaration_title:"—"}</span><small>{show("declaring_company",true)?declaration.declaring_company:""}</small></div>
@@ -2224,8 +2230,8 @@ function BatchOrderCustomsWorkbench({orderId,declarations,fields,manage,allowRel
         {manage&&<Modal title={`编辑报关单 · ${declaration.declaration_number}`} triggerLabel="编辑" triggerClassName="text-button" size="wide" dialogClassName="customs-declaration-modal" closeSignal={closeSignal}><BatchCustomsDeclarationForm orderId={orderId} declaration={declaration} fields={fields} allowRelease={allowRelease} busy={busy}/></Modal>}
       </div>
     </div>)}</div>}
-    {!declarations.length&&<p className="empty-state">本票尚未登记报关单。先上传“报关资料”，再新增申报单。</p>}
-    {manage&&<Modal title="新增本票报关单" triggerLabel="新增报关单" triggerClassName="primary batch-customs-create-button" size="wide" dialogClassName="customs-declaration-modal" closeSignal={closeSignal}><BatchCustomsDeclarationForm orderId={orderId} fields={fields} allowRelease={allowRelease} busy={busy}/></Modal>}
+    {!declarations.length&&<div className="batch-customs-empty-row"><span>{manage?"报关资料就绪后，登记本票申报信息。":"本票尚未登记报关单。"}</span>{manage&&<Modal title="新增本票报关单" triggerLabel="新增报关单" triggerClassName="primary batch-customs-create-button" size="wide" dialogClassName="customs-declaration-modal" closeSignal={closeSignal}><BatchCustomsDeclarationForm orderId={orderId} fields={fields} allowRelease={allowRelease} busy={busy}/></Modal>}</div>}
+    {declarations.length>0&&manage&&<div className="batch-customs-footer-action"><Modal title="新增本票报关单" triggerLabel="新增报关单" triggerClassName="primary batch-customs-create-button" size="wide" dialogClassName="customs-declaration-modal" closeSignal={closeSignal}><BatchCustomsDeclarationForm orderId={orderId} fields={fields} allowRelease={allowRelease} busy={busy}/></Modal></div>}
   </section>;
 }
 
