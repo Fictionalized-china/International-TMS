@@ -54,8 +54,10 @@ function actorOwnsFrozenModule(
 
 /**
  * Warehouse scans are physical mutations, so a bound order must derive its
- * availability from the current, unfinished frozen module state and the
- * physical site's frozen responsibility-position queue.
+ * availability from the unfinished frozen module state and the physical
+ * site's frozen responsibility-position queue. Overseas receiving is the
+ * arrival event that closes the preceding transport node, so it may use the
+ * next configured overseas-warehouse module before pickup becomes current.
  * Only a real SQL NULL binding keeps the historic warehouse behaviour.
  */
 export async function loadWarehousePhysicalWorkflowAccess(
@@ -173,6 +175,38 @@ export async function loadWarehousePhysicalWorkflowAccess(
     const previous = [...placements.results]
       .reverse()
       .find((placement) => placement.sort_order < currentStep.sort_order);
+    // The overseas warehouse scan is the physical arrival event that closes
+    // the preceding transport/tracking node. It must therefore be available
+    // from the preceding transport phase before the configured pickup node, while
+    // still deriving its owner and placement from the frozen workflow.
+    if (moduleCode === "overseas_warehouse" && next && next.module_status !== "completed") {
+      const tasks = await db.prepare(
+        `SELECT assignee_user_id,responsibility_position_code
+         FROM workflow_instance_task_states
+         WHERE instance_module_state_id=? AND status!='completed'
+         ORDER BY sort_order,id`,
+      ).bind(next.id).all<TaskOwnerRow>();
+      if (!actorOwnsFrozenModule(actor, next, tasks.results)) {
+        return {
+          configured: true,
+          visible: true,
+          available: false,
+          targetStepKey: next.step_key,
+          targetStepName: next.step_name,
+          reason: `当前账号不是“${next.step_name}”冻结任务的负责人，仅可查看`,
+          legacyFallback: false,
+        };
+      }
+      return {
+        configured: true,
+        visible: true,
+        available: true,
+        targetStepKey: next.step_key,
+        targetStepName: next.step_name,
+        reason: null,
+        legacyFallback: false,
+      };
+    }
     return {
       configured: true,
       visible: true,
@@ -227,9 +261,11 @@ export async function loadWarehousePhysicalWorkflowAccess(
 }
 
 /**
- * Active candidate queues use exactly the same current unfinished module and
- * frozen position-queue rule as the action loader; route-level warehouse
- * context independently enforces the selected physical site. `orderAlias` is source-code only.
+ * Active candidate queues use the same frozen placement and position-queue
+ * rule as the action loader. Overseas receiving also includes its next frozen
+ * module because the arrival scan is what advances transport into pickup.
+ * Route-level warehouse context independently enforces the selected physical
+ * site. `orderAlias` is source-code only.
  */
 export function warehousePhysicalWorkflowAccessSql(
   orderAlias: string,
@@ -267,6 +303,18 @@ export function warehousePhysicalWorkflowAccessSql(
         )
       )`
     : "AND 0=1";
+  const modulePlacementJoin = moduleCode === "overseas_warehouse"
+    ? `JOIN workflow_instance_step_states gate_module_step
+          ON gate_module_step.instance_id=gate_instance.id
+         AND gate_module_step.sort_order>=gate_current_step.sort_order
+       JOIN workflow_instance_module_states gate_module
+          ON gate_module.instance_step_state_id=gate_module_step.id
+         AND gate_module.module_code=?
+         AND gate_module.status!='completed'`
+    : `JOIN workflow_instance_module_states gate_module
+          ON gate_module.instance_step_state_id=gate_current_step.id
+         AND gate_module.module_code=?
+         AND gate_module.status!='completed'`;
   return {
     sql: `(${orderAlias}.status NOT IN ('completed','cancelled') AND (
       ${orderAlias}.workflow_instance_id IS NULL
@@ -276,10 +324,7 @@ export function warehousePhysicalWorkflowAccessSql(
         JOIN workflow_instance_step_states gate_current_step
           ON gate_current_step.instance_id=gate_instance.id
          AND gate_current_step.step_key=gate_instance.current_step_key
-        JOIN workflow_instance_module_states gate_module
-          ON gate_module.instance_step_state_id=gate_current_step.id
-         AND gate_module.module_code=?
-         AND gate_module.status!='completed'
+        ${modulePlacementJoin}
         WHERE gate_instance.id=${orderAlias}.workflow_instance_id
           AND gate_instance.organization_id=${orderAlias}.organization_id
           AND gate_instance.order_id=${orderAlias}.id

@@ -35,6 +35,8 @@ const steps = {
   assignment: { step_name: "任务分配", sort_order: 10 },
   warehouse_receiving: { step_name: "国内仓入库", sort_order: 20 },
   customs: { step_name: "报关放行", sort_order: 30 },
+  outbound_transport: { step_name: "出境运输", sort_order: 40 },
+  overseas_pickup: { step_name: "客户扫码自提签收", sort_order: 50 },
 };
 
 function database(options: DatabaseOptions = {}) {
@@ -212,6 +214,28 @@ describe("warehouse physical workflow access", () => {
     expect(access.reason).toBe("“国内仓入库”办理节点已结束，当前仅可查看历史记录");
   });
 
+  it("opens overseas receiving from the preceding transport node", async () => {
+    const fixture = database({
+      currentStepKey: "outbound_transport",
+      moduleStepKey: "overseas_pickup",
+      moduleResponsibility: "OVERSEAS_WAREHOUSE",
+    });
+    const access = await loadWarehousePhysicalWorkflowAccess(
+      fixture.DB,
+      "org-1",
+      "order-1",
+      "overseas_warehouse",
+      { userId: "overseas-user", positionCode: "OVERSEAS_WAREHOUSE" },
+    );
+
+    expect(access).toMatchObject({
+      available: true,
+      targetStepKey: "overseas_pickup",
+      targetStepName: "客户扫码自提签收",
+      reason: null,
+    });
+  });
+
   it("rejects a completed current module", async () => {
     const fixture = database({ moduleStatus: "completed" });
 
@@ -272,7 +296,7 @@ describe("warehouse physical workflow access", () => {
     expect(fixture.sql).toHaveLength(1);
   });
 
-  it("builds active queue SQL from the same exact-current owner and terminal rules", () => {
+  it("builds the overseas receiving queue from the current or following frozen node", () => {
     const gate = warehousePhysicalWorkflowAccessSql("o", "overseas_warehouse", actor);
 
     expect(gate.values).toEqual([
@@ -288,7 +312,7 @@ describe("warehouse physical workflow access", () => {
     expect(gate.sql).toContain("COALESCE(");
     expect(gate.sql).toContain("gate_position_task.responsibility_position_code");
     expect(gate.sql).not.toContain("assignee_user_id=?");
-    expect(gate.sql).not.toContain("gate_current_step.sort_order>=gate_target_step.sort_order");
+    expect(gate.sql).toContain("gate_module_step.sort_order>=gate_current_step.sort_order");
   });
 
   it("keeps a separate reached-node predicate for readonly history", () => {
