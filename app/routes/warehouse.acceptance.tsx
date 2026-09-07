@@ -255,7 +255,6 @@ export async function action({ request }: Route.ActionArgs) {
   const requestedLocationId = valueOf(form, "locationId");
   const requestedResult = valueOf(form, "receiptResult");
   let exceptionNotes = valueOf(form, "exceptionNotes").trim();
-  const evidenceNote = valueOf(form, "evidenceNote").trim();
   const notes = valueOf(form, "notes").trim();
   if (!orderId) return { formError: "订单不能为空" };
 
@@ -296,8 +295,6 @@ export async function action({ request }: Route.ActionArgs) {
     "warehouse",
   );
   const policies = resolveWarehouseAcceptancePolicies(workflowFields);
-  if (policies.evidence.isActive && policies.evidence.isRequired && !evidenceNote)
-    return { formError: "请填写收货凭证或现场凭证索引" };
   if (policies.notes.isActive && policies.notes.isRequired && !notes)
     return { formError: "请填写收货备注" };
 
@@ -544,7 +541,7 @@ export async function action({ request }: Route.ActionArgs) {
     ).bind(
       receiptId,user.organizationId,receiptNumber,shipmentId,warehouse.id,location.id,"completed",
       totalPackages,totalPieces,totalWeight,totalVolume,effectiveNotes || null,user.userId,now,now,now,
-      packageTypes.length === 1 ? packageTypes[0] : "mixed",policies.evidence.isActive ? evidenceNote || null : null,result === "ready" ? 1 : 0,
+      packageTypes.length === 1 ? packageTypes[0] : "mixed",null,result === "ready" ? 1 : 0,
       result === "exception" ? 1 : 0,exceptionNotes || null,
     ),
   );
@@ -792,7 +789,6 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
           exceptionHint="允许入库但冻结后续装车和配载"
           exceptionFooter="填写短少、破损、错货、超差等具体情况"
         /> : <div className="alert info">货齐选择已在当前工作流中隐藏：系统依据累计包装数和已填的实收数据自动判定分批、货齐或异常。</div>}
-        {policies.evidence.isActive && <label className="field span-2"><span>收货凭证{acceptanceRequiredMarker(policies.evidence)}</span><textarea name="evidenceNote" rows={2} required={policies.evidence.isRequired} placeholder="照片、单证或现场凭证的索引/说明"/></label>}
         {policies.notes.isActive && <label className="field span-2"><span>收货备注{acceptanceRequiredMarker(policies.notes)}</span><textarea name="notes" rows={2} required={policies.notes.isRequired} placeholder="本次到货车辆、现场情况等"/></label>}
         <button className="primary acceptance-submit" disabled={busy || !canOperate || !loaderData.locations.length}>{busy ? "正在验收入库…" : "确认验收、入库并生成标签"}</button>
       </section>

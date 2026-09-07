@@ -23,7 +23,7 @@ describe("resolveWarehouseAcceptancePolicies", () => {
     expect(policies.actualWeight).toMatchObject({ isActive: false, isRequired: false });
     expect(policies.location).toMatchObject({ isActive: true, isRequired: false });
     expect(policies.cargoComplete).toMatchObject({ isActive: false, isRequired: false });
-    expect(policies.evidence).toMatchObject({ isActive: true, isRequired: true });
+    expect(policies).not.toHaveProperty("evidence");
     expect(policies.notes).toMatchObject({ isActive: false, isRequired: false });
   });
 
@@ -68,7 +68,6 @@ describe("resolveWarehouseAcceptancePolicies", () => {
     expect(policies.actualVolume).toMatchObject({ isActive: true, isRequired: true });
     expect(policies.location).toMatchObject({ isActive: true, isRequired: true });
     expect(policies.cargoComplete).toMatchObject({ isActive: true, isRequired: true });
-    expect(policies.evidence).toMatchObject({ isActive: true, isRequired: false });
     expect(policies.notes).toMatchObject({ isActive: true, isRequired: false });
   });
 

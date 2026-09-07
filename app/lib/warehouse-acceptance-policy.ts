@@ -44,7 +44,6 @@ export function resolveWarehouseAcceptancePolicies(
     actualDimensions: systemRequiredPolicy,
     location: configurablePolicy(fields, "warehouse_location", "required"),
     cargoComplete: configurablePolicy(fields, "cargo_complete_set", "required"),
-    evidence: configurablePolicy(fields, "receipt_evidence", "optional"),
     notes: configurablePolicy(fields, "warehouse_receipt_notes", "optional"),
   } as const;
 }

@@ -70,7 +70,10 @@ const loadingTypeLockedFields = new Set([
   "vehicle_capacity_volume",
 ]);
 const loadingTypeFixedField = new Set(["business_type"]);
-const retiredWorkflowFields = new Set(["loading_seal_number"]);
+const retiredWorkflowFields = new Set([
+  "loading_seal_number",
+  "receipt_evidence",
+]);
 
 export const assignmentManagedModuleCodes = [
   "transport",
@@ -203,21 +206,23 @@ export async function ensureWorkflowCatalogFields(organizationId: string) {
   )
     .bind(organizationId)
     .run();
+  const retiredFieldKeys = [...retiredWorkflowFields];
+  const retiredFieldPlaceholders = retiredFieldKeys.map(() => "?").join(",");
   await env.DB.prepare(
     `UPDATE workflow_step_fields
      SET is_active=0,is_required=0,updated_at=?
      WHERE workflow_id IN (SELECT id FROM workflow_definitions WHERE organization_id=?)
-       AND field_key='loading_seal_number'`,
+       AND field_key IN (${retiredFieldPlaceholders})`,
   )
-    .bind(now, organizationId)
+    .bind(now, organizationId, ...retiredFieldKeys)
     .run();
   await env.DB.prepare(
     `UPDATE workflow_instance_fields
      SET is_active=0,is_required=0
      WHERE workflow_id IN (SELECT id FROM workflow_definitions WHERE organization_id=?)
-       AND field_key='loading_seal_number'`,
+       AND field_key IN (${retiredFieldPlaceholders})`,
   )
-    .bind(organizationId)
+    .bind(organizationId, ...retiredFieldKeys)
     .run();
   const standardCodes = [...standardWorkflowCodes];
   const placeholders = standardCodes.map(() => "?").join(",");
@@ -567,13 +572,14 @@ export async function loadOrderModuleWorkflowFields(
     raw = live.results;
     raw = mergeWorkflowFieldCatalogBaseline(raw, binding.workflow_id, moduleCode);
   }
+  raw = raw.filter((item) => !retiredWorkflowFields.has(item.field_key));
   if (moduleCode === "loading") {
     const order = await env.DB.prepare(
       "SELECT business_type FROM transport_orders WHERE organization_id=? AND id=?",
     )
       .bind(organizationId, orderId)
       .first<{ business_type: string | null }>();
-    raw = raw.filter((item) => !loadingTypeFixedField.has(item.field_key) && !retiredWorkflowFields.has(item.field_key));
+    raw = raw.filter((item) => !loadingTypeFixedField.has(item.field_key));
     if (order?.business_type === "ftl") {
       raw = raw.filter((item) => !loadingTypeLockedFields.has(item.field_key));
     }

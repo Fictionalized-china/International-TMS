@@ -205,7 +205,6 @@ export const workflowFieldCatalog: WorkflowFieldCatalogItem[] = [
   field("warehouse_receiving", "warehouse", "actual_weight_kg", "实收重量KG", "number", "required", "配载、容量校验和成本分摊使用的实际重量。"),
   field("warehouse_receiving", "warehouse", "actual_volume_cbm", "实测体积CBM", "number", "required", "配载、容量校验和成本分摊使用的实际体积。"),
   field("warehouse_receiving", "warehouse", "warehouse_location", "入库库位", "warehouse", "required", "货物当前库位。"),
-  field("warehouse_receiving", "warehouse", "receipt_evidence", "收货凭证", "attachment", "optional", "照片、单证或现场凭证索引。"),
   field("warehouse_receiving", "warehouse", "receipt_difference", "实收差异", "textarea", "optional", "预录与实收差异及处理结果。"),
   field("warehouse_receiving", "warehouse", "warehouse_receipt_notes", "收货备注", "textarea", "optional", "仓库收货现场说明和异常备注。"),
   field("warehouse_receiving", "warehouse", "cargo_complete_set", "货齐状态", "select", "required", "整票货物全部到齐并完成实收登记后，才可进入出口准备。", "ready|货齐\nexception|异常"),

@@ -374,7 +374,6 @@ export async function action({ request }: Route.ActionArgs) {
     locationId = valueOf(form, "locationId"),
     rawBarcode = valueOf(form, "barcode").toUpperCase(),
     packageType = valueOf(form, "packageType"),
-    evidenceNote = valueOf(form, "evidenceNote"),
     notes = valueOf(form, "notes"),
     receiptResult = valueOf(form, "receiptResult"),
     cargoComplete = receiptResult === "ready",
@@ -578,7 +577,6 @@ export async function action({ request }: Route.ActionArgs) {
   const piecesPolicy = acceptancePolicies.actualPieces;
   const weightPolicy = acceptancePolicies.actualWeight;
   const volumePolicy = acceptancePolicies.actualVolume;
-  const evidencePolicy = acceptancePolicies.evidence;
   const notesPolicy = acceptancePolicies.notes;
   let effectiveLocationId = locationId;
   if (!effectiveLocationId && (!locationPolicy.isActive || !locationPolicy.isRequired)) {
@@ -625,12 +623,6 @@ export async function action({ request }: Route.ActionArgs) {
     : null;
   if (volumePolicy.isActive && volumePolicy.isRequired && volume == null)
     return { formError: "系统无法根据实际长、宽、高计算实测体积" };
-  if (
-    evidencePolicy.isActive &&
-    evidencePolicy.isRequired &&
-    !evidenceNote.trim()
-  )
-    return { formError: "请填写收货凭证或现场凭证索引" };
   if (notesPolicy.isActive && notesPolicy.isRequired && !notes.trim())
     return { formError: "请填写收货备注" };
   const shipmentBootstrap: D1PreparedStatement[] = [];
@@ -817,7 +809,7 @@ export async function action({ request }: Route.ActionArgs) {
         now,
         now,
         packageTypePolicy.isActive ? packageType || null : null,
-        evidencePolicy.isActive ? evidenceNote || null : null,
+        null,
         cargoComplete ? 1 : 0,
         hasException ? 1 : 0,
         exceptionNotes || null,
@@ -1298,7 +1290,6 @@ export default function WarehouseInbound({
   const piecesPolicy = acceptancePolicies.actualPieces;
   const weightPolicy = acceptancePolicies.actualWeight;
   const volumePolicy = acceptancePolicies.actualVolume;
-  const evidencePolicy = acceptancePolicies.evidence;
   const notesPolicy = acceptancePolicies.notes;
   const selectedShipmentRecord = loaderData.selectedShipment;
   const scannedPackageRecord = loaderData.scannedPackage;
@@ -1396,7 +1387,6 @@ export default function WarehouseInbound({
               exceptionHint="数量、重量、包装或货况异常；保存本次收货但不结束运输阶段"
               exceptionFooter="填写短少、破损、错货、超差等具体情况"
             />
-            {evidencePolicy.isActive && <label className="field span-2"><span>收货凭证{acceptanceRequiredMarker(evidencePolicy)}</span><textarea name="evidenceNote" rows={2} required={evidencePolicy.isRequired} placeholder="照片、单证或现场凭证的索引/说明"/></label>}
             {notesPolicy.isActive && <label className="field span-2"><span>收货备注{acceptanceRequiredMarker(notesPolicy)}</span><textarea name="notes" rows={2} required={notesPolicy.isRequired} placeholder="本次到货车辆、现场情况等"/></label>}
             <button className="primary acceptance-submit" disabled={busy || !loaderData.locations.length}>{busy ? "正在验收入库…" : "确认验收并扫码入库"}</button>
           </section>
