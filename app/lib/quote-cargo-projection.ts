@@ -14,14 +14,14 @@ SELECT
   ?,
   ?,
   ?,
-  ? || '-P' || printf('%03d',sequence),
+  ? || '-IN-' || printf('%03d',sequence),
   sequence,
   ?
 FROM package_sequence
 WHERE sequence <= ?`;
 
 export type QuoteCargoProjection = {
-  totalPieces: number;
+  declaredQuantity: number;
   packageCount: number;
   piecesPerPackage: 1;
   grossWeightPerPackageKg: number;
@@ -77,21 +77,22 @@ export function resolveQuoteTotalVolumeCbm(input: {
 }
 
 /**
- * Accepted quotations describe totals and one set of per-piece dimensions.
- * The canonical order model therefore projects N quoted pieces to N physical
- * packages with one piece in each package. This preserves both quotation totals
- * and the warehouse volume calculated from dimensions × actual package count.
+ * Product quantity is a commercial/customs fact. Package count is a physical
+ * warehouse fact. They intentionally remain independent from this point on.
  */
 export function quoteCargoProjection(input: {
   pieces: number;
+  plannedPackageCount: number;
   totalGrossWeightKg: number;
   totalVolumeCbm: number;
 }): QuoteCargoProjection {
-  const packageCount = assertQuoteAutoPackageCount(input.pieces);
+  const packageCount = assertQuoteAutoPackageCount(input.plannedPackageCount);
+  const declaredQuantity = assertNonNegativeFinite(input.pieces, "商品数量");
+  if (declaredQuantity <= 0) throw new Error("商品数量必须大于 0");
   const totalGrossWeightKg = assertNonNegativeFinite(input.totalGrossWeightKg, "预计重量");
   const totalVolumeCbm = assertNonNegativeFinite(input.totalVolumeCbm, "预计体积");
   return {
-    totalPieces: packageCount,
+    declaredQuantity,
     packageCount,
     piecesPerPackage: 1,
     grossWeightPerPackageKg: totalGrossWeightKg / packageCount,

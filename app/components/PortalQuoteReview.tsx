@@ -33,6 +33,9 @@ export type PortalQuote = {
   road_load_type: "ftl" | "ltl";
   cargo_description: string;
   pieces: number;
+  declared_quantity_unit: string;
+  planned_package_count: number;
+  planned_package_type: string;
   gross_weight_kg: number;
   volume_cbm: number;
   estimated_length_cm: number;
@@ -118,7 +121,9 @@ export function PortalQuoteReviewModal({
         </div></section>
         <section><h3>货物概况</h3><div className="quote-review-facts">
           {visible("quotation_cargo_description", "required") && <QuoteReviewCell label="货物" value={quote.cargo_description || "—"}/>} 
-          {visible("quotation_pieces", "required") && <QuoteReviewCell label="预计件数" value={`${quote.pieces} 件`}/>} 
+          {visible("quotation_pieces", "required") && <QuoteReviewCell label="商品数量" value={`${quote.pieces} ${quote.declared_quantity_unit || "件"}`}/>} 
+          {visible("quotation_planned_package_count", "required") && <QuoteReviewCell label="预计入仓包装" value={`${quote.planned_package_count || 1} 包`}/>} 
+          {visible("quotation_planned_package_type", "required") && <QuoteReviewCell label="预计包装类型" value={quote.planned_package_type || "other"}/>} 
           {visible("quotation_gross_weight_kg", "required") && <QuoteReviewCell label="预计重量" value={`${quote.gross_weight_kg} KG`}/>} 
           {visible("quotation_volume_cbm", "required") && <QuoteReviewCell label="预计体积" value={`${quote.volume_cbm} CBM`}/>} 
           {(visible("quotation_length_cm", "required") || visible("quotation_width_cm", "required") || visible("quotation_height_cm", "required")) && <QuoteReviewCell label="预计尺寸" value={`${dimensions} CM`}/>} 

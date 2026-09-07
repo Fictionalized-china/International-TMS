@@ -81,6 +81,9 @@ type Quote = {
   road_load_type: "ftl" | "ltl";
   cargo_description: string;
   pieces: number;
+  declared_quantity_unit: string;
+  planned_package_count: number;
+  planned_package_type: string;
   gross_weight_kg: number;
   volume_cbm: number;
   estimated_length_cm: number;
@@ -176,7 +179,8 @@ export async function loader({ request }: Route.LoaderArgs) {
         q.origin_country,q.origin_state,q.origin_city,q.pickup_address,
         q.destination_country,q.destination_state,q.destination_city,
         q.destination_warehouse_id,w.name destination_warehouse_name,q.destination_warehouse_note,q.customs_clearance_mode,
-        q.transport_mode,q.road_load_type,q.cargo_description,q.pieces,q.gross_weight_kg,q.volume_cbm,
+        q.transport_mode,q.road_load_type,q.cargo_description,q.pieces,q.declared_quantity_unit,
+        q.planned_package_count,q.planned_package_type,q.gross_weight_kg,q.volume_cbm,
         q.estimated_length_cm,q.estimated_width_cm,q.estimated_height_cm,q.total_amount,q.valid_until,q.notes,
         (SELECT COUNT(*) FROM quotation_charges qc
          WHERE qc.quotation_id=q.id AND qc.quantity>0 AND qc.unit_price>0) quotation_charge_items,
@@ -383,6 +387,9 @@ export async function action({ request }: Route.ActionArgs) {
       const customsClearanceMode = valueOf(form, "customsClearanceMode");
       const cargoDescription = valueOf(form, "cargoDescription");
       const rawPieces = valueOf(form, "pieces");
+      const rawDeclaredQuantityUnit = valueOf(form, "declaredQuantityUnit");
+      const rawPlannedPackageCount = valueOf(form, "plannedPackageCount");
+      const rawPlannedPackageType = valueOf(form, "plannedPackageType");
       const rawWeight = valueOf(form, "weight");
       const rawLength = valueOf(form, "length");
       const rawWidth = valueOf(form, "width");
@@ -486,9 +493,14 @@ export async function action({ request }: Route.ActionArgs) {
       ]);
       if (!salesperson) throw new Error("业务员已停用或不存在");
       if (effectiveWarehouseId && !warehouse) throw new Error("目的仓已停用或不存在");
-      const pieces = assertQuoteAutoPackageCount(
-        numberValue("quotation_pieces",rawPieces,"预计件数","required",true),
+      const pieces = numberValue("quotation_pieces",rawPieces,"商品实际件数","required",true);
+      const declaredQuantityUnit = activeValue("quotation_declared_quantity_unit",rawDeclaredQuantityUnit,"required") || "件";
+      const plannedPackageCount = assertQuoteAutoPackageCount(
+        numberValue("quotation_planned_package_count",rawPlannedPackageCount,"预计入仓包装数","required",true),
       );
+      const plannedPackageType = activeValue("quotation_planned_package_type",rawPlannedPackageType,"required") || "other";
+      requiredText("quotation_declared_quantity_unit",declaredQuantityUnit,"商品数量单位","required");
+      requiredText("quotation_planned_package_type",plannedPackageType,"预计包装类型","required");
       const weight = numberValue("quotation_gross_weight_kg",rawWeight,"预计重量","required");
       const length = numberValue("quotation_length_cm",rawLength,"预计长度","required");
       const width = numberValue("quotation_width_cm",rawWidth,"预计宽度","required");
@@ -496,12 +508,12 @@ export async function action({ request }: Route.ActionArgs) {
       const submittedVolume = numberValue("quotation_volume_cbm",rawVolume,"预计体积","required");
       const volume = resolveQuoteTotalVolumeCbm({
         deriveFromDimensions:[
-          policy("quotation_pieces","required"),
+          policy("quotation_planned_package_count","required"),
           policy("quotation_length_cm","required"),
           policy("quotation_width_cm","required"),
           policy("quotation_height_cm","required"),
         ].every((fieldPolicy) => fieldPolicy.isActive),
-        pieces,lengthCm:length,widthCm:width,heightCm:height,
+        pieces:plannedPackageCount,lengthCm:length,widthCm:width,heightCm:height,
         submittedVolumeCbm:submittedVolume,
       });
       const preparedWorkflowValues = await prepareQuotationWorkflowFieldValues({
@@ -536,14 +548,16 @@ export async function action({ request }: Route.ActionArgs) {
               id,organization_id,quote_number,customer_id,origin_country,origin_state,origin_city,pickup_address,
               destination_country,destination_state,destination_city,destination_warehouse_id,destination_warehouse_note,
               estimated_length_cm,estimated_width_cm,estimated_height_cm,customs_clearance_mode,
-              transport_mode,road_load_type,cargo_description,pieces,gross_weight_kg,volume_cbm,currency,
+              transport_mode,road_load_type,cargo_description,pieces,declared_quantity_unit,planned_package_count,
+              planned_package_type,gross_weight_kg,volume_cbm,currency,
               subtotal,tax_amount,total_amount,valid_until,status,lifecycle_status,notes,salesperson_user_id,workflow_definition_id,
               created_by_user_id,created_at,updated_at
-             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'CNY',?,0,?,?, 'sent','pending',?,?,?,?,?,?)`,
+             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'CNY',?,0,?,?, 'sent','pending',?,?,?,?,?,?)`,
           ).bind(
             id,current.organizationId,number,customerId,effectiveOriginCountry,effectiveOriginState || null,effectiveOriginCity,effectivePickupAddress || null,
             effectiveDestinationCountry,effectiveDestinationState || null,effectiveDestinationCity,effectiveWarehouseId || null,effectiveWarehouseNote || null,
-            length,width,height,effectiveCustomsMode,transportMode,roadLoadType,effectiveCargoDescription,pieces,weight,volume,
+            length,width,height,effectiveCustomsMode,transportMode,roadLoadType,effectiveCargoDescription,pieces,
+            declaredQuantityUnit,plannedPackageCount,plannedPackageType,weight,volume,
             total,total,effectiveValidUntil || null,effectiveNotes || null,effectiveSalespersonId,workflowDefinitionId,current.userId,now,now,
           ),
           env.DB.prepare(
@@ -665,7 +679,7 @@ async function saveQuotationNativeWorkflowUpdate(input: {
       return;
     }
     const parsed = integer ? requirePositiveInteger(raw,label) : requirePositiveNumber(raw,label);
-    next[column] = fieldKey === "quotation_pieces"
+    next[column] = fieldKey === "quotation_planned_package_count"
       ? assertQuoteAutoPackageCount(parsed)
       : parsed;
   };
@@ -686,7 +700,10 @@ async function saveQuotationNativeWorkflowUpdate(input: {
   setText("quotation_cargo_description","cargoDescription","cargo_description","required","");
   setText("quotation_notes","notes","notes","optional");
   setText("quotation_valid_until","validUntil","valid_until","optional");
-  setPositive("quotation_pieces","pieces","pieces","预计件数","required",true);
+  setPositive("quotation_pieces","pieces","pieces","商品实际件数","required",true);
+  setText("quotation_declared_quantity_unit","declaredQuantityUnit","declared_quantity_unit","required","件");
+  setPositive("quotation_planned_package_count","plannedPackageCount","planned_package_count","预计入仓包装数","required",true);
+  setText("quotation_planned_package_type","plannedPackageType","planned_package_type","required","other");
   setPositive("quotation_gross_weight_kg","weight","gross_weight_kg","预计重量","required");
   setPositive("quotation_length_cm","length","estimated_length_cm","预计长度","required");
   setPositive("quotation_width_cm","width","estimated_width_cm","预计宽度","required");
@@ -694,12 +711,12 @@ async function saveQuotationNativeWorkflowUpdate(input: {
   setPositive("quotation_volume_cbm","volume","volume_cbm","预计体积","required");
   next.volume_cbm = resolveQuoteTotalVolumeCbm({
     deriveFromDimensions:[
-      policy("quotation_pieces","required"),
+      policy("quotation_planned_package_count","required"),
       policy("quotation_length_cm","required"),
       policy("quotation_width_cm","required"),
       policy("quotation_height_cm","required"),
     ].every((fieldPolicy) => fieldPolicy.isActive),
-    pieces:Number(next.pieces),
+    pieces:Number(next.planned_package_count || 1),
     lengthCm:Number(next.estimated_length_cm),
     widthCm:Number(next.estimated_width_cm),
     heightCm:Number(next.estimated_height_cm),
@@ -797,7 +814,8 @@ async function saveQuotationNativeWorkflowUpdate(input: {
       customer_contact_name=?,customer_contact_phone=?,salesperson_user_id=?,customs_clearance_mode=?,
       origin_country=?,origin_state=?,origin_city=?,pickup_address=?,
       destination_country=?,destination_state=?,destination_city=?,destination_warehouse_id=?,destination_warehouse_note=?,
-      cargo_description=?,notes=?,pieces=?,gross_weight_kg=?,estimated_length_cm=?,estimated_width_cm=?,estimated_height_cm=?,
+      cargo_description=?,notes=?,pieces=?,declared_quantity_unit=?,planned_package_count=?,planned_package_type=?,
+      gross_weight_kg=?,estimated_length_cm=?,estimated_width_cm=?,estimated_height_cm=?,
       volume_cbm=?,valid_until=?,subtotal=?,total_amount=?,updated_at=?
      WHERE id=? AND organization_id=?
        AND lifecycle_status IN ('pending','withdrawn') AND updated_at=?`,
@@ -806,7 +824,8 @@ async function saveQuotationNativeWorkflowUpdate(input: {
     next.customs_clearance_mode || "company",next.origin_country || "",next.origin_state || null,next.origin_city || "",
     next.pickup_address ?? null,next.destination_country || "",next.destination_state || null,next.destination_city || "",
     next.destination_warehouse_id ?? null,next.destination_warehouse_note ?? null,next.cargo_description || "",next.notes ?? null,
-    Number(next.pieces || 1),Number(next.gross_weight_kg || 0),Number(next.estimated_length_cm || 0),
+    Number(next.pieces || 1),next.declared_quantity_unit || "件",Number(next.planned_package_count || 1),
+    next.planned_package_type || "other",Number(next.gross_weight_kg || 0),Number(next.estimated_length_cm || 0),
     Number(next.estimated_width_cm || 0),Number(next.estimated_height_cm || 0),Number(next.volume_cbm || 0),
     next.valid_until ?? null,total,total,now,input.quotationId,input.organizationId,expectedUpdatedAt,
   )];
@@ -896,7 +915,8 @@ export default function QuotationsPage({ loaderData, actionData }: Route.Compone
           const visible=(key:QuotationNativeFieldKey,fallback:"required"|"optional")=>quotationWorkflowFieldPolicy(fields,key,fallback).isActive;
           const routeVisible=visible("quotation_origin_region","required")||visible("quotation_destination_region","required")||visible("quotation_destination_warehouse_id","required");
           const measures=[
-            visible("quotation_pieces","required")?`${quote.pieces} 件`:null,
+            visible("quotation_pieces","required")?`${quote.pieces} ${quote.declared_quantity_unit || "件"}`:null,
+            visible("quotation_planned_package_count","required")?`${quote.planned_package_count} 包`:null,
             visible("quotation_gross_weight_kg","required")?`${quote.gross_weight_kg} KG`:null,
             visible("quotation_volume_cbm","required")?`${quote.volume_cbm} CBM`:null,
           ].filter(Boolean).join(" · ");
@@ -1024,13 +1044,14 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
   const [roadLoadType, setRoadLoadType] = useState<"" | "ltl" | "ftl">("");
   const [workflowDefinitionId, setWorkflowDefinitionId] = useState("");
   const [pieces, setPieces] = useState("1");
+  const [plannedPackageCount, setPlannedPackageCount] = useState("1");
   const [lengthCm, setLengthCm] = useState("");
   const [widthCm, setWidthCm] = useState("");
   const [heightCm, setHeightCm] = useState("");
   const [charges, setCharges] = useState([{ name: transportChargeNameOptions[0]?.[0] || "国际汽运费", quantity: 1, unitPrice: 0, notes: "" }]);
   const total = charges.reduce((sum, charge) => sum + Number(charge.quantity || 0) * Number(charge.unitPrice || 0), 0);
   const calculatedVolumeValue = calculateQuoteTotalVolumeCbm({
-    pieces:Number(pieces),lengthCm:Number(lengthCm),
+    pieces:Number(plannedPackageCount),lengthCm:Number(lengthCm),
     widthCm:Number(widthCm),heightCm:Number(heightCm),
   });
   const calculatedVolume = calculatedVolumeValue == null ? "" : calculatedVolumeValue.toFixed(4);
@@ -1066,6 +1087,9 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
     cargoDescription: quotePolicy("quotation_cargo_description","required"),
     notes: quotePolicy("quotation_notes","optional"),
     pieces: quotePolicy("quotation_pieces","required"),
+    declaredQuantityUnit: quotePolicy("quotation_declared_quantity_unit","required"),
+    plannedPackageCount: quotePolicy("quotation_planned_package_count","required"),
+    plannedPackageType: quotePolicy("quotation_planned_package_type","required"),
     weight: quotePolicy("quotation_gross_weight_kg","required"),
     length: quotePolicy("quotation_length_cm","required"),
     width: quotePolicy("quotation_width_cm","required"),
@@ -1077,9 +1101,10 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
   const routeFieldsVisible = policies.originRegion.isActive || policies.pickupAddress.isActive ||
     policies.destinationRegion.isActive || policies.destinationWarehouse.isActive || policies.destinationNote.isActive;
   const cargoNarrativeVisible = policies.cargoDescription.isActive || policies.notes.isActive;
-  const cargoMetricsVisible = policies.pieces.isActive || policies.weight.isActive ||
+  const cargoMetricsVisible = policies.pieces.isActive || policies.declaredQuantityUnit.isActive ||
+    policies.plannedPackageCount.isActive || policies.plannedPackageType.isActive || policies.weight.isActive ||
     policies.length.isActive || policies.width.isActive || policies.height.isActive || policies.volume.isActive;
-  const volumeCanAutoCalculate = policies.pieces.isActive && policies.length.isActive &&
+  const volumeCanAutoCalculate = policies.plannedPackageCount.isActive && policies.length.isActive &&
     policies.width.isActive && policies.height.isActive;
   useEffect(() => {
     if (!compatibleWorkflows.some((workflow) => workflow.id === workflowDefinitionId)) {
@@ -1107,7 +1132,10 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
     setWorkflowDefinitionId("");
   };
   const cargoMetrics = cargoMetricsVisible && <div className="quote-metrics-grid">
-    {policies.pieces.isActive && <Field label="预计件数" className="quote-metric-compact"><input className="control" name="pieces" type="number" min="1" max={MAX_QUOTE_AUTO_PACKAGES} step="1" value={pieces} onChange={(event) => setPieces(event.target.value)} required={policies.pieces.isRequired}/></Field>}
+    {policies.pieces.isActive && <Field label="商品实际件数" className="quote-metric-compact"><input className="control" name="pieces" type="number" min="1" step="1" value={pieces} onChange={(event) => setPieces(event.target.value)} required={policies.pieces.isRequired}/></Field>}
+    {policies.declaredQuantityUnit.isActive && <Field label="商品数量单位" className="quote-metric-compact"><input className="control" name="declaredQuantityUnit" defaultValue="件" placeholder="件 / 套 / 台" required={policies.declaredQuantityUnit.isRequired}/></Field>}
+    {policies.plannedPackageCount.isActive && <Field label="预计入仓包装数" className="quote-metric-compact"><input className="control" name="plannedPackageCount" type="number" min="1" max={MAX_QUOTE_AUTO_PACKAGES} step="1" value={plannedPackageCount} onChange={(event) => setPlannedPackageCount(event.target.value)} required={policies.plannedPackageCount.isRequired}/></Field>}
+    {policies.plannedPackageType.isActive && <Field label="预计包装类型"><select className="control" name="plannedPackageType" defaultValue="other" required={policies.plannedPackageType.isRequired}><option value="carton">纸箱</option><option value="pallet">托盘</option><option value="wooden_case">木箱</option><option value="bag">袋装</option><option value="other">其他</option></select></Field>}
     {policies.weight.isActive && <Field label="预计重量 KG"><input className="control" name="weight" type="number" min="0.001" step="0.001" required={policies.weight.isRequired}/></Field>}
     {(policies.length.isActive || policies.width.isActive || policies.height.isActive) && <fieldset className="quote-dimension-group">
       <legend>预计尺寸 CM</legend>
@@ -1223,6 +1251,9 @@ function QuotationNativeWorkflowInputs({
     cargo:policy("quotation_cargo_description","required"),
     notes:policy("quotation_notes","optional"),
     pieces:policy("quotation_pieces","required"),
+    declaredQuantityUnit:policy("quotation_declared_quantity_unit","required"),
+    plannedPackageCount:policy("quotation_planned_package_count","required"),
+    plannedPackageType:policy("quotation_planned_package_type","required"),
     weight:policy("quotation_gross_weight_kg","required"),
     length:policy("quotation_length_cm","required"),
     width:policy("quotation_width_cm","required"),
@@ -1241,21 +1272,22 @@ function QuotationNativeWorkflowInputs({
       }))
     : [{ id:"",name:transportChargeNameOptions[0]?.[0] || "国际汽运费",quantity:1,unitPrice:0,notes:"" }]);
   const [pieces,setPieces] = useState(String(quote.pieces || 1));
+  const [plannedPackageCount,setPlannedPackageCount] = useState(String(quote.planned_package_count || 1));
   const [lengthCm,setLengthCm] = useState(String(quote.estimated_length_cm || ""));
   const [widthCm,setWidthCm] = useState(String(quote.estimated_width_cm || ""));
   const [heightCm,setHeightCm] = useState(String(quote.estimated_height_cm || ""));
-  const volumeCanAutoCalculate = p.pieces.isActive && p.length.isActive &&
+  const volumeCanAutoCalculate = p.plannedPackageCount.isActive && p.length.isActive &&
     p.width.isActive && p.height.isActive;
   const calculatedVolumeValue = volumeCanAutoCalculate
     ? calculateQuoteTotalVolumeCbm({
-        pieces:Number(pieces),lengthCm:Number(lengthCm),
+        pieces:Number(plannedPackageCount),lengthCm:Number(lengthCm),
         widthCm:Number(widthCm),heightCm:Number(heightCm),
       })
     : null;
   const calculatedVolume = calculatedVolumeValue == null ? "" : calculatedVolumeValue.toFixed(4);
   const anyParty = p.contactName.isActive || p.contactPhone.isActive || p.salesperson.isActive || p.customs.isActive;
   const anyRoute = p.origin.isActive || p.pickup.isActive || p.destination.isActive || p.warehouse.isActive || p.warehouseNote.isActive;
-  const anyCargo = p.cargo.isActive || p.notes.isActive || p.pieces.isActive || p.weight.isActive || p.length.isActive || p.width.isActive || p.height.isActive || p.volume.isActive;
+  const anyCargo = p.cargo.isActive || p.notes.isActive || p.pieces.isActive || p.declaredQuantityUnit.isActive || p.plannedPackageCount.isActive || p.plannedPackageType.isActive || p.weight.isActive || p.length.isActive || p.width.isActive || p.height.isActive || p.volume.isActive;
   return <div className="quote-native-workflow-inputs">
     {anyParty && <QuoteLedgerSection title="客户与经办" note="以下项目直接保存回本报价，不写入扩展字段表">
       <div className="quote-field-grid">
@@ -1287,7 +1319,10 @@ function QuotationNativeWorkflowInputs({
         {p.notes.isActive && <Field label="报价备注"><textarea className="control textarea" name="notes" rows={2} defaultValue={quote.notes || ""} required={p.notes.isRequired}/></Field>}
       </div>
       <div className="quote-field-grid">
-        {p.pieces.isActive && <Field label="预计件数"><input className="control" name="pieces" type="number" min="1" max={MAX_QUOTE_AUTO_PACKAGES} step="1" value={pieces} onChange={(event) => setPieces(event.target.value)} required={p.pieces.isRequired}/></Field>}
+        {p.pieces.isActive && <Field label="商品实际件数"><input className="control" name="pieces" type="number" min="1" step="1" value={pieces} onChange={(event) => setPieces(event.target.value)} required={p.pieces.isRequired}/></Field>}
+        {p.declaredQuantityUnit.isActive && <Field label="商品数量单位"><input className="control" name="declaredQuantityUnit" defaultValue={quote.declared_quantity_unit || "件"} required={p.declaredQuantityUnit.isRequired}/></Field>}
+        {p.plannedPackageCount.isActive && <Field label="预计入仓包装数"><input className="control" name="plannedPackageCount" type="number" min="1" max={MAX_QUOTE_AUTO_PACKAGES} step="1" value={plannedPackageCount} onChange={(event) => setPlannedPackageCount(event.target.value)} required={p.plannedPackageCount.isRequired}/></Field>}
+        {p.plannedPackageType.isActive && <Field label="预计包装类型"><select className="control" name="plannedPackageType" defaultValue={quote.planned_package_type || "other"} required={p.plannedPackageType.isRequired}><option value="carton">纸箱</option><option value="pallet">托盘</option><option value="wooden_case">木箱</option><option value="bag">袋装</option><option value="other">其他</option></select></Field>}
         {p.weight.isActive && <Field label="预计重量 KG"><input className="control" name="weight" type="number" min="0.001" step="0.001" defaultValue={quote.gross_weight_kg || ""} required={p.weight.isRequired}/></Field>}
         {p.length.isActive && <Field label="预计长度 CM"><input className="control" name="length" type="number" min="0.01" step="0.01" value={lengthCm} onChange={(event) => setLengthCm(event.target.value)} required={p.length.isRequired}/></Field>}
         {p.width.isActive && <Field label="预计宽度 CM"><input className="control" name="width" type="number" min="0.01" step="0.01" value={widthCm} onChange={(event) => setWidthCm(event.target.value)} required={p.width.isRequired}/></Field>}

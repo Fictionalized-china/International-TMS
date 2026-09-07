@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { Form, Link, redirect, useNavigation } from "react-router";
-import { useEffect, useState, type ReactElement } from "react";
+import { useEffect, useState } from "react";
 import type { Route } from "./+types/warehouse.acceptance";
 import {
   WarehouseReceiptResultSelector,
@@ -26,7 +26,6 @@ import {
   acceptanceRequiredMarker,
   automaticWarehouseAcceptanceResult,
   resolveWarehouseAcceptancePolicies,
-  warehouseAcceptancePackageCount,
   warehouseAcceptanceReadyIsBlocked,
 } from "../lib/warehouse-acceptance-policy";
 import {
@@ -51,6 +50,17 @@ type AcceptanceOrder = {
   shipment_number: string | null;
   carrier_name: string | null;
   vehicle_summary: string | null;
+  planned_inbound_package_count: number;
+  planned_inbound_package_type: string;
+};
+
+type InboundMark = {
+  id:string;
+  cargo_item_id:string;
+  package_code:string;
+  package_sequence:number;
+  status:string;
+  is_supplemental:number;
 };
 
 type CargoItem = {
@@ -147,12 +157,14 @@ export async function loader({ request }: Route.LoaderArgs) {
   let order: AcceptanceOrder | null = null;
   let cargoItems: CargoItem[] = [];
   let workflowFields: Awaited<ReturnType<typeof loadOrderModuleWorkflowFields>> = [];
+  let inboundMarks:InboundMark[]=[];
   let lookupError = "";
   if (reference) {
     const matches = await env.DB.prepare(
       `SELECT o.id,o.order_number,o.status,o.business_type,o.customer_id,c.name customer_name,
               c.identity_code customer_identity_code,o.shipper_contact,o.shipper_phone,
-              o.origin_city,o.origin_address,s.id shipment_id,s.shipment_number,
+              o.origin_city,o.origin_address,o.planned_inbound_package_count,o.planned_inbound_package_type,
+              s.id shipment_id,s.shipment_number,
               COALESCE(ca.name,a.carrier_name) carrier_name,
               (SELECT GROUP_CONCAT(COALESCE(NULLIF(v.plate_number,''),'未录车牌')||' / '||COALESCE(NULLIF(v.driver_name,''),'未录司机'),'；')
                  FROM domestic_waybill_vehicles v
@@ -195,13 +207,13 @@ export async function loader({ request }: Route.LoaderArgs) {
         lookupError = workflowAccess.reason || "当前订单的冻结工作流尚未开放国内仓入库";
         order = null;
       } else {
-        const cargo = await env.DB.prepare(
+        const [cargo,marks] = await Promise.all([env.DB.prepare(
           `SELECT i.id,i.line_no,i.cargo_name_cn,i.cargo_name_en,i.hs_code,i.package_type,
                   i.package_count,i.pieces_per_package,i.gross_weight_per_package_kg,
                   i.net_weight_per_package_kg,i.length_cm,i.width_cm,i.height_cm,
                   i.volume_per_package_cbm,i.marks,i.notes,
-                  COALESCE(SUM(CASE WHEN r.id IS NOT NULL THEN ri.actual_packages ELSE 0 END),0) received_packages,
-                  COALESCE(SUM(CASE WHEN r.id IS NOT NULL THEN ri.actual_pieces ELSE 0 END),0) received_pieces,
+                  COALESCE((SELECT COUNT(*) FROM order_cargo_packages mark WHERE mark.cargo_item_id=i.id AND mark.is_active=1 AND mark.status='received'),0) received_packages,
+                  0 received_pieces,
                   COALESCE(SUM(CASE WHEN r.id IS NOT NULL THEN ri.actual_weight_kg ELSE 0 END),0) received_weight_kg,
                   COALESCE(SUM(CASE WHEN r.id IS NOT NULL THEN ri.actual_volume_cbm ELSE 0 END),0) received_volume_cbm
              FROM order_cargo_items i
@@ -210,8 +222,14 @@ export async function loader({ request }: Route.LoaderArgs) {
             WHERE i.organization_id=? AND i.order_id=?
             GROUP BY i.id
             ORDER BY i.line_no,i.id`,
-        ).bind(warehouse.id, user.organizationId, order.id).all<CargoItem>();
+        ).bind(warehouse.id, user.organizationId, order.id).all<CargoItem>(),env.DB.prepare(
+          `SELECT id,cargo_item_id,package_code,package_sequence,status,is_supplemental
+             FROM order_cargo_packages
+            WHERE organization_id=? AND order_id=? AND is_active=1 AND status!='cancelled'
+            ORDER BY package_sequence`,
+        ).bind(user.organizationId,order.id).all<InboundMark>()]);
         cargoItems = cargo.results;
+        inboundMarks=marks.results;
         workflowFields = await loadOrderModuleWorkflowFields(
           user.organizationId,
           order.id,
@@ -229,16 +247,17 @@ export async function loader({ request }: Route.LoaderArgs) {
     reference,
     order,
     cargoItems,
+    inboundMarks,
     workflowFields,
     locations: locations.results,
     recentLabels: recentLabels.results,
     receiptId,
     resultMessage: acceptanceResult === "ready"
-      ? `验收入库完成，订单已确认货齐，共生成 ${recentLabels.results.length} 张标签`
+      ? `验收入库完成，订单已确认货齐，本次扫描 ${recentLabels.results.length} 个入仓包装`
       : acceptanceResult === "exception"
-        ? `异常货物已入库并冻结，共生成 ${recentLabels.results.length} 张标签，请到异常处理结案`
+        ? `异常货物已入库并冻结，本次扫描 ${recentLabels.results.length} 个入仓包装，请到异常处理结案`
         : acceptanceResult === "partial"
-          ? `本批货物已入库，共生成 ${recentLabels.results.length} 张标签；订单继续等待后续到货`
+          ? `本批货物已入库，本次扫描 ${recentLabels.results.length} 个入仓包装；订单继续等待后续到货`
           : "",
     lookupError,
   };
@@ -255,12 +274,14 @@ export async function action({ request }: Route.ActionArgs) {
   const orderId = valueOf(form, "orderId");
   const requestedLocationId = valueOf(form, "locationId");
   const requestedResult = valueOf(form, "receiptResult");
+  const scannedMarkCodes=parseScannedCodes(valueOf(form,"scannedMarkCodes"));
   let exceptionNotes = valueOf(form, "exceptionNotes").trim();
   const notes = valueOf(form, "notes").trim();
   if (!orderId) return { formError: "订单不能为空" };
 
   const order = await env.DB.prepare(
-    `SELECT o.id,o.order_number,o.customer_id,o.origin_city,s.id shipment_id,s.shipment_number
+    `SELECT o.id,o.order_number,o.customer_id,o.origin_city,o.planned_inbound_package_count,
+            o.planned_inbound_package_type,s.id shipment_id,s.shipment_number
        FROM transport_orders o
        JOIN order_transport_assignments a ON a.id=(
          SELECT ax.id FROM order_transport_assignments ax
@@ -277,6 +298,7 @@ export async function action({ request }: Route.ActionArgs) {
   ).bind(orderId, user.organizationId, warehouse.id).first<{
     id: string; order_number: string; customer_id: string; origin_city: string;
     shipment_id: string | null; shipment_number: string | null;
+    planned_inbound_package_count:number; planned_inbound_package_type:string;
   }>();
   if (!order) return { formError: "订单不存在、状态不可收货，或计划入库仓库与当前仓库不一致" };
 
@@ -357,30 +379,54 @@ export async function action({ request }: Route.ActionArgs) {
   }>();
   if (!cargo.results.length) return { formError: "订单没有货物明细，无法验收" };
 
+  if(!scannedMarkCodes.length)return{formError:"请至少扫描一张入仓唛头"};
+  const existingMarks=await env.DB.prepare(
+    `SELECT id,cargo_item_id,package_code,package_sequence,status,is_supplemental
+       FROM order_cargo_packages
+      WHERE organization_id=? AND order_id=? AND is_active=1 AND status!='cancelled'
+      ORDER BY package_sequence`,
+  ).bind(user.organizationId,order.id).all<InboundMark>();
+  const marksByCode=new Map(existingMarks.results.map(mark=>[mark.package_code.toUpperCase(),mark]));
+  const supplementalMarks:InboundMark[]=[];
+  const scannedMarks:InboundMark[]=[];
+  let nextSupplementalSequence=Math.max(
+    order.planned_inbound_package_count,
+    ...existingMarks.results.map(mark=>mark.package_sequence),
+  )+1;
+  for(const code of scannedMarkCodes){
+    const existing=marksByCode.get(code);
+    if(existing){
+      if(existing.status==='received')return{formError:`入仓唛头 ${existing.package_code} 已收货，不能重复扫描`};
+      scannedMarks.push(existing);
+      continue;
+    }
+    const match=code.match(new RegExp(`^${escapeRegExp(order.order_number)}-IN-(\\d{3})$`,'i'));
+    const sequence=match?Number(match[1]):0;
+    if(!sequence||sequence!==nextSupplementalSequence)
+      return{formError:`${code} 不是当前订单的有效入仓唛头`};
+    const supplemental:InboundMark={
+      id:crypto.randomUUID(),cargo_item_id:cargo.results[0].id,package_code:code,
+      package_sequence:sequence,status:'planned',is_supplemental:1,
+    };
+    marksByCode.set(code,supplemental);
+    supplementalMarks.push(supplemental);
+    scannedMarks.push(supplemental);
+    nextSupplementalSequence+=1;
+  }
+  const scannedCountByCargo=new Map<string,number>();
+  for(const mark of scannedMarks)scannedCountByCargo.set(mark.cargo_item_id,(scannedCountByCargo.get(mark.cargo_item_id)||0)+1);
+
   const actualRows = cargo.results.map((item, index) => {
-    const packageFieldName = `actualPackages_${index}`;
-    const packageRaw = policies.actualPackages.isActive
-      ? valueOf(form, packageFieldName)
-      : "";
-    const submittedPackages = packageRaw === ""
-      ? null
-      : nonNegativeInteger(form, packageFieldName);
-    const actualPackages = warehouseAcceptancePackageCount({
-      plannedPackages: item.package_count,
-      receivedPackages: item.received_packages,
-      submittedPackages,
-    });
+    const actualPackages = scannedCountByCargo.get(item.id)||0;
     const actualLength = nonNegativeNumber(form, `actualLength_${index}`);
     const actualWidth = nonNegativeNumber(form, `actualWidth_${index}`);
     const actualHeight = nonNegativeNumber(form, `actualHeight_${index}`);
     return {
       ...item,
       actualPackages,
-      packageCountProvided: packageRaw !== "",
-      packageCountInvalid: packageRaw !== "" && submittedPackages === null,
-      actualPieces: policies.actualPieces.isActive
-        ? nonNegativeInteger(form, `actualPieces_${index}`)
-        : null,
+      packageCountProvided: true,
+      packageCountInvalid: false,
+      actualPieces: null,
       actualWeight: policies.actualWeight.isActive
         ? nonNegativeNumber(form, `actualWeight_${index}`)
         : null,
@@ -400,15 +446,9 @@ export async function action({ request }: Route.ActionArgs) {
   });
   if (actualRows.some((item) => item.packageCountInvalid))
     return { formError: "实收包装数如果填写，必须是有效的非负整数" };
-  if (policies.actualPackages.isRequired && actualRows.some((item) => !item.packageCountProvided))
-    return { formError: "实收包装数为必填，请逐条确认" };
   const receivedRows = actualRows.filter((item) => item.actualPackages > 0);
   if (receivedRows.some((item) => !item.actualLength || !item.actualWidth || !item.actualHeight))
     return { formError: "有实收包装的货物必须填写大于 0 的实际长、宽、高" };
-  if (policies.actualPieces.isRequired && receivedRows.some((item) => !item.actualPieces))
-    return { formError: "有实收包装的货物必须填写大于 0 的实收件数" };
-  if (policies.actualPieces.isActive && receivedRows.some((item) => item.actualPieces !== null && item.actualPieces <= 0))
-    return { formError: "实收件数如果填写，必须大于 0" };
   if (policies.actualWeight.isRequired && receivedRows.some((item) => !item.actualWeight))
     return { formError: "有实收包装的货物必须填写大于 0 的实际重量" };
   if (policies.actualVolume.isRequired && receivedRows.some((item) => !item.actualVolume))
@@ -452,12 +492,12 @@ export async function action({ request }: Route.ActionArgs) {
   const totalWeight = inventoryRows.reduce((sum, item) => sum + item.actualWeight, 0);
   const totalVolume = inventoryRows.reduce((sum, item) => sum + item.actualVolume, 0);
   const packageTypes = [...new Set(inventoryRows.map((item) => item.package_type))];
-  const expected = cargo.results.reduce((sum, item) => ({
-    packages: sum.packages + item.package_count,
+  const expectedCargo = cargo.results.reduce((sum, item) => ({
     pieces: sum.pieces + item.package_count * item.pieces_per_package,
     weightKg: sum.weightKg + item.package_count * item.gross_weight_per_package_kg,
     volumeCbm: sum.volumeCbm + item.package_count * item.volume_per_package_cbm,
-  }), { packages: 0, pieces: 0, weightKg: 0, volumeCbm: 0 });
+  }), { pieces: 0, weightKg: 0, volumeCbm: 0 });
+  const expected = { packages: order.planned_inbound_package_count, ...expectedCargo };
   const previous = await env.DB.prepare(
     `SELECT COALESCE(SUM(total_packages),0) packages,COALESCE(SUM(total_pieces),0) pieces,COALESCE(SUM(total_weight_kg),0) weight_kg,
             COALESCE(SUM(total_volume_cbm),0) volume_cbm
@@ -497,6 +537,10 @@ export async function action({ request }: Route.ActionArgs) {
       exceptionNotes ||= "系统已隐藏人工货齐选择，实收超量或差异较大，已自动转为异常入库";
     }
   }
+  if(supplementalMarks.length){
+    result="exception";
+    exceptionNotes||=`超计划收货 ${supplementalMarks.length} 包，已生成补录唛头，等待操作岗确认差异`;
+  }
   if (!inventoryRows.length && result !== "ready")
     return { formError: "本次至少要验收一个实际包装" };
   if (result === "exception" && !exceptionNotes)
@@ -532,6 +576,18 @@ export async function action({ request }: Route.ActionArgs) {
   const effectiveNotes = policies.notes.isActive ? notes : "";
   const locationText = `${location.warehouse_name} / ${location.zone_name} / ${location.name} (${location.code})`;
   const statements: D1PreparedStatement[] = [...bootstrap];
+  for(const mark of supplementalMarks){
+    statements.push(env.DB.prepare(
+      `INSERT INTO order_cargo_packages(
+        id,organization_id,order_id,cargo_item_id,package_code,package_sequence,status,created_at,
+        label_revision,is_active,is_supplemental
+      ) VALUES(?,?,?,?,?,?,'planned',?,1,1,1)`,
+    ).bind(mark.id,user.organizationId,order.id,mark.cargo_item_id,mark.package_code,mark.package_sequence,now));
+  }
+  statements.push(env.DB.prepare(
+    `UPDATE transport_orders SET inbound_package_locked_at=COALESCE(inbound_package_locked_at,?),updated_at=?
+      WHERE id=? AND organization_id=?`,
+  ).bind(now,now,order.id,user.organizationId));
   statements.push(
     env.DB.prepare(
       `INSERT INTO warehouse_receipts(
@@ -572,11 +628,13 @@ export async function action({ request }: Route.ActionArgs) {
         result === "exception" ? "exception" : "normal",item.itemNotes || null,now,now,
       ),
     );
-    for (let sequence = 1; sequence <= actualPackages; sequence += 1) {
+    const itemMarks=scannedMarks.filter(mark=>mark.cargo_item_id===item.id);
+    for (let sequence = 1; sequence <= itemMarks.length; sequence += 1) {
+      const inboundMark=itemMarks[sequence-1];
       const packageId = crypto.randomUUID();
-      const barcode = generateCode("OUL");
-      const packageNumber = generatePackageNumber(order.order_number, item.line_no, sequence);
-      const pieces = distributeInteger(item.packagePieces, actualPackages, sequence);
+      const barcode = inboundMark.package_code;
+      const packageNumber = inboundMark.package_code;
+      const pieces = 1;
       const weight = actualWeight > 0
         ? distributeDecimal(actualWeight, actualPackages, sequence)
         : null;
@@ -590,11 +648,17 @@ export async function action({ request }: Route.ActionArgs) {
           `INSERT INTO warehouse_packages(
             id,organization_id,receipt_id,shipment_id,warehouse_id,location_id,barcode,package_number,
             pieces,weight_kg,volume_cbm,length_cm,width_cm,height_cm,status,notes,created_at,updated_at,cargo_item_id
-          ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            ,label_kind,lifecycle_status,source_order_package_id
+          ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'inbound_mark','active',?)`,
         ).bind(
           packageId,user.organizationId,receiptId,shipmentId,warehouse.id,location.id,barcode,packageNumber,
-          pieces,weight,volume,actualLength,actualWidth,actualHeight,packageStatus,item.itemNotes || effectiveNotes || null,now,now,item.id,
+          pieces,weight,volume,actualLength,actualWidth,actualHeight,packageStatus,item.itemNotes || effectiveNotes || null,now,now,item.id,inboundMark.id,
         ),
+        env.DB.prepare(
+          `UPDATE order_cargo_packages
+              SET status='received',received_at=?,received_warehouse_id=?,received_location_id=?,received_by_user_id=?
+            WHERE id=? AND organization_id=? AND status='planned' AND is_active=1`,
+        ).bind(now,warehouse.id,location.id,user.userId,inboundMark.id,user.organizationId),
         env.DB.prepare(
           `INSERT INTO warehouse_package_movements(
             id,organization_id,package_id,operation_type,from_location_id,to_location_id,
@@ -611,7 +675,20 @@ export async function action({ request }: Route.ActionArgs) {
         id,organization_id,shipment_id,operation_type,location,measured_pieces,
         measured_weight_kg,measured_volume_cbm,notes,operator_user_id,occurred_at,created_at,warehouse_location_id
       ) VALUES(?,?,?,'receive',?,?,?,?,?,?,?,?,?)`,
-    ).bind(crypto.randomUUID(),user.organizationId,shipmentId,locationText,totalPieces,totalWeight,totalVolume,effectiveNotes || exceptionNotes || null,user.userId,now,now,location.id),
+    ).bind(
+      crypto.randomUUID(),
+      user.organizationId,
+      shipmentId,
+      locationText,
+      totalPieces > 0 ? totalPieces : null,
+      totalWeight > 0 ? totalWeight : null,
+      totalVolume > 0 ? totalVolume : null,
+      effectiveNotes || exceptionNotes || null,
+      user.userId,
+      now,
+      now,
+      location.id,
+    ),
     env.DB.prepare(
       `INSERT INTO shipment_events(id,shipment_id,status,location,description,event_at,visible_to_customer,created_by_user_id,created_at)
        VALUES(?,?,'picked_up',?,?,?,1,?,?)`,
@@ -704,11 +781,19 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
     loaderData.warehouseAccessLevel,
   );
   const [receiptResult, setReceiptResult] = useState<"partial" | "ready" | "exception">("partial");
+  const [markInput,setMarkInput]=useState("");
+  const [scannedMarks,setScannedMarks]=useState<string[]>([]);
   const labels = loaderData.receiptId ? loaderData.recentLabels : [];
   const policies = resolveWarehouseAcceptancePolicies(loaderData.workflowFields);
-  useEffect(() => setReceiptResult("partial"), [loaderData.order?.id]);
+  useEffect(() => {setReceiptResult("partial");setScannedMarks([]);setMarkInput("");}, [loaderData.order?.id]);
+  const addScannedMark=()=>{
+    const code=markInput.trim().toUpperCase();
+    if(!code)return;
+    setScannedMarks(current=>current.includes(code)?current:[...current,code]);
+    setMarkInput("");
+  };
   return <>
-    <header className="page-header acceptance-header"><div><p className="eyebrow">ACCEPTANCE RECEIVING</p><h1>验收收货</h1><p>扫描订单号，逐条核对预录与实收数据，选择库位入库后打印每个实际包装的仓库标签。</p></div>{labels.length > 0 && <button type="button" className="primary no-print" onClick={() => window.print()}>打印本次 {labels.length} 张标签</button>}</header>
+    <header className="page-header acceptance-header"><div><p className="eyebrow">ACCEPTANCE RECEIVING</p><h1>验收收货</h1><p>先调出订单，再逐一扫描客户已粘贴的入仓唛头；系统保存到仓时间、库位和操作人，不在仓库重复统计商品件数。</p></div></header>
     <ActionToast message={actionError ?? loaderData.resultMessage} tone={actionError ? "error" : "success"} data={actionData}/>
     {!loaderData.locations.length && <div className="alert error">当前仓库没有可用库位，请先<Link to={`/warehouse/locations?warehouseId=${loaderData.warehouse.id}`}>配置仓库与库位</Link>。</div>}
     {canOperate ? <WarehouseReceivingScanPanel
@@ -722,6 +807,7 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
     {loaderData.lookupError && <div className="alert error no-print">{loaderData.lookupError}</div>}
     {canOperate && loaderData.order && loaderData.cargoItems.length > 0 && <Form method="post" className="acceptance-workbench no-print" onInput={(event) => synchronizeWarehouseVolumeRow(event.target)}>
       <input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/><input type="hidden" name="orderId" value={loaderData.order.id}/><input type="hidden" name="reference" value={loaderData.order.order_number}/>
+      <input type="hidden" name="scannedMarkCodes" value={JSON.stringify(scannedMarks)}/>
       <WarehouseReceivingOrderStrip facts={[
         { label: "订单 / 类型", value: `${loaderData.order.order_number} · ${loaderData.order.business_type === "ftl" ? "整车" : "拼车"}` },
         { label: "客户", value: `[${loaderData.order.customer_identity_code}] ${loaderData.order.customer_name}` },
@@ -729,35 +815,40 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
         { label: "国内运输", value: loaderData.order.carrier_name || "承运商未填写", detail: loaderData.order.vehicle_summary || "车辆与司机未填写" },
         { label: "提货地", value: `${loaderData.order.origin_city} · ${loaderData.order.origin_address}` },
       ]}/>
+      <section className="panel inbound-mark-scan-panel">
+        <div className="panel-header"><div><h2>扫描本批入仓唛头</h2><p>每个外包装扫描一次；重复扫描只提示且不重复计数。超收时可直接扫描连续补录码，例如 {loaderData.order.order_number}-IN-{String(loaderData.order.planned_inbound_package_count+1).padStart(3,"0")}。</p></div><strong>{scannedMarks.length} 个待提交</strong></div>
+        <div className="inbound-mark-scan-row"><input className="control" value={markInput} onChange={event=>setMarkInput(event.target.value)} onKeyDown={event=>{if(event.key==='Enter'){event.preventDefault();addScannedMark();}}} placeholder="扫描入仓唛头后回车" autoFocus/><button type="button" className="btn primary" onClick={addScannedMark}>加入本批</button></div>
+        <div className="inbound-mark-progress"><span>计划 {loaderData.order.planned_inbound_package_count} 包</span><span>历史已收 {loaderData.inboundMarks.filter(mark=>mark.status==='received').length} 包</span><span>本次 {scannedMarks.length} 包</span></div>
+        {scannedMarks.length>0&&<div className="inbound-mark-chip-list">{scannedMarks.map(code=><button key={code} type="button" onClick={()=>setScannedMarks(current=>current.filter(item=>item!==code))} title="点击移除">{code}<span>×</span></button>)}</div>}
+      </section>
       <section className="panel acceptance-cargo-panel">
         <div className="panel-header"><div><h2>预录货物与本次实收</h2><p>每条货物按本次实际到仓填写；未在本批到仓的货物全部填 0。长宽高用于生成实物库存与标签，固定为系统必填。</p></div><span className="status-pill">{loaderData.cargoItems.length} 条货物</span></div>
-        {!policies.actualPackages.isActive && <div className="alert info">实收包装数已在当前订单工作流中隐藏；系统将按每条货物的“计划包装数 − 当前仓累计实收包装数”推导本次包装数，最低为 0。</div>}
+        <div className="alert info">本次包装数完全按上方已扫描唛头计算；商品件数不参与仓库收货门禁。</div>
         <div className="table-wrap acceptance-cargo-table"><table><thead><tr>
           <th>预录货物</th><th>计划数据</th><th>累计已收</th>
-          {policies.actualPackages.isActive && <th>本次包装数{acceptanceRequiredMarker(policies.actualPackages)}</th>}
-          {policies.actualPieces.isActive && <th>本次件数{acceptanceRequiredMarker(policies.actualPieces)}</th>}
+          <th>本次扫码包装</th>
           {policies.actualWeight.isActive && <th>实际重量 KG{acceptanceRequiredMarker(policies.actualWeight)}</th>}
           <th>实际长×宽×高 CM{acceptanceRequiredMarker(policies.actualDimensions)}</th>
           {policies.actualVolume.isActive && <th>实际体积 CBM（自动计算）{acceptanceRequiredMarker(policies.actualVolume)}</th>}
           <th>本行备注</th>
         </tr></thead><tbody>{loaderData.cargoItems.map((item,index) => {
-          const expectedPieces = item.package_count * item.pieces_per_package;
           const expectedWeight = item.package_count * item.gross_weight_per_package_kg;
           const expectedVolume = item.package_count * item.volume_per_package_cbm;
-          const remainingPackages = Math.max(0,item.package_count-item.received_packages);
+          const knownCodes=new Set(loaderData.inboundMarks.filter(mark=>mark.cargo_item_id===item.id).map(mark=>mark.package_code.toUpperCase()));
+          const scannedForItem=scannedMarks.filter(code=>knownCodes.has(code)).length+
+            (index===0?scannedMarks.filter(code=>!loaderData.inboundMarks.some(mark=>mark.package_code.toUpperCase()===code)).length:0);
           const calculatedVolume = calculateWarehouseVolumeCbm({
             lengthCm: item.length_cm,
             widthCm: item.width_cm,
             heightCm: item.height_cm,
-            packageCount: remainingPackages,
+            packageCount: scannedForItem,
           });
-          return <tr key={item.id} data-warehouse-volume-row data-warehouse-volume-packages={remainingPackages}>
+          return <tr key={item.id} data-warehouse-volume-row data-warehouse-volume-packages={scannedForItem}>
             <td><strong>{item.line_no}. {item.cargo_name_cn}</strong><small>{item.cargo_name_en || "—"} · HS {item.hs_code || "—"}</small><small>{packageTypeLabel(item.package_type)} · {item.length_cm}×{item.width_cm}×{item.height_cm} cm</small></td>
-            <td><strong>{item.package_count} 包 / {expectedPieces} 件</strong><small>{expectedWeight.toFixed(2)} KG · {expectedVolume.toFixed(3)} CBM</small></td>
-            <td><strong>{item.received_packages} 包 / {item.received_pieces} 件</strong><small>{item.received_weight_kg.toFixed(2)} KG · {item.received_volume_cbm.toFixed(3)} CBM</small></td>
-            {policies.actualPackages.isActive && <td><input name={`actualPackages_${index}`} type="number" min="0" step="1" defaultValue={remainingPackages} required={policies.actualPackages.isRequired} data-warehouse-volume-packages/></td>}
-            {policies.actualPieces.isActive && <td><input name={`actualPieces_${index}`} type="number" min="0" step="1" defaultValue={Math.max(0,expectedPieces-item.received_pieces)} required={policies.actualPieces.isRequired}/></td>}
-            {policies.actualWeight.isActive && <td><input name={`actualWeight_${index}`} type="number" min="0" step="0.001" defaultValue={Math.max(0,expectedWeight-item.received_weight_kg).toFixed(3)} required={policies.actualWeight.isRequired}/></td>}
+            <td><strong>{item.package_count} 个入仓包装</strong><small>{expectedWeight.toFixed(2)} KG · {expectedVolume.toFixed(3)} CBM</small></td>
+            <td><strong>{item.received_packages} 个已收包装</strong><small>{item.received_weight_kg.toFixed(2)} KG · {item.received_volume_cbm.toFixed(3)} CBM</small></td>
+            <td><strong>{scannedForItem}</strong><small>按唛头自动汇总</small></td>
+            {policies.actualWeight.isActive && <td><input name={`actualWeight_${index}`} type="number" min="0" step="0.001" defaultValue={(item.gross_weight_per_package_kg*scannedForItem).toFixed(3)} required={policies.actualWeight.isRequired}/></td>}
             <td><div className="acceptance-dimensions"><input name={`actualLength_${index}`} type="number" min="0" step="0.1" defaultValue={item.length_cm} aria-label="实际长度" required data-warehouse-volume-length/><span>×</span><input name={`actualWidth_${index}`} type="number" min="0" step="0.1" defaultValue={item.width_cm} aria-label="实际宽度" required data-warehouse-volume-width/><span>×</span><input name={`actualHeight_${index}`} type="number" min="0" step="0.1" defaultValue={item.height_cm} aria-label="实际高度" required data-warehouse-volume-height/></div></td>
             {policies.actualVolume.isActive && <td><input name={`actualVolume_${index}`} aria-label="实际体积 CBM（自动计算）" type="number" min="0" step="0.0001" defaultValue={formatWarehouseVolumeCbm(calculatedVolume)} required={policies.actualVolume.isRequired} readOnly data-warehouse-volume-output/></td>}
             <td><input name={`itemNotes_${index}`} placeholder="选填"/></td>
@@ -777,20 +868,10 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
           exceptionFooter="填写短少、破损、错货、超差等具体情况"
         /> : <div className="alert info">货齐选择已在当前工作流中隐藏：系统依据累计包装数和已填的实收数据自动判定分批、货齐或异常。</div>}
         {policies.notes.isActive && <label className="field span-2"><span>收货备注{acceptanceRequiredMarker(policies.notes)}</span><textarea name="notes" rows={2} required={policies.notes.isRequired} placeholder="本次到货车辆、现场情况等"/></label>}
-        <button className="primary acceptance-submit" disabled={busy || !canOperate || !loaderData.locations.length}>{busy ? "正在验收入库…" : "确认验收、入库并生成标签"}</button>
+        <button className="primary acceptance-submit" disabled={busy || !canOperate || !loaderData.locations.length || !scannedMarks.length}>{busy ? "正在验收入库…" : "确认本批扫码入库"}</button>
       </section>
     </Form>}
-    {labels.length > 0 && <section className="acceptance-label-section"><div className="panel-header no-print"><div><h2>本次仓库货物标签</h2><p>每个实际包装一张，打印后粘贴到对应货物外包装。</p></div><span>{labels.length} 张</span></div><div className="package-labels">{labels.map((item) => <AcceptanceLabel key={item.id} item={item}/>)}</div></section>}
   </>;
-}
-
-function AcceptanceLabel({ item }: { item: PackageLabel }) {
-  return <article className="package-label warehouse-package-label"><header><strong>OULING 国际物流</strong><span>货物条码标签</span></header><Code39 value={item.barcode}/><b>{item.barcode}</b><dl><div><dt>订单</dt><dd>{item.order_number}</dd></div><div><dt>货物条码</dt><dd>{item.barcode}</dd></div><div><dt>客户</dt><dd>[{item.customer_identity_code}] {item.customer_name}</dd></div><div><dt>实收</dt><dd>{item.pieces} 件 · {item.weight_kg?.toFixed(2) || "0.00"} KG · {item.volume_cbm?.toFixed(3) || "0.000"} CBM</dd></div><div><dt>库位</dt><dd>{item.zone_name} / {item.location_name}（{item.location_code}）</dd></div></dl></article>;
-}
-
-function Code39({ value }: { value: string }) {
-  const patterns: Record<string,string>={"0":"nnnwwnwnn","1":"wnnwnnnnw","2":"nnwwnnnnw","3":"wnwwnnnnn","4":"nnnwwnnnw","5":"wnnwwnnnn","6":"nnwwwnnnn","7":"nnnwnnwnw","8":"wnnwnnwnn","9":"nnwwnnwnn","A":"wnnnnwnnw","B":"nnwnnwnnw","C":"wnwnnwnnn","D":"nnnnwwnnw","E":"wnnnwwnnn","F":"nnwnwwnnn","G":"nnnnnwwnw","H":"wnnnnwwnn","I":"nnwnnwwnn","J":"nnnnwwwnn","K":"wnnnnnnww","L":"nnwnnnnww","M":"wnwnnnnwn","N":"nnnnwnnww","O":"wnnnwnnwn","P":"nnwnwnnwn","Q":"nnnnnnwww","R":"wnnnnnwwn","S":"nnwnnnwwn","T":"nnnnwnwwn","U":"wwnnnnnnw","V":"nwwnnnnnw","W":"wwwnnnnnn","X":"nwnnwnnnw","Y":"wwnnwnnnn","Z":"nwwnwnnnn","-":"nwnnnnwnw","*":"nwnnwnwnn"};
-  let x=0;const bars:ReactElement[]=[];for(const char of `*${value}*`){for(const[index,width]of[...(patterns[char]??patterns["-"])].entries()){const size=width==="w"?3:1;if(index%2===0)bars.push(<rect key={`${x}-${index}`} x={x} y="0" width={size} height="48"/>);x+=size}x+=1}return <svg className="code39" viewBox={`0 0 ${x} 48`} preserveAspectRatio="none">{bars}</svg>;
 }
 
 async function ensureVerifiedReceivingBatch(input:{organizationId:string;shipmentId:string;locationId:string;actorUserId:string;now:string}) {
@@ -798,7 +879,7 @@ async function ensureVerifiedReceivingBatch(input:{organizationId:string;shipmen
   const batchId=existing?.id??crypto.randomUUID();const statements:D1PreparedStatement[]=[];
   if(existing) statements.push(env.DB.prepare("UPDATE warehouse_sorting_batches SET target_location_id=?,status='verified',verified_by_user_id=?,verified_at=COALESCE(verified_at,?),updated_at=? WHERE id=? AND organization_id=?").bind(input.locationId,input.actorUserId,input.now,input.now,batchId,input.organizationId));
   else statements.push(env.DB.prepare("INSERT INTO warehouse_sorting_batches(id,organization_id,batch_number,shipment_id,target_location_id,status,notes,created_by_user_id,verified_by_user_id,created_at,updated_at,verified_at) VALUES(?,?,?,?,?,'verified',?,?,?,?,?,?)").bind(batchId,input.organizationId,generateCode("SORT"),input.shipmentId,input.locationId,"系统根据验收确认货齐自动生成",input.actorUserId,input.actorUserId,input.now,input.now,input.now));
-  const packages=await env.DB.prepare("SELECT id FROM warehouse_packages WHERE organization_id=? AND shipment_id=? AND status IN ('in_stock','allocated')").bind(input.organizationId,input.shipmentId).all<{id:string}>();
+  const packages=await env.DB.prepare("SELECT id FROM warehouse_packages WHERE organization_id=? AND shipment_id=? AND label_kind='inbound_mark' AND lifecycle_status='active' AND status='in_stock'").bind(input.organizationId,input.shipmentId).all<{id:string}>();
   for(const item of packages.results) statements.push(env.DB.prepare("INSERT OR IGNORE INTO warehouse_sorting_items(id,organization_id,batch_id,package_id,status,sorted_by_user_id,verified_by_user_id,sorted_at,verified_at,notes) VALUES(?,?,?,?,'verified',?,?,?,?,?)").bind(crypto.randomUUID(),input.organizationId,batchId,item.id,input.actorUserId,input.actorUserId,input.now,input.now,"验收确认货齐，自动纳入装车范围"));
   await env.DB.batch(statements);
 }
@@ -819,10 +900,16 @@ async function completeDomesticTransport(organizationId:string,orderId:string,sh
 }
 
 function nonNegativeNumber(form:FormData,name:string){const raw=valueOf(form,name);if(raw==="")return null;const value=Number(raw);return Number.isFinite(value)&&value>=0?value:null}
-function nonNegativeInteger(form:FormData,name:string){const value=nonNegativeNumber(form,name);return value!==null&&Number.isInteger(value)?value:null}
-function distributeInteger(total:number,count:number,sequence:number){const base=Math.floor(total/count);return base+(sequence<=total%count?1:0)}
 function distributeDecimal(total:number,count:number,sequence:number){const base=Math.floor(total/count*1_000_000)/1_000_000;return sequence===count?Number((total-base*(count-1)).toFixed(6)):base}
 function generateCode(prefix:string){return `${prefix}-${Date.now().toString(36).toUpperCase()}-${crypto.randomUUID().slice(0,5).toUpperCase()}`}
-function generatePackageNumber(orderNumber:string,lineNo:number,sequence:number){return `PK-${orderNumber.replace(/[^A-Z0-9]/gi,"").slice(-14).toUpperCase()}-${lineNo}-${sequence}-${crypto.randomUUID().slice(0,3).toUpperCase()}`}
 function packageTypeLabel(value:string){return({carton:"纸箱",pallet:"托盘",wooden_case:"木箱",bag:"袋装",drum:"桶装",bundle:"捆装",other:"其他",mixed:"混合包装"}as Record<string,string>)[value]||value}
+function parseScannedCodes(raw:string){
+  if(!raw)return[];
+  try{
+    const value=JSON.parse(raw);
+    if(!Array.isArray(value))return[];
+    return [...new Set(value.map(item=>String(item).trim().toUpperCase()).filter(Boolean))];
+  }catch{return[]}
+}
+function escapeRegExp(value:string){return value.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")}
 export function meta(){return[{title:"验收收货 | International TMS"}]}

@@ -35,8 +35,9 @@ export async function completeWarehouseDispatchTransaction(
   const statements: D1PreparedStatement[] = [
     db.prepare(
       `UPDATE warehouse_packages
-       SET status='dispatched',updated_at=?
+       SET status='dispatched',lifecycle_status=CASE WHEN label_kind='oul' THEN 'in_transit' ELSE lifecycle_status END,updated_at=?
        WHERE organization_id=? AND warehouse_id=?
+         AND label_kind='oul' AND lifecycle_status='active'
          AND id IN (
            SELECT di.package_id
            FROM warehouse_dispatch_items di
@@ -58,7 +59,7 @@ export async function completeWarehouseDispatchTransaction(
        JOIN warehouse_dispatches d
          ON d.id=di.dispatch_id AND d.organization_id=di.organization_id
        WHERE d.id=? AND d.organization_id=? AND d.status='loading'
-         AND p.warehouse_id=?`,
+         AND p.warehouse_id=? AND p.label_kind='oul'`,
     ).bind(actorUserId, description, occurredAt, occurredAt, dispatchId, organizationId, warehouseId),
     db.prepare(
       `INSERT INTO warehouse_operations(
@@ -77,7 +78,7 @@ export async function completeWarehouseDispatchTransaction(
          JOIN warehouse_dispatches d
            ON d.id=di.dispatch_id AND d.organization_id=di.organization_id
          WHERE d.id=? AND d.organization_id=? AND d.status='loading'
-           AND p.warehouse_id=?
+           AND p.warehouse_id=? AND p.label_kind='oul'
        ) scope`,
     ).bind(description, actorUserId, occurredAt, occurredAt, dispatchId, organizationId, warehouseId),
     db.prepare(
@@ -97,7 +98,7 @@ export async function completeWarehouseDispatchTransaction(
          JOIN warehouse_dispatches d
            ON d.id=di.dispatch_id AND d.organization_id=di.organization_id
          WHERE d.id=? AND d.organization_id=? AND d.status='loading'
-           AND p.warehouse_id=?
+           AND p.warehouse_id=? AND p.label_kind='oul'
        ) scope`,
     ).bind(description, occurredAt, actorUserId, occurredAt, dispatchId, organizationId, warehouseId),
     db.prepare(
@@ -114,7 +115,7 @@ export async function completeWarehouseDispatchTransaction(
            JOIN warehouse_dispatches d
              ON d.id=di.dispatch_id AND d.organization_id=di.organization_id
            WHERE d.id=? AND d.organization_id=? AND d.status='loading'
-             AND p.warehouse_id=?
+             AND p.warehouse_id=? AND p.label_kind='oul'
          )`,
     ).bind(organizationId, dispatchId, organizationId, warehouseId),
   ];
@@ -133,7 +134,7 @@ export async function completeWarehouseDispatchTransaction(
              JOIN warehouse_packages p
                ON p.id=di.package_id AND p.organization_id=di.organization_id
              WHERE d.id=? AND d.organization_id=? AND d.status='loading'
-               AND d.transport_batch_id=? AND p.warehouse_id=?
+               AND d.transport_batch_id=? AND p.warehouse_id=? AND p.label_kind='oul'
            )`,
       ).bind(
         occurredAt,
@@ -156,7 +157,7 @@ export async function completeWarehouseDispatchTransaction(
              JOIN warehouse_packages p
                ON p.id=di.package_id AND p.organization_id=di.organization_id
              WHERE d.id=? AND d.organization_id=? AND d.status='loading'
-               AND d.transport_batch_id=? AND p.warehouse_id=?
+               AND d.transport_batch_id=? AND p.warehouse_id=? AND p.label_kind='oul'
            )`,
       ).bind(
         occurredAt,
@@ -186,7 +187,7 @@ export async function completeWarehouseDispatchTransaction(
              ON p.id=di.package_id AND p.organization_id=di.organization_id
            WHERE di.dispatch_id=warehouse_dispatches.id
              AND di.organization_id=warehouse_dispatches.organization_id
-             AND p.warehouse_id=?
+             AND p.warehouse_id=? AND p.label_kind='oul'
          )`,
     ).bind(actorUserId, occurredAt, occurredAt, dispatchId, organizationId, warehouseId),
   );

@@ -14,7 +14,7 @@ import {
   type PortalQuote,
   type PortalQuoteCharge,
 } from "../components/PortalQuoteReview";
-import type { OrderMarkLabel } from "../lib/order-mark-label.server";
+import { loadActiveOrderMarksByOrder, type OrderMarkLabel } from "../lib/order-mark-label.server";
 import { paginateList, readListPage } from "../lib/list-pagination";
 import { customerFacingOrderStatusLabel } from "../lib/overseas-warehouse";
 import { orderRouteFilterCount, readOrderRouteFilters } from "../lib/order-route-filters";
@@ -108,6 +108,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const [orderRows, quoteRows, chargeRows] = await Promise.all([
     env.DB.prepare(
       `SELECT o.id,o.order_number,c.name customer_name,q.quote_number,o.business_type,o.cargo_description,o.pieces,
+        o.declared_quantity_unit,o.planned_inbound_package_count,o.planned_inbound_package_type,o.inbound_package_locked_at,
         o.gross_weight_kg,o.volume_cbm,o.origin_country,o.origin_state,o.origin_city,o.origin_address,
         o.exit_port,bp.name exit_port_name,o.destination_country,o.destination_state,o.destination_city,o.destination_address,
         w.name overseas_warehouse_name,o.status,o.current_step_name,
@@ -139,7 +140,8 @@ export async function loader({ request }: Route.LoaderArgs) {
         q.origin_country,q.origin_state,q.origin_city,q.pickup_address,
         q.destination_country,q.destination_state,q.destination_city,qw.name destination_warehouse_name,
         q.destination_warehouse_note,q.customs_clearance_mode,q.road_load_type,q.cargo_description,
-        q.pieces,q.gross_weight_kg,q.volume_cbm,q.estimated_length_cm,q.estimated_width_cm,
+        q.pieces,q.declared_quantity_unit,q.planned_package_count,q.planned_package_type,
+        q.gross_weight_kg,q.volume_cbm,q.estimated_length_cm,q.estimated_width_cm,
         q.estimated_height_cm,q.total_amount,q.valid_until,q.notes,q.lifecycle_status,
         o.id order_id,o.order_number,o.status order_status,o.current_step_code,q.created_at
        FROM quotations q
@@ -179,8 +181,17 @@ export async function loader({ request }: Route.LoaderArgs) {
     listQuotationWorkflowFieldValues(user.organizationId, quoteIds),
   ]);
 
+  const marksByOrder = await loadActiveOrderMarksByOrder(
+    user.organizationId,
+    visibleOrders.map((order) => order.id),
+  );
+  const orders = visibleOrders.map((order) => ({
+    ...order,
+    marks: marksByOrder.get(order.id) ?? [],
+  }));
+
   return {
-    orders: visibleOrders,
+    orders,
     quotes: visibleQuotes,
     pagination: {
       page: pagination.page,

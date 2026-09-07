@@ -3707,6 +3707,35 @@ td small {
     grid-row: 2;
   }
 }
+.atomic-oul-receiving-panel,
+.atomic-pickup-confirm { padding: 10px 12px; }
+.atomic-oul-scan-row,
+.atomic-pickup-scan,
+.atomic-pickup-confirm .overseas-pickup-confirm-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+.atomic-oul-message,
+.atomic-pickup-scan > span { margin: 6px 0; color: #506b80; font-size: 12px; }
+.atomic-oul-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding-top: 9px;
+}
+.atomic-oul-footer span { color: #64798c; font-size: 11px; }
+.atomic-pickup-scan { padding: 8px 10px; border-block: 1px solid #dce6ee; background: #f7fafc; }
+.atomic-pickup-confirm { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: end; border-top: 1px solid #dce6ee; }
+tr.is-scanned { background: #effaf4; }
+@media (max-width: 700px) {
+  .atomic-oul-scan-row,
+  .atomic-pickup-scan,
+  .atomic-pickup-confirm,
+  .atomic-pickup-confirm .overseas-pickup-confirm-fields { grid-template-columns: 1fr; }
+}
 
 /* Dense downstream order modules: connected form cells instead of loose cards. */
 .module-business-stack.dense-module-stack {
@@ -5588,6 +5617,79 @@ label:not(:has(> span:first-child .required-mark)):not(:has(> span:first-child >
   }
 }
 
+/* Package identity flow: compact scan and final-packing work areas. */
+.inbound-mark-scan-panel { padding: 10px 12px; }
+.inbound-mark-scan-row {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+.inbound-mark-progress,
+.inbound-mark-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.inbound-mark-progress span,
+.inbound-mark-chip-list button {
+  min-height: 28px;
+  padding: 4px 9px;
+  border: 1px solid #cbd9e6;
+  border-radius: 3px;
+  background: #f7fafc;
+  color: #24455f;
+  font-size: 12px;
+}
+.inbound-mark-chip-list button span { margin-left: 8px; color: #d9472f; font-weight: 800; }
+.outbound-packing-panel {
+  margin-top: 10px;
+  border: 1px solid #cbd9e6;
+  border-left: 3px solid #f56b3b;
+  background: #fbfcfd;
+}
+.outbound-packing-panel > header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  min-height: 44px;
+  padding: 7px 10px;
+  border-bottom: 1px solid #dce6ee;
+  background: #f3f7fa;
+}
+.outbound-packing-panel > header div,
+.outbound-packing-order > div { display: flex; flex-direction: column; gap: 2px; }
+.outbound-packing-panel > header span,
+.outbound-packing-order span,
+.outbound-packing-panel > p { color: #64798c; font-size: 11px; }
+.outbound-packing-panel > p { margin: 6px 10px 9px; }
+.outbound-packing-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 9px 10px 3px;
+}
+.outbound-packing-order {
+  display: grid;
+  grid-template-columns: minmax(150px, .85fr) minmax(200px, 1.2fr) minmax(120px, .65fr);
+  gap: 8px;
+  align-items: end;
+  padding: 8px;
+  border: 1px solid #dce6ee;
+  background: #fff;
+}
+.outbound-packing-order .field { margin: 0; }
+.outbound-packing-order :is(input, select) { height: 34px; }
+@media (max-width: 1200px) {
+  .outbound-packing-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 700px) {
+  .inbound-mark-scan-row,
+  .outbound-packing-order { grid-template-columns: 1fr; }
+}
+
 /* Customer editor alignment contract: one grid, one baseline, no overlapping fields. */
 .customer-editor-tabs {
   display: grid;
@@ -6153,6 +6255,13 @@ label:not(:has(> span:first-child .required-mark)):not(:has(> span:first-child >
 .order-mark-toolbar p { margin: 0; color: #718598; font-size: 10px; }
 .order-mark-toolbar > div:last-child { display: flex; gap: 7px; flex: 0 0 auto; }
 .order-mark-toolbar a { text-decoration: none; }
+.order-mark-revision { margin-bottom: 12px; padding: 10px 12px; display: flex; align-items: end; justify-content: space-between; gap: 18px; border: 1px solid var(--line); border-left: 4px solid #f46a3b; background: #fff; }
+.order-mark-revision > div { display: grid; gap: 3px; }
+.order-mark-revision span { color: #66798b; font-size: 11px; }
+.order-mark-revision-form { display: flex; align-items: end; gap: 8px; }
+.order-mark-revision-form label { display: grid; gap: 4px; min-width: 120px; }
+.order-mark-revision-form label span { font-weight: 700; }
+.order-mark-revision-form input { width: 120px; }
 .order-mark-print-area { display: flex; justify-content: center; }
 .order-mark-label {
   width: min(760px, 100%);
@@ -6173,6 +6282,27 @@ label:not(:has(> span:first-child .required-mark)):not(:has(> span:first-child >
 .order-mark-label > header strong { font-size: 22px; }
 .order-mark-label > header span { font-size: 15px; font-weight: 700; }
 .order-mark-code39 { width: 100%; height: 86px; margin: 17px 0 6px; display: block; fill: #111; }
+.oul-label-panel { display: grid; gap: 10px; }
+.oul-label-summary { display: flex; align-items: center; gap: 14px; color: #5c7184; font-size: 12px; }
+.oul-label-print-area { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.oul-label {
+  min-width: 0;
+  padding: 14px 16px;
+  color: #111;
+  border: 2px solid #12263b;
+  background: #fff;
+  break-inside: avoid;
+}
+.oul-label > header { display: flex; justify-content: space-between; gap: 12px; padding-bottom: 7px; border-bottom: 2px solid #12263b; }
+.oul-label > header strong { font-size: 16px; }
+.oul-label > header span { font-size: 12px; font-weight: 700; }
+.oul-label .order-mark-code39 { height: 62px; margin: 10px 0 4px; }
+.oul-label > b { display: block; text-align: center; font: 800 16px Consolas, monospace; letter-spacing: 1px; }
+.oul-label dl { margin: 9px 0 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid #aab6c0; border-left: 1px solid #aab6c0; }
+.oul-label dl > div { display: grid; grid-template-columns: 74px minmax(0, 1fr); border-right: 1px solid #aab6c0; border-bottom: 1px solid #aab6c0; }
+.oul-label dt, .oul-label dd { margin: 0; padding: 6px 7px; overflow-wrap: anywhere; }
+.oul-label dt { font-weight: 700; background: #f2f6f9; }
+.oul-label footer { margin: 7px 0 0; color: #536677; font-size: 10px; }
 .order-mark-number { display: block; padding: 0 0 13px; font: 800 23px Consolas, monospace; letter-spacing: 2px; text-align: center; }
 .order-mark-label dl { margin: 0; border-top: 1px solid #777; }
 .order-mark-label dl > div { min-height: 48px; display: grid; grid-template-columns: 118px minmax(0, 1fr); border-bottom: 1px solid #aaa; }
@@ -6442,6 +6572,19 @@ label:not(:has(> span:first-child .required-mark)):not(:has(> span:first-child >
     border: 0;
     box-shadow: none;
   }
+  body.printing-oul-labels .handover-section { display: none !important; }
+  body.printing-oul-labels .oul-label-panel,
+  body.printing-oul-labels .oul-label-panel * { visibility: visible !important; }
+  body.printing-oul-labels .oul-label-panel {
+    position: absolute;
+    inset: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    box-shadow: none;
+  }
+  body.printing-oul-labels .oul-label-print-area { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8mm; }
+  body:not(.printing-oul-labels) .oul-label-panel { display: none !important; }
   .location-print-layer {
     position: absolute;
     inset: 0;

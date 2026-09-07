@@ -59,6 +59,9 @@ type AcceptedQuote = {
   service_level: string | null;
   cargo_description: string;
   pieces: number;
+  declared_quantity_unit: string;
+  planned_package_count: number;
+  planned_package_type: string;
   gross_weight_kg: number;
   volume_cbm: number;
   estimated_length_cm: number;
@@ -140,10 +143,11 @@ export async function createOrderFromAcceptedQuote(input: {
   const contactPhone = quote.customer_contact_phone || contact?.phone || null;
   const cargoProjection = quoteCargoProjection({
     pieces: Number(quote.pieces),
+    plannedPackageCount: Number(quote.planned_package_count || 1),
     totalGrossWeightKg: Number(quote.gross_weight_kg),
     totalVolumeCbm: Number(quote.volume_cbm),
   });
-  const pieces = cargoProjection.totalPieces;
+  const pieces = cargoProjection.declaredQuantity;
 
   const snapshotJson = JSON.stringify({
     quoteNumber: quote.quote_number,
@@ -164,6 +168,9 @@ export async function createOrderFromAcceptedQuote(input: {
     customsClearanceMode: quote.customs_clearance_mode,
     cargoDescription: quote.cargo_description,
     pieces: quote.pieces,
+    declaredQuantityUnit: quote.declared_quantity_unit,
+    plannedPackageCount: quote.planned_package_count,
+    plannedPackageType: quote.planned_package_type,
     grossWeightKg: quote.gross_weight_kg,
     volumeCbm: quote.volume_cbm,
     currency: quote.currency,
@@ -185,11 +192,12 @@ export async function createOrderFromAcceptedQuote(input: {
          origin_country,origin_state,origin_city,origin_address,
          consignee_name,consignee_contact,consignee_phone,
          destination_country,destination_state,destination_city,destination_address,
-         cargo_description,pieces,gross_weight_kg,volume_cbm,transport_mode,service_level,
+         cargo_description,pieces,declared_quantity_unit,planned_inbound_package_count,
+         planned_inbound_package_type,gross_weight_kg,volume_cbm,transport_mode,service_level,
          status,source,special_instructions,created_by_user_id,salesperson_user_id,
          current_assignee_user_id,current_step_code,current_step_name,workflow_updated_at,
          created_at,updated_at,customs_clearance_mode,quote_withdrawn
-       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).bind(
       orderId,input.organizationId,orderNumber,now.slice(0,10),"export",quote.road_load_type,
       quote.destination_warehouse_id,quote.destination_warehouse_note,quote.customer_id,quote.id,
@@ -197,7 +205,8 @@ export async function createOrderFromAcceptedQuote(input: {
        quote.origin_country,quote.origin_state,quote.origin_city,pickupAddressText,
       quote.customer_name,contactName,contactPhone,
       quote.destination_country,quote.destination_state,quote.destination_city,destinationAddress,
-      quote.cargo_description,pieces,quote.gross_weight_kg,quote.volume_cbm,quote.transport_mode,quote.service_level,
+      quote.cargo_description,pieces,quote.declared_quantity_unit,quote.planned_package_count,
+      quote.planned_package_type,quote.gross_weight_kg,quote.volume_cbm,quote.transport_mode,quote.service_level,
       "draft",input.source,quote.notes,input.actorUserId,quote.salesperson_user_id,
       quote.salesperson_user_id,"order_creation","委托资料补充",now,
       now,now,quote.customs_clearance_mode,0,
@@ -206,14 +215,16 @@ export async function createOrderFromAcceptedQuote(input: {
       `INSERT INTO order_cargo_items(
          id,organization_id,order_id,line_no,cargo_name_cn,package_type,package_count,pieces_per_package,
          gross_weight_per_package_kg,net_weight_per_package_kg,length_cm,width_cm,height_cm,
-         volume_per_package_cbm,declared_value,currency,origin_country,notes,created_at,updated_at
-       ) VALUES(?,?,?,?,?,'other',?,?,?,?,?,?,?,?,0,?,?,?,?,?)`,
+         volume_per_package_cbm,declared_value,currency,origin_country,notes,created_at,updated_at,
+         declared_quantity,declared_unit
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?)`,
     ).bind(
-      cargoId,input.organizationId,orderId,1,quote.cargo_description,
+      cargoId,input.organizationId,orderId,1,quote.cargo_description,quote.planned_package_type,
       cargoProjection.packageCount,cargoProjection.piecesPerPackage,
       cargoProjection.grossWeightPerPackageKg,cargoProjection.netWeightPerPackageKg,
       quote.estimated_length_cm,quote.estimated_width_cm,quote.estimated_height_cm,
       cargoProjection.volumePerPackageCbm,quote.currency,quote.origin_country,"由已接受报价自动生成",now,now,
+      cargoProjection.declaredQuantity,quote.declared_quantity_unit,
     ),
     env.DB.prepare(INSERT_QUOTE_CARGO_PACKAGES_SQL).bind(
       cargoProjection.packageCount,cargoId,input.organizationId,orderId,cargoId,
@@ -288,7 +299,8 @@ async function loadAcceptedQuote(organizationId: string, quotationId: string) {
             q.destination_warehouse_id,q.destination_warehouse_note,
             w.name warehouse_name,w.address warehouse_address,
             q.transport_mode,q.road_load_type,q.service_level,q.cargo_description,
-            q.pieces,q.gross_weight_kg,q.volume_cbm,
+            q.pieces,q.declared_quantity_unit,q.planned_package_count,q.planned_package_type,
+            q.gross_weight_kg,q.volume_cbm,
             q.estimated_length_cm,q.estimated_width_cm,q.estimated_height_cm,
             q.customs_clearance_mode,q.currency,q.subtotal,q.tax_amount,q.total_amount,q.notes
        FROM quotations q

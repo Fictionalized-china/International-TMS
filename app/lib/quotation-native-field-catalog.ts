@@ -40,7 +40,10 @@ export const quotationNativeFieldCatalog = [
   nativeField("quotation_destination_warehouse_note","目的地备注","textarea","consignment","optional","门牌、联系人、提货窗口等本票补充说明。"),
   nativeField("quotation_cargo_description","货物描述","textarea","cargo","required","货物名称、品类、材质、用途等报价说明。"),
   nativeField("quotation_notes","报价备注","textarea","cargo","optional","报价范围、特殊约定或其他说明。"),
-  nativeField("quotation_pieces","预计件数","number","cargo","required","本次报价预计货物件数。"),
+  nativeField("quotation_pieces","商品实际件数","number","cargo","required","商业单据与报关使用的商品数量，不作为仓库扫描数量。"),
+  nativeField("quotation_declared_quantity_unit","商品数量单位","text","cargo","required","商业单据与报关使用的数量单位，例如件、套、台。"),
+  nativeField("quotation_planned_package_count","预计入仓包装数","number","cargo","required","按物理外包装数量生成入仓唛头；不等于包装内商品数量。"),
+  nativeField("quotation_planned_package_type","预计包装类型","select","cargo","required","预计到达国内仓的物理外包装类型。","carton|纸箱\npallet|托盘\nwooden_case|木箱\nbag|袋装\nother|其他"),
   nativeField("quotation_gross_weight_kg","预计重量 KG","number","cargo","required","本次报价预计毛重。"),
   nativeField("quotation_length_cm","预计长度 CM","number","cargo","required","单件或统一包装预计长度。"),
   nativeField("quotation_width_cm","预计宽度 CM","number","cargo","required","单件或统一包装预计宽度。"),
@@ -78,6 +81,9 @@ export function quotationNativeFieldPresent(
     case "quotation_cargo_description": return text("cargo_description");
     case "quotation_notes": return text("notes");
     case "quotation_pieces": return positive("pieces");
+    case "quotation_declared_quantity_unit": return text("declared_quantity_unit");
+    case "quotation_planned_package_count": return positive("planned_package_count");
+    case "quotation_planned_package_type": return text("planned_package_type");
     case "quotation_gross_weight_kg": return positive("gross_weight_kg");
     case "quotation_length_cm": return positive("estimated_length_cm");
     case "quotation_width_cm": return positive("estimated_width_cm");

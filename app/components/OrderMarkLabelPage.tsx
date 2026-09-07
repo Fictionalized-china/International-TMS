@@ -1,15 +1,19 @@
 import { type ReactElement } from "react";
-import { Link } from "react-router";
+import { Form, Link } from "react-router";
 import type { OrderMarkLabel } from "../lib/order-mark-label.server";
 
 export function OrderMarkLabelPage({
   order,
   returnTo,
   downloadTo,
+  canReviseInboundPackages = false,
+  revisionMessage,
 }: {
   order: OrderMarkLabel;
   returnTo: string;
   downloadTo: string;
+  canReviseInboundPackages?: boolean;
+  revisionMessage?: { success?: string; formError?: string };
 }) {
   const route = [order.origin_country, order.origin_state, order.origin_city]
     .filter(Boolean)
@@ -22,7 +26,7 @@ export function OrderMarkLabelPage({
         <div>
           <span>ORDER MARK LABEL</span>
           <h1>入仓唛头标签</h1>
-          <p>客户接受报价后自动生成；唛头号与订单号一致，每个外包装均粘贴此标签。</p>
+          <p>客户接受报价后按预计入仓包装数自动生成；每个外包装使用一张唯一唛头。</p>
         </div>
         <div>
           <Link className="secondary" to={returnTo}>返回订单</Link>
@@ -30,6 +34,12 @@ export function OrderMarkLabelPage({
           <button className="primary" type="button" onClick={() => window.print()}>打印标签</button>
         </div>
       </header>
+      {revisionMessage?.formError && <div className="alert error no-print">{revisionMessage.formError}</div>}
+      {revisionMessage?.success && <div className="alert success no-print">{revisionMessage.success}</div>}
+      <section className="order-mark-revision no-print">
+        <div><strong>预计入仓包装：{order.planned_inbound_package_count} 包</strong><span>{order.inbound_package_locked_at ? "国内仓已开始扫码，包装数和唛头已锁定" : "首次扫码前可由本单业务员修订；保存后旧唛头立即失效"}</span></div>
+        {canReviseInboundPackages && !order.inbound_package_locked_at && <Form method="post" className="order-mark-revision-form"><label><span>新包装数</span><input type="number" name="plannedPackageCount" min="1" max="500" step="1" defaultValue={order.planned_inbound_package_count} required/></label><button className="primary">重新生成唛头</button></Form>}
+      </section>
       <OrderMarkLabelPreview order={order} route={route} />
     </main>
   );
@@ -46,28 +56,31 @@ export function OrderMarkLabelPreview({
     [order.origin_country, order.origin_state, order.origin_city].filter(Boolean).join(" "),
     [order.destination_country, order.destination_state, order.destination_city].filter(Boolean).join(" "),
   ].join(" → ");
+  const marks=order.marks.length?order.marks:[{id:order.id,code:`${order.order_number}-IN-001`,sequence:1,revision:1}];
   return (
     <section className="order-mark-print-area" aria-label={`订单 ${order.order_number} 的入仓唛头标签`}>
-      <article className="order-mark-label">
+      {marks.map((mark)=><article className="order-mark-label" key={mark.id}>
         <header><strong>OULING 国际物流</strong><span>入仓唛头标签</span></header>
-        <Code39 value={order.order_number} />
-        <b className="order-mark-number">{order.order_number}</b>
+        <Code39 value={mark.code} />
+        <b className="order-mark-number">{mark.code}</b>
         <dl>
-          <div><dt>唛头号</dt><dd>{order.order_number}</dd></div>
+          <div><dt>入仓唛头</dt><dd>{mark.code}</dd></div>
           <div><dt>订单号</dt><dd>{order.order_number}</dd></div>
+          <div><dt>包装序号</dt><dd>{mark.sequence}/{order.planned_inbound_package_count}（预计）</dd></div>
           <div><dt>客户</dt><dd>{order.customer_name}</dd></div>
           <div><dt>货物</dt><dd>{order.cargo_description}</dd></div>
-          <div><dt>计划数据</dt><dd>{order.pieces} 件 · {order.gross_weight_kg} KG · {order.volume_cbm} CBM</dd></div>
+          <div><dt>商品数量</dt><dd>{order.pieces} {order.declared_quantity_unit}</dd></div>
+          <div><dt>预计包装</dt><dd>{order.planned_inbound_package_count} 包 · {order.planned_inbound_package_type}</dd></div>
           <div><dt>运输线路</dt><dd>{route}</dd></div>
           <div><dt>境外目的仓</dt><dd>{order.overseas_warehouse_name || "待确定"}</dd></div>
         </dl>
-        <footer>本标签唛头号与条码内容均为订单号；仓库实收件数、重量、体积以现场清点为准。</footer>
-      </article>
+        <footer>条码唯一对应本入仓包装；国内仓扫码收货，最终出库包装另行生成 OUL。</footer>
+      </article>)}
     </section>
   );
 }
 
-function Code39({ value }: { value: string }) {
+export function Code39({ value }: { value: string }) {
   const patterns: Record<string, string> = {
     "0":"nnnwwnwnn","1":"wnnwnnnnw","2":"nnwwnnnnw","3":"wnwwnnnnn","4":"nnnwwnnnw",
     "5":"wnnwwnnnn","6":"nnwwwnnnn","7":"nnnwnnwnw","8":"wnnwnnwnn","9":"nnwwnnwnn",

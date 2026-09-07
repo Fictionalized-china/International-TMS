@@ -8,6 +8,9 @@ export type OrderMarkLabel = {
   customer_name: string;
   cargo_description: string;
   pieces: number;
+  declared_quantity_unit: string;
+  planned_inbound_package_count: number;
+  planned_inbound_package_type: string;
   gross_weight_kg: number;
   volume_cbm: number;
   origin_country: string;
@@ -19,7 +22,35 @@ export type OrderMarkLabel = {
   overseas_warehouse_name: string | null;
   status: string;
   label_generated_at: string;
+  inbound_package_locked_at: string | null;
+  marks: Array<{ id: string; code: string; sequence: number; revision: number }>;
 };
+
+export type OrderMark = OrderMarkLabel["marks"][number];
+
+export async function loadActiveOrderMarksByOrder(
+  organizationId: string,
+  orderIds: string[],
+) {
+  const result = new Map<string, OrderMark[]>();
+  if (!orderIds.length) return result;
+
+  const placeholders = orderIds.map(() => "?").join(",");
+  const rows = await env.DB.prepare(
+    `SELECT order_id,id,package_code code,package_sequence sequence,label_revision revision
+       FROM order_cargo_packages
+      WHERE organization_id=? AND order_id IN (${placeholders})
+        AND is_active=1 AND status!='cancelled'
+      ORDER BY order_id,package_sequence`,
+  ).bind(organizationId, ...orderIds).all<OrderMark & { order_id: string }>();
+
+  for (const row of rows.results) {
+    const marks = result.get(row.order_id) ?? [];
+    marks.push({ id: row.id, code: row.code, sequence: row.sequence, revision: row.revision });
+    result.set(row.order_id, marks);
+  }
+  return result;
+}
 
 export async function loadOrderMarkLabel(input: {
   organizationId: string;
@@ -31,7 +62,8 @@ export async function loadOrderMarkLabel(input: {
     ? [input.orderId, input.organizationId, input.customerId]
     : [input.orderId, input.organizationId];
   const order = await env.DB.prepare(
-    `SELECT o.id,o.order_number,c.name customer_name,o.cargo_description,o.pieces,
+    `SELECT o.id,o.order_number,c.name customer_name,o.cargo_description,o.pieces,o.declared_quantity_unit,
+      o.planned_inbound_package_count,o.planned_inbound_package_type,
       o.gross_weight_kg,o.volume_cbm,o.origin_country,o.origin_state,o.origin_city,
       o.destination_country,o.destination_state,o.destination_city,
       w.name overseas_warehouse_name,o.status,
@@ -39,7 +71,7 @@ export async function loadOrderMarkLabel(input: {
         WHEN q.accepted_at IS NOT NULL THEN q.accepted_at
         WHEN o.quotation_id IS NULL AND o.status IN ('confirmed','in_execution','completed') THEN o.created_at
         ELSE NULL
-      END label_generated_at,o.quote_withdrawn
+      END label_generated_at,o.quote_withdrawn,o.inbound_package_locked_at
      FROM transport_orders o
      JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
      LEFT JOIN quotations q ON q.id=o.quotation_id AND q.organization_id=o.organization_id
@@ -47,7 +79,7 @@ export async function loadOrderMarkLabel(input: {
      WHERE o.id=? AND o.organization_id=?${customerScope}`,
   )
     .bind(...values)
-    .first<OrderMarkLabel & { quote_withdrawn: number }>();
+    .first<Omit<OrderMarkLabel,"marks"> & { quote_withdrawn: number }>();
   if (!order) throw new Response("订单不存在", { status: 404 });
   if (!orderMarkLabelAvailable({
     status: order.status,
@@ -56,7 +88,13 @@ export async function loadOrderMarkLabel(input: {
   })) {
     throw new Response("客户接受报价后才会自动生成入仓唛头标签", { status: 409 });
   }
-  return order;
+  const marks=await env.DB.prepare(
+    `SELECT id,package_code code,package_sequence sequence,label_revision revision
+       FROM order_cargo_packages
+      WHERE organization_id=? AND order_id=? AND is_active=1 AND status!='cancelled'
+      ORDER BY package_sequence`,
+  ).bind(input.organizationId,input.orderId).all<{id:string;code:string;sequence:number;revision:number}>();
+  return { ...order,marks:marks.results };
 }
 
 export function orderMarkLabelDownload(order: OrderMarkLabel) {
@@ -71,46 +109,53 @@ export function orderMarkLabelDownload(order: OrderMarkLabel) {
 }
 
 export function buildOrderMarkLabelSvg(order: OrderMarkLabel) {
-  const barcode = code39Bars(order.order_number.toUpperCase());
-  const scale = 880 / barcode.width;
   const route = [order.origin_country, order.origin_state, order.origin_city]
     .filter(Boolean)
     .join(" ") + " → " + [order.destination_country, order.destination_state, order.destination_city]
       .filter(Boolean)
       .join(" ");
-  const rows = [
-    ["唛头号", order.order_number],
-    ["订单号", order.order_number],
-    ["客户", order.customer_name],
-    ["货物", order.cargo_description],
-    ["计划数据", `${order.pieces} 件 · ${order.gross_weight_kg} KG · ${order.volume_cbm} CBM`],
-    ["运输线路", route],
-    ["境外目的仓", order.overseas_warehouse_name || "待确定"],
-  ];
-  let rowY = 320;
-  const rowSvg = rows.map(([label, value]) => {
-    const lines = wrapText(value, 44);
-    const height = Math.max(58, 30 + lines.length * 24);
-    const valueSvg = lines.map((line, index) =>
-      `<tspan x="250" dy="${index === 0 ? 0 : 24}">${escapeXml(line)}</tspan>`,
-    ).join("");
-    const current = `<line x1="55" y1="${rowY}" x2="945" y2="${rowY}" stroke="#b7b7b7"/>
-      <text x="75" y="${rowY + 35}" font-size="22" font-weight="700">${escapeXml(label)}</text>
-      <text x="250" y="${rowY + 35}" font-size="22" font-weight="600">${valueSvg}</text>`;
-    rowY += height;
-    return current;
+  const marks=order.marks.length?order.marks:[{id:order.id,code:`${order.order_number}-IN-001`,sequence:1,revision:1}];
+  const pageHeight=760;
+  const height=pageHeight*marks.length;
+  const pages=marks.map((mark,pageIndex)=>{
+    const barcode=code39Bars(mark.code.toUpperCase());
+    const scale=880/barcode.width;
+    const rows = [
+      ["入仓唛头", mark.code],
+      ["订单号", order.order_number],
+      ["包装序号", `${mark.sequence}/${order.planned_inbound_package_count}（预计）`],
+      ["客户", order.customer_name],
+      ["货物", order.cargo_description],
+      ["商品数量", `${order.pieces} ${order.declared_quantity_unit}`],
+      ["预计包装", `${order.planned_inbound_package_count} 包 · ${order.planned_inbound_package_type}`],
+      ["运输线路", route],
+      ["境外目的仓", order.overseas_warehouse_name || "待确定"],
+    ];
+    let rowY=310;
+    const rowSvg=rows.map(([label,value])=>{
+      const lines=wrapText(value,44);
+      const rowHeight=Math.max(46,24+lines.length*20);
+      const valueSvg=lines.map((line,index)=>`<tspan x="250" dy="${index===0?0:20}">${escapeXml(line)}</tspan>`).join("");
+      const current=`<line x1="55" y1="${rowY}" x2="945" y2="${rowY}" stroke="#b7b7b7"/>
+        <text x="75" y="${rowY+29}" font-size="20" font-weight="700">${escapeXml(label)}</text>
+        <text x="250" y="${rowY+29}" font-size="20" font-weight="600">${valueSvg}</text>`;
+      rowY+=rowHeight;
+      return current;
+    }).join("");
+    return `<g transform="translate(0 ${pageIndex*pageHeight})">
+      <rect width="1000" height="${pageHeight}" fill="#fff"/>
+      <rect x="20" y="20" width="960" height="720" rx="10" fill="none" stroke="#111" stroke-width="5"/>
+      <text x="55" y="72" font-family="Arial,'Microsoft YaHei',sans-serif" font-size="31" font-weight="800">OULING 国际物流</text>
+      <text x="945" y="72" text-anchor="end" font-family="Arial,'Microsoft YaHei',sans-serif" font-size="24" font-weight="700">入仓唛头标签</text>
+      <line x1="55" y1="92" x2="945" y2="92" stroke="#111" stroke-width="3"/>
+      <g transform="translate(60 112) scale(${scale} 1)" fill="#111">${barcode.rects}</g>
+      <text x="500" y="274" text-anchor="middle" font-family="Consolas,monospace" font-size="30" font-weight="800" letter-spacing="1">${escapeXml(mark.code)}</text>
+      <g font-family="Arial,'Microsoft YaHei',sans-serif" fill="#111">${rowSvg}</g>
+    </g>`;
   }).join("");
-  const height = Math.max(720, rowY + 55);
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1000" height="${height}" viewBox="0 0 1000 ${height}">
-  <rect width="1000" height="${height}" fill="#fff"/>
-  <rect x="20" y="20" width="960" height="${height - 40}" rx="10" fill="none" stroke="#111" stroke-width="5"/>
-  <text x="55" y="72" font-family="Arial,'Microsoft YaHei',sans-serif" font-size="31" font-weight="800">OULING 国际物流</text>
-  <text x="945" y="72" text-anchor="end" font-family="Arial,'Microsoft YaHei',sans-serif" font-size="24" font-weight="700">入仓唛头标签</text>
-  <line x1="55" y1="92" x2="945" y2="92" stroke="#111" stroke-width="3"/>
-  <g transform="translate(60 118) scale(${scale} 1)" fill="#111">${barcode.rects}</g>
-  <text x="500" y="285" text-anchor="middle" font-family="Consolas,monospace" font-size="34" font-weight="800" letter-spacing="2">${escapeXml(order.order_number)}</text>
-  <g font-family="Arial,'Microsoft YaHei',sans-serif" fill="#111">${rowSvg}</g>
+  ${pages}
 </svg>`;
 }
 

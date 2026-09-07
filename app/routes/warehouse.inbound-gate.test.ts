@@ -28,7 +28,10 @@ const harness = vi.hoisted(() => {
     barcode: "PKG-001",
     package_number: "PKG-001",
     status: "dispatched",
+    label_kind: "oul",
+    lifecycle_status: "in_transit",
     warehouse_id: "domestic-warehouse",
+    overseas_warehouse_id: "overseas-warehouse",
     source_warehouse_name: "国内仓",
     receipt_number: "IN-001",
     received_at: "2026-09-06T00:00:00.000Z",
@@ -56,6 +59,9 @@ const harness = vi.hoisted(() => {
         first: vi.fn(async () => {
           if (sql.includes("FROM warehouse_packages p")) return pkg;
           if (sql.includes("FROM shipments s JOIN transport_orders o") && sql.includes("WHERE s.id=?")) return shipment;
+          if (sql.includes("FROM order_tracking_milestones") && sql.includes("milestone_code='exported'")) return {
+            event_at: "2026-09-06T01:00:00.000Z",
+          };
           if (sql.includes("customs_clearance_mode") && sql.includes("exited")) return {
             exited: 1,
             order_number: shipment.order_number,

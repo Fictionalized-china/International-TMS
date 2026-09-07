@@ -4,7 +4,7 @@ import { PortalLink as Link } from "../components/PortalNavigation";
 import { OrderMarkLabelModal } from "../components/OrderMarkLabelModal";
 import { PortalPickupAppointment } from "../components/PortalPickupAppointment";
 import { ActionToast } from "../components/ActionToast";
-import type { OrderMarkLabel } from "../lib/order-mark-label.server";
+import { loadActiveOrderMarksByOrder, type OrderMarkLabel } from "../lib/order-mark-label.server";
 import { requirePortalCustomer } from "../lib/portal.server";
 import { normalizePortalNotificationLink } from "../lib/portal-notification-links";
 import { customerFacingOrderStatusLabel } from "../lib/overseas-warehouse";
@@ -57,7 +57,8 @@ export async function loader({ request }: Route.LoaderArgs) {
   const [recentOrders, pendingQuotes, notices, unread] = await Promise.all([
     env.DB.prepare(
       `SELECT o.id,o.order_number,c.name customer_name,q.quote_number,o.business_type,o.cargo_description,
-              o.pieces,o.gross_weight_kg,o.volume_cbm,o.origin_country,o.origin_state,o.origin_city,
+              o.pieces,o.declared_quantity_unit,o.planned_inbound_package_count,o.planned_inbound_package_type,
+              o.inbound_package_locked_at,o.gross_weight_kg,o.volume_cbm,o.origin_country,o.origin_state,o.origin_city,
               o.destination_country,o.destination_state,o.destination_city,w.name overseas_warehouse_name,
               o.current_step_name,o.status,o.exception_status,o.updated_at,
               op.status overseas_operation_status,op.appointment_at pickup_appointment_at,
@@ -90,11 +91,19 @@ export async function loader({ request }: Route.LoaderArgs) {
     env.DB.prepare("SELECT id,type,title,message,link,is_read,created_at FROM portal_notifications WHERE organization_id=? AND customer_id=? AND (user_id IS NULL OR user_id=?) ORDER BY created_at DESC LIMIT 6").bind(user.organizationId, customer.id, user.userId).all<Notice>(),
     env.DB.prepare("SELECT COUNT(*) count FROM portal_notifications WHERE organization_id=? AND customer_id=? AND (user_id IS NULL OR user_id=?) AND is_read=0").bind(user.organizationId, customer.id, user.userId).first<{ count: number }>(),
   ]);
+  const marksByOrder = await loadActiveOrderMarksByOrder(
+    user.organizationId,
+    recentOrders.results.map((order) => order.id),
+  );
+  const orders = recentOrders.results.map((order) => ({
+    ...order,
+    marks: marksByOrder.get(order.id) ?? [],
+  }));
   return {
     customer,
     contacts: contacts.results,
     addresses: addresses.results,
-    recentOrders: recentOrders.results,
+    recentOrders: orders,
     pendingQuotes: pendingQuotes.results,
     notices: notices.results,
     appointmentResult: url.searchParams.get("appointmentResult") || "",

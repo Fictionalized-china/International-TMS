@@ -65,22 +65,22 @@ describe("quote package insert SQL", () => {
 });
 
 describe("quoteCargoProjection", () => {
-  it("projects quotation totals to one physical package per quoted piece", () => {
+  it("keeps declared product quantity separate from physical packages", () => {
     const result = quoteCargoProjection({
-      pieces: 2,
+      pieces: 20,
+      plannedPackageCount: 10,
       totalGrossWeightKg: 110,
       totalVolumeCbm: 1.728,
     });
 
     expect(result).toMatchObject({
-      totalPieces: 2,
-      packageCount: 2,
+      declaredQuantity: 20,
+      packageCount: 10,
       piecesPerPackage: 1,
-      grossWeightPerPackageKg: 55,
-      netWeightPerPackageKg: 55,
-      volumePerPackageCbm: 0.864,
+      grossWeightPerPackageKg: 11,
+      netWeightPerPackageKg: 11,
+      volumePerPackageCbm: 0.1728,
     });
-    expect(result.packageCount * result.piecesPerPackage).toBe(2);
     expect(result.packageCount * result.grossWeightPerPackageKg).toBeCloseTo(110);
     expect(result.packageCount * result.volumePerPackageCbm).toBeCloseTo(1.728);
   });
@@ -88,10 +88,11 @@ describe("quoteCargoProjection", () => {
   it("keeps a one-piece quotation as one package", () => {
     expect(quoteCargoProjection({
       pieces: 1,
+      plannedPackageCount: 1,
       totalGrossWeightKg: 25,
       totalVolumeCbm: 0.5,
     })).toEqual({
-      totalPieces: 1,
+      declaredQuantity: 1,
       packageCount: 1,
       piecesPerPackage: 1,
       grossWeightPerPackageKg: 25,
@@ -109,6 +110,7 @@ describe("quoteCargoProjection", () => {
     "rejects invalid quotation totals %s",
     (value) => expect(() => quoteCargoProjection({
       pieces: 1,
+      plannedPackageCount: 1,
       totalGrossWeightKg: value,
       totalVolumeCbm: 1,
     })).toThrow(/预计重量/),

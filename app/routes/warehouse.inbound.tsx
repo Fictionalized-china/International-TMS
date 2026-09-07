@@ -128,6 +128,7 @@ type BatchInboundScopeRow = {
   order_number: string;
   overseas_warehouse_id: string | null;
 };
+type AtomicInboundPackage={id:string;dispatch_id:string;barcode:string;package_number:string;order_id:string;order_number:string;shipment_id:string;customer_name:string;source_warehouse_name:string};
 
 export async function loader({ request }: Route.LoaderArgs) {
   const user = await requireSessionUser(request, "warehouse.view", "warehouse");
@@ -229,6 +230,7 @@ export async function loader({ request }: Route.LoaderArgs) {
            LEFT JOIN warehouse_receipts r ON r.id=p.receipt_id AND r.organization_id=p.organization_id
            LEFT JOIN order_cargo_items i ON i.id=p.cargo_item_id AND i.organization_id=p.organization_id
           WHERE p.organization_id=?
+            AND p.label_kind='oul' AND p.lifecycle_status='in_transit' AND p.status='dispatched'
             AND (UPPER(p.barcode)=UPPER(?) OR UPPER(p.package_number)=UPPER(?))
           ORDER BY CASE WHEN UPPER(p.barcode)=UPPER(?) THEN 1 ELSE 2 END
           LIMIT 1`,
@@ -263,13 +265,37 @@ export async function loader({ request }: Route.LoaderArgs) {
            JOIN warehouses w ON w.id=p.warehouse_id AND w.organization_id=p.organization_id
            LEFT JOIN warehouse_receipts r ON r.id=p.receipt_id AND r.organization_id=p.organization_id
            LEFT JOIN order_cargo_items i ON i.id=p.cargo_item_id AND i.organization_id=p.organization_id
-          WHERE di.organization_id=? AND di.dispatch_id=?
+          WHERE di.organization_id=? AND di.dispatch_id=? AND p.label_kind='oul' AND p.lifecycle_status='in_transit' AND p.status='dispatched'
           LIMIT 1`,
       )
         .bind(user.organizationId, scannedDispatch.id)
         .first<ScannedPackage>()
     : null;
   const scannedPackage = directlyScannedPackage ?? dispatchPackage;
+  const packageDispatch=directlyScannedPackage
+    ?await env.DB.prepare(`SELECT d.id FROM warehouse_dispatch_items di
+       JOIN warehouse_dispatches d ON d.id=di.dispatch_id AND d.organization_id=di.organization_id
+       WHERE di.organization_id=? AND di.package_id=? AND d.status='dispatched'
+       ORDER BY d.dispatched_at DESC LIMIT 1`).bind(user.organizationId,directlyScannedPackage.id).first<{id:string}>()
+    :null;
+  const batchDispatch=batchId
+    ?await env.DB.prepare("SELECT id FROM warehouse_dispatches WHERE organization_id=? AND transport_batch_id=? AND status='dispatched' ORDER BY dispatched_at DESC LIMIT 1")
+      .bind(user.organizationId,batchId).first<{id:string}>()
+    :null;
+  const atomicDispatchId=scannedDispatch?.status==='dispatched'?scannedDispatch.id:packageDispatch?.id??batchDispatch?.id??null;
+  const atomicScopePackages=atomicDispatchId
+    ?(await env.DB.prepare(`SELECT p.id,di.dispatch_id,p.barcode,p.package_number,o.id order_id,o.order_number,s.id shipment_id,c.name customer_name,w.name source_warehouse_name
+       FROM warehouse_dispatch_items di
+       JOIN warehouse_dispatches d ON d.id=di.dispatch_id AND d.organization_id=di.organization_id AND d.status='dispatched'
+       JOIN warehouse_packages p ON p.id=di.package_id AND p.organization_id=di.organization_id AND p.label_kind='oul' AND p.lifecycle_status='in_transit' AND p.status='dispatched'
+       JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id
+       JOIN transport_orders o ON o.id=s.order_id AND o.organization_id=s.organization_id
+       JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
+       JOIN warehouses w ON w.id=p.warehouse_id AND w.organization_id=p.organization_id
+       WHERE di.organization_id=? AND di.dispatch_id=? AND o.overseas_warehouse_id=?
+       ORDER BY o.order_number,p.package_number`)
+      .bind(user.organizationId,atomicDispatchId,warehouse.id).all<AtomicInboundPackage>()).results
+    :[];
   const actualExitRecord = scannedPackage
     ? await env.DB.prepare(
         `SELECT event_at
@@ -311,8 +337,8 @@ export async function loader({ request }: Route.LoaderArgs) {
     : null;
   if (reference && scannedDispatch && scannedDispatch.status !== "dispatched")
     lookupError = `装车任务 ${scannedDispatch.dispatch_number} 尚未完成出库交接，暂不能办理境外目的仓收货`;
-  else if (reference && scannedDispatch && scannedDispatch.package_count > 1)
-    lookupError = `装车任务 ${scannedDispatch.dispatch_number} 包含 ${scannedDispatch.package_count} 个货物标签，请逐件扫描货物标签入库`;
+  else if (reference && scannedDispatch && scannedDispatch.package_count > 1 && !atomicScopePackages.length)
+    lookupError = `装车任务 ${scannedDispatch.dispatch_number} 的 OUL 清单无法读取，请刷新后重试`;
   else if (reference && scannedPackage?.warehouse_id === warehouse.id && scannedPackage.receipt_status === "completed")
     lookupError = `货物标签 ${scannedPackage.barcode} 已于${scannedPackage.received_at ? ` ${new Date(scannedPackage.received_at).toLocaleString("zh-CN")}` : ""}通过入库单 ${scannedPackage.receipt_number || "—"} 在“${warehouse.name}”完成入库，请勿重复扫描`;
   else if (reference && scannedPackage?.warehouse_id === warehouse.id)
@@ -333,7 +359,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     lookupError = scannedPackageWorkflowAccess.reason || "当前订单的冻结工作流尚未开放境外仓入库";
   else if (reference && scannedPackage && !selectedShipment)
     lookupError = `货物标签 ${scannedPackage.barcode} 不属于当前目的仓，或对应运输单尚未进入可收货阶段`;
-  else if (reference && !scannedPackage)
+  else if (reference && !scannedPackage && !atomicScopePackages.length)
     lookupError = `未找到国内仓生成的货物标签或装车任务：${reference}`;
   const workflowFields = receivableShipment
     ? await loadOrderModuleWorkflowFields(
@@ -360,6 +386,8 @@ export async function loader({ request }: Route.LoaderArgs) {
     reference,
     selectedShipment: receivableShipment,
     scannedPackage: receivableShipment ? scannedPackage : null,
+    atomicDispatchId,
+    atomicScopePackages,
     lookupError,
     workflowFields,
   };
@@ -381,6 +409,7 @@ export async function action({ request }: Route.ActionArgs) {
   if (!isOverseasWarehouse)
     throw redirect(`/warehouse/acceptance${new URL(request.url).search}`);
   const form = await request.formData(),
+    intent=valueOf(form,"intent"),
     shipmentId = valueOf(form, "shipmentId"),
     shipmentReference = valueOf(form, "shipmentReference").trim(),
     customerIdentityCode = valueOf(form, "customerIdentityCode")
@@ -395,6 +424,7 @@ export async function action({ request }: Route.ActionArgs) {
     hasException = receiptResult === "exception",
     exceptionNotes = valueOf(form, "exceptionNotes").trim(),
     now = new Date().toISOString();
+  if(intent==="atomic_overseas_receive")return receiveAtomicOverseasScope({request,user,warehouse:selectedWarehouse,form,batchId,requestedBatchOrderIds,now});
   const submittedPieces = positiveInt(form, "pieces");
   const pieces = submittedPieces ?? 1,
     weight = positive(form, "weight"),
@@ -708,7 +738,7 @@ export async function action({ request }: Route.ActionArgs) {
   };
   const difference = calculateWarehouseDifference(plannedActual, actual);
   if (isOverseasWarehouse && !rawBarcode)
-    return { formError: "境外目的仓必须扫描国内仓生成的货物标签，不能重新生成标签" };
+    return { formError: "境外目的仓必须扫描装车时生成的 OUL 标签，不能重新生成标签" };
   const barcode = rawBarcode || generateCode("OUL"),
     receiptNumber = generateCode("IN");
   if (!/^[A-Z0-9-]{4,40}$/.test(barcode))
@@ -1056,6 +1086,105 @@ type OverseasReceivingResult = {
   warning?: string | null;
 };
 
+async function receiveAtomicOverseasScope(input:{
+  request:Request;
+  user:Awaited<ReturnType<typeof requireSessionUser>>;
+  warehouse:{id:string;name:string};
+  form:FormData;
+  batchId:string;
+  requestedBatchOrderIds:string[];
+  now:string;
+}){
+  const dispatchId=valueOf(input.form,"dispatchId");
+  const scannedCodes=parseCodeList(valueOf(input.form,"scannedOulCodes"));
+  const requestedLocationId=valueOf(input.form,"locationId");
+  if(!dispatchId)return{formError:"请先扫描装车任务码或任一 OUL，调出本次完整收货范围"};
+  const rows=(await env.DB.prepare(`SELECT p.id,p.barcode,p.package_number,p.shipment_id,p.location_id source_location_id,
+      p.weight_kg,p.volume_cbm,p.length_cm,p.width_cm,p.height_cm,o.id order_id,o.order_number,o.customer_id,
+      o.overseas_warehouse_id,o.customs_clearance_mode,s.status shipment_status,d.transport_batch_id
+    FROM warehouse_dispatch_items di
+    JOIN warehouse_dispatches d ON d.id=di.dispatch_id AND d.organization_id=di.organization_id AND d.status='dispatched'
+    JOIN warehouse_packages p ON p.id=di.package_id AND p.organization_id=di.organization_id
+    JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id
+    JOIN transport_orders o ON o.id=s.order_id AND o.organization_id=s.organization_id
+    WHERE di.organization_id=? AND di.dispatch_id=? AND p.label_kind='oul' AND p.lifecycle_status='in_transit' AND p.status='dispatched'
+    ORDER BY o.order_number,p.package_number`).bind(input.user.organizationId,dispatchId).all<{
+      id:string;barcode:string;package_number:string;shipment_id:string;source_location_id:string;weight_kg:number|null;volume_cbm:number|null;
+      length_cm:number|null;width_cm:number|null;height_cm:number|null;order_id:string;order_number:string;customer_id:string;
+      overseas_warehouse_id:string|null;customs_clearance_mode:"company"|"customer";shipment_status:string;transport_batch_id:string|null;
+    }>()).results;
+  if(!rows.length)return{formError:"当前装车任务没有可收货的在途 OUL，可能尚未出库或已经完成入库"};
+  if(rows.some(row=>row.overseas_warehouse_id!==input.warehouse.id))return{formError:"本次收货范围包含不属于当前目的仓的订单，已整体拒绝提交"};
+  if(input.batchId&&rows.some(row=>row.transport_batch_id!==input.batchId))return{formError:"当前装车任务与 PZ 配载单不一致，已整体拒绝提交"};
+  const orderIds=[...new Set(rows.map(row=>row.order_id))];
+  if(input.requestedBatchOrderIds.length&&(
+    input.requestedBatchOrderIds.length!==orderIds.length||orderIds.some(orderId=>!input.requestedBatchOrderIds.includes(orderId))
+  ))return{formError:"页面锁定的 PZ 挂载订单与提交范围不一致，已整体拒绝提交"};
+  const expectedCodes=rows.map(row=>row.barcode.toUpperCase());
+  const missing=expectedCodes.filter(code=>!scannedCodes.includes(code));
+  const foreign=scannedCodes.filter(code=>!expectedCodes.includes(code));
+  if(missing.length||foreign.length)return{formError:`必须一次扫齐本次范围内全部 OUL：已扫 ${scannedCodes.length}/${expectedCodes.length}${missing.length?`，缺少 ${missing.length} 张`:""}${foreign.length?`，含 ${foreign.length} 张非本任务标签`:""}`};
+  const location=await env.DB.prepare(`SELECT l.id,l.code,l.name,z.name zone_name,w.name warehouse_name
+    FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id JOIN warehouses w ON w.id=l.warehouse_id
+    WHERE l.organization_id=? AND l.warehouse_id=? AND l.id=? AND l.status='active' AND z.status='active' AND w.status='active'`)
+    .bind(input.user.organizationId,input.warehouse.id,requestedLocationId).first<{id:string;code:string;name:string;zone_name:string;warehouse_name:string}>();
+  if(!location)return{formError:"请选择当前境外仓的有效入库库位"};
+  for(const orderId of orderIds){
+    const access=await loadWarehousePhysicalWorkflowAccess(env.DB,input.user.organizationId,orderId,"overseas_warehouse",{userId:input.user.userId,positionCode:input.user.positionCode});
+    if(!access.available)return{formError:access.reason||"本次范围内有订单尚未开放境外仓入库，已整体拒绝提交"};
+    const exited=await env.DB.prepare("SELECT 1 ok FROM order_tracking_milestones WHERE organization_id=? AND order_id=? AND milestone_code='exported' LIMIT 1").bind(input.user.organizationId,orderId).first<{ok:number}>();
+    if(!exited)return{formError:`${rows.find(row=>row.order_id===orderId)?.order_number||orderId} 尚未登记实际出境，已整体拒绝提交`};
+  }
+  const customs=await loadOverseasInboundCustomsGates(input.user.organizationId,orderIds.map(orderId=>{
+    const row=rows.find(item=>item.order_id===orderId)!;
+    return{orderId,orderNumber:row.order_number,customsClearanceMode:row.customs_clearance_mode};
+  }));
+  const customsBlocked=customs.find(item=>item.blocked);
+  if(customsBlocked)return{formError:customsBlocked.message||`${rows.find(row=>row.order_id===customsBlocked.orderId)?.order_number||customsBlocked.orderId} 的清关门禁尚未通过`};
+  const locationText=`${location.warehouse_name} / ${location.zone_name} / ${location.name} (${location.code})`;
+  const statements:D1PreparedStatement[]=[];
+  const receiptByOrder=new Map<string,{id:string;number:string}>();
+  for(const orderId of orderIds){
+    const orderRows=rows.filter(row=>row.order_id===orderId),lead=orderRows[0],receiptId=crypto.randomUUID(),receiptNumber=generateCode("IN");
+    receiptByOrder.set(orderId,{id:receiptId,number:receiptNumber});
+    statements.push(
+      env.DB.prepare(`INSERT INTO warehouse_receipts(id,organization_id,receipt_number,shipment_id,warehouse_id,location_id,status,total_packages,total_pieces,total_weight_kg,total_volume_cbm,notes,received_by_user_id,received_at,created_at,updated_at,package_type,evidence_note,cargo_complete,has_exception,exception_notes)
+        VALUES(?,?,?,?,?,?,'completed',?,0,?,?,?, ?,?,?,?,'mixed',NULL,1,0,NULL)`)
+        .bind(receiptId,input.user.organizationId,receiptNumber,lead.shipment_id,input.warehouse.id,location.id,orderRows.length,
+          orderRows.reduce((sum,row)=>sum+Number(row.weight_kg||0),0),orderRows.reduce((sum,row)=>sum+Number(row.volume_cbm||0),0),
+          "OUL 全量扫码收货",input.user.userId,input.now,input.now,input.now),
+      env.DB.prepare(`INSERT INTO warehouse_operations(id,organization_id,shipment_id,operation_type,location,measured_pieces,measured_weight_kg,measured_volume_cbm,notes,operator_user_id,occurred_at,created_at,warehouse_location_id)
+        VALUES(?,?,?,'receive',?,NULL,?,?,?, ?,?,?,?)`).bind(crypto.randomUUID(),input.user.organizationId,lead.shipment_id,locationText,
+          orderRows.reduce((sum,row)=>sum+Number(row.weight_kg||0),0),orderRows.reduce((sum,row)=>sum+Number(row.volume_cbm||0),0),
+          "境外仓 OUL 全量扫码入库",input.user.userId,input.now,input.now,location.id),
+    );
+  }
+  for(const row of rows){
+    const receipt=receiptByOrder.get(row.order_id)!;
+    statements.push(
+      env.DB.prepare(`UPDATE warehouse_packages SET receipt_id=?,warehouse_id=?,location_id=?,status='in_stock',lifecycle_status='overseas_received',updated_at=?
+        WHERE id=? AND organization_id=? AND label_kind='oul' AND lifecycle_status='in_transit' AND status='dispatched'`)
+        .bind(receipt.id,input.warehouse.id,location.id,input.now,row.id,input.user.organizationId),
+      env.DB.prepare(`INSERT INTO warehouse_package_movements(id,organization_id,package_id,operation_type,from_location_id,to_location_id,operator_user_id,notes,occurred_at,created_at)
+        VALUES(?,?,?,'inbound',?,?,?,?,?,?)`).bind(crypto.randomUUID(),input.user.organizationId,row.id,row.source_location_id,location.id,input.user.userId,`境外仓全量扫码入库 · ${receipt.number}`,input.now,input.now),
+    );
+  }
+  try{await env.DB.batch(statements)}catch(error){console.error("atomic overseas receiving failed",error);return{formError:"整批收货失败，本次没有写入任何 OUL，请核对后重试"}}
+  const warnings:string[]=[];
+  for(const orderId of orderIds){
+    const receipt=receiptByOrder.get(orderId)!;
+    try{await finalizeOverseasReceiving({organizationId:input.user.organizationId,orderId,actorUserId:input.user.userId,actualArrivalAt:input.now,notes:`境外仓入库单 ${receipt.number} 已完成全部 OUL 扫码`})}
+    catch(error){warnings.push(`${rows.find(row=>row.order_id===orderId)?.order_number||orderId} 工作流同步待重试`)}
+  }
+  await writeAudit({request:input.request,action:"warehouse.overseas.atomic_receive",resourceType:"warehouse_dispatch",resourceId:dispatchId,organizationId:input.user.organizationId,actorUserId:input.user.userId,metadata:{batchId:input.batchId||null,orderIds,barcodes:expectedCodes,warehouseId:input.warehouse.id,locationId:location.id,warnings}});
+  return{success:`已一次性收货 ${expectedCodes.length} 个 OUL，覆盖 ${orderIds.length} 票订单${warnings.length?`；${warnings.join("、")}`:""}`,atomicCompleted:true};
+}
+
+function parseCodeList(raw:string){
+  if(!raw)return[];
+  try{const value=JSON.parse(raw);return Array.isArray(value)?[...new Set(value.map(item=>String(item).trim().toUpperCase()).filter(Boolean))]:[]}catch{return[]}
+}
+
 async function finalizeOverseasReceiving(input: {
   organizationId: string;
   orderId: string;
@@ -1287,9 +1416,13 @@ export default function WarehouseInbound({
   const [receiptResult, setReceiptResult] = useState<"" | "ready" | "exception">(
     "",
   );
+  const [atomicScanInput,setAtomicScanInput]=useState("");
+  const [atomicScans,setAtomicScans]=useState<string[]>([]);
+  const [atomicScanMessage,setAtomicScanMessage]=useState("");
   useEffect(() => {
     setReceiptResult("");
   }, [loaderData.reference]);
+  useEffect(()=>{setAtomicScanInput("");setAtomicScans([]);setAtomicScanMessage("")},[loaderData.atomicDispatchId]);
   useEffect(() => {
     if (actionData?.success) {
       setReceiptResult("");
@@ -1317,7 +1450,7 @@ export default function WarehouseInbound({
         <div>
           <p className="eyebrow">ACCEPTANCE RECEIVING</p>
           <h1>验收收货</h1>
-          <p>当前仓库：{loaderData.warehouse.name}。扫描国内仓生成的原货物标签，核对实收并选择库位；同一运输单全部货物清点完成后自动结束境外运输。</p>
+          <p>当前仓库：{loaderData.warehouse.name}。扫描装车时生成的 OUL 标签，核对实收并选择库位；同一运输单全部 OUL 清点完成后自动结束境外运输。</p>
         </div>
       </header>
       <ActionToast data={actionData} />
@@ -1336,14 +1469,14 @@ export default function WarehouseInbound({
       )}
       {!actionData?.success && loaderData.lookupError && <div className="alert error no-print">{loaderData.lookupError}</div>}
       {!canOperate && <div className="alert info">当前账号为仓库只读视角，可查看收货结果；货物扫描、实收录入和入库提交仅向有操作权限的冻结任务负责人开放。</div>}
-      {canOperate && !loaderData.batchContext?.error && <WarehouseReceivingScanPanel
+      {canOperate && !loaderData.batchContext?.error && !loaderData.atomicScopePackages.length && <WarehouseReceivingScanPanel
         key={actionData?.success ? `completed:${actionData.success}` : loaderData.reference}
         warehouseId={loaderData.warehouse.id}
         reference={actionData?.success ? "" : loaderData.reference}
         inputLabel="扫描货物标签 / 装车任务码"
-        placeholder="扫描国内仓货物条码、包装号或 OUT 装车任务码后回车"
+        placeholder="扫描装车 OUL 标签或 OUT 装车任务码后回车"
         submitLabel="调出验收信息"
-        hint="单件装车任务可扫描 OUT 任务码；多件任务逐件扫描原货物标签。系统自动核对订单、客户、运单和目的仓。"
+        hint="可扫描 OUT 任务码调出整票，也可扫描任一 OUL 调出对应范围；确认时必须一次扫齐。系统自动核对订单、客户、运单和目的仓。"
         hiddenFields={[
           { name: "orderId", value: loaderData.orderId || "" },
           { name: "batchId", value: loaderData.batchContext?.id || "" },
@@ -1351,6 +1484,16 @@ export default function WarehouseInbound({
           { name: "returnTo", value: loaderData.returnTo },
         ]}
       />}
+      {canOperate&&loaderData.atomicScopePackages.length>0&&!(actionData&&"atomicCompleted" in actionData&&actionData.atomicCompleted)&&<Form method="post" className="panel atomic-oul-receiving-panel">
+        <input type="hidden" name="intent" value="atomic_overseas_receive"/>
+        <input type="hidden" name="dispatchId" value={loaderData.atomicDispatchId||""}/>
+        <input type="hidden" name="scannedOulCodes" value={JSON.stringify(atomicScans)}/>
+        <div className="panel-header"><div><h2>一次扫齐全部 OUL</h2><p>{loaderData.batchContext?`${loaderData.batchContext.number} 整批收货`:`装车任务 ${loaderData.atomicDispatchId}`}；扫描只暂存在当前页面，全部扫齐后一次提交，刷新或离开页面会清空。</p></div><strong>{atomicScans.length}/{loaderData.atomicScopePackages.length}</strong></div>
+        <div className="atomic-oul-scan-row"><label className="field"><span>扫描 OUL</span><input value={atomicScanInput} onChange={event=>setAtomicScanInput(event.target.value)} onKeyDown={event=>{if(event.key!=="Enter")return;event.preventDefault();const code=atomicScanInput.trim().toUpperCase();if(!code)return;const expected=loaderData.atomicScopePackages.some(item=>item.barcode.toUpperCase()===code);if(!expected){setAtomicScanMessage("该 OUL 不属于当前收货范围");return}if(atomicScans.includes(code)){setAtomicScanMessage("该 OUL 已扫描，本次未重复计数");setAtomicScanInput("");return}setAtomicScans(current=>[...current,code]);setAtomicScanInput("");setAtomicScanMessage("已加入本次临时清单");}} autoFocus placeholder="扫描 OUL 后回车"/></label><label className="field"><span>入库库位 *</span><select name="locationId" required><option value="">请选择库位</option>{loaderData.locations.map(item=><option key={item.id} value={item.id}>{item.zone_name} / {item.name}（{item.code}）</option>)}</select></label></div>
+        {atomicScanMessage&&<p className="atomic-oul-message" role="status">{atomicScanMessage}</p>}
+        <div className="table-wrap"><table><thead><tr><th>订单</th><th>客户</th><th>OUL</th><th>来源仓</th><th>扫码状态</th></tr></thead><tbody>{loaderData.atomicScopePackages.map(item=>{const scanned=atomicScans.includes(item.barcode.toUpperCase());return <tr key={item.id} className={scanned?"is-scanned":""}><td>{item.order_number}</td><td>{item.customer_name}</td><td><strong>{item.barcode}</strong></td><td>{item.source_warehouse_name}</td><td><span className={`status-pill ${scanned?"success":"warning"}`}>{scanned?"已扫描":"待扫描"}</span></td></tr>})}</tbody></table></div>
+        <div className="atomic-oul-footer"><span>未扫齐时不能提交；服务器会再次核对完整范围。</span><button className="primary warehouse-primary" disabled={busy||atomicScans.length!==loaderData.atomicScopePackages.length}>{busy?"正在整批入库…":"全部扫齐并一次入库"}</button></div>
+      </Form>}
       {showReceivingWorkbench && selectedShipmentRecord && scannedPackageRecord && canOperate && (
         <Form
           method="post"
