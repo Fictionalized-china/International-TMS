@@ -25,6 +25,7 @@ import {
   type OrderWorkloadView,
 } from "../lib/order-workload-view";
 import { orderDetailQueueHref, orderQueueContextFromList } from "../lib/order-queue-navigation";
+import { ordinaryOrderBatchExclusionSql } from "../lib/batch-order-list";
 
 type OrderRow = {
   id: string;
@@ -117,18 +118,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const visibility = orderVisibilitySql(current, "o");
   where.push(visibility.sql);
   values.push(...visibility.values);
-  const ordinaryBatchExclusionSql = `NOT EXISTS(
-    SELECT 1 FROM transport_batch_orders ordinary_batch_order
-    JOIN transport_batches ordinary_batch
-      ON ordinary_batch.id=ordinary_batch_order.batch_id
-     AND ordinary_batch.organization_id=ordinary_batch_order.organization_id
-    WHERE ordinary_batch_order.organization_id=o.organization_id
-      AND ordinary_batch_order.order_id=o.id
-      AND ordinary_batch_order.status!='removed'
-      AND ordinary_batch.batch_number LIKE 'PZ-%'
-      AND ordinary_batch.status!='cancelled'
-      AND ordinary_batch.road_status NOT IN ('cancelled','overseas_arrived','waiting_pickup','pickup_completed')
-  )`;
+  const ordinaryBatchExclusionSql = ordinaryOrderBatchExclusionSql("o");
   if (canViewBatchWorkload) {
     where.push(ordinaryBatchExclusionSql);
   }

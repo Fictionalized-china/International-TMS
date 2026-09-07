@@ -40,6 +40,7 @@ import {
 } from "../lib/batch-responsibility";
 import { loadOrdersInitialResponsibilityRestrictions } from "../lib/batch-responsibility.server";
 import { listActiveOrganizationAssigneeCandidates } from "../lib/organization-assignee.server";
+import { pendingBatchApprovalNotificationStatement } from "../lib/internal-notifications.server";
 
 
 const PAGE_SIZE=10;
@@ -60,6 +61,7 @@ type BatchRow={
   border_port:string|null;customs_location:string|null;planned_loading_at:string|null;planned_departure_at:string|null;
   status:string;road_status:string;approval_status:string;order_count:number;order_numbers:string;
   total_weight:number;total_volume:number;has_dispatch:number;has_started:number;created_at:string;
+  dispatch_id:string|null;
   carrier_id:string|null;overseas_carrier_name:string|null;overseas_vehicle_plate:string|null;
   overseas_driver_name:string|null;vehicle_master_id:string|null;driver_master_id:string|null;
 };
@@ -215,6 +217,7 @@ export async function loader({request}:Route.LoaderArgs){
       COUNT(DISTINCT bo.order_id) order_count,GROUP_CONCAT(DISTINCT o.order_number) order_numbers,
       COALESCE(SUM((SELECT SUM(p.weight_kg) FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id WHERE s.order_id=o.id AND p.warehouse_id=b.warehouse_id AND p.status IN ('in_stock','allocated'))),0) total_weight,
       COALESCE(SUM((SELECT SUM(p.volume_cbm) FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id WHERE s.order_id=o.id AND p.warehouse_id=b.warehouse_id AND p.status IN ('in_stock','allocated'))),0) total_volume,
+      (SELECT d.id FROM warehouse_dispatches d WHERE d.organization_id=b.organization_id AND d.transport_batch_id=b.id AND d.status!='cancelled' ORDER BY d.updated_at DESC LIMIT 1) dispatch_id,
       EXISTS(SELECT 1 FROM warehouse_dispatches d WHERE d.transport_batch_id=b.id AND d.status!='cancelled') has_dispatch,
       EXISTS(SELECT 1 FROM warehouse_dispatches d LEFT JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id
         WHERE d.transport_batch_id=b.id AND d.status!='cancelled' AND (d.status='dispatched' OR di.status!='pending')) has_started
@@ -276,6 +279,7 @@ export async function action({request}:Route.ActionArgs){
         AND approval_status='rejected' AND operation_supervisor_user_id IS NOT NULL`)
       .bind(user.userId,now,now,batchId,user.organizationId,warehouse.id).run();
     if(!Number(submitted.meta?.changes||0))return{formError:"仅已退回且仍有指定操作主管的配载单可以重新提交"};
+    await pendingBatchApprovalNotificationStatement(env.DB,{organizationId:user.organizationId,batchId,batchNumber:batch.batch_number,supervisorUserId:batch.operation_supervisor_user_id,actorUserId:user.userId,now}).run();
     await writeAudit({request,action:"warehouse.consolidation.resubmit",resourceType:"transport_batch",resourceId:batchId,organizationId:user.organizationId,actorUserId:user.userId,metadata:{batchNumber:batch.batch_number}});
     return{success:`配载单 ${batch.batch_number} 已重新提交操作主管审核`,batchId};
   }
@@ -390,6 +394,7 @@ export async function action({request}:Route.ActionArgs){
       statements.push(env.DB.prepare("INSERT INTO transport_batch_vehicles(id,organization_id,batch_id,vehicle_no,vehicle_type,plate_number,carrier_id,driver_name,driver_phone,capacity_weight_kg,capacity_volume_cbm,status,created_at,updated_at,vehicle_master_id,driver_master_id) VALUES(?,?,?,'MAIN-1',?,?,?,?,?,?,?,'planned',?,?,?,?)").bind(vehicleId,user.organizationId,batchId,selectedResource.vehicleType,selectedResource.plateNumber,selectedResource.carrierId,selectedResource.driverName,selectedResource.driverPhone,selectedResource.capacityWeight,selectedResource.capacityVolume,now,now,selectedResource.vehicleMasterId,selectedResource.driverMasterId));
     }
     statements.push(...prepareBatchOrderStatements(states,user.organizationId,batchId,1,user.userId,now,false));
+    statements.push(pendingBatchApprovalNotificationStatement(env.DB,{organizationId:user.organizationId,batchId,batchNumber,supervisorUserId:operationSupervisorUserId,actorUserId:user.userId,now}));
     for(const orderChunk of chunkD1Values(states.map(row=>row.order_id),6))statements.push(env.DB.prepare(`UPDATE transport_orders SET exit_port=CASE WHEN ?<>'' THEN ? ELSE exit_port END,customs_location=CASE WHEN ?<>'' THEN ? ELSE customs_location END,updated_at=? WHERE organization_id=? AND id IN (${d1Placeholders(orderChunk.length)})`).bind(borderPort,borderPort,customsLocation,customsLocation,now,user.organizationId,...orderChunk));
     try{await env.DB.batch(statements)}catch{return{formError:"配载单编号冲突或数据已被其他操作占用，请刷新后重试"}}
     await activateLoadingModules(user.organizationId,states.map(row=>row.order_id),batchNumber,user.userId,now,"仓库货物配载");
@@ -475,7 +480,7 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
       <div><p className="eyebrow">CARGO CONSOLIDATION</p><h1>货物配载</h1><p>勾选完整拼车订单并生成正式 PZ 配载单；本页仅查看文件齐套状态，不再上传订单文件。</p></div>
       <Link className="secondary" to={`/warehouse/loading-documents?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}`}>进入配载文件</Link>
     </header>
-    {actionData?.formError&&<div className="alert error">{actionData.formError}</div>}{actionData?.success&&<div className="alert success">{actionData.success}{actionData.batchId&&<> · <Link to={`/admin/loading/${actionData.batchId}`}>打开配载单</Link></>}</div>}
+    {actionData?.formError&&<div className="alert error">{actionData.formError}</div>}{actionData?.success&&<div className="alert success"><strong>{actionData.success}</strong>{actionData.batchId&&<> · 下一步由操作主管审核并统一分配整批负责人。<Link to={`/admin/loading/${actionData.batchId}`}>查看审核状态</Link></>}</div>}
     <section className="panel consolidation-view-panel">
       <nav className="consolidation-view-tabs peer-page-tabs" aria-label="货物配载页面">
         <Link className={activeView==="stock"?"active":""} aria-current={activeView==="stock"?"page":undefined} to={consolidationViewHref(loaderData,"stock")} viewTransition>在库货物 <span>{loaderData.total}</span></Link>
@@ -555,7 +560,7 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
         <td>{batch.destination_location}<small>{batch.border_port||"口岸未填"} · {batch.customs_location||"清关地未填"}</small></td>
         <td>{batch.planned_loading_at?new Date(batch.planned_loading_at).toLocaleString("zh-CN"):"装车待定"}<small>出境：{batch.planned_departure_at?new Date(batch.planned_departure_at).toLocaleString("zh-CN"):"未填写"}</small></td>
         <td><span className={`status-pill ${approved?"success":batch.approval_status==="rejected"?"danger":""}`}>{batch.has_started?"已开始装车":batch.has_dispatch?"装车任务已生成":approved?"审核通过，待装车":batch.approval_status==="rejected"?"审核退回":"待操作主管审核"}</span></td>
-        <td><div className="button-row consolidation-batch-actions"><Link className="text-button" to={`/admin/loading/${batch.id}`}>查看配载单</Link>{approved?<Link className="primary warehouse-primary" to={`/warehouse/outbound?warehouseId=${loaderData.warehouse.id}&view=${batch.has_dispatch?"execution":"pending"}`}>{batch.has_dispatch?"进入装车与出库":"创建装车任务"}</Link>:<span className="status-pill">审核通过后开放装车</span>}{approved&&!batch.has_started&&<Modal title={`车辆安排 · ${batch.batch_number}`} triggerLabel={batch.carrier_id&&batch.vehicle_master_id&&batch.driver_master_id?"修改车辆":"补充车辆"} triggerClassName="text-button" closeSignal={actionData?.success}><BatchResourceForm batch={batch} carriers={loaderData.carriers} vehicles={loaderData.carrierVehicles} drivers={loaderData.carrierDrivers} busy={busy}/></Modal>}{batch.approval_status!=="submitted"&&!batch.has_started&&<Modal title={`调整 ${batch.batch_number}`} triggerLabel="调整订单" triggerClassName="text-button" closeSignal={actionData?.success}><BatchAdjustment batch={batch} orders={loaderData.batchOrders.filter(row=>row.batch_id===batch.id)} busy={busy}/></Modal>}{batch.approval_status==="rejected"&&!batch.has_started&&<Form method="post"><input type="hidden" name="intent" value="resubmit"/><input type="hidden" name="batchId" value={batch.id}/><button className="primary" disabled={busy}>重新提交审核</button></Form>}</div></td>
+        <td><div className="button-row consolidation-batch-actions">{approved?<Link className="primary warehouse-primary" to={batch.has_dispatch&&batch.dispatch_id?`/warehouse/outbound?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}&view=execution&dispatchId=${encodeURIComponent(batch.dispatch_id)}`:`/warehouse/outbound?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}&view=pending&q=${encodeURIComponent(batch.batch_number)}`}>{batch.has_dispatch?"进入本单装车出库":"创建本单装车任务"}</Link>:<span className="status-pill">下一步：操作主管审核并分配</span>}<Link className="text-button" to={`/admin/loading/${batch.id}`}>查看配载单</Link>{approved&&!batch.has_started&&<Modal title={`车辆安排 · ${batch.batch_number}`} triggerLabel={batch.carrier_id&&batch.vehicle_master_id&&batch.driver_master_id?"修改车辆":"补充车辆"} triggerClassName="text-button" closeSignal={actionData?.success}><BatchResourceForm batch={batch} carriers={loaderData.carriers} vehicles={loaderData.carrierVehicles} drivers={loaderData.carrierDrivers} busy={busy}/></Modal>}{batch.approval_status!=="submitted"&&!batch.has_started&&<Modal title={`调整 ${batch.batch_number}`} triggerLabel="调整订单" triggerClassName="text-button" closeSignal={actionData?.success}><BatchAdjustment batch={batch} orders={loaderData.batchOrders.filter(row=>row.batch_id===batch.id)} busy={busy}/></Modal>}{batch.approval_status==="rejected"&&!batch.has_started&&<Form method="post"><input type="hidden" name="intent" value="resubmit"/><input type="hidden" name="batchId" value={batch.id}/><button className="primary" disabled={busy}>重新提交审核</button></Form>}</div></td>
       </tr>})}</tbody></table></div>
       {!loaderData.batches.length&&<p className="empty-state">{Object.values(loaderData.batchFilters).some(Boolean)?"当前筛选条件下没有配载单。":"当前仓库尚未生成配载单。"}</p>}
       <Pagination loaderData={loaderData} view="batches"/>
@@ -864,5 +869,5 @@ function prepareBatchOrderStatements(rows:CandidateState[],organizationId:string
   });
 }
 async function batchHasStarted(organizationId:string,batchId:string){const row=await env.DB.prepare(`SELECT EXISTS(SELECT 1 FROM warehouse_dispatches d LEFT JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id WHERE d.organization_id=? AND d.transport_batch_id=? AND d.status!='cancelled' AND (d.status='dispatched' OR di.status!='pending')) started`).bind(organizationId,batchId).first<{started:number}>();return Boolean(row?.started)}
-async function editableBatch(organizationId:string,warehouseId:string,batchId:string){const batch=await env.DB.prepare("SELECT id,batch_number FROM transport_batches WHERE id=? AND organization_id=? AND warehouse_id=? AND batch_number LIKE 'PZ-%' AND status IN ('planning','loading') AND approval_status IN ('draft','rejected')").bind(batchId,organizationId,warehouseId).first<{id:string;batch_number:string}>();if(!batch||await batchHasStarted(organizationId,batchId))return null;return batch}
+async function editableBatch(organizationId:string,warehouseId:string,batchId:string){const batch=await env.DB.prepare("SELECT id,batch_number,operation_supervisor_user_id FROM transport_batches WHERE id=? AND organization_id=? AND warehouse_id=? AND batch_number LIKE 'PZ-%' AND status IN ('planning','loading') AND approval_status IN ('draft','rejected')").bind(batchId,organizationId,warehouseId).first<{id:string;batch_number:string;operation_supervisor_user_id:string}>();if(!batch||await batchHasStarted(organizationId,batchId))return null;return batch}
 export function meta(){return[{title:"货物配载 | International TMS"}]}

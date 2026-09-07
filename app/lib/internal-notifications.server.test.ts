@@ -49,10 +49,13 @@ const database=vi.hoisted(()=>{
 vi.mock("cloudflare:workers",()=>({env:{DB:database.DB}}));
 
 import {
+  assignedBatchNotificationStatement,
   assignedOrderNotificationStatement,
   listInternalNotifications,
   loadInternalNotificationSummary,
   markInternalNotification,
+  pendingBatchApprovalNotificationStatement,
+  warehouseBatchReadyNotificationStatement,
 } from "./internal-notifications.server";
 
 describe("internal notification delivery",()=>{
@@ -114,5 +117,44 @@ describe("internal notification delivery",()=>{
     expect(query?.bindings).toEqual([
       "委托审核","user-1","2026-09-04T00:00:00.000Z","order-1","org-1","user-2","委托审核",
     ]);
+  });
+
+  it("deep-links operation and document assignees to their own batch workbench",async()=>{
+    await assignedBatchNotificationStatement(database.DB as unknown as D1Database,{
+      organizationId:"org-1",batchId:"batch 1",batchNumber:"PZ-001",assigneeUserId:"operation-1",
+      actorUserId:"supervisor-1",responsibilityLabel:"操作职责",targetTab:"tracking",now:"2026-09-04T00:00:00.000Z",
+    }).run();
+    const operation=database.queries.at(-1);
+    expect(operation?.sql).toContain("n.category='transport_batch_assignment'");
+    expect(operation?.bindings).toContain("/admin/loading/batch%201?tab=tracking");
+
+    await assignedBatchNotificationStatement(database.DB as unknown as D1Database,{
+      organizationId:"org-1",batchId:"batch-1",batchNumber:"PZ-001",assigneeUserId:"document-1",
+      actorUserId:"supervisor-1",responsibilityLabel:"单证与报关职责",targetTab:"documents",now:"2026-09-04T00:00:00.000Z",
+    }).run();
+    expect(database.queries.at(-1)?.bindings).toContain("/admin/loading/batch-1?tab=documents");
+  });
+
+  it("notifies the exact supervisor when a batch is submitted",async()=>{
+    await pendingBatchApprovalNotificationStatement(database.DB as unknown as D1Database,{
+      organizationId:"org-1",batchId:"batch-1",batchNumber:"PZ-001",supervisorUserId:"supervisor-1",
+      actorUserId:"warehouse-1",now:"2026-09-04T00:00:00.000Z",
+    }).run();
+    const query=database.queries.at(-1);
+    expect(query?.sql).toContain("u.id=?");
+    expect(query?.sql).toContain("transport_batch_approval");
+    expect(query?.bindings).toContain("supervisor-1");
+    expect(query?.bindings).toContain("/admin/loading/batch-1");
+  });
+
+  it("notifies only warehouse operators and managers with a filtered outbound link",async()=>{
+    await warehouseBatchReadyNotificationStatement(database.DB as unknown as D1Database,{
+      organizationId:"org-1",batchId:"batch-1",batchNumber:"PZ-20260907-001",warehouseId:"warehouse 1",
+      actorUserId:"supervisor-1",now:"2026-09-04T00:00:00.000Z",
+    }).run();
+    const query=database.queries.at(-1);
+    expect(query?.sql).toContain("a.access_level IN ('operator','manager')");
+    expect(query?.sql).toContain("warehouse_batch_ready");
+    expect(query?.bindings).toContain("/warehouse/outbound?warehouseId=warehouse%201&view=pending&q=PZ-20260907-001");
   });
 });

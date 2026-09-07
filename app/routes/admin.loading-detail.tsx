@@ -66,6 +66,7 @@ import {
 import {
   assignedBatchNotificationStatement,
   broadcastInternalNotification,
+  warehouseBatchReadyNotificationStatement,
 } from "../lib/internal-notifications.server";
 import { isActiveExceptionStatus } from "../lib/batch-exception-policy";
 import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
@@ -940,10 +941,14 @@ export async function action({request,params}:Route.ActionArgs){
         return{formError:"配载单状态或负责人已被其他人更新，请刷新后重试"};
       }
       for(const orderId of orderIds)await syncOrderWorkflowSnapshotSafe(current.organizationId,orderId);
-      await env.DB.batch([
-        assignedBatchNotificationStatement(env.DB,{organizationId:current.organizationId,batchId,batchNumber:batch.batch_number,assigneeUserId:operationAssigneeUserId,actorUserId:current.userId,responsibilityLabel:"操作职责",now}),
-        assignedBatchNotificationStatement(env.DB,{organizationId:current.organizationId,batchId,batchNumber:batch.batch_number,assigneeUserId:documentAssigneeUserId,actorUserId:current.userId,responsibilityLabel:"单证与报关职责",now}),
-      ]);
+      const notificationStatements=[
+        assignedBatchNotificationStatement(env.DB,{organizationId:current.organizationId,batchId,batchNumber:batch.batch_number,assigneeUserId:operationAssigneeUserId,actorUserId:current.userId,responsibilityLabel:"操作职责",targetTab:"tracking" as const,now}),
+        assignedBatchNotificationStatement(env.DB,{organizationId:current.organizationId,batchId,batchNumber:batch.batch_number,assigneeUserId:documentAssigneeUserId,actorUserId:current.userId,responsibilityLabel:"单证与报关职责",targetTab:"documents" as const,now}),
+      ];
+      if(!reassigning&&batch.warehouse_id)notificationStatements.push(
+        warehouseBatchReadyNotificationStatement(env.DB,{organizationId:current.organizationId,batchId,batchNumber:batch.batch_number,warehouseId:batch.warehouse_id,actorUserId:current.userId,now}),
+      );
+      await env.DB.batch(notificationStatements);
       await writeAudit({request,action:reassigning?"transport.batch.reassign":"transport.batch.approve",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{batchNumber:batch.batch_number,operationAssigneeUserId,documentAssigneeUserId,previousOperationAssigneeUserId:batchApproval.operation_assignee_user_id,previousDocumentAssigneeUserId:batchApproval.document_assignee_user_id,orderCount:orderIds.length,reassignReason:reassignReason||null,exceptionReassignment:reassigning&&!ordinaryReassignmentAllowed}});
       return{success:reassigning?`${batch.batch_number} 已完成整批改派，旧负责人保留历史只读记录`:`${batch.batch_number} 已审核通过，${orderIds.length} 票订单的操作与单证职责已统一交接`};
     }catch(error){return{formError:errorMessage(error)}}

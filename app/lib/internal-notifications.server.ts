@@ -68,8 +68,10 @@ export function assignedBatchNotificationStatement(db:D1Database,input:{
   assigneeUserId:string;
   actorUserId:string|null;
   responsibilityLabel:string;
+  targetTab?:"tracking"|"documents";
   now:string;
 }) {
+  const link=`/admin/loading/${encodeURIComponent(input.batchId)}${input.targetTab?`?tab=${input.targetTab}`:""}`;
   return db.prepare(
     `INSERT INTO internal_notifications(
       id,organization_id,user_id,category,severity,title,message,link,requires_ack,
@@ -78,16 +80,89 @@ export function assignedBatchNotificationStatement(db:D1Database,input:{
      SELECT lower(hex(randomblob(16))),?,u.id,
        'transport_batch_assignment','warning','新配载单待您办理：'||?,
        '配载单 '||?||' 已将全部挂载订单的'||?||'统一交接给您，请及时办理。',
-       '/admin/loading/'||?,0,0,?,?
+       ?,0,0,?,?
      FROM users u
      WHERE u.id=? AND u.status='active'
        AND EXISTS(
          SELECT 1 FROM memberships m
          WHERE m.organization_id=? AND m.user_id=u.id AND m.status='active'
+       )
+       AND NOT EXISTS(
+         SELECT 1 FROM internal_notifications n
+         WHERE n.organization_id=? AND n.user_id=u.id
+           AND n.category='transport_batch_assignment' AND n.link=? AND n.is_read=0
        )`,
   ).bind(
     input.organizationId,input.batchNumber,input.batchNumber,input.responsibilityLabel,
-    input.batchId,input.actorUserId,input.now,input.assigneeUserId,input.organizationId,
+    link,input.actorUserId,input.now,input.assigneeUserId,input.organizationId,
+    input.organizationId,link,
+  );
+}
+
+export function pendingBatchApprovalNotificationStatement(db:D1Database,input:{
+  organizationId:string;
+  batchId:string;
+  batchNumber:string;
+  supervisorUserId:string;
+  actorUserId:string|null;
+  now:string;
+}) {
+  const link=`/admin/loading/${encodeURIComponent(input.batchId)}`;
+  return db.prepare(
+    `INSERT INTO internal_notifications(
+      id,organization_id,user_id,category,severity,title,message,link,requires_ack,
+      is_read,created_by_user_id,created_at
+     )
+     SELECT lower(hex(randomblob(16))),?,u.id,
+       'transport_batch_approval','warning','配载单待审核与统一分配：'||?,
+       '配载单 '||?||' 已提交；请审核并同时指定整批操作与单证负责人。',
+       ?,0,0,?,?
+     FROM users u
+     WHERE u.id=? AND u.status='active'
+       AND EXISTS(
+         SELECT 1 FROM memberships m
+         WHERE m.organization_id=? AND m.user_id=u.id AND m.status='active'
+       )
+       AND NOT EXISTS(
+         SELECT 1 FROM internal_notifications n
+         WHERE n.organization_id=? AND n.user_id=u.id
+           AND n.category='transport_batch_approval' AND n.link=? AND n.is_read=0
+       )`,
+  ).bind(
+    input.organizationId,input.batchNumber,input.batchNumber,link,input.actorUserId,input.now,
+    input.supervisorUserId,input.organizationId,input.organizationId,link,
+  );
+}
+
+export function warehouseBatchReadyNotificationStatement(db:D1Database,input:{
+  organizationId:string;
+  batchId:string;
+  batchNumber:string;
+  warehouseId:string;
+  actorUserId:string|null;
+  now:string;
+}) {
+  const link=`/warehouse/outbound?warehouseId=${encodeURIComponent(input.warehouseId)}&view=pending&q=${encodeURIComponent(input.batchNumber)}`;
+  return db.prepare(
+    `INSERT INTO internal_notifications(
+      id,organization_id,user_id,category,severity,title,message,link,requires_ack,
+      is_read,created_by_user_id,created_at
+     )
+     SELECT lower(hex(randomblob(16))),a.organization_id,a.user_id,
+       'warehouse_batch_ready','warning','配载单可创建装车任务：'||?,
+       '配载单 '||?||' 已审核并完成整批负责人分配，请创建装车任务。',
+       ?,0,0,?,?
+     FROM warehouse_user_access a
+     JOIN users u ON u.id=a.user_id AND u.status='active'
+     WHERE a.organization_id=? AND a.warehouse_id=? AND a.access_level IN ('operator','manager')
+       AND NOT EXISTS(
+         SELECT 1 FROM internal_notifications n
+         WHERE n.organization_id=a.organization_id AND n.user_id=a.user_id
+           AND n.category='warehouse_batch_ready' AND n.link=? AND n.is_read=0
+       )`,
+  ).bind(
+    input.batchNumber,input.batchNumber,link,input.actorUserId,input.now,
+    input.organizationId,input.warehouseId,link,
   );
 }
 

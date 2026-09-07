@@ -205,6 +205,7 @@ describe("cargo consolidation frozen loading stage gate", () => {
 
     expect(result).toMatchObject({ success: expect.stringContaining("已生成并提交操作主管审核") });
     expect(harness.DB.batch).toHaveBeenCalled();
+    expect(harness.queries.some((sql) => sql.includes("transport_batch_approval"))).toBe(true);
   });
 
   it("loads the list with the same workflow decision and filter predicate", async () => {

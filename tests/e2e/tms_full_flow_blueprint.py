@@ -164,11 +164,11 @@ FULL_FLOW_CASES: tuple[ScenarioCase, ...] = (
         GateExpectation("报价幂等门禁", "system_integrity_invariant", "not_applicable", "hide", "已接受报价不显示再次确认按钮", "重复提交不会生成第二张订单", "系统", "检查幂等键与 UI 状态投影"),
     ),
     ScenarioCase(
-        "CONSIGN-001", "客户补充四张订单委托资料并提请审批", "P0", "happy_path", "委托资料补充",
-        "customer", "portal", ("四张订单已生成",), {"order_count": 4},
-        ("逐单进入委托资料", "按工作流可见字段上传/填写", "提请审批"),
+        "CONSIGN-001", "业务岗补充四张订单委托资料并提请审批", "P0", "happy_path", "委托资料补充",
+        "sales", "admin", ("四张订单已生成",), {"order_count": 4},
+        ("从运输订单进入待补充订单", "按工作流可见字段上传/填写", "提请审批"),
         "四张订单进入委托审核；选填字段不阻断，隐藏字段不出现。",
-        workflow_gate("委托资料完整性", mode="required", behavior="allow", ui="提示只列当前工作流必填缺口", server="必填齐全后允许提请审批", owner="客户"),
+        workflow_gate("委托资料完整性", mode="required", behavior="allow", ui="提示只列当前工作流必填缺口", server="必填齐全后允许提请审批", owner="业务岗"),
     ),
     ScenarioCase(
         "APPROVE-001", "业务主管审核四张委托", "P0", "happy_path", "委托审核",
