@@ -36,61 +36,18 @@ type BatchOriginalResponsibilityRow = {
   assignee_name: string | null;
 };
 
-const effectivePositionSql = (taskAlias: string, moduleAlias: string) =>
-  `CASE WHEN ${taskAlias}.id IS NULL
-    THEN ${moduleAlias}.responsibility_position_code
-    ELSE COALESCE(${taskAlias}.responsibility_position_code,${moduleAlias}.responsibility_position_code)
-  END`;
-
-const activeFrozenTaskSql = (taskAlias: string) =>
-  `(${taskAlias}.id IS NULL OR ${taskAlias}.status NOT IN ('completed','not_applicable'))`;
-
 /**
- * The optimistic approval update repeats the exact frozen-snapshot ownership
- * rule used to build the UI restrictions. A forged request, or an assignee
- * change racing between loader and action, therefore cannot reuse a former
- * mounted-order owner.
+ * Mounted-order owners may be selected for the batch-wide handoff. The action
+ * still validates their active organization position and complete batch
+ * permissions before this optimistic approval update runs.
  */
-export function batchInitialResponsibilityAssignmentGuard(input: {
+export function batchInitialResponsibilityAssignmentGuard(_input: {
   operationAssigneeUserId: string;
   documentAssigneeUserId: string;
 }) {
-  const initialPosition = effectivePositionSql("initial_task", "initial_module");
   return {
-    sql: `NOT EXISTS(
-      SELECT 1
-        FROM transport_batch_orders initial_batch_order
-        JOIN transport_orders initial_order
-          ON initial_order.id=initial_batch_order.order_id
-         AND initial_order.organization_id=initial_batch_order.organization_id
-        JOIN workflow_instances initial_instance
-          ON initial_instance.id=initial_order.workflow_instance_id
-         AND initial_instance.organization_id=initial_order.organization_id
-         AND initial_instance.order_id=initial_order.id
-        JOIN workflow_instance_step_states initial_step
-          ON initial_step.instance_id=initial_instance.id
-        JOIN workflow_instance_module_states initial_module
-          ON initial_module.instance_step_state_id=initial_step.id
-        LEFT JOIN workflow_instance_task_states initial_task
-          ON initial_task.instance_module_state_id=initial_module.id
-        LEFT JOIN order_module_instances initial_order_module
-          ON initial_order_module.organization_id=initial_order.organization_id
-         AND initial_order_module.order_id=initial_order.id
-         AND initial_order_module.module_code=initial_module.module_code
-       WHERE initial_batch_order.batch_id=transport_batches.id
-         AND initial_batch_order.organization_id=transport_batches.organization_id
-         AND initial_batch_order.status!='removed'
-         AND initial_module.status NOT IN ('completed','not_applicable')
-         AND ${activeFrozenTaskSql("initial_task")}
-         AND (
-           (${initialPosition}='${BATCH_RESPONSIBILITY_POSITION_CODES.operation}'
-             AND COALESCE(initial_task.assignee_user_id,initial_order_module.assignee_user_id)=?)
-           OR
-           (${initialPosition}='${BATCH_RESPONSIBILITY_POSITION_CODES.document}'
-             AND COALESCE(initial_task.assignee_user_id,initial_order_module.assignee_user_id)=?)
-         )
-    )`,
-    values: [input.operationAssigneeUserId, input.documentAssigneeUserId],
+    sql: "1=1",
+    values: [] as string[],
   };
 }
 

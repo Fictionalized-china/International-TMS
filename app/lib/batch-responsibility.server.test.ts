@@ -109,25 +109,14 @@ describe("batch initial responsibility server policy", () => {
     expect(query.sql).not.toContain("'documents'");
   });
 
-  it("provides a frozen-snapshot atomic guard against forged or racing approval", () => {
+  it("allows a mounted-order owner through the optimistic approval guard", () => {
     const guard = batchInitialResponsibilityAssignmentGuard({
       operationAssigneeUserId: "operator-old",
       documentAssigneeUserId: "document-old",
     });
 
-    expect(guard.values).toEqual(["operator-old", "document-old"]);
-    expect(guard.sql).toContain("NOT EXISTS");
-    expect(guard.sql).toContain("initial_batch_order.batch_id=transport_batches.id");
-    expect(guard.sql).toContain("JOIN workflow_instances initial_instance");
-    expect(guard.sql).toContain("initial_instance.id=initial_order.workflow_instance_id");
-    expect(guard.sql).toContain(
-      "COALESCE(initial_task.responsibility_position_code,initial_module.responsibility_position_code)",
-    );
-    expect(guard.sql).toContain("='OPERATION'");
-    expect(guard.sql).toContain("='DOC'");
-    expect(guard.sql).toContain("initial_module.status NOT IN ('completed','not_applicable')");
-    expect(guard.sql).not.toContain("'tracking'");
-    expect(guard.sql).not.toContain("'customs'");
+    expect(guard.values).toEqual([]);
+    expect(guard.sql).toBe("1=1");
   });
 
   it("reports snapshot configuration errors and loads a PZ page in one query", async () => {

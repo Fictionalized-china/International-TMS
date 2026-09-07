@@ -668,10 +668,10 @@ function SupervisorUnifiedQueue({ items, operationMembers, documentMembers, pend
           <div><span>挂载范围</span><b>{selected.order_count} 票订单</b></div>
           <div><span>线路</span><b>{selected.origin_location} → {selected.destination_location}</b></div>
         </div>
-        <div className="alert info batch-assignment-rule">系统按每票订单锁定的工作流快照识别未完成操作/单证职责；首次统一分配必须同时换人。原负责人保留在候选项中但不可选，并显示关联订单原因；旧负责人仅保留历史订单只读权限。</div>
+        <div className="alert info batch-assignment-rule">系统按每票订单锁定的工作流快照识别未完成操作/单证职责。可以选择挂载订单现有负责人，也可以选择其他合格人员；提交后，两人分别统一接管整张配载单的操作与单证职责。</div>
         {responsibilityConfigurationErrors.length > 0
           ? <div className="alert error" role="alert"><strong>工作流配置阻断：</strong>{responsibilityConfigurationErrors.join("；")}</div>
-          : !freshInitialAssigneesAvailable && <div className="alert warning" role="alert">当前组织没有同时可用的新操作负责人和新单证负责人；请先在组织架构中新增或启用其他人员。</div>}
+          : !freshInitialAssigneesAvailable && <div className="alert warning" role="alert">当前组织没有同时可用的操作负责人和单证负责人；请先检查人员状态、岗位和权限。</div>}
         <OrganizationAssigneePicker members={operationMembers} name="operationAssigneeUserId" idPrefix={`orders-batch-operation-${selected.id}`} personLabel="整批操作负责人" disabledUserReasons={operationDisabledReasons} required/>
         <OrganizationAssigneePicker members={documentMembers} name="documentAssigneeUserId" idPrefix={`orders-batch-document-${selected.id}`} personLabel="整批单证负责人" disabledUserReasons={documentDisabledReasons} required/>
         {fetcher.data?.formError && <div className="alert error">{fetcher.data.formError}</div>}

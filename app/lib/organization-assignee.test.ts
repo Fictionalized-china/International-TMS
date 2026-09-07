@@ -128,7 +128,7 @@ describe("organization assignee hierarchy", () => {
     expect(html).not.toContain('aria-label="选择部门"');
   });
 
-  it("does not submit an excluded former owner and explains why candidates are excluded", () => {
+  it("does not submit a disabled candidate and explains why it is unavailable", () => {
     const html = renderToStaticMarkup(createElement(OrganizationAssigneePicker, {
       members,
       name: "assigneeUserId",
@@ -139,8 +139,8 @@ describe("organization assignee hierarchy", () => {
       },
     }));
 
-    expect(html).toContain("已禁用 1 名挂载订单原负责人");
-    expect(html).toContain("原负责人，不可选");
+    expect(html).toContain("已禁用 1 名不符合当前指派条件的人员");
+    expect(html).toContain("（不可选）");
     expect(html).not.toContain("A 部门 / 1 岗位 / a1");
   });
 });

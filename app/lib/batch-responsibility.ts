@@ -143,13 +143,13 @@ function restrictionReason(
   orderNumbers: readonly string[],
 ) {
   const responsibilityLabel = kind === "operation" ? "操作" : "单证";
-  return `${userName}是挂载订单 ${orderNumbers.join("、")} 的原${responsibilityLabel}负责人；PZ 首次统一分配必须更换新${responsibilityLabel}负责人。`;
+  return `${userName}是挂载订单 ${orderNumbers.join("、")} 的现有${responsibilityLabel}负责人；如被选中，将继续作为整张 PZ 的统一${responsibilityLabel}负责人。`;
 }
 
 /**
- * A PZ handoff deliberately changes the people who own shared downstream work.
- * Every former downstream owner from every mounted order is therefore excluded,
- * not just the owner found on the first order.
+ * Keep the mounted orders' current owners for display and audit context. They
+ * remain valid candidates for the batch-wide handoff when their account,
+ * position and permissions satisfy the ordinary assignment checks.
  */
 export function buildBatchInitialResponsibilityRestrictions(
   assignments: readonly BatchOriginalResponsibilityAssignment[],
@@ -194,41 +194,30 @@ export function buildBatchInitialResponsibilityRestrictions(
 }
 
 export function batchInitialResponsibilityDisabledReasons(
-  restrictions: BatchInitialResponsibilityRestrictions,
-  kind: BatchResponsibilityKind,
+  _restrictions: BatchInitialResponsibilityRestrictions,
+  _kind: BatchResponsibilityKind,
 ) {
-  return Object.fromEntries(
-    restrictions[kind].map((restriction) => [restriction.userId, restriction.reason]),
-  );
+  return {} as Record<string, string>;
 }
 
 export function findBatchInitialResponsibilityConflict(
-  restrictions: BatchInitialResponsibilityRestrictions,
-  selection: {
+  _restrictions: BatchInitialResponsibilityRestrictions,
+  _selection: {
     operationAssigneeUserId: string;
     documentAssigneeUserId: string;
   },
 ): { kind: BatchResponsibilityKind; userId: string; reason: string } | null {
-  for (const kind of ["operation", "document"] as const) {
-    const selectedUserId = kind === "operation"
-      ? selection.operationAssigneeUserId
-      : selection.documentAssigneeUserId;
-    const restriction = restrictions[kind].find((item) => item.userId === selectedUserId);
-    if (restriction) return { kind, userId: selectedUserId, reason: restriction.reason };
-  }
   return null;
 }
 export function eligibleBatchInitialResponsibilityCandidates(
   members: readonly OrganizationAssigneeMember[],
-  restrictions: BatchInitialResponsibilityRestrictions,
+  _restrictions: BatchInitialResponsibilityRestrictions,
   kind: BatchResponsibilityKind,
 ) {
-  const excluded = new Set(restrictions[kind].map((item) => item.userId));
   const positionCode = BATCH_RESPONSIBILITY_POSITION_CODES[kind];
   return members.filter(
     (member) =>
       member.position_code === positionCode &&
-      !excluded.has(member.id) &&
       organizationAssigneeCanHandle(
         member,
         BATCH_RESPONSIBILITY_PERMISSION_REQUIREMENTS[kind],

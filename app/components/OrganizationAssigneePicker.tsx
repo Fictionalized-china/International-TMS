@@ -264,7 +264,7 @@ export function OrganizationAssigneePicker({
           value={member.id}
           disabled={Boolean(disabledUserReasons[member.id])}
         >
-          {member.display_name}{disabledUserReasons[member.id] ? "（原负责人，不可选）" : ""}
+          {member.display_name}{disabledUserReasons[member.id] ? "（不可选）" : ""}
         </option>)}
       </select>
       <small className={selectedPath ? "organization-assignee-path ready" : "organization-assignee-path"}>
@@ -275,7 +275,7 @@ export function OrganizationAssigneePicker({
             : "暂无同时绑定部门和岗位的有效个人账户，请先维护组织成员。"}
       </small>
       {disabledUserCount > 0 && <small className="organization-assignee-exclusion-note">
-        已禁用 {disabledUserCount} 名挂载订单原负责人；展开候选项可查看具体原因。
+        已禁用 {disabledUserCount} 名不符合当前指派条件的人员；展开候选项可查看具体原因。
       </small>}
     </div>
   );

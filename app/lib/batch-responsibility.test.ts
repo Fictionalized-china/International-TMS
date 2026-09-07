@@ -82,7 +82,7 @@ describe("batch responsibility policy", () => {
     expect(batchSharedResponsibilityIsActive("waiting_pickup")).toBe(false);
   });
 
-  it("excludes every mounted order's former downstream operator and document clerk", () => {
+  it("records every mounted order's current downstream operator and document clerk", () => {
     const restrictions = buildBatchInitialResponsibilityRestrictions([
       {
         orderId: "order-228",
@@ -150,7 +150,7 @@ describe("batch responsibility policy", () => {
     expect(restrictions.operation.some((item) => item.userId === "finance-user")).toBe(false);
   });
 
-  it("returns the same explanatory conflict used by UI disabling and POST validation", () => {
+  it("keeps mounted-order owners selectable for the batch-wide handoff", () => {
     const restrictions = buildBatchInitialResponsibilityRestrictions([
       {
         orderId: "order-228",
@@ -170,22 +170,18 @@ describe("batch responsibility policy", () => {
       },
     ]);
 
-    const operationConflict = findBatchInitialResponsibilityConflict(restrictions, {
+    expect(restrictions.operation[0]?.reason).toBe(
+      "原操作员是挂载订单 SO2026090400228 的现有操作负责人；如被选中，将继续作为整张 PZ 的统一操作负责人。",
+    );
+    expect(findBatchInitialResponsibilityConflict(restrictions, {
       operationAssigneeUserId: "operator-old",
       documentAssigneeUserId: "document-new",
-    });
-    expect(operationConflict).toEqual({
-      kind: "operation",
-      userId: "operator-old",
-      reason: "原操作员是挂载订单 SO2026090400228 的原操作负责人；PZ 首次统一分配必须更换新操作负责人。",
-    });
-    expect(batchInitialResponsibilityDisabledReasons(restrictions, "operation")).toEqual({
-      "operator-old": operationConflict?.reason,
-    });
+    })).toBeNull();
+    expect(batchInitialResponsibilityDisabledReasons(restrictions, "operation")).toEqual({});
     expect(findBatchInitialResponsibilityConflict(restrictions, {
       operationAssigneeUserId: "operator-new",
       documentAssigneeUserId: "document-old",
-    })?.kind).toBe("document");
+    })).toBeNull();
     expect(findBatchInitialResponsibilityConflict(restrictions, {
       operationAssigneeUserId: "operator-new",
       documentAssigneeUserId: "document-new",
@@ -273,7 +269,7 @@ describe("batch responsibility policy", () => {
     expect(readiness.operation).toEqual([]);
   });
 
-  it("rejects complete candidates when every candidate is an original order owner", () => {
+  it("accepts a qualified candidate who already owns a mounted order", () => {
     const restrictions = buildBatchInitialResponsibilityRestrictions([{
       orderId: "order-1",
       orderNumber: "SO-001",
@@ -292,7 +288,7 @@ describe("batch responsibility policy", () => {
       position_name: "操作岗",
       permission_codes: "transport.batch.assigned.view,order.module.tracking.manage,order.module.exceptions.manage",
     }], restrictions);
-    expect(readiness.operation).toEqual([]);
+    expect(readiness.operation.map((member) => member.id)).toEqual(["operation-original"]);
   });
 
   it("accepts fresh operation and document candidates with complete permissions", () => {
