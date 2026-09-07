@@ -19476,7 +19476,7 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .linear-order-page { height: auto; min-height: 100%; overflow: visible; }
 .linear-order-page .workspace { min-height: 0; display: grid; flex: 0 0 auto; grid-template-columns: minmax(0,1fr) 220px; gap: 8px; align-items: start; overflow: visible; }
 .linear-order-page .panel { border: 1px solid var(--line); border-radius: 4px; background: #fff; box-shadow: 0 2px 5px rgba(26,45,66,.02); }
-.linear-order-page .node-panel { min-height: 0; position: relative; display: flex; flex-direction: column; overflow: visible; padding: 0; }
+.linear-order-page .node-panel { min-width: 0; min-height: 0; position: relative; display: flex; flex-direction: column; overflow: visible; padding: 0; }
 .linear-order-page .node-header { padding: 8px 10px 7px; display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 1px solid var(--line); }
 .linear-order-page .node-title { display: flex; gap: 8px; align-items: center; }
 .linear-order-page .node-number { width: 25px; height: 25px; display: grid; flex: 0 0 auto; place-items: center; color: var(--orange); border: 1px solid #f2b29a; border-radius: 50%; font: 10px Consolas,monospace; }
@@ -20522,7 +20522,7 @@ html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animatio
 .linear-order-page .approval-inline-form {
   padding: 7px;
   display: grid;
-  grid-template-columns: minmax(120px,.6fr) minmax(260px,1.45fr) minmax(330px,1.55fr) max-content;
+  grid-template-columns: minmax(0,.6fr) minmax(0,1.45fr) minmax(0,1.55fr) max-content;
   gap: 7px;
   align-items: end;
 }
