@@ -29704,7 +29704,7 @@ html[data-motion="off"] *::after {
 
 .billing-workspace-tabs {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   margin-bottom: 10px;
   border: 1px solid #cbd8e5;
   background: #fff;
@@ -29755,6 +29755,17 @@ html[data-motion="off"] *::after {
 .billing-workspace-tabs a.active small { color: #d8e7f5; }
 
 .billing-workspace-page { padding: 0 10px 10px; overflow: hidden; }
+.billing-task-pack-filter { display: grid; grid-template-columns: minmax(260px, 1fr) auto auto; gap: 8px; align-items: end; margin: 10px 0; padding: 8px 10px; border: 1px solid #dce5ee; background: #f7f9fb; }
+.billing-task-pack-filter .field { min-width: 0; }
+.billing-task-pack-filter input { width: 100% !important; }
+.settlement-task-pack-table table { min-width: 1120px; }
+.settlement-task-pack-table td { vertical-align: top; }
+.settlement-task-pack-table td > :is(strong, small) { display: block; }
+.settlement-task-pack-table td > small { margin-top: 3px; color: #66798b; }
+.settlement-signoff-line { display: flex; flex-wrap: wrap; gap: 4px; }
+.settlement-signoff-line span { padding: 2px 5px; border: 1px solid #d4dee8; color: #718295; background: #f6f8fa; font-size: 10px; }
+.settlement-signoff-line span.done { border-color: #a8d9c5; color: #087553; background: #effaf5; }
+.settlement-signoff-line span.pending { border-color: #efc0b2; color: #a5472c; background: #fff5f1; }
 .billing-workspace-heading {
   align-items: center;
   margin: 0 -10px;

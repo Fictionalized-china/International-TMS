@@ -49,6 +49,8 @@ import {
   type SettlementExpense,
 } from "../lib/settlement-workbench.server";
 import { valueOf } from "../lib/validation";
+import { loadSettlementTaskPackCount, loadSettlementTaskPackPage } from "../lib/settlement-task-pack.server";
+import { settlementDirectionSignoffComplete, settlementTaskNextAction, type SettlementTaskPackRow } from "../lib/settlement-task-pack";
 
 type UserOption = { id: string; display_name: string };
 type SettlementUiAccess = Pick<SettlementMultiOrderActionAccess, "visible" | "canWrite" | "reason">;
@@ -67,6 +69,7 @@ const emptyActionAccessIndex = (): SettlementActionAccessIndex => ({
 });
 
 const tabCopy: Record<BillingTab, { label: string; description: string }> = {
+  tasks: { label: "结算任务包", description: "按订单查看全链路与下一步" },
   pending: { label: "待对账", description: "从已确认费用生成对账单" },
   reconciliations: { label: "对账单", description: "复核草稿并查看对账进度" },
   cash: { label: "收付款核销", description: "登记真实流水并完成核销" },
@@ -80,8 +83,9 @@ export async function loader({ request }: Route.LoaderArgs) {
     return { accessDenied: true as const, current };
   }
 
-  const view = readBillingView(new URL(request.url).searchParams);
-  const [summary, organization, users] = await Promise.all([
+  const requestUrl = new URL(request.url);
+  const view = readBillingView(requestUrl.searchParams, current.positionCode === "CASHIER" ? "cash" : "tasks");
+  const [summary, organization, users, taskPackTotal] = await Promise.all([
     loadSettlementSummary(env.DB, current),
     env.DB.prepare("SELECT name FROM organizations WHERE id=?")
       .bind(current.organizationId)
@@ -89,6 +93,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     env.DB.prepare(
       "SELECT u.id,u.display_name FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=? AND m.status='active' AND u.status='active' ORDER BY u.display_name",
     ).bind(current.organizationId).all<UserOption>(),
+    loadSettlementTaskPackCount(env.DB, current, view.tab === "tasks" ? view.query : ""),
   ]);
   const pageQuery = {
     page: view.page,
@@ -106,9 +111,12 @@ export async function loader({ request }: Route.LoaderArgs) {
   let invoiceHistoryPage = emptySettlementPage<InvoiceRecordRow>(view.page, BILLING_PAGE_SIZE);
   let legacyHistoryPage = emptySettlementPage<LegacyInvoiceRow>(view.page, BILLING_PAGE_SIZE);
   let availableCashTransactions: CashTransactionRow[] = [];
+  let taskPackPage = emptySettlementPage<SettlementTaskPackRow>(view.page, BILLING_PAGE_SIZE);
   const actionAccess = emptyActionAccessIndex();
 
-  if (view.tab === "pending") {
+  if (view.tab === "tasks") {
+    taskPackPage = await loadSettlementTaskPackPage(env.DB, current, pageQuery, taskPackTotal);
+  } else if (view.tab === "pending") {
     eligiblePage = await loadEligibleExpensePage(env.DB, current, pageQuery);
     for (const expense of eligiblePage.items) {
       actionAccess.createReconciliationByExpenseId[expense.id] = await loadSettlementWorkbenchActionAccess(env.DB, {
@@ -170,8 +178,9 @@ export async function loader({ request }: Route.LoaderArgs) {
     invoiceHistoryPage,
     legacyHistoryPage,
     availableCashTransactions,
+    taskPackPage,
     actionAccess,
-    counts: summary.counts,
+    counts: { tasks: taskPackTotal, ...summary.counts },
     balances: summary.balances,
   };
 }
@@ -402,6 +411,11 @@ export default function Billing({ loaderData, actionData }: Route.ComponentProps
       {actionData.formError ?? actionData.success}
     </div>}
 
+    {loaderData.view.tab === "tasks" && <SettlementTaskPackPage
+      view={loaderData.view}
+      page={loaderData.taskPackPage}
+      positionCode={loaderData.current.positionCode}
+    />}
     {loaderData.view.tab === "pending" && <PendingReconciliationPage
       view={loaderData.view}
       page={loaderData.eligiblePage}
@@ -437,6 +451,55 @@ export default function Billing({ loaderData, actionData }: Route.ComponentProps
       legacyPage={loaderData.legacyHistoryPage}
     />}
   </>;
+}
+
+function SettlementTaskPackPage({ view, page, positionCode }: {
+  view: BillingView;
+  page: SettlementPage<SettlementTaskPackRow>;
+  positionCode: string | null;
+}) {
+  return <section className="panel billing-workspace-page settlement-task-pack-page">
+    <WorkspaceHeading
+      title="结算任务包"
+      description="每张订单只保留一个下一步入口；费用、三方签核、对账、发票、核销、凭证和复盘状态在同一行核对。"
+      count={`${page.total} 单`}
+    />
+    <Form method="get" className="billing-task-pack-filter">
+      <input type="hidden" name="tab" value="tasks"/>
+      <label className="field"><span>查找结算订单</span><input name="q" defaultValue={view.query} placeholder="订单号或客户"/></label>
+      <button className="btn primary">查询</button>
+      <Link className="btn" to="/admin/billing?tab=tasks">重置</Link>
+    </Form>
+    <div className="table-wrap settlement-task-pack-table"><table>
+      <thead><tr><th>订单 / 客户</th><th>费用</th><th>三方签核</th><th>对账单</th><th>发票 / 核销</th><th>归档资料 / 复盘</th><th>本岗下一步</th></tr></thead>
+      <tbody>{page.items.map((row) => {
+        const next = settlementTaskNextAction(row, positionCode);
+        const csDone = settlementDirectionSignoffComplete(row, "confirmed");
+        const businessDone = settlementDirectionSignoffComplete(row, "business_reviewed");
+        const financeDone = settlementDirectionSignoffComplete(row, "finance_reviewed");
+        return <tr key={row.id}>
+          <td><OrderNumberLink id={row.id} number={row.order_number}/><small>{row.customer_name} · {row.business_type === "ltl" ? "拼车" : "整车"}</small></td>
+          <td><strong>{row.expense_count} 条</strong><small>应收 {row.receivable_count} · 应付 {row.payable_count}</small></td>
+          <td><div className="settlement-signoff-line"><StatusMark done={csDone} label="客服"/><StatusMark done={businessDone} label="业务"/><StatusMark done={financeDone} label="财务"/></div></td>
+          <td><strong>{row.reconciliation_count ? `${row.reconciliation_confirmed_count} 已确认` : "未生成"}</strong><small>{row.reconciliation_draft_count ? `${row.reconciliation_draft_count} 张草稿待确认` : "无待确认草稿"}</small></td>
+          <td><strong>发票 {moneyProgress(row.invoiced_amount, row.expense_amount)}</strong><small>核销 {moneyProgress(row.settled_amount, row.expense_amount)}</small></td>
+          <td><strong>账单 {row.billing_document_count ? "已归集" : "待归集"} · 凭证 {row.payment_receipt_count ? "已归集" : "待归集"}</strong><small>{row.review_conclusion ? "复盘已完成" : row.review_snapshot_count ? "复盘待确认" : "尚未复盘"}</small></td>
+          <td><Link className={`btn small${next.waiting ? "" : " primary"}`} to={next.href}>{next.label}</Link><small>{row.current_step_name || "结算协同"}</small></td>
+        </tr>;
+      })}</tbody>
+    </table></div>
+    {!page.items.length && <EmptyState>没有符合当前条件的结算订单。</EmptyState>}
+    <QueryPagination {...page} unit="单"/>
+  </section>;
+}
+
+function StatusMark({ done, label }: { done: boolean; label: string }) {
+  return <span className={done ? "done" : "pending"}>{done ? "✓" : "·"} {label}</span>;
+}
+
+function moneyProgress(done: number, total: number) {
+  if (Number(total) <= 0 || Number(done) <= 0.009) return "未开始";
+  return Number(done) + 0.009 >= Number(total) ? "已完成" : "部分完成";
 }
 
 function BillingTabs({ active, counts }: {

@@ -4,9 +4,9 @@ import { readBillingView, settlementExpenseGroupKey } from "./billing-view";
 describe("billing view", () => {
   it("uses a stable default tab and clamps invalid query values", () => {
     expect(readBillingView(new URLSearchParams("tab=unknown&page=-2&direction=bad"))).toMatchObject({
-      tab: "pending",
+      tab: "tasks",
       page: 1,
-      direction: "receivable",
+      direction: "",
       historyType: "cash",
     });
     expect(readBillingView(new URLSearchParams("tab=history&historyType=invoices&page=3"))).toMatchObject({
@@ -14,6 +14,10 @@ describe("billing view", () => {
       page: 3,
       historyType: "invoices",
     });
+  });
+
+  it("supports a role-specific default tab", () => {
+    expect(readBillingView(new URLSearchParams(), "cash").tab).toBe("cash");
   });
 
   it("normalizes currency and preserves valid filters", () => {

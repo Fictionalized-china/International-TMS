@@ -3,6 +3,7 @@ import { readListPage } from "./list-pagination";
 export const BILLING_PAGE_SIZE = 10;
 
 export const billingTabs = [
+  "tasks",
   "pending",
   "reconciliations",
   "cash",
@@ -35,11 +36,11 @@ const statuses = new Set([
 ]);
 const historyTypes = new Set<BillingHistoryType>(["cash", "invoices", "legacy"]);
 
-export function readBillingView(searchParams: URLSearchParams): BillingView {
+export function readBillingView(searchParams: URLSearchParams, defaultTab: BillingTab = "tasks"): BillingView {
   const requestedTab = searchParams.get("tab");
   const tab = billingTabs.includes(requestedTab as BillingTab)
     ? requestedTab as BillingTab
-    : "pending";
+    : defaultTab;
   const requestedDirection = searchParams.get("direction") || "";
   const requestedStatus = searchParams.get("status") || "";
   const requestedHistoryType = searchParams.get("historyType") || "";

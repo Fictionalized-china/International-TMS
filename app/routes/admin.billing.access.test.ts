@@ -116,6 +116,10 @@ vi.mock("../lib/settlement-workbench.server", () => ({
   recordCashTransaction: harness.recordCashTransaction,
   allocateCashTransaction: harness.allocateCashTransaction,
 }));
+vi.mock("../lib/settlement-task-pack.server", () => ({
+  loadSettlementTaskPackCount: vi.fn(async () => 0),
+  loadSettlementTaskPackPage: vi.fn(async () => ({ items: [], page: 1, pageCount: 1, pageSize: 10, total: 0 })),
+}));
 
 import { action, loader } from "./admin.billing";
 
