@@ -21697,6 +21697,108 @@ html[data-motion="off"] .consolidation-view-content { animation: none; }
 .linear-order-page .dense-module-stack .module-business-section > .review-generation-form {
   padding: 9px;
 }
+.linear-order-page .order-review-workbench .order-review-status-row {
+  min-height: 32px;
+  padding: 5px 9px;
+  gap: 8px;
+}
+.linear-order-page .order-review-workbench .order-review-status-row > span:last-child {
+  font-size: 10px;
+}
+.linear-order-page .order-review-workbench .review-blocker-list {
+  margin: 0;
+  padding: 6px 9px;
+}
+.linear-order-page .order-review-workbench .review-generation-form {
+  gap: 8px;
+  padding: 7px 9px 8px;
+}
+.linear-order-page .order-review-workbench .review-generation-form label {
+  gap: 4px;
+  font-size: 10px;
+}
+.linear-order-page .order-review-workbench .review-generation-form textarea {
+  min-height: 96px;
+}
+.linear-order-page .order-review-workbench .review-generation-form button {
+  min-height: 32px;
+}
+.linear-order-page .order-review-workbench .review-finalize-form {
+  min-height: 45px;
+  padding: 6px 9px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+.linear-order-page .order-review-workbench .review-finalize-form button {
+  min-width: 150px;
+}
+.linear-order-page .order-review-evidence {
+  background: #fff;
+}
+.linear-order-page .order-review-evidence > summary {
+  min-height: 40px;
+  padding: 6px 9px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  color: #234967;
+  background: #f7f9fb;
+  list-style: none;
+  cursor: pointer;
+}
+.linear-order-page .order-review-evidence > summary::-webkit-details-marker {
+  display: none;
+}
+.linear-order-page .order-review-evidence > summary span,
+.linear-order-page .order-review-evidence > summary strong,
+.linear-order-page .order-review-evidence > summary small {
+  display: block;
+}
+.linear-order-page .order-review-evidence > summary strong {
+  font-size: 11px;
+}
+.linear-order-page .order-review-evidence > summary small {
+  margin-top: 2px;
+  color: #788a9d;
+  font-size: 9px;
+}
+.linear-order-page .order-review-evidence > summary em {
+  flex: 0 0 auto;
+  color: #0a4fa8;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 700;
+}
+.linear-order-page .order-review-evidence > summary em::before {
+  content: "展开";
+}
+.linear-order-page .order-review-evidence[open] > summary em::before {
+  content: "收起";
+}
+.linear-order-page .order-review-evidence > summary:hover,
+.linear-order-page .order-review-evidence > summary:focus-visible {
+  color: #0a4fa8;
+  background: #f2f7fc;
+  outline: 2px solid #b8cde0;
+  outline-offset: -2px;
+}
+.linear-order-page .order-review-evidence-body {
+  border-top: 1px solid var(--line);
+}
+.linear-order-page .order-review-evidence-body > .module-business-section + .module-business-section {
+  border-top: 1px solid var(--line);
+}
+@media (max-width: 760px) {
+  .linear-order-page .order-review-workbench .review-finalize-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .linear-order-page .order-review-workbench .review-finalize-form button {
+    width: 100%;
+  }
+}
 .linear-order-page .module-summary-table table,
 .linear-order-page .information-table table,
 .linear-order-page .tracking-progress-table table,

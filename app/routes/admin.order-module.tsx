@@ -7936,8 +7936,8 @@ function ModuleBusinessData({
     return (
       <div className="module-business-stack dense-module-stack order-review-workbench">
         <BusinessSubsection
-          title="复盘结论与完成判定"
-          hint="系统只按本订单锁定的工作流实例校验启用且必办的模块、字段与资料；可选结算余额会保留事实，但不阻断最终归档。"
+          title="订单复盘状态"
+          hint="先处理待办，再填写并保存复盘草稿；只有最终确认后订单才会完成归档。"
         >
           <div className="order-review-status-row">
             <span className={`status-pill review-status-${review.completionStatus}`}>
@@ -7950,7 +7950,7 @@ function ModuleBusinessData({
             <span>
               {review.snapshotId
                 ? `第 ${review.revision} 版 · ${review.generatedBy || "系统"} · ${review.generatedAt ? new Date(review.generatedAt).toLocaleString("zh-CN") : "—"}`
-                : "尚未生成订单复盘"}
+                : "尚未保存复盘草稿"}
             </span>
           </div>
           {review.blockers.length ? (
@@ -7976,12 +7976,59 @@ function ModuleBusinessData({
                 ? "当前工作流必办门禁已通过；仍有可选结算余额，可归档并在之后继续补录。"
                 : review.snapshotId
                   ? "业务条件及当前工作流要求的结算门禁均已闭环，可最终确认归档。"
-                  : "业务条件及当前工作流门禁已通过，请先生成复盘草稿并核对结论。"}
+                  : "业务条件及当前工作流门禁已通过，请填写并保存复盘草稿。"}
             </p>
           )}
         </BusinessSubsection>
 
-        <BusinessSubsection title="时效复盘" hint="所有时间均来自对应业务模块的实际记录，不要求重复填写。">
+        {canGenerate && (
+          <BusinessSubsection
+            title={review.snapshotId ? "更新订单复盘" : "填写订单复盘"}
+            hint="保存草稿不会完成订单；保存后可在下方执行最终确认。"
+            className="order-review-action-section"
+          >
+            <Form method="post" className="review-generation-form">
+              <input type="hidden" name="intent" value="generate_order_review" />
+              <ModuleField fields={data.workflowFields} fieldKey="customer_dispute_summary" label="客户异议摘要">
+                {(required) => <textarea name="customerDisputeSummary" required={required} defaultValue={review.customerDisputeSummary || ""} placeholder="没有异议可留空" />}
+              </ModuleField>
+              <ModuleField fields={data.workflowFields} fieldKey="review_result" label="复盘结论" fallbackRequired>
+                {(required) => <textarea name="reviewConclusion" required={required} defaultValue={review.reviewConclusion || ""} placeholder="本票业务结论、主要偏差与原因" />}
+              </ModuleField>
+              <ModuleField fields={data.workflowFields} fieldKey="review_improvements" label="改进建议">
+                {(required) => <textarea name="improvementNotes" required={required} defaultValue={review.improvementNotes || ""} placeholder="后续可复用的改进动作" />}
+              </ModuleField>
+              <button className="primary" disabled={busy}>{review.snapshotId ? "保存复盘修改" : "保存复盘草稿"}</button>
+            </Form>
+          </BusinessSubsection>
+        )}
+        {canGenerate && review.snapshotId && (
+          <BusinessSubsection
+            title="确认完成并归档"
+            hint="最终提交时会重新校验业务、文件和结算门禁。"
+            className="order-review-finalize-section"
+          >
+            {finalizationGate?.allowed ? (
+              <Form method="post" className="review-finalize-form">
+                <input type="hidden" name="intent" value="finalize_order_review" />
+                <label className="checkbox-line">
+                  <input type="checkbox" name="confirmFinalReview" value="1" required />
+                  <span>我已核对复盘结论及全部业务、结算和归档资料。</span>
+                </label>
+                <button className="primary" disabled={busy}>确认完成并归档</button>
+              </Form>
+            ) : (
+              <p className="alert warning">
+                {finalizationGate?.reason || "当前仍有门禁未通过，处理完成并重新保存复盘草稿后才能最终确认。"}
+              </p>
+            )}
+          </BusinessSubsection>
+        )}
+
+        <details className="order-review-evidence">
+          <summary><span><strong>查看复盘依据</strong><small>时效、货量、费用、异常与人员均由系统自动汇总</small></span><em aria-hidden="true" /></summary>
+          <div className="order-review-evidence-body">
+        <BusinessSubsection title="时效记录" hint="所有时间均来自对应业务模块的实际记录，不要求重复填写。">
           <div className="table-wrap module-record-table review-timing-table">
             <table>
               <thead><tr>{timings.map(([label]) => <th key={label}>{label}</th>)}</tr></thead>
@@ -7990,7 +8037,7 @@ function ModuleBusinessData({
           </div>
         </BusinessSubsection>
 
-        <BusinessSubsection title="货量复盘" hint="按计划、仓库实收和实际装车三种口径并列展示。">
+        <BusinessSubsection title="货量对比" hint="按计划、仓库实收和实际装车三种口径并列展示。">
           <div className="table-wrap module-record-table">
             <table>
               <thead><tr><th>口径</th><th>件数</th><th>重量 KG</th><th>体积 CBM</th></tr></thead>
@@ -8042,45 +8089,8 @@ function ModuleBusinessData({
             </table>
           </div>
         </BusinessSubsection>
-
-        {canGenerate && (
-          <BusinessSubsection title="生成订单复盘草稿" hint="可以重复生成新版本；每次均重新读取业务模块实际数据，但不会直接完成订单。">
-            <Form method="post" className="review-generation-form">
-              <input type="hidden" name="intent" value="generate_order_review" />
-              <ModuleField fields={data.workflowFields} fieldKey="customer_dispute_summary" label="客户异议摘要">
-                {(required) => <textarea name="customerDisputeSummary" required={required} defaultValue={review.customerDisputeSummary || ""} placeholder="没有异议可留空" />}
-              </ModuleField>
-              <ModuleField fields={data.workflowFields} fieldKey="review_result" label="复盘结论" fallbackRequired>
-                {(required) => <textarea name="reviewConclusion" required={required} defaultValue={review.reviewConclusion || ""} placeholder="本票业务结论、主要偏差与原因" />}
-              </ModuleField>
-              <ModuleField fields={data.workflowFields} fieldKey="review_improvements" label="改进建议">
-                {(required) => <textarea name="improvementNotes" required={required} defaultValue={review.improvementNotes || ""} placeholder="后续可复用的改进动作" />}
-              </ModuleField>
-              <button className="primary" disabled={busy}>生成 / 更新复盘草稿</button>
-            </Form>
-          </BusinessSubsection>
-        )}
-        {canGenerate && review.snapshotId && (
-          <BusinessSubsection
-            title="最终确认归档"
-            hint="这是独立的最终动作；系统会在提交时重新校验当前工作流的模块、文件、字段和结算门禁。"
-          >
-            {finalizationGate?.allowed ? (
-              <Form method="post" className="review-generation-form">
-                <input type="hidden" name="intent" value="finalize_order_review" />
-                <label className="checkbox-line">
-                  <input type="checkbox" name="confirmFinalReview" value="1" required />
-                  <span>我已核对复盘结论及全部业务、结算和归档资料，确认完成本订单。</span>
-                </label>
-                <button className="primary" disabled={busy}>最终确认并归档订单</button>
-              </Form>
-            ) : (
-              <p className="alert warning">
-                {finalizationGate?.reason || "当前仍有门禁未通过，处理完成并重新生成复盘草稿后才能最终确认。"}
-              </p>
-            )}
-          </BusinessSubsection>
-        )}
+          </div>
+        </details>
         {manage && <Link className="secondary module-external-link" to="/admin/billing">进入费用结算与核销</Link>}
       </div>
     );
