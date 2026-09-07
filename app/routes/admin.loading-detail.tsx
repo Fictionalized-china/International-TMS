@@ -4,6 +4,7 @@ import { Form, Link, useNavigation, useSearchParams } from "react-router";
 import type { Route } from "./+types/admin.loading-detail";
 import { OrderNumberLink } from "../components/EntityNumberLink";
 import { OrganizationAssigneePicker } from "../components/OrganizationAssigneePicker";
+import { ActionToast } from "../components/ActionToast";
 import type { OrganizationAssigneeMember } from "../lib/organization-assignee";
 import { isActiveOrganizationAssigneeForPositions } from "../lib/organization-assignee.server";
 import { requireSessionUser } from "../lib/auth.server";
@@ -1645,7 +1646,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
     setDetailDrawerOpen(true);
   };
   const overseasInboundHandoff=resolveBatchOverseasInboundHandoff(loaderData.orders);
-  return <><header className="page-header batch-tracking-page-header"><div><p className="eyebrow">PZ LOAD · TRANSPORT TRACKING</p><h1>{loaderData.batch.batch_number}</h1><p>{loaderData.batch.batch_name} · {loaderData.batch.origin_location} → {loaderData.batch.destination_location}</p></div><div className="page-actions">{loaderData.returnOrderId&&<Link className="secondary" to={`/admin/orders/${loaderData.returnOrderId}`}>返回订单详情</Link>}<Link className="secondary" to="/admin/loading">返回配载单跟踪</Link><span className="status-pill">{allDispatched?"后台运输跟踪":"等待仓库出库"}</span><span className="status-pill">{roadStatusLabels[loaderData.batch.road_status]||loaderData.batch.road_status}</span></div></header><ActionToast signal={actionData} message={actionData?.formError??actionData?.success} tone={actionData?.formError?"error":"success"}/>
+  return <><header className="page-header batch-tracking-page-header"><div><p className="eyebrow">PZ LOAD · TRANSPORT TRACKING</p><h1>{loaderData.batch.batch_number}</h1><p>{loaderData.batch.batch_name} · {loaderData.batch.origin_location} → {loaderData.batch.destination_location}</p></div><div className="page-actions">{loaderData.returnOrderId&&<Link className="secondary" to={`/admin/orders/${loaderData.returnOrderId}`}>返回订单详情</Link>}<Link className="secondary" to="/admin/loading">返回配载单跟踪</Link><span className="status-pill">{allDispatched?"后台运输跟踪":"等待仓库出库"}</span><span className="status-pill">{roadStatusLabels[loaderData.batch.road_status]||loaderData.batch.road_status}</span></div></header><ActionToast data={actionData}/>
   <div className="batch-detail-layout"><main className="batch-detail-main">
   {requiresSupervisorApproval&&loaderData.batch.approval_status==="submitted"&&<section className="panel batch-command-panel">
     <div className="panel-header"><div><h2>配载单待操作主管审核与统一分配</h2><p>一次选择整批操作负责人和整批单证负责人；提交成功后，两人分别接管本 PZ 下全部订单的后续共同业务。</p></div><span className="status-pill warning">待审核</span></div>
@@ -2043,22 +2044,6 @@ function BatchDocumentWorkbench({batchId,orders,visibleOrders,orderPagination,ba
 
 export function BatchOrderArchiveButton({orderId,onOpen}:{orderId:string;onOpen:(orderId:string)=>void}){
   return <button className="secondary" type="button" onClick={()=>onOpen(orderId)} aria-haspopup="dialog">在右侧查看完整归档</button>;
-}
-
-function ActionToast({signal,message,tone}:{signal?:unknown;message?:string;tone:"success"|"error"}){
-  const [visible,setVisible]=useState(Boolean(message));
-  useEffect(()=>{
-    if(!message)return;
-    setVisible(true);
-    const timer=window.setTimeout(()=>setVisible(false),4200);
-    return()=>window.clearTimeout(timer);
-  },[message,signal]);
-  if(!message||!visible)return null;
-  return <div className={`batch-action-toast ${tone}`} role={tone==="error"?"alert":"status"} aria-live={tone==="error"?"assertive":"polite"}>
-    <span>{tone==="error"?"操作未完成":"操作成功"}</span>
-    <p>{message}</p>
-    <button type="button" aria-label="关闭提示" onClick={()=>setVisible(false)}>×</button>
-  </div>;
 }
 
 export function BatchTrackingWorkbench({batchId,batchNumber,orders,visibleOrders,orderPagination,trackingMilestones,trackingFlags,workflowPolicies,milestoneAction,actualExitAction,batchVehiclePlate,overseasVehiclePlate,borderPort,customsLocation,busy,manage,warehouseReady,documentGateReady,exitConfirmed,canConfirmExit,exitBlockers,borderPorts,documentsHref,actionCloseSignal}:{

@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { Form, Link, redirect, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.order-operations";
+import { ActionToast } from "../components/ActionToast";
 import { ensureOrderModules } from "../lib/order-modules.server";
 import { requireSessionUser } from "../lib/auth.server";
 import { requireOrderAccess } from "../lib/order-access.server";
@@ -671,15 +672,7 @@ export default function OrderOperations({
           返回订单挂载页
         </Link>
       </div>
-      {actionData && (
-        <div
-          className={`alert ${"formError" in actionData ? "error" : "success"}`}
-        >
-          {"formError" in actionData
-            ? actionData.formError
-            : actionData.success}
-        </div>
-      )}
+      <ActionToast data={actionData}/>
       <nav className="operation-jump">
         <a href="#cargo">货品包装</a>
         <a href="#loading">批次配载</a>

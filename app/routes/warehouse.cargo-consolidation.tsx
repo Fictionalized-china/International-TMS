@@ -4,6 +4,7 @@ import { Form, Link, useNavigation } from "react-router";
 import type { Route } from "./+types/warehouse.cargo-consolidation";
 import { Modal } from "../components/Modal";
 import { ConfirmAction } from "../components/ConfirmAction";
+import { ActionToast } from "../components/ActionToast";
 import { writeAudit } from "../lib/audit.server";
 import { requireSessionUser } from "../lib/auth.server";
 import { ensureOrderModules, syncOrderWorkflowSnapshot } from "../lib/order-modules.server";
@@ -480,7 +481,7 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
       <div><p className="eyebrow">CARGO CONSOLIDATION</p><h1>货物配载</h1><p>勾选完整拼车订单并生成正式 PZ 配载单；本页仅查看文件齐套状态，不再上传订单文件。</p></div>
       <Link className="secondary" to={`/warehouse/loading-documents?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}`}>进入配载文件</Link>
     </header>
-    {actionData?.formError&&<div className="alert error">{actionData.formError}</div>}{actionData?.success&&<div className="alert success"><strong>{actionData.success}</strong>{actionData.batchId&&<> · 下一步由操作主管审核并统一分配整批负责人。<Link to={`/admin/loading/${actionData.batchId}`}>查看审核状态</Link></>}</div>}
+    <ActionToast data={actionData}/>
     <section className="panel consolidation-view-panel">
       <nav className="consolidation-view-tabs peer-page-tabs" aria-label="货物配载页面">
         <Link className={activeView==="stock"?"active":""} aria-current={activeView==="stock"?"page":undefined} to={consolidationViewHref(loaderData,"stock")} viewTransition>在库货物 <span>{loaderData.total}</span></Link>

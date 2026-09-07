@@ -8,6 +8,7 @@ import { loadWarehouseContext } from "../lib/warehouse-context.server";
 import { warehouseRoleLabels } from "../lib/road-master-data";
 import { AppIcon } from "../components/AppIcon";
 import { PrototypeBrandMark } from "../components/PrototypeBrandMark";
+import { ActionToast } from "../components/ActionToast";
 import { ConnectionStatus } from "../components/InteractionFeedback";
 import { WorkspacePreferences } from "../components/WorkspacePreferences";
 import { InternalNotificationCenter } from "../components/InternalNotificationCenter";
@@ -281,8 +282,7 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
             )}
           </section>
         )}
-        {loaderData.result && <div className="alert success">{loaderData.result}</div>}
-        {loaderData.error && <div className="alert error">{loaderData.error}</div>}
+        <ActionToast message={loaderData.error || loaderData.result} tone={loaderData.error ? "error" : "success"}/>
         <Outlet />
       </main>
       </div>

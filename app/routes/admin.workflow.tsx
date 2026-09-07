@@ -10,6 +10,7 @@ import {
 import { valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import { Modal } from "../components/Modal";
+import { ActionToast } from "../components/ActionToast";
 import { ConfirmAction } from "../components/ConfirmAction";
 import { orderModuleDefinitions, type OrderModuleCode } from "../lib/order-modules";
 import { chunkD1Rows, chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
@@ -1911,11 +1912,7 @@ export default function Workflow({ loaderData, actionData }: Route.ComponentProp
           )}
         </div>
       </header>
-      {(successMessage || formError) && (
-        <div className={`alert ${formError ? "error" : "success"}`}>
-          {formError ?? successMessage}
-        </div>
-      )}
+      <ActionToast message={formError ?? successMessage} tone={formError ? "error" : "success"} data={actionData}/>
 
       <section className="workflow-type-groups" aria-label="按订单类型分类的工作流">
         <WorkflowTypeGroup

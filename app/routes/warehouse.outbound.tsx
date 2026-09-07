@@ -1,11 +1,12 @@
 ﻿import { env } from "cloudflare:workers";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Form, Link, redirect, useNavigation } from "react-router";
 import type { Route } from "./+types/warehouse.outbound";
 import { Modal } from "../components/Modal";
 import { QueryPagination } from "../components/QueryPagination";
+import { ActionToast } from "../components/ActionToast";
 import { requireSessionUser } from "../lib/auth.server";
-import { valueOf } from "../lib/validation";
+import { validatePhone, valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import { syncOrderWorkflowSnapshot } from "../lib/order-modules.server";
 import { isValidCustomerIdentityCode } from "../lib/customer-identity";
@@ -65,6 +66,7 @@ type CarrierOption={id:string;name:string};
 type VehicleOption={id:string;carrier_id:string;carrier_name:string;plate_number:string;vehicle_type:string|null};
 type DriverOption={id:string;carrier_id:string;carrier_name:string;name:string;phone:string|null};
 type OutboundResources={carriers:CarrierOption[];vehicles:VehicleOption[];drivers:DriverOption[]};
+type PendingOutboundDriver={id:string;carrierId:string;name:string;phone:string|null;licenseNumber:string|null};
 type ReferenceOption={category:"border_port"|"customs_place";code:string;name:string};
 type ManifestDoc={id:string;order_id:string;file_name:string;review_status:string;created_at:string};
 type OutboundDocument={orderId:string;orderNumber:string;customerId:string;customerName:string;required:boolean;attachmentId:string|null;code:LoadingDocumentCode;name:string;fileName:string|null;contentType:string|null;sizeBytes:number|null;reviewStatus:string|null};
@@ -73,6 +75,22 @@ type OutboundExecutionPolicy=WarehouseOutboundWorkflowPolicy&{batchFields:Loadin
 type OutboundPolicyDifference={fieldKey:string;label:string;mode:"optional"};
 type OutboundTaskWorkflowState={scanConfirmation:WarehouseOutboundWorkflowPolicy["scanConfirmation"];loadingStage:LoadingBatchStageGate;workflowSyncPending:boolean};
 type OutboundInspection={batch:Batch;documentGroups:OutboundDocumentGroup[];documents:OutboundDocument[];allUploaded:boolean;allApproved:boolean;notesActive:boolean;notesRequired:boolean;scanActive:boolean;scanRequired:boolean;executionPolicy:OutboundExecutionPolicy;resourceDifferences:OutboundPolicyDifference[];resourcePolicyError:string|null};
+
+export const NEW_OUTBOUND_DRIVER_ID="__new_outbound_driver__";
+
+export function validateNewOutboundDriverRegistration(input:{
+  driverId:string;
+  carrierId:string;
+  name:string;
+  phone:string;
+  phoneRequired:boolean;
+}){
+  if(input.driverId!==NEW_OUTBOUND_DRIVER_ID)return null;
+  if(!input.carrierId.trim())return"请先选择境外承运商，再新建司机";
+  if(input.name.trim().length<2)return"新司机姓名至少填写 2 个字符";
+  if(input.phoneRequired&&!input.phone.trim())return"请填写新司机手机号";
+  return input.phone.trim()?validatePhone(input.phone.trim(),"新司机手机号")??null:null;
+}
 
 export function warehouseDispatchCompletionResult({dispatchNumber,businessType,completionWarningText}:{dispatchNumber:string;businessType:string;completionWarningText:string}){
   return{success:(businessType==="ltl"
@@ -403,6 +421,7 @@ export async function action({request}:Route.ActionArgs){
   if(intent==="create"){
     const batchId=valueOf(form,"batchId"),orderNumber=valueOf(form,"orderNumber").trim(),customerIdentityCode=valueOf(form,"customerIdentityCode").trim().toUpperCase(),notes=valueOf(form,"notes");
     const carrierId=valueOf(form,"outboundCarrierId"),vehicleId=valueOf(form,"outboundVehicleId"),driverId=valueOf(form,"outboundDriverId"),plannedDepartureAt=valueOf(form,"plannedDepartureAt"),plannedArrivalAt=valueOf(form,"plannedArrivalAt");
+    const newDriverName=valueOf(form,"newOutboundDriverName").trim(),newDriverPhone=valueOf(form,"newOutboundDriverPhone").trim(),newDriverLicenseNumber=valueOf(form,"newOutboundDriverLicenseNumber").trim();
     const requestedExitPort=valueOf(form,"exitPort").trim(),requestedCustomsLocation=valueOf(form,"customsLocation").trim();
     if(!batchId&&!orderNumber)return{formError:"请输入订单号或选择货齐入库记录"};
     if(customerIdentityCode&&!isValidCustomerIdentityCode(customerIdentityCode))return{formError:"客户识别码应为5位字母与数字混合，且不包含 O、0、1、L"};
@@ -482,7 +501,21 @@ export async function action({request}:Route.ActionArgs){
       return rejectCreate(`请先上传、检查并确认：${pending.map(document=>`${document.orderNumber} ${document.name}`).join("、")}`);
     }
     if(inspection.notesActive&&inspection.notesRequired&&!notes.trim())return rejectCreate("请填写装车交接备注");
+    let newDriverRegistration:PendingOutboundDriver|null=null;
     if(batch.business_type==="ftl"){
+      const newDriverError=validateNewOutboundDriverRegistration({
+        driverId,
+        carrierId,
+        name:newDriverName,
+        phone:newDriverPhone,
+        phoneRequired:inspection.executionPolicy.batchFields.main_driver_phone.isRequired,
+      });
+      if(newDriverError)return rejectCreate(newDriverError);
+      if(driverId===NEW_OUTBOUND_DRIVER_ID){
+        const existingDriver=await env.DB.prepare("SELECT id FROM carrier_drivers WHERE organization_id=? AND carrier_id=? AND name=? LIMIT 1")
+          .bind(user.organizationId,carrierId,newDriverName).first<{id:string}>();
+        newDriverRegistration={id:existingDriver?.id??crypto.randomUUID(),carrierId,name:newDriverName,phone:newDriverPhone||null,licenseNumber:newDriverLicenseNumber||null};
+      }
       const resourceError=validateFtlOutboundResourceSelection({
         carrierId,vehicleId,driverId,plannedDepartureAt,plannedArrivalAt,
         policies:{
@@ -494,7 +527,7 @@ export async function action({request}:Route.ActionArgs){
       if(resourceError)return rejectCreate(resourceError);
     }
     let planned=batch.business_type==="ftl"
-      ?await resolveFtlDispatchPlan(user.organizationId,{carrierId,vehicleId,driverId,plannedDepartureAt,plannedArrivalAt},inspection.executionPolicy.batchFields)
+      ?await resolveFtlDispatchPlan(user.organizationId,{carrierId,vehicleId,driverId,plannedDepartureAt,plannedArrivalAt,newDriver:newDriverRegistration},inspection.executionPolicy.batchFields)
       :await resolveDispatchPlan(user.organizationId,batch.order_id,batch.business_type,inspection.batch.transport_batch_id,inspection.executionPolicy.batchFields,warehouse.id);
     if("error" in planned)return rejectCreate(planned.error);
     let plate=planned.vehicle_plate?.trim().toUpperCase()||"",driver=planned.driver_name?.trim()||"",phone=planned.driver_phone?.trim()||"",carrier=planned.carrier_name?.trim()||"";
@@ -548,7 +581,7 @@ export async function action({request}:Route.ActionArgs){
       if(finalResourceError)return{formError:finalResourceError,inspection:finalInspection};
     }
     const finalPlanned=batch.business_type==="ftl"
-      ?await resolveFtlDispatchPlan(user.organizationId,{carrierId,vehicleId,driverId,plannedDepartureAt,plannedArrivalAt},finalInspection.executionPolicy.batchFields)
+      ?await resolveFtlDispatchPlan(user.organizationId,{carrierId,vehicleId,driverId,plannedDepartureAt,plannedArrivalAt,newDriver:newDriverRegistration},finalInspection.executionPolicy.batchFields)
       :await resolveDispatchPlan(user.organizationId,batch.order_id,batch.business_type,finalInspection.batch.transport_batch_id,finalInspection.executionPolicy.batchFields,warehouse.id);
     if("error" in finalPlanned)return{formError:finalPlanned.error,inspection:finalInspection};
     const finalPlanIssues=dispatchPlanPolicyIssues(finalInspection.executionPolicy.batchFields,finalPlanned);
@@ -600,7 +633,14 @@ export async function action({request}:Route.ActionArgs){
       env.DB.prepare("UPDATE transport_orders SET exit_port=?,customs_location=?,updated_at=? WHERE organization_id=? AND id=?")
         .bind(exitPort||null,customsLocation||null,now,user.organizationId,batch.order_id),
     ]:[];
+    const newDriverStatements=newDriverRegistration?[
+      env.DB.prepare(`INSERT INTO carrier_drivers(id,organization_id,carrier_id,name,phone,license_number,status,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,'active',?,?)
+        ON CONFLICT(organization_id,carrier_id,name) DO UPDATE SET phone=excluded.phone,license_number=excluded.license_number,status='active',updated_at=excluded.updated_at`)
+        .bind(newDriverRegistration.id,user.organizationId,newDriverRegistration.carrierId,newDriverRegistration.name,newDriverRegistration.phone,newDriverRegistration.licenseNumber,now,now),
+    ]:[];
     await env.DB.batch([
+      ...newDriverStatements,
       env.DB.prepare(`INSERT INTO warehouse_dispatches(id,organization_id,dispatch_number,sorting_batch_id,shipment_id,vehicle_plate,driver_name,driver_phone,carrier_name,seal_number,destination,status,notes,created_by_user_id,created_at,updated_at,transport_batch_id) VALUES(?,?,?,?,?,?,?,?,?,NULL,?,'loading',?,?,?,?,?)`).bind(dispatchId,user.organizationId,number,batch.id,batch.shipment_id,plate,driver,phone||null,carrier||null,destination,inspection.notesActive?(notes||null):null,user.userId,now,now,planned.batch_id),
       itemStatement,
       ...workflowFieldStatements,
@@ -608,6 +648,13 @@ export async function action({request}:Route.ActionArgs){
       ...batchStateStatements,
     ]);
     const postCreateWarnings:string[]=[];
+    if(newDriverRegistration){
+      try{
+        const registeredDriver=await env.DB.prepare("SELECT id FROM carrier_drivers WHERE organization_id=? AND carrier_id=? AND name=? LIMIT 1")
+          .bind(user.organizationId,newDriverRegistration.carrierId,newDriverRegistration.name).first<{id:string}>();
+        await writeAudit({request,action:"carrier.driver.register_from_outbound",resourceType:"carrier_driver",resourceId:registeredDriver?.id??newDriverRegistration.id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{carrierId:newDriverRegistration.carrierId,driverName:newDriverRegistration.name,dispatchNumber:number}});
+      }catch(error){console.error("outbound driver registration audit failed",error);postCreateWarnings.push("新司机登记审计待重试")}
+    }
     if(planned.batch_id){
       try{await refreshLoadingManifest(user.organizationId,planned.batch_id,user.userId,now)}catch(error){console.error("dispatch manifest sync failed",error);postCreateWarnings.push("配载舱单待重试")}
     }
@@ -882,6 +929,7 @@ export default function WarehouseOutbound({loaderData,actionData}:Route.Componen
   if(loaderData.view==="create"){
     const unit=loaderData.selectedLoadUnit,isLtl=unit?.business_type==="ltl"&&Boolean(unit.transport_batch_id);
     return <div className="outbound-create-page">
+      <ActionToast data={actionData}/>
       <header className="page-header" id="warehouse-outbound-workbench"><div><p className="eyebrow">CREATE LOADING TASK</p><h1>创建装车任务</h1><p>{unit?`${isLtl?unit.batch_number:unit.order_number} · ${isLtl?`${unit.order_count} 票拼车订单`:unit.customer_name}`:"请从在仓订单列表选择要办理的订单。"}</p></div><Link className="secondary" to={loaderData.pendingHref}>返回在仓订单</Link></header>
       <ol className="outbound-create-rhythm" aria-label="创建装车任务步骤">
         <li className={unit?"complete":"current"}><span>1</span><div><strong>选择在仓订单</strong><small>{unit?"已选定":"当前步骤"}</small></div></li>
@@ -911,7 +959,7 @@ export default function WarehouseOutbound({loaderData,actionData}:Route.Componen
   </>;
   return <>
     <header className={`page-header${selectedTask?" outbound-detail-header":""}`} id="warehouse-outbound-workbench"><div><p className="eyebrow">LOAD · SCAN · DISPATCH</p><h1>{selectedTask?"装车出库任务详情":"装车与出库任务中心"}</h1><p>{selectedTask?"按任务完成扫码装车、出库交接，并查看进入境外运输前的后续节点。":"集中查看已有装车出库任务、当前节点和办理进度；点击任务后进入操作详情。"}</p></div><div className="button-row">{selectedTask&&<Link className="secondary" to={loaderData.executionHref}>返回任务中心</Link>}<Link className="secondary" to={loaderData.pendingHref}>返回在仓订单</Link></div></header>
-    {(actionSuccess||actionError)&&<div className={`alert outbound-task-feedback ${actionError?"error":"success"}`}><span>{actionError??actionSuccess}</span></div>}
+    <ActionToast data={actionData}/>
     {selectedTask?<section className="outbound-task-detail-workbench">
       <DispatchNodeStrip task={selectedTask} scanPolicy={loaderData.selectedExecutionPolicy?.scanConfirmation}/>
       {selectedTask.business_type==="ftl"&&!selectedTask.outbound_resource_confirmed&&<div className="alert warning" role="alert"><strong>历史整车任务提示：</strong>该任务创建于仓库出境资源确认上线之前，当前显示的车辆可能来自旧版国内运输安排，只保留为审计记录。新建整车任务将强制由仓库选择境外承运商、车辆和司机，不再沿用此逻辑。</div>}
@@ -974,7 +1022,6 @@ function BlockedLoadingDocumentRemediation({inspection,reasons,pendingHref,canOp
   },[actionError,actionSuccess,inspection?.allApproved]);
   return <section className="panel outbound-create-blocked">
     <div className="panel-header"><div><h2>暂不能创建装车任务</h2><p>{stageError?"当前未到冻结工作流的装车办理节点；本页只展示已有信息，进入目标节点后再补充文件或创建任务。":unresolvedRequired.length?"请在当前页面补齐以下必需文件；上传并确认后系统立即重新核验装车条件。":"文件条件已经满足，仍需处理下列其他装车条件。"}</p></div><span className="status-pill warning">待补条件</span></div>
-    {(actionSuccess||actionError)&&<div className={`alert ${actionError?"error":"success"}`} role={actionError?"alert":"status"} aria-live="polite">{actionError??actionSuccess}</div>}
     {!stageError&&unresolvedRequired.length>0&&<div className="outbound-blocked-document-summary"><strong>需要补充或确认以下文件</strong><span>{unresolvedRequired.map(document=>`${document.orderNumber} ${document.name}`).join("、")}</span></div>}
     <ul>{reasons.map(reason=><li key={reason}>{reason}</li>)}</ul>
     {remediationTargets.length>0&&<div className="outbound-remediation-portals" aria-label="截断处理入口">
@@ -1096,6 +1143,7 @@ function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,borde
   const [carrierId,setCarrierId]=useState("");
   const [vehicleId,setVehicleId]=useState("");
   const [driverId,setDriverId]=useState("");
+  const [creatingDriver,setCreatingDriver]=useState(false);
   const isFtl=inspection?.batch.business_type==="ftl";
   const taskLabel=isFtl?inspection?.batch.order_number:inspection?.batch.batch_number;
   const uploadedCount=inspection?.documents.filter(document=>document.required&&document.attachmentId).length??0;
@@ -1109,12 +1157,11 @@ function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,borde
   const requiredOutboundMasterDataReady=!resourcePolicy||(
     (!resourcePolicy.carrier.isRequired||outboundResources.carriers.length>0)&&
     (!resourcePolicy.vehicle.isRequired||outboundResources.vehicles.length>0)&&
-    (!resourcePolicy.driver.isRequired||outboundResources.drivers.length>0)
+    (!resourcePolicy.driver.isRequired||outboundResources.carriers.length>0)
   );
   const remainingRequired=Math.max(0,requiredCount-uploadedCount);
   return <div className="outbound-create-workbench">
     {!inspection&&<div className="alert error" role="alert">无法读取该订单的装车文件清单，请返回在仓订单列表重新进入。</div>}
-    {actionError&&<div className="alert error" role="alert" aria-live="assertive">{actionError}</div>}
     {stageError&&stageError!==actionError&&<div className="alert warning" role="alert">{stageError}</div>}
     {inspection&&<>
       <div className="outbound-inspection-summary">
@@ -1136,12 +1183,13 @@ function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,borde
               {inspection.executionPolicy.batchFields.customs_location.isActive&&<label className="field"><span>起运地清关地{inspection.executionPolicy.batchFields.customs_location.isRequired?" *":"（选填）"}</span><select name="customsLocation" defaultValue={inspection.batch.customs_location||""} required={inspection.executionPolicy.batchFields.customs_location.isRequired}><option value="">请选择起运地清关地</option><ReferenceOptions currentValue={inspection.batch.customs_location} options={customsPlaces}/></select></label>}
             </div>
             <div className="ftl-outbound-transport-row">
-              {resourcePolicy?.carrier.isActive&&<label className="field"><span>境外承运商{resourcePolicy.carrier.isRequired?" *":"（选填）"}</span><select name="outboundCarrierId" value={carrierId} required={resourcePolicy.carrier.isRequired} onChange={event=>{setCarrierId(event.target.value);setVehicleId("");setDriverId("");}}><option value="">请选择境外承运商</option>{outboundResources.carriers.map(carrier=><option key={carrier.id} value={carrier.id}>{carrier.name}</option>)}</select></label>}
-              {resourcePolicy?.driver.isActive&&<label className="field"><span>出境司机{resourcePolicy.driver.isRequired?" *":"（选填）"}</span><select name="outboundDriverId" value={driverId} required={resourcePolicy.driver.isRequired} disabled={!carrierId} onChange={event=>setDriverId(event.target.value)}><option value="">{carrierId?"请选择该承运商司机":"请先选择承运商"}</option>{carrierDrivers.map(driver=><option key={driver.id} value={driver.id}>{driver.name} · {driver.phone||"电话未登记"}</option>)}</select></label>}
+              {resourcePolicy?.carrier.isActive&&<label className="field"><span>境外承运商{resourcePolicy.carrier.isRequired?" *":"（选填）"}</span><select name="outboundCarrierId" value={carrierId} required={resourcePolicy.carrier.isRequired} onChange={event=>{setCarrierId(event.target.value);setVehicleId("");setDriverId("");setCreatingDriver(false);}}><option value="">请选择境外承运商</option>{outboundResources.carriers.map(carrier=><option key={carrier.id} value={carrier.id}>{carrier.name}</option>)}</select></label>}
+              {resourcePolicy?.driver.isActive&&<div className="field outbound-driver-field"><span id="outbound-driver-label">出境司机{resourcePolicy.driver.isRequired?" *":"（选填）"}</span><OutboundDriverPicker carrierId={carrierId} drivers={carrierDrivers} value={driverId} required={resourcePolicy.driver.isRequired} onChange={value=>{setDriverId(value);setCreatingDriver(false);}} onCreate={()=>{setDriverId(NEW_OUTBOUND_DRIVER_ID);setCreatingDriver(true);}}/></div>}
               {resourcePolicy?.vehicle.isActive&&<label className="field"><span>出境车辆{resourcePolicy.vehicle.isRequired?" *":"（选填）"}</span><select name="outboundVehicleId" value={vehicleId} required={resourcePolicy.vehicle.isRequired} disabled={!carrierId} onChange={event=>setVehicleId(event.target.value)}><option value="">{carrierId?"请选择该承运商车辆":"请先选择承运商"}</option>{carrierVehicles.map(vehicle=><option key={vehicle.id} value={vehicle.id}>{vehicle.plate_number} · {vehicle.vehicle_type||"车型未登记"}</option>)}</select></label>}
               {plannedDeparturePolicy?.isActive&&<label className="field"><span>计划出境发车时间{plannedDeparturePolicy.isRequired?" *":"（选填）"}</span><input type="datetime-local" name="plannedDepartureAt" required={plannedDeparturePolicy.isRequired}/></label>}
               {plannedArrivalPolicy?.isActive&&<label className="field"><span>计划境外到仓时间{plannedArrivalPolicy.isRequired?" *":"（选填）"}</span><input type="datetime-local" name="plannedArrivalAt" required={plannedArrivalPolicy.isRequired}/></label>}
             </div>
+            {creatingDriver&&resourcePolicy?.driver.isActive&&<fieldset className="outbound-new-driver-panel"><legend>新司机资料</legend><p>保存装车任务时自动登记到当前承运商，并立即用于本次出境运输。</p><div className="outbound-new-driver-grid"><label className="field"><span>司机姓名 *</span><input name="newOutboundDriverName" minLength={2} maxLength={80} autoComplete="name" required placeholder="请输入司机姓名"/></label>{inspection.executionPolicy.batchFields.main_driver_phone.isActive&&<label className="field"><span>司机手机号{inspection.executionPolicy.batchFields.main_driver_phone.isRequired?" *":"（选填）"}</span><input name="newOutboundDriverPhone" maxLength={30} autoComplete="tel" required={inspection.executionPolicy.batchFields.main_driver_phone.isRequired} placeholder="请输入司机联系电话"/></label>}<label className="field"><span>驾驶证号（选填）</span><input name="newOutboundDriverLicenseNumber" maxLength={80} placeholder="用于司机台账识别"/></label><button type="button" className="secondary outbound-cancel-new-driver" onClick={()=>{setCreatingDriver(false);setDriverId("");}}>取消新建</button></div></fieldset>}
           </div>
         </section>}
         {!isFtl&&inspection.resourcePolicyError&&<div className="alert error" role="alert">{inspection.resourcePolicyError}</div>}
@@ -1154,6 +1202,33 @@ function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,borde
       </Form>
       </>}
     </>}
+  </div>;
+}
+
+function OutboundDriverPicker({carrierId,drivers,value,required,onChange,onCreate}:{carrierId:string;drivers:OutboundResources["drivers"];value:string;required:boolean;onChange:(value:string)=>void;onCreate:()=>void}){
+  const [open,setOpen]=useState(false);
+  const rootRef=useRef<HTMLDivElement>(null);
+  const selected=drivers.find(driver=>driver.id===value);
+  useEffect(()=>{setOpen(false)},[carrierId]);
+  useEffect(()=>{
+    if(!open)return;
+    const closeOnOutside=(event:PointerEvent)=>{if(event.target instanceof Node&&!rootRef.current?.contains(event.target))setOpen(false)};
+    const closeOnEscape=(event:KeyboardEvent)=>{if(event.key==="Escape"){event.preventDefault();setOpen(false);rootRef.current?.querySelector<HTMLButtonElement>(".outbound-driver-picker-trigger")?.focus()}};
+    document.addEventListener("pointerdown",closeOnOutside,true);
+    document.addEventListener("keydown",closeOnEscape,true);
+    return()=>{document.removeEventListener("pointerdown",closeOnOutside,true);document.removeEventListener("keydown",closeOnEscape,true)};
+  },[open]);
+  const label=value===NEW_OUTBOUND_DRIVER_ID?"正在新建未登记司机":selected?`${selected.name} · ${selected.phone||"电话未登记"}`:carrierId?"请选择该承运商司机":"请先选择承运商";
+  return <div ref={rootRef} className={`outbound-driver-picker${open?" is-open":""}`}>
+    <input type="hidden" name="outboundDriverId" value={value}/>
+    <button type="button" className="outbound-driver-picker-trigger" aria-labelledby="outbound-driver-label" aria-haspopup="listbox" aria-expanded={open} aria-required={required} disabled={!carrierId} onClick={()=>setOpen(current=>!current)}><span>{label}</span><b aria-hidden="true">▾</b></button>
+    {open&&<div className="outbound-driver-picker-drawer" role="listbox" aria-label="选择出境司机">
+      <div className="outbound-driver-picker-options">
+        {drivers.map(driver=><button key={driver.id} type="button" role="option" aria-selected={driver.id===value} onClick={()=>{onChange(driver.id);setOpen(false)}}><strong>{driver.name}</strong><span>{driver.phone||"电话未登记"}</span></button>)}
+        {!drivers.length&&<p>当前承运商还没有已登记司机。</p>}
+      </div>
+      <footer><button type="button" className="primary" onClick={()=>{onCreate();setOpen(false)}}>＋ 新建司机</button><span>新建后随本次装车任务自动登记并使用</span></footer>
+    </div>}
   </div>;
 }
 
@@ -1491,7 +1566,7 @@ async function resolveDispatchPlan(organizationId:string,orderId:string,business
 }
 async function resolveFtlDispatchPlan(
   organizationId:string,
-  input:{carrierId:string;vehicleId:string;driverId:string;plannedDepartureAt:string;plannedArrivalAt:string},
+  input:{carrierId:string;vehicleId:string;driverId:string;plannedDepartureAt:string;plannedArrivalAt:string;newDriver?:PendingOutboundDriver|null},
   policies:LoadingBatchFieldPolicies,
 ):Promise<DispatchPlan|{error:string}>{
   const carrierId=input.carrierId.trim(),vehicleId=input.vehicleId.trim(),driverId=input.driverId.trim();
@@ -1513,10 +1588,14 @@ async function resolveFtlDispatchPlan(
       .bind(organizationId,vehicleId,carrierId).first<{id:string;vehicle_type:string|null;plate_number:string|null}>()
     :null;
   if(vehicleId&&!vehicle)return{error:"所选出境车辆已失效或不属于该承运商，请刷新后重新选择"};
-  const driver=driverId
-    ?await env.DB.prepare("SELECT id,name,phone FROM carrier_drivers WHERE organization_id=? AND id=? AND carrier_id=? AND status='active'")
-      .bind(organizationId,driverId,carrierId).first<{id:string;name:string;phone:string|null}>()
-    :null;
+  const driver=driverId===NEW_OUTBOUND_DRIVER_ID
+    ?input.newDriver&&input.newDriver.carrierId===carrierId
+      ?{id:input.newDriver.id,name:input.newDriver.name,phone:input.newDriver.phone}
+      :null
+    :driverId
+      ?await env.DB.prepare("SELECT id,name,phone FROM carrier_drivers WHERE organization_id=? AND id=? AND carrier_id=? AND status='active'")
+        .bind(organizationId,driverId,carrierId).first<{id:string;name:string;phone:string|null}>()
+      :null;
   if(driverId&&!driver)return{error:"所选出境司机已失效或不属于该承运商，请刷新后重新选择"};
   return{
     ...emptyPlan,

@@ -3,6 +3,7 @@ import { Form, Link, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.shipments";
 import { OrderNumberLink } from "../components/EntityNumberLink";
 import { OrderRouteFilterFields } from "../components/OrderRouteFilterFields";
+import { ActionToast } from "../components/ActionToast";
 import { requireSessionUser } from "../lib/auth.server";
 import { nextDocumentNumber } from "../lib/documents.server";
 import { canTransition, nextStates } from "../lib/workflow";
@@ -339,11 +340,7 @@ export default function Shipments({ loaderData, actionData }: Route.ComponentPro
       </div>
       <span className="status-pill">共 {loaderData.total} 票</span>
     </header>
-    {(actionData?.success || actionData?.formError) && (
-      <div className={`alert ${actionData.formError ? "error" : "success"}`}>
-        {actionData.formError ?? actionData.success}
-      </div>
-    )}
+    <ActionToast data={actionData} />
     <section className="panel shipment-register">
       <div className="panel-header shipment-register-header">
         <div>

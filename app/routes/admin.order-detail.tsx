@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type R
 import { flushSync } from "react-dom";
 import { Form, Link, redirect, useNavigate, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.order-detail";
+import { ActionToast } from "../components/ActionToast";
 import { canEditWorkflowDefinition, requireSessionUser } from "../lib/auth.server";
 import {
   canEditCurrentOrderWorkspace,
@@ -1079,8 +1080,7 @@ function LinearOrderWorkspace({
         </div>
       </nav>
 
-      {success && <div className="alert">{success}</div>}
-      {formError && <div className="alert error"><b>当前操作未完成：</b>{formError}</div>}
+      <ActionToast message={formError ?? success} tone={formError ? "error" : "success"}/>
 
       <div className="workspace">
         <section className={`node-panel panel${showOuterActionBar ? "" : " without-actionbar"}`}>

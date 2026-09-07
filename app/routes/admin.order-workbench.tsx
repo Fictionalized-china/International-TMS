@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Form, Link } from "react-router";
 import type { Route } from "./+types/admin.order-workbench";
 import { OrderNumberLink } from "../components/EntityNumberLink";
+import { ActionToast } from "../components/ActionToast";
 import { requireSessionUser } from "../lib/auth.server";
 import { orderVisibilitySql, requireOrderAccess } from "../lib/order-access.server";
 import { writeAudit } from "../lib/audit.server";
@@ -468,8 +469,7 @@ export default function OrderWorkbench({
         />
       </section>
 
-      {response?.formError && <div className="alert error">{response.formError}</div>}
-      {response?.success && <div className="alert success">{response.success}</div>}
+      <ActionToast data={response}/>
       {response?.batchPreview && (
         <BatchReview items={response.batchPreview.items} />
       )}

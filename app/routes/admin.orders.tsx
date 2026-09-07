@@ -4,6 +4,7 @@ import { Form, Link, useFetcher, useLocation } from "react-router";
 import type { Route } from "./+types/admin.orders";
 import { Modal } from "../components/Modal";
 import { OrganizationAssigneePicker } from "../components/OrganizationAssigneePicker";
+import { ActionToast } from "../components/ActionToast";
 import type { OrganizationAssigneeMember } from "../lib/organization-assignee";
 import {
   batchInitialResponsibilityDisabledReasons,
@@ -614,7 +615,7 @@ function SupervisorUnifiedQueue({ items, operationMembers, documentMembers, pend
         </div>
       </details>
     </Form>
-    {success && <div className="alert success batch-assignment-feedback">{success}</div>}
+    <ActionToast message={success} tone="success"/>
     {!!items.length && <div className="table-wrap"><table className="supervisor-workload-table">
       <thead><tr><th>类型 / 编号</th><th>客户 / 挂载范围</th><th>货物与线路</th><th>当前节点 / 负责人</th><th>状态 / 更新时间</th><th>操作</th></tr></thead>
       <tbody>{items.map((item) => {

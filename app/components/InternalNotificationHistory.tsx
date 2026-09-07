@@ -1,5 +1,6 @@
 import { Form, Link, useSearchParams } from "react-router";
 import type { InternalNotification } from "../lib/internal-notifications.server";
+import { ActionToast } from "./ActionToast";
 
 type NotificationActionData = {
   success?:string;
@@ -46,8 +47,7 @@ export function InternalNotificationHistory({
         <button className="secondary" disabled={!ordinaryUnreadCount}>普通通知全部已读（{ordinaryUnreadCount}）</button>
       </Form>
     </header>
-    {actionData?.success&&<div className="alert" role="status">{actionData.success}</div>}
-    {actionData?.formError&&<div className="alert error" role="alert">{actionData.formError}</div>}
+    <ActionToast data={actionData}/>
     <section className="panel notification-list internal-notification-list">
       {notifications.map((item)=><article key={item.id} className={item.is_read?"":"unread"}>
         <span className={`status-pill ${item.severity==="critical"?"danger":item.severity==="warning"?"warning":""}`}>

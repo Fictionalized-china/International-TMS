@@ -3,6 +3,7 @@ import { Form, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.warehouses";
 import { Modal } from "../components/Modal";
 import { ConfirmAction } from "../components/ConfirmAction";
+import { ActionToast } from "../components/ActionToast";
 import { requireSessionUser } from "../lib/auth.server";
 import { valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
@@ -336,11 +337,7 @@ export default function AdminWarehouses({ loaderData, actionData }: Route.Compon
           <WarehouseForm busy={busy} />
         </Modal>
       </header>
-      {(actionData?.success || actionData?.formError) && (
-        <div className={`alert ${actionData.formError ? "error" : "success"}`}>
-          {actionData.formError ?? actionData.success}
-        </div>
-      )}
+      <ActionToast data={actionData} />
       <section className="stats">
         <article><span>仓库总数</span><strong>{loaderData.warehouses.length}</strong><small>全部仓储场地</small></article>
         <article><span>启用仓库</span><strong>{active}</strong><small>允许现场作业</small></article>

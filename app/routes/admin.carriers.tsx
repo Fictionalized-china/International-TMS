@@ -3,6 +3,7 @@ import { Form, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.carriers";
 import { Modal } from "../components/Modal";
 import { ConfirmAction } from "../components/ConfirmAction";
+import { ActionToast } from "../components/ActionToast";
 import { requireSessionUser } from "../lib/auth.server";
 import { writeAudit } from "../lib/audit.server";
 import { validatePhone, valueOf } from "../lib/validation";
@@ -230,11 +231,7 @@ export default function Carriers({ loaderData, actionData }: Route.ComponentProp
           </Modal>
         )}
       </header>
-      {(actionData?.success || actionData?.formError) && (
-        <div className={`alert ${actionData.formError ? "error" : "success"}`}>
-          {actionData.formError ?? actionData.success}
-        </div>
-      )}
+      <ActionToast data={actionData} />
       <section className="panel">
         <div className="panel-header">
           <div>

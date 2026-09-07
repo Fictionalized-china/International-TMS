@@ -7,6 +7,7 @@ import {
   WarehouseReceivingOrderStrip,
   WarehouseReceivingScanPanel,
 } from "../components/WarehouseReceivingFlow";
+import { ActionToast } from "../components/ActionToast";
 import { requireSessionUser } from "../lib/auth.server";
 import { valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
@@ -1305,11 +1306,7 @@ export default function WarehouseInbound({
           <p>当前仓库：{loaderData.warehouse.name}。扫描国内仓生成的原货物标签，核对实收并选择库位；同一运输单全部货物清点完成后自动结束境外运输。</p>
         </div>
       </header>
-      {(actionData?.success || actionData?.formError) && (
-        <div className={`alert ${actionData.formError ? "error" : "success"}`}>
-          {actionData.formError ?? actionData.success}
-        </div>
-      )}
+      <ActionToast data={actionData} />
       {loaderData.batchContext && (
         <section className={`alert ${loaderData.batchContext.error ? "error" : "info"}`} aria-label="PZ 配载单收货范围">
           <strong>{loaderData.batchContext.number} · 整批收货范围</strong>

@@ -5,6 +5,7 @@ import { requireSessionUser } from "../lib/auth.server";
 import { validateCode, valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import { Modal } from "../components/Modal";
+import { ActionToast } from "../components/ActionToast";
 import { chunkD1Rows, chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 import {
   effectivePermissionCodes,
@@ -292,7 +293,7 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
       </Modal>}
     </header>
 
-    {(success || formError) && <div className={`alert ${formError ? "error" : "success"}`} role="status">{formError ?? success}</div>}
+    <ActionToast message={formError ?? success} tone={formError ? "error" : "success"} data={actionData}/>
 
     <section className="permission-section">
       <div className="section-heading"><div><h2>岗位角色权限</h2><p>点击角色查看权限来源；启用角色可一次性调整整组权限。</p></div><span>{loaderData.roles.filter((role) => role.status === "active").length} 个启用</span></div>

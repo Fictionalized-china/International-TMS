@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearchParams } from "react-router";
 import type { Route } from "./+types/warehouse.loading-documents";
 import { Modal } from "../components/Modal";
 import { QueryPagination } from "../components/QueryPagination";
+import { ActionToast } from "../components/ActionToast";
 import { requireSessionUser } from "../lib/auth.server";
 import {
   currentStageLoadingDocumentRequirements,
@@ -286,7 +287,7 @@ export default function WarehouseLoadingDocuments({ loaderData, actionData }: Ro
     <header className="page-header warehouse-loading-documents-header">
       <div><p className="eyebrow">LOAD DOCUMENTS</p><h1>配载文件</h1><p>按 PZ 配载单只读查看当前节点已到期文件的齐套状态；上传与审核由冻结工作流指定的业务或单证负责人办理。</p></div>
     </header>
-    {!selected && (actionData?.success || actionData?.formError) && <div className={`alert ${actionData.formError ? "error" : "success"}`} role={actionData.formError ? "alert" : "status"}>{actionData.formError ?? actionData.success}</div>}
+    <ActionToast data={actionData}/>
     <section className="panel warehouse-loading-document-list">
       <div className="panel-header"><div><h2>配载单文件状态</h2><p>一行一张配载单；仓库核对当前节点已到期文件，缺失项由对应订单的当前负责人补齐。</p></div><span>共 {loaderData.total} 张</span></div>
       <div className="table-wrap"><table><thead><tr><th>配载单</th><th>运输线路</th><th>挂载订单</th><th>文件齐套</th><th>审核状态</th><th>配载状态</th><th>更新时间</th><th>操作</th></tr></thead><tbody>
@@ -335,7 +336,6 @@ export default function WarehouseLoadingDocuments({ loaderData, actionData }: Ro
           <div><strong>{selected.order_count} 票挂载订单</strong><span>{selected.origin_location} → {selected.destination_location}</span></div>
           <p>{loaderData.documentMutationPolicy.reason}。</p>
         </header>
-        {(actionData?.success || actionData?.formError) && <div className={`warehouse-loading-document-message ${actionData.formError ? "error" : "success"}`} role={actionData.formError ? "alert" : "status"} aria-live="polite">{actionData.formError ?? actionData.success}</div>}
         {selectedSummary && selectedMissing === 0 && selected && <div className={`warehouse-loading-document-completion ${selectedReady ? "success" : "pending"}`} role="status" aria-live="polite"><div><strong>{selected.dispatch_id ? "装车任务已创建" : selectedSummary.rejectedRequiredCount ? "必填文件已被退回" : selectedReady ? "文件齐套完成" : "全部必填文件已上传"}</strong><span>{selected.dispatch_id ? "可直接进入装车与出库继续办理。" : selectedSummary.rejectedRequiredCount ? `${selectedSummary.rejectedRequiredCount} 项文件需重新上传并通过审核，完成后即可创建装车任务。` : selectedReady ? "当前配载单的必填文件已全部通过，可直接新建装车任务。" : `还有 ${Math.max(0, selectedSummary.requiredCount - selectedSummary.approvedRequiredCount)} 项待审核，审核通过后即可创建装车任务。`}</span></div><Link className={selectedReady ? "primary warehouse-primary" : "secondary"} to={loadingTaskHref(loaderData.warehouse.id, selected.id, selected.dispatch_id)}>{selected.dispatch_id ? "进入装车与出库" : "新建装车任务"}</Link></div>}
         <div className="table-wrap warehouse-loading-document-matrix"><table><thead><tr><th>订单 / 客户</th><th>货物</th>{loaderData.selectedDocumentTypes.map((item) => <th key={item.code}>{item.name}</th>)}<th>操作</th></tr></thead><tbody>
           {orderPagination.items.map((order) => {

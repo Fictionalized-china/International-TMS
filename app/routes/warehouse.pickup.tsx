@@ -7,6 +7,7 @@ import { requireSessionUser } from "../lib/auth.server";
 import { writeAudit } from "../lib/audit.server";
 import { advanceOverseasOrder } from "../lib/overseas-warehouse.server";
 import { Modal } from "../components/Modal";
+import { ActionToast } from "../components/ActionToast";
 import { valueOf } from "../lib/validation";
 import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
@@ -390,8 +391,7 @@ export default function WarehousePickup({ loaderData, actionData }: Route.Compon
       </div>
     </header>
     {loaderData.workflowGateReason && <p className="alert warning">{loaderData.workflowGateReason}</p>}
-    {loaderData.result && !readyToConfirm && <p className="alert success">{loaderData.result}</p>}
-    {actionData?.formError && <p className="alert warning">{actionData.formError}</p>}
+    <ActionToast message={actionData?.formError || (!readyToConfirm ? loaderData.result : null)} tone={actionData?.formError ? "error" : "success"} data={actionData}/>
     {pickupCompletion && <Modal
       title="出库成功"
       openSignal={`${pickupCompletion.orderNumber}:${pickupCompletion.packageCount}`}

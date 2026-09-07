@@ -8,6 +8,7 @@ import { validateCode, validateEmail, validatePassword, validatePhone, valueOf }
 import { writeAudit } from "../lib/audit.server";
 import { Modal } from "../components/Modal";
 import { CustomerEditorForm } from "../components/CustomerEditorForm";
+import { ActionToast } from "../components/ActionToast";
 import { generateCustomerIdentityCode } from "../lib/customer-identity";
 import { resolveCustomerCode } from "../lib/customer-code";
 import {
@@ -576,7 +577,7 @@ export default function Customers({ loaderData, actionData }: Route.ComponentPro
         <span className={`status-pill ${canManage ? "success" : "off"}`}>{loaderData.customerAccess.operationLabel}</span>
       </div>
     </header>
-    {(actionData?.success || actionData?.formError) && <div className={`alert ${actionData.formError ? "error" : "success"}`}>{actionData.formError ?? actionData.success}</div>}
+    <ActionToast data={actionData}/>
     <section className="panel portal-registration-review" id="portal-registration-requests">
       <div className="panel-header"><div><h2>客户门户注册申请</h2><p>申请人只能提交资料；必须在这里确认最终客户，批准后才会开放该客户的订单、报价和账单。</p></div><span className={`status-pill ${loaderData.registrations.length ? "warning" : "success"}`}>{loaderData.registrations.length} 条待审核</span></div>
       <div className="table-wrap"><table><thead><tr><th>申请时间</th><th>企业资料</th><th>联系人 / 登录邮箱</th><th>系统预匹配</th><th>绑定客户并处理</th></tr></thead><tbody>{loaderData.registrations.map((registration) => <tr key={registration.id}>

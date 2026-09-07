@@ -67,11 +67,30 @@ type OutboundRouteTestExports = {
     workflowSyncPending?: boolean,
   ) => { code: string; label: string; next: string; action: string; tone: string };
   DispatchCard?: (props: Record<string, unknown>) => ReactElement;
+  NEW_OUTBOUND_DRIVER_ID?: string;
+  validateNewOutboundDriverRegistration?: (input: {
+    driverId: string;
+    carrierId: string;
+    name: string;
+    phone: string;
+    phoneRequired: boolean;
+  }) => string | null;
 };
 
 const testExports = outboundRoute as typeof outboundRoute & OutboundRouteTestExports;
 
 describe("warehouse outbound interaction safety", () => {
+  it("validates an unregistered driver before the loading task can register and use it", () => {
+    expect(testExports.NEW_OUTBOUND_DRIVER_ID).toBe("__new_outbound_driver__");
+    const validate = testExports.validateNewOutboundDriverRegistration;
+    expect(validate).toBeTypeOf("function");
+    expect(validate?.({ driverId: "registered", carrierId: "", name: "", phone: "", phoneRequired: true })).toBeNull();
+    expect(validate?.({ driverId: "__new_outbound_driver__", carrierId: "", name: "张三", phone: "13800001111", phoneRequired: true })).toContain("承运商");
+    expect(validate?.({ driverId: "__new_outbound_driver__", carrierId: "carrier-1", name: "张", phone: "13800001111", phoneRequired: true })).toContain("2 个字符");
+    expect(validate?.({ driverId: "__new_outbound_driver__", carrierId: "carrier-1", name: "张三", phone: "", phoneRequired: true })).toContain("手机号");
+    expect(validate?.({ driverId: "__new_outbound_driver__", carrierId: "carrier-1", name: "张三", phone: "13800001111", phoneRequired: true })).toBeNull();
+  });
+
   it("returns FTL dispatch success without requesting an automatic native print dialog", () => {
     expect(testExports.warehouseDispatchCompletionResult).toBeTypeOf("function");
 

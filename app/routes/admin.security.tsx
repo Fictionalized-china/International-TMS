@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { Form, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.security";
 import { ConfirmAction } from "../components/ConfirmAction";
+import { ActionToast } from "../components/ActionToast";
 import { requireSessionUser } from "../lib/auth.server";
 import { valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
@@ -126,15 +127,7 @@ export default function Security({ loaderData, actionData }: Route.ComponentProp
         <article><span>风险用户</span><strong>{loaderData.risks.length}</strong><small>失败或锁定</small></article>
       </section>
 
-      {(actionData?.success || actionData?.formError) && (
-        <div
-          className={`alert ${actionData.formError ? "error" : "success"}`}
-          role={actionData.formError ? "alert" : "status"}
-          aria-live={actionData.formError ? "assertive" : "polite"}
-        >
-          {actionData.formError ?? actionData.success}
-        </div>
-      )}
+      <ActionToast data={actionData} />
 
       <section className="panel">
         <h2>有效会话</h2>

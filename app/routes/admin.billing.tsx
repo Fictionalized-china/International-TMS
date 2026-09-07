@@ -3,6 +3,7 @@ import { Form, Link, useLocation, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.billing";
 import { QueryPagination } from "../components/QueryPagination";
 import { OrderNumberLink, OrderNumberLinkList } from "../components/EntityNumberLink";
+import { ActionToast } from "../components/ActionToast";
 import { writeAudit } from "../lib/audit.server";
 import { requireSessionUser, type SessionUser } from "../lib/auth.server";
 import { canAccessSettlementWorkbench } from "../lib/billing-access";
@@ -408,9 +409,7 @@ export default function Billing({ loaderData, actionData }: Route.ComponentProps
 
     <BillingTabs active={loaderData.view.tab} counts={loaderData.counts} />
 
-    {(actionData?.success || actionData?.formError) && <div className={`alert ${actionData.formError ? "error" : "success"}`} role="status">
-      {actionData.formError ?? actionData.success}
-    </div>}
+    <ActionToast data={actionData}/>
 
     {loaderData.view.tab === "tasks" && <SettlementTaskPackPage
       view={loaderData.view}

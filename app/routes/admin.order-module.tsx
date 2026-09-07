@@ -3,6 +3,7 @@ import { Form as RouterForm, Link, useActionData, useFetcher, useNavigation, red
 import { env } from "cloudflare:workers";
 import type { Route } from "./+types/admin.order-module";
 import { BatchNumberLink, OrderNumberLink } from "../components/EntityNumberLink";
+import { ActionToast } from "../components/ActionToast";
 import { requireSessionUser } from "../lib/auth.server";
 import {
   canOperateCurrentOrder,
@@ -4566,11 +4567,7 @@ export default function OrderModulePage({
           )}
         </div>
       </header>
-      {actionMessage && (
-        <div className={`alert ${actionFailed ? "error" : "success"}`}>
-          {actionMessage}
-        </div>
-      )}
+      <ActionToast message={actionMessage} tone={actionFailed ? "error" : "success"} data={actionData} />
       {!loaderData.access.canEdit && (
         <div className="alert module-access-note">
           <strong>当前为只读状态</strong>
@@ -6377,6 +6374,12 @@ function ModuleBusinessData({
     const createPanelResetKey = data.customsDeclarations.map((item) => item.id).sort().join(":") || "empty";
     return (
       <div className="module-business-stack dense-module-stack">
+        <ModuleSummaryTable items={[
+          { label: "有效起运地报关单", value: activeOriginDeclarations.length, detail: "张" },
+          { label: "起运地已放行", value: releasedOriginCount, detail: "张" },
+          { label: "待放行", value: activeOriginDeclarations.length - releasedOriginCount, detail: "张" },
+          { label: "删单 / 作废", value: deletedCount, detail: "张，不计有效单据" },
+        ]} />
         {manage && (
           <NewCustomsDeclarationPanel
             key={createPanelResetKey}
@@ -6384,12 +6387,6 @@ function ModuleBusinessData({
             fields={data.workflowFields}
           />
         )}
-        <ModuleSummaryTable items={[
-          { label: "有效起运地报关单", value: activeOriginDeclarations.length, detail: "张" },
-          { label: "起运地已放行", value: releasedOriginCount, detail: "张" },
-          { label: "待放行", value: activeOriginDeclarations.length - releasedOriginCount, detail: "张" },
-          { label: "删单 / 作废", value: deletedCount, detail: "张，不计有效单据" },
-        ]} />
         <div className="table-wrap module-record-table">
           <table>
             <thead>
@@ -8204,7 +8201,7 @@ function NewCustomsDeclarationPanel({ busy, fields }: { busy: boolean; fields: W
     <Modal
       title="新增报关单"
       triggerLabel="新增报关单"
-      triggerClassName="primary"
+      triggerClassName="primary customs-create-declaration-button"
       size="wide"
       dialogClassName="customs-declaration-modal"
       initialFocusSelector="[name='clearanceStage']"

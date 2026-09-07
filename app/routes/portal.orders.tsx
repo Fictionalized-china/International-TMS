@@ -6,6 +6,7 @@ import { OrderRouteFilterFields } from "../components/OrderRouteFilterFields";
 import { PortalPickupAppointment } from "../components/PortalPickupAppointment";
 import { PortalForm as Form, PortalLink as Link } from "../components/PortalNavigation";
 import { QueryPagination } from "../components/QueryPagination";
+import { ActionToast } from "../components/ActionToast";
 import {
   PortalQuoteReviewModal,
   quotationStatusLabel,
@@ -211,9 +212,8 @@ export default function PortalOrders({ loaderData, actionData }: Route.Component
     <div className="page prototype-page">
       <div className="breadcrumb">客户门户 / 我的订单</div>
       <header className="page-head"><div><h1>我的订单</h1><p>待确认报价与运输订单统一管理；请先查看完整报价信息，再在弹窗内确认。</p></div></header>
-      {(actionData?.success || actionData?.formError) && <div className={`alert ${actionData.formError ? "error" : "success"}`} role="alert">{actionData.formError || actionData.success}</div>}
-      {loaderData.appointmentResult && <p className="alert success">{loaderData.appointmentResult}</p>}
-      {loaderData.appointmentError && <p className="alert error">{loaderData.appointmentError}</p>}
+      <ActionToast data={actionData}/>
+      <ActionToast message={loaderData.appointmentError || loaderData.appointmentResult} tone={loaderData.appointmentError ? "error" : "success"}/>
       {loaderData.quotationId && loaderData.quotes.some((quote) => quote.id === loaderData.quotationId) && !actionData?.success && (
         <div className="alert portal-quote-focus-notice" role="status"><span>已定位通知中的待确认报价，请点击“查看信息”核对后确认。</span><Link className="btn small" to="/portal/orders">取消定位</Link></div>
       )}

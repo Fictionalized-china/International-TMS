@@ -5,6 +5,7 @@ import { requireSessionUser } from "../lib/auth.server";
 import { validateCode, valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import { Modal } from "../components/Modal";
+import { ActionToast } from "../components/ActionToast";
 
 const categories = [
   ["country", "国家/地区"],
@@ -335,11 +336,7 @@ export default function MasterData({
           </Link>
         ))}
       </nav>
-      {(actionData?.success || actionData?.formError) && (
-        <div className={`alert ${actionData.formError ? "error" : "success"}`}>
-          {actionData.formError ?? actionData.success}
-        </div>
-      )}
+      <ActionToast data={actionData} />
       <Form method="get" action="." className="master-search">
         <input type="hidden" name="category" value={loaderData.category} />
         <span>⌕</span>

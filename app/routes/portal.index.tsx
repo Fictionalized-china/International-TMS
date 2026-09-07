@@ -3,6 +3,7 @@ import type { Route } from "./+types/portal.index";
 import { PortalLink as Link } from "../components/PortalNavigation";
 import { OrderMarkLabelModal } from "../components/OrderMarkLabelModal";
 import { PortalPickupAppointment } from "../components/PortalPickupAppointment";
+import { ActionToast } from "../components/ActionToast";
 import type { OrderMarkLabel } from "../lib/order-mark-label.server";
 import { requirePortalCustomer } from "../lib/portal.server";
 import { normalizePortalNotificationLink } from "../lib/portal-notification-links";
@@ -115,7 +116,7 @@ export default function PortalIndex({ loaderData }: Route.ComponentProps) {
       <div><p className="prototype-kicker">CUSTOMER PORTAL</p><h1>{loaderData.customer.name}</h1><p>客户代码 {loaderData.customer.code} · 账户状态 {loaderData.customer.status === "active" ? "正常" : loaderData.customer.status}</p></div>
       <span className="pill portal-enabled">门户已启用</span>
     </header>
-    {loaderData.appointmentResult && <p className="alert success">{loaderData.appointmentResult}</p>}
+    <ActionToast message={loaderData.appointmentResult} tone="success"/>
     {loaderData.appointmentError && <p className="alert error">{loaderData.appointmentError}</p>}
 
     <section className="kpis portal-home-kpis" aria-label="业务摘要">

@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { Form, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.positions";
 import { ConfirmAction } from "../components/ConfirmAction";
+import { ActionToast } from "../components/ActionToast";
 import { requireSessionUser } from "../lib/auth.server";
 import { writeAudit } from "../lib/audit.server";
 import { valueOf } from "../lib/validation";
@@ -305,11 +306,7 @@ export default function Positions({ loaderData, actionData }: Route.ComponentPro
         </div>
         <span className="status-pill">{loaderData.positions.length} 个岗位</span>
       </header>
-      {(actionData?.success || actionData?.formError) && (
-        <div className={`alert ${actionData.formError ? "error" : "success"}`}>
-          {actionData.formError ?? actionData.success}
-        </div>
-      )}
+      <ActionToast data={actionData} />
       <section className="panel">
         <div className="panel-header">
           <div>

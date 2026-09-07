@@ -7,6 +7,7 @@ import { hashPassword } from "../lib/crypto.server";
 import { validateEmail, validatePassword, valueOf, type FieldErrors } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import { Modal } from "../components/Modal";
+import { ActionToast } from "../components/ActionToast";
 import { roleCodeForPosition } from "../lib/position-role";
 import { isProtectedAccessRole } from "../lib/permission-blocks";
 import { inspectAccessControlSchema } from "../lib/access-control-schema.server";
@@ -168,9 +169,7 @@ export default function Users({ loaderData, actionData }: Route.ComponentProps) 
       </Modal>}
     </header>
 
-    {(success || formError) && (
-      <div className={`alert ${formError ? "error" : "success"}`}>{formError ?? success}</div>
-    )}
+    <ActionToast message={formError ?? success} tone={formError ? "error" : "success"} data={actionData}/>
 
     <section className="panel">
       <h2>组织成员</h2>
