@@ -5652,17 +5652,19 @@ function AssignmentManifestWorkbench({
                       )}
                     </td>
                     <td>
-                      {group.modules.map((module) => (
-                        <span className="assignment-module-coverage" key={`${group.key}:${module.moduleCode}`}>
-                          <strong>{module.moduleName}</strong>
-                          <small>
-                            {module.required ? "必填" : "可选"}
-                            {module.taskNames.length > 0
-                              ? ` · ${module.taskNames.join("、")}`
-                              : " · 模块负责人"}
-                          </small>
-                        </span>
-                      ))}
+                      <div className="assignment-module-coverage-list">
+                        {group.modules.map((module) => (
+                          <span className="assignment-module-coverage" key={`${group.key}:${module.moduleCode}`}>
+                            <strong>{module.moduleName}</strong>
+                            <small>
+                              {module.required ? "必填" : "可选"}
+                              {module.taskNames.length > 0
+                                ? ` · ${module.taskNames.join("、")}`
+                                : " · 模块负责人"}
+                            </small>
+                          </span>
+                        ))}
+                      </div>
                     </td>
                     <td>
                       <span className={`assignment-row-status${assigneeUserId ? " ready" : ""}`}>

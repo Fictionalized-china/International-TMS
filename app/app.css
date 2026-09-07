@@ -20395,6 +20395,7 @@ html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animatio
 /* 4.html-style approval and dispatch sheets: flat, dense, and single-submit. */
 .linear-order-page .approval-sheet,
 .linear-order-page .assignment-manifest { min-height: 100%; position: relative; display: flex; flex-direction: column; gap: 7px; }
+.linear-order-page .assignment-manifest { gap: 5px; }
 .linear-order-page .approval-section,
 .linear-order-page .assignment-manifest-section { overflow: hidden; border: 1px solid var(--line); border-radius: 3px; background: #fff; }
 .linear-order-page .approval-section > header,
@@ -20536,7 +20537,7 @@ html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animatio
 .linear-order-page .assignment-manifest-footer strong { color: var(--ink); font-size: 10px; }
 .linear-order-page .approval-footer span,
 .linear-order-page .assignment-manifest-footer span { color: #91a0ae; font-size: 9px; }
-.linear-order-page .assignment-manifest-gate { min-height: 36px; padding: 7px 10px; display: flex; gap: 8px; align-items: center; color: #8a6930; border: 1px solid #ead9b7; background: #fffaf1; }
+.linear-order-page .assignment-manifest-gate { min-height: 30px; padding: 5px 9px; display: flex; gap: 7px; align-items: center; color: #8a6930; border: 1px solid #ead9b7; background: #fffaf1; }
 .linear-order-page .assignment-manifest-gate > span { width: 17px; height: 17px; display: grid; flex: 0 0 auto; place-items: center; border: 1px solid currentColor; border-radius: 50%; font-size: 9px; font-weight: 800; }
 .linear-order-page .assignment-manifest-gate p { margin: 0; font-size: 9px; }
 .linear-order-page .assignment-manifest-feedback {
@@ -20554,24 +20555,46 @@ html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animatio
 .linear-order-page .assignment-manifest-feedback span { min-width: 0; }
 .linear-order-page .assignment-manifest-table { width: 100%; table-layout: fixed; border-collapse: collapse; }
 .linear-order-page .assignment-manifest-table th,
-.linear-order-page .assignment-manifest-table td { height: 41px; padding: 5px 9px; border-bottom: 1px solid var(--line2); text-align: left; font-size: 9px; vertical-align: middle; }
-.linear-order-page .assignment-manifest-table th { height: 30px; color: #8191a0; background: #fbfcfd; font-weight: 650; }
+.linear-order-page .assignment-manifest-table td { height: 36px; padding: 3px 8px; border-bottom: 1px solid var(--line2); text-align: left; font-size: 9px; vertical-align: middle; }
+.linear-order-page .assignment-manifest-table th { height: 27px; color: #8191a0; background: #fbfcfd; font-weight: 650; }
 .linear-order-page .assignment-manifest-table th:nth-child(1) { width: 18%; }
-.linear-order-page .assignment-manifest-table th:nth-child(2) { width: 52%; }
-.linear-order-page .assignment-manifest-table th:nth-child(3) { width: 22%; }
+.linear-order-page .assignment-manifest-table th:nth-child(2) { width: 40%; }
+.linear-order-page .assignment-manifest-table th:nth-child(3) { width: 34%; }
 .linear-order-page .assignment-manifest-table th:nth-child(4) { width: 8%; }
 .linear-order-page .assignment-manifest-table td strong,
 .linear-order-page .assignment-manifest-table td small { display: block; }
 .linear-order-page .assignment-manifest-table td strong { color: var(--ink); font-size: 10px; }
 .linear-order-page .assignment-manifest-table td small { margin-top: 2px; color: #98a5b1; font-size: 8px; }
 .linear-order-page .assignment-manifest-table .control { width: 100%; }
-.linear-order-page .assignment-module-coverage {
-  display: block;
+.linear-order-page .assignment-manifest-table .organization-assignee-trigger { min-height: 32px; }
+.linear-order-page .assignment-manifest-table .organization-assignee-path { display: none; }
+.linear-order-page .assignment-manifest-table .organization-assignee-exclusion-note {
+  margin-top: 2px;
+  font-size: 8px;
+  line-height: 1.2;
+}
+.linear-order-page .assignment-manifest-table .assignment-site-queue strong,
+.linear-order-page .assignment-manifest-table .assignment-site-queue small { display: inline; margin: 0; }
+.linear-order-page .assignment-manifest-table .assignment-site-queue small::before { content: " · "; }
+.linear-order-page .assignment-module-coverage-list {
   min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px 12px;
+}
+.linear-order-page .assignment-module-coverage {
+  display: inline-flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 4px;
   overflow-wrap: anywhere;
   color: #526b82;
-  line-height: 1.45;
+  line-height: 1.2;
+  white-space: nowrap;
 }
+.linear-order-page .assignment-module-coverage strong,
+.linear-order-page .assignment-module-coverage small { display: inline; margin: 0; }
 .linear-order-page .assignment-manifest-table td:last-child { white-space: nowrap; }
 .linear-order-page .assignment-row-status { color: #a46a30; }
 .linear-order-page .assignment-row-status::before { margin-right: 5px; content: "•"; }
