@@ -20557,9 +20557,9 @@ html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animatio
 .linear-order-page .assignment-manifest-table th,
 .linear-order-page .assignment-manifest-table td { height: 36px; padding: 3px 8px; border-bottom: 1px solid var(--line2); text-align: left; font-size: 9px; vertical-align: middle; }
 .linear-order-page .assignment-manifest-table th { height: 27px; color: #8191a0; background: #fbfcfd; font-weight: 650; }
-.linear-order-page .assignment-manifest-table th:nth-child(1) { width: 18%; }
+.linear-order-page .assignment-manifest-table th:nth-child(1) { width: 14.4%; }
 .linear-order-page .assignment-manifest-table th:nth-child(2) { width: 40%; }
-.linear-order-page .assignment-manifest-table th:nth-child(3) { width: 34%; }
+.linear-order-page .assignment-manifest-table th:nth-child(3) { width: 37.6%; }
 .linear-order-page .assignment-manifest-table th:nth-child(4) { width: 8%; }
 .linear-order-page .assignment-manifest-table td strong,
 .linear-order-page .assignment-manifest-table td small { display: block; }
@@ -20578,23 +20578,23 @@ html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animatio
 .linear-order-page .assignment-manifest-table .assignment-site-queue small::before { content: " · "; }
 .linear-order-page .assignment-module-coverage-list {
   min-width: 0;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(142px, 1fr));
+  align-items: start;
   gap: 3px 12px;
 }
 .linear-order-page .assignment-module-coverage {
-  display: inline-flex;
+  display: grid;
+  grid-template-rows: 13px auto;
   min-width: 0;
-  align-items: baseline;
-  gap: 4px;
+  align-content: start;
+  gap: 1px;
   overflow-wrap: anywhere;
   color: #526b82;
   line-height: 1.2;
-  white-space: nowrap;
 }
 .linear-order-page .assignment-module-coverage strong,
-.linear-order-page .assignment-module-coverage small { display: inline; margin: 0; }
+.linear-order-page .assignment-module-coverage small { display: block; margin: 0; }
 .linear-order-page .assignment-manifest-table td:last-child { white-space: nowrap; }
 .linear-order-page .assignment-row-status { color: #a46a30; }
 .linear-order-page .assignment-row-status::before { margin-right: 5px; content: "•"; }
