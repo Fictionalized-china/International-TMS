@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   canReviewOrderModuleDocument,
   canUploadOrderModuleDocument,
+  isOrderDocumentSelfReviewBlocked,
   isSettlementDocumentStageOpen,
   orderDocumentWorkflowMutationAccess,
   settlementDocumentStageAccess,
@@ -220,6 +221,33 @@ describe("order document access", () => {
         false,
       ),
     ).toBe(true);
+  });
+
+  it("blocks only ordinary self-review while preserving cross-account and privileged review", () => {
+    expect(
+      isOrderDocumentSelfReviewBlocked(
+        { userId: "doc-uploader", positionCode: "DOC" },
+        "doc-uploader",
+      ),
+    ).toBe(true);
+    expect(
+      isOrderDocumentSelfReviewBlocked(
+        { userId: "doc-reviewer", positionCode: "DOC" },
+        "doc-uploader",
+      ),
+    ).toBe(false);
+    expect(
+      isOrderDocumentSelfReviewBlocked(
+        { userId: "boss", positionCode: "BOSS" },
+        "boss",
+      ),
+    ).toBe(false);
+    expect(
+      isOrderDocumentSelfReviewBlocked(
+        { userId: "developer", positionCode: "DEVELOPER" },
+        "developer",
+      ),
+    ).toBe(false);
   });
 
   const lockedDocumentWorkflow = (

@@ -97,6 +97,16 @@ export function hasOrderDocumentSystemOverride(user: OrderDocumentAccessUser) {
   );
 }
 
+export function isOrderDocumentSelfReviewBlocked(
+  user: OrderDocumentAccessUser,
+  uploadedByUserId: string | null | undefined,
+) {
+  if (hasOrderDocumentSystemOverride(user)) return false;
+  return Boolean(
+    user.userId && uploadedByUserId && user.userId === uploadedByUserId,
+  );
+}
+
 export function canUploadOrderModuleDocument(
   user: OrderDocumentAccessUser,
   moduleCode: string,

@@ -48,6 +48,7 @@ const harness = vi.hoisted(() => {
     workflowFields: [] as Array<Record<string, unknown>>,
     documentReviews: [] as Array<{ document_category: string; review_status: string | null }>,
     attachmentDocumentCategory: "commercial_invoice",
+    attachmentUploadedByUserId: "user-b" as string | null,
     documentReviewWrites: 0,
     moduleAssigneeUserId: "user-a" as string | null,
     moduleTaskAssigneeUserIds: ["user-a"] as string[],
@@ -74,8 +75,11 @@ const harness = vi.hoisted(() => {
           if (query.includes("FROM order_tasks t")) {
             return state.task;
           }
-          if (query.includes("SELECT document_category FROM order_document_metadata")) {
-            return { document_category: state.attachmentDocumentCategory };
+          if (query.includes("FROM order_document_metadata m") && query.includes("JOIN order_attachments a")) {
+            return {
+              document_category: state.attachmentDocumentCategory,
+              uploaded_by_user_id: state.attachmentUploadedByUserId,
+            };
           }
           return null;
         },
@@ -242,6 +246,20 @@ function post(intent: string, values: Record<string, string> = {}) {
   });
 }
 
+function uploadPost(documentCategory: string) {
+  const body = new FormData();
+  body.set("intent", "document_upload");
+  body.set("documentCategory", documentCategory);
+  body.set("documentDescription", "测试文件");
+  body.set("attachments", new File([new Uint8Array([1, 2, 3])], "test.pdf", {
+    type: "application/pdf",
+  }));
+  return new Request("http://local.test/admin/orders/order-1/modules/customs", {
+    method: "POST",
+    body,
+  });
+}
+
 function invoke(request: Request, moduleCode = "transport") {
   return action({
     request,
@@ -284,6 +302,7 @@ describe("order module action mutation gates", () => {
     harness.state.workflowFields = [];
     harness.state.documentReviews = [];
     harness.state.attachmentDocumentCategory = "commercial_invoice";
+    harness.state.attachmentUploadedByUserId = "user-b";
     harness.state.documentReviewWrites = 0;
     harness.state.moduleAssigneeUserId = "user-a";
     harness.state.moduleTaskAssigneeUserIds = ["user-a"];
@@ -301,6 +320,26 @@ describe("order module action mutation gates", () => {
     expect(harness.sql.some((query) =>
       query.includes("INSERT INTO order_document_metadata"),
     )).toBe(false);
+  });
+
+  it("marks an ordinary account upload approved without recording the uploader as reviewer", async () => {
+    harness.current.permissions = [
+      "order.view",
+      "order.scope.assigned",
+      "order.module.customs.manage",
+    ];
+    harness.current.positionCode = "DOC";
+    harness.order.current_assignee_user_id = "user-operation";
+    harness.state.moduleAssigneeUserId = "user-a";
+    harness.state.moduleTaskAssigneeUserIds = ["user-a"];
+
+    await expect(invoke(uploadPost("commercial_invoice"), "customs"))
+      .resolves.toEqual({ success: "发票已上传并自动通过" });
+    expect(harness.sql.some((query) =>
+      query.includes("'approved',NULL") &&
+      query.includes("INSERT INTO order_document_metadata"),
+    )).toBe(true);
+    expect(harness.synchronizeOrderDocumentsModuleStatus).toHaveBeenCalled();
   });
 
   it("allows the exact customs module document owner to review while the order-level owner differs", async () => {
@@ -321,6 +360,27 @@ describe("order module action mutation gates", () => {
       success: "文件审核状态已更新",
     }));
     expect(harness.state.documentReviewWrites).toBe(1);
+  });
+
+  it("rejects an ordinary module owner reviewing a file uploaded by the same account", async () => {
+    harness.current.permissions = [
+      "order.view",
+      "order.scope.assigned",
+      "order.module.customs.manage",
+    ];
+    harness.current.positionCode = "DOC";
+    harness.order.current_assignee_user_id = "user-operation";
+    harness.state.moduleAssigneeUserId = "user-a";
+    harness.state.moduleTaskAssigneeUserIds = ["user-a"];
+    harness.state.attachmentUploadedByUserId = "user-a";
+
+    await expect(invoke(post("document_review", {
+      attachmentId: "attachment-1",
+      reviewStatus: "approved",
+    }), "customs")).resolves.toEqual({
+      formError: "该文件由当前账号上传，请由其他有审核权限的账号复核",
+    });
+    expect(harness.state.documentReviewWrites).toBe(0);
   });
 
   it("denies customs document review when the module is assigned to another user", async () => {

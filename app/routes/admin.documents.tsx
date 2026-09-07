@@ -139,7 +139,7 @@ export default function DocumentCenter({ loaderData }: Route.ComponentProps) {
         <td>{placement ? moduleLabel(placement.moduleCode) : item.source_type === "batch" ? "配载单" : "其他"}</td>
         <td><span className={`status-pill ${item.review_status === "approved" || item.review_status === "archived" ? "success" : item.review_status === "rejected" ? "danger" : "warning"}`}>{reviewLabel(item.review_status)}</span></td>
         <td>{item.uploader_name || "—"}<small>{new Date(item.created_at).toLocaleString("zh-CN")}</small></td>
-        <td>{item.reviewer_name || "—"}<small>{item.reviewed_at ? new Date(item.reviewed_at).toLocaleString("zh-CN") : "尚未审核"}</small></td>
+        <td>{item.reviewer_name || (item.reviewed_at ? "系统自动" : "—")}<small>{item.reviewed_at ? new Date(item.reviewed_at).toLocaleString("zh-CN") : "尚未审核"}</small></td>
         <td><div className="page-actions"><a className="text-button" href={`${fileHref}?mode=view`} target="_blank" rel="noreferrer">查看</a><a className="text-button" href={fileHref}>下载</a><Link className="text-button" to={sourceHref}>打开来源节点</Link></div></td>
       </tr>;
     })}</tbody></table></div>{!loaderData.rows.length && <p className="empty-state">当前筛选条件下没有{loaderData.scope === "order" ? "订单" : "配载单"}文件记录。</p>}

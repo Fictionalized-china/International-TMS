@@ -51,6 +51,7 @@ describe("PZ inline handoffs", () => {
       orderDocuments: [{
         id: "document-1",
         order_id: "order-1",
+        uploaded_by_user_id: "doc-2",
         document_category: "commercial_invoice",
         file_name: "invoice-v2.pdf",
         content_type: "application/pdf",
@@ -61,6 +62,7 @@ describe("PZ inline handoffs", () => {
       }, {
         id: "document-0",
         order_id: "order-1",
+        uploaded_by_user_id: "doc-1",
         document_category: "commercial_invoice",
         file_name: "invoice-v1.pdf",
         content_type: "application/pdf",

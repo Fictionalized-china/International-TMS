@@ -20,6 +20,7 @@ import { loadBatchCostAllocationActionPolicy } from "../lib/batch-cost-allocatio
 import type { BatchCostAllocationActionPolicy } from "../lib/batch-cost-allocation-action-policy";
 import { canManageOrderModule } from "../lib/position-portal";
 import { maxInlineOrderDocumentBytes, orderDocumentTypeCodes, orderDocumentTypeLabel } from "../lib/order-documents";
+import { isOrderDocumentSelfReviewBlocked } from "../lib/order-document-access";
 import { loadOrderDocumentWorkflowMutationAccess } from "../lib/order-document-access.server";
 import { batchCostsManageScopeSql, batchVisibilitySql, canAccessBatchWorkspace } from "../lib/order-access.server";
 import {
@@ -458,7 +459,7 @@ type Vehicle={id:string;vehicle_no:string;vehicle_type:string|null;plate_number:
 type Option={id:string;name:string};
 type ReferenceOption={code:string;name:string};
 type BatchDocument={id:string;document_category:string;file_name:string;content_type:string;size_bytes:number;description:string|null;review_status:string;created_at:string};
-type OrderDocument={id:string;order_id:string;document_category:string;file_name:string;content_type:string;size_bytes:number;description:string|null;review_status:string;created_at:string};
+type OrderDocument={id:string;order_id:string;uploaded_by_user_id:string|null;document_category:string;file_name:string;content_type:string;size_bytes:number;description:string|null;review_status:string;created_at:string};
 type CustomsSummary={order_id:string;total:number;released:number};
 type BatchCustomsDeclaration={id:string;order_id:string;customs_record_id:string;clearance_stage:string;declaration_number:string;declaration_type:string;declaration_title:string;declaring_company:string;declared_at:string;declared_amount:number;currency:string;gross_weight_kg:number;released_at:string|null;status:string;is_deleted:number;is_redeclared:number;is_amended:number;is_inspected:number;change_reason:string|null;updated_at:string};
 type BatchOutboundStatus={order_id:string;dispatched:number};
@@ -679,14 +680,14 @@ export async function loader({request,params}:Route.LoaderArgs){
     ) SELECT id,document_category,file_name,content_type,size_bytes,description,review_status,created_at
       FROM ranked WHERE row_no=1 ORDER BY created_at DESC`).bind(current.organizationId,batchId).all<BatchDocument>(),
     env.DB.prepare(`WITH ranked AS (
-      SELECT a.id,a.order_id,m.document_category,a.file_name,a.content_type,a.size_bytes,m.description,m.review_status,a.created_at,
+      SELECT a.id,a.order_id,a.uploaded_by_user_id,m.document_category,a.file_name,a.content_type,a.size_bytes,m.description,m.review_status,a.created_at,
         ROW_NUMBER() OVER(PARTITION BY a.order_id,m.document_category ORDER BY a.created_at DESC,a.id DESC) row_no
       FROM transport_batch_orders bo JOIN order_attachments a ON a.order_id=bo.order_id AND a.organization_id=bo.organization_id
       JOIN order_document_metadata m ON m.attachment_id=a.id AND m.order_id=bo.order_id AND m.organization_id=bo.organization_id
       WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed'
-    ) SELECT id,order_id,document_category,file_name,content_type,size_bytes,description,review_status,created_at
+    ) SELECT id,order_id,uploaded_by_user_id,document_category,file_name,content_type,size_bytes,description,review_status,created_at
       FROM ranked WHERE row_no=1 ORDER BY created_at DESC`).bind(batchId,current.organizationId).all<OrderDocument>(),
-    env.DB.prepare(`SELECT a.id,a.order_id,m.document_category,a.file_name,a.content_type,a.size_bytes,
+    env.DB.prepare(`SELECT a.id,a.order_id,a.uploaded_by_user_id,m.document_category,a.file_name,a.content_type,a.size_bytes,
         m.description,m.review_status,a.created_at
       FROM transport_batch_orders bo
       JOIN order_attachments a ON a.order_id=bo.order_id AND a.organization_id=bo.organization_id
@@ -1096,7 +1097,6 @@ export async function action({request,params}:Route.ActionArgs){
   }
   if(intent==="batch_order_document_upload"){
     const orderId=valueOf(form,"orderId"),documentCategory=valueOf(form,"documentCategory"),file=form.get("attachment");
-    const approveImmediately=valueOf(form,"approveImmediately")==="1";
     if(!ORDER_BATCH_DOCUMENT_CODES.includes(documentCategory as LoadingOrderDocumentCode)||!orderDocumentTypeCodes.has(documentCategory))return{formError:"请选择有效的订单文件类型"};
     if(!(file instanceof File)||file.size<=0)return{formError:"请选择要上传的订单文件"};
     const fileError=validateDocumentFile(file);if(fileError)return{formError:fileError};
@@ -1113,11 +1113,11 @@ export async function action({request,params}:Route.ActionArgs){
     const attachmentId=crypto.randomUUID();
     await env.DB.batch([
       env.DB.prepare("INSERT INTO order_attachments(id,organization_id,order_id,customer_id,file_name,content_type,size_bytes,data_url,uploaded_by_user_id,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,'admin',?)").bind(attachmentId,current.organizationId,orderId,order.customer_id,file.name,file.type,file.size,await toDataUrl(file),current.userId,now),
-      env.DB.prepare("INSERT INTO order_document_metadata(attachment_id,organization_id,order_id,document_category,description,public_to_customer,review_status,reviewed_by_user_id,reviewed_at,updated_at) VALUES(?,?,?,?,?,0,?,?,?,?)").bind(attachmentId,current.organizationId,orderId,documentCategory,valueOf(form,"documentDescription")||orderDocumentTypeLabel(documentCategory),approveImmediately?"approved":"pending",approveImmediately?current.userId:null,approveImmediately?now:null,now),
+      env.DB.prepare("INSERT INTO order_document_metadata(attachment_id,organization_id,order_id,document_category,description,public_to_customer,review_status,reviewed_by_user_id,reviewed_at,updated_at) VALUES(?,?,?,?,?,0,'approved',NULL,?,?)").bind(attachmentId,current.organizationId,orderId,documentCategory,valueOf(form,"documentDescription")||orderDocumentTypeLabel(documentCategory),now,now),
     ]);
     await synchronizeOrderDocumentsModuleStatus({organizationId:current.organizationId,orderId,actorUserId:current.userId,now,source:"admin_upload"});
-    await writeAudit({request,action:"transport.batch.order_document.upload",resourceType:"order_attachment",resourceId:attachmentId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{batchId,orderId,documentCategory,approveImmediately}});
-    return{success:approveImmediately?`${orderDocumentTypeLabel(documentCategory)}已上传并通过`:`${orderDocumentTypeLabel(documentCategory)}已上传到对应订单，等待审核`};
+    await writeAudit({request,action:"transport.batch.order_document.upload",resourceType:"order_attachment",resourceId:attachmentId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{batchId,orderId,documentCategory,automaticReview:true}});
+    return{success:`${orderDocumentTypeLabel(documentCategory)}已上传并自动通过`};
   }
   if(intent==="generate_manifest"){
     // 配载单由工作台自动生成：仓库按生成的配载单装车出库，不再要求人工上传。
@@ -1147,17 +1147,21 @@ export async function action({request,params}:Route.ActionArgs){
   if(intent==="batch_order_document_review"){
     const orderId=valueOf(form,"orderId"),attachmentId=valueOf(form,"attachmentId"),reviewStatus=valueOf(form,"reviewStatus");
     if(!["approved","rejected"].includes(reviewStatus))return{formError:"请选择有效的审核结果"};
-    const target=await env.DB.prepare(`SELECT m.document_category
+    const target=await env.DB.prepare(`SELECT m.document_category,a.uploaded_by_user_id
       FROM order_document_metadata m
+      JOIN order_attachments a ON a.id=m.attachment_id AND a.order_id=m.order_id AND a.organization_id=m.organization_id
       WHERE m.attachment_id=? AND m.order_id=? AND m.organization_id=?
         AND EXISTS(SELECT 1 FROM transport_batch_orders bo WHERE bo.batch_id=? AND bo.order_id=m.order_id AND bo.organization_id=m.organization_id AND bo.status!='removed')`)
-      .bind(attachmentId,orderId,current.organizationId,batchId).first<{document_category:string}>();
+      .bind(attachmentId,orderId,current.organizationId,batchId).first<{document_category:string;uploaded_by_user_id:string|null}>();
     if(!target)return{formError:"订单文件不存在或不属于当前配载单"};
     const workflowAccess=await loadOrderDocumentWorkflowMutationAccess(
       env.DB,current.organizationId,orderId,target.document_category,
     );
     if(!workflowAccess.allowed){
       return{formError:workflowAccess.reason||"当前订单冻结工作流不允许审核该文件"};
+    }
+    if(isOrderDocumentSelfReviewBlocked(current,target.uploaded_by_user_id)){
+      return{formError:"该文件由当前账号上传，请由其他有审核权限的账号复核"};
     }
     const result=await env.DB.prepare(`UPDATE order_document_metadata SET review_status=?,reviewed_by_user_id=?,reviewed_at=?,updated_at=? WHERE attachment_id=? AND order_id=? AND organization_id=? AND EXISTS(SELECT 1 FROM transport_batch_orders bo WHERE bo.batch_id=? AND bo.order_id=? AND bo.organization_id=? AND bo.status!='removed')`).bind(reviewStatus,current.userId,now,now,attachmentId,orderId,current.organizationId,batchId,orderId,current.organizationId).run();
     if(!result.meta.changes)return{formError:"订单文件不存在或不属于当前配载单"};
@@ -2001,17 +2005,17 @@ function BatchDocumentWorkbench({batchId,orders,visibleOrders,orderPagination,ba
                   <input type="hidden" name="orderId" value={order.order_id}/>
                   <input type="hidden" name="documentCategory" value={requirement.code}/>
                   <input type="hidden" name="documentDescription" value={requirement.name}/>
-                  <input type="hidden" name="approveImmediately" value="1"/>
                   <label><span className="sr-only">选择{requirement.name}文件</span><input type="file" name="attachment" aria-label={`选择${requirement.name}文件`} required/></label>
-                  <button className="secondary" disabled={busy}>{current?.review_status==="rejected"?"重新上传并通过":"上传并通过"}</button>
+                  <button className="secondary" disabled={busy}>{current?.review_status==="rejected"?"重新上传":"上传"}</button>
                 </Form>}
-                {manageDocuments&&current?.review_status==="pending"&&<Form method="post" className="batch-order-file-review-action">
+                {manageDocuments&&current&&current.review_status!=="archived"&&(privileged||current.uploaded_by_user_id!==currentUserId)&&<Form method="post" className="batch-order-file-review-action">
                   <input type="hidden" name="intent" value="batch_order_document_review"/>
                   <input type="hidden" name="orderId" value={order.order_id}/>
                   <input type="hidden" name="attachmentId" value={current.id}/>
                   <button className="primary" name="reviewStatus" value="approved" disabled={busy}>审核通过</button>
                   <button className="secondary" name="reviewStatus" value="rejected" disabled={busy}>退回</button>
                 </Form>}
+                {manageDocuments&&current?.review_status==="pending"&&!privileged&&current.uploaded_by_user_id===currentUserId&&<span className="muted">历史待审文件请重新上传，上传后自动通过</span>}
               </div>;
             })}{!activeRequirements.length&&<span className="status-pill success">当前工作流未启用逐票文件</span>}</div>
             <BatchOrderCustomsWorkbench orderId={order.order_id} declarations={orderCustomsDeclarations} fields={customsPolicy.fields} manage={canManageThisOrder} allowRelease={canReleaseThisOrder} busy={busy} closeSignal={customsCloseSignal}/>

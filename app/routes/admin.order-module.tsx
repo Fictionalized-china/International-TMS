@@ -52,6 +52,7 @@ import {
 } from "../lib/billing-access";
 import {
   canReviewOrderModuleDocument,
+  isOrderDocumentSelfReviewBlocked,
   orderDocumentWorkflowMutationAccess,
   canUploadOrderModuleDocument,
   settlementDocumentStageAccess,
@@ -354,6 +355,7 @@ type Cargo = {
 };
 type Attachment = {
   id: string;
+  uploaded_by_user_id: string | null;
   file_name: string;
   content_type: string;
   size_bytes: number;
@@ -956,7 +958,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
   ]);
   const [attachments, bookings, batches, shipments] = await Promise.all([
     env.DB.prepare(
-      `SELECT a.id,a.file_name,a.content_type,a.size_bytes,a.created_at,m.document_category,m.description,m.public_to_customer,m.review_status FROM order_attachments a LEFT JOIN order_document_metadata m ON m.attachment_id=a.id WHERE a.order_id=? AND a.organization_id=? ORDER BY a.created_at DESC`,
+      `SELECT a.id,a.uploaded_by_user_id,a.file_name,a.content_type,a.size_bytes,a.created_at,m.document_category,m.description,m.public_to_customer,m.review_status FROM order_attachments a LEFT JOIN order_document_metadata m ON m.attachment_id=a.id WHERE a.order_id=? AND a.organization_id=? ORDER BY a.created_at DESC`,
     )
       .bind(orderId, current.organizationId)
       .all<Attachment>(),
@@ -1599,15 +1601,22 @@ export async function action({ request, params }: Route.ActionArgs) {
   ].includes(intent);
   const quickReviewAttachmentId = valueOf(form, "quickReviewAttachmentId");
   const documentReviewAction = intent === "document_review" || Boolean(quickReviewAttachmentId);
-  const actionDocumentCategory = !isDocumentAction
+  const actionDocumentTarget = !isDocumentAction
     ? null
     : intent === "document_upload" && !quickReviewAttachmentId
-      ? valueOf(form, "documentCategory")
-      : (await env.DB.prepare(
-          "SELECT document_category FROM order_document_metadata WHERE attachment_id=? AND order_id=? AND organization_id=?",
+      ? { document_category: valueOf(form, "documentCategory"), uploaded_by_user_id: null }
+      : await env.DB.prepare(
+          `SELECT m.document_category,a.uploaded_by_user_id
+             FROM order_document_metadata m
+             JOIN order_attachments a
+               ON a.id=m.attachment_id
+              AND a.order_id=m.order_id
+              AND a.organization_id=m.organization_id
+            WHERE m.attachment_id=? AND m.order_id=? AND m.organization_id=?`,
         )
           .bind(valueOf(form, "attachmentId") || quickReviewAttachmentId, orderId, current.organizationId)
-          .first<{ document_category: string }>())?.document_category ?? null;
+          .first<{ document_category: string; uploaded_by_user_id: string | null }>();
+  const actionDocumentCategory = actionDocumentTarget?.document_category ?? null;
   const actionDocumentPlacement = actionDocumentCategory
     ? orderDocumentPlacement(actionDocumentCategory)
     : null;
@@ -3689,6 +3698,8 @@ export async function action({ request, params }: Route.ActionArgs) {
       if (quickReviewAttachmentId) {
         if (moduleCode !== "documents")
           return { formError: "文件审核请在文件中心办理" };
+        if (isOrderDocumentSelfReviewBlocked(current, actionDocumentTarget?.uploaded_by_user_id))
+          return { formError: "该文件由当前账号上传，请由其他有审核权限的账号复核" };
         const now = new Date().toISOString();
         await env.DB.prepare(
           "UPDATE order_document_metadata SET review_status='approved',reviewed_by_user_id=?,reviewed_at=?,updated_at=? WHERE attachment_id=? AND order_id=? AND organization_id=?",
@@ -3789,15 +3800,15 @@ export async function action({ request, params }: Route.ActionArgs) {
             now,
           ),
           env.DB.prepare(
-            "INSERT INTO order_document_metadata(attachment_id,organization_id,order_id,document_category,description,public_to_customer,review_status,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT INTO order_document_metadata(attachment_id,organization_id,order_id,document_category,description,public_to_customer,review_status,reviewed_by_user_id,reviewed_at,updated_at) VALUES(?,?,?,?,?,?,'approved',NULL,?,?)",
           ).bind(
             attachmentId,
             current.organizationId,
             orderId,
-             documentCategory,
-             valueOf(form, "documentDescription") || orderDocumentTypeLabel(documentCategory),
+            documentCategory,
+            valueOf(form, "documentDescription") || orderDocumentTypeLabel(documentCategory),
             valueOf(form, "publicToCustomer") === "1" ? 1 : 0,
-            "pending",
+            now,
             now,
           ),
         );
@@ -3812,13 +3823,22 @@ export async function action({ request, params }: Route.ActionArgs) {
       });
       if (placement?.moduleCode === "costs")
         await refreshOrderSettlementState(current.organizationId, orderId, now);
-      return { success: `${orderDocumentTypeLabel(documentCategory)}已上传并进入审核` };
+      return { success: `${orderDocumentTypeLabel(documentCategory)}已上传并自动通过` };
     }
     if (intent === "document_review") {
       const attachmentId = valueOf(form, "attachmentId");
       const target = await env.DB.prepare(
-        "SELECT document_category FROM order_document_metadata WHERE attachment_id=? AND order_id=? AND organization_id=?",
-      ).bind(attachmentId, orderId, current.organizationId).first<{ document_category: string }>();
+        `SELECT m.document_category,a.uploaded_by_user_id
+           FROM order_document_metadata m
+           JOIN order_attachments a
+             ON a.id=m.attachment_id
+            AND a.order_id=m.order_id
+            AND a.organization_id=m.organization_id
+          WHERE m.attachment_id=? AND m.order_id=? AND m.organization_id=?`,
+      ).bind(attachmentId, orderId, current.organizationId).first<{
+        document_category: string;
+        uploaded_by_user_id: string | null;
+      }>();
       if (!target) return { formError: "要审核的文件不存在" };
       if (
         target.document_category === "consignment_letter" &&
@@ -3837,6 +3857,8 @@ export async function action({ request, params }: Route.ActionArgs) {
         !orderDocumentCanBeHandledInModule(target.document_category, moduleCode as OrderModuleCode)
       )
         return { formError: "请在该文件对应的业务节点审核" };
+      if (isOrderDocumentSelfReviewBlocked(current, target.uploaded_by_user_id))
+        return { formError: "该文件由当前账号上传，请由其他有审核权限的账号复核" };
       const status = valueOf(form, "reviewStatus");
       if (!["approved", "rejected", "archived"].includes(status))
         return { formError: "审核状态无效" };
@@ -5472,7 +5494,13 @@ function ModuleSourceDocuments({
             code !== "loading" &&
             (placement.documentCode === "consignment_letter"
               ? canApproveConsignment
-              : canReviewDocumentAtStage);
+              : canReviewDocumentAtStage) &&
+            !isOrderDocumentSelfReviewBlocked(data.current, latest?.uploaded_by_user_id);
+          const awaitingOtherReviewer = Boolean(
+            latest &&
+            latest.review_status === "pending" &&
+            isOrderDocumentSelfReviewBlocked(data.current, latest.uploaded_by_user_id),
+          );
           return (
             <article
               key={placement.documentCode}
@@ -5522,7 +5550,7 @@ function ModuleSourceDocuments({
                     <label className="field"><span>审核结果</span><select name="reviewStatus" defaultValue={latest.review_status === "rejected" ? "rejected" : "approved"}><option value="approved">审核通过</option><option value="rejected">退回修改</option></select></label>
                     <button className="primary" disabled={busy}>确认审核结果</button>
                   </Form>
-                </Modal> : code === "loading" ? <span className="muted">仓库已同步</span> : documentStageAccess?.reason ? <span className="muted">{documentStageAccess.reason}</span> : null}
+                </Modal> : awaitingOtherReviewer ? <span className="muted">历史待审文件请重新上传</span> : code === "loading" ? <span className="muted">仓库已同步</span> : documentStageAccess?.reason ? <span className="muted">{documentStageAccess.reason}</span> : null}
               </div> : canEditDocument ? <Form method="post" encType="multipart/form-data" className="source-document-upload-form">
                 <input type="hidden" name="intent" value="document_upload" />
                 <input type="hidden" name="documentCategory" value={placement.documentCode} />
@@ -6289,7 +6317,7 @@ function ModuleBusinessData({
                       </Modal> : null}
                       {(item.document_category === "consignment_letter"
                         ? canApproveConsignment
-                        : manage) ? <Modal key={`review:${item.id}:${documentReviewCloseSignal(reviewCloseSignal, item.id) ?? "idle"}`} title={`审核文件 · ${item.file_name}`} triggerLabel="审核" triggerClassName="text-button" size="wide" closeSignal={documentReviewCloseSignal(reviewCloseSignal, item.id)}>
+                        : manage) && !isOrderDocumentSelfReviewBlocked(data.current, item.uploaded_by_user_id) ? <Modal key={`review:${item.id}:${documentReviewCloseSignal(reviewCloseSignal, item.id) ?? "idle"}`} title={`审核文件 · ${item.file_name}`} triggerLabel="审核" triggerClassName="text-button" size="wide" closeSignal={documentReviewCloseSignal(reviewCloseSignal, item.id)}>
                         <Form method="post" className="stack">
                           <input
                             type="hidden"
@@ -6305,7 +6333,7 @@ function ModuleBusinessData({
                           <label className="field"><span>审核结果</span><select name="reviewStatus" defaultValue={item.review_status === "rejected" ? "rejected" : "approved"}><option value="approved">审核通过</option><option value="rejected">退回修改</option><option value="archived">审核通过并归档</option></select></label>
                           <button className="primary" disabled={busy}>确认审核结果</button>
                         </Form>
-                      </Modal> : null}
+                      </Modal> : item.review_status === "pending" && isOrderDocumentSelfReviewBlocked(data.current, item.uploaded_by_user_id) ? <span className="muted">历史待审文件请重新上传</span> : null}
                     </div>
                   </td>
                 </tr>
