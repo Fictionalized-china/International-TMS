@@ -584,6 +584,9 @@ const assignmentNativeFieldKeys = new Set([
   "assignment_scope",
   "pre_payable_expenses",
 ]);
+const orderDossierOwnedWorkflowFieldKeys = new Set([
+  "business_type",
+]);
 const quotationStatusLabels: Record<string, string> = {
   draft: "草稿",
   sent: "待客户确认",
@@ -5025,7 +5028,11 @@ function WorkflowFieldChecklist({
   busy: boolean;
   compact?: boolean;
 }) {
-  const visible = fields.filter((field) => field.isActive);
+  const visible = fields.filter(
+    (field) =>
+      field.isActive &&
+      !orderDossierOwnedWorkflowFieldKeys.has(field.fieldKey),
+  );
   if (!visible.length) return null;
   const missing = visible.filter((field) => field.isRequired && !field.present);
   if (compact) {

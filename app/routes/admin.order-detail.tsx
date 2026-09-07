@@ -1208,7 +1208,7 @@ function LinearOrderSideRail({
       <dl className="linear-side-facts">
         <div><dt>客户</dt><dd title={order.customer_name}>{order.customer_name || "—"}</dd></div>
         <div><dt>订单号</dt><dd className="order-number-only" title={order.order_number}>{order.order_number}</dd></div>
-        <div><dt>类型</dt><dd>{order.business_type === "ltl" ? "拼车 · 已锁定" : "整车 · 已锁定"}</dd></div>
+        <div><dt>订单类型</dt><dd>{order.business_type === "ltl" ? "拼车 · 报价锁定" : "整车 · 报价锁定"}</dd></div>
         <div><dt>当前节点</dt><dd title={order.current_step_name}>{order.current_step_name || "—"}</dd></div>
         <div><dt>负责人</dt><dd title={order.assignee_name || ""}>{order.assignee_name || "待分配"}</dd></div>
         <div><dt>货物</dt><dd title={order.cargo_description}>{order.cargo_description || "—"}</dd></div>
