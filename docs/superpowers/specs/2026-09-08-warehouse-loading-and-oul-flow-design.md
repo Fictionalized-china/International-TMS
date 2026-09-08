@@ -189,7 +189,7 @@
 - `order_id`、可选 `transport_batch_id`、`dispatch_id`。
 - `source_package_count`、`outbound_package_count`。
 - `total_weight_kg`、`total_volume_cbm`、`packing_mode`、`notes`。
-- `revision`、`status`：`generated`、`label_ready`、`loading`、`dispatched`、`cancelled`。
+- `revision`、`status`：`generated`、`printed`、`labelled`、`loading`、`dispatched`、`cancelled`。
 - 创建人、创建时间、更新时间。
 
 关联设计：
@@ -288,4 +288,3 @@ OUL 数量的唯一来源为包装批次的 `outbound_package_count`，不得再
 - 包装批次可追溯全部入仓唛头和全部 OUL，但不存在虚构逐包映射。
 - 首张 OUL 扫描后不能调整包装数量；确认出库后不能作废 OUL。
 - 境外仓和客户自提继续识别同一批 OUL。
-
