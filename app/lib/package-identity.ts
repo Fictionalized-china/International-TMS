@@ -27,6 +27,20 @@ export function randomPzSuffix(random = Math.random) {
   return Array.from({ length: 3 }, () => PZ_ALPHABET[Math.floor(random() * PZ_ALPHABET.length)]).join("");
 }
 
+export function randomOulSuffix(random = Math.random) {
+  return Array.from({ length: 4 }, () => PZ_ALPHABET[Math.floor(random() * PZ_ALPHABET.length)]).join("");
+}
+
+export function oulCode(orderNumber: string, sequence: number, total: number, suffix: string) {
+  assertPackageCount(sequence, "OUL 序号");
+  assertPackageCount(total, "OUL 总数");
+  if (sequence > total) throw new Error("OUL 序号不能大于总数");
+  if (!/^[2-9A-HJ-NP-Z]{4}$/.test(suffix)) throw new Error("OUL 随机码无效");
+  const orderPart = orderNumber.replace(/[^A-Z0-9]/gi, "").slice(-12).toUpperCase();
+  if (!orderPart) throw new Error("订单号无效");
+  return `OUL-${orderPart}-${String(sequence).padStart(3, "0")}-${String(total).padStart(3, "0")}-${suffix}`;
+}
+
 export function pzNumber(input: { warehouseSerialCode: string; at: Date; suffix: string }) {
   if (!/^\d{2}$/.test(input.warehouseSerialCode)) throw new Error("仓库两位编号未配置");
   if (!/^[2-9A-HJ-NP-Z]{3}$/.test(input.suffix)) throw new Error("配载单随机码无效");
