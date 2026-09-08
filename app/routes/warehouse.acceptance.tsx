@@ -158,6 +158,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   let cargoItems: CargoItem[] = [];
   let workflowFields: Awaited<ReturnType<typeof loadOrderModuleWorkflowFields>> = [];
   let inboundMarks:InboundMark[]=[];
+  let initialScannedMarkCode = "";
   let lookupError = "";
   if (reference) {
     const matches = await env.DB.prepare(
@@ -189,9 +190,15 @@ export async function loader({ request }: Route.LoaderArgs) {
             SELECT 1 FROM order_waybills ow
              WHERE ow.organization_id=o.organization_id AND ow.order_id=o.id
                AND UPPER(ow.waybill_number)=UPPER(?)
+          ) OR EXISTS(
+            SELECT 1 FROM order_cargo_packages scanned_mark
+             WHERE scanned_mark.organization_id=o.organization_id
+               AND scanned_mark.order_id=o.id
+               AND scanned_mark.is_active=1 AND scanned_mark.status!='cancelled'
+               AND UPPER(scanned_mark.package_code)=UPPER(?)
           ))
         ORDER BY o.updated_at DESC LIMIT 2`,
-    ).bind(user.organizationId, warehouse.id, reference, reference, reference).all<AcceptanceOrder>();
+    ).bind(user.organizationId, warehouse.id, reference, reference, reference, reference).all<AcceptanceOrder>();
     if (matches.results.length > 1) lookupError = "该号码匹配多个订单，请扫描或输入唯一的系统订单号";
     else if (!matches.results.length) lookupError = `未找到计划进入“${warehouse.name}”且可验收的订单：${reference}`;
     else {
@@ -230,6 +237,13 @@ export async function loader({ request }: Route.LoaderArgs) {
         ).bind(user.organizationId,order.id).all<InboundMark>()]);
         cargoItems = cargo.results;
         inboundMarks=marks.results;
+        const referencedMark = inboundMarks.find(
+          (mark) => mark.package_code.toUpperCase() === reference.toUpperCase(),
+        );
+        if (referencedMark?.status === "received")
+          lookupError = `入仓唛头 ${referencedMark.package_code} 已收货，不能重复扫描`;
+        else if (referencedMark)
+          initialScannedMarkCode = referencedMark.package_code.toUpperCase();
         workflowFields = await loadOrderModuleWorkflowFields(
           user.organizationId,
           order.id,
@@ -248,6 +262,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     order,
     cargoItems,
     inboundMarks,
+    initialScannedMarkCode,
     workflowFields,
     locations: locations.results,
     recentLabels: recentLabels.results,
@@ -785,7 +800,11 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
   const [scannedMarks,setScannedMarks]=useState<string[]>([]);
   const labels = loaderData.receiptId ? loaderData.recentLabels : [];
   const policies = resolveWarehouseAcceptancePolicies(loaderData.workflowFields);
-  useEffect(() => {setReceiptResult("partial");setScannedMarks([]);setMarkInput("");}, [loaderData.order?.id]);
+  useEffect(() => {
+    setReceiptResult("partial");
+    setScannedMarks(loaderData.initialScannedMarkCode ? [loaderData.initialScannedMarkCode] : []);
+    setMarkInput("");
+  }, [loaderData.order?.id, loaderData.initialScannedMarkCode]);
   const addScannedMark=()=>{
     const code=markInput.trim().toUpperCase();
     if(!code)return;
@@ -793,16 +812,16 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
     setMarkInput("");
   };
   return <>
-    <header className="page-header acceptance-header"><div><p className="eyebrow">ACCEPTANCE RECEIVING</p><h1>验收收货</h1><p>先调出订单，再逐一扫描客户已粘贴的入仓唛头；系统保存到仓时间、库位和操作人，不在仓库重复统计商品件数。</p></div></header>
+    <header className="page-header acceptance-header"><div><p className="eyebrow">ACCEPTANCE RECEIVING</p><h1>验收收货</h1><p>扫描任一入仓唛头即可调出整批信息并计入本次收货；继续逐一扫描其余外包装，系统自动记录整批收齐进度。</p></div></header>
     <ActionToast message={actionError ?? loaderData.resultMessage} tone={actionError ? "error" : "success"} data={actionData}/>
     {!loaderData.locations.length && <div className="alert error">当前仓库没有可用库位，请先<Link to={`/warehouse/locations?warehouseId=${loaderData.warehouse.id}`}>配置仓库与库位</Link>。</div>}
     {canOperate ? <WarehouseReceivingScanPanel
       warehouseId={loaderData.warehouse.id}
       reference={loaderData.reference}
-      inputLabel="扫描订单号"
-      placeholder="扫描订单号条码后回车"
+      inputLabel="扫描入仓唛头 / 订单号"
+      placeholder="扫描任一入仓唛头后回车"
       submitLabel="调出验收信息"
-      hint="扫描枪输入订单号并发送回车后，系统自动读取客户、货物、运输和累计收货信息。"
+      hint="首次扫描任一 SO…-IN-… 入仓唛头即可调出所属整批，并自动把该唛头计入本次收货；也兼容手工输入订单号查询。"
     /> : <div className="alert info">当前账号为仓库只读视角，可查看入库结果与历史标签；验收扫描和入库提交仅向有操作权限的冻结任务负责人开放。</div>}
     {loaderData.lookupError && <div className="alert error no-print">{loaderData.lookupError}</div>}
     {canOperate && loaderData.order && loaderData.cargoItems.length > 0 && <Form method="post" className="acceptance-workbench no-print" onInput={(event) => synchronizeWarehouseVolumeRow(event.target)}>

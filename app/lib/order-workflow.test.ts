@@ -115,6 +115,18 @@ describe("workflow action ownership", () => {
       currentUserId: "supervisor-1",
     })).toBe(false);
     expect(canRunOrderWorkflowAction({
+      actionCode: "reject",
+      positionCode: "BUSINESS_SUPERVISOR",
+      currentAssigneeUserId: "supervisor-1",
+      currentUserId: "supervisor-1",
+    })).toBe(true);
+    expect(canRunOrderWorkflowAction({
+      actionCode: "reject",
+      positionCode: "BUSINESS_SUPERVISOR",
+      currentAssigneeUserId: "supervisor-2",
+      currentUserId: "supervisor-1",
+    })).toBe(false);
+    expect(canRunOrderWorkflowAction({
       actionCode: "dispatch",
       positionCode: "BUSINESS_SUPERVISOR",
       currentAssigneeUserId: "supervisor-1",

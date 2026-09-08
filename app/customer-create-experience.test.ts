@@ -59,6 +59,8 @@ describe("customer creation experience contract", () => {
     expect(customersRoute).toContain('form.has("archiveContract")');
     expect(customersRoute).toContain("customer_portal_accounts");
     expect(customersRoute).toContain("customer_contracts");
+    expect(customersRoute).toContain("fileToDataUrl(contractAttachment)");
+    expect(customersRoute).not.toContain("new FileReader()");
     expect(customersRoute).toContain('return { success: "客户已创建", customerId: id }');
   });
 });

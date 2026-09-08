@@ -19,10 +19,10 @@ export type ConsignmentApprovalStatusRow = {
 
 function latestByAction(
   history: ConsignmentApprovalHistoryEntry[],
-  actionCode: string,
+  ...actionCodes: string[]
 ) {
   return history
-    .filter((item) => item.actionCode === actionCode)
+    .filter((item) => actionCodes.includes(item.actionCode))
     .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))[0] ?? null;
 }
 
@@ -40,7 +40,7 @@ export function consignmentApprovalStatusRows(input: {
 }): ConsignmentApprovalStatusRow[] {
   const submitted = latestByAction(input.history, "submit");
   const approved = latestByAction(input.history, "approve");
-  const returned = latestByAction(input.history, "cancel_submitted");
+  const returned = latestByAction(input.history, "reject", "cancel_submitted");
   const latestSubmissionReturned = happenedAfter(returned, submitted);
   const currentApproval = approved && (!submitted || approved.occurredAt > submitted.occurredAt)
     ? approved

@@ -11,6 +11,7 @@ import { CustomerEditorForm } from "../components/CustomerEditorForm";
 import { ActionToast } from "../components/ActionToast";
 import { generateCustomerIdentityCode } from "../lib/customer-identity";
 import { resolveCustomerCode } from "../lib/customer-code";
+import { fileToDataUrl } from "../lib/file-data-url";
 import {
   customerBusinessRoleLabel,
   customerBusinessRoles,
@@ -351,7 +352,7 @@ async function runCustomerAction({ request, current, form, intent, now }: {
     if (fileError) return { formError: fileError };
     const id = crypto.randomUUID();
     await env.DB.prepare(`INSERT INTO customer_contracts (id, organization_id, customer_id, title, file_name, content_type, size_bytes, data_url, effective_at, expires_at, status, notes, uploaded_by_user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`)
-      .bind(id, current.organizationId, customerId, title, file.name, file.type, file.size, await toDataUrl(file), valueOf(form, "effectiveAt") || null, valueOf(form, "expiresAt") || null, valueOf(form, "notes") || null, current.userId, now, now).run();
+      .bind(id, current.organizationId, customerId, title, file.name, file.type, file.size, await fileToDataUrl(file), valueOf(form, "effectiveAt") || null, valueOf(form, "expiresAt") || null, valueOf(form, "notes") || null, current.userId, now, now).run();
     await writeAudit({ request, action: "customer.contract.upload", resourceType: "customer_contract", resourceId: id, organizationId: current.organizationId, actorUserId: current.userId, metadata: { customerId, title } });
     return { success: `合同“${title}”已归档到客户资料` };
   }
@@ -477,7 +478,7 @@ async function runCustomerAction({ request, current, form, intent, now }: {
   const portalAccountId = crypto.randomUUID();
   const contractId = archiveContract ? crypto.randomUUID() : null;
   const portalPasswordHash = await hashPassword(portalPassword);
-  const contractDataUrl = archiveContract && contractAttachment instanceof File ? await toDataUrl(contractAttachment) : null;
+  const contractDataUrl = archiveContract && contractAttachment instanceof File ? await fileToDataUrl(contractAttachment) : null;
   try {
     await env.DB.batch([
       env.DB.prepare(`INSERT INTO customers (id, organization_id, code, identity_code, name, short_name, party_category, type, sales_owner_user_id, status, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`).bind(id, current.organizationId, effectiveCode, identityCode, name, shortName || null, partyCategory, legacyCustomerTypeForRoles(businessRoles), effectiveOwnerId, notes || null, now, now),
@@ -512,15 +513,6 @@ function validateContractFile(file: File) {
   if (file.size > maxInlineContractBytes) return "合同文件不能超过 1.2MB；更大的文件请先压缩或拆分";
   if (!file.type) return "无法识别文件类型";
   return null;
-}
-
-async function toDataUrl(file: File) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error("文件读取失败"));
-    reader.readAsDataURL(file);
-  });
 }
 
 async function nextCustomerIdentityCode(organizationId:string):Promise<string|null>{

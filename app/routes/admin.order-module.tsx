@@ -951,7 +951,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
        LEFT JOIN users actor ON actor.id=h.actor_user_id
        LEFT JOIN users assignee ON assignee.id=h.assignee_user_id
        WHERE h.order_id=? AND h.organization_id=?
-         AND h.action_code IN ('submit','approve','cancel_submitted')
+         AND h.action_code IN ('submit','approve','reject','cancel_submitted')
        ORDER BY h.occurred_at DESC`,
     )
       .bind(orderId, current.organizationId)
@@ -1524,7 +1524,7 @@ export async function action({ request, params }: Route.ActionArgs) {
   const isConsignmentApprovalAction =
     moduleCode === "consignment" &&
     intent === "workflow_action" &&
-    valueOf(form, "actionCode") === "approve";
+    ["approve", "reject"].includes(valueOf(form, "actionCode"));
   const isExpenseDirectionControlAction =
     moduleCode === "costs" && intent === "expense_direction_control";
   const order = await env.DB.prepare(
@@ -1864,20 +1864,27 @@ export async function action({ request, params }: Route.ActionArgs) {
       const missingDocuments = await missingRequiredDocumentUploads("consignment");
       if (missingDocuments.length) return { formError: `请先审核通过：${missingDocuments.join("、")}` };
     }
+    if (moduleCode === "consignment" && actionCode === "reject" && valueOf(form, "notes").trim().length < 2)
+      return { formError: "请填写至少 2 个字符的打回原因，业务员将据此补充资料" };
+    const workflowAssigneeUserId = moduleCode === "consignment" && actionCode === "reject"
+      ? order.salesperson_user_id
+      : valueOf(form, "assigneeUserId") || null;
+    if (moduleCode === "consignment" && actionCode === "reject" && !workflowAssigneeUserId)
+      return { formError: "订单未绑定原业务员，暂时不能打回；请先修复订单负责人" };
     const result = await runOrderWorkflowAction({
       request,
       organizationId: current.organizationId,
       actorUserId: current.userId,
       orderId,
       actionCode,
-      assigneeUserId: valueOf(form, "assigneeUserId") || null,
+      assigneeUserId: workflowAssigneeUserId,
       notes: valueOf(form, "notes"),
       bypassAssigneeRestriction: workflowAdministrator,
     });
     if (
       !("formError" in result) &&
       moduleCode === "consignment" &&
-      actionCode === "approve"
+      ["approve", "reject"].includes(actionCode)
     ) {
       return redirect(`/admin/orders/${orderId}`);
     }
@@ -5945,8 +5952,8 @@ function cargoWorkflowDisplayItems(item: Cargo): WorkflowDisplayItem[] {
     { fieldKey: "package_type", label: "包装类型", value: warehousePackageTypeLabel(item.package_type), present: text(item.package_type) },
     { fieldKey: "package_count", label: "包装数", value: item.package_count, present: positive(item.package_count) },
     { fieldKey: "pieces_per_package", label: "每包装件数", value: item.pieces_per_package, present: positive(item.pieces_per_package) },
-    { fieldKey: "gross_weight_per_package_kg", label: "单包装毛重 KG", value: `${item.gross_weight_per_package_kg} KG`, present: positive(item.gross_weight_per_package_kg) },
-    { fieldKey: "net_weight_per_package_kg", label: "单包装净重 KG", value: `${item.net_weight_per_package_kg} KG`, present: positive(item.net_weight_per_package_kg) },
+    { fieldKey: "gross_weight_per_package_kg", label: "单包装毛重 KG", value: `${item.gross_weight_per_package_kg.toFixed(2)} KG`, present: positive(item.gross_weight_per_package_kg) },
+    { fieldKey: "net_weight_per_package_kg", label: "单包装净重 KG", value: `${item.net_weight_per_package_kg.toFixed(2)} KG`, present: positive(item.net_weight_per_package_kg) },
     { fieldKey: "length_cm", label: "长度 CM", value: `${item.length_cm} CM`, present: positive(item.length_cm) },
     { fieldKey: "width_cm", label: "宽度 CM", value: `${item.width_cm} CM`, present: positive(item.width_cm) },
     { fieldKey: "height_cm", label: "高度 CM", value: `${item.height_cm} CM`, present: positive(item.height_cm) },
@@ -6610,13 +6617,15 @@ function ModuleBusinessData({
                   </select>}
                 </ModuleField>
                 {domesticDriverId === "__new__" && <fieldset className="transport-resource-inline-fields span-2"><legend>新司机快速建档</legend><label className="field"><span>司机姓名 <b>*</b></span><input name="newDriverName" required maxLength={80}/></label><label className="field"><span>司机电话 <b>*</b></span><input name="newDriverPhone" type="tel" inputMode="tel" pattern="[+0-9 \(\)\-]{6,30}" title="只能输入数字、空格、括号、短横线和开头的加号" required maxLength={30}/></label><label className="field"><span>证件号</span><input name="newDriverLicenseNumber" maxLength={80}/></label></fieldset>}
-                <input type="hidden" name="driverName" value={domesticDriver?.name || ""} />
-                <ModuleField fields={data.workflowFields} fieldKey="domestic_driver_phone" label="国内司机手机号" fallbackRequired>
-                  {(required) => <input name="driverPhone" value={domesticDriver?.phone || ""} readOnly required={required} placeholder="选择司机后自动带出" />}
-                </ModuleField>
-                <ModuleField fields={data.workflowFields} fieldKey="domestic_driver_id_number" label="国内司机证件号">
-                  {(required) => <input name="driverIdNumber" value={domesticDriver?.license_number || ""} readOnly required={required} placeholder="选择司机后自动带出" />}
-                </ModuleField>
+                {domesticDriverId !== "__new__" && <>
+                  <input type="hidden" name="driverName" value={domesticDriver?.name || ""} />
+                  <ModuleField fields={data.workflowFields} fieldKey="domestic_driver_phone" label="国内司机手机号" fallbackRequired>
+                    {(required) => <input name="driverPhone" value={domesticDriver?.phone || ""} readOnly required={required} placeholder="选择司机后自动带出" />}
+                  </ModuleField>
+                  <ModuleField fields={data.workflowFields} fieldKey="domestic_driver_id_number" label="国内司机证件号">
+                    {(required) => <input name="driverIdNumber" value={domesticDriver?.license_number || ""} readOnly required={required} placeholder="选择司机后自动带出" />}
+                  </ModuleField>
+                </>}
                 <div className="transport-route-row span-2">
                   <div className="transport-route-stop">
                     <span>国内提货起点</span>
@@ -8613,6 +8622,8 @@ function OrderApprovalReview({
   reviewCloseSignal: unknown;
 }) {
   const { order, cargo } = data;
+  const [approvalAction, setApprovalAction] = useState<"approve" | "reject">("approve");
+  const [approvalNotes, setApprovalNotes] = useState("资料完整，同意进入任务分配");
   if (!canApproveConsignment) {
     return <ConsignmentApprovalStatusTable data={data} />;
   }
@@ -8623,6 +8634,7 @@ function OrderApprovalReview({
       orderWorkflowTargetAssigneeRequirements("approve"),
     )
   );
+  const salesperson = data.members.find((member) => member.id === order.salesperson_user_id);
   const cargoTotals = cargo.reduce((total, item) => ({
     pieces: total.pieces + item.package_count * item.pieces_per_package,
     grossWeight: total.grossWeight + item.package_count * item.gross_weight_per_package_kg,
@@ -8655,22 +8667,29 @@ function OrderApprovalReview({
       reviewCloseSignal={reviewCloseSignal}
     />
     <section className="approval-section approval-decision">
-      <header><strong>审批办理</strong><span>确认意见并指定下一步具体操作主管</span></header>
-      {!operationSupervisors.length && <div className="alert error" role="alert">没有同时具备订单查看、任务分配和配载审批权限的有效操作主管；请先调整组织人员或个人权限。</div>}
+      <header><strong>审批办理</strong><span>选择通过或打回；通过时指定下一步具体操作主管</span></header>
+      {approvalAction === "approve" && !operationSupervisors.length && <div className="alert error" role="alert">没有同时具备订单查看、任务分配和配载审批权限的有效操作主管；请先调整组织人员或个人权限。</div>}
       <Form method="post" id="consignment-approval-form" className="approval-inline-form">
         <input type="hidden" name="intent" value="workflow_action" />
-        <input type="hidden" name="actionCode" value="approve" />
-        <label className="approval-result-field"><span>审批结果 <b>*</b></span><select className="control filled" aria-label="审批结果" defaultValue="approved"><option value="approved">通过</option></select></label>
-        <label className="approval-notes-field"><span>审批意见</span><input className="control editing" name="notes" defaultValue="资料完整，同意进入任务分配" /></label>
-        <OrganizationAssigneePicker
-          members={operationSupervisors}
-          name="assigneeUserId"
-          idPrefix="approval-operation-supervisor"
-          className="approval-next-assignee"
-          personLabel="下一步操作主管"
-          required
-        />
-        <button className="primary approval-submit-button" disabled={busy || !cargo.length || !canApproveConsignment || !operationSupervisors.length}>审批通过并进入任务分配 →</button>
+        <label className="approval-result-field"><span>审批结果 <b>*</b></span><select className="control filled" aria-label="审批结果" name="actionCode" value={approvalAction} onChange={(event) => {
+          const nextAction = event.currentTarget.value as "approve" | "reject";
+          setApprovalAction(nextAction);
+          setApprovalNotes(nextAction === "reject" ? "" : "资料完整，同意进入任务分配");
+        }}><option value="approve">通过</option><option value="reject">打回</option></select></label>
+        <label className="approval-notes-field"><span>{approvalAction === "reject" ? "打回原因" : "审批意见"}{approvalAction === "reject" && <b> *</b>}</span><input className="control editing" name="notes" value={approvalNotes} onChange={(event) => setApprovalNotes(event.currentTarget.value)} required={approvalAction === "reject"} minLength={approvalAction === "reject" ? 2 : undefined} placeholder={approvalAction === "reject" ? "说明需要业务员补充或修正的资料" : "填写审批意见"} /></label>
+        {approvalAction === "approve" ? <OrganizationAssigneePicker
+            members={operationSupervisors}
+            name="assigneeUserId"
+            idPrefix="approval-operation-supervisor"
+            className="approval-next-assignee"
+            personLabel="下一步操作主管"
+            required
+          /> : <div className="approval-return-assignee">
+            <span>退回处理人</span>
+            <strong>{salesperson?.display_name || "原业务员"}</strong>
+            <small>退回后恢复资料编辑，由原业务员补充并重新提交审批</small>
+          </div>}
+        <button className="primary approval-submit-button" disabled={busy || !cargo.length || !canApproveConsignment || (approvalAction === "approve" ? !operationSupervisors.length : !order.salesperson_user_id || approvalNotes.trim().length < 2)}>{approvalAction === "approve" ? "审批通过并进入任务分配 →" : "打回业务员补充资料 →"}</button>
       </Form>
     </section>
   </div>;

@@ -62,8 +62,8 @@ describe("consignment approval read-only status", () => {
       orderStatus: "draft",
       history: [
         {
-          actionCode: "cancel_submitted",
-          actionName: "退回修改",
+          actionCode: "reject",
+          actionName: "审批打回",
           actorName: "业务主管账号",
           assigneeName: "业务员账号",
           notes: "补充委托书",

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const css = readFileSync(new URL("./app.css", import.meta.url), "utf8");
+const route = readFileSync(new URL("./routes/admin.order-module.tsx", import.meta.url), "utf8");
 const marker = "Domestic transport: task-focused tabs and a single-screen compact entry sheet.";
 const start = css.indexOf(marker);
 const contract = start >= 0 ? css.slice(start, css.indexOf("/* Compact flat-table workbench", start)) : "";
@@ -20,5 +21,11 @@ describe("domestic transport layout contract", () => {
     expect(contract).toContain("width: 100% !important;");
     expect(contract).toContain("max-width: none !important;");
     expect(contract).toContain("justify-self: stretch !important;");
+  });
+
+  it("does not render registered-driver details beside the new-driver fields", () => {
+    expect(route).toContain('domesticDriverId !== "__new__" && <>');
+    expect(route).toContain('fieldKey="domestic_driver_phone"');
+    expect(route).toContain('fieldKey="domestic_driver_id_number"');
   });
 });
