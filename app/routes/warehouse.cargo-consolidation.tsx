@@ -71,6 +71,7 @@ type StockRow={
   weight_kg:number;volume_cbm:number;location_names:string|null;cargo_ready:number;
   has_exception:number;active_dispatch:number;active_batch_id:string|null;active_batch_number:string|null;
   operation_supervisor_user_id:string|null;
+  packing_job_id:string;packing_status:"labelled"|"allocated";
 };
 
 type BatchRow={
@@ -96,13 +97,16 @@ type BatchResource={carrierId:string|null;carrierName:string|null;vehicleMasterI
 type ReferenceOption={category:"border_port"|"customs_place";code:string;name:string};
 
 const stockCtes=`WITH stock AS (
-    SELECT s.order_id,COUNT(p.id) package_count,COALESCE(SUM(p.pieces),0) pieces,
+    SELECT job.order_id,job.id packing_job_id,job.status packing_status,
+      COUNT(p.id) package_count,COALESCE(SUM(p.pieces),0) pieces,
       COALESCE(SUM(p.weight_kg),0) weight_kg,COALESCE(SUM(p.volume_cbm),0) volume_cbm,
       GROUP_CONCAT(DISTINCT wl.name) location_names
-    FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id
+    FROM warehouse_packing_jobs job
+    JOIN warehouse_packages p ON p.packing_job_id=job.id AND p.organization_id=job.organization_id
     LEFT JOIN warehouse_locations wl ON wl.id=p.location_id
-    WHERE p.organization_id=? AND p.warehouse_id=? AND p.status IN ('in_stock','allocated') AND p.label_kind='inbound_mark'
-    GROUP BY s.order_id
+    WHERE job.organization_id=? AND job.warehouse_id=? AND job.status IN ('labelled','allocated')
+      AND p.status IN ('in_stock','allocated') AND p.label_kind='oul' AND p.lifecycle_status='active'
+    GROUP BY job.order_id,job.id,job.status
   ), ready AS (
     SELECT DISTINCT s.order_id FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id
     WHERE r.organization_id=? AND r.warehouse_id=? AND r.status='completed' AND r.cargo_complete=1
@@ -170,6 +174,7 @@ function rowSelectSql(){return`SELECT o.id order_id,o.order_number,o.business_ty
     (SELECT GROUP_CONCAT(NULLIF(TRIM(i.cargo_name_cn),''),'、') FROM order_cargo_items i WHERE i.organization_id=o.organization_id AND i.order_id=o.id) cargo_names,
     o.overseas_warehouse_id,ow.name overseas_warehouse_name,o.destination_country,o.destination_state,o.destination_city,o.operation_supervisor_user_id,
     o.exit_port,o.customs_location,st.package_count,st.pieces,st.weight_kg,st.volume_cbm,st.location_names,
+    st.packing_job_id,st.packing_status,
     CASE WHEN rr.order_id IS NULL THEN 0 ELSE 1 END cargo_ready,
     CASE WHEN eo.order_id IS NULL THEN 0 ELSE 1 END has_exception,
     CASE WHEN dd.order_id IS NULL THEN 0 ELSE 1 END active_dispatch,
@@ -196,9 +201,9 @@ export async function loader({request}:Route.LoaderArgs){
   like("COALESCE(ow.name,'')",filters.warehouse);like("o.destination_country",filters.country);like("COALESCE(o.destination_state,'')",filters.state);like("o.destination_city",filters.city);like("c.name",filters.customer);
   if(filters.keyword){clauses.push("(o.order_number LIKE ? OR c.name LIKE ? OR COALESCE(o.cargo_description,'') LIKE ? OR EXISTS(SELECT 1 FROM order_cargo_items qi WHERE qi.order_id=o.id AND COALESCE(qi.cargo_name_cn,'') LIKE ?))");bindings.push(...Array(4).fill(`%${filters.keyword}%`))}
   const loadingWorkflowGateSql=loadingConsolidationWorkflowAccessSql("o");
-  if(filters.eligibility==="eligible")clauses.push(`o.business_type='ltl' AND rr.order_id IS NOT NULL AND eo.order_id IS NULL AND dd.order_id IS NULL AND ab.batch_id IS NULL AND ${loadingWorkflowGateSql}`);
-  if(filters.eligibility==="assigned")clauses.push("ab.batch_id IS NOT NULL");
-  if(filters.eligibility==="blocked")clauses.push(`ab.batch_id IS NULL AND (o.business_type!='ltl' OR rr.order_id IS NULL OR eo.order_id IS NOT NULL OR dd.order_id IS NOT NULL OR NOT ${loadingWorkflowGateSql})`);
+  if(filters.eligibility==="eligible")clauses.push(`o.business_type='ltl' AND st.packing_status='labelled' AND rr.order_id IS NOT NULL AND eo.order_id IS NULL AND dd.order_id IS NULL AND ab.batch_id IS NULL AND ${loadingWorkflowGateSql}`);
+  if(filters.eligibility==="assigned")clauses.push("ab.batch_id IS NOT NULL AND st.packing_status='allocated'");
+  if(filters.eligibility==="blocked")clauses.push(`ab.batch_id IS NULL AND (o.business_type!='ltl' OR st.packing_status!='labelled' OR rr.order_id IS NULL OR eo.order_id IS NOT NULL OR dd.order_id IS NOT NULL OR NOT ${loadingWorkflowGateSql})`);
   const filterSql=clauses.length?` AND ${clauses.join(" AND ")}`:"",baseBindings=stockBindings(user.organizationId,warehouse.id);
   const totalRow=await env.DB.prepare(`${stockCtes} SELECT COUNT(*) total ${stockFrom}${filterSql}`).bind(...baseBindings,...bindings).first<{total:number}>();
   const total=totalRow?.total??0,pages=Math.max(1,Math.ceil(total/pageSize)),safePage=Math.min(page,pages);
@@ -232,8 +237,8 @@ export async function loader({request}:Route.LoaderArgs){
       (SELECT v.vehicle_master_id FROM transport_batch_vehicles v WHERE v.batch_id=b.id AND v.organization_id=b.organization_id AND v.status!='cancelled' ORDER BY v.created_at LIMIT 1) vehicle_master_id,
       (SELECT v.driver_master_id FROM transport_batch_vehicles v WHERE v.batch_id=b.id AND v.organization_id=b.organization_id AND v.status!='cancelled' ORDER BY v.created_at LIMIT 1) driver_master_id,
       COUNT(DISTINCT bo.order_id) order_count,GROUP_CONCAT(DISTINCT o.order_number) order_numbers,
-      COALESCE(SUM((SELECT SUM(p.weight_kg) FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id WHERE s.order_id=o.id AND p.warehouse_id=b.warehouse_id AND p.status IN ('in_stock','allocated') AND p.label_kind='inbound_mark')),0) total_weight,
-      COALESCE(SUM((SELECT SUM(p.volume_cbm) FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id WHERE s.order_id=o.id AND p.warehouse_id=b.warehouse_id AND p.status IN ('in_stock','allocated') AND p.label_kind='inbound_mark')),0) total_volume,
+      COALESCE(SUM((SELECT job.total_weight_kg FROM warehouse_packing_jobs job WHERE job.organization_id=b.organization_id AND job.warehouse_id=b.warehouse_id AND job.order_id=o.id AND job.status IN ('allocated','loading','dispatched') ORDER BY job.updated_at DESC LIMIT 1)),0) total_weight,
+      COALESCE(SUM((SELECT job.total_volume_cbm FROM warehouse_packing_jobs job WHERE job.organization_id=b.organization_id AND job.warehouse_id=b.warehouse_id AND job.order_id=o.id AND job.status IN ('allocated','loading','dispatched') ORDER BY job.updated_at DESC LIMIT 1)),0) total_volume,
       (SELECT d.id FROM warehouse_dispatches d WHERE d.organization_id=b.organization_id AND d.transport_batch_id=b.id AND d.status!='cancelled' ORDER BY d.updated_at DESC LIMIT 1) dispatch_id,
       EXISTS(SELECT 1 FROM warehouse_dispatches d WHERE d.transport_batch_id=b.id AND d.status!='cancelled') has_dispatch,
       EXISTS(SELECT 1 FROM warehouse_dispatches d LEFT JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id
@@ -253,8 +258,8 @@ export async function loader({request}:Route.LoaderArgs){
       ORDER BY b.updated_at DESC LIMIT 100`).bind(user.organizationId,warehouse.id).all<AvailableBatch>(),
     env.DB.prepare(`SELECT bo.batch_id,o.id order_id,o.order_number,c.name customer_name,
       (SELECT GROUP_CONCAT(NULLIF(TRIM(i.cargo_name_cn),''),'、') FROM order_cargo_items i WHERE i.organization_id=o.organization_id AND i.order_id=o.id) cargo_names,
-      COALESCE((SELECT SUM(p.weight_kg) FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id WHERE s.order_id=o.id AND p.warehouse_id=b.warehouse_id AND p.status IN ('in_stock','allocated') AND p.label_kind='inbound_mark'),0) weight_kg,
-      COALESCE((SELECT SUM(p.volume_cbm) FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id WHERE s.order_id=o.id AND p.warehouse_id=b.warehouse_id AND p.status IN ('in_stock','allocated') AND p.label_kind='inbound_mark'),0) volume_cbm
+      COALESCE((SELECT job.total_weight_kg FROM warehouse_packing_jobs job WHERE job.organization_id=b.organization_id AND job.warehouse_id=b.warehouse_id AND job.order_id=o.id AND job.status IN ('allocated','loading','dispatched') ORDER BY job.updated_at DESC LIMIT 1),0) weight_kg,
+      COALESCE((SELECT job.total_volume_cbm FROM warehouse_packing_jobs job WHERE job.organization_id=b.organization_id AND job.warehouse_id=b.warehouse_id AND job.order_id=o.id AND job.status IN ('allocated','loading','dispatched') ORDER BY job.updated_at DESC LIMIT 1),0) volume_cbm
       FROM transport_batches b JOIN transport_batch_orders bo ON bo.batch_id=b.id AND bo.status!='removed'
       JOIN transport_orders o ON o.id=bo.order_id JOIN customers c ON c.id=o.customer_id
       WHERE b.organization_id=? AND b.warehouse_id=? AND b.batch_number LIKE 'PZ-%' AND b.status!='cancelled'
@@ -329,7 +334,10 @@ export async function action({request}:Route.ActionArgs){
     const states=await loadCandidateStates(user.organizationId,warehouse.id,orderIds);
     const loadingStageAccesses=await loadLoadingConsolidationWorkflowAccesses(env.DB,user.organizationId,states.map(row=>row.order_id));
     const loadingStageAccessByOrder=new Map(loadingStageAccesses.map(access=>[access.orderId,access]));
-    const blockers=states.flatMap((row)=>loadingConsolidationCandidateBlockers(row,loadingStageAccessByOrder.get(row.order_id)).map(reason=>`${row.order_number}：${reason}`));
+    const blockers=states.flatMap((row)=>[
+      ...(row.packing_status&&row.packing_status!=="labelled"?["最终包装尚未完成贴标，或已进入其他配载单"]:[]),
+      ...loadingConsolidationCandidateBlockers(row,loadingStageAccessByOrder.get(row.order_id)),
+    ].map(reason=>`${row.order_number}：${reason}`));
     if(states.length!==orderIds.length)blockers.push("部分所选订单已不在当前仓库或已经出库");
     if(blockers.length)return{formError:`暂不能配载：${[...new Set(blockers)].join("；")}`};
     const supervisorIds=[...new Set(states.map(row=>row.operation_supervisor_user_id).filter((id):id is string=>Boolean(id)))];
@@ -377,7 +385,7 @@ export async function action({request}:Route.ActionArgs){
       if(combinedPolicies.exit_port.isRequired&&!targetBatch.border_port)return{formError:`${targetBatch.batch_number} 缺少当前订单工作流要求的出境口岸，请先补齐后再加入订单`};
       responsibilityOrderIds=[...new Set([...existingOrders.results.map(row=>row.order_id),...responsibilityOrderIds])];
       if(combinedPolicies.customs_location.isRequired&&!targetBatch.customs_location)return{formError:`${targetBatch.batch_number} 缺少当前订单工作流要求的清关地，请先补齐后再加入订单`};
-      const firstOrder=await env.DB.prepare("SELECT o.id order_id,o.order_number,o.business_type,o.origin_country,o.origin_state,o.origin_city,o.destination_country,o.destination_state,o.destination_city,o.exit_port,o.customs_location,o.overseas_warehouse_id,o.operation_supervisor_user_id,ow.name overseas_warehouse_name,'' customer_name,'' cargo_names,0 package_count,0 pieces,0 weight_kg,0 volume_cbm,'' location_names,1 cargo_ready,0 has_exception,0 active_dispatch,NULL active_batch_id,NULL active_batch_number FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id WHERE bo.batch_id=? AND bo.status!='removed' ORDER BY bo.sequence_no LIMIT 1").bind(targetBatch.id).first<CandidateState>();
+      const firstOrder=await env.DB.prepare("SELECT o.id order_id,o.order_number,o.business_type,o.origin_country,o.origin_state,o.origin_city,o.destination_country,o.destination_state,o.destination_city,o.exit_port,o.customs_location,o.overseas_warehouse_id,o.operation_supervisor_user_id,ow.name overseas_warehouse_name,'' customer_name,'' cargo_names,0 package_count,0 pieces,0 weight_kg,0 volume_cbm,'' location_names,1 cargo_ready,0 has_exception,0 active_dispatch,NULL active_batch_id,NULL active_batch_number,'' packing_job_id,'allocated' packing_status FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id WHERE bo.batch_id=? AND bo.status!='removed' ORDER BY bo.sequence_no LIMIT 1").bind(targetBatch.id).first<CandidateState>();
       if(firstOrder)comparison=[firstOrder,...states];
     }
     const compatibility=checkCompatibility(comparison);
@@ -386,7 +394,10 @@ export async function action({request}:Route.ActionArgs){
     if(responsibilityError)return{formError:responsibilityError};
     if(targetBatch){
       const sequence=await env.DB.prepare("SELECT COALESCE(MAX(sequence_no),0) next FROM transport_batch_orders WHERE batch_id=? AND organization_id=?").bind(targetBatch.id,user.organizationId).first<{next:number}>();
-      const statements=prepareBatchOrderStatements(states,user.organizationId,targetBatch.id,(sequence?.next??0)+1,user.userId,now,true);
+      const statements=[
+        ...preparePackingJobAllocationStatements(states,user.organizationId,warehouse.id,targetBatch.id,now),
+        ...prepareBatchOrderStatements(states,user.organizationId,targetBatch.id,(sequence?.next??0)+1,user.userId,now,true),
+      ];
       for(const orderChunk of chunkD1Values(states.map(row=>row.order_id),4))statements.push(env.DB.prepare(`UPDATE transport_orders SET exit_port=COALESCE(?,exit_port),customs_location=COALESCE(?,customs_location),updated_at=? WHERE organization_id=? AND id IN (${d1Placeholders(orderChunk.length)})`).bind(targetBatch.border_port,targetBatch.customs_location,now,user.organizationId,...orderChunk));
       await env.DB.batch(statements);
       await addOrdersToPendingDispatch(user.organizationId,warehouse.id,targetBatch.id,states.map(row=>row.order_id),now);
@@ -409,6 +420,7 @@ export async function action({request}:Route.ActionArgs){
       const vehicleId=crypto.randomUUID();
       statements.push(env.DB.prepare("INSERT INTO transport_batch_vehicles(id,organization_id,batch_id,vehicle_no,vehicle_type,plate_number,carrier_id,driver_name,driver_phone,capacity_weight_kg,capacity_volume_cbm,status,created_at,updated_at,vehicle_master_id,driver_master_id) VALUES(?,?,?,'MAIN-1',?,?,?,?,?,?,?,'planned',?,?,?,?)").bind(vehicleId,user.organizationId,batchId,selectedResource.vehicleType,selectedResource.plateNumber,selectedResource.carrierId,selectedResource.driverName,selectedResource.driverPhone,selectedResource.capacityWeight,selectedResource.capacityVolume,now,now,selectedResource.vehicleMasterId,selectedResource.driverMasterId));
     }
+    statements.push(...preparePackingJobAllocationStatements(states,user.organizationId,warehouse.id,batchId,now));
     statements.push(...prepareBatchOrderStatements(states,user.organizationId,batchId,1,user.userId,now,false));
     statements.push(pendingBatchApprovalNotificationStatement(env.DB,{organizationId:user.organizationId,batchId,batchNumber,supervisorUserId:operationSupervisorUserId,actorUserId:user.userId,now}));
     for(const orderChunk of chunkD1Values(states.map(row=>row.order_id),6))statements.push(env.DB.prepare(`UPDATE transport_orders SET exit_port=CASE WHEN ?<>'' THEN ? ELSE exit_port END,customs_location=CASE WHEN ?<>'' THEN ? ELSE customs_location END,updated_at=? WHERE organization_id=? AND id IN (${d1Placeholders(orderChunk.length)})`).bind(borderPort,borderPort,customsLocation,customsLocation,now,user.organizationId,...orderChunk));
@@ -493,13 +505,13 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
   const activeView:ConsolidationView=loaderData.view;
   return <div className="warehouse-consolidation-page">
     <header className="warehouse-page-header ltl-loading-header">
-      <div><p className="eyebrow">CARGO CONSOLIDATION</p><h1>货物配载</h1><p>勾选完整拼车订单并生成正式 PZ 配载单；本页仅查看文件齐套状态，不再上传订单文件。</p></div>
+      <div><p className="eyebrow">CONSOLIDATION POOL</p><h1>待配载池</h1><p>只显示已完成最终包装并确认贴标的拼车订单；勾选兼容订单生成正式 PZ 配载单。</p></div>
       <Link className="secondary" to={`/warehouse/loading-documents?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}`}>进入配载文件</Link>
     </header>
     <ActionToast data={actionData}/>
     <section className="panel consolidation-view-panel">
-      <nav className="consolidation-view-tabs peer-page-tabs" aria-label="货物配载页面">
-        <Link className={activeView==="stock"?"active":""} aria-current={activeView==="stock"?"page":undefined} to={consolidationViewHref(loaderData,"stock")} viewTransition>在库货物 <span>{loaderData.total}</span></Link>
+      <nav className="consolidation-view-tabs peer-page-tabs" aria-label="待配载池页面">
+        <Link className={activeView==="stock"?"active":""} aria-current={activeView==="stock"?"page":undefined} to={consolidationViewHref(loaderData,"stock")} viewTransition>待配载订单 <span>{loaderData.total}</span></Link>
         <Link className={activeView==="batches"?"active":""} aria-current={activeView==="batches"?"page":undefined} to={consolidationViewHref(loaderData,"batches")} viewTransition>当前配载单 <span>{loaderData.batchTotal}</span></Link>
       </nav>
       <div className={`consolidation-view-content ${activeView}`}>
@@ -508,8 +520,8 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
       <section className="consolidation-tab-panel consolidation-stock-panel">
       <div className="panel-header">
         <div>
-          <h2>当前仓库全部在库货物</h2>
-          <p>本页只校验货物、目的地与车辆配载条件；文件状态只读且不阻断配载，生成配载单后到“配载文件”集中管理。</p>
+          <h2>已贴标待配载订单</h2>
+          <p>每票订单的 OUL 已在“二次打包与贴标”生成并贴好；文件状态只读且不阻断配载。</p>
         </div>
         <div className="consolidation-selection-actions">
           <span className="status-pill">已选 {selected.length} / 在库 {loaderData.total} 票</span>
@@ -807,16 +819,25 @@ async function resolveBatchResource(organizationId:string,form:FormData,policies
 function checkCompatibility(rows:CandidateState[]){if(!rows.length)return"没有可配载订单";const first=rows[0],same=(pick:(row:CandidateState)=>string|null)=>rows.every(row=>(pick(row)||"").trim()===(pick(first)||"").trim());if(!first.overseas_warehouse_id)return"所选订单必须设置境外目的仓";if(!same(row=>row.overseas_warehouse_id))return"所选订单的境外目的仓不一致";if(!same(row=>row.destination_country)||!same(row=>row.destination_state)||!same(row=>row.destination_city))return"所选订单的目的国家、省州或城市不一致";return""}
 async function loadCandidateStates(organizationId:string,warehouseId:string,orderIds:string[]){if(!orderIds.length)return[];const rows:CandidateState[]=[];for(const orderChunk of chunkD1Values([...new Set(orderIds)],7)){const result=await env.DB.prepare(`SELECT o.id order_id,o.order_number,o.business_type,o.origin_country,o.origin_state,o.origin_city,o.destination_country,o.destination_state,o.destination_city,o.exit_port,o.customs_location,o.overseas_warehouse_id,o.operation_supervisor_user_id,ow.name overseas_warehouse_name,c.name customer_name,
     (SELECT GROUP_CONCAT(NULLIF(TRIM(i.cargo_name_cn),''),'、') FROM order_cargo_items i WHERE i.organization_id=o.organization_id AND i.order_id=o.id) cargo_names,
-    (SELECT COUNT(*) FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id WHERE p.organization_id=o.organization_id AND s.order_id=o.id AND p.warehouse_id=? AND p.status IN ('in_stock','allocated') AND p.label_kind='inbound_mark') package_count,
-    COALESCE((SELECT SUM(p.pieces) FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id WHERE p.organization_id=o.organization_id AND s.order_id=o.id AND p.warehouse_id=? AND p.status IN ('in_stock','allocated') AND p.label_kind='inbound_mark'),0) pieces,
-    COALESCE((SELECT SUM(p.weight_kg) FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id WHERE p.organization_id=o.organization_id AND s.order_id=o.id AND p.warehouse_id=? AND p.status IN ('in_stock','allocated') AND p.label_kind='inbound_mark'),0) weight_kg,
-    COALESCE((SELECT SUM(p.volume_cbm) FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id WHERE p.organization_id=o.organization_id AND s.order_id=o.id AND p.warehouse_id=? AND p.status IN ('in_stock','allocated') AND p.label_kind='inbound_mark'),0) volume_cbm,'' location_names,
+    job.id packing_job_id,job.status packing_status,
+    COUNT(p.id) package_count,COALESCE(SUM(p.pieces),0) pieces,
+    job.total_weight_kg weight_kg,job.total_volume_cbm volume_cbm,
+    GROUP_CONCAT(DISTINCT wl.name) location_names,
     EXISTS(SELECT 1 FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE r.organization_id=o.organization_id AND s.order_id=o.id AND r.warehouse_id=? AND r.status='completed' AND r.cargo_complete=1) cargo_ready,
     EXISTS(SELECT 1 FROM warehouse_exceptions e JOIN shipments s ON s.id=e.shipment_id WHERE e.organization_id=o.organization_id AND s.order_id=o.id AND e.status IN ('open','processing')) has_exception,
     EXISTS(SELECT 1 FROM warehouse_dispatches d JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id JOIN warehouse_packages p ON p.id=di.package_id JOIN shipments s ON s.id=p.shipment_id WHERE d.organization_id=o.organization_id AND s.order_id=o.id AND p.warehouse_id=? AND d.status!='cancelled') active_dispatch,
     (SELECT b.id FROM transport_batch_orders bo JOIN transport_batches b ON b.id=bo.batch_id WHERE bo.organization_id=o.organization_id AND bo.order_id=o.id AND bo.status!='removed' AND b.status!='cancelled' AND b.batch_number LIKE 'PZ-%' ORDER BY b.updated_at DESC LIMIT 1) active_batch_id,
     (SELECT b.batch_number FROM transport_batch_orders bo JOIN transport_batches b ON b.id=bo.batch_id WHERE bo.organization_id=o.organization_id AND bo.order_id=o.id AND bo.status!='removed' AND b.status!='cancelled' AND b.batch_number LIKE 'PZ-%' ORDER BY b.updated_at DESC LIMIT 1) active_batch_number
-    FROM transport_orders o JOIN customers c ON c.id=o.customer_id LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id WHERE o.organization_id=? AND o.id IN (${d1Placeholders(orderChunk.length)})`).bind(warehouseId,warehouseId,warehouseId,warehouseId,warehouseId,warehouseId,organizationId,...orderChunk).all<CandidateState>();rows.push(...result.results)}
+    FROM transport_orders o
+    JOIN customers c ON c.id=o.customer_id
+    LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id
+    JOIN warehouse_packing_jobs job ON job.organization_id=o.organization_id AND job.order_id=o.id
+      AND job.warehouse_id=? AND job.status IN ('labelled','allocated')
+    JOIN warehouse_packages p ON p.organization_id=job.organization_id AND p.packing_job_id=job.id
+      AND p.label_kind='oul' AND p.lifecycle_status='active' AND p.status IN ('in_stock','allocated')
+    LEFT JOIN warehouse_locations wl ON wl.id=p.location_id
+    WHERE o.organization_id=? AND o.id IN (${d1Placeholders(orderChunk.length)})
+    GROUP BY o.id,job.id`).bind(warehouseId,warehouseId,warehouseId,organizationId,...orderChunk).all<CandidateState>();rows.push(...result.results)}
   const byId=new Map(rows.map(row=>[row.order_id,row]));
   return orderIds.map(orderId=>byId.get(orderId)).filter((row):row is CandidateState=>Boolean(row));
 }
@@ -848,8 +869,11 @@ async function addOrdersToPendingDispatch(organizationId:string,warehouseId:stri
     env.DB.prepare(`INSERT OR IGNORE INTO warehouse_dispatch_items(id,organization_id,dispatch_id,package_id,status)
       SELECT lower(hex(randomblob(16))),p.organization_id,?,p.id,'pending' FROM warehouse_packages p
       JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id
-      WHERE p.organization_id=? AND p.warehouse_id=? AND p.status IN ('in_stock','allocated') AND s.order_id IN (${d1Placeholders(orderChunk.length)})`).bind(dispatch.id,organizationId,warehouseId,...orderChunk),
+      WHERE p.organization_id=? AND p.warehouse_id=? AND p.status IN ('in_stock','allocated')
+        AND p.label_kind='oul' AND p.lifecycle_status='active'
+        AND s.order_id IN (${d1Placeholders(orderChunk.length)})`).bind(dispatch.id,organizationId,warehouseId,...orderChunk),
     env.DB.prepare(`UPDATE warehouse_packages SET status='allocated',updated_at=? WHERE organization_id=? AND warehouse_id=? AND status='in_stock'
+      AND label_kind='oul' AND lifecycle_status='active'
       AND shipment_id IN (SELECT id FROM shipments WHERE organization_id=? AND order_id IN (${d1Placeholders(orderChunk.length)}))`).bind(now,organizationId,warehouseId,organizationId,...orderChunk),
   );
   await env.DB.batch(statements);
@@ -857,24 +881,38 @@ async function addOrdersToPendingDispatch(organizationId:string,warehouseId:stri
 async function removeOrdersFromPendingDispatch(organizationId:string,warehouseId:string,batchId:string,orderIds:string[],now:string){
   if(!orderIds.length)return;
   const dispatch=await env.DB.prepare("SELECT id FROM warehouse_dispatches WHERE organization_id=? AND transport_batch_id=? AND status='loading' ORDER BY updated_at DESC LIMIT 1").bind(organizationId,batchId).first<{id:string}>();
-  if(!dispatch)return;
   const statements:D1PreparedStatement[]=[];
-  for(const orderChunk of chunkD1Values([...new Set(orderIds)],4))statements.push(
-    env.DB.prepare(`UPDATE warehouse_packages SET status='in_stock',updated_at=? WHERE organization_id=? AND warehouse_id=? AND status='allocated' AND id IN (
-      SELECT di.package_id FROM warehouse_dispatch_items di JOIN warehouse_packages p ON p.id=di.package_id JOIN shipments s ON s.id=p.shipment_id
-      WHERE di.dispatch_id=? AND s.order_id IN (${d1Placeholders(orderChunk.length)}))`).bind(now,organizationId,warehouseId,dispatch.id,...orderChunk),
-    env.DB.prepare(`DELETE FROM warehouse_dispatch_items WHERE dispatch_id=? AND package_id IN (
-      SELECT p.id FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id WHERE s.order_id IN (${d1Placeholders(orderChunk.length)}))`).bind(dispatch.id,...orderChunk),
-  );
+  for(const orderChunk of chunkD1Values([...new Set(orderIds)],4)){
+    statements.push(env.DB.prepare(`UPDATE warehouse_packing_jobs SET status='labelled',transport_batch_id=NULL,updated_at=?
+      WHERE organization_id=? AND warehouse_id=? AND transport_batch_id=? AND status='allocated'
+        AND order_id IN (${d1Placeholders(orderChunk.length)})`).bind(now,organizationId,warehouseId,batchId,...orderChunk));
+    if(dispatch)statements.push(
+      env.DB.prepare(`UPDATE warehouse_packages SET status='in_stock',updated_at=? WHERE organization_id=? AND warehouse_id=? AND status='allocated' AND label_kind='oul' AND id IN (
+        SELECT di.package_id FROM warehouse_dispatch_items di JOIN warehouse_packages p ON p.id=di.package_id JOIN shipments s ON s.id=p.shipment_id
+        WHERE di.dispatch_id=? AND s.order_id IN (${d1Placeholders(orderChunk.length)}))`).bind(now,organizationId,warehouseId,dispatch.id,...orderChunk),
+      env.DB.prepare(`DELETE FROM warehouse_dispatch_items WHERE dispatch_id=? AND package_id IN (
+        SELECT p.id FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id WHERE p.label_kind='oul' AND s.order_id IN (${d1Placeholders(orderChunk.length)}))`).bind(dispatch.id,...orderChunk),
+    );
+  }
   await env.DB.batch(statements);
 }
 async function cancelPendingDispatch(organizationId:string,batchId:string,now:string){
   const dispatch=await env.DB.prepare("SELECT id FROM warehouse_dispatches WHERE organization_id=? AND transport_batch_id=? AND status='loading' ORDER BY updated_at DESC LIMIT 1").bind(organizationId,batchId).first<{id:string}>();
-  if(!dispatch)return;
-  await env.DB.batch([
-    env.DB.prepare("UPDATE warehouse_packages SET status='in_stock',updated_at=? WHERE organization_id=? AND status='allocated' AND id IN (SELECT package_id FROM warehouse_dispatch_items WHERE dispatch_id=?)").bind(now,organizationId,dispatch.id),
+  const statements:D1PreparedStatement[]=[
+    env.DB.prepare("UPDATE warehouse_packing_jobs SET status='labelled',transport_batch_id=NULL,updated_at=? WHERE organization_id=? AND transport_batch_id=? AND status='allocated'").bind(now,organizationId,batchId),
+  ];
+  if(dispatch)statements.push(
+    env.DB.prepare("UPDATE warehouse_packages SET status='in_stock',updated_at=? WHERE organization_id=? AND status='allocated' AND label_kind='oul' AND id IN (SELECT package_id FROM warehouse_dispatch_items WHERE dispatch_id=?)").bind(now,organizationId,dispatch.id),
     env.DB.prepare("UPDATE warehouse_dispatches SET status='cancelled',updated_at=? WHERE id=? AND organization_id=?").bind(now,dispatch.id,organizationId),
-  ]);
+  );
+  await env.DB.batch(statements);
+}
+function preparePackingJobAllocationStatements(rows:CandidateState[],organizationId:string,warehouseId:string,batchId:string,now:string){
+  return chunkD1Values(rows,5).map(rowChunk=>env.DB.prepare(`UPDATE warehouse_packing_jobs
+    SET status='allocated',transport_batch_id=?,updated_at=?
+    WHERE organization_id=? AND warehouse_id=? AND status='labelled' AND transport_batch_id IS NULL
+      AND id IN (${d1Placeholders(rowChunk.length)})`)
+    .bind(batchId,now,organizationId,warehouseId,...rowChunk.map(row=>row.packing_job_id)));
 }
 function prepareBatchOrderStatements(rows:CandidateState[],organizationId:string,batchId:string,startSequence:number,userId:string,now:string,upsert:boolean){
   return chunkD1Rows(rows,8).map((rowChunk)=>{
@@ -891,4 +929,4 @@ async function editableBatch(organizationId:string,warehouseId:string,batchId:st
   const dispatch=await env.DB.prepare("SELECT 1 ok FROM warehouse_dispatches WHERE organization_id=? AND transport_batch_id=? AND status!='cancelled' LIMIT 1").bind(organizationId,batchId).first();
   return dispatch?null:batch;
 }
-export function meta(){return[{title:"货物配载 | International TMS"}]}
+export function meta(){return[{title:"待配载池 | International TMS"}]}
