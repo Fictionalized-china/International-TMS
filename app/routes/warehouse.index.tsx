@@ -273,7 +273,7 @@ function WarehouseCargoDetails({ row, items, packages }: { row: CategorizedWareh
   }), { packages: 0, pieces: 0, grossWeight: 0, volume: 0 });
 
   return <div className="warehouse-cargo-dialog">
-    <div className="warehouse-cargo-code-guide"><strong>扫码标识说明</strong><span>唛头号等于订单号，用于识别整票订单；OUL 为实体包装的仓库货物主码，同一包装在国内仓、运输和境外仓全程复用，不会重复生成。</span></div>
+    <div className="warehouse-cargo-code-guide"><strong>扫码标识说明</strong><span>入仓唛头按订单包装逐张生成，用于国内仓收货；创建装车任务后，按最终出仓包裹数生成 OUL，用于装车、境外仓收货和客户自提。</span></div>
     <div className="warehouse-cargo-summary">
       <span><small>客户</small><strong>{row.customer_name}</strong></span>
       <span><small>运单号</small><strong>{row.shipment_number}</strong></span>
@@ -299,14 +299,14 @@ function WarehouseCargoDetails({ row, items, packages }: { row: CategorizedWareh
         <td><strong>毛重 {item.gross_weight_per_package_kg.toFixed(2)} KG/包装</strong><small>净重 {item.net_weight_per_package_kg.toFixed(2)} KG/包装</small></td>
         <td><strong>{item.length_cm} × {item.width_cm} × {item.height_cm} cm</strong><small>{item.volume_per_package_cbm.toFixed(4)} CBM/包装</small></td>
         <td><strong>{item.currency} {item.declared_value.toLocaleString("zh-CN")}</strong><small>{item.origin_country || "原产国未填"}{item.brand_model ? ` · ${item.brand_model}` : ""}</small></td>
-        <td className="warehouse-cargo-identifiers"><small>唛头号（订单号）</small><code>{identifiers.markNumber}</code><small>仓库货物主码（OUL）</small>{identifiers.packages.length ? <div>{identifiers.packages.map((pkg) => <code key={pkg.id} title={`包装号 ${pkg.package_number}`}>{pkg.barcode}</code>)}</div> : <em>尚未生成（国内仓收货时生成）</em>}</td>
+        <td className="warehouse-cargo-identifiers"><small>入仓唛头</small><code>{identifiers.markNumber}</code><small>最终出仓包裹码（OUL）</small>{identifiers.packages.length ? <div>{identifiers.packages.map((pkg) => <code key={pkg.id} title={`包装号 ${pkg.package_number}`}>{pkg.barcode}</code>)}</div> : <em>尚未生成（创建装车任务时按最终出仓包裹数生成）</em>}</td>
         <td><strong>{identifiers.customMarks ? `货物标记：${identifiers.customMarks}` : "无额外货物标记"}</strong><small>{[item.special_attributes, item.notes].filter(Boolean).join(" · ") || "无备注"}</small></td>
       </tr>;
       })}</tbody>
     </table></div> : <div className="warehouse-cargo-empty">
       <strong>{row.cargo_description || "货物名称待补"}</strong>
       <span>唛头号（订单号）：<code>{row.order_number}</code></span>
-      <span>仓库货物主码（OUL）：{packages.length ? [...new Set(packages.map((item) => item.barcode))].join("、") : "尚未生成（国内仓收货时生成）"}</span>
+      <span>最终出仓包裹码（OUL）：{packages.length ? [...new Set(packages.map((item) => item.barcode))].join("、") : "尚未生成（创建装车任务时生成）"}</span>
       <span>该订单尚无逐项货物明细，当前仅有订单汇总：{row.pieces || 0} 件 · {Number(row.gross_weight_kg || 0).toFixed(2)} KG · {Number(row.volume_cbm || 0).toFixed(3)} CBM。</span>
     </div>}
   </div>;

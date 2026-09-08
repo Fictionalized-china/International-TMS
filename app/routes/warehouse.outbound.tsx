@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Form, Link, redirect, useNavigation } from "react-router";
 import type { Route } from "./+types/warehouse.outbound";
-import { Modal } from "../components/Modal";
+import { Modal, useModalScrollLock } from "../components/Modal";
 import { QueryPagination } from "../components/QueryPagination";
 import { ActionToast } from "../components/ActionToast";
 import { Code39 } from "../components/OrderMarkLabelPage";
@@ -74,6 +74,7 @@ type VehicleOption={id:string;carrier_id:string;carrier_name:string;plate_number
 type DriverOption={id:string;carrier_id:string;carrier_name:string;name:string;phone:string|null};
 type OutboundResources={carriers:CarrierOption[];vehicles:VehicleOption[];drivers:DriverOption[]};
 type PendingOutboundDriver={id:string;carrierId:string;name:string;phone:string|null;licenseNumber:string|null};
+type PackingBatchSummary={id:string;order_id:string;order_number:string;packing_mode:"preserve"|"merge"|"split";source_package_count:number;outbound_package_count:number;total_weight_kg:number|null;total_volume_cbm:number|null;revision:number;status:"generated"|"printed"|"labelled"|"loading"|"dispatched"|"cancelled";labels_printed_at:string|null;labeling_confirmed_at:string|null};
 type ReferenceOption={category:"border_port"|"customs_place";code:string;name:string};
 type ManifestDoc={id:string;order_id:string;file_name:string;review_status:string;created_at:string};
 type OutboundDocument={orderId:string;orderNumber:string;customerId:string;customerName:string;required:boolean;attachmentId:string|null;code:LoadingDocumentCode;name:string;fileName:string|null;contentType:string|null;sizeBytes:number|null;reviewStatus:string|null;uploadedByUserId:string|null};
@@ -272,6 +273,14 @@ export async function loader({request}:Route.LoaderArgs){
       ORDER BY o.order_number,COALESCE(di.loaded_at,p.created_at) DESC LIMIT 1000`).bind(user.organizationId,warehouse.id,selectedDispatch.id).all<Item>()).results
     :[];
   const itemPagination=paginateList(items,itemPage);
+  const packingBatches=selectedDispatch
+    ?(await env.DB.prepare(`SELECT pb.id,pb.order_id,o.order_number,pb.packing_mode,pb.source_package_count,pb.outbound_package_count,
+        pb.total_weight_kg,pb.total_volume_cbm,pb.revision,pb.status,pb.labels_printed_at,pb.labeling_confirmed_at
+      FROM warehouse_packing_batches pb
+      JOIN transport_orders o ON o.id=pb.order_id AND o.organization_id=pb.organization_id
+      WHERE pb.organization_id=? AND pb.warehouse_id=? AND pb.dispatch_id=? AND pb.status!='cancelled'
+      ORDER BY o.order_number`).bind(user.organizationId,warehouse.id,selectedDispatch.id).all<PackingBatchSummary>()).results
+    :[];
   const selectedExecutionPolicy=selectedDispatch
     ?await loadDispatchWorkflowPolicy(user.organizationId,warehouse.id,selectedDispatch.id)
     :null;
@@ -343,6 +352,7 @@ export async function loader({request}:Route.LoaderArgs){
     items,
     visibleItems:itemPagination.items,
     itemPagination,
+    packingBatches,
     orderId,
     returnTo:url.searchParams.get("returnTo"),
     view,
@@ -815,6 +825,37 @@ export async function action({request}:Route.ActionArgs){
     await writeAudit({request,action:"warehouse.dispatch.oul_repacked",resourceType:"warehouse_dispatch",resourceId:dispatch.id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{dispatchNumber:dispatch.dispatch_number,orders:revisedPlan.batches.map(item=>({orderId:item.orderId,orderNumber:item.orderNumber,count:item.outboundPackageCount}))}});
     return{success:`${dispatch.dispatch_number} 已作废原 OUL 并生成新版，请重新打印后再开始装车扫码`};
   }
+  if(intent==="record_oul_print"){
+    if(dispatch.status!=="loading")return{formError:"该任务已经完成出库交接，不能重新打印 OUL"};
+    const active=await env.DB.prepare("SELECT COUNT(*) total,SUM(CASE WHEN status='generated' THEN 1 ELSE 0 END) generated FROM warehouse_packing_batches WHERE organization_id=? AND warehouse_id=? AND dispatch_id=? AND status!='cancelled'")
+      .bind(user.organizationId,warehouse.id,dispatch.id).first<{total:number;generated:number}>();
+    if(!active?.total)return{formError:"当前任务没有可打印的最终包装批次"};
+    await env.DB.prepare(`UPDATE warehouse_packing_batches
+      SET status=CASE WHEN status='generated' THEN 'printed' ELSE status END,
+          labels_printed_at=COALESCE(labels_printed_at,?),labels_printed_by_user_id=COALESCE(labels_printed_by_user_id,?),updated_at=?
+      WHERE organization_id=? AND warehouse_id=? AND dispatch_id=? AND status IN ('generated','printed')`)
+      .bind(now,user.userId,now,user.organizationId,warehouse.id,dispatch.id).run();
+    await writeAudit({request,action:"warehouse.dispatch.oul_print",resourceType:"warehouse_dispatch",resourceId:dispatch.id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{dispatchNumber:dispatch.dispatch_number}});
+    return{success:`${dispatch.dispatch_number} 的 OUL 已记录打印；贴到全部最终出仓包裹后，请确认贴标完成`};
+  }
+  if(intent==="confirm_oul_labeling"){
+    if(dispatch.status!=="loading")return{formError:"该任务已经完成出库交接，不能重复确认贴标"};
+    const active=await env.DB.prepare(`SELECT COUNT(*) total,
+        SUM(CASE WHEN status='generated' THEN 1 ELSE 0 END) unprinted,
+        SUM(CASE WHEN status IN ('printed','labelled') THEN 1 ELSE 0 END) confirmable
+      FROM warehouse_packing_batches
+      WHERE organization_id=? AND warehouse_id=? AND dispatch_id=? AND status!='cancelled'`)
+      .bind(user.organizationId,warehouse.id,dispatch.id).first<{total:number;unprinted:number;confirmable:number}>();
+    if(!active?.total)return{formError:"当前任务没有可确认的最终包装批次"};
+    if(Number(active.unprinted??0)>0)return{formError:"请先打印全部 OUL，再确认贴标完成"};
+    await env.DB.prepare(`UPDATE warehouse_packing_batches
+      SET status=CASE WHEN status='printed' THEN 'labelled' ELSE status END,
+          labeling_confirmed_at=COALESCE(labeling_confirmed_at,?),labeling_confirmed_by_user_id=COALESCE(labeling_confirmed_by_user_id,?),updated_at=?
+      WHERE organization_id=? AND warehouse_id=? AND dispatch_id=? AND status IN ('printed','labelled')`)
+      .bind(now,user.userId,now,user.organizationId,warehouse.id,dispatch.id).run();
+    await writeAudit({request,action:"warehouse.dispatch.oul_labeling_confirm",resourceType:"warehouse_dispatch",resourceId:dispatch.id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{dispatchNumber:dispatch.dispatch_number}});
+    return{success:`${dispatch.dispatch_number} 已确认全部 OUL 贴标完成，现在可以连续扫码装车`};
+  }
   const workflowMutationIntent=["route_fields","schedule","load","dispatch"].includes(intent);
   if(intent==="dispatch"&&dispatch.status==="dispatched")return warehouseDispatchCompletionResult({dispatchNumber:dispatch.dispatch_number,businessType:dispatch.business_type,completionWarningText:"；该任务此前已完成，本次未重复写入出库流水。如业务工作流仍停留在装车节点，可使用“恢复工作流同步”"});
   if(intent==="resync_workflow"){
@@ -931,7 +972,12 @@ export async function action({request}:Route.ActionArgs){
   }
   if(intent==="load"){
     if(dispatch.status!=="loading")return{formError:"该装车任务已完成出库交接，不能继续装车"};
-    if(!executionPolicy?.scanConfirmation.isActive)return{formError:"当前工作流已隐藏逐件扫码，请直接办理出库交接"};
+    const packingReady=await env.DB.prepare(`SELECT COUNT(*) total,
+        SUM(CASE WHEN status IN ('labelled','loading') AND labeling_confirmed_at IS NOT NULL THEN 1 ELSE 0 END) ready
+      FROM warehouse_packing_batches
+      WHERE organization_id=? AND warehouse_id=? AND dispatch_id=? AND status!='cancelled'`)
+      .bind(user.organizationId,warehouse.id,dispatch.id).first<{total:number;ready:number}>();
+    if(!packingReady?.total||Number(packingReady.ready??0)!==Number(packingReady.total))return{formError:"请先打印 OUL 并确认全部最终出仓包裹已贴标，再开始扫码装车"};
     const barcode=valueOf(form,"barcode").toUpperCase();
     // Package ownership is a permanent integrity gate: workflow configuration
     // may hide/relax scanning, but can never load a code from another task.
@@ -945,7 +991,7 @@ export async function action({request}:Route.ActionArgs){
     const finalExecutionPolicy=await loadDispatchWorkflowPolicy(user.organizationId,warehouse.id,dispatch.id);
     const finalWorkflowActionError=warehouseOutboundWorkflowActionError(finalExecutionPolicy);
     if(finalWorkflowActionError)return{formError:finalWorkflowActionError};
-    if(!finalExecutionPolicy?.scanConfirmation.isActive)return{formError:"提交前工作流已隐藏逐件扫码，未写入；请刷新后直接办理出库交接"};
+    if(!finalExecutionPolicy)return{formError:"扫码前无法读取最新工作流规则，请刷新后重试"};
     if(dispatch.business_type==="ftl"){
       const finalRouteError=validateFtlOutboundRouteFields({exitPort:dispatch.exit_port||"",customsLocation:dispatch.customs_location||"",policies:finalExecutionPolicy.batchFields});
       if(finalRouteError)return{formError:`扫码前工作流规则已变化：${finalRouteError}`};
@@ -957,11 +1003,15 @@ export async function action({request}:Route.ActionArgs){
     const finalPlanIssues=dispatchPlanPolicyIssues(finalExecutionPolicy.batchFields,finalPlan);
     if(finalPlanIssues.requiredMissing.length)return{formError:`扫码前工作流规则已变化，请补齐：${finalPlanIssues.requiredMissing.join("、")}`};
     resourceDifferences=finalPlanIssues.differences;
-    const loaded=await env.DB.prepare(`UPDATE warehouse_dispatch_items SET status='loaded',loaded_by_user_id=?,loaded_at=?
+    const loadResults=await env.DB.batch([
+      env.DB.prepare(`UPDATE warehouse_dispatch_items SET status='loaded',loaded_by_user_id=?,loaded_at=?
       WHERE id=? AND organization_id=? AND status!='loaded'
         AND EXISTS(SELECT 1 FROM warehouse_dispatches d JOIN warehouse_packages p ON p.id=? AND p.organization_id=warehouse_dispatch_items.organization_id WHERE d.id=warehouse_dispatch_items.dispatch_id AND d.organization_id=warehouse_dispatch_items.organization_id AND d.status='loading' AND d.id=? AND p.warehouse_id=? AND p.label_kind='oul' AND p.lifecycle_status='active' AND p.status='allocated')`)
-      .bind(user.userId,now,item.id,user.organizationId,item.package_id,dispatch.id,warehouse.id).run();
-    if(!loaded.meta.changes)return{formError:"装车任务或货物状态已变化，请刷新后重试"};
+        .bind(user.userId,now,item.id,user.organizationId,item.package_id,dispatch.id,warehouse.id),
+      env.DB.prepare("UPDATE warehouse_packing_batches SET status='loading',updated_at=? WHERE organization_id=? AND warehouse_id=? AND dispatch_id=? AND status='labelled'")
+        .bind(now,user.organizationId,warehouse.id,dispatch.id),
+    ]);
+    if(!loadResults[0]?.meta.changes)return{formError:"装车任务或货物状态已变化，请刷新后重试"};
     if(resourceDifferences.length)await writeAudit({request,action:"warehouse.dispatch.resource_difference_confirmed",resourceType:"warehouse_dispatch",resourceId:dispatch.id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{dispatchNumber:dispatch.dispatch_number,stage:"scan",resourcePolicyDifferences:resourceDifferences}});
     return{success:`${barcode} 已装车，请核对下方货物信息`,actionKind:"package_loaded" as const,scannedBarcode:barcode,scannedDispatchId:dispatch.id};
   }
@@ -975,6 +1025,7 @@ export async function action({request}:Route.ActionArgs){
       WHERE di.dispatch_id=? AND di.organization_id=? AND p.warehouse_id=? AND p.label_kind='oul' AND p.lifecycle_status='active'`).bind(dispatch.id,user.organizationId,warehouse.id).first<{total:number;loaded:number}>();
     if(!counts?.total)return{formError:"当前装车任务没有货物，不能出库交接"};
     const loadedCount=Number(counts.loaded??0),missingScanCount=Math.max(0,counts.total-loadedCount);
+    if(missingScanCount>0)return{formError:`必须扫齐全部 ${counts.total} 张 OUL 后才能确认出库，当前还差 ${missingScanCount} 张`};
     const scanDifferenceConfirmed=valueOf(form,"scanDifferenceConfirmed")==="yes";
     if(!executionPolicy)return{formError:"无法读取该任务的最新工作流规则，请刷新后重试"};
     const scanError=warehouseOutboundDispatchScanError(executionPolicy.scanConfirmation,counts.total,loadedCount,scanDifferenceConfirmed);
@@ -1056,6 +1107,9 @@ export default function WarehouseOutbound({loaderData,actionData}:Route.Componen
   const inspection=actionData&&"inspection" in actionData
     ?actionData.inspection??loaderData.requestedInspection
     :loaderData.requestedInspection;
+  const selectedPackingReady=loaderData.packingBatches.length>0&&loaderData.packingBatches.every(batch=>
+    ["labelled","loading","dispatched"].includes(batch.status)&&Boolean(batch.labeling_confirmed_at)
+  );
   if(loaderData.view==="create"){
     const unit=loaderData.selectedLoadUnit,isLtl=unit?.business_type==="ltl"&&Boolean(unit.transport_batch_id);
     return <div className="outbound-create-page">
@@ -1091,11 +1145,11 @@ export default function WarehouseOutbound({loaderData,actionData}:Route.Componen
     <header className={`page-header${selectedTask?" outbound-detail-header":""}`} id="warehouse-outbound-workbench"><div><p className="eyebrow">LOAD · SCAN · DISPATCH</p><h1>{selectedTask?"装车出库任务详情":"装车与出库任务中心"}</h1><p>{selectedTask?"按任务完成扫码装车、出库交接，并查看进入境外运输前的后续节点。":"集中查看已有装车出库任务、当前节点和办理进度；点击任务后进入操作详情。"}</p></div><div className="button-row">{selectedTask&&<Link className="secondary" to={loaderData.executionHref}>返回任务中心</Link>}<Link className="secondary" to={loaderData.pendingHref}>返回在仓订单</Link></div></header>
     <ActionToast data={actionData}/>
     {selectedTask?<section className="outbound-task-detail-workbench">
-      <DispatchNodeStrip task={selectedTask} scanPolicy={loaderData.selectedExecutionPolicy?.scanConfirmation}/>
+      <DispatchNodeStrip task={selectedTask} scanPolicy={loaderData.selectedExecutionPolicy?.scanConfirmation} packingBatches={loaderData.packingBatches}/>
       {selectedTask.business_type==="ftl"&&!selectedTask.outbound_resource_confirmed&&<div className="alert warning" role="alert"><strong>历史整车任务提示：</strong>该任务创建于仓库出境资源确认上线之前，当前显示的车辆可能来自旧版国内运输安排，只保留为审计记录。新建整车任务将强制由仓库选择境外承运商、车辆和司机，不再沿用此逻辑。</div>}
       {selectedTask.business_type==="ftl"&&loaderData.selectedExecutionPolicy&&<FtlOutboundRouteEditor task={selectedTask} workflowPolicy={loaderData.selectedExecutionPolicy} borderPorts={loaderData.borderPorts} customsPlaces={loaderData.customsPlaces} busy={busy} canOperate={canOperate}/>}
-      <OulLabelPanel task={selectedTask} items={loaderData.items.filter(x=>x.dispatch_id===selectedTask.id)} busy={busy} canOperate={canOperate} closeSignal={actionSuccess}/>
-      {selectedTask.status==="loading"?<DispatchCard key={selectedTask.id} warehouseId={loaderData.warehouse.id} task={selectedTask} items={loaderData.visibleItems.filter(x=>x.dispatch_id===selectedTask.id)} itemPagination={loaderData.itemPagination} manifest={loaderData.manifestsByOrder[selectedTask.order_id]} busy={busy} canOperate={canOperate} workflowPolicy={loaderData.selectedExecutionPolicy} resourceDifferences={loaderData.selectedResourceDifferences} resourcePolicyError={loaderData.selectedResourcePolicyError} highlightedBarcode={scannedDispatchId===selectedTask.id?scannedBarcode:undefined}/>:<>
+      <OulLabelPanel task={selectedTask} items={loaderData.items.filter(x=>x.dispatch_id===selectedTask.id)} packingBatches={loaderData.packingBatches} busy={busy} canOperate={canOperate} closeSignal={actionSuccess}/>
+      {selectedTask.status==="loading"?(selectedPackingReady?<DispatchCard key={selectedTask.id} warehouseId={loaderData.warehouse.id} task={selectedTask} items={loaderData.visibleItems.filter(x=>x.dispatch_id===selectedTask.id)} itemPagination={loaderData.itemPagination} manifest={loaderData.manifestsByOrder[selectedTask.order_id]} busy={busy} canOperate={canOperate} workflowPolicy={loaderData.selectedExecutionPolicy} resourceDifferences={loaderData.selectedResourceDifferences} resourcePolicyError={loaderData.selectedResourcePolicyError} highlightedBarcode={scannedDispatchId===selectedTask.id?scannedBarcode:undefined}/>:<section className="panel outbound-loading-locked"><strong>下一步：打印并贴好全部 OUL</strong><span>确认贴标完成后，系统自动开放连续扫码装车区。</span></section>):<>
         <section className="panel outbound-completed-task"><div className="panel-header"><div><h2>{selectedStage?.code==="overseas_transit"?"境外运输进行中":selectedStage?.code==="overseas_arrived"?"货物已到境外":"出库交接已完成"}</h2><p>{selectedStage?.code==="overseas_transit"?"实际出境已经确认，订单当前处于境外运输中。":selectedStage?.code==="overseas_arrived"?"境外运输节点已经完成，等待或正在办理境外仓作业。":"装车模块已经推进完成，当前进入“已装车待出境”；实际出境确认后才进入境外运输中。"}</p></div><span className={`status-pill ${selectedStage?.tone||"success"}`}>{selectedStage?.label}</span></div>{selectedStage?.code==="handover_done"?<div className="outbound-next-node-action"><div><strong>下一节点：实际出境确认</strong><span>{isConsolidatedOutboundTask(selectedTask.business_type,selectedTask.transport_batch_id)?"拼车按 PZ 配载单统一确认出境并同步全部订单。":selectedTask.outbound_resource_confirmed?"整车车辆与司机已经由仓库确认并同步管理端，后续直接在订单的报关及出境运输节点办理。":"该历史整车任务未经过新版仓库资源确认；请在管理端核实车辆后，直接在订单的报关及出境运输节点办理。"}</span></div>{isConsolidatedOutboundTask(selectedTask.business_type,selectedTask.transport_batch_id)?canOpenAdminSite?<Link className="primary warehouse-primary" to={`/admin/loading/${selectedTask.transport_batch_id}?tab=tracking`}>进入 PZ 配载单确认实际出境</Link>:<span className="status-pill off">请切换至配载单操作负责人账号办理实际出境</span>:<span className="status-pill success">整车无需进入配载页</span>}</div>:<div className="outbound-next-node-action"><div><strong>{selectedStage?.next}</strong><span>当前节点状态已同步到管理端。</span></div>{isConsolidatedOutboundTask(selectedTask.business_type,selectedTask.transport_batch_id)&&(canOpenAdminSite?<Link className="secondary" to={`/admin/loading/${selectedTask.transport_batch_id}`}>查看 PZ 配载单</Link>:<span className="status-pill off">管理端由配载单负责人继续办理</span>)}</div>}</section>
         {loaderData.taskWorkflowStates[selectedTask.id]?.workflowSyncPending&&<section className="panel outbound-workflow-resync"><div className="panel-header"><div><h2>物理出库已完成，业务工作流待同步</h2><p>货物不会重复出库。这里只重试配载/订单进度和冻结工作流快照。</p></div><span className="status-pill warning">待恢复</span></div>{canOperate?<Form method="post" className="button-row"><input type="hidden" name="intent" value="resync_workflow"/><input type="hidden" name="dispatchId" value={selectedTask.id}/><button className="primary warehouse-primary" disabled={busy}>恢复工作流同步</button></Form>:<div className="alert info">请由当前仓库的操作账号执行“恢复工作流同步”；本账号仅可查看状态。</div>}</section>}
         <section className="panel handover-section"><div className="panel-header no-print"><div><h2>仓库装车出库交接单</h2><p>本交接单记录仓库装车结果，不等同于车辆已实际出境。</p></div><button className="secondary" type="button" onClick={()=>window.print()}>打印交接单</button></div><Handover warehouseId={loaderData.warehouse.id} task={selectedTask} items={loaderData.items.filter(x=>x.dispatch_id===selectedTask.id)} manifest={loaderData.manifestsByOrder[selectedTask.order_id]}/></section>
@@ -1113,23 +1167,23 @@ function clearOutboundFiltersHref(pendingHref:string){const [path,query=""]=pend
 function formatWarehouseTime(value:string|null){return value?new Date(value).toLocaleString("zh-CN",{hour12:false}):"入仓时间待补";}
 function dispatchTaskSubject(task:Dispatch){const isBatch=isConsolidatedOutboundTask(task.business_type,task.transport_batch_id);const orderNumbers=task.order_numbers||task.order_number,customerNames=task.customer_names||task.customer_name;return isBatch?{primary:task.batch_number,secondary:`${orderNumbers} · ${customerNames}`,typeLabel:`PZ 配载单 · ${orderNumbers.split(",").filter(Boolean).length} 票订单`}:{primary:task.order_number,secondary:task.customer_name,typeLabel:"整车订单"};}
 function dispatchTaskPriority(task:Dispatch,state?:OutboundTaskWorkflowState){const code=warehouseOutboundTaskStage(task,state?.scanConfirmation,state?.loadingStage,state?.workflowSyncPending).code;return code==="workflow_sync_pending"?0:code==="handover_ready"?1:code==="loading"?2:code==="waiting_scan"?3:code==="workflow_blocked"?4:code==="handover_done"?5:6;}
-export function warehouseOutboundTaskStage(task:Pick<Dispatch,"status"|"road_status"|"actual_departure_at"|"item_count"|"loaded_count">,scanPolicy?:Pick<WarehouseOutboundWorkflowPolicy["scanConfirmation"],"mode"|"isRequired">,loadingStage?:Pick<LoadingBatchStageGate,"available"|"reason">,workflowSyncPending=false){
+export function warehouseOutboundTaskStage(task:Pick<Dispatch,"status"|"road_status"|"actual_departure_at"|"item_count"|"loaded_count">,_scanPolicy?:Pick<WarehouseOutboundWorkflowPolicy["scanConfirmation"],"mode"|"isRequired">,loadingStage?:Pick<LoadingBatchStageGate,"available"|"reason">,workflowSyncPending=false){
   if(task.status==="dispatched"&&workflowSyncPending)return{code:"workflow_sync_pending",label:"工作流待同步",next:"物理出库已完成，请恢复业务工作流同步",action:"恢复同步",tone:"warning"};
   if(["overseas_arrived","waiting_pickup","pickup_completed"].includes(task.road_status||""))return{code:"overseas_arrived",label:"已到境外",next:"等待境外仓办理",action:"查看任务",tone:"success"};
   if(task.road_status==="outbound_in_transit"||task.actual_departure_at)return{code:"overseas_transit",label:"境外运输中",next:"下一节点：到达境外仓",action:"查看任务",tone:"success"};
   if(task.status==="dispatched")return{code:"handover_done",label:"出库交接完成",next:"下一节点：实际出境确认",action:"查看交接与下一节点",tone:"success"};
   if(loadingStage&&!loadingStage.available)return{code:"workflow_blocked",label:"工作流门禁关闭",next:loadingStage.reason||"当前不能办理装车与出库",action:"查看原因",tone:"warning"};
-  if(scanPolicy&&!scanPolicy.isRequired)return{code:"handover_ready",label:"待出库交接",next:scanPolicy.mode==="hidden"?"逐件扫码已隐藏":"逐件扫码为选填",action:"办理出库交接",tone:"warning"};
   if(task.item_count>0&&task.loaded_count===task.item_count)return{code:"handover_ready",label:"待出库交接",next:"货物已全部扫码",action:"办理出库交接",tone:"warning"};
-  if(task.loaded_count>0)return{code:"loading",label:"装车中",next:`还需扫描 ${Math.max(0,task.item_count-task.loaded_count)} 个货号`,action:"继续扫码装车",tone:""};
-  return{code:"waiting_scan",label:"待扫码装车",next:`共 ${task.item_count} 个货号`,action:"装车出库",tone:"off"};
+  if(task.loaded_count>0)return{code:"loading",label:"装车中",next:`还需扫描 ${Math.max(0,task.item_count-task.loaded_count)} 张 OUL`,action:"继续扫码装车",tone:""};
+  return{code:"waiting_scan",label:"待扫码装车",next:`共 ${task.item_count} 张 OUL`,action:"装车出库",tone:"off"};
 }
-function DispatchNodeStrip({task,scanPolicy}:{task:Dispatch;scanPolicy?:WarehouseOutboundWorkflowPolicy["scanConfirmation"]}){
-  const loaded=task.item_count>0&&task.loaded_count===task.item_count,scanGateSatisfied=!scanPolicy?.isRequired||loaded,handedOver=task.status==="dispatched",inTransit=task.road_status==="outbound_in_transit"||Boolean(task.actual_departure_at),arrived=["overseas_arrived","waiting_pickup","pickup_completed"].includes(task.road_status||"");
+function DispatchNodeStrip({task,packingBatches=[]}:{task:Dispatch;scanPolicy?:WarehouseOutboundWorkflowPolicy["scanConfirmation"];packingBatches?:PackingBatchSummary[]}){
+  const loaded=task.item_count>0&&task.loaded_count===task.item_count,scanGateSatisfied=loaded,handedOver=task.status==="dispatched",labelsReady=packingBatches.length>0&&packingBatches.every(batch=>["labelled","loading","dispatched"].includes(batch.status)&&Boolean(batch.labeling_confirmed_at)),inTransit=task.road_status==="outbound_in_transit"||Boolean(task.actual_departure_at),arrived=["overseas_arrived","waiting_pickup","pickup_completed"].includes(task.road_status||"");
   const nodes=[
     {label:"任务已创建",hint:task.dispatch_number,state:"complete"},
-    {label:scanPolicy?.mode==="hidden"?"逐件扫码（已隐藏）":"扫码装车",hint:scanPolicy?.mode==="hidden"?"工作流不显示扫码区":loaded?`${task.loaded_count}/${task.item_count} 已完成`:scanPolicy?.mode==="optional"?`${task.loaded_count}/${task.item_count} 已扫描（选填）`:`${task.loaded_count}/${task.item_count} 已扫描`,state:scanGateSatisfied?"complete":task.status==="loading"?"current":"complete"},
-    {label:"出库交接",hint:handedOver?"仓库交接已完成":scanGateSatisfied?"当前待办理":"完成必填扫码后开放",state:handedOver?"complete":scanGateSatisfied?"current":"upcoming"},
+    {label:"打印并贴 OUL",hint:"每个最终出仓包裹一张",state:handedOver||labelsReady?"complete":task.status==="loading"?"current":"complete"},
+    {label:"扫码装车",hint:loaded?`${task.loaded_count}/${task.item_count} 已完成`:`${task.loaded_count}/${task.item_count} 已扫描`,state:scanGateSatisfied?"complete":task.status==="loading"&&labelsReady?"current":"upcoming"},
+    {label:"出库交接",hint:handedOver?"仓库交接已完成":scanGateSatisfied?"当前待办理":"扫齐全部 OUL 后开放",state:handedOver?"complete":scanGateSatisfied?"current":"upcoming"},
     {label:"境外运输",hint:arrived?"已到达境外":inTransit?"运输进行中":handedOver?"待实际出境确认":"完成交接后进入",state:arrived?"complete":inTransit?"current":"upcoming"},
   ];
   return <section className="outbound-node-table" aria-label="装车出库任务节点"><div className="table-wrap"><table><thead><tr>{nodes.map((node,index)=><th key={node.label}>{index+1}. {node.label}</th>)}</tr></thead><tbody><tr>{nodes.map(node=><td key={node.label} className={node.state}><span className={`status-pill ${node.state==="complete"?"success":node.state==="current"?"":"off"}`}>{node.state==="complete"?"已完成":node.state==="current"?"当前节点":"未开始"}</span><small>{node.hint}</small></td>)}</tr></tbody></table></div></section>;
@@ -1276,6 +1330,8 @@ function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,borde
   const [driverId,setDriverId]=useState("");
   const [creatingDriver,setCreatingDriver]=useState(false);
   const [packingModes,setPackingModes]=useState<Record<string,"preserve"|"repack">>({});
+  const [documentDrawerOpen,setDocumentDrawerOpen]=useState(false);
+  useModalScrollLock(documentDrawerOpen);
   const isFtl=inspection?.batch.business_type==="ftl";
   const taskLabel=isFtl?inspection?.batch.order_number:inspection?.batch.batch_number;
   const uploadedCount=inspection?.documents.filter(document=>document.required&&document.attachmentId).length??0;
@@ -1303,7 +1359,17 @@ function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,borde
         <span>文件进度<strong>{uploadedCount}/{requiredCount} 已上传</strong></span>
       </div>
       {stageError?<OutboundCreationReadOnly inspection={inspection} warehouseId={warehouseId}/>:<>
-      <OutboundOrderDocumentWorkspace inspection={inspection} warehouseId={warehouseId} busy={busy}/>
+      <section className="outbound-document-gate-summary">
+        <div><strong>发运文件</strong><span>{inspection.allApproved?"必需文件已齐并已确认":inspection.allUploaded?"文件已齐，等待其他账号确认":`还需补充 ${remainingRequired} 份必需文件`}</span></div>
+        <span className={`status-pill ${inspection.allApproved?"success":"warning"}`}>{uploadedCount}/{requiredCount}</span>
+        <button type="button" className="secondary" onClick={()=>setDocumentDrawerOpen(true)}>查看 / 补充文件</button>
+      </section>
+      {documentDrawerOpen&&<div className="linear-drawer-backdrop" role="presentation" onMouseDown={event=>{if(event.target===event.currentTarget)setDocumentDrawerOpen(false)}}>
+        <aside className="linear-order-drawer outbound-document-drawer" role="dialog" aria-modal="true" aria-label="装车发运文件">
+          <header className="linear-drawer-head"><div><span>LOADING DOCUMENTS</span><h2>装车发运文件</h2></div><button type="button" onClick={()=>setDocumentDrawerOpen(false)} aria-label="关闭">×</button></header>
+          <div className="outbound-document-drawer-body"><OutboundOrderDocumentWorkspace inspection={inspection} warehouseId={warehouseId} busy={busy}/></div>
+        </aside>
+      </div>}
       <Form method="post" className="outbound-inline-create-form" onKeyDown={event=>{if(event.key==="Enter")event.preventDefault();}}>
         <input type="hidden" name="intent" value="create"/><input type="hidden" name="batchId" value={inspection.batch.id}/><input type="hidden" name="orderNumber" value={isFtl?inspection.batch.order_number:""}/><input type="hidden" name="customerIdentityCode" value={isFtl?inspection.batch.customer_identity_code:""}/>
         <section className="outbound-packing-panel">
@@ -1315,6 +1381,9 @@ function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,borde
               <div><strong>{group.orderNumber}</strong><span>{sourceCount} 个入仓包装</span></div>
               <label className="field"><span>成包方式</span><select name={`packingMode_${group.orderId}`} value={mode} onChange={event=>setPackingModes(current=>({...current,[group.orderId]:event.target.value as "preserve"|"repack"}))}><option value="preserve">保持原包装（1:1）</option><option value="repack">重新合包或拆包</option></select></label>
               <label className="field"><span>最终 OUL 数量 *</span><input name={`outboundPackageCount_${group.orderId}`} type="number" min="1" max="500" step="1" defaultValue={sourceCount||1} disabled={mode==="preserve"} required={mode==="repack"}/></label>
+              <label className="field"><span>最终总重量 KG（选填）</span><input name={`packingTotalWeightKg_${group.orderId}`} type="number" min="0.001" step="0.001" placeholder="未实测留空"/></label>
+              <label className="field"><span>最终总体积 CBM（选填）</span><input name={`packingTotalVolumeCbm_${group.orderId}`} type="number" min="0.0001" step="0.0001" placeholder="未实测留空"/></label>
+              <label className="field"><span>成包备注（选填）</span><input name={`packingNotes_${group.orderId}`} maxLength={240} placeholder="如：2 包合为 1 包"/></label>
             </article>;
           })}</div>
           <p>每个最终物理包装生成一张 OUL；只能在同一订单内合包或拆包，商品内容分配暂为选填且不阻断装车。</p>
@@ -1341,8 +1410,8 @@ function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,borde
         {!isFtl&&inspection.resourceDifferences.length>0&&<div className="alert info" role="status"><strong>选填运输信息未登记：</strong>{inspection.resourceDifferences.map(item=>item.label).join("、")}。不阻断装车任务，系统会在审计中记录当前差异。</div>}
         {inspection.notesActive&&<label className="field outbound-handover-notes"><span>交接备注{inspection.notesRequired?" *":""}</span><textarea name="notes" rows={3} required={inspection.notesRequired} placeholder="填写装车交接、装载要求或出库注意事项"/></label>}
         <div className="outbound-inline-create-footer">
-          <div role="status" aria-live="polite"><strong>{inspection.allUploaded?"文件核验已完成":"必需文件尚未齐全"}</strong><span>{inspection.allUploaded?(isFtl?"确认出境资源后即可创建装车任务。":"全部订单文件已齐，可按当前 PZ 配载单统一创建装车任务。"):`还需上传 ${remainingRequired} 份必需文件；可切换上方订单页签逐票补齐。`}</span></div>
-          <button type="submit" className="primary warehouse-primary" disabled={!inspection.allUploaded||busy||(isFtl&&!requiredOutboundMasterDataReady)||Boolean(inspection.resourcePolicyError)}>确认并创建装车任务</button>
+          <div role="status" aria-live="polite"><strong>{inspection.allApproved?"文件核验已完成":inspection.allUploaded?"等待文件确认":"必需文件尚未齐全"}</strong><span>{inspection.allApproved?(isFtl?"确认出境资源后即可创建装车任务。":"全部订单文件已确认，可按当前 PZ 配载单统一创建装车任务。"):inspection.allUploaded?"请由非上传账号确认待审文件。":`还需上传 ${remainingRequired} 份必需文件。`}</span></div>
+          <button type="submit" className="primary warehouse-primary" disabled={!inspection.allApproved||busy||(isFtl&&!requiredOutboundMasterDataReady)||Boolean(inspection.resourcePolicyError)}>确认并创建装车任务</button>
         </div>
       </Form>
       </>}
@@ -1423,13 +1492,17 @@ function packageTypeLabel(value:string|null){return({carton:"纸箱",pallet:"托
 function cargoDimensions(item:Item){return item.length_cm!==null&&item.width_cm!==null&&item.height_cm!==null?`${item.length_cm} × ${item.width_cm} × ${item.height_cm} cm`:"—";}
 function cargoLoadedAt(value:string|null){return value?new Date(value).toLocaleString("zh-CN",{hour12:false}):"—";}
 function printOulLabels(){document.body.classList.add("printing-oul-labels");window.print();window.setTimeout(()=>document.body.classList.remove("printing-oul-labels"),250);}
-function OulLabelPanel({task,items,busy,canOperate,closeSignal}:{task:Dispatch;items:Item[];busy:boolean;canOperate:boolean;closeSignal?:string}){
+function OulLabelPanel({task,items,packingBatches,busy,canOperate,closeSignal}:{task:Dispatch;items:Item[];packingBatches:PackingBatchSummary[];busy:boolean;canOperate:boolean;closeSignal?:string}){
+  const [drawerOpen,setDrawerOpen]=useState(false);
+  useModalScrollLock(drawerOpen);
   const groups=[...new Map(items.map(item=>[item.order_id,{orderId:item.order_id,orderNumber:item.order_number,count:items.filter(row=>row.order_id===item.order_id).length}])).values()];
   const canRepack=task.status==="loading"&&task.loaded_count===0&&items.length>0;
+  const allPrinted=packingBatches.length>0&&packingBatches.every(batch=>["printed","labelled","loading","dispatched"].includes(batch.status));
+  const allLabelled=packingBatches.length>0&&packingBatches.every(batch=>["labelled","loading","dispatched"].includes(batch.status)&&Boolean(batch.labeling_confirmed_at));
   return <section className="panel oul-label-panel">
-    <div className="panel-header no-print"><div><h2>最终出库包装（OUL）</h2><p>国内仓装车、境外仓整批收货和客户整单自提统一扫描本组 OUL。</p></div><div className="button-row"><button type="button" className="primary warehouse-primary" onClick={printOulLabels} disabled={!items.length}>打印全部 OUL</button>{canOperate&&canRepack&&<Modal title="重做最终出库包装" triggerLabel="调整成包数量" triggerClassName="secondary" closeSignal={closeSignal}><Form method="post" className="stack"><input type="hidden" name="intent" value="repack_oul"/><input type="hidden" name="dispatchId" value={task.id}/><div className="alert warning">保存后原 OUL 立即作废并生成新版。仅在尚未扫描任何 OUL 时允许操作。</div>{groups.map(group=><label className="field" key={group.orderId}><span>{group.orderNumber} · 最终 OUL 数量 *</span><input type="number" min="1" max="500" step="1" name={`outboundPackageCount_${group.orderId}`} defaultValue={group.count} required/></label>)}<button className="primary warehouse-primary" disabled={busy}>作废原标签并生成新版</button></Form></Modal>}</div></div>
-    <div className="oul-label-summary no-print"><span>{groups.length} 票订单</span><span>{items.length} 张有效 OUL</span>{task.loaded_count>0&&<span className="status-pill warning">已开始装车，成包已锁定</span>}</div>
-    <div className="oul-label-print-area">{items.map(item=>{const orderItems=items.filter(row=>row.order_id===item.order_id),sequence=orderItems.findIndex(row=>row.id===item.id)+1;return <article className="oul-label" key={item.id}><header><strong>OULING 国际物流</strong><span>出境包装标签</span></header><Code39 value={item.barcode}/><b>{item.barcode}</b><dl><div><dt>订单号</dt><dd>{item.order_number}</dd></div><div><dt>包装序号</dt><dd>{sequence} / {orderItems.length}</dd></div><div><dt>货物</dt><dd>{item.cargo_name_cn||"—"}</dd></div><div><dt>实测</dt><dd>{item.weight_kg??"—"} KG · {item.volume_cbm??"—"} CBM</dd></div></dl><footer>OUL 全程身份：国内装车 → 境外整批收货 → 客户整单自提签收</footer></article>})}</div>
+    <div className="panel-header no-print"><div><h2>最终出库包装（OUL）</h2><p>每张 OUL 只属于一张订单，并贯穿国内装车、境外仓收货和客户自提。</p></div><div className="button-row"><button type="button" className="primary warehouse-primary" onClick={()=>setDrawerOpen(true)} disabled={!items.length}>{allLabelled?"查看 / 补打 OUL":allPrinted?"继续贴标确认":"打印 OUL"}</button>{canOperate&&canRepack&&<Modal title="重做最终出库包装" triggerLabel="调整成包数量" triggerClassName="secondary" closeSignal={closeSignal}><Form method="post" className="stack"><input type="hidden" name="intent" value="repack_oul"/><input type="hidden" name="dispatchId" value={task.id}/><div className="alert warning">保存后原 OUL 立即作废并生成新版。仅在尚未扫描任何 OUL 时允许操作。</div>{groups.map(group=><label className="field" key={group.orderId}><span>{group.orderNumber} · 最终 OUL 数量 *</span><input type="number" min="1" max="500" step="1" name={`outboundPackageCount_${group.orderId}`} defaultValue={group.count} required/></label>)}<button className="primary warehouse-primary" disabled={busy}>作废原标签并生成新版</button></Form></Modal>}</div></div>
+    <div className="oul-label-summary no-print"><span>{groups.length} 票订单</span><span>{items.length} 个最终出仓包裹</span><span className={`status-pill ${allLabelled?"success":allPrinted?"warning":"off"}`}>{allLabelled?"已贴标，可扫码":allPrinted?"待确认贴标":"待打印"}</span>{task.loaded_count>0&&<span className="status-pill warning">已开始装车，成包已锁定</span>}</div>
+    {drawerOpen&&<div className="linear-drawer-backdrop" role="presentation" onMouseDown={event=>{if(event.target===event.currentTarget)setDrawerOpen(false)}}><aside className="linear-order-drawer outbound-oul-drawer" role="dialog" aria-modal="true" aria-label="OUL 标签"><header className="linear-drawer-head no-print"><div><span>OUTBOUND UNIT LABELS</span><h2>{task.dispatch_number} · OUL 标签</h2></div><button type="button" onClick={()=>setDrawerOpen(false)} aria-label="关闭">×</button></header><div className="outbound-oul-drawer-body"><div className="oul-label-print-area">{items.map(item=>{const orderItems=items.filter(row=>row.order_id===item.order_id),sequence=orderItems.findIndex(row=>row.id===item.id)+1;return <article className="oul-label" key={item.id}><header><strong>OULING 国际物流</strong><span>出境包装标签</span></header><Code39 value={item.barcode}/><b>{item.barcode}</b><dl><div><dt>订单号</dt><dd>{item.order_number}</dd></div><div><dt>包装序号</dt><dd>{sequence} / {orderItems.length}</dd></div><div><dt>货物</dt><dd>{item.cargo_name_cn||"—"}</dd></div><div><dt>任务</dt><dd>{task.dispatch_number}</dd></div></dl><footer>OUL 全程身份：国内装车 → 境外整批收货 → 客户整单自提签收</footer></article>})}</div></div>{canOperate&&task.status==="loading"&&<footer className="outbound-oul-drawer-actions no-print">{!allLabelled&&<Form method="post"><input type="hidden" name="intent" value="record_oul_print"/><input type="hidden" name="dispatchId" value={task.id}/><button type="submit" className="secondary" onClick={printOulLabels} disabled={busy}>打印全部并记录</button></Form>}{allPrinted&&!allLabelled&&<Form method="post"><input type="hidden" name="intent" value="confirm_oul_labeling"/><input type="hidden" name="dispatchId" value={task.id}/><button className="primary warehouse-primary" disabled={busy}>已贴好全部标签，开始装车</button></Form>}{allLabelled&&<span className="status-pill success">全部贴标已确认</span>}</footer>}</aside></div>}
   </section>;
 }
 export function DispatchCard({warehouseId,task,items,itemPagination,manifest,busy,canOperate,workflowPolicy,resourceDifferences,resourcePolicyError,highlightedBarcode}:{warehouseId:string;task:Dispatch;items:Item[];itemPagination:{page:number;pageCount:number;pageSize:number;total:number};manifest?:ManifestDoc;busy:boolean;canOperate:boolean;workflowPolicy:OutboundExecutionPolicy|null;resourceDifferences:OutboundPolicyDifference[];resourcePolicyError:string|null;highlightedBarcode?:string}){
@@ -1438,7 +1511,7 @@ export function DispatchCard({warehouseId,task,items,itemPagination,manifest,bus
   const scanPolicy=workflowPolicy?.scanConfirmation??{isActive:false,isRequired:false,mode:"hidden" as const};
   const plannedExitPolicy=workflowPolicy?.batchFields.planned_exit_at??{isActive:false,isRequired:false,mode:"hidden" as const};
   const missingScanCount=Math.max(0,task.item_count-task.loaded_count);
-  const canDispatch=stageAvailable&&task.item_count>0&&(!scanPolicy.isRequired||allLoaded);
+  const canDispatch=stageAvailable&&task.item_count>0&&allLoaded;
   const subject=dispatchTaskSubject(task);
   return <section className="panel dispatch-sheet">
     <div className="panel-header"><div><h2>{task.dispatch_number}</h2><p><strong>{subject.primary}</strong> · {subject.secondary}</p></div><div className="dispatch-progress"><strong>{task.loaded_count}/{task.item_count}</strong><span>整单已装车</span></div></div>
@@ -1449,9 +1522,8 @@ export function DispatchCard({warehouseId,task,items,itemPagination,manifest,bus
     {manifest&&<div className="table-wrap dispatch-manifest-table"><table><thead><tr><th>配载单</th><th>数据来源</th></tr></thead><tbody><tr><td><a href={warehouseBatchDocumentHref(manifest.id,warehouseId)} target="_blank" rel="noreferrer">{manifest.file_name}</a></td><td>工作台自动生成，点击打开对照装车</td></tr></tbody></table></div>}
     {resourcePolicyError&&<div className="alert error" role="alert">{resourcePolicyError}</div>}
     {!resourcePolicyError&&resourceDifferences.length>0&&<div className="alert info" role="status"><strong>选填运输信息未登记：</strong>{resourceDifferences.map(item=>item.label).join("、")}。该差异仅记录审计，不阻断扫码或出库。</div>}
-    {canOperate&&stageAvailable&&scanPolicy.isActive&&!resourcePolicyError&&<Form key={task.loaded_count} method="post" className={`scan-inline outbound-loading-scan${allLoaded?" scan-complete":""}`}><input type="hidden" name="intent" value={allLoaded?"dispatch":"load"}/><input type="hidden" name="dispatchId" value={task.id}/>{allLoaded?<div className="outbound-final-action-guide" role="status" aria-live="polite"><span className="outbound-final-action-step" aria-hidden="true">3</span><span className="outbound-final-action-copy"><span className="outbound-final-action-kicker">下一步 · 出库交接</span><strong>全部货物已扫码，等待最终确认</strong><small>确认后同步管理端；如需纸质交接单，可在成功页点击“打印交接单”。可直接按 Enter。</small></span></div>:<label className="field outbound-scan-code-field"><span>{`扫描货物码${scanPolicy.isRequired?" *":"（选填）"}`}</span><OutboundBarcodeInput busy={busy}/></label>}<button type="submit" className={`primary warehouse-primary${allLoaded?" outbound-finalize-button":""}`} autoFocus={allLoaded} aria-keyshortcuts={allLoaded?"Enter":undefined} disabled={busy}>{allLoaded?<><span>确认出库交接</span><span className="outbound-finalize-arrow" aria-hidden="true">→</span></>:"确认装车"}</button></Form>}
-    {stageAvailable&&!scanPolicy.isActive&&<div className="alert warning" role="status">当前工作流已隐藏逐件扫码。系统不会以扫描数量阻断出库，但会在出库审计中记录全部未扫描差异。</div>}
-    <section className="dispatch-cargo-list"><header><div><h3>订单货物列表</h3><p>{scanPolicy.isActive?"扫描成功后，对应货物状态会由“待装车”更新为“已装车”。":"逐件扫码已隐藏，货物清单仍完整保留用于交接与审计。"}</p></div><span>{task.loaded_count}/{task.item_count} 已扫描</span></header><div className="table-wrap"><table><thead><tr><th>状态</th><th>货物名称</th><th>标签号 / 条码</th><th>订单</th><th>包装 / 件数</th><th>重量 KG</th><th>体积 CBM</th><th>长 × 宽 × 高</th><th>装车时间</th></tr></thead><tbody aria-live="polite">{items.map(item=><tr key={item.id} className={item.barcode===highlightedBarcode?"current-scan":""}><td><span className={`status-pill ${item.status!=="loaded"?"off":"success"}`}>{item.status==="loaded"?"已扫描":"未扫描"}</span></td><td><strong>{item.cargo_name_cn||"未关联货物明细"}</strong></td><td><strong>{item.package_number}</strong><small>{item.barcode}</small></td><td>{item.order_number}</td><td>{packageTypeLabel(item.package_type)} · {item.pieces} 件</td><td>{item.weight_kg?.toFixed(3)??"—"}</td><td>{item.volume_cbm?.toFixed(4)??"—"}</td><td>{cargoDimensions(item)}</td><td>{cargoLoadedAt(item.loaded_at)}</td></tr>)}</tbody></table></div><QueryPagination {...itemPagination} pageParam="itemPage" unit="条货物"/></section>
+    {canOperate&&stageAvailable&&!resourcePolicyError&&<Form key={task.loaded_count} method="post" className={`scan-inline outbound-loading-scan${allLoaded?" scan-complete":""}`}><input type="hidden" name="intent" value={allLoaded?"dispatch":"load"}/><input type="hidden" name="dispatchId" value={task.id}/>{allLoaded?<div className="outbound-final-action-guide" role="status" aria-live="polite"><span className="outbound-final-action-step" aria-hidden="true">4</span><span className="outbound-final-action-copy"><span className="outbound-final-action-kicker">下一步 · 出库交接</span><strong>全部 OUL 已扫码，等待最终确认</strong><small>确认后同步管理端；如需纸质交接单，可在成功页打印。</small></span></div>:<label className="field outbound-scan-code-field"><span>连续扫描 OUL *</span><OutboundBarcodeInput busy={busy}/><small>扫描一张后按 Enter 即自动登记并继续聚焦，无需点击按钮。</small></label>}<button type="submit" className={allLoaded?"primary warehouse-primary outbound-finalize-button":"visually-hidden"} autoFocus={allLoaded} aria-keyshortcuts={allLoaded?"Enter":undefined} disabled={busy}>{allLoaded?<><span>确认整批装车出库</span><span className="outbound-finalize-arrow" aria-hidden="true">→</span></>:"登记本张 OUL"}</button></Form>}
+    <section className="dispatch-cargo-list"><header><div><h3>最终出仓包裹</h3><p>每行是一件贴有 OUL 的实体包裹；必须全部扫码后才能整批出库。</p></div><span>{task.loaded_count}/{task.item_count} 已扫描</span></header><div className="table-wrap"><table><thead><tr><th>状态</th><th>货物名称</th><th>OUL</th><th>订单</th><th>包装</th><th>装车时间</th></tr></thead><tbody aria-live="polite">{items.map(item=><tr key={item.id} className={item.barcode===highlightedBarcode?"current-scan":""}><td><span className={`status-pill ${item.status!=="loaded"?"off":"success"}`}>{item.status==="loaded"?"已扫描":"未扫描"}</span></td><td><strong>{item.cargo_name_cn||"订单货物"}</strong></td><td><strong>{item.barcode}</strong></td><td>{item.order_number}</td><td>最终出仓包装</td><td>{cargoLoadedAt(item.loaded_at)}</td></tr>)}</tbody></table></div><QueryPagination {...itemPagination} pageParam="itemPage" unit="个包裹"/></section>
     {canOperate&&canDispatch&&(!scanPolicy.isActive||!allLoaded)&&!resourcePolicyError&&<DispatchConfirmation task={task} busy={busy} scanPolicy={scanPolicy} missingScanCount={missingScanCount}/>}
   </section>;
 }

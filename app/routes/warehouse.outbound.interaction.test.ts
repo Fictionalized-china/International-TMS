@@ -237,12 +237,12 @@ describe("warehouse outbound interaction safety", () => {
     }])).toBe(false);
   });
 
-  it("uses each task frozen scan policy and synchronization state in the task center", () => {
+  it("keeps physical OUL scanning mandatory while preserving workflow synchronization state", () => {
     expect(testExports.warehouseOutboundTaskStage).toBeTypeOf("function");
     const task={status:"loading",road_status:null,actual_departure_at:null,item_count:4,loaded_count:0};
     expect(testExports.warehouseOutboundTaskStage?.(
       task,{mode:"hidden",isRequired:false},{available:true,reason:null},false,
-    ).code).toBe("handover_ready");
+    ).code).toBe("waiting_scan");
     expect(testExports.warehouseOutboundTaskStage?.(
       task,{mode:"required",isRequired:true},{available:true,reason:null},false,
     ).code).toBe("waiting_scan");

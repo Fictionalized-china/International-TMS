@@ -34,6 +34,17 @@ export async function completeWarehouseDispatchTransaction(
   } = input;
   const statements: D1PreparedStatement[] = [
     db.prepare(
+      `UPDATE warehouse_packing_batches
+       SET status='dispatched',updated_at=?
+       WHERE organization_id=? AND warehouse_id=? AND dispatch_id=? AND status='loading'
+         AND NOT EXISTS(
+           SELECT 1 FROM warehouse_dispatch_items item
+           WHERE item.organization_id=warehouse_packing_batches.organization_id
+             AND item.dispatch_id=warehouse_packing_batches.dispatch_id
+             AND item.status!='loaded'
+         )`,
+    ).bind(occurredAt, organizationId, warehouseId, dispatchId),
+    db.prepare(
       `UPDATE warehouse_packages
        SET status='dispatched',lifecycle_status=CASE WHEN label_kind='oul' THEN 'in_transit' ELSE lifecycle_status END,updated_at=?
        WHERE organization_id=? AND warehouse_id=?
