@@ -23,6 +23,12 @@ describe("order intake regression contract", () => {
     expect(orderModuleRoute).toContain("item.net_weight_per_package_kg.toFixed(2)");
   });
 
+  it("does not present the package-row fallback as a warehouse piece count", () => {
+    expect(orderModuleRoute).toContain("NULLIF(SUM(r.total_pieces),0)");
+    expect(orderModuleRoute).toContain('<td>未统计</td>');
+    expect(orderModuleRoute).toContain("仓库未清点的商品件数显示为“未统计”");
+  });
+
   it("loads an order by any active inbound mark and counts the first scan", () => {
     expect(warehouseAcceptanceRoute).toContain("FROM order_cargo_packages scanned_mark");
     expect(warehouseAcceptanceRoute).toContain("UPPER(scanned_mark.package_code)=UPPER(?)");

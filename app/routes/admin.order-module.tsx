@@ -1293,22 +1293,22 @@ export async function loader({ request, params }: Route.LoaderArgs) {
                    FROM warehouse_receipts r
                    JOIN shipments s ON s.id=r.shipment_id
                   WHERE r.organization_id=? AND s.order_id=? AND r.status='completed') receipt_count,
-                (SELECT COUNT(*)
-                   FROM warehouse_packages p
-                   JOIN shipments s ON s.id=p.shipment_id
-                  WHERE p.organization_id=? AND s.order_id=?) actual_packages,
-                COALESCE((SELECT SUM(p.pieces)
-                   FROM warehouse_packages p
-                   JOIN shipments s ON s.id=p.shipment_id
-                  WHERE p.organization_id=? AND s.order_id=?),0) actual_pieces,
-                COALESCE((SELECT SUM(p.weight_kg)
-                   FROM warehouse_packages p
-                   JOIN shipments s ON s.id=p.shipment_id
-                  WHERE p.organization_id=? AND s.order_id=?),0) actual_weight_kg,
-                COALESCE((SELECT SUM(p.volume_cbm)
-                   FROM warehouse_packages p
-                   JOIN shipments s ON s.id=p.shipment_id
-                  WHERE p.organization_id=? AND s.order_id=?),0) actual_volume_cbm,
+                COALESCE((SELECT SUM(r.total_packages)
+                   FROM warehouse_receipts r
+                   JOIN shipments s ON s.id=r.shipment_id
+                  WHERE r.organization_id=? AND s.order_id=? AND r.status='completed'),0) actual_packages,
+                (SELECT NULLIF(SUM(r.total_pieces),0)
+                   FROM warehouse_receipts r
+                   JOIN shipments s ON s.id=r.shipment_id
+                  WHERE r.organization_id=? AND s.order_id=? AND r.status='completed') actual_pieces,
+                COALESCE((SELECT SUM(r.total_weight_kg)
+                   FROM warehouse_receipts r
+                   JOIN shipments s ON s.id=r.shipment_id
+                  WHERE r.organization_id=? AND s.order_id=? AND r.status='completed'),0) actual_weight_kg,
+                COALESCE((SELECT SUM(r.total_volume_cbm)
+                   FROM warehouse_receipts r
+                   JOIN shipments s ON s.id=r.shipment_id
+                  WHERE r.organization_id=? AND s.order_id=? AND r.status='completed'),0) actual_volume_cbm,
                 EXISTS(
                   SELECT 1 FROM warehouse_receipts rx
                   JOIN shipments sx ON sx.id=rx.shipment_id
@@ -1328,7 +1328,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
         .first<{
           receipt_count: number;
           actual_packages: number;
-          actual_pieces: number;
+          actual_pieces: number | null;
           actual_weight_kg: number;
           actual_volume_cbm: number;
           counting_completed: number;
@@ -6786,7 +6786,9 @@ function ModuleBusinessData({
     const activeBatchResource = activeBatch ? batchTransportDisplay(activeBatch) : null;
     const hasWarehouseReceipt = Boolean(data.warehouseActuals?.receipt_count);
     const actualPackages = Number(data.warehouseActuals?.actual_packages ?? 0);
-    const actualPieces = Number(data.warehouseActuals?.actual_pieces ?? 0);
+    const actualPieces = data.warehouseActuals?.actual_pieces == null
+      ? null
+      : Number(data.warehouseActuals.actual_pieces);
     const actualWeight = Number(data.warehouseActuals?.actual_weight_kg ?? 0);
     const actualVolume = Number(data.warehouseActuals?.actual_volume_cbm ?? 0);
     const comparisonCell = (
@@ -6831,7 +6833,7 @@ function ModuleBusinessData({
 
         <BusinessSubsection
           title="报价预估与仓库实收对比"
-          hint="报价预估来自客户确认的报价数据；实收偏差绝对值超过 5% 时仅作淡红色提示，不影响后续办理。"
+          hint="报价预估来自客户确认的报价数据；仓库未清点的商品件数显示为“未统计”，不参与偏差提示。"
         >
           <div className="table-wrap module-record-table operation-sheet-table cargo-comparison-summary-table">
             <table>
@@ -6841,7 +6843,7 @@ function ModuleBusinessData({
                 <tr>
                   <td><strong>仓库实收</strong></td>
                   {hasWarehouseReceipt ? comparisonCell(quotationPackages, actualPackages, (value) => String(value)) : <td>—</td>}
-                  {hasWarehouseReceipt ? comparisonCell(quotationPieces, actualPieces, (value) => String(value)) : <td>—</td>}
+                  {hasWarehouseReceipt ? actualPieces == null ? <td>未统计</td> : comparisonCell(quotationPieces, actualPieces, (value) => String(value)) : <td>—</td>}
                   {hasWarehouseReceipt ? comparisonCell(quotationWeight, actualWeight, (value) => value.toFixed(2)) : <td>—</td>}
                   {hasWarehouseReceipt ? comparisonCell(quotationVolume, actualVolume, (value) => value.toFixed(3)) : <td>—</td>}
                   <td>{hasWarehouseReceipt ? `${data.warehouseActuals?.receipt_count} 张收货单` : "待仓库清点"}</td>
