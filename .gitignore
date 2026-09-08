@@ -42,3 +42,4 @@ test-results/
 output/
 .local-backups/
 .tmp_*
+.worktrees/
