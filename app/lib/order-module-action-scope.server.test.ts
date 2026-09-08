@@ -10,6 +10,7 @@ const database = vi.hoisted(() => {
     },
     workflowModule: null as null | {
       id: string;
+      step_key: string;
       responsibility_position_code: string | null;
     },
     tasks: [] as Array<{
@@ -59,6 +60,7 @@ describe("order module action scope", () => {
     };
     database.state.workflowModule = {
       id: "review-module-state",
+      step_key: "completion_review",
       responsibility_position_code: "FINANCE_ACCOUNTING",
     };
     database.state.tasks = [];
@@ -84,6 +86,7 @@ describe("order module action scope", () => {
       "review",
     )).resolves.toEqual({
       moduleCode: "review",
+      stepKey: "completion_review",
       enabled: true,
       assigneeUserId: "finance-user",
       taskAssigneeUserIds: ["finance-user"],
@@ -134,6 +137,7 @@ describe("order module action scope", () => {
       "review",
     )).resolves.toEqual({
       moduleCode: "review",
+      stepKey: null,
       enabled: false,
       assigneeUserId: null,
       taskAssigneeUserIds: [],

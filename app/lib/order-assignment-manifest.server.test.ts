@@ -46,7 +46,7 @@ const assignees = vi.hoisted(() => ({
 
 vi.mock("cloudflare:workers", () => ({ env: { DB: database.DB } }));
 vi.mock("./organization-assignee.server", () => ({
-  isActiveOrganizationAssigneeForPositions: assignees.valid,
+  isActiveOrganizationAssigneeForWorkflowNodes: assignees.valid,
 }));
 
 import {
@@ -63,6 +63,7 @@ function dbRow(overrides: Record<string, unknown> = {}) {
     module_state_id: "module-transport",
     module_code: "transport",
     module_name: "国内运输",
+    step_key: "domestic_execution",
     step_sort_order: 40,
     module_sort_order: 10,
     module_required: 1,
@@ -239,12 +240,16 @@ describe("frozen order assignment manifest server", () => {
     })).resolves.toMatchObject({
       resolvedGroups: [{ assigneeUserId: "operator-1", selectedNow: true }],
     });
-    expect(assignees.valid).toHaveBeenCalledWith(
-      "organization-1",
-      "operator-1",
-      ["OPERATION"],
-      [["order.module.exceptions.manage"], ["order.module.transport.manage"]],
-    );
+    expect(assignees.valid).toHaveBeenCalledWith({
+      organizationId: "organization-1",
+      userId: "operator-1",
+      responsibilityPositionCode: "OPERATION",
+      nodes: [
+        { stepKey: "domestic_execution", moduleCode: "exceptions" },
+        { stepKey: "domestic_execution", moduleCode: "transport" },
+      ],
+      permissionRequirements: [["order.view"]],
+    });
   });
 
   it("does not require or accept a personal assignee for a physical warehouse queue", async () => {
@@ -289,7 +294,7 @@ describe("frozen order assignment manifest server", () => {
       organizationId: "organization-1",
       orderId: "order-1",
       selections: [{ groupKey: "position:OPERATION", assigneeUserId: "document-user" }],
-    })).rejects.toThrow("OPERATION负责人必须是该岗位下的有效个人账户");
+    })).rejects.toThrow("OPERATION负责人不具备该责任所需的节点资格");
   });
 
   it("requires an explicit position when one module contains task-level responsibility overrides", async () => {

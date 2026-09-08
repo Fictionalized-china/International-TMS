@@ -16,6 +16,7 @@ function row(
     moduleStateId: "module-transport",
     moduleCode: "transport",
     moduleName: "国内运输",
+    stepKey: "domestic_execution",
     stepSortOrder: 40,
     moduleSortOrder: 10,
     moduleRequired: true,
@@ -120,7 +121,7 @@ describe("order assignment manifest", () => {
       taskPositionCode: "FINANCE_ACCOUNTING",
     })]).groups[0];
     expect(orderAssignmentGroupPermissionRequirements(finance)).toEqual([
-      ["order.module.review.manage"],
+      ["order.view"],
       ["billing.expense.approve"],
     ]);
 
@@ -140,21 +141,27 @@ describe("order assignment manifest", () => {
     );
   });
 
-  it("对无岗位成员和全员被 deny 的必填责任给出不同配置错误", () => {
+  it("按责任岗位继承和节点覆盖计算派单候选", () => {
     const group = buildOrderAssignmentManifest([row()]).groups;
     expect(orderAssignmentCandidateConfigurationErrors(group, [])).toEqual([
-      "OPERATION 岗位暂无有效个人账户",
+      "OPERATION 责任暂无符合节点资格的有效个人账户",
     ]);
     expect(orderAssignmentCandidateConfigurationErrors(group, [{
       position_code: "OPERATION",
       permission_codes: "order.view",
-    }])).toEqual([
-      "OPERATION 岗位现有账户均不具备该责任所需的有效权限（含个人拒绝覆盖）",
-    ]);
+    }])).toEqual([]);
+    expect(orderAssignmentCandidateConfigurationErrors(group, [{
+      position_code: "DOC",
+      permission_codes: "order.view",
+      workflow_access_entries: "domestic_execution:transport:allow",
+    }])).toEqual([]);
     expect(orderAssignmentCandidateConfigurationErrors(group, [{
       position_code: "OPERATION",
       permission_codes: "order.module.transport.manage",
-    }])).toEqual([]);
+      workflow_access_entries: "domestic_execution:transport:deny",
+    }])).toEqual([
+      "OPERATION 责任暂无符合节点资格的有效个人账户",
+    ]);
   });
 
   it("builds a required assignment group from the frozen workflow snapshot", () => {

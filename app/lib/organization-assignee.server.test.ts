@@ -73,6 +73,7 @@ import {
 import {
   isActiveOrganizationAssignee,
   isActiveOrganizationAssigneeForPositions,
+  isActiveOrganizationAssigneeForWorkflowNodes,
   listActiveOrganizationAssignees,
   listActiveOrganizationAssigneeIds,
   requireActiveOrganizationAssignee,
@@ -112,6 +113,16 @@ describe("organization assignee server guard", () => {
     ).resolves.toBe(true);
     expect(database.queries.at(-1)?.sql).toContain("p.code IN (?)");
     expect(database.queries.at(-1)?.bindings).toEqual(["org-a", "user-a3", "OPERATION"]);
+  });
+
+  it("validates a frozen-node assignee from position inheritance", async () => {
+    await expect(isActiveOrganizationAssigneeForWorkflowNodes({
+      organizationId: "org-a",
+      userId: "user-a3",
+      responsibilityPositionCode: "OPERATION",
+      nodes: [{ stepKey: "domestic_execution", moduleCode: "transport" }],
+    })).resolves.toBe(true);
+    expect(database.queries.at(-1)?.sql).toContain("membership_workflow_access_overrides");
   });
 
   it("applies personal deny-aware effective permissions after the position check", async () => {

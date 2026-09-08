@@ -213,7 +213,7 @@ describe("order access", () => {
     })).toBe(true);
   });
 
-  it("does not let module permission bypass the configured owner or a disabled module", () => {
+  it("does not let account eligibility bypass the configured owner or a disabled module", () => {
     const input = {
       user: {
         ...baseUser,
@@ -238,6 +238,15 @@ describe("order access", () => {
       ...input,
       moduleAssigneeUserId: "user-a",
       user: { ...input.user, permissions: [] },
+    })).toBe(true);
+    expect(canOperateEnabledOrderModule({
+      ...input,
+      stepKey: "completion_review",
+      moduleAssigneeUserId: "user-a",
+      user: {
+        ...input.user,
+        permissionOverrides: [{ code: "order.module.review.manage", effect: "deny" }],
+      },
     })).toBe(false);
   });
 
@@ -264,6 +273,60 @@ describe("order access", () => {
       ...input,
       responsibilityPositionCodes: ["DOC"],
     })).toBe(false);
+  });
+
+  it("lets an account override qualify an unassigned node and lets an explicit denial win", () => {
+    const input = {
+      user: {
+        ...baseUser,
+        positionCode: "CS",
+        workflowAccessOverrides: [{
+          stepKey: "order_creation",
+          moduleCode: "consignment",
+          effect: "allow" as const,
+        }],
+      },
+      orderStatus: "draft",
+      stepKey: "order_creation",
+      moduleCode: "consignment",
+      moduleEnabled: true,
+      moduleAssigneeUserId: null,
+      taskAssigneeUserIds: [] as string[],
+      responsibilityPositionCodes: ["SALES"],
+    };
+    expect(canOperateEnabledOrderModule(input)).toBe(true);
+    expect(canOperateEnabledOrderModule({
+      ...input,
+      user: {
+        ...input.user,
+        workflowAccessOverrides: [{
+          stepKey: "order_creation",
+          moduleCode: "consignment",
+          effect: "deny" as const,
+        }],
+      },
+    })).toBe(false);
+  });
+
+  it("adds explicitly allowed current nodes to order-list visibility", () => {
+    const scoped = orderVisibilitySql({
+      ...baseUser,
+      positionCode: "DOC",
+      permissions: ["order.view"],
+      workflowAccessOverrides: [{
+        stepKey: "order_creation",
+        moduleCode: "consignment",
+        effect: "allow",
+      }],
+    });
+    expect(scoped.sql).toContain("qualified_step.step_key=?");
+    expect(scoped.sql).toContain("qualified_module.module_code=?");
+    expect(scoped.values).toEqual([
+      "order_creation",
+      "consignment",
+      "user-a",
+      "user-a",
+    ]);
   });
 
   it("keeps the current workspace editable for an authorized scoped module owner", () => {

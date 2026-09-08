@@ -58,6 +58,7 @@ export type OrderModuleInstance = {
 
 export type OrderModuleActionScope = {
   moduleCode: OrderModuleCode;
+  stepKey: string | null;
   enabled: boolean;
   assigneeUserId: string | null;
   taskAssigneeUserIds: string[];
@@ -95,6 +96,7 @@ export async function loadOrderModuleActionScope(
   if (module.workflow_instance_id && !module.matched_instance_id) {
     return {
       moduleCode,
+      stepKey: null,
       enabled: false,
       assigneeUserId: null,
       taskAssigneeUserIds: [],
@@ -102,7 +104,7 @@ export async function loadOrderModuleActionScope(
     };
   }
   const workflowModule = await env.DB.prepare(
-    `SELECT ms.id,ms.responsibility_position_code
+    `SELECT ms.id,ss.step_key,ms.responsibility_position_code
      FROM workflow_instances wi
      JOIN workflow_instance_step_states ss ON ss.instance_id=wi.id
      LEFT JOIN workflow_instance_step_states current_ss
@@ -126,6 +128,7 @@ export async function loadOrderModuleActionScope(
     orderId,
   ).first<{
     id: string;
+    step_key: string;
     responsibility_position_code: string | null;
   }>();
   const tasks = workflowModule
@@ -141,6 +144,7 @@ export async function loadOrderModuleActionScope(
     : { results: [] };
   return {
     moduleCode,
+    stepKey: workflowModule?.step_key ?? null,
     enabled: module.workflow_instance_id
       ? Boolean(workflowModule)
       : module.enabled === 1,

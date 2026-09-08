@@ -8,6 +8,7 @@ import {
 import {
   buildOrganizationAssigneeTree,
   findOrganizationAssigneePath,
+  organizationAssigneeCanHandleWorkflowNodes,
   type OrganizationAssigneeMember,
 } from "./organization-assignee";
 
@@ -126,6 +127,25 @@ describe("organization assignee hierarchy", () => {
     expect(html).toContain("A 部门 / 2 岗位 / a3");
     expect(html).toContain('name="assigneeUserId"');
     expect(html).not.toContain('aria-label="选择部门"');
+  });
+
+  it("inherits node eligibility from the responsibility position and honors explicit overrides", () => {
+    const node = [{ stepKey: "order_creation", moduleCode: "consignment" }];
+    expect(organizationAssigneeCanHandleWorkflowNodes({
+      position_code: "SALES",
+    }, "SALES", node)).toBe(true);
+    expect(organizationAssigneeCanHandleWorkflowNodes({
+      position_code: "DOC",
+      workflow_access_entries: "order_creation:consignment:allow",
+    }, "SALES", node)).toBe(true);
+    expect(organizationAssigneeCanHandleWorkflowNodes({
+      position_code: "SALES",
+      workflow_access_entries: "order_creation:consignment:deny",
+    }, "SALES", node)).toBe(false);
+    expect(organizationAssigneeCanHandleWorkflowNodes({
+      position_code: "SALES",
+      permission_override_entries: "order.module.consignment.manage:deny",
+    }, "SALES", node)).toBe(false);
   });
 
   it("does not submit a disabled candidate and explains why it is unavailable", () => {

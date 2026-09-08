@@ -68,6 +68,10 @@ import {
   type PublicationPositionReadiness,
 } from "../lib/workflow-publication-validation";
 import { listActiveOrganizationAssignees } from "../lib/organization-assignee.server";
+import {
+  organizationAssigneePermissionOverrides,
+  organizationAssigneeWorkflowAccessOverrides,
+} from "../lib/organization-assignee";
 
 type Definition = {
   id: string;
@@ -1686,13 +1690,22 @@ async function loadPublicationPositionReadiness(organizationId: string) {
      ORDER BY p.sort_order,p.name`,
   ).bind(organizationId).all<PublicationPositionReadiness>();
   const members = await listActiveOrganizationAssignees(organizationId);
-  const membersByPosition = new Map<string, Array<{ membershipId: string; permissionCodes: string[] }>>();
+  const membersByPosition = new Map<string, Array<{
+    membershipId: string;
+    positionCode: string;
+    permissionCodes: string[];
+    permissionOverrides: ReturnType<typeof organizationAssigneePermissionOverrides>;
+    workflowAccessOverrides: ReturnType<typeof organizationAssigneeWorkflowAccessOverrides>;
+  }>>();
   for (const member of members) {
-    if (!member.position_code) continue;
+    if (!member.position_code || !member.membership_id) continue;
     const list = membersByPosition.get(member.position_code) ?? [];
     list.push({
-      membershipId: member.id,
+      membershipId: member.membership_id,
+      positionCode: member.position_code,
       permissionCodes: (member.permission_codes ?? "").split(",").filter(Boolean),
+      permissionOverrides: organizationAssigneePermissionOverrides(member),
+      workflowAccessOverrides: organizationAssigneeWorkflowAccessOverrides(member),
     });
     membersByPosition.set(member.position_code, list);
   }

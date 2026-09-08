@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { Form, useNavigation } from "react-router";
 import type { Route } from "./+types/dashboard.roles";
-import { requireSessionUser } from "../lib/auth.server";
+import { canEditWorkflowDefinition, requireSessionUser } from "../lib/auth.server";
 import { validateCode, valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import { Modal } from "../components/Modal";
@@ -13,6 +13,7 @@ import {
   type PermissionOverride,
 } from "../lib/permission-blocks";
 import { inspectAccessControlSchema } from "../lib/access-control-schema.server";
+import type { WorkflowNodeAccessOverride } from "../lib/workflow-node-access";
 
 type RoleRow = {
   id: string;
@@ -34,6 +35,16 @@ type MemberRow = {
   role_names: string | null;
   inherited_permissions: string | null;
   override_entries: string | null;
+};
+type WorkflowNodeRow = {
+  step_key: string;
+  step_name: string;
+  module_code: string;
+  module_name: string;
+  responsibility_position_codes: string | null;
+};
+type MemberWorkflowOverrideRow = WorkflowNodeAccessOverride & {
+  membershipId: string;
 };
 
 const moduleLabels: Record<string, string> = {
@@ -57,9 +68,18 @@ export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "role.view");
   const schema = await inspectAccessControlSchema(env.DB);
   if (!schema.ready) {
-    return { current, roles: [] as RoleRow[], permissions: [] as PermissionRow[], members: [] as MemberRow[], schemaReady: false, schemaMissing: schema.missing };
+    return {
+      current,
+      roles: [] as RoleRow[],
+      permissions: [] as PermissionRow[],
+      members: [] as MemberRow[],
+      workflowNodes: [] as WorkflowNodeRow[],
+      workflowOverrides: [] as MemberWorkflowOverrideRow[],
+      schemaReady: false,
+      schemaMissing: schema.missing,
+    };
   }
-  const [roles, permissions, members] = await Promise.all([
+  const [roles, permissions, members, workflowNodes, workflowOverrides] = await Promise.all([
     env.DB.prepare(
       `SELECT r.id,r.code,r.name,r.description,r.is_system,r.status,
               GROUP_CONCAT(DISTINCT rp.permission_code) permissions,
@@ -96,12 +116,42 @@ export async function loader({ request }: Route.LoaderArgs) {
        WHERE m.organization_id=? AND m.status='active' AND u.status='active'
        ORDER BY p.sort_order,u.display_name`,
     ).bind(current.organizationId).all<MemberRow>(),
+    env.DB.prepare(
+      `SELECT step.step_key,
+              step.name step_name,
+              module.module_code,
+              module.display_name module_name,
+              GROUP_CONCAT(DISTINCT module.responsibility_position_code) responsibility_position_codes
+       FROM workflow_definitions workflow
+       JOIN workflow_steps step
+         ON step.workflow_id=workflow.id AND step.is_active=1
+       JOIN workflow_step_modules module
+         ON module.workflow_id=workflow.id
+        AND module.step_id=step.id
+        AND module.is_active=1
+       WHERE workflow.organization_id=?
+         AND workflow.lifecycle_status='published'
+         AND workflow.status='active'
+       GROUP BY step.step_key,step.name,module.module_code,module.display_name
+       ORDER BY MIN(step.sort_order),MIN(module.sort_order),module.display_name`,
+    ).bind(current.organizationId).all<WorkflowNodeRow>(),
+    env.DB.prepare(
+      `SELECT override.membership_id membershipId,
+              override.step_key stepKey,
+              override.module_code moduleCode,
+              override.effect
+       FROM membership_workflow_access_overrides override
+       JOIN memberships membership ON membership.id=override.membership_id
+       WHERE membership.organization_id=?`,
+    ).bind(current.organizationId).all<MemberWorkflowOverrideRow>(),
   ]);
   return {
     current,
     roles: roles.results,
     permissions: permissions.results,
     members: members.results,
+    workflowNodes: workflowNodes.results,
+    workflowOverrides: workflowOverrides.results,
     schemaReady: true,
     schemaMissing: [] as string[],
   };
@@ -131,7 +181,10 @@ function rolePermissionStatements(roleId: string, selected: string[]) {
 }
 
 export async function action({ request }: Route.ActionArgs) {
-  const current = await requireSessionUser(request, "role.manage");
+  const current = await requireSessionUser(request);
+  if (!current.permissions.includes("role.manage") && !canEditWorkflowDefinition(current)) {
+    throw new Response("无权管理账号资格", { status: 403 });
+  }
   const schema = await inspectAccessControlSchema(env.DB);
   if (!schema.ready) return { formError: `权限数据库升级尚未完成：${schema.missing.join("、")}。请完成迁移后重试。` };
   const form = await request.formData();
@@ -155,13 +208,44 @@ export async function action({ request }: Route.ActionArgs) {
     }
 
     const overrides: PermissionOverride[] = [];
+    const workflowOverrides: WorkflowNodeAccessOverride[] = [];
     for (const [key, rawValue] of form.entries()) {
-      if (!key.startsWith("override:") || typeof rawValue !== "string") continue;
-      if (!['allow', 'deny'].includes(rawValue)) continue;
-      overrides.push({ code: key.slice("override:".length), effect: rawValue as "allow" | "deny" });
+      if (typeof rawValue !== "string" || !["allow", "deny"].includes(rawValue)) continue;
+      if (key.startsWith("override:")) {
+        overrides.push({ code: key.slice("override:".length), effect: rawValue as "allow" | "deny" });
+        continue;
+      }
+      if (key.startsWith("workflowOverride:")) {
+        const [stepKey, moduleCode] = key.slice("workflowOverride:".length).split(":");
+        if (stepKey && moduleCode) {
+          workflowOverrides.push({
+            stepKey,
+            moduleCode,
+            effect: rawValue as "allow" | "deny",
+          });
+        }
+      }
     }
     if (!await validatePermissionSelection(overrides.map((item) => item.code))) {
       return { formError: "账户权限积木中包含无效选项", targetId: membershipId };
+    }
+    const configuredNodes = await env.DB.prepare(
+      `SELECT DISTINCT step.step_key,module.module_code
+       FROM workflow_definitions workflow
+       JOIN workflow_steps step ON step.workflow_id=workflow.id AND step.is_active=1
+       JOIN workflow_step_modules module
+         ON module.workflow_id=workflow.id
+        AND module.step_id=step.id
+        AND module.is_active=1
+       WHERE workflow.organization_id=?
+         AND workflow.lifecycle_status='published'
+         AND workflow.status='active'`,
+    ).bind(current.organizationId).all<{ step_key: string; module_code: string }>();
+    const configuredNodeKeys = new Set(
+      configuredNodes.results.map((item) => `${item.step_key}:${item.module_code}`),
+    );
+    if (workflowOverrides.some((item) => !configuredNodeKeys.has(`${item.stepKey}:${item.moduleCode}`))) {
+      return { formError: "工作流节点资格中包含已停用或无效的节点", targetId: membershipId };
     }
     const insertStatements = chunkD1Rows(overrides, 6).map((overrideChunk) => env.DB.prepare(
       `INSERT INTO membership_permission_overrides(
@@ -170,9 +254,24 @@ export async function action({ request }: Route.ActionArgs) {
     ).bind(...overrideChunk.flatMap((override) => [
       membershipId, override.code, override.effect, current.userId, now, now,
     ])));
+    const insertWorkflowStatements = chunkD1Rows(workflowOverrides, 7).map((overrideChunk) => env.DB.prepare(
+      `INSERT INTO membership_workflow_access_overrides(
+        membership_id,step_key,module_code,effect,updated_by_user_id,created_at,updated_at
+      ) VALUES ${overrideChunk.map(() => "(?,?,?,?,?,?,?)").join(",")}`,
+    ).bind(...overrideChunk.flatMap((override) => [
+      membershipId,
+      override.stepKey,
+      override.moduleCode,
+      override.effect,
+      current.userId,
+      now,
+      now,
+    ])));
     await env.DB.batch([
       env.DB.prepare("DELETE FROM membership_permission_overrides WHERE membership_id=?").bind(membershipId),
+      env.DB.prepare("DELETE FROM membership_workflow_access_overrides WHERE membership_id=?").bind(membershipId),
       ...insertStatements,
+      ...insertWorkflowStatements,
     ]);
     await writeAudit({
       request,
@@ -181,9 +280,9 @@ export async function action({ request }: Route.ActionArgs) {
       resourceId: membershipId,
       organizationId: current.organizationId,
       actorUserId: current.userId,
-      metadata: { overrides },
+      metadata: { overrides, workflowOverrides },
     });
-    return { success: "账户权限积木已一次性应用", targetId: membershipId };
+    return { success: "账户权限与工作流节点资格已一次性应用", targetId: membershipId };
   }
 
   const selected = selectedPermissionCodes(form);
@@ -268,7 +367,8 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
     (groups[permission.module] ??= []).push(permission);
     return groups;
   }, {});
-  const canManage = loaderData.current.permissions.includes("role.manage");
+  const canManage = loaderData.current.permissions.includes("role.manage") ||
+    canEditWorkflowDefinition(loaderData.current);
   const success = actionData && "success" in actionData ? actionData.success : undefined;
   const formError = actionData && "formError" in actionData ? actionData.formError : undefined;
   const values = actionData && "values" in actionData ? actionData.values : undefined;
@@ -337,11 +437,17 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
           const added = overrides.filter((item) => item.effect === "allow").length;
           const denied = overrides.filter((item) => item.effect === "deny").length;
           const overrideByCode = new Map(overrides.map((item) => [item.code, item.effect]));
+          const workflowOverrideByKey = new Map(
+            loaderData.workflowOverrides
+              .filter((item) => item.membershipId === member.membership_id)
+              .map((item) => [`${item.stepKey}:${item.moduleCode}`, item.effect]),
+          );
+          const workflowOverrideCount = workflowOverrideByKey.size;
           return <tr key={member.membership_id}>
             <td><strong>{member.display_name}</strong><small>{member.email}</small></td>
             <td>{member.position_name || "未绑定岗位"}</td>
             <td>{member.role_names || "未分配角色"}</td>
-            <td><strong>{effective.length} 项有效</strong><small>{protectedAccount ? "系统保护" : `额外允许 ${added} · 明确拒绝 ${denied}`}</small></td>
+            <td><strong>{effective.length} 项有效</strong><small>{protectedAccount ? "系统保护" : `权限积木 ${added + denied} · 节点资格 ${workflowOverrideCount}`}</small></td>
             <td><Modal title={`账户权限 · ${member.display_name}`} triggerLabel="配置积木" triggerClassName="btn small" closeSignal={actionData?.targetId === member.membership_id && success} size="xwide">
               <Form method="post" className="permission-editor-form">
                 <input type="hidden" name="intent" value="update_account_overrides" />
@@ -364,6 +470,11 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
                     </label>;
                   })}
                 </section>)}</div>
+                <WorkflowNodeOverrideEditor
+                  nodes={loaderData.workflowNodes}
+                  selected={workflowOverrideByKey}
+                  disabled={!canManage || protectedAccount}
+                />
                 {canManage && !protectedAccount && <div className="permission-editor-actions"><span>确认后所有账户级改变一次性生效并写入审计。</span><button className="primary" disabled={busy}>确认应用</button></div>}
               </Form>
             </Modal></td>
@@ -372,6 +483,53 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
       </table></div>
     </section>
   </>;
+}
+
+function WorkflowNodeOverrideEditor({
+  nodes,
+  selected,
+  disabled,
+}: {
+  nodes: WorkflowNodeRow[];
+  selected: Map<string, "allow" | "deny">;
+  disabled: boolean;
+}) {
+  const groupedNodes = nodes.reduce<Map<string, WorkflowNodeRow[]>>((groups, node) => {
+    const key = `${node.step_key}:${node.step_name}`;
+    const current = groups.get(key) ?? [];
+    current.push(node);
+    groups.set(key, current);
+    return groups;
+  }, new Map());
+  return <fieldset className="workflow-node-override-editor">
+    <legend>工作流节点账号资格</legend>
+    <p>继承表示按冻结工作流的责任岗位和具体负责人办理；允许可将本账号加入该节点候选范围；拒绝始终优先。</p>
+    <div className="workflow-node-override-grid">
+      {[...groupedNodes.entries()].map(([key, items]) => {
+        const [stepKey, stepName] = key.split(":");
+        return <section key={stepKey}>
+          <h3>{stepName}</h3>
+          {items.map((node) => {
+            const selectionKey = `${node.step_key}:${node.module_code}`;
+            const positions = node.responsibility_position_codes?.split(",").filter(Boolean).join(" / ") || "未指定岗位";
+            return <label className="workflow-node-override-row" key={selectionKey}>
+              <span><b>{node.module_name}</b><small>{positions}</small></span>
+              <select
+                name={`workflowOverride:${node.step_key}:${node.module_code}`}
+                defaultValue={selected.get(selectionKey) ?? "inherit"}
+                disabled={disabled}
+                aria-label={`${stepName}${node.module_name}账号资格`}
+              >
+                <option value="inherit">继承工作流</option>
+                <option value="allow">允许候选</option>
+                <option value="deny">明确拒绝</option>
+              </select>
+            </label>;
+          })}
+        </section>;
+      })}
+    </div>
+  </fieldset>;
 }
 
 function PermissionCheckboxes({

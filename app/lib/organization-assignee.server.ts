@@ -3,6 +3,8 @@ import { isMissingSqliteTableError } from "./d1-errors";
 import {
   satisfiesOrganizationAssigneePermissionRequirements,
   organizationAssigneeCanHandle,
+  organizationAssigneeCanHandleWorkflowNodes,
+  type OrganizationAssigneeWorkflowNode,
   type OrganizationAssigneeMember,
 } from "./organization-assignee";
 
@@ -18,6 +20,7 @@ const activeOrganizationAssigneeBaseSql = `
 
 export async function listActiveOrganizationAssignees(organizationId: string) {
   const selectWithOverrides = `SELECT u.id,u.display_name,
+      m.id membership_id,
       d.id department_id,d.code department_code,d.name department_name,
       p.id position_id,p.code position_code,p.name position_name,
       (SELECT GROUP_CONCAT(DISTINCT effective_permission.code)
@@ -44,7 +47,13 @@ export async function listActiveOrganizationAssignees(organizationId: string) {
                ON protected_role.id=protected_mr.role_id AND protected_role.status='active'
             WHERE protected_mr.membership_id=m.id
               AND protected_role.code IN ('owner','boss')
-         ) effective_permission) permission_codes
+         ) effective_permission) permission_codes,
+      (SELECT GROUP_CONCAT(permission_override.permission_code||':'||permission_override.effect)
+         FROM membership_permission_overrides permission_override
+        WHERE permission_override.membership_id=m.id) permission_override_entries,
+      (SELECT GROUP_CONCAT(workflow_override.step_key||':'||workflow_override.module_code||':'||workflow_override.effect)
+         FROM membership_workflow_access_overrides workflow_override
+        WHERE workflow_override.membership_id=m.id) workflow_access_entries
     ${activeOrganizationAssigneeBaseSql}
    ORDER BY d.sort_order,p.sort_order,u.display_name`;
   try {
@@ -52,9 +61,12 @@ export async function listActiveOrganizationAssignees(organizationId: string) {
       .bind(organizationId)
       .all<OrganizationAssigneeMember>()).results;
   } catch (error) {
-    if (!isMissingSqliteTableError(error, "membership_permission_overrides")) throw error;
+    if (
+      !isMissingSqliteTableError(error, "membership_permission_overrides") &&
+      !isMissingSqliteTableError(error, "membership_workflow_access_overrides")
+    ) throw error;
     const legacyRows = await env.DB.prepare(
-      `SELECT u.id,u.display_name,
+      `SELECT u.id,u.display_name,m.id membership_id,
               d.id department_id,d.code department_code,d.name department_name,
               p.id position_id,p.code position_code,p.name position_name,
               (SELECT GROUP_CONCAT(DISTINCT legacy_permission.code)
@@ -73,6 +85,28 @@ export async function listActiveOrganizationAssignees(organizationId: string) {
     ).bind(organizationId).all<OrganizationAssigneeMember>();
     return legacyRows.results;
   }
+}
+
+export async function isActiveOrganizationAssigneeForWorkflowNodes(input: {
+  organizationId: string;
+  userId: string;
+  responsibilityPositionCode: string;
+  nodes: readonly OrganizationAssigneeWorkflowNode[];
+  permissionRequirements?: readonly (readonly string[])[];
+}) {
+  if (!input.userId || !input.responsibilityPositionCode || !input.nodes.length) return false;
+  const member = (await listActiveOrganizationAssignees(input.organizationId)).find(
+    (candidate) => candidate.id === input.userId,
+  );
+  return Boolean(
+    member &&
+    organizationAssigneeCanHandleWorkflowNodes(
+      member,
+      input.responsibilityPositionCode,
+      input.nodes,
+    ) &&
+    organizationAssigneeCanHandle(member, input.permissionRequirements ?? []),
+  );
 }
 
 export async function listActiveOrganizationAssigneeCandidates(input: {

@@ -29331,8 +29331,39 @@ html[data-motion="off"] *::after {
 .account-override-row b { font-size: 11px; }
 .account-override-row small { margin-top: 2px; color: #667b8f; font-size: 10px; line-height: 1.35; }
 .account-override-row select { width: 100%; min-height: 30px; }
+.workflow-node-override-editor {
+  margin: 0;
+  padding: 10px;
+  border: 1px solid #cfdae4;
+  background: #f8fafc;
+}
+.workflow-node-override-editor > legend { padding: 0 6px; color: #0c3558; font-weight: 700; }
+.workflow-node-override-editor > p { margin: 0 0 9px; color: #60758a; font-size: 11px; }
+.workflow-node-override-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.workflow-node-override-grid > section { border: 1px solid #d9e2ea; background: #fff; }
+.workflow-node-override-grid h3 { margin: 0; padding: 7px 9px; font-size: 12px; background: #eef4f8; border-bottom: 1px solid #d9e2ea; }
+.workflow-node-override-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 110px;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 5px 8px;
+  border-bottom: 1px solid #edf1f4;
+}
+.workflow-node-override-row:last-child { border-bottom: 0; }
+.workflow-node-override-row b,
+.workflow-node-override-row small { display: block; }
+.workflow-node-override-row b { font-size: 11px; }
+.workflow-node-override-row small { margin-top: 2px; color: #6b7e90; font-size: 10px; }
+.workflow-node-override-row select { width: 100%; min-height: 30px; }
 @media (max-width: 900px) {
-  .account-override-grid { grid-template-columns: 1fr; }
+  .account-override-grid,
+  .workflow-node-override-grid { grid-template-columns: 1fr; }
   .permission-editor-notice,
   .permission-editor-actions { align-items: stretch; flex-direction: column; }
 }

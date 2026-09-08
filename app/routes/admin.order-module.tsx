@@ -144,6 +144,7 @@ import { Modal } from "../components/Modal";
 import { OrganizationAssigneePicker } from "../components/OrganizationAssigneePicker";
 import {
   organizationAssigneeCanHandle,
+  organizationAssigneeCanHandleWorkflowNodes,
   type OrganizationAssigneeMember,
 } from "../lib/organization-assignee";
 import {
@@ -688,9 +689,9 @@ function canOperateLoadedConfiguredModule(
 }
 
 function canManageLoadedModule(data: Route.ComponentProps["loaderData"]) {
-  if (["review", "exceptions"].includes(data.definition.code))
-    return canOperateLoadedConfiguredModule(data);
-  return canManageOrderModule(data.current, data.definition.code) ||
+  return canOperateLoadedConfiguredModule(data) ||
+    (!data.workflowStageAccess.workflowContext.locked &&
+      canManageOrderModule(data.current, data.definition.code)) ||
     canEditWorkflowDefinitionInUi(data.current);
 }
 type CustomsRecord = {
@@ -878,6 +879,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     canOperateEnabledOrderModule({
       user: current,
       orderStatus: order.status,
+      stepKey: moduleActionScope.stepKey,
       moduleCode: moduleActionScope.moduleCode,
       moduleEnabled: moduleActionScope.enabled,
       moduleAssigneeUserId: moduleActionScope.assigneeUserId,
@@ -1559,6 +1561,7 @@ export async function action({ request, params }: Route.ActionArgs) {
   const currentModuleActionCanOperate = canOperateEnabledOrderModule({
     user: current,
     orderStatus: order.status,
+    stepKey: currentModule.stepKey,
     moduleCode: currentModule.moduleCode,
     moduleEnabled: currentModule.enabled,
     moduleAssigneeUserId: currentModule.assigneeUserId,
@@ -5399,9 +5402,7 @@ function ModuleSourceDocuments({
     })
     .filter((placement) => placement.policy.visible);
   if (!placements.length) return null;
-  const canManageDocuments =
-    canManageOrderModule(data.current, code) ||
-    canEditWorkflowDefinitionInUi(data.current);
+  const canManageDocuments = canManageLoadedModule(data);
   const settlementDocumentOwners = code === "costs"
     ? {
         customerServiceAssigneeUserId:
@@ -5637,8 +5638,14 @@ function AssignmentManifestWorkbench({
               {personalAssignmentGroups.map((group) => {
                 const eligibleMembers = group.positionCode
                   ? members.filter((member) =>
-                      member.position_code === group.positionCode &&
-                      organizationAssigneeCanHandle(member, orderAssignmentGroupPermissionRequirements(group)),
+                      organizationAssigneeCanHandleWorkflowNodes(
+                        member,
+                        group.positionCode!,
+                        group.modules.flatMap((module) => module.workflowNodes),
+                      ) && organizationAssigneeCanHandle(
+                        member,
+                        orderAssignmentGroupPermissionRequirements(group),
+                      )
                     )
                   : [];
                 const positionName = eligibleMembers[0]?.position_name

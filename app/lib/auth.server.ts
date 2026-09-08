@@ -16,8 +16,10 @@ import {
   type PermissionOverride,
 } from "./permission-blocks";
 import { sessionCookieName, sessionSlotFromRequest, withSessionSlot } from "./session-slot";
+import type { WorkflowNodeAccessOverride } from "./workflow-node-access";
 
 let warnedAboutMissingPermissionOverrides = false;
+let warnedAboutMissingWorkflowAccessOverrides = false;
 
 async function listPermissionOverrides(userId: string, organizationId: string) {
   try {
@@ -40,6 +42,36 @@ async function listPermissionOverrides(userId: string, organizationId: string) {
   }
 }
 
+async function listWorkflowAccessOverrides(
+  userId: string,
+  organizationId: string,
+) {
+  try {
+    const rows = await env.DB.prepare(
+      `SELECT override.step_key stepKey,
+              override.module_code moduleCode,
+              override.effect
+       FROM memberships membership
+       JOIN membership_workflow_access_overrides override
+         ON override.membership_id=membership.id
+       WHERE membership.user_id=?
+         AND membership.organization_id=?
+         AND membership.status='active'`,
+    )
+      .bind(userId, organizationId)
+      .all<WorkflowNodeAccessOverride>();
+    return rows.results;
+  } catch (error) {
+    if (!isMissingSqliteTableError(error, "membership_workflow_access_overrides"))
+      throw error;
+    if (!warnedAboutMissingWorkflowAccessOverrides) {
+      console.warn("工作流节点账号资格表尚未迁移，当前请求暂时按冻结工作流岗位与负责人运行；请执行数据库迁移。");
+      warnedAboutMissingWorkflowAccessOverrides = true;
+    }
+    return [];
+  }
+}
+
 export type SessionUser = {
   sessionId: string;
   userId: string;
@@ -49,6 +81,8 @@ export type SessionUser = {
   displayName: string;
   site: Site;
   permissions: string[];
+  permissionOverrides?: PermissionOverride[];
+  workflowAccessOverrides?: WorkflowNodeAccessOverride[];
   positionCode: string | null;
   roleCodes: string[];
 };
@@ -156,7 +190,7 @@ export async function getSessionUser(
     .bind(tokenHash, new Date().toISOString())
     .first<Record<string, string>>();
   if (!row || row.site !== site) return null;
-  const [permissionRows, accessProfile, overrideRows, allPermissionRows] = await Promise.all([
+  const [permissionRows, accessProfile, overrideRows, workflowAccessOverrideRows, allPermissionRows] = await Promise.all([
     env.DB.prepare(
     `SELECT DISTINCT rp.permission_code AS code
        FROM memberships m
@@ -180,6 +214,7 @@ export async function getSessionUser(
       .bind(row.user_id, row.organization_id)
       .first<{ membership_id: string; position_code: string | null; role_codes: string | null }>(),
     listPermissionOverrides(row.user_id, row.organization_id),
+    listWorkflowAccessOverrides(row.user_id, row.organization_id),
     env.DB.prepare("SELECT code FROM permissions ORDER BY code").all<{ code: string }>(),
   ]);
   const roleCodes = (accessProfile?.role_codes ?? "").split(",").filter(Boolean);
@@ -198,6 +233,8 @@ export async function getSessionUser(
     displayName: row.display_name,
     site: row.site as Site,
     permissions,
+    permissionOverrides: overrideRows,
+    workflowAccessOverrides: workflowAccessOverrideRows,
     positionCode: accessProfile?.position_code ?? null,
     roleCodes,
   };

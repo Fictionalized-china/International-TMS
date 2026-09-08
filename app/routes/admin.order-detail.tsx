@@ -7,6 +7,7 @@ import { ActionToast } from "../components/ActionToast";
 import { canEditWorkflowDefinition, requireSessionUser } from "../lib/auth.server";
 import {
   canEditCurrentOrderWorkspace,
+  canOperateEnabledOrderModule,
   canOperateCurrentOrder,
   canReadFullOrderLifecycle,
 } from "../lib/order-access";
@@ -1955,20 +1956,25 @@ function CurrentNodeWorksheet({
             step.rows.filter((item) => item.module_state_id === row.module_state_id),
           );
           const pendingTasks = tasks.filter((task) => task.task_status !== "completed");
-          const mine = !orderCompleted && row.module_status !== "completed" && (
-            pendingTasks.length > 0
-              ? pendingTasks.some((task) => {
-                  if (task.task_assignee_user_id) return task.task_assignee_user_id === data.current.userId;
-                  return (task.task_position_code || row.responsibility_position_code) === data.current.positionCode;
-                })
-              : row.assignee_user_id
-                ? row.assignee_user_id === data.current.userId
-                : row.responsibility_position_code === data.current.positionCode
-          );
+          const mine = canOperateEnabledOrderModule({
+            user: data.current,
+            orderStatus: data.order.status,
+            stepKey: step.step_key,
+            moduleCode: row.module_code || "",
+            moduleEnabled: row.module_enabled === 1,
+            moduleAssigneeUserId: row.assignee_user_id,
+            taskAssigneeUserIds: pendingTasks
+              .map((task) => task.task_assignee_user_id)
+              .filter((userId): userId is string => Boolean(userId)),
+            responsibilityPositionCodes: Array.from(new Set([
+              row.responsibility_position_code,
+              ...pendingTasks.map((task) => task.task_position_code),
+            ].filter((code): code is string => Boolean(code)))),
+          });
           const editable = Boolean(
             module &&
             orderModuleAccess(data.order.status, module.module_code).canEdit &&
-            canManageOrderModule(data.current, module.module_code),
+            mine,
           );
           const tone: WorksheetTone = orderCompleted || row.module_status === "completed"
             ? "complete"

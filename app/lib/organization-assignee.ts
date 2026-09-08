@@ -1,5 +1,6 @@
 export type OrganizationAssigneeMember = {
   id: string;
+  membership_id?: string;
   display_name: string;
   department_id: string | null;
   department_code?: string | null;
@@ -8,6 +9,13 @@ export type OrganizationAssigneeMember = {
   position_code?: string | null;
   position_name: string | null;
   permission_codes?: string | null;
+  permission_override_entries?: string | null;
+  workflow_access_entries?: string | null;
+};
+
+export type OrganizationAssigneeWorkflowNode = {
+  stepKey: string;
+  moduleCode: string;
 };
 
 export type OrganizationPositionNode = {
@@ -66,6 +74,70 @@ export function organizationAssigneeCanHandle(
     organizationAssigneePermissionCodes(member),
     requirements,
   );
+}
+
+export function organizationAssigneePermissionOverrides(
+  member: Pick<OrganizationAssigneeMember, "permission_override_entries">,
+) {
+  return (member.permission_override_entries ?? "")
+    .split(",")
+    .map((entry) => {
+      const separator = entry.lastIndexOf(":");
+      if (separator < 1) return null;
+      const effect = entry.slice(separator + 1);
+      if (effect !== "allow" && effect !== "deny") return null;
+      return { code: entry.slice(0, separator), effect } as const;
+    })
+    .filter((entry): entry is { code: string; effect: "allow" | "deny" } => Boolean(entry));
+}
+
+export function organizationAssigneeWorkflowAccessOverrides(
+  member: Pick<OrganizationAssigneeMember, "workflow_access_entries">,
+) {
+  return (member.workflow_access_entries ?? "")
+    .split(",")
+    .map((entry) => {
+      const [stepKey, moduleCode, effect] = entry.split(":");
+      if (!stepKey || !moduleCode || (effect !== "allow" && effect !== "deny")) return null;
+      return { stepKey, moduleCode, effect } as const;
+    })
+    .filter((entry): entry is {
+      stepKey: string;
+      moduleCode: string;
+      effect: "allow" | "deny";
+    } => Boolean(entry));
+}
+
+/**
+ * Frozen-workflow assignment eligibility mirrors the runtime node gate:
+ * responsibility-position inheritance is the default, an explicit allow may
+ * add an account from another position, and either node or legacy module deny
+ * always removes the account from the candidate pool.
+ */
+export function organizationAssigneeCanHandleWorkflowNodes(
+  member: Pick<
+    OrganizationAssigneeMember,
+    "position_code" | "permission_override_entries" | "workflow_access_entries"
+  >,
+  responsibilityPositionCode: string,
+  nodes: readonly OrganizationAssigneeWorkflowNode[],
+) {
+  const permissionOverrides = organizationAssigneePermissionOverrides(member);
+  const workflowOverrides = organizationAssigneeWorkflowAccessOverrides(member);
+  return nodes.every((node) => {
+    if (permissionOverrides.some(
+      (override) =>
+        override.code === `order.module.${node.moduleCode}.manage` &&
+        override.effect === "deny",
+    )) return false;
+    const nodeOverride = workflowOverrides.find(
+      (override) =>
+        override.stepKey === node.stepKey && override.moduleCode === node.moduleCode,
+    )?.effect;
+    if (nodeOverride === "deny") return false;
+    if (nodeOverride === "allow") return true;
+    return member.position_code === responsibilityPositionCode;
+  });
 }
 
 export function buildOrganizationAssigneeTree(

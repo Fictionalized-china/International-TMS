@@ -5,6 +5,7 @@ import {
   orderAssignmentPermissionRequirements,
 } from "./order-assignment-manifest";
 import { satisfiesOrganizationAssigneePermissionRequirements } from "./organization-assignee";
+import type { WorkflowNodeAccessOverride } from "./workflow-node-access";
 
 export type PublicationStep = {
   id: string;
@@ -67,7 +68,10 @@ export type PublicationPositionReadiness = {
   permission_codes: string | null;
   active_member_permissions?: readonly {
     membershipId: string;
+    positionCode?: string;
     permissionCodes: readonly string[];
+    permissionOverrides?: readonly { code: string; effect: "allow" | "deny" }[];
+    workflowAccessOverrides?: readonly WorkflowNodeAccessOverride[];
   }[];
 };
 
@@ -281,22 +285,6 @@ export function validateWorkflowCoreModuleBindings(
   return issues;
 }
 
-function acceptedHandlerPermissions(stepKey: string, moduleCode: string) {
-  if (stepKey === "quotation") return ["quote.manage"];
-  if (stepKey === "order_creation" && ["consignment", "cargo"].includes(moduleCode)) {
-    return ["quote.manage", `order.module.${moduleCode}.manage`];
-  }
-  if (stepKey === "consignment_approval" && moduleCode === "consignment") {
-    // The exact assignee uses the dedicated approval path, which deliberately
-    // does not grant broad consignment editing to a supervisor.
-    return ["order.view"];
-  }
-  if (["warehouse", "loading", "overseas_warehouse"].includes(moduleCode)) {
-    return [`order.module.${moduleCode}.manage`, "warehouse.operate"];
-  }
-  return [`order.module.${moduleCode}.manage`];
-}
-
 function permissionSet(position: PublicationPositionReadiness) {
   return new Set(
     (position.permission_codes ?? "")
@@ -304,6 +292,55 @@ function permissionSet(position: PublicationPositionReadiness) {
       .map((item) => item.trim())
       .filter(Boolean),
   );
+}
+
+function handlerSafetyPermissionRequirements(
+  stepKey: string,
+  positionCode: string,
+  moduleCode: string,
+) {
+  if (stepKey === "quotation") return [["quote.manage"]];
+  return orderAssignmentPermissionRequirements({
+    assignmentMode: "person",
+    positionCode,
+    moduleCodes: [moduleCode],
+  });
+}
+
+type PublicationMember = NonNullable<PublicationPositionReadiness["active_member_permissions"]>[number];
+
+function publicationMembers(positions: readonly PublicationPositionReadiness[]) {
+  const members = new Map<string, PublicationMember>();
+  for (const position of positions) {
+    for (const member of position.active_member_permissions ?? []) {
+      members.set(member.membershipId, {
+        ...member,
+        positionCode: member.positionCode ?? position.code,
+      });
+    }
+  }
+  return [...members.values()];
+}
+
+function publicationMemberCanHandleNodes(
+  member: PublicationMember,
+  responsibilityPositionCode: string,
+  nodes: readonly { stepKey: string; moduleCode: string }[],
+) {
+  return nodes.every((node) => {
+    if (member.permissionOverrides?.some(
+      (override) =>
+        override.code === `order.module.${node.moduleCode}.manage` &&
+        override.effect === "deny",
+    )) return false;
+    const nodeOverride = member.workflowAccessOverrides?.find(
+      (override) =>
+        override.stepKey === node.stepKey && override.moduleCode === node.moduleCode,
+    )?.effect;
+    if (nodeOverride === "deny") return false;
+    if (nodeOverride === "allow") return true;
+    return member.positionCode === responsibilityPositionCode;
+  });
 }
 
 const settlementActionRequirements = {
@@ -357,6 +394,10 @@ export function validateWorkflowResponsibilityReadiness(input: {
   const activeStepIds = new Set(activeSteps.map((step) => step.id));
   const stepById = new Map(activeSteps.map((step) => [step.id, step]));
   const positionByCode = new Map(input.positions.map((position) => [position.code, position]));
+  const members = publicationMembers(input.positions);
+  const hasMemberDetails = input.positions.some((position) =>
+    position.active_member_permissions !== undefined
+  );
   const requiredPlacements = new Map<string, string[]>();
   for (const module of input.modules.filter(
     (item) => item.is_active === 1 && item.is_required === 1 && activeStepIds.has(item.step_id),
@@ -422,23 +463,30 @@ export function validateWorkflowResponsibilityReadiness(input: {
         issues.push(`${taskLabel}引用了不存在或已停用的岗位 ${positionCode}`);
         continue;
       }
-      if (Number(position.active_member_count) < 1) {
-        issues.push(`${taskLabel}的岗位“${position.name}”没有可用账号`);
-        continue;
-      }
-      const accepted = acceptedHandlerPermissions(step.step_key, module.module_code);
-      const memberPermissions = position.active_member_permissions;
-      const hasAcceptedPermission = memberPermissions
-        ? memberPermissions.some((member) =>
-            satisfiesOrganizationAssigneePermissionRequirements(
+      const safetyRequirements = handlerSafetyPermissionRequirements(
+        step.step_key,
+        positionCode,
+        module.module_code,
+      );
+      const hasEligibleMember = hasMemberDetails
+        ? members.some((member) =>
+            publicationMemberCanHandleNodes(
+              member,
+              positionCode,
+              [{ stepKey: step.step_key, moduleCode: module.module_code }],
+            ) && satisfiesOrganizationAssigneePermissionRequirements(
               member.permissionCodes,
-              [accepted],
+              safetyRequirements,
             )
           )
-        : accepted.some((permission) => permissionSet(position).has(permission));
-      if (!hasAcceptedPermission) {
+        : Number(position.active_member_count) > 0 &&
+          satisfiesOrganizationAssigneePermissionRequirements(
+            permissionSet(position),
+            safetyRequirements,
+          );
+      if (!hasEligibleMember) {
         issues.push(
-          `${taskLabel}的岗位“${position.name}”缺少办理权限（需要 ${accepted.join(" 或 ")}）`,
+          `${taskLabel}没有符合节点资格的有效账号；请保留责任岗位继承资格，或由老板、开发者、人事显式允许其他账号`,
         );
       }
     }
@@ -451,7 +499,10 @@ export function validateWorkflowResponsibilityReadiness(input: {
       .filter((_, index) => assignmentStepIndex < 0 || index > assignmentStepIndex)
       .map((step) => step.id),
   );
-  const requiredPersonalGroups = new Map<string, Set<string>>();
+  const requiredPersonalGroups = new Map<string, {
+    moduleCodes: Set<string>;
+    nodes: Array<{ stepKey: string; moduleCode: string }>;
+  }>();
   for (const task of input.tasks.filter(
     (item) => item.is_active === 1 && item.is_required === 1 && item.task_type !== "system",
   )) {
@@ -468,28 +519,35 @@ export function validateWorkflowResponsibilityReadiness(input: {
     const positionCode =
       task.responsibility_position_code ?? module.responsibility_position_code;
     if (!positionCode || orderAssignmentMode(positionCode) !== "person") continue;
-    const moduleCodes = requiredPersonalGroups.get(positionCode) ?? new Set<string>();
-    moduleCodes.add(module.module_code);
-    requiredPersonalGroups.set(positionCode, moduleCodes);
+    const group = requiredPersonalGroups.get(positionCode) ?? {
+      moduleCodes: new Set<string>(),
+      nodes: [],
+    };
+    group.moduleCodes.add(module.module_code);
+    const stepKey = stepById.get(module.step_id)?.step_key;
+    if (stepKey && !group.nodes.some(
+      (node) => node.stepKey === stepKey && node.moduleCode === module.module_code,
+    )) group.nodes.push({ stepKey, moduleCode: module.module_code });
+    requiredPersonalGroups.set(positionCode, group);
   }
-  for (const [positionCode, moduleCodes] of requiredPersonalGroups) {
+  for (const [positionCode, group] of requiredPersonalGroups) {
     const position = positionByCode.get(positionCode);
-    const members = position?.active_member_permissions;
-    if (!members) continue;
-    const requirements = orderAssignmentPermissionRequirements({
+    if (!hasMemberDetails) continue;
+    const safetyRequirements = orderAssignmentPermissionRequirements({
       assignmentMode: "person",
       positionCode,
-      moduleCodes: [...moduleCodes],
+      moduleCodes: [...group.moduleCodes],
     });
     const hasCapableMember = members.some((member) =>
+      publicationMemberCanHandleNodes(member, positionCode, group.nodes) &&
       satisfiesOrganizationAssigneePermissionRequirements(
         member.permissionCodes,
-        requirements,
-      ),
+        safetyRequirements,
+      )
     );
     if (!hasCapableMember) {
       issues.push(
-        `岗位“${position?.name ?? positionCode}”没有同一有效个人账号可同时办理派单后的全部必办模块（${[...moduleCodes].join("、")}）；请调整个人权限或责任岗位后再发布`,
+        `岗位“${position?.name ?? positionCode}”没有同一有效个人账号可同时办理派单后的全部必办节点（${[...group.moduleCodes].join("、")}）；请调整节点资格或责任岗位后再发布`,
       );
     }
   }

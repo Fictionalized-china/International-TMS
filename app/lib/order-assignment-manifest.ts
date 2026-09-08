@@ -2,6 +2,7 @@ export type WorkflowAssignmentSnapshotRow = {
   moduleStateId: string;
   moduleCode: string;
   moduleName: string;
+  stepKey: string;
   stepSortOrder: number;
   moduleSortOrder: number;
   moduleRequired: boolean;
@@ -27,6 +28,7 @@ export type OrderAssignmentManifestModule = {
   taskStateIds: string[];
   taskKeys: string[];
   taskNames: string[];
+  workflowNodes: OrganizationAssigneeWorkflowNode[];
 };
 
 export type OrderAssignmentManifestGroup = {
@@ -61,21 +63,14 @@ export function orderAssignmentPermissionRequirements(input: {
   moduleCodes: readonly string[];
 }): string[][] {
   if (input.assignmentMode === "site_queue") return [];
-  const requirements: string[][] = [];
-  for (const moduleCode of input.moduleCodes) {
-    if (["warehouse", "loading", "overseas_warehouse"].includes(moduleCode)) {
-      requirements.push([`order.module.${moduleCode}.manage`, "warehouse.operate"]);
-      continue;
-    }
-    if (moduleCode === "consignment" && input.positionCode === "BUSINESS_SUPERVISOR") {
-      requirements.push(["order.view"]);
-      continue;
-    }
-    requirements.push([`order.module.${moduleCode}.manage`]);
-    if (moduleCode === "review" && input.positionCode === "FINANCE_ACCOUNTING") {
-      requirements.push(["billing.expense.approve"]);
-    }
-  }
+  // Node responsibility now grants the business operation itself. Keep only
+  // cross-cutting safety capabilities that are not represented by a workflow
+  // module and therefore must not be inferred from node ownership.
+  const requirements: string[][] = [["order.view"]];
+  if (
+    input.positionCode === "FINANCE_ACCOUNTING" &&
+    input.moduleCodes.includes("review")
+  ) requirements.push(["billing.expense.approve"]);
   const seen = new Set<string>();
   return requirements.filter((alternatives) => {
     const key = [...alternatives].sort().join("\u0000");
@@ -103,7 +98,7 @@ export function orderAssignmentCandidateConfigurationErrors(
   groups: readonly OrderAssignmentManifestGroup[],
   members: readonly Pick<
     OrganizationAssigneeMember,
-    "position_code" | "permission_codes"
+    "position_code" | "permission_codes" | "permission_override_entries" | "workflow_access_entries"
   >[],
 ) {
   return groups.flatMap((group) => {
@@ -112,18 +107,17 @@ export function orderAssignmentCandidateConfigurationErrors(
       group.assignmentMode !== "person" ||
       !group.positionCode
     ) return [];
-    const positionMembers = members.filter(
-      (member) => member.position_code === group.positionCode,
-    );
-    if (!positionMembers.length) {
-      return [`${group.positionCode} 岗位暂无有效个人账户`];
-    }
-    const requirements = orderAssignmentGroupPermissionRequirements(group);
-    if (!positionMembers.some((member) =>
-      organizationAssigneeCanHandle(member, requirements)
+    const workflowNodes = group.modules.flatMap((module) => module.workflowNodes);
+    const safetyRequirements = orderAssignmentGroupPermissionRequirements(group);
+    if (!members.some((member) =>
+      organizationAssigneeCanHandleWorkflowNodes(
+        member,
+        group.positionCode!,
+        workflowNodes,
+      ) && organizationAssigneeCanHandle(member, safetyRequirements)
     )) {
       return [
-        `${group.positionCode} 岗位现有账户均不具备该责任所需的有效权限（含个人拒绝覆盖）`,
+        `${group.positionCode} 责任暂无符合节点资格的有效个人账户`,
       ];
     }
     return [];
@@ -203,6 +197,7 @@ export function buildOrderAssignmentManifest(
         taskStateIds: [],
         taskKeys: [],
         taskNames: [],
+        workflowNodes: [],
       };
       group.modules.push(module);
     }
@@ -221,6 +216,11 @@ export function buildOrderAssignmentManifest(
       module.taskKeys.push(row.taskKey);
     if (row.taskName && !module.taskNames.includes(row.taskName))
       module.taskNames.push(row.taskName);
+    if (!module.workflowNodes.some(
+      (node) => node.stepKey === row.stepKey && node.moduleCode === row.moduleCode,
+    )) {
+      module.workflowNodes.push({ stepKey: row.stepKey, moduleCode: row.moduleCode });
+    }
     const effectiveAssigneeUserId = row.taskStateId
       ? row.taskAssigneeUserId ?? (
           positionCode === row.modulePositionCode ? row.moduleAssigneeUserId : null
@@ -275,5 +275,7 @@ export function buildOrderAssignmentManifest(
 }
 import {
   organizationAssigneeCanHandle,
+  organizationAssigneeCanHandleWorkflowNodes,
   type OrganizationAssigneeMember,
+  type OrganizationAssigneeWorkflowNode,
 } from "./organization-assignee";

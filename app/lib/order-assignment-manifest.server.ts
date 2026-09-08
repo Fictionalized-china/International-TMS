@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { isActiveOrganizationAssigneeForPositions } from "./organization-assignee.server";
+import { isActiveOrganizationAssigneeForWorkflowNodes } from "./organization-assignee.server";
 import {
   buildOrderAssignmentManifest,
   nextRequiredOrderAssignmentGroup,
@@ -13,6 +13,7 @@ type WorkflowAssignmentSnapshotDbRow = {
   module_state_id: string;
   module_code: string;
   module_name: string;
+  step_key: string;
   step_sort_order: number;
   module_sort_order: number;
   module_required: number;
@@ -55,6 +56,7 @@ function mapSnapshotRow(row: WorkflowAssignmentSnapshotDbRow): WorkflowAssignmen
     moduleStateId: row.module_state_id,
     moduleCode: row.module_code,
     moduleName: row.module_name,
+    stepKey: row.step_key,
     stepSortOrder: Number(row.step_sort_order),
     moduleSortOrder: Number(row.module_sort_order),
     moduleRequired: Boolean(row.module_required),
@@ -107,6 +109,7 @@ export async function loadOrderAssignmentManifest(
   }
   const rows = await env.DB.prepare(
     `SELECT ms.id module_state_id,ms.module_code,ms.display_name module_name,
+            ss.step_key,
             ss.sort_order step_sort_order,ms.sort_order module_sort_order,
             ms.is_required module_required,ms.status module_status,
             ms.responsibility_position_code module_position_code,
@@ -216,13 +219,14 @@ export async function validateOrderAssignmentManifestSelections(input: {
     }
     if (!group.positionCode)
       throw new Error("当前责任分配组没有配置岗位，无法选择个人账户");
-    if (!(await isActiveOrganizationAssigneeForPositions(
-      input.organizationId,
-      assigneeUserId,
-      [group.positionCode],
-      orderAssignmentGroupPermissionRequirements(group),
-    ))) {
-      throw new Error(`${group.positionCode}负责人必须是该岗位下的有效个人账户`);
+    if (!(await isActiveOrganizationAssigneeForWorkflowNodes({
+      organizationId: input.organizationId,
+      userId: assigneeUserId,
+      responsibilityPositionCode: group.positionCode,
+      nodes: group.modules.flatMap((module) => module.workflowNodes),
+      permissionRequirements: orderAssignmentGroupPermissionRequirements(group),
+    }))) {
+      throw new Error(`${group.positionCode}负责人不具备该责任所需的节点资格`);
     }
     resolvedGroups.push({
       group,
@@ -278,13 +282,14 @@ export async function resolveOrderModuleAssignmentTarget(input: {
 
   if (!target.positionCode)
     throw new Error("当前模块未配置责任岗位，不能分配个人账户");
-  if (!(await isActiveOrganizationAssigneeForPositions(
-    input.organizationId,
-    input.assigneeUserId,
-    [target.positionCode],
-    orderAssignmentGroupPermissionRequirements(target),
-  ))) {
-    throw new Error(`${target.positionCode}负责人必须是该岗位下的有效个人账户`);
+  if (!(await isActiveOrganizationAssigneeForWorkflowNodes({
+    organizationId: input.organizationId,
+    userId: input.assigneeUserId,
+    responsibilityPositionCode: target.positionCode,
+    nodes: target.modules.flatMap((module) => module.workflowNodes),
+    permissionRequirements: orderAssignmentGroupPermissionRequirements(target),
+  }))) {
+    throw new Error(`${target.positionCode}负责人不具备该责任所需的节点资格`);
   }
   const module = target.modules.find((item) => item.moduleCode === input.moduleCode);
   if (!module) throw new Error("当前模块没有可分配的工作流任务");

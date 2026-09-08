@@ -33,7 +33,7 @@ const finance = {
   name: "财务会计岗",
   status: "active",
   active_member_count: 1,
-  permission_codes: "order.view,order.module.review.manage",
+  permission_codes: "order.view,order.module.review.manage,billing.expense.approve",
 };
 
 describe("workflow publication responsibility readiness", () => {
@@ -48,22 +48,22 @@ describe("workflow publication responsibility readiness", () => {
     ).toEqual([]);
   });
 
-  it("rejects an unreachable or unauthorized human task", () => {
+  it("rejects an unstaffed human task without duplicating workflow authority in module roles", () => {
     const issues = validateWorkflowResponsibilityReadiness({
       steps,
       modules: [reviewModule],
       tasks: [reviewTask],
       positions: [{ ...finance, active_member_count: 0, permission_codes: "order.view" }],
     });
-    expect(issues).toContain('节点“完成复盘”模块“订单复盘”任务“复盘并归档”的岗位“财务会计岗”没有可用账号');
+    expect(issues.join("\n")).toContain("没有符合节点资格的有效账号");
 
     const permissionIssues = validateWorkflowResponsibilityReadiness({
       steps,
       modules: [reviewModule],
       tasks: [reviewTask],
-      positions: [{ ...finance, permission_codes: "order.view" }],
+      positions: [{ ...finance, permission_codes: "order.view,billing.expense.approve" }],
     });
-    expect(permissionIssues.join("\n")).toContain("order.module.review.manage");
+    expect(permissionIssues.join("\n")).not.toContain("order.module.review.manage");
   });
 
   it("rejects missing or disabled responsibility positions", () => {
@@ -173,7 +173,7 @@ describe("workflow publication responsibility readiness", () => {
       display_name: "系统同步",
       is_required: 1,
     };
-    const operation = { ...finance, code: "OPERATION", name: "操作岗", permission_codes: "order.module.tracking.manage" };
+    const operation = { ...finance, code: "OPERATION", name: "操作岗", permission_codes: "order.view" };
     expect(validateWorkflowResponsibilityReadiness({
       steps: [step], modules: [optionalHumanModule],
       tasks: [{ ...reviewTask, step_module_id: optionalHumanModule.id, task_type: "form", is_required: 0, responsibility_position_code: "OPERATION" }],
@@ -335,7 +335,10 @@ describe("workflow publication responsibility readiness", () => {
     }).join("\n")).toContain("责任岗位必须为 FINANCE_ACCOUNTING");
 
     expect(validateWorkflowResponsibilityReadiness({
-      steps: [settlementStep], modules: [review], tasks: [], positions: [finance], fields: [financeField],
+      steps: [settlementStep], modules: [review], tasks: [], positions: [{
+        ...finance,
+        permission_codes: "order.view,order.module.review.manage",
+      }], fields: [financeField],
     }).join("\n")).toContain("billing.expense.approve");
 
     const operation = {
@@ -400,10 +403,10 @@ describe("workflow publication responsibility readiness", () => {
     }).join("\n");
 
     expect(issueText).toContain("同一有效个人账号");
-    expect(issueText).toContain("全部必办模块");
+    expect(issueText).toContain("全部必办节点");
   });
 
-  it("requires one ordinary-order assignee to hold every required module permission", () => {
+  it("requires one ordinary-order assignee to remain eligible for every required node", () => {
     const assignmentStep = {
       id: "assignment-step",
       step_key: "task_assignment",
@@ -471,8 +474,24 @@ describe("workflow publication responsibility readiness", () => {
       positions: [{
         ...position,
         active_member_permissions: [
-          { membershipId: "operation-a", permissionCodes: ["order.module.transport.manage"] },
-          { membershipId: "operation-b", permissionCodes: ["order.module.tracking.manage"] },
+          {
+            membershipId: "operation-a",
+            permissionCodes: ["order.view"],
+            workflowAccessOverrides: [{
+              stepKey: "outbound_transport",
+              moduleCode: "tracking",
+              effect: "deny" as const,
+            }],
+          },
+          {
+            membershipId: "operation-b",
+            permissionCodes: ["order.view"],
+            workflowAccessOverrides: [{
+              stepKey: "domestic_execution",
+              moduleCode: "transport",
+              effect: "deny" as const,
+            }],
+          },
         ],
       }],
     }).join("\n");
@@ -485,10 +504,7 @@ describe("workflow publication responsibility readiness", () => {
         active_member_count: 1,
         active_member_permissions: [{
           membershipId: "operation-complete",
-          permissionCodes: [
-            "order.module.transport.manage",
-            "order.module.tracking.manage",
-          ],
+          permissionCodes: ["order.view"],
         }],
       }],
     }).join("\n");
@@ -515,7 +531,12 @@ describe("workflow publication responsibility readiness", () => {
         active_member_count: 1,
         active_member_permissions: [{
           membershipId: "operation-denied",
-          permissionCodes: ["order.module.transport.manage"],
+          permissionCodes: ["order.view"],
+          workflowAccessOverrides: [{
+            stepKey: "outbound_transport",
+            moduleCode: "tracking",
+            effect: "deny" as const,
+          }],
         }],
       }],
     }).join("\n");

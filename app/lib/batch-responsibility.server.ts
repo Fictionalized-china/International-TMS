@@ -18,6 +18,7 @@ type BatchOriginalResponsibilityRow = {
   module_state_id: string | null;
   module_code: string | null;
   module_name: string | null;
+  step_key: string | null;
   step_sort_order: number | null;
   module_sort_order: number | null;
   module_required: number | null;
@@ -161,6 +162,7 @@ export async function loadBatchesInitialResponsibilityRestrictions(
   const rows = await db.prepare(
     `SELECT bo.batch_id,bo.order_id,o.order_number,wi.id workflow_instance_id,
             ms.id module_state_id,ms.module_code,ms.display_name module_name,
+            ss.step_key,
             ss.sort_order step_sort_order,ms.sort_order module_sort_order,
             ms.is_required module_required,ms.status module_status,
             ms.responsibility_position_code module_position_code,
@@ -213,6 +215,7 @@ export async function loadBatchesInitialResponsibilityRestrictions(
           moduleStateId: row.module_state_id,
           moduleCode: row.module_code,
           moduleName: row.module_name,
+          stepKey: row.step_key ?? "",
           stepSortOrder: Number(row.step_sort_order ?? 0),
           moduleSortOrder: Number(row.module_sort_order ?? 0),
           moduleRequired: Boolean(row.module_required),
