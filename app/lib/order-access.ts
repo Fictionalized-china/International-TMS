@@ -1,7 +1,6 @@
 import { isProtectedAccessRole } from "./permission-blocks";
 import {
   resolveWorkflowNodeOperationAccess,
-  type WorkflowNodeAccessOverride,
 } from "./workflow-node-access";
 
 export type OrderAccessUser = {
@@ -11,7 +10,6 @@ export type OrderAccessUser = {
   permissions: string[];
   roleCodes: string[];
   permissionOverrides?: Array<{ code: string; effect: "allow" | "deny" }>;
-  workflowAccessOverrides?: WorkflowNodeAccessOverride[];
 };
 
 export function canViewAllOrders(user: OrderAccessUser) {
@@ -55,18 +53,14 @@ export function canReadFullOrderLifecycle(user: Pick<OrderAccessUser, "positionC
 
 /**
  * Viewing an order and operating its current node are deliberately separate.
- * Boss/developer accounts keep the documented administrative bypass; every
- * other account may operate only while it is the explicitly assigned handler.
+ * Configuration authority never grants business-operation authority. An
+ * account may operate only while it is the explicitly assigned handler.
  */
 export function canOperateCurrentOrder(
   user: Pick<OrderAccessUser, "userId" | "roleCodes" | "positionCode">,
   order: { status: string; current_assignee_user_id?: string | null },
 ) {
   if (["completed", "cancelled"].includes(order.status)) return false;
-  if (
-    ["BOSS", "DEVELOPER"].includes(user.positionCode ?? "") ||
-    user.roleCodes.some((code) => ["boss", "developer", "owner"].includes(code))
-  ) return true;
   return Boolean(
     order.current_assignee_user_id &&
     order.current_assignee_user_id === user.userId,
@@ -74,7 +68,7 @@ export function canOperateCurrentOrder(
 }
 
 export type EnabledOrderModuleActionInput = {
-  user: Pick<OrderAccessUser, "userId" | "positionCode" | "permissions" | "roleCodes" | "permissionOverrides" | "workflowAccessOverrides">;
+  user: Pick<OrderAccessUser, "userId" | "positionCode" | "permissions" | "roleCodes" | "permissionOverrides">;
   orderStatus: string;
   stepKey?: string | null;
   moduleCode: string;
@@ -89,8 +83,8 @@ export type EnabledOrderModuleActionInput = {
  * Their mutations are therefore authorized from the frozen workflow instance:
  * the module must be enabled and the account must either be the explicit
  * module/task owner, belong to the configured responsibility pool while the
- * work is unassigned, or have an explicit node qualification. Account-level
- * denials remain an independent security boundary and always win.
+ * work is unassigned. Account-level module denials remain an independent
+ * security boundary and always win.
  */
 export function canOperateEnabledOrderModule(
   input: EnabledOrderModuleActionInput,
@@ -196,48 +190,6 @@ export function orderVisibilitySql(user: OrderAccessUser, alias = "o") {
     if (user.positionCode) values.push(user.positionCode);
     if (retainedModuleAssignment) values.push(user.userId, user.userId);
     if (retainedSupervisorAssignment) values.push(user.userId);
-  }
-
-  for (const override of user.workflowAccessOverrides ?? []) {
-    if (override.effect !== "allow") continue;
-    conditions.push(`EXISTS(
-      SELECT 1
-        FROM workflow_instances qualified_instance
-        JOIN workflow_instance_step_states qualified_step
-          ON qualified_step.instance_id=qualified_instance.id
-         AND qualified_step.step_key=qualified_instance.current_step_key
-        JOIN workflow_instance_module_states qualified_module
-          ON qualified_module.instance_step_state_id=qualified_step.id
-        LEFT JOIN order_module_instances qualified_order_module
-          ON qualified_order_module.organization_id=qualified_instance.organization_id
-         AND qualified_order_module.order_id=qualified_instance.order_id
-         AND qualified_order_module.module_code=qualified_module.module_code
-       WHERE qualified_instance.organization_id=${alias}.organization_id
-         AND qualified_instance.order_id=${alias}.id
-         AND qualified_instance.status='active'
-         AND qualified_step.step_key=?
-         AND qualified_module.module_code=?
-         AND qualified_module.status NOT IN ('completed','not_applicable')
-         AND (
-           qualified_order_module.assignee_user_id=?
-           OR EXISTS(
-             SELECT 1 FROM workflow_instance_task_states qualified_task
-              WHERE qualified_task.instance_module_state_id=qualified_module.id
-                AND qualified_task.status NOT IN ('completed','not_applicable')
-                AND qualified_task.assignee_user_id=?
-           )
-           OR (
-             qualified_order_module.assignee_user_id IS NULL
-             AND NOT EXISTS(
-               SELECT 1 FROM workflow_instance_task_states assigned_task
-                WHERE assigned_task.instance_module_state_id=qualified_module.id
-                  AND assigned_task.status NOT IN ('completed','not_applicable')
-                  AND assigned_task.assignee_user_id IS NOT NULL
-             )
-           )
-         )
-    )`);
-    values.push(override.stepKey, override.moduleCode, user.userId, user.userId);
   }
 
   return {

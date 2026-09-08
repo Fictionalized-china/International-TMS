@@ -62,6 +62,14 @@ type WorkflowTaskRow = {
 
 type FilterOption = { id: string; name: string };
 
+type PositionWorkflowFieldRow = {
+  workflow_name: string;
+  step_name: string;
+  module_name: string;
+  field_label: string;
+  field_key: string;
+};
+
 type PortalSettings = {
   order_scope: "current_position" | "all_orders";
   default_filter: "open" | "all" | "blocked" | "overdue";
@@ -69,6 +77,26 @@ type PortalSettings = {
 
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request);
+  const workflowFieldPermissions = current.positionCode
+    ? (await env.DB.prepare(
+      `SELECT workflow.name workflow_name,step.name step_name,
+              COALESCE(module.display_name,field.module_code,'委托资料') module_name,
+              field.label field_label,field.field_key
+       FROM workflow_step_fields field
+       JOIN workflow_definitions workflow ON workflow.id=field.workflow_id
+       JOIN workflow_steps step ON step.id=field.step_id
+       LEFT JOIN workflow_step_modules module
+         ON module.workflow_id=field.workflow_id
+        AND module.step_id=field.step_id
+        AND module.module_code=COALESCE(field.module_code,'consignment')
+       WHERE workflow.organization_id=? AND workflow.status='active'
+         AND workflow.lifecycle_status!='retired'
+         AND step.is_active=1 AND field.is_active=1
+         AND (','||COALESCE(field.handler_position_codes,'')||',') LIKE '%,'||?||',%'
+       ORDER BY workflow.name,workflow.version_number DESC,step.sort_order,
+                COALESCE(module.sort_order,9999),field.sort_order`,
+    ).bind(current.organizationId,current.positionCode).all<PositionWorkflowFieldRow>()).results
+    : [] as PositionWorkflowFieldRow[];
   const url = new URL(request.url);
   const routeFilters = readOrderRouteFilters(url.searchParams);
   const requestedPage = readListPage(url.searchParams);
@@ -82,6 +110,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       pagination: { page: 1, pageCount: 1, pageSize: 10, total: 0 },
       positions: [] as FilterOption[],
       assignees: [] as FilterOption[],
+      workflowFieldPermissions,
       filters: {
         state: "open",
         stage: "",
@@ -301,6 +330,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     },
     positions: portalPositions.results,
     assignees: portalAssignees.results,
+    workflowFieldPermissions,
     filters: {
       state: stateFilter,
       stage: stageFilter,
@@ -326,6 +356,22 @@ export default function PositionPortal({ loaderData }: Route.ComponentProps) {
       <div><p className="eyebrow">TASK WORKBENCH</p><h1>任务工作台</h1><p>{current.displayName} · {canViewAll ? "可查看全部订单" : "只显示当前由本岗位负责推进的订单"} · 点击订单直接进入对应办理模组</p></div>
       <div className="page-actions"><span className="status-pill">当前筛选 {loaderData.pagination.total} 单</span></div>
     </header>
+
+    <section className="panel position-field-permission-summary">
+      <details>
+        <summary>
+          <span>本岗位可填写的订单字段</span>
+          <strong>{loaderData.workflowFieldPermissions.length} 项</strong>
+        </summary>
+        <div className="position-field-permission-list">
+          {loaderData.workflowFieldPermissions.map((field) => <span key={`${field.workflow_name}:${field.step_name}:${field.field_key}`}>
+            <b>{field.field_label}</b>
+            <small>{field.workflow_name} · {field.step_name} · {field.module_name}</small>
+          </span>)}
+          {!loaderData.workflowFieldPermissions.length && <p className="empty-state">当前岗位没有配置可填写的订单字段。</p>}
+        </div>
+      </details>
+    </section>
 
     {accessLimited ? <section className="panel"><div className="empty-state"><strong>当前岗位仅用于组织与薪资归类</strong><p>尚未配置订单或业务数据权限；如需承担业务，请由人事行政岗或老板增加对应权限积木。</p></div></section> : <section className="panel position-order-ledger">
       <div className="position-ledger-summary" aria-label="待办概况"><span className="position-summary-actionable">待我办理 <strong>{summary.actionable}</strong></span><span>只读跟踪 <strong>{summary.readonly}</strong></span><span>未完成 <strong>{summary.open}</strong></span><span>有阻断 <strong>{summary.blocked}</strong></span><span>已超时 <strong>{summary.overdue}</strong></span><span>当前筛选 <strong>{loaderData.pagination.total}</strong></span></div>

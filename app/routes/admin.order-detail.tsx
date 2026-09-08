@@ -4,7 +4,7 @@ import { flushSync } from "react-dom";
 import { Form, Link, redirect, useNavigate, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.order-detail";
 import { ActionToast } from "../components/ActionToast";
-import { canEditWorkflowDefinition, requireSessionUser } from "../lib/auth.server";
+import { requireSessionUser } from "../lib/auth.server";
 import {
   canEditCurrentOrderWorkspace,
   canOperateEnabledOrderModule,
@@ -328,8 +328,9 @@ export function canOperateScopedEmbeddedOrderModule(input: {
   return Boolean(input.moduleActionCanOperate && input.moduleCanEdit);
 }
 
-export function orderDetailActionPermission(intent: string) {
+export function orderDetailActionPermission(intent: string, moduleCode?: string | null) {
   if (intent === "workflow_version_switch") return "workflow.manage";
+  if (moduleCode && orderModuleDefinition(moduleCode)) return "order.view";
   if (["workflow_action", "expense_direction_control", "cargo_create", "cargo_update"].includes(intent))
     return "order.view";
   return "order.manage";
@@ -699,9 +700,10 @@ export async function action({ request, params, context }: Route.ActionArgs) {
   const moduleRequest = request.clone();
   const form = await request.formData();
   const intent = valueOf(form, "intent");
+  const moduleCode = new URL(request.url).searchParams.get("module");
   const current = await requireSessionUser(
     request,
-    orderDetailActionPermission(intent),
+    orderDetailActionPermission(intent, moduleCode),
   );
   await requireOrderAccess(current, params.orderId);
   if(intent==="workflow_supplement_complete"){
@@ -884,7 +886,6 @@ export async function action({ request, params, context }: Route.ActionArgs) {
     });
     return { success: "订单基础信息已修改；提交审批前请再次核对货物和费用" };
   }
-  const moduleCode = new URL(request.url).searchParams.get("module");
   if (moduleCode && orderModuleDefinition(moduleCode)) {
     const result = await orderModuleAction({
       request: moduleRequest,
@@ -907,7 +908,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
     actionCode: valueOf(form, "actionCode"),
     assigneeUserId: valueOf(form, "assigneeUserId") || null,
     notes: valueOf(form, "notes"),
-    bypassAssigneeRestriction: canEditWorkflowDefinition(current),
+    bypassAssigneeRestriction: false,
   });
   if (!("formError" in workflowResult)) return redirect(`/admin/orders/${params.orderId}`);
   return workflowResult;

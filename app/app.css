@@ -26317,7 +26317,7 @@ button {
   font-size: 13px;
 }
 .workflow-field-table table {
-  min-width: 820px;
+  min-width: 1040px;
   table-layout: fixed;
 }
 .workflow-field-table th:nth-child(1) { width: 58px; }
@@ -26326,7 +26326,8 @@ button {
 .workflow-field-table th:nth-child(4) { width: 82px; }
 .workflow-field-table th:nth-child(5) { width: 106px; }
 .workflow-field-table th:nth-child(6) { width: auto; }
-.workflow-field-table th:nth-child(7) { width: 180px; }
+.workflow-field-table th:nth-child(7) { width: 210px; }
+.workflow-field-table th:nth-child(8) { width: 180px; }
 .workflow-field-table td {
   min-height: 38px;
   vertical-align: middle;
@@ -26367,6 +26368,48 @@ button {
   border: 1px solid #c8d4e1;
   border-radius: 2px;
   background: #fff;
+}
+.workflow-field-position-summary {
+  color: #465f78;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.workflow-field-position-editor {
+  position: relative;
+}
+.workflow-field-position-editor > summary {
+  min-height: 30px;
+  padding: 6px 24px 6px 8px;
+  color: #174f79;
+  border: 1px solid #bfd0df;
+  background: #f7fafc;
+  cursor: pointer;
+}
+.workflow-field-position-editor > form {
+  position: absolute;
+  z-index: 8;
+  top: calc(100% + 4px);
+  right: 0;
+  width: 260px;
+  padding: 9px;
+  border: 1px solid #c5d3df;
+  background: #fff;
+  box-shadow: 0 8px 24px rgb(19 44 68 / 14%);
+}
+.workflow-field-position-editor form > div {
+  display: grid;
+  grid-template-columns: repeat(2,minmax(0,1fr));
+  gap: 5px;
+  margin-bottom: 8px;
+}
+.workflow-field-position-editor label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 4px 6px;
+  border: 1px solid #e0e7ed;
+  background: #fafcfd;
 }
 .workflow-field-table tr.workflow-field-mode-pending td {
   background: #fff9ed;
@@ -27890,6 +27933,36 @@ details > summary,
 .position-portal-header {
   margin-bottom: 7px !important;
 }
+.position-field-permission-summary {
+  margin-bottom: 7px;
+  padding: 0 !important;
+  overflow: hidden;
+}
+.position-field-permission-summary summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 36px;
+  padding: 7px 10px;
+  color: #174f79;
+  background: #f4f8fb;
+  cursor: pointer;
+}
+.position-field-permission-list {
+  display: grid;
+  grid-template-columns: repeat(4,minmax(0,1fr));
+  gap: 1px;
+  padding: 1px;
+  background: #dce5ec;
+}
+.position-field-permission-list > span {
+  min-height: 42px;
+  padding: 6px 8px;
+  background: #fff;
+}
+.position-field-permission-list b,
+.position-field-permission-list small { display: block; }
+.position-field-permission-list small { margin-top: 2px; color: #687d90; font-size: 10px; }
 
 .position-order-ledger {
   padding: 0 !important;
@@ -29331,6 +29404,44 @@ html[data-motion="off"] *::after {
 .account-override-row b { font-size: 11px; }
 .account-override-row small { margin-top: 2px; color: #667b8f; font-size: 10px; line-height: 1.35; }
 .account-override-row select { width: 100%; min-height: 30px; }
+.position-workflow-field-cards {
+  display: grid;
+  grid-template-columns: repeat(4,minmax(0,1fr));
+  gap: 8px;
+  padding: 10px;
+}
+.position-workflow-field-card {
+  min-height: 150px !important;
+}
+.position-workflow-field-editor .permission-editor-notice { margin-bottom: 0; }
+.position-workflow-field-grid {
+  display: grid;
+  grid-template-columns: repeat(3,minmax(0,1fr));
+  gap: 8px;
+}
+.position-workflow-field-grid > section {
+  border: 1px solid #d9e2ea;
+  background: #fff;
+}
+.position-workflow-field-grid h3 {
+  margin: 0;
+  padding: 7px 9px;
+  font-size: 11px;
+  background: #eef4f8;
+  border-bottom: 1px solid #d9e2ea;
+}
+.position-workflow-field-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 5px 8px;
+  border-bottom: 1px solid #edf1f4;
+}
+.position-workflow-field-row:last-child { border-bottom: 0; }
+.position-workflow-field-row b,
+.position-workflow-field-row small { display: block; }
+.position-workflow-field-row small { margin-top: 2px; color: #687d90; font-size: 10px; }
 .workflow-node-override-editor {
   margin: 0;
   padding: 10px;
@@ -29363,7 +29474,10 @@ html[data-motion="off"] *::after {
 .workflow-node-override-row select { width: 100%; min-height: 30px; }
 @media (max-width: 900px) {
   .account-override-grid,
-  .workflow-node-override-grid { grid-template-columns: 1fr; }
+  .workflow-node-override-grid,
+  .position-workflow-field-grid,
+  .position-workflow-field-cards,
+  .position-field-permission-list { grid-template-columns: 1fr; }
   .permission-editor-notice,
   .permission-editor-actions { align-items: stretch; flex-direction: column; }
 }

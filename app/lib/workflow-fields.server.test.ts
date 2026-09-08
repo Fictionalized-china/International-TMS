@@ -4,6 +4,7 @@ type RecordedStatement = {
   sql: string;
   bindings: unknown[];
   bind: (...bindings: unknown[]) => RecordedStatement;
+  first: <T>() => Promise<T | null>;
   run: () => Promise<{ meta: { changes: number } }>;
 };
 
@@ -21,6 +22,9 @@ const database = vi.hoisted(() => {
           bind(...bindings: unknown[]) {
             statement.bindings = bindings;
             return statement;
+          },
+          async first<T>() {
+            return { position_codes: "SALES" } as T;
           },
           async run() {
             return { meta: { changes: 0 } };
@@ -43,11 +47,13 @@ import {
   assignmentCoverageIsComplete,
   assignmentManagedModuleCodes,
   confirmedBatchCostAllocationPresenceSql,
+  defaultWorkflowFieldHandlerPositionCodes,
   ftlOutboundWorkflowFieldValues,
   mergeWorkflowFieldCatalogBaseline,
   synchronizeWorkflowFieldDefinitionForInstances,
+  synchronizeWorkflowFieldHandlerPositionsForInstances,
   synchronizeWorkflowFieldPolicyForInstances,
-  workflowFieldPolicyAppliesAtStage,
+  workflowFieldPolicyAppliesToStepStatus,
 } from "./workflow-fields.server";
 
 describe("stage-aware workflow field synchronization", () => {
@@ -174,13 +180,33 @@ describe("stage-aware workflow field synchronization", () => {
     expect(assignmentCoverageIsComplete(0, 0)).toBe(false);
   });
 
-  it("applies a changed rule only to future and current stages", () => {
-    expect(workflowFieldPolicyAppliesAtStage(10, 20)).toBe(true);
-    expect(workflowFieldPolicyAppliesAtStage(20, 20)).toBe(true);
-    expect(workflowFieldPolicyAppliesAtStage(30, 20)).toBe(false);
+  it("applies a changed rule to active and future nodes, but freezes completed history", () => {
+    expect(workflowFieldPolicyAppliesToStepStatus("active")).toBe(true);
+    expect(workflowFieldPolicyAppliesToStepStatus("pending")).toBe(true);
+    expect(workflowFieldPolicyAppliesToStepStatus("not_started")).toBe(true);
+    expect(workflowFieldPolicyAppliesToStepStatus("completed")).toBe(false);
+    expect(workflowFieldPolicyAppliesToStepStatus("not_applicable")).toBe(false);
   });
 
-  it("updates and inserts definition snapshots only before the target step is passed", async () => {
+  it("falls back from a field module to the configured responsibility of its node", async () => {
+    await expect(defaultWorkflowFieldHandlerPositionCodes({
+      workflowId: "workflow-1",
+      stepId: "quotation-step",
+      moduleCode: "cargo",
+    })).resolves.toBe("SALES");
+
+    const statement = database.prepared.at(-1)!;
+    expect(statement.sql).toContain("SELECT COALESCE(");
+    expect(statement.sql).toContain("WHERE workflow_id=? AND step_id=? AND is_active=1");
+    expect(statement.bindings).toEqual([
+      "workflow-1", "quotation-step", "cargo",
+      "workflow-1", "quotation-step", "cargo",
+      "workflow-1", "quotation-step",
+      "workflow-1", "quotation-step",
+    ]);
+  });
+
+  it("updates and inserts definition snapshots only while the target node is open", async () => {
     await synchronizeWorkflowFieldDefinitionForInstances({
       workflowId: "workflow-1",
       stepKey: "order_creation",
@@ -198,26 +224,20 @@ describe("stage-aware workflow field synchronization", () => {
     expect(database.batches).toHaveLength(1);
     const [updateStatement, insertStatement] = database.batches[0];
     for (const statement of [updateStatement, insertStatement]) {
-      expect(statement.sql).toContain(
-        "current_step.sort_order<=target_step.sort_order",
-      );
-      expect(statement.sql).toContain("current_step.step_key=wi.current_step_key");
+      expect(statement.sql).toContain("workflow_instance_step_states target_state");
+      expect(statement.sql).toContain("target_state.status NOT IN ('completed','not_applicable')");
+      expect(statement.sql).not.toContain("current_step.sort_order<=target_step.sort_order");
     }
     expect(updateStatement.sql).toContain(
       "WHERE workflow_id=? AND step_key=? AND field_key=? AND module_code=?",
     );
-    expect(updateStatement.bindings.slice(-5)).toEqual([
+    expect(updateStatement.bindings.slice(-4)).toEqual([
       "workflow-1",
       "order_creation",
       "document_consignment_letter",
       "consignment",
-      "order_creation",
     ]);
-    expect(updateStatement.bindings.at(-1)).toBe("order_creation");
-    expect(insertStatement.bindings.slice(-2)).toEqual([
-      "order_creation",
-      "workflow-1",
-    ]);
+    expect(insertStatement.bindings.at(-1)).toBe("workflow-1");
   });
 
   it("matches the previous identity when a definition is structurally edited", async () => {
@@ -239,12 +259,11 @@ describe("stage-aware workflow field synchronization", () => {
     });
 
     const [updateStatement] = database.batches[0];
-    expect(updateStatement.bindings.slice(-5)).toEqual([
+    expect(updateStatement.bindings.slice(-4)).toEqual([
       "workflow-1",
       "old_step",
       "old_key",
       "consignment",
-      "new_step",
     ]);
   });
 
@@ -259,16 +278,35 @@ describe("stage-aware workflow field synchronization", () => {
 
     expect(database.prepared).toHaveLength(1);
     const [statement] = database.prepared;
-    expect(statement.sql).toContain(
-      "target_step.step_key=workflow_instance_fields.step_key",
-    );
-    expect(statement.sql).toContain(
-      "current_step.sort_order<=target_step.sort_order",
-    );
+    expect(statement.sql).toContain("workflow_instance_step_states target_state");
+    expect(statement.sql).toContain("target_state.step_key=workflow_instance_fields.step_key");
+    expect(statement.sql).toContain("target_state.status NOT IN ('completed','not_applicable')");
+    expect(statement.sql).not.toContain("current_step.sort_order<=target_step.sort_order");
     expect(statement.bindings).toEqual([
       0,
       1,
       "workflow-1",
+      "document_consignment_letter",
+      "consignment",
+    ]);
+  });
+
+  it("synchronizes handler positions only into open node snapshots", async () => {
+    await synchronizeWorkflowFieldHandlerPositionsForInstances({
+      workflowId: "workflow-1",
+      stepKey: "order_creation",
+      fieldKey: "document_consignment_letter",
+      moduleCode: "consignment",
+      handlerPositionCodes: "DOC,SALES",
+    });
+
+    const [statement] = database.prepared;
+    expect(statement.sql).toContain("SET handler_position_codes=?");
+    expect(statement.sql).toContain("target_state.status NOT IN ('completed','not_applicable')");
+    expect(statement.bindings).toEqual([
+      "DOC,SALES",
+      "workflow-1",
+      "order_creation",
       "document_consignment_letter",
       "consignment",
     ]);

@@ -169,6 +169,7 @@ import {
   saveOrderCustomWorkflowFieldValue,
   type WorkflowFieldState,
 } from "../lib/workflow-fields.server";
+import { canPositionHandleWorkflowField } from "../lib/workflow-field-position-access";
 import { canCompleteWorkflowTask } from "../lib/workflow-task-access";
 import { workflowFieldConfigurationHref } from "../lib/workflow-field-locator";
 import {
@@ -272,15 +273,6 @@ type OrderService = {
   status: string;
 };
 type Member = OrganizationAssigneeMember;
-function canEditWorkflowDefinitionInUi(user: {
-  positionCode?: string | null;
-  roleCodes: string[];
-}) {
-  return (
-    ["BOSS", "DEVELOPER"].includes(user.positionCode ?? "") ||
-    user.roleCodes.some((code) => ["boss", "developer", "owner"].includes(code))
-  );
-}
 
 async function refreshOrderSettlementState(
   organizationId: string,
@@ -691,8 +683,7 @@ function canOperateLoadedConfiguredModule(
 function canManageLoadedModule(data: Route.ComponentProps["loaderData"]) {
   return canOperateLoadedConfiguredModule(data) ||
     (!data.workflowStageAccess.workflowContext.locked &&
-      canManageOrderModule(data.current, data.definition.code)) ||
-    canEditWorkflowDefinitionInUi(data.current);
+      canManageOrderModule(data.current, data.definition.code));
 }
 type CustomsRecord = {
   id: string;
@@ -1592,12 +1583,8 @@ export async function action({ request, params }: Route.ActionArgs) {
   const isConsignmentDocumentReviewAction =
     ["consignment", "documents"].includes(moduleCode) &&
     intent === "document_review";
-  const workflowAdministrator = canEditWorkflowDefinitionInUi(current);
   const moduleManageAccess = canManageOrderModule(current, moduleCode);
-  const restrictsWorkflowAdministratorBypass = ["review", "exceptions"].includes(moduleCode);
   const moduleScopedActionAccess = currentModuleActionCanOperate;
-  const workflowAdministratorActionAccess =
-    workflowAdministrator && !restrictsWorkflowAdministratorBypass;
   const isDocumentAction = [
     "document_upload",
     "document_review",
@@ -1653,6 +1640,27 @@ export async function action({ request, params }: Route.ActionArgs) {
   if (isDocumentAction && !documentWorkflowMutationAccess?.allowed) {
     return { formError: documentWorkflowMutationAccess?.reason || "当前工作流未开放该文件操作" };
   }
+  const moduleWorkflowFields = await loadOrderModuleWorkflowFields(
+    current.organizationId,
+    orderId,
+    moduleCode as Parameters<typeof loadOrderModuleWorkflowFields>[2],
+  );
+  const documentFieldWriteAction = ["document_upload", "document_metadata_update"].includes(intent);
+  const documentFieldPolicy = actionDocumentPlacement
+    ? moduleWorkflowFields.find((field) => field.fieldKey === actionDocumentPlacement.fieldKey)
+    : null;
+  const isBoundSalesperson = current.positionCode === "SALES" &&
+    current.userId === order.salesperson_user_id &&
+    !["completed", "cancelled"].includes(order.status);
+  const canWriteConfiguredDocumentField = Boolean(
+    documentFieldWriteAction &&
+    documentFieldPolicy &&
+    canPositionHandleWorkflowField(
+      documentFieldPolicy.handlerPositionCodes,
+      current.positionCode,
+    ) &&
+    (moduleScopedActionAccess || canOperateCurrentOrder(current, order) || isBoundSalesperson),
+  );
   const settlementDocumentOwners = isSettlementDocumentAction
     ? await env.DB.prepare(
         `SELECT costs.assignee_user_id customer_service_assignee_user_id,
@@ -1736,25 +1744,20 @@ export async function action({ request, params }: Route.ActionArgs) {
           : "结算文件仅可由本单已分配的客服或财务会计上传和维护。",
     };
   }
-  if (!canOperateCurrentOrder(current, order) && !isOrdinaryTrackingMutation && !isSalesConsignmentSubmitAction && !isSalesCargoEditAction && !workflowAdministratorActionAccess && !moduleScopedActionAccess && !isExpenseDirectionControlAction && !isAuthorizedSettlementDocumentAction) {
+  if (!canOperateCurrentOrder(current, order) && !isOrdinaryTrackingMutation && !isSalesConsignmentSubmitAction && !isSalesCargoEditAction && !moduleScopedActionAccess && !isExpenseDirectionControlAction && !isAuthorizedSettlementDocumentAction && !canWriteConfiguredDocumentField) {
     return { formError: "当前节点不由本账号办理，订单信息仅供查看" };
   }
   const isAssignedConsignmentApprover = isAssignedOrderApprover({
     status: order.status,
     currentAssigneeUserId: order.current_assignee_user_id,
     currentUserId: current.userId,
-  }) || (workflowAdministrator && order.status === "submitted");
+  });
   const canApproveConsignment =
     (isConsignmentApprovalAction || isConsignmentDocumentReviewAction) &&
     isAssignedConsignmentApprover;
-  if (!moduleManageAccess && !isOrdinaryTrackingMutation && !canApproveConsignment && !isSalesConsignmentSubmitAction && !isSalesCargoEditAction && !workflowAdministratorActionAccess && !moduleScopedActionAccess && !isExpenseDirectionControlAction && !isAuthorizedSettlementDocumentAction) {
+  if (!moduleManageAccess && !isOrdinaryTrackingMutation && !canApproveConsignment && !isSalesConsignmentSubmitAction && !isSalesCargoEditAction && !moduleScopedActionAccess && !isExpenseDirectionControlAction && !isAuthorizedSettlementDocumentAction && !canWriteConfiguredDocumentField) {
     return { formError: "当前岗位可以查看本模块，但没有提交业务操作的权限" };
   }
-  const moduleWorkflowFields = await loadOrderModuleWorkflowFields(
-    current.organizationId,
-    orderId,
-    moduleCode as Parameters<typeof loadOrderModuleWorkflowFields>[2],
-  );
   const expenseValidationWorkflowFields = expensePolicyModuleCode === moduleCode
     ? moduleWorkflowFields
     : await loadOrderModuleWorkflowFields(
@@ -1882,7 +1885,7 @@ export async function action({ request, params }: Route.ActionArgs) {
       actionCode,
       assigneeUserId: workflowAssigneeUserId,
       notes: valueOf(form, "notes"),
-      bypassAssigneeRestriction: workflowAdministrator,
+      bypassAssigneeRestriction: false,
     });
     if (
       !("formError" in result) &&
@@ -1937,6 +1940,7 @@ export async function action({ request, params }: Route.ActionArgs) {
         fieldId: valueOf(form, "fieldId"),
         value: valueOf(form, "fieldValue"),
         actorUserId: current.userId,
+        actorPositionCode: current.positionCode,
       });
       await syncOrderWorkflowSnapshot(current.organizationId, orderId);
       return { success: "字段已保存，必填状态已重新检查" };
@@ -2395,7 +2399,7 @@ export async function action({ request, params }: Route.ActionArgs) {
           actionCode: "dispatch",
           assigneeUserId: mainAssigneeUserId,
           notes: valueOf(form, "notes"),
-          bypassAssigneeRestriction: canEditWorkflowDefinitionInUi(current),
+          bypassAssigneeRestriction: false,
           allowPendingAssignment: true,
           atomicStatements: [
             env.DB.prepare(
@@ -2516,7 +2520,7 @@ export async function action({ request, params }: Route.ActionArgs) {
         actionCode: "dispatch",
         assigneeUserId: mainAssigneeUserId,
         notes: valueOf(form, "notes"),
-        bypassAssigneeRestriction: canEditWorkflowDefinitionInUi(current),
+        bypassAssigneeRestriction: false,
         allowPendingAssignment: true,
         atomicStatements: [
           env.DB.prepare(
@@ -4507,7 +4511,7 @@ export default function OrderModulePage({
         status: order.status,
         currentAssigneeUserId: order.current_assignee_user_id,
         currentUserId: loaderData.current.userId,
-      }) || (order.status === "submitted" && canEditWorkflowDefinitionInUi(loaderData.current));
+      });
   const actionMessage =
     actionData && "formError" in actionData
       ? actionData.formError
@@ -4762,7 +4766,7 @@ export function EmbeddedOrderModule({
     status: order.status,
     currentAssigneeUserId: order.current_assignee_user_id,
     currentUserId: scopedData.current.userId,
-  }) || (order.status === "submitted" && canEditWorkflowDefinitionInUi(scopedData.current)));
+  }));
   const compactApproval = definition.code === "consignment" && approvalMode;
 
   if (
@@ -4922,7 +4926,6 @@ export function ConsignmentReviewActionBar({
   );
   const manage =
     (canManageOrderModule(data.current, "consignment") ||
-      canEditWorkflowDefinitionInUi(data.current) ||
       canSubmitSalesOrderForApproval({
         status: data.order.status,
         positionCode: data.current.positionCode,
@@ -4934,7 +4937,7 @@ export function ConsignmentReviewActionBar({
     status: data.order.status,
     currentAssigneeUserId: data.order.current_assignee_user_id,
     currentUserId: data.current.userId,
-  }) || (data.order.status === "submitted" && canEditWorkflowDefinitionInUi(data.current));
+  });
 
   if (manage && data.order.status === "draft") {
     return (

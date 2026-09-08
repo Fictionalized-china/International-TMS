@@ -98,7 +98,7 @@ export function orderAssignmentCandidateConfigurationErrors(
   groups: readonly OrderAssignmentManifestGroup[],
   members: readonly Pick<
     OrganizationAssigneeMember,
-    "position_code" | "permission_codes" | "permission_override_entries" | "workflow_access_entries"
+    "position_code" | "permission_codes" | "permission_override_entries"
   >[],
 ) {
   return groups.flatMap((group) => {

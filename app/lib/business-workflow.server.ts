@@ -4,7 +4,10 @@ import {
   pickNextRequiredWorkflowModule,
   type OrderModuleCode,
 } from "./order-modules";
-import { snapshotWorkflowFieldsForInstance } from "./workflow-fields.server";
+import {
+  backfillWorkflowFieldHandlerPositionsForWorkflow,
+  snapshotWorkflowFieldsForInstance,
+} from "./workflow-fields.server";
 import { workflowFieldCatalog } from "./workflow-field-catalog";
 import { resolveConfiguredOrderBusinessTarget } from "./order-business-workflow-target";
 import {
@@ -397,6 +400,7 @@ async function ensureRoadWorkflowTemplates(organizationId: string) {
       code: template.code,
       now,
     });
+    await backfillWorkflowFieldHandlerPositionsForWorkflow(template.workflowId);
   }
   return templates;
 }

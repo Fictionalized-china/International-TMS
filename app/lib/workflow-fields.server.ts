@@ -19,6 +19,11 @@ import {
 import { frozenWorkflowFieldScopeMarkerKey } from "./workflow-field-runtime";
 import { workflowInstanceCapabilityStageAccess } from "./workflow-instance-stage-gate";
 import { loadLockedWorkflowStageContext } from "./workflow-instance-stage-gate.server";
+import {
+  canPositionHandleWorkflowField,
+  normalizeWorkflowFieldHandlerPositionCodes,
+  serializeWorkflowFieldHandlerPositionCodes,
+} from "./workflow-field-position-access";
 
 export const confirmedBatchCostAllocationPresenceSql=`EXISTS(
   SELECT 1
@@ -47,6 +52,7 @@ export type WorkflowFieldRule = {
   sortOrder: number;
   optionsText: string | null;
   helpText: string | null;
+  handlerPositionCodes?: string[];
   isBuiltIn: boolean;
 };
 
@@ -273,6 +279,178 @@ export async function ensureWorkflowCatalogFields(organizationId: string) {
       .bind(ftlWorkflow.id, ...excludedFields)
       .run();
   }
+  await env.DB.prepare(
+    `UPDATE workflow_step_fields
+     SET handler_position_codes=COALESCE((
+       SELECT GROUP_CONCAT(position_code, ',')
+       FROM (
+         SELECT position_code FROM (
+           SELECT module.responsibility_position_code position_code
+           FROM workflow_step_modules module
+           WHERE module.workflow_id=workflow_step_fields.workflow_id
+             AND module.step_id=workflow_step_fields.step_id
+             AND module.module_code=COALESCE(workflow_step_fields.module_code,'consignment')
+             AND module.is_active=1
+             AND module.responsibility_position_code IS NOT NULL
+           UNION
+           SELECT task.responsibility_position_code position_code
+           FROM workflow_step_modules module
+           JOIN workflow_module_tasks task
+             ON task.workflow_id=module.workflow_id
+            AND task.step_module_id=module.id
+            AND task.is_active=1
+           WHERE module.workflow_id=workflow_step_fields.workflow_id
+             AND module.step_id=workflow_step_fields.step_id
+             AND module.module_code=COALESCE(workflow_step_fields.module_code,'consignment')
+             AND module.is_active=1
+             AND task.responsibility_position_code IS NOT NULL
+         ) ORDER BY position_code
+       )
+     ),(
+       SELECT GROUP_CONCAT(position_code, ',')
+       FROM (
+         SELECT position_code FROM (
+           SELECT module.responsibility_position_code position_code
+           FROM workflow_step_modules module
+           WHERE module.workflow_id=workflow_step_fields.workflow_id
+             AND module.step_id=workflow_step_fields.step_id
+             AND module.is_active=1
+             AND module.responsibility_position_code IS NOT NULL
+           UNION
+           SELECT task.responsibility_position_code position_code
+           FROM workflow_step_modules module
+           JOIN workflow_module_tasks task
+             ON task.workflow_id=module.workflow_id
+            AND task.step_module_id=module.id
+            AND task.is_active=1
+           WHERE module.workflow_id=workflow_step_fields.workflow_id
+             AND module.step_id=workflow_step_fields.step_id
+             AND module.is_active=1
+             AND task.responsibility_position_code IS NOT NULL
+         ) ORDER BY position_code
+       )
+     ))
+     WHERE handler_position_codes IS NULL
+       AND workflow_id IN (
+         SELECT id FROM workflow_definitions WHERE organization_id=?
+       )`,
+  ).bind(organizationId).run();
+}
+
+export async function backfillWorkflowFieldHandlerPositionsForWorkflow(
+  workflowId: string,
+) {
+  await env.DB.prepare(
+    `UPDATE workflow_step_fields
+     SET handler_position_codes=COALESCE((
+       SELECT GROUP_CONCAT(position_code, ',')
+       FROM (
+         SELECT position_code FROM (
+           SELECT module.responsibility_position_code position_code
+           FROM workflow_step_modules module
+           WHERE module.workflow_id=workflow_step_fields.workflow_id
+             AND module.step_id=workflow_step_fields.step_id
+             AND module.module_code=COALESCE(workflow_step_fields.module_code,'consignment')
+             AND module.is_active=1
+             AND module.responsibility_position_code IS NOT NULL
+           UNION
+           SELECT task.responsibility_position_code position_code
+           FROM workflow_step_modules module
+           JOIN workflow_module_tasks task
+             ON task.workflow_id=module.workflow_id
+            AND task.step_module_id=module.id
+            AND task.is_active=1
+           WHERE module.workflow_id=workflow_step_fields.workflow_id
+             AND module.step_id=workflow_step_fields.step_id
+             AND module.module_code=COALESCE(workflow_step_fields.module_code,'consignment')
+             AND module.is_active=1
+             AND task.responsibility_position_code IS NOT NULL
+         ) ORDER BY position_code
+       )
+     ),(
+       SELECT GROUP_CONCAT(position_code, ',')
+       FROM (
+         SELECT position_code FROM (
+           SELECT module.responsibility_position_code position_code
+           FROM workflow_step_modules module
+           WHERE module.workflow_id=workflow_step_fields.workflow_id
+             AND module.step_id=workflow_step_fields.step_id
+             AND module.is_active=1
+             AND module.responsibility_position_code IS NOT NULL
+           UNION
+           SELECT task.responsibility_position_code position_code
+           FROM workflow_step_modules module
+           JOIN workflow_module_tasks task
+             ON task.workflow_id=module.workflow_id
+            AND task.step_module_id=module.id
+            AND task.is_active=1
+           WHERE module.workflow_id=workflow_step_fields.workflow_id
+             AND module.step_id=workflow_step_fields.step_id
+             AND module.is_active=1
+             AND task.responsibility_position_code IS NOT NULL
+         ) ORDER BY position_code
+       )
+     ))
+     WHERE handler_position_codes IS NULL AND workflow_id=?`,
+  ).bind(workflowId).run();
+}
+
+export async function defaultWorkflowFieldHandlerPositionCodes(input: {
+  workflowId: string;
+  stepId: string;
+  moduleCode: OrderModuleCode;
+}) {
+  const row = await env.DB.prepare(
+    `SELECT COALESCE(
+       (SELECT GROUP_CONCAT(position_code, ',') FROM (
+         SELECT position_code FROM (
+           SELECT responsibility_position_code position_code
+           FROM workflow_step_modules
+           WHERE workflow_id=? AND step_id=? AND module_code=? AND is_active=1
+             AND responsibility_position_code IS NOT NULL
+           UNION
+           SELECT task.responsibility_position_code position_code
+           FROM workflow_step_modules module
+           JOIN workflow_module_tasks task
+             ON task.workflow_id=module.workflow_id
+            AND task.step_module_id=module.id
+            AND task.is_active=1
+           WHERE module.workflow_id=? AND module.step_id=? AND module.module_code=?
+             AND module.is_active=1
+             AND task.responsibility_position_code IS NOT NULL
+         ) ORDER BY position_code
+       )),
+       (SELECT GROUP_CONCAT(position_code, ',') FROM (
+         SELECT position_code FROM (
+           SELECT responsibility_position_code position_code
+           FROM workflow_step_modules
+           WHERE workflow_id=? AND step_id=? AND is_active=1
+             AND responsibility_position_code IS NOT NULL
+           UNION
+           SELECT task.responsibility_position_code position_code
+           FROM workflow_step_modules module
+           JOIN workflow_module_tasks task
+             ON task.workflow_id=module.workflow_id
+            AND task.step_module_id=module.id
+            AND task.is_active=1
+           WHERE module.workflow_id=? AND module.step_id=? AND module.is_active=1
+             AND task.responsibility_position_code IS NOT NULL
+         ) ORDER BY position_code
+       ))
+     ) position_codes`,
+  ).bind(
+    input.workflowId,
+    input.stepId,
+    input.moduleCode,
+    input.workflowId,
+    input.stepId,
+    input.moduleCode,
+    input.workflowId,
+    input.stepId,
+    input.workflowId,
+    input.stepId,
+  ).first<{ position_codes: string | null }>();
+  return serializeWorkflowFieldHandlerPositionCodes(row?.position_codes);
 }
 
 export async function snapshotWorkflowFieldsForInstance(input: {
@@ -284,11 +462,12 @@ export async function snapshotWorkflowFieldsForInstance(input: {
   await env.DB.prepare(
     `INSERT OR IGNORE INTO workflow_instance_fields(
        id,instance_id,workflow_id,step_key,module_code,field_key,label,field_type,
-       is_required,is_active,sort_order,options_text,help_text,created_at
+       is_required,is_active,sort_order,options_text,help_text,handler_position_codes,created_at
      )
      SELECT lower(hex(randomblob(16))),?,f.workflow_id,s.step_key,
             COALESCE(f.module_code,'consignment'),f.field_key,f.label,f.field_type,
-            f.is_required,f.is_active,f.sort_order,f.options_text,f.help_text,?
+            f.is_required,f.is_active,f.sort_order,f.options_text,f.help_text,
+            f.handler_position_codes,?
      FROM workflow_step_fields f
      JOIN workflow_steps s ON s.id=f.step_id AND s.workflow_id=f.workflow_id
      WHERE f.workflow_id=?`,
@@ -311,15 +490,12 @@ export async function synchronizeWorkflowFieldPolicyForInstances(input: {
        AND EXISTS(
          SELECT 1
          FROM workflow_instances wi
-         JOIN workflow_steps current_step
-           ON current_step.workflow_id=wi.workflow_id
-          AND current_step.step_key=wi.current_step_key
-         JOIN workflow_steps target_step
-           ON target_step.workflow_id=wi.workflow_id
-          AND target_step.step_key=workflow_instance_fields.step_key
+         JOIN workflow_instance_step_states target_state
+           ON target_state.instance_id=wi.id
+          AND target_state.step_key=workflow_instance_fields.step_key
          WHERE wi.id=workflow_instance_fields.instance_id
            AND wi.workflow_id=workflow_instance_fields.workflow_id
-           AND current_step.sort_order<=target_step.sort_order
+           AND target_state.status NOT IN ('completed','not_applicable')
        )`,
   )
     .bind(
@@ -330,6 +506,36 @@ export async function synchronizeWorkflowFieldPolicyForInstances(input: {
       input.moduleCode,
     )
     .run();
+}
+
+export async function synchronizeWorkflowFieldHandlerPositionsForInstances(input: {
+  workflowId: string;
+  stepKey: string;
+  fieldKey: string;
+  moduleCode: OrderModuleCode;
+  handlerPositionCodes: string;
+}) {
+  await env.DB.prepare(
+    `UPDATE workflow_instance_fields
+     SET handler_position_codes=?
+     WHERE workflow_id=? AND step_key=? AND field_key=? AND module_code=?
+       AND EXISTS(
+         SELECT 1
+         FROM workflow_instances wi
+         JOIN workflow_instance_step_states target_state
+           ON target_state.instance_id=wi.id
+          AND target_state.step_key=workflow_instance_fields.step_key
+         WHERE wi.id=workflow_instance_fields.instance_id
+           AND wi.workflow_id=workflow_instance_fields.workflow_id
+           AND target_state.status NOT IN ('completed','not_applicable')
+       )`,
+  ).bind(
+    input.handlerPositionCodes,
+    input.workflowId,
+    input.stepKey,
+    input.fieldKey,
+    input.moduleCode,
+  ).run();
 }
 
 export async function synchronizeWorkflowFieldDefinitionForInstances(input: {
@@ -361,15 +567,12 @@ export async function synchronizeWorkflowFieldDefinitionForInstances(input: {
          AND EXISTS(
            SELECT 1
            FROM workflow_instances wi
-           JOIN workflow_steps current_step
-             ON current_step.workflow_id=wi.workflow_id
-            AND current_step.step_key=wi.current_step_key
-           JOIN workflow_steps target_step
-             ON target_step.workflow_id=wi.workflow_id
-            AND target_step.step_key=?
+           JOIN workflow_instance_step_states target_state
+             ON target_state.instance_id=wi.id
+            AND target_state.step_key=workflow_instance_fields.step_key
            WHERE wi.id=workflow_instance_fields.instance_id
              AND wi.workflow_id=workflow_instance_fields.workflow_id
-             AND current_step.sort_order<=target_step.sort_order
+             AND target_state.status NOT IN ('completed','not_applicable')
          )`,
     ).bind(
       input.stepKey,
@@ -384,7 +587,6 @@ export async function synchronizeWorkflowFieldDefinitionForInstances(input: {
       sourceStepKey,
       sourceFieldKey,
       sourceModuleCode,
-      input.stepKey,
     ),
     env.DB.prepare(
       `INSERT OR IGNORE INTO workflow_instance_fields(
@@ -393,14 +595,11 @@ export async function synchronizeWorkflowFieldDefinitionForInstances(input: {
        )
        SELECT lower(hex(randomblob(16))),wi.id,wi.workflow_id,?,?,?,?,?,?,?,?,?,?,?
        FROM workflow_instances wi
-       JOIN workflow_steps current_step
-         ON current_step.workflow_id=wi.workflow_id
-        AND current_step.step_key=wi.current_step_key
-       JOIN workflow_steps target_step
-         ON target_step.workflow_id=wi.workflow_id
-        AND target_step.step_key=?
+       JOIN workflow_instance_step_states target_state
+         ON target_state.instance_id=wi.id
+        AND target_state.step_key=?
        WHERE wi.workflow_id=?
-         AND current_step.sort_order<=target_step.sort_order`,
+         AND target_state.status NOT IN ('completed','not_applicable')`,
     ).bind(
       input.stepKey,
       input.moduleCode,
@@ -420,15 +619,13 @@ export async function synchronizeWorkflowFieldDefinitionForInstances(input: {
 }
 
 /**
- * A template-field change belongs to the live gate only while an order is at
- * the target node or has not reached it yet.  Once the order has moved past
- * the node, its instance snapshot is historical evidence and must stay frozen.
+ * A template-field change belongs to the live gate while the target node is
+ * open. Completed/skipped nodes are historical evidence and stay frozen. If a
+ * completed node is reopened, its status becomes active again and the latest
+ * definition applies on the next synchronization.
  */
-export function workflowFieldPolicyAppliesAtStage(
-  currentStepSortOrder: number,
-  targetStepSortOrder: number,
-) {
-  return currentStepSortOrder <= targetStepSortOrder;
+export function workflowFieldPolicyAppliesToStepStatus(status: string) {
+  return !["completed", "not_applicable"].includes(status);
 }
 
 export async function inspectHiddenWorkflowFieldData(input: {
@@ -487,7 +684,7 @@ export async function listTemplateWorkflowFields(workflowIds: string[]) {
     const rows = await env.DB.prepare(
       `SELECT f.id,f.workflow_id,s.step_key,s.name step_name,COALESCE(f.module_code,'consignment') module_code,
               f.field_key,f.label,f.field_type,f.is_required,f.is_active,f.sort_order,
-              f.options_text,f.help_text
+              f.options_text,f.help_text,f.handler_position_codes
        FROM workflow_step_fields f
        JOIN workflow_steps s ON s.id=f.step_id
        WHERE f.workflow_id IN (${d1Placeholders(workflowChunk.length)})
@@ -533,7 +730,7 @@ export async function loadOrderModuleWorkflowFields(
       env.DB.prepare(
         `SELECT f.id,f.workflow_id,f.step_key,COALESCE(ss.step_name,f.step_key) step_name,
                 f.module_code,f.field_key,f.label,f.field_type,f.is_required,
-                f.is_active,f.sort_order,f.options_text,f.help_text
+                f.is_active,f.sort_order,f.options_text,f.help_text,f.handler_position_codes
          FROM workflow_instance_fields f
          LEFT JOIN workflow_instance_step_states ss
            ON ss.instance_id=f.instance_id AND ss.step_key=f.step_key
@@ -561,7 +758,7 @@ export async function loadOrderModuleWorkflowFields(
     const live = await env.DB.prepare(
       `SELECT f.id,f.workflow_id,s.step_key,s.name step_name,COALESCE(f.module_code,'consignment') module_code,
               f.field_key,f.label,f.field_type,f.is_required,f.is_active,f.sort_order,
-              f.options_text,f.help_text
+              f.options_text,f.help_text,f.handler_position_codes
        FROM workflow_step_fields f
        JOIN workflow_steps s ON s.id=f.step_id
        WHERE f.workflow_id=? AND COALESCE(f.module_code,'consignment')=?
@@ -618,6 +815,7 @@ export async function loadOrderModuleWorkflowFields(
     sortOrder: placement.sort_order,
     optionsText: null,
     helpText: null,
+    handlerPositionCodes: [],
     isBuiltIn: true,
     present: true,
     displayValue: null,
@@ -692,6 +890,7 @@ export async function saveOrderCustomWorkflowFieldValue(input: {
   fieldId: string;
   value: string | null;
   actorUserId: string;
+  actorPositionCode?: string | null;
 }) {
   const workflow = await loadLockedWorkflowStageContext(
     env.DB,
@@ -705,7 +904,8 @@ export async function saveOrderCustomWorkflowFieldValue(input: {
   if (!workflow.locked)
     throw new Error("历史订单没有冻结的自定义字段快照，不能修改该字段");
   const field = await env.DB.prepare(
-    `SELECT f.id,f.module_code,f.step_key,f.field_key,f.is_active,o.status order_status
+    `SELECT f.id,f.module_code,f.step_key,f.field_key,f.is_active,
+            f.handler_position_codes,o.status order_status
      FROM workflow_instance_fields f
      JOIN workflow_instances wi ON wi.id=f.instance_id
      JOIN transport_orders o
@@ -718,6 +918,7 @@ export async function saveOrderCustomWorkflowFieldValue(input: {
     step_key: string;
     field_key: string;
     is_active: number;
+    handler_position_codes: string | null;
     order_status: string;
   }>();
   if (!field?.is_active || workflowFieldCatalogByKey.has(field.field_key))
@@ -726,6 +927,11 @@ export async function saveOrderCustomWorkflowFieldValue(input: {
     throw new Error("订单已完成或取消，自定义字段仅供查看，不能继续修改");
   if (field.module_code !== input.moduleCode)
     throw new Error("该自定义字段不属于当前模块");
+  if (!canPositionHandleWorkflowField(
+    field.handler_position_codes,
+    input.actorPositionCode,
+  ))
+    throw new Error("当前岗位没有填写该字段的权限");
   const capability = workflowInstanceCapabilityStageAccess({
     context: workflow,
     moduleCode: input.moduleCode,
@@ -787,6 +993,7 @@ type RawField = {
   sort_order: number;
   options_text: string | null;
   help_text: string | null;
+  handler_position_codes?: string | null;
 };
 
 const workflowStepDefaultNames: Record<string, string> = {
@@ -835,6 +1042,7 @@ export function mergeWorkflowFieldCatalogBaseline(
       sort_order: catalogIndex * 10 + 10,
       options_text: item.optionsText ?? null,
       help_text: item.helpText,
+      handler_position_codes: "",
     } satisfies RawField];
   });
   return [...rows, ...baseline].sort(
@@ -859,6 +1067,9 @@ function toRule(row: RawField): WorkflowFieldRule {
     sortOrder: row.sort_order,
     optionsText: row.options_text,
     helpText: row.help_text,
+    handlerPositionCodes: normalizeWorkflowFieldHandlerPositionCodes(
+      row.handler_position_codes,
+    ),
     isBuiltIn: workflowFieldCatalogByKey.has(row.field_key),
   };
 }

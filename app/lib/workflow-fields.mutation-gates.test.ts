@@ -25,7 +25,7 @@ const harness = vi.hoisted(() => {
           if (query.includes("SELECT o.workflow_instance_id,wi.id matched_instance_id,wi.current_step_key")) {
             return state.binding;
           }
-          if (query.includes("SELECT f.id,f.module_code,f.step_key,f.field_key,f.is_active,o.status order_status")) {
+          if (query.includes("SELECT f.id,f.module_code,f.step_key,f.field_key,f.is_active")) {
             return state.selectedField;
           }
           return null;
@@ -68,6 +68,7 @@ describe("frozen custom workflow field mutation gates", () => {
     field_key: "custom_gate_note",
     is_active: 1,
     is_required: 0,
+    handler_position_codes: "OPERATION",
     order_status: "in_execution",
   });
 
@@ -78,6 +79,7 @@ describe("frozen custom workflow field mutation gates", () => {
     fieldId: "field-custom-note",
     value: "saved value",
     actorUserId: "user-1",
+    actorPositionCode: "OPERATION",
   });
 
   beforeEach(() => {
@@ -104,8 +106,21 @@ describe("frozen custom workflow field mutation gates", () => {
     await expect(save()).resolves.toBeUndefined();
     expect(harness.state.writes).toBe(1);
     expect(harness.sql.find((query) =>
-      query.includes("SELECT f.id,f.module_code,f.step_key,f.field_key,f.is_active,o.status order_status"),
+      query.includes("SELECT f.id,f.module_code,f.step_key,f.field_key,f.is_active"),
     )).toContain("o.workflow_instance_id=wi.id");
+  });
+
+  it("rejects a configured field when the actor belongs to another position", async () => {
+    await expect(saveOrderCustomWorkflowFieldValue({
+      organizationId: "org-1",
+      orderId: "order-1",
+      moduleCode: "transport",
+      fieldId: "field-custom-note",
+      value: "saved value",
+      actorUserId: "user-1",
+      actorPositionCode: "DOC",
+    })).rejects.toThrow("当前岗位没有填写该字段的权限");
+    expect(harness.state.writes).toBe(0);
   });
 
   it("rejects a known field id belonging to another module", async () => {

@@ -122,7 +122,7 @@ describe("organization assignee server guard", () => {
       responsibilityPositionCode: "OPERATION",
       nodes: [{ stepKey: "domestic_execution", moduleCode: "transport" }],
     })).resolves.toBe(true);
-    expect(database.queries.at(-1)?.sql).toContain("membership_workflow_access_overrides");
+    expect(database.queries.at(-1)?.sql).not.toContain("membership_workflow_access_overrides");
   });
 
   it("applies personal deny-aware effective permissions after the position check", async () => {

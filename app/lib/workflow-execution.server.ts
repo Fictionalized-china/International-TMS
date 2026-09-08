@@ -390,11 +390,12 @@ export async function replaceWorkflowInstanceVersion(input:{
     env.DB.prepare(
       `INSERT INTO workflow_instance_fields(
         id,instance_id,workflow_id,step_key,module_code,field_key,label,field_type,
-        is_required,is_active,sort_order,options_text,help_text,created_at
+        is_required,is_active,sort_order,options_text,help_text,handler_position_codes,created_at
        )
        SELECT lower(hex(randomblob(16))),?,f.workflow_id,s.step_key,
               COALESCE(f.module_code,'consignment'),f.field_key,f.label,f.field_type,
-              f.is_required,f.is_active,f.sort_order,f.options_text,f.help_text,?
+              f.is_required,f.is_active,f.sort_order,f.options_text,f.help_text,
+              f.handler_position_codes,?
        FROM workflow_step_fields f
        JOIN workflow_steps s ON s.id=f.step_id AND s.workflow_id=f.workflow_id
        WHERE f.workflow_id=?`,

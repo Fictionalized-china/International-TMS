@@ -55,7 +55,7 @@ describe("workflow publication responsibility readiness", () => {
       tasks: [reviewTask],
       positions: [{ ...finance, active_member_count: 0, permission_codes: "order.view" }],
     });
-    expect(issues.join("\n")).toContain("没有符合节点资格的有效账号");
+    expect(issues.join("\n")).toContain("没有具备基础安全权限的有效账号");
 
     const permissionIssues = validateWorkflowResponsibilityReadiness({
       steps,
@@ -477,18 +477,16 @@ describe("workflow publication responsibility readiness", () => {
           {
             membershipId: "operation-a",
             permissionCodes: ["order.view"],
-            workflowAccessOverrides: [{
-              stepKey: "outbound_transport",
-              moduleCode: "tracking",
+            permissionOverrides: [{
+              code: "order.module.tracking.manage",
               effect: "deny" as const,
             }],
           },
           {
             membershipId: "operation-b",
             permissionCodes: ["order.view"],
-            workflowAccessOverrides: [{
-              stepKey: "domestic_execution",
-              moduleCode: "transport",
+            permissionOverrides: [{
+              code: "order.module.transport.manage",
               effect: "deny" as const,
             }],
           },
@@ -532,9 +530,8 @@ describe("workflow publication responsibility readiness", () => {
         active_member_permissions: [{
           membershipId: "operation-denied",
           permissionCodes: ["order.view"],
-          workflowAccessOverrides: [{
-            stepKey: "outbound_transport",
-            moduleCode: "tracking",
+          permissionOverrides: [{
+            code: "order.module.tracking.manage",
             effect: "deny" as const,
           }],
         }],

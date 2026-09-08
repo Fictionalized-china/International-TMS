@@ -155,7 +155,11 @@ describe("new-organization standard workflow bootstrap", () => {
     expect(moduleInserts).toHaveLength(48);
     expect(taskInserts).toHaveLength(48);
     expect(fieldInserts.length).toBeGreaterThan(0);
-    expect(database.prepared.some((entry) => /^\s*UPDATE\s+workflow_/i.test(entry.sql))).toBe(false);
+    expect(database.prepared.some((entry) => /^\s*UPDATE\s+workflow_definitions/i.test(entry.sql))).toBe(false);
+    expect(database.prepared.some((entry) =>
+      entry.sql.includes("UPDATE workflow_step_fields") &&
+      entry.sql.includes("handler_position_codes"),
+    )).toBe(true);
   });
 
   it("uses the real id of an existing draft instead of assuming the deterministic id", async () => {
@@ -185,7 +189,7 @@ describe("new-organization standard workflow bootstrap", () => {
     await ensureDefaultWorkflow("org-new");
 
     expect(database.prepared.some((entry) =>
-      /^\s*UPDATE\s+workflow_/i.test(entry.sql) ||
+      (/^\s*UPDATE\s+workflow_/i.test(entry.sql) && entry.values.includes("published-pending-id")) ||
       (entry.sql.includes("INSERT OR IGNORE INTO workflow_steps") && entry.values[1] === "published-pending-id"),
     )).toBe(false);
   });

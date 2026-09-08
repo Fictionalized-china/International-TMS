@@ -10,7 +10,7 @@ type OrderDetailNavigationExports = {
     moduleActionCanOperate?: boolean;
     moduleCanEdit?: boolean;
   }) => boolean;
-  orderDetailActionPermission?: (intent: string) => string;
+  orderDetailActionPermission?: (intent: string, moduleCode?: string | null) => string;
 };
 
 const navigationExports = orderDetailRoute as typeof orderDetailRoute & OrderDetailNavigationExports;
@@ -35,5 +35,11 @@ describe("ordinary order detail navigation", () => {
     expect(permission?.("cargo_create")).toBe("order.view");
     expect(permission?.("cargo_update")).toBe("order.view");
     expect(permission?.("order_update")).toBe("order.manage");
+  });
+
+  it("lets embedded document uploads reach their module and field gates", () => {
+    const permission = navigationExports.orderDetailActionPermission;
+    expect(permission?.("document_upload", "consignment")).toBe("order.view");
+    expect(permission?.("document_upload", null)).toBe("order.manage");
   });
 });

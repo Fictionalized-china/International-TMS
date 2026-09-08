@@ -275,16 +275,11 @@ describe("order access", () => {
     })).toBe(false);
   });
 
-  it("lets an account override qualify an unassigned node and lets an explicit denial win", () => {
+  it("uses the configured responsibility position before a node is assigned", () => {
     const input = {
       user: {
         ...baseUser,
         positionCode: "CS",
-        workflowAccessOverrides: [{
-          stepKey: "order_creation",
-          moduleCode: "consignment",
-          effect: "allow" as const,
-        }],
       },
       orderStatus: "draft",
       stepKey: "order_creation",
@@ -294,39 +289,23 @@ describe("order access", () => {
       taskAssigneeUserIds: [] as string[],
       responsibilityPositionCodes: ["SALES"],
     };
-    expect(canOperateEnabledOrderModule(input)).toBe(true);
+    expect(canOperateEnabledOrderModule(input)).toBe(false);
     expect(canOperateEnabledOrderModule({
       ...input,
       user: {
         ...input.user,
-        workflowAccessOverrides: [{
-          stepKey: "order_creation",
-          moduleCode: "consignment",
-          effect: "deny" as const,
-        }],
+        positionCode: "SALES",
       },
-    })).toBe(false);
+    })).toBe(true);
   });
 
-  it("adds explicitly allowed current nodes to order-list visibility", () => {
+  it("does not add mutable workflow configuration to order-list visibility", () => {
     const scoped = orderVisibilitySql({
       ...baseUser,
       positionCode: "DOC",
       permissions: ["order.view"],
-      workflowAccessOverrides: [{
-        stepKey: "order_creation",
-        moduleCode: "consignment",
-        effect: "allow",
-      }],
     });
-    expect(scoped.sql).toContain("qualified_step.step_key=?");
-    expect(scoped.sql).toContain("qualified_module.module_code=?");
-    expect(scoped.values).toEqual([
-      "order_creation",
-      "consignment",
-      "user-a",
-      "user-a",
-    ]);
+    expect(scoped).toEqual({ sql:"0=1", values:[] });
   });
 
   it("keeps the current workspace editable for an authorized scoped module owner", () => {
@@ -356,15 +335,15 @@ describe("order access", () => {
     })).toBe(true);
   });
 
-  it("keeps the boss and developer current-node bypass", () => {
+  it("does not let configuration administrators bypass concrete assignment", () => {
     expect(canOperateCurrentOrder({ ...baseUser, positionCode: "BOSS" }, {
       status: "in_execution",
       current_assignee_user_id: "user-b",
-    })).toBe(true);
+    })).toBe(false);
     expect(canOperateCurrentOrder({ ...baseUser, positionCode: "DEVELOPER" }, {
       status: "in_execution",
       current_assignee_user_id: null,
-    })).toBe(true);
+    })).toBe(false);
   });
 
   it("grants owner and all-scope accounts every order", () => {

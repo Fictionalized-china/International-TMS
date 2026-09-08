@@ -24,9 +24,12 @@ import {
 import { quotationNativeFieldCatalog } from "../lib/quotation-native-field-catalog";
 import {
   ensureWorkflowCatalogFields,
+  defaultWorkflowFieldHandlerPositionCodes,
   inspectHiddenWorkflowFieldData,
   synchronizeWorkflowFieldDefinitionForInstances,
+  synchronizeWorkflowFieldHandlerPositionsForInstances,
 } from "../lib/workflow-fields.server";
+import { serializeWorkflowFieldHandlerPositionCodes } from "../lib/workflow-field-position-access";
 import {
   syncCostsModuleStatus,
   syncOrderWorkflowSnapshot,
@@ -70,7 +73,6 @@ import {
 import { listActiveOrganizationAssignees } from "../lib/organization-assignee.server";
 import {
   organizationAssigneePermissionOverrides,
-  organizationAssigneeWorkflowAccessOverrides,
 } from "../lib/organization-assignee";
 
 type Definition = {
@@ -125,6 +127,7 @@ type StepField = {
   sort_order: number;
   options_text: string | null;
   help_text: string | null;
+  handler_position_codes: string | null;
   module_code: OrderModuleCode;
   updated_at: string;
 };
@@ -204,7 +207,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       .bind(workflowId)
       .all<Step>(),
     env.DB.prepare(
-      "SELECT id, step_id, field_key, label, field_type, is_required, is_active, sort_order, options_text, help_text, COALESCE(module_code,'consignment') module_code, updated_at FROM workflow_step_fields WHERE workflow_id=? ORDER BY sort_order, field_key",
+      "SELECT id, step_id, field_key, label, field_type, is_required, is_active, sort_order, options_text, help_text, handler_position_codes, COALESCE(module_code,'consignment') module_code, updated_at FROM workflow_step_fields WHERE workflow_id=? ORDER BY sort_order, field_key",
     )
       .bind(workflowId)
       .all<StepField>(),
@@ -415,7 +418,7 @@ export async function action({ request }: Route.ActionArgs) {
     for (const idChunk of chunkD1Values(requestedChanges.map((item)=>item.fieldId),1)) {
       const rows = await env.DB.prepare(
         `SELECT f.id,f.step_id,s.step_key,s.name step_name,f.field_key,f.label,f.field_type,
-          f.is_required,f.is_active,f.sort_order,f.options_text,f.help_text,
+          f.is_required,f.is_active,f.sort_order,f.options_text,f.help_text,f.handler_position_codes,
           COALESCE(f.module_code,'consignment') module_code,f.updated_at
          FROM workflow_step_fields f JOIN workflow_steps s ON s.id=f.step_id
          WHERE f.workflow_id=? AND f.id IN (${d1Placeholders(idChunk.length)})`,
@@ -436,6 +439,25 @@ export async function action({ request }: Route.ActionArgs) {
       updatedAt:requestedById.get(field.id)!.updatedAt,
     })).filter((item)=>item.previousMode!==item.mode);
     if (!changes.length) return { success:"字段规则没有变化，无需应用" };
+    const resolvedHandlerPositions = new Map<string,string>();
+    for (const change of changes) {
+      let handlerPositionCodes = serializeWorkflowFieldHandlerPositionCodes(
+        change.field.handler_position_codes,
+      );
+      if (change.mode !== "hidden" && !handlerPositionCodes) {
+        handlerPositionCodes = await defaultWorkflowFieldHandlerPositionCodes({
+          workflowId,
+          stepId:change.field.step_id,
+          moduleCode:change.field.module_code,
+        });
+        if (!handlerPositionCodes) {
+          return {
+            formError:`字段“${change.field.label}”启用前必须先为所属模组配置责任岗位`,
+          };
+        }
+      }
+      resolvedHandlerPositions.set(change.field.id,handlerPositionCodes);
+    }
     const impacts = new Map<string,WorkflowFieldPolicyImpact>();
     for (const stepKey of [...new Set(changes.map((item)=>item.field.step_key))]) {
       impacts.set(stepKey,await inspectWorkflowFieldPolicyImpact(workflowId,stepKey));
@@ -447,12 +469,21 @@ export async function action({ request }: Route.ActionArgs) {
     for (const mode of ["required","optional","hidden"] as const) {
       const modeChanges = changes.filter((item)=>item.mode===mode);
       const flags = editableWorkflowFieldFlags(mode);
-      for (const changeChunk of chunkD1Rows(modeChanges,2,4)) {
+      for (const changeChunk of chunkD1Rows(modeChanges,4,4)) {
         updateStatements.push(env.DB.prepare(
-          `UPDATE workflow_step_fields SET is_required=?,is_active=?,updated_at=?
+          `UPDATE workflow_step_fields SET is_required=?,is_active=?,
+             handler_position_codes=CASE id
+               ${changeChunk.map(()=>"WHEN ? THEN ?").join(" ")}
+               ELSE handler_position_codes END,
+             updated_at=?
            WHERE workflow_id=? AND (${changeChunk.map(()=>"(id=? AND updated_at=?)").join(" OR ")})`,
         ).bind(
-          flags.isRequired,flags.isActive,now,workflowId,
+          flags.isRequired,flags.isActive,
+          ...changeChunk.flatMap((item)=>[
+            item.field.id,
+            resolvedHandlerPositions.get(item.field.id) ?? "",
+          ]),
+          now,workflowId,
           ...changeChunk.flatMap((item)=>[item.field.id,item.updatedAt]),
         ));
       }
@@ -479,6 +510,13 @@ export async function action({ request }: Route.ActionArgs) {
         sortOrder:field.sort_order,
         optionsText:field.options_text,
         helpText:field.help_text,
+      });
+      await synchronizeWorkflowFieldHandlerPositionsForInstances({
+        workflowId,
+        stepKey:field.step_key,
+        fieldKey:field.field_key,
+        moduleCode:field.module_code,
+        handlerPositionCodes:resolvedHandlerPositions.get(field.id) ?? "",
       });
       if (flags.isActive)
         await ensureFieldPolicyModule(workflowId,field.step_id,field.module_code,flags.isRequired,now);
@@ -568,13 +606,70 @@ export async function action({ request }: Route.ActionArgs) {
     return { success:`已一次应用 ${changes.length} 项字段规则，现有订单后续门禁已同步${taskText?`；${taskText}`:""}${preservedText}` };
   }
 
+  if (intent === "field_positions_update") {
+    const fieldId = valueOf(form, "fieldId");
+    const field = await env.DB.prepare(
+      `SELECT field.id,field.field_key,field.label,field.is_active,
+              step.step_key,COALESCE(field.module_code,'consignment') module_code
+       FROM workflow_step_fields field
+       JOIN workflow_steps step ON step.id=field.step_id
+       WHERE field.id=? AND field.workflow_id=?`,
+    ).bind(fieldId, workflowId).first<{
+      id:string;
+      field_key:string;
+      label:string;
+      is_active:number;
+      step_key:string;
+      module_code:OrderModuleCode;
+    }>();
+    if (!field) return { formError:"字段不存在或已被其他窗口删除" };
+    const selected = serializeWorkflowFieldHandlerPositionCodes(
+      form.getAll("handlerPositions").filter(
+        (item): item is string => typeof item === "string",
+      ),
+    );
+    if (field.is_active && !selected)
+      return { formError:"启用字段至少需要一个可填写岗位" };
+    const selectedCodes = selected ? selected.split(",") : [];
+    if (selectedCodes.length) {
+      const valid = await env.DB.prepare(
+        `SELECT COUNT(*) count FROM positions
+         WHERE organization_id=? AND status='active'
+           AND code IN (${d1Placeholders(selectedCodes.length)})`,
+      ).bind(current.organizationId, ...selectedCodes).first<{ count:number }>();
+      if (Number(valid?.count || 0) !== selectedCodes.length)
+        return { formError:"填写岗位中包含已停用或无效岗位，请刷新后重试" };
+    }
+    await env.DB.prepare(
+      "UPDATE workflow_step_fields SET handler_position_codes=?,updated_at=? WHERE id=? AND workflow_id=?",
+    ).bind(selected, now, field.id, workflowId).run();
+    await synchronizeWorkflowFieldHandlerPositionsForInstances({
+      workflowId,
+      stepKey:field.step_key,
+      fieldKey:field.field_key,
+      moduleCode:field.module_code,
+      handlerPositionCodes:selected,
+    });
+    await writeAudit({
+      request,
+      action:"workflow.field.handler_positions.update",
+      resourceType:"workflow_step_field",
+      resourceId:field.id,
+      organizationId:current.organizationId,
+      actorUserId:current.userId,
+      metadata:{ workflowId,fieldKey:field.field_key,stepKey:field.step_key,handlerPositionCodes:selectedCodes },
+    });
+    return { success:`字段“${field.label}”的填写岗位已更新；当前和未来节点立即采用新规则` };
+  }
+
   if (intent === "field_mode_update") {
     const fieldId = valueOf(form, "fieldId");
     const mode = editableWorkflowFieldMode(valueOf(form, "fieldMode"));
     if (!mode) return { formError: "字段规则只能设置为必填、选填或隐藏" };
     const field = await env.DB.prepare(
       `SELECT f.id,f.step_id,s.step_key,f.field_key,f.label,f.field_type,f.is_required,f.is_active,f.sort_order,
-        f.options_text,f.help_text,COALESCE(f.module_code,'consignment') module_code,f.updated_at
+        f.options_text,f.help_text,f.handler_position_codes,
+        COALESCE(f.module_code,'consignment') module_code,f.updated_at
        FROM workflow_step_fields f JOIN workflow_steps s ON s.id=f.step_id
        WHERE f.id=? AND f.workflow_id=?`,
     )
@@ -591,6 +686,7 @@ export async function action({ request }: Route.ActionArgs) {
         sort_order: number;
         options_text: string | null;
         help_text: string | null;
+        handler_position_codes: string | null;
         module_code: OrderModuleCode;
         updated_at: string;
     }>();
@@ -602,12 +698,25 @@ export async function action({ request }: Route.ActionArgs) {
       return{formError:"该规则会影响现有订单，请先查看分层影响并在弹窗中二次确认"};
     }
     const flags = editableWorkflowFieldFlags(mode);
+    let handlerPositionCodes = serializeWorkflowFieldHandlerPositionCodes(
+      field.handler_position_codes,
+    );
+    if (flags.isActive && !handlerPositionCodes) {
+      handlerPositionCodes = await defaultWorkflowFieldHandlerPositionCodes({
+        workflowId,
+        stepId:field.step_id,
+        moduleCode:field.module_code,
+      });
+      if (!handlerPositionCodes) {
+        return { formError:`字段“${field.label}”启用前必须先为所属模组配置责任岗位` };
+      }
+    }
     const expectedUpdatedAt=valueOf(form,"fieldUpdatedAt");
     if(!expectedUpdatedAt)return{formError:"字段版本信息缺失，请刷新工作流后重试"};
     const updateResult=await env.DB.prepare(
-      "UPDATE workflow_step_fields SET is_required=?,is_active=?,updated_at=? WHERE id=? AND workflow_id=? AND updated_at=?",
+      "UPDATE workflow_step_fields SET is_required=?,is_active=?,handler_position_codes=?,updated_at=? WHERE id=? AND workflow_id=? AND updated_at=?",
     )
-      .bind(flags.isRequired, flags.isActive, now, field.id, workflowId, expectedUpdatedAt)
+      .bind(flags.isRequired, flags.isActive, handlerPositionCodes, now, field.id, workflowId, expectedUpdatedAt)
       .run();
     if(!updateResult.meta.changes){
       return{formError:"该字段已被其他窗口修改，请刷新后查看最新规则再操作"};
@@ -624,6 +733,13 @@ export async function action({ request }: Route.ActionArgs) {
       sortOrder: field.sort_order,
       optionsText: field.options_text,
       helpText: field.help_text,
+    });
+    await synchronizeWorkflowFieldHandlerPositionsForInstances({
+      workflowId,
+      stepKey:field.step_key,
+      fieldKey:field.field_key,
+      moduleCode:field.module_code,
+      handlerPositionCodes,
     });
     if (flags.isActive) {
       await ensureFieldPolicyModule(workflowId, field.step_id, field.module_code, flags.isRequired, now);
@@ -841,9 +957,16 @@ export async function action({ request }: Route.ActionArgs) {
       return{formError:"新增字段会同步到现有订单，请先查看分层影响并在弹窗中二次确认"};
     }
     const id = crypto.randomUUID();
+    const handlerPositionCodes = await defaultWorkflowFieldHandlerPositionCodes({
+      workflowId,
+      stepId:step.id,
+      moduleCode:parsed.moduleCode,
+    });
+    if (parsed.active && !handlerPositionCodes)
+      return { formError:"所属模组尚未配置负责岗位，请先设置模组或办理步骤岗位" };
     await env.DB.prepare(
-      `INSERT INTO workflow_step_fields(id,workflow_id,step_id,field_key,label,field_type,is_required,is_active,sort_order,options_text,help_text,module_code,created_at,updated_at)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO workflow_step_fields(id,workflow_id,step_id,field_key,label,field_type,is_required,is_active,sort_order,options_text,help_text,module_code,handler_position_codes,created_at,updated_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     )
       .bind(
         id,
@@ -858,6 +981,7 @@ export async function action({ request }: Route.ActionArgs) {
         parsed.optionsText,
         parsed.helpText,
         parsed.moduleCode,
+        handlerPositionCodes,
         now,
         now,
       )
@@ -874,6 +998,13 @@ export async function action({ request }: Route.ActionArgs) {
       sortOrder:parsed.sortOrder,
       optionsText:parsed.optionsText,
       helpText:parsed.helpText,
+    });
+    await synchronizeWorkflowFieldHandlerPositionsForInstances({
+      workflowId,
+      stepKey:step.step_key,
+      fieldKey:parsed.fieldKey,
+      moduleCode:parsed.moduleCode,
+      handlerPositionCodes,
     });
     if (parsed.active) {
       await ensureFieldPolicyModule(workflowId, step.id, parsed.moduleCode, parsed.required, now);
@@ -974,13 +1105,20 @@ export async function action({ request }: Route.ActionArgs) {
         catalog.optionsText ?? null,catalog.helpText,catalog.moduleCode,now,fieldId,workflowId,
       ).run();
     } else {
+      const handlerPositionCodes = await defaultWorkflowFieldHandlerPositionCodes({
+        workflowId,
+        stepId:step.id,
+        moduleCode:catalog.moduleCode,
+      });
+      if (flags.isActive && !handlerPositionCodes)
+        return { formError:"所属模组尚未配置负责岗位，请先设置模组或办理步骤岗位" };
       await env.DB.prepare(
-        `INSERT INTO workflow_step_fields(id,workflow_id,step_id,field_key,label,field_type,is_required,is_active,sort_order,options_text,help_text,module_code,created_at,updated_at)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO workflow_step_fields(id,workflow_id,step_id,field_key,label,field_type,is_required,is_active,sort_order,options_text,help_text,module_code,handler_position_codes,created_at,updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       ).bind(
         fieldId,workflowId,step.id,catalog.fieldKey,catalog.label,catalog.fieldType,
         flags.isRequired,flags.isActive,sortOrder,catalog.optionsText ?? null,
-        catalog.helpText,catalog.moduleCode,now,now,
+        catalog.helpText,catalog.moduleCode,handlerPositionCodes,now,now,
       ).run();
     }
     if (flags.isActive) {
@@ -998,6 +1136,16 @@ export async function action({ request }: Route.ActionArgs) {
       sortOrder,
       optionsText: catalog.optionsText ?? null,
       helpText: catalog.helpText,
+    });
+    const effectiveHandlerPositions = await env.DB.prepare(
+      "SELECT handler_position_codes FROM workflow_step_fields WHERE id=? AND workflow_id=?",
+    ).bind(fieldId,workflowId).first<{ handler_position_codes:string|null }>();
+    await synchronizeWorkflowFieldHandlerPositionsForInstances({
+      workflowId,
+      stepKey:step.step_key,
+      fieldKey:catalog.fieldKey,
+      moduleCode:catalog.moduleCode,
+      handlerPositionCodes:effectiveHandlerPositions?.handler_position_codes ?? "",
     });
     if (exists?.step_id && exists.step_id !== step.id) {
       await reconcileFieldPolicyModule(workflowId, exists.step_id, exists.module_code, now);
@@ -1061,17 +1209,38 @@ export async function action({ request }: Route.ActionArgs) {
   if (intent === "field_update") {
     const fieldId = valueOf(form, "fieldId");
     const field = await env.DB.prepare(
-      `SELECT f.id,f.step_id,s.step_key,f.field_key,COALESCE(f.module_code,'consignment') module_code
+      `SELECT f.id,f.step_id,s.step_key,f.field_key,f.handler_position_codes,
+              COALESCE(f.module_code,'consignment') module_code
        FROM workflow_step_fields f JOIN workflow_steps s ON s.id=f.step_id
        WHERE f.id=? AND f.workflow_id=?`,
     )
       .bind(fieldId, workflowId)
-      .first<{ id: string; step_id: string; step_key: string; field_key: string; module_code: OrderModuleCode }>();
+      .first<{
+        id: string;
+        step_id: string;
+        step_key: string;
+        field_key: string;
+        handler_position_codes: string | null;
+        module_code: OrderModuleCode;
+      }>();
     if (!field) return { formError: "字段不存在" };
     const parsed = parseFieldForm(form);
     if ("formError" in parsed) return parsed;
+    let handlerPositionCodes = serializeWorkflowFieldHandlerPositionCodes(
+      field.handler_position_codes,
+    );
+    if (parsed.active && !handlerPositionCodes) {
+      handlerPositionCodes = await defaultWorkflowFieldHandlerPositionCodes({
+        workflowId,
+        stepId:field.step_id,
+        moduleCode:parsed.moduleCode,
+      });
+      if (!handlerPositionCodes) {
+        return { formError:`字段“${parsed.label}”启用前必须先为所属模组配置责任岗位` };
+      }
+    }
     await env.DB.prepare(
-      "UPDATE workflow_step_fields SET field_key=?,label=?,field_type=?,is_required=?,is_active=?,sort_order=?,options_text=?,help_text=?,module_code=?,updated_at=? WHERE id=? AND workflow_id=?",
+      "UPDATE workflow_step_fields SET field_key=?,label=?,field_type=?,is_required=?,is_active=?,sort_order=?,options_text=?,help_text=?,module_code=?,handler_position_codes=?,updated_at=? WHERE id=? AND workflow_id=?",
     )
       .bind(
         parsed.fieldKey,
@@ -1083,6 +1252,7 @@ export async function action({ request }: Route.ActionArgs) {
         parsed.optionsText,
         parsed.helpText,
         parsed.moduleCode,
+        handlerPositionCodes,
         now,
         fieldId,
         workflowId,
@@ -1106,6 +1276,13 @@ export async function action({ request }: Route.ActionArgs) {
       sortOrder: parsed.sortOrder,
       optionsText: parsed.optionsText,
       helpText: parsed.helpText,
+    });
+    await synchronizeWorkflowFieldHandlerPositionsForInstances({
+      workflowId,
+      stepKey:field.step_key,
+      fieldKey:parsed.fieldKey,
+      moduleCode:parsed.moduleCode,
+      handlerPositionCodes,
     });
     await reconcileFieldPolicyModule(workflowId, field.step_id, field.module_code, now);
     if (field.module_code !== parsed.moduleCode) {
@@ -1318,7 +1495,7 @@ async function copyWorkflowStepsAndFields(sourceWorkflowId: string, targetWorkfl
   if (statements.length) await env.DB.batch(statements);
 
   const sourceFields = await env.DB.prepare(
-    "SELECT step_id,field_key,label,field_type,is_required,is_active,sort_order,options_text,help_text,COALESCE(module_code,'consignment') module_code FROM workflow_step_fields WHERE workflow_id=? ORDER BY sort_order,field_key",
+    "SELECT step_id,field_key,label,field_type,is_required,is_active,sort_order,options_text,help_text,handler_position_codes,COALESCE(module_code,'consignment') module_code FROM workflow_step_fields WHERE workflow_id=? ORDER BY sort_order,field_key",
   )
     .bind(sourceWorkflowId)
     .all<Omit<StepField, "id">>();
@@ -1327,8 +1504,8 @@ async function copyWorkflowStepsAndFields(sourceWorkflowId: string, targetWorkfl
       const targetStepId = stepIdMap.get(field.step_id);
       if (!targetStepId) return null;
       return env.DB.prepare(
-        `INSERT INTO workflow_step_fields(id,workflow_id,step_id,field_key,label,field_type,is_required,is_active,sort_order,options_text,help_text,module_code,created_at,updated_at)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO workflow_step_fields(id,workflow_id,step_id,field_key,label,field_type,is_required,is_active,sort_order,options_text,help_text,module_code,handler_position_codes,created_at,updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       ).bind(
         crypto.randomUUID(),
         targetWorkflowId,
@@ -1342,6 +1519,7 @@ async function copyWorkflowStepsAndFields(sourceWorkflowId: string, targetWorkfl
         field.options_text,
         field.help_text,
         field.module_code,
+        field.handler_position_codes,
         now,
         now,
       );
@@ -1600,6 +1778,30 @@ function validateWorkflowConfiguration(
   );
   if (duplicateFieldKeys.length)
     issues.push(`同一工作流内字段键不能跨节点重复：${[...new Set(duplicateFieldKeys.map((field) => field.field_key))].join("、")}`);
+  const fieldsWithoutHandlers = fields.filter(
+    (field) => field.is_active && !serializeWorkflowFieldHandlerPositionCodes(
+      field.handler_position_codes,
+    ),
+  );
+  if (fieldsWithoutHandlers.length) {
+    issues.push(
+      `启用字段必须配置填写岗位：${fieldsWithoutHandlers.map((field) => field.label).join("、")}`,
+    );
+  }
+  const activePositionCodes = new Set(
+    positions.filter((position) => position.status === "active")
+      .map((position) => position.code),
+  );
+  const fieldsWithInvalidHandlers = fields.filter((field) =>
+    field.is_active && serializeWorkflowFieldHandlerPositionCodes(
+      field.handler_position_codes,
+    ).split(",").filter(Boolean).some((code) => !activePositionCodes.has(code)),
+  );
+  if (fieldsWithInvalidHandlers.length) {
+    issues.push(
+      `字段填写岗位已停用或不存在：${fieldsWithInvalidHandlers.map((field) => field.label).join("、")}`,
+    );
+  }
   for (const step of activeSteps) {
     const stepModules = modules.filter((item) => item.step_id === step.id && item.is_active);
     if (!stepModules.length) issues.push(`节点“${step.name}”没有启用的功能模组`);
@@ -1630,7 +1832,7 @@ async function loadWorkflowValidationIssues(workflowId: string, organizationId: 
     ).bind(workflowId).all<ModuleTask>(),
     env.DB.prepare(
       `SELECT id,step_id,field_key,label,field_type,is_required,is_active,sort_order,
-        options_text,help_text,COALESCE(module_code,'consignment') module_code
+        options_text,help_text,handler_position_codes,COALESCE(module_code,'consignment') module_code
        FROM workflow_step_fields WHERE workflow_id=? ORDER BY sort_order,field_key`,
     ).bind(workflowId).all<StepField>(),
     loadPublicationPositionReadiness(organizationId),
@@ -1695,7 +1897,6 @@ async function loadPublicationPositionReadiness(organizationId: string) {
     positionCode: string;
     permissionCodes: string[];
     permissionOverrides: ReturnType<typeof organizationAssigneePermissionOverrides>;
-    workflowAccessOverrides: ReturnType<typeof organizationAssigneeWorkflowAccessOverrides>;
   }>>();
   for (const member of members) {
     if (!member.position_code || !member.membership_id) continue;
@@ -1705,7 +1906,6 @@ async function loadPublicationPositionReadiness(organizationId: string) {
       positionCode: member.position_code,
       permissionCodes: (member.permission_codes ?? "").split(",").filter(Boolean),
       permissionOverrides: organizationAssigneePermissionOverrides(member),
-      workflowAccessOverrides: organizationAssigneeWorkflowAccessOverrides(member),
     });
     membersByPosition.set(member.position_code, list);
   }
@@ -2316,6 +2516,7 @@ function NodeConfigDialog({
               steps={steps}
               fields={fieldsByStep.get(step.id) ?? []}
               allFields={allFields}
+              positions={positions}
               structureEditable={structureEditable}
               requirementEditable={requirementEditable}
               used={!structureEditable}
@@ -2522,6 +2723,7 @@ function FieldList({
   steps,
   fields,
   allFields,
+  positions,
   structureEditable,
   requirementEditable,
   used,
@@ -2537,6 +2739,7 @@ function FieldList({
   steps: Step[];
   fields: StepField[];
   allFields: StepField[];
+  positions: PositionOption[];
   structureEditable: boolean;
   requirementEditable: boolean;
   used:boolean;
@@ -2558,7 +2761,7 @@ function FieldList({
       </div>
       <div className="table-wrap workflow-field-table">
         <table>
-          <thead><tr><th>顺序</th><th>字段</th><th>业务模块</th><th>类型</th><th>当前规则</th><th>说明</th><th>操作</th></tr></thead>
+          <thead><tr><th>顺序</th><th>字段</th><th>业务模块</th><th>类型</th><th>当前规则</th><th>说明</th><th>填写岗位</th><th>操作</th></tr></thead>
           <tbody>
             {fields.map((field) => {
               const mode = workflowFieldMode(field);
@@ -2577,6 +2780,15 @@ function FieldList({
                   <td><span className={`status-pill workflow-mode-${mode}`}>{workflowFieldModes.find((item) => item.value === mode)?.label}</span></td>
                   <td>{field.help_text || "—"}</td>
                   <td>
+                    <FieldHandlerPositions
+                      workflowId={workflowId}
+                      field={field}
+                      positions={positions}
+                      editable={requirementEditable}
+                      busy={busy}
+                    />
+                  </td>
+                  <td>
                     <div className="workflow-field-row-actions">
                       {requirementEditable && (
                         <RequirementModeSelect field={field} mode={draftMode} changed={modeChanged} busy={busy} onModeChange={onModeChange}/>
@@ -2591,7 +2803,7 @@ function FieldList({
                 </tr>
               );
             })}
-            {!fields.length && <tr><td colSpan={7} className="empty-state">该节点暂未配置字段。</td></tr>}
+            {!fields.length && <tr><td colSpan={8} className="empty-state">该节点暂未配置字段。</td></tr>}
           </tbody>
         </table>
       </div>
@@ -2611,6 +2823,47 @@ function FieldList({
       )}
     </div>
   );
+}
+
+function FieldHandlerPositions({
+  workflowId,
+  field,
+  positions,
+  editable,
+  busy,
+}: {
+  workflowId:string;
+  field:StepField;
+  positions:PositionOption[];
+  editable:boolean;
+  busy:boolean;
+}) {
+  const selected = new Set(
+    (field.handler_position_codes || "").split(",").filter(Boolean),
+  );
+  const label = positions.filter((position) => selected.has(position.code))
+    .map((position) => position.name).join("、") || "未配置";
+  if (!editable) return <span className="workflow-field-position-summary">{label}</span>;
+  return <details className="workflow-field-position-editor">
+    <summary>{label}</summary>
+    <Form method="post">
+      <input type="hidden" name="intent" value="field_positions_update"/>
+      <input type="hidden" name="workflowId" value={workflowId}/>
+      <input type="hidden" name="fieldId" value={field.id}/>
+      <div>
+        {positions.map((position) => <label key={position.code}>
+          <input
+            type="checkbox"
+            name="handlerPositions"
+            value={position.code}
+            defaultChecked={selected.has(position.code)}
+          />
+          <span>{position.name}</span>
+        </label>)}
+      </div>
+      <button className="primary small" disabled={busy}>保存岗位</button>
+    </Form>
+  </details>;
 }
 
 function RequirementModeSelect({

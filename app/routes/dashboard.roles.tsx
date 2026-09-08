@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { Form, useNavigation } from "react-router";
 import type { Route } from "./+types/dashboard.roles";
-import { canEditWorkflowDefinition, requireSessionUser } from "../lib/auth.server";
+import { requireSessionUser } from "../lib/auth.server";
 import { validateCode, valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import { Modal } from "../components/Modal";
@@ -13,7 +13,14 @@ import {
   type PermissionOverride,
 } from "../lib/permission-blocks";
 import { inspectAccessControlSchema } from "../lib/access-control-schema.server";
-import type { WorkflowNodeAccessOverride } from "../lib/workflow-node-access";
+import { canManageAccessConfiguration } from "../lib/access-configuration-authority";
+import {
+  normalizeWorkflowFieldHandlerPositionCodes,
+  serializeWorkflowFieldHandlerPositionCodes,
+  toggleWorkflowFieldHandlerPosition,
+} from "../lib/workflow-field-position-access";
+import { synchronizeWorkflowFieldHandlerPositionsForInstances } from "../lib/workflow-fields.server";
+import type { OrderModuleCode } from "../lib/order-modules";
 
 type RoleRow = {
   id: string;
@@ -36,15 +43,23 @@ type MemberRow = {
   inherited_permissions: string | null;
   override_entries: string | null;
 };
-type WorkflowNodeRow = {
+type PositionRow = {
+  code: string;
+  name: string;
+  department_name: string;
+};
+type WorkflowFieldPermissionRow = {
+  id: string;
+  workflow_id: string;
+  workflow_name: string;
+  version_number: number;
   step_key: string;
   step_name: string;
-  module_code: string;
+  module_code: OrderModuleCode;
   module_name: string;
-  responsibility_position_codes: string | null;
-};
-type MemberWorkflowOverrideRow = WorkflowNodeAccessOverride & {
-  membershipId: string;
+  field_key: string;
+  field_label: string;
+  handler_position_codes: string | null;
 };
 
 const moduleLabels: Record<string, string> = {
@@ -73,13 +88,13 @@ export async function loader({ request }: Route.LoaderArgs) {
       roles: [] as RoleRow[],
       permissions: [] as PermissionRow[],
       members: [] as MemberRow[],
-      workflowNodes: [] as WorkflowNodeRow[],
-      workflowOverrides: [] as MemberWorkflowOverrideRow[],
+      positions: [] as PositionRow[],
+      workflowFields: [] as WorkflowFieldPermissionRow[],
       schemaReady: false,
       schemaMissing: schema.missing,
     };
   }
-  const [roles, permissions, members, workflowNodes, workflowOverrides] = await Promise.all([
+  const [roles, permissions, members, positions, workflowFields] = await Promise.all([
     env.DB.prepare(
       `SELECT r.id,r.code,r.name,r.description,r.is_system,r.status,
               GROUP_CONCAT(DISTINCT rp.permission_code) permissions,
@@ -117,41 +132,43 @@ export async function loader({ request }: Route.LoaderArgs) {
        ORDER BY p.sort_order,u.display_name`,
     ).bind(current.organizationId).all<MemberRow>(),
     env.DB.prepare(
-      `SELECT step.step_key,
-              step.name step_name,
-              module.module_code,
-              module.display_name module_name,
-              GROUP_CONCAT(DISTINCT module.responsibility_position_code) responsibility_position_codes
-       FROM workflow_definitions workflow
-       JOIN workflow_steps step
-         ON step.workflow_id=workflow.id AND step.is_active=1
-       JOIN workflow_step_modules module
-         ON module.workflow_id=workflow.id
-        AND module.step_id=step.id
-        AND module.is_active=1
-       WHERE workflow.organization_id=?
-         AND workflow.lifecycle_status='published'
-         AND workflow.status='active'
-       GROUP BY step.step_key,step.name,module.module_code,module.display_name
-       ORDER BY MIN(step.sort_order),MIN(module.sort_order),module.display_name`,
-    ).bind(current.organizationId).all<WorkflowNodeRow>(),
+      `SELECT position.code,position.name,department.name department_name
+       FROM positions position
+       JOIN departments department
+         ON department.organization_id=position.organization_id
+        AND department.code=position.department_code
+       WHERE position.organization_id=? AND position.status='active'
+       ORDER BY department.sort_order,position.sort_order,position.name`,
+    ).bind(current.organizationId).all<PositionRow>(),
     env.DB.prepare(
-      `SELECT override.membership_id membershipId,
-              override.step_key stepKey,
-              override.module_code moduleCode,
-              override.effect
-       FROM membership_workflow_access_overrides override
-       JOIN memberships membership ON membership.id=override.membership_id
-       WHERE membership.organization_id=?`,
-    ).bind(current.organizationId).all<MemberWorkflowOverrideRow>(),
+      `SELECT field.id,workflow.id workflow_id,workflow.name workflow_name,
+              workflow.version_number,step.step_key,step.name step_name,
+              COALESCE(field.module_code,'consignment') module_code,
+              COALESCE(module.display_name,field.module_code,'委托资料') module_name,
+              field.field_key,field.label field_label,field.handler_position_codes
+       FROM workflow_step_fields field
+       JOIN workflow_definitions workflow ON workflow.id=field.workflow_id
+       JOIN workflow_steps step ON step.id=field.step_id
+       LEFT JOIN workflow_step_modules module
+         ON module.workflow_id=field.workflow_id
+        AND module.step_id=field.step_id
+        AND module.module_code=COALESCE(field.module_code,'consignment')
+       WHERE workflow.organization_id=?
+         AND workflow.lifecycle_status!='retired'
+         AND workflow.status='active'
+         AND step.is_active=1
+         AND field.is_active=1
+       ORDER BY workflow.name,workflow.version_number DESC,step.sort_order,
+                COALESCE(module.sort_order,9999),field.sort_order,field.label`,
+    ).bind(current.organizationId).all<WorkflowFieldPermissionRow>(),
   ]);
   return {
     current,
     roles: roles.results,
     permissions: permissions.results,
     members: members.results,
-    workflowNodes: workflowNodes.results,
-    workflowOverrides: workflowOverrides.results,
+    positions: positions.results,
+    workflowFields: workflowFields.results,
     schemaReady: true,
     schemaMissing: [] as string[],
   };
@@ -182,7 +199,7 @@ function rolePermissionStatements(roleId: string, selected: string[]) {
 
 export async function action({ request }: Route.ActionArgs) {
   const current = await requireSessionUser(request);
-  if (!current.permissions.includes("role.manage") && !canEditWorkflowDefinition(current)) {
+  if (!canManageAccessConfiguration(current)) {
     throw new Response("无权管理账号资格", { status: 403 });
   }
   const schema = await inspectAccessControlSchema(env.DB);
@@ -208,44 +225,14 @@ export async function action({ request }: Route.ActionArgs) {
     }
 
     const overrides: PermissionOverride[] = [];
-    const workflowOverrides: WorkflowNodeAccessOverride[] = [];
     for (const [key, rawValue] of form.entries()) {
       if (typeof rawValue !== "string" || !["allow", "deny"].includes(rawValue)) continue;
       if (key.startsWith("override:")) {
         overrides.push({ code: key.slice("override:".length), effect: rawValue as "allow" | "deny" });
-        continue;
-      }
-      if (key.startsWith("workflowOverride:")) {
-        const [stepKey, moduleCode] = key.slice("workflowOverride:".length).split(":");
-        if (stepKey && moduleCode) {
-          workflowOverrides.push({
-            stepKey,
-            moduleCode,
-            effect: rawValue as "allow" | "deny",
-          });
-        }
       }
     }
     if (!await validatePermissionSelection(overrides.map((item) => item.code))) {
       return { formError: "账户权限积木中包含无效选项", targetId: membershipId };
-    }
-    const configuredNodes = await env.DB.prepare(
-      `SELECT DISTINCT step.step_key,module.module_code
-       FROM workflow_definitions workflow
-       JOIN workflow_steps step ON step.workflow_id=workflow.id AND step.is_active=1
-       JOIN workflow_step_modules module
-         ON module.workflow_id=workflow.id
-        AND module.step_id=step.id
-        AND module.is_active=1
-       WHERE workflow.organization_id=?
-         AND workflow.lifecycle_status='published'
-         AND workflow.status='active'`,
-    ).bind(current.organizationId).all<{ step_key: string; module_code: string }>();
-    const configuredNodeKeys = new Set(
-      configuredNodes.results.map((item) => `${item.step_key}:${item.module_code}`),
-    );
-    if (workflowOverrides.some((item) => !configuredNodeKeys.has(`${item.stepKey}:${item.moduleCode}`))) {
-      return { formError: "工作流节点资格中包含已停用或无效的节点", targetId: membershipId };
     }
     const insertStatements = chunkD1Rows(overrides, 6).map((overrideChunk) => env.DB.prepare(
       `INSERT INTO membership_permission_overrides(
@@ -254,24 +241,9 @@ export async function action({ request }: Route.ActionArgs) {
     ).bind(...overrideChunk.flatMap((override) => [
       membershipId, override.code, override.effect, current.userId, now, now,
     ])));
-    const insertWorkflowStatements = chunkD1Rows(workflowOverrides, 7).map((overrideChunk) => env.DB.prepare(
-      `INSERT INTO membership_workflow_access_overrides(
-        membership_id,step_key,module_code,effect,updated_by_user_id,created_at,updated_at
-      ) VALUES ${overrideChunk.map(() => "(?,?,?,?,?,?,?)").join(",")}`,
-    ).bind(...overrideChunk.flatMap((override) => [
-      membershipId,
-      override.stepKey,
-      override.moduleCode,
-      override.effect,
-      current.userId,
-      now,
-      now,
-    ])));
     await env.DB.batch([
       env.DB.prepare("DELETE FROM membership_permission_overrides WHERE membership_id=?").bind(membershipId),
-      env.DB.prepare("DELETE FROM membership_workflow_access_overrides WHERE membership_id=?").bind(membershipId),
       ...insertStatements,
-      ...insertWorkflowStatements,
     ]);
     await writeAudit({
       request,
@@ -280,9 +252,93 @@ export async function action({ request }: Route.ActionArgs) {
       resourceId: membershipId,
       organizationId: current.organizationId,
       actorUserId: current.userId,
-      metadata: { overrides, workflowOverrides },
+      metadata: { overrides },
     });
-    return { success: "账户权限与工作流节点资格已一次性应用", targetId: membershipId };
+    return { success: "账户安全权限已一次性应用", targetId: membershipId };
+  }
+
+  if (intent === "update_position_workflow_fields") {
+    const positionCode = valueOf(form, "positionCode");
+    const position = await env.DB.prepare(
+      `SELECT code,name FROM positions
+       WHERE organization_id=? AND code=? AND status='active'`,
+    ).bind(current.organizationId, positionCode).first<{ code: string; name: string }>();
+    if (!position) return { formError: "岗位不存在或已停用", targetId: positionCode };
+
+    const selectedIds = new Set(form.getAll("workflowFields").filter(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    ));
+    const fields = await env.DB.prepare(
+      `SELECT field.id,field.workflow_id,field.field_key,field.label,
+              field.is_active,field.handler_position_codes,
+              step.step_key,COALESCE(field.module_code,'consignment') module_code
+       FROM workflow_step_fields field
+       JOIN workflow_definitions workflow ON workflow.id=field.workflow_id
+       JOIN workflow_steps step ON step.id=field.step_id
+       WHERE workflow.organization_id=?
+         AND workflow.lifecycle_status!='retired'
+         AND workflow.status='active' AND step.is_active=1 AND field.is_active=1`,
+    ).bind(current.organizationId).all<{
+      id: string;
+      workflow_id: string;
+      field_key: string;
+      label: string;
+      is_active: number;
+      handler_position_codes: string | null;
+      step_key: string;
+      module_code: OrderModuleCode;
+    }>();
+    const knownIds = new Set(fields.results.map((field) => field.id));
+    if ([...selectedIds].some((id) => !knownIds.has(id))) {
+      return { formError: "字段列表已经变化，请刷新后重试", targetId: positionCode };
+    }
+
+    const changes = fields.results.flatMap((field) => {
+      const nextCodes = toggleWorkflowFieldHandlerPosition(
+        field.handler_position_codes,
+        positionCode,
+        selectedIds.has(field.id),
+      );
+      const previous = serializeWorkflowFieldHandlerPositionCodes(
+        normalizeWorkflowFieldHandlerPositionCodes(field.handler_position_codes),
+      );
+      const next = serializeWorkflowFieldHandlerPositionCodes(nextCodes);
+      return previous === next ? [] : [{ field, next }];
+    });
+    const invalid = changes.find(({ field, next }) => field.is_active && !next);
+    if (invalid) {
+      return {
+        formError: `字段“${invalid.field.label}”至少要保留一个填写岗位`,
+        targetId: positionCode,
+      };
+    }
+    if (changes.length) {
+      await env.DB.batch(changes.map(({ field, next }) => env.DB.prepare(
+        "UPDATE workflow_step_fields SET handler_position_codes=?,updated_at=? WHERE id=?",
+      ).bind(next, now, field.id)));
+      for (const { field, next } of changes) {
+        await synchronizeWorkflowFieldHandlerPositionsForInstances({
+          workflowId: field.workflow_id,
+          stepKey: field.step_key,
+          fieldKey: field.field_key,
+          moduleCode: field.module_code,
+          handlerPositionCodes: next,
+        });
+      }
+    }
+    await writeAudit({
+      request,
+      action: "position.workflow_fields.update",
+      resourceType: "position",
+      resourceId: position.code,
+      organizationId: current.organizationId,
+      actorUserId: current.userId,
+      metadata: { changedFieldCount: changes.length },
+    });
+    return {
+      success: `${position.name}的订单工作流字段权限已更新`,
+      targetId: position.code,
+    };
   }
 
   const selected = selectedPermissionCodes(form);
@@ -367,8 +423,7 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
     (groups[permission.module] ??= []).push(permission);
     return groups;
   }, {});
-  const canManage = loaderData.current.permissions.includes("role.manage") ||
-    canEditWorkflowDefinition(loaderData.current);
+  const canManage = canManageAccessConfiguration(loaderData.current);
   const success = actionData && "success" in actionData ? actionData.success : undefined;
   const formError = actionData && "formError" in actionData ? actionData.formError : undefined;
   const values = actionData && "values" in actionData ? actionData.values : undefined;
@@ -419,6 +474,50 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
       })}</div>
     </section>
 
+    <section className="permission-section position-workflow-field-section">
+      <div className="section-heading">
+        <div>
+          <h2>订单工作流字段权限</h2>
+          <p>按岗位配置可填写字段；这里不指定具体经办账号，订单仍由创建业务员或操作主管分配的负责人办理。</p>
+        </div>
+        <span>{loaderData.positions.length} 个有效岗位</span>
+      </div>
+      <div className="cards position-workflow-field-cards">
+        {loaderData.positions.map((position) => {
+          const selected = new Set(loaderData.workflowFields.filter((field) =>
+            normalizeWorkflowFieldHandlerPositionCodes(field.handler_position_codes)
+              .includes(position.code),
+          ).map((field) => field.id));
+          return <article className="role-card position-workflow-field-card" key={position.code}>
+            <div>
+              <span className="status-pill">{position.department_name}</span>
+              <h3>{position.name}</h3>
+              <code>{position.code}</code>
+              <p>{selected.size} 个订单工作流字段可填写</p>
+            </div>
+            <footer>
+              <span>岗位级权限</span>
+              <Modal
+                title={`订单字段权限 · ${position.name}`}
+                triggerLabel="配置字段"
+                triggerClassName="btn small"
+                closeSignal={actionData?.targetId === position.code && success}
+                size="xwide"
+              >
+                <PositionWorkflowFieldEditor
+                  position={position}
+                  fields={loaderData.workflowFields}
+                  selected={selected}
+                  disabled={!canManage}
+                  busy={busy}
+                />
+              </Modal>
+            </footer>
+          </article>;
+        })}
+      </div>
+    </section>
+
     <section className="permission-section account-permission-section">
       <div className="section-heading"><div><h2>账户权限积木</h2><p>在岗位角色之上为某个账号加权限或抽走权限，不改变同岗位其他人。</p></div><span>{loaderData.members.length} 个有效账号</span></div>
       <div className="table-wrap"><table className="account-permission-table">
@@ -437,17 +536,11 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
           const added = overrides.filter((item) => item.effect === "allow").length;
           const denied = overrides.filter((item) => item.effect === "deny").length;
           const overrideByCode = new Map(overrides.map((item) => [item.code, item.effect]));
-          const workflowOverrideByKey = new Map(
-            loaderData.workflowOverrides
-              .filter((item) => item.membershipId === member.membership_id)
-              .map((item) => [`${item.stepKey}:${item.moduleCode}`, item.effect]),
-          );
-          const workflowOverrideCount = workflowOverrideByKey.size;
           return <tr key={member.membership_id}>
             <td><strong>{member.display_name}</strong><small>{member.email}</small></td>
             <td>{member.position_name || "未绑定岗位"}</td>
             <td>{member.role_names || "未分配角色"}</td>
-            <td><strong>{effective.length} 项有效</strong><small>{protectedAccount ? "系统保护" : `权限积木 ${added + denied} · 节点资格 ${workflowOverrideCount}`}</small></td>
+            <td><strong>{effective.length} 项有效</strong><small>{protectedAccount ? "系统保护" : `安全权限积木 ${added + denied}`}</small></td>
             <td><Modal title={`账户权限 · ${member.display_name}`} triggerLabel="配置积木" triggerClassName="btn small" closeSignal={actionData?.targetId === member.membership_id && success} size="xwide">
               <Form method="post" className="permission-editor-form">
                 <input type="hidden" name="intent" value="update_account_overrides" />
@@ -470,11 +563,6 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
                     </label>;
                   })}
                 </section>)}</div>
-                <WorkflowNodeOverrideEditor
-                  nodes={loaderData.workflowNodes}
-                  selected={workflowOverrideByKey}
-                  disabled={!canManage || protectedAccount}
-                />
                 {canManage && !protectedAccount && <div className="permission-editor-actions"><span>确认后所有账户级改变一次性生效并写入审计。</span><button className="primary" disabled={busy}>确认应用</button></div>}
               </Form>
             </Modal></td>
@@ -485,51 +573,56 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
   </>;
 }
 
-function WorkflowNodeOverrideEditor({
-  nodes,
+function PositionWorkflowFieldEditor({
+  position,
+  fields,
   selected,
   disabled,
+  busy,
 }: {
-  nodes: WorkflowNodeRow[];
-  selected: Map<string, "allow" | "deny">;
+  position: PositionRow;
+  fields: WorkflowFieldPermissionRow[];
+  selected: Set<string>;
   disabled: boolean;
+  busy: boolean;
 }) {
-  const groupedNodes = nodes.reduce<Map<string, WorkflowNodeRow[]>>((groups, node) => {
-    const key = `${node.step_key}:${node.step_name}`;
-    const current = groups.get(key) ?? [];
-    current.push(node);
-    groups.set(key, current);
-    return groups;
+  const groups = fields.reduce<Map<string, WorkflowFieldPermissionRow[]>>((result, field) => {
+    const key = `${field.workflow_id}:${field.step_key}`;
+    const current = result.get(key) ?? [];
+    current.push(field);
+    result.set(key, current);
+    return result;
   }, new Map());
-  return <fieldset className="workflow-node-override-editor">
-    <legend>工作流节点账号资格</legend>
-    <p>继承表示按冻结工作流的责任岗位和具体负责人办理；允许可将本账号加入该节点候选范围；拒绝始终优先。</p>
-    <div className="workflow-node-override-grid">
-      {[...groupedNodes.entries()].map(([key, items]) => {
-        const [stepKey, stepName] = key.split(":");
-        return <section key={stepKey}>
-          <h3>{stepName}</h3>
-          {items.map((node) => {
-            const selectionKey = `${node.step_key}:${node.module_code}`;
-            const positions = node.responsibility_position_codes?.split(",").filter(Boolean).join(" / ") || "未指定岗位";
-            return <label className="workflow-node-override-row" key={selectionKey}>
-              <span><b>{node.module_name}</b><small>{positions}</small></span>
-              <select
-                name={`workflowOverride:${node.step_key}:${node.module_code}`}
-                defaultValue={selected.get(selectionKey) ?? "inherit"}
-                disabled={disabled}
-                aria-label={`${stepName}${node.module_name}账号资格`}
-              >
-                <option value="inherit">继承工作流</option>
-                <option value="allow">允许候选</option>
-                <option value="deny">明确拒绝</option>
-              </select>
-            </label>;
-          })}
-        </section>;
-      })}
+  return <Form method="post" className="permission-editor-form position-workflow-field-editor">
+    <input type="hidden" name="intent" value="update_position_workflow_fields" />
+    <input type="hidden" name="positionCode" value={position.code} />
+    <div className="permission-editor-notice">
+      <b>{position.name} · 岗位字段办理范围</b>
+      <span>勾选只决定该岗位能填写哪些字段；具体由谁办理仍取决于订单创建人与操作主管的任务分配。</span>
     </div>
-  </fieldset>;
+    <div className="position-workflow-field-grid">
+      {[...groups.entries()].map(([key, items]) => <section key={key}>
+        <h3>{items[0].workflow_name} v{items[0].version_number} · {items[0].step_name}</h3>
+        {items.map((field) => <label className="position-workflow-field-row" key={field.id}>
+          <input
+            type="checkbox"
+            name="workflowFields"
+            value={field.id}
+            defaultChecked={selected.has(field.id)}
+            disabled={disabled}
+          />
+          <span>
+            <b>{field.field_label}</b>
+            <small>{field.module_name} · {field.field_key}</small>
+          </span>
+        </label>)}
+      </section>)}
+    </div>
+    {!disabled && <div className="permission-editor-actions">
+      <span>保存后，当前开放节点与未来节点立即采用新岗位规则；已完成节点保持不变。</span>
+      <button className="primary" disabled={busy}>保存岗位字段权限</button>
+    </div>}
+  </Form>;
 }
 
 function PermissionCheckboxes({

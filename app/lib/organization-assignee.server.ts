@@ -50,10 +50,7 @@ export async function listActiveOrganizationAssignees(organizationId: string) {
          ) effective_permission) permission_codes,
       (SELECT GROUP_CONCAT(permission_override.permission_code||':'||permission_override.effect)
          FROM membership_permission_overrides permission_override
-        WHERE permission_override.membership_id=m.id) permission_override_entries,
-      (SELECT GROUP_CONCAT(workflow_override.step_key||':'||workflow_override.module_code||':'||workflow_override.effect)
-         FROM membership_workflow_access_overrides workflow_override
-        WHERE workflow_override.membership_id=m.id) workflow_access_entries
+        WHERE permission_override.membership_id=m.id) permission_override_entries
     ${activeOrganizationAssigneeBaseSql}
    ORDER BY d.sort_order,p.sort_order,u.display_name`;
   try {
@@ -62,8 +59,7 @@ export async function listActiveOrganizationAssignees(organizationId: string) {
       .all<OrganizationAssigneeMember>()).results;
   } catch (error) {
     if (
-      !isMissingSqliteTableError(error, "membership_permission_overrides") &&
-      !isMissingSqliteTableError(error, "membership_workflow_access_overrides")
+      !isMissingSqliteTableError(error, "membership_permission_overrides")
     ) throw error;
     const legacyRows = await env.DB.prepare(
       `SELECT u.id,u.display_name,m.id membership_id,

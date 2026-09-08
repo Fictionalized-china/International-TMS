@@ -39,6 +39,7 @@ const harness = vi.hoisted(() => {
       const statement = {
         bind: vi.fn(() => statement),
         first: vi.fn(async () => {
+          if (sql.includes("SELECT serial_code FROM warehouses")) return { serial_code: "01" };
           if (sql.includes("MAX(CAST(substr(batch_number")) return { next: 1 };
           if (sql.includes("WITH stock AS") && sql.includes("SELECT COUNT(*) total")) {
             return { total: candidates.length };

@@ -1,14 +1,6 @@
-export type WorkflowNodeAccessOverride = {
-  stepKey: string;
-  moduleCode: string;
-  effect: "allow" | "deny";
-};
-
 export type WorkflowNodeOperationSource =
-  | "administrator"
   | "assigned"
   | "responsibility_position"
-  | "account_override"
   | "denied";
 
 export type WorkflowNodeOperationAccess = {
@@ -22,33 +14,13 @@ type WorkflowNodeOperationUser = {
   positionCode: string | null;
   roleCodes: readonly string[];
   permissionOverrides?: readonly { code: string; effect: "allow" | "deny" }[];
-  workflowAccessOverrides?: readonly WorkflowNodeAccessOverride[];
 };
 
-export function isWorkflowAccessAdministrator(
-  user: Pick<WorkflowNodeOperationUser, "positionCode" | "roleCodes">,
-) {
-  return (
-    ["BOSS", "DEVELOPER"].includes(user.positionCode ?? "") ||
-    user.roleCodes.some((code) => ["owner", "boss", "developer"].includes(code))
-  );
-}
-
-function nodeOverride(
-  user: WorkflowNodeOperationUser,
-  stepKey: string | null,
-  moduleCode: string,
-) {
-  if (!stepKey) return null;
-  return user.workflowAccessOverrides?.find(
-    (item) => item.stepKey === stepKey && item.moduleCode === moduleCode,
-  )?.effect ?? null;
-}
-
 /**
- * Resolve the actor side of a frozen workflow-node gate.  Workflow ownership
- * is authoritative; static module permissions are only an explicit account
- * denial boundary and no longer have to be granted a second time.
+ * Resolve the actor side of a frozen workflow-node gate. Configuration
+ * authority never grants business-operation authority: once assigned, only
+ * the assigned account may operate; before assignment, the responsibility
+ * position is the candidate pool. Explicit safety denials still win.
  */
 export function resolveWorkflowNodeOperationAccess(input: {
   user: WorkflowNodeOperationUser;
@@ -66,26 +38,16 @@ export function resolveWorkflowNodeOperationAccess(input: {
   if (["completed", "cancelled"].includes(input.orderStatus)) {
     return { allowed: false, source: "denied", reason: "订单已经结束，当前节点仅供查看" };
   }
-  if (isWorkflowAccessAdministrator(input.user)) {
-    return { allowed: true, source: "administrator", reason: null };
-  }
 
   const modulePermission = `order.module.${input.moduleCode}.manage`;
   const moduleDenied = input.user.permissionOverrides?.some(
     (item) => item.code === modulePermission && item.effect === "deny",
   );
-  const accountNodeOverride = nodeOverride(
-    input.user,
-    input.stepKey,
-    input.moduleCode,
-  );
-  if (moduleDenied || accountNodeOverride === "deny") {
+  if (moduleDenied) {
     return {
       allowed: false,
       source: "denied",
-      reason: accountNodeOverride === "deny"
-        ? "当前账号已被明确禁止办理该工作流节点"
-        : "当前账号已被明确禁止办理该业务模块",
+      reason: "当前账号被明确禁止办理该业务模块",
     };
   }
 
@@ -100,9 +62,6 @@ export function resolveWorkflowNodeOperationAccess(input: {
       : { allowed: false, source: "denied", reason: "当前节点已经分配给其他账号" };
   }
 
-  if (accountNodeOverride === "allow") {
-    return { allowed: true, source: "account_override", reason: null };
-  }
   if (
     input.user.positionCode &&
     input.responsibilityPositionCodes.includes(input.user.positionCode)

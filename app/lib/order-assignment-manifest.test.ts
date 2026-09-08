@@ -141,7 +141,7 @@ describe("order assignment manifest", () => {
     );
   });
 
-  it("按责任岗位继承和节点覆盖计算派单候选", () => {
+  it("只按责任岗位和基础安全权限计算派单候选", () => {
     const group = buildOrderAssignmentManifest([row()]).groups;
     expect(orderAssignmentCandidateConfigurationErrors(group, [])).toEqual([
       "OPERATION 责任暂无符合节点资格的有效个人账户",
@@ -153,15 +153,13 @@ describe("order assignment manifest", () => {
     expect(orderAssignmentCandidateConfigurationErrors(group, [{
       position_code: "DOC",
       permission_codes: "order.view",
-      workflow_access_entries: "domestic_execution:transport:allow",
-    }])).toEqual([]);
-    expect(orderAssignmentCandidateConfigurationErrors(group, [{
-      position_code: "OPERATION",
-      permission_codes: "order.module.transport.manage",
-      workflow_access_entries: "domestic_execution:transport:deny",
     }])).toEqual([
       "OPERATION 责任暂无符合节点资格的有效个人账户",
     ]);
+    expect(orderAssignmentCandidateConfigurationErrors(group, [{
+      position_code: "OPERATION",
+      permission_codes: "order.view,order.module.transport.manage",
+    }])).toEqual([]);
   });
 
   it("builds a required assignment group from the frozen workflow snapshot", () => {

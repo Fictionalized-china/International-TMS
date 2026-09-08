@@ -5,7 +5,6 @@ import {
   orderAssignmentPermissionRequirements,
 } from "./order-assignment-manifest";
 import { satisfiesOrganizationAssigneePermissionRequirements } from "./organization-assignee";
-import type { WorkflowNodeAccessOverride } from "./workflow-node-access";
 
 export type PublicationStep = {
   id: string;
@@ -71,7 +70,6 @@ export type PublicationPositionReadiness = {
     positionCode?: string;
     permissionCodes: readonly string[];
     permissionOverrides?: readonly { code: string; effect: "allow" | "deny" }[];
-    workflowAccessOverrides?: readonly WorkflowNodeAccessOverride[];
   }[];
 };
 
@@ -333,12 +331,6 @@ function publicationMemberCanHandleNodes(
         override.code === `order.module.${node.moduleCode}.manage` &&
         override.effect === "deny",
     )) return false;
-    const nodeOverride = member.workflowAccessOverrides?.find(
-      (override) =>
-        override.stepKey === node.stepKey && override.moduleCode === node.moduleCode,
-    )?.effect;
-    if (nodeOverride === "deny") return false;
-    if (nodeOverride === "allow") return true;
     return member.positionCode === responsibilityPositionCode;
   });
 }
@@ -486,7 +478,7 @@ export function validateWorkflowResponsibilityReadiness(input: {
           );
       if (!hasEligibleMember) {
         issues.push(
-          `${taskLabel}没有符合节点资格的有效账号；请保留责任岗位继承资格，或由老板、开发者、人事显式允许其他账号`,
+          `${taskLabel}的责任岗位没有具备基础安全权限的有效账号；请调整责任岗位或岗位角色权限`,
         );
       }
     }
@@ -547,7 +539,7 @@ export function validateWorkflowResponsibilityReadiness(input: {
     );
     if (!hasCapableMember) {
       issues.push(
-        `岗位“${position?.name ?? positionCode}”没有同一有效个人账号可同时办理派单后的全部必办节点（${[...group.moduleCodes].join("、")}）；请调整节点资格或责任岗位后再发布`,
+        `岗位“${position?.name ?? positionCode}”没有同一有效个人账号可同时办理派单后的全部必办节点（${[...group.moduleCodes].join("、")}）；请调整责任岗位或岗位角色权限后再发布`,
       );
     }
   }

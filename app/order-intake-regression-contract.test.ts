@@ -29,16 +29,16 @@ describe("order intake regression contract", () => {
     expect(orderModuleRoute).toContain("仓库未清点的商品件数显示为“未统计”");
   });
 
-  it("loads an order by any active inbound mark and counts the first scan", () => {
+  it("identifies any active inbound mark from the unified warehouse scanner", () => {
     expect(warehouseAcceptanceRoute).toContain("FROM order_cargo_packages scanned_mark");
     expect(warehouseAcceptanceRoute).toContain("UPPER(scanned_mark.package_code)=UPPER(?)");
-    expect(warehouseAcceptanceRoute).toContain("initialScannedMarkCode = referencedMark.package_code.toUpperCase()");
-    expect(warehouseAcceptanceRoute).toContain("loaderData.initialScannedMarkCode ? [loaderData.initialScannedMarkCode] : []");
-    expect(warehouseAcceptanceRoute).toContain('inputLabel="扫描入仓唛头 / 订单号"');
-    expect(warehouseAcceptanceRoute).toContain("handleMarkInputChange");
-    expect(warehouseAcceptanceRoute).toContain("系统识别完整唛头后自动登记，无需点击按钮");
+    expect(warehouseAcceptanceRoute).toContain('scanFetcher.submit({intent:"scan_mark"');
+    expect(warehouseAcceptanceRoute).toContain('code,requestKey:crypto.randomUUID()');
+    expect(warehouseAcceptanceRoute).toContain("仓库统一扫描栏");
+    expect(warehouseAcceptanceRoute).toContain("同一个扫描栏服务当前仓库全部订单");
+    expect(warehouseAcceptanceRoute).toContain("扫描成功，已归入");
     expect(warehouseAcceptanceRoute).not.toContain(">加入本批</button>");
-    expect(warehouseAcceptanceRoute).toContain("本单不支持分批入库");
+    expect(warehouseAcceptanceRoute).toContain("入仓包装数完全按唛头扫描累计");
     expect(warehouseAcceptanceRoute).toContain("showPartial={false}");
   });
 });
