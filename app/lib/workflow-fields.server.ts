@@ -218,7 +218,8 @@ export async function ensureWorkflowCatalogFields(organizationId: string) {
     `UPDATE workflow_step_fields
      SET is_active=0,is_required=0,updated_at=?
      WHERE workflow_id IN (SELECT id FROM workflow_definitions WHERE organization_id=?)
-       AND field_key IN (${retiredFieldPlaceholders})`,
+       AND field_key IN (${retiredFieldPlaceholders})
+       AND (is_active<>0 OR is_required<>0)`,
   )
     .bind(now, organizationId, ...retiredFieldKeys)
     .run();
@@ -243,6 +244,11 @@ export async function ensureWorkflowCatalogFields(organizationId: string) {
        AND workflow_id IN (
          SELECT id FROM workflow_definitions
          WHERE organization_id=? AND code IN (${placeholders})
+       )
+       AND step_id<>(
+         SELECT target.id FROM workflow_steps target
+         WHERE target.workflow_id=workflow_step_fields.workflow_id
+           AND target.step_key='port_loading'
        )`,
   )
     .bind(now, organizationId, ...standardCodes)
@@ -266,7 +272,8 @@ export async function ensureWorkflowCatalogFields(organizationId: string) {
       `UPDATE workflow_step_fields
        SET is_active=0,is_required=0,updated_at=?
        WHERE workflow_id=? AND module_code='loading'
-         AND field_key IN (${excludedPlaceholders})`,
+         AND field_key IN (${excludedPlaceholders})
+         AND (is_active<>0 OR is_required<>0)`,
     )
       .bind(now, ftlWorkflow.id, ...excludedFields)
       .run();

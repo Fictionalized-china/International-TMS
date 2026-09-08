@@ -21107,15 +21107,16 @@ html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animatio
   padding: 9px 11px;
 }
 .warehouse-app-shell .acceptance-cargo-table table {
-  min-width: 900px;
+  min-width: 1080px;
 }
 .warehouse-app-shell .acceptance-cargo-table th:nth-child(1) { width: 220px; }
 .warehouse-app-shell .acceptance-cargo-table th:nth-child(2),
 .warehouse-app-shell .acceptance-cargo-table th:nth-child(3) { width: 160px; }
 .warehouse-app-shell .acceptance-cargo-table th:nth-child(4),
 .warehouse-app-shell .acceptance-cargo-table th:nth-child(5) { width: 150px; }
-.warehouse-app-shell .acceptance-cargo-table th:nth-child(6) { width: 170px; }
-.warehouse-app-shell .acceptance-cargo-table td:nth-child(-n + 6) {
+.warehouse-app-shell .acceptance-cargo-table th:nth-child(6) { width: 150px; }
+.warehouse-app-shell .acceptance-cargo-table th:nth-child(7) { width: 170px; }
+.warehouse-app-shell .acceptance-cargo-table td:nth-child(-n + 7) {
   white-space: normal;
   overflow-wrap: anywhere;
 }

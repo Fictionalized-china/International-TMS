@@ -500,9 +500,11 @@ export async function action({ request }: Route.ActionArgs) {
       actualWeight: policies.actualWeight.isActive
         ? nonNegativeNumber(form, `actualWeight_${index}`)
         : null,
-      // 国内仓收货只确认入仓包装与实重。最终包装的尺寸、体积和计费重
-      // 在二次包装/创建装车任务时登记，不能复用报价阶段的预估尺寸冒充实测。
-      actualVolume: null,
+      // 国内仓收货记录整票入仓包装的实重和总体积。最终包装的逐包尺寸
+      // 仍在二次包装/贴标阶段登记，不能复用报价阶段的预估尺寸冒充实测。
+      actualVolume: policies.actualVolume.isActive
+        ? nonNegativeNumber(form, `actualVolume_${index}`)
+        : null,
       actualLength: 0,
       actualWidth: 0,
       actualHeight: 0,
@@ -514,6 +516,8 @@ export async function action({ request }: Route.ActionArgs) {
   const receivedRows = actualRows.filter((item) => item.actualPackages > 0);
   if (policies.actualWeight.isRequired && receivedRows.some((item) => !item.actualWeight))
     return { formError: "有实收包装的货物必须填写大于 0 的实际重量" };
+  if (policies.actualVolume.isRequired && receivedRows.some((item) => !item.actualVolume))
+    return { formError: "有实收包装的货物必须填写大于 0 的实收总体积" };
   const inventoryRows = receivedRows.map((item) => ({
     ...item,
     // A package row needs at least one piece for the physical inventory
@@ -573,7 +577,8 @@ export async function action({ request }: Route.ActionArgs) {
   const piecesComparable = false;
   const weightComparable = policies.actualWeight.isActive &&
     receivedRows.every((item) => item.actualWeight !== null);
-  const volumeComparable = false;
+  const volumeComparable = policies.actualVolume.isActive &&
+    receivedRows.every((item) => item.actualVolume !== null);
   const difference = calculateWarehouseDifference(
     {
       pieces: piecesComparable ? expected.pieces : cumulative.pieces,
@@ -931,10 +936,11 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
         {scannedMarks.length>0&&<div className="inbound-mark-chip-list">{scannedMarks.map(code=><span key={code}>{code}<small>已登记</small></span>)}</div>}
       </section>
       <section className="panel acceptance-cargo-panel">
-        <div className="panel-header"><div><h2>包装收齐与实重核对</h2><p>入仓包装数完全按唛头扫描累计；国内仓只记录实重，不在收货环节重复统计商品件数和最终包装尺寸。</p></div><span className="status-pill">{loaderData.cargoItems.length} 条货物</span></div>
+        <div className="panel-header"><div><h2>包装收齐与实测核对</h2><p>入仓包装数按唛头扫描累计；仓库登记整票实重和总体积，不重复统计商品件数，最终包装尺寸留到二次打包贴标阶段。</p></div><span className="status-pill">{loaderData.cargoItems.length} 条货物</span></div>
         <div className="table-wrap acceptance-cargo-table"><table><thead><tr>
-          <th>货物</th><th>计划入仓包装</th><th>扫码累计</th><th>申报重量</th>
+          <th>货物</th><th>计划入仓包装</th><th>扫码累计</th><th>申报重量 / 体积</th>
           {policies.actualWeight.isActive && <th>本单实收重量 KG{acceptanceRequiredMarker(policies.actualWeight)}</th>}
+          {policies.actualVolume.isActive && <th>本单实收总体积 CBM{acceptanceRequiredMarker(policies.actualVolume)}</th>}
           <th>备注</th>
         </tr></thead><tbody>{loaderData.cargoItems.map((item,index) => {
           const expectedWeight = item.package_count * item.gross_weight_per_package_kg;
@@ -946,8 +952,9 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
             <td><strong>{item.line_no}. {item.cargo_name_cn}</strong><small>{item.cargo_name_en || "—"} · HS {item.hs_code || "—"}</small><small>{packageTypeLabel(item.package_type)}</small></td>
             <td><strong>{item.package_count} 包</strong><small>按预计包装数生成入仓唛头</small></td>
             <td><strong>{cumulativeScanned} / {item.package_count} 包</strong><small>{scannedForItem?`含本次新扫 ${scannedForItem} 包，确认后正式入库`:"等待扫描"}</small></td>
-            <td><strong>{expectedWeight.toFixed(2)} KG</strong><small>报价/委托申报值</small></td>
-            {policies.actualWeight.isActive && <td><input name={`actualWeight_${index}`} aria-label={`${item.cargo_name_cn} 本单实收重量`} type="number" min="0" step="0.001" defaultValue="" placeholder="称重后填写" required={policies.actualWeight.isRequired}/></td>}
+            <td><strong>{expectedWeight.toFixed(2)} KG</strong><small>{item.volume_per_package_cbm * item.package_count > 0 ? `${(item.volume_per_package_cbm * item.package_count).toFixed(3)} CBM` : "体积未申报"}</small></td>
+            {policies.actualWeight.isActive && <td><input name={`actualWeight_${index}`} aria-label={`${item.cargo_name_cn} 本单实收重量`} type="number" min="0.001" step="0.001" defaultValue="" placeholder="必填，称重后填写" required={policies.actualWeight.isRequired}/></td>}
+            {policies.actualVolume.isActive && <td><input name={`actualVolume_${index}`} aria-label={`${item.cargo_name_cn} 本单实收总体积`} type="number" min="0.001" step="0.001" defaultValue="" placeholder="必填，量方后填写" required={policies.actualVolume.isRequired}/></td>}
             <td><input name={`itemNotes_${index}`} placeholder="选填"/></td>
           </tr>;
         })}</tbody></table></div>

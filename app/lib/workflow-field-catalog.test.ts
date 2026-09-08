@@ -54,6 +54,19 @@ describe("workflow field building blocks", () => {
     ).toMatchObject({ defaultMode: "optional" });
   });
 
+  it("requires warehouse receiving weight and volume by default", () => {
+    for (const fieldKey of ["actual_weight_kg", "actual_volume_cbm"]) {
+      expect(
+        workflowFieldCatalog.find((item) => item.fieldKey === fieldKey),
+        fieldKey,
+      ).toMatchObject({
+        stepKey: "warehouse_receiving",
+        moduleCode: "warehouse",
+        defaultMode: "required",
+      });
+    }
+  });
+
   it("shows the order-creation baseline but keeps only the consignment letter as its gate", () => {
     const orderCreationFields = workflowFieldCatalog.filter(
       (field) => field.stepKey === "order_creation",
