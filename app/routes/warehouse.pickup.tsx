@@ -24,6 +24,7 @@ import {
   warehousePhysicalWorkflowAccessSql,
   warehousePhysicalWorkflowVisibilitySql,
 } from "../lib/warehouse-workflow-access.server";
+import { initialOverseasInboundScans } from "../lib/overseas-inbound-scan";
 
 type PickupPackage = {
   id: string;
@@ -147,6 +148,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     packages: activeOrder ? packages.results : [],
     activeOrder,
     pickupWorkflowPolicy,
+    initialScannedOul: url.searchParams.get("pickupScannedOul") || "",
     workflowGateReason: requestedOrderAccess && !requestedOrderAccess.available
       ? requestedOrderAccess.reason || "当前订单的冻结工作流尚未开放客户自提"
       : "",
@@ -230,7 +232,7 @@ export async function action({ request }: Route.ActionArgs) {
     });
     return redirect(`/warehouse/pickup?${params.toString()}`);
   }
-  const barcode = valueOf(form, "barcode").trim();
+  const barcode = valueOf(form, "barcode").trim().toUpperCase();
   if (!barcode) return { formError: "请扫描境外仓现有货物标签" };
 
   const orderLookup = await env.DB.prepare(
@@ -314,6 +316,7 @@ export async function action({ request }: Route.ActionArgs) {
   const params = new URLSearchParams({
     warehouseId: warehouse.id,
     orderId:pkg.order_id,
+    pickupScannedOul: pkg.barcode,
     pickupResult: `${pkg.order_number} 已调出；请在当前页面一次扫齐全部 OUL 后确认自提`,
   });
   return redirect(`/warehouse/pickup?${params.toString()}`);
@@ -331,10 +334,18 @@ export default function WarehousePickup({ loaderData, actionData }: Route.Compon
     loaderData.user,
     loaderData.warehouseAccessLevel,
   );
+  const firstPickupScan = initialOverseasInboundScans(
+    loaderData.initialScannedOul,
+    loaderData.packages,
+  )[0] || "";
   const [scanInput,setScanInput]=useState("");
-  const [scannedCodes,setScannedCodes]=useState<string[]>([]);
-  const [scanMessage,setScanMessage]=useState("");
-  useEffect(()=>{setScanInput("");setScannedCodes([]);setScanMessage("")},[loaderData.activeOrder?.order_id]);
+  const [scannedCodes,setScannedCodes]=useState<string[]>(firstPickupScan ? [firstPickupScan] : []);
+  const [scanMessage,setScanMessage]=useState(firstPickupScan ? "首张 OUL 已识别并计入自提清单" : "");
+  useEffect(()=>{
+    setScanInput("");
+    setScannedCodes(firstPickupScan ? [firstPickupScan] : []);
+    setScanMessage(firstPickupScan ? "首张 OUL 已识别并计入自提清单" : "");
+  },[loaderData.activeOrder?.order_id,firstPickupScan]);
   const readyToConfirm = Boolean(
     loaderData.activeOrder &&
     loaderData.packages.length > 0 &&

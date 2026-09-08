@@ -3727,6 +3727,13 @@ td small {
   padding-top: 9px;
 }
 .atomic-oul-footer span { color: #64798c; font-size: 11px; }
+.atomic-overseas-cargo-table small { display: block; margin-top: 3px; color: #64748b; }
+.atomic-overseas-cargo-table th,
+.atomic-overseas-cargo-table td { vertical-align: top; }
+.atomic-overseas-confirm { margin-top: 10px; border-top: 1px solid #dce6ee; }
+.atomic-overseas-confirm .acceptance-result { grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(220px, 1fr)); }
+.atomic-overseas-confirm .atomic-oul-footer { grid-column: 1 / -1; }
+.atomic-overseas-confirm .atomic-oul-footer button { min-width: 220px; }
 .atomic-pickup-scan { padding: 8px 10px; border-block: 1px solid #dce6ee; background: #f7fafc; }
 .atomic-pickup-confirm { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: end; border-top: 1px solid #dce6ee; }
 tr.is-scanned { background: #effaf4; }
