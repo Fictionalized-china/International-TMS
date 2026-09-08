@@ -169,18 +169,18 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
             <span><AppIcon name="clipboardCheck" size={17} /></span>验收收货
           </NavLink>
           {loaderData.warehouse.warehouse_role !== "overseas_destination" && (
-            <NavLink to={warehouseLink("/warehouse/consolidation", loaderData.query)}>
-              <span><AppIcon name="boxes" size={17} /></span>货物配载
+            <NavLink to={warehouseLink("/warehouse/packing", loaderData.query)}>
+              <span><AppIcon name="packageCheck" size={17} /></span>二次打包与贴标
             </NavLink>
           )}
           {loaderData.warehouse.warehouse_role !== "overseas_destination" && (
-            <NavLink to={warehouseLink("/warehouse/loading-documents", loaderData.query)}>
-              <span><AppIcon name="file" size={17} /></span>配载文件
+            <NavLink to={warehouseLink("/warehouse/consolidation", loaderData.query)}>
+              <span><AppIcon name="boxes" size={17} /></span>待配载池
             </NavLink>
           )}
           {loaderData.warehouse.warehouse_role !== "overseas_destination" && (
             <Link className={loaderData.currentPath.startsWith("/warehouse/outbound") && loaderData.outboundView === "pending" ? "active" : undefined} to={warehouseOutboundLink(loaderData.query,"pending")}>
-              <span><AppIcon name="packageCheck" size={17} /></span>在仓待装
+              <span><AppIcon name="clipboardCheck" size={17} /></span>创建装车任务
             </Link>
           )}
           {loaderData.warehouse.warehouse_role !== "overseas_destination" && (
@@ -267,18 +267,18 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
                     ? "本单已完成装车出库"
                     : flow.dispatchStatus === "loading"
                       ? "当前办理：继续本单装车任务"
-                      : "当前办理：选择订单创建装车任务"}
+                    : "当前办理：先确认最终包装并贴标"}
                 </strong>
                 <small>
                   {flow.dispatchStatus === "dispatched"
                     ? "仓库交接已经完成，无需再次创建装车任务。"
                     : flow.dispatchStatus === "loading"
                       ? "任务已同步到“装车与出库”，请继续扫码并完成出库交接。"
-                      : "请在“在仓待装”中选择订单，再检查文件并创建装车任务。"}
+                      : "请先在“二次打包与贴标”登记最终包裹并确认标签已贴完，再按整车或拼车路线继续。"}
                 </small>
               </div>
             ) : (
-              <Link className="primary" to={warehouseOutboundLink(loaderData.query,"pending")}>货齐已确认，进入在仓待装</Link>
+              <Link className="primary" to={warehouseLink("/warehouse/packing", loaderData.query)}>货齐已确认，进入二次打包与贴标</Link>
             )}
           </section>
         )}
