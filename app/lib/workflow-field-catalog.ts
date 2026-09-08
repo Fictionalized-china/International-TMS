@@ -1,6 +1,7 @@
 ﻿import type { OrderModuleCode } from "./order-modules";
 
 import { quotationNativeFieldCatalog } from "./quotation-native-field-catalog";
+import { workflowFieldKeyCandidates } from "./workflow-field-runtime";
 
 export type WorkflowFieldMode = "required" | "optional" | "hidden";
 export type WorkflowFieldRequirementSource = "legacy_required" | "quotation_native" | "new_system";
@@ -352,7 +353,9 @@ export function workflowFieldPolicy(
   fieldKey: string,
   fallbackMode: WorkflowFieldMode = "optional",
 ) {
-  const configured = fields.find((field) => field.fieldKey === fieldKey);
+  const configured = workflowFieldKeyCandidates(fieldKey)
+    .map((candidate) => fields.find((field) => field.fieldKey === candidate))
+    .find(Boolean);
   if (configured)
     return {
       isActive: configured.isActive,

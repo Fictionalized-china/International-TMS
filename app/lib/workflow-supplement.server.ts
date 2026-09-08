@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import type { OrderModuleCode } from "./order-modules";
 import { orderDocumentPlacements } from "./order-documents";
 import { loadOrderModuleWorkflowFields } from "./workflow-fields.server";
+import { workflowFieldKeyCandidates } from "./workflow-field-runtime";
 
 export type WorkflowFieldPolicyImpact = {
   total:number;
@@ -219,10 +220,15 @@ export async function workflowSupplementFieldIsPresent(input:{
   const fields=await loadOrderModuleWorkflowFields(
     input.organizationId,input.orderId,input.moduleCode,
   );
-  const exact=fields.find((field)=>
-    field.stepKey===input.targetStepKey&&field.fieldKey===input.fieldKey,
-  );
-  const matching=exact??fields.find((field)=>field.fieldKey===input.fieldKey);
+  const candidates=workflowFieldKeyCandidates(input.fieldKey);
+  const exact=candidates
+    .map((fieldKey)=>fields.find((field)=>
+      field.stepKey===input.targetStepKey&&field.fieldKey===fieldKey,
+    ))
+    .find(Boolean);
+  const matching=exact??candidates
+    .map((fieldKey)=>fields.find((field)=>field.fieldKey===fieldKey))
+    .find(Boolean);
   return matching?.present===true;
 }
 

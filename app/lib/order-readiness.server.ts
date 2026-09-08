@@ -13,6 +13,7 @@ import {
 import {
   isFrozenWorkflowFieldScopeMarker,
   runtimeWorkflowFieldPolicy,
+  workflowFieldKeyCandidates,
 } from "./workflow-field-runtime";
 import type { OrderModuleCode } from "./order-modules";
 import {
@@ -234,8 +235,11 @@ async function workflowRequirements(
       if (!moduleRequired(moduleCode)) return false;
       const scopedFields = scopes.get(moduleCode)?.fields ?? [];
       if (moduleCode === "consignment" && scopedFields.some(isFrozenWorkflowFieldScopeMarker)) {
+        const candidates = new Set(workflowFieldKeyCandidates(fieldKey));
         const configured = scopedFields.filter(
-          (field) => !isFrozenWorkflowFieldScopeMarker(field) && field.fieldKey === fieldKey,
+          (field) =>
+            !isFrozenWorkflowFieldScopeMarker(field) &&
+            candidates.has(field.fieldKey),
         );
         return configured.some((field) => field.isActive && field.isRequired);
       }

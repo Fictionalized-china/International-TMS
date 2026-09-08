@@ -23890,6 +23890,10 @@ form :is(input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):n
   border-color: #e5bcbc !important;
   background: #fff3f3 !important;
 }
+form [data-workflow-required="true"] :is(input, select, textarea)[aria-invalid="true"] {
+  border-color: #e5bcbc !important;
+  background: #fff3f3 !important;
+}
 form :is(input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="file"]), select, textarea):required:valid:not(:disabled) {
   border-color: #c8d3df !important;
   background: #fff !important;
@@ -26375,34 +26379,37 @@ button {
   line-height: 1.5;
 }
 .workflow-field-position-editor {
-  position: relative;
+  width: 100%;
 }
 .workflow-field-position-editor > summary {
+  box-sizing: border-box;
+  width: 100%;
   min-height: 30px;
   padding: 6px 24px 6px 8px;
   color: #174f79;
   border: 1px solid #bfd0df;
   background: #f7fafc;
   cursor: pointer;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .workflow-field-position-editor > form {
-  position: absolute;
-  z-index: 8;
-  top: calc(100% + 4px);
-  right: 0;
-  width: 260px;
+  position: static;
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 6px;
   padding: 9px;
   border: 1px solid #c5d3df;
   background: #fff;
-  box-shadow: 0 8px 24px rgb(19 44 68 / 14%);
 }
 .workflow-field-position-editor form > div {
   display: grid;
-  grid-template-columns: repeat(2,minmax(0,1fr));
+  grid-template-columns: 1fr;
   gap: 5px;
   margin-bottom: 8px;
 }
 .workflow-field-position-editor label {
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 5px;
@@ -26410,6 +26417,10 @@ button {
   padding: 4px 6px;
   border: 1px solid #e0e7ed;
   background: #fafcfd;
+}
+.workflow-field-position-editor label span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .workflow-field-table tr.workflow-field-mode-pending td {
   background: #fff9ed;
@@ -30306,14 +30317,6 @@ html[data-motion="off"] *::after {
 
 .customs-declaration-form .field:has(input:required:invalid, select:required:invalid, textarea:required:invalid) > span:first-child::after {
   content: none;
-}
-
-.customs-declaration-form .field input:required:invalid:not(:user-invalid),
-.customs-declaration-form .field select:required:invalid:not(:user-invalid),
-.customs-declaration-form .field textarea:required:invalid:not(:user-invalid) {
-  border-color: #c8d5e3 !important;
-  background: #fff !important;
-  box-shadow: none !important;
 }
 
 .customs-declaration-form .field input:focus,

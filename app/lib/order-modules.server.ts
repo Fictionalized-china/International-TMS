@@ -35,6 +35,7 @@ import {
   frozenWorkflowTaskAssignmentStatements,
   resolveOrderModuleAssignmentTarget,
 } from "./order-assignment-manifest.server";
+import { runtimeWorkflowFieldPolicy } from "./workflow-field-runtime";
 
 export type OrderModuleInstance = {
   id: string;
@@ -1331,8 +1332,11 @@ async function validateModuleGate(
     moduleCode as OrderModuleCode,
   );
   const required = (fieldKey: string, fallback = false) => {
-    const field = configuredFields.find((item) => item.fieldKey === fieldKey);
-    return field ? field.isActive && field.isRequired : fallback;
+    return runtimeWorkflowFieldPolicy(
+      configuredFields,
+      fieldKey,
+      fallback,
+    ).required;
   };
   const anyRequired = (fieldKeys: string[], fallback = false) =>
     fieldKeys.some((fieldKey) => required(fieldKey, fallback));

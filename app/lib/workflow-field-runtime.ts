@@ -8,6 +8,25 @@ export type RuntimeWorkflowFieldLike = {
 export const frozenWorkflowFieldScopeMarkerKey =
   "__frozen_workflow_field_scope__";
 
+const historicalWorkflowFieldAliases: Readonly<Record<string, readonly string[]>> = {
+  domestic_carrier_id: ["carrier_name"],
+  domestic_vehicle_type: ["vehicle_type"],
+  domestic_plate_number: ["vehicle_plate"],
+  domestic_driver_name: ["driver_name"],
+  domestic_driver_phone: ["driver_phone"],
+  domestic_actual_pickup_at: ["actual_pickup_at"],
+  primary_operator: ["operator"],
+  origin_address: ["pickup_address"],
+  requested_pickup_date: ["pickup_time"],
+  overseas_warehouse_id: ["overseas_warehouse"],
+  shipper_contact: ["pickup_contact"],
+  shipper_phone: ["pickup_phone"],
+};
+
+export function workflowFieldKeyCandidates(fieldKey: string) {
+  return [fieldKey, ...(historicalWorkflowFieldAliases[fieldKey] || [])];
+}
+
 export function isFrozenWorkflowFieldScopeMarker(
   field: Pick<RuntimeWorkflowFieldLike, "fieldKey">,
 ) {
@@ -26,10 +45,13 @@ export function runtimeWorkflowFieldPolicy(
   fieldKey: string,
   fallbackRequired = false,
 ) {
-  const configured = fields.find(
-    (field) =>
-      !isFrozenWorkflowFieldScopeMarker(field) && field.fieldKey === fieldKey,
-  );
+  const candidates = workflowFieldKeyCandidates(fieldKey);
+  const configured = candidates
+    .map((candidate) => fields.find(
+      (field) =>
+        !isFrozenWorkflowFieldScopeMarker(field) && field.fieldKey === candidate,
+    ))
+    .find(Boolean);
   if (configured) {
     return {
       visible: configured.isActive,

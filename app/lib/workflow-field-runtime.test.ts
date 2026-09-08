@@ -65,4 +65,38 @@ describe("runtimeWorkflowFieldPolicy", () => {
     expect(hasVisibleRuntimeWorkflowField(fields, ["hidden", "optional"])).toBe(true);
     expect(hasVisibleRuntimeWorkflowField(fields, ["hidden", "unknown"])).toBe(false);
   });
+
+  it("resolves historical transport keys when an old snapshot has no canonical field", () => {
+    const legacyFields = [{
+      fieldKey: "driver_name",
+      label: "国内司机姓名",
+      isActive: true,
+      isRequired: true,
+    }];
+
+    expect(runtimeWorkflowFieldPolicy(
+      legacyFields,
+      "domestic_driver_name",
+    )).toMatchObject({
+      visible: true,
+      required: true,
+      configured: true,
+    });
+  });
+
+  it("prefers the canonical field over its historical alias", () => {
+    const mixedFields = [
+      { fieldKey: "driver_name", isActive: true, isRequired: true },
+      { fieldKey: "domestic_driver_name", isActive: true, isRequired: false },
+    ];
+
+    expect(runtimeWorkflowFieldPolicy(
+      mixedFields,
+      "domestic_driver_name",
+    )).toMatchObject({
+      visible: true,
+      required: false,
+      configured: true,
+    });
+  });
 });

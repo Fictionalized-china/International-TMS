@@ -175,6 +175,7 @@ import { workflowFieldConfigurationHref } from "../lib/workflow-field-locator";
 import {
   hasVisibleRuntimeWorkflowField,
   runtimeWorkflowFieldPolicy,
+  workflowFieldKeyCandidates,
 } from "../lib/workflow-field-runtime";
 import {
   consignmentApprovalStatusRows,
@@ -5208,7 +5209,12 @@ function ModuleField({
   const policy = workflowFieldPolicy(fields, fieldKey, fallbackRequired);
   if (!policy.visible) return null;
   return (
-    <label id={`workflow-field-${fieldKey}`} className={className} data-workflow-field={fieldKey}>
+    <label
+      id={`workflow-field-${fieldKey}`}
+      className={className}
+      data-workflow-field={fieldKey}
+      data-workflow-required={policy.required ? "true" : "false"}
+    >
       <span>
         {policy.label || label}
         {policy.required && (
@@ -5237,7 +5243,9 @@ function WorkflowInfo({
 }) {
   const policy = workflowFieldPolicy(fields, fieldKey);
   if (!policy.visible) return null;
-  const configured = fields.find((field) => field.fieldKey === fieldKey);
+  const configured = workflowFieldKeyCandidates(fieldKey)
+    .map((candidate) => fields.find((field) => field.fieldKey === candidate))
+    .find(Boolean);
   const present = configured ? configured.present : Boolean(value.trim());
   const state = present ? (policy.required ? "filled" : undefined) : policy.required ? "required-missing" : "optional-empty";
   return (
@@ -6600,7 +6608,7 @@ function ModuleBusinessData({
                   </label>
                 </fieldset>
                 <ModuleField fields={data.workflowFields} fieldKey="domestic_plate_number" label="国内车辆" fallbackRequired>
-                  {(required) => <select name="vehicleMasterId" value={domesticVehicleId} onChange={(event) => setDomesticVehicleId(event.currentTarget.value)} required={required} disabled={!domesticCarrierId}>
+                  {(required) => <select name="vehicleMasterId" value={domesticVehicleId} onChange={(event) => setDomesticVehicleId(event.currentTarget.value)} required={required} aria-invalid={required && !domesticVehicleId} disabled={!domesticCarrierId}>
                     <option value="">{domesticCarrierId ? "请选择车辆" : "请先选择承运商"}</option>
                     {data.carrierVehicles.filter((item) => item.carrier_id === domesticCarrierId).map((item) => (
                       <option key={item.id} value={item.id}>{item.plate_number}{item.vehicle_type ? ` · ${item.vehicle_type}` : ""}</option>
@@ -6611,14 +6619,14 @@ function ModuleBusinessData({
                 {domesticVehicleId === "__new__" && <fieldset className="transport-resource-inline-fields span-2"><legend>新车辆快速建档</legend><label className="field"><span>车牌号 <b>*</b></span><input name="newVehiclePlateNumber" required maxLength={20} placeholder="例如 湘AT0831"/></label><label className="field"><span>车型 <b>*</b></span><input name="newVehicleType" required maxLength={80} placeholder="例如 13.5 米高栏"/></label><label className="field compact-money-field"><span>载重 KG</span><input name="newVehicleCapacityWeight" type="number" min="0" step="0.001" defaultValue="0"/></label><label className="field compact-money-field"><span>容积 CBM</span><input name="newVehicleCapacityVolume" type="number" min="0" step="0.001" defaultValue="0"/></label></fieldset>}
                 <input type="hidden" name="plateNumber" value={domesticVehicle?.plate_number || ""} />
                 <ModuleField fields={data.workflowFields} fieldKey="domestic_vehicle_type" label="国内车型" fallbackRequired>
-                  {(required) => <input name="vehicleType" value={domesticVehicle?.vehicle_type || ""} readOnly required={required} placeholder="选择车辆后自动带出" />}
+                  {(required) => <input name="vehicleType" value={domesticVehicle?.vehicle_type || ""} readOnly required={required} aria-invalid={required && domesticVehicleId !== "__new__" && !domesticVehicle?.vehicle_type} placeholder="选择车辆后自动带出" />}
                 </ModuleField>
                 <ModuleField fields={data.workflowFields} fieldKey="domestic_vehicle_count" label="车辆数目">
                   {(required) => <input name="vehicleCount" type="number" min="1" step="1" defaultValue="1" required={required} />}
                 </ModuleField>
                 <input type="hidden" name="loadingMode" value={data.order.business_type} />
                 <ModuleField fields={data.workflowFields} fieldKey="domestic_driver_name" label="国内司机姓名" fallbackRequired>
-                  {(required) => <select name="driverMasterId" value={domesticDriverId} onChange={(event) => setDomesticDriverId(event.currentTarget.value)} required={required} disabled={!domesticCarrierId}>
+                  {(required) => <select name="driverMasterId" value={domesticDriverId} onChange={(event) => setDomesticDriverId(event.currentTarget.value)} required={required} aria-invalid={required && !domesticDriverId} disabled={!domesticCarrierId}>
                     <option value="">{domesticCarrierId ? "请选择司机" : "请先选择承运商"}</option>
                     {data.carrierDrivers.filter((item) => item.carrier_id === domesticCarrierId).map((item) => (
                       <option key={item.id} value={item.id}>{item.name}{item.phone ? ` · ${item.phone}` : ""}</option>
@@ -6630,10 +6638,10 @@ function ModuleBusinessData({
                 {domesticDriverId !== "__new__" && <>
                   <input type="hidden" name="driverName" value={domesticDriver?.name || ""} />
                   <ModuleField fields={data.workflowFields} fieldKey="domestic_driver_phone" label="国内司机手机号" fallbackRequired>
-                    {(required) => <input name="driverPhone" value={domesticDriver?.phone || ""} readOnly required={required} placeholder="选择司机后自动带出" />}
+                    {(required) => <input name="driverPhone" value={domesticDriver?.phone || ""} readOnly required={required} aria-invalid={required && !domesticDriver?.phone} placeholder="选择司机后自动带出" />}
                   </ModuleField>
                   <ModuleField fields={data.workflowFields} fieldKey="domestic_driver_id_number" label="国内司机证件号">
-                    {(required) => <input name="driverIdNumber" value={domesticDriver?.license_number || ""} readOnly required={required} placeholder="选择司机后自动带出" />}
+                    {(required) => <input name="driverIdNumber" value={domesticDriver?.license_number || ""} readOnly required={required} aria-invalid={required && !domesticDriver?.license_number} placeholder="选择司机后自动带出" />}
                   </ModuleField>
                 </>}
                 <div className="transport-route-row span-2">

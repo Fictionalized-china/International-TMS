@@ -111,6 +111,13 @@ describe("workflow field building blocks", () => {
     ).toEqual({ isActive: true, isRequired: false });
   });
 
+  it("keeps server-side gates compatible with historical transport keys", () => {
+    expect(workflowFieldPolicy(
+      [{ fieldKey: "driver_name", isActive: true, isRequired: true }],
+      "domestic_driver_name",
+    )).toEqual({ isActive: true, isRequired: true });
+  });
+
   it("keeps order-level contracts available as a hidden workflow block", () => {
     expect(
       workflowFieldCatalog.find((item) => item.fieldKey === "document_contract"),
