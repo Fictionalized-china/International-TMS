@@ -45,6 +45,35 @@ export async function completeWarehouseDispatchTransaction(
          )`,
     ).bind(occurredAt, organizationId, warehouseId, dispatchId),
     db.prepare(
+      `UPDATE warehouse_packing_jobs
+       SET status='dispatched',updated_at=?
+       WHERE organization_id=? AND warehouse_id=? AND dispatch_id=? AND status='loading'
+         AND NOT EXISTS(
+           SELECT 1 FROM warehouse_dispatch_items item
+           WHERE item.organization_id=warehouse_packing_jobs.organization_id
+             AND item.dispatch_id=warehouse_packing_jobs.dispatch_id
+             AND item.status!='loaded'
+         )`,
+    ).bind(occurredAt, organizationId, warehouseId, dispatchId),
+    db.prepare(
+      `UPDATE warehouse_packages
+       SET status='dispatched',
+           notes=TRIM(COALESCE(notes||'；','')||'最终 OUL 已完成装车出库，入仓唛头结束流转'),
+           updated_at=?
+       WHERE organization_id=? AND warehouse_id=?
+         AND label_kind='inbound_mark' AND lifecycle_status='active' AND status='allocated'
+         AND id IN (
+           SELECT source.inbound_warehouse_package_id
+           FROM warehouse_packing_job_sources source
+           JOIN warehouse_packing_jobs job
+             ON job.id=source.packing_job_id AND job.organization_id=source.organization_id
+           JOIN warehouse_dispatches dispatch
+             ON dispatch.id=job.dispatch_id AND dispatch.organization_id=job.organization_id
+           WHERE source.organization_id=? AND job.warehouse_id=?
+             AND job.dispatch_id=? AND job.status='dispatched' AND dispatch.status='loading'
+         )`,
+    ).bind(occurredAt, organizationId, warehouseId, organizationId, warehouseId, dispatchId),
+    db.prepare(
       `UPDATE warehouse_packages
        SET status='dispatched',lifecycle_status=CASE WHEN label_kind='oul' THEN 'in_transit' ELSE lifecycle_status END,updated_at=?
        WHERE organization_id=? AND warehouse_id=?

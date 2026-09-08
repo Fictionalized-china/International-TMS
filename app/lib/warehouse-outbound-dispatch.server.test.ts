@@ -54,6 +54,10 @@ describe("completeWarehouseDispatchTransaction", () => {
     );
     expect(sql).toContain("p.organization_id=di.organization_id");
     expect(sql).toContain("s.organization_id=p.organization_id");
+    expect(sql).toContain("UPDATE warehouse_packing_jobs");
+    expect(sql).toContain("job.status='dispatched'");
+    expect(sql).toContain("warehouse_packing_job_sources");
+    expect(sql).toContain("p.label_kind='oul'");
   });
 
   it("reports a concurrent retry as a stable no-op so callers cannot repeat post-commit effects", async () => {

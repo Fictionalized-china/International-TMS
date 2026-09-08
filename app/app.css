@@ -5889,8 +5889,40 @@ label:not(:has(> span:first-child .required-mark)):not(:has(> span:first-child >
 }
 .outbound-packing-order .field { margin: 0; }
 .outbound-packing-order :is(input, select) { height: 34px; }
+.outbound-packing-ready-summary {
+  margin-top: 10px;
+  border: 1px solid #bcdccf;
+  border-left: 3px solid #1aa779;
+  background: #f4fbf8;
+}
+.outbound-packing-ready-summary > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 42px;
+  padding: 7px 10px;
+  border-bottom: 1px solid #d3e9df;
+}
+.outbound-packing-ready-summary > header div,
+.outbound-packing-ready-summary > div > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.outbound-packing-ready-summary > header div span,
+.outbound-packing-ready-summary > div > span { color: #64798c; font-size: 11px; }
+.outbound-packing-ready-summary > div {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(110px, 1fr)) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+.outbound-packing-ready-summary > div strong { color: #102d48; font-size: 13px; }
 @media (max-width: 1200px) {
   .outbound-packing-grid { grid-template-columns: 1fr; }
+  .outbound-packing-ready-summary > div { grid-template-columns: repeat(2, minmax(110px, 1fr)); }
 }
 @media (max-width: 700px) {
   .inbound-mark-scan-row,
