@@ -29,6 +29,7 @@ import {
 import {
   loadOverseasInboundCustomsGates,
 } from "../lib/overseas-inbound-policy.server";
+import { initialOverseasInboundScans } from "../lib/overseas-inbound-scan";
 import {
   acceptanceRequiredMarker,
   resolveWarehouseAcceptancePolicies,
@@ -1416,13 +1417,27 @@ export default function WarehouseInbound({
   const [receiptResult, setReceiptResult] = useState<"" | "ready" | "exception">(
     "",
   );
+  const firstAtomicScan = initialOverseasInboundScans(
+    loaderData.reference,
+    loaderData.atomicScopePackages,
+  )[0] || "";
   const [atomicScanInput,setAtomicScanInput]=useState("");
-  const [atomicScans,setAtomicScans]=useState<string[]>([]);
-  const [atomicScanMessage,setAtomicScanMessage]=useState("");
+  const [atomicScans,setAtomicScans]=useState<string[]>(
+    firstAtomicScan ? [firstAtomicScan] : [],
+  );
+  const [atomicScanMessage,setAtomicScanMessage]=useState(
+    firstAtomicScan ? "首张 OUL 已识别并计入本次清单，请继续扫描其余标签" : "",
+  );
   useEffect(() => {
     setReceiptResult("");
   }, [loaderData.reference]);
-  useEffect(()=>{setAtomicScanInput("");setAtomicScans([]);setAtomicScanMessage("")},[loaderData.atomicDispatchId]);
+  useEffect(()=>{
+    setAtomicScanInput("");
+    setAtomicScans(firstAtomicScan ? [firstAtomicScan] : []);
+    setAtomicScanMessage(
+      firstAtomicScan ? "首张 OUL 已识别并计入本次清单，请继续扫描其余标签" : "",
+    );
+  },[loaderData.atomicDispatchId,firstAtomicScan]);
   useEffect(() => {
     if (actionData?.success) {
       setReceiptResult("");
@@ -1442,7 +1457,10 @@ export default function WarehouseInbound({
   const selectedShipmentRecord = loaderData.selectedShipment;
   const scannedPackageRecord = loaderData.scannedPackage;
   const showReceivingWorkbench = Boolean(
-    selectedShipmentRecord && scannedPackageRecord && !actionData?.success,
+    selectedShipmentRecord &&
+      scannedPackageRecord &&
+      loaderData.atomicScopePackages.length === 0 &&
+      !actionData?.success,
   );
   return (
     <>
@@ -1488,8 +1506,8 @@ export default function WarehouseInbound({
         <input type="hidden" name="intent" value="atomic_overseas_receive"/>
         <input type="hidden" name="dispatchId" value={loaderData.atomicDispatchId||""}/>
         <input type="hidden" name="scannedOulCodes" value={JSON.stringify(atomicScans)}/>
-        <div className="panel-header"><div><h2>一次扫齐全部 OUL</h2><p>{loaderData.batchContext?`${loaderData.batchContext.number} 整批收货`:`装车任务 ${loaderData.atomicDispatchId}`}；扫描只暂存在当前页面，全部扫齐后一次提交，刷新或离开页面会清空。</p></div><strong>{atomicScans.length}/{loaderData.atomicScopePackages.length}</strong></div>
-        <div className="atomic-oul-scan-row"><label className="field"><span>扫描 OUL</span><input value={atomicScanInput} onChange={event=>setAtomicScanInput(event.target.value)} onKeyDown={event=>{if(event.key!=="Enter")return;event.preventDefault();const code=atomicScanInput.trim().toUpperCase();if(!code)return;const expected=loaderData.atomicScopePackages.some(item=>item.barcode.toUpperCase()===code);if(!expected){setAtomicScanMessage("该 OUL 不属于当前收货范围");return}if(atomicScans.includes(code)){setAtomicScanMessage("该 OUL 已扫描，本次未重复计数");setAtomicScanInput("");return}setAtomicScans(current=>[...current,code]);setAtomicScanInput("");setAtomicScanMessage("已加入本次临时清单");}} autoFocus placeholder="扫描 OUL 后回车"/></label><label className="field"><span>入库库位 *</span><select name="locationId" required><option value="">请选择库位</option>{loaderData.locations.map(item=><option key={item.id} value={item.id}>{item.zone_name} / {item.name}（{item.code}）</option>)}</select></label></div>
+        <div className="panel-header"><div><h2>连续扫描全部 OUL</h2><p>{loaderData.batchContext?`${loaderData.batchContext.number} 整批收货`:`装车任务 ${loaderData.atomicDispatchId}`}；首个 OUL 已随调出动作计数，继续在下方同一扫描区扫完其余标签，全部扫齐后一次入库。</p></div><strong>{atomicScans.length}/{loaderData.atomicScopePackages.length}</strong></div>
+        <div className="atomic-oul-scan-row"><label className="field"><span>统一扫描 OUL</span><input value={atomicScanInput} onChange={event=>setAtomicScanInput(event.target.value)} onKeyDown={event=>{if(event.key!=="Enter")return;event.preventDefault();const code=atomicScanInput.trim().toUpperCase();if(!code)return;const expected=loaderData.atomicScopePackages.some(item=>item.barcode.toUpperCase()===code);if(!expected){setAtomicScanMessage("该 OUL 不属于当前收货范围");return}if(atomicScans.includes(code)){setAtomicScanMessage("该 OUL 已扫描，本次未重复计数");setAtomicScanInput("");return}setAtomicScans(current=>[...current,code]);setAtomicScanInput("");setAtomicScanMessage("已登记，请继续扫描下一张 OUL");}} autoFocus placeholder="扫描下一张 OUL 后回车"/></label><label className="field"><span>入库库位 *</span><select name="locationId" required><option value="">请选择库位</option>{loaderData.locations.map(item=><option key={item.id} value={item.id}>{item.zone_name} / {item.name}（{item.code}）</option>)}</select></label></div>
         {atomicScanMessage&&<p className="atomic-oul-message" role="status">{atomicScanMessage}</p>}
         <div className="table-wrap"><table><thead><tr><th>订单</th><th>客户</th><th>OUL</th><th>来源仓</th><th>扫码状态</th></tr></thead><tbody>{loaderData.atomicScopePackages.map(item=>{const scanned=atomicScans.includes(item.barcode.toUpperCase());return <tr key={item.id} className={scanned?"is-scanned":""}><td>{item.order_number}</td><td>{item.customer_name}</td><td><strong>{item.barcode}</strong></td><td>{item.source_warehouse_name}</td><td><span className={`status-pill ${scanned?"success":"warning"}`}>{scanned?"已扫描":"待扫描"}</span></td></tr>})}</tbody></table></div>
         <div className="atomic-oul-footer"><span>未扫齐时不能提交；服务器会再次核对完整范围。</span><button className="primary warehouse-primary" disabled={busy||atomicScans.length!==loaderData.atomicScopePackages.length}>{busy?"正在整批入库…":"全部扫齐并一次入库"}</button></div>
