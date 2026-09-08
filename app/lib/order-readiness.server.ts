@@ -364,13 +364,20 @@ export async function checkOrderLoadPlan(
     ...workflow.configurationReasons("loading"),
     ...workflow.configurationReasons("transport"),
   );
+  const deferFtlLoadingFormBlocker = order.business_type === "ftl" && context.mode !== "strict";
   const blocker = await env.DB.prepare(
     `SELECT module_name FROM order_module_instances
      WHERE organization_id=? AND order_id=? AND enabled=1 AND is_required=1
        AND status IN ('blocked','exception')
+       AND NOT (?=1 AND module_code='loading' AND status='blocked')
        AND module_code IN (${LOAD_PLAN_GATE_MODULES.map(() => "?").join(",")})
      LIMIT 1`,
-  ).bind(organizationId, orderId, ...LOAD_PLAN_GATE_MODULES).first<{ module_name: string }>();
+  ).bind(
+    organizationId,
+    orderId,
+    deferFtlLoadingFormBlocker ? 1 : 0,
+    ...LOAD_PLAN_GATE_MODULES,
+  ).first<{ module_name: string }>();
   if (blocker) reasons.push(`${blocker.module_name}存在当前阶段阻断或异常`);
 
   if (order.warehouse_enabled === 1) {

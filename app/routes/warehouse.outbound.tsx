@@ -38,6 +38,7 @@ import {
 import { loadLoadingBatchWorkflowOrders } from "../lib/loading-batch-field-policy.server";
 import { recordBatchOutboundProgress, recordWarehouseProgress } from "../lib/warehouse-progress.server";
 import {
+  isExplicitDispatchCreationConfirmation,
   resolveWarehouseOutboundWorkflowPolicyForOrders,
   type WarehouseOutboundWorkflowPolicy,
 } from "../lib/warehouse-outbound-policy";
@@ -352,7 +353,9 @@ export async function loader({request}:Route.LoaderArgs){
   }
   const requestedBatchId=url.searchParams.get("batchId");
   const selectedLoadUnit=findWarehouseOutboundLoadUnit(loadUnits,requestedBatchId)
-    ??(requestedView==="create"&&orderId&&visibleBatches.length===1?visibleBatches[0]:null);
+    ??(requestedView==="create"&&orderId&&visibleBatches.length===1
+      ?loadUnits.find((unit)=>unit.id===visibleBatches[0].id)??null
+      :null);
   const requestedInspection=selectedLoadUnit
     ?await loadOutboundInspection(user.organizationId,warehouse.id,selectedLoadUnit)
     :null;
@@ -478,6 +481,7 @@ export async function action({request}:Route.ActionArgs){
     return{success:"本装车任务涉及订单的必需发运文件已全部确认，现在可以创建装车任务",actionKind:"loading_documents_approved" as const,reviewCloseSignal:now,inspection:await loadOutboundInspectionByIds(user.organizationId,warehouse.id,inspectionOrderId,batchId)};
   }
   if(intent==="create"){
+    if(!isExplicitDispatchCreationConfirmation(form.get("createConfirmation")))return{formError:"装车任务未创建：请由仓库人员明确点击“确认并创建装车任务”。工作流热插拔和页面刷新只重新计算门禁，不会代替人工确认。"};
     const batchId=valueOf(form,"batchId"),orderNumber=valueOf(form,"orderNumber").trim(),customerIdentityCode=valueOf(form,"customerIdentityCode").trim().toUpperCase(),notes=valueOf(form,"notes");
     const carrierId=valueOf(form,"outboundCarrierId"),vehicleId=valueOf(form,"outboundVehicleId"),driverId=valueOf(form,"outboundDriverId"),plannedDepartureAt=valueOf(form,"plannedDepartureAt"),plannedArrivalAt=valueOf(form,"plannedArrivalAt");
     const newDriverName=valueOf(form,"newOutboundDriverName").trim(),newDriverPhone=valueOf(form,"newOutboundDriverPhone").trim(),newDriverLicenseNumber=valueOf(form,"newOutboundDriverLicenseNumber").trim();
@@ -1384,7 +1388,7 @@ function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,borde
           <div className="outbound-document-drawer-body"><OutboundOrderDocumentWorkspace inspection={inspection} warehouseId={warehouseId} busy={busy}/></div>
         </aside>
       </div>}
-      <Form method="post" className="outbound-inline-create-form" onKeyDown={event=>{if(event.key==="Enter")event.preventDefault();}}>
+      <Form method="post" className="outbound-inline-create-form" onKeyDown={event=>{if(event.key==="Enter")event.preventDefault();}} onSubmit={event=>{const submitter=(event.nativeEvent as SubmitEvent).submitter;if(!(submitter instanceof HTMLButtonElement)||submitter.name!=="createConfirmation"||submitter.value!=="confirm_dispatch_creation")event.preventDefault();}}>
         <input type="hidden" name="intent" value="create"/><input type="hidden" name="batchId" value={inspection.batch.id}/><input type="hidden" name="orderNumber" value={isFtl?inspection.batch.order_number:""}/><input type="hidden" name="customerIdentityCode" value={isFtl?inspection.batch.customer_identity_code:""}/>
         <section className="outbound-packing-ready-summary">
           <header><div><strong>最终包装与贴标已完成</strong><span>本页只创建装车任务，不会重新成包或生成 OUL。</span></div><span className="status-pill success">已锁定</span></header>
@@ -1413,7 +1417,7 @@ function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,borde
         {inspection.notesActive&&<label className="field outbound-handover-notes"><span>交接备注{inspection.notesRequired?" *":""}</span><textarea name="notes" rows={3} required={inspection.notesRequired} placeholder="填写装车交接、装载要求或出库注意事项"/></label>}
         <div className="outbound-inline-create-footer">
           <div role="status" aria-live="polite"><strong>{inspection.allApproved?"文件核验已完成":inspection.allUploaded?"等待文件确认":"必需文件尚未齐全"}</strong><span>{inspection.allApproved?(isFtl?"确认出境资源后即可创建装车任务。":"全部订单文件已确认，可按当前 PZ 配载单统一创建装车任务。"):inspection.allUploaded?"请由非上传账号确认待审文件。":`还需上传 ${remainingRequired} 份必需文件。`}</span></div>
-          <button type="submit" className="primary warehouse-primary" disabled={!inspection.allApproved||busy||(isFtl&&!requiredOutboundMasterDataReady)||Boolean(inspection.resourcePolicyError)}>确认并创建装车任务</button>
+          <button type="submit" name="createConfirmation" value="confirm_dispatch_creation" className="primary warehouse-primary" disabled={!inspection.allApproved||busy||(isFtl&&!requiredOutboundMasterDataReady)||Boolean(inspection.resourcePolicyError)}>确认并创建装车任务</button>
         </div>
       </Form>
       </>}

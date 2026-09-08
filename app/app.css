@@ -19626,7 +19626,9 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   background: #fff;
   box-shadow: 0 2px 5px rgba(26,45,66,.02);
 }
-.prototype-page .order-table-filters { grid-template-columns: minmax(220px,2fr) repeat(4,minmax(116px,1fr)) auto auto; }
+.prototype-page .order-table-filters {
+  grid-template-columns: minmax(190px,1.35fr) repeat(5,minmax(110px,1fr)) auto auto;
+}
 .prototype-page .field { min-width: 0; }
 .prototype-page .field > span { min-height: 15px; margin-bottom: 5px; display: block; color: #718295; font-size: 9px; }
 .prototype-page .control {
@@ -21087,7 +21089,7 @@ html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animatio
 .linear-order-page .assignment-waiting-note span { color: #957b51; }
 
 @media (max-width: 1220px) {
-  .prototype-page .order-table-filters { grid-template-columns: minmax(220px,2fr) repeat(2,minmax(120px,1fr)) auto auto; }
+  .prototype-page .order-table-filters { grid-template-columns: minmax(190px,1.4fr) repeat(2,minmax(120px,1fr)) auto auto; }
   .prototype-page .kpis { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .linear-order-page .order-head { grid-template-columns: 1fr auto; }
   .linear-order-page .current-summary { grid-column: 1 / -1; grid-row: 2; }

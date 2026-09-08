@@ -1048,7 +1048,7 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
   const [lengthCm, setLengthCm] = useState("");
   const [widthCm, setWidthCm] = useState("");
   const [heightCm, setHeightCm] = useState("");
-  const [charges, setCharges] = useState([{ name: transportChargeNameOptions[0]?.[0] || "国际汽运费", quantity: 1, unitPrice: 0, notes: "" }]);
+  const [charges, setCharges] = useState([{ name: transportChargeNameOptions[0]?.[0] || "国际汽运费", quantity: 1, unitPrice: "", notes: "" }]);
   const total = charges.reduce((sum, charge) => sum + Number(charge.quantity || 0) * Number(charge.unitPrice || 0), 0);
   const calculatedVolumeValue = calculateQuoteTotalVolumeCbm({
     pieces:Number(plannedPackageCount),lengthCm:Number(lengthCm),
@@ -1203,9 +1203,9 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
     {cargoMetricsVisible && <QuoteLedgerSection className="quote-metrics-section" title="3　货物数量与尺寸">{cargoMetrics}</QuoteLedgerSection>}
     {(policies.charges.isActive || policies.validUntil.isActive) && <QuoteLedgerSection
       title="4　报价费用与有效期"
-      action={policies.charges.isActive ? <button className="btn quote-charge-add" type="button" onClick={() => setCharges((rows) => [...rows, { name: transportChargeNameOptions[0]?.[0] || "国际汽运费", quantity: 1, unitPrice: 0, notes: "" }])}>＋ 添加费用</button> : undefined}
+      action={policies.charges.isActive ? <button className="btn quote-charge-add" type="button" onClick={() => setCharges((rows) => [...rows, { name: transportChargeNameOptions[0]?.[0] || "国际汽运费", quantity: 1, unitPrice: "", notes: "" }])}>＋ 添加费用</button> : undefined}
     >
-      {policies.charges.isActive && <><div className="table-wrap quote-charge-table-wrap"><table className="inline-table quote-charge-table"><thead><tr><th>费用名称</th><th>数量</th><th>单价</th><th>金额</th><th>备注</th><th>操作</th></tr></thead><tbody>{charges.map((charge, index) => <tr key={index}><td><select className="control" name="chargeName" value={charge.name} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, name: event.target.value } : row))} required={policies.charges.isRequired}>{transportChargeNameOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td><td><input className="control" name="chargeQuantity" type="number" min="0.01" step="0.01" value={charge.quantity} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: Number(event.target.value) } : row))} required={policies.charges.isRequired}/></td><td><input className="control" name="chargeUnitPrice" type="number" min="0.01" step="0.01" value={charge.unitPrice} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, unitPrice: Number(event.target.value) } : row))} required={policies.charges.isRequired}/></td><td><b>{(charge.quantity * charge.unitPrice).toLocaleString()}</b></td><td><input className="control" name="chargeNotes" value={charge.notes} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, notes: event.target.value } : row))}/></td><td><button className="btn danger" type="button" disabled={charges.length === 1} onClick={() => setCharges((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>删除</button></td></tr>)}</tbody></table></div>
+      {policies.charges.isActive && <><div className="table-wrap quote-charge-table-wrap"><table className="inline-table quote-charge-table"><thead><tr><th>费用名称</th><th>数量</th><th>单价</th><th>金额</th><th>备注</th><th>操作</th></tr></thead><tbody>{charges.map((charge, index) => <tr key={index}><td><select className="control" name="chargeName" value={charge.name} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, name: event.target.value } : row))} required={policies.charges.isRequired}>{transportChargeNameOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td><td><input className="control" name="chargeQuantity" type="number" min="0.01" step="0.01" value={charge.quantity} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: Number(event.target.value) } : row))} required={policies.charges.isRequired}/></td><td><input className="control" name="chargeUnitPrice" type="number" min="0.01" step="0.01" value={charge.unitPrice} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, unitPrice: event.target.value } : row))} required={policies.charges.isRequired}/></td><td><b>{(charge.quantity * Number(charge.unitPrice || 0)).toLocaleString()}</b></td><td><input className="control" name="chargeNotes" value={charge.notes} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, notes: event.target.value } : row))}/></td><td><button className="btn danger" type="button" disabled={charges.length === 1} onClick={() => setCharges((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>删除</button></td></tr>)}</tbody></table></div>
       </>}
       <div className="quote-charge-footer">
         {policies.validUntil.isActive && <Field label="报价有效期"><input className="control" name="validUntil" type="date" required={policies.validUntil.isRequired}/></Field>}
@@ -1267,10 +1267,10 @@ function QuotationNativeWorkflowInputs({
         id:charge.id,
         name:charge.description,
         quantity:Number(charge.quantity),
-        unitPrice:Number(charge.unit_price),
+        unitPrice:String(charge.unit_price),
         notes:charge.notes || "",
       }))
-    : [{ id:"",name:transportChargeNameOptions[0]?.[0] || "国际汽运费",quantity:1,unitPrice:0,notes:"" }]);
+    : [{ id:"",name:transportChargeNameOptions[0]?.[0] || "国际汽运费",quantity:1,unitPrice:"",notes:"" }]);
   const [pieces,setPieces] = useState(String(quote.pieces || 1));
   const [plannedPackageCount,setPlannedPackageCount] = useState(String(quote.planned_package_count || 1));
   const [lengthCm,setLengthCm] = useState(String(quote.estimated_length_cm || ""));
@@ -1334,10 +1334,10 @@ function QuotationNativeWorkflowInputs({
       {p.charges.isActive && <div className="table-wrap"><table className="inline-table quote-charge-table"><thead><tr><th>费用名称</th><th>数量</th><th>单价</th><th>备注</th><th>操作</th></tr></thead><tbody>{chargeRows.map((charge,index) => <tr key={index}>
         <td><input type="hidden" name="chargeId" value={charge.id}/><select className="control" name="chargeName" value={charge.name} onChange={(event) => setChargeRows((rows) => rows.map((row,i) => i === index ? {...row,name:event.target.value} : row))} required={p.charges.isRequired}>{transportChargeNameOptions.map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></td>
         <td><input className="control" name="chargeQuantity" type="number" min="0.01" step="0.01" value={charge.quantity} onChange={(event) => setChargeRows((rows) => rows.map((row,i) => i === index ? {...row,quantity:Number(event.target.value)} : row))} required={p.charges.isRequired}/></td>
-        <td><input className="control" name="chargeUnitPrice" type="number" min="0.01" step="0.01" value={charge.unitPrice} onChange={(event) => setChargeRows((rows) => rows.map((row,i) => i === index ? {...row,unitPrice:Number(event.target.value)} : row))} required={p.charges.isRequired}/></td>
+        <td><input className="control" name="chargeUnitPrice" type="number" min="0.01" step="0.01" value={charge.unitPrice} onChange={(event) => setChargeRows((rows) => rows.map((row,i) => i === index ? {...row,unitPrice:event.target.value} : row))} required={p.charges.isRequired}/></td>
         <td><input className="control" name="chargeNotes" value={charge.notes} onChange={(event) => setChargeRows((rows) => rows.map((row,i) => i === index ? {...row,notes:event.target.value} : row))}/></td>
         <td><button className="btn danger" type="button" disabled={Boolean(charge.id) || chargeRows.length === 1} title={charge.id ? "既有费用保留审计标识，只允许修改；如需冲销请在订单结算阶段处理" : undefined} onClick={() => setChargeRows((rows) => rows.filter((_,i) => i !== index))}>删除</button></td>
-      </tr>)}</tbody></table><button className="btn" type="button" onClick={() => setChargeRows((rows) => [...rows,{id:"",name:transportChargeNameOptions[0]?.[0] || "国际汽运费",quantity:1,unitPrice:0,notes:""}])}>＋ 添加费用</button></div>}
+      </tr>)}</tbody></table><button className="btn" type="button" onClick={() => setChargeRows((rows) => [...rows,{id:"",name:transportChargeNameOptions[0]?.[0] || "国际汽运费",quantity:1,unitPrice:"",notes:""}])}>＋ 添加费用</button></div>}
       {p.validUntil.isActive && <Field label="报价有效期"><input className="control" name="validUntil" type="date" defaultValue={quote.valid_until || ""} required={p.validUntil.isRequired}/></Field>}
     </QuoteLedgerSection>}
   </div>;

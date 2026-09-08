@@ -20,7 +20,11 @@ const state = vi.hoisted(() => ({
   order: null as OperationalOrder | null,
   workflowFields: new Map<string, Array<Record<string, unknown>>>(),
   moduleModes: new Map<string, { module_code: string; enabled: number; is_required: number }>(),
-  moduleBlocker: null as { module_name: string } | null,
+  moduleBlocker: null as {
+    module_name: string;
+    module_code?: string;
+    status?: "blocked" | "exception";
+  } | null,
   ltlPlan: null as Record<string, unknown> | null,
   firstMileAssignment: null as Record<string, unknown> | null,
   mainAssignment: null as { plate_number: string } | null,
@@ -56,8 +60,17 @@ vi.mock("cloudflare:workers", () => ({
           },
           async first<T>() {
             if (sql.includes("FROM transport_orders o")) return state.order as T | null;
-            if (sql.includes("SELECT module_name FROM order_module_instances"))
-              return state.moduleBlocker as T | null;
+            if (sql.includes("SELECT module_name FROM order_module_instances")) {
+              const blocker = state.moduleBlocker;
+              const defersLoadingBlocker = Number(statement.bindings[2]) === 1;
+              if (
+                blocker &&
+                defersLoadingBlocker &&
+                blocker.module_code === "loading" &&
+                blocker.status !== "exception"
+              ) return null;
+              return blocker as T | null;
+            }
             if (sql.includes("COUNT(DISTINCT v.id) vehicle_count"))
               return state.ltlPlan as T | null;
             if (sql.includes("leg_type='first_mile'"))
@@ -525,6 +538,50 @@ describe("order readiness follows the bound workflow field modes", () => {
       );
 
       expect(result).toEqual({ ready: true, reasons: [] });
+    });
+
+    it("does not let a stale loading form failure prevent reopening the FTL creation page", async () => {
+      state.moduleBlocker = {
+        module_name: "装车与出库",
+        module_code: "loading",
+        status: "blocked",
+      };
+
+      const entry = await checkOrderLoadPlan(
+        "org-1",
+        "order-1",
+        undefined,
+        undefined,
+        { mode: "entry" },
+      );
+      const submit = await checkOrderLoadPlan(
+        "org-1",
+        "order-1",
+        undefined,
+        undefined,
+        { mode: "submit", values: completeSubmission },
+      );
+
+      expect(entry).toEqual({ ready: true, reasons: [] });
+      expect(submit).toEqual({ ready: true, reasons: [] });
+    });
+
+    it("keeps loading exceptions closed even when opening the FTL creation page", async () => {
+      state.moduleBlocker = {
+        module_name: "装车与出库",
+        module_code: "loading",
+        status: "exception",
+      };
+
+      const result = await checkOrderLoadPlan(
+        "org-1",
+        "order-1",
+        undefined,
+        undefined,
+        { mode: "entry" },
+      );
+
+      expect(result.ready).toBe(false);
     });
 
     it("also defers overseas transport aliases supplied by the FTL creation page", async () => {

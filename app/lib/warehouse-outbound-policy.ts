@@ -16,6 +16,15 @@ export type WarehouseOutboundWorkflowPolicy = {
   scanConfirmation: WarehouseOutboundFieldPolicy;
 };
 
+// Creating a dispatch is a material warehouse mutation. A generic form
+// revalidation/requestSubmit must never impersonate the operator's explicit
+// confirmation button.
+export function isExplicitDispatchCreationConfirmation(
+  value: FormDataEntryValue | null,
+) {
+  return value === "confirm_dispatch_creation";
+}
+
 function aggregateFieldPolicy(
   fieldsByOrder: readonly (readonly WorkflowFieldPolicyLike[])[],
   fieldKey: string,

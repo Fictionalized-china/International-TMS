@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  isExplicitDispatchCreationConfirmation,
   resolveWarehouseOutboundWorkflowPolicy,
   resolveWarehouseOutboundWorkflowPolicyForOrders,
 } from "./warehouse-outbound-policy";
@@ -15,6 +16,12 @@ const field = (
 });
 
 describe("resolveWarehouseOutboundWorkflowPolicy", () => {
+  it("requires the dedicated operator confirmation value before creating a dispatch", () => {
+    expect(isExplicitDispatchCreationConfirmation("confirm_dispatch_creation")).toBe(true);
+    expect(isExplicitDispatchCreationConfirmation(null)).toBe(false);
+    expect(isExplicitDispatchCreationConfirmation("create")).toBe(false);
+  });
+
   it("lets any required order make the whole PZ field required", () => {
     const policy = resolveWarehouseOutboundWorkflowPolicy([
       [field("loading_handover_notes", "hidden"), field("loading_scan_confirmation", "optional")],
