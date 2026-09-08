@@ -48,7 +48,7 @@ async function activeScanSession(db: D1Database, input: {
     await db.prepare(
       `INSERT INTO warehouse_inbound_scan_sessions(
          id,organization_id,warehouse_id,status,opened_by_user_id,opened_at,created_at,updated_at
-       ) VALUES(?,?,?,'active',?,?,?,?,?)`,
+       ) VALUES(?,?,?,'active',?,?,?,?)`,
     ).bind(id, input.organizationId, input.warehouseId, input.userId, input.now, input.now, input.now).run();
     return id;
   } catch {

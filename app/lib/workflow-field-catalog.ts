@@ -204,7 +204,7 @@ export const workflowFieldCatalog: WorkflowFieldCatalogItem[] = [
   field("warehouse_receiving", "warehouse", "actual_package_count", "实收包装数（旧）", "number", "hidden", "已由入仓唛头扫码自动汇总，不再人工填写。"),
   field("warehouse_receiving", "warehouse", "actual_pieces", "实收商品件数（旧）", "number", "hidden", "仓库不重复统计包装内商品数量。"),
   field("warehouse_receiving", "warehouse", "actual_weight_kg", "实收重量KG", "number", "required", "配载、容量校验和成本分摊使用的实际重量。"),
-  field("warehouse_receiving", "warehouse", "actual_volume_cbm", "实测体积CBM", "number", "required", "配载、容量校验和成本分摊使用的实际体积。"),
+  field("warehouse_receiving", "warehouse", "actual_volume_cbm", "收货实测体积（旧）", "number", "hidden", "国内仓收货不再测量最终包装体积；二次打包后的尺寸与体积在装车准备阶段登记。"),
   field("warehouse_receiving", "warehouse", "warehouse_location", "入库库位", "warehouse", "required", "货物当前库位。"),
   field("warehouse_receiving", "warehouse", "receipt_difference", "实收差异", "textarea", "optional", "预录与实收差异及处理结果。"),
   field("warehouse_receiving", "warehouse", "warehouse_receipt_notes", "收货备注", "textarea", "optional", "仓库收货现场说明和异常备注。"),

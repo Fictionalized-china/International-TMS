@@ -1,11 +1,10 @@
 import { env } from "cloudflare:workers";
-import { Form, Link, redirect, useNavigation } from "react-router";
+import { Form, Link, redirect, useFetcher, useNavigate, useNavigation } from "react-router";
 import { useEffect, useRef, useState } from "react";
 import type { Route } from "./+types/warehouse.acceptance";
 import {
   WarehouseReceiptResultSelector,
   WarehouseReceivingOrderStrip,
-  WarehouseReceivingScanPanel,
 } from "../components/WarehouseReceivingFlow";
 import { ActionToast } from "../components/ActionToast";
 import { requireSessionUser } from "../lib/auth.server";
@@ -22,17 +21,13 @@ import { synchronizeOrderExceptionStatuses } from "../lib/order-exception-status
 import { loadOrderModuleWorkflowFields } from "../lib/workflow-fields.server";
 import { canOperateWarehouseUi } from "../lib/warehouse-ui-access";
 import { loadWarehousePhysicalWorkflowAccess } from "../lib/warehouse-workflow-access.server";
+import { scanInboundMarkAtWarehouse } from "../lib/warehouse-inbound-scan-session.server";
 import {
   acceptanceRequiredMarker,
   automaticWarehouseAcceptanceResult,
   resolveWarehouseAcceptancePolicies,
   warehouseAcceptanceReadyIsBlocked,
 } from "../lib/warehouse-acceptance-policy";
-import {
-  calculateWarehouseVolumeCbm,
-  formatWarehouseVolumeCbm,
-  synchronizeWarehouseVolumeRow,
-} from "../lib/warehouse-volume";
 
 type AcceptanceOrder = {
   id: string;
@@ -158,7 +153,8 @@ export async function loader({ request }: Route.LoaderArgs) {
   let cargoItems: CargoItem[] = [];
   let workflowFields: Awaited<ReturnType<typeof loadOrderModuleWorkflowFields>> = [];
   let inboundMarks:InboundMark[]=[];
-  let initialScannedMarkCode = "";
+  let receivingSessionId = "";
+  let scannedInboundMarks:InboundMark[]=[];
   let lookupError = "";
   if (reference) {
     const matches = await env.DB.prepare(
@@ -214,7 +210,7 @@ export async function loader({ request }: Route.LoaderArgs) {
         lookupError = workflowAccess.reason || "当前订单的冻结工作流尚未开放国内仓入库";
         order = null;
       } else {
-        const [cargo,marks] = await Promise.all([env.DB.prepare(
+        const [cargo,marks,receivingSession] = await Promise.all([env.DB.prepare(
           `SELECT i.id,i.line_no,i.cargo_name_cn,i.cargo_name_en,i.hs_code,i.package_type,
                   i.package_count,i.pieces_per_package,i.gross_weight_per_package_kg,
                   i.net_weight_per_package_kg,i.length_cm,i.width_cm,i.height_cm,
@@ -234,16 +230,24 @@ export async function loader({ request }: Route.LoaderArgs) {
              FROM order_cargo_packages
             WHERE organization_id=? AND order_id=? AND is_active=1 AND status!='cancelled'
             ORDER BY package_sequence`,
-        ).bind(user.organizationId,order.id).all<InboundMark>()]);
+        ).bind(user.organizationId,order.id).all<InboundMark>(),env.DB.prepare(
+          `SELECT id FROM warehouse_inbound_order_receiving_sessions
+            WHERE organization_id=? AND warehouse_id=? AND order_id=? AND status='scanning'
+            ORDER BY opened_at DESC LIMIT 1`,
+        ).bind(user.organizationId,warehouse.id,order.id).first<{id:string}>()]);
         cargoItems = cargo.results;
         inboundMarks=marks.results;
-        const referencedMark = inboundMarks.find(
-          (mark) => mark.package_code.toUpperCase() === reference.toUpperCase(),
-        );
-        if (referencedMark?.status === "received")
-          lookupError = `入仓唛头 ${referencedMark.package_code} 已收货，不能重复扫描`;
-        else if (referencedMark)
-          initialScannedMarkCode = referencedMark.package_code.toUpperCase();
+        receivingSessionId=receivingSession?.id??"";
+        if(receivingSessionId){
+          const scanned=await env.DB.prepare(
+            `SELECT mark.id,mark.cargo_item_id,mark.package_code,mark.package_sequence,mark.status,mark.is_supplemental
+               FROM warehouse_inbound_order_receiving_items item
+               JOIN order_cargo_packages mark ON mark.id=item.inbound_mark_id
+              WHERE item.organization_id=? AND item.order_receiving_session_id=?
+              ORDER BY mark.package_sequence,mark.id`,
+          ).bind(user.organizationId,receivingSessionId).all<InboundMark>();
+          scannedInboundMarks=scanned.results;
+        }
         workflowFields = await loadOrderModuleWorkflowFields(
           user.organizationId,
           order.id,
@@ -262,7 +266,8 @@ export async function loader({ request }: Route.LoaderArgs) {
     order,
     cargoItems,
     inboundMarks,
-    initialScannedMarkCode,
+    receivingSessionId,
+    scannedInboundMarks,
     workflowFields,
     locations: locations.results,
     recentLabels: recentLabels.results,
@@ -286,10 +291,48 @@ export async function action({ request }: Route.ActionArgs) {
   await requireWarehouseAssignment(user, warehouse.id, "operator");
 
   const form = await request.formData();
+  const intent = valueOf(form, "intent");
+  if(intent==="scan_mark"){
+    const code=valueOf(form,"code").trim().toUpperCase();
+    if(!code)return{scanResult:{outcome:"not_found",orderNumber:null,message:"请扫描入仓唛头"}};
+    const candidate=await env.DB.prepare(
+      `SELECT o.id,o.status,a.destination_warehouse_id
+         FROM order_cargo_packages mark
+         JOIN transport_orders o ON o.id=mark.order_id AND o.organization_id=mark.organization_id
+         LEFT JOIN order_transport_assignments a ON a.id=(
+           SELECT ax.id FROM order_transport_assignments ax
+            WHERE ax.organization_id=o.organization_id AND ax.order_id=o.id
+              AND ax.leg_type='first_mile' AND ax.status!='cancelled'
+            ORDER BY ax.updated_at DESC,ax.created_at DESC LIMIT 1
+         )
+        WHERE mark.organization_id=? AND UPPER(mark.package_code)=?
+          AND mark.is_active=1 AND mark.status!='cancelled'
+        ORDER BY mark.created_at DESC LIMIT 1`,
+    ).bind(user.organizationId,code).first<{id:string;status:string;destination_warehouse_id:string|null}>();
+    if(candidate&&!['confirmed','in_execution'].includes(candidate.status)){
+      return{scanResult:{outcome:'unavailable',orderNumber:null,message:'该订单当前状态不允许国内仓收货'}};
+    }
+    if(candidate?.destination_warehouse_id===warehouse.id){
+      const access=await loadWarehousePhysicalWorkflowAccess(
+        env.DB,user.organizationId,candidate.id,"warehouse",
+        {userId:user.userId,positionCode:user.positionCode},
+      );
+      if(!access.available)return{scanResult:{outcome:"unavailable",orderNumber:null,message:access.reason||"该订单尚未开放国内仓收货"}};
+    }
+    try{
+      const scanResult=await scanInboundMarkAtWarehouse(env.DB,{
+        organizationId:user.organizationId,warehouseId:warehouse.id,userId:user.userId,
+        code,requestKey:valueOf(form,"requestKey")||null,
+      });
+      return{scanResult};
+    }catch(error){
+      console.error("warehouse inbound mark scan failed",error);
+      return{scanResult:{outcome:"unavailable",orderNumber:null,message:"扫码登记失败，请重新扫描"}};
+    }
+  }
   const orderId = valueOf(form, "orderId");
   const requestedLocationId = valueOf(form, "locationId");
   const requestedResult = valueOf(form, "receiptResult");
-  const scannedMarkCodes=parseScannedCodes(valueOf(form,"scannedMarkCodes"));
   let exceptionNotes = valueOf(form, "exceptionNotes").trim();
   const notes = valueOf(form, "notes").trim();
   if (!orderId) return { formError: "订单不能为空" };
@@ -326,6 +369,21 @@ export async function action({ request }: Route.ActionArgs) {
   );
   if (!workflowAccess.available)
     return { formError: workflowAccess.reason || "当前订单的冻结工作流尚未开放国内仓入库" };
+
+  const receivingSession=await env.DB.prepare(
+    `SELECT id FROM warehouse_inbound_order_receiving_sessions
+      WHERE organization_id=? AND warehouse_id=? AND order_id=? AND status='scanning'
+      ORDER BY opened_at DESC LIMIT 1`,
+  ).bind(user.organizationId,warehouse.id,order.id).first<{id:string}>();
+  if(!receivingSession)return{formError:"当前订单还没有扫码记录，请先使用页面顶部的仓库统一扫描栏扫描入仓唛头"};
+  const persistedScans=await env.DB.prepare(
+    `SELECT mark.package_code
+       FROM warehouse_inbound_order_receiving_items item
+       JOIN order_cargo_packages mark ON mark.id=item.inbound_mark_id
+      WHERE item.organization_id=? AND item.order_receiving_session_id=?
+      ORDER BY mark.package_sequence,mark.id`,
+  ).bind(user.organizationId,receivingSession.id).all<{package_code:string}>();
+  const scannedMarkCodes=persistedScans.results.map(item=>item.package_code.toUpperCase());
 
   const workflowFields = await loadOrderModuleWorkflowFields(
     user.organizationId,
@@ -433,9 +491,6 @@ export async function action({ request }: Route.ActionArgs) {
 
   const actualRows = cargo.results.map((item, index) => {
     const actualPackages = scannedCountByCargo.get(item.id)||0;
-    const actualLength = nonNegativeNumber(form, `actualLength_${index}`);
-    const actualWidth = nonNegativeNumber(form, `actualWidth_${index}`);
-    const actualHeight = nonNegativeNumber(form, `actualHeight_${index}`);
     return {
       ...item,
       actualPackages,
@@ -445,29 +500,20 @@ export async function action({ request }: Route.ActionArgs) {
       actualWeight: policies.actualWeight.isActive
         ? nonNegativeNumber(form, `actualWeight_${index}`)
         : null,
-      actualVolume: policies.actualVolume.isActive
-        ? calculateWarehouseVolumeCbm({
-            lengthCm: actualLength,
-            widthCm: actualWidth,
-            heightCm: actualHeight,
-            packageCount: actualPackages,
-          })
-        : null,
-      actualLength,
-      actualWidth,
-      actualHeight,
+      // 国内仓收货只确认入仓包装与实重。最终包装的尺寸、体积和计费重
+      // 在二次包装/创建装车任务时登记，不能复用报价阶段的预估尺寸冒充实测。
+      actualVolume: null,
+      actualLength: 0,
+      actualWidth: 0,
+      actualHeight: 0,
       itemNotes: valueOf(form, `itemNotes_${index}`).trim(),
     };
   });
   if (actualRows.some((item) => item.packageCountInvalid))
     return { formError: "实收包装数如果填写，必须是有效的非负整数" };
   const receivedRows = actualRows.filter((item) => item.actualPackages > 0);
-  if (receivedRows.some((item) => !item.actualLength || !item.actualWidth || !item.actualHeight))
-    return { formError: "有实收包装的货物必须填写大于 0 的实际长、宽、高" };
   if (policies.actualWeight.isRequired && receivedRows.some((item) => !item.actualWeight))
     return { formError: "有实收包装的货物必须填写大于 0 的实际重量" };
-  if (policies.actualVolume.isRequired && receivedRows.some((item) => !item.actualVolume))
-    return { formError: "有实收包装的货物必须填写大于 0 的实际体积" };
   const inventoryRows = receivedRows.map((item) => ({
     ...item,
     // A package row needs at least one piece for the physical inventory
@@ -524,12 +570,10 @@ export async function action({ request }: Route.ActionArgs) {
     weightKg: (previous?.weight_kg ?? 0) + totalWeight,
     volumeCbm: (previous?.volume_cbm ?? 0) + totalVolume,
   };
-  const piecesComparable = policies.actualPieces.isActive &&
-    receivedRows.every((item) => item.actualPieces !== null);
+  const piecesComparable = false;
   const weightComparable = policies.actualWeight.isActive &&
     receivedRows.every((item) => item.actualWeight !== null);
-  const volumeComparable = policies.actualVolume.isActive &&
-    receivedRows.every((item) => item.actualVolume !== null);
+  const volumeComparable = false;
   const difference = calculateWarehouseDifference(
     {
       pieces: piecesComparable ? expected.pieces : cumulative.pieces,
@@ -568,7 +612,7 @@ export async function action({ request }: Route.ActionArgs) {
     };
   if (result === "ready" && warehouseAcceptanceReadyIsBlocked(acceptanceComparison))
     return {
-      formError: `累计实收与预录差异较大，不能直接确认货齐：预录 ${expected.packages} 包/${expected.pieces} 件，累计实收 ${cumulative.packages} 包/${cumulative.pieces} 件，最大可比实收差异 ${difference.maxPercent.toFixed(1)}%。请选择“异常入库”并处理差异。`,
+      formError: `累计实收与预录差异较大，不能直接确认货齐：预录 ${expected.packages} 包，累计扫描 ${cumulative.packages} 包，可比实重差异 ${difference.maxPercent.toFixed(1)}%。请选择“异常入库”并处理差异。`,
     };
 
   if (result === "ready") {
@@ -618,6 +662,16 @@ export async function action({ request }: Route.ActionArgs) {
       packageTypes.length === 1 ? packageTypes[0] : "mixed",null,result === "ready" ? 1 : 0,
       result === "exception" ? 1 : 0,exceptionNotes || null,
     ),
+    env.DB.prepare(
+      `UPDATE warehouse_inbound_mark_receipts
+          SET status='confirmed',receipt_id=?,confirmed_at=?,updated_at=?
+        WHERE organization_id=? AND warehouse_id=? AND order_receiving_session_id=? AND status='scanned'`,
+    ).bind(receiptId,now,now,user.organizationId,warehouse.id,receivingSession.id),
+    env.DB.prepare(
+      `UPDATE warehouse_inbound_order_receiving_sessions
+          SET status='confirmed',confirmed_receipt_id=?,confirmed_by_user_id=?,confirmed_at=?,updated_at=?
+        WHERE id=? AND organization_id=? AND warehouse_id=? AND order_id=? AND status='scanning'`,
+    ).bind(receiptId,user.userId,now,now,receivingSession.id,user.organizationId,warehouse.id,order.id),
   );
 
   const createdPackages: { id: string; barcode: string }[] = [];
@@ -792,33 +846,40 @@ export async function action({ request }: Route.ActionArgs) {
 
 export default function WarehouseAcceptance({ loaderData, actionData }: Route.ComponentProps) {
   const busy = useNavigation().state !== "idle";
-  const actionError = actionData?.formError;
+  const navigate = useNavigate();
+  const scanFetcher=useFetcher<typeof action>();
+  const actionError = actionData&&"formError" in actionData?actionData.formError:undefined;
+  const scanResult=scanFetcher.data&&"scanResult" in scanFetcher.data?scanFetcher.data.scanResult:undefined;
   const canOperate = canOperateWarehouseUi(
     loaderData.user,
     loaderData.warehouseAccessLevel,
   );
   const [receiptResult, setReceiptResult] = useState<"" | "ready" | "exception">("");
   const [markInput,setMarkInput]=useState("");
-  const [scannedMarks,setScannedMarks]=useState<string[]>([]);
-  const [scanFeedback,setScanFeedback]=useState("");
   const markInputRef=useRef<HTMLInputElement>(null);
-  const labels = loaderData.receiptId ? loaderData.recentLabels : [];
   const policies = resolveWarehouseAcceptancePolicies(loaderData.workflowFields);
+  const scannedMarks=loaderData.scannedInboundMarks.map(mark=>mark.package_code.toUpperCase());
   const historicallyReceivedCount=loaderData.inboundMarks.filter(mark=>mark.status==='received').length;
   const accountedPackageCount=historicallyReceivedCount+scannedMarks.length;
   const plannedPackageCount=loaderData.order?.planned_inbound_package_count??0;
   const normalReceivingComplete=Boolean(loaderData.order)&&accountedPackageCount===plannedPackageCount;
   useEffect(() => {
     setReceiptResult("");
-    setScannedMarks(loaderData.initialScannedMarkCode ? [loaderData.initialScannedMarkCode] : []);
     setMarkInput("");
-    setScanFeedback(loaderData.initialScannedMarkCode ? `${loaderData.initialScannedMarkCode} 已登记，请继续扫描其余唛头` : "");
-  }, [loaderData.order?.id, loaderData.initialScannedMarkCode]);
+  }, [loaderData.order?.id]);
   useEffect(() => {
-    if(!loaderData.order)return;
     const frame=requestAnimationFrame(()=>markInputRef.current?.focus());
     return()=>cancelAnimationFrame(frame);
   }, [loaderData.order?.id, scannedMarks.length]);
+  useEffect(()=>{
+    if(scanFetcher.state!=="idle"||!scanResult)return;
+    setMarkInput("");
+    markInputRef.current?.focus();
+    if(scanResult.orderNumber&&scanResult.orderNumber!==loaderData.order?.order_number){
+      const params=new URLSearchParams({warehouseId:loaderData.warehouse.id,reference:scanResult.orderNumber});
+      navigate(`/warehouse/acceptance?${params.toString()}`);
+    }
+  },[loaderData.order?.order_number,loaderData.warehouse.id,navigate,scanFetcher.state,scanResult]);
   useEffect(() => {
     if(!loaderData.order)return;
     setReceiptResult(current=>{
@@ -827,46 +888,36 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
       return normalReceivingComplete?'ready':'';
     });
   }, [accountedPackageCount, loaderData.order, normalReceivingComplete, plannedPackageCount]);
-  const addScannedMark=(rawCode=markInput)=>{
+  const openScannedReference=(code:string)=>{
+    const params=new URLSearchParams({warehouseId:loaderData.warehouse.id,reference:code});
+    navigate(`/warehouse/acceptance?${params.toString()}`);
+  };
+  const submitWarehouseScan=(rawCode=markInput)=>{
+    if(scanFetcher.state!=="idle")return;
     const code=rawCode.trim().toUpperCase();
     if(!code)return;
-    if(loaderData.inboundMarks.some(mark=>mark.status==='received'&&mark.package_code.toUpperCase()===code)){
-      setScanFeedback(`${code} 已经入库，无需重复扫描`);
-      setMarkInput("");
+    if(!/-IN-\d{3,}$/i.test(code)){
+      openScannedReference(code);
       return;
     }
-    if(scannedMarks.includes(code)){
-      setScanFeedback(`${code} 已在本次清单中，无需重复扫描`);
-      setMarkInput("");
-      return;
-    }
-    setScannedMarks(current=>current.includes(code)?current:[...current,code]);
-    setScanFeedback(`${code} 已自动登记`);
     setMarkInput("");
-  };
-  const handleMarkInputChange=(value:string)=>{
-    const normalized=value.toUpperCase();
-    setMarkInput(normalized);
-    const prefix=`${loaderData.order?.order_number??''}-IN-`;
-    const sequence=normalized.slice(prefix.length);
-    if(prefix.length>4&&normalized.startsWith(prefix)&&/^\d{3,}$/.test(sequence))addScannedMark(normalized);
+    scanFetcher.submit({intent:"scan_mark",warehouseId:loaderData.warehouse.id,code,requestKey:crypto.randomUUID()},{method:"post"});
   };
   return <>
-    <header className="page-header acceptance-header"><div><p className="eyebrow">ACCEPTANCE RECEIVING</p><h1>验收收货</h1><p>扫描任一入仓唛头即可调出整批信息并计入本次收货；继续逐一扫描其余外包装，系统自动记录整批收齐进度。</p></div></header>
+    <header className="page-header acceptance-header"><div><p className="eyebrow">ACCEPTANCE RECEIVING</p><h1>验收收货</h1><p>仓库统一扫描入口；扫描任一入仓唛头，系统自动识别订单并累计整批收货进度。</p></div></header>
     <ActionToast message={actionError ?? loaderData.resultMessage} tone={actionError ? "error" : "success"} data={actionData}/>
     {!loaderData.locations.length && <div className="alert error">当前仓库没有可用库位，请先<Link to={`/warehouse/locations?warehouseId=${loaderData.warehouse.id}`}>配置仓库与库位</Link>。</div>}
-    {canOperate && !loaderData.order ? <WarehouseReceivingScanPanel
-      warehouseId={loaderData.warehouse.id}
-      reference={loaderData.reference}
-      inputLabel="扫描入仓唛头 / 订单号"
-      placeholder="扫描任一入仓唛头后回车"
-      submitLabel="调出验收信息"
-      hint="首次扫描任一 SO…-IN-… 入仓唛头即可调出所属整批，并自动把该唛头计入本次收货；也兼容手工输入订单号查询。"
-    /> : !canOperate ? <div className="alert info">当前账号为仓库只读视角，可查看入库结果与历史标签；验收扫描和入库提交仅向有操作权限的冻结任务负责人开放。</div> : null}
+    {canOperate ? <section className="panel acceptance-scan-panel acceptance-unified-scan no-print">
+      <form className="acceptance-scan-form" onSubmit={event=>{event.preventDefault();submitWarehouseScan();}}>
+        <label className="field scan-field"><span>仓库统一扫描栏</span><input ref={markInputRef} data-keyboard-search value={markInput} onChange={event=>setMarkInput(event.target.value.toUpperCase())} autoFocus autoComplete="off" placeholder="扫描任意订单的入仓唛头后回车" required disabled={scanFetcher.state!=="idle"}/></label>
+        <button type="submit" className="primary" disabled={scanFetcher.state!=="idle"}>{scanFetcher.state!=="idle"?"正在登记…":"识别并登记"}</button>
+        <small>同一个扫描栏服务当前仓库全部订单；每次扫码后系统自动识别订单并归入各自的整单收货会话。</small>
+      </form>
+      {(scanResult||loaderData.order)&&<div className={`inbound-mark-scan-feedback${normalReceivingComplete?' complete':''}`} role="status" aria-live="polite">{scanResult?.message??(scanResult?.outcome==="accepted"?`扫描成功，已归入 ${scanResult.orderNumber} 的收货会话`:normalReceivingComplete?`已扫齐 ${plannedPackageCount} 包，请核对实重和库位后确认入库`:`当前查看 ${loaderData.order?.order_number}，还需扫描 ${Math.max(0,plannedPackageCount-accountedPackageCount)} 包`)}</div>}
+    </section> : <div className="alert info">当前账号为仓库只读视角，可查看入库结果与历史标签；验收扫描和入库提交仅向有操作权限的冻结任务负责人开放。</div>}
     {loaderData.lookupError && <div className="alert error no-print">{loaderData.lookupError}</div>}
-    {canOperate && loaderData.order && loaderData.cargoItems.length > 0 && <Form method="post" className="acceptance-workbench no-print" onInput={(event) => synchronizeWarehouseVolumeRow(event.target)}>
+    {canOperate && loaderData.order && loaderData.cargoItems.length > 0 && <Form method="post" className="acceptance-workbench no-print">
       <input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/><input type="hidden" name="orderId" value={loaderData.order.id}/><input type="hidden" name="reference" value={loaderData.order.order_number}/>
-      <input type="hidden" name="scannedMarkCodes" value={JSON.stringify(scannedMarks)}/>
       <WarehouseReceivingOrderStrip facts={[
         { label: "订单 / 类型", value: `${loaderData.order.order_number} · ${loaderData.order.business_type === "ftl" ? "整车" : "拼车"}` },
         { label: "客户", value: `[${loaderData.order.customer_identity_code}] ${loaderData.order.customer_name}` },
@@ -874,43 +925,29 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
         { label: "国内运输", value: loaderData.order.carrier_name || "承运商未填写", detail: loaderData.order.vehicle_summary || "车辆与司机未填写" },
         { label: "提货地", value: `${loaderData.order.origin_city} · ${loaderData.order.origin_address}` },
       ]}/>
-      <section className="panel inbound-mark-scan-panel">
-        <div className="panel-header"><div><h2>连续扫描入仓唛头</h2><p>首个唛头已经计入；继续逐一扫描剩余外包装，系统识别完整唛头后自动登记，无需点击按钮。</p></div><div className="inbound-mark-scan-actions"><strong>{accountedPackageCount} / {plannedPackageCount} 包</strong><Link className="btn" to={`/warehouse/acceptance?warehouseId=${loaderData.warehouse.id}`}>切换订单</Link></div></div>
-        <div className="inbound-mark-scan-row"><input ref={markInputRef} className="control" value={markInput} onChange={event=>handleMarkInputChange(event.target.value)} onKeyDown={event=>{if(event.key==='Enter'){event.preventDefault();addScannedMark();}}} placeholder="连续扫描入仓唛头（自动登记）" autoFocus autoComplete="off"/></div>
-        <div className={`inbound-mark-scan-feedback${normalReceivingComplete?' complete':''}`} role="status" aria-live="polite">{normalReceivingComplete?`已扫齐 ${plannedPackageCount} 包，请核对实收数据后确认入库`:scanFeedback||`还需扫描 ${Math.max(0,plannedPackageCount-accountedPackageCount)} 包`}</div>
+      <section className="panel inbound-mark-progress-panel">
+        <div className="panel-header"><div><h2>当前订单扫码进度</h2><p>扫描操作统一在页面顶部完成；这里仅展示当前订单的整批收齐情况。</p></div><div className="inbound-mark-scan-actions"><strong>{accountedPackageCount} / {plannedPackageCount} 包</strong><Link className="btn" to={`/warehouse/acceptance?warehouseId=${loaderData.warehouse.id}`}>结束查看</Link></div></div>
         <div className="inbound-mark-progress"><span>计划 {plannedPackageCount} 包</span><span>历史已收 {historicallyReceivedCount} 包</span><span>本次 {scannedMarks.length} 包</span><span>剩余 {Math.max(0,plannedPackageCount-accountedPackageCount)} 包</span></div>
-        {scannedMarks.length>0&&<div className="inbound-mark-chip-list">{scannedMarks.map(code=><button key={code} type="button" onClick={()=>setScannedMarks(current=>current.filter(item=>item!==code))} title="点击移除">{code}<span>×</span></button>)}</div>}
+        {scannedMarks.length>0&&<div className="inbound-mark-chip-list">{scannedMarks.map(code=><span key={code}>{code}<small>已登记</small></span>)}</div>}
       </section>
       <section className="panel acceptance-cargo-panel">
-        <div className="panel-header"><div><h2>预录货物与本次实收</h2><p>每条货物按本次实际到仓填写；未在本批到仓的货物全部填 0。长宽高用于生成实物库存与标签，固定为系统必填。</p></div><span className="status-pill">{loaderData.cargoItems.length} 条货物</span></div>
-        <div className="alert info">本次包装数完全按上方已扫描唛头计算；商品件数不参与仓库收货门禁。</div>
+        <div className="panel-header"><div><h2>包装收齐与实重核对</h2><p>入仓包装数完全按唛头扫描累计；国内仓只记录实重，不在收货环节重复统计商品件数和最终包装尺寸。</p></div><span className="status-pill">{loaderData.cargoItems.length} 条货物</span></div>
         <div className="table-wrap acceptance-cargo-table"><table><thead><tr>
-          <th>预录货物</th><th>计划数据</th><th>累计已收</th>
-          <th>本次扫码包装</th>
-          {policies.actualWeight.isActive && <th>实际重量 KG{acceptanceRequiredMarker(policies.actualWeight)}</th>}
-          <th>实际长×宽×高 CM{acceptanceRequiredMarker(policies.actualDimensions)}</th>
-          {policies.actualVolume.isActive && <th>实际体积 CBM（自动计算）{acceptanceRequiredMarker(policies.actualVolume)}</th>}
-          <th>本行备注</th>
+          <th>货物</th><th>计划入仓包装</th><th>扫码累计</th><th>申报重量</th>
+          {policies.actualWeight.isActive && <th>本单实收重量 KG{acceptanceRequiredMarker(policies.actualWeight)}</th>}
+          <th>备注</th>
         </tr></thead><tbody>{loaderData.cargoItems.map((item,index) => {
           const expectedWeight = item.package_count * item.gross_weight_per_package_kg;
-          const expectedVolume = item.package_count * item.volume_per_package_cbm;
           const knownCodes=new Set(loaderData.inboundMarks.filter(mark=>mark.cargo_item_id===item.id).map(mark=>mark.package_code.toUpperCase()));
           const scannedForItem=scannedMarks.filter(code=>knownCodes.has(code)).length+
             (index===0?scannedMarks.filter(code=>!loaderData.inboundMarks.some(mark=>mark.package_code.toUpperCase()===code)).length:0);
-          const calculatedVolume = calculateWarehouseVolumeCbm({
-            lengthCm: item.length_cm,
-            widthCm: item.width_cm,
-            heightCm: item.height_cm,
-            packageCount: scannedForItem,
-          });
-          return <tr key={item.id} data-warehouse-volume-row data-warehouse-volume-packages={scannedForItem}>
-            <td><strong>{item.line_no}. {item.cargo_name_cn}</strong><small>{item.cargo_name_en || "—"} · HS {item.hs_code || "—"}</small><small>{packageTypeLabel(item.package_type)} · {item.length_cm}×{item.width_cm}×{item.height_cm} cm</small></td>
-            <td><strong>{item.package_count} 个入仓包装</strong><small>{expectedWeight.toFixed(2)} KG · {expectedVolume.toFixed(3)} CBM</small></td>
-            <td><strong>{item.received_packages} 个已收包装</strong><small>{item.received_weight_kg.toFixed(2)} KG · {item.received_volume_cbm.toFixed(3)} CBM</small></td>
-            <td><strong>{scannedForItem}</strong><small>按唛头自动汇总</small></td>
-            {policies.actualWeight.isActive && <td><input name={`actualWeight_${index}`} type="number" min="0" step="0.001" defaultValue={(item.gross_weight_per_package_kg*scannedForItem).toFixed(3)} required={policies.actualWeight.isRequired}/></td>}
-            <td><div className="acceptance-dimensions"><input name={`actualLength_${index}`} type="number" min="0" step="0.1" defaultValue={item.length_cm} aria-label="实际长度" required data-warehouse-volume-length/><span>×</span><input name={`actualWidth_${index}`} type="number" min="0" step="0.1" defaultValue={item.width_cm} aria-label="实际宽度" required data-warehouse-volume-width/><span>×</span><input name={`actualHeight_${index}`} type="number" min="0" step="0.1" defaultValue={item.height_cm} aria-label="实际高度" required data-warehouse-volume-height/></div></td>
-            {policies.actualVolume.isActive && <td><input name={`actualVolume_${index}`} aria-label="实际体积 CBM（自动计算）" type="number" min="0" step="0.0001" defaultValue={formatWarehouseVolumeCbm(calculatedVolume)} required={policies.actualVolume.isRequired} readOnly data-warehouse-volume-output/></td>}
+          const cumulativeScanned=item.received_packages+scannedForItem;
+          return <tr key={item.id}>
+            <td><strong>{item.line_no}. {item.cargo_name_cn}</strong><small>{item.cargo_name_en || "—"} · HS {item.hs_code || "—"}</small><small>{packageTypeLabel(item.package_type)}</small></td>
+            <td><strong>{item.package_count} 包</strong><small>按预计包装数生成入仓唛头</small></td>
+            <td><strong>{cumulativeScanned} / {item.package_count} 包</strong><small>{scannedForItem?`含本次新扫 ${scannedForItem} 包，确认后正式入库`:"等待扫描"}</small></td>
+            <td><strong>{expectedWeight.toFixed(2)} KG</strong><small>报价/委托申报值</small></td>
+            {policies.actualWeight.isActive && <td><input name={`actualWeight_${index}`} aria-label={`${item.cargo_name_cn} 本单实收重量`} type="number" min="0" step="0.001" defaultValue="" placeholder="称重后填写" required={policies.actualWeight.isRequired}/></td>}
             <td><input name={`itemNotes_${index}`} placeholder="选填"/></td>
           </tr>;
         })}</tbody></table></div>
@@ -964,13 +1001,5 @@ function nonNegativeNumber(form:FormData,name:string){const raw=valueOf(form,nam
 function distributeDecimal(total:number,count:number,sequence:number){const base=Math.floor(total/count*1_000_000)/1_000_000;return sequence===count?Number((total-base*(count-1)).toFixed(6)):base}
 function generateCode(prefix:string){return `${prefix}-${Date.now().toString(36).toUpperCase()}-${crypto.randomUUID().slice(0,5).toUpperCase()}`}
 function packageTypeLabel(value:string){return({carton:"纸箱",pallet:"托盘",wooden_case:"木箱",bag:"袋装",drum:"桶装",bundle:"捆装",other:"其他",mixed:"混合包装"}as Record<string,string>)[value]||value}
-function parseScannedCodes(raw:string){
-  if(!raw)return[];
-  try{
-    const value=JSON.parse(raw);
-    if(!Array.isArray(value))return[];
-    return [...new Set(value.map(item=>String(item).trim().toUpperCase()).filter(Boolean))];
-  }catch{return[]}
-}
 function escapeRegExp(value:string){return value.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")}
 export function meta(){return[{title:"验收收货 | International TMS"}]}
