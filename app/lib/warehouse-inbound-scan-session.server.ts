@@ -187,7 +187,7 @@ export async function scanInboundMarkAtWarehouse(db: D1Database, input: {
         `INSERT INTO warehouse_inbound_scan_events(
            id,organization_id,warehouse_id,scan_session_id,normalized_code,request_key,outcome,inbound_mark_id,order_id,
            order_receiving_session_id,scanned_by_user_id,scanned_at,created_at,updated_at
-         ) VALUES(?,?,?,?,?,?, 'accepted',?,?,?,?,?,?,?,?)`,
+         ) VALUES(?,?,?,?,?,?, 'accepted',?,?,?,?,?,?,?)`,
       ).bind(eventId, input.organizationId, input.warehouseId, scanSessionId, code, input.requestKey ?? null,
         resolved.inbound_mark_id, resolved.order_id, receiving.id, input.userId, now, now, now),
       db.prepare(
