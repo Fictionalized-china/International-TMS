@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildWarehousePackingPlan, type PackingSource } from "./warehouse-packing-plan";
+import {
+  buildWarehousePackingPlan,
+  type PackingOrderRequest,
+  type PackingSource,
+} from "./warehouse-packing-plan";
 
 function source(orderId: string, index: number): PackingSource {
   return {
@@ -73,7 +77,7 @@ describe("buildWarehousePackingPlan", () => {
   });
 
   it("rejects missing sources, invalid counts and invalid request scope", () => {
-    const valid = {
+    const valid: PackingOrderRequest = {
       orderId: "order-a", orderNumber: "SO-A", sourceType: "ftl_order" as const, transportBatchId: null,
       mode: "merge" as const, outboundPackageCount: 1, totalWeightKg: null, totalVolumeCbm: null, notes: "",
     };

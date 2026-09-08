@@ -23,6 +23,10 @@ import {
 import { loadOrderLoadingDocumentRequirements } from "../lib/loading-document-requirements.server";
 import { loadOrderDocumentWorkflowMutationAccess } from "../lib/order-document-access.server";
 import {
+  hasOrderDocumentSystemOverride,
+  isOrderDocumentSelfReviewBlocked,
+} from "../lib/order-document-access";
+import {
   loadingDispatchPlanPolicyIssues,
   loadingBatchResourcePolicy,
   resolveLoadingBatchFieldPolicies,
@@ -54,6 +58,8 @@ import { warehouseOutboundRemediations } from "../lib/warehouse-outbound-remedia
 import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 import { paginateList, readListPage } from "../lib/list-pagination";
 import { completeWarehouseDispatchTransaction } from "../lib/warehouse-outbound-dispatch.server";
+import { buildWarehousePackingPlan, type PackingOrderRequest } from "../lib/warehouse-packing-plan";
+import { oulCode, randomOulSuffix } from "../lib/package-identity";
 
 const LOADING_DOCUMENTS=loadingOrderDocumentDefinitions;
 const LOADING_DOCUMENT_PLACEHOLDERS=LOADING_DOCUMENTS.map(()=>"?").join(",");
@@ -70,7 +76,7 @@ type OutboundResources={carriers:CarrierOption[];vehicles:VehicleOption[];driver
 type PendingOutboundDriver={id:string;carrierId:string;name:string;phone:string|null;licenseNumber:string|null};
 type ReferenceOption={category:"border_port"|"customs_place";code:string;name:string};
 type ManifestDoc={id:string;order_id:string;file_name:string;review_status:string;created_at:string};
-type OutboundDocument={orderId:string;orderNumber:string;customerId:string;customerName:string;required:boolean;attachmentId:string|null;code:LoadingDocumentCode;name:string;fileName:string|null;contentType:string|null;sizeBytes:number|null;reviewStatus:string|null};
+type OutboundDocument={orderId:string;orderNumber:string;customerId:string;customerName:string;required:boolean;attachmentId:string|null;code:LoadingDocumentCode;name:string;fileName:string|null;contentType:string|null;sizeBytes:number|null;reviewStatus:string|null;uploadedByUserId:string|null};
 type OutboundDocumentGroup={orderId:string;orderNumber:string;customerId:string;customerName:string;documents:OutboundDocument[];allUploaded:boolean;allApproved:boolean};
 type PackingSource={id:string;orderId:string;orderNumber:string;shipmentId:string;cargoItemId:string|null;receiptId:string;locationId:string;markId:string;markCode:string;weightKg:number|null;volumeCbm:number|null};
 type OutboundExecutionPolicy=WarehouseOutboundWorkflowPolicy&{batchFields:LoadingBatchFieldPolicies;resources:ReturnType<typeof loadingBatchResourcePolicy>;loadingStage:LoadingBatchStageGate};
@@ -393,11 +399,15 @@ export async function action({request}:Route.ActionArgs){
     const fileError=validateOutboundDocumentFile(file);
     if(fileError)return{formError:fileError,inspection};
     const attachmentId=crypto.randomUUID();
+    const requiresManualReview=hasOrderDocumentSystemOverride(user);
     await env.DB.batch([
       env.DB.prepare("INSERT INTO order_attachments(id,organization_id,order_id,customer_id,file_name,content_type,size_bytes,data_url,uploaded_by_user_id,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,'admin',?)")
         .bind(attachmentId,user.organizationId,orderId,documentGroup.customerId,file.name,file.type,file.size,await toDataUrl(file),user.userId,now),
-      env.DB.prepare("INSERT INTO order_document_metadata(attachment_id,organization_id,order_id,document_category,description,public_to_customer,review_status,updated_at) VALUES(?,?,?,?,?,0,'pending',?)")
-        .bind(attachmentId,user.organizationId,orderId,documentCategory,documentType.name,now),
+      env.DB.prepare(`INSERT INTO order_document_metadata(
+        attachment_id,organization_id,order_id,document_category,description,public_to_customer,
+        review_status,reviewed_by_user_id,reviewed_at,updated_at
+      ) VALUES(?,?,?,?,?,0,?,NULL,?,?)`)
+        .bind(attachmentId,user.organizationId,orderId,documentCategory,documentType.name,requiresManualReview?"pending":"approved",requiresManualReview?null:now,now),
     ]);
     await writeAudit({request,action:"warehouse.outbound.document_upload",resourceType:"order_attachment",resourceId:attachmentId,organizationId:user.organizationId,actorUserId:user.userId,metadata:{warehouseId:warehouse.id,orderId,orderNumber:documentGroup.orderNumber,documentCategory,fileName:file.name}});
     return{success:`${documentGroup.orderNumber} 的${documentType.name}已上传`,actionKind:"loading_document_uploaded" as const,uploadOpenSignal:now,inspection:await loadOutboundInspectionByIds(user.organizationId,warehouse.id,inspectionOrderId,batchId)};
@@ -410,7 +420,15 @@ export async function action({request}:Route.ActionArgs){
     if(stageError)return{formError:stageError,inspection};
     const missing=inspection.documents.filter(document=>document.required&&!document.attachmentId);
     if(missing.length)return{formError:`请先上传：${missing.map(document=>`${document.orderNumber} ${document.name}`).join("、")}`,inspection};
-    const uploadedDocuments=inspection.documents.filter(document=>document.attachmentId);
+    const uploadedDocuments=inspection.documents.filter(document=>
+      document.attachmentId&&document.reviewStatus==="pending"&&
+      !isOrderDocumentSelfReviewBlocked(user,document.uploadedByUserId)
+    );
+    const blockedSelfReview=inspection.documents.filter(document=>
+      document.required&&document.attachmentId&&document.reviewStatus==="pending"&&
+      isOrderDocumentSelfReviewBlocked(user,document.uploadedByUserId)
+    );
+    if(blockedSelfReview.length)return{formError:`以下文件不能由上传账号自行审核：${blockedSelfReview.map(document=>`${document.orderNumber} ${document.name}`).join("、")}`,inspection};
     const approvalStatements=chunkD1Values(uploadedDocuments,4).map(documentChunk=>env.DB.prepare(`UPDATE order_document_metadata
       SET review_status=CASE WHEN review_status='archived' THEN 'archived' ELSE 'approved' END,
           reviewed_by_user_id=?,reviewed_at=?,updated_at=?
@@ -485,22 +503,15 @@ export async function action({request}:Route.ActionArgs){
     }
     const missing=inspection.documents.filter(document=>document.required&&!document.attachmentId);
     if(missing.length)return rejectCreate(`请先上传：${missing.map(document=>`${document.orderNumber} ${document.name}`).join("、")}`);
-    const documentsToApprove=inspection.documents.filter(document=>document.attachmentId&&!["approved","archived"].includes(document.reviewStatus||""));
-    if(documentsToApprove.length){
-      const approvalStatements=chunkD1Values(documentsToApprove,4).map(documentChunk=>env.DB.prepare(`UPDATE order_document_metadata
-        SET review_status='approved',reviewed_by_user_id=?,reviewed_at=?,updated_at=?
-        WHERE organization_id=? AND attachment_id IN (${d1Placeholders(documentChunk.length)})`)
-        .bind(user.userId,now,now,user.organizationId,...documentChunk.map(document=>document.attachmentId)));
-      await env.DB.batch(approvalStatements);
-      await writeAudit({request,action:"warehouse.outbound.documents_confirm_and_create",resourceType:"transport_order",resourceId:batch.order_id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{warehouseId:warehouse.id,orderNumbers:inspection.documentGroups.map(group=>group.orderNumber),documents:documentsToApprove.map(document=>`${document.orderNumber}:${document.code}`)}});
-      inspection=await loadOutboundInspectionByIds(user.organizationId,warehouse.id,batch.order_id,batch.id);
-      if(!inspection)return{formError:"文件确认后订单状态发生变化，请重新检查订单"};
-      const refreshedStageError=warehouseOutboundWorkflowActionError(inspection.executionPolicy);
-      if(refreshedStageError)return rejectCreate(refreshedStageError);
-    }
     if(!inspection.allApproved){
       const pending=inspection.documents.filter(document=>document.required&&!["approved","archived"].includes(document.reviewStatus||""));
-      return rejectCreate(`请先上传、检查并确认：${pending.map(document=>`${document.orderNumber} ${document.name}`).join("、")}`);
+      const rejected=pending.filter(document=>document.reviewStatus==="rejected");
+      const awaiting=pending.filter(document=>document.reviewStatus!=="rejected");
+      const messages=[
+        rejected.length?`已退回需重新上传：${rejected.map(document=>`${document.orderNumber} ${document.name}`).join("、")}`:"",
+        awaiting.length?`待其他账号审核：${awaiting.map(document=>`${document.orderNumber} ${document.name}`).join("、")}`:"",
+      ].filter(Boolean);
+      return rejectCreate(messages.join("；"));
     }
     if(inspection.notesActive&&inspection.notesRequired&&!notes.trim())return rejectCreate("请填写装车交接备注");
     let newDriverRegistration:PendingOutboundDriver|null=null;
@@ -604,26 +615,37 @@ export async function action({request}:Route.ActionArgs){
       if(finalBlocked.length)return{formError:`配载单 ${finalBatchReadiness.batchNumber} 的装车条件已变化：${formatOrderBlockers(finalBlocked)}`,inspection:finalInspection};
     }
     inspection=finalInspection;
-    const packingPlan=buildFinalPackingPlan(form,inspection);
+    const packingPlan=parsePackingRequests(form,inspection);
     if("error" in packingPlan)return{formError:packingPlan.error,inspection};
     const dispatchId=crypto.randomUUID(),number=generateDispatch(),mainAssignmentId=crypto.randomUUID();
     const packingStatements:D1PreparedStatement[]=[];
-    for(const output of packingPlan.outputs){
-      packingStatements.push(
-        env.DB.prepare(`INSERT INTO warehouse_packages(
-          id,organization_id,receipt_id,shipment_id,warehouse_id,location_id,barcode,package_number,
-          pieces,weight_kg,volume_cbm,status,notes,created_at,updated_at,cargo_item_id,
-          label_kind,lifecycle_status,source_order_package_id,packing_revision
-        ) VALUES(?,?,?,?,?,?,?,?,1,?,?,'allocated',?,?,?,?,'oul','active',?,1)`)
-          .bind(output.id,user.organizationId,output.receiptId,output.shipmentId,warehouse.id,output.locationId,output.code,output.code,
-            output.weightKg,output.volumeCbm,`装车前最终成包 · ${output.relationType}`,now,now,output.cargoItemId,output.sourceMarkIds[0]),
-        env.DB.prepare("INSERT INTO warehouse_dispatch_items(id,organization_id,dispatch_id,package_id,status) VALUES(?,?,?,?,'pending')")
-          .bind(crypto.randomUUID(),user.organizationId,dispatchId,output.id),
-      );
-      for(const sourceMarkId of output.sourceMarkIds){
-        packingStatements.push(env.DB.prepare(`INSERT INTO warehouse_package_relations(
-          id,organization_id,order_id,inbound_package_id,outbound_package_id,relation_type,created_by_user_id,created_at
-        ) VALUES(?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(),user.organizationId,output.orderId,sourceMarkId,output.id,output.relationType,user.userId,now));
+    for(const packingBatch of packingPlan.batches){
+      packingStatements.push(env.DB.prepare(`INSERT INTO warehouse_packing_batches(
+        id,organization_id,warehouse_id,order_id,transport_batch_id,dispatch_id,source_type,packing_mode,
+        source_package_count,outbound_package_count,total_weight_kg,total_volume_cbm,notes,revision,status,
+        created_by_user_id,created_at,updated_at
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,'generated',?,?,?)`).bind(
+        packingBatch.id,user.organizationId,warehouse.id,packingBatch.orderId,packingBatch.transportBatchId,dispatchId,
+        packingBatch.sourceType,packingBatch.mode,packingBatch.sourcePackageIds.length,packingBatch.outboundPackageCount,
+        packingBatch.totalWeightKg,packingBatch.totalVolumeCbm,packingBatch.notes||null,user.userId,now,now,
+      ));
+      for(const sourcePackageId of packingBatch.sourcePackageIds){
+        packingStatements.push(env.DB.prepare(`INSERT INTO warehouse_packing_batch_sources(
+          id,organization_id,packing_batch_id,inbound_warehouse_package_id,created_at
+        ) VALUES(?,?,?,?,?)`).bind(crypto.randomUUID(),user.organizationId,packingBatch.id,sourcePackageId,now));
+      }
+      for(const output of packingBatch.outputs){
+        packingStatements.push(
+          env.DB.prepare(`INSERT INTO warehouse_packages(
+            id,organization_id,receipt_id,shipment_id,warehouse_id,location_id,barcode,package_number,
+            pieces,weight_kg,volume_cbm,status,notes,created_at,updated_at,cargo_item_id,
+            label_kind,lifecycle_status,source_order_package_id,packing_revision,packing_batch_id
+          ) VALUES(?,?,?,?,?,?,?,?,1,NULL,NULL,'allocated',?,?,?,NULL,'oul','active',NULL,1,?)`)
+            .bind(output.id,user.organizationId,output.receiptId,output.shipmentId,warehouse.id,output.locationId,output.code,output.code,
+              `最终出仓包装 · ${packingBatch.mode}`,now,now,packingBatch.id),
+          env.DB.prepare("INSERT INTO warehouse_dispatch_items(id,organization_id,dispatch_id,package_id,status) VALUES(?,?,?,?,'pending')")
+            .bind(crypto.randomUUID(),user.organizationId,dispatchId,output.id),
+        );
       }
     }
     for(const source of inspection.packingSources){
@@ -699,51 +721,98 @@ export async function action({request}:Route.ActionArgs){
   if(!dispatch)return{formError:"装车任务不存在"};
   if(intent==="repack_oul"){
     if(dispatch.status!=="loading")return{formError:"该任务已经完成出库交接，不能重做 OUL"};
-    const activeDispatch=dispatch;
-    const currentItems=await env.DB.prepare(`SELECT di.id dispatch_item_id,di.status,p.id package_id,p.shipment_id,p.receipt_id,p.location_id,p.cargo_item_id,p.weight_kg,p.volume_cbm,p.packing_revision,o.id order_id,o.order_number
+    const currentItems=await env.DB.prepare(`SELECT di.id dispatch_item_id,di.status,p.id package_id,p.packing_batch_id,o.id order_id,o.order_number
       FROM warehouse_dispatch_items di
       JOIN warehouse_packages p ON p.id=di.package_id AND p.organization_id=di.organization_id
       JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id
       JOIN transport_orders o ON o.id=s.order_id AND o.organization_id=s.organization_id
       WHERE di.organization_id=? AND di.dispatch_id=? AND p.warehouse_id=? AND p.label_kind='oul' AND p.lifecycle_status!='voided'
-      ORDER BY o.order_number,p.created_at,p.id`).bind(user.organizationId,dispatch.id,warehouse.id).all<{dispatch_item_id:string;status:string;package_id:string;shipment_id:string;receipt_id:string;location_id:string;cargo_item_id:string|null;weight_kg:number|null;volume_cbm:number|null;packing_revision:number;order_id:string;order_number:string}>();
+      ORDER BY o.order_number,p.created_at,p.id`).bind(user.organizationId,dispatch.id,warehouse.id).all<{dispatch_item_id:string;status:string;package_id:string;packing_batch_id:string|null;order_id:string;order_number:string}>();
     if(!currentItems.results.length)return{formError:"当前任务没有可重做的 OUL"};
     if(currentItems.results.some(item=>item.status!=="pending"))return{formError:"装车扫码已经开始，OUL 成包方案已锁定，不能作废或重做"};
-    const relations=await env.DB.prepare(`SELECT DISTINCT r.order_id,r.inbound_package_id
-      FROM warehouse_package_relations r
-      JOIN warehouse_dispatch_items di ON di.package_id=r.outbound_package_id AND di.organization_id=r.organization_id
-      JOIN order_cargo_packages source ON source.id=r.inbound_package_id AND source.organization_id=r.organization_id
-      WHERE r.organization_id=? AND di.dispatch_id=? AND source.is_active=1 AND source.status!='cancelled'
-      ORDER BY r.order_id,source.package_sequence`).bind(user.organizationId,dispatch.id).all<{order_id:string;inbound_package_id:string}>();
-    const statements:D1PreparedStatement[]=[];
-    const orderGroups=[...new Map(currentItems.results.map(item=>[item.order_id,currentItems.results.filter(row=>row.order_id===item.order_id)])).entries()];
-    for(const [orderId,items] of orderGroups){
-      const orderNumber=items[0].order_number,sourceIds=relations.results.filter(row=>row.order_id===orderId).map(row=>row.inbound_package_id);
-      if(!sourceIds.length)return{formError:`${orderNumber} 缺少入仓唛头来源关系，不能安全重做 OUL`};
-      const requested=Number(valueOf(form,`outboundPackageCount_${orderId}`));
+    if(currentItems.results.some(item=>!item.packing_batch_id))return{formError:"当前任务仍使用旧版 OUL 关系，请新建订单重新测试"};
+    const activeBatches=await env.DB.prepare(`SELECT id,order_id,transport_batch_id,source_type,source_package_count,total_weight_kg,total_volume_cbm,notes,revision
+      FROM warehouse_packing_batches
+      WHERE organization_id=? AND warehouse_id=? AND dispatch_id=? AND status!='cancelled'
+      ORDER BY order_id`).bind(user.organizationId,warehouse.id,dispatch.id).all<{
+        id:string;order_id:string;transport_batch_id:string|null;source_type:"ftl_order"|"pz_order";source_package_count:number;
+        total_weight_kg:number|null;total_volume_cbm:number|null;notes:string|null;revision:number;
+      }>();
+    if(!activeBatches.results.length)return{formError:"当前任务缺少最终包装批次，请新建订单重新测试"};
+    const sourceRows=await env.DB.prepare(`SELECT source.packing_batch_id,p.id,p.shipment_id,p.receipt_id,p.location_id
+      FROM warehouse_packing_batch_sources source
+      JOIN warehouse_packages p ON p.id=source.inbound_warehouse_package_id AND p.organization_id=source.organization_id
+      WHERE source.organization_id=? AND source.packing_batch_id IN (
+        SELECT id FROM warehouse_packing_batches WHERE organization_id=? AND warehouse_id=? AND dispatch_id=? AND status!='cancelled'
+      ) ORDER BY source.packing_batch_id,p.id`).bind(user.organizationId,user.organizationId,warehouse.id,dispatch.id).all<{
+        packing_batch_id:string;id:string;shipment_id:string;receipt_id:string;location_id:string;
+      }>();
+    const requests:PackingOrderRequest[]=[];
+    const sources:import("../lib/warehouse-packing-plan").PackingSource[]=[];
+    for(const packingBatch of activeBatches.results){
+      const orderItems=currentItems.results.filter(item=>item.order_id===packingBatch.order_id);
+      const orderNumber=orderItems[0]?.order_number;
+      if(!orderNumber)return{formError:"包装批次关联订单已失效，不能重做 OUL"};
+      const batchSources=sourceRows.results.filter(source=>source.packing_batch_id===packingBatch.id);
+      if(batchSources.length!==packingBatch.source_package_count)return{formError:`${orderNumber} 的入仓唛头来源不完整，不能安全重做 OUL`};
+      const requested=Number(valueOf(form,`outboundPackageCount_${packingBatch.order_id}`));
       if(!Number.isInteger(requested)||requested<1||requested>500)return{formError:`${orderNumber} 的最终 OUL 数量必须是 1–500 的整数`};
-      const relationType=requested===sourceIds.length?"kept":requested<sourceIds.length?"merged":"split";
-      const sourceGroups=Array.from({length:requested},()=>[] as string[]);
-      if(requested<=sourceIds.length)sourceIds.forEach((sourceId,index)=>sourceGroups[Math.floor(index*requested/sourceIds.length)].push(sourceId));
-      else sourceGroups.forEach((bucket,index)=>bucket.push(sourceIds[index%sourceIds.length]));
-      const totalWeight=items.reduce((sum,item)=>sum+Number(item.weight_kg||0),0),totalVolume=items.reduce((sum,item)=>sum+Number(item.volume_cbm||0),0);
-      const revision=Math.max(...items.map(item=>Number(item.packing_revision||1)))+1;
-      sourceGroups.forEach((sourceGroup,index)=>{
-        const packageId=crypto.randomUUID(),code=generateOulCode(orderNumber,index+1,requested);
-        statements.push(
-          env.DB.prepare(`INSERT INTO warehouse_packages(id,organization_id,receipt_id,shipment_id,warehouse_id,location_id,barcode,package_number,pieces,weight_kg,volume_cbm,status,notes,created_at,updated_at,cargo_item_id,label_kind,lifecycle_status,source_order_package_id,packing_revision)
-            VALUES(?,?,?,?,?,?,?,?,1,?,?,'allocated',?,?,?,?,'oul','active',?,?)`).bind(packageId,user.organizationId,items[0].receipt_id,items[0].shipment_id,warehouse.id,items[0].location_id,code,code,totalWeight>0?splitPackingMeasure(totalWeight,requested,index):null,totalVolume>0?splitPackingMeasure(totalVolume,requested,index):null,`装车前重做最终成包 · 第 ${revision} 版`,now,now,items[0].cargo_item_id,sourceGroup[0],revision),
-          env.DB.prepare("INSERT INTO warehouse_dispatch_items(id,organization_id,dispatch_id,package_id,status) VALUES(?,?,?,?,'pending')").bind(crypto.randomUUID(),user.organizationId,activeDispatch.id,packageId),
-          ...sourceGroup.map(sourceId=>env.DB.prepare(`INSERT INTO warehouse_package_relations(id,organization_id,order_id,inbound_package_id,outbound_package_id,relation_type,created_by_user_id,created_at) VALUES(?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(),user.organizationId,orderId,sourceId,packageId,relationType,user.userId,now)),
-        );
+      requests.push({
+        orderId:packingBatch.order_id,orderNumber,sourceType:packingBatch.source_type,
+        transportBatchId:packingBatch.transport_batch_id,
+        mode:requested===batchSources.length?"preserve":requested<batchSources.length?"merge":"split",
+        outboundPackageCount:requested,totalWeightKg:packingBatch.total_weight_kg,totalVolumeCbm:packingBatch.total_volume_cbm,
+        notes:packingBatch.notes??"",
       });
+      sources.push(...batchSources.map(source=>({
+        id:source.id,orderId:packingBatch.order_id,shipmentId:source.shipment_id,
+        receiptId:source.receipt_id,locationId:source.location_id,
+      })));
     }
-    statements.unshift(
+    let revisedPlan:ReturnType<typeof buildWarehousePackingPlan>;
+    try{
+      revisedPlan=buildWarehousePackingPlan({
+        requests,sources,createId:()=>crypto.randomUUID(),
+        createOulCode:({orderNumber,sequence,total})=>oulCode(orderNumber,sequence,total,randomOulSuffix()),
+      });
+    }catch(error){return{formError:error instanceof Error?error.message:"重做最终包装失败"};}
+    const statements:D1PreparedStatement[]=[
+      env.DB.prepare("UPDATE warehouse_packing_batches SET status='cancelled',updated_at=? WHERE organization_id=? AND warehouse_id=? AND dispatch_id=? AND status IN ('generated','printed','labelled')").bind(now,user.organizationId,warehouse.id,dispatch.id),
       env.DB.prepare(`UPDATE warehouse_packages SET status='dispatched',lifecycle_status='voided',voided_at=?,voided_by_user_id=?,void_reason='装车前成包方案变更',updated_at=? WHERE organization_id=? AND id IN (SELECT package_id FROM warehouse_dispatch_items WHERE organization_id=? AND dispatch_id=?)`).bind(now,user.userId,now,user.organizationId,user.organizationId,dispatch.id),
       env.DB.prepare("DELETE FROM warehouse_dispatch_items WHERE organization_id=? AND dispatch_id=?").bind(user.organizationId,dispatch.id),
-    );
+    ];
+    for(const revised of revisedPlan.batches){
+      const previous=activeBatches.results.find(item=>item.order_id===revised.orderId)!;
+      const revision=previous.revision+1;
+      statements.push(env.DB.prepare(`INSERT INTO warehouse_packing_batches(
+        id,organization_id,warehouse_id,order_id,transport_batch_id,dispatch_id,source_type,packing_mode,
+        source_package_count,outbound_package_count,total_weight_kg,total_volume_cbm,notes,revision,status,
+        created_by_user_id,created_at,updated_at
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'generated',?,?,?)`).bind(
+        revised.id,user.organizationId,warehouse.id,revised.orderId,revised.transportBatchId,dispatch.id,revised.sourceType,revised.mode,
+        revised.sourcePackageIds.length,revised.outboundPackageCount,revised.totalWeightKg,revised.totalVolumeCbm,revised.notes||null,
+        revision,user.userId,now,now,
+      ));
+      for(const sourceId of revised.sourcePackageIds){
+        statements.push(env.DB.prepare("INSERT INTO warehouse_packing_batch_sources(id,organization_id,packing_batch_id,inbound_warehouse_package_id,created_at) VALUES(?,?,?,?,?)")
+          .bind(crypto.randomUUID(),user.organizationId,revised.id,sourceId,now));
+      }
+      for(const output of revised.outputs){
+        statements.push(
+          env.DB.prepare(`INSERT INTO warehouse_packages(
+            id,organization_id,receipt_id,shipment_id,warehouse_id,location_id,barcode,package_number,pieces,
+            weight_kg,volume_cbm,status,notes,created_at,updated_at,cargo_item_id,label_kind,lifecycle_status,
+            source_order_package_id,packing_revision,packing_batch_id
+          ) VALUES(?,?,?,?,?,?,?,?,1,NULL,NULL,'allocated',?,?,?,NULL,'oul','active',NULL,?,?)`)
+            .bind(output.id,user.organizationId,output.receiptId,output.shipmentId,warehouse.id,output.locationId,output.code,output.code,
+              `重做最终出仓包装 · 第 ${revision} 版`,now,now,revision,revised.id),
+          env.DB.prepare("INSERT INTO warehouse_dispatch_items(id,organization_id,dispatch_id,package_id,status) VALUES(?,?,?,?,'pending')")
+            .bind(crypto.randomUUID(),user.organizationId,dispatch.id,output.id),
+        );
+      }
+    }
     await env.DB.batch(statements);
-    await writeAudit({request,action:"warehouse.dispatch.oul_repacked",resourceType:"warehouse_dispatch",resourceId:dispatch.id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{dispatchNumber:dispatch.dispatch_number,orders:orderGroups.map(([orderId,items])=>({orderId,orderNumber:items[0].order_number,count:Number(valueOf(form,`outboundPackageCount_${orderId}`))}))}});
+    await writeAudit({request,action:"warehouse.dispatch.oul_repacked",resourceType:"warehouse_dispatch",resourceId:dispatch.id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{dispatchNumber:dispatch.dispatch_number,orders:revisedPlan.batches.map(item=>({orderId:item.orderId,orderNumber:item.orderNumber,count:item.outboundPackageCount}))}});
     return{success:`${dispatch.dispatch_number} 已作废原 OUL 并生成新版，请重新打印后再开始装车扫码`};
   }
   const workflowMutationIntent=["route_fields","schedule","load","dispatch"].includes(intent);
@@ -1575,16 +1644,16 @@ async function loadOutboundInspection(organizationId:string,warehouseId:string,b
       receiptId:row.receipt_id,locationId:row.location_id,markId:row.mark_id,markCode:row.mark_code,weightKg:row.weight_kg,volumeCbm:row.volume_cbm,
     })));
   }
-  type DocumentRow={order_id:string;attachment_id:string;document_category:LoadingDocumentCode;file_name:string;content_type:string;size_bytes:number;review_status:string;created_at:string};
+  type DocumentRow={order_id:string;attachment_id:string;document_category:LoadingDocumentCode;file_name:string;content_type:string;size_bytes:number;review_status:string;created_at:string;uploaded_by_user_id:string|null};
   const documentRows:DocumentRow[]=[];
   const documentRowsPromise=(async()=>{
     for(const orderChunk of chunkD1Values(orderRows,1+LOADING_DOCUMENTS.length)){
       const result=await env.DB.prepare(`WITH ranked AS (
-      SELECT m.order_id,m.attachment_id,m.document_category,a.file_name,a.content_type,a.size_bytes,m.review_status,a.created_at,
+      SELECT m.order_id,m.attachment_id,m.document_category,a.file_name,a.content_type,a.size_bytes,m.review_status,a.created_at,a.uploaded_by_user_id,
         ROW_NUMBER() OVER(PARTITION BY m.order_id,m.document_category ORDER BY a.created_at DESC,a.id DESC) row_no
       FROM order_document_metadata m JOIN order_attachments a ON a.id=m.attachment_id AND a.organization_id=m.organization_id AND a.order_id=m.order_id
       WHERE m.organization_id=? AND m.order_id IN (${d1Placeholders(orderChunk.length)}) AND m.document_category IN (${LOADING_DOCUMENT_PLACEHOLDERS})
-      ) SELECT order_id,attachment_id,document_category,file_name,content_type,size_bytes,review_status,created_at
+      ) SELECT order_id,attachment_id,document_category,file_name,content_type,size_bytes,review_status,created_at,uploaded_by_user_id
         FROM ranked WHERE row_no=1 ORDER BY created_at DESC`).bind(organizationId,...orderChunk.map(order=>order.order_id),...LOADING_DOCUMENTS.map(document=>document.code)).all<DocumentRow>();
       documentRows.push(...result.results);
     }
@@ -1602,7 +1671,7 @@ async function loadOutboundInspection(organizationId:string,warehouseId:string,b
     const documents=currentStageLoadingDocumentRequirements(requirements?.documents??[]).map(type=>{
       const row=latestByOrderCode.get(`${order.order_id}:${type.code}`);
       const required=type.isRequired;
-      return{orderId:order.order_id,orderNumber:order.order_number,customerId:order.customer_id,customerName:order.customer_name,required,attachmentId:row?.attachment_id??null,code:type.code,name:type.name,fileName:row?.file_name??null,contentType:row?.content_type??null,sizeBytes:row?.size_bytes??null,reviewStatus:row?.review_status??null};
+      return{orderId:order.order_id,orderNumber:order.order_number,customerId:order.customer_id,customerName:order.customer_name,required,attachmentId:row?.attachment_id??null,code:type.code,name:type.name,fileName:row?.file_name??null,contentType:row?.content_type??null,sizeBytes:row?.size_bytes??null,reviewStatus:row?.review_status??null,uploadedByUserId:row?.uploaded_by_user_id??null};
     });
     return{orderId:order.order_id,orderNumber:order.order_number,customerId:order.customer_id,customerName:order.customer_name,documents,allUploaded:documents.filter(document=>document.required).every(document=>Boolean(document.attachmentId)),allApproved:documents.filter(document=>document.required).every(document=>["approved","archived"].includes(document.reviewStatus||""))};
   });
@@ -1642,44 +1711,45 @@ async function diagnoseOutboundOrder(organizationId:string,warehouseId:string,or
   return readiness.reasons.length?`${order.order_number} 尚不能创建装车任务：${readiness.reasons.join("、")}`:null;
 }
 function generateDispatch(){return `OUT-${new Date().toISOString().slice(2,10).replaceAll("-","")}-${crypto.randomUUID().slice(0,5).toUpperCase()}`}
-type PlannedOul={id:string;code:string;orderId:string;shipmentId:string;cargoItemId:string|null;receiptId:string;locationId:string;weightKg:number|null;volumeCbm:number|null;sourceMarkIds:string[];relationType:"kept"|"merged"|"split"};
-function buildFinalPackingPlan(form:FormData,inspection:OutboundInspection):{outputs:PlannedOul[]}|{error:string}{
-  const outputs:PlannedOul[]=[];
-  for(const group of inspection.documentGroups){
-    const sources=inspection.packingSources.filter(source=>source.orderId===group.orderId);
-    if(!sources.length)return{error:`${group.orderNumber} 没有可成包的入仓唛头，请先完成国内仓收货`};
-    const mode=valueOf(form,`packingMode_${group.orderId}`)==="repack"?"repack":"preserve";
-    const requested=mode==="preserve"?sources.length:Number(valueOf(form,`outboundPackageCount_${group.orderId}`));
-    if(!Number.isInteger(requested)||requested<1||requested>500)return{error:`${group.orderNumber} 的最终出库包装数必须是 1–500 的整数`};
-    const relationType=requested===sources.length?"kept":requested<sources.length?"merged":"split";
-    const sourceGroups=Array.from({length:requested},()=>[] as PackingSource[]);
-    if(requested<=sources.length){
-      sources.forEach((source,index)=>sourceGroups[Math.floor(index*requested/sources.length)].push(source));
-    }else{
-      sourceGroups.forEach((bucket,index)=>bucket.push(sources[index%sources.length]));
-    }
-    const totalWeight=sources.reduce((sum,source)=>sum+Number(source.weightKg||0),0);
-    const totalVolume=sources.reduce((sum,source)=>sum+Number(source.volumeCbm||0),0);
-    sourceGroups.forEach((mapped,index)=>{
-      const code=generateOulCode(group.orderNumber,index+1,requested);
-      outputs.push({
-        id:crypto.randomUUID(),code,orderId:group.orderId,shipmentId:sources[0].shipmentId,cargoItemId:sources[0].cargoItemId,
-        receiptId:sources[0].receiptId,locationId:sources[0].locationId,
-        weightKg:totalWeight>0?splitPackingMeasure(totalWeight,requested,index):null,
-        volumeCbm:totalVolume>0?splitPackingMeasure(totalVolume,requested,index):null,
-        sourceMarkIds:[...new Set(mapped.map(source=>source.markId))],relationType,
-      });
+function optionalPackingMeasure(form:FormData,name:string,label:string){
+  const raw=valueOf(form,name).trim();
+  if(!raw)return null;
+  const value=Number(raw);
+  if(!Number.isFinite(value)||value<=0)throw new Error(`${label}必须大于 0，未实测时请留空`);
+  return value;
+}
+export function parsePackingRequests(form:FormData,inspection:OutboundInspection){
+  try{
+    const requests:PackingOrderRequest[]=inspection.documentGroups.map(group=>{
+      const sources=inspection.packingSources.filter(source=>source.orderId===group.orderId);
+      if(!sources.length)throw new Error(`${group.orderNumber} 没有可成包的入仓唛头，请先完成国内仓收货`);
+      const requestedMode=valueOf(form,`packingMode_${group.orderId}`)==="repack"?"repack":"preserve";
+      const requested=requestedMode==="preserve"?sources.length:Number(valueOf(form,`outboundPackageCount_${group.orderId}`));
+      const mode=requestedMode==="preserve"||requested===sources.length?"preserve":requested<sources.length?"merge":"split";
+      return{
+        orderId:group.orderId,
+        orderNumber:group.orderNumber,
+        sourceType:inspection.batch.business_type==="ltl"?"pz_order":"ftl_order",
+        transportBatchId:inspection.batch.business_type==="ltl"?inspection.batch.transport_batch_id:null,
+        mode,
+        outboundPackageCount:requested,
+        totalWeightKg:optionalPackingMeasure(form,`packingTotalWeightKg_${group.orderId}`,`${group.orderNumber} 最终总重量`),
+        totalVolumeCbm:optionalPackingMeasure(form,`packingTotalVolumeCbm_${group.orderId}`,`${group.orderNumber} 最终总体积`),
+        notes:valueOf(form,`packingNotes_${group.orderId}`).trim(),
+      };
     });
+    return buildWarehousePackingPlan({
+      requests,
+      sources:inspection.packingSources.map(source=>({
+        id:source.id,orderId:source.orderId,shipmentId:source.shipmentId,
+        receiptId:source.receiptId,locationId:source.locationId,
+      })),
+      createId:()=>crypto.randomUUID(),
+      createOulCode:({orderNumber,sequence,total})=>oulCode(orderNumber,sequence,total,randomOulSuffix()),
+    });
+  }catch(error){
+    return{error:error instanceof Error?error.message:"最终出仓包装信息无效"};
   }
-  return{outputs};
-}
-function generateOulCode(orderNumber:string,sequence:number,total:number){
-  const orderPart=orderNumber.replace(/[^A-Z0-9]/gi,"").slice(-12).toUpperCase();
-  return `OUL-${orderPart}-${String(sequence).padStart(3,"0")}-${String(total).padStart(3,"0")}-${crypto.randomUUID().slice(0,4).toUpperCase()}`;
-}
-function splitPackingMeasure(total:number,count:number,index:number){
-  const base=Math.floor(total/count*1_000_000)/1_000_000;
-  return index===count-1?Number((total-base*(count-1)).toFixed(6)):base;
 }
 function dispatchPlanPolicyIssues(policies:LoadingBatchFieldPolicies,plan:DispatchPlan){
   const issues=loadingDispatchPlanPolicyIssues(policies,plan);
