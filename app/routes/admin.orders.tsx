@@ -14,7 +14,7 @@ import {
 import { loadBatchesInitialResponsibilityRestrictions } from "../lib/batch-responsibility.server";
 import { OrderRouteFilterFields } from "../components/OrderRouteFilterFields";
 import { requireSessionUser } from "../lib/auth.server";
-import { assignedBatchViewPermission, canOperateCurrentOrder, orderVisibilitySql } from "../lib/order-access.server";
+import { assignedBatchViewPermission, canOperateCurrentOrder, currentOrderActionSql, orderVisibilitySql } from "../lib/order-access.server";
 import { orderRouteFilterCount, readOrderRouteFilters } from "../lib/order-route-filters";
 import {
   batchAssignmentStatus,
@@ -95,6 +95,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const url = new URL(request.url);
   const keyword = (url.searchParams.get("keyword") || "").trim();
   const type = url.searchParams.get("type") || "";
+  const handlingScope = url.searchParams.get("handlingScope") === "mine" ? "mine" : "";
   const requestedWorkStatus = url.searchParams.get("workStatus") || "";
   const workStatus = ["pending", "active", "completed", "exception"].includes(requestedWorkStatus)
     ? requestedWorkStatus
@@ -144,6 +145,11 @@ export async function loader({ request }: Route.LoaderArgs) {
   } else if (["ftl", "ltl"].includes(type)) {
     where.push("o.business_type=?");
     values.push(type);
+  }
+  if (!unifiedSupervisorWorkload && handlingScope === "mine") {
+    const actionable = currentOrderActionSql(current, "o");
+    where.push(actionable.sql);
+    values.push(...actionable.values);
   }
   if (unifiedSupervisorWorkload && workStatus === "pending") {
     where.push("o.status NOT IN ('completed','cancelled') AND o.current_assignee_user_id=?");
@@ -387,7 +393,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   });
   return {
     orders,
-    filters: { keyword, type, workStatus, status, step, exception, batchKeyword: unifiedSupervisorWorkload ? "" : batchKeyword, batchStatus, view: workloadView, batchPage: String(batchPage), ...routeFilters },
+    filters: { keyword, type, handlingScope, workStatus, status, step, exception, batchKeyword: unifiedSupervisorWorkload ? "" : batchKeyword, batchStatus, view: workloadView, batchPage: String(batchPage), ...routeFilters },
     steps: stepRows.results,
     page,
     pageSize,
@@ -474,6 +480,7 @@ export default function Orders({ loaderData }: Route.ComponentProps) {
         {loaderData.canViewBatchWorkload && <input type="hidden" name="view" value="orders"/>}
         <label className="field wide"><span>快速查找</span><input className="control" name="keyword" data-keyboard-search defaultValue={loaderData.filters.keyword} placeholder="订单号、客户或货物"/></label>
         <FilterSelect name="type" label="订单类型" value={loaderData.filters.type} options={[{ value: "ftl", label: "整车" }, { value: "ltl", label: "拼车" }]}/>
+        <FilterSelect name="handlingScope" label="办理范围" value={loaderData.filters.handlingScope} options={[{ value: "mine", label: "待我办理" }]}/>
         <FilterSelect name="status" label="订单状态" value={loaderData.filters.status} options={statusOptions}/>
         <FilterSelect name="step" label="当前节点" value={loaderData.filters.step} options={loaderData.steps}/>
         <FilterSelect name="exception" label="异常" value={loaderData.filters.exception} options={[{ value: "no", label: "无异常" }, { value: "yes", label: "有异常" }]}/>

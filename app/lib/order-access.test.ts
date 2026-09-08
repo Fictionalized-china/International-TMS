@@ -8,6 +8,7 @@ import {
   canEditCurrentOrderWorkspace,
   canOperateEnabledOrderModule,
   canOperateCurrentOrder,
+  currentOrderActionSql,
   canReadFullOrderLifecycle,
   canSeeScopedOrder,
   orderVisibilitySql,
@@ -194,6 +195,13 @@ describe("order access", () => {
       status: "completed",
       current_assignee_user_id: "user-a",
     })).toBe(false);
+  });
+
+  it("builds a narrow server-side filter for orders awaiting the current account", () => {
+    const actionable = currentOrderActionSql(baseUser, "work_order");
+    expect(actionable.sql).toContain("work_order.status NOT IN ('completed','cancelled')");
+    expect(actionable.sql).toContain("work_order.current_assignee_user_id=?");
+    expect(actionable.values).toEqual(["user-a"]);
   });
 
   it("lets the assigned review owner operate an enabled module after the order-level handoff is cleared", () => {

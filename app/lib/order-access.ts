@@ -67,6 +67,19 @@ export function canOperateCurrentOrder(
   );
 }
 
+/**
+ * SQL counterpart of canOperateCurrentOrder for list-level "待我办理"
+ * filters. Keep this deliberately narrower than visibility: historical
+ * collaborators may continue to read an order, but only the current explicit
+ * handler owns the next order-level action.
+ */
+export function currentOrderActionSql(user: Pick<OrderAccessUser, "userId">, alias = "o") {
+  return {
+    sql: `${alias}.status NOT IN ('completed','cancelled') AND ${alias}.current_assignee_user_id=?`,
+    values: [user.userId],
+  };
+}
+
 export type EnabledOrderModuleActionInput = {
   user: Pick<OrderAccessUser, "userId" | "positionCode" | "permissions" | "roleCodes" | "permissionOverrides">;
   orderStatus: string;

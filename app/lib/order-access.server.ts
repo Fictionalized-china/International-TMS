@@ -11,6 +11,7 @@ export {
   batchVisibilitySql,
   canAccessBatchWorkspace,
   canOperateCurrentOrder,
+  currentOrderActionSql,
   canSeeScopedOrder,
   canViewAllOrders,
   orderVisibilitySql,
