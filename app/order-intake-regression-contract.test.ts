@@ -29,5 +29,10 @@ describe("order intake regression contract", () => {
     expect(warehouseAcceptanceRoute).toContain("initialScannedMarkCode = referencedMark.package_code.toUpperCase()");
     expect(warehouseAcceptanceRoute).toContain("loaderData.initialScannedMarkCode ? [loaderData.initialScannedMarkCode] : []");
     expect(warehouseAcceptanceRoute).toContain('inputLabel="扫描入仓唛头 / 订单号"');
+    expect(warehouseAcceptanceRoute).toContain("handleMarkInputChange");
+    expect(warehouseAcceptanceRoute).toContain("系统识别完整唛头后自动登记，无需点击按钮");
+    expect(warehouseAcceptanceRoute).not.toContain(">加入本批</button>");
+    expect(warehouseAcceptanceRoute).toContain("本单不支持分批入库");
+    expect(warehouseAcceptanceRoute).toContain("showPartial={false}");
   });
 });

@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { Form, Link, redirect, useNavigation } from "react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Route } from "./+types/warehouse.acceptance";
 import {
   WarehouseReceiptResultSelector,
@@ -341,7 +341,7 @@ export async function action({ request }: Route.ActionArgs) {
     if (!["partial", "ready", "exception"].includes(requestedResult)) {
       if (policies.cargoComplete.isRequired)
         return { formError: "请选择本次验收结果" };
-      result = "partial";
+      result = "auto";
     } else {
       result = requestedResult as "partial" | "ready" | "exception";
     }
@@ -552,6 +552,8 @@ export async function action({ request }: Route.ActionArgs) {
       exceptionNotes ||= "系统已隐藏人工货齐选择，实收超量或差异较大，已自动转为异常入库";
     }
   }
+  if(result==="partial")
+    return{formError:`本单不支持分批入库；请继续扫描剩余 ${Math.max(0,expected.packages-cumulative.packages)} 包，或按实际情况选择“异常入库”`};
   if(supplementalMarks.length){
     result="exception";
     exceptionNotes||=`超计划收货 ${supplementalMarks.length} 包，已生成补录唛头，等待操作岗确认差异`;
@@ -718,7 +720,7 @@ export async function action({ request }: Route.ActionArgs) {
     ).bind(now,order.id,user.organizationId),
   );
 
-  if (result !== "partial" && (difference.hasDifference || packageMismatch || piecesMismatch)) {
+  if (difference.hasDifference || packageMismatch || piecesMismatch) {
     statements.push(
       env.DB.prepare(
         `INSERT INTO warehouse_receipt_differences(
@@ -795,34 +797,72 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
     loaderData.user,
     loaderData.warehouseAccessLevel,
   );
-  const [receiptResult, setReceiptResult] = useState<"partial" | "ready" | "exception">("partial");
+  const [receiptResult, setReceiptResult] = useState<"" | "ready" | "exception">("");
   const [markInput,setMarkInput]=useState("");
   const [scannedMarks,setScannedMarks]=useState<string[]>([]);
+  const [scanFeedback,setScanFeedback]=useState("");
+  const markInputRef=useRef<HTMLInputElement>(null);
   const labels = loaderData.receiptId ? loaderData.recentLabels : [];
   const policies = resolveWarehouseAcceptancePolicies(loaderData.workflowFields);
+  const historicallyReceivedCount=loaderData.inboundMarks.filter(mark=>mark.status==='received').length;
+  const accountedPackageCount=historicallyReceivedCount+scannedMarks.length;
+  const plannedPackageCount=loaderData.order?.planned_inbound_package_count??0;
+  const normalReceivingComplete=Boolean(loaderData.order)&&accountedPackageCount===plannedPackageCount;
   useEffect(() => {
-    setReceiptResult("partial");
+    setReceiptResult("");
     setScannedMarks(loaderData.initialScannedMarkCode ? [loaderData.initialScannedMarkCode] : []);
     setMarkInput("");
+    setScanFeedback(loaderData.initialScannedMarkCode ? `${loaderData.initialScannedMarkCode} 已登记，请继续扫描其余唛头` : "");
   }, [loaderData.order?.id, loaderData.initialScannedMarkCode]);
-  const addScannedMark=()=>{
-    const code=markInput.trim().toUpperCase();
+  useEffect(() => {
+    if(!loaderData.order)return;
+    const frame=requestAnimationFrame(()=>markInputRef.current?.focus());
+    return()=>cancelAnimationFrame(frame);
+  }, [loaderData.order?.id, scannedMarks.length]);
+  useEffect(() => {
+    if(!loaderData.order)return;
+    setReceiptResult(current=>{
+      if(current==='exception')return current;
+      if(accountedPackageCount>plannedPackageCount)return 'exception';
+      return normalReceivingComplete?'ready':'';
+    });
+  }, [accountedPackageCount, loaderData.order, normalReceivingComplete, plannedPackageCount]);
+  const addScannedMark=(rawCode=markInput)=>{
+    const code=rawCode.trim().toUpperCase();
     if(!code)return;
+    if(loaderData.inboundMarks.some(mark=>mark.status==='received'&&mark.package_code.toUpperCase()===code)){
+      setScanFeedback(`${code} 已经入库，无需重复扫描`);
+      setMarkInput("");
+      return;
+    }
+    if(scannedMarks.includes(code)){
+      setScanFeedback(`${code} 已在本次清单中，无需重复扫描`);
+      setMarkInput("");
+      return;
+    }
     setScannedMarks(current=>current.includes(code)?current:[...current,code]);
+    setScanFeedback(`${code} 已自动登记`);
     setMarkInput("");
+  };
+  const handleMarkInputChange=(value:string)=>{
+    const normalized=value.toUpperCase();
+    setMarkInput(normalized);
+    const prefix=`${loaderData.order?.order_number??''}-IN-`;
+    const sequence=normalized.slice(prefix.length);
+    if(prefix.length>4&&normalized.startsWith(prefix)&&/^\d{3,}$/.test(sequence))addScannedMark(normalized);
   };
   return <>
     <header className="page-header acceptance-header"><div><p className="eyebrow">ACCEPTANCE RECEIVING</p><h1>验收收货</h1><p>扫描任一入仓唛头即可调出整批信息并计入本次收货；继续逐一扫描其余外包装，系统自动记录整批收齐进度。</p></div></header>
     <ActionToast message={actionError ?? loaderData.resultMessage} tone={actionError ? "error" : "success"} data={actionData}/>
     {!loaderData.locations.length && <div className="alert error">当前仓库没有可用库位，请先<Link to={`/warehouse/locations?warehouseId=${loaderData.warehouse.id}`}>配置仓库与库位</Link>。</div>}
-    {canOperate ? <WarehouseReceivingScanPanel
+    {canOperate && !loaderData.order ? <WarehouseReceivingScanPanel
       warehouseId={loaderData.warehouse.id}
       reference={loaderData.reference}
       inputLabel="扫描入仓唛头 / 订单号"
       placeholder="扫描任一入仓唛头后回车"
       submitLabel="调出验收信息"
       hint="首次扫描任一 SO…-IN-… 入仓唛头即可调出所属整批，并自动把该唛头计入本次收货；也兼容手工输入订单号查询。"
-    /> : <div className="alert info">当前账号为仓库只读视角，可查看入库结果与历史标签；验收扫描和入库提交仅向有操作权限的冻结任务负责人开放。</div>}
+    /> : !canOperate ? <div className="alert info">当前账号为仓库只读视角，可查看入库结果与历史标签；验收扫描和入库提交仅向有操作权限的冻结任务负责人开放。</div> : null}
     {loaderData.lookupError && <div className="alert error no-print">{loaderData.lookupError}</div>}
     {canOperate && loaderData.order && loaderData.cargoItems.length > 0 && <Form method="post" className="acceptance-workbench no-print" onInput={(event) => synchronizeWarehouseVolumeRow(event.target)}>
       <input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/><input type="hidden" name="orderId" value={loaderData.order.id}/><input type="hidden" name="reference" value={loaderData.order.order_number}/>
@@ -835,9 +875,10 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
         { label: "提货地", value: `${loaderData.order.origin_city} · ${loaderData.order.origin_address}` },
       ]}/>
       <section className="panel inbound-mark-scan-panel">
-        <div className="panel-header"><div><h2>扫描本批入仓唛头</h2><p>每个外包装扫描一次；重复扫描只提示且不重复计数。超收时可直接扫描连续补录码，例如 {loaderData.order.order_number}-IN-{String(loaderData.order.planned_inbound_package_count+1).padStart(3,"0")}。</p></div><strong>{scannedMarks.length} 个待提交</strong></div>
-        <div className="inbound-mark-scan-row"><input className="control" value={markInput} onChange={event=>setMarkInput(event.target.value)} onKeyDown={event=>{if(event.key==='Enter'){event.preventDefault();addScannedMark();}}} placeholder="扫描入仓唛头后回车" autoFocus/><button type="button" className="btn primary" onClick={addScannedMark}>加入本批</button></div>
-        <div className="inbound-mark-progress"><span>计划 {loaderData.order.planned_inbound_package_count} 包</span><span>历史已收 {loaderData.inboundMarks.filter(mark=>mark.status==='received').length} 包</span><span>本次 {scannedMarks.length} 包</span></div>
+        <div className="panel-header"><div><h2>连续扫描入仓唛头</h2><p>首个唛头已经计入；继续逐一扫描剩余外包装，系统识别完整唛头后自动登记，无需点击按钮。</p></div><div className="inbound-mark-scan-actions"><strong>{accountedPackageCount} / {plannedPackageCount} 包</strong><Link className="btn" to={`/warehouse/acceptance?warehouseId=${loaderData.warehouse.id}`}>切换订单</Link></div></div>
+        <div className="inbound-mark-scan-row"><input ref={markInputRef} className="control" value={markInput} onChange={event=>handleMarkInputChange(event.target.value)} onKeyDown={event=>{if(event.key==='Enter'){event.preventDefault();addScannedMark();}}} placeholder="连续扫描入仓唛头（自动登记）" autoFocus autoComplete="off"/></div>
+        <div className={`inbound-mark-scan-feedback${normalReceivingComplete?' complete':''}`} role="status" aria-live="polite">{normalReceivingComplete?`已扫齐 ${plannedPackageCount} 包，请核对实收数据后确认入库`:scanFeedback||`还需扫描 ${Math.max(0,plannedPackageCount-accountedPackageCount)} 包`}</div>
+        <div className="inbound-mark-progress"><span>计划 {plannedPackageCount} 包</span><span>历史已收 {historicallyReceivedCount} 包</span><span>本次 {scannedMarks.length} 包</span><span>剩余 {Math.max(0,plannedPackageCount-accountedPackageCount)} 包</span></div>
         {scannedMarks.length>0&&<div className="inbound-mark-chip-list">{scannedMarks.map(code=><button key={code} type="button" onClick={()=>setScannedMarks(current=>current.filter(item=>item!==code))} title="点击移除">{code}<span>×</span></button>)}</div>}
       </section>
       <section className="panel acceptance-cargo-panel">
@@ -878,16 +919,17 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
         {policies.location.isActive ? <label className="field"><span>入库库位{acceptanceRequiredMarker(policies.location)}</span><select name="locationId" required={policies.location.isRequired}><option value="">{policies.location.isRequired ? "请选择库位" : "未选则使用首个启用库位"}</option>{loaderData.locations.map((item) => <option key={item.id} value={item.id}>{item.warehouse_name} / {item.zone_name} / {item.name}（{item.code}）</option>)}</select></label> : <div className="alert info">入库库位已在当前工作流中隐藏，系统将使用当前仓库首个启用库位。</div>}
         {policies.cargoComplete.isActive ? <WarehouseReceiptResultSelector
           value={receiptResult}
-          onChange={(value) => value && setReceiptResult(value)}
-          showPartial
+          onChange={(value) => value !== "partial" && setReceiptResult(value)}
+          showPartial={false}
           readyLabel="订单货齐"
-          readyHint="本次入库后，订单全部货物已经到齐"
+          readyHint={normalReceivingComplete ? "唛头已经全部扫齐" : `还需扫描 ${Math.max(0,plannedPackageCount-accountedPackageCount)} 包`}
+          readyDisabled={!normalReceivingComplete}
           required={policies.cargoComplete.isRequired}
           exceptionHint="允许入库但冻结后续装车和配载"
           exceptionFooter="填写短少、破损、错货、超差等具体情况"
         /> : <div className="alert info">货齐选择已在当前工作流中隐藏：系统依据累计包装数和已填的实收数据自动判定分批、货齐或异常。</div>}
         {policies.notes.isActive && <label className="field span-2"><span>收货备注{acceptanceRequiredMarker(policies.notes)}</span><textarea name="notes" rows={2} required={policies.notes.isRequired} placeholder="本次到货车辆、现场情况等"/></label>}
-        <button className="primary acceptance-submit" disabled={busy || !canOperate || !loaderData.locations.length || !scannedMarks.length}>{busy ? "正在验收入库…" : "确认本批扫码入库"}</button>
+        <button className="primary acceptance-submit" disabled={busy || !canOperate || !loaderData.locations.length || !scannedMarks.length || (!normalReceivingComplete&&receiptResult!=="exception")}>{busy ? "正在验收入库…" : normalReceivingComplete ? "确认整批扫码入库" : "请继续扫描至整批收齐"}</button>
       </section>
     </Form>}
   </>;

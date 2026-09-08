@@ -70,6 +70,7 @@ export function WarehouseReceiptResultSelector({
   showPartial,
   readyLabel,
   readyHint,
+  readyDisabled = false,
   required = true,
   exceptionHint = "数量、重量、包装或货况存在异常。",
   exceptionFooter,
@@ -79,6 +80,7 @@ export function WarehouseReceiptResultSelector({
   showPartial: boolean;
   readyLabel: string;
   readyHint: string;
+  readyDisabled?: boolean;
   required?: boolean;
   exceptionHint?: string;
   exceptionFooter: string;
@@ -104,6 +106,7 @@ export function WarehouseReceiptResultSelector({
           label={readyLabel}
           hint={readyHint}
           required={required}
+          disabled={readyDisabled}
         />
         <ReceiptResultOption
           value="exception"
@@ -131,6 +134,7 @@ function ReceiptResultOption({
   label,
   hint,
   required,
+  disabled = false,
 }: {
   value: Exclude<WarehouseReceiptResult, "">;
   checked: boolean;
@@ -138,6 +142,7 @@ function ReceiptResultOption({
   label: string;
   hint: string;
   required: boolean;
+  disabled?: boolean;
 }) {
   return (
     <label>
@@ -147,6 +152,7 @@ function ReceiptResultOption({
         value={value}
         checked={checked}
         required={required}
+        disabled={disabled}
         onChange={() => onChange(value)}
       />
       <span><b>{label}</b><small>{hint}</small></span>

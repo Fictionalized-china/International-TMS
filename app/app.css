@@ -5620,10 +5620,25 @@ label:not(:has(> span:first-child .required-mark)):not(:has(> span:first-child >
 /* Package identity flow: compact scan and final-packing work areas. */
 .inbound-mark-scan-panel { padding: 10px 12px; }
 .inbound-mark-scan-row {
-  display: grid;
-  grid-template-columns: minmax(280px, 1fr) auto;
+  display: block;
+}
+.inbound-mark-scan-actions {
+  display: flex;
+  align-items: center;
   gap: 8px;
-  align-items: end;
+}
+.inbound-mark-scan-feedback {
+  margin-top: 8px;
+  padding: 7px 9px;
+  border-left: 3px solid #2a79ad;
+  background: #eef7fc;
+  color: #24455f;
+  font-size: 12px;
+}
+.inbound-mark-scan-feedback.complete {
+  border-left-color: #15966f;
+  background: #ecf9f3;
+  color: #0d6d51;
 }
 .inbound-mark-progress,
 .inbound-mark-chip-list {
