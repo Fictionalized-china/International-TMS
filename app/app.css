@@ -5927,9 +5927,49 @@ label:not(:has(> span:first-child .required-mark)):not(:has(> span:first-child >
   padding: 8px 10px;
 }
 .outbound-packing-ready-summary > div strong { color: #102d48; font-size: 13px; }
+.outbound-inspection-summary.is-batch {
+  grid-template-columns: minmax(150px, .8fr) minmax(120px, .55fr) minmax(260px, 1.45fr) minmax(180px, 1fr) minmax(200px, 1.1fr) minmax(105px, .55fr);
+}
+.outbound-batch-order-check {
+  margin-top: 8px;
+  border: 1px solid #cbd9e6;
+  background: #fff;
+}
+.outbound-batch-order-check > header {
+  min-height: 38px;
+  padding: 6px 9px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid #dce6ee;
+  background: #f3f7fa;
+}
+.outbound-batch-order-check > header > div,
+.outbound-order-check-table td:first-child,
+.outbound-order-check-table td:nth-child(3),
+.outbound-order-check-table td:nth-child(4) {
+  display: grid;
+  gap: 2px;
+}
+.outbound-batch-order-check > header span,
+.outbound-order-check-table small { color: #64798c; font-size: 10px; }
+.outbound-batch-order-check > header > span { color: #245474; font-weight: 700; white-space: nowrap; }
+.outbound-order-check-table { min-width: 980px; table-layout: fixed; }
+.outbound-order-check-table th,
+.outbound-order-check-table td { padding: 5px 8px; vertical-align: middle; }
+.outbound-order-check-table th:nth-child(1) { width: 22%; }
+.outbound-order-check-table th:nth-child(2) { width: 18%; }
+.outbound-order-check-table th:nth-child(3) { width: 12%; }
+.outbound-order-check-table th:nth-child(4) { width: 15%; }
+.outbound-order-check-table th:nth-child(5) { width: 19%; }
+.outbound-order-check-table th:nth-child(6) { width: 14%; }
+.outbound-order-check-table td:nth-child(2),
+.outbound-order-check-table td:nth-child(5) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 1200px) {
   .outbound-packing-grid { grid-template-columns: 1fr; }
   .outbound-packing-ready-summary > div { grid-template-columns: repeat(2, minmax(110px, 1fr)); }
+  .outbound-inspection-summary.is-batch { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 @media (max-width: 700px) {
   .inbound-mark-scan-row,

@@ -65,7 +65,7 @@ import { oulCode, randomOulSuffix } from "../lib/package-identity";
 const LOADING_DOCUMENTS=loadingOrderDocumentDefinitions;
 const LOADING_DOCUMENT_PLACEHOLDERS=LOADING_DOCUMENTS.map(()=>"?").join(",");
 type LoadingDocumentCode=LoadingOrderDocumentCode;
-type Batch={id:string;batch_number:string;shipment_id:string;shipment_number:string;order_id:string;order_number:string;customer_id:string;customer_name:string;customer_identity_code:string;business_type:string;exit_port:string|null;customs_location:string|null;destination_location:string;destination_summary?:string;item_count:number;total_pieces:number;total_weight_kg:number;total_volume_cbm:number;received_at:string|null;verified_at:string|null;storage_locations:string;packing_job_id:string;packing_job_status:"labelled"|"allocated";transport_batch_id:string|null;transport_batch_number:string|null;transport_batch_approval_status:string|null;related_order_ids:string;order_count:number;order_numbers:string;customer_names:string;customer_identity_codes:string};
+type Batch={id:string;batch_number:string;shipment_id:string;shipment_number:string;order_id:string;order_number:string;customer_id:string;customer_name:string;customer_identity_code:string;business_type:string;exit_port:string|null;customs_location:string|null;destination_location:string;destination_summary?:string;item_count:number;total_pieces:number;total_weight_kg:number;total_volume_cbm:number;received_at:string|null;verified_at:string|null;storage_locations:string;packing_job_id:string;packing_job_status:"labelled"|"allocated";transport_batch_id:string|null;transport_batch_number:string|null;transport_batch_origin_location:string|null;transport_batch_destination_location:string|null;transport_batch_approval_status:string|null;related_order_ids:string;order_count:number;order_numbers:string;customer_names:string;customer_identity_codes:string};
 type Dispatch={id:string;dispatch_number:string;batch_number:string;shipment_id:string;shipment_number:string;order_id:string;order_number:string;business_type:string;outbound_resource_confirmed:number;order_numbers:string|null;related_order_ids:string|null;customer_id:string;customer_name:string;customer_names:string|null;customer_identity_code:string;exit_port:string|null;customs_location:string|null;vehicle_plate:string;driver_name:string;driver_phone:string|null;carrier_name:string|null;notes:string|null;destination:string;status:string;item_count:number;loaded_count:number;pieces:number;weight_kg:number;volume_cbm:number;created_at:string;dispatched_at:string|null;creator_name:string|null;transport_batch_id:string|null;planned_departure_at:string|null;planned_arrival_at:string|null;road_status:string|null;actual_departure_at:string|null};
 type Item={id:string;dispatch_id:string;order_id:string;order_number:string;barcode:string;package_number:string;cargo_name_cn:string|null;package_type:string|null;pieces:number;weight_kg:number|null;volume_cbm:number|null;length_cm:number|null;width_cm:number|null;height_cm:number|null;status:string;loaded_at:string|null};
 type DispatchShipment={shipment_id:string;order_id:string;order_number:string;customer_id:string;current_location:string|null};
@@ -80,11 +80,12 @@ type ReferenceOption={category:"border_port"|"customs_place";code:string;name:st
 type ManifestDoc={id:string;order_id:string;file_name:string;review_status:string;created_at:string};
 type OutboundDocument={orderId:string;orderNumber:string;customerId:string;customerName:string;required:boolean;attachmentId:string|null;code:LoadingDocumentCode;name:string;fileName:string|null;contentType:string|null;sizeBytes:number|null;reviewStatus:string|null;uploadedByUserId:string|null};
 type OutboundDocumentGroup={orderId:string;orderNumber:string;customerId:string;customerName:string;documents:OutboundDocument[];allUploaded:boolean;allApproved:boolean};
+type OutboundOrderSummary={orderId:string;orderNumber:string;customerName:string;cargoSummary:string;oulCount:number;pieces:number;weightKg:number;volumeCbm:number;storageLocations:string;requiredDocumentCount:number;approvedDocumentCount:number};
 type PackingSource={id:string;orderId:string;orderNumber:string;shipmentId:string;cargoItemId:string|null;receiptId:string;locationId:string;markId:string;markCode:string;weightKg:number|null;volumeCbm:number|null};
 type OutboundExecutionPolicy=WarehouseOutboundWorkflowPolicy&{batchFields:LoadingBatchFieldPolicies;resources:ReturnType<typeof loadingBatchResourcePolicy>;loadingStage:LoadingBatchStageGate};
 type OutboundPolicyDifference={fieldKey:string;label:string;mode:"optional"};
 type OutboundTaskWorkflowState={scanConfirmation:WarehouseOutboundWorkflowPolicy["scanConfirmation"];loadingStage:LoadingBatchStageGate;workflowSyncPending:boolean};
-type OutboundInspection={batch:Batch;documentGroups:OutboundDocumentGroup[];documents:OutboundDocument[];packingSources:PackingSource[];allUploaded:boolean;allApproved:boolean;notesActive:boolean;notesRequired:boolean;scanActive:boolean;scanRequired:boolean;executionPolicy:OutboundExecutionPolicy;resourceDifferences:OutboundPolicyDifference[];resourcePolicyError:string|null};
+type OutboundInspection={batch:Batch;documentGroups:OutboundDocumentGroup[];documents:OutboundDocument[];orderSummaries:OutboundOrderSummary[];packingSources:PackingSource[];allUploaded:boolean;allApproved:boolean;notesActive:boolean;notesRequired:boolean;scanActive:boolean;scanRequired:boolean;executionPolicy:OutboundExecutionPolicy;dispatchPlan:DispatchPlan|null;resourceDifferences:OutboundPolicyDifference[];resourcePolicyError:string|null};
 type ReadyPackingJob={id:string;order_id:string;status:"labelled"|"allocated";transport_batch_id:string|null;outbound_package_count:number;oul_count:number};
 
 const availablePackedBatchSql=`SELECT b.id,b.batch_number,b.shipment_id,s.shipment_number,
@@ -100,6 +101,7 @@ const availablePackedBatchSql=`SELECT b.id,b.batch_number,b.shipment_id,s.shipme
         AND receipt.warehouse_id=job.warehouse_id AND receipt.status='completed') received_at,
     job.id packing_job_id,job.status packing_job_status,
     transport_batch.id transport_batch_id,transport_batch.batch_number transport_batch_number,
+    transport_batch.origin_location transport_batch_origin_location,transport_batch.destination_location transport_batch_destination_location,
     CASE WHEN transport_batch.approval_status='approved' AND transport_batch.operation_assignee_user_id IS NOT NULL
       AND transport_batch.document_assignee_user_id IS NOT NULL THEN 'approved'
       WHEN transport_batch.approval_status='approved' THEN 'assignment_incomplete'
@@ -137,6 +139,12 @@ export function validateNewOutboundDriverRegistration(input:{
   if(input.name.trim().length<2)return"新司机姓名至少填写 2 个字符";
   if(input.phoneRequired&&!input.phone.trim())return"请填写新司机手机号";
   return input.phone.trim()?validatePhone(input.phone.trim(),"新司机手机号")??null:null;
+}
+
+export function warehouseDispatchCreationErrorMessage(error:unknown){
+  const message=error instanceof Error?`${error.message} ${String((error as Error&{cause?:unknown}).cause??"")}`:String(error);
+  if(message.includes("packing_job_dispatch_claim_invalid"))return"装车任务未创建：配载单中的包装任务归属已变化，请刷新本页核对订单与 OUL 后重试";
+  return"装车任务创建失败，系统没有写入不完整任务；请刷新本页核对装车条件后重试";
 }
 
 export function warehouseDispatchCompletionResult({dispatchNumber,businessType,completionWarningText}:{dispatchNumber:string;businessType:string;completionWarningText:string}){
@@ -690,14 +698,19 @@ export async function action({request}:Route.ActionArgs){
         ON CONFLICT(organization_id,carrier_id,name) DO UPDATE SET phone=excluded.phone,license_number=excluded.license_number,status='active',updated_at=excluded.updated_at`)
         .bind(newDriverRegistration.id,user.organizationId,newDriverRegistration.carrierId,newDriverRegistration.name,newDriverRegistration.phone,newDriverRegistration.licenseNumber,now,now),
     ]:[];
-    await env.DB.batch([
-      ...newDriverStatements,
-      env.DB.prepare(`INSERT INTO warehouse_dispatches(id,organization_id,dispatch_number,sorting_batch_id,shipment_id,vehicle_plate,driver_name,driver_phone,carrier_name,seal_number,destination,status,notes,created_by_user_id,created_at,updated_at,transport_batch_id) VALUES(?,?,?,?,?,?,?,?,?,NULL,?,'loading',?,?,?,?,?)`).bind(dispatchId,user.organizationId,number,batch.id,batch.shipment_id,plate,driver,phone||null,carrier||null,destination,inspection.notesActive?(notes||null):null,user.userId,now,now,planned.batch_id),
-      ...packingStatements,
-      ...workflowFieldStatements,
-      ...mainAssignmentStatements,
-      ...batchStateStatements,
-    ]);
+    try{
+      await env.DB.batch([
+        ...newDriverStatements,
+        env.DB.prepare(`INSERT INTO warehouse_dispatches(id,organization_id,dispatch_number,sorting_batch_id,shipment_id,vehicle_plate,driver_name,driver_phone,carrier_name,seal_number,destination,status,notes,created_by_user_id,created_at,updated_at,transport_batch_id) VALUES(?,?,?,?,?,?,?,?,?,NULL,?,'loading',?,?,?,?,?)`).bind(dispatchId,user.organizationId,number,batch.id,batch.shipment_id,plate,driver,phone||null,carrier||null,destination,inspection.notesActive?(notes||null):null,user.userId,now,now,planned.batch_id),
+        ...packingStatements,
+        ...workflowFieldStatements,
+        ...mainAssignmentStatements,
+        ...batchStateStatements,
+      ]);
+    }catch(error){
+      console.error("warehouse dispatch creation failed",error);
+      return{formError:warehouseDispatchCreationErrorMessage(error),inspection};
+    }
     const postCreateWarnings:string[]=[];
     if(newDriverRegistration){
       try{
@@ -1366,14 +1379,20 @@ function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,borde
     (!resourcePolicy.driver.isRequired||outboundResources.carriers.length>0)
   );
   const remainingRequired=Math.max(0,requiredCount-uploadedCount);
+  const batchPlan=!isFtl?inspection?.dispatchPlan:null;
+  const batchOrigin=inspection?.batch.transport_batch_origin_location||"起运地待登记";
+  const batchDestination=inspection?.batch.transport_batch_destination_location||inspection?.batch.destination_location||"目的地待登记";
+  const batchCustomerCount=inspection?new Set(inspection.documentGroups.map(group=>group.customerName)).size:0;
   return <div className="outbound-create-workbench">
     {!inspection&&<div className="alert error" role="alert">无法读取该订单的装车文件清单，请返回在仓订单列表重新进入。</div>}
     {stageError&&stageError!==actionError&&<div className="alert warning" role="alert">{stageError}</div>}
     {inspection&&<>
-      <div className="outbound-inspection-summary">
+      <div className={`outbound-inspection-summary${isFtl?"":" is-batch"}`}>
         <span>{isFtl?"订单":"PZ 配载单"}<strong>{taskLabel}</strong></span>
-        <span>{isFtl?"客户":"批次范围"}<strong>{isFtl?inspection.batch.customer_name:`${inspection.documentGroups.length} 票订单 · ${new Set(inspection.documentGroups.map(group=>group.customerName)).size} 个客户`}</strong></span>
-        <span>运输类型<strong>{isFtl?"整车":"拼车"}</strong></span>
+        <span>{isFtl?"客户":"订单 / 客户"}<strong>{isFtl?inspection.batch.customer_name:`${inspection.documentGroups.length} 票 · ${batchCustomerCount} 个客户`}</strong></span>
+        <span>{isFtl?"运输类型":"运输线路"}<strong title={isFtl?undefined:`${batchOrigin} → ${batchDestination}`}>{isFtl?"整车":`${batchOrigin} → ${batchDestination}`}</strong></span>
+        {!isFtl&&<span>承运车辆<strong>{batchPlan?.carrier_name||"承运商待登记"} · {batchPlan?.vehicle_plate||"车辆待登记"}</strong></span>}
+        {!isFtl&&<span>司机 / 发车<strong>{batchPlan?.driver_name||"司机待登记"} · {batchPlan?.planned_departure_at?formatWarehouseTime(batchPlan.planned_departure_at):"时间待登记"}</strong></span>}
         <span>文件进度<strong>{uploadedCount}/{requiredCount} 已上传</strong></span>
       </div>
       {stageError?<OutboundCreationReadOnly inspection={inspection} warehouseId={warehouseId}/>:<>
@@ -1394,6 +1413,10 @@ function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,borde
           <header><div><strong>最终包装与贴标已完成</strong><span>本页只创建装车任务，不会重新成包或生成 OUL。</span></div><span className="status-pill success">已锁定</span></header>
           <div><span>订单范围<strong>{inspection.documentGroups.length} 票</strong></span><span>最终出仓包装<strong>{inspection.batch.item_count} 个 OUL</strong></span><span>总重量<strong>{Number(inspection.batch.total_weight_kg).toFixed(2)} KG</strong></span><span>总体积<strong>{Number(inspection.batch.total_volume_cbm).toFixed(3)} CBM</strong></span><Link className="secondary" to={`/warehouse/packing?warehouseId=${encodeURIComponent(warehouseId)}`}>查看包装与标签</Link></div>
         </section>
+        {!isFtl&&<section className="outbound-batch-order-check" aria-label="配载单挂载订单核对">
+          <header><div><strong>挂载订单与最终包装</strong><span>创建前核对每票订单的客户、货物、OUL、实测数据、库位和发运文件。</span></div><span>{inspection.orderSummaries.length} 票 · {inspection.orderSummaries.reduce((total,order)=>total+order.oulCount,0)} 个 OUL</span></header>
+          <div className="table-wrap"><table className="outbound-order-check-table"><thead><tr><th>订单 / 客户</th><th>货物</th><th>最终包装</th><th>实重 / 体积</th><th>库位</th><th>发运文件</th></tr></thead><tbody>{inspection.orderSummaries.map(order=><tr key={order.orderId}><td><strong>{order.orderNumber}</strong><small>{order.customerName}</small></td><td title={order.cargoSummary}>{order.cargoSummary}</td><td><strong>{order.oulCount} 个 OUL</strong><small>{order.pieces} 件</small></td><td><strong>{order.weightKg.toFixed(2)} KG</strong><small>{order.volumeCbm.toFixed(3)} CBM</small></td><td title={order.storageLocations}>{order.storageLocations}</td><td><span className={`status-pill ${order.approvedDocumentCount===order.requiredDocumentCount?"success":"warning"}`}>{order.approvedDocumentCount}/{order.requiredDocumentCount} 已确认</span></td></tr>)}</tbody></table></div>
+        </section>}
         {isFtl&&<section className="ftl-outbound-resource-confirmation">
           <header><div><strong>确认整车出境路线与运输资源</strong><span>本区字段直接采用当前订单的工作流显示/必填规则；创建后原子同步到管理端。</span></div><span className="status-pill warning">创建前确认</span></header>
           {!requiredOutboundMasterDataReady&&<div className="alert error" role="alert">工作流必填的境外运输主数据尚无可选项，请先在管理端承运商台账补齐。选填项缺失不会阻断创建。</div>}
@@ -1735,6 +1758,31 @@ async function loadOutboundInspection(organizationId:string,warehouseId:string,b
   const orderRows=scopeOrders.results.length?scopeOrders.results:[{order_id:batch.order_id,order_number:batch.order_number,customer_id:batch.customer_id,customer_name:batch.customer_name}];
   const enabledOrderIds=await loadEnabledLoadingOrderIds(organizationId,orderRows.map(order=>order.order_id));
   if(orderRows.some(order=>!enabledOrderIds.has(order.order_id)))return null;
+  type OrderSummaryRow={order_id:string;order_number:string;customer_name:string;cargo_summary:string|null;oul_count:number;pieces:number;weight_kg:number;volume_cbm:number;storage_locations:string|null};
+  const orderSummaryRows:OrderSummaryRow[]=[];
+  for(const orderChunk of chunkD1Values(orderRows,1)){
+    const result=await env.DB.prepare(`SELECT o.id order_id,o.order_number,c.name customer_name,
+        (SELECT REPLACE(GROUP_CONCAT(DISTINCT NULLIF(TRIM(cargo.cargo_name_cn),'')),',','、')
+          FROM order_cargo_items cargo WHERE cargo.organization_id=o.organization_id AND cargo.order_id=o.id) cargo_summary,
+        COUNT(DISTINCT package_row.id) oul_count,COALESCE(SUM(package_row.pieces),0) pieces,
+        job.total_weight_kg weight_kg,job.total_volume_cbm volume_cbm,
+        REPLACE(GROUP_CONCAT(DISTINCT COALESCE(NULLIF(TRIM(location.code),''),location.name)),',','、') storage_locations
+      FROM transport_orders o
+      JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
+      JOIN warehouse_packing_jobs job ON job.order_id=o.id AND job.organization_id=o.organization_id
+        AND job.warehouse_id=? AND job.dispatch_id IS NULL
+        AND ((o.business_type='ftl' AND job.status='labelled' AND job.transport_batch_id IS NULL)
+          OR (o.business_type='ltl' AND job.status='allocated' AND job.transport_batch_id=?))
+      JOIN warehouse_packages package_row ON package_row.packing_job_id=job.id
+        AND package_row.organization_id=job.organization_id AND package_row.warehouse_id=job.warehouse_id
+        AND package_row.label_kind='oul' AND package_row.lifecycle_status='active' AND package_row.status='in_stock'
+      LEFT JOIN warehouse_locations location ON location.id=package_row.location_id AND location.organization_id=package_row.organization_id
+      WHERE o.organization_id=? AND o.id IN (${d1Placeholders(orderChunk.length)})
+      GROUP BY o.id,o.order_number,c.name,job.id,job.total_weight_kg,job.total_volume_cbm
+      ORDER BY o.order_number`)
+      .bind(warehouseId,batch.transport_batch_id,organizationId,...orderChunk.map(order=>order.order_id)).all<OrderSummaryRow>();
+    orderSummaryRows.push(...result.results);
+  }
   const packingSources:PackingSource[]=[];
   for(const orderChunk of chunkD1Values(orderRows,1)){
     const sourceRows=await env.DB.prepare(`SELECT p.id,o.id order_id,o.order_number,p.shipment_id,p.cargo_item_id,p.receipt_id,p.location_id,
@@ -1787,18 +1835,24 @@ async function loadOutboundInspection(organizationId:string,warehouseId:string,b
     });
     return{orderId:order.order_id,orderNumber:order.order_number,customerId:order.customer_id,customerName:order.customer_name,documents,allUploaded:documents.filter(document=>document.required).every(document=>Boolean(document.attachmentId)),allApproved:documents.filter(document=>document.required).every(document=>["approved","archived"].includes(document.reviewStatus||""))};
   });
+  const summaryByOrder=new Map(orderSummaryRows.map(row=>[row.order_id,row]));
+  const orderSummaries=orderRows.map(order=>{
+    const row=summaryByOrder.get(order.order_id),documentGroup=documentGroups.find(group=>group.orderId===order.order_id);
+    const requiredDocuments=documentGroup?.documents.filter(document=>document.required)??[];
+    return{orderId:order.order_id,orderNumber:order.order_number,customerName:order.customer_name,cargoSummary:row?.cargo_summary||"货物名称待补",oulCount:Number(row?.oul_count||0),pieces:Number(row?.pieces||0),weightKg:Number(row?.weight_kg||0),volumeCbm:Number(row?.volume_cbm||0),storageLocations:row?.storage_locations||"库位待补",requiredDocumentCount:requiredDocuments.length,approvedDocumentCount:requiredDocuments.filter(document=>["approved","archived"].includes(document.reviewStatus||"")).length};
+  });
   const documents=documentGroups.flatMap(group=>group.documents);
   const workflowPolicy=resolveWarehouseOutboundWorkflowPolicyForOrders(workflowOrders);
   const batchFields=resolveLoadingBatchFieldPolicies(workflowOrders);
   const executionPolicy={...workflowPolicy,batchFields,resources:loadingBatchResourcePolicy(batchFields),loadingStage:resolveLoadingBatchStageGate(workflowOrders,new Map(orderRows.map(order=>[order.order_id,order.order_number])))};
-  let resourceDifferences:OutboundPolicyDifference[]=[],resourcePolicyError:string|null=null;
+  let dispatchPlan:DispatchPlan|null=null,resourceDifferences:OutboundPolicyDifference[]=[],resourcePolicyError:string|null=null;
   if(batch.business_type==="ltl"){
     const plan=await resolveDispatchPlan(organizationId,batch.order_id,batch.business_type,batch.transport_batch_id,batchFields,warehouseId);
     if("error" in plan)resourcePolicyError=plan.error;
-    else resourceDifferences=dispatchPlanPolicyIssues(batchFields,plan).differences;
+    else{dispatchPlan=plan;resourceDifferences=dispatchPlanPolicyIssues(batchFields,plan).differences;}
   }
   const inspectionBatch={...batch,batch_number:batch.transport_batch_number||batch.batch_number,related_order_ids:documentGroups.map(group=>group.orderId).join(","),order_count:documentGroups.length,order_numbers:documentGroups.map(group=>group.orderNumber).join("、"),customer_names:[...new Set(documentGroups.map(group=>group.customerName))].join("、"),customer_identity_codes:batch.customer_identity_code};
-  return{batch:inspectionBatch,documentGroups,documents,packingSources,allUploaded:documentGroups.every(group=>group.allUploaded),allApproved:documentGroups.every(group=>group.allApproved),notesActive:workflowPolicy.handoverNotes.isActive,notesRequired:workflowPolicy.handoverNotes.isRequired,scanActive:workflowPolicy.scanConfirmation.isActive,scanRequired:workflowPolicy.scanConfirmation.isRequired,executionPolicy,resourceDifferences,resourcePolicyError};
+  return{batch:inspectionBatch,documentGroups,documents,orderSummaries,packingSources,allUploaded:documentGroups.every(group=>group.allUploaded),allApproved:documentGroups.every(group=>group.allApproved),notesActive:workflowPolicy.handoverNotes.isActive,notesRequired:workflowPolicy.handoverNotes.isRequired,scanActive:workflowPolicy.scanConfirmation.isActive,scanRequired:workflowPolicy.scanConfirmation.isRequired,executionPolicy,dispatchPlan,resourceDifferences,resourcePolicyError};
 }
 function validateOutboundDocumentFile(file:File){
   const allowed=new Set(["application/pdf","application/msword","application/vnd.openxmlformats-officedocument.wordprocessingml.document","application/vnd.ms-excel","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","image/jpeg","image/png","image/webp"]);

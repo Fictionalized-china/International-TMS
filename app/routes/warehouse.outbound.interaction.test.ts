@@ -75,11 +75,22 @@ type OutboundRouteTestExports = {
     phone: string;
     phoneRequired: boolean;
   }) => string | null;
+  warehouseDispatchCreationErrorMessage?: (error: unknown) => string;
 };
 
 const testExports = outboundRoute as typeof outboundRoute & OutboundRouteTestExports;
 
 describe("warehouse outbound interaction safety", () => {
+  it("maps a stale PZ packing claim to a recoverable inline creation error", () => {
+    const mapError=testExports.warehouseDispatchCreationErrorMessage;
+    expect(mapError).toBeTypeOf("function");
+    const claimError=mapError?.(new Error("D1_ERROR: packing_job_dispatch_claim_invalid"));
+    const genericError=mapError?.(new Error("unexpected database failure"));
+    expect(claimError).toBeTruthy();
+    expect(claimError).not.toContain("packing_job_dispatch_claim_invalid");
+    expect(claimError).not.toBe(genericError);
+  });
+
   it("validates an unregistered driver before the loading task can register and use it", () => {
     expect(testExports.NEW_OUTBOUND_DRIVER_ID).toBe("__new_outbound_driver__");
     const validate = testExports.validateNewOutboundDriverRegistration;
