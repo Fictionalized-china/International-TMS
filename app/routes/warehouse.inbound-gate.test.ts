@@ -57,6 +57,7 @@ const harness = vi.hoisted(() => {
       const statement = {
         bind: vi.fn(() => statement),
         first: vi.fn(async () => {
+          if (sql.includes("SELECT d.id FROM warehouse_dispatch_items di")) return { id: "dispatch-1" };
           if (sql.includes("FROM warehouse_packages p")) return pkg;
           if (sql.includes("FROM shipments s JOIN transport_orders o") && sql.includes("WHERE s.id=?")) return shipment;
           if (sql.includes("FROM order_tracking_milestones") && sql.includes("milestone_code='exported'")) return {
@@ -247,6 +248,11 @@ describe("overseas warehouse inbound frozen workflow gate", () => {
     expect(result.selectedShipment).toEqual(harness.shipment);
     expect(result.scannedPackage).toEqual(harness.pkg);
     expect(harness.loadWorkflowFields).toHaveBeenCalled();
+    const atomicScopeQuery = harness.queries.find((sql) => sql.includes("FROM warehouse_dispatch_items di") && sql.includes("customer_name"));
+    expect(atomicScopeQuery).toContain("COALESCE(NULLIF(TRIM(i.cargo_name_cn),'')");
+    expect(atomicScopeQuery).toContain("COALESCE(r.package_type,i.package_type) package_type");
+    expect(atomicScopeQuery).not.toContain("p.cargo_name");
+    expect(atomicScopeQuery).not.toContain("p.package_type");
   });
 
   it("uses the same dynamic customs reason for a forged POST before mutation", async () => {

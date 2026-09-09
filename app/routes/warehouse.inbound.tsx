@@ -303,7 +303,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     :null;
   const atomicDispatchId=scannedDispatch?.status==='dispatched'?scannedDispatch.id:packageDispatch?.id??batchDispatch?.id??null;
   const atomicScopePackages=atomicDispatchId
-    ?(await env.DB.prepare(`SELECT p.id,di.dispatch_id,p.barcode,p.package_number,p.cargo_name,p.package_type,p.pieces,p.weight_kg,p.volume_cbm,p.length_cm,p.width_cm,p.height_cm,
+    ?(await env.DB.prepare(`SELECT p.id,di.dispatch_id,p.barcode,p.package_number,
+       COALESCE(NULLIF(TRIM(i.cargo_name_cn),''),NULLIF(TRIM(o.cargo_description),'')) cargo_name,
+       COALESCE(r.package_type,i.package_type) package_type,
+       p.pieces,p.weight_kg,p.volume_cbm,p.length_cm,p.width_cm,p.height_cm,
        o.id order_id,o.order_number,s.id shipment_id,c.name customer_name,w.name source_warehouse_name
        FROM warehouse_dispatch_items di
        JOIN warehouse_dispatches d ON d.id=di.dispatch_id AND d.organization_id=di.organization_id AND d.status='dispatched'
@@ -312,6 +315,8 @@ export async function loader({ request }: Route.LoaderArgs) {
        JOIN transport_orders o ON o.id=s.order_id AND o.organization_id=s.organization_id
        JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
        JOIN warehouses w ON w.id=p.warehouse_id AND w.organization_id=p.organization_id
+       LEFT JOIN warehouse_receipts r ON r.id=p.receipt_id AND r.organization_id=p.organization_id
+       LEFT JOIN order_cargo_items i ON i.id=p.cargo_item_id AND i.organization_id=p.organization_id
        WHERE di.organization_id=? AND di.dispatch_id=? AND o.overseas_warehouse_id=?
        ORDER BY o.order_number,p.package_number`)
       .bind(user.organizationId,atomicDispatchId,warehouse.id).all<AtomicInboundPackage>()).results
