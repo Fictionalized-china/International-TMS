@@ -48,10 +48,18 @@ from tms_pz_account_prep import (
     build_pz_runtime_credentials,
     prepare_secondary_pz_accounts,
 )
+from tms_flow_scope import (
+    dispatch_keys_for_scope,
+    ltl_keys_for_scope,
+    normalize_flow_scope,
+    order_keys_for_scope,
+    phase2_stages_for_scope,
+)
 
 
 ORDER_KEYS = ("ftl", "ltl1", "ltl2", "ltl3")
 LTL_KEYS = ("ltl1", "ltl2", "ltl3")
+FLOW_SCOPE = normalize_flow_scope("combined")
 REQUIRED_ACCOUNT_ALIASES = (
     "hr_admin",
     "operation",
@@ -69,6 +77,14 @@ PHASE2_STAGE_ORDER = (
     "batch_loading_outbound",
     "batch_sync_and_drawer_assertions",
 )
+
+
+def configure_flow_scope(value: str) -> None:
+    global FLOW_SCOPE, ORDER_KEYS, LTL_KEYS, PHASE2_STAGE_ORDER
+    FLOW_SCOPE = normalize_flow_scope(value)
+    ORDER_KEYS = order_keys_for_scope(FLOW_SCOPE)
+    LTL_KEYS = ltl_keys_for_scope(FLOW_SCOPE)
+    PHASE2_STAGE_ORDER = phase2_stages_for_scope(FLOW_SCOPE)
 PHASE2_NEGATIVE_GATE_CASES = (
     "P2-NEG-SCAN-CROSS-ORDER",
     "P2-NEG-SCAN-DUPLICATE",
@@ -341,6 +357,7 @@ def build_handoff_payload(
     }
     return {
         "schema": HANDOFF_SCHEMA,
+        "flow_scope": FLOW_SCOPE,
         "source_phase1_run_id": phase1.source_run_id,
         "source_phase1_entity_prefix": phase1.source_entity_prefix,
         "customer": {"name": phase1.customer_name},
@@ -351,8 +368,12 @@ def build_handoff_payload(
             "order_numbers": [phase1.orders[key] for key in LTL_KEYS],
         },
         "dispatches": {
-            "ftl": {"dispatch_number": artifacts.ftl_dispatch_number},
-            "ltl_batch": {"dispatch_number": artifacts.ltl_dispatch_number},
+            key: {
+                "dispatch_number": artifacts.ftl_dispatch_number
+                if key == "ftl"
+                else artifacts.ltl_dispatch_number
+            }
+            for key in dispatch_keys_for_scope(FLOW_SCOPE)
         },
         "assignees": {
             "operation": artifacts.operation_assignee,
@@ -476,7 +497,9 @@ class Phase2Flow:
         self.domestic_warehouse_id = ""
         self.domestic_warehouse_name = ""
         self.operation = self._add_role("operation")
-        self.batch_operation = self._add_role("operation_2")
+        self.batch_operation = (
+            self._add_role("operation_2") if LTL_KEYS else self.operation
+        )
         self.operation_supervisor = self._add_role("operation_supervisor")
         self.domestic_warehouse = self._add_role("domestic_warehouse")
         for key, number in phase1.orders.items():
@@ -2279,7 +2302,8 @@ class Phase2Flow:
 
     def run(self) -> Phase2Artifacts:
         self._login(self.operation, "操作岗")
-        self._login(self.batch_operation, "PZ 新整批操作负责人")
+        if LTL_KEYS:
+            self._login(self.batch_operation, "PZ 新整批操作负责人")
         self._login(self.operation_supervisor, "操作主管")
         self._login(self.domestic_warehouse, "国内仓库岗")
         warehouse_name = self.domestic_warehouse.page.locator(
@@ -2295,12 +2319,14 @@ class Phase2Flow:
         self.domestic_warehouse_name = self._locator_text(warehouse_name, 500)
         self.arrange_domestic_transport()
         self.accept_orders_into_warehouse()
-        self.complete_ftl_outbound()
-        self.create_ltl_batch()
-        self.assign_batch()
-        self.assert_mounted_orders_leave_ordinary_table()
-        self.complete_ltl_batch_outbound()
-        self.assert_batch_sync_and_drawer()
+        if "ftl" in ORDER_KEYS:
+            self.complete_ftl_outbound()
+        if LTL_KEYS:
+            self.create_ltl_batch()
+            self.assign_batch()
+            self.assert_mounted_orders_leave_ordinary_table()
+            self.complete_ltl_batch_outbound()
+            self.assert_batch_sync_and_drawer()
         self.harness.assert_certifiable()
         return self.artifacts
 
@@ -2322,6 +2348,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url", default="http://127.0.0.1:5189")
     parser.add_argument("--output-root", type=Path, default=Path("output/playwright"))
     parser.add_argument(
+        "--flow", choices=("combined", "ftl", "pz"), default="combined"
+    )
+    parser.add_argument(
         "--fixture-file",
         type=Path,
         default=HERE / "fixtures" / "tms-phase2-document.pdf",
@@ -2340,6 +2369,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    configure_flow_scope(args.flow)
     phase1 = load_phase1_handoff(args.phase1_summary)
     vault = load_credentials(args.credentials_file)
     required = vault.select(REQUIRED_ACCOUNT_ALIASES)
@@ -2376,20 +2406,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 slow_mo=args.slow_mo,
                 action_timeout_ms=args.timeout_ms,
                 navigation_timeout_ms=args.navigation_timeout_ms,
-                scenario_name="1 FTL + 3 LTL 全流程第二阶段：国内入库、配载与装车出库",
+                scenario_name=f"{args.flow} 可视化全流程第二阶段：国内入库、配载与装车出库",
             )
             flow: Phase2Flow | None = None
             try:
-                credentials, prepared_accounts = prepare_secondary_pz_accounts(
-                    harness=harness,
-                    credentials=credentials,
-                )
-                harness.journal.add_note(
-                    "PZ 独立负责人账号准备完成："
-                    + "、".join(
-                        f"{item.alias}={item.outcome}" for item in prepared_accounts
+                if LTL_KEYS:
+                    credentials, prepared_accounts = prepare_secondary_pz_accounts(
+                        harness=harness,
+                        credentials=credentials,
                     )
-                )
+                    harness.journal.add_note(
+                        "PZ 独立负责人账号准备完成："
+                        + "、".join(
+                            f"{item.alias}={item.outcome}" for item in prepared_accounts
+                        )
+                    )
                 flow = Phase2Flow(
                     harness=harness,
                     credentials=credentials,

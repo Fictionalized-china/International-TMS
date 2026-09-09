@@ -439,10 +439,12 @@ class Phase3SafetyAndOutputTests(unittest.TestCase):
 
         self.assertIn("manageDocuments={manageDocuments}", route_source)
         self.assertIn('value="batch_order_document_upload"', route_source)
-        self.assertIn('name="approveImmediately" value="1"', route_source)
-        self.assertIn('valueOf(form,"approveImmediately")==="1"', route_source)
-        self.assertIn("上传并通过", route_source)
-        self.assertIn("待整单单证负责人上传", route_source)
+        self.assertNotIn('name="approveImmediately" value="1"', route_source)
+        self.assertIn("automaticReview:true", route_source)
+        self.assertIn("'approved',NULL", route_source)
+        self.assertIn("选择并上传", route_source)
+        self.assertIn("选择文件后自动上传", route_source)
+        self.assertIn("待负责人上传", route_source)
         self.assertNotIn('blocks?"待仓库上传"', route_source)
 
     def test_phase3_recovers_missing_batch_documents_through_visible_ui(self) -> None:

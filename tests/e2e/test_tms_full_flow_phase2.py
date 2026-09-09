@@ -551,7 +551,10 @@ class Phase2SafetyTests(unittest.TestCase):
     def test_phase2_uses_primary_for_ordinary_and_secondary_for_pz(self) -> None:
         source = (HERE / "tms_full_flow_phase2.py").read_text(encoding="utf-8")
         self.assertIn('self.operation = self._add_role("operation")', source)
-        self.assertIn('self.batch_operation = self._add_role("operation_2")', source)
+        self.assertIn(
+            'self._add_role("operation_2") if LTL_KEYS else self.operation',
+            source,
+        )
         self.assertIn('self.credentials["document_2"].role', source)
         self.assertNotIn(
             'self.credentials.get("operation_2", self.credentials["operation"])',

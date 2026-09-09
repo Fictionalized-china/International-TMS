@@ -43,10 +43,18 @@ from tms_ui_harness import (
     safe_artifact_name,
 )
 from tms_pz_account_prep import build_pz_runtime_credentials
+from tms_flow_scope import (
+    dispatch_keys_for_scope,
+    ltl_keys_for_scope,
+    normalize_flow_scope,
+    order_keys_for_scope,
+    phase3_stages_for_scope,
+)
 
 
 ORDER_KEYS = ("ftl", "ltl1", "ltl2", "ltl3")
 LTL_KEYS = ("ltl1", "ltl2", "ltl3")
+FLOW_SCOPE = normalize_flow_scope("combined")
 REQUIRED_ACCOUNT_ALIASES = ("operation", "document", "overseas_warehouse", "customer")
 PHASE2_HANDOFF_SCHEMA = "international-tms-full-flow-phase2-handoff/v1"
 PHASE3_HANDOFF_SCHEMA = "international-tms-full-flow-phase3-handoff/v1"
@@ -70,6 +78,17 @@ PHASE3_STAGE_ORDER = (
     "customer_notification_and_optional_appointment",
     "overseas_pickup_scan_and_signoff",
 )
+
+
+def configure_flow_scope(value: str) -> None:
+    global FLOW_SCOPE, ORDER_KEYS, LTL_KEYS, PHASE2_STAGE_ORDER, PHASE3_STAGE_ORDER
+    FLOW_SCOPE = normalize_flow_scope(value)
+    ORDER_KEYS = order_keys_for_scope(FLOW_SCOPE)
+    LTL_KEYS = ltl_keys_for_scope(FLOW_SCOPE)
+    from tms_flow_scope import phase2_stages_for_scope
+
+    PHASE2_STAGE_ORDER = phase2_stages_for_scope(FLOW_SCOPE)
+    PHASE3_STAGE_ORDER = phase3_stages_for_scope(FLOW_SCOPE)
 PHASE3_PERMISSION_AND_NEGATIVE_CASES = (
     "P3-PERM-PZ-NEW-DOCUMENT",
     "P3-NEG-PZ-OLD-DOCUMENT-DEEP-LINK",
@@ -215,6 +234,11 @@ def load_phase2_handoff(path: Path | str) -> Phase2Handoff:
         raise ValueError("第二阶段 handoff schema 不受支持")
     if handoff.get("ready_for_phase3") is not True:
         raise ValueError("第二阶段尚未明确 ready_for_phase3")
+    handoff_scope = normalize_flow_scope(str(handoff.get("flow_scope", "combined")))
+    if handoff_scope != FLOW_SCOPE:
+        raise ValueError(
+            f"第二阶段演示范围为 {handoff_scope}，当前请求为 {FLOW_SCOPE}"
+        )
     completed_stages = tuple(str(item) for item in handoff.get("completed_stages", ()))
     if completed_stages != PHASE2_STAGE_ORDER:
         raise ValueError("第二阶段 completed_stages 不完整或顺序不一致")
@@ -256,18 +280,21 @@ def load_phase2_handoff(path: Path | str) -> Phase2Handoff:
 
     batch = _mapping(handoff.get("transport_batch"), "handoff.transport_batch")
     batch_number = str(batch.get("batch_number", "")).strip().upper()
-    if not PZ_NUMBER_RE.fullmatch(batch_number):
-        raise ValueError("第二阶段 PZ 配载单号缺失或格式无效")
     order_keys = tuple(str(item) for item in batch.get("order_keys", ()))
     order_numbers = tuple(str(item).strip().upper() for item in batch.get("order_numbers", ()))
-    if order_keys != LTL_KEYS:
-        raise ValueError("PZ 配载范围必须严格包含 ltl1、ltl2、ltl3")
-    if order_numbers != tuple(item.order_number for item in orders if item.key in LTL_KEYS):
-        raise ValueError("PZ 挂载订单号与 orders 交接不一致")
+    if LTL_KEYS:
+        if not PZ_NUMBER_RE.fullmatch(batch_number):
+            raise ValueError("第二阶段 PZ 配载单号缺失或格式无效")
+        if order_keys != LTL_KEYS:
+            raise ValueError("PZ 配载范围必须严格包含 ltl1、ltl2、ltl3")
+        if order_numbers != tuple(item.order_number for item in orders if item.key in LTL_KEYS):
+            raise ValueError("PZ 挂载订单号与 orders 交接不一致")
+    elif batch_number or order_keys or order_numbers:
+        raise ValueError("整车演示交接不应包含 PZ 配载单")
 
     raw_dispatches = _mapping(handoff.get("dispatches"), "handoff.dispatches")
     dispatches: dict[str, str] = {}
-    for key in ("ftl", "ltl_batch"):
+    for key in dispatch_keys_for_scope(FLOW_SCOPE):
         item = _mapping(raw_dispatches.get(key), f"handoff.dispatches.{key}")
         number = str(item.get("dispatch_number", "")).strip().upper()
         if not OUT_NUMBER_RE.fullmatch(number):
@@ -336,6 +363,7 @@ def build_handoff_payload(
     lineage["source_phase2_run_id"] = source.source_run_id
     return {
         "schema": PHASE3_HANDOFF_SCHEMA,
+        "flow_scope": FLOW_SCOPE,
         "source_phase2_run_id": source.source_run_id,
         "source_phase1_run_id": source.source_phase1_run_id,
         "source_phase1_entity_prefix": source.source_phase1_entity_prefix,
@@ -361,7 +389,8 @@ def build_handoff_payload(
         },
         "customs_declarations": dict(artifacts.customs_declarations),
         "tracking_nodes": {
-            key: list(values) for key, values in artifacts.completed_tracking_nodes.items()
+            key: list(artifacts.completed_tracking_nodes.get(key, ()))
+            for key in dispatch_keys_for_scope(FLOW_SCOPE)
         },
         "overseas_inbound": list(artifacts.inbound_cargo_codes),
         "appointed_order": artifacts.appointed_order,
@@ -488,10 +517,16 @@ class Phase3Flow:
             source.source_phase1_entity_prefix
         )
 
-        self.operation = self._add_role("operation")
-        self.batch_operation = self._add_role(source.batch_operation_alias)
-        self.document = self._add_role("document")
-        self.batch_document = self._add_role(source.batch_document_alias)
+        if FLOW_SCOPE == "pz":
+            self.batch_operation = self._add_role(source.batch_operation_alias)
+            self.operation = self.batch_operation
+            self.batch_document = self._add_role(source.batch_document_alias)
+            self.document = self.batch_document
+        else:
+            self.operation = self._add_role("operation")
+            self.batch_operation = self.operation
+            self.document = self._add_role("document")
+            self.batch_document = self.document
         self.overseas_warehouse = self._add_role("overseas_warehouse")
         self.customer = harness.add_role(
             "fresh_customer_phase3", self.portal_email, site="portal"
@@ -503,7 +538,8 @@ class Phase3Flow:
             )
             for index, code in enumerate(item.cargo_codes, start=1):
                 harness.journal.register_entity("oul", f"{item.key}_{index}", code)
-        harness.journal.register_entity("transport_batch", "ltl", source.batch_number)
+        if source.batch_number:
+            harness.journal.register_entity("transport_batch", "ltl", source.batch_number)
         for key, value in source.dispatches.items():
             harness.journal.register_entity("dispatch", key, value)
         if source.customer_name:
@@ -2446,26 +2482,28 @@ class Phase3Flow:
             )
 
     def run(self) -> Phase3Artifacts:
-        self._login(
-            self.operation,
-            password=self.credentials["operation"].password,
-            label="普通订单原操作岗",
-        )
-        self._login(
-            self.batch_operation,
-            password=self.credentials[self.source.batch_operation_alias].password,
-            label="PZ 新整批操作负责人",
-        )
-        self._login(
-            self.document,
-            password=self.credentials["document"].password,
-            label="整车原单证岗",
-        )
-        self._login(
-            self.batch_document,
-            password=self.credentials[self.source.batch_document_alias].password,
-            label="PZ 新整批单证负责人",
-        )
+        if FLOW_SCOPE == "pz":
+            self._login(
+                self.batch_operation,
+                password=self.credentials[self.source.batch_operation_alias].password,
+                label="PZ 新整批操作负责人",
+            )
+            self._login(
+                self.batch_document,
+                password=self.credentials[self.source.batch_document_alias].password,
+                label="PZ 新整批单证负责人",
+            )
+        else:
+            self._login(
+                self.operation,
+                password=self.credentials["operation"].password,
+                label="整车操作岗",
+            )
+            self._login(
+                self.document,
+                password=self.credentials["document"].password,
+                label="整车单证岗",
+            )
         self._login(
             self.overseas_warehouse,
             password=self.credentials["overseas_warehouse"].password,
@@ -2476,11 +2514,14 @@ class Phase3Flow:
             password=self.credentials["customer"].password,
             label="新建客户门户账号",
         )
-        self.assert_customs_permission_alignment()
-        self.complete_ftl_customs()
-        self.complete_batch_customs()
-        self.complete_ftl_tracking()
-        self.complete_batch_tracking()
+        if FLOW_SCOPE == "combined":
+            self.assert_customs_permission_alignment()
+        if "ftl" in ORDER_KEYS:
+            self.complete_ftl_customs()
+            self.complete_ftl_tracking()
+        if LTL_KEYS:
+            self.complete_batch_customs()
+            self.complete_batch_tracking()
         self.complete_overseas_inbound()
         self.verify_portal_and_optional_appointment()
         self.complete_pickup_signoff()
@@ -2512,6 +2553,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url", default="http://127.0.0.1:5189")
     parser.add_argument("--output-root", type=Path, default=Path("output/playwright"))
     parser.add_argument(
+        "--flow", choices=("combined", "ftl", "pz"), default="combined"
+    )
+    parser.add_argument(
         "--fixture-file",
         type=Path,
         default=HERE / "fixtures" / "tms-phase2-document.pdf",
@@ -2530,6 +2574,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    configure_flow_scope(args.flow)
     source = load_phase2_handoff(args.phase2_summary)
     vault = load_credentials(args.credentials_file)
     required = vault.select(REQUIRED_ACCOUNT_ALIASES)
@@ -2565,7 +2610,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 slow_mo=args.slow_mo,
                 action_timeout_ms=args.timeout_ms,
                 navigation_timeout_ms=args.navigation_timeout_ms,
-                scenario_name="1 FTL + 3 LTL 全流程第三阶段：报关、出境、境外仓与自提签收",
+                scenario_name=f"{args.flow} 可视化全流程第三阶段：报关、出境、境外仓与自提签收",
             )
             flow = Phase3Flow(
                 harness=harness,

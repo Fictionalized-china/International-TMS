@@ -44,6 +44,7 @@ from tms_ui_harness import (
     RoleBrowserSession,
     TmsUIHarness,
 )
+from tms_flow_scope import normalize_flow_scope, order_keys_for_scope
 
 
 ORDER_NUMBER_RE = re.compile(r"\bSO[0-9A-Z-]{6,}\b")
@@ -178,14 +179,16 @@ def build_fresh_identity(attempt: AttemptIdentity) -> FreshBusinessIdentity:
     )
 
 
-def phase1_records(attempt: AttemptIdentity) -> list[Phase1Order]:
+def phase1_records(attempt: AttemptIdentity, flow_scope: str = "combined") -> list[Phase1Order]:
     prefix = attempt.entity_prefix
-    return [
+    records = [
         Phase1Order("ftl", "ftl", f"{prefix}-FTL-货物", 2),
         Phase1Order("ltl1", "ltl", f"{prefix}-LTL-01-货物", 3),
         Phase1Order("ltl2", "ltl", f"{prefix}-LTL-02-货物", 4),
         Phase1Order("ltl3", "ltl", f"{prefix}-LTL-03-货物", 5),
     ]
+    selected = set(order_keys_for_scope(normalize_flow_scope(flow_scope)))
+    return [record for record in records if record.key in selected]
 
 
 def validate_full_flow_credentials(
@@ -1618,6 +1621,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url", default="http://127.0.0.1:5189")
     parser.add_argument("--output-root", type=Path, default=Path("output/playwright"))
     parser.add_argument("--series-id", default="phase1-one-ftl-three-ltl")
+    parser.add_argument(
+        "--flow",
+        choices=("combined", "ftl", "pz"),
+        default="combined",
+        help="执行全部订单、仅整车，或仅三票拼车配载流程。",
+    )
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--slow-mo", type=int, default=40)
     parser.add_argument("--timeout-ms", type=int, default=20_000)
@@ -1648,7 +1657,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     series = AttemptSeries(args.series_id, args.output_root)
     attempt = series.begin_attempt()
     identity = build_fresh_identity(attempt)
-    records = phase1_records(attempt)
+    records = phase1_records(attempt, args.flow)
     status = "failed"
     reason = ""
     summary_path: Path | None = None
@@ -1665,7 +1674,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 action_timeout_ms=args.timeout_ms,
                 navigation_timeout_ms=args.navigation_timeout_ms,
                 attempt=attempt,
-                scenario_name="全新客户 + 1 FTL + 3 LTL 全流程第一段",
+                scenario_name=f"{args.flow} 可视化全流程第一阶段：客户、报价、委托、审批与分配",
             )
             flow = Phase1Flow(
                 harness=harness,
@@ -1716,6 +1725,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "summary": str(summary_path) if summary_path else "",
                 "reason": reason,
                 "entities": {
+                    "flow_scope": args.flow,
                     "customer": identity.customer_name,
                     "quotes": {item.key: item.quote_number for item in records},
                     "orders": {item.key: item.order_number for item in records},

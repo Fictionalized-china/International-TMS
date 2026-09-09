@@ -45,10 +45,18 @@ from tms_ui_harness import (
     require_certified_summary,
     safe_artifact_name,
 )
+from tms_flow_scope import (
+    dispatch_keys_for_scope,
+    ltl_keys_for_scope,
+    normalize_flow_scope,
+    order_keys_for_scope,
+    phase3_stages_for_scope,
+)
 
 
 ORDER_KEYS = ("ftl", "ltl1", "ltl2", "ltl3")
 LTL_KEYS = ("ltl1", "ltl2", "ltl3")
+FLOW_SCOPE = normalize_flow_scope("combined")
 REQUIRED_ACCOUNT_ALIASES = ("customer_service", "sales", "finance", "cashier")
 OPTIONAL_WAREHOUSE_ALIASES = ("domestic_warehouse", "overseas_warehouse")
 PHASE4_STAGE_ORDER = (
@@ -74,6 +82,14 @@ PHASE3_STAGE_ORDER = (
     "customer_notification_and_optional_appointment",
     "overseas_pickup_scan_and_signoff",
 )
+
+
+def configure_flow_scope(value: str) -> None:
+    global FLOW_SCOPE, ORDER_KEYS, LTL_KEYS, PHASE3_STAGE_ORDER
+    FLOW_SCOPE = normalize_flow_scope(value)
+    ORDER_KEYS = order_keys_for_scope(FLOW_SCOPE)
+    LTL_KEYS = ltl_keys_for_scope(FLOW_SCOPE)
+    PHASE3_STAGE_ORDER = phase3_stages_for_scope(FLOW_SCOPE)
 
 ORDER_NUMBER_RE = re.compile(r"^SO[0-9A-Z-]{6,}$", re.I)
 PZ_NUMBER_RE = re.compile(r"^PZ-[0-9A-Z-]{4,}$", re.I)
@@ -251,6 +267,11 @@ def load_phase3_handoff(path: Path | str) -> Phase3Handoff:
         raise ValueError("第三阶段 handoff schema 不受支持")
     if handoff.get("ready_for_phase4") is not True:
         raise ValueError("第三阶段尚未声明 ready_for_phase4")
+    handoff_scope = normalize_flow_scope(str(handoff.get("flow_scope", "combined")))
+    if handoff_scope != FLOW_SCOPE:
+        raise ValueError(
+            f"第三阶段演示范围为 {handoff_scope}，当前请求为 {FLOW_SCOPE}"
+        )
     completed_stages = tuple(str(item) for item in handoff.get("completed_stages", ()))
     if completed_stages != PHASE3_STAGE_ORDER:
         raise ValueError("第三阶段 completed_stages 不完整或顺序不一致")
@@ -298,26 +319,24 @@ def load_phase3_handoff(path: Path | str) -> Phase3Handoff:
         raise ValueError("第三阶段交接缺少客户名称")
     batch = _mapping(handoff.get("transport_batch"), "handoff.transport_batch")
     batch_number = str(batch.get("batch_number", "")).strip().upper()
-    if not PZ_NUMBER_RE.fullmatch(batch_number):
-        raise ValueError("第三阶段结果缺少有效 PZ 配载单号")
-    batch_order_keys = _required_string_list(
-        batch.get("order_keys"), "handoff.transport_batch.order_keys"
-    )
+    batch_order_keys = tuple(str(item) for item in batch.get("order_keys", ()))
     batch_order_numbers = tuple(
-        item.upper()
-        for item in _required_string_list(
-            batch.get("order_numbers"), "handoff.transport_batch.order_numbers"
-        )
+        str(item).strip().upper() for item in batch.get("order_numbers", ())
     )
-    if batch_order_keys != LTL_KEYS:
-        raise ValueError("第三阶段 PZ 配载范围必须严格包含 ltl1、ltl2、ltl3")
-    expected_batch_numbers = tuple(orders[key].order_number for key in LTL_KEYS)
-    if batch_order_numbers != expected_batch_numbers:
-        raise ValueError("第三阶段 PZ 挂载订单号与 orders 交接不一致")
+    if LTL_KEYS:
+        if not PZ_NUMBER_RE.fullmatch(batch_number):
+            raise ValueError("第三阶段结果缺少有效 PZ 配载单号")
+        if batch_order_keys != LTL_KEYS:
+            raise ValueError("第三阶段 PZ 配载范围必须严格包含 ltl1、ltl2、ltl3")
+        expected_batch_numbers = tuple(orders[key].order_number for key in LTL_KEYS)
+        if batch_order_numbers != expected_batch_numbers:
+            raise ValueError("第三阶段 PZ 挂载订单号与 orders 交接不一致")
+    elif batch_number or batch_order_keys or batch_order_numbers:
+        raise ValueError("整车演示交接不应包含 PZ 配载单")
     dispatch_payload = _mapping(handoff.get("dispatches"), "handoff.dispatches")
     dispatches = {
-        "ftl": _dispatch_number(dispatch_payload.get("ftl")).upper(),
-        "ltl_batch": _dispatch_number(dispatch_payload.get("ltl_batch")).upper(),
+        key: _dispatch_number(dispatch_payload.get(key)).upper()
+        for key in dispatch_keys_for_scope(FLOW_SCOPE)
     }
     if any(not OUT_NUMBER_RE.fullmatch(value) for value in dispatches.values()):
         raise ValueError("第三阶段交接缺少有效装车任务号")
@@ -358,13 +377,14 @@ def load_phase3_handoff(path: Path | str) -> Phase3Handoff:
     tracking_payload = _mapping(
         handoff.get("tracking_nodes"), "handoff.tracking_nodes"
     )
-    if set(tracking_payload) != {"ftl", "ltl_batch"}:
-        raise ValueError("第三阶段运踪交接必须严格包含 ftl 与 ltl_batch")
+    expected_tracking_keys = set(dispatch_keys_for_scope(FLOW_SCOPE))
+    if set(tracking_payload) != expected_tracking_keys:
+        raise ValueError("第三阶段运踪交接与当前演示范围不一致")
     tracking_nodes = {
         key: _required_string_list(
             tracking_payload.get(key), f"handoff.tracking_nodes.{key}"
         )
-        for key in ("ftl", "ltl_batch")
+        for key in dispatch_keys_for_scope(FLOW_SCOPE)
     }
     if any(nodes != TRACKING_NODE_ORDER for nodes in tracking_nodes.values()):
         raise ValueError("第三阶段整车与 PZ 必经运踪节点不完整或顺序不一致")
@@ -471,6 +491,7 @@ def build_handoff_payload(
     lineage["source_phase3_run_id"] = phase3.source_run_id
     return {
         "schema": HANDOFF_SCHEMA,
+        "flow_scope": FLOW_SCOPE,
         "source_phase3_run_id": phase3.source_run_id,
         "source_phase2_run_id": phase3.source_phase2_run_id,
         "source_phase1_run_id": phase3.source_phase1_run_id,
@@ -623,9 +644,10 @@ class Phase4Flow:
                 self.harness.journal.register_entity(
                     "cargo_codes", key, ",".join(item.cargo_codes)
                 )
-        self.harness.journal.register_entity(
-            "transport_batch", "ltl", phase3.transport_batch_number
-        )
+        if phase3.transport_batch_number:
+            self.harness.journal.register_entity(
+                "transport_batch", "ltl", phase3.transport_batch_number
+            )
         if phase3.customer_name:
             self.harness.journal.register_entity(
                 "customer", "primary", phase3.customer_name
@@ -2116,6 +2138,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-root", type=Path, default=HERE / "artifacts" / "tms-ui-e2e"
     )
     parser.add_argument(
+        "--flow", choices=("combined", "ftl", "pz"), default="combined"
+    )
+    parser.add_argument(
         "--fixture-file",
         type=Path,
         default=HERE / "fixtures" / "tms-phase4-settlement-document.pdf",
@@ -2134,6 +2159,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    configure_flow_scope(args.flow)
     phase3 = load_phase3_handoff(args.phase3_summary)
     vault = load_credentials(args.credentials_file)
     required = vault.select(REQUIRED_ACCOUNT_ALIASES)
@@ -2170,7 +2196,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 slow_mo=args.slow_mo,
                 action_timeout_ms=args.timeout_ms,
                 navigation_timeout_ms=args.navigation_timeout_ms,
-                scenario_name="1 FTL + 3 LTL 全流程第四阶段：费用、结算、异常闭环与复盘归档",
+                scenario_name=f"{args.flow} 可视化全流程第四阶段：费用、结算、异常闭环与复盘归档",
             )
             flow = Phase4Flow(
                 harness=harness,

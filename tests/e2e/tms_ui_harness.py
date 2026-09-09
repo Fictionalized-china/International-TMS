@@ -9,6 +9,7 @@ page mutation APIs.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 import unicodedata
@@ -585,6 +586,7 @@ class RoleBrowserSession:
         journal: RunJournal,
         action_timeout_ms: int = 15_000,
         navigation_timeout_ms: int = 30_000,
+        before_action: Callable[["RoleBrowserSession", str, str], None] | None = None,
     ) -> None:
         self.role = role
         self.email = email
@@ -598,6 +600,7 @@ class RoleBrowserSession:
         self._trace_active = False
         self._trace_label = ""
         self._authenticated = False
+        self._before_action = before_action
 
     def locator(self, selector: str) -> Any:
         return self.page.locator(selector)
@@ -621,6 +624,8 @@ class RoleBrowserSession:
         safe_detail = _safe_detail(detail)
         status = "passed"
         try:
+            if self._before_action is not None:
+                self._before_action(self, kind, target)
             return operation()
         except Exception as caught:
             status = "failed"
@@ -1317,12 +1322,36 @@ class TmsUIHarness:
             scenario_name=scenario_name,
             base_url=self.base_url,
         )
-        self.browser = playwright.chromium.launch(headless=headless, slow_mo=slow_mo)
+        self.visual_demo = os.getenv("TMS_E2E_VISUAL_DEMO", "").strip() == "1"
+        browser_channel = os.getenv("TMS_E2E_BROWSER_CHANNEL", "").strip()
+        launch_options: dict[str, Any] = {"headless": headless, "slow_mo": slow_mo}
+        if browser_channel:
+            launch_options["channel"] = browser_channel
+        self.browser = playwright.chromium.launch(**launch_options)
+        self.viewport_width = int(os.getenv("TMS_E2E_VIEWPORT_WIDTH", "1920" if self.visual_demo else "1600"))
+        self.viewport_height = int(os.getenv("TMS_E2E_VIEWPORT_HEIGHT", "1080" if self.visual_demo else "1000"))
+        self.role_switch_pause_ms = int(os.getenv("TMS_E2E_ROLE_SWITCH_PAUSE_MS", "700"))
+        self._active_demo_role = ""
         self.action_timeout_ms = action_timeout_ms
         self.navigation_timeout_ms = navigation_timeout_ms
         self.sessions: dict[str, RoleBrowserSession] = {}
         self.last_status: RunStatus | str = "running"
         self.finalization_error = ""
+
+    def _before_visible_action(
+        self, session: RoleBrowserSession, kind: str, target: str
+    ) -> None:
+        if not self.visual_demo:
+            return
+        session.page.bring_to_front()
+        if self._active_demo_role != session.role:
+            self._active_demo_role = session.role
+            print(
+                f"\n[岗位切换] 当前账号：{session.role} ({session.email})\n"
+                f"[当前动作] {target}",
+                flush=True,
+            )
+            session.page.wait_for_timeout(self.role_switch_pause_ms)
 
     def assert_certifiable(self) -> None:
         failures = self.journal.certification_failure_counts()
@@ -1337,7 +1366,7 @@ class TmsUIHarness:
             raise ValueError(f"角色会话已存在：{role}")
         context = self.browser.new_context(
             locale="zh-CN",
-            viewport={"width": 1600, "height": 1000},
+            viewport={"width": self.viewport_width, "height": self.viewport_height},
             accept_downloads=True,
         )
         context.set_default_timeout(self.action_timeout_ms)
@@ -1352,6 +1381,7 @@ class TmsUIHarness:
             journal=self.journal,
             action_timeout_ms=self.action_timeout_ms,
             navigation_timeout_ms=self.navigation_timeout_ms,
+            before_action=self._before_visible_action,
         )
         self.sessions[role] = session
         return session
