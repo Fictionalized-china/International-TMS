@@ -20,8 +20,8 @@ const declarationFieldKeys = new Set([
   "declaration_type",
   "declaration_title",
   "declaring_company",
-  "declaration_date",
-  "declaration_amount",
+  "declared_at",
+  "declared_amount",
   "declaration_currency",
   "declaration_gross_weight",
 ]);
@@ -39,18 +39,18 @@ export function customsModuleGateRequirements(
     (field) => field.fieldKey === "customs_declarations",
   );
   const releaseField = fields.find((field) => field.fieldKey === "customs_release");
-  if (options?.moduleRequired === true) {
-    return {
-      declarationsRequired: legacy || declarationField?.isActive === true,
-      releaseRequired: legacy || releaseField?.isActive === true,
-    };
-  }
-  const declarationsRequired = legacy || fields.some(
-    (field) =>
-      declarationFieldKeys.has(field.fieldKey) &&
-      field.isActive &&
-      field.isRequired,
-  );
+  // Module requiredness enables this business area, but must never upgrade a
+  // field configured as optional. The group field is authoritative when it is
+  // present; detail-field requiredness is only a compatibility fallback for
+  // older non-empty snapshots without the group field.
+  const declarationsRequired = legacy || (declarationField
+    ? declarationField.isActive && declarationField.isRequired
+    : fields.some(
+        (field) =>
+          declarationFieldKeys.has(field.fieldKey) &&
+          field.isActive &&
+          field.isRequired,
+      ));
   const releaseRequired = releaseField
     ? releaseField.isActive && releaseField.isRequired
     : legacy;
@@ -59,7 +59,7 @@ export function customsModuleGateRequirements(
 
 /**
  * Derives the automatic customs-module state from the effective workflow
- * snapshot. A required module must produce every visible core result, while
+ * snapshot. Field modes remain authoritative inside a required module, while
  * an optional module never blocks and hidden core actions stay absent.
  */
 export function deriveCustomsModuleAutomationState(input: {

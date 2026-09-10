@@ -176,6 +176,23 @@ export function loadingDocumentRequirement(
   return requirements.find((requirement) => requirement.code === code);
 }
 
+export function uploadedRequiredDocumentCompletedGate(input: {
+  requirements: readonly EffectiveLoadingDocumentRequirement[];
+  reviews: readonly LoadingDocumentReview[];
+  uploadedCode: string | null | undefined;
+}) {
+  if (!input.uploadedCode) return false;
+  const uploaded = loadingDocumentRequirement(
+    input.requirements,
+    input.uploadedCode,
+  );
+  if (!uploaded?.isActive || !uploaded.isRequired) return false;
+  return summarizeLoadingDocumentRequirements(
+    input.requirements,
+    input.reviews,
+  ).complete;
+}
+
 export function loadingDocumentFieldPolicy(
   requirements: readonly EffectiveLoadingDocumentRequirement[] | null | undefined,
   code: string,

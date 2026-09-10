@@ -4,6 +4,7 @@ import {
   loadingDocumentFieldPolicy,
   resolveLoadingDocumentRequirements,
   summarizeLoadingDocumentRequirements,
+  uploadedRequiredDocumentCompletedGate,
   warehouseLoadingDocumentMutationPolicy,
 } from "./loading-document-requirements";
 
@@ -239,6 +240,52 @@ describe("loading document requirements", () => {
       incompleteCodes: [],
       complete: true,
     });
+  });
+
+  it("auto-advances only when the uploaded file is the required file that completes the gate", () => {
+    const requirements = resolveLoadingDocumentRequirements({
+      orderId: "auto-advance-order",
+      customsEnabled: true,
+      fieldsByModule: {
+        consignment: [{
+          fieldKey: "document_consignment_letter",
+          isActive: false,
+          isRequired: false,
+        }],
+        customs: [
+          {
+            fieldKey: "document_commercial_invoice",
+            isActive: true,
+            isRequired: true,
+          },
+          {
+            fieldKey: "document_packing_list",
+            isActive: true,
+            isRequired: false,
+          },
+          {
+            fieldKey: "document_customs_document",
+            isActive: false,
+            isRequired: false,
+          },
+        ],
+      },
+    }).documents;
+    const reviews = [
+      { document_category: "commercial_invoice", review_status: "approved" },
+      { document_category: "packing_list", review_status: "approved" },
+    ];
+
+    expect(uploadedRequiredDocumentCompletedGate({
+      requirements,
+      reviews,
+      uploadedCode: "commercial_invoice",
+    })).toBe(true);
+    expect(uploadedRequiredDocumentCompletedGate({
+      requirements,
+      reviews,
+      uploadedCode: "packing_list",
+    })).toBe(false);
   });
 
   it("does not let future customs files block the earlier loading stage", () => {

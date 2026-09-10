@@ -54,20 +54,30 @@ describe("deriveCustomsModuleAutomationState", () => {
       .toMatchObject({ status: "in_progress", step: "documents" });
   });
 
-  it("requires visible core actions when the customs module itself is required", () => {
+  it("does not upgrade optional core actions when the customs module itself is required", () => {
     const fields = [
       field("customs_declarations", "optional"),
       field("customs_release", "optional"),
     ];
 
     expect(customsModuleGateRequirements(fields, { moduleRequired: true }))
-      .toEqual({ declarationsRequired: true, releaseRequired: true });
+      .toEqual({ declarationsRequired: false, releaseRequired: false });
     expect(deriveCustomsModuleAutomationState({
       total: 0,
       released: 0,
       fields,
       moduleRequired: true,
-    })).toMatchObject({ status: "in_progress", step: "documents" });
+    })).toMatchObject({ status: "completed", blocker: null });
+  });
+
+  it("uses detail fields only as a compatibility fallback when the declaration group is absent", () => {
+    expect(customsModuleGateRequirements([
+      field("declaration_number", "required"),
+      field("customs_release", "optional"),
+    ], { moduleRequired: true })).toEqual({
+      declarationsRequired: true,
+      releaseRequired: false,
+    });
   });
 
   it("never blocks an optional customs module even if its fields are required", () => {
