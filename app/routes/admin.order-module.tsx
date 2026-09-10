@@ -155,8 +155,8 @@ import {
   orderAssignmentAssigneeFieldName,
 } from "../lib/order-assignment-manifest";
 import {
-  applyOrderAssignmentManifest,
   loadOrderAssignmentManifest,
+  prepareOrderAssignmentManifest,
 } from "../lib/order-assignment-manifest.server";
 import {
   isActiveOrganizationAssignee,
@@ -2377,7 +2377,7 @@ export async function action({ request, params }: Route.ActionArgs) {
           };
         }
         const now = new Date().toISOString();
-        const manifestResult = await applyOrderAssignmentManifest({
+        const manifestResult = await prepareOrderAssignmentManifest({
           organizationId: current.organizationId,
           orderId,
           actorUserId: current.userId,
@@ -2387,11 +2387,6 @@ export async function action({ request, params }: Route.ActionArgs) {
         });
         const mainAssigneeUserId = manifestResult.primaryAssigneeUserId
           ?? proposedMainAssigneeUserId;
-        await env.DB.prepare(
-          "UPDATE order_module_instances SET assignee_user_id=?,blocking_reason=NULL,updated_at=? WHERE organization_id=? AND order_id=? AND module_code='assignment' AND enabled=1",
-        )
-          .bind(mainAssigneeUserId, now, current.organizationId, orderId)
-          .run();
         const workflowResult = await runOrderWorkflowAction({
           request,
           organizationId: current.organizationId,
@@ -2402,7 +2397,10 @@ export async function action({ request, params }: Route.ActionArgs) {
           notes: valueOf(form, "notes"),
           bypassAssigneeRestriction: false,
           allowPendingAssignment: true,
+          prospectiveAssignmentAssigneeUserId: mainAssigneeUserId,
+          prospectiveSatisfiedGateFieldKeys: manifestResult.prospectiveSatisfiedGateFieldKeys,
           atomicStatements: [
+            ...manifestResult.statements,
             env.DB.prepare(
               "UPDATE order_module_instances SET status='completed',current_step_code='assigned',current_step_name='分配完成',progress_percent=100,assignee_user_id=?,started_at=COALESCE(started_at,?),completed_at=COALESCE(completed_at,?),blocking_reason=NULL,updated_at=? WHERE organization_id=? AND order_id=? AND module_code='assignment' AND enabled=1",
             ).bind(mainAssigneeUserId, now, now, now, current.organizationId, orderId),

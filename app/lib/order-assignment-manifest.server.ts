@@ -335,7 +335,7 @@ export function frozenWorkflowTaskAssignmentStatements(input: {
   ];
 }
 
-export async function applyOrderAssignmentManifest(input: {
+export async function prepareOrderAssignmentManifest(input: {
   organizationId: string;
   orderId: string;
   actorUserId: string;
@@ -441,14 +441,29 @@ export async function applyOrderAssignmentManifest(input: {
       );
     }
   }
-  if (statements.length) await env.DB.batch(statements);
   const nextGroup = nextRequiredOrderAssignmentGroup(manifest.groups);
   const primaryAssigneeUserId = nextGroup
     ? resolvedGroups.find(({ group }) => group.key === nextGroup.key)?.assigneeUserId ?? null
     : null;
   return {
+    statements,
     assignedGroupCount: resolvedGroups.length,
     assignedModuleCodes,
     primaryAssigneeUserId,
+    prospectiveSatisfiedGateFieldKeys: [
+      ...(primaryAssigneeUserId ? ["primary_operator"] : []),
+      ...(resolvedGroups.length ? ["module_assignees"] : []),
+      ...(assignedModuleCodes.length ? ["assignment_scope"] : []),
+    ],
+  };
+}
+
+export async function applyOrderAssignmentManifest(input: Parameters<typeof prepareOrderAssignmentManifest>[0]) {
+  const prepared = await prepareOrderAssignmentManifest(input);
+  if (prepared.statements.length) await env.DB.batch(prepared.statements);
+  return {
+    assignedGroupCount: prepared.assignedGroupCount,
+    assignedModuleCodes: prepared.assignedModuleCodes,
+    primaryAssigneeUserId: prepared.primaryAssigneeUserId,
   };
 }

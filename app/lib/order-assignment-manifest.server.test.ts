@@ -54,6 +54,7 @@ import {
   frozenWorkflowTaskAssignmentStatements,
   loadOrderDispatchResponsibilityPolicy,
   loadOrderAssignmentManifest,
+  prepareOrderAssignmentManifest,
   resolveOrderModuleAssignmentTarget,
   validateOrderAssignmentManifestSelections,
 } from "./order-assignment-manifest.server";
@@ -360,6 +361,28 @@ describe("frozen order assignment manifest server", () => {
       "workflow-instance-1",
       "organization-1",
       "order-1",
+    ]);
+  });
+
+  it("does not persist assignment statements before the workflow transition batch", async () => {
+    database.state.rows = [dbRow()];
+
+    const result = await prepareOrderAssignmentManifest({
+      organizationId: "organization-1",
+      orderId: "order-1",
+      actorUserId: "supervisor-1",
+      selections: [{
+        groupKey: "position:OPERATION",
+        assigneeUserId: "operator-1",
+      }],
+    });
+
+    expect(database.state.batchSizes).toEqual([]);
+    expect(result.statements.length).toBeGreaterThan(0);
+    expect(result.prospectiveSatisfiedGateFieldKeys).toEqual([
+      "primary_operator",
+      "module_assignees",
+      "assignment_scope",
     ]);
   });
 

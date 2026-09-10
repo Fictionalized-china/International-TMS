@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   assignmentModuleBlocksDispatch,
   canRunOrderWorkflowAction,
+  dispatchedOrderWorkflowNeedsReconciliation,
   canSubmitSalesOrderForApproval,
   isAssignedOrderApprover,
   orderWorkflowTargetAssigneeRequirements,
@@ -194,5 +195,33 @@ describe("workflow gate module refresh", () => {
     expect(shouldRefreshOrderModulesBeforeWorkflowGate({
       actionCode: "approve",
     })).toBe(true);
+  });
+});
+
+describe("dispatched workflow reconciliation", () => {
+  it("detects a frozen order whose dispatch committed without advancing the workflow snapshot", () => {
+    expect(dispatchedOrderWorkflowNeedsReconciliation({
+      orderStatus: "in_execution",
+      currentStepCode: "module:assignment",
+      workflowStepKey: "task_assignment",
+    })).toBe(true);
+  });
+
+  it("does not treat normal execution or legacy snapshots as a broken dispatch", () => {
+    expect(dispatchedOrderWorkflowNeedsReconciliation({
+      orderStatus: "in_execution",
+      currentStepCode: "module:transport",
+      workflowStepKey: "domestic_execution",
+    })).toBe(false);
+    expect(dispatchedOrderWorkflowNeedsReconciliation({
+      orderStatus: "in_execution",
+      currentStepCode: "execution",
+      workflowStepKey: null,
+    })).toBe(false);
+    expect(dispatchedOrderWorkflowNeedsReconciliation({
+      orderStatus: "confirmed",
+      currentStepCode: "module:assignment",
+      workflowStepKey: "task_assignment",
+    })).toBe(false);
   });
 });

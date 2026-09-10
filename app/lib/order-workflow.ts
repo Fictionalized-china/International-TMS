@@ -57,11 +57,24 @@ export function shouldRefreshOrderModulesBeforeWorkflowGate(input: {
   actionCode: string;
   allowPendingAssignment?: boolean;
 }) {
-  // The assignment manifest writes the selected operation owner immediately
-  // before validating the dispatch transition. Refreshing modules in between
-  // would reseed the still-pending assignment module from the order's current
-  // operation-supervisor owner and overwrite that explicit selection.
+  // A pending assignment is validated prospectively and committed atomically
+  // with dispatch. Refreshing here would still inspect the pre-commit owner.
   return !(input.actionCode === "dispatch" && input.allowPendingAssignment);
+}
+
+export function dispatchedOrderWorkflowNeedsReconciliation(input: {
+  orderStatus: string;
+  currentStepCode: string | null | undefined;
+  workflowStepKey: string | null | undefined;
+}) {
+  if (input.orderStatus !== "in_execution") return false;
+  return (
+    input.workflowStepKey === "task_assignment" ||
+    (input.workflowStepKey != null && (
+      input.currentStepCode === "module:assignment" ||
+      input.currentStepCode === "task_assignment"
+    ))
+  );
 }
 
 export function assignmentModuleBlocksDispatch(module: {

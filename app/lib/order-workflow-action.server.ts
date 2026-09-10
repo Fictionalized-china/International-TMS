@@ -12,6 +12,8 @@ export async function runOrderWorkflowAction(input: {
   bypassAssigneeRestriction?: boolean;
   allowPendingAssignment?: boolean;
   atomicStatements?: D1PreparedStatement[];
+  prospectiveAssignmentAssigneeUserId?: string | null;
+  prospectiveSatisfiedGateFieldKeys?: readonly string[];
 }) {
   try {
     const result = await executeOrderWorkflowAction({
@@ -24,6 +26,8 @@ export async function runOrderWorkflowAction(input: {
       bypassAssigneeRestriction: input.bypassAssigneeRestriction,
       allowPendingAssignment: input.allowPendingAssignment,
       atomicStatements: input.atomicStatements,
+      prospectiveAssignmentAssigneeUserId: input.prospectiveAssignmentAssigneeUserId,
+      prospectiveSatisfiedGateFieldKeys: input.prospectiveSatisfiedGateFieldKeys,
     });
     await writeAudit({
       request: input.request,

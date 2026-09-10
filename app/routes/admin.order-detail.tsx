@@ -18,7 +18,10 @@ import {
   statusLabel,
   type OrderWorkflowTransition,
 } from "../lib/order-workflow";
-import { listOrderWorkflowTransitions } from "../lib/order-workflow.server";
+import {
+  listOrderWorkflowTransitions,
+  reconcileDispatchedOrderWorkflow,
+} from "../lib/order-workflow.server";
 import { runOrderWorkflowAction } from "../lib/order-workflow-action.server";
 import { valueOf } from "../lib/validation";
 import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
@@ -346,6 +349,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "order.view"),
     id = params.orderId;
   await requireOrderAccess(current, id);
+  await reconcileDispatchedOrderWorkflow(current.organizationId, id);
   // Reconcile before reading the order snapshot. Reading first returned the
   // previous node in the same response even though reconciliation succeeded.
   await reconcileOverseasOrderDeliveryState({

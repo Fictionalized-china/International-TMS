@@ -7,6 +7,7 @@ import { missingRequiredWorkflowStepFields } from "./workflow-fields.server";
 import {
   assignmentModuleBlocksDispatch,
   canRunOrderWorkflowAction,
+  dispatchedOrderWorkflowNeedsReconciliation,
   orderWorkflowTargetAssigneeRequirements,
   shouldRefreshOrderModulesBeforeWorkflowGate,
 } from "./order-workflow";
@@ -70,6 +71,8 @@ export async function validateOrderWorkflowAction(input: {
   assigneeUserId?: string | null;
   bypassAssigneeRestriction?: boolean;
   allowPendingAssignment?: boolean;
+  prospectiveAssignmentAssigneeUserId?: string | null;
+  prospectiveSatisfiedGateFieldKeys?: readonly string[];
 }) {
   const order = await env.DB.prepare(
     `SELECT o.id,o.order_number,o.status,o.current_step_code,o.current_assignee_user_id,
@@ -152,11 +155,12 @@ export async function validateOrderWorkflowAction(input: {
   if (gateStepKey) {
     if (shouldRefreshOrderModulesBeforeWorkflowGate(input))
       await ensureOrderModules(input.organizationId, input.orderId);
-    const missing = await missingRequiredWorkflowStepFields(
+    const prospectiveSatisfied = new Set(input.prospectiveSatisfiedGateFieldKeys ?? []);
+    const missing = (await missingRequiredWorkflowStepFields(
       input.organizationId,
       input.orderId,
       gateStepKey,
-    );
+    )).filter((field) => !prospectiveSatisfied.has(field.fieldKey));
     if (missing.length)
       return {
         ok: false as const,
@@ -190,7 +194,10 @@ export async function validateOrderWorkflowAction(input: {
           transition,
         };
       }
-      if (!assignment?.assignee_user_id) {
+      const effectiveAssignmentAssignee = input.prospectiveAssignmentAssigneeUserId
+        ?? assignment?.assignee_user_id
+        ?? null;
+      if (!effectiveAssignmentAssignee) {
         return {
           ok: false as const,
           reason: "当前工作流要求任务分配，但尚未设置派单主负责人。",
@@ -198,7 +205,7 @@ export async function validateOrderWorkflowAction(input: {
           transition,
         };
       }
-      if (input.assigneeUserId && input.assigneeUserId !== assignment.assignee_user_id) {
+      if (input.assigneeUserId && input.assigneeUserId !== effectiveAssignmentAssignee) {
         return {
           ok: false as const,
           reason: "派单负责人与任务分配不一致，请从任务分配页重新确认。",
@@ -309,6 +316,8 @@ export async function executeOrderWorkflowAction(input: {
   bypassAssigneeRestriction?: boolean;
   allowPendingAssignment?: boolean;
   atomicStatements?: D1PreparedStatement[];
+  prospectiveAssignmentAssigneeUserId?: string | null;
+  prospectiveSatisfiedGateFieldKeys?: readonly string[];
 }) {
   const checked = await validateOrderWorkflowAction(input);
   if (!checked.ok) throw new Error(checked.reason);
@@ -366,9 +375,11 @@ export async function executeOrderWorkflowAction(input: {
         })]
       : []),
   ]);
-  await ensureOrderModules(input.organizationId, order.id);
-  if (transition.to_status === "in_execution")
-    await syncOrderWorkflowSnapshot(input.organizationId, order.id);
+  if (transition.to_status === "in_execution") {
+    await reconcileDispatchedOrderWorkflow(input.organizationId, order.id, { force: true });
+  } else {
+    await ensureOrderModules(input.organizationId, order.id);
+  }
   const snapshot = await env.DB.prepare(
     "SELECT current_step_name FROM transport_orders WHERE organization_id=? AND id=?",
   )
@@ -380,6 +391,57 @@ export async function executeOrderWorkflowAction(input: {
     toStatus: transition.to_status,
     stepName: snapshot?.current_step_name ?? transition.target_step_name,
   };
+}
+
+type DispatchedOrderWorkflowSnapshot = {
+  status: string;
+  current_step_code: string | null;
+  current_step_key: string | null;
+};
+
+async function loadDispatchedOrderWorkflowSnapshot(
+  organizationId: string,
+  orderId: string,
+) {
+  return env.DB.prepare(
+    `SELECT o.status,o.current_step_code,wi.current_step_key
+       FROM transport_orders o
+       LEFT JOIN workflow_instances wi
+         ON wi.id=o.workflow_instance_id AND wi.organization_id=o.organization_id
+      WHERE o.organization_id=? AND o.id=?`,
+  ).bind(organizationId, orderId).first<DispatchedOrderWorkflowSnapshot>();
+}
+
+export async function reconcileDispatchedOrderWorkflow(
+  organizationId: string,
+  orderId: string,
+  options: { force?: boolean } = {},
+) {
+  let snapshot = await loadDispatchedOrderWorkflowSnapshot(organizationId, orderId);
+  if (!snapshot) return false;
+  if (!options.force && !dispatchedOrderWorkflowNeedsReconciliation({
+    orderStatus: snapshot.status,
+    currentStepCode: snapshot.current_step_code,
+    workflowStepKey: snapshot.current_step_key,
+  })) return false;
+
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await syncOrderWorkflowSnapshot(organizationId, orderId);
+      lastError = null;
+    } catch (error) {
+      lastError = error;
+    }
+    snapshot = await loadDispatchedOrderWorkflowSnapshot(organizationId, orderId);
+    if (snapshot && !dispatchedOrderWorkflowNeedsReconciliation({
+      orderStatus: snapshot.status,
+      currentStepCode: snapshot.current_step_code,
+      workflowStepKey: snapshot.current_step_key,
+    })) return true;
+  }
+  if (lastError instanceof Error) throw lastError;
+  throw new Error("派单已保存，但工作流未能进入下一业务节点；系统已停止返回成功，请重试");
 }
 
 export function statusLabel(status: string) {
