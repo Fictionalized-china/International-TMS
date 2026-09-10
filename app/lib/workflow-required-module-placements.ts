@@ -18,9 +18,8 @@ export function isAllowedRepeatedRequiredModulePlacement(
   const allowedSteps = allowedRepeatedRequiredModuleSteps[moduleCode];
   return Boolean(
     allowedSteps &&
-    stepKeys.length === allowedSteps.size &&
+    stepKeys.length > 1 &&
     new Set(stepKeys).size === stepKeys.length &&
-    stepKeys.every((stepKey) => allowedSteps.has(stepKey)) &&
-    [...allowedSteps].every((stepKey) => stepKeys.includes(stepKey)),
+    stepKeys.every((stepKey) => allowedSteps.has(stepKey)),
   );
 }

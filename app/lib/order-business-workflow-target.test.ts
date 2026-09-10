@@ -51,7 +51,26 @@ describe("configured order business target", () => {
     });
   });
 
-  it("fails closed when required consignment is repeated outside the core status-driven nodes", () => {
+  it("allows required consignment repeats when another core placement is optional", () => {
+    expect(resolveConfiguredOrderBusinessTarget({
+      modules: [
+        { module_code: "consignment", enabled: 1, is_required: 1, status: "completed" },
+        modules[0],
+      ],
+      currentStepKey: "task_assignment",
+      placements: [
+        { step_key: "quotation", sort_order: 10, module_code: "consignment", module_required: 1, module_state_status: "completed" },
+        { step_key: "order_creation", sort_order: 20, module_code: "consignment", module_required: 0, module_state_status: "completed" },
+        { step_key: "consignment_approval", sort_order: 30, module_code: "consignment", module_required: 1, module_state_status: "completed" },
+        { step_key: "domestic_execution", sort_order: 50, module_code: "transport", module_required: 1, module_state_status: "pending" },
+      ],
+    })).toEqual({
+      stepKey: "domestic_execution",
+      unresolvedModuleCodes: [],
+    });
+  });
+
+  it("ignores malformed duplicate placement history after that module is completed", () => {
     expect(resolveConfiguredOrderBusinessTarget({
       modules: [
         { module_code: "consignment", enabled: 1, is_required: 1, status: "completed" },
@@ -65,13 +84,10 @@ describe("configured order business target", () => {
         { step_key: "custom_consignment_check", sort_order: 40, module_code: "consignment", module_required: 1, module_state_status: "pending" },
         { step_key: "domestic_execution", sort_order: 50, module_code: "transport", module_required: 1, module_state_status: "pending" },
       ],
-    })).toEqual({
-      stepKey: "task_assignment",
-      unresolvedModuleCodes: ["consignment"],
-    });
+    })).toEqual({ stepKey: "domestic_execution", unresolvedModuleCodes: [] });
   });
 
-  it("fails closed when the repeated core consignment placement is incomplete", () => {
+  it("allows a subset of the core consignment placements to remain required", () => {
     expect(resolveConfiguredOrderBusinessTarget({
       modules: [
         { module_code: "consignment", enabled: 1, is_required: 1, status: "completed" },
@@ -83,10 +99,7 @@ describe("configured order business target", () => {
         { step_key: "order_creation", sort_order: 20, module_code: "consignment", module_required: 1, module_state_status: "completed" },
         { step_key: "domestic_execution", sort_order: 50, module_code: "transport", module_required: 1, module_state_status: "pending" },
       ],
-    })).toEqual({
-      stepKey: "order_creation",
-      unresolvedModuleCodes: ["consignment"],
-    });
+    })).toEqual({ stepKey: "domestic_execution", unresolvedModuleCodes: [] });
   });
 
   it("fails closed when a frozen module has more than one required occurrence", () => {
@@ -100,6 +113,24 @@ describe("configured order business target", () => {
     })).toEqual({
       stepKey: "transport_prepare",
       unresolvedModuleCodes: ["transport"],
+    });
+  });
+
+  it("fails closed when a pending module repeats outside its allowed placements", () => {
+    expect(resolveConfiguredOrderBusinessTarget({
+      modules: [
+        { module_code: "consignment", enabled: 1, is_required: 1, status: "in_progress" },
+        modules[0],
+      ],
+      currentStepKey: "order_creation",
+      placements: [
+        { step_key: "quotation", sort_order: 10, module_code: "consignment", module_required: 1, module_state_status: "completed" },
+        { step_key: "custom_consignment_check", sort_order: 40, module_code: "consignment", module_required: 1, module_state_status: "pending" },
+        { step_key: "domestic_execution", sort_order: 50, module_code: "transport", module_required: 1, module_state_status: "pending" },
+      ],
+    })).toEqual({
+      stepKey: "order_creation",
+      unresolvedModuleCodes: ["consignment"],
     });
   });
 

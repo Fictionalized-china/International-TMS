@@ -26,9 +26,28 @@ export function resolveConfiguredOrderBusinessTarget(input: {
   currentStepKey: string | null;
   completionStepKey?: string;
 }) {
+  const pendingModuleCodes = new Set(
+    input.modules
+      .filter(
+        (module) =>
+          module.enabled === 1 &&
+          module.is_required === 1 &&
+          module.status !== "completed",
+      )
+      .map((module) => module.module_code),
+  );
+  if (!pendingModuleCodes.size)
+    return {
+      stepKey: input.completionStepKey ?? "completion_review",
+      unresolvedModuleCodes: [] as string[],
+    };
+
   const requiredPlacements = new Map<string, string[]>();
   for (const placement of input.placements) {
-    if (placement.module_required !== 1) continue;
+    if (
+      placement.module_required !== 1 ||
+      !pendingModuleCodes.has(placement.module_code)
+    ) continue;
     const stepKeys = requiredPlacements.get(placement.module_code) ?? [];
     stepKeys.push(placement.step_key);
     requiredPlacements.set(placement.module_code, stepKeys);
@@ -46,22 +65,6 @@ export function resolveConfiguredOrderBusinessTarget(input: {
       unresolvedModuleCodes: duplicateRequiredModuleCodes,
     };
   }
-
-  const pendingModuleCodes = new Set(
-    input.modules
-      .filter(
-        (module) =>
-          module.enabled === 1 &&
-          module.is_required === 1 &&
-          module.status !== "completed",
-      )
-      .map((module) => module.module_code),
-  );
-  if (!pendingModuleCodes.size)
-    return {
-      stepKey: input.completionStepKey ?? "completion_review",
-      unresolvedModuleCodes: [] as string[],
-    };
 
   const ordered = [...input.placements].sort(
     (left, right) => left.sort_order - right.sort_order,
