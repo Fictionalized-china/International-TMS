@@ -21375,6 +21375,32 @@ html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animatio
   grid-template-columns: minmax(260px, 0.65fr) minmax(0, 2fr);
 }
 
+/* Overseas atomic receiving reveals its confirmation fields only after a full
+   scan. Keep that dynamic section on one stable full-width track instead of
+   inheriting the generic receiving workbench columns. */
+.warehouse-app-shell .acceptance-confirm-panel.atomic-overseas-confirm {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+}
+
+.warehouse-app-shell .atomic-overseas-confirm > .acceptance-result,
+.warehouse-app-shell .atomic-overseas-confirm > .warehouse-exception-note,
+.warehouse-app-shell .atomic-overseas-confirm > .field,
+.warehouse-app-shell .atomic-overseas-confirm > .atomic-oul-footer {
+  grid-column: 1;
+  width: 100%;
+  min-width: 0;
+}
+
+.warehouse-app-shell .atomic-overseas-confirm > .acceptance-result {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.warehouse-app-shell .atomic-overseas-confirm textarea {
+  width: 100%;
+  min-width: 0;
+}
+
 .acceptance-result,
 .acceptance-result label,
 .acceptance-result label > span {
@@ -21909,6 +21935,10 @@ html[data-motion="off"] .consolidation-view-content { animation: none; }
   .warehouse-app-shell .acceptance-result,
   .consolidation-filter-primary,
   .consolidation-advanced-filters > div {
+    grid-template-columns: 1fr;
+  }
+
+  .warehouse-app-shell .atomic-overseas-confirm > .acceptance-result {
     grid-template-columns: 1fr;
   }
 }
