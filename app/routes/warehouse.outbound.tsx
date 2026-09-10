@@ -45,7 +45,6 @@ import {
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
 import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
 import { canOperateWarehouseUi } from "../lib/warehouse-ui-access";
-import { canUseAdminSite } from "../lib/site-account-access";
 import {
   findWarehouseOutboundLoadUnit,
   filterWarehouseOutboundLoadUnits,
@@ -384,7 +383,13 @@ export async function loader({request}:Route.LoaderArgs){
     user,warehouse,warehouseAccessLevel:warehouseContext.selectedAccessLevel,
     loadUnits:pendingPagination.items,
     pendingPagination,
-    loadUnitCounts:{all:loadUnits.length,ready:loadUnits.filter(item=>item.ready).length,blocked:loadUnits.filter(item=>!item.ready).length},
+    loadUnitCounts:{
+      all:loadUnits.length,
+      ftl:loadUnits.filter(item=>item.business_type==="ftl").length,
+      ltl:loadUnits.filter(item=>item.business_type==="ltl"&&Boolean(item.transport_batch_id)).length,
+      ready:loadUnits.filter(item=>item.ready).length,
+      blocked:loadUnits.filter(item=>!item.ready).length,
+    },
     filters,
     dispatches:visibleDispatches,
     executionTasks:taskPagination.items,
@@ -1126,7 +1131,7 @@ export async function action({request}:Route.ActionArgs){
 }
 
 export default function WarehouseOutbound({loaderData,actionData}:Route.ComponentProps){
-  const busy=useNavigation().state!=="idle",canOperate=canOperateWarehouseUi(loaderData.user,loaderData.warehouseAccessLevel),canOpenAdminSite=canUseAdminSite(loaderData.user.roleCodes),completed=loaderData.dispatches.filter(x=>x.status==="dispatched");
+  const busy=useNavigation().state!=="idle",canOperate=canOperateWarehouseUi(loaderData.user,loaderData.warehouseAccessLevel),completed=loaderData.dispatches.filter(x=>x.status==="dispatched");
   const selectedTask=loaderData.requestedDispatchId?loaderData.dispatches.find(task=>task.id===loaderData.requestedDispatchId):undefined;
   const taskStage=(task:Dispatch)=>{const state=loaderData.taskWorkflowStates[task.id];return warehouseOutboundTaskStage(task,state?.scanConfirmation,state?.loadingStage,state?.workflowSyncPending)};
   const selectedStage=selectedTask?taskStage(selectedTask):undefined;
@@ -1161,10 +1166,14 @@ export default function WarehouseOutbound({loaderData,actionData}:Route.Componen
     <header className="page-header" id="warehouse-outbound-workbench"><div><p className="eyebrow">IN-WAREHOUSE ORDERS</p><h1>在仓订单</h1><p>先筛选并选定订单，再进入独立页面核验文件、创建装车任务。拼车订单仍按 PZ 配载单整批办理。</p></div><Link className="secondary" to={loaderData.executionHref}>查看装车与出库</Link></header>
     <section className="panel outbound-pending-orders">
       <div className="panel-header"><div><h2>在仓订单列表</h2><p>点击订单号或 PZ 配载单号进入“创建装车任务”；暂不满足条件的订单会直接标明原因。</p></div><span>{loaderData.pendingPagination.total} / {loaderData.loadUnitCounts.all} 个装车单位</span></div>
+      <nav className="peer-page-tabs outbound-order-type-tabs" aria-label="在仓订单分类">
+        <Link className={loaderData.filters.businessType==="all"?"active":""} aria-current={loaderData.filters.businessType==="all"?"page":undefined} to={outboundTypeFilterHref(loaderData.pendingHref,"all")}>全部 <span>{loaderData.loadUnitCounts.all}</span></Link>
+        <Link className={loaderData.filters.businessType==="ftl"?"active":""} aria-current={loaderData.filters.businessType==="ftl"?"page":undefined} to={outboundTypeFilterHref(loaderData.pendingHref,"ftl")}>整车订单 <span>{loaderData.loadUnitCounts.ftl}</span></Link>
+        <Link className={loaderData.filters.businessType==="ltl"?"active":""} aria-current={loaderData.filters.businessType==="ltl"?"page":undefined} to={outboundTypeFilterHref(loaderData.pendingHref,"ltl")}>配载订单 <span>{loaderData.loadUnitCounts.ltl}</span></Link>
+      </nav>
       <Form method="get" className="outbound-order-filter-form" role="search">
-        <input type="hidden" name="view" value="pending"/><input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/>{loaderData.orderId&&<input type="hidden" name="orderId" value={loaderData.orderId}/>} {loaderData.returnTo&&<input type="hidden" name="returnTo" value={loaderData.returnTo}/>}
+        <input type="hidden" name="view" value="pending"/><input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/><input type="hidden" name="type" value={loaderData.filters.businessType}/>{loaderData.orderId&&<input type="hidden" name="orderId" value={loaderData.orderId}/>} {loaderData.returnTo&&<input type="hidden" name="returnTo" value={loaderData.returnTo}/>}
         <label><span>搜索</span><input name="q" defaultValue={loaderData.filters.query} placeholder="订单号、PZ 单号、客户或目的地" autoComplete="off"/></label>
-        <label><span>运输类型</span><select name="type" defaultValue={loaderData.filters.businessType}><option value="all">全部类型</option><option value="ftl">整车</option><option value="ltl">拼车</option></select></label>
         <label><span>装车条件</span><select name="readiness" defaultValue={loaderData.filters.readiness}><option value="all">全部状态</option><option value="ready">可创建任务</option><option value="blocked">待补条件</option></select></label>
         <div className="outbound-order-filter-actions"><button className="primary warehouse-primary">查询</button><Link className="secondary" to={clearOutboundFiltersHref(loaderData.pendingHref)}>重置</Link></div>
       </Form>
@@ -1182,7 +1191,7 @@ export default function WarehouseOutbound({loaderData,actionData}:Route.Componen
       {selectedTask.business_type==="ftl"&&loaderData.selectedExecutionPolicy&&<FtlOutboundRouteEditor task={selectedTask} workflowPolicy={loaderData.selectedExecutionPolicy} borderPorts={loaderData.borderPorts} customsPlaces={loaderData.customsPlaces} busy={busy} canOperate={canOperate}/>}
       {!usesPredispatchPacking&&<OulLabelPanel task={selectedTask} items={loaderData.items.filter(x=>x.dispatch_id===selectedTask.id)} packingBatches={loaderData.packingBatches} busy={busy} canOperate={canOperate} closeSignal={actionSuccess}/>}
       {selectedTask.status==="loading"?(selectedPackingReady?<DispatchCard key={selectedTask.id} warehouseId={loaderData.warehouse.id} task={selectedTask} items={loaderData.visibleItems.filter(x=>x.dispatch_id===selectedTask.id)} itemPagination={loaderData.itemPagination} manifest={loaderData.manifestsByOrder[selectedTask.order_id]} busy={busy} canOperate={canOperate} workflowPolicy={loaderData.selectedExecutionPolicy} resourceDifferences={loaderData.selectedResourceDifferences} resourcePolicyError={loaderData.selectedResourcePolicyError} highlightedBarcode={scannedDispatchId===selectedTask.id?scannedBarcode:undefined}/>:<section className="panel outbound-loading-locked"><strong>下一步：打印并贴好全部 OUL</strong><span>确认贴标完成后，系统自动开放连续扫码装车区。</span></section>):<>
-        <section className="panel outbound-completed-task"><div className="panel-header"><div><h2>{selectedStage?.code==="overseas_transit"?"境外运输进行中":selectedStage?.code==="overseas_arrived"?"货物已到境外":"出库交接已完成"}</h2><p>{selectedStage?.code==="overseas_transit"?"实际出境已经确认，订单当前处于境外运输中。":selectedStage?.code==="overseas_arrived"?"境外运输节点已经完成，等待或正在办理境外仓作业。":"装车模块已经推进完成，当前进入“已装车待出境”；实际出境确认后才进入境外运输中。"}</p></div><span className={`status-pill ${selectedStage?.tone||"success"}`}>{selectedStage?.label}</span></div>{selectedStage?.code==="handover_done"?<div className="outbound-next-node-action"><div><strong>下一节点：实际出境确认</strong><span>{isConsolidatedOutboundTask(selectedTask.business_type,selectedTask.transport_batch_id)?"拼车按 PZ 配载单统一确认出境并同步全部订单。":selectedTask.outbound_resource_confirmed?"整车车辆与司机已经由仓库确认并同步管理端，后续直接在订单的报关及出境运输节点办理。":"该历史整车任务未经过新版仓库资源确认；请在管理端核实车辆后，直接在订单的报关及出境运输节点办理。"}</span></div>{isConsolidatedOutboundTask(selectedTask.business_type,selectedTask.transport_batch_id)?canOpenAdminSite?<Link className="primary warehouse-primary" to={`/admin/loading/${selectedTask.transport_batch_id}?tab=tracking`}>进入 PZ 配载单确认实际出境</Link>:<span className="status-pill off">请切换至配载单操作负责人账号办理实际出境</span>:<span className="status-pill success">整车无需进入配载页</span>}</div>:<div className="outbound-next-node-action"><div><strong>{selectedStage?.next}</strong><span>当前节点状态已同步到管理端。</span></div>{isConsolidatedOutboundTask(selectedTask.business_type,selectedTask.transport_batch_id)&&(canOpenAdminSite?<Link className="secondary" to={`/admin/loading/${selectedTask.transport_batch_id}`}>查看 PZ 配载单</Link>:<span className="status-pill off">管理端由配载单负责人继续办理</span>)}</div>}</section>
+        <section className="panel outbound-completed-task"><div className="panel-header"><div><h2>{selectedStage?.code==="overseas_transit"?"境外运输进行中":selectedStage?.code==="overseas_arrived"?"货物已到境外":"出库交接已完成"}</h2><p>{selectedStage?.code==="overseas_transit"?"实际出境已经确认，订单当前处于境外运输中。":selectedStage?.code==="overseas_arrived"?"境外运输节点已经完成，等待或正在办理境外仓作业。":"装车模块已经推进完成，当前进入“已装车待出境”；实际出境确认后才进入境外运输中。"}</p></div><span className={`status-pill ${selectedStage?.tone||"success"}`}>{selectedStage?.label}</span></div>{selectedStage?.code==="handover_done"?<div className="outbound-next-node-action"><div><strong>下一节点：实际出境确认</strong><span>{isConsolidatedOutboundTask(selectedTask.business_type,selectedTask.transport_batch_id)?"拼车按 PZ 配载单统一确认出境并同步全部订单。请由管理端的配载单操作负责人继续办理。":selectedTask.outbound_resource_confirmed?"整车车辆与司机已经由仓库确认并同步管理端，后续由管理端在订单的报关及出境运输节点办理。":"该历史整车任务未经过新版仓库资源确认；请由管理端核实车辆并继续办理。"}</span></div><span className="status-pill success">仓库端作业已完成</span></div>:<div className="outbound-next-node-action"><div><strong>{selectedStage?.next}</strong><span>当前节点状态已同步；后续业务请在对应独立终端办理。</span></div></div>}</section>
         {loaderData.taskWorkflowStates[selectedTask.id]?.workflowSyncPending&&<section className="panel outbound-workflow-resync"><div className="panel-header"><div><h2>物理出库已完成，业务工作流待同步</h2><p>货物不会重复出库。这里只重试配载/订单进度和冻结工作流快照。</p></div><span className="status-pill warning">待恢复</span></div>{canOperate?<Form method="post" className="button-row"><input type="hidden" name="intent" value="resync_workflow"/><input type="hidden" name="dispatchId" value={selectedTask.id}/><button className="primary warehouse-primary" disabled={busy}>恢复工作流同步</button></Form>:<div className="alert info">请由当前仓库的操作账号执行“恢复工作流同步”；本账号仅可查看状态。</div>}</section>}
         <section className="panel handover-section"><div className="panel-header no-print"><div><h2>仓库装车出库交接单</h2><p>本交接单记录仓库装车结果，不等同于车辆已实际出境。</p></div><button className="secondary" type="button" onClick={()=>window.print()}>打印交接单</button></div><Handover warehouseId={loaderData.warehouse.id} task={selectedTask} items={loaderData.items.filter(x=>x.dispatch_id===selectedTask.id)} manifest={loaderData.manifestsByOrder[selectedTask.order_id]}/></section>
       </>}
@@ -1195,7 +1204,8 @@ export default function WarehouseOutbound({loaderData,actionData}:Route.Componen
 
 function executionTaskHref(executionHref:string,dispatchId:string){return`${executionHref}${executionHref.includes("?")?"&":"?"}dispatchId=${encodeURIComponent(dispatchId)}`;}
 function createLoadUnitHref(pendingHref:string,batchId:string){const [path,query=""]=pendingHref.split("?"),params=new URLSearchParams(query);params.set("view","create");params.set("batchId",batchId);return`${path}?${params.toString()}`;}
-function clearOutboundFiltersHref(pendingHref:string){const [path,query=""]=pendingHref.split("?"),params=new URLSearchParams(query);params.delete("q");params.delete("type");params.delete("readiness");params.set("view","pending");return`${path}?${params.toString()}`;}
+function outboundTypeFilterHref(pendingHref:string,businessType:"all"|"ftl"|"ltl"){const [path,query=""]=pendingHref.split("?"),params=new URLSearchParams(query);params.set("view","pending");params.set("type",businessType);params.delete("pendingPage");return`${path}?${params.toString()}`;}
+function clearOutboundFiltersHref(pendingHref:string){const [path,query=""]=pendingHref.split("?"),params=new URLSearchParams(query);params.delete("q");params.delete("readiness");params.delete("pendingPage");params.set("view","pending");return`${path}?${params.toString()}`;}
 function formatWarehouseTime(value:string|null){return value?new Date(value).toLocaleString("zh-CN",{hour12:false}):"入仓时间待补";}
 function dispatchTaskSubject(task:Dispatch){const isBatch=isConsolidatedOutboundTask(task.business_type,task.transport_batch_id);const orderNumbers=task.order_numbers||task.order_number,customerNames=task.customer_names||task.customer_name;return isBatch?{primary:task.batch_number,secondary:`${orderNumbers} · ${customerNames}`,typeLabel:`PZ 配载单 · ${orderNumbers.split(",").filter(Boolean).length} 票订单`}:{primary:task.order_number,secondary:task.customer_name,typeLabel:"整车订单"};}
 function dispatchTaskPriority(task:Dispatch,state?:OutboundTaskWorkflowState){const code=warehouseOutboundTaskStage(task,state?.scanConfirmation,state?.loadingStage,state?.workflowSyncPending).code;return code==="workflow_sync_pending"?0:code==="handover_ready"?1:code==="loading"?2:code==="waiting_scan"?3:code==="workflow_blocked"?4:code==="handover_done"?5:6;}
@@ -1241,13 +1251,13 @@ function BlockedLoadingDocumentRemediation({inspection,reasons,pendingHref,canOp
     <div className="panel-header"><div><h2>暂不能创建装车任务</h2><p>{stageError?"当前未到冻结工作流的装车办理节点；本页只展示已有信息，进入目标节点后再补充文件或创建任务。":unresolvedRequired.length?"请在当前页面补齐以下必需文件；上传并确认后系统立即重新核验装车条件。":"文件条件已经满足，仍需处理下列其他装车条件。"}</p></div><span className="status-pill warning">待补条件</span></div>
     {!stageError&&unresolvedRequired.length>0&&<div className="outbound-blocked-document-summary"><strong>需要补充或确认以下文件</strong><span>{unresolvedRequired.map(document=>`${document.orderNumber} ${document.name}`).join("、")}</span></div>}
     <ul>{reasons.map(reason=><li key={reason}>{reason}</li>)}</ul>
-    {remediationTargets.length>0&&<div className="outbound-remediation-portals" aria-label="截断处理入口">
+    {remediationTargets.length>0&&<div className="outbound-remediation-portals" aria-label="阻断处理指引">
       {remediationTargets.map(target=><article key={target.key}>
         <div><strong>{target.title}</strong><span>{target.hint}</span></div>
-        <Link className="secondary" to={target.href} target="_blank" rel="noreferrer">打开处理入口</Link>
+        <span className="status-pill off">由对应岗位在管理端办理</span>
       </article>)}
       <div className="outbound-remediation-recheck">
-        <span>处理页会在新标签打开；完成后无需重复查找订单，回到本页重新核验即可。</span>
+        <span>对应岗位处理完成后，仓库人员留在本端重新核验即可；本页不跨端跳转。</span>
         <Link className="primary warehouse-primary" to={retryHref} reloadDocument>已处理，重新核验</Link>
       </div>
     </div>}

@@ -182,6 +182,7 @@ type Attachment = {
 };
 type WarehousePackageLabel = {
   id: string;
+  label_kind: "inbound_mark" | "oul" | string;
   barcode: string;
   package_number: string;
   status: string;
@@ -537,7 +538,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
   ]);
   const [packageLabels, workflowVersions, cargoItems, warehouseReceipts] = await Promise.all([
     env.DB.prepare(
-      `SELECT p.id,p.barcode,p.package_number,p.status,p.pieces,p.weight_kg,p.volume_cbm,p.created_at,
+      `SELECT p.id,p.label_kind,p.barcode,p.package_number,p.status,p.pieces,p.weight_kg,p.volume_cbm,p.created_at,
               i.cargo_name_cn cargo_name,w.name warehouse_name,z.name zone_name,l.name location_name
          FROM warehouse_packages p
          JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id
@@ -1303,6 +1304,8 @@ function LinearOrderDrawer({
   const order = data.order;
   const markLabelReady = isOrderMarkLabelReady(order);
   const assignedModules = data.modules.filter((module) => module.enabled && module.assignee_user_id);
+  const inboundMarkLabels = data.packageLabels.filter((label) => label.label_kind === "inbound_mark");
+  const outboundOulLabels = data.packageLabels.filter((label) => label.label_kind === "oul");
   return (
     <div className="linear-drawer-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <aside className="linear-order-drawer" role="dialog" aria-modal="true" aria-label="订单辅助资料">
@@ -1420,9 +1423,13 @@ function LinearOrderDrawer({
               </article>)}
               {!data.cargoItems.length && <p className="linear-drawer-empty">当前订单尚无结构化货物明细，仅显示报价继承的摘要数据。</p>}
             </div></section>
-            <section className="linear-drawer-section"><h3>仓库货物标签 <span>{data.packageLabels.length} 张</span></h3><div className="linear-drawer-list">
-              {data.packageLabels.map((label) => <article key={label.id}><div><strong>{label.barcode}</strong><span>{label.cargo_name || order.cargo_description} · {label.package_number}</span></div><small>{label.pieces} 件 · {label.weight_kg ?? "—"} KG · {label.volume_cbm ?? "—"} CBM<br/>{label.warehouse_name || "仓库待定"} · {warehousePackageStatusLabel(label.status)}</small></article>)}
-              {!data.packageLabels.length && <p className="linear-drawer-empty">尚未生成仓库货物标签。</p>}
+            <section className="linear-drawer-section"><h3>入仓唛头 <span>{inboundMarkLabels.length} 张</span></h3><div className="linear-drawer-list">
+              {inboundMarkLabels.map((label) => <article key={label.id}><div><strong>{label.barcode}</strong><span>{label.cargo_name || order.cargo_description} · {label.package_number}</span></div><small>{label.pieces} 件 · {label.weight_kg ?? "—"} KG<br/>{label.warehouse_name || "仓库待定"} · {warehousePackageStatusLabel(label.status)}</small></article>)}
+              {!inboundMarkLabels.length && <p className="linear-drawer-empty">尚未生成入仓唛头。</p>}
+            </div></section>
+            <section className="linear-drawer-section"><h3>最终出仓标签（OUL） <span>{outboundOulLabels.length} 张</span></h3><div className="linear-drawer-list">
+              {outboundOulLabels.map((label) => <article key={label.id}><div><strong>{label.barcode}</strong><span>{label.cargo_name || order.cargo_description} · {label.package_number}</span></div><small>{label.pieces} 件 · {label.weight_kg ?? "—"} KG · {label.volume_cbm ?? "—"} CBM<br/>{label.warehouse_name || "仓库待定"} · {warehousePackageStatusLabel(label.status)}</small></article>)}
+              {!outboundOulLabels.length && <p className="linear-drawer-empty">完成最终包装后生成 OUL。</p>}
             </div></section>
           </>}
           {activeTab === "attachments" && <section className="linear-drawer-section"><h3>订单文件 <span>{data.attachments.length} 个</span></h3><div className="linear-drawer-list">

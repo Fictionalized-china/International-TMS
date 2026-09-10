@@ -4556,17 +4556,7 @@ export default function OrderModulePage({
           >
             {moduleStatusLabels[module.status] ?? module.status}
           </span>
-          {definition.code === "warehouse" && (
-            <Form method="post" action="/switch-site" className="module-header-warehouse-form">
-              <input type="hidden" name="target" value="warehouse" />
-              <input
-                type="hidden"
-                name="warehouseTo"
-                value={`/warehouse/acceptance?orderId=${order.id}&returnTo=${encodeURIComponent(`/admin/orders/${order.id}/modules/warehouse`)}`}
-              />
-              <button className="primary">进入仓库端</button>
-            </Form>
-          )}
+          {definition.code === "warehouse" && <span className="status-pill off">仓库端独立办理</span>}
           <Link className="secondary" to={`/admin/orders/${order.id}`}>
             返回订单中心
           </Link>
@@ -7314,14 +7304,7 @@ function ModuleBusinessData({
             <div className="loading-next-action">
               <strong>下一步由境外目的仓办理</strong>
               <span>仓库人员扫描本票货物标签，登记实收并选择“清点无误”。</span>
-              <WarehouseSiteButton
-                orderId={data.order.id}
-                targetPath={`/warehouse/inbound?warehouseId=${encodeURIComponent(data.order.overseas_warehouse_id)}`}
-                returnModuleCode="overseas_warehouse"
-                className="primary"
-              >
-                去境外目的仓扫码收货
-              </WarehouseSiteButton>
+              <span className="status-pill off">等待目的仓账号扫码收货</span>
             </div>
           </BusinessSubsection>
         )}
@@ -7331,14 +7314,7 @@ function ModuleBusinessData({
             <div className="loading-next-action">
               <strong>下一步由境外目的仓办理</strong>
               <span>{operation?.appointment_at ? `客户预约 ${appointmentStatus} 提货；` : "客户尚未预约；"}到仓后扫描本票全部货物条码，并在货物核对弹窗内确认收货。</span>
-              {data.order.overseas_warehouse_id && <WarehouseSiteButton
-                orderId={data.order.id}
-                targetPath={`/warehouse/pickup?warehouseId=${encodeURIComponent(data.order.overseas_warehouse_id)}`}
-                returnModuleCode="overseas_warehouse"
-                className="primary"
-              >
-                去境外仓扫码自提签收
-              </WarehouseSiteButton>}
+              {data.order.overseas_warehouse_id && <span className="status-pill off">等待目的仓账号办理自提签收</span>}
             </div>
           </BusinessSubsection>
         )}
@@ -7930,7 +7906,7 @@ function ModuleBusinessData({
           </div>
         </BusinessSubsection>
 
-        {manage && <BusinessSubsection title="仓库办理" hint="实际收货操作继续在仓库端完成；管理端仅提供入口和同步状态。">
+        {manage && <BusinessSubsection title="仓库办理" hint="实际收货操作由独立仓库端完成；管理端只读同步状态，不提供跨端快捷入口。">
           <div className="table-wrap module-record-table operation-sheet-table warehouse-operation-table">
             <table>
               <thead><tr><th>办理事项</th><th>当前状态</th><th>同步结果</th><th>操作</th></tr></thead>
@@ -7938,7 +7914,7 @@ function ModuleBusinessData({
                 <td>到仓收货、实点登记与货齐确认</td>
                 <td><span className={`status-pill ${data.warehouseFlow?.inboundReady ? "success" : ""}`}>{data.warehouseFlow?.inboundReady ? "已入库并确认货齐" : data.warehouseFlow?.received ? "已收货，待确认货齐" : "待仓库收货"}</span></td>
                 <td>{data.warehouseFlow?.inboundReady ? "已同步至订单，允许进入装车与出库" : "仓库实点值和标签将在入库后自动显示"}</td>
-                <td><div className="row-actions"><WarehouseSiteButton orderId={data.order.id} targetPath="/warehouse/acceptance" className="primary">{data.warehouseFlow?.inboundReady ? "查看收货记录" : "去仓库收货"}</WarehouseSiteButton>{data.warehouseFlow?.inboundReady && <Link className="secondary" to={`/admin/orders/${data.order.id}/modules/loading#module-business-data`}>进入装车与出库</Link>}</div></td>
+                <td><div className="row-actions"><span className={`status-pill ${data.warehouseFlow?.inboundReady ? "success" : "off"}`}>{data.warehouseFlow?.inboundReady ? "仓库作业已同步" : "等待仓库账号办理"}</span>{data.warehouseFlow?.inboundReady && <Link className="secondary" to={`/admin/orders/${data.order.id}/modules/loading#module-business-data`}>进入装车与出库</Link>}</div></td>
               </tr></tbody>
             </table>
           </div>
@@ -8139,15 +8115,7 @@ function ModuleBusinessData({
             </tbody>
           </table>
         </div>
-        {manage && <Form method="post" action="/switch-site" className="module-external-form">
-          <input type="hidden" name="target" value="warehouse" />
-          <input
-            type="hidden"
-            name="warehouseTo"
-            value={`/warehouse/exceptions?orderId=${data.order.id}&returnTo=${encodeURIComponent(`/admin/orders/${data.order.id}/modules/exceptions`)}`}
-          />
-          <button className="secondary module-external-link">查看仓库异常工作台</button>
-        </Form>}
+        {manage && <p className="alert info">仓库异常请由对应仓库账号在独立仓库端登记和处理；结果会自动同步到本订单。</p>}
       </div>
     );
   return (
@@ -9146,84 +9114,6 @@ function ExpenseDirectionWorkflow({
     </div>
   );
 }
-function warehouseAdminReturn(orderId: string, moduleCode = "warehouse") {
-  return `/admin/orders/${orderId}/modules/${moduleCode}`;
-}
-function warehouseTarget(orderId: string, targetPath: string, returnModuleCode = "warehouse") {
-  const separator = targetPath.includes("?") ? "&" : "?";
-  return `${targetPath}${separator}orderId=${orderId}&returnTo=${encodeURIComponent(warehouseAdminReturn(orderId, returnModuleCode))}`;
-}
-function WarehouseSiteButton({
-  orderId,
-  targetPath,
-  returnModuleCode = "warehouse",
-  className = "secondary",
-  children,
-}: {
-  orderId: string;
-  targetPath: string;
-  returnModuleCode?: string;
-  className?: string;
-  children: ReactNode;
-}) {
-  return (
-    <Form method="post" action="/switch-site">
-      <input type="hidden" name="target" value="warehouse" />
-      <input type="hidden" name="warehouseTo" value={warehouseTarget(orderId, targetPath, returnModuleCode)} />
-      <button className={className}>{children}</button>
-    </Form>
-  );
-}
-function WarehouseSiteCard({
-  orderId,
-  targetPath,
-  marker,
-  title,
-  text,
-  className,
-}: {
-  orderId: string;
-  targetPath: string;
-  marker: string;
-  title: string;
-  text: string;
-  className?: string;
-}) {
-  return (
-    <Form method="post" action="/switch-site" className={`warehouse-module-step-form ${className ?? ""}`}>
-      <input type="hidden" name="target" value="warehouse" />
-      <input type="hidden" name="warehouseTo" value={warehouseTarget(orderId, targetPath)} />
-      <button type="submit" title={`进入${title}`}>
-        <b>{marker}</b>
-        <strong>{title}</strong>
-        <span>{text}</span>
-      </button>
-    </Form>
-  );
-}
-function Capability({ title, text, href }: { title: string; text: string; href?: string }) {
-  const content = (
-    <>
-      <strong>{title}</strong>
-      <p>{text}</p>
-      {href && <small>点击进入</small>}
-    </>
-  );
-  if (href?.startsWith("/warehouse"))
-    return (
-      <Form method="post" action="/switch-site" className="capability-switch-form">
-        <input type="hidden" name="target" value="warehouse" />
-        <input type="hidden" name="warehouseTo" value={href} />
-        <button type="submit">{content}</button>
-      </Form>
-    );
-  return href ? (
-    <Link to={href}>{content}</Link>
-  ) : (
-    <article>{content}</article>
-  );
-}
-
 function FtlOutboundResourceForm({
   data,
   batch,
@@ -9295,7 +9185,6 @@ function InlineLoadingWorkbench({
   context?: "loading" | "warehouse";
 }) {
   const activeBatch = data.batches.find((item) => item.status !== "cancelled");
-  const warehouseTo = `/warehouse/consolidation?orderId=${encodeURIComponent(data.order.id)}&returnTo=${encodeURIComponent(`/admin/orders/${data.order.id}/modules/loading`)}`;
   return <section className="inline-loading-workbench">
     <div className="panel-header">
       <div>
@@ -9309,12 +9198,10 @@ function InlineLoadingWorkbench({
     {activeBatch ? <div className="inline-loading-actions">
       <small><BatchNumberLink id={activeBatch.id} number={activeBatch.batch_number}/> · 已挂载 {activeBatch.order_count} 票订单</small>
       <Link className="primary" to={`/admin/loading/${activeBatch.id}`}>打开配载单</Link>
-    </div> : <Form method="post" action="/switch-site" className="inline-loading-actions">
-      <input type="hidden" name="target" value="warehouse" />
-      <input type="hidden" name="warehouseTo" value={warehouseTo} />
-      <small>仓库端会按当前账号绑定仓库显示可配载货物。</small>
-      <button className="primary" disabled={busy}>去仓库端货物配载</button>
-    </Form>}
+    </div> : <div className="inline-loading-actions">
+      <small>等待仓库账号在独立仓库端完成货物配载；结果会自动同步到本页。</small>
+      <span className="status-pill off">等待仓库端办理</span>
+    </div>}
   </section>;
 }
 

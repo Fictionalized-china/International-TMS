@@ -30,18 +30,6 @@ type WarehouseFlow = {
   dispatchStatus: string | null;
 };
 
-function safeAdminReturn(value: string | null, orderId: string | null) {
-  if (
-    value &&
-    (value === "/admin" ||
-      value.startsWith("/admin/") ||
-      value.startsWith("/admin?")) &&
-    !value.startsWith("//")
-  )
-    return value;
-  return orderId ? `/admin/orders/${orderId}/modules/warehouse` : "/admin";
-}
-
 export async function loader({ request }: Route.LoaderArgs) {
   const user = await requireSessionUser(request, "warehouse.view", "warehouse");
   const warehouseContext = await loadWarehouseContext(request, user);
@@ -49,7 +37,6 @@ export async function loader({ request }: Route.LoaderArgs) {
 
   const url = new URL(request.url);
   const orderId = url.searchParams.get("orderId");
-  const returnTo = safeAdminReturn(url.searchParams.get("returnTo"), orderId);
   let orderContext: (WarehouseOrder & {
     module: Awaited<ReturnType<typeof listOrderModules>>[number] | null;
   }) | null = null;
@@ -89,7 +76,6 @@ export async function loader({ request }: Route.LoaderArgs) {
   const preserved = new URLSearchParams();
   preserved.set("warehouseId", warehouse.id);
   if (orderContext) preserved.set("orderId", orderContext.id);
-  if (returnTo !== "/admin") preserved.set("returnTo", returnTo);
   const query = preserved.toString();
   const requestedOutboundView = url.searchParams.get("view");
   const outboundView = requestedOutboundView === "pending" || requestedOutboundView === "execution"
@@ -105,7 +91,6 @@ export async function loader({ request }: Route.LoaderArgs) {
     outboundView,
     orderContext,
     warehouseFlow,
-    returnTo,
     query,
     result: url.searchParams.get("warehouseResult"),
     error: url.searchParams.get("warehouseError"),
@@ -121,13 +106,6 @@ function warehouseOutboundLink(query: string, view: "pending" | "execution") {
   const params = new URLSearchParams(query);
   params.set("view", view);
   return `/warehouse/outbound?${params.toString()}`;
-}
-
-function warehouseReturnLabel(returnTo: string, hasOrderContext: boolean) {
-  if (!hasOrderContext) return "返回管理后台";
-  if (returnTo.includes("/modules/loading")) return "返回装车与出库";
-  if (returnTo.includes("/modules/overseas_warehouse")) return "返回境外仓办理";
-  return "返回订单仓库模块";
 }
 
 export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
@@ -205,16 +183,6 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
             <span><AppIcon name="warehouse" size={17} /></span>仓库与库位
           </NavLink>
         </nav>
-        <div className="warehouse-site-actions">
-          <Form action={`/switch-site?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}`} method="post">
-            <input type="hidden" name="target" value="admin" />
-            <input type="hidden" name="returnTo" value={loaderData.returnTo} />
-            <button className="warehouse-return" title="切换回运营管理后台">
-              <AppIcon name="layout" size={16} />
-              {warehouseReturnLabel(loaderData.returnTo, Boolean(orderContext))}
-            </button>
-          </Form>
-        </div>
         <div className="warehouse-user">
           <span className="warehouse-avatar">
             {user.displayName.slice(0, 1).toUpperCase()}
@@ -255,11 +223,7 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
             ) : !flow.inboundReady ? (
               <Link className="primary" to={warehouseLink(loaderData.warehouse.warehouse_role === "overseas_destination" ? "/warehouse/inbound" : "/warehouse/acceptance", loaderData.query)}>{loaderData.warehouse.warehouse_role === "overseas_destination" ? "继续验收并完成清点" : "继续验收并确认货齐"}</Link>
             ) : loaderData.warehouse.warehouse_role === "overseas_destination" ? (
-              <Form action={`/switch-site?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}`} method="post">
-                <input type="hidden" name="target" value="admin" />
-                <input type="hidden" name="returnTo" value={`/admin/orders/${orderContext.id}/modules/overseas_warehouse#module-business-data`} />
-                <button className="primary">清点完成并已自动通知，返回订单</button>
-              </Form>
+              <span className="status-pill success">清点完成，结果已同步并自动通知管理端</span>
             ) : loaderData.currentPath.startsWith("/warehouse/outbound") ? (
               <div className="warehouse-context-next">
                 <strong>

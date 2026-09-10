@@ -58,7 +58,6 @@ import { Modal, useModalScrollLock } from "../components/Modal";
 import { QueryPagination } from "../components/QueryPagination";
 import { paginateList, readListPage } from "../lib/list-pagination";
 import {
-  buildBatchOverseasInboundHref,
   resolveBatchOverseasInboundHandoff,
 } from "../lib/batch-overseas-inbound-navigation";
 import {
@@ -2358,19 +2357,15 @@ function BatchCustomsPortal({orders,customsSummaries}:{orders:BatchOrder[];custo
 }
 
 function WarehouseOutboundAction({orderId,batchId,customsReady}:{orderId:string;batchId:string;customsReady?:boolean}){
-  const returnTo=`/admin/loading/${batchId}?fromOrderId=${encodeURIComponent(orderId)}`;
-  const warehouseTo=`/warehouse/outbound?orderId=${encodeURIComponent(orderId)}&returnTo=${encodeURIComponent(returnTo)}`;
   return <div className="loading-warehouse-handoff">
     {customsReady===false&&<div className="alert warning" style={{marginBottom:"0.5rem"}}>⚠️ 本票报关单尚未收齐放行，配载出库前请先到「配载单文件工作台」处理报关资料与报关单。</div>}
-    <div><strong>下一步由仓库办理</strong><span>仓库按已确认的配载车辆扫码拣货、装车并完成出库交接。</span></div><Form method="post" action="/switch-site"><input type="hidden" name="target" value="warehouse"/><input type="hidden" name="warehouseTo" value={warehouseTo}/><button className="primary">去仓库端拣货装车</button></Form></div>;
+    <div><strong>下一步由仓库办理</strong><span>请由仓库账号在独立仓库端按已确认的配载车辆扫码拣货、装车并完成出库交接。</span></div><span className="status-pill off">等待仓库端办理</span></div>;
 }
 
 function WarehouseOverseasInboundAction({batchId,batchNumber,warehouseId,orderIds}:{batchId:string;batchNumber:string;warehouseId:string;orderIds:string[]}){
-  const returnTo=`/admin/loading/${batchId}?tab=overseas`;
-  const warehouseTo=buildBatchOverseasInboundHref({batchId,warehouseId,orderIds,returnTo});
   return <div className="loading-warehouse-handoff batch-overseas-inbound-handoff">
-    <div><strong>整批交接境外目的仓</strong><span>{batchNumber} 共 {orderIds.length} 票；进入后自动限定本 PZ，仓库仍须逐票扫码清点。</span></div>
-    <Form method="post" action="/switch-site"><input type="hidden" name="target" value="warehouse"/><input type="hidden" name="warehouseTo" value={warehouseTo}/><button className="primary">进入本 PZ 目的仓收货</button></Form>
+    <div><strong>整批交接境外目的仓</strong><span>{batchNumber} 共 {orderIds.length} 票；请由目的仓账号在独立仓库端扫描 OUL，系统会自动限定本 PZ 并逐票清点。</span></div>
+    <span className="status-pill off">等待目的仓办理</span>
   </div>;
 }
 

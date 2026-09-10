@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Form, Link, useNavigation } from "react-router";
 import type { Route } from "./+types/warehouse.packing";
 import { ActionToast } from "../components/ActionToast";
+import { Modal } from "../components/Modal";
 import { QueryPagination } from "../components/QueryPagination";
 import { requireSessionUser } from "../lib/auth.server";
 import { d1Placeholders } from "../lib/d1-bindings";
@@ -18,6 +19,10 @@ type PackingRow = {
   order_number: string;
   business_type: "ftl" | "ltl";
   customer_name: string;
+  cargo_description: string;
+  pieces: number;
+  gross_weight_kg: number;
+  volume_cbm: number;
   shipment_id: string;
   source_package_count: number;
   inbound_weight_kg: number;
@@ -81,7 +86,8 @@ export async function loader({ request }: Route.LoaderArgs) {
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const page = Math.min(requestedPage, pageCount);
   const rows = await env.DB.prepare(`${receivedCte}
-    SELECT o.id order_id,o.order_number,o.business_type,c.name customer_name,received.shipment_id,
+    SELECT o.id order_id,o.order_number,o.business_type,c.name customer_name,
+      o.cargo_description,o.pieces,o.gross_weight_kg,o.volume_cbm,received.shipment_id,
       received.source_package_count,received.inbound_weight_kg,received.location_names,
       job.id job_id,job.packing_mode,job.outbound_package_count,job.total_weight_kg,
       job.total_volume_cbm,job.status job_status,job.transport_batch_id,job.dispatch_id
@@ -290,14 +296,22 @@ function PackingRowView({ row, warehouseId, busy }: { row: PackingRow; warehouse
       <td><span className={`status-pill ${row.job_status === "labelled" ? "success" : ""}`}>{packingStatus(row.job_status)}</span></td>
       <td><strong>{next}</strong></td>
       <td><div className="button-row">
-        {!row.job_id && <button type="button" className="primary" onClick={() => setEditing(true)}>开始打包</button>}
+        {!row.job_id && <><button type="button" className="primary" onClick={() => setEditing(true)}>开始打包</button><Modal
+          title={`最终包装登记 · ${row.order_number}`}
+          isOpen={editing}
+          onOpenChange={setEditing}
+          size="xwide"
+          dialogClassName="warehouse-packing-modal"
+          guardFormChanges
+          closeSignal={row.job_id}
+          initialFocusSelector="select"
+        ><PackingForm row={row} busy={busy} onCancel={() => setEditing(false)}/></Modal></>}
         {row.job_status === "generated" && <><Link className="secondary" target="_blank" to={`/warehouse/packing-labels?warehouseId=${encodeURIComponent(warehouseId)}&jobId=${encodeURIComponent(row.job_id!)}`}>查看 / 打印 OUL</Link><Form method="post"><input type="hidden" name="intent" value="confirm_labelled"/><input type="hidden" name="jobId" value={row.job_id ?? ""}/><button className="primary" disabled={busy}>确认全部标签已贴完</button></Form></>}
         {row.job_status === "labelled" && row.business_type === "ftl" && <Link className="primary" to={`/warehouse/outbound?warehouseId=${encodeURIComponent(warehouseId)}&view=create&orderId=${encodeURIComponent(row.order_id)}`}>创建装车任务</Link>}
         {row.job_status === "labelled" && row.business_type === "ltl" && <Link className="primary" to={`/warehouse/consolidation?warehouseId=${encodeURIComponent(warehouseId)}&eligibility=eligible&q=${encodeURIComponent(row.order_number)}`}>查看待配载</Link>}
         {row.job_id && ["generated", "labelled"].includes(row.job_status || "") && <Form method="post"><input type="hidden" name="intent" value="cancel_packing"/><input type="hidden" name="jobId" value={row.job_id}/><button className="text-button" disabled={busy}>重做包装</button></Form>}
       </div></td>
     </tr>
-    {editing && <tr className="warehouse-packing-editor-row"><td colSpan={7}><PackingForm row={row} busy={busy} onCancel={() => setEditing(false)}/></td></tr>}
   </>;
 }
 
@@ -307,9 +321,19 @@ function PackingForm({ row, busy, onCancel }: { row: PackingRow; busy: boolean; 
   const count = mode === "preserve" ? row.source_package_count : Math.min(500, Math.max(1, requestedCount || 1));
   return <Form method="post" className="warehouse-packing-editor">
     <input type="hidden" name="intent" value="create_packing"/><input type="hidden" name="orderId" value={row.order_id}/><input type="hidden" name="outboundPackageCount" value={count}/>
-    <div className="warehouse-packing-plan-head"><div><h3>{row.order_number} · 最终包装方案</h3><p>实测数据按每个最终出仓包裹登记，系统自动计算体积与整票合计。</p></div><div className="button-row"><button type="button" className="secondary" onClick={onCancel}>取消</button><button className="primary" disabled={busy}>{busy ? "正在生成…" : `生成 ${count} 张 OUL`}</button></div></div>
+    <section className="warehouse-packing-cargo-summary" aria-label="本次打包货物信息">
+      <div><span>客户</span><strong>{row.customer_name}</strong></div>
+      <div className="wide"><span>货物</span><strong>{row.cargo_description || "未填写货物描述"}</strong></div>
+      <div><span>入仓包装</span><strong>{row.source_package_count} 包</strong></div>
+      <div><span>商品件数</span><strong>{row.pieces} 件</strong></div>
+      <div><span>申报重量 / 体积</span><strong>{Number(row.gross_weight_kg).toFixed(2)} KG / {Number(row.volume_cbm).toFixed(3)} CBM</strong></div>
+      <div><span>仓库实收重量</span><strong>{Number(row.inbound_weight_kg).toFixed(2)} KG</strong></div>
+      <div><span>当前库位</span><strong>{row.location_names || "库位待定"}</strong></div>
+    </section>
+    <div className="warehouse-packing-plan-head"><div><h3>选择最终包装方式</h3><p>每张订单独立打包；系统按最终包裹逐一生成 OUL，不允许跨订单合包。</p></div></div>
     <div className="form-grid compact warehouse-packing-mode-grid"><label className="field"><span>包装方式 *</span><select name="packingMode" value={mode} onChange={(event) => { const nextMode = event.target.value as typeof mode; setMode(nextMode); setRequestedCount(nextMode === "merge" ? Math.max(1, row.source_package_count - 1) : nextMode === "split" ? row.source_package_count + 1 : row.source_package_count); }}><option value="preserve">保留原包装</option>{row.source_package_count > 1 && <option value="merge">合并包装</option>}<option value="split">拆分包装</option></select></label><label className="field"><span>入仓包装数</span><input value={row.source_package_count} readOnly/></label><label className="field"><span>最终出仓包装数 *</span><input type="number" min={mode === "split" ? row.source_package_count + 1 : 1} max={mode === "merge" ? Math.max(1, row.source_package_count - 1) : 500} value={count} disabled={mode === "preserve"} onChange={(event) => setRequestedCount(Number(event.target.value))}/></label><label className="field"><span>包装备注</span><input name="notes" placeholder="选填，例如加固、换箱"/></label></div>
     <div className="warehouse-package-measure-list"><div className="warehouse-package-measure-head"><span>包裹</span><span>实重 KG</span><span>长 CM</span><span>宽 CM</span><span>高 CM</span><span>体积</span></div>{Array.from({ length: count }, (_, index) => <div className="warehouse-package-measure-row" key={index}><strong>#{String(index + 1).padStart(3, "0")}</strong><input name={`weightKg_${index}`} type="number" min="0.001" step="0.001" placeholder="必填" required/><input name={`lengthCm_${index}`} type="number" min="0.1" step="0.1" placeholder="必填" required/><input name={`widthCm_${index}`} type="number" min="0.1" step="0.1" placeholder="必填" required/><input name={`heightCm_${index}`} type="number" min="0.1" step="0.1" placeholder="必填" required/><span>自动计算</span></div>)}</div>
+    <footer className="warehouse-packing-modal-actions"><span>提交后生成 {count} 张 OUL；打印并贴标后再确认完成。</span><div className="button-row"><button type="button" className="secondary" onClick={onCancel}>取消</button><button className="primary" disabled={busy}>{busy ? "正在生成…" : `确认打包并生成 ${count} 张 OUL`}</button></div></footer>
   </Form>;
 }
 

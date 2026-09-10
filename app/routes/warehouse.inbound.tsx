@@ -1514,7 +1514,6 @@ export default function WarehouseInbound({
         <section className={`alert ${loaderData.batchContext.error ? "error" : "info"}`} aria-label="PZ 配载单收货范围">
           <strong>{loaderData.batchContext.number} · 整批收货范围</strong>
           <span>{loaderData.batchContext.error || `已锁定 ${loaderData.batchContext.orderIds.length} 票挂载订单（${loaderData.batchContext.orderNumbers.join("、")} ）。每次仍只调出一个原 OUL 货物码，逐票核对、入库和留痕。`}</span>
-          {loaderData.returnTo && <Link to={loaderData.returnTo}>返回配载单</Link>}
         </section>
       )}
       {canOperate && !loaderData.locations.length && (

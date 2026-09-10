@@ -88,10 +88,6 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
           <Form action="/logout?site=admin" method="post">
             <button className="sidebar-logout" title="退出登录" aria-label="退出登录"><AppIcon name="logout" size={17} /></button>
           </Form>
-          {can("warehouse.view") && <Form action="/switch-site" method="post" className="sidebar-warehouse-switch">
-            <input type="hidden" name="target" value="warehouse" />
-            <button title="使用当前账号进入已绑定仓库"><AppIcon name="warehouse" size={15} />登录仓库管理</button>
-          </Form>}
         </div>
       </aside>
       <div className="admin-main-column">

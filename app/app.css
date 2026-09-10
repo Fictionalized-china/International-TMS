@@ -2768,13 +2768,32 @@ td small {
 }
 .outbound-order-filter-form {
   display: grid;
-  grid-template-columns: minmax(280px, 1.8fr) minmax(150px, .65fr) minmax(170px, .72fr) auto;
+  grid-template-columns: minmax(280px, 1.8fr) minmax(170px, .72fr) auto;
   gap: 10px;
   align-items: end;
   padding: 11px 12px;
   border-top: 1px solid #dbe4ed;
   border-bottom: 1px solid #dbe4ed;
   background: #f8fafc;
+}
+.outbound-order-type-tabs {
+  padding: 10px 12px 0 !important;
+}
+.outbound-order-type-tabs > a span {
+  display: inline-grid;
+  min-width: 22px;
+  min-height: 20px;
+  margin-left: 7px;
+  padding: 0 6px;
+  place-items: center;
+  border-radius: 999px;
+  background: #edf3f8;
+  color: #45647d;
+  font-size: 11px;
+}
+.outbound-order-type-tabs > a.active span {
+  background: rgba(255, 255, 255, .16);
+  color: #fff;
 }
 .outbound-order-filter-form label {
   display: grid;
@@ -5671,15 +5690,35 @@ label:not(:has(> span:first-child .required-mark)):not(:has(> span:first-child >
 .warehouse-packing-list td:last-child form {
   margin: 0;
 }
-.warehouse-packing-editor-row > td {
-  padding: 0 !important;
-  background: #f7fafc;
-}
 .warehouse-packing-editor {
   display: grid;
   gap: 12px;
-  padding: 14px;
-  border-left: 3px solid var(--brand);
+  min-width: 0;
+}
+.warehouse-packing-modal {
+  width: min(1180px, calc(100vw - 48px));
+}
+.warehouse-packing-modal .modal-body {
+  padding: 14px 16px 16px;
+}
+.warehouse-packing-cargo-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  border: 1px solid #d8e2eb;
+  background: #d8e2eb;
+}
+.warehouse-packing-cargo-summary > div {
+  min-width: 0;
+  min-height: 56px;
+  padding: 9px 11px;
+  background: #f7faff;
+}
+.warehouse-packing-cargo-summary > div.wide { grid-column: span 2; }
+.warehouse-packing-cargo-summary span,
+.warehouse-packing-cargo-summary strong { display: block; }
+.warehouse-packing-cargo-summary span { color: var(--muted); font-size: 11px; }
+.warehouse-packing-cargo-summary strong { margin-top: 4px; overflow-wrap: anywhere; }
 }
 .warehouse-packing-plan-head {
   display: flex;
@@ -5710,6 +5749,8 @@ label:not(:has(> span:first-child .required-mark)):not(:has(> span:first-child >
   height: 36px;
 }
 .warehouse-package-measure-list {
+  max-height: min(38vh, 420px);
+  overflow: auto;
   border: 1px solid #d8e2eb;
   background: #fff;
 }
@@ -5742,10 +5783,27 @@ label:not(:has(> span:first-child .required-mark)):not(:has(> span:first-child >
   color: var(--muted);
   font-size: 11px;
 }
+.warehouse-packing-modal-actions {
+  position: sticky;
+  bottom: -16px;
+  z-index: 2;
+  min-height: 52px;
+  margin: 0 -16px -16px;
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  color: var(--muted);
+  border-top: 1px solid #d8e2eb;
+  background: #fff;
+}
+.warehouse-packing-modal-actions .primary { min-width: 230px; }
 @media (max-width: 900px) {
   .warehouse-packing-filter form,
   .warehouse-packing-mode-grid { grid-template-columns: 1fr 1fr; }
   .warehouse-packing-plan-head { align-items: stretch; flex-direction: column; }
+  .warehouse-packing-cargo-summary { grid-template-columns: 1fr 1fr; }
 }
 
 /* Final outbound packing: compact order-owned OUL workflow. */
@@ -20117,7 +20175,7 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   animation: linear-drawer-fade .16s ease-out;
 }
 .linear-order-drawer {
-  width: min(760px, 96vw);
+  width: min(1040px, 96vw);
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -20152,8 +20210,9 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 }
 .linear-drawer-head > button:hover,
 .linear-drawer-head > button:focus-visible { color: var(--ink); background: #e3e9ed; outline: 2px solid #bdd2e7; outline-offset: 2px; }
-.linear-drawer-tabs { padding: 0 18px; display: flex; border-bottom: 1px solid var(--line); }
+.linear-drawer-tabs { padding: 0 18px; display: flex; flex-wrap: nowrap; gap: 6px; overflow-x: auto; border-bottom: 1px solid var(--line); }
 .linear-drawer-tabs button {
+  flex: 0 0 auto;
   min-height: 39px;
   padding: 0 12px;
   color: #8393a2;
@@ -31003,6 +31062,19 @@ html[data-motion="off"] *::after {
 .batch-assignment-summary > div:last-child { border-right: 0; }
 .batch-assignment-summary span { display: block; margin-bottom: 3px; color: #718295; font-size: 10px; }
 .batch-assignment-summary b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.batch-assignment-orders { min-width: 0; border: 1px solid #d9e4ee; background: #fff; }
+.batch-assignment-orders > header { min-height: 45px; padding: 7px 10px; display: flex; align-items: center; justify-content: space-between; gap: 12px; background: #f7faff; border-bottom: 1px solid #d9e4ee; }
+.batch-assignment-orders > header strong,
+.batch-assignment-orders > header span { display: block; }
+.batch-assignment-orders > header span { margin-top: 2px; color: var(--muted); font-size: 10px; }
+.batch-assignment-orders > header > b { color: var(--brand); }
+.batch-assignment-orders .table-wrap { max-height: 250px; overflow: auto; }
+.batch-assignment-orders table { min-width: 760px; margin: 0; }
+.batch-assignment-orders th,
+.batch-assignment-orders td { padding: 7px 9px; vertical-align: top; }
+.batch-assignment-orders td b,
+.batch-assignment-orders td small { display: block; }
+.batch-assignment-orders td small { margin-top: 2px; color: var(--muted); }
 .batch-assignment-rule { margin: 0; }
 .batch-assignment-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .batch-assignment-actions .primary { min-width: 210px; }

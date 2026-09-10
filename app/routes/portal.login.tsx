@@ -67,6 +67,6 @@ export default function PortalLogin({ loaderData, actionData }: Route.ComponentP
     <div className="brand-mark portal-mark">OT</div><p className="eyebrow">OULING CUSTOMER PORTAL</p><h1>客户门户</h1><p className="muted">查询业务资料并与欧凌国际物流协作</p>
     {actionData?.error && <div className="alert error">{actionData.error}</div>}
     <Form method="post" className="stack"><input type="hidden" name={PORTAL_CONTEXT_PARAM} value={contextId} /><label className="field"><span>邮箱</span><input name="email" type="email" defaultValue={actionData?.email} required autoComplete="email" /></label><label className="field"><span>密码</span><input name="password" type="password" required autoComplete="current-password" /></label><button className="primary portal-primary" disabled={busy}>{busy ? "正在登录…" : "进入客户门户"}</button></Form>
-    <div className="portal-auth-links"><Link className="portal-register-entry" to={portalContextualPath("/portal/register", contextId)}>注册客户账号</Link><a className="site-switch" href="/login">内部员工登录 →</a></div>
+    <div className="portal-auth-links"><Link className="portal-register-entry" to={portalContextualPath("/portal/register", contextId)}>注册客户账号</Link></div>
   </section></main>;
 }

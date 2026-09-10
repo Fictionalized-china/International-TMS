@@ -27,6 +27,7 @@ import {
 } from "../lib/order-workload-view";
 import { orderDetailQueueHref, orderQueueContextFromList } from "../lib/order-queue-navigation";
 import { ordinaryOrderBatchExclusionSql } from "../lib/batch-order-list";
+import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 
 type OrderRow = {
   id: string;
@@ -80,8 +81,22 @@ type BatchAssignmentRow = {
   updated_at: string;
 };
 
+type BatchMountedOrder = {
+  batch_id: string;
+  order_id: string;
+  order_number: string;
+  customer_name: string;
+  cargo_description: string;
+  pieces: number;
+  gross_weight_kg: number;
+  volume_cbm: number;
+  current_step_name: string | null;
+  current_assignee_name: string | null;
+};
+
 type BatchAssignmentViewRow = BatchAssignmentRow & {
   initialResponsibilityRestrictions: BatchInitialResponsibilityRestrictions;
+  mountedOrders: BatchMountedOrder[];
 };
 
 type SupervisorWorkItem =
@@ -353,6 +368,24 @@ export async function loader({ request }: Route.LoaderArgs) {
         { results: [] as OrganizationAssigneeMember[] },
       ];
   const total = countRow?.count || 0;
+  const mountedOrderRows = canApproveBatches && batchAssignmentRows.results.length
+    ? (await Promise.all(chunkD1Values(batchAssignmentRows.results.map((batch) => batch.id), 1).map((batchIds) => env.DB.prepare(
+        `SELECT bo.batch_id,o.id order_id,o.order_number,c.name customer_name,o.cargo_description,
+                o.pieces,o.gross_weight_kg,o.volume_cbm,o.current_step_name,
+                current_owner.display_name current_assignee_name
+           FROM transport_batch_orders bo
+           JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
+           JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
+           LEFT JOIN users current_owner ON current_owner.id=o.current_assignee_user_id
+          WHERE bo.organization_id=? AND bo.status!='removed'
+            AND bo.batch_id IN (${d1Placeholders(batchIds.length)})
+          ORDER BY bo.batch_id,o.order_number`,
+      ).bind(current.organizationId, ...batchIds).all<BatchMountedOrder>()))).flatMap((result) => result.results)
+    : [];
+  const mountedOrdersByBatch = mountedOrderRows.reduce<Record<string, BatchMountedOrder[]>>((groups, order) => {
+    (groups[order.batch_id] ||= []).push(order);
+    return groups;
+  }, {});
   const initialResponsibilityRestrictionsByBatch = canApproveBatches
     ? await loadBatchesInitialResponsibilityRestrictions(
         env.DB,
@@ -367,6 +400,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     initialResponsibilityRestrictions:
       initialResponsibilityRestrictionsByBatch[batch.id]
       ?? buildBatchInitialResponsibilityRestrictions([]),
+    mountedOrders: mountedOrdersByBatch[batch.id] || [],
   }));
   const orders = rows.results.map((order) => ({
     ...order,
@@ -675,6 +709,18 @@ function SupervisorUnifiedQueue({ items, operationMembers, documentMembers, pend
           <div><span>挂载范围</span><b>{selected.order_count} 票订单</b></div>
           <div><span>线路</span><b>{selected.origin_location} → {selected.destination_location}</b></div>
         </div>
+        <section className="batch-assignment-orders" aria-label="配载单挂载订单明细">
+          <header><div><strong>挂载订单明细</strong><span>确认货物、客户、当前节点与原负责人后，再统一分配整批负责人。</span></div><b>{selected.mountedOrders.length} 票</b></header>
+          <div className="table-wrap"><table>
+            <thead><tr><th>订单 / 客户</th><th>货物</th><th>件数 / 重量 / 体积</th><th>当前节点 / 原负责人</th></tr></thead>
+            <tbody>{selected.mountedOrders.map((order) => <tr key={order.order_id}>
+              <td><b>{order.order_number}</b><small>{order.customer_name}</small></td>
+              <td><b>{order.cargo_description || "未填写货物描述"}</b></td>
+              <td><b>{order.pieces} 件</b><small>{Number(order.gross_weight_kg).toFixed(2)} KG · {Number(order.volume_cbm).toFixed(3)} CBM</small></td>
+              <td><b>{order.current_step_name || "待同步"}</b><small>{order.current_assignee_name || "待分配"}</small></td>
+            </tr>)}</tbody>
+          </table></div>
+        </section>
         <div className="alert info batch-assignment-rule">系统按每票订单锁定的工作流快照识别未完成操作/单证职责。可以选择挂载订单现有负责人，也可以选择其他合格人员；提交后，两人分别统一接管整张配载单的操作与单证职责。</div>
         {responsibilityConfigurationErrors.length > 0
           ? <div className="alert error" role="alert"><strong>工作流配置阻断：</strong>{responsibilityConfigurationErrors.join("；")}</div>
