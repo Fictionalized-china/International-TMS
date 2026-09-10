@@ -1251,13 +1251,13 @@ function BlockedLoadingDocumentRemediation({inspection,reasons,pendingHref,canOp
     <div className="panel-header"><div><h2>暂不能创建装车任务</h2><p>{stageError?"当前未到冻结工作流的装车办理节点；本页只展示已有信息，进入目标节点后再补充文件或创建任务。":unresolvedRequired.length?"请在当前页面补齐以下必需文件；上传并确认后系统立即重新核验装车条件。":"文件条件已经满足，仍需处理下列其他装车条件。"}</p></div><span className="status-pill warning">待补条件</span></div>
     {!stageError&&unresolvedRequired.length>0&&<div className="outbound-blocked-document-summary"><strong>需要补充或确认以下文件</strong><span>{unresolvedRequired.map(document=>`${document.orderNumber} ${document.name}`).join("、")}</span></div>}
     <ul>{reasons.map(reason=><li key={reason}>{reason}</li>)}</ul>
-    {remediationTargets.length>0&&<div className="outbound-remediation-portals" aria-label="阻断处理指引">
+    {remediationTargets.length>0&&<div className="outbound-remediation-portals" aria-label="阻断处理入口">
       {remediationTargets.map(target=><article key={target.key}>
         <div><strong>{target.title}</strong><span>{target.hint}</span></div>
-        <span className="status-pill off">由对应岗位在管理端办理</span>
+        <Link className="secondary" to={target.href} target="_blank" rel="noreferrer">打开管理端处理</Link>
       </article>)}
       <div className="outbound-remediation-recheck">
-        <span>对应岗位处理完成后，仓库人员留在本端重新核验即可；本页不跨端跳转。</span>
+        <span>管理端会在新标签打开；处理完成后无需重复查找订单，回到本页重新核验即可。</span>
         <Link className="primary warehouse-primary" to={retryHref} reloadDocument>已处理，重新核验</Link>
       </div>
     </div>}

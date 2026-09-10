@@ -5719,7 +5719,6 @@ label:not(:has(> span:first-child .required-mark)):not(:has(> span:first-child >
 .warehouse-packing-cargo-summary strong { display: block; }
 .warehouse-packing-cargo-summary span { color: var(--muted); font-size: 11px; }
 .warehouse-packing-cargo-summary strong { margin-top: 4px; overflow-wrap: anywhere; }
-}
 .warehouse-packing-plan-head {
   display: flex;
   justify-content: space-between;
