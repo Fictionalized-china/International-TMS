@@ -2046,7 +2046,7 @@ function BatchDocumentWorkbench({batchId,orders,visibleOrders,orderPagination,ba
                   <input type="hidden" name="orderId" value={order.order_id}/>
                   <input type="hidden" name="documentCategory" value={requirement.code}/>
                   <input type="hidden" name="documentDescription" value={requirement.name}/>
-                  <label className="primary batch-order-file-picker" title="选择文件后自动上传"><span>{current?.review_status==="rejected"?"重新选择":"选择并上传"}</span><input type="file" name="attachment" aria-label={`选择并自动上传${requirement.name}`} required disabled={busy} onChange={event=>{if(event.currentTarget.files?.length)event.currentTarget.form?.requestSubmit()}}/></label>
+                  <label className="primary batch-order-file-picker" title="选择文件后自动上传"><span>{current?.review_status==="rejected"?"重新选择":"选择并上传"}</span><input type="file" name="attachment" aria-label={`选择并自动上传${requirement.name}`} disabled={busy} onChange={event=>{if(event.currentTarget.files?.length)event.currentTarget.form?.requestSubmit()}}/></label>
                 </Form>}
                 {manageDocuments&&current&&current.review_status!=="archived"&&(privileged||current.uploaded_by_user_id!==currentUserId)&&<Form method="post" className="batch-order-file-review-action">
                   <input type="hidden" name="intent" value="batch_order_document_review"/>
