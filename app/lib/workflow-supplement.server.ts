@@ -1,6 +1,15 @@
 import { env } from "cloudflare:workers";
 import type { OrderModuleCode } from "./order-modules";
-import { orderDocumentPlacements } from "./order-documents";
+import {
+  maxInlineOrderDocumentBytes,
+  orderDocumentPlacements,
+  orderDocumentTypeLabel,
+} from "./order-documents";
+import {
+  currentStageLoadingDocumentRequirements,
+} from "./loading-document-requirements";
+import { loadOrderLoadingDocumentRequirements } from "./loading-document-requirements.server";
+import { orderDocumentSupplementNotificationStatement } from "./internal-notifications.server";
 import { loadOrderModuleWorkflowFields } from "./workflow-fields.server";
 import { workflowFieldKeyCandidates } from "./workflow-field-runtime";
 
@@ -41,6 +50,23 @@ type OpenWorkflowSupplementTask = {
   field_key:string;
   field_label:string;
 };
+
+type SupplementDocumentTask = OpenWorkflowSupplementTask & {
+  task_kind:"supplement"|"audit_only";
+  customer_id:string;
+  salesperson_user_id:string|null;
+};
+
+const supplementDocumentContentTypes=new Set([
+  "application/pdf",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+]);
 
 export async function inspectWorkflowFieldPolicyImpact(
   workflowId:string,
@@ -191,7 +217,94 @@ export async function synchronizeWorkflowSupplementTasks(input:{
       else created+=changes;
     }
   }
+  if (orderDocumentPlacements.some((item)=>
+    item.moduleCode===input.moduleCode&&item.fieldKey===input.fieldKey,
+  )) {
+    for (const candidate of missing) {
+      await orderDocumentSupplementNotificationStatement(env.DB,{
+        organizationId:input.organizationId,
+        orderId:candidate.order_id,
+        fieldLabel:input.fieldLabel,
+        actorUserId:input.actorUserId,
+        now,
+      }).run();
+    }
+  }
   return { created,cancelled:0,autoCompleted };
+}
+
+export async function ensureMissingLoadingDocumentSupplements(input:{
+  organizationId:string;
+  orderIds:readonly string[];
+  actorUserId:string|null;
+}) {
+  const orderIds=[...new Set(input.orderIds.filter(Boolean))];
+  if (!orderIds.length) return {created:0,autoCompleted:0,notified:0};
+  const requirements=await loadOrderLoadingDocumentRequirements(
+    input.organizationId,orderIds,
+  );
+  const now=new Date().toISOString();
+  let created=0,autoCompleted=0,notified=0;
+  for (const group of requirements) {
+    for (const requirement of currentStageLoadingDocumentRequirements(group.documents)) {
+      if (!requirement.isRequired) continue;
+      const snapshot=await env.DB.prepare(
+        `SELECT wi.id instance_id,wi.workflow_id,f.step_key target_step_key
+         FROM transport_orders o
+         JOIN workflow_instances wi
+           ON wi.id=o.workflow_instance_id AND wi.organization_id=o.organization_id AND wi.order_id=o.id
+         JOIN workflow_instance_fields f
+           ON f.instance_id=wi.id AND f.module_code=? AND f.field_key=?
+            AND f.is_active=1 AND f.is_required=1
+         WHERE o.organization_id=? AND o.id=?`,
+      ).bind(
+        requirement.moduleCode,requirement.fieldKey,input.organizationId,group.orderId,
+      ).first<{instance_id:string;workflow_id:string;target_step_key:string}>();
+      if (!snapshot) continue;
+      const present=await workflowSupplementFieldIsPresent({
+        organizationId:input.organizationId,
+        orderId:group.orderId,
+        targetStepKey:snapshot.target_step_key,
+        moduleCode:requirement.moduleCode,
+        fieldKey:requirement.fieldKey,
+      });
+      if (present) {
+        const completed=await env.DB.prepare(
+          `UPDATE workflow_supplement_tasks
+           SET status='completed',resolution_note='系统检测到必传文件已经补齐，任务自动完成。',
+             completed_by_user_id=?,completed_at=?,updated_at=?
+           WHERE organization_id=? AND instance_id=? AND module_code=? AND field_key=? AND status='open'`,
+        ).bind(
+          input.actorUserId,now,now,input.organizationId,snapshot.instance_id,
+          requirement.moduleCode,requirement.fieldKey,
+        ).run();
+        autoCompleted+=Number(completed.meta?.changes||0);
+        continue;
+      }
+      const inserted=await env.DB.prepare(
+        `INSERT OR IGNORE INTO workflow_supplement_tasks(
+          id,organization_id,workflow_id,instance_id,order_id,target_step_key,module_code,
+          field_key,field_label,task_kind,status,reason,created_by_user_id,created_at,updated_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,'supplement','open',?,?,?,?)`,
+      ).bind(
+        crypto.randomUUID(),input.organizationId,snapshot.workflow_id,snapshot.instance_id,
+        group.orderId,snapshot.target_step_key,requirement.moduleCode,requirement.fieldKey,
+        requirement.name,
+        "装车或配载资料检查发现必传文件缺失；订单节点不回退，请原业务员通过补录门户补齐。",
+        input.actorUserId,now,now,
+      ).run();
+      created+=Number(inserted.meta?.changes||0);
+      const notification=await orderDocumentSupplementNotificationStatement(env.DB,{
+        organizationId:input.organizationId,
+        orderId:group.orderId,
+        fieldLabel:requirement.name,
+        actorUserId:input.actorUserId,
+        now,
+      }).run();
+      notified+=Number(notification.meta?.changes||0);
+    }
+  }
+  return {created,autoCompleted,notified};
 }
 
 export async function workflowSupplementFieldIsPresent(input:{
@@ -279,4 +392,86 @@ export async function completeWorkflowSupplementTask(input:{
     input.actorUserId,input.resolutionNote.trim(),now,now,input.taskId,input.organizationId,input.orderId,
   ).run();
   if (!Number(updated.meta?.changes||0)) throw new Error("补录任务不存在或已经处理");
+}
+
+export async function uploadWorkflowSupplementDocument(input:{
+  organizationId:string;
+  orderId:string;
+  taskId:string;
+  actorUserId:string;
+  allowSystemOverride:boolean;
+  file:File;
+}) {
+  const task=await env.DB.prepare(
+    `SELECT t.instance_id,t.target_step_key,t.module_code,t.field_key,t.field_label,t.task_kind,
+       o.customer_id,COALESCE(q.salesperson_user_id,o.salesperson_user_id) salesperson_user_id
+     FROM workflow_supplement_tasks t
+     JOIN transport_orders o ON o.id=t.order_id AND o.organization_id=t.organization_id
+     LEFT JOIN quotations q ON q.id=o.quotation_id AND q.organization_id=o.organization_id
+     WHERE t.id=? AND t.organization_id=? AND t.order_id=? AND t.status='open'`,
+  ).bind(
+    input.taskId,input.organizationId,input.orderId,
+  ).first<SupplementDocumentTask>();
+  if (!task) throw new Error("补录任务不存在或已经处理");
+  if (task.task_kind!=="supplement") throw new Error("该任务仅允许审计复核，不能补传文件");
+  if (!input.allowSystemOverride&&task.salesperson_user_id!==input.actorUserId) {
+    throw new Error("该补录入口仅向本订单绑定的业务员开放");
+  }
+  const placement=orderDocumentPlacements.find((item)=>
+    item.moduleCode===task.module_code&&item.fieldKey===task.field_key,
+  );
+  if (!placement) throw new Error("该补录任务不是文件任务，不能在此上传");
+  if (!(input.file instanceof File)||input.file.size<=0) throw new Error("请选择需要补录的文件");
+  if (input.file.size>maxInlineOrderDocumentBytes||!supplementDocumentContentTypes.has(input.file.type)) {
+    throw new Error("仅支持 PDF、Word、Excel 和图片；单个文件不能超过 1.2MB");
+  }
+  const now=new Date().toISOString();
+  const attachmentId=crypto.randomUUID();
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO order_attachments(
+        id,organization_id,order_id,customer_id,file_name,content_type,size_bytes,data_url,
+        uploaded_by_user_id,source,created_at
+       ) VALUES(?,?,?,?,?,?,?,?,?,'admin',?)`,
+    ).bind(
+      attachmentId,input.organizationId,input.orderId,task.customer_id,input.file.name,
+      input.file.type,input.file.size,await supplementFileToDataUrl(input.file),input.actorUserId,now,
+    ),
+    env.DB.prepare(
+      `INSERT INTO order_document_metadata(
+        attachment_id,organization_id,order_id,document_category,description,public_to_customer,
+        review_status,reviewed_by_user_id,reviewed_at,updated_at
+       ) VALUES(?,?,?,?,?,0,'approved',NULL,?,?)`,
+    ).bind(
+      attachmentId,input.organizationId,input.orderId,placement.documentCode,
+      orderDocumentTypeLabel(placement.documentCode),now,now,
+    ),
+  ]);
+  await completeWorkflowSupplementTask({
+    organizationId:input.organizationId,
+    orderId:input.orderId,
+    taskId:input.taskId,
+    actorUserId:input.actorUserId,
+    resolutionNote:"缺失文件已通过补录门户上传，系统自动销项。",
+  });
+  await env.DB.prepare(
+    `UPDATE internal_notifications
+     SET is_read=1,read_at=COALESCE(read_at,?)
+     WHERE organization_id=? AND user_id=? AND category='order_document_supplement'
+       AND link=? AND is_read=0`,
+  ).bind(
+    now,input.organizationId,task.salesperson_user_id ?? input.actorUserId,
+    `/admin/orders/${encodeURIComponent(input.orderId)}?drawer=supplements`,
+  ).run();
+  return {attachmentId,documentCode:placement.documentCode};
+}
+
+async function supplementFileToDataUrl(file:File) {
+  const bytes=new Uint8Array(await file.arrayBuffer());
+  let binary="";
+  const chunkSize=0x8000;
+  for (let index=0;index<bytes.length;index+=chunkSize) {
+    binary+=String.fromCharCode(...bytes.subarray(index,index+chunkSize));
+  }
+  return `data:${file.type};base64,${btoa(binary)}`;
 }

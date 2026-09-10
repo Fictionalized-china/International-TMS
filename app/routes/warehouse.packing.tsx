@@ -11,6 +11,7 @@ import { valueOf } from "../lib/validation";
 import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
 import { writeAudit } from "../lib/audit.server";
+import { ensureMissingLoadingDocumentSupplements } from "../lib/workflow-supplement.server";
 
 type PackingRow = {
   order_id: string;
@@ -228,6 +229,17 @@ export async function action({ request }: Route.ActionArgs) {
     } catch (error) {
       console.error("confirm packing labels failed", error);
       return { formError: "贴标确认失败，请检查所有最终包装的实重和长宽高后重试" };
+    }
+    try {
+      await ensureMissingLoadingDocumentSupplements({
+        organizationId: user.organizationId,
+        orderIds: [job.order_id],
+        actorUserId: user.userId,
+      });
+    } catch (error) {
+      // Physical packing must remain completed. The consolidation-pool loader
+      // performs the same idempotent reconciliation and will retry delivery.
+      console.error("reconcile packing document supplements failed", error);
     }
     await writeAudit({ request, action: "warehouse.packing.labelled", resourceType: "warehouse_packing_job", resourceId: job.id, organizationId: user.organizationId, actorUserId: user.userId, metadata: { orderId: job.order_id, orderNumber: job.order_number } });
     return { success: job.business_type === "ltl" ? `${job.order_number} 已确认贴标，现已进入待配载池` : `${job.order_number} 已确认贴标，现在可以创建整车装车任务` };

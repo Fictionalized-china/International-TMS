@@ -42,4 +42,10 @@ describe("ordinary order detail navigation", () => {
     expect(permission?.("document_upload", "consignment")).toBe("order.view");
     expect(permission?.("document_upload", null)).toBe("order.manage");
   });
+
+  it("opens only the restricted supplement upload with order.view", () => {
+    const permission = navigationExports.orderDetailActionPermission;
+    expect(permission?.("workflow_supplement_document_upload")).toBe("order.view");
+    expect(permission?.("workflow_supplement_complete")).toBe("order.manage");
+  });
 });

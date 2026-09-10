@@ -43,6 +43,7 @@ import { loadOrdersInitialResponsibilityRestrictions } from "../lib/batch-respon
 import { listActiveOrganizationAssigneeCandidates } from "../lib/organization-assignee.server";
 import { pendingBatchApprovalNotificationStatement } from "../lib/internal-notifications.server";
 import { pzNumber, randomPzSuffix } from "../lib/package-identity";
+import { ensureMissingLoadingDocumentSupplements } from "../lib/workflow-supplement.server";
 
 
 const PAGE_SIZE=10;
@@ -278,6 +279,11 @@ export async function loader({request}:Route.LoaderArgs){
     loadLoadingBatchWorkflowOrders(user.organizationId,orderIds),
     loadLoadingConsolidationWorkflowAccesses(env.DB,user.organizationId,orderIds),
   ]);
+  await ensureMissingLoadingDocumentSupplements({
+    organizationId:user.organizationId,
+    orderIds,
+    actorUserId:user.userId,
+  });
   return{user,warehouse,view,rows:rows.results,options:options.results,batches:batches.results,batchOptions:batchOptions.results,availableBatches:availableBatches.results,batchOrders:batchOrders.results,carriers:carriers.results,carrierVehicles:carrierVehicles.results,carrierDrivers:carrierDrivers.results,borderPorts:routeOptions.results.filter(item=>item.category==="border_port"),customsPlaces:routeOptions.results.filter(item=>item.category==="customs_place"),orderDocumentRequirements,latestRequiredDocuments,loadingWorkflowOrders,loadingStageAccesses,filters,batchFilters,page:safePage,pageSize,pages,total,batchPage:safeBatchPage,batchPages,batchTotal};
 }
 

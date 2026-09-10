@@ -89,7 +89,11 @@ import { reconcileOverseasOrderDeliveryState } from "../lib/overseas-warehouse.s
 import {
   completeWorkflowSupplementTask,
   listOrderSupplementTasks,
+  uploadWorkflowSupplementDocument,
 } from "../lib/workflow-supplement.server";
+import { hasOrderDocumentSystemOverride } from "../lib/order-document-access";
+import { orderDocumentPlacements } from "../lib/order-documents";
+import { synchronizeOrderDocumentsModuleStatus } from "../lib/documents-module-status.server";
 
 type Order = {
   id: string;
@@ -334,7 +338,7 @@ export function canOperateScopedEmbeddedOrderModule(input: {
 export function orderDetailActionPermission(intent: string, moduleCode?: string | null) {
   if (intent === "workflow_version_switch") return "workflow.manage";
   if (moduleCode && orderModuleDefinition(moduleCode)) return "order.view";
-  if (["workflow_action", "expense_direction_control", "cargo_create", "cargo_update"].includes(intent))
+  if (["workflow_action", "expense_direction_control", "cargo_create", "cargo_update", "workflow_supplement_document_upload"].includes(intent))
     return "order.view";
   return "order.manage";
 }
@@ -576,6 +580,8 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
     ).bind(current.organizationId,id).all<WarehouseReceiptSnapshot>(),
   ]);
   const requestUrl = new URL(request.url);
+  const initialDrawerTab: LinearOrderDrawerTab | null =
+    requestUrl.searchParams.get("drawer") === "supplements" ? "supplements" : null;
   const entryPreference = orderEntryPreference(current.positionCode, businessWorkflow?.current_step_key);
   const orderQueueNavigation = readOrderQueueNavigation(requestUrl.searchParams, id);
   const preferenceAvailable = Boolean(entryPreference && workflowFormRows.results.some(
@@ -673,6 +679,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
     modules,
     currentWorkflowTasks,
     supplementTasks,
+    initialDrawerTab,
     workflowVersions: workflowVersions.results,
     workflowSwitchImpact,
     tasks: tasks.results,
@@ -710,6 +717,38 @@ export async function action({ request, params, context }: Route.ActionArgs) {
     orderDetailActionPermission(intent, moduleCode),
   );
   await requireOrderAccess(current, params.orderId);
+  if(intent==="workflow_supplement_document_upload"){
+    const attachment=form.get("attachment");
+    if(!(attachment instanceof File)||attachment.size<=0){
+      return{formError:"请选择需要补录的文件"};
+    }
+    try{
+      const uploaded=await uploadWorkflowSupplementDocument({
+        organizationId:current.organizationId,
+        orderId:params.orderId,
+        taskId:valueOf(form,"taskId"),
+        actorUserId:current.userId,
+        allowSystemOverride:hasOrderDocumentSystemOverride(current),
+        file:attachment,
+      });
+      const now=new Date().toISOString();
+      await synchronizeOrderDocumentsModuleStatus({
+        organizationId:current.organizationId,
+        orderId:params.orderId,
+        actorUserId:current.userId,
+        now,
+        source:"admin_upload",
+      });
+      await writeAudit({
+        request,action:"workflow.supplement.document.upload",resourceType:"transport_order",
+        resourceId:params.orderId,organizationId:current.organizationId,actorUserId:current.userId,
+        metadata:{taskId:valueOf(form,"taskId"),attachmentId:uploaded.attachmentId,documentCode:uploaded.documentCode},
+      });
+      return{success:"缺失文件已上传并自动完成补录任务"};
+    }catch(error){
+      return{formError:error instanceof Error?error.message:"文件补录失败"};
+    }
+  }
   if(intent==="workflow_supplement_complete"){
     try{
       await completeWorkflowSupplementTask({
@@ -964,7 +1003,7 @@ function LinearOrderWorkspace({
   formError?: string;
   documentReviewSignal?: unknown;
 }) {
-  const [drawerTab, setDrawerTab] = useState<LinearOrderDrawerTab | null>(null);
+  const [drawerTab, setDrawerTab] = useState<LinearOrderDrawerTab | null>(data.initialDrawerTab);
   useModalScrollLock(Boolean(drawerTab));
   const order = data.order;
   const currentStepKey = data.businessWorkflow?.current_step_key || "";
@@ -1390,12 +1429,19 @@ function LinearOrderDrawer({
             {data.attachments.map((attachment) => <article key={attachment.id}><div><strong>{attachment.file_name}</strong><span>{new Date(attachment.created_at).toLocaleString("zh-CN")}</span></div><small>{attachment.content_type}<br/>{(attachment.size_bytes / 1024).toFixed(1)} KB</small><a href={`/admin/document-files/order/${attachment.id}`}>下载</a></article>)}
             {!data.attachments.length && <p className="linear-drawer-empty">当前订单暂无文件。</p>}
           </div></section>}
-          {activeTab === "supplements" && <section className="linear-drawer-section"><h3>资料补录 <span>{data.supplementTasks.filter((item)=>item.status==="open").length} 项待办</span></h3><p className="linear-drawer-section-note">工作流规则变化后，已完成节点不会回退；需要补齐或复核的资料集中在此处理并保留审计。</p><div className="linear-drawer-list supplement-task-list">
-            {data.supplementTasks.map((task)=><article key={task.id} className={task.status==="open"?"open":"resolved"}>
+          {activeTab === "supplements" && <section className="linear-drawer-section"><h3>资料补录 <span>{data.supplementTasks.filter((item)=>item.status==="open").length} 项待办</span></h3><p className="linear-drawer-section-note">此入口只展示当前缺件，不重新开放已完成的历史节点。绑定业务员选择文件后会自动上传、通过并销项。</p><div className="linear-drawer-list supplement-task-list">
+            {data.supplementTasks.map((task)=>{
+              const documentPlacement=orderDocumentPlacements.find((item)=>item.moduleCode===task.module_code&&item.fieldKey===task.field_key);
+              const canUploadMissingDocument=task.status==="open"&&task.task_kind==="supplement"&&Boolean(documentPlacement)&&(
+                data.current.userId===order.salesperson_user_id||hasOrderDocumentSystemOverride(data.current)
+              );
+              return <article key={task.id} className={task.status==="open"?"open":"resolved"}>
               <div><strong>{task.field_label}</strong><span>{task.target_step_name||task.target_step_key} · {task.task_kind==="audit_only"?"审计补录":"资料补录"}</span><p>{task.reason}</p>{task.resolution_note&&<p>处理说明：{task.resolution_note}</p>}</div>
               <small>{task.status==="open"?"待处理":task.status==="completed"?`已完成 · ${task.completed_by_name||"系统"}`:"已关闭"}<br/>{new Date(task.created_at).toLocaleString("zh-CN")}</small>
-              {task.status==="open"&&!readOnly&&<Form method="post" className="supplement-task-form"><input type="hidden" name="intent" value="workflow_supplement_complete"/><input type="hidden" name="taskId" value={task.id}/><input name="resolutionNote" aria-label={`${task.field_label}补录说明`} placeholder="填写补录/复核说明" minLength={2} required/><div><Link className="text-button" to={`/admin/orders/${order.id}/modules/${task.module_code}`}>查看办理位置</Link><button className="text-button">完成补录</button></div></Form>}
-            </article>)}
+              {canUploadMissingDocument&&<Form method="post" encType="multipart/form-data" className="supplement-document-upload"><input type="hidden" name="intent" value="workflow_supplement_document_upload"/><input type="hidden" name="taskId" value={task.id}/><label><span>选择{task.field_label}</span><input type="file" name="attachment" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" required onChange={(event)=>{if(event.currentTarget.files?.length)event.currentTarget.form?.requestSubmit();}}/></label><small>选择后自动上传，无需返回原节点</small></Form>}
+              {task.status==="open"&&!documentPlacement&&!readOnly&&<Form method="post" className="supplement-task-form"><input type="hidden" name="intent" value="workflow_supplement_complete"/><input type="hidden" name="taskId" value={task.id}/><input name="resolutionNote" aria-label={`${task.field_label}补录说明`} placeholder="填写补录/复核说明" minLength={2} required/><div><Link className="text-button" to={`/admin/orders/${order.id}/modules/${task.module_code}`}>查看办理位置</Link><button className="text-button">完成补录</button></div></Form>}
+              {task.status==="open"&&Boolean(documentPlacement)&&!canUploadMissingDocument&&<p className="supplement-task-restricted">待本订单绑定业务员补传，其他岗位仅可查看。</p>}
+            </article>})}
             {!data.supplementTasks.length&&<p className="linear-drawer-empty">当前订单没有资料补录任务。</p>}
           </div></section>}
           {activeTab === "history" && <>

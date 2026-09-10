@@ -166,6 +166,46 @@ export function warehouseBatchReadyNotificationStatement(db:D1Database,input:{
   );
 }
 
+export function orderDocumentSupplementNotificationStatement(db:D1Database,input:{
+  organizationId:string;
+  orderId:string;
+  fieldLabel:string;
+  actorUserId:string|null;
+  now:string;
+}) {
+  const link=`/admin/orders/${encodeURIComponent(input.orderId)}?drawer=supplements`;
+  return db.prepare(
+    `INSERT INTO internal_notifications(
+      id,organization_id,user_id,category,severity,title,message,link,requires_ack,
+      is_read,created_by_user_id,created_at
+     )
+     SELECT lower(hex(randomblob(16))),o.organization_id,
+       COALESCE(q.salesperson_user_id,o.salesperson_user_id),
+       'order_document_supplement','warning','订单缺少必传资料：'||o.order_number,
+       '订单 '||o.order_number||' 缺少“'||?||'”，请进入补录门户上传；订单当前节点不会回退。',
+       ?,0,0,?,?
+     FROM transport_orders o
+     LEFT JOIN quotations q ON q.id=o.quotation_id AND q.organization_id=o.organization_id
+     JOIN users u ON u.id=COALESCE(q.salesperson_user_id,o.salesperson_user_id) AND u.status='active'
+     WHERE o.organization_id=? AND o.id=?
+       AND EXISTS(
+         SELECT 1 FROM memberships m
+         WHERE m.organization_id=o.organization_id
+           AND m.user_id=COALESCE(q.salesperson_user_id,o.salesperson_user_id)
+           AND m.status='active'
+       )
+       AND NOT EXISTS(
+         SELECT 1 FROM internal_notifications n
+         WHERE n.organization_id=o.organization_id
+           AND n.user_id=COALESCE(q.salesperson_user_id,o.salesperson_user_id)
+           AND n.category='order_document_supplement' AND n.link=? AND n.is_read=0
+       )`,
+  ).bind(
+    input.fieldLabel,link,input.actorUserId,input.now,
+    input.organizationId,input.orderId,link,
+  );
+}
+
 export async function broadcastInternalNotification(input:{
   organizationId:string;
   actorUserId:string;

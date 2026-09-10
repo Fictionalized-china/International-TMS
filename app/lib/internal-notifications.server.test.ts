@@ -54,6 +54,7 @@ import {
   listInternalNotifications,
   loadInternalNotificationSummary,
   markInternalNotification,
+  orderDocumentSupplementNotificationStatement,
   pendingBatchApprovalNotificationStatement,
   warehouseBatchReadyNotificationStatement,
 } from "./internal-notifications.server";
@@ -156,5 +157,18 @@ describe("internal notification delivery",()=>{
     expect(query?.sql).toContain("a.access_level IN ('operator','manager')");
     expect(query?.sql).toContain("warehouse_batch_ready");
     expect(query?.bindings).toContain("/warehouse/outbound?warehouseId=warehouse%201&view=pending&q=PZ-20260907-001");
+  });
+
+  it("routes a missing document notice to the order salesperson supplement portal",async()=>{
+    await orderDocumentSupplementNotificationStatement(database.DB as unknown as D1Database,{
+      organizationId:"org-1",orderId:"order 1",fieldLabel:"合同",
+      actorUserId:"warehouse-1",now:"2026-09-10T00:00:00.000Z",
+    }).run();
+    const query=database.queries.at(-1);
+    expect(query?.sql).toContain("COALESCE(q.salesperson_user_id,o.salesperson_user_id)");
+    expect(query?.sql).toContain("order_document_supplement");
+    expect(query?.sql).toContain("NOT EXISTS");
+    expect(query?.bindings).toContain("/admin/orders/order%201?drawer=supplements");
+    expect(query?.bindings).toContain("合同");
   });
 });
