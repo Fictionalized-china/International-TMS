@@ -12,8 +12,7 @@ export type CustomsModuleAutomationState = {
   blocker: string | null;
 };
 
-const declarationFieldKeys = new Set([
-  "customs_declarations",
+const declarationDetailFieldKeys = new Set([
   "declaration_stage",
   "declaration_status",
   "declaration_number",
@@ -39,18 +38,19 @@ export function customsModuleGateRequirements(
     (field) => field.fieldKey === "customs_declarations",
   );
   const releaseField = fields.find((field) => field.fieldKey === "customs_release");
-  // Module requiredness enables this business area, but must never upgrade a
-  // field configured as optional. The group field is authoritative when it is
-  // present; detail-field requiredness is only a compatibility fallback for
-  // older non-empty snapshots without the group field.
-  const declarationsRequired = legacy || (declarationField
-    ? declarationField.isActive && declarationField.isRequired
-    : fields.some(
-        (field) =>
-          declarationFieldKeys.has(field.fieldKey) &&
-          field.isActive &&
-          field.isRequired,
-      ));
+  // Module requiredness alone must not upgrade optional fields. However, a
+  // required declaration detail cannot be completed without an actual
+  // declaration record, even when the optional group/control field exists.
+  // Treat either an explicitly required group or any required detail as the
+  // declaration gate so summary state and departure validation stay aligned.
+  const declarationsRequired = legacy || Boolean(
+    declarationField?.isActive && declarationField.isRequired,
+  ) || fields.some(
+    (field) =>
+      declarationDetailFieldKeys.has(field.fieldKey) &&
+      field.isActive &&
+      field.isRequired,
+  );
   const releaseRequired = releaseField
     ? releaseField.isActive && releaseField.isRequired
     : legacy;

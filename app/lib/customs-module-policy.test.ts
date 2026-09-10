@@ -70,13 +70,35 @@ describe("deriveCustomsModuleAutomationState", () => {
     })).toMatchObject({ status: "completed", blocker: null });
   });
 
-  it("uses detail fields only as a compatibility fallback when the declaration group is absent", () => {
+  it("requires a declaration when a required detail exists without the declaration group", () => {
     expect(customsModuleGateRequirements([
       field("declaration_number", "required"),
       field("customs_release", "optional"),
     ], { moduleRequired: true })).toEqual({
       declarationsRequired: true,
       releaseRequired: false,
+    });
+  });
+
+  it("requires a declaration when the group is optional but a declaration detail is required", () => {
+    const fields = [
+      field("customs_declarations", "optional"),
+      field("declaration_number", "required"),
+      field("declaring_company", "required"),
+      field("customs_release", "optional"),
+    ];
+
+    expect(customsModuleGateRequirements(fields, { moduleRequired: true }))
+      .toEqual({ declarationsRequired: true, releaseRequired: false });
+    expect(deriveCustomsModuleAutomationState({
+      total: 0,
+      released: 0,
+      fields,
+      moduleRequired: true,
+    })).toMatchObject({
+      status: "in_progress",
+      step: "documents",
+      blocker: "尚未录入有效起运地报关单",
     });
   });
 

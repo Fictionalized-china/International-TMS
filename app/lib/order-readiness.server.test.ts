@@ -314,10 +314,11 @@ describe("order readiness follows the bound workflow field modes", () => {
     expect(result.reasons).toContain("装车与出库冻结工作流配置异常：模块缺少有效办理节点");
   });
 
-  it("requires a visible declaration result when the customs module is required", async () => {
+  it("requires a declaration result when an active declaration detail is required", async () => {
     state.order = baseOrder({ customs_enabled: 1 });
     setFields("customs", [
       field("customs", "customs_declarations", "optional", false, "outbound_transport"),
+      field("customs", "declaration_number", "required", false, "outbound_transport"),
       field("customs", "customs_release", "hidden", false, "outbound_transport"),
       field("customs", "document_commercial_invoice", "hidden", false, "outbound_transport"),
       field("customs", "document_packing_list", "hidden", false, "outbound_transport"),
