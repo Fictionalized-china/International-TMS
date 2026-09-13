@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { Form, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.warehouses";
+import { positionRoleCodeSql } from "../lib/position-role";
 import { Modal } from "../components/Modal";
 import { ConfirmAction } from "../components/ConfirmAction";
 import { ActionToast } from "../components/ActionToast";
@@ -73,9 +74,11 @@ export async function loader({ request }: Route.LoaderArgs) {
       `SELECT u.id,u.display_name,u.email,d.name department_name,
         CASE WHEN EXISTS(
           SELECT 1 FROM memberships m2
-          JOIN membership_roles mr ON mr.membership_id=m2.id
-          JOIN role_permissions rp ON rp.role_id=mr.role_id
-          WHERE m2.organization_id=? AND m2.user_id=u.id AND rp.permission_code='warehouse.view'
+          JOIN positions p2 ON p2.id=m2.position_id AND p2.organization_id=m2.organization_id AND p2.status='active'
+          JOIN roles r2 ON r2.organization_id=m2.organization_id AND r2.code=${positionRoleCodeSql("p2.code")} AND r2.status='active'
+          JOIN role_permissions rp ON rp.role_id=r2.id
+          WHERE m2.organization_id=? AND m2.user_id=u.id AND m2.status='active'
+            AND rp.permission_code='warehouse.view'
         ) THEN 1 ELSE 0 END warehouse_enabled
        FROM users u
        JOIN memberships m ON m.user_id=u.id AND m.organization_id=?

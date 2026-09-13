@@ -5,8 +5,7 @@ import type { Route } from "./+types/admin.loading-detail";
 import { OrderNumberLink } from "../components/EntityNumberLink";
 import { OrganizationAssigneePicker } from "../components/OrganizationAssigneePicker";
 import { ActionToast } from "../components/ActionToast";
-import type { OrganizationAssigneeMember } from "../lib/organization-assignee";
-import { isActiveOrganizationAssigneeForPositions } from "../lib/organization-assignee.server";
+import { isActiveOrganizationAssigneeForPositions, listActiveOrganizationAssignees } from "../lib/organization-assignee.server";
 import { requireSessionUser } from "../lib/auth.server";
 import { writeAudit } from "../lib/audit.server";
 import { synchronizeOrderDocumentsModuleStatus } from "../lib/documents-module-status.server";
@@ -796,42 +795,11 @@ export async function loader({request,params}:Route.LoaderArgs){
       FROM carrier_drivers d JOIN carriers c ON c.id=d.carrier_id
       WHERE d.organization_id=? AND d.status='active' AND c.status='active' AND c.carrier_scope='overseas'
       ORDER BY c.name,d.name`).bind(current.organizationId).all<CarrierDriverOption>(),
-    env.DB.prepare(`SELECT u.id,u.display_name,
-        d.id department_id,d.code department_code,d.name department_name,
-        p.id position_id,p.code position_code,p.name position_name,
-        (SELECT GROUP_CONCAT(DISTINCT effective_permission.code)
-           FROM (
-             SELECT rp.permission_code code
-               FROM membership_roles effective_mr
-               JOIN roles effective_role
-                 ON effective_role.id=effective_mr.role_id AND effective_role.status='active'
-               JOIN role_permissions rp ON rp.role_id=effective_role.id
-              WHERE effective_mr.membership_id=m.id
-                AND NOT EXISTS (
-                  SELECT 1 FROM membership_permission_overrides denied
-                   WHERE denied.membership_id=m.id
-                     AND denied.permission_code=rp.permission_code
-                     AND denied.effect='deny'
-                )
-             UNION
-             SELECT allowed.permission_code
-               FROM membership_permission_overrides allowed
-              WHERE allowed.membership_id=m.id AND allowed.effect='allow'
-             UNION
-             SELECT '*'
-               FROM membership_roles protected_mr
-               JOIN roles protected_role
-                 ON protected_role.id=protected_mr.role_id AND protected_role.status='active'
-              WHERE protected_mr.membership_id=m.id
-                AND protected_role.code IN ('owner','boss')
-           ) effective_permission) permission_codes
-      FROM memberships m
-      JOIN users u ON u.id=m.user_id AND u.status='active'
-      JOIN departments d ON d.id=m.department_id AND d.organization_id=m.organization_id AND d.status='active'
-      JOIN positions p ON p.id=m.position_id AND p.organization_id=m.organization_id AND p.status='active'
-        AND p.department_code=d.code
-      WHERE m.organization_id=? AND m.status='active' AND p.code IN ('OPERATION','DOC')
-      ORDER BY d.sort_order,p.sort_order,u.display_name`).bind(current.organizationId).all<OrganizationAssigneeMember>(),
+    listActiveOrganizationAssignees(current.organizationId).then((members) => ({
+      results: members.filter((member) =>
+        member.position_code === "OPERATION" || member.position_code === "DOC"
+      ),
+    })),
   ]);
   responsibilityMembers.results=responsibilityMembers.results.filter((member)=>{
     const kind=member.position_code==="OPERATION"

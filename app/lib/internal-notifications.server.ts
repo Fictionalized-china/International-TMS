@@ -224,9 +224,11 @@ export async function broadcastInternalNotification(input:{
      )
      SELECT lower(hex(randomblob(16))),m.organization_id,m.user_id,?,?,?,?,?,
        CASE WHEN ?=1 AND (m.user_id=? OR EXISTS(
-         SELECT 1 FROM membership_roles mr
-         JOIN roles r ON r.id=mr.role_id
-         WHERE mr.membership_id=m.id AND r.code IN ('owner','boss','developer')
+         SELECT 1 FROM positions position
+         WHERE position.id=m.position_id
+           AND position.organization_id=m.organization_id
+           AND position.status='active'
+           AND position.code IN ('BOSS','DEVELOPER')
        )) THEN 1 ELSE 0 END,
        0,?,?
      FROM memberships m

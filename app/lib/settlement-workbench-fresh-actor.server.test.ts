@@ -2,12 +2,12 @@ import { describe, expect, it } from "vitest";
 import { loadFreshSettlementWorkbenchActor } from "./settlement-workbench-access.server";
 
 type RowSet = {
-  inherited?: string[];
-  roles?: string[];
-  overrides?: Array<{ code: string; effect: "allow" | "deny" }>;
+  permissions?: string[];
   allPermissions?: string[];
-  valid?: boolean;
+  sessionValid?: boolean;
+  profileValid?: boolean;
   positionCode?: string;
+  roleCode?: string;
 };
 
 function database(rows: RowSet = {}) {
@@ -22,26 +22,26 @@ function database(rows: RowSet = {}) {
           return statement;
         },
         async first() {
-          if (rows.valid === false) return null;
-          return {
-            membership_id: "membership-1",
-            position_code: rows.positionCode ?? "FINANCE_ACCOUNTING",
-            role_codes: (rows.roles ?? ["pos_finance"]).join(","),
-            inherited_codes: (rows.inherited ?? []).join(","),
-            override_json: JSON.stringify(rows.overrides ?? []),
-          };
+          if (sql.includes("FROM sessions session")) {
+            return rows.sessionValid === false ? null : { ok: 1 };
+          }
+          if (sql.includes("FROM memberships membership")) {
+            if (rows.profileValid === false) return null;
+            return {
+              membership_id: "membership-1",
+              department_id: "department-1",
+              department_code: "ACC",
+              position_id: "position-1",
+              position_code: rows.positionCode ?? "FINANCE_ACCOUNTING",
+              position_name: "财务会计岗",
+              role_code: rows.roleCode ?? "pos_finance",
+              permission_codes: (rows.permissions ?? []).join(","),
+            };
+          }
+          return null;
         },
         async all() {
-          if (sql.includes("active_role.code AS code")) {
-            return { results: (rows.roles ?? ["pos_finance"]).map((code) => ({ code })) };
-          }
-          if (sql.includes("role_permission.permission_code AS code")) {
-            return { results: (rows.inherited ?? []).map((code) => ({ code })) };
-          }
-          if (sql.includes("membership_permission_overrides")) {
-            return { results: rows.overrides ?? [] };
-          }
-          if (sql.includes("FROM permissions permission")) {
+          if (sql.includes("SELECT code FROM permissions")) {
             return { results: (rows.allPermissions ?? []).map((code) => ({ code })) };
           }
           return { results: [] };
@@ -60,10 +60,9 @@ const identity = {
 };
 
 describe("fresh settlement actor", () => {
-  it("reloads active session, membership, position, roles and account overrides", async () => {
+  it("reloads the active session and exact current-position permission profile", async () => {
     const { db, calls } = database({
-      inherited: ["billing.view", "billing.sensitive.view", "billing.manage"],
-      overrides: [{ code: "billing.manage", effect: "deny" }],
+      permissions: ["billing.view", "billing.sensitive.view", "billing.manage"],
     });
 
     const actor = await loadFreshSettlementWorkbenchActor(
@@ -77,35 +76,38 @@ describe("fresh settlement actor", () => {
       userId: "finance-1",
       positionCode: "FINANCE_ACCOUNTING",
       roleCodes: ["pos_finance"],
-      permissions: ["billing.sensitive.view", "billing.view"],
+      permissions: ["billing.manage", "billing.sensitive.view", "billing.view"],
     });
     expect(calls[0].sql).toContain("session.expires_at>?");
     expect(calls[0].sql).toContain("session.site='admin'");
-    expect(calls[0].sql).toContain("user.status='active'");
-    expect(calls[0].sql).toContain("organization.status='active'");
-    expect(calls[0].sql).toContain("membership.status='active'");
-    expect(calls[0].sql).toContain("position.status='active'");
-    expect(calls[0].sql).toContain("active_role.status='active'");
-    expect(calls.every((call) => call.bindings.includes("session-1"))).toBe(true);
+    expect(calls[1].sql).toContain("CASE position.code");
+    expect(calls[1].sql).not.toContain("membership_roles");
+    expect(calls[1].sql).not.toContain("membership_permission_overrides");
   });
 
-  it("fails closed without querying permissions when the live identity is invalid", async () => {
-    const { db, calls } = database({ valid: false });
-
+  it("fails closed before loading a profile when the live session is invalid", async () => {
+    const { db, calls } = database({ sessionValid: false });
     await expect(loadFreshSettlementWorkbenchActor(db, identity)).resolves.toBeNull();
     expect(calls).toHaveLength(1);
   });
 
-  it("keeps protected owner permissions tied to a currently active protected role", async () => {
+  it("fails closed when no active current-position profile exists", async () => {
+    const { db } = database({ profileValid: false });
+    await expect(loadFreshSettlementWorkbenchActor(db, identity)).resolves.toBeNull();
+  });
+
+  it("gives protected positions all registered permissions without account overrides", async () => {
     const { db } = database({
       positionCode: "BOSS",
-      roles: ["owner"],
-      inherited: ["billing.view"],
-      overrides: [{ code: "billing.manage", effect: "deny" }],
+      roleCode: "boss",
+      permissions: ["billing.view"],
       allPermissions: ["billing.view", "billing.manage", "billing.scope.all"],
     });
-
     const actor = await loadFreshSettlementWorkbenchActor(db, identity);
-    expect(actor?.permissions).toEqual(["billing.manage", "billing.scope.all", "billing.view"]);
+    expect(actor?.permissions).toEqual([
+      "billing.view",
+      "billing.manage",
+      "billing.scope.all",
+    ]);
   });
 });

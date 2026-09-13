@@ -7,6 +7,8 @@ import { valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import { siteFromRequest, siteLogin } from "../lib/site.server";
 import { createSessionSlot, sessionSlotFromUrl, withSessionSlot } from "../lib/session-slot";
+import { loadActivePositionAccessProfile } from "../lib/position-access-profile.server";
+import { canUseAdminSite } from "../lib/site-account-access";
 
 export function meta() { return [{ title: "登录 | International TMS" }]; }
 
@@ -27,20 +29,21 @@ export async function action({ request }: Route.ActionArgs) {
     `SELECT u.id, u.password_hash, u.failed_login_count, u.locked_until, m.organization_id
        FROM users u JOIN memberships m ON m.user_id = u.id
       WHERE u.email = ? AND u.status = 'active' AND m.status = 'active'
-        AND EXISTS (
-          SELECT 1 FROM membership_roles mr
-          JOIN roles r ON r.id=mr.role_id AND r.organization_id=m.organization_id
-          WHERE mr.membership_id=m.id
-            AND r.status='active'
-            AND r.code NOT IN ('warehouse_operator','overseas_warehouse_operator')
-        )
       LIMIT 1`,
   ).bind(email).first<{ id: string; password_hash: string; failed_login_count: number; locked_until: string | null; organization_id: string }>();
   if (user && isLoginLocked(user.locked_until)) {
     await writeAudit({ request, action: "auth.locked", resourceType: "session", outcome: "failure", organizationId: user.organization_id, actorUserId: user.id });
     return { error: "登录尝试过多，请 15 分钟后再试", email };
   }
-  if (!user || !(await verifyPassword(password, user.password_hash))) {
+  const accessProfile = user
+    ? await loadActivePositionAccessProfile(env.DB, user.organization_id, user.id)
+    : null;
+  if (
+    !user ||
+    !accessProfile ||
+    !canUseAdminSite([accessProfile.roleCode]) ||
+    !(await verifyPassword(password, user.password_hash))
+  ) {
     if (user) await recordLoginFailure(user.id, user.failed_login_count);
     await writeAudit({ request, action: "auth.login", resourceType: "session", outcome: "failure", metadata: { email } });
     return { error: "邮箱或密码不正确，或该账号不属于管理后台", email };

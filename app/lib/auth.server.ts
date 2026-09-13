@@ -9,36 +9,10 @@ import {
 } from "./portal-session-context";
 import type { Site } from "./site.server";
 import { siteFromRequest, siteLogin } from "./site.server";
-import { isMissingSqliteTableError } from "./d1-errors";
-import {
-  effectivePermissionCodes,
-  isProtectedAccessRole,
-  type PermissionOverride,
-} from "./permission-blocks";
+import type { PermissionOverride } from "./permission-blocks";
+import { loadActivePositionAccessProfile } from "./position-access-profile.server";
+import { canUseAdminSite } from "./site-account-access";
 import { sessionCookieName, sessionSlotFromRequest, withSessionSlot } from "./session-slot";
-
-let warnedAboutMissingPermissionOverrides = false;
-
-async function listPermissionOverrides(userId: string, organizationId: string) {
-  try {
-    const rows = await env.DB.prepare(
-      `SELECT mpo.permission_code code,mpo.effect
-       FROM memberships m
-       JOIN membership_permission_overrides mpo ON mpo.membership_id=m.id
-       WHERE m.user_id=? AND m.organization_id=? AND m.status='active'`,
-    )
-      .bind(userId, organizationId)
-      .all<PermissionOverride>();
-    return rows.results;
-  } catch (error) {
-    if (!isMissingSqliteTableError(error, "membership_permission_overrides")) throw error;
-    if (!warnedAboutMissingPermissionOverrides) {
-      console.warn("权限覆盖表尚未迁移，当前请求暂时按岗位角色权限运行；请执行数据库迁移。");
-      warnedAboutMissingPermissionOverrides = true;
-    }
-    return [];
-  }
-}
 
 export type SessionUser = {
   sessionId: string;
@@ -126,70 +100,33 @@ export async function getSessionUser(
        JOIN users u ON u.id = s.user_id
        JOIN organizations o ON o.id = s.organization_id
       WHERE s.token_hash = ? AND s.expires_at > ?
-        AND u.status = 'active' AND o.status = 'active'
-        AND (
-          (s.site = 'admin' AND EXISTS (
-            SELECT 1 FROM memberships m
-            WHERE m.user_id = u.id AND m.organization_id = o.id AND m.status = 'active'
-              AND EXISTS (
-                SELECT 1 FROM membership_roles mr
-                JOIN roles r ON r.id=mr.role_id AND r.organization_id=m.organization_id
-                WHERE mr.membership_id=m.id
-                  AND r.status='active'
-                  AND r.code NOT IN ('warehouse_operator','overseas_warehouse_operator')
-              )
-          ))
-          OR
-          (s.site = 'portal' AND EXISTS (
-            SELECT 1 FROM customer_portal_accounts cpa
-            WHERE cpa.user_id = u.id AND cpa.organization_id = o.id AND cpa.status = 'active'
-          ))
-          OR
-          (s.site = 'warehouse' AND EXISTS (
-            SELECT 1 FROM memberships m
-            JOIN membership_roles mr ON mr.membership_id=m.id
-            JOIN roles r ON r.id=mr.role_id AND r.organization_id=m.organization_id
-            JOIN role_permissions rp ON rp.role_id=r.id AND rp.permission_code='warehouse.view'
-            WHERE m.user_id=u.id AND m.organization_id=o.id AND m.status='active'
-          ))
-        )`,
+        AND u.status = 'active' AND o.status = 'active'`,
   )
     .bind(tokenHash, new Date().toISOString())
     .first<Record<string, string>>();
   if (!row || row.site !== site) return null;
-  const [permissionRows, accessProfile, overrideRows, allPermissionRows] = await Promise.all([
-    env.DB.prepare(
-    `SELECT DISTINCT rp.permission_code AS code
-       FROM memberships m
-       JOIN membership_roles mr ON mr.membership_id = m.id
-       JOIN roles r ON r.id = mr.role_id AND r.organization_id = m.organization_id
-       JOIN role_permissions rp ON rp.role_id = r.id
-      WHERE m.user_id = ? AND m.organization_id = ? AND m.status = 'active'`,
-  )
-    .bind(row.user_id, row.organization_id)
-    .all<{ code: string }>(),
-    env.DB.prepare(
-      `SELECT m.id membership_id,p.code position_code,GROUP_CONCAT(DISTINCT r.code) role_codes
-       FROM memberships m
-       LEFT JOIN positions p ON p.id=m.position_id AND p.organization_id=m.organization_id
-       LEFT JOIN membership_roles mr ON mr.membership_id=m.id
-       LEFT JOIN roles r ON r.id=mr.role_id AND r.organization_id=m.organization_id
-       WHERE m.user_id=? AND m.organization_id=? AND m.status='active'
-       GROUP BY m.id
-       LIMIT 1`,
-    )
-      .bind(row.user_id, row.organization_id)
-      .first<{ membership_id: string; position_code: string | null; role_codes: string | null }>(),
-    listPermissionOverrides(row.user_id, row.organization_id),
-    env.DB.prepare("SELECT code FROM permissions ORDER BY code").all<{ code: string }>(),
-  ]);
-  const roleCodes = (accessProfile?.role_codes ?? "").split(",").filter(Boolean);
-  const permissions = effectivePermissionCodes({
-    inherited: permissionRows.results.map((item) => item.code),
-    overrides: overrideRows,
-    allPermissions: allPermissionRows.results.map((item) => item.code),
-    protectedRole: isProtectedAccessRole(roleCodes),
-  });
+  let permissions: string[] = [];
+  let positionCode: string | null = null;
+  let roleCodes: string[] = [];
+  if (site === "portal") {
+    const portalAccount = await env.DB.prepare(
+      `SELECT 1 FROM customer_portal_accounts
+       WHERE user_id=? AND organization_id=? AND status='active'`,
+    ).bind(row.user_id, row.organization_id).first();
+    if (!portalAccount) return null;
+  } else {
+    const accessProfile = await loadActivePositionAccessProfile(
+      env.DB,
+      row.organization_id,
+      row.user_id,
+    );
+    if (!accessProfile) return null;
+    if (site === "admin" && !canUseAdminSite([accessProfile.roleCode])) return null;
+    if (site === "warehouse" && !accessProfile.permissions.includes("warehouse.view")) return null;
+    permissions = accessProfile.permissions;
+    positionCode = accessProfile.positionCode;
+    roleCodes = [accessProfile.roleCode];
+  }
   return {
     sessionId: row.session_id,
     userId: row.user_id,
@@ -199,8 +136,8 @@ export async function getSessionUser(
     displayName: row.display_name,
     site: row.site as Site,
     permissions,
-    permissionOverrides: overrideRows,
-    positionCode: accessProfile?.position_code ?? null,
+    permissionOverrides: [],
+    positionCode,
     roleCodes,
   };
 }

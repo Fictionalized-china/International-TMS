@@ -90,28 +90,16 @@ export function organizationAssigneePermissionOverrides(
     .filter((entry): entry is { code: string; effect: "allow" | "deny" } => Boolean(entry));
 }
 
-/**
- * Frozen-workflow assignment eligibility mirrors the runtime node gate:
- * responsibility-position inheritance is authoritative. A legacy module-level
- * safety denial may still remove an account from the candidate pool.
- */
+/** Frozen-workflow assignment eligibility is owned by the current position. */
 export function organizationAssigneeCanHandleWorkflowNodes(
   member: Pick<
     OrganizationAssigneeMember,
-    "position_code" | "permission_override_entries"
+    "position_code"
   >,
   responsibilityPositionCode: string,
   nodes: readonly OrganizationAssigneeWorkflowNode[],
 ) {
-  const permissionOverrides = organizationAssigneePermissionOverrides(member);
-  return nodes.every((node) => {
-    if (permissionOverrides.some(
-      (override) =>
-        override.code === `order.module.${node.moduleCode}.manage` &&
-        override.effect === "deny",
-    )) return false;
-    return member.position_code === responsibilityPositionCode;
-  });
+  return nodes.every(() => member.position_code === responsibilityPositionCode);
 }
 
 export function buildOrganizationAssigneeTree(

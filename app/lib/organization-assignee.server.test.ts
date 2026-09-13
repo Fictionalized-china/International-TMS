@@ -3,63 +3,56 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const database = vi.hoisted(() => {
   const queries: Array<{ sql: string; bindings: unknown[] }> = [];
   let validUserIds = new Set(["user-a3"]);
-  let grantedCodes = ["order.module.transport.manage"];
-  let memberQueryError: Error | null = null;
-  const memberRows = [{
+  let permissionCodes = "order.module.transport.manage";
+  let positionCode = "OPERATION";
+
+  const member = () => ({
     id: "user-a3",
     display_name: "Operator A3",
+    membership_id: "membership-a3",
     department_id: "department-operation",
     department_code: "OPERATION",
     department_name: "操作部",
     position_id: "position-operation",
-    position_code: "OPERATION",
+    position_code: positionCode,
     position_name: "操作岗",
-    permission_codes: "order.module.transport.manage",
-  }];
+    permission_codes: permissionCodes,
+    permission_override_entries: null,
+  });
 
   return {
     queries,
     setValidUserIds(userIds: string[]) {
       validUserIds = new Set(userIds);
     },
-    setGrantedCodes(codes: string[]) {
-      grantedCodes = codes;
+    setPermissionCodes(codes: string[]) {
+      permissionCodes = codes.join(",");
     },
-    setMemberQueryError(error: Error | null) {
-      memberQueryError = error;
+    setPositionCode(code: string) {
+      positionCode = code;
     },
     DB: {
       prepare(sql: string) {
         const query = { sql, bindings: [] as unknown[] };
         queries.push(query);
-        return {
+        const statement = {
           bind(...bindings: unknown[]) {
             query.bindings = bindings;
+            return statement;
+          },
+          async first() {
+            return validUserIds.has(String(query.bindings[1])) ? { ok: 1 } : null;
+          },
+          async all<T>() {
+            if (sql.includes("GROUP_CONCAT(DISTINCT CASE")) {
+              return { results: [member()] as T[] };
+            }
             return {
-              async first() {
-                if (sql.includes("SELECT m.id membership_id")) {
-                  return validUserIds.has(String(bindings[1])) ? { membership_id: "membership-a3" } : null;
-                }
-                return validUserIds.has(String(bindings[1])) ? { ok: 1 } : null;
-              },
-              async all<T>() {
-                if (sql.includes("GROUP_CONCAT(DISTINCT effective_permission.code)")) {
-                  if (memberQueryError) throw memberQueryError;
-                  return { results: memberRows as T[] };
-                }
-                if (sql.includes("GROUP_CONCAT(DISTINCT legacy_permission.code)")) {
-                  return { results: memberRows as T[] };
-                }
-                if (sql.includes("SELECT DISTINCT effective.code")) {
-                  return { results: grantedCodes.map((code) => ({ code })) as T[] };
-                }
-                return {
-                  results: [...validUserIds].map((id) => ({ id })) as T[],
-                };
-              },
+              results: [...validUserIds].map((id) => ({ id })) as T[],
             };
           },
         };
+        return statement;
       },
     },
   };
@@ -83,36 +76,33 @@ describe("organization assignee server guard", () => {
   beforeEach(() => {
     database.queries.length = 0;
     database.setValidUserIds(["user-a3"]);
-    database.setGrantedCodes(["order.module.transport.manage"]);
-    database.setMemberQueryError(null);
+    database.setPermissionCodes(["order.module.transport.manage"]);
+    database.setPositionCode("OPERATION");
   });
 
-  it("accepts only an active personal account attached to a matching department and position", async () => {
+  it("accepts only an active account attached to a matching department and position", async () => {
     await expect(isActiveOrganizationAssignee("org-a", "user-a3")).resolves.toBe(true);
     await expect(isActiveOrganizationAssignee("org-a", "user-missing")).resolves.toBe(false);
-
     expect(database.queries[0].sql).toContain("JOIN departments");
     expect(database.queries[0].sql).toContain("JOIN positions");
     expect(database.queries[0].sql).toContain("p.department_code=d.code");
-    expect(database.queries[0].bindings).toEqual(["org-a", "user-a3"]);
   });
 
-  it("returns only concrete assignable account ids and rejects invalid submissions", async () => {
+  it("returns only concrete assignable accounts and rejects invalid submissions", async () => {
     await expect(listActiveOrganizationAssigneeIds("org-a")).resolves.toEqual(
       new Set(["user-a3"]),
     );
     await expect(requireActiveOrganizationAssignee("org-a", "user-a3")).resolves.toBeUndefined();
-    await expect(
-      requireActiveOrganizationAssignee("org-a", "user-missing"),
-    ).rejects.toThrow("请选择部门、岗位下的有效个人账户");
+    await expect(requireActiveOrganizationAssignee("org-a", "user-missing")).rejects.toThrow();
   });
 
-  it("can restrict an assignee to one or more position codes", async () => {
+  it("restricts assignment by the account current position", async () => {
     await expect(
       isActiveOrganizationAssigneeForPositions("org-a", "user-a3", ["OPERATION"]),
     ).resolves.toBe(true);
-    expect(database.queries.at(-1)?.sql).toContain("p.code IN (?)");
-    expect(database.queries.at(-1)?.bindings).toEqual(["org-a", "user-a3", "OPERATION"]);
+    await expect(
+      isActiveOrganizationAssigneeForPositions("org-a", "user-a3", ["DOC"]),
+    ).resolves.toBe(false);
   });
 
   it("validates a frozen-node assignee from position inheritance", async () => {
@@ -122,10 +112,9 @@ describe("organization assignee server guard", () => {
       responsibilityPositionCode: "OPERATION",
       nodes: [{ stepKey: "domestic_execution", moduleCode: "transport" }],
     })).resolves.toBe(true);
-    expect(database.queries.at(-1)?.sql).not.toContain("membership_workflow_access_overrides");
   });
 
-  it("applies personal deny-aware effective permissions after the position check", async () => {
+  it("uses only the position permission profile for runtime requirements", async () => {
     await expect(isActiveOrganizationAssigneeForPositions(
       "org-a",
       "user-a3",
@@ -133,7 +122,7 @@ describe("organization assignee server guard", () => {
       [["order.module.transport.manage"], ["order.module.exceptions.manage"]],
     )).resolves.toBe(false);
 
-    database.setGrantedCodes([
+    database.setPermissionCodes([
       "order.module.transport.manage",
       "order.module.exceptions.manage",
     ]);
@@ -143,7 +132,30 @@ describe("organization assignee server guard", () => {
       ["OPERATION"],
       [["order.module.transport.manage"], ["order.module.exceptions.manage"]],
     )).resolves.toBe(true);
-    expect(database.queries.at(-1)?.sql).toContain("denied.effect='deny'");
+    expect(database.queries.at(-1)?.sql).not.toContain("membership_permission_overrides");
+    expect(database.queries.at(-1)?.sql).not.toContain("membership_roles");
+  });
+
+  it("derives exactly one active permission role from position code", async () => {
+    await expect(listActiveOrganizationAssignees("org-a")).resolves.toEqual([
+      expect.objectContaining({
+        id: "user-a3",
+        position_code: "OPERATION",
+        permission_codes: "order.module.transport.manage",
+      }),
+    ]);
+    const sql = database.queries.at(-1)?.sql ?? "";
+    expect(sql).toContain("CASE p.code");
+    expect(sql).toContain("r.status='active'");
+    expect(sql).not.toContain("membership_permission_overrides");
+    expect(sql).not.toContain("membership_roles");
+  });
+
+  it("grants protected positions the complete runtime marker", async () => {
+    database.setPositionCode("BOSS");
+    await expect(listActiveOrganizationAssignees("org-a")).resolves.toEqual([
+      expect.objectContaining({ permission_codes: "*" }),
+    ]);
   });
 
   it("requires one granted permission from every runtime alternative group", () => {
@@ -158,31 +170,5 @@ describe("organization assignee server guard", () => {
       ["order.module.review.manage"], requirements,
     )).toBe(false);
     expect(satisfiesOrganizationAssigneePermissionRequirements(["*"], requirements)).toBe(true);
-  });
-
-  it("仅在个人权限覆盖表缺失时回落旧角色权限候选查询", async () => {
-    database.setMemberQueryError(
-      new Error("D1_ERROR: no such table: membership_permission_overrides"),
-    );
-
-    await expect(listActiveOrganizationAssignees("org-a")).resolves.toEqual([
-      expect.objectContaining({ id: "user-a3", position_code: "OPERATION" }),
-    ]);
-    const memberQueries = database.queries.filter((query) =>
-      query.sql.includes("GROUP_CONCAT(DISTINCT"),
-    );
-    expect(memberQueries).toHaveLength(2);
-    expect(memberQueries[0].sql).toContain("membership_permission_overrides");
-    expect(memberQueries[1].sql).not.toContain("membership_permission_overrides");
-  });
-
-  it("候选查询的非缺表异常不降级且继续抛出", async () => {
-    database.setMemberQueryError(new Error("D1_ERROR: database unavailable"));
-
-    await expect(listActiveOrganizationAssignees("org-a"))
-      .rejects.toThrow("database unavailable");
-    expect(database.queries.filter((query) =>
-      query.sql.includes("GROUP_CONCAT(DISTINCT"),
-    )).toHaveLength(1);
   });
 });

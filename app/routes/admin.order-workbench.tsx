@@ -151,13 +151,12 @@ export async function loader({ request, params }: Route.LoaderArgs) {
       .bind(current.organizationId, current.userId, workspace)
       .all<SavedView>(),
     env.DB.prepare(
-      `SELECT m.title,d.name department_name,GROUP_CONCAT(DISTINCT r.name) role_names
+      `SELECT m.title,d.name department_name,p.name role_names
        FROM memberships m
        LEFT JOIN departments d ON d.id=m.department_id
-       LEFT JOIN membership_roles mr ON mr.membership_id=m.id
-       LEFT JOIN roles r ON r.id=mr.role_id
+       LEFT JOIN positions p ON p.id=m.position_id AND p.organization_id=m.organization_id
        WHERE m.organization_id=? AND m.user_id=?
-       GROUP BY m.id,d.name`,
+       GROUP BY m.id,d.name,p.name`,
     )
       .bind(current.organizationId, current.userId)
       .first<Profile>(),

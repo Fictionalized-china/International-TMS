@@ -17,8 +17,30 @@ const positionRoleMap: Record<string, string> = {
   OVERSEAS_WAREHOUSE: "overseas_warehouse_operator",
 };
 
+export const protectedAccessPositionCodes = ["BOSS", "DEVELOPER"] as const;
+
+const protectedAccessPositions = new Set<string>(protectedAccessPositionCodes);
+
 export function roleCodeForPosition(positionCode: string) {
   return positionRoleMap[positionCode] ?? positionCode.toLowerCase();
+}
+
+export function isProtectedAccessPosition(positionCode: string | null | undefined) {
+  return Boolean(positionCode && protectedAccessPositions.has(positionCode));
+}
+
+/**
+ * Keep the legacy position-to-role storage bridge in one place while runtime
+ * authorization is position-owned. `positionCodeSql` must be a trusted column
+ * reference supplied by application code, never user input.
+ */
+export function positionRoleCodeSql(positionCodeSql: string) {
+  const branches = Object.entries(positionRoleMap)
+    .map(([positionCode, roleCode]) =>
+      `WHEN '${positionCode}' THEN '${roleCode}'`,
+    )
+    .join(" ");
+  return `(CASE ${positionCodeSql} ${branches} ELSE lower(${positionCodeSql}) END)`;
 }
 
 export const officialPositionRoleCodes = Object.values(positionRoleMap);

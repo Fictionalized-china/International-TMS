@@ -71,9 +71,7 @@ import {
   type PublicationPositionReadiness,
 } from "../lib/workflow-publication-validation";
 import { listActiveOrganizationAssignees } from "../lib/organization-assignee.server";
-import {
-  organizationAssigneePermissionOverrides,
-} from "../lib/organization-assignee";
+import { positionRoleCodeSql } from "../lib/position-role";
 
 type Definition = {
   id: string;
@@ -1847,46 +1845,22 @@ async function loadWorkflowValidationIssues(workflowId: string, organizationId: 
 }
 
 async function loadPublicationPositionReadiness(organizationId: string) {
+  const roleCodeSql = positionRoleCodeSql("p.code");
   const positions = await env.DB.prepare(
     `SELECT p.code,p.name,p.status,
        COUNT(DISTINCT CASE WHEN m.status='active' AND u.status='active' THEN m.user_id END) active_member_count,
-       GROUP_CONCAT(DISTINCT CASE
-         WHEN m.status='active' AND u.status='active'
-         THEN effective_permission.permission_code END) permission_codes
+       GROUP_CONCAT(DISTINCT CASE WHEN p.code IN ('BOSS','DEVELOPER')
+         THEN '*' ELSE position_permission.permission_code END) permission_codes
      FROM positions p
      LEFT JOIN memberships m
        ON m.organization_id=p.organization_id AND m.position_id=p.id
      LEFT JOIN users u ON u.id=m.user_id
-     LEFT JOIN (
-       SELECT effective_membership.position_id,role_permission.permission_code
-       FROM memberships effective_membership
-       JOIN users effective_user
-         ON effective_user.id=effective_membership.user_id
-        AND effective_user.status='active'
-       JOIN membership_roles effective_membership_role
-         ON effective_membership_role.membership_id=effective_membership.id
-       JOIN roles effective_role
-         ON effective_role.id=effective_membership_role.role_id
-        AND effective_role.organization_id=effective_membership.organization_id
-        AND effective_role.status='active'
-       JOIN role_permissions role_permission ON role_permission.role_id=effective_role.id
-       WHERE effective_membership.status='active'
-         AND NOT EXISTS (
-           SELECT 1 FROM membership_permission_overrides denied
-           WHERE denied.membership_id=effective_membership.id
-             AND denied.permission_code=role_permission.permission_code
-             AND denied.effect='deny'
-         )
-       UNION
-       SELECT effective_membership.position_id,allowed.permission_code
-       FROM memberships effective_membership
-       JOIN users effective_user
-         ON effective_user.id=effective_membership.user_id
-        AND effective_user.status='active'
-       JOIN membership_permission_overrides allowed
-         ON allowed.membership_id=effective_membership.id AND allowed.effect='allow'
-       WHERE effective_membership.status='active'
-     ) effective_permission ON effective_permission.position_id=p.id
+     LEFT JOIN roles position_role
+       ON position_role.organization_id=p.organization_id
+      AND position_role.code=${roleCodeSql}
+      AND position_role.status='active'
+     LEFT JOIN role_permissions position_permission
+       ON position_permission.role_id=position_role.id
      WHERE p.organization_id=?
      GROUP BY p.id,p.code,p.name,p.status
      ORDER BY p.sort_order,p.name`,
@@ -1896,7 +1870,7 @@ async function loadPublicationPositionReadiness(organizationId: string) {
     membershipId: string;
     positionCode: string;
     permissionCodes: string[];
-    permissionOverrides: ReturnType<typeof organizationAssigneePermissionOverrides>;
+    permissionOverrides: [];
   }>>();
   for (const member of members) {
     if (!member.position_code || !member.membership_id) continue;
@@ -1905,7 +1879,7 @@ async function loadPublicationPositionReadiness(organizationId: string) {
       membershipId: member.membership_id,
       positionCode: member.position_code,
       permissionCodes: (member.permission_codes ?? "").split(",").filter(Boolean),
-      permissionOverrides: organizationAssigneePermissionOverrides(member),
+      permissionOverrides: [],
     });
     membersByPosition.set(member.position_code, list);
   }

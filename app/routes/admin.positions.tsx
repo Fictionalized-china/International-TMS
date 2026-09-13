@@ -6,8 +6,12 @@ import { ActionToast } from "../components/ActionToast";
 import { requireSessionUser } from "../lib/auth.server";
 import { writeAudit } from "../lib/audit.server";
 import { valueOf } from "../lib/validation";
-import { roleCodeForPosition } from "../lib/position-role";
-import { isProtectedAccessRole } from "../lib/permission-blocks";
+import {
+  isProtectedAccessPosition,
+  officialPositionRoleCodes,
+  positionRoleCodeSql,
+  roleCodeForPosition,
+} from "../lib/position-role";
 import { inspectAccessControlSchema } from "../lib/access-control-schema.server";
 import { OrganizationAccessTabs } from "../components/OrganizationAccessTabs";
 import { QueryPagination } from "../components/QueryPagination";
@@ -97,15 +101,12 @@ export async function loader({ request }: Route.LoaderArgs) {
   if (binding === "unbound") memberConditions.push("m.position_id IS NULL");
   const memberWhere = memberConditions.join(" AND ");
   const memberSql = `SELECT m.id membership_id,u.id user_id,u.display_name,u.email,m.title,m.position_id,p.name position_name,
-              p.department_code,d.name department_name,GROUP_CONCAT(r.code) role_codes
+              p.department_code,d.name department_name,${positionRoleCodeSql("p.code")} role_codes
        FROM memberships m
        JOIN users u ON u.id=m.user_id
        LEFT JOIN positions p ON p.id=m.position_id
        LEFT JOIN departments d ON d.organization_id=m.organization_id AND d.code=p.department_code
-       LEFT JOIN membership_roles mr ON mr.membership_id=m.id
-       LEFT JOIN roles r ON r.id=mr.role_id
        WHERE ${memberWhere}
-       GROUP BY m.id
        ORDER BY u.display_name
        LIMIT ? OFFSET ?`;
   const memberCountSql = `SELECT COUNT(*) total FROM memberships m
@@ -224,16 +225,19 @@ export async function action({ request }: Route.ActionArgs) {
       department_id: string;
     }>();
     const membership = await env.DB.prepare(
-      `SELECT m.id,GROUP_CONCAT(DISTINCT r.code) role_codes
-       FROM memberships m LEFT JOIN membership_roles mr ON mr.membership_id=m.id
-       LEFT JOIN roles r ON r.id=mr.role_id
-       WHERE m.id=? AND m.organization_id=? AND m.status='active' GROUP BY m.id`,
-    ).bind(membershipId, current.organizationId).first<{ id: string; role_codes: string | null }>();
+      `SELECT m.id,p.code position_code
+       FROM memberships m
+       LEFT JOIN positions p ON p.id=m.position_id AND p.organization_id=m.organization_id
+       WHERE m.id=? AND m.organization_id=? AND m.status='active'`,
+    ).bind(membershipId, current.organizationId).first<{
+      id: string;
+      position_code: string | null;
+    }>();
     if (!position || !membership) return { formError: "请选择有效账号和岗位" };
-    if (isProtectedAccessRole((membership.role_codes ?? "").split(",").filter(Boolean))) {
+    if (isProtectedAccessPosition(membership.position_code)) {
       return { formError: "老板/所有者账户的岗位和角色不可修改" };
     }
-    if (["BOSS", "DEVELOPER"].includes(position.code) && !isProtectedAccessRole(current.roleCodes)) {
+    if (isProtectedAccessPosition(position.code) && !isProtectedAccessPosition(current.positionCode)) {
       return { formError: "只有老板/所有者可以分配受保护岗位" };
     }
     const roleCode = roleCodeForPosition(position.code);
@@ -315,13 +319,31 @@ export async function action({ request }: Route.ActionArgs) {
     "SELECT id FROM departments WHERE organization_id=? AND code=? AND status='active'",
   ).bind(current.organizationId, departmentCode).first<{ id: string }>();
   if (!department) return { formError: "请选择有效的归属部门" };
-  await env.DB.prepare(
-    `INSERT INTO positions(id,organization_id,code,name,department_code,status,sort_order,created_at,updated_at)
-     VALUES(?,?,?,?,?,'active',?,?,?)
-     ON CONFLICT(organization_id,code) DO UPDATE SET
-       name=excluded.name,department_code=excluded.department_code,status='active',
-       sort_order=excluded.sort_order,updated_at=excluded.updated_at`,
-  ).bind(crypto.randomUUID(), current.organizationId, code, name, departmentCode, sortOrder, now, now).run();
+  const roleCode = roleCodeForPosition(code);
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO positions(id,organization_id,code,name,department_code,status,sort_order,created_at,updated_at)
+       VALUES(?,?,?,?,?,'active',?,?,?)
+       ON CONFLICT(organization_id,code) DO UPDATE SET
+         name=excluded.name,department_code=excluded.department_code,status='active',
+         sort_order=excluded.sort_order,updated_at=excluded.updated_at`,
+    ).bind(crypto.randomUUID(), current.organizationId, code, name, departmentCode, sortOrder, now, now),
+    env.DB.prepare(
+      `INSERT INTO roles(id,organization_id,code,name,description,is_system,status,created_at,updated_at)
+       VALUES(?,?,?,?,?,?,'active',?,?)
+       ON CONFLICT(organization_id,code) DO UPDATE SET
+         name=excluded.name,description=excluded.description,status='active',updated_at=excluded.updated_at`,
+    ).bind(
+      crypto.randomUUID(),
+      current.organizationId,
+      roleCode,
+      name,
+      `${name} position permission profile`,
+      officialPositionRoleCodes.includes(roleCode) ? 1 : 0,
+      now,
+      now,
+    ),
+  ]);
   const savedPosition = await env.DB.prepare(
     "SELECT id FROM positions WHERE organization_id=? AND code=?",
   ).bind(current.organizationId, code).first<{ id: string }>();
@@ -564,6 +586,23 @@ async function ensurePositionsSeed(organizationId: string) {
          name=excluded.name,department_code=excluded.department_code,sort_order=excluded.sort_order,updated_at=excluded.updated_at`,
     ).bind(crypto.randomUUID(), organizationId, code, name, departmentCode, sort, now, now),
   ));
+  await env.DB.batch(defaults.map(([code, name]) => {
+    const roleCode = roleCodeForPosition(code);
+    return env.DB.prepare(
+      `INSERT INTO roles(id,organization_id,code,name,description,is_system,status,created_at,updated_at)
+       VALUES(?,?,?,?,?,1,'active',?,?)
+       ON CONFLICT(organization_id,code) DO UPDATE SET
+         name=excluded.name,description=excluded.description,status='active',updated_at=excluded.updated_at`,
+    ).bind(
+      crypto.randomUUID(),
+      organizationId,
+      roleCode,
+      name,
+      `${name} position permission profile`,
+      now,
+      now,
+    );
+  }));
   await env.DB.prepare(
     `INSERT OR IGNORE INTO position_portal_settings(id,organization_id,position_id,order_scope,default_filter,created_at,updated_at)
      SELECT lower(hex(randomblob(16))),p.organization_id,p.id,
