@@ -467,9 +467,9 @@ export default function Orders({ loaderData }: Route.ComponentProps) {
   });
   return (
     <div className="page prototype-page order-list-page">
-      <div className="breadcrumb">汽运业务 / 运输订单</div>
+      <div className="breadcrumb">汽运业务 / 订单中心</div>
       <header className="page-head">
-        <div><h1>运输订单</h1><p>订单由客户接受报价后自动生成；在一张表内筛选、查看并进入当前业务节点。</p></div>
+        <div><h1>订单中心</h1><p>订单由客户接受报价后自动生成；在一张表内筛选、查看并进入当前业务节点。</p></div>
         <Link className="btn primary" to="/admin/quotations">前往询价与报价</Link>
       </header>
       {loaderData.canViewBatchWorkload && !loaderData.unifiedSupervisorWorkload && <OrderWorkloadTabs
@@ -899,4 +899,4 @@ function statusTone(status: string, exceptionStatus: string | null) {
   return "blue";
 }
 
-export function meta() { return [{ title: "运输订单 | 新翎航 TMS" }]; }
+export function meta() { return [{ title: "订单中心 | 新翎航 TMS" }]; }

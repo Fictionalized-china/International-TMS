@@ -13,7 +13,7 @@ import { writeAudit } from "../lib/audit.server";
 import { recordWorkflowEvent } from "../lib/business-workflow.server";
 import { statusLabel as orderStatusLabel } from "../lib/order-workflow";
 import { loadOrderGuidance } from "../lib/order-guidance.server";
-import { canOperateCurrentOrder, orderVisibilitySql, requireOrderAccess } from "../lib/order-access.server";
+import { canOperateCurrentOrder, currentOrderActionSql, orderVisibilitySql, requireOrderAccess } from "../lib/order-access.server";
 import { orderRouteFilterCount, readOrderRouteFilters, type OrderRouteFilters } from "../lib/order-route-filters";
 
 type Shipment = {
@@ -73,6 +73,7 @@ type Shipment = {
 
 type ShipmentFilters = OrderRouteFilters & {
   q: string;
+  handlingScope: string;
   status: string;
   workflowStatus: string;
   source: string;
@@ -88,6 +89,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const requestedPage = Math.max(1, Number(url.searchParams.get("page") || 1));
   const filters: ShipmentFilters = {
     q: (url.searchParams.get("q") || "").trim(),
+    handlingScope: url.searchParams.get("handlingScope") === "mine" ? "mine" : "",
     status: url.searchParams.get("status") || "",
     workflowStatus: url.searchParams.get("workflowStatus") || "",
     source: url.searchParams.get("source") || "",
@@ -101,6 +103,11 @@ export async function loader({ request }: Route.LoaderArgs) {
   const visibility = orderVisibilitySql(current, "o");
   where.push(visibility.sql);
   bindings.push(...visibility.values);
+  if (filters.handlingScope === "mine") {
+    const actionable = currentOrderActionSql(current, "o");
+    where.push(actionable.sql);
+    bindings.push(...actionable.values);
+  }
   if (filters.q) {
     where.push(`(s.shipment_number LIKE ? OR s.master_tracking_number LIKE ? OR o.order_number LIKE ? OR c.name LIKE ? OR c.identity_code LIKE ? OR o.cargo_description LIKE ? OR s.current_location LIKE ? OR o.current_step_name LIKE ?)`);
     const keyword = `%${filters.q}%`;
@@ -322,7 +329,7 @@ export async function action({ request }: Route.ActionArgs) {
   return { success: "运单状态与轨迹已更新" };
 }
 async function ownedShipment(id: string, org: string) { return env.DB.prepare("SELECT order_id FROM shipments WHERE id = ? AND organization_id = ?").bind(id, org).first<{order_id:string}>(); }
-export function meta() { return [{ title: "运输执行 | International TMS" }]; }
+export function meta() { return [{ title: "运输单据 | International TMS" }]; }
 const labels: Record<string,string> = { booked:"已订舱", picked_up:"已提货", in_transit:"运输中", customs:"清关中", out_for_delivery:"运输中", delivered:"已签收", exception:"异常", cancelled:"已取消" };
 const businessTypeLabels: Record<string,string> = { ltl:"零担/拼车", ftl:"整车", warehouse:"仓到仓" };
 const orderWorkflowStatuses = ["draft","submitted","confirmed","in_execution","completed","cancelled"];
@@ -336,8 +343,8 @@ export default function Shipments({ loaderData, actionData }: Route.ComponentPro
     <header className="page-header">
       <div>
         <p className="eyebrow">SHIPMENT REGISTER</p>
-        <h1>运输执行</h1>
-        <p>运输订单承载业务全流程；这里集中管理实际生成的运单，并与在途车辆视图协同。</p>
+        <h1>运输单据</h1>
+        <p>订单中心承载业务全流程；这里集中查看实际生成的运单、运输资源与轨迹。</p>
       </div>
       <span className="status-pill">共 {loaderData.total} 票</span>
     </header>
@@ -353,6 +360,7 @@ export default function Shipments({ loaderData, actionData }: Route.ComponentPro
       <div className="shipment-filter-shell">
         <Form method="get" action="." className="shipment-filters">
           <input name="q" defaultValue={loaderData.filters.q} placeholder="运单号、订单号、客户、识别码、货物、位置"/>
+          <select name="handlingScope" defaultValue={loaderData.filters.handlingScope}><option value="">全部可见</option><option value="mine">待我办理</option></select>
           <select name="status" defaultValue={loaderData.filters.status}><option value="">全部运单状态</option>{Object.entries(labels).map(([value,label])=><option key={value} value={value}>{label}</option>)}</select>
           <select name="pageSize" defaultValue="10" aria-label="每页数量"><option value="10">10 条/页</option></select>
           <button className="secondary">筛选</button>

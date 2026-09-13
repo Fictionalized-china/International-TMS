@@ -251,7 +251,10 @@ describe("order access", () => {
     const actionable = currentOrderActionSql(baseUser, "work_order");
     expect(actionable.sql).toContain("work_order.status NOT IN ('completed','cancelled')");
     expect(actionable.sql).toContain("work_order.current_assignee_user_id=?");
-    expect(actionable.values).toEqual(["user-a"]);
+    expect(actionable.sql).toContain("action_module_instance.assignee_user_id=?");
+    expect(actionable.sql).toContain("action_task.assignee_user_id=?");
+    expect(actionable.sql).not.toContain("responsibility_position_code=?");
+    expect(actionable.values).toEqual(["user-a", "user-a", "user-a"]);
   });
 
   it("lets the assigned review owner operate an enabled module after the order-level handoff is cleared", () => {

@@ -63,10 +63,10 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
 
           <SideNavGroup label="汽运业务" visible={navigationGroups.transport}>
           {can("quote.view") && <SideLink to="/admin/quotations" icon="receipt">询价与报价</SideLink>}
-          {can("order.view") && <SideLink to="/admin/orders" icon="clipboard">运输订单</SideLink>}
+          {can("order.view") && <SideLink to="/admin/orders" icon="clipboard">订单中心</SideLink>}
           {canAccessBatches && <SideLink to="/admin/loading" icon="truck">配载单跟踪</SideLink>}
           {can("order.module.documents.manage") && <SideLink to="/admin/documents" icon="documents">文件中心</SideLink>}
-          {can("shipment.view") && <SideLink to="/admin/shipments" icon="packageCheck">运输执行</SideLink>}
+          {can("shipment.view") && <SideLink to="/admin/shipments" icon="packageCheck">运输单据</SideLink>}
           {canAccessBilling && <SideLink to="/admin/billing" icon="billing">费用结算</SideLink>}
           {can("order.module.cargo.manage") && <SideLink to="/admin/cargo" icon="boxes">货物信息</SideLink>}
           </SideNavGroup>

@@ -181,13 +181,50 @@ export function canOperateCurrentOrder(
 /**
  * SQL counterpart of canOperateCurrentOrder for list-level "待我办理"
  * filters. Keep this deliberately narrower than visibility: historical
- * collaborators may continue to read an order, but only the current explicit
- * handler owns the next order-level action.
+ * collaborators and unassigned position pools may continue to read an order,
+ * but only an account explicitly assigned to the order, current module or a
+ * current unfinished task belongs in the work queue.
  */
 export function currentOrderActionSql(user: Pick<OrderAccessUser, "userId">, alias = "o") {
   return {
-    sql: `${alias}.status NOT IN ('completed','cancelled') AND ${alias}.current_assignee_user_id=?`,
-    values: [user.userId],
+    sql: `${alias}.status NOT IN ('completed','cancelled') AND (
+      ${alias}.current_assignee_user_id=?
+      OR EXISTS(
+        SELECT 1
+        FROM workflow_instances action_instance
+        JOIN workflow_instance_step_states action_step
+          ON action_step.instance_id=action_instance.id
+         AND action_step.step_key=action_instance.current_step_key
+        JOIN workflow_instance_module_states action_module
+          ON action_module.instance_step_state_id=action_step.id
+         AND action_module.status!='completed'
+        JOIN order_module_instances action_module_instance
+          ON action_module_instance.organization_id=action_instance.organization_id
+         AND action_module_instance.order_id=action_instance.order_id
+         AND action_module_instance.module_code=action_module.module_code
+         AND action_module_instance.enabled=1
+        WHERE action_instance.organization_id=${alias}.organization_id
+          AND action_instance.order_id=${alias}.id
+          AND action_module_instance.assignee_user_id=?
+      )
+      OR EXISTS(
+        SELECT 1
+        FROM workflow_instances action_task_instance
+        JOIN workflow_instance_step_states action_task_step
+          ON action_task_step.instance_id=action_task_instance.id
+         AND action_task_step.step_key=action_task_instance.current_step_key
+        JOIN workflow_instance_module_states action_task_module
+          ON action_task_module.instance_step_state_id=action_task_step.id
+         AND action_task_module.status!='completed'
+        JOIN workflow_instance_task_states action_task
+          ON action_task.instance_module_state_id=action_task_module.id
+         AND action_task.status!='completed'
+        WHERE action_task_instance.organization_id=${alias}.organization_id
+          AND action_task_instance.order_id=${alias}.id
+          AND action_task.assignee_user_id=?
+      )
+    )`,
+    values: [user.userId, user.userId, user.userId],
   };
 }
 
