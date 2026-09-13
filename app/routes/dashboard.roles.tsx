@@ -9,11 +9,6 @@ import { Modal } from "../components/Modal";
 import { ActionToast } from "../components/ActionToast";
 import { OrganizationAccessTabs } from "../components/OrganizationAccessTabs";
 import { chunkD1Rows, chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
-import {
-  effectivePermissionCodes,
-  isProtectedAccessRole,
-  type PermissionOverride,
-} from "../lib/permission-blocks";
 import { inspectAccessControlSchema } from "../lib/access-control-schema.server";
 import { canManageAccessConfiguration } from "../lib/access-configuration-authority";
 import {
@@ -24,6 +19,8 @@ import {
 import { synchronizeWorkflowFieldHandlerPositionsForInstances } from "../lib/workflow-fields.server";
 import type { OrderModuleCode } from "../lib/order-modules";
 import { adminNavigationPermissionGroups } from "../lib/admin-navigation";
+import { roleCodeForPosition } from "../lib/position-role";
+import { diagnosePositionPermission } from "../lib/position-permission-diagnostics";
 
 type RoleRow = {
   id: string;
@@ -40,6 +37,7 @@ type MemberRow = {
   membership_id: string;
   display_name: string;
   email: string;
+  position_code: string | null;
   position_name: string | null;
   role_codes: string | null;
   role_names: string | null;
@@ -125,6 +123,7 @@ export async function loader({ request }: Route.LoaderArgs) {
            JOIN roles r ON r.id=mr.role_id AND r.status='active'
            JOIN role_permissions rp ON rp.role_id=r.id
           WHERE mr.membership_id=m.id) inherited_permissions,
+        p.code position_code,
         (SELECT GROUP_CONCAT(mpo.permission_code||':'||mpo.effect)
            FROM membership_permission_overrides mpo
           WHERE mpo.membership_id=m.id) override_entries
@@ -212,52 +211,10 @@ export async function action({ request }: Route.ActionArgs) {
   const now = new Date().toISOString();
 
   if (intent === "update_account_overrides") {
-    const membershipId = valueOf(form, "membershipId");
-    const member = await env.DB.prepare(
-      `SELECT m.id,GROUP_CONCAT(DISTINCT r.code) role_codes
-       FROM memberships m
-       LEFT JOIN membership_roles mr ON mr.membership_id=m.id
-       LEFT JOIN roles r ON r.id=mr.role_id
-       WHERE m.id=? AND m.organization_id=? AND m.status='active'
-       GROUP BY m.id`,
-    ).bind(membershipId, current.organizationId).first<{ id: string; role_codes: string | null }>();
-    if (!member) return { formError: "账号不存在或已经停用", targetId: membershipId };
-    const memberRoleCodes = (member.role_codes ?? "").split(",").filter(Boolean);
-    if (isProtectedAccessRole(memberRoleCodes)) {
-      return { formError: "老板/所有者账户的权限不可抽走或覆盖", targetId: membershipId };
-    }
-
-    const overrides: PermissionOverride[] = [];
-    for (const [key, rawValue] of form.entries()) {
-      if (typeof rawValue !== "string" || !["allow", "deny"].includes(rawValue)) continue;
-      if (key.startsWith("override:")) {
-        overrides.push({ code: key.slice("override:".length), effect: rawValue as "allow" | "deny" });
-      }
-    }
-    if (!await validatePermissionSelection(overrides.map((item) => item.code))) {
-      return { formError: "账户权限积木中包含无效选项", targetId: membershipId };
-    }
-    const insertStatements = chunkD1Rows(overrides, 6).map((overrideChunk) => env.DB.prepare(
-      `INSERT INTO membership_permission_overrides(
-        membership_id,permission_code,effect,updated_by_user_id,created_at,updated_at
-      ) VALUES ${overrideChunk.map(() => "(?,?,?,?,?,?)").join(",")}`,
-    ).bind(...overrideChunk.flatMap((override) => [
-      membershipId, override.code, override.effect, current.userId, now, now,
-    ])));
-    await env.DB.batch([
-      env.DB.prepare("DELETE FROM membership_permission_overrides WHERE membership_id=?").bind(membershipId),
-      ...insertStatements,
-    ]);
-    await writeAudit({
-      request,
-      action: "membership.permissions.override",
-      resourceType: "membership",
-      resourceId: membershipId,
-      organizationId: current.organizationId,
-      actorUserId: current.userId,
-      metadata: { overrides },
-    });
-    return { success: "账户安全权限已一次性应用", targetId: membershipId };
+    return {
+      formError: "账号级权限覆盖已停用；请在“岗位默认权限”或“工作流字段”中按岗位修改。",
+      targetId: valueOf(form, "membershipId"),
+    };
   }
 
   if (intent === "update_position_workflow_fields") {
@@ -419,7 +376,7 @@ export function meta() { return [{ title: "岗位权限 | International TMS" }];
 export default function Roles({ loaderData, actionData }: Route.ComponentProps) {
   const busy = useNavigation().state !== "idle";
   const [searchParams] = useSearchParams();
-  const accessView = ["workflow", "accounts"].includes(searchParams.get("view") ?? "")
+  const accessView = ["workflow", "diagnostics"].includes(searchParams.get("view") ?? "")
     ? searchParams.get("view")!
     : "positions";
   if (!loaderData.schemaReady) return <>
@@ -442,7 +399,7 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
       <div>
         <p className="eyebrow">MODULAR ACCESS CONTROL</p>
         <h1>岗位权限</h1>
-        <p>岗位角色提供默认权限，账户权限积木可额外允许或明确拒绝；拒绝优先于角色继承。</p>
+        <p>岗位是菜单、操作与工作流字段权限的唯一来源；同岗位账号使用同一套规则。</p>
       </div>
       {canManage && <Modal title="创建角色" triggerLabel="新增角色" closeSignal={success} size="wide">
         <Form method="post" className="form-grid compact permission-editor-form">
@@ -463,7 +420,7 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
     <nav className="peer-page-tabs access-permission-view-tabs" aria-label="岗位权限分类">
       <Link className={accessView === "positions" ? "active" : ""} to="/admin/roles">岗位默认权限</Link>
       <Link className={accessView === "workflow" ? "active" : ""} to="/admin/roles?view=workflow">工作流字段</Link>
-      <Link className={accessView === "accounts" ? "active" : ""} to="/admin/roles?view=accounts">账号特殊授权</Link>
+      <Link className={accessView === "diagnostics" ? "active" : ""} to="/admin/roles?view=diagnostics">权限一致性诊断</Link>
     </nav>
 
     {accessView === "positions" && <section className="permission-section">
@@ -480,7 +437,7 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
               <input type="hidden" name="roleId" value={role.id} />
               <div className={`permission-editor-notice ${protectedRole ? "warning" : ""}`}>
                 <b>{protectedRole ? "系统保护角色" : role.status === "disabled" ? "历史角色" : "修改岗位默认权限"}</b>
-                <span>{protectedRole ? "老板/所有者始终拥有全部权限，不能抽走。" : role.status === "disabled" ? "仅保留历史审计，不允许新分配或修改。" : "保存后使用该角色的账号立即继承新权限；账户级拒绝仍然优先。"}</span>
+                <span>{protectedRole ? "老板/所有者始终拥有全部权限，不能抽走。" : role.status === "disabled" ? "仅保留历史审计，不允许新分配或修改。" : "保存后该岗位的所有在职账号立即采用新权限。"}</span>
               </div>
               <PermissionCheckboxes grouped={grouped} selected={selected} disabled={!canManage || protectedRole || role.status === "disabled"}/>
               {canManage && !protectedRole && role.status === "active" && <div className="permission-editor-actions"><span>所有勾选将一次性替换当前角色权限。</span><button className="primary" disabled={busy}>确认应用</button></div>}
@@ -534,54 +491,30 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
       </div>
     </section>}
 
-    {accessView === "accounts" && <section className="permission-section account-permission-section">
-      <div className="section-heading"><div><h2>账户权限积木</h2><p>在岗位角色之上为某个账号加权限或抽走权限，不改变同岗位其他人。</p></div><span>{loaderData.members.length} 个有效账号</span></div>
+    {accessView === "diagnostics" && <section className="permission-section account-permission-section">
+      <div className="section-heading"><div><h2>账号与岗位权限一致性</h2><p>只诊断账号的岗位绑定、岗位角色映射和已停用的旧覆盖数据；不提供账号级授权。</p></div><span>{loaderData.members.length} 个有效账号</span></div>
       <div className="table-wrap"><table className="account-permission-table">
-        <thead><tr><th>账号</th><th>部门 / 岗位</th><th>继承角色</th><th>权限结果</th><th>操作</th></tr></thead>
+        <thead><tr><th>账号</th><th>岗位</th><th>期望岗位角色</th><th>实际映射</th><th>权限结果</th><th>诊断</th></tr></thead>
         <tbody>{loaderData.members.map((member) => {
           const inherited = (member.inherited_permissions ?? "").split(",").filter(Boolean);
-          const overrides = parseOverrides(member.override_entries);
           const roleCodes = (member.role_codes ?? "").split(",").filter(Boolean);
-          const protectedAccount = isProtectedAccessRole(roleCodes);
-          const effective = effectivePermissionCodes({
-            inherited,
-            overrides,
-            allPermissions: loaderData.permissions.map((permission) => permission.code),
-            protectedRole: protectedAccount,
+          const expectedRoleCode = member.position_code
+            ? roleCodeForPosition(member.position_code)
+            : null;
+          const legacyOverrideCount = (member.override_entries ?? "").split(",").filter(Boolean).length;
+          const diagnostic = diagnosePositionPermission({
+            positionCode: member.position_code,
+            expectedRoleCode,
+            actualRoleCodes: roleCodes,
+            legacyOverrideCount,
           });
-          const added = overrides.filter((item) => item.effect === "allow").length;
-          const denied = overrides.filter((item) => item.effect === "deny").length;
-          const overrideByCode = new Map(overrides.map((item) => [item.code, item.effect]));
           return <tr key={member.membership_id}>
             <td><strong>{member.display_name}</strong><small>{member.email}</small></td>
             <td>{member.position_name || "未绑定岗位"}</td>
-            <td>{member.role_names || "未分配角色"}</td>
-            <td><strong>{effective.length} 项有效</strong><small>{protectedAccount ? "系统保护" : `安全权限积木 ${added + denied}`}</small></td>
-            <td><Modal title={`账户权限 · ${member.display_name}`} triggerLabel="配置积木" triggerClassName="btn small" closeSignal={actionData?.targetId === member.membership_id && success} size="xwide">
-              <Form method="post" className="permission-editor-form">
-                <input type="hidden" name="intent" value="update_account_overrides" />
-                <input type="hidden" name="membershipId" value={member.membership_id} />
-                <div className={`permission-editor-notice ${protectedAccount ? "warning" : ""}`}>
-                  <b>{member.display_name} · {member.position_name || "未绑定岗位"}</b>
-                  <span>{protectedAccount ? "老板/所有者账户不可覆盖，始终拥有全部权限。" : "继承保持岗位默认；允许增加权限；拒绝会覆盖所有角色授权。"}</span>
-                </div>
-                <div className="account-override-grid">{Object.entries(grouped).map(([module, items]) => <section key={module}>
-                  <h3>{moduleLabels[module] ?? module}</h3>
-                  {items.map((permission) => {
-                    const isInherited = inherited.includes(permission.code);
-                    return <label className="account-override-row" key={permission.code}>
-                      <span><b>{permission.name}</b><small>{permission.description} · {isInherited ? "角色已授予" : "角色未授予"}</small></span>
-                      <select name={`override:${permission.code}`} defaultValue={overrideByCode.get(permission.code) ?? "inherit"} disabled={!canManage || protectedAccount} aria-label={`${permission.name}账户权限`}>
-                        <option value="inherit">继承角色</option>
-                        <option value="allow">额外允许</option>
-                        <option value="deny">明确拒绝</option>
-                      </select>
-                    </label>;
-                  })}
-                </section>)}</div>
-                {canManage && !protectedAccount && <div className="permission-editor-actions"><span>确认后所有账户级改变一次性生效并写入审计。</span><button className="primary" disabled={busy}>确认应用</button></div>}
-              </Form>
-            </Modal></td>
+            <td><code>{expectedRoleCode || "—"}</code></td>
+            <td><strong>{member.role_names || "未分配角色"}</strong><small>{roleCodes.join("、") || "—"}</small></td>
+            <td><strong>{inherited.length} 项岗位权限</strong><small>账号级覆盖不参与运行时鉴权</small></td>
+            <td><span className={`status-pill ${diagnostic.status === "conflict" ? "off" : ""}`}>{diagnostic.status === "consistent" ? "一致" : "需迁移"}</span><small>{diagnostic.issues.join("；") || "岗位权限映射正常"}</small></td>
           </tr>;
         })}</tbody>
       </table></div>
@@ -744,15 +677,4 @@ function IndeterminateCheckbox({
     type="checkbox"
     aria-checked={indeterminate ? "mixed" : props.checked}
   />;
-}
-
-function parseOverrides(value: string | null): PermissionOverride[] {
-  if (!value) return [];
-  return value.split(",").flatMap((entry) => {
-    const separator = entry.lastIndexOf(":");
-    if (separator < 1) return [];
-    const code = entry.slice(0, separator);
-    const effect = entry.slice(separator + 1);
-    return effect === "allow" || effect === "deny" ? [{ code, effect }] : [];
-  });
 }

@@ -379,6 +379,19 @@ export async function action({ request }: Route.ActionArgs) {
       version,definition.id,definition.road_load_type,now,now,
     ).run();
     await copyWorkflowStepsAndFields(definition.id, id, now);
+    await writeAudit({
+      request,
+      action: "workflow.version.create",
+      resourceType: "workflow_definition",
+      resourceId: id,
+      organizationId: current.organizationId,
+      actorUserId: current.userId,
+      metadata: {
+        sourceWorkflowId: definition.id,
+        templateFamilyId: definition.template_family_id,
+        version,
+      },
+    });
     throw redirect(`/admin/workflow?workflowId=${encodeURIComponent(id)}&edit=1#workflow-editor`);
   }
 
@@ -389,6 +402,23 @@ export async function action({ request }: Route.ActionArgs) {
     await env.DB.prepare(
       "UPDATE workflow_definitions SET validation_status=?,validation_message=?,updated_at=? WHERE id=? AND organization_id=?",
     ).bind(validationStatus, issues.join("\n") || null, now, definition.id, current.organizationId).run();
+    await writeAudit({
+      request,
+      action: issues.length
+        ? "workflow.validation.failed"
+        : intent === "publish"
+          ? "workflow.validation.before_publish"
+          : "workflow.validation.passed",
+      resourceType: "workflow_definition",
+      resourceId: definition.id,
+      organizationId: current.organizationId,
+      actorUserId: current.userId,
+      metadata: {
+        version: definition.version_number,
+        issueCount: issues.length,
+        issues,
+      },
+    });
     if (issues.length) return { formError: `发布校验未通过：${issues.join("；")}` };
     if (intent === "validate") return { success: "校验通过，可以进入模拟预览或正式发布" };
     await env.DB.batch([
@@ -401,6 +431,18 @@ export async function action({ request }: Route.ActionArgs) {
           published_at=?,published_by_user_id=?,updated_at=? WHERE id=? AND organization_id=?`,
       ).bind(now,current.userId,now,definition.id,current.organizationId),
     ]);
+    await writeAudit({
+      request,
+      action: "workflow.version.publish",
+      resourceType: "workflow_definition",
+      resourceId: definition.id,
+      organizationId: current.organizationId,
+      actorUserId: current.userId,
+      metadata: {
+        templateFamilyId: definition.template_family_id,
+        version: definition.version_number,
+      },
+    });
     return { success: `工作流 v${definition.version_number} 已发布；旧订单继续使用原版本` };
   }
 
