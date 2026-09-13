@@ -9,7 +9,15 @@ export type PositionAccessProfile = {
   positionName: string;
   roleCode: string;
   permissions: string[];
+  dataScope: PositionBusinessDataScope;
 };
+
+export type PositionBusinessDataScope =
+  | "self"
+  | "department"
+  | "warehouse"
+  | "region"
+  | "company";
 
 type PositionAccessRow = {
   membership_id: string;
@@ -20,6 +28,7 @@ type PositionAccessRow = {
   position_name: string;
   role_code: string;
   permission_codes: string | null;
+  data_scope: PositionBusinessDataScope;
 };
 
 export async function loadActivePositionAccessProfile(
@@ -33,6 +42,12 @@ export async function loadActivePositionAccessProfile(
        department.id department_id,department.code department_code,
        position.id position_id,position.code position_code,position.name position_name,
        role.code role_code,
+       COALESCE(portal_setting.business_data_scope,CASE
+         WHEN position.code IN ('BOSS','DEVELOPER') THEN 'company'
+         WHEN position.code IN ('BUSINESS_SUPERVISOR','OPERATION_SUPERVISOR') THEN 'department'
+         WHEN position.code IN ('WAREHOUSE','OVERSEAS_WAREHOUSE') THEN 'warehouse'
+         WHEN position.code='OVERSEAS' THEN 'region'
+         ELSE 'self' END) data_scope,
        GROUP_CONCAT(DISTINCT role_permission.permission_code) permission_codes
      FROM memberships membership
      JOIN users user ON user.id=membership.user_id AND user.status='active'
@@ -50,10 +65,13 @@ export async function loadActivePositionAccessProfile(
       AND role.code=${roleCodeSql}
       AND role.status='active'
      LEFT JOIN role_permissions role_permission ON role_permission.role_id=role.id
+     LEFT JOIN position_portal_settings portal_setting
+       ON portal_setting.organization_id=membership.organization_id
+      AND portal_setting.position_id=position.id
      WHERE membership.organization_id=? AND membership.user_id=?
        AND membership.status='active'
      GROUP BY membership.id,department.id,department.code,
-       position.id,position.code,position.name,role.code
+       position.id,position.code,position.name,role.code,portal_setting.business_data_scope
      LIMIT 1`,
   ).bind(organizationId, userId).first<PositionAccessRow>();
   if (!row) return null;
@@ -72,6 +90,7 @@ export async function loadActivePositionAccessProfile(
     positionName: row.position_name,
     roleCode: row.role_code,
     permissions,
+    dataScope: row.data_scope,
   };
 }
 

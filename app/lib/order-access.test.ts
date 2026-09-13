@@ -11,6 +11,7 @@ import {
   currentOrderActionSql,
   canReadFullOrderLifecycle,
   canSeeScopedOrder,
+  canViewAllOrders,
   orderVisibilitySql,
 } from "./order-access";
 
@@ -172,6 +173,55 @@ describe("order access", () => {
       assignee_user_id: "user-b",
       responsible_position_code: "TRACKING",
     })).toBe(true);
+  });
+
+  it("uses the position data scope as a read boundary without granting operation", () => {
+    const departmentViewer = {
+      ...baseUser,
+      userId: "department-viewer",
+      departmentId: "department-a",
+      dataScope: "department" as const,
+    };
+    expect(canSeeScopedOrder(departmentViewer, {
+      department_ids: ["department-a"],
+      assignee_user_id: "another-user",
+    })).toBe(true);
+    expect(canOperateCurrentOrder(departmentViewer, {
+      status: "in_execution",
+      current_assignee_user_id: "another-user",
+    })).toBe(false);
+    const scoped = orderVisibilitySql(departmentViewer, "department_order");
+    expect(scoped.sql).toContain("scope_member.department_id=?");
+    expect(scoped.values).toContain("department-a");
+  });
+
+  it("does not let a warehouse scope expose another warehouse", () => {
+    const warehouseViewer = {
+      ...baseUser,
+      userId: "warehouse-viewer",
+      dataScope: "warehouse" as const,
+      warehouseIds: ["warehouse-a"],
+    };
+    expect(canSeeScopedOrder(warehouseViewer, {
+      warehouse_ids: ["warehouse-a"],
+      assignee_user_id: "another-user",
+    })).toBe(true);
+    expect(canSeeScopedOrder(warehouseViewer, {
+      warehouse_ids: ["warehouse-b"],
+      assignee_user_id: "another-user",
+    })).toBe(false);
+    const scoped = orderVisibilitySql(warehouseViewer, "warehouse_order");
+    expect(scoped.sql).toContain("warehouse_order.overseas_warehouse_id IN (?)");
+    expect(scoped.values.filter((value) => value === "warehouse-a")).toHaveLength(5);
+  });
+
+  it("keeps protected company scope complete while ignoring legacy all-order grants on scoped positions", () => {
+    expect(canViewAllOrders({ ...baseUser, dataScope: "company" })).toBe(true);
+    expect(canViewAllOrders({
+      ...baseUser,
+      dataScope: "self",
+      permissions: [...baseUser.permissions, "order.scope.all"],
+    })).toBe(false);
   });
 
   it("marks lifecycle collaboration roles as full-lifecycle read roles", () => {

@@ -28,6 +28,7 @@ type Position = {
   permissions: string | null;
   portal_order_scope: string;
   portal_default_filter: string;
+  business_data_scope: string;
 };
 
 type Department = { code: string; name: string };
@@ -170,7 +171,13 @@ export async function loader({ request }: Route.LoaderArgs) {
                     ELSE lower(p.code)
                   END) permissions,
               COALESCE(pps.order_scope,CASE WHEN p.code IN ('BOSS','DEVELOPER') THEN 'all_orders' ELSE 'current_position' END) portal_order_scope,
-              COALESCE(pps.default_filter,'open') portal_default_filter
+              COALESCE(pps.default_filter,'open') portal_default_filter,
+              COALESCE(pps.business_data_scope,CASE
+                WHEN p.code IN ('BOSS','DEVELOPER') THEN 'company'
+                WHEN p.code IN ('BUSINESS_SUPERVISOR','OPERATION_SUPERVISOR') THEN 'department'
+                WHEN p.code IN ('WAREHOUSE','OVERSEAS_WAREHOUSE') THEN 'warehouse'
+                WHEN p.code='OVERSEAS' THEN 'region'
+                ELSE 'self' END) business_data_scope
        FROM positions p
        LEFT JOIN departments d ON d.organization_id=p.organization_id AND d.code=p.department_code
        LEFT JOIN position_portal_settings pps ON pps.organization_id=p.organization_id AND pps.position_id=p.id
@@ -271,10 +278,46 @@ export async function action({ request }: Route.ActionArgs) {
     const next = valueOf(form, "status");
     if (!["active","disabled"].includes(next)) return { formError: "岗位目标状态无效" };
     const row = await env.DB.prepare(
-      "SELECT status FROM positions WHERE id=? AND organization_id=?",
-    ).bind(id, current.organizationId).first<{ status: string }>();
+      "SELECT status,code FROM positions WHERE id=? AND organization_id=?",
+    ).bind(id, current.organizationId).first<{ status: string; code: string }>();
     if (!row) return { formError: "岗位不存在" };
     if (row.status === next) return { formError: next === "active" ? "岗位已启用" : "岗位已停用" };
+    if (next === "disabled") {
+      if (isProtectedAccessPosition(row.code)) return { formError: "老板和开发者岗位不可停用" };
+      const unresolved = await env.DB.prepare(
+        `SELECT
+          (SELECT COUNT(*) FROM memberships member
+            WHERE member.organization_id=? AND member.position_id=? AND member.status='active') active_members,
+          (SELECT COUNT(DISTINCT responsibility.order_id) FROM (
+            SELECT orders.id order_id FROM transport_orders orders
+            JOIN memberships member ON member.user_id IN (orders.current_assignee_user_id,orders.operation_supervisor_user_id)
+             AND member.organization_id=orders.organization_id AND member.position_id=? AND member.status='active'
+            WHERE orders.organization_id=? AND orders.status NOT IN ('completed','cancelled')
+            UNION ALL
+            SELECT module.order_id FROM order_module_instances module
+            JOIN memberships member ON member.user_id=module.assignee_user_id
+             AND member.organization_id=module.organization_id AND member.position_id=? AND member.status='active'
+            JOIN transport_orders orders ON orders.id=module.order_id AND orders.organization_id=module.organization_id
+            WHERE module.organization_id=? AND orders.status NOT IN ('completed','cancelled')
+            UNION ALL
+            SELECT task.order_id FROM order_tasks task
+            JOIN memberships member ON member.user_id=task.assignee_user_id
+             AND member.organization_id=task.organization_id AND member.position_id=? AND member.status='active'
+            JOIN transport_orders orders ON orders.id=task.order_id AND orders.organization_id=task.organization_id
+            WHERE task.organization_id=? AND task.status!='completed' AND orders.status NOT IN ('completed','cancelled')
+          ) responsibility) unresolved_orders`,
+      ).bind(
+        current.organizationId, id,
+        id, current.organizationId,
+        id, current.organizationId,
+        id, current.organizationId,
+      ).first<{ active_members: number; unresolved_orders: number }>();
+      if (Number(unresolved?.active_members ?? 0) || Number(unresolved?.unresolved_orders ?? 0)) {
+        return {
+          formError: `岗位仍有 ${Number(unresolved?.active_members ?? 0)} 名在岗人员、${Number(unresolved?.unresolved_orders ?? 0)} 票未完责任；请先完成转岗和主管重分配`,
+        };
+      }
+    }
     const result = await env.DB.prepare(
       "UPDATE positions SET status=?,updated_at=? WHERE id=? AND organization_id=? AND status=?",
     ).bind(next, now, id, current.organizationId, row.status).run();
@@ -293,18 +336,22 @@ export async function action({ request }: Route.ActionArgs) {
   if (intent === "portal_settings") {
     const positionId = valueOf(form, "positionId");
     const defaultFilter = valueOf(form, "defaultFilter");
+    const requestedDataScope = valueOf(form, "dataScope");
+    const allowedDataScopes = ["self", "department", "warehouse", "region", "company"];
     if (!["open", "all", "blocked", "overdue"].includes(defaultFilter))
       return { formError: "任务工作台配置无效" };
-    const position = await env.DB.prepare("SELECT id FROM positions WHERE id=? AND organization_id=?").bind(positionId, current.organizationId).first();
+    if (!allowedDataScopes.includes(requestedDataScope)) return { formError: "岗位数据范围无效" };
+    const position = await env.DB.prepare("SELECT id,code FROM positions WHERE id=? AND organization_id=?").bind(positionId, current.organizationId).first<{ id: string; code: string }>();
     if (!position) return { formError: "岗位不存在" };
+    const dataScope = isProtectedAccessPosition(position.code) ? "company" : requestedDataScope;
     await env.DB.prepare(
-      `INSERT INTO position_portal_settings(id,organization_id,position_id,order_scope,default_filter,updated_by_user_id,created_at,updated_at)
-       VALUES(?,?,?,?,?,?,?,?)
+      `INSERT INTO position_portal_settings(id,organization_id,position_id,order_scope,default_filter,business_data_scope,updated_by_user_id,created_at,updated_at)
+       VALUES(?,?,?,?,?,?,?,?,?)
        ON CONFLICT(organization_id,position_id) DO UPDATE SET
-         order_scope=excluded.order_scope,default_filter=excluded.default_filter,
+         order_scope=excluded.order_scope,default_filter=excluded.default_filter,business_data_scope=excluded.business_data_scope,
          updated_by_user_id=excluded.updated_by_user_id,updated_at=excluded.updated_at`,
-    ).bind(crypto.randomUUID(), current.organizationId, positionId, "current_position", defaultFilter, current.userId, now, now).run();
-    return { success: "任务工作台默认筛选已更新；订单范围由角色/账户权限积木控制" };
+    ).bind(crypto.randomUUID(), current.organizationId, positionId, "current_position", defaultFilter, dataScope, current.userId, now, now).run();
+    return { success: "岗位业务数据范围和任务工作台默认筛选已更新" };
   }
 
   const code = valueOf(form, "code").toUpperCase();
@@ -522,6 +569,14 @@ export default function Positions({ loaderData, actionData }: Route.ComponentPro
                         <input type="hidden" name="intent" value="portal_settings" />
                         <input type="hidden" name="positionId" value={position.id} />
                         <span className="field-static-note">范围由权限积木控制</span>
+                        {isProtectedAccessPosition(position.code) && <input type="hidden" name="dataScope" value="company" />}
+                        <select name={isProtectedAccessPosition(position.code) ? undefined : "dataScope"} defaultValue={position.business_data_scope} disabled={isProtectedAccessPosition(position.code)}>
+                          <option value="self">数据：本人责任</option>
+                          <option value="department">数据：本部门</option>
+                          <option value="warehouse">数据：授权仓库</option>
+                          <option value="region">数据：授权区域</option>
+                          <option value="company">数据：全公司</option>
+                        </select>
                         <select name="defaultFilter" defaultValue={position.portal_default_filter}>
                           <option value="open">默认：未完成</option>
                           <option value="all">默认：全部</option>

@@ -10,10 +10,121 @@ export type OrderAccessUser = {
   permissions: string[];
   roleCodes: string[];
   permissionOverrides?: Array<{ code: string; effect: "allow" | "deny" }>;
+  departmentId?: string | null;
+  departmentCode?: string | null;
+  dataScope?: "self" | "department" | "warehouse" | "region" | "company";
+  warehouseIds?: readonly string[];
+  regionCountryCodes?: readonly string[];
 };
 
 export function canViewAllOrders(user: OrderAccessUser) {
-  return isProtectedAccessRole(user.roleCodes) || user.permissions.includes("order.scope.all");
+  return isProtectedAccessRole(user.roleCodes) || user.dataScope === "company" || (
+    user.dataScope === undefined && user.permissions.includes("order.scope.all")
+  );
+}
+
+function placeholders(values: readonly unknown[]) {
+  return values.map(() => "?").join(",");
+}
+
+/**
+ * Position data scope controls read visibility only. Exact creator/current/module
+ * assignments remain independently visible so reassignment never strands work,
+ * while mutation continues to be checked by the workflow responsibility gates.
+ */
+function configuredPositionScopeSql(user: OrderAccessUser, alias: string) {
+  if (!user.dataScope || user.dataScope === "self") return null;
+  if (user.dataScope === "company") return { sql: "1=1", values: [] as string[] };
+
+  if (user.dataScope === "department" && user.departmentId) {
+    return {
+      sql: `EXISTS(
+        SELECT 1 FROM memberships scope_member
+        WHERE scope_member.organization_id=${alias}.organization_id
+          AND scope_member.department_id=? AND scope_member.status='active'
+          AND (
+            scope_member.user_id IN (
+              ${alias}.salesperson_user_id,${alias}.created_by_user_id,
+              ${alias}.current_assignee_user_id,${alias}.operation_supervisor_user_id
+            )
+            OR EXISTS(
+              SELECT 1 FROM order_module_instances scope_module
+              WHERE scope_module.organization_id=${alias}.organization_id
+                AND scope_module.order_id=${alias}.id
+                AND scope_module.assignee_user_id=scope_member.user_id
+            )
+            OR EXISTS(
+              SELECT 1 FROM order_tasks scope_task
+              WHERE scope_task.organization_id=${alias}.organization_id
+                AND scope_task.order_id=${alias}.id
+                AND scope_task.assignee_user_id=scope_member.user_id
+            )
+          )
+      )`,
+      values: [user.departmentId],
+    };
+  }
+
+  if (user.dataScope === "warehouse" && user.warehouseIds?.length) {
+    const ids = [...new Set(user.warehouseIds)];
+    const marker = placeholders(ids);
+    return {
+      sql: `(
+        ${alias}.overseas_warehouse_id IN (${marker})
+        OR EXISTS(
+          SELECT 1 FROM shipments scope_shipment
+          JOIN warehouse_receipts scope_receipt
+            ON scope_receipt.organization_id=scope_shipment.organization_id
+           AND scope_receipt.shipment_id=scope_shipment.id
+          WHERE scope_shipment.organization_id=${alias}.organization_id
+            AND scope_shipment.order_id=${alias}.id
+            AND scope_receipt.warehouse_id IN (${marker})
+        )
+        OR EXISTS(
+          SELECT 1 FROM order_cargo_packages scope_package
+          WHERE scope_package.organization_id=${alias}.organization_id
+            AND scope_package.order_id=${alias}.id
+            AND scope_package.received_warehouse_id IN (${marker})
+        )
+        OR EXISTS(
+          SELECT 1 FROM order_transport_assignments scope_transport
+          WHERE scope_transport.organization_id=${alias}.organization_id
+            AND scope_transport.order_id=${alias}.id
+            AND scope_transport.destination_warehouse_id IN (${marker})
+        )
+        OR EXISTS(
+          SELECT 1 FROM transport_batch_orders scope_batch_order
+          JOIN transport_batches scope_batch
+            ON scope_batch.id=scope_batch_order.batch_id
+           AND scope_batch.organization_id=scope_batch_order.organization_id
+          WHERE scope_batch_order.organization_id=${alias}.organization_id
+            AND scope_batch_order.order_id=${alias}.id
+            AND scope_batch_order.status!='removed'
+            AND scope_batch.warehouse_id IN (${marker})
+        )
+      )`,
+      values: [...ids, ...ids, ...ids, ...ids, ...ids],
+    };
+  }
+
+  if (user.dataScope === "region" && user.regionCountryCodes?.length) {
+    const countries = [...new Set(user.regionCountryCodes.map((code) => code.toUpperCase()))];
+    const marker = placeholders(countries);
+    return {
+      sql: `(
+        upper(${alias}.origin_country) IN (${marker})
+        OR upper(${alias}.destination_country) IN (${marker})
+        OR EXISTS(
+          SELECT 1 FROM warehouses scope_warehouse
+          WHERE scope_warehouse.organization_id=${alias}.organization_id
+            AND scope_warehouse.id=${alias}.overseas_warehouse_id
+            AND upper(scope_warehouse.country_code) IN (${marker})
+        )
+      )`,
+      values: [...countries, ...countries, ...countries],
+    };
+  }
+  return { sql: "0=1", values: [] as string[] };
 }
 
 export const assignedBatchViewPermission = "transport.batch.assigned.view";
@@ -205,6 +316,11 @@ export function orderVisibilitySql(user: OrderAccessUser, alias = "o") {
     if (retainedSupervisorAssignment) values.push(user.userId);
   }
 
+  const configuredScope = configuredPositionScopeSql(user, alias);
+  if (configuredScope) {
+    conditions.push(configuredScope.sql);
+    values.push(...configuredScope.values);
+  }
   return {
     sql: conditions.length ? `(${conditions.join(" OR ")})` : "0=1",
     values,
@@ -372,8 +488,29 @@ export function canSeeScopedOrder(user: OrderAccessUser, order: {
   current_module_assignee_user_ids?: readonly (string | null | undefined)[];
   lifecycle_assignee_user_ids?: readonly (string | null | undefined)[];
   responsible_position_code?: string | null;
+  department_ids?: readonly (string | null | undefined)[];
+  warehouse_ids?: readonly (string | null | undefined)[];
+  origin_country?: string | null;
+  destination_country?: string | null;
 }) {
   if (canViewAllOrders(user)) return true;
+  if (
+    user.dataScope === "department" &&
+    order.department_ids?.some((departmentId) => Boolean(
+      departmentId && departmentId === user.departmentId,
+    ))
+  ) return true;
+  if (
+    user.dataScope === "warehouse" &&
+    order.warehouse_ids?.some((warehouseId) => Boolean(
+      warehouseId && user.warehouseIds?.includes(warehouseId),
+    ))
+  ) return true;
+  if (user.dataScope === "region") {
+    const countries = new Set(user.regionCountryCodes?.map((code) => code.toUpperCase()) ?? []);
+    if ([order.origin_country, order.destination_country]
+      .some((code) => Boolean(code && countries.has(code.toUpperCase())))) return true;
+  }
   if (user.permissions.includes("order.scope.sales_own") && [
     order.salesperson_user_id,
     order.created_by_user_id,

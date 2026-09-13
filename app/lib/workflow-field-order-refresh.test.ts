@@ -27,8 +27,8 @@ describe("workflow field order refresh", () => {
     const result = await refreshOrdersForWorkflowFieldChanges({
       changes: [{ moduleCode: "consignment", stepKey: "order_creation" }],
       listAffectedOrderIds: async () => ["order-current", "order-future"],
-      syncCostsModuleStatus: async () => events.push("costs"),
-      syncOrderWorkflowSnapshot: async (orderId) => events.push(`snapshot:${orderId}`),
+      syncCostsModuleStatus: async () => { events.push("costs"); },
+      syncOrderWorkflowSnapshot: async (orderId) => { events.push(`snapshot:${orderId}`); },
     });
 
     expect(events).toEqual([

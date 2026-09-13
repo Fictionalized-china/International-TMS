@@ -129,17 +129,13 @@ describe("organization assignee hierarchy", () => {
     expect(html).not.toContain('aria-label="选择部门"');
   });
 
-  it("inherits node eligibility from the responsibility position and honors safety denials", () => {
+  it("inherits node eligibility exclusively from the responsibility position", () => {
     const node = [{ stepKey: "order_creation", moduleCode: "consignment" }];
     expect(organizationAssigneeCanHandleWorkflowNodes({
       position_code: "SALES",
     }, "SALES", node)).toBe(true);
     expect(organizationAssigneeCanHandleWorkflowNodes({
       position_code: "DOC",
-    }, "SALES", node)).toBe(false);
-    expect(organizationAssigneeCanHandleWorkflowNodes({
-      position_code: "SALES",
-      permission_override_entries: "order.module.consignment.manage:deny",
     }, "SALES", node)).toBe(false);
   });
 

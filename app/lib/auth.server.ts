@@ -10,7 +10,10 @@ import {
 import type { Site } from "./site.server";
 import { siteFromRequest, siteLogin } from "./site.server";
 import type { PermissionOverride } from "./permission-blocks";
-import { loadActivePositionAccessProfile } from "./position-access-profile.server";
+import {
+  loadActivePositionAccessProfile,
+  type PositionBusinessDataScope,
+} from "./position-access-profile.server";
 import { canUseAdminSite } from "./site-account-access";
 import { sessionCookieName, sessionSlotFromRequest, withSessionSlot } from "./session-slot";
 
@@ -26,6 +29,11 @@ export type SessionUser = {
   permissionOverrides?: PermissionOverride[];
   positionCode: string | null;
   roleCodes: string[];
+  departmentId: string | null;
+  departmentCode: string | null;
+  dataScope: PositionBusinessDataScope;
+  warehouseIds: string[];
+  regionCountryCodes: string[];
 };
 
 function cookieValue(request: Request, name: string): string | null {
@@ -108,6 +116,11 @@ export async function getSessionUser(
   let permissions: string[] = [];
   let positionCode: string | null = null;
   let roleCodes: string[] = [];
+  let departmentId: string | null = null;
+  let departmentCode: string | null = null;
+  let dataScope: PositionBusinessDataScope = "self";
+  let warehouseIds: string[] = [];
+  let regionCountryCodes: string[] = [];
   if (site === "portal") {
     const portalAccount = await env.DB.prepare(
       `SELECT 1 FROM customer_portal_accounts
@@ -126,6 +139,26 @@ export async function getSessionUser(
     permissions = accessProfile.permissions;
     positionCode = accessProfile.positionCode;
     roleCodes = [accessProfile.roleCode];
+    departmentId = accessProfile.departmentId;
+    departmentCode = accessProfile.departmentCode;
+    dataScope = accessProfile.dataScope;
+    if (["warehouse", "region"].includes(dataScope)) {
+      const warehouseAccess = await env.DB.prepare(
+        `SELECT warehouse.id,warehouse.country_code
+           FROM warehouse_user_access access
+           JOIN warehouses warehouse
+             ON warehouse.id=access.warehouse_id
+            AND warehouse.organization_id=access.organization_id
+            AND warehouse.status='active'
+          WHERE access.organization_id=? AND access.user_id=?
+            AND access.access_level IN ('operator','manager')
+          ORDER BY warehouse.code`,
+      ).bind(row.organization_id, row.user_id).all<{ id: string; country_code: string }>();
+      warehouseIds = warehouseAccess.results.map((warehouse) => warehouse.id);
+      regionCountryCodes = [...new Set(
+        warehouseAccess.results.map((warehouse) => warehouse.country_code).filter(Boolean),
+      )];
+    }
   }
   return {
     sessionId: row.session_id,
@@ -139,6 +172,11 @@ export async function getSessionUser(
     permissionOverrides: [],
     positionCode,
     roleCodes,
+    departmentId,
+    departmentCode,
+    dataScope,
+    warehouseIds,
+    regionCountryCodes,
   };
 }
 
