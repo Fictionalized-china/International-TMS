@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { refreshOrdersForWorkflowFieldChanges } from "./workflow-field-order-refresh";
 
 describe("workflow field order refresh", () => {
-  it("does not query or refresh orders for fields outside the costs module", async () => {
+  it("refreshes current and future order snapshots for fields outside the costs module", async () => {
     const listAffectedOrderIds = vi.fn(async () => ["order-1"]);
     const syncCostsModuleStatus = vi.fn(async () => undefined);
     const syncOrderWorkflowSnapshot = vi.fn(async () => undefined);
@@ -16,10 +16,26 @@ describe("workflow field order refresh", () => {
       syncOrderWorkflowSnapshot,
     });
 
-    expect(result).toEqual({ matchedOrders: 0, refreshedOrders: 0 });
-    expect(listAffectedOrderIds).not.toHaveBeenCalled();
+    expect(result).toEqual({ matchedOrders: 1, refreshedOrders: 1 });
+    expect(listAffectedOrderIds).toHaveBeenCalledWith(["outbound_transport"]);
     expect(syncCostsModuleStatus).not.toHaveBeenCalled();
-    expect(syncOrderWorkflowSnapshot).not.toHaveBeenCalled();
+    expect(syncOrderWorkflowSnapshot).toHaveBeenCalledWith("order-1");
+  });
+
+  it("never advances workflow or creates business records while refreshing field gates", async () => {
+    const events: string[] = [];
+    const result = await refreshOrdersForWorkflowFieldChanges({
+      changes: [{ moduleCode: "consignment", stepKey: "order_creation" }],
+      listAffectedOrderIds: async () => ["order-current", "order-future"],
+      syncCostsModuleStatus: async () => events.push("costs"),
+      syncOrderWorkflowSnapshot: async (orderId) => events.push(`snapshot:${orderId}`),
+    });
+
+    expect(events).toEqual([
+      "snapshot:order-current",
+      "snapshot:order-future",
+    ]);
+    expect(result).toEqual({ matchedOrders: 2, refreshedOrders: 2 });
   });
 
   it("refreshes a costs gate placed on a custom workflow step", async () => {

@@ -469,7 +469,7 @@ describe("workflow publication responsibility readiness", () => {
       fields: [],
     };
 
-    const splitIssues = validateWorkflowResponsibilityReadiness({
+    const positionOnlyIssues = validateWorkflowResponsibilityReadiness({
       ...base,
       positions: [{
         ...position,
@@ -477,23 +477,15 @@ describe("workflow publication responsibility readiness", () => {
           {
             membershipId: "operation-a",
             permissionCodes: ["order.view"],
-            permissionOverrides: [{
-              code: "order.module.tracking.manage",
-              effect: "deny" as const,
-            }],
           },
           {
             membershipId: "operation-b",
             permissionCodes: ["order.view"],
-            permissionOverrides: [{
-              code: "order.module.transport.manage",
-              effect: "deny" as const,
-            }],
           },
         ],
       }],
     }).join("\n");
-    expect(splitIssues).toContain("没有同一有效个人账号");
+    expect(positionOnlyIssues).not.toContain("没有同一有效个人账号");
 
     const completeIssues = validateWorkflowResponsibilityReadiness({
       ...base,
@@ -522,22 +514,6 @@ describe("workflow publication responsibility readiness", () => {
     }).join("\n");
     expect(protectedOwnerIssues).toBe("");
 
-    const denyAwareIssues = validateWorkflowResponsibilityReadiness({
-      ...base,
-      positions: [{
-        ...position,
-        active_member_count: 1,
-        active_member_permissions: [{
-          membershipId: "operation-denied",
-          permissionCodes: ["order.view"],
-          permissionOverrides: [{
-            code: "order.module.tracking.manage",
-            effect: "deny" as const,
-          }],
-        }],
-      }],
-    }).join("\n");
-    expect(denyAwareIssues).toContain("没有同一有效个人账号");
   });
 
   it("rejects required system tasks without a runtime auto-handler and accepts supported handlers", () => {

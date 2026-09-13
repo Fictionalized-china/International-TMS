@@ -81,7 +81,7 @@ export function currentOrderActionSql(user: Pick<OrderAccessUser, "userId">, ali
 }
 
 export type EnabledOrderModuleActionInput = {
-  user: Pick<OrderAccessUser, "userId" | "positionCode" | "permissions" | "roleCodes" | "permissionOverrides">;
+  user: Pick<OrderAccessUser, "userId" | "positionCode" | "permissions" | "roleCodes">;
   orderStatus: string;
   stepKey?: string | null;
   moduleCode: string;
@@ -96,8 +96,8 @@ export type EnabledOrderModuleActionInput = {
  * Their mutations are therefore authorized from the frozen workflow instance:
  * the module must be enabled and the account must either be the explicit
  * module/task owner, belong to the configured responsibility pool while the
- * work is unassigned. Account-level module denials remain an independent
- * security boundary and always win.
+ * work is unassigned. The account inherits its operation capability from the
+ * current position profile; per-account permission exceptions are not used.
  */
 export function canOperateEnabledOrderModule(
   input: EnabledOrderModuleActionInput,

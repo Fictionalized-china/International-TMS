@@ -13,14 +13,14 @@ type WorkflowNodeOperationUser = {
   userId: string;
   positionCode: string | null;
   roleCodes: readonly string[];
-  permissionOverrides?: readonly { code: string; effect: "allow" | "deny" }[];
 };
 
 /**
  * Resolve the actor side of a frozen workflow-node gate. Configuration
  * authority never grants business-operation authority: once assigned, only
  * the assigned account may operate; before assignment, the responsibility
- * position is the candidate pool. Explicit safety denials still win.
+ * position is the candidate pool. Account-level permission exceptions do not
+ * participate here: the position profile is the sole permission source.
  */
 export function resolveWorkflowNodeOperationAccess(input: {
   user: WorkflowNodeOperationUser;
@@ -37,18 +37,6 @@ export function resolveWorkflowNodeOperationAccess(input: {
   }
   if (["completed", "cancelled"].includes(input.orderStatus)) {
     return { allowed: false, source: "denied", reason: "订单已经结束，当前节点仅供查看" };
-  }
-
-  const modulePermission = `order.module.${input.moduleCode}.manage`;
-  const moduleDenied = input.user.permissionOverrides?.some(
-    (item) => item.code === modulePermission && item.effect === "deny",
-  );
-  if (moduleDenied) {
-    return {
-      allowed: false,
-      source: "denied",
-      reason: "当前账号被明确禁止办理该业务模块",
-    };
   }
 
   const assignedUserIds = new Set(

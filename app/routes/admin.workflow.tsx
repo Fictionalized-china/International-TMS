@@ -1870,7 +1870,6 @@ async function loadPublicationPositionReadiness(organizationId: string) {
     membershipId: string;
     positionCode: string;
     permissionCodes: string[];
-    permissionOverrides: [];
   }>>();
   for (const member of members) {
     if (!member.position_code || !member.membership_id) continue;
@@ -1879,7 +1878,6 @@ async function loadPublicationPositionReadiness(organizationId: string) {
       membershipId: member.membership_id,
       positionCode: member.position_code,
       permissionCodes: (member.permission_codes ?? "").split(",").filter(Boolean),
-      permissionOverrides: [],
     });
     membersByPosition.set(member.position_code, list);
   }

@@ -69,7 +69,6 @@ export type PublicationPositionReadiness = {
     membershipId: string;
     positionCode?: string;
     permissionCodes: readonly string[];
-    permissionOverrides?: readonly { code: string; effect: "allow" | "deny" }[];
   }[];
 };
 
@@ -323,16 +322,9 @@ function publicationMembers(positions: readonly PublicationPositionReadiness[]) 
 function publicationMemberCanHandleNodes(
   member: PublicationMember,
   responsibilityPositionCode: string,
-  nodes: readonly { stepKey: string; moduleCode: string }[],
+  _nodes: readonly { stepKey: string; moduleCode: string }[],
 ) {
-  return nodes.every((node) => {
-    if (member.permissionOverrides?.some(
-      (override) =>
-        override.code === `order.module.${node.moduleCode}.manage` &&
-        override.effect === "deny",
-    )) return false;
-    return member.positionCode === responsibilityPositionCode;
-  });
+  return member.positionCode === responsibilityPositionCode;
 }
 
 const settlementActionRequirements = {

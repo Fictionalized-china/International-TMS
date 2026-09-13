@@ -247,15 +247,6 @@ describe("order access", () => {
       moduleAssigneeUserId: "user-a",
       user: { ...input.user, permissions: [] },
     })).toBe(true);
-    expect(canOperateEnabledOrderModule({
-      ...input,
-      stepKey: "completion_review",
-      moduleAssigneeUserId: "user-a",
-      user: {
-        ...input.user,
-        permissionOverrides: [{ code: "order.module.review.manage", effect: "deny" }],
-      },
-    })).toBe(false);
   });
 
   it("uses the workflow-instance responsibility pool only while the module is unassigned", () => {

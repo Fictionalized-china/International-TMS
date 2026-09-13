@@ -16,10 +16,6 @@ export async function refreshOrdersForWorkflowFieldChanges(input: {
 }): Promise<WorkflowFieldOrderRefreshResult> {
   const targetStepKeys = [...new Set(
     input.changes
-      .filter(
-        (change) =>
-          change.moduleCode === "costs",
-      )
       .map((change) => change.stepKey),
   )];
   if (!targetStepKeys.length) {
@@ -29,11 +25,14 @@ export async function refreshOrdersForWorkflowFieldChanges(input: {
   const orderIds = [...new Set(
     (await input.listAffectedOrderIds(targetStepKeys)).filter(Boolean),
   )];
+  const hasCostsChange = input.changes.some(
+    (change) => change.moduleCode === "costs",
+  );
   const refreshConcurrency = 4;
   for (let index = 0; index < orderIds.length; index += refreshConcurrency) {
     await Promise.all(
       orderIds.slice(index, index + refreshConcurrency).map(async (orderId) => {
-        await input.syncCostsModuleStatus(orderId);
+        if (hasCostsChange) await input.syncCostsModuleStatus(orderId);
         await input.syncOrderWorkflowSnapshot(orderId);
       }),
     );
