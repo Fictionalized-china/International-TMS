@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { Form, useNavigation } from "react-router";
+import { useEffect, useRef, useState, type InputHTMLAttributes } from "react";
 import type { Route } from "./+types/dashboard.roles";
 import { requireSessionUser } from "../lib/auth.server";
 import { validateCode, valueOf } from "../lib/validation";
@@ -21,6 +22,7 @@ import {
 } from "../lib/workflow-field-position-access";
 import { synchronizeWorkflowFieldHandlerPositionsForInstances } from "../lib/workflow-fields.server";
 import type { OrderModuleCode } from "../lib/order-modules";
+import { adminNavigationPermissionGroups } from "../lib/admin-navigation";
 
 type RoleRow = {
   id: string;
@@ -634,16 +636,100 @@ function PermissionCheckboxes({
   selected: Set<string>;
   disabled?: boolean;
 }) {
-  return <fieldset className="permission-grid">
-    <legend>权限积木</legend>
-    {Object.entries(grouped).map(([module, items]) => <div key={module}>
-      <strong>{moduleLabels[module] ?? module}</strong>
-      {items.map((permission) => <label key={permission.code}>
-        <input type="checkbox" name="permissions" value={permission.code} defaultChecked={selected.has(permission.code)} disabled={disabled}/>
-        <span><b>{permission.name}</b><small>{permission.description}</small></span>
-      </label>)}
-    </div>)}
-  </fieldset>;
+  const selectedSignature = [...selected].sort().join("\u0000");
+  const [selectedCodes, setSelectedCodes] = useState(() => new Set(selected));
+  const knownCodes = new Set(
+    Object.values(grouped).flat().map((permission) => permission.code),
+  );
+
+  useEffect(() => {
+    setSelectedCodes(new Set(selected));
+  }, [selectedSignature]);
+
+  function setPermission(code: string, checked: boolean) {
+    setSelectedCodes((current) => {
+      const next = new Set(current);
+      if (checked) next.add(code);
+      else next.delete(code);
+      return next;
+    });
+  }
+
+  function setNavigationGroup(
+    group: (typeof adminNavigationPermissionGroups)[number],
+    checked: boolean,
+  ) {
+    setSelectedCodes((current) => {
+      const next = new Set(current);
+      const codes = checked
+        ? group.enablePermissionCodes
+        : group.controllingPermissionCodes;
+      codes.filter((code) => knownCodes.has(code)).forEach((code) => {
+        if (checked) next.add(code);
+        else next.delete(code);
+      });
+      return next;
+    });
+  }
+
+  return <>
+    <fieldset className="admin-menu-permission-grid" disabled={disabled}>
+      <legend>一级菜单快捷配置</legend>
+      <p>批量勾选会同步下方现有权限；路由和接口仍按具体权限校验，可继续在下方精细调整。</p>
+      <div className="admin-menu-permission-options">
+        {adminNavigationPermissionGroups.map((group) => {
+          const enableCodes = group.enablePermissionCodes.filter((code) => knownCodes.has(code));
+          const controllingCodes = group.controllingPermissionCodes.filter((code) => knownCodes.has(code));
+          const checked = enableCodes.length > 0 && enableCodes.every((code) => selectedCodes.has(code));
+          const hasSelected = controllingCodes.some((code) => selectedCodes.has(code));
+          return <label key={group.key}>
+            <IndeterminateCheckbox
+              checked={checked}
+              indeterminate={!checked && hasSelected}
+              disabled={disabled || enableCodes.length === 0}
+              onChange={(event) => setNavigationGroup(group, event.currentTarget.checked)}
+            />
+            <span><b>{group.label}</b><small>{group.description}</small></span>
+          </label>;
+        })}
+      </div>
+    </fieldset>
+    <fieldset className="permission-grid">
+      <legend>具体权限</legend>
+      {Object.entries(grouped).map(([module, items]) => <div key={module}>
+        <strong>{moduleLabels[module] ?? module}</strong>
+        {items.map((permission) => <label key={permission.code}>
+          <input
+            type="checkbox"
+            name="permissions"
+            value={permission.code}
+            checked={selectedCodes.has(permission.code)}
+            disabled={disabled}
+            onChange={(event) => setPermission(permission.code, event.currentTarget.checked)}
+          />
+          <span><b>{permission.name}</b><small>{permission.description}</small></span>
+        </label>)}
+      </div>)}
+    </fieldset>
+  </>;
+}
+
+function IndeterminateCheckbox({
+  indeterminate,
+  ...props
+}: InputHTMLAttributes<HTMLInputElement> & { indeterminate: boolean }) {
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (inputRef.current) inputRef.current.indeterminate = indeterminate;
+  }, [indeterminate]);
+
+  return <input
+    {...props}
+    ref={inputRef}
+    type="checkbox"
+    aria-checked={indeterminate ? "mixed" : props.checked}
+  />;
 }
 
 function parseOverrides(value: string | null): PermissionOverride[] {

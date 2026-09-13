@@ -10,6 +10,7 @@ import { WorkspacePreferences } from "../components/WorkspacePreferences";
 import { loadInternalNotificationSummary } from "../lib/internal-notifications.server";
 import { canAccessSettlementWorkbench } from "../lib/billing-access";
 import { canAccessBatchWorkspace } from "../lib/order-access";
+import { adminNavigationGroupVisibility } from "../lib/admin-navigation";
 
 export async function loader({ request }: Route.LoaderArgs) {
   const user = await requireSessionUser(request);
@@ -24,6 +25,7 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
   const can = (permission: string) => user.permissions.includes(permission);
   const canAccessBilling = canAccessSettlementWorkbench(user.permissions);
   const canAccessBatches = canAccessBatchWorkspace(user);
+  const navigationGroups = adminNavigationGroupVisibility(user);
 
   return (
     <div className="shell admin-app-shell">
@@ -44,14 +46,15 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
         </div>
 
         <nav className="nav" aria-label="运营管理导航">
-          <span className="nav-group nav-title">工作台</span>
-          <SideLink to="/admin/portal" icon="layout">任务工作台</SideLink>
-          <SideLink to="/admin/notifications" icon="bell">
-            通知{loaderData.notifications.unreadCount>0&&<b className="nav-badge">{loaderData.notifications.unreadCount>99?"99+":loaderData.notifications.unreadCount}</b>}
-          </SideLink>
-          {can("dashboard.view") && <SideLink to="/admin" icon="dashboard" end>运营总览</SideLink>}
+          <SideNavGroup label="工作台" visible={navigationGroups.workbench}>
+            <SideLink to="/admin/portal" icon="layout">任务工作台</SideLink>
+            <SideLink to="/admin/notifications" icon="bell">
+              通知{loaderData.notifications.unreadCount>0&&<b className="nav-badge">{loaderData.notifications.unreadCount>99?"99+":loaderData.notifications.unreadCount}</b>}
+            </SideLink>
+            {can("dashboard.view") && <SideLink to="/admin" icon="dashboard" end>运营总览</SideLink>}
+          </SideNavGroup>
 
-          <span className="nav-group nav-title">汽运业务</span>
+          <SideNavGroup label="汽运业务" visible={navigationGroups.transport}>
           {can("quote.view") && <SideLink to="/admin/quotations" icon="receipt">询价与报价</SideLink>}
           {can("order.view") && <SideLink to="/admin/orders" icon="clipboard">运输订单</SideLink>}
           {can("shipment.view") && <SideLink to="/admin/domestic-tracking" icon="map">在途车辆</SideLink>}
@@ -60,15 +63,17 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
           {can("shipment.view") && <SideLink to="/admin/shipments" icon="packageCheck">运单列表</SideLink>}
           {canAccessBilling && <SideLink to="/admin/billing" icon="billing">费用结算</SideLink>}
           {can("order.module.cargo.manage") && <SideLink to="/admin/cargo" icon="boxes">货物信息</SideLink>}
+          </SideNavGroup>
 
-          <span className="nav-group nav-title">业务资料</span>
+          <SideNavGroup label="业务资料" visible={navigationGroups.businessData}>
           {can("customer.view") && <SideLink to="/admin/customers" icon="building">客户管理</SideLink>}
           {can("sales.view") && <SideLink to="/admin/sales" icon="chart">销售管理</SideLink>}
           {can("pricing.view") && <SideLink to="/admin/logistics-products" icon="briefcase">物流产品</SideLink>}
           {can("carrier.view") && <SideLink to="/admin/carriers" icon="truck">承运商管理</SideLink>}
           {can("workflow.view") && <SideLink to="/admin/workflow" icon="workflow">业务工作流</SideLink>}
+          </SideNavGroup>
 
-          <span className="nav-group nav-title">系统</span>
+          <SideNavGroup label="系统" visible={navigationGroups.system}>
           {can("master.view") && <SideLink to="/admin/master-data" icon="settings">基础数据</SideLink>}
           {can("warehouse.manage") && <SideLink to="/admin/warehouses" icon="warehouse">仓库管理</SideLink>}
           {can("department.view") && <SideLink to="/admin/departments" icon="users">部门管理</SideLink>}
@@ -77,6 +82,7 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
           {can("role.view") && <SideLink to="/admin/roles" icon="shield">角色权限</SideLink>}
           {can("security.manage") && <SideLink to="/admin/security" icon="lock">安全中心</SideLink>}
           {can("audit.view") && <SideLink to="/admin/audit" icon="history">审计日志</SideLink>}
+          </SideNavGroup>
         </nav>
 
         <div className="sidebar-user userbox">
@@ -109,6 +115,22 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
       </div>
     </div>
   );
+}
+
+function SideNavGroup({
+  label,
+  visible,
+  children,
+}: {
+  label: string;
+  visible: boolean;
+  children: ReactNode;
+}) {
+  if (!visible) return null;
+  return <>
+    <span className="nav-group nav-title">{label}</span>
+    {children}
+  </>;
 }
 
 function SideLink({

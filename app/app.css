@@ -29706,7 +29706,47 @@ html[data-motion="off"] *::after {
 }
 .permission-editor-notice.warning { color: #7a4b12; border-color: #ead1a6; border-left-color: #d58a22; background: #fff9ee; }
 .permission-editor-notice span { color: inherit; font-size: 11px; }
-.permission-editor-form > .permission-grid { grid-column: 1 / -1; }
+.permission-editor-form > .permission-grid,
+.permission-editor-form > .admin-menu-permission-grid { grid-column: 1 / -1; }
+.admin-menu-permission-grid {
+  margin: 0;
+  padding: 10px;
+  border: 1px solid #cbd8e4;
+  background: #f7fafc;
+}
+.admin-menu-permission-grid > legend {
+  padding: 0 6px;
+  color: #0c3558;
+  font-weight: 700;
+}
+.admin-menu-permission-grid > p {
+  margin: 0 0 8px;
+  color: #60758a;
+  font-size: 11px;
+}
+.admin-menu-permission-options {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+.admin-menu-permission-options label {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  min-height: 58px;
+  padding: 9px 10px;
+  border: 1px solid #d5e0e9;
+  background: #fff;
+  cursor: pointer;
+}
+.admin-menu-permission-options input { margin-top: 2px; }
+.admin-menu-permission-options b,
+.admin-menu-permission-options small { display: block; }
+.admin-menu-permission-options b { color: #123b5d; font-size: 12px; }
+.admin-menu-permission-options small { margin-top: 3px; color: #657b8f; font-size: 10px; line-height: 1.4; }
+.admin-menu-permission-grid:disabled { opacity: .7; }
+.admin-menu-permission-grid:disabled .admin-menu-permission-options label { cursor: not-allowed; }
 .permission-editor-actions {
   position: sticky;
   bottom: 0;
@@ -29817,7 +29857,8 @@ html[data-motion="off"] *::after {
   .workflow-node-override-grid,
   .position-workflow-field-grid,
   .position-workflow-field-cards,
-  .position-field-permission-list { grid-template-columns: 1fr; }
+  .position-field-permission-list,
+  .admin-menu-permission-options { grid-template-columns: 1fr; }
   .permission-editor-notice,
   .permission-editor-actions { align-items: stretch; flex-direction: column; }
 }
