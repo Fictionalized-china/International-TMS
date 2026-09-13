@@ -71,6 +71,22 @@ export type LoadingDocumentRequirementSummary = {
   complete: boolean;
 };
 
+export type LoadingDocumentOrderGateInput = {
+  orderId: string;
+  requirements: readonly EffectiveLoadingDocumentRequirement[];
+  reviews: readonly LoadingDocumentReview[];
+};
+
+export type LoadingDocumentBatchGateSummary = {
+  orders: Array<LoadingDocumentRequirementSummary & { orderId: string }>;
+  requiredCount: number;
+  uploadedRequiredCount: number;
+  approvedRequiredCount: number;
+  rejectedRequiredCount: number;
+  incompleteOrderIds: string[];
+  complete: boolean;
+};
+
 export const warehouseLoadingDocumentMutationPolicy = {
   allowed: false,
   reason: "订单文件由冻结工作流当前节点指定的业务或单证负责人办理；仓库端仅查看齐套状态",
@@ -166,6 +182,48 @@ export function summarizeLoadingDocumentRequirements(
     missingUploadCodes,
     incompleteCodes,
     complete: incompleteCodes.length === 0,
+  };
+}
+
+/**
+ * Evaluate a consolidation batch without merging the field rules of its
+ * mounted orders. Each order keeps the workflow contract that is effective
+ * for that order; a required document on one order must never become required
+ * on another order in the same batch.
+ */
+export function summarizeLoadingDocumentBatchGate(
+  orderInputs: readonly LoadingDocumentOrderGateInput[],
+): LoadingDocumentBatchGateSummary {
+  const orders = orderInputs.map((input) => ({
+    orderId: input.orderId,
+    ...summarizeLoadingDocumentRequirements(
+      input.requirements,
+      input.reviews,
+    ),
+  }));
+  const incompleteOrderIds = orders
+    .filter((order) => !order.complete)
+    .map((order) => order.orderId);
+  return {
+    orders,
+    requiredCount: orders.reduce(
+      (sum, order) => sum + order.requiredCount,
+      0,
+    ),
+    uploadedRequiredCount: orders.reduce(
+      (sum, order) => sum + order.uploadedRequiredCount,
+      0,
+    ),
+    approvedRequiredCount: orders.reduce(
+      (sum, order) => sum + order.approvedRequiredCount,
+      0,
+    ),
+    rejectedRequiredCount: orders.reduce(
+      (sum, order) => sum + order.rejectedRequiredCount,
+      0,
+    ),
+    incompleteOrderIds,
+    complete: orderInputs.length > 0 && incompleteOrderIds.length === 0,
   };
 }
 

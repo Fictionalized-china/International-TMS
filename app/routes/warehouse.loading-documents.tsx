@@ -8,7 +8,7 @@ import { requireSessionUser } from "../lib/auth.server";
 import {
   currentStageLoadingDocumentRequirements,
   loadingOrderDocumentDefinitions,
-  summarizeLoadingDocumentRequirements,
+  summarizeLoadingDocumentBatchGate,
   warehouseLoadingDocumentMutationPolicy,
   type LoadingOrderDocumentCode,
   type OrderLoadingDocumentRequirements,
@@ -164,30 +164,19 @@ export async function loader({ request }: Route.LoaderArgs) {
   }
   const batchDocumentSummaries = contextBatches.map((batch) => {
     const orderIds = batch.order_ids.split(",").filter(Boolean);
-    const orderSummaries = orderIds.map((orderId) =>
-      summarizeLoadingDocumentRequirements(
-        currentStageLoadingDocumentRequirements(requirementsByOrder.get(orderId)?.documents ?? []),
-        documentStatusesByBatchOrder.get(`${batch.id}:${orderId}`) ?? [],
+    const batchGate = summarizeLoadingDocumentBatchGate(orderIds.map((orderId) => ({
+      orderId,
+      requirements: currentStageLoadingDocumentRequirements(
+        requirementsByOrder.get(orderId)?.documents ?? [],
       ),
-    );
+      reviews: documentStatusesByBatchOrder.get(`${batch.id}:${orderId}`) ?? [],
+    })));
     return {
       batchId: batch.id,
-      requiredCount: orderSummaries.reduce(
-        (sum, summary) => sum + summary.requiredCount,
-        0,
-      ),
-      uploadedRequiredCount: orderSummaries.reduce(
-        (sum, summary) => sum + summary.uploadedRequiredCount,
-        0,
-      ),
-      approvedRequiredCount: orderSummaries.reduce(
-        (sum, summary) => sum + summary.approvedRequiredCount,
-        0,
-      ),
-      rejectedRequiredCount: orderSummaries.reduce(
-        (sum, summary) => sum + summary.rejectedRequiredCount,
-        0,
-      ),
+      requiredCount: batchGate.requiredCount,
+      uploadedRequiredCount: batchGate.uploadedRequiredCount,
+      approvedRequiredCount: batchGate.approvedRequiredCount,
+      rejectedRequiredCount: batchGate.rejectedRequiredCount,
     };
   });
   let orders: OrderRow[] = [];

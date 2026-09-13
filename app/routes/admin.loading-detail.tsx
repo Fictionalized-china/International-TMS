@@ -27,6 +27,7 @@ import { batchCostsManageScopeSql, batchVisibilitySql, canAccessBatchWorkspace }
 import {
   loadingOrderDocumentDefinitions,
   summarizeLoadingDocumentRequirements,
+  summarizeLoadingDocumentBatchGate,
   uploadedRequiredDocumentCompletedGate,
   type LoadingOrderDocumentCode,
   type OrderLoadingDocumentRequirements,
@@ -1607,13 +1608,16 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   };
   const customsReadyCount=loaderData.orders.filter(order=>customsReadyForOrder(order.order_id)).length;
   const allCustomsReady=loaderData.orders.length>0&&customsReadyCount===loaderData.orders.length;
-  const allRequiredDocumentsReady=loaderData.orders.length>0&&loaderData.orders.every(order=>{
+  const batchDocumentGate=summarizeLoadingDocumentBatchGate(loaderData.orders.map(order=>{
     const requirements=loaderData.orderDocumentRequirements.find(group=>group.orderId===order.order_id)?.documents??[];
-    const files=loaderData.orderDocuments.filter(item=>item.order_id===order.order_id);
     const customsModule=customsPolicyFor(order.order_id);
-    const blockingRequirements=requirements.filter(requirement=>requirement.moduleCode!=="customs"||(customsModule.enabled&&customsModule.required));
-    return summarizeLoadingDocumentRequirements(blockingRequirements,files).complete;
-  });
+    return{
+      orderId:order.order_id,
+      requirements:requirements.filter(requirement=>requirement.moduleCode!=="customs"||(customsModule.enabled&&customsModule.required)),
+      reviews:loaderData.orderDocuments.filter(item=>item.order_id===order.order_id),
+    };
+  }));
+  const allRequiredDocumentsReady=batchDocumentGate.complete;
   const allDocumentGateReady=allCustomsReady&&allRequiredDocumentsReady;
   const activeExceptions=loaderData.batchExceptions.filter(item=>isActiveExceptionStatus(item.status));
   const blockingExceptions=activeExceptions.filter(item=>item.blocks_progress===1);

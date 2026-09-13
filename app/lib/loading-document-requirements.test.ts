@@ -3,6 +3,7 @@ import {
   currentStageLoadingDocumentRequirements,
   loadingDocumentFieldPolicy,
   resolveLoadingDocumentRequirements,
+  summarizeLoadingDocumentBatchGate,
   summarizeLoadingDocumentRequirements,
   uploadedRequiredDocumentCompletedGate,
   warehouseLoadingDocumentMutationPolicy,
@@ -192,6 +193,58 @@ describe("loading document requirements", () => {
 
     expect(summaries.flatMap((summary) => summary.incompleteCodes)).toEqual([]);
     expect(summaries.reduce((sum, summary) => sum + summary.requiredCount, 0)).toBe(2);
+  });
+
+  it("does not copy an old order required document onto a new-rule order", () => {
+    const oldRuleOrder = resolveLoadingDocumentRequirements({
+      orderId: "old-rule-order",
+      customsEnabled: false,
+      fieldsByModule: {
+        consignment: [{
+          fieldKey: "document_consignment_letter",
+          isActive: true,
+          isRequired: true,
+        }],
+      },
+    });
+    const newRuleOrder = resolveLoadingDocumentRequirements({
+      orderId: "new-rule-order",
+      customsEnabled: false,
+      fieldsByModule: {
+        consignment: [{
+          fieldKey: "document_consignment_letter",
+          isActive: true,
+          isRequired: false,
+        }],
+      },
+    });
+
+    const summary = summarizeLoadingDocumentBatchGate([
+      {
+        orderId: oldRuleOrder.orderId,
+        requirements: oldRuleOrder.documents,
+        reviews: [{
+          document_category: "consignment_letter",
+          review_status: "approved",
+        }],
+      },
+      {
+        orderId: newRuleOrder.orderId,
+        requirements: newRuleOrder.documents,
+        reviews: [],
+      },
+    ]);
+
+    expect(summary).toMatchObject({
+      requiredCount: 1,
+      approvedRequiredCount: 1,
+      incompleteOrderIds: [],
+      complete: true,
+    });
+    expect(summary.orders).toEqual([
+      expect.objectContaining({ orderId: "old-rule-order", requiredCount: 1 }),
+      expect.objectContaining({ orderId: "new-rule-order", requiredCount: 0 }),
+    ]);
   });
 
   it("keeps warehouse task creation blocked until uploaded files are confirmed", () => {
