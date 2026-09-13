@@ -4,6 +4,7 @@ import type { Route } from "./+types/admin.shipments";
 import { OrderNumberLink } from "../components/EntityNumberLink";
 import { OrderRouteFilterFields } from "../components/OrderRouteFilterFields";
 import { ActionToast } from "../components/ActionToast";
+import { TransportExecutionTabs } from "../components/TransportExecutionTabs";
 import { requireSessionUser } from "../lib/auth.server";
 import { nextDocumentNumber } from "../lib/documents.server";
 import { canTransition, nextStates } from "../lib/workflow";
@@ -321,7 +322,7 @@ export async function action({ request }: Route.ActionArgs) {
   return { success: "运单状态与轨迹已更新" };
 }
 async function ownedShipment(id: string, org: string) { return env.DB.prepare("SELECT order_id FROM shipments WHERE id = ? AND organization_id = ?").bind(id, org).first<{order_id:string}>(); }
-export function meta() { return [{ title: "运单列表 | International TMS" }]; }
+export function meta() { return [{ title: "运输执行 | International TMS" }]; }
 const labels: Record<string,string> = { booked:"已订舱", picked_up:"已提货", in_transit:"运输中", customs:"清关中", out_for_delivery:"运输中", delivered:"已签收", exception:"异常", cancelled:"已取消" };
 const businessTypeLabels: Record<string,string> = { ltl:"零担/拼车", ftl:"整车", warehouse:"仓到仓" };
 const orderWorkflowStatuses = ["draft","submitted","confirmed","in_execution","completed","cancelled"];
@@ -335,11 +336,12 @@ export default function Shipments({ loaderData, actionData }: Route.ComponentPro
     <header className="page-header">
       <div>
         <p className="eyebrow">SHIPMENT REGISTER</p>
-        <h1>运单列表</h1>
-        <p>集中查看运单状态、关联订单、创建来源和运输摘要，并快速筛选目标运单。</p>
+        <h1>运输执行</h1>
+        <p>运输订单承载业务全流程；这里集中管理实际生成的运单，并与在途车辆视图协同。</p>
       </div>
       <span className="status-pill">共 {loaderData.total} 票</span>
     </header>
+    <TransportExecutionTabs />
     <ActionToast data={actionData} />
     <section className="panel shipment-register">
       <div className="panel-header shipment-register-header">

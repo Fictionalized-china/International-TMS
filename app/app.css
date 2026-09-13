@@ -29689,8 +29689,8 @@ html[data-motion="off"] *::after {
 .permission-section .section-heading h2 { margin: 0; font-size: 15px; }
 .permission-section .section-heading p,
 .permission-section .section-heading span { margin: 2px 0 0; color: #60758a; font-size: 11px; }
-.role-permission-cards { margin: 0; border: 0; }
-.role-permission-cards .role-card { display: grid; gap: 8px; min-height: 200px; }
+.role-permission-cards { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; margin: 0; padding: 10px; border: 0; }
+.role-permission-cards .role-card { display: grid; gap: 8px; min-height: 148px; padding: 12px; }
 .role-permission-cards .role-card.is-disabled { background: #f7f9fb; opacity: .78; }
 .role-permission-cards .role-card > button { justify-self: start; }
 .permission-editor-form { display: grid; gap: 12px; }
@@ -29853,6 +29853,7 @@ html[data-motion="off"] *::after {
 .workflow-node-override-row small { margin-top: 2px; color: #6b7e90; font-size: 10px; }
 .workflow-node-override-row select { width: 100%; min-height: 30px; }
 @media (max-width: 900px) {
+  .position-account-filters { grid-template-columns: 1fr; }
   .account-override-grid,
   .workflow-node-override-grid,
   .position-workflow-field-grid,
@@ -31925,6 +31926,43 @@ html[data-motion="off"] *::after {
   z-index: 4;
   outline: 3px solid #2d7dd2 !important;
   outline-offset: -3px !important;
+}
+
+.organization-access-tabs,
+.transport-execution-tabs,
+.position-management-tabs,
+.access-permission-view-tabs {
+  margin: 0 0 10px;
+}
+
+.organization-access-tabs {
+  padding-bottom: 8px !important;
+  border-bottom: 1px solid #d5e0e9 !important;
+}
+
+.organization-access-tabs > :is(a, button) { min-width: 116px; }
+.transport-execution-tabs > :is(a, button),
+.position-management-tabs > :is(a, button),
+.access-permission-view-tabs > :is(a, button) { min-width: 124px; }
+
+.position-account-filters {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.5fr) minmax(150px, 1fr) minmax(190px, 1.2fr) 130px auto;
+  align-items: end;
+  gap: 8px;
+  padding: 9px 10px;
+  border-bottom: 1px solid #d9e2ea;
+  background: #f7fafc;
+}
+
+.position-account-filters .field { min-width: 0; }
+.position-account-filters .field > :is(input, select) { width: 100% !important; }
+.position-account-filter-actions { display: flex; align-items: center; gap: 8px; min-height: 34px; }
+
+.access-permission-view-tabs {
+  padding: 8px !important;
+  border: 1px solid #d5e0e9 !important;
+  background: #f7fafc !important;
 }
 
 .document-scope-peer-page-tabs {

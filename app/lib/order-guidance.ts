@@ -172,11 +172,12 @@ function moduleGuidance(
   fallbackCode: OrderModuleCode,
 ) {
   const code = module?.module_code ?? fallbackCode;
+  const automaticOwner = code === "overseas_warehouse" ? "境外目的仓" : null;
   return {
     stage,
     action,
-    owner: module?.assignee_name || "待分配",
-    blocker: module?.blocking_reason || (!module?.assignee_name ? "尚未分配负责人" : null),
+    owner: module?.assignee_name || automaticOwner || "待分配",
+    blocker: module?.blocking_reason || (!module?.assignee_name && !automaticOwner ? "尚未分配负责人" : null),
     href: `/admin/orders/${orderId}/modules/${code}#module-business-data`,
     moduleCode: code,
   };

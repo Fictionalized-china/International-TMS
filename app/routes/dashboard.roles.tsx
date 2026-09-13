@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { Form, useNavigation } from "react-router";
+import { Form, Link, useNavigation, useSearchParams } from "react-router";
 import { useEffect, useRef, useState, type InputHTMLAttributes } from "react";
 import type { Route } from "./+types/dashboard.roles";
 import { requireSessionUser } from "../lib/auth.server";
@@ -7,6 +7,7 @@ import { validateCode, valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import { Modal } from "../components/Modal";
 import { ActionToast } from "../components/ActionToast";
+import { OrganizationAccessTabs } from "../components/OrganizationAccessTabs";
 import { chunkD1Rows, chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 import {
   effectivePermissionCodes,
@@ -413,12 +414,17 @@ export async function action({ request }: Route.ActionArgs) {
   return { success: "角色已创建", targetId: roleId };
 }
 
-export function meta() { return [{ title: "角色权限 | International TMS" }]; }
+export function meta() { return [{ title: "岗位权限 | International TMS" }]; }
 
 export default function Roles({ loaderData, actionData }: Route.ComponentProps) {
   const busy = useNavigation().state !== "idle";
+  const [searchParams] = useSearchParams();
+  const accessView = ["workflow", "accounts"].includes(searchParams.get("view") ?? "")
+    ? searchParams.get("view")!
+    : "positions";
   if (!loaderData.schemaReady) return <>
-    <header className="page-header"><div><p className="eyebrow">ACCESS CONTROL MAINTENANCE</p><h1>角色权限暂时只读</h1><p>系统检测到数据库版本落后于当前程序，已停止权限写入以保护现有账号。</p></div></header>
+    <header className="page-header"><div><p className="eyebrow">ACCESS CONTROL MAINTENANCE</p><h1>岗位权限暂时只读</h1><p>系统检测到数据库版本落后于当前程序，已停止权限写入以保护现有账号。</p></div></header>
+    <OrganizationAccessTabs permissions={loaderData.current.permissions}/>
     <section className="panel"><div className="alert warning" role="status">待升级项目：{loaderData.schemaMissing.join("、")}。请重新启动服务；启动命令会自动应用数据库迁移。</div></section>
   </>;
   const grouped = loaderData.permissions.reduce<Record<string, PermissionRow[]>>((groups, permission) => {
@@ -435,7 +441,7 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
     <header className="page-header">
       <div>
         <p className="eyebrow">MODULAR ACCESS CONTROL</p>
-        <h1>角色权限</h1>
+        <h1>岗位权限</h1>
         <p>岗位角色提供默认权限，账户权限积木可额外允许或明确拒绝；拒绝优先于角色继承。</p>
       </div>
       {canManage && <Modal title="创建角色" triggerLabel="新增角色" closeSignal={success} size="wide">
@@ -450,17 +456,25 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
       </Modal>}
     </header>
 
+    <OrganizationAccessTabs permissions={loaderData.current.permissions}/>
+
     <ActionToast message={formError ?? success} tone={formError ? "error" : "success"} data={actionData}/>
 
-    <section className="permission-section">
-      <div className="section-heading"><div><h2>岗位角色权限</h2><p>点击角色查看权限来源；启用角色可一次性调整整组权限。</p></div><span>{loaderData.roles.filter((role) => role.status === "active").length} 个启用</span></div>
+    <nav className="peer-page-tabs access-permission-view-tabs" aria-label="岗位权限分类">
+      <Link className={accessView === "positions" ? "active" : ""} to="/admin/roles">岗位默认权限</Link>
+      <Link className={accessView === "workflow" ? "active" : ""} to="/admin/roles?view=workflow">工作流字段</Link>
+      <Link className={accessView === "accounts" ? "active" : ""} to="/admin/roles?view=accounts">账号特殊授权</Link>
+    </nav>
+
+    {accessView === "positions" && <section className="permission-section">
+      <div className="section-heading"><div><h2>岗位默认权限</h2><p>点击岗位权限模板查看来源；保存后同岗位账号立即继承。</p></div><span>{loaderData.roles.filter((role) => role.status === "active").length} 个启用</span></div>
       <div className="cards role-permission-cards">{loaderData.roles.map((role) => {
         const selected = new Set((role.permissions ?? "").split(",").filter(Boolean));
         const protectedRole = ["owner", "boss"].includes(role.code);
         return <article className={`role-card ${role.status === "disabled" ? "is-disabled" : ""}`} key={role.id}>
           <div><span className={`status-pill ${role.status === "disabled" ? "off" : ""}`}>{role.status === "disabled" ? "历史停用" : role.is_system ? "系统角色" : "自定义角色"}</span><h3>{role.name}</h3><code>{role.code}</code><p>{role.description || "暂无说明"}</p></div>
           <footer><span>{selected.size} 项权限</span><span>{role.member_count} 位成员</span></footer>
-          <Modal title={`角色权限 · ${role.name}`} triggerLabel="查看与编辑" triggerClassName="btn small" closeSignal={actionData?.targetId === role.id && success} size="xwide">
+          <Modal title={`岗位权限 · ${role.name}`} triggerLabel="查看与编辑" triggerClassName="btn small" closeSignal={actionData?.targetId === role.id && success} size="xwide">
             <Form method="post" className="permission-editor-form">
               <input type="hidden" name="intent" value="update_role" />
               <input type="hidden" name="roleId" value={role.id} />
@@ -474,9 +488,9 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
           </Modal>
         </article>;
       })}</div>
-    </section>
+    </section>}
 
-    <section className="permission-section position-workflow-field-section">
+    {accessView === "workflow" && <section className="permission-section position-workflow-field-section">
       <div className="section-heading">
         <div>
           <h2>订单工作流字段权限</h2>
@@ -518,9 +532,9 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
           </article>;
         })}
       </div>
-    </section>
+    </section>}
 
-    <section className="permission-section account-permission-section">
+    {accessView === "accounts" && <section className="permission-section account-permission-section">
       <div className="section-heading"><div><h2>账户权限积木</h2><p>在岗位角色之上为某个账号加权限或抽走权限，不改变同岗位其他人。</p></div><span>{loaderData.members.length} 个有效账号</span></div>
       <div className="table-wrap"><table className="account-permission-table">
         <thead><tr><th>账号</th><th>部门 / 岗位</th><th>继承角色</th><th>权限结果</th><th>操作</th></tr></thead>
@@ -571,7 +585,7 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
           </tr>;
         })}</tbody>
       </table></div>
-    </section>
+    </section>}
   </>;
 }
 

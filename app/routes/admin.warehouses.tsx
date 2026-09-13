@@ -438,7 +438,7 @@ function AccessManager({ warehouse, users, access, busy }: { warehouse: Warehous
         ))}
       </div>
       {!access.length && <p className="empty-state">该仓库尚未分配具体用户。</p>}
-      <p className="access-note">仓库级授权控制用户可进入哪个仓库；用户仍需在“角色权限”中拥有仓库端查看或操作权限。</p>
+      <p className="access-note">仓库级授权控制用户可进入哪个仓库；账号仍需在“岗位权限”中拥有仓库端查看或操作权限。</p>
     </div>
   );
 }

@@ -26,6 +26,13 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
   const canAccessBilling = canAccessSettlementWorkbench(user.permissions);
   const canAccessBatches = canAccessBatchWorkspace(user);
   const navigationGroups = adminNavigationGroupVisibility(user);
+  const organizationAccessHref = can("department.view")
+    ? "/admin/departments"
+    : can("user.view")
+      ? "/admin/positions"
+      : can("role.view")
+        ? "/admin/roles"
+        : null;
 
   return (
     <div className="shell admin-app-shell">
@@ -57,10 +64,9 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
           <SideNavGroup label="汽运业务" visible={navigationGroups.transport}>
           {can("quote.view") && <SideLink to="/admin/quotations" icon="receipt">询价与报价</SideLink>}
           {can("order.view") && <SideLink to="/admin/orders" icon="clipboard">运输订单</SideLink>}
-          {can("shipment.view") && <SideLink to="/admin/domestic-tracking" icon="map">在途车辆</SideLink>}
           {canAccessBatches && <SideLink to="/admin/loading" icon="truck">配载单跟踪</SideLink>}
           {can("order.module.documents.manage") && <SideLink to="/admin/documents" icon="documents">文件中心</SideLink>}
-          {can("shipment.view") && <SideLink to="/admin/shipments" icon="packageCheck">运单列表</SideLink>}
+          {can("shipment.view") && <SideLink to="/admin/shipments" icon="packageCheck">运输执行</SideLink>}
           {canAccessBilling && <SideLink to="/admin/billing" icon="billing">费用结算</SideLink>}
           {can("order.module.cargo.manage") && <SideLink to="/admin/cargo" icon="boxes">货物信息</SideLink>}
           </SideNavGroup>
@@ -76,10 +82,7 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
           <SideNavGroup label="系统" visible={navigationGroups.system}>
           {can("master.view") && <SideLink to="/admin/master-data" icon="settings">基础数据</SideLink>}
           {can("warehouse.manage") && <SideLink to="/admin/warehouses" icon="warehouse">仓库管理</SideLink>}
-          {can("department.view") && <SideLink to="/admin/departments" icon="users">部门管理</SideLink>}
-          {can("user.view") && <SideLink to="/admin/positions" icon="userSettings">岗位管理</SideLink>}
-          {can("user.view") && <SideLink to="/admin/users" icon="users">用户管理</SideLink>}
-          {can("role.view") && <SideLink to="/admin/roles" icon="shield">角色权限</SideLink>}
+          {organizationAccessHref && <SideLink to={organizationAccessHref} icon="userSettings">组织与权限</SideLink>}
           {can("security.manage") && <SideLink to="/admin/security" icon="lock">安全中心</SideLink>}
           {can("audit.view") && <SideLink to="/admin/audit" icon="history">审计日志</SideLink>}
           </SideNavGroup>

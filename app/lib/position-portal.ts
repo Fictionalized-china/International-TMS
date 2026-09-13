@@ -66,8 +66,8 @@ const portalConfigs: Record<string, PositionPortalConfig> = {
     quickLinks: [
       { label: "业务工作流", description: "编辑模板、节点与字段", href: "/admin/workflow", permission: "workflow.view" },
       { label: "基础数据", description: "维护业务主数据", href: "/admin/master-data", permission: "master.view" },
-      { label: "岗位管理", description: "检查岗位权限", href: "/admin/positions", permission: "user.view" },
-      { label: "角色权限", description: "维护系统角色", href: "/admin/roles", permission: "role.view" },
+      { label: "岗位与账号", description: "检查账号任岗", href: "/admin/positions", permission: "user.view" },
+      { label: "岗位权限", description: "维护岗位默认权限", href: "/admin/roles", permission: "role.view" },
     ],
   },
   DOC: {
@@ -81,7 +81,7 @@ const portalConfigs: Record<string, PositionPortalConfig> = {
       { label: "单证待办", description: "处理文件资料", href: "/admin/workbenches/documents", permission: "order.view" },
       { label: "报关待办", description: "处理申报与放行", href: "/admin/workbenches/customs", permission: "order.view" },
       { label: "配载订单", description: "处理分配给本人的整批单证与报关", href: "/admin/loading", permission: "transport.batch.assigned.view" },
-      { label: "运单列表", description: "核对关联运单", href: "/admin/shipments", permission: "shipment.view" },
+      { label: "运输执行", description: "核对关联运单", href: "/admin/shipments", permission: "shipment.view" },
     ],
   },
   CS: {
@@ -106,7 +106,7 @@ const portalConfigs: Record<string, PositionPortalConfig> = {
     moduleCodes: ["tracking"],
     quickLinks: [
       { label: "运踪待办", description: "更新当前运输节点", href: "/admin/workbenches/tracking", permission: "order.view" },
-      { label: "运单列表", description: "查看车辆和轨迹", href: "/admin/shipments", permission: "shipment.view" },
+      { label: "运输执行", description: "查看车辆和轨迹", href: "/admin/shipments", permission: "shipment.view" },
     ],
   },
   FINANCE_ACCOUNTING: {
@@ -169,7 +169,7 @@ const portalConfigs: Record<string, PositionPortalConfig> = {
     quickLinks: [
       { label: "海外待办", description: "处理到仓和自提", href: "/admin/workbenches/tasks", permission: "order.view" },
       { label: "运踪待办", description: "更新境外运输节点", href: "/admin/workbenches/tracking", permission: "order.view" },
-      { label: "运单列表", description: "查看出境运单", href: "/admin/shipments", permission: "shipment.view" },
+      { label: "运输执行", description: "查看出境运单", href: "/admin/shipments", permission: "shipment.view" },
     ],
   },
   LOADING: { code: "LOADING", title: "前端配载岗", description: "仅用于岗位与薪资归类。", viewAreas: [], operateAreas: [], moduleCodes: [], quickLinks: [] },
@@ -196,7 +196,7 @@ const portalConfigs: Record<string, PositionPortalConfig> = {
     quickLinks: [
       { label: "业务待办", description: "按下一步处理订单", href: "/admin/workbenches/tasks", permission: "order.view" },
       { label: "运输订单", description: "查看全部执行订单", href: "/admin/orders", permission: "order.view" },
-      { label: "运单列表", description: "查看运输资源与轨迹", href: "/admin/shipments", permission: "shipment.view" },
+      { label: "运输执行", description: "查看运输资源与轨迹", href: "/admin/shipments", permission: "shipment.view" },
       { label: "配载单跟踪", description: "处理分配给本人的整批运输", href: "/admin/loading", permission: "transport.batch.assigned.view" },
     ],
   },
@@ -210,7 +210,7 @@ const portalConfigs: Record<string, PositionPortalConfig> = {
     quickLinks: [],
   },
   CASHIER: { code: "CASHIER", title: "出纳岗门户", description: "登记收付款并完成核销。", viewAreas: ["全部订单摘要", "应收应付", "收付款流水"], operateAreas: ["登记收付款", "对账单核销", "数据导出"], moduleCodes: [], quickLinks: [{ label: "费用结算", description: "登记流水与核销", href: "/admin/billing", permission: "billing.view" }] },
-  HR_ADMIN: { code: "HR_ADMIN", title: "人事行政岗门户", description: "维护组织、账号、岗位和权限。", viewAreas: ["组织与账号", "部门岗位", "角色权限", "审计日志"], operateAreas: ["开通与停用账号", "配置岗位", "增减权限积木"], moduleCodes: [], quickLinks: [{ label: "用户管理", description: "开通与维护账号", href: "/admin/users", permission: "user.view" }, { label: "岗位管理", description: "维护部门岗位", href: "/admin/positions", permission: "department.view" }, { label: "角色权限", description: "配置角色和个人积木", href: "/admin/roles", permission: "role.view" }] },
+  HR_ADMIN: { code: "HR_ADMIN", title: "人事行政岗门户", description: "维护组织、账号、岗位和权限。", viewAreas: ["组织架构", "岗位与账号", "岗位权限", "审计日志"], operateAreas: ["开通与停用账号", "配置岗位", "增减权限积木"], moduleCodes: [], quickLinks: [{ label: "组织与权限", description: "开通账号并维护岗位归属", href: "/admin/positions", permission: "user.view" }, { label: "岗位权限", description: "配置岗位和账号特殊权限", href: "/admin/roles", permission: "role.view" }] },
   BOOKING: {
     code: "BOOKING",
     title: "订舱人员门户",
@@ -220,7 +220,7 @@ const portalConfigs: Record<string, PositionPortalConfig> = {
     moduleCodes: ["transport", "loading", "documents"],
     quickLinks: [
       { label: "运输待办", description: "处理分配任务", href: "/admin/workbenches/tasks", permission: "order.view" },
-      { label: "运单列表", description: "维护运输运单", href: "/admin/shipments", permission: "shipment.view" },
+      { label: "运输执行", description: "维护运输运单", href: "/admin/shipments", permission: "shipment.view" },
       { label: "承运商管理", description: "选择承运资源", href: "/admin/carriers", permission: "carrier.view" },
     ],
   },

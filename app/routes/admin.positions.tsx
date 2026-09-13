@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { Form, useNavigation } from "react-router";
+import { Form, Link, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.positions";
 import { ConfirmAction } from "../components/ConfirmAction";
 import { ActionToast } from "../components/ActionToast";
@@ -9,6 +9,8 @@ import { valueOf } from "../lib/validation";
 import { roleCodeForPosition } from "../lib/position-role";
 import { isProtectedAccessRole } from "../lib/permission-blocks";
 import { inspectAccessControlSchema } from "../lib/access-control-schema.server";
+import { OrganizationAccessTabs } from "../components/OrganizationAccessTabs";
+import { QueryPagination } from "../components/QueryPagination";
 
 type Position = {
   id: string;
@@ -33,8 +35,12 @@ type Member = {
   title: string | null;
   position_id: string | null;
   position_name: string | null;
+  department_code: string | null;
+  department_name: string | null;
   role_codes: string | null;
 };
+
+const MEMBER_PAGE_SIZE = 10;
 
 const permissionLabels: Record<string, string> = {
   "dashboard.view": "首页",
@@ -63,7 +69,51 @@ const permissionLabels: Record<string, string> = {
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "user.view");
   await ensurePositionsSeed(current.organizationId);
-  const [positions, departments, members] = await Promise.all([
+  const url = new URL(request.url);
+  const view = url.searchParams.get("view") === "accounts" ? "accounts" : "positions";
+  const q = (url.searchParams.get("q") ?? "").trim();
+  const department = url.searchParams.get("department") ?? "";
+  const position = url.searchParams.get("position") ?? "";
+  const binding = ["bound", "unbound"].includes(url.searchParams.get("binding") ?? "")
+    ? url.searchParams.get("binding")!
+    : "";
+  const page = Math.max(1, Number.parseInt(url.searchParams.get("page") ?? "1", 10) || 1);
+  const memberConditions = ["m.organization_id=?", "m.status='active'", "u.status='active'"];
+  const memberBindings: unknown[] = [current.organizationId];
+  if (q) {
+    memberConditions.push("(u.display_name LIKE ? OR u.email LIKE ? OR COALESCE(p.name,'') LIKE ? OR COALESCE(d.name,'') LIKE ?)");
+    const term = `%${q}%`;
+    memberBindings.push(term, term, term, term);
+  }
+  if (department) {
+    memberConditions.push("p.department_code=?");
+    memberBindings.push(department);
+  }
+  if (position) {
+    memberConditions.push("m.position_id=?");
+    memberBindings.push(position);
+  }
+  if (binding === "bound") memberConditions.push("m.position_id IS NOT NULL");
+  if (binding === "unbound") memberConditions.push("m.position_id IS NULL");
+  const memberWhere = memberConditions.join(" AND ");
+  const memberSql = `SELECT m.id membership_id,u.id user_id,u.display_name,u.email,m.title,m.position_id,p.name position_name,
+              p.department_code,d.name department_name,GROUP_CONCAT(r.code) role_codes
+       FROM memberships m
+       JOIN users u ON u.id=m.user_id
+       LEFT JOIN positions p ON p.id=m.position_id
+       LEFT JOIN departments d ON d.organization_id=m.organization_id AND d.code=p.department_code
+       LEFT JOIN membership_roles mr ON mr.membership_id=m.id
+       LEFT JOIN roles r ON r.id=mr.role_id
+       WHERE ${memberWhere}
+       GROUP BY m.id
+       ORDER BY u.display_name
+       LIMIT ? OFFSET ?`;
+  const memberCountSql = `SELECT COUNT(*) total FROM memberships m
+       JOIN users u ON u.id=m.user_id
+       LEFT JOIN positions p ON p.id=m.position_id
+       LEFT JOIN departments d ON d.organization_id=m.organization_id AND d.code=p.department_code
+       WHERE ${memberWhere}`;
+  const [positions, departments, members, memberCount] = await Promise.all([
     env.DB.prepare(
       `SELECT p.id,p.code,p.name,p.department_code,d.name department_name,p.status,p.sort_order,
               CASE p.code
@@ -129,24 +179,23 @@ export async function loader({ request }: Route.LoaderArgs) {
     env.DB.prepare(
       "SELECT code,name FROM departments WHERE organization_id=? AND status='active' ORDER BY sort_order,name",
     ).bind(current.organizationId).all<Department>(),
-    env.DB.prepare(
-      `SELECT m.id membership_id,u.id user_id,u.display_name,u.email,m.title,m.position_id,p.name position_name,
-              GROUP_CONCAT(r.code) role_codes
-       FROM memberships m
-       JOIN users u ON u.id=m.user_id
-       LEFT JOIN positions p ON p.id=m.position_id
-       LEFT JOIN membership_roles mr ON mr.membership_id=m.id
-       LEFT JOIN roles r ON r.id=mr.role_id
-       WHERE m.organization_id=? AND m.status='active' AND u.status='active'
-       GROUP BY m.id
-       ORDER BY u.display_name`,
-    ).bind(current.organizationId).all<Member>(),
+    env.DB.prepare(memberSql).bind(...memberBindings, MEMBER_PAGE_SIZE, (page - 1) * MEMBER_PAGE_SIZE).all<Member>(),
+    env.DB.prepare(memberCountSql).bind(...memberBindings).first<{ total: number }>(),
   ]);
+  const memberTotal = Number(memberCount?.total ?? 0);
   return {
     current,
     positions: positions.results,
     departments: departments.results,
     members: members.results,
+    view,
+    filters: { q, department, position, binding },
+    memberPagination: {
+      page,
+      pageCount: Math.max(1, Math.ceil(memberTotal / MEMBER_PAGE_SIZE)),
+      pageSize: MEMBER_PAGE_SIZE,
+      total: memberTotal,
+    },
   };
 }
 
@@ -191,7 +240,7 @@ export async function action({ request }: Route.ActionArgs) {
     const role = await env.DB.prepare(
       "SELECT id FROM roles WHERE organization_id=? AND code=? AND status='active'",
     ).bind(current.organizationId, roleCode).first<{ id: string }>();
-    if (!role) return { formError: `岗位 ${position.name} 还没有对应角色，请先执行数据库迁移或在角色权限中补齐` };
+    if (!role) return { formError: `岗位 ${position.name} 还没有对应权限模板，请先执行数据库迁移或在岗位权限中补齐` };
     await env.DB.batch([
       env.DB.prepare("UPDATE memberships SET department_id=?,position_id=?,title=?,updated_at=? WHERE id=? AND organization_id=?").bind(position.department_id, position.id, position.name, now, membershipId, current.organizationId),
       env.DB.prepare("DELETE FROM membership_roles WHERE membership_id=? AND role_id IN (SELECT id FROM roles WHERE organization_id=? AND (code LIKE 'pos_%' OR code IN ('boss','developer','warehouse_operator','overseas_warehouse_operator')))").bind(membershipId, current.organizationId),
@@ -301,19 +350,32 @@ export default function Positions({ loaderData, actionData }: Route.ComponentPro
       <header className="page-header">
         <div>
           <p className="eyebrow">POSITION ACCESS</p>
-          <h1>岗位管理</h1>
-          <p>按岗位维护权限边界，并把账号绑定到对应岗位；老板岗位默认拥有所有权限。</p>
+          <h1>岗位与账号</h1>
+          <p>先维护岗位定义，再把账号绑定到岗位；岗位权限统一在“岗位权限”页面维护。</p>
         </div>
         <span className="status-pill">{loaderData.positions.length} 个岗位</span>
       </header>
+      <OrganizationAccessTabs permissions={loaderData.current.permissions}/>
       <ActionToast data={actionData} />
-      <section className="panel">
+      <nav className="peer-page-tabs position-management-tabs" aria-label="岗位与账号分类">
+        <Link className={loaderData.view === "positions" ? "active" : ""} to="/admin/positions?view=positions">岗位定义</Link>
+        <Link className={loaderData.view === "accounts" ? "active" : ""} to="/admin/positions?view=accounts">账号任岗</Link>
+      </nav>
+      {loaderData.view === "accounts" && <section className="panel">
         <div className="panel-header">
           <div>
             <h2>账号岗位绑定</h2>
-            <p>岗位决定账号默认能进入哪些模块；特殊账号仍可在角色权限里叠加角色。</p>
+            <p>按账号、部门或岗位筛选后调整归属；每页固定显示 10 个账号。</p>
           </div>
         </div>
+        <Form method="get" className="position-account-filters">
+          <input type="hidden" name="view" value="accounts" />
+          <label className="field"><span>查找账号</span><input name="q" defaultValue={loaderData.filters.q} placeholder="姓名或邮箱" /></label>
+          <label className="field"><span>部门</span><select name="department" defaultValue={loaderData.filters.department}><option value="">全部部门</option>{loaderData.departments.map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label>
+          <label className="field"><span>岗位</span><select name="position" defaultValue={loaderData.filters.position}><option value="">全部岗位</option>{loaderData.positions.filter((item) => item.status === "active").map((item) => <option key={item.id} value={item.id}>{item.department_name} / {item.name}</option>)}</select></label>
+          <label className="field"><span>绑定状态</span><select name="binding" defaultValue={loaderData.filters.binding}><option value="">全部</option><option value="bound">已绑定</option><option value="unbound">未绑定</option></select></label>
+          <div className="position-account-filter-actions"><button className="secondary">筛选</button><Link className="text-button" to="/admin/positions?view=accounts">重置</Link></div>
+        </Form>
         <div className="table-wrap">
           <table>
             <thead>
@@ -331,7 +393,7 @@ export default function Positions({ loaderData, actionData }: Route.ComponentPro
                     <strong>{member.display_name}</strong>
                     <small>{member.email}{member.title ? ` · ${member.title}` : ""}</small>
                   </td>
-                  <td>{member.position_name || "未绑定"}</td>
+                  <td><strong>{member.position_name || "未绑定"}</strong><small>{member.department_name || "未归属部门"}</small></td>
                   <td><small>{member.role_codes || "未分配角色"}</small></td>
                   <td>
                     {canManage ? (
@@ -355,8 +417,9 @@ export default function Positions({ loaderData, actionData }: Route.ComponentPro
             </tbody>
           </table>
         </div>
-      </section>
-      {canManage && (
+        <QueryPagination {...loaderData.memberPagination} unit="个账号" />
+      </section>}
+      {loaderData.view === "positions" && canManage && (
         <section className="panel">
           <h2>新增或更新岗位</h2>
           <Form method="post" className="form-grid compact position-editor-form">
@@ -386,11 +449,11 @@ export default function Positions({ loaderData, actionData }: Route.ComponentPro
           </Form>
         </section>
       )}
-      <section className="panel">
+      {loaderData.view === "positions" && <section className="panel">
         <div className="panel-header">
           <div>
             <h2>岗位与权限范围</h2>
-            <p>这里展示岗位对应角色的权限摘要；具体权限项仍在角色权限中维护。</p>
+            <p>这里展示岗位默认权限摘要；具体权限项统一在“岗位权限”中维护。</p>
           </div>
         </div>
         <div className="table-wrap">
@@ -469,7 +532,7 @@ export default function Positions({ loaderData, actionData }: Route.ComponentPro
             </tbody>
           </table>
         </div>
-      </section>
+      </section>}
     </>
   );
 }
@@ -511,5 +574,5 @@ async function ensurePositionsSeed(organizationId: string) {
 }
 
 export function meta() {
-  return [{ title: "岗位管理 | International TMS" }];
+  return [{ title: "岗位与账号 | International TMS" }];
 }

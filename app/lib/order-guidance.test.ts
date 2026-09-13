@@ -50,4 +50,18 @@ describe("order next guidance", () => {
     expect(confirmed[1].status).toBe("completed");
     expect(confirmed[2].status).toBe("active");
   });
+
+  it("treats overseas warehouse pickup as warehouse-owned instead of unassigned", () => {
+    const result = orderNextGuidance({
+      orderId: "o1",
+      orderStatus: "in_execution",
+      modules: [module({
+        module_code: "overseas_warehouse",
+        module_name: "客户扫码自提",
+        current_step_name: "等待客户预约或扫码自提",
+      })],
+    });
+    expect(result.owner).toBe("境外目的仓");
+    expect(result.blocker).toBeNull();
+  });
 });

@@ -8,6 +8,7 @@ import { validateEmail, validatePassword, valueOf, type FieldErrors } from "../l
 import { writeAudit } from "../lib/audit.server";
 import { Modal } from "../components/Modal";
 import { ActionToast } from "../components/ActionToast";
+import { OrganizationAccessTabs } from "../components/OrganizationAccessTabs";
 import { roleCodeForPosition } from "../lib/position-role";
 import { isProtectedAccessRole } from "../lib/permission-blocks";
 import { inspectAccessControlSchema } from "../lib/access-control-schema.server";
@@ -113,7 +114,7 @@ export async function action({ request }: Route.ActionArgs) {
   return { success: "用户已创建" };
 }
 
-export function meta() { return [{ title: "用户管理 | International TMS" }]; }
+export function meta() { return [{ title: "账号管理 | International TMS" }]; }
 
 export default function Users({ loaderData, actionData }: Route.ComponentProps) {
   const busy = useNavigation().state !== "idle";
@@ -130,7 +131,7 @@ export default function Users({ loaderData, actionData }: Route.ComponentProps) 
     <header className="page-header">
       <div>
         <p className="eyebrow">IDENTITY</p>
-        <h1>用户管理</h1>
+        <h1>账号管理</h1>
         <p>每个账号必须归属到“部门 → 岗位”，审核和派单才能准确落到个人。</p>
       </div>
       {canManage && <Modal title="创建用户" triggerLabel="新增用户" closeSignal={success}>
@@ -156,7 +157,7 @@ export default function Users({ loaderData, actionData }: Route.ComponentProps) 
             />
             {errors?.positionId && <small className="field-error">{errors.positionId}</small>}
           </div>
-          <div className="field"><span>角色</span><p className="field-static-note">由所选岗位自动匹配；个人增减权限请前往“角色权限 → 账户权限积木”。</p></div>
+          <div className="field"><span>权限来源</span><p className="field-static-note">由所选岗位自动匹配；个人例外请前往“岗位权限 → 账号特殊授权”。</p></div>
           <label className="field span-2">
             <span>初始密码</span>
             <input name="password" type="password" required/>
@@ -168,6 +169,8 @@ export default function Users({ loaderData, actionData }: Route.ComponentProps) 
         </Form>
       </Modal>}
     </header>
+
+    <OrganizationAccessTabs permissions={loaderData.current.permissions}/>
 
     <ActionToast message={formError ?? success} tone={formError ? "error" : "success"} data={actionData}/>
 
