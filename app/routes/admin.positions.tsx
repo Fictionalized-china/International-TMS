@@ -465,7 +465,8 @@ export default function Positions({ loaderData, actionData }: Route.ComponentPro
                 <th>岗位</th>
                 <th>归属部门</th>
                 <th>权限摘要</th>
-                <th>业务范围与工作台</th>
+                <th>数据范围</th>
+                <th>工作台默认</th>
                 <th>状态</th>
                 <th>操作</th>
               </tr>
@@ -489,50 +490,12 @@ export default function Positions({ loaderData, actionData }: Route.ComponentPro
                       ) : (
                         <span className="muted-text">尚未配置</span>
                       )}
-                      <Link className="row-secondary-link" to="/admin/roles">配置权限</Link>
                     </td>
                     <td>
-                      <div className="position-scope-summary">
-                        <strong>{dataScopeLabels[position.business_data_scope] ?? "按岗位授权"}</strong>
-                        <small>{defaultFilterLabels[position.portal_default_filter] ?? "默认查看未完成"}</small>
-                      </div>
-                      {canManage && <Modal
-                        title={`业务范围 · ${position.name}`}
-                        triggerLabel="设置范围"
-                        triggerClassName="btn small"
-                        closeSignal={targetId === position.id && success}
-                      >
-                        <Form method="post" className="position-scope-dialog">
-                          <input type="hidden" name="intent" value="portal_settings" />
-                          <input type="hidden" name="positionId" value={position.id} />
-                          {protectedPosition && <input type="hidden" name="dataScope" value="company" />}
-                          <div className="position-scope-grid">
-                            <label className="field">
-                              <span>可查看的数据</span>
-                              <select name={protectedPosition ? undefined : "dataScope"} defaultValue={position.business_data_scope} disabled={protectedPosition}>
-                                <option value="self">本人责任数据</option>
-                                <option value="department">本部门数据</option>
-                                <option value="warehouse">授权仓库数据</option>
-                                <option value="region">授权区域数据</option>
-                                <option value="company">全公司数据</option>
-                              </select>
-                            </label>
-                            <label className="field">
-                              <span>任务工作台默认筛选</span>
-                              <select name="defaultFilter" defaultValue={position.portal_default_filter}>
-                                <option value="open">未完成</option>
-                                <option value="all">全部</option>
-                                <option value="blocked">有阻断</option>
-                                <option value="overdue">即将或已经超时</option>
-                              </select>
-                            </label>
-                          </div>
-                          <div className="dialog-form-actions">
-                            <span>{protectedPosition ? "系统保护岗位固定查看全公司数据。" : "该设置只控制数据范围和默认筛选，不改变具体操作权限。"}</span>
-                            <button className="primary" disabled={busy}>保存设置</button>
-                          </div>
-                        </Form>
-                      </Modal>}
+                      <strong>{dataScopeLabels[position.business_data_scope] ?? "按岗位授权"}</strong>
+                    </td>
+                    <td>
+                      <span>{defaultFilterLabels[position.portal_default_filter] ?? "默认查看未完成"}</span>
                     </td>
                     <td>
                       <span className={`status-pill ${position.status !== "active" ? "off" : ""}`}>
@@ -540,6 +503,45 @@ export default function Positions({ loaderData, actionData }: Route.ComponentPro
                       </span>
                     </td>
                     <td>
+                      <div className="position-settings-actions">
+                        <Link className="btn small" to="/admin/roles">配置权限</Link>
+                        {canManage && <Modal
+                          title={`业务范围 · ${position.name}`}
+                          triggerLabel="设置范围"
+                          triggerClassName="btn small"
+                          closeSignal={targetId === position.id && success}
+                        >
+                          <Form method="post" className="position-scope-dialog">
+                            <input type="hidden" name="intent" value="portal_settings" />
+                            <input type="hidden" name="positionId" value={position.id} />
+                            {protectedPosition && <input type="hidden" name="dataScope" value="company" />}
+                            <div className="position-scope-grid">
+                              <label className="field">
+                                <span>可查看的数据</span>
+                                <select name={protectedPosition ? undefined : "dataScope"} defaultValue={position.business_data_scope} disabled={protectedPosition}>
+                                  <option value="self">本人责任数据</option>
+                                  <option value="department">本部门数据</option>
+                                  <option value="warehouse">授权仓库数据</option>
+                                  <option value="region">授权区域数据</option>
+                                  <option value="company">全公司数据</option>
+                                </select>
+                              </label>
+                              <label className="field">
+                                <span>任务工作台默认筛选</span>
+                                <select name="defaultFilter" defaultValue={position.portal_default_filter}>
+                                  <option value="open">未完成</option>
+                                  <option value="all">全部</option>
+                                  <option value="blocked">有阻断</option>
+                                  <option value="overdue">即将或已经超时</option>
+                                </select>
+                              </label>
+                            </div>
+                            <div className="dialog-form-actions">
+                              <span>{protectedPosition ? "系统保护岗位固定查看全公司数据。" : "该设置只控制数据范围和默认筛选，不改变具体操作权限。"}</span>
+                              <button className="primary" disabled={busy}>保存设置</button>
+                            </div>
+                          </Form>
+                        </Modal>}
                       {canManage && (
                         <Form method="post">
                           <input type="hidden" name="intent" value="toggle" />
@@ -550,6 +552,7 @@ export default function Positions({ loaderData, actionData }: Route.ComponentPro
                             : <button className="text-button" disabled={busy}>启用</button>}
                         </Form>
                       )}
+                      </div>
                     </td>
                   </tr>
                 );

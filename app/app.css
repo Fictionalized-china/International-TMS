@@ -32382,14 +32382,14 @@ html[data-motion="off"] *::after {
 .position-settings-table td:first-child strong,
 .position-settings-table td:first-child small,
 .position-settings-table td:nth-child(3) strong,
-.position-settings-table td:nth-child(3) span,
-.position-scope-summary > * { display: block; }
+.position-settings-table td:nth-child(3) span { display: block; }
 .position-settings-table td:first-child small,
-.position-scope-summary small,
 .muted-text { margin-top: 3px; color: #6b7e90; font-size: 10px; }
 .position-settings-table td:nth-child(3) { min-width: 210px; }
-.row-secondary-link { display: inline-block; margin-top: 5px; font-size: 11px; font-weight: 700; }
-.position-scope-summary { min-width: 155px; }
+.position-settings-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 218px; }
+.position-settings-actions form { margin: 0; }
+.position-settings-actions .btn,
+.position-settings-actions button { white-space: nowrap; }
 .position-scope-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .position-sort-field input { max-width: 160px; }
 
