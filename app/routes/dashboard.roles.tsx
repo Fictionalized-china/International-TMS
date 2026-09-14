@@ -371,11 +371,15 @@ export async function action({ request }: Route.ActionArgs) {
   return { success: "角色已创建", targetId: roleId };
 }
 
-export function meta() { return [{ title: "岗位权限 | International TMS" }]; }
+export function meta() { return [{ title: "权限配置 | International TMS" }]; }
 
 export default function Roles({ loaderData, actionData }: Route.ComponentProps) {
   const busy = useNavigation().state !== "idle";
   const [searchParams] = useSearchParams();
+  const [roleQuery, setRoleQuery] = useState("");
+  const [rolePage, setRolePage] = useState(1);
+  const [workflowQuery, setWorkflowQuery] = useState("");
+  const [workflowPage, setWorkflowPage] = useState(1);
   const accessView = ["workflow", "diagnostics"].includes(searchParams.get("view") ?? "")
     ? searchParams.get("view")!
     : "positions";
@@ -393,22 +397,35 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
   const formError = actionData && "formError" in actionData ? actionData.formError : undefined;
   const values = actionData && "values" in actionData ? actionData.values : undefined;
   const errors = actionData && "errors" in actionData ? actionData.errors : undefined;
+  const pageSize = 10;
+  const normalizedRoleQuery = roleQuery.trim().toLocaleLowerCase("zh-CN");
+  const filteredRoles = loaderData.roles.filter((role) => !normalizedRoleQuery ||
+    [role.name, role.description ?? ""].some((value) => value.toLocaleLowerCase("zh-CN").includes(normalizedRoleQuery)));
+  const rolePageCount = Math.max(1, Math.ceil(filteredRoles.length / pageSize));
+  const currentRolePage = Math.min(rolePage, rolePageCount);
+  const pagedRoles = filteredRoles.slice((currentRolePage - 1) * pageSize, currentRolePage * pageSize);
+  const normalizedWorkflowQuery = workflowQuery.trim().toLocaleLowerCase("zh-CN");
+  const filteredPositions = loaderData.positions.filter((position) => !normalizedWorkflowQuery ||
+    [position.name, position.department_name].some((value) => value.toLocaleLowerCase("zh-CN").includes(normalizedWorkflowQuery)));
+  const workflowPageCount = Math.max(1, Math.ceil(filteredPositions.length / pageSize));
+  const currentWorkflowPage = Math.min(workflowPage, workflowPageCount);
+  const pagedPositions = filteredPositions.slice((currentWorkflowPage - 1) * pageSize, currentWorkflowPage * pageSize);
 
   return <>
     <header className="page-header">
       <div>
         <p className="eyebrow">MODULAR ACCESS CONTROL</p>
-        <h1>岗位权限</h1>
-        <p>岗位是菜单、操作与工作流字段权限的唯一来源；同岗位账号使用同一套规则。</p>
+        <h1>权限配置</h1>
+        <p>只配置岗位能看什么、能做什么、能填写什么；人员账号不在这里单独授权。</p>
       </div>
-      {canManage && <Modal title="创建角色" triggerLabel="新增角色" closeSignal={success} size="wide">
+      {canManage && <Modal title="新增权限模板" triggerLabel="新增权限模板" closeSignal={success} size="wide">
         <Form method="post" className="form-grid compact permission-editor-form">
           <input type="hidden" name="intent" value="create_role" />
-          <label className="field"><span>角色名称</span><input name="name" required defaultValue={values?.name}/>{errors?.name && <small className="field-error">{errors.name}</small>}</label>
-          <label className="field"><span>角色代码</span><input name="code" required placeholder="custom_role" defaultValue={values?.code}/>{errors?.code && <small className="field-error">{errors.code}</small>}</label>
+          <label className="field"><span>模板名称</span><input name="name" required defaultValue={values?.name}/>{errors?.name && <small className="field-error">{errors.name}</small>}</label>
+          <label className="field"><span>模板代码</span><input name="code" required placeholder="custom_role" defaultValue={values?.code}/>{errors?.code && <small className="field-error">{errors.code}</small>}</label>
           <label className="field span-2"><span>说明</span><textarea name="description" rows={2} defaultValue={values?.description}/></label>
           <PermissionCheckboxes grouped={grouped} selected={new Set(values?.permissions ?? [])}/>
-          <div className="permission-editor-actions span-2"><span>允许创建零权限角色，用于纯岗位或薪资归类。</span><button className="primary" disabled={busy}>创建角色</button></div>
+          <div className="permission-editor-actions span-2"><span>模板保存后可作为岗位的菜单与操作权限来源。</span><button className="primary" disabled={busy}>创建模板</button></div>
         </Form>
       </Modal>}
     </header>
@@ -417,21 +434,29 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
 
     <ActionToast message={formError ?? success} tone={formError ? "error" : "success"} data={actionData}/>
 
-    <nav className="peer-page-tabs access-permission-view-tabs" aria-label="岗位权限分类">
-      <Link className={accessView === "positions" ? "active" : ""} to="/admin/roles">岗位默认权限</Link>
+    <nav className="peer-page-tabs access-permission-view-tabs" aria-label="权限配置分类">
+      <Link className={accessView === "positions" ? "active" : ""} to="/admin/roles">基础权限</Link>
       <Link className={accessView === "workflow" ? "active" : ""} to="/admin/roles?view=workflow">工作流字段</Link>
-      <Link className={accessView === "diagnostics" ? "active" : ""} to="/admin/roles?view=diagnostics">权限一致性诊断</Link>
+      <Link className={accessView === "diagnostics" ? "active" : ""} to="/admin/roles?view=diagnostics">一致性检查</Link>
     </nav>
 
     {accessView === "positions" && <section className="permission-section">
-      <div className="section-heading"><div><h2>岗位默认权限</h2><p>点击岗位权限模板查看来源；保存后同岗位账号立即继承。</p></div><span>{loaderData.roles.filter((role) => role.status === "active").length} 个启用</span></div>
-      <div className="cards role-permission-cards">{loaderData.roles.map((role) => {
+      <div className="section-heading"><div><h2>岗位基础权限</h2><p>清单只显示权限结果；具体菜单和操作项在弹窗中配置。</p></div><span>{loaderData.roles.filter((role) => role.status === "active").length} 个启用</span></div>
+      <div className="permission-ledger-toolbar">
+        <label className="field"><span>查找岗位</span><input value={roleQuery} onChange={(event) => { setRoleQuery(event.currentTarget.value); setRolePage(1); }} placeholder="输入岗位或说明" /></label>
+        <span>共 {filteredRoles.length} 个岗位</span>
+      </div>
+      <div className="table-wrap"><table className="permission-ledger-table">
+        <thead><tr><th>岗位</th><th>权限范围</th><th>使用情况</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody>{pagedRoles.map((role) => {
         const selected = new Set((role.permissions ?? "").split(",").filter(Boolean));
         const protectedRole = ["owner", "boss"].includes(role.code);
-        return <article className={`role-card ${role.status === "disabled" ? "is-disabled" : ""}`} key={role.id}>
-          <div><span className={`status-pill ${role.status === "disabled" ? "off" : ""}`}>{role.status === "disabled" ? "历史停用" : role.is_system ? "系统角色" : "自定义角色"}</span><h3>{role.name}</h3><code>{role.code}</code><p>{role.description || "暂无说明"}</p></div>
-          <footer><span>{selected.size} 项权限</span><span>{role.member_count} 位成员</span></footer>
-          <Modal title={`岗位权限 · ${role.name}`} triggerLabel="查看与编辑" triggerClassName="btn small" closeSignal={actionData?.targetId === role.id && success} size="xwide">
+        return <tr className={role.status === "disabled" ? "is-disabled" : ""} key={role.id}>
+          <td><strong>{role.name}</strong><small>{role.description || "暂无说明"}</small></td>
+          <td><strong>{protectedRole ? "全部系统权限" : `${selected.size} 项菜单与操作权限`}</strong><small>{role.is_system ? "系统预置模板" : "自定义权限模板"}</small></td>
+          <td><strong>{role.member_count} 位成员</strong><small>同岗位账号自动继承</small></td>
+          <td><span className={`status-pill ${role.status === "disabled" ? "off" : ""}`}>{role.status === "disabled" ? "已停用" : "启用"}</span></td>
+          <td><Modal title={`基础权限 · ${role.name}`} triggerLabel="查看与配置" triggerClassName="btn small" closeSignal={actionData?.targetId === role.id && success} size="xwide">
             <Form method="post" className="permission-editor-form">
               <input type="hidden" name="intent" value="update_role" />
               <input type="hidden" name="roleId" value={role.id} />
@@ -442,35 +467,38 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
               <PermissionCheckboxes grouped={grouped} selected={selected} disabled={!canManage || protectedRole || role.status === "disabled"}/>
               {canManage && !protectedRole && role.status === "active" && <div className="permission-editor-actions"><span>所有勾选将一次性替换当前角色权限。</span><button className="primary" disabled={busy}>确认应用</button></div>}
             </Form>
-          </Modal>
-        </article>;
-      })}</div>
+          </Modal></td>
+        </tr>;
+      })}</tbody>
+      </table></div>
+      <ClientListPagination page={currentRolePage} pageCount={rolePageCount} total={filteredRoles.length} unit="个岗位" onChange={setRolePage} />
     </section>}
 
     {accessView === "workflow" && <section className="permission-section position-workflow-field-section">
       <div className="section-heading">
         <div>
-          <h2>订单工作流字段权限</h2>
-          <p>按岗位配置可填写字段；这里不指定具体经办账号，订单仍由创建业务员或操作主管分配的负责人办理。</p>
+          <h2>工作流字段办理权限</h2>
+          <p>决定每个岗位能填写哪些订单字段；具体经办人仍由创建人与任务分配关系确定。</p>
         </div>
         <span>{loaderData.positions.length} 个有效岗位</span>
       </div>
-      <div className="cards position-workflow-field-cards">
-        {loaderData.positions.map((position) => {
+      <div className="permission-ledger-toolbar">
+        <label className="field"><span>查找岗位</span><input value={workflowQuery} onChange={(event) => { setWorkflowQuery(event.currentTarget.value); setWorkflowPage(1); }} placeholder="输入岗位或部门" /></label>
+        <span>共 {filteredPositions.length} 个岗位</span>
+      </div>
+      <div className="table-wrap"><table className="permission-ledger-table">
+        <thead><tr><th>岗位</th><th>归属部门</th><th>可填写字段</th><th>权限层级</th><th>操作</th></tr></thead>
+        <tbody>{pagedPositions.map((position) => {
           const selected = new Set(loaderData.workflowFields.filter((field) =>
             normalizeWorkflowFieldHandlerPositionCodes(field.handler_position_codes)
               .includes(position.code),
           ).map((field) => field.id));
-          return <article className="role-card position-workflow-field-card" key={position.code}>
-            <div>
-              <span className="status-pill">{position.department_name}</span>
-              <h3>{position.name}</h3>
-              <code>{position.code}</code>
-              <p>{selected.size} 个订单工作流字段可填写</p>
-            </div>
-            <footer>
-              <span>岗位级权限</span>
-              <Modal
+          return <tr key={position.code}>
+            <td><strong>{position.name}</strong></td>
+            <td>{position.department_name}</td>
+            <td><strong>{selected.size} 个字段</strong><small>按当前启用工作流统计</small></td>
+            <td><span className="status-pill">岗位级</span></td>
+            <td><Modal
                 title={`订单字段权限 · ${position.name}`}
                 triggerLabel="配置字段"
                 triggerClassName="btn small"
@@ -484,11 +512,11 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
                   disabled={!canManage}
                   busy={busy}
                 />
-              </Modal>
-            </footer>
-          </article>;
-        })}
-      </div>
+              </Modal></td>
+          </tr>;
+        })}</tbody>
+      </table></div>
+      <ClientListPagination page={currentWorkflowPage} pageCount={workflowPageCount} total={filteredPositions.length} unit="个岗位" onChange={setWorkflowPage} />
     </section>}
 
     {accessView === "diagnostics" && <section className="permission-section account-permission-section">
@@ -520,6 +548,39 @@ export default function Roles({ loaderData, actionData }: Route.ComponentProps) 
       </table></div>
     </section>}
   </>;
+}
+
+function ClientListPagination({
+  page,
+  pageCount,
+  total,
+  unit,
+  onChange,
+}: {
+  page: number;
+  pageCount: number;
+  total: number;
+  unit: string;
+  onChange: (page: number) => void;
+}) {
+  if (pageCount <= 1) return null;
+  const pageNumbers = Array.from(new Set([1, page - 1, page, page + 1, pageCount]))
+    .filter((value) => value >= 1 && value <= pageCount)
+    .sort((left, right) => left - right);
+  return <footer className="compact-ledger-pagination" aria-label="列表分页">
+    <span>每页 10 {unit} · 第 {page} / {pageCount} 页 · 共 {total} {unit}</span>
+    <div>
+      <button type="button" className="secondary" disabled={page <= 1} onClick={() => onChange(page - 1)}>上一页</button>
+      {pageNumbers.map((pageNumber) => <button
+        type="button"
+        key={pageNumber}
+        className={pageNumber === page ? "active" : "secondary"}
+        aria-current={pageNumber === page ? "page" : undefined}
+        onClick={() => onChange(pageNumber)}
+      >{pageNumber}</button>)}
+      <button type="button" className="secondary" disabled={page >= pageCount} onClick={() => onChange(page + 1)}>下一页</button>
+    </div>
+  </footer>;
 }
 
 function PositionWorkflowFieldEditor({

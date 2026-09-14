@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { useState } from "react";
-import { Form, useNavigation } from "react-router";
+import { Form, Link, useNavigation } from "react-router";
 import type { Route } from "./+types/dashboard.users";
 import { requireSessionUser } from "../lib/auth.server";
 import { hashPassword } from "../lib/crypto.server";
@@ -13,20 +13,60 @@ import { roleCodeForPosition } from "../lib/position-role";
 import { isProtectedAccessRole } from "../lib/permission-blocks";
 import { inspectAccessControlSchema } from "../lib/access-control-schema.server";
 import { loadWorkflowPositionRemovalBlocker } from "../lib/workflow-position-coverage.server";
+import { QueryPagination } from "../components/QueryPagination";
 
 type MemberRow = { membership_id: string; user_id: string; display_name: string; email: string; title: string | null; department_id:string|null; department_name:string|null; position_id:string|null; position_name:string|null; status: string; roles: string | null; role_ids: string | null; role_codes: string | null; last_login_at: string | null };
 type Department = { id:string; parent_id:string|null; name:string; status:string; sort_order:number };
 type PositionOption = { id:string; code:string; name:string; department_id:string };
 
+const MEMBER_PAGE_SIZE = 10;
+
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "user.view");
-  const [members,departments,positions] = await Promise.all([
-    env.DB.prepare(`SELECT m.id AS membership_id, u.id AS user_id, u.display_name, u.email, m.title, m.department_id, d.name AS department_name, m.position_id, p.name AS position_name, m.status, u.last_login_at, GROUP_CONCAT(r.name, '、') AS roles, GROUP_CONCAT(r.id) AS role_ids, GROUP_CONCAT(DISTINCT r.code) AS role_codes FROM memberships m JOIN users u ON u.id = m.user_id LEFT JOIN departments d ON d.id=m.department_id AND d.organization_id=m.organization_id LEFT JOIN positions p ON p.id=m.position_id AND p.organization_id=m.organization_id LEFT JOIN membership_roles mr ON mr.membership_id = m.id LEFT JOIN roles r ON r.id = mr.role_id WHERE m.organization_id = ? GROUP BY m.id ORDER BY d.sort_order,p.sort_order,u.display_name`).bind(current.organizationId).all<MemberRow>(),
+  const url = new URL(request.url);
+  const q = (url.searchParams.get("q") ?? "").trim();
+  const departmentId = url.searchParams.get("departmentId") ?? "";
+  const positionId = url.searchParams.get("positionId") ?? "";
+  const status = ["active", "disabled"].includes(url.searchParams.get("status") ?? "")
+    ? url.searchParams.get("status")!
+    : "";
+  const page = Math.max(1, Number.parseInt(url.searchParams.get("page") ?? "1", 10) || 1);
+  const conditions = ["m.organization_id = ?"];
+  const bindings: unknown[] = [current.organizationId];
+  if (q) {
+    conditions.push("(u.display_name LIKE ? OR u.email LIKE ? OR COALESCE(p.name, '') LIKE ?)");
+    const term = `%${q}%`;
+    bindings.push(term, term, term);
+  }
+  if (departmentId) {
+    conditions.push("m.department_id = ?");
+    bindings.push(departmentId);
+  }
+  if (positionId) {
+    conditions.push("m.position_id = ?");
+    bindings.push(positionId);
+  }
+  if (status) {
+    conditions.push("m.status = ?");
+    bindings.push(status);
+  }
+  const where = conditions.join(" AND ");
+  const [members,memberCount,departments,positions] = await Promise.all([
+    env.DB.prepare(`SELECT m.id AS membership_id, u.id AS user_id, u.display_name, u.email, m.title, m.department_id, d.name AS department_name, m.position_id, p.name AS position_name, m.status, u.last_login_at, GROUP_CONCAT(r.name, '、') AS roles, GROUP_CONCAT(r.id) AS role_ids, GROUP_CONCAT(DISTINCT r.code) AS role_codes FROM memberships m JOIN users u ON u.id = m.user_id LEFT JOIN departments d ON d.id=m.department_id AND d.organization_id=m.organization_id LEFT JOIN positions p ON p.id=m.position_id AND p.organization_id=m.organization_id LEFT JOIN membership_roles mr ON mr.membership_id = m.id LEFT JOIN roles r ON r.id = mr.role_id WHERE ${where} GROUP BY m.id ORDER BY d.sort_order,p.sort_order,u.display_name LIMIT ? OFFSET ?`).bind(...bindings, MEMBER_PAGE_SIZE, (page - 1) * MEMBER_PAGE_SIZE).all<MemberRow>(),
+    env.DB.prepare(`SELECT COUNT(*) total FROM memberships m JOIN users u ON u.id=m.user_id LEFT JOIN positions p ON p.id=m.position_id AND p.organization_id=m.organization_id WHERE ${where}`).bind(...bindings).first<{total:number}>(),
     env.DB.prepare("SELECT id,parent_id,name,status,sort_order FROM departments WHERE organization_id=? ORDER BY sort_order,name").bind(current.organizationId).all<Department>(),
     env.DB.prepare(`SELECT p.id,p.code,p.name,d.id department_id FROM positions p JOIN departments d ON d.organization_id=p.organization_id AND d.code=p.department_code AND d.status='active' WHERE p.organization_id=? AND p.status='active' ORDER BY d.sort_order,p.sort_order,p.name`).bind(current.organizationId).all<PositionOption>(),
   ]);
   const canAssignProtectedPosition=isProtectedAccessRole(current.roleCodes);
-  return { current, members: members.results, departments:departments.results, positions:positions.results.filter((position)=>canAssignProtectedPosition||!["BOSS","DEVELOPER"].includes(position.code)) };
+  const total = Number(memberCount?.total ?? 0);
+  return {
+    current,
+    members: members.results,
+    departments:departments.results,
+    positions:positions.results.filter((position)=>canAssignProtectedPosition||!["BOSS","DEVELOPER"].includes(position.code)),
+    filters:{q,departmentId,positionId,status},
+    pagination:{page,pageCount:Math.max(1,Math.ceil(total/MEMBER_PAGE_SIZE)),pageSize:MEMBER_PAGE_SIZE,total},
+  };
 }
 
 export async function action({ request }: Route.ActionArgs) {
@@ -65,7 +105,7 @@ export async function action({ request }: Route.ActionArgs) {
       env.DB.prepare("INSERT OR IGNORE INTO membership_roles(membership_id,role_id) VALUES(?,?)").bind(membershipId,role.id),
     ]);
     await writeAudit({request,action:"membership.organization.assign",resourceType:"membership",resourceId:membershipId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{departmentId:placement.department_id,positionId:placement.position_id}});
-    return{success:"用户的部门和岗位已更新"};
+    return{success:"用户的部门和岗位已更新",targetId:membershipId};
   }
   if (intent === "toggle") {
     const membershipId = valueOf(form, "membershipId");
@@ -114,7 +154,7 @@ export async function action({ request }: Route.ActionArgs) {
   return { success: "用户已创建" };
 }
 
-export function meta() { return [{ title: "账号管理 | International TMS" }]; }
+export function meta() { return [{ title: "人员账号 | International TMS" }]; }
 
 export default function Users({ loaderData, actionData }: Route.ComponentProps) {
   const busy = useNavigation().state !== "idle";
@@ -131,8 +171,8 @@ export default function Users({ loaderData, actionData }: Route.ComponentProps) 
     <header className="page-header">
       <div>
         <p className="eyebrow">IDENTITY</p>
-        <h1>账号管理</h1>
-        <p>每个账号必须归属到“部门 → 岗位”，审核和派单才能准确落到个人。</p>
+        <h1>人员账号</h1>
+        <p>查看人员状态和组织归属；岗位调整在弹窗中完成，权限随岗位自动继承。</p>
       </div>
       {canManage && <Modal title="创建用户" triggerLabel="新增用户" closeSignal={success}>
         <Form method="post" className="form-grid compact">
@@ -157,7 +197,7 @@ export default function Users({ loaderData, actionData }: Route.ComponentProps) 
             />
             {errors?.positionId && <small className="field-error">{errors.positionId}</small>}
           </div>
-          <div className="field"><span>权限来源</span><p className="field-static-note">由所选岗位自动匹配；个人例外请前往“岗位权限 → 账号特殊授权”。</p></div>
+          <div className="field"><span>权限来源</span><p className="field-static-note">由所选岗位自动继承；系统不提供账号级临时加权。</p></div>
           <label className="field span-2">
             <span>初始密码</span>
             <input name="password" type="password" required/>
@@ -175,36 +215,45 @@ export default function Users({ loaderData, actionData }: Route.ComponentProps) 
     <ActionToast message={formError ?? success} tone={formError ? "error" : "success"} data={actionData}/>
 
     <section className="panel">
-      <h2>组织成员</h2>
+      <div className="panel-header">
+        <div><h2>组织成员</h2><p>主表只展示结果，需要修改时再打开对应人员。</p></div>
+        <span>{loaderData.pagination.total} 个账号</span>
+      </div>
+      <Form method="get" className="personnel-account-filters">
+        <label className="field"><span>查找人员</span><input name="q" defaultValue={loaderData.filters.q} placeholder="姓名、邮箱或岗位" /></label>
+        <label className="field"><span>部门</span><select name="departmentId" defaultValue={loaderData.filters.departmentId}><option value="">全部部门</option>{departmentOptions.map((department)=><option key={department.id} value={department.id}>{`${"　".repeat(department.level)}${department.name}`}</option>)}</select></label>
+        <label className="field"><span>岗位</span><select name="positionId" defaultValue={loaderData.filters.positionId}><option value="">全部岗位</option>{loaderData.positions.map((position)=><option key={position.id} value={position.id}>{position.name}</option>)}</select></label>
+        <label className="field"><span>状态</span><select name="status" defaultValue={loaderData.filters.status}><option value="">全部状态</option><option value="active">有效</option><option value="disabled">已停用</option></select></label>
+        <div className="personnel-account-filter-actions"><button className="secondary">筛选</button><Link className="text-button" to="/admin/users">重置</Link></div>
+      </Form>
       <div className="table-wrap">
         <table>
-          <thead><tr><th>成员</th><th colSpan={2}>组织归属（部门 → 岗位）</th><th>角色</th><th>最近登录</th><th>状态</th><th></th></tr></thead>
+          <thead><tr><th>人员</th><th>当前归属</th><th>最近登录</th><th>状态</th><th>操作</th></tr></thead>
           <tbody>{loaderData.members.map((member) => {const protectedMember=isProtectedAccessRole((member.role_codes ?? "").split(",").filter(Boolean));return <tr key={member.membership_id}>
             <td><strong>{member.display_name}</strong><small>{member.email}</small></td>
-            <td colSpan={2}>
-              {canManage&&!protectedMember ? <Form method="post" className="member-placement-form">
-                <input type="hidden" name="intent" value="department"/>
-                <input type="hidden" name="membershipId" value={member.membership_id}/>
-                <OrganizationPlacementFields
-                  departments={departmentOptions}
-                  positions={loaderData.positions}
-                  defaultDepartmentId={member.department_id ?? ""}
-                  defaultPositionId={member.position_id ?? ""}
-                />
-                <button className="text-button" disabled={busy}>保存归属</button>
-              </Form> : `${member.department_name || "未分配"} / ${member.position_name || "未分配"}${protectedMember?" · 系统保护":""}`}
-            </td>
-            <td><strong>{member.roles || "未分配"}</strong><small>随岗位自动匹配；个人差异使用权限积木</small></td>
+            <td><strong>{member.position_name || "未分配岗位"}</strong><small>{member.department_name || "未分配部门"}{protectedMember?" · 系统保护":""}</small></td>
             <td>{member.last_login_at ? new Date(member.last_login_at).toLocaleString("zh-CN") : "从未"}</td>
             <td><span className={`status-pill ${member.status !== "active" ? "off" : ""}`}>{member.status === "active" ? "有效" : "已停用"}</span></td>
-            <td>{canManage && !protectedMember && member.user_id !== loaderData.current.userId && <Form method="post">
-              <input type="hidden" name="intent" value="toggle"/>
-              <input type="hidden" name="membershipId" value={member.membership_id}/>
-              <button className="text-button">{member.status === "active" ? "停用" : "恢复"}</button>
-            </Form>}</td>
+            <td><div className="personnel-account-actions">
+              {canManage&&!protectedMember && <Modal title={`调整归属 · ${member.display_name}`} triggerLabel="调整归属" triggerClassName="btn small" closeSignal={actionData && "targetId" in actionData && actionData.targetId===member.membership_id && success}>
+                <Form method="post" className="personnel-placement-dialog">
+                  <input type="hidden" name="intent" value="department"/>
+                  <input type="hidden" name="membershipId" value={member.membership_id}/>
+                  <div className="permission-editor-notice"><b>当前归属</b><span>{member.department_name || "未分配部门"} / {member.position_name || "未分配岗位"}</span></div>
+                  <OrganizationPlacementFields departments={departmentOptions} positions={loaderData.positions} defaultDepartmentId={member.department_id ?? ""} defaultPositionId={member.position_id ?? ""}/>
+                  <div className="dialog-form-actions"><span>保存后账号立即继承新岗位权限。</span><button className="primary" disabled={busy}>确认调整</button></div>
+                </Form>
+              </Modal>}
+              {canManage && !protectedMember && member.user_id !== loaderData.current.userId && <Form method="post">
+                <input type="hidden" name="intent" value="toggle"/>
+                <input type="hidden" name="membershipId" value={member.membership_id}/>
+                <button className="text-button">{member.status === "active" ? "停用" : "恢复"}</button>
+              </Form>}
+            </div></td>
           </tr>})}</tbody>
         </table>
       </div>
+      <QueryPagination {...loaderData.pagination} unit="个账号" />
     </section>
   </>;
 }

@@ -32341,3 +32341,103 @@ html[data-motion="off"] *::after {
   .peer-page-tabs > :is(a, button),
   .document-scope-peer-page-tabs > .document-scope-switch > label { min-width: min(132px, 100%); }
 }
+
+/* Organization access workspace: keep summaries visible and move low-frequency edits into dialogs. */
+.page-header-actions,
+.personnel-account-actions,
+.personnel-account-filter-actions,
+.dialog-form-actions,
+.compact-ledger-pagination,
+.compact-ledger-pagination > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.personnel-account-filters {
+  display: grid;
+  grid-template-columns: minmax(230px, 1.4fr) repeat(3, minmax(150px, .75fr)) auto;
+  align-items: end;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #d9e2ea;
+  background: #f7fafc;
+}
+.personnel-account-filters .field { margin: 0; }
+.personnel-account-filter-actions { min-height: 34px; }
+.personnel-account-actions { flex-wrap: wrap; }
+.personnel-placement-dialog,
+.position-scope-dialog { display: grid; gap: 14px; min-width: min(620px, 78vw); }
+.personnel-placement-dialog .organization-placement-fields { width: 100%; min-width: 0; }
+.dialog-form-actions {
+  justify-content: flex-end;
+  min-height: 46px;
+  padding-top: 10px;
+  border-top: 1px solid #d9e2ea;
+}
+.dialog-form-actions > span { margin-right: auto; color: #60758a; font-size: 11px; }
+.page-header-actions { justify-content: flex-end; }
+
+.position-settings-table td { vertical-align: middle; }
+.position-settings-table td:first-child strong,
+.position-settings-table td:first-child small,
+.position-settings-table td:nth-child(3) strong,
+.position-settings-table td:nth-child(3) span,
+.position-scope-summary > * { display: block; }
+.position-settings-table td:first-child small,
+.position-scope-summary small,
+.muted-text { margin-top: 3px; color: #6b7e90; font-size: 10px; }
+.position-settings-table td:nth-child(3) { min-width: 210px; }
+.row-secondary-link { display: inline-block; margin-top: 5px; font-size: 11px; font-weight: 700; }
+.position-scope-summary { min-width: 155px; }
+.position-scope-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.position-sort-field input { max-width: 160px; }
+
+.permission-ledger-toolbar {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #d9e2ea;
+  background: #f7fafc;
+}
+.permission-ledger-toolbar .field { width: min(420px, 100%); margin: 0; }
+.permission-ledger-toolbar > span { padding-bottom: 8px; color: #60758a; font-size: 11px; white-space: nowrap; }
+.permission-ledger-table { table-layout: fixed; }
+.permission-ledger-table th:nth-child(1) { width: 25%; }
+.permission-ledger-table th:nth-child(2) { width: 29%; }
+.permission-ledger-table th:nth-child(3) { width: 20%; }
+.permission-ledger-table th:nth-child(4) { width: 12%; }
+.permission-ledger-table th:nth-child(5) { width: 14%; }
+.permission-ledger-table td { vertical-align: middle; }
+.permission-ledger-table td strong,
+.permission-ledger-table td small { display: block; }
+.permission-ledger-table td small { margin-top: 3px; color: #6b7e90; font-size: 10px; line-height: 1.4; }
+.permission-ledger-table tr.is-disabled { background: #f7f9fb; opacity: .78; }
+.compact-ledger-pagination {
+  justify-content: space-between;
+  min-height: 48px;
+  padding: 8px 12px;
+  border-top: 1px solid #d9e2ea;
+  color: #60758a;
+  font-size: 11px;
+}
+.compact-ledger-pagination button { min-width: 34px; min-height: 32px; }
+.compact-ledger-pagination button.active { color: #fff; border-color: #0b3658; background: #0b3658; }
+
+@media (max-width: 1100px) {
+  .personnel-account-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .personnel-account-filter-actions { grid-column: 1 / -1; justify-content: flex-end; }
+}
+
+@media (max-width: 720px) {
+  .personnel-account-filters,
+  .position-scope-grid { grid-template-columns: 1fr; }
+  .permission-ledger-toolbar,
+  .compact-ledger-pagination { align-items: stretch; flex-direction: column; }
+  .permission-ledger-toolbar > span { padding: 0; }
+  .compact-ledger-pagination > div { flex-wrap: wrap; }
+  .personnel-placement-dialog,
+  .position-scope-dialog { min-width: 0; }
+}

@@ -8,9 +8,9 @@ export function OrganizationAccessTabs({ permissions }: OrganizationAccessTabsPr
   const can = (permission: string) => permissions.includes(permission);
   const tabs = [
     can("department.view") && { to: "/admin/departments", label: "组织架构" },
-    can("user.view") && { to: "/admin/positions", label: "岗位与账号" },
-    can("user.view") && { to: "/admin/users", label: "账号管理" },
-    can("role.view") && { to: "/admin/roles", label: "岗位权限" },
+    can("user.view") && { to: "/admin/positions", label: "岗位设置" },
+    can("user.view") && { to: "/admin/users", label: "人员账号" },
+    can("role.view") && { to: "/admin/roles", label: "权限配置" },
   ].filter((tab): tab is { to: string; label: string } => Boolean(tab));
 
   if (tabs.length < 2) return null;

@@ -14,7 +14,7 @@ import {
 } from "../lib/position-role";
 import { inspectAccessControlSchema } from "../lib/access-control-schema.server";
 import { OrganizationAccessTabs } from "../components/OrganizationAccessTabs";
-import { QueryPagination } from "../components/QueryPagination";
+import { Modal } from "../components/Modal";
 
 type Position = {
   id: string;
@@ -47,35 +47,26 @@ type Member = {
 
 const MEMBER_PAGE_SIZE = 10;
 
-const permissionLabels: Record<string, string> = {
-  "dashboard.view": "首页",
-  "order.view": "查看订单",
-  "order.manage": "办理订单",
-  "shipment.view": "查看运单",
-  "shipment.manage": "管理运单",
-  "warehouse.view": "查看仓库",
-  "warehouse.operate": "仓库操作",
-  "billing.view": "查看费用",
-  "billing.manage": "费用结算",
-  "customer.view": "查看客户",
-  "customer.manage": "管理客户",
-  "sales.view": "销售",
-  "sales.manage": "销售管理",
-  "quote.view": "报价",
-  "quote.manage": "报价管理",
-  "workflow.view": "业务工作流",
-  "carrier.view": "查看承运商",
-  "carrier.manage": "管理承运商",
-  "pricing.view": "物流产品",
-  "pricing.manage": "产品管理",
-  "audit.view": "审计",
+const dataScopeLabels: Record<string, string> = {
+  self: "本人责任数据",
+  department: "本部门数据",
+  warehouse: "授权仓库数据",
+  region: "授权区域数据",
+  company: "全公司数据",
+};
+
+const defaultFilterLabels: Record<string, string> = {
+  open: "默认查看未完成",
+  all: "默认查看全部",
+  blocked: "默认查看有阻断",
+  overdue: "默认查看即将或已经超时",
 };
 
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "user.view");
   await ensurePositionsSeed(current.organizationId);
   const url = new URL(request.url);
-  const view = url.searchParams.get("view") === "accounts" ? "accounts" : "positions";
+  const view = "positions";
   const q = (url.searchParams.get("q") ?? "").trim();
   const department = url.searchParams.get("department") ?? "";
   const position = url.searchParams.get("position") ?? "";
@@ -351,7 +342,7 @@ export async function action({ request }: Route.ActionArgs) {
          order_scope=excluded.order_scope,default_filter=excluded.default_filter,business_data_scope=excluded.business_data_scope,
          updated_by_user_id=excluded.updated_by_user_id,updated_at=excluded.updated_at`,
     ).bind(crypto.randomUUID(), current.organizationId, positionId, "current_position", defaultFilter, dataScope, current.userId, now, now).run();
-    return { success: "岗位业务数据范围和任务工作台默认筛选已更新" };
+    return { success: "岗位业务数据范围和任务工作台默认筛选已更新", targetId: positionId };
   }
 
   const code = valueOf(form, "code").toUpperCase();
@@ -414,177 +405,134 @@ export async function action({ request }: Route.ActionArgs) {
 export default function Positions({ loaderData, actionData }: Route.ComponentProps) {
   const busy = useNavigation().state !== "idle";
   const canManage = loaderData.current.permissions.includes("user.manage");
+  const success = actionData && "success" in actionData ? actionData.success : undefined;
+  const targetId = actionData && "targetId" in actionData ? actionData.targetId : undefined;
   return (
     <>
       <header className="page-header">
         <div>
           <p className="eyebrow">POSITION ACCESS</p>
-          <h1>岗位与账号</h1>
-          <p>先维护岗位定义，再把账号绑定到岗位；岗位权限统一在“岗位权限”页面维护。</p>
+          <h1>岗位设置</h1>
+          <p>定义岗位及其业务范围；人员归属在“人员账号”，菜单和工作流权限在“权限配置”维护。</p>
         </div>
-        <span className="status-pill">{loaderData.positions.length} 个岗位</span>
+        <div className="page-header-actions">
+          <span className="status-pill">{loaderData.positions.length} 个岗位</span>
+          {canManage && <Modal title="新增岗位" triggerLabel="新增岗位" closeSignal={success} size="wide">
+            <Form method="post" className="form-grid compact position-editor-form">
+              <input type="hidden" name="intent" value="upsert" />
+              <label className="field">
+                <span>岗位名称 *</span>
+                <input name="name" placeholder="例如：订舱岗" required />
+              </label>
+              <label className="field">
+                <span>岗位代码 *</span>
+                <input name="code" placeholder="例如：BOOKING" required />
+              </label>
+              <label className="field">
+                <span>归属部门 *</span>
+                <select name="departmentCode" required>
+                  <option value="">选择归属部门</option>
+                  {loaderData.departments.map((department) => (
+                    <option key={department.code} value={department.code}>{department.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="field position-sort-field">
+                <span>显示顺序</span>
+                <input name="sortOrder" type="number" step="1" defaultValue="100" />
+              </label>
+              <div className="dialog-form-actions span-2">
+                <span>保存后可在“权限配置”中设置该岗位的菜单、操作和工作流字段。</span>
+                <button className="primary" disabled={busy}>保存岗位</button>
+              </div>
+            </Form>
+          </Modal>}
+        </div>
       </header>
       <OrganizationAccessTabs permissions={loaderData.current.permissions}/>
       <ActionToast data={actionData} />
-      <nav className="peer-page-tabs position-management-tabs" aria-label="岗位与账号分类">
-        <Link className={loaderData.view === "positions" ? "active" : ""} to="/admin/positions?view=positions">岗位定义</Link>
-        <Link className={loaderData.view === "accounts" ? "active" : ""} to="/admin/positions?view=accounts">账号任岗</Link>
-      </nav>
-      {loaderData.view === "accounts" && <section className="panel">
+      <section className="panel position-settings-panel">
         <div className="panel-header">
           <div>
-            <h2>账号岗位绑定</h2>
-            <p>按账号、部门或岗位筛选后调整归属；每页固定显示 10 个账号。</p>
-          </div>
-        </div>
-        <Form method="get" className="position-account-filters">
-          <input type="hidden" name="view" value="accounts" />
-          <label className="field"><span>查找账号</span><input name="q" defaultValue={loaderData.filters.q} placeholder="姓名或邮箱" /></label>
-          <label className="field"><span>部门</span><select name="department" defaultValue={loaderData.filters.department}><option value="">全部部门</option>{loaderData.departments.map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label>
-          <label className="field"><span>岗位</span><select name="position" defaultValue={loaderData.filters.position}><option value="">全部岗位</option>{loaderData.positions.filter((item) => item.status === "active").map((item) => <option key={item.id} value={item.id}>{item.department_name} / {item.name}</option>)}</select></label>
-          <label className="field"><span>绑定状态</span><select name="binding" defaultValue={loaderData.filters.binding}><option value="">全部</option><option value="bound">已绑定</option><option value="unbound">未绑定</option></select></label>
-          <div className="position-account-filter-actions"><button className="secondary">筛选</button><Link className="text-button" to="/admin/positions?view=accounts">重置</Link></div>
-        </Form>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>账号</th>
-                <th>当前岗位</th>
-                <th>已有角色</th>
-                <th>调整岗位</th>
-              </tr>
-            </thead>
-            <tbody>
-              {loaderData.members.map((member) => (
-                <tr key={member.membership_id}>
-                  <td>
-                    <strong>{member.display_name}</strong>
-                    <small>{member.email}{member.title ? ` · ${member.title}` : ""}</small>
-                  </td>
-                  <td><strong>{member.position_name || "未绑定"}</strong><small>{member.department_name || "未归属部门"}</small></td>
-                  <td><small>{member.role_codes || "未分配角色"}</small></td>
-                  <td>
-                    {canManage ? (
-                      <Form method="post" className="inline-form">
-                        <input type="hidden" name="intent" value="assign_member_position" />
-                        <input type="hidden" name="membershipId" value={member.membership_id} />
-                        <select name="positionId" defaultValue={member.position_id || ""} required>
-                          <option value="">选择岗位</option>
-                          {loaderData.positions.filter((position) => position.status === "active").map((position) => (
-                            <option key={position.id} value={position.id}>{position.department_name} / {position.name}</option>
-                          ))}
-                        </select>
-                        <button className="secondary" disabled={busy}>保存</button>
-                      </Form>
-                    ) : (
-                      "只读"
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <QueryPagination {...loaderData.memberPagination} unit="个账号" />
-      </section>}
-      {loaderData.view === "positions" && canManage && (
-        <section className="panel">
-          <h2>新增或更新岗位</h2>
-          <Form method="post" className="form-grid compact position-editor-form">
-            <input type="hidden" name="intent" value="upsert" />
-            <label className="field">
-              <span>岗位名称</span>
-              <input name="name" placeholder="例如：操作" required />
-            </label>
-            <label className="field">
-              <span>岗位代码</span>
-              <input name="code" placeholder="例如：OPERATION" required />
-            </label>
-            <label className="field">
-              <span>归属部门</span>
-              <select name="departmentCode" required>
-                <option value="">选择归属部门</option>
-                {loaderData.departments.map((department) => (
-                  <option key={department.code} value={department.code}>{department.code} · {department.name}</option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>排序</span>
-              <input name="sortOrder" type="number" step="1" defaultValue="100" />
-            </label>
-            <button className="primary" disabled={busy}>保存岗位</button>
-          </Form>
-        </section>
-      )}
-      {loaderData.view === "positions" && <section className="panel">
-        <div className="panel-header">
-          <div>
-            <h2>岗位与权限范围</h2>
-            <p>这里展示岗位默认权限摘要；具体权限项统一在“岗位权限”中维护。</p>
+            <h2>岗位列表</h2>
+            <p>页面只展示岗位摘要；低频设置进入弹窗，避免在表格中同时堆放大量控件。</p>
           </div>
         </div>
         <div className="table-wrap">
-          <table>
+          <table className="position-settings-table">
             <thead>
               <tr>
                 <th>岗位</th>
-                <th>部门</th>
-                <th>对应角色</th>
-                <th>模块权限</th>
-                <th>任务工作台</th>
+                <th>归属部门</th>
+                <th>权限摘要</th>
+                <th>业务范围与工作台</th>
                 <th>状态</th>
                 <th>操作</th>
               </tr>
             </thead>
             <tbody>
               {loaderData.positions.map((position) => {
-                const permissions = (position.permissions || "")
-                  .split(",")
-                  .filter(Boolean)
-                  .map((code) => permissionLabels[code] ?? code);
+                const permissionCount = (position.permissions || "").split(",").filter(Boolean).length;
+                const protectedPosition = isProtectedAccessPosition(position.code);
                 return (
                   <tr key={position.id}>
                     <td>
                       <strong>{position.name}</strong>
-                      <small>{position.code}</small>
+                      {protectedPosition && <small>系统保护岗位</small>}
                     </td>
-                    <td>{position.department_code ? `${position.department_code} · ${position.department_name ?? ""}` : "未指定"}</td>
-                    <td><code>{position.role_code}</code></td>
+                    <td>{position.department_name ?? "未指定部门"}</td>
                     <td>
                       {position.code === "BOSS" ? (
-                        <span className="status-pill success">所有权限</span>
-                      ) : permissions.length ? (
-                        <div className="chip-list compact">
-                          {permissions.slice(0, 8).map((label) => <span key={label}>{label}</span>)}
-                          {permissions.length > 8 && <span>+{permissions.length - 8}</span>}
-                        </div>
+                        <strong>全部权限</strong>
+                      ) : permissionCount ? (
+                        <strong>{permissionCount} 项菜单与操作权限</strong>
                       ) : (
-                        "未配置"
+                        <span className="muted-text">尚未配置</span>
                       )}
+                      <Link className="row-secondary-link" to="/admin/roles">配置权限</Link>
                     </td>
                     <td>
-                      {canManage ? <Form method="post" className="portal-setting-form">
-                        <input type="hidden" name="intent" value="portal_settings" />
-                        <input type="hidden" name="positionId" value={position.id} />
-                        <span className="field-static-note">范围由权限积木控制</span>
-                        {isProtectedAccessPosition(position.code) && <input type="hidden" name="dataScope" value="company" />}
-                        <select name={isProtectedAccessPosition(position.code) ? undefined : "dataScope"} defaultValue={position.business_data_scope} disabled={isProtectedAccessPosition(position.code)}>
-                          <option value="self">数据：本人责任</option>
-                          <option value="department">数据：本部门</option>
-                          <option value="warehouse">数据：授权仓库</option>
-                          <option value="region">数据：授权区域</option>
-                          <option value="company">数据：全公司</option>
-                        </select>
-                        <select name="defaultFilter" defaultValue={position.portal_default_filter}>
-                          <option value="open">默认：未完成</option>
-                          <option value="all">默认：全部</option>
-                          <option value="blocked">默认：有阻断</option>
-                          <option value="overdue">默认：即将/已经超时</option>
-                        </select>
-                        <button className="text-button" disabled={busy}>保存</button>
-                      </Form> : <small>范围由权限积木控制</small>}
+                      <div className="position-scope-summary">
+                        <strong>{dataScopeLabels[position.business_data_scope] ?? "按岗位授权"}</strong>
+                        <small>{defaultFilterLabels[position.portal_default_filter] ?? "默认查看未完成"}</small>
+                      </div>
+                      {canManage && <Modal
+                        title={`业务范围 · ${position.name}`}
+                        triggerLabel="设置范围"
+                        triggerClassName="btn small"
+                        closeSignal={targetId === position.id && success}
+                      >
+                        <Form method="post" className="position-scope-dialog">
+                          <input type="hidden" name="intent" value="portal_settings" />
+                          <input type="hidden" name="positionId" value={position.id} />
+                          {protectedPosition && <input type="hidden" name="dataScope" value="company" />}
+                          <div className="position-scope-grid">
+                            <label className="field">
+                              <span>可查看的数据</span>
+                              <select name={protectedPosition ? undefined : "dataScope"} defaultValue={position.business_data_scope} disabled={protectedPosition}>
+                                <option value="self">本人责任数据</option>
+                                <option value="department">本部门数据</option>
+                                <option value="warehouse">授权仓库数据</option>
+                                <option value="region">授权区域数据</option>
+                                <option value="company">全公司数据</option>
+                              </select>
+                            </label>
+                            <label className="field">
+                              <span>任务工作台默认筛选</span>
+                              <select name="defaultFilter" defaultValue={position.portal_default_filter}>
+                                <option value="open">未完成</option>
+                                <option value="all">全部</option>
+                                <option value="blocked">有阻断</option>
+                                <option value="overdue">即将或已经超时</option>
+                              </select>
+                            </label>
+                          </div>
+                          <div className="dialog-form-actions">
+                            <span>{protectedPosition ? "系统保护岗位固定查看全公司数据。" : "该设置只控制数据范围和默认筛选，不改变具体操作权限。"}</span>
+                            <button className="primary" disabled={busy}>保存设置</button>
+                          </div>
+                        </Form>
+                      </Modal>}
                     </td>
                     <td>
                       <span className={`status-pill ${position.status !== "active" ? "off" : ""}`}>
@@ -609,7 +557,7 @@ export default function Positions({ loaderData, actionData }: Route.ComponentPro
             </tbody>
           </table>
         </div>
-      </section>}
+      </section>
     </>
   );
 }
@@ -668,5 +616,5 @@ async function ensurePositionsSeed(organizationId: string) {
 }
 
 export function meta() {
-  return [{ title: "岗位与账号 | International TMS" }];
+  return [{ title: "岗位设置 | International TMS" }];
 }
