@@ -1,83 +1,177 @@
 # International TMS
 
-国际零担运输管理系统。当前基础版本包含运营后台、客户门户、基础数据、客户与销售管理以及权限安全。
+面向国际公路运输业务的一体化运输管理系统，覆盖整车（FTL）与拼车（LTL）订单，从客户建档、询价报价、委托审批、国内运输和仓库作业，一直延伸到报关出境、境外仓收货、客户自提、费用结算与复盘归档。
 
-## Sites
+> 当前项目仍在持续迭代。业务流程、字段门禁和岗位权限均以代码、数据库迁移及已发布工作流配置为准；本地构建或测试通过不等同于生产环境已完成验收。
 
-- Operations: `/admin`, prepared for `admin.oulingtruck.com`
-- Customer portal: `/portal`, prepared for `portal.oulingtruck.com`
-- Warehouse operations: `/warehouse`, prepared for `warehouse.oulingtruck.com`
-- The sites share one organization-scoped D1 database but enforce separate session types, layouts and authorization boundaries.
+## 系统入口
 
-Production domain plan:
+系统采用三端分离架构。三端共享组织范围内的数据，但拥有独立登录会话、界面和服务端权限边界。
 
-- `oulingtruck.com`: public website or unified entry
-- `admin.oulingtruck.com`: operations and management
-- `portal.oulingtruck.com`: customer self-service
-- `warehouse.oulingtruck.com`: warehouse and field operations
+| 端 | 路径 | 主要使用者 | 主要职责 |
+| --- | --- | --- | --- |
+| 管理端 | `/admin` | 业务、主管、操作、单证、财务、人事及管理者 | 报价、订单推进、任务分配、报关、运输跟踪、结算、组织与权限管理 |
+| 仓库端 | `/warehouse` | 国内仓与境外仓作业人员 | 扫码收货、最终包装、标签、配载、装车出库、境外入库及自提交接 |
+| 客户端 | `/portal` | 客户 | 报价确认、订单与运踪查询、预约自提、扫码签收及账单查看 |
 
-Each hostname should be attached to the same Worker as a separate Cloudflare Custom Domain. Sessions are host-only cookies and carry a server-side site type, so credentials issued on one site cannot authorize another site. Warehouse users additionally require `warehouse.view`; operating and configuration actions use `warehouse.operate` and `warehouse.manage`.
+首次部署通过 `/setup` 创建组织与所有者；系统已有首个用户后，该入口会自动关闭。
 
-## Current modules
+规划域名：
 
-- Cloudflare Workers + React Router + TypeScript
-- Cloudflare D1 schema and versioned migrations
-- One-time protected system bootstrap
-- Organization-level tenant isolation
-- Secure password hashing and server-side sessions
-- Users, memberships, roles and fine-grained permissions
-- Reference data for countries, currencies, units, transport modes, service levels and lead sources
-- Customer 360 records, contacts, addresses, credit terms and customer portal accounts
-- Sales leads, opportunities, pipeline stages and activities
-- Quotations with routes, cargo metrics, charge lines, tax and customer acceptance
-- Transport orders from the operations site or customer portal
-- Shipments, carriers, transport legs, customer-visible tracking events and proof of delivery
-- Accounts receivable invoices, charge lines, due dates and payment status
-- Separate operations and customer portal authentication
-- Separate warehouse login, permissions and operations shell
-- Login lockout, session monitoring and session revocation
-- Security audit trail
-- Pull-request CI and protected automatic production deployment from `main`
+- `admin.oulingtruck.com`：管理端
+- `warehouse.oulingtruck.com`：仓库端
+- `portal.oulingtruck.com`：客户端
+- `oulingtruck.com`：官网或统一入口
 
-## Phase-one workflow
+## 核心业务流程
 
-`Customer → Opportunity → Quotation → Transport order → Shipment → Delivery → Invoice`
+```text
+客户建档与询价报价
+  → 客户确认报价并生成订单
+  → 委托资料补充与审批
+  → 任务分配
+  → 国内运输
+  → 国内仓扫码入库
+  → 最终包装与 OUL 贴标
+      ├─ 整车：直接创建装车任务
+      └─ 拼车：进入待配载池 → 创建 PZ 配载单 → 整批分配 → 创建装车任务
+  → 扫码装车与确认出库
+  → 报关、放行与实际出境
+  → 运踪登记
+  → 境外仓扫码验收入库
+  → 客户预约、自提扫码与签收
+  → 三方费用结算
+  → 复盘归档
+```
 
-Each workflow uses guarded status transitions, organization-scoped authorization,
-automatic document numbering and audit events. Customer portal users can accept or
-reject quotations, submit bookings, follow shipment tracking and review issued invoices.
+整车订单保持订单级推进；拼车订单在生成 PZ 配载单后，按配载单统一分配操作与单证负责人、组织装车和运输，但每张订单的货物、文件、费用及历史规则仍分别追踪。
 
-## Local setup
+## 包装与标签模型
 
-Requirements: Node.js 22 or newer.
+系统区分商品数量、入仓包装和最终出仓包装，避免把报关件数与仓库作业数量混为一谈。
+
+- **商品件数**：用于报价、商业资料与报关，不参与仓库扫码数量判断。
+- **入仓唛头**：按预计入仓包装数生成，格式类似 `SO...-IN-001`，用于国内仓扫码收货。
+- **OUL 标签**：仓库确认最终包装后，按最终出仓物理包裹数生成；用于国内装车、境外仓入库和客户自提签收。
+- 一张 OUL 只能属于一张订单；禁止将不同订单的货物合成同一个最终包裹。
+- PZ 配载单只把多张订单的 OUL 组织到同一装车任务和车辆，不改变 OUL 的订单归属。
+
+## 工作流与权限
+
+- 工作流字段支持必填、选填和隐藏，可按整车或拼车工作流版本配置。
+- 新规则影响当前正停留节点、尚未进入该节点及后续新订单；已经完成的历史节点不追溯阻断。
+- 配载单按每张挂载订单自身生效的规则检查文件，不能把某张订单的旧规则强加给其他订单。
+- 字段办理权限属于岗位，不在工作流中指定具体账号。
+- 订单创建后由对应业务员负责；进入任务分配后，由操作主管分配的具体账号承办。
+- 权限由菜单、操作能力、数据范围、工作流字段和岗位归属共同决定，服务端仍会校验直接地址访问。
+- 老板与所有者默认拥有全部业务数据；普通账号按岗位权限和订单责任范围访问。
+
+## 主要模块
+
+### 管理端
+
+- 任务工作台、通知与运营总览
+- 客户、销售、物流产品与询价报价
+- 运输订单、配载单跟踪、运单与运踪
+- 文件中心、货物与标签、费用结算
+- 国内运输、承运商、车辆和司机资源
+- 组织架构、部门、岗位、账号与权限
+- 工作流配置、基础数据、安全中心与审计日志
+
+### 仓库端
+
+- 国内仓验收收货与入仓唛头扫码
+- 最终包装、OUL 生成与打印贴标
+- 待配载池、PZ 配载文件与装车任务
+- OUL 连续扫码装车、确认出库与交接
+- 境外仓扫码验收入库与客户自提交接
+- 仓库货物、库位、盘点和异常处理
+
+### 客户端
+
+- 报价确认、订单与运输状态查询
+- 账单与通知
+- 到仓预约、自提扫码与签收
+- 账户资料与安全设置
+
+## 技术架构
+
+- React 19 + React Router 8
+- TypeScript 5.9 + Vite 8
+- Cloudflare Workers
+- Cloudflare D1 与版本化迁移
+- Vitest 自动化测试
+- GitHub Actions 持续集成与生产部署工作流
+
+系统包含组织级数据隔离、服务端会话、细粒度权限、登录保护、审计记录以及工作流门禁。
+
+## 本地开发
+
+要求：Node.js 22 或更新版本。
+
+```powershell
+npm ci
+Copy-Item .dev.vars.example .dev.vars
+```
+
+在 `.dev.vars` 中将 `BOOTSTRAP_TOKEN` 替换为仅用于本地初始化的长随机值，然后启动：
+
+```powershell
+npm run dev:win
+```
+
+Windows 默认访问地址为 `http://127.0.0.1:5189`。在其他环境也可以运行：
 
 ```bash
-npm ci
-cp .dev.vars.example .dev.vars
-npm run db:migrate:local
 npm run dev
 ```
 
-Set a long random `BOOTSTRAP_TOKEN` in `.dev.vars`. Open `/setup` once to create the
-first organization and owner. The setup route disables itself after the first user
-exists.
+启动命令会先应用本地 D1 迁移。首次运行时打开 `/setup`，使用 `BOOTSTRAP_TOKEN` 初始化组织和所有者账号。
 
-## Verification
+## 验证命令
 
 ```bash
+# 类型与路由检查
+npm run typecheck
+
+# 单元及集成测试
+npm run test
+
+# 生产构建
+npm run build
+
+# 完整持续集成检查
 npm run ci
+
+# HTTP 压力测试（需要先启动目标服务）
+npm run test:stress
 ```
 
-This runs generated Cloudflare types, React Router route types, TypeScript checks,
-unit tests, and a production build.
+## 数据库与部署
 
-## Production deployment
+```bash
+# 应用本地 D1 迁移
+npm run db:migrate:local
 
-Merges to `main` automatically run validation, D1 migrations and the Cloudflare
-Workers deployment through the protected GitHub `production` environment.
+# 应用远程 D1 迁移
+npm run db:migrate:remote
 
-The workflow can also be started manually through **Deploy production**. Bind the
-future custom domains to the same Worker; hostname routing already recognizes
-`admin.oulingtruck.com`, `portal.oulingtruck.com` and `warehouse.oulingtruck.com`.
+# 构建并部署 Cloudflare Worker
+npm run deploy
+```
 
-Never commit `.dev.vars`, `.env`, tokens, passwords, keys, or customer data.
+推送到 `main` 会触发 GitHub Actions 校验，并通过受保护的 `production` 环境执行 D1 迁移和 Cloudflare Workers 部署；也可以在 Actions 中手动运行生产部署工作流。部署前需配置 `CLOUDFLARE_API_TOKEN` 与 `CLOUDFLARE_ACCOUNT_ID` 仓库密钥。
+
+## 项目文档
+
+- [国际汽运主业务流程与四端推进责任](docs/业务流程图_四端推进责任.md)
+- [岗位权限与账户权限积木](docs/岗位权限与门户.md)
+- [国内仓最终包装、OUL 与装车出库流程设计](docs/superpowers/specs/2026-09-08-warehouse-loading-and-oul-flow-design.md)
+- [订单系统架构](docs/order-system-architecture.md)
+- [Windows 11 测试电脑拉取与启动](docs/Windows11测试电脑拉取与启动.md)
+
+## 安全要求
+
+- 不得提交 `.dev.vars`、`.env`、令牌、密码、密钥或客户业务数据。
+- 生产数据库迁移和部署前必须先完成备份、验证及回滚准备。
+- 仓库改为私有后，仍应按最小权限原则管理协作者与 GitHub Actions 密钥。
