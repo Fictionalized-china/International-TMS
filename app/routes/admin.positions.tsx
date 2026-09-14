@@ -510,6 +510,7 @@ export default function Positions({ loaderData, actionData }: Route.ComponentPro
                           triggerLabel="设置范围"
                           triggerClassName="btn small"
                           closeSignal={targetId === position.id && success}
+                          size="wide"
                         >
                           <Form method="post" className="position-scope-dialog">
                             <input type="hidden" name="intent" value="portal_settings" />

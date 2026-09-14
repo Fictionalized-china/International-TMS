@@ -29694,6 +29694,11 @@ html[data-motion="off"] *::after {
 .role-permission-cards .role-card.is-disabled { background: #f7f9fb; opacity: .78; }
 .role-permission-cards .role-card > button { justify-self: start; }
 .permission-editor-form { display: grid; gap: 12px; }
+.modal-card.xwide .modal-body .permission-editor-form:has(> .permission-grid) {
+  width: 100%;
+  grid-template-columns: minmax(0, 1fr);
+  justify-content: stretch;
+}
 .permission-editor-notice {
   display: flex;
   align-items: center;
@@ -29708,6 +29713,8 @@ html[data-motion="off"] *::after {
 .permission-editor-notice span { color: inherit; font-size: 11px; }
 .permission-editor-form > .permission-grid,
 .permission-editor-form > .admin-menu-permission-grid { grid-column: 1 / -1; }
+.permission-editor-form > .permission-editor-notice,
+.permission-editor-form > .permission-editor-actions { grid-column: 1 / -1; }
 .admin-menu-permission-grid {
   margin: 0;
   padding: 10px;
@@ -29729,6 +29736,15 @@ html[data-motion="off"] *::after {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
+.permission-editor-form > .permission-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+}
+.permission-editor-form > .permission-grid > div {
+  grid-template-columns: 1fr;
+  align-content: start;
+}
+.permission-editor-form > .permission-grid > div > strong { grid-column: 1; }
 .admin-menu-permission-options label {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr);
@@ -32366,8 +32382,13 @@ html[data-motion="off"] *::after {
 .personnel-account-filters .field { margin: 0; }
 .personnel-account-filter-actions { min-height: 34px; }
 .personnel-account-actions { flex-wrap: wrap; }
-.personnel-placement-dialog,
-.position-scope-dialog { display: grid; gap: 14px; min-width: min(620px, 78vw); }
+.personnel-placement-dialog { display: grid; gap: 14px; min-width: min(620px, 78vw); }
+.position-scope-dialog {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  gap: 14px;
+}
 .personnel-placement-dialog .organization-placement-fields { width: 100%; min-width: 0; }
 .dialog-form-actions {
   justify-content: flex-end;
@@ -32391,6 +32412,8 @@ html[data-motion="off"] *::after {
 .position-settings-actions .btn,
 .position-settings-actions button { white-space: nowrap; }
 .position-scope-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.position-scope-grid > *,
+.position-scope-grid :is(input, select, textarea) { min-width: 0; }
 .position-sort-field input { max-width: 160px; }
 
 .permission-ledger-toolbar {
@@ -32429,6 +32452,7 @@ html[data-motion="off"] *::after {
 @media (max-width: 1100px) {
   .personnel-account-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .personnel-account-filter-actions { grid-column: 1 / -1; justify-content: flex-end; }
+  .permission-editor-form > .permission-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 720px) {
@@ -32440,4 +32464,6 @@ html[data-motion="off"] *::after {
   .compact-ledger-pagination > div { flex-wrap: wrap; }
   .personnel-placement-dialog,
   .position-scope-dialog { min-width: 0; }
+  .admin-menu-permission-options,
+  .permission-editor-form > .permission-grid { grid-template-columns: 1fr; }
 }
