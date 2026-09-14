@@ -646,12 +646,22 @@ function PermissionCheckboxes({
 }) {
   const selectedSignature = [...selected].sort().join("\u0000");
   const [selectedCodes, setSelectedCodes] = useState(() => new Set(selected));
+  const [expandedModules, setExpandedModules] = useState(() => new Set(
+    Object.entries(grouped)
+      .filter(([, items]) => items.some((permission) => selected.has(permission.code)))
+      .map(([module]) => module),
+  ));
   const knownCodes = new Set(
     Object.values(grouped).flat().map((permission) => permission.code),
   );
 
   useEffect(() => {
     setSelectedCodes(new Set(selected));
+    setExpandedModules(new Set(
+      Object.entries(grouped)
+        .filter(([, items]) => items.some((permission) => selected.has(permission.code)))
+        .map(([module]) => module),
+    ));
   }, [selectedSignature]);
 
   function setPermission(code: string, checked: boolean) {
@@ -680,6 +690,15 @@ function PermissionCheckboxes({
     });
   }
 
+  function togglePermissionDirectory(module: string) {
+    setExpandedModules((current) => {
+      const next = new Set(current);
+      if (next.has(module)) next.delete(module);
+      else next.add(module);
+      return next;
+    });
+  }
+
   return <>
     <fieldset className="admin-menu-permission-grid" disabled={disabled}>
       <legend>一级菜单快捷配置</legend>
@@ -702,22 +721,43 @@ function PermissionCheckboxes({
         })}
       </div>
     </fieldset>
-    <fieldset className="permission-grid">
+    <fieldset className="permission-grid permission-directory">
       <legend>具体权限</legend>
-      {Object.entries(grouped).map(([module, items]) => <div key={module}>
-        <strong>{moduleLabels[module] ?? module}</strong>
-        {items.map((permission) => <label key={permission.code}>
-          <input
-            type="checkbox"
-            name="permissions"
-            value={permission.code}
-            checked={selectedCodes.has(permission.code)}
-            disabled={disabled}
-            onChange={(event) => setPermission(permission.code, event.currentTarget.checked)}
-          />
-          <span><b>{permission.name}</b><small>{permission.description}</small></span>
-        </label>)}
-      </div>)}
+      <p className="permission-directory-hint">按业务目录展开后再配置具体权限；目录右侧显示已选数量。</p>
+      <div className="permission-directory-list">
+        {Object.entries(grouped).map(([module, items]) => {
+          const selectedCount = items.filter((permission) => selectedCodes.has(permission.code)).length;
+          const expanded = expandedModules.has(module);
+          return <section className={`permission-directory-group${expanded ? " is-open" : ""}`} key={module}>
+            <button
+              type="button"
+              className="permission-directory-summary"
+              aria-expanded={expanded}
+              onClick={() => togglePermissionDirectory(module)}
+            >
+              <span className="permission-directory-chevron" aria-hidden="true">›</span>
+              <span className="permission-directory-title">
+                <b>{moduleLabels[module] ?? module}</b>
+                <small>{items.length} 项可配置权限</small>
+              </span>
+              <span className="permission-directory-count">{selectedCount}/{items.length} 已选</span>
+            </button>
+            <div className="permission-directory-items" hidden={!expanded}>
+              {items.map((permission) => <label key={permission.code}>
+                <input
+                  type="checkbox"
+                  name="permissions"
+                  value={permission.code}
+                  checked={selectedCodes.has(permission.code)}
+                  disabled={disabled}
+                  onChange={(event) => setPermission(permission.code, event.currentTarget.checked)}
+                />
+                <span><b>{permission.name}</b><small>{permission.description}</small></span>
+              </label>)}
+            </div>
+          </section>;
+        })}
+      </div>
     </fieldset>
   </>;
 }
