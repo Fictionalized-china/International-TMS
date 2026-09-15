@@ -1,0 +1,1694 @@
+import { env } from "cloudflare:workers";
+import { chunkD1Values, d1Placeholders } from "./d1-bindings";
+import type { OrderModuleCode } from "./order-modules";
+import { domesticTransportPayableWorkflowValues } from "./transport-workflow";
+import { orderDocumentPlacements } from "./order-documents";
+import { isActualExitTrackingMilestone } from "./batch-tracking.shared";
+import { loadOrderAssignmentManifest } from "./order-assignment-manifest.server";
+import {
+  quotationNativeFieldKeySet,
+  quotationNativeFieldPresent,
+} from "./quotation-native-field-catalog";
+import {
+  workflowFieldCatalog,
+  workflowFieldCatalogByKey,
+  workflowFieldMode,
+  workflowFieldModeFlags,
+  type WorkflowFieldMode,
+} from "./workflow-field-catalog";
+import { frozenWorkflowFieldScopeMarkerKey } from "./workflow-field-runtime";
+import { workflowInstanceCapabilityStageAccess } from "./workflow-instance-stage-gate";
+import { loadLockedWorkflowStageContext } from "./workflow-instance-stage-gate.server";
+import {
+  canPositionHandleWorkflowField,
+  normalizeWorkflowFieldHandlerPositionCodes,
+  serializeWorkflowFieldHandlerPositionCodes,
+} from "./workflow-field-position-access";
+
+export const confirmedBatchCostAllocationPresenceSql=`EXISTS(
+  SELECT 1
+  FROM transport_cost_allocations ca
+  JOIN transport_cost_allocation_lines line
+    ON line.allocation_id=ca.id
+   AND line.organization_id=ca.organization_id
+   AND line.order_id=bo.order_id
+   AND line.expense_id IS NOT NULL
+  WHERE ca.organization_id=bo.organization_id
+    AND ca.batch_id=b.id AND ca.status='confirmed'
+)`;
+
+export type WorkflowFieldRule = {
+  id: string;
+  workflowId: string;
+  stepKey: string;
+  stepName: string;
+  moduleCode: OrderModuleCode;
+  fieldKey: string;
+  label: string;
+  fieldType: string;
+  isRequired: boolean;
+  isActive: boolean;
+  mode: WorkflowFieldMode;
+  sortOrder: number;
+  optionsText: string | null;
+  helpText: string | null;
+  handlerPositionCodes?: string[];
+  isBuiltIn: boolean;
+};
+
+export type WorkflowFieldState = WorkflowFieldRule & {
+  present: boolean;
+  displayValue: string | null;
+};
+
+const standardWorkflowCodes = new Set([
+  "tms-road-pending",
+  "tms-default",
+  "tms-ftl-standard",
+]);
+
+const loadingTypeLockedFields = new Set([
+  "business_type",
+  "loading_batch",
+  "consolidation_warehouse",
+  "cost_allocation",
+  "vehicle_capacity_weight",
+  "vehicle_capacity_volume",
+]);
+const loadingTypeFixedField = new Set(["business_type"]);
+const retiredWorkflowFields = new Set([
+  "loading_seal_number",
+  "receipt_evidence",
+]);
+
+export const assignmentManagedModuleCodes = [
+  "transport",
+  "tracking",
+  "exceptions",
+  "documents",
+  "customs",
+  "costs",
+] as const satisfies readonly OrderModuleCode[];
+
+export function assignmentCoverageIsComplete(
+  assigned: number,
+  total: number,
+) {
+  return total > 0 && assigned >= total;
+}
+
+export async function ensureWorkflowCatalogFields(organizationId: string) {
+  const [workflows, existingFields] = await Promise.all([
+    env.DB.prepare(
+      "SELECT id,code,road_load_type FROM workflow_definitions WHERE organization_id=?",
+    )
+      .bind(organizationId)
+      .all<{ id: string; code: string; road_load_type: string | null }>(),
+    env.DB.prepare(
+      `SELECT field.workflow_id,step.step_key,
+              COALESCE(field.module_code,'consignment') module_code,field.field_key
+       FROM workflow_step_fields field
+       JOIN workflow_steps step ON step.id=field.step_id
+       JOIN workflow_definitions workflow ON workflow.id=field.workflow_id
+       WHERE workflow.organization_id=?`,
+    )
+      .bind(organizationId)
+      .all<{
+        workflow_id: string;
+        step_key: string;
+        module_code: OrderModuleCode;
+        field_key: string;
+      }>(),
+  ]);
+  const existingFieldKeys = new Set(
+    existingFields.results.map(
+      (item) => `${item.workflow_id}:${item.step_key}:${item.module_code}:${item.field_key}`,
+    ),
+  );
+  const now = new Date().toISOString();
+  const statements: D1PreparedStatement[] = [];
+  for (const workflow of workflows.results) {
+    for (const item of workflowFieldCatalog) {
+      // Every road workflow starts from the system field baseline. Workflow
+      // configuration is an overlay for required/optional/hidden choices, not
+      // a blank form builder. INSERT OR IGNORE preserves every boss-authored
+      // choice while filling catalog gaps in old or copied versions.
+      const shouldSeed =
+        standardWorkflowCodes.has(workflow.code) ||
+        ["ftl", "ltl"].includes(workflow.road_load_type || "");
+      if (!shouldSeed) continue;
+      if (retiredWorkflowFields.has(item.fieldKey)) continue;
+      if (
+        existingFieldKeys.has(
+          `${workflow.id}:${item.stepKey}:${item.moduleCode}:${item.fieldKey}`,
+        )
+      ) continue;
+      const isFtlLoadingField =
+        workflow.code === "tms-ftl-standard" && item.moduleCode === "loading";
+      if (isFtlLoadingField && loadingTypeLockedFields.has(item.fieldKey)) continue;
+      const targetStepKey = item.stepKey;
+      const isActive = item.defaultMode === "hidden" ? 0 : 1;
+      const isRequired = item.defaultMode === "required" ? 1 : 0;
+      statements.push(
+        env.DB.prepare(
+          `INSERT OR IGNORE INTO workflow_step_fields(
+           id,workflow_id,step_id,field_key,label,field_type,is_required,is_active,
+             sort_order,options_text,help_text,module_code,created_at,updated_at
+           )
+           SELECT ?,?,s.id,?,?,?,?,?,?,?,?,?,?,?
+           FROM workflow_steps s
+           WHERE s.workflow_id=? AND s.step_key=?
+             AND NOT EXISTS(
+               SELECT 1 FROM workflow_step_fields existing
+               WHERE existing.workflow_id=?
+                 AND existing.field_key=?
+                 AND COALESCE(existing.module_code,?)=?
+             )`,
+        ).bind(
+          `${workflow.id}:catalog:${item.moduleCode}:${item.fieldKey}`,
+          workflow.id,
+          item.fieldKey,
+          item.label,
+          item.fieldType,
+          isRequired,
+          isActive,
+          workflowFieldCatalog.indexOf(item) * 10 + 10,
+          item.optionsText ?? null,
+          item.helpText,
+          item.moduleCode,
+          now,
+          now,
+          workflow.id,
+          targetStepKey,
+          workflow.id,
+          item.fieldKey,
+          item.moduleCode,
+          item.moduleCode,
+        ),
+      );
+    }
+  }
+  for (let index = 0; index < statements.length; index += 80) {
+    await env.DB.batch(statements.slice(index, index + 80));
+  }
+  await env.DB.prepare(
+    `UPDATE workflow_step_fields
+     SET module_code=COALESCE(module_code,(
+       SELECT CASE ws.step_key
+         WHEN 'order_creation' THEN 'consignment'
+         WHEN 'consignment_approval' THEN 'consignment'
+         WHEN 'task_assignment' THEN 'assignment'
+         WHEN 'domestic_execution' THEN 'transport'
+         WHEN 'warehouse_receiving' THEN 'warehouse'
+         WHEN 'port_loading' THEN 'loading'
+         WHEN 'outbound_transport' THEN 'tracking'
+         WHEN 'overseas_pickup' THEN 'overseas_warehouse'
+         WHEN 'reconciliation' THEN 'costs'
+         WHEN 'completion_review' THEN 'review'
+         ELSE 'consignment' END
+       FROM workflow_steps ws WHERE ws.id=workflow_step_fields.step_id
+     ))
+     WHERE workflow_id IN (SELECT id FROM workflow_definitions WHERE organization_id=?)`,
+  )
+    .bind(organizationId)
+    .run();
+  const retiredFieldKeys = [...retiredWorkflowFields];
+  const retiredFieldPlaceholders = retiredFieldKeys.map(() => "?").join(",");
+  await env.DB.prepare(
+    `UPDATE workflow_step_fields
+     SET is_active=0,is_required=0,updated_at=?
+     WHERE workflow_id IN (SELECT id FROM workflow_definitions WHERE organization_id=?)
+       AND field_key IN (${retiredFieldPlaceholders})
+       AND (is_active<>0 OR is_required<>0)`,
+  )
+    .bind(now, organizationId, ...retiredFieldKeys)
+    .run();
+  await env.DB.prepare(
+    `UPDATE workflow_instance_fields
+     SET is_active=0,is_required=0
+     WHERE workflow_id IN (SELECT id FROM workflow_definitions WHERE organization_id=?)
+       AND field_key IN (${retiredFieldPlaceholders})`,
+  )
+    .bind(organizationId, ...retiredFieldKeys)
+    .run();
+  const standardCodes = [...standardWorkflowCodes];
+  const placeholders = standardCodes.map(() => "?").join(",");
+  await env.DB.prepare(
+    `UPDATE workflow_step_fields
+     SET step_id=(
+       SELECT target.id FROM workflow_steps target
+       WHERE target.workflow_id=workflow_step_fields.workflow_id
+         AND target.step_key='port_loading'
+     ),updated_at=?
+     WHERE module_code='loading'
+       AND workflow_id IN (
+         SELECT id FROM workflow_definitions
+         WHERE organization_id=? AND code IN (${placeholders})
+       )
+       AND step_id<>(
+         SELECT target.id FROM workflow_steps target
+         WHERE target.workflow_id=workflow_step_fields.workflow_id
+           AND target.step_key='port_loading'
+       )`,
+  )
+    .bind(now, organizationId, ...standardCodes)
+    .run();
+  await env.DB.prepare(
+    `UPDATE workflow_instance_fields
+     SET step_key='port_loading'
+     WHERE module_code='loading'
+       AND workflow_id IN (
+         SELECT id FROM workflow_definitions
+         WHERE organization_id=? AND code IN (${placeholders})
+       )`,
+  )
+    .bind(organizationId, ...standardCodes)
+    .run();
+    const ftlWorkflow = workflows.results.find((item) => item.code === "tms-ftl-standard");
+  if (ftlWorkflow) {
+    const excludedFields = [...loadingTypeLockedFields];
+    const excludedPlaceholders = excludedFields.map(() => "?").join(",");
+    await env.DB.prepare(
+      `UPDATE workflow_step_fields
+       SET is_active=0,is_required=0,updated_at=?
+       WHERE workflow_id=? AND module_code='loading'
+         AND field_key IN (${excludedPlaceholders})
+         AND (is_active<>0 OR is_required<>0)`,
+    )
+      .bind(now, ftlWorkflow.id, ...excludedFields)
+      .run();
+    await env.DB.prepare(
+      `UPDATE workflow_instance_fields
+       SET is_active=0,is_required=0
+       WHERE workflow_id=? AND module_code='loading'
+         AND field_key IN (${excludedPlaceholders})`,
+    )
+      .bind(ftlWorkflow.id, ...excludedFields)
+      .run();
+  }
+  await env.DB.prepare(
+    `UPDATE workflow_step_fields
+     SET handler_position_codes=COALESCE((
+       SELECT GROUP_CONCAT(position_code, ',')
+       FROM (
+         SELECT position_code FROM (
+           SELECT module.responsibility_position_code position_code
+           FROM workflow_step_modules module
+           WHERE module.workflow_id=workflow_step_fields.workflow_id
+             AND module.step_id=workflow_step_fields.step_id
+             AND module.module_code=COALESCE(workflow_step_fields.module_code,'consignment')
+             AND module.is_active=1
+             AND module.responsibility_position_code IS NOT NULL
+           UNION
+           SELECT task.responsibility_position_code position_code
+           FROM workflow_step_modules module
+           JOIN workflow_module_tasks task
+             ON task.workflow_id=module.workflow_id
+            AND task.step_module_id=module.id
+            AND task.is_active=1
+           WHERE module.workflow_id=workflow_step_fields.workflow_id
+             AND module.step_id=workflow_step_fields.step_id
+             AND module.module_code=COALESCE(workflow_step_fields.module_code,'consignment')
+             AND module.is_active=1
+             AND task.responsibility_position_code IS NOT NULL
+         ) ORDER BY position_code
+       )
+     ),(
+       SELECT GROUP_CONCAT(position_code, ',')
+       FROM (
+         SELECT position_code FROM (
+           SELECT module.responsibility_position_code position_code
+           FROM workflow_step_modules module
+           WHERE module.workflow_id=workflow_step_fields.workflow_id
+             AND module.step_id=workflow_step_fields.step_id
+             AND module.is_active=1
+             AND module.responsibility_position_code IS NOT NULL
+           UNION
+           SELECT task.responsibility_position_code position_code
+           FROM workflow_step_modules module
+           JOIN workflow_module_tasks task
+             ON task.workflow_id=module.workflow_id
+            AND task.step_module_id=module.id
+            AND task.is_active=1
+           WHERE module.workflow_id=workflow_step_fields.workflow_id
+             AND module.step_id=workflow_step_fields.step_id
+             AND module.is_active=1
+             AND task.responsibility_position_code IS NOT NULL
+         ) ORDER BY position_code
+       )
+     ))
+     WHERE handler_position_codes IS NULL
+       AND workflow_id IN (
+         SELECT id FROM workflow_definitions WHERE organization_id=?
+       )`,
+  ).bind(organizationId).run();
+}
+
+export async function backfillWorkflowFieldHandlerPositionsForWorkflow(
+  workflowId: string,
+) {
+  await env.DB.prepare(
+    `UPDATE workflow_step_fields
+     SET handler_position_codes=COALESCE((
+       SELECT GROUP_CONCAT(position_code, ',')
+       FROM (
+         SELECT position_code FROM (
+           SELECT module.responsibility_position_code position_code
+           FROM workflow_step_modules module
+           WHERE module.workflow_id=workflow_step_fields.workflow_id
+             AND module.step_id=workflow_step_fields.step_id
+             AND module.module_code=COALESCE(workflow_step_fields.module_code,'consignment')
+             AND module.is_active=1
+             AND module.responsibility_position_code IS NOT NULL
+           UNION
+           SELECT task.responsibility_position_code position_code
+           FROM workflow_step_modules module
+           JOIN workflow_module_tasks task
+             ON task.workflow_id=module.workflow_id
+            AND task.step_module_id=module.id
+            AND task.is_active=1
+           WHERE module.workflow_id=workflow_step_fields.workflow_id
+             AND module.step_id=workflow_step_fields.step_id
+             AND module.module_code=COALESCE(workflow_step_fields.module_code,'consignment')
+             AND module.is_active=1
+             AND task.responsibility_position_code IS NOT NULL
+         ) ORDER BY position_code
+       )
+     ),(
+       SELECT GROUP_CONCAT(position_code, ',')
+       FROM (
+         SELECT position_code FROM (
+           SELECT module.responsibility_position_code position_code
+           FROM workflow_step_modules module
+           WHERE module.workflow_id=workflow_step_fields.workflow_id
+             AND module.step_id=workflow_step_fields.step_id
+             AND module.is_active=1
+             AND module.responsibility_position_code IS NOT NULL
+           UNION
+           SELECT task.responsibility_position_code position_code
+           FROM workflow_step_modules module
+           JOIN workflow_module_tasks task
+             ON task.workflow_id=module.workflow_id
+            AND task.step_module_id=module.id
+            AND task.is_active=1
+           WHERE module.workflow_id=workflow_step_fields.workflow_id
+             AND module.step_id=workflow_step_fields.step_id
+             AND module.is_active=1
+             AND task.responsibility_position_code IS NOT NULL
+         ) ORDER BY position_code
+       )
+     ))
+     WHERE handler_position_codes IS NULL AND workflow_id=?`,
+  ).bind(workflowId).run();
+}
+
+export async function defaultWorkflowFieldHandlerPositionCodes(input: {
+  workflowId: string;
+  stepId: string;
+  moduleCode: OrderModuleCode;
+}) {
+  const row = await env.DB.prepare(
+    `SELECT COALESCE(
+       (SELECT GROUP_CONCAT(position_code, ',') FROM (
+         SELECT position_code FROM (
+           SELECT responsibility_position_code position_code
+           FROM workflow_step_modules
+           WHERE workflow_id=? AND step_id=? AND module_code=? AND is_active=1
+             AND responsibility_position_code IS NOT NULL
+           UNION
+           SELECT task.responsibility_position_code position_code
+           FROM workflow_step_modules module
+           JOIN workflow_module_tasks task
+             ON task.workflow_id=module.workflow_id
+            AND task.step_module_id=module.id
+            AND task.is_active=1
+           WHERE module.workflow_id=? AND module.step_id=? AND module.module_code=?
+             AND module.is_active=1
+             AND task.responsibility_position_code IS NOT NULL
+         ) ORDER BY position_code
+       )),
+       (SELECT GROUP_CONCAT(position_code, ',') FROM (
+         SELECT position_code FROM (
+           SELECT responsibility_position_code position_code
+           FROM workflow_step_modules
+           WHERE workflow_id=? AND step_id=? AND is_active=1
+             AND responsibility_position_code IS NOT NULL
+           UNION
+           SELECT task.responsibility_position_code position_code
+           FROM workflow_step_modules module
+           JOIN workflow_module_tasks task
+             ON task.workflow_id=module.workflow_id
+            AND task.step_module_id=module.id
+            AND task.is_active=1
+           WHERE module.workflow_id=? AND module.step_id=? AND module.is_active=1
+             AND task.responsibility_position_code IS NOT NULL
+         ) ORDER BY position_code
+       ))
+     ) position_codes`,
+  ).bind(
+    input.workflowId,
+    input.stepId,
+    input.moduleCode,
+    input.workflowId,
+    input.stepId,
+    input.moduleCode,
+    input.workflowId,
+    input.stepId,
+    input.workflowId,
+    input.stepId,
+  ).first<{ position_codes: string | null }>();
+  return serializeWorkflowFieldHandlerPositionCodes(row?.position_codes);
+}
+
+export async function snapshotWorkflowFieldsForInstance(input: {
+  organizationId: string;
+  instanceId: string;
+  workflowId: string;
+}) {
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO workflow_instance_fields(
+       id,instance_id,workflow_id,step_key,module_code,field_key,label,field_type,
+       is_required,is_active,sort_order,options_text,help_text,handler_position_codes,created_at
+     )
+     SELECT lower(hex(randomblob(16))),?,f.workflow_id,s.step_key,
+            COALESCE(f.module_code,'consignment'),f.field_key,f.label,f.field_type,
+            f.is_required,f.is_active,f.sort_order,f.options_text,f.help_text,
+            f.handler_position_codes,?
+     FROM workflow_step_fields f
+     JOIN workflow_steps s ON s.id=f.step_id AND s.workflow_id=f.workflow_id
+     WHERE f.workflow_id=?`,
+  )
+    .bind(input.instanceId, now, input.workflowId)
+    .run();
+}
+
+export async function synchronizeWorkflowFieldPolicyForInstances(input: {
+  workflowId: string;
+  fieldKey: string;
+  moduleCode: OrderModuleCode;
+  isRequired: number;
+  isActive: number;
+}) {
+  await env.DB.prepare(
+    `UPDATE workflow_instance_fields
+     SET is_required=?,is_active=?
+     WHERE workflow_id=? AND field_key=? AND module_code=?
+       AND EXISTS(
+         SELECT 1
+         FROM workflow_instances wi
+         JOIN workflow_instance_step_states target_state
+           ON target_state.instance_id=wi.id
+          AND target_state.step_key=workflow_instance_fields.step_key
+         WHERE wi.id=workflow_instance_fields.instance_id
+           AND wi.workflow_id=workflow_instance_fields.workflow_id
+           AND target_state.status NOT IN ('completed','not_applicable')
+       )`,
+  )
+    .bind(
+      input.isRequired,
+      input.isActive,
+      input.workflowId,
+      input.fieldKey,
+      input.moduleCode,
+    )
+    .run();
+}
+
+export async function synchronizeWorkflowFieldHandlerPositionsForInstances(input: {
+  workflowId: string;
+  stepKey: string;
+  fieldKey: string;
+  moduleCode: OrderModuleCode;
+  handlerPositionCodes: string;
+}) {
+  await env.DB.prepare(
+    `UPDATE workflow_instance_fields
+     SET handler_position_codes=?
+     WHERE workflow_id=? AND step_key=? AND field_key=? AND module_code=?
+       AND EXISTS(
+         SELECT 1
+         FROM workflow_instances wi
+         JOIN workflow_instance_step_states target_state
+           ON target_state.instance_id=wi.id
+          AND target_state.step_key=workflow_instance_fields.step_key
+         WHERE wi.id=workflow_instance_fields.instance_id
+           AND wi.workflow_id=workflow_instance_fields.workflow_id
+           AND target_state.status NOT IN ('completed','not_applicable')
+       )`,
+  ).bind(
+    input.handlerPositionCodes,
+    input.workflowId,
+    input.stepKey,
+    input.fieldKey,
+    input.moduleCode,
+  ).run();
+}
+
+export async function synchronizeWorkflowFieldDefinitionForInstances(input: {
+  workflowId: string;
+  stepKey: string;
+  fieldKey: string;
+  moduleCode: OrderModuleCode;
+  sourceStepKey?: string;
+  sourceFieldKey?: string;
+  sourceModuleCode?: OrderModuleCode;
+  label: string;
+  fieldType: string;
+  isRequired: number;
+  isActive: number;
+  sortOrder: number;
+  optionsText: string | null;
+  helpText: string | null;
+}) {
+  const now = new Date().toISOString();
+  const sourceStepKey = input.sourceStepKey ?? input.stepKey;
+  const sourceFieldKey = input.sourceFieldKey ?? input.fieldKey;
+  const sourceModuleCode = input.sourceModuleCode ?? input.moduleCode;
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE workflow_instance_fields
+       SET step_key=?,label=?,field_type=?,is_required=?,is_active=?,sort_order=?,
+           options_text=?,help_text=?
+       WHERE workflow_id=? AND step_key=? AND field_key=? AND module_code=?
+         AND EXISTS(
+           SELECT 1
+           FROM workflow_instances wi
+           JOIN workflow_instance_step_states target_state
+             ON target_state.instance_id=wi.id
+            AND target_state.step_key=workflow_instance_fields.step_key
+           WHERE wi.id=workflow_instance_fields.instance_id
+             AND wi.workflow_id=workflow_instance_fields.workflow_id
+             AND target_state.status NOT IN ('completed','not_applicable')
+         )`,
+    ).bind(
+      input.stepKey,
+      input.label,
+      input.fieldType,
+      input.isRequired,
+      input.isActive,
+      input.sortOrder,
+      input.optionsText,
+      input.helpText,
+      input.workflowId,
+      sourceStepKey,
+      sourceFieldKey,
+      sourceModuleCode,
+    ),
+    env.DB.prepare(
+      `INSERT OR IGNORE INTO workflow_instance_fields(
+         id,instance_id,workflow_id,step_key,module_code,field_key,label,field_type,
+         is_required,is_active,sort_order,options_text,help_text,created_at
+       )
+       SELECT lower(hex(randomblob(16))),wi.id,wi.workflow_id,?,?,?,?,?,?,?,?,?,?,?
+       FROM workflow_instances wi
+       JOIN workflow_instance_step_states target_state
+         ON target_state.instance_id=wi.id
+        AND target_state.step_key=?
+       WHERE wi.workflow_id=?
+         AND target_state.status NOT IN ('completed','not_applicable')`,
+    ).bind(
+      input.stepKey,
+      input.moduleCode,
+      input.fieldKey,
+      input.label,
+      input.fieldType,
+      input.isRequired,
+      input.isActive,
+      input.sortOrder,
+      input.optionsText,
+      input.helpText,
+      now,
+      input.stepKey,
+      input.workflowId,
+    ),
+  ]);
+}
+
+/**
+ * A template-field change belongs to the live gate while the target node is
+ * open. Completed/skipped nodes are historical evidence and stay frozen. If a
+ * completed node is reopened, its status becomes active again and the latest
+ * definition applies on the next synchronization.
+ */
+export function workflowFieldPolicyAppliesToStepStatus(status: string) {
+  return !["completed", "not_applicable"].includes(status);
+}
+
+export async function inspectHiddenWorkflowFieldData(input: {
+  organizationId: string;
+  workflowId: string;
+  fieldKey: string;
+  moduleCode: OrderModuleCode;
+}) {
+  const placement = orderDocumentPlacements.find(
+    (item) => item.fieldKey === input.fieldKey,
+  );
+  let preservedFiles = 0;
+  let preservedBytes = 0;
+  if (placement) {
+    const stored = await env.DB.prepare(
+      `SELECT COUNT(*) file_count,COALESCE(SUM(a.size_bytes),0) total_bytes
+       FROM order_attachments a
+       JOIN order_document_metadata m ON m.attachment_id=a.id
+       WHERE a.organization_id=? AND m.document_category=?
+         AND EXISTS(
+           SELECT 1 FROM workflow_instances wi
+           WHERE wi.workflow_id=? AND wi.order_id=a.order_id
+         )`,
+    ).bind(
+      input.organizationId,
+      placement.documentCode,
+      input.workflowId,
+    ).first<{ file_count: number; total_bytes: number }>();
+    preservedFiles = Number(stored?.file_count || 0);
+    preservedBytes = Number(stored?.total_bytes || 0);
+  }
+  const customValues = await env.DB.prepare(
+    `SELECT COUNT(*) value_count
+     FROM order_custom_workflow_field_values
+     WHERE organization_id=? AND field_instance_id IN (
+       SELECT id FROM workflow_instance_fields
+       WHERE workflow_id=? AND field_key=? AND module_code=?
+     )`,
+  ).bind(
+    input.organizationId,
+    input.workflowId,
+    input.fieldKey,
+    input.moduleCode,
+  ).first<{ value_count: number }>();
+  return {
+    preservedFiles,
+    preservedBytes,
+    preservedCustomValues: Number(customValues?.value_count || 0),
+  };
+}
+
+export async function listTemplateWorkflowFields(workflowIds: string[]) {
+  if (!workflowIds.length) return [] as (WorkflowFieldRule & { workflowId: string })[];
+  const fields: RawField[] = [];
+  for (const workflowChunk of chunkD1Values([...new Set(workflowIds)])) {
+    const rows = await env.DB.prepare(
+      `SELECT f.id,f.workflow_id,s.step_key,s.name step_name,COALESCE(f.module_code,'consignment') module_code,
+              f.field_key,f.label,f.field_type,f.is_required,f.is_active,f.sort_order,
+              f.options_text,f.help_text,f.handler_position_codes
+       FROM workflow_step_fields f
+       JOIN workflow_steps s ON s.id=f.step_id
+       WHERE f.workflow_id IN (${d1Placeholders(workflowChunk.length)})
+       ORDER BY f.workflow_id,s.sort_order,f.sort_order,f.field_key`,
+    ).bind(...workflowChunk).all<RawField>();
+    fields.push(...rows.results);
+  }
+  fields.sort((left, right) => left.workflow_id.localeCompare(right.workflow_id));
+  return fields.map(toRule);
+}
+
+type FrozenModuleFieldPlacement = {
+  step_key: string;
+  step_name: string;
+  sort_order: number;
+};
+
+export async function loadOrderModuleWorkflowFields(
+  organizationId: string,
+  orderId: string,
+  moduleCode: OrderModuleCode,
+): Promise<WorkflowFieldState[]> {
+  const binding = await env.DB.prepare(
+    `SELECT o.workflow_instance_id,wi.id matched_instance_id,wi.workflow_id
+     FROM transport_orders o
+     LEFT JOIN workflow_instances wi
+       ON wi.id=o.workflow_instance_id
+      AND wi.organization_id=o.organization_id
+      AND wi.order_id=o.id
+     WHERE o.id=? AND o.organization_id=?`,
+  )
+    .bind(orderId, organizationId)
+    .first<{
+      workflow_instance_id: string | null;
+      matched_instance_id: string | null;
+      workflow_id: string | null;
+    }>();
+  if (!binding) return [];
+  let raw: RawField[] = [];
+  let frozenPlacements: FrozenModuleFieldPlacement[] = [];
+  if (binding.workflow_instance_id && binding.matched_instance_id) {
+    const [snapshot, placements] = await Promise.all([
+      env.DB.prepare(
+        `SELECT f.id,f.workflow_id,f.step_key,COALESCE(ss.step_name,f.step_key) step_name,
+                f.module_code,f.field_key,f.label,f.field_type,f.is_required,
+                f.is_active,f.sort_order,f.options_text,f.help_text,f.handler_position_codes
+         FROM workflow_instance_fields f
+         LEFT JOIN workflow_instance_step_states ss
+           ON ss.instance_id=f.instance_id AND ss.step_key=f.step_key
+         WHERE f.instance_id=? AND f.module_code=?
+         ORDER BY f.sort_order,f.field_key`,
+      )
+        .bind(binding.matched_instance_id, moduleCode)
+        .all<RawField>(),
+      env.DB.prepare(
+        `SELECT ss.step_key,ss.step_name,ss.sort_order
+         FROM workflow_instance_module_states ms
+         JOIN workflow_instance_step_states ss
+           ON ss.id=ms.instance_step_state_id
+         WHERE ss.instance_id=? AND ms.module_code=?
+         ORDER BY ss.sort_order,ms.sort_order,ms.id`,
+      )
+        .bind(binding.matched_instance_id, moduleCode)
+        .all<FrozenModuleFieldPlacement>(),
+    ]);
+    raw = snapshot.results;
+    frozenPlacements = placements.results;
+  } else if (!binding.workflow_instance_id) {
+    if (!binding.workflow_id) return [];
+
+    const live = await env.DB.prepare(
+      `SELECT f.id,f.workflow_id,s.step_key,s.name step_name,COALESCE(f.module_code,'consignment') module_code,
+              f.field_key,f.label,f.field_type,f.is_required,f.is_active,f.sort_order,
+              f.options_text,f.help_text,f.handler_position_codes
+       FROM workflow_step_fields f
+       JOIN workflow_steps s ON s.id=f.step_id
+       WHERE f.workflow_id=? AND COALESCE(f.module_code,'consignment')=?
+       ORDER BY f.sort_order,f.field_key`,
+    )
+      .bind(binding.workflow_id, moduleCode)
+      .all<RawField>();
+    raw = live.results;
+    raw = mergeWorkflowFieldCatalogBaseline(raw, binding.workflow_id, moduleCode);
+  }
+  raw = raw.filter((item) => !retiredWorkflowFields.has(item.field_key));
+  if (moduleCode === "loading") {
+    const order = await env.DB.prepare(
+      "SELECT business_type FROM transport_orders WHERE organization_id=? AND id=?",
+    )
+      .bind(organizationId, orderId)
+      .first<{ business_type: string | null }>();
+    raw = raw.filter((item) => !loadingTypeFixedField.has(item.field_key));
+    if (order?.business_type === "ftl") {
+      raw = raw.filter((item) => !loadingTypeLockedFields.has(item.field_key));
+    }
+  }
+  const rules = raw.map(toRule);
+  const presence = await resolveFieldPresence(organizationId, orderId, moduleCode, rules);
+  const states = rules.map((rule) => ({
+    ...rule,
+    present: presence.get(rule.fieldKey)?.present ?? false,
+    displayValue: presence.get(rule.fieldKey)?.displayValue ?? null,
+  }));
+  if (!binding.workflow_instance_id) return states;
+
+  const markerPlacements = frozenPlacements.length
+    ? [...new Map(
+        frozenPlacements.map((placement) => [placement.step_key, placement]),
+      ).values()]
+    : [{
+        step_key: "__frozen_unplaced_module__",
+        step_name: "Frozen module without a valid placement",
+        sort_order: -1,
+      }];
+  const workflowId = binding.workflow_id ?? binding.workflow_instance_id;
+  const markers: WorkflowFieldState[] = markerPlacements.map((placement) => ({
+    id: `${binding.workflow_instance_id}:scope:${moduleCode}:${placement.step_key}`,
+    workflowId,
+    stepKey: placement.step_key,
+    stepName: placement.step_name,
+    moduleCode,
+    fieldKey: frozenWorkflowFieldScopeMarkerKey,
+    label: "",
+    fieldType: "scope",
+    isRequired: false,
+    isActive: false,
+    mode: "hidden",
+    sortOrder: placement.sort_order,
+    optionsText: null,
+    helpText: null,
+    handlerPositionCodes: [],
+    isBuiltIn: true,
+    present: true,
+    displayValue: null,
+  }));
+  return [...states, ...markers];
+}
+
+export async function missingRequiredModuleFields(
+  organizationId: string,
+  orderId: string,
+  moduleCode: OrderModuleCode,
+) {
+  const fields = await loadOrderModuleWorkflowFields(organizationId, orderId, moduleCode);
+  return fields.filter((item) => item.isActive && item.isRequired && !item.present);
+}
+
+export async function missingRequiredWorkflowModuleStepFields(
+  organizationId: string,
+  orderId: string,
+  stepKey: string,
+  moduleCode: OrderModuleCode,
+) {
+  const fields = await loadOrderModuleWorkflowFields(organizationId, orderId, moduleCode);
+  return fields.filter(
+    (item) =>
+      item.stepKey === stepKey &&
+      item.isActive &&
+      item.isRequired &&
+      !item.present,
+  );
+}
+
+export async function missingRequiredWorkflowStepFields(
+  organizationId: string,
+  orderId: string,
+  stepKey: string,
+) {
+  const moduleCodes: OrderModuleCode[] = [
+    "consignment",
+    "cargo",
+    "assignment",
+    "transport",
+    "warehouse",
+    "loading",
+    "documents",
+    "customs",
+    "tracking",
+    "overseas_warehouse",
+    "costs",
+    "exceptions",
+    "review",
+  ];
+  const groups: Awaited<ReturnType<typeof loadOrderModuleWorkflowFields>>[] = [];
+  for (const moduleCode of moduleCodes) {
+    groups.push(await loadOrderModuleWorkflowFields(organizationId, orderId, moduleCode));
+  }
+  return groups
+    .flat()
+    .filter(
+      (field) =>
+        field.stepKey === stepKey &&
+        field.isActive &&
+        field.isRequired &&
+        !field.present,
+    );
+}
+
+export async function saveOrderCustomWorkflowFieldValue(input: {
+  organizationId: string;
+  orderId: string;
+  moduleCode: OrderModuleCode;
+  fieldId: string;
+  value: string | null;
+  actorUserId: string;
+  actorPositionCode?: string | null;
+}) {
+  const workflow = await loadLockedWorkflowStageContext(
+    env.DB,
+    input.organizationId,
+    input.orderId,
+    input.moduleCode,
+  );
+  // Custom values are keyed to a frozen field instance. Legacy orders do not
+  // have such a key, so consulting a mutable template would violate the
+  // order's locked contract and the value table's foreign-key boundary.
+  if (!workflow.locked)
+    throw new Error("历史订单没有冻结的自定义字段快照，不能修改该字段");
+  const field = await env.DB.prepare(
+    `SELECT f.id,f.module_code,f.step_key,f.field_key,f.is_active,
+            f.handler_position_codes,o.status order_status
+     FROM workflow_instance_fields f
+     JOIN workflow_instances wi ON wi.id=f.instance_id
+     JOIN transport_orders o
+       ON o.id=wi.order_id AND o.organization_id=wi.organization_id
+      AND o.workflow_instance_id=wi.id
+     WHERE f.id=? AND wi.organization_id=? AND wi.order_id=?`,
+  ).bind(input.fieldId, input.organizationId, input.orderId).first<{
+    id: string;
+    module_code: OrderModuleCode;
+    step_key: string;
+    field_key: string;
+    is_active: number;
+    handler_position_codes: string | null;
+    order_status: string;
+  }>();
+  if (!field?.is_active || workflowFieldCatalogByKey.has(field.field_key))
+    throw new Error("该字段不是可编辑的自定义字段");
+  if (["completed", "cancelled"].includes(field.order_status))
+    throw new Error("订单已完成或取消，自定义字段仅供查看，不能继续修改");
+  if (field.module_code !== input.moduleCode)
+    throw new Error("该自定义字段不属于当前模块");
+  if (!canPositionHandleWorkflowField(
+    field.handler_position_codes,
+    input.actorPositionCode,
+  ))
+    throw new Error("当前岗位没有填写该字段的权限");
+  const capability = workflowInstanceCapabilityStageAccess({
+    context: workflow,
+    moduleCode: input.moduleCode,
+    fieldKeys: [field.field_key],
+  });
+  const currentStep = workflow.steps.find(
+    (step) => step.stepKey === workflow.currentStepKey,
+  );
+  const fieldStep = workflow.steps.find(
+    (step) => step.stepKey === field.step_key,
+  );
+  const exactFieldPlacement = workflow.fields.some(
+    (placement) =>
+      placement.moduleCode === input.moduleCode &&
+      placement.fieldKey === field.field_key &&
+      placement.stepKey === field.step_key &&
+      placement.isActive,
+  );
+  const modulePlacedAtFieldStep = workflow.modulePlacements.some(
+    (placement) =>
+      placement.moduleCode === input.moduleCode &&
+      placement.stepKey === field.step_key,
+  );
+  if (
+    !capability.visible ||
+    !capability.available ||
+    !exactFieldPlacement ||
+    !modulePlacedAtFieldStep ||
+    !currentStep ||
+    !fieldStep ||
+    currentStep.sortOrder < fieldStep.sortOrder
+  ) {
+    throw new Error(capability.reason || "该自定义字段在当前冻结工作流节点尚未开放");
+  }
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    `INSERT INTO order_custom_workflow_field_values(
+       id,organization_id,order_id,field_instance_id,value_text,created_by_user_id,updated_by_user_id,created_at,updated_at
+     ) VALUES(?,?,?,?,?,?,?,?,?)
+     ON CONFLICT(order_id,field_instance_id) DO UPDATE SET
+       value_text=excluded.value_text,updated_by_user_id=excluded.updated_by_user_id,updated_at=excluded.updated_at`,
+  ).bind(
+    crypto.randomUUID(), input.organizationId, input.orderId, input.fieldId,
+    input.value?.trim() || null, input.actorUserId, input.actorUserId, now, now,
+  ).run();
+}
+
+type RawField = {
+  id: string;
+  workflow_id: string;
+  step_key: string;
+  step_name: string;
+  module_code: OrderModuleCode;
+  field_key: string;
+  label: string;
+  field_type: string;
+  is_required: number;
+  is_active: number;
+  sort_order: number;
+  options_text: string | null;
+  help_text: string | null;
+  handler_position_codes?: string | null;
+};
+
+const workflowStepDefaultNames: Record<string, string> = {
+  quotation: "询价报价",
+  order_creation: "委托资料补充",
+  consignment_approval: "委托审核",
+  task_assignment: "任务分配",
+  domestic_execution: "国内运输",
+  warehouse_receiving: "国内仓入库",
+  port_loading: "出口准备与装车出库",
+  outbound_transport: "出境运输",
+  overseas_pickup: "客户扫码自提签收",
+  reconciliation: "对账结算",
+  completion_review: "完成复盘",
+};
+
+/**
+ * Fill gaps from the system business-field baseline, then let concrete
+ * workflow rows override it. An explicit hidden row therefore stays hidden;
+ * an old or copied workflow that omitted a standard field no longer empties
+ * the business page or silently bypasses its default gate.
+ */
+export function mergeWorkflowFieldCatalogBaseline(
+  rows: RawField[],
+  workflowId: string,
+  moduleCode: OrderModuleCode,
+): RawField[] {
+  const existing = new Set(
+    rows.map((row) => `${row.module_code}:${row.field_key}`),
+  );
+  const baseline = workflowFieldCatalog.flatMap((item, catalogIndex) => {
+    const identity = `${item.moduleCode}:${item.fieldKey}`;
+    if (item.moduleCode !== moduleCode || existing.has(identity)) return [];
+    const flags = workflowFieldModeFlags(item.defaultMode);
+    return [{
+      id: `${workflowId}:runtime-catalog:${item.moduleCode}:${item.fieldKey}`,
+      workflow_id: workflowId,
+      step_key: item.stepKey,
+      step_name: workflowStepDefaultNames[item.stepKey] ?? item.stepKey,
+      module_code: item.moduleCode,
+      field_key: item.fieldKey,
+      label: item.label,
+      field_type: item.fieldType,
+      is_required: flags.isRequired,
+      is_active: flags.isActive,
+      sort_order: catalogIndex * 10 + 10,
+      options_text: item.optionsText ?? null,
+      help_text: item.helpText,
+      handler_position_codes: "",
+    } satisfies RawField];
+  });
+  return [...rows, ...baseline].sort(
+    (left, right) =>
+      left.sort_order - right.sort_order || left.field_key.localeCompare(right.field_key),
+  );
+}
+
+function toRule(row: RawField): WorkflowFieldRule {
+  return {
+    id: row.id,
+    workflowId: row.workflow_id,
+    stepKey: row.step_key,
+    stepName: row.step_name,
+    moduleCode: row.module_code,
+    fieldKey: row.field_key,
+    label: row.label,
+    fieldType: row.field_type,
+    isRequired: Boolean(row.is_required),
+    isActive: Boolean(row.is_active),
+    mode: workflowFieldMode(row),
+    sortOrder: row.sort_order,
+    optionsText: row.options_text,
+    helpText: row.help_text,
+    handlerPositionCodes: normalizeWorkflowFieldHandlerPositionCodes(
+      row.handler_position_codes,
+    ),
+    isBuiltIn: workflowFieldCatalogByKey.has(row.field_key),
+  };
+}
+
+type Presence = { present: boolean; displayValue: string | null };
+
+export function ftlOutboundWorkflowFieldValues(
+  assignment: Record<string, unknown> | null | undefined,
+) {
+  if (!assignment) return {} as Record<string, unknown>;
+  const carrier = assignment.carrier_id || assignment.carrier_name;
+  const vehiclePresent = Boolean(assignment.vehicle_type || assignment.plate_number);
+  return {
+    main_carrier_id: carrier,
+    main_vehicle_type: assignment.vehicle_type,
+    main_plate_number: assignment.plate_number,
+    main_driver_name: assignment.driver_name,
+    main_driver_phone: assignment.driver_phone,
+    planned_exit_at: assignment.planned_departure_at,
+    planned_arrival_at: assignment.planned_arrival_at,
+    loading_instruction: assignment.loading_requirements,
+    loading_notes: assignment.notes,
+    overseas_carrier_name: assignment.carrier_name || assignment.carrier_id,
+    overseas_vehicle_type: assignment.vehicle_type,
+    overseas_vehicle_count: vehiclePresent ? 1 : null,
+    overseas_vehicle_plate: assignment.plate_number,
+    overseas_driver_name: assignment.driver_name,
+    overseas_driver_phone: assignment.driver_phone,
+  } satisfies Record<string, unknown>;
+}
+
+async function resolveFieldPresence(
+  organizationId: string,
+  orderId: string,
+  moduleCode: OrderModuleCode,
+  rules: WorkflowFieldRule[],
+) {
+  const result = new Map<string, Presence>();
+  const order = await env.DB.prepare(
+    `SELECT o.*,wi.id bound_instance_id
+     FROM transport_orders o
+     LEFT JOIN workflow_instances wi
+       ON wi.id=o.workflow_instance_id
+      AND wi.organization_id=o.organization_id
+      AND wi.order_id=o.id
+     WHERE o.id=? AND o.organization_id=?`,
+  )
+    .bind(orderId, organizationId)
+    .first<Record<string, unknown>>();
+  if (!order) return result;
+  for (const rule of rules) {
+    if (rule.fieldKey in order) setPresence(result, rule.fieldKey, order[rule.fieldKey]);
+  }
+
+  const quotationRules = rules.filter((rule) =>
+    quotationNativeFieldKeySet.has(rule.fieldKey),
+  );
+  if (quotationRules.length) {
+    const quotation = await env.DB.prepare(
+      `SELECT q.*,
+        (SELECT COUNT(*) FROM quotation_charges c
+         WHERE c.quotation_id=q.id AND c.quantity>0 AND c.unit_price>0) quotation_charge_items
+       FROM quotations q
+       JOIN transport_orders o ON o.quotation_id=q.id AND o.organization_id=q.organization_id
+       WHERE o.id=? AND o.organization_id=?`,
+    ).bind(orderId,organizationId).first<Record<string, unknown>>();
+    if (quotation) {
+      for (const rule of quotationRules) {
+        const present = quotationNativeFieldPresent(rule.fieldKey,quotation);
+        result.set(rule.fieldKey,{
+          present,
+          displayValue:present ? "已由报价继承" : null,
+        });
+      }
+    }
+  }
+
+  const documentRules = rules.filter((rule) =>
+    orderDocumentPlacements.some(
+      (placement) => placement.fieldKey === rule.fieldKey,
+    ),
+  );
+  if (documentRules.length) {
+    const attachments = await env.DB.prepare(
+      `SELECT m.document_category,m.review_status,COUNT(*) total
+       FROM order_attachments a
+       JOIN order_document_metadata m ON m.attachment_id=a.id
+       WHERE a.organization_id=? AND a.order_id=?
+       GROUP BY m.document_category,m.review_status`,
+    )
+      .bind(organizationId, orderId)
+      .all<{
+        document_category: string;
+        review_status: string | null;
+        total: number;
+      }>();
+    for (const rule of documentRules) {
+      const placement = orderDocumentPlacements.find(
+        (item) => item.fieldKey === rule.fieldKey,
+      );
+      const rows = attachments.results.filter(
+        (item) => item.document_category === placement?.documentCode,
+      );
+      const total = rows.reduce((sum, item) => sum + Number(item.total || 0), 0);
+      const reviewed = rows.reduce(
+        (sum, item) =>
+          sum +
+          (["approved", "archived"].includes(item.review_status || "")
+            ? Number(item.total || 0)
+            : 0),
+        0,
+      );
+      result.set(rule.fieldKey, {
+        present: total > 0,
+        displayValue:
+          total > 0 ? `${total} 份，${reviewed} 份已审核` : null,
+      });
+    }
+  }
+
+  if (moduleCode === "cargo") {
+    const rows = await env.DB.prepare(
+      "SELECT * FROM order_cargo_items WHERE organization_id=? AND order_id=? ORDER BY line_no",
+    ).bind(organizationId, orderId).all<Record<string, unknown>>();
+    const cargoKeyMap: Record<string, string> = {
+      origin_country_cargo: "origin_country",
+      cargo_images: "image_count",
+      cargo_notes: "notes",
+    };
+    for (const rule of rules) {
+      const column = cargoKeyMap[rule.fieldKey] ?? rule.fieldKey;
+      if (rule.fieldKey === "cargo_images") {
+        const image = await env.DB.prepare(
+          "SELECT COUNT(*) total FROM order_cargo_images WHERE organization_id=? AND order_id=?",
+        ).bind(organizationId, orderId).first<{ total: number }>();
+        setPresence(result, rule.fieldKey, image?.total ?? 0, true);
+      } else if (rows.results.length) {
+        const present = rows.results.every((row) => meaningful(row[column], rule.fieldType));
+        result.set(rule.fieldKey, { present, displayValue: present ? `${rows.results.length} 条明细` : null });
+      }
+    }
+  }
+
+  if (moduleCode === "assignment") {
+    const assignmentModuleList = assignmentManagedModuleCodes
+      .map((code) => `'${code}'`)
+      .join(",");
+    const [assignment, assignmentManifest] = await Promise.all([
+      env.DB.prepare(
+      `SELECT o.status,o.current_assignee_user_id,
+              MAX(CASE WHEN m.module_code='assignment' THEN m.assignee_user_id END) assignment_assignee_user_id,
+              COUNT(CASE WHEN m.enabled=1
+                AND m.module_code IN (${assignmentModuleList})
+                AND m.assignee_user_id IS NOT NULL THEN 1 END) assigned,
+              COUNT(CASE WHEN m.enabled=1
+                AND m.module_code IN (${assignmentModuleList}) THEN 1 END) required_total
+       FROM transport_orders o
+       LEFT JOIN order_module_instances m ON m.order_id=o.id AND m.organization_id=o.organization_id
+       WHERE o.id=? AND o.organization_id=? GROUP BY o.id`,
+      ).bind(orderId, organizationId).first<{
+      status: string;
+      current_assignee_user_id: string | null;
+      assignment_assignee_user_id: string | null;
+      assigned: number;
+      required_total: number;
+      }>(),
+      loadOrderAssignmentManifest(organizationId, orderId),
+    ]);
+    setPresence(result, "approval_result", assignment && !["draft", "submitted"].includes(assignment.status) ? "approved" : null);
+    setPresence(
+      result,
+      "primary_operator",
+      assignment?.assignment_assignee_user_id ?? assignment?.current_assignee_user_id,
+    );
+    const usesLockedManifest = Boolean(assignmentManifest.workflowInstanceId);
+    const manifestAssigned = assignmentManifest.groups.filter(
+      (group) =>
+        group.assignmentMode === "site_queue" ||
+        group.assignmentState === "assigned",
+    ).length;
+    const assignmentComplete = usesLockedManifest
+      ? assignmentManifest.configurationErrors.length === 0 &&
+        assignmentManifest.groups.every(
+          (group) =>
+            !group.required ||
+            group.assignmentMode === "site_queue" ||
+            group.assignmentState === "assigned",
+        )
+      : assignmentCoverageIsComplete(
+          assignment?.assigned ?? 0,
+          assignment?.required_total ?? 0,
+        );
+    const assignedCount = usesLockedManifest ? manifestAssigned : assignment?.assigned ?? 0;
+    const assignmentPresence: Presence = {
+      present: assignmentComplete,
+      displayValue: assignmentComplete ? `${assignedCount} 个责任组已确认` : null,
+    };
+    result.set("module_assignees", assignmentPresence);
+    result.set("assignment_scope", assignmentPresence);
+    const assignmentTask = await env.DB.prepare(
+      `SELECT due_at,
+              (SELECT notes FROM order_module_history h
+               WHERE h.organization_id=? AND h.order_id=? AND h.action_code IN ('assign','module_assigned')
+               ORDER BY h.occurred_at DESC LIMIT 1) notes
+       FROM order_tasks
+       WHERE organization_id=? AND order_id=? AND task_type='module_owner'
+       ORDER BY updated_at DESC LIMIT 1`,
+    ).bind(organizationId, orderId, organizationId, orderId).first<{ due_at: string | null; notes: string | null }>();
+    setPresence(result, "assignment_due_at", assignmentTask?.due_at);
+    setPresence(result, "assignment_notes", assignmentTask?.notes);
+    const payable = await env.DB.prepare(
+      "SELECT COUNT(*) total FROM business_expenses WHERE organization_id=? AND order_id=? AND direction='payable' AND stage!='cancelled'",
+    ).bind(organizationId, orderId).first<{ total: number }>();
+    setPresence(result, "pre_payable_expenses", payable?.total ?? 0, true);
+  }
+
+  if (moduleCode === "transport") {
+    const [transport, payable] = await Promise.all([
+      env.DB.prepare(
+        `SELECT a.*,COALESCE(a.carrier_id,a.carrier_name) domestic_carrier_id,
+              a.vehicle_type domestic_vehicle_type,a.vehicle_count domestic_vehicle_count,a.loading_mode domestic_loading_mode,a.plate_number domestic_plate_number,
+              a.driver_name domestic_driver_name,a.driver_phone domestic_driver_phone,
+              a.driver_id_number domestic_driver_id_number,
+              a.planned_departure_at domestic_planned_departure_at,a.planned_arrival_at domestic_planned_arrival_at,
+              a.freight_amount domestic_freight_amount,a.freight_currency domestic_freight_currency,
+              a.loading_requirements domestic_loading_requirements,a.notes domestic_transport_notes
+       FROM order_transport_assignments a
+       WHERE a.organization_id=? AND a.order_id=? AND a.leg_type='first_mile' AND a.status!='cancelled'
+       ORDER BY a.created_at DESC LIMIT 1`,
+      ).bind(organizationId, orderId).first<Record<string, unknown>>(),
+      env.DB.prepare(
+        `SELECT charge_name,quantity,exchange_rate
+         FROM business_expenses
+         WHERE organization_id=? AND order_id=? AND direction='payable' AND stage!='cancelled'
+           AND charge_code='DOMESTIC_FREIGHT'
+         ORDER BY CASE WHEN source_type='transport_assignment' THEN 0 ELSE 1 END,updated_at DESC,created_at DESC
+         LIMIT 1`,
+      ).bind(organizationId, orderId).first<{
+        charge_name: string | null;
+        quantity: number | null;
+        exchange_rate: number | null;
+      }>(),
+    ]);
+    for (const rule of rules) {
+      if (transport && rule.fieldKey in transport) setPresence(result, rule.fieldKey, transport[rule.fieldKey]);
+    }
+    const payableValues = domesticTransportPayableWorkflowValues(payable);
+    for (const [fieldKey, value] of Object.entries(payableValues))
+      setPresence(result, fieldKey, value);
+    const shipment = await env.DB.prepare(
+      `SELECT s.actual_pickup_at,
+              COALESCE(s.actual_delivery_at,(
+                SELECT MAX(r.received_at) FROM warehouse_receipts r
+                WHERE r.organization_id=s.organization_id AND r.shipment_id=s.id
+                  AND r.status='completed' AND r.cargo_complete=1
+              )) actual_delivery_at
+       FROM shipments s WHERE s.organization_id=? AND s.order_id=?
+       ORDER BY s.created_at DESC LIMIT 1`,
+    ).bind(organizationId, orderId).first<{ actual_pickup_at: string | null; actual_delivery_at: string | null }>();
+    setPresence(result, "domestic_actual_pickup_at", shipment?.actual_pickup_at);
+    setPresence(result, "domestic_actual_arrival_at", shipment?.actual_delivery_at);
+    const waybill = await env.DB.prepare(
+      `SELECT waybill_number,accompanying_at waybill_accompanying_at,
+              shipper_instructions waybill_shipper_instructions,
+              customs_notes waybill_customs_notes,
+              accompanying_documents waybill_accompanying_documents,
+              documents_verified waybill_documents_verified
+       FROM order_waybills
+       WHERE organization_id=? AND order_id=? AND status!='cancelled'
+       ORDER BY created_at DESC LIMIT 1`,
+    ).bind(organizationId, orderId).first<Record<string, unknown>>();
+    for (const rule of rules) {
+      if (waybill && rule.fieldKey in waybill)
+        setPresence(result, rule.fieldKey, waybill[rule.fieldKey]);
+    }
+  }
+
+  if (moduleCode === "warehouse") {
+    const warehouse = await env.DB.prepare(
+      `SELECT COUNT(DISTINCT r.id) receipt_count,
+              COUNT(DISTINCT CASE WHEN p.barcode IS NOT NULL AND p.barcode!='' THEN p.id END) warehouse_barcode,
+              MAX(r.package_type) actual_package_type,
+              COALESCE(SUM(r.total_packages),0) actual_package_count,
+              COALESCE(SUM(r.total_pieces),0) actual_pieces,
+              COALESCE(SUM(r.total_weight_kg),0) actual_weight_kg,
+              COALESCE(SUM(r.total_volume_cbm),0) actual_volume_cbm,
+              MAX(r.location_id) warehouse_location,
+              MAX(r.evidence_note) receipt_evidence,
+              MAX(r.notes) warehouse_receipt_notes,
+              EXISTS(SELECT 1 FROM warehouse_receipt_differences d WHERE d.order_id=? AND d.organization_id=?) receipt_difference,
+              EXISTS(SELECT 1 FROM warehouse_sorting_batches b JOIN shipments sx ON sx.id=b.shipment_id WHERE sx.order_id=? AND b.organization_id=? AND b.status='verified') cargo_complete_set
+       FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id
+       LEFT JOIN warehouse_packages p ON p.receipt_id=r.id
+       WHERE r.organization_id=? AND s.order_id=? AND r.status='completed'`,
+    ).bind(orderId, organizationId, orderId, organizationId, organizationId, orderId).first<Record<string, unknown>>();
+    if (warehouse) {
+      setPresence(result, "warehouse_receipt", warehouse.receipt_count, true);
+      for (const key of ["warehouse_barcode", "actual_package_type", "actual_package_count", "actual_pieces", "actual_weight_kg", "actual_volume_cbm", "warehouse_location", "receipt_evidence", "receipt_difference", "warehouse_receipt_notes", "cargo_complete_set"])
+        setPresence(
+          result,
+          key,
+          warehouse[key],
+          ["warehouse_barcode", "actual_package_count", "actual_pieces", "actual_weight_kg", "actual_volume_cbm", "receipt_difference", "cargo_complete_set"].includes(key),
+        );
+    }
+  }
+
+  if (moduleCode === "loading") {
+    const routeSelection = await env.DB.prepare(
+      `SELECT business_type,exit_port,customs_location,transit_locations,route_notes route_code
+       FROM transport_orders WHERE organization_id=? AND id=?`,
+    ).bind(organizationId, orderId).first<Record<string, unknown>>();
+    if (routeSelection) {
+      for (const key of ["business_type", "exit_port", "customs_location", "transit_locations", "route_code"])
+        setPresence(result, key, routeSelection[key]);
+    }
+    const batch = await env.DB.prepare(
+      `SELECT b.*,b.id loading_batch,b.warehouse_id consolidation_warehouse,b.carrier_id main_carrier_id,
+              v.vehicle_type main_vehicle_type,v.plate_number main_plate_number,
+              v.driver_name main_driver_name,v.driver_phone main_driver_phone,
+              v.capacity_weight_kg vehicle_capacity_weight,v.capacity_volume_cbm vehicle_capacity_volume,
+              b.planned_departure_at planned_exit_at,b.route_notes loading_instruction,b.notes loading_notes,
+              ${confirmedBatchCostAllocationPresenceSql} cost_allocation
+       FROM transport_batch_orders bo
+       JOIN transport_batches b
+         ON b.id=bo.batch_id AND b.organization_id=bo.organization_id
+       LEFT JOIN transport_batch_vehicles v
+         ON v.batch_id=b.id AND v.organization_id=b.organization_id AND v.status!='cancelled'
+       WHERE bo.organization_id=? AND bo.order_id=? AND bo.status!='removed' AND b.status!='cancelled'
+       ORDER BY b.created_at DESC,v.created_at LIMIT 1`,
+    ).bind(organizationId, orderId).first<Record<string, unknown>>();
+    for (const rule of rules) if (batch && rule.fieldKey in batch) setPresence(result, rule.fieldKey, batch[rule.fieldKey], rule.fieldKey === "cost_allocation");
+    if (!batch && routeSelection?.business_type === "ftl") {
+      const assignment = await env.DB.prepare(
+        `SELECT carrier_id,carrier_name,vehicle_type,plate_number,driver_name,driver_phone,
+                planned_departure_at,planned_arrival_at,loading_requirements,notes
+         FROM order_transport_assignments
+         WHERE organization_id=? AND order_id=? AND status!='cancelled'
+         ORDER BY CASE leg_type WHEN 'main' THEN 0 WHEN 'first_mile' THEN 1 ELSE 2 END,created_at DESC LIMIT 1`,
+      ).bind(organizationId, orderId).first<Record<string, unknown>>();
+      const assignmentValues = ftlOutboundWorkflowFieldValues(assignment);
+      for (const rule of rules)
+        if (rule.fieldKey in assignmentValues)
+          setPresence(result, rule.fieldKey, assignmentValues[rule.fieldKey]);
+    }
+    const dispatch = await env.DB.prepare(
+      `SELECT d.notes loading_handover_notes,
+              COUNT(CASE WHEN di.status='loaded' THEN 1 END) loaded,
+              COUNT(di.id) total
+       FROM warehouse_dispatches d
+       JOIN warehouse_sorting_batches sb ON sb.id=d.sorting_batch_id
+       JOIN shipments s ON s.id=sb.shipment_id
+       LEFT JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id
+       WHERE d.organization_id=? AND s.order_id=? AND d.status!='cancelled'
+       GROUP BY d.id ORDER BY d.created_at DESC LIMIT 1`,
+    ).bind(organizationId, orderId).first<Record<string, unknown>>();
+    if (dispatch) {
+      setPresence(result, "loading_handover_notes", dispatch.loading_handover_notes);
+      setPresence(
+        result,
+        "loading_scan_confirmation",
+        Number(dispatch.total ?? 0) > 0 && Number(dispatch.loaded ?? 0) >= Number(dispatch.total ?? 0) ? 1 : null,
+      );
+    }
+  }
+
+  if (moduleCode === "documents") {
+    const documents = await env.DB.prepare(
+      `SELECT COUNT(*) total,
+              COUNT(CASE WHEN COALESCE(m.review_status,'pending') IN ('approved','archived') THEN 1 END) reviewed,
+              COUNT(CASE WHEN COALESCE(m.document_category,'')!='' THEN 1 END) categorized,
+              COUNT(CASE WHEN COALESCE(m.description,'')!='' THEN 1 END) described,
+              COUNT(CASE WHEN m.public_to_customer IS NOT NULL THEN 1 END) visibility_set
+       FROM order_attachments a LEFT JOIN order_document_metadata m ON m.attachment_id=a.id
+       WHERE a.organization_id=? AND a.order_id=?`,
+    ).bind(organizationId, orderId).first<{ total: number; reviewed: number; categorized: number; described: number; visibility_set: number }>();
+    setPresence(result, "predeparture_documents", documents?.total ?? 0, true);
+    setPresence(result, "document_review", documents && documents.total > 0 && documents.reviewed >= documents.total ? documents.reviewed : null);
+    setPresence(result, "document_attachment", documents?.total ?? 0, true);
+    setPresence(result, "document_category", documents && documents.total > 0 && documents.categorized >= documents.total ? documents.categorized : null);
+    setPresence(result, "document_description", documents && documents.total > 0 && documents.described >= documents.total ? documents.described : null);
+    setPresence(result, "document_public_to_customer", documents && documents.total > 0 && documents.visibility_set >= documents.total ? documents.visibility_set : null);
+  }
+
+  if (moduleCode === "customs") {
+    const declarations = await env.DB.prepare(
+      `SELECT d.*,r.clearance_stage FROM order_customs_declarations d
+       JOIN order_customs_records r ON r.id=d.customs_record_id
+       WHERE d.organization_id=? AND d.order_id=? AND d.is_deleted=0`,
+    ).bind(organizationId, orderId).all<Record<string, unknown>>();
+    setPresence(result, "customs_declarations", declarations.results.length, true);
+    const customsMap: Record<string, string> = {
+      declaration_stage: "clearance_stage",
+      declaration_status: "status",
+      declaration_currency: "currency",
+      declaration_gross_weight: "gross_weight_kg",
+      declaration_change_reason: "change_reason",
+      customs_release: "released_at",
+    };
+    for (const rule of rules) {
+      const column = customsMap[rule.fieldKey] ?? rule.fieldKey;
+      if (rule.fieldKey === "declaration_change_flags") {
+        const hasFlags = declarations.results.some((row) => row.is_redeclared || row.is_amended || row.is_inspected);
+        result.set(rule.fieldKey, { present: hasFlags, displayValue: hasFlags ? "已记录" : null });
+      } else if (declarations.results.length && column in declarations.results[0]) {
+        const origin = declarations.results.filter((row) => row.clearance_stage === "origin");
+        const rows = rule.fieldKey === "customs_release" ? origin : declarations.results;
+        const present = rows.length > 0 && rows.every((row) => meaningful(row[column], rule.fieldType));
+        result.set(rule.fieldKey, { present, displayValue: present ? `${rows.length} 张申报单` : null });
+      }
+    }
+  }
+
+  if (moduleCode === "tracking") {
+    const milestones = await env.DB.prepare(
+      "SELECT milestone_code,milestone_name,event_at,location,vehicle_reference,notes,visible_to_customer FROM order_tracking_milestones WHERE organization_id=? AND order_id=? ORDER BY event_at",
+    ).bind(organizationId, orderId).all<Record<string, unknown>>();
+    const first = milestones.results[0];
+    const latest = milestones.results[milestones.results.length - 1];
+    const exit = milestones.results.find((row) =>
+      isActualExitTrackingMilestone(row.milestone_code),
+    );
+    setPresence(result, "actual_departure_at", first?.event_at);
+    setPresence(result, "actual_exit_at", exit?.event_at);
+    setPresence(result, "tracking_milestone", latest?.milestone_code);
+    setPresence(result, "tracking_milestone_name", latest?.milestone_name);
+    setPresence(result, "tracking_event_at", latest?.event_at);
+    setPresence(result, "tracking_location", latest?.location);
+    setPresence(result, "tracking_vehicle", latest?.vehicle_reference);
+    setPresence(result, "tracking_notes", latest?.notes);
+    setPresence(result, "visible_to_customer", latest ? String(latest.visible_to_customer ?? "") : null);
+  }
+
+  if (moduleCode === "overseas_warehouse") {
+    const operation = await env.DB.prepare(
+      `SELECT actual_arrival_at overseas_arrival_at,notes overseas_arrival_notes,
+              notified_at customer_notified_at,appointment_at pickup_appointment_at,
+              appointment_period pickup_appointment_period,
+              pickup_contact overseas_pickup_contact,pickup_proof_reference pickup_proof,pickup_at pickup_completed_at,
+              notes customer_notification_notes,notes pickup_appointment_notes,notes pickup_completion_notes
+       FROM overseas_warehouse_operations
+       WHERE organization_id=? AND order_id=? ORDER BY created_at DESC LIMIT 1`,
+    ).bind(organizationId, orderId).first<Record<string, unknown>>();
+    for (const rule of rules) if (operation && rule.fieldKey in operation) setPresence(result, rule.fieldKey, operation[rule.fieldKey]);
+  }
+
+  if (moduleCode === "costs") {
+    const costs = await env.DB.prepare(
+      `SELECT
+         EXISTS(SELECT 1 FROM business_expenses WHERE organization_id=? AND order_id=? AND direction='receivable' AND stage!='cancelled') pre_receivable_expenses,
+         EXISTS(SELECT 1 FROM business_expenses WHERE organization_id=? AND order_id=? AND direction='payable' AND stage!='cancelled') pre_payable_expenses,
+         EXISTS(SELECT 1 FROM business_expenses WHERE organization_id=? AND order_id=? AND direction='receivable' AND stage!='cancelled') receivable_expenses,
+         EXISTS(SELECT 1 FROM business_expenses WHERE organization_id=? AND order_id=? AND direction='payable' AND stage!='cancelled') payable_expenses,
+         EXISTS(SELECT 1 FROM business_expenses WHERE organization_id=? AND order_id=? AND currency!='') expense_currency,
+         EXISTS(SELECT 1 FROM business_expenses WHERE organization_id=? AND order_id=? AND exchange_rate>0) expense_exchange_rate,
+         (EXISTS(SELECT 1 FROM order_expense_direction_controls WHERE organization_id=? AND order_id=? AND direction='receivable' AND confirmed=1)
+          AND EXISTS(SELECT 1 FROM order_expense_direction_controls WHERE organization_id=? AND order_id=? AND direction='payable' AND confirmed=1)) customer_service_confirmation,
+         (EXISTS(SELECT 1 FROM order_expense_direction_controls WHERE organization_id=? AND order_id=? AND direction='receivable' AND business_reviewed=1)
+          AND EXISTS(SELECT 1 FROM order_expense_direction_controls WHERE organization_id=? AND order_id=? AND direction='payable' AND business_reviewed=1)) business_review,
+         (EXISTS(SELECT 1 FROM order_expense_direction_controls WHERE organization_id=? AND order_id=? AND direction='receivable' AND finance_reviewed=1)
+          AND EXISTS(SELECT 1 FROM order_expense_direction_controls WHERE organization_id=? AND order_id=? AND direction='payable' AND finance_reviewed=1)) finance_review,
+         EXISTS(SELECT 1 FROM settlement_reconciliation_lines l JOIN settlement_reconciliations r ON r.id=l.reconciliation_id JOIN business_expenses e ON e.id=l.expense_id WHERE r.organization_id=? AND e.order_id=?) reconciliation_statement,
+         EXISTS(SELECT 1 FROM settlement_invoice_allocations a JOIN business_expenses e ON e.id=a.expense_id WHERE e.order_id=?) invoice_records,
+         EXISTS(SELECT 1 FROM settlement_cash_allocations a JOIN business_expenses e ON e.id=a.expense_id WHERE e.order_id=?) cash_records,
+         EXISTS(SELECT 1 FROM settlement_cash_allocations a JOIN business_expenses e ON e.id=a.expense_id WHERE e.order_id=?) writeoff_records`,
+    ).bind(
+      organizationId,orderId,organizationId,orderId,
+      organizationId,orderId,organizationId,orderId,
+      organizationId,orderId,organizationId,orderId,
+      organizationId,orderId,organizationId,orderId,
+      organizationId,orderId,organizationId,orderId,
+      organizationId,orderId,organizationId,orderId,
+      organizationId,orderId,
+      orderId,orderId,orderId,
+    ).first<Record<string, unknown>>();
+    for (const rule of rules) if (costs && rule.fieldKey in costs) setPresence(result, rule.fieldKey, costs[rule.fieldKey], true);
+    const expenseRows = await env.DB.prepare(
+      `SELECT direction,charge_code,charge_name,counterparty_name,currency,quantity,
+              unit_price,exchange_rate,tax_rate,occurred_on,foreign_account_no,
+              is_internal,notes
+       FROM business_expenses
+       WHERE organization_id=? AND order_id=? AND stage!='cancelled'`,
+    ).bind(organizationId, orderId).all<Record<string, unknown>>();
+    const expenseFieldMap: Record<string, string> = {
+      expense_direction: "direction",
+      expense_charge_code: "charge_code",
+      expense_charge_name: "charge_name",
+      expense_counterparty: "counterparty_name",
+      expense_currency: "currency",
+      expense_quantity: "quantity",
+      expense_unit_price: "unit_price",
+      expense_exchange_rate: "exchange_rate",
+      expense_tax_rate: "tax_rate",
+      expense_occurred_on: "occurred_on",
+      expense_foreign_account_no: "foreign_account_no",
+      expense_is_internal: "is_internal",
+      expense_notes: "notes",
+    };
+    for (const rule of rules) {
+      const column = expenseFieldMap[rule.fieldKey];
+      if (!column) continue;
+      const present = expenseRows.results.length > 0 && expenseRows.results.every((row) => meaningful(row[column], rule.fieldType));
+      result.set(rule.fieldKey, {
+        present,
+        displayValue: present ? `${expenseRows.results.length} 条费用` : null,
+      });
+    }
+  }
+
+  if (moduleCode === "review") {
+    const review = await env.DB.prepare(
+      `SELECT customer_dispute_summary,review_conclusion review_result,
+              improvement_notes review_improvements
+       FROM order_review_snapshots
+       WHERE organization_id=? AND order_id=?
+       ORDER BY updated_at DESC LIMIT 1`,
+    ).bind(organizationId, orderId).first<Record<string, unknown>>();
+    for (const rule of rules)
+      if (review && rule.fieldKey in review)
+        setPresence(result, rule.fieldKey, review[rule.fieldKey]);
+  }
+
+  if (moduleCode === "exceptions") {
+    const exceptions = await env.DB.prepare(
+      `SELECT
+        (SELECT COUNT(*) FROM warehouse_exceptions e JOIN shipments s ON s.id=e.shipment_id
+         WHERE e.organization_id=? AND s.order_id=?)
+        +
+        (SELECT COUNT(*) FROM transport_batch_exceptions e
+         WHERE e.organization_id=? AND (
+           e.order_id=? OR (e.scope='batch' AND EXISTS(
+             SELECT 1 FROM transport_batch_orders bo
+             WHERE bo.organization_id=e.organization_id AND bo.batch_id=e.batch_id
+               AND bo.order_id=? AND bo.status!='removed'
+           ))
+         )) total`,
+    ).bind(organizationId, orderId, organizationId, orderId, orderId).first<{ total: number }>();
+    setPresence(result, "exception_records", exceptions?.total ?? 0, true);
+  }
+
+  const quotationFields = rules.filter((rule) => rule.stepKey === "quotation");
+  if (quotationFields.length) {
+    const values = await env.DB.prepare(
+      `SELECT v.field_key,v.value_text,v.file_name
+       FROM transport_orders o
+       JOIN quotation_workflow_field_values v
+         ON v.quotation_id=o.quotation_id AND v.organization_id=o.organization_id
+       WHERE o.organization_id=? AND o.id=? AND v.module_code=?`,
+    ).bind(organizationId,orderId,moduleCode).all<{
+      field_key:string;
+      value_text:string|null;
+      file_name:string|null;
+    }>();
+    for (const item of values.results) {
+      const rule = quotationFields.find((field) => field.fieldKey === item.field_key);
+      if (!rule) continue;
+      setPresence(
+        result,
+        rule.fieldKey,
+        rule.fieldType === "attachment" ? item.file_name : item.value_text,
+      );
+    }
+  }
+
+  const customFields = rules.filter((rule) => !rule.isBuiltIn && rule.stepKey !== "quotation");
+  if (customFields.length) {
+    const ids = customFields.map((item) => item.id);
+    for (const idChunk of chunkD1Values(ids, 2)) {
+      const values = await env.DB.prepare(
+        `SELECT field_instance_id,value_text FROM order_custom_workflow_field_values
+         WHERE organization_id=? AND order_id=? AND field_instance_id IN (${d1Placeholders(idChunk.length)})`,
+      ).bind(organizationId, orderId, ...idChunk).all<{ field_instance_id: string; value_text: string | null }>();
+      for (const item of values.results)
+        setPresence(
+          result,
+          customFields.find((field) => field.id === item.field_instance_id)?.fieldKey ?? "",
+          item.value_text,
+        );
+    }
+  }
+  return result;
+}
+
+function setPresence(
+  target: Map<string, Presence>,
+  key: string,
+  value: unknown,
+  positiveNumber = false,
+) {
+  if (!key) return;
+  const present = positiveNumber
+    ? Number(value ?? 0) > 0
+    : meaningful(value, "text");
+  target.set(key, {
+    present,
+    displayValue: present ? display(value) : null,
+  });
+}
+
+function meaningful(value: unknown, fieldType: string) {
+  if (value === null || value === undefined) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  if (typeof value === "number") {
+    if (["number", "amount"].includes(fieldType)) return value > 0;
+    return Number.isFinite(value);
+  }
+  if (typeof value === "boolean") return value;
+  return true;
+}
+
+function display(value: unknown) {
+  if (typeof value === "number") return value > 1 ? String(value) : "已填写";
+  if (typeof value === "string" && value.length <= 40) return value;
+  return "已填写";
+}

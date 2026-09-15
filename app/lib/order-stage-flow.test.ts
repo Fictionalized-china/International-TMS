@@ -1,0 +1,117 @@
+import { describe, expect, it } from "vitest";
+import {
+  orderBusinessStages,
+  orderModuleAccess,
+  orderModuleSequence,
+  orderModuleWorkflowStageAccess,
+} from "./order-stage-flow";
+
+const workflowSteps = orderBusinessStages.map((stage, index) => ({
+  stepKey: stage.code,
+  stepName: stage.shortTitle,
+  sortOrder: (index + 1) * 10,
+}));
+
+describe("order stage access", () => {
+  it("keeps stage one editable before approval and freezes submitted data", () => {
+    expect(orderModuleAccess("draft", "consignment").canEdit).toBe(true);
+    expect(orderModuleAccess("draft", "costs").canEdit).toBe(true);
+    expect(orderModuleAccess("submitted", "cargo").canEdit).toBe(false);
+    expect(orderModuleAccess("submitted", "assignment").canEdit).toBe(false);
+  });
+
+  it("opens preparation after approval and execution after dispatch", () => {
+    expect(orderModuleAccess("confirmed", "transport").canEdit).toBe(false);
+    expect(orderModuleAccess("confirmed", "warehouse").canEdit).toBe(false);
+    expect(orderModuleAccess("confirmed", "documents").canEdit).toBe(false);
+    expect(orderModuleAccess("in_execution", "transport").canEdit).toBe(true);
+    expect(orderModuleAccess("in_execution", "documents").canEdit).toBe(true);
+    expect(orderModuleAccess("in_execution", "customs").canEdit).toBe(true);
+    expect(orderModuleAccess("in_execution", "costs").canEdit).toBe(true);
+  });
+
+  it("keeps terminal orders viewable but read-only", () => {
+    expect(orderModuleAccess("completed", "costs")).toMatchObject({
+      canView: true,
+      canEdit: false,
+    });
+    expect(orderModuleAccess("cancelled", "consignment").canEdit).toBe(false);
+  });
+
+  it("defines one unambiguous top-to-bottom business sequence", () => {
+    expect(orderBusinessStages.map((stage) => stage.code)).toEqual([
+      "order_creation",
+      "consignment_approval",
+      "task_assignment",
+      "domestic_execution",
+      "warehouse_receiving",
+      "port_loading",
+      "outbound_transport",
+      "overseas_pickup",
+      "reconciliation",
+      "completion_review",
+    ]);
+    expect(orderModuleSequence("transport")).toBeLessThan(
+      orderModuleSequence("warehouse"),
+    );
+    expect(orderModuleSequence("warehouse")).toBeLessThan(
+      orderModuleSequence("loading"),
+    );
+    expect(orderModuleSequence("loading")).toBeLessThan(
+      orderModuleSequence("customs"),
+    );
+    // 文件中心不是工作流独立模块，不参与主序列（归 outbound_transport 阶段查看）
+    expect(orderModuleSequence("documents")).toBe(999);
+    expect(orderModuleSequence("transport")).toBeLessThan(
+      orderModuleSequence("tracking"),
+    );
+    expect(orderModuleSequence("tracking")).toBeLessThan(
+      orderModuleSequence("costs"),
+    );
+  });
+
+  it("hides future module forms until their workflow stage is reached", () => {
+    expect(
+      orderModuleWorkflowStageAccess(
+        "tracking",
+        "domestic_execution",
+        workflowSteps,
+      ).available,
+    ).toBe(false);
+    expect(
+      orderModuleWorkflowStageAccess(
+        "documents",
+        "port_loading",
+        workflowSteps,
+      ).available,
+    ).toBe(false);
+    expect(
+      orderModuleWorkflowStageAccess(
+        "documents",
+        "outbound_transport",
+        workflowSteps,
+      ).available,
+    ).toBe(true);
+    expect(
+      orderModuleWorkflowStageAccess(
+        "overseas_warehouse",
+        "outbound_transport",
+        workflowSteps,
+      ).reason,
+    ).toContain("扫码自提签收");
+  });
+
+  it("opens a module at an earlier workflow node when a field block is moved there", () => {
+    const access = orderModuleWorkflowStageAccess(
+      "customs",
+      "consignment_approval",
+      workflowSteps,
+      "consignment_approval",
+    );
+    expect(access).toMatchObject({
+      available: true,
+      requiredStepKey: "consignment_approval",
+      customPlacement: true,
+    });
+  });
+});

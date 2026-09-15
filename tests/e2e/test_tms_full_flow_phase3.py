@@ -1,0 +1,715 @@
+from __future__ import annotations
+
+import json
+import re
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+
+from tms_full_flow_phase3 import (
+    DENIED_PAGE_RE,
+    LTL_KEYS,
+    ORDER_KEYS,
+    PHASE2_STAGE_ORDER,
+    PHASE3_PERMISSION_AND_NEGATIVE_CASES,
+    PHASE3_HANDOFF_SCHEMA,
+    PHASE3_STAGE_ORDER,
+    REQUIRED_ACCOUNT_ALIASES,
+    Phase3Artifacts,
+    _public_preflight,
+    batch_tab_name_pattern,
+    build_handoff_payload,
+    build_parser,
+    derive_phase1_entity_prefix,
+    load_phase2_handoff,
+    portal_email_from_entity_prefix,
+)
+from tms_ui_credentials import CredentialRecord, CredentialVault
+from ui_only_guard import scan_path
+
+
+ORDER_NUMBERS = {
+    "ftl": "SO2026090500101",
+    "ltl1": "SO2026090500102",
+    "ltl2": "SO2026090500103",
+    "ltl3": "SO2026090500104",
+}
+EXPECTED_PIECES = {"ftl": 2, "ltl1": 3, "ltl2": 4, "ltl3": 5}
+
+
+def valid_phase2_payload(*, include_prefix: bool = True) -> dict[str, object]:
+    orders = {
+        key: {
+            "order_number": ORDER_NUMBERS[key],
+            "business_type": "ftl" if key == "ftl" else "ltl",
+            "expected_pieces": EXPECTED_PIECES[key],
+            "cargo_codes": [
+                f"OUL-20260905-{key.upper()}-{index:02d}"
+                for index in range(1, EXPECTED_PIECES[key] + 1)
+            ],
+        }
+        for key in ORDER_KEYS
+    }
+    handoff: dict[str, object] = {
+        "schema": "international-tms-full-flow-phase2-handoff/v1",
+        "source_phase1_run_id": (
+            "phase1-one-ftl-three-ltl-a003-20260905150000-abcdef12"
+        ),
+        "customer": {"name": "UI全流程验收客户-ABCDEF12"},
+        "orders": orders,
+        "transport_batch": {
+            "batch_number": "PZ-20260905-001",
+            "order_keys": list(LTL_KEYS),
+            "order_numbers": [
+                orders[key]["order_number"]  # type: ignore[index]
+                for key in LTL_KEYS
+            ],
+        },
+        "dispatches": {
+            "ftl": {"dispatch_number": "OUT-20260905-FTL01"},
+            "ltl_batch": {"dispatch_number": "OUT-20260905-PZ001"},
+        },
+        "assignees": {
+            "operation": "PZ接管操作二号",
+            "document": "PZ接管单证二号",
+            "operation_alias": "operation_2",
+            "document_alias": "document_2",
+        },
+        "certification_lineage": {
+            "mode": "fresh-from-phase1",
+            "root_phase1_run_id": "phase1-one-ftl-three-ltl-a003-20260905150000-abcdef12",
+            "root_entity_prefix": "UIE2E-20260905150000-A003-ABCDEF12",
+            "fresh_phase1_attempt": True,
+            "recovery_branches_used": False,
+        },
+        "completed_stages": list(PHASE2_STAGE_ORDER),
+        "ready_for_phase3": True,
+    }
+    if include_prefix:
+        handoff["source_phase1_entity_prefix"] = (
+            "UIE2E-20260905150000-A003-ABCDEF12"
+        )
+    return {
+        "schema": "international-tms-ui-only-run/v2",
+        "run_id": "phase2-source-20260905160000-12345678",
+        "status": "passed",
+        "metrics": {"steps_failed": 0, "steps_blocked": 0, "gates_failed": 0},
+        "handoff": handoff,
+    }
+
+
+def write_payload(root: Path, payload: dict[str, object]) -> Path:
+    path = root / "phase2-summary.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8-sig")
+    return path
+
+
+def credential_vault() -> CredentialVault:
+    records: list[CredentialRecord] = []
+    for alias in REQUIRED_ACCOUNT_ALIASES:
+        site = "portal" if alias == "customer" else (
+            "warehouse" if alias == "overseas_warehouse" else "admin"
+        )
+        records.append(
+            CredentialRecord(
+                alias=alias,
+                site=site,
+                department="测试部门",
+                role=alias,
+                email=f"{alias}@secret.test",
+                password=f"Secret-{alias}-123A",
+            )
+        )
+    return CredentialVault(records)
+
+
+class Phase3HandoffInputTests(unittest.TestCase):
+    def test_loads_phase2_handoff_with_all_identifiers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = load_phase2_handoff(
+                write_payload(Path(directory), valid_phase2_payload())
+            )
+        self.assertEqual([item.key for item in source.orders], list(ORDER_KEYS))
+        self.assertEqual(source.batch_number, "PZ-20260905-001")
+        self.assertEqual(source.dispatches["ftl"], "OUT-20260905-FTL01")
+        self.assertEqual(len(source.all_cargo_codes), sum(EXPECTED_PIECES.values()))
+        self.assertEqual(source.order("ltl3").business_type, "ltl")
+        self.assertEqual(source.order("ltl3").expected_pieces, 5)
+        self.assertEqual(source.batch_operation_alias, "operation_2")
+        self.assertEqual(source.batch_document_alias, "document_2")
+
+    def test_derives_non_secret_prefix_from_phase1_run_id_for_old_envelope(self) -> None:
+        payload = valid_phase2_payload(include_prefix=False)
+        with tempfile.TemporaryDirectory() as directory:
+            source = load_phase2_handoff(write_payload(Path(directory), payload))
+        self.assertEqual(
+            source.source_phase1_entity_prefix,
+            "UIE2E-20260905150000-A003-ABCDEF12",
+        )
+        self.assertEqual(
+            portal_email_from_entity_prefix(source.source_phase1_entity_prefix),
+            "uie2e.phase1.uie2e20260905150000a003abcdef12@example.test",
+        )
+
+    def test_rejects_phase2_that_is_not_ready(self) -> None:
+        payload = valid_phase2_payload()
+        payload["handoff"]["ready_for_phase3"] = False  # type: ignore[index]
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_payload(Path(directory), payload)
+            with self.assertRaisesRegex(ValueError, "ready_for_phase3"):
+                load_phase2_handoff(path)
+
+    def test_rejects_batch_order_mismatch(self) -> None:
+        payload = valid_phase2_payload()
+        payload["handoff"]["transport_batch"]["order_numbers"][0] = (  # type: ignore[index]
+            "SO2026090599999"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_payload(Path(directory), payload)
+            with self.assertRaisesRegex(ValueError, "挂载订单号"):
+                load_phase2_handoff(path)
+
+    def test_rejects_duplicate_oul_across_orders(self) -> None:
+        payload = valid_phase2_payload()
+        ltl3_codes = payload["handoff"]["orders"]["ltl3"]["cargo_codes"]  # type: ignore[index]
+        ltl3_codes[0] = payload["handoff"]["orders"]["ltl1"]["cargo_codes"][0]  # type: ignore[index]
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_payload(Path(directory), payload)
+            with self.assertRaisesRegex(ValueError, "不能复用"):
+                load_phase2_handoff(path)
+
+    def test_rejects_missing_customer_name(self) -> None:
+        payload = valid_phase2_payload()
+        payload["handoff"]["customer"] = {"name": ""}  # type: ignore[index]
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_payload(Path(directory), payload)
+            with self.assertRaisesRegex(ValueError, "客户名称"):
+                load_phase2_handoff(path)
+
+    def test_rejects_pz_handoff_that_reuses_primary_accounts(self) -> None:
+        payload = valid_phase2_payload()
+        payload["handoff"]["assignees"]["operation_alias"] = "operation"  # type: ignore[index]
+        payload["handoff"]["assignees"]["document_alias"] = "document"  # type: ignore[index]
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_payload(Path(directory), payload)
+            with self.assertRaisesRegex(ValueError, "operation_2"):
+                load_phase2_handoff(path)
+
+    def test_run_id_derivation_rejects_unstructured_value(self) -> None:
+        self.assertEqual(derive_phase1_entity_prefix("legacy-run"), "")
+
+    def test_rejects_nominal_pass_with_failed_phase2_metrics(self) -> None:
+        payload = valid_phase2_payload()
+        payload["metrics"]["steps_failed"] = 1  # type: ignore[index]
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_payload(Path(directory), payload)
+            with self.assertRaisesRegex(ValueError, "失败证据"):
+                load_phase2_handoff(path)
+
+    def test_rejects_recovery_or_missing_fresh_lineage(self) -> None:
+        payload = valid_phase2_payload()
+        payload["handoff"]["certification_lineage"]["recovery_branches_used"] = True  # type: ignore[index]
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_payload(Path(directory), payload)
+            with self.assertRaisesRegex(ValueError, "fresh attempt"):
+                load_phase2_handoff(path)
+
+    def test_rejects_empty_phase1_run_id_even_when_lineage_matches(self) -> None:
+        payload = valid_phase2_payload()
+        payload["handoff"]["source_phase1_run_id"] = ""  # type: ignore[index]
+        payload["handoff"]["certification_lineage"]["root_phase1_run_id"] = ""  # type: ignore[index]
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_payload(Path(directory), payload)
+            with self.assertRaisesRegex(ValueError, "source_phase1_run_id"):
+                load_phase2_handoff(path)
+
+    def test_rejects_phase1_entity_prefix_that_disagrees_with_run_id(self) -> None:
+        payload = valid_phase2_payload()
+        payload["handoff"]["source_phase1_entity_prefix"] = (  # type: ignore[index]
+            "UIE2E-20260905150000-A003-DEADBEEF"
+        )
+        payload["handoff"]["certification_lineage"]["root_entity_prefix"] = (  # type: ignore[index]
+            "UIE2E-20260905150000-A003-DEADBEEF"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_payload(Path(directory), payload)
+            with self.assertRaisesRegex(ValueError, "entity_prefix.*run_id"):
+                load_phase2_handoff(path)
+
+    def test_rejects_missing_short_long_or_invalid_expected_piece_contract(self) -> None:
+        cases = (
+            ("missing", "expected_pieces.*正整数"),
+            ("short", "OUL 数量.*预计件数"),
+            ("long", "OUL 数量.*预计件数"),
+            ("invalid_mapping", "expected_pieces.*正整数"),
+        )
+        for case, expected_error in cases:
+            with self.subTest(case=case):
+                payload = valid_phase2_payload()
+                order = payload["handoff"]["orders"]["ftl"]  # type: ignore[index]
+                if case == "missing":
+                    order.pop("expected_pieces")
+                elif case == "short":
+                    order["cargo_codes"].pop()
+                elif case == "long":
+                    order["cargo_codes"].append("OUL-20260905-FTL-99")
+                else:
+                    order["expected_pieces"] = {"count": 2}
+                with tempfile.TemporaryDirectory() as directory:
+                    path = write_payload(Path(directory), payload)
+                    with self.assertRaisesRegex(ValueError, expected_error):
+                        load_phase2_handoff(path)
+
+
+class Phase3SafetyAndOutputTests(unittest.TestCase):
+    def test_formal_flow_executes_pz_permission_and_exit_negative_gates(self) -> None:
+        self.assertEqual(
+            PHASE3_PERMISSION_AND_NEGATIVE_CASES,
+            (
+                "P3-PERM-PZ-NEW-DOCUMENT",
+                "P3-NEG-PZ-OLD-DOCUMENT-DEEP-LINK",
+                "P3-NEG-PZ-PARTIAL-CUSTOMS-EXIT",
+                "P3-NEG-CHILD-OLD-DOCUMENT",
+            ),
+        )
+
+    def test_denied_page_accepts_resource_hiding_not_found_copy(self) -> None:
+        body = (
+            "SYSTEM RECOVERY\n找不到该页面\n"
+            "页面地址可能已变更，请返回工作台重新进入。"
+        )
+        self.assertIsNotNone(DENIED_PAGE_RE.search(body))
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.source = load_phase2_handoff(
+            write_payload(self.root, valid_phase2_payload())
+        )
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_execute_is_opt_in(self) -> None:
+        args = build_parser().parse_args(["--phase2-summary", "summary.json"])
+        self.assertFalse(args.execute)
+
+    def test_preflight_does_not_serialize_credentials_or_portal_email(self) -> None:
+        fixture = HERE / "fixtures" / "tms-phase2-document.pdf"
+        payload = _public_preflight(
+            credential_vault(),
+            self.source,
+            base_url="http://127.0.0.1:5189",
+            fixture_file=fixture,
+        )
+        rendered = json.dumps(payload, ensure_ascii=False)
+        self.assertEqual(payload["status"], "READY_NOT_EXECUTED")
+        self.assertFalse(payload["business_writes"])
+        self.assertTrue(payload["portal_identity_reconstructable"])
+        self.assertEqual(payload["pz_runtime_roles"], ["operation_2", "document_2"])
+        self.assertEqual(payload["expected_pieces"], EXPECTED_PIECES)
+        self.assertNotIn("@secret.test", rendered)
+        self.assertNotIn("Secret-", rendered)
+        self.assertNotIn("uie2e.phase1", rendered)
+
+    def test_phase3_handoff_carries_business_evidence_without_login_identity(self) -> None:
+        artifacts = Phase3Artifacts(
+            customs_declarations={
+                "ftl": "E2E-FTL-01",
+                "ltl1": "E2E-LTL1-02",
+                "ltl2": "E2E-LTL2-03",
+                "ltl3": "E2E-LTL3-04",
+            },
+            completed_tracking_nodes={
+                "ftl": [
+                    "border_arrived",
+                    "exported",
+                    "foreign_entered",
+                    "customs_cleared",
+                ],
+                "ltl_batch": [
+                    "border_arrived",
+                    "exported",
+                    "foreign_entered",
+                    "customs_cleared",
+                ],
+            },
+            inbound_cargo_codes=list(self.source.all_cargo_codes),
+            pickup_cargo_codes=list(self.source.all_cargo_codes),
+            appointed_order=self.source.order("ftl").order_number,
+            signed_orders=[item.order_number for item in self.source.orders],
+        )
+        payload = build_handoff_payload(
+            self.source, artifacts, ready_for_phase4=True
+        )
+        rendered = json.dumps(payload, ensure_ascii=False)
+        self.assertEqual(payload["schema"], PHASE3_HANDOFF_SCHEMA)
+        self.assertTrue(payload["ready_for_phase4"])
+        self.assertEqual(payload["completed_stages"], list(PHASE3_STAGE_ORDER))
+        self.assertEqual(
+            payload["oul_numbers"],
+            {
+                item.key: list(item.cargo_codes) for item in self.source.orders
+            },
+        )
+        self.assertEqual(payload["orders"]["ltl3"]["expected_pieces"], 5)
+        self.assertEqual(
+            payload["transport_batch"]["order_numbers"],
+            [self.source.order(key).order_number for key in LTL_KEYS],
+        )
+        self.assertEqual(
+            payload["pickup_cargo_codes"], list(self.source.all_cargo_codes)
+        )
+        self.assertEqual(len(payload["pickup_signed_orders"]), 4)
+        self.assertEqual(
+            payload["certification_lineage"]["source_phase2_run_id"],
+            self.source.source_run_id,
+        )
+        self.assertNotIn("@example.test", rendered)
+
+    def test_stage_order_ends_at_pickup_signoff(self) -> None:
+        self.assertEqual(
+            PHASE3_STAGE_ORDER[-2:],
+            (
+                "customer_notification_and_optional_appointment",
+                "overseas_pickup_scan_and_signoff",
+            ),
+        )
+
+    def test_certification_scenario_passes_ui_only_static_guard(self) -> None:
+        violations = scan_path(HERE / "tms_full_flow_phase3.py")
+        self.assertEqual(
+            violations,
+            [],
+            "\n".join(
+                f"{item.line}:{item.column} [{item.code}] {item.message}"
+                for item in violations
+            ),
+        )
+
+    def test_phase3_separates_ftl_and_pz_responsibility_sessions(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        self.assertIn('self.operation = self._add_role("operation")', source)
+        self.assertIn('self.document = self._add_role("document")', source)
+        self.assertIn('self.batch_operation = self._add_role(source.batch_operation_alias)', source)
+        self.assertIn('self.batch_document = self._add_role(source.batch_document_alias)', source)
+        self.assertIn("session = self.batch_operation", source)
+        self.assertIn("session = self.batch_document", source)
+
+    def test_batch_tab_locator_accepts_status_prefix_in_accessible_name(self) -> None:
+        pattern = batch_tab_name_pattern("报关与文件")
+        self.assertRegex("待处理 报关与文件 逐票文件、申报、编辑与放行", pattern)
+        self.assertRegex("已完成 报关与文件", pattern)
+        self.assertNotRegex("进入报关与文件前置说明", pattern)
+
+    def test_pz_child_link_uses_the_product_accessible_name(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        self.assertIn('name=f"查看订单 {first_order.order_number}"', source)
+        self.assertIn("exact=True", source)
+
+    def test_permission_probe_closes_batch_disclosure_before_reusing_session(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index('            disclosure = row.locator("details.batch-order-file-details")')
+        end = source.index('        with self.document.step(', start)
+        permission_probe = source[start:end]
+
+        self.assertIn(
+            'f"收起 {first_order.order_number} 报关办理区"',
+            permission_probe,
+        )
+        self.assertIn(
+            'disclosure.get_by_role("button", name="关闭文件查看窗口", exact=True)',
+            permission_probe,
+        )
+        self.assertIn(
+            'f"{first_order.order_number} 报关办理区已关闭"',
+            permission_probe,
+        )
+
+    def test_batch_document_owner_has_a_visible_upload_path_in_the_batch_workbench(self) -> None:
+        route_source = (
+            HERE.parents[1] / "app" / "routes" / "admin.loading-detail.tsx"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("manageDocuments={manageDocuments}", route_source)
+        self.assertIn('value="batch_order_document_upload"', route_source)
+        self.assertNotIn('name="approveImmediately" value="1"', route_source)
+        self.assertIn("automaticReview:true", route_source)
+        self.assertIn("'approved',NULL", route_source)
+        self.assertIn("选择并上传", route_source)
+        self.assertIn("选择文件后自动上传", route_source)
+        self.assertIn("待负责人上传", route_source)
+        self.assertNotIn('blocks?"待仓库上传"', route_source)
+
+    def test_phase3_recovers_missing_batch_documents_through_visible_ui(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        self.assertIn("def _ensure_batch_order_documents(", source)
+        self.assertIn("session.choose_files(", source)
+        self.assertIn('name=re.compile(r"^上传.*通过$")', source)
+        self.assertIn("self._ensure_batch_order_documents(session, order)", source)
+
+    def test_ordinary_order_navigation_waits_for_the_destination_heading(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def _open_ordinary_order(")
+        end = source.index("    def _open_batch(", start)
+        helper = source[start:end]
+        self.assertIn(
+            'get_by_role("heading", name=order_number, exact=True)',
+            helper,
+        )
+
+    def test_batch_navigation_waits_for_the_order_classification_before_selecting_a_tab(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def _open_batch(")
+        end = source.index("    def _open_batch_tab(", start)
+        helper = source[start:end]
+
+        classification = (
+            'tabs = session.page.get_by_role('
+            '"navigation", name="普通订单与配载订单分类"'
+        )
+        wait = 'self._expect_visible_or_block(\n            session,\n            tabs,'
+        self.assertIn(classification, helper)
+        self.assertIn(wait, helper)
+        self.assertLess(helper.index(wait), helper.index('self._click_workload_tab(session, "配载订单")'))
+
+    def test_tab_switches_wait_for_the_target_url_and_app_idle_state(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def _activate_tab_and_wait(")
+        end = source.index("    def _open_batch_tab(", start)
+        helper = source[start:end]
+
+        self.assertIn("href = link.first.get_attribute(\"href\") or \"\"", helper)
+        self.assertIn("session.page.wait_for_url(", helper)
+        self.assertIn("re.compile(re.escape(href))", helper)
+        self.assertIn(
+            'session.page.get_by_role("progressbar", name="系统正在处理请求")',
+            helper,
+        )
+        self.assertIn("session.expect_hidden(", helper)
+
+        ordinary_start = source.index("    def _open_ordinary_business_tab(")
+        ordinary_end = source.index("    def _ensure_ftl_customs_documents(", ordinary_start)
+        ordinary_helper = source[ordinary_start:ordinary_end]
+        self.assertIn("self._activate_tab_and_wait(session, link, label)", ordinary_helper)
+        self.assertNotIn("wait_for_timeout", ordinary_helper)
+
+    def test_ftl_customs_save_waits_for_durable_declaration_row(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def complete_ftl_customs(")
+        end = source.index("    def _assert_batch_exit_blocked_before_all_customs(", start)
+        helper = source[start:end]
+        self.assertIn(
+            'filter(has_text=declaration_number)',
+            helper,
+        )
+        self.assertNotIn(
+            'self.document, "申报单已保存", "整车报关单保存成功提示"',
+            helper,
+        )
+
+    def test_ftl_customs_documents_open_files_then_return_to_declarations(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def _ensure_ftl_customs_documents(")
+        end = source.index("    def _declaration_number(", start)
+        helper = source[start:end]
+        self.assertIn(
+            'self._open_ordinary_business_tab(self.document, "报关文件")',
+            helper,
+        )
+        self.assertIn(
+            'self._open_ordinary_business_tab(self.document, "报关单")',
+            helper,
+        )
+        self.assertNotIn(
+            "if not self._is_visible(section):\n            return",
+            helper,
+        )
+
+    def test_ftl_customs_document_upload_waits_for_the_selected_row_to_refresh(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def _ensure_ftl_customs_documents(")
+        end = source.index("    def _declaration_number(", start)
+        helper = source[start:end]
+
+        self.assertIn(
+            'document_name = candidate.locator(".source-document-name strong").inner_text()',
+            helper,
+        )
+        self.assertIn("uploaded_missing = section.locator(", helper)
+        self.assertIn(
+            'self.document.expect_hidden(\n                    uploaded_missing,',
+            helper,
+        )
+        self.assertNotIn("self.document.page.wait_for_timeout(350)", helper)
+
+    def test_ftl_customs_document_review_waits_for_the_dialog_to_close(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def _ensure_ftl_customs_documents(")
+        end = source.index("    def _declaration_number(", start)
+        helper = source[start:end]
+
+        self.assertIn(
+            'self.document.expect_hidden(dialog, "报关文件审核提交完成")',
+            helper,
+        )
+        self.assertNotIn("self.document.page.wait_for_timeout(300)", helper)
+
+    def test_batch_customs_uses_durable_rows_instead_of_transient_toasts(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def complete_batch_customs(")
+        end = source.index("    @staticmethod\n    def _event_time", start)
+        helper = source[start:end]
+        self.assertIn(
+            'filter(has_text=declaration_number)',
+            helper,
+        )
+        self.assertIn(
+            'filter(has_text="1/1 张放行")',
+            helper,
+        )
+        self.assertNotIn(
+            '"本票报关单已保存"',
+            helper,
+        )
+        self.assertNotIn(
+            "self._expect_success(",
+            helper,
+        )
+
+    def test_batch_customs_resumes_one_pending_declaration_and_closes_the_panel(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def complete_batch_customs(")
+        end = source.index("    @staticmethod\n    def _event_time", start)
+        helper = source[start:end]
+
+        self.assertIn("pending_declarations = panel.locator", helper)
+        self.assertIn("if pending_declarations.count() == 1:", helper)
+        self.assertIn('pending_declaration.locator("strong")', helper)
+        self.assertIn('recovery_branches_used") is True', helper)
+        self.assertIn("released_declarations = panel.locator", helper)
+        self.assertIn("if already_released and recovery_mode:", helper)
+        self.assertIn("if not self._is_visible(panel):", helper)
+        self.assertIn(".batch-order-file-panel-header button", helper)
+        self.assertLess(
+            helper.index(".batch-order-file-panel-header button"),
+            helper.index("release = saved_row.get_by_role"),
+        )
+
+    def test_phase3_preserves_valid_prefilled_datetime_controls(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+
+        for field_name, expected_count in {
+            "declaredAt": 1,
+            "releasedAt": 1,
+            "eventAt": 2,
+            "actualExitAt": 1,
+        }.items():
+            pattern = re.compile(
+                rf'"{field_name}",\n\s+[^\n]+,\n\s+[^\n]+,\n\s+only_if_empty=True,'
+            )
+            self.assertEqual(
+                len(pattern.findall(source)),
+                expected_count,
+                f"{field_name} must preserve a valid prefilled value",
+            )
+
+    def test_ftl_tracking_opens_its_peer_tab_before_waiting_for_the_workbench(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def complete_ftl_tracking(")
+        end = source.index("    def _fill_batch_tracking_form(", start)
+        helper = source[start:end]
+
+        open_tab = 'self._open_ordinary_business_tab(self.operation, "出境运输与运踪")'
+        self.assertIn(open_tab, helper)
+        self.assertLess(helper.index(open_tab), helper.index('name="运输进度与运单跟踪"'))
+
+    def test_ftl_tracking_recovery_skips_completed_nodes_but_fresh_certification_rejects_them(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        submit_start = source.index("    def _submit_ftl_tracking_node(")
+        complete_start = source.index("    def complete_ftl_tracking(", submit_start)
+        complete_end = source.index("    def _fill_batch_tracking_form(", complete_start)
+        submit_helper = source[submit_start:complete_start]
+        complete_helper = source[complete_start:complete_end]
+
+        self.assertIn('get_by_text(', submit_helper)
+        self.assertIn('"运输节点已更新", exact=False', submit_helper)
+        self.assertIn(").or_(completed_row)", submit_helper)
+        self.assertIn('filter(has_text="已完成")', submit_helper)
+        self.assertIn('".tracking-progress-table tbody tr"', submit_helper)
+        self.assertNotIn('"table.tracking-progress-table tbody tr"', submit_helper)
+        self.assertIn("get_by_text(label, exact=True)", submit_helper)
+        self.assertIn("get_by_text(label, exact=True)", complete_helper)
+        self.assertIn('recovery_branches_used") is True', complete_helper)
+        self.assertIn("if completed and recovery_mode:", complete_helper)
+        self.assertIn("continue", complete_helper)
+        self.assertIn("不能作为 fresh 全流程认证数据", complete_helper)
+
+    def test_batch_tracking_waits_for_exit_form_or_persisted_confirmation(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def complete_batch_tracking(")
+        end = source.index("    def _prepare_overseas_receipt(", start)
+        helper = source[start:end]
+
+        self.assertIn('locator("form.batch-inline-exit-form")', helper)
+        self.assertIn('get_by_text(', helper)
+        self.assertIn('"实际出境已确认", exact=False', helper)
+        self.assertIn("exit_form.or_(exit_confirmed)", helper)
+        self.assertLess(
+            helper.index("exit_form.or_(exit_confirmed)"),
+            helper.index("if self._is_visible(exit_form):"),
+        )
+
+    def test_batch_tracking_rows_use_container_class_and_exact_labels(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def _submit_batch_node(")
+        end = source.index("    def _prepare_overseas_receipt(", start)
+        helper = source[start:end]
+
+        self.assertIn('locator(".batch-tracking-node-table")', helper)
+        self.assertIn('".batch-tracking-node-table tbody tr"', helper)
+        self.assertNotIn('"table.batch-tracking-node-table', helper)
+        self.assertIn("get_by_text(row_label, exact=True)", helper)
+        self.assertIn('get_by_text("口岸到达", exact=True)', helper)
+        self.assertIn('get_by_text("目的仓到达", exact=True)', helper)
+
+    def test_portal_appointment_recovery_does_not_create_a_second_appointment(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def verify_portal_and_optional_appointment(")
+        end = source.index("    def complete_pickup_signoff(", start)
+        helper = source[start:end]
+
+        self.assertIn(
+            "appointment_done = bool(self.artifacts.appointed_order)",
+            helper,
+        )
+        self.assertIn("expect_hidden(\n                        dialog", helper)
+
+    def test_pz_read_only_audit_checks_capabilities_not_transient_copy(self) -> None:
+        source = (HERE / "tms_full_flow_phase3.py").read_text(encoding="utf-8")
+        start = source.index("    def assert_customs_permission_alignment(")
+        end = source.index("    def complete_ftl_customs(", start)
+        helper = source[start:end]
+
+        self.assertIn('locator("section.batch-order-documents")', helper)
+        self.assertNotIn('get_by_text("当前只读"', helper)
+        self.assertIn('locator(".batch-customs-create-button")', helper)
+        self.assertIn('locator(".batch-order-direct-customs-button")', helper)
+
+    def test_ftl_border_tracking_uses_the_live_batch_order_status_constraint(self) -> None:
+        route_source = (
+            HERE.parents[1] / "app" / "routes" / "admin.order-module.tsx"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("WHEN ?='assigned' AND status IN ('departed','arrived')", route_source)
+        self.assertNotIn("WHEN ?='loaded' AND status IN ('departed','arrived')", route_source)
+
+
+if __name__ == "__main__":
+    unittest.main()
