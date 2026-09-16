@@ -311,8 +311,8 @@ export async function ensureWorkflowCatalogFields(organizationId: string) {
              AND module.module_code=COALESCE(workflow_step_fields.module_code,'consignment')
              AND module.is_active=1
              AND task.responsibility_position_code IS NOT NULL
-         ) ORDER BY position_code
-       )
+         ) distinct_positions ORDER BY position_code
+       ) ordered_positions
      ),(
        SELECT GROUP_CONCAT(position_code, ',')
        FROM (
@@ -334,8 +334,8 @@ export async function ensureWorkflowCatalogFields(organizationId: string) {
              AND module.step_id=workflow_step_fields.step_id
              AND module.is_active=1
              AND task.responsibility_position_code IS NOT NULL
-         ) ORDER BY position_code
-       )
+         ) distinct_positions ORDER BY position_code
+       ) ordered_positions
      ))
      WHERE handler_position_codes IS NULL
        AND workflow_id IN (
@@ -372,8 +372,8 @@ export async function backfillWorkflowFieldHandlerPositionsForWorkflow(
              AND module.module_code=COALESCE(workflow_step_fields.module_code,'consignment')
              AND module.is_active=1
              AND task.responsibility_position_code IS NOT NULL
-         ) ORDER BY position_code
-       )
+         ) distinct_positions ORDER BY position_code
+       ) ordered_positions
      ),(
        SELECT GROUP_CONCAT(position_code, ',')
        FROM (
@@ -395,8 +395,8 @@ export async function backfillWorkflowFieldHandlerPositionsForWorkflow(
              AND module.step_id=workflow_step_fields.step_id
              AND module.is_active=1
              AND task.responsibility_position_code IS NOT NULL
-         ) ORDER BY position_code
-       )
+         ) distinct_positions ORDER BY position_code
+       ) ordered_positions
      ))
      WHERE handler_position_codes IS NULL AND workflow_id=?`,
   ).bind(workflowId).run();
@@ -425,8 +425,8 @@ export async function defaultWorkflowFieldHandlerPositionCodes(input: {
            WHERE module.workflow_id=? AND module.step_id=? AND module.module_code=?
              AND module.is_active=1
              AND task.responsibility_position_code IS NOT NULL
-         ) ORDER BY position_code
-       )),
+         ) distinct_positions ORDER BY position_code
+       ) ordered_positions),
        (SELECT GROUP_CONCAT(position_code, ',') FROM (
          SELECT position_code FROM (
            SELECT responsibility_position_code position_code
@@ -442,8 +442,8 @@ export async function defaultWorkflowFieldHandlerPositionCodes(input: {
             AND task.is_active=1
            WHERE module.workflow_id=? AND module.step_id=? AND module.is_active=1
              AND task.responsibility_position_code IS NOT NULL
-         ) ORDER BY position_code
-       ))
+         ) distinct_positions ORDER BY position_code
+       ) ordered_positions)
      ) position_codes`,
   ).bind(
     input.workflowId,

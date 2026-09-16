@@ -21,6 +21,32 @@ function requiredField(
 }
 
 describe("costs completion gate", () => {
+  it("never completes settlement before the workflow reaches reconciliation", () => {
+    const result = evaluateCostsCompletionGate({
+      fields: [requiredField("receivable_expenses", true, "应收费用")],
+      directions: [
+        {
+          direction: "receivable",
+          hasExpenses: true,
+          customerServiceConfirmed: false,
+          businessReviewed: false,
+          financeReviewed: false,
+        },
+      ],
+      settlementStageReached: false,
+    });
+
+    expect(result).toMatchObject({
+      complete: false,
+      status: "in_progress",
+      currentStepCode: "parallel_review",
+      blockers: [
+        { fieldKey: "settlement_stage", label: "尚未进入对账结算节点" },
+      ],
+    });
+    expect(result.progressPercent).toBeLessThan(100);
+  });
+
   it("completes only when every configured required gate is satisfied", () => {
     const result = evaluateCostsCompletionGate({
       fields: [
@@ -123,7 +149,7 @@ describe("costs completion gate", () => {
     });
   });
 
-  it("does not block on optional or hidden fields", () => {
+  it("still requires enabled settlement signatures when legacy configuration marks them optional", () => {
     const result = evaluateCostsCompletionGate({
       fields: [
         {
@@ -135,16 +161,44 @@ describe("costs completion gate", () => {
           isActive: false,
         },
       ],
-      directions: [],
+      directions: [
+        {
+          direction: "receivable",
+          hasExpenses: true,
+          customerServiceConfirmed: true,
+          businessReviewed: false,
+          financeReviewed: false,
+        },
+      ],
     });
 
     expect(result).toMatchObject({
-      complete: true,
-      status: "completed",
-      progressPercent: 100,
-      blockingReason: null,
-      blockers: [],
+      complete: false,
+      status: "in_progress",
+      blockers: [{ fieldKey: "business_review", direction: "receivable" }],
     });
+  });
+
+  it("does not block on hidden settlement signatures", () => {
+    const result = evaluateCostsCompletionGate({
+      fields: [
+        {
+          ...requiredField("finance_review", false, "财务审核"),
+          isActive: false,
+        },
+      ],
+      directions: [
+        {
+          direction: "receivable",
+          hasExpenses: true,
+          customerServiceConfirmed: true,
+          businessReviewed: true,
+          financeReviewed: false,
+        },
+      ],
+    });
+
+    expect(result.complete).toBe(true);
   });
 
   it("uses the locked field placement instead of a hard-coded settlement step", () => {
@@ -161,9 +215,7 @@ describe("costs completion gate", () => {
     expect(result).toMatchObject({
       complete: false,
       status: "not_started",
-      blockers: [
-        { fieldKey: "reconciliation_statement", label: "对账单" },
-      ],
+      blockers: [{ fieldKey: "reconciliation_statement", label: "对账单" }],
     });
   });
 
@@ -182,9 +234,7 @@ describe("costs completion gate", () => {
       progressPercent: 50,
       currentStepCode: "parallel_review",
       blockingReason: "待补齐必填项：开票/收票记录",
-      blockers: [
-        { fieldKey: "invoice_records", label: "开票/收票记录" },
-      ],
+      blockers: [{ fieldKey: "invoice_records", label: "开票/收票记录" }],
     });
   });
 

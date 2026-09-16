@@ -3,6 +3,7 @@ import { isFrozenWorkflowFieldScopeMarker } from "./workflow-field-runtime";
 export const quotationConsignmentPresentationKeys = [
   "quotation_customer_contact_name",
   "quotation_customer_contact_phone",
+  "quotation_mark_contacts",
   "quotation_salesperson_user_id",
   "quotation_customs_clearance_mode",
   "quotation_origin_region",

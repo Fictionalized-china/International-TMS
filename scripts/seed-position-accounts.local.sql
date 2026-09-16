@@ -15,8 +15,8 @@ WITH account_seed(email, display_name) AS (
     ('business-route@e2e.test', '商务航线账号'),
     ('booking@e2e.test', '订舱人员账号')
 )
-INSERT INTO users(id,email,password_hash,display_name,status,created_at,updated_at)
-SELECT lower(hex(randomblob(16))),seed.email,admin.password_hash,seed.display_name,'active',datetime('now'),datetime('now')
+INSERT INTO users(id,email,password_hash,display_name,phone,status,created_at,updated_at)
+SELECT lower(hex(randomblob(16))),seed.email,admin.password_hash,seed.display_name,'13980000000','active',datetime('now'),datetime('now')
 FROM account_seed seed
 CROSS JOIN (SELECT password_hash FROM users WHERE email='admin@e2e.test' LIMIT 1) admin
 WHERE NOT EXISTS(SELECT 1 FROM users existing WHERE lower(existing.email)=lower(seed.email));

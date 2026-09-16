@@ -103,13 +103,12 @@ export default function LoadingTracking({ loaderData }: Route.ComponentProps) {
       </div>
       <span className="status-pill">{loaderData.total} 张配载单</span>
     </header>
-    <section className="panel">
+    <section className="panel loading-tracking-filter-panel">
       <Form method="get" action="." className="filter-bar compact loading-tracking-filter">
-        <label className="field"><span>配载单号或订单号</span><input name="q" defaultValue={loaderData.q} placeholder="输入子订单号可定位所属配载单" /></label>
-        <label className="field"><span>状态</span><select name="status" defaultValue={loaderData.status}><option value="all">全部</option><option value="active">执行中</option><option value="completed">已完成</option><option value="cancelled">已取消</option></select></label>
-        <button className="secondary">查询</button>
-        <Link className="text-button" to="/admin/loading">重置</Link>
-        <details className="inline-details advanced-filter"><summary>高级筛选</summary><div className="filter-help">仓库、目的地、客户和时间等高级条件后续统一接入筛选积木；当前可通过配载单内订单号准确定位。</div></details>
+        <label className="field loading-tracking-filter__query"><span>配载单号或订单号</span><input name="q" defaultValue={loaderData.q} placeholder="输入配载单号或子订单号" /></label>
+        <label className="field loading-tracking-filter__status"><span>状态</span><select name="status" defaultValue={loaderData.status}><option value="all">全部</option><option value="active">执行中</option><option value="completed">已完成</option><option value="cancelled">已取消</option></select></label>
+        <div className="loading-tracking-filter__actions"><button className="primary">查询</button><Link className="secondary" to="/admin/loading">重置</Link></div>
+        <details className="inline-details advanced-filter loading-tracking-filter__advanced"><summary>高级筛选</summary><div className="filter-help">仓库、目的地、客户和时间等高级条件后续统一接入筛选积木；当前可通过配载单内订单号准确定位。</div></details>
       </Form>
     </section>
     <section className="panel">

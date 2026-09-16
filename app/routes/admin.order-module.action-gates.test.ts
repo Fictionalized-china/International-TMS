@@ -55,6 +55,7 @@ const harness = vi.hoisted(() => {
     trackingActionEditable: true,
     trackingActionReason: null as string | null,
     cargoSaveCalls: 0,
+    customFieldSaveCalls: 0,
   };
   const sql: string[] = [];
   const DB = {
@@ -164,6 +165,9 @@ const harness = vi.hoisted(() => {
       state.cargoSaveCalls += 1;
       return { ok: true as const, itemId: "cargo-1", created: true, packageCount: 1 };
     }),
+    saveOrderCustomWorkflowFieldValue: vi.fn(async () => {
+      state.customFieldSaveCalls += 1;
+    }),
   };
 });
 
@@ -200,7 +204,7 @@ vi.mock("../lib/organization-assignee.server", () => ({
 vi.mock("../lib/workflow-fields.server", () => ({
   loadOrderModuleWorkflowFields: vi.fn(async () => harness.state.workflowFields),
   missingRequiredModuleFields: vi.fn(async () => []),
-  saveOrderCustomWorkflowFieldValue: vi.fn(),
+  saveOrderCustomWorkflowFieldValue: harness.saveOrderCustomWorkflowFieldValue,
 }));
 vi.mock("../lib/workflow-instance-stage-gate.server", () => ({
   loadLockedWorkflowStageContext: vi.fn(async (
@@ -236,7 +240,7 @@ vi.mock("../lib/order-cargo-editor.server", () => ({
   saveOrderCargoItem: harness.saveOrderCargoItem,
 }));
 
-import { action } from "./admin.order-module";
+import { action, canWriteLoadedWorkflowField } from "./admin.order-module";
 
 function post(intent: string, values: Record<string, string> = {}) {
   return new Request("http://local.test/admin/orders/order-1/modules/transport", {
@@ -309,6 +313,75 @@ describe("order module action mutation gates", () => {
     harness.state.trackingActionEditable = true;
     harness.state.trackingActionReason = null;
     harness.state.cargoSaveCalls = 0;
+    harness.state.customFieldSaveCalls = 0;
+  });
+
+  it("exposes the field editor to a configured current-node handler", () => {
+    expect(canWriteLoadedWorkflowField({
+      access: { canEdit: true },
+      current: {
+        userId: "doc-1",
+        positionCode: "DOC",
+      },
+      order: {
+        status: "in_execution",
+        current_assignee_user_id: "doc-1",
+      },
+      moduleActionCanOperate: false,
+    } as never, {
+      handlerPositionCodes: ["DOC", "OPERATION"],
+    } as never)).toBe(true);
+  });
+
+  it("allows only the configured field handler at the current node without opening the module", async () => {
+    harness.current.permissions = ["order.view", "order.scope.assigned"];
+    harness.current.positionCode = "DOC";
+    harness.order.current_assignee_user_id = "user-a";
+    harness.state.moduleAssigneeUserId = "sales-user";
+    harness.state.moduleTaskAssigneeUserIds = ["sales-user"];
+    harness.state.workflowFields = [{
+      id: "field-outbound-note",
+      fieldKey: "outbound_note",
+      handlerPositionCodes: ["DOC", "OPERATION"],
+      isActive: true,
+      isBuiltIn: false,
+    }];
+
+    await expect(invoke(post("workflow_field_save", {
+      fieldId: "field-outbound-note",
+      fieldValue: "field-only update",
+    }), "consignment")).resolves.toEqual({
+      success: "字段已保存，必填状态已重新检查",
+    });
+    expect(harness.state.customFieldSaveCalls).toBe(1);
+
+    await expect(invoke(post("consignment_update"), "consignment"))
+      .resolves.toEqual({
+        formError: "当前岗位可以查看本模块，但没有提交业务操作的权限",
+      });
+  });
+
+  it("rejects a custom field write from a position outside the field handler list", async () => {
+    harness.current.permissions = ["order.view", "order.scope.assigned"];
+    harness.current.positionCode = "SALES";
+    harness.order.current_assignee_user_id = "user-a";
+    harness.state.moduleAssigneeUserId = "sales-user";
+    harness.state.moduleTaskAssigneeUserIds = ["sales-user"];
+    harness.state.workflowFields = [{
+      id: "field-outbound-note",
+      fieldKey: "outbound_note",
+      handlerPositionCodes: ["DOC", "OPERATION"],
+      isActive: true,
+      isBuiltIn: false,
+    }];
+
+    await expect(invoke(post("workflow_field_save", {
+      fieldId: "field-outbound-note",
+      fieldValue: "forged value",
+    }), "consignment")).resolves.toEqual({
+      formError: "当前岗位可以查看本模块，但没有提交业务操作的权限",
+    });
+    expect(harness.state.customFieldSaveCalls).toBe(0);
   });
 
   it("rejects a forged document upload through a different module URL", async () => {

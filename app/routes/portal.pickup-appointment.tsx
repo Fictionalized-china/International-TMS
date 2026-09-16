@@ -22,6 +22,11 @@ type AppointmentOrder = {
   warehouse_name: string | null;
 };
 
+export async function loader({ request }: Route.LoaderArgs) {
+  const contextId = portalContextIdFromRequest(request);
+  return redirect(contextId ? portalContextualPath("/portal", contextId) : "/portal");
+}
+
 export async function action({ request }: Route.ActionArgs) {
   const { user, customer } = await requirePortalCustomer(request);
   const form = await request.formData();

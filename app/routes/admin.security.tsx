@@ -28,7 +28,10 @@ type RiskUser = {
 };
 
 export async function loader({ request }: Route.LoaderArgs) {
-  const current = await requireSessionUser(request, "security.manage");
+  const current = await requireSessionUser(request);
+  if (!current.permissions.some((permission) => ["security.view", "security.manage"].includes(permission))) {
+    throw new Response("无权查看安全中心", { status: 403 });
+  }
   const [sessions, risks] = await Promise.all([
     env.DB.prepare(
       `SELECT s.id, s.user_id, u.display_name, u.email, s.site, c.name AS customer_name,
@@ -51,7 +54,12 @@ export async function loader({ request }: Route.LoaderArgs) {
        ORDER BY u.failed_login_count DESC`,
     ).bind(current.organizationId, current.organizationId).all<RiskUser>(),
   ]);
-  return { current, sessions: sessions.results, risks: risks.results };
+  return {
+    current,
+    canManage: current.permissions.includes("security.manage"),
+    sessions: sessions.results,
+    risks: risks.results,
+  };
 }
 
 export async function action({ request }: Route.ActionArgs) {
@@ -143,7 +151,7 @@ export default function Security({ loaderData, actionData }: Route.ComponentProp
                   <td>{new Date(session.created_at).toLocaleString("zh-CN")}</td>
                   <td>{new Date(session.expires_at).toLocaleString("zh-CN")}</td>
                   <td>
-                    {session.id !== loaderData.current.sessionId && (
+                    {loaderData.canManage && session.id !== loaderData.current.sessionId ? (
                       <Form method="post">
                         <input type="hidden" name="intent" value="revoke" />
                         <input type="hidden" name="id" value={session.id} />
@@ -155,7 +163,7 @@ export default function Security({ loaderData, actionData }: Route.ComponentProp
                           pending={busy}
                         />
                       </Form>
-                    )}
+                    ) : <span className="muted">只读</span>}
                   </td>
                 </tr>
               ))}
@@ -177,13 +185,13 @@ export default function Security({ loaderData, actionData }: Route.ComponentProp
                     <td>{user.failed_login_count}</td>
                     <td>{user.locked_until ? new Date(user.locked_until).toLocaleString("zh-CN") : "未锁定"}</td>
                     <td>
-                      <Form method="post">
+                      {loaderData.canManage ? <Form method="post">
                         <input type="hidden" name="intent" value="unlock" />
                         <input type="hidden" name="id" value={user.id} />
                         <button className="text-button" disabled={busy}>
                           {busy ? "正在处理…" : "解除限制"}
                         </button>
-                      </Form>
+                      </Form> : <span className="muted">只读</span>}
                     </td>
                   </tr>
                 ))}

@@ -15,11 +15,19 @@ const order = (
 ): LoadingBatchWorkflowOrder => ({ orderId, fields, appliesToCurrentOrFuture });
 
 describe("resolveLoadingBatchFieldPolicies", () => {
-  it("uses the strictest current or future rule across all participating orders", () => {
+  it("keeps mixed frozen rules visible without letting one order block the shared batch", () => {
     const policies = resolveLoadingBatchFieldPolicies([
       order("optional", [{ fieldKey: "exit_port", isActive: true, isRequired: false }]),
       order("hidden", [{ fieldKey: "exit_port", isActive: false, isRequired: false }]),
       order("required", [{ fieldKey: "exit_port", isActive: true, isRequired: true }]),
+    ]);
+    expect(policies.exit_port).toEqual({ isActive: true, isRequired: false, mode: "optional" });
+  });
+
+  it("requires a shared field when every participating order requires it", () => {
+    const policies = resolveLoadingBatchFieldPolicies([
+      order("one", [{ fieldKey: "exit_port", isActive: true, isRequired: true }]),
+      order("two", [{ fieldKey: "exit_port", isActive: true, isRequired: true }]),
     ]);
     expect(policies.exit_port).toEqual({ isActive: true, isRequired: true, mode: "required" });
   });

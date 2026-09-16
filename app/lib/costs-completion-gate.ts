@@ -56,13 +56,15 @@ function directionLabel(direction: CostsCompletionDirectionState["direction"]) {
 export function evaluateCostsCompletionGate(input: {
   fields: readonly CostsCompletionFieldState[];
   directions: readonly CostsCompletionDirectionState[];
+  settlementStageReached?: boolean;
 }): CostsCompletionGateResult {
-  const requiredFields = input.fields.filter(
-    (field) =>
-      field.moduleCode === "costs" &&
-      field.isActive &&
-      field.isRequired,
-  );
+  const requiredFields = input.fields.filter((field) => {
+    if (field.moduleCode !== "costs" || !field.isActive) return false;
+    // The three settlement signatures are business controls, not ordinary
+    // optional data fields.  If enabled, all applicable directions must be
+    // signed even when an older workflow version marked the field optional.
+    return field.isRequired || field.fieldKey in signOffFieldChecks;
+  });
   const directionByCode = new Map(
     input.directions.map((direction) => [direction.direction, direction]),
   );
@@ -77,7 +79,8 @@ export function evaluateCostsCompletionGate(input: {
   );
   for (const field of requiredFields) {
     if (hasBalanceFacts && balanceFieldKeys.has(field.fieldKey)) continue;
-    const check = signOffFieldChecks[field.fieldKey as keyof typeof signOffFieldChecks];
+    const check =
+      signOffFieldChecks[field.fieldKey as keyof typeof signOffFieldChecks];
     if (!check) {
       requiredCheckCount += 1;
       if (field.present) completedRequiredCheckCount += 1;
@@ -100,7 +103,9 @@ export function evaluateCostsCompletionGate(input: {
     }
   }
   if (hasBalanceFacts && requiredBalanceFields.length) {
-    const balanceLabel = requiredBalanceFields.map((field) => field.label).join("、");
+    const balanceLabel = requiredBalanceFields
+      .map((field) => field.label)
+      .join("、");
     for (const direction of input.directions) {
       if (!direction.hasExpenses) continue;
       requiredCheckCount += 1;
@@ -118,25 +123,44 @@ export function evaluateCostsCompletionGate(input: {
       }
     }
   }
+  const settlementStageReached = input.settlementStageReached ?? true;
+  if (!settlementStageReached) {
+    blockers.push({
+      fieldKey: "settlement_stage",
+      label: "尚未进入对账结算节点",
+    });
+  }
   const complete = blockers.length === 0;
-  const hasActivity = input.directions.some(
-    (direction) =>
-      direction.hasExpenses ||
-      direction.customerServiceConfirmed ||
-      direction.businessReviewed ||
-      direction.financeReviewed,
-  ) || input.fields.some((field) => field.present);
+  const hasActivity =
+    input.directions.some(
+      (direction) =>
+        direction.hasExpenses ||
+        direction.customerServiceConfirmed ||
+        direction.businessReviewed ||
+        direction.financeReviewed,
+    ) || input.fields.some((field) => field.present);
 
   return {
     complete,
-    status: complete ? "completed" : hasActivity ? "in_progress" : "not_started",
+    status: complete
+      ? "completed"
+      : hasActivity
+        ? "in_progress"
+        : "not_started",
     progressPercent: complete
       ? 100
       : Math.min(
           99,
-          Math.round((completedRequiredCheckCount / Math.max(1, requiredCheckCount)) * 100),
+          Math.round(
+            (completedRequiredCheckCount / Math.max(1, requiredCheckCount)) *
+              100,
+          ),
         ),
-    currentStepCode: complete ? "settled" : hasActivity ? "parallel_review" : "waiting",
+    currentStepCode: complete
+      ? "settled"
+      : hasActivity
+        ? "parallel_review"
+        : "waiting",
     blockingReason: blockers.length
       ? `待补齐必填项：${blockers.map((blocker) => blocker.label).join("、")}`
       : null,

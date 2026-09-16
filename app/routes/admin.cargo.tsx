@@ -52,7 +52,13 @@ const packageLabels: Record<string, string> = {
 };
 
 export async function loader({ request }: Route.LoaderArgs) {
-  const current = await requireSessionUser(request, "order.module.cargo.manage");
+  const current = await requireSessionUser(request);
+  if (!current.permissions.some((permission) => [
+    "order.module.cargo.view",
+    "order.module.cargo.manage",
+  ].includes(permission))) {
+    throw new Response("无权查看货物信息", { status: 403 });
+  }
   const visibility = orderVisibilitySql(current, "o");
   const requestedPage = Math.max(
     1,

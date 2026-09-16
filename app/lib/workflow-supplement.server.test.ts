@@ -105,7 +105,7 @@ describe("workflow supplement task presence reconciliation",()=>{
     vi.mocked(loadOrderModuleWorkflowFields).mockClear();
   });
 
-  it("creates a task only for a historical order whose real field is missing",async()=>{
+  it("does not apply a new required rule to historical orders",async()=>{
     testState.candidates.push(
       {instance_id:"instance-present",order_id:"order-present",audit_only:0},
       {instance_id:"instance-missing",order_id:"order-missing",audit_only:0},
@@ -115,15 +115,13 @@ describe("workflow supplement task presence reconciliation",()=>{
 
     const result=await synchronizeWorkflowSupplementTasks(baseSyncInput);
 
-    expect(result).toEqual({created:1,cancelled:0,autoCompleted:1});
-    const statements=testState.batches.flat();
-    const inserts=statements.filter((statement)=>statement.sql.includes("INSERT OR IGNORE"));
-    expect(inserts).toHaveLength(1);
-    expect(inserts[0].bindings).toContain("order-missing");
-    expect(inserts[0].bindings).not.toContain("order-present");
+    expect(result).toEqual({created:0,cancelled:1,autoCompleted:0});
+    expect(testState.batches).toHaveLength(0);
+    expect(testState.runStatements[0].sql).toContain("SET status='cancelled'");
+    expect(loadOrderModuleWorkflowFields).not.toHaveBeenCalled();
   });
 
-  it("treats an existing order document as present and does not create a task",async()=>{
+  it("does not create historical document supplements after a policy change",async()=>{
     testState.candidates.push({instance_id:"instance-doc",order_id:"order-doc",audit_only:0});
     testState.documentTotals.set("order-doc",1);
 
@@ -134,7 +132,7 @@ describe("workflow supplement task presence reconciliation",()=>{
       fieldLabel:"委托书",
     });
 
-    expect(result.created).toBe(0);
+    expect(result).toEqual({created:0,cancelled:1,autoCompleted:0});
     expect(testState.batches.flat().some((statement)=>statement.sql.includes("INSERT OR IGNORE"))).toBe(false);
     expect(loadOrderModuleWorkflowFields).not.toHaveBeenCalled();
   });

@@ -18,7 +18,11 @@ import {
 } from "../lib/workflow-field-position-access";
 import { synchronizeWorkflowFieldHandlerPositionsForInstances } from "../lib/workflow-fields.server";
 import type { OrderModuleCode } from "../lib/order-modules";
-import { adminNavigationPermissionGroups } from "../lib/admin-navigation";
+import {
+  adminNavigationPermissionGroups,
+  adminNavigationPermissionItems,
+  normalizeAdminNavigationPermissions,
+} from "../lib/admin-navigation";
 import { roleCodeForPosition } from "../lib/position-role";
 import { diagnosePositionPermission } from "../lib/position-permission-diagnostics";
 
@@ -301,7 +305,7 @@ export async function action({ request }: Route.ActionArgs) {
     };
   }
 
-  const selected = selectedPermissionCodes(form);
+  const selected = normalizeAdminNavigationPermissions(selectedPermissionCodes(form));
   if (!await validatePermissionSelection(selected)) {
     return { formError: "权限选项无效" };
   }
@@ -646,29 +650,58 @@ function PermissionCheckboxes({
 }) {
   const selectedSignature = [...selected].sort().join("\u0000");
   const [selectedCodes, setSelectedCodes] = useState(() => new Set(selected));
-  const [expandedModules, setExpandedModules] = useState(() => new Set(
-    Object.entries(grouped)
-      .filter(([, items]) => items.some((permission) => selected.has(permission.code)))
-      .map(([module]) => module),
-  ));
+  const [activeView, setActiveView] = useState<"menus" | "operations">("menus");
+  const [permissionQuery, setPermissionQuery] = useState("");
+  const [expandedNavigationGroups, setExpandedNavigationGroups] = useState(() => new Set<string>());
+  const [expandedModules, setExpandedModules] = useState(() => new Set<string>());
   const knownCodes = new Set(
     Object.values(grouped).flat().map((permission) => permission.code),
   );
+  const operationGroups = Object.entries(grouped).filter(([module]) => module !== "navigation");
+  const operationPermissions = operationGroups.flatMap(([, items]) => items);
+  const selectedMenuCount = adminNavigationPermissionItems.filter((item) => (
+    knownCodes.has(item.menuPermissionCode) && selectedCodes.has(item.menuPermissionCode)
+  )).length;
+  const availableMenuCount = adminNavigationPermissionItems.filter((item) => knownCodes.has(item.menuPermissionCode)).length;
+  const selectedOperationCount = operationPermissions.filter((permission) => selectedCodes.has(permission.code)).length;
+  const normalizedPermissionQuery = permissionQuery.trim().toLocaleLowerCase("zh-CN");
 
   useEffect(() => {
     setSelectedCodes(new Set(selected));
-    setExpandedModules(new Set(
-      Object.entries(grouped)
-        .filter(([, items]) => items.some((permission) => selected.has(permission.code)))
-        .map(([module]) => module),
-    ));
+    setExpandedNavigationGroups(new Set());
+    setExpandedModules(new Set());
+    setPermissionQuery("");
   }, [selectedSignature]);
 
   function setPermission(code: string, checked: boolean) {
     setSelectedCodes((current) => {
       const next = new Set(current);
       if (checked) next.add(code);
-      else next.delete(code);
+      else {
+        const requiredByVisibleMenu = adminNavigationPermissionItems.some((item) => (
+          current.has(item.menuPermissionCode) && item.enablePermissionCodes.includes(code)
+        ));
+        if (!requiredByVisibleMenu) next.delete(code);
+      }
+      return next;
+    });
+  }
+
+  function setNavigationItem(
+    item: (typeof adminNavigationPermissionItems)[number],
+    checked: boolean,
+  ) {
+    setSelectedCodes((current) => {
+      const next = new Set(current);
+      if (checked) {
+        if (knownCodes.has(item.menuPermissionCode)) next.add(item.menuPermissionCode);
+        item.enablePermissionCodes
+          .filter((code) => knownCodes.has(code))
+          .forEach((code) => next.add(code));
+      } else {
+        // 关闭入口不回收业务权限，避免误伤该岗位从其他入口办理业务的能力。
+        next.delete(item.menuPermissionCode);
+      }
       return next;
     });
   }
@@ -679,12 +712,15 @@ function PermissionCheckboxes({
   ) {
     setSelectedCodes((current) => {
       const next = new Set(current);
-      const codes = checked
-        ? group.enablePermissionCodes
-        : group.controllingPermissionCodes;
-      codes.filter((code) => knownCodes.has(code)).forEach((code) => {
-        if (checked) next.add(code);
-        else next.delete(code);
+      group.items.forEach((item) => {
+        if (checked) {
+          if (knownCodes.has(item.menuPermissionCode)) next.add(item.menuPermissionCode);
+          item.enablePermissionCodes
+            .filter((code) => knownCodes.has(code))
+            .forEach((code) => next.add(code));
+        } else {
+          next.delete(item.menuPermissionCode);
+        }
       });
       return next;
     });
@@ -699,40 +735,109 @@ function PermissionCheckboxes({
     });
   }
 
+  function toggleNavigationDirectory(groupKey: string) {
+    setExpandedNavigationGroups((current) => {
+      const next = new Set(current);
+      if (next.has(groupKey)) next.delete(groupKey);
+      else next.add(groupKey);
+      return next;
+    });
+  }
+
   return <>
-    <fieldset className="admin-menu-permission-grid" disabled={disabled}>
-      <legend>一级菜单快捷配置</legend>
-      <p>批量勾选会同步下方现有权限；路由和接口仍按具体权限校验，可继续在下方精细调整。</p>
-      <div className="admin-menu-permission-options">
+    <nav className="permission-editor-mode-tabs" aria-label="权限配置类型">
+      <button
+        type="button"
+        className={activeView === "menus" ? "active" : ""}
+        aria-pressed={activeView === "menus"}
+        onClick={() => setActiveView("menus")}
+      >
+        <b>菜单可见</b>
+        <small>{selectedMenuCount}/{availableMenuCount} 已开启</small>
+      </button>
+      <button
+        type="button"
+        className={activeView === "operations" ? "active" : ""}
+        aria-pressed={activeView === "operations"}
+        onClick={() => setActiveView("operations")}
+      >
+        <b>操作与数据权限</b>
+        <small>{selectedOperationCount}/{operationPermissions.length} 已授予</small>
+      </button>
+    </nav>
+
+    <div className="permission-editor-mode-guide">
+      {activeView === "menus"
+        ? <><b>菜单可见只决定“从哪里进入”</b><span>开启入口时只补足最小只读权限，不会自动授予新增、编辑或审批能力。</span></>
+        : <><b>在这里授予“能做什么”</b><span>例如修改仓库：搜索并勾选“管理仓库配置”；只需查看时不要勾选管理权限。</span></>}
+    </div>
+
+    <fieldset className="admin-menu-permission-grid" disabled={disabled} hidden={activeView !== "menus"}>
+      <legend>菜单可见</legend>
+      <div className="admin-menu-permission-tree">
         {adminNavigationPermissionGroups.map((group) => {
-          const enableCodes = group.enablePermissionCodes.filter((code) => knownCodes.has(code));
-          const controllingCodes = group.controllingPermissionCodes.filter((code) => knownCodes.has(code));
-          const checked = enableCodes.length > 0 && enableCodes.every((code) => selectedCodes.has(code));
-          const hasSelected = controllingCodes.some((code) => selectedCodes.has(code));
-          return <label key={group.key}>
-            <IndeterminateCheckbox
-              checked={checked}
-              indeterminate={!checked && hasSelected}
-              disabled={disabled || enableCodes.length === 0}
-              onChange={(event) => setNavigationGroup(group, event.currentTarget.checked)}
-            />
-            <span><b>{group.label}</b><small>{group.description}</small></span>
-          </label>;
+          const availableItems = group.items.filter((item) => knownCodes.has(item.menuPermissionCode));
+          const selectedCount = availableItems.filter((item) => selectedCodes.has(item.menuPermissionCode)).length;
+          const checked = availableItems.length > 0 && selectedCount === availableItems.length;
+          const expanded = expandedNavigationGroups.has(group.key);
+          return <section className={`admin-menu-permission-group${expanded ? " is-open" : ""}`} key={group.key}>
+            <div className="admin-menu-permission-group-summary">
+              <button type="button" aria-expanded={expanded} onClick={() => toggleNavigationDirectory(group.key)}>
+                <span className="permission-directory-chevron" aria-hidden="true">›</span>
+                <span><b>{group.label}</b><small>{group.description}</small></span>
+              </button>
+              <label title={`全选或取消${group.label}入口`}>
+                <IndeterminateCheckbox
+                  checked={checked}
+                  indeterminate={!checked && selectedCount > 0}
+                  disabled={disabled || availableItems.length === 0}
+                  onChange={(event) => setNavigationGroup(group, event.currentTarget.checked)}
+                />
+                <span>{selectedCount}/{availableItems.length}</span>
+              </label>
+            </div>
+            <div className="admin-menu-permission-items" hidden={!expanded}>
+              {group.items.map((item) => {
+                const available = knownCodes.has(item.menuPermissionCode);
+                return <label className="admin-menu-permission-item" key={item.key}>
+                  <input
+                    type="checkbox"
+                    name="permissions"
+                    value={item.menuPermissionCode}
+                    checked={selectedCodes.has(item.menuPermissionCode)}
+                    disabled={disabled || !available}
+                    onChange={(event) => setNavigationItem(item, event.currentTarget.checked)}
+                  />
+                  <span><b>{item.label}</b><small>{item.description}</small></span>
+                </label>;
+              })}
+            </div>
+          </section>;
         })}
       </div>
     </fieldset>
-    <fieldset className="permission-grid permission-directory">
-      <legend>具体权限</legend>
-      <p className="permission-directory-hint">按业务目录展开后再配置具体权限；目录右侧显示已选数量。</p>
+    <fieldset className="permission-grid permission-directory" hidden={activeView !== "operations"}>
+      <legend>操作与数据权限</legend>
+      <label className="permission-directory-search">
+        <span>查找权限</span>
+        <input
+          value={permissionQuery}
+          onChange={(event) => setPermissionQuery(event.currentTarget.value)}
+          placeholder="输入功能名称，例如：管理仓库配置"
+        />
+      </label>
       <div className="permission-directory-list">
-        {Object.entries(grouped).map(([module, items]) => {
+        {operationGroups.map(([module, items]) => {
           const selectedCount = items.filter((permission) => selectedCodes.has(permission.code)).length;
           const expanded = expandedModules.has(module);
-          return <section className={`permission-directory-group${expanded ? " is-open" : ""}`} key={module}>
+          const matchingItems = items.filter((permission) => permissionMatchesQuery(permission, normalizedPermissionQuery));
+          const visible = normalizedPermissionQuery === "" || matchingItems.length > 0;
+          const showItems = expanded || normalizedPermissionQuery !== "";
+          return <section className={`permission-directory-group${showItems ? " is-open" : ""}`} key={module} hidden={!visible}>
             <button
               type="button"
               className="permission-directory-summary"
-              aria-expanded={expanded}
+              aria-expanded={showItems}
               onClick={() => togglePermissionDirectory(module)}
             >
               <span className="permission-directory-chevron" aria-hidden="true">›</span>
@@ -742,8 +847,8 @@ function PermissionCheckboxes({
               </span>
               <span className="permission-directory-count">{selectedCount}/{items.length} 已选</span>
             </button>
-            <div className="permission-directory-items" hidden={!expanded}>
-              {items.map((permission) => <label key={permission.code}>
+            <div className="permission-directory-items" hidden={!showItems}>
+              {items.map((permission) => <label key={permission.code} hidden={!permissionMatchesQuery(permission, normalizedPermissionQuery)}>
                 <input
                   type="checkbox"
                   name="permissions"
@@ -753,6 +858,7 @@ function PermissionCheckboxes({
                   onChange={(event) => setPermission(permission.code, event.currentTarget.checked)}
                 />
                 <span><b>{permission.name}</b><small>{permission.description}</small></span>
+                <em className={`permission-capability ${permissionCapabilityKind(permission.code)}`}>{permissionCapabilityLabel(permission.code)}</em>
               </label>)}
             </div>
           </section>;
@@ -760,6 +866,35 @@ function PermissionCheckboxes({
       </div>
     </fieldset>
   </>;
+}
+
+function permissionMatchesQuery(permission: PermissionRow, query: string) {
+  if (!query) return true;
+  return [permission.name, permission.description, permission.code]
+    .some((value) => value.toLocaleLowerCase("zh-CN").includes(query));
+}
+
+function permissionCapabilityKind(code: string) {
+  if (code.includes("scope.")) return "scope";
+  if (code.endsWith(".view")) return "view";
+  if (code.endsWith(".manage")) return "manage";
+  if (code.endsWith(".approve") || code.endsWith(".review")) return "approve";
+  if (code.endsWith(".operate")) return "operate";
+  if (code.endsWith(".export")) return "export";
+  return "action";
+}
+
+function permissionCapabilityLabel(code: string) {
+  const kind = permissionCapabilityKind(code);
+  return {
+    scope: "数据范围",
+    view: "查看",
+    manage: "管理",
+    approve: "审批",
+    operate: "办理",
+    export: "导出",
+    action: "操作",
+  }[kind];
 }
 
 function IndeterminateCheckbox({

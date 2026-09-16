@@ -25,6 +25,7 @@ import {
   requireCustomerAccess,
 } from "../lib/customer-access.server";
 import { describeCustomerAccess } from "../lib/customer-access-view";
+import { duplicateOrDatabaseError, isUniqueConstraintError } from "../lib/db-errors.server";
 
 const customerPartyCategories = [
   { value: "customer", label: "客户" },
@@ -133,13 +134,13 @@ export async function loader({ request }: Route.LoaderArgs) {
       (SELECT x.city FROM customer_addresses x WHERE x.customer_id=c.id AND x.type='shipping' ORDER BY x.is_default DESC,x.updated_at DESC LIMIT 1) AS default_address_city,
       (SELECT x.address_line1 FROM customer_addresses x WHERE x.customer_id=c.id AND x.type='shipping' ORDER BY x.is_default DESC,x.updated_at DESC LIMIT 1) AS default_address_line1
       FROM customers c LEFT JOIN users u ON u.id = c.sales_owner_user_id LEFT JOIN customer_contacts cc ON cc.customer_id = c.id LEFT JOIN customer_addresses ca ON ca.customer_id = c.id LEFT JOIN customer_business_role_assignments cbr ON cbr.customer_id = c.id AND cbr.organization_id = c.organization_id WHERE c.organization_id = ? AND ${visibility.sql} GROUP BY c.id ORDER BY c.created_at DESC LIMIT 200`).bind(current.organizationId,...visibility.values).all<CustomerRow>(),
-    env.DB.prepare(`SELECT cc.id, cc.customer_id, cc.name, cc.title, cc.email, cc.phone, cc.is_primary FROM customer_contacts cc JOIN customers c ON c.id = cc.customer_id WHERE c.organization_id = ? AND cc.customer_id IN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) ORDER BY cc.is_primary DESC, cc.name`).bind(current.organizationId,current.organizationId).all<ContactRow>(),
-    env.DB.prepare(`SELECT ca.id, ca.customer_id, ca.label, ca.type, ca.country_code, ca.state, ca.city, ca.address_line1, ca.contact_name, ca.contact_phone, ca.is_default FROM customer_addresses ca JOIN customers c ON c.id = ca.customer_id WHERE c.organization_id = ? AND ca.customer_id IN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) ORDER BY ca.is_default DESC, ca.label`).bind(current.organizationId,current.organizationId).all<AddressRow>(),
-    env.DB.prepare(`SELECT cpa.id, cpa.customer_id, cpa.user_id, u.display_name, u.email, cpa.status, u.last_login_at FROM customer_portal_accounts cpa JOIN users u ON u.id = cpa.user_id WHERE cpa.organization_id = ? AND cpa.customer_id IN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) ORDER BY u.display_name`).bind(current.organizationId,current.organizationId).all<PortalRow>(),
+    env.DB.prepare(`SELECT cc.id, cc.customer_id, cc.name, cc.title, cc.email, cc.phone, cc.is_primary FROM customer_contacts cc JOIN customers c ON c.id = cc.customer_id JOIN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) recent_customers ON recent_customers.id=cc.customer_id WHERE c.organization_id = ? ORDER BY cc.is_primary DESC, cc.name`).bind(current.organizationId,current.organizationId).all<ContactRow>(),
+    env.DB.prepare(`SELECT ca.id, ca.customer_id, ca.label, ca.type, ca.country_code, ca.state, ca.city, ca.address_line1, ca.contact_name, ca.contact_phone, ca.is_default FROM customer_addresses ca JOIN customers c ON c.id = ca.customer_id JOIN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) recent_customers ON recent_customers.id=ca.customer_id WHERE c.organization_id = ? ORDER BY ca.is_default DESC, ca.label`).bind(current.organizationId,current.organizationId).all<AddressRow>(),
+    env.DB.prepare(`SELECT cpa.id, cpa.customer_id, cpa.user_id, u.display_name, u.email, cpa.status, u.last_login_at FROM customer_portal_accounts cpa JOIN users u ON u.id = cpa.user_id JOIN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) recent_customers ON recent_customers.id=cpa.customer_id WHERE cpa.organization_id = ? ORDER BY u.display_name`).bind(current.organizationId,current.organizationId).all<PortalRow>(),
   ]);
   const [registrations, contracts, owners, countries] = await Promise.all([
     env.DB.prepare(`SELECT pr.id,pr.user_id,pr.company_name,pr.customer_identity_code,pr.contact_name,pr.contact_phone,pr.email,pr.candidate_customer_id,c.name candidate_customer_name,pr.created_at FROM portal_registration_requests pr LEFT JOIN customers c ON c.id=pr.candidate_customer_id AND c.organization_id=pr.organization_id WHERE pr.organization_id=? AND pr.status='pending' ORDER BY pr.created_at`).bind(current.organizationId).all<PortalRegistrationRow>(),
-    env.DB.prepare(`SELECT id, customer_id, title, file_name, content_type, size_bytes, effective_at, expires_at, status, notes, created_at FROM customer_contracts WHERE organization_id = ? AND customer_id IN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) ORDER BY created_at DESC LIMIT 500`).bind(current.organizationId,current.organizationId).all<ContractRow>(),
+    env.DB.prepare(`SELECT cc.id, cc.customer_id, cc.title, cc.file_name, cc.content_type, cc.size_bytes, cc.effective_at, cc.expires_at, cc.status, cc.notes, cc.created_at FROM customer_contracts cc JOIN (SELECT id FROM customers WHERE organization_id=? ORDER BY created_at DESC LIMIT 200) recent_customers ON recent_customers.id=cc.customer_id WHERE cc.organization_id = ? ORDER BY cc.created_at DESC LIMIT 500`).bind(current.organizationId,current.organizationId).all<ContractRow>(),
     env.DB.prepare(`SELECT u.id, u.display_name FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.organization_id = ? AND m.status = 'active' ORDER BY u.display_name`).bind(current.organizationId).all<{ id: string; display_name: string }>(),
     env.DB.prepare("SELECT code, name FROM reference_data WHERE organization_id = ? AND category = 'country' AND status = 'active' ORDER BY sort_order, code").bind(current.organizationId).all<{ code: string; name: string }>(),
   ]);
@@ -243,7 +244,7 @@ async function runCustomerAction({ request, current, form, intent, now }: {
         env.DB.prepare(`INSERT INTO portal_notifications(id,organization_id,customer_id,user_id,type,title,message,link,is_read,created_at) SELECT ?,?,?,?,'system',?,?,?,0,? WHERE EXISTS(SELECT 1 FROM customer_portal_accounts WHERE id=?)`).bind(crypto.randomUUID(), current.organizationId, customer.id, registration.user_id, "客户门户账号已开通", `您的账号已经绑定到 ${customer.name}，现在可以查看对应客户的业务资料。`, "/portal/account", now, accountId),
       ]);
     } catch (error) {
-      if (String(error).includes("UNIQUE constraint failed")) return { formError: "该注册账号已由其他操作绑定，请刷新后查看" };
+      if (isUniqueConstraintError(error)) return { formError: "该注册账号已由其他操作绑定，请刷新后查看" };
       throw error;
     }
     if (!approvalResults[0].meta.changes) return { formError: "该注册申请已由其他人处理，请刷新后查看" };
@@ -285,7 +286,13 @@ async function runCustomerAction({ request, current, form, intent, now }: {
     if (!label || !city || !addressLine1) return { formError: "地址名称、城市和详细地址必填" };
     if (!['registered', 'billing', 'shipping', 'warehouse'].includes(type)) return { formError: "地址类型无效" };
     const id = crypto.randomUUID();
-    await env.DB.prepare("INSERT INTO customer_addresses (id, customer_id, type, label, country_code, city, address_line1, is_default, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, customerId, type, label, countryCode || "CN", city, addressLine1, form.has("isDefault") ? 1 : 0, now, now).run();
+    const isDefault = form.has("isDefault");
+    await env.DB.batch([
+      ...(isDefault
+        ? [env.DB.prepare("UPDATE customer_addresses SET is_default=0,updated_at=? WHERE customer_id=? AND type=? AND is_default=1").bind(now, customerId, type)]
+        : []),
+      env.DB.prepare("INSERT INTO customer_addresses (id, customer_id, type, label, country_code, city, address_line1, is_default, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, customerId, type, label, countryCode || "CN", city, addressLine1, isDefault ? 1 : 0, now, now),
+    ]);
     await writeAudit({ request, action: "customer.address.create", resourceType: "customer_address", resourceId: id, organizationId: current.organizationId, actorUserId: current.userId, metadata: { customerId } });
     return { success: "地址已添加" };
   }
@@ -300,21 +307,26 @@ async function runCustomerAction({ request, current, form, intent, now }: {
     const cityRow = await env.DB.prepare("SELECT 1 FROM reference_data WHERE organization_id=? AND category='city' AND name=? AND parent_code=? AND status='active'").bind(current.organizationId, city, state).first();
     if (!province || !cityRow) return { formError: "请选择国家对应的省/州和城市" };
     const id = crypto.randomUUID();
-    if (form.has("isDefault")) await env.DB.prepare("UPDATE customer_addresses SET is_default=0,updated_at=? WHERE customer_id=? AND type='shipping'").bind(now, customerId).run();
-    await env.DB.prepare("INSERT INTO customer_addresses (id, customer_id, type, label, country_code, state, city, address_line1, contact_name, contact_phone, is_default, created_at, updated_at) VALUES (?, ?, 'shipping', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, customerId, label, countryCode, state, city, addressLine1, contactName || null, contactPhone || null, form.has("isDefault") ? 1 : 0, now, now).run();
+    const isDefault = form.has("isDefault");
+    await env.DB.batch([
+      ...(isDefault
+        ? [env.DB.prepare("UPDATE customer_addresses SET is_default=0,updated_at=? WHERE customer_id=? AND type='shipping' AND is_default=1").bind(now, customerId)]
+        : []),
+      env.DB.prepare("INSERT INTO customer_addresses (id, customer_id, type, label, country_code, state, city, address_line1, contact_name, contact_phone, is_default, created_at, updated_at) VALUES (?, ?, 'shipping', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, customerId, label, countryCode, state, city, addressLine1, contactName || null, contactPhone || null, isDefault ? 1 : 0, now, now),
+    ]);
     await writeAudit({ request, action: "customer.pickup_address.create", resourceType: "customer_address", resourceId: id, organizationId: current.organizationId, actorUserId: current.userId, metadata: { customerId } });
     return { success: "常用提货地已保存" };
   }
 
   if (intent === "portal") {
-    const customerId = valueOf(form, "customerId"), displayName = valueOf(form, "displayName"), email = valueOf(form, "email").toLowerCase(), password = valueOf(form, "password");
+    const customerId = valueOf(form, "customerId"), displayName = valueOf(form, "displayName"), email = valueOf(form, "email").toLowerCase(), phone = valueOf(form,"phone").trim(), password = valueOf(form, "password");
     if (!(await ownedCustomer(customerId, current.organizationId))) return { formError: "客户不存在" };
-    const emailError = validateEmail(email), passwordError = validatePassword(password);
-    if (displayName.length < 2 || emailError || passwordError) return { formError: emailError || passwordError || "门户用户姓名至少 2 个字符" };
+    const emailError = validateEmail(email), phoneError = validatePhone(phone,"门户账号联系电话"), passwordError = validatePassword(password);
+    if (displayName.length < 2 || emailError || phoneError || passwordError) return { formError: emailError || phoneError || passwordError || "门户用户姓名至少 2 个字符" };
     if (await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(email).first()) return { formError: "该邮箱已被使用" };
     const userId = crypto.randomUUID(), accountId = crypto.randomUUID();
     await env.DB.batch([
-      env.DB.prepare("INSERT INTO users (id, email, password_hash, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)").bind(userId, email, await hashPassword(password), displayName, now, now),
+      env.DB.prepare("INSERT INTO users (id, email, password_hash, display_name, phone, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(userId, email, await hashPassword(password), displayName, phone, now, now),
       env.DB.prepare("INSERT INTO customer_portal_accounts (id, organization_id, customer_id, user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)").bind(accountId, current.organizationId, customerId, userId, now, now),
     ]);
     await writeAudit({ request, action: "portal.account.create", resourceType: "customer_portal_account", resourceId: accountId, organizationId: current.organizationId, actorUserId: current.userId, metadata: { customerId, email } });
@@ -419,8 +431,8 @@ async function runCustomerAction({ request, current, form, intent, now }: {
           : env.DB.prepare("INSERT INTO customer_addresses(id,customer_id,type,label,country_code,state,city,address_line1,contact_name,contact_phone,is_default,created_at,updated_at) VALUES(?,?,'shipping','默认提货地',?,?,?,?,?,?,1,?,?)")
               .bind(addressId, customerId, profile.addressCountryCode, profile.addressState, profile.addressCity, profile.addressLine1, profile.contactName, profile.contactPhone, now, now),
       ]);
-    } catch {
-      return { formError: "客户代码不能重复", values };
+    } catch (error) {
+      return { formError: duplicateOrDatabaseError(error, "客户代码不能重复"), values };
     }
     await writeAudit({ request, action: "customer.update", resourceType: "customer", resourceId: customerId, organizationId: current.organizationId, actorUserId: current.userId, metadata: { code: effectiveCode, partyCategory, businessRoles, status } });
     return { success: `客户“${name}”已更新` };
@@ -487,8 +499,8 @@ async function runCustomerAction({ request, current, form, intent, now }: {
         .bind(contactId, id, profile.contactName, profile.contactTitle || null, profile.contactEmail || null, profile.contactPhone, now, now),
       env.DB.prepare("INSERT INTO customer_addresses(id,customer_id,type,label,country_code,state,city,address_line1,contact_name,contact_phone,is_default,created_at,updated_at) VALUES(?,?,'shipping','默认提货地',?,?,?,?,?,?,1,?,?)")
         .bind(addressId, id, profile.addressCountryCode, profile.addressState, profile.addressCity, profile.addressLine1, profile.contactName, profile.contactPhone, now, now),
-      env.DB.prepare("INSERT INTO users (id,email,password_hash,display_name,created_at,updated_at) VALUES (?,?,?,?,?,?)")
-        .bind(portalUserId, portalEmail, portalPasswordHash, portalDisplayName, now, now),
+      env.DB.prepare("INSERT INTO users (id,email,password_hash,display_name,phone,created_at,updated_at) VALUES (?,?,?,?,?,?,?)")
+        .bind(portalUserId, portalEmail, portalPasswordHash, portalDisplayName, profile.contactPhone, now, now),
       env.DB.prepare("INSERT INTO customer_portal_accounts (id,organization_id,customer_id,user_id,created_at,updated_at) VALUES (?,?,?,?,?,?)")
         .bind(portalAccountId, current.organizationId, id, portalUserId, now, now),
       ...(archiveContract && contractId && contractAttachment instanceof File ? [
@@ -496,7 +508,7 @@ async function runCustomerAction({ request, current, form, intent, now }: {
           .bind(contractId, current.organizationId, id, contractTitle, contractAttachment.name, contractAttachment.type, contractAttachment.size, contractDataUrl, contractEffectiveAt || null, contractExpiresAt || null, contractNotes || null, current.userId, now, now),
       ] : []),
     ]);
-  } catch { return { formError: "客户代码、识别码或门户邮箱不能重复", values }; }
+  } catch (error) { return { formError: duplicateOrDatabaseError(error, "客户代码、识别码或门户邮箱不能重复"), values }; }
   await writeAudit({ request, action: "customer.create", resourceType: "customer", resourceId: id, organizationId: current.organizationId, actorUserId: current.userId, metadata: { code: effectiveCode, identityCode, partyCategory, businessRoles } });
   await writeAudit({ request, action: "portal.account.create", resourceType: "customer_portal_account", resourceId: portalAccountId, organizationId: current.organizationId, actorUserId: current.userId, metadata: { customerId: id, email: portalEmail, source: "customer.create" } });
   if (contractId) await writeAudit({ request, action: "customer.contract.upload", resourceType: "customer_contract", resourceId: contractId, organizationId: current.organizationId, actorUserId: current.userId, metadata: { customerId: id, title: contractTitle, source: "customer.create" } });
@@ -718,7 +730,7 @@ function CustomerPickupAddressForm({ customer, countries, provinces, cities, bus
 }
 
 function CustomerPortalForm({ customer, busy }: { customer: CustomerRow; busy: boolean }) {
-  return <Form method="post" className="customer-subform"><input type="hidden" name="intent" value="portal"/><input type="hidden" name="customerId" value={customer.id}/><div className="customer-form-section"><div className="customer-form-section-title"><strong>门户登录资料</strong><span>开通后客户可确认报价、下载唛头并接收自提提醒</span></div><div className="customer-form-grid"><label className="field field-medium"><span>用户姓名</span><input name="displayName" autoComplete="name" required maxLength={80}/></label><label className="field field-wide"><span>登录邮箱</span><input name="email" type="email" autoComplete="email" required maxLength={254}/></label><label className="field field-wide"><span>初始密码</span><input name="password" type="password" autoComplete="new-password" required minLength={12} maxLength={128}/><small>至少 12 位，包含大小写字母和数字</small></label></div></div><div className="customer-form-actions"><span>账号创建成功后可立即登录客户门户。</span><button className="primary" disabled={busy}>确认开通门户</button></div></Form>;
+  return <Form method="post" className="customer-subform"><input type="hidden" name="intent" value="portal"/><input type="hidden" name="customerId" value={customer.id}/><div className="customer-form-section"><div className="customer-form-section-title"><strong>门户登录资料</strong><span>开通后客户可确认报价、下载唛头并接收自提提醒</span></div><div className="customer-form-grid"><label className="field field-medium"><span>用户姓名</span><input name="displayName" autoComplete="name" required maxLength={80}/></label><label className="field field-medium"><span>联系电话</span><input name="phone" type="tel" inputMode="tel" required maxLength={30} pattern="[+0-9 \(\)\-]{6,30}"/></label><label className="field field-wide"><span>登录邮箱</span><input name="email" type="email" autoComplete="email" required maxLength={254}/></label><label className="field field-wide"><span>初始密码</span><input name="password" type="password" autoComplete="new-password" required minLength={12} maxLength={128}/><small>至少 12 位，包含大小写字母和数字</small></label></div></div><div className="customer-form-actions"><span>账号创建成功后可立即登录客户门户。</span><button className="primary" disabled={busy}>确认开通门户</button></div></Form>;
 }
 
 function addressTypeLabel(type: string) {

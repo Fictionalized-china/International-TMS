@@ -53,6 +53,12 @@ import {
   calculateQuoteTotalVolumeCbm,
   resolveQuoteTotalVolumeCbm,
 } from "../lib/quote-cargo-projection";
+import {
+  parseMarkContactIds,
+  recommendedMarkContactIds,
+  type MarkContactOption,
+} from "../lib/mark-contacts";
+import { listActiveMarkContacts, resolveMarkContactSnapshots } from "../lib/mark-contacts.server";
 
 type Quote = {
   id: string;
@@ -61,6 +67,7 @@ type Quote = {
   customer_name: string;
   customer_contact_name: string | null;
   customer_contact_phone: string | null;
+  mark_contact_ids_json: string | null;
   salesperson_name: string | null;
   salesperson_user_id: string | null;
   workflow_definition_id: string | null;
@@ -121,14 +128,6 @@ type CustomerOption = {
   contact_name: string | null;
   contact_phone: string | null;
 };
-type CustomerContactOption = {
-  id: string;
-  customer_id: string;
-  name: string;
-  phone: string | null;
-  is_primary: number;
-};
-
 type CustomerCreateActionData = {
   intent?: string;
   customerId?: string;
@@ -171,9 +170,9 @@ export async function loader({ request }: Route.LoaderArgs) {
   // D1 allows only a small number of concurrent connections per Worker
   // invocation. Load independent lookup groups in bounded waves instead of
   // opening every quotation-page query at once.
-  const [quotes, quotationCharges, customers, contacts] = await Promise.all([
+  const [quotes, quotationCharges, customers] = await Promise.all([
     env.DB.prepare(
-      `SELECT q.id,q.customer_id,q.quote_number,c.name customer_name,q.customer_contact_name,q.customer_contact_phone,
+      `SELECT q.id,q.customer_id,q.quote_number,c.name customer_name,q.customer_contact_name,q.customer_contact_phone,q.mark_contact_ids_json,
         q.salesperson_user_id,u.display_name salesperson_name,
         q.workflow_definition_id,wd.name workflow_name,wd.version_number workflow_version_number,
         q.origin_country,q.origin_state,q.origin_city,q.pickup_address,
@@ -213,13 +212,6 @@ export async function loader({ request }: Route.LoaderArgs) {
         (SELECT cc.phone FROM customer_contacts cc WHERE cc.customer_id=c.id ORDER BY cc.is_primary DESC,cc.created_at LIMIT 1) contact_phone
        FROM customers c WHERE c.organization_id=? AND c.status='active' AND ${customerScope.sql} ORDER BY c.name`,
     ).bind(current.organizationId,...customerScope.values).all<CustomerOption>(),
-    env.DB.prepare(
-      `SELECT cc.id,cc.customer_id,cc.name,cc.phone,cc.is_primary
-       FROM customer_contacts cc
-       JOIN customers c ON c.id=cc.customer_id
-       WHERE c.organization_id=? AND c.status='active' AND ${customerScope.sql}
-       ORDER BY cc.customer_id,cc.is_primary DESC,cc.updated_at DESC,cc.name`,
-    ).bind(current.organizationId,...customerScope.values).all<CustomerContactOption>(),
   ]);
   const [users, warehouses, countries, provinces] = await Promise.all([
     env.DB.prepare(
@@ -235,7 +227,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     geoOptions(current.organizationId, "country"),
     geoOptions(current.organizationId, "province"),
   ]);
-  const [cities, workflows, workflowFields] = await Promise.all([
+  const [cities, workflows, workflowFields, markContacts] = await Promise.all([
     geoOptions(current.organizationId, "city"),
     env.DB.prepare(
       `SELECT id,name,version_number,road_load_type,lifecycle_status FROM workflow_definitions
@@ -246,6 +238,7 @@ export async function loader({ request }: Route.LoaderArgs) {
          COALESCE(published_at,updated_at) DESC,version_number DESC,name`,
     ).bind(current.organizationId).all<WorkflowOption>(),
     listQuotationWorkflowFields(current.organizationId),
+    listActiveMarkContacts(current.organizationId),
   ]);
   const quoteRows = quotes.results ?? [];
   const pagination = paginateList(quoteRows, page);
@@ -271,7 +264,6 @@ export async function loader({ request }: Route.LoaderArgs) {
     },
     quotationCharges: quotationCharges.results ?? [],
     customers: customers.results ?? [],
-    contacts: contacts.results ?? [],
     users: users.results ?? [],
     warehouses: warehouses.results ?? [],
     countries,
@@ -279,6 +271,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     cities,
     workflows: workflows.results ?? [],
     workflowFields,
+    markContacts,
     quotationWorkflowFields,
     workflowValues,
     filters: { keyword, lifecycle },
@@ -375,6 +368,7 @@ export async function action({ request }: Route.ActionArgs) {
       const workflowDefinitionId = valueOf(form, "workflowDefinitionId");
       const customerContactName = valueOf(form, "customerContactName");
       const customerContactPhone = valueOf(form, "customerContactPhone");
+      const markContactIds = parseMarkContactIds(form.getAll("markContactIds"));
       const pickupAddress = valueOf(form, "pickupAddress");
       const originCountry = valueOf(form, "originCountry");
       const originState = valueOf(form, "originState");
@@ -441,6 +435,7 @@ export async function action({ request }: Route.ActionArgs) {
       const effectiveSalespersonId = canViewAll ? configuredSalespersonId : current.userId;
       const effectiveContactName = activeValue("quotation_customer_contact_name",customerContactName,"required");
       const effectiveContactPhone = activeValue("quotation_customer_contact_phone",customerContactPhone,"required");
+      const markContactPolicy = policy("quotation_mark_contacts","optional");
       const effectivePickupAddress = activeValue("quotation_pickup_address",pickupAddress,"required");
       const effectiveOriginCountry = activeValue("quotation_origin_region",originCountry,"required");
       const effectiveOriginState = activeValue("quotation_origin_region",originState,"required");
@@ -457,6 +452,7 @@ export async function action({ request }: Route.ActionArgs) {
 
       requiredText("quotation_customer_contact_name",effectiveContactName,"客户联系人","required");
       requiredText("quotation_customer_contact_phone",effectiveContactPhone,"联系电话","required");
+      if (markContactPolicy.isRequired && markContactIds.length === 0) throw new Error("请至少选择 1 名唛头联系人");
       requiredText("quotation_pickup_address",effectivePickupAddress,"提货地址","required");
       requiredText("quotation_cargo_description",effectiveCargoDescription,"货物描述","required");
       requiredText("quotation_destination_warehouse_id",effectiveWarehouseId,"目的仓库","required");
@@ -493,6 +489,15 @@ export async function action({ request }: Route.ActionArgs) {
       ]);
       if (!salesperson) throw new Error("业务员已停用或不存在");
       if (effectiveWarehouseId && !warehouse) throw new Error("目的仓已停用或不存在");
+      const markContactSnapshots = markContactPolicy.isActive
+        ? await resolveMarkContactSnapshots({
+            organizationId:current.organizationId,
+            ids:markContactIds,
+            originCountry:effectiveOriginCountry,
+            destinationCountry:effectiveDestinationCountry,
+            destinationWarehouseId:effectiveWarehouseId,
+          })
+        : [];
       const pieces = numberValue("quotation_pieces",rawPieces,"商品实际件数","required",true);
       const declaredQuantityUnit = activeValue("quotation_declared_quantity_unit",rawDeclaredQuantityUnit,"required") || "件";
       const plannedPackageCount = assertQuoteAutoPackageCount(
@@ -551,14 +556,15 @@ export async function action({ request }: Route.ActionArgs) {
               transport_mode,road_load_type,cargo_description,pieces,declared_quantity_unit,planned_package_count,
               planned_package_type,gross_weight_kg,volume_cbm,currency,
               subtotal,tax_amount,total_amount,valid_until,status,lifecycle_status,notes,salesperson_user_id,workflow_definition_id,
-              created_by_user_id,created_at,updated_at
-             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'CNY',?,0,?,?, 'sent','pending',?,?,?,?,?,?)`,
+              created_by_user_id,mark_contact_ids_json,created_at,updated_at
+             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'CNY',?,0,?,?, 'sent','pending',?,?,?,?,?,?,?)`,
           ).bind(
             id,current.organizationId,number,customerId,effectiveOriginCountry,effectiveOriginState || null,effectiveOriginCity,effectivePickupAddress || null,
             effectiveDestinationCountry,effectiveDestinationState || null,effectiveDestinationCity,effectiveWarehouseId || null,effectiveWarehouseNote || null,
             length,width,height,effectiveCustomsMode,transportMode,roadLoadType,effectiveCargoDescription,pieces,
             declaredQuantityUnit,plannedPackageCount,plannedPackageType,weight,volume,
-            total,total,effectiveValidUntil || null,effectiveNotes || null,effectiveSalespersonId,workflowDefinitionId,current.userId,now,now,
+            total,total,effectiveValidUntil || null,effectiveNotes || null,effectiveSalespersonId,workflowDefinitionId,current.userId,
+            JSON.stringify(markContactSnapshots.map((contact)=>contact.id)),now,now,
           ),
           env.DB.prepare(
             "UPDATE quotations SET customer_contact_name=?,customer_contact_phone=? WHERE id=? AND organization_id=?",
@@ -686,6 +692,12 @@ async function saveQuotationNativeWorkflowUpdate(input: {
 
   setText("quotation_customer_contact_name","customerContactName","customer_contact_name","required");
   setText("quotation_customer_contact_phone","customerContactPhone","customer_contact_phone","required");
+  const markContactsPolicy = policy("quotation_mark_contacts","optional");
+  if (markContactsPolicy.isActive && valueOf(input.form,"markContactsIncluded") === "1") {
+    next.mark_contact_ids_json = JSON.stringify(parseMarkContactIds(input.form.getAll("markContactIds")));
+  } else if (!markContactsPolicy.isActive) {
+    next.mark_contact_ids_json = "[]";
+  }
   setText("quotation_salesperson_user_id","salespersonId","salesperson_user_id","required");
   setText("quotation_customs_clearance_mode","customsClearanceMode","customs_clearance_mode","required","company");
   setText("quotation_origin_region","originCountry","origin_country","required","");
@@ -803,6 +815,19 @@ async function saveQuotationNativeWorkflowUpdate(input: {
     ).bind(next.destination_warehouse_id,input.organizationId).first();
     if (!warehouse) throw new Error("目的仓已停用或不存在");
   }
+  if (markContactsPolicy.isActive) {
+    const markContactIds = parseStoredMultipleValues(String(next.mark_contact_ids_json ?? "[]"));
+    if (markContactsPolicy.isRequired && markContactIds.length === 0) {
+      throw new Error("请至少选择 1 名唛头联系人");
+    }
+    await resolveMarkContactSnapshots({
+      organizationId:input.organizationId,
+      ids:markContactIds,
+      originCountry:String(next.origin_country || ""),
+      destinationCountry:String(next.destination_country || ""),
+      destinationWarehouseId:String(next.destination_warehouse_id || ""),
+    });
+  }
 
   const changedNativeFieldKeys = changedQuotationNativeFieldKeys(input.quote,next);
   const now = new Date().toISOString();
@@ -811,7 +836,7 @@ async function saveQuotationNativeWorkflowUpdate(input: {
     : Number(next.total_amount || 0);
   const statements:D1PreparedStatement[] = [env.DB.prepare(
     `UPDATE quotations SET
-      customer_contact_name=?,customer_contact_phone=?,salesperson_user_id=?,customs_clearance_mode=?,
+      customer_contact_name=?,customer_contact_phone=?,mark_contact_ids_json=?,salesperson_user_id=?,customs_clearance_mode=?,
       origin_country=?,origin_state=?,origin_city=?,pickup_address=?,
       destination_country=?,destination_state=?,destination_city=?,destination_warehouse_id=?,destination_warehouse_note=?,
       cargo_description=?,notes=?,pieces=?,declared_quantity_unit=?,planned_package_count=?,planned_package_type=?,
@@ -820,7 +845,7 @@ async function saveQuotationNativeWorkflowUpdate(input: {
      WHERE id=? AND organization_id=?
        AND lifecycle_status IN ('pending','withdrawn') AND updated_at=?`,
   ).bind(
-    next.customer_contact_name ?? null,next.customer_contact_phone ?? null,next.salesperson_user_id ?? null,
+    next.customer_contact_name ?? null,next.customer_contact_phone ?? null,next.mark_contact_ids_json ?? null,next.salesperson_user_id ?? null,
     next.customs_clearance_mode || "company",next.origin_country || "",next.origin_state || null,next.origin_city || "",
     next.pickup_address ?? null,next.destination_country || "",next.destination_state || null,next.destination_city || "",
     next.destination_warehouse_id ?? null,next.destination_warehouse_note ?? null,next.cargo_description || "",next.notes ?? null,
@@ -967,7 +992,7 @@ function QuoteActions({ quote, fields, values, charges, loaderData, actionData, 
   ));
   return <div className="toolbar-actions quotation-table-actions">
     <Modal title={quote.order_number ? `报价详情 · ${quote.order_number}` : "报价详情"} triggerLabel="查看" triggerClassName="btn" size="wide" dialogClassName="quote-review-modal"><QuoteDetail quote={quote} fields={fields} values={values} charges={charges} customers={loaderData.customers} warehouses={loaderData.warehouses} /></Modal>
-    {activeFields.length > 0 && ["pending","withdrawn"].includes(quote.lifecycle_status) && <Modal title={quote.order_number ? `补充第一步配置项 · ${quote.order_number}` : "补充第一步配置项"} triggerLabel={missing.length ? `补充配置项 ${missing.length}` : "配置项"} triggerClassName={missing.length ? "btn danger" : "btn"} closeSignal={workflowSuccess} isOpen={workflowEditorOpen} onOpenChange={updateWorkflowEditorOpen} size="xwide" guardFormChanges><Form method="post" encType="multipart/form-data" className="quotation-workflow-update-form" data-enter-flow><input type="hidden" name="intent" value="workflow_fields_update"/><input type="hidden" name="id" value={quote.id}/><input type="hidden" name="nativeFieldsIncluded" value="1"/>{workflowError&&<div ref={workflowErrorRef} className="alert error" role="alert" tabIndex={-1}><strong>配置项尚未保存</strong><span>{workflowError}</span><small>已填写内容仍保留，请按提示修改后重试。</small></div>}<div className="quote-workflow-form-head"><strong>第 1 步 · 询价报价</strong><span>{quote.workflow_name} v{quote.workflow_version_number} · 版本已锁定</span></div>{nativeFields.length > 0 && <QuotationNativeWorkflowInputs quote={quote} fields={nativeFields} charges={charges} users={loaderData.users} warehouses={loaderData.warehouses} countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities}/>}<QuotationWorkflowFieldInputs fields={customFields} values={values} customers={loaderData.customers} warehouses={loaderData.warehouses}/><div className="modal-form-actions"><button className="btn primary" disabled={busy}>保存配置项</button></div></Form></Modal>}
+    {activeFields.length > 0 && ["pending","withdrawn"].includes(quote.lifecycle_status) && <Modal title={quote.order_number ? `补充第一步配置项 · ${quote.order_number}` : "补充第一步配置项"} triggerLabel={missing.length ? `补充配置项 ${missing.length}` : "配置项"} triggerClassName={missing.length ? "btn danger" : "btn"} closeSignal={workflowSuccess} isOpen={workflowEditorOpen} onOpenChange={updateWorkflowEditorOpen} size="xwide" guardFormChanges><Form method="post" encType="multipart/form-data" className="quotation-workflow-update-form" data-enter-flow><input type="hidden" name="intent" value="workflow_fields_update"/><input type="hidden" name="id" value={quote.id}/><input type="hidden" name="nativeFieldsIncluded" value="1"/>{workflowError&&<div ref={workflowErrorRef} className="alert error" role="alert" tabIndex={-1}><strong>配置项尚未保存</strong><span>{workflowError}</span><small>已填写内容仍保留，请按提示修改后重试。</small></div>}<div className="quote-workflow-form-head"><strong>第 1 步 · 询价报价</strong><span>{quote.workflow_name} v{quote.workflow_version_number} · 版本已锁定</span></div>{nativeFields.length > 0 && <QuotationNativeWorkflowInputs quote={quote} fields={nativeFields} charges={charges} users={loaderData.users} warehouses={loaderData.warehouses} countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} markContacts={loaderData.markContacts}/>}<QuotationWorkflowFieldInputs fields={customFields} values={values} customers={loaderData.customers} warehouses={loaderData.warehouses}/><div className="modal-form-actions"><button className="btn primary" disabled={busy}>保存配置项</button></div></Form></Modal>}
     {quote.lifecycle_status === "pending" && <Form method="post"><input type="hidden" name="intent" value="accept"/><input type="hidden" name="id" value={quote.id}/><button className="btn primary" disabled={busy || missing.length > 0} title={missing.length ? `尚缺：${missing.map((field) => field.label).join("、")}` : undefined}>代客户确认</button></Form>}
     {quote.lifecycle_status === "accepted" && quote.order_status === "draft" && <Form method="post"><input type="hidden" name="intent" value="withdraw"/><input type="hidden" name="id" value={quote.id}/><ConfirmAction className="btn" title="撤回报价接受" description="将撤回该报价的客户接受状态；已生成订单会保留为草稿并留下审计记录。" triggerLabel="撤回接受" confirmLabel="确认撤回" pending={busy}/></Form>}
     {quote.lifecycle_status === "withdrawn" && <Form method="post"><input type="hidden" name="intent" value="accept"/><input type="hidden" name="id" value={quote.id}/><button className="btn primary" disabled={busy}>重新接受</button></Form>}
@@ -1041,6 +1066,12 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
   const [pickupAddress, setPickupAddress] = useState(loaderData.customers[0]?.pickup_address || "");
   const [customerContactName, setCustomerContactName] = useState(loaderData.customers[0]?.contact_name || "");
   const [customerContactPhone, setCustomerContactPhone] = useState(loaderData.customers[0]?.contact_phone || "");
+  const [salespersonId,setSalespersonId] = useState(loaderData.current.userId);
+  const [originCountry,setOriginCountry] = useState("");
+  const [destinationCountry,setDestinationCountry] = useState("");
+  const [destinationWarehouseId,setDestinationWarehouseId] = useState("");
+  const [selectedMarkContactIds,setSelectedMarkContactIds] = useState<string[]>([]);
+  const markContactsTouchedRef = useRef(false);
   const [roadLoadType, setRoadLoadType] = useState<"" | "ltl" | "ftl">("");
   const [workflowDefinitionId, setWorkflowDefinitionId] = useState("");
   const [pieces, setPieces] = useState("1");
@@ -1055,7 +1086,6 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
     widthCm:Number(widthCm),heightCm:Number(heightCm),
   });
   const calculatedVolume = calculatedVolumeValue == null ? "" : calculatedVolumeValue.toFixed(4);
-  const selectedCustomerContacts = loaderData.contacts.filter((contact) => contact.customer_id === customerId);
   const selectedCustomer = loaderData.customers.find((customer) => customer.id === customerId);
   const createdCustomerId = customerFetcher.data?.intent === "customer" && customerFetcher.data.success
     ? customerFetcher.data.customerId || ""
@@ -1077,6 +1107,7 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
   const policies = {
     contactName: quotePolicy("quotation_customer_contact_name","required"),
     contactPhone: quotePolicy("quotation_customer_contact_phone","required"),
+    markContacts: quotePolicy("quotation_mark_contacts","optional"),
     salesperson: quotePolicy("quotation_salesperson_user_id","required"),
     customsMode: quotePolicy("quotation_customs_clearance_mode","required"),
     originRegion: quotePolicy("quotation_origin_region","required"),
@@ -1111,6 +1142,19 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
       setWorkflowDefinitionId(compatibleWorkflows[0]?.id || "");
     }
   }, [roadLoadType, workflowDefinitionId, compatibleWorkflows]);
+  useEffect(() => {
+    markContactsTouchedRef.current=false;
+  },[workflowDefinitionId]);
+  useEffect(() => {
+    if (!policies.markContacts.isActive) {
+      setSelectedMarkContactIds([]);
+      return;
+    }
+    if (markContactsTouchedRef.current) return;
+    setSelectedMarkContactIds(recommendedMarkContactIds(loaderData.markContacts,{
+      salespersonId,originCountry,destinationCountry,destinationWarehouseId,
+    }));
+  },[policies.markContacts.isActive,loaderData.markContacts,salespersonId,originCountry,destinationCountry,destinationWarehouseId]);
   useEffect(()=>{
     if(formError)errorSummaryRef.current?.focus();
   },[formError]);
@@ -1156,13 +1200,14 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
     <QuoteLedgerSection className="quote-plan-section" title="1　客户与运输方案">
       <div className="quote-field-grid quote-plan-grid">
         <Field label="客户" className="quote-customer-picker-field quote-plan-customer"><div className="quote-customer-picker-row"><select className="control" name="customerId" value={customerId} onChange={(event) => selectCustomer(event.target.value)} required><option value="">请选择客户</option>{loaderData.customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name}</option>)}</select>{canCreateCustomer && <Modal title="新增客户" triggerLabel="＋ 新增客户" triggerClassName="secondary" size="xwide" dialogClassName="customer-editor-modal" closeSignal={createdCustomerId || undefined} guardFormChanges><CustomerEditorForm intent="customer" owners={loaderData.users} countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} busy={customerFetcher.state !== "idle"} values={customerFetcher.data?.values} errors={customerFetcher.data?.errors} formError={customerFetcher.data?.formError} formComponent={customerFetcher.Form} action="/admin/customers"/></Modal>}</div>{createdCustomerId && <small className="quote-customer-created">新客户已创建并自动选中</small>}</Field>
-        {policies.contactName.isActive && <Field label="客户联系人" className="quote-plan-contact"><ContactCombobox name="customerContactName" value={customerContactName} contacts={selectedCustomerContacts} mode="name" required={policies.contactName.isRequired} onChange={(value, contact) => { setCustomerContactName(value); if (contact?.phone) setCustomerContactPhone(contact.phone); }} /></Field>}
-        {policies.contactPhone.isActive && <Field label="联系电话" className="quote-plan-phone"><ContactCombobox name="customerContactPhone" value={customerContactPhone} contacts={selectedCustomerContacts} mode="phone" required={policies.contactPhone.isRequired} onChange={(value, contact) => { setCustomerContactPhone(value); if (contact) setCustomerContactName(contact.name); }} /></Field>}
+        {policies.contactName.isActive && <Field label="客户联系人" className="quote-plan-contact"><input className="control quote-customer-autofill" name="customerContactName" value={customerContactName} readOnly required={policies.contactName.isRequired} placeholder="选择客户后自动带出"/></Field>}
+        {policies.contactPhone.isActive && <Field label="客户联系电话" className="quote-plan-phone"><input className="control quote-customer-autofill" name="customerContactPhone" type="tel" value={customerContactPhone} readOnly required={policies.contactPhone.isRequired} placeholder="选择客户后自动带出"/></Field>}
+        {policies.markContacts.isActive && <div className="field quote-mark-contacts-field quote-plan-mark-contact"><span>我方唛头联系人{policies.markContacts.isRequired?"":"（选填）"}</span><MarkContactPicker contacts={loaderData.markContacts} selectedIds={selectedMarkContactIds} required={policies.markContacts.isRequired} onChange={(ids)=>{markContactsTouchedRef.current=true;setSelectedMarkContactIds(ids);}}/></div>}
         <Field label="订单类型" className="quote-plan-order-type"><select className="control" name="roadLoadType" value={roadLoadType} onChange={(event) => selectRoadLoadType(event.target.value as "" | "ltl" | "ftl")} required><option value="" disabled>请选择订单类型</option><option value="ltl">拼车</option><option value="ftl">整车</option></select></Field>
         <Field label="工作流版本" className="quote-plan-workflow"><select className="control" name="workflowDefinitionId" value={workflowDefinitionId} onChange={(event) => setWorkflowDefinitionId(event.target.value)} disabled={!roadLoadType} required><option value="">{!roadLoadType ? "请先选择订单类型" : compatibleWorkflows.length ? "请选择工作流版本" : "当前类型暂无可用工作流"}</option>{compatibleWorkflows.map((workflow) => <option key={workflow.id} value={workflow.id}>{workflow.name} · v{workflow.version_number}{workflow.lifecycle_status === "published" ? " · 当前发布" : " · 历史版本"}</option>)}</select></Field>
-        {policies.salesperson.isActive && <Field label="业务员" className="quote-plan-secondary"><select className="control" name="salespersonId" defaultValue={loaderData.current.userId} required={policies.salesperson.isRequired}><option value="">请选择业务员</option>{loaderData.users.map((user) => <option key={user.id} value={user.id}>{user.display_name} · {user.email}</option>)}</select></Field>}
-        <Field label="运输方式" className="quote-plan-secondary"><select className="control" name="transportMode" defaultValue="ROAD" required><option value="ROAD">汽运</option><option value="RAIL" disabled>铁运（流程未开放）</option><option value="AIR" disabled>空运（流程未开放）</option></select></Field>
-        {policies.customsMode.isActive && <Field label="清关办理方式" className="quote-plan-secondary"><select className="control" name="customsClearanceMode" defaultValue="company" required={policies.customsMode.isRequired}><option value="company">公司代办清关</option><option value="customer">客户自理清关</option></select></Field>}
+        {policies.salesperson.isActive && <Field label="业务员" className="quote-plan-secondary quote-plan-salesperson"><select className="control" name="salespersonId" value={salespersonId} onChange={(event)=>setSalespersonId(event.target.value)} required={policies.salesperson.isRequired}><option value="">请选择业务员</option>{loaderData.users.map((user) => <option key={user.id} value={user.id}>{user.display_name} · {user.email}</option>)}</select></Field>}
+        <Field label="运输方式" className="quote-plan-secondary quote-plan-transport"><select className="control" name="transportMode" defaultValue="ROAD" required><option value="ROAD">汽运</option><option value="RAIL" disabled>铁运（流程未开放）</option><option value="AIR" disabled>空运（流程未开放）</option></select></Field>
+        {policies.customsMode.isActive && <Field label="清关办理方式" className="quote-plan-secondary quote-plan-customs"><select className="control" name="customsClearanceMode" defaultValue="company" required={policies.customsMode.isRequired}><option value="company">公司代办清关</option><option value="customer">客户自理清关</option></select></Field>}
       </div>
     </QuoteLedgerSection>
     {selectedWorkflow && selectedCustomWorkflowFields.length > 0 && <QuoteLedgerSection className="quote-workflow-fields-section" title="工作流配置项" note={`${selectedWorkflow.name} v${selectedWorkflow.version_number}`}>
@@ -1173,15 +1218,15 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
         <section className="quote-route-card">
           <header><b>起运信息</b></header>
           <div className="quote-route-card-fields">
-            {policies.originRegion.isActive && <div className="field"><span>起运地区</span><GeoCascadeFields key={`origin-${customerId}`} prefix="origin" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} initialCountry={selectedCustomer?.pickup_country_code} initialProvince={selectedCustomer?.pickup_state_code} initialCity={selectedCustomer?.pickup_city} required={policies.originRegion.isRequired} /></div>}
+            {policies.originRegion.isActive && <div className="field"><span>起运地区</span><GeoCascadeFields key={`origin-${customerId}`} prefix="origin" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} initialCountry={selectedCustomer?.pickup_country_code} initialProvince={selectedCustomer?.pickup_state_code} initialCity={selectedCustomer?.pickup_city} required={policies.originRegion.isRequired} onChange={(region)=>setOriginCountry(region.country)}/></div>}
             {policies.pickupAddress.isActive && <Field label="提货地址"><input className="control" name="pickupAddress" value={pickupAddress} onChange={(event) => setPickupAddress(event.target.value)} required={policies.pickupAddress.isRequired}/></Field>}
           </div>
         </section>
         <section className="quote-route-card">
           <header><b>目的信息</b></header>
           <div className="quote-route-card-fields quote-destination-card-fields">
-            {policies.destinationRegion.isActive && <div className="field"><span>目的地区</span><GeoCascadeFields prefix="destination" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} required={policies.destinationRegion.isRequired} /></div>}
-            {policies.destinationWarehouse.isActive && <Field label="目的仓库"><select className="control quote-warehouse-select" name="destinationWarehouseId" required={policies.destinationWarehouse.isRequired}><option value="">请选择境外目的仓</option>{loaderData.warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></Field>}
+            {policies.destinationRegion.isActive && <div className="field"><span>目的地区</span><GeoCascadeFields prefix="destination" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} required={policies.destinationRegion.isRequired} onChange={(region)=>setDestinationCountry(region.country)}/></div>}
+            {policies.destinationWarehouse.isActive && <Field label="目的仓库"><select className="control quote-warehouse-select" name="destinationWarehouseId" value={destinationWarehouseId} onChange={(event)=>setDestinationWarehouseId(event.target.value)} required={policies.destinationWarehouse.isRequired}><option value="">请选择境外目的仓</option>{loaderData.warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></Field>}
             {policies.destinationNote.isActive && <Field label="目的地备注"><input className="control" name="destinationWarehouseNote" required={policies.destinationNote.isRequired}/></Field>}
           </div>
         </section>
@@ -1226,6 +1271,7 @@ function QuotationNativeWorkflowInputs({
   countries,
   provinces,
   cities,
+  markContacts,
 }: {
   quote: Quote;
   fields: QuotationWorkflowField[];
@@ -1235,12 +1281,14 @@ function QuotationNativeWorkflowInputs({
   countries: GeoOption[];
   provinces: GeoOption[];
   cities: GeoOption[];
+  markContacts:MarkContactOption[];
 }) {
   const policy = (key: QuotationNativeFieldKey, fallback: "required" | "optional") =>
     quotationWorkflowFieldPolicy(fields,key,fallback);
   const p = {
     contactName:policy("quotation_customer_contact_name","required"),
     contactPhone:policy("quotation_customer_contact_phone","required"),
+    markContacts:policy("quotation_mark_contacts","optional"),
     salesperson:policy("quotation_salesperson_user_id","required"),
     customs:policy("quotation_customs_clearance_mode","required"),
     origin:policy("quotation_origin_region","required"),
@@ -1276,6 +1324,7 @@ function QuotationNativeWorkflowInputs({
   const [lengthCm,setLengthCm] = useState(String(quote.estimated_length_cm || ""));
   const [widthCm,setWidthCm] = useState(String(quote.estimated_width_cm || ""));
   const [heightCm,setHeightCm] = useState(String(quote.estimated_height_cm || ""));
+  const [selectedMarkContactIds,setSelectedMarkContactIds] = useState(()=>parseStoredMultipleValues(quote.mark_contact_ids_json));
   const volumeCanAutoCalculate = p.plannedPackageCount.isActive && p.length.isActive &&
     p.width.isActive && p.height.isActive;
   const calculatedVolumeValue = volumeCanAutoCalculate
@@ -1285,14 +1334,15 @@ function QuotationNativeWorkflowInputs({
       })
     : null;
   const calculatedVolume = calculatedVolumeValue == null ? "" : calculatedVolumeValue.toFixed(4);
-  const anyParty = p.contactName.isActive || p.contactPhone.isActive || p.salesperson.isActive || p.customs.isActive;
+  const anyParty = p.contactName.isActive || p.contactPhone.isActive || p.markContacts.isActive || p.salesperson.isActive || p.customs.isActive;
   const anyRoute = p.origin.isActive || p.pickup.isActive || p.destination.isActive || p.warehouse.isActive || p.warehouseNote.isActive;
   const anyCargo = p.cargo.isActive || p.notes.isActive || p.pieces.isActive || p.declaredQuantityUnit.isActive || p.plannedPackageCount.isActive || p.plannedPackageType.isActive || p.weight.isActive || p.length.isActive || p.width.isActive || p.height.isActive || p.volume.isActive;
   return <div className="quote-native-workflow-inputs">
     {anyParty && <QuoteLedgerSection title="客户与经办" note="以下项目直接保存回本报价，不写入扩展字段表">
       <div className="quote-field-grid">
         {p.contactName.isActive && <Field label="客户联系人"><input className="control" name="customerContactName" defaultValue={quote.customer_contact_name || ""} required={p.contactName.isRequired}/></Field>}
-        {p.contactPhone.isActive && <Field label="联系电话"><input className="control" name="customerContactPhone" type="tel" defaultValue={quote.customer_contact_phone || ""} required={p.contactPhone.isRequired}/></Field>}
+        {p.contactPhone.isActive && <Field label="客户联系电话"><input className="control" name="customerContactPhone" type="tel" defaultValue={quote.customer_contact_phone || ""} required={p.contactPhone.isRequired}/></Field>}
+        {p.markContacts.isActive && <div className="field quote-mark-contacts-field"><span>我方唛头联系人{p.markContacts.isRequired?"":"（选填）"}</span><MarkContactPicker contacts={markContacts} selectedIds={selectedMarkContactIds} required={p.markContacts.isRequired} onChange={setSelectedMarkContactIds}/></div>}
         {p.salesperson.isActive && <Field label="业务员"><select className="control" name="salespersonId" defaultValue={quote.salesperson_user_id || ""} required={p.salesperson.isRequired}><option value="">请选择业务员</option>{users.map((user) => <option key={user.id} value={user.id}>{user.display_name} · {user.email}</option>)}</select></Field>}
         {p.customs.isActive && <Field label="清关办理方式"><select className="control" name="customsClearanceMode" defaultValue={quote.customs_clearance_mode || "company"} required={p.customs.isRequired}><option value="company">公司代办清关</option><option value="customer">客户自理清关</option></select></Field>}
       </div>
@@ -1406,58 +1456,53 @@ function Field({ label, className = "", children }: { label: string; className?:
   return <label className={`field ${className}`}><span>{label}</span>{children}</label>;
 }
 
-function ContactCombobox({
-  name,
-  value,
-  contacts,
-  mode,
-  required,
-  onChange,
-}: {
-  name: string;
-  value: string;
-  contacts: CustomerContactOption[];
-  mode: "name" | "phone";
-  required: boolean;
-  onChange: (value: string, contact?: CustomerContactOption) => void;
+function MarkContactPicker({ contacts,selectedIds,required,onChange }: {
+  contacts:MarkContactOption[];
+  selectedIds:string[];
+  required:boolean;
+  onChange:(ids:string[])=>void;
 }) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const listId = `quote-${name}-options`;
-  const selectableContacts = contacts.filter((contact) => mode === "name" || Boolean(contact.phone));
-  const findContact = (nextValue: string) => selectableContacts.find((contact) => (
-    mode === "name" ? contact.name === nextValue : contact.phone === nextValue
-  ));
-  return <div className="quote-contact-combobox">
-    <input
-      ref={inputRef}
-      className="control"
-      name={name}
-      type={mode === "phone" ? "tel" : "text"}
-      inputMode={mode === "phone" ? "tel" : undefined}
-      pattern={mode === "phone" ? "[+0-9 \\(\\)\\-]{6,30}" : undefined}
-      title={mode === "phone" ? "只能输入数字、空格、括号、短横线和开头的加号" : undefined}
-      list={listId}
-      value={value}
-      placeholder={mode === "name" ? "选择或输入联系人" : "选择或输入联系电话"}
-      onChange={(event) => onChange(event.target.value, findContact(event.target.value))}
-      required={required}
-    />
-    <button
-      type="button"
-      title={contacts.length ? "展开客户联系人" : "该客户暂无联系人，可直接输入"}
-      aria-label={contacts.length ? "展开客户联系人" : "该客户暂无联系人，可直接输入"}
-      onClick={() => {
-        inputRef.current?.focus();
-        try {
-          inputRef.current?.showPicker?.();
-        } catch {
-          // Some browsers expose showPicker but do not allow it for text inputs.
-        }
-      }}
-    ><ChevronDown aria-hidden="true" size={14}/></button>
-    <datalist id={listId}>
-      {selectableContacts.map((contact) => <option key={`${name}-${contact.id}`} value={mode === "name" ? contact.name : contact.phone || ""}>{mode === "name" ? contact.phone || "未登记电话" : contact.name}{contact.is_primary ? " · 主要联系人" : ""}</option>)}
-    </datalist>
+  const selected=new Set(selectedIds);
+  const departments=Array.from(new Set(contacts.map((contact)=>contact.department_name))).map((name)=>({
+    name,
+    contacts:contacts.filter((contact)=>contact.department_name===name),
+  }));
+  const selectedNames=contacts.filter((contact)=>selected.has(contact.id)).map((contact)=>contact.name);
+  const toggle=(id:string,checked:boolean)=>{
+    if(checked&&selectedIds.length>=3)return;
+    onChange(checked?[...selectedIds,id]:selectedIds.filter((value)=>value!==id));
+  };
+  return <div className="quote-mark-contact-picker" role="group" aria-label="选择我方唛头联系人">
+    <input type="hidden" name="markContactsIncluded" value="1"/>
+    <details className="quote-mark-contact-dropdown">
+      <summary className="control" title={selectedNames.join("、")}>
+        <span>{selectedNames.length?selectedNames.join("、"):"按部门和岗位选择"}</span>
+        <b>{selectedIds.length}/3</b>
+        <ChevronDown aria-hidden="true" size={14}/>
+      </summary>
+      <div className="quote-mark-contact-drawer">
+        <header><span>组织账号</span><small>可单选或多选，最多 3 人</small></header>
+        <div className="quote-mark-contact-tree" role="tree">{departments.map((department)=><details key={department.name} className="quote-mark-contact-branch">
+          <summary><span>{department.name}</span><small>{department.contacts.length}</small></summary>
+          <div>{Array.from(new Set(department.contacts.map((contact)=>contact.position_name))).map((positionName)=>{
+            const positionContacts=department.contacts.filter((contact)=>contact.position_name===positionName);
+            return <section key={`${department.name}-${positionName}`} aria-label={positionName}>
+              <b>{positionName}</b>
+              {positionContacts.map((contact)=>{
+                const checked=selected.has(contact.id);
+                const disabled=!checked&&selectedIds.length>=3;
+                return <label key={contact.id} className={checked?"is-selected":""}>
+                  <input type="checkbox" name="markContactIds" value={contact.id} checked={checked} disabled={disabled} onChange={(event)=>toggle(contact.id,event.currentTarget.checked)}/>
+                  <span><strong>{contact.name}</strong><small>{contact.phone}</small></span>
+                </label>;
+              })}
+            </section>;
+          })}</div>
+        </details>)}</div>
+        {!contacts.length&&<p className="quote-mark-contact-empty">暂无绑定电话的组织账号，请联系人事行政补录。</p>}
+      </div>
+    </details>
+    {required&&selectedIds.length===0&&<small className="quote-mark-contact-required">当前工作流要求至少选择 1 名联系人。</small>}
   </div>;
 }
 
@@ -1470,6 +1515,7 @@ function GeoCascadeFields({
   initialProvince = "",
   initialCity = "",
   required,
+  onChange,
 }: {
   prefix: "origin" | "destination";
   countries: GeoOption[];
@@ -1479,6 +1525,7 @@ function GeoCascadeFields({
   initialProvince?: string | null;
   initialCity?: string | null;
   required: boolean;
+  onChange?: (region:{ country:string;province:string;city:string })=>void;
 }) {
   const initialCountryCode = countries.find((option) => option.code === initialCountry || option.name === initialCountry)?.code || "";
   const initialProvinceCode = provinces.find((option) => option.parent_code === initialCountryCode && (option.code === initialProvince || option.name === initialProvince))?.code || "";
@@ -1497,6 +1544,10 @@ function GeoCascadeFields({
   const placeLabel = prefix === "origin" ? "起运" : "目的";
   const selectionLabel = [countryName, provinceName, cityName].filter(Boolean).join(" / ");
   const panelId = `${prefix}-geo-cascade`;
+
+  useEffect(()=>{
+    onChange?.({country:countryName,province:provinceName,city:cityName});
+  },[countryName,provinceName,cityName,onChange]);
 
   useEffect(() => {
     if (!isOpen) return;

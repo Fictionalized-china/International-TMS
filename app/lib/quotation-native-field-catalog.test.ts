@@ -13,9 +13,9 @@ import {
 } from "./quotation-workflow-fields";
 
 describe("quotation native workflow fields",() => {
-  it("derives every quote workflow surface from one unique 22-field registry",() => {
+  it("derives every quote workflow surface from one unique 23-field registry",() => {
     const keys = quotationNativeFieldCatalog.map((field) => field.fieldKey);
-    expect(keys).toHaveLength(22);
+    expect(keys).toHaveLength(23);
     expect(new Set(keys).size).toBe(keys.length);
     expect([...quotationBuiltInWorkflowFieldKeys]).toEqual(keys);
     expect([...quotationNativeFieldKeySet]).toEqual(keys);
@@ -38,6 +38,7 @@ describe("quotation native workflow fields",() => {
   it("keeps quote defaults and module ownership aligned with the registry",() => {
     expect(quotationNativeFieldCatalog.filter((field) => field.defaultMode === "required")).toHaveLength(19);
     expect(quotationNativeFieldCatalog.filter((field) => field.defaultMode === "optional").map((field) => field.fieldKey)).toEqual([
+      "quotation_mark_contacts",
       "quotation_destination_warehouse_note",
       "quotation_notes",
       "quotation_valid_until",

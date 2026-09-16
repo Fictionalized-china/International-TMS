@@ -1,6 +1,6 @@
 import { type ReactElement } from "react";
 import { Form, Link } from "react-router";
-import type { OrderMarkLabel } from "../lib/order-mark-label.server";
+import { orderMarkLabelFacts, type OrderMarkLabel } from "../lib/order-mark-label";
 
 export function OrderMarkLabelPage({
   order,
@@ -15,11 +15,6 @@ export function OrderMarkLabelPage({
   canReviseInboundPackages?: boolean;
   revisionMessage?: { success?: string; formError?: string };
 }) {
-  const route = [order.origin_country, order.origin_state, order.origin_city]
-    .filter(Boolean)
-    .join(" ") + " → " + [order.destination_country, order.destination_state, order.destination_city]
-      .filter(Boolean)
-      .join(" ");
   return (
     <main className="order-mark-page">
       <header className="order-mark-toolbar no-print">
@@ -40,41 +35,33 @@ export function OrderMarkLabelPage({
         <div><strong>预计入仓包装：{order.planned_inbound_package_count} 包</strong><span>{order.inbound_package_locked_at ? "国内仓已开始扫码，包装数和唛头已锁定" : "首次扫码前可由本单业务员修订；保存后旧唛头立即失效"}</span></div>
         {canReviseInboundPackages && !order.inbound_package_locked_at && <Form method="post" className="order-mark-revision-form"><label><span>新包装数</span><input type="number" name="plannedPackageCount" min="1" max="500" step="1" defaultValue={order.planned_inbound_package_count} required/></label><button className="primary">重新生成唛头</button></Form>}
       </section>
-      <OrderMarkLabelPreview order={order} route={route} />
+      <OrderMarkLabelPreview order={order} />
     </main>
   );
 }
 
 export function OrderMarkLabelPreview({
   order,
-  route: routeOverride,
 }: {
   order: OrderMarkLabel;
-  route?: string;
 }) {
-  const route = routeOverride ?? [
-    [order.origin_country, order.origin_state, order.origin_city].filter(Boolean).join(" "),
-    [order.destination_country, order.destination_state, order.destination_city].filter(Boolean).join(" "),
-  ].join(" → ");
+  const facts = orderMarkLabelFacts(order);
   const marks=order.marks.length?order.marks:[{id:order.id,code:`${order.order_number}-IN-001`,sequence:1,revision:1}];
   return (
     <section className="order-mark-print-area" aria-label={`订单 ${order.order_number} 的入仓唛头标签`}>
       {marks.map((mark)=><article className="order-mark-label" key={mark.id}>
         <header><strong>OULING 国际物流</strong><span>入仓唛头标签</span></header>
         <Code39 value={mark.code} />
-        <b className="order-mark-number">{mark.code}</b>
+        <div className="order-mark-scan-code"><span>扫描码：{mark.code}</span><span>包装 {mark.sequence}/{order.planned_inbound_package_count}</span></div>
+        <b className="order-mark-number"><span>唛头号</span>{order.order_number}</b>
         <dl>
-          <div><dt>入仓唛头</dt><dd>{mark.code}</dd></div>
-          <div><dt>订单号</dt><dd>{order.order_number}</dd></div>
-          <div><dt>包装序号</dt><dd>{mark.sequence}/{order.planned_inbound_package_count}（预计）</dd></div>
-          <div><dt>客户</dt><dd>{order.customer_name}</dd></div>
-          <div><dt>货物</dt><dd>{order.cargo_description}</dd></div>
-          <div><dt>商品数量</dt><dd>{order.pieces} {order.declared_quantity_unit}</dd></div>
-          <div><dt>预计包装</dt><dd>{order.planned_inbound_package_count} 包 · {order.planned_inbound_package_type}</dd></div>
-          <div><dt>运输线路</dt><dd>{route}</dd></div>
-          <div><dt>境外目的仓</dt><dd>{order.overseas_warehouse_name || "待确定"}</dd></div>
+          <div><dt>目的地</dt><dd>{facts.destination}</dd></div>
+          <div><dt>件数</dt><dd>{facts.pieces}</dd></div>
+          <div><dt>方数</dt><dd>{facts.volume}</dd></div>
+          <div><dt>重量</dt><dd>{facts.weight}</dd></div>
+          {facts.contacts.length>0&&<div className="order-mark-contacts"><dt>我方联系人</dt><dd>{facts.contacts.map((contact)=><span key={`${contact.id}-${contact.phone}`}><b>{contact.label}</b><em>{contact.name}</em><strong>{contact.phone}</strong></span>)}</dd></div>}
         </dl>
-        <footer>条码唯一对应本入仓包装；国内仓扫码收货，最终出库包装另行生成 OUL。</footer>
+        <footer>条码为本包装唯一入仓扫描码；唛头号保持订单号。国内仓扫码收货后，最终出库包装另行生成 OUL。</footer>
       </article>)}
     </section>
   );

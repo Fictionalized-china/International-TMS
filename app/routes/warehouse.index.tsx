@@ -136,7 +136,10 @@ export async function loader({ request }: Route.LoaderArgs) {
                FROM warehouse_packages wp
               WHERE wp.organization_id=s.organization_id AND wp.shipment_id=s.id AND wp.status!='cancelled') package_barcodes,
             (SELECT COUNT(*) FROM warehouse_exceptions we JOIN warehouse_packages wp ON wp.id=we.package_id WHERE we.organization_id=s.organization_id AND we.shipment_id=s.id AND wp.warehouse_id=? AND we.status IN ('open','processing')) active_exception_count,
-            MAX(o.updated_at,s.updated_at) updated_at
+            CASE
+              WHEN o.updated_at >= s.updated_at THEN o.updated_at
+              ELSE s.updated_at
+            END updated_at
        FROM shipments s
        JOIN transport_orders o ON o.id=s.order_id AND o.organization_id=s.organization_id
        JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id

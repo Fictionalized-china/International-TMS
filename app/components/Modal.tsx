@@ -269,6 +269,9 @@ export function Modal({
     if (!force && submissionCloseLocked) return;
     if(!force&&!dismissible)return;
     if (!force && hasUnsavedChanges) {
+      dialogRef.current?.querySelectorAll<HTMLDetailsElement>("details[open]").forEach((details) => {
+        details.open = false;
+      });
       setDiscardConfirmationOpen(true);
       return;
     }

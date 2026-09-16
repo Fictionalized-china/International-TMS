@@ -1,5 +1,9 @@
 import { env } from "cloudflare:workers";
 import {
+  isRetryableMysqlTransactionError,
+  mysqlTransactionRetryDelayMs,
+} from "../runtime/mysql-transaction-policy";
+import {
   missingRequiredWorkflowModuleStepFields,
   snapshotWorkflowFieldsForInstance,
 } from "./workflow-fields.server";
@@ -15,19 +19,40 @@ import { canCompleteWorkflowTask } from "./workflow-task-access";
 
 type ModuleFact = { module_code:string; status:string };
 
+// Snapshot statements are idempotent (INSERT OR IGNORE + guarded UPDATEs), so
+// the whole block is safe to retry when MySQL reports a transient deadlock.
+// These statements run as autocommit .run() calls outside the adapter's
+// transaction retry policy, so a retry loop must be applied here explicitly.
+const SNAPSHOT_DEADLOCK_RETRY_ATTEMPTS = 3;
+
+async function runSnapshotStatement(statement:()=>Promise<unknown>) {
+  let lastError:unknown;
+  for (let attempt=0; attempt<=SNAPSHOT_DEADLOCK_RETRY_ATTEMPTS; attempt++) {
+    try {
+      return await statement();
+    } catch (error) {
+      lastError = error;
+      if (attempt>=SNAPSHOT_DEADLOCK_RETRY_ATTEMPTS
+        || !isRetryableMysqlTransactionError(error)) throw error;
+      await new Promise((resolve)=>setTimeout(resolve,mysqlTransactionRetryDelayMs(attempt)));
+    }
+  }
+  throw lastError;
+}
+
 export async function ensureWorkflowExecutionSnapshot(input:{
   instanceId:string;
   workflowId:string;
 }) {
   const now = new Date().toISOString();
-  await env.DB.prepare(
+  await runSnapshotStatement(() => env.DB.prepare(
     `INSERT OR IGNORE INTO workflow_instance_step_states(
       id,instance_id,workflow_id,step_id,step_key,step_name,sort_order,status,updated_at
      )
      SELECT lower(hex(randomblob(16))),?,?,s.id,s.step_key,s.name,s.sort_order,'pending',?
      FROM workflow_steps s WHERE s.workflow_id=? AND s.is_active=1`,
-  ).bind(input.instanceId,input.workflowId,now,input.workflowId).run();
-  await env.DB.prepare(
+  ).bind(input.instanceId,input.workflowId,now,input.workflowId).run());
+  await runSnapshotStatement(() => env.DB.prepare(
     `INSERT OR IGNORE INTO workflow_instance_module_states(
       id,instance_step_state_id,step_module_id,module_code,display_name,sort_order,is_required,status,
       responsibility_position_code,completion_mode,updated_at
@@ -37,8 +62,8 @@ export async function ensureWorkflowExecutionSnapshot(input:{
      FROM workflow_instance_step_states ss JOIN workflow_step_modules m
        ON m.workflow_id=ss.workflow_id AND m.step_id=ss.step_id AND m.is_active=1
      WHERE ss.instance_id=?`,
-  ).bind(now,input.instanceId).run();
-  await env.DB.prepare(
+  ).bind(now,input.instanceId).run());
+  await runSnapshotStatement(() => env.DB.prepare(
     `INSERT OR IGNORE INTO workflow_instance_task_states(
       id,instance_module_state_id,module_task_id,task_key,name,task_type,sort_order,is_required,status,
       responsibility_position_code,instructions,updated_at
@@ -49,22 +74,22 @@ export async function ensureWorkflowExecutionSnapshot(input:{
      JOIN workflow_instance_step_states ss ON ss.id=ms.instance_step_state_id
      JOIN workflow_module_tasks t ON t.workflow_id=ss.workflow_id AND t.step_module_id=ms.step_module_id AND t.is_active=1
      WHERE ss.instance_id=?`,
-  ).bind(now,input.instanceId).run();
-  await env.DB.prepare(
+  ).bind(now,input.instanceId).run());
+  await runSnapshotStatement(() => env.DB.prepare(
     `UPDATE workflow_instance_step_states
      SET status='active',started_at=COALESCE(started_at,?),updated_at=?
      WHERE instance_id=? AND step_key=(
        SELECT current_step_key FROM workflow_instances WHERE id=?
      ) AND status='pending'`,
-  ).bind(now,now,input.instanceId,input.instanceId).run();
-  await env.DB.prepare(
+  ).bind(now,now,input.instanceId,input.instanceId).run());
+  await runSnapshotStatement(() => env.DB.prepare(
     `UPDATE workflow_instance_module_states
      SET status='active',updated_at=?
      WHERE instance_step_state_id IN (
        SELECT id FROM workflow_instance_step_states WHERE instance_id=? AND status='active'
      ) AND status='pending'`,
-  ).bind(now,input.instanceId).run();
-  await env.DB.prepare(
+  ).bind(now,input.instanceId).run());
+  await runSnapshotStatement(() => env.DB.prepare(
     `UPDATE workflow_instance_task_states
      SET status='active',updated_at=?
      WHERE instance_module_state_id IN (
@@ -72,7 +97,7 @@ export async function ensureWorkflowExecutionSnapshot(input:{
        JOIN workflow_instance_step_states ss ON ss.id=ms.instance_step_state_id
        WHERE ss.instance_id=? AND ss.status='active'
      ) AND status='pending'`,
-  ).bind(now,input.instanceId).run();
+  ).bind(now,input.instanceId).run());
 }
 
 export async function synchronizeWorkflowExecution(input:{

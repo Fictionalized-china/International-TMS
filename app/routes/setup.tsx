@@ -7,6 +7,7 @@ import {
   validateCode,
   validateEmail,
   validatePassword,
+  validatePhone,
   valueOf,
   type FieldErrors,
 } from "../lib/validation";
@@ -42,6 +43,7 @@ export async function action({ request }: Route.ActionArgs) {
   const organizationCode = valueOf(form, "organizationCode").toLowerCase();
   const displayName = valueOf(form, "displayName");
   const email = valueOf(form, "email").toLowerCase();
+  const phone = valueOf(form, "phone").trim();
   const password = valueOf(form, "password");
   const bootstrapToken = valueOf(form, "bootstrapToken");
   const errors: FieldErrors = {};
@@ -53,6 +55,8 @@ export async function action({ request }: Route.ActionArgs) {
     errors.displayName = "姓名需要 2-80 个字符";
   const emailError = validateEmail(email);
   if (emailError) errors.email = emailError;
+  const phoneError = validatePhone(phone,"管理员联系电话");
+  if (phoneError) errors.phone = phoneError;
   const passwordError = validatePassword(password);
   if (passwordError) errors.password = passwordError;
   if (!(await secureEqual(bootstrapToken, env.BOOTSTRAP_TOKEN)))
@@ -60,7 +64,7 @@ export async function action({ request }: Route.ActionArgs) {
   if (Object.keys(errors).length)
     return {
       errors,
-      values: { organizationName, organizationCode, displayName, email },
+      values: { organizationName, organizationCode, displayName, email, phone },
     };
 
   const now = new Date().toISOString();
@@ -103,8 +107,8 @@ export async function action({ request }: Route.ActionArgs) {
         "INSERT INTO organizations (id, code, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
       ).bind(organizationId, organizationCode, organizationName, now, now),
       env.DB.prepare(
-        "INSERT INTO users (id, email, password_hash, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-      ).bind(userId, email, passwordHash, displayName, now, now),
+        "INSERT INTO users (id, email, password_hash, display_name, phone, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).bind(userId, email, passwordHash, displayName, phone, now, now),
       env.DB.prepare(
         "INSERT INTO memberships (id, organization_id, user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
       ).bind(membershipId, organizationId, userId, "系统管理员", now, now),
@@ -235,6 +239,13 @@ export default function Setup({
             type="email"
             defaultValue={actionData?.values?.email}
             error={actionData?.errors?.email}
+          />
+          <Field
+            label="管理员联系电话"
+            name="phone"
+            type="tel"
+            defaultValue={actionData?.values?.phone}
+            error={actionData?.errors?.phone}
           />
           <Field
             label="管理员密码"

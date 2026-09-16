@@ -346,8 +346,10 @@ async function loadBatchOrderWorkflowPolicies(
       LEFT JOIN workflow_instances wi ON wi.id=o.workflow_instance_id
         AND wi.organization_id=o.organization_id AND wi.order_id=o.id
       WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
-    ), module_codes(module_code) AS (
-      VALUES ('loading'),('tracking'),('customs')
+    ), module_codes AS (
+      SELECT 'loading' module_code
+      UNION ALL SELECT 'tracking'
+      UNION ALL SELECT 'customs'
     ), modules AS (
       SELECT bo.order_id,bo.business_type,bo.bound_workflow_instance_id,
         bo.matched_workflow_instance_id,bo.workflow_id,c.module_code,
@@ -659,7 +661,7 @@ export async function loader({request,params}:Route.LoaderArgs){
         (SELECT omi.assignee_user_id FROM order_module_instances omi WHERE omi.organization_id=o.organization_id AND omi.order_id=o.id AND omi.module_code='documents' AND omi.enabled=1 LIMIT 1) document_assignee_user_id,
         (SELECT omi.assignee_user_id FROM order_module_instances omi WHERE omi.organization_id=o.organization_id AND omi.order_id=o.id AND omi.module_code='customs' AND omi.enabled=1 LIMIT 1) customs_assignee_user_id
       FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id JOIN customers c ON c.id=o.customer_id LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id LEFT JOIN overseas_warehouse_operations op ON op.batch_id=bo.batch_id AND op.order_id=bo.order_id AND op.organization_id=bo.organization_id
-      WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed' GROUP BY bo.order_id ORDER BY bo.sequence_no`).bind(batchId,current.organizationId).all<BatchOrder>(),
+      WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed' ORDER BY bo.sequence_no`).bind(batchId,current.organizationId).all<BatchOrder>(),
     env.DB.prepare(`WITH vehicle_order_actual AS (
         SELECT l.vehicle_id,p.order_id,
           COALESCE((SELECT SUM(r.total_weight_kg) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=p.order_id AND r.status='completed'),SUM(i.gross_weight_per_package_kg)) weight,
@@ -1291,6 +1293,23 @@ export async function action({request,params}:Route.ActionArgs){
     // Keep the physical batch transition atomic, but constrain every order
     // mutation to the ids re-authorised by the frozen actual_exit_at policy.
     const exitOrderChunks=chunkD1Values(exitTrackingOrderIds,8);
+    // MySQL 1093 guard: resolve the latest shipment ids BEFORE the atomic
+    // batch, then update shipments by primary key only (no sub-SELECT on the
+    // UPDATE target table).
+    const exitShipmentIds:string[]=[];
+    for(const chunk of exitOrderChunks){
+      const latestShipments=await env.DB.prepare(`SELECT (
+          SELECT latest.id FROM shipments latest
+          WHERE latest.organization_id=bo.organization_id AND latest.order_id=bo.order_id
+          ORDER BY latest.created_at DESC LIMIT 1
+        ) AS shipment_id
+        FROM transport_batch_orders bo
+        WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
+          AND bo.order_id IN (${d1Placeholders(chunk.length)})`)
+        .bind(current.organizationId,batchId,...chunk)
+        .all<{shipment_id:string|null}>();
+      for(const row of latestShipments.results) if(row.shipment_id) exitShipmentIds.push(row.shipment_id);
+    }
     const statements:D1PreparedStatement[]=[
       env.DB.prepare("INSERT INTO transport_exit_confirmations(id,organization_id,batch_id,actual_exit_at,exit_port,exit_vehicle_plate,overseas_vehicle_plate,overseas_carrier_name,overseas_vehicle_type,overseas_driver_name,overseas_driver_phone,proof_reference,notes,confirmed_by_user_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(crypto.randomUUID(),current.organizationId,batchId,actualExitAt,exitPort,exitVehiclePlate,overseasVehiclePlate||null,overseasCarrierName||null,overseasVehicleType||null,overseasDriverName||null,overseasDriverPhone||null,valueOf(form,"proofReference")||null,valueOf(form,"exitNotes")||null,current.userId,now),
       env.DB.prepare("UPDATE transport_batches SET status='departed',road_status='outbound_in_transit',actual_departure_at=?,border_port=?,updated_at=? WHERE id=? AND organization_id=?").bind(actualExitAt,exitPort,now,batchId,current.organizationId),
@@ -1344,18 +1363,9 @@ export async function action({request,params}:Route.ActionArgs){
               AND existing.task_type='start_receivable_reconciliation'
               AND existing.status IN ('pending','in_progress')
           )`).bind(current.userId,now,now,current.organizationId,batchId,...chunk)),
-      ...exitOrderChunks.map(chunk=>env.DB.prepare(`UPDATE shipments
+      ...chunkD1Values(exitShipmentIds,8).map(chunk=>env.DB.prepare(`UPDATE shipments
         SET status='in_transit',current_location=?,updated_at=?
-        WHERE organization_id=? AND id IN (
-          SELECT (
-            SELECT latest.id FROM shipments latest
-            WHERE latest.organization_id=bo.organization_id AND latest.order_id=bo.order_id
-            ORDER BY latest.created_at DESC LIMIT 1
-          )
-          FROM transport_batch_orders bo
-          WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
-            AND bo.order_id IN (${d1Placeholders(chunk.length)})
-        )`).bind(exitPort,now,current.organizationId,current.organizationId,batchId,...chunk)),
+        WHERE organization_id=? AND id IN (${d1Placeholders(chunk.length)})`).bind(exitPort,now,current.organizationId,...chunk)),
       ...exitOrderChunks.map(chunk=>env.DB.prepare(`INSERT INTO shipment_events(
           id,shipment_id,status,location,description,event_at,visible_to_customer,created_by_user_id,created_at
         )
@@ -1483,18 +1493,31 @@ export async function action({request,params}:Route.ActionArgs){
     const milestoneStatusMap:Record<string,string>={border_arrived:"customs",exported:"in_transit",transloaded:"in_transit",transit_customs:"in_transit",foreign_entered:"in_transit",customs_cleared:"in_transit",station_arrived:"in_transit"};
     const shipmentStatus=milestoneStatusMap[milestoneCode]||"in_transit";
     try{
-      await env.DB.batch(Array.from(groupedTargets.values()).flatMap(group=>{
+      // MySQL 1093 guard: resolve the latest shipment ids for each order
+      // chunk BEFORE the atomic batch, then update shipments by primary key
+      // only.  The shipment_events INSERT keeps its original JOIN form since
+      // its target table is shipment_events, not shipments.
+      const shipmentUpdateStatements:D1PreparedStatement[]=[];
+      for(const group of groupedTargets.values()){
         const shipmentDescription=`批次 ${batch.batch_number} 登记「${milestoneDef.name}」${group.location?`，地点 ${group.location}`:""}${group.vehicle?`，车辆 ${group.vehicle}`:""}`;
-        return chunkD1Values(group.orderIds,8).flatMap(chunk=>[
-        env.DB.prepare(`UPDATE shipments SET status=?,current_location=?,updated_at=?
-          WHERE organization_id=? AND id IN (
-            SELECT (SELECT latest.id FROM shipments latest
+        for(const chunk of chunkD1Values(group.orderIds,8)){
+          const latestShipments=await env.DB.prepare(`SELECT (
+              SELECT latest.id FROM shipments latest
               WHERE latest.organization_id=bo.organization_id AND latest.order_id=bo.order_id
-              ORDER BY COALESCE(latest.updated_at,latest.created_at) DESC,latest.created_at DESC LIMIT 1)
+              ORDER BY COALESCE(latest.updated_at,latest.created_at) DESC,latest.created_at DESC LIMIT 1
+            ) AS shipment_id
             FROM transport_batch_orders bo
-            WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed' AND bo.order_id IN (${d1Placeholders(chunk.length)})
-          )`).bind(shipmentStatus,group.location,now,current.organizationId,current.organizationId,batchId,...chunk),
-        env.DB.prepare(`INSERT INTO shipment_events(id,shipment_id,status,location,description,event_at,visible_to_customer,created_by_user_id,created_at)
+            WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
+              AND bo.order_id IN (${d1Placeholders(chunk.length)})`)
+            .bind(current.organizationId,batchId,...chunk)
+            .all<{shipment_id:string|null}>();
+          const shipmentIds=latestShipments.results.map(row=>row.shipment_id).filter((id):id is string=>id!==null);
+          for(const shipmentIdChunk of chunkD1Values(shipmentIds,8)){
+            shipmentUpdateStatements.push(env.DB.prepare(`UPDATE shipments SET status=?,current_location=?,updated_at=?
+              WHERE organization_id=? AND id IN (${d1Placeholders(shipmentIdChunk.length)})`)
+              .bind(shipmentStatus,group.location,now,current.organizationId,...shipmentIdChunk));
+          }
+          shipmentUpdateStatements.push(env.DB.prepare(`INSERT INTO shipment_events(id,shipment_id,status,location,description,event_at,visible_to_customer,created_by_user_id,created_at)
           SELECT lower(hex(randomblob(16))),latest.id,?,?,?,?,?,?,?
           FROM transport_batch_orders bo
           JOIN shipments latest ON latest.id=(
@@ -1502,9 +1525,10 @@ export async function action({request,params}:Route.ActionArgs){
             WHERE candidate.organization_id=bo.organization_id AND candidate.order_id=bo.order_id
             ORDER BY COALESCE(candidate.updated_at,candidate.created_at) DESC,candidate.created_at DESC LIMIT 1
           )
-          WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed' AND bo.order_id IN (${d1Placeholders(chunk.length)})`).bind(shipmentStatus,group.location,shipmentDescription,eventAt,group.visible?1:0,current.userId,now,current.organizationId,batchId,...chunk),
-        ]);
-      }));
+          WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed' AND bo.order_id IN (${d1Placeholders(chunk.length)})`).bind(shipmentStatus,group.location,shipmentDescription,eventAt,group.visible?1:0,current.userId,now,current.organizationId,batchId,...chunk));
+        }
+      }
+      await env.DB.batch(shipmentUpdateStatements);
     }catch{postCommitWarnings.push("运单轨迹事件待重试")}
     return{success:`已为 ${orderIds.length} 票订单登记「${milestoneDef.name}」（${eventAt}）${postCommitWarnings.length?`；节点已保存，注意：${postCommitWarnings.join("；")}`:"；模块进度与批次状态已同步"}`};
   }
@@ -2146,20 +2170,20 @@ export function BatchTrackingWorkbench({batchId,batchNumber,orders,visibleOrders
     {trackingOrders.length>0&&!milestoneSurfaceVisible&&!actualExitSurfaceVisible&&<div className="alert info">当前冻结工作流未展示运输节点和实际出境登记，本页仅保留历史只读信息。</div>}
     {trackingOrders.length>0&&(milestoneSurfaceVisible||actualExitSurfaceVisible)&&!warehouseReady&&<div className="alert warning">仓库端尚未完成整批装车出库。当前仅可查看，完成出库后系统会按冻结工作流开放相应登记项。</div>}
     {warehouseReady&&!documentGateReady&&!exitConfirmed&&(milestoneSurfaceVisible||actualExitSurfaceVisible)&&<div className="batch-exit-prerequisite" role="status"><div><strong>当前待办：完成工作流要求的逐票报关与文件</strong><span>必填门禁通过后回到本页继续办理；选填项目不会阻断。</span></div><Link className="primary" to={documentsHref}>进入报关与文件</Link></div>}
-    {warehouseReady&&documentGateReady&&!exitConfirmed&&!borderArrivalReady&&borderArrivalNode&&milestoneSurfaceVisible&&<div className="batch-exit-prerequisite" role="status"><div><strong>当前待办：登记口岸到达</strong><span>这是运输事件顺序完整性要求；一次登记只同步冻结工作流开放该节点的挂载订单。</span></div>{milestoneCanWrite?<Modal title="登记运输节点 · 口岸到达" triggerLabel="登记口岸到达" triggerClassName="primary" size="wide" closeSignal={actionCloseSignal}><BatchTrackingNodeForm nodeCode={borderArrivalNode.code} total={nodeOrders.length} fields={workflowPolicies} defaultEventAt={defaultEventAt} defaultLocation={defaultLocation(borderArrivalNode.code)} defaultVehicle={defaultVehicle} busy={busy}/></Modal>:<span className="status-pill off">当前冻结工作流只读</span>}</div>}
-    {actualExitSurfaceVisible&&warehouseReady&&documentGateReady&&!exitConfirmed&&borderArrivalReady&&canConfirmExit&&actualExitCanWrite&&<div className="batch-exit-prerequisite" role="status"><div><strong>当前待办：确认实际出境</strong><span>点击按钮后在弹窗中登记；保存后同步已启用运踪的挂载订单，并进入境外运输阶段。</span></div><Modal title="确认实际出境" triggerLabel="登记实际出境" triggerClassName="primary" size="wide" closeSignal={actionCloseSignal}><BatchExitConfirmForm workflowPolicies={workflowPolicies} defaultEventAt={defaultEventAt} borderPort={borderPort} borderPorts={borderPorts} defaultVehicle={defaultVehicle} busy={busy}/></Modal></div>} 
+    {warehouseReady&&documentGateReady&&!exitConfirmed&&!borderArrivalReady&&borderArrivalNode&&milestoneSurfaceVisible&&<div className="batch-exit-prerequisite" role="status"><div><strong>当前待办：登记口岸到达</strong><span>请在下方运输节点表的“操作”列登记；一次登记只同步冻结工作流开放该节点的挂载订单。</span></div><span className={`status-pill ${milestoneCanWrite?"warning":"off"}`}>{milestoneCanWrite?"在操作列办理":"当前冻结工作流只读"}</span></div>}
+    {actualExitSurfaceVisible&&warehouseReady&&documentGateReady&&!exitConfirmed&&borderArrivalReady&&canConfirmExit&&actualExitCanWrite&&<div className="batch-exit-prerequisite" role="status"><div><strong>当前待办：确认实际出境</strong><span>请在下方运输节点表的“操作”列登记；保存后同步已启用运踪的挂载订单，并进入境外运输阶段。</span></div><span className="status-pill warning">在操作列办理</span></div>}
     {actualExitSurfaceVisible&&warehouseReady&&documentGateReady&&!exitConfirmed&&borderArrivalReady&&(!canConfirmExit||!actualExitCanWrite)&&<div className="batch-gate-blocker batch-inline-exit-blocker"><div><strong>{canConfirmExit?"当前冻结工作流只读":"实际出境仍有前置事项"}</strong>{exitBlockers.length?<ul>{exitBlockers.map(reason=><li key={reason}>{reason}</li>)}</ul>:<p>{actualExitAction.reason||"请由本配载单的操作负责人确认实际出境。"}</p>}</div></div>}
     {actualExitSurfaceVisible&&exitConfirmed&&borderArrivalReady&&<div className="alert success">实际出境已确认{milestoneSurfaceVisible?"；可继续登记境外运输节点":""}。</div>}
     {exitSequenceAnomaly&&<div className="alert danger" role="alert"><strong>运输节点顺序异常</strong>：批次已经登记出境，但仍有 {exitSequenceOrders.length-exitReadyOrderCount} 票缺少更早的“口岸到达”记录。请补录真实到达时间；系统不会伪造历史时间。</div>}
     {milestoneSurfaceVisible&&<><div className="batch-tracking-note"><strong>此处留出接口后续自动化</strong><span>字段显隐、当前节点和必填状态来自冻结工作流；选填字段不会阻断。</span><strong>结构性顺序</strong><span>一旦登记运输事件，前后节点时间必须连续且幂等，防止产生不可能的轨迹。</span></div>
-    <div className="table-wrap batch-tracking-node-table"><table><thead><tr><th>顺序</th><th>运输节点</th><th>流程进度</th><th>批次登记状态</th><th>最近登记</th><th>操作</th></tr></thead><tbody>{visibleMilestones.map((node,index)=>{
+    <div className="table-wrap batch-tracking-node-table" id="batch-tracking-node-table"><table><thead><tr><th>顺序</th><th>运输节点</th><th>流程进度</th><th>批次登记状态</th><th>最近登记</th><th>操作</th></tr></thead><tbody>{visibleMilestones.map((node,index)=>{
       const count=nodeOrders.filter(o=>{const list=milestonesByOrder.get(o.order_id)||[];return list.some(m=>m.milestone_code===node.code);}).length;
       const total=nodeOrders.length;
       const sample=visibleTrackingMilestones.find(m=>m.milestone_code===node.code);
       const sequenceAnomaly=node.code==="exported"&&count>0&&!borderArrivalReady;
       return <tr className={sequenceAnomaly?"blocked-row":count===total?"completed-row":count>0?"partial-row":""} key={node.code}>
         <td>{String(index+1).padStart(2,"0")}</td><td><strong>{node.name}</strong></td><td>{node.progress}%</td><td><span className={`status-pill ${sequenceAnomaly?"danger":count===total?"success":""}`}>{sequenceAnomaly?`顺序异常 · ${exitReadyOrderCount}/${total} 票口岸到达`:count===total?"全票已登记":count>0?`${count}/${total} 票`:"未登记"}</span></td><td>{sample?formatShortDateTime(sample.event_at):"—"}</td>
-        <td>{node.code==="exported"&&!exitConfirmed?(actualExitSurfaceVisible&&borderArrivalReady&&canConfirmExit&&actualExitCanWrite?<Modal title="确认实际出境" triggerLabel="登记节点" triggerClassName="text-button" size="wide" closeSignal={actionCloseSignal}><BatchExitConfirmForm workflowPolicies={workflowPolicies} defaultEventAt={defaultEventAt} borderPort={borderPort} borderPorts={borderPorts} defaultVehicle={defaultVehicle} busy={busy}/></Modal>:<span className="muted">{actualExitSurfaceVisible?"完成前置步骤后开放":"当前冻结工作流不登记"}</span>):milestoneCanWrite&&node.code!=="station_arrived"&&node.code!=="exported"?<Modal title={`登记运输节点 · ${node.name}`} triggerLabel="登记节点" triggerClassName="text-button" size="wide" closeSignal={actionCloseSignal}><BatchTrackingNodeForm nodeCode={node.code} total={total} fields={workflowPolicies} defaultEventAt={defaultEventAt} defaultLocation={defaultLocation(node.code)} defaultVehicle={defaultVehicle} busy={busy}/></Modal>:<span className="muted">{node.code==="exported"?"出境确认自动登记":node.code==="station_arrived"?"仓库自动登记":"当前只读"}</span>}</td>
+        <td>{node.code==="exported"&&!exitConfirmed?(actualExitSurfaceVisible&&borderArrivalReady&&canConfirmExit&&actualExitCanWrite?<Modal title="确认实际出境" triggerLabel="登记实际出境" triggerClassName="primary batch-tracking-node-action" size="wide" closeSignal={actionCloseSignal}><BatchExitConfirmForm workflowPolicies={workflowPolicies} defaultEventAt={defaultEventAt} borderPort={borderPort} borderPorts={borderPorts} defaultVehicle={defaultVehicle} busy={busy}/></Modal>:<span className="muted">{actualExitSurfaceVisible?"完成前置步骤后开放":"当前冻结工作流不登记"}</span>):milestoneCanWrite&&node.code!=="station_arrived"&&node.code!=="exported"?<Modal title={`登记运输节点 · ${node.name}`} triggerLabel={`登记${node.name}`} triggerClassName="primary batch-tracking-node-action" size="wide" closeSignal={actionCloseSignal}><BatchTrackingNodeForm nodeCode={node.code} total={total} fields={workflowPolicies} defaultEventAt={defaultEventAt} defaultLocation={defaultLocation(node.code)} defaultVehicle={defaultVehicle} busy={busy}/></Modal>:<span className="muted">{node.code==="exported"?"出境确认自动登记":node.code==="station_arrived"?"仓库自动登记":"当前只读"}</span>}</td>
       </tr>;
     })}</tbody></table></div></>}
     {trackingOrders.length>0&&<details className="batch-tracking-orders batch-inline-disclosure"><summary><span><strong>逐票节点状态</strong><small>仅显示当前工作流已启用运踪模块的订单</small></span><em aria-hidden="true"/></summary>

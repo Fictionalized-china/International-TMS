@@ -305,10 +305,11 @@ export async function action({ request }: Route.ActionArgs) {
               AND ax.leg_type='first_mile' AND ax.status!='cancelled'
             ORDER BY ax.updated_at DESC,ax.created_at DESC LIMIT 1
          )
-        WHERE mark.organization_id=? AND UPPER(mark.package_code)=?
+        WHERE mark.organization_id=?
+          AND (UPPER(mark.package_code)=? OR UPPER(o.order_number)=?)
           AND mark.is_active=1 AND mark.status!='cancelled'
         ORDER BY mark.created_at DESC LIMIT 1`,
-    ).bind(user.organizationId,code).first<{id:string;status:string;destination_warehouse_id:string|null}>();
+    ).bind(user.organizationId,code,code).first<{id:string;status:string;destination_warehouse_id:string|null}>();
     if(candidate&&!['confirmed','in_execution'].includes(candidate.status)){
       return{scanResult:{outcome:'unavailable',orderNumber:null,message:'该订单当前状态不允许国内仓收货'}};
     }
@@ -635,7 +636,7 @@ export async function action({ request }: Route.ActionArgs) {
              WHERE bo.organization_id=e.organization_id AND bo.batch_id=e.batch_id
                AND bo.order_id=? AND bo.status!='removed'
            )))
-       ) ORDER BY event_at LIMIT 1`,
+       ) active_exceptions ORDER BY event_at LIMIT 1`,
     ).bind(user.organizationId, order.id, user.organizationId, order.id, order.id).first<{ exception_number: string }>();
     if (activeException) return { formError: `订单仍有未结案异常 ${activeException.exception_number}，处理结案后才能确认货齐` };
   }
@@ -901,13 +902,19 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
     if(scanFetcher.state!=="idle")return;
     const code=rawCode.trim().toUpperCase();
     if(!code)return;
-    if(!/-IN-\d{3,}$/i.test(code)){
-      openScannedReference(code);
-      return;
-    }
     setMarkInput("");
     scanFetcher.submit({intent:"scan_mark",warehouseId:loaderData.warehouse.id,code,requestKey:crypto.randomUUID()},{method:"post"});
   };
+  const remainingPackageCount=Math.max(0,plannedPackageCount-accountedPackageCount);
+  const scanFeedback=scanResult?.message??(
+    scanResult?.outcome==="accepted"
+      ? scanResult.orderNumber===loaderData.order?.order_number
+        ? `扫描成功，${scanResult.orderNumber} 已登记 ${accountedPackageCount}/${plannedPackageCount} 包，剩余 ${remainingPackageCount} 包`
+        : `扫描成功，已归入 ${scanResult.orderNumber} 的收货会话`
+      : normalReceivingComplete
+        ? `已扫齐 ${plannedPackageCount} 包，请核对实重和库位后确认入库`
+        : `当前查看 ${loaderData.order?.order_number}，还需扫描 ${remainingPackageCount} 包`
+  );
   return <>
     <header className="page-header acceptance-header"><div><p className="eyebrow">ACCEPTANCE RECEIVING</p><h1>验收收货</h1><p>仓库统一扫描入口；扫描任一入仓唛头，系统自动识别订单并累计整批收货进度。</p></div></header>
     <ActionToast message={actionError ?? loaderData.resultMessage} tone={actionError ? "error" : "success"} data={actionData}/>
@@ -918,7 +925,7 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
         <button type="submit" className="primary" disabled={scanFetcher.state!=="idle"}>{scanFetcher.state!=="idle"?"正在登记…":"识别并登记"}</button>
         <small>同一个扫描栏服务当前仓库全部订单；每次扫码后系统自动识别订单并归入各自的整单收货会话。</small>
       </form>
-      {(scanResult||loaderData.order)&&<div className={`inbound-mark-scan-feedback${normalReceivingComplete?' complete':''}`} role="status" aria-live="polite">{scanResult?.message??(scanResult?.outcome==="accepted"?`扫描成功，已归入 ${scanResult.orderNumber} 的收货会话`:normalReceivingComplete?`已扫齐 ${plannedPackageCount} 包，请核对实重和库位后确认入库`:`当前查看 ${loaderData.order?.order_number}，还需扫描 ${Math.max(0,plannedPackageCount-accountedPackageCount)} 包`)}</div>}
+      {(scanResult||loaderData.order)&&<div className={`inbound-mark-scan-feedback${normalReceivingComplete?' complete':''}`} role="status" aria-live="polite">{scanFeedback}</div>}
     </section> : <div className="alert info">当前账号为仓库只读视角，可查看入库结果与历史标签；验收扫描和入库提交仅向有操作权限的冻结任务负责人开放。</div>}
     {loaderData.lookupError && <div className="alert error no-print">{loaderData.lookupError}</div>}
     {canOperate && loaderData.order && loaderData.cargoItems.length > 0 && <Form method="post" className="acceptance-workbench no-print">

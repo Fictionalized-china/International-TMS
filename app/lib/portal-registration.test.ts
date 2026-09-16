@@ -20,6 +20,12 @@ describe("portal self registration", () => {
     expect(validatePortalRegistration(validRegistration)).toEqual({});
   });
 
+  it("requires a phone number for every new account", () => {
+    expect(validatePortalRegistration({ ...validRegistration, phone: "" })).toMatchObject({
+      phone: expect.any(String),
+    });
+  });
+
   it("returns field-level recovery messages", () => {
     const errors = validatePortalRegistration({
       ...validRegistration,

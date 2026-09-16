@@ -28,7 +28,13 @@ type FileRow = {
 const pageSize = 50;
 
 export async function loader({ request }: Route.LoaderArgs) {
-  const current = await requireSessionUser(request, "order.module.documents.manage");
+  const current = await requireSessionUser(request);
+  if (!current.permissions.some((permission) => [
+    "order.module.documents.view",
+    "order.module.documents.manage",
+  ].includes(permission))) {
+    throw new Response("无权查看文件中心", { status: 403 });
+  }
   const orderVisibility = orderVisibilitySql(current, "o");
   const batchVisibility = batchVisibilitySql(current, "b");
   const url = new URL(request.url);

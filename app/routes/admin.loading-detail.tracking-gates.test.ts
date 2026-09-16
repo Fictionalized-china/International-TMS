@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { MemoryRouter } from "react-router";
+import { createMemoryRouter, MemoryRouter, RouterProvider } from "react-router";
 import type { BatchTrackingActionPolicy } from "../lib/batch-tracking-action-policy";
 
 const harness = vi.hoisted(() => {
@@ -147,6 +147,12 @@ const harness = vi.hoisted(() => {
         all: vi.fn(async () => {
           if (sql.includes("COALESCE((SELECT s.shipment_number"))
             return { results: orders };
+          // MySQL 1093 guard: latest shipment ids are resolved before the
+          // atomic exit batch; map each queried order to its shipment.
+          if (sql.includes("AS shipment_id")) {
+            const orderIds = record.bindings.slice(2) as string[];
+            return { results: orderIds.map((orderId) => ({ shipment_id: `shipment-${orderId}` })) };
+          }
           if (sql.includes("SELECT bo.order_id,o.order_number") && sql.includes("transport_batch_orders"))
             return { results: orders.map((order) => ({ order_id: order.order_id, order_number: order.order_number })) };
           if (sql.includes("WITH batch_orders AS")) {
@@ -427,9 +433,21 @@ describe("PZ frozen tracking route gates", () => {
     ].some((fragment) => item.sql.includes(fragment)));
     expect(participantWrites.length).toBeGreaterThanOrEqual(6);
     for (const write of participantWrites) {
-      expect(write.bindings).toContain("order-1");
-      expect(write.bindings).not.toContain("order-2");
+      if (write.sql.includes("UPDATE shipments")) {
+        // MySQL 1093 guard: shipments are updated by the pre-resolved latest
+        // shipment ids of participating orders, not by a self-referencing
+        // sub-SELECT on the UPDATE target table.
+        expect(write.sql).not.toContain("FROM shipments");
+        expect(write.bindings).toContain("shipment-order-1");
+        expect(write.bindings).not.toContain("shipment-order-2");
+      } else {
+        expect(write.bindings).toContain("order-1");
+        expect(write.bindings).not.toContain("order-2");
+      }
     }
+    const latestShipmentLookup = harness.prepared.find((item) => item.sql.includes("AS shipment_id"));
+    expect(latestShipmentLookup?.sql).not.toContain("UPDATE");
+    expect(latestShipmentLookup?.bindings).toEqual(["org-1", "batch-1", "order-1"]);
     expect(harness.prepared.find((item) =>
       item.sql.includes("INSERT INTO order_tracking_milestones"),
     )?.bindings).toContain("order-1");
@@ -482,5 +500,77 @@ describe("PZ frozen tracking route gates", () => {
     expect(markup).toContain(reason);
     expect(markup).not.toContain('name="intent" value="batch_tracking_add"');
     expect(markup).not.toContain('name="intent" value="exit_confirm"');
+  });
+
+  it("keeps every manual milestone registration in the table operation column", () => {
+    const editable = batchPolicy("editable", null, ["order-1", "order-2"]);
+    const workflowPolicies = harness.orders.flatMap((order) => [{
+      orderId: order.order_id,
+      businessType: "ltl",
+      moduleCode: "tracking" as const,
+      enabled: true,
+      required: true,
+      fields: [
+        { fieldKey: "tracking_milestone", isActive: true, isRequired: true },
+        { fieldKey: "actual_exit_at", isActive: true, isRequired: true },
+      ],
+    }]);
+    const trackingMilestones = harness.orders.map((order, index) => ({
+      id: `milestone-${index}`,
+      order_id: order.order_id,
+      milestone_code: "border_arrived",
+      milestone_name: "口岸到达",
+      event_at: "2026-09-06T09:00:00.000Z",
+      location: "口岸",
+      vehicle_reference: "粤A001",
+      notes: null,
+      visible_to_customer: 1,
+    }));
+    const render = (exitConfirmed: boolean) => {
+      const workbench = BatchTrackingWorkbench({
+        batchId: "batch-1",
+        batchNumber: "PZ-001",
+        orders: harness.orders,
+        visibleOrders: harness.orders,
+        orderPagination: { page: 1, pageCount: 1, pageSize: 10, total: 2 },
+        trackingMilestones,
+        trackingFlags: [],
+        workflowPolicies,
+        batchVehiclePlate: "粤A001",
+        overseasVehiclePlate: null,
+        borderPort: "PORT-1",
+        customsLocation: "深圳",
+        busy: false,
+        manage: true,
+        milestoneAction: editable,
+        actualExitAction: editable,
+        warehouseReady: true,
+        documentGateReady: true,
+        exitConfirmed,
+        canConfirmExit: true,
+        exitBlockers: [],
+        borderPorts: [],
+        documentsHref: "?tab=documents",
+      } as never);
+      const router = createMemoryRouter([{
+        path: "*",
+        element: workbench,
+      }], { initialEntries: ["/admin/loading/batch-1?tab=tracking"] });
+      return renderToStaticMarkup(createElement(RouterProvider, { router }));
+    };
+
+    const beforeExit = render(false);
+    const bannerStart = beforeExit.indexOf("batch-exit-prerequisite");
+    const tableStart = beforeExit.indexOf("batch-tracking-node-table");
+    expect(bannerStart).toBeGreaterThan(-1);
+    expect(tableStart).toBeGreaterThan(bannerStart);
+    expect(beforeExit.slice(bannerStart, tableStart)).not.toContain("<button");
+    expect(beforeExit.slice(tableStart)).toContain("登记实际出境");
+    expect(beforeExit.slice(tableStart)).toContain("batch-tracking-node-action");
+
+    const afterExit = render(true);
+    expect(afterExit).toContain("实际出境已确认");
+    expect(afterExit.slice(afterExit.indexOf("batch-tracking-node-table")))
+      .toContain("登记海外入境");
   });
 });

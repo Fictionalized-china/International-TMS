@@ -8,9 +8,10 @@ import { ConnectionStatus } from "../components/InteractionFeedback";
 import { InternalNotificationCenter } from "../components/InternalNotificationCenter";
 import { WorkspacePreferences } from "../components/WorkspacePreferences";
 import { loadInternalNotificationSummary } from "../lib/internal-notifications.server";
-import { canAccessSettlementWorkbench } from "../lib/billing-access";
-import { canAccessBatchWorkspace } from "../lib/order-access";
-import { adminNavigationGroupVisibility } from "../lib/admin-navigation";
+import {
+  adminNavigationGroupVisibility,
+  adminNavigationItemVisibility,
+} from "../lib/admin-navigation";
 
 export async function loader({ request }: Route.LoaderArgs) {
   const user = await requireSessionUser(request);
@@ -23,9 +24,8 @@ export async function loader({ request }: Route.LoaderArgs) {
 export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
   const { user } = loaderData;
   const can = (permission: string) => user.permissions.includes(permission);
-  const canAccessBilling = canAccessSettlementWorkbench(user.permissions);
-  const canAccessBatches = canAccessBatchWorkspace(user);
   const navigationGroups = adminNavigationGroupVisibility(user);
+  const navigationItems = adminNavigationItemVisibility(user);
   const organizationAccessHref = can("department.view")
     ? "/admin/departments"
     : can("user.view")
@@ -54,37 +54,37 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
 
         <nav className="nav" aria-label="运营管理导航">
           <SideNavGroup label="工作台" visible={navigationGroups.workbench}>
-            <SideLink to="/admin/portal" icon="layout">任务工作台</SideLink>
-            <SideLink to="/admin/notifications" icon="bell">
+            {navigationItems.portal && <SideLink to="/admin/portal" icon="layout">任务工作台</SideLink>}
+            {navigationItems.notifications && <SideLink to="/admin/notifications" icon="bell">
               通知{loaderData.notifications.unreadCount>0&&<b className="nav-badge">{loaderData.notifications.unreadCount>99?"99+":loaderData.notifications.unreadCount}</b>}
-            </SideLink>
-            {can("dashboard.view") && <SideLink to="/admin" icon="dashboard" end>运营总览</SideLink>}
+            </SideLink>}
+            {navigationItems.dashboard && <SideLink to="/admin" icon="dashboard" end>运营总览</SideLink>}
           </SideNavGroup>
 
           <SideNavGroup label="汽运业务" visible={navigationGroups.transport}>
-          {can("quote.view") && <SideLink to="/admin/quotations" icon="receipt">询价与报价</SideLink>}
-          {can("order.view") && <SideLink to="/admin/orders" icon="clipboard">订单中心</SideLink>}
-          {canAccessBatches && <SideLink to="/admin/loading" icon="truck">配载单跟踪</SideLink>}
-          {can("order.module.documents.manage") && <SideLink to="/admin/documents" icon="documents">文件中心</SideLink>}
-          {can("shipment.view") && <SideLink to="/admin/shipments" icon="packageCheck">运输单据</SideLink>}
-          {canAccessBilling && <SideLink to="/admin/billing" icon="billing">费用结算</SideLink>}
-          {can("order.module.cargo.manage") && <SideLink to="/admin/cargo" icon="boxes">货物信息</SideLink>}
+          {navigationItems.quotations && <SideLink to="/admin/quotations" icon="receipt">询价与报价</SideLink>}
+          {navigationItems.orders && <SideLink to="/admin/orders" icon="clipboard">订单中心</SideLink>}
+          {navigationItems.loading && <SideLink to="/admin/loading" icon="truck">配载单跟踪</SideLink>}
+          {navigationItems.documents && <SideLink to="/admin/documents" icon="documents">文件中心</SideLink>}
+          {navigationItems.shipments && <SideLink to="/admin/shipments" icon="packageCheck">运输单据</SideLink>}
+          {navigationItems.billing && <SideLink to="/admin/billing" icon="billing">费用结算</SideLink>}
+          {navigationItems.cargo && <SideLink to="/admin/cargo" icon="boxes">货物信息</SideLink>}
           </SideNavGroup>
 
           <SideNavGroup label="业务资料" visible={navigationGroups.businessData}>
-          {can("customer.view") && <SideLink to="/admin/customers" icon="building">客户管理</SideLink>}
-          {can("sales.view") && <SideLink to="/admin/sales" icon="chart">销售管理</SideLink>}
-          {can("pricing.view") && <SideLink to="/admin/logistics-products" icon="briefcase">物流产品</SideLink>}
-          {can("carrier.view") && <SideLink to="/admin/carriers" icon="truck">承运商管理</SideLink>}
-          {can("workflow.view") && <SideLink to="/admin/workflow" icon="workflow">业务工作流</SideLink>}
+          {navigationItems.customers && <SideLink to="/admin/customers" icon="building">客户管理</SideLink>}
+          {navigationItems.sales && <SideLink to="/admin/sales" icon="chart">销售管理</SideLink>}
+          {navigationItems.logisticsProducts && <SideLink to="/admin/logistics-products" icon="briefcase">物流产品</SideLink>}
+          {navigationItems.carriers && <SideLink to="/admin/carriers" icon="truck">承运商管理</SideLink>}
+          {navigationItems.workflow && <SideLink to="/admin/workflow" icon="workflow">业务工作流</SideLink>}
           </SideNavGroup>
 
           <SideNavGroup label="系统" visible={navigationGroups.system}>
-          {can("master.view") && <SideLink to="/admin/master-data" icon="settings">基础数据</SideLink>}
-          {can("warehouse.manage") && <SideLink to="/admin/warehouses" icon="warehouse">仓库管理</SideLink>}
-          {organizationAccessHref && <SideLink to={organizationAccessHref} icon="userSettings">组织与权限</SideLink>}
-          {can("security.manage") && <SideLink to="/admin/security" icon="lock">安全中心</SideLink>}
-          {can("audit.view") && <SideLink to="/admin/audit" icon="history">审计日志</SideLink>}
+          {navigationItems.masterData && <SideLink to="/admin/master-data" icon="settings">基础数据</SideLink>}
+          {navigationItems.warehouses && <SideLink to="/admin/warehouses" icon="warehouse">仓库管理</SideLink>}
+          {navigationItems.organizationAccess && organizationAccessHref && <SideLink to={organizationAccessHref} icon="userSettings">组织与权限</SideLink>}
+          {navigationItems.security && <SideLink to="/admin/security" icon="lock">安全中心</SideLink>}
+          {navigationItems.audit && <SideLink to="/admin/audit" icon="history">审计日志</SideLink>}
           </SideNavGroup>
         </nav>
 

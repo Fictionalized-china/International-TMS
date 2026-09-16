@@ -1,3 +1,8 @@
+import {
+  inferAdminNavigationMenuPermissions,
+  normalizeAdminNavigationPermissions,
+} from "./admin-navigation";
+
 type PositionSeed = [code: string, name: string, departmentCode: string, sortOrder: number];
 type RoleSeed = [code: string, name: string, description: string];
 
@@ -92,7 +97,14 @@ export function accessModelBootstrapStatements(
       ).bind(roleId));
       continue;
     }
-    const permissions = accessModelRolePermissions[code] ?? [];
+    const basePermissions = accessModelRolePermissions[code] ?? [];
+    const permissions = normalizeAdminNavigationPermissions([
+      ...basePermissions,
+      ...inferAdminNavigationMenuPermissions(basePermissions, {
+        positionCode: null,
+        roleCodes: [code],
+      }),
+    ]);
     if (permissions.length) {
       statements.push(db.prepare(
         `INSERT INTO role_permissions(role_id,permission_code)

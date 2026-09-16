@@ -633,7 +633,7 @@ export async function action({ request }: Route.ActionArgs) {
       category:"workflow_field_policy_changed",
       severity:changes.some((item)=>item.mode==="required")?"critical":"warning",
       title:`工作流字段规则已批量变更：${changes.length} 项`,
-      message:`${summary}${changes.length>8?`；另有 ${changes.length-8} 项` : ""}。历史节点不会回退，后续门禁已同步。`,
+      message:`${summary}${changes.length>8?`；另有 ${changes.length-8} 项` : ""}。当前和未到达节点采用新规则；已通过节点沿用旧规则。`,
       link:`/admin/workflow?workflowId=${encodeURIComponent(workflowId)}`,
       requiresLeadershipAck:true,
     });
@@ -644,7 +644,7 @@ export async function action({ request }: Route.ActionArgs) {
     const preservedText=preservedFiles||preservedValues
       ?`；保留 ${preservedFiles} 个历史文件和 ${preservedValues} 条历史值`
       :"";
-    return { success:`已一次应用 ${changes.length} 项字段规则，现有订单后续门禁已同步${taskText?`；${taskText}`:""}${preservedText}` };
+    return { success:`已一次应用 ${changes.length} 项字段规则；当前和未到达节点采用新规则，已通过节点沿用旧规则${taskText?`；${taskText}`:""}${preservedText}` };
   }
 
   if (intent === "field_positions_update") {
@@ -845,7 +845,7 @@ export async function action({ request }: Route.ActionArgs) {
       category:"workflow_field_policy_changed",
       severity:mode==="required"?"critical":"warning",
       title:`工作流字段规则已变更：${field.label}`,
-      message:`${field.label} 已由${previousMode==="required"?"必填":previousMode==="optional"?"选填":"隐藏"}改为${mode==="required"?"必填":mode==="optional"?"选填":"隐藏"}。影响 ${impact.total} 张订单：当前 ${impact.current}、未来 ${impact.future}、历史补录 ${impact.historical}、审计补录 ${impact.auditOnly}；历史节点不会回退。`,
+      message:`${field.label} 已由${previousMode==="required"?"必填":previousMode==="optional"?"选填":"隐藏"}改为${mode==="required"?"必填":mode==="optional"?"选填":"隐藏"}。影响 ${impact.total} 张订单：当前 ${impact.current}、未到达 ${impact.future}、已通过沿用旧规则 ${impact.historical + impact.auditOnly}。`,
       link:`/admin/workflow?workflowId=${encodeURIComponent(workflowId)}`,
       requiresLeadershipAck:true,
     });
@@ -854,7 +854,7 @@ export async function action({ request }: Route.ActionArgs) {
       : "";
     const modeLabel = mode === "required" ? "必填" : mode === "optional" ? "选填" : "隐藏";
     const taskText=supplementTasks.created?`；已创建 ${supplementTasks.created} 项资料补录任务`:supplementTasks.cancelled?`；已关闭 ${supplementTasks.cancelled} 项旧补录任务`:"";
-    return { success: `字段“${field.label}”已设为${modeLabel}，现有订单后续门禁已同步${taskText}${preservedText}` };
+    return { success: `字段“${field.label}”已设为${modeLabel}；当前和未到达节点采用新规则，已通过节点沿用旧规则${taskText}${preservedText}` };
   }
 
   if (!workflowIntentAllowedForUsage(intent, definition.instance_count) && intent !== "advance") {
@@ -1091,11 +1091,11 @@ export async function action({ request }: Route.ActionArgs) {
       category:"workflow_field_added",
       severity:parsed.mode==="required"?"critical":"warning",
       title:`工作流新增字段：${parsed.label}`,
-      message:`“${parsed.label}”已加入“${step.step_key}”节点并设为${workflowModeLabel(parsed.mode)}。影响 ${impact.total} 张订单；历史节点不回退${supplementTasks.created?`，已生成 ${supplementTasks.created} 项补录任务`:""}。`,
+      message:`“${parsed.label}”已加入“${step.step_key}”节点并设为${workflowModeLabel(parsed.mode)}。影响 ${impact.total} 张订单；当前和未到达节点采用新规则，已通过节点沿用旧规则。`,
       link:`/admin/workflow?workflowId=${encodeURIComponent(workflowId)}`,
       requiresLeadershipAck:true,
     });
-    return { success: `字段“${parsed.label}”已新增并同步到 ${impact.total} 张现有订单${supplementTasks.created?`；已创建 ${supplementTasks.created} 项资料补录任务`:""}` };
+    return { success: `字段“${parsed.label}”已新增；当前和未到达节点采用新规则，已通过节点沿用旧规则` };
   }
 
   if (intent === "field_catalog_add" || intent === "field_catalog_assign") {
@@ -1240,11 +1240,11 @@ export async function action({ request }: Route.ActionArgs) {
       category:"workflow_field_catalog_changed",
       severity:mode==="required"?"critical":"warning",
       title:`工作流字段积木已变更：${catalog.label}`,
-      message:`“${catalog.label}”已${exists?"更新":"加入"}到“${step.step_key}”并设为${workflowModeLabel(mode)}。影响 ${impact.total} 张订单；历史节点不回退${supplementTasks.created?`，已生成 ${supplementTasks.created} 项补录任务`:""}。`,
+      message:`“${catalog.label}”已${exists?"更新":"加入"}到“${step.step_key}”并设为${workflowModeLabel(mode)}。影响 ${impact.total} 张订单；当前和未到达节点采用新规则，已通过节点沿用旧规则。`,
       link:`/admin/workflow?workflowId=${encodeURIComponent(workflowId)}`,
       requiresLeadershipAck:true,
     });
-    return { success: `业务字段“${catalog.label}”已${exists ? "更新" : "加入"}到“${step.step_key}”，${impact.total} 张现有订单已同步${supplementTasks.created?`；已创建 ${supplementTasks.created} 项补录任务`:""}` };
+    return { success: `业务字段“${catalog.label}”已${exists ? "更新" : "加入"}到“${step.step_key}”；当前和未到达节点采用新规则，已通过节点沿用旧规则` };
   }
 
   if (intent === "field_update") {
@@ -2318,7 +2318,7 @@ function WorkflowDefinitionCard({
             </div>
             <div className={`alert ${capabilities.usedByOrders ? "warning" : "success"}`}>
               {capabilities.usedByOrders
-                ? "该版本已被订单使用：可以新增字段并调整必填、选填或隐藏；历史节点不回退。若需增删节点，请基于此版本创建新的工作流。"
+                ? "该版本已被订单使用：可以新增字段并调整必填、选填或隐藏；当前和未到达节点采用新规则，已通过节点沿用旧规则。若需增删节点，请基于此版本创建新的工作流。"
                 : "该版本尚未被订单使用：点击编辑后可新增、删除节点，配置功能模组，并调整字段必填、选填或隐藏。"}
             </div>
             <div className="table-wrap workflow-inspect-node-table">
@@ -2774,7 +2774,7 @@ function FieldList({
       <div className="workflow-field-config-heading">
         <div>
           <h3>字段填写规则</h3>
-          <p>必填字段缺失会阻断当前和未来流程；历史节点不回退而生成补录任务；隐藏不显示、不阻断，历史值与附件永久保留。</p>
+          <p>必填字段缺失会阻断当前和未到达节点；已通过节点沿用通过时的旧规则；隐藏后不显示、不阻断，历史值与附件永久保留。</p>
         </div>
         <strong>{fields.length} 个字段</strong>
       </div>
@@ -2944,17 +2944,17 @@ function WorkflowFieldBatchActions({
     <div className="workflow-field-batch-buttons">
       {changes.length?<Modal title={`预览字段规则变更 · ${changes.length} 项`} triggerLabel="预览" triggerClassName="secondary" size="wide">
         <div className="workflow-field-batch-preview">
-          <div className="alert warning" role="status">这里只预览，不会保存。确认应用后，全部变更作为一次提交同步到实际工作流、现有订单门禁和补录任务。</div>
+          <div className="alert warning" role="status">这里只预览，不会保存。确认应用后，全部变更作为一次提交同步到当前和未到达节点；已通过节点保持原规则。</div>
           <div className="table-wrap"><table><thead><tr><th>节点 / 字段</th><th>规则变化</th><th>现有订单影响</th></tr></thead><tbody>{changes.map(({field,currentMode,mode})=>{
             const step=stepById.get(field.step_id);
             const impact=fieldPolicyImpacts[step?.step_key??""]??{total:0,future:0,current:0,historical:0,auditOnly:0};
-            return <tr key={field.id}><td><strong>{field.label}</strong><small>{step?.name??"未知节点"} · 顺序 {step?.sort_order??"—"}</small></td><td><span className={`status-pill workflow-mode-${currentMode}`}>{workflowModeLabel(currentMode)}</span><b className="workflow-field-change-arrow">→</b><span className={`status-pill workflow-mode-${mode}`}>{workflowModeLabel(mode)}</span></td><td>{impact.total?`${impact.total} 张：当前 ${impact.current}、未来 ${impact.future}、历史补录 ${impact.historical}、仅审计 ${impact.auditOnly}`:"当前没有既有订单受影响"}</td></tr>;
+            return <tr key={field.id}><td><strong>{field.label}</strong><small>{step?.name??"未知节点"} · 顺序 {step?.sort_order??"—"}</small></td><td><span className={`status-pill workflow-mode-${currentMode}`}>{workflowModeLabel(currentMode)}</span><b className="workflow-field-change-arrow">→</b><span className={`status-pill workflow-mode-${mode}`}>{workflowModeLabel(mode)}</span></td><td>{impact.total?`${impact.total} 张：当前 ${impact.current}、未到达 ${impact.future}、已通过沿用旧规则 ${impact.historical + impact.auditOnly}`:"当前没有既有订单受影响"}</td></tr>;
           })}</tbody></table></div>
         </div>
       </Modal>:<button type="button" className="secondary" disabled>预览</button>}
       <ConfirmAction
         title={`确认一次应用 ${changes.length} 项字段规则`}
-        description={`系统会把当前页面暂存的 ${changes.length} 项变化一次提交，并按订单阶段同步门禁与补录任务；历史节点不会回退，隐藏字段的历史数据永久保留。`}
+        description={`系统会把当前页面暂存的 ${changes.length} 项变化一次提交；当前和未到达节点采用新规则，已通过节点沿用旧规则，隐藏字段的历史数据永久保留。`}
         triggerLabel="确认应用"
         confirmLabel="确认应用全部变更"
         className="primary"
@@ -2990,7 +2990,7 @@ function FieldForm({
   const [mode,setMode]=useState(field?workflowFieldMode(field):"optional");
   const formId=`workflow-field-${field?.id??`new-${stepId}`}`;
   const impactDescription=mode==="required"
-    ? `新增后，${impact?.current??0} 张当前节点订单与 ${impact?.future??0} 张未到达订单启用门禁；${impact?.historical??0} 张已通过节点订单生成资料补录；${impact?.auditOnly??0} 张已出境或完成订单只生成审计补录。历史节点不会回退。`
+    ? `新增后，${impact?.current??0} 张当前节点订单与 ${impact?.future??0} 张未到达订单采用新规则；${(impact?.historical??0)+(impact?.auditOnly??0)} 张已通过节点订单沿用旧规则。`
     : `新增后同步到 ${impact?.total??0} 张现有订单，设为${workflowModeLabel(mode)}，不会阻断已通过节点；历史数据保持不变。`;
   return (
     <Form id={formId} method="post" className="workflow-field-form workflow-field-modal-form">
@@ -3130,7 +3130,7 @@ function CatalogFieldAction({workflowId,step,catalog,existing,onCurrentStep,busy
   const formId=`workflow-catalog-${step.id}-${catalog.fieldKey}`;
   const actionLabel=onCurrentStep?"更新规则":existing?"移动到本节点":"加入本节点";
   const description=mode==="required"
-    ? `${actionLabel}后，${impact.current} 张当前节点订单与 ${impact.future} 张未到达订单启用门禁；${impact.historical} 张历史订单生成资料补录；${impact.auditOnly} 张已出境或完成订单只生成审计补录。历史节点不会回退。`
+    ? `${actionLabel}后，${impact.current} 张当前节点订单与 ${impact.future} 张未到达订单采用新规则；${impact.historical + impact.auditOnly} 张已通过节点订单沿用旧规则。`
     : `${actionLabel}后同步到 ${impact.total} 张现有订单，设为${workflowModeLabel(mode)}；已有值与附件保持不变。`;
   return <Form id={formId} method="post" className="workflow-catalog-row-form">
     <input type="hidden" name="intent" value="field_catalog_assign" />

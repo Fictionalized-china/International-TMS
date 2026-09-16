@@ -93,6 +93,7 @@ function buildProvisionSql(accounts: PreparedAccount[], organizationCode: string
   const now = new Date().toISOString();
   const organizationId = organizationIdExpression(organizationCode);
   const allowedEmails = sqlList(accounts.map((account) => account.email));
+  const phoneByKey = new Map(accounts.map((account,index) => [account.key,`1399${String(index+1).padStart(7,"0")}`]));
   const boss = accounts.find((account) => account.key === "boss");
   if (!boss) throw new Error("Missing boss account blueprint");
 
@@ -103,7 +104,7 @@ function buildProvisionSql(accounts: PreparedAccount[], organizationCode: string
     "-- Apply only after migrations and /setup have created the target organization and owner.",
     "-- Existing identities outside this allowlist are disabled, not deleted, so audit references remain intact.",
     `DELETE FROM sessions WHERE organization_id=${organizationId};`,
-    `UPDATE users SET email=${sqlText(boss.email)},password_hash=${sqlText(boss.passwordHash)},display_name=${sqlText(boss.displayName)},status='active',failed_login_count=0,locked_until=NULL,updated_at=${sqlText(now)}\n` +
+    `UPDATE users SET email=${sqlText(boss.email)},password_hash=${sqlText(boss.passwordHash)},display_name=${sqlText(boss.displayName)},phone=${sqlText(phoneByKey.get(boss.key)!)},status='active',failed_login_count=0,locked_until=NULL,updated_at=${sqlText(now)}\n` +
       `WHERE id=(SELECT m.user_id FROM memberships m JOIN roles r ON r.organization_id=m.organization_id JOIN membership_roles mr ON mr.membership_id=m.id AND mr.role_id=r.id WHERE m.organization_id=${organizationId} AND r.code='owner' LIMIT 1);`,
   ];
 
@@ -125,9 +126,9 @@ function buildProvisionSql(accounts: PreparedAccount[], organizationCode: string
 
   for (const account of accounts.filter((item) => item.key !== "boss")) {
     statements.push(
-      `INSERT INTO users(id,email,password_hash,display_name,status,failed_login_count,locked_until,created_at,updated_at)\n` +
-      `VALUES(${sqlText(randomUUID())},${sqlText(account.email)},${sqlText(account.passwordHash)},${sqlText(account.displayName)},'active',0,NULL,${sqlText(now)},${sqlText(now)})\n` +
-      `ON CONFLICT(email) DO UPDATE SET password_hash=excluded.password_hash,display_name=excluded.display_name,status='active',failed_login_count=0,locked_until=NULL,updated_at=excluded.updated_at;`,
+      `INSERT INTO users(id,email,password_hash,display_name,phone,status,failed_login_count,locked_until,created_at,updated_at)\n` +
+      `VALUES(${sqlText(randomUUID())},${sqlText(account.email)},${sqlText(account.passwordHash)},${sqlText(account.displayName)},${sqlText(phoneByKey.get(account.key)!)},'active',0,NULL,${sqlText(now)},${sqlText(now)})\n` +
+      `ON CONFLICT(email) DO UPDATE SET password_hash=excluded.password_hash,display_name=excluded.display_name,phone=excluded.phone,status='active',failed_login_count=0,locked_until=NULL,updated_at=excluded.updated_at;`,
     );
   }
 

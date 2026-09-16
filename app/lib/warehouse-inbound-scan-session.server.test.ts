@@ -12,7 +12,9 @@ type FakeStatement = {
 };
 
 function inboundScanDb() {
+  const preparedSql: string[] = [];
   const statement = (sql: string): FakeStatement => {
+    preparedSql.push(sql);
     const current: FakeStatement = {
       sql,
       values: [],
@@ -53,6 +55,7 @@ function inboundScanDb() {
   };
 
   return {
+    preparedSql,
     prepare: statement,
     async batch(statements: FakeStatement[]) {
       for (const prepared of statements) {
@@ -70,11 +73,12 @@ function inboundScanDb() {
 
 describe("scanInboundMarkAtWarehouse", () => {
   it("atomically records the first valid IN mark scan", async () => {
-    const result = await scanInboundMarkAtWarehouse(inboundScanDb() as never, {
+    const db = inboundScanDb();
+    const result = await scanInboundMarkAtWarehouse(db as never, {
       organizationId: "organization-1",
       warehouseId: "warehouse-1",
       userId: "warehouse-user-1",
-      code: "so2026090800320-in-001",
+      code: "SO2026090800320",
       now: "2026-09-09T00:00:00.000Z",
     });
 
@@ -85,5 +89,6 @@ describe("scanInboundMarkAtWarehouse", () => {
       inboundMarkId: "mark-1",
       orderReceivingSessionId: "receiving-session-1",
     });
+    expect(db.preparedSql).toContainEqual(expect.stringContaining("UPPER(ord.order_number)=?"));
   });
 });

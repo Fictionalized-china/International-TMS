@@ -249,7 +249,7 @@ export async function loader({ request }: Route.LoaderArgs) {
            LEFT JOIN warehouse_receipts r ON r.id=p.receipt_id AND r.organization_id=p.organization_id
            LEFT JOIN order_cargo_items i ON i.id=p.cargo_item_id AND i.organization_id=p.organization_id
           WHERE p.organization_id=?
-            AND p.label_kind='oul' AND p.lifecycle_status='in_transit' AND p.status='dispatched'
+            AND p.label_kind='oul'
             AND (UPPER(p.barcode)=UPPER(?) OR UPPER(p.package_number)=UPPER(?))
           ORDER BY CASE WHEN UPPER(p.barcode)=UPPER(?) THEN 1 ELSE 2 END
           LIMIT 1`,

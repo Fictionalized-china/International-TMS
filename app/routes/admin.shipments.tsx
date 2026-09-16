@@ -15,6 +15,7 @@ import { statusLabel as orderStatusLabel } from "../lib/order-workflow";
 import { loadOrderGuidance } from "../lib/order-guidance.server";
 import { canOperateCurrentOrder, currentOrderActionSql, orderVisibilitySql, requireOrderAccess } from "../lib/order-access.server";
 import { orderRouteFilterCount, readOrderRouteFilters, type OrderRouteFilters } from "../lib/order-route-filters";
+import { duplicateOrDatabaseError } from "../lib/db-errors.server";
 
 type Shipment = {
   id: string;
@@ -284,7 +285,7 @@ export async function action({ request }: Route.ActionArgs) {
     const code = valueOf(form, "code").toLowerCase(), name = valueOf(form, "name"), scac = valueOf(form, "scac").toUpperCase(), contactName = valueOf(form, "contactName"), phone = valueOf(form, "phone"), email = valueOf(form, "email").toLowerCase();
     if (validateCode(code) || name.length < 2 || (email && validateEmail(email))) return { formError: "请填写有效承运商代码、名称和邮箱" };
     const id = crypto.randomUUID();
-    try { await env.DB.prepare("INSERT INTO carriers (id, organization_id, code, name, scac, contact_name, contact_phone, contact_email, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, current.organizationId, code, name, scac || null, contactName || null, phone || null, email || null, now, now).run(); } catch { return { formError: "承运商代码不能重复" }; }
+    try { await env.DB.prepare("INSERT INTO carriers (id, organization_id, code, name, scac, contact_name, contact_phone, contact_email, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, current.organizationId, code, name, scac || null, contactName || null, phone || null, email || null, now, now).run(); } catch (error) { return { formError: duplicateOrDatabaseError(error, "承运商代码不能重复") }; }
     await writeAudit({ request, action: "carrier.create", resourceType: "carrier", resourceId: id, organizationId: current.organizationId, actorUserId: current.userId, metadata: { code } });
     return { success: "承运商已创建" };
   }

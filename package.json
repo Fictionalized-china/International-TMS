@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "react-router build && node scripts/sanitize-build.mjs",
+    "build:mysql": "node scripts/build-mysql.mjs",
     "ci": "npm run typecheck && npm run test && npm run build",
     "dev": "npm run db:migrate:local && react-router dev",
     "dev:win": "npm run db:migrate:local && react-router dev --clearScreen=false --host 127.0.0.1 --port 5189 --strictPort",
@@ -11,6 +12,12 @@
     "deploy": "npm run db:migrate:remote && npm run build && wrangler deploy",
     "db:migrate:local": "wrangler d1 migrations apply international-tms --local",
     "db:migrate:remote": "wrangler d1 migrations apply international-tms --remote",
+    "db:bootstrap:mysql": "python scripts/export-mysql-bootstrap.py",
+    "db:init:mysql": "node scripts/init-mysql.mjs",
+    "db:verify:mysql": "node scripts/verify-mysql.mjs",
+    "db:migrate:mysql": "node scripts/migrate-mysql.mjs",
+    "db:verify:runtime:mysql": "node scripts/verify-mysql-runtime.mjs",
+    "start:mysql": "node production/server.mjs",
     "preview": "npm run build && vite preview",
     "test": "vitest run",
     "test:stress": "node scripts/http-stress.mjs",
@@ -21,8 +28,10 @@
     "postinstall": "wrangler types"
   },
   "dependencies": {
+    "@react-router/node": "^8.0.0",
     "isbot": "^5.1.36",
     "lucide-react": "^0.468.0",
+    "mysql2": "^3.24.4",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-router": "8.0.0"

@@ -169,7 +169,11 @@ import {
   saveOrderCustomWorkflowFieldValue,
   type WorkflowFieldState,
 } from "../lib/workflow-fields.server";
-import { canPositionHandleWorkflowField } from "../lib/workflow-field-position-access";
+import {
+  canPositionHandleWorkflowField,
+  canWriteWorkflowFieldAtCurrentNode,
+} from "../lib/workflow-field-position-access";
+import { visibleApprovalCustomFields } from "../lib/order-approval-custom-fields";
 import { canCompleteWorkflowTask } from "../lib/workflow-task-access";
 import { workflowFieldConfigurationHref } from "../lib/workflow-field-locator";
 import {
@@ -693,6 +697,18 @@ function canManageLoadedModule(data: Route.ComponentProps["loaderData"]) {
   return canOperateLoadedConfiguredModule(data) ||
     (!data.workflowStageAccess.workflowContext.locked &&
       canManageOrderModule(data.current, data.definition.code));
+}
+
+export function canWriteLoadedWorkflowField(
+  data: Route.ComponentProps["loaderData"],
+  field: WorkflowFieldState,
+) {
+  return data.access.canEdit && canWriteWorkflowFieldAtCurrentNode({
+    configuredPositionCodes: field.handlerPositionCodes,
+    positionCode: data.current.positionCode,
+    canOperateCurrentNode: canOperateCurrentOrder(data.current, data.order),
+    canOperateModule: data.moduleActionCanOperate,
+  });
 }
 type CustomsRecord = {
   id: string;
@@ -1657,6 +1673,18 @@ export async function action({ request, params }: Route.ActionArgs) {
     orderId,
     moduleCode as Parameters<typeof loadOrderModuleWorkflowFields>[2],
   );
+  const customWorkflowFieldAction = intent === "workflow_field_save"
+    ? moduleWorkflowFields.find((field) => field.id === valueOf(form, "fieldId"))
+    : null;
+  const canWriteConfiguredWorkflowField = Boolean(
+    customWorkflowFieldAction &&
+    canWriteWorkflowFieldAtCurrentNode({
+      configuredPositionCodes: customWorkflowFieldAction.handlerPositionCodes,
+      positionCode: current.positionCode,
+      canOperateCurrentNode: canOperateCurrentOrder(current, order),
+      canOperateModule: moduleScopedActionAccess,
+    }),
+  );
   const documentFieldWriteAction = ["document_upload", "document_metadata_update"].includes(intent);
   const documentFieldPolicy = actionDocumentPlacement
     ? moduleWorkflowFields.find((field) => field.fieldKey === actionDocumentPlacement.fieldKey)
@@ -1756,7 +1784,7 @@ export async function action({ request, params }: Route.ActionArgs) {
           : "结算文件仅可由本单已分配的客服或财务会计上传和维护。",
     };
   }
-  if (!canOperateCurrentOrder(current, order) && !isOrdinaryTrackingMutation && !isSalesConsignmentSubmitAction && !isSalesCargoEditAction && !moduleScopedActionAccess && !isExpenseDirectionControlAction && !isAuthorizedSettlementDocumentAction && !canWriteConfiguredDocumentField) {
+  if (!canOperateCurrentOrder(current, order) && !isOrdinaryTrackingMutation && !isSalesConsignmentSubmitAction && !isSalesCargoEditAction && !moduleScopedActionAccess && !isExpenseDirectionControlAction && !isAuthorizedSettlementDocumentAction && !canWriteConfiguredDocumentField && !canWriteConfiguredWorkflowField) {
     return { formError: "当前节点不由本账号办理，订单信息仅供查看" };
   }
   const isAssignedConsignmentApprover = isAssignedOrderApprover({
@@ -1767,7 +1795,7 @@ export async function action({ request, params }: Route.ActionArgs) {
   const canApproveConsignment =
     (isConsignmentApprovalAction || isConsignmentDocumentReviewAction) &&
     isAssignedConsignmentApprover;
-  if (!moduleManageAccess && !isOrdinaryTrackingMutation && !canApproveConsignment && !isSalesConsignmentSubmitAction && !isSalesCargoEditAction && !moduleScopedActionAccess && !isExpenseDirectionControlAction && !isAuthorizedSettlementDocumentAction && !canWriteConfiguredDocumentField) {
+  if (!moduleManageAccess && !isOrdinaryTrackingMutation && !canApproveConsignment && !isSalesConsignmentSubmitAction && !isSalesCargoEditAction && !moduleScopedActionAccess && !isExpenseDirectionControlAction && !isAuthorizedSettlementDocumentAction && !canWriteConfiguredDocumentField && !canWriteConfiguredWorkflowField) {
     return { formError: "当前岗位可以查看本模块，但没有提交业务操作的权限" };
   }
   const expenseValidationWorkflowFields = expensePolicyModuleCode === moduleCode
@@ -3346,6 +3374,23 @@ export async function action({ request, params }: Route.ActionArgs) {
       }
       const now = new Date().toISOString();
       const shipmentStatus = milestoneCode === "border_arrived" ? "customs" : "in_transit";
+      // MySQL 1093 guard ("You can't specify target table 'shipments' for
+      // update in FROM clause"): resolve the latest shipment id per order
+      // BEFORE the atomic batch, then update by primary key only.  Nothing in
+      // the batch mutates shipments before these UPDATEs, so the SQLite/D1
+      // path stays semantically identical.
+      const latestShipmentIdByOrder = new Map<string, string>();
+      for (const targetOrderId of linkedOrderIds) {
+        const latestShipment = await env.DB.prepare(
+          `SELECT id FROM shipments
+            WHERE organization_id=? AND order_id=?
+            ORDER BY COALESCE(updated_at,created_at) DESC,created_at DESC
+            LIMIT 1`,
+        )
+          .bind(current.organizationId, targetOrderId)
+          .first<{ id: string }>();
+        if (latestShipment) latestShipmentIdByOrder.set(targetOrderId, latestShipment.id);
+      }
       const statements = linkedOrderIds.flatMap((targetOrderId) => [
         env.DB.prepare(
           `INSERT INTO order_tracking_milestones(id,organization_id,order_id,milestone_code,milestone_name,event_at,location,vehicle_reference,notes,visible_to_customer,created_by_user_id,created_at)
@@ -3372,14 +3417,23 @@ export async function action({ request, params }: Route.ActionArgs) {
           milestoneCode,
           eventAt,
         ),
-        env.DB.prepare(
-          `UPDATE shipments
-           SET status=?,
-               current_location=COALESCE(?,current_location),
-               updated_at=?
-           WHERE organization_id=? AND order_id=? AND status!='cancelled'
-             AND id=(SELECT latest.id FROM shipments latest WHERE latest.organization_id=? AND latest.order_id=? ORDER BY COALESCE(latest.updated_at,latest.created_at) DESC,latest.created_at DESC LIMIT 1)`,
-        ).bind(shipmentStatus, location, now, current.organizationId, targetOrderId, current.organizationId, targetOrderId),
+        ...(latestShipmentIdByOrder.has(targetOrderId)
+          ? [
+              env.DB.prepare(
+                `UPDATE shipments
+                 SET status=?,
+                     current_location=COALESCE(?,current_location),
+                     updated_at=?
+                 WHERE organization_id=? AND id=? AND status!='cancelled'`,
+              ).bind(
+                shipmentStatus,
+                location,
+                now,
+                current.organizationId,
+                latestShipmentIdByOrder.get(targetOrderId)!,
+              ),
+            ]
+          : []),
       ]);
       await env.DB.batch(statements);
       if (batchSynchronizedTrackingMilestones.has(milestoneCode)) {
@@ -4522,6 +4576,8 @@ export default function OrderModulePage({
         currentAssigneeUserId: order.current_assignee_user_id,
         currentUserId: loaderData.current.userId,
       });
+  const canWriteField = (field: WorkflowFieldState) =>
+    canWriteLoadedWorkflowField(loaderData, field);
   const actionMessage =
     actionData && "formError" in actionData
       ? actionData.formError
@@ -4689,6 +4745,7 @@ export default function OrderModulePage({
                 manage={manage}
                 canApproveConsignment={canApproveConsignment}
                 busy={busy}
+                canWriteField={canWriteField}
                 reviewCloseSignal={
                   actionData && "documentReviewSignal" in actionData
                     ? actionData.documentReviewSignal
@@ -4704,6 +4761,7 @@ export default function OrderModulePage({
                         !assignmentNativeFieldKeys.has(field.fieldKey)),
                   )}
                   manage={manage}
+                  canWriteField={canWriteField}
                   busy={busy}
                 />
               )}
@@ -4762,6 +4820,8 @@ export function EmbeddedOrderModule({
   const manage =
     !readOnly &&
     canManageLoadedModule(scopedData) && scopedData.access.canEdit;
+  const canWriteField = (field: WorkflowFieldState) =>
+    canWriteLoadedWorkflowField(scopedData, field);
   const canApproveConsignment = !readOnly && (isAssignedOrderApprover({
     status: order.status,
     currentAssigneeUserId: order.current_assignee_user_id,
@@ -4818,19 +4878,28 @@ export function EmbeddedOrderModule({
           />
         )}
         {compactApproval ? (
-          <OrderApprovalReview
-            data={scopedData}
-            manage={manage}
-            canApproveConsignment={canApproveConsignment}
-            busy={busy}
-            reviewCloseSignal={reviewCloseSignal}
-          />
+          <>
+            <WorkflowFieldChecklist
+              fields={visibleApprovalCustomFields(scopedData.workflowFields)}
+              manage={manage}
+              canWriteField={canWriteField}
+              busy={busy}
+            />
+            <OrderApprovalReview
+              data={scopedData}
+              manage={manage}
+              canApproveConsignment={canApproveConsignment}
+              busy={busy}
+              reviewCloseSignal={reviewCloseSignal}
+            />
+          </>
         ) : (definition.code === "customs" && customsSection === "files") ||
           (definition.code === "costs" && costsSection === "files") ? null : (
           <ModuleBusinessData
             code={definition.code}
             data={scopedData}
             manage={manage}
+            canWriteField={canWriteField}
             canApproveConsignment={canApproveConsignment}
             busy={busy}
             reviewCloseSignal={reviewCloseSignal}
@@ -4849,6 +4918,7 @@ export function EmbeddedOrderModule({
                   !assignmentNativeFieldKeys.has(field.fieldKey)),
             )}
             manage={manage}
+            canWriteField={canWriteField}
             busy={busy}
           />
         )}
@@ -5052,11 +5122,13 @@ function ModuleNextGuidance({
 function WorkflowFieldChecklist({
   fields,
   manage,
+  canWriteField,
   busy,
   compact = false,
 }: {
   fields: WorkflowFieldState[];
   manage: boolean;
+  canWriteField?: (field: WorkflowFieldState) => boolean;
   busy: boolean;
   compact?: boolean;
 }) {
@@ -5112,7 +5184,7 @@ function WorkflowFieldChecklist({
                 {field.label}
                 {field.isRequired && <b className="required-mark" aria-label="必填">*</b>}
               </span>
-              {manage ? <CustomWorkflowFieldForm field={field} busy={busy} /> : <strong>{field.displayValue || ""}</strong>}
+              {(canWriteField?.(field) ?? manage) ? <CustomWorkflowFieldForm field={field} busy={busy} /> : <strong>{field.displayValue || ""}</strong>}
               <small className="workflow-field-runtime-source">来源节点：{field.stepName || field.stepKey} · <Link to={workflowFieldConfigurationHref({workflowId:field.workflowId,stepKey:field.stepKey,moduleCode:field.moduleCode,fieldKey:field.fieldKey})}>配置显示规则</Link></small>
             </div>
           ),
@@ -6178,6 +6250,7 @@ function ModuleBusinessData({
   code,
   data,
   manage,
+  canWriteField,
   canApproveConsignment,
   busy,
   reviewCloseSignal,
@@ -6187,6 +6260,7 @@ function ModuleBusinessData({
   code: OrderModuleCode;
   data: Route.ComponentProps["loaderData"];
   manage: boolean;
+  canWriteField?: (field: WorkflowFieldState) => boolean;
   canApproveConsignment: boolean;
   busy: boolean;
   reviewCloseSignal?: unknown;
@@ -7743,7 +7817,7 @@ function ModuleBusinessData({
                     <tr key={field.id} className={field.present ? "ready" : field.isRequired ? "missing" : ""}>
                       <td><strong>{field.label}{field.isRequired && <sup>*</sup>}</strong><small className="subline">{field.helpText || "业务补充信息"}</small></td>
                       <td><span className={`field-state ${field.present && field.isRequired ? "filled" : field.isRequired ? "required-missing" : "optional-empty"}`}>{field.present ? "已填" : field.isRequired ? "必填但未填" : "未填"}</span></td>
-                      <td><div className="consignment-custom-field-control">{manage ? <CustomWorkflowFieldForm field={field} busy={busy} /> : <span>{field.displayValue || ""}</span>}<div className="consignment-custom-field-source"><span>来源节点：{field.stepName || field.stepKey}</span>{manage && <Link className="text-button" to={workflowFieldConfigurationHref({workflowId:field.workflowId,stepKey:field.stepKey,moduleCode:field.moduleCode,fieldKey:field.fieldKey})}>配置显示规则</Link>}</div></div></td>
+                      <td><div className="consignment-custom-field-control">{(canWriteField?.(field) ?? manage) ? <CustomWorkflowFieldForm field={field} busy={busy} /> : <span>{field.displayValue || ""}</span>}<div className="consignment-custom-field-source"><span>来源节点：{field.stepName || field.stepKey}</span>{manage && <Link className="text-button" to={workflowFieldConfigurationHref({workflowId:field.workflowId,stepKey:field.stepKey,moduleCode:field.moduleCode,fieldKey:field.fieldKey})}>配置显示规则</Link>}</div></div></td>
                     </tr>
                   ))}</tbody>
                 </table>

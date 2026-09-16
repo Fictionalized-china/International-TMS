@@ -155,7 +155,10 @@ export async function loader({ request }: Route.LoaderArgs) {
             m.module_code,m.module_name,m.enabled,m.is_required,m.status,
             m.current_step_code,m.current_step_name,m.blocking_reason,m.assignee_user_id module_assignee_user_id,
             m.progress_percent,u.display_name assignee_name,
-            MAX(o.updated_at,m.updated_at) updated_at
+            CASE
+              WHEN o.updated_at >= m.updated_at THEN o.updated_at
+              ELSE m.updated_at
+            END updated_at
        FROM transport_orders o
        JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
        JOIN order_module_instances m ON m.order_id=o.id AND m.organization_id=o.organization_id

@@ -22,10 +22,8 @@ export function validatePortalRegistration(input: PortalRegistrationInput): Fiel
     errors.displayName = "联系人姓名应为 2-80 个字符";
   const emailError = validateEmail(input.email);
   if (emailError) errors.email = emailError;
-  if (input.phone) {
-    const phoneError = validatePhone(input.phone);
-    if (phoneError) errors.phone = phoneError;
-  }
+  const phoneError = validatePhone(input.phone);
+  if (phoneError) errors.phone = phoneError;
   const passwordError = validatePassword(input.password);
   if (passwordError) errors.password = passwordError;
   if (input.password !== input.confirmPassword) errors.confirmPassword = "两次输入的密码不一致";

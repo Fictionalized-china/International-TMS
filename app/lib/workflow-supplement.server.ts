@@ -37,12 +37,6 @@ export type WorkflowSupplementTask = {
   completed_by_name:string|null;
 };
 
-type WorkflowSupplementCandidate = {
-  instance_id:string;
-  order_id:string;
-  audit_only:number;
-};
-
 type OpenWorkflowSupplementTask = {
   instance_id:string;
   target_step_key:string;
@@ -128,109 +122,20 @@ export async function synchronizeWorkflowSupplementTasks(input:{
   actorUserId:string;
 }) {
   const now = new Date().toISOString();
-  if (input.mode !== "required") {
-    const cancelled = await env.DB.prepare(
-      `UPDATE workflow_supplement_tasks
-       SET status='cancelled',resolution_note=?,completed_by_user_id=?,completed_at=?,updated_at=?
-       WHERE organization_id=? AND workflow_id=? AND module_code=? AND field_key=? AND status='open'`,
-    ).bind(
-      input.mode === "hidden" ? "字段已隐藏，补录任务关闭；历史值继续保留审计。" : "字段已改为选填，补录任务关闭。",
-      input.actorUserId,now,now,input.organizationId,input.workflowId,input.moduleCode,input.fieldKey,
-    ).run();
-    return { created:0,cancelled:Number(cancelled.meta?.changes||0),autoCompleted:0 };
-  }
-  const candidates = await env.DB.prepare(
-    `SELECT wi.id instance_id,wi.order_id,
-       CASE WHEN wi.status='completed'
-         OR EXISTS(
-           SELECT 1 FROM transport_batch_orders bo
-           JOIN transport_exit_confirmations ec ON ec.batch_id=bo.batch_id
-           WHERE bo.order_id=wi.order_id AND bo.status!='removed'
-         )
-         OR EXISTS(
-           SELECT 1 FROM order_tracking_milestones tm
-           WHERE tm.order_id=wi.order_id AND tm.milestone_code IN ('exported','actual_exit','exit')
-         ) THEN 1 ELSE 0 END audit_only
-     FROM workflow_instances wi
-     JOIN workflow_steps current_step
-       ON current_step.workflow_id=wi.workflow_id AND current_step.step_key=wi.current_step_key
-     JOIN workflow_steps target_step
-       ON target_step.workflow_id=wi.workflow_id AND target_step.step_key=?
-     WHERE wi.organization_id=? AND wi.workflow_id=? AND wi.order_id IS NOT NULL
-       AND current_step.sort_order>target_step.sort_order`,
+  const resolutionNote = input.mode === "required"
+    ? "字段已改为必填；新规则只作用于当前和未到达节点，已通过节点沿用旧规则。"
+    : input.mode === "hidden"
+      ? "字段已隐藏；新规则只作用于当前和未到达节点，已通过节点沿用旧规则并保留历史值。"
+      : "字段已改为选填；新规则只作用于当前和未到达节点，已通过节点沿用旧规则。";
+  const cancelled = await env.DB.prepare(
+    `UPDATE workflow_supplement_tasks
+     SET status='cancelled',resolution_note=?,completed_by_user_id=?,completed_at=?,updated_at=?
+     WHERE organization_id=? AND workflow_id=? AND module_code=? AND field_key=? AND status='open'`,
   ).bind(
-    input.targetStepKey,input.organizationId,input.workflowId,
-  ).all<WorkflowSupplementCandidate>();
-
-  const missing:WorkflowSupplementCandidate[]=[];
-  const alreadyPresent:WorkflowSupplementCandidate[]=[];
-  // Keep the reads bounded and deterministic. A field-policy change can affect
-  // many historical orders, but it must never create a task merely because the
-  // order has already passed the node.
-  for (const candidate of candidates.results) {
-    const present=await workflowSupplementFieldIsPresent({
-      organizationId:input.organizationId,
-      orderId:candidate.order_id,
-      targetStepKey:input.targetStepKey,
-      moduleCode:input.moduleCode,
-      fieldKey:input.fieldKey,
-    });
-    (present?alreadyPresent:missing).push(candidate);
-  }
-
-  const writes:D1PreparedStatement[]=[];
-  for (const candidate of alreadyPresent) {
-    writes.push(env.DB.prepare(
-      `UPDATE workflow_supplement_tasks
-       SET status='completed',resolution_note=?,completed_by_user_id=?,completed_at=?,updated_at=?
-       WHERE organization_id=? AND workflow_id=? AND instance_id=? AND module_code=?
-         AND field_key=? AND status='open'`,
-    ).bind(
-      "系统检测到字段或文件已经补齐，任务自动完成。",
-      input.actorUserId,now,now,input.organizationId,input.workflowId,
-      candidate.instance_id,input.moduleCode,input.fieldKey,
-    ));
-  }
-  for (const candidate of missing) {
-    const auditOnly=candidate.audit_only===1;
-    writes.push(env.DB.prepare(
-      `INSERT OR IGNORE INTO workflow_supplement_tasks(
-        id,organization_id,workflow_id,instance_id,order_id,target_step_key,module_code,
-        field_key,field_label,task_kind,status,reason,created_by_user_id,created_at,updated_at
-       ) VALUES(?,?,?,?,?,?,?,?,?,?,'open',?,?,?,?)`,
-    ).bind(
-      crypto.randomUUID(),input.organizationId,input.workflowId,candidate.instance_id,
-      candidate.order_id,input.targetStepKey,input.moduleCode,input.fieldKey,input.fieldLabel,
-      auditOnly?"audit_only":"supplement",
-      auditOnly
-        ? "订单已出境或完成：仅补录审计，不回退历史节点。"
-        : "字段改为必填时订单已通过所属节点：创建补录任务，不回退历史节点。",
-      input.actorUserId,now,now,
-    ));
-  }
-  let created=0,autoCompleted=0;
-  for (let index=0;index<writes.length;index+=80) {
-    const results=await env.DB.batch(writes.slice(index,index+80));
-    for (let offset=0;offset<results.length;offset+=1) {
-      const changes=Number(results[offset]?.meta?.changes||0);
-      if (index+offset<alreadyPresent.length) autoCompleted+=changes;
-      else created+=changes;
-    }
-  }
-  if (orderDocumentPlacements.some((item)=>
-    item.moduleCode===input.moduleCode&&item.fieldKey===input.fieldKey,
-  )) {
-    for (const candidate of missing) {
-      await orderDocumentSupplementNotificationStatement(env.DB,{
-        organizationId:input.organizationId,
-        orderId:candidate.order_id,
-        fieldLabel:input.fieldLabel,
-        actorUserId:input.actorUserId,
-        now,
-      }).run();
-    }
-  }
-  return { created,cancelled:0,autoCompleted };
+    resolutionNote,
+    input.actorUserId,now,now,input.organizationId,input.workflowId,input.moduleCode,input.fieldKey,
+  ).run();
+  return { created:0,cancelled:Number(cancelled.meta?.changes||0),autoCompleted:0 };
 }
 
 export async function ensureMissingLoadingDocumentSupplements(input:{

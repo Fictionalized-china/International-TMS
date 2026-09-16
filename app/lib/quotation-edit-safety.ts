@@ -106,6 +106,7 @@ const nativeColumns: ReadonlyArray<{
 }> = [
   { key: "quotation_customer_contact_name", columns: ["customer_contact_name"] },
   { key: "quotation_customer_contact_phone", columns: ["customer_contact_phone"] },
+  { key: "quotation_mark_contacts", columns: ["mark_contact_ids_json"] },
   { key: "quotation_salesperson_user_id", columns: ["salesperson_user_id"] },
   { key: "quotation_customs_clearance_mode", columns: ["customs_clearance_mode"] },
   { key: "quotation_origin_region", columns: ["origin_country", "origin_state", "origin_city"] },

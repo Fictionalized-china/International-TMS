@@ -21,6 +21,7 @@ import {
   isLiveDataRoute,
   shouldRefreshForDataMutationSignal,
 } from "./lib/live-data-refresh";
+import { normalizeSessionSlot, withSessionSlot } from "./lib/session-slot";
 import "./app.css";
 
 type DataMutationSource = {
@@ -94,10 +95,6 @@ const sessionSlotBootstrap = `(() => {
   }
   if (!valid(slot)) return;
   try { window.sessionStorage.setItem(storageKey, slot); } catch {}
-  if (current.searchParams.get(param) !== slot) {
-    current.searchParams.set(param, slot);
-    window.history.replaceState(window.history.state, "", current.pathname + current.search + current.hash);
-  }
   const addSlot = value => {
     if (value == null || value === "") return value;
     try {
@@ -146,6 +143,28 @@ const sessionSlotBootstrap = `(() => {
   window.open = (url, target, features) => originalOpen(addSlot(url), target, features);
 })();`;
 
+function SessionSlotHydrator() {
+  useEffect(() => {
+    const current = new URL(window.location.href);
+    if (normalizeSessionSlot(current.searchParams.get("itmsTab"))) return;
+    let slot: string | null = null;
+    try {
+      slot = normalizeSessionSlot(
+        window.sessionStorage.getItem("international-tms-tab-session"),
+      );
+    } catch {
+      return;
+    }
+    if (!slot) return;
+    window.history.replaceState(
+      window.history.state,
+      "",
+      withSessionSlot(`${current.pathname}${current.search}${current.hash}`, slot),
+    );
+  }, []);
+  return null;
+}
+
 export const links: Route.LinksFunction = () => [];
 
 export function Layout({ children }: { children: React.ReactNode }) {
@@ -160,6 +179,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
         <Links />
       </head>
       <body>
+        <SessionSlotHydrator />
         <div className="legacy-browser-warning" role="alert">
           当前为 360 兼容模式，系统需要现代浏览器内核。请切换到“极速模式”后继续使用。
         </div>

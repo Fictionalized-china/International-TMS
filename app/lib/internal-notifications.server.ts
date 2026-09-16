@@ -332,26 +332,30 @@ export async function loadInternalNotificationSummary(
   userId:string,
 ) {
   const now = new Date().toISOString();
-  const [count,latest] = await Promise.all([
-    env.DB.prepare(
+  const count = await env.DB.prepare(
       `SELECT COUNT(*) count FROM internal_notifications
        WHERE organization_id=? AND user_id=? AND is_read=0`,
-    ).bind(organizationId,userId).first<{count:number}>(),
-    env.DB.prepare(
-      `UPDATE internal_notifications
-       SET popup_shown_at=?
-       WHERE id=(
-         SELECT id FROM internal_notifications
-         WHERE organization_id=? AND user_id=? AND popup_shown_at IS NULL
-           AND category!='order_assignment'
-         ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
-                  created_at DESC
-         LIMIT 1
-       )
-       AND organization_id=? AND user_id=? AND popup_shown_at IS NULL
-       RETURNING id,category,severity,title,message,link,requires_ack,is_read,
-                 popup_shown_at,acknowledged_at,created_at`,
-    ).bind(now,organizationId,userId,organizationId,userId).first<InternalNotification>(),
-  ]);
+    ).bind(organizationId,userId).first<{count:number}>();
+  // MySQL 1093 guard: an UPDATE cannot re-read its own target table in a
+  // sub-SELECT, so resolve the popup candidate id first, then mark it shown
+  // by primary key.  The popup_shown_at IS NULL guard on the UPDATE keeps the
+  // same "only once" semantics under concurrency.
+  const candidate = await env.DB.prepare(
+      `SELECT id FROM internal_notifications
+       WHERE organization_id=? AND user_id=? AND popup_shown_at IS NULL
+         AND category!='order_assignment'
+       ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+                created_at DESC
+       LIMIT 1`,
+    ).bind(organizationId,userId).first<{id:string}>();
+  const latest = candidate
+    ? await env.DB.prepare(
+        `UPDATE internal_notifications
+         SET popup_shown_at=?
+         WHERE id=? AND organization_id=? AND user_id=? AND popup_shown_at IS NULL
+         RETURNING id,category,severity,title,message,link,requires_ack,is_read,
+                   popup_shown_at,acknowledged_at,created_at`,
+      ).bind(now,candidate.id,organizationId,userId).first<InternalNotification>()
+    : null;
   return { unreadCount:Number(count?.count||0), latest:latest??null };
 }

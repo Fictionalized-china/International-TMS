@@ -198,6 +198,8 @@ describe("stage-aware workflow field synchronization", () => {
     const statement = database.prepared.at(-1)!;
     expect(statement.sql).toContain("SELECT COALESCE(");
     expect(statement.sql).toContain("WHERE workflow_id=? AND step_id=? AND is_active=1");
+    expect(statement.sql).toContain(") distinct_positions ORDER BY position_code");
+    expect(statement.sql).toContain(") ordered_positions");
     expect(statement.bindings).toEqual([
       "workflow-1", "quotation-step", "cargo",
       "workflow-1", "quotation-step", "cargo",

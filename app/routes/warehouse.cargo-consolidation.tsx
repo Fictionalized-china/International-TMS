@@ -445,22 +445,30 @@ export async function action({request}:Route.ActionArgs){
     if((count?.total??0)<=2)return{formError:"配载单至少保留 2 票订单；如需全部重配，请取消该配载单"};
     const membership=await env.DB.prepare("SELECT 1 ok FROM transport_batch_orders WHERE batch_id=? AND order_id=? AND organization_id=? AND status!='removed'").bind(batchId,orderId,user.organizationId).first();
     if(!membership)return{formError:"该订单不在当前配载单中"};
-    const removed=await env.DB.prepare(
-      `UPDATE transport_batch_orders SET status='removed',updated_at=?
-       WHERE batch_id=? AND order_id=? AND organization_id=? AND status!='removed'
-         AND EXISTS(
-           SELECT 1 FROM transport_batches b
-           WHERE b.id=transport_batch_orders.batch_id AND b.organization_id=transport_batch_orders.organization_id
-             AND b.warehouse_id=? AND b.status IN ('planning','loading')
-         )
+    // MySQL 1093 guard: verify batch state and remaining-order count with a
+    // plain SELECT first, then remove by primary key.  The SELECT keeps the
+    // exact original predicates, so concurrent changes still yield changes=0.
+    const removable=await env.DB.prepare(
+      `SELECT bo.id
+       FROM transport_batch_orders bo
+       JOIN transport_batches b ON b.id=bo.batch_id AND b.organization_id=bo.organization_id
+       WHERE bo.batch_id=? AND bo.order_id=? AND bo.organization_id=? AND bo.status!='removed'
+         AND b.warehouse_id=? AND b.status IN ('planning','loading')
          AND 2 < (
            SELECT COUNT(*) FROM transport_batch_orders active
-           WHERE active.batch_id=transport_batch_orders.batch_id
-             AND active.organization_id=transport_batch_orders.organization_id
+           WHERE active.batch_id=bo.batch_id
+             AND active.organization_id=bo.organization_id
              AND active.status!='removed'
-         )`,
-    ).bind(now,batchId,orderId,user.organizationId,warehouse.id).run();
-    if(!Number(removed.meta?.changes||0))return{formError:"配载单状态已变化、订单已移出或当前仅剩 2 票，请刷新后查看"};
+         )
+       LIMIT 1`,
+    ).bind(batchId,orderId,user.organizationId,warehouse.id).first<{id:string}>();
+    const removed=removable
+      ? await env.DB.prepare(
+          `UPDATE transport_batch_orders SET status='removed',updated_at=?
+           WHERE id=? AND organization_id=? AND status!='removed'`,
+        ).bind(now,removable.id,user.organizationId).run()
+      : null;
+    if(!Number(removed?.meta?.changes||0))return{formError:"配载单状态已变化、订单已移出或当前仅剩 2 票，请刷新后查看"};
     await removeOrdersFromPendingDispatch(user.organizationId,warehouse.id,batchId,[orderId],now);
     await resetLoadingModules(user.organizationId,[orderId],user.userId,now,`从配载单 ${batch.batch_number} 移除`);
     await synchronizeBatchTransport(user.organizationId,batchId,now);
@@ -892,13 +900,30 @@ async function removeOrdersFromPendingDispatch(organizationId:string,warehouseId
     statements.push(env.DB.prepare(`UPDATE warehouse_packing_jobs SET status='labelled',transport_batch_id=NULL,updated_at=?
       WHERE organization_id=? AND warehouse_id=? AND transport_batch_id=? AND status='allocated'
         AND order_id IN (${d1Placeholders(orderChunk.length)})`).bind(now,organizationId,warehouseId,batchId,...orderChunk));
-    if(dispatch)statements.push(
-      env.DB.prepare(`UPDATE warehouse_packages SET status='in_stock',updated_at=? WHERE organization_id=? AND warehouse_id=? AND status='allocated' AND label_kind='oul' AND id IN (
-        SELECT di.package_id FROM warehouse_dispatch_items di JOIN warehouse_packages p ON p.id=di.package_id JOIN shipments s ON s.id=p.shipment_id
-        WHERE di.dispatch_id=? AND s.order_id IN (${d1Placeholders(orderChunk.length)}))`).bind(now,organizationId,warehouseId,dispatch.id,...orderChunk),
+    if(dispatch){
+      // MySQL 1093 guard: resolve the affected package ids with a plain
+      // SELECT before the batch, then update warehouse_packages by primary
+      // key only.  The DELETE below keeps its sub-SELECT because its target
+      // table (warehouse_dispatch_items) is not referenced inside it.
+      const stalePackages=await env.DB.prepare(`SELECT di.package_id id
+        FROM warehouse_dispatch_items di
+        JOIN warehouse_packages p ON p.id=di.package_id
+        JOIN shipments s ON s.id=p.shipment_id
+        WHERE di.dispatch_id=? AND s.order_id IN (${d1Placeholders(orderChunk.length)})`)
+        .bind(dispatch.id,...orderChunk).all<{id:string}>();
+      const stalePackageIds=stalePackages.results.map(row=>row.id);
+      for(const packageChunk of chunkD1Values(stalePackageIds,4)){
+        statements.push(
+          env.DB.prepare(`UPDATE warehouse_packages SET status='in_stock',updated_at=?
+            WHERE organization_id=? AND warehouse_id=? AND status='allocated' AND label_kind='oul'
+              AND id IN (${d1Placeholders(packageChunk.length)})`).bind(now,organizationId,warehouseId,...packageChunk),
+        );
+      }
+      statements.push(
       env.DB.prepare(`DELETE FROM warehouse_dispatch_items WHERE dispatch_id=? AND package_id IN (
         SELECT p.id FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id WHERE p.label_kind='oul' AND s.order_id IN (${d1Placeholders(orderChunk.length)}))`).bind(dispatch.id,...orderChunk),
-    );
+      );
+    }
   }
   await env.DB.batch(statements);
 }

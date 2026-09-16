@@ -35,6 +35,7 @@ const database=vi.hoisted(()=>{
               popupAvailable=false;
               return notification as T;
             }
+            if(sql.includes("SELECT id FROM internal_notifications"))return {id:"notice-1"} as T;
             if(sql.includes("SELECT id,requires_ack"))return {id:"notice-1",requires_ack:requiresAck} as T;
             return null;
           },
@@ -69,10 +70,17 @@ describe("internal notification delivery",()=>{
     expect(first.unreadCount).toBe(1);
     expect(first.latest?.id).toBe("notice-1");
     expect(second.latest).toBeNull();
+    // MySQL 1093 guard: the candidate is resolved by a plain SELECT first and
+    // the popup is then claimed by primary key in a separate UPDATE.
+    const candidate=database.queries.find((query)=>query.sql.includes("SELECT id FROM internal_notifications"));
+    expect(candidate?.sql).toContain("popup_shown_at IS NULL");
+    expect(candidate?.sql).toContain("category!='order_assignment'");
+    expect(candidate?.sql).not.toContain("UPDATE");
+    expect(candidate?.bindings).toEqual(["org-1","user-1"]);
     const claim=database.queries.find((query)=>query.sql.includes("RETURNING"));
     expect(claim?.sql).toContain("popup_shown_at IS NULL");
-    expect(claim?.sql).toContain("category!='order_assignment'");
-    expect(claim?.bindings.slice(1)).toEqual(["org-1","user-1","org-1","user-1"]);
+    expect(claim?.sql).not.toContain("category!='order_assignment'");
+    expect(claim?.bindings.slice(1)).toEqual(["notice-1","org-1","user-1"]);
   });
 
   it("keeps already displayed notifications in the account history",async()=>{

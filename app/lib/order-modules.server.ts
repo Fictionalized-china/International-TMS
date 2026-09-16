@@ -1004,7 +1004,7 @@ export async function syncCostsModuleStatus(
   now = new Date().toISOString(),
 ) {
   await ensureOrderModules(organizationId, orderId);
-  const [expenses, controls, workflowFields] = await Promise.all([
+  const [expenses, controls, workflowFields, settlementStageReached] = await Promise.all([
     env.DB.prepare(
       `SELECT e.direction,COUNT(*) total,
               COALESCE(SUM(MAX(
@@ -1042,6 +1042,7 @@ export async function syncCostsModuleStatus(
         finance_locked: number;
       }>(),
     loadOrderModuleWorkflowFields(organizationId, orderId, "costs"),
+    orderCostsSettlementStageReached(organizationId, orderId),
   ]);
   const expenseByDirection = new Map(
     expenses.results.map((item) => [item.direction, item]),
@@ -1051,6 +1052,7 @@ export async function syncCostsModuleStatus(
   );
   const gate = evaluateCostsCompletionGate({
     fields: workflowFields,
+    settlementStageReached,
     directions: (["receivable", "payable"] as const).map((direction) => {
       const control = controlByDirection.get(direction);
       const expense = expenseByDirection.get(direction);
@@ -1092,6 +1094,35 @@ export async function syncCostsModuleStatus(
       orderId,
     )
     .run();
+}
+
+async function orderCostsSettlementStageReached(
+  organizationId: string,
+  orderId: string,
+) {
+  const placement = await env.DB.prepare(
+    `SELECT current_step.sort_order current_sort_order,
+      (SELECT MAX(cost_step.sort_order)
+         FROM workflow_instance_step_states cost_step
+         JOIN workflow_instance_module_states cost_module
+           ON cost_module.instance_step_state_id=cost_step.id
+          AND cost_module.module_code='costs'
+        WHERE cost_step.instance_id=workflow.id
+          AND cost_module.is_required=1) settlement_sort_order
+       FROM workflow_instances workflow
+       JOIN workflow_instance_step_states current_step
+         ON current_step.instance_id=workflow.id
+        AND current_step.step_key=workflow.current_step_key
+      WHERE workflow.organization_id=? AND workflow.order_id=?
+      LIMIT 1`,
+  ).bind(organizationId, orderId).first<{
+    current_sort_order: number;
+    settlement_sort_order: number | null;
+  }>();
+  return Boolean(
+    placement?.settlement_sort_order != null &&
+    Number(placement.current_sort_order) >= Number(placement.settlement_sort_order),
+  );
 }
 
 export async function listOrderModules(
@@ -1237,6 +1268,13 @@ export async function advanceOrderModule(input: {
     definition.steps[currentIndex].code,
   );
   const isLast = currentIndex >= definition.steps.length - 1;
+  if (
+    input.moduleCode === "costs" &&
+    isLast &&
+    !(await orderCostsSettlementStageReached(input.organizationId, input.orderId))
+  ) {
+    throw new Error("尚未进入对账结算节点，当前只能预录费用，不能提前完成结算");
+  }
   if (isLast) {
     const missing = await missingRequiredModuleFields(
       input.organizationId,

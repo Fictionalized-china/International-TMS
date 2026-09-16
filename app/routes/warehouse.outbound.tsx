@@ -1,5 +1,6 @@
 ﻿import { env } from "cloudflare:workers";
-import { useEffect, useRef, useState } from "react";
+import { Check, ChevronDown, Plus } from "lucide-react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Form, Link, redirect, useNavigation } from "react-router";
 import type { Route } from "./+types/warehouse.outbound";
 import { Modal, useModalScrollLock } from "../components/Modal";
@@ -1461,6 +1462,7 @@ function CreateDispatchWorkbench({warehouseId,inspection,outboundResources,borde
 function OutboundDriverPicker({carrierId,drivers,value,required,onChange,onCreate}:{carrierId:string;drivers:OutboundResources["drivers"];value:string;required:boolean;onChange:(value:string)=>void;onCreate:()=>void}){
   const [open,setOpen]=useState(false);
   const rootRef=useRef<HTMLDivElement>(null);
+  const listboxId=useId();
   const selected=drivers.find(driver=>driver.id===value);
   useEffect(()=>{setOpen(false)},[carrierId]);
   useEffect(()=>{
@@ -1474,13 +1476,14 @@ function OutboundDriverPicker({carrierId,drivers,value,required,onChange,onCreat
   const label=value===NEW_OUTBOUND_DRIVER_ID?"正在新建未登记司机":selected?`${selected.name} · ${selected.phone||"电话未登记"}`:carrierId?"请选择该承运商司机":"请先选择承运商";
   return <div ref={rootRef} className={`outbound-driver-picker${open?" is-open":""}`}>
     <input type="hidden" name="outboundDriverId" value={value}/>
-    <button type="button" className="outbound-driver-picker-trigger" aria-labelledby="outbound-driver-label" aria-haspopup="listbox" aria-expanded={open} aria-required={required} disabled={!carrierId} onClick={()=>setOpen(current=>!current)}><span>{label}</span><b aria-hidden="true">▾</b></button>
-    {open&&<div className="outbound-driver-picker-drawer" role="listbox" aria-label="选择出境司机">
-      <div className="outbound-driver-picker-options">
-        {drivers.map(driver=><button key={driver.id} type="button" role="option" aria-selected={driver.id===value} onClick={()=>{onChange(driver.id);setOpen(false)}}><strong>{driver.name}</strong><span>{driver.phone||"电话未登记"}</span></button>)}
+    <button type="button" className="outbound-driver-picker-trigger" aria-labelledby="outbound-driver-label" aria-controls={listboxId} aria-haspopup="listbox" aria-expanded={open} aria-required={required} disabled={!carrierId} onClick={()=>setOpen(current=>!current)}><span>{label}</span><ChevronDown aria-hidden="true" size={14}/></button>
+    {open&&<div className="outbound-driver-picker-drawer">
+      <header><strong>选择出境司机</strong><small>{drivers.length} 人可选</small></header>
+      <div id={listboxId} className="outbound-driver-picker-options" role="listbox" aria-label="选择出境司机">
+        {drivers.map(driver=><button key={driver.id} type="button" role="option" aria-selected={driver.id===value} onClick={()=>{onChange(driver.id);setOpen(false)}}><span><strong>{driver.name}</strong><small>{driver.phone||"电话未登记"}</small></span>{driver.id===value&&<Check aria-hidden="true" size={14}/>}</button>)}
         {!drivers.length&&<p>当前承运商还没有已登记司机。</p>}
       </div>
-      <footer><button type="button" className="primary" onClick={()=>{onCreate();setOpen(false)}}>＋ 新建司机</button><span>新建后随本次装车任务自动登记并使用</span></footer>
+      <footer><button type="button" className="outbound-driver-create-action" onClick={()=>{onCreate();setOpen(false)}}><Plus aria-hidden="true" size={14}/><span><strong>新建司机</strong><small>随本次装车任务自动登记并使用</small></span></button></footer>
     </div>}
   </div>;
 }
@@ -1755,7 +1758,8 @@ async function loadOutboundInspectionByIds(organizationId:string,warehouseId:str
 }
 async function loadOutboundInspection(organizationId:string,warehouseId:string,batch:Batch):Promise<OutboundInspection|null>{
   const scopeOrders=batch.business_type==="ltl"
-    ?await env.DB.prepare(`SELECT DISTINCT o.id order_id,o.order_number,o.customer_id,c.name customer_name
+    ?await env.DB.prepare(`SELECT o.id order_id,o.order_number,o.customer_id,c.name customer_name,
+      MIN(bo.sequence_no) sequence_no
       FROM transport_batch_orders selected
       JOIN transport_batches tb ON tb.id=selected.batch_id AND tb.organization_id=selected.organization_id AND tb.warehouse_id=? AND tb.status IN ('planning','loading')
       JOIN transport_batch_orders bo ON bo.batch_id=selected.batch_id AND bo.organization_id=selected.organization_id AND bo.status!='removed'
@@ -1763,7 +1767,8 @@ async function loadOutboundInspection(organizationId:string,warehouseId:string,b
       JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
       WHERE selected.organization_id=? AND selected.order_id=? AND selected.status!='removed'
         AND (? IS NULL OR selected.batch_id=?)
-      ORDER BY bo.sequence_no`).bind(warehouseId,organizationId,batch.order_id,batch.transport_batch_id,batch.transport_batch_id).all<{order_id:string;order_number:string;customer_id:string;customer_name:string}>()
+      GROUP BY o.id,o.order_number,o.customer_id,c.name
+      ORDER BY sequence_no`).bind(warehouseId,organizationId,batch.order_id,batch.transport_batch_id,batch.transport_batch_id).all<{order_id:string;order_number:string;customer_id:string;customer_name:string;sequence_no:number}>()
     :{results:[{order_id:batch.order_id,order_number:batch.order_number,customer_id:batch.customer_id,customer_name:batch.customer_name}]};
   const orderRows=scopeOrders.results.length?scopeOrders.results:[{order_id:batch.order_id,order_number:batch.order_number,customer_id:batch.customer_id,customer_name:batch.customer_name}];
   const enabledOrderIds=await loadEnabledLoadingOrderIds(organizationId,orderRows.map(order=>order.order_id));

@@ -22,6 +22,13 @@ const cookie = login.headers.get("set-cookie")?.split(";")[0];
 if (![302,303].includes(login.status) || !cookie) {
   throw new Error(`Pressure-test login failed: HTTP ${login.status}`);
 }
+const loginLocation = login.headers.get("location");
+const sessionSlot = loginLocation
+  ? new URL(loginLocation,baseUrl).searchParams.get("itmsTab")
+  : null;
+if (!sessionSlot) {
+  throw new Error("Pressure-test login failed: missing itmsTab session slot");
+}
 
 const samples = [];
 const failures = [];
@@ -33,11 +40,13 @@ async function worker() {
     const index = cursor++;
     if (index >= total) return;
     const route = routes[index % routes.length];
+    const target = new URL(route,baseUrl);
+    if (!target.searchParams.has("itmsTab")) target.searchParams.set("itmsTab",sessionSlot);
     const controller = new AbortController();
     const timer = setTimeout(()=>controller.abort(),timeoutMs);
     const started = performance.now();
     try {
-      const response = await fetch(`${baseUrl}${route}`,{
+      const response = await fetch(target,{
         headers:{cookie,accept:"text/html"},
         redirect:"manual",
         signal:controller.signal,

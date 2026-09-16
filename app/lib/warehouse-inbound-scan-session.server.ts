@@ -124,14 +124,20 @@ export async function scanInboundMarkAtWarehouse(db: D1Database, input: {
             AND a.leg_type='first_mile' AND a.status!='cancelled'
           ORDER BY a.updated_at DESC,a.created_at DESC LIMIT 1
        )
-      WHERE mark.organization_id=? AND UPPER(mark.package_code)=?
+      WHERE mark.organization_id=?
+        AND (UPPER(mark.package_code)=? OR UPPER(ord.order_number)=?)
         AND mark.is_active=1 AND mark.status!='cancelled'
-      ORDER BY mark.created_at DESC LIMIT 2`,
-  ).bind(input.organizationId, code).all<ResolvedInboundMark>();
+      ORDER BY CASE WHEN UPPER(mark.package_code)=? THEN 0 ELSE 1 END,
+               mark.package_sequence,mark.created_at DESC
+      LIMIT 2`,
+  ).bind(input.organizationId, code, code, code).all<ResolvedInboundMark>();
   if (mark.results.length !== 1) {
     const eventId = await recordEvent(db, { ...input, now, scanSessionId, normalizedCode: code, outcome: "not_found" });
     return { outcome: "not_found", scanSessionId, eventId, orderId: null, orderNumber: null,
-      inboundMarkId: null, orderReceivingSessionId: null, duplicateOfEventId: null, message: "未找到唯一有效的入仓唛头" };
+      inboundMarkId: null, orderReceivingSessionId: null, duplicateOfEventId: null,
+      message: mark.results.length > 1
+        ? "该订单包含多个入仓唛头，请扫描标签上的唯一包装条码"
+        : "未找到唯一有效的入仓唛头" };
   }
   const resolved = mark.results[0];
   if (resolved.eligible_warehouse_id !== input.warehouseId) {

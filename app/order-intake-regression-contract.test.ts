@@ -32,8 +32,11 @@ describe("order intake regression contract", () => {
   it("identifies any active inbound mark from the unified warehouse scanner", () => {
     expect(warehouseAcceptanceRoute).toContain("FROM order_cargo_packages scanned_mark");
     expect(warehouseAcceptanceRoute).toContain("UPPER(scanned_mark.package_code)=UPPER(?)");
+    expect(warehouseAcceptanceRoute).toContain("UPPER(o.order_number)=?");
     expect(warehouseAcceptanceRoute).toContain('scanFetcher.submit({intent:"scan_mark"');
     expect(warehouseAcceptanceRoute).toContain('code,requestKey:crypto.randomUUID()');
+    expect(warehouseAcceptanceRoute).not.toContain('if(!/-IN-\\d{3,}$/i.test(code))');
+    expect(warehouseAcceptanceRoute).toContain('剩余 ${remainingPackageCount} 包');
     expect(warehouseAcceptanceRoute).toContain("仓库统一扫描栏");
     expect(warehouseAcceptanceRoute).toContain("同一个扫描栏服务当前仓库全部订单");
     expect(warehouseAcceptanceRoute).toContain("扫描成功，已归入");

@@ -24,6 +24,18 @@ export function canPositionHandleWorkflowField(
     .includes(positionCode);
 }
 
+export function canWriteWorkflowFieldAtCurrentNode(input: {
+  configuredPositionCodes: readonly string[] | string | null | undefined;
+  positionCode: string | null | undefined;
+  canOperateCurrentNode: boolean;
+  canOperateModule: boolean;
+}) {
+  return canPositionHandleWorkflowField(
+    input.configuredPositionCodes,
+    input.positionCode,
+  ) && (input.canOperateCurrentNode || input.canOperateModule);
+}
+
 export function toggleWorkflowFieldHandlerPosition(
   configuredPositionCodes: readonly string[] | string | null | undefined,
   positionCode: string,

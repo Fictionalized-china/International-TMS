@@ -10,6 +10,7 @@ import { writeAudit } from "../lib/audit.server";
 import { valueOf } from "../lib/validation";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
 import { chunkD1Rows, chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
+import { duplicateOrDatabaseError } from "../lib/db-errors.server";
 
 type Warehouse={id:string;code:string;name:string;country_code:string|null;city:string|null;address:string|null;status:string;zone_count:number;location_count:number};
 type Zone={id:string;warehouse_id:string;code:string;name:string;zone_type:string;status:string;location_count:number};
@@ -28,6 +29,7 @@ export async function loader({request}:Route.LoaderArgs){
 
 export async function action({request}:Route.ActionArgs){
   const user=await requireSessionUser(request,"warehouse.manage","warehouse"),form=await request.formData(),intent=valueOf(form,"intent"),entity=valueOf(form,"entity"),now=new Date().toISOString();
+  if(entity==="warehouse")return{formError:"新增仓库请前往管理后台的“仓库管理”，完成仓库类型与登录账号绑定"};
   if(intent==="toggle"){
     const id=valueOf(form,"id"),status=valueOf(form,"status"),table=entity==="zone"?"warehouse_zones":entity==="location"?"warehouse_locations":"";
     if(entity==="warehouse")return{formError:"请在管理后台的仓库管理中停用仓库，避免中断当前现场会话"};
@@ -67,10 +69,7 @@ export async function action({request}:Route.ActionArgs){
   const code=valueOf(form,"code").toUpperCase(),name=valueOf(form,"name");
   if(!/^[A-Z0-9-]{2,24}$/.test(code)||name.length<1||name.length>80)return{formError:"请填写有效的名称和代码（代码仅限字母、数字和横线）"};
   try{
-    if(entity==="warehouse"){
-      const country=valueOf(form,"country").toUpperCase(),city=valueOf(form,"city"),address=valueOf(form,"address");
-      await env.DB.prepare("INSERT INTO warehouses(id,organization_id,code,name,country_code,city,address,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'active',?,?)").bind(crypto.randomUUID(),user.organizationId,code,name,country||null,city||null,address||null,now,now).run();
-    }else if(entity==="zone"){
+    if(entity==="zone"){
       const warehouseId=valueOf(form,"warehouseId"),zoneType=valueOf(form,"zoneType");
       const parent=await env.DB.prepare("SELECT id FROM warehouses WHERE id=? AND organization_id=? AND status='active'").bind(warehouseId,user.organizationId).first();
       if(!parent)return{formError:"请选择有效的启用仓库"};
@@ -81,7 +80,7 @@ export async function action({request}:Route.ActionArgs){
       if(!zone)return{formError:"请选择有效的启用库区"};
       await env.DB.prepare("INSERT INTO warehouse_locations(id,organization_id,warehouse_id,zone_id,code,name,barcode,capacity_cbm,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?, 'active',?,?)").bind(crypto.randomUUID(),user.organizationId,zone.warehouse_id,zoneId,code,name,barcode||null,capacity>0?capacity:null,now,now).run();
     }else return{formError:"无效的配置类型"};
-  }catch{return{formError:"代码或条码不能重复，请检查后重试"};}
+  }catch(error){return{formError:duplicateOrDatabaseError(error,"代码或条码不能重复，请检查后重试")};}
   await writeAudit({request,action:`warehouse.${entity}.create`,resourceType:entity,organizationId:user.organizationId,actorUserId:user.userId,metadata:{code,name}});
   return{success:`${name} 已创建`};
 }
@@ -90,7 +89,7 @@ const zoneLabels:Record<string,string>={receiving:"收货区",storage:"存储区
 
 export default function WarehouseLocations({loaderData,actionData}:Route.ComponentProps){
   const canManage=loaderData.user.permissions.includes("warehouse.manage"),busy=useNavigation().state!=="idle";
-  return <><header className="page-header"><div><p className="eyebrow">WAREHOUSE MASTER DATA</p><h1>仓库与库位</h1><p>按仓库、库区、库位三级结构管理现场作业位置和扫描条码。</p></div>{canManage&&<div className="page-actions"><Modal title="新增仓库" triggerLabel="＋ 新增仓库" closeSignal={actionData?.success}><WarehouseForm busy={busy}/></Modal><Modal title="新增库区" triggerLabel="新增库区" triggerClassName="secondary" closeSignal={actionData?.success}><ZoneForm warehouses={loaderData.warehouses} busy={busy}/></Modal><Modal title="新增库位" triggerLabel="新增库位" triggerClassName="secondary" closeSignal={actionData?.success}><LocationForm zones={loaderData.zones} busy={busy}/></Modal><Modal title="批量生成库位" triggerLabel="批量生成库位" triggerClassName="secondary" closeSignal={actionData?.success} size="wide"><BatchLocationForm zones={loaderData.zones} busy={busy}/></Modal></div>}</header>
+  return <><header className="page-header"><div><p className="eyebrow">WAREHOUSE MASTER DATA</p><h1>仓库与库位</h1><p>按仓库、库区、库位三级结构管理现场作业位置和扫描条码；新增仓库及账号绑定统一在管理后台办理。</p></div>{canManage&&<div className="page-actions"><Modal title="新增库区" triggerLabel="新增库区" triggerClassName="secondary" closeSignal={actionData?.success}><ZoneForm warehouses={loaderData.warehouses} busy={busy}/></Modal><Modal title="新增库位" triggerLabel="新增库位" triggerClassName="secondary" closeSignal={actionData?.success}><LocationForm zones={loaderData.zones} busy={busy}/></Modal><Modal title="批量生成库位" triggerLabel="批量生成库位" triggerClassName="secondary" closeSignal={actionData?.success} size="wide"><BatchLocationForm zones={loaderData.zones} busy={busy}/></Modal></div>}</header>
     <ActionToast data={actionData}/>
     <section className="stats"><article><span>仓库</span><strong>{loaderData.warehouses.length}</strong><small>独立作业场地</small></article><article><span>库区</span><strong>{loaderData.zones.length}</strong><small>按作业用途划分</small></article><article><span>库位</span><strong>{loaderData.locations.length}</strong><small>支持条码识别</small></article></section>
     <section className="warehouse-tree">{loaderData.warehouses.map(warehouse=><article className="panel" key={warehouse.id}><div className="panel-header"><div><h2>{warehouse.name} <code>{warehouse.code}</code></h2><p>{[warehouse.country_code,warehouse.city,warehouse.address].filter(Boolean).join(" · ")||"尚未设置地址"}</p></div><div className="page-actions"><span className={`status-pill ${warehouse.status!=="active"?"off":""}`}>{warehouse.status==="active"?"启用":"停用"}</span><small>仓库状态请在管理后台维护</small></div></div>
@@ -100,7 +99,6 @@ export default function WarehouseLocations({loaderData,actionData}:Route.Compone
 }
 
 function Toggle({entity,id,active,label}:{entity:"zone"|"location";id:string;active:boolean;label:string}){return <Form method="post"><input type="hidden" name="intent" value="toggle"/><input type="hidden" name="entity" value={entity}/><input type="hidden" name="id" value={id}/><input type="hidden" name="status" value={active?"disabled":"active"}/>{active?<ConfirmAction title={entity==="zone"?"停用库区":"停用库位"} description={`停用后“${label}”不能再用于新的仓储作业；既有库存和扫描审计保留。`} triggerLabel="停用" confirmLabel="确认停用"/>:<button className="text-button">启用</button>}</Form>}
-function WarehouseForm({busy}:{busy:boolean}){return <Form method="post" className="stack"><input type="hidden" name="entity" value="warehouse"/><label className="field"><span>仓库名称</span><input name="name" required/></label><label className="field"><span>仓库代码</span><input name="code" placeholder="URC-01" required/></label><div className="form-grid compact"><label className="field"><span>国家代码</span><input name="country" placeholder="CN"/></label><label className="field"><span>城市</span><input name="city"/></label></div><label className="field"><span>详细地址</span><input name="address"/></label><button className="primary" disabled={busy}>创建仓库</button></Form>}
 function ZoneForm({warehouses,busy}:{warehouses:Warehouse[];busy:boolean}){return <Form method="post" className="stack"><input type="hidden" name="entity" value="zone"/><label className="field"><span>所属仓库</span><select name="warehouseId" required>{warehouses.filter(x=>x.status==="active").map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></label><label className="field"><span>库区名称</span><input name="name" required/></label><label className="field"><span>库区代码</span><input name="code" placeholder="SORT-A" required/></label><label className="field"><span>库区类型</span><select name="zoneType">{Object.entries(zoneLabels).map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label><button className="primary" disabled={busy}>创建库区</button></Form>}
 function LocationForm({zones,busy}:{zones:Zone[];busy:boolean}){return <Form method="post" className="stack"><input type="hidden" name="entity" value="location"/><label className="field"><span>所属库区</span><select name="zoneId" required>{zones.filter(x=>x.status==="active").map(x=><option key={x.id} value={x.id}>{x.name}（{x.code}）</option>)}</select></label><label className="field"><span>库位名称</span><input name="name" required/></label><label className="field"><span>库位代码</span><input name="code" placeholder="A-01-01" required/></label><label className="field"><span>扫描条码</span><input name="barcode" placeholder="不填可后续生成"/></label><label className="field"><span>容量 CBM</span><input name="capacity" type="number" min="0" step="0.001"/></label><button className="primary" disabled={busy}>创建库位</button></Form>}
 function BatchLocationForm({zones,busy}:{zones:Zone[];busy:boolean}){return <Form method="post" className="stack"><input type="hidden" name="entity" value="location_batch"/><label className="field"><span>所属库区</span><select name="zoneId" required>{zones.filter(x=>x.status==="active").map(x=><option key={x.id} value={x.id}>{x.name}（{x.code}）</option>)}</select></label><div className="form-grid compact"><label className="field"><span>代码前缀</span><input name="prefix" defaultValue="A" placeholder="例如 A-01" required/><small>系统将生成 A-01、A-02……</small></label><label className="field"><span>名称前缀</span><input name="namePrefix" defaultValue="库位" placeholder="例如 A区库位"/></label><label className="field"><span>起始序号</span><input name="start" type="number" min="0" max="99999" step="1" defaultValue="1" required/></label><label className="field"><span>生成数量</span><input name="count" type="number" min="1" max="200" step="1" defaultValue="20" required/><small>每次最多 200 个</small></label><label className="field"><span>序号位数</span><select name="padding" defaultValue="2"><option value="1">1 位（1）</option><option value="2">2 位（01）</option><option value="3">3 位（001）</option><option value="4">4 位（0001）</option><option value="5">5 位（00001）</option></select></label><label className="field"><span>统一容量 CBM</span><input name="capacity" type="number" min="0" step="0.001" placeholder="可不填"/></label></div><div className="batch-preview"><strong>生成规则示例</strong><span>前缀 A，起始 1，数量 20，序号 2 位 → A-01 至 A-20</span><small>扫描条码将自动包含仓库、库区和库位代码。</small></div><button className="primary" disabled={busy}>确认批量生成</button></Form>}

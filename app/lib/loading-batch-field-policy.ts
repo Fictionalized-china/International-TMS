@@ -127,9 +127,9 @@ function policyForOrder(
 }
 
 /**
- * A PZ batch is a shared business object. A required field on any participating
- * order therefore makes the batch field required. Optional wins only when no
- * participating order requires it; historical steps do not reopen old gates.
+ * A PZ batch is shared, but every order retains its own frozen field policy.
+ * Only a unanimous required rule may block the shared form. Mixed rules stay
+ * visible as optional so hot-swapped per-order gates cannot block loading.
  */
 export function resolveLoadingBatchFieldPolicies(
   orders: readonly LoadingBatchWorkflowOrder[],
@@ -139,8 +139,8 @@ export function resolveLoadingBatchFieldPolicies(
       const policies = orders
         .map((order) => policyForOrder(order, fieldKey))
         .filter((policy): policy is LoadingBatchFieldPolicy => Boolean(policy));
-      const isRequired = policies.some((policy) => policy.isRequired);
-      const isActive = isRequired || policies.some((policy) => policy.isActive);
+      const isRequired = policies.length > 0 && policies.every((policy) => policy.isRequired);
+      const isActive = policies.some((policy) => policy.isActive);
       return [fieldKey, {
         isActive,
         isRequired,

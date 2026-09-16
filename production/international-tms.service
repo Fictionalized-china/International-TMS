@@ -1,0 +1,29 @@
+[Unit]
+Description=International TMS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=international-tms
+Group=international-tms
+WorkingDirectory=/opt/international-tms/current
+EnvironmentFile=/etc/international-tms/international-tms.env
+Environment=HOME=/var/lib/international-tms
+ExecStart=/opt/international-tms/shared/node/bin/node production/server.mjs
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/international-tms
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=international-tms
+
+[Install]
+WantedBy=multi-user.target

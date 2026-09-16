@@ -11,7 +11,7 @@ type AuditInput = {
   metadata?: Record<string, unknown>;
 };
 
-export async function writeAudit(input: AuditInput): Promise<void> {
+export async function writeAuditStrict(input: AuditInput): Promise<void> {
   const now = new Date().toISOString();
   await env.DB.prepare(
     `INSERT INTO audit_logs
@@ -32,4 +32,26 @@ export async function writeAudit(input: AuditInput): Promise<void> {
       now,
     )
     .run();
+}
+
+/**
+ * Business mutations and audit persistence are not part of the same database
+ * transaction at most call sites.  Do not report a completed mutation as a
+ * failure merely because the follow-up audit insert failed: that encourages a
+ * user retry and can duplicate the business operation.  Security-sensitive
+ * flows that must fail closed can opt in to writeAuditStrict explicitly.
+ */
+export async function writeAudit(input: AuditInput): Promise<void> {
+  try {
+    await writeAuditStrict(input);
+  } catch (error) {
+    console.error("AUDIT_WRITE_FAILED", {
+      action: input.action,
+      resourceType: input.resourceType,
+      resourceId: input.resourceId ?? null,
+      organizationId: input.organizationId ?? null,
+      actorUserId: input.actorUserId ?? null,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }

@@ -20,6 +20,7 @@ import { customerFacingOrderStatusLabel } from "../lib/overseas-warehouse";
 import { orderRouteFilterCount, readOrderRouteFilters } from "../lib/order-route-filters";
 import { handlePortalQuotationAction } from "../lib/portal-quotation-action.server";
 import { requirePortalCustomer } from "../lib/portal.server";
+import { resolveMarkContactSnapshots } from "../lib/mark-contacts";
 import {
   listQuotationWorkflowFields,
   listQuotationWorkflowFieldValues,
@@ -40,6 +41,10 @@ type PortalOrder = OrderMarkLabel & {
   exit_port: string | null;
   exit_port_name: string | null;
   destination_address: string | null;
+};
+
+type PortalOrderRow = Omit<PortalOrder, "marks" | "mark_contacts"> & {
+  mark_contacts_snapshot_json: string | null;
 };
 
 const quoteStatusMap = {
@@ -108,6 +113,8 @@ export async function loader({ request }: Route.LoaderArgs) {
   const [orderRows, quoteRows, chargeRows] = await Promise.all([
     env.DB.prepare(
       `SELECT o.id,o.order_number,c.name customer_name,q.quote_number,o.business_type,o.cargo_description,o.pieces,
+        COALESCE(NULLIF(TRIM(q.customer_contact_phone),''),NULLIF(TRIM(o.shipper_phone),''),NULLIF(TRIM(o.consignee_phone),'')) contact_phone,
+        o.mark_contacts_snapshot_json,
         o.declared_quantity_unit,o.planned_inbound_package_count,o.planned_inbound_package_type,o.inbound_package_locked_at,
         o.gross_weight_kg,o.volume_cbm,o.origin_country,o.origin_state,o.origin_city,o.origin_address,
         o.exit_port,bp.name exit_port_name,o.destination_country,o.destination_state,o.destination_city,o.destination_address,
@@ -133,7 +140,7 @@ export async function loader({ request }: Route.LoaderArgs) {
        )
        WHERE ${orderWhere.join(" AND ")}
        ORDER BY CASE WHEN q.id=? THEN 0 ELSE 1 END,o.created_at DESC`,
-    ).bind(...orderValues, quotationId).all<PortalOrder>(),
+    ).bind(...orderValues, quotationId).all<PortalOrderRow>(),
     env.DB.prepare(
       `SELECT q.id,q.quote_number,c.name customer_name,q.customer_contact_name,q.customer_contact_phone,
         u.display_name salesperson_name,q.workflow_definition_id,wd.name workflow_name,wd.version_number workflow_version_number,
@@ -185,10 +192,17 @@ export async function loader({ request }: Route.LoaderArgs) {
     user.organizationId,
     visibleOrders.map((order) => order.id),
   );
-  const orders = visibleOrders.map((order) => ({
-    ...order,
-    marks: marksByOrder.get(order.id) ?? [],
-  }));
+  const orders = visibleOrders.map((row) => {
+    const { mark_contacts_snapshot_json, ...order } = row;
+    return {
+      ...order,
+      mark_contacts: resolveMarkContactSnapshots(mark_contacts_snapshot_json, {
+        name: "业务联系",
+        phone: order.contact_phone,
+      }),
+      marks: marksByOrder.get(order.id) ?? [],
+    };
+  });
 
   return {
     orders,
