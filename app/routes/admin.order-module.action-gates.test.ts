@@ -517,6 +517,25 @@ describe("order module action mutation gates", () => {
     expect(harness.writeAudit).not.toHaveBeenCalled();
   });
 
+  it("lets the assigned review owner confirm warehouse receipt differences from review", async () => {
+    harness.current.permissions = [
+      "order.view",
+      "order.scope.assigned",
+      "order.module.review.manage",
+    ];
+    harness.current.positionCode = "FINANCE";
+    harness.state.actorPositions = [{ code: "FINANCE" }];
+    harness.state.moduleAssigneeUserId = "user-a";
+    harness.state.moduleTaskAssigneeUserIds = ["user-a"];
+
+    await expect(invoke(post("warehouse_difference_confirm"), "review"))
+      .resolves.toEqual({ success: "仓库实收差异及费用影响已确认，结算阻断已解除" });
+    expect(harness.state.batchRuns).toBe(1);
+    expect(harness.writeAudit).toHaveBeenCalledWith(expect.objectContaining({
+      action: "warehouse.actual.difference.confirm",
+    }));
+  });
+
   it.each(["", "instance-active", "instance-wrong", "instance-completed"])(
     "rejects legacy confirm_dispatch for every non-NULL workflow binding (%j)",
     async (workflowInstanceId) => {

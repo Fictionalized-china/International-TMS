@@ -15104,7 +15104,8 @@ a.order-module-card.read-only:hover {
 .review-blocker-list { display: grid; gap: 8px; margin-top: 14px; }
 .review-blocker-list > strong { color: #b33d25; }
 .review-blocker-list a,
-.review-blocker-readonly {
+.review-blocker-readonly,
+.review-blocker-action {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -15115,6 +15116,8 @@ a.order-module-card.read-only:hover {
   color: #9e321d;
   background: #fff5f2;
 }
+.review-blocker-action form { flex: 0 0 auto; margin: 0; }
+.review-blocker-action button { min-height: 32px; white-space: nowrap; }
 .review-blocker-list a span { color: #0b56b3; font-weight: 800; }
 .review-blocker-readonly {
   color: #795b42;
@@ -24571,7 +24574,8 @@ body:has(.expandable[open]) .linear-drawer-backdrop { display: none; }
   margin-top: 6px;
 }
 .review-blocker-list a,
-.review-blocker-readonly {
+.review-blocker-readonly,
+.review-blocker-action {
   min-height: 30px;
   padding: 5px 8px;
   border-radius: 4px;

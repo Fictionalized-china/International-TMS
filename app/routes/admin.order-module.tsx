@@ -83,7 +83,12 @@ import {
   checkOrderLoadPlan,
   resolveOrderTrackingVehicleReference,
 } from "../lib/order-readiness.server";
-import { roadStatusLabels } from "../lib/warehouse-actual";
+import {
+  displayWarehouseMeasuredCount,
+  displayWarehouseMeasuredDimensions,
+  displayWarehouseMeasuredDimensionSummary,
+  roadStatusLabels,
+} from "../lib/warehouse-actual";
 import {
   syncBatchRoadStatusFromTracking,
   syncTrackingModuleStatusForOrder,
@@ -1256,10 +1261,10 @@ export async function loader({ request, params }: Route.LoaderArgs) {
           `SELECT i.id cargo_item_id,
                   COUNT(r.id) actual_record_count,
                   SUM(CASE WHEN r.id IS NOT NULL THEN ri.actual_packages END) actual_packages,
-                  SUM(CASE WHEN r.id IS NOT NULL THEN ri.actual_pieces END) actual_pieces,
+                  SUM(CASE WHEN r.id IS NOT NULL AND ri.actual_pieces>0 THEN ri.actual_pieces END) actual_pieces,
                   SUM(CASE WHEN r.id IS NOT NULL THEN ri.actual_weight_kg END) actual_weight_kg,
                   SUM(CASE WHEN r.id IS NOT NULL THEN ri.actual_volume_cbm END) actual_volume_cbm,
-                  GROUP_CONCAT(DISTINCT CASE WHEN r.id IS NOT NULL THEN printf('%g × %g × %g',ri.actual_length_cm,ri.actual_width_cm,ri.actual_height_cm) END) actual_dimensions,
+                  GROUP_CONCAT(DISTINCT CASE WHEN r.id IS NOT NULL AND ri.actual_length_cm>0 AND ri.actual_width_cm>0 AND ri.actual_height_cm>0 THEN printf('%g × %g × %g',ri.actual_length_cm,ri.actual_width_cm,ri.actual_height_cm) END) actual_dimensions,
                   GROUP_CONCAT(DISTINCT CASE WHEN r.id IS NOT NULL THEN r.package_type END) actual_package_types,
                   GROUP_CONCAT(DISTINCT CASE WHEN r.id IS NOT NULL THEN r.receipt_number END) receipt_numbers,
                   MIN(CASE WHEN r.id IS NOT NULL THEN r.received_at END) first_received_at,
@@ -2654,7 +2659,7 @@ export async function action({ request, params }: Route.ActionArgs) {
       });
       return workflowResult;
     }
-    if (intent === "warehouse_difference_confirm" && moduleCode === "warehouse") {
+    if (intent === "warehouse_difference_confirm" && ["warehouse", "review"].includes(moduleCode)) {
       const now = new Date().toISOString();
       await env.DB.batch([
         env.DB.prepare("UPDATE warehouse_receipt_differences SET status='confirmed',fee_impact_confirmed=1,confirmed_by_user_id=?,confirmed_at=?,updated_at=? WHERE organization_id=? AND order_id=? AND status='pending'").bind(current.userId,now,now,current.organizationId,orderId),
@@ -7902,7 +7907,7 @@ function ModuleBusinessData({
                   <td>{new Date(receipt.received_at).toLocaleString("zh-CN",{hour12:false})}</td>
                   <td>{receipt.warehouse_name}<small>{receipt.zone_name} / {receipt.location_name}（{receipt.location_code}）</small></td>
                   <td><span className={`status-pill ${receipt.cargo_complete ? "success" : receipt.has_exception ? "danger" : ""}`}>{receipt.cargo_complete ? "已核实货齐" : receipt.has_exception ? "异常入库" : "分批入库"}</span>{receipt.exception_notes && <small className="danger-text">{receipt.exception_notes}</small>}</td>
-                  <td><strong>{receipt.total_packages} 包 / {receipt.total_pieces} 件</strong><small>{Number(receipt.total_weight_kg).toFixed(2)} KG · {Number(receipt.total_volume_cbm).toFixed(3)} CBM</small></td>
+                  <td><strong>{receipt.total_packages} 包 / {displayWarehouseMeasuredCount(receipt.total_pieces)} 件</strong><small>{Number(receipt.total_weight_kg).toFixed(2)} KG · {Number(receipt.total_volume_cbm).toFixed(3)} CBM</small></td>
                   <td>{receipt.operator_name || "仓库操作员"}</td>
                   <td>{receipt.notes || "—"}<small>{receipt.evidence_note || "无补充凭证说明"}</small></td>
                 </tr>)}
@@ -7937,9 +7942,9 @@ function ModuleBusinessData({
                       <td><span className={`data-source-label ${hasActual ? "actual" : "pending"}`}>仓库实点</span></td>
                       <td>{hasActual ? warehousePackageTypesLabel(actual?.actual_package_types ?? null) : "—"}</td>
                       <td>{hasActual ? actual?.actual_packages : "—"}</td>
-                      <td>{hasActual ? actual?.actual_pieces : "—"}</td>
+                      <td>{hasActual ? displayWarehouseMeasuredCount(actual?.actual_pieces) : "—"}</td>
                       <td>{hasActual ? Number(actual?.actual_weight_kg).toFixed(2) : "—"}</td>
-                      <td>{hasActual ? actual?.actual_dimensions || "—" : "—"}</td>
+                      <td>{hasActual ? displayWarehouseMeasuredDimensionSummary(actual?.actual_dimensions) : "—"}</td>
                       <td>{hasActual ? Number(actual?.actual_volume_cbm).toFixed(3) : "—"}</td>
                       <td>{hasActual ? <><strong>{actual?.receipt_numbers || "收货单待同步"}</strong><small>{labels.length} 张仓库标签</small></> : "—"}</td>
                     </tr>,
@@ -7961,9 +7966,9 @@ function ModuleBusinessData({
                   <td><strong>{label.package_number}</strong></td>
                   <td><code>{label.barcode}</code></td>
                   <td>{label.line_no ? `${label.line_no}. ` : ""}{label.cargo_name_cn || "未关联货物行"}</td>
-                  <td>{label.pieces}</td>
+                  <td>{displayWarehouseMeasuredCount(label.pieces)}</td>
                   <td>{label.weight_kg == null ? "—" : `${Number(label.weight_kg).toFixed(2)} KG`}<small>{label.volume_cbm == null ? "—" : `${Number(label.volume_cbm).toFixed(3)} CBM`}</small></td>
-                  <td>{label.length_cm == null || label.width_cm == null || label.height_cm == null ? "—" : `${label.length_cm} × ${label.width_cm} × ${label.height_cm}`}</td>
+                  <td>{displayWarehouseMeasuredDimensions(label.length_cm, label.width_cm, label.height_cm)}</td>
                   <td>{label.warehouse_name || "—"}<small>{[label.zone_name,label.location_name,label.location_code && `(${label.location_code})`].filter(Boolean).join(" / ") || "—"}</small></td>
                   <td><span className={`status-pill ${["in_stock","allocated","dispatched","picked_up"].includes(label.status) ? "success" : label.status === "exception" ? "danger" : ""}`}>{warehousePackageStatusText(label.status)}</span></td>
                   <td>{new Date(label.created_at).toLocaleString("zh-CN",{hour12:false})}</td>
@@ -8047,6 +8052,17 @@ function ModuleBusinessData({
               <strong>异常通知</strong>
               {review.blockers.map((blocker) => {
                 const settlementHandoff = blocker.href === "/admin/billing" && !canOpenSettlement;
+                if (blocker.code === "cargo_difference" && canGenerate) {
+                  return (
+                    <div className="review-blocker-action" key={blocker.code}>
+                      <span>{blocker.message}</span>
+                      <Form method="post">
+                        <input type="hidden" name="intent" value="warehouse_difference_confirm" />
+                        <button className="primary" disabled={busy}>确认实收差异及费用影响</button>
+                      </Form>
+                    </div>
+                  );
+                }
                 return settlementHandoff ? (
                   <div className="review-blocker-readonly" key={blocker.code}>
                     <span>{blocker.message}</span>
