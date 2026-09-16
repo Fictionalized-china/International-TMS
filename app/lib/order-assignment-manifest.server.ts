@@ -18,6 +18,7 @@ type WorkflowAssignmentSnapshotDbRow = {
   module_sort_order: number;
   module_required: number;
   module_status: string;
+  module_completion_mode: string;
   module_position_code: string | null;
   module_assignee_user_id: string | null;
   task_state_id: string | null;
@@ -61,6 +62,7 @@ function mapSnapshotRow(row: WorkflowAssignmentSnapshotDbRow): WorkflowAssignmen
     moduleSortOrder: Number(row.module_sort_order),
     moduleRequired: Boolean(row.module_required),
     moduleStatus: row.module_status,
+    moduleCompletionMode: row.module_completion_mode,
     modulePositionCode: row.module_position_code,
     moduleAssigneeUserId: row.module_assignee_user_id,
     taskStateId: row.task_state_id,
@@ -112,6 +114,7 @@ export async function loadOrderAssignmentManifest(
             ss.step_key,
             ss.sort_order step_sort_order,ms.sort_order module_sort_order,
             ms.is_required module_required,ms.status module_status,
+            ms.completion_mode module_completion_mode,
             ms.responsibility_position_code module_position_code,
             omi.assignee_user_id module_assignee_user_id,
             ts.id task_state_id,ts.task_key,ts.name task_name,ts.sort_order task_sort_order,

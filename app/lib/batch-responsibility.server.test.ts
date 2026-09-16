@@ -20,6 +20,7 @@ function snapshotRow(overrides: Record<string, unknown> = {}) {
     module_sort_order: 10,
     module_required: 1,
     module_status: "pending",
+    module_completion_mode: "all_tasks",
     module_position_code: "OPERATION",
     module_assignee_user_id: "operator-old",
     task_state_id: "task-state-228",

@@ -21,6 +21,7 @@ function row(
     moduleSortOrder: 10,
     moduleRequired: true,
     moduleStatus: "pending",
+    moduleCompletionMode: "all_tasks",
     modulePositionCode: "OPERATION",
     moduleAssigneeUserId: null,
     taskStateId: "task-transport",
@@ -287,5 +288,29 @@ describe("order assignment manifest", () => {
       "review",
     ]);
     expect(manifest.configurationErrors).toEqual(["完成复盘未配置责任岗位"]);
+  });
+
+  it("excludes automatic field-policy modules from personal assignment", () => {
+    const manifest = buildOrderAssignmentManifest([
+      row({
+        moduleStateId: "module-consignment-fields",
+        moduleCode: "consignment",
+        moduleName: "委托信息",
+        moduleCompletionMode: "automatic",
+        modulePositionCode: null,
+        taskStateId: null,
+        taskKey: null,
+        taskName: null,
+        taskSortOrder: null,
+        taskRequired: null,
+        taskStatus: null,
+        taskPositionCode: null,
+      }),
+      row(),
+    ]);
+
+    expect(manifest.groups).toHaveLength(1);
+    expect(manifest.groups[0].modules.map((module) => module.moduleCode)).toEqual(["transport"]);
+    expect(manifest.configurationErrors).toEqual([]);
   });
 });

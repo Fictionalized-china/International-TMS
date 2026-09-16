@@ -7,6 +7,7 @@ export type WorkflowAssignmentSnapshotRow = {
   moduleSortOrder: number;
   moduleRequired: boolean;
   moduleStatus: string;
+  moduleCompletionMode: string;
   modulePositionCode: string | null;
   moduleAssigneeUserId: string | null;
   taskStateId: string | null;
@@ -163,6 +164,7 @@ export function buildOrderAssignmentManifest(
   );
   for (const row of orderedRows) {
     if (
+      row.moduleCompletionMode === "automatic" ||
       ["completed", "not_applicable"].includes(row.moduleStatus) ||
       (row.taskStatus && ["completed", "not_applicable"].includes(row.taskStatus))
     ) continue;

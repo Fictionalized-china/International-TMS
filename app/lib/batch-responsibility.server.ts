@@ -23,6 +23,7 @@ type BatchOriginalResponsibilityRow = {
   module_sort_order: number | null;
   module_required: number | null;
   module_status: string | null;
+  module_completion_mode: string | null;
   module_position_code: string | null;
   module_assignee_user_id: string | null;
   task_state_id: string | null;
@@ -165,6 +166,7 @@ export async function loadBatchesInitialResponsibilityRestrictions(
             ss.step_key,
             ss.sort_order step_sort_order,ms.sort_order module_sort_order,
             ms.is_required module_required,ms.status module_status,
+            ms.completion_mode module_completion_mode,
             ms.responsibility_position_code module_position_code,
             omi.assignee_user_id module_assignee_user_id,
             ts.id task_state_id,ts.task_key,ts.name task_name,ts.sort_order task_sort_order,
@@ -220,6 +222,7 @@ export async function loadBatchesInitialResponsibilityRestrictions(
           moduleSortOrder: Number(row.module_sort_order ?? 0),
           moduleRequired: Boolean(row.module_required),
           moduleStatus: row.module_status,
+          moduleCompletionMode: row.module_completion_mode ?? "all_tasks",
           modulePositionCode: row.module_position_code,
           moduleAssigneeUserId: row.module_assignee_user_id,
           taskStateId: row.task_state_id,
@@ -243,6 +246,7 @@ export async function loadBatchesInitialResponsibilityRestrictions(
       }
       for (const row of orderRows) {
         if (!row.module_code || !row.module_status) continue;
+        if (row.module_completion_mode === "automatic") continue;
         if (["completed", "not_applicable"].includes(row.module_status)) continue;
         if (row.task_status && ["completed", "not_applicable"].includes(row.task_status)) continue;
         const positionCode = row.task_state_id
