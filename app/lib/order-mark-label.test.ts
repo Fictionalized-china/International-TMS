@@ -42,6 +42,23 @@ describe("order mark label", () => {
     });
   });
 
+  it("keeps legacy portal rows without a contact snapshot renderable", () => {
+    expect(orderMarkLabelFacts({
+      destination_country: "UZ",
+      destination_state: null,
+      destination_city: "Tashkent",
+      overseas_warehouse_name: null,
+      pieces: 1,
+      declared_quantity_unit: "件",
+      volume_cbm: 0.1,
+      gross_weight_kg: 10,
+      contact_phone: null,
+    })).toMatchObject({
+      contacts: [],
+      phone: "—",
+    });
+  });
+
   it("prints the order number as the mark number while retaining a package-specific scan code", () => {
     const order: OrderMarkLabel = {
       id: "order-1",

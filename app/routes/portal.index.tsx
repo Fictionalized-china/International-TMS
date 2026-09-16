@@ -5,6 +5,7 @@ import { OrderMarkLabelModal } from "../components/OrderMarkLabelModal";
 import { PortalPickupAppointment } from "../components/PortalPickupAppointment";
 import { ActionToast } from "../components/ActionToast";
 import { loadActiveOrderMarksByOrder, type OrderMarkLabel } from "../lib/order-mark-label.server";
+import { resolveMarkContactSnapshots } from "../lib/mark-contacts";
 import { requirePortalCustomer } from "../lib/portal.server";
 import { normalizePortalNotificationLink } from "../lib/portal-notification-links";
 import { customerFacingOrderStatusLabel } from "../lib/overseas-warehouse";
@@ -21,6 +22,9 @@ type RecentOrder = OrderMarkLabel & {
   overseas_operation_status: string | null;
   pickup_appointment_at: string | null;
   pickup_appointment_period: string | null;
+};
+type RecentOrderRow = Omit<RecentOrder, "marks" | "mark_contacts"> & {
+  mark_contacts_snapshot_json: string | null;
 };
 type PendingQuote = {
   id: string;
@@ -57,6 +61,8 @@ export async function loader({ request }: Route.LoaderArgs) {
   const [recentOrders, pendingQuotes, notices, unread] = await Promise.all([
     env.DB.prepare(
       `SELECT o.id,o.order_number,c.name customer_name,q.quote_number,o.business_type,o.cargo_description,
+              COALESCE(NULLIF(TRIM(q.customer_contact_phone),''),NULLIF(TRIM(o.shipper_phone),''),NULLIF(TRIM(o.consignee_phone),'')) contact_phone,
+              o.mark_contacts_snapshot_json,
               o.pieces,o.declared_quantity_unit,o.planned_inbound_package_count,o.planned_inbound_package_type,
               o.inbound_package_locked_at,o.gross_weight_kg,o.volume_cbm,o.origin_country,o.origin_state,o.origin_city,
               o.destination_country,o.destination_state,o.destination_city,w.name overseas_warehouse_name,
@@ -80,7 +86,7 @@ export async function loader({ request }: Route.LoaderArgs) {
          )
         WHERE o.organization_id=? AND o.customer_id=?
         ORDER BY o.updated_at DESC LIMIT 8`,
-    ).bind(user.organizationId, customer.id).all<RecentOrder>(),
+    ).bind(user.organizationId, customer.id).all<RecentOrderRow>(),
     env.DB.prepare(
       `SELECT id,quote_number,road_load_type,cargo_description,origin_city,destination_city,
               total_amount,valid_until,created_at
@@ -95,10 +101,17 @@ export async function loader({ request }: Route.LoaderArgs) {
     user.organizationId,
     recentOrders.results.map((order) => order.id),
   );
-  const orders = recentOrders.results.map((order) => ({
-    ...order,
-    marks: marksByOrder.get(order.id) ?? [],
-  }));
+  const orders = recentOrders.results.map((row) => {
+    const { mark_contacts_snapshot_json, ...order } = row;
+    return {
+      ...order,
+      mark_contacts: resolveMarkContactSnapshots(mark_contacts_snapshot_json, {
+        name: "业务联系",
+        phone: order.contact_phone,
+      }),
+      marks: marksByOrder.get(order.id) ?? [],
+    };
+  });
   return {
     customer,
     contacts: contacts.results,

@@ -28,26 +28,27 @@ export type OrderMarkLabel = {
 
 export type OrderMark = OrderMarkLabel["marks"][number];
 
-export function orderMarkLabelFacts(order: Pick<
+export function orderMarkLabelFacts(order: Omit<Pick<
   OrderMarkLabel,
   "destination_country" | "destination_state" | "destination_city" |
   "overseas_warehouse_name" | "pieces" | "declared_quantity_unit" |
   "volume_cbm" | "gross_weight_kg" | "contact_phone" | "mark_contacts"
->) {
+>, "mark_contacts"> & { mark_contacts?: MarkContactSnapshot[] | null }) {
   const destinationRegion = [order.destination_country, order.destination_state, order.destination_city]
     .filter(Boolean)
     .join(" ");
+  const markContacts = order.mark_contacts ?? [];
   return {
     destination: [destinationRegion, order.overseas_warehouse_name].filter(Boolean).join(" · ") || "待确认",
     pieces: `${formatMeasure(order.pieces, 0)} ${order.declared_quantity_unit || "件"}`,
     volume: `${formatMeasure(order.volume_cbm, 4)} CBM`,
     weight: `${formatMeasure(order.gross_weight_kg, 3)} KG`,
-    contacts: order.mark_contacts.map((contact)=>({
+    contacts: markContacts.map((contact)=>({
       ...contact,
       label:contact.title || markContactTypeLabels[contact.type],
     })),
-    phone: order.mark_contacts.length
-      ? order.mark_contacts.map((contact)=>`${contact.title || markContactTypeLabels[contact.type]}：${contact.name} ${contact.phone}`).join("\n")
+    phone: markContacts.length
+      ? markContacts.map((contact)=>`${contact.title || markContactTypeLabels[contact.type]}：${contact.name} ${contact.phone}`).join("\n")
       : "—",
   };
 }
