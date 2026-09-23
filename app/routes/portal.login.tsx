@@ -12,7 +12,7 @@ import {
   portalContextIdFromRequest,
   portalContextualPath,
 } from "../lib/portal-session-context";
-import { siteFromRequest, siteLogin } from "../lib/site.server";
+import { siteFromRequest, siteHomeFromRequest, siteLogin } from "../lib/site.server";
 
 export function meta() { return [{ title: "客户门户登录 | International TMS" }]; }
 
@@ -20,7 +20,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const site=siteFromRequest(request); if(site!=="portal")throw redirect(siteLogin(site));
   const contextId = portalContextIdFromRequest(request) || crypto.randomUUID();
   if ((await getSessionUser(request, "portal", null, contextId))?.site === "portal") {
-    throw redirect(portalContextualPath("/portal", contextId));
+    throw redirect(portalContextualPath(siteHomeFromRequest(request), contextId));
   }
   return { contextId };
 }
@@ -55,7 +55,7 @@ export async function action({ request }: Route.ActionArgs) {
     return { error: portalRegistrationLoginMessage(user.registration_status, user.review_notes), email, contextId };
   }
   await writeAudit({ request, action: "portal.login", resourceType: "session", organizationId: user.organization_id, actorUserId: user.id });
-  return redirect(portalContextualPath("/portal", contextId), {
+  return redirect(portalContextualPath(siteHomeFromRequest(request), contextId), {
     headers: { "Set-Cookie": await createSession(user.id, user.organization_id, "portal", null, contextId) },
   });
 }

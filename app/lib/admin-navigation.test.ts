@@ -19,22 +19,24 @@ function user(permissions: string[] = []) {
 }
 
 describe("admin navigation permissions", () => {
-  it("defines every sidebar entry once inside the four first-level groups", () => {
+  it("defines every sidebar entry once inside the five first-level groups", () => {
     expect(adminNavigationPermissionGroups.map((group) => group.key)).toEqual([
       "workbench",
+      "control",
       "transport",
       "businessData",
       "system",
     ]);
-    expect(adminNavigationPermissionItems).toHaveLength(20);
-    expect(new Set(adminNavigationPermissionItems.map((item) => item.key)).size).toBe(20);
-    expect(new Set(adminNavigationPermissionItems.map((item) => item.menuPermissionCode)).size).toBe(20);
+    expect(adminNavigationPermissionItems).toHaveLength(22);
+    expect(new Set(adminNavigationPermissionItems.map((item) => item.key)).size).toBe(22);
+    expect(new Set(adminNavigationPermissionItems.map((item) => item.menuPermissionCode)).size).toBe(22);
   });
 
   it("does not expose a menu from a business permission alone", () => {
     expect(canViewAdminNavigationItem(user(["order.view"]), "orders")).toBe(false);
     expect(adminNavigationGroupVisibility(user(["order.view"]))).toEqual({
       workbench: false,
+      control: false,
       transport: false,
       businessData: false,
       system: false,
@@ -94,6 +96,20 @@ describe("admin navigation permissions", () => {
       "billing.view",
       "billing.sensitive.view",
     ]), "billing")).toBe(true);
+  });
+
+  it("keeps tracking center and analytics as independently configurable entries", () => {
+    expect(canViewAdminNavigationItem(user([
+      "menu.admin.tracking_center.view",
+      "shipment.view",
+    ]), "trackingCenter")).toBe(true);
+    expect(canViewAdminNavigationItem(user([
+      "menu.admin.analytics.view",
+      "analytics.business.view",
+    ]), "analytics")).toBe(true);
+    expect(canViewAdminNavigationItem(user([
+      "menu.admin.analytics.view",
+    ]), "analytics")).toBe(false);
   });
 
   it("infers equivalent menu visibility for roles created from legacy permissions", () => {

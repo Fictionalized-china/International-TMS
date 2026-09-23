@@ -2,6 +2,7 @@ import { canAccessBatchWorkspace, type OrderAccessUser } from "./order-access";
 
 export type AdminNavigationGroupKey =
   | "workbench"
+  | "control"
   | "transport"
   | "businessData"
   | "system";
@@ -10,6 +11,8 @@ export type AdminNavigationItemKey =
   | "portal"
   | "notifications"
   | "dashboard"
+  | "trackingCenter"
+  | "analytics"
   | "quotations"
   | "orders"
   | "loading"
@@ -66,6 +69,15 @@ export const adminNavigationPermissionGroups: readonly AdminNavigationPermission
       navigationItem("portal", "任务工作台", "查看本人待办与工作入口。", "/admin/portal", []),
       navigationItem("notifications", "通知", "查看站内通知。", "/admin/notifications", []),
       navigationItem("dashboard", "运营总览", "查看岗位范围内的运营概览。", "/admin", ["dashboard.view"]),
+    ],
+  },
+  {
+    key: "control",
+    label: "运营控制",
+    description: "集中查看调度、运踪、时效预警与经营分析。",
+    items: [
+      navigationItem("trackingCenter", "调度与运踪", "统一查看调度、在途轨迹和时效预警。", "/admin/tracking-center", ["shipment.view"]),
+      navigationItem("analytics", "汇总分析", "按授权范围查看业务、仓库和财务汇总。", "/admin/analytics", ["analytics.business.view"]),
     ],
   },
   {

@@ -32,6 +32,9 @@ export default [
     route("admin/logistics-products", "routes/admin.logistics-products.tsx"),
     route("admin/carriers", "routes/admin.carriers.tsx"),
     route("admin/orders", "routes/admin.orders.tsx"),
+    route("admin/tracking-center", "routes/admin.tracking-center.tsx"),
+    route("admin/analytics", "routes/admin.analytics.tsx"),
+    route("admin/analytics/export", "routes/admin.analytics-export.ts"),
     route("admin/domestic-tracking", "routes/admin.domestic-tracking.tsx"),
     route("admin/documents", "routes/admin.documents.tsx"),
     route(

@@ -61,6 +61,11 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
             {navigationItems.dashboard && <SideLink to="/admin" icon="dashboard" end>运营总览</SideLink>}
           </SideNavGroup>
 
+          <SideNavGroup label="运营控制" visible={navigationGroups.control}>
+          {navigationItems.trackingCenter && <SideLink to="/admin/tracking-center" icon="map">调度与运踪</SideLink>}
+          {navigationItems.analytics && <SideLink to="/admin/analytics" icon="chart">汇总分析</SideLink>}
+          </SideNavGroup>
+
           <SideNavGroup label="汽运业务" visible={navigationGroups.transport}>
           {navigationItems.quotations && <SideLink to="/admin/quotations" icon="receipt">询价与报价</SideLink>}
           {navigationItems.orders && <SideLink to="/admin/orders" icon="clipboard">订单中心</SideLink>}

@@ -37,6 +37,342 @@
   .allocation-confirm-form { align-items: stretch; flex-direction: column; }
 }
 
+/* 调度与运踪 / 汇总分析：高密度运营控制台，保持现有后台视觉语言。 */
+.tracking-control-center,
+.analytics-center {
+  min-width: 0;
+  display: grid;
+  gap: 14px;
+}
+
+.tracking-control-center > *,
+.analytics-center > *,
+.tracking-center-panel {
+  min-width: 0;
+}
+
+.tracking-center-header,
+.analytics-header {
+  align-items: flex-end;
+}
+
+.tracking-center-kpis,
+.analytics-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.tracking-center-kpis > a,
+.analytics-kpi-grid > a {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 14px;
+  border: 1px solid #d7e2ea;
+  border-radius: 4px;
+  background: #fff;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.tracking-center-kpis > a:hover,
+.tracking-center-kpis > a:focus-visible,
+.analytics-kpi-grid > a:hover,
+.analytics-kpi-grid > a:focus-visible {
+  border-color: #2d789f;
+  box-shadow: 0 2px 10px rgb(18 66 94 / 9%);
+  outline: 2px solid rgb(45 120 159 / 14%);
+  outline-offset: 1px;
+}
+
+.tracking-center-kpis > a > span,
+.analytics-kpi-grid > a > span {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  background: #eef6fa;
+  color: #12658d;
+}
+
+.tracking-center-kpis div,
+.analytics-kpi-grid a div {
+  min-width: 0;
+  display: grid;
+}
+
+.tracking-center-kpis small,
+.analytics-kpi-grid small {
+  color: #657b8c;
+  font-size: 11px;
+}
+
+.tracking-center-kpis strong,
+.analytics-kpi-grid strong {
+  margin: 2px 0;
+  color: #102f47;
+  font-size: 23px;
+  line-height: 1.1;
+}
+
+.tracking-center-kpis em,
+.analytics-kpi-grid em {
+  overflow: hidden;
+  color: #8a9aa6;
+  font-size: 10px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tracking-center-filter,
+.analytics-filter-bar {
+  display: grid;
+  grid-template-columns: minmax(240px, 2fr) repeat(3, minmax(130px, 1fr)) auto;
+  align-items: end;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 11px;
+  border: 1px solid #e0e8ee;
+  background: #f8fafc;
+}
+
+.analytics-filter-bar {
+  grid-template-columns: repeat(2, minmax(130px, .8fr)) repeat(3, minmax(150px, 1fr)) auto;
+  margin: 0;
+}
+
+.tracking-center-filter label,
+.analytics-filter-bar label {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.tracking-center-filter label > span,
+.analytics-filter-bar label > span {
+  color: #526a7d;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.tracking-center-filter input,
+.tracking-center-filter select,
+.analytics-filter-bar input,
+.analytics-filter-bar select {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+}
+
+.tracking-center-filter > div,
+.analytics-filter-bar > div {
+  display: flex;
+  gap: 7px;
+  white-space: nowrap;
+}
+
+.tracking-center-table table {
+  min-width: 1120px;
+}
+
+.tracking-center-table td {
+  vertical-align: top;
+}
+
+.tracking-center-table td > strong,
+.tracking-center-table td > small {
+  display: block;
+}
+
+.tracking-center-table td > small {
+  margin-top: 5px;
+  color: #718695;
+}
+
+.tracking-warning {
+  width: max-content;
+  max-width: 100%;
+  margin-top: 6px;
+  padding: 2px 6px;
+  border: 1px solid #c9e4d7;
+  border-radius: 3px;
+  background: #f2fbf7;
+  color: #18724b !important;
+}
+
+.tracking-warning.warning {
+  border-color: #edd497;
+  background: #fff9e8;
+  color: #986600 !important;
+}
+
+.tracking-warning.danger {
+  border-color: #efb8b1;
+  background: #fff3f1;
+  color: #b63b2e !important;
+}
+
+.analytics-filter-panel {
+  padding: 10px;
+}
+
+.analytics-kpi-grid {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.analytics-finance-grid,
+.analytics-breakdown-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.analytics-finance-grid > a {
+  display: grid;
+  gap: 5px;
+  padding: 14px;
+  border-left: 3px solid #ef6b3a;
+  background: #f8fafc;
+  color: inherit;
+  text-decoration: none;
+}
+
+.analytics-finance-grid small,
+.analytics-finance-grid span {
+  color: #708391;
+  font-size: 10px;
+}
+
+.analytics-finance-grid strong {
+  color: #102f47;
+  font-size: 20px;
+}
+
+.analytics-breakdown {
+  min-width: 0;
+}
+
+.analytics-breakdown ol {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.analytics-breakdown li > span {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.analytics-breakdown li > a {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+}
+
+.analytics-breakdown li > a > span {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.analytics-breakdown li > a > i {
+  height: 5px;
+  display: block;
+  overflow: hidden;
+  border-radius: 3px;
+  background: #e7edf2;
+}
+
+.analytics-breakdown li > a > i > b {
+  height: 100%;
+  display: block;
+  border-radius: inherit;
+  background: #2c7a9e;
+}
+
+.analytics-breakdown li > a:hover strong,
+.analytics-breakdown li > a:focus-visible strong {
+  color: #0b6f9c;
+}
+
+@media (max-width: 1440px) {
+  .tracking-center-kpis {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.analytics-breakdown li strong {
+  overflow: hidden;
+  color: #203f56;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analytics-breakdown li small {
+  flex: 0 0 auto;
+  color: #718695;
+  font-size: 10px;
+}
+
+.analytics-breakdown li > i {
+  height: 5px;
+  display: block;
+  overflow: hidden;
+  border-radius: 3px;
+  background: #e7edf2;
+}
+
+.analytics-breakdown li > i > b {
+  height: 100%;
+  display: block;
+  border-radius: inherit;
+  background: #2c7a9e;
+}
+
+@media (max-width: 1200px) {
+  .tracking-center-kpis,
+  .analytics-kpi-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .tracking-center-filter,
+  .analytics-filter-bar {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .tracking-center-kpis,
+  .analytics-kpi-grid,
+  .tracking-center-filter,
+  .analytics-filter-bar,
+  .analytics-finance-grid,
+  .analytics-breakdown-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .tracking-center-filter > div,
+  .analytics-filter-bar > div {
+    flex-wrap: wrap;
+  }
+
+  .tracking-center-filter > div > *,
+  .analytics-filter-bar > div > * {
+    flex: 1 1 120px;
+  }
+}
+
 /* One order, one workflow-driven business form. */
 .order-detail-page-header {
   min-height: 68px;

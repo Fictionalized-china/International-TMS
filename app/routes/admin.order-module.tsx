@@ -99,6 +99,7 @@ import {
   trackingMilestoneNeedsDepartureReadiness,
 } from "../lib/order-tracking-action-policy";
 import { loadOrderTrackingActionAccess } from "../lib/order-tracking-action-policy.server";
+import { insertShipmentEventIfMissing } from "../lib/shipment-event-write.server";
 import {
   nextOverseasAction,
   overseasOperationProgress,
@@ -3437,6 +3438,17 @@ export async function action({ request, params }: Route.ActionArgs) {
                 current.organizationId,
                 latestShipmentIdByOrder.get(targetOrderId)!,
               ),
+              insertShipmentEventIfMissing(env.DB, {
+                id: crypto.randomUUID(),
+                shipmentId: latestShipmentIdByOrder.get(targetOrderId)!,
+                status: shipmentStatus,
+                location: location || null,
+                description: milestoneName,
+                eventAt,
+                visibleToCustomer,
+                actorUserId: current.userId,
+                createdAt: now,
+              }),
             ]
           : []),
       ]);
