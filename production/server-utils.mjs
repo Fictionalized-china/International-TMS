@@ -25,3 +25,12 @@ export function resolveStaticRequestPath(root, requestUrl, host = "localhost") {
   }
   return { kind: "candidate", path: candidate, pathname: parsed.pathname };
 }
+
+/** Delay until the next occurrence of a wall-clock hour in UTC+8. */
+export function millisecondsUntilNextShanghaiHour(hour, now = Date.now()) {
+  const normalizedHour = Math.max(0, Math.min(23, Number(hour) || 0));
+  const shanghaiNow = new Date(now + 8 * 60 * 60 * 1000);
+  let target = Date.UTC(shanghaiNow.getUTCFullYear(), shanghaiNow.getUTCMonth(), shanghaiNow.getUTCDate(), normalizedHour, 0, 0, 0) - 8 * 60 * 60 * 1000;
+  if (target <= now) target += 24 * 60 * 60 * 1000;
+  return target - now;
+}

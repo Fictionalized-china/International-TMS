@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  millisecondsUntilNextShanghaiHour,
   resolveStaticRequestPath,
   safeRequestPathname,
 } from "./server-utils.mjs";
@@ -32,5 +33,12 @@ describe("production server request boundary", () => {
       "localhost",
     );
     expect(result.kind).toBe("candidate");
+  });
+
+  it("schedules the next report for 02:00 in Shanghai", () => {
+    const before = Date.parse("2026-09-26T17:00:00.000Z"); // 01:00 in Shanghai
+    const after = Date.parse("2026-09-26T19:00:00.000Z"); // 03:00 in Shanghai
+    expect(millisecondsUntilNextShanghaiHour(2, before)).toBe(60 * 60 * 1000);
+    expect(millisecondsUntilNextShanghaiHour(2, after)).toBe(23 * 60 * 60 * 1000);
   });
 });

@@ -16,16 +16,22 @@ describe("analytics visibility", () => {
       canViewReceivable: true,
       canViewPayable: false,
       canViewProfit: false,
+      canConfigure: false,
+      canFillManual: false,
       canExport: false,
     });
     expect(analyticsVisibility([
       "analytics.business.view",
       "analytics.payable.view",
       "analytics.profit.view",
+      "analytics.config.manage",
+      "analytics.manual.fill",
       "data.export",
     ])).toMatchObject({
       canViewPayable: true,
       canViewProfit: true,
+      canConfigure: true,
+      canFillManual: true,
       canExport: true,
     });
   });

@@ -7,13 +7,14 @@ import { createRequestListener } from "@react-router/node";
 import mysql from "mysql2/promise";
 import * as build from "../build/server/index.js";
 import { inspectMysqlSchema } from "./mysql-migrations.mjs";
-import { resolveStaticRequestPath, safeRequestPathname } from "./server-utils.mjs";
+import { millisecondsUntilNextShanghaiHour, resolveStaticRequestPath, safeRequestPathname } from "./server-utils.mjs";
 
 const root = resolve(fileURLToPath(new URL("../build/client", import.meta.url)));
 const host = process.env.HOST ?? "127.0.0.1";
 const port = Number(process.env.PORT ?? 3100);
 const listener = createRequestListener({ build, mode: process.env.NODE_ENV ?? "production" });
 let readinessPool;
+let analyticsSnapshotTimer;
 const mime = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
@@ -132,10 +133,35 @@ const server = createServer((request, response) => {
 
 server.listen(port, host, () => {
   console.log(`International TMS listening on http://${host}:${port}`);
+  scheduleAnalyticsSnapshot();
 });
+
+function scheduleAnalyticsSnapshot() {
+  if (!process.env.BOOTSTRAP_TOKEN) {
+    console.warn("Analytics snapshot schedule disabled: BOOTSTRAP_TOKEN is missing");
+    return;
+  }
+  const delay = millisecondsUntilNextShanghaiHour(2);
+  analyticsSnapshotTimer = setTimeout(async () => {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/internal/jobs/analytics-snapshot`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${process.env.BOOTSTRAP_TOKEN}` },
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+      console.log("Scheduled analytics snapshots generated", await response.json());
+    } catch (error) {
+      console.error("Scheduled analytics snapshot failed", error);
+    } finally {
+      scheduleAnalyticsSnapshot();
+    }
+  }, delay);
+  analyticsSnapshotTimer.unref?.();
+}
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, () => server.close(async () => {
+    if (analyticsSnapshotTimer) clearTimeout(analyticsSnapshotTimer);
     if (readinessPool) await readinessPool.end();
     process.exit(0);
   }));

@@ -28,6 +28,86 @@ const migrations = [
       );
     },
   },
+  {
+    version: 160,
+    name: "financial_analytics_configuration",
+    definition: [
+      "permissions.analytics.config.manage",
+      "permissions.analytics.manual.fill",
+      "analytics_metric_configs",
+      "analytics_manual_metric_values",
+      "analytics_report_snapshots",
+      "analytics_port_settings",
+    ].join("\n"),
+    async up(connection) {
+      await connection.query(`CREATE TABLE IF NOT EXISTS analytics_metric_configs (
+        id VARCHAR(128) NOT NULL PRIMARY KEY,
+        organization_id VARCHAR(128) NOT NULL,
+        metric_code VARCHAR(128) NOT NULL,
+        calculation_mode VARCHAR(24) NOT NULL DEFAULT 'automatic',
+        assigned_position_id VARCHAR(128) NULL,
+        start_date_source VARCHAR(40) NOT NULL DEFAULT 'settlement_confirmed',
+        target_value DECIMAL(20,4) NULL,
+        warning_value DECIMAL(20,4) NULL,
+        danger_value DECIMAL(20,4) NULL,
+        config_json JSON NULL,
+        effective_from DATE NOT NULL,
+        updated_by_user_id VARCHAR(128) NULL,
+        created_at DATETIME(3) NOT NULL,
+        updated_at DATETIME(3) NOT NULL,
+        UNIQUE KEY uq_analytics_metric_config (organization_id,metric_code),
+        KEY idx_analytics_metric_configs_org (organization_id,metric_code)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
+      await connection.query(`CREATE TABLE IF NOT EXISTS analytics_manual_metric_values (
+        id VARCHAR(128) NOT NULL PRIMARY KEY,
+        organization_id VARCHAR(128) NOT NULL,
+        metric_code VARCHAR(128) NOT NULL,
+        period_start DATE NOT NULL,
+        period_end DATE NOT NULL,
+        dimension_key VARCHAR(255) NOT NULL DEFAULT '',
+        dimension_label VARCHAR(255) NULL,
+        numeric_value DECIMAL(20,4) NULL,
+        text_value TEXT NULL,
+        source_note TEXT NULL,
+        status VARCHAR(24) NOT NULL DEFAULT 'confirmed',
+        entered_by_user_id VARCHAR(128) NULL,
+        created_at DATETIME(3) NOT NULL,
+        updated_at DATETIME(3) NOT NULL,
+        UNIQUE KEY uq_analytics_manual_value (organization_id,metric_code,period_start,period_end,dimension_key),
+        KEY idx_analytics_manual_values_period (organization_id,period_start,period_end,metric_code,status)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
+      await connection.query(`CREATE TABLE IF NOT EXISTS analytics_report_snapshots (
+        id VARCHAR(128) NOT NULL PRIMARY KEY,
+        organization_id VARCHAR(128) NOT NULL,
+        period_start DATE NOT NULL,
+        period_end DATE NOT NULL,
+        generated_at DATETIME(3) NOT NULL,
+        generation_mode VARCHAR(24) NOT NULL DEFAULT 'scheduled',
+        payload_json JSON NOT NULL,
+        created_at DATETIME(3) NOT NULL,
+        UNIQUE KEY uq_analytics_snapshot (organization_id,period_start,period_end,generated_at),
+        KEY idx_analytics_snapshots_period (organization_id,period_start,period_end,generated_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
+      await connection.query(`CREATE TABLE IF NOT EXISTS analytics_port_settings (
+        organization_id VARCHAR(128) NOT NULL,
+        port_name VARCHAR(255) NOT NULL,
+        is_visible TINYINT(1) NOT NULL DEFAULT 1,
+        sort_order INT NOT NULL DEFAULT 100,
+        updated_by_user_id VARCHAR(128) NULL,
+        created_at DATETIME(3) NOT NULL,
+        updated_at DATETIME(3) NOT NULL,
+        PRIMARY KEY (organization_id,port_name)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
+      await connection.query(`INSERT INTO permissions(code,module,name,description)
+        VALUES ('analytics.config.manage','analytics','配置财务分析口径','配置指标计算方式、岗位、日期来源、目标和预警阈值'),
+               ('analytics.manual.fill','analytics','填写财务分析指标','按获授权岗位填写或导入人工统计值')
+        ON DUPLICATE KEY UPDATE name=VALUES(name),description=VALUES(description)`);
+      await connection.query(`INSERT IGNORE INTO role_permissions(role_id,permission_code)
+        SELECT id,'analytics.config.manage' FROM roles WHERE status='active' AND code IN ('owner','boss','pos_finance')`);
+      await connection.query(`INSERT IGNORE INTO role_permissions(role_id,permission_code)
+        SELECT id,'analytics.manual.fill' FROM roles WHERE status='active' AND code IN ('owner','boss','pos_finance')`);
+    },
+  },
 ];
 
 for (const migration of migrations) {
@@ -41,6 +121,10 @@ export const requiredMysqlSchemaChecksum = migrations.at(-1)?.checksum ?? "";
 export const requiredMysqlSchemaColumns = [
   ["quotations", "mark_contact_ids_json"],
   ["transport_orders", "mark_contacts_snapshot_json"],
+  ["analytics_metric_configs", "metric_code"],
+  ["analytics_manual_metric_values", "numeric_value"],
+  ["analytics_report_snapshots", "payload_json"],
+  ["analytics_port_settings", "port_name"],
 ];
 
 async function addColumnIfMissing(connection, table, column, definition) {
@@ -99,7 +183,11 @@ export async function inspectMysqlSchema(connection) {
          FROM information_schema.columns
         WHERE table_schema=DATABASE()
           AND ((table_name='quotations' AND column_name='mark_contact_ids_json')
-            OR (table_name='transport_orders' AND column_name='mark_contacts_snapshot_json'))`,
+            OR (table_name='transport_orders' AND column_name='mark_contacts_snapshot_json')
+            OR (table_name='analytics_metric_configs' AND column_name='metric_code')
+            OR (table_name='analytics_manual_metric_values' AND column_name='numeric_value')
+            OR (table_name='analytics_report_snapshots' AND column_name='payload_json')
+            OR (table_name='analytics_port_settings' AND column_name='port_name'))`,
     ).then(([rows]) => rows),
   ]);
   return evaluateMysqlSchema({ appliedMigrations, columns });
