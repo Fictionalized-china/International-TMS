@@ -29,6 +29,37 @@ const migrations = [
     },
   },
   {
+    version: 159,
+    name: "tracking_center_and_analytics_permissions",
+    definition: [
+      "permissions.menu.admin.tracking_center.view",
+      "permissions.menu.admin.analytics.view",
+      "permissions.analytics.receivable.view",
+      "permissions.analytics.payable.view",
+      "role_permissions.analytics_navigation",
+    ].join("\n"),
+    async up(connection) {
+      await connection.query(`INSERT INTO permissions(code,module,name,description)
+        VALUES ('menu.admin.tracking_center.view','navigation','显示调度与运踪菜单','在管理端侧栏显示调度、运踪与时效预警入口'),
+               ('menu.admin.analytics.view','navigation','显示汇总分析菜单','在管理端侧栏显示汇总分析入口'),
+               ('analytics.receivable.view','analytics','查看应收汇总','查看汇总分析中的应收金额，不包含应付、毛利或导出'),
+               ('analytics.payable.view','analytics','查看应付与成本汇总','查看汇总分析中的应付及成本金额，不包含应收、毛利或导出')
+        ON DUPLICATE KEY UPDATE name=VALUES(name),description=VALUES(description)`);
+      await connection.query(`INSERT IGNORE INTO role_permissions(role_id,permission_code)
+        SELECT role_id,'menu.admin.tracking_center.view' FROM role_permissions WHERE permission_code='shipment.view'`);
+      await connection.query(`INSERT IGNORE INTO role_permissions(role_id,permission_code)
+        SELECT role_id,'menu.admin.analytics.view' FROM role_permissions WHERE permission_code='analytics.business.view'`);
+      await connection.query(`INSERT IGNORE INTO role_permissions(role_id,permission_code)
+        SELECT id,'analytics.receivable.view' FROM roles WHERE status='active' AND code IN ('owner','boss','pos_finance')`);
+      await connection.query(`INSERT IGNORE INTO role_permissions(role_id,permission_code)
+        SELECT id,'analytics.payable.view' FROM roles WHERE status='active' AND code IN ('owner','boss','pos_finance')`);
+      await connection.query(`INSERT IGNORE INTO role_permissions(role_id,permission_code)
+        SELECT id,'menu.admin.tracking_center.view' FROM roles WHERE status='active' AND code IN ('owner','boss')`);
+      await connection.query(`INSERT IGNORE INTO role_permissions(role_id,permission_code)
+        SELECT id,'menu.admin.analytics.view' FROM roles WHERE status='active' AND code IN ('owner','boss')`);
+    },
+  },
+  {
     version: 160,
     name: "financial_analytics_configuration",
     definition: [
