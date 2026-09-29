@@ -1138,7 +1138,7 @@ async function resolveFieldPresence(
     const quotation = await env.DB.prepare(
       `SELECT q.*,
         (SELECT COUNT(*) FROM quotation_charges c
-         WHERE c.quotation_id=q.id AND c.quantity>0 AND c.unit_price>0) quotation_charge_items
+         WHERE c.quotation_id=q.id AND c.quantity>0 AND c.unit_price>=0) quotation_charge_items
        FROM quotations q
        JOIN transport_orders o ON o.quotation_id=q.id AND o.organization_id=q.organization_id
        WHERE o.id=? AND o.organization_id=?`,

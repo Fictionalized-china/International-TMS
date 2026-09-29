@@ -59,6 +59,7 @@ import {
   type MarkContactOption,
 } from "../lib/mark-contacts";
 import { listActiveMarkContacts, resolveMarkContactSnapshots } from "../lib/mark-contacts.server";
+import { missingOrderIntakeFees } from "../lib/order-intake-fees";
 
 type Quote = {
   id: string;
@@ -182,7 +183,7 @@ export async function loader({ request }: Route.LoaderArgs) {
         q.planned_package_count,q.planned_package_type,q.gross_weight_kg,q.volume_cbm,
         q.estimated_length_cm,q.estimated_width_cm,q.estimated_height_cm,q.total_amount,q.valid_until,q.notes,
         (SELECT COUNT(*) FROM quotation_charges qc
-         WHERE qc.quotation_id=q.id AND qc.quantity>0 AND qc.unit_price>0) quotation_charge_items,
+         WHERE qc.quotation_id=q.id AND qc.quantity>0 AND qc.unit_price>=0) quotation_charge_items,
         q.lifecycle_status,o.id order_id,o.order_number,o.status order_status,o.current_step_code,q.created_at
        FROM quotations q
        JOIN customers c ON c.id=q.customer_id
@@ -274,7 +275,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     markContacts,
     quotationWorkflowFields,
     workflowValues,
-    filters: { keyword, lifecycle },
+    filters: { keyword, lifecycle, entryMode: url.searchParams.get("entryMode") === "direct" ? "direct" : "" },
   };
 }
 
@@ -291,7 +292,7 @@ export async function action({ request }: Route.ActionArgs) {
       const quote = await env.DB.prepare(
         `SELECT q.*,
           (SELECT COUNT(*) FROM quotation_charges c
-           WHERE c.quotation_id=q.id AND c.quantity>0 AND c.unit_price>0) quotation_charge_items
+           WHERE c.quotation_id=q.id AND c.quantity>0 AND c.unit_price>=0) quotation_charge_items
          FROM quotations q
          JOIN customers c ON c.id=q.customer_id AND c.organization_id=q.organization_id
          WHERE q.id=? AND q.organization_id=? AND ${customerScope.sql}`,
@@ -361,6 +362,7 @@ export async function action({ request }: Route.ActionArgs) {
       return { intent, quotationId: actionQuotationId, success: "询价报价第一步的配置字段已保存" };
     }
     if (intent === "create") {
+      const entryMode = valueOf(form, "entryMode") === "direct" ? "direct" : "quote";
       const customerId = valueOf(form, "customerId");
       const salespersonId = valueOf(form, "salespersonId");
       const transportMode = valueOf(form, "transportMode");
@@ -527,13 +529,14 @@ export async function action({ request }: Route.ActionArgs) {
       });
       const chargeNames = form.getAll("chargeName").map(String);
       const quantities = form.getAll("chargeQuantity").map(Number);
-      const unitPrices = form.getAll("chargeUnitPrice").map(Number);
+      const rawUnitPrices = form.getAll("chargeUnitPrice").map(String);
       const chargeNotes = form.getAll("chargeNotes").map(String);
       const chargePolicy = policy("quotation_charge_items","required");
       const charges = chargePolicy.isActive ? chargeNames.map((name, index) => {
         const quantity = quantities[index];
-        const unitPrice = unitPrices[index];
-        if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(unitPrice) || unitPrice <= 0) {
+        const rawUnitPrice = rawUnitPrices[index] || "";
+        const unitPrice = Number(rawUnitPrice);
+        if (!Number.isFinite(quantity) || quantity <= 0 || !rawUnitPrice.trim() || !Number.isFinite(unitPrice) || unitPrice < 0) {
           if (chargePolicy.isRequired) throw new Error(`第 ${index + 1} 条费用的数量或单价无效`);
           return null;
         }
@@ -541,6 +544,16 @@ export async function action({ request }: Route.ActionArgs) {
       }).filter((item): item is NonNullable<typeof item> => Boolean(item)) : [];
       if (chargePolicy.isRequired && (!charges.length || charges.some((item) => !item.name)))
         throw new Error("至少填写一条有效的客户应收费用");
+      if (entryMode === "direct") {
+        const missingFees = missingOrderIntakeFees(roadLoadType, charges.map((charge, index) => ({
+          chargeCode: `RECEIVABLE_${index + 1}`,
+          chargeName: charge.name,
+          amount: charge.amount,
+        })));
+        if (missingFees.length) {
+          throw new Error(`${roadLoadType === "ftl" ? "整车" : "拼车"}直接录单前请明确录入：${missingFees.map((item) => item.label).join("、")}；客户自送时提货费请填写 0。`);
+        }
+      }
       const total = charges.reduce((sum, item) => sum + item.amount, 0);
       const now = new Date().toISOString();
       const id = crypto.randomUUID();
@@ -574,11 +587,11 @@ export async function action({ request }: Route.ActionArgs) {
               id,quotation_id,charge_code,description,quantity,unit_price,amount,exchange_rate,sort_order,notes,created_at
              ) VALUES(?,?,?,?,?,?,?,1,?,?,?)`,
           ).bind(crypto.randomUUID(),id,`RECEIVABLE_${index + 1}`,charge.name,charge.quantity,charge.unitPrice,charge.amount,(index + 1) * 10,charge.notes,now)),
-          env.DB.prepare(
+          ...(entryMode === "quote" ? [env.DB.prepare(
             `INSERT INTO portal_notifications(
               id,organization_id,customer_id,user_id,type,title,message,link,is_read,created_at
              ) VALUES(?,?,?,?,?,?,?,?,0,?)`,
-          ).bind(notificationId,current.organizationId,customerId,null,"quote","新报价待确认",`报价 ${number} 等待确认。`,`/portal/orders?status=quote_pending&quote=${encodeURIComponent(id)}`,now),
+          ).bind(notificationId,current.organizationId,customerId,null,"quote","新报价待确认",`报价 ${number} 等待确认。`,`/portal/orders?status=quote_pending&quote=${encodeURIComponent(id)}`,now)] : []),
         ]);
         await savePreparedQuotationWorkflowFieldValues({
           organizationId:current.organizationId,
@@ -595,7 +608,7 @@ export async function action({ request }: Route.ActionArgs) {
           quotationId:id,
           actorUserId:current.userId,
           source:"admin",
-          metadata:{ number,roadLoadType,workflowVersionLocked:true },
+          metadata:{ number,roadLoadType,workflowVersionLocked:true,entryMode },
         });
         if (!workflowInstanceId) throw new Error("所选工作流缺少询价报价第一节点");
       } catch (error) {
@@ -609,7 +622,36 @@ export async function action({ request }: Route.ActionArgs) {
         ]);
         throw error;
       }
-      return { intent, quotationId: actionQuotationId, success: `报价 ${number} 已保存并进入待客户确认` };
+      if (entryMode === "direct") {
+        const order = await acceptQuotation({
+          organizationId: current.organizationId,
+          quotationId: id,
+          actorUserId: current.userId,
+          source: "admin",
+          request,
+        });
+        await env.DB.prepare(
+          "UPDATE quotations SET acceptance_source='offline_order_entry',updated_at=? WHERE id=? AND organization_id=?",
+        ).bind(new Date().toISOString(), id, current.organizationId).run();
+        await writeAudit({
+          request,
+          action: "order.direct_entry.create",
+          resourceType: "transport_order",
+          resourceId: order.id,
+          organizationId: current.organizationId,
+          actorUserId: current.userId,
+          metadata: { quotationId: id, quotationNumber: number, orderNumber: order.orderNumber },
+        });
+        return {
+          intent,
+          entryMode,
+          quotationId: id,
+          orderId: order.id,
+          orderNumber: order.orderNumber,
+          success: `订单 ${order.orderNumber} 已按线下确认资料直接建立`,
+        };
+      }
+      return { intent, entryMode, quotationId: id, success: `报价 ${number} 已保存并进入待客户确认` };
     }
     const quotationId = valueOf(form, "id");
     if (!quotationId) throw new Error("缺少报价记录");
@@ -739,7 +781,7 @@ async function saveQuotationNativeWorkflowUpdate(input: {
   const chargeIds = input.form.getAll("chargeId").map(String);
   const chargeNames = input.form.getAll("chargeName").map(String);
   const chargeQuantities = input.form.getAll("chargeQuantity").map(Number);
-  const chargeUnitPrices = input.form.getAll("chargeUnitPrice").map(Number);
+  const chargeUnitPrices = input.form.getAll("chargeUnitPrice").map(String);
   const chargeNotes = input.form.getAll("chargeNotes").map(String);
   const existingCharges = chargePolicy.isActive
     ? (await env.DB.prepare(
@@ -899,10 +941,13 @@ async function saveQuotationNativeWorkflowUpdate(input: {
 export default function QuotationsPage({ loaderData, actionData }: Route.ComponentProps) {
   const busy = useNavigation().state !== "idle";
   const [createQuoteOpen,setCreateQuoteOpen]=useState(false);
+  const [directOrderOpen,setDirectOrderOpen]=useState(loaderData.filters.entryMode === "direct");
   const dismissedCreateResult=useRef(actionData);
   const actionError=actionData&&"formError" in actionData?actionData.formError:undefined;
   const actionSuccess=actionData&&"success" in actionData?actionData.success:undefined;
-  const createFormError=createQuoteOpen&&actionData?.intent==="create"&&actionError&&
+  const createFormError=createQuoteOpen&&actionData?.intent==="create"&&actionData.entryMode!=="direct"&&actionError&&
+    actionData!==dismissedCreateResult.current?actionError:undefined;
+  const directFormError=directOrderOpen&&actionData?.intent==="create"&&actionData.entryMode==="direct"&&actionError&&
     actionData!==dismissedCreateResult.current?actionError:undefined;
   const updateCreateQuoteOpen=(nextOpen:boolean)=>{
     if(!nextOpen)dismissedCreateResult.current=actionData;
@@ -912,10 +957,13 @@ export default function QuotationsPage({ loaderData, actionData }: Route.Compone
   return <div className="page prototype-page">
     <div className="breadcrumb">管理后台 / 工作台 / <b>询价与报价</b></div>
     <div className="page-head">
-      <div><span className="eyebrow">QUOTE DESK / 询价与报价</span><h1>询价与报价</h1><p>报价被接受后立即生成唯一运输订单，不再二次创建订单。</p></div>
-      <div className="head-actions"><Modal title="创建运输报价" triggerLabel="创建报价" triggerClassName="btn primary" closeSignal={actionData?.intent==="create"?actionSuccess:undefined} isOpen={createQuoteOpen} onOpenChange={updateCreateQuoteOpen} size="xwide" dialogClassName="quote-form-modal" guardFormChanges><QuoteForm loaderData={loaderData} busy={busy} formError={createFormError} /></Modal></div>
+      <div><span className="eyebrow">QUOTE DESK / 询价与报价</span><h1>询价与报价</h1><p>线下已经确认的业务可直接录单；需要客户线上确认时再使用报价流程。</p></div>
+      <div className="head-actions">
+        <Modal title="创建运输报价" triggerLabel="创建报价" triggerClassName="btn" closeSignal={actionData?.intent==="create"&&actionData.entryMode!=="direct"?actionSuccess:undefined} isOpen={createQuoteOpen} onOpenChange={updateCreateQuoteOpen} size="xwide" dialogClassName="quote-form-modal" guardFormChanges><QuoteForm loaderData={loaderData} busy={busy} formError={createFormError} entryMode="quote" /></Modal>
+        <Modal title="线下确认直接录单" triggerLabel="直接录单" triggerClassName="btn primary" closeSignal={actionData?.intent==="create"&&actionData.entryMode==="direct"?actionSuccess:undefined} isOpen={directOrderOpen} onOpenChange={setDirectOrderOpen} size="xwide" dialogClassName="quote-form-modal" guardFormChanges><QuoteForm loaderData={loaderData} busy={busy} formError={directFormError} entryMode="direct" /></Modal>
+      </div>
     </div>
-    {(actionSuccess || actionError) && <div className={`gate ${actionError ? "" : "ok"}`}>{actionError || actionSuccess}</div>}
+    {(actionSuccess || actionError) && <div className={`gate ${actionError ? "" : "ok"}`}>{actionError || actionSuccess}{actionData && "orderId" in actionData && actionData.orderId ? <Link className="btn small" to={`/admin/orders/${actionData.orderId}`}>打开订单</Link> : null}</div>}
     <div className="kpis quotation-kpis">
       <div className="panel"><span>待客户确认</span><b>{stats.pending}</b></div>
       <div className="panel"><span>已接受</span><b>{stats.accepted}</b></div>
@@ -1058,7 +1106,7 @@ function ReadCell({ label, value }: { label: string; value: string }) {
   return <div><span>{label}</span><b>{value}</b></div>;
 }
 
-function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<ReturnType<typeof loader>>; busy: boolean; formError?: string }) {
+function QuoteForm({ loaderData, busy, formError, entryMode }: { loaderData: Awaited<ReturnType<typeof loader>>; busy: boolean; formError?: string; entryMode: "quote" | "direct" }) {
   const errorSummaryRef=useRef<HTMLDivElement>(null);
   const autoSelectedCustomerRef = useRef("");
   const customerFetcher = useFetcher<CustomerCreateActionData>();
@@ -1195,7 +1243,9 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
   </div>;
   return <Form method="post" encType="multipart/form-data" className="prototype-quote-form" data-keyboard-submit data-enter-flow>
     <input type="hidden" name="intent" value="create"/>
-    {formError && <div ref={errorSummaryRef} className="alert error" role="alert" tabIndex={-1}><strong>报价尚未保存</strong><span>{formError}</span><small>已填写内容仍保留在当前弹窗，请按提示修改后重试。</small></div>}
+    <input type="hidden" name="entryMode" value={entryMode}/>
+    {entryMode === "direct" && <div className="alert info"><strong>直接录单</strong><span>适用于已经通过微信、线下等方式确认的业务；保存后直接建立草稿订单，不向客户发送待确认报价。</span></div>}
+    {formError && <div ref={errorSummaryRef} className="alert error" role="alert" tabIndex={-1}><strong>{entryMode === "direct" ? "订单尚未建立" : "报价尚未保存"}</strong><span>{formError}</span><small>已填写内容仍保留在当前弹窗，请按提示修改后重试。</small></div>}
     <div className="quote-ledger">
     <QuoteLedgerSection className="quote-plan-section" title="1　客户与运输方案">
       <div className="quote-field-grid quote-plan-grid">
@@ -1250,7 +1300,7 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
       title="4　报价费用与有效期"
       action={policies.charges.isActive ? <button className="btn quote-charge-add" type="button" onClick={() => setCharges((rows) => [...rows, { name: transportChargeNameOptions[0]?.[0] || "国际汽运费", quantity: 1, unitPrice: "", notes: "" }])}>＋ 添加费用</button> : undefined}
     >
-      {policies.charges.isActive && <><div className="table-wrap quote-charge-table-wrap"><table className="inline-table quote-charge-table"><thead><tr><th>费用名称</th><th>数量</th><th>单价</th><th>金额</th><th>备注</th><th>操作</th></tr></thead><tbody>{charges.map((charge, index) => <tr key={index}><td><select className="control" name="chargeName" value={charge.name} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, name: event.target.value } : row))} required={policies.charges.isRequired}>{transportChargeNameOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td><td><input className="control" name="chargeQuantity" type="number" min="0.01" step="0.01" value={charge.quantity} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: Number(event.target.value) } : row))} required={policies.charges.isRequired}/></td><td><input className="control" name="chargeUnitPrice" type="number" min="0.01" step="0.01" value={charge.unitPrice} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, unitPrice: event.target.value } : row))} required={policies.charges.isRequired}/></td><td><b>{(charge.quantity * Number(charge.unitPrice || 0)).toLocaleString()}</b></td><td><input className="control" name="chargeNotes" value={charge.notes} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, notes: event.target.value } : row))}/></td><td><button className="btn danger" type="button" disabled={charges.length === 1} onClick={() => setCharges((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>删除</button></td></tr>)}</tbody></table></div>
+      {policies.charges.isActive && <><div className="table-wrap quote-charge-table-wrap"><table className="inline-table quote-charge-table"><thead><tr><th>费用名称</th><th>数量</th><th>单价</th><th>金额</th><th>备注</th><th>操作</th></tr></thead><tbody>{charges.map((charge, index) => <tr key={index}><td><select className="control" name="chargeName" value={charge.name} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, name: event.target.value } : row))} required={policies.charges.isRequired}>{transportChargeNameOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td><td><input className="control" name="chargeQuantity" type="number" min="0.01" step="0.01" value={charge.quantity} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: Number(event.target.value) } : row))} required={policies.charges.isRequired}/></td><td><input className="control" name="chargeUnitPrice" type="number" min="0" step="0.01" value={charge.unitPrice} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, unitPrice: event.target.value } : row))} required={policies.charges.isRequired}/></td><td><b>{(charge.quantity * Number(charge.unitPrice || 0)).toLocaleString()}</b></td><td><input className="control" name="chargeNotes" value={charge.notes} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, notes: event.target.value } : row))}/></td><td><button className="btn danger" type="button" disabled={charges.length === 1} onClick={() => setCharges((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>删除</button></td></tr>)}</tbody></table></div>
       </>}
       <div className="quote-charge-footer">
         {policies.validUntil.isActive && <Field label="报价有效期"><input className="control" name="validUntil" type="date" required={policies.validUntil.isRequired}/></Field>}
@@ -1258,7 +1308,7 @@ function QuoteForm({ loaderData, busy, formError }: { loaderData: Awaited<Return
       </div>
     </QuoteLedgerSection>}
     </div>
-    <div className="modal-form-actions"><button className="btn primary large" disabled={busy}>保存报价并等待客户确认</button></div>
+    <div className="modal-form-actions"><button className="btn primary large" disabled={busy}>{entryMode === "direct" ? "确认资料并建立订单" : "保存报价并等待客户确认"}</button></div>
   </Form>;
 }
 
@@ -1384,7 +1434,7 @@ function QuotationNativeWorkflowInputs({
       {p.charges.isActive && <div className="table-wrap"><table className="inline-table quote-charge-table"><thead><tr><th>费用名称</th><th>数量</th><th>单价</th><th>备注</th><th>操作</th></tr></thead><tbody>{chargeRows.map((charge,index) => <tr key={index}>
         <td><input type="hidden" name="chargeId" value={charge.id}/><select className="control" name="chargeName" value={charge.name} onChange={(event) => setChargeRows((rows) => rows.map((row,i) => i === index ? {...row,name:event.target.value} : row))} required={p.charges.isRequired}>{transportChargeNameOptions.map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></td>
         <td><input className="control" name="chargeQuantity" type="number" min="0.01" step="0.01" value={charge.quantity} onChange={(event) => setChargeRows((rows) => rows.map((row,i) => i === index ? {...row,quantity:Number(event.target.value)} : row))} required={p.charges.isRequired}/></td>
-        <td><input className="control" name="chargeUnitPrice" type="number" min="0.01" step="0.01" value={charge.unitPrice} onChange={(event) => setChargeRows((rows) => rows.map((row,i) => i === index ? {...row,unitPrice:event.target.value} : row))} required={p.charges.isRequired}/></td>
+        <td><input className="control" name="chargeUnitPrice" type="number" min="0" step="0.01" value={charge.unitPrice} onChange={(event) => setChargeRows((rows) => rows.map((row,i) => i === index ? {...row,unitPrice:event.target.value} : row))} required={p.charges.isRequired}/></td>
         <td><input className="control" name="chargeNotes" value={charge.notes} onChange={(event) => setChargeRows((rows) => rows.map((row,i) => i === index ? {...row,notes:event.target.value} : row))}/></td>
         <td><button className="btn danger" type="button" disabled={Boolean(charge.id) || chargeRows.length === 1} title={charge.id ? "既有费用保留审计标识，只允许修改；如需冲销请在订单结算阶段处理" : undefined} onClick={() => setChargeRows((rows) => rows.filter((_,i) => i !== index))}>删除</button></td>
       </tr>)}</tbody></table><button className="btn" type="button" onClick={() => setChargeRows((rows) => [...rows,{id:"",name:transportChargeNameOptions[0]?.[0] || "国际汽运费",quantity:1,unitPrice:"",notes:""}])}>＋ 添加费用</button></div>}

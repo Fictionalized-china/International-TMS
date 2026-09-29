@@ -28,7 +28,7 @@ export function parseQuotationChargeUpdate(input: {
   ids: readonly string[];
   names: readonly string[];
   quantities: readonly number[];
-  unitPrices: readonly number[];
+  unitPrices: readonly (number | string)[];
   notes: readonly string[];
   required: boolean;
 }): QuotationChargeUpdate {
@@ -64,9 +64,11 @@ export function parseQuotationChargeUpdate(input: {
     const id = normalizedIds[index] || "";
     const name = rawName.trim();
     const quantity = input.quantities[index];
-    const unitPrice = input.unitPrices[index];
+    const rawUnitPrice = input.unitPrices[index];
+    const hasUnitPrice = typeof rawUnitPrice === "number" || rawUnitPrice.trim() !== "";
+    const unitPrice = Number(rawUnitPrice);
     const valid = Boolean(name) && Number.isFinite(quantity) && quantity > 0 &&
-      Number.isFinite(unitPrice) && unitPrice > 0;
+      hasUnitPrice && Number.isFinite(unitPrice) && unitPrice >= 0;
     if (!valid) {
       if (id || input.required) {
         throw new Error(`第 ${index + 1} 条费用的名称、数量或单价无效`);

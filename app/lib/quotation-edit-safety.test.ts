@@ -76,8 +76,16 @@ describe("quotation charge edit safety",() => {
 
   it("ignores the single empty starter row when charges are optional",() => {
     expect(parseQuotationChargeUpdate({
-      existing:[],ids:[""],names:["国际汽运费"],quantities:[1],unitPrices:[0],notes:[""],required:false,
+      existing:[],ids:[""],names:["国际汽运费"],quantities:[1],unitPrices:[""],notes:[""],required:false,
     })).toEqual({ charges:[],changed:false });
+  });
+
+  it("preserves an explicitly entered zero fee",() => {
+    expect(parseQuotationChargeUpdate({
+      existing:[],ids:[""],names:["提货费"],quantities:[1],unitPrices:["0"],notes:["客户自送"],required:true,
+    }).charges).toEqual([{
+      id:"",name:"提货费",quantity:1,unitPrice:0,amount:0,notes:"客户自送",
+    }]);
   });
 });
 

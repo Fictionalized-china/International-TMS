@@ -206,7 +206,7 @@ export async function assertQuotationWorkflowFieldsComplete(
   const quote = await env.DB.prepare(
     `SELECT q.*,
        (SELECT COUNT(*) FROM quotation_charges c
-        WHERE c.quotation_id=q.id AND c.quantity>0 AND c.unit_price>0) quotation_charge_items
+        WHERE c.quotation_id=q.id AND c.quantity>0 AND c.unit_price>=0) quotation_charge_items
      FROM quotations q WHERE q.organization_id=? AND q.id=?`,
   ).bind(organizationId,quotationId).first<Record<string, unknown>>();
   if (!quote) throw new Error("报价不存在");

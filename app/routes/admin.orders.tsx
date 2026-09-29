@@ -469,8 +469,8 @@ export default function Orders({ loaderData }: Route.ComponentProps) {
     <div className="page prototype-page order-list-page">
       <div className="breadcrumb">汽运业务 / 订单中心</div>
       <header className="page-head">
-        <div><h1>订单中心</h1><p>订单由客户接受报价后自动生成；在一张表内筛选、查看并进入当前业务节点。</p></div>
-        <Link className="btn primary" to="/admin/quotations">前往询价与报价</Link>
+        <div><h1>订单中心</h1><p>业务员可按线下已确认内容直接录单；询价与报价保留为可选销售工具。</p></div>
+        <div className="head-actions"><Link className="btn" to="/admin/quotations">询价与报价</Link><Link className="btn primary" to="/admin/quotations?entryMode=direct">直接录单</Link></div>
       </header>
       {loaderData.canViewBatchWorkload && !loaderData.unifiedSupervisorWorkload && <OrderWorkloadTabs
         active={loaderData.workloadView}

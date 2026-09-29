@@ -9,8 +9,21 @@ const warehouseAcceptanceRoute = readFileSync(
   new URL("./routes/warehouse.acceptance.tsx", import.meta.url),
   "utf8",
 );
+const quotationsRoute = readFileSync(
+  new URL("./routes/admin.quotations.tsx", import.meta.url),
+  "utf8",
+);
 
 describe("order intake regression contract", () => {
+  it("supports direct order entry without sending a portal quote notification", () => {
+    expect(quotationsRoute).toContain('valueOf(form, "entryMode") === "direct"');
+    expect(quotationsRoute).toContain('entryMode === "quote" ? [env.DB.prepare(');
+    expect(quotationsRoute).toContain('if (entryMode === "direct")');
+    expect(quotationsRoute).toContain('missingOrderIntakeFees(roadLoadType');
+    expect(quotationsRoute).toContain('acceptance_source=\'offline_order_entry\'');
+    expect(quotationsRoute).toContain('<input type="hidden" name="entryMode" value={entryMode}/>');
+  });
+
   it("offers approval and return while routing returns to the bound salesperson", () => {
     expect(orderModuleRoute).toContain('<option value="reject">打回</option>');
     expect(orderModuleRoute).toContain('actionCode === "reject"\n      ? order.salesperson_user_id');
