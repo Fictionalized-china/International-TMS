@@ -156,7 +156,7 @@ function addPost() {
   });
 }
 
-describe("cargo consolidation frozen loading stage gate", () => {
+describe("cargo consolidation warehouse execution boundary", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     harness.state.stageAvailable = false;
@@ -171,13 +171,9 @@ describe("cargo consolidation frozen loading stage gate", () => {
     } as never);
 
     expect(result).toEqual({
-      formError: `暂不能配载：SO-001：${harness.gateReason}；SO-002：${harness.gateReason}`,
+      formError: "配载组成与境外运输资源现由操作主管在管理端“配载单跟踪”统一维护；仓库端只执行收货、装车、扫描和出库。",
     });
-    expect(harness.loadStageAccesses).toHaveBeenCalledWith(
-      harness.DB,
-      "org-1",
-      ["order-1", "order-2"],
-    );
+    expect(harness.loadStageAccesses).not.toHaveBeenCalled();
     expect(harness.DB.batch).not.toHaveBeenCalled();
   });
 
@@ -189,13 +185,13 @@ describe("cargo consolidation frozen loading stage gate", () => {
     } as never);
 
     expect(result).toEqual({
-      formError: `暂不能配载：SO-001：${harness.gateReason}`,
+      formError: "配载组成与境外运输资源现由操作主管在管理端“配载单跟踪”统一维护；仓库端只执行收货、装车、扫描和出库。",
     });
     expect(harness.DB.batch).not.toHaveBeenCalled();
     expect(harness.queries.some((sql) => sql.includes("FROM transport_batches WHERE id=?"))).toBe(false);
   });
 
-  it("allows creation after the frozen loading placement becomes current", async () => {
+  it("keeps warehouse creation disabled after the frozen loading placement becomes current", async () => {
     harness.state.stageAvailable = true;
 
     const result = await action({
@@ -204,9 +200,11 @@ describe("cargo consolidation frozen loading stage gate", () => {
       context: undefined,
     } as never);
 
-    expect(result).toMatchObject({ success: expect.stringContaining("已生成并提交操作主管审核") });
-    expect(harness.DB.batch).toHaveBeenCalled();
-    expect(harness.queries.some((sql) => sql.includes("transport_batch_approval"))).toBe(true);
+    expect(result).toEqual({
+      formError: "配载组成与境外运输资源现由操作主管在管理端“配载单跟踪”统一维护；仓库端只执行收货、装车、扫描和出库。",
+    });
+    expect(harness.DB.batch).not.toHaveBeenCalled();
+    expect(harness.queries.some((sql) => sql.includes("transport_batch_approval"))).toBe(false);
   });
 
   it("loads the list with the same workflow decision and filter predicate", async () => {

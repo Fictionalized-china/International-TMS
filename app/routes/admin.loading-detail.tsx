@@ -77,6 +77,7 @@ import {
 } from "../lib/internal-notifications.server";
 import { isActiveExceptionStatus } from "../lib/batch-exception-policy";
 import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
+import { loadOperationalRules } from "../lib/operational-rules.server";
 import {
   BATCH_RESPONSIBILITY_PERMISSION_REQUIREMENTS,
   BATCH_RESPONSIBILITY_POSITION_CODES,
@@ -1208,7 +1209,8 @@ export async function action({request,params}:Route.ActionArgs){
     if(!charge)return{formError:"请选择有效的分摊费用项目"};
     if(!["auto","weight","volume","equal"].includes(method))return{formError:"请选择有效的分摊方式"};
     try{
-      const allocationId=await createCostAllocation(env.DB,{organizationId:current.organizationId,batchId,chargeCode:charge.code,chargeName:charge.name,counterpartyName:valueOf(form,"counterpartyName"),currency:valueOf(form,"currency")||"CNY",exchangeRate:positiveNumberOf(form,"exchangeRate",1),totalAmount:positiveNumberOf(form,"totalAmount"),method:method as "auto"|AllocationMethod,notes:valueOf(form,"allocationNotes"),userId:current.userId,now,assertCanMutate:assertCostCanMutate});
+      const rules=await loadOperationalRules(current.organizationId);
+      const allocationId=await createCostAllocation(env.DB,{organizationId:current.organizationId,batchId,chargeCode:charge.code,chargeName:charge.name,counterpartyName:valueOf(form,"counterpartyName"),currency:valueOf(form,"currency")||"CNY",exchangeRate:positiveNumberOf(form,"exchangeRate",1),totalAmount:positiveNumberOf(form,"totalAmount"),method:method as "auto"|AllocationMethod,notes:valueOf(form,"allocationNotes"),volumeWeightRatioKgPerCbm:rules["loading.volume_weight_ratio_kg_per_cbm"],userId:current.userId,now,assertCanMutate:assertCostCanMutate});
       await writeAudit({request,action:"transport.batch.cost_allocation.create",resourceType:"transport_cost_allocation",resourceId:allocationId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{batchId,chargeCode}});
       return{success:"分摊草稿已生成；请逐票检查后再确认入账"};
     }catch(error){return{formError:errorMessage(error)}}
@@ -1218,7 +1220,8 @@ export async function action({request,params}:Route.ActionArgs){
     if(!["weight","volume","equal"].includes(method))return{formError:"分摊方式无效"};
     const lineIds=form.getAll("lineId").map(String),amounts=form.getAll("lineAmount").map(value=>Number(value)),reasons=form.getAll("lineReason").map(String);
     try{
-      await updateCostAllocation(env.DB,{organizationId:current.organizationId,allocationId,method:method as AllocationMethod,adjustments:lineIds.map((lineId,index)=>({lineId,amount:amounts[index],reason:reasons[index]||""})),now,assertCanMutate:assertCostCanMutate});
+      const rules=await loadOperationalRules(current.organizationId);
+      await updateCostAllocation(env.DB,{organizationId:current.organizationId,allocationId,method:method as AllocationMethod,adjustments:lineIds.map((lineId,index)=>({lineId,amount:amounts[index],reason:reasons[index]||""})),volumeWeightRatioKgPerCbm:rules["loading.volume_weight_ratio_kg_per_cbm"],now,assertCanMutate:assertCostCanMutate});
       await writeAudit({request,action:"transport.batch.cost_allocation.update",resourceType:"transport_cost_allocation",resourceId:allocationId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{batchId,method}});
       return{success:"分摊草稿已保存，尚未生成正式费用"};
     }catch(error){return{formError:errorMessage(error)}}

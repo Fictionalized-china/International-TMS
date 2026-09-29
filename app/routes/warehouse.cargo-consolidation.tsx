@@ -292,6 +292,9 @@ export async function action({request}:Route.ActionArgs){
   const context=await loadWarehouseContext(request,user),warehouse=context.selected;
   await requireWarehouseAssignment(user,warehouse.id,"operator");
   const form=await request.formData(),intent=valueOf(form,"intent"),now=new Date().toISOString();
+  if(["create","add","remove","cancel","resource","resubmit"].includes(intent)){
+    return{formError:"配载组成与境外运输资源现由操作主管在管理端“配载单跟踪”统一维护；仓库端只执行收货、装车、扫描和出库。"};
+  }
   if(intent==="resubmit"){
     const batchId=valueOf(form,"batchId"),batch=await editableBatch(user.organizationId,warehouse.id,batchId);
     if(!batch)return{formError:"配载单不存在、已开始装车或当前不能重新提交"};
@@ -519,7 +522,7 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
   const activeView:ConsolidationView=loaderData.view;
   return <div className="warehouse-consolidation-page">
     <header className="warehouse-page-header ltl-loading-header">
-      <div><p className="eyebrow">CONSOLIDATION POOL</p><h1>待配载池</h1><p>只显示已完成最终包装并确认贴标的拼车订单；勾选兼容订单生成正式 PZ 配载单。</p></div>
+      <div><p className="eyebrow">CONSOLIDATION EXECUTION</p><h1>配载执行准备</h1><p>只读核对已货齐和已贴标订单；配载组成与境外运输资源由操作主管在管理端统一规划。</p></div>
       <Link className="secondary" to={`/warehouse/loading-documents?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}`}>进入配载文件</Link>
     </header>
     <ActionToast data={actionData}/>
@@ -534,15 +537,10 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
       <section className="consolidation-tab-panel consolidation-stock-panel">
       <div className="panel-header">
         <div>
-          <h2>已贴标待配载订单</h2>
-          <p>每票订单的 OUL 已在“二次打包与贴标”生成并贴好；文件状态只读且不阻断配载。</p>
+          <h2>已贴标订单（只读）</h2>
+          <p>每票订单的 OUL 已在“二次打包与贴标”生成并贴好；仓库不再决定订单组合或运输资源。</p>
         </div>
-        <div className="consolidation-selection-actions">
-          <span className="status-pill">已选 {selected.length} / 在库 {loaderData.total} 票</span>
-          <button type="button" className="secondary" disabled={!selected.length} onClick={()=>setSelected([])}>清空</button>
-          {selected.length>0&&loaderData.availableBatches.length>0&&<Modal title="加入已有配载单" triggerLabel="加入已有" triggerClassName="secondary" size="xwide" closeSignal={actionData?.success}><AddToBatchForm selected={selected} batches={loaderData.availableBatches} busy={busy}/></Modal>}
-          <Modal title="生成配载单" triggerLabel={`生成配载（${selected.length}）`} size="xwide" closeSignal={actionData?.success}><ConsolidationForm selected={selected} totals={totals} warehouseName={loaderData.warehouse.name} policies={fieldPolicies} carriers={loaderData.carriers} vehicles={loaderData.carrierVehicles} drivers={loaderData.carrierDrivers} borderPorts={loaderData.borderPorts} customsPlaces={loaderData.customsPlaces} busy={busy}/></Modal>
-        </div>
+        <div className="consolidation-selection-actions"><span className="status-pill off">仓库只读核对 · 在库 {loaderData.total} 票</span></div>
       </div>
       <div className="table-wrap ltl-loading-table consolidation-stock-table">
         <table>
@@ -574,7 +572,7 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
               const requirements=loaderData.orderDocumentRequirements.find(group=>group.orderId===row.order_id)?.documents??[];
               const documents=loaderData.latestRequiredDocuments.filter(document=>document.order_id===row.order_id);
               return <tr key={row.order_id} className={checked?"selected-row":""}>
-                <td><input type="checkbox" checked={checked} disabled={assigned||blockers.length>0} onChange={event=>toggle(row,event.target.checked)} aria-label={`选择订单 ${row.order_number}`}/></td>
+                <td><input type="checkbox" checked={assigned} disabled aria-label={`订单 ${row.order_number} 配载状态`}/></td>
                 <td>{assigned?<span className="status-pill" title={row.active_batch_number??"已加入配载单"}>已配载 · {row.active_batch_number}</span>:<span className={`status-pill ${blockers.length?"off":"success"}`} title={blockers.join("；")}>{blockers.length?"不可配载":"可配载"}</span>}</td>
                 <td className="consolidation-order-cell" title={`${row.order_number} · ${row.customer_name} · ${row.cargo_names||"未填写货名"}`}><strong>{row.order_number}</strong><span>· {row.customer_name}</span><small>· {row.cargo_names||"未填写货名"}</small></td>
                 <td className="consolidation-receipt-cell" title={`${row.package_count} 包装 / ${row.pieces} 件 · ${row.weight_kg.toFixed(2)} KG · ${row.volume_cbm.toFixed(3)} CBM`}><strong>{row.package_count} 包装 / {row.pieces} 件</strong><span>· {row.weight_kg.toFixed(2)} KG · {row.volume_cbm.toFixed(3)} CBM</span></td>
@@ -602,7 +600,7 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
         <td>{batch.destination_location}<small>{batch.border_port||"口岸未填"} · {batch.customs_location||"清关地未填"}</small></td>
         <td>{batch.planned_loading_at?new Date(batch.planned_loading_at).toLocaleString("zh-CN"):"装车待定"}<small>出境：{batch.planned_departure_at?new Date(batch.planned_departure_at).toLocaleString("zh-CN"):"未填写"}</small></td>
         <td><span className={`status-pill ${approved?"success":batch.approval_status==="rejected"?"danger":""}`}>{batch.has_started?"已开始装车":batch.has_dispatch?"装车任务已生成":approved?"审核通过，待装车":batch.approval_status==="rejected"?"审核退回":"待操作主管审核"}</span></td>
-        <td><div className="button-row consolidation-batch-actions">{approved?<Link className="primary warehouse-primary" to={batch.has_dispatch&&batch.dispatch_id?`/warehouse/outbound?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}&view=execution&dispatchId=${encodeURIComponent(batch.dispatch_id)}`:`/warehouse/outbound?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}&view=pending&type=ltl&q=${encodeURIComponent(batch.batch_number)}`}>{batch.has_dispatch?"进入本单装车出库":"创建本单装车任务"}</Link>:<span className="status-pill">下一步：操作主管审核并分配</span>}<span className="status-pill off">配载单后续由管理端负责人办理</span>{approved&&!batch.has_started&&<Modal title={`车辆安排 · ${batch.batch_number}`} triggerLabel={batch.carrier_id&&batch.vehicle_master_id&&batch.driver_master_id?"修改车辆":"补充车辆"} triggerClassName="text-button" closeSignal={actionData?.success}><BatchResourceForm batch={batch} carriers={loaderData.carriers} vehicles={loaderData.carrierVehicles} drivers={loaderData.carrierDrivers} busy={busy}/></Modal>}{batch.approval_status!=="submitted"&&!batch.has_started&&<Modal title={`调整 ${batch.batch_number}`} triggerLabel="调整订单" triggerClassName="text-button" closeSignal={actionData?.success}><BatchAdjustment batch={batch} orders={loaderData.batchOrders.filter(row=>row.batch_id===batch.id)} busy={busy}/></Modal>}{batch.approval_status==="rejected"&&!batch.has_started&&<Form method="post"><input type="hidden" name="intent" value="resubmit"/><input type="hidden" name="batchId" value={batch.id}/><button className="primary" disabled={busy}>重新提交审核</button></Form>}</div></td>
+        <td><div className="button-row consolidation-batch-actions">{approved?<Link className="primary warehouse-primary" to={batch.has_dispatch&&batch.dispatch_id?`/warehouse/outbound?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}&view=execution&dispatchId=${encodeURIComponent(batch.dispatch_id)}`:`/warehouse/outbound?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}&view=pending&type=ltl&q=${encodeURIComponent(batch.batch_number)}`}>{batch.has_dispatch?"进入本单装车出库":"创建本单装车任务"}</Link>:<span className="status-pill">等待操作主管审核并分配</span>}<span className="status-pill off">组成与资源由管理端维护</span></div></td>
       </tr>})}</tbody></table></div>
       {!loaderData.batches.length&&<p className="empty-state">{Object.values(loaderData.batchFilters).some(Boolean)?"当前筛选条件下没有配载单。":"当前仓库尚未生成配载单。"}</p>}
       <Pagination loaderData={loaderData} view="batches"/>

@@ -275,6 +275,7 @@ describe("expense direction controls", () => {
   it("allows early expense entry only from the consignment costs section", () => {
     expect(canCreateExpenseFromModule("costs", "")).toBe(true);
     expect(canCreateExpenseFromModule("consignment", "consignment_costs")).toBe(true);
+    expect(canCreateExpenseFromModule("transport", "execution_costs")).toBe(true);
     expect(canCreateExpenseFromModule("consignment", "info")).toBe(false);
     expect(canCreateExpenseFromModule("warehouse", "consignment_costs")).toBe(false);
   });

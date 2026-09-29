@@ -183,6 +183,8 @@ export function canCreateExpenseFromModule(
 ) {
   return moduleCode === "costs" || (
     moduleCode === "consignment" && entryContext === "consignment_costs"
+  ) || (
+    moduleCode === "transport" && entryContext === "execution_costs"
   );
 }
 

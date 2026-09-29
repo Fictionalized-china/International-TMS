@@ -89,6 +89,7 @@ export async function loadCostAllocations(db:D1Database,organizationId:string,ba
 export async function createCostAllocation(db:D1Database,input:{
   organizationId:string;batchId:string;chargeCode:string;chargeName:string;counterpartyName:string;
   currency:string;exchangeRate:number;totalAmount:number;method:"auto"|AllocationMethod;notes?:string;
+  volumeWeightRatioKgPerCbm?:number;
   userId:string;now:string;assertCanMutate:AssertCostAllocationCanMutate;
 }){
   if(!input.chargeCode||!input.chargeName||!input.counterpartyName)throw new Error("请填写费用项目和往来单位");
@@ -100,11 +101,13 @@ export async function createCostAllocation(db:D1Database,input:{
   if(missing.length)throw new Error(`以下订单没有仓库实收数据：${missing.map(item=>item.order_number).join("、")}`);
   const totalWeight=actuals.reduce((sum,item)=>sum+item.actual_weight_kg,0);
   const totalVolume=actuals.reduce((sum,item)=>sum+item.actual_volume_cbm,0);
-  const method=input.method==="auto"?recommendAllocationMethod(input.chargeCode,totalWeight,totalVolume):input.method;
+  const volumeWeightRatio=Number.isFinite(input.volumeWeightRatioKgPerCbm)&&Number(input.volumeWeightRatioKgPerCbm)>0
+    ?Number(input.volumeWeightRatioKgPerCbm):300;
+  const method=input.method==="auto"?recommendAllocationMethod(input.chargeCode,totalWeight,totalVolume,volumeWeightRatio):input.method;
   const suggestions=allocateCost(actuals.map(item=>({orderId:item.order_id,actualWeightKg:item.actual_weight_kg,actualVolumeCbm:item.actual_volume_cbm})),input.totalAmount,method);
   const density=allocationDensity(totalWeight,totalVolume),allocationId=crypto.randomUUID();
   const statements:D1PreparedStatement[]=[
-    db.prepare(`INSERT INTO transport_cost_allocations(id,organization_id,batch_id,charge_code,charge_name,counterparty_name,currency,exchange_rate,total_amount,allocation_method,total_actual_weight_kg,total_actual_volume_cbm,density_kg_per_cbm,density_result,status,notes,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'draft',?,?,?,?)`).bind(allocationId,input.organizationId,input.batchId,input.chargeCode,input.chargeName,input.counterpartyName,input.currency.toUpperCase(),input.exchangeRate,input.totalAmount,method,totalWeight,totalVolume,density,density<300?"轻货：密度低于 300 KG/CBM":"重货：密度达到 300 KG/CBM",input.notes||null,input.userId,input.now,input.now),
+    db.prepare(`INSERT INTO transport_cost_allocations(id,organization_id,batch_id,charge_code,charge_name,counterparty_name,currency,exchange_rate,total_amount,allocation_method,total_actual_weight_kg,total_actual_volume_cbm,density_kg_per_cbm,density_result,status,notes,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'draft',?,?,?,?)`).bind(allocationId,input.organizationId,input.batchId,input.chargeCode,input.chargeName,input.counterpartyName,input.currency.toUpperCase(),input.exchangeRate,input.totalAmount,method,totalWeight,totalVolume,density,density<volumeWeightRatio?`轻货：密度低于 ${volumeWeightRatio} KG/CBM`:`重货：密度达到 ${volumeWeightRatio} KG/CBM`,input.notes||null,input.userId,input.now,input.now),
     ...suggestions.map(line=>db.prepare(`INSERT INTO transport_cost_allocation_lines(id,organization_id,allocation_id,order_id,actual_weight_kg,actual_volume_cbm,suggested_ratio,suggested_amount,final_amount,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(),input.organizationId,allocationId,line.orderId,line.actualWeightKg,line.actualVolumeCbm,line.ratio,line.amount,line.amount,input.now,input.now)),
   ];
   await input.assertCanMutate({
@@ -123,6 +126,7 @@ export async function createCostAllocation(db:D1Database,input:{
 
 export async function updateCostAllocation(db:D1Database,input:{
   organizationId:string;allocationId:string;method:AllocationMethod;
+  volumeWeightRatioKgPerCbm?:number;
   adjustments:{lineId:string;amount:number;reason:string}[];now:string;
   assertCanMutate:AssertCostAllocationCanMutate;
 }){
@@ -156,7 +160,9 @@ export async function updateCostAllocation(db:D1Database,input:{
   const totalWeight=actuals.reduce((sum,item)=>sum+item.actual_weight_kg,0);
   const totalVolume=actuals.reduce((sum,item)=>sum+item.actual_volume_cbm,0);
   const density=allocationDensity(totalWeight,totalVolume);
-  statements.push(db.prepare("UPDATE transport_cost_allocations SET allocation_method=?,total_actual_weight_kg=?,total_actual_volume_cbm=?,density_kg_per_cbm=?,density_result=?,updated_at=? WHERE id=? AND organization_id=? AND status='draft'").bind(input.method,totalWeight,totalVolume,density,density<300?"轻货：密度低于 300 KG/CBM":"重货：密度达到 300 KG/CBM",input.now,input.allocationId,input.organizationId));
+  const volumeWeightRatio=Number.isFinite(input.volumeWeightRatioKgPerCbm)&&Number(input.volumeWeightRatioKgPerCbm)>0
+    ?Number(input.volumeWeightRatioKgPerCbm):300;
+  statements.push(db.prepare("UPDATE transport_cost_allocations SET allocation_method=?,total_actual_weight_kg=?,total_actual_volume_cbm=?,density_kg_per_cbm=?,density_result=?,updated_at=? WHERE id=? AND organization_id=? AND status='draft'").bind(input.method,totalWeight,totalVolume,density,density<volumeWeightRatio?`轻货：密度低于 ${volumeWeightRatio} KG/CBM`:`重货：密度达到 ${volumeWeightRatio} KG/CBM`,input.now,input.allocationId,input.organizationId));
   await input.assertCanMutate({
     organizationId:input.organizationId,
     batchId:header.batch_id,

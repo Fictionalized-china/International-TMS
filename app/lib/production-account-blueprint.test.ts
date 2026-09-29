@@ -53,8 +53,12 @@ describe("cloud production account blueprint", () => {
     }
   });
 
-  it("keeps payroll-only positions free of business permissions", () => {
-    expect(accessModelRolePermissions.pos_business_route).toBeUndefined();
+  it("limits transport-resource business staff to carrier master data", () => {
+    expect(accessModelRolePermissions.pos_business_route).toEqual([
+      "dashboard.view",
+      "carrier.view",
+      "carrier.manage",
+    ]);
     expect(accessModelRolePermissions.pos_front_loading).toBeUndefined();
   });
 

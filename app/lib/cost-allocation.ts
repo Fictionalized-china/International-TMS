@@ -17,9 +17,9 @@ export function allocationDensity(weightKg:number,volumeCbm:number){
   return volumeCbm>0?weightKg/volumeCbm:0;
 }
 
-export function recommendAllocationMethod(chargeCode:string,weightKg:number,volumeCbm:number):AllocationMethod{
+export function recommendAllocationMethod(chargeCode:string,weightKg:number,volumeCbm:number,volumeWeightRatioKgPerCbm=300):AllocationMethod{
   if(EQUAL_CHARGES.has(chargeCode.toUpperCase()))return "equal";
-  return allocationDensity(weightKg,volumeCbm)<300?"volume":"weight";
+  return allocationDensity(weightKg,volumeCbm)<volumeWeightRatioKgPerCbm?"volume":"weight";
 }
 
 export function allocationMethodLabel(method:AllocationMethod){

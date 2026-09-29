@@ -30,7 +30,9 @@ describe("MySQL runtime schema readiness", () => {
       columns: columns.slice(0, 1),
     });
     expect(result.ready).toBe(false);
-    expect(result.missingColumns).toEqual(["transport_orders.mark_contacts_snapshot_json"]);
+    expect(result.missingColumns).toEqual(
+      requiredMysqlSchemaColumns.slice(1).map(([tableName, columnName]) => `${tableName}.${columnName}`),
+    );
     expect(result.migrationState).toBe("checksum_mismatch");
   });
 });

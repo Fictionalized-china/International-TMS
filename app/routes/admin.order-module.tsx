@@ -6621,7 +6621,7 @@ function ModuleBusinessData({
                 />
                 <div className="transport-cost-heading span-2">
                   <strong>先安排承运商并登记预计应付</strong>
-                  <span>由业务员在国内运输开始时确认；保存后同步生成国内运输应付明细。</span>
+                  <span>由操作岗在国内运输开始时确认；保存后同步生成国内运输应付明细。</span>
                 </div>
                 <input type="hidden" name="legType" value="first_mile" />
                 <input type="hidden" name="carrierName" />
@@ -6859,6 +6859,15 @@ function ModuleBusinessData({
             </div>
           )}
         </section>
+        {manage && <BusinessSubsection
+          title="执行中新增加费用"
+          hint="操作岗接手订单后，可随实际执行新增包装、装卸、仓储等应收或应付费用；全部记录保留录入人与时间，后续统一进入对账结算。"
+        >
+          <details className="expandable module-create-dialog">
+            <summary>新增执行费用</summary>
+            <ExpenseCreateForm fields={data.quotationCostWorkflowFields} busy={busy} entryContext="execution_costs"/>
+          </details>
+        </BusinessSubsection>}
       </div>
     );
   if (code === "loading") {
@@ -8969,7 +8978,7 @@ function ExpenseCreateForm({
 }: {
   fields: WorkflowFieldState[];
   busy: boolean;
-  entryContext?: "consignment_costs";
+  entryContext?: "consignment_costs" | "execution_costs";
 }) {
   const [currency,setCurrency]=useState("CNY");
   const [exchangeRate,setExchangeRate]=useState("1");

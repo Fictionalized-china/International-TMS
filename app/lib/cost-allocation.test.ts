@@ -8,6 +8,11 @@ describe("cost allocation",()=>{
     expect(recommendAllocationMethod("FREIGHT",600,2)).toBe("weight");
   });
 
+  it("uses the configured volume-weight boundary",()=>{
+    expect(recommendAllocationMethod("FREIGHT",700,2,400)).toBe("volume");
+    expect(recommendAllocationMethod("FREIGHT",800,2,400)).toBe("weight");
+  });
+
   it("uses equal allocation for fixed per-order charges",()=>{
     expect(recommendAllocationMethod("CUSTOMS",900,1)).toBe("equal");
   });
