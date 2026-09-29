@@ -12,7 +12,10 @@ import { valueOf } from "../lib/validation";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
 import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
 import { nextDocumentNumber } from "../lib/documents.server";
-import { calculateWarehouseDifference } from "../lib/warehouse-actual";
+import {
+  calculateWarehouseDifference,
+  shouldCreateWarehouseDifference,
+} from "../lib/warehouse-actual";
 import { recordWarehouseProgress } from "../lib/warehouse-progress.server";
 import { recordWorkflowEvent } from "../lib/business-workflow.server";
 import { syncOrderWorkflowSnapshot } from "../lib/order-modules.server";
@@ -780,7 +783,7 @@ export async function action({ request }: Route.ActionArgs) {
     ).bind(now,order.id,user.organizationId),
   );
 
-  if (difference.hasDifference || packageMismatch || piecesMismatch) {
+  if (shouldCreateWarehouseDifference({ difference, packageMismatch, piecesMismatch })) {
     statements.push(
       env.DB.prepare(
         `INSERT INTO warehouse_receipt_differences(

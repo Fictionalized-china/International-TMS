@@ -13,27 +13,54 @@ export type WarehouseDifference = {
   requiresFeeConfirmation: boolean;
 };
 
-function differencePercent(planned: number, actual: number) {
-  if (planned <= 0) return actual > 0 ? 100 : 0;
-  return Math.abs(actual - planned) / planned * 100;
+export const DEFAULT_WAREHOUSE_DIFFERENCE_THRESHOLD_PERCENT = 5;
+
+function roundMeasurement(value: number, precision: number) {
+  const factor = 10 ** precision;
+  return Math.round((Number(value) + Number.EPSILON) * factor) / factor;
+}
+
+function differencePercent(planned: number, actual: number, precision: number) {
+  const normalizedPlanned = roundMeasurement(planned, precision);
+  const normalizedActual = roundMeasurement(actual, precision);
+  if (normalizedPlanned === normalizedActual) return 0;
+  if (normalizedPlanned <= 0) return normalizedActual > 0 ? 100 : 0;
+  return Math.abs(normalizedActual - normalizedPlanned) / normalizedPlanned * 100;
 }
 
 export function calculateWarehouseDifference(
   planned: WarehouseActual,
   actual: WarehouseActual,
+  thresholdPercent = DEFAULT_WAREHOUSE_DIFFERENCE_THRESHOLD_PERCENT,
 ): WarehouseDifference {
-  const piecesPercent = differencePercent(planned.pieces, actual.pieces);
-  const weightPercent = differencePercent(planned.weightKg, actual.weightKg);
-  const volumePercent = differencePercent(planned.volumeCbm, actual.volumeCbm);
+  // Keep comparison precision aligned with the values the operator can see and
+  // enter. This prevents hidden floating-point tails from creating a warehouse
+  // exception while both sides appear identical on screen.
+  const piecesPercent = differencePercent(planned.pieces, actual.pieces, 0);
+  const weightPercent = differencePercent(planned.weightKg, actual.weightKg, 2);
+  const volumePercent = differencePercent(planned.volumeCbm, actual.volumeCbm, 3);
   const maxPercent = Math.max(piecesPercent, weightPercent, volumePercent);
+  const safeThreshold = Number.isFinite(thresholdPercent) && thresholdPercent >= 0
+    ? thresholdPercent
+    : DEFAULT_WAREHOUSE_DIFFERENCE_THRESHOLD_PERCENT;
   return {
     piecesPercent,
     weightPercent,
     volumePercent,
     maxPercent,
     hasDifference: maxPercent > 0.01,
-    requiresFeeConfirmation: maxPercent > 5,
+    requiresFeeConfirmation: maxPercent > safeThreshold,
   };
+}
+
+export function shouldCreateWarehouseDifference(input: {
+  difference: WarehouseDifference;
+  packageMismatch?: boolean;
+  piecesMismatch?: boolean;
+}) {
+  return input.difference.requiresFeeConfirmation ||
+    Boolean(input.packageMismatch) ||
+    Boolean(input.piecesMismatch);
 }
 
 export const roadStatusLabels: Record<string, string> = {

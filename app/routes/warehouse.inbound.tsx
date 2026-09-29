@@ -15,7 +15,10 @@ import { recordWorkflowEvent } from "../lib/business-workflow.server";
 import { isValidCustomerIdentityCode } from "../lib/customer-identity";
 import { nextDocumentNumber } from "../lib/documents.server";
 import { recordWarehouseProgress } from "../lib/warehouse-progress.server";
-import { calculateWarehouseDifference } from "../lib/warehouse-actual";
+import {
+  calculateWarehouseDifference,
+  shouldCreateWarehouseDifference,
+} from "../lib/warehouse-actual";
 import { workflowFieldPolicy } from "../lib/workflow-field-catalog";
 import { loadOrderModuleWorkflowFields } from "../lib/workflow-fields.server";
 import { syncOrderWorkflowSnapshot } from "../lib/order-modules.server";
@@ -911,7 +914,7 @@ export async function action({ request }: Route.ActionArgs) {
               "UPDATE shipments SET status='picked_up',current_location=?,actual_pickup_at=COALESCE(actual_pickup_at,?),updated_at=? WHERE id=? AND organization_id=?",
             ).bind(locationText, now, now, shipment.id, user.organizationId),
           ]),
-      ...(difference.hasDifference
+      ...(shouldCreateWarehouseDifference({ difference })
         ? [
             env.DB.prepare(
               `INSERT INTO warehouse_receipt_differences(id,organization_id,receipt_id,order_id,planned_pieces,planned_weight_kg,planned_volume_cbm,actual_pieces,actual_weight_kg,actual_volume_cbm,max_difference_percent,status,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,?)`,
