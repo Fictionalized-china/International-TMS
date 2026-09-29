@@ -32,7 +32,6 @@ describe("standard road workflow factory defaults", () => {
         .map((module) => `${module.stepKey}:${module.moduleCode}`),
     );
     expect(required).toEqual(new Set([
-      "quotation:consignment",
       "order_creation:consignment",
       "consignment_approval:consignment",
       "task_assignment:assignment",
@@ -50,6 +49,7 @@ describe("standard road workflow factory defaults", () => {
         .filter((module) => !module.required)
         .map((module) => `${module.stepKey}:${module.moduleCode}`),
     ).toEqual([
+      "quotation:consignment",
       "order_creation:cargo",
       "order_creation:costs",
       "outbound_transport:documents",
@@ -76,6 +76,15 @@ describe("standard road workflow factory defaults", () => {
     expect(settlement?.responsibilityPositionCode).toBe("CS");
     expect(review?.responsibilityPositionCode).toBe("FINANCE_ACCOUNTING");
     expect(positionRole.SALES).toBe("pos_sales");
+  });
+
+  it("routes sales directly to operation supervision and keeps loading decisions out of warehouse ownership", () => {
+    expect(standardRoadWorkflowModules.find(
+      (module) => module.stepKey === "consignment_approval",
+    )?.responsibilityPositionCode).toBe("OPERATION_SUPERVISOR");
+    expect(standardRoadWorkflowModules.find(
+      (module) => module.stepKey === "port_loading" && module.moduleCode === "loading",
+    )?.responsibilityPositionCode).toBe("OPERATION_SUPERVISOR");
   });
 
 

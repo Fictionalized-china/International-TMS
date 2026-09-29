@@ -102,28 +102,28 @@ describe("workflow action ownership", () => {
     })).toBe(false);
   });
 
-  it("keeps a business supervisor read-only outside an assigned approval", () => {
+  it("lets only the assigned operation supervisor approve or reject", () => {
     expect(canRunOrderWorkflowAction({
       actionCode: "approve",
-      positionCode: "BUSINESS_SUPERVISOR",
+      positionCode: "OPERATION_SUPERVISOR",
       currentAssigneeUserId: "supervisor-1",
       currentUserId: "supervisor-1",
     })).toBe(true);
     expect(canRunOrderWorkflowAction({
       actionCode: "approve",
-      positionCode: "BUSINESS_SUPERVISOR",
+      positionCode: "OPERATION_SUPERVISOR",
       currentAssigneeUserId: "supervisor-2",
       currentUserId: "supervisor-1",
     })).toBe(false);
     expect(canRunOrderWorkflowAction({
       actionCode: "reject",
-      positionCode: "BUSINESS_SUPERVISOR",
+      positionCode: "OPERATION_SUPERVISOR",
       currentAssigneeUserId: "supervisor-1",
       currentUserId: "supervisor-1",
     })).toBe(true);
     expect(canRunOrderWorkflowAction({
       actionCode: "reject",
-      positionCode: "BUSINESS_SUPERVISOR",
+      positionCode: "OPERATION_SUPERVISOR",
       currentAssigneeUserId: "supervisor-2",
       currentUserId: "supervisor-1",
     })).toBe(false);

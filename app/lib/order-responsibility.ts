@@ -11,7 +11,7 @@ const modulePositions: Record<OrderModuleCode, OrderResponsiblePosition> = {
   assignment: { code: "OPERATION_SUPERVISOR", name: "操作主管" },
   transport: { code: "OPERATION", name: "操作岗（含运踪）" },
   warehouse: { code: "WAREHOUSE", name: "仓库岗" },
-  loading: { code: "WAREHOUSE", name: "仓库岗" },
+  loading: { code: "OPERATION_SUPERVISOR", name: "操作主管" },
   documents: { code: "DOC", name: "单证岗" },
   customs: { code: "DOC", name: "单证岗" },
   tracking: { code: "OPERATION", name: "操作岗（含运踪）" },
@@ -29,7 +29,7 @@ export function orderResponsiblePosition(
     return { code: "NONE", name: "无需处理" };
   }
   if (orderStatus === "submitted") {
-    return { code: "BUSINESS_SUPERVISOR", name: "业务主管" };
+    return { code: "OPERATION_SUPERVISOR", name: "操作主管" };
   }
   if (orderStatus === "confirmed") {
     return { code: "OPERATION_SUPERVISOR", name: "操作主管" };

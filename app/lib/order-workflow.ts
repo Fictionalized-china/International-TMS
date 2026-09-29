@@ -12,9 +12,9 @@ export type OrderWorkflowTransition = {
 const workflowActionPositionCodes: Record<string, readonly string[]> = {
   submit: ["SALES"],
   cancel_draft: ["SALES"],
-  approve: ["BUSINESS_SUPERVISOR"],
-  reject: ["BUSINESS_SUPERVISOR"],
-  cancel_submitted: ["BUSINESS_SUPERVISOR"],
+  approve: ["OPERATION_SUPERVISOR"],
+  reject: ["OPERATION_SUPERVISOR"],
+  cancel_submitted: ["OPERATION_SUPERVISOR"],
   dispatch: ["OPERATION_SUPERVISOR"],
   cancel_confirmed: ["OPERATION_SUPERVISOR"],
   complete: ["FINANCE_ACCOUNTING"],

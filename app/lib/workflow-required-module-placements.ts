@@ -16,10 +16,14 @@ export function isAllowedRepeatedRequiredModulePlacement(
   stepKeys: readonly string[],
 ) {
   const allowedSteps = allowedRepeatedRequiredModuleSteps[moduleCode];
-  return Boolean(
-    allowedSteps &&
-    stepKeys.length === allowedSteps.size &&
-    new Set(stepKeys).size === stepKeys.length &&
-    stepKeys.every((stepKey) => allowedSteps.has(stepKey)),
-  );
+  const distinctSteps = new Set(stepKeys);
+  if (!allowedSteps || distinctSteps.size !== stepKeys.length) return false;
+  if (stepKeys.length === allowedSteps.size) {
+    return stepKeys.every((stepKey) => allowedSteps.has(stepKey));
+  }
+  // The direct-entry standard makes quotation optional while the two
+  // order-status-driven consignment gates remain required.
+  return distinctSteps.size === 2 &&
+    distinctSteps.has("order_creation") &&
+    distinctSteps.has("consignment_approval");
 }

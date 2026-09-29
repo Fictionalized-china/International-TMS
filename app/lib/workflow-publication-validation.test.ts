@@ -608,7 +608,7 @@ describe("workflow core step order", () => {
     }).join("\n")).toContain("同一模块编码");
   });
 
-  it("allows only the three status-driven required consignment placements", () => {
+  it("allows the status-driven consignment placements with optional quotation", () => {
     const coreSteps = [
       { id: "quotation", step_key: "quotation", name: "询价报价", is_active: 1 },
       { id: "creation", step_key: "order_creation", name: "委托资料", is_active: 1 },
@@ -629,6 +629,13 @@ describe("workflow core step order", () => {
       positions: [],
     }).join("\n");
     expect(issues).not.toContain("同一模块编码");
+
+    expect(validateWorkflowResponsibilityReadiness({
+      steps: coreSteps.slice(1),
+      modules: coreModules.slice(1),
+      tasks: [],
+      positions: [],
+    }).join("\n")).not.toContain("同一模块编码");
 
     expect(validateWorkflowResponsibilityReadiness({
       steps: coreSteps.slice(0, 2),

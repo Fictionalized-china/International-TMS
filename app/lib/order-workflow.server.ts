@@ -17,6 +17,7 @@ import {
   isActiveOrganizationAssigneeForPositions,
 } from "./organization-assignee.server";
 import { loadOrderDispatchResponsibilityPolicy } from "./order-assignment-manifest.server";
+import { loadMissingOrderIntakeFees } from "./order-intake-fees.server";
 
 export type OrderWorkflowTransition = {
   action_code: string;
@@ -36,6 +37,7 @@ type OrderRow = {
   current_step_code: string;
   current_assignee_user_id: string | null;
   salesperson_user_id: string | null;
+  business_type: string;
   shipper_name: string;
   shipper_contact: string | null;
   shipper_phone: string | null;
@@ -76,7 +78,7 @@ export async function validateOrderWorkflowAction(input: {
 }) {
   const order = await env.DB.prepare(
     `SELECT o.id,o.order_number,o.status,o.current_step_code,o.current_assignee_user_id,
-      COALESCE(q.salesperson_user_id,o.salesperson_user_id) salesperson_user_id,
+      COALESCE(q.salesperson_user_id,o.salesperson_user_id) salesperson_user_id,o.business_type,
       o.shipper_name,o.shipper_contact,o.shipper_phone,o.consignee_name,
       o.origin_city,o.origin_address,o.destination_city,o.destination_address,o.cargo_description,o.transport_mode,
       o.requested_pickup_date,o.exit_port,o.overseas_warehouse_id,
@@ -124,11 +126,11 @@ export async function validateOrderWorkflowAction(input: {
     const actionOwner: Record<string, string> = {
       submit: "当前订单的业务员",
       cancel_draft: "当前订单的业务员",
-      approve: "提交审批时指定的业务主管",
-      reject: "提交审批时指定的业务主管",
-      cancel_submitted: "提交审批时指定的业务主管",
-      dispatch: "业务主管指定的操作主管",
-      cancel_confirmed: "业务主管指定的操作主管",
+      approve: "提交审批时指定的操作主管",
+      reject: "提交审批时指定的操作主管",
+      cancel_submitted: "提交审批时指定的操作主管",
+      dispatch: "当前任务分配节点的操作主管",
+      cancel_confirmed: "当前任务分配节点的操作主管",
       complete: "当前订单指定的财务会计",
     };
     return {
@@ -145,6 +147,21 @@ export async function validateOrderWorkflowAction(input: {
       order,
       transition,
     };
+  if (input.actionCode === "submit") {
+    const missingFees = await loadMissingOrderIntakeFees({
+      organizationId: input.organizationId,
+      orderId: input.orderId,
+      businessType: order.business_type,
+    });
+    if (missingFees.length) {
+      return {
+        ok: false as const,
+        reason: `${order.business_type === "ftl" ? "整车" : "拼车"}订单开单前请明确录入：${missingFees.map((item) => item.label).join("、")}；客户自送时提货费请填写 0。`,
+        order,
+        transition,
+      };
+    }
+  }
   const gateStepByAction: Record<string,string> = {
     submit: "order_creation",
     approve: "consignment_approval",
@@ -234,7 +251,7 @@ export async function validateOrderWorkflowAction(input: {
         )
       : null;
     const expectedPositions: Record<string, readonly string[]> = {
-      submit: ["BUSINESS_SUPERVISOR"],
+      submit: ["OPERATION_SUPERVISOR"],
       approve: ["OPERATION_SUPERVISOR"],
     };
     const expectedPositionCodes = dispatchPolicy
@@ -261,7 +278,7 @@ export async function validateOrderWorkflowAction(input: {
           ? "操作岗个人账户（旧订单兼容规则）"
           : `锁定工作流首个必办岗位（${dispatchPolicy.positionCode}）个人账户`
         : input.actionCode === "submit"
-        ? "具备订单查看权限的业务主管"
+        ? "具备订单查看权限的操作主管"
         : input.actionCode === "approve"
           ? "具备派单及配载审批权限的操作主管"
           : "配置岗位";

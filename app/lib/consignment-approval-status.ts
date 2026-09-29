@@ -69,7 +69,7 @@ export function consignmentApprovalStatusRows(input: {
       updatedAt: latestSubmissionReturned ? returned?.occurredAt ?? null : submitted?.occurredAt ?? null,
       note: latestSubmissionReturned
         ? returned?.notes || returned?.actionName || "审批已退回，等待重新提交"
-        : submitted?.notes || (submitted ? "委托资料已送交业务主管审核" : "等待业务岗提交委托资料"),
+        : submitted?.notes || (submitted ? "委托资料已送交操作主管审核" : "等待业务岗提交委托资料"),
     },
     {
       key: "approval",
@@ -85,7 +85,7 @@ export function consignmentApprovalStatusRows(input: {
       owner: currentApproval?.actorName || submitted?.assigneeName || (input.orderStatus === "submitted" ? input.currentAssigneeName : null) || "待指定",
       updatedAt: currentApproval?.occurredAt || (latestSubmissionReturned ? returned?.occurredAt ?? null : submitted?.occurredAt ?? null),
       note: currentApproval?.notes || (approvalStatus === "active"
-        ? "资料已冻结，等待指定业务主管审核"
+        ? "资料已冻结，等待指定操作主管审核"
         : approvalStatus === "completed"
           ? "审批已通过"
           : latestSubmissionReturned

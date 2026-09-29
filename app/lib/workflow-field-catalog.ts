@@ -174,7 +174,7 @@ export const workflowFieldCatalog: WorkflowFieldCatalogItem[] = [
   field("order_creation", "cargo", "cargo_images", "货物图片", "attachment", "optional", "货物或包装图片。"),
   field("order_creation", "cargo", "cargo_notes", "货物备注", "textarea", "optional", "货物明细补充说明。"),
 
-  field("consignment_approval", "consignment", "approval_result", "订单审批结果", "select", "required", "业务主管查看完整委托资料后通过或退回。", "approved|通过\nrejected|退回"),
+  field("consignment_approval", "consignment", "approval_result", "订单审批结果", "select", "required", "操作主管查看完整委托资料和开单费用后通过或退回。", "approved|通过\nrejected|退回"),
   field("task_assignment", "assignment", "primary_operator", "主操作员", "select", "required", "审核通过后由操作主管人工指定。"),
   field("task_assignment", "assignment", "module_assignees", "模块负责人", "multiselect", "required", "按模组选择具体岗位和具体人员。"),
   field("task_assignment", "assignment", "assignment_due_at", "办理期限", "datetime", "hidden", "第一期暂不配置办理时限。"),

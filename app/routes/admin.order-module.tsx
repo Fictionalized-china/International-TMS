@@ -4995,9 +4995,9 @@ export function ConsignmentReviewActionBar({
   busy: boolean;
   actionUrl?: string;
 }) {
-  const businessSupervisors = data.members.filter(
+  const approvalSupervisors = data.members.filter(
     (member) =>
-      member.position_code === "BUSINESS_SUPERVISOR" &&
+      member.position_code === "OPERATION_SUPERVISOR" &&
       organizationAssigneeCanHandle(
         member,
         orderWorkflowTargetAssigneeRequirements("submit"),
@@ -5029,7 +5029,7 @@ export function ConsignmentReviewActionBar({
   if (manage && data.order.status === "draft") {
     return (
       <>
-      {!businessSupervisors.length && <div className="alert error" role="alert">没有具备订单查看权限的有效业务主管；请先调整组织人员或个人权限。</div>}
+      {!approvalSupervisors.length && <div className="alert error" role="alert">没有具备订单查看权限的有效操作主管；请先调整组织人员或个人权限。</div>}
       <Form method="post" action={actionUrl} className="consignment-submit-bar" id="consignment-stage-action">
         <div>
           <strong>委托资料复核完成后，直接提交审批</strong>
@@ -5039,12 +5039,12 @@ export function ConsignmentReviewActionBar({
           <input type="hidden" name="intent" value="workflow_action" />
           <input type="hidden" name="actionCode" value="submit" />
           <OrganizationAssigneePicker
-            members={businessSupervisors}
+            members={approvalSupervisors}
             name="assigneeUserId"
             idPrefix="consignment-approver"
-            personLabel="业务主管"
+            personLabel="操作主管"
           />
-          <button className="primary" disabled={busy || !businessSupervisors.length}>提交审批</button>
+          <button className="primary" disabled={busy || !approvalSupervisors.length}>提交审批</button>
         </div>
       </Form>
       </>
