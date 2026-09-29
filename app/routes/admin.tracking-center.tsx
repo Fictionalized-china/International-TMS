@@ -35,7 +35,7 @@ export default function TrackingCenter({ loaderData }: Route.ComponentProps) {
       <Form method="get" className="tracking-center-filter">
         <label><span>快速定位</span><input name="q" defaultValue={loaderData.filters.q} placeholder="订单、客户、线路、车辆、配载单或负责人" /></label>
         <label><span>调度状态</span><select name="dispatch" defaultValue={loaderData.filters.dispatch}><option value="">全部</option><option value="pending_dispatch">待调度</option><option value="scheduled">已调度待发运</option><option value="in_transit">运输执行中</option><option value="completed">已完成</option></select></label>
-        <label><span>时效状态</span><select name="warning" defaultValue={loaderData.filters.warning}><option value="">全部</option><option value="attention">全部预警</option><option value="normal">时效正常</option><option value="upcoming">24小时内到期</option><option value="overdue">已超时</option><option value="stale">超过48小时未更新</option><option value="exception">运输异常</option></select></label>
+        <label><span>时效状态</span><select name="warning" defaultValue={loaderData.filters.warning}><option value="">全部</option><option value="attention">全部预警</option><option value="normal">时效正常</option><option value="upcoming">{loaderData.thresholds.dueWarningHours}小时内到期</option><option value="overdue">已超时</option><option value="stale">超过{loaderData.thresholds.staleWarningHours}小时未更新</option><option value="exception">运输异常</option></select></label>
         <label><span>订单类型</span><select name="businessType" defaultValue={loaderData.filters.businessType}><option value="">全部</option><option value="ftl">整车</option><option value="ltl">拼车</option></select></label>
         <div><button className="primary">筛选</button><Link className="secondary" to="/admin/tracking-center">重置</Link></div>
       </Form>

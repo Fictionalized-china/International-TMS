@@ -16,6 +16,7 @@ import {
   calculateWarehouseDifference,
   shouldCreateWarehouseDifference,
 } from "../lib/warehouse-actual";
+import { loadOperationalRules } from "../lib/operational-rules.server";
 import { recordWarehouseProgress } from "../lib/warehouse-progress.server";
 import { recordWorkflowEvent } from "../lib/business-workflow.server";
 import { syncOrderWorkflowSnapshot } from "../lib/order-modules.server";
@@ -583,6 +584,7 @@ export async function action({ request }: Route.ActionArgs) {
     receivedRows.every((item) => item.actualWeight !== null);
   const volumeComparable = policies.actualVolume.isActive &&
     receivedRows.every((item) => item.actualVolume !== null);
+  const operationalRules = await loadOperationalRules(user.organizationId);
   const difference = calculateWarehouseDifference(
     {
       pieces: piecesComparable ? expected.pieces : cumulative.pieces,
@@ -590,6 +592,7 @@ export async function action({ request }: Route.ActionArgs) {
       volumeCbm: volumeComparable ? expected.volumeCbm : cumulative.volumeCbm,
     },
     cumulative,
+    operationalRules["warehouse.receipt_difference_threshold_percent"],
   );
   const packageMismatch = cumulative.packages !== expected.packages;
   const piecesMismatch = piecesComparable && cumulative.pieces !== expected.pieces;

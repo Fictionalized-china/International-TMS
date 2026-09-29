@@ -139,6 +139,28 @@ const migrations = [
         SELECT id,'analytics.manual.fill' FROM roles WHERE status='active' AND code IN ('owner','boss','pos_finance')`);
     },
   },
+  {
+    version: 161,
+    name: "operational_rule_configuration",
+    definition: [
+      "operational_rule_configs",
+      "operational_rule_configs.rule_code",
+      "operational_rule_configs.numeric_value",
+    ].join("\n"),
+    async up(connection) {
+      await connection.query(`CREATE TABLE IF NOT EXISTS operational_rule_configs (
+        id VARCHAR(128) NOT NULL PRIMARY KEY,
+        organization_id VARCHAR(128) NOT NULL,
+        rule_code VARCHAR(128) NOT NULL,
+        numeric_value DECIMAL(20,4) NOT NULL,
+        updated_by_user_id VARCHAR(128) NULL,
+        created_at DATETIME(3) NOT NULL,
+        updated_at DATETIME(3) NOT NULL,
+        UNIQUE KEY uq_operational_rule_config (organization_id,rule_code),
+        KEY idx_operational_rule_configs_org (organization_id,rule_code)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
+    },
+  },
 ];
 
 for (const migration of migrations) {
@@ -156,6 +178,7 @@ export const requiredMysqlSchemaColumns = [
   ["analytics_manual_metric_values", "numeric_value"],
   ["analytics_report_snapshots", "payload_json"],
   ["analytics_port_settings", "port_name"],
+  ["operational_rule_configs", "rule_code"],
 ];
 
 async function addColumnIfMissing(connection, table, column, definition) {

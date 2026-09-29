@@ -73,6 +73,8 @@ import {
 } from "../lib/workflow-publication-validation";
 import { listActiveOrganizationAssignees } from "../lib/organization-assignee.server";
 import { positionRoleCodeSql } from "../lib/position-role";
+import { operationalRuleDefinitions } from "../lib/operational-rules";
+import { loadOperationalRules, saveOperationalRules } from "../lib/operational-rules.server";
 
 type Definition = {
   id: string;
@@ -168,6 +170,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "workflow.view");
   await ensureWorkflowCatalogFields(current.organizationId);
   const defaultWorkflowId = await ensureDefaultWorkflow(current.organizationId);
+  const operationalRules = await loadOperationalRules(current.organizationId);
   const url = new URL(request.url);
   const requestedWorkflowId = url.searchParams.get("workflowId");
   const requestedFieldId = url.searchParams.get("fieldId");
@@ -269,6 +272,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     }));
   return {
     current,
+    operationalRules,
     openEditor,
     focusedFieldId: focusedField?.id ?? null,
     definitions: definitions.results,
@@ -303,6 +307,33 @@ export async function action({ request }: Route.ActionArgs) {
   const now = new Date().toISOString();
   const workflowId =
     valueOf(form, "workflowId") || new URL(request.url).searchParams.get("workflowId") || defaultWorkflowId;
+
+  if (intent === "operational_rules_update") {
+    const values = {} as Record<typeof operationalRuleDefinitions[number]["code"], number>;
+    for (const definition of operationalRuleDefinitions) {
+      const raw = valueOf(form, definition.code).trim();
+      const value = Number(raw);
+      if (!raw || !Number.isFinite(value) || value < definition.min || value > definition.max) {
+        return { formError: `${definition.label}必须在 ${definition.min} 至 ${definition.max} ${definition.unit}之间` };
+      }
+      values[definition.code] = value;
+    }
+    await saveOperationalRules({
+      organizationId: current.organizationId,
+      actorUserId: current.userId,
+      values,
+      now,
+    });
+    await writeAudit({
+      request,
+      action: "operational.rules.update",
+      resourceType: "operational_rule_config",
+      organizationId: current.organizationId,
+      actorUserId: current.userId,
+      metadata: values,
+    });
+    return { success: "运行规则已保存，新业务数据立即按新规则计算；历史结果不回写。" };
+  }
 
   if (intent === "workflow_create") {
     const name = valueOf(form, "name").trim();
@@ -2141,6 +2172,39 @@ export default function Workflow({ loaderData, actionData }: Route.ComponentProp
         </div>
       </header>
       <ActionToast message={formError ?? successMessage} tone={formError ? "error" : "success"} data={actionData}/>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>运行规则</h2>
+            <p>门槛与换算规则独立于流程版本；修改只影响之后发生的业务，不回写已完成节点。</p>
+          </div>
+          <span className="status-pill">组织级配置</span>
+        </div>
+        <Form method="post" className="form-grid">
+          <input type="hidden" name="intent" value="operational_rules_update" />
+          {operationalRuleDefinitions.map((definition) => (
+            <label className="field" key={definition.code}>
+              <span>{definition.label}</span>
+              <div className="input-with-unit">
+                <input
+                  type="number"
+                  name={definition.code}
+                  min={definition.min}
+                  max={definition.max}
+                  step={definition.step}
+                  defaultValue={loaderData.operationalRules[definition.code]}
+                  required
+                  disabled={!manage}
+                />
+                <span>{definition.unit}</span>
+              </div>
+              <small>{definition.description}</small>
+            </label>
+          ))}
+          {manage && <div className="form-actions"><button className="primary" disabled={busy}>保存运行规则</button></div>}
+        </Form>
+      </section>
 
       <section className="workflow-type-groups" aria-label="按订单类型分类的工作流">
         <WorkflowTypeGroup

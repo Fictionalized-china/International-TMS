@@ -19,6 +19,7 @@ import {
   calculateWarehouseDifference,
   shouldCreateWarehouseDifference,
 } from "../lib/warehouse-actual";
+import { loadOperationalRules } from "../lib/operational-rules.server";
 import { workflowFieldPolicy } from "../lib/workflow-field-catalog";
 import { loadOrderModuleWorkflowFields } from "../lib/workflow-fields.server";
 import { syncOrderWorkflowSnapshot } from "../lib/order-modules.server";
@@ -764,7 +765,12 @@ export async function action({ request }: Route.ActionArgs) {
     weightKg: planned?.gross_weight_kg ?? 0,
     volumeCbm: planned?.volume_cbm ?? 0,
   };
-  const difference = calculateWarehouseDifference(plannedActual, actual);
+  const operationalRules = await loadOperationalRules(user.organizationId);
+  const difference = calculateWarehouseDifference(
+    plannedActual,
+    actual,
+    operationalRules["warehouse.receipt_difference_threshold_percent"],
+  );
   if (isOverseasWarehouse && !rawBarcode)
     return { formError: "境外目的仓必须扫描装车时生成的 OUL 标签，不能重新生成标签" };
   const barcode = rawBarcode || generateCode("OUL"),

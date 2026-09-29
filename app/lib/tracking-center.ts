@@ -22,6 +22,11 @@ export type TrackingCenterDerivedState = {
   };
 };
 
+export type TrackingCenterThresholds = {
+  dueWarningHours?: number;
+  staleWarningHours?: number;
+};
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function timestamp(value: string | null) {
@@ -33,7 +38,14 @@ function timestamp(value: string | null) {
 export function deriveTrackingCenterState(
   source: TrackingCenterSource,
   now = new Date(),
+  thresholds: TrackingCenterThresholds = {},
 ): TrackingCenterDerivedState {
+  const dueWarningHours = Number.isFinite(thresholds.dueWarningHours) && Number(thresholds.dueWarningHours) > 0
+    ? Number(thresholds.dueWarningHours)
+    : 24;
+  const staleWarningHours = Number.isFinite(thresholds.staleWarningHours) && Number(thresholds.staleWarningHours) > 0
+    ? Number(thresholds.staleWarningHours)
+    : 48;
   const completed = source.orderStatus === "completed" ||
     source.batchRoadStatus === "pickup_completed" || Boolean(source.actualArrivalAt);
   const inTransit = [
@@ -62,11 +74,11 @@ export function deriveTrackingCenterState(
     return { dispatch, warning: { code: "overdue", label: "已超时", tone: "danger" } };
   }
   const latestEventAt = timestamp(source.latestEventAt);
-  if (latestEventAt !== null && nowAt - latestEventAt > 2 * DAY_MS && ["scheduled", "in_transit"].includes(dispatch.code)) {
-    return { dispatch, warning: { code: "stale", label: "超过48小时未更新", tone: "warning" } };
+  if (latestEventAt !== null && nowAt - latestEventAt > staleWarningHours / 24 * DAY_MS && ["scheduled", "in_transit"].includes(dispatch.code)) {
+    return { dispatch, warning: { code: "stale", label: `超过${staleWarningHours}小时未更新`, tone: "warning" } };
   }
-  if (plannedArrivalAt !== null && plannedArrivalAt - nowAt <= DAY_MS) {
-    return { dispatch, warning: { code: "upcoming", label: "24小时内到期", tone: "warning" } };
+  if (plannedArrivalAt !== null && plannedArrivalAt - nowAt <= dueWarningHours / 24 * DAY_MS) {
+    return { dispatch, warning: { code: "upcoming", label: `${dueWarningHours}小时内到期`, tone: "warning" } };
   }
   return { dispatch, warning: { code: "normal", label: "时效正常", tone: "success" } };
 }

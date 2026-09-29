@@ -3,6 +3,7 @@ import type { SessionUser } from "./auth.server";
 import { orderVisibilitySql } from "./order-access.server";
 import { paginateList, readListPage } from "./list-pagination";
 import { deriveTrackingCenterState, summarizeTrackingCenter } from "./tracking-center";
+import { loadOperationalRules } from "./operational-rules.server";
 
 type TrackingCenterDbRow = {
   order_id: string;
@@ -41,7 +42,7 @@ export async function loadTrackingCenter(request: Request, current: SessionUser)
   const dispatch = (url.searchParams.get("dispatch") ?? "").trim();
   const businessType = (url.searchParams.get("businessType") ?? "").trim();
   const visibility = orderVisibilitySql(current, "o");
-  const result = await env.DB.prepare(
+  const [result, operationalRules] = await Promise.all([env.DB.prepare(
     `SELECT o.id order_id,o.order_number,c.name customer_name,o.business_type,o.status order_status,
             o.is_overdue,o.exception_status,o.origin_city,o.destination_city,o.current_step_name,
             owner.display_name owner_name,
@@ -82,7 +83,7 @@ export async function loadTrackingCenter(request: Request, current: SessionUser)
         AND o.status NOT IN ('draft','submitted','cancelled')
       ORDER BY o.is_overdue DESC,COALESCE(s.updated_at,o.workflow_updated_at,o.updated_at) DESC
       LIMIT 600`,
-  ).bind(current.organizationId, ...visibility.values).all<TrackingCenterDbRow>();
+  ).bind(current.organizationId, ...visibility.values).all<TrackingCenterDbRow>(), loadOperationalRules(current.organizationId)]);
 
   const now = new Date();
   const rows: TrackingCenterRow[] = result.results.map((row) => ({
@@ -97,7 +98,10 @@ export async function loadTrackingCenter(request: Request, current: SessionUser)
       plannedArrivalAt: row.planned_arrival_at,
       actualArrivalAt: row.actual_arrival_at,
       latestEventAt: row.latest_event_at,
-    }, now),
+    }, now, {
+      dueWarningHours: operationalRules["tracking.due_warning_hours"],
+      staleWarningHours: operationalRules["tracking.stale_warning_hours"],
+    }),
   }));
   const filtered = rows.filter((row) => {
     if (warning === "attention" && !["overdue", "stale", "exception"].includes(row.warning.code)) return false;
@@ -128,5 +132,9 @@ export async function loadTrackingCenter(request: Request, current: SessionUser)
       warning: row.warning,
     }))),
     filters: { q: url.searchParams.get("q") ?? "", warning, dispatch, businessType },
+    thresholds: {
+      dueWarningHours: operationalRules["tracking.due_warning_hours"],
+      staleWarningHours: operationalRules["tracking.stale_warning_hours"],
+    },
   };
 }
