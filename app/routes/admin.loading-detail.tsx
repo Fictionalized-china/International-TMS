@@ -967,8 +967,12 @@ export async function action({request,params}:Route.ActionArgs){
     });
   };
   if(batchRequiresSupervisorApproval(batchApproval.batch_number)&&batchApproval.approval_status!=="approved"&&!costIntent)return{formError:"配载单须由操作主管审核并同时指定整单操作与单证负责人后才能继续办理"};
-  if(batchRequiresSupervisorApproval(batchApproval.batch_number)&&!batchSharedResponsibilityIsActive(batchApproval.road_status)&&!privileged&&(trackingIntent||exceptionIntent||customsIntent||documentIntent))return{formError:"配载单已到达境外仓，整批操作与单证负责人现为只读；后续由各订单客服和财务继续办理"};
-  if((trackingIntent||exceptionIntent)&&!privileged&&batchApproval.operation_assignee_user_id!==current.userId)return{formError:"本配载单的运踪与异常只允许已指派的整单操作负责人办理"};
+  const independentTracking=current.positionCode==="TRACKING"&&current.permissions.includes("order.module.tracking.manage");
+  if(batchRequiresSupervisorApproval(batchApproval.batch_number)&&!batchSharedResponsibilityIsActive(batchApproval.road_status)&&!privileged&&(
+    (trackingIntent&&!independentTracking)||exceptionIntent||customsIntent||documentIntent
+  ))return{formError:"配载单已到达境外仓，整批操作与单证负责人现为只读；后续由各订单客服和财务继续办理"};
+  if(trackingIntent&&!privileged&&!independentTracking&&batchApproval.operation_assignee_user_id!==current.userId)return{formError:"本配载单运踪只允许独立运踪岗或已指派的整单操作负责人办理"};
+  if(exceptionIntent&&!privileged&&batchApproval.operation_assignee_user_id!==current.userId)return{formError:"本配载单异常只允许已指派的整单操作负责人办理"};
   // Resolve the exact frozen field after ownership is checked. This prevents
   // a previous PZ owner from probing the replacement owner's workflow and
   // ensures client-supplied order ids never determine mutation targets.
@@ -1551,6 +1555,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   const batchApproved=!requiresSupervisorApproval||loaderData.batch.approval_status==="approved";
   const sharedResponsibilityActive=batchSharedResponsibilityIsActive(loaderData.batch.road_status);
   const currentIsBatchOperator=privileged||loaderData.batch.operation_assignee_user_id===loaderData.current.userId;
+  const currentIsIndependentTracking=loaderData.current.positionCode==="TRACKING"&&loaderData.current.permissions.includes("order.module.tracking.manage");
   const currentIsBatchDocumentOwner=privileged||loaderData.batch.document_assignee_user_id===loaderData.current.userId;
   const canManageBatchResponsibility=requiresSupervisorApproval&&(privileged||(loaderData.current.permissions.includes("transport.batch.approve")&&loaderData.batch.operation_supervisor_user_id===loaderData.current.userId));
   const canReviewBatch=loaderData.batch.approval_status==="submitted"&&canManageBatchResponsibility;
@@ -1567,7 +1572,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   const ordinaryReassignmentAllowed=canOrdinaryReassignBatchResponsibility({batchNumber:loaderData.batch.batch_number,approvalStatus:loaderData.batch.approval_status,roadStatus:loaderData.batch.road_status,actualDepartureAt:loaderData.batch.actual_departure_at});
   const canReassignBatch=loaderData.batch.approval_status==="approved"&&canManageBatchResponsibility&&(ordinaryReassignmentAllowed||privileged);
   const manage=batchApproved&&currentIsBatchOperator&&canManageOrderModule(loaderData.current,"loading");
-  const manageTracking=batchApproved&&(sharedResponsibilityActive||privileged)&&currentIsBatchOperator&&canManageOrderModule(loaderData.current,"tracking");
+  const manageTracking=batchApproved&&(currentIsIndependentTracking||((sharedResponsibilityActive||privileged)&&currentIsBatchOperator))&&canManageOrderModule(loaderData.current,"tracking");
   const manageDocuments=batchApproved&&(sharedResponsibilityActive||privileged)&&currentIsBatchDocumentOwner&&canManageOrderModule(loaderData.current,"documents");
   const manageCustoms=batchApproved&&(sharedResponsibilityActive||privileged)&&currentIsBatchDocumentOwner&&canManageOrderModule(loaderData.current,"customs");
   const manageExceptions=batchApproved&&(sharedResponsibilityActive||privileged)&&currentIsBatchOperator&&canManageOrderModule(loaderData.current,"exceptions");

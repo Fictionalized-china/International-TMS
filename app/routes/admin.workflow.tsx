@@ -1813,14 +1813,14 @@ function validateWorkflowConfiguration(
   const issues: string[] = [];
   const activeSteps = steps.filter((item) => item.is_active).sort((a,b) => a.sort_order-b.sort_order);
   if (!activeSteps.length) issues.push("至少需要一个启用节点");
-  if (activeSteps.length && activeSteps[0].trigger_event !== "quote.created")
-    issues.push("第一个启用节点必须是询价报价，并承接报价首次保存");
+  if (activeSteps.length && activeSteps[0].trigger_event !== "order.created")
+    issues.push("第一个启用节点必须是业务员录单，并承接订单创建");
   const duplicateStepOrders = activeSteps.filter(
     (item,index) => activeSteps.findIndex((other) => other.sort_order === item.sort_order) !== index,
   );
   if (duplicateStepOrders.length) issues.push("启用节点的顺序不能重复");
   const requiredRuntimeSteps = [
-    "quotation","order_creation","consignment_approval","task_assignment","domestic_execution",
+    "order_creation","consignment_approval","task_assignment","domestic_execution",
     "warehouse_receiving","port_loading","outbound_transport","overseas_pickup",
     "reconciliation","completion_review",
   ];

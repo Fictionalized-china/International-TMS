@@ -224,7 +224,30 @@ describe("expense direction controls", () => {
     });
   });
 
-  it("routes business and finance reviews to their exact assigned accounts", () => {
+  it("routes receivable review from customer service through operation and operation supervisor", () => {
+    expect(expenseDirectionActionAccess({
+      action: "business_review",
+      direction: "receivable",
+      currentUserId: "operation-1",
+      assignedUserId: "operation-1",
+      assignedUserName: "操作甲",
+      positionCode: "OPERATION",
+      roleCodes: ["pos_operation"],
+      permissions: ["order.module.costs.manage"],
+    }).allowed).toBe(true);
+    expect(expenseDirectionActionAccess({
+      action: "finance_review",
+      direction: "receivable",
+      currentUserId: "supervisor-1",
+      assignedUserId: "supervisor-1",
+      assignedUserName: "操作主管甲",
+      positionCode: "OPERATION_SUPERVISOR",
+      roleCodes: ["pos_operation_supervisor"],
+      permissions: ["order.module.costs.manage"],
+    }).allowed).toBe(true);
+  });
+
+  it("routes payable application through department supervisor and finance", () => {
     const finance = {
       currentUserId: "finance-1",
       assignedUserId: "finance-1",
@@ -233,12 +256,13 @@ describe("expense direction controls", () => {
       roleCodes: ["pos_finance"],
       permissions: ["order.module.costs.manage", "billing.expense.approve"],
     };
-    expect(expenseDirectionActionAccess({ ...finance, action: "finance_review" }).allowed).toBe(true);
-    expect(expenseDirectionActionAccess({ ...finance, action: "business_review" }).allowed).toBe(false);
+    expect(expenseDirectionActionAccess({ ...finance, action: "finance_review", direction: "payable" }).allowed).toBe(true);
+    expect(expenseDirectionActionAccess({ ...finance, action: "business_review", direction: "payable" }).allowed).toBe(false);
     expect(expenseDirectionActionAccess({
       ...finance,
       permissions: ["order.module.costs.manage"],
       action: "finance_review",
+      direction: "payable",
     }).allowed).toBe(false);
     expect(expenseDirectionActionAccess({
       ...finance,
@@ -249,13 +273,24 @@ describe("expense direction controls", () => {
       action: "confirm",
     }).allowed).toBe(false);
     expect(expenseDirectionActionAccess({
+      action: "confirm",
+      direction: "payable",
+      currentUserId: "operation-1",
+      assignedUserId: "operation-1",
+      assignedUserName: "操作甲",
+      positionCode: "OPERATION",
+      roleCodes: ["pos_operation"],
+      permissions: ["order.module.costs.manage"],
+    }).allowed).toBe(true);
+    expect(expenseDirectionActionAccess({
       action: "business_review",
-      currentUserId: "sales-1",
-      assignedUserId: "sales-1",
-      assignedUserName: "业务甲",
-      positionCode: "SALES",
-      roleCodes: ["pos_sales"],
-      permissions: [],
+      direction: "payable",
+      currentUserId: "supervisor-1",
+      assignedUserId: "supervisor-1",
+      assignedUserName: "操作主管甲",
+      positionCode: "OPERATION_SUPERVISOR",
+      roleCodes: ["pos_operation_supervisor"],
+      permissions: ["order.module.costs.manage"],
     }).allowed).toBe(true);
   });
 

@@ -100,8 +100,8 @@ const portalConfigs: Record<string, PositionPortalConfig> = {
   TRACKING: {
     code: "TRACKING",
     title: "运踪岗门户",
-    description: "按订单节点录入车辆信息并更新每日运踪。",
-    viewAreas: ["本人负责订单", "车辆与运单", "最新运输位置"],
+    description: "统一维护全部在途订单的运输节点，并同步管理端预警与客户端轨迹。",
+    viewAreas: ["全部在途订单", "车辆与运单", "时效预警", "客户可见轨迹"],
     operateAreas: ["录入车辆资料", "更新每日运踪", "维护客户可见轨迹"],
     moduleCodes: ["tracking"],
     quickLinks: [
@@ -135,28 +135,16 @@ const portalConfigs: Record<string, PositionPortalConfig> = {
       { label: "订单中心", description: "创建并跟进本人订单", href: "/admin/orders", permission: "order.view" },
     ],
   },
-  BUSINESS_SUPERVISOR: {
-    code: "BUSINESS_SUPERVISOR",
-    title: "业务主管门户",
-    description: "查看全部业务订单，并审批明确提交给本人的委托资料。",
-    viewAreas: ["全部订单", "委托资料", "报价与客户摘要"],
-    operateAreas: ["审批本人待办", "指定下一步操作主管"],
-    moduleCodes: ["consignment"],
-    quickLinks: [
-      { label: "审批待办", description: "审批提交给本人的委托", href: "/admin/workbenches/tasks", permission: "order.view" },
-      { label: "订单中心", description: "只读查看全部订单", href: "/admin/orders", permission: "order.view" },
-    ],
-  },
   OPERATION_SUPERVISOR: {
     code: "OPERATION_SUPERVISOR",
     title: "操作主管门户",
-    description: "接收业务主管转交的订单，分配具体操作岗，并审核拼车配载单。",
-    viewAreas: ["本人审批订单", "本人审批配载单", "执行人员与进度"],
-    operateAreas: ["任务分配", "拼车配载审批", "指定整单操作负责人"],
+    description: "直接审核业务员录入的订单，分配执行人员并统筹整车或拼车配载。",
+    viewAreas: ["本人审批订单", "待生成配载单", "执行人员与进度"],
+    operateAreas: ["委托审核", "任务分配", "生成配载单并指定负责人"],
     moduleCodes: ["assignment", "loading"],
     quickLinks: [
       { label: "任务分配", description: "处理本人待派订单", href: "/admin/workbenches/tasks", permission: "order.view" },
-      { label: "配载审批", description: "审核仓库提交的拼车配载单", href: "/admin/loading", permission: "order.view" },
+      { label: "配载管理", description: "选择运输资源并生成配载单", href: "/admin/loading", permission: "order.view" },
     ],
   },
   OVERSEAS: {
@@ -189,10 +177,10 @@ const portalConfigs: Record<string, PositionPortalConfig> = {
   OPERATION: {
     code: "OPERATION",
     title: "操作门户",
-    description: "连续负责分配给本人的运输安排、车辆轨迹和执行异常。",
-    viewAreas: ["派给本人的订单", "本人负责配载单", "运输资源", "轨迹和异常"],
-    operateAreas: ["国内运输安排", "登记全程运踪", "异常处理"],
-    moduleCodes: ["transport", "tracking", "exceptions"],
+    description: "连续负责分配给本人的运输安排、费用补录和执行异常。",
+    viewAreas: ["派给本人的订单", "本人负责配载单", "运输资源", "执行异常"],
+    operateAreas: ["国内运输安排", "新增执行费用", "异常处理"],
+    moduleCodes: ["transport", "costs", "exceptions"],
     quickLinks: [
       { label: "业务待办", description: "按下一步处理订单", href: "/admin/workbenches/tasks", permission: "order.view" },
       { label: "订单中心", description: "查看全部执行订单", href: "/admin/orders", permission: "order.view" },

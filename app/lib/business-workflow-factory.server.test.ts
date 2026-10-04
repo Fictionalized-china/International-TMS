@@ -152,8 +152,8 @@ describe("new-organization standard workflow bootstrap", () => {
     const fieldInserts = database.prepared.filter((entry) =>
       entry.sql.includes("INSERT OR IGNORE INTO workflow_step_fields"),
     );
-    expect(moduleInserts).toHaveLength(48);
-    expect(taskInserts).toHaveLength(48);
+    expect(moduleInserts).toHaveLength(45);
+    expect(taskInserts).toHaveLength(45);
     expect(fieldInserts.length).toBeGreaterThan(0);
     expect(database.prepared.some((entry) => /^\s*UPDATE\s+workflow_definitions/i.test(entry.sql))).toBe(false);
     expect(database.prepared.some((entry) =>
@@ -171,7 +171,7 @@ describe("new-organization standard workflow bootstrap", () => {
       entry.sql.includes("INSERT OR IGNORE INTO workflow_steps") &&
       entry.values[1] === "actual-default-id",
     );
-    expect(defaultStepInsert?.values[0]).toBe("actual-default-id:step:quotation");
+    expect(defaultStepInsert?.values[0]).toBe("actual-default-id:step:order_creation");
     expect(database.prepared.some((entry) =>
       entry.sql.includes("INSERT OR IGNORE INTO workflow_step_modules") &&
       entry.values.includes("actual-default-id"),

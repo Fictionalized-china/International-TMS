@@ -368,7 +368,7 @@ describe("PZ frozen tracking route gates", () => {
     harness.state.ownerUserId = "operation-2";
 
     await expect(runAction("batch_tracking_add")).resolves.toEqual({
-      formError: "本配载单的运踪与异常只允许已指派的整单操作负责人办理",
+      formError: "本配载单运踪只允许独立运踪岗或已指派的整单操作负责人办理",
     });
     expect(harness.loadBatchTrackingActionPolicy).not.toHaveBeenCalled();
     expect(harness.DB.batch).not.toHaveBeenCalled();

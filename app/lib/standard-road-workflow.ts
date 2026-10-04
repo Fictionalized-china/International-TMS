@@ -27,20 +27,6 @@ export type StandardRoadWorkflowModuleSeed = {
  */
 export const standardRoadWorkflowModules: readonly StandardRoadWorkflowModuleSeed[] = [
   {
-    stepKey: "quotation",
-    moduleCode: "consignment",
-    displayName: "询价与报价",
-    sortOrder: 10,
-    required: false,
-    responsibilityPositionCode: "SALES",
-    completionMode: "all_tasks",
-    taskKey: "handle_quotation",
-    taskName: "填写询价并完成报价",
-    taskType: "system",
-    taskRequired: false,
-    instructions: "询价报价是可选销售工具；线下确认的业务可直接录单。",
-  },
-  {
     stepKey: "order_creation",
     moduleCode: "consignment",
     displayName: "委托信息",
@@ -186,7 +172,7 @@ export const standardRoadWorkflowModules: readonly StandardRoadWorkflowModuleSee
     displayName: "出境运输与运踪",
     sortOrder: 30,
     required: true,
-    responsibilityPositionCode: "OPERATION",
+    responsibilityPositionCode: "TRACKING",
     completionMode: "all_tasks",
     taskKey: "handle_tracking",
     taskName: "登记实际出境与运踪",

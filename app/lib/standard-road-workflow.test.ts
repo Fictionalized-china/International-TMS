@@ -8,11 +8,11 @@ import { validateWorkflowResponsibilityReadiness } from "./workflow-publication-
 
 const positionRole: Record<string, keyof typeof accessModelRolePermissions> = {
   SALES: "pos_sales",
-  BUSINESS_SUPERVISOR: "pos_business_supervisor",
   OPERATION_SUPERVISOR: "pos_operation_supervisor",
   CS: "pos_customer_service",
   OPERATION: "pos_operation",
   DOC: "pos_doc",
+  TRACKING: "pos_tracking",
   WAREHOUSE: "warehouse_operator",
   OVERSEAS_WAREHOUSE: "overseas_warehouse_operator",
   FINANCE_ACCOUNTING: "pos_finance",
@@ -49,7 +49,6 @@ describe("standard road workflow factory defaults", () => {
         .filter((module) => !module.required)
         .map((module) => `${module.stepKey}:${module.moduleCode}`),
     ).toEqual([
-      "quotation:consignment",
       "order_creation:cargo",
       "order_creation:costs",
       "outbound_transport:documents",
@@ -59,13 +58,20 @@ describe("standard road workflow factory defaults", () => {
 
   it("uses the runtime auto-completion task-key convention for every factory task", () => {
     for (const module of standardRoadWorkflowModules) {
-      const expectedTaskKey = module.stepKey === "quotation"
-        ? "handle_quotation"
-        : `handle_${module.moduleCode}`;
+      const expectedTaskKey = `handle_${module.moduleCode}`;
       expect(module.taskKey).toBe(expectedTaskKey);
     }
   });
-  it("keeps the three-party settlement owners aligned with runtime authorization", () => {
+  it("starts orders at direct intake and keeps tracking independently owned", () => {
+    expect(standardRoadWorkflowModules.some(
+      (module) => module.stepKey === "quotation",
+    )).toBe(false);
+    expect(standardRoadWorkflowModules.find(
+      (module) => module.stepKey === "outbound_transport" && module.moduleCode === "tracking",
+    )?.responsibilityPositionCode).toBe("TRACKING");
+  });
+
+  it("keeps settlement owned by customer service while downstream approvals remain configurable", () => {
     const settlement = standardRoadWorkflowModules.find(
       (module) => module.stepKey === "reconciliation" && module.moduleCode === "costs",
     );

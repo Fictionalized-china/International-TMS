@@ -79,7 +79,6 @@ describe("batch cost allocation frozen action policy", () => {
     ["past costs", { current_step_sort_order: 110 }, "已越过最终费用节点"],
     ["closed costs", { costs_status: "completed" }, "已关闭"],
     ["signed payable", { payable_finance_reviewed: 1 }, "已有确认"],
-    ["not dispatched", { dispatched: 0 }, "尚未完成装车出库"],
     ["after exit", { actual_exit_recorded: 1 }, "已登记实际出境"],
     ["batch departed", { batch_actual_departure_at: "2026-09-06T01:00:00Z" }, "已实际出境"],
     ["batch unapproved", { batch_approval_status: "submitted" }, "未审核通过"],
@@ -90,10 +89,17 @@ describe("batch cost allocation frozen action policy", () => {
     expect(result.reason).toContain(message);
   });
 
+  it("opens configured cost allocation before dispatch so profit can be previewed before final batch submission", () => {
+    expect(resolveBatchCostAllocationActionPolicy([row({ dispatched: 0 })])).toMatchObject({
+      editable: true,
+      visible: true,
+    });
+  });
+
   it("uses whole-batch AND and includes the blocked order number", () => {
     const result = resolveBatchCostAllocationActionPolicy([
       row(),
-      row({ order_id: "order-2", order_number: "SO-BLOCKED", dispatched: 0 }),
+      row({ order_id: "order-2", order_number: "SO-BLOCKED", payable_finance_reviewed: 1 }),
     ]);
     expect(result.editable).toBe(false);
     expect(result.reason).toContain("SO-BLOCKED");

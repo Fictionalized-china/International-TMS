@@ -3662,13 +3662,17 @@ export async function action({ request, params }: Route.ActionArgs) {
       ).find((item) => item.action === action);
       if (!actionPolicy?.active)
         return {
-          formError: `当前工作流未启用“${expenseDirectionActionLabel(action)}”，不能执行该签核`,
+          formError: `当前工作流未启用“${expenseDirectionActionLabel(action, direction)}”，不能执行该签核`,
         };
       const expenseAssignees = await env.DB.prepare(
         `SELECT COALESCE(q.salesperson_user_id,o.salesperson_user_id) business_assignee_user_id,
                 sales.display_name business_assignee_name,
                 costs.assignee_user_id customer_service_assignee_user_id,
                 customer_service.display_name customer_service_assignee_name,
+                transport.assignee_user_id operation_assignee_user_id,
+                operation_user.display_name operation_assignee_name,
+                assignment.assignee_user_id operation_supervisor_user_id,
+                operation_supervisor.display_name operation_supervisor_name,
                 review.assignee_user_id finance_assignee_user_id,
                 finance.display_name finance_assignee_name
          FROM transport_orders o
@@ -3676,6 +3680,10 @@ export async function action({ request, params }: Route.ActionArgs) {
          LEFT JOIN users sales ON sales.id=COALESCE(q.salesperson_user_id,o.salesperson_user_id)
          LEFT JOIN order_module_instances costs ON costs.organization_id=o.organization_id AND costs.order_id=o.id AND costs.module_code='costs' AND costs.enabled=1
          LEFT JOIN users customer_service ON customer_service.id=costs.assignee_user_id
+         LEFT JOIN order_module_instances transport ON transport.organization_id=o.organization_id AND transport.order_id=o.id AND transport.module_code='transport' AND transport.enabled=1
+         LEFT JOIN users operation_user ON operation_user.id=transport.assignee_user_id
+         LEFT JOIN order_module_instances assignment ON assignment.organization_id=o.organization_id AND assignment.order_id=o.id AND assignment.module_code='assignment' AND assignment.enabled=1
+         LEFT JOIN users operation_supervisor ON operation_supervisor.id=assignment.assignee_user_id
          LEFT JOIN order_module_instances review ON review.organization_id=o.organization_id AND review.order_id=o.id AND review.module_code='review' AND review.enabled=1
          LEFT JOIN users finance ON finance.id=review.assignee_user_id
          WHERE o.organization_id=? AND o.id=?`,
@@ -3686,25 +3694,27 @@ export async function action({ request, params }: Route.ActionArgs) {
           business_assignee_name: string | null;
           customer_service_assignee_user_id: string | null;
           customer_service_assignee_name: string | null;
+          operation_assignee_user_id: string | null;
+          operation_assignee_name: string | null;
+          operation_supervisor_user_id: string | null;
+          operation_supervisor_name: string | null;
           finance_assignee_user_id: string | null;
           finance_assignee_name: string | null;
         }>();
-      const actionAssignee = controlAction === "confirm"
-        ? {
-            id: expenseAssignees?.customer_service_assignee_user_id ?? null,
-            name: expenseAssignees?.customer_service_assignee_name ?? null,
-          }
-        : controlAction === "business_review"
-          ? {
-              id: expenseAssignees?.business_assignee_user_id ?? null,
-              name: expenseAssignees?.business_assignee_name ?? null,
-            }
-          : {
-              id: expenseAssignees?.finance_assignee_user_id ?? null,
-              name: expenseAssignees?.finance_assignee_name ?? null,
-            };
+      const actionAssignee = direction === "receivable"
+        ? controlAction === "confirm"
+          ? { id: expenseAssignees?.customer_service_assignee_user_id ?? null, name: expenseAssignees?.customer_service_assignee_name ?? null }
+          : controlAction === "business_review"
+            ? { id: expenseAssignees?.operation_assignee_user_id ?? null, name: expenseAssignees?.operation_assignee_name ?? null }
+            : { id: expenseAssignees?.operation_supervisor_user_id ?? null, name: expenseAssignees?.operation_supervisor_name ?? null }
+        : controlAction === "confirm"
+          ? { id: expenseAssignees?.operation_assignee_user_id ?? null, name: expenseAssignees?.operation_assignee_name ?? null }
+          : controlAction === "business_review"
+            ? { id: expenseAssignees?.operation_supervisor_user_id ?? null, name: expenseAssignees?.operation_supervisor_name ?? null }
+            : { id: expenseAssignees?.finance_assignee_user_id ?? null, name: expenseAssignees?.finance_assignee_name ?? null };
       const actionAccess = expenseDirectionActionAccess({
         action,
+        direction,
         currentUserId: current.userId,
         assignedUserId: actionAssignee.id,
         assignedUserName: actionAssignee.name,
@@ -3730,7 +3740,7 @@ export async function action({ request, params }: Route.ActionArgs) {
           .bind(current.organizationId, orderId, direction)
           .first<ExpenseDirectionControl>()) || emptyExpenseDirectionControl(direction);
       if (expenseDirectionActionCompleted(existing, action))
-        return { formError: `${expenseDirectionActionLabel(action)}已经完成并锁定，请刷新页面查看最新状态` };
+        return { formError: `${expenseDirectionActionLabel(action, direction)}已经完成并锁定，请刷新页面查看最新状态` };
       const now = new Date().toISOString();
       await env.DB.prepare(
         `INSERT INTO order_expense_direction_controls(organization_id,order_id,direction,updated_at)
@@ -3778,8 +3788,8 @@ export async function action({ request, params }: Route.ActionArgs) {
       });
       const labels: Record<string, string> = {
         confirm: "费用已确认",
-        business_review: "业务审核已完成",
-        finance_review: "财务审核已完成",
+        business_review: "复核已完成",
+        finance_review: "审批已完成",
       };
       return {
         actionKind: "expense_direction_control",
@@ -7465,6 +7475,8 @@ function ModuleBusinessData({
       emptyExpenseDirectionControl(direction);
     const costsModule = data.modules.find((item) => item.module_code === "costs");
     const reviewModule = data.modules.find((item) => item.module_code === "review");
+    const transportModule = data.modules.find((item) => item.module_code === "transport");
+    const assignmentModule = data.modules.find((item) => item.module_code === "assignment");
     const actionPolicies = expenseDirectionActionPolicies(data.workflowFields);
     const activeActionPolicies = actionPolicies.filter((policy) => policy.active);
     const requiredActionCount = activeActionPolicies.filter(
@@ -7525,13 +7537,20 @@ function ModuleBusinessData({
           ) || Boolean(control.business_locked || control.finance_locked);
           const actionAccessByAction = Object.fromEntries(
             expenseDirectionActions.map((action) => {
-              const assignee = action === "confirm"
-                ? { id: costsModule?.assignee_user_id || null, name: costsModule?.assignee_name || null }
-                : action === "business_review"
-                  ? { id: data.order.salesperson_user_id, name: data.order.quotation_salesperson_name }
-                  : { id: reviewModule?.assignee_user_id || null, name: reviewModule?.assignee_name || null };
+              const assignee = direction === "receivable"
+                ? action === "confirm"
+                  ? { id: costsModule?.assignee_user_id || null, name: costsModule?.assignee_name || null }
+                  : action === "business_review"
+                    ? { id: transportModule?.assignee_user_id || null, name: transportModule?.assignee_name || null }
+                    : { id: assignmentModule?.assignee_user_id || null, name: assignmentModule?.assignee_name || null }
+                : action === "confirm"
+                  ? { id: transportModule?.assignee_user_id || null, name: transportModule?.assignee_name || null }
+                  : action === "business_review"
+                    ? { id: assignmentModule?.assignee_user_id || null, name: assignmentModule?.assignee_name || null }
+                    : { id: reviewModule?.assignee_user_id || null, name: reviewModule?.assignee_name || null };
               return [action, expenseDirectionActionAccess({
                 action,
+                direction,
                 currentUserId: data.current.userId,
                 assignedUserId: assignee.id,
                 assignedUserName: assignee.name,
@@ -9192,7 +9211,7 @@ function ExpenseDirectionWorkflow({
           const actionComplete = expenseDirectionActionCompleted(control, action);
           const actionAccess = actionAccessByAction[action];
           const actionStageAccess = actionStageAccessByAction[action];
-          const label = expenseDirectionActionLabel(action);
+          const label = expenseDirectionActionLabel(action, direction);
           return (
             <section
               className={`expense-parallel-card ${actionComplete ? "is-complete" : "is-pending"}`}

@@ -144,6 +144,7 @@ export function canAccessBatchWorkspace(
     user.roleCodes.some((code) => ["owner", "boss", "developer"].includes(code)) ||
     user.permissions.some((permission) => [
       assignedBatchViewPermission,
+      "transport.batch.plan",
       "transport.batch.approve",
       "order.module.loading.manage",
       batchCostsManagePermission,
@@ -157,7 +158,7 @@ export function canAccessBatchWorkspace(
  * the order and every workflow node visible after responsibility moves on.
  */
 export function canReadFullOrderLifecycle(user: Pick<OrderAccessUser, "positionCode">) {
-  return ["SALES", "OPERATION_SUPERVISOR", "OPERATION", "DOC", "FINANCE_ACCOUNTING"].includes(
+  return ["SALES", "OPERATION_SUPERVISOR", "OPERATION", "TRACKING", "DOC", "FINANCE_ACCOUNTING"].includes(
     user.positionCode ?? "",
   );
 }
@@ -475,7 +476,7 @@ export function batchVisibilitySql(user: OrderAccessUser, alias = "b") {
       : user.positionCode === "DOC"
         ? "document_assignee_user_id"
         : null
-    : user.permissions.includes("transport.batch.approve") && user.positionCode === "OPERATION_SUPERVISOR"
+    : user.permissions.some((permission) => ["transport.batch.plan", "transport.batch.approve"].includes(permission)) && user.positionCode === "OPERATION_SUPERVISOR"
       ? "operation_supervisor_user_id"
       : null;
   if (exactBatchOwnerColumn) {
@@ -491,6 +492,7 @@ export function batchVisibilitySql(user: OrderAccessUser, alias = "b") {
     user.roleCodes.some((code) => ["owner", "boss", "developer"].includes(code)) ||
     user.permissions.some((permission) => [
       assignedBatchViewPermission,
+      "transport.batch.plan",
       "transport.batch.approve",
       "order.module.loading.manage",
     ].includes(permission));

@@ -8,7 +8,7 @@ const positionPortal = readFileSync(new URL("./lib/position-portal.ts", import.m
 
 describe("loading responsibility contract", () => {
   it("lets only the operation supervisor create a loading plan", () => {
-    expect(adminLoading).toContain('requireSessionUser(request, "transport.batch.approve")');
+    expect(adminLoading).toContain('requireSessionUser(request, "transport.batch.plan")');
     expect(adminLoading).toContain('valueOf(form, "intent") !== "create_batch"');
     expect(planningService).toContain("拼车配载至少选择 2 票订单");
     expect(planningService).toContain("所选订单必须已指派同一操作主管");

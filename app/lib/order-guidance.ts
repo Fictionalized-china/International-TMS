@@ -125,7 +125,7 @@ export function orderNextGuidance(input: {
     return {
       stage: orderBusinessStages[1],
       action: "核对资料并审批订单",
-      owner: "业务主管",
+      owner: "操作主管",
       blocker: null,
       href: `${href}/modules/consignment#module-business-data`,
       moduleCode: "consignment" as const,

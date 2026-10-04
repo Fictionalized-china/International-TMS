@@ -21,7 +21,7 @@ const openRow = {
 
 describe("batch cost allocation policy loader", () => {
   it("binds the organization and batch and preserves whole-batch failure", async () => {
-    const all = vi.fn(async () => ({ results: [openRow, { ...openRow, order_id: "order-2", order_number: "SO-2", dispatched: 0 }] }));
+    const all = vi.fn(async () => ({ results: [openRow, { ...openRow, order_id: "order-2", order_number: "SO-2", payable_finance_reviewed: 1 }] }));
     const bind = vi.fn(() => ({ all }));
     const prepare = vi.fn((_sql: string) => ({ bind }));
     const result = await loadBatchCostAllocationActionPolicy({

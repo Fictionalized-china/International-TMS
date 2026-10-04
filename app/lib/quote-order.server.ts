@@ -443,58 +443,8 @@ async function repairGeneratedOrder(input: {
 }
 
 async function rollbackGeneratedOrder(organizationId: string, orderId: string) {
-  const instance = await env.DB.prepare(
-    `SELECT id,quotation_id FROM workflow_instances
-     WHERE organization_id=? AND order_id=?`,
-  ).bind(organizationId,orderId).first<{id:string;quotation_id:string|null}>();
-  if (instance?.quotation_id) {
-    const now = new Date().toISOString();
-    await env.DB.batch([
-      env.DB.prepare(
-        `UPDATE workflow_instances SET order_id=NULL,current_step_key='quotation',status='active',
-          completed_at=NULL,updated_at=? WHERE id=? AND organization_id=?`,
-      ).bind(now,instance.id,organizationId),
-      env.DB.prepare(
-        `UPDATE workflow_instance_step_states
-         SET status=CASE step_key WHEN 'quotation' THEN 'active' ELSE 'pending' END,
-           completed_at=NULL,updated_at=? WHERE instance_id=?`,
-      ).bind(now,instance.id),
-      env.DB.prepare(
-        `UPDATE workflow_instance_module_states
-         SET status=CASE WHEN instance_step_state_id IN (
-           SELECT id FROM workflow_instance_step_states WHERE instance_id=? AND step_key='quotation'
-         ) THEN 'active' ELSE 'pending' END,updated_at=?
-         WHERE instance_step_state_id IN (
-           SELECT id FROM workflow_instance_step_states WHERE instance_id=?
-         )`,
-      ).bind(instance.id,now,instance.id),
-      env.DB.prepare(
-        `UPDATE workflow_instance_task_states
-         SET status=CASE WHEN instance_module_state_id IN (
-           SELECT ms.id FROM workflow_instance_module_states ms
-           JOIN workflow_instance_step_states ss ON ss.id=ms.instance_step_state_id
-           WHERE ss.instance_id=? AND ss.step_key='quotation'
-         ) THEN 'active' ELSE 'pending' END,
-         completed_by_user_id=NULL,completed_at=NULL,updated_at=?
-         WHERE instance_module_state_id IN (
-           SELECT ms.id FROM workflow_instance_module_states ms
-           JOIN workflow_instance_step_states ss ON ss.id=ms.instance_step_state_id
-           WHERE ss.instance_id=?
-         )`,
-      ).bind(instance.id,now,instance.id),
-      env.DB.prepare(
-        `INSERT INTO workflow_history(
-          id,instance_id,step_key,step_name,actor_user_id,source,metadata,occurred_at
-         ) VALUES(?,?,'quotation','询价报价',NULL,'system',?,?)`,
-      ).bind(
-        crypto.randomUUID(),instance.id,
-        JSON.stringify({orderCreationRolledBack:true,orderId}),now,
-      ),
-    ]);
-  } else {
-    await env.DB.prepare("DELETE FROM workflow_instances WHERE organization_id=? AND order_id=?")
-      .bind(organizationId,orderId).run();
-  }
+  await env.DB.prepare("DELETE FROM workflow_instances WHERE organization_id=? AND order_id=?")
+    .bind(organizationId,orderId).run();
   await env.DB.prepare("DELETE FROM shipments WHERE organization_id=? AND order_id=?")
     .bind(organizationId,orderId).run();
   await env.DB.prepare("DELETE FROM transport_orders WHERE organization_id=? AND id=?")

@@ -350,7 +350,7 @@ export async function action({request}:Route.ActionArgs){
     if(states.length!==orderIds.length)blockers.push("部分所选订单已不在当前仓库或已经出库");
     if(blockers.length)return{formError:`暂不能配载：${[...new Set(blockers)].join("；")}`};
     const supervisorIds=[...new Set(states.map(row=>row.operation_supervisor_user_id).filter((id):id is string=>Boolean(id)))];
-    if(supervisorIds.length===0)return{formError:"所选订单尚未完成操作主管指派，请先由业务主管审批并指定操作主管"};
+    if(supervisorIds.length===0)return{formError:"所选订单尚未完成操作主管指派，请先由操作主管完成委托审批"};
     if(supervisorIds.length>1)return{formError:"所选订单分属不同操作主管，请按操作主管拆分配载单"};
     if(states.some(row=>!row.operation_supervisor_user_id))return{formError:"部分所选订单缺少操作主管，请先完成订单审批与指派"};
     const operationSupervisorUserId=supervisorIds[0];

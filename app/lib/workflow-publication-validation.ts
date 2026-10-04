@@ -73,7 +73,6 @@ export type PublicationPositionReadiness = {
 };
 
 export const workflowCoreStepSequence = [
-  "quotation",
   "order_creation",
   "consignment_approval",
   "task_assignment",
@@ -228,12 +227,6 @@ export function validateWorkflowCoreModuleBindings(
   const activeSteps = steps.filter((step) => step.is_active === 1);
   const requirements = [
     {
-      stepKey: "quotation",
-      moduleCode: "consignment",
-      mustBeRequired: true,
-      label: "询价报价",
-    },
-    {
       stepKey: "order_creation",
       moduleCode: "consignment",
       mustBeRequired: true,
@@ -296,7 +289,6 @@ function handlerSafetyPermissionRequirements(
   positionCode: string,
   moduleCode: string,
 ) {
-  if (stepKey === "quotation") return [["quote.manage"]];
   return orderAssignmentPermissionRequirements({
     assignmentMode: "person",
     positionCode,
@@ -329,19 +321,25 @@ function publicationMemberCanHandleNodes(
 
 const settlementActionRequirements = {
   customer_service_confirmation: {
-    label: "费用确认",
-    positionCode: "CS",
-    permissionCodes: ["order.module.costs.manage"],
+    label: "费用发起 / 确认",
+    owners: [
+      { positionCode: "CS", permissionCodes: ["order.module.costs.manage"] },
+      { positionCode: "OPERATION", permissionCodes: ["order.module.costs.manage"] },
+    ],
   },
   business_review: {
-    label: "业务审核",
-    positionCode: "SALES",
-    permissionCodes: [],
+    label: "业务执行 / 主管复核",
+    owners: [
+      { positionCode: "OPERATION", permissionCodes: ["order.module.costs.manage"] },
+      { positionCode: "OPERATION_SUPERVISOR", permissionCodes: ["order.module.costs.manage"] },
+    ],
   },
   finance_review: {
-    label: "财务审核",
-    positionCode: "FINANCE_ACCOUNTING",
-    permissionCodes: ["billing.expense.approve"],
+    label: "主管 / 财务审批",
+    owners: [
+      { positionCode: "OPERATION_SUPERVISOR", permissionCodes: ["order.module.costs.manage"] },
+      { positionCode: "FINANCE_ACCOUNTING", permissionCodes: ["billing.expense.approve"] },
+    ],
   },
 } as const;
 
@@ -551,78 +549,24 @@ export function validateWorkflowResponsibilityReadiness(input: {
     const step = stepById.get(field.step_id)!;
     const label = `节点“${step.name}”的结算动作“${requirement.label}”`;
 
-    if (field.field_key === "customer_service_confirmation") {
-      const costsModule = input.modules.find(
-        (module) =>
-          module.is_active === 1 &&
-          module.step_id === field.step_id &&
-          module.module_code === "costs",
-      );
-      if (!costsModule) {
-        issues.push(`${label}已启用，但同节点未启用费用结算模块`);
-        continue;
-      }
-      if (costsModule.responsibility_position_code !== requirement.positionCode) {
-        issues.push(
-          `${label}运行时由客服费用负责人办理；对应费用模块责任岗位必须为 ${requirement.positionCode}`,
-        );
-        continue;
-      }
-      const incompatibleTasks = input.tasks.filter((task) =>
-        task.is_active === 1 &&
-        task.is_required === 1 &&
-        task.task_type !== "system" &&
-        task.step_module_id === costsModule.id &&
-        (task.responsibility_position_code ?? costsModule.responsibility_position_code) !==
-          requirement.positionCode
-      );
-      if (incompatibleTasks.length) {
-        issues.push(`${label}不支持由任务覆写其他岗位；必办人工任务责任岗位必须为 ${requirement.positionCode}`);
-        continue;
-      }
-    }
-
-    if (field.field_key === "finance_review") {
-      const reviewModules = input.modules.filter(
-        (module) =>
-          module.is_active === 1 &&
-          activeStepIds.has(module.step_id) &&
-          module.module_code === "review",
-      );
-      if (!reviewModules.length) {
-        issues.push(`${label}已启用，但未启用提供财务负责人的订单复盘模块`);
-        continue;
-      }
-      if (reviewModules.some(
-        (module) => module.responsibility_position_code !== requirement.positionCode,
-      )) {
-        issues.push(
-          `${label}运行时由订单复盘负责人办理；所有已启用订单复盘模块的责任岗位必须为 ${requirement.positionCode}`,
-        );
-        continue;
-      }
-      const incompatibleTasks = reviewModules.flatMap((module) =>
-        input.tasks.filter((task) =>
-          task.is_active === 1 &&
-          task.is_required === 1 &&
-          task.task_type !== "system" &&
-          task.step_module_id === module.id &&
-          (task.responsibility_position_code ?? module.responsibility_position_code) !==
-            requirement.positionCode
-        )
-      );
-      if (incompatibleTasks.length) {
-        issues.push(`${label}不支持由复盘任务覆写其他岗位；必办人工任务责任岗位必须为 ${requirement.positionCode}`);
-        continue;
-      }
-    }
-
-    const readiness = positionReadinessIssue(
-      positionByCode.get(requirement.positionCode),
-      requirement.positionCode,
-      requirement.permissionCodes,
+    const costsModule = input.modules.find(
+      (module) =>
+        module.is_active === 1 &&
+        module.step_id === field.step_id &&
+        module.module_code === "costs",
     );
-    if (readiness) issues.push(`${label}${readiness}`);
+    if (!costsModule) {
+      issues.push(`${label}已启用，但同节点未启用费用结算模块`);
+      continue;
+    }
+    for (const owner of requirement.owners) {
+      const readiness = positionReadinessIssue(
+        positionByCode.get(owner.positionCode),
+        owner.positionCode,
+        owner.permissionCodes,
+      );
+      if (readiness) issues.push(`${label}${readiness}`);
+    }
   }
 
   const reviewStep = activeSteps.find((step) => step.step_key === "completion_review");

@@ -10,7 +10,8 @@ export const BATCH_RESPONSIBILITY_PERMISSION_REQUIREMENTS: Record<
 > = {
   operation: [
     [assignedBatchViewPermission],
-    ["order.module.tracking.manage"],
+    ["order.module.transport.manage"],
+    ["order.module.costs.manage"],
     ["order.module.exceptions.manage"],
   ],
   document: [
@@ -25,7 +26,7 @@ export function batchResponsibilityPermissionDisabledReasons(
   kind: BatchResponsibilityKind,
 ) {
   const requirementLabel = kind === "operation"
-    ? "\u914d\u8f7d\u5355\u67e5\u770b\u3001\u8fd0\u8e2a\u529e\u7406\u548c\u5f02\u5e38\u5904\u7406\u6743\u9650"
+    ? "\u914d\u8f7d\u5355\u67e5\u770b\u3001\u8fd0\u8f93\u529e\u7406\u3001\u8d39\u7528\u8865\u5f55\u548c\u5f02\u5e38\u5904\u7406\u6743\u9650"
     : "\u914d\u8f7d\u5355\u67e5\u770b\u3001\u6587\u4ef6\u529e\u7406\u548c\u62a5\u5173\u529e\u7406\u6743\u9650";
   const responsibilityLabel = kind === "operation" ? "\u64cd\u4f5c" : "\u5355\u8bc1";
   return Object.fromEntries(

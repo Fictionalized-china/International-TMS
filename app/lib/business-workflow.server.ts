@@ -87,7 +87,6 @@ type ModuleSnapshot = {
 };
 
 export const defaultWorkflowSteps = [
-  ["quotation", "询价报价", "quote", "quote.created", 10, "admin"],
   ["order_creation", "委托资料补充", "order", "order.created", 20, "admin"],
   ["consignment_approval", "委托审核", "order", "manual.consignment_approval", 30, "admin"],
   ["task_assignment", "任务分配", "order", "manual.task_assignment", 40, "admin"],

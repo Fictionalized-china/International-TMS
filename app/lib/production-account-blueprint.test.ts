@@ -75,8 +75,10 @@ describe("cloud production account blueprint", () => {
     expect(accessModelRolePermissions.pos_customer_service).not.toContain("billing.scope.all");
     expect(accessModelRolePermissions.pos_finance).toContain("billing.scope.all");
     expect(accessModelRolePermissions.pos_cashier).toContain("billing.scope.all");
-    expect(accessModelRolePermissions.pos_business_supervisor).toContain("order.scope.all");
+    expect(accessModelRolePermissions.pos_business_supervisor).toBeUndefined();
     expect(accessModelRolePermissions.pos_operation_supervisor).toContain("transport.batch.approve");
+    expect(accessModelRolePermissions.pos_operation_supervisor).toContain("transport.batch.plan");
+    expect(accessModelRolePermissions.pos_tracking).toContain("order.scope.all");
 
     for (const role of ["pos_operation_supervisor", "pos_operation", "pos_doc", "pos_customer_service", "pos_finance", "warehouse_operator", "overseas_warehouse_operator"]) {
       expect(accessModelRolePermissions[role]).toContain("order.scope.assigned");
@@ -85,14 +87,15 @@ describe("cloud production account blueprint", () => {
 
     expect(accessModelRolePermissions.pos_operation).not.toContain("order.module.documents.manage");
     expect(accessModelRolePermissions.pos_operation).not.toContain("order.module.customs.manage");
-    expect(accessModelRolePermissions.pos_operation).toContain("order.module.tracking.manage");
+    expect(accessModelRolePermissions.pos_operation).not.toContain("order.module.tracking.manage");
     expect(accessModelRolePermissions.pos_operation).toContain("transport.batch.assigned.view");
     expect(accessModelRolePermissions.pos_doc).toContain("order.module.documents.manage");
     expect(accessModelRolePermissions.pos_doc).toContain("order.module.customs.manage");
     expect(accessModelRolePermissions.pos_doc).toContain("transport.batch.assigned.view");
     expect(accessModelRolePermissions.pos_operation).not.toContain("order.module.loading.manage");
     expect(accessModelRolePermissions.pos_doc).not.toContain("order.module.loading.manage");
-    expect(accessModelRolePermissions.pos_tracking).toBeUndefined();
+    expect(accessModelRolePermissions.pos_tracking).toContain("order.module.tracking.manage");
+    expect(accessModelRolePermissions.pos_tracking).toContain("shipment.manage");
 
     expect(accessModelRolePermissions.pos_cashier).toContain("order.scope.all");
     expect(accessModelRolePermissions.pos_hr_admin).not.toContain("order.view");

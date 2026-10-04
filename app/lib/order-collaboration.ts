@@ -63,8 +63,8 @@ export function orderCollaborationNotice({
   switch (currentStepKey as OrderBusinessStageCode) {
     case "consignment_approval":
       return {
-        title: `待${actor("业务主管", assigneeName)}审批`,
-        progress: "当前进度：委托资料已提交，正在等待业务主管审核。",
+        title: `待${actor("操作主管", assigneeName)}审批`,
+        progress: "当前进度：业务员已提交委托资料，正在等待操作主管审核。",
       };
     case "task_assignment":
       return {

@@ -92,13 +92,13 @@ export async function loader({ request }: Route.LoaderArgs) {
       LIMIT ? OFFSET ?`,
   ).bind(current.organizationId, ...visibility.values, ...searchBinds, pageSize, (page - 1) * pageSize).all<BatchRow>();
 
-  const canPlan = current.permissions.includes("transport.batch.approve");
+  const canPlan = current.permissions.includes("transport.batch.plan");
   const [planningCandidates, planningOptions] = canPlan
     ? await Promise.all([
         loadLoadingPlanningCandidates(current),
         loadLoadingPlanningOptions(current.organizationId),
       ])
-    : [[], { carriers: [], vehicles: [], drivers: [], borderPorts: [], customsPlaces: [] }];
+    : [[], { carriers: [], vehicles: [], drivers: [], borderPorts: [], customsPlaces: [], operationMembers: [], documentMembers: [] }];
 
   return {
     canPlan,
@@ -114,10 +114,14 @@ export async function loader({ request }: Route.LoaderArgs) {
 }
 
 export async function action({ request }: Route.ActionArgs) {
-  const current = await requireSessionUser(request, "transport.batch.approve");
+  const current = await requireSessionUser(request, "transport.batch.plan");
   const form = await request.formData();
   if (valueOf(form, "intent") !== "create_batch") return { formError: "未知操作" };
   try {
+    const allocationMethod = valueOf(form, "costAllocationMethod");
+    if (!["auto", "weight", "volume", "equal"].includes(allocationMethod)) {
+      return { formError: "成本分摊方式无效，请刷新后重试" };
+    }
     const created = await createOperationPlannedBatch({
       current,
       orderIds: form.getAll("orderIds").map(String),
@@ -132,6 +136,12 @@ export async function action({ request }: Route.ActionArgs) {
       plannedArrivalAt: valueOf(form, "plannedArrivalAt").trim(),
       routeNotes: valueOf(form, "routeNotes").trim(),
       notes: valueOf(form, "notes").trim(),
+      operationAssigneeUserId: valueOf(form, "operationAssigneeUserId"),
+      documentAssigneeUserId: valueOf(form, "documentAssigneeUserId"),
+      costAmount: Number(valueOf(form, "costAmount")),
+      costCurrency: valueOf(form, "costCurrency") || "CNY",
+      costExchangeRate: Number(valueOf(form, "costExchangeRate") || "1"),
+      costAllocationMethod: allocationMethod as "auto" | "weight" | "volume" | "equal",
     });
     await writeAudit({
       request,
@@ -143,7 +153,7 @@ export async function action({ request }: Route.ActionArgs) {
       metadata: created,
     });
     return {
-      success: `配载单 ${created.batchNumber} 已建立，下一步请完成负责人分配`,
+      success: `配载单 ${created.batchNumber} 已建立，负责人和成本分摊草稿已同步保存`,
       batchId: created.batchId,
       batchNumber: created.batchNumber,
     };
@@ -164,7 +174,7 @@ export default function LoadingTracking({ loaderData, actionData }: Route.Compon
       <span className="status-pill">{loaderData.total} 张配载单</span>
     </header>
     <ActionToast message={actionData?.formError || actionData?.success} tone={actionData?.formError ? "error" : "success"} data={actionData}/>
-    {actionData && "batchId" in actionData && actionData.batchId && <div className="alert success"><strong>配载规划已保存</strong><Link className="text-button" to={`/admin/loading/${actionData.batchId}`}>进入配载单完成负责人分配 →</Link></div>}
+    {actionData && "batchId" in actionData && actionData.batchId && <div className="alert success"><strong>配载规划已保存</strong><Link className="text-button" to={`/admin/loading/${actionData.batchId}`}>进入配载单核对执行 →</Link></div>}
     {loaderData.canPlan && <BatchPlanningPanel data={loaderData} busy={busy}/>}
     <section className="panel loading-tracking-filter-panel">
       <Form method="get" action="." className="filter-bar compact loading-tracking-filter">
@@ -204,6 +214,8 @@ function BatchPlanningPanel({ data, busy }: {
   const [carrierId, setCarrierId] = useState("");
   const [vehicleId, setVehicleId] = useState("");
   const [driverId, setDriverId] = useState("");
+  const [costAmount, setCostAmount] = useState("");
+  const [costExchangeRate, setCostExchangeRate] = useState("1");
   const selected = data.planningCandidates.filter((item) => selectedIds.includes(item.order_id));
   const first = selected[0];
   const routeKey = (item: (typeof data.planningCandidates)[number]) => [
@@ -215,7 +227,10 @@ function BatchPlanningPanel({ data, busy }: {
     weight: sum.weight + Number(item.weight_kg || 0),
     volume: sum.volume + Number(item.volume_cbm || 0),
     packages: sum.packages + Number(item.package_count || 0),
-  }), { weight: 0, volume: 0, packages: 0 }), [selected]);
+    receivable: sum.receivable + Number(item.receivable_base_amount || 0),
+  }), { weight: 0, volume: 0, packages: 0, receivable: 0 }), [selected]);
+  const costBaseAmount = Number(costAmount || 0) * Number(costExchangeRate || 0);
+  const estimatedProfit = totals.receivable - costBaseAmount;
   const vehicles = data.planningOptions.vehicles.filter((item) => item.carrier_id === carrierId);
   const drivers = data.planningOptions.drivers.filter((item) => item.carrier_id === carrierId);
   const toggle = (id: string, checked: boolean) => setSelectedIds((current) => checked
@@ -230,6 +245,12 @@ function BatchPlanningPanel({ data, busy }: {
         <label className="field"><span>境外承运商 *</span><select name="carrierId" value={carrierId} required onChange={(event) => { setCarrierId(event.currentTarget.value); setVehicleId(""); setDriverId(""); }}><option value="">请选择商务已录入资源</option>{data.planningOptions.carriers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
         <label className="field"><span>境外车辆 *</span><select name="vehicleId" value={vehicleId} required disabled={!carrierId} onChange={(event) => setVehicleId(event.currentTarget.value)}><option value="">{carrierId ? "请选择车辆" : "请先选择承运商"}</option>{vehicles.map((item) => <option key={item.id} value={item.id}>{item.plate_number}{item.vehicle_type ? ` · ${item.vehicle_type}` : ""}</option>)}</select></label>
         <label className="field"><span>境外司机 *</span><select name="driverId" value={driverId} required disabled={!carrierId} onChange={(event) => setDriverId(event.currentTarget.value)}><option value="">{carrierId ? "请选择司机" : "请先选择承运商"}</option>{drivers.map((item) => <option key={item.id} value={item.id}>{item.name}{item.phone ? ` · ${item.phone}` : ""}</option>)}</select></label>
+        <label className="field"><span>整批操作负责人 *</span><select name="operationAssigneeUserId" required defaultValue=""><option value="">请选择操作岗账号</option>{data.planningOptions.operationMembers.map((item) => <option key={item.id} value={item.id}>{item.display_name}</option>)}</select></label>
+        <label className="field"><span>整批单证负责人 *</span><select name="documentAssigneeUserId" required defaultValue=""><option value="">请选择单证岗账号</option>{data.planningOptions.documentMembers.map((item) => <option key={item.id} value={item.id}>{item.display_name}</option>)}</select></label>
+        <label className="field"><span>境外运输成本 *</span><input name="costAmount" type="number" min="0.01" step="0.01" required value={costAmount} onChange={(event) => setCostAmount(event.currentTarget.value)} placeholder="输入承运资源报价"/></label>
+        <label className="field"><span>成本币种 *</span><select name="costCurrency" defaultValue="CNY"><option value="CNY">CNY</option><option value="USD">USD</option><option value="RUB">RUB</option><option value="KZT">KZT</option><option value="UZS">UZS</option></select></label>
+        <label className="field"><span>折算汇率 *</span><input name="costExchangeRate" type="number" min="0.000001" step="0.000001" required value={costExchangeRate} onChange={(event) => setCostExchangeRate(event.currentTarget.value)}/></label>
+        <label className="field"><span>成本分摊方式 *</span><select name="costAllocationMethod" defaultValue="auto"><option value="auto">按 1:300 抛重比自动建议</option><option value="weight">按实收重量</option><option value="volume">按实收体积</option><option value="equal">按订单均分</option></select></label>
         <label className="field"><span>出境口岸</span><select name="borderPort" defaultValue=""><option value="">按工作流选填</option>{data.planningOptions.borderPorts.map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label>
         <label className="field"><span>清关地</span><select name="customsLocation" defaultValue=""><option value="">按工作流选填</option>{data.planningOptions.customsPlaces.map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label>
         <label className="field"><span>计划装车</span><input name="plannedLoadingAt" type="datetime-local"/></label>
@@ -238,13 +259,13 @@ function BatchPlanningPanel({ data, busy }: {
         <label className="field"><span>线路说明</span><input name="routeNotes" placeholder="按工作流选填"/></label>
         <label className="field span-2"><span>配载说明</span><input name="notes" placeholder="特殊装载、交接或调度说明"/></label>
       </div>
-      <div className="loading-selection-summary inline-loading-summary"><span>已选 <strong>{selected.length}</strong> 票</span><span>{totals.packages} 包</span><span>{totals.weight.toFixed(2)} KG</span><span>{totals.volume.toFixed(3)} CBM</span></div>
+      <div className="loading-selection-summary inline-loading-summary"><span>已选 <strong>{selected.length}</strong> 票</span><span>{totals.packages} 包</span><span>{totals.weight.toFixed(2)} KG</span><span>{totals.volume.toFixed(3)} CBM</span><span>应收折算 {totals.receivable.toFixed(2)}</span><span>成本折算 {costBaseAmount.toFixed(2)}</span><span>预计毛利 <strong>{estimatedProfit.toFixed(2)}</strong></span></div>
       <div className="table-wrap module-record-table inline-loading-table"><table><thead><tr><th>选择</th><th>订单 / 客户</th><th>装车仓</th><th>境外目的地</th><th>实收汇总</th><th>状态</th></tr></thead><tbody>{data.planningCandidates.map((item) => {
         const disabled = !compatible(item) && !selectedIds.includes(item.order_id);
         return <tr key={item.order_id} className={selectedIds.includes(item.order_id) ? "selected-row" : ""}><td><input type="checkbox" name="orderIds" value={item.order_id} checked={selectedIds.includes(item.order_id)} disabled={disabled} onChange={(event) => toggle(item.order_id,event.currentTarget.checked)}/></td><td><strong>{item.order_number}</strong><small>{item.customer_name}</small></td><td>{item.warehouse_name}</td><td>{item.overseas_warehouse_name || "未设置"}<small>{[item.destination_country,item.destination_state,item.destination_city].filter(Boolean).join(" ")}</small></td><td>{Number(item.weight_kg).toFixed(2)} KG<small>{Number(item.volume_cbm).toFixed(3)} CBM · {item.package_count} 包</small></td><td>{disabled ? "与当前选择不兼容" : "可配载"}</td></tr>;
       })}</tbody></table></div>
       {!data.planningCandidates.length && <p className="empty-state">当前没有同时满足“已货齐、无异常、未占用、工作流已到配载节点”的订单。</p>}
-      <div className="inline-loading-actions"><small>提交时服务端会重新校验全部订单和资源，避免并发占用或跨线路混配。</small><button className="primary" disabled={busy || selected.length < 2 || !carrierId || !vehicleId || !driverId}>{busy ? "正在校验并生成…" : "生成配载单并进入负责人分配"}</button></div>
+      <div className="inline-loading-actions"><small>提交时会重新校验订单、运输资源、负责人和成本；一次生成配载单并保存成本分摊草稿，不再二次自审。</small><button className="primary" disabled={busy || selected.length < 2 || !carrierId || !vehicleId || !driverId || Number(costAmount) <= 0}>{busy ? "正在校验并生成…" : "确认资源、负责人和成本并生成配载单"}</button></div>
     </Form>
   </section>;
 }

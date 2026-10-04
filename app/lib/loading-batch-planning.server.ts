@@ -16,7 +16,20 @@ import {
   loadLoadingConsolidationWorkflowAccesses,
   loadingConsolidationWorkflowAccessSql,
 } from "./loading-consolidation-stage-gate.server";
-import { pendingBatchApprovalNotificationStatement } from "./internal-notifications.server";
+import {
+  assignedBatchNotificationStatement,
+  warehouseBatchReadyNotificationStatement,
+} from "./internal-notifications.server";
+import { listActiveOrganizationAssignees, isActiveOrganizationAssigneeForPositions } from "./organization-assignee.server";
+import {
+  BATCH_RESPONSIBILITY_PERMISSION_REQUIREMENTS,
+  buildConfiguredBatchResponsibilityTargets,
+  eligibleBatchInitialResponsibilityCandidates,
+  buildBatchInitialResponsibilityRestrictions,
+  type BatchResponsibilityTransferTarget,
+} from "./batch-responsibility";
+import { loadOrderAssignmentManifest } from "./order-assignment-manifest.server";
+import { allocateCost, allocationDensity, recommendAllocationMethod, type AllocationMethod } from "./cost-allocation";
 
 export type LoadingPlanningCandidate = {
   order_id: string;
@@ -45,6 +58,7 @@ export type LoadingPlanningCandidate = {
   operation_supervisor_user_id: string | null;
   exit_port: string | null;
   customs_location: string | null;
+  receivable_base_amount: number;
 };
 
 export type LoadingPlanningResourceOption = {
@@ -67,7 +81,10 @@ const planningCandidateSelect = `SELECT o.id order_id,o.order_number,c.name cust
     1 cargo_ready,0 has_exception,0 active_dispatch,NULL active_batch_id,NULL active_batch_number,
     o.overseas_warehouse_id,ow.name overseas_warehouse_name,
     o.destination_country,o.destination_state,o.destination_city,o.operation_supervisor_user_id,
-    o.exit_port,o.customs_location
+    o.exit_port,o.customs_location,
+    COALESCE((SELECT SUM(e.base_amount) FROM business_expenses e
+      WHERE e.organization_id=o.organization_id AND e.order_id=o.id
+        AND e.direction='receivable' AND e.stage!='cancelled'),0) receivable_base_amount
   FROM transport_orders o
   JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
   JOIN warehouse_packing_jobs job ON job.organization_id=o.organization_id AND job.order_id=o.id
@@ -105,7 +122,7 @@ export async function loadLoadingPlanningCandidates(current: SessionUser) {
 }
 
 export async function loadLoadingPlanningOptions(organizationId: string) {
-  const [carriers, vehicles, drivers, references] = await Promise.all([
+  const [carriers, vehicles, drivers, references, members] = await Promise.all([
     env.DB.prepare("SELECT id,name FROM carriers WHERE organization_id=? AND status='active' AND carrier_scope='overseas' ORDER BY name")
       .bind(organizationId).all<{ id: string; name: string }>(),
     env.DB.prepare(`SELECT v.id,v.carrier_id,v.plate_number,v.vehicle_type
@@ -118,14 +135,42 @@ export async function loadLoadingPlanningOptions(organizationId: string) {
       ORDER BY c.name,d.name`).bind(organizationId).all<LoadingPlanningResourceOption>(),
     env.DB.prepare("SELECT category,code,name FROM reference_data WHERE organization_id=? AND status='active' AND category IN ('border_port','customs_place') ORDER BY category,sort_order,name")
       .bind(organizationId).all<{ category: string; code: string; name: string }>(),
+    listActiveOrganizationAssignees(organizationId),
   ]);
+  const emptyRestrictions = buildBatchInitialResponsibilityRestrictions([]);
   return {
     carriers: carriers.results,
     vehicles: vehicles.results,
     drivers: drivers.results,
     borderPorts: references.results.filter((item) => item.category === "border_port"),
     customsPlaces: references.results.filter((item) => item.category === "customs_place"),
+    operationMembers: eligibleBatchInitialResponsibilityCandidates(members, emptyRestrictions, "operation"),
+    documentMembers: eligibleBatchInitialResponsibilityCandidates(members, emptyRestrictions, "document"),
   };
+}
+
+async function loadBatchResponsibilityTransferTargets(input: {
+  organizationId: string;
+  orderIds: readonly string[];
+  operationAssigneeUserId: string;
+  documentAssigneeUserId: string;
+}) {
+  const targets: BatchResponsibilityTransferTarget[] = [];
+  for (const orderId of input.orderIds) {
+    const manifest = await loadOrderAssignmentManifest(input.organizationId, orderId);
+    targets.push(...buildConfiguredBatchResponsibilityTargets({
+      orderId,
+      manifest,
+      operationAssigneeUserId: input.operationAssigneeUserId,
+      documentAssigneeUserId: input.documentAssigneeUserId,
+    }));
+  }
+  for (const positionCode of ["OPERATION", "DOC"] as const) {
+    if (!targets.some((target) => target.positionCode === positionCode)) {
+      throw new Error(`挂载订单冻结工作流中没有未完成的${positionCode === "OPERATION" ? "操作" : "单证"}职责`);
+    }
+  }
+  return targets;
 }
 
 export async function createOperationPlannedBatch(input: {
@@ -142,6 +187,12 @@ export async function createOperationPlannedBatch(input: {
   plannedArrivalAt: string;
   routeNotes: string;
   notes: string;
+  operationAssigneeUserId: string;
+  documentAssigneeUserId: string;
+  costAmount: number;
+  costCurrency: string;
+  costExchangeRate: number;
+  costAllocationMethod: "auto" | AllocationMethod;
 }) {
   const orderIds = [...new Set(input.orderIds.filter(Boolean))];
   if (orderIds.length < 2) throw new Error("拼车配载至少选择 2 票订单");
@@ -149,6 +200,31 @@ export async function createOperationPlannedBatch(input: {
   if (!input.carrierId || !input.vehicleId || !input.driverId) {
     throw new Error("请先选择商务已录入的境外承运商、车辆和司机，再生成配载单");
   }
+  if (!input.operationAssigneeUserId || !input.documentAssigneeUserId) {
+    throw new Error("请选择整批操作负责人和单证负责人");
+  }
+  if (!Number.isFinite(input.costAmount) || input.costAmount <= 0) {
+    throw new Error("请填写大于 0 的境外运输成本");
+  }
+  if (!Number.isFinite(input.costExchangeRate) || input.costExchangeRate <= 0) {
+    throw new Error("费用汇率必须大于 0");
+  }
+  const [operationAssigneeValid, documentAssigneeValid] = await Promise.all([
+    isActiveOrganizationAssigneeForPositions(
+      input.current.organizationId,
+      input.operationAssigneeUserId,
+      ["OPERATION"],
+      BATCH_RESPONSIBILITY_PERMISSION_REQUIREMENTS.operation,
+    ),
+    isActiveOrganizationAssigneeForPositions(
+      input.current.organizationId,
+      input.documentAssigneeUserId,
+      ["DOC"],
+      BATCH_RESPONSIBILITY_PERMISSION_REQUIREMENTS.document,
+    ),
+  ]);
+  if (!operationAssigneeValid) throw new Error("所选操作负责人岗位或权限已变化，请刷新后重选");
+  if (!documentAssigneeValid) throw new Error("所选单证负责人岗位或权限已变化，请刷新后重选");
   const visibility = orderVisibilitySql(input.current, "o");
   const rows = await env.DB.prepare(
     `${planningCandidateSelect} AND ${visibility.sql} AND o.id IN (${d1Placeholders(orderIds.length)})`,
@@ -188,6 +264,12 @@ export async function createOperationPlannedBatch(input: {
     loading_notes: input.notes,
   });
   if (requiredError) throw new Error(requiredError);
+  const responsibilityTargets = await loadBatchResponsibilityTransferTargets({
+    organizationId: input.current.organizationId,
+    orderIds,
+    operationAssigneeUserId: input.operationAssigneeUserId,
+    documentAssigneeUserId: input.documentAssigneeUserId,
+  });
   const [carrier, vehicle, driver] = await Promise.all([
     env.DB.prepare("SELECT id,name FROM carriers WHERE id=? AND organization_id=? AND status='active' AND carrier_scope='overseas'")
       .bind(input.carrierId, input.current.organizationId).first<{ id: string; name: string }>(),
@@ -222,20 +304,38 @@ export async function createOperationPlannedBatch(input: {
   const routeKey = [first.warehouse_id, first.overseas_warehouse_id, first.destination_country, first.destination_state, first.destination_city]
     .map((value) => (value || "").trim().toLowerCase()).join("|");
   const batchName = input.batchName || `${first.warehouse_name} → ${first.overseas_warehouse_name || first.destination_city}`;
+  const responsibilityRevision = crypto.randomUUID();
+  const totalWeight = candidates.reduce((sum, row) => sum + Number(row.weight_kg || 0), 0);
+  const totalVolume = candidates.reduce((sum, row) => sum + Number(row.volume_cbm || 0), 0);
+  const allocationMethod = input.costAllocationMethod === "auto"
+    ? recommendAllocationMethod("OVERSEAS_TRANSPORT", totalWeight, totalVolume, 300)
+    : input.costAllocationMethod;
+  if (!["weight", "volume", "equal"].includes(allocationMethod)) {
+    throw new Error("成本分摊方式无效，请刷新后重试");
+  }
+  const costSuggestions = allocateCost(candidates.map((row) => ({
+    orderId: row.order_id,
+    actualWeightKg: Number(row.weight_kg || 0),
+    actualVolumeCbm: Number(row.volume_cbm || 0),
+  })), input.costAmount, allocationMethod);
+  const costAllocationId = crypto.randomUUID();
+  const density = allocationDensity(totalWeight, totalVolume);
   const statements: D1PreparedStatement[] = [env.DB.prepare(`INSERT INTO transport_batches(
       id,organization_id,order_id,batch_number,batch_name,origin_location,destination_location,
       planned_departure_at,planned_arrival_at,status,notes,route_key,warehouse_id,carrier_id,
       created_by_user_id,created_at,updated_at,border_port,customs_location,transit_location,route_notes,
       planned_loading_at,overseas_carrier_name,overseas_vehicle_type,overseas_vehicle_count,
       overseas_vehicle_plate,overseas_driver_name,overseas_driver_phone,approval_status,
-      operation_supervisor_user_id,submitted_by_user_id,submitted_at
-    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      operation_supervisor_user_id,operation_assignee_user_id,document_assignee_user_id,
+      responsibility_revision,submitted_by_user_id,submitted_at,approved_by_user_id,approved_at
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
       batchId,input.current.organizationId,first.order_id,batchNumber,batchName,first.warehouse_name,destination,
       input.plannedDepartureAt || null,input.plannedArrivalAt || null,"planning",input.notes || null,routeKey,
       first.warehouse_id,carrier.id,input.current.userId,now,now,input.borderPort || null,input.customsLocation || null,
       null,input.routeNotes || null,input.plannedLoadingAt || null,carrier.name,vehicle.vehicle_type,1,
-      vehicle.plate_number.trim().toUpperCase(),driver.name.trim(),driver.phone.trim(),"submitted",
-      first.operation_supervisor_user_id,input.current.userId,now,
+      vehicle.plate_number.trim().toUpperCase(),driver.name.trim(),driver.phone.trim(),"approved",
+      first.operation_supervisor_user_id,input.operationAssigneeUserId,input.documentAssigneeUserId,
+      responsibilityRevision,input.current.userId,now,input.current.userId,now,
     ), env.DB.prepare(`INSERT INTO transport_batch_vehicles(
       id,organization_id,batch_id,vehicle_no,vehicle_type,plate_number,carrier_id,driver_name,driver_phone,
       capacity_weight_kg,capacity_volume_cbm,status,created_at,updated_at,vehicle_master_id,driver_master_id
@@ -243,7 +343,22 @@ export async function createOperationPlannedBatch(input: {
       crypto.randomUUID(),input.current.organizationId,batchId,vehicle.vehicle_type,vehicle.plate_number.trim().toUpperCase(),
       carrier.id,driver.name.trim(),driver.phone.trim(),vehicle.capacity_weight_kg || 0,vehicle.capacity_volume_cbm || 0,
       now,now,vehicle.id,driver.id,
-    )];
+    ), env.DB.prepare(`INSERT INTO transport_cost_allocations(
+      id,organization_id,batch_id,charge_code,charge_name,counterparty_name,currency,exchange_rate,
+      total_amount,allocation_method,total_actual_weight_kg,total_actual_volume_cbm,density_kg_per_cbm,
+      density_result,status,notes,created_by_user_id,created_at,updated_at
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'draft',?,?,?,?)`).bind(
+      costAllocationId,input.current.organizationId,batchId,"OVERSEAS_TRANSPORT","境外运输费",carrier.name,
+      input.costCurrency.trim().toUpperCase() || "CNY",input.costExchangeRate,input.costAmount,allocationMethod,
+      totalWeight,totalVolume,density,density < 300 ? "轻货：按 1:300 抛重比建议按体积分摊" : "重货：按实收重量分摊",
+      `配载单生成前成本预览；${input.notes || "无备注"}`,input.current.userId,now,now,
+    ), ...costSuggestions.map((line) => env.DB.prepare(`INSERT INTO transport_cost_allocation_lines(
+      id,organization_id,allocation_id,order_id,actual_weight_kg,actual_volume_cbm,suggested_ratio,
+      suggested_amount,final_amount,created_at,updated_at
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      crypto.randomUUID(),input.current.organizationId,costAllocationId,line.orderId,line.actualWeightKg,
+      line.actualVolumeCbm,line.ratio,line.amount,line.amount,now,now,
+    ))];
   for (const rowChunk of chunkD1Values(candidates, 5)) {
     statements.push(env.DB.prepare(`UPDATE warehouse_packing_jobs SET status='allocated',transport_batch_id=?,updated_at=?
       WHERE organization_id=? AND warehouse_id=? AND status='labelled' AND transport_batch_id IS NULL
@@ -259,12 +374,91 @@ export async function createOperationPlannedBatch(input: {
       .bind(...rowChunk.flatMap((row, index) => [crypto.randomUUID(),input.current.organizationId,batchId,row.order_id,start + index + 1,input.current.userId,now,now])));
     sequenceOffset += rowChunk.length;
   }
-  statements.push(pendingBatchApprovalNotificationStatement(env.DB, {
+  for (const orderId of orderIds) {
+    const orderTargets = responsibilityTargets.filter((target) => target.orderId === orderId);
+    const moduleCodes = [...new Set(orderTargets.flatMap((target) => target.moduleCodes))];
+    for (const moduleCodeChunk of chunkD1Values(moduleCodes, 8)) {
+      statements.push(env.DB.prepare(`UPDATE order_tasks SET status='cancelled',updated_at=?
+        WHERE organization_id=? AND order_id=? AND task_type='module_owner'
+          AND status IN ('pending','in_progress')
+          AND module_code IN (${d1Placeholders(moduleCodeChunk.length)})`)
+        .bind(now,input.current.organizationId,orderId,...moduleCodeChunk));
+    }
+    for (const target of orderTargets) {
+      for (const taskStateIds of chunkD1Values(target.taskStateIds, 10)) {
+        statements.push(env.DB.prepare(`UPDATE workflow_instance_task_states
+          SET assignee_user_id=?,updated_at=?
+          WHERE id IN (${d1Placeholders(taskStateIds.length)})
+            AND status NOT IN ('completed','not_applicable')
+            AND instance_module_state_id IN (
+              SELECT module_state.id FROM workflow_instance_module_states module_state
+              JOIN workflow_instance_step_states step_state ON step_state.id=module_state.instance_step_state_id
+              JOIN workflow_instances instance ON instance.id=step_state.instance_id
+              WHERE instance.id=? AND instance.organization_id=? AND instance.order_id=?
+            )`)
+          .bind(target.assigneeUserId,now,...taskStateIds,target.workflowInstanceId,input.current.organizationId,orderId));
+      }
+      for (const primaryModuleCodes of chunkD1Values(target.primaryModuleCodes, 12)) {
+        statements.push(env.DB.prepare(`UPDATE order_module_instances
+          SET assignee_user_id=?,blocking_reason=NULL,updated_at=?
+          WHERE organization_id=? AND order_id=?
+            AND module_code IN (${d1Placeholders(primaryModuleCodes.length)})
+            AND status NOT IN ('completed','not_applicable')`)
+          .bind(target.assigneeUserId,now,input.current.organizationId,orderId,...primaryModuleCodes));
+      }
+      for (const targetModuleCodes of chunkD1Values(target.moduleCodes, 12)) {
+        statements.push(env.DB.prepare(`INSERT INTO order_tasks(
+            id,organization_id,order_id,module_code,task_type,title,status,assignee_user_id,
+            assigned_by_user_id,due_at,created_at,updated_at
+          )
+          SELECT lower(hex(randomblob(16))),module.organization_id,module.order_id,module.module_code,'module_owner',
+            module.module_name||?,'pending',?,?,NULL,?,?
+          FROM order_module_instances module
+          WHERE module.organization_id=? AND module.order_id=?
+            AND module.module_code IN (${d1Placeholders(targetModuleCodes.length)})
+            AND module.status NOT IN ('completed','not_applicable')`)
+          .bind(`处理任务（${target.positionCode}）`,target.assigneeUserId,input.current.userId,now,now,
+            input.current.organizationId,orderId,...targetModuleCodes));
+        statements.push(env.DB.prepare(`INSERT INTO order_module_history(
+            id,organization_id,order_id,module_instance_id,action_code,action_name,
+            from_step_code,to_step_code,to_step_name,actor_user_id,notes,occurred_at
+          )
+          SELECT lower(hex(randomblob(16))),module.organization_id,module.order_id,module.id,'assign',
+            '配载单统一分配',module.current_step_code,module.current_step_code,module.current_step_name,?,?,?
+          FROM order_module_instances module
+          WHERE module.organization_id=? AND module.order_id=?
+            AND module.module_code IN (${d1Placeholders(targetModuleCodes.length)})
+            AND module.status NOT IN ('completed','not_applicable')`)
+          .bind(input.current.userId,`${batchNumber}：操作与单证职责按冻结工作流配置统一交接`,now,
+            input.current.organizationId,orderId,...targetModuleCodes));
+      }
+    }
+  }
+  statements.push(assignedBatchNotificationStatement(env.DB, {
     organizationId: input.current.organizationId,
     batchId,
     batchNumber,
-    supervisorUserId: first.operation_supervisor_user_id,
+    assigneeUserId: input.operationAssigneeUserId,
     actorUserId: input.current.userId,
+    responsibilityLabel: "操作职责",
+    now,
+  }));
+  statements.push(warehouseBatchReadyNotificationStatement(env.DB, {
+    organizationId: input.current.organizationId,
+    batchId,
+    batchNumber,
+    warehouseId: first.warehouse_id,
+    actorUserId: input.current.userId,
+    now,
+  }));
+  statements.push(assignedBatchNotificationStatement(env.DB, {
+    organizationId: input.current.organizationId,
+    batchId,
+    batchNumber,
+    assigneeUserId: input.documentAssigneeUserId,
+    actorUserId: input.current.userId,
+    responsibilityLabel: "单证与报关职责",
+    targetTab: "documents",
     now,
   }));
   for (const orderChunk of chunkD1Values(orderIds, 6)) {
@@ -283,8 +477,11 @@ export async function createOperationPlannedBatch(input: {
     batchNumber,
     orderIds,
     operationSupervisorUserId: first.operation_supervisor_user_id,
-    totalWeight: candidates.reduce((sum, row) => sum + Number(row.weight_kg || 0), 0),
-    totalVolume: candidates.reduce((sum, row) => sum + Number(row.volume_cbm || 0), 0),
+    totalWeight,
+    totalVolume,
+    receivableBaseAmount: candidates.reduce((sum, row) => sum + Number(row.receivable_base_amount || 0), 0),
+    costBaseAmount: input.costAmount * input.costExchangeRate,
+    costAllocationId,
   };
 }
 

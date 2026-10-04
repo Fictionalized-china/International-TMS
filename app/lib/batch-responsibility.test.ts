@@ -16,7 +16,8 @@ describe("batch responsibility policy", () => {
   it("requires full downstream permissions for PZ assignees", () => {
     expect(BATCH_RESPONSIBILITY_PERMISSION_REQUIREMENTS.operation).toEqual([
       ["transport.batch.assigned.view"],
-      ["order.module.tracking.manage"],
+      ["order.module.transport.manage"],
+      ["order.module.costs.manage"],
       ["order.module.exceptions.manage"],
     ]);
     expect(BATCH_RESPONSIBILITY_PERMISSION_REQUIREMENTS.document).toEqual([
@@ -36,12 +37,12 @@ describe("batch responsibility policy", () => {
       {
         ...baseMember,
         id: "qualified-operation",
-        permission_codes: "transport.batch.assigned.view,order.module.tracking.manage,order.module.exceptions.manage",
+        permission_codes: "transport.batch.assigned.view,order.module.transport.manage,order.module.costs.manage,order.module.exceptions.manage",
       },
       {
         ...baseMember,
         id: "missing-exceptions",
-        permission_codes: "transport.batch.assigned.view,order.module.tracking.manage",
+        permission_codes: "transport.batch.assigned.view,order.module.transport.manage,order.module.costs.manage",
       },
       { ...baseMember, id: "protected-owner", permission_codes: "*" },
     ];
@@ -56,7 +57,7 @@ describe("batch responsibility policy", () => {
     }], "document"))).toEqual(["missing-customs"]);
   });
 
-  it("applies supervisor approval only to consolidated PZ batches", () => {
+  it("keeps the PZ responsibility contract while new batches enter it already approved", () => {
     expect(batchRequiresSupervisorApproval("PZ-20260905-001")).toBe(true);
     expect(batchRequiresSupervisorApproval("FTL-20260905-001")).toBe(false);
   });
@@ -286,7 +287,7 @@ describe("batch responsibility policy", () => {
       position_id: "position-operation",
       position_code: "OPERATION",
       position_name: "操作岗",
-      permission_codes: "transport.batch.assigned.view,order.module.tracking.manage,order.module.exceptions.manage",
+      permission_codes: "transport.batch.assigned.view,order.module.transport.manage,order.module.costs.manage,order.module.exceptions.manage",
     }], restrictions);
     expect(readiness.operation.map((member) => member.id)).toEqual(["operation-original"]);
   });
@@ -305,7 +306,7 @@ describe("batch responsibility policy", () => {
         id: "operation-fresh",
         display_name: "新操作员",
         position_code: "OPERATION",
-        permission_codes: "transport.batch.assigned.view,order.module.tracking.manage,order.module.exceptions.manage",
+        permission_codes: "transport.batch.assigned.view,order.module.transport.manage,order.module.costs.manage,order.module.exceptions.manage",
       },
       {
         ...common,

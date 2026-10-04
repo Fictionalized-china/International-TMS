@@ -10,10 +10,10 @@ describe("order collaboration notice", () => {
       orderStatus: "submitted",
       currentStepKey: "consignment_approval",
       moduleCode: "consignment",
-      assigneeName: "业务主管账号",
+      assigneeName: "操作主管账号",
     })).toEqual({
-      title: "待业务主管（业务主管账号）审批",
-      progress: "当前进度：委托资料已提交，正在等待业务主管审核。",
+      title: "待操作主管（操作主管账号）审批",
+      progress: "当前进度：业务员已提交委托资料，正在等待操作主管审核。",
     });
   });
 
@@ -22,7 +22,7 @@ describe("order collaboration notice", () => {
       orderStatus: "submitted",
       currentStepKey: "consignment_approval",
       moduleCode: "consignment",
-      assigneeName: "业务主管账号",
+      assigneeName: "操作主管账号",
       currentUserId: "user-supervisor",
       assigneeUserId: "user-supervisor",
     })).toBeNull();

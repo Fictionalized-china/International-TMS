@@ -207,11 +207,17 @@ describe("workflow publication responsibility readiness", () => {
       name: "客服岗",
       permission_codes: "order.view,order.module.costs.manage",
     };
-    const salesperson = {
+    const operation = {
       ...finance,
-      code: "SALES",
-      name: "业务岗",
-      permission_codes: "order.view,quote.manage",
+      code: "OPERATION",
+      name: "操作岗",
+      permission_codes: "order.view,order.module.costs.manage",
+    };
+    const operationSupervisor = {
+      ...finance,
+      code: "OPERATION_SUPERVISOR",
+      name: "操作主管",
+      permission_codes: "order.view,order.module.costs.manage",
     };
 
     expect(validateWorkflowResponsibilityReadiness({
@@ -231,7 +237,8 @@ describe("workflow publication responsibility readiness", () => {
       ],
       positions: [
         customerService,
-        salesperson,
+        operation,
+        operationSupervisor,
         { ...finance, permission_codes: `${finance.permission_codes},billing.expense.approve` },
       ],
       fields: [
@@ -242,7 +249,7 @@ describe("workflow publication responsibility readiness", () => {
     })).toEqual([]);
   });
 
-  it("rejects enabled customer-service signoff when its frozen source or account readiness is invalid", () => {
+  it("requires staffed customer-service and operation owners for the shared confirm field", () => {
     const settlementStep = { id: "settlement-step", step_key: "reconciliation", name: "对账结算", is_active: 1 };
     const field = {
       step_id: settlementStep.id,
@@ -266,13 +273,17 @@ describe("workflow publication responsibility readiness", () => {
       permission_codes: "order.view,order.module.costs.manage",
     };
 
+    const operation = {
+      ...finance,
+      code: "OPERATION",
+      name: "操作岗",
+      permission_codes: "order.view,order.module.costs.manage",
+    };
+
     expect(validateWorkflowResponsibilityReadiness({
-      steps: [settlementStep],
-      modules: [{ ...costsModule, responsibility_position_code: "OPERATION" }],
-      tasks: [],
-      positions: [customerService],
-      fields: [field],
-    }).join("\n")).toContain("对应费用模块责任岗位必须为 CS");
+      steps: [settlementStep], modules: [costsModule], tasks: [],
+      positions: [customerService], fields: [field],
+    }).join("\n")).toContain("岗位 OPERATION 不存在或已停用");
 
     expect(validateWorkflowResponsibilityReadiness({
       steps: [settlementStep], modules: [costsModule], tasks: [], positions: [], fields: [field],
@@ -280,40 +291,23 @@ describe("workflow publication responsibility readiness", () => {
 
     expect(validateWorkflowResponsibilityReadiness({
       steps: [settlementStep], modules: [costsModule], tasks: [],
-      positions: [{ ...customerService, active_member_count: 0 }], fields: [field],
+      positions: [{ ...customerService, active_member_count: 0 }, operation], fields: [field],
     }).join("\n")).toContain("没有可用账号");
 
     expect(validateWorkflowResponsibilityReadiness({
       steps: [settlementStep], modules: [costsModule], tasks: [],
-      positions: [{ ...customerService, permission_codes: "order.view" }], fields: [field],
+      positions: [{ ...customerService, permission_codes: "order.view" }, operation], fields: [field],
     }).join("\n")).toContain("order.module.costs.manage");
-
-    const operation = {
-      ...finance,
-      code: "OPERATION",
-      name: "操作岗",
-      permission_codes: "order.view,order.module.costs.manage",
-    };
-    expect(validateWorkflowResponsibilityReadiness({
-      steps: [settlementStep],
-      modules: [costsModule],
-      tasks: [{
-        ...reviewTask,
-        step_module_id: costsModule.id,
-        task_type: "form",
-        responsibility_position_code: "OPERATION",
-      }],
-      positions: [customerService, operation],
-      fields: [field],
-    }).join("\n")).toContain("不支持由任务覆写其他岗位");
   });
 
-  it("rejects enabled business and finance signoffs without their runtime owners and dedicated permission", () => {
+  it("requires operation, supervisor and finance readiness for settlement approvals", () => {
     const settlementStep = { id: "settlement-step", step_key: "reconciliation", name: "对账结算", is_active: 1 };
-    const review = {
+    const costs = {
       ...reviewModule,
-      id: "finance-review-module",
+      id: "costs-module",
       step_id: settlementStep.id,
+      module_code: "costs",
+      responsibility_position_code: "CS",
     };
     const businessField = {
       step_id: settlementStep.id,
@@ -326,41 +320,18 @@ describe("workflow publication responsibility readiness", () => {
 
     expect(validateWorkflowResponsibilityReadiness({
       steps: [settlementStep], modules: [], tasks: [], positions: [], fields: [businessField],
-    }).join("\n")).toContain("岗位 SALES 不存在或已停用");
+    }).join("\n")).toContain("同节点未启用费用结算模块");
 
     expect(validateWorkflowResponsibilityReadiness({
-      steps: [settlementStep],
-      modules: [{ ...review, responsibility_position_code: "OPERATION" }],
-      tasks: [], positions: [], fields: [financeField],
-    }).join("\n")).toContain("责任岗位必须为 FINANCE_ACCOUNTING");
+      steps: [settlementStep], modules: [costs], tasks: [], positions: [], fields: [businessField],
+    }).join("\n")).toContain("岗位 OPERATION 不存在或已停用");
 
     expect(validateWorkflowResponsibilityReadiness({
-      steps: [settlementStep], modules: [review], tasks: [], positions: [{
-        ...finance,
-        permission_codes: "order.view,order.module.review.manage",
-      }], fields: [financeField],
+      steps: [settlementStep], modules: [costs], tasks: [], positions: [
+        { ...finance, permission_codes: "order.view,order.module.review.manage" },
+        { ...finance, code: "OPERATION_SUPERVISOR", name: "操作主管", permission_codes: "order.view,order.module.costs.manage" },
+      ], fields: [financeField],
     }).join("\n")).toContain("billing.expense.approve");
-
-    const operation = {
-      ...finance,
-      code: "OPERATION",
-      name: "操作岗",
-      permission_codes: "order.view,order.module.review.manage",
-    };
-    expect(validateWorkflowResponsibilityReadiness({
-      steps: [settlementStep],
-      modules: [review],
-      tasks: [{
-        ...reviewTask,
-        step_module_id: review.id,
-        responsibility_position_code: "OPERATION",
-      }],
-      positions: [
-        { ...finance, permission_codes: `${finance.permission_codes},billing.expense.approve` },
-        operation,
-      ],
-      fields: [financeField],
-    }).join("\n")).toContain("不支持由复盘任务覆写其他岗位");
   });
 
   it("rejects finance signoff when review and approval permissions are split across different accounts", () => {
@@ -683,7 +654,7 @@ describe("workflow core step order", () => {
     ];
 
     const issues = validateWorkflowCoreModuleBindings(statusSteps, invalidModules).join("\n");
-    expect(issues).toContain("询价报价");
+    expect(issues).not.toContain("询价报价");
     expect(issues).toContain("委托信息");
     expect(issues).toContain("委托审核");
     expect(issues).toContain("任务分配");

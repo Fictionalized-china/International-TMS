@@ -152,8 +152,6 @@ export function resolveBatchCostAllocationActionPolicy(
     ) fail("最终费用节点与当前节点顺序冲突，费用分摊已阻断");
     else if (row.actual_exit_recorded)
       fail("已登记实际出境，不能再新增、调整或确认配载成本");
-    else if (!row.dispatched)
-      fail("尚未完成装车出库，全部挂载订单出库后才能办理");
 
     const resolvedIssue = issue as { reason: string; visible: boolean } | null;
     reasons[row.order_id] = resolvedIssue?.reason ?? "";

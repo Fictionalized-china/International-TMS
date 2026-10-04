@@ -16,13 +16,14 @@ const row = (overrides: Partial<SettlementTaskPackRow> = {}): SettlementTaskPack
 
 describe("settlement task next action", () => {
   it("sends each signoff role to the same order expense workspace", () => {
-    expect(settlementTaskNextAction(row({ receivable_confirmed: 0 }), "CS").label).toBe("客服确认费用");
-    expect(settlementTaskNextAction(row({ payable_business_reviewed: 0 }), "SALES").label).toBe("业务签核费用");
-    expect(settlementTaskNextAction(row({ payable_finance_reviewed: 0 }), "FINANCE_ACCOUNTING").label).toBe("财务签核费用");
+    expect(settlementTaskNextAction(row({ receivable_confirmed: 0 }), "CS").label).toBe("客服确认应收");
+    expect(settlementTaskNextAction(row({ payable_confirmed: 0 }), "OPERATION").label).toBe("复核应收 / 发起应付");
+    expect(settlementTaskNextAction(row({ payable_business_reviewed: 0 }), "OPERATION_SUPERVISOR").label).toBe("主管审批费用");
+    expect(settlementTaskNextAction(row({ payable_finance_reviewed: 0 }), "FINANCE_ACCOUNTING").label).toBe("财务审批应付");
   });
 
   it("moves from reconciliation through invoice, cash, documents and review", () => {
-    expect(settlementTaskNextAction(row(), "FINANCE_ACCOUNTING").label).toBe("生成对账单");
+    expect(settlementTaskNextAction(row(), "CS").label).toBe("生成对账单");
     expect(settlementTaskNextAction(row({ reconciliation_count: 1, reconciliation_draft_count: 1 }), "FINANCE_ACCOUNTING").label).toBe("确认对账单");
     expect(settlementTaskNextAction(row({ reconciliation_count: 1, reconciliation_confirmed_count: 1 }), "FINANCE_ACCOUNTING").label).toBe("登记发票");
     expect(settlementTaskNextAction(row({ reconciliation_count: 1, reconciliation_confirmed_count: 1, invoiced_amount: 200 }), "CASHIER").label).toBe("登记流水并核销");

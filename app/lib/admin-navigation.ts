@@ -91,6 +91,7 @@ export const adminNavigationPermissionGroups: readonly AdminNavigationPermission
         ...navigationItem("loading", "配载单跟踪", "查看本人可访问的配载单。", "/admin/loading", ["transport.batch.assigned.view"]),
         accessPermissionCodes: [
           "transport.batch.assigned.view",
+          "transport.batch.plan",
           "transport.batch.approve",
           "order.module.loading.manage",
           "order.module.costs.manage",

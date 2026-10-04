@@ -83,10 +83,18 @@ export function expenseDirectionActionPolicies(
   });
 }
 
-export function expenseDirectionActionLabel(action: ExpenseDirectionAction) {
-  if (action === "confirm") return "费用确认";
-  if (action === "business_review") return "业务审核";
-  return "财务审核";
+export function expenseDirectionActionLabel(
+  action: ExpenseDirectionAction,
+  direction: "receivable" | "payable" = "receivable",
+) {
+  if (direction === "receivable") {
+    if (action === "confirm") return "客服确认应收";
+    if (action === "business_review") return "操作复核应收";
+    return "操作主管审批应收";
+  }
+  if (action === "confirm") return "发起应付申请";
+  if (action === "business_review") return "部门主管审批应付";
+  return "财务审批应付";
 }
 
 export function expenseDirectionActionCompleted(
@@ -111,6 +119,7 @@ export function expenseDirectionComplete(
 
 export function expenseDirectionActionAccess(input: {
   action: ExpenseDirectionAction;
+  direction?: "receivable" | "payable";
   currentUserId: string;
   assignedUserId: string | null;
   assignedUserName?: string | null;
@@ -125,11 +134,18 @@ export function expenseDirectionActionAccess(input: {
     return { allowed: true, ownerLabel: "老板或开发者", reason: null };
   }
 
-  const roleName = input.action === "confirm"
-    ? "客服费用负责人"
-    : input.action === "business_review"
-      ? "订单业务员"
-      : "财务审核负责人";
+  const direction = input.direction ?? "receivable";
+  const roleName = direction === "receivable"
+    ? input.action === "confirm"
+      ? "客服费用负责人"
+      : input.action === "business_review"
+        ? "订单操作负责人"
+        : "操作主管"
+    : input.action === "confirm"
+      ? "应付申请人"
+      : input.action === "business_review"
+        ? "部门主管"
+        : "财务审核负责人";
   const ownerLabel = input.assignedUserName
     ? `${roleName} ${input.assignedUserName}`
     : `已分配的${roleName}`;
@@ -148,12 +164,17 @@ export function expenseDirectionActionAccess(input: {
     };
   }
 
-  const qualified = input.action === "confirm"
-    ? input.positionCode === "CS" && input.permissions.includes("order.module.costs.manage")
-    : input.action === "business_review"
-      ? input.positionCode === "SALES"
-      : input.positionCode === "FINANCE_ACCOUNTING" &&
-        input.permissions.includes("billing.expense.approve");
+  const qualified = direction === "receivable"
+    ? input.action === "confirm"
+      ? input.positionCode === "CS" && input.permissions.includes("order.module.costs.manage")
+      : input.action === "business_review"
+        ? input.positionCode === "OPERATION" && input.permissions.includes("order.module.costs.manage")
+        : input.positionCode === "OPERATION_SUPERVISOR" && input.permissions.includes("order.module.costs.manage")
+    : input.action === "confirm"
+      ? ["OPERATION", "SALES"].includes(input.positionCode ?? "") && input.permissions.includes("order.module.costs.manage")
+      : input.action === "business_review"
+        ? input.positionCode === "OPERATION_SUPERVISOR" && input.permissions.includes("order.module.costs.manage")
+        : input.positionCode === "FINANCE_ACCOUNTING" && input.permissions.includes("billing.expense.approve");
   return qualified
     ? { allowed: true, ownerLabel, reason: null }
     : {

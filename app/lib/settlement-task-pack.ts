@@ -57,10 +57,14 @@ export function settlementTaskNextAction(
   row: SettlementTaskPackRow,
   positionCode: string | null | undefined,
 ): SettlementTaskAction {
-  const customerServiceDone = settlementDirectionSignoffComplete(row, "confirmed");
-  const businessDone = settlementDirectionSignoffComplete(row, "business_reviewed");
-  const financeDone = settlementDirectionSignoffComplete(row, "finance_reviewed");
-  const signoffsDone = customerServiceDone && businessDone && financeDone;
+  const receivableCustomerServiceDone = row.receivable_count === 0 || row.receivable_confirmed === 1;
+  const receivableOperationDone = row.receivable_count === 0 || row.receivable_business_reviewed === 1;
+  const receivableSupervisorDone = row.receivable_count === 0 || row.receivable_finance_reviewed === 1;
+  const payableApplicationDone = row.payable_count === 0 || row.payable_confirmed === 1;
+  const payableSupervisorDone = row.payable_count === 0 || row.payable_business_reviewed === 1;
+  const payableFinanceDone = row.payable_count === 0 || row.payable_finance_reviewed === 1;
+  const signoffsDone = receivableCustomerServiceDone && receivableOperationDone &&
+    receivableSupervisorDone && payableApplicationDone && payableSupervisorDone && payableFinanceDone;
 
   if (positionCode === "CASHIER") {
     if (row.reconciliation_confirmed_count > 0 && row.settled_amount + 0.009 < row.expense_amount) {
@@ -69,20 +73,25 @@ export function settlementTaskNextAction(
     return { label: "等待已确认对账单", href: orderModuleHref(row, "expenses"), waiting: true };
   }
 
-  if (positionCode === "CS" && !customerServiceDone) {
-    return { label: "客服确认费用", href: orderModuleHref(row, "expenses"), waiting: false };
+  if (positionCode === "CS" && !receivableCustomerServiceDone) {
+    return { label: "客服确认应收", href: orderModuleHref(row, "expenses"), waiting: false };
   }
-  if (positionCode === "SALES" && !businessDone) {
-    return { label: "业务签核费用", href: orderModuleHref(row, "expenses"), waiting: false };
+  if (positionCode === "OPERATION" && (!receivableOperationDone || !payableApplicationDone)) {
+    return { label: "复核应收 / 发起应付", href: orderModuleHref(row, "expenses"), waiting: false };
   }
-  if (positionCode === "FINANCE_ACCOUNTING" && !financeDone) {
-    return { label: "财务签核费用", href: orderModuleHref(row, "expenses"), waiting: false };
+  if (positionCode === "OPERATION_SUPERVISOR" && (!receivableSupervisorDone || !payableSupervisorDone)) {
+    return { label: "主管审批费用", href: orderModuleHref(row, "expenses"), waiting: false };
+  }
+  if (positionCode === "FINANCE_ACCOUNTING" && !payableFinanceDone) {
+    return { label: "财务审批应付", href: orderModuleHref(row, "expenses"), waiting: false };
   }
   if (!signoffsDone) {
-    return { label: "查看三方签核进度", href: orderModuleHref(row, "expenses"), waiting: true };
+    return { label: "查看应收应付审批进度", href: orderModuleHref(row, "expenses"), waiting: true };
   }
   if (row.reconciliation_count === 0) {
-    return { label: "生成对账单", href: billingHref("pending", row), waiting: false };
+    return positionCode === "CS"
+      ? { label: "生成对账单", href: billingHref("pending", row), waiting: false }
+      : { label: "等待客服生成对账单", href: orderModuleHref(row, "expenses"), waiting: true };
   }
   if (row.reconciliation_draft_count > 0 || row.reconciliation_confirmed_count === 0) {
     return { label: "确认对账单", href: billingHref("reconciliations", row), waiting: false };
