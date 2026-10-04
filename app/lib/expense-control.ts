@@ -88,7 +88,7 @@ export function expenseDirectionActionLabel(
   direction: "receivable" | "payable" = "receivable",
 ) {
   if (direction === "receivable") {
-    if (action === "confirm") return "客服确认应收";
+    if (action === "confirm") return "业务 / 客服发起应收";
     if (action === "business_review") return "操作复核应收";
     return "操作主管审批应收";
   }

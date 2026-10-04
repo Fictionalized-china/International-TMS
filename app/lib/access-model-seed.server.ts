@@ -100,6 +100,8 @@ export function accessModelBootstrapStatements(
     }
     const basePermissions = [...(accessModelRolePermissions[code] ?? []),
       ...(["pos_sales","pos_customer_service"].includes(code) ? ["order.intake.manage"] : []),
+      ...(["boss","developer","pos_sales","pos_customer_service","pos_operation","pos_operation_supervisor","pos_business_route","pos_finance"].includes(code)?["settlement.signature.manage"]:[]),
+      ...(["boss","developer","pos_finance"].includes(code)?["settlement.offline_approval.record"]:[]),
       ...(code === "developer" ? ["workflow.process_policy.manage"] : []),
     ];
     const permissions = normalizeAdminNavigationPermissions([

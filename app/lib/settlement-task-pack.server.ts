@@ -2,6 +2,7 @@ import { settlementOrderScopeSql } from "./settlement-workbench-access.server";
 import type { SettlementWorkbenchActor } from "./settlement-workbench-access";
 import type { SettlementPage, SettlementPageQuery } from "./settlement-workbench-pages.server";
 import type { SettlementTaskPackRow } from "./settlement-task-pack";
+import { loadLockedWorkflowStageContext } from "./workflow-instance-stage-gate.server";
 
 function candidateSql(scopeSql: string, filtered: boolean) {
   return `FROM transport_orders o
@@ -69,5 +70,10 @@ export async function loadSettlementTaskPackPage(
       o.updated_at DESC LIMIT ? OFFSET ?`)
     .bind(...bound.values, query.pageSize, (page - 1) * query.pageSize)
     .all<SettlementTaskPackRow>();
-  return { items: rows.results, page, pageCount, pageSize: query.pageSize, total };
+  const items=[];
+  for(const row of rows.results) {
+    const context=await loadLockedWorkflowStageContext(db,actor.organizationId,row.id,"costs");
+    items.push({...row,required_signoff_fields:context.locked?context.fields.filter(f=>f.moduleCode==="costs"&&f.isActive&&f.isRequired).map(f=>f.fieldKey):undefined});
+  }
+  return { items, page, pageCount, pageSize: query.pageSize, total };
 }

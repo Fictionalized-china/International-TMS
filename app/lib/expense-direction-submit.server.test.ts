@@ -23,6 +23,15 @@ const input=()=>({db,organizationId:"org",orderId:"order",direction:"receivable"
   userId:"cs",notes:null,now:"2026-10-04T00:00:00Z",refresh:vi.fn(async()=>{})});
 
 describe("expense signature atomic commit and retry",()=>{
+  it("enforces prerequisites in the atomic update and confirms amounts only at final approval",async()=>{
+    const request=input(),required=["confirm","business_review","finance_review"] as const;
+    expect((await persistExpenseDirectionAction({...request,action:"finance_review",previousActions:["confirm","business_review"],confirmFeesWhenAllActions:required})).applied).toBe(false);
+    await persistExpenseDirectionAction({...request,confirmFeesWhenAllActions:required});
+    expect(database.prepare("SELECT stage FROM business_expenses").get()?.stage).toBe("estimated");
+    await persistExpenseDirectionAction({...request,action:"business_review",previousActions:["confirm"],confirmFeesWhenAllActions:required});
+    await persistExpenseDirectionAction({...request,action:"finance_review",previousActions:["confirm","business_review"],confirmFeesWhenAllActions:required});
+    expect(database.prepare("SELECT stage FROM business_expenses").get()?.stage).toBe("confirmed");
+  });
   it("retains a saved signature and confirmed expenses when synchronization fails, then clears the marker on retry",async()=>{
     const request=input();request.refresh.mockRejectedValue(new Error("sync unavailable"));
     expect(await persistExpenseDirectionAction(request)).toEqual({applied:true,syncPending:true});

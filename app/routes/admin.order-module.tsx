@@ -15,6 +15,7 @@ import { validatePhone, valueOf } from "../lib/validation";
 import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 import { writeAudit } from "../lib/audit.server";
 import { persistExpenseDirectionAction, retryOrderSettlementSync } from "../lib/expense-direction-submit.server";
+import { submitMeetingSignature,loadMeetingSettlement,meetingSignatureAccess } from "../lib/meeting-settlement.server";
 import { loadBusinessProcessPolicy } from "../lib/business-process-policy.server";
 import { policyPositions } from "../lib/business-process-policy";
 import { synchronizeOrderDocumentsModuleStatus } from "../lib/documents-module-status.server";
@@ -1482,6 +1483,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
         },
     canViewExpenseSummary,
     processPolicy: await loadBusinessProcessPolicy(current.organizationId),
+    meetingSettlement: await loadMeetingSettlement(env.DB,current.organizationId,orderId),
     canViewFullExpenseDetails,
     access: {
       ...baseAccess,
@@ -1582,6 +1584,14 @@ export async function action({ request, params }: Route.ActionArgs) {
     }>();
   if (!order) return { formError: "订单不存在" };
   const processPolicy = await loadBusinessProcessPolicy(current.organizationId);
+  if(isExpenseDirectionControlAction) {
+    const direction=valueOf(form,"direction"),action=valueOf(form,"controlAction");
+    if(!["receivable","payable"].includes(direction)||!["confirm","business_review","finance_review"].includes(action)) return {formError:"签核参数无效"};
+    try {
+      const result=await submitMeetingSignature(env.DB,{current,orderId,direction:direction as "receivable"|"payable",action:action as ExpenseDirectionAction,notes:valueOf(form,"notes"),refresh:()=>refreshOrderSettlementState(current.organizationId,orderId,new Date().toISOString())});
+      return {actionKind:"expense_direction_control",success:`签核已保存${result.syncPending?"，结算状态待同步":""}`};
+    }catch(error){return {formError:error instanceof Error?error.message:"签核失败"};}
+  }
   await ensureOrderModules(current.organizationId, orderId);
   const currentModule = await loadOrderModuleActionScope(
     current.organizationId,
@@ -7521,6 +7531,7 @@ function ModuleBusinessData({
           </div>
         )}
         <div className="module-toolbar">
+          <Link className="primary" to={`/admin/settlement-approvals?q=${encodeURIComponent(data.order.order_number)}`}>出境后对账签核 / 付款审批</Link>
           {manage && (
             <details className="expandable module-create-dialog">
               <summary>新增费用</summary>
@@ -7529,7 +7540,7 @@ function ModuleBusinessData({
           )}
           <span className="status-pill">
             {activeActionPolicies.length
-              ? `并行签核 · ${requiredActionCount} 项必办${optionalActionCount ? ` · ${optionalActionCount} 项选办` : ""}`
+              ? `费用签核 · ${requiredActionCount} 项必办${optionalActionCount ? ` · ${optionalActionCount} 项选办` : ""}`
               : "当前工作流无需费用签核"}
           </span>
         </div>
@@ -7558,16 +7569,8 @@ function ModuleBusinessData({
                   : action === "business_review"
                     ? { id: assignmentModule?.assignee_user_id || null, name: assignmentModule?.assignee_name || null }
                     : { id: reviewModule?.assignee_user_id || null, name: reviewModule?.assignee_name || null };
-              return [action, expenseDirectionActionAccess({
-                action,
-                direction,
-                currentUserId: data.current.userId,
-                assignedUserId: assignee.id,
-                assignedUserName: assignee.name,
-                positionCode: data.current.positionCode,
-                roleCodes: data.current.roleCodes,
-                permissions: data.current.permissions,
-              })];
+              const reason=meetingSignatureAccess(data.meetingSettlement,data.current,direction,action);
+              return [action,{allowed:!reason,reason,ownerLabel:assignee.name??"本单配置责任人"}];
             }),
           ) as Record<ExpenseDirectionAction, ExpenseDirectionActionAccess>;
           return (
@@ -9201,9 +9204,9 @@ function ExpenseDirectionWorkflow({
     <div className="expense-direction-flow">
       <div className="expense-parallel-heading">
         <div>
-          <strong>并行签核</strong>
+          <strong>费用签核</strong>
           <span>
-            无先后顺序；{requiredActionPolicies.length} 项必办
+            按流程策略办理，出境后审批请使用上方独立入口；{requiredActionPolicies.length} 项必办
             {optionalActionPolicies.length
               ? `，${optionalActionPolicies.length} 项选办且不阻断结算`
               : ""}。

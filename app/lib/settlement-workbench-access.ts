@@ -43,6 +43,7 @@ export type SettlementOrderActionInput = {
   orderId: string;
   assignedToActor: boolean;
   workflow: LockedWorkflowStageContext;
+  parallelSettlementOpen?: boolean;
 };
 
 const mutationPermission: Record<SettlementWorkbenchAction, string> = {
@@ -239,7 +240,7 @@ export function resolveSettlementOrderActionAccess(input: SettlementOrderActionI
     });
   }
   const current = currentMatches[0];
-  if (current.stepKey !== target.stepKey) {
+  if (current.stepKey !== target.stepKey && !input.parallelSettlementOpen) {
     if (current.sortOrder === target.sortOrder) {
       return invalidFrozenConfiguration({
         action: input.action,

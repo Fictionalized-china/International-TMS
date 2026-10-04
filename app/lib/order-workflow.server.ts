@@ -20,6 +20,7 @@ import { loadOrderDispatchResponsibilityPolicy } from "./order-assignment-manife
 import { loadMissingOrderIntakeFees } from "./order-intake-fees.server";
 import { loadBusinessProcessPolicy } from "./business-process-policy.server";
 import { policyEnabled, policyPositions } from "./business-process-policy";
+import { loadActivePositionAccessProfile } from "./position-access-profile.server";
 
 export type OrderWorkflowTransition = {
   action_code: string;
@@ -119,6 +120,10 @@ export async function validateOrderWorkflowAction(input: {
      LIMIT 1`,
   ).bind(input.organizationId,input.actorUserId).first<{code:string}>();
   const processPolicy = await loadBusinessProcessPolicy(input.organizationId);
+  if(["submit","cancel_draft"].includes(input.actionCode)) {
+    const profile=await loadActivePositionAccessProfile(env.DB,input.organizationId,input.actorUserId);
+    if(!profile?.permissions.includes("order.intake.manage")) return {ok:false as const,reason:"当前账号录单权限已撤销",order,transition};
+  }
   const configurableActions = ["submit", "cancel_draft", "approve", "reject", "cancel_submitted", "dispatch", "cancel_confirmed"];
   if (input.actionCode === "submit" && actorPosition?.code === "CS" && policyEnabled(processPolicy, "order.cs_requires_customer_flag")) {
     const eligible = await env.DB.prepare("SELECT 1 FROM transport_orders o JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id WHERE o.id=? AND o.organization_id=? AND c.cs_order_entry_enabled=1 AND c.status='active'").bind(input.orderId,input.organizationId).first();

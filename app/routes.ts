@@ -75,6 +75,7 @@ export default [
     route("admin/orders/:orderId", "routes/admin.order-detail.tsx"),
     route("admin/shipments", "routes/admin.shipments.tsx"),
     route("admin/billing", "routes/admin.billing.tsx"),
+    route("admin/settlement-approvals", "routes/admin.settlement-approvals.tsx"),
     route("admin/workflow", "routes/admin.workflow.tsx"),
     route("admin/warehouses", "routes/admin.warehouses.tsx"),
     route("admin/departments", "routes/admin.departments.tsx"),

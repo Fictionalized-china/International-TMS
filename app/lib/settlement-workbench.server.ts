@@ -3,6 +3,10 @@ import{refreshOrderCompletionStatus}from"./order-review.server";
 import{syncCostsModuleStatus,syncOrderWorkflowSnapshot}from"./order-modules.server";
 import{refreshSettlementAffectedOrders}from"./settlement-order-refresh";
 import{chunkD1Rows,chunkD1Values,d1Placeholders}from"./d1-bindings";
+import{assertMeetingSignoffsComplete}from"./meeting-settlement.server";
+import{loadBusinessProcessPolicy}from"./business-process-policy.server";
+import{policyPositions}from"./business-process-policy";
+import{loadActivePositionAccessProfile}from"./position-access-profile.server";
 
 export type SettlementExpense={
   id:string;order_id:string;order_number:string;customer_name:string;direction:"receivable"|"payable";
@@ -73,6 +77,11 @@ export async function createReconciliation(db:D1Database,input:{organizationId:s
   if(input.direction==="receivable"&&rows.some(row=>row.customer_id!==customerId))throw new Error("客户应收对账不能跨客户合并");
   if(input.direction==="payable"&&rows.some(row=>(row.counterparty_name||"").trim()!==counterparty))throw new Error("供应商应付对账不能跨往来单位合并");
   if(rows.some(row=>!Number.isFinite(row.amount)||row.amount<=0))throw new Error("所选费用中存在金额为 0 的记录，请先完善费用金额再发起对账");
+  await assertMeetingSignoffsComplete(db,input.organizationId,rows.map(row=>row.order_id),input.direction);
+  if(input.direction==="receivable") {
+    const policy=await loadBusinessProcessPolicy(input.organizationId,db),actor=await loadActivePositionAccessProfile(db,input.organizationId,input.userId);
+    if(!actor||!policyPositions(policy,"receivable.statement_positions").includes(actor.positionCode)) throw new Error("客户应收对账单须由策略配置的生成岗位办理");
+  }
   const org=await db.prepare("SELECT name FROM organizations WHERE id=?").bind(input.organizationId).first<{name:string}>();
   if(!org)throw new Error("组织信息无效");
   const id=crypto.randomUUID(),number=settlementDocumentNumber(input.direction==="receivable"?"REC":"PAY",new Date(input.now)),total=rows.reduce((sum,row)=>sum+row.amount,0);
@@ -141,14 +150,27 @@ export async function recordSettlementInvoice(db:D1Database,input:{organizationI
   return{id,recordNumber};
 }
 
-export async function recordCashTransaction(db:D1Database,input:{organizationId:string;direction:"receipt"|"payment";counterpartyName:string;currency:string;amount:number;occurredOn:string;settlementEntity:string;accountName:string;handledByUserId:string;evidenceReference?:string;notes?:string;userId:string;now:string}&SettlementMutationGuard){
+export async function recordCashTransaction(db:D1Database,input:{organizationId:string;direction:"receipt"|"payment";counterpartyName:string;currency:string;amount:number;occurredOn:string;settlementEntity:string;accountName:string;handledByUserId:string;evidenceReference?:string;notes?:string;paymentStatementNumber?:string;userId:string;now:string}&SettlementMutationGuard){
   if(!input.counterpartyName||!input.currency||!input.occurredOn||!input.settlementEntity||!input.accountName||!input.handledByUserId)throw new Error("请完整填写往来单位、币种、日期、所属公司、账户和经办人");
   if(!Number.isFinite(input.amount)||input.amount<=0)throw new Error("收付款金额必须大于 0");
   const user=await db.prepare("SELECT 1 FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.user_id=? AND m.organization_id=? AND m.status='active' AND u.status='active'").bind(input.handledByUserId,input.organizationId).first();
   if(!user)throw new Error("经办人无效");
+  let paymentReconciliationId:string|null=null;
+  if(input.direction==="payment") {
+    const policy=await loadBusinessProcessPolicy(input.organizationId,db);
+    if(policy["payable.offline_approval_required"]==="1" || input.paymentStatementNumber) {
+      const statement=await db.prepare("SELECT id,counterparty_name,currency,total_amount FROM settlement_reconciliations WHERE organization_id=? AND document_number=? AND direction='payable' AND status='confirmed'").bind(input.organizationId,input.paymentStatementNumber??"").first<{id:string;counterparty_name:string;currency:string;total_amount:number}>();
+      if(!statement) throw new Error("供应商付款须关联已确认的应付对账单编号");
+      if(statement.counterparty_name!==input.counterpartyName || statement.currency!==input.currency.toUpperCase()) throw new Error("付款往来单位、币种与付款申请不一致");
+      await assertMeetingSignoffsComplete(db,input.organizationId,await loadReconciliationOrderIds(db,input.organizationId,statement.id),"payable",true);
+      const paid=await db.prepare("SELECT COALESCE(SUM(amount),0) amount FROM settlement_cash_transactions WHERE organization_id=? AND payment_reconciliation_id=? AND status!='void'").bind(input.organizationId,statement.id).first<{amount:number}>();
+      if(input.amount+Number(paid?.amount??0)>Number(statement.total_amount)+0.009) throw new Error("登记付款总额超过已审批的付款申请金额");
+      paymentReconciliationId=statement.id;
+    }
+  }
   const id=crypto.randomUUID(),number=settlementDocumentNumber("CASH",new Date(input.now));
   await input.assertCanMutate();
-  await db.prepare(`INSERT INTO settlement_cash_transactions(id,organization_id,transaction_number,direction,counterparty_name,currency,amount,occurred_on,settlement_entity,account_name,handled_by_user_id,evidence_reference,notes,status,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'unallocated',?,?,?)`).bind(id,input.organizationId,number,input.direction,input.counterpartyName,input.currency.toUpperCase(),input.amount,input.occurredOn,input.settlementEntity,input.accountName,input.handledByUserId,input.evidenceReference||null,input.notes||null,input.userId,input.now,input.now).run();
+  await db.prepare(`INSERT INTO settlement_cash_transactions(id,organization_id,transaction_number,direction,counterparty_name,currency,amount,occurred_on,settlement_entity,account_name,handled_by_user_id,evidence_reference,notes,status,created_by_user_id,created_at,updated_at,payment_reconciliation_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'unallocated',?,?,?,?)`).bind(id,input.organizationId,number,input.direction,input.counterpartyName,input.currency.toUpperCase(),input.amount,input.occurredOn,input.settlementEntity,input.accountName,input.handledByUserId,input.evidenceReference||null,input.notes||null,input.userId,input.now,input.now,paymentReconciliationId).run();
   return{id,number};
 }
 
@@ -163,6 +185,7 @@ export async function allocateCashTransaction(db:D1Database,input:{organizationI
   if(cash.counterparty_name!==reconciliation.counterparty_name||cash.currency!==reconciliation.currency)throw new Error("只能核销同一往来单位、同一币种的费用");
   if(input.amount-cash.remaining>0.009)throw new Error("核销金额超过流水未分配余额");
   const lines=await loadReconciliationOutstanding(db,input.organizationId,input.reconciliationId,"cash");
+  if(reconciliation.direction==="payable") await assertMeetingSignoffsComplete(db,input.organizationId,await loadReconciliationOrderIds(db,input.organizationId,input.reconciliationId),"payable",true);
   const allocations=allocateToOutstanding(lines.map(line=>({id:line.expense_id,outstanding:line.outstanding})),input.amount);
   const allocationStatements=chunkD1Rows(allocations,8).map(chunk=>db.prepare(`INSERT INTO settlement_cash_allocations(id,organization_id,cash_transaction_id,reconciliation_id,expense_id,amount,created_by_user_id,created_at) VALUES ${chunk.map(()=>"(?,?,?,?,?,?,?,?)").join(",")}`).bind(...chunk.flatMap(item=>[crypto.randomUUID(),input.organizationId,input.transactionId,input.reconciliationId,item.id,item.amount,input.userId,input.now])));
   await input.assertCanMutate();

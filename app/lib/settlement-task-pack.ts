@@ -26,6 +26,7 @@ export type SettlementTaskPackRow = {
   review_snapshot_count: number;
   review_conclusion: string | null;
   updated_at: string;
+  required_signoff_fields?:readonly string[];
 };
 
 export type SettlementTaskAction = {
@@ -38,6 +39,8 @@ export function settlementDirectionSignoffComplete(
   row: SettlementTaskPackRow,
   kind: "confirmed" | "business_reviewed" | "finance_reviewed",
 ) {
+  const key={confirmed:"customer_service_confirmation",business_reviewed:"business_review",finance_reviewed:"finance_review"}[kind];
+  if(row.required_signoff_fields && !row.required_signoff_fields.includes(key)) return true;
   const receivable = row.receivable_count === 0 || row[`receivable_${kind}`] === 1;
   const payable = row.payable_count === 0 || row[`payable_${kind}`] === 1;
   return receivable && payable;
@@ -57,12 +60,13 @@ export function settlementTaskNextAction(
   row: SettlementTaskPackRow,
   positionCode: string | null | undefined,
 ): SettlementTaskAction {
-  const receivableCustomerServiceDone = row.receivable_count === 0 || row.receivable_confirmed === 1;
-  const receivableOperationDone = row.receivable_count === 0 || row.receivable_business_reviewed === 1;
-  const receivableSupervisorDone = row.receivable_count === 0 || row.receivable_finance_reviewed === 1;
-  const payableApplicationDone = row.payable_count === 0 || row.payable_confirmed === 1;
-  const payableSupervisorDone = row.payable_count === 0 || row.payable_business_reviewed === 1;
-  const payableFinanceDone = row.payable_count === 0 || row.payable_finance_reviewed === 1;
+  const required=(key:string)=>!row.required_signoff_fields||row.required_signoff_fields.includes(key);
+  const receivableCustomerServiceDone = !required("customer_service_confirmation")||row.receivable_count === 0 || row.receivable_confirmed === 1;
+  const receivableOperationDone = !required("business_review")||row.receivable_count === 0 || row.receivable_business_reviewed === 1;
+  const receivableSupervisorDone = !required("finance_review")||row.receivable_count === 0 || row.receivable_finance_reviewed === 1;
+  const payableApplicationDone = !required("customer_service_confirmation")||row.payable_count === 0 || row.payable_confirmed === 1;
+  const payableSupervisorDone = !required("business_review")||row.payable_count === 0 || row.payable_business_reviewed === 1;
+  const payableFinanceDone = !required("finance_review")||row.payable_count === 0 || row.payable_finance_reviewed === 1;
   const signoffsDone = receivableCustomerServiceDone && receivableOperationDone &&
     receivableSupervisorDone && payableApplicationDone && payableSupervisorDone && payableFinanceDone;
 

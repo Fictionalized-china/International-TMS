@@ -289,6 +289,7 @@ export async function action({ request }: Route.ActionArgs) {
         handledByUserId: valueOf(form, "handledByUserId"),
         evidenceReference: valueOf(form, "evidenceReference"),
         notes: valueOf(form, "cashNotes"),
+        paymentStatementNumber:valueOf(form,"paymentStatementNumber"),
         userId: current.userId,
         assertCanMutate: () => assertRecordCashAllowed(current),
         now,
@@ -488,7 +489,7 @@ function SettlementTaskPackPage({ view, page, positionCode }: {
         return <tr key={row.id}>
           <td><Link className="entity-number-link" aria-label={`查看订单 ${row.order_number}`} to={orderDetailQueueHref(row.id,queueContext)}>{row.order_number}</Link><small>{row.customer_name} · {row.business_type === "ltl" ? "拼车" : "整车"}</small></td>
           <td><strong>{row.expense_count} 条</strong><small>应收 {row.receivable_count} · 应付 {row.payable_count}</small></td>
-          <td><div className="settlement-signoff-line"><StatusMark done={csDone} label="客服"/><StatusMark done={businessDone} label="业务"/><StatusMark done={financeDone} label="财务"/></div></td>
+          <td><div className="settlement-signoff-line"><StatusMark done={csDone} label="发起"/><StatusMark done={businessDone} label="复核"/><StatusMark done={financeDone} label="审批"/></div><Link to={`/admin/settlement-approvals?q=${encodeURIComponent(row.order_number)}`}>查看按方向签核</Link></td>
           <td><strong>{row.reconciliation_count ? `${row.reconciliation_confirmed_count} 已确认` : "未生成"}</strong><small>{row.reconciliation_draft_count ? `${row.reconciliation_draft_count} 张草稿待确认` : "无待确认草稿"}</small></td>
           <td><strong>发票 {moneyProgress(row.invoiced_amount, row.expense_amount)}</strong><small>核销 {moneyProgress(row.settled_amount, row.expense_amount)}</small></td>
           <td><strong>账单 {row.billing_document_count ? "已归集" : "待归集"} · 凭证 {row.payment_receipt_count ? "已归集" : "待归集"}</strong><small>{row.review_conclusion ? "复盘已完成" : row.review_snapshot_count ? "复盘待确认" : "尚未复盘"}</small></td>
@@ -919,6 +920,7 @@ function CashEntryForm({ users, organizationName, busy }: {
       <Text name="accountName" label="银行 / 现金账户" required />
       <Sel name="handledByUserId" label="经办人" items={users.map((item) => [item.id, item.display_name])} />
       <Text name="evidenceReference" label="凭证附件 / 编号" />
+      <Text name="paymentStatementNumber" label="供应商付款关联应付对账单编号（收款留空）" />
       <label className="field settlement-cash-notes"><span>备注</span><textarea name="cashNotes" rows={2} /></label>
       <button className="primary" disabled={busy}>登记收付款流水</button>
     </Form>

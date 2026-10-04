@@ -12,6 +12,9 @@ import {
 } from "./settlement-workbench-access";
 import { loadLockedWorkflowStageContext } from "./workflow-instance-stage-gate.server";
 import { loadActivePositionAccessProfile } from "./position-access-profile.server";
+import { loadBusinessProcessPolicy } from "./business-process-policy.server";
+import { policyEnabled } from "./business-process-policy";
+import { actualExportSql } from "./meeting-settlement.server";
 
 export type SettlementAccessSource =
   | { kind: "order_ids"; ids: readonly string[] }
@@ -130,10 +133,13 @@ export async function loadSettlementWorkbenchActionAccess(
   }
 
   const workflows: SettlementOrderActionInput[] = [];
+  const processPolicy=await loadBusinessProcessPolicy(input.actor.organizationId,db);
   for (const orderId of orderIds) {
+    const exported=policyEnabled(processPolicy,"settlement.after_actual_export")?await db.prepare(`SELECT 1 FROM transport_orders o WHERE o.id=? AND o.organization_id=? AND o.status='in_execution' AND ${actualExportSql()}`).bind(orderId,input.actor.organizationId).first():null;
     workflows.push({
       orderId,
       assignedToActor: scopeByOrder.get(orderId) === true,
+      parallelSettlementOpen:Boolean(exported),
       workflow: await loadLockedWorkflowStageContext(
         db,
         input.actor.organizationId,

@@ -1,0 +1,2 @@
+ALTER TABLE settlement_cash_transactions ADD COLUMN payment_reconciliation_id TEXT;
+CREATE INDEX cash_payment_application ON settlement_cash_transactions(organization_id,payment_reconciliation_id);
