@@ -1,6 +1,7 @@
 /** Cross-module business rules. Node/field hot-plug remains owned by workflows. */
 export const businessProcessPolicyDefinitions = [
-  { key: "order.submit_positions", label: "录单提交岗位", group: "录单与审核", kind: "positions", defaultValue: "SALES,CS" },
+  { key: "order.submit_positions", label: "录单提交岗位（含紧急协助）", group: "录单与审核", kind: "positions", defaultValue: "SALES,CS,HR_ADMIN" },
+  { key: "order.hr_emergency_enabled", label: "允许人事紧急协助录单（必须记录原因）", group: "录单与审核", kind: "boolean", defaultValue: "1" },
   { key: "order.approve_positions", label: "订单审核岗位", group: "录单与审核", kind: "positions", defaultValue: "OPERATION_SUPERVISOR" },
   { key: "order.cs_requires_customer_flag", label: "客服仅代录已配置客户", group: "录单与审核", kind: "boolean", defaultValue: "1" },
   { key: "order.ftl_required_fees", label: "整车开单必录费用代码", group: "录单与审核", kind: "fees", defaultValue: "pickup,handling,storage,customs_port,overseas_driver,transit_customs" },
@@ -14,6 +15,8 @@ export const businessProcessPolicyDefinitions = [
   { key: "dispatch.handler_positions", label: "找车办理岗位", group: "运踪与商务调度", kind: "positions", defaultValue: "BUSINESS_ROUTE" },
   { key: "dispatch.automatic", label: "资料齐全时自动生成找车任务", group: "运踪与商务调度", kind: "boolean", defaultValue: "1" },
   { key: "dispatch.required_order_fields", label: "找车前必备订单字段", group: "运踪与商务调度", kind: "fields", defaultValue: "shipper_name,shipper_contact,shipper_phone,origin_city,origin_address,consignee_name,destination_city,destination_address,cargo_description,exit_port" },
+  { key: "loading.automatic_cost_allocation", label: "生成配载单时自动关联子订单应付成本", group: "运踪与商务调度", kind: "boolean", defaultValue: "1" },
+  { key: "tracking.alerts_enabled", label: "自动向业务与操作发送时效预警", group: "运踪与商务调度", kind: "boolean", defaultValue: "1" },
   { key: "settlement.after_actual_export", label: "实际出境后开放对账签核", group: "应收应付", kind: "boolean", defaultValue: "1" },
   { key: "settlement.sequential", label: "费用签核必须按顺序办理", group: "应收应付", kind: "boolean", defaultValue: "1" },
   { key: "receivable.initiator_positions", label: "应收发起岗位", group: "应收应付", kind: "positions", defaultValue: "SALES,CS" },

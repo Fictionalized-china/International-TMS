@@ -36,6 +36,10 @@ export async function persistExpenseDirectionAction(input: {
       AND EXISTS(SELECT 1 FROM order_expense_direction_controls c
         WHERE c.organization_id=? AND c.order_id=? AND c.direction=? ${input.confirmFeesWhenAllActions?input.confirmFeesWhenAllActions.map(action=>`AND c.${columns[action]}=1`).join(" "):"AND c.confirmed=1"})`)
     .bind(now,organizationId,orderId,direction,organizationId,orderId,direction));
+  const completedColumn=columns[action];
+  statements.push(db.prepare(`INSERT INTO audit_logs(id,organization_id,actor_user_id,action,resource_type,resource_id,outcome,metadata_json,created_at)
+    SELECT ?,?,?,?,'transport_order',?,'success',?,? WHERE EXISTS(SELECT 1 FROM order_expense_direction_controls c WHERE c.organization_id=? AND c.order_id=? AND c.direction=? AND c.${completedColumn}=1 AND c.updated_at=?)`)
+    .bind(revision,organizationId,userId,`settlement.${direction}.${action}`,orderId,JSON.stringify({direction,action}),now,organizationId,orderId,direction,now));
   statements.push(db.prepare(`INSERT INTO order_settlement_sync_requests(organization_id,order_id,revision,updated_at)
     VALUES(?,?,?,?) ON CONFLICT(organization_id,order_id) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at`)
     .bind(organizationId,orderId,revision,now));

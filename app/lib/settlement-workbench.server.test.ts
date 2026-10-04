@@ -166,6 +166,7 @@ describe("settlement mutation critical guards", () => {
       organizationId: "org-1",
       transactionId: "cash-1",
       reconciliationId: "reconciliation-1",
+      requestId:'allocation-request-00001',
       amount: 25,
       userId: "cashier-1",
       now: "2026-09-06T00:00:00.000Z",

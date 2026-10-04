@@ -120,6 +120,7 @@ export async function validateOrderWorkflowAction(input: {
      LIMIT 1`,
   ).bind(input.organizationId,input.actorUserId).first<{code:string}>();
   const processPolicy = await loadBusinessProcessPolicy(input.organizationId);
+  if(input.actionCode==='submit'&&actorPosition?.code==='HR_ADMIN'&&!policyEnabled(processPolicy,'order.hr_emergency_enabled'))return {ok:false as const,reason:'人事紧急协助录单已停用',order,transition};
   if(["submit","cancel_draft"].includes(input.actionCode)) {
     const profile=await loadActivePositionAccessProfile(env.DB,input.organizationId,input.actorUserId);
     if(!profile?.permissions.includes("order.intake.manage")) return {ok:false as const,reason:"当前账号录单权限已撤销",order,transition};

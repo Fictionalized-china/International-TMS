@@ -105,7 +105,7 @@ export async function fulfillDispatchTask(db:D1Database,input:{current:SessionUs
   const now=new Date().toISOString();
   const owners=await db.prepare(`SELECT DISTINCT user_id FROM (SELECT requested_by_user_id user_id FROM order_dispatch_requests WHERE id=? AND organization_id=?
     UNION SELECT operation_supervisor_user_id FROM transport_orders WHERE id=? AND organization_id=?
-    UNION SELECT assignee_user_id FROM order_module_instances WHERE order_id=? AND organization_id=? AND module_code='transport') WHERE user_id IS NOT NULL`)
+    UNION SELECT assignee_user_id FROM order_module_instances WHERE order_id=? AND organization_id=? AND module_code='transport') dispatch_owners WHERE user_id IS NOT NULL`)
     .bind(request.id,current.organizationId,input.orderId,current.organizationId,input.orderId,current.organizationId).all<{user_id:string}>();
   const results=await db.batch([
     db.prepare(`UPDATE order_dispatch_requests SET status='fulfilled',carrier_id=?,vehicle_id=?,driver_id=?,freight_amount=?,freight_currency=?,exchange_rate=?,resource_notes=?,fulfilled_by_user_id=?,fulfilled_at=?,updated_at=?

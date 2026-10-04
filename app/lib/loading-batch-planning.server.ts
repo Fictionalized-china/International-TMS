@@ -31,6 +31,10 @@ import {
 } from "./batch-responsibility";
 import { loadOrderAssignmentManifest } from "./order-assignment-manifest.server";
 import { allocateCost, allocationDensity, recommendAllocationMethod, type AllocationMethod } from "./cost-allocation";
+import { loadBusinessProcessPolicy } from "./business-process-policy.server";
+import { policyEnabled } from "./business-process-policy";
+import { loadOperationalRules } from "./operational-rules.server";
+import { plannedCostIntegrationStatements } from "./planning-cost-integration.server";
 
 export type LoadingPlanningCandidate = {
   order_id: string;
@@ -116,8 +120,7 @@ export async function loadLoadingPlanningCandidates(current: SessionUser) {
   const visibility = orderVisibilitySql(current, "o");
   const result = await env.DB.prepare(
     `${planningCandidateSelect} AND ${visibility.sql}
-     ORDER BY w.name,ow.name,o.destination_country,o.destination_state,o.destination_city,o.order_number
-     LIMIT 300`,
+     ORDER BY w.name,ow.name,o.destination_country,o.destination_state,o.destination_city,o.order_number`,
   ).bind(current.organizationId, ...visibility.values).all<LoadingPlanningCandidate>();
   return result.results;
 }
@@ -148,6 +151,12 @@ export async function loadLoadingPlanningOptions(organizationId: string) {
     operationMembers: eligibleBatchInitialResponsibilityCandidates(members, emptyRestrictions, "operation"),
     documentMembers: eligibleBatchInitialResponsibilityCandidates(members, emptyRestrictions, "document"),
   };
+}
+
+export async function loadPlannedResourceFeedback(current:SessionUser) {
+  if(!current.permissions.includes('dispatch.cost.view'))return [];
+  const scope=orderVisibilitySql(current,'o');
+  return (await env.DB.prepare(`SELECT d.id,d.order_id,o.order_number,d.carrier_id,d.vehicle_id,d.driver_id,d.freight_amount,d.freight_currency,d.exchange_rate FROM order_dispatch_requests d JOIN transport_orders o ON o.id=d.order_id AND o.organization_id=d.organization_id WHERE d.organization_id=? AND d.status='fulfilled' AND o.status='in_execution' AND ${scope.sql}`).bind(current.organizationId,...scope.values).all<{id:string;order_id:string;order_number:string;carrier_id:string;vehicle_id:string;driver_id:string;freight_amount:number;freight_currency:string;exchange_rate:number}>()).results;
 }
 
 async function loadBatchResponsibilityTransferTargets(input: {
@@ -343,8 +352,10 @@ export async function createOperationPlannedBatch(input: PlanningInput) {
   const responsibilityRevision = crypto.randomUUID();
   const totalWeight = candidates.reduce((sum, row) => sum + Number(row.weight_kg || 0), 0);
   const totalVolume = candidates.reduce((sum, row) => sum + Number(row.volume_cbm || 0), 0);
+  const [processPolicy,operationalRules]=await Promise.all([loadBusinessProcessPolicy(input.current.organizationId,env.DB),loadOperationalRules(input.current.organizationId,env.DB)]);
+  const ratio=operationalRules['loading.volume_weight_ratio_kg_per_cbm'];
   const allocationMethod = input.costAllocationMethod === "auto"
-    ? recommendAllocationMethod("OVERSEAS_TRANSPORT", totalWeight, totalVolume, 300)
+    ? recommendAllocationMethod("OVERSEAS_TRANSPORT", totalWeight, totalVolume, ratio)
     : input.costAllocationMethod;
   if (!["weight", "volume", "equal"].includes(allocationMethod)) {
     throw new Error("成本分摊方式无效，请刷新后重试");
@@ -354,6 +365,7 @@ export async function createOperationPlannedBatch(input: PlanningInput) {
     actualWeightKg: Number(row.weight_kg || 0),
     actualVolumeCbm: Number(row.volume_cbm || 0),
   })), input.costAmount, allocationMethod);
+  const allocationLines=costSuggestions.map(line=>({...line,id:crypto.randomUUID()}));
   const costAllocationId = crypto.randomUUID();
   const density = allocationDensity(totalWeight, totalVolume);
   const result: PlannedBatchResult = {
@@ -389,22 +401,24 @@ export async function createOperationPlannedBatch(input: PlanningInput) {
       crypto.randomUUID(),input.current.organizationId,batchId,vehicle.vehicle_type,vehicle.plate_number.trim().toUpperCase(),
       carrier.id,driver.name.trim(),driver.phone.trim(),vehicle.capacity_weight_kg || 0,vehicle.capacity_volume_cbm || 0,
       now,now,vehicle.id,driver.id,
-    ), env.DB.prepare(`INSERT INTO transport_cost_allocations(
+    )];
+  const costStatements: D1PreparedStatement[] = [env.DB.prepare(`INSERT INTO transport_cost_allocations(
       id,organization_id,batch_id,charge_code,charge_name,counterparty_name,currency,exchange_rate,
       total_amount,allocation_method,total_actual_weight_kg,total_actual_volume_cbm,density_kg_per_cbm,
-      density_result,status,notes,created_by_user_id,created_at,updated_at
-    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'draft',?,?,?,?)`).bind(
+      density_result,status,notes,created_by_user_id,created_at,updated_at,creation_mode
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'draft',?,?,?,?,'planning')`).bind(
       costAllocationId,input.current.organizationId,batchId,"OVERSEAS_TRANSPORT","境外运输费",carrier.name,
       input.costCurrency.trim().toUpperCase() || "CNY",input.costExchangeRate,input.costAmount,allocationMethod,
-      totalWeight,totalVolume,density,density < 300 ? "轻货：按 1:300 抛重比建议按体积分摊" : "重货：按实收重量分摊",
+      totalWeight,totalVolume,density,density < ratio ? `轻货：按 1:${ratio} 抛重比建议按体积分摊` : "重货：按实收重量分摊",
       `配载单生成前成本预览；${input.notes || "无备注"}`,input.current.userId,now,now,
-    ), ...costSuggestions.map((line) => env.DB.prepare(`INSERT INTO transport_cost_allocation_lines(
+    ), ...allocationLines.map((line) => env.DB.prepare(`INSERT INTO transport_cost_allocation_lines(
       id,organization_id,allocation_id,order_id,actual_weight_kg,actual_volume_cbm,suggested_ratio,
       suggested_amount,final_amount,created_at,updated_at
     ) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).bind(
-      crypto.randomUUID(),input.current.organizationId,costAllocationId,line.orderId,line.actualWeightKg,
+      line.id,input.current.organizationId,costAllocationId,line.orderId,line.actualWeightKg,
       line.actualVolumeCbm,line.ratio,line.amount,line.amount,now,now,
     ))];
+  if(policyEnabled(processPolicy,'loading.automatic_cost_allocation')) costStatements.push(...plannedCostIntegrationStatements(env.DB,{organizationId:input.current.organizationId,allocationId:costAllocationId,actorUserId:input.current.userId,currency:input.costCurrency,exchangeRate:input.costExchangeRate,counterparty:carrier.name,now,lines:allocationLines}));
   for (const rowChunk of chunkD1Values(candidates, 5)) {
     statements.push(env.DB.prepare(`UPDATE warehouse_packing_jobs SET status='allocated',transport_batch_id=?,updated_at=?
       WHERE organization_id=? AND warehouse_id=? AND status='labelled' AND transport_batch_id IS NULL
@@ -487,6 +501,7 @@ export async function createOperationPlannedBatch(input: PlanningInput) {
       WHERE organization_id=? AND id IN (${d1Placeholders(orderChunk.length)})`)
       .bind(input.borderPort,input.borderPort,input.customsLocation,input.customsLocation,now,input.current.organizationId,...orderChunk));
   }
+  statements.push(...costStatements);
   try {
     await env.DB.batch(statements);
   } catch (error) {

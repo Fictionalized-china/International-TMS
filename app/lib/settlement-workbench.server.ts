@@ -150,9 +150,13 @@ export async function recordSettlementInvoice(db:D1Database,input:{organizationI
   return{id,recordNumber};
 }
 
-export async function recordCashTransaction(db:D1Database,input:{organizationId:string;direction:"receipt"|"payment";counterpartyName:string;currency:string;amount:number;occurredOn:string;settlementEntity:string;accountName:string;handledByUserId:string;evidenceReference?:string;notes?:string;paymentStatementNumber?:string;userId:string;now:string}&SettlementMutationGuard){
+export async function recordCashTransaction(db:D1Database,input:{organizationId:string;direction:"receipt"|"payment";counterpartyName:string;currency:string;amount:number;occurredOn:string;settlementEntity:string;accountName:string;handledByUserId:string;evidenceReference?:string;notes?:string;paymentStatementNumber?:string;requestId:string;userId:string;now:string}&SettlementMutationGuard){
   if(!input.counterpartyName||!input.currency||!input.occurredOn||!input.settlementEntity||!input.accountName||!input.handledByUserId)throw new Error("请完整填写往来单位、币种、日期、所属公司、账户和经办人");
   if(!Number.isFinite(input.amount)||input.amount<=0)throw new Error("收付款金额必须大于 0");
+  if(!/^[A-Za-z0-9:_-]{10,160}$/.test(input.requestId))throw new Error("流水提交标识无效，请刷新后重试");
+  const payloadHash=await cashSubmissionHash(input);
+  const previous=input.requestId?await db.prepare("SELECT id,transaction_number,payload_hash FROM settlement_cash_transactions WHERE organization_id=? AND created_by_user_id=? AND request_id=?").bind(input.organizationId,input.userId,input.requestId).first<{id:string;transaction_number:string;payload_hash:string}>():null;
+  if(previous){await input.assertCanMutate();if(previous.payload_hash!==payloadHash)throw new Error("同一提交标识内容不同，请重新打开流水登记");return {id:previous.id,number:previous.transaction_number};}
   const user=await db.prepare("SELECT 1 FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.user_id=? AND m.organization_id=? AND m.status='active' AND u.status='active'").bind(input.handledByUserId,input.organizationId).first();
   if(!user)throw new Error("经办人无效");
   let paymentReconciliationId:string|null=null;
@@ -170,11 +174,31 @@ export async function recordCashTransaction(db:D1Database,input:{organizationId:
   }
   const id=crypto.randomUUID(),number=settlementDocumentNumber("CASH",new Date(input.now));
   await input.assertCanMutate();
-  await db.prepare(`INSERT INTO settlement_cash_transactions(id,organization_id,transaction_number,direction,counterparty_name,currency,amount,occurred_on,settlement_entity,account_name,handled_by_user_id,evidence_reference,notes,status,created_by_user_id,created_at,updated_at,payment_reconciliation_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'unallocated',?,?,?,?)`).bind(id,input.organizationId,number,input.direction,input.counterpartyName,input.currency.toUpperCase(),input.amount,input.occurredOn,input.settlementEntity,input.accountName,input.handledByUserId,input.evidenceReference||null,input.notes||null,input.userId,input.now,input.now,paymentReconciliationId).run();
+  const statements:D1PreparedStatement[]=[];
+  if(paymentReconciliationId){
+    statements.push(db.prepare("UPDATE settlement_reconciliations SET payment_reserved_amount=payment_reserved_amount+?,payment_write_token=? WHERE id=? AND organization_id=? AND status='confirmed' AND payment_reserved_amount+?<=total_amount+0.009").bind(input.amount,id,paymentReconciliationId,input.organizationId,input.amount));
+    statements.push(db.prepare("INSERT INTO settlement_commit_guards(id,valid,created_at) SELECT ?,CASE WHEN EXISTS(SELECT 1 FROM settlement_reconciliations WHERE id=? AND organization_id=? AND payment_write_token=?) THEN 1 ELSE NULL END,?").bind(id,paymentReconciliationId,input.organizationId,id,input.now));
+  }
+  statements.push(db.prepare(`INSERT INTO settlement_cash_transactions(id,organization_id,transaction_number,direction,counterparty_name,currency,amount,occurred_on,settlement_entity,account_name,handled_by_user_id,evidence_reference,notes,status,created_by_user_id,created_at,updated_at,payment_reconciliation_id,request_id,payload_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'unallocated',?,?,?,?,?,?)`).bind(id,input.organizationId,number,input.direction,input.counterpartyName,input.currency.toUpperCase(),input.amount,input.occurredOn,input.settlementEntity,input.accountName,input.handledByUserId,input.evidenceReference||null,input.notes||null,input.userId,input.now,input.now,paymentReconciliationId,input.requestId||null,payloadHash));
+  try{await db.batch(statements);}catch(error){
+    const raced=input.requestId?await db.prepare("SELECT id,transaction_number,payload_hash FROM settlement_cash_transactions WHERE organization_id=? AND created_by_user_id=? AND request_id=?").bind(input.organizationId,input.userId,input.requestId).first<{id:string;transaction_number:string;payload_hash:string}>():null;
+    if(raced?.payload_hash===payloadHash)return {id:raced.id,number:raced.transaction_number};
+    if(String(error).includes('settlement_commit_guards'))throw new Error('审批付款余额已变化或已用完，请刷新后核对；本次未登记付款');
+    throw error;
+  }
   return{id,number};
 }
 
-export async function allocateCashTransaction(db:D1Database,input:{organizationId:string;transactionId:string;reconciliationId:string;amount:number;userId:string;now:string}&SettlementMutationGuard){
+export async function allocateCashTransaction(db:D1Database,input:{organizationId:string;transactionId:string;reconciliationId:string;amount:number;userId:string;now:string;requestId:string}&SettlementMutationGuard){
+  if(!/^[A-Za-z0-9:_-]{10,160}$/.test(input.requestId)||!Number.isFinite(input.amount)||input.amount<=0)throw new Error('核销金额或提交标识无效，请刷新后重试');
+  const {sha256}=await import('./crypto.server');
+  const payloadHash=await sha256(JSON.stringify([input.transactionId,input.reconciliationId,input.amount]));
+  const replay=()=>db.prepare('SELECT payload_hash FROM settlement_cash_allocation_requests WHERE organization_id=? AND actor_user_id=? AND request_id=?').bind(input.organizationId,input.userId,input.requestId).first<{payload_hash:string}>();
+  const previous=await replay();
+  if(previous){
+    if(previous.payload_hash!==payloadHash)throw new Error('同一核销提交的内容不同，请刷新后发起新核销');
+    await input.assertCanMutate();await refreshCashAllocationState(db,input);return;
+  }
   const [cash,reconciliation]=await Promise.all([
     db.prepare(`SELECT t.*,t.amount-COALESCE((SELECT SUM(a.amount) FROM settlement_cash_allocations a WHERE a.cash_transaction_id=t.id AND a.organization_id=t.organization_id),0) remaining FROM settlement_cash_transactions t WHERE t.id=? AND t.organization_id=? AND t.status!='void'`).bind(input.transactionId,input.organizationId).first<CashTransactionRow&{remaining:number}>(),
     db.prepare("SELECT * FROM settlement_reconciliations WHERE id=? AND organization_id=? AND status='confirmed'").bind(input.reconciliationId,input.organizationId).first<ReconciliationRow>(),
@@ -182,6 +206,7 @@ export async function allocateCashTransaction(db:D1Database,input:{organizationI
   if(!cash||!reconciliation)throw new Error("收付款流水或对账单无效");
   const expectedDirection=reconciliation.direction==="receivable"?"receipt":"payment";
   if(cash.direction!==expectedDirection)throw new Error("收付款方向与对账单方向不一致");
+  if(cash.direction==='payment'&&(cash as CashTransactionRow&{payment_reconciliation_id?:string}).payment_reconciliation_id&&(cash as CashTransactionRow&{payment_reconciliation_id?:string}).payment_reconciliation_id!==input.reconciliationId)throw new Error('付款流水只能核销关联的已审批申请单');
   if(cash.counterparty_name!==reconciliation.counterparty_name||cash.currency!==reconciliation.currency)throw new Error("只能核销同一往来单位、同一币种的费用");
   if(input.amount-cash.remaining>0.009)throw new Error("核销金额超过流水未分配余额");
   const lines=await loadReconciliationOutstanding(db,input.organizationId,input.reconciliationId,"cash");
@@ -189,14 +214,30 @@ export async function allocateCashTransaction(db:D1Database,input:{organizationI
   const allocations=allocateToOutstanding(lines.map(line=>({id:line.expense_id,outstanding:line.outstanding})),input.amount);
   const allocationStatements=chunkD1Rows(allocations,8).map(chunk=>db.prepare(`INSERT INTO settlement_cash_allocations(id,organization_id,cash_transaction_id,reconciliation_id,expense_id,amount,created_by_user_id,created_at) VALUES ${chunk.map(()=>"(?,?,?,?,?,?,?,?)").join(",")}`).bind(...chunk.flatMap(item=>[crypto.randomUUID(),input.organizationId,input.transactionId,input.reconciliationId,item.id,item.amount,input.userId,input.now])));
   await input.assertCanMutate();
-  await db.batch(allocationStatements);
-  const allocated=await db.prepare("SELECT COALESCE(SUM(amount),0) total FROM settlement_cash_allocations WHERE organization_id=? AND cash_transaction_id=?").bind(input.organizationId,input.transactionId).first<{total:number}>();
-  const status=(allocated?.total??0)>=cash.amount-0.009?"allocated":"partially_allocated";
-  await db.prepare("UPDATE settlement_cash_transactions SET status=?,updated_at=? WHERE id=? AND organization_id=?").bind(status,input.now,input.transactionId,input.organizationId).run();
-  await refreshExpenseStages(db,input.organizationId,allocations.map(item=>item.id),input.now);
-  await syncSettlementOrderStates(db,input.organizationId,await loadExpenseOrderIds(db,input.organizationId,allocations.map(item=>item.id)),input.now);
+  const token=crypto.randomUUID(),guards:D1PreparedStatement[]=[db.prepare("UPDATE settlement_cash_transactions SET allocation_reserved_amount=allocation_reserved_amount+?,allocation_write_token=? WHERE id=? AND organization_id=? AND status!='void' AND allocation_reserved_amount+?<=amount+0.009").bind(input.amount,token,input.transactionId,input.organizationId,input.amount)];
+  for(const allocation of [...allocations].sort((a,b)=>a.id.localeCompare(b.id)))guards.push(db.prepare("UPDATE business_expenses SET cash_reserved_amount=cash_reserved_amount+?,cash_write_token=? WHERE id=? AND organization_id=? AND stage!='cancelled' AND cash_reserved_amount+?<=amount+0.009").bind(allocation.amount,token,allocation.id,input.organizationId,allocation.amount));
+  guards.push(db.prepare(`INSERT INTO settlement_commit_guards(id,valid,created_at) SELECT ?,CASE WHEN EXISTS(SELECT 1 FROM settlement_cash_transactions WHERE id=? AND organization_id=? AND allocation_write_token=?) AND (SELECT COUNT(*) FROM business_expenses WHERE organization_id=? AND cash_write_token=?)=? THEN 1 ELSE NULL END,?`).bind(token,input.transactionId,input.organizationId,token,input.organizationId,token,allocations.length,input.now));
+  const claim=db.prepare('INSERT INTO settlement_cash_allocation_requests(organization_id,actor_user_id,request_id,payload_hash,cash_transaction_id,reconciliation_id,created_at) VALUES(?,?,?,?,?,?,?)').bind(input.organizationId,input.userId,input.requestId,payloadHash,input.transactionId,input.reconciliationId,input.now);
+  try{await db.batch([claim,...guards,...allocationStatements]);}catch(error){
+    const concurrent=await replay();
+    if(concurrent?.payload_hash===payloadHash){await refreshCashAllocationState(db,input);return;}
+    if(String(error).includes('settlement_commit_guards'))throw new Error('核销余额已被其他提交使用，请刷新；本次核销未保存');throw error;
+  }
+  await refreshCashAllocationState(db,input);
 }
 
+async function refreshCashAllocationState(db:D1Database,input:{organizationId:string;transactionId:string;reconciliationId:string;now:string}) {
+  await db.prepare(`UPDATE settlement_cash_transactions SET status=CASE WHEN allocation_reserved_amount>=amount-0.009 THEN 'allocated' WHEN allocation_reserved_amount>0 THEN 'partially_allocated' ELSE 'unallocated' END,updated_at=? WHERE id=? AND organization_id=? AND status!='void'`).bind(input.now,input.transactionId,input.organizationId).run();
+  const rows=await db.prepare('SELECT DISTINCT expense_id FROM settlement_cash_allocations WHERE organization_id=? AND cash_transaction_id=? AND reconciliation_id=?').bind(input.organizationId,input.transactionId,input.reconciliationId).all<{expense_id:string}>();
+  const expenseIds=rows.results.map(row=>row.expense_id);
+  await refreshExpenseStages(db,input.organizationId,expenseIds,input.now);
+  await syncSettlementOrderStates(db,input.organizationId,await loadExpenseOrderIds(db,input.organizationId,expenseIds),input.now);
+}
+
+async function cashSubmissionHash(input:{direction:string;counterpartyName:string;currency:string;amount:number;occurredOn:string;settlementEntity:string;accountName:string;handledByUserId:string;paymentStatementNumber?:string;evidenceReference?:string;notes?:string}) {
+  const {sha256}=await import('./crypto.server');
+  return sha256(JSON.stringify([input.direction,input.counterpartyName,input.currency.toUpperCase(),input.amount,input.occurredOn,input.settlementEntity,input.accountName,input.handledByUserId,input.paymentStatementNumber||'',input.evidenceReference||'',input.notes||'']));
+}
 async function loadReconciliationOutstanding(db:D1Database,organizationId:string,reconciliationId:string,type:"invoice"|"cash"){
   const allocationTable=type==="invoice"?"settlement_invoice_allocations":"settlement_cash_allocations";
   const statusJoin=type==="invoice"?"JOIN settlement_invoice_records h ON h.id=a.invoice_record_id AND h.organization_id=a.organization_id AND h.status!='void'":"JOIN settlement_cash_transactions h ON h.id=a.cash_transaction_id AND h.organization_id=a.organization_id AND h.status!='void'";

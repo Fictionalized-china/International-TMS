@@ -94,6 +94,7 @@ export async function createOrderFromAcceptedQuote(input: {
   actorUserId: string;
   source: "admin" | "portal";
   request?: Request;
+  initialPayables?:readonly {chargeCode:string;chargeName:string;amount:number;counterparty:string}[];
 }): Promise<CreatedOrder> {
   const quote = await loadAcceptedQuote(input.organizationId, input.quotationId);
   if (!quote) throw new Error("报价无效或尚未被接受");
@@ -285,6 +286,8 @@ export async function createOrderFromAcceptedQuote(input: {
         "INSERT INTO order_services(id,organization_id,order_id,service_code,service_name,created_at) VALUES(?,?,?,?,?,?)",
       ).bind(crypto.randomUUID(),input.organizationId,orderId,code,name,now)),
     ...receivableStatements({ organizationId: input.organizationId, orderId, quote, charges: chargeRows.results, actorUserId: input.actorUserId, now }),
+    ...(input.initialPayables??[]).map(fee=>env.DB.prepare(`INSERT INTO business_expenses(id,organization_id,order_id,direction,stage,charge_code,charge_name,counterparty_name,currency,quantity,unit_price,amount,exchange_rate,base_amount,created_by_user_id,created_at,updated_at,source_type,source_id)
+      VALUES(?,?,?,'payable','estimated',?,?,?,'CNY',1,?,?,1,?,?,?,?,'direct_order_entry',?)`).bind(crypto.randomUUID(),input.organizationId,orderId,fee.chargeCode,fee.chargeName,fee.counterparty,fee.amount,fee.amount,fee.amount,input.actorUserId,now,now,`${quote.id}:${fee.chargeCode}`)),
   ];
 
   try {
@@ -443,12 +446,12 @@ async function repairGeneratedOrder(input: {
 }
 
 async function rollbackGeneratedOrder(organizationId: string, orderId: string) {
-  await env.DB.prepare("DELETE FROM workflow_instances WHERE organization_id=? AND order_id=?")
-    .bind(organizationId,orderId).run();
-  await env.DB.prepare("DELETE FROM shipments WHERE organization_id=? AND order_id=?")
-    .bind(organizationId,orderId).run();
-  await env.DB.prepare("DELETE FROM transport_orders WHERE organization_id=? AND id=?")
-    .bind(organizationId,orderId).run();
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM business_expenses WHERE organization_id=? AND order_id=? AND source_type IN ('quotation_charge','quotation','direct_order_entry')").bind(organizationId,orderId),
+    env.DB.prepare("DELETE FROM workflow_instances WHERE organization_id=? AND order_id=?").bind(organizationId,orderId),
+    env.DB.prepare("DELETE FROM shipments WHERE organization_id=? AND order_id=?").bind(organizationId,orderId),
+    env.DB.prepare("DELETE FROM transport_orders WHERE organization_id=? AND id=?").bind(organizationId,orderId),
+  ]);
 }
 
 function receivableStatements(input: {

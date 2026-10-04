@@ -27,6 +27,7 @@ export type SettlementTaskPackRow = {
   review_conclusion: string | null;
   updated_at: string;
   required_signoff_fields?:readonly string[];
+  configured_next_action?:SettlementTaskAction;
 };
 
 export type SettlementTaskAction = {
@@ -60,6 +61,7 @@ export function settlementTaskNextAction(
   row: SettlementTaskPackRow,
   positionCode: string | null | undefined,
 ): SettlementTaskAction {
+  if(row.configured_next_action)return row.configured_next_action;
   const required=(key:string)=>!row.required_signoff_fields||row.required_signoff_fields.includes(key);
   const receivableCustomerServiceDone = !required("customer_service_confirmation")||row.receivable_count === 0 || row.receivable_confirmed === 1;
   const receivableOperationDone = !required("business_review")||row.receivable_count === 0 || row.receivable_business_reviewed === 1;

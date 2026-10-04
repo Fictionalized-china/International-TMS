@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   evaluateMysqlSchema,
+  inspectMysqlSchema,
   requiredMysqlSchemaChecksum,
   requiredMysqlSchemaColumns,
   requiredMysqlSchemaVersion,
@@ -9,6 +10,17 @@ import {
 const columns = requiredMysqlSchemaColumns.map(([table_name, column_name]) => ({ table_name, column_name }));
 
 describe("MySQL runtime schema readiness", () => {
+  it('queries every required schema pair from the same source as the readiness check',async()=>{
+    const connection={query:async(sql,bindings)=>{
+      if(sql.includes('information_schema.tables'))return [[{count:1}]];
+      if(sql.includes('information_schema.columns')){
+        expect(bindings).toEqual(requiredMysqlSchemaColumns.flat());
+        return [Array.from({length:bindings.length/2},(_,i)=>({table_name:bindings[i*2],column_name:bindings[i*2+1]}))];
+      }
+      return [[{version:requiredMysqlSchemaVersion,checksum:requiredMysqlSchemaChecksum}]];
+    }};
+    expect(await inspectMysqlSchema(connection)).toMatchObject({ready:true});
+  });
   it("accepts the tracked migration with all required columns", () => {
     expect(evaluateMysqlSchema({
       appliedMigrations: [{ version: requiredMysqlSchemaVersion, checksum: requiredMysqlSchemaChecksum }],

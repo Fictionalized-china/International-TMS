@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Form, Link, useFetcher, useNavigation } from "react-router";
+import { Form, Link, useFetcher, useNavigation, useActionData } from "react-router";
+import { intakeSubmissionIdentity,assertDirectIntakeAuthority } from '../lib/intake-submission.server';
 import { ChevronDown, ChevronRight } from "lucide-react";
 import type { Route } from "./+types/admin.quotations";
 import { Modal } from "../components/Modal";
@@ -61,7 +62,6 @@ import {
 import { listActiveMarkContacts, resolveMarkContactSnapshots } from "../lib/mark-contacts.server";
 import { configuredOrderIntakeFees, ftlOrderIntakeFeeRequirements, missingOrderIntakeFees } from "../lib/order-intake-fees";
 import { loadBusinessProcessPolicy } from "../lib/business-process-policy.server";
-import { policyEnabled, policyPositions } from "../lib/business-process-policy";
 
 type Quote = {
   id: string;
@@ -261,6 +261,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   ]);
   return {
     current,
+    intakeRequestId:crypto.randomUUID(),
     quotes: visibleQuoteRows,
     processPolicy,
     pagination,
@@ -372,6 +373,27 @@ export async function action({ request }: Route.ActionArgs) {
     }
     if (intent === "create") {
       const entryMode = valueOf(form, "entryMode") === "direct" ? "direct" : "quote";
+      const identity=directEntry?await intakeSubmissionIdentity(form,current.organizationId,current.userId):null;
+      if(identity){
+        const saved=await env.DB.prepare(`SELECT q.id,q.intake_payload_hash,q.intake_payables_json,q.acceptance_source,c.cs_order_entry_enabled,c.status customer_status,o.id order_id,o.order_number,
+          (SELECT id FROM workflow_instances WHERE quotation_id=q.id AND organization_id=q.organization_id LIMIT 1) instance_id
+          FROM quotations q JOIN customers c ON c.id=q.customer_id AND c.organization_id=q.organization_id LEFT JOIN transport_orders o ON o.quotation_id=q.id AND o.organization_id=q.organization_id
+          WHERE q.id=? AND q.organization_id=? AND q.created_by_user_id=? AND ${customerScope.sql}`).bind(identity.id,current.organizationId,current.userId,...customerScope.values).first<{id:string;intake_payload_hash:string;intake_payables_json:string;acceptance_source:string|null;cs_order_entry_enabled:number;customer_status:string;order_id:string|null;order_number:string|null;instance_id:string|null}>();
+        if(saved){
+          if(saved.intake_payload_hash!==identity.payloadHash)throw new Error('本次录单请求的内容已变化，请重新打开录单窗口');
+          if(!saved.instance_id)throw new Error('本次录单正在处理，请稍后重试；不要重新开单');
+          if(!saved.order_id){
+            if(saved.customer_status!=='active')throw new Error('客户已停用，不能恢复开单');
+            assertDirectIntakeAuthority({policy:processPolicy,positionCode:current.positionCode,roleCodes:current.roleCodes,customerCsEnabled:saved.cs_order_entry_enabled,emergencyReason:valueOf(form,'intakeEmergencyReason')});
+          }
+          const order=saved.order_id?{id:saved.order_id,orderNumber:saved.order_number!}:await acceptQuotation({organizationId:current.organizationId,quotationId:saved.id,actorUserId:current.userId,source:'admin',request,initialPayables:JSON.parse(saved.intake_payables_json||'[]')});
+          if(saved.acceptance_source!=='offline_order_entry'){
+            await env.DB.prepare("UPDATE quotations SET acceptance_source='offline_order_entry',updated_at=? WHERE id=? AND organization_id=?").bind(new Date().toISOString(),saved.id,current.organizationId).run();
+            await writeAudit({request,action:'order.direct_entry.resume',resourceType:'transport_order',resourceId:order.id,organizationId:current.organizationId,actorUserId:current.userId,metadata:{quotationId:saved.id,orderNumber:order.orderNumber,emergencyReason:current.positionCode==='HR_ADMIN'?valueOf(form,'intakeEmergencyReason'):undefined}});
+          }
+          return {intent,entryMode,quotationId:saved.id,orderId:order.id,orderNumber:order.orderNumber,success:`订单 ${order.orderNumber} 已建立，重复提交未重复开单`};
+        }
+      }
       const customerId = valueOf(form, "customerId");
       const salespersonId = valueOf(form, "salespersonId");
       const transportMode = valueOf(form, "transportMode");
@@ -416,8 +438,7 @@ export async function action({ request }: Route.ActionArgs) {
       ]);
       if (!customer) throw new Error("客户已停用或不存在");
       if (entryMode === "direct") {
-        if (!policyPositions(processPolicy, "order.submit_positions").includes(current.positionCode ?? "") && !current.roleCodes.some(c => ["owner","boss","developer"].includes(c))) throw new Error("当前岗位未配置直接录单职责");
-        if (current.positionCode === "CS" && policyEnabled(processPolicy, "order.cs_requires_customer_flag") && !customer.cs_order_entry_enabled) throw new Error("该客户尚未配置为客服代录客户");
+        assertDirectIntakeAuthority({policy:processPolicy,positionCode:current.positionCode,roleCodes:current.roleCodes,customerCsEnabled:customer.cs_order_entry_enabled,emergencyReason:valueOf(form,'intakeEmergencyReason')});
       }
       if (!workflow) throw new Error("所选工作流与整车/拼车类型不匹配，或该版本无效");
       const selectedWorkflowFields = (await listQuotationWorkflowFields(current.organizationId))
@@ -584,9 +605,10 @@ export async function action({ request }: Route.ActionArgs) {
       }
       const total = charges.reduce((sum, item) => sum + item.amount, 0);
       const now = new Date().toISOString();
-      const id = crypto.randomUUID();
+      const id = identity?.id??crypto.randomUUID();
       const notificationId = crypto.randomUUID();
       const number = await nextDocumentNumber(current.organizationId, "quote");
+      let quoteCreated=false;
       try {
         await env.DB.batch([
           env.DB.prepare(
@@ -608,8 +630,8 @@ export async function action({ request }: Route.ActionArgs) {
             JSON.stringify(markContactSnapshots.map((contact)=>contact.id)),now,now,
           ),
           env.DB.prepare(
-            "UPDATE quotations SET customer_contact_name=?,customer_contact_phone=? WHERE id=? AND organization_id=?",
-          ).bind(effectiveContactName || null,effectiveContactPhone || null,id,current.organizationId),
+            "UPDATE quotations SET customer_contact_name=?,customer_contact_phone=?,intake_payload_hash=?,intake_payables_json=? WHERE id=? AND organization_id=?",
+          ).bind(effectiveContactName || null,effectiveContactPhone || null,identity?.payloadHash??null,identity?JSON.stringify(payableFees.map(fee=>({...fee,counterparty:payableCounterparty}))):null,id,current.organizationId),
           ...charges.map((charge, index) => env.DB.prepare(
             `INSERT INTO quotation_charges(
               id,quotation_id,charge_code,description,quantity,unit_price,amount,exchange_rate,sort_order,notes,created_at
@@ -621,6 +643,7 @@ export async function action({ request }: Route.ActionArgs) {
              ) VALUES(?,?,?,?,?,?,?,?,0,?)`,
           ).bind(notificationId,current.organizationId,customerId,null,"quote","新报价待确认",`报价 ${number} 等待确认。`,`/portal/orders?status=quote_pending&quote=${encodeURIComponent(id)}`,now)] : []),
         ]);
+        quoteCreated=true;
         await savePreparedQuotationWorkflowFieldValues({
           organizationId:current.organizationId,
           quotationId:id,
@@ -638,8 +661,10 @@ export async function action({ request }: Route.ActionArgs) {
           source:"admin",
           metadata:{ number,roadLoadType,workflowVersionLocked:true,entryMode },
         });
-        if (!workflowInstanceId) throw new Error("所选工作流缺少询价报价第一节点");
+        if (!workflowInstanceId) throw new Error("所选工作流缺少可用于录单的初始节点");
       } catch (error) {
+        // A losing concurrent insert must never clean up the winning submission.
+        if(!quoteCreated){if(identity&&/unique|duplicate/i.test(String(error)))throw new Error('本次录单正在处理，请稍后使用原窗口重试');throw error;}
         await env.DB.batch([
           env.DB.prepare("DELETE FROM workflow_instances WHERE organization_id=? AND quotation_id=?")
             .bind(current.organizationId,id),
@@ -657,11 +682,8 @@ export async function action({ request }: Route.ActionArgs) {
           actorUserId: current.userId,
           source: "admin",
           request,
+          initialPayables:payableFees.map(fee=>({...fee,counterparty:payableCounterparty})),
         });
-        if (payableFees.length) await env.DB.batch(payableFees.map(fee => env.DB.prepare(`INSERT INTO business_expenses(
-          id,organization_id,order_id,direction,stage,charge_code,charge_name,counterparty_name,currency,quantity,unit_price,amount,exchange_rate,base_amount,created_by_user_id,created_at,updated_at,source_type,source_id
-          ) VALUES(?,?,?,'payable','estimated',?,?,?,'CNY',1,?,?,1,?,?,?,?,'direct_order_entry',?)`)
-          .bind(crypto.randomUUID(),current.organizationId,order.id,fee.chargeCode,fee.chargeName,payableCounterparty,fee.amount,fee.amount,fee.amount,current.userId,now,now,`${id}:${fee.chargeCode}`)));
         await env.DB.prepare(
           "UPDATE quotations SET acceptance_source='offline_order_entry',updated_at=? WHERE id=? AND organization_id=?",
         ).bind(new Date().toISOString(), id, current.organizationId).run();
@@ -672,7 +694,7 @@ export async function action({ request }: Route.ActionArgs) {
           resourceId: order.id,
           organizationId: current.organizationId,
           actorUserId: current.userId,
-          metadata: { quotationId: id, quotationNumber: number, orderNumber: order.orderNumber },
+          metadata: { quotationId: id, quotationNumber: number, orderNumber: order.orderNumber,emergencyReason:current.positionCode==='HR_ADMIN'?valueOf(form,'intakeEmergencyReason'):undefined },
         });
         return {
           intent,
@@ -1139,6 +1161,9 @@ function ReadCell({ label, value }: { label: string; value: string }) {
 }
 
 function QuoteForm({ loaderData, busy, formError, entryMode }: { loaderData: Awaited<ReturnType<typeof loader>>; busy: boolean; formError?: string; entryMode: "quote" | "direct" }) {
+  const creationResult=useActionData<typeof action>();
+  const [intakeRequestId,setIntakeRequestId]=useState(loaderData.intakeRequestId);
+  useEffect(()=>{if(creationResult?.intent==='create'&&'success' in creationResult&&creationResult.success)setIntakeRequestId(crypto.randomUUID());},[creationResult]);
   const errorSummaryRef=useRef<HTMLDivElement>(null);
   const autoSelectedCustomerRef = useRef("");
   const customerFetcher = useFetcher<CustomerCreateActionData>();
@@ -1276,6 +1301,8 @@ function QuoteForm({ loaderData, busy, formError, entryMode }: { loaderData: Awa
   return <Form method="post" encType="multipart/form-data" className="prototype-quote-form" data-keyboard-submit data-enter-flow>
     <input type="hidden" name="intent" value="create"/>
     <input type="hidden" name="entryMode" value={entryMode}/>
+    {entryMode==='direct'&&<input type="hidden" name="intakeRequestId" value={intakeRequestId}/>}
+    {entryMode==='direct'&&loaderData.current.positionCode==='HR_ADMIN'&&<label className="field"><span>紧急协助原因 *</span><input name="intakeEmergencyReason" required maxLength={1000}/></label>}
     {entryMode === "direct" && <div className="alert info"><strong>直接录单</strong><span>适用于已经通过微信、线下等方式确认的业务；保存后直接建立草稿订单，不向客户发送待确认报价。</span></div>}
     {formError && <div ref={errorSummaryRef} className="alert error" role="alert" tabIndex={-1}><strong>{entryMode === "direct" ? "订单尚未建立" : "报价尚未保存"}</strong><span>{formError}</span><small>已填写内容仍保留在当前弹窗，请按提示修改后重试。</small></div>}
     <div className="quote-ledger">

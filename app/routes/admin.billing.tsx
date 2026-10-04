@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
-import { Form, Link, useLocation, useNavigation } from "react-router";
+import { Form, Link, useLocation, useNavigation, useActionData } from "react-router";
+import { useState,useEffect } from "react";
 import type { Route } from "./+types/admin.billing";
 import { QueryPagination } from "../components/QueryPagination";
 import { OrderNumberLink, OrderNumberLinkList } from "../components/EntityNumberLink";
@@ -290,6 +291,7 @@ export async function action({ request }: Route.ActionArgs) {
         evidenceReference: valueOf(form, "evidenceReference"),
         notes: valueOf(form, "cashNotes"),
         paymentStatementNumber:valueOf(form,"paymentStatementNumber"),
+        requestId:valueOf(form,"requestId"),
         userId: current.userId,
         assertCanMutate: () => assertRecordCashAllowed(current),
         now,
@@ -298,7 +300,7 @@ export async function action({ request }: Route.ActionArgs) {
         number: result.number,
         direction,
       });
-      return { success: `流水 ${result.number} 已登记；可在当前页匹配对账单并核销` };
+      return { success: `流水 ${result.number} 已登记；可在当前页匹配对账单并核销`,cashRecordedId:result.id };
     }
     if (intent === "allocate_cash") {
       const transactionId = valueOf(form, "transactionId");
@@ -311,6 +313,7 @@ export async function action({ request }: Route.ActionArgs) {
         transactionId,
         reconciliationId,
         amount: positive(form, "amount"),
+        requestId:valueOf(form,'requestId'),
         userId: current.userId,
         assertCanMutate: () => assertSettlementActionAllowed(current, "allocate_cash", source),
         now,
@@ -819,6 +822,8 @@ export function ReconciliationSheet({ row, mode, access, busy, cash = [] }: {
   busy: boolean;
   cash?: CashTransactionRow[];
 }) {
+  const [allocationRequestId,setAllocationRequestId]=useState(()=>crypto.randomUUID());
+  useEffect(()=>setAllocationRequestId(crypto.randomUUID()),[row.settled_amount]);
   const invoiceRemaining = Math.max(0, row.total_amount - row.invoiced_amount);
   if (!access.visible) return null;
   const settlementRemaining = Math.max(0, row.total_amount - row.settled_amount);
@@ -887,6 +892,7 @@ export function ReconciliationSheet({ row, mode, access, busy, cash = [] }: {
       <summary>匹配收付款流水并核销</summary>
       <Form method="post" className="form-grid compact billing-allocation-form">
         <input type="hidden" name="intent" value="allocate_cash" />
+        <input type="hidden" name="requestId" value={allocationRequestId} />
         <input type="hidden" name="reconciliationId" value={row.id} />
         <Sel name="transactionId" label="可用流水" items={matchingCash.map((item) => [
           item.id,
@@ -907,10 +913,14 @@ function CashEntryForm({ users, organizationName, busy }: {
   organizationName: string;
   busy: boolean;
 }) {
+  const [requestId,setRequestId]=useState(()=>crypto.randomUUID()),actionData=useActionData<typeof action>();
+  const savedId=actionData&&'cashRecordedId' in actionData?actionData.cashRecordedId:undefined;
+  useEffect(()=>{if(savedId)setRequestId(crypto.randomUUID());},[savedId]);
   return <details className="billing-entry-disclosure">
     <summary><span>登记一笔新流水</span><small>客户收款或供应商付款</small></summary>
     <Form method="post" className="form-grid compact settlement-cash-form">
       <input type="hidden" name="intent" value="record_cash" />
+      <input type="hidden" name="requestId" value={requestId} />
       <Sel name="direction" label="方向" items={[["receipt", "客户收款"], ["payment", "供应商付款"]]} />
       <Text name="counterpartyName" label="往来单位" required />
       <Text name="currency" label="币种" required defaultValue="CNY" />

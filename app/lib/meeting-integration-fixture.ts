@@ -23,3 +23,19 @@ export async function meetingFixture() {
   for(const [id] of people){const profile=await loadActivePositionAccessProfile(db,"org",id);if(!profile)throw new Error(`Missing test profile ${id}`);actors.set(id,{userId:id,organizationId:"org",sessionId:id,organizationName:"测试",email:`${id}@test.local`,displayName:id,site:"admin",positionCode:profile.positionCode,roleCodes:[profile.roleCode],departmentId:profile.departmentId,departmentCode:profile.departmentCode,dataScope:profile.dataScope,permissions:profile.permissions,warehouseIds:[],regionCountryCodes:[]});}
   return {database,db,actors,now};
 }
+
+export function seedFrozenMeetingWorkflow(fixture:Awaited<ReturnType<typeof meetingFixture>>) {
+  const sql=fixture.database,now=fixture.now;
+  sql.prepare("INSERT INTO workflow_definitions(id,organization_id,code,name,created_at,updated_at) VALUES('wf','org','test-flow','测试流程',?,?)").run(now,now);
+  for(const [key,sort] of [['order_creation',20],['reconciliation',100]] as const){
+    sql.prepare("INSERT INTO workflow_steps(id,workflow_id,step_key,name,entity_type,trigger_event,sort_order,created_at,updated_at) VALUES(?,'wf',?,?,'order',?,?,?,?)").run(`step:${key}`,key,key,`${key}.test`,sort,now,now);
+    sql.prepare("INSERT INTO workflow_step_modules(id,workflow_id,step_id,module_code,display_name,created_at,updated_at) VALUES(?,'wf',?,'costs','费用',?,?)").run(`placement:${key}`,`step:${key}`,now,now);
+  }
+  sql.prepare("INSERT INTO workflow_instances(id,organization_id,workflow_id,customer_id,order_id,current_step_key,started_at,updated_at) VALUES('instance','org','wf','customer','order','reconciliation',?,?)").run(now,now);
+  sql.exec("UPDATE transport_orders SET workflow_instance_id='instance' WHERE id='order'");
+  for(const [key,sort] of [['order_creation',20],['reconciliation',100]] as const){
+    sql.prepare("INSERT INTO workflow_instance_step_states(id,instance_id,workflow_id,step_id,step_key,step_name,sort_order,status,updated_at) VALUES(?,'instance','wf',?,?,?,?,?,?)").run(`state:${key}`,`step:${key}`,key,key,sort,key==='order_creation'?'completed':'active',now);
+    sql.prepare("INSERT INTO workflow_instance_module_states(id,instance_step_state_id,step_module_id,module_code,display_name,sort_order,is_required,completion_mode,updated_at) VALUES(?,?,?,'costs','费用',10,1,'all_tasks',?)").run(`module-state:${key}`,`state:${key}`,`placement:${key}`,now);
+    for(const field of ['customer_service_confirmation','business_review','finance_review'])sql.prepare("INSERT INTO workflow_instance_fields(id,instance_id,workflow_id,step_key,module_code,field_key,label,field_type,is_required,is_active,created_at) VALUES(?,'instance','wf',?,'costs',?,?,'text',1,1,?)").run(`field:${key}:${field}`,key,field,field,now);
+  }
+}

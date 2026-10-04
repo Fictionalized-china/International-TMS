@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { applyLoadingIntegrityMigration, loadingIntegrityTriggers } from "./loading-integrity-migration.mjs";
+import { applyMeetingFlowMigration } from './meeting-flow-migration.mjs';
 
 const migrations = [
   {
@@ -232,6 +233,7 @@ const migrations = [
   },
 ];
 
+migrations.push({version:179,name:'configurable_meeting_flow_and_atomic_settlement',definition:applyMeetingFlowMigration.toString(),up:connection=>applyMeetingFlowMigration(connection,addColumnIfMissing)});
 for (const migration of migrations) {
   migration.checksum = createHash("sha256")
     .update(`${migration.version}:${migration.name}\n${migration.definition}`)
@@ -251,6 +253,12 @@ export const requiredMysqlSchemaColumns = [
   ["transport_batch_order_claims", "batch_id"],
   ["loading_planning_submissions", "sync_status"],
   ["order_settlement_sync_requests", "revision"],
+  ['business_process_policies','policy_key'], ['order_daily_tracking','request_id'], ['order_dispatch_requests','status'],
+  ['order_payable_offline_approvals','evidence_reference'], ['order_commission_records','write_token'], ['hr_report_snapshots','payload_json'],
+  ['settlement_commit_guards','valid'], ['settlement_cash_transactions','request_id'], ['settlement_reconciliations','payment_reserved_amount'], ['business_expenses','cash_reserved_amount'],
+  ['transport_cost_allocations','creation_mode'],
+  ['quotations','intake_payload_hash'],
+  ['settlement_cash_allocation_requests','payload_hash'],
 ];
 
 async function addColumnIfMissing(connection, table, column, definition) {
@@ -308,16 +316,8 @@ export async function inspectMysqlSchema(connection) {
       `SELECT table_name,column_name
          FROM information_schema.columns
         WHERE table_schema=DATABASE()
-          AND ((table_name='quotations' AND column_name='mark_contact_ids_json')
-            OR (table_name='transport_orders' AND column_name='mark_contacts_snapshot_json')
-            OR (table_name='analytics_metric_configs' AND column_name='metric_code')
-            OR (table_name='analytics_manual_metric_values' AND column_name='numeric_value')
-            OR (table_name='analytics_report_snapshots' AND column_name='payload_json')
-            OR (table_name='analytics_port_settings' AND column_name='port_name')
-            OR (table_name='operational_rule_configs' AND column_name='rule_code')
-            OR (table_name='transport_batch_order_claims' AND column_name='batch_id')
-            OR (table_name='loading_planning_submissions' AND column_name='sync_status')
-            OR (table_name='order_settlement_sync_requests' AND column_name='revision'))`,
+          AND (${requiredMysqlSchemaColumns.map(()=>'(table_name=? AND column_name=?)').join(' OR ')})`,
+      requiredMysqlSchemaColumns.flat(),
     ).then(([rows]) => rows),
   ]);
   return evaluateMysqlSchema({ appliedMigrations, columns });

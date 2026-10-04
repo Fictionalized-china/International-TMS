@@ -50,7 +50,7 @@ export function canRunOrderWorkflowAction(input: {
   const allowedPositions = input.allowedPositionCodes ?? workflowActionPositionCodes[input.actionCode];
   if (!allowedPositions?.includes(input.positionCode ?? "")) return false;
   if (["submit", "cancel_draft"].includes(input.actionCode)) {
-    return (Boolean(input.salespersonUserId) && input.salespersonUserId === input.currentUserId) || (input.positionCode === "CS" && input.creatorUserId === input.currentUserId);
+    return (Boolean(input.salespersonUserId) && input.salespersonUserId === input.currentUserId) || (input.positionCode !== "SALES" && input.creatorUserId === input.currentUserId);
   }
   return Boolean(input.currentAssigneeUserId) && input.currentAssigneeUserId === input.currentUserId;
 }
@@ -124,6 +124,6 @@ export function canSubmitSalesOrderForApproval(input: {
     (input.permissions.includes("order.intake.manage") || (
       input.permissions.includes("order.scope.sales_own") && input.permissions.includes("quote.manage")
     )) &&
-    ((Boolean(input.salespersonUserId) && input.salespersonUserId === input.currentUserId) || (input.positionCode === "CS" && input.creatorUserId === input.currentUserId))
+    ((Boolean(input.salespersonUserId) && input.salespersonUserId === input.currentUserId) || (input.positionCode !== "SALES" && input.creatorUserId === input.currentUserId))
   );
 }

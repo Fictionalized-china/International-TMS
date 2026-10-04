@@ -99,7 +99,8 @@ export function accessModelBootstrapStatements(
       continue;
     }
     const basePermissions = [...(accessModelRolePermissions[code] ?? []),
-      ...(["pos_sales","pos_customer_service"].includes(code) ? ["order.intake.manage"] : []),
+      ...(["pos_sales","pos_customer_service","pos_hr_admin"].includes(code) ? ["order.intake.manage"] : []),
+      ...(code==='pos_hr_admin'?['customer.view','customer.scope.all']:[]),
       ...(["boss","developer","pos_sales","pos_customer_service","pos_operation","pos_operation_supervisor","pos_business_route","pos_finance"].includes(code)?["settlement.signature.manage"]:[]),
       ...(["boss","developer","pos_finance"].includes(code)?["settlement.offline_approval.record"]:[]),
       ...(["boss","developer","pos_hr_admin"].includes(code)?["hr.report.view","hr.report.amount.view","hr.commission.manage","order.view","shipment.view","order.scope.all","data.export"]:[]),

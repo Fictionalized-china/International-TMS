@@ -2,7 +2,8 @@ import { settlementOrderScopeSql } from "./settlement-workbench-access.server";
 import type { SettlementWorkbenchActor } from "./settlement-workbench-access";
 import type { SettlementPage, SettlementPageQuery } from "./settlement-workbench-pages.server";
 import type { SettlementTaskPackRow } from "./settlement-task-pack";
-import { loadLockedWorkflowStageContext } from "./workflow-instance-stage-gate.server";
+import { loadMeetingSettlement,meetingSignatureAccess } from './meeting-settlement.server';
+import { expenseDirectionActionPolicies,expenseDirectionActionCompleted,expenseDirectionActionLabel,emptyExpenseDirectionControl } from './expense-control';
 
 function candidateSql(scopeSql: string, filtered: boolean) {
   return `FROM transport_orders o
@@ -72,8 +73,18 @@ export async function loadSettlementTaskPackPage(
     .all<SettlementTaskPackRow>();
   const items=[];
   for(const row of rows.results) {
-    const context=await loadLockedWorkflowStageContext(db,actor.organizationId,row.id,"costs");
-    items.push({...row,required_signoff_fields:context.locked?context.fields.filter(f=>f.moduleCode==="costs"&&f.isActive&&f.isRequired).map(f=>f.fieldKey):undefined});
+    const state=await loadMeetingSettlement(db,actor.organizationId,row.id),policies=expenseDirectionActionPolicies(state.fields);
+    let next:import('./settlement-task-pack').SettlementTaskAction|undefined;
+    const href=`/admin/settlement-approvals?q=${encodeURIComponent(row.order_number)}`;
+    if(!state.open&&!state.historical&&state.order.status!=='completed')next={label:'等待实际出境或完善工作流配置',href,waiting:true};
+    else if(state.open)for(const direction of ['receivable','payable'] as const){
+      if((direction==='receivable'?row.receivable_count:row.payable_count)===0)continue;
+      const control=state.controls.find(c=>c.direction===direction)??emptyExpenseDirectionControl(direction);
+      for(const policy of policies){if(policy.active&&!expenseDirectionActionCompleted(control,policy.action)&&!meetingSignatureAccess(state,actor,direction,policy.action)){next={label:expenseDirectionActionLabel(policy.action,direction),href,waiting:false};break;}}
+      if(next)break;
+    }
+    if(!next&&state.open&&policies.some(p=>p.required&&((row.receivable_count>0&&row[`receivable_${p.action==='confirm'?'confirmed':p.action==='business_review'?'business_reviewed':'finance_reviewed'}`]!==1)||(row.payable_count>0&&row[`payable_${p.action==='confirm'?'confirmed':p.action==='business_review'?'business_reviewed':'finance_reviewed'}`]!==1))))next={label:'查看当前岗位及前序签核进度',href,waiting:true};
+    items.push({...row,configured_next_action:next,required_signoff_fields:state.workflow.locked?policies.filter(p=>p.required).map(p=>p.fieldKey):undefined});
   }
   return { items, page, pageCount, pageSize: query.pageSize, total };
 }

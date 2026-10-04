@@ -11,6 +11,7 @@ import {
   createOperationPlannedBatch,
   loadLoadingPlanningCandidates,
   loadLoadingPlanningOptions,
+  loadPlannedResourceFeedback,
   resumeOperationPlannedBatch,
 } from "../lib/loading-batch-planning.server";
 import { valueOf } from "../lib/validation";
@@ -106,8 +107,10 @@ export async function loader({ request }: Route.LoaderArgs) {
       ])
     : [[], { carriers: [], vehicles: [], drivers: [], borderPorts: [], customsPlaces: [], operationMembers: [], documentMembers: [] }];
 
+  const resourceFeedback=canPlan?await loadPlannedResourceFeedback(current):[];
   return {
     canPlan,
+    resourceFeedback,
     currentUserId:current.userId,
     requestId:crypto.randomUUID(),
     ...advanced.fields,
@@ -264,6 +267,7 @@ function BatchPlanningPanel({ data, busy }: {
     <Form method="post">
       <input type="hidden" name="intent" value="create_batch"/>
       <input type="hidden" name="requestId" value={data.requestId}/>
+      {data.resourceFeedback.length>0&&<label className="field"><span>直接使用商务已反馈资源与报价</span><select defaultValue="" onChange={e=>{const resource=data.resourceFeedback.find(r=>r.id===e.target.value);if(!resource)return;setCarrierId(resource.carrier_id);setVehicleId(resource.vehicle_id);setDriverId(resource.driver_id);setCostAmount(String(resource.freight_amount));setCostCurrency(resource.freight_currency);setCostExchangeRate(String(resource.exchange_rate));}}><option value="">选择后自动填写，无需重新录入</option>{data.resourceFeedback.filter(r=>!selected.length||selectedIds.includes(r.order_id)).map(r=><option key={r.id} value={r.id}>{r.order_number} · {r.freight_currency} {r.freight_amount}</option>)}</select></label>}
       <div className="form-grid compact loading-batch-fields">
         <label className="field"><span>配载单名称</span><input name="batchName" placeholder="留空自动生成"/></label>
         <label className="field"><span>境外承运商 *</span><select name="carrierId" value={carrierId} required onChange={(event) => { setCarrierId(event.currentTarget.value); setVehicleId(""); setDriverId(""); }}><option value="">请选择商务已录入资源</option>{data.planningOptions.carriers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
@@ -291,7 +295,7 @@ function BatchPlanningPanel({ data, busy }: {
         return <tr key={item.order_id} className={selectedIds.includes(item.order_id) ? "selected-row" : ""}><td><input type="checkbox" name="orderIds" aria-label={`选择订单 ${item.order_number}`} value={item.order_id} checked={selectedIds.includes(item.order_id)} disabled={disabled} onChange={(event) => toggle(item.order_id,event.currentTarget.checked)}/></td><td><strong>{item.order_number}</strong><small>{item.customer_name}</small></td><td>{item.warehouse_name}</td><td>{item.overseas_warehouse_name || "未设置"}<small>{[item.destination_country,item.destination_state,item.destination_city].filter(Boolean).join(" ")}</small></td><td>{Number(item.weight_kg).toFixed(2)} KG<small>{Number(item.volume_cbm).toFixed(3)} CBM · {item.package_count} 包</small></td><td>{disabled ? "与当前选择不兼容" : "可配载"}</td></tr>;
       })}</tbody></table></div>
       {!data.planningCandidates.length && <p className="empty-state">当前没有同时满足“已货齐、无异常、未占用、工作流已到配载节点”的订单。</p>}
-      <div className="inline-loading-actions"><small>提交时会重新校验订单、运输资源、负责人和成本；一次生成配载单并保存成本分摊草稿。</small><button className="primary" disabled={busy || selected.length < 2 || !carrierId || !vehicleId || !driverId || Number(costAmount) <= 0 || Number(costExchangeRate)<=0}>{busy ? "正在校验并生成…" : "确认资源、负责人和成本并生成配载单"}</button></div>
+      <div className="inline-loading-actions"><small>提交时会重新校验订单、运输资源、负责人和成本；按流程策略自动关联子订单成本，关闭自动关联时保留分摊草稿供人工确认。</small><button className="primary" disabled={busy || selected.length < 2 || !carrierId || !vehicleId || !driverId || Number(costAmount) <= 0 || Number(costExchangeRate)<=0}>{busy ? "正在校验并生成…" : "确认资源、负责人和成本并生成配载单"}</button></div>
     </Form>
   </section>;
 }

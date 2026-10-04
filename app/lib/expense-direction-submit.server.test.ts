@@ -14,6 +14,7 @@ beforeEach(()=>{
     finance_locked INTEGER DEFAULT 0,finance_locked_by_user_id TEXT,finance_locked_at TEXT,notes TEXT,updated_at TEXT,
     UNIQUE(order_id,direction));
     CREATE TABLE business_expenses(organization_id TEXT,order_id TEXT,direction TEXT,stage TEXT,updated_at TEXT);
+    CREATE TABLE audit_logs(id TEXT PRIMARY KEY,organization_id TEXT,actor_user_id TEXT,action TEXT,resource_type TEXT,resource_id TEXT,outcome TEXT,metadata_json TEXT,created_at TEXT);
     CREATE TABLE order_settlement_sync_requests(organization_id TEXT,order_id TEXT,revision TEXT,updated_at TEXT,PRIMARY KEY(organization_id,order_id));
     INSERT INTO business_expenses VALUES('org','order','receivable','estimated',NULL);`);
   db=sqliteD1(database);

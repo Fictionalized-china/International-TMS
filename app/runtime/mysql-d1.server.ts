@@ -508,10 +508,21 @@ class MysqlPreparedStatement {
     }
 
     const translated = translateSqliteSql(this.sourceSql);
+    const commitGuard = /^INSERT\s+INTO\s+settlement_commit_guards\b/i.test(translated);
+    if (commitGuard && !connection) throw new Error('settlement_commit_guards must execute inside a transaction');
     const [result] = await (connection ?? getPool()).execute(
       translated,
       this.values,
     );
+    // A non-strict MySQL session may coerce a failed NOT NULL guard to zero.
+    // Verify its stored value on the same transactional connection before any
+    // following financial writes; throwing here rolls back the entire batch.
+    if (commitGuard && connection) {
+      const [guards] = await connection.execute<RowDataPacket[]>(
+        'SELECT valid FROM settlement_commit_guards WHERE id=?', [this.values[0]],
+      );
+      if (guards.length !== 1 || Number(guards[0].valid) !== 1) throw new Error('settlement_commit_guards: transaction eligibility changed');
+    }
     if (Array.isArray(result))
       return { rows: result as RowDataPacket[], header: undefined };
     return { rows: [], header: result as ResultSetHeader };

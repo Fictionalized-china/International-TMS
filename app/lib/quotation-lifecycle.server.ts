@@ -25,6 +25,7 @@ export async function acceptQuotation(input: {
   actorUserId: string;
   source: "admin" | "portal";
   request?: Request;
+  initialPayables?:readonly {chargeCode:string;chargeName:string;amount:number;counterparty:string}[];
 }): Promise<CreatedOrder> {
   const quote = await loadQuote(input.organizationId, input.quotationId);
   if (!quote) throw new Error("报价不存在");

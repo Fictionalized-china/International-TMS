@@ -42,7 +42,7 @@ export async function recordDailyTracking(db:D1Database,input:{current:SessionUs
     db.prepare(`INSERT INTO audit_logs(id,organization_id,actor_user_id,action,resource_type,resource_id,outcome,metadata_json,created_at)
       VALUES(?,?,?,'tracking.daily.create','transport_order',?,'success',?,?)`).bind(crypto.randomUUID(),current.organizationId,current.userId,order.id,JSON.stringify({kind,visibleToCustomer:input.visibleToCustomer}),at),
   ];
-  if(kind==="pickup") statements.push(db.prepare("UPDATE shipments SET actual_pickup_at=COALESCE(actual_pickup_at,?),updated_at=? WHERE id=? AND organization_id=?").bind(eventAt,at,order.shipment_id,current.organizationId));
+  if(kind==="pickup") statements.push(db.prepare("UPDATE shipments SET actual_pickup_at=COALESCE(actual_pickup_at,?),status=CASE WHEN status IN ('pending','booked') THEN 'picked_up' ELSE status END,updated_at=? WHERE id=? AND organization_id=?").bind(eventAt,at,order.shipment_id,current.organizationId));
   try { await db.batch(statements); }
   catch(error) {
     const concurrent=await db.prepare("SELECT payload_hash FROM order_daily_tracking WHERE organization_id=? AND actor_user_id=? AND request_id=?").bind(current.organizationId,current.userId,input.requestId).first<{payload_hash:string}>();
