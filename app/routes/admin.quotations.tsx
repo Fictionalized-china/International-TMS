@@ -59,7 +59,9 @@ import {
   type MarkContactOption,
 } from "../lib/mark-contacts";
 import { listActiveMarkContacts, resolveMarkContactSnapshots } from "../lib/mark-contacts.server";
-import { missingOrderIntakeFees } from "../lib/order-intake-fees";
+import { configuredOrderIntakeFees, ftlOrderIntakeFeeRequirements, missingOrderIntakeFees } from "../lib/order-intake-fees";
+import { loadBusinessProcessPolicy } from "../lib/business-process-policy.server";
+import { policyEnabled, policyPositions } from "../lib/business-process-policy";
 
 type Quote = {
   id: string;
@@ -150,7 +152,9 @@ type WorkflowOption = {
 };
 
 export async function loader({ request }: Route.LoaderArgs) {
-  const current = await requireSessionUser(request, "quote.view");
+  const directEntry = new URL(request.url).searchParams.get("entryMode") === "direct";
+  const current = await requireSessionUser(request, directEntry ? "order.intake.manage" : "quote.view");
+  const processPolicy = await loadBusinessProcessPolicy(current.organizationId);
   const customerScope = customerVisibilitySql(current, "c");
   const canViewAll = canViewAllCustomers(current);
   const url = new URL(request.url);
@@ -158,6 +162,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const lifecycle = (url.searchParams.get("status") || "").trim();
   const page = readListPage(url.searchParams);
   const where = ["q.organization_id=?", customerScope.sql];
+  if (!current.permissions.includes("quote.view")) where.push("1=0");
   const binds: unknown[] = [current.organizationId, ...customerScope.values];
   if (keyword) {
     where.push("(q.quote_number LIKE ? OR c.name LIKE ? OR q.cargo_description LIKE ? OR o.order_number LIKE ?)");
@@ -257,13 +262,14 @@ export async function loader({ request }: Route.LoaderArgs) {
   return {
     current,
     quotes: visibleQuoteRows,
+    processPolicy,
     pagination,
     quoteStats: {
       pending: quoteRows.filter((quote) => quote.lifecycle_status === "pending").length,
       accepted: quoteRows.filter((quote) => quote.lifecycle_status === "accepted").length,
       orders: quoteRows.filter((quote) => quote.order_id).length,
     },
-    quotationCharges: quotationCharges.results ?? [],
+    quotationCharges: current.permissions.includes("quote.view") ? quotationCharges.results ?? [] : [],
     customers: customers.results ?? [],
     users: users.results ?? [],
     warehouses: warehouses.results ?? [],
@@ -280,11 +286,14 @@ export async function loader({ request }: Route.LoaderArgs) {
 }
 
 export async function action({ request }: Route.ActionArgs) {
-  const current = await requireSessionUser(request, "quote.manage");
+  const current = await requireSessionUser(request);
   const customerScope = customerVisibilitySql(current, "c");
   const canViewAll = canViewAllCustomers(current);
   const form = await request.formData();
   const intent = valueOf(form, "intent");
+  const directEntry = intent === "create" && valueOf(form, "entryMode") === "direct";
+  if (!current.permissions.includes(directEntry ? "order.intake.manage" : "quote.manage")) throw new Response("没有权限执行此操作", { status: 403 });
+  const processPolicy = await loadBusinessProcessPolicy(current.organizationId);
   const actionQuotationId = valueOf(form, "id") || undefined;
   try {
     if (intent === "workflow_fields_update") {
@@ -398,7 +407,7 @@ export async function action({ request }: Route.ActionArgs) {
       }
       if (!workflowDefinitionId) throw new Error("请选择本报价使用的工作流版本");
       const [customer, workflow] = await Promise.all([
-        env.DB.prepare(`SELECT c.id FROM customers c WHERE c.id=? AND c.organization_id=? AND c.status='active' AND ${customerScope.sql}`).bind(customerId,current.organizationId,...customerScope.values).first(),
+        env.DB.prepare(`SELECT c.id,c.cs_order_entry_enabled FROM customers c WHERE c.id=? AND c.organization_id=? AND c.status='active' AND ${customerScope.sql}`).bind(customerId,current.organizationId,...customerScope.values).first<{id:string;cs_order_entry_enabled:number}>(),
         env.DB.prepare(
           `SELECT id FROM workflow_definitions
            WHERE id=? AND organization_id=? AND lifecycle_status IN ('published','retired')
@@ -406,6 +415,10 @@ export async function action({ request }: Route.ActionArgs) {
         ).bind(workflowDefinitionId,current.organizationId,roadLoadType).first(),
       ]);
       if (!customer) throw new Error("客户已停用或不存在");
+      if (entryMode === "direct") {
+        if (!policyPositions(processPolicy, "order.submit_positions").includes(current.positionCode ?? "") && !current.roleCodes.some(c => ["owner","boss","developer"].includes(c))) throw new Error("当前岗位未配置直接录单职责");
+        if (current.positionCode === "CS" && policyEnabled(processPolicy, "order.cs_requires_customer_flag") && !customer.cs_order_entry_enabled) throw new Error("该客户尚未配置为客服代录客户");
+      }
       if (!workflow) throw new Error("所选工作流与整车/拼车类型不匹配，或该版本无效");
       const selectedWorkflowFields = (await listQuotationWorkflowFields(current.organizationId))
         .filter((field) => field.workflow_id === workflowDefinitionId);
@@ -544,12 +557,27 @@ export async function action({ request }: Route.ActionArgs) {
       }).filter((item): item is NonNullable<typeof item> => Boolean(item)) : [];
       if (chargePolicy.isRequired && (!charges.length || charges.some((item) => !item.name)))
         throw new Error("至少填写一条有效的客户应收费用");
+      const payableAmounts = form.getAll("intakePayableAmount").map(String);
+      const payableCodes = form.getAll("intakePayableCode").map(String);
+      const payableCounterparty = valueOf(form, "intakePayableCounterparty");
+      const allowedFees = [...ftlOrderIntakeFeeRequirements,...configuredOrderIntakeFees(processPolicy,roadLoadType)];
+      const payableFees = directEntry ? payableCodes.flatMap((code,index) => {
+        const fee = allowedFees.find(f => f.code === code);
+        if (!fee) throw new Error("开单费用配置已变化，请刷新后重新填写");
+        const raw = payableAmounts[index]?.trim();
+        if (!raw) return [];
+        const amount = Number(raw);
+        if (!Number.isFinite(amount) || amount < 0) throw new Error(`${fee.label}应付金额无效`);
+        return [{chargeCode:fee.code,chargeName:fee.label,amount,direction:"payable" as const}];
+      }) : [];
+      if (payableFees.length && !payableCounterparty) throw new Error("请填写开单应付往来单位");
       if (entryMode === "direct") {
-        const missingFees = missingOrderIntakeFees(roadLoadType, charges.map((charge, index) => ({
+        const missingFees = missingOrderIntakeFees(roadLoadType, [...charges.map((charge, index) => ({
           chargeCode: `RECEIVABLE_${index + 1}`,
           chargeName: charge.name,
           amount: charge.amount,
-        })));
+          direction:"receivable" as const,
+        })),...payableFees],processPolicy);
         if (missingFees.length) {
           throw new Error(`${roadLoadType === "ftl" ? "整车" : "拼车"}直接录单前请明确录入：${missingFees.map((item) => item.label).join("、")}；客户自送时提货费请填写 0。`);
         }
@@ -630,6 +658,10 @@ export async function action({ request }: Route.ActionArgs) {
           source: "admin",
           request,
         });
+        if (payableFees.length) await env.DB.batch(payableFees.map(fee => env.DB.prepare(`INSERT INTO business_expenses(
+          id,organization_id,order_id,direction,stage,charge_code,charge_name,counterparty_name,currency,quantity,unit_price,amount,exchange_rate,base_amount,created_by_user_id,created_at,updated_at,source_type,source_id
+          ) VALUES(?,?,?,'payable','estimated',?,?,?,'CNY',1,?,?,1,?,?,?,?,'direct_order_entry',?)`)
+          .bind(crypto.randomUUID(),current.organizationId,order.id,fee.chargeCode,fee.chargeName,payableCounterparty,fee.amount,fee.amount,fee.amount,current.userId,now,now,`${id}:${fee.chargeCode}`)));
         await env.DB.prepare(
           "UPDATE quotations SET acceptance_source='offline_order_entry',updated_at=? WHERE id=? AND organization_id=?",
         ).bind(new Date().toISOString(), id, current.organizationId).run();
@@ -959,7 +991,7 @@ export default function QuotationsPage({ loaderData, actionData }: Route.Compone
     <div className="page-head">
       <div><span className="eyebrow">QUOTE DESK / 询价与报价</span><h1>询价与报价</h1><p>线下已经确认的业务可直接录单；需要客户线上确认时再使用报价流程。</p></div>
       <div className="head-actions">
-        <Modal title="创建运输报价" triggerLabel="创建报价" triggerClassName="btn" closeSignal={actionData?.intent==="create"&&actionData.entryMode!=="direct"?actionSuccess:undefined} isOpen={createQuoteOpen} onOpenChange={updateCreateQuoteOpen} size="xwide" dialogClassName="quote-form-modal" guardFormChanges><QuoteForm loaderData={loaderData} busy={busy} formError={createFormError} entryMode="quote" /></Modal>
+        {loaderData.current.permissions.includes("quote.manage") && <Modal title="创建运输报价" triggerLabel="创建报价" triggerClassName="btn" closeSignal={actionData?.intent==="create"&&actionData.entryMode!=="direct"?actionSuccess:undefined} isOpen={createQuoteOpen} onOpenChange={updateCreateQuoteOpen} size="xwide" dialogClassName="quote-form-modal" guardFormChanges><QuoteForm loaderData={loaderData} busy={busy} formError={createFormError} entryMode="quote" /></Modal>}
         <Modal title="线下确认直接录单" triggerLabel="直接录单" triggerClassName="btn primary" closeSignal={actionData?.intent==="create"&&actionData.entryMode==="direct"?actionSuccess:undefined} isOpen={directOrderOpen} onOpenChange={setDirectOrderOpen} size="xwide" dialogClassName="quote-form-modal" guardFormChanges><QuoteForm loaderData={loaderData} busy={busy} formError={directFormError} entryMode="direct" /></Modal>
       </div>
     </div>
@@ -1308,6 +1340,7 @@ function QuoteForm({ loaderData, busy, formError, entryMode }: { loaderData: Awa
       </div>
     </QuoteLedgerSection>}
     </div>
+    {entryMode === "direct" && <fieldset className="panel"><legend>开单应付费用 CNY</legend><p>未录入请留空；客户自送等明确无费用情况填写 0。费用类别及应收应付必录要求由流程策略配置。</p><label className="field"><span>应付往来单位</span><input name="intakePayableCounterparty" /></label><div className="form-grid">{[...new Map([...ftlOrderIntakeFeeRequirements,...configuredOrderIntakeFees(loaderData.processPolicy,roadLoadType || "ltl")].map(f => [f.code,f])).values()].map(fee => <label className="field" key={fee.code}><span>{fee.label}</span><input type="hidden" name="intakePayableCode" value={fee.code}/><input name="intakePayableAmount" type="number" min="0" step="0.01" /></label>)}</div></fieldset>}
     <div className="modal-form-actions"><button className="btn primary large" disabled={busy}>{entryMode === "direct" ? "确认资料并建立订单" : "保存报价并等待客户确认"}</button></div>
   </Form>;
 }

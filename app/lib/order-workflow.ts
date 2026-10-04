@@ -41,14 +41,16 @@ export function canRunOrderWorkflowAction(input: {
   positionCode: string | null | undefined;
   currentAssigneeUserId: string | null | undefined;
   salespersonUserId?: string | null | undefined;
+  creatorUserId?: string | null;
   currentUserId: string;
   bypassAssigneeRestriction?: boolean;
+  allowedPositionCodes?: readonly string[];
 }) {
   if (input.bypassAssigneeRestriction) return true;
-  const allowedPositions = workflowActionPositionCodes[input.actionCode];
+  const allowedPositions = input.allowedPositionCodes ?? workflowActionPositionCodes[input.actionCode];
   if (!allowedPositions?.includes(input.positionCode ?? "")) return false;
   if (["submit", "cancel_draft"].includes(input.actionCode)) {
-    return Boolean(input.salespersonUserId) && input.salespersonUserId === input.currentUserId;
+    return (Boolean(input.salespersonUserId) && input.salespersonUserId === input.currentUserId) || (input.positionCode === "CS" && input.creatorUserId === input.currentUserId);
   }
   return Boolean(input.currentAssigneeUserId) && input.currentAssigneeUserId === input.currentUserId;
 }
@@ -113,13 +115,15 @@ export function canSubmitSalesOrderForApproval(input: {
   permissions: string[];
   salespersonUserId: string | null | undefined;
   currentUserId: string;
+  submitPositionCodes?: readonly string[];
+  creatorUserId?: string | null;
 }) {
   return (
     input.status === "draft" &&
-    input.positionCode === "SALES" &&
-    input.permissions.includes("order.scope.sales_own") &&
-    input.permissions.includes("quote.manage") &&
-    Boolean(input.salespersonUserId) &&
-    input.salespersonUserId === input.currentUserId
+    (input.submitPositionCodes ?? ["SALES"]).includes(input.positionCode ?? "") &&
+    (input.permissions.includes("order.intake.manage") || (
+      input.permissions.includes("order.scope.sales_own") && input.permissions.includes("quote.manage")
+    )) &&
+    ((Boolean(input.salespersonUserId) && input.salespersonUserId === input.currentUserId) || (input.positionCode === "CS" && input.creatorUserId === input.currentUserId))
   );
 }

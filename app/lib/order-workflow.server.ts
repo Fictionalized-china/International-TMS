@@ -18,6 +18,8 @@ import {
 } from "./organization-assignee.server";
 import { loadOrderDispatchResponsibilityPolicy } from "./order-assignment-manifest.server";
 import { loadMissingOrderIntakeFees } from "./order-intake-fees.server";
+import { loadBusinessProcessPolicy } from "./business-process-policy.server";
+import { policyEnabled, policyPositions } from "./business-process-policy";
 
 export type OrderWorkflowTransition = {
   action_code: string;
@@ -37,6 +39,7 @@ type OrderRow = {
   current_step_code: string;
   current_assignee_user_id: string | null;
   salesperson_user_id: string | null;
+  created_by_user_id: string | null;
   business_type: string;
   shipper_name: string;
   shipper_contact: string | null;
@@ -77,7 +80,7 @@ export async function validateOrderWorkflowAction(input: {
   prospectiveSatisfiedGateFieldKeys?: readonly string[];
 }) {
   const order = await env.DB.prepare(
-    `SELECT o.id,o.order_number,o.status,o.current_step_code,o.current_assignee_user_id,
+    `SELECT o.id,o.order_number,o.status,o.current_step_code,o.current_assignee_user_id,o.created_by_user_id,
       COALESCE(q.salesperson_user_id,o.salesperson_user_id) salesperson_user_id,o.business_type,
       o.shipper_name,o.shipper_contact,o.shipper_phone,o.consignee_name,
       o.origin_city,o.origin_address,o.destination_city,o.destination_address,o.cargo_description,o.transport_mode,
@@ -115,13 +118,21 @@ export async function validateOrderWorkflowAction(input: {
      WHERE m.organization_id=? AND m.user_id=? AND m.status='active' AND p.status='active'
      LIMIT 1`,
   ).bind(input.organizationId,input.actorUserId).first<{code:string}>();
+  const processPolicy = await loadBusinessProcessPolicy(input.organizationId);
+  const configurableActions = ["submit", "cancel_draft", "approve", "reject", "cancel_submitted", "dispatch", "cancel_confirmed"];
+  if (input.actionCode === "submit" && actorPosition?.code === "CS" && policyEnabled(processPolicy, "order.cs_requires_customer_flag")) {
+    const eligible = await env.DB.prepare("SELECT 1 FROM transport_orders o JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id WHERE o.id=? AND o.organization_id=? AND c.cs_order_entry_enabled=1 AND c.status='active'").bind(input.orderId,input.organizationId).first();
+    if (!eligible) return { ok: false as const, reason: "该客户尚未配置为客服代录客户", order, transition };
+  }
   if (!canRunOrderWorkflowAction({
     actionCode: input.actionCode,
     positionCode: actorPosition?.code,
     currentAssigneeUserId: order.current_assignee_user_id,
     salespersonUserId: order.salesperson_user_id,
+    creatorUserId: order.created_by_user_id,
     currentUserId: input.actorUserId,
     bypassAssigneeRestriction: input.bypassAssigneeRestriction,
+    allowedPositionCodes: configurableActions.includes(input.actionCode) ? policyPositions(processPolicy, ["submit", "cancel_draft"].includes(input.actionCode) ? "order.submit_positions" : "order.approve_positions") : undefined,
   })) {
     const actionOwner: Record<string, string> = {
       submit: "当前订单的业务员",
@@ -251,8 +262,8 @@ export async function validateOrderWorkflowAction(input: {
         )
       : null;
     const expectedPositions: Record<string, readonly string[]> = {
-      submit: ["OPERATION_SUPERVISOR"],
-      approve: ["OPERATION_SUPERVISOR"],
+      submit: policyPositions(processPolicy, "order.approve_positions"),
+      approve: policyPositions(processPolicy, "order.approve_positions"),
     };
     const expectedPositionCodes = dispatchPolicy
       ? [dispatchPolicy.positionCode]

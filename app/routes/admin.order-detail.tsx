@@ -18,6 +18,8 @@ import {
   statusLabel,
   type OrderWorkflowTransition,
 } from "../lib/order-workflow";
+import { loadBusinessProcessPolicy } from "../lib/business-process-policy.server";
+import { policyPositions } from "../lib/business-process-policy";
 import {
   listOrderWorkflowTransitions,
   reconcileDispatchedOrderWorkflow,
@@ -151,6 +153,7 @@ type Order = {
   assignee_name: string | null;
   assignee_email: string | null;
   salesperson_user_id: string | null;
+  created_by_user_id: string | null;
   salesperson_name: string | null;
   salesperson_email: string | null;
   workflow_updated_at: string | null;
@@ -371,7 +374,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
       o.shipper_name,o.shipper_contact,o.shipper_phone,o.origin_country,
       o.origin_state,o.origin_city,o.origin_address,o.consignee_name,o.consignee_contact,o.consignee_phone,
       o.destination_country,o.destination_state,o.destination_city,o.destination_address,o.cargo_description,
-      o.pieces,o.gross_weight_kg,o.volume_cbm,o.transport_mode,o.service_level,o.requested_pickup_date,
+      o.pieces,o.gross_weight_kg,o.volume_cbm,o.transport_mode,o.service_level,o.requested_pickup_date,o.created_by_user_id,
       o.requested_delivery_date,o.status,o.source,o.special_instructions,o.current_step_name,o.current_assignee_user_id,
       au.display_name assignee_name,au.email assignee_email,COALESCE(q.salesperson_user_id,o.salesperson_user_id) salesperson_user_id,
       sales.display_name salesperson_name,sales.email salesperson_email,o.workflow_updated_at,o.is_overdue,o.exception_status,o.completion_status,
@@ -658,6 +661,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
   return {
     current,
     orderQueueNavigation,
+    processPolicy: await loadBusinessProcessPolicy(current.organizationId),
     canManage: current.permissions.includes("order.manage"),
     canOperateCurrentNode: canOperateCurrentOrder(current, order),
     order,
@@ -1039,6 +1043,8 @@ function LinearOrderWorkspace({
       permissions: data.current.permissions,
       salespersonUserId: order.salesperson_user_id,
       currentUserId: data.current.userId,
+      submitPositionCodes: policyPositions(data.processPolicy, "order.submit_positions"),
+      creatorUserId: order.created_by_user_id,
     });
   const canOperateScopedEmbeddedModule = canOperateScopedEmbeddedOrderModule({
     moduleActionCanOperate: data.embeddedModuleData?.moduleActionCanOperate,
@@ -1563,6 +1569,8 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, readOn
         permissions: data.embeddedModuleData.current.permissions,
         salespersonUserId: data.embeddedModuleData.order.salesperson_user_id,
         currentUserId: data.embeddedModuleData.current.userId,
+        submitPositionCodes: policyPositions(data.processPolicy, "order.submit_positions"),
+        creatorUserId: data.embeddedModuleData.order.created_by_user_id,
       })),
   );
   const orderCreationTabs = [
@@ -2713,7 +2721,10 @@ function directOrderWorkflowAction(data: Route.ComponentProps["loaderData"]) {
     actionCode,
     positionCode: data.current.positionCode,
     currentAssigneeUserId: data.order.current_assignee_user_id,
+    salespersonUserId: data.order.salesperson_user_id,
+    creatorUserId: data.order.created_by_user_id,
     currentUserId: data.current.userId,
+    allowedPositionCodes: policyPositions(data.processPolicy, ["submit", "cancel_draft"].includes(actionCode) ? "order.submit_positions" : "order.approve_positions"),
     bypassAssigneeRestriction: data.current.roleCodes.some((code) =>
       ["owner", "boss", "developer"].includes(code),
     ),

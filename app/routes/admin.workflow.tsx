@@ -2135,6 +2135,7 @@ export default function Workflow({ loaderData, actionData }: Route.ComponentProp
           <p>以运输订单主流程为准，管理可复制的工作流模板、节点和节点字段。</p>
         </div>
         <div className="page-actions">
+          {loaderData.current.permissions.includes("workflow.process_policy.manage") && <Link className="secondary" to="/admin/process-policy">业务流程策略</Link>}
           <span className="status-pill">{loaderData.definitions.length} 个模板</span>
           {manage && (
             <Modal title="新建工作流" triggerLabel="新建工作流" closeSignal={successMessage}>

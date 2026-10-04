@@ -98,7 +98,10 @@ export function accessModelBootstrapStatements(
       ).bind(roleId));
       continue;
     }
-    const basePermissions = accessModelRolePermissions[code] ?? [];
+    const basePermissions = [...(accessModelRolePermissions[code] ?? []),
+      ...(["pos_sales","pos_customer_service"].includes(code) ? ["order.intake.manage"] : []),
+      ...(code === "developer" ? ["workflow.process_policy.manage"] : []),
+    ];
     const permissions = normalizeAdminNavigationPermissions([
       ...basePermissions,
       ...inferAdminNavigationMenuPermissions(basePermissions, {

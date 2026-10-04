@@ -15,6 +15,8 @@ import { validatePhone, valueOf } from "../lib/validation";
 import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 import { writeAudit } from "../lib/audit.server";
 import { persistExpenseDirectionAction, retryOrderSettlementSync } from "../lib/expense-direction-submit.server";
+import { loadBusinessProcessPolicy } from "../lib/business-process-policy.server";
+import { policyPositions } from "../lib/business-process-policy";
 import { synchronizeOrderDocumentsModuleStatus } from "../lib/documents-module-status.server";
 import {
   advanceOrderModule,
@@ -220,6 +222,7 @@ type OrderSummary = {
   quotation_customer_contact_phone: string | null;
   mark_contacts_snapshot_json: string | null;
   salesperson_user_id: string | null;
+  created_by_user_id: string | null;
   quotation_salesperson_name: string | null;
   quotation_cargo_description: string | null;
   quotation_notes: string | null;
@@ -850,7 +853,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     `SELECT o.id,o.order_number,o.order_date,o.quotation_id,q.quote_number,q.currency quotation_currency,q.subtotal quotation_subtotal,q.tax_amount quotation_tax_amount,q.total_amount quotation_total_amount,q.status quotation_status,
             COALESCE(q.customer_contact_name,o.shipper_contact) quotation_customer_contact_name,
             COALESCE(q.customer_contact_phone,o.shipper_phone) quotation_customer_contact_phone,
-            o.mark_contacts_snapshot_json,
+            o.mark_contacts_snapshot_json,o.created_by_user_id,
             COALESCE(q.salesperson_user_id,o.salesperson_user_id) salesperson_user_id,
             salesperson.display_name quotation_salesperson_name,
             COALESCE(q.cargo_description,o.cargo_description) quotation_cargo_description,
@@ -1478,6 +1481,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
           quotation_total_amount: null,
         },
     canViewExpenseSummary,
+    processPolicy: await loadBusinessProcessPolicy(current.organizationId),
     canViewFullExpenseDetails,
     access: {
       ...baseAccess,
@@ -1564,7 +1568,7 @@ export async function action({ request, params }: Route.ActionArgs) {
             consignee_name,destination_country,destination_state,destination_city,destination_address,
             exit_port,transit_locations,customs_location,route_notes,overseas_warehouse_id,
             requires_transloading,requires_transit_customs,current_assignee_user_id,salesperson_user_id,
-            workflow_instance_id
+            workflow_instance_id,created_by_user_id
      FROM transport_orders WHERE id=? AND organization_id=?`,
   )
     .bind(orderId, current.organizationId)
@@ -1574,8 +1578,10 @@ export async function action({ request, params }: Route.ActionArgs) {
       exit_port:string|null;transit_locations:string|null;customs_location:string|null;route_notes:string|null;overseas_warehouse_id:string|null;
       requires_transloading:number;requires_transit_customs:number;current_assignee_user_id:string|null;salesperson_user_id:string|null;
       workflow_instance_id:string|null;
+      created_by_user_id:string|null;
     }>();
   if (!order) return { formError: "订单不存在" };
+  const processPolicy = await loadBusinessProcessPolicy(current.organizationId);
   await ensureOrderModules(current.organizationId, orderId);
   const currentModule = await loadOrderModuleActionScope(
     current.organizationId,
@@ -1615,6 +1621,8 @@ export async function action({ request, params }: Route.ActionArgs) {
       permissions: current.permissions,
       salespersonUserId: order.salesperson_user_id,
       currentUserId: current.userId,
+      creatorUserId: order.created_by_user_id,
+      submitPositionCodes: policyPositions(processPolicy, "order.submit_positions"),
     });
   const isSalesCargoEditAction =
     moduleCode === "cargo" &&
@@ -1625,6 +1633,8 @@ export async function action({ request, params }: Route.ActionArgs) {
       permissions: current.permissions,
       salespersonUserId: order.salesperson_user_id,
       currentUserId: current.userId,
+      creatorUserId: order.created_by_user_id,
+      submitPositionCodes: policyPositions(processPolicy, "order.submit_positions"),
     });
   const isConsignmentDocumentReviewAction =
     ["consignment", "documents"].includes(moduleCode) &&
@@ -5003,7 +5013,7 @@ export function ConsignmentReviewActionBar({
 }) {
   const approvalSupervisors = data.members.filter(
     (member) =>
-      member.position_code === "OPERATION_SUPERVISOR" &&
+      policyPositions(data.processPolicy,"order.approve_positions").includes(member.position_code ?? "") &&
       organizationAssigneeCanHandle(
         member,
         orderWorkflowTargetAssigneeRequirements("submit"),
@@ -5011,7 +5021,7 @@ export function ConsignmentReviewActionBar({
   );
   const operationSupervisors = data.members.filter(
     (member) =>
-      member.position_code === "OPERATION_SUPERVISOR" &&
+      policyPositions(data.processPolicy,"order.approve_positions").includes(member.position_code ?? "") &&
       organizationAssigneeCanHandle(
         member,
         orderWorkflowTargetAssigneeRequirements("approve"),
@@ -5025,6 +5035,8 @@ export function ConsignmentReviewActionBar({
         permissions: data.current.permissions,
         salespersonUserId: data.order.salesperson_user_id,
         currentUserId: data.current.userId,
+        creatorUserId: data.order.created_by_user_id,
+        submitPositionCodes: policyPositions(data.processPolicy,"order.submit_positions"),
       })) && data.access.canEdit;
   const canApproveConsignment = isAssignedOrderApprover({
     status: data.order.status,
@@ -6321,6 +6333,8 @@ function ModuleBusinessData({
         permissions: data.current.permissions,
         salespersonUserId: data.order.salesperson_user_id,
         currentUserId: data.current.userId,
+        creatorUserId: data.order.created_by_user_id,
+        submitPositionCodes: policyPositions(data.processPolicy,"order.submit_positions"),
       })
     )} busy={busy} closeSignal={
       moduleActionData?.actionKind === "cargo_editor" && moduleActionData.success

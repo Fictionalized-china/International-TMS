@@ -46,6 +46,12 @@ describe("assigned order approval", () => {
 });
 
 describe("sales order submission", () => {
+  it("allows the configured CS creator without letting another CS take its draft", () => {
+    const input = {status:"draft",positionCode:"CS",permissions:["order.intake.manage"],salespersonUserId:"sales",creatorUserId:"cs",currentUserId:"cs",submitPositionCodes:["SALES","CS"]};
+    expect(canSubmitSalesOrderForApproval(input)).toBe(true);
+    expect(canSubmitSalesOrderForApproval({...input,currentUserId:"other"})).toBe(false);
+    expect(canRunOrderWorkflowAction({actionCode:"submit",positionCode:"CS",currentAssigneeUserId:null,salespersonUserId:"sales",creatorUserId:"cs",currentUserId:"cs",allowedPositionCodes:["CS"]})).toBe(true);
+  });
   it("allows a salesperson with own-order and quotation permissions to submit a draft", () => {
     expect(canSubmitSalesOrderForApproval({
       status: "draft",
