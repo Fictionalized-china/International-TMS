@@ -15,6 +15,7 @@ const port = Number(process.env.PORT ?? 3100);
 const listener = createRequestListener({ build, mode: process.env.NODE_ENV ?? "production" });
 let readinessPool;
 let analyticsSnapshotTimer;
+let businessDispatchTimer;
 const mime = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
@@ -134,7 +135,21 @@ const server = createServer((request, response) => {
 server.listen(port, host, () => {
   console.log(`International TMS listening on http://${host}:${port}`);
   scheduleAnalyticsSnapshot();
+  scheduleBusinessDispatch();
 });
+
+function scheduleBusinessDispatch() {
+  if(!process.env.BOOTSTRAP_TOKEN) return;
+  businessDispatchTimer=setTimeout(async()=>{
+    try {
+      const response=await fetch(`http://127.0.0.1:${port}/internal/jobs/business-dispatch`,{method:"POST",headers:{Authorization:`Bearer ${process.env.BOOTSTRAP_TOKEN}`},signal:AbortSignal.timeout(60000)});
+      if(!response.ok) throw new Error(`HTTP ${response.status}`);
+      await response.arrayBuffer();
+    }catch(error){console.error("Scheduled business dispatch failed",error);}
+    finally{scheduleBusinessDispatch();}
+  },15*60*1000);
+  businessDispatchTimer.unref?.();
+}
 
 function scheduleAnalyticsSnapshot() {
   if (!process.env.BOOTSTRAP_TOKEN) {
@@ -162,6 +177,7 @@ function scheduleAnalyticsSnapshot() {
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, () => server.close(async () => {
     if (analyticsSnapshotTimer) clearTimeout(analyticsSnapshotTimer);
+    if (businessDispatchTimer) clearTimeout(businessDispatchTimer);
     if (readinessPool) await readinessPool.end();
     process.exit(0);
   }));

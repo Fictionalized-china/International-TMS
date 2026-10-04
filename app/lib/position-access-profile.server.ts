@@ -43,7 +43,7 @@ export async function loadActivePositionAccessProfile(
        position.id position_id,position.code position_code,position.name position_name,
        role.code role_code,
        COALESCE(portal_setting.business_data_scope,CASE
-         WHEN position.code IN ('BOSS','DEVELOPER','TRACKING') THEN 'company'
+         WHEN position.code IN ('BOSS','DEVELOPER','TRACKING','BUSINESS_ROUTE') THEN 'company'
          WHEN position.code IN ('BUSINESS_SUPERVISOR','OPERATION_SUPERVISOR') THEN 'department'
          WHEN position.code IN ('WAREHOUSE','OVERSEAS_WAREHOUSE') THEN 'warehouse'
          WHEN position.code='OVERSEAS' THEN 'region'

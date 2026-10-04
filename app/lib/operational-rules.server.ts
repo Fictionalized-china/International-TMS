@@ -6,8 +6,8 @@ import {
   type OperationalRuleCode,
 } from "./operational-rules";
 
-export async function loadOperationalRules(organizationId: string) {
-  const result = await env.DB.prepare(
+export async function loadOperationalRules(organizationId: string, db: D1Database = env.DB) {
+  const result = await db.prepare(
     `SELECT rule_code,numeric_value
        FROM operational_rule_configs
       WHERE organization_id=?`,

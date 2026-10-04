@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { Form, Link, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.process-policy";
 import { requireSessionUser } from "../lib/auth.server";
-import { businessProcessPolicyDefinitions, type BusinessProcessPolicyKey } from "../lib/business-process-policy";
+import { businessProcessPolicyDefinitions, dispatchOrderFieldCodes, type BusinessProcessPolicyKey } from "../lib/business-process-policy";
 import { loadBusinessProcessPolicy, saveBusinessProcessPolicy } from "../lib/business-process-policy.server";
 import { writeAudit } from "../lib/audit.server";
 
@@ -42,6 +42,7 @@ export default function ProcessPolicy({ loaderData, actionData }: Route.Componen
       {groups.map(group => <fieldset className="panel" key={group}><legend>{group}</legend><div className="form-grid">{businessProcessPolicyDefinitions.filter(d => d.group === group).map(d => <label className="field" key={d.key}><span>{d.label}</span>{d.kind === "boolean" ? <select name={d.key} defaultValue={loaderData.policy[d.key]}><option value="1">启用</option><option value="0">停用</option></select> : <input name={d.key} defaultValue={loaderData.policy[d.key]} required={d.kind === "positions"} />}<small>{d.kind === "positions" ? "多个岗位用英文逗号分隔；不能留空。" : d.kind === "fees" ? "标准费用类别或实际费用代码，用英文逗号分隔；留空表示不限制类别。" : "仅控制此项能力，不扩大其他业务权限。"}</small></label>)}</div></fieldset>)}
       <fieldset className="panel"><legend>客服代录客户</legend><p>不以姓名推测客户身份；勾选实际业务客户后，客服才可代录其订单。</p><div className="form-grid">{loaderData.customers.map(c => <label key={c.id}><input type="checkbox" name="csCustomerIds" value={c.id} defaultChecked={Boolean(c.cs_order_entry_enabled)} /> {c.name}</label>)}</div></fieldset>
       <details className="panel"><summary>可选岗位代码</summary><p>{loaderData.positions.map(p => `${p.code}：${p.name}`).join("；")}</p></details>
+      <details className="panel"><summary>找车资料字段代码</summary><p>{dispatchOrderFieldCodes.join("、")}</p><p>仅支持现有订单字段；不填写表示不增加额外资料门禁。</p></details>
       <button className="primary" disabled={busy}>保存流程策略</button>
     </Form></div>;
 }

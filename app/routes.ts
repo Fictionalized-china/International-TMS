@@ -14,6 +14,7 @@ export default [
   route("warehouse/login", "routes/warehouse.login.tsx"),
   route("logout", "routes/logout.tsx"),
   route("internal/jobs/analytics-snapshot", "routes/internal.analytics-snapshot.ts"),
+  route("internal/jobs/business-dispatch", "routes/internal.business-dispatch.ts"),
   layout("routes/dashboard.tsx", [
     route("admin", "routes/dashboard.index.tsx"),
     route("admin/portal", "routes/admin.position-portal.tsx"),

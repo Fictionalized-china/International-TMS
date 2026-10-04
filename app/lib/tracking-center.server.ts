@@ -26,6 +26,8 @@ type TrackingCenterDbRow = {
   batch_plate: string | null;
   planned_arrival_at: string | null;
   actual_arrival_at: string | null;
+  actual_pickup_at: string | null;
+  planned_port_arrival_at: string | null;
   latest_event: string | null;
   latest_event_at: string | null;
   latest_location: string | null;
@@ -45,7 +47,7 @@ export async function loadTrackingCenter(request: Request, current: SessionUser)
   const [result, operationalRules] = await Promise.all([env.DB.prepare(
     `SELECT o.id order_id,o.order_number,c.name customer_name,o.business_type,o.status order_status,
             o.is_overdue,o.exception_status,o.origin_city,o.destination_city,o.current_step_name,
-            owner.display_name owner_name,
+            owner.display_name owner_name,s.actual_pickup_at,o.planned_port_arrival_at,
             a.id assignment_id,COALESCE(carrier.name,a.carrier_name) assignment_carrier,a.plate_number assignment_plate,
             b.id batch_id,b.batch_number,b.road_status batch_road_status,b.overseas_vehicle_plate batch_plate,
             COALESCE(b.planned_arrival_at,a.planned_arrival_at,s.estimated_delivery_at,o.requested_delivery_date) planned_arrival_at,
@@ -82,7 +84,7 @@ export async function loadTrackingCenter(request: Request, current: SessionUser)
       WHERE o.organization_id=? AND ${visibility.sql}
         AND o.status NOT IN ('draft','submitted','cancelled')
       ORDER BY o.is_overdue DESC,COALESCE(s.updated_at,o.workflow_updated_at,o.updated_at) DESC
-      LIMIT 600`,
+      `,
   ).bind(current.organizationId, ...visibility.values).all<TrackingCenterDbRow>(), loadOperationalRules(current.organizationId)]);
 
   const now = new Date();

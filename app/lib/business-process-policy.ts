@@ -13,6 +13,7 @@ export const businessProcessPolicyDefinitions = [
   { key: "dispatch.request_positions", label: "发起找车岗位", group: "运踪与商务调度", kind: "positions", defaultValue: "OPERATION,OPERATION_SUPERVISOR,TRACKING" },
   { key: "dispatch.handler_positions", label: "找车办理岗位", group: "运踪与商务调度", kind: "positions", defaultValue: "BUSINESS_ROUTE" },
   { key: "dispatch.automatic", label: "资料齐全时自动生成找车任务", group: "运踪与商务调度", kind: "boolean", defaultValue: "1" },
+  { key: "dispatch.required_order_fields", label: "找车前必备订单字段", group: "运踪与商务调度", kind: "fields", defaultValue: "shipper_name,shipper_contact,shipper_phone,origin_city,origin_address,consignee_name,destination_city,destination_address,cargo_description,exit_port" },
   { key: "settlement.after_actual_export", label: "实际出境后开放对账签核", group: "应收应付", kind: "boolean", defaultValue: "1" },
   { key: "settlement.sequential", label: "费用签核必须按顺序办理", group: "应收应付", kind: "boolean", defaultValue: "1" },
   { key: "receivable.initiator_positions", label: "应收发起岗位", group: "应收应付", kind: "positions", defaultValue: "SALES,CS" },
@@ -29,6 +30,7 @@ export const businessProcessPolicyDefinitions = [
 export type BusinessProcessPolicyKey = typeof businessProcessPolicyDefinitions[number]["key"];
 export type BusinessProcessPolicy = Record<BusinessProcessPolicyKey, string>;
 export const defaultBusinessProcessPolicy = Object.fromEntries(businessProcessPolicyDefinitions.map(d => [d.key, d.defaultValue])) as BusinessProcessPolicy;
+export const dispatchOrderFieldCodes = ["shipper_name","shipper_contact","shipper_phone","origin_city","origin_address","consignee_name","consignee_contact","consignee_phone","destination_city","destination_address","cargo_description","exit_port","requested_pickup_date","overseas_warehouse_id"];
 
 export function policyPositions(policy: BusinessProcessPolicy, key: BusinessProcessPolicyKey) {
   return policy[key].split(",").map(v => v.trim()).filter(Boolean);
@@ -47,6 +49,7 @@ export function validateBusinessProcessPolicy(values: Partial<Record<BusinessPro
       const codes = [...new Set(value.split(",").map(v => v.trim()).filter(Boolean))];
       if (definition.kind === "positions" && !codes.length) throw new Error(`${definition.label}不能为空，避免无人可办理`);
       if (codes.some(code => !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(code))) throw new Error(`${definition.label}包含无效代码`);
+      if (definition.kind === "fields" && codes.some(code=>!dispatchOrderFieldCodes.includes(code))) throw new Error("找车字段代码不存在，请使用页面列出的订单字段，避免无法解除的门禁");
       normalized[definition.key] = codes.join(",");
     }
   }
