@@ -14,6 +14,7 @@ import { requireOrderAccess } from "../lib/order-access.server";
 import { validatePhone, valueOf } from "../lib/validation";
 import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 import { writeAudit } from "../lib/audit.server";
+import { persistExpenseDirectionAction, retryOrderSettlementSync } from "../lib/expense-direction-submit.server";
 import { synchronizeOrderDocumentsModuleStatus } from "../lib/documents-module-status.server";
 import {
   advanceOrderModule,
@@ -1461,7 +1462,11 @@ export async function loader({ request, params }: Route.LoaderArgs) {
   const policyRemediationEdit = workflowFields.some(
     (field)=>field.isActive && field.isRequired && !field.present,
   ) && !["completed","cancelled"].includes(order.status);
+  const settlementSyncPending = moduleCode === "costs" && Boolean(await env.DB.prepare(
+    "SELECT 1 FROM order_settlement_sync_requests WHERE organization_id=? AND order_id=?",
+  ).bind(current.organizationId,orderId).first());
   return {
+    settlementSyncPending,
     current,
     order: canViewExpenseSummary
       ? order
@@ -1580,6 +1585,13 @@ export async function action({ request, params }: Route.ActionArgs) {
   if (!currentModule) return { formError: "订单模块不存在" };
   if (!currentModule.enabled)
     return { formError: "当前工作流未启用该模块" };
+  if (intent === "settlement_sync_retry" && moduleCode === "costs") {
+    if (!canAccessSettlementWorkbench(current.permissions) && !canManageOrderModule(current,"costs")) return { formError:"当前账号无权更新结算状态" };
+    const now = new Date().toISOString();
+    const pending = await retryOrderSettlementSync({db:env.DB,organizationId:current.organizationId,orderId,
+      refresh:() => refreshOrderSettlementState(current.organizationId,orderId,now)});
+    return {success:pending ? "签核记录已保存，结算状态仍待同步，请稍后重试" : "结算状态已同步，原有签核记录保持不变"};
+  }
   const isOrdinaryTrackingMutation =
     moduleCode === "tracking" &&
     ["tracking_add", "tracking_option_toggle"].includes(intent);
@@ -3739,44 +3751,20 @@ export async function action({ request, params }: Route.ActionArgs) {
         )
           .bind(current.organizationId, orderId, direction)
           .first<ExpenseDirectionControl>()) || emptyExpenseDirectionControl(direction);
-      if (expenseDirectionActionCompleted(existing, action))
-        return { formError: `${expenseDirectionActionLabel(action, direction)}已经完成并锁定，请刷新页面查看最新状态` };
+      if (expenseDirectionActionCompleted(existing, action)) {
+        const pending = await retryOrderSettlementSync({db:env.DB,organizationId:current.organizationId,orderId,
+          refresh:() => refreshOrderSettlementState(current.organizationId,orderId,new Date().toISOString())});
+        return {success:`${expenseDirectionActionLabel(action,direction)}已记录${pending ? "，结算状态待同步" : "，无需重复签核"}`};
+      }
       const now = new Date().toISOString();
-      await env.DB.prepare(
-        `INSERT INTO order_expense_direction_controls(organization_id,order_id,direction,updated_at)
-         VALUES(?,?,?,?) ON CONFLICT(order_id,direction) DO UPDATE SET updated_at=excluded.updated_at`,
-      )
-        .bind(current.organizationId, orderId, direction, now)
-        .run();
       const notes = valueOf(form, "notes") || null;
-      const updateResult = controlAction === "confirm"
-        ? await env.DB.prepare(
-            `UPDATE order_expense_direction_controls
-             SET confirmed=1,confirmed_by_user_id=?,confirmed_at=?,notes=COALESCE(?,notes),updated_at=?
-             WHERE organization_id=? AND order_id=? AND direction=? AND confirmed=0`,
-          ).bind(current.userId, now, notes, now, current.organizationId, orderId, direction).run()
-        : controlAction === "business_review"
-          ? await env.DB.prepare(
-              `UPDATE order_expense_direction_controls
-               SET business_reviewed=1,business_reviewed_by_user_id=?,business_reviewed_at=?,
-                   business_locked=1,business_locked_by_user_id=?,business_locked_at=?,notes=COALESCE(?,notes),updated_at=?
-               WHERE organization_id=? AND order_id=? AND direction=? AND business_reviewed=0`,
-            ).bind(current.userId, now, current.userId, now, notes, now, current.organizationId, orderId, direction).run()
-          : await env.DB.prepare(
-              `UPDATE order_expense_direction_controls
-               SET finance_reviewed=1,finance_reviewed_by_user_id=?,finance_reviewed_at=?,
-                   finance_locked=1,finance_locked_by_user_id=?,finance_locked_at=?,notes=COALESCE(?,notes),updated_at=?
-               WHERE organization_id=? AND order_id=? AND direction=? AND finance_reviewed=0`,
-            ).bind(current.userId, now, current.userId, now, notes, now, current.organizationId, orderId, direction).run();
-      if (!Number(updateResult.meta?.changes || 0))
-        return { formError: "该签核已由其他人员更新，请刷新后查看最新状态" };
-      if (controlAction === "confirm")
-        await env.DB.prepare(
-          "UPDATE business_expenses SET stage='confirmed',updated_at=? WHERE organization_id=? AND order_id=? AND direction=? AND stage='estimated'",
-        )
-          .bind(now, current.organizationId, orderId, direction)
-          .run();
-      await refreshOrderSettlementState(current.organizationId, orderId, now);
+      const saved = await persistExpenseDirectionAction({db:env.DB,organizationId:current.organizationId,orderId,
+        direction,action,userId:current.userId,notes,now,
+        refresh:() => refreshOrderSettlementState(current.organizationId,orderId,now)});
+      if (!saved.applied) return {
+        actionKind:"expense_direction_control",
+        success:`${expenseDirectionActionLabel(action,direction)}已记录${saved.syncPending ? "，结算状态待同步" : "，无需重复签核"}`,
+      };
       await writeAudit({
         request,
         action: `expense.${direction}.${controlAction}`,
@@ -3793,7 +3781,7 @@ export async function action({ request, params }: Route.ActionArgs) {
       };
       return {
         actionKind: "expense_direction_control",
-        success: `${direction === "receivable" ? "应收" : "应付"}${labels[controlAction]}`,
+        success: `${direction === "receivable" ? "应收" : "应付"}${labels[controlAction]}${saved.syncPending ? "；签核已保存，结算状态待同步" : ""}`,
       };
     }
     if (intent === "expense_control") {
@@ -4665,6 +4653,7 @@ export default function OrderModulePage({
         </div>
       </header>
       <ActionToast message={actionMessage} tone={actionFailed ? "error" : "success"} data={actionData} />
+      <SettlementSyncNotice data={loaderData} busy={busy}/>
       {!loaderData.access.canEdit && (
         <div className="alert module-access-note">
           <strong>当前为只读状态</strong>
@@ -4808,6 +4797,12 @@ export default function OrderModulePage({
   );
 }
 
+function SettlementSyncNotice({data,busy}:{data:Route.ComponentProps["loaderData"];busy:boolean}) {
+  if (!data.settlementSyncPending) return null;
+  const canRetry = canAccessSettlementWorkbench(data.current.permissions) || canManageOrderModule(data.current,"costs");
+  return <div className="alert warning"><span>费用签核已保存，结算状态尚待同步。</span>{canRetry && <Form method="post"><input type="hidden" name="intent" value="settlement_sync_retry"/><button className="secondary" disabled={busy}>重试结算同步</button></Form>}</div>;
+}
+
 export function EmbeddedOrderModule({
   data,
   busy,
@@ -4881,6 +4876,7 @@ export function EmbeddedOrderModule({
   return (
     <embeddedModuleFormAction.Provider value={actionUrl}>
       <div className={`linear-module-embedded${readOnly ? " is-read-only" : ""}`} id="module-business-data">
+        <SettlementSyncNotice data={scopedData} busy={busy}/>
         {!scopedData.access.canEdit && (
           <div className="alert module-access-note">
             <strong>当前为只读状态</strong>

@@ -323,7 +323,7 @@ def triggers(connection: sqlite3.Connection) -> list[dict[str, Any]]:
         "SELECT name,tbl_name,sql FROM sqlite_master WHERE type='trigger' AND sql IS NOT NULL ORDER BY name"
     ).fetchall()
     pattern = re.compile(
-        r"^\s*CREATE\s+TRIGGER\s+\S+\s+BEFORE\s+"
+        r"^\s*CREATE\s+TRIGGER\s+\S+\s+(BEFORE|AFTER)\s+"
         r"(INSERT|DELETE|UPDATE(?:\s+OF\s+(.+?))?)\s+ON\s+(\S+)\s*"
         r"(?:(?:WHEN)\s+(.+?))?\s*BEGIN\s+(.+?)\s*END\s*;?\s*$",
         re.IGNORECASE | re.DOTALL,
@@ -332,7 +332,7 @@ def triggers(connection: sqlite3.Connection) -> list[dict[str, Any]]:
         match = pattern.match(sql)
         if not match:
             raise ValueError(f"Cannot parse trigger {name}")
-        event_source, update_columns, parsed_table, condition, body = match.groups()
+        timing, event_source, update_columns, parsed_table, condition, body = match.groups()
         event = "UPDATE" if event_source.upper().startswith("UPDATE") else event_source.upper()
         predicates: list[str] = []
         if update_columns:
@@ -345,14 +345,18 @@ def triggers(connection: sqlite3.Connection) -> list[dict[str, Any]]:
             predicates.append("(" + mysql_condition(condition) + ")")
         predicate = " AND ".join(predicates) if predicates else "TRUE"
         message_match = re.search(r"RAISE\s*\(\s*ABORT\s*,\s*'((?:''|[^'])*)'\s*\)", body, re.IGNORECASE | re.DOTALL)
-        if not message_match:
-            raise ValueError(f"Cannot find RAISE message in trigger {name}")
-        message = message_match.group(1).replace("''", "'").replace("'", "''")
+        if message_match:
+            message = message_match.group(1).replace("''", "'").replace("'", "''")
+            mysql_body = f"SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '{message}';"
+        elif timing.upper() == "AFTER" and name.startswith(("batch_order_claim_", "batch_claim_")):
+            mysql_body = mysql_condition(body)
+        else:
+            raise ValueError(f"Unsupported trigger body in {name}")
         mysql_name = safe_name("trg", name)
         statement = (
-            f"CREATE TRIGGER {quote(mysql_name)} BEFORE {event} ON {quote(parsed_table.strip('`\"'))} "
+            f"CREATE TRIGGER {quote(mysql_name)} {timing.upper()} {event} ON {quote(parsed_table.strip('`\"'))} "
             "FOR EACH ROW BEGIN "
-            f"IF {predicate} THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '{message}'; END IF; "
+            f"IF {predicate} THEN {mysql_body} END IF; "
             "END"
         )
         result.append({"table": table, "name": mysql_name, "sql": statement})

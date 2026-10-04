@@ -5,6 +5,7 @@ import {
 } from "./batch-tracking-action-policy";
 import { frozenWorkflowFieldActionPolicy } from "./workflow-field-action-policy";
 import { loadLockedWorkflowStageContext } from "./workflow-instance-stage-gate.server";
+import { normalizeWorkflowFieldHandlerPositionCodes } from "./workflow-field-position-access";
 
 export type BatchTrackingActionOrder = {
   orderId: string;
@@ -22,6 +23,7 @@ type FieldPlacementRow = {
   step_key: string;
   is_active: number;
   is_required: number;
+  handler_position_codes: string | null;
 };
 
 /**
@@ -35,6 +37,7 @@ export async function loadBatchTrackingActionPolicy(input: {
   organizationId: string;
   orders: readonly BatchTrackingActionOrder[];
   fieldKey: string;
+  actor?: { positionCode:string|null; privileged:boolean };
 }): Promise<LoadedBatchTrackingActionPolicy> {
   const uniqueOrders = [...new Map(
     input.orders
@@ -66,7 +69,7 @@ export async function loadBatchTrackingActionPolicy(input: {
     }
 
     const fieldRows = await input.db.prepare(
-      `SELECT f.module_code,f.field_key,f.step_key,f.is_active,f.is_required
+      `SELECT f.module_code,f.field_key,f.step_key,f.is_active,f.is_required,f.handler_position_codes
        FROM transport_orders o
        JOIN workflow_instances wi
          ON wi.id=o.workflow_instance_id
@@ -91,13 +94,15 @@ export async function loadBatchTrackingActionPolicy(input: {
         isRequired: field.is_required === 1,
       })),
     };
+    const policy = frozenWorkflowFieldActionPolicy({context:exactFieldContext,moduleCode:"tracking",fieldKey:input.fieldKey});
+    const field = fieldRows.results.find((item) => item.module_code === "tracking" && item.is_active === 1 && item.step_key === policy.targetStepKey);
+    const actorAllowed = !input.actor || input.actor.privileged || !field ||
+      normalizeWorkflowFieldHandlerPositionCodes(field.handler_position_codes).includes(input.actor.positionCode || "");
     orderPolicies.push({
       ...order,
-      policy: frozenWorkflowFieldActionPolicy({
-        context: exactFieldContext,
-        moduleCode: "tracking",
-        fieldKey: input.fieldKey,
-      }),
+      policy: policy.editable && !actorAllowed
+        ? {...policy,status:"read_only",editable:false,reason:"当前岗位不在该运踪字段的填写岗位配置中，请由配置的运踪负责人办理"}
+        : policy,
     });
   }
 

@@ -16345,6 +16345,10 @@ a.order-module-card.read-only:hover {
     justify-self: stretch;
   }
 }
+.inline-loading-workbench .loading-batch-fields {
+  grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr));
+  align-items: end;
+}
 @media (max-width: 640px) {
   .loading-tracking-filter { grid-template-columns: 1fr; }
   .loading-tracking-filter__query { max-width: none; }

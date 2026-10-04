@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { applyLoadingIntegrityMigration, loadingIntegrityTriggers } from "./loading-integrity-migration.mjs";
 
 const migrations = [
   {
@@ -223,6 +224,12 @@ const migrations = [
         WHERE status='active' AND code='pos_operation_supervisor'`);
     },
   },
+  {
+    version: 167,
+    name: "loading_integrity_and_sync",
+    definition: "transport_batch_order_claims;loading_planning_submissions;order_settlement_sync_requests\n" + JSON.stringify(loadingIntegrityTriggers),
+    up: applyLoadingIntegrityMigration,
+  },
 ];
 
 for (const migration of migrations) {
@@ -241,6 +248,9 @@ export const requiredMysqlSchemaColumns = [
   ["analytics_report_snapshots", "payload_json"],
   ["analytics_port_settings", "port_name"],
   ["operational_rule_configs", "rule_code"],
+  ["transport_batch_order_claims", "batch_id"],
+  ["loading_planning_submissions", "sync_status"],
+  ["order_settlement_sync_requests", "revision"],
 ];
 
 async function addColumnIfMissing(connection, table, column, definition) {
@@ -303,7 +313,11 @@ export async function inspectMysqlSchema(connection) {
             OR (table_name='analytics_metric_configs' AND column_name='metric_code')
             OR (table_name='analytics_manual_metric_values' AND column_name='numeric_value')
             OR (table_name='analytics_report_snapshots' AND column_name='payload_json')
-            OR (table_name='analytics_port_settings' AND column_name='port_name'))`,
+            OR (table_name='analytics_port_settings' AND column_name='port_name')
+            OR (table_name='operational_rule_configs' AND column_name='rule_code')
+            OR (table_name='transport_batch_order_claims' AND column_name='batch_id')
+            OR (table_name='loading_planning_submissions' AND column_name='sync_status')
+            OR (table_name='order_settlement_sync_requests' AND column_name='revision'))`,
     ).then(([rows]) => rows),
   ]);
   return evaluateMysqlSchema({ appliedMigrations, columns });

@@ -6,7 +6,7 @@ import { OrderNumberLink } from "../components/EntityNumberLink";
 import { OrganizationAssigneePicker } from "../components/OrganizationAssigneePicker";
 import { ActionToast } from "../components/ActionToast";
 import { isActiveOrganizationAssigneeForPositions, listActiveOrganizationAssignees } from "../lib/organization-assignee.server";
-import { requireSessionUser } from "../lib/auth.server";
+import { requireSessionUser, type SessionUser } from "../lib/auth.server";
 import { writeAudit } from "../lib/audit.server";
 import { synchronizeOrderDocumentsModuleStatus } from "../lib/documents-module-status.server";
 import { valueOf } from "../lib/validation";
@@ -440,6 +440,7 @@ async function loadFreshBatchTrackingAction(
   organizationId: string,
   batchId: string,
   fieldKey: "tracking_milestone" | "actual_exit_at",
+  current:SessionUser,
 ): Promise<BatchTrackingActionPolicy> {
   const orders = await env.DB.prepare(
     `SELECT bo.order_id,o.order_number
@@ -454,6 +455,7 @@ async function loadFreshBatchTrackingAction(
     organizationId,
     orders: batchTrackingPolicyOrders(orders.results),
     fieldKey,
+    actor:{positionCode:current.positionCode,privileged:["BOSS","DEVELOPER"].includes(current.positionCode || "") || current.roleCodes.some((code)=>["owner","boss","developer"].includes(code))},
   });
   return loaded.batch;
 }
@@ -758,12 +760,14 @@ export async function loader({request,params}:Route.LoaderArgs){
     organizationId:current.organizationId,
     orders:batchTrackingPolicyOrders(orders.results),
     fieldKey:"tracking_milestone",
+    actor:{positionCode:current.positionCode,privileged:["BOSS","DEVELOPER"].includes(current.positionCode || "") || current.roleCodes.some((code)=>["owner","boss","developer"].includes(code))},
   })).batch;
   const actualExitAction=(await loadBatchTrackingActionPolicy({
     db:env.DB,
     organizationId:current.organizationId,
     orders:batchTrackingPolicyOrders(orders.results),
     fieldKey:"actual_exit_at",
+    actor:{positionCode:current.positionCode,privileged:["BOSS","DEVELOPER"].includes(current.positionCode || "") || current.roleCodes.some((code)=>["owner","boss","developer"].includes(code))},
   })).batch;
   const batchCargoItems=(await env.DB.prepare(`SELECT i.id,i.order_id,i.line_no,i.cargo_name_cn,i.cargo_name_en,i.hs_code,i.overseas_hs_code,
       i.package_type,i.package_count,i.pieces_per_package,i.gross_weight_per_package_kg,
@@ -847,6 +851,8 @@ export async function action({request,params}:Route.ActionArgs){
   if(!batch)return{formError:"配载批次无效"};
   const batchApproval=await env.DB.prepare("SELECT batch_number,approval_status,operation_supervisor_user_id,operation_assignee_user_id,document_assignee_user_id,responsibility_revision,actual_departure_at,road_status FROM transport_batches WHERE id=? AND organization_id=?").bind(batchId,current.organizationId).first<{batch_number:string;approval_status:string;operation_supervisor_user_id:string|null;operation_assignee_user_id:string|null;document_assignee_user_id:string|null;responsibility_revision:string|null;actual_departure_at:string|null;road_status:string}>();
   if(!batchApproval)return{formError:"配载单审核状态无效"};
+  const pendingPlan = await env.DB.prepare("SELECT 1 FROM loading_planning_submissions WHERE organization_id=? AND batch_id=? AND sync_status='pending'").bind(current.organizationId,batchId).first();
+  if(pendingPlan)return{formError:"配载规划已保存，系统资料尚待同步，请到配载单跟踪列表重试同步后继续办理"};
   if(responsibilityIntent){
     if(!batchRequiresSupervisorApproval(batchApproval.batch_number))return{formError:"整车批次不进入拼车配载审核与统一分配"};
     if(!privileged&&batchApproval.operation_supervisor_user_id!==current.userId)return{formError:"该配载单已指派给其他操作主管审核"};
@@ -981,6 +987,7 @@ export async function action({request,params}:Route.ActionArgs){
         current.organizationId,
         batchId,
         intent==="exit_confirm"?"actual_exit_at":"tracking_milestone",
+        current,
       )
     : null;
   if(trackingActionPolicy&&!trackingActionPolicy.editable)return{formError:trackingActionPolicy.reason??"当前冻结工作流不允许办理该运踪动作"};

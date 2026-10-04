@@ -4,7 +4,8 @@ import { chunkD1Rows, chunkD1Values, d1Placeholders } from "./d1-bindings";
 import { ensureOrderModules, syncOrderWorkflowSnapshot } from "./order-modules.server";
 import { orderVisibilitySql } from "./order-access.server";
 import { pzNumber, randomPzSuffix } from "./package-identity";
-import { refreshLoadingManifest } from "./loading-manifest.server";
+import { ensureBatchSystemDocuments } from "./loading-manifest.server";
+import { sha256 } from "./crypto.server";
 import { synchronizeBatchTransport } from "./batch-transport-sync.server";
 import {
   loadingBatchRequiredValueError,
@@ -173,8 +174,18 @@ async function loadBatchResponsibilityTransferTargets(input: {
   return targets;
 }
 
-export async function createOperationPlannedBatch(input: {
+type PlannedBatchResult = {
+  batchId: string; batchNumber: string; orderIds: string[];
+  operationSupervisorUserId: string | null; totalWeight: number; totalVolume: number;
+  receivableBaseAmount: number; costBaseAmount: number; costAllocationId: string;
+};
+type PlanningSubmission = {
+  payload_hash: string; batch_id: string; result_json: string | PlannedBatchResult;
+  sync_status: "pending" | "complete";
+};
+type PlanningInput = {
   current: SessionUser;
+  requestId: string;
   orderIds: readonly string[];
   batchName: string;
   carrierId: string;
@@ -193,8 +204,24 @@ export async function createOperationPlannedBatch(input: {
   costCurrency: string;
   costExchangeRate: number;
   costAllocationMethod: "auto" | AllocationMethod;
-}) {
-  const orderIds = [...new Set(input.orderIds.filter(Boolean))];
+};
+
+async function loadSubmission(input: Pick<PlanningInput, "current" | "requestId">) {
+  return env.DB.prepare(`SELECT payload_hash,batch_id,result_json,sync_status FROM loading_planning_submissions
+    WHERE organization_id=? AND actor_user_id=? AND request_id=?`)
+    .bind(input.current.organizationId,input.current.userId,input.requestId).first<PlanningSubmission>();
+}
+
+export async function createOperationPlannedBatch(input: PlanningInput) {
+  if (!/^[a-zA-Z0-9-]{16,128}$/.test(input.requestId)) throw new Error("提交标识无效，请刷新页面后重试");
+  const orderIds = [...new Set(input.orderIds.filter(Boolean))].sort();
+  const { current: _current, requestId: _requestId, ...payload } = input;
+  const payloadHash = await sha256(JSON.stringify({ ...payload, orderIds }));
+  const previous = await loadSubmission(input);
+  if (previous) {
+    if (previous.payload_hash !== payloadHash) throw new Error("这次提交已保存过不同的规划，请刷新页面后发起新规划");
+    return resumeOperationPlannedBatch(input.current,previous.batch_id);
+  }
   if (orderIds.length < 2) throw new Error("拼车配载至少选择 2 票订单");
   if (orderIds.length > 50) throw new Error("单张配载单最多选择 50 票订单");
   if (!input.carrierId || !input.vehicleId || !input.driverId) {
@@ -209,6 +236,8 @@ export async function createOperationPlannedBatch(input: {
   if (!Number.isFinite(input.costExchangeRate) || input.costExchangeRate <= 0) {
     throw new Error("费用汇率必须大于 0");
   }
+  if (!["CNY","USD","RUB","KZT","UZS"].includes(input.costCurrency)) throw new Error("成本币种无效");
+  if (input.costCurrency === "CNY" && input.costExchangeRate !== 1) throw new Error("人民币成本折算汇率必须为 1");
   const [operationAssigneeValid, documentAssigneeValid] = await Promise.all([
     isActiveOrganizationAssigneeForPositions(
       input.current.organizationId,
@@ -230,6 +259,8 @@ export async function createOperationPlannedBatch(input: {
     `${planningCandidateSelect} AND ${visibility.sql} AND o.id IN (${d1Placeholders(orderIds.length)})`,
   ).bind(input.current.organizationId, ...visibility.values, ...orderIds).all<LoadingPlanningCandidate>();
   if (rows.results.length !== orderIds.length) {
+    const winner = await loadSubmission(input);
+    if (winner?.payload_hash === payloadHash) return resumeOperationPlannedBatch(input.current,winner.batch_id);
     throw new Error("部分订单已不满足配载条件、已被其他配载单占用或不在当前权限范围，请刷新后重选");
   }
   const byId = new Map(rows.results.map((row) => [row.order_id, row]));
@@ -251,6 +282,11 @@ export async function createOperationPlannedBatch(input: {
   }
   if (!same((row) => row.operation_supervisor_user_id) || !first.operation_supervisor_user_id) {
     throw new Error("所选订单必须已指派同一操作主管，请按负责人拆分配载");
+  }
+  const privileged = ["BOSS","DEVELOPER"].includes(input.current.positionCode || "") ||
+    input.current.roleCodes.some((code) => ["owner","boss","developer"].includes(code));
+  if (!privileged && first.operation_supervisor_user_id !== input.current.userId) {
+    throw new Error("仅订单已指派的操作主管可以生成本批配载单");
   }
   const workflowOrders = await loadLoadingBatchWorkflowOrders(input.current.organizationId, orderIds);
   const policies = resolveLoadingBatchFieldPolicies(workflowOrders);
@@ -320,6 +356,12 @@ export async function createOperationPlannedBatch(input: {
   })), input.costAmount, allocationMethod);
   const costAllocationId = crypto.randomUUID();
   const density = allocationDensity(totalWeight, totalVolume);
+  const result: PlannedBatchResult = {
+    batchId,batchNumber,orderIds,operationSupervisorUserId:first.operation_supervisor_user_id,
+    totalWeight,totalVolume,
+    receivableBaseAmount:candidates.reduce((sum,row) => sum + Number(row.receivable_base_amount || 0),0),
+    costBaseAmount:input.costAmount * input.costExchangeRate,costAllocationId,
+  };
   const statements: D1PreparedStatement[] = [env.DB.prepare(`INSERT INTO transport_batches(
       id,organization_id,order_id,batch_number,batch_name,origin_location,destination_location,
       planned_departure_at,planned_arrival_at,status,notes,route_key,warehouse_id,carrier_id,
@@ -333,9 +375,13 @@ export async function createOperationPlannedBatch(input: {
       input.plannedDepartureAt || null,input.plannedArrivalAt || null,"planning",input.notes || null,routeKey,
       first.warehouse_id,carrier.id,input.current.userId,now,now,input.borderPort || null,input.customsLocation || null,
       null,input.routeNotes || null,input.plannedLoadingAt || null,carrier.name,vehicle.vehicle_type,1,
-      vehicle.plate_number.trim().toUpperCase(),driver.name.trim(),driver.phone.trim(),"approved",
+      vehicle.plate_number.trim().toUpperCase(),driver.name.trim(),driver.phone.trim(),"draft",
       first.operation_supervisor_user_id,input.operationAssigneeUserId,input.documentAssigneeUserId,
       responsibilityRevision,input.current.userId,now,input.current.userId,now,
+    ), env.DB.prepare(`INSERT INTO loading_planning_submissions(
+      organization_id,actor_user_id,request_id,payload_hash,batch_id,result_json,sync_status,created_at,updated_at
+    ) VALUES(?,?,?,?,?,?,'pending',?,?)`).bind(
+      input.current.organizationId,input.current.userId,input.requestId,payloadHash,batchId,JSON.stringify(result),now,now,
     ), env.DB.prepare(`INSERT INTO transport_batch_vehicles(
       id,organization_id,batch_id,vehicle_no,vehicle_type,plate_number,carrier_id,driver_name,driver_phone,
       capacity_weight_kg,capacity_volume_cbm,status,created_at,updated_at,vehicle_master_id,driver_master_id
@@ -434,33 +480,6 @@ export async function createOperationPlannedBatch(input: {
       }
     }
   }
-  statements.push(assignedBatchNotificationStatement(env.DB, {
-    organizationId: input.current.organizationId,
-    batchId,
-    batchNumber,
-    assigneeUserId: input.operationAssigneeUserId,
-    actorUserId: input.current.userId,
-    responsibilityLabel: "操作职责",
-    now,
-  }));
-  statements.push(warehouseBatchReadyNotificationStatement(env.DB, {
-    organizationId: input.current.organizationId,
-    batchId,
-    batchNumber,
-    warehouseId: first.warehouse_id,
-    actorUserId: input.current.userId,
-    now,
-  }));
-  statements.push(assignedBatchNotificationStatement(env.DB, {
-    organizationId: input.current.organizationId,
-    batchId,
-    batchNumber,
-    assigneeUserId: input.documentAssigneeUserId,
-    actorUserId: input.current.userId,
-    responsibilityLabel: "单证与报关职责",
-    targetTab: "documents",
-    now,
-  }));
   for (const orderChunk of chunkD1Values(orderIds, 6)) {
     statements.push(env.DB.prepare(`UPDATE transport_orders SET
       exit_port=CASE WHEN ?<>'' THEN ? ELSE exit_port END,
@@ -468,21 +487,71 @@ export async function createOperationPlannedBatch(input: {
       WHERE organization_id=? AND id IN (${d1Placeholders(orderChunk.length)})`)
       .bind(input.borderPort,input.borderPort,input.customsLocation,input.customsLocation,now,input.current.organizationId,...orderChunk));
   }
-  await env.DB.batch(statements);
-  await activateLoadingModules(input.current.organizationId, orderIds, batchNumber, input.current.userId, now);
-  await synchronizeBatchTransport(input.current.organizationId, batchId, now);
-  await refreshLoadingManifest(input.current.organizationId, batchId, input.current.userId, now);
-  return {
-    batchId,
-    batchNumber,
-    orderIds,
-    operationSupervisorUserId: first.operation_supervisor_user_id,
-    totalWeight,
-    totalVolume,
-    receivableBaseAmount: candidates.reduce((sum, row) => sum + Number(row.receivable_base_amount || 0), 0),
-    costBaseAmount: input.costAmount * input.costExchangeRate,
-    costAllocationId,
-  };
+  try {
+    await env.DB.batch(statements);
+  } catch (error) {
+    // The database rolls back the complete batch if the request key or active
+    // order claim loses a race. A repeated identical request reuses its winner.
+    const winner = await loadSubmission(input);
+    if (winner && winner.payload_hash === payloadHash) return resumeOperationPlannedBatch(input.current,winner.batch_id);
+    if (String(error).includes("transport_batch_order_claims")) {
+      throw new Error("所选订单已被其他配载单占用，本次规划未保存，请刷新后重选");
+    }
+    throw error;
+  }
+  return resumeOperationPlannedBatch(input.current,batchId).catch((error) => {
+    console.error("LOADING_PLAN_SYNC_PENDING",{batchId,error:String(error)});
+    return { ...result, syncPending:true };
+  });
+}
+
+export async function resumeOperationPlannedBatch(current: SessionUser, batchId: string) {
+  const saved = await env.DB.prepare(`SELECT s.result_json,s.sync_status,b.batch_number,b.status,
+      b.operation_assignee_user_id,b.document_assignee_user_id,b.warehouse_id,b.created_by_user_id
+    FROM loading_planning_submissions s JOIN transport_batches b ON b.id=s.batch_id AND b.organization_id=s.organization_id
+    WHERE s.organization_id=? AND s.actor_user_id=? AND s.batch_id=?`)
+    .bind(current.organizationId,current.userId,batchId).first<PlanningSubmission & {
+      status:string; operation_assignee_user_id:string; document_assignee_user_id:string;
+      warehouse_id:string; created_by_user_id:string;
+    }>();
+  if (!saved) throw new Error("当前账号没有这次配载规划的同步记录");
+  const result = typeof saved.result_json === "string" ? JSON.parse(saved.result_json) as PlannedBatchResult : saved.result_json;
+  if (saved.status === "cancelled") throw new Error("配载单已取消，不能继续同步");
+  if (saved.sync_status === "complete") return { ...result, syncPending:false };
+  const token = crypto.randomUUID(), now = new Date().toISOString();
+  const expires = new Date(Date.now() - 10 * 60_000).toISOString();
+  const claim = await env.DB.prepare(`UPDATE loading_planning_submissions SET sync_token=?,sync_started_at=?,updated_at=?
+    WHERE organization_id=? AND batch_id=? AND sync_status='pending'
+      AND (sync_token IS NULL OR sync_started_at<?)`)
+    .bind(token,now,now,current.organizationId,batchId,expires).run();
+  if (!Number(claim.meta.changes)) return { ...result, syncPending:true };
+  try {
+    await activateLoadingModules(current.organizationId,result.orderIds,result.batchNumber,current.userId,now,batchId);
+    await synchronizeBatchTransport(current.organizationId,batchId,now);
+    if (!await ensureBatchSystemDocuments(current.organizationId,batchId,current.userId,now)) {
+      throw new Error("配载系统单据尚未完整生成");
+    }
+    await env.DB.batch([
+      env.DB.prepare(`UPDATE transport_batches SET approval_status='approved',updated_at=?
+        WHERE organization_id=? AND id=? AND status!='cancelled'`).bind(now,current.organizationId,batchId),
+      assignedBatchNotificationStatement(env.DB,{organizationId:current.organizationId,batchId,batchNumber:result.batchNumber,
+        assigneeUserId:saved.operation_assignee_user_id,actorUserId:current.userId,responsibilityLabel:"操作职责",now}),
+      assignedBatchNotificationStatement(env.DB,{organizationId:current.organizationId,batchId,batchNumber:result.batchNumber,
+        assigneeUserId:saved.document_assignee_user_id,actorUserId:current.userId,responsibilityLabel:"单证与报关职责",targetTab:"documents",now}),
+      warehouseBatchReadyNotificationStatement(env.DB,{organizationId:current.organizationId,batchId,batchNumber:result.batchNumber,
+        warehouseId:saved.warehouse_id,actorUserId:current.userId,now}),
+      env.DB.prepare(`UPDATE loading_planning_submissions SET sync_status='complete',sync_token=NULL,updated_at=?
+        WHERE organization_id=? AND batch_id=? AND sync_token=?`).bind(now,current.organizationId,batchId,token),
+    ]);
+    return { ...result, syncPending:false };
+  } catch (error) {
+    console.error("LOADING_PLAN_SYNC_PENDING",{batchId,error:String(error)});
+    return { ...result, syncPending:true };
+  } finally {
+    await env.DB.prepare(`UPDATE loading_planning_submissions SET sync_token=NULL
+      WHERE organization_id=? AND batch_id=? AND sync_token=?`)
+      .bind(current.organizationId,batchId,token).run().catch((error) => console.error("LOADING_SYNC_UNLOCK_FAILED",String(error)));
+  }
 }
 
 async function nextBatchNumber(organizationId: string, warehouseSerialCode: string, at: Date) {
@@ -501,6 +570,7 @@ async function activateLoadingModules(
   batchNumber: string,
   userId: string,
   now: string,
+  batchId: string,
 ) {
   for (const orderId of orderIds) await ensureOrderModules(organizationId, orderId);
   const modules: Array<{ id: string; order_id: string; current_step_code: string | null }> = [];
@@ -516,15 +586,16 @@ async function activateLoadingModules(
     statements.push(env.DB.prepare(`UPDATE order_module_instances SET status='in_progress',
       current_step_code='planned',current_step_name='配载成单',progress_percent=75,
       started_at=COALESCE(started_at,?),completed_at=NULL,blocking_reason=NULL,updated_at=?
-      WHERE id IN (${d1Placeholders(moduleChunk.length)})`)
+      WHERE status NOT IN ('completed','not_applicable') AND COALESCE(current_step_code,'')!='confirmed'
+        AND id IN (${d1Placeholders(moduleChunk.length)})`)
       .bind(now,now,...moduleChunk.map((module) => module.id)));
   }
   for (const moduleChunk of chunkD1Rows(modules, 12)) {
     statements.push(env.DB.prepare(`INSERT INTO order_module_history(
       id,organization_id,order_id,module_instance_id,action_code,action_name,from_step_code,
       to_step_code,to_step_name,actor_user_id,notes,occurred_at
-    ) VALUES ${moduleChunk.map(() => "(?,?,?,?,?,?,?,?,?,?,?,?)").join(",")}`)
-      .bind(...moduleChunk.flatMap((module) => [crypto.randomUUID(),organizationId,module.order_id,module.id,
+    ) VALUES ${moduleChunk.map(() => "(?,?,?,?,?,?,?,?,?,?,?,?)").join(",")} ON CONFLICT(id) DO NOTHING`)
+      .bind(...moduleChunk.flatMap((module) => [`${batchId}:${module.id}:create`,organizationId,module.order_id,module.id,
         "batch_create","操作主管配载规划",module.current_step_code,"planned","配载成单",userId,
         `加入配载单 ${batchNumber}`,now])));
   }

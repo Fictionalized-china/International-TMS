@@ -9,6 +9,7 @@ const harness = vi.hoisted(() => ({
     step_key: string;
     is_active: number;
     is_required: number;
+    handler_position_codes?:string;
   }>>(),
   queries: [] as string[],
   bindings: [] as unknown[][],
@@ -83,6 +84,17 @@ function database(): D1Database {
 }
 
 describe("batch tracking frozen action policy loader", () => {
+  it("uses the frozen field handler position for both tracking and legacy operator configurations",async()=>{
+    harness.contexts.set("order-1",context("tracking"));
+    const load=(positionCode:string)=>loadBatchTrackingActionPolicy({db:database(),organizationId:"org-1",
+      orders:[{orderId:"order-1"}],fieldKey:"tracking_milestone",actor:{positionCode,privileged:false}});
+    harness.fields.set("order-1",[{...trackingField(),handler_position_codes:"TRACKING"}]);
+    expect((await load("OPERATION")).batch.editable).toBe(false);
+    expect((await load("TRACKING")).batch.editable).toBe(true);
+    harness.fields.set("order-1",[{...trackingField(),handler_position_codes:"OPERATION"}]);
+    expect((await load("OPERATION")).batch.editable).toBe(true);
+    expect((await load("TRACKING")).batch.editable).toBe(false);
+  });
   beforeEach(() => {
     harness.contexts.clear();
     harness.fields.clear();
