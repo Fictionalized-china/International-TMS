@@ -75,6 +75,7 @@ function database() {
           }
           harness.bindings.push(values);
           return {
+            async first() { return null; },
             async all() {
               return {
                 results: sql.includes("assigned_to_actor")

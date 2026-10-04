@@ -53,11 +53,12 @@ describe("cloud production account blueprint", () => {
     }
   });
 
-  it("limits transport-resource business staff to carrier master data", () => {
+  it("adds commercial dispatch while keeping unrelated mutation permissions closed", () => {
     expect(accessModelRolePermissions.pos_business_route).toEqual([
       "dashboard.view",
       "carrier.view",
       "carrier.manage",
+      "order.view","shipment.view","dispatch.manage","dispatch.cost.view",
     ]);
     expect(accessModelRolePermissions.pos_front_loading).toBeUndefined();
   });

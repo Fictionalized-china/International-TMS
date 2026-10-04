@@ -13,6 +13,8 @@ export type AdminNavigationItemKey =
   | "dashboard"
   | "trackingCenter"
   | "analytics"
+  | "hrReports"
+  | "settlementApprovals"
   | "quotations"
   | "orders"
   | "loading"
@@ -78,6 +80,7 @@ export const adminNavigationPermissionGroups: readonly AdminNavigationPermission
     items: [
       navigationItem("trackingCenter", "调度与运踪", "统一查看调度、在途轨迹和时效预警。", "/admin/tracking-center", ["shipment.view"]),
       navigationItem("analytics", "汇总分析", "按授权范围查看业务、仓库和财务汇总。", "/admin/analytics", ["analytics.business.view"]),
+      navigationItem("hrReports", "人事回款与提成", "已回款订单、发车统计与提成登记。", "/admin/hr-reports", ["hr.report.view"]),
     ],
   },
   {
@@ -101,6 +104,7 @@ export const adminNavigationPermissionGroups: readonly AdminNavigationPermission
       navigationItem("documents", "文件中心", "查看订单与配载文件。", "/admin/documents", ["order.module.documents.view"], ["order.module.documents.view", "order.module.documents.manage"]),
       navigationItem("shipments", "运输单据", "查看运单与运输轨迹。", "/admin/shipments", ["shipment.view"]),
       navigationItem("billing", "费用结算", "查看获授权范围内的费用信息。", "/admin/billing", ["billing.view", "billing.sensitive.view"], undefined, "all"),
+      navigationItem("settlementApprovals", "出境后费用审批", "按配置和本单责任办理应收应付签核。", "/admin/settlement-approvals", ["settlement.signature.manage"]),
       navigationItem("cargo", "货物信息", "查看订单货物与包装信息。", "/admin/cargo", ["order.module.cargo.view"], ["order.module.cargo.view", "order.module.cargo.manage"]),
     ],
   },

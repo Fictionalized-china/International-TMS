@@ -1,12 +1,13 @@
-import { env } from "cloudflare:workers";
 import { businessProcessPolicyDefinitions, resolveBusinessProcessPolicy, validateBusinessProcessPolicy, type BusinessProcessPolicyKey } from "./business-process-policy";
 
-export async function loadBusinessProcessPolicy(organizationId: string, db: D1Database = env.DB) {
-  const rows = await db.prepare("SELECT policy_key,policy_value FROM business_process_policies WHERE organization_id=?").bind(organizationId).all<{ policy_key: string; policy_value: string }>();
+export async function loadBusinessProcessPolicy(organizationId: string, db?: D1Database) {
+  const database=db??(await import("cloudflare:workers")).env.DB;
+  const rows = await database.prepare("SELECT policy_key,policy_value FROM business_process_policies WHERE organization_id=?").bind(organizationId).all<{ policy_key: string; policy_value: string }>();
   return resolveBusinessProcessPolicy(rows.results);
 }
 
-export async function saveBusinessProcessPolicy(input: { organizationId: string; userId: string; values: Partial<Record<BusinessProcessPolicyKey, unknown>>; additionalStatements?: D1PreparedStatement[] }, db: D1Database = env.DB) {
+export async function saveBusinessProcessPolicy(input: { organizationId: string; userId: string; values: Partial<Record<BusinessProcessPolicyKey, unknown>>; additionalStatements?: D1PreparedStatement[] }, database?: D1Database) {
+  const db=database??(await import("cloudflare:workers")).env.DB;
   const values = validateBusinessProcessPolicy(input.values);
   const positions = await db.prepare("SELECT code FROM positions WHERE organization_id=? AND status='active'").bind(input.organizationId).all<{ code: string }>();
   const active = new Set(positions.results.map(p => p.code));

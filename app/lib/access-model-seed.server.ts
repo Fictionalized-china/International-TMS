@@ -102,6 +102,8 @@ export function accessModelBootstrapStatements(
       ...(["pos_sales","pos_customer_service"].includes(code) ? ["order.intake.manage"] : []),
       ...(["boss","developer","pos_sales","pos_customer_service","pos_operation","pos_operation_supervisor","pos_business_route","pos_finance"].includes(code)?["settlement.signature.manage"]:[]),
       ...(["boss","developer","pos_finance"].includes(code)?["settlement.offline_approval.record"]:[]),
+      ...(["boss","developer","pos_hr_admin"].includes(code)?["hr.report.view","hr.report.amount.view","hr.commission.manage","order.view","shipment.view","order.scope.all","data.export"]:[]),
+      ...(["pos_operation","pos_operation_supervisor"].includes(code)?["dispatch.request"]:[]),
       ...(code === "developer" ? ["workflow.process_policy.manage"] : []),
     ];
     const permissions = normalizeAdminNavigationPermissions([
@@ -121,13 +123,14 @@ export function accessModelBootstrapStatements(
   for (const [code] of accessModelPositions) {
     statements.push(db.prepare(
       `INSERT INTO position_portal_settings(
-        id,organization_id,position_id,order_scope,default_filter,created_at,updated_at
-       ) VALUES(?,?,?,?, 'open',?,?)`,
+        id,organization_id,position_id,order_scope,default_filter,business_data_scope,created_at,updated_at
+       ) VALUES(?,?,?,?, 'open',?,?,?)`,
     ).bind(
       `${organizationId}:portal:${code}`,
       organizationId,
       `${organizationId}:position:${code}`,
       "current_position",
+      ["BOSS","DEVELOPER","TRACKING","BUSINESS_ROUTE","HR_ADMIN"].includes(code)?"company":code==="OPERATION_SUPERVISOR"?"department":["WAREHOUSE","OVERSEAS_WAREHOUSE"].includes(code)?"warehouse":"self",
       now,
       now,
     ));

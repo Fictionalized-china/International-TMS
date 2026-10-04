@@ -7,6 +7,8 @@ import { AppIcon } from "../components/AppIcon";
 import { orderVisibilitySql } from "../lib/order-access.server";
 import { QueryPagination } from "../components/QueryPagination";
 import { paginateList, readListPage } from "../lib/list-pagination";
+import { MeetingWorkOverview } from "../components/MeetingWorkOverview";
+import { loadMeetingWorkOverview } from "../lib/meeting-work-overview.server";
 
 const dashboardViewCodes = ["todo", "blocked", "in_progress", "unsettled"] as const;
 type DashboardViewCode = (typeof dashboardViewCodes)[number];
@@ -42,7 +44,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       WHERE o.organization_id=? AND o.status!='cancelled'
         AND ${visibility.sql}
       ORDER BY o.is_overdue DESC,COALESCE(o.workflow_updated_at,o.updated_at,o.created_at) DESC
-      LIMIT 300`,
+      `,
   ).bind(user.organizationId, ...visibility.values).all<DashboardOrderRow>();
   const rows = result.results ?? [];
   const guidance = await loadOrderGuidance(env.DB, user.organizationId, rows.map(({ id, order_number, status }) => ({ id, order_number, status })));
@@ -61,6 +63,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const pagination = paginateList(selectedOrders, requestedPage);
   return {
     user,
+    meetingOverview:await loadMeetingWorkOverview(env.DB,user),
     selectedView,
     counts: {
       todo: currentTodos.length,
@@ -77,13 +80,14 @@ export function meta() { return [{ title: "运营总览 | International TMS" }];
 
 export default function DashboardIndex({ loaderData }: Route.ComponentProps) {
   const views: { code: DashboardViewCode; label: string; hint: string; icon: Parameters<typeof AppIcon>[0]["name"]; tone: string }[] = [
-    { code: "todo", label: "当前待办", hint: "按优先级继续处理", icon: "clipboardCheck", tone: "orange" },
+    { code: "todo", label: "未完成订单", hint: "岗位范围内的待处理订单", icon: "clipboardCheck", tone: "orange" },
     { code: "blocked", label: "存在阻断", hint: "需先补齐资料或门禁", icon: "shield", tone: "red" },
     { code: "in_progress", label: "业务办理中", hint: "运输与仓库执行中", icon: "truck", tone: "blue" },
     { code: "unsettled", label: "业务完成待结算", hint: "等待收付款与核销", icon: "billing", tone: "green" },
   ];
   const activeView = views.find((view) => view.code === loaderData.selectedView)!;
   return <div className="ops-dashboard ops-dashboard-filtered">
+    <MeetingWorkOverview overview={loaderData.meetingOverview}/>
     <header className="page-header ops-dashboard-header">
       <div><p className="eyebrow">OPERATIONS OVERVIEW</p><h1>运营总览</h1><p>{loaderData.user.displayName} · 点击下方条件即可切换对应订单，不需要重新填写筛选表单。</p></div>
       <div className="page-actions"><Link className="secondary" to="/admin/portal"><AppIcon name="layout" size={15}/>岗位待办</Link><Link className="primary" to="/admin/orders"><AppIcon name="clipboard" size={15}/>全部订单</Link></div>

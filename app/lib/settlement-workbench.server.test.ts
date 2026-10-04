@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+vi.mock("./meeting-settlement.server",()=>({assertMeetingSignoffsComplete:vi.fn(async()=>{})}));
+vi.mock("./position-access-profile.server",()=>({loadActivePositionAccessProfile:vi.fn(async()=>({positionCode:"CS"}))}));
 
 const dependency = vi.hoisted(() => ({
   refreshOrderCompletionStatus: vi.fn(async () => undefined),

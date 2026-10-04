@@ -27,9 +27,9 @@ describe("admin navigation permissions", () => {
       "businessData",
       "system",
     ]);
-    expect(adminNavigationPermissionItems).toHaveLength(22);
-    expect(new Set(adminNavigationPermissionItems.map((item) => item.key)).size).toBe(22);
-    expect(new Set(adminNavigationPermissionItems.map((item) => item.menuPermissionCode)).size).toBe(22);
+    expect(adminNavigationPermissionItems).toHaveLength(24);
+    expect(new Set(adminNavigationPermissionItems.map((item) => item.key)).size).toBe(adminNavigationPermissionItems.length);
+    expect(new Set(adminNavigationPermissionItems.map((item) => item.menuPermissionCode)).size).toBe(adminNavigationPermissionItems.length);
   });
 
   it("does not expose a menu from a business permission alone", () => {

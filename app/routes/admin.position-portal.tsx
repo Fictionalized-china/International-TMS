@@ -4,6 +4,8 @@ import type { Route } from "./+types/admin.position-portal";
 import { OrderNumberLink } from "../components/EntityNumberLink";
 import { OrderRouteFilterFields } from "../components/OrderRouteFilterFields";
 import { QueryPagination } from "../components/QueryPagination";
+import { MeetingWorkOverview } from "../components/MeetingWorkOverview";
+import { loadMeetingWorkOverview } from "../lib/meeting-work-overview.server";
 import { requireSessionUser } from "../lib/auth.server";
 import { paginateList, readListPage } from "../lib/list-pagination";
 import { canOperateCurrentOrder } from "../lib/order-access";
@@ -77,6 +79,7 @@ type PortalSettings = {
 
 export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request);
+  const meetingOverview=await loadMeetingWorkOverview(env.DB,current);
   const workflowFieldPermissions = current.positionCode
     ? (await env.DB.prepare(
       `SELECT workflow.name workflow_name,step.name step_name,
@@ -106,6 +109,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       orders: [] as never[],
       canViewAll: false,
       accessLimited: true,
+      meetingOverview,
       summary: { open: 0, blocked: 0, overdue: 0, actionable: 0, readonly: 0 },
       pagination: { page: 1, pageCount: 1, pageSize: 10, total: 0 },
       positions: [] as FilterOption[],
@@ -318,6 +322,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     orders: pagination.items,
     canViewAll,
     accessLimited: false,
+    meetingOverview,
     summary: {
       open: scopedOrders.filter((order) => !["completed", "cancelled"].includes(order.order_status)).length,
       blocked: scopedOrders.filter((order) => Boolean(order.blocker)).length,
@@ -359,6 +364,7 @@ export default function PositionPortal({ loaderData }: Route.ComponentProps) {
       <div><p className="eyebrow">TASK WORKBENCH</p><h1>任务工作台</h1><p>{current.displayName} · {canViewAll ? "可查看全部订单" : "只显示当前由本岗位负责推进的订单"} · 点击订单直接进入对应办理模组</p></div>
       <div className="page-actions"><span className="status-pill">当前筛选 {loaderData.pagination.total} 单</span></div>
     </header>
+    <MeetingWorkOverview overview={loaderData.meetingOverview}/>
 
     <section className="panel position-field-permission-summary">
       <details>

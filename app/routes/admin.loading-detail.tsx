@@ -535,7 +535,7 @@ function buildLoadingManifestHtml(batch: ManifestBatchRow, orders: ManifestOrder
 }
 
 const BATCH_DOCUMENT_TYPES=[
-  {code:"loading_manifest",name:"配载单",hint:"仓库生成 PZ 配载单时自动形成，只读留档，不参与审核或出境门禁",required:false},
+  {code:"loading_manifest",name:"配载单",hint:"操作主管生成 PZ 配载单时自动形成，只读留档，不参与仓库审核或出境门禁",required:false},
   {code:"vehicle_manifest",name:"装车清单",hint:"仓库按 PZ 配载订单、车辆和司机自动生成并同步",required:false},
   {code:"batch_waybill",name:"批次运单",hint:"仓库按 PZ 配载单运输资源自动生成并同步",required:false},
   {code:"border_handover",name:"口岸交接文件",hint:"口岸换装、过境或交接凭证",required:false},
@@ -1689,7 +1689,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   {activeTab==="documents"&&<BatchDocumentWorkbench batchId={loaderData.batch.id} orders={loaderData.orders} visibleOrders={visibleOrders} orderPagination={orderPagination} batchDocuments={loaderData.batchDocuments} orderDocuments={loaderData.orderDocuments} orderDocumentRequirements={loaderData.orderDocumentRequirements} customsSummaries={loaderData.customsSummaries} customsDeclarations={loaderData.customsDeclarations} workflowPolicies={loaderData.batchWorkflowPolicies} customsAccesses={loaderData.batchCustomsAccess.orders} busy={busy} manageDocuments={manageDocuments} manageCustoms={manageCustoms} currentUserId={loaderData.current.userId} documentOwnerUserId={loaderData.batch.document_assignee_user_id} documentOwnerName={loaderData.batch.document_assignee_name} privileged={privileged} requiresTransloading={requiresTransloading} ready={allDocumentGateReady} customsCloseSignal={customsCloseSignal} uploadedOrderId={uploadedOrderId} uploadedDocumentCategory={uploadedDocumentCategory} documentUploadSignal={documentUploadSignal} onOpenOrderDossier={orderId=>openDetailDrawer(orderId)}/>} 
   {activeTab==="exceptions"&&<BatchExceptionWorkbench batch={loaderData.batch} orders={loaderData.orders} packages={loaderData.exceptionPackages} exceptions={loaderData.batchExceptions} busy={busy} manage={manageExceptions} closeSignal={actionData?.success?actionData:undefined}/>}
   {activeTab==="batch"&&<><section className="panel loading-sheet batch-tab-panel" id="batch-arrangement">
-    <div className="batch-detail-summary"><div><h2>仓库配载结果</h2><p>由仓库端自动同步，管理后台只读查看。</p></div><div className="loading-sheet-state batch-detail-summary-status"><span>{loaderData.orders.length} 票</span><span>{loaderData.vehicles.length} 车</span><b>{allDispatched?"仓库已出库":loadPlanReady&&allDocumentGateReady?"待仓库装车":"待仓库补齐"}</b></div></div>
+    <div className="batch-detail-summary"><div><h2>配载计划与仓库执行结果</h2><p>操作主管制定配载计划；仓库按计划扫描装车，执行结果自动同步。</p></div><div className="loading-sheet-state batch-detail-summary-status"><span>{loaderData.orders.length} 票</span><span>{loaderData.vehicles.length} 车</span><b>{allDispatched?"仓库已出库":loadPlanReady&&allDocumentGateReady?"待仓库装车":"待仓库补齐"}</b></div></div>
     <div className="batch-detail-disclosure-body">
     <div className="loading-summary-strip">
       <span>起运地<strong>{loaderData.batch.origin_location}</strong></span>
@@ -1723,7 +1723,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   {loaderData.showBatchCosts&&loaderData.costAllocations&&<CostAllocationSection allocations={loaderData.costAllocations} busy={busy} manage={manageCosts} blockedReason={loaderData.batchCostBlockedReason}/>}</>}
   {activeTab==="outbound"&&<section className="panel batch-tab-panel" id="batch-exit-gate"><div className="panel-header"><div><h2>装车出库</h2><p>本页只核对仓库装车和出库交接结果；后续报关、口岸到达与实际出境按页签顺序办理。</p></div><span className={`status-pill ${allDispatched?"success":""}`}>{allDispatched?"已完成":"待仓库办理"}</span></div>
     <div className="table-wrap batch-exit-gate-table"><table><thead><tr><th>装车项目</th><th>当前状态</th><th>核对结果</th></tr></thead><tbody>
-      <tr className="completed-row"><td><strong>配载单同步</strong></td><td><span className="status-pill success">已通过</span></td><td>{loaderData.batch.batch_number} 已由仓库生成</td></tr>
+      <tr className="completed-row"><td><strong>配载单同步</strong></td><td><span className="status-pill success">已通过</span></td><td>{loaderData.batch.batch_number} 已由操作主管生成，仓库按计划执行</td></tr>
       <tr className={hasRequiredTransportResources?(transportResourceReady?"completed-row":"blocked-row"):"readonly-row"}><td><strong>运输车辆与司机</strong></td><td><span className={`status-pill ${hasRequiredTransportResources?(transportResourceReady?"success":"danger"):"off"}`}>{hasRequiredTransportResources?(transportResourceReady?"必填项已齐":"必填项待补齐"):"当前工作流选填"}</span></td><td>{loaderData.batch.overseas_carrier_name||loaderData.batch.overseas_vehicle_plate?`${loaderData.batch.overseas_carrier_name||"承运方未填"} · ${loaderData.batch.overseas_vehicle_plate||"车牌未填"}`:hasRequiredTransportResources?"承运方、车辆或司机必填资料未齐":"未填写也不阻断当前流程"}</td></tr>
       <tr className={allDispatched?"completed-row":"blocked-row"}><td><strong>仓库装车出库</strong></td><td><span className={`status-pill ${allDispatched?"success":"danger"}`}>{allDispatched?"已完成":"待办理"}</span></td><td>{allDispatched?"全部订单已完成装车和出库交接":`${dispatchedCount}/${loaderData.orders.length} 票已完成；待处理：${pendingDispatchOrders.map(order=>order.order_number).join("、")}`}</td></tr>
     </tbody></table></div>
