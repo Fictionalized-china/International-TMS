@@ -13,6 +13,8 @@ import { ensureShipmentForOrder } from "./shipment-sync.server";
 import { quoteCargoProjection } from "./quote-cargo-projection";
 import { parseMarkContactIdsJson, type MarkContactSnapshot } from "./mark-contacts";
 import { resolveMarkContactSnapshots } from "./mark-contacts.server";
+import type { IntakePayable } from "./intake-fee-lines";
+import { intakePayableStatements } from "./intake-fee-lines.server";
 
 type QuoteReceivable = {
   id: string;
@@ -94,7 +96,7 @@ export async function createOrderFromAcceptedQuote(input: {
   actorUserId: string;
   source: "admin" | "portal";
   request?: Request;
-  initialPayables?:readonly {chargeCode:string;chargeName:string;amount:number;counterparty:string}[];
+  initialPayables?:readonly IntakePayable[];
 }): Promise<CreatedOrder> {
   const quote = await loadAcceptedQuote(input.organizationId, input.quotationId);
   if (!quote) throw new Error("报价无效或尚未被接受");
@@ -286,8 +288,8 @@ export async function createOrderFromAcceptedQuote(input: {
         "INSERT INTO order_services(id,organization_id,order_id,service_code,service_name,created_at) VALUES(?,?,?,?,?,?)",
       ).bind(crypto.randomUUID(),input.organizationId,orderId,code,name,now)),
     ...receivableStatements({ organizationId: input.organizationId, orderId, quote, charges: chargeRows.results, actorUserId: input.actorUserId, now }),
-    ...(input.initialPayables??[]).map(fee=>env.DB.prepare(`INSERT INTO business_expenses(id,organization_id,order_id,direction,stage,charge_code,charge_name,counterparty_name,currency,quantity,unit_price,amount,exchange_rate,base_amount,created_by_user_id,created_at,updated_at,source_type,source_id)
-      VALUES(?,?,?,'payable','estimated',?,?,?,'CNY',1,?,?,1,?,?,?,?,'direct_order_entry',?)`).bind(crypto.randomUUID(),input.organizationId,orderId,fee.chargeCode,fee.chargeName,fee.counterparty,fee.amount,fee.amount,fee.amount,input.actorUserId,now,now,`${quote.id}:${fee.chargeCode}`)),
+    ...intakePayableStatements(env.DB, { organizationId:input.organizationId, orderId,
+      quotationId:quote.id, actorUserId:input.actorUserId, now, fees:input.initialPayables??[] }),
   ];
 
   try {

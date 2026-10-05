@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { createOrderFromAcceptedQuote, type CreatedOrder } from "./quote-order.server";
 import { assertQuotationWorkflowFieldsComplete } from "./quotation-workflow-fields.server";
+import type { IntakePayable } from "./intake-fee-lines";
 
 type LifecycleStatus = "pending" | "accepted" | "withdrawn" | "void";
 
@@ -25,7 +26,7 @@ export async function acceptQuotation(input: {
   actorUserId: string;
   source: "admin" | "portal";
   request?: Request;
-  initialPayables?:readonly {chargeCode:string;chargeName:string;amount:number;counterparty:string}[];
+  initialPayables?:readonly IntakePayable[];
 }): Promise<CreatedOrder> {
   const quote = await loadQuote(input.organizationId, input.quotationId);
   if (!quote) throw new Error("报价不存在");

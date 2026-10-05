@@ -61,7 +61,9 @@ import {
   type MarkContactOption,
 } from "../lib/mark-contacts";
 import { listActiveMarkContacts, resolveMarkContactSnapshots } from "../lib/mark-contacts.server";
-import { configuredOrderIntakeFees, ftlOrderIntakeFeeRequirements, missingOrderIntakeFees } from "../lib/order-intake-fees";
+import { configuredOrderIntakeFees, missingOrderIntakeFees } from "../lib/order-intake-fees";
+import { feeLineAmount, intakePayableOptions, MAX_INTAKE_FEE_LINES, newFeeDraft, parseIntakePayables, type FeeDraft } from "../lib/intake-fee-lines";
+import { IntakeStepLayout, IntakeFeeEditor } from "../components/IntakeEntry";
 import { loadBusinessProcessPolicy } from "../lib/business-process-policy.server";
 
 type Quote = {
@@ -567,32 +569,26 @@ export async function action({ request }: Route.ActionArgs) {
       const rawUnitPrices = form.getAll("chargeUnitPrice").map(String);
       const chargeNotes = form.getAll("chargeNotes").map(String);
       const chargePolicy = policy("quotation_charge_items","required");
+      if (directEntry && (chargeNames.length > MAX_INTAKE_FEE_LINES || chargeNames.length !== quantities.length ||
+        chargeNames.length !== rawUnitPrices.length || chargeNames.length !== chargeNotes.length)) {
+        throw new Error(`客户应收明细不完整或超过 ${MAX_INTAKE_FEE_LINES} 条`);
+      }
       const charges = chargePolicy.isActive ? chargeNames.map((name, index) => {
         const quantity = quantities[index];
         const rawUnitPrice = rawUnitPrices[index] || "";
         const unitPrice = Number(rawUnitPrice);
         if (!Number.isFinite(quantity) || quantity <= 0 || !rawUnitPrice.trim() || !Number.isFinite(unitPrice) || unitPrice < 0) {
-          if (chargePolicy.isRequired) throw new Error(`第 ${index + 1} 条费用的数量或单价无效`);
+          if (chargePolicy.isRequired || (directEntry && (rawUnitPrice.trim() || chargeNotes[index]?.trim() || quantity !== 1))) throw new Error(`第 ${index + 1} 条费用的数量或单价无效`);
           return null;
         }
-        return { name, quantity, unitPrice, amount: quantity * unitPrice, notes: chargeNotes[index] || null };
+        const amount = directEntry ? feeLineAmount(quantity, unitPrice) : quantity * unitPrice;
+        if (!Number.isFinite(amount) || (directEntry && amount > Number.MAX_SAFE_INTEGER / 100)) throw new Error(`第 ${index + 1} 条费用金额过大`);
+        return { name, quantity, unitPrice, amount, notes: chargeNotes[index] || null };
       }).filter((item): item is NonNullable<typeof item> => Boolean(item)) : [];
       if (chargePolicy.isRequired && (!charges.length || charges.some((item) => !item.name)))
         throw new Error("至少填写一条有效的客户应收费用");
-      const payableAmounts = form.getAll("intakePayableAmount").map(String);
-      const payableCodes = form.getAll("intakePayableCode").map(String);
-      const payableCounterparty = valueOf(form, "intakePayableCounterparty");
-      const allowedFees = [...ftlOrderIntakeFeeRequirements,...configuredOrderIntakeFees(processPolicy,roadLoadType)];
-      const payableFees = directEntry ? payableCodes.flatMap((code,index) => {
-        const fee = allowedFees.find(f => f.code === code);
-        if (!fee) throw new Error("开单费用配置已变化，请刷新后重新填写");
-        const raw = payableAmounts[index]?.trim();
-        if (!raw) return [];
-        const amount = Number(raw);
-        if (!Number.isFinite(amount) || amount < 0) throw new Error(`${fee.label}应付金额无效`);
-        return [{chargeCode:fee.code,chargeName:fee.label,amount,direction:"payable" as const}];
-      }) : [];
-      if (payableFees.length && !payableCounterparty) throw new Error("请填写开单应付往来单位");
+      const payableFees = directEntry ? parseIntakePayables(form, intakePayableOptions(processPolicy, roadLoadType === 'ftl' ? 'ftl' : 'ltl'))
+        .map(fee => ({ ...fee, direction: "payable" as const })) : [];
       if (entryMode === "direct") {
         const missingFees = missingOrderIntakeFees(roadLoadType, [...charges.map((charge, index) => ({
           chargeCode: `RECEIVABLE_${index + 1}`,
@@ -632,7 +628,7 @@ export async function action({ request }: Route.ActionArgs) {
           ),
           env.DB.prepare(
             "UPDATE quotations SET customer_contact_name=?,customer_contact_phone=?,intake_payload_hash=?,intake_payables_json=? WHERE id=? AND organization_id=?",
-          ).bind(effectiveContactName || null,effectiveContactPhone || null,identity?.payloadHash??null,identity?JSON.stringify(payableFees.map(fee=>({...fee,counterparty:payableCounterparty}))):null,id,current.organizationId),
+          ).bind(effectiveContactName || null,effectiveContactPhone || null,identity?.payloadHash??null,identity?JSON.stringify(payableFees):null,id,current.organizationId),
           ...charges.map((charge, index) => env.DB.prepare(
             `INSERT INTO quotation_charges(
               id,quotation_id,charge_code,description,quantity,unit_price,amount,exchange_rate,sort_order,notes,created_at
@@ -683,7 +679,7 @@ export async function action({ request }: Route.ActionArgs) {
           actorUserId: current.userId,
           source: "admin",
           request,
-          initialPayables:payableFees.map(fee=>({...fee,counterparty:payableCounterparty})),
+          initialPayables:payableFees,
         });
         await env.DB.prepare(
           "UPDATE quotations SET acceptance_source='offline_order_entry',updated_at=? WHERE id=? AND organization_id=?",
@@ -997,7 +993,8 @@ export default function QuotationsPage({ loaderData, actionData }: Route.Compone
   const busy = useNavigation().state !== "idle";
   const isDirectEntry = loaderData.filters.entryMode === "direct";
   const [createQuoteOpen,setCreateQuoteOpen]=useState(false);
-  const [directOrderOpen,setDirectOrderOpen]=useState(loaderData.filters.entryMode === "direct");
+  // Portals are client-only. Open after hydration rather than changing the first client tree.
+  const [directOrderOpen,setDirectOrderOpen]=useState(false);
   useEffect(() => {
     setDirectOrderOpen(isDirectEntry);
     setCreateQuoteOpen(false);
@@ -1020,7 +1017,7 @@ export default function QuotationsPage({ loaderData, actionData }: Route.Compone
       <div><span className="eyebrow">{isDirectEntry ? "ORDER INTAKE / 订单中心" : "SALES TOOLS / 报价辅助"}</span><h1>{isDirectEntry ? "直接录单" : "询价与报价"}</h1><p>{isDirectEntry ? "按线下已确认的业务建立订单；费用必录要求与岗位职责仍由工作流和业务策略控制。" : "报价是可选销售辅助功能，不是开单前置节点；线下确认后的录单请从订单中心进入。"}</p></div>
       <div className="head-actions">
         {!isDirectEntry && loaderData.current.permissions.includes("quote.manage") && <Modal title="创建运输报价" triggerLabel="创建报价" triggerClassName="btn" closeSignal={actionData?.intent==="create"&&actionData.entryMode!=="direct"?actionSuccess:undefined} isOpen={createQuoteOpen} onOpenChange={updateCreateQuoteOpen} size="xwide" dialogClassName="quote-form-modal" guardFormChanges><QuoteForm loaderData={loaderData} busy={busy} formError={createFormError} entryMode="quote" /></Modal>}
-        {isDirectEntry && loaderData.current.permissions.includes("order.intake.manage") && <Modal title="线下确认直接录单" triggerLabel="直接录单" triggerClassName="btn primary" closeSignal={actionData?.intent==="create"&&actionData.entryMode==="direct"?actionSuccess:undefined} isOpen={directOrderOpen} onOpenChange={setDirectOrderOpen} size="xwide" dialogClassName="quote-form-modal" guardFormChanges><QuoteForm loaderData={loaderData} busy={busy} formError={directFormError} entryMode="direct" /></Modal>}
+        {isDirectEntry && loaderData.current.permissions.includes("order.intake.manage") && <Modal title="线下确认直接录单" triggerLabel="直接录单" triggerClassName="btn primary" closeSignal={actionData?.intent==="create"&&actionData.entryMode==="direct"?actionSuccess:undefined} isOpen={directOrderOpen} onOpenChange={setDirectOrderOpen} size="xwide" dialogClassName="quote-form-modal quote-intake-modal" guardFormChanges><QuoteForm loaderData={loaderData} busy={busy} formError={directFormError} entryMode="direct" /></Modal>}
       </div>
     </div>
     <AdminWorkspaceTabs user={loaderData.current} workspace={isDirectEntry ? "orders" : "sales"} />
@@ -1192,7 +1189,15 @@ function QuoteForm({ loaderData, busy, formError, entryMode }: { loaderData: Awa
   const [widthCm, setWidthCm] = useState("");
   const [heightCm, setHeightCm] = useState("");
   const [charges, setCharges] = useState([{ name: transportChargeNameOptions[0]?.[0] || "国际汽运费", quantity: 1, unitPrice: "", notes: "" }]);
-  const total = charges.reduce((sum, charge) => sum + Number(charge.quantity || 0) * Number(charge.unitPrice || 0), 0);
+  const [receivableRows, setReceivableRows] = useState<FeeDraft[]>(() => [newFeeDraft('国际汽运费')]);
+  const [payableRows, setPayableRows] = useState<FeeDraft[]>([]);
+  const payableOptions = intakePayableOptions(loaderData.processPolicy, roadLoadType || 'ltl');
+  const total = entryMode === 'direct'
+    ? receivableRows.reduce((sum, row) => {
+      const amount = feeLineAmount(Number(row.quantity), Number(row.unitPrice));
+      return sum + (Number.isFinite(amount) ? amount : 0);
+    }, 0)
+    : charges.reduce((sum, charge) => sum + Number(charge.quantity || 0) * Number(charge.unitPrice || 0), 0);
   const calculatedVolumeValue = calculateQuoteTotalVolumeCbm({
     pieces:Number(plannedPackageCount),lengthCm:Number(lengthCm),
     widthCm:Number(widthCm),heightCm:Number(heightCm),
@@ -1305,15 +1310,16 @@ function QuoteForm({ loaderData, busy, formError, entryMode }: { loaderData: Awa
       ? <input aria-label="预计体积 CBM" className="control quote-calculated-volume" name="volume" type="number" min="0.0001" step="0.0001" value={calculatedVolume} readOnly required={policies.volume.isRequired}/>
       : <input aria-label="预计体积 CBM" className="control" name="volume" type="number" min="0.0001" step="0.0001" required={policies.volume.isRequired}/>}</Field>}
   </div>;
-  return <Form method="post" encType="multipart/form-data" className="prototype-quote-form" data-keyboard-submit data-enter-flow>
+  return <Form method="post" encType="multipart/form-data" className="prototype-quote-form" noValidate={entryMode === 'direct'} data-keyboard-submit data-enter-flow>
     <input type="hidden" name="intent" value="create"/>
     <input type="hidden" name="entryMode" value={entryMode}/>
     {entryMode==='direct'&&<input type="hidden" name="intakeRequestId" value={intakeRequestId}/>}
-    {entryMode==='direct'&&loaderData.current.positionCode==='HR_ADMIN'&&<label className="field"><span>紧急协助原因 *</span><input name="intakeEmergencyReason" required maxLength={1000}/></label>}
     {entryMode === "direct" && <div className="alert info"><strong>直接录单</strong><span>适用于已经通过微信、线下等方式确认的业务；保存后直接建立草稿订单，不向客户发送待确认报价。</span></div>}
     {formError && <div ref={errorSummaryRef} className="alert error" role="alert" tabIndex={-1}><strong>{entryMode === "direct" ? "订单尚未建立" : "报价尚未保存"}</strong><span>{formError}</span><small>已填写内容仍保留在当前弹窗，请按提示修改后重试。</small></div>}
+    <IntakeStepLayout enabled={entryMode === 'direct'} busy={busy}>
     <div className="quote-ledger">
-    <QuoteLedgerSection className="quote-plan-section" title="1　客户与运输方案">
+    <QuoteLedgerSection step={0} className="quote-plan-section" title="1　客户与运输方案">
+      {entryMode==='direct'&&loaderData.current.positionCode==='HR_ADMIN'&&<label className="field"><span>紧急协助原因 *</span><input className="control" name="intakeEmergencyReason" required maxLength={1000}/></label>}
       <div className="quote-field-grid quote-plan-grid">
         <Field label="客户" className="quote-customer-picker-field quote-plan-customer"><div className="quote-customer-picker-row"><select className="control" name="customerId" value={customerId} onChange={(event) => selectCustomer(event.target.value)} required><option value="">请选择客户</option>{loaderData.customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name}</option>)}</select>{canCreateCustomer && <Modal title="新增客户" triggerLabel="＋ 新增客户" triggerClassName="secondary" size="xwide" dialogClassName="customer-editor-modal" closeSignal={createdCustomerId || undefined} guardFormChanges><CustomerEditorForm intent="customer" owners={loaderData.users} countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} busy={customerFetcher.state !== "idle"} values={customerFetcher.data?.values} errors={customerFetcher.data?.errors} formError={customerFetcher.data?.formError} formComponent={customerFetcher.Form} action="/admin/customers"/></Modal>}</div>{createdCustomerId && <small className="quote-customer-created">新客户已创建并自动选中</small>}</Field>
         {policies.contactName.isActive && <Field label="客户联系人" className="quote-plan-contact"><input className="control quote-customer-autofill" name="customerContactName" value={customerContactName} readOnly required={policies.contactName.isRequired} placeholder="选择客户后自动带出"/></Field>}
@@ -1326,10 +1332,10 @@ function QuoteForm({ loaderData, busy, formError, entryMode }: { loaderData: Awa
         {policies.customsMode.isActive && <Field label="清关办理方式" className="quote-plan-secondary quote-plan-customs"><select className="control" name="customsClearanceMode" defaultValue="company" required={policies.customsMode.isRequired}><option value="company">公司代办清关</option><option value="customer">客户自理清关</option></select></Field>}
       </div>
     </QuoteLedgerSection>
-    {selectedWorkflow && selectedCustomWorkflowFields.length > 0 && <QuoteLedgerSection className="quote-workflow-fields-section" title="工作流配置项" note={`${selectedWorkflow.name} v${selectedWorkflow.version_number}`}>
+    {selectedWorkflow && selectedCustomWorkflowFields.length > 0 && <QuoteLedgerSection step={0} className="quote-workflow-fields-section" title="工作流配置项" note={`${selectedWorkflow.name} v${selectedWorkflow.version_number}`}>
       <QuotationWorkflowFieldInputs fields={selectedCustomWorkflowFields} values={[]} customers={loaderData.customers} warehouses={loaderData.warehouses}/>
     </QuoteLedgerSection>}
-    {routeFieldsVisible && <QuoteLedgerSection className="quote-route-section" title="2　起运、目的与货物">
+    {routeFieldsVisible && <QuoteLedgerSection step={1} className="quote-route-section" title="2　起运、目的与货物">
       <div className={`quote-route-cards ${cargoNarrativeVisible ? "with-cargo" : ""}`} role="group" aria-label="报价运输路线与货物">
         <section className="quote-route-card">
           <header><b>起运信息</b></header>
@@ -1355,18 +1361,18 @@ function QuoteForm({ loaderData, busy, formError, entryMode }: { loaderData: Awa
         </section>}
       </div>
     </QuoteLedgerSection>}
-    {!routeFieldsVisible && cargoNarrativeVisible && <QuoteLedgerSection title="2　货物与报价说明">
+    {!routeFieldsVisible && cargoNarrativeVisible && <QuoteLedgerSection step={1} title="2　货物与报价说明">
       <div className="quote-description-grid">
         {policies.cargoDescription.isActive && <Field label="货物描述"><textarea className="control textarea" name="cargoDescription" rows={3} placeholder="填写货物名称、品类、材质、用途等说明" required={policies.cargoDescription.isRequired} /></Field>}
         {policies.notes.isActive && <Field label="报价备注"><textarea className="control textarea" name="notes" rows={3} placeholder="填写报价范围、特殊约定或其他说明" required={policies.notes.isRequired} /></Field>}
       </div>
     </QuoteLedgerSection>}
-    {cargoMetricsVisible && <QuoteLedgerSection className="quote-metrics-section" title="3　货物数量与尺寸">{cargoMetrics}</QuoteLedgerSection>}
+    {cargoMetricsVisible && <QuoteLedgerSection step={2} className="quote-metrics-section" title="3　货物数量与尺寸">{cargoMetrics}</QuoteLedgerSection>}
     {(policies.charges.isActive || policies.validUntil.isActive) && <QuoteLedgerSection
-      title="4　报价费用与有效期"
-      action={policies.charges.isActive ? <button className="btn quote-charge-add" type="button" onClick={() => setCharges((rows) => [...rows, { name: transportChargeNameOptions[0]?.[0] || "国际汽运费", quantity: 1, unitPrice: "", notes: "" }])}>＋ 添加费用</button> : undefined}
+      step={3} title={entryMode === 'direct' ? '4　客户应收费用' : '4　报价费用与有效期'}
+      action={entryMode !== 'direct' && policies.charges.isActive ? <button className="btn quote-charge-add" type="button" onClick={() => setCharges((rows) => [...rows, { name: transportChargeNameOptions[0]?.[0] || "国际汽运费", quantity: 1, unitPrice: "", notes: "" }])}>＋ 添加费用</button> : undefined}
     >
-      {policies.charges.isActive && <><div className="table-wrap quote-charge-table-wrap"><table className="inline-table quote-charge-table"><thead><tr><th>费用名称</th><th>数量</th><th>单价</th><th>金额</th><th>备注</th><th>操作</th></tr></thead><tbody>{charges.map((charge, index) => <tr key={index}><td><select className="control" name="chargeName" value={charge.name} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, name: event.target.value } : row))} required={policies.charges.isRequired}>{transportChargeNameOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td><td><input className="control" name="chargeQuantity" type="number" min="0.01" step="0.01" value={charge.quantity} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: Number(event.target.value) } : row))} required={policies.charges.isRequired}/></td><td><input className="control" name="chargeUnitPrice" type="number" min="0" step="0.01" value={charge.unitPrice} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, unitPrice: event.target.value } : row))} required={policies.charges.isRequired}/></td><td><b>{(charge.quantity * Number(charge.unitPrice || 0)).toLocaleString()}</b></td><td><input className="control" name="chargeNotes" value={charge.notes} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, notes: event.target.value } : row))}/></td><td><button className="btn danger" type="button" disabled={charges.length === 1} onClick={() => setCharges((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>删除</button></td></tr>)}</tbody></table></div>
+      {policies.charges.isActive && <>{entryMode === 'direct' ? <IntakeFeeEditor direction="receivable" rows={receivableRows} setRows={setReceivableRows} options={transportChargeNameOptions.map(([code,label]) => ({code,label}))} required={policies.charges.isRequired}/> : <div className="table-wrap quote-charge-table-wrap"><table className="inline-table quote-charge-table"><thead><tr><th>费用名称</th><th>数量</th><th>单价</th><th>金额</th><th>备注</th><th>操作</th></tr></thead><tbody>{charges.map((charge, index) => <tr key={index}><td><select className="control" name="chargeName" value={charge.name} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, name: event.target.value } : row))} required={policies.charges.isRequired}>{transportChargeNameOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td><td><input className="control" name="chargeQuantity" type="number" min="0.01" step="0.01" value={charge.quantity} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: Number(event.target.value) } : row))} required={policies.charges.isRequired}/></td><td><input className="control" name="chargeUnitPrice" type="number" min="0" step="0.01" value={charge.unitPrice} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, unitPrice: event.target.value } : row))} required={policies.charges.isRequired}/></td><td><b>{(charge.quantity * Number(charge.unitPrice || 0)).toLocaleString()}</b></td><td><input className="control" name="chargeNotes" value={charge.notes} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, notes: event.target.value } : row))}/></td><td><button className="btn danger" type="button" disabled={charges.length === 1} onClick={() => setCharges((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>删除</button></td></tr>)}</tbody></table></div>}
       </>}
       <div className="quote-charge-footer">
         {policies.validUntil.isActive && <Field label="报价有效期"><input className="control" name="validUntil" type="date" required={policies.validUntil.isRequired}/></Field>}
@@ -1374,8 +1380,11 @@ function QuoteForm({ loaderData, busy, formError, entryMode }: { loaderData: Awa
       </div>
     </QuoteLedgerSection>}
     </div>
-    {entryMode === "direct" && <fieldset className="panel"><legend>开单应付费用 CNY</legend><p>未录入请留空；客户自送等明确无费用情况填写 0。费用类别及应收应付必录要求由流程策略配置。</p><label className="field"><span>应付往来单位</span><input name="intakePayableCounterparty" /></label><div className="form-grid">{[...new Map([...ftlOrderIntakeFeeRequirements,...configuredOrderIntakeFees(loaderData.processPolicy,roadLoadType || "ltl")].map(f => [f.code,f])).values()].map(fee => <label className="field" key={fee.code}><span>{fee.label}</span><input type="hidden" name="intakePayableCode" value={fee.code}/><input name="intakePayableAmount" type="number" min="0" step="0.01" /></label>)}</div></fieldset>}
-    <div className="modal-form-actions"><button className="btn primary large" disabled={busy}>{entryMode === "direct" ? "确认资料并建立订单" : "保存报价并等待客户确认"}</button></div>
+    {entryMode === "direct" && <QuoteLedgerSection step={4} title="5　开单应付费用 CNY" note="未录入留空；客户自送等明确无费用时填写单价 0。必录规则仍由流程策略配置。">
+      <IntakeFeeEditor direction="payable" rows={payableRows} setRows={setPayableRows} options={payableOptions}
+        recommended={configuredOrderIntakeFees(loaderData.processPolicy, roadLoadType || 'ltl')}/>
+    </QuoteLedgerSection>}
+    </IntakeStepLayout>
   </Form>;
 }
 
@@ -1565,8 +1574,8 @@ function parseStoredMultipleValues(value: string | null | undefined) {
   }
 }
 
-function QuoteLedgerSection({ title, note, action, className = "", children }: { title: string; note?: string; action?: React.ReactNode; className?: string; children: React.ReactNode }) {
-  return <section className={`quote-ledger-section ${className}`}><div className="quote-ledger-heading"><b>{title}</b>{(note || action) && <div className="quote-section-heading">{note && <span>{note}</span>}{action}</div>}</div><div className="quote-ledger-body">{children}</div></section>;
+function QuoteLedgerSection({ title, note, action, className = "", children, step }: { title: string; note?: string; action?: React.ReactNode; className?: string; children: React.ReactNode; step?: number }) {
+  return <section data-intake-step={step} className={`quote-ledger-section ${className}`}><div className="quote-ledger-heading"><b>{title}</b>{(note || action) && <div className="quote-section-heading">{note && <span>{note}</span>}{action}</div>}</div><div className="quote-ledger-body">{children}</div></section>;
 }
 
 function Field({ label, className = "", children }: { label: string; className?: string; children: React.ReactNode }) {
