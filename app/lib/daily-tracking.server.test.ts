@@ -47,6 +47,11 @@ describe("independent daily tracking",()=>{
     await expect(recordDailyTracking(db,{...input(),current:{...current,organizationId:"other"}})).rejects.toThrow("不存在");
     sql.exec("UPDATE shipments SET status='delivered'");await expect(recordDailyTracking(db,input())).rejects.toThrow("运输已结束");
   });
+  it("compares MySQL datetime pickup values chronologically rather than lexically",async()=>{
+    sql.exec("UPDATE shipments SET actual_pickup_at='2026-09-01 02:00:00.000'");
+    await expect(recordDailyTracking(db,{...input(),eventKind:'location',eventAt:'2026-09-01T01:00:00Z'})).rejects.toThrow('早于实际提货');
+    expect(sql.prepare('SELECT COUNT(*) n FROM order_daily_tracking').get()?.n).toBe(0);
+  });
   it("hot-unplug preserves records but prevents new actions",async()=>{
     await recordDailyTracking(db,input());sql.exec("INSERT INTO business_process_policies VALUES('org','tracking.daily_enabled','0')");
     await expect(recordDailyTracking(db,{...input(),requestId:"new-request-123"})).rejects.toThrow("已停用");

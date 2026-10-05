@@ -208,6 +208,9 @@ describe("MySQL session collation", () => {
   it("does not hard-code a single collation name for the session", () => {
     expect(source).not.toMatch(/collation_connection\s*=\s*utf8mb4_/i);
   });
+  it("does not truncate permission sets or multi-order summaries at MySQL's small default", () => {
+    expect(source).toContain("SET SESSION group_concat_max_len = 65535");
+  });
 });
 
 /**

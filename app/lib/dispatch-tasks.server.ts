@@ -107,17 +107,28 @@ export async function fulfillDispatchTask(db:D1Database,input:{current:SessionUs
     UNION SELECT operation_supervisor_user_id FROM transport_orders WHERE id=? AND organization_id=?
     UNION SELECT assignee_user_id FROM order_module_instances WHERE order_id=? AND organization_id=? AND module_code='transport') dispatch_owners WHERE user_id IS NOT NULL`)
     .bind(request.id,current.organizationId,input.orderId,current.organizationId,input.orderId,current.organizationId).all<{user_id:string}>();
-  const results=await db.batch([
+  const guardId=crypto.randomUUID();
+  let results:D1Result[];
+  try { results=await db.batch([
     db.prepare(`UPDATE order_dispatch_requests SET status='fulfilled',carrier_id=?,vehicle_id=?,driver_id=?,freight_amount=?,freight_currency=?,exchange_rate=?,resource_notes=?,fulfilled_by_user_id=?,fulfilled_at=?,updated_at=?
       WHERE id=? AND organization_id=? AND status='pending'`).bind(input.carrierId,input.vehicleId,input.driverId,input.freightAmount,input.currency,input.exchangeRate,input.notes.trim(),current.userId,now,now,request.id,current.organizationId),
+    // Validate the committed resource within the same transaction. A stale
+    // pending read must not silently succeed when another submit wins.
+    db.prepare(`INSERT INTO settlement_commit_guards(id,valid,created_at)
+      SELECT ?,CASE WHEN EXISTS(SELECT 1 FROM order_dispatch_requests WHERE id=? AND organization_id=? AND status='fulfilled'
+        AND carrier_id=? AND vehicle_id=? AND driver_id=? AND freight_amount=? AND freight_currency=? AND exchange_rate=? AND COALESCE(resource_notes,'')=?) THEN 1 ELSE NULL END,?`)
+      .bind(guardId,request.id,current.organizationId,input.carrierId,input.vehicleId,input.driverId,input.freightAmount,input.currency,input.exchangeRate,input.notes.trim(),now),
     db.prepare(`UPDATE order_tasks SET status='completed',assignee_user_id=?,completed_at=?,updated_at=? WHERE id=? AND organization_id=? AND status IN ('pending','in_progress')
-      AND EXISTS(SELECT 1 FROM order_dispatch_requests d WHERE d.id=? AND d.organization_id=? AND d.status='fulfilled')`).bind(current.userId,now,now,request.task_id,current.organizationId,request.id,current.organizationId),
+      AND EXISTS(SELECT 1 FROM order_dispatch_requests d WHERE d.id=? AND d.organization_id=? AND d.status='fulfilled' AND d.fulfilled_by_user_id=? AND d.fulfilled_at=?)`).bind(current.userId,now,now,request.task_id,current.organizationId,request.id,current.organizationId,current.userId,now),
     db.prepare(`INSERT INTO audit_logs(id,organization_id,actor_user_id,action,resource_type,resource_id,outcome,metadata_json,created_at)
-      VALUES(?,?,?,'dispatch.resource.fulfill','transport_order',?,'success',?,?)`).bind(crypto.randomUUID(),current.organizationId,current.userId,input.orderId,JSON.stringify({carrierId:input.carrierId,vehicleId:input.vehicleId,driverId:input.driverId}),now),
+      SELECT ?,?,?,'dispatch.resource.fulfill','transport_order',?,'success',?,? WHERE EXISTS(SELECT 1 FROM order_dispatch_requests WHERE id=? AND organization_id=? AND fulfilled_by_user_id=? AND fulfilled_at=?)`).bind(crypto.randomUUID(),current.organizationId,current.userId,input.orderId,JSON.stringify({carrierId:input.carrierId,vehicleId:input.vehicleId,driverId:input.driverId}),now,request.id,current.organizationId,current.userId,now),
     ...owners.results.map(owner=>db.prepare(`INSERT OR IGNORE INTO internal_notifications(id,organization_id,user_id,category,severity,title,message,link,requires_ack,is_read,created_by_user_id,created_at)
       VALUES(?,?,?,'dispatch_ready','info','商务运输资源已反馈','可在调度与运踪查看资源并安排配载。','/admin/tracking-center',0,0,?,?)`)
       .bind(`${request.id}:ready:${owner.user_id}`,current.organizationId,owner.user_id,current.userId,now)),
-  ]);
+  ]); } catch(error) {
+    if(String(error).includes('settlement_commit_guards')) throw new Error('运输资源已由其他提交更新，请刷新核对；本次未覆盖资源');
+    throw error;
+  }
   return {duplicate:!Number(results[0].meta.changes)};
 }
 

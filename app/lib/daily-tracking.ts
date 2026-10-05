@@ -17,3 +17,10 @@ export function validTrackingEventTime(value:string,now:Date) {
   const time=Date.parse(value);
   return Number.isFinite(time) && time <= now.getTime()+5*60*1000;
 }
+
+/** MySQL dateStrings emits UTC DATETIME without a zone; never parse it in the host's local zone. */
+export function storedTrackingTimestamp(value:string) {
+  const normalized=/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)
+    ? `${value.replace(" ","T")}Z` : value;
+  return Date.parse(normalized);
+}

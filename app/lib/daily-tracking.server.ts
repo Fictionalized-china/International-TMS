@@ -1,6 +1,6 @@
 import type { SessionUser } from "./auth.server";
 import { loadBusinessProcessPolicy } from "./business-process-policy.server";
-import { dailyTrackingAccess,dailyTrackingDescription,validTrackingEventTime,type DailyTrackingKind } from "./daily-tracking";
+import { dailyTrackingAccess,dailyTrackingDescription,validTrackingEventTime,storedTrackingTimestamp,type DailyTrackingKind } from "./daily-tracking";
 import { sha256 } from "./crypto.server";
 import { orderVisibilitySql } from "./order-access";
 
@@ -21,7 +21,11 @@ export async function recordDailyTracking(db:D1Database,input:{current:SessionUs
   const denied=dailyTrackingAccess({policy,positionCode:current.positionCode,permissions:current.permissions,orderStatus:order.status,eventKind:input.eventKind,pickupAt:order.actual_pickup_at});
   if(denied) throw new Error(denied);
   if(order.shipment_status==="delivered") throw new Error("运输已结束，历史轨迹只读");
-  if(order.actual_pickup_at && eventAt<order.actual_pickup_at) throw new Error("在途轨迹不能早于实际提货时间");
+  if(order.actual_pickup_at) {
+    const pickupTime=storedTrackingTimestamp(order.actual_pickup_at);
+    if(!Number.isFinite(pickupTime)) throw new Error("实际提货时间无效，请核对历史运单数据");
+    if(Date.parse(eventAt)<pickupTime) throw new Error("在途轨迹不能早于实际提货时间");
+  }
   const kind=input.eventKind as DailyTrackingKind;
   const description=dailyTrackingDescription(kind,input.notes,input.vehicleReference);
   const hash=await sha256(JSON.stringify({orderId:input.orderId,kind,eventAt,location:input.location.trim(),vehicle:input.vehicleReference.trim(),notes:input.notes.trim(),visible:input.visibleToCustomer}));

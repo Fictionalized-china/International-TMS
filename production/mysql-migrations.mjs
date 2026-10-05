@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { applyLoadingIntegrityMigration, loadingIntegrityTriggers } from "./loading-integrity-migration.mjs";
 import { applyMeetingFlowMigration } from './meeting-flow-migration.mjs';
+import { applyIsoTimestampMigration } from './iso-timestamp-migration.mjs';
+import { applyP0WorkflowParityMigration } from './p0-workflow-parity-migration.mjs';
 
 const migrations = [
   {
@@ -234,6 +236,8 @@ const migrations = [
 ];
 
 migrations.push({version:179,name:'configurable_meeting_flow_and_atomic_settlement',definition:applyMeetingFlowMigration.toString(),up:connection=>applyMeetingFlowMigration(connection,addColumnIfMissing)});
+migrations.push({version:180,name:'iso_timestamp_storage_compatibility',definition:applyIsoTimestampMigration.toString(),up:applyIsoTimestampMigration});
+migrations.push({version:181,name:'p0_workflow_and_position_mysql_parity',definition:applyP0WorkflowParityMigration.toString(),up:applyP0WorkflowParityMigration});
 for (const migration of migrations) {
   migration.checksum = createHash("sha256")
     .update(`${migration.version}:${migration.name}\n${migration.definition}`)

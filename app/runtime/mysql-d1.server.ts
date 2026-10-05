@@ -72,6 +72,11 @@ function getPool(): Pool {
     connection.query("SET time_zone = '+00:00'", (error) => {
       if (error) console.error("Unable to initialize MySQL time zone", error);
     });
+    // Permission codes and multi-order summaries must not be silently truncated
+    // by MySQL's small GROUP_CONCAT default (which can remove granted rights).
+    connection.query("SET SESSION group_concat_max_len = 65535", (error) => {
+      if (error) console.error("Unable to initialize MySQL aggregation limit", error);
+    });
   });
   return pool;
 }
