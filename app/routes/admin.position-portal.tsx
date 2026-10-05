@@ -7,6 +7,7 @@ import { QueryPagination } from "../components/QueryPagination";
 import { MeetingWorkOverview } from "../components/MeetingWorkOverview";
 import { loadMeetingWorkOverview } from "../lib/meeting-work-overview.server";
 import { requireSessionUser } from "../lib/auth.server";
+import { AdminWorkspaceTabs } from "../components/AdminWorkspaceTabs";
 import { paginateList, readListPage } from "../lib/list-pagination";
 import { canOperateCurrentOrder } from "../lib/order-access";
 import { canSeeScopedOrder, canViewAllOrders } from "../lib/order-access.server";
@@ -353,7 +354,7 @@ export async function loader({ request }: Route.LoaderArgs) {
 }
 
 export function meta() {
-  return [{ title: "任务工作台 | International TMS" }];
+  return [{ title: "工作台 · 我的待办 | International TMS" }];
 }
 
 export default function PositionPortal({ loaderData }: Route.ComponentProps) {
@@ -361,9 +362,10 @@ export default function PositionPortal({ loaderData }: Route.ComponentProps) {
   const advancedFilterCount = [filters.stage, filters.businessType, filters.position, filters.assignee].filter(Boolean).length + orderRouteFilterCount(filters);
   return <>
     <header className="page-header position-portal-header">
-      <div><p className="eyebrow">TASK WORKBENCH</p><h1>任务工作台</h1><p>{current.displayName} · {canViewAll ? "可查看全部订单" : "只显示当前由本岗位负责推进的订单"} · 点击订单直接进入对应办理模组</p></div>
+      <div><p className="eyebrow">WORKBENCH / 我的待办</p><h1>工作台</h1><p>{current.displayName} · {canViewAll ? "可查看全部订单" : "只显示当前由本岗位负责推进的订单"} · 点击订单直接进入对应办理模组</p></div>
       <div className="page-actions"><span className="status-pill">当前筛选 {loaderData.pagination.total} 单</span></div>
     </header>
+    <AdminWorkspaceTabs user={current} workspace="portal" />
     <MeetingWorkOverview overview={loaderData.meetingOverview}/>
 
     <section className="panel position-field-permission-summary">

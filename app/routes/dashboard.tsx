@@ -1,5 +1,5 @@
-import { Form, NavLink, Outlet } from "react-router";
-import type { ReactNode } from "react";
+import { Form, Link, NavLink, Outlet, useLocation } from "react-router";
+import { Fragment, type ReactNode } from "react";
 import type { Route } from "./+types/dashboard";
 import { requireSessionUser } from "../lib/auth.server";
 import { AppIcon, type AppIconName } from "../components/AppIcon";
@@ -8,10 +8,17 @@ import { ConnectionStatus } from "../components/InteractionFeedback";
 import { InternalNotificationCenter } from "../components/InternalNotificationCenter";
 import { WorkspacePreferences } from "../components/WorkspacePreferences";
 import { loadInternalNotificationSummary } from "../lib/internal-notifications.server";
-import {
-  adminNavigationGroupVisibility,
-  adminNavigationItemVisibility,
-} from "../lib/admin-navigation";
+import type { AdminNavigationItemKey } from "../lib/admin-navigation";
+import { adminPrimaryNavigationGroups, adminPrimaryNavigationItemActive, adminWorkspaceHref } from "../lib/admin-workspace-navigation";
+
+const sideIcons: Record<AdminNavigationItemKey, AppIconName> = {
+  portal: "layout", notifications: "bell", dashboard: "dashboard", trackingCenter: "map",
+  analytics: "chart", hrReports: "chart", quotations: "receipt", orders: "clipboard",
+  loading: "truck", documents: "documents", shipments: "packageCheck", billing: "billing",
+  settlementApprovals: "billing", cargo: "boxes", customers: "building", sales: "chart",
+  logisticsProducts: "briefcase", carriers: "truck", workflow: "workflow", masterData: "settings",
+  warehouses: "warehouse", organizationAccess: "userSettings", security: "lock", audit: "history",
+};
 
 export async function loader({ request }: Route.LoaderArgs) {
   const user = await requireSessionUser(request);
@@ -23,16 +30,8 @@ export async function loader({ request }: Route.LoaderArgs) {
 
 export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
   const { user } = loaderData;
-  const can = (permission: string) => user.permissions.includes(permission);
-  const navigationGroups = adminNavigationGroupVisibility(user);
-  const navigationItems = adminNavigationItemVisibility(user);
-  const organizationAccessHref = can("department.view")
-    ? "/admin/departments"
-    : can("user.view")
-      ? "/admin/positions"
-      : can("role.view")
-        ? "/admin/roles"
-        : null;
+  const location = useLocation();
+  const navigationGroups = adminPrimaryNavigationGroups(user);
 
   return (
     <div className="shell admin-app-shell">
@@ -53,46 +52,15 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
         </div>
 
         <nav className="nav" aria-label="运营管理导航">
-          <SideNavGroup label="工作台" visible={navigationGroups.workbench}>
-            {navigationItems.portal && <SideLink to="/admin/portal" icon="layout">任务工作台</SideLink>}
-            {navigationItems.notifications && <SideLink to="/admin/notifications" icon="bell">
-              通知{loaderData.notifications.unreadCount>0&&<b className="nav-badge">{loaderData.notifications.unreadCount>99?"99+":loaderData.notifications.unreadCount}</b>}
-            </SideLink>}
-            {navigationItems.dashboard && <SideLink to="/admin" icon="dashboard" end>运营总览</SideLink>}
-          </SideNavGroup>
-
-          <SideNavGroup label="运营控制" visible={navigationGroups.control}>
-          {navigationItems.trackingCenter && <SideLink to="/admin/tracking-center" icon="map">调度与运踪</SideLink>}
-          {navigationItems.analytics && <SideLink to="/admin/analytics" icon="chart">汇总分析</SideLink>}
-          {navigationItems.hrReports && <SideLink to="/admin/hr-reports" icon="chart">人事回款与提成</SideLink>}
-          </SideNavGroup>
-
-          <SideNavGroup label="汽运业务" visible={navigationGroups.transport}>
-          {navigationItems.quotations && <SideLink to="/admin/quotations" icon="receipt">询价与报价</SideLink>}
-          {navigationItems.orders && <SideLink to="/admin/orders" icon="clipboard">订单中心</SideLink>}
-          {navigationItems.loading && <SideLink to="/admin/loading" icon="truck">配载单跟踪</SideLink>}
-          {navigationItems.documents && <SideLink to="/admin/documents" icon="documents">文件中心</SideLink>}
-          {navigationItems.shipments && <SideLink to="/admin/shipments" icon="packageCheck">运输单据</SideLink>}
-          {navigationItems.billing && <SideLink to="/admin/billing" icon="billing">费用结算</SideLink>}
-          {navigationItems.settlementApprovals && <SideLink to="/admin/settlement-approvals" icon="billing">出境后费用审批</SideLink>}
-          {navigationItems.cargo && <SideLink to="/admin/cargo" icon="boxes">货物信息</SideLink>}
-          </SideNavGroup>
-
-          <SideNavGroup label="业务资料" visible={navigationGroups.businessData}>
-          {navigationItems.customers && <SideLink to="/admin/customers" icon="building">客户管理</SideLink>}
-          {navigationItems.sales && <SideLink to="/admin/sales" icon="chart">销售管理</SideLink>}
-          {navigationItems.logisticsProducts && <SideLink to="/admin/logistics-products" icon="briefcase">物流产品</SideLink>}
-          {navigationItems.carriers && <SideLink to="/admin/carriers" icon="truck">承运商管理</SideLink>}
-          {navigationItems.workflow && <SideLink to="/admin/workflow" icon="workflow">业务工作流</SideLink>}
-          </SideNavGroup>
-
-          <SideNavGroup label="系统" visible={navigationGroups.system}>
-          {navigationItems.masterData && <SideLink to="/admin/master-data" icon="settings">基础数据</SideLink>}
-          {navigationItems.warehouses && <SideLink to="/admin/warehouses" icon="warehouse">仓库管理</SideLink>}
-          {navigationItems.organizationAccess && organizationAccessHref && <SideLink to={organizationAccessHref} icon="userSettings">组织与权限</SideLink>}
-          {navigationItems.security && <SideLink to="/admin/security" icon="lock">安全中心</SideLink>}
-          {navigationItems.audit && <SideLink to="/admin/audit" icon="history">审计日志</SideLink>}
-          </SideNavGroup>
+          {navigationGroups.map(group => <Fragment key={group.key}>
+            <span className="nav-group nav-title">{group.label}</span>
+            {group.items.map(item => <SideLink key={item.key}
+              to={adminWorkspaceHref(item.href, location.search)} icon={sideIcons[item.key]}
+              active={adminPrimaryNavigationItemActive(item, location.pathname, location.search)}>
+              {item.label}{item.key === "notifications" && loaderData.notifications.unreadCount > 0 &&
+                <b className="nav-badge">{loaderData.notifications.unreadCount > 99 ? "99+" : loaderData.notifications.unreadCount}</b>}
+            </SideLink>)}
+          </Fragment>)}
         </nav>
 
         <div className="sidebar-user userbox">
@@ -127,37 +95,21 @@ export default function DashboardLayout({ loaderData }: Route.ComponentProps) {
   );
 }
 
-function SideNavGroup({
-  label,
-  visible,
-  children,
-}: {
-  label: string;
-  visible: boolean;
-  children: ReactNode;
-}) {
-  if (!visible) return null;
-  return <>
-    <span className="nav-group nav-title">{label}</span>
-    {children}
-  </>;
-}
-
 function SideLink({
   to,
   icon,
-  end,
+  active,
   children,
 }: {
   to: string;
   icon: AppIconName;
-  end?: boolean;
+  active: boolean;
   children: ReactNode;
 }) {
   return (
-    <NavLink to={to} end={end}>
+    <Link to={to} className={active ? "active" : undefined} aria-current={active ? "page" : undefined}>
       <span className="nav-icon"><AppIcon name={icon} size={17} /></span>
       <span>{children}</span>
-    </NavLink>
+    </Link>
   );
 }

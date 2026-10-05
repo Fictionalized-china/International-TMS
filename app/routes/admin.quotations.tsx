@@ -9,6 +9,7 @@ import { CustomerEditorForm, type CustomerEditorValues } from "../components/Cus
 import { ConfirmAction } from "../components/ConfirmAction";
 import { QueryPagination } from "../components/QueryPagination";
 import { requireSessionUser } from "../lib/auth.server";
+import { AdminWorkspaceTabs } from "../components/AdminWorkspaceTabs";
 import { paginateList, readListPage } from "../lib/list-pagination";
 import { canViewAllCustomers, customerVisibilitySql } from "../lib/customer-access.server";
 import { writeAudit } from "../lib/audit.server";
@@ -994,8 +995,13 @@ async function saveQuotationNativeWorkflowUpdate(input: {
 
 export default function QuotationsPage({ loaderData, actionData }: Route.ComponentProps) {
   const busy = useNavigation().state !== "idle";
+  const isDirectEntry = loaderData.filters.entryMode === "direct";
   const [createQuoteOpen,setCreateQuoteOpen]=useState(false);
   const [directOrderOpen,setDirectOrderOpen]=useState(loaderData.filters.entryMode === "direct");
+  useEffect(() => {
+    setDirectOrderOpen(isDirectEntry);
+    setCreateQuoteOpen(false);
+  }, [isDirectEntry]);
   const dismissedCreateResult=useRef(actionData);
   const actionError=actionData&&"formError" in actionData?actionData.formError:undefined;
   const actionSuccess=actionData&&"success" in actionData?actionData.success:undefined;
@@ -1009,16 +1015,17 @@ export default function QuotationsPage({ loaderData, actionData }: Route.Compone
   };
   const stats = loaderData.quoteStats;
   return <div className="page prototype-page">
-    <div className="breadcrumb">管理后台 / 工作台 / <b>询价与报价</b></div>
+    <div className="breadcrumb">管理后台 / {isDirectEntry ? "订单中心" : "销售管理"} / <b>{isDirectEntry ? "直接录单" : "报价辅助"}</b></div>
     <div className="page-head">
-      <div><span className="eyebrow">QUOTE DESK / 询价与报价</span><h1>询价与报价</h1><p>线下已经确认的业务可直接录单；需要客户线上确认时再使用报价流程。</p></div>
+      <div><span className="eyebrow">{isDirectEntry ? "ORDER INTAKE / 订单中心" : "SALES TOOLS / 报价辅助"}</span><h1>{isDirectEntry ? "直接录单" : "询价与报价"}</h1><p>{isDirectEntry ? "按线下已确认的业务建立订单；费用必录要求与岗位职责仍由工作流和业务策略控制。" : "报价是可选销售辅助功能，不是开单前置节点；线下确认后的录单请从订单中心进入。"}</p></div>
       <div className="head-actions">
-        {loaderData.current.permissions.includes("quote.manage") && <Modal title="创建运输报价" triggerLabel="创建报价" triggerClassName="btn" closeSignal={actionData?.intent==="create"&&actionData.entryMode!=="direct"?actionSuccess:undefined} isOpen={createQuoteOpen} onOpenChange={updateCreateQuoteOpen} size="xwide" dialogClassName="quote-form-modal" guardFormChanges><QuoteForm loaderData={loaderData} busy={busy} formError={createFormError} entryMode="quote" /></Modal>}
-        <Modal title="线下确认直接录单" triggerLabel="直接录单" triggerClassName="btn primary" closeSignal={actionData?.intent==="create"&&actionData.entryMode==="direct"?actionSuccess:undefined} isOpen={directOrderOpen} onOpenChange={setDirectOrderOpen} size="xwide" dialogClassName="quote-form-modal" guardFormChanges><QuoteForm loaderData={loaderData} busy={busy} formError={directFormError} entryMode="direct" /></Modal>
+        {!isDirectEntry && loaderData.current.permissions.includes("quote.manage") && <Modal title="创建运输报价" triggerLabel="创建报价" triggerClassName="btn" closeSignal={actionData?.intent==="create"&&actionData.entryMode!=="direct"?actionSuccess:undefined} isOpen={createQuoteOpen} onOpenChange={updateCreateQuoteOpen} size="xwide" dialogClassName="quote-form-modal" guardFormChanges><QuoteForm loaderData={loaderData} busy={busy} formError={createFormError} entryMode="quote" /></Modal>}
+        {isDirectEntry && loaderData.current.permissions.includes("order.intake.manage") && <Modal title="线下确认直接录单" triggerLabel="直接录单" triggerClassName="btn primary" closeSignal={actionData?.intent==="create"&&actionData.entryMode==="direct"?actionSuccess:undefined} isOpen={directOrderOpen} onOpenChange={setDirectOrderOpen} size="xwide" dialogClassName="quote-form-modal" guardFormChanges><QuoteForm loaderData={loaderData} busy={busy} formError={directFormError} entryMode="direct" /></Modal>}
       </div>
     </div>
+    <AdminWorkspaceTabs user={loaderData.current} workspace={isDirectEntry ? "orders" : "sales"} />
     {(actionSuccess || actionError) && <div className={`gate ${actionError ? "" : "ok"}`}>{actionError || actionSuccess}{actionData && "orderId" in actionData && actionData.orderId ? <Link className="btn small" to={`/admin/orders/${actionData.orderId}`}>打开订单</Link> : null}</div>}
-    <div className="kpis quotation-kpis">
+    {!isDirectEntry && <><div className="kpis quotation-kpis">
       <div className="panel"><span>待客户确认</span><b>{stats.pending}</b></div>
       <div className="panel"><span>已接受</span><b>{stats.accepted}</b></div>
       <div className="panel"><span>自动生成订单</span><b>{stats.orders}</b></div>
@@ -1052,7 +1059,7 @@ export default function QuotationsPage({ loaderData, actionData }: Route.Compone
       </tbody></table></div>
       {!loaderData.quotes.length && <div className="empty-state">暂无符合条件的报价。</div>}
       <QueryPagination {...loaderData.pagination} />
-    </section>
+    </section></>}
   </div>;
 }
 
@@ -1833,4 +1840,6 @@ function statusTone(status: Quote["lifecycle_status"]) {
   return "blue";
 }
 
-export function meta() { return [{ title: "询价与报价 | 新翎航 TMS" }]; }
+export function meta({ loaderData }: Route.MetaArgs) {
+  return [{ title: loaderData?.filters.entryMode === "direct" ? "订单中心 · 直接录单 | 新翎航 TMS" : "销售管理 · 报价辅助 | 新翎航 TMS" }];
+}

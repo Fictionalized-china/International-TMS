@@ -330,7 +330,7 @@ export async function action({ request }: Route.ActionArgs) {
   return { success: "运单状态与轨迹已更新" };
 }
 async function ownedShipment(id: string, org: string) { return env.DB.prepare("SELECT order_id FROM shipments WHERE id = ? AND organization_id = ?").bind(id, org).first<{order_id:string}>(); }
-export function meta() { return [{ title: "运输单据 | International TMS" }]; }
+export function meta() { return [{ title: "运单档案 | International TMS" }]; }
 const labels: Record<string,string> = { booked:"已订舱", picked_up:"已提货", in_transit:"运输中", customs:"清关中", out_for_delivery:"运输中", delivered:"已签收", exception:"异常", cancelled:"已取消" };
 const businessTypeLabels: Record<string,string> = { ltl:"零担/拼车", ftl:"整车", warehouse:"仓到仓" };
 const orderWorkflowStatuses = ["draft","submitted","confirmed","in_execution","completed","cancelled"];
@@ -344,12 +344,12 @@ export default function Shipments({ loaderData, actionData }: Route.ComponentPro
     <header className="page-header">
       <div>
         <p className="eyebrow">SHIPMENT REGISTER</p>
-        <h1>运输单据</h1>
+        <h1>运单档案</h1>
         <p>订单中心承载业务全流程；这里集中查看实际生成的运单、运输资源与轨迹。</p>
       </div>
       <span className="status-pill">共 {loaderData.total} 票</span>
     </header>
-    <TransportExecutionTabs />
+    <TransportExecutionTabs user={loaderData.current} />
     <ActionToast data={actionData} />
     <section className="panel shipment-register">
       <div className="panel-header shipment-register-header">

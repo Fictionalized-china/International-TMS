@@ -768,7 +768,7 @@ function PermissionCheckboxes({
 
     <div className="permission-editor-mode-guide">
       {activeView === "menus"
-        ? <><b>菜单可见只决定“从哪里进入”</b><span>开启入口时只补足最小只读权限，不会自动授予新增、编辑或审批能力。</span></>
+        ? <><b>菜单可见只决定“从哪里进入”</b><span>一级入口已合并，子页面仍独立勾选。开启入口时只补足原功能所需的最小权限，不因合并授予其他子页权限；待我审批不授予财务金额读取权。</span></>
         : <><b>在这里授予“能做什么”</b><span>例如修改仓库：搜索并勾选“管理仓库配置”；只需查看时不要勾选管理权限。</span></>}
     </div>
 

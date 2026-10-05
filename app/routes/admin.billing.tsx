@@ -7,6 +7,7 @@ import { OrderNumberLink, OrderNumberLinkList } from "../components/EntityNumber
 import { ActionToast } from "../components/ActionToast";
 import { writeAudit } from "../lib/audit.server";
 import { requireSessionUser, type SessionUser } from "../lib/auth.server";
+import { AdminWorkspaceTabs } from "../components/AdminWorkspaceTabs";
 import { canAccessSettlementWorkbench } from "../lib/billing-access";
 import {
   BILLING_PAGE_SIZE,
@@ -387,9 +388,8 @@ async function freshSettlementActor(
 }
 
 export default function Billing({ loaderData, actionData }: Route.ComponentProps) {
-  if (loaderData.accessDenied) return <BillingAccessHandoff />;
-
   const busy = useNavigation().state !== "idle";
+  if (loaderData.accessDenied) return <><AdminWorkspaceTabs user={loaderData.current} workspace="billing" /><BillingAccessHandoff /></>;
   const manage = loaderData.current.permissions.includes("billing.manage");
   const cashManage = loaderData.current.permissions.includes("billing.cash.manage");
   return <>
@@ -403,6 +403,7 @@ export default function Billing({ loaderData, actionData }: Route.ComponentProps
         {manage && cashManage ? "全流程办理" : manage ? "财务办理" : cashManage ? "出纳办理" : "只读"}
       </span>
     </header>
+    <AdminWorkspaceTabs user={loaderData.current} workspace="billing" />
 
     {loaderData.balances.length > 0 && <div className="billing-balance-strip" aria-label="未核销余额">
       {loaderData.balances.map((item) => <span key={`${item.direction}-${item.currency}`}>

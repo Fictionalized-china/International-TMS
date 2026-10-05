@@ -14,6 +14,7 @@ import {
 import { loadBatchesInitialResponsibilityRestrictions } from "../lib/batch-responsibility.server";
 import { OrderRouteFilterFields } from "../components/OrderRouteFilterFields";
 import { requireSessionUser } from "../lib/auth.server";
+import { AdminWorkspaceTabs } from "../components/AdminWorkspaceTabs";
 import { assignedBatchViewPermission, canOperateCurrentOrder, currentOrderActionSql, orderVisibilitySql } from "../lib/order-access.server";
 import { orderRouteFilterCount, readOrderRouteFilters } from "../lib/order-route-filters";
 import {
@@ -426,6 +427,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     priorityBatchCount: batchCountRow?.priority_count || 0,
   });
   return {
+    current,
     orders,
     filters: { keyword, type, handlingScope, workStatus, status, step, exception, batchKeyword: unifiedSupervisorWorkload ? "" : batchKeyword, batchStatus, view: workloadView, batchPage: String(batchPage), ...routeFilters },
     steps: stepRows.results,
@@ -470,8 +472,8 @@ export default function Orders({ loaderData }: Route.ComponentProps) {
       <div className="breadcrumb">汽运业务 / 订单中心</div>
       <header className="page-head">
         <div><h1>订单中心</h1><p>业务员可按线下已确认内容直接录单；询价与报价保留为可选销售工具。</p></div>
-        <div className="head-actions"><Link className="btn" to="/admin/quotations">询价与报价</Link><Link className="btn primary" to="/admin/quotations?entryMode=direct">直接录单</Link></div>
       </header>
+      <AdminWorkspaceTabs user={loaderData.current} workspace="orders" />
       {loaderData.canViewBatchWorkload && !loaderData.unifiedSupervisorWorkload && <OrderWorkloadTabs
         active={loaderData.workloadView}
         batchCount={loaderData.batchTotal}

@@ -33,7 +33,7 @@ export type AdminNavigationItemKey =
   | "security"
   | "audit";
 
-type AdminNavigationUser = Pick<
+export type AdminNavigationUser = Pick<
   OrderAccessUser,
   "positionCode" | "roleCodes" | "permissions"
 >;
@@ -44,7 +44,7 @@ export type AdminNavigationPermissionItem = {
   description: string;
   href: string;
   menuPermissionCode: string;
-  /** 打开菜单时自动补足的最小页面读取权限，不包含任何写权限。 */
+  /** 沿用本功能既有准入权限；不能因入口合并补足其他子功能的权限。 */
   enablePermissionCodes: readonly string[];
   accessPermissionCodes: readonly string[];
   accessMode?: "all" | "any";
@@ -60,7 +60,8 @@ export type AdminNavigationPermissionGroup = {
 
 /**
  * 管理端菜单权限只控制入口可见性；页面读取、编辑、审批和删除继续由既有
- * 业务权限控制。启用菜单时仅补足进入该页面所需的最小读取权限。
+ * 业务权限控制。启用菜单时沿用本功能的最小准入权限（审批入口包含既有
+ * 签核权限），绝不因为同属一个板块而补足其他子页的读取或办理权限。
  */
 export const adminNavigationPermissionGroups: readonly AdminNavigationPermissionGroup[] = [
   {
@@ -68,9 +69,9 @@ export const adminNavigationPermissionGroups: readonly AdminNavigationPermission
     label: "工作台",
     description: "个人任务、通知和运营概览。",
     items: [
-      navigationItem("portal", "任务工作台", "查看本人待办与工作入口。", "/admin/portal", []),
+      navigationItem("portal", "我的待办", "工作台 → 我的待办；查看本人待办与工作入口。", "/admin/portal", []),
       navigationItem("notifications", "通知", "查看站内通知。", "/admin/notifications", []),
-      navigationItem("dashboard", "运营总览", "查看岗位范围内的运营概览。", "/admin", ["dashboard.view"]),
+      navigationItem("dashboard", "运营看板", "工作台 → 运营看板；查看岗位范围内的运营概览。", "/admin", ["dashboard.view"]),
     ],
   },
   {
@@ -88,7 +89,7 @@ export const adminNavigationPermissionGroups: readonly AdminNavigationPermission
     label: "汽运业务",
     description: "订单、配载、单据、文件、费用与货物。",
     items: [
-      navigationItem("quotations", "询价与报价", "查看客户询价和运输报价。", "/admin/quotations", ["quote.view"]),
+      navigationItem("quotations", "询价与报价", "销售管理 → 报价辅助；可独立停用，不影响直接录单。", "/admin/quotations", ["quote.view"]),
       navigationItem("orders", "订单中心", "查看岗位范围内的运输订单。", "/admin/orders", ["order.view"]),
       {
         ...navigationItem("loading", "配载单跟踪", "查看本人可访问的配载单。", "/admin/loading", ["transport.batch.assigned.view"]),
@@ -102,10 +103,10 @@ export const adminNavigationPermissionGroups: readonly AdminNavigationPermission
         accessKind: "batchWorkspace",
       },
       navigationItem("documents", "文件中心", "查看订单与配载文件。", "/admin/documents", ["order.module.documents.view"], ["order.module.documents.view", "order.module.documents.manage"]),
-      navigationItem("shipments", "运输单据", "查看运单与运输轨迹。", "/admin/shipments", ["shipment.view"]),
+      navigationItem("shipments", "运单档案", "调度与运踪 → 运单档案及在途车辆；保留运单与运输段操作。", "/admin/shipments", ["shipment.view"]),
       navigationItem("billing", "费用结算", "查看获授权范围内的费用信息。", "/admin/billing", ["billing.view", "billing.sensitive.view"], undefined, "all"),
-      navigationItem("settlementApprovals", "出境后费用审批", "按配置和本单责任办理应收应付签核。", "/admin/settlement-approvals", ["settlement.signature.manage"]),
-      navigationItem("cargo", "货物信息", "查看订单货物与包装信息。", "/admin/cargo", ["order.module.cargo.view"], ["order.module.cargo.view", "order.module.cargo.manage"]),
+      navigationItem("settlementApprovals", "待我审批", "费用结算 → 待我审批；按本单责任签核，不授予财务金额读取权。", "/admin/settlement-approvals", ["order.view", "settlement.signature.manage"], undefined, "all"),
+      navigationItem("cargo", "货物检索", "订单中心 → 货物检索；查看订单货物与包装信息。", "/admin/cargo", ["order.module.cargo.view"], ["order.module.cargo.view", "order.module.cargo.manage"]),
     ],
   },
   {

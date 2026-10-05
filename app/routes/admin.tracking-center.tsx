@@ -5,6 +5,7 @@ import { AppIcon } from "../components/AppIcon";
 import { OrderNumberLink } from "../components/EntityNumberLink";
 import { QueryPagination } from "../components/QueryPagination";
 import { requireSessionUser } from "../lib/auth.server";
+import { TransportExecutionTabs } from "../components/TransportExecutionTabs";
 import { loadTrackingCenter } from "../lib/tracking-center.server";
 import { loadBusinessProcessPolicy } from "../lib/business-process-policy.server";
 import { policyEnabled,policyPositions } from "../lib/business-process-policy";
@@ -56,6 +57,7 @@ export default function TrackingCenter({ loaderData,actionData }: Route.Componen
       <div><p className="eyebrow">DISPATCH &amp; TRACKING CONTROL</p><h1>调度与运踪</h1><p>一个入口查看调度安排、在途状态、时效预警与客户端轨迹同步。</p></div>
       <div className="page-actions"><Link className="secondary" to="/admin/workbenches/tracking">我的运踪待办</Link><Link className="secondary" to="/admin/loading">配载单跟踪</Link><Link className="primary" to="/admin/domestic-tracking">运输执行台账</Link></div>
     </header>
+    <TransportExecutionTabs user={loaderData.current} />
     {actionData?.formError&&<p className="alert danger" role="alert">{actionData.formError}</p>}{actionData?.success&&<p className="alert success" role="status">{actionData.success}</p>}
 
     <nav className="tracking-center-kpis" aria-label="调度与运踪汇总">

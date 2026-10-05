@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { Link } from "react-router";
 import type { Route } from "./+types/admin.cargo";
 import { requireSessionUser } from "../lib/auth.server";
+import { AdminWorkspaceTabs } from "../components/AdminWorkspaceTabs";
 import { orderVisibilitySql } from "../lib/order-access.server";
 import { statusLabel } from "../lib/order-workflow";
 
@@ -95,6 +96,7 @@ export async function loader({ request }: Route.LoaderArgs) {
         .all<CargoImage>()
     : { results: [] as CargoImage[] };
   return {
+    current,
     cargo: cargo.results,
     images: images.results,
     total,
@@ -104,7 +106,7 @@ export async function loader({ request }: Route.LoaderArgs) {
 }
 
 export function meta() {
-  return [{ title: "货物信息 | International TMS" }];
+  return [{ title: "货物检索 | International TMS" }];
 }
 
 export default function CargoInformation({ loaderData }: Route.ComponentProps) {
@@ -113,11 +115,12 @@ export default function CargoInformation({ loaderData }: Route.ComponentProps) {
       <header className="page-header">
         <div>
           <p className="eyebrow">ROAD FREIGHT CARGO</p>
-          <h1>货物信息</h1>
+          <h1>货物检索</h1>
           <p>按订单货物明细的最小记录单位，集中查看全部汽运货物。</p>
         </div>
         <span className="status-pill">共 {loaderData.total} 条</span>
       </header>
+      <AdminWorkspaceTabs user={loaderData.current} workspace="orders" />
       <section className="panel">
         <div className="table-wrap">
           <table>

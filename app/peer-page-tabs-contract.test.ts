@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 const css = readFileSync(new URL("./app.css", import.meta.url), "utf8");
 const peerTabSources = [
+  "./components/AdminWorkspaceTabs.tsx",
   "./components/CustomerEditorForm.tsx",
   "./routes/admin.billing.tsx",
   "./routes/admin.documents.tsx",

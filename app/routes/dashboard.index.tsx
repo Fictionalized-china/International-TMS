@@ -8,6 +8,7 @@ import { orderVisibilitySql } from "../lib/order-access.server";
 import { QueryPagination } from "../components/QueryPagination";
 import { paginateList, readListPage } from "../lib/list-pagination";
 import { MeetingWorkOverview } from "../components/MeetingWorkOverview";
+import { AdminWorkspaceTabs } from "../components/AdminWorkspaceTabs";
 import { loadMeetingWorkOverview } from "../lib/meeting-work-overview.server";
 
 const dashboardViewCodes = ["todo", "blocked", "in_progress", "unsettled"] as const;
@@ -76,7 +77,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   };
 }
 
-export function meta() { return [{ title: "运营总览 | International TMS" }]; }
+export function meta() { return [{ title: "工作台 · 运营看板 | International TMS" }]; }
 
 export default function DashboardIndex({ loaderData }: Route.ComponentProps) {
   const views: { code: DashboardViewCode; label: string; hint: string; icon: Parameters<typeof AppIcon>[0]["name"]; tone: string }[] = [
@@ -87,11 +88,12 @@ export default function DashboardIndex({ loaderData }: Route.ComponentProps) {
   ];
   const activeView = views.find((view) => view.code === loaderData.selectedView)!;
   return <div className="ops-dashboard ops-dashboard-filtered">
-    <MeetingWorkOverview overview={loaderData.meetingOverview}/>
     <header className="page-header ops-dashboard-header">
-      <div><p className="eyebrow">OPERATIONS OVERVIEW</p><h1>运营总览</h1><p>{loaderData.user.displayName} · 点击下方条件即可切换对应订单，不需要重新填写筛选表单。</p></div>
-      <div className="page-actions"><Link className="secondary" to="/admin/portal"><AppIcon name="layout" size={15}/>岗位待办</Link><Link className="primary" to="/admin/orders"><AppIcon name="clipboard" size={15}/>全部订单</Link></div>
+      <div><p className="eyebrow">WORKBENCH / 运营看板</p><h1>工作台</h1><p>{loaderData.user.displayName} · 点击下方条件即可切换对应订单，不需要重新填写筛选表单。</p></div>
+      <div className="page-actions">{loaderData.user.permissions.includes("order.view") && <Link className="primary" to="/admin/orders"><AppIcon name="clipboard" size={15}/>全部订单</Link>}</div>
     </header>
+    <AdminWorkspaceTabs user={loaderData.user} workspace="portal" />
+    <MeetingWorkOverview overview={loaderData.meetingOverview}/>
 
     <nav className="ops-kpi-grid ops-filter-kpis" aria-label="运营订单筛选">
       {views.map((view) => <Link key={view.code} className={loaderData.selectedView === view.code ? "active" : ""} aria-current={loaderData.selectedView === view.code ? "page" : undefined} to={view.code === "todo" ? "/admin" : `/admin?view=${view.code}`}>

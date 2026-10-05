@@ -2,6 +2,8 @@ import { env } from "cloudflare:workers";
 import { Form,Link,useNavigation } from "react-router";
 import type { Route } from "./+types/admin.settlement-approvals";
 import { requireSessionUser } from "../lib/auth.server";
+import { AdminWorkspaceTabs } from "../components/AdminWorkspaceTabs";
+import { canViewAdminNavigationItem } from "../lib/admin-navigation";
 import { orderVisibilitySql } from "../lib/order-access";
 import { loadMeetingSettlement,meetingSignatureAccess,submitMeetingSignature,actualExportSql,assertMeetingSignoffsComplete } from "../lib/meeting-settlement.server";
 import { refreshMeetingSettlement } from "../lib/meeting-settlement-refresh.server";
@@ -49,12 +51,13 @@ export async function action({request}:Route.ActionArgs) {
 }
 export default function SettlementApprovals({loaderData,actionData}:Route.ComponentProps) {
   const busy=useNavigation().state!=="idle";
-  return <div className="module-business-stack"><header className="page-header"><div><h1>出境后对账与付款审批</h1><p>分别办理客户应收与供应商应付；可办步骤由工作流控制，办理岗位由业务策略配置，个人责任由本单任务分派决定。</p></div><Link className="secondary" to="/admin/billing">费用结算</Link></header>
+  return <div className="module-business-stack"><header className="page-header"><div><h1>费用结算 · 待我审批</h1><p>分别办理客户应收与供应商应付；可办步骤由工作流控制，办理岗位由业务策略配置，个人责任由本单任务分派决定。</p></div></header>
+    <AdminWorkspaceTabs user={loaderData.current} workspace="billing" />
     {actionData?.formError&&<p role="alert" className="alert danger">{actionData.formError}</p>}{actionData?.success&&<p role="status" className="alert success">{actionData.success}</p>}
     <Form method="get" className="tracking-center-filter"><label>订单定位<input name="q" defaultValue={loaderData.q}/></label><button className="primary">查询</button></Form>
     {loaderData.rows.map(row=><section className="panel" key={row.id}><h2><OrderNumberLink id={row.id} number={row.orderNumber}/></h2>{row.directions.map(item=><div key={item.direction}><h3>{item.direction==="receivable"?"客户应收":"供应商应付"}</h3><div className="row-actions">{item.actions.filter(a=>a.active).map(a=><div key={a.action}><span>{a.configuredRelease?'确认费用（配置为无需审批链）':expenseDirectionActionLabel(a.action,item.direction)} · {a.required?"必办":"选办"} · {a.completed?"已完成":"待办"}</span>{!a.completed&&(a.reason?<small>{a.reason}</small>:<Form method="post"><input type="hidden" name="orderId" value={row.id}/><input type="hidden" name="direction" value={item.direction}/><input type="hidden" name="action" value={a.action}/><input aria-label="签核备注" name="notes" placeholder="签核备注"/><button className="primary" disabled={busy}>{a.configuredRelease?'按当前配置确认费用':expenseDirectionActionLabel(a.action,item.direction)}</button></Form>)}</div>)}</div></div>)}
       {row.offline?<p>线下付款审批：{row.offline.approver_name} · {row.offline.approved_at} · {row.offline.evidence_reference}</p>:row.canRecordOffline?<Modal title="记录总经理线下审批" triggerLabel="记录线下付款审批" closeSignal={actionData?.savedAt}><Form method="post" className="form-grid"><input type="hidden" name="intent" value="offline"/><input type="hidden" name="orderId" value={row.id}/><label>审批人<input name="approver" required/></label><label>实际审批日期<input type="date" name="approvedAt" required/></label><label>凭证 / 记录编号<input name="evidence" required/></label><button className="primary" disabled={busy}>保存审批记录</button></Form></Modal>:<p>线下付款审批记录待财务登记。</p>}
       {row.payableMissing&&<p className="alert warning">尚无应付费用，请通知操作或商务补录；不阻断独立应收对账。</p>}
-      <div className="row-actions"><Link to={`/admin/billing?q=${encodeURIComponent(row.orderNumber)}`}>查看确认、对账与发票状态</Link><Link to={`/admin/orders/${row.id}?module=documents&stage=outbound_transport`}>查看报关与出境资料</Link></div>
+      <div className="row-actions">{canViewAdminNavigationItem(loaderData.current, "billing") && <Link to={`/admin/billing?q=${encodeURIComponent(row.orderNumber)}`}>查看确认、对账与发票状态</Link>}<Link to={`/admin/orders/${row.id}?module=documents&stage=outbound_transport`}>查看报关与出境资料</Link></div>
     </section>)}{!loaderData.rows.length&&<p className="empty-state">当前范围内尚无已实际出境订单。</p>}<QueryPagination {...loaderData.pagination} unit="票订单"/></div>;
 }
