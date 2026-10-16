@@ -157,10 +157,12 @@ export function canAccessBatchWorkspace(
  * lifecycle. This does not grant any module/action permission; it only keeps
  * the order and every workflow node visible after responsibility moves on.
  */
-export function canReadFullOrderLifecycle(user: Pick<OrderAccessUser, "positionCode">) {
-  return ["SALES", "OPERATION_SUPERVISOR", "OPERATION", "TRACKING", "DOC", "FINANCE_ACCOUNTING"].includes(
-    user.positionCode ?? "",
-  );
+export function canReadFullOrderLifecycle(user: Pick<OrderAccessUser, "positionCode"> & {
+  roleCodes?: readonly string[];
+}) {
+  return isBossBusinessActor(user) || [
+    "SALES", "OPERATION_SUPERVISOR", "OPERATION", "TRACKING", "DOC", "FINANCE_ACCOUNTING",
+  ].includes(user.positionCode ?? "");
 }
 
 /**

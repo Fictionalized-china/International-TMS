@@ -230,6 +230,8 @@ describe("order access", () => {
     expect(canReadFullOrderLifecycle({ positionCode: "OPERATION" })).toBe(true);
     expect(canReadFullOrderLifecycle({ positionCode: "DOC" })).toBe(true);
     expect(canReadFullOrderLifecycle({ positionCode: "FINANCE_ACCOUNTING" })).toBe(true);
+    expect(canReadFullOrderLifecycle({ positionCode: "BOSS" })).toBe(true);
+    expect(canReadFullOrderLifecycle({ positionCode: "SALES", roleCodes: ["boss"] })).toBe(true);
   });
 
   it("separates current-node operation from full-lifecycle visibility", () => {

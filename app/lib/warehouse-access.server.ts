@@ -1,16 +1,12 @@
 import { env } from "cloudflare:workers";
 import type { SessionUser } from "./auth.server";
+import { resolveWarehouseAccess } from "./warehouse-access";
 
 const rank:Record<string,number>={viewer:1,operator:2,manager:3};
 
 export async function getWarehouseAccess(user:SessionUser){
   const rows=await env.DB.prepare("SELECT warehouse_id,access_level FROM warehouse_user_access WHERE organization_id=? AND user_id=?").bind(user.organizationId,user.userId).all<{warehouse_id:string;access_level:string}>();
-  // An explicit warehouse assignment wins even for managers. This keeps the
-  // warehouse workspace tied to the signed-in account instead of silently
-  // falling back to the first warehouse in the organization.
-  if(rows.results.length)return{all:false,warehouseIds:rows.results.map(x=>x.warehouse_id),levels:new Map(rows.results.map(x=>[x.warehouse_id,x.access_level]))};
-  if(user.permissions.includes("warehouse.manage"))return{all:true,warehouseIds:[] as string[],levels:new Map<string,string>()};
-  return{all:false,warehouseIds:rows.results.map(x=>x.warehouse_id),levels:new Map(rows.results.map(x=>[x.warehouse_id,x.access_level]))};
+  return resolveWarehouseAccess(user, rows.results);
 }
 
 export async function requireWarehouseAssignment(user:SessionUser,warehouseId:string,required:"viewer"|"operator"|"manager"="viewer"){
