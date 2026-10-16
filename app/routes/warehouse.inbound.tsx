@@ -205,7 +205,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const workflowGate = warehousePhysicalWorkflowAccessSql(
     "o",
     "overseas_warehouse",
-    { userId: user.userId, positionCode: user.positionCode },
+    { userId: user.userId, positionCode: user.positionCode, roleCodes: user.roleCodes },
   );
   const [shipments, locations] = await Promise.all([
     env.DB.prepare(
@@ -361,7 +361,7 @@ export async function loader({ request }: Route.LoaderArgs) {
         user.organizationId,
         scannedPackage.order_id,
         "overseas_warehouse",
-        { userId: user.userId, positionCode: user.positionCode },
+        { userId: user.userId, positionCode: user.positionCode, roleCodes: user.roleCodes },
       )
     : null;
   if (reference && scannedDispatch && scannedDispatch.status !== "dispatched")
@@ -608,7 +608,7 @@ export async function action({ request }: Route.ActionArgs) {
     user.organizationId,
     orderId,
     "overseas_warehouse",
-    { userId: user.userId, positionCode: user.positionCode },
+    { userId: user.userId, positionCode: user.positionCode, roleCodes: user.roleCodes },
   );
   if (!workflowAccess.available)
     return { formError: workflowAccess.reason || "当前订单的冻结工作流尚未开放境外仓入库" };
@@ -1171,7 +1171,7 @@ async function receiveAtomicOverseasScope(input:{
     .bind(input.user.organizationId,input.warehouse.id,requestedLocationId).first<{id:string;code:string;name:string;zone_name:string;warehouse_name:string}>();
   if(!location)return{formError:"请选择当前境外仓的有效入库库位"};
   for(const orderId of orderIds){
-    const access=await loadWarehousePhysicalWorkflowAccess(env.DB,input.user.organizationId,orderId,"overseas_warehouse",{userId:input.user.userId,positionCode:input.user.positionCode});
+    const access=await loadWarehousePhysicalWorkflowAccess(env.DB,input.user.organizationId,orderId,"overseas_warehouse",{userId:input.user.userId,positionCode:input.user.positionCode,roleCodes:input.user.roleCodes});
     if(!access.available)return{formError:access.reason||"本次范围内有订单尚未开放境外仓入库，已整体拒绝提交"};
     const exited=await env.DB.prepare("SELECT 1 ok FROM order_tracking_milestones WHERE organization_id=? AND order_id=? AND milestone_code='exported' LIMIT 1").bind(input.user.organizationId,orderId).first<{ok:number}>();
     if(!exited)return{formError:`${rows.find(row=>row.order_id===orderId)?.order_number||orderId} 尚未登记实际出境，已整体拒绝提交`};

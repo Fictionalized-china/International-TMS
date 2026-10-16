@@ -6,6 +6,18 @@ export type PermissionOverride = {
 export function isProtectedAccessRole(roleCodes: readonly string[] | null | undefined) {
   return (roleCodes ?? []).some((code) => code === "owner" || code === "boss");
 }
+
+/**
+ * The boss account is the system-level demonstration and emergency operator.
+ * It may stand in for a configured position or assignee, while business data
+ * gates (required fields, status, sequence and amount checks) remain active.
+ */
+export function isBossBusinessActor(actor: {
+  positionCode?: string | null;
+  roleCodes?: readonly string[] | null;
+}) {
+  return actor.positionCode === "BOSS" || isProtectedAccessRole(actor.roleCodes);
+}
 export function effectivePermissionCodes(input: {
   inherited: Iterable<string>;
   overrides: Iterable<PermissionOverride>;

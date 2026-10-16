@@ -48,7 +48,7 @@ async function createDispatchTask(db:D1Database,org:string,order:DispatchOrder,p
 
 export async function requestDispatchTask(db:D1Database,input:{current:SessionUser;orderId:string;plannedPortArrivalAt:string;planOnly?:boolean}) {
   const {current}=input,policy=await loadBusinessProcessPolicy(current.organizationId,db);
-  const denied=dispatchTaskAccess(policy,current.positionCode,current.permissions,"request");
+  const denied=dispatchTaskAccess(policy,current.positionCode,current.permissions,"request",current.roleCodes);
   if(denied) throw new Error(denied);
   const visibility=orderVisibilitySql(current,"o");
   const order=await db.prepare(`${sourceSql} WHERE o.organization_id=? AND o.id=? AND ${visibility.sql}`).bind(current.organizationId,input.orderId,...visibility.values).first<DispatchOrder>();
@@ -85,7 +85,7 @@ export async function refreshAutomaticDispatchTasks(db:D1Database,org:string,now
 
 export async function fulfillDispatchTask(db:D1Database,input:{current:SessionUser;orderId:string;carrierId:string;vehicleId:string;driverId:string;freightAmount:number;currency:string;exchangeRate:number;notes:string}) {
   const {current}=input,policy=await loadBusinessProcessPolicy(current.organizationId,db);
-  const denied=dispatchTaskAccess(policy,current.positionCode,current.permissions,"fulfill");
+  const denied=dispatchTaskAccess(policy,current.positionCode,current.permissions,"fulfill",current.roleCodes);
   if(denied) throw new Error(denied);
   if(!(input.freightAmount>0) || !Number.isFinite(input.freightAmount) || !(input.exchangeRate>0) || !Number.isFinite(input.exchangeRate) || !/^[A-Z]{3}$/.test(input.currency)) throw new Error("请填写有效运价、币种与实际汇率");
   const visibility=orderVisibilitySql(current,"o");

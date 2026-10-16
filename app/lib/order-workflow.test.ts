@@ -88,6 +88,26 @@ describe("sales order submission", () => {
       currentUserId: "sales-1",
     })).toBe(false);
   });
+
+  it("lets the boss submit a valid draft even when another salesperson owns it", () => {
+    expect(canSubmitSalesOrderForApproval({
+      status: "draft",
+      positionCode: "BOSS",
+      permissions: ["order.intake.manage"],
+      salespersonUserId: "sales-1",
+      creatorUserId: "sales-1",
+      currentUserId: "boss-1",
+      roleCodes: [],
+    })).toBe(true);
+    expect(canSubmitSalesOrderForApproval({
+      status: "submitted",
+      positionCode: "BOSS",
+      permissions: ["order.intake.manage"],
+      salespersonUserId: "sales-1",
+      currentUserId: "boss-1",
+      roleCodes: [],
+    })).toBe(false);
+  });
 });
 
 describe("workflow action ownership", () => {

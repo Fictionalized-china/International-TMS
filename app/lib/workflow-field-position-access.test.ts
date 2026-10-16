@@ -20,7 +20,7 @@ describe("workflow field handler positions", () => {
   it("allows only a configured position and never grants account-level access", () => {
     expect(canPositionHandleWorkflowField("DOC,SALES", "SALES")).toBe(true);
     expect(canPositionHandleWorkflowField("DOC,SALES", "OPERATION")).toBe(false);
-    expect(canPositionHandleWorkflowField("", "BOSS")).toBe(false);
+    expect(canPositionHandleWorkflowField("", "BOSS")).toBe(true);
   });
 
   it("adds or removes one position without changing the other positions", () => {

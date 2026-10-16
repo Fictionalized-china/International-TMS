@@ -29,5 +29,21 @@ describe("canCompleteWorkflowTask", () => {
   it("fails closed when the frozen task has no responsibility", () => {
     expect(canCompleteWorkflowTask({ ...base, responsibilityPositionCode: null })).toBe(false);
   });
+
+  it("lets the boss complete a manual task owned by another position or account", () => {
+    expect(canCompleteWorkflowTask({
+      ...base,
+      actorPositionCodes: ["BOSS"],
+      taskAssigneeUserId: "user-b",
+      moduleAssigneeUserId: "user-c",
+      responsibilityPositionCode: "DOC",
+    })).toBe(true);
+    expect(canCompleteWorkflowTask({
+      ...base,
+      actorRoleCodes: ["boss"],
+      taskAssigneeUserId: "user-b",
+      responsibilityPositionCode: "DOC",
+    })).toBe(true);
+  });
 });
 

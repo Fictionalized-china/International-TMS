@@ -21,6 +21,7 @@ import { loadMissingOrderIntakeFees } from "./order-intake-fees.server";
 import { loadBusinessProcessPolicy } from "./business-process-policy.server";
 import { policyEnabled, policyPositions } from "./business-process-policy";
 import { loadActivePositionAccessProfile } from "./position-access-profile.server";
+import { isBossBusinessActor } from "./permission-blocks";
 
 export type OrderWorkflowTransition = {
   action_code: string;
@@ -121,8 +122,8 @@ export async function validateOrderWorkflowAction(input: {
   ).bind(input.organizationId,input.actorUserId).first<{code:string}>();
   const processPolicy = await loadBusinessProcessPolicy(input.organizationId);
   if(input.actionCode==='submit'&&actorPosition?.code==='HR_ADMIN'&&!policyEnabled(processPolicy,'order.hr_emergency_enabled'))return {ok:false as const,reason:'人事紧急协助录单已停用',order,transition};
+  const profile=await loadActivePositionAccessProfile(env.DB,input.organizationId,input.actorUserId);
   if(["submit","cancel_draft"].includes(input.actionCode)) {
-    const profile=await loadActivePositionAccessProfile(env.DB,input.organizationId,input.actorUserId);
     if(!profile?.permissions.includes("order.intake.manage")) return {ok:false as const,reason:"当前账号录单权限已撤销",order,transition};
   }
   const configurableActions = ["submit", "cancel_draft", "approve", "reject", "cancel_submitted", "dispatch", "cancel_confirmed"];
@@ -137,7 +138,10 @@ export async function validateOrderWorkflowAction(input: {
     salespersonUserId: order.salesperson_user_id,
     creatorUserId: order.created_by_user_id,
     currentUserId: input.actorUserId,
-    bypassAssigneeRestriction: input.bypassAssigneeRestriction,
+    bypassAssigneeRestriction: input.bypassAssigneeRestriction || Boolean(profile && isBossBusinessActor({
+      positionCode: profile.positionCode,
+      roleCodes: [profile.roleCode],
+    })),
     allowedPositionCodes: configurableActions.includes(input.actionCode) ? policyPositions(processPolicy, ["submit", "cancel_draft"].includes(input.actionCode) ? "order.submit_positions" : "order.approve_positions") : undefined,
   })) {
     const actionOwner: Record<string, string> = {

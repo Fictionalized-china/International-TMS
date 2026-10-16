@@ -1,3 +1,5 @@
+import { isBossBusinessActor } from "./permission-blocks";
+
 export type OrderWorkflowTransition = {
   action_code: string;
   action_name: string;
@@ -117,7 +119,9 @@ export function canSubmitSalesOrderForApproval(input: {
   currentUserId: string;
   submitPositionCodes?: readonly string[];
   creatorUserId?: string | null;
+  roleCodes?: readonly string[];
 }) {
+  if (input.status === "draft" && isBossBusinessActor(input)) return true;
   return (
     input.status === "draft" &&
     (input.submitPositionCodes ?? ["SALES"]).includes(input.positionCode ?? "") &&

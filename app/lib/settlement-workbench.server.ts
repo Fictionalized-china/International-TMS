@@ -7,6 +7,7 @@ import{assertMeetingSignoffsComplete}from"./meeting-settlement.server";
 import{loadBusinessProcessPolicy}from"./business-process-policy.server";
 import{policyPositions}from"./business-process-policy";
 import{loadActivePositionAccessProfile}from"./position-access-profile.server";
+import{isBossBusinessActor}from"./permission-blocks";
 
 export type SettlementExpense={
   id:string;order_id:string;order_number:string;customer_name:string;direction:"receivable"|"payable";
@@ -80,7 +81,7 @@ export async function createReconciliation(db:D1Database,input:{organizationId:s
   await assertMeetingSignoffsComplete(db,input.organizationId,rows.map(row=>row.order_id),input.direction);
   if(input.direction==="receivable") {
     const policy=await loadBusinessProcessPolicy(input.organizationId,db),actor=await loadActivePositionAccessProfile(db,input.organizationId,input.userId);
-    if(!actor||!policyPositions(policy,"receivable.statement_positions").includes(actor.positionCode)) throw new Error("客户应收对账单须由策略配置的生成岗位办理");
+    if(!actor||(!isBossBusinessActor({positionCode:actor.positionCode,roleCodes:[actor.roleCode]})&&!policyPositions(policy,"receivable.statement_positions").includes(actor.positionCode))) throw new Error("客户应收对账单须由策略配置的生成岗位办理");
   }
   const org=await db.prepare("SELECT name FROM organizations WHERE id=?").bind(input.organizationId).first<{name:string}>();
   if(!org)throw new Error("组织信息无效");

@@ -898,6 +898,7 @@ export async function saveOrderCustomWorkflowFieldValue(input: {
   value: string | null;
   actorUserId: string;
   actorPositionCode?: string | null;
+  actorRoleCodes?: readonly string[];
 }) {
   const workflow = await loadLockedWorkflowStageContext(
     env.DB,
@@ -937,6 +938,7 @@ export async function saveOrderCustomWorkflowFieldValue(input: {
   if (!canPositionHandleWorkflowField(
     field.handler_position_codes,
     input.actorPositionCode,
+    input.actorRoleCodes,
   ))
     throw new Error("当前岗位没有填写该字段的权限");
   const capability = workflowInstanceCapabilityStageAccess({

@@ -296,6 +296,7 @@ export async function completeWorkflowTask(input:{
   orderId:string;
   taskStateId:string;
   actorUserId:string;
+  actorRoleCodes?: readonly string[];
 }) {
   const task = await env.DB.prepare(
     `SELECT ts.id,ts.task_key,ss.step_key,
@@ -332,6 +333,7 @@ export async function completeWorkflowTask(input:{
   if (!canCompleteWorkflowTask({
     actorUserId: input.actorUserId,
     actorPositionCodes: actorPositions.results.map((item) => item.code),
+    actorRoleCodes: input.actorRoleCodes,
     taskAssigneeUserId: task.task_assignee_user_id,
     moduleAssigneeUserId: task.module_assignee_user_id,
     responsibilityPositionCode: task.responsibility_position_code,

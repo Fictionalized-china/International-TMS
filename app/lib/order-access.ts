@@ -1,4 +1,4 @@
-import { isProtectedAccessRole } from "./permission-blocks";
+import { isBossBusinessActor, isProtectedAccessRole } from "./permission-blocks";
 import {
   resolveWorkflowNodeOperationAccess,
 } from "./workflow-node-access";
@@ -173,6 +173,7 @@ export function canOperateCurrentOrder(
   order: { status: string; current_assignee_user_id?: string | null },
 ) {
   if (["completed", "cancelled"].includes(order.status)) return false;
+  if (isBossBusinessActor(user)) return true;
   return Boolean(
     order.current_assignee_user_id &&
     order.current_assignee_user_id === user.userId,

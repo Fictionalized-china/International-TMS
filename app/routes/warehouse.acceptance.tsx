@@ -208,7 +208,7 @@ export async function loader({ request }: Route.LoaderArgs) {
         user.organizationId,
         order.id,
         "warehouse",
-        { userId: user.userId, positionCode: user.positionCode },
+        { userId: user.userId, positionCode: user.positionCode, roleCodes: user.roleCodes },
       );
       if (!workflowAccess.available) {
         lookupError = workflowAccess.reason || "当前订单的冻结工作流尚未开放国内仓入库";
@@ -320,7 +320,7 @@ export async function action({ request }: Route.ActionArgs) {
     if(candidate?.destination_warehouse_id===warehouse.id){
       const access=await loadWarehousePhysicalWorkflowAccess(
         env.DB,user.organizationId,candidate.id,"warehouse",
-        {userId:user.userId,positionCode:user.positionCode},
+        {userId:user.userId,positionCode:user.positionCode,roleCodes:user.roleCodes},
       );
       if(!access.available)return{scanResult:{outcome:"unavailable",orderNumber:null,message:access.reason||"该订单尚未开放国内仓收货"}};
     }
@@ -370,7 +370,7 @@ export async function action({ request }: Route.ActionArgs) {
     user.organizationId,
     order.id,
     "warehouse",
-    { userId: user.userId, positionCode: user.positionCode },
+    { userId: user.userId, positionCode: user.positionCode, roleCodes: user.roleCodes },
   );
   if (!workflowAccess.available)
     return { formError: workflowAccess.reason || "当前订单的冻结工作流尚未开放国内仓入库" };

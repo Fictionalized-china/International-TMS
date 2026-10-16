@@ -845,6 +845,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
         orderId:params.orderId,
         taskStateId:valueOf(form,"taskStateId"),
         actorUserId:current.userId,
+        actorRoleCodes:current.roleCodes,
       });
       await syncOrderBusinessWorkflow({
         organizationId:current.organizationId,
@@ -1040,6 +1041,7 @@ function LinearOrderWorkspace({
     canSubmitSalesOrderForApproval({
       status: order.status,
       positionCode: data.current.positionCode,
+      roleCodes: data.current.roleCodes,
       permissions: data.current.permissions,
       salespersonUserId: order.salesperson_user_id,
       currentUserId: data.current.userId,
@@ -1566,6 +1568,7 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, readOn
       canSubmitSalesOrderForApproval({
         status: data.embeddedModuleData.order.status,
         positionCode: data.embeddedModuleData.current.positionCode,
+        roleCodes: data.embeddedModuleData.current.roleCodes,
         permissions: data.embeddedModuleData.current.permissions,
         salespersonUserId: data.embeddedModuleData.order.salesperson_user_id,
         currentUserId: data.embeddedModuleData.current.userId,

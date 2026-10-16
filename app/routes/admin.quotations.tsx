@@ -65,6 +65,8 @@ import { configuredOrderIntakeFees, missingOrderIntakeFees } from "../lib/order-
 import { feeLineAmount, intakePayableOptions, MAX_INTAKE_FEE_LINES, newFeeDraft, parseIntakePayables, type FeeDraft } from "../lib/intake-fee-lines";
 import { IntakeStepLayout, IntakeFeeEditor } from "../components/IntakeEntry";
 import { loadBusinessProcessPolicy } from "../lib/business-process-policy.server";
+import { preferredIntakeSalespersonId } from "../lib/intake-salesperson";
+import { isBossBusinessActor } from "../lib/permission-blocks";
 
 type Quote = {
   id: string;
@@ -143,7 +145,7 @@ type CustomerCreateActionData = {
   errors?: Record<string, string>;
 };
 
-type UserOption = { id: string; display_name: string; email: string };
+type UserOption = { id: string; display_name: string; email: string; position_code: string | null };
 type WarehouseOption = { id: string; name: string; country_code: string | null; city: string | null; address: string | null };
 type GeoOption = { code: string; name: string; parent_code: string | null };
 type WorkflowOption = {
@@ -224,9 +226,14 @@ export async function loader({ request }: Route.LoaderArgs) {
   ]);
   const [users, warehouses, countries, provinces] = await Promise.all([
     env.DB.prepare(
-      `SELECT u.id,u.display_name,u.email FROM memberships m JOIN users u ON u.id=m.user_id
+      `SELECT u.id,u.display_name,u.email,
+        MAX(CASE WHEN p.code='SALES' THEN 'SALES' ELSE NULL END) position_code
+       FROM memberships m
+       JOIN users u ON u.id=m.user_id
+       JOIN positions p ON p.id=m.position_id AND p.organization_id=m.organization_id
        WHERE m.organization_id=? AND m.status='active' AND u.status='active'
          AND (?=1 OR u.id=?)
+       GROUP BY u.id,u.display_name,u.email
        ORDER BY u.display_name,u.email`,
     ).bind(current.organizationId,canViewAll?1:0,current.userId).all<UserOption>(),
     env.DB.prepare(
@@ -470,7 +477,19 @@ export async function action({ request }: Route.ActionArgs) {
         return integer ? requirePositiveInteger(raw,label) : requirePositiveNumber(raw,label);
       };
 
-      const configuredSalespersonId = activeValue("quotation_salesperson_user_id",salespersonId,"required") || current.userId;
+      let configuredSalespersonId = activeValue("quotation_salesperson_user_id",salespersonId,"required");
+      if (!configuredSalespersonId && isBossBusinessActor(current)) {
+        const fallbackSalesperson = await env.DB.prepare(
+          `SELECT u.id
+           FROM memberships m
+           JOIN users u ON u.id=m.user_id AND u.status='active'
+           JOIN positions p ON p.id=m.position_id AND p.organization_id=m.organization_id
+           WHERE m.organization_id=? AND m.status='active' AND p.status='active' AND p.code='SALES'
+           ORDER BY u.created_at,u.id LIMIT 1`,
+        ).bind(current.organizationId).first<{ id: string }>();
+        configuredSalespersonId = fallbackSalesperson?.id ?? current.userId;
+      }
+      configuredSalespersonId ||= current.userId;
       const effectiveSalespersonId = canViewAll ? configuredSalespersonId : current.userId;
       const effectiveContactName = activeValue("quotation_customer_contact_name",customerContactName,"required");
       const effectiveContactPhone = activeValue("quotation_customer_contact_phone",customerContactPhone,"required");
@@ -1175,7 +1194,12 @@ function QuoteForm({ loaderData, busy, formError, entryMode }: { loaderData: Awa
   const [pickupAddress, setPickupAddress] = useState(loaderData.customers[0]?.pickup_address || "");
   const [customerContactName, setCustomerContactName] = useState(loaderData.customers[0]?.contact_name || "");
   const [customerContactPhone, setCustomerContactPhone] = useState(loaderData.customers[0]?.contact_phone || "");
-  const [salespersonId,setSalespersonId] = useState(loaderData.current.userId);
+  const [salespersonId,setSalespersonId] = useState(() => preferredIntakeSalespersonId({
+    currentUserId: loaderData.current.userId,
+    currentPositionCode: loaderData.current.positionCode,
+    currentRoleCodes: loaderData.current.roleCodes,
+    users: loaderData.users,
+  }));
   const [originCountry,setOriginCountry] = useState("");
   const [destinationCountry,setDestinationCountry] = useState("");
   const [destinationWarehouseId,setDestinationWarehouseId] = useState("");

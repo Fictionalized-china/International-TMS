@@ -1,4 +1,7 @@
+import { isBossBusinessActor } from "./permission-blocks";
+
 export type WorkflowNodeOperationSource =
+  | "boss_override"
   | "assigned"
   | "responsibility_position"
   | "denied";
@@ -16,11 +19,9 @@ type WorkflowNodeOperationUser = {
 };
 
 /**
- * Resolve the actor side of a frozen workflow-node gate. Configuration
- * authority never grants business-operation authority: once assigned, only
- * the assigned account may operate; before assignment, the responsibility
- * position is the candidate pool. Account-level permission exceptions do not
- * participate here: the position profile is the sole permission source.
+ * Resolve the actor side of a frozen workflow-node gate. The boss account is
+ * the explicit demo/emergency stand-in; all other actors must own the task or
+ * match its configured responsibility position.
  */
 export function resolveWorkflowNodeOperationAccess(input: {
   user: WorkflowNodeOperationUser;
@@ -37,6 +38,10 @@ export function resolveWorkflowNodeOperationAccess(input: {
   }
   if (["completed", "cancelled"].includes(input.orderStatus)) {
     return { allowed: false, source: "denied", reason: "订单已经结束，当前节点仅供查看" };
+  }
+
+  if (isBossBusinessActor(input.user)) {
+    return { allowed: true, source: "boss_override", reason: null };
   }
 
   const assignedUserIds = new Set(

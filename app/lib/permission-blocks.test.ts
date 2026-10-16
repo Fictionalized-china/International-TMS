@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   effectivePermissionCodes,
+  isBossBusinessActor,
   isProtectedAccessRole,
 } from "./permission-blocks";
 
@@ -30,5 +31,12 @@ describe("effectivePermissionCodes", () => {
       protectedRole: true,
     })).toEqual(["order.view", "role.manage"]);
     expect(isProtectedAccessRole(["pos_sales", "boss"])).toBe(true);
+  });
+
+  it("recognizes the boss as a workflow stand-in without elevating other positions", () => {
+    expect(isBossBusinessActor({ positionCode: "BOSS", roleCodes: [] })).toBe(true);
+    expect(isBossBusinessActor({ positionCode: "SALES", roleCodes: ["boss"] })).toBe(true);
+    expect(isBossBusinessActor({ positionCode: "DEVELOPER", roleCodes: ["developer"] })).toBe(false);
+    expect(isBossBusinessActor({ positionCode: "SALES", roleCodes: ["pos_sales"] })).toBe(false);
   });
 });

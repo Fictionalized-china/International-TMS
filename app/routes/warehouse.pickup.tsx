@@ -67,7 +67,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const workflowGate = warehousePhysicalWorkflowAccessSql(
     "o",
     "overseas_warehouse",
-    { userId: user.userId, positionCode: user.positionCode },
+    { userId: user.userId, positionCode: user.positionCode, roleCodes: user.roleCodes },
   );
   const workflowVisibility = warehousePhysicalWorkflowVisibilitySql(
     "o",
@@ -122,7 +122,7 @@ export async function loader({ request }: Route.LoaderArgs) {
         user.organizationId,
         orderId,
         "overseas_warehouse",
-        { userId: user.userId, positionCode: user.positionCode },
+        { userId: user.userId, positionCode: user.positionCode, roleCodes: user.roleCodes },
       )
     : null;
   const pickupWorkflowFields = activeOrder && requestedOrderAccess?.available
@@ -180,7 +180,7 @@ export async function action({ request }: Route.ActionArgs) {
       user.organizationId,
       orderId,
       "overseas_warehouse",
-      { userId: user.userId, positionCode: user.positionCode },
+      { userId: user.userId, positionCode: user.positionCode, roleCodes: user.roleCodes },
     );
     if (!workflowAccess.available)
       return { formError: workflowAccess.reason || "当前订单的冻结工作流尚未开放客户自提" };
@@ -251,7 +251,7 @@ export async function action({ request }: Route.ActionArgs) {
       user.organizationId,
       orderLookup.order_id,
       "overseas_warehouse",
-      { userId: user.userId, positionCode: user.positionCode },
+      { userId: user.userId, positionCode: user.positionCode, roleCodes: user.roleCodes },
     );
     if (!workflowAccess.available)
       return { formError: workflowAccess.reason || "当前订单的冻结工作流尚未开放客户自提" };
@@ -299,7 +299,7 @@ export async function action({ request }: Route.ActionArgs) {
     user.organizationId,
     pkg.order_id,
     "overseas_warehouse",
-    { userId: user.userId, positionCode: user.positionCode },
+    { userId: user.userId, positionCode: user.positionCode, roleCodes: user.roleCodes },
   );
   if (!workflowAccess.available)
     return { formError: workflowAccess.reason || "当前订单的冻结工作流尚未开放客户自提" };

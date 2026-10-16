@@ -12,6 +12,7 @@ import { OrderNumberLink } from "../components/EntityNumberLink";
 import { QueryPagination } from "../components/QueryPagination";
 import { Modal } from "../components/Modal";
 import { paginateList,readListPage } from "../lib/list-pagination";
+import { isBossBusinessActor } from "../lib/permission-blocks";
 export async function loader({request}:Route.LoaderArgs) {
   const current=await requireSessionUser(request,"order.view"),scope=orderVisibilitySql(current,"o"),url=new URL(request.url),q=(url.searchParams.get("q")??"").trim();
   const orders=await env.DB.prepare(`SELECT o.id FROM transport_orders o WHERE o.organization_id=? AND ${scope.sql} AND o.status='in_execution' AND (${actualExportSql()} OR o.current_step_name LIKE '对账结算%') ${q?"AND o.order_number LIKE ?":""} ORDER BY o.updated_at DESC`).bind(current.organizationId,...scope.values,...(q?[`%${q}%`]:[])).all<{id:string}>();
@@ -27,7 +28,7 @@ export async function loader({request}:Route.LoaderArgs) {
       return {direction,actions:policies.map(p=>({...p,configuredRelease:configuredRelease&&p.action==='confirm',active:p.active||(configuredRelease&&p.action==='confirm'),completed:expenseDirectionActionCompleted(control,p.action),reason:!expense?.n?'尚未录入本方向费用，请先补录':expense.missing?'请先补齐费用往来单位':meetingSignatureAccess(state,current,direction,p.action)}))};
     });
     const offline=await env.DB.prepare("SELECT approver_name,approved_at,evidence_reference FROM order_payable_offline_approvals WHERE organization_id=? AND order_id=?").bind(current.organizationId,order.id).first<{approver_name:string;approved_at:string;evidence_reference:string}>();
-    rows.push({id:order.id,orderNumber:state.order.order_number,open:state.open,directions,offline,payableMissing:!expenseInfo.some(e=>e.direction==='payable'),canRecordOffline:state.open&&state.order.finance_user_id===current.userId&&current.permissions.includes("settlement.offline_approval.record")});
+    rows.push({id:order.id,orderNumber:state.order.order_number,open:state.open,directions,offline,payableMissing:!expenseInfo.some(e=>e.direction==='payable'),canRecordOffline:state.open&&(isBossBusinessActor(current)||(state.order.finance_user_id===current.userId&&current.permissions.includes("settlement.offline_approval.record")))});
   }
   return {current,rows,pagination:page,q};
 }
@@ -37,7 +38,7 @@ export async function action({request}:Route.ActionArgs) {
     if(v("intent")==="offline") {
       const scope=orderVisibilitySql(current,"o");if(!await env.DB.prepare(`SELECT 1 FROM transport_orders o WHERE o.id=? AND o.organization_id=? AND ${scope.sql}`).bind(v("orderId"),current.organizationId,...scope.values).first()) throw new Error("订单不在当前读取范围");
       const state=await loadMeetingSettlement(env.DB,current.organizationId,v("orderId"));
-      if(!state.open || state.order.finance_user_id!==current.userId || !current.permissions.includes("settlement.offline_approval.record")) throw new Error("仅本单财务负责人可记录线下付款审批");
+      if(!state.open || (!isBossBusinessActor(current)&&(state.order.finance_user_id!==current.userId || !current.permissions.includes("settlement.offline_approval.record")))) throw new Error("仅本单财务负责人可记录线下付款审批");
       await assertMeetingSignoffsComplete(env.DB,current.organizationId,[v("orderId")],"payable");
       if(!v("approver").trim()||!v("evidence").trim()||!Number.isFinite(Date.parse(v("approvedAt")))) throw new Error("请填写实际审批人、日期和凭证编号");
       const now=new Date().toISOString();if(Date.parse(v("approvedAt"))>Date.now()+300000) throw new Error("审批日期不能晚于当前时间");

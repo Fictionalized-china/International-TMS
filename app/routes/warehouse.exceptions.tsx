@@ -12,6 +12,7 @@ import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
 import { synchronizeOrderExceptionStatuses } from "../lib/order-exception-status.server";
 import { paginateList, readListPage } from "../lib/list-pagination";
 import { loadOrderModuleActionScope } from "../lib/order-modules.server";
+import { isBossBusinessActor } from "../lib/permission-blocks";
 
 type ExceptionRow={id:string;exception_number:string;package_id:string;barcode:string;shipment_number:string;order_number:string;customer_name:string;customer_identity_code:string;location_name:string;exception_type:string;severity:string;status:string;description:string;resolution:string|null;reported_at:string;resolved_at:string|null;reporter_name:string|null;assignee_name:string|null};
 type Attachment={id:string;exception_id:string;file_name:string;content_type:string;size_bytes:number};
@@ -50,7 +51,7 @@ export async function loader({request}:Route.LoaderArgs){
   const differenceModuleCode=warehouse.warehouse_role==="overseas_destination"?"overseas_warehouse":"warehouse";
   const differences=await Promise.all(differenceRows.results.map(async row=>{
     const scope=await loadOrderModuleActionScope(user.organizationId,row.order_id,differenceModuleCode);
-    const canConfirm=Boolean(scope?.enabled&&user.positionCode&&scope.responsibilityPositionCodes.includes(user.positionCode));
+    const canConfirm=Boolean(scope?.enabled&&(isBossBusinessActor(user)||(user.positionCode&&scope.responsibilityPositionCodes.includes(user.positionCode))));
     return{...row,can_confirm:canConfirm,access_reason:canConfirm?null:"当前订单冻结工作流未将仓库差异确认分配给本岗位"};
   }));
   return{user,warehouse,status,exceptions:pagination.items,attachments:attachments.results,users:users.results,differences,summary,pagination:{page:pagination.page,pageCount:pagination.pageCount,pageSize:pagination.pageSize,total:pagination.total}};
@@ -64,7 +65,7 @@ export async function action({request}:Route.ActionArgs){
     const differenceModuleCode=warehouse.warehouse_role==="overseas_destination"?"overseas_warehouse":"warehouse";
     const scope=await loadOrderModuleActionScope(user.organizationId,orderId,differenceModuleCode);
     if(!scope?.enabled)return{formError:"当前订单冻结工作流未启用仓库差异确认"};
-    if(!user.positionCode||!scope.responsibilityPositionCodes.includes(user.positionCode))return{formError:"当前订单冻结工作流未将仓库差异确认分配给本岗位"};
+    if(!isBossBusinessActor(user)&&(!user.positionCode||!scope.responsibilityPositionCodes.includes(user.positionCode)))return{formError:"当前订单冻结工作流未将仓库差异确认分配给本岗位"};
     const pending=await env.DB.prepare(`SELECT COUNT(*) count FROM warehouse_receipt_differences d
       JOIN warehouse_receipts r ON r.id=d.receipt_id AND r.organization_id=d.organization_id
       WHERE d.organization_id=? AND d.order_id=? AND r.warehouse_id=?

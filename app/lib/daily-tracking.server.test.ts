@@ -61,6 +61,12 @@ describe("independent daily tracking",()=>{
     expect(dailyTrackingAccess({policy:defaultBusinessProcessPolicy,positionCode:"TRACKING",permissions:[],orderStatus:"in_execution",eventKind:"pickup",pickupAt:null})).toContain("没有");
     expect(dailyTrackingAccess({policy:defaultBusinessProcessPolicy,positionCode:"TRACKING",permissions:current.permissions,orderStatus:"in_execution",eventKind:"actual_exit",pickupAt:null})).toContain("类型无效");
   });
+  it("lets boss enter daily tracking but still enforces workflow status and event sequence",()=>{
+    const boss={positionCode:"BOSS",roleCodes:[],permissions:[],orderStatus:"in_execution",eventKind:"pickup",pickupAt:null,policy:defaultBusinessProcessPolicy};
+    expect(dailyTrackingAccess(boss)).toBeNull();
+    expect(dailyTrackingAccess({...boss,orderStatus:"completed"})).toContain("尚未进入");
+    expect(dailyTrackingAccess({...boss,eventKind:"location",pickupAt:null})).toContain("实际提货");
+  });
 });
 describe("dispatch policy boundaries",()=>{
   it("uses configurable lead time and requires an actual plan",()=>{
@@ -72,5 +78,7 @@ describe("dispatch policy boundaries",()=>{
     expect(dispatchTaskAccess(defaultBusinessProcessPolicy,"BUSINESS_ROUTE",["dispatch.manage"],"fulfill")).toBeNull();
     expect(dispatchTaskAccess(defaultBusinessProcessPolicy,"BUSINESS_ROUTE",["dispatch.manage"],"request")).toBeTruthy();
     expect(dispatchTaskAccess({...defaultBusinessProcessPolicy,"dispatch.enabled":"0"},"BUSINESS_ROUTE",["dispatch.manage"],"fulfill")).toBeTruthy();
+    expect(dispatchTaskAccess(defaultBusinessProcessPolicy,"BOSS",[],"request")).toBeNull();
+    expect(dispatchTaskAccess({...defaultBusinessProcessPolicy,"dispatch.enabled":"0"},"BOSS",[],"request")).toBeTruthy();
   });
 });

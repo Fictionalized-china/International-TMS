@@ -283,6 +283,28 @@ describe("warehouse physical workflow access", () => {
     )).resolves.toMatchObject({ available: true });
   });
 
+  it("lets the boss operate the reached physical warehouse module regardless of its assignee", async () => {
+    const fixture = database({
+      moduleResponsibility: "WAREHOUSE",
+      tasks: [{ assignee_user_id: "other-user", responsibility_position_code: "WAREHOUSE" }],
+    });
+    const completed = database({ orderStatus: "completed" });
+    await expect(loadWarehousePhysicalWorkflowAccess(
+      completed.DB,
+      "org-1",
+      "order-1",
+      "warehouse",
+      { userId: "boss", positionCode: "BOSS", roleCodes: [] },
+    )).resolves.toMatchObject({ available: false });
+    await expect(loadWarehousePhysicalWorkflowAccess(
+      fixture.DB,
+      "org-1",
+      "order-1",
+      "warehouse",
+      { userId: "boss", positionCode: "BOSS", roleCodes: [] },
+    )).resolves.toMatchObject({ available: true });
+  });
+
   it.each(["completed", "cancelled"])("rejects a %s order even with physical records", async (orderStatus) => {
     const fixture = database({ orderStatus });
 
@@ -313,6 +335,18 @@ describe("warehouse physical workflow access", () => {
     expect(gate.sql).toContain("gate_position_task.responsibility_position_code");
     expect(gate.sql).not.toContain("assignee_user_id=?");
     expect(gate.sql).toContain("gate_module_step.sort_order>=gate_current_step.sort_order");
+  });
+
+  it("keeps warehouse SQL scoped to reachable modules while allowing the boss queue override", () => {
+    const gate = warehousePhysicalWorkflowAccessSql("o", "overseas_warehouse", {
+      userId: "boss",
+      positionCode: "BOSS",
+      roleCodes: [],
+    });
+    expect(gate.values).toEqual(["overseas_warehouse"]);
+    expect(gate.sql).toContain("o.status NOT IN ('completed','cancelled')");
+    expect(gate.sql).toContain("gate_module.status!='completed'");
+    expect(gate.sql).not.toContain("gate_position_task.responsibility_position_code");
   });
 
   it("keeps a separate reached-node predicate for readonly history", () => {

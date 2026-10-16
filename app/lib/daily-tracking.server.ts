@@ -18,7 +18,7 @@ export async function recordDailyTracking(db:D1Database,input:{current:SessionUs
     .bind(input.orderId,current.organizationId,...visibility.values).first<{id:string;status:string;shipment_id:string;shipment_status:string;actual_pickup_at:string|null}>();
   if(!order) throw new Error("订单或运单不存在，或超出当前账号数据范围");
   const policy=await loadBusinessProcessPolicy(current.organizationId,db);
-  const denied=dailyTrackingAccess({policy,positionCode:current.positionCode,permissions:current.permissions,orderStatus:order.status,eventKind:input.eventKind,pickupAt:order.actual_pickup_at});
+  const denied=dailyTrackingAccess({policy,positionCode:current.positionCode,roleCodes:current.roleCodes,permissions:current.permissions,orderStatus:order.status,eventKind:input.eventKind,pickupAt:order.actual_pickup_at});
   if(denied) throw new Error(denied);
   if(order.shipment_status==="delivered") throw new Error("运输已结束，历史轨迹只读");
   if(order.actual_pickup_at) {

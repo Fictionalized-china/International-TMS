@@ -1,8 +1,11 @@
 import { sha256 } from './crypto.server';
 import { policyEnabled,policyPositions,type BusinessProcessPolicy } from './business-process-policy';
+import { isBossBusinessActor } from './permission-blocks';
 export function assertDirectIntakeAuthority(input:{policy:BusinessProcessPolicy;positionCode:string|null;roleCodes:readonly string[];customerCsEnabled:number;emergencyReason:string}) {
   const {policy,positionCode,roleCodes,customerCsEnabled,emergencyReason}=input;
-  if(!policyPositions(policy,'order.submit_positions').includes(positionCode??'')&&!roleCodes.some(code=>['owner','boss','developer'].includes(code)))throw new Error('当前岗位未配置直接录单职责');
+  const boss=isBossBusinessActor({positionCode,roleCodes});
+  if(!policyPositions(policy,'order.submit_positions').includes(positionCode??'')&&!boss&&!roleCodes.includes('developer'))throw new Error('当前岗位未配置直接录单职责');
+  if(boss)return;
   if(positionCode==='HR_ADMIN'&&(!policyEnabled(policy,'order.hr_emergency_enabled')||!emergencyReason.trim()))throw new Error('人事仅可在配置允许时紧急协助录单，请填写协助原因');
   if(positionCode==='CS'&&policyEnabled(policy,'order.cs_requires_customer_flag')&&!customerCsEnabled)throw new Error('该客户尚未配置为客服代录客户');
 }

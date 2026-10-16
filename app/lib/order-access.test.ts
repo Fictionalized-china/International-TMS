@@ -387,11 +387,37 @@ describe("order access", () => {
     })).toBe(true);
   });
 
-  it("does not let configuration administrators bypass concrete assignment", () => {
+  it("lets the boss stand in for an assigned operator but keeps completed orders read-only", () => {
     expect(canOperateCurrentOrder({ ...baseUser, positionCode: "BOSS" }, {
       status: "in_execution",
       current_assignee_user_id: "user-b",
+    })).toBe(true);
+    expect(canOperateCurrentOrder({ ...baseUser, positionCode: "BOSS" }, {
+      status: "completed",
+      current_assignee_user_id: "user-b",
     })).toBe(false);
+    const boss = { ...baseUser, positionCode: "BOSS", roleCodes: ["boss"] };
+    expect(canOperateEnabledOrderModule({
+      user: boss,
+      orderStatus: "in_execution",
+      moduleCode: "transport",
+      moduleEnabled: true,
+      moduleAssigneeUserId: "user-b",
+      taskAssigneeUserIds: [],
+      responsibilityPositionCodes: ["OPERATION"],
+    })).toBe(true);
+    expect(canOperateEnabledOrderModule({
+      user: boss,
+      orderStatus: "in_execution",
+      moduleCode: "transport",
+      moduleEnabled: false,
+      moduleAssigneeUserId: "user-b",
+      taskAssigneeUserIds: [],
+      responsibilityPositionCodes: ["OPERATION"],
+    })).toBe(false);
+  });
+
+  it("does not treat the developer position as the boss account", () => {
     expect(canOperateCurrentOrder({ ...baseUser, positionCode: "DEVELOPER" }, {
       status: "in_execution",
       current_assignee_user_id: null,

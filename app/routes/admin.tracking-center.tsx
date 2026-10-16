@@ -10,6 +10,7 @@ import { loadTrackingCenter } from "../lib/tracking-center.server";
 import { loadBusinessProcessPolicy } from "../lib/business-process-policy.server";
 import { policyEnabled,policyPositions } from "../lib/business-process-policy";
 import { dispatchTaskAccess } from "../lib/dispatch-tasks";
+import { isBossBusinessActor } from "../lib/permission-blocks";
 import { loadDispatchTaskRows,refreshAutomaticDispatchTasks,requestDispatchTask,fulfillDispatchTask } from "../lib/dispatch-tasks.server";
 import { recordDailyTracking } from "../lib/daily-tracking.server";
 import { DailyTrackingForm,DispatchRequestForm,DispatchFeedbackForm } from "../components/TrackingActionForms";
@@ -18,14 +19,14 @@ export async function loader({ request }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "shipment.view");
   const policy=await loadBusinessProcessPolicy(current.organizationId);
   await refreshAutomaticDispatchTasks(env.DB,current.organizationId);
-  const canRequest=!dispatchTaskAccess(policy,current.positionCode,current.permissions,"request");
-  const canFulfill=!dispatchTaskAccess(policy,current.positionCode,current.permissions,"fulfill");
+  const canRequest=!dispatchTaskAccess(policy,current.positionCode,current.permissions,"request",current.roleCodes);
+  const canFulfill=!dispatchTaskAccess(policy,current.positionCode,current.permissions,"fulfill",current.roleCodes);
   const resources=canFulfill ? {
     carriers:(await env.DB.prepare("SELECT id,name FROM carriers WHERE organization_id=? AND status='active'").bind(current.organizationId).all<{id:string;name:string}>()).results,
     vehicles:(await env.DB.prepare("SELECT id,carrier_id,plate_number FROM carrier_vehicles WHERE organization_id=? AND status='active'").bind(current.organizationId).all<{id:string;carrier_id:string;plate_number:string}>()).results,
     drivers:(await env.DB.prepare("SELECT id,carrier_id,name FROM carrier_drivers WHERE organization_id=? AND status='active'").bind(current.organizationId).all<{id:string;carrier_id:string;name:string}>()).results,
   } : {carriers:[],vehicles:[],drivers:[]};
-  return { current,policy,canRequest,canFulfill,resources,requestId:crypto.randomUUID(),dispatchTasks:await loadDispatchTaskRows(env.DB,current),canDaily:policyEnabled(policy,"tracking.daily_enabled")&&policyPositions(policy,"tracking.positions").includes(current.positionCode??"")&&current.permissions.includes("tracking.daily.manage"), ...(await loadTrackingCenter(request, current)) };
+  return { current,policy,canRequest,canFulfill,resources,requestId:crypto.randomUUID(),dispatchTasks:await loadDispatchTaskRows(env.DB,current),canDaily:policyEnabled(policy,"tracking.daily_enabled")&&(isBossBusinessActor(current)||(policyPositions(policy,"tracking.positions").includes(current.positionCode??"")&&current.permissions.includes("tracking.daily.manage"))), ...(await loadTrackingCenter(request, current)) };
 }
 
 export async function action({request}:Route.ActionArgs) {

@@ -1,3 +1,5 @@
+import { isBossBusinessActor } from "./permission-blocks";
+
 export function normalizeWorkflowFieldHandlerPositionCodes(
   values: readonly string[] | string | null | undefined,
 ) {
@@ -18,7 +20,9 @@ export function serializeWorkflowFieldHandlerPositionCodes(
 export function canPositionHandleWorkflowField(
   configuredPositionCodes: readonly string[] | string | null | undefined,
   positionCode: string | null | undefined,
+  roleCodes?: readonly string[],
 ) {
+  if (isBossBusinessActor({ positionCode, roleCodes })) return true;
   if (!positionCode) return false;
   return normalizeWorkflowFieldHandlerPositionCodes(configuredPositionCodes)
     .includes(positionCode);
@@ -27,12 +31,14 @@ export function canPositionHandleWorkflowField(
 export function canWriteWorkflowFieldAtCurrentNode(input: {
   configuredPositionCodes: readonly string[] | string | null | undefined;
   positionCode: string | null | undefined;
+  roleCodes?: readonly string[];
   canOperateCurrentNode: boolean;
   canOperateModule: boolean;
 }) {
   return canPositionHandleWorkflowField(
     input.configuredPositionCodes,
     input.positionCode,
+    input.roleCodes,
   ) && (input.canOperateCurrentNode || input.canOperateModule);
 }
 

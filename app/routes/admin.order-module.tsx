@@ -718,6 +718,7 @@ export function canWriteLoadedWorkflowField(
   return data.access.canEdit && canWriteWorkflowFieldAtCurrentNode({
     configuredPositionCodes: field.handlerPositionCodes,
     positionCode: data.current.positionCode,
+    roleCodes: data.current.roleCodes,
     canOperateCurrentNode: canOperateCurrentOrder(data.current, data.order),
     canOperateModule: data.moduleActionCanOperate,
   });
@@ -1629,6 +1630,7 @@ export async function action({ request, params }: Route.ActionArgs) {
     canSubmitSalesOrderForApproval({
       status: order.status,
       positionCode: current.positionCode,
+      roleCodes: current.roleCodes,
       permissions: current.permissions,
       salespersonUserId: order.salesperson_user_id,
       currentUserId: current.userId,
@@ -1641,6 +1643,7 @@ export async function action({ request, params }: Route.ActionArgs) {
     canSubmitSalesOrderForApproval({
       status: order.status,
       positionCode: current.positionCode,
+      roleCodes: current.roleCodes,
       permissions: current.permissions,
       salespersonUserId: order.salesperson_user_id,
       currentUserId: current.userId,
@@ -1720,6 +1723,7 @@ export async function action({ request, params }: Route.ActionArgs) {
     canWriteWorkflowFieldAtCurrentNode({
       configuredPositionCodes: customWorkflowFieldAction.handlerPositionCodes,
       positionCode: current.positionCode,
+      roleCodes: current.roleCodes,
       canOperateCurrentNode: canOperateCurrentOrder(current, order),
       canOperateModule: moduleScopedActionAccess,
     }),
@@ -1737,6 +1741,7 @@ export async function action({ request, params }: Route.ActionArgs) {
     canPositionHandleWorkflowField(
       documentFieldPolicy.handlerPositionCodes,
       current.positionCode,
+      current.roleCodes,
     ) &&
     (moduleScopedActionAccess || canOperateCurrentOrder(current, order) || isBoundSalesperson),
   );
@@ -2020,6 +2025,7 @@ export async function action({ request, params }: Route.ActionArgs) {
         value: valueOf(form, "fieldValue"),
         actorUserId: current.userId,
         actorPositionCode: current.positionCode,
+        actorRoleCodes: current.roleCodes,
       });
       await syncOrderWorkflowSnapshot(current.organizationId, orderId);
       return { success: "字段已保存，必填状态已重新检查" };
@@ -2785,6 +2791,7 @@ export async function action({ request, params }: Route.ActionArgs) {
       if (!canCompleteWorkflowTask({
         actorUserId: current.userId,
         actorPositionCodes: actorPositions.results.map((item) => item.code),
+        actorRoleCodes: current.roleCodes,
         taskAssigneeUserId: task.task_assignee_user_id,
         moduleAssigneeUserId: task.module_assignee_user_id,
         responsibilityPositionCode: task.responsibility_position_code,
@@ -5043,6 +5050,7 @@ export function ConsignmentReviewActionBar({
       canSubmitSalesOrderForApproval({
         status: data.order.status,
         positionCode: data.current.positionCode,
+        roleCodes: data.current.roleCodes,
         permissions: data.current.permissions,
         salespersonUserId: data.order.salesperson_user_id,
         currentUserId: data.current.userId,
@@ -6341,6 +6349,7 @@ function ModuleBusinessData({
       manage || data.moduleActionCanOperate || canSubmitSalesOrderForApproval({
         status: data.order.status,
         positionCode: data.current.positionCode,
+        roleCodes: data.current.roleCodes,
         permissions: data.current.permissions,
         salespersonUserId: data.order.salesperson_user_id,
         currentUserId: data.current.userId,

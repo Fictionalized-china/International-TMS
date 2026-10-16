@@ -1,8 +1,9 @@
 import { policyEnabled,policyPositions,type BusinessProcessPolicy } from "./business-process-policy";
-export function dispatchTaskAccess(policy:BusinessProcessPolicy,positionCode:string|null,permissions:readonly string[],action:"request"|"fulfill") {
+import { isBossBusinessActor } from "./permission-blocks";
+export function dispatchTaskAccess(policy:BusinessProcessPolicy,positionCode:string|null,permissions:readonly string[],action:"request"|"fulfill",roleCodes?:readonly string[]) {
   if(!policyEnabled(policy,"dispatch.enabled")) return "商务找车功能已停用，历史任务与资源保留";
   const positions=policyPositions(policy,action==="request"?"dispatch.request_positions":"dispatch.handler_positions");
-  if(!positions.includes(positionCode??"") || !permissions.includes(action==="request"?"dispatch.request":"dispatch.manage")) return "当前岗位没有此项调度办理权";
+  if(!isBossBusinessActor({positionCode,roleCodes}) && (!positions.includes(positionCode??"") || !permissions.includes(action==="request"?"dispatch.request":"dispatch.manage"))) return "当前岗位没有此项调度办理权";
   return null;
 }
 export function dispatchIsDue(plannedPortArrivalAt:string|null,leadDays:number,now:Date) {

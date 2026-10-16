@@ -1,9 +1,11 @@
 import type { WorkflowInstanceCapabilityStageAccess } from "./workflow-instance-stage-gate";
+import { isBossBusinessActor } from "./permission-blocks";
 
 export type WarehousePhysicalModuleCode = "warehouse" | "overseas_warehouse";
 export type WarehousePhysicalWorkflowActor = {
   userId: string;
   positionCode: string | null;
+  roleCodes?: readonly string[];
 };
 
 export type WarehousePhysicalWorkflowAccess = WorkflowInstanceCapabilityStageAccess & {
@@ -43,6 +45,7 @@ function actorOwnsFrozenModule(
   module: ModulePlacementRow,
   tasks: readonly TaskOwnerRow[],
 ) {
+  if (isBossBusinessActor(actor)) return true;
   if (!actor.positionCode) return false;
   const queuePositions = tasks.length
     ? tasks.map((task) =>
@@ -275,7 +278,10 @@ export function warehousePhysicalWorkflowAccessSql(
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(orderAlias)) {
     throw new Error("Invalid SQL order alias");
   }
-  const queueOwnerSql = actor.positionCode
+  const bossOverride = isBossBusinessActor(actor);
+  const queueOwnerSql = bossOverride
+    ? ""
+    : actor.positionCode
     ? `AND (
         (
           EXISTS(
@@ -332,7 +338,9 @@ export function warehousePhysicalWorkflowAccessSql(
           ${queueOwnerSql}
       )
     ))`,
-    values: actor.positionCode
+    values: bossOverride
+      ? [moduleCode]
+      : actor.positionCode
       ? [moduleCode, actor.positionCode, actor.positionCode]
       : [moduleCode],
   };
