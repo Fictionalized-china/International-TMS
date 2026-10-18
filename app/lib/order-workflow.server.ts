@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { changedRowGuard, guardedBatch } from "./mutation-guard.server";
 import {
   ensureOrderModules,
   syncOrderWorkflowSnapshot,
@@ -363,15 +364,9 @@ export async function executeOrderWorkflowAction(input: {
     now = new Date().toISOString(),
     historyId = crypto.randomUUID(),
     assignee = input.assigneeUserId || null;
-  await env.DB.batch([
-    ...(input.atomicStatements ?? []),
-    ...(input.actionCode === "approve" && assignee
-      ? [env.DB.prepare(
-          "UPDATE transport_orders SET operation_supervisor_user_id=? WHERE id=? AND organization_id=?",
-        ).bind(assignee, order.id, input.organizationId)]
-      : []),
+  await guardedBatch(env.DB, [
     env.DB.prepare(
-      `UPDATE transport_orders SET status=?,current_step_code=?,current_step_name=?,current_assignee_user_id=?,workflow_updated_at=?,is_overdue=0,confirmed_at=CASE WHEN ?='confirmed' THEN COALESCE(confirmed_at,?) ELSE confirmed_at END,updated_at=? WHERE id=? AND organization_id=? AND status=?`,
+      `UPDATE transport_orders SET status=?,current_step_code=?,current_step_name=?,current_assignee_user_id=?,workflow_updated_at=?,is_overdue=0,confirmed_at=CASE WHEN ?='confirmed' THEN COALESCE(confirmed_at,?) ELSE confirmed_at END,updated_at=? WHERE id=? AND organization_id=? AND status=? AND current_step_code=? AND COALESCE(current_assignee_user_id,'')=?`,
     ).bind(
       transition.to_status,
       transition.target_step_code,
@@ -384,7 +379,13 @@ export async function executeOrderWorkflowAction(input: {
       order.id,
       input.organizationId,
       order.status,
+      order.current_step_code,
+      order.current_assignee_user_id || "",
     ),
+    changedRowGuard(env.DB, now),
+    ...(input.atomicStatements ?? []),
+    ...(input.actionCode === "approve" && assignee
+      ? [env.DB.prepare("UPDATE transport_orders SET operation_supervisor_user_id=? WHERE id=? AND organization_id=?").bind(assignee, order.id, input.organizationId)] : []),
     env.DB.prepare(
       "INSERT INTO order_workflow_history(id,organization_id,order_id,action_code,action_name,from_status,to_status,from_step_code,to_step_code,actor_user_id,assignee_user_id,notes,occurred_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
     ).bind(
@@ -412,7 +413,7 @@ export async function executeOrderWorkflowAction(input: {
           now,
         })]
       : []),
-  ]);
+  ], "订单已被其他人处理，本次未提交，请刷新后重试");
   if (transition.to_status === "in_execution") {
     await reconcileDispatchedOrderWorkflow(input.organizationId, order.id, { force: true });
   } else {

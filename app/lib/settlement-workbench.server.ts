@@ -8,6 +8,7 @@ import{loadBusinessProcessPolicy}from"./business-process-policy.server";
 import{policyPositions}from"./business-process-policy";
 import{loadActivePositionAccessProfile}from"./position-access-profile.server";
 import{isBossBusinessActor}from"./permission-blocks";
+import{predicateGuard,changedRowGuard,guardedBatch}from"./mutation-guard.server";
 
 export type SettlementExpense={
   id:string;order_id:string;order_number:string;customer_name:string;direction:"receivable"|"payable";
@@ -89,10 +90,12 @@ export async function createReconciliation(db:D1Database,input:{organizationId:s
   if(!Number.isFinite(total)||total<=0)throw new Error("所选费用合计必须大于 0，请先完善费用金额再发起对账");
   const lineStatements=chunkD1Rows(rows,6).map(chunk=>db.prepare(`INSERT INTO settlement_reconciliation_lines(id,organization_id,reconciliation_id,expense_id,amount,created_at) VALUES ${chunk.map(()=>"(?,?,?,?,?,?)").join(",")}`).bind(...chunk.flatMap(row=>[crypto.randomUUID(),input.organizationId,id,row.id,row.amount,input.now])));
   await input.assertCanMutate();
-  await db.batch([
+  await guardedBatch(db,[
+    ...[...rows].sort((a,b)=>a.id.localeCompare(b.id)).map(row=>db.prepare("UPDATE business_expenses SET updated_at=updated_at WHERE id=? AND organization_id=?").bind(row.id,input.organizationId)),
+    ...rows.map(row=>predicateGuard(db,`EXISTS(SELECT 1 FROM business_expenses WHERE id=? AND organization_id=? AND stage='confirmed' AND amount=? AND direction=? AND currency=?) AND NOT EXISTS(SELECT 1 FROM settlement_reconciliation_lines l JOIN settlement_reconciliations r ON r.id=l.reconciliation_id AND r.organization_id=l.organization_id WHERE l.expense_id=? AND l.organization_id=? AND r.status!='withdrawn')`,[row.id,input.organizationId,row.amount,row.direction,row.currency,row.id,input.organizationId],input.now)),
     db.prepare(`INSERT INTO settlement_reconciliations(id,organization_id,document_number,direction,counterparty_name,customer_id,settlement_entity,currency,total_amount,status,notes,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,'draft',?,?,?,?)`).bind(id,input.organizationId,number,input.direction,counterparty,customerId,org.name,currency,total,input.notes||null,input.userId,input.now,input.now),
     ...lineStatements,
-  ]);
+  ],"费用已被修改或加入其他对账单，本次未保存，请刷新后重试");
   await syncSettlementOrderStates(db,input.organizationId,rows.map(row=>row.order_id),input.now);
   return{id,number};
 }
@@ -102,6 +105,7 @@ export async function confirmReconciliation(db:D1Database,input:{organizationId:
   if(!row||row.status!=="draft")throw new Error("只有草稿对账单可以确认");
   const statements=[
     db.prepare("UPDATE settlement_reconciliations SET status='confirmed',confirmed_by_user_id=?,confirmed_at=?,updated_at=? WHERE id=? AND organization_id=? AND status='draft'").bind(input.userId,input.now,input.now,input.id,input.organizationId),
+    changedRowGuard(db,input.now),
     db.prepare(`UPDATE business_expenses SET stage='reconciled',updated_at=?
       WHERE organization_id=? AND stage='confirmed'
         AND EXISTS(
@@ -126,13 +130,26 @@ export async function confirmReconciliation(db:D1Database,input:{organizationId:
       )
       AND order_id IN (SELECT e.order_id FROM settlement_reconciliation_lines l JOIN business_expenses e ON e.id=l.expense_id AND e.organization_id=l.organization_id WHERE l.reconciliation_id=? AND l.organization_id=?)`).bind(input.now,input.now,input.organizationId,input.id,input.userId,input.now,input.id,input.organizationId));
   await input.assertCanMutate();
-  const [headerUpdate]=await db.batch(statements);
+  const [headerUpdate]=await guardedBatch(db,statements,"对账单状态已变化，请刷新后重试");
   const headerChanges=Number((headerUpdate as {meta?:{changes?:number}}|undefined)?.meta?.changes??0);
   if(headerChanges!==1)throw new Error("对账单状态已变化，请刷新后重试");
   await syncSettlementOrderStates(db,input.organizationId,await loadReconciliationOrderIds(db,input.organizationId,input.id),input.now);
 }
 
-export async function recordSettlementInvoice(db:D1Database,input:{organizationId:string;reconciliationId:string;amount:number;invoiceCompany:string;invoiceType:string;invoiceNumber:string;invoiceCode?:string;invoiceDate:string;taxRate:number;titleName:string;taxNumber?:string;addressPhone?:string;bankAccount?:string;exchangeRate:number;attachmentReference?:string;notes?:string;userId:string;now:string}&SettlementMutationGuard){
+export async function recordSettlementInvoice(db:D1Database,input:{organizationId:string;reconciliationId:string;amount:number;invoiceCompany:string;invoiceType:string;invoiceNumber:string;invoiceCode?:string;invoiceDate:string;taxRate:number;titleName:string;taxNumber?:string;addressPhone?:string;bankAccount?:string;exchangeRate:number;attachmentReference?:string;notes?:string;userId:string;now:string;requestId:string}&SettlementMutationGuard){
+  if(!/^[A-Za-z0-9:_-]{10,64}$/.test(input.requestId))throw new Error("发票提交标识无效，请刷新后重试");
+  const {sha256}=await import("./crypto.server");
+  const payloadHash=await sha256(JSON.stringify([input.reconciliationId,input.amount,input.invoiceCompany,input.invoiceType,input.invoiceNumber,input.invoiceCode||"",input.invoiceDate,input.taxRate,input.titleName,input.taxNumber||"",input.addressPhone||"",input.bankAccount||"",input.exchangeRate,input.attachmentReference||"",input.notes||""]));
+  const replay=()=>db.prepare("SELECT id,record_number,request_payload_hash FROM settlement_invoice_records WHERE organization_id=? AND created_by_user_id=? AND request_id=?").bind(input.organizationId,input.userId,input.requestId).first<{id:string;record_number:string;request_payload_hash:string}>();
+  const replayResult=async(previous:{id:string;record_number:string;request_payload_hash:string})=>{
+    await input.assertCanMutate();
+    if(previous.request_payload_hash!==payloadHash)throw new Error("同一发票提交标识内容不同，请重新打开登记表单");
+    const expenses=await db.prepare("SELECT expense_id FROM settlement_invoice_allocations WHERE organization_id=? AND invoice_record_id=?").bind(input.organizationId,previous.id).all<{expense_id:string}>();
+    await refreshExpenseStages(db,input.organizationId,expenses.results.map(row=>row.expense_id),input.now);
+    await syncSettlementOrderStates(db,input.organizationId,await loadReconciliationOrderIds(db,input.organizationId,input.reconciliationId),input.now);
+    return {id:previous.id,recordNumber:previous.record_number};
+  };
+  const previous=await replay();if(previous)return replayResult(previous);
   const reconciliation=await db.prepare("SELECT * FROM settlement_reconciliations WHERE id=? AND organization_id=? AND status='confirmed'").bind(input.reconciliationId,input.organizationId).first<ReconciliationRow>();
   if(!reconciliation)throw new Error("只能从已确认对账单登记发票");
   if(!input.invoiceCompany||!input.invoiceType||!input.invoiceNumber||!input.invoiceDate||!input.titleName)throw new Error("请填写开票/收票公司、类别、号码、日期和抬头");
@@ -142,10 +159,16 @@ export async function recordSettlementInvoice(db:D1Database,input:{organizationI
   const id=crypto.randomUUID(),recordNumber=settlementDocumentNumber("TAX",new Date(input.now));
   const allocationStatements=chunkD1Rows(allocations,6).map(chunk=>db.prepare(`INSERT INTO settlement_invoice_allocations(id,organization_id,invoice_record_id,expense_id,amount,created_at) VALUES ${chunk.map(()=>"(?,?,?,?,?,?)").join(",")}`).bind(...chunk.flatMap(item=>[crypto.randomUUID(),input.organizationId,id,item.id,item.amount,input.now])));
   await input.assertCanMutate();
-  await db.batch([
+  try { await guardedBatch(db,[
+    db.prepare("UPDATE settlement_reconciliations SET updated_at=updated_at WHERE id=? AND organization_id=?").bind(input.reconciliationId,input.organizationId),
+    ...[...allocations].sort((a,b)=>a.id.localeCompare(b.id)).map(item=>db.prepare("UPDATE business_expenses SET updated_at=updated_at WHERE id=? AND organization_id=?").bind(item.id,input.organizationId)),
+    predicateGuard(db,"EXISTS(SELECT 1 FROM settlement_reconciliations WHERE id=? AND organization_id=? AND status='confirmed')",[input.reconciliationId,input.organizationId],input.now),
+    ...allocations.map(item=>predicateGuard(db,`COALESCE((SELECT line.amount FROM settlement_reconciliation_lines line WHERE line.organization_id=? AND line.reconciliation_id=? AND line.expense_id=?),0) >= ? + COALESCE((SELECT SUM(a.amount) FROM settlement_invoice_allocations a JOIN settlement_invoice_records i ON i.id=a.invoice_record_id AND i.organization_id=a.organization_id WHERE a.organization_id=? AND a.expense_id=? AND i.status!='void'),0) - 0.009`,[input.organizationId,input.reconciliationId,item.id,item.amount,input.organizationId,item.id],input.now)),
     db.prepare(`INSERT INTO settlement_invoice_records(id,organization_id,record_number,reconciliation_id,direction,counterparty_name,invoice_company,invoice_type,invoice_number,invoice_code,invoice_date,tax_rate,title_name,tax_number,address_phone,bank_account,currency,amount,exchange_rate,attachment_reference,notes,status,created_by_user_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'recorded',?,?)`).bind(id,input.organizationId,recordNumber,input.reconciliationId,reconciliation.direction,reconciliation.counterparty_name,input.invoiceCompany,input.invoiceType,input.invoiceNumber,input.invoiceCode||null,input.invoiceDate,input.taxRate,input.titleName,input.taxNumber||null,input.addressPhone||null,input.bankAccount||null,reconciliation.currency,input.amount,input.exchangeRate,input.attachmentReference||null,input.notes||null,input.userId,input.now),
+    db.prepare("UPDATE settlement_invoice_records SET request_id=?,request_payload_hash=? WHERE id=? AND organization_id=?").bind(input.requestId,payloadHash,id,input.organizationId),
     ...allocationStatements,
-  ]);
+  ],"发票余额或对账状态已变化，本次未登记，请刷新后重试"); }
+  catch(error){const existing=await replay();if(existing)return replayResult(existing);throw error;}
   await refreshExpenseStages(db,input.organizationId,allocations.map(item=>item.id),input.now);
   await syncSettlementOrderStates(db,input.organizationId,await loadExpenseOrderIds(db,input.organizationId,allocations.map(item=>item.id)),input.now);
   return{id,recordNumber};

@@ -1,3 +1,5 @@
+import { storedBusinessTimestamp } from "./business-time";
+
 export type TrackingCenterSource = {
   orderStatus: string;
   isOverdue: boolean;
@@ -31,7 +33,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 function timestamp(value: string | null) {
   if (!value) return null;
-  const parsed = Date.parse(value);
+  const parsed = storedBusinessTimestamp(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
 

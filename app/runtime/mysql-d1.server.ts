@@ -300,6 +300,7 @@ export function translateSqliteSql(input: string): string {
   let sql = input.trim().replace(/;\s*$/, "");
   sql = sql.replace(/\bINSERT\s+OR\s+IGNORE\b/gi, "INSERT IGNORE");
   sql = sql.replace(/\bINSERT\s+OR\s+REPLACE\b/gi, "REPLACE");
+  sql = sql.replace(/\bchanges\s*\(\s*\)/gi, "ROW_COUNT()");
   sql = moveLeadingWithClauseIntoInsert(sql);
   sql = sql.replace(/\s+COLLATE\s+NOCASE\b/gi, "");
   sql = sql.replace(/datetime\s*\(\s*'now'\s*\)/gi, "UTC_TIMESTAMP(3)");
@@ -513,20 +514,26 @@ class MysqlPreparedStatement {
     }
 
     const translated = translateSqliteSql(this.sourceSql);
-    const commitGuard = /^INSERT\s+INTO\s+settlement_commit_guards\b/i.test(translated);
-    if (commitGuard && !connection) throw new Error('settlement_commit_guards must execute inside a transaction');
+    const commitGuard = /^INSERT\s+INTO\s+(settlement_commit_guards|mutation_commit_guards)\b/i.exec(translated)?.[1];
+    if (commitGuard && !connection) throw new Error(`${commitGuard} must execute inside a transaction`);
     const [result] = await (connection ?? getPool()).execute(
       translated,
       this.values,
-    );
+    ).catch((error: unknown) => {
+      const code = (error as { code?: string })?.code;
+      if (commitGuard && (code === 'ER_BAD_NULL_ERROR' || code === 'ER_CHECK_CONSTRAINT_VIOLATED')) {
+        throw new Error(`${commitGuard}: transaction eligibility changed`, { cause: error });
+      }
+      throw error;
+    });
     // A non-strict MySQL session may coerce a failed NOT NULL guard to zero.
     // Verify its stored value on the same transactional connection before any
     // following financial writes; throwing here rolls back the entire batch.
     if (commitGuard && connection) {
       const [guards] = await connection.execute<RowDataPacket[]>(
-        'SELECT valid FROM settlement_commit_guards WHERE id=?', [this.values[0]],
+        `SELECT valid FROM ${commitGuard} WHERE id=?`, [this.values[0]],
       );
-      if (guards.length !== 1 || Number(guards[0].valid) !== 1) throw new Error('settlement_commit_guards: transaction eligibility changed');
+      if (guards.length !== 1 || Number(guards[0].valid) !== 1) throw new Error(`${commitGuard}: transaction eligibility changed`);
     }
     if (Array.isArray(result))
       return { rows: result as RowDataPacket[], header: undefined };

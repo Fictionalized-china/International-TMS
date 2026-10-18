@@ -3,6 +3,7 @@ import { applyLoadingIntegrityMigration, loadingIntegrityTriggers } from "./load
 import { applyMeetingFlowMigration } from './meeting-flow-migration.mjs';
 import { applyIsoTimestampMigration } from './iso-timestamp-migration.mjs';
 import { applyP0WorkflowParityMigration } from './p0-workflow-parity-migration.mjs';
+import { applyCloudMutationIntegrityMigration } from './cloud-mutation-integrity-migration.mjs';
 
 const migrations = [
   {
@@ -238,6 +239,7 @@ const migrations = [
 migrations.push({version:179,name:'configurable_meeting_flow_and_atomic_settlement',definition:applyMeetingFlowMigration.toString(),up:connection=>applyMeetingFlowMigration(connection,addColumnIfMissing)});
 migrations.push({version:180,name:'iso_timestamp_storage_compatibility',definition:applyIsoTimestampMigration.toString(),up:applyIsoTimestampMigration});
 migrations.push({version:181,name:'p0_workflow_and_position_mysql_parity',definition:applyP0WorkflowParityMigration.toString(),up:applyP0WorkflowParityMigration});
+migrations.push({version:182,name:'cloud_mutation_integrity',definition:applyCloudMutationIntegrityMigration.toString(),up:connection=>applyCloudMutationIntegrityMigration(connection,addColumnIfMissing)});
 for (const migration of migrations) {
   migration.checksum = createHash("sha256")
     .update(`${migration.version}:${migration.name}\n${migration.definition}`)
@@ -247,6 +249,10 @@ for (const migration of migrations) {
 export const requiredMysqlSchemaVersion = migrations.at(-1)?.version ?? 0;
 export const requiredMysqlSchemaChecksum = migrations.at(-1)?.checksum ?? "";
 export const requiredMysqlSchemaColumns = [
+  ["mutation_commit_guards", "valid"],
+  ["warehouse_stocktakes", "mutation_version"],
+  ["settlement_invoice_records", "request_id"],
+  ["settlement_invoice_records", "request_payload_hash"],
   ["quotations", "mark_contact_ids_json"],
   ["transport_orders", "mark_contacts_snapshot_json"],
   ["analytics_metric_configs", "metric_code"],

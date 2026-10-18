@@ -1,3 +1,4 @@
+import { businessDateTimeLabel } from "./business-time";
 import { env } from "cloudflare:workers";
 
 type ManifestBatch = {
@@ -61,10 +62,10 @@ function buildManifestHtml(batch: ManifestBatch, orders: ManifestOrder[], vehicl
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeHtml(documentName)} ${escapeHtml(batch.batch_number)}</title><style>
 body{font:12px "Microsoft YaHei",Arial,sans-serif;color:#111;margin:24px}h1{font-size:22px;margin:0 0 6px}h2{font-size:15px;margin:20px 0 8px}.meta{display:grid;grid-template-columns:repeat(3,1fr);gap:8px 20px;margin:12px 0}.meta span{border-bottom:1px solid #bbb;padding:5px 0}.meta b{color:#555;margin-right:6px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #999;padding:6px;text-align:left}th{background:#eee}.number{text-align:right}.footer{margin-top:18px;color:#555}.signatures{display:grid;grid-template-columns:repeat(3,1fr);gap:30px;margin-top:40px}.signatures span{border-top:1px solid #333;padding-top:6px}@media print{body{margin:8mm}}
 </style></head><body><h1>${escapeHtml(documentName)} ${escapeHtml(batch.batch_number)}</h1><div>${escapeHtml(batch.batch_name)}</div>
-<div class="meta"><span><b>线路</b>${escapeHtml(batch.origin_location)} → ${escapeHtml(batch.destination_location)}</span><span><b>出境口岸</b>${escapeHtml(batch.border_port || "待填写")}</span><span><b>计划发车</b>${escapeHtml(batch.planned_departure_at?.slice(0, 16).replace("T", " ") || "待填写")}</span><span><b>境外承运商</b>${escapeHtml(batch.overseas_carrier_name || batch.carrier_name || "待填写")}</span><span><b>车辆</b>${escapeHtml(batch.overseas_vehicle_type || "-")} · ${escapeHtml(batch.overseas_vehicle_plate || "待填写")}</span><span><b>司机</b>${escapeHtml(batch.overseas_driver_name || "待填写")} ${escapeHtml(batch.overseas_driver_phone || "")}</span></div>
+<div class="meta"><span><b>线路</b>${escapeHtml(batch.origin_location)} → ${escapeHtml(batch.destination_location)}</span><span><b>出境口岸</b>${escapeHtml(batch.border_port || "待填写")}</span><span><b>计划发车</b>${escapeHtml(businessDateTimeLabel(batch.planned_departure_at) || "待填写")}</span><span><b>境外承运商</b>${escapeHtml(batch.overseas_carrier_name || batch.carrier_name || "待填写")}</span><span><b>车辆</b>${escapeHtml(batch.overseas_vehicle_type || "-")} · ${escapeHtml(batch.overseas_vehicle_plate || "待填写")}</span><span><b>司机</b>${escapeHtml(batch.overseas_driver_name || "待填写")} ${escapeHtml(batch.overseas_driver_phone || "")}</span></div>
 <h2>车辆信息</h2><table><thead><tr><th>车辆序号</th><th>车型</th><th>车牌号</th><th>司机</th><th>电话</th></tr></thead><tbody>${vehicleRows}</tbody></table>
 <h2>挂载订单（${orders.length} 票）</h2><table><thead><tr><th>订单号</th><th>工作号</th><th>客户</th><th>货物</th><th>件数</th><th>实收重量 KG</th><th>实收体积 CBM</th></tr></thead><tbody>${orderRows}</tbody><tfoot><tr><th colspan="4">合计</th><th class="number">${totalPieces}</th><th class="number">${totalWeight.toFixed(2)}</th><th class="number">${totalVolume.toFixed(3)}</th></tr></tfoot></table>
-<div class="footer">系统生成时间：${escapeHtml(generatedAt.slice(0, 19).replace("T", " "))} · 来源：仓库货物配载与装车数据</div><div class="signatures"><span>仓库装车签字 / 日期</span><span>司机签字 / 日期</span><span>理货签字 / 日期</span></div></body></html>`;
+<div class="footer">系统生成时间：${escapeHtml(businessDateTimeLabel(generatedAt))} · 来源：仓库货物配载与装车数据</div><div class="signatures"><span>仓库装车签字 / 日期</span><span>司机签字 / 日期</span><span>理货签字 / 日期</span></div></body></html>`;
 }
 
 export async function refreshLoadingManifest(organizationId: string, batchId: string, userId: string, now: string) {

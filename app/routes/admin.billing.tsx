@@ -246,6 +246,7 @@ export async function action({ request }: Route.ActionArgs) {
       const blocked = await settlementActionBlocked(current, "record_invoice", source);
       if (blocked) return { formError: blocked };
       const result = await recordSettlementInvoice(env.DB, {
+        requestId: valueOf(form,"requestId"),
         organizationId: current.organizationId,
         reconciliationId,
         amount: positive(form, "amount"),
@@ -824,6 +825,8 @@ export function ReconciliationSheet({ row, mode, access, busy, cash = [] }: {
   cash?: CashTransactionRow[];
 }) {
   const [allocationRequestId,setAllocationRequestId]=useState(()=>crypto.randomUUID());
+  const [invoiceRequestId,setInvoiceRequestId]=useState(()=>crypto.randomUUID());
+  useEffect(()=>setInvoiceRequestId(crypto.randomUUID()),[row.invoiced_amount]);
   useEffect(()=>setAllocationRequestId(crypto.randomUUID()),[row.settled_amount]);
   const invoiceRemaining = Math.max(0, row.total_amount - row.invoiced_amount);
   if (!access.visible) return null;
@@ -868,6 +871,7 @@ export function ReconciliationSheet({ row, mode, access, busy, cash = [] }: {
       <summary>登记{row.direction === "receivable" ? "销项开票" : "进项收票"}</summary>
       <Form method="post" className="form-grid compact billing-invoice-form">
         <input type="hidden" name="intent" value="record_invoice" />
+        <input type="hidden" name="requestId" value={invoiceRequestId} />
         <input type="hidden" name="reconciliationId" value={row.id} />
         <Num name="amount" label={`本次金额（剩余 ${invoiceRemaining.toFixed(2)}）`} required max={invoiceRemaining} />
         <Text name="invoiceCompany" label="开票 / 收票公司" required defaultValue={row.settlement_entity} />

@@ -1,3 +1,4 @@
+import { businessDateTimeLabel } from "../lib/business-time";
 import { env } from "cloudflare:workers";
 import { useEffect, useMemo, useState } from "react";
 import { Form, Link, useNavigation } from "react-router";
@@ -637,7 +638,7 @@ function BatchResourceForm({batch,carriers,vehicles,drivers,busy}:{batch:BatchRo
     <input type="hidden" name="intent" value="resource"/>
     <input type="hidden" name="batchId" value={batch.id}/>
     <BatchResourceFields carriers={carriers} vehicles={vehicles} drivers={drivers} carrierId={batch.carrier_id??""} vehicleMasterId={batch.vehicle_master_id??""} driverMasterId={batch.driver_master_id??""}/>
-    <label className="field"><span>计划出境发车时间 *</span><input name="plannedDepartureAt" type="datetime-local" defaultValue={batch.planned_departure_at?.slice(0,16)??""} required/></label>
+    <label className="field"><span>计划出境发车时间 *</span><input name="plannedDepartureAt" type="datetime-local" defaultValue={businessDateTimeLabel(batch.planned_departure_at).replace(" ","T")} required/></label>
     <div className="alert info">保存后同步到管理后台配载单和已生成但尚未开始扫描的仓库装车任务。</div>
     <button className="primary" disabled={busy}>确认承运商、车辆和司机</button>
   </Form>

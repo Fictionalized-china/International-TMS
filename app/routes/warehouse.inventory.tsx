@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { changedRowGuard, predicateGuard, guardedBatch } from "../lib/mutation-guard.server";
 import { Form, Link, useNavigation } from "react-router";
 import type { Route } from "./+types/warehouse.inventory";
 import { Modal } from "../components/Modal";
@@ -30,6 +31,13 @@ export async function loader({request}:Route.LoaderArgs){
 }
 
 export async function action({request}:Route.ActionArgs){
+  try { return await inventoryAction(request); }
+  catch(error) {
+    if(error instanceof Error && error.message.startsWith("库存状态已变化")) return {formError:error.message};
+    throw error;
+  }
+}
+async function inventoryAction(request:Request){
   const user=await requireSessionUser(request,"warehouse.operate","warehouse"),warehouseContext=await loadWarehouseContext(request,user),warehouse=warehouseContext.selected,form=await request.formData(),intent=valueOf(form,"intent"),now=new Date().toISOString();
   await requireWarehouseAssignment(user,warehouse.id,"operator");
   if(intent==="move"){
@@ -40,10 +48,11 @@ export async function action({request}:Route.ActionArgs){
     if(pkg.location_id===targetId)return{formError:"货物已经位于目标库位"};
     if(pkg.status==="allocated")return{formError:"货物已进入集货批次，请在批次作业中处理"};
     if(pkg.status==="dispatched")return{formError:"货物已经出库，不能移库"};
-    await env.DB.batch([
-      env.DB.prepare("UPDATE warehouse_packages SET location_id=?,updated_at=? WHERE id=? AND organization_id=?").bind(targetId,now,pkg.id,user.organizationId),
+    await guardedBatch(env.DB,[
+      env.DB.prepare("UPDATE warehouse_packages SET location_id=?,updated_at=? WHERE id=? AND organization_id=? AND warehouse_id=? AND location_id=? AND status NOT IN ('allocated','dispatched')").bind(targetId,now,pkg.id,user.organizationId,warehouse.id,pkg.location_id),
+      changedRowGuard(env.DB,now),
       env.DB.prepare("INSERT INTO warehouse_package_movements(id,organization_id,package_id,operation_type,from_location_id,to_location_id,operator_user_id,notes,occurred_at,created_at) VALUES(?,?,?,'move',?,?,?,?,?,?)").bind(crypto.randomUUID(),user.organizationId,pkg.id,pkg.location_id,targetId,user.userId,notes||"扫码移库",now,now)
-    ]);
+    ],"库存状态已变化，本次未移库，请刷新后重试");
     await writeAudit({request,action:"warehouse.inventory.move",resourceType:"warehouse_package",resourceId:pkg.id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{barcode:pkg.barcode,from:pkg.location_id,to:targetId}});
     return{success:`${pkg.barcode} 已完成移库`};
   }
@@ -54,31 +63,44 @@ export async function action({request}:Route.ActionArgs){
     if(active)return{formError:"该库位已有进行中的盘点任务"};
     const id=crypto.randomUUID(),number=generateStocktake();
     const expected=await env.DB.prepare("SELECT COUNT(*) total FROM warehouse_packages WHERE location_id=? AND organization_id=? AND status!='dispatched'").bind(location.id,user.organizationId).first<{total:number}>();
-    await env.DB.batch([
+    await guardedBatch(env.DB,[
+      env.DB.prepare("UPDATE warehouse_locations SET updated_at=updated_at WHERE id=? AND organization_id=? AND warehouse_id=? AND status='active'").bind(location.id,user.organizationId,warehouse.id),
+      predicateGuard(env.DB,"NOT EXISTS(SELECT 1 FROM warehouse_stocktakes WHERE location_id=? AND organization_id=? AND status='counting')",[location.id,user.organizationId],now),
       env.DB.prepare("INSERT INTO warehouse_stocktakes(id,organization_id,stocktake_number,warehouse_id,location_id,status,expected_packages,notes,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,'counting',?,?,?,?,?)").bind(id,user.organizationId,number,location.warehouse_id,location.id,expected?.total??0,notes||null,user.userId,now,now),
-      env.DB.prepare("INSERT INTO warehouse_stocktake_items(id,organization_id,stocktake_id,package_id,expected_quantity,counted_quantity,result) SELECT lower(hex(randomblob(16))),organization_id,?,id,1,0,'pending' FROM warehouse_packages WHERE location_id=? AND organization_id=? AND status!='dispatched'").bind(id,location.id,user.organizationId)
-    ]);
+      env.DB.prepare("INSERT INTO warehouse_stocktake_items(id,organization_id,stocktake_id,package_id,expected_quantity,counted_quantity,result) SELECT lower(hex(randomblob(16))),organization_id,?,id,1,0,'pending' FROM warehouse_packages WHERE location_id=? AND organization_id=? AND warehouse_id=? AND status!='dispatched'").bind(id,location.id,user.organizationId,warehouse.id),
+      env.DB.prepare("UPDATE warehouse_stocktakes SET expected_packages=(SELECT COUNT(*) FROM warehouse_stocktake_items WHERE stocktake_id=?) WHERE id=?").bind(id,id),
+    ],"库存状态已变化，该库位可能已创建盘点，请刷新后重试");
     return{success:`盘点任务 ${number} 已创建，共 ${expected?.total??0} 个账面货物`};
   }
-  const stocktakeId=valueOf(form,"stocktakeId"),stocktake=await env.DB.prepare("SELECT id,location_id,status,stocktake_number FROM warehouse_stocktakes WHERE id=? AND organization_id=? AND warehouse_id=?").bind(stocktakeId,user.organizationId,warehouse.id).first<{id:string;location_id:string;status:string;stocktake_number:string}>();
+  const stocktakeId=valueOf(form,"stocktakeId"),stocktake=await env.DB.prepare("SELECT id,location_id,status,stocktake_number,mutation_version FROM warehouse_stocktakes WHERE id=? AND organization_id=? AND warehouse_id=?").bind(stocktakeId,user.organizationId,warehouse.id).first<{id:string;location_id:string;status:string;stocktake_number:string;mutation_version:number}>();
   if(!stocktake)return{formError:"盘点任务不存在"};
   if(intent==="count"){
     if(stocktake.status!=="counting")return{formError:"该盘点任务已经结束"};
-    const barcode=valueOf(form,"barcode").toUpperCase(),pkg=await env.DB.prepare("SELECT id,location_id,status FROM warehouse_packages WHERE organization_id=? AND barcode=? AND status!='dispatched'").bind(user.organizationId,barcode).first<{id:string;location_id:string;status:string}>();
+    const barcode=valueOf(form,"barcode").toUpperCase(),pkg=await env.DB.prepare("SELECT id,location_id,status FROM warehouse_packages WHERE organization_id=? AND warehouse_id=? AND barcode=? AND status!='dispatched'").bind(user.organizationId,warehouse.id,barcode).first<{id:string;location_id:string;status:string}>();
     if(!pkg)return{formError:`未找到在库标签 ${barcode}`};
     const item=await env.DB.prepare("SELECT id,counted_quantity,expected_quantity FROM warehouse_stocktake_items WHERE stocktake_id=? AND package_id=?").bind(stocktake.id,pkg.id).first<{id:string;counted_quantity:number;expected_quantity:number}>();
     if(item?.counted_quantity)return{formError:"该标签已经盘点，请勿重复扫描"};
-    if(item)await env.DB.prepare("UPDATE warehouse_stocktake_items SET counted_quantity=1,result='matched',counted_by_user_id=?,counted_at=? WHERE id=?").bind(user.userId,now,item.id).run();
-    else await env.DB.prepare("INSERT INTO warehouse_stocktake_items(id,organization_id,stocktake_id,package_id,expected_quantity,counted_quantity,result,counted_by_user_id,counted_at) VALUES(?,?,?,?,0,1,'overage',?,?)").bind(crypto.randomUUID(),user.organizationId,stocktake.id,pkg.id,user.userId,now).run();
-    const totals=await env.DB.prepare("SELECT SUM(counted_quantity) counted,SUM(CASE WHEN result='overage' THEN 1 ELSE 0 END) overage FROM warehouse_stocktake_items WHERE stocktake_id=?").bind(stocktake.id).first<{counted:number;overage:number}>();
-    await env.DB.prepare("UPDATE warehouse_stocktakes SET counted_packages=?,overage_packages=?,updated_at=? WHERE id=?").bind(totals?.counted??0,totals?.overage??0,now,stocktake.id).run();
+    await guardedBatch(env.DB,[
+      env.DB.prepare("UPDATE warehouse_stocktakes SET mutation_version=mutation_version+1,updated_at=? WHERE id=? AND organization_id=? AND warehouse_id=? AND status='counting' AND mutation_version=?").bind(now,stocktake.id,user.organizationId,warehouse.id,stocktake.mutation_version),
+      changedRowGuard(env.DB,now),
+      env.DB.prepare("UPDATE warehouse_packages SET updated_at=updated_at WHERE id=? AND organization_id=? AND warehouse_id=? AND status!='dispatched'").bind(pkg.id,user.organizationId,warehouse.id),
+      changedRowGuard(env.DB,now),
+      item ? env.DB.prepare("UPDATE warehouse_stocktake_items SET counted_quantity=1,result='matched',counted_by_user_id=?,counted_at=? WHERE id=? AND counted_quantity=0").bind(user.userId,now,item.id)
+        : env.DB.prepare("INSERT INTO warehouse_stocktake_items(id,organization_id,stocktake_id,package_id,expected_quantity,counted_quantity,result,counted_by_user_id,counted_at) VALUES(?,?,?,?,0,1,'overage',?,?)").bind(crypto.randomUUID(),user.organizationId,stocktake.id,pkg.id,user.userId,now),
+      changedRowGuard(env.DB,now),
+      env.DB.prepare("UPDATE warehouse_stocktakes SET counted_packages=(SELECT COALESCE(SUM(counted_quantity),0) FROM warehouse_stocktake_items WHERE stocktake_id=?),overage_packages=(SELECT COUNT(*) FROM warehouse_stocktake_items WHERE stocktake_id=? AND result='overage') WHERE id=?").bind(stocktake.id,stocktake.id,stocktake.id),
+    ],"库存状态已变化，盘点可能已关闭或标签已处理，请刷新后重试");
     return{success:`${barcode} 盘点成功${item?"":"，记录为盘盈"}`};
   }
   if(intent==="complete_stocktake"){
     if(stocktake.status!=="counting")return{formError:"该盘点任务已经结束"};
-    await env.DB.prepare("UPDATE warehouse_stocktake_items SET result='shortage' WHERE stocktake_id=? AND expected_quantity=1 AND counted_quantity=0").bind(stocktake.id).run();
-    const totals=await env.DB.prepare("SELECT SUM(counted_quantity) counted,SUM(CASE WHEN result='shortage' THEN 1 ELSE 0 END) shortage,SUM(CASE WHEN result='overage' THEN 1 ELSE 0 END) overage FROM warehouse_stocktake_items WHERE stocktake_id=?").bind(stocktake.id).first<{counted:number;shortage:number;overage:number}>();
-    await env.DB.prepare("UPDATE warehouse_stocktakes SET status='completed',counted_packages=?,shortage_packages=?,overage_packages=?,completed_by_user_id=?,completed_at=?,updated_at=? WHERE id=?").bind(totals?.counted??0,totals?.shortage??0,totals?.overage??0,user.userId,now,now,stocktake.id).run();
+    await guardedBatch(env.DB,[
+      env.DB.prepare("UPDATE warehouse_stocktakes SET status='completed',mutation_version=mutation_version+1,completed_by_user_id=?,completed_at=?,updated_at=? WHERE id=? AND organization_id=? AND warehouse_id=? AND status='counting' AND mutation_version=?").bind(user.userId,now,now,stocktake.id,user.organizationId,warehouse.id,stocktake.mutation_version),
+      changedRowGuard(env.DB,now),
+      env.DB.prepare("UPDATE warehouse_stocktake_items SET result='shortage' WHERE stocktake_id=? AND expected_quantity=1 AND counted_quantity=0").bind(stocktake.id),
+      env.DB.prepare("UPDATE warehouse_stocktakes SET counted_packages=(SELECT COALESCE(SUM(counted_quantity),0) FROM warehouse_stocktake_items WHERE stocktake_id=?),shortage_packages=(SELECT COUNT(*) FROM warehouse_stocktake_items WHERE stocktake_id=? AND result='shortage'),overage_packages=(SELECT COUNT(*) FROM warehouse_stocktake_items WHERE stocktake_id=? AND result='overage') WHERE id=?").bind(stocktake.id,stocktake.id,stocktake.id,stocktake.id),
+    ],"库存状态已变化，其他人正在盘点或已结束，请刷新后重试");
+    const totals=await env.DB.prepare("SELECT counted_packages counted,shortage_packages shortage,overage_packages overage FROM warehouse_stocktakes WHERE id=?").bind(stocktake.id).first<{counted:number;shortage:number;overage:number}>();
     await writeAudit({request,action:"warehouse.stocktake.complete",resourceType:"warehouse_stocktake",resourceId:stocktake.id,organizationId:user.organizationId,actorUserId:user.userId,metadata:totals??undefined});
     return{success:`盘点 ${stocktake.stocktake_number} 已完成：盘亏 ${totals?.shortage??0}，盘盈 ${totals?.overage??0}`};
   }

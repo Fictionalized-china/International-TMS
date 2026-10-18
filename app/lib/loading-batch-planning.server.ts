@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { normalizeBusinessPlanTime } from "./business-time";
 import type { SessionUser } from "./auth.server";
 import { chunkD1Rows, chunkD1Values, d1Placeholders } from "./d1-bindings";
 import { ensureOrderModules, syncOrderWorkflowSnapshot } from "./order-modules.server";
@@ -222,6 +223,10 @@ async function loadSubmission(input: Pick<PlanningInput, "current" | "requestId"
 }
 
 export async function createOperationPlannedBatch(input: PlanningInput) {
+  const loading = normalizeBusinessPlanTime(input.plannedLoadingAt);
+  const departure = normalizeBusinessPlanTime(input.plannedDepartureAt);
+  const arrival = normalizeBusinessPlanTime(input.plannedArrivalAt);
+  if ((loading && departure && loading > departure) || (departure && arrival && departure > arrival) || (loading && arrival && loading > arrival)) throw new Error("计划时间须满足装车不晚于出境、出境不晚于到仓");
   if (!/^[a-zA-Z0-9-]{16,128}$/.test(input.requestId)) throw new Error("提交标识无效，请刷新页面后重试");
   const orderIds = [...new Set(input.orderIds.filter(Boolean))].sort();
   const { current: _current, requestId: _requestId, ...payload } = input;
@@ -231,6 +236,8 @@ export async function createOperationPlannedBatch(input: PlanningInput) {
     if (previous.payload_hash !== payloadHash) throw new Error("这次提交已保存过不同的规划，请刷新页面后发起新规划");
     return resumeOperationPlannedBatch(input.current,previous.batch_id);
   }
+  // Keep request hashing backward-compatible; normalize only the persisted plan.
+  input = {...input,plannedLoadingAt:loading || "",plannedDepartureAt:departure || "",plannedArrivalAt:arrival || ""};
   if (orderIds.length < 2) throw new Error("拼车配载至少选择 2 票订单");
   if (orderIds.length > 50) throw new Error("单张配载单最多选择 50 票订单");
   if (!input.carrierId || !input.vehicleId || !input.driverId) {

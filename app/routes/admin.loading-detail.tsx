@@ -1,3 +1,4 @@
+import { businessDateTimeLabel } from "../lib/business-time";
 import { env } from "cloudflare:workers";
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Form, Link, useNavigate, useNavigation, useSearchParams } from "react-router";
@@ -521,7 +522,7 @@ function buildLoadingManifestHtml(batch: ManifestBatchRow, orders: ManifestOrder
 </style></head><body>
 <h1>配载单 ${escapeHtml(batch.batch_number)}</h1>
 <div class="meta"><span>${escapeHtml(batch.batch_name)}</span></div>
-<div class="meta"><span><b>线路</b>${escapeHtml(batch.origin_location)} → ${escapeHtml(batch.destination_location)}</span><span><b>承运商</b>${escapeHtml(batch.carrier_name || "待定")}</span><span><b>出境口岸</b>${escapeHtml(batch.border_port || "待定")}</span><span><b>计划发车</b>${escapeHtml(batch.planned_departure_at?.slice(0, 16).replace("T", " ") || "待定")}</span><span><b>计划到达</b>${escapeHtml(batch.planned_arrival_at?.slice(0, 16).replace("T", " ") || "待定")}</span></div>
+<div class="meta"><span><b>线路</b>${escapeHtml(batch.origin_location)} → ${escapeHtml(batch.destination_location)}</span><span><b>承运商</b>${escapeHtml(batch.carrier_name || "待定")}</span><span><b>出境口岸</b>${escapeHtml(batch.border_port || "待定")}</span><span><b>计划发车</b>${escapeHtml(businessDateTimeLabel(batch.planned_departure_at) || "待定")}</span><span><b>计划到达</b>${escapeHtml(businessDateTimeLabel(batch.planned_arrival_at) || "待定")}</span></div>
 <h2>境外运输资源</h2>
 <div class="meta"><span><b>境外承运方</b>${escapeHtml(batch.overseas_carrier_name || "待定")}</span><span><b>车型/数量</b>${escapeHtml(batch.overseas_vehicle_type || "待定")} × ${batch.overseas_vehicle_count || 1}</span><span><b>车牌</b>${escapeHtml(batch.overseas_vehicle_plate || "待定")}</span><span><b>司机</b>${escapeHtml(batch.overseas_driver_name || "待定")} ${escapeHtml(batch.overseas_driver_phone || "")}</span></div>
 <h2>装载车辆（${vehicles.length} 车）</h2>
@@ -529,7 +530,7 @@ function buildLoadingManifestHtml(batch: ManifestBatchRow, orders: ManifestOrder
 <h2>挂载订单（${orders.length} 票）</h2>
 <table><thead><tr><th>订单号</th><th>工作号</th><th>委托人</th><th>货物名称</th><th>件数</th><th>实收重量 KG</th><th>实收体积 CBM</th><th>装载车辆</th></tr></thead><tbody>${rows}</tbody>
 <tfoot><tr><td colspan="4">合计</td><td class="num">${totalPieces}</td><td class="num">${totalWeight.toFixed(2)}</td><td class="num">${totalVolume.toFixed(3)}</td><td>—</td></tr></tfoot></table>
-<div class="footer"><span>系统生成时间：${escapeHtml(generatedAt.slice(0, 19).replace("T", " "))}</span><span>生成来源：配载工作台（自动审核通过）</span></div>
+<div class="footer"><span>系统生成时间：${escapeHtml(businessDateTimeLabel(generatedAt))}</span><span>生成来源：配载工作台（自动审核通过）</span></div>
 <div class="sign"><div>仓库装车签字 / 日期</div><div>司机签字 / 日期</div><div>理货签字 / 日期</div></div>
 </body></html>`;
 }
