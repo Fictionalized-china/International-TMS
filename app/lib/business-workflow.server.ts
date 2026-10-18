@@ -427,6 +427,14 @@ export async function recordWorkflowEvent(input: RecordEventInput): Promise<stri
   let step = await env.DB.prepare(
     "SELECT step_key, name, sort_order FROM workflow_steps WHERE workflow_id = ? AND trigger_event = ? AND is_active = 1",
   ).bind(definition.id, input.event).first<Step>();
+  // Quotation is an optional sales tool, not an intake prerequisite. When its
+  // node is unplugged, still freeze the selected workflow at its order-entry
+  // node; do not revive quotation/approval nodes or advance an existing instance.
+  if (!step && !instance && input.event === "quote.created" && input.quotationId) {
+    step = await env.DB.prepare(
+      "SELECT step_key, name, sort_order FROM workflow_steps WHERE workflow_id=? AND trigger_event='order.created' AND is_active=1",
+    ).bind(definition.id).first<Step>();
+  }
   if (!step) return null;
 
   const now = new Date().toISOString();

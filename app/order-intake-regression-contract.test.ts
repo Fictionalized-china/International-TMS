@@ -15,12 +15,19 @@ const quotationsRoute = readFileSync(
 );
 
 describe("order intake regression contract", () => {
+  it("keeps failures inside the direct-entry dialog and closes into a real order page with tab identity", () => {
+    expect(quotationsRoute).toContain('entryMode: directEntry ? "direct" : "quote", quotationId: actionQuotationId, formError:');
+    expect(quotationsRoute).toContain('onClose={() => setExitIntake(true)}');
+    expect(quotationsRoute).toContain('if (!exitIntake || directOrderOpen) return;');
+    expect(quotationsRoute).toContain('navigate(adminWorkspaceHref(orderId ? `/admin/orders/${encodeURIComponent(orderId)}` : "/admin/orders", location.search), { replace: true })');
+  });
   it("supports direct order entry without sending a portal quote notification", () => {
     expect(quotationsRoute).toContain('valueOf(form, "entryMode") === "direct"');
     expect(quotationsRoute).toContain('entryMode === "quote" ? [env.DB.prepare(');
     expect(quotationsRoute).toContain('if (entryMode === "direct")');
     expect(quotationsRoute).toContain('missingOrderIntakeFees(roadLoadType');
-    expect(quotationsRoute).toContain('acceptance_source=\'offline_order_entry\'');
+    expect(quotationsRoute).not.toContain("acceptance_source='offline_order_entry'");
+    expect(quotationsRoute).toContain('action: "order.direct_entry.create"');
     expect(quotationsRoute).toContain('<input type="hidden" name="entryMode" value={entryMode}/>');
   });
 

@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Form, Link, useFetcher, useNavigation, useActionData } from "react-router";
+import { Form, Link, useFetcher, useNavigation, useActionData, useNavigate, useLocation } from "react-router";
+import { adminWorkspaceHref } from "../lib/admin-workspace-navigation";
 import { intakeSubmissionIdentity,assertDirectIntakeAuthority } from '../lib/intake-submission.server';
 import { ChevronDown, ChevronRight } from "lucide-react";
 import type { Route } from "./+types/admin.quotations";
@@ -397,8 +398,7 @@ export async function action({ request }: Route.ActionArgs) {
             assertDirectIntakeAuthority({policy:processPolicy,positionCode:current.positionCode,roleCodes:current.roleCodes,customerCsEnabled:saved.cs_order_entry_enabled,emergencyReason:valueOf(form,'intakeEmergencyReason')});
           }
           const order=saved.order_id?{id:saved.order_id,orderNumber:saved.order_number!}:await acceptQuotation({organizationId:current.organizationId,quotationId:saved.id,actorUserId:current.userId,source:'admin',request,initialPayables:JSON.parse(saved.intake_payables_json||'[]')});
-          if(saved.acceptance_source!=='offline_order_entry'){
-            await env.DB.prepare("UPDATE quotations SET acceptance_source='offline_order_entry',updated_at=? WHERE id=? AND organization_id=?").bind(new Date().toISOString(),saved.id,current.organizationId).run();
+          if(!saved.order_id){
             await writeAudit({request,action:'order.direct_entry.resume',resourceType:'transport_order',resourceId:order.id,organizationId:current.organizationId,actorUserId:current.userId,metadata:{quotationId:saved.id,orderNumber:order.orderNumber,emergencyReason:current.positionCode==='HR_ADMIN'?valueOf(form,'intakeEmergencyReason'):undefined}});
           }
           return {intent,entryMode,quotationId:saved.id,orderId:order.id,orderNumber:order.orderNumber,success:`订单 ${order.orderNumber} 已建立，重复提交未重复开单`};
@@ -670,7 +670,7 @@ export async function action({ request }: Route.ActionArgs) {
         const workflowInstanceId = await recordWorkflowEvent({
           organizationId:current.organizationId,
           workflowId:workflowDefinitionId,
-          event:"quote.created",
+          event:entryMode === "direct" ? "order.created" : "quote.created",
           customerId,
           quotationId:id,
           actorUserId:current.userId,
@@ -700,9 +700,9 @@ export async function action({ request }: Route.ActionArgs) {
           request,
           initialPayables:payableFees,
         });
-        await env.DB.prepare(
-          "UPDATE quotations SET acceptance_source='offline_order_entry',updated_at=? WHERE id=? AND organization_id=?",
-        ).bind(new Date().toISOString(), id, current.organizationId).run();
+        // acceptance_source is the authenticated channel ('admin' / 'portal').
+        // Direct-entry identity and audit metadata carry the intake mode; do not
+        // write an out-of-enum value after the order has already been committed.
         await writeAudit({
           request,
           action: "order.direct_entry.create",
@@ -745,7 +745,7 @@ export async function action({ request }: Route.ActionArgs) {
     }
     throw new Error("未知操作");
   } catch (error) {
-    return { intent, quotationId: actionQuotationId, formError: error instanceof Error ? error.message : String(error) };
+    return { intent, entryMode: directEntry ? "direct" : "quote", quotationId: actionQuotationId, formError: error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -1009,6 +1009,9 @@ async function saveQuotationNativeWorkflowUpdate(input: {
 }
 
 export default function QuotationsPage({ loaderData, actionData }: Route.ComponentProps) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [exitIntake, setExitIntake] = useState(false);
   const busy = useNavigation().state !== "idle";
   const isDirectEntry = loaderData.filters.entryMode === "direct";
   const [createQuoteOpen,setCreateQuoteOpen]=useState(false);
@@ -1021,6 +1024,16 @@ export default function QuotationsPage({ loaderData, actionData }: Route.Compone
   const dismissedCreateResult=useRef(actionData);
   const actionError=actionData&&"formError" in actionData?actionData.formError:undefined;
   const actionSuccess=actionData&&"success" in actionData?actionData.success:undefined;
+  useEffect(() => {
+    if (!exitIntake || directOrderOpen) return;
+    // Let the closed modal unregister its dirty-form guard before navigating.
+    const timer = window.setTimeout(() => {
+      const orderId = actionData?.intent === "create" && actionData.entryMode === "direct" &&
+        "success" in actionData && "orderId" in actionData ? actionData.orderId : undefined;
+      navigate(adminWorkspaceHref(orderId ? `/admin/orders/${encodeURIComponent(orderId)}` : "/admin/orders", location.search), { replace: true });
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [exitIntake, directOrderOpen, actionData, navigate, location.search]);
   const createFormError=createQuoteOpen&&actionData?.intent==="create"&&actionData.entryMode!=="direct"&&actionError&&
     actionData!==dismissedCreateResult.current?actionError:undefined;
   const directFormError=directOrderOpen&&actionData?.intent==="create"&&actionData.entryMode==="direct"&&actionError&&
@@ -1036,7 +1049,7 @@ export default function QuotationsPage({ loaderData, actionData }: Route.Compone
       <div><span className="eyebrow">{isDirectEntry ? "ORDER INTAKE / 订单中心" : "SALES TOOLS / 报价辅助"}</span><h1>{isDirectEntry ? "直接录单" : "询价与报价"}</h1><p>{isDirectEntry ? "按线下已确认的业务建立订单；费用必录要求与岗位职责仍由工作流和业务策略控制。" : "报价是可选销售辅助功能，不是开单前置节点；线下确认后的录单请从订单中心进入。"}</p></div>
       <div className="head-actions">
         {!isDirectEntry && loaderData.current.permissions.includes("quote.manage") && <Modal title="创建运输报价" triggerLabel="创建报价" triggerClassName="btn" closeSignal={actionData?.intent==="create"&&actionData.entryMode!=="direct"?actionSuccess:undefined} isOpen={createQuoteOpen} onOpenChange={updateCreateQuoteOpen} size="xwide" dialogClassName="quote-form-modal" guardFormChanges><QuoteForm loaderData={loaderData} busy={busy} formError={createFormError} entryMode="quote" /></Modal>}
-        {isDirectEntry && loaderData.current.permissions.includes("order.intake.manage") && <Modal title="线下确认直接录单" triggerLabel="直接录单" triggerClassName="btn primary" closeSignal={actionData?.intent==="create"&&actionData.entryMode==="direct"?actionSuccess:undefined} isOpen={directOrderOpen} onOpenChange={setDirectOrderOpen} size="xwide" dialogClassName="quote-form-modal quote-intake-modal" guardFormChanges><QuoteForm loaderData={loaderData} busy={busy} formError={directFormError} entryMode="direct" /></Modal>}
+        {isDirectEntry && loaderData.current.permissions.includes("order.intake.manage") && <Modal title="线下确认直接录单" triggerLabel="直接录单" triggerClassName="btn primary" closeSignal={actionData?.intent==="create"&&actionData.entryMode==="direct"?actionSuccess:undefined} isOpen={directOrderOpen} onOpenChange={setDirectOrderOpen} onClose={() => setExitIntake(true)} size="xwide" dialogClassName="quote-form-modal quote-intake-modal" guardFormChanges><QuoteForm loaderData={loaderData} busy={busy} formError={directFormError} entryMode="direct" /></Modal>}
       </div>
     </div>
     <AdminWorkspaceTabs user={loaderData.current} workspace={isDirectEntry ? "orders" : "sales"} />
