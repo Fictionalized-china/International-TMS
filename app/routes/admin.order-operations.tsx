@@ -2,12 +2,13 @@ import { redirect } from "react-router";
 import type { Route } from "./+types/admin.order-operations";
 import { requireSessionUser } from "../lib/auth.server";
 import { requireOrderAccess } from "../lib/order-access.server";
+import { sessionSlotFromRequest, withSessionSlot } from "../lib/session-slot";
 
 /** Compatibility URL only: all reads and mutations use the current module authorization. */
 export async function loader({ request, params }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "order.view");
   await requireOrderAccess(current, params.orderId);
-  return redirect(`/admin/orders/${encodeURIComponent(params.orderId!)}`);
+  return redirect(withSessionSlot(`/admin/orders/${encodeURIComponent(params.orderId!)}`, sessionSlotFromRequest(request)));
 }
 export async function action({ request, params }: Route.ActionArgs) {
   const current = await requireSessionUser(request, "order.manage");

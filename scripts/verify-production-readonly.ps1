@@ -1,6 +1,9 @@
 param(
   [Parameter(Mandatory=$true)][string]$CredentialsPath,
-  [string]$BaseUrl = 'https://tms.shxlh.com'
+  [string]$BaseUrl = 'https://tms.shxlh.com',
+  [switch]$PortalOnly,
+  [switch]$SkipPortal,
+  [int]$PortalAccountIndex = 15
 )
 $ErrorActionPreference = 'Stop'
 # Credentials stay in memory. Only login POSTs and page GETs are issued.
@@ -27,9 +30,15 @@ function Assert-Page($Response, [string]$Label) {
 function Open-Session([int]$Index, [string]$LoginPath, [string]$ExpectedPrefix) {
   $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
   $login = Invoke-WebRequest "$BaseUrl$LoginPath" -WebSession $session -UseBasicParsing -TimeoutSec 45
-  $response = Invoke-WebRequest (Get-ResponseUri $login).AbsoluteUri -Method Post -Body @{email=$accounts[$Index].Email;password=$accounts[$Index].Password} -WebSession $session -UseBasicParsing -TimeoutSec 45
+  $body = @{email=$accounts[$Index].Email;password=$accounts[$Index].Password}
+  $hiddenContext = [regex]::Match($login.Content,'name="portalContext"[^>]*value="([^"]+)"')
+  if ($hiddenContext.Success) { $body.portalContext = $hiddenContext.Groups[1].Value }
+  $response = Invoke-WebRequest (Get-ResponseUri $login).AbsoluteUri -Method Post -Body $body -WebSession $session -UseBasicParsing -TimeoutSec 45
   $uri = Get-ResponseUri $response
-  if (!$uri.AbsolutePath.StartsWith($ExpectedPrefix) -or $uri.AbsolutePath -match '/login$') { throw "Authentication failed for account slot $Index" }
+  if (!$uri.AbsolutePath.StartsWith($ExpectedPrefix) -or $uri.AbsolutePath -match '/login$') {
+    $reason = [regex]::Match($response.Content,'class="alert error"[^>]*>([^<]+)</').Groups[1].Value
+    throw "Authentication failed for account slot ${Index}: $reason"
+  }
   return [pscustomobject]@{Session=$session;Query=$uri.Query}
 }
 function Read-Page($Context,[string]$Path,[string]$Label) {
@@ -43,11 +52,28 @@ function Read-LinkedPages($Context,$Page,[string]$Pattern,[string]$Label,[int]$L
   foreach ($link in $links) {
     $uri = [uri]::new([uri]$BaseUrl,$link)
     if ($uri.Host -ne ([uri]$BaseUrl).Host) { throw 'Refusing off-site link' }
-    if (!$uri.Query -and $Context.Query) { $uri = [uri]($uri.AbsoluteUri + $Context.Query) }
+    # Browser navigation carries tab context even when a link has its own filters.
+    $builder = [System.UriBuilder]::new($uri)
+    $query = [System.Web.HttpUtility]::ParseQueryString($builder.Query)
+    $sessionQuery = [System.Web.HttpUtility]::ParseQueryString($Context.Query)
+    foreach ($key in @('itmsTab','portalContext')) {
+      if ($sessionQuery[$key]) { $query[$key] = $sessionQuery[$key] }
+    }
+    $builder.Query = $query.ToString()
+    $uri = $builder.Uri
     $response = Invoke-WebRequest $uri -WebSession $Context.Session -UseBasicParsing -TimeoutSec 45
     Assert-Page $response $Label
+    if ($Label -eq 'admin order detail') {
+      foreach($suffix in @('/operations','/mark-label')) {
+        $extra = [System.UriBuilder]::new($uri)
+        $extra.Path = $extra.Path.TrimEnd('/') + $suffix
+        $related = Invoke-WebRequest $extra.Uri -WebSession $Context.Session -UseBasicParsing -TimeoutSec 45
+        Assert-Page $related "admin order $suffix"
+      }
+    }
   }
 }
+if (!$PortalOnly) {
 $admin = Open-Session 0 '/login' '/admin'
 foreach($path in @('/admin/quotations','/admin/analytics','/admin/tracking-center','/admin/billing','/admin/shipments','/admin/workflow')) { $null = Read-Page $admin $path $path }
 $orders = Read-Page $admin '/admin/orders' 'admin orders'
@@ -56,8 +82,11 @@ $loading = Read-Page $admin '/admin/loading' 'admin loading list'
 Read-LinkedPages $admin $loading '/admin/loading/[^/?]+' 'admin loading detail'
 $warehouse = Open-Session 13 '/warehouse/login' '/warehouse'
 foreach($path in @('/warehouse/inventory','/warehouse/inbound','/warehouse/outbound','/warehouse/loading-documents')) { $null = Read-Page $warehouse $path $path }
-$portal = Open-Session 15 '/portal/login' '/portal'
+}
+if (!$SkipPortal) {
+$portal = Open-Session $PortalAccountIndex '/portal/login' '/portal'
 $portalOrders = Read-Page $portal '/portal/orders' 'portal orders'
 $null = Read-Page $portal '/portal/tracking' 'portal tracking'
 Read-LinkedPages $portal $portalOrders '/portal/orders/[^/?]+/mark-label(?:\?|$)' 'portal mark label' 3
+} else { Write-Host 'SKIP portal authenticated checks (credentials unavailable)' }
 Write-Output 'Read-only production checks completed. No order, inventory or financial mutations submitted.'
