@@ -14,3 +14,12 @@
 - 每个开发批次必须独立验证并创建本地 Git 提交，作为可回滚节点。
 - 每个批次完成后必须说明：已完成、暂未完成、下一批内容。
 - 未经项目负责人明确指令，不推送 Git，也不部署 Cloudflare 生产环境。
+
+## 当前正式环境与发布入口
+
+- 正式系统是阿里云 ECS `101.133.133.152` 上的 Node.js + MySQL，域名为 `https://tms.shxlh.com`。用户说“部署云端”时默认指此环境。
+- 服务为 `international-tms.service`，应用软链为 `/opt/international-tms/current`，发布目录为 `/opt/international-tms/releases/`，本地健康端口为 `3100`。
+- 发布使用 `npm run build:mysql` 和 `scripts/deploy-alibaba-release.sh`。先确认当前线上目录、构建成功及发布包 SHA256，再执行脚本完成备份、迁移、核心数据摘要核对、原子切换及健康检查。
+- `npm run deploy` 是 Cloudflare Workers/D1 发布命令，不是上述阿里云正式环境的发布入口。不要因浏览器已登录 Cloudflare 而切换部署目标。
+- 发布包仅包含构建产物和受版本控制的运行、迁移文件；禁止包含 `.dev.vars`、本地账密、数据库初始化快照或测试数据。复用现有服务器环境配置，不运行初始化或种子脚本。
+- 发布后须核对公网登录及相关账号只读页面，并记录新旧发布目录、备份路径、版本和验证范围。健康检查通过不能代替真实业务写入验收。
