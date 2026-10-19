@@ -15,11 +15,12 @@ const quotationsRoute = readFileSync(
 );
 
 describe("order intake regression contract", () => {
-  it("keeps failures inside the direct-entry dialog and closes into a real order page with tab identity", () => {
+  it("keeps failures inside the direct-entry dialog and closes into the order ledger with tab identity", () => {
     expect(quotationsRoute).toContain('entryMode: directEntry ? "direct" : "quote", quotationId: actionQuotationId, formError:');
     expect(quotationsRoute).toContain('onClose={() => setExitIntake(true)}');
     expect(quotationsRoute).toContain('if (!exitIntake || directOrderOpen) return;');
-    expect(quotationsRoute).toContain('navigate(adminWorkspaceHref(orderId ? `/admin/orders/${encodeURIComponent(orderId)}` : "/admin/orders", location.search), { replace: true })');
+    expect(quotationsRoute).toContain('navigate(adminWorkspaceHref("/admin/orders", location.search), { replace: true })');
+    expect(quotationsRoute).not.toContain('navigate(adminWorkspaceHref(orderId ?');
   });
   it("supports direct order entry without sending a portal quote notification", () => {
     expect(quotationsRoute).toContain('valueOf(form, "entryMode") === "direct"');

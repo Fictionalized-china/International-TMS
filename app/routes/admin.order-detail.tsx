@@ -44,11 +44,13 @@ import {
   type OrderModuleCode,
 } from "../lib/order-modules";
 import {
+  orderBusinessDisplayStages,
   orderBusinessStages,
   orderModuleAccess,
   orderModuleSequence,
   orderStageAccess,
 } from "../lib/order-stage-flow";
+import { displayWorkflowSteps } from "../lib/order-workflow-display";
 import {
   buildStageSnapshots,
   orderNextGuidance,
@@ -1018,8 +1020,11 @@ function LinearOrderWorkspace({
   const steps = data.workflowSteps.map((step) => ({ ...step, rows: stepRows.get(step.step_key) || [] }));
   const selectedStep = steps.find((step) => step.step_key === data.selectedStepKey) || steps[0] || null;
   const selectedRows = selectedStep ? uniqueWorkflowModules(selectedStep.rows) : [];
-  const currentIndex = Math.max(0, steps.findIndex((step) => step.step_key === currentStepKey));
-  const selectedIndex = Math.max(0, steps.findIndex((step) => step.step_key === selectedStep?.step_key));
+  const displaySteps = displayWorkflowSteps(steps, currentStepKey);
+  const currentIndex = Math.max(0, displaySteps.findIndex((step) => step.member_step_keys.includes(currentStepKey)));
+  const selectedIndex = Math.max(0, displaySteps.findIndex((step) => step.member_step_keys.includes(selectedStep?.step_key || "")));
+  const currentDisplayStep = displaySteps[currentIndex];
+  const selectedDisplayStep = displaySteps[selectedIndex];
   const orderCompleted = order.status === "completed";
   const viewingCurrent = orderCompleted || selectedStep?.step_key === currentStepKey;
   const currentCostsStage = frozenWorkflowModuleStage(
@@ -1121,12 +1126,14 @@ function LinearOrderWorkspace({
       </header>
 
       <nav className="workflow" aria-label="订单工作流">
-        <div className="workflow-meta"><b>当前节点：{data.businessWorkflow?.current_step_name || order.current_step_name}</b><span className="progress-num">{progress}%</span></div>
+        <div className="workflow-meta"><b>当前节点：{currentDisplayStep?.name || data.businessWorkflow?.current_step_name || order.current_step_name}</b><span className="progress-num">{progress}%</span></div>
         <div className="steps">
-          {steps.map((step, index) => {
-            const state = step.rows[0]?.step_status || (index < currentIndex ? "completed" : index === currentIndex ? "active" : "pending");
-            const accessible = canReadFullLifecycle || orderCompleted || state === "completed" || step.step_key === currentStepKey;
-            const className = `step ${state === "completed" ? "done" : step.step_key === currentStepKey ? "current" : ""}${step.step_key === selectedStep?.step_key ? " selected" : ""}`;
+          {displaySteps.map((step, index) => {
+            const state = orderCompleted ? "completed" : index < currentIndex ? "completed" : index === currentIndex ? "active" : "pending";
+            const isCurrent = step.member_step_keys.includes(currentStepKey);
+            const isSelected = step.member_step_keys.includes(selectedStep?.step_key || "");
+            const accessible = canReadFullLifecycle || orderCompleted || state === "completed" || isCurrent;
+            const className = `step ${state === "completed" ? "done" : isCurrent ? "current" : ""}${isSelected ? " selected" : ""}`;
             const content = <><i>{state === "completed" ? "✓" : index + 1}</i><span>{step.name}</span></>;
             return accessible
               ? <Link className={className} key={step.step_key} to={appendOrderQueueContext(`?stage=${encodeURIComponent(step.step_key)}`, queueContext)}>{content}</Link>
@@ -1140,7 +1147,7 @@ function LinearOrderWorkspace({
       <div className="workspace">
         <section className={`node-panel panel${showOuterActionBar ? "" : " without-actionbar"}`}>
           <header className="node-header">
-            <div className="node-title"><span className="node-number">{selectedIndex + 1}</span><div><h2>{selectedStep?.name || "订单资料"}</h2><p>{orderCompleted ? "订单已归档；页面内容仅供查看。" : viewingCurrent && !readOnly ? "本页只显示当前节点需要查看和处理的数据。" : viewingCurrent ? "当前节点不由本账号办理；订单信息仅供查看。" : viewingPast ? "正在查看已完成节点；历史数据只读。" : "正在查看后续节点；当前仅可查看，不能提前办理。"}</p></div></div>
+            <div className="node-title"><span className="node-number">{selectedIndex + 1}</span><div><h2>{selectedDisplayStep?.name || selectedStep?.name || "订单资料"}</h2><p>{selectedDisplayStep?.member_step_keys.length === 2 ? `当前环节：${selectedStep?.name || "审核分配"}。` : ""}{orderCompleted ? "订单已归档；页面内容仅供查看。" : viewingCurrent && !readOnly ? "本页只显示当前节点需要查看和处理的数据。" : viewingCurrent ? "当前节点不由本账号办理；订单信息仅供查看。" : viewingPast ? "正在查看已完成节点；历史数据只读。" : "正在查看后续节点；当前仅可查看，不能提前办理。"}</p></div></div>
             <div className="node-header-tools">
               <div className="owner-chips"><span className="active">{responsiblePosition}</span><span>{responsibleAssignee}</span><span>{readOnly ? "只读" : parallelCostsActive ? "并行办理" : `${pendingTasks.length} 项待办`}</span></div>
               <div className="node-reference-actions" aria-label="订单辅助资料">
@@ -1806,7 +1813,9 @@ function OrderBusinessForm({
     orderResponsiblePosition(guidance.moduleCode, order.status).name;
   const currentStepDisplayName = orderCompleted
     ? "订单已完成"
-    : data.businessWorkflow?.current_step_name || order.current_step_name;
+    : displayWorkflowSteps(configuredSteps, currentStepKey)
+        .find((step) => step.member_step_keys.includes(currentStepKey || ""))?.name ||
+      data.businessWorkflow?.current_step_name || order.current_step_name;
   const currentAction = orderCompleted ? "查看订单资料与历史记录" : guidance.action;
   const currentPositionDisplay = orderCompleted ? "已归档" : currentPositionName;
   const currentAssigneeDisplay = orderCompleted
@@ -2417,9 +2426,10 @@ function OrderModulesByStage({
 }) {
   const enabledModules = modules.filter((module) => module.enabled === 1);
   const workflowModules = composeOrderWorkflow(modules);
+  const visibleStages = orderBusinessDisplayStages;
   return (
     <div className="order-stage-list" id="order-module-stages">
-      {orderBusinessStages.map((stage) => {
+      {visibleStages.map((stage) => {
         const stageModules = stage.modules
           .map((moduleCode) =>
             enabledModules.find(
@@ -2959,9 +2969,10 @@ function OrderVerticalWorkflow({
   workflowFormRows?: WorkflowFormRow[];
 }) {
   if (workflow && workflowSteps.length) {
+    const visibleSteps = displayWorkflowSteps(workflowSteps, workflow.current_step_key);
     const currentIndex = Math.max(
       0,
-      workflowSteps.findIndex((step) => step.step_key === workflow.current_step_key),
+      visibleSteps.findIndex((step) => step.member_step_keys.includes(workflow.current_step_key)),
     );
     const done = order.status === "completed" || workflow.status === "completed";
     return (
@@ -2971,7 +2982,7 @@ function OrderVerticalWorkflow({
           <strong>{workflow.workflow_name}</strong>
         </header>
         <ol>
-          {workflowSteps.map((step, index) => {
+          {visibleSteps.map((step, index) => {
             const status = done
               ? "completed"
               : index < currentIndex
@@ -2980,7 +2991,11 @@ function OrderVerticalWorkflow({
                   ? "active"
                   : "pending";
             const stepModules = uniqueWorkflowModules(
-              workflowFormRows.filter((row) => row.step_key === step.step_key),
+              workflowFormRows.filter((row) =>
+                (step.member_step_keys.includes(workflow.current_step_key)
+                  ? [workflow.current_step_key]
+                  : [step.step_key]).includes(row.step_key),
+              ),
             );
             const target =
               stepModules.find((row) => row.module_status !== "completed") ??
@@ -3611,22 +3626,23 @@ function TemplateOrderProgress({
   workflow: BusinessWorkflow;
   workflowSteps: BusinessWorkflowStep[];
 }) {
+  const visibleSteps = displayWorkflowSteps(workflowSteps, workflow.current_step_key);
   const currentIndex = Math.max(
     0,
-    workflowSteps.findIndex((step) => step.step_key === workflow.current_step_key),
+    visibleSteps.findIndex((step) => step.member_step_keys.includes(workflow.current_step_key)),
   );
   const [previewedStepKey, setPreviewedStepKey] = useState<string | null>(null);
   const percent =
     order.status === "completed" || workflow.status === "completed"
       ? 100
-      : workflowSteps.length > 1
-        ? Math.round((currentIndex / (workflowSteps.length - 1)) * 100)
+      : visibleSteps.length > 1
+        ? Math.round((currentIndex / (visibleSteps.length - 1)) * 100)
         : 0;
   const preview =
-    workflowSteps.find((step) => step.step_key === previewedStepKey) ??
-    workflowSteps[currentIndex] ??
-    workflowSteps[0];
-  const nextStep = workflowSteps[currentIndex + 1] ?? null;
+    visibleSteps.find((step) => step.member_step_keys.includes(previewedStepKey || "")) ??
+    visibleSteps[currentIndex] ??
+    visibleSteps[0];
+  const nextStep = visibleSteps[currentIndex + 1] ?? null;
   return (
     <section className="panel order-overall-progress">
       <div className="panel-header">
@@ -3640,7 +3656,7 @@ function TemplateOrderProgress({
         <i style={{ width: `${percent}%` }} />
       </div>
       <div className="order-progress-steps">
-        {workflowSteps.map((step, index) => {
+        {visibleSteps.map((step, index) => {
           const status =
             order.status === "completed" || workflow.status === "completed"
               ? "completed"
@@ -3654,7 +3670,7 @@ function TemplateOrderProgress({
               type="button"
               key={step.step_key}
               aria-label={`查看${step.name}节点信息`}
-              aria-pressed={preview.step_key === step.step_key}
+              aria-pressed={preview.member_step_keys.includes(step.step_key)}
               className={status}
               onMouseEnter={() => setPreviewedStepKey(step.step_key)}
               onFocus={() => setPreviewedStepKey(step.step_key)}

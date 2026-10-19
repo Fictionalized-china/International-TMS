@@ -37,18 +37,21 @@ describe("order next guidance", () => {
       module({ module_code: "overseas_warehouse", enabled: 0, status: "not_applicable" }),
       module({ module_code: "costs", module_name: "费用结算" }),
     ]);
-    expect(snapshots[7].status).toBe("skipped");
-    expect(snapshots[8].status).toBe("active");
+    expect(snapshots.find((snapshot) => snapshot.stage.code === "overseas_pickup")?.status).toBe("skipped");
+    expect(snapshots.find((snapshot) => snapshot.stage.code === "reconciliation")?.status).toBe("active");
   });
 
-  it("keeps approval and assignment as separate required stages", () => {
+  it("shows approval and assignment as one stage while preserving their ordered checkpoints", () => {
     const submitted = buildStageSnapshots("submitted", []);
     const confirmed = buildStageSnapshots("confirmed", [
       module({ module_code: "assignment", module_name: "任务分配" }),
     ]);
-    expect(submitted[1].status).toBe("active");
-    expect(confirmed[1].status).toBe("completed");
-    expect(confirmed[2].status).toBe("active");
+    const submittedReviewAssignment = submitted.find((snapshot) => snapshot.stage.code === "task_assignment");
+    const confirmedReviewAssignment = confirmed.find((snapshot) => snapshot.stage.code === "task_assignment");
+    expect(submittedReviewAssignment?.stage.shortTitle).toBe("审核分配");
+    expect(submittedReviewAssignment?.status).toBe("active");
+    expect(confirmedReviewAssignment?.status).toBe("active");
+    expect(confirmed.find((snapshot) => snapshot.stage.code === "consignment_approval")).toBeUndefined();
   });
 
   it("treats overseas warehouse pickup as warehouse-owned instead of unassigned", () => {

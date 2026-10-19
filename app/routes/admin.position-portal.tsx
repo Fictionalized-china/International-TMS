@@ -303,7 +303,9 @@ export async function loader({ request }: Route.LoaderArgs) {
     if (stateFilter === "reviewed" && ["draft", "submitted", "cancelled"].includes(order.order_status)) return false;
     if (workFilter === "actionable" && !order.can_operate_current_node) return false;
     if (workFilter === "readonly" && order.can_operate_current_node) return false;
-    if (stageFilter && order.current_stage_code !== stageFilter) return false;
+    if (stageFilter === "review_assignment") {
+      if (!(["consignment_approval", "task_assignment"] as string[]).includes(order.current_stage_code)) return false;
+    } else if (stageFilter && order.current_stage_code !== stageFilter) return false;
     if (businessTypeFilter && order.business_type !== businessTypeFilter) return false;
     if (positionFilter && order.responsible_position_code !== positionFilter) return false;
     if (assigneeFilter && order.assignee_user_id !== assigneeFilter) return false;
@@ -397,7 +399,7 @@ export default function PositionPortal({ loaderData }: Route.ComponentProps) {
           <summary><span>更多筛选条件</span><small>{advancedFilterCount ? `已启用 ${advancedFilterCount} 项` : "路线、阶段、类型、岗位和负责人"}</small></summary>
           <div className="position-advanced-filter-grid">
             <OrderRouteFilterFields filters={filters}/>
-            <label><span>业务阶段</span><select name="stage" defaultValue={filters.stage}><option value="">全部阶段</option><option value="order_creation">订单创建</option><option value="consignment_approval">委托审核</option><option value="task_assignment">任务分配</option><option value="domestic_execution">国内运输</option><option value="warehouse_receiving">仓库入库</option><option value="port_loading">出口准备</option><option value="outbound_transport">出境运输</option><option value="overseas_pickup">境外仓自提</option><option value="reconciliation">对账结算</option><option value="completion_review">完成复盘</option></select></label>
+            <label><span>业务阶段</span><select name="stage" defaultValue={filters.stage}><option value="">全部阶段</option><option value="order_creation">订单创建</option><option value="review_assignment">审核分配</option><option value="domestic_execution">国内运输</option><option value="warehouse_receiving">仓库入库</option><option value="port_loading">出口准备</option><option value="outbound_transport">出境运输</option><option value="overseas_pickup">境外仓自提</option><option value="reconciliation">对账结算</option><option value="completion_review">完成复盘</option></select></label>
             <label><span>订单类型</span><select name="businessType" defaultValue={filters.businessType}><option value="">全部类型</option><option value="ftl">整车</option><option value="ltl">拼车</option></select></label>
             <label><span>负责岗位</span><select name="position" defaultValue={filters.position}><option value="">全部负责岗位</option>{loaderData.positions.map((item)=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
             <label><span>具体负责人</span><select name="assignee" defaultValue={filters.assignee}><option value="">全部负责人</option>{loaderData.assignees.map((item)=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>

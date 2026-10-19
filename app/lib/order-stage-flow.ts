@@ -117,6 +117,18 @@ export const orderBusinessStages: readonly OrderBusinessStage[] = [
   },
 ] as const;
 
+/** Operator-facing grouping; the persisted approval and assignment checkpoints stay separate. */
+export const orderBusinessDisplayStages: readonly OrderBusinessStage[] = orderBusinessStages
+  .filter((stage) => stage.code !== "consignment_approval")
+  .map((stage, index) => stage.code === "task_assignment"
+    ? {
+        ...stage,
+        title: "2. 审核分配",
+        shortTitle: "审核分配",
+        description: "操作主管在同一业务阶段先审核委托资料，再分配模块负责人；系统仍按顺序分别校验。",
+      }
+    : { ...stage, title: `${index + 1}. ${stage.shortTitle}` });
+
 const statusRank: Record<string, number> = {
   draft: 0,
   submitted: 1,

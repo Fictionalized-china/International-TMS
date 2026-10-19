@@ -1,4 +1,5 @@
 import {
+  orderBusinessDisplayStages,
   orderBusinessStages,
   type OrderBusinessStage,
 } from "./order-stage-flow";
@@ -31,19 +32,11 @@ export function buildStageSnapshots(orderStatus: string, modules: GuidanceModule
       (module.is_required === 1 ||
         !["not_started", "not_applicable"].includes(module.status)),
   );
-  const snapshots: StageSnapshot[] = orderBusinessStages.map((stage) => {
+  const snapshots: StageSnapshot[] = orderBusinessDisplayStages.map((stage) => {
     const stageModules = stage.modules
       .map((code) => active.find((module) => module.module_code === code))
       .filter((module): module is GuidanceModule => Boolean(module));
     if (!stageModules.length) {
-      if (stage.code === "consignment_approval") {
-        if (["confirmed", "in_execution", "completed"].includes(orderStatus)) {
-          return { stage, activeModules: [], status: "completed" as const, progress: 100 };
-        }
-        if (orderStatus === "submitted") {
-          return { stage, activeModules: [], status: "pending" as const, progress: 0 };
-        }
-      }
       return { stage, activeModules: [], status: "skipped" as const, progress: 0 };
     }
     const stageComplete = stageModules.every((module) =>
@@ -63,8 +56,9 @@ export function buildStageSnapshots(orderStatus: string, modules: GuidanceModule
     };
   });
   let activeIndex = snapshots.findIndex((snapshot) => snapshot.status === "pending");
-  if (orderStatus === "submitted") activeIndex = 1;
-  if (orderStatus === "confirmed") activeIndex = 2;
+  if (["submitted", "confirmed"].includes(orderStatus)) {
+    activeIndex = snapshots.findIndex((snapshot) => snapshot.stage.code === "task_assignment");
+  }
   if (orderStatus === "completed") activeIndex = snapshots.length - 1;
   if (activeIndex >= 0 && snapshots[activeIndex].status !== "completed") {
     snapshots[activeIndex] = { ...snapshots[activeIndex], status: "active" };
@@ -99,7 +93,7 @@ export function orderNextGuidance(input: {
     };
   if (orderStatus === "completed")
     return {
-      stage: orderBusinessStages[9],
+      stage: orderBusinessDisplayStages[orderBusinessDisplayStages.length - 1],
       action: "查看订单复盘结果",
       owner: "订单负责人",
       blocker: null,
@@ -123,7 +117,7 @@ export function orderNextGuidance(input: {
   }
   if (orderStatus === "submitted")
     return {
-      stage: orderBusinessStages[1],
+      stage: orderBusinessDisplayStages[1],
       action: "核对资料并审批订单",
       owner: "操作主管",
       blocker: null,
@@ -133,9 +127,9 @@ export function orderNextGuidance(input: {
   if (orderStatus === "confirmed") {
     const assignment = module("assignment");
     if (!assignment || assignment.status !== "completed")
-      return moduleGuidance(orderId, orderBusinessStages[2], assignment, "分配订单和模块负责人", "assignment");
+      return moduleGuidance(orderId, orderBusinessDisplayStages[1], assignment, "分配订单和模块负责人", "assignment");
     return {
-      stage: orderBusinessStages[2],
+      stage: orderBusinessDisplayStages[1],
       action: "核对分配并确认派单",
       owner: "操作主管",
       blocker: null,
@@ -155,7 +149,7 @@ export function orderNextGuidance(input: {
       pending.module_code,
     );
   return {
-    stage: orderBusinessStages[9],
+    stage: orderBusinessDisplayStages[orderBusinessDisplayStages.length - 1],
     action: "进入复盘页确认订单完成",
     owner: "订单负责人",
     blocker: null,

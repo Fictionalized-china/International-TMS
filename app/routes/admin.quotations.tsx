@@ -1028,12 +1028,10 @@ export default function QuotationsPage({ loaderData, actionData }: Route.Compone
     if (!exitIntake || directOrderOpen) return;
     // Let the closed modal unregister its dirty-form guard before navigating.
     const timer = window.setTimeout(() => {
-      const orderId = actionData?.intent === "create" && actionData.entryMode === "direct" &&
-        "success" in actionData && "orderId" in actionData ? actionData.orderId : undefined;
-      navigate(adminWorkspaceHref(orderId ? `/admin/orders/${encodeURIComponent(orderId)}` : "/admin/orders", location.search), { replace: true });
+      navigate(adminWorkspaceHref("/admin/orders", location.search), { replace: true });
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [exitIntake, directOrderOpen, actionData, navigate, location.search]);
+  }, [exitIntake, directOrderOpen, navigate, location.search]);
   const createFormError=createQuoteOpen&&actionData?.intent==="create"&&actionData.entryMode!=="direct"&&actionError&&
     actionData!==dismissedCreateResult.current?actionError:undefined;
   const directFormError=directOrderOpen&&actionData?.intent==="create"&&actionData.entryMode==="direct"&&actionError&&
