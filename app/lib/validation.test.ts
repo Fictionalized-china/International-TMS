@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   requirePositiveInteger,
   requirePositiveNumber,
+  requireNonNegativeNumber,
   validateCode,
   validateEmail,
   validatePassword,
@@ -22,6 +23,12 @@ describe("identity validation", () => {
 });
 
 describe("business number validation", () => {
+  it.each(["0", "0.0000001"])("accepts entered non-negative volume %s", (value) => {
+    expect(requireNonNegativeNumber(value, "体积")).toBe(Number(value));
+  });
+  it.each(["", "  ", "-1", "NaN", "Infinity"])("rejects invalid non-negative volume %s", (value) => {
+    expect(() => requireNonNegativeNumber(value, "体积")).toThrow();
+  });
   it.each(["0", "O", "-1", "", "Infinity", "NaN"])(
     "rejects non-positive or non-numeric amount %s",
     (value) => expect(() => requirePositiveNumber(value, "金额")).toThrow("金额必须大于 0"),

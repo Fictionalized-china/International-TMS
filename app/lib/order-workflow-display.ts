@@ -11,6 +11,25 @@ export type DisplayWorkflowStep<T extends DisplayableWorkflowStep> = T & {
 
 const REVIEW_ASSIGNMENT_KEYS = ["consignment_approval", "task_assignment"] as const;
 
+export function hasReviewAssignmentWorkspace(steps: readonly DisplayableWorkflowStep[]) {
+  const approvalIndex = steps.findIndex((step) => step.step_key === REVIEW_ASSIGNMENT_KEYS[0]);
+  return approvalIndex >= 0 && steps[approvalIndex + 1]?.step_key === REVIEW_ASSIGNMENT_KEYS[1];
+}
+
+/** Keep both checkpoint links on the currently actionable part of the same page. */
+export function resolveReviewAssignmentStep(
+  steps: readonly DisplayableWorkflowStep[],
+  selectedStepKey: string,
+  currentStepKey: string | null | undefined,
+) {
+  if (hasReviewAssignmentWorkspace(steps) &&
+    REVIEW_ASSIGNMENT_KEYS.some((key) => key === selectedStepKey) &&
+    REVIEW_ASSIGNMENT_KEYS.some((key) => key === currentStepKey)) {
+    return currentStepKey!;
+  }
+  return selectedStepKey;
+}
+
 /**
  * These two persisted checkpoints remain separate for approval and assignment
  * guards, but appear as one operator-facing stage. The active persisted key is

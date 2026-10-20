@@ -30,6 +30,21 @@ const existing: CargoEditorRecord = {
 };
 
 describe("order cargo editor workflow policy", () => {
+  it.each(["0", "0.0000001"])("accepts required cargo volume %s when dimensions are unplugged", (volume) => {
+    const result = resolveCargoEditorSubmission({
+      fields: [{ fieldKey: "volume_per_package_cbm", isActive: true, isRequired: true }],
+      submitted: { volume },
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.volume).toBe(Number(volume));
+  });
+  it("does not confuse a missing required cargo volume with entered zero", () => {
+    const result = resolveCargoEditorSubmission({
+      fields: [{ fieldKey: "volume_per_package_cbm", isActive: true, isRequired: true }],
+      submitted: {},
+    });
+    expect(result.ok).toBe(false);
+  });
   it("ignores forged values for hidden fields while preserving an existing row", () => {
     const result = resolveCargoEditorSubmission({
       fields: [

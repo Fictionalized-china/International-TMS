@@ -13,6 +13,14 @@ import {
 } from "./quotation-workflow-fields";
 
 describe("quotation native workflow fields",() => {
+  it.each([0, "0", 0.0000001])("treats entered volume %s as present, not a positive-only gate", (volume_cbm) => {
+    expect(quotationNativeFieldPresent("quotation_volume_cbm", { volume_cbm })).toBe(true);
+  });
+
+  it.each([null, undefined, "", "  ", -1, "invalid", Infinity])("rejects missing or invalid volume %s", (volume_cbm) => {
+    expect(quotationNativeFieldPresent("quotation_volume_cbm", { volume_cbm })).toBe(false);
+  });
+
   it("derives every quote workflow surface from one unique 23-field registry",() => {
     const keys = quotationNativeFieldCatalog.map((field) => field.fieldKey);
     expect(keys).toHaveLength(23);

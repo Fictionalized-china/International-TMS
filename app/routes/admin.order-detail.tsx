@@ -4,6 +4,7 @@ import { flushSync } from "react-dom";
 import { Form, Link, redirect, useNavigate, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.order-detail";
 import { ActionToast } from "../components/ActionToast";
+import { ReviewAssignmentWorkbench } from "../components/ReviewAssignmentWorkbench";
 import { requireSessionUser } from "../lib/auth.server";
 import {
   canEditCurrentOrderWorkspace,
@@ -50,7 +51,7 @@ import {
   orderModuleSequence,
   orderStageAccess,
 } from "../lib/order-stage-flow";
-import { displayWorkflowSteps } from "../lib/order-workflow-display";
+import { displayWorkflowSteps, hasReviewAssignmentWorkspace, resolveReviewAssignmentStep } from "../lib/order-workflow-display";
 import {
   buildStageSnapshots,
   orderNextGuidance,
@@ -604,9 +605,12 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
       row.step_status === "active" || row.step_status === "completed"
     )
   );
-  const selectedStepKey = requestedStepAllowed
+  const initialSelectedStepKey = requestedStepAllowed
     ? requestedStepKey!
     : businessWorkflow?.current_step_key || workflowSteps.results[0]?.step_key || "";
+  const selectedStepKey = resolveReviewAssignmentStep(
+    workflowSteps.results, initialSelectedStepKey, businessWorkflow?.current_step_key,
+  );
   const currentWorkflowModuleCodes = enabledWorkflowModuleCodes(
     workflowFormRows.results,
     selectedStepKey,
@@ -944,7 +948,8 @@ export async function action({ request, params, context }: Route.ActionArgs) {
       context,
     } as unknown as Parameters<typeof orderModuleAction>[0]);
     if (result instanceof Response && result.status >= 300 && result.status < 400) {
-      return redirect(`/admin/orders/${params.orderId}`);
+      const navigation = readOrderQueueNavigation(new URL(request.url).searchParams, params.orderId);
+      return redirect(appendOrderQueueContext(`/admin/orders/${params.orderId}`, navigation));
     }
     return result;
   }
@@ -1072,7 +1077,7 @@ function LinearOrderWorkspace({
   const pendingTasks = selectedStep
     ? uniqueWorkflowTasks(selectedStep.rows).filter((task) => !orderCompleted && task.task_status !== "completed")
     : [];
-  const progress = orderCompleted ? 100 : steps.length ? Math.round((currentIndex / steps.length) * 100) : 0;
+  const progress = orderCompleted ? 100 : displaySteps.length ? Math.round((currentIndex / displaySteps.length) * 100) : 0;
   const showOuterActionBar = !data.embeddedModuleData && !readOnly;
   const currentWorkflowTask = data.currentWorkflowTasks.find(
     (task) => !orderCompleted && task.status !== "completed" && task.module_code === guidance.moduleCode,
@@ -1106,7 +1111,7 @@ function LinearOrderWorkspace({
 
   return (
     <div className="page prototype-page linear-order-page">
-      <div className="breadcrumb">运输订单 / {order.order_number} / {selectedStep?.name || "订单资料"}</div>
+      <div className="breadcrumb">运输订单 / {order.order_number} / {selectedDisplayStep?.name || "订单资料"}</div>
       <header className="order-head">
         <div className="order-title"><span className="eyebrow">TRANSPORT ORDER / {order.business_type === "ltl" ? "拼车订单" : "整车订单"}</span><h1>{order.order_number}</h1><p>{order.customer_name} · {order.origin_state || ""}{order.origin_city} → {order.destination_state || ""}{order.destination_city}</p></div>
         <div className="current-summary">
@@ -1519,6 +1524,31 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, readOn
   useEffect(() => setSelectedCostsSection(data.selectedCostsSection), [data.selectedCostsSection, data.selectedStepKey]);
   if (!selectedStep || !rows.length) return <section className="section" id="node-fields"><div className="section-title"><b>本节点业务数据</b><span>当前节点没有配置需要人工填写的字段</span></div><div className="grid"><ReadCell label="节点状态" value="无需人工录入，节点仍按工作流保留" className="span4"/></div></section>;
   const selectedRow = rows.find((row) => row.module_code === selectedModuleCode) || rows[0];
+  const combinedReviewAssignment = hasReviewAssignmentWorkspace(data.workflowSteps) &&
+    ((selectedStep.step_key === "consignment_approval" && selectedModuleCode === "consignment") ||
+      (selectedStep.step_key === "task_assignment" && selectedModuleCode === "assignment" &&
+        ["confirmed", "in_execution", "completed"].includes(data.order.status)));
+  const latestApproval = data.history.find((item) => item.from_status === "submitted" && item.to_status === "confirmed");
+  const embeddedModuleContent = data.embeddedModuleData ? <EmbeddedOrderModule
+    data={data.embeddedModuleData}
+    busy={busy}
+    actionUrl={orderModuleTabHref({
+      orderId: data.order.id, stepKey: selectedStep.step_key, moduleCode: selectedModuleCode,
+      section: selectedModuleCode === "consignment" ? selectedConsignmentSection
+        : selectedModuleCode === "customs" ? selectedCustomsSection
+        : selectedModuleCode === "costs" ? selectedCostsSection : null,
+      navigation: queueTabNavigation,
+    })}
+    workflowStepKey={selectedStep.step_key}
+    consignmentSection={selectedConsignmentSection}
+    customsSection={selectedCustomsSection}
+    costsSection={selectedCostsSection}
+    hideConsignmentActionBar={selectedStep.step_key === "order_creation"}
+    approvalMode={selectedStep.step_key === "consignment_approval"}
+    combinedReviewAssignment={combinedReviewAssignment}
+    reviewCloseSignal={documentReviewSignal}
+    readOnly={readOnly}
+  /> : null;
   const selectedFields = data.currentWorkflowFields.filter((field) => field.stepKey === selectedStep.step_key && field.moduleCode === selectedRow.module_code && field.isActive);
   const isOrderCreation = selectedStep.step_key === "order_creation";
   const selectedSection = selectedModuleCode === "cargo" ? "cargo" : selectedConsignmentSection;
@@ -1549,13 +1579,6 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, readOn
       : selectedModuleCode === "costs"
         ? selectedCostsSection
       : null;
-  const actionUrl = orderModuleTabHref({
-    orderId: data.order.id,
-    stepKey: selectedStep.step_key,
-    moduleCode: selectedModuleCode,
-    section: selectedModuleSection,
-    navigation: queueTabNavigation,
-  });
   const canAdministerWorkflowInUi = Boolean(
     data.embeddedModuleData &&
     (["BOSS", "DEVELOPER"].includes(
@@ -1735,7 +1758,7 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, readOn
           dialogClassName="consignment-submit-dialog"
         >
           <div className="consignment-submit-dialog-note">
-            请选择具体审批负责人。提交成功后，订单将自动进入“委托审核”节点。
+            请选择具体审批负责人。提交成功后，订单将自动进入审核办理。
           </div>
           {actionError && <div className="alert error" role="alert"><b>提交未完成：</b>{actionError}</div>}
           <ConsignmentReviewActionBar
@@ -1754,7 +1777,10 @@ function SelectedStepSections({ data, rows, selectedStep, viewingCurrent, readOn
     </div>}
     <div className="linear-module-tab-viewport">
       <div className="linear-module-tab-panel" key={activeTabKey}>
-    {data.embeddedModuleRedirect ? <section className="section"><div className="section-title"><b>{selectedRow.module_name || "关联业务单"}</b><span>该节点按配载单统一推进</span></div><div className="linear-external-work"><p>拼车订单在仓库生成 PZ 配载单后，由配载单统一记录出境运输并同步全部子订单。</p><Link className={`btn${readOnly ? "" : " primary"}`} to={data.embeddedModuleRedirect}>{readOnly ? "查看关联配载单" : "打开配载单跟踪"}</Link></div></section> : data.embeddedModuleData ? <EmbeddedOrderModule data={data.embeddedModuleData} busy={busy} actionUrl={actionUrl} workflowStepKey={selectedStep.step_key} consignmentSection={selectedConsignmentSection} customsSection={selectedCustomsSection} costsSection={selectedCostsSection} hideConsignmentActionBar={isOrderCreation} approvalMode={selectedStep.step_key === "consignment_approval"} reviewCloseSignal={documentReviewSignal} readOnly={readOnly}/> : <section className="section"><div className="section-title"><b>{selectedRow.module_name || selectedRow.module_code || "业务数据"}</b><span>{viewingCurrent ? "当前节点" : "历史节点"}</span></div><div className="grid">{selectedFields.map((field) => {
+    {data.embeddedModuleRedirect ? <section className="section"><div className="section-title"><b>{selectedRow.module_name || "关联业务单"}</b><span>该节点按配载单统一推进</span></div><div className="linear-external-work"><p>拼车订单在仓库生成 PZ 配载单后，由配载单统一记录出境运输并同步全部子订单。</p><Link className={`btn${readOnly ? "" : " primary"}`} to={data.embeddedModuleRedirect}>{readOnly ? "查看关联配载单" : "打开配载单跟踪"}</Link></div></section> : data.embeddedModuleData ? combinedReviewAssignment ? <ReviewAssignmentWorkbench
+      phase={selectedStep.step_key === "task_assignment" ? "assignment" : "approval"}
+      approvalRecord={latestApproval ? { actor: latestApproval.actor_name || "审批人", time: new Date(latestApproval.occurred_at).toLocaleString("zh-CN"), notes: latestApproval.notes } : undefined}
+    >{embeddedModuleContent}</ReviewAssignmentWorkbench> : embeddedModuleContent : <section className="section"><div className="section-title"><b>{selectedRow.module_name || selectedRow.module_code || "业务数据"}</b><span>{viewingCurrent ? "当前节点" : "历史节点"}</span></div><div className="grid">{selectedFields.map((field) => {
       const fieldState = field.present ? "filled" : field.isRequired ? "required-missing" : "optional-empty";
       return <div className={`read-cell workflow-cell ${field.present ? "complete" : field.isRequired ? "missing" : "optional"}`} key={field.id}><span>{field.label}{field.isRequired ? " *" : ""}</span><b>{field.displayValue || "—"}</b><em className={`field-state ${fieldState}`}>{field.present ? "已填" : field.isRequired ? "必填但未填" : "未填"}</em></div>;
     })}</div></section>}

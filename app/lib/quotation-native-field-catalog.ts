@@ -1,4 +1,5 @@
 import type { OrderModuleCode } from "./order-modules";
+import { nonNegativeNumberPresent } from "./validation";
 
 export type QuotationNativeFieldMode = "required" | "optional" | "hidden";
 
@@ -49,7 +50,7 @@ export const quotationNativeFieldCatalog = [
   nativeField("quotation_length_cm","预计长度 CM","number","cargo","required","单件或统一包装预计长度。"),
   nativeField("quotation_width_cm","预计宽度 CM","number","cargo","required","单件或统一包装预计宽度。"),
   nativeField("quotation_height_cm","预计高度 CM","number","cargo","required","单件或统一包装预计高度。"),
-  nativeField("quotation_volume_cbm","预计体积 CBM","number","cargo","required","根据件数和长宽高自动计算；也参与报价接受前门禁。"),
+  nativeField("quotation_volume_cbm","预计体积 CBM","number","cargo","required","根据包装数和长宽高自动计算；允许为 0 或极小正数，必填仅校验是否填写有效非负数。"),
   nativeField("quotation_charge_items","客户应收费用","amount","costs","required","至少一条数量和单价均有效的客户应收费用。"),
   nativeField("quotation_valid_until","报价有效期","date","costs","optional","客户接受报价的有效截止日期。"),
 ] as const satisfies readonly QuotationNativeFieldDefinition[];
@@ -90,7 +91,7 @@ export function quotationNativeFieldPresent(
     case "quotation_length_cm": return positive("estimated_length_cm");
     case "quotation_width_cm": return positive("estimated_width_cm");
     case "quotation_height_cm": return positive("estimated_height_cm");
-    case "quotation_volume_cbm": return positive("volume_cbm");
+    case "quotation_volume_cbm": return nonNegativeNumberPresent(quotation.volume_cbm);
     case "quotation_charge_items": return positive("quotation_charge_items");
     case "quotation_valid_until": return text("valid_until");
     default: return false;

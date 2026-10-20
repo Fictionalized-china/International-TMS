@@ -11,7 +11,8 @@ import {
   canReadFullOrderLifecycle,
 } from "../lib/order-access";
 import { requireOrderAccess } from "../lib/order-access.server";
-import { validatePhone, valueOf } from "../lib/validation";
+import { validatePhone, valueOf, nonNegativeNumberPresent } from "../lib/validation";
+import { formatQuoteVolumeInput } from "../lib/quote-cargo-projection";
 import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 import { writeAudit } from "../lib/audit.server";
 import { persistExpenseDirectionAction, retryOrderSettlementSync } from "../lib/expense-direction-submit.server";
@@ -4841,6 +4842,7 @@ export function EmbeddedOrderModule({
   costsSection = "files",
   hideConsignmentActionBar = false,
   approvalMode = false,
+  combinedReviewAssignment = false,
   reviewCloseSignal,
   readOnly = false,
 }: {
@@ -4853,6 +4855,7 @@ export function EmbeddedOrderModule({
   costsSection?: "files" | "expenses";
   hideConsignmentActionBar?: boolean;
   approvalMode?: boolean;
+  combinedReviewAssignment?: boolean;
   reviewCloseSignal?: unknown;
   readOnly?: boolean;
 }) {
@@ -4942,6 +4945,7 @@ export function EmbeddedOrderModule({
               canApproveConsignment={canApproveConsignment}
               busy={busy}
               reviewCloseSignal={reviewCloseSignal}
+              combinedReviewAssignment={combinedReviewAssignment}
             />
           </>
         ) : (definition.code === "customs" && customsSection === "files") ||
@@ -6100,7 +6104,7 @@ function cargoWorkflowDisplayItems(item: Cargo): WorkflowDisplayItem[] {
     { fieldKey: "length_cm", label: "长度 CM", value: `${item.length_cm} CM`, present: positive(item.length_cm) },
     { fieldKey: "width_cm", label: "宽度 CM", value: `${item.width_cm} CM`, present: positive(item.width_cm) },
     { fieldKey: "height_cm", label: "高度 CM", value: `${item.height_cm} CM`, present: positive(item.height_cm) },
-    { fieldKey: "volume_per_package_cbm", label: "单包装体积 CBM", value: `${item.volume_per_package_cbm.toFixed(4)} CBM`, present: positive(item.volume_per_package_cbm) },
+    { fieldKey: "volume_per_package_cbm", label: "单包装体积 CBM", value: `${formatQuoteVolumeInput(item.volume_per_package_cbm)} CBM`, present: nonNegativeNumberPresent(item.volume_per_package_cbm) },
     { fieldKey: "declared_value", label: "申报货值", value: item.declared_value.toLocaleString(), present: positive(item.declared_value) },
     { fieldKey: "currency", label: "货值币种", value: item.currency, present: text(item.currency) },
     { fieldKey: "origin_country_cargo", label: "货物原产国", value: item.origin_country, present: text(item.origin_country) },
@@ -6154,7 +6158,7 @@ function CargoWorkflowData({
         { fieldKey: "quotation_length_cm", label: "预计长度 CM", value: data.order.quotation_length_cm ? `${data.order.quotation_length_cm} CM` : "" },
         { fieldKey: "quotation_width_cm", label: "预计宽度 CM", value: data.order.quotation_width_cm ? `${data.order.quotation_width_cm} CM` : "" },
         { fieldKey: "quotation_height_cm", label: "预计高度 CM", value: data.order.quotation_height_cm ? `${data.order.quotation_height_cm} CM` : "" },
-        { fieldKey: "quotation_volume_cbm", label: "预计体积 CBM", value: data.order.quotation_volume_cbm ? `${data.order.quotation_volume_cbm} CBM` : "" },
+        { fieldKey: "quotation_volume_cbm", label: "预计体积 CBM", value: nonNegativeNumberPresent(data.order.quotation_volume_cbm) ? `${formatQuoteVolumeInput(data.order.quotation_volume_cbm)} CBM` : "" },
       ]}
     />}
     <WorkflowInformationGroup
@@ -6165,7 +6169,7 @@ function CargoWorkflowData({
         { fieldKey: "cargo_name_cn", label: "货物明细", value: data.cargo.length ? `${data.cargo.length} 条` : "" },
         { fieldKey: "package_count", label: "包装数", value: totalPackages ? `${totalPackages} 箱/托/件` : "" },
         { fieldKey: "gross_weight_per_package_kg", label: "总毛重", value: totalWeight ? `${totalWeight.toFixed(3)} KG` : "" },
-        { fieldKey: "volume_per_package_cbm", label: "总体积", value: totalVolume ? `${totalVolume.toFixed(4)} CBM` : "" },
+        { fieldKey: "volume_per_package_cbm", label: "总体积", value: data.cargo.length ? `${formatQuoteVolumeInput(totalVolume)} CBM` : "" },
       ]}
     />
     {showDetailFields ? <div className="table-wrap module-record-table cargo-workflow-table">
@@ -6277,7 +6281,7 @@ function CargoEditorForm({
     {numberField("length_cm", "length", "长度 CM", item?.length_cm ?? 0, "0.1")}
     {numberField("width_cm", "width", "宽度 CM", item?.width_cm ?? 0, "0.1")}
     {numberField("height_cm", "height", "高度 CM", item?.height_cm ?? 0, "0.1")}
-    {numberField("volume_per_package_cbm", "volume", "单包装体积 CBM（留 0 按尺寸自动计算）", item?.volume_per_package_cbm ?? 0, "0.0001")}
+    {numberField("volume_per_package_cbm", "volume", "单包装体积 CBM（允许 0，按已有尺寸补算）", item?.volume_per_package_cbm ?? 0, "any")}
     {numberField("declared_value", "declaredValue", "申报货值", item?.declared_value ?? 0, "0.01")}
     <ModuleField fields={fields} fieldKey="currency" label="货值币种">
       {(required) => <select name="currency" defaultValue={item?.currency || "USD"} required={required}>
@@ -8769,26 +8773,31 @@ function OrderApprovalReview({
   canApproveConsignment,
   busy,
   reviewCloseSignal,
+  combinedReviewAssignment = false,
 }: {
   data: Route.ComponentProps["loaderData"];
   manage: boolean;
   canApproveConsignment: boolean;
   busy: boolean;
   reviewCloseSignal: unknown;
+  combinedReviewAssignment?: boolean;
 }) {
   const { order, cargo } = data;
   const [approvalAction, setApprovalAction] = useState<"approve" | "reject">("approve");
+  const [decisionOpen, setDecisionOpen] = useState(false);
   const [approvalNotes, setApprovalNotes] = useState("资料完整，同意进入任务分配");
   if (!canApproveConsignment) {
     return <ConsignmentApprovalStatusTable data={data} />;
   }
   const operationSupervisors = data.members.filter((member) =>
-    member.position_code === "OPERATION_SUPERVISOR" &&
+    policyPositions(data.processPolicy, "order.approve_positions").includes(member.position_code ?? "") &&
     organizationAssigneeCanHandle(
       member,
       orderWorkflowTargetAssigneeRequirements("approve"),
     )
   );
+  const continueWithCurrentApprover = combinedReviewAssignment &&
+    operationSupervisors.some((member) => member.id === data.current.userId);
   const salesperson = data.members.find((member) => member.id === order.salesperson_user_id);
   const cargoTotals = cargo.reduce((total, item) => ({
     pieces: total.pieces + item.package_count * item.pieces_per_package,
@@ -8822,7 +8831,10 @@ function OrderApprovalReview({
       reviewCloseSignal={reviewCloseSignal}
     />
     <section className="approval-section approval-decision">
-      <header><strong>审批办理</strong><span>选择通过或打回；通过时指定下一步具体操作主管</span></header>
+      <header><strong>审批办理</strong><span>{combinedReviewAssignment ? "通过后在本页展开任务分配；驳回则退回原业务员" : "选择通过或打回；通过时指定下一步具体操作主管"}</span>
+        {combinedReviewAssignment && <button type="button" className="primary" aria-expanded={decisionOpen} aria-controls="consignment-approval-form" disabled={busy} onClick={() => setDecisionOpen((open) => !open)}>审核结果</button>}
+      </header>
+      {(!combinedReviewAssignment || decisionOpen) && <>
       {approvalAction === "approve" && !operationSupervisors.length && <div className="alert error" role="alert">没有同时具备订单查看、任务分配和配载审批权限的有效操作主管；请先调整组织人员或个人权限。</div>}
       <Form method="post" id="consignment-approval-form" className="approval-inline-form">
         <input type="hidden" name="intent" value="workflow_action" />
@@ -8832,7 +8844,11 @@ function OrderApprovalReview({
           setApprovalNotes(nextAction === "reject" ? "" : "资料完整，同意进入任务分配");
         }}><option value="approve">通过</option><option value="reject">打回</option></select></label>
         <label className="approval-notes-field"><span>{approvalAction === "reject" ? "打回原因" : "审批意见"}{approvalAction === "reject" && <b> *</b>}</span><input className="control editing" name="notes" value={approvalNotes} onChange={(event) => setApprovalNotes(event.currentTarget.value)} required={approvalAction === "reject"} minLength={approvalAction === "reject" ? 2 : undefined} placeholder={approvalAction === "reject" ? "说明需要业务员补充或修正的资料" : "填写审批意见"} /></label>
-        {approvalAction === "approve" ? <OrganizationAssigneePicker
+        {approvalAction === "approve" ? continueWithCurrentApprover ? <div className="approval-return-assignee">
+          <input type="hidden" name="assigneeUserId" value={data.current.userId} />
+          <span>任务分配负责人</span><strong>由当前审核人继续办理</strong>
+          <small>审核成功后自动展开下方任务分配</small>
+        </div> : <OrganizationAssigneePicker
             members={operationSupervisors}
             name="assigneeUserId"
             idPrefix="approval-operation-supervisor"
@@ -8844,8 +8860,9 @@ function OrderApprovalReview({
             <strong>{salesperson?.display_name || "原业务员"}</strong>
             <small>退回后恢复资料编辑，由原业务员补充并重新提交审批</small>
           </div>}
-        <button className="primary approval-submit-button" disabled={busy || !cargo.length || !canApproveConsignment || (approvalAction === "approve" ? !operationSupervisors.length : !order.salesperson_user_id || approvalNotes.trim().length < 2)}>{approvalAction === "approve" ? "审批通过并进入任务分配 →" : "打回业务员补充资料 →"}</button>
+        <button className="primary approval-submit-button" disabled={busy || !canApproveConsignment || (approvalAction === "approve" ? !cargo.length || !operationSupervisors.length : !order.salesperson_user_id || approvalNotes.trim().length < 2)}>{approvalAction === "approve" ? combinedReviewAssignment ? "审核通过，展开任务分配" : "审批通过并进入任务分配 →" : "驳回并退回业务员"}</button>
       </Form>
+      </>}
     </section>
   </div>;
 }

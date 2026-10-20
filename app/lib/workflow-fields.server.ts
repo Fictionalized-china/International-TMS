@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { nonNegativeNumberPresent } from "./validation";
 import { chunkD1Values, d1Placeholders } from "./d1-bindings";
 import type { OrderModuleCode } from "./order-modules";
 import { domesticTransportPayableWorkflowValues } from "./transport-workflow";
@@ -1216,7 +1217,9 @@ async function resolveFieldPresence(
         ).bind(organizationId, orderId).first<{ total: number }>();
         setPresence(result, rule.fieldKey, image?.total ?? 0, true);
       } else if (rows.results.length) {
-        const present = rows.results.every((row) => meaningful(row[column], rule.fieldType));
+        const present = rows.results.every((row) => rule.fieldKey === "volume_per_package_cbm"
+          ? nonNegativeNumberPresent(row[column])
+          : meaningful(row[column], rule.fieldType));
         result.set(rule.fieldKey, { present, displayValue: present ? `${rows.results.length} 条明细` : null });
       }
     }

@@ -21813,6 +21813,12 @@ html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animatio
 .linear-order-page .approval-status-badge.active { border-color: #f0c49b; color: #a45a18; background: #fff7ed; }
 .linear-order-page .approval-status-badge.returned { border-color: #efb6ad; color: #b64032; background: #fff2f0; }
 .linear-order-page .approval-status-section > footer { padding: 8px 12px; border-top: 1px solid var(--line2); color: #71869a; background: #fbfcfd; font-size: 9px; }
+.review-assignment-workbench { display: grid; gap: 12px; }
+.review-assignment-record, .review-assignment-waiting { margin: 0; padding: 12px; color: var(--ink); }
+.review-assignment-record > summary { cursor: pointer; color: #177b5d; font-weight: 650; }
+.review-assignment-record > p { margin: 10px 0 0; }
+.review-assignment-workbench .approval-decision > header { flex-wrap: wrap; gap: 8px; }
+.review-assignment-workbench .approval-decision > header > button { margin-left: auto; }
 .linear-order-page .approval-next-assignee {
   min-height: 51px;
   padding: 5px 6px;

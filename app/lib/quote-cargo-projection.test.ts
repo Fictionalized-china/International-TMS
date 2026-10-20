@@ -3,11 +3,32 @@ import {
   MAX_QUOTE_AUTO_PACKAGES,
   assertQuoteAutoPackageCount,
   calculateQuoteTotalVolumeCbm,
+  formatQuoteVolumeInput,
   quoteCargoProjection,
   resolveQuoteTotalVolumeCbm,
 } from "./quote-cargo-projection";
 
 describe("quotation volume calculation", () => {
+  it("formats small volumes without losing the submitted value", () => {
+    expect(formatQuoteVolumeInput(0.0000001)).toBe("0.0000001");
+    expect(formatQuoteVolumeInput(0)).toBe("0");
+    expect(formatQuoteVolumeInput(null)).toBe("");
+  });
+  it.each([
+    [1, 1, 1, 0.000001],
+    [1, 1, 0.1, 0.0000001],
+    [1, 1, 214, 0.000214],
+  ])("preserves small positive volume for %s × %s × %s CM", (lengthCm, widthCm, heightCm, volume) => {
+    expect(calculateQuoteTotalVolumeCbm({ pieces: 1, lengthCm, widthCm, heightCm })).toBe(volume);
+  });
+
+  it("accepts a zero submitted volume when dimensions are not authoritative", () => {
+    expect(resolveQuoteTotalVolumeCbm({
+      deriveFromDimensions: false, pieces: 1, lengthCm: 0, widthCm: 0, heightCm: 0,
+      submittedVolumeCbm: 0,
+    })).toBe(0);
+  });
+
   it("calculates the quoted total from identical per-package dimensions", () => {
     expect(calculateQuoteTotalVolumeCbm({
       pieces: 2,

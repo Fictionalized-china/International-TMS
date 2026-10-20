@@ -1,5 +1,4 @@
 export const MAX_QUOTE_AUTO_PACKAGES = 500;
-const QUOTE_VOLUME_PRECISION = 4;
 
 export type QuoteCargoProjection = {
   declaredQuantity: number;
@@ -36,10 +35,15 @@ export function calculateQuoteTotalVolumeCbm(input: {
     .map(Number);
   if (values.some((value) => !Number.isFinite(value) || value <= 0)) return null;
   const [pieces, lengthCm, widthCm, heightCm] = values;
-  return Number(
-    ((pieces * lengthCm * widthCm * heightCm) / 1_000_000)
-      .toFixed(QUOTE_VOLUME_PRECISION),
-  );
+  const volume = (pieces * lengthCm * widthCm * heightCm) / 1_000_000;
+  // Significant digits remove binary floating noise without rounding tiny cargo to zero.
+  return Number.isFinite(volume) ? Number(volume.toPrecision(15)) : null;
+}
+
+/** Display precision must never change the value submitted to the server. */
+export function formatQuoteVolumeInput(volume: number | null): string {
+  if (volume == null || !Number.isFinite(volume)) return "";
+  return volume.toLocaleString("en-US", { useGrouping: false, maximumSignificantDigits: 15 });
 }
 
 export function resolveQuoteTotalVolumeCbm(input: {

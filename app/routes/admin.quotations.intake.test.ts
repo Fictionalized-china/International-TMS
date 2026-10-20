@@ -51,6 +51,36 @@ function form(type = 'ltl', mode = 'direct') {
 const submit = (body: FormData) => action({request:new Request('http://localhost/admin/quotations?entryMode=direct', {method:'POST',body}),params:{},context:undefined} as never);
 
 describe('real intake action with quotation node unplugged', () => {
+  it.each(['ltl','ftl'])('%s: a rounded-zero submission still creates tiny cargo without a volume gate', async type => {
+    const body = form(type);
+    body.set('length','1'); body.set('width','1'); body.set('height','0.1'); body.set('volume','0');
+    const result = await submit(body);
+    expect(result, JSON.stringify(result)).toMatchObject({orderId:expect.any(String)});
+    if (!('orderId' in result)) throw new Error(JSON.stringify(result));
+    const order = fixture.database.prepare('SELECT volume_cbm FROM transport_orders WHERE id=?').get(result.orderId!) as { volume_cbm: number };
+    expect(order.volume_cbm).toBe(0.0000001);
+    const cargo = fixture.database.prepare('SELECT volume_per_package_cbm FROM order_cargo_items WHERE order_id=?').get(result.orderId!) as { volume_per_package_cbm: number };
+    expect(cargo.volume_per_package_cbm).toBe(0.0000001);
+  });
+  it('accepts explicit zero volume with dimension calculation unplugged', async () => {
+    fixture.database.exec("UPDATE workflow_steps SET is_active=1 WHERE id='org:tms-default:quote'");
+    for (const field of ['quotation_length_cm','quotation_width_cm','quotation_height_cm']) {
+      fixture.database.prepare(`INSERT INTO workflow_step_fields
+        (id,workflow_id,step_id,module_code,field_key,label,field_type,is_active,is_required,created_at,updated_at)
+        VALUES(?,'org:tms-default','org:tms-default:quote','cargo',?,?,'number',0,0,?,?)`)
+        .run(field,field,field,fixture.now,fixture.now);
+    }
+    const body = form(); body.set('volume','0');
+    const result = await submit(body);
+    expect(result).toMatchObject({orderId:expect.any(String)});
+    if (!('orderId' in result)) throw new Error(JSON.stringify(result));
+    expect(fixture.database.prepare('SELECT volume_cbm FROM transport_orders WHERE id=?').get(result.orderId!)).toMatchObject({volume_cbm:0});
+  });
+  it.each(['-1','Infinity',''])('rejects invalid or missing required intake volume %s', async volume => {
+    const body = form(); body.set('volume', volume);
+    expect(await submit(body)).toMatchObject({formError:expect.stringContaining('体积')});
+    expect(fixture.database.prepare('SELECT COUNT(*) n FROM quotations').get()).toMatchObject({n:0});
+  });
   it.each(['ltl','ftl'])('%s: sales can create once with explicit zero fees and no mark contacts', async type => {
     const body = form(type);
     const result = await submit(body);

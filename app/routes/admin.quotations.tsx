@@ -49,11 +49,12 @@ import {
   parseQuotationChargeUpdate,
   quotationDetailFacts,
 } from "../lib/quotation-edit-safety";
-import { requirePositiveInteger, requirePositiveNumber, validatePhone, valueOf } from "../lib/validation";
+import { requirePositiveInteger, requirePositiveNumber, requireNonNegativeNumber, validatePhone, valueOf } from "../lib/validation";
 import {
   MAX_QUOTE_AUTO_PACKAGES,
   assertQuoteAutoPackageCount,
   calculateQuoteTotalVolumeCbm,
+  formatQuoteVolumeInput,
   resolveQuoteTotalVolumeCbm,
 } from "../lib/quote-cargo-projection";
 import {
@@ -474,7 +475,8 @@ export async function action({ request }: Route.ActionArgs) {
           if (currentPolicy.isRequired) throw new Error(`请填写“${label}”`);
           return integer ? 1 : 0;
         }
-        return integer ? requirePositiveInteger(raw,label) : requirePositiveNumber(raw,label);
+        return fieldKey === "quotation_volume_cbm" ? requireNonNegativeNumber(raw,label)
+          : integer ? requirePositiveInteger(raw,label) : requirePositiveNumber(raw,label);
       };
 
       let configuredSalespersonId = activeValue("quotation_salesperson_user_id",salespersonId,"required");
@@ -793,10 +795,13 @@ async function saveQuotationNativeWorkflowUpdate(input: {
     if (!policy(fieldKey,fallback).isActive || !input.form.has(formName)) return;
     const raw = valueOf(input.form,formName).trim();
     if (!raw) {
+      if (fieldKey === "quotation_volume_cbm" && policy(fieldKey,fallback).isRequired)
+        throw new Error(`请填写“${label}”`);
       next[column] = integer ? 1 : 0;
       return;
     }
-    const parsed = integer ? requirePositiveInteger(raw,label) : requirePositiveNumber(raw,label);
+    const parsed = fieldKey === "quotation_volume_cbm" ? requireNonNegativeNumber(raw,label)
+      : integer ? requirePositiveInteger(raw,label) : requirePositiveNumber(raw,label);
     next[column] = fieldKey === "quotation_planned_package_count"
       ? assertQuoteAutoPackageCount(parsed)
       : parsed;
@@ -1237,7 +1242,7 @@ function QuoteForm({ loaderData, busy, formError, entryMode }: { loaderData: Awa
     pieces:Number(plannedPackageCount),lengthCm:Number(lengthCm),
     widthCm:Number(widthCm),heightCm:Number(heightCm),
   });
-  const calculatedVolume = calculatedVolumeValue == null ? "" : calculatedVolumeValue.toFixed(4);
+  const calculatedVolume = formatQuoteVolumeInput(calculatedVolumeValue);
   const selectedCustomer = loaderData.customers.find((customer) => customer.id === customerId);
   const createdCustomerId = customerFetcher.data?.intent === "customer" && customerFetcher.data.success
     ? customerFetcher.data.customerId || ""
@@ -1342,8 +1347,8 @@ function QuoteForm({ loaderData, busy, formError, entryMode }: { loaderData: Awa
       </div>
     </fieldset>}
     {policies.volume.isActive && <Field label={`预计体积 CBM${volumeCanAutoCalculate ? "（自动计算）" : ""}`}>{volumeCanAutoCalculate
-      ? <input aria-label="预计体积 CBM" className="control quote-calculated-volume" name="volume" type="number" min="0.0001" step="0.0001" value={calculatedVolume} readOnly required={policies.volume.isRequired}/>
-      : <input aria-label="预计体积 CBM" className="control" name="volume" type="number" min="0.0001" step="0.0001" required={policies.volume.isRequired}/>}</Field>}
+      ? <input aria-label="预计体积 CBM" className="control quote-calculated-volume" name="volume" type="number" min="0" step="any" value={calculatedVolume} readOnly required={policies.volume.isRequired}/>
+      : <input aria-label="预计体积 CBM" className="control" name="volume" type="number" min="0" step="any" required={policies.volume.isRequired}/>}</Field>}
   </div>;
   return <Form method="post" encType="multipart/form-data" className="prototype-quote-form" noValidate={entryMode === 'direct'} data-keyboard-submit data-enter-flow>
     <input type="hidden" name="intent" value="create"/>
@@ -1494,7 +1499,7 @@ function QuotationNativeWorkflowInputs({
         widthCm:Number(widthCm),heightCm:Number(heightCm),
       })
     : null;
-  const calculatedVolume = calculatedVolumeValue == null ? "" : calculatedVolumeValue.toFixed(4);
+  const calculatedVolume = formatQuoteVolumeInput(calculatedVolumeValue);
   const anyParty = p.contactName.isActive || p.contactPhone.isActive || p.markContacts.isActive || p.salesperson.isActive || p.customs.isActive;
   const anyRoute = p.origin.isActive || p.pickup.isActive || p.destination.isActive || p.warehouse.isActive || p.warehouseNote.isActive;
   const anyCargo = p.cargo.isActive || p.notes.isActive || p.pieces.isActive || p.declaredQuantityUnit.isActive || p.plannedPackageCount.isActive || p.plannedPackageType.isActive || p.weight.isActive || p.length.isActive || p.width.isActive || p.height.isActive || p.volume.isActive;
@@ -1538,7 +1543,7 @@ function QuotationNativeWorkflowInputs({
         {p.length.isActive && <Field label="预计长度 CM"><input className="control" name="length" type="number" min="0.01" step="0.01" value={lengthCm} onChange={(event) => setLengthCm(event.target.value)} required={p.length.isRequired}/></Field>}
         {p.width.isActive && <Field label="预计宽度 CM"><input className="control" name="width" type="number" min="0.01" step="0.01" value={widthCm} onChange={(event) => setWidthCm(event.target.value)} required={p.width.isRequired}/></Field>}
         {p.height.isActive && <Field label="预计高度 CM"><input className="control" name="height" type="number" min="0.01" step="0.01" value={heightCm} onChange={(event) => setHeightCm(event.target.value)} required={p.height.isRequired}/></Field>}
-        {p.volume.isActive && <Field label={`预计体积 CBM${volumeCanAutoCalculate ? "（自动计算）" : ""}`}><input className="control" name="volume" type="number" min="0.0001" step="0.0001" {...(volumeCanAutoCalculate ? { value:calculatedVolume,readOnly:true } : { defaultValue:quote.volume_cbm || "" })} required={p.volume.isRequired}/></Field>}
+        {p.volume.isActive && <Field label={`预计体积 CBM${volumeCanAutoCalculate ? "（自动计算）" : ""}`}><input className="control" name="volume" type="number" min="0" step="any" {...(volumeCanAutoCalculate ? { value:calculatedVolume,readOnly:true } : { defaultValue:quote.volume_cbm ?? "" })} required={p.volume.isRequired}/></Field>}
       </div>
     </QuoteLedgerSection>}
     {(p.charges.isActive || p.validUntil.isActive) && <QuoteLedgerSection title="费用与有效期" note="费用修改后自动重新汇总报价总额">

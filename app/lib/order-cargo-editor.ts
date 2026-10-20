@@ -1,4 +1,5 @@
 import { runtimeWorkflowFieldPolicy } from "./workflow-field-runtime";
+import { nonNegativeNumberPresent } from "./validation";
 
 export type CargoEditorWorkflowField = {
   fieldKey: string;
@@ -173,6 +174,10 @@ export function resolveCargoEditorSubmission(input: {
   const present = (fieldKey: CargoFieldKey) => {
     const target = fieldNames[fieldKey];
     const current = value[target];
+    if (fieldKey === "volume_per_package_cbm") {
+      return nonNegativeNumberPresent(current) &&
+        (nonNegativeNumberPresent(read(fieldKey)) || Number(current) > 0);
+    }
     return typeof current === "number" ? current > 0 : Boolean(current.trim());
   };
   for (const fieldKey of Object.keys(fieldNames) as CargoFieldKey[]) {

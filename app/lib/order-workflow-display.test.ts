@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { displayWorkflowSteps } from "./order-workflow-display";
+import { displayWorkflowSteps, hasReviewAssignmentWorkspace, resolveReviewAssignmentStep } from "./order-workflow-display";
 
 const standardSteps = [
   { step_key: "order_creation", name: "订单创建", sort_order: 10 },
@@ -9,6 +9,16 @@ const standardSteps = [
 ];
 
 describe("operator-facing order workflow stages", () => {
+  it("opens assignment on the same approval URL only after the server advances", () => {
+    expect(resolveReviewAssignmentStep(standardSteps, "consignment_approval", "task_assignment")).toBe("task_assignment");
+    expect(resolveReviewAssignmentStep(standardSteps, "task_assignment", "consignment_approval")).toBe("consignment_approval");
+  });
+
+  it("keeps other stages and completed history independent", () => {
+    expect(resolveReviewAssignmentStep(standardSteps, "order_creation", "task_assignment")).toBe("order_creation");
+    expect(resolveReviewAssignmentStep(standardSteps, "consignment_approval", "domestic_execution")).toBe("consignment_approval");
+    expect(hasReviewAssignmentWorkspace(standardSteps.filter((step) => step.step_key !== "task_assignment"))).toBe(false);
+  });
   it.each(["consignment_approval", "task_assignment"])(
     "shows %s as the same stage while keeping its internal checkpoint link",
     (activeStepKey) => {
@@ -35,6 +45,8 @@ describe("operator-facing order workflow stages", () => {
       { step_key: "custom_gate", name: "自定义校验", sort_order: 35 },
       standardSteps[2],
     ];
+    expect(hasReviewAssignmentWorkspace(customized)).toBe(false);
+    expect(resolveReviewAssignmentStep(customized, "consignment_approval", "task_assignment")).toBe("consignment_approval");
 
     expect(displayWorkflowSteps(customized, "consignment_approval").map((step) => step.name)).toEqual([
       "订单创建",

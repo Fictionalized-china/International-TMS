@@ -37,6 +37,18 @@ export function requirePositiveNumber(value: string, label: string): number {
   return number;
 }
 
+export function requireNonNegativeNumber(value: string, label: string): number {
+  const number = Number(value);
+  if (!value.trim() || !Number.isFinite(number) || number < 0)
+    throw new Error(`${label}必须是大于或等于 0 的有限数值`);
+  return number;
+}
+
+export function nonNegativeNumberPresent(value: unknown): boolean {
+  return (typeof value === "number" || typeof value === "string") &&
+    String(value).trim() !== "" && Number.isFinite(Number(value)) && Number(value) >= 0;
+}
+
 export function requirePositiveInteger(value: string, label: string): number {
   const number = Number(value);
   if (!Number.isInteger(number) || number <= 0) throw new Error(`${label}必须是大于 0 的整数`);
