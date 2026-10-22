@@ -6907,10 +6907,9 @@ function ModuleBusinessData({
           title="执行中新增加费用"
           hint="操作岗接手订单后，可随实际执行新增包装、装卸、仓储等应收或应付费用；全部记录保留录入人与时间，后续统一进入对账结算。"
         >
-          <details className="expandable module-create-dialog">
-            <summary>新增执行费用</summary>
+          <Modal title="新增执行费用" triggerLabel="新增执行费用" triggerClassName="primary" size="wide" dialogClassName="execution-expense-modal" closeSignal={moduleActionData?.success}>
             <ExpenseCreateForm fields={data.quotationCostWorkflowFields} busy={busy} entryContext="execution_costs"/>
-          </details>
+          </Modal>
         </BusinessSubsection>}
       </div>
     );
