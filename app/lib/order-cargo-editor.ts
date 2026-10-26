@@ -103,12 +103,16 @@ export function cargoEditorFieldPolicy(
 }
 
 export function nextOrderPackageCodeSequence(orderNumber: string, packageCodes: readonly string[]) {
-  const prefix = `${orderNumber}-P`;
-  return packageCodes.reduce((max, packageCode) => {
-    if (!packageCode.startsWith(prefix)) return max;
-    const sequence = Number(packageCode.slice(prefix.length));
+  // Legacy -P codes remain scannable. Reserve an ordinal for every historical
+  // mark so a new -IN code never reuses an already issued package position.
+  const inPrefix = `${orderNumber}-IN-`;
+  const legacyPrefix = `${orderNumber}-P`;
+  const issued = packageCodes.filter((code) => code.startsWith(inPrefix) || code.startsWith(legacyPrefix));
+  const highestIssued = issued.reduce((max, code) => {
+    const sequence = Number(code.slice(code.startsWith(inPrefix) ? inPrefix.length : legacyPrefix.length));
     return Number.isInteger(sequence) && sequence > 0 ? Math.max(max, sequence) : max;
-  }, 0) + 1;
+  }, 0);
+  return Math.max(highestIssued, issued.length) + 1;
 }
 
 export function resolveCargoEditorSubmission(input: {

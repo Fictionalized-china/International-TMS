@@ -104,11 +104,13 @@ describe("order cargo editor workflow policy", () => {
     expect(cargoEditorFieldPolicy([], "cargo_name_en")).toMatchObject({ visible: true, required: false });
   });
 
-  it("allocates a package code after the highest historical suffix instead of COUNT", () => {
+  it("allocates continuous inbound codes while reserving legacy issued marks", () => {
     expect(nextOrderPackageCodeSequence("SO-001", [
+      "SO-001-IN-001",
       "SO-001-P001",
-      "SO-001-P003",
       "SO-OTHER-P099",
-    ])).toBe(4);
+    ])).toBe(3);
+    expect(nextOrderPackageCodeSequence("SO-001", ["SO-001-IN-001"])).toBe(2);
+    expect(nextOrderPackageCodeSequence("SO-001", ["SO-001-IN-001", "SO-001-IN-003"])).toBe(4);
   });
 });

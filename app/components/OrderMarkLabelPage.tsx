@@ -1,6 +1,6 @@
 import { type ReactElement } from "react";
 import { Form, Link } from "react-router";
-import { orderMarkLabelFacts, type OrderMarkLabel } from "../lib/order-mark-label";
+import { orderMarkLabelFacts, orderMarkPackageFacts, type OrderMarkLabel } from "../lib/order-mark-label";
 
 export function OrderMarkLabelPage({
   order,
@@ -49,16 +49,16 @@ export function OrderMarkLabelPreview({
   const marks=order.marks.length?order.marks:[{id:order.id,code:`${order.order_number}-IN-001`,sequence:1,revision:1}];
   return (
     <section className="order-mark-print-area" aria-label={`订单 ${order.order_number} 的入仓唛头标签`}>
-      {marks.map((mark)=><article className="order-mark-label" key={mark.id}>
+      {marks.map((mark,index)=><article className="order-mark-label" key={mark.id}>
         <header><strong>OULING 国际物流</strong><span>入仓唛头标签</span></header>
         <Code39 value={mark.code} />
-        <div className="order-mark-scan-code"><span>扫描码：{mark.code}</span><span>包装 {mark.sequence}/{order.planned_inbound_package_count}</span></div>
+        <div className="order-mark-scan-code"><span>扫描码：{mark.code}</span><span>包装 {index + 1}/{marks.length}</span></div>
         <b className="order-mark-number"><span>唛头号</span>{order.order_number}</b>
         <dl>
           <div><dt>目的地</dt><dd>{facts.destination}</dd></div>
-          <div><dt>件数</dt><dd>{facts.pieces}</dd></div>
-          <div><dt>方数</dt><dd>{facts.volume}</dd></div>
-          <div><dt>重量</dt><dd>{facts.weight}</dd></div>
+          <div><dt>本包件数</dt><dd>{orderMarkPackageFacts(order,mark).pieces}</dd></div>
+          <div><dt>本包方数</dt><dd>{orderMarkPackageFacts(order,mark).volume}</dd></div>
+          <div><dt>本包重量</dt><dd>{orderMarkPackageFacts(order,mark).weight}</dd></div>
           {facts.contacts.length>0&&<div className="order-mark-contacts"><dt>我方联系人</dt><dd>{facts.contacts.map((contact)=><span key={`${contact.id}-${contact.phone}`}><b>{contact.label}</b><em>{contact.name}</em><strong>{contact.phone}</strong></span>)}</dd></div>}
         </dl>
         <footer>条码为本包装唯一入仓扫描码；唛头号保持订单号。国内仓扫码收货后，最终出库包装另行生成 OUL。</footer>

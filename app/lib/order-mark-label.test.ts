@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildOrderMarkLabelSvg, orderMarkLabelFacts, type OrderMarkLabel } from "./order-mark-label";
+import { buildOrderMarkLabelSvg, orderMarkLabelFacts, orderMarkPackageFacts, type OrderMarkLabel } from "./order-mark-label";
 import { orderMarkLabelAvailable } from "./order-mark-label-policy";
 
 describe("order mark label", () => {
@@ -102,6 +102,33 @@ describe("order mark label", () => {
     expect(svg).toContain("业务联系：张三 +86 13800000000");
     expect(svg).not.toContain("运输线路");
     expect(svg).not.toContain("客户</text>");
+  });
+
+  it("prints each issued package's own measures and an order-wide ordinal", () => {
+    const order: OrderMarkLabel = {
+      id: "order-2", order_number: "SO2026102000024", contact_phone: null,
+      mark_contacts: [], customer_name: "测试客户", cargo_description: "321、132",
+      pieces: 2, declared_quantity_unit: "件", planned_inbound_package_count: 1,
+      planned_inbound_package_type: "其他", gross_weight_kg: 2475, volume_cbm: 231.0002,
+      origin_country: "中国", origin_state: null, origin_city: "深圳市",
+      destination_country: "俄罗斯", destination_state: null, destination_city: "莫斯科",
+      overseas_warehouse_name: null, status: "in_execution",
+      label_generated_at: "2026-10-20T08:09:55Z", inbound_package_locked_at: null,
+      marks: [
+        { id: "first", code: "SO2026102000024-IN-001", sequence: 1, revision: 1,
+          pieces: 1, weightKg: 1244, volumeCbm: 0.0002 },
+        { id: "second", code: "SO2026102000024-P001", sequence: 1, revision: 1,
+          pieces: 1, weightKg: 1231, volumeCbm: 231 },
+      ],
+    };
+    expect(orderMarkPackageFacts(order, order.marks[0])).toMatchObject({ pieces: "1 件", weight: "1244 KG", volume: "0.0002 CBM" });
+    const svg = buildOrderMarkLabelSvg(order);
+    expect(svg).toContain("包装 1/2");
+    expect(svg).toContain("包装 2/2");
+    expect(svg).toContain("本包重量");
+    expect(svg).toContain("1244 KG");
+    expect(svg).toContain("1231 KG");
+    expect(svg).not.toContain("2475 KG");
   });
 
 });

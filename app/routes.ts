@@ -104,6 +104,8 @@ export default [
       "routes/portal.order-mark-label-download.ts",
     ),
     route("portal/tracking", "routes/portal.tracking.tsx"),
+    route("portal/tracking/:shipmentId", "routes/portal.tracking-detail.tsx"),
+    route("portal/tracking/:shipmentId/events/:eventId", "routes/portal.tracking-event.tsx"),
     route("portal/billing", "routes/portal.billing.tsx"),
     route("portal/notifications", "routes/portal.notifications.tsx"),
     route("portal/account", "routes/portal.account.tsx"),

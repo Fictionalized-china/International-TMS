@@ -15,16 +15,18 @@ export async function loadActiveOrderMarksByOrder(
 
   const placeholders = orderIds.map(() => "?").join(",");
   const rows = await env.DB.prepare(
-    `SELECT order_id,id,package_code code,package_sequence sequence,label_revision revision
-       FROM order_cargo_packages
-      WHERE organization_id=? AND order_id IN (${placeholders})
-        AND is_active=1 AND status!='cancelled'
-      ORDER BY order_id,package_sequence`,
+    `SELECT p.order_id,p.id,p.package_code code,p.package_sequence sequence,p.label_revision revision,
+            i.pieces_per_package pieces,i.gross_weight_per_package_kg weightKg,i.volume_per_package_cbm volumeCbm
+       FROM order_cargo_packages p JOIN order_cargo_items i ON i.id=p.cargo_item_id
+      WHERE p.organization_id=? AND p.order_id IN (${placeholders})
+        AND p.is_active=1 AND p.status!='cancelled'
+      ORDER BY p.order_id,p.created_at,p.package_code`,
   ).bind(organizationId, ...orderIds).all<OrderMark & { order_id: string }>();
 
   for (const row of rows.results) {
     const marks = result.get(row.order_id) ?? [];
-    marks.push({ id: row.id, code: row.code, sequence: row.sequence, revision: row.revision });
+    marks.push({ id: row.id, code: row.code, sequence: row.sequence, revision: row.revision,
+      pieces: row.pieces, weightKg: row.weightKg, volumeCbm: row.volumeCbm });
     result.set(row.order_id, marks);
   }
   return result;
@@ -74,10 +76,11 @@ export async function loadOrderMarkLabel(input: {
     phone:order.contact_phone,
   });
   const marks=await env.DB.prepare(
-    `SELECT id,package_code code,package_sequence sequence,label_revision revision
-       FROM order_cargo_packages
-      WHERE organization_id=? AND order_id=? AND is_active=1 AND status!='cancelled'
-      ORDER BY package_sequence`,
+    `SELECT p.id,p.package_code code,p.package_sequence sequence,p.label_revision revision,
+            i.pieces_per_package pieces,i.gross_weight_per_package_kg weightKg,i.volume_per_package_cbm volumeCbm
+       FROM order_cargo_packages p JOIN order_cargo_items i ON i.id=p.cargo_item_id
+      WHERE p.organization_id=? AND p.order_id=? AND p.is_active=1 AND p.status!='cancelled'
+      ORDER BY p.created_at,p.package_code`,
   ).bind(input.organizationId,input.orderId).all<{id:string;code:string;sequence:number;revision:number}>();
   const {mark_contacts_snapshot_json:_,...labelOrder}=order;
   return { ...labelOrder,mark_contacts:markContacts,marks:marks.results };

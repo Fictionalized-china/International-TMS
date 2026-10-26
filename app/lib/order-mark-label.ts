@@ -23,10 +23,19 @@ export type OrderMarkLabel = {
   status: string;
   label_generated_at: string;
   inbound_package_locked_at: string | null;
-  marks: Array<{ id: string; code: string; sequence: number; revision: number }>;
+  marks: Array<{ id: string; code: string; sequence: number; revision: number;
+    pieces?: number | null; weightKg?: number | null; volumeCbm?: number | null }>;
 };
 
 export type OrderMark = OrderMarkLabel["marks"][number];
+
+export function orderMarkPackageFacts(order: OrderMarkLabel, mark: OrderMark) {
+  return {
+    pieces: `${formatMeasure(mark.pieces ?? order.pieces, 0)} ${order.declared_quantity_unit || "件"}`,
+    volume: `${formatMeasure(mark.volumeCbm ?? order.volume_cbm, 4)} CBM`,
+    weight: `${formatMeasure(mark.weightKg ?? order.gross_weight_kg, 3)} KG`,
+  };
+}
 
 export function orderMarkLabelFacts(order: Omit<Pick<
   OrderMarkLabel,
@@ -61,13 +70,14 @@ export function buildOrderMarkLabelSvg(order: OrderMarkLabel) {
   const pageHeight = 610;
   const height = pageHeight * marks.length;
   const pages = marks.map((mark, pageIndex) => {
+    const packageFacts = orderMarkPackageFacts(order, mark);
     const barcode = code39Bars(mark.code.toUpperCase());
     const scale = 880 / barcode.width;
     const rows = [
       ["目的地", facts.destination],
-      ["件数", facts.pieces],
-      ["方数", facts.volume],
-      ["重量", facts.weight],
+      ["本包件数", packageFacts.pieces],
+      ["本包方数", packageFacts.volume],
+      ["本包重量", packageFacts.weight],
       ["我方联系人", facts.phone],
     ];
     let rowY = 316;
@@ -90,7 +100,7 @@ export function buildOrderMarkLabelSvg(order: OrderMarkLabel) {
       <text x="945" y="72" text-anchor="end" font-family="Arial,'Microsoft YaHei',sans-serif" font-size="24" font-weight="700">入仓唛头标签</text>
       <line x1="55" y1="92" x2="945" y2="92" stroke="#111" stroke-width="3"/>
       <g transform="translate(60 112) scale(${scale} 1)" fill="#111">${barcode.rects}</g>
-      <text x="500" y="258" text-anchor="middle" font-family="Consolas,monospace" font-size="17" font-weight="700">扫描码：${escapeXml(mark.code)} · 包装 ${mark.sequence}/${order.planned_inbound_package_count}</text>
+      <text x="500" y="258" text-anchor="middle" font-family="Consolas,monospace" font-size="17" font-weight="700">扫描码：${escapeXml(mark.code)} · 包装 ${pageIndex + 1}/${marks.length}</text>
       <text x="500" y="296" text-anchor="middle" font-family="Arial,'Microsoft YaHei',sans-serif" font-size="29" font-weight="800">唛头号　${escapeXml(order.order_number)}</text>
       <g font-family="Arial,'Microsoft YaHei',sans-serif" fill="#111">${rowSvg}</g>
       <text x="55" y="572" font-family="Arial,'Microsoft YaHei',sans-serif" font-size="14" fill="#444">条码为本包装唯一入仓扫描码；唛头号保持订单号。</text>

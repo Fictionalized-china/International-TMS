@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { Form, Link } from "react-router";
+import { PortalForm as Form, PortalLink as Link } from "../components/PortalNavigation";
 import type { Route } from "./+types/portal.tracking";
 import { requirePortalCustomer } from "../lib/portal.server";
 
@@ -29,7 +29,7 @@ type Event = {
 const PAGE_SIZE = 10;
 
 const labels: Record<string, string> = {
-  booked: "已订舱",
+  booked: "待运踪更新",
   picked_up: "已提货",
   in_transit: "运输中",
   customs: "清关中",
@@ -41,7 +41,7 @@ const labels: Record<string, string> = {
 
 const statusOptions = [
   { value: "", label: "全部状态" },
-  { value: "booked", label: "已订舱" },
+  { value: "booked", label: "待运踪更新" },
   { value: "picked_up", label: "已提货" },
   { value: "in_transit", label: "运输中" },
   { value: "customs", label: "清关中" },
@@ -177,14 +177,13 @@ export default function PortalTracking({ loaderData }: Route.ComponentProps) {
             <strong>订单轨迹</strong>
             <span>当前显示 {loaderData.total} / {loaderData.allTotal} 单</span>
           </div>
-          <span>运输中订单优先，每页最多 10 单</span>
+          <span>点击订单查看完整轨迹，每页最多 10 单</span>
         </div>
 
         {loaderData.shipments.length ? (
           <div className="portal-tracking-order-list">
             {loaderData.shipments.map((shipment, index) => {
               const events = eventsByShipment.get(shipment.id) ?? [];
-              const isFinished = shipment.status === "delivered" || shipment.status === "cancelled";
               const latestEvent = events[0];
               return (
                 <article className={`portal-tracking-order-card ${shipment.status === "exception" ? "is-exception" : ""}`} key={shipment.id}>
@@ -192,8 +191,8 @@ export default function PortalTracking({ loaderData }: Route.ComponentProps) {
                     <div className="portal-tracking-order-title">
                       <span className="portal-tracking-order-index">{(loaderData.page - 1) * PAGE_SIZE + index + 1}</span>
                       <div>
-                        <strong>{shipment.order_number}</strong>
-                        <small>运单 {shipment.shipment_number}</small>
+                        <strong><Link to={`/portal/tracking/${shipment.id}`}>{shipment.order_number}</Link></strong>
+                        <small>运单 {shipment.shipment_number} · {shipment.origin_city} → {shipment.destination_city}</small>
                       </div>
                     </div>
                     <span className={`status-pill ${shipment.status === "exception" ? "danger" : ""}`}>
@@ -201,42 +200,12 @@ export default function PortalTracking({ loaderData }: Route.ComponentProps) {
                     </span>
                   </header>
 
-                  <div className="portal-tracking-order-facts">
-                    <div><span>运输路线</span><strong>{shipment.origin_city} → {shipment.destination_city}</strong></div>
-                    <div><span>货物</span><strong>{shipment.cargo_description || "—"}</strong></div>
-                    <div><span>当前位置</span><strong>{shipment.current_location || "待更新"}</strong></div>
-                    <div>
-                      <span>{shipment.actual_delivery_at ? "实际送达" : "预计送达"}</span>
-                      <strong>{formatDateTime(shipment.actual_delivery_at || shipment.estimated_delivery_at)}</strong>
-                    </div>
-                    <div><span>签收人</span><strong>{shipment.signed_by || "—"}</strong></div>
+                  <div className="portal-tracking-order-summary">
+                    <div><span>当前位置</span><strong>{latestEvent?.location || shipment.current_location || "待更新"}</strong></div>
+                    <div><span>最新动态</span><strong>{latestEvent?.description || "暂无客户可见节点"}</strong></div>
+                    <div><span>更新时间</span><strong>{formatDateTime(latestEvent?.event_at || null)}</strong></div>
+                    <Link className="secondary-button" to={`/portal/tracking/${shipment.id}`}>查看轨迹 →</Link>
                   </div>
-
-                  <details className="portal-tracking-timeline" open={!isFinished}>
-                    <summary>
-                      <span>轨迹节点 <strong>{events.length}</strong> 条</span>
-                      <span>{latestEvent ? `最新：${latestEvent.description}` : "暂无客户可见节点"}</span>
-                    </summary>
-                    {events.length ? (
-                      <ol>
-                        {events.map((event) => (
-                          <li key={event.id}>
-                            <span className="portal-tracking-timeline-dot" aria-hidden="true" />
-                            <div className="portal-tracking-timeline-main">
-                              <strong>{event.description}</strong>
-                              <span>{event.location || "地点待更新"}</span>
-                            </div>
-                            <div className="portal-tracking-timeline-meta">
-                              <span>{labels[event.status] || event.status}</span>
-                              <time dateTime={event.event_at}>{formatDateTime(event.event_at)}</time>
-                            </div>
-                          </li>
-                        ))}
-                      </ol>
-                    ) : (
-                      <p className="empty-state">暂无客户可见运输节点。</p>
-                    )}
-                  </details>
                 </article>
               );
             })}

@@ -104,6 +104,19 @@ export async function saveOrderCargoItem(input: {
       ).bind(itemId, input.orderId, input.organizationId).all<CargoPackageRow>()).results
     : [];
   const activePackages = packages.filter((item) => item.status !== "cancelled");
+  if (!existing || result.value.packageCount !== activePackages.length) {
+    const order = await input.db.prepare(
+      "SELECT inbound_package_locked_at FROM transport_orders WHERE id=? AND organization_id=?",
+    ).bind(input.orderId, input.organizationId).first<{ inbound_package_locked_at: string | null }>();
+    if (!order) return { ok: false as const, error: "订单不存在，无法保存货物明细" };
+    if (order.inbound_package_locked_at)
+      return { ok: false as const, error: "国内仓已开始扫码，不能再新增货物或修改计划包装数" };
+    const receivedMark = await input.db.prepare(
+      "SELECT id FROM order_cargo_packages WHERE order_id=? AND organization_id=? AND status NOT IN ('planned','cancelled') LIMIT 1",
+    ).bind(input.orderId, input.organizationId).first<{ id: string }>();
+    if (receivedMark)
+      return { ok: false as const, error: "货物已进入仓储或后续作业，不能改变计划包装数" };
+  }
   if (activePackages.some((item) => item.status !== "planned") && result.value.packageCount !== activePackages.length)
     return { ok: false as const, error: "货物已入库或进入后续作业，不能再修改包装数量" };
 
@@ -150,7 +163,7 @@ export async function saveOrderCargoItem(input: {
         "INSERT INTO order_cargo_packages(id,organization_id,order_id,cargo_item_id,package_code,package_sequence,created_at) VALUES(?,?,?,?,?,?,?)",
       ).bind(
         crypto.randomUUID(), input.organizationId, input.orderId, itemId,
-        `${input.orderNumber}-P${String(packageNumber).padStart(3, "0")}`,
+        `${input.orderNumber}-IN-${String(packageNumber).padStart(3, "0")}`,
         sequenceStart + index, now,
       ));
     }
@@ -172,12 +185,14 @@ export async function saveOrderCargoItem(input: {
     `UPDATE transport_orders SET
       cargo_description=COALESCE((SELECT GROUP_CONCAT(cargo_name_cn,'、') FROM order_cargo_items WHERE order_id=? AND organization_id=?),'未填写'),
       pieces=COALESCE((SELECT SUM(package_count*pieces_per_package) FROM order_cargo_items WHERE order_id=? AND organization_id=?),1),
+      planned_inbound_package_count=COALESCE((SELECT SUM(package_count) FROM order_cargo_items WHERE order_id=? AND organization_id=?),1),
       gross_weight_kg=COALESCE((SELECT SUM(package_count*gross_weight_per_package_kg) FROM order_cargo_items WHERE order_id=? AND organization_id=?),0),
       volume_cbm=COALESCE((SELECT SUM(package_count*volume_per_package_cbm) FROM order_cargo_items WHERE order_id=? AND organization_id=?),0),
       updated_at=? WHERE id=? AND organization_id=?`,
   ).bind(
     input.orderId, input.organizationId, input.orderId, input.organizationId,
     input.orderId, input.organizationId, input.orderId, input.organizationId,
+    input.orderId, input.organizationId,
     now, input.orderId, input.organizationId,
   ));
   await input.db.batch(statements);
