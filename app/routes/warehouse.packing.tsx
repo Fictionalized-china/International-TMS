@@ -26,6 +26,7 @@ type PackingRow = {
   shipment_id: string;
   source_package_count: number;
   inbound_weight_kg: number;
+  inbound_weight_breakdown: string | null;
   location_names: string | null;
   job_id: string | null;
   packing_mode: "preserve" | "merge" | "split" | null;
@@ -63,6 +64,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const receivedCte = `WITH received AS (
       SELECT s.order_id,s.id shipment_id,COUNT(p.id) source_package_count,
              COALESCE(SUM(p.weight_kg),0) inbound_weight_kg,
+             GROUP_CONCAT(p.weight_kg) inbound_weight_breakdown,
              GROUP_CONCAT(DISTINCT COALESCE(NULLIF(TRIM(l.code),''),l.name)) location_names
       FROM warehouse_packages p
       JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id
@@ -88,7 +90,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const rows = await env.DB.prepare(`${receivedCte}
     SELECT o.id order_id,o.order_number,o.business_type,c.name customer_name,
       o.cargo_description,o.pieces,o.gross_weight_kg,o.volume_cbm,received.shipment_id,
-      received.source_package_count,received.inbound_weight_kg,received.location_names,
+      received.source_package_count,received.inbound_weight_kg,received.inbound_weight_breakdown,received.location_names,
       job.id job_id,job.packing_mode,job.outbound_package_count,job.total_weight_kg,
       job.total_volume_cbm,job.status job_status,job.transport_batch_id,job.dispatch_id
     ${receivedFrom}
@@ -327,7 +329,8 @@ function PackingForm({ row, busy, onCancel }: { row: PackingRow; busy: boolean; 
       <div><span>入仓包装</span><strong>{row.source_package_count} 包</strong></div>
       <div><span>商品件数</span><strong>{row.pieces} 件</strong></div>
       <div><span>申报重量 / 体积</span><strong>{Number(row.gross_weight_kg).toFixed(2)} KG / {Number(row.volume_cbm).toFixed(3)} CBM</strong></div>
-      <div><span>仓库实收重量</span><strong>{Number(row.inbound_weight_kg).toFixed(2)} KG</strong></div>
+      <div><span>仓库实收重量（{row.source_package_count} 包合计）</span><strong>{Number(row.inbound_weight_kg).toFixed(2)} KG</strong>
+        {row.source_package_count <= 10 && row.inbound_weight_breakdown && <small>{row.inbound_weight_breakdown.split(",").map((weight) => `${Number(weight).toFixed(2)} KG`).join(" + ")}</small>}</div>
       <div><span>当前库位</span><strong>{row.location_names || "库位待定"}</strong></div>
     </section>
     <div className="warehouse-packing-plan-head"><div><h3>选择最终包装方式</h3><p>每张订单独立打包；系统按最终包裹逐一生成 OUL，不允许跨订单合包。</p></div></div>

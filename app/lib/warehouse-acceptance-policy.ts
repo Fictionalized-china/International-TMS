@@ -48,6 +48,19 @@ export function resolveWarehouseAcceptancePolicies(
   } as const;
 }
 
+/** Domestic inbound volume is informational; the final packing station
+ * measures outbound dimensions. An older frozen workflow may still mark this
+ * field required, so domestic receiving explicitly makes it optional. */
+export function resolveDomesticWarehouseAcceptancePolicies(
+  fields: readonly WorkflowFieldPolicyLike[],
+) {
+  const policies = resolveWarehouseAcceptancePolicies(fields);
+  return {
+    ...policies,
+    actualVolume: { ...policies.actualVolume, isRequired: false },
+  };
+}
+
 export function acceptanceRequiredMarker(policy: WarehouseAcceptanceFieldPolicy) {
   if (!policy.isRequired) return "";
   return policy.isSystemLocked ? " * · 系统锁定" : " *";

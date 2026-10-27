@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   calculateWarehouseDifference,
+  calculateDomesticWarehouseDifference,
   displayWarehouseMeasuredCount,
   displayWarehouseMeasuredDimensions,
   displayWarehouseMeasuredDimensionSummary,
@@ -45,6 +46,17 @@ describe("calculateWarehouseDifference", () => {
       { pieces: 1, weightKg: 103, volumeCbm: 1 },
       2,
     ).requiresFeeConfirmation).toBe(true);
+  });
+
+  it("does not compare domestic receipt volume but still gates on weight", () => {
+    expect(calculateDomesticWarehouseDifference(
+      { pieces: 2, weightKg: 2475, volumeCbm: 231 },
+      { pieces: 2, weightKg: 2475, volumeCbm: 0 },
+    )).toMatchObject({ volumePercent: 0, maxPercent: 0, requiresFeeConfirmation: false });
+    expect(calculateDomesticWarehouseDifference(
+      { pieces: 2, weightKg: 2475, volumeCbm: 231 },
+      { pieces: 2, weightKg: 2000, volumeCbm: 0 },
+    )).toMatchObject({ volumePercent: 0, requiresFeeConfirmation: true });
   });
 });
 

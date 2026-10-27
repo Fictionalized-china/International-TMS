@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   automaticWarehouseAcceptanceResult,
+  resolveDomesticWarehouseAcceptancePolicies,
   resolveWarehouseAcceptancePolicies,
   warehouseAcceptancePackageCount,
   warehouseAcceptanceReadyIsBlocked,
@@ -69,6 +70,17 @@ describe("resolveWarehouseAcceptancePolicies", () => {
     expect(policies.location).toMatchObject({ isActive: true, isRequired: true });
     expect(policies.cargoComplete).toMatchObject({ isActive: true, isRequired: true });
     expect(policies.notes).toMatchObject({ isActive: true, isRequired: false });
+  });
+
+  it("never requires domestic receipt volume even for an older frozen required field", () => {
+    const policies = resolveDomesticWarehouseAcceptancePolicies([
+      { fieldKey: "actual_volume_cbm", isActive: true, isRequired: true },
+    ]);
+    expect(policies.actualVolume).toMatchObject({ isActive: true, isRequired: false });
+    expect(policies.actualWeight.isRequired).toBe(true);
+    expect(resolveDomesticWarehouseAcceptancePolicies([
+      { fieldKey: "actual_volume_cbm", isActive: false, isRequired: false },
+    ]).actualVolume.isActive).toBe(false);
   });
 
   it("never auto-confirms over-receipt or a material comparable difference", () => {

@@ -13,7 +13,7 @@ import { loadWarehouseContext } from "../lib/warehouse-context.server";
 import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
 import { nextDocumentNumber } from "../lib/documents.server";
 import {
-  calculateWarehouseDifference,
+  calculateDomesticWarehouseDifference,
   shouldCreateWarehouseDifference,
 } from "../lib/warehouse-actual";
 import { loadOperationalRules } from "../lib/operational-rules.server";
@@ -29,7 +29,7 @@ import { scanInboundMarkAtWarehouse } from "../lib/warehouse-inbound-scan-sessio
 import {
   acceptanceRequiredMarker,
   automaticWarehouseAcceptanceResult,
-  resolveWarehouseAcceptancePolicies,
+  resolveDomesticWarehouseAcceptancePolicies,
   warehouseAcceptanceReadyIsBlocked,
 } from "../lib/warehouse-acceptance-policy";
 
@@ -395,7 +395,7 @@ export async function action({ request }: Route.ActionArgs) {
     order.id,
     "warehouse",
   );
-  const policies = resolveWarehouseAcceptancePolicies(workflowFields);
+  const policies = resolveDomesticWarehouseAcceptancePolicies(workflowFields);
   if (policies.notes.isActive && policies.notes.isRequired && !notes)
     return { formError: "请填写收货备注" };
 
@@ -505,8 +505,8 @@ export async function action({ request }: Route.ActionArgs) {
       actualWeight: policies.actualWeight.isActive
         ? nonNegativeNumber(form, `actualWeight_${index}`)
         : null,
-      // 国内仓收货记录整票入仓包装的实重和总体积。最终包装的逐包尺寸
-      // 仍在二次包装/贴标阶段登记，不能复用报价阶段的预估尺寸冒充实测。
+      // Volume is optional at domestic receipt. Final outbound package volume
+      // comes from measured dimensions at the packing/label stage.
       actualVolume: policies.actualVolume.isActive
         ? nonNegativeNumber(form, `actualVolume_${index}`)
         : null,
@@ -521,8 +521,6 @@ export async function action({ request }: Route.ActionArgs) {
   const receivedRows = actualRows.filter((item) => item.actualPackages > 0);
   if (policies.actualWeight.isRequired && receivedRows.some((item) => !item.actualWeight))
     return { formError: "有实收包装的货物必须填写大于 0 的实际重量" };
-  if (policies.actualVolume.isRequired && receivedRows.some((item) => !item.actualVolume))
-    return { formError: "有实收包装的货物必须填写大于 0 的实收总体积" };
   const inventoryRows = receivedRows.map((item) => ({
     ...item,
     // A package row needs at least one piece for the physical inventory
@@ -582,14 +580,12 @@ export async function action({ request }: Route.ActionArgs) {
   const piecesComparable = false;
   const weightComparable = policies.actualWeight.isActive &&
     receivedRows.every((item) => item.actualWeight !== null);
-  const volumeComparable = policies.actualVolume.isActive &&
-    receivedRows.every((item) => item.actualVolume !== null);
   const operationalRules = await loadOperationalRules(user.organizationId);
-  const difference = calculateWarehouseDifference(
+  const difference = calculateDomesticWarehouseDifference(
     {
       pieces: piecesComparable ? expected.pieces : cumulative.pieces,
       weightKg: weightComparable ? expected.weightKg : cumulative.weightKg,
-      volumeCbm: volumeComparable ? expected.volumeCbm : cumulative.volumeCbm,
+      volumeCbm: expected.volumeCbm,
     },
     cumulative,
     operationalRules["warehouse.receipt_difference_threshold_percent"],
@@ -869,7 +865,7 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
   const [receiptResult, setReceiptResult] = useState<"" | "ready" | "exception">("");
   const [markInput,setMarkInput]=useState("");
   const markInputRef=useRef<HTMLInputElement>(null);
-  const policies = resolveWarehouseAcceptancePolicies(loaderData.workflowFields);
+  const policies = resolveDomesticWarehouseAcceptancePolicies(loaderData.workflowFields);
   const scannedMarks=loaderData.scannedInboundMarks.map(mark=>mark.package_code.toUpperCase());
   const historicallyReceivedCount=loaderData.inboundMarks.filter(mark=>mark.status==='received').length;
   const accountedPackageCount=historicallyReceivedCount+scannedMarks.length;
@@ -949,11 +945,11 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
         {scannedMarks.length>0&&<div className="inbound-mark-chip-list">{scannedMarks.map(code=><span key={code}>{code}<small>已登记</small></span>)}</div>}
       </section>
       <section className="panel acceptance-cargo-panel">
-        <div className="panel-header"><div><h2>包装收齐与实测核对</h2><p>入仓包装数按唛头扫描累计；仓库登记整票实重和总体积，不重复统计商品件数，最终包装尺寸留到二次打包贴标阶段。</p></div><span className="status-pill">{loaderData.cargoItems.length} 条货物</span></div>
+        <div className="panel-header"><div><h2>包装收齐与实重核对</h2><p>入仓包装数按唛头扫描累计；收货时核对实重，体积可留空且不参与收货差异判断。最终包装尺寸在二次打包贴标阶段登记。</p></div><span className="status-pill">{loaderData.cargoItems.length} 条货物</span></div>
         <div className="table-wrap acceptance-cargo-table"><table><thead><tr>
           <th>货物</th><th>计划入仓包装</th><th>扫码累计</th><th>申报重量 / 体积</th>
           {policies.actualWeight.isActive && <th>本单实收重量 KG{acceptanceRequiredMarker(policies.actualWeight)}</th>}
-          {policies.actualVolume.isActive && <th>本单实收总体积 CBM{acceptanceRequiredMarker(policies.actualVolume)}</th>}
+          {policies.actualVolume.isActive && <th>实收总体积 CBM（选填）</th>}
           <th>备注</th>
         </tr></thead><tbody>{loaderData.cargoItems.map((item,index) => {
           const expectedWeight = item.package_count * item.gross_weight_per_package_kg;
@@ -967,7 +963,7 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
             <td><strong>{cumulativeScanned} / {item.package_count} 包</strong><small>{scannedForItem?`含本次新扫 ${scannedForItem} 包，确认后正式入库`:"等待扫描"}</small></td>
             <td><strong>{expectedWeight.toFixed(2)} KG</strong><small>{item.volume_per_package_cbm * item.package_count > 0 ? `${(item.volume_per_package_cbm * item.package_count).toFixed(3)} CBM` : "体积未申报"}</small></td>
             {policies.actualWeight.isActive && <td><input name={`actualWeight_${index}`} aria-label={`${item.cargo_name_cn} 本单实收重量`} type="number" min="0.001" step="0.001" defaultValue="" placeholder="必填，称重后填写" required={policies.actualWeight.isRequired}/></td>}
-            {policies.actualVolume.isActive && <td><input name={`actualVolume_${index}`} aria-label={`${item.cargo_name_cn} 本单实收总体积`} type="number" min="0.001" step="0.001" defaultValue="" placeholder="必填，量方后填写" required={policies.actualVolume.isRequired}/></td>}
+            {policies.actualVolume.isActive && <td><input name={`actualVolume_${index}`} aria-label={`${item.cargo_name_cn} 本单实收总体积（选填）`} type="number" min="0.001" step="0.001" defaultValue="" placeholder="选填，不参与收货核对"/></td>}
             <td><input name={`itemNotes_${index}`} placeholder="选填"/></td>
           </tr>;
         })}</tbody></table></div>

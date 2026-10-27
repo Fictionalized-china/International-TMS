@@ -53,6 +53,20 @@ export function calculateWarehouseDifference(
   };
 }
 
+export function calculateDomesticWarehouseDifference(
+  planned: WarehouseActual,
+  actual: WarehouseActual,
+  thresholdPercent = DEFAULT_WAREHOUSE_DIFFERENCE_THRESHOLD_PERCENT,
+): WarehouseDifference {
+  // Volume may be recorded at receipt, but only scanned package count and
+  // actual weight participate in the domestic receiving difference gate.
+  return calculateWarehouseDifference(
+    { ...planned, volumeCbm: actual.volumeCbm },
+    actual,
+    thresholdPercent,
+  );
+}
+
 export function shouldCreateWarehouseDifference(input: {
   difference: WarehouseDifference;
   packageMismatch?: boolean;
