@@ -1,5 +1,6 @@
 import { businessDateTimeLabel } from "../lib/business-time";
 import { env } from "cloudflare:workers";
+import { DateTimeSelect } from "../components/DateTimeSelect";
 import { useEffect, useMemo, useState } from "react";
 import { Form, Link, useNavigation } from "react-router";
 import type { Route } from "./+types/warehouse.cargo-consolidation";
@@ -516,7 +517,6 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
   const totals=useMemo(()=>selected.reduce((sum,row)=>({packages:sum.packages+row.packages,pieces:sum.pieces+row.pieces,weight:sum.weight+row.weight,volume:sum.volume+row.volume}),{packages:0,pieces:0,weight:0,volume:0}),[selected]);
   const fieldPolicies=useMemo(()=>resolveLoadingBatchFieldPolicies(selected.map(row=>row.loadingWorkflow)),[selected]);
   const loadingStageAccessByOrder=useMemo(()=>new Map(loaderData.loadingStageAccesses.map(access=>[access.orderId,access])),[loaderData.loadingStageAccesses]);
-  const selectedIds=new Set(selected.map(row=>row.orderId));
   const toggle=(row:StockRow,checked:boolean)=>setSelected(current=>checked?[...current.filter(item=>item.orderId!==row.order_id),toSelection(row,loaderData.loadingWorkflowOrders.find(item=>item.orderId===row.order_id)??{orderId:row.order_id,appliesToCurrentOrFuture:true,fields:[]})]:current.filter(item=>item.orderId!==row.order_id));
   const values=<K extends keyof (typeof loaderData.options)[number]>(key:K)=>[...new Set(loaderData.options.map(row=>row[key]).filter(Boolean) as string[])];
   const batchValues=<K extends keyof (typeof loaderData.batchOptions)[number]>(key:K)=>[...new Set(loaderData.batchOptions.map(row=>row[key]).filter(Boolean) as string[])];
@@ -527,6 +527,7 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
       <Link className="secondary" to={`/warehouse/loading-documents?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}`}>进入配载文件</Link>
     </header>
     <ActionToast data={actionData}/>
+    <div className="alert info">仓库端仅核对待配载货物，不在此勾选成单。请由操作主管登录管理端，进入「汽运业务 → 配载工作台 → 规划生成配载单」。</div>
     <section className="panel consolidation-view-panel">
       <nav className="consolidation-view-tabs peer-page-tabs" aria-label="待配载池页面">
         <Link className={activeView==="stock"?"active":""} aria-current={activeView==="stock"?"page":undefined} to={consolidationViewHref(loaderData,"stock")} viewTransition>待配载订单 <span>{loaderData.total}</span></Link>
@@ -538,7 +539,7 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
       <section className="consolidation-tab-panel consolidation-stock-panel">
       <div className="panel-header">
         <div>
-          <h2>已贴标订单（只读）</h2>
+          <h2>已贴标订单（仓库只读）</h2>
           <p>每票订单的 OUL 已在“二次打包与贴标”生成并贴好；仓库不再决定订单组合或运输资源。</p>
         </div>
         <div className="consolidation-selection-actions"><span className="status-pill off">仓库只读核对 · 在库 {loaderData.total} 票</span></div>
@@ -546,7 +547,6 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
       <div className="table-wrap ltl-loading-table consolidation-stock-table">
         <table>
           <colgroup>
-            <col className="consolidation-col-select" />
             <col className="consolidation-col-status" />
             <col className="consolidation-col-order" />
             <col className="consolidation-col-receipt" />
@@ -557,7 +557,6 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
           </colgroup>
           <thead>
             <tr>
-              <th>选择</th>
               <th>配载状态</th>
               <th>订单 / 客户 / 货物</th>
               <th>实收数据</th>
@@ -569,12 +568,11 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
           </thead>
           <tbody>
             {loaderData.rows.map(row=>{
-              const assigned=Boolean(row.active_batch_id),blockers=loadingConsolidationCandidateBlockers(row,loadingStageAccessByOrder.get(row.order_id)),checked=selectedIds.has(row.order_id);
+              const assigned=Boolean(row.active_batch_id),blockers=loadingConsolidationCandidateBlockers(row,loadingStageAccessByOrder.get(row.order_id));
               const requirements=loaderData.orderDocumentRequirements.find(group=>group.orderId===row.order_id)?.documents??[];
               const documents=loaderData.latestRequiredDocuments.filter(document=>document.order_id===row.order_id);
-              return <tr key={row.order_id} className={checked?"selected-row":""}>
-                <td><input type="checkbox" checked={assigned} disabled aria-label={`订单 ${row.order_number} 配载状态`}/></td>
-                <td>{assigned?<span className="status-pill" title={row.active_batch_number??"已加入配载单"}>已配载 · {row.active_batch_number}</span>:<span className={`status-pill ${blockers.length?"off":"success"}`} title={blockers.join("；")}>{blockers.length?"不可配载":"可配载"}</span>}</td>
+              return <tr key={row.order_id}>
+                <td>{assigned?<span className="status-pill" title={row.active_batch_number??"已加入配载单"}>已配载 · {row.active_batch_number}</span>:<span className={`status-pill ${blockers.length?"off":"success"}`} title={blockers.join("；")}>{blockers.length?"暂不可配载":"待主管配载"}</span>}</td>
                 <td className="consolidation-order-cell" title={`${row.order_number} · ${row.customer_name} · ${row.cargo_names||"未填写货名"}`}><strong>{row.order_number}</strong><span>· {row.customer_name}</span><small>· {row.cargo_names||"未填写货名"}</small></td>
                 <td className="consolidation-receipt-cell" title={`${row.package_count} 包装 / ${row.pieces} 件 · ${row.weight_kg.toFixed(2)} KG · ${row.volume_cbm.toFixed(3)} CBM`}><strong>{row.package_count} 包装 / {row.pieces} 件</strong><span>· {row.weight_kg.toFixed(2)} KG · {row.volume_cbm.toFixed(3)} CBM</span></td>
                 <td className="consolidation-origin-warehouse-cell" title={loaderData.warehouse.name}>{loaderData.warehouse.name}</td>
@@ -622,9 +620,9 @@ function ConsolidationForm({selected,totals,warehouseName,policies,carriers,vehi
       {policies.exit_port.isActive&&<label className="field"><span>出境口岸{requiredMark(policies.exit_port)}</span><select name="borderPort" required={policies.exit_port.isRequired}><option value="">请选择出境口岸</option>{borderPorts.map(item=><option key={item.code} value={item.code}>{item.name} · {item.code}</option>)}</select></label>}
       {policies.customs_location.isActive&&<label className="field"><span>清关地{requiredMark(policies.customs_location)}</span><select name="customsLocation" required={policies.customs_location.isRequired}><option value="">请选择清关地</option>{customsPlaces.map(item=><option key={item.code} value={item.code}>{item.name} · {item.code}</option>)}</select></label>}
       {policies.loading_batch.isActive&&<label className="field"><span>配载单名称{requiredMark(policies.loading_batch)}</span><input name="batchName" placeholder="留空时系统自动生成"/></label>}
-      {policies.planned_loading_at.isActive&&<label className="field"><span>计划装车时间{requiredMark(policies.planned_loading_at)}</span><input name="plannedLoadingAt" type="datetime-local" required={policies.planned_loading_at.isRequired}/></label>}
-      {policies.planned_exit_at.isActive&&<label className="field"><span>计划出境发车时间{requiredMark(policies.planned_exit_at)}</span><input name="plannedDepartureAt" type="datetime-local" required={policies.planned_exit_at.isRequired}/></label>}
-      {policies.planned_arrival_at.isActive&&<label className="field"><span>计划境外到仓时间{requiredMark(policies.planned_arrival_at)}</span><input name="plannedArrivalAt" type="datetime-local" required={policies.planned_arrival_at.isRequired}/></label>}
+      {policies.planned_loading_at.isActive&&<label className="field"><span>计划装车时间{requiredMark(policies.planned_loading_at)}</span><DateTimeSelect name="plannedLoadingAt" required={policies.planned_loading_at.isRequired}/></label>}
+      {policies.planned_exit_at.isActive&&<label className="field"><span>计划出境发车时间{requiredMark(policies.planned_exit_at)}</span><DateTimeSelect name="plannedDepartureAt" required={policies.planned_exit_at.isRequired}/></label>}
+      {policies.planned_arrival_at.isActive&&<label className="field"><span>计划境外到仓时间{requiredMark(policies.planned_arrival_at)}</span><DateTimeSelect name="plannedArrivalAt" required={policies.planned_arrival_at.isRequired}/></label>}
       {policies.route_code.isActive&&<label className="field"><span>运输线路{requiredMark(policies.route_code)}</span><input name="routeNotes" placeholder={policies.route_code.isRequired?"请填写运输线路":"选填"} required={policies.route_code.isRequired}/></label>}
       {policies.loading_notes.isActive&&<label className="field span-2"><span>备注{requiredMark(policies.loading_notes)}</span><input name="notes" placeholder={policies.loading_notes.isRequired?"请填写配载备注":"选填"} required={policies.loading_notes.isRequired}/></label>}
     </div>
@@ -638,7 +636,7 @@ function BatchResourceForm({batch,carriers,vehicles,drivers,busy}:{batch:BatchRo
     <input type="hidden" name="intent" value="resource"/>
     <input type="hidden" name="batchId" value={batch.id}/>
     <BatchResourceFields carriers={carriers} vehicles={vehicles} drivers={drivers} carrierId={batch.carrier_id??""} vehicleMasterId={batch.vehicle_master_id??""} driverMasterId={batch.driver_master_id??""}/>
-    <label className="field"><span>计划出境发车时间 *</span><input name="plannedDepartureAt" type="datetime-local" defaultValue={businessDateTimeLabel(batch.planned_departure_at).replace(" ","T")} required/></label>
+    <label className="field"><span>计划出境发车时间 *</span><DateTimeSelect name="plannedDepartureAt" defaultValue={businessDateTimeLabel(batch.planned_departure_at).replace(" ","T")} required/></label>
     <div className="alert info">保存后同步到管理后台配载单和已生成但尚未开始扫描的仓库装车任务。</div>
     <button className="primary" disabled={busy}>确认承运商、车辆和司机</button>
   </Form>

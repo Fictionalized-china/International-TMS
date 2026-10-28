@@ -6,6 +6,7 @@ import type { Route } from "./+types/admin.loading-detail";
 import { OrderNumberLink } from "../components/EntityNumberLink";
 import { OrganizationAssigneePicker } from "../components/OrganizationAssigneePicker";
 import { ActionToast } from "../components/ActionToast";
+import { DateTimeSelect } from "../components/DateTimeSelect";
 import { isActiveOrganizationAssigneeForPositions, listActiveOrganizationAssignees } from "../lib/organization-assignee.server";
 import { requireSessionUser, type SessionUser } from "../lib/auth.server";
 import { writeAudit } from "../lib/audit.server";
@@ -2328,7 +2329,7 @@ function BatchCustomsReleaseForm({orderId,declaration,fields,busy}:{orderId:stri
   return <Form method="post" className="stack">
     <input type="hidden" name="intent" value="batch_order_customs_declaration_save"/><input type="hidden" name="orderId" value={orderId}/><input type="hidden" name="declarationId" value={declaration.id}/><input type="hidden" name="customsRecordId" value={declaration.customs_record_id}/><input type="hidden" name="releaseDeclaration" value="1"/>
     <BatchCustomsDeclarationView declaration={declaration} fields={fields}/><div className="alert warning">请确认上方当前工作流允许展示的报关内容无误且已获得海关放行。确认后将重算本票门禁和工作流。</div>
-    {release.visible&&<label className="field"><span>{release.label||"放行时间"}{release.required&&<b className="required-mark"> *</b>}</span><input name="releasedAt" type="datetime-local" defaultValue={dateTimeLocal(new Date().toISOString())} required={release.required}/></label>}<button className="primary" disabled={busy}>确认放行并同步工作流</button>
+    {release.visible&&<label className="field"><span>{release.label||"放行时间"}{release.required&&<b className="required-mark"> *</b>}</span><DateTimeSelect name="releasedAt" defaultValue={dateTimeLocal(new Date().toISOString())} required={release.required}/></label>}<button className="primary" disabled={busy}>确认放行并同步工作流</button>
   </Form>;
 }
 
@@ -2439,7 +2440,7 @@ function OverseasResourceFields({batch,carrierId,carrierVehicles,carrierDrivers}
   </>;
 }
 
-function Field({name,label,required,type="text",defaultValue,className}:{name:string;label:string;required?:boolean;type?:string;defaultValue?:string;className?:string}){return <label className={`field ${className||""}`.trim()}><span>{label}</span><input name={name} required={required} type={type} defaultValue={defaultValue} min={type==="number"?0:undefined} step={type==="number"?"0.001":undefined}/></label>}
+function Field({name,label,required,type="text",defaultValue,className}:{name:string;label:string;required?:boolean;type?:string;defaultValue?:string;className?:string}){return <label className={`field ${className||""}`.trim()}><span>{label}</span>{type==="datetime-local"?<DateTimeSelect name={name} required={required} defaultValue={defaultValue}/>:<input name={name} required={required} type={type} defaultValue={defaultValue} min={type==="number"?0:undefined} step={type==="number"?"0.001":undefined}/>}</label>}
 function numberOf(form:FormData,name:string){const value=Number(valueOf(form,name)||0);return Number.isFinite(value)&&value>=0?value:0}
 function positiveNumberOf(form:FormData,name:string,fallback=0){const value=Number(valueOf(form,name)||fallback);return Number.isFinite(value)&&value>0?value:0}
 function errorMessage(error:unknown){return error instanceof Error?error.message:"操作失败，请稍后重试"}

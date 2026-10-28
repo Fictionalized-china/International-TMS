@@ -121,7 +121,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const exception = url.searchParams.get("exception") || "";
   const routeFilters = readOrderRouteFilters(url.searchParams);
   const page = Math.max(1, Number(url.searchParams.get("page") || 1));
-  const pageSize = 10;
+  const pageSize = current.positionCode === "SALES" ? 25 : 10;
   const batchPage = Math.max(1, Number(url.searchParams.get("batchPage") || 1));
   const batchPageSize = 10;
   const legacyBatchKeyword = (url.searchParams.get("batchKeyword") || "").trim();
@@ -468,10 +468,11 @@ export default function Orders({ loaderData }: Route.ComponentProps) {
       : loaderData.orders.map((order) => order.id),
   });
   return (
-    <div className="page prototype-page order-list-page">
+    <div className={`page prototype-page order-list-page${loaderData.current.positionCode === "SALES" ? " sales-orders-page" : ""}`}>
       <div className="breadcrumb">汽运业务 / 订单中心</div>
       <header className="page-head">
         <div><h1>订单中心</h1><p>业务员可按线下已确认内容直接录单；询价与报价保留为可选销售工具。</p></div>
+        {loaderData.current.permissions.includes("transport.batch.plan") && <Link className="btn primary" to="/admin/loading?view=planning">进入配载规划工作台 →</Link>}
       </header>
       <AdminWorkspaceTabs user={loaderData.current} workspace="orders" />
       {loaderData.canViewBatchWorkload && !loaderData.unifiedSupervisorWorkload && <OrderWorkloadTabs
@@ -528,7 +529,7 @@ export default function Orders({ loaderData }: Route.ComponentProps) {
         </details>
       </Form>
       <section className="table-panel order-table-panel">
-        <div className="table-panel-head"><div><b>普通订单</b><span>有当前节点办理权限时显示橙色入口；其他订单仅供查看。</span></div><span>{loaderData.total} 单</span></div>
+        <div className="table-panel-head"><div><b>普通订单</b><span>有当前节点办理权限时显示橙色入口；其他订单仅供查看。</span></div><span>共 {loaderData.total} 单 · 每页 {loaderData.pageSize} 单</span></div>
         <div className="table-wrap">
           <table>
             <thead><tr><th>订单号</th><th>客户</th><th>类型</th><th>货物与实物数据</th><th>线路与目的仓</th><th>当前节点</th><th>负责人</th><th>状态</th><th>操作</th></tr></thead>

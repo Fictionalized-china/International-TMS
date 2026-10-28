@@ -4,6 +4,7 @@ import type { Route } from "./+types/admin.shipments";
 import { OrderNumberLink } from "../components/EntityNumberLink";
 import { OrderRouteFilterFields } from "../components/OrderRouteFilterFields";
 import { ActionToast } from "../components/ActionToast";
+import { DateTimeSelect } from "../components/DateTimeSelect";
 import { TransportExecutionTabs } from "../components/TransportExecutionTabs";
 import { requireSessionUser } from "../lib/auth.server";
 import { nextStates } from "../lib/workflow";
@@ -387,7 +388,7 @@ function ShipmentOperations({
               items={orders.map((o) => [o.id, `${o.order_number} · ${o.customer_name}`])}
             />
             <label className="field"><span>主追踪号</span><input name="tracking" /></label>
-            <label className="field"><span>预计送达</span><input name="eta" type="datetime-local" /></label>
+            <label className="field"><span>预计送达</span><DateTimeSelect name="eta" /></label>
             <button className="primary" disabled={busy}>创建运单</button>
           </Form>
         </details>
@@ -418,8 +419,8 @@ function ShipmentOperations({
             <label className="field"><span>承运商参考号</span><input name="reference" /></label>
             <label className="field"><span>起点</span><input name="origin" required /></label>
             <label className="field"><span>终点</span><input name="destination" required /></label>
-            <label className="field"><span>计划发车</span><input name="departure" type="datetime-local" /></label>
-            <label className="field"><span>计划到达</span><input name="arrival" type="datetime-local" /></label>
+            <label className="field"><span>计划发车</span><DateTimeSelect name="departure" /></label>
+            <label className="field"><span>计划到达</span><DateTimeSelect name="arrival" /></label>
             <button className="primary" disabled={busy}>添加分段</button>
           </Form>
         </details>
@@ -445,7 +446,7 @@ function ShipmentOperations({
                 </select>
               </label>
               <label className="field"><span>当前位置</span><input name="location" /></label>
-              <label className="field"><span>发生时间</span><input name="eventAt" type="datetime-local" /></label>
+              <label className="field"><span>发生时间</span><DateTimeSelect name="eventAt" /></label>
               <label className="field span-2"><span>轨迹说明</span><input name="description" required /></label>
               <label className="field"><span>签收人</span><input name="signedBy" /></label>
               <label className="field"><span>异常原因</span><input name="exceptionReason" /></label>

@@ -4,6 +4,7 @@ import { env } from "cloudflare:workers";
 import type { Route } from "./+types/admin.order-module";
 import { BatchNumberLink, OrderNumberLink } from "../components/EntityNumberLink";
 import { ActionToast } from "../components/ActionToast";
+import { DateTimeSelect } from "../components/DateTimeSelect";
 import { requireSessionUser } from "../lib/auth.server";
 import {
   canOperateCurrentOrder,
@@ -6808,10 +6809,10 @@ function ModuleBusinessData({
                 </div>
                 <div className="transport-schedule-row">
                   <ModuleField fields={data.workflowFields} fieldKey="domestic_planned_departure_at" label="计划提货时间" className="field transport-time-field" fallbackRequired>
-                    {(required) => <input name="plannedDepartureAt" type="datetime-local" required={required} />}
+                    {(required) => <DateTimeSelect name="plannedDepartureAt" required={required} />}
                   </ModuleField>
                   <ModuleField fields={data.workflowFields} fieldKey="domestic_planned_arrival_at" label="计划到仓时间" className="field transport-time-field" fallbackRequired>
-                    {(required) => <input name="plannedArrivalAt" type="datetime-local" required={required} />}
+                    {(required) => <DateTimeSelect name="plannedArrivalAt" required={required} />}
                   </ModuleField>
                 </div>
                 <div className="transport-notes-row">
@@ -7259,7 +7260,7 @@ function ModuleBusinessData({
                 </select>}
               </ModuleField>
               <ModuleField fields={data.workflowFields} fieldKey="tracking_event_at" label="发生时间" className="field tracking-node-event" fallbackRequired>
-                {(required) => <input name="eventAt" type="datetime-local" required={required} />}
+                {(required) => <DateTimeSelect name="eventAt" required={required} />}
               </ModuleField>
               <ModuleField fields={data.workflowFields} fieldKey="tracking_location" label="地点" className="field tracking-node-location" fallbackRequired>
                 {(required) => <input name="location" required={required} />}
@@ -8426,7 +8427,7 @@ function CustomsDeclarationForm({ busy, declaration, fields, lockStatus = false,
             : <select name="status" value={status} onChange={(event) => setStatus(event.target.value)} disabled={isDeleted} required={required}><option value="declared">已申报，待放行</option>{releaseVisible && <option value="released">已放行</option>}</select>}
         </ModuleField>
         <ModuleField fields={fields} fieldKey="declared_at" label="申报时间" className="field customs-field-third" fallbackRequired>
-          {(required) => <input name="declaredAt" type="datetime-local" defaultValue={toDateTimeInput(declaration?.declared_at) || toDateTimeInput(new Date().toISOString())} required={required} />}
+          {(required) => <DateTimeSelect name="declaredAt" defaultValue={toDateTimeInput(declaration?.declared_at) || toDateTimeInput(new Date().toISOString())} required={required} />}
         </ModuleField>
         <ModuleField fields={fields} fieldKey="declaration_number" label="报关单号" className="field customs-field-third" fallbackRequired>
           {(required) => <input name="declarationNumber" defaultValue={declaration?.declaration_number ?? ""} required={required} />}
@@ -8452,7 +8453,7 @@ function CustomsDeclarationForm({ busy, declaration, fields, lockStatus = false,
           </ModuleField>
         </div>}
         {status === "released" && !isDeleted && !lockStatus && <ModuleField fields={fields} fieldKey="customs_release" label="放行时间" className="field customs-field-third" fallbackRequired>
-          {(required) => <input name="releasedAt" type="datetime-local" defaultValue={toDateTimeInput(declaration?.released_at) || toDateTimeInput(new Date().toISOString())} required={required} />}
+          {(required) => <DateTimeSelect name="releasedAt" defaultValue={toDateTimeInput(declaration?.released_at) || toDateTimeInput(new Date().toISOString())} required={required} />}
         </ModuleField>}
       </div>
     </section>
@@ -8604,7 +8605,7 @@ function CustomsNextStepStrip({
           {record.quarantine_required === 1 && <input type="hidden" name="quarantineRequired" value="on" />}
           <label className="field">
             <span>放行时间</span>
-            <input name="releasedAt" type="datetime-local" defaultValue={toDateTimeInput(new Date().toISOString())} required />
+            <DateTimeSelect name="releasedAt" defaultValue={toDateTimeInput(new Date().toISOString())} required />
           </label>
           <button className="primary" disabled={busy}>确认海关放行</button>
         </Form>
@@ -8709,16 +8710,16 @@ function CustomsRecordForm({
       </label>
       <label className="field">
         <span>截关日期</span>
-        <input name="cutoffAt" type="datetime-local" defaultValue={toDateTimeInput(record?.cutoff_at)} />
+        <DateTimeSelect name="cutoffAt" defaultValue={toDateTimeInput(record?.cutoff_at)} />
       </label>
       <label className="field">
         <span>申报日期</span>
-        <input name="declaredAt" type="datetime-local" defaultValue={toDateTimeInput(record?.declared_at)} />
+        <DateTimeSelect name="declaredAt" defaultValue={toDateTimeInput(record?.declared_at)} />
       </label>
       {status === "released" && (
         <label className="field">
           <span>放行日期</span>
-          <input name="releasedAt" type="datetime-local" defaultValue={toDateTimeInput(record?.released_at) || toDateTimeInput(new Date().toISOString())} />
+          <DateTimeSelect name="releasedAt" defaultValue={toDateTimeInput(record?.released_at) || toDateTimeInput(new Date().toISOString())} />
         </label>
       )}
       <label className="field">

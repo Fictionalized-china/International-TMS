@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Form, useNavigation } from "react-router";
 import { Modal } from "./Modal";
+import { DateTimeSelect } from "./DateTimeSelect";
 import { dailyTrackingKindLabels, dailyTrackingKinds } from "../lib/daily-tracking";
 
 export function DailyTrackingForm({orderId,orderNumber,requestId,closeSignal}:{orderId:string;orderNumber:string;requestId:string;closeSignal:unknown}) {
@@ -8,7 +9,7 @@ export function DailyTrackingForm({orderId,orderNumber,requestId,closeSignal}:{o
   return <Modal title={`每日运踪 · ${orderNumber}`} triggerLabel="登记每日运踪" triggerClassName="text-button" closeSignal={closeSignal}>
     <Form method="post" className="form-grid"><input type="hidden" name="intent" value="daily"/><input type="hidden" name="orderId" value={orderId}/><input type="hidden" name="requestId" value={`${requestId}:${orderId}`}/>
       <label>动态类型<select name="eventKind">{dailyTrackingKinds.map(kind=><option key={kind} value={kind}>{dailyTrackingKindLabels[kind]}</option>)}</select></label>
-      <label>发生时间（北京时间）<input type="datetime-local" name="eventAt" required defaultValue={new Date(Date.now()+8*3600*1000).toISOString().slice(0,16)}/></label>
+      <label>发生时间（北京时间）<DateTimeSelect name="eventAt" required defaultValue={new Date(Date.now()+8*3600*1000).toISOString().slice(0,16)}/></label>
       <label>当前地点<input name="location" required maxLength={200}/></label><label>车号 / 换装车号<input name="vehicleReference" maxLength={100}/></label>
       <label className="full">运踪说明 / 排队位置<textarea name="notes" required maxLength={2000}/></label>
       <label><input type="checkbox" name="visible" value="1" defaultChecked/>同步到客户运踪</label>
@@ -21,7 +22,7 @@ export function DispatchRequestForm({orderId,orderNumber,closeSignal}:{orderId:s
   const busy=useNavigation().state!=="idle";
   return <Modal title={`商务找车 · ${orderNumber}`} triggerLabel="计划到口岸 / 找车" triggerClassName="text-button" closeSignal={closeSignal}><Form method="post" className="form-grid">
     <input type="hidden" name="intent" value="dispatch_request"/><input type="hidden" name="orderId" value={orderId}/>
-    <label>计划到口岸（北京时间）<input type="datetime-local" name="plannedPortArrivalAt" required/></label>
+    <label>计划到口岸（北京时间）<DateTimeSelect name="plannedPortArrivalAt" required/></label>
     <p>可先保存计划，按配置提前天数自动生成找车待办；也可现在发送。资料不齐时会明确列出缺项。</p>
     <button className="secondary" name="planOnly" value="1" disabled={busy}>仅保存计划</button><button className="primary" disabled={busy}>发送商务找车任务</button>
   </Form></Modal>;

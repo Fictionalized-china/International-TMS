@@ -4,6 +4,7 @@ import { flushSync } from "react-dom";
 import { Form, Link, redirect, useNavigate, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.order-detail";
 import { ActionToast } from "../components/ActionToast";
+import { DateTimeSelect } from "../components/DateTimeSelect";
 import { ReviewAssignmentWorkbench } from "../components/ReviewAssignmentWorkbench";
 import { requireSessionUser } from "../lib/auth.server";
 import {
@@ -3445,7 +3446,7 @@ function OrderEditForm({
       </label>
       <label className="field">
         <span>预约提货时间</span>
-        <input name="requestedPickupDate" type="datetime-local" defaultValue={toDateTimeLocal(order.requested_pickup_date)} required />
+        <DateTimeSelect name="requestedPickupDate" defaultValue={toDateTimeLocal(order.requested_pickup_date)} required />
       </label>
       <label className="field">
         <span>要求送达日</span>

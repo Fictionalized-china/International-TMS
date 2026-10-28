@@ -92,7 +92,7 @@ export const adminNavigationPermissionGroups: readonly AdminNavigationPermission
       navigationItem("quotations", "询价与报价", "销售管理 → 报价辅助；可独立停用，不影响直接录单。", "/admin/quotations", ["quote.view"]),
       navigationItem("orders", "订单中心", "查看岗位范围内的运输订单。", "/admin/orders", ["order.view"]),
       {
-        ...navigationItem("loading", "配载单跟踪", "查看本人可访问的配载单。", "/admin/loading", ["transport.batch.assigned.view"]),
+        ...navigationItem("loading", "配载工作台", "操作主管规划生成配载单；其他岗位查看本人可访问的配载单。", "/admin/loading", ["transport.batch.assigned.view"]),
         accessPermissionCodes: [
           "transport.batch.assigned.view",
           "transport.batch.plan",

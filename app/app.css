@@ -7060,7 +7060,7 @@ label:not(:has(> span:first-child .required-mark)):not(:has(> span:first-child >
 .order-mark-revision-form label { display: grid; gap: 4px; min-width: 120px; }
 .order-mark-revision-form label span { font-weight: 700; }
 .order-mark-revision-form input { width: 120px; }
-.order-mark-print-area { display: flex; justify-content: center; }
+.order-mark-print-area { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
 .order-mark-label {
   width: min(760px, 100%);
   padding: 18px 22px;
@@ -7117,6 +7117,21 @@ label:not(:has(> span:first-child .required-mark)):not(:has(> span:first-child >
 .order-mark-preview-modal .modal-header h2 { font-size: 15px; }
 .order-mark-preview-modal .modal-body { padding: 12px 16px 0; }
 .order-mark-dialog { display: grid; gap: 12px; }
+.order-mark-carousel-controls { display: flex; justify-content: space-between; align-items: center; gap: 12px; color: #18334d; }
+.order-mark-carousel-controls > div { display: flex; gap: 8px; }
+.order-mark-carousel-controls button { cursor: pointer; }
+.order-mark-carousel-controls button:disabled { opacity: .45; cursor: not-allowed; }
+.loading-workspace-tabs { display: flex; gap: 8px; margin: 0 0 12px; }
+.loading-workspace-tabs a { display: inline-flex; align-items: center; gap: 8px; min-height: 42px; padding: 8px 14px; border: 1px solid #cbd8e4; background: #fff; color: #24435f; text-decoration: none; }
+.loading-workspace-tabs a.active { border-color: #153b5b; background: #153b5b; color: #fff; }
+.loading-workspace-tabs a span { padding: 1px 6px; border-radius: 10px; background: #edf3f8; color: #153b5b; }
+@media (max-width: 680px) { .loading-workspace-tabs { flex-direction: column; } }
+.order-mark-carousel-viewport { min-width: 0; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x mandatory; scrollbar-width: auto; scrollbar-color: #58718c #e6edf3; }
+.order-mark-dialog .order-mark-print-area { width: 100%; flex-wrap: nowrap; justify-content: flex-start; }
+.order-mark-dialog .order-mark-label { box-sizing: border-box; flex: 0 0 100%; max-width: none; scroll-snap-align: start; }
+.date-time-select { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; min-width: 0; }
+.date-time-select > input[type="date"] { flex: 1 1 148px; min-width: 0; }
+.date-time-select > select { flex: 1 1 66px; max-width: 110px; min-width: 0; }
 .order-mark-dialog-status {
   min-height: 46px;
   padding: 8px 12px;
@@ -7197,7 +7212,11 @@ label:not(:has(> span:first-child .required-mark)):not(:has(> span:first-child >
   }
   .order-mark-preview-modal > .modal-header,
   .order-mark-preview-modal .order-mark-dialog-status,
-  .order-mark-preview-modal .order-mark-dialog-actions { display: none !important; }
+  .order-mark-preview-modal .order-mark-dialog-actions,
+  .order-mark-preview-modal .order-mark-carousel-controls { display: none !important; }
+  .order-mark-preview-modal .order-mark-carousel-viewport { overflow: visible !important; }
+  .order-mark-preview-modal .order-mark-print-area { display: block !important; }
+  .order-mark-preview-modal .order-mark-label { width: 100% !important; margin-bottom: 8mm; break-after: page; }
   .order-mark-preview-modal > .modal-body {
     max-height: none !important;
     padding: 0 !important;
@@ -20436,6 +20455,21 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   flex-direction: column;
   color: var(--ink);
 }
+.admin-app-shell .content:has(> .prototype-page.sales-orders-page) { overflow-y: auto; }
+.prototype-page.sales-orders-page { height: auto; min-height: 100%; }
+.prototype-page.sales-orders-page .table-panel { flex: none; overflow: visible; }
+.prototype-page.sales-orders-page .table-wrap { flex: none; overflow-x: auto; overflow-y: visible; }
+.prototype-page.sales-orders-page table { table-layout: fixed; min-width: 1120px; }
+.prototype-page.sales-orders-page th, .prototype-page.sales-orders-page td { white-space: normal; overflow-wrap: anywhere; }
+.sales-orders-page th:nth-child(1) { width: 14%; }
+.sales-orders-page th:nth-child(2) { width: 12%; }
+.sales-orders-page th:nth-child(3) { width: 6%; }
+.sales-orders-page th:nth-child(4) { width: 15%; }
+.sales-orders-page th:nth-child(5) { width: 19%; }
+.sales-orders-page th:nth-child(6) { width: 12%; }
+.sales-orders-page th:nth-child(7) { width: 8%; }
+.sales-orders-page th:nth-child(8) { width: 7%; }
+.sales-orders-page th:nth-child(9) { width: 7%; }
 .prototype-page .breadcrumb {
   min-height: 20px;
   margin-bottom: 9px;

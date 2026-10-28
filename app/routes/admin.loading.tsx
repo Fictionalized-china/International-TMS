@@ -4,6 +4,7 @@ import { Form, Link, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.loading";
 import { BatchNumberLink, OrderNumberLinkList } from "../components/EntityNumberLink";
 import { ActionToast } from "../components/ActionToast";
+import { DateTimeSelect } from "../components/DateTimeSelect";
 import { requireSessionUser } from "../lib/auth.server";
 import { batchVisibilitySql } from "../lib/order-access.server";
 import { canAccessBatchWorkspace } from "../lib/order-access";
@@ -100,6 +101,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   ).bind(current.organizationId, ...visibility.values, ...searchBinds,...advanced.values, pageSize, (page - 1) * pageSize).all<BatchRow>();
 
   const canPlan = current.permissions.includes("transport.batch.plan");
+  const view = canPlan && url.searchParams.get("view") !== "tracking" ? "planning" : "tracking";
   const [planningCandidates, planningOptions] = canPlan
     ? await Promise.all([
         loadLoadingPlanningCandidates(current),
@@ -110,6 +112,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const resourceFeedback=canPlan?await loadPlannedResourceFeedback(current):[];
   return {
     canPlan,
+    view,
     resourceFeedback,
     currentUserId:current.userId,
     requestId:crypto.randomUUID(),
@@ -186,19 +189,25 @@ export default function LoadingTracking({ loaderData, actionData }: Route.Compon
     <header className="page-header">
       <div>
         <p className="eyebrow">CONSOLIDATION TRACKING</p>
-        <h1>配载单跟踪</h1>
+        <h1>{loaderData.view === "planning" ? "配载规划工作台" : "配载单跟踪"}</h1>
         <p>操作主管按商务已录入的境外运输资源选择可配载订单；仓库只负责后续装车、扫描和出库执行。</p>
       </div>
-      <span className="status-pill">{loaderData.total} 张配载单</span>
+      <span className="status-pill">{loaderData.view === "planning" ? `${loaderData.planningCandidates.length} 票待配载` : `${loaderData.total} 张配载单`}</span>
     </header>
+    {loaderData.canPlan && <nav className="loading-workspace-tabs peer-page-tabs" aria-label="配载工作台视图">
+      <Link className={loaderData.view === "planning" ? "active" : ""} aria-current={loaderData.view === "planning" ? "page" : undefined} to="/admin/loading?view=planning">① 规划生成配载单 <span>{loaderData.planningCandidates.length}</span></Link>
+      <Link className={loaderData.view === "tracking" ? "active" : ""} aria-current={loaderData.view === "tracking" ? "page" : undefined} to="/admin/loading?view=tracking">② 已生成配载单 <span>{loaderData.total}</span></Link>
+    </nav>}
     <ActionToast message={actionData?.formError || actionData?.success} tone={actionData?.formError ? "error" : "success"} data={actionData}/>
     {actionData && "batchId" in actionData && actionData.batchId && <div className={`alert ${actionData.syncPending ? "warning" : "success"}`}><strong>{actionData.syncPending ? "配载规划已保存，待同步后开放执行" : "配载规划已保存"}</strong>{actionData.syncPending ? <Form method="post"><input type="hidden" name="intent" value="retry_batch_sync"/><input type="hidden" name="batchId" value={actionData.batchId}/><button className="secondary" disabled={busy}>重试同步</button></Form> : <Link className="text-button" to={`/admin/loading/${actionData.batchId}`}>进入配载单办理 →</Link>}</div>}
-    {loaderData.canPlan && <BatchPlanningPanel data={loaderData} busy={busy}/>}
+    {loaderData.view === "planning" && <BatchPlanningPanel data={loaderData} busy={busy}/>}
+    {loaderData.view === "tracking" && <>
     <section className="panel loading-tracking-filter-panel">
       <Form method="get" action="." className="filter-bar compact loading-tracking-filter">
+        {loaderData.canPlan && <input type="hidden" name="view" value="tracking"/>}
         <label className="field loading-tracking-filter__query"><span>配载单号或订单号</span><input name="q" defaultValue={loaderData.q} placeholder="输入配载单号或子订单号" /></label>
         <label className="field loading-tracking-filter__status"><span>状态</span><select name="status" defaultValue={loaderData.status}><option value="all">全部</option><option value="active">执行中</option><option value="completed">已完成</option><option value="cancelled">已取消</option></select></label>
-        <div className="loading-tracking-filter__actions"><button className="primary">查询</button><Link className="secondary" to="/admin/loading">重置</Link></div>
+        <div className="loading-tracking-filter__actions"><button className="primary">查询</button><Link className="secondary" to={loaderData.canPlan ? "/admin/loading?view=tracking" : "/admin/loading"}>重置</Link></div>
         <details className="inline-details advanced-filter loading-tracking-filter__advanced" open={Boolean(loaderData.warehouse||loaderData.destination||loaderData.customer||loaderData.departureFrom||loaderData.departureTo)}><summary>高级筛选</summary><div className="filter-help form-grid compact">
           <label className="field"><span>装车仓</span><input name="warehouse" defaultValue={loaderData.warehouse} placeholder="仓库名称"/></label>
           <label className="field"><span>目的地</span><input name="destination" defaultValue={loaderData.destination} placeholder="目的仓或地区"/></label>
@@ -228,6 +237,7 @@ export default function LoadingTracking({ loaderData, actionData }: Route.Compon
         {loaderData.page < loaderData.pageCount && <Link className="secondary" to={pageHref(loaderData, loaderData.page + 1)}>下一页</Link>}
       </div>}
     </section>
+    </>}
   </>;
 }
 
@@ -283,9 +293,9 @@ function BatchPlanningPanel({ data, busy }: {
       <details className="inline-details"><summary>口岸、时间与补充说明</summary><div className="form-grid compact loading-batch-fields">
         <label className="field"><span>出境口岸</span><select name="borderPort" defaultValue=""><option value="">按工作流选填</option>{data.planningOptions.borderPorts.map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label>
         <label className="field"><span>清关地</span><select name="customsLocation" defaultValue=""><option value="">按工作流选填</option>{data.planningOptions.customsPlaces.map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label>
-        <label className="field"><span>计划装车</span><input name="plannedLoadingAt" type="datetime-local"/></label>
-        <label className="field"><span>计划出境</span><input name="plannedDepartureAt" type="datetime-local"/></label>
-        <label className="field"><span>计划到仓</span><input name="plannedArrivalAt" type="datetime-local"/></label>
+        <label className="field"><span>计划装车</span><DateTimeSelect name="plannedLoadingAt"/></label>
+        <label className="field"><span>计划出境</span><DateTimeSelect name="plannedDepartureAt"/></label>
+        <label className="field"><span>计划到仓</span><DateTimeSelect name="plannedArrivalAt"/></label>
         <label className="field"><span>线路说明</span><input name="routeNotes" placeholder="按工作流选填"/></label>
         <label className="field span-2"><span>配载说明</span><input name="notes" placeholder="特殊装载、交接或调度说明"/></label>
       </div></details>
@@ -294,15 +304,17 @@ function BatchPlanningPanel({ data, busy }: {
         const disabled = !compatible(item) && !selectedIds.includes(item.order_id);
         return <tr key={item.order_id} className={selectedIds.includes(item.order_id) ? "selected-row" : ""}><td><input type="checkbox" name="orderIds" aria-label={`选择订单 ${item.order_number}`} value={item.order_id} checked={selectedIds.includes(item.order_id)} disabled={disabled} onChange={(event) => toggle(item.order_id,event.currentTarget.checked)}/></td><td><strong>{item.order_number}</strong><small>{item.customer_name}</small></td><td>{item.warehouse_name}</td><td>{item.overseas_warehouse_name || "未设置"}<small>{[item.destination_country,item.destination_state,item.destination_city].filter(Boolean).join(" ")}</small></td><td>{Number(item.weight_kg).toFixed(2)} KG<small>{Number(item.volume_cbm).toFixed(3)} CBM · {item.package_count} 包</small></td><td>{disabled ? "与当前选择不兼容" : "可配载"}</td></tr>;
       })}</tbody></table></div>
-      {!data.planningCandidates.length && <p className="empty-state">当前没有同时满足“已货齐、无异常、未占用、工作流已到配载节点”的订单。</p>}
+      {!data.planningCandidates.length && <p className="empty-state">当前没有同时满足“已货齐、已贴标、无异常、未占用、工作流已到配载节点”的订单。仓库端待配载池仅供核对，不能在仓库账号中勾选成单。</p>}
+      {data.planningCandidates.length === 1 && <p className="alert info">目前只有 1 票可配载；拼车配载至少需要两票同仓、同目的地且同操作主管的订单。</p>}
       <div className="inline-loading-actions"><small>提交时会重新校验订单、运输资源、负责人和成本；按流程策略自动关联子订单成本，关闭自动关联时保留分摊草稿供人工确认。</small><button className="primary" disabled={busy || selected.length < 2 || !carrierId || !vehicleId || !driverId || Number(costAmount) <= 0 || Number(costExchangeRate)<=0}>{busy ? "正在校验并生成…" : "确认资源、负责人和成本并生成配载单"}</button></div>
     </Form>
   </section>;
 }
 
-function pageHref(data: { q: string; status: string } & Record<"warehouse"|"destination"|"customer"|"departureFrom"|"departureTo",string>, page: number) {
+function pageHref(data: { q: string; status: string; canPlan: boolean } & Record<"warehouse"|"destination"|"customer"|"departureFrom"|"departureTo",string>, page: number) {
   const params = new URLSearchParams({ q:data.q,status:data.status,warehouse:data.warehouse,destination:data.destination,
     customer:data.customer,departureFrom:data.departureFrom,departureTo:data.departureTo,page:String(page) });
+  if (data.canPlan) params.set("view", "tracking");
   return `/admin/loading?${params}`;
 }
 
