@@ -231,6 +231,32 @@ describe("order readiness follows the bound workflow field modes", () => {
     expect(result.reasons.some((reason)=>reason.includes("重复办理节点"))).toBe(false);
   });
 
+  it("ignores quotation fields left in a direct-entry snapshot without a quotation node", async () => {
+    setFields("consignment", [
+      field("consignment", "quotation_customer_contact_name", "required", false, "quotation"),
+      field("consignment", "overseas_warehouse_id", "optional", true, "order_creation"),
+      field("consignment", "approval_result", "optional", true, "consignment_approval"),
+      frozenModule("consignment", "order_creation", "委托资料补充"),
+      frozenModule("consignment", "consignment_approval", "审核分配"),
+    ]);
+
+    const result = await checkOrderLoadPlan("org-1", "order-1");
+
+    expect(result).toEqual({ ready: true, reasons: [] });
+  });
+
+  it("still rejects active consignment fields outside every valid frozen placement", async () => {
+    setFields("consignment", [
+      field("consignment", "unexpected_field", "required", false, "unknown_step"),
+      frozenModule("consignment", "order_creation", "委托资料补充"),
+      frozenModule("consignment", "consignment_approval", "审核分配"),
+    ]);
+
+    const result = await checkOrderLoadPlan("org-1", "order-1");
+
+    expect(result.reasons).toContain("委托冻结工作流配置异常：字段未放在委托模块办理节点");
+  });
+
   it("fails pre-departure documents closed when a frozen module placement is malformed", async () => {
     setFields("transport", [
       frozenModule("transport", "domestic_execution", "国内运输"),
@@ -275,6 +301,26 @@ describe("order readiness follows the bound workflow field modes", () => {
     expect(optional.ready).toBe(true);
     expect(required.ready).toBe(false);
     expect(required.reasons).toContain("国内仓入库必填项未完成：warehouse_receipt");
+  });
+
+  it("does not require domestic receipt volume at loading for an older frozen workflow", async () => {
+    state.order = baseOrder({ warehouse_enabled: 1 });
+    setFields("warehouse", [
+      field("warehouse", "actual_weight_kg", "required", true, "warehouse_receiving"),
+      field("warehouse", "actual_volume_cbm", "required", false, "warehouse_receiving"),
+      frozenModule("warehouse", "warehouse_receiving", "国内仓入库"),
+    ]);
+
+    const result = await checkOrderLoadPlan("org-1", "order-1");
+
+    expect(result).toEqual({ ready: true, reasons: [] });
+    setFields("warehouse", [
+      field("warehouse", "actual_weight_kg", "required", false, "warehouse_receiving"),
+      field("warehouse", "actual_volume_cbm", "required", false, "warehouse_receiving"),
+      frozenModule("warehouse", "warehouse_receiving", "国内仓入库"),
+    ]);
+    const missingWeight = await checkOrderLoadPlan("org-1", "order-1");
+    expect(missingWeight.reasons).toContain("“国内仓入库”必填项未完成：actual_weight_kg");
   });
 
   it("uses a custom frozen warehouse target instead of the canonical warehouse step", async () => {

@@ -154,8 +154,16 @@ async function workflowRequirements(
     ) {
       const placementKeys = new Set(uniquePlacements.map((placement) => placement.stepKey));
       const configuredFields = fields.filter((field) => !isFrozenWorkflowFieldScopeMarker(field));
-      const misplaced = configuredFields.filter((field) => field.isActive && !placementKeys.has(field.stepKey));
-      const duplicatePlacementKeys = configuredFields
+      // Direct-entry orders omit the optional quotation node, but older frozen
+      // snapshots still carry its fields. They are not part of this order's
+      // executable workflow and must not block downstream warehouse work.
+      const omittedOptionalQuotation = placementKeys.has("order_creation") &&
+        placementKeys.has("consignment_approval") && !placementKeys.has("quotation");
+      const placedFields = configuredFields.filter((field) => placementKeys.has(field.stepKey));
+      const misplaced = configuredFields.filter((field) => field.isActive &&
+        !placementKeys.has(field.stepKey) &&
+        !(omittedOptionalQuotation && field.stepKey === "quotation"));
+      const duplicatePlacementKeys = placedFields
         .map((field) => `${field.stepKey}:${field.fieldKey}`)
         .filter((key, index, values) => values.indexOf(key) !== index);
       const reasons = [
@@ -163,7 +171,7 @@ async function workflowRequirements(
         ...(duplicatePlacementKeys.length ? ["委托冻结工作流配置异常：同一节点存在重复字段"] : []),
       ];
       scopes.set(moduleCode, {
-        fields: reasons.length ? markers : fields,
+        fields: reasons.length ? markers : [...placedFields, ...markers],
         targetStepName: null,
         reasons,
       });
@@ -381,7 +389,11 @@ export async function checkOrderLoadPlan(
   if (blocker) reasons.push(`${blocker.module_name}存在当前阶段阻断或异常`);
 
   if (order.warehouse_enabled === 1) {
-    const missingWarehouseFields = workflow.missingRequired("warehouse");
+    // Domestic receiving treats measured volume as informational even when an
+    // older frozen workflow still marks it required. Packing records the final
+    // outbound dimensions, so zero receipt volume is not a loading gate.
+    const missingWarehouseFields = workflow.missingRequired("warehouse")
+      .filter((field) => field.fieldKey !== "actual_volume_cbm");
     if (missingWarehouseFields.length) {
       reasons.push(
         `${workflow.targetStepName("warehouse")
