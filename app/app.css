@@ -7129,9 +7129,86 @@ label:not(:has(> span:first-child .required-mark)):not(:has(> span:first-child >
 .order-mark-carousel-viewport { min-width: 0; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x mandatory; scrollbar-width: auto; scrollbar-color: #58718c #e6edf3; }
 .order-mark-dialog .order-mark-print-area { width: 100%; flex-wrap: nowrap; justify-content: flex-start; }
 .order-mark-dialog .order-mark-label { box-sizing: border-box; flex: 0 0 100%; max-width: none; scroll-snap-align: start; }
-.date-time-select { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; min-width: 0; }
-.date-time-select > input[type="date"] { flex: 1 1 148px; min-width: 0; }
-.date-time-select > select { flex: 1 1 66px; max-width: 110px; min-width: 0; }
+/* Common date/time control: keep the existing dense TMS visual language while
+ * presenting date, hour and minute as one familiar segmented field.  The
+ * doubled class/child selectors intentionally outrank generic `.field > span`
+ * and full-width input rules without changing any other form control. */
+.date-time-select.date-time-select,
+.field > .date-time-select {
+  display: grid;
+  grid-template-columns: minmax(112px, 1fr) 1px minmax(54px, 68px) 8px minmax(54px, 68px);
+  align-items: stretch;
+  gap: 0;
+  width: min(100%, 388px);
+  min-width: 0;
+  min-height: var(--form-control-height, 34px);
+  margin: 0;
+  overflow: hidden;
+  color: var(--ink, #183149);
+  font-size: inherit;
+  line-height: normal;
+  background: #fff;
+  border: 1px solid #cbd8e4;
+  border-radius: 3px;
+  transition: border-color .16s ease, box-shadow .16s ease;
+}
+.date-time-select.date-time-select:focus-within {
+  border-color: var(--blue, #1769aa);
+  box-shadow: 0 0 0 2px #eaf2ff;
+}
+.warehouse-app-shell .date-time-select.date-time-select:focus-within {
+  border-color: var(--green, #15936b);
+  box-shadow: 0 0 0 2px #e8f7f1;
+}
+.date-time-select > .date-time-select__part {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  height: calc(var(--form-control-height, 34px) - 2px) !important;
+  min-height: calc(var(--form-control-height, 34px) - 2px) !important;
+  margin: 0;
+  padding: 0 10px;
+  color: inherit;
+  font: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  outline: 0;
+}
+.date-time-select > .date-time-select__date { padding-right: 8px; }
+.date-time-select > .date-time-select__hour,
+.date-time-select > .date-time-select__minute { padding-left: 8px; padding-right: 6px; }
+.date-time-select > .date-time-select__divider {
+  align-self: stretch;
+  width: 1px;
+  margin: 6px 0;
+  background: #dce4ea;
+}
+.date-time-select > .date-time-select__separator {
+  display: grid;
+  place-items: center;
+  width: 8px;
+  min-width: 8px;
+  margin: 0;
+  color: #7890a5;
+  font-weight: 700;
+  line-height: 1;
+}
+.date-time-select:has(.date-time-select__part:disabled) {
+  background: #f4f7f9;
+  color: #7890a5;
+}
+@media (max-width: 520px) {
+  .date-time-select.date-time-select,
+  .field > .date-time-select {
+    grid-template-columns: minmax(104px, 1fr) 1px minmax(52px, 64px) 8px minmax(52px, 64px);
+    width: 100%;
+  }
+  .date-time-select > .date-time-select__part { padding-left: 7px; padding-right: 5px; }
+  .date-time-select > .date-time-select__separator { width: 8px; min-width: 8px; }
+}
 .order-mark-dialog-status {
   min-height: 46px;
   padding: 8px 12px;

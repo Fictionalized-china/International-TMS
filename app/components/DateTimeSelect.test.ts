@@ -16,5 +16,9 @@ describe("splitDateTimeInputValue", () => {
     expect(html).toContain('name="plannedDepartureAt"');
     expect(html).toContain('value="2026-10-29T11:10"');
     expect(html).toContain("required");
+    expect(html).toContain('role="group"');
+    expect(html).toContain('aria-label="选择日期和时间"');
+    expect(html).toContain('class="date-time-select__part date-time-select__hour"');
+    expect(html).toContain('class="date-time-select__separator"');
   });
 });
