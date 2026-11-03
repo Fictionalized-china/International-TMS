@@ -5,6 +5,7 @@ vi.mock("cloudflare:workers", () => ({ env: { get DB() { return harness.db; } } 
 import { loadMeetingSettlement, submitMeetingSignature } from "./meeting-settlement.server";
 import { meetingSignatureAccess, settlementActionOwners } from "./meeting-settlement";
 import { loadOrderModuleWorkflowFields, expenseLedgerFieldPresent } from "./workflow-fields.server";
+import { listOrderModules } from "./order-modules.server";
 
 let fixture: Awaited<ReturnType<typeof meetingFixture>>;
 afterEach(() => {if(fixture?.database.isOpen)fixture.database.close();});
@@ -51,6 +52,16 @@ describe("settlement canonical responsibility and valid zero fees", () => {
     fixture.database.prepare("INSERT INTO workflow_instance_fields(id,instance_id,workflow_id,step_key,module_code,field_key,label,field_type,is_required,is_active,created_at) VALUES('price','instance','wf','reconciliation','costs','expense_unit_price','单价','amount',1,1,?)").run(fixture.now);
     const fields = await loadOrderModuleWorkflowFields("org", "order", "costs");
     expect(fields.find(field => field.fieldKey === "expense_unit_price")?.present).toBe(true);
+  });
+  it("does not display a stale price or settlement-stage blocker after pickup while preserving unsigned controls", async () => {
+    await setup();
+    fixture.database.exec("UPDATE order_module_instances SET status='in_progress',blocking_reason='单价、尚未进入对账结算节点' WHERE module_code='costs'");
+    const modules=await listOrderModules('org','order');
+    const costs=modules.find(module=>module.module_code==='costs');
+    expect(costs?.blocking_reason).not.toContain('尚未进入对账结算节点');
+    expect(costs?.blocking_reason).not.toContain('单价');
+    expect(costs?.blocking_reason).toContain('应收');
+    expect(fixture.database.prepare("SELECT COUNT(*) n FROM order_expense_direction_controls").get()?.n).toBe(0);
   });
   it.each([0, "0", 123, "12.50"])("accepts an explicitly entered non-negative price %s", value => {
     expect(expenseLedgerFieldPresent("expense_unit_price", value, "amount")).toBe(true);

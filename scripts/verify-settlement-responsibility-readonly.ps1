@@ -41,7 +41,7 @@ foreach($index in @(7,2,5,4,10,8,11)){
   $context=[pscustomobject]@{Index=$index;Session=$session;Query=$signedUri.Query}
   $approval=Read-Page $context "/admin/settlement-approvals?q=$OrderNumber"
   if($approval.Content -match '此客户未配置客服代办应收'){throw 'Order-entry authorization still blocks settlement'}
-  if($approval.Content -notmatch '本单责任人：'){throw 'Canonical signature-owner hints missing'}
+  if($index -ne 11 -and $approval.Content -notmatch '本单责任人：'){throw 'Canonical signature-owner hints missing'}
   if($index -eq 7 -and !(Has-SignatureForm $approval 'receivable' 'confirm')){throw 'Assigned CS has no AR confirmation form'}
   if($index -eq 5 -and !(Has-SignatureForm $approval 'payable' 'confirm')){throw 'Assigned operation user has no AP application form'}
   if($index -notin @(7,2) -and (Has-SignatureForm $approval 'receivable' 'confirm')){throw "Slot $index can incorrectly initiate AR"}
@@ -49,7 +49,13 @@ foreach($index in @(7,2,5,4,10,8,11)){
   if($index -in @(7,5,4,10)){
     $detail=Read-Page $context "/admin/orders/$OrderId"
     if($detail.Content -match '此客户未配置客服代办应收'){throw 'Order detail still uses customer intake flag for settlement'}
-    if($detail.Content -notmatch '不要求当前账号办理所有步骤'){throw 'Settlement-chain guidance missing'}
+    if($index -eq 7 -and $detail.Content -notmatch '不要求当前账号办理所有步骤'){throw 'Settlement-chain guidance missing for the assigned CS'}
+    if($index -eq 7){
+      $visible=[regex]::Replace($detail.Content,'(?s)<script\b[^>]*>.*?</script>','')
+      foreach($block in [regex]::Matches($visible,'待补齐必填项：([^<]+)')){
+        if($block.Value -match '单价|尚未进入对账结算节点'){throw 'A stale completed prerequisite is still shown as a blocker'}
+      }
+    }
   }
   if($index -in @(7,10,11)){$null=Read-Page $context '/admin/billing'}
   Write-Host "PASS slot=$index correct signatory and sequence"

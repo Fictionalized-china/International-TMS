@@ -998,12 +998,10 @@ async function syncModuleStateFromTransportBatch(organizationId: string, orderId
   if (statements.length) await env.DB.batch(statements);
 }
 
-export async function syncCostsModuleStatus(
+export async function loadCostsCompletionGate(
   organizationId: string,
   orderId: string,
-  now = new Date().toISOString(),
 ) {
-  await ensureOrderModules(organizationId, orderId);
   const [expenses, controls, workflowFields, settlementStageReached] = await Promise.all([
     env.DB.prepare(
       `SELECT e.direction,COUNT(*) total,
@@ -1051,7 +1049,11 @@ export async function syncCostsModuleStatus(
     controls.results.map((item) => [item.direction, item]),
   );
   const gate = evaluateCostsCompletionGate({
-    fields: workflowFields,
+    fields: workflowFields.map(field=>{
+      const labels:Record<string,string>={customer_service_confirmation:"费用确认",business_review:"费用复核",finance_review:"费用审批"};
+      const legacyLabels=["客服费用确认","客服确认","业务审核","财务审核"];
+      return legacyLabels.includes(field.label)&&labels[field.fieldKey]?{...field,label:labels[field.fieldKey]}:field;
+    }),
     settlementStageReached,
     directions: (["receivable", "payable"] as const).map((direction) => {
       const control = controlByDirection.get(direction);
@@ -1066,6 +1068,16 @@ export async function syncCostsModuleStatus(
       };
     }),
   });
+  return gate;
+}
+
+export async function syncCostsModuleStatus(
+  organizationId: string,
+  orderId: string,
+  now = new Date().toISOString(),
+) {
+  await ensureOrderModules(organizationId, orderId);
+  const gate = await loadCostsCompletionGate(organizationId, orderId);
 
   const definition = orderModuleDefinition("costs");
   if (!definition) return;
@@ -1141,6 +1153,15 @@ export async function listOrderModules(
   )
     .bind(organizationId, orderId)
     .all<OrderModuleInstance>();
+  const costs = rows.results.find(module=>module.module_code==='costs');
+  if(costs?.enabled===1&&costs.status!=='completed'){
+    // A persisted summary can predate pickup, rule changes or an upgraded validator.
+    // Project current facts for readers; never create signatures or rewrite fees on GET.
+    const gate=await loadCostsCompletionGate(organizationId,orderId);
+    costs.blocking_reason=gate.blockingReason;
+    costs.progress_percent=gate.progressPercent;
+    costs.status=gate.status;
+  }
   return rows.results;
 }
 
