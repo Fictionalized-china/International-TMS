@@ -6,6 +6,8 @@ import type { Route } from "./+types/admin.loading-detail";
 import { OrderNumberLink } from "../components/EntityNumberLink";
 import { OrganizationAssigneePicker } from "../components/OrganizationAssigneePicker";
 import { ActionToast } from "../components/ActionToast";
+import { sendBatchToCommercial,returnBatchVehicleToCommercial } from "../lib/batch-dispatch.server";
+import { ensureBatchSystemDocuments } from "../lib/loading-manifest.server";
 import { DateTimeSelect } from "../components/DateTimeSelect";
 import { isActiveOrganizationAssigneeForPositions, listActiveOrganizationAssignees } from "../lib/organization-assignee.server";
 import { requireSessionUser, type SessionUser } from "../lib/auth.server";
@@ -216,6 +218,8 @@ async function assignBatchResponsibilities(input:{
         SET approval_status='approved',operation_assignee_user_id=?,document_assignee_user_id=?,
             approved_by_user_id=?,approved_at=?,approval_notes=NULL,responsibility_revision=?,updated_at=?
         WHERE id=? AND organization_id=? AND batch_number LIKE 'PZ-%' AND approval_status='submitted'
+          AND submitted_at IS NOT NULL AND carrier_id IS NOT NULL
+          AND EXISTS(SELECT 1 FROM transport_batch_vehicles v WHERE v.batch_id=transport_batches.id AND v.organization_id=transport_batches.organization_id AND v.status!='cancelled')
           AND ${initialResponsibilityGuard!.sql}`)
       .bind(input.operationAssigneeUserId,input.documentAssigneeUserId,input.actorUserId,input.now,revision,input.now,input.batchId,input.organizationId,...initialResponsibilityGuard!.values)
     : env.DB.prepare(`UPDATE transport_batches
@@ -637,6 +641,10 @@ export async function loader({request,params}:Route.LoaderArgs){
   if(!batch)throw new Response("配载批次不存在",{status:404});
   const canViewBatchCosts=canAccessSettlementWorkbench(current.permissions);
   const canWriteBatchCosts=hasBatchCostWritePermissions(current.permissions);
+  const commercialQuote=canViewBatchCosts?await env.DB.prepare(`SELECT q.freight_amount,q.currency,q.exchange_rate,q.allocation_method,q.notes,c.name carrier_name
+    FROM batch_dispatch_quotes q JOIN carriers c ON c.id=q.carrier_id AND c.organization_id=q.organization_id
+    WHERE q.organization_id=? AND q.batch_id=?`).bind(current.organizationId,batchId)
+    .first<{freight_amount:number;currency:string;exchange_rate:number;allocation_method:string;notes:string|null;carrier_name:string}>():null;
   // D1 allows only a small number of simultaneous connections per Worker
   // invocation. Load the workspace in groups of four instead of opening every
   // independent query at once.
@@ -747,7 +755,7 @@ export async function loader({request,params}:Route.LoaderArgs){
     canViewBatchCosts&&canWriteBatchCosts&&hasWholeBatchCostOwnership&&costAllocationAction?.editable,
   );
   const showBatchCosts=Boolean(
-    canViewBatchCosts&&(costAllocationAction?.visible||costAllocations?.length),
+    canViewBatchCosts&&(costAllocationAction?.visible||costAllocations?.length||commercialQuote),
   );
   const batchCostBlockedReason=costAllocationAction?costAllocationBlockedReason({
     canWritePermissions:canWriteBatchCosts,
@@ -821,7 +829,7 @@ export async function loader({request,params}:Route.LoaderArgs){
   const initialResponsibilityRestrictions=batch.approval_status==="submitted"
     ? await loadBatchInitialResponsibilityRestrictions(env.DB,current.organizationId,batchId)
     : buildBatchInitialResponsibilityRestrictions([]);
-  return{current,batch,canViewBatchCosts,showBatchCosts,canManageBatchCosts,batchCostBlockedReason,orders:orders.results,batchWorkflowPolicies,trackingMilestoneAction,actualExitAction,batchCargoItems,vehicles:vehicles.results,carriers:carriers.results,warehouses:warehouses.results,borderPorts:borderPorts.results,costAllocations,batchDocuments:batchDocuments.results,orderDocuments:orderDocuments.results,orderDocumentArchive:orderDocumentArchive.results,orderDocumentRequirements,customsSummaries:customsSummaries.results,customsDeclarations:customsDeclarations.results,batchExceptions,exceptionPackages,outboundStatuses:outboundStatuses.results,batchCustomsAccess,departureGateStatuses,returnOrderId,trackingMilestones,trackingFlags:trackingFlags.results,batchVehiclePlate,carrierVehicles:carrierVehicles.results,carrierDrivers:carrierDrivers.results,operationMembers:responsibilityMembers.results.filter(member=>member.position_code==="OPERATION"),documentMembers:responsibilityMembers.results.filter(member=>member.position_code==="DOC"),initialResponsibilityRestrictions};
+  return{current,batch,canViewBatchCosts,commercialQuote,showBatchCosts,canManageBatchCosts,batchCostBlockedReason,orders:orders.results,batchWorkflowPolicies,trackingMilestoneAction,actualExitAction,batchCargoItems,vehicles:vehicles.results,carriers:carriers.results,warehouses:warehouses.results,borderPorts:borderPorts.results,costAllocations,batchDocuments:batchDocuments.results,orderDocuments:orderDocuments.results,orderDocumentArchive:orderDocumentArchive.results,orderDocumentRequirements,customsSummaries:customsSummaries.results,customsDeclarations:customsDeclarations.results,batchExceptions,exceptionPackages,outboundStatuses:outboundStatuses.results,batchCustomsAccess,departureGateStatuses,returnOrderId,trackingMilestones,trackingFlags:trackingFlags.results,batchVehiclePlate,carrierVehicles:carrierVehicles.results,carrierDrivers:carrierDrivers.results,operationMembers:responsibilityMembers.results.filter(member=>member.position_code==="OPERATION"),documentMembers:responsibilityMembers.results.filter(member=>member.position_code==="DOC"),initialResponsibilityRestrictions};
 }
 
 export async function action({request,params}:Route.ActionArgs){
@@ -829,7 +837,7 @@ export async function action({request,params}:Route.ActionArgs){
   if(!canAccessBatchWorkspace(current))throw new Response("当前岗位没有配载单工作台访问权限",{status:403});
   const batchVisibility=batchVisibilitySql(current,"b");
   const privileged=["BOSS","DEVELOPER"].includes(current.positionCode??"")||current.roleCodes.some(code=>["owner","boss","developer"].includes(code));
-  const responsibilityIntent=["batch_approve","batch_reassign","batch_reject"].includes(intent);
+  const responsibilityIntent=["batch_dispatch_send","batch_approve","batch_reassign","batch_reject"].includes(intent);
   const customsIntent=intent==="batch_order_customs_declaration_save";
   const documentIntent=["batch_order_document_upload","batch_order_document_review"].includes(intent);
   const exceptionIntent=["batch_exception_create","batch_exception_progress","batch_exception_resolve"].includes(intent);
@@ -851,17 +859,30 @@ export async function action({request,params}:Route.ActionArgs){
   if(!allowed)throw new Response(costIntent?"无权查看或办理敏感费用分摊":customsIntent?"无权办理报关作业":documentIntent?"无权办理逐票文件":exceptionIntent?"无权办理配载异常":"无权办理拼车配载",{status:403});
   const batch=await env.DB.prepare(`SELECT b.id,b.batch_number,b.status,b.road_status,b.border_port,b.customs_location,b.route_notes,b.warehouse_id,b.overseas_carrier_name,b.overseas_vehicle_type,b.overseas_vehicle_count,b.overseas_vehicle_plate,b.overseas_driver_name,b.overseas_driver_phone FROM transport_batches b WHERE b.id=? AND b.organization_id=? AND b.status!='cancelled' AND ${batchVisibility.sql}`).bind(batchId,current.organizationId,...batchVisibility.values).first<{id:string;batch_number:string;status:string;road_status:string;border_port:string|null;customs_location:string|null;route_notes:string|null;warehouse_id:string|null;overseas_carrier_name:string|null;overseas_vehicle_type:string|null;overseas_vehicle_count:number;overseas_vehicle_plate:string|null;overseas_driver_name:string|null;overseas_driver_phone:string|null}>();
   if(!batch)return{formError:"配载批次无效"};
-  const batchApproval=await env.DB.prepare("SELECT batch_number,approval_status,operation_supervisor_user_id,operation_assignee_user_id,document_assignee_user_id,responsibility_revision,actual_departure_at,road_status FROM transport_batches WHERE id=? AND organization_id=?").bind(batchId,current.organizationId).first<{batch_number:string;approval_status:string;operation_supervisor_user_id:string|null;operation_assignee_user_id:string|null;document_assignee_user_id:string|null;responsibility_revision:string|null;actual_departure_at:string|null;road_status:string}>();
+  const batchApproval=await env.DB.prepare("SELECT batch_number,approval_status,submitted_at,carrier_id,operation_supervisor_user_id,operation_assignee_user_id,document_assignee_user_id,responsibility_revision,actual_departure_at,road_status FROM transport_batches WHERE id=? AND organization_id=?").bind(batchId,current.organizationId).first<{batch_number:string;approval_status:string;submitted_at:string|null;carrier_id:string|null;operation_supervisor_user_id:string|null;operation_assignee_user_id:string|null;document_assignee_user_id:string|null;responsibility_revision:string|null;actual_departure_at:string|null;road_status:string}>();
   if(!batchApproval)return{formError:"配载单审核状态无效"};
   const pendingPlan = await env.DB.prepare("SELECT 1 FROM loading_planning_submissions WHERE organization_id=? AND batch_id=? AND sync_status='pending'").bind(current.organizationId,batchId).first();
   if(pendingPlan)return{formError:"配载规划已保存，系统资料尚待同步，请到配载单跟踪列表重试同步后继续办理"};
+  if(intent==="batch_dispatch_send"){
+    try{const number=await sendBatchToCommercial(current,batchId);await writeAudit({request,action:"transport.batch.dispatch.send",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId});return{success:`${number} 已发送商务找车`};}
+    catch(error){return{formError:errorMessage(error)}}
+  }
   if(responsibilityIntent){
     if(!batchRequiresSupervisorApproval(batchApproval.batch_number))return{formError:"整车批次不进入拼车配载审核与统一分配"};
     if(!privileged&&batchApproval.operation_supervisor_user_id!==current.userId)return{formError:"该配载单已指派给其他操作主管审核"};
     if(intent==="batch_reject"){
       if(batchApproval.approval_status!=="submitted")return{formError:"仅待审核的配载单可以退回"};
+      if(!batchApproval.submitted_at)return{formError:"配载单尚未发送商务，不需要退回"};
       const rejectionNotes=valueOf(form,"rejectionNotes").trim();
-      if(!rejectionNotes)return{formError:"请填写退回原因，仓库据此调整后重新提交"};
+      if(!rejectionNotes)return{formError:"请填写退回原因"};
+      const commercialQuote=await env.DB.prepare("SELECT 1 FROM batch_dispatch_quotes WHERE organization_id=? AND batch_id=?")
+        .bind(current.organizationId,batchId).first();
+      if(commercialQuote){
+        try{await returnBatchVehicleToCommercial({organizationId:current.organizationId,batchId,batchNumber:batch.batch_number,actorUserId:current.userId,reason:rejectionNotes});
+          await writeAudit({request,action:"transport.batch.dispatch.return",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{reason:rejectionNotes}});
+          return{success:`${batch.batch_number} 已退回商务重新找车`};}
+        catch(error){return{formError:errorMessage(error)}}
+      }
       const rejected=await env.DB.prepare(`UPDATE transport_batches
         SET approval_status='rejected',approval_notes=?,operation_assignee_user_id=NULL,
             document_assignee_user_id=NULL,responsibility_revision=NULL,updated_at=?
@@ -873,6 +894,7 @@ export async function action({request,params}:Route.ActionArgs){
     }
     const reassigning=intent==="batch_reassign";
     if(!reassigning&&batchApproval.approval_status!=="submitted")return{formError:"仅待审核的配载单可以审核通过"};
+    if(!reassigning&&(!batchApproval.submitted_at||!batchApproval.carrier_id))return{formError:"请先发送商务找车并等待整批车辆、司机与运价落实"};
     if(reassigning&&batchApproval.approval_status!=="approved")return{formError:"仅已审核配载单可以变更负责人"};
     const operationAssigneeUserId=valueOf(form,"operationAssigneeUserId");
     const documentAssigneeUserId=valueOf(form,"documentAssigneeUserId");
@@ -917,6 +939,7 @@ export async function action({request,params}:Route.ActionArgs){
         operationAssigneeUserId,
         documentAssigneeUserId,
       });
+      if(!reassigning&&!await ensureBatchSystemDocuments(current.organizationId,batchId,current.userId,now))return{formError:"配载系统单据尚未完整生成，请检查整批车辆资料后重试"};
       const changed=await assignBatchResponsibilities({
         organizationId:current.organizationId,batchId,batchNumber:batch.batch_number,
         operationAssigneeUserId,documentAssigneeUserId,actorUserId:current.userId,now,
@@ -1567,7 +1590,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   const currentIsIndependentTracking=loaderData.current.positionCode==="TRACKING"&&loaderData.current.permissions.includes("order.module.tracking.manage");
   const currentIsBatchDocumentOwner=privileged||loaderData.batch.document_assignee_user_id===loaderData.current.userId;
   const canManageBatchResponsibility=requiresSupervisorApproval&&(privileged||(loaderData.current.permissions.includes("transport.batch.approve")&&loaderData.batch.operation_supervisor_user_id===loaderData.current.userId));
-  const canReviewBatch=loaderData.batch.approval_status==="submitted"&&canManageBatchResponsibility;
+  const canReviewBatch=loaderData.batch.approval_status==="submitted"&&Boolean(loaderData.batch.submitted_at)&&Boolean(loaderData.batch.carrier_id)&&canManageBatchResponsibility;
   const operationPermissionDisabledReasons=batchResponsibilityPermissionDisabledReasons(loaderData.operationMembers,"operation");
   const documentPermissionDisabledReasons=batchResponsibilityPermissionDisabledReasons(loaderData.documentMembers,"document");
   const initialOperationDisabledReasons={...operationPermissionDisabledReasons,...batchInitialResponsibilityDisabledReasons(loaderData.initialResponsibilityRestrictions,"operation")};
@@ -1678,8 +1701,10 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   return <><header className="page-header batch-tracking-page-header"><div><p className="eyebrow">PZ LOAD · TRANSPORT TRACKING</p><h1>{loaderData.batch.batch_number}</h1><p>{loaderData.batch.batch_name} · {loaderData.batch.origin_location} → {loaderData.batch.destination_location}</p></div><div className="page-actions">{loaderData.returnOrderId&&<Link className="secondary" to={`/admin/orders/${loaderData.returnOrderId}`}>返回订单详情</Link>}<Link className="secondary" to="/admin/loading">返回配载单跟踪</Link><span className="status-pill">{allDispatched?"后台运输跟踪":"等待仓库出库"}</span><span className="status-pill">{roadStatusLabels[loaderData.batch.road_status]||loaderData.batch.road_status}</span></div></header><ActionToast data={actionData}/>
   <div className="batch-detail-layout"><main className="batch-detail-main">
   {requiresSupervisorApproval&&loaderData.batch.approval_status==="submitted"&&<section className="panel batch-command-panel">
-    <div className="panel-header"><div><h2>配载单待操作主管审核与统一分配</h2><p>一次选择整批操作负责人和整批单证负责人；提交成功后，两人分别接管本 PZ 下全部订单的后续共同业务。</p></div><span className="status-pill warning">待审核</span></div>
-    {canReviewBatch?<><div className="alert info"><strong>统一选择整批负责人：</strong>可以继续选择任一挂载订单的现有操作员或单证员，也可以选择其他合格人员。提交后，两人分别接管整张 PZ 的操作与单证职责，其他旧负责人仅保留历史只读记录。</div>{loaderData.initialResponsibilityRestrictions.configurationErrors.length>0?<div className="alert error" role="alert"><strong>工作流配置阻断：</strong>{loaderData.initialResponsibilityRestrictions.configurationErrors.join("；")}</div>:!freshInitialAssigneesAvailable&&<div className="alert warning" role="alert">当前组织没有同时可用的操作负责人和单证负责人；请先检查人员状态、岗位和权限。</div>}<Form method="post" className="form-grid compact"><input type="hidden" name="intent" value="batch_approve"/><OrganizationAssigneePicker members={loaderData.operationMembers} name="operationAssigneeUserId" idPrefix="batch-operation-owner" personLabel="整批操作负责人" disabledUserReasons={initialOperationDisabledReasons} required/><OrganizationAssigneePicker members={loaderData.documentMembers} name="documentAssigneeUserId" idPrefix="batch-document-owner" personLabel="整批单证负责人" disabledUserReasons={initialDocumentDisabledReasons} required/><button className="primary span-2" disabled={busy||!freshInitialAssigneesAvailable}>审核通过并统一交接全部订单</button></Form><Form method="post" className="form-grid compact"><input type="hidden" name="intent" value="batch_reject"/><label className="field span-2"><span>退回原因</span><input name="rejectionNotes" placeholder="如需退回，请说明仓库应调整的内容"/></label><button className="secondary span-2" disabled={busy}>退回仓库调整</button></Form></>:<div className="alert warning">本配载单已提交给 {loaderData.batch.operation_supervisor_name||"指定操作主管"}；当前账号仅可查看，等待主管审核。</div>}
+    <div className="panel-header"><div><h2>{!loaderData.batch.submitted_at?"配载单待发送商务找车":!loaderData.batch.carrier_id?"商务找车中":"资源已落实，待操作主管确认"}</h2><p>操作主管先发送整批需求，商务绑定车辆和司机；确认后再统一指派并交仓库执行。</p></div><span className="status-pill warning">{!loaderData.batch.submitted_at?"待发送":!loaderData.batch.carrier_id?"待找车":"待确认"}</span></div>
+    {!loaderData.batch.submitted_at&&(canManageBatchResponsibility?<Form method="post"><input type="hidden" name="intent" value="batch_dispatch_send"/><button className="primary" disabled={busy}>发送配载单给商务找车</button></Form>:<div className="alert warning">等待本批操作主管发送商务找车。</div>)}
+    {loaderData.batch.submitted_at&&!loaderData.batch.carrier_id&&<div className="alert info">配载需求已发送商务；待商务反馈整批车辆、司机和运价。仓库装车尚未开放。</div>}
+    {canReviewBatch?<><div className="alert info"><strong>统一选择整批负责人：</strong>可以继续选择任一挂载订单的现有操作员或单证员，也可以选择其他合格人员。确认后两人接管本 PZ 的后续共同业务。</div>{loaderData.initialResponsibilityRestrictions.configurationErrors.length>0?<div className="alert error" role="alert"><strong>工作流配置阻断：</strong>{loaderData.initialResponsibilityRestrictions.configurationErrors.join("；")}</div>:!freshInitialAssigneesAvailable&&<div className="alert warning" role="alert">当前组织没有同时可用的操作负责人和单证负责人；请先检查人员状态、岗位和权限。</div>}<Form method="post" className="form-grid compact"><input type="hidden" name="intent" value="batch_approve"/><OrganizationAssigneePicker members={loaderData.operationMembers} name="operationAssigneeUserId" idPrefix="batch-operation-owner" personLabel="整批操作负责人" disabledUserReasons={initialOperationDisabledReasons} required/><OrganizationAssigneePicker members={loaderData.documentMembers} name="documentAssigneeUserId" idPrefix="batch-document-owner" personLabel="整批单证负责人" disabledUserReasons={initialDocumentDisabledReasons} required/><button className="primary span-2" disabled={busy||!freshInitialAssigneesAvailable}>确认配载并发送仓库装车</button></Form><Form method="post" className="form-grid compact"><input type="hidden" name="intent" value="batch_reject"/><label className="field span-2"><span>退回原因</span><input name="rejectionNotes" placeholder="请说明退回原因"/></label><button className="secondary span-2" disabled={busy}>退回调整</button></Form></>:null}
   </section>}
   {requiresSupervisorApproval&&loaderData.batch.approval_status==="approved"&&<section className="panel batch-command-panel batch-responsibility-panel"><div className="alert success batch-responsibility-status">已审核 · 操作：<strong>{loaderData.batch.operation_assignee_name||"待补充分配"}</strong> · 单证：<strong>{loaderData.batch.document_assignee_name||"待补充分配"}</strong><span>境外仓入库后转为只读</span></div>{canReassignBatch&&<details><summary>{loaderData.batch.operation_assignee_user_id&&loaderData.batch.document_assignee_user_id?"变更整批负责人":"补全整批负责人"}</summary><Form method="post" className="form-grid compact"><input type="hidden" name="intent" value="batch_reassign"/><OrganizationAssigneePicker members={loaderData.operationMembers} name="operationAssigneeUserId" idPrefix="batch-reassign-operation" personLabel="整批操作负责人" required/><OrganizationAssigneePicker members={loaderData.documentMembers} name="documentAssigneeUserId" idPrefix="batch-reassign-document" personLabel="整批单证负责人" required/><label className="field span-2"><span>{ordinaryReassignmentAllowed?"变更说明（可选）":"异常改派原因（必填）"}</span><input name="reassignReason" required={!ordinaryReassignmentAllowed} placeholder="系统将通知新负责人并保留旧负责人历史只读记录"/></label><button className="primary span-2" disabled={busy}>确认统一改派</button></Form></details>}</section>}
   {requiresSupervisorApproval&&loaderData.batch.approval_status==="rejected"&&<div className="alert warning">配载单已退回仓库调整，重新提交审核前管理端保持只读。</div>}
@@ -1722,7 +1747,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
     </div>
     </div>
   </section>
-  {loaderData.showBatchCosts&&loaderData.costAllocations&&<CostAllocationSection allocations={loaderData.costAllocations} busy={busy} manage={manageCosts} blockedReason={loaderData.batchCostBlockedReason}/>}</>}
+  {loaderData.showBatchCosts&&loaderData.costAllocations&&<CostAllocationSection allocations={loaderData.costAllocations} quote={loaderData.commercialQuote} busy={busy} manage={manageCosts} blockedReason={loaderData.batchCostBlockedReason}/>}</>}
   {activeTab==="outbound"&&<section className="panel batch-tab-panel" id="batch-exit-gate"><div className="panel-header"><div><h2>装车出库</h2><p>本页只核对仓库装车和出库交接结果；后续报关、口岸到达与实际出境按页签顺序办理。</p></div><span className={`status-pill ${allDispatched?"success":""}`}>{allDispatched?"已完成":"待仓库办理"}</span></div>
     <div className="table-wrap batch-exit-gate-table"><table><thead><tr><th>装车项目</th><th>当前状态</th><th>核对结果</th></tr></thead><tbody>
       <tr className="completed-row"><td><strong>配载单同步</strong></td><td><span className="status-pill success">已通过</span></td><td>{loaderData.batch.batch_number} 已由操作主管生成，仓库按计划执行</td></tr>
@@ -2382,11 +2407,12 @@ function WarehouseOverseasInboundAction({batchId,batchNumber,warehouseId,orderId
   </div>;
 }
 
-export function CostAllocationSection({allocations,busy,manage,blockedReason}:{allocations:Awaited<ReturnType<typeof loadCostAllocations>>;busy:boolean;manage:boolean;blockedReason:string|null}){
+export function CostAllocationSection({allocations,quote,busy,manage,blockedReason}:{allocations:Awaited<ReturnType<typeof loadCostAllocations>>;quote?:{freight_amount:number;currency:string;exchange_rate:number;allocation_method:string;notes:string|null;carrier_name:string}|null;busy:boolean;manage:boolean;blockedReason:string|null}){
   const draftCount=allocations.filter(item=>item.status==="draft").length;
   return <details className="panel cost-allocation-section batch-detail-disclosure"><summary className="batch-detail-summary"><div><h2>拼车成本分摊</h2><p>仅影响内部应付与毛利，不改变客户应收。</p></div><div className="batch-detail-summary-status"><span>{allocations.length} 条</span><b>{draftCount} 个待确认</b><em aria-hidden="true"/></div></summary><div className="batch-detail-disclosure-body">
     {!manage&&blockedReason&&<div className="alert warning">{blockedReason}</div>}
-    {manage&&<details className="inline-details"><summary>新增分摊草稿</summary><Form method="post" className="form-grid compact"><input type="hidden" name="intent" value="create_cost_allocation"/><label className="field"><span>费用项目</span><select name="chargeCode" required><option value="">请选择</option>{COST_CHARGES.map(item=><option key={item.code} value={item.code}>{item.name}</option>)}</select></label><Field name="counterpartyName" label="往来单位 / 供应商" required/><Field name="totalAmount" label="费用总额" type="number" required/><Field name="currency" label="币种" required defaultValue="CNY"/><Field name="exchangeRate" label="折本位币汇率" type="number" required defaultValue="1"/><label className="field"><span>分摊方式</span><select name="method" defaultValue="auto"><option value="auto">系统建议（推荐）</option><option value="weight">按实收重量</option><option value="volume">按实收体积</option><option value="equal">按订单均分</option></select></label><label className="field span-2"><span>费用备注</span><input name="allocationNotes" placeholder="例如口岸换装运费、报关费等"/></label><button className="primary" disabled={busy}>生成分摊草稿</button></Form></details>}
+    {quote&&<div className="alert info">商务整批报价：<strong>{quote.currency} {Number(quote.freight_amount).toFixed(2)}</strong> · {quote.carrier_name}。此报价尚未入账；待冻结费用窗口开放后由有权限的岗位生成并确认分摊。</div>}
+    {manage&&<details className="inline-details"><summary>新增分摊草稿</summary><Form method="post" className="form-grid compact"><input type="hidden" name="intent" value="create_cost_allocation"/><label className="field"><span>费用项目</span><select name="chargeCode" required defaultValue={quote?"OVERSEAS_TRANSPORT":""}><option value="">请选择</option>{COST_CHARGES.map(item=><option key={item.code} value={item.code}>{item.name}</option>)}</select></label><Field name="counterpartyName" label="往来单位 / 供应商" required defaultValue={quote?.carrier_name}/><Field name="totalAmount" label="费用总额" type="number" required defaultValue={quote?String(quote.freight_amount):undefined}/><Field name="currency" label="币种" required defaultValue={quote?.currency||"CNY"}/><Field name="exchangeRate" label="折本位币汇率" type="number" required defaultValue={quote?String(quote.exchange_rate):"1"}/><label className="field"><span>分摊方式</span><select name="method" defaultValue={quote?.allocation_method||"auto"}><option value="auto">系统建议（推荐）</option><option value="weight">按实收重量</option><option value="volume">按实收体积</option><option value="equal">按订单均分</option></select></label><label className="field span-2"><span>费用备注</span><input name="allocationNotes" defaultValue={quote?.notes||""} placeholder="例如口岸换装运费、报关费等"/></label><button className="primary" disabled={busy}>生成分摊草稿</button></Form></details>}
     {!allocations.length&&<p className="empty-state">暂无成本分摊。全部挂载订单完成装车出库后，可在这里生成分摊草稿。</p>}
     <div className="cost-allocation-list">{allocations.map(allocation=><section className="cost-allocation-sheet" key={allocation.id}><div className="table-wrap cost-allocation-summary-table"><table><thead><tr><th>费用项目</th><th>往来单位</th><th>总额</th><th>分摊方式</th><th>实收重量</th><th>实收体积</th><th>密度</th><th>状态</th></tr></thead><tbody><tr><td><strong>{allocation.charge_name}</strong></td><td>{allocation.counterparty_name}</td><td>{allocation.currency} {allocation.total_amount.toFixed(2)}</td><td>{allocationMethodLabel(allocation.allocation_method)}</td><td>{allocation.total_actual_weight_kg.toFixed(2)} KG</td><td>{allocation.total_actual_volume_cbm.toFixed(3)} CBM</td><td>{allocation.density_kg_per_cbm.toFixed(2)} KG/CBM<small>{allocation.density_result}</small></td><td><span className={`status-pill ${allocation.status==="confirmed"?"success":""}`}>{allocation.status==="confirmed"?"已确认入账":"草稿待复核"}</span><small>{allocation.confirmed_at?`确认时间 ${allocation.confirmed_at}`:"系统建议可人工调整"}</small></td></tr></tbody></table></div>
       {allocation.status==="draft"&&manage?<><Form method="post"><input type="hidden" name="intent" value="update_cost_allocation"/><input type="hidden" name="allocationId" value={allocation.id}/><label className="field allocation-method"><span>复核分摊方式</span><select name="method" defaultValue={allocation.allocation_method}><option value="weight">按实收重量</option><option value="volume">按实收体积</option><option value="equal">按订单均分</option></select></label><div className="table-wrap"><table><thead><tr><th>订单 / 客户</th><th>实收重量</th><th>实收体积</th><th>建议比例</th><th>建议金额</th><th>最终金额</th><th>调整原因</th></tr></thead><tbody>{allocation.lines.map(line=><tr key={line.id}><td><strong><OrderNumberLink id={line.order_id} number={line.order_number}/></strong><small>{line.customer_name}</small><input type="hidden" name="lineId" value={line.id}/></td><td>{line.actual_weight_kg.toFixed(2)} KG</td><td>{line.actual_volume_cbm.toFixed(3)} CBM</td><td>{(line.suggested_ratio*100).toFixed(2)}%</td><td>{line.suggested_amount.toFixed(2)}</td><td><input className="table-input amount" type="number" min="0" step="0.01" name="lineAmount" defaultValue={line.final_amount.toFixed(2)} required/></td><td><input className="table-input reason" name="lineReason" defaultValue={line.adjustment_reason||""} placeholder="修改金额时必填"/></td></tr>)}</tbody></table></div><button className="secondary" disabled={busy}>保存人工复核结果</button></Form><Form method="post" className="allocation-confirm-form"><input type="hidden" name="intent" value="confirm_cost_allocation"/><input type="hidden" name="allocationId" value={allocation.id}/><p>确认后将生成正式应付费用并进入内部毛利核算；客户应收仍以订单费用模块的应收记录为准。</p><button className="primary" disabled={busy}>确认分摊并生成应付</button></Form></>:<div className="table-wrap"><table><thead><tr><th>订单 / 客户</th><th>实收重量</th><th>实收体积</th><th>最终分摊</th><th>费用状态</th></tr></thead><tbody>{allocation.lines.map(line=><tr key={line.id}><td><strong><OrderNumberLink id={line.order_id} number={line.order_number}/></strong><small>{line.customer_name}</small></td><td>{line.actual_weight_kg.toFixed(2)} KG</td><td>{line.actual_volume_cbm.toFixed(3)} CBM</td><td>{allocation.currency} {line.final_amount.toFixed(2)}</td><td>{line.expense_id?"已生成应付":"待生成"}</td></tr>)}</tbody></table></div>}

@@ -54,6 +54,7 @@ export async function requestDispatchTask(db:D1Database,input:{current:SessionUs
   const visibility=orderVisibilitySql(current,"o");
   const order=await db.prepare(`${sourceSql} WHERE o.organization_id=? AND o.id=? AND ${visibility.sql}`).bind(current.organizationId,input.orderId,...visibility.values).first<DispatchOrder>();
   if(!order) throw new Error("订单不存在或超出当前账号数据范围");
+  if(order.business_type==="ltl") throw new Error("拼车请先由操作主管生成配载单，再按整张配载单发送商务找车");
   const selectedPort=input.exitPort?.trim()||"";
   if(selectedPort && selectedPort!==order.exit_port) {
     if(order.exit_port?.trim()) throw new Error("订单已登记出境口岸，请在订单线路资料中核对，不能从找车任务直接改写");
@@ -84,7 +85,7 @@ export async function refreshAutomaticDispatchTasks(db:D1Database,org:string,now
   const policy=await loadBusinessProcessPolicy(org,db);
   if(!policyEnabled(policy,"dispatch.enabled") || !policyEnabled(policy,"dispatch.automatic")) return {created:0,skipped:0};
   const rules=await loadOperationalRules(org,db);
-  const rows=await db.prepare(`${sourceSql} WHERE o.organization_id=? AND o.status='in_execution' AND o.planned_port_arrival_at IS NOT NULL
+  const rows=await db.prepare(`${sourceSql} WHERE o.organization_id=? AND o.business_type='ftl' AND o.status='in_execution' AND o.planned_port_arrival_at IS NOT NULL
     AND NOT EXISTS(SELECT 1 FROM order_dispatch_requests d WHERE d.organization_id=o.organization_id AND d.order_id=o.id)`)
     .bind(org).all<DispatchOrder>();
   let created=0,skipped=0;
@@ -153,6 +154,6 @@ export async function loadDispatchTaskRows(db:D1Database,current:SessionUser) {
     LEFT JOIN carriers c ON c.id=d.carrier_id AND c.organization_id=d.organization_id
     LEFT JOIN carrier_vehicles v ON v.id=d.vehicle_id AND v.organization_id=d.organization_id
     LEFT JOIN carrier_drivers driver ON driver.id=d.driver_id AND driver.organization_id=d.organization_id
-    WHERE d.organization_id=? AND ${visibility.sql} ORDER BY CASE d.status WHEN 'pending' THEN 0 ELSE 1 END,d.planned_port_arrival_at`)
+    WHERE d.organization_id=? AND o.business_type='ftl' AND ${visibility.sql} ORDER BY CASE d.status WHEN 'pending' THEN 0 ELSE 1 END,d.planned_port_arrival_at`)
     .bind(current.organizationId,...visibility.values).all<{id:string;order_id:string;order_number:string;status:string;planned_port_arrival_at:string;freight_amount:number|null;freight_currency:string|null;resource_notes:string|null;carrier_name:string|null;plate_number:string|null;driver_name:string|null;fulfilled_at:string|null}>()).results.map(row=>current.permissions.includes("dispatch.cost.view")?row:{...row,freight_amount:null,freight_currency:null});
 }

@@ -12,7 +12,7 @@ beforeEach(async () => {
   sql.prepare("INSERT INTO carriers(id,organization_id,code,name,created_at,updated_at) VALUES('carrier','org','CAR','运输商',?,?)").run(now, now);
   sql.prepare("INSERT INTO carrier_vehicles(id,organization_id,carrier_id,plate_number,created_at,updated_at) VALUES('vehicle','org','carrier','车牌',?,?)").run(now, now);
   sql.prepare("INSERT INTO carrier_drivers(id,organization_id,carrier_id,name,created_at,updated_at) VALUES('driver','org','carrier','司机',?,?)").run(now, now);
-  sql.exec("UPDATE transport_orders SET exit_port=NULL WHERE id='order'");
+  sql.exec("UPDATE transport_orders SET exit_port=NULL,business_type='ftl' WHERE id='order'");
   await requestDispatchTask(fixture.db, { current: fixture.actors.get("operation")!, orderId: "order", plannedPortArrivalAt: "2026-10-05T00:00:00Z" });
 });
 afterEach(() => { fixture?.database.close(); vi.restoreAllMocks(); });

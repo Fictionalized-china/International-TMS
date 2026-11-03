@@ -6,10 +6,11 @@ vi.mock('./order-modules.server',()=>({ensureOrderModules:async()=>{},syncOrderW
 vi.mock('./batch-transport-sync.server',()=>({synchronizeBatchTransport:async()=>{}}));
 vi.mock('./loading-manifest.server',()=>({ensureBatchSystemDocuments:async()=>true}));
 import { createOperationPlannedBatch } from './loading-batch-planning.server';
+import { sendBatchToCommercial,loadBatchFindVehicleTasks,fulfillBatchFindVehicle,returnBatchVehicleToCommercial } from './batch-dispatch.server';
 let fixture:Awaited<ReturnType<typeof meetingFixture>>;
 afterEach(()=>fixture?.database.close());
 describe('new loading plans against every actual database guard',()=>{
-  it('creates one pre-dispatch allocation, child cost and batch, and reuses a duplicate submission',async()=>{
+  it('creates a resource-free PZ without pre-approving it or posting costs',async()=>{
     fixture=await meetingFixture();harness.db=fixture.db;const sql=fixture.database,now=fixture.now;
     seedFrozenMeetingWorkflow(fixture);
     sql.exec("UPDATE workflow_instance_module_states SET responsibility_position_code='CS';UPDATE workflow_instances SET current_step_key='port_loading'");
@@ -44,9 +45,24 @@ describe('new loading plans against every actual database guard',()=>{
     const result=await createOperationPlannedBatch(request);expect(result.syncPending).toBe(false);
     expect(await createOperationPlannedBatch(request)).toEqual(result);
     expect(sql.prepare('SELECT COUNT(*) n FROM transport_batches').get()?.n).toBe(1);
-    expect(sql.prepare("SELECT stage,amount,source_type FROM business_expenses").get()).toMatchObject({stage:'estimated',amount:30,source_type:'loading_cost_allocation_line'});
-    expect(sql.prepare('SELECT COUNT(*) n,SUM(amount) amount FROM business_expenses').get()).toMatchObject({n:2,amount:60});
-    expect(sql.prepare('SELECT status,creation_mode FROM transport_cost_allocations').get()).toMatchObject({status:'confirmed',creation_mode:'planning'});
+    expect(sql.prepare('SELECT approval_status,submitted_at,carrier_id FROM transport_batches').get()).toMatchObject({approval_status:'submitted',submitted_at:null,carrier_id:null});
+    expect(sql.prepare('SELECT COUNT(*) n FROM business_expenses').get()?.n).toBe(0);
+    expect(sql.prepare('SELECT COUNT(*) n FROM transport_cost_allocations').get()?.n).toBe(0);
     expect(sql.prepare('SELECT COUNT(*) n FROM warehouse_dispatches').get()?.n).toBe(0);
+    expect(await sendBatchToCommercial(fixture.actors.get('supervisor')!,result.batchId)).toBe(result.batchNumber);
+    expect((await loadBatchFindVehicleTasks(fixture.actors.get('commercial')!)).map(item=>item.batch_number)).toContain(result.batchNumber);
+    await expect(fulfillBatchFindVehicle({current:fixture.actors.get('commercial')!,batchId:result.batchId,
+      carrierId:'__new',newCarrierName:'全新境外承运商',vehicleId:'__new',newPlateNumber:'NEW-TEST-001',newVehicleType:'13米厢式车',
+      driverId:'__new',newDriverName:'测试司机',newDriverPhone:'13800001111',freightAmount:60,currency:'CNY',exchangeRate:1,
+      allocationMethod:'auto',notes:'测试资源'})).resolves.toBe(result.batchNumber);
+    expect(sql.prepare('SELECT carrier_id,approval_status FROM transport_batches WHERE id=?').get(result.batchId)).toMatchObject({approval_status:'submitted',carrier_id:expect.any(String)});
+    expect(sql.prepare('SELECT COUNT(*) n FROM transport_batch_vehicles WHERE batch_id=?').get(result.batchId)?.n).toBe(1);
+    expect(sql.prepare('SELECT freight_amount,currency FROM batch_dispatch_quotes WHERE batch_id=?').get(result.batchId)).toMatchObject({freight_amount:60,currency:'CNY'});
+    await expect(fulfillBatchFindVehicle({current:fixture.actors.get('commercial')!,batchId:result.batchId,
+      carrierId:'carrier',newCarrierName:'',vehicleId:'vehicle',newPlateNumber:'',newVehicleType:'',driverId:'driver',newDriverName:'',newDriverPhone:'',freightAmount:60,currency:'CNY',exchangeRate:1,allocationMethod:'auto',notes:''})).rejects.toThrow('已经完成绑定');
+    await returnBatchVehicleToCommercial({organizationId:'org',batchId:result.batchId,batchNumber:result.batchNumber,actorUserId:'supervisor',reason:'更换车辆'});
+    expect(sql.prepare('SELECT carrier_id,approval_status FROM transport_batches WHERE id=?').get(result.batchId)).toMatchObject({carrier_id:null,approval_status:'submitted'});
+    expect(sql.prepare('SELECT COUNT(*) n FROM batch_dispatch_quotes WHERE batch_id=?').get(result.batchId)?.n).toBe(0);
+    expect(sql.prepare('SELECT COUNT(*) n FROM transport_batch_vehicles WHERE batch_id=?').get(result.batchId)?.n).toBe(0);
   });
 });

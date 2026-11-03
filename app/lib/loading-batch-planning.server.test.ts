@@ -56,7 +56,8 @@ describe("saved loading plan recovery",()=>{
     expect(database.prepare("SELECT sync_status,sync_token FROM loading_planning_submissions").get()).toEqual({sync_status:"pending",sync_token:null});
     expect(harness.notification).not.toHaveBeenCalled();
     expect(await resumeOperationPlannedBatch(current,"batch")).toMatchObject({batchId:"batch",syncPending:false});
-    expect(database.prepare("SELECT approval_status FROM transport_batches").get()).toEqual({approval_status:"approved"});
+    expect(database.prepare("SELECT approval_status FROM transport_batches").get()).toEqual({approval_status:"draft"});
+    expect(harness.notification).not.toHaveBeenCalled();
   });
   it("reuses the same submission without re-running completed synchronization",async()=>{
     expect(await createOperationPlannedBatch(request)).toMatchObject({batchId:"batch",syncPending:false});
@@ -75,14 +76,14 @@ describe("saved loading plan recovery",()=>{
     release();expect(await first).toMatchObject({syncPending:false});
     expect(harness.sync).toHaveBeenCalledTimes(1);
   });
-  it("does not regress completed loading or duplicate history while retrying document generation",async()=>{
+  it("does not generate documents or advance approved state during initial planning sync",async()=>{
     database.exec("INSERT INTO order_module_instances(id,organization_id,order_id,module_code,enabled,status,current_step_code) VALUES('module','org','order','loading',1,'pending','ready')");
     harness.sync.mockImplementation(async()=>{database.exec("UPDATE order_module_instances SET status='completed',current_step_code='confirmed'");});
     harness.documents.mockRejectedValueOnce(new Error("document write failed"));
-    expect(await resumeOperationPlannedBatch(current,"batch")).toMatchObject({syncPending:true});
     expect(await resumeOperationPlannedBatch(current,"batch")).toMatchObject({syncPending:false});
     expect(database.prepare("SELECT status,current_step_code FROM order_module_instances").get()).toEqual({status:"completed",current_step_code:"confirmed"});
     expect(database.prepare("SELECT COUNT(*) total FROM order_module_history").get()).toEqual({total:1});
+    expect(harness.documents).not.toHaveBeenCalled();
   });
   it("rejects a different actor and a cancelled batch",async()=>{
     await expect(resumeOperationPlannedBatch({...current,userId:"other"},"batch")).rejects.toThrow("没有这次");

@@ -240,6 +240,28 @@ migrations.push({version:179,name:'configurable_meeting_flow_and_atomic_settleme
 migrations.push({version:180,name:'iso_timestamp_storage_compatibility',definition:applyIsoTimestampMigration.toString(),up:applyIsoTimestampMigration});
 migrations.push({version:181,name:'p0_workflow_and_position_mysql_parity',definition:applyP0WorkflowParityMigration.toString(),up:applyP0WorkflowParityMigration});
 migrations.push({version:182,name:'cloud_mutation_integrity',definition:applyCloudMutationIntegrityMigration.toString(),up:connection=>applyCloudMutationIntegrityMigration(connection,addColumnIfMissing)});
+migrations.push({
+  version:183,
+  name:'batch_dispatch_quotes',
+  definition:'batch_dispatch_quotes(organization_id,batch_id,carrier_id,vehicle_id,driver_id,freight_amount,currency,exchange_rate,allocation_method,notes,created_by_user_id,created_at)',
+  async up(connection){
+    await connection.query(`CREATE TABLE IF NOT EXISTS batch_dispatch_quotes (
+      organization_id VARCHAR(128) NOT NULL,
+      batch_id VARCHAR(128) NOT NULL,
+      carrier_id VARCHAR(128) NOT NULL,
+      vehicle_id VARCHAR(128) NOT NULL,
+      driver_id VARCHAR(128) NOT NULL,
+      freight_amount DECIMAL(18,4) NOT NULL,
+      currency VARCHAR(8) NOT NULL,
+      exchange_rate DECIMAL(18,8) NOT NULL,
+      allocation_method VARCHAR(16) NOT NULL,
+      notes TEXT NULL,
+      created_by_user_id VARCHAR(128) NOT NULL,
+      created_at VARCHAR(40) NOT NULL,
+      PRIMARY KEY (organization_id,batch_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
+  },
+});
 for (const migration of migrations) {
   migration.checksum = createHash("sha256")
     .update(`${migration.version}:${migration.name}\n${migration.definition}`)
@@ -269,6 +291,7 @@ export const requiredMysqlSchemaColumns = [
   ['transport_cost_allocations','creation_mode'],
   ['quotations','intake_payload_hash'],
   ['settlement_cash_allocation_requests','payload_hash'],
+  ['batch_dispatch_quotes','freight_amount'],
 ];
 
 async function addColumnIfMissing(connection, table, column, definition) {

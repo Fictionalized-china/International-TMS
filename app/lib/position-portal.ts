@@ -140,11 +140,11 @@ const portalConfigs: Record<string, PositionPortalConfig> = {
     title: "操作主管门户",
     description: "直接审核业务员录入的订单，分配执行人员并统筹整车或拼车配载。",
     viewAreas: ["本人审批订单", "待生成配载单", "执行人员与进度"],
-    operateAreas: ["委托审核", "任务分配", "生成配载单并指定负责人"],
+    operateAreas: ["委托审核", "任务分配", "生成配载单", "发送商务找车", "确认整批资源并指派负责人"],
     moduleCodes: ["assignment", "loading"],
     quickLinks: [
       { label: "任务分配", description: "处理本人待派订单", href: "/admin/workbenches/tasks", permission: "order.view" },
-      { label: "配载管理", description: "选择运输资源并生成配载单", href: "/admin/loading", permission: "order.view" },
+      { label: "配载管理", description: "选拼车订单成单、发送商务、确认资源并交仓库", href: "/admin/loading", permission: "order.view" },
     ],
   },
   OVERSEAS: {
@@ -191,11 +191,11 @@ const portalConfigs: Record<string, PositionPortalConfig> = {
   BUSINESS_ROUTE: {
     code: "BUSINESS_ROUTE",
     title: "商务报价岗",
-    description: "在配载成单前寻找并维护境外运输资源。",
+    description: "收到操作主管的整批配载需求后找车，将承运商、车辆、司机和报价绑定到配载单。",
     viewAreas: ["境外承运商", "境外车辆", "境外司机"],
-    operateAreas: ["新增和维护配载前置运输资源"],
+    operateAreas: ["办理整批配载单找车", "新增陌生承运商、车辆和司机", "维护运输资源"],
     moduleCodes: [],
-    quickLinks: [{ label: "承运商管理", description: "录入境外承运商、车辆和司机", href: "/admin/carriers", permission: "carrier.view" }],
+    quickLinks: [{ label: "商务找车", description: "查看配载单并绑定境外承运商、车辆和司机", href: "/admin/tracking-center", permission: "shipment.view" },{ label: "承运商管理", description: "维护境外承运商、车辆和司机", href: "/admin/carriers", permission: "carrier.view" }],
   },
   CASHIER: { code: "CASHIER", title: "出纳岗门户", description: "登记收付款并完成核销。", viewAreas: ["全部订单摘要", "应收应付", "收付款流水"], operateAreas: ["登记收付款", "对账单核销", "数据导出"], moduleCodes: [], quickLinks: [{ label: "费用结算", description: "登记流水与核销", href: "/admin/billing", permission: "billing.view" }] },
   HR_ADMIN: { code: "HR_ADMIN", title: "人事行政岗门户", description: "维护组织、账号、岗位和权限。", viewAreas: ["组织架构", "岗位与账号", "岗位权限", "审计日志"], operateAreas: ["开通与停用账号", "配置岗位", "增减权限积木"], moduleCodes: [], quickLinks: [{ label: "组织与权限", description: "开通账号并维护岗位归属", href: "/admin/positions", permission: "user.view" }, { label: "岗位权限", description: "配置岗位和账号特殊权限", href: "/admin/roles", permission: "role.view" }] },

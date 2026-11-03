@@ -135,6 +135,7 @@ describe("meeting workflow integrated against all real migrations",()=>{
   });
   it("creates one dispatch task and deduplicated notices, then validates supplier-linked resources",async()=>{
     fee("receivable");const current=fixture.actors.get("operation")!;
+    fixture.database.exec("UPDATE transport_orders SET business_type='ftl' WHERE id='order'");
     const request={current,orderId:"order",plannedPortArrivalAt:"2026-10-05T00:00:00Z"};
     expect((await requestDispatchTask(fixture.db,request)).created).toBe(true);expect((await requestDispatchTask(fixture.db,request)).created).toBe(false);
     expect(fixture.database.prepare("SELECT COUNT(*) n FROM internal_notifications WHERE category='dispatch_request'").get()?.n).toBe(1);

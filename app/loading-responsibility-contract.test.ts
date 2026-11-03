@@ -14,10 +14,11 @@ describe("loading responsibility contract", () => {
     expect(planningService).toContain("所选订单必须已指派同一操作主管");
   });
 
-  it("requires pre-recorded overseas transport resources before batching", () => {
-    expect(planningService).toContain("请先选择商务已录入的境外承运商、车辆和司机");
-    expect(planningService).toContain("carrier_scope='overseas'");
-    expect(positionPortal).toContain("录入境外承运商、车辆和司机");
+  it("creates the PZ before commercial vehicle search and limits warehouse execution", () => {
+    expect(planningService).toContain("first.warehouse_id,null,input.current.userId");
+    expect(planningService).toContain('null,null,null,"submitted"');
+    expect(positionPortal).toContain("生成配载单");
+    expect(positionPortal).toContain("办理整批配载单找车");
   });
 
   it("keeps the warehouse endpoint execution-only", () => {

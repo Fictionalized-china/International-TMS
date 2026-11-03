@@ -35,6 +35,8 @@ const harness = vi.hoisted(() => {
             return {
               batch_number: "PZ-20260906-001",
               approval_status: "submitted",
+              submitted_at: "2026-09-06T00:00:00Z",
+              carrier_id: "carrier-1",
               operation_supervisor_user_id: "supervisor-1",
               operation_assignee_user_id: null,
               document_assignee_user_id: null,

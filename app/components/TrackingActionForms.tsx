@@ -41,3 +41,29 @@ export function DispatchFeedbackForm({orderId,orderNumber,resources,closeSignal}
     <label className="full">资源备注<textarea name="notes" maxLength={2000}/></label><p>资源先录入承运商台账。反馈不自动创建配载单，仍由操作主管选择资源配载。</p><button className="primary" disabled={busy}>确认资源已落实</button>
   </Form></Modal>;
 }
+
+export function BatchDispatchFeedbackForm({batchId,batchNumber,resources,closeSignal}:{batchId:string;batchNumber:string;resources:DispatchResources;closeSignal:unknown}) {
+  const [carrier,setCarrier]=useState("");
+  const [vehicle,setVehicle]=useState("");
+  const [driver,setDriver]=useState("");
+  const [currency,setCurrency]=useState("CNY");
+  const busy=useNavigation().state!=="idle";
+  return <Modal title={`整批找车反馈 · ${batchNumber}`} triggerLabel="落实整批资源" triggerClassName="primary" closeSignal={closeSignal}>
+    <Form method="post" className="form-grid">
+      <input type="hidden" name="intent" value="batch_dispatch_fulfill"/><input type="hidden" name="batchId" value={batchId}/>
+      <label>境外承运商 *<select name="carrierId" value={carrier} required onChange={event=>{setCarrier(event.target.value);setVehicle("");setDriver("");}}><option value="">请选择承运商</option>{resources.carriers.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}<option value="__new">＋ 新增陌生承运商</option></select></label>
+      {carrier==="__new"&&<label>新承运商名称 *<input name="newCarrierName" required minLength={2} maxLength={100} placeholder="填写承运商全称"/></label>}
+      <label>境外车辆 *<select name="vehicleId" value={vehicle} required disabled={!carrier} onChange={event=>setVehicle(event.target.value)}><option value="">请选择车辆</option>{resources.vehicles.filter(item=>item.carrier_id===carrier).map(item=><option key={item.id} value={item.id}>{item.plate_number}</option>)}<option value="__new">＋ 新增陌生车辆</option></select></label>
+      {vehicle==="__new"&&<><label>新车牌 / 车号 *<input name="newPlateNumber" required minLength={2} maxLength={40}/></label><label>车型 *<input name="newVehicleType" required minLength={2} maxLength={80} placeholder="如 13 米厢式车"/></label></>}
+      <label>境外司机 *<select name="driverId" value={driver} required disabled={!carrier} onChange={event=>setDriver(event.target.value)}><option value="">请选择司机</option>{resources.drivers.filter(item=>item.carrier_id===carrier).map(item=><option key={item.id} value={item.id}>{item.name}</option>)}<option value="__new">＋ 新增陌生司机</option></select></label>
+      {driver==="__new"&&<><label>新司机姓名 *<input name="newDriverName" required minLength={2} maxLength={80}/></label><label>新司机电话 *<input name="newDriverPhone" required minLength={5} maxLength={30} type="tel"/></label></>}
+      <label>整批运价 *<input name="freightAmount" type="number" min="0.01" step="0.01" required/></label>
+      <label>币种 *<select name="currency" value={currency} onChange={event=>setCurrency(event.target.value)}><option value="CNY">CNY</option><option value="USD">USD</option><option value="RUB">RUB</option><option value="KZT">KZT</option><option value="UZS">UZS</option></select></label>
+      <label>实际汇率 *<input key={currency} name="exchangeRate" type="number" min="0.000001" step="0.000001" defaultValue={currency==="CNY"?"1":""} readOnly={currency==="CNY"} required/></label>
+      <label>整批成本分摊 *<select name="allocationMethod" defaultValue="auto"><option value="auto">按 1:300 抛重比自动建议</option><option value="weight">按实收重量</option><option value="volume">按实收体积</option><option value="equal">按订单均分</option></select></label>
+      <label className="full">资源备注<textarea name="notes" maxLength={2000}/></label>
+      <p className="full">新资源与配载绑定将一次保存；操作主管确认前，仓库仍不能装车。</p>
+      <button className="primary" disabled={busy}>确认绑定整批资源并反馈主管</button>
+    </Form>
+  </Modal>;
+}
