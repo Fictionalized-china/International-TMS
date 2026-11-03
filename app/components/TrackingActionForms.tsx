@@ -18,11 +18,12 @@ export function DailyTrackingForm({orderId,orderNumber,requestId,closeSignal}:{o
   </Modal>;
 }
 
-export function DispatchRequestForm({orderId,orderNumber,closeSignal}:{orderId:string;orderNumber:string;closeSignal:unknown}) {
+export function DispatchRequestForm({orderId,orderNumber,currentExitPort,borderPorts,requireExitPort,closeSignal}:{orderId:string;orderNumber:string;currentExitPort:string|null;borderPorts:{code:string;name:string}[];requireExitPort:boolean;closeSignal:unknown}) {
   const busy=useNavigation().state!=="idle";
   return <Modal title={`商务找车 · ${orderNumber}`} triggerLabel="计划到口岸 / 找车" triggerClassName="text-button" closeSignal={closeSignal}><Form method="post" className="form-grid">
     <input type="hidden" name="intent" value="dispatch_request"/><input type="hidden" name="orderId" value={orderId}/>
     <label>计划到口岸（北京时间）<DateTimeSelect name="plannedPortArrivalAt" required/></label>
+    {currentExitPort?<p>订单已登记出境口岸：{borderPorts.find(port=>port.code===currentExitPort)?.name||currentExitPort}。如需更改，请在订单线路资料中核对。</p>:<label>出境口岸{requireExitPort?" *":"（可选，未定可在配载时填写）"}<select name="exitPort" required={requireExitPort} defaultValue=""><option value="">{requireExitPort?"请选择出境口岸":"暂不确定"}</option>{borderPorts.map(port=><option key={port.code} value={port.code}>{port.name}</option>)}</select></label>}
     <p>可先保存计划，按配置提前天数自动生成找车待办；也可现在发送。资料不齐时会明确列出缺项。</p>
     <button className="secondary" name="planOnly" value="1" disabled={busy}>仅保存计划</button><button className="primary" disabled={busy}>发送商务找车任务</button>
   </Form></Modal>;

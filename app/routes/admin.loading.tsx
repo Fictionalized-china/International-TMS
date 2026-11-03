@@ -5,6 +5,7 @@ import type { Route } from "./+types/admin.loading";
 import { BatchNumberLink, OrderNumberLinkList } from "../components/EntityNumberLink";
 import { ActionToast } from "../components/ActionToast";
 import { DateTimeSelect } from "../components/DateTimeSelect";
+import { LoadingOrderPeek } from "../components/LoadingOrderPeek";
 import { requireSessionUser } from "../lib/auth.server";
 import { batchVisibilitySql } from "../lib/order-access.server";
 import { canAccessBatchWorkspace } from "../lib/order-access";
@@ -18,6 +19,8 @@ import {
 import { valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import { loadingTrackingFilters } from "../lib/loading-tracking-filters";
+import { resolveLoadingBatchFieldPolicies } from "../lib/loading-batch-field-policy";
+import { loadLoadingBatchWorkflowOrders } from "../lib/loading-batch-field-policy.server";
 
 type BatchRow = {
   id: string;
@@ -110,6 +113,8 @@ export async function loader({ request }: Route.LoaderArgs) {
     : [[], { carriers: [], vehicles: [], drivers: [], borderPorts: [], customsPlaces: [], operationMembers: [], documentMembers: [] }];
 
   const resourceFeedback=canPlan?await loadPlannedResourceFeedback(current):[];
+  const planningWorkflowOrders=view==="planning"&&planningCandidates.length
+    ?await loadLoadingBatchWorkflowOrders(current.organizationId,planningCandidates.map((item)=>item.order_id)):[];
   return {
     canPlan,
     view,
@@ -118,6 +123,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     requestId:crypto.randomUUID(),
     ...advanced.fields,
     planningCandidates,
+    planningWorkflowOrders,
     planningOptions,
     batches: rows.results,
     total: count?.total ?? 0,
@@ -253,6 +259,7 @@ function BatchPlanningPanel({ data, busy }: {
   const [costCurrency,setCostCurrency] = useState("CNY");
   const [costExchangeRate, setCostExchangeRate] = useState("1");
   const selected = data.planningCandidates.filter((item) => selectedIds.includes(item.order_id));
+  const selectedFieldPolicies=resolveLoadingBatchFieldPolicies(data.planningWorkflowOrders.filter((item)=>selectedIds.includes(item.orderId)));
   const first = selected[0];
   const routeKey = (item: (typeof data.planningCandidates)[number]) => [
     item.warehouse_id,item.overseas_warehouse_id,item.destination_country,item.destination_state || "",
@@ -290,19 +297,22 @@ function BatchPlanningPanel({ data, busy }: {
         <label className="field"><span>折算汇率 *</span><input name="costExchangeRate" type="number" min="0.000001" step="0.000001" required readOnly={costCurrency === "CNY"} placeholder="录入实际汇率" value={costExchangeRate} onChange={(event) => setCostExchangeRate(event.currentTarget.value)}/></label>
         <label className="field"><span>成本分摊方式 *</span><select name="costAllocationMethod" defaultValue="auto"><option value="auto">按 1:300 抛重比自动建议</option><option value="weight">按实收重量</option><option value="volume">按实收体积</option><option value="equal">按订单均分</option></select></label>
       </div>
-      <details className="inline-details"><summary>口岸、时间与补充说明</summary><div className="form-grid compact loading-batch-fields">
-        <label className="field"><span>出境口岸</span><select name="borderPort" defaultValue=""><option value="">按工作流选填</option>{data.planningOptions.borderPorts.map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label>
-        <label className="field"><span>清关地</span><select name="customsLocation" defaultValue=""><option value="">按工作流选填</option>{data.planningOptions.customsPlaces.map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label>
-        <label className="field"><span>计划装车</span><DateTimeSelect name="plannedLoadingAt"/></label>
-        <label className="field"><span>计划出境</span><DateTimeSelect name="plannedDepartureAt"/></label>
-        <label className="field"><span>计划到仓</span><DateTimeSelect name="plannedArrivalAt"/></label>
-        <label className="field"><span>线路说明</span><input name="routeNotes" placeholder="按工作流选填"/></label>
-        <label className="field span-2"><span>配载说明</span><input name="notes" placeholder="特殊装载、交接或调度说明"/></label>
-      </div></details>
+      <section className="loading-plan-route-panel" aria-label="口岸与计划时间">
+        <div className="loading-plan-route-head"><strong>口岸与计划时间</strong><span>按已选订单的冻结工作流判断，带 * 的字段须在生成前填写。</span></div>
+        {!selected.length?<p>先勾选待配载订单，所需的口岸、时间与线路字段会在这里直接显示。</p>:<div className="form-grid compact loading-batch-fields">
+          {selectedFieldPolicies.exit_port.isActive&&<label className="field"><span>出境口岸{selectedFieldPolicies.exit_port.isRequired?" *":"（选填）"}</span><select name="borderPort" defaultValue="" required={selectedFieldPolicies.exit_port.isRequired}><option value="">请选择出境口岸</option>{data.planningOptions.borderPorts.map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label>}
+          {selectedFieldPolicies.customs_location.isActive&&<label className="field"><span>清关地{selectedFieldPolicies.customs_location.isRequired?" *":"（选填）"}</span><select name="customsLocation" defaultValue="" required={selectedFieldPolicies.customs_location.isRequired}><option value="">请选择清关地</option>{data.planningOptions.customsPlaces.map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label>}
+          {selectedFieldPolicies.planned_loading_at.isActive&&<label className="field"><span>计划装车{selectedFieldPolicies.planned_loading_at.isRequired?" *":"（选填）"}</span><DateTimeSelect name="plannedLoadingAt" required={selectedFieldPolicies.planned_loading_at.isRequired}/></label>}
+          {selectedFieldPolicies.planned_exit_at.isActive&&<label className="field"><span>计划出境{selectedFieldPolicies.planned_exit_at.isRequired?" *":"（选填）"}</span><DateTimeSelect name="plannedDepartureAt" required={selectedFieldPolicies.planned_exit_at.isRequired}/></label>}
+          {selectedFieldPolicies.planned_arrival_at.isActive&&<label className="field"><span>计划到仓{selectedFieldPolicies.planned_arrival_at.isRequired?" *":"（选填）"}</span><DateTimeSelect name="plannedArrivalAt" required={selectedFieldPolicies.planned_arrival_at.isRequired}/></label>}
+          {selectedFieldPolicies.route_code.isActive&&<label className="field"><span>线路说明{selectedFieldPolicies.route_code.isRequired?" *":"（选填）"}</span><input name="routeNotes" required={selectedFieldPolicies.route_code.isRequired} placeholder="填写运输线路"/></label>}
+          {selectedFieldPolicies.loading_notes.isActive&&<label className="field span-2"><span>配载说明{selectedFieldPolicies.loading_notes.isRequired?" *":"（选填）"}</span><input name="notes" required={selectedFieldPolicies.loading_notes.isRequired} placeholder="特殊装载、交接或调度说明"/></label>}
+        </div>}
+      </section>
       <div className="loading-selection-summary inline-loading-summary"><span>已选 <strong>{selected.length}</strong> 票</span><span>{totals.packages} 包</span><span>{totals.weight.toFixed(2)} KG</span><span>{totals.volume.toFixed(3)} CBM</span><span>应收折算 {totals.receivable.toFixed(2)}</span><span>成本折算 {Number(costExchangeRate)>0 ? costBaseAmount.toFixed(2) : "待填写汇率"}</span><span>预计毛利 <strong>{Number(costExchangeRate)>0 ? estimatedProfit.toFixed(2) : "待填写汇率"}</strong></span></div>
       <div className="table-wrap module-record-table inline-loading-table"><table><thead><tr><th>选择</th><th>订单 / 客户</th><th>装车仓</th><th>境外目的地</th><th>实收汇总</th><th>状态</th></tr></thead><tbody>{data.planningCandidates.map((item) => {
         const disabled = !compatible(item) && !selectedIds.includes(item.order_id);
-        return <tr key={item.order_id} className={selectedIds.includes(item.order_id) ? "selected-row" : ""}><td><input type="checkbox" name="orderIds" aria-label={`选择订单 ${item.order_number}`} value={item.order_id} checked={selectedIds.includes(item.order_id)} disabled={disabled} onChange={(event) => toggle(item.order_id,event.currentTarget.checked)}/></td><td><strong>{item.order_number}</strong><small>{item.customer_name}</small></td><td>{item.warehouse_name}</td><td>{item.overseas_warehouse_name || "未设置"}<small>{[item.destination_country,item.destination_state,item.destination_city].filter(Boolean).join(" ")}</small></td><td>{Number(item.weight_kg).toFixed(2)} KG<small>{Number(item.volume_cbm).toFixed(3)} CBM · {item.package_count} 包</small></td><td>{disabled ? "与当前选择不兼容" : "可配载"}</td></tr>;
+        return <tr key={item.order_id} className={selectedIds.includes(item.order_id) ? "selected-row" : ""}><td><input type="checkbox" name="orderIds" aria-label={`选择订单 ${item.order_number}`} value={item.order_id} checked={selectedIds.includes(item.order_id)} disabled={disabled} onChange={(event) => toggle(item.order_id,event.currentTarget.checked)}/></td><td><LoadingOrderPeek order={item}/><small>{item.customer_name}</small></td><td>{item.warehouse_name}</td><td>{item.overseas_warehouse_name || "未设置"}<small>{[item.destination_country,item.destination_state,item.destination_city].filter(Boolean).join(" ")}</small></td><td>{Number(item.weight_kg).toFixed(2)} KG<small>{Number(item.volume_cbm).toFixed(3)} CBM · {item.package_count} 包</small></td><td>{disabled ? "与当前选择不兼容" : "可配载"}</td></tr>;
       })}</tbody></table></div>
       {!data.planningCandidates.length && <p className="empty-state">当前没有同时满足“已货齐、已贴标、无异常、未占用、工作流已到配载节点”的订单。仓库端待配载池仅供核对，不能在仓库账号中勾选成单。</p>}
       {data.planningCandidates.length === 1 && <p className="alert info">目前只有 1 票可配载；拼车配载至少需要两票同仓、同目的地且同操作主管的订单。</p>}

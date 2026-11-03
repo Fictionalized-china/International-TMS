@@ -10,6 +10,7 @@ type TrackingCenterDbRow = {
   order_number: string;
   customer_name: string;
   business_type: string;
+  exit_port: string | null;
   order_status: string;
   is_overdue: number;
   exception_status: string;
@@ -45,7 +46,7 @@ export async function loadTrackingCenter(request: Request, current: SessionUser)
   const businessType = (url.searchParams.get("businessType") ?? "").trim();
   const visibility = orderVisibilitySql(current, "o");
   const [result, operationalRules] = await Promise.all([env.DB.prepare(
-    `SELECT o.id order_id,o.order_number,c.name customer_name,o.business_type,o.status order_status,
+    `SELECT o.id order_id,o.order_number,c.name customer_name,o.business_type,o.exit_port,o.status order_status,
             o.is_overdue,o.exception_status,o.origin_city,o.destination_city,o.current_step_name,
             owner.display_name owner_name,s.actual_pickup_at,o.planned_port_arrival_at,
             a.id assignment_id,COALESCE(carrier.name,a.carrier_name) assignment_carrier,a.plate_number assignment_plate,

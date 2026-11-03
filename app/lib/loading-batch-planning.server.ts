@@ -42,6 +42,9 @@ export type LoadingPlanningCandidate = {
   order_number: string;
   customer_name: string;
   business_type: string;
+  origin_city: string | null;
+  cargo_description: string | null;
+  cargo_names: string | null;
   warehouse_id: string;
   warehouse_name: string;
   warehouse_serial_code: string | null;
@@ -63,7 +66,9 @@ export type LoadingPlanningCandidate = {
   destination_city: string;
   operation_supervisor_user_id: string | null;
   exit_port: string | null;
+  exit_port_name: string | null;
   customs_location: string | null;
+  customs_location_name: string | null;
   receivable_base_amount: number;
 };
 
@@ -76,7 +81,8 @@ export type LoadingPlanningResourceOption = {
   vehicle_type?: string | null;
 };
 
-const planningCandidateSelect = `SELECT o.id order_id,o.order_number,c.name customer_name,o.business_type,
+const planningCandidateSelect = `SELECT o.id order_id,o.order_number,c.name customer_name,o.business_type,o.origin_city,o.cargo_description,
+    (SELECT GROUP_CONCAT(NULLIF(TRIM(i.cargo_name_cn),''),'、') FROM order_cargo_items i WHERE i.organization_id=o.organization_id AND i.order_id=o.id) cargo_names,
     w.id warehouse_id,w.name warehouse_name,w.serial_code warehouse_serial_code,
     job.id packing_job_id,job.status packing_status,
     (SELECT COUNT(*) FROM warehouse_packages p WHERE p.organization_id=job.organization_id
@@ -87,7 +93,7 @@ const planningCandidateSelect = `SELECT o.id order_id,o.order_number,c.name cust
     1 cargo_ready,0 has_exception,0 active_dispatch,NULL active_batch_id,NULL active_batch_number,
     o.overseas_warehouse_id,ow.name overseas_warehouse_name,
     o.destination_country,o.destination_state,o.destination_city,o.operation_supervisor_user_id,
-    o.exit_port,o.customs_location,
+    o.exit_port,bp.name exit_port_name,o.customs_location,cp.name customs_location_name,
     COALESCE((SELECT SUM(e.base_amount) FROM business_expenses e
       WHERE e.organization_id=o.organization_id AND e.order_id=o.id
         AND e.direction='receivable' AND e.stage!='cancelled'),0) receivable_base_amount
@@ -98,6 +104,8 @@ const planningCandidateSelect = `SELECT o.id order_id,o.order_number,c.name cust
   JOIN warehouses w ON w.id=job.warehouse_id AND w.organization_id=job.organization_id
     AND w.status='active' AND w.warehouse_role!='overseas_destination'
   LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id
+  LEFT JOIN reference_data bp ON bp.organization_id=o.organization_id AND bp.category='border_port' AND bp.code=o.exit_port
+  LEFT JOIN reference_data cp ON cp.organization_id=o.organization_id AND cp.category='customs_place' AND cp.code=o.customs_location
   WHERE o.organization_id=? AND o.business_type='ltl'
     AND o.overseas_warehouse_id IS NOT NULL
     AND EXISTS(SELECT 1 FROM warehouse_packages p WHERE p.organization_id=job.organization_id

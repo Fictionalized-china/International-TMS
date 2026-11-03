@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { meetingFixture } from "./meeting-integration-fixture";
 import { fulfillDispatchTask, requestDispatchTask } from "./dispatch-tasks.server";
+import { defaultBusinessProcessPolicy } from "./business-process-policy";
 
 vi.mock("cloudflare:workers", () => ({ env: {} }));
 let fixture: Awaited<ReturnType<typeof meetingFixture>>;
@@ -11,12 +12,29 @@ beforeEach(async () => {
   sql.prepare("INSERT INTO carriers(id,organization_id,code,name,created_at,updated_at) VALUES('carrier','org','CAR','运输商',?,?)").run(now, now);
   sql.prepare("INSERT INTO carrier_vehicles(id,organization_id,carrier_id,plate_number,created_at,updated_at) VALUES('vehicle','org','carrier','车牌',?,?)").run(now, now);
   sql.prepare("INSERT INTO carrier_drivers(id,organization_id,carrier_id,name,created_at,updated_at) VALUES('driver','org','carrier','司机',?,?)").run(now, now);
+  sql.exec("UPDATE transport_orders SET exit_port=NULL WHERE id='order'");
   await requestDispatchTask(fixture.db, { current: fixture.actors.get("operation")!, orderId: "order", plannedPortArrivalAt: "2026-10-05T00:00:00Z" });
 });
 afterEach(() => { fixture?.database.close(); vi.restoreAllMocks(); });
 const input = () => ({ current: fixture.actors.get("commercial")!, orderId: "order", carrierId: "carrier", vehicleId: "vehicle", driverId: "driver", freightAmount: 100, currency: "CNY", exchangeRate: 1, notes: "已确认资源" });
 
 describe("commercial resource feedback concurrency", () => {
+  it("does not require a port before commercial vehicle search by default", () => {
+    expect(defaultBusinessProcessPolicy["dispatch.required_order_fields"].split(",")).not.toContain("exit_port");
+    expect(fixture.database.prepare("SELECT exit_port FROM transport_orders WHERE id='order'").get()).toEqual({ exit_port: null });
+    expect(fixture.database.prepare("SELECT status FROM order_dispatch_requests WHERE order_id='order'").get()).toEqual({ status: "pending" });
+  });
+
+  it("keeps an explicitly configured port gate actionable and validates the selected reference", async () => {
+    fixture.database.exec("DELETE FROM order_dispatch_requests WHERE order_id='order'");
+    fixture.database.prepare("INSERT INTO business_process_policies(organization_id,policy_key,policy_value,updated_at) VALUES('org','dispatch.required_order_fields','exit_port',?)").run(fixture.now);
+    const request = { current: fixture.actors.get("operation")!, orderId: "order", plannedPortArrivalAt: "2026-10-05T00:00:00Z" };
+    await expect(requestDispatchTask(fixture.db, request)).rejects.toThrow("出境口岸");
+    await expect(requestDispatchTask(fixture.db, { ...request, exitPort: "INVALID" })).rejects.toThrow("请选择基础数据中启用的出境口岸");
+    fixture.database.prepare("INSERT INTO reference_data(id,organization_id,category,code,name,created_at,updated_at) VALUES('port','org','border_port','PORT-1','测试口岸',?,?)").run(fixture.now, fixture.now);
+    await expect(requestDispatchTask(fixture.db, { ...request, exitPort: "PORT-1" })).resolves.toMatchObject({ created: true });
+    expect(fixture.database.prepare("SELECT exit_port FROM transport_orders WHERE id='order'").get()).toEqual({ exit_port: "PORT-1" });
+  });
   it("saves linked resources once and treats an identical retry as duplicate", async () => {
     expect(await fulfillDispatchTask(fixture.db, input())).toEqual({ duplicate: false });
     expect(await fulfillDispatchTask(fixture.db, input())).toEqual({ duplicate: true });

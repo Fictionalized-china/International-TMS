@@ -6,13 +6,14 @@ import { loadOperationalRules } from "./operational-rules.server";
 import { orderVisibilitySql } from "./order-access";
 import { loadActivePositionAccessProfile } from "./position-access-profile.server";
 
-type DispatchOrder={id:string;order_number:string;status:string;planned_port_arrival_at:string|null;has_receivable:number;[field:string]:unknown};
+type DispatchOrder={id:string;order_number:string;status:string;business_type:string;exit_port:string|null;planned_port_arrival_at:string|null;has_receivable:number;[field:string]:unknown};
 const sourceSql=`SELECT o.*,CASE WHEN EXISTS(SELECT 1 FROM business_expenses e WHERE e.organization_id=o.organization_id AND e.order_id=o.id AND e.direction='receivable' AND e.stage!='cancelled') THEN 1 ELSE 0 END has_receivable FROM transport_orders o`;
+const dispatchFieldLabels:Record<string,string>={shipper_name:"发货人",shipper_contact:"发货联系人",shipper_phone:"发货联系电话",origin_city:"起运城市",origin_address:"提货地址",consignee_name:"收货人",consignee_contact:"收货联系人",consignee_phone:"收货联系电话",destination_city:"目的城市",destination_address:"目的地址",cargo_description:"货物描述",exit_port:"出境口岸",requested_pickup_date:"要求提货日期",overseas_warehouse_id:"境外目的仓"};
 function dispatchReadiness(order:DispatchOrder,policy:BusinessProcessPolicy) {
   if(order.status!=="in_execution") throw new Error("订单须审核并完成派单后才能发起找车");
   const required=policy["dispatch.required_order_fields"].split(",").filter(Boolean);
   const missing=required.filter(key=>!String(order[key]??"").trim());
-  if(missing.length) throw new Error(`订单资料不齐，尚缺：${missing.join("、")}`);
+  if(missing.length) throw new Error(`订单资料不齐，尚缺：${missing.map(key=>dispatchFieldLabels[key]||key).join("、")}`);
   if(policyEnabled(policy,"order.require_receivable") && !order.has_receivable) throw new Error("订单尚未录入客户应收，不能发起找车");
 }
 
@@ -46,23 +47,35 @@ async function createDispatchTask(db:D1Database,org:string,order:DispatchOrder,p
   return {created:Number(results[0].meta.changes)>0,id};
 }
 
-export async function requestDispatchTask(db:D1Database,input:{current:SessionUser;orderId:string;plannedPortArrivalAt:string;planOnly?:boolean}) {
+export async function requestDispatchTask(db:D1Database,input:{current:SessionUser;orderId:string;plannedPortArrivalAt:string;exitPort?:string;planOnly?:boolean}) {
   const {current}=input,policy=await loadBusinessProcessPolicy(current.organizationId,db);
   const denied=dispatchTaskAccess(policy,current.positionCode,current.permissions,"request",current.roleCodes);
   if(denied) throw new Error(denied);
   const visibility=orderVisibilitySql(current,"o");
   const order=await db.prepare(`${sourceSql} WHERE o.organization_id=? AND o.id=? AND ${visibility.sql}`).bind(current.organizationId,input.orderId,...visibility.values).first<DispatchOrder>();
   if(!order) throw new Error("订单不存在或超出当前账号数据范围");
+  const selectedPort=input.exitPort?.trim()||"";
+  if(selectedPort && selectedPort!==order.exit_port) {
+    if(order.exit_port?.trim()) throw new Error("订单已登记出境口岸，请在订单线路资料中核对，不能从找车任务直接改写");
+    const activePort=await db.prepare("SELECT code FROM reference_data WHERE organization_id=? AND category='border_port' AND code=? AND status='active'")
+      .bind(current.organizationId,selectedPort).first<{code:string}>();
+    if(!activePort) throw new Error("请选择基础数据中启用的出境口岸");
+    order.exit_port=selectedPort;
+  }
   dispatchReadiness(order,policy);
   const time=Date.parse(input.plannedPortArrivalAt);
   if(!Number.isFinite(time)) throw new Error("计划到口岸时间无效");
   order.planned_port_arrival_at=new Date(time).toISOString();
   const now=new Date().toISOString();
   await db.batch([
-    db.prepare("UPDATE transport_orders SET planned_port_arrival_at=?,updated_at=? WHERE id=? AND organization_id=?").bind(order.planned_port_arrival_at,now,order.id,current.organizationId),
+    db.prepare("UPDATE transport_orders SET planned_port_arrival_at=?,exit_port=CASE WHEN TRIM(COALESCE(exit_port,''))='' THEN ? ELSE exit_port END,updated_at=? WHERE id=? AND organization_id=?").bind(order.planned_port_arrival_at,selectedPort||null,now,order.id,current.organizationId),
     db.prepare(`INSERT INTO audit_logs(id,organization_id,actor_user_id,action,resource_type,resource_id,outcome,metadata_json,created_at)
-      VALUES(?,?,?,'dispatch.plan.update','transport_order',?,'success',?,?)`).bind(crypto.randomUUID(),current.organizationId,current.userId,order.id,JSON.stringify({plannedPortArrivalAt:order.planned_port_arrival_at}),now),
+      VALUES(?,?,?,'dispatch.plan.update','transport_order',?,'success',?,?)`).bind(crypto.randomUUID(),current.organizationId,current.userId,order.id,JSON.stringify({plannedPortArrivalAt:order.planned_port_arrival_at,exitPort:selectedPort||null}),now),
   ]);
+  if(selectedPort) {
+    const saved=await db.prepare("SELECT exit_port FROM transport_orders WHERE id=? AND organization_id=?").bind(order.id,current.organizationId).first<{exit_port:string|null}>();
+    if(saved?.exit_port!==selectedPort) throw new Error("订单出境口岸已由其他操作更新，请刷新并核对后再发送找车任务");
+  }
   if(input.planOnly) return {created:false,planned:true};
   return createDispatchTask(db,current.organizationId,order,policy,current.userId,now);
 }

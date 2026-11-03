@@ -21,12 +21,13 @@ export async function loader({ request }: Route.LoaderArgs) {
   await refreshAutomaticDispatchTasks(env.DB,current.organizationId);
   const canRequest=!dispatchTaskAccess(policy,current.positionCode,current.permissions,"request",current.roleCodes);
   const canFulfill=!dispatchTaskAccess(policy,current.positionCode,current.permissions,"fulfill",current.roleCodes);
+  const borderPorts=canRequest?(await env.DB.prepare("SELECT code,name FROM reference_data WHERE organization_id=? AND category='border_port' AND status='active' ORDER BY sort_order,name").bind(current.organizationId).all<{code:string;name:string}>()).results:[];
   const resources=canFulfill ? {
     carriers:(await env.DB.prepare("SELECT id,name FROM carriers WHERE organization_id=? AND status='active'").bind(current.organizationId).all<{id:string;name:string}>()).results,
     vehicles:(await env.DB.prepare("SELECT id,carrier_id,plate_number FROM carrier_vehicles WHERE organization_id=? AND status='active'").bind(current.organizationId).all<{id:string;carrier_id:string;plate_number:string}>()).results,
     drivers:(await env.DB.prepare("SELECT id,carrier_id,name FROM carrier_drivers WHERE organization_id=? AND status='active'").bind(current.organizationId).all<{id:string;carrier_id:string;name:string}>()).results,
   } : {carriers:[],vehicles:[],drivers:[]};
-  return { current,policy,canRequest,canFulfill,resources,requestId:crypto.randomUUID(),dispatchTasks:await loadDispatchTaskRows(env.DB,current),canDaily:policyEnabled(policy,"tracking.daily_enabled")&&(isBossBusinessActor(current)||(policyPositions(policy,"tracking.positions").includes(current.positionCode??"")&&current.permissions.includes("tracking.daily.manage"))), ...(await loadTrackingCenter(request, current)) };
+  return { current,policy,canRequest,canFulfill,borderPorts,resources,requestId:crypto.randomUUID(),dispatchTasks:await loadDispatchTaskRows(env.DB,current),canDaily:policyEnabled(policy,"tracking.daily_enabled")&&(isBossBusinessActor(current)||(policyPositions(policy,"tracking.positions").includes(current.positionCode??"")&&current.permissions.includes("tracking.daily.manage"))), ...(await loadTrackingCenter(request, current)) };
 }
 
 export async function action({request}:Route.ActionArgs) {
@@ -36,7 +37,7 @@ export async function action({request}:Route.ActionArgs) {
   try {
     switch(value("intent")) {
       case "daily":await recordDailyTracking(env.DB,{current,orderId:value("orderId"),requestId:value("requestId"),eventKind:value("eventKind"),eventAt:beijingTime("eventAt"),location:value("location"),vehicleReference:value("vehicleReference"),notes:value("notes"),visibleToCustomer:value("visible")==="1"});break;
-      case "dispatch_request":await requestDispatchTask(env.DB,{current,orderId:value("orderId"),plannedPortArrivalAt:beijingTime("plannedPortArrivalAt"),planOnly:value("planOnly")==="1"});break;
+      case "dispatch_request":await requestDispatchTask(env.DB,{current,orderId:value("orderId"),plannedPortArrivalAt:beijingTime("plannedPortArrivalAt"),exitPort:value("exitPort"),planOnly:value("planOnly")==="1"});break;
       case "dispatch_fulfill":await fulfillDispatchTask(env.DB,{current,orderId:value("orderId"),carrierId:value("carrierId"),vehicleId:value("vehicleId"),driverId:value("driverId"),freightAmount:Number(value("freightAmount")),currency:value("currency"),exchangeRate:Number(value("exchangeRate")),notes:value("notes")});break;
       default:throw new Error("未知操作");
     }
@@ -84,7 +85,7 @@ export default function TrackingCenter({ loaderData,actionData }: Route.Componen
           <td><strong>{row.batch_number || row.assignment_carrier || "尚未调度"}</strong><small>{row.batch_plate || row.assignment_plate || "车辆待安排"}</small></td>
           <td><strong>{row.latest_event || "暂无轨迹"}</strong><small>{row.latest_location || "地点待更新"} · {formatTime(row.latest_event_at)}</small></td>
           <td><strong>{row.client_visible_event_count} 条客户可见</strong><small>{row.client_latest_event_at ? `最近同步 ${formatTime(row.client_latest_event_at)}` : "尚未发布客户轨迹"}</small></td>
-          <td className="sticky-action"><div className="row-actions">{loaderData.canDaily&&row.order_status==="in_execution"&&!row.actual_arrival_at&&<DailyTrackingForm orderId={row.order_id} orderNumber={row.order_number} requestId={loaderData.requestId} closeSignal={actionData?.savedAt}/>} {loaderData.canRequest&&row.order_status==="in_execution"&&<DispatchRequestForm orderId={row.order_id} orderNumber={row.order_number} closeSignal={actionData?.savedAt}/>} {row.batch_id ? <Link className="text-button" to={`/admin/loading/${row.batch_id}?tab=tracking`}>办理整批运踪</Link> : <Link className="text-button" to={`/admin/orders/${row.order_id}/modules/tracking`}>办理订单运踪</Link>}</div></td>
+          <td className="sticky-action"><div className="row-actions">{loaderData.canDaily&&row.order_status==="in_execution"&&!row.actual_arrival_at&&<DailyTrackingForm orderId={row.order_id} orderNumber={row.order_number} requestId={loaderData.requestId} closeSignal={actionData?.savedAt}/>} {loaderData.canRequest&&row.order_status==="in_execution"&&<DispatchRequestForm orderId={row.order_id} orderNumber={row.order_number} currentExitPort={row.exit_port} borderPorts={loaderData.borderPorts} requireExitPort={loaderData.policy["dispatch.required_order_fields"].split(",").includes("exit_port")} closeSignal={actionData?.savedAt}/>} {row.batch_id ? <Link className="text-button" to={`/admin/loading/${row.batch_id}?tab=tracking`}>办理整批运踪</Link> : <Link className="text-button" to={`/admin/orders/${row.order_id}/modules/tracking`}>办理订单运踪</Link>}</div></td>
         </tr>)}
       </tbody></table>{!loaderData.rows.length && <p className="empty-state">当前筛选条件下没有运输任务。</p>}</div>
       <QueryPagination {...loaderData.pagination} unit="票任务"/>

@@ -14,7 +14,7 @@ export const businessProcessPolicyDefinitions = [
   { key: "dispatch.request_positions", label: "发起找车岗位", group: "运踪与商务调度", kind: "positions", defaultValue: "OPERATION,OPERATION_SUPERVISOR,TRACKING" },
   { key: "dispatch.handler_positions", label: "找车办理岗位", group: "运踪与商务调度", kind: "positions", defaultValue: "BUSINESS_ROUTE" },
   { key: "dispatch.automatic", label: "资料齐全时自动生成找车任务", group: "运踪与商务调度", kind: "boolean", defaultValue: "1" },
-  { key: "dispatch.required_order_fields", label: "找车前必备订单字段", group: "运踪与商务调度", kind: "fields", defaultValue: "shipper_name,shipper_contact,shipper_phone,origin_city,origin_address,consignee_name,destination_city,destination_address,cargo_description,exit_port" },
+  { key: "dispatch.required_order_fields", label: "找车前必备订单字段", group: "运踪与商务调度", kind: "fields", defaultValue: "shipper_name,shipper_contact,shipper_phone,origin_city,origin_address,consignee_name,destination_city,destination_address,cargo_description" },
   { key: "loading.automatic_cost_allocation", label: "生成配载单时自动关联子订单应付成本", group: "运踪与商务调度", kind: "boolean", defaultValue: "1" },
   { key: "tracking.alerts_enabled", label: "自动向业务与操作发送时效预警", group: "运踪与商务调度", kind: "boolean", defaultValue: "1" },
   { key: "settlement.after_actual_export", label: "实际出境后开放对账签核", group: "应收应付", kind: "boolean", defaultValue: "1" },
