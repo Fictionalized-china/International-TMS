@@ -120,6 +120,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   return {
     canPlan,
     view,
+    trackingRole:current.positionCode==="TRACKING"&&current.permissions.includes("order.module.tracking.manage"),
     resourceFeedback,
     currentUserId:current.userId,
     requestId:crypto.randomUUID(),
@@ -197,8 +198,8 @@ export default function LoadingTracking({ loaderData, actionData }: Route.Compon
     <header className="page-header">
       <div>
         <p className="eyebrow">CONSOLIDATION TRACKING</p>
-        <h1>{loaderData.view === "planning" ? "配载规划工作台" : "配载单跟踪"}</h1>
-        <p>操作主管先选择拼车订单生成配载单，再发送商务找车；资源落实并经主管确认后交仓库执行。</p>
+        <h1>{loaderData.view === "planning" ? "配载规划工作台" : loaderData.trackingRole ? "配载单运踪" : "配载单跟踪"}</h1>
+        <p>{loaderData.trackingRole ? "一张配载单办理一次运输节点，系统同步已启用运踪的挂载订单；下表每张配载单只显示一行。" : "操作主管先选择拼车订单生成配载单，再发送商务找车；资源落实并经主管确认后交仓库执行。"}</p>
       </div>
       <span className="status-pill">{loaderData.view === "planning" ? `${loaderData.planningCandidates.length} 票待配载` : `${loaderData.total} 张配载单`}</span>
     </header>
@@ -236,7 +237,7 @@ export default function LoadingTracking({ loaderData, actionData }: Route.Compon
         <td>{batch.vehicle_count} 辆</td>
         <td>{formatDate(batch.planned_departure_at)}</td>
         <td><span className={`status-pill ${batch.approval_status==="approved"?"success":batch.approval_status==="rejected"?"danger":""}`}>{batch.sync_pending ? "已保存 · 待同步" : batch.approval_status==="submitted"?(!batch.submitted_at?"待发商务":!batch.carrier_id?"商务找车中":"待主管确认"):batchApprovalLabel(batch.approval_status)}</span><small>{roadStatusLabel(batch.road_status)}</small></td>
-        <td>{Boolean(batch.sync_pending)&&loaderData.canPlan&&batch.created_by_user_id===loaderData.currentUserId ? <Form method="post"><input type="hidden" name="intent" value="retry_batch_sync"/><input type="hidden" name="batchId" value={batch.id}/><button className="secondary" disabled={busy}>重试同步</button></Form> : <Link className={batch.approval_status==="submitted"?"primary":"text-button"} to={`/admin/loading/${batch.id}`}>{batch.approval_status==="submitted"?(!batch.submitted_at?"发送商务找车":!batch.carrier_id?"查看找车进度":"主管确认配载"):"查看配载单"}</Link>}</td>
+        <td>{Boolean(batch.sync_pending)&&loaderData.canPlan&&batch.created_by_user_id===loaderData.currentUserId ? <Form method="post"><input type="hidden" name="intent" value="retry_batch_sync"/><input type="hidden" name="batchId" value={batch.id}/><button className="secondary" disabled={busy}>重试同步</button></Form> : <Link className={loaderData.trackingRole?"primary":batch.approval_status==="submitted"?"primary":"text-button"} to={`/admin/loading/${batch.id}${loaderData.trackingRole?"?tab=tracking":""}`}>{loaderData.trackingRole?"办理整批运踪":batch.approval_status==="submitted"?(!batch.submitted_at?"发送商务找车":!batch.carrier_id?"查看找车进度":"主管确认配载"):"查看配载单"}</Link>}</td>
       </tr>)}</tbody></table></div>
       {!loaderData.batches.length && <p className="empty-state">没有找到符合条件的已生成配载单。</p>}
       {loaderData.pageCount > 1 && <div className="pagination">

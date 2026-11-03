@@ -399,6 +399,21 @@ describe("PZ frozen tracking route gates", () => {
     }));
   });
 
+  it("records one batch action against both participating child orders", async () => {
+    await expect(runAction("batch_tracking_add", {
+      milestoneCode: "border_arrived",
+      eventAt: "2026-09-06T10:00",
+      location: "口岸",
+      visibleToCustomer: "on",
+    })).resolves.toMatchObject({ success: expect.stringContaining("2 票订单") });
+
+    const inserts = harness.prepared.filter((item) => item.sql.includes("INSERT INTO order_tracking_milestones"));
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].bindings).toContain("order-1");
+    expect(inserts[0].bindings).toContain("order-2");
+    expect(inserts[0].bindings).toContain("batch-1");
+  });
+
   it("writes optional-node settings only to frozen-policy participants", async () => {
     harness.state.milestoneParticipants = ["order-1"];
 

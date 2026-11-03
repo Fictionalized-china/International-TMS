@@ -67,6 +67,15 @@ describe("consolidated admin navigation", () => {
     expect(adminWorkspaceSections(user(["menu.admin.quotations.view", "quote.view", "quote.manage"]), "sales").map(section => section.key)).toEqual(["quotations"]);
   });
 
+  it("offers the tracking role a batch-level entrance only with batch read access", () => {
+    const actor = user(["menu.admin.tracking_center.view", "shipment.view", "order.view", "transport.batch.assigned.view", "order.module.tracking.manage"], "TRACKING");
+    const sections = adminWorkspaceSections(actor, "trackingCenter");
+    expect(sections.map(section => section.key)).toContain("batchTracking");
+    expect(sections.find(section => section.key === "batchTracking")?.href).toBe("/admin/loading?view=tracking");
+    expect(adminWorkspaceSectionActive(sections.find(section => section.key === "batchTracking")!, "/admin/loading/batch-1", "?tab=tracking")).toBe(true);
+    expect(adminWorkspaceSections(user(actor.permissions.filter(permission => permission !== "transport.batch.assigned.view"), "TRACKING"), "trackingCenter").map(section => section.key)).not.toContain("batchTracking");
+  });
+
   it("matches path segment boundaries and gives direct intake and quotations different parents", () => {
     const items = adminPrimaryNavigationGroups(user(normalizeAdminNavigationPermissions(adminNavigationPermissionItems.map(item => item.menuPermissionCode)))).flatMap(group => group.items);
     const active = (path: string, search = "") => items.filter(item => adminPrimaryNavigationItemActive(item, path, search)).map(item => item.key);

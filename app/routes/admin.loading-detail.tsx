@@ -1588,6 +1588,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   const sharedResponsibilityActive=batchSharedResponsibilityIsActive(loaderData.batch.road_status);
   const currentIsBatchOperator=privileged||loaderData.batch.operation_assignee_user_id===loaderData.current.userId;
   const currentIsIndependentTracking=loaderData.current.positionCode==="TRACKING"&&loaderData.current.permissions.includes("order.module.tracking.manage");
+  const trackingFocused=currentIsIndependentTracking;
   const currentIsBatchDocumentOwner=privileged||loaderData.batch.document_assignee_user_id===loaderData.current.userId;
   const canManageBatchResponsibility=requiresSupervisorApproval&&(privileged||(loaderData.current.permissions.includes("transport.batch.approve")&&loaderData.batch.operation_supervisor_user_id===loaderData.current.userId));
   const canReviewBatch=loaderData.batch.approval_status==="submitted"&&Boolean(loaderData.batch.submitted_at)&&Boolean(loaderData.batch.carrier_id)&&canManageBatchResponsibility;
@@ -1657,7 +1658,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   const arrived=["overseas_arrived","waiting_pickup","pickup_completed"].includes(loaderData.batch.road_status);
   const defaultActiveTab:BatchWorkspaceTab=activeExceptions.length?"exceptions":arrived?"overseas":exited?"tracking":!allDispatched?"batch":!allDocumentGateReady?"documents":"tracking";
   const requestedTab=searchParams.get("tab");
-  const activeTab:BatchWorkspaceTab=isBatchWorkspaceTab(requestedTab)?requestedTab:defaultActiveTab;
+  const activeTab:BatchWorkspaceTab=trackingFocused?"tracking":isBatchWorkspaceTab(requestedTab)?requestedTab:defaultActiveTab;
   const tabHref=(tab:BatchWorkspaceTab)=>{const next=new URLSearchParams(searchParams);next.set("tab",tab);next.delete("orderPage");next.delete("documentView");return `?${next.toString()}`};
   const uploadedOrderId=actionData&&"uploadedOrderId" in actionData&&typeof actionData.uploadedOrderId==="string"?actionData.uploadedOrderId:null;
   const uploadedDocumentCategory=actionData&&"uploadedDocumentCategory" in actionData&&typeof actionData.uploadedDocumentCategory==="string"?actionData.uploadedDocumentCategory:null;
@@ -1698,6 +1699,12 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
     setDetailDrawerOpen(true);
   };
   const overseasInboundHandoff=resolveBatchOverseasInboundHandoff(loaderData.orders);
+  const trackingWorkbench=<BatchTrackingWorkbench batchId={loaderData.batch.id} batchNumber={loaderData.batch.batch_number} orders={loaderData.orders} visibleOrders={visibleOrders} orderPagination={orderPagination} trackingMilestones={loaderData.trackingMilestones} trackingFlags={loaderData.trackingFlags} workflowPolicies={loaderData.batchWorkflowPolicies} milestoneAction={loaderData.trackingMilestoneAction} actualExitAction={loaderData.actualExitAction} batchVehiclePlate={loaderData.batchVehiclePlate} overseasVehiclePlate={loaderData.batch.overseas_vehicle_plate||null} borderPort={loaderData.batch.border_port||null} customsLocation={loaderData.batch.customs_location||null} busy={busy} manage={manageTracking&&allDispatched} warehouseReady={allDispatched} documentGateReady={allDocumentGateReady} exitConfirmed={exited} canConfirmExit={canConfirmExit} exitBlockers={Array.from(new Set(exitBlockers))} borderPorts={loaderData.borderPorts} documentsHref={trackingFocused?undefined:tabHref("documents")} actionCloseSignal={actionData?.success?actionData:undefined}/>;
+  if(trackingFocused)return <>
+    <header className="page-header batch-tracking-page-header"><div><p className="eyebrow">PZ TRACKING · BATCH WORKBENCH</p><h1>配载单运踪 · {loaderData.batch.batch_number}</h1><p>{loaderData.batch.origin_location} → {loaderData.batch.destination_location} · 整批登记一次，同步本单中已启用运踪的 {loaderData.orders.length} 票订单。</p></div><div className="page-actions"><Link className="secondary" to="/admin/loading?view=tracking">返回配载单运踪</Link><span className="status-pill">{roadStatusLabels[loaderData.batch.road_status]||loaderData.batch.road_status}</span></div></header>
+    <ActionToast data={actionData}/>
+    {trackingWorkbench}
+  </>;
   return <><header className="page-header batch-tracking-page-header"><div><p className="eyebrow">PZ LOAD · TRANSPORT TRACKING</p><h1>{loaderData.batch.batch_number}</h1><p>{loaderData.batch.batch_name} · {loaderData.batch.origin_location} → {loaderData.batch.destination_location}</p></div><div className="page-actions">{loaderData.returnOrderId&&<Link className="secondary" to={`/admin/orders/${loaderData.returnOrderId}`}>返回订单详情</Link>}<Link className="secondary" to="/admin/loading">返回配载单跟踪</Link><span className="status-pill">{allDispatched?"后台运输跟踪":"等待仓库出库"}</span><span className="status-pill">{roadStatusLabels[loaderData.batch.road_status]||loaderData.batch.road_status}</span></div></header><ActionToast data={actionData}/>
   <div className="batch-detail-layout"><main className="batch-detail-main">
   {requiresSupervisorApproval&&loaderData.batch.approval_status==="submitted"&&<section className="panel batch-command-panel">
@@ -1712,7 +1719,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
     <div className="panel-header"><div><h2>配载单执行</h2></div><span className="status-pill">{roadStatusLabels[loaderData.batch.road_status]||loaderData.batch.road_status}</span></div>
     <BatchWorkspaceTabs status={loaderData.batch.road_status} documentGateReady={allDocumentGateReady} loadPlanReady={loadPlanReady} warehouseReady={allDispatched} borderArrivalReady={borderArrivalReady} exceptionCount={activeExceptions.length} activeTab={activeTab} tabHref={tabHref}/>
   </section>
-  {activeTab==="tracking"&&<BatchTrackingWorkbench batchId={loaderData.batch.id} batchNumber={loaderData.batch.batch_number} orders={loaderData.orders} visibleOrders={visibleOrders} orderPagination={orderPagination} trackingMilestones={loaderData.trackingMilestones} trackingFlags={loaderData.trackingFlags} workflowPolicies={loaderData.batchWorkflowPolicies} milestoneAction={loaderData.trackingMilestoneAction} actualExitAction={loaderData.actualExitAction} batchVehiclePlate={loaderData.batchVehiclePlate} overseasVehiclePlate={loaderData.batch.overseas_vehicle_plate||null} borderPort={loaderData.batch.border_port||null} customsLocation={loaderData.batch.customs_location||null} busy={busy} manage={manageTracking&&allDispatched} warehouseReady={allDispatched} documentGateReady={allDocumentGateReady} exitConfirmed={exited} canConfirmExit={canConfirmExit} exitBlockers={Array.from(new Set(exitBlockers))} borderPorts={loaderData.borderPorts} documentsHref={tabHref("documents")} actionCloseSignal={actionData?.success?actionData:undefined}/>} 
+  {activeTab==="tracking"&&trackingWorkbench}
   {activeTab==="documents"&&<BatchDocumentWorkbench batchId={loaderData.batch.id} orders={loaderData.orders} visibleOrders={visibleOrders} orderPagination={orderPagination} batchDocuments={loaderData.batchDocuments} orderDocuments={loaderData.orderDocuments} orderDocumentRequirements={loaderData.orderDocumentRequirements} customsSummaries={loaderData.customsSummaries} customsDeclarations={loaderData.customsDeclarations} workflowPolicies={loaderData.batchWorkflowPolicies} customsAccesses={loaderData.batchCustomsAccess.orders} busy={busy} manageDocuments={manageDocuments} manageCustoms={manageCustoms} currentUserId={loaderData.current.userId} documentOwnerUserId={loaderData.batch.document_assignee_user_id} documentOwnerName={loaderData.batch.document_assignee_name} privileged={privileged} requiresTransloading={requiresTransloading} ready={allDocumentGateReady} customsCloseSignal={customsCloseSignal} uploadedOrderId={uploadedOrderId} uploadedDocumentCategory={uploadedDocumentCategory} documentUploadSignal={documentUploadSignal} onOpenOrderDossier={orderId=>openDetailDrawer(orderId)}/>} 
   {activeTab==="exceptions"&&<BatchExceptionWorkbench batch={loaderData.batch} orders={loaderData.orders} packages={loaderData.exceptionPackages} exceptions={loaderData.batchExceptions} busy={busy} manage={manageExceptions} closeSignal={actionData?.success?actionData:undefined}/>}
   {activeTab==="batch"&&<><section className="panel loading-sheet batch-tab-panel" id="batch-arrangement">
@@ -2146,7 +2153,7 @@ export function BatchTrackingWorkbench({batchId,batchNumber,orders,visibleOrders
   canConfirmExit:boolean;
   exitBlockers:string[];
   borderPorts:ReferenceOption[];
-  documentsHref:string;
+  documentsHref?:string;
   actionCloseSignal?:unknown;
 }){
   // 各订单的最新里程碑（按 progress 权重排序）
@@ -2195,7 +2202,7 @@ export function BatchTrackingWorkbench({batchId,batchNumber,orders,visibleOrders
   const defaultLocation=(nodeCode:string)=>["border_arrived","exported"].includes(nodeCode)?borderPort||"":nodeCode==="customs_cleared"?customsLocation||"":"";
   const borderArrivalNode=visibleMilestones.find(node=>node.code==="border_arrived");
   return <section className="panel batch-tracking-workbench" id="batch-tracking">
-    <div className="panel-header"><div><h2>口岸到达、实际出境与运踪</h2><p>页面操作项、必填状态和推进门禁均来自挂载订单的冻结工作流。</p></div><div className="batch-tracking-header-actions"><span className="status-pill">{trackingOrders.length} 票启用 · {visibleTrackingMilestones.length} 条节点</span>{milestoneCanWrite&&milestoneSurfaceVisible&&<Modal title="可选运输节点设置" triggerLabel={`可选节点${requiresTransloading||requiresTransitCustoms?" · 已启用":""}`} triggerClassName="text-button batch-optional-node-trigger" closeSignal={actionCloseSignal}>
+    <div className="panel-header"><div><h2>口岸到达、实际出境与运踪</h2><p>在本配载单登记一次运输节点，系统按各订单的冻结工作流同步参与订单；无需逐票重复办理。</p></div><div className="batch-tracking-header-actions"><span className="status-pill">{trackingOrders.length} 票启用 · {visibleTrackingMilestones.length} 条节点</span>{milestoneCanWrite&&milestoneSurfaceVisible&&<Modal title="可选运输节点设置" triggerLabel={`可选节点${requiresTransloading||requiresTransitCustoms?" · 已启用":""}`} triggerClassName="text-button batch-optional-node-trigger" closeSignal={actionCloseSignal}>
       <div className="batch-optional-node-dialog"><p className="muted">仅在运输途中实际发生换装或转关时启用；默认不参与主流程。</p><div className="table-wrap batch-tracking-option-table"><table><thead><tr><th>可选节点</th><th>适用范围</th><th>当前设置</th><th>操作</th></tr></thead><tbody>
         <tr><td><strong>换装</strong></td><td>给本批参与运踪的订单开放“换装”节点</td><td><span className={`status-pill ${requiresTransloading?"success":"off"}`}>{requiresTransloading?"已启用":"未启用"}</span></td><td><Form method="post"><input type="hidden" name="intent" value="batch_tracking_option_toggle"/><input type="hidden" name="optionCode" value="transloaded"/><label className="toggle-label"><input type="checkbox" name="enable" defaultChecked={requiresTransloading}/><span>启用</span></label><button className="text-button" disabled={busy}>应用</button></Form></td></tr>
         <tr><td><strong>转关</strong></td><td>给本批参与运踪的订单开放“转关”节点</td><td><span className={`status-pill ${requiresTransitCustoms?"success":"off"}`}>{requiresTransitCustoms?"已启用":"未启用"}</span></td><td><Form method="post"><input type="hidden" name="intent" value="batch_tracking_option_toggle"/><input type="hidden" name="optionCode" value="transit_customs"/><label className="toggle-label"><input type="checkbox" name="enable" defaultChecked={requiresTransitCustoms}/><span>启用</span></label><button className="text-button" disabled={busy}>应用</button></Form></td></tr>
@@ -2211,7 +2218,7 @@ export function BatchTrackingWorkbench({batchId,batchNumber,orders,visibleOrders
     </div>}
     {trackingOrders.length>0&&!milestoneSurfaceVisible&&!actualExitSurfaceVisible&&<div className="alert info">当前冻结工作流未展示运输节点和实际出境登记，本页仅保留历史只读信息。</div>}
     {trackingOrders.length>0&&(milestoneSurfaceVisible||actualExitSurfaceVisible)&&!warehouseReady&&<div className="alert warning">仓库端尚未完成整批装车出库。当前仅可查看，完成出库后系统会按冻结工作流开放相应登记项。</div>}
-    {warehouseReady&&!documentGateReady&&!exitConfirmed&&(milestoneSurfaceVisible||actualExitSurfaceVisible)&&<div className="batch-exit-prerequisite" role="status"><div><strong>当前待办：完成工作流要求的逐票报关与文件</strong><span>必填门禁通过后回到本页继续办理；选填项目不会阻断。</span></div><Link className="primary" to={documentsHref}>进入报关与文件</Link></div>}
+    {warehouseReady&&!documentGateReady&&!exitConfirmed&&(milestoneSurfaceVisible||actualExitSurfaceVisible)&&<div className="batch-exit-prerequisite" role="status"><div><strong>当前待办：完成工作流要求的逐票报关与文件</strong><span>必填门禁通过后回到本页继续办理；选填项目不会阻断。</span></div>{documentsHref?<Link className="primary" to={documentsHref}>进入报关与文件</Link>:<span className="status-pill warning">等待单证岗办理</span>}</div>}
     {warehouseReady&&documentGateReady&&!exitConfirmed&&!borderArrivalReady&&borderArrivalNode&&milestoneSurfaceVisible&&<div className="batch-exit-prerequisite" role="status"><div><strong>当前待办：登记口岸到达</strong><span>请在下方运输节点表的“操作”列登记；一次登记只同步冻结工作流开放该节点的挂载订单。</span></div><span className={`status-pill ${milestoneCanWrite?"warning":"off"}`}>{milestoneCanWrite?"在操作列办理":"当前冻结工作流只读"}</span></div>}
     {actualExitSurfaceVisible&&warehouseReady&&documentGateReady&&!exitConfirmed&&borderArrivalReady&&canConfirmExit&&actualExitCanWrite&&<div className="batch-exit-prerequisite" role="status"><div><strong>当前待办：确认实际出境</strong><span>请在下方运输节点表的“操作”列登记；保存后同步已启用运踪的挂载订单，并进入境外运输阶段。</span></div><span className="status-pill warning">在操作列办理</span></div>}
     {actualExitSurfaceVisible&&warehouseReady&&documentGateReady&&!exitConfirmed&&borderArrivalReady&&(!canConfirmExit||!actualExitCanWrite)&&<div className="batch-gate-blocker batch-inline-exit-blocker"><div><strong>{canConfirmExit?"当前冻结工作流只读":"实际出境仍有前置事项"}</strong>{exitBlockers.length?<ul>{exitBlockers.map(reason=><li key={reason}>{reason}</li>)}</ul>:<p>{actualExitAction.reason||"请由本配载单的操作负责人确认实际出境。"}</p>}</div></div>}
@@ -2228,7 +2235,7 @@ export function BatchTrackingWorkbench({batchId,batchNumber,orders,visibleOrders
         <td>{node.code==="exported"&&!exitConfirmed?(actualExitSurfaceVisible&&borderArrivalReady&&canConfirmExit&&actualExitCanWrite?<Modal title="确认实际出境" triggerLabel="登记实际出境" triggerClassName="primary batch-tracking-node-action" size="wide" closeSignal={actionCloseSignal}><BatchExitConfirmForm workflowPolicies={workflowPolicies} defaultEventAt={defaultEventAt} borderPort={borderPort} borderPorts={borderPorts} defaultVehicle={defaultVehicle} busy={busy}/></Modal>:<span className="muted">{actualExitSurfaceVisible?"完成前置步骤后开放":"当前冻结工作流不登记"}</span>):milestoneCanWrite&&node.code!=="station_arrived"&&node.code!=="exported"?<Modal title={`登记运输节点 · ${node.name}`} triggerLabel={`登记${node.name}`} triggerClassName="primary batch-tracking-node-action" size="wide" closeSignal={actionCloseSignal}><BatchTrackingNodeForm nodeCode={node.code} total={total} fields={workflowPolicies} defaultEventAt={defaultEventAt} defaultLocation={defaultLocation(node.code)} defaultVehicle={defaultVehicle} busy={busy}/></Modal>:<span className="muted">{node.code==="exported"?"出境确认自动登记":node.code==="station_arrived"?"仓库自动登记":"当前只读"}</span>}</td>
       </tr>;
     })}</tbody></table></div></>}
-    {trackingOrders.length>0&&<details className="batch-tracking-orders batch-inline-disclosure"><summary><span><strong>逐票节点状态</strong><small>仅显示当前工作流已启用运踪模块的订单</small></span><em aria-hidden="true"/></summary>
+    {trackingOrders.length>0&&<details className="batch-tracking-orders batch-inline-disclosure"><summary><span><strong>订单同步结果</strong><small>只读核对本配载单内已启用运踪的订单，不必逐票登记</small></span><em aria-hidden="true"/></summary>
       <div className="table-wrap"><table><thead><tr><th>订单 / 客户</th><th>最新节点</th><th>节点时间</th><th>地点</th><th>车辆</th><th>历史节点</th><th>操作</th></tr></thead><tbody>{visibleTrackingOrders.map(order=>{
         const latest=latestByOrder.get(order.order_id);
         const list=milestonesByOrder.get(order.order_id)||[];
@@ -2239,7 +2246,7 @@ export function BatchTrackingWorkbench({batchId,batchNumber,orders,visibleOrders
           <td>{latest?.location||"—"}</td>
           <td>{latest?.vehicle_reference||"—"}</td>
           <td><small className="tracking-history-list">{list.map(m=>`${m.milestone_name} ${formatShortDateTime(m.event_at)}`).join(" · ")||"无"}</small></td>
-          <td><Link className="text-button" to={`/admin/orders/${order.order_id}/modules/tracking`}>订单跟踪</Link></td>
+          <td><Link className="text-button" to={`/admin/orders/${order.order_id}/modules/tracking`}>查看订单记录</Link></td>
         </tr>;
       })}</tbody></table></div>
       <QueryPagination {...trackingPagination} pageParam="orderPage" unit="票订单"/>
