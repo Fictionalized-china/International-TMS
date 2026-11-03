@@ -34693,6 +34693,131 @@ html[data-motion="off"] *::after {
   }
 }
 
+/* Count-aware metric rows. Permissions can remove finance metrics, so the
+   visible siblings, rather than an assumed four cards, determine the spans.
+   Every row fills its available width and DOM/keyboard order stays intact. */
+:is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell)
+  :is(.ops-kpi-grid, .analytics-kpi-grid.compact, .tracking-center-kpis, .kpis, .stats, .finance-kpi-grid) {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  align-items: stretch;
+}
+
+:is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell)
+  :is(.ops-kpi-grid, .analytics-kpi-grid.compact, .tracking-center-kpis, .kpis, .stats, .finance-kpi-grid) > * {
+  min-width: 0;
+  grid-column: span 3;
+}
+
+:is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell)
+  :is(.ops-kpi-grid, .analytics-kpi-grid.compact, .tracking-center-kpis, .kpis, .stats, .finance-kpi-grid):where(:has(> :only-child)) > * {
+  grid-column: span 12;
+}
+
+:is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell)
+  :is(.ops-kpi-grid, .analytics-kpi-grid.compact, .tracking-center-kpis, .kpis, .stats, .finance-kpi-grid):where(:has(> :nth-child(2):last-child)) > * {
+  grid-column: span 6;
+}
+
+:is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell)
+  :is(.ops-kpi-grid, .analytics-kpi-grid.compact, .tracking-center-kpis, .kpis, .stats, .finance-kpi-grid):where(:has(> :nth-child(3):last-child, > :nth-child(6):last-child)) > * {
+  grid-column: span 4;
+}
+
+:is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell)
+  :is(.ops-kpi-grid, .analytics-kpi-grid.compact, .tracking-center-kpis, .kpis, .stats, .finance-kpi-grid):where(:has(> :nth-child(5):last-child)) {
+  grid-template-columns: repeat(10, minmax(0, 1fr));
+}
+
+:is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell)
+  :is(.ops-kpi-grid, .analytics-kpi-grid.compact, .tracking-center-kpis, .kpis, .stats, .finance-kpi-grid):where(:has(> :nth-child(5):last-child)) > * {
+  grid-column: span 2;
+}
+
+:is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell)
+  :is(.ops-kpi-grid, .analytics-kpi-grid.compact, .tracking-center-kpis, .kpis, .stats, .finance-kpi-grid):where(:has(> :nth-child(7):last-child)) > :nth-child(n + 5) {
+  grid-column: span 4;
+}
+
+/* Keep filter rows rectangular too. The existing action wrapper is purely
+   presentational; exposing its two buttons to the grid yields eight cells. */
+.finance-analytics .finance-filter-bar {
+  grid-template-columns: minmax(105px, .7fr) repeat(2, minmax(130px, 1fr)) minmax(170px, 1.35fr) minmax(110px, .8fr) auto auto;
+}
+
+.finance-analytics .analytics-header .page-actions,
+.tracking-control-center .page-actions {
+  flex-wrap: wrap;
+  align-items: stretch;
+}
+
+.finance-analytics .analytics-header .page-actions > *,
+.tracking-control-center .page-actions > * {
+  flex: 1 0 auto;
+  justify-content: center;
+}
+
+@media (max-width: 1440px) {
+  :is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell)
+    :is(.ops-kpi-grid, .analytics-kpi-grid.compact, .tracking-center-kpis, .kpis, .stats, .finance-kpi-grid):where(:has(> :nth-child(5):last-child)) {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+
+  :is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell)
+    :is(.ops-kpi-grid, .analytics-kpi-grid.compact, .tracking-center-kpis, .kpis, .stats, .finance-kpi-grid):where(:has(> :nth-child(5):last-child)) > :nth-child(n + 4) {
+    grid-column: span 3;
+  }
+
+  .finance-analytics .finance-filter-bar {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .finance-analytics .analytics-filter-actions { display: contents; }
+  .finance-analytics .finance-filter-bar > *,
+  .finance-analytics .analytics-filter-actions > * { min-width: 0; }
+  .finance-analytics .analytics-filter-actions > *,
+  .finance-analytics .analytics-advanced-filters > summary { width: 100%; justify-content: center; }
+}
+
+@media (max-width: 1200px) {
+  :is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell)
+    :is(.ops-kpi-grid, .analytics-kpi-grid.compact, .tracking-center-kpis, .kpis, .stats, .finance-kpi-grid) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  :is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell)
+    :is(.ops-kpi-grid, .analytics-kpi-grid.compact, .tracking-center-kpis, .kpis, .stats, .finance-kpi-grid) > :nth-child(n) {
+    grid-column: span 1;
+  }
+
+  :is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell)
+    :is(.ops-kpi-grid, .analytics-kpi-grid.compact, .tracking-center-kpis, .kpis, .stats, .finance-kpi-grid) > :last-child:nth-child(odd) {
+    grid-column: 1 / -1;
+  }
+
+  :is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell)
+    :is(.ops-kpi-grid, .analytics-kpi-grid.compact, .tracking-center-kpis, .kpis, .stats, .finance-kpi-grid):where(:has(> :nth-child(5):last-child)) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .finance-analytics .finance-filter-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .finance-analytics .finance-filter-bar:has(> .analytics-advanced-filters[open]) > label:last-of-type { grid-column: 1 / -1; }
+  .finance-analytics .analytics-advanced-filters[open] { grid-column: 1 / -1; }
+  .finance-analytics .analytics-advanced-filters > div { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 560px) {
+  :is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell)
+    :is(.ops-kpi-grid, .analytics-kpi-grid.compact, .tracking-center-kpis, .kpis, .stats, .finance-kpi-grid),
+  :is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell)
+    :is(.ops-kpi-grid, .analytics-kpi-grid.compact, .tracking-center-kpis, .kpis, .stats, .finance-kpi-grid):where(:has(> :nth-child(5):last-child)),
+  .finance-analytics .finance-filter-bar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .admin-app-shell *,
   .warehouse-app-shell *,
