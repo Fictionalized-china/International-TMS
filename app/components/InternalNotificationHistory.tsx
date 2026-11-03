@@ -1,6 +1,7 @@
 import { Form, Link, useSearchParams } from "react-router";
 import type { InternalNotification } from "../lib/internal-notifications.server";
 import { ActionToast } from "./ActionToast";
+import { internalNotificationObjectHref } from "../lib/internal-notification-links";
 
 type NotificationActionData = {
   success?:string;
@@ -61,7 +62,7 @@ export function InternalNotificationHistory({
           <small>{new Date(item.created_at).toLocaleString("zh-CN")}</small>
         </div>
         <div className="page-actions">
-          {allowObjectLinks&&item.link&&<Link className="text-button" to={item.link}>查看对象</Link>}
+          {allowObjectLinks&&internalNotificationObjectHref(item)&&<Link className="text-button" to={internalNotificationObjectHref(item)!}>查看对象</Link>}
           {((item.requires_ack&&!item.acknowledged_at)||(!item.requires_ack&&!item.is_read))&&<Form method="post">
             <input type="hidden" name="intent" value={item.requires_ack?"acknowledge":"read"}/>
             <input type="hidden" name="notificationId" value={item.id}/>

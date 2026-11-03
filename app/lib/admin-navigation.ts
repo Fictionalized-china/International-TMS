@@ -17,6 +17,7 @@ export type AdminNavigationItemKey =
   | "settlementApprovals"
   | "quotations"
   | "orders"
+  | "dispatch"
   | "loading"
   | "documents"
   | "shipments"
@@ -79,7 +80,7 @@ export const adminNavigationPermissionGroups: readonly AdminNavigationPermission
     label: "运营控制",
     description: "集中查看调度、运踪、时效预警与经营分析。",
     items: [
-      navigationItem("trackingCenter", "调度与运踪", "统一查看调度、在途轨迹和时效预警。", "/admin/tracking-center", ["shipment.view"]),
+      navigationItem("trackingCenter", "调度与运踪", "统一查看调度、在途轨迹和时效预警。", "/admin/tracking-center", ["tracking.center.view", "shipment.view"], undefined, "all"),
       navigationItem("analytics", "汇总分析", "按授权范围查看业务、仓库和财务汇总。", "/admin/analytics", ["analytics.business.view"]),
       navigationItem("hrReports", "人事回款与提成", "已回款订单、发车统计与提成登记。", "/admin/hr-reports", ["hr.report.view"]),
     ],
@@ -91,6 +92,7 @@ export const adminNavigationPermissionGroups: readonly AdminNavigationPermission
     items: [
       navigationItem("quotations", "询价与报价", "销售管理 → 报价辅助；可独立停用，不影响直接录单。", "/admin/quotations", ["quote.view"]),
       navigationItem("orders", "订单中心", "查看岗位范围内的运输订单。", "/admin/orders", ["order.view"]),
+      navigationItem("dispatch", "找车", "查看商务找车需求，登记整车或配载单的车辆、司机与报价。", "/admin/dispatch", ["dispatch.view"]),
       {
         ...navigationItem("loading", "配载工作台", "操作主管规划生成配载单；其他岗位查看本人可访问的配载单。", "/admin/loading", ["transport.batch.assigned.view"]),
         accessPermissionCodes: [

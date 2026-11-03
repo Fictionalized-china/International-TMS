@@ -34696,6 +34696,32 @@ html[data-motion="off"] *::after {
 /* Count-aware metric rows. Permissions can remove finance metrics, so the
    visible siblings, rather than an assumed four cards, determine the spans.
    Every row fills its available width and DOM/keyboard order stays intact. */
+.loading-planning-filters {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px 12px;
+  padding: 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--dashboard-control-radius);
+  background: #f8fafb;
+}
+.loading-planning-filters > .field { min-width: 0; margin: 0; }
+.loading-planning-filters :is(input, select) { width: 100%; min-width: 0; }
+.loading-planning-filter-footer { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.loading-planning-filter-footer span { color: var(--muted); font-size: 12px; }
+.loading-planning-selected { display: flex; flex-wrap: wrap; gap: 8px; padding-block: 10px; }
+.dispatch-workbench .dispatch-workbench-filter { grid-template-columns: minmax(220px, 2fr) repeat(2, minmax(140px, 1fr)) auto; }
+@media (max-width: 1100px) {
+  .loading-planning-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dispatch-workbench .dispatch-workbench-filter { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 560px) {
+  .loading-planning-filters,
+  .dispatch-workbench .dispatch-workbench-filter { grid-template-columns: minmax(0, 1fr); }
+  .loading-planning-filter-footer { align-items: stretch; flex-direction: column; }
+}
+
 :is(.admin-app-shell, .warehouse-app-shell, .prototype-portal-shell)
   :is(.ops-kpi-grid, .analytics-kpi-grid.compact, .tracking-center-kpis, .kpis, .stats, .finance-kpi-grid) {
   display: grid;

@@ -3,6 +3,7 @@ import { Link, useFetcher } from "react-router";
 import type { InternalNotification } from "../lib/internal-notifications.server";
 import { AppIcon } from "./AppIcon";
 import { Modal } from "./Modal";
+import { internalNotificationObjectHref } from "../lib/internal-notification-links";
 
 export function InternalNotificationCenter({
   unreadCount,
@@ -19,6 +20,7 @@ export function InternalNotificationCenter({
 }) {
   const fetcher = useFetcher<{success?:string;notificationId?:string}>();
   const [open,setOpen] = useState(false);
+  const objectHref = latest ? internalNotificationObjectHref(latest) : null;
   useEffect(() => {
     if (!latest) return;
     const safeToInterrupt = () => {
@@ -73,7 +75,7 @@ export function InternalNotificationCenter({
         <time>{new Date(latest.created_at).toLocaleString("zh-CN")}</time>
         <div className="confirm-action-buttons">
           <Link className="secondary" to={historyPath} onClick={() => setOpen(false)}>查看全部</Link>
-          {allowObjectLink && latest.link && <Link className="secondary" to={latest.link} onClick={() => setOpen(false)}>查看影响对象</Link>}
+          {allowObjectLink && objectHref && <Link className="secondary" to={objectHref} onClick={() => setOpen(false)}>查看影响对象</Link>}
           <fetcher.Form method="post" action={actionPath}>
             <input type="hidden" name="intent" value={latest.requires_ack?"acknowledge":"read"}/>
             <input type="hidden" name="notificationId" value={latest.id}/>

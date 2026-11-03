@@ -13,7 +13,7 @@ import { adminPrimaryNavigationGroups, adminPrimaryNavigationItemActive, adminWo
 
 const sideIcons: Record<AdminNavigationItemKey, AppIconName> = {
   portal: "layout", notifications: "bell", dashboard: "dashboard", trackingCenter: "map",
-  analytics: "chart", hrReports: "chart", quotations: "receipt", orders: "clipboard",
+  analytics: "chart", hrReports: "chart", quotations: "receipt", orders: "clipboard", dispatch: "truck",
   loading: "truck", documents: "documents", shipments: "packageCheck", billing: "billing",
   settlementApprovals: "billing", cargo: "boxes", customers: "building", sales: "chart",
   logisticsProducts: "briefcase", carriers: "truck", workflow: "workflow", masterData: "settings",

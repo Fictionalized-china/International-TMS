@@ -6,6 +6,14 @@ import { dispatchTaskAccess } from "./dispatch-tasks";
 import { loadActivePositionAccessProfile } from "./position-access-profile.server";
 import type { AllocationMethod } from "./cost-allocation";
 import { synchronizeBatchTransport } from "./batch-transport-sync.server";
+import { orderVisibilitySql } from "./order-access";
+
+function dispatchBatchScope(current: SessionUser) {
+  const scope = orderVisibilitySql(current, "scope_order");
+  return { values: scope.values, sql: `NOT EXISTS(SELECT 1 FROM transport_batch_orders scope_link
+    JOIN transport_orders scope_order ON scope_order.id=scope_link.order_id AND scope_order.organization_id=scope_link.organization_id
+    WHERE scope_link.batch_id=b.id AND scope_link.organization_id=b.organization_id AND scope_link.status!='removed' AND NOT (${scope.sql}))` };
+}
 
 export type BatchFindVehicleTask = {
   id:string;batch_number:string;batch_name:string;origin_location:string;destination_location:string;
@@ -15,8 +23,8 @@ export type BatchFindVehicleTask = {
 };
 
 export async function loadBatchFindVehicleTasks(current:SessionUser):Promise<BatchFindVehicleTask[]> {
-  const policy=await loadBusinessProcessPolicy(current.organizationId,env.DB);
-  if(dispatchTaskAccess(policy,current.positionCode,current.permissions,"fulfill",current.roleCodes))return [];
+  if(!current.permissions.includes("dispatch.view"))return [];
+  const scope = dispatchBatchScope(current);
   return (await env.DB.prepare(`SELECT b.id,b.batch_number,b.batch_name,b.origin_location,b.destination_location,
       b.border_port,b.planned_departure_at,w.name warehouse_name,b.carrier_id,c.name carrier_name,
       b.overseas_vehicle_plate,b.overseas_driver_name,COUNT(DISTINCT bo.order_id) order_count,
@@ -30,9 +38,11 @@ export async function loadBatchFindVehicleTasks(current:SessionUser):Promise<Bat
     LEFT JOIN warehouse_packing_jobs job ON job.organization_id=bo.organization_id AND job.order_id=bo.order_id AND job.transport_batch_id=b.id
     LEFT JOIN warehouses w ON w.id=b.warehouse_id AND w.organization_id=b.organization_id
     LEFT JOIN carriers c ON c.id=b.carrier_id AND c.organization_id=b.organization_id
-    WHERE b.organization_id=? AND b.batch_number LIKE 'PZ-%' AND b.approval_status='submitted'
+    WHERE b.organization_id=? AND b.batch_number LIKE 'PZ-%'
+      AND ${scope.sql}
+      AND (b.approval_status='submitted' OR EXISTS(SELECT 1 FROM batch_dispatch_quotes quote WHERE quote.organization_id=b.organization_id AND quote.batch_id=b.id))
       AND b.submitted_at IS NOT NULL AND b.status!='cancelled'
-    GROUP BY b.id ORDER BY b.submitted_at DESC LIMIT 100`).bind(current.organizationId).all<BatchFindVehicleTask>()).results;
+    GROUP BY b.id ORDER BY CASE WHEN b.carrier_id IS NULL THEN 0 ELSE 1 END,b.submitted_at DESC`).bind(current.organizationId,...scope.values).all<BatchFindVehicleTask>()).results;
 }
 
 export async function sendBatchToCommercial(current:SessionUser,batchId:string) {
@@ -59,7 +69,7 @@ export async function sendBatchToCommercial(current:SessionUser,batchId:string) 
   const recipients:string[]=[];
   for(const member of members){
     const access=await loadActivePositionAccessProfile(env.DB,current.organizationId,member.user_id);
-    if(access?.permissions.includes("dispatch.manage"))recipients.push(member.user_id);
+    if(access?.permissions.includes("dispatch.manage") && access.permissions.includes("dispatch.view"))recipients.push(member.user_id);
   }
   if(!recipients.length)throw new Error("找车岗位没有具备办理权限的有效账号，请先配置人员与权限");
   const now=new Date().toISOString();
@@ -69,8 +79,8 @@ export async function sendBatchToCommercial(current:SessionUser,batchId:string) 
       VALUES(?,(SELECT CASE WHEN submitted_at=? AND submitted_by_user_id=? THEN 1 ELSE NULL END FROM transport_batches WHERE organization_id=? AND id=?),?)`)
     .bind(crypto.randomUUID(),now,current.userId,current.organizationId,batchId,now),...recipients.map(userId=>env.DB.prepare(`INSERT INTO internal_notifications
     (id,organization_id,user_id,category,severity,title,message,link,requires_ack,is_read,created_by_user_id,created_at)
-    VALUES(?,?,?,'dispatch_request','warning',?,?,'/admin/tracking-center',0,0,?,?)`)
-    .bind(crypto.randomUUID(),current.organizationId,userId,`配载单 ${batch.batch_number} 待找车`,"请进入调度与运踪，按整张配载单落实车辆、司机和运价。",current.userId,now))];
+    VALUES(?,?,?,'dispatch_request','warning',?,?,'/admin/dispatch',0,0,?,?)`)
+    .bind(crypto.randomUUID(),current.organizationId,userId,`配载单 ${batch.batch_number} 待找车`,"请进入找车工作台，按整张配载单落实车辆、司机和运价。",current.userId,now))];
   try{const results=await env.DB.batch(statements);if(!Number(results[0]?.meta?.changes||0))throw new Error("配载单状态已变化，请刷新页面");}
   catch(error){if(String(error).includes("NOT NULL"))throw new Error("配载单状态已变化，请刷新页面");throw error;}
   return batch.batch_number;
@@ -88,6 +98,7 @@ export async function fulfillBatchFindVehicle(input:FeedbackInput){
   const newCarrier=input.carrierId==="__new";
   const newVehicle=input.vehicleId==="__new";
   const newDriver=input.driverId==="__new";
+  if((newCarrier||newVehicle||newDriver)&&!current.permissions.includes("carrier.manage"))throw new Error("新增承运商、车辆或司机需要运输资源维护权限");
   if(newCarrier&&(!newVehicle||!newDriver))throw new Error("新增承运商时请同时新增车辆和司机");
   const carrierName=input.newCarrierName.trim();
   const plate=input.newPlateNumber.trim().toUpperCase();
@@ -97,9 +108,10 @@ export async function fulfillBatchFindVehicle(input:FeedbackInput){
   if(newCarrier&&(carrierName.length<2||carrierName.length>100))throw new Error("新承运商名称须为 2–100 字符");
   if(newVehicle&&(plate.length<2||plate.length>40||vehicleType.length<2||vehicleType.length>80))throw new Error("请填写有效的新车牌和车型");
   if(newDriver&&(driverName.length<2||driverName.length>80||!/^[+0-9()\-\s]{5,30}$/.test(driverPhone)))throw new Error("请填写新司机姓名和有效联系电话");
-  const batch=await env.DB.prepare(`SELECT id,batch_number,operation_supervisor_user_id,approval_status,submitted_at,carrier_id
-    FROM transport_batches WHERE organization_id=? AND id=? AND batch_number LIKE 'PZ-%' AND status!='cancelled'`)
-    .bind(current.organizationId,input.batchId).first<{id:string;batch_number:string;operation_supervisor_user_id:string|null;approval_status:string;submitted_at:string|null;carrier_id:string|null}>();
+  const scope = dispatchBatchScope(current);
+  const batch=await env.DB.prepare(`SELECT b.id,b.batch_number,b.operation_supervisor_user_id,b.approval_status,b.submitted_at,b.carrier_id
+    FROM transport_batches b WHERE b.organization_id=? AND b.id=? AND b.batch_number LIKE 'PZ-%' AND b.status!='cancelled' AND ${scope.sql}`)
+    .bind(current.organizationId,input.batchId,...scope.values).first<{id:string;batch_number:string;operation_supervisor_user_id:string|null;approval_status:string;submitted_at:string|null;carrier_id:string|null}>();
   if(!batch||batch.approval_status!=="submitted"||!batch.submitted_at||batch.carrier_id)throw new Error("配载需求不存在、尚未发送或已经完成绑定");
   const carrierId=newCarrier?crypto.randomUUID():input.carrierId;
   const vehicleId=newVehicle?crypto.randomUUID():input.vehicleId;
@@ -169,17 +181,25 @@ export async function returnBatchVehicleToCommercial(input:{organizationId:strin
     .bind(input.organizationId,input.batchId),env.DB.prepare(`DELETE FROM transport_batch_vehicles WHERE organization_id=? AND batch_id=? AND status='planned'`)
     .bind(input.organizationId,input.batchId)];
   const policy=await loadBusinessProcessPolicy(input.organizationId,env.DB);
+  if(!policyEnabled(policy,"dispatch.enabled"))throw new Error("商务找车功能已停用，不能退回重新找车");
   const positions=policyPositions(policy,"dispatch.handler_positions");
+  let recipientCount=0;
   if(positions.length){
     const members=(await env.DB.prepare(`SELECT DISTINCT m.user_id FROM memberships m JOIN users u ON u.id=m.user_id AND u.status='active'
       JOIN positions p ON p.id=m.position_id AND p.organization_id=m.organization_id AND p.status='active'
       WHERE m.organization_id=? AND m.status='active' AND p.code IN (${positions.map(()=>"?").join(",")})`)
       .bind(input.organizationId,...positions).all<{user_id:string}>()).results;
-    for(const member of members)statements.push(env.DB.prepare(`INSERT INTO internal_notifications
+    for(const member of members){
+      const access=await loadActivePositionAccessProfile(env.DB,input.organizationId,member.user_id);
+      if(!access?.permissions.includes("dispatch.manage")||!access.permissions.includes("dispatch.view"))continue;
+      recipientCount++;
+      statements.push(env.DB.prepare(`INSERT INTO internal_notifications
       (id,organization_id,user_id,category,severity,title,message,link,requires_ack,is_read,created_by_user_id,created_at)
-      VALUES(?,?,?,'dispatch_request','warning',?,?,'/admin/tracking-center',0,0,?,?)`)
+      VALUES(?,?,?,'dispatch_request','warning',?,?,'/admin/dispatch',0,0,?,?)`)
       .bind(crypto.randomUUID(),input.organizationId,member.user_id,`${input.batchNumber} 找车资源需调整`,input.reason,input.actorUserId,now));
+    }
   }
+  if(!recipientCount)throw new Error("找车岗位没有同时具备查看和办理权限的有效账号，请先配置后再退回");
   try{const results=await env.DB.batch(statements);if(!Number(results[0]?.meta?.changes||0))throw new Error("配载资源状态已变化，请刷新页面");}
   catch(error){if(String(error).includes("NOT NULL"))throw new Error("配载资源状态已变化，请刷新页面");throw error;}
   await synchronizeBatchTransport(input.organizationId,input.batchId,now).catch(error=>console.error("BATCH_DISPATCH_RETURN_SYNC_PENDING",{batchId:input.batchId,error:String(error)}));

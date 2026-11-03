@@ -74,7 +74,9 @@ export function adminPrimaryNavigationGroups(user: AdminNavigationUser) {
       const organizationHref = item.key === "organizationAccess" ?
         user.permissions.includes("department.view") ? "/admin/departments" :
           user.permissions.includes("user.view") ? "/admin/positions" : "/admin/roles" : href;
-      items.push({ key: item.key, label: isWorkspace(item.key) ? workspaceLabels[item.key] : item.label, href: organizationHref });
+      const label = item.key === "trackingCenter" && !canViewAdminNavigationItem(user, "trackingCenter")
+        ? "运输执行" : isWorkspace(item.key) ? workspaceLabels[item.key] : item.label;
+      items.push({ key: item.key, label, href: organizationHref });
     }
     return { key: group.key as AdminNavigationGroupKey, label: group.label, items };
   }).filter(group => group.items.length > 0);

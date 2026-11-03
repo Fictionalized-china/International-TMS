@@ -13,8 +13,8 @@ export async function loadMeetingWorkOverview(db:D1Database,current:SessionUser)
     const rows=await db.prepare(`SELECT o.order_number FROM order_dispatch_requests d JOIN transport_orders o ON o.id=d.order_id AND o.organization_id=d.organization_id WHERE d.organization_id=? AND d.status='pending' AND o.business_type='ftl' AND ${scope.sql}`).bind(current.organizationId,...scope.values).all<{order_number:string}>();
     const batches=await db.prepare(`SELECT batch_number FROM transport_batches WHERE organization_id=? AND batch_number LIKE 'PZ-%' AND approval_status='submitted' AND submitted_at IS NOT NULL AND carrier_id IS NULL AND status!='cancelled' ORDER BY submitted_at DESC`).bind(current.organizationId).all<{batch_number:string}>();
     dispatch=rows.results.length+batches.results.length;
-    for(const r of batches.results.slice(0,5))items.push({title:`整批找车：${r.batch_number}`,href:"/admin/tracking-center"});
-    for(const r of rows.results.slice(0,Math.max(0,5-items.length)))items.push({title:`商务找车：${r.order_number}`,href:"/admin/tracking-center?dispatchTask=pending"});
+    for(const r of batches.results.slice(0,5))items.push({title:`整批找车：${r.batch_number}`,href:`/admin/dispatch?q=${encodeURIComponent(r.batch_number)}`});
+    for(const r of rows.results.slice(0,Math.max(0,5-items.length)))items.push({title:`商务找车：${r.order_number}`,href:`/admin/dispatch?q=${encodeURIComponent(r.order_number)}`});
   }
   if(policyEnabled(policy,"tracking.daily_enabled")&&(isBossBusinessActor(current)||(policyPositions(policy,"tracking.positions").includes(current.positionCode??"")&&current.permissions.includes("tracking.daily.manage")))) {
     const today=new Date(Date.now()+8*3600000).toISOString().slice(0,10)+"T00:00:00+08:00";

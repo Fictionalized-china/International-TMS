@@ -24,6 +24,7 @@ async function createDispatchTask(db:D1Database,org:string,order:DispatchOrder,p
   if(existing) return {created:false,id:existing.id};
   const id=`dispatch:${org}:${order.id}`,taskId=id;
   const recipientPositions=policyPositions(policy,"dispatch.handler_positions");
+  if(!recipientPositions.length) throw new Error("尚未配置商务找车岗位，请先配置岗位与有效账号");
   const recipients=await db.prepare(`SELECT DISTINCT m.user_id FROM memberships m JOIN users u ON u.id=m.user_id AND u.status='active'
     JOIN positions p ON p.id=m.position_id AND p.organization_id=m.organization_id AND p.status='active'
     WHERE m.organization_id=? AND m.status='active' AND p.code IN (${recipientPositions.map(()=>"?").join(",")})`)
@@ -31,7 +32,7 @@ async function createDispatchTask(db:D1Database,org:string,order:DispatchOrder,p
   const eligible=[];
   for(const recipient of recipients.results) {
     const profile=await loadActivePositionAccessProfile(db,org,recipient.user_id);
-    if(profile?.permissions.includes("dispatch.manage")) eligible.push(recipient);
+    if(profile?.permissions.includes("dispatch.manage") && profile.permissions.includes("dispatch.view")) eligible.push(recipient);
   }
   if(!eligible.length) throw new Error("找车办理岗位尚无具有办理权限的有效账号，请配置人员与权限后再发送");
   const statements=[
@@ -40,7 +41,7 @@ async function createDispatchTask(db:D1Database,org:string,order:DispatchOrder,p
     db.prepare(`INSERT OR IGNORE INTO order_tasks(id,organization_id,order_id,module_code,task_type,title,priority,status,assigned_by_user_id,due_at,created_at,updated_at)
       VALUES(?,?,?,'dispatch','find_overseas_vehicle',?,'high','pending',?,?,?,?)`).bind(taskId,org,order.id,`商务找车：${order.order_number}`,actor,order.planned_port_arrival_at,now,now),
     ...eligible.map(r=>db.prepare(`INSERT OR IGNORE INTO internal_notifications(id,organization_id,user_id,category,severity,title,message,link,requires_ack,is_read,created_by_user_id,created_at)
-      VALUES(?,?,?,'dispatch_request','warning','有新的商务找车任务','请打开调度与运踪中的找车待办，反馈境外运输资源。','/admin/tracking-center?dispatchTask=pending',0,0,?,?)`)
+      VALUES(?,?,?,'dispatch_request','warning','有新的商务找车任务','请打开找车工作台，反馈境外运输资源。','/admin/dispatch',0,0,?,?)`)
       .bind(`${id}:${r.user_id}`,org,r.user_id,actor,now)),
   ];
   const results=await db.batch(statements);
@@ -137,8 +138,8 @@ export async function fulfillDispatchTask(db:D1Database,input:{current:SessionUs
     db.prepare(`INSERT INTO audit_logs(id,organization_id,actor_user_id,action,resource_type,resource_id,outcome,metadata_json,created_at)
       SELECT ?,?,?,'dispatch.resource.fulfill','transport_order',?,'success',?,? WHERE EXISTS(SELECT 1 FROM order_dispatch_requests WHERE id=? AND organization_id=? AND fulfilled_by_user_id=? AND fulfilled_at=?)`).bind(crypto.randomUUID(),current.organizationId,current.userId,input.orderId,JSON.stringify({carrierId:input.carrierId,vehicleId:input.vehicleId,driverId:input.driverId}),now,request.id,current.organizationId,current.userId,now),
     ...owners.results.map(owner=>db.prepare(`INSERT OR IGNORE INTO internal_notifications(id,organization_id,user_id,category,severity,title,message,link,requires_ack,is_read,created_by_user_id,created_at)
-      VALUES(?,?,?,'dispatch_ready','info','商务运输资源已反馈','可在调度与运踪查看资源并安排配载。','/admin/tracking-center',0,0,?,?)`)
-      .bind(`${request.id}:ready:${owner.user_id}`,current.organizationId,owner.user_id,current.userId,now)),
+      VALUES(?,?,?,'dispatch_ready','info','商务运输资源已反馈','请查看订单中的运输资源并继续办理。',?,0,0,?,?)`)
+      .bind(`${request.id}:ready:${owner.user_id}`,current.organizationId,owner.user_id,`/admin/orders/${input.orderId}`,current.userId,now)),
   ]); } catch(error) {
     if(String(error).includes('settlement_commit_guards')) throw new Error('运输资源已由其他提交更新，请刷新核对；本次未覆盖资源');
     throw error;
@@ -148,12 +149,13 @@ export async function fulfillDispatchTask(db:D1Database,input:{current:SessionUs
 
 export async function loadDispatchTaskRows(db:D1Database,current:SessionUser) {
   const visibility=orderVisibilitySql(current,"o");
-  return (await db.prepare(`SELECT d.id,d.order_id,o.order_number,d.status,d.planned_port_arrival_at,d.freight_amount,d.freight_currency,d.resource_notes,
+  return (await db.prepare(`SELECT d.id,d.order_id,o.order_number,o.origin_city,o.destination_city,customer.name customer_name,d.status,d.planned_port_arrival_at,d.freight_amount,d.freight_currency,d.resource_notes,
     c.name carrier_name,v.plate_number,driver.name driver_name,d.fulfilled_at FROM order_dispatch_requests d
     JOIN transport_orders o ON o.id=d.order_id AND o.organization_id=d.organization_id
+    JOIN customers customer ON customer.id=o.customer_id AND customer.organization_id=o.organization_id
     LEFT JOIN carriers c ON c.id=d.carrier_id AND c.organization_id=d.organization_id
     LEFT JOIN carrier_vehicles v ON v.id=d.vehicle_id AND v.organization_id=d.organization_id
     LEFT JOIN carrier_drivers driver ON driver.id=d.driver_id AND driver.organization_id=d.organization_id
     WHERE d.organization_id=? AND o.business_type='ftl' AND ${visibility.sql} ORDER BY CASE d.status WHEN 'pending' THEN 0 ELSE 1 END,d.planned_port_arrival_at`)
-    .bind(current.organizationId,...visibility.values).all<{id:string;order_id:string;order_number:string;status:string;planned_port_arrival_at:string;freight_amount:number|null;freight_currency:string|null;resource_notes:string|null;carrier_name:string|null;plate_number:string|null;driver_name:string|null;fulfilled_at:string|null}>()).results.map(row=>current.permissions.includes("dispatch.cost.view")?row:{...row,freight_amount:null,freight_currency:null});
+    .bind(current.organizationId,...visibility.values).all<{id:string;order_id:string;order_number:string;origin_city:string|null;destination_city:string|null;customer_name:string;status:string;planned_port_arrival_at:string;freight_amount:number|null;freight_currency:string|null;resource_notes:string|null;carrier_name:string|null;plate_number:string|null;driver_name:string|null;fulfilled_at:string|null}>()).results.map(row=>current.permissions.includes("dispatch.cost.view")?row:{...row,freight_amount:null,freight_currency:null});
 }

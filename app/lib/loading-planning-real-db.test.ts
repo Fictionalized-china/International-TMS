@@ -51,6 +51,17 @@ describe('new loading plans against every actual database guard',()=>{
     expect(sql.prepare('SELECT COUNT(*) n FROM warehouse_dispatches').get()?.n).toBe(0);
     expect(await sendBatchToCommercial(fixture.actors.get('supervisor')!,result.batchId)).toBe(result.batchNumber);
     expect((await loadBatchFindVehicleTasks(fixture.actors.get('commercial')!)).map(item=>item.batch_number)).toContain(result.batchNumber);
+    const restrictedCommercial={...fixture.actors.get('commercial')!,dataScope:'self' as const};
+    expect(await loadBatchFindVehicleTasks(restrictedCommercial)).toEqual([]);
+    await expect(fulfillBatchFindVehicle({current:restrictedCommercial,batchId:result.batchId,
+      carrierId:'carrier',newCarrierName:'',vehicleId:'vehicle',newPlateNumber:'',newVehicleType:'',driverId:'driver',newDriverName:'',newDriverPhone:'',freightAmount:60,currency:'CNY',exchangeRate:1,allocationMethod:'auto',notes:''})).rejects.toThrow('配载需求不存在');
+    expect(sql.prepare('SELECT carrier_id FROM transport_batches WHERE id=?').get(result.batchId)?.carrier_id).toBeNull();
+    const readonlyResourcesActor={...fixture.actors.get('commercial')!,permissions:fixture.actors.get('commercial')!.permissions.filter(code=>code!=='carrier.manage')};
+    await expect(fulfillBatchFindVehicle({current:readonlyResourcesActor,batchId:result.batchId,
+      carrierId:'__new',newCarrierName:'无权限新增',vehicleId:'__new',newPlateNumber:'NO-ACCESS',newVehicleType:'厢式车',
+      driverId:'__new',newDriverName:'测试司机',newDriverPhone:'13800001111',freightAmount:60,currency:'CNY',exchangeRate:1,
+      allocationMethod:'auto',notes:''})).rejects.toThrow('运输资源维护权限');
+    expect(sql.prepare('SELECT COUNT(*) n FROM carriers').get()?.n).toBe(1);
     await expect(fulfillBatchFindVehicle({current:fixture.actors.get('commercial')!,batchId:result.batchId,
       carrierId:'__new',newCarrierName:'全新境外承运商',vehicleId:'__new',newPlateNumber:'NEW-TEST-001',newVehicleType:'13米厢式车',
       driverId:'__new',newDriverName:'测试司机',newDriverPhone:'13800001111',freightAmount:60,currency:'CNY',exchangeRate:1,
@@ -60,6 +71,12 @@ describe('new loading plans against every actual database guard',()=>{
     expect(sql.prepare('SELECT freight_amount,currency FROM batch_dispatch_quotes WHERE batch_id=?').get(result.batchId)).toMatchObject({freight_amount:60,currency:'CNY'});
     await expect(fulfillBatchFindVehicle({current:fixture.actors.get('commercial')!,batchId:result.batchId,
       carrierId:'carrier',newCarrierName:'',vehicleId:'vehicle',newPlateNumber:'',newVehicleType:'',driverId:'driver',newDriverName:'',newDriverPhone:'',freightAmount:60,currency:'CNY',exchangeRate:1,allocationMethod:'auto',notes:''})).rejects.toThrow('已经完成绑定');
+    // A disabled/misconfigured handler must not clear already-bound resources into a dead end.
+    sql.exec("UPDATE users SET status='disabled' WHERE id='commercial'");
+    await expect(returnBatchVehicleToCommercial({organizationId:'org',batchId:result.batchId,batchNumber:result.batchNumber,actorUserId:'supervisor',reason:'更换车辆'})).rejects.toThrow('有效账号');
+    expect(sql.prepare('SELECT carrier_id FROM transport_batches WHERE id=?').get(result.batchId)?.carrier_id).not.toBeNull();
+    expect(sql.prepare('SELECT COUNT(*) n FROM batch_dispatch_quotes WHERE batch_id=?').get(result.batchId)?.n).toBe(1);
+    sql.exec("UPDATE users SET status='active' WHERE id='commercial'");
     await returnBatchVehicleToCommercial({organizationId:'org',batchId:result.batchId,batchNumber:result.batchNumber,actorUserId:'supervisor',reason:'更换车辆'});
     expect(sql.prepare('SELECT carrier_id,approval_status FROM transport_batches WHERE id=?').get(result.batchId)).toMatchObject({carrier_id:null,approval_status:'submitted'});
     expect(sql.prepare('SELECT COUNT(*) n FROM batch_dispatch_quotes WHERE batch_id=?').get(result.batchId)?.n).toBe(0);

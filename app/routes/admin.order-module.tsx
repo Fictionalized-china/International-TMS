@@ -6,6 +6,8 @@ import { BatchNumberLink, OrderNumberLink } from "../components/EntityNumberLink
 import { ActionToast } from "../components/ActionToast";
 import { DateTimeSelect } from "../components/DateTimeSelect";
 import { requireSessionUser } from "../lib/auth.server";
+import { dispatchWorkspaceHref } from "../lib/transport-workspace-access";
+import { sessionSlotFromRequest, withSessionSlot } from "../lib/session-slot";
 import {
   canOperateCurrentOrder,
   canOperateEnabledOrderModule,
@@ -843,6 +845,10 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     orderId = params.orderId,
     moduleCode = params.moduleCode;
   await requireOrderAccess(current, orderId);
+  if (moduleCode === "dispatch") {
+    if (!current.permissions.includes("dispatch.view")) throw new Response("没有找车工作台权限", { status: 403 });
+    throw redirect(withSessionSlot(dispatchWorkspaceHref(orderId), sessionSlotFromRequest(request)));
+  }
   const definition = orderModuleDefinition(moduleCode);
   if (!definition) throw new Response("订单模块不存在", { status: 404 });
   const requestUrl = new URL(request.url);

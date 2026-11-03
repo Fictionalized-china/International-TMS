@@ -13,13 +13,13 @@ function user(permissions: string[], positionCode = "OPERATION") {
 }
 
 describe("consolidated admin navigation", () => {
-  it("shows 19 primary entries but retains all 24 independently configurable permission records", () => {
+  it("shows 20 primary entries and all 25 independently configurable permission records", () => {
     const full = user(normalizeAdminNavigationPermissions(adminNavigationPermissionItems.map(item => item.menuPermissionCode)));
     const items = adminPrimaryNavigationGroups(full).flatMap(group => group.items);
-    expect(items).toHaveLength(19);
-    expect(adminNavigationPermissionItems).toHaveLength(24);
+    expect(items).toHaveLength(20);
+    expect(adminNavigationPermissionItems).toHaveLength(25);
     expect(items.map(item => item.key)).not.toEqual(expect.arrayContaining(["dashboard", "shipments", "cargo", "quotations", "settlementApprovals"]));
-    expect(new Set(items.map(item => item.key)).size).toBe(19);
+    expect(new Set(items.map(item => item.key)).size).toBe(20);
   });
 
   it("routes a signature-only account to approvals without granting financial amount visibility", () => {
@@ -68,7 +68,7 @@ describe("consolidated admin navigation", () => {
   });
 
   it("offers the tracking role a batch-level entrance only with batch read access", () => {
-    const actor = user(["menu.admin.tracking_center.view", "shipment.view", "order.view", "transport.batch.assigned.view", "order.module.tracking.manage"], "TRACKING");
+    const actor = user(["menu.admin.tracking_center.view", "tracking.center.view", "shipment.view", "order.view", "transport.batch.assigned.view", "order.module.tracking.manage"], "TRACKING");
     const sections = adminWorkspaceSections(actor, "trackingCenter");
     expect(sections.map(section => section.key)).toContain("batchTracking");
     expect(sections.find(section => section.key === "batchTracking")?.href).toBe("/admin/loading?view=tracking");
@@ -109,7 +109,7 @@ describe("consolidated admin navigation", () => {
     const workspaces = ["portal", "trackingCenter", "orders", "billing", "sales"] as const;
     const grantsByWorkspace = [
       ["menu.admin.portal.view", "menu.admin.dashboard.view", "dashboard.view"],
-      ["menu.admin.tracking_center.view", "menu.admin.shipments.view", "shipment.view"],
+      ["menu.admin.tracking_center.view", "menu.admin.shipments.view", "shipment.view", "tracking.center.view"],
       ["menu.admin.orders.view", "menu.admin.cargo.view", "order.view", "order.module.cargo.view", "order.intake.manage"],
       ["menu.admin.billing.view", "menu.admin.settlement_approvals.view", "billing.view", "billing.sensitive.view", "order.view", "settlement.signature.manage"],
       ["menu.admin.sales.view", "menu.admin.quotations.view", "sales.view", "quote.view"],

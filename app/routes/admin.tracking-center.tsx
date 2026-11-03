@@ -1,4 +1,4 @@
-import { Form, Link } from "react-router";
+import { Form, Link, redirect } from "react-router";
 import { env } from "cloudflare:workers";
 import type { Route } from "./+types/admin.tracking-center";
 import { AppIcon } from "../components/AppIcon";
@@ -11,36 +11,35 @@ import { loadBusinessProcessPolicy } from "../lib/business-process-policy.server
 import { policyEnabled,policyPositions } from "../lib/business-process-policy";
 import { dispatchTaskAccess } from "../lib/dispatch-tasks";
 import { isBossBusinessActor } from "../lib/permission-blocks";
-import { loadDispatchTaskRows,refreshAutomaticDispatchTasks,requestDispatchTask,fulfillDispatchTask } from "../lib/dispatch-tasks.server";
-import { loadBatchFindVehicleTasks, fulfillBatchFindVehicle } from "../lib/batch-dispatch.server";
+import { refreshAutomaticDispatchTasks,requestDispatchTask } from "../lib/dispatch-tasks.server";
 import { recordDailyTracking } from "../lib/daily-tracking.server";
-import { DailyTrackingForm,DispatchRequestForm,DispatchFeedbackForm,BatchDispatchFeedbackForm } from "../components/TrackingActionForms";
+import { DailyTrackingForm,DispatchRequestForm } from "../components/TrackingActionForms";
+import { canViewTrackingCenter } from "../lib/transport-workspace-access";
+import { sessionSlotFromRequest, withSessionSlot } from "../lib/session-slot";
 
 export async function loader({ request }: Route.LoaderArgs) {
-  const current = await requireSessionUser(request, "shipment.view");
+  const current = await requireSessionUser(request);
+  if (current.permissions.includes("dispatch.view") && (!canViewTrackingCenter(current) || new URL(request.url).searchParams.has("dispatchTask"))) {
+    return redirect(withSessionSlot("/admin/dispatch", sessionSlotFromRequest(request)));
+  }
+  if (!canViewTrackingCenter(current)) throw new Response("当前账号没有调度与运踪总览权限", { status: 403 });
   const policy=await loadBusinessProcessPolicy(current.organizationId);
   await refreshAutomaticDispatchTasks(env.DB,current.organizationId);
   const canRequest=!dispatchTaskAccess(policy,current.positionCode,current.permissions,"request",current.roleCodes);
-  const canFulfill=!dispatchTaskAccess(policy,current.positionCode,current.permissions,"fulfill",current.roleCodes);
   const borderPorts=canRequest?(await env.DB.prepare("SELECT code,name FROM reference_data WHERE organization_id=? AND category='border_port' AND status='active' ORDER BY sort_order,name").bind(current.organizationId).all<{code:string;name:string}>()).results:[];
-  const resources=canFulfill ? {
-    carriers:(await env.DB.prepare("SELECT id,name FROM carriers WHERE organization_id=? AND status='active' AND carrier_scope='overseas'").bind(current.organizationId).all<{id:string;name:string}>()).results,
-    vehicles:(await env.DB.prepare("SELECT v.id,v.carrier_id,v.plate_number FROM carrier_vehicles v JOIN carriers c ON c.id=v.carrier_id AND c.organization_id=v.organization_id WHERE v.organization_id=? AND v.status='active' AND c.status='active' AND c.carrier_scope='overseas'").bind(current.organizationId).all<{id:string;carrier_id:string;plate_number:string}>()).results,
-    drivers:(await env.DB.prepare("SELECT d.id,d.carrier_id,d.name FROM carrier_drivers d JOIN carriers c ON c.id=d.carrier_id AND c.organization_id=d.organization_id WHERE d.organization_id=? AND d.status='active' AND c.status='active' AND c.carrier_scope='overseas'").bind(current.organizationId).all<{id:string;carrier_id:string;name:string}>()).results,
-  } : {carriers:[],vehicles:[],drivers:[]};
-  return { current,policy,canRequest,canFulfill,borderPorts,resources,requestId:crypto.randomUUID(),dispatchTasks:await loadDispatchTaskRows(env.DB,current),batchDispatchTasks:await loadBatchFindVehicleTasks(current),canDaily:policyEnabled(policy,"tracking.daily_enabled")&&(isBossBusinessActor(current)||(policyPositions(policy,"tracking.positions").includes(current.positionCode??"")&&current.permissions.includes("tracking.daily.manage"))), ...(await loadTrackingCenter(request, current)) };
+  return { current,policy,canRequest,borderPorts,requestId:crypto.randomUUID(),canDaily:policyEnabled(policy,"tracking.daily_enabled")&&(isBossBusinessActor(current)||(policyPositions(policy,"tracking.positions").includes(current.positionCode??"")&&current.permissions.includes("tracking.daily.manage"))), ...(await loadTrackingCenter(request, current)) };
 }
 
 export async function action({request}:Route.ActionArgs) {
-  const current=await requireSessionUser(request,"shipment.view"),form=await request.formData(),value=(key:string)=>String(form.get(key)??"");
+  const current=await requireSessionUser(request,"shipment.view");
+  if (!canViewTrackingCenter(current)) throw new Response("当前账号没有调度与运踪总览权限", { status: 403 });
+  const form=await request.formData(),value=(key:string)=>String(form.get(key)??"");
   // A datetime-local field here is explicitly labelled Beijing time, not server-local time.
   const beijingTime=(key:string)=>{const time=value(key);return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(time)?`${time}:00+08:00`:time;};
   try {
     switch(value("intent")) {
       case "daily":await recordDailyTracking(env.DB,{current,orderId:value("orderId"),requestId:value("requestId"),eventKind:value("eventKind"),eventAt:beijingTime("eventAt"),location:value("location"),vehicleReference:value("vehicleReference"),notes:value("notes"),visibleToCustomer:value("visible")==="1"});break;
       case "dispatch_request":await requestDispatchTask(env.DB,{current,orderId:value("orderId"),plannedPortArrivalAt:beijingTime("plannedPortArrivalAt"),exitPort:value("exitPort"),planOnly:value("planOnly")==="1"});break;
-      case "dispatch_fulfill":await fulfillDispatchTask(env.DB,{current,orderId:value("orderId"),carrierId:value("carrierId"),vehicleId:value("vehicleId"),driverId:value("driverId"),freightAmount:Number(value("freightAmount")),currency:value("currency"),exchangeRate:Number(value("exchangeRate")),notes:value("notes")});break;
-      case "batch_dispatch_fulfill":await fulfillBatchFindVehicle({current,batchId:value("batchId"),carrierId:value("carrierId"),newCarrierName:value("newCarrierName"),vehicleId:value("vehicleId"),newPlateNumber:value("newPlateNumber"),newVehicleType:value("newVehicleType"),driverId:value("driverId"),newDriverName:value("newDriverName"),newDriverPhone:value("newDriverPhone"),freightAmount:Number(value("freightAmount")),currency:value("currency"),exchangeRate:Number(value("exchangeRate")),allocationMethod:(value("allocationMethod")||"auto") as "auto"|"weight"|"volume"|"equal",notes:value("notes")});break;
       default:throw new Error("未知操作");
     }
     return {success:"已保存，相关岗位待办与客户端可见轨迹会同步更新。",savedAt:crypto.randomUUID()};
@@ -68,9 +67,6 @@ export default function TrackingCenter({ loaderData,actionData }: Route.Componen
       {kpis.map((item) => <Link key={item.label} to={item.href}><span><AppIcon name={item.icon}/></span><div><small>{item.label}</small><strong>{item.value}</strong><em>{item.hint}</em></div></Link>)}
     </nav>
 
-    {!!loaderData.batchDispatchTasks.length&&<section className="panel"><div className="panel-header"><div><h2>拼车配载单找车</h2><p>按整张配载单落实车辆、司机和运价；完成后交操作主管确认。</p></div><span className="status-pill">{loaderData.batchDispatchTasks.length} 张</span></div><div className="table-wrap"><table><thead><tr><th>配载单 / 挂载订单</th><th>线路与口岸</th><th>货物汇总</th><th>计划发车</th><th>资源状态</th><th>办理</th></tr></thead><tbody>{loaderData.batchDispatchTasks.map(task=><tr key={task.id}><td><strong>{task.batch_number}</strong><small>{task.order_count} 票：{task.order_numbers||"—"}</small></td><td>{task.origin_location} → {task.destination_location}<small>装车仓：{task.warehouse_name||"待补"} · 出境口岸：{task.border_port||"待补"}</small></td><td>{task.package_count} 包 · {Number(task.weight_kg||0).toFixed(2)} KG<small>{Number(task.volume_cbm||0).toFixed(3)} CBM</small></td><td>{formatTime(task.planned_departure_at)}</td><td>{task.carrier_id?`${task.carrier_name} · ${task.overseas_vehicle_plate} · ${task.overseas_driver_name}`:"待商务找车"}</td><td>{!task.carrier_id&&<BatchDispatchFeedbackForm batchId={task.id} batchNumber={task.batch_number} resources={loaderData.resources} closeSignal={actionData?.savedAt}/>}</td></tr>)}</tbody></table></div></section>}
-
-    {!!loaderData.dispatchTasks.length&&<section className="panel"><div className="panel-header"><h2>商务找车与资源反馈</h2><Link to="/admin/carriers">维护运输资源</Link></div><div className="table-wrap"><table><thead><tr><th>订单</th><th>计划到口岸</th><th>资源</th><th>状态</th><th>操作</th></tr></thead><tbody>{loaderData.dispatchTasks.map(task=><tr key={task.id}><td><OrderNumberLink id={task.order_id} number={task.order_number}/></td><td>{formatTime(task.planned_port_arrival_at)}</td><td>{[task.carrier_name,task.plate_number,task.driver_name].filter(Boolean).join(" · ")||"待商务落实"}{task.freight_amount!==null&&<small>{task.freight_amount} {task.freight_currency}</small>}</td><td>{task.status==="fulfilled"?"资源已落实":"待找车"}</td><td>{loaderData.canFulfill&&task.status==="pending"&&<DispatchFeedbackForm orderId={task.order_id} orderNumber={task.order_number} resources={loaderData.resources} closeSignal={actionData?.savedAt}/>}</td></tr>)}</tbody></table></div></section>}
     <section className="panel tracking-center-panel">
       <div className="panel-header"><div><h2>全程运输监控</h2><p>这里按订单展示预警；拼车订单请进入配载单整批登记，系统会同步挂载订单。</p></div><span className="status-pill">{loaderData.pagination.total} 票</span></div>
       <Form method="get" className="tracking-center-filter">

@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { useState } from "react";
-import { Form, Link } from "react-router";
+import { Form, Link, redirect } from "react-router";
 import type { Route } from "./+types/admin.order-workbench";
 import { OrderNumberLink } from "../components/EntityNumberLink";
 import { ActionToast } from "../components/ActionToast";
@@ -8,6 +8,8 @@ import { requireSessionUser } from "../lib/auth.server";
 import { orderVisibilitySql, requireOrderAccess } from "../lib/order-access.server";
 import { writeAudit } from "../lib/audit.server";
 import { assignOrderModule } from "../lib/order-modules.server";
+import { canViewOrderWorkbench, orderTaskWorkspaceHref } from "../lib/transport-workspace-access";
+import { sessionSlotFromRequest, withSessionSlot } from "../lib/session-slot";
 import {
   normalizeWorkbenchSelection,
   validateWorkbenchBatch,
@@ -91,9 +93,14 @@ type ActionResponse = {
 
 export async function loader({ request, params }: Route.LoaderArgs) {
   const current = await requireSessionUser(request, "order.view");
+  if (params.workspace === "dispatch") {
+    if (!current.permissions.includes("dispatch.view")) throw new Response("没有找车工作台权限", { status: 403 });
+    return redirect(withSessionSlot("/admin/dispatch", sessionSlotFromRequest(request)));
+  }
   const workspace = params.workspace as Workspace;
   const config = workspaces[workspace];
   if (!config) throw new Response("工作台不存在", { status: 404 });
+  if (!canViewOrderWorkbench(current, workspace)) throw new Response("没有此业务工作台的读取权限", { status: 403 });
 
   const url = new URL(request.url);
   const q = (url.searchParams.get("q") || "").trim();
@@ -175,6 +182,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     page,
     pages,
     canManage: current.permissions.includes("order.manage"),
+    visibleWorkspaces: Object.keys(workspaces).filter(key => canViewOrderWorkbench(current, key)),
   };
 }
 
@@ -182,6 +190,7 @@ export async function action({ request, params }: Route.ActionArgs): Promise<Act
   const current = await requireSessionUser(request, "order.view");
   const workspace = params.workspace as Workspace;
   if (!workspaces[workspace]) return { formError: "工作台不存在" };
+  if (!canViewOrderWorkbench(current, workspace)) throw new Response("没有此业务工作台的读取权限", { status: 403 });
   const form = await request.formData();
   const intent = text(form, "intent");
 
@@ -435,7 +444,7 @@ export default function OrderWorkbench({
       </header>
 
       <nav className="tabs module-workbench-tabs peer-page-tabs" aria-label="业务工作台分类">
-        {Object.entries(workspaces).map(([key, item]) => (
+        {Object.entries(workspaces).filter(([key]) => loaderData.visibleWorkspaces.includes(key)).map(([key, item]) => (
           <Link
             key={key}
             className={loaderData.workspace === key ? "active" : ""}
@@ -576,7 +585,7 @@ export default function OrderWorkbench({
                   </td>
                   <td>{new Date(row.updated_at).toLocaleString("zh-CN")}</td>
                   <td>
-                    <Link className="text-button" to={`/admin/orders/${row.order_id}/modules/${row.module_code}`}>
+                    <Link className="text-button" to={orderTaskWorkspaceHref(row.order_id, row.module_code)}>
                       进入处理
                     </Link>
                   </td>

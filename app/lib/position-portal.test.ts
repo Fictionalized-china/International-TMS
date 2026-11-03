@@ -17,7 +17,7 @@ describe("position portal", () => {
     expect(visiblePortalLinks(finance, ["order.view", "billing.view", "billing.sensitive.view"]).map((item) => item.label))
       .toEqual(["费用待办", "费用结算"]);
     expect(visiblePortalLinks(finance, ["order.view", "billing.view"]).map((item) => item.label))
-      .toEqual(["费用待办"]);
+      .toEqual([]);
   });
 
   it("requires module-specific permission unless the account is elevated", () => {

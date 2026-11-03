@@ -58,7 +58,7 @@ describe("cloud production account blueprint", () => {
       "dashboard.view",
       "carrier.view",
       "carrier.manage",
-      "order.view","shipment.view","dispatch.manage","dispatch.cost.view",
+      "order.view","shipment.view","dispatch.view","dispatch.manage","dispatch.cost.view",
     ]);
     expect(accessModelRolePermissions.pos_front_loading).toBeUndefined();
   });

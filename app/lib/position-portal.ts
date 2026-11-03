@@ -1,5 +1,6 @@
 import type { OrderModuleCode } from "./order-modules";
 import { canAccessSettlementWorkbench } from "./billing-access";
+import { canViewTrackingCenter } from "./transport-workspace-access";
 
 export type PositionPortalLink = {
   label: string;
@@ -195,7 +196,7 @@ const portalConfigs: Record<string, PositionPortalConfig> = {
     viewAreas: ["境外承运商", "境外车辆", "境外司机"],
     operateAreas: ["办理整批配载单找车", "新增陌生承运商、车辆和司机", "维护运输资源"],
     moduleCodes: [],
-    quickLinks: [{ label: "商务找车", description: "查看配载单并绑定境外承运商、车辆和司机", href: "/admin/tracking-center", permission: "shipment.view" },{ label: "承运商管理", description: "维护境外承运商、车辆和司机", href: "/admin/carriers", permission: "carrier.view" }],
+    quickLinks: [{ label: "商务找车", description: "查看配载单并绑定境外承运商、车辆和司机", href: "/admin/dispatch", permission: "dispatch.view" },{ label: "承运商管理", description: "维护境外承运商、车辆和司机", href: "/admin/carriers", permission: "carrier.view" }],
   },
   CASHIER: { code: "CASHIER", title: "出纳岗门户", description: "登记收付款并完成核销。", viewAreas: ["全部订单摘要", "应收应付", "收付款流水"], operateAreas: ["登记收付款", "对账单核销", "数据导出"], moduleCodes: [], quickLinks: [{ label: "费用结算", description: "登记流水与核销", href: "/admin/billing", permission: "billing.view" }] },
   HR_ADMIN: { code: "HR_ADMIN", title: "人事行政岗门户", description: "维护组织、账号、岗位和权限。", viewAreas: ["组织架构", "岗位与账号", "岗位权限", "审计日志"], operateAreas: ["开通与停用账号", "配置岗位", "增减权限积木"], moduleCodes: [], quickLinks: [{ label: "组织与权限", description: "开通账号并维护岗位归属", href: "/admin/positions", permission: "user.view" }, { label: "岗位权限", description: "配置岗位和账号特殊权限", href: "/admin/roles", permission: "role.view" }] },
@@ -236,7 +237,8 @@ export function visiblePortalLinks(config: PositionPortalConfig, permissions: st
   return config.quickLinks.filter(
     (link) =>
       (!link.permission || permissions.includes(link.permission)) &&
-      (link.href !== "/admin/billing" || canAccessSettlementWorkbench(permissions)),
+      (!["/admin/billing", "/admin/workbenches/costs"].includes(link.href) || canAccessSettlementWorkbench(permissions)) &&
+      (link.href !== "/admin/workbenches/tracking" || canViewTrackingCenter({ permissions })),
   );
 }
 

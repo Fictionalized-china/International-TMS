@@ -21,6 +21,7 @@ import { writeAudit } from "../lib/audit.server";
 import { loadingTrackingFilters } from "../lib/loading-tracking-filters";
 import { resolveLoadingBatchFieldPolicies } from "../lib/loading-batch-field-policy";
 import { loadLoadingBatchWorkflowOrders } from "../lib/loading-batch-field-policy.server";
+import { emptyLoadingPlanningFilters, filterLoadingPlanningCandidates, hiddenLoadingPlanningSelections, type LoadingPlanningFilters } from "../lib/loading-planning-filters";
 
 type BatchRow = {
   id: string;
@@ -255,6 +256,11 @@ function BatchPlanningPanel({ data, busy }: {
   busy: boolean;
 }) {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [filters, setFilters] = useState<LoadingPlanningFilters>({ ...emptyLoadingPlanningFilters });
+  const filteredCandidates = useMemo(() => filterLoadingPlanningCandidates(data.planningCandidates, filters), [data.planningCandidates, filters]);
+  const updateFilter = (key: keyof LoadingPlanningFilters, value: string) => setFilters(current => ({ ...current, [key]: value }));
+  const warehouseOptions = [...new Map(data.planningCandidates.map(item => [item.warehouse_id, item.warehouse_name])).entries()];
+  const destinationWarehouseOptions = [...new Map(data.planningCandidates.filter(item => item.overseas_warehouse_id).map(item => [item.overseas_warehouse_id!, item.overseas_warehouse_name || item.overseas_warehouse_id!])).entries()];
   const selected = data.planningCandidates.filter((item) => selectedIds.includes(item.order_id));
   const selectedFieldPolicies=resolveLoadingBatchFieldPolicies(data.planningWorkflowOrders.filter((item)=>selectedIds.includes(item.orderId)));
   const first = selected[0];
@@ -274,9 +280,19 @@ function BatchPlanningPanel({ data, busy }: {
     : current.filter((item) => item !== id));
   return <section className="panel inline-loading-workbench">
     <div className="panel-header"><div><h2>配载规划</h2><p>勾选同仓、同目的仓的订单，生成待找车配载单；此时不需要车辆、司机和报价。</p></div><span className="status-pill">{data.planningCandidates.length} 票可配载</span></div>
+    <div className="loading-planning-filters" role="search" aria-label="筛选待配载订单">
+      <label className="field"><span>订单 / 货物</span><input value={filters.q} onChange={event => updateFilter("q", event.target.value)} placeholder="订单号或货物名称"/></label>
+      <label className="field"><span>装车仓库</span><select value={filters.warehouseId} onChange={event => updateFilter("warehouseId", event.target.value)}><option value="">全部装车仓</option>{warehouseOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label>
+      <label className="field"><span>境外目的仓</span><select value={filters.destinationWarehouseId} onChange={event => updateFilter("destinationWarehouseId", event.target.value)}><option value="">全部目的仓</option>{destinationWarehouseOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label>
+      <label className="field"><span>客户</span><input value={filters.customer} onChange={event => updateFilter("customer", event.target.value)} placeholder="客户名称"/></label>
+      <label className="field"><span>境外目的地</span><input value={filters.destination} onChange={event => updateFilter("destination", event.target.value)} placeholder="国家、省州或城市"/></label>
+      <label className="field"><span>出境口岸</span><input value={filters.port} onChange={event => updateFilter("port", event.target.value)} placeholder="口岸名称或编码"/></label>
+      <div className="loading-planning-filter-footer"><span>当前显示 {filteredCandidates.length} / {data.planningCandidates.length} 票；筛选保留已选订单。</span><button type="button" className="secondary" onClick={() => setFilters({ ...emptyLoadingPlanningFilters })}>重置筛选</button></div>
+    </div>
     <Form method="post">
       <input type="hidden" name="intent" value="create_batch"/>
       <input type="hidden" name="requestId" value={data.requestId}/>
+      {hiddenLoadingPlanningSelections(selected, filteredCandidates).map(item => <input key={item.order_id} type="hidden" name="orderIds" value={item.order_id}/>)}
       <div className="form-grid compact loading-batch-fields">
         <label className="field"><span>配载单名称</span><input name="batchName" placeholder="留空自动生成"/></label>
       </div>
@@ -293,11 +309,13 @@ function BatchPlanningPanel({ data, busy }: {
         </div>}
       </section>
       <div className="loading-selection-summary inline-loading-summary"><span>已选 <strong>{selected.length}</strong> 票</span><span>{totals.packages} 包</span><span>{totals.weight.toFixed(2)} KG</span><span>{totals.volume.toFixed(3)} CBM</span></div>
-      <div className="table-wrap module-record-table inline-loading-table"><table><thead><tr><th>选择</th><th>订单 / 客户</th><th>装车仓</th><th>境外目的地</th><th>实收汇总</th><th>状态</th></tr></thead><tbody>{data.planningCandidates.map((item) => {
+      {selected.length > 0 && <div className="loading-planning-selected" aria-label="已选待配载订单">{selected.map(item => <button key={item.order_id} type="button" className="secondary" aria-label={`取消选择 ${item.order_number}`} onClick={() => toggle(item.order_id, false)}>{item.order_number} ×</button>)}<button type="button" className="text-button" onClick={() => setSelectedIds([])}>清空选择</button></div>}
+      <div className="table-wrap module-record-table inline-loading-table"><table><thead><tr><th>选择</th><th>订单 / 客户</th><th>装车仓</th><th>境外目的地</th><th>实收汇总</th><th>状态</th></tr></thead><tbody>{filteredCandidates.map((item) => {
         const disabled = !compatible(item) && !selectedIds.includes(item.order_id);
         return <tr key={item.order_id} className={selectedIds.includes(item.order_id) ? "selected-row" : ""}><td><input type="checkbox" name="orderIds" aria-label={`选择订单 ${item.order_number}`} value={item.order_id} checked={selectedIds.includes(item.order_id)} disabled={disabled} onChange={(event) => toggle(item.order_id,event.currentTarget.checked)}/></td><td><LoadingOrderPeek order={item}/><small>{item.customer_name}</small></td><td>{item.warehouse_name}</td><td>{item.overseas_warehouse_name || "未设置"}<small>{[item.destination_country,item.destination_state,item.destination_city].filter(Boolean).join(" ")}</small></td><td>{Number(item.weight_kg).toFixed(2)} KG<small>{Number(item.volume_cbm).toFixed(3)} CBM · {item.package_count} 包</small></td><td>{disabled ? "与当前选择不兼容" : "可配载"}</td></tr>;
       })}</tbody></table></div>
       {!data.planningCandidates.length && <p className="empty-state">当前没有同时满足“已货齐、已贴标、无异常、未占用、工作流已到配载节点”的订单。仓库端待配载池仅供核对，不能在仓库账号中勾选成单。</p>}
+      {!!data.planningCandidates.length && !filteredCandidates.length && <p className="empty-state">没有符合当前筛选条件的待配载订单；已选订单仍保留，可重置筛选继续选择。</p>}
       {data.planningCandidates.length === 1 && <p className="alert info">目前只有 1 票可配载；拼车配载至少需要两票同仓、同目的地且同操作主管的订单。</p>}
       <div className="inline-loading-actions"><small>生成后还需发送商务找车；商务反馈整批资源，主管确认后仓库才可装车。</small><button className="primary" disabled={busy || selected.length < 2}>{busy ? "正在校验并生成…" : "生成待找车配载单"}</button></div>
     </Form>

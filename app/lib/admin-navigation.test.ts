@@ -27,7 +27,7 @@ describe("admin navigation permissions", () => {
       "businessData",
       "system",
     ]);
-    expect(adminNavigationPermissionItems).toHaveLength(24);
+    expect(adminNavigationPermissionItems).toHaveLength(25);
     expect(new Set(adminNavigationPermissionItems.map((item) => item.key)).size).toBe(adminNavigationPermissionItems.length);
     expect(new Set(adminNavigationPermissionItems.map((item) => item.menuPermissionCode)).size).toBe(adminNavigationPermissionItems.length);
   });
@@ -102,6 +102,7 @@ describe("admin navigation permissions", () => {
     expect(canViewAdminNavigationItem(user([
       "menu.admin.tracking_center.view",
       "shipment.view",
+      "tracking.center.view",
     ]), "trackingCenter")).toBe(true);
     expect(canViewAdminNavigationItem(user([
       "menu.admin.analytics.view",
