@@ -60,10 +60,9 @@ export function evaluateCostsCompletionGate(input: {
 }): CostsCompletionGateResult {
   const requiredFields = input.fields.filter((field) => {
     if (field.moduleCode !== "costs" || !field.isActive) return false;
-    // The three settlement signatures are business controls, not ordinary
-    // optional data fields.  If enabled, all applicable directions must be
-    // signed even when an older workflow version marked the field optional.
-    return field.isRequired || field.fieldKey in signOffFieldChecks;
+    // The frozen required/optional/hidden policy must match the signature gate.
+    // Otherwise a skipped optional signature can strand a fully settled order.
+    return field.isRequired;
   });
   const directionByCode = new Map(
     input.directions.map((direction) => [direction.direction, direction]),

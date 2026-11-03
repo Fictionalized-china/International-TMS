@@ -1583,7 +1583,7 @@ async function resolveFieldPresence(
     for (const rule of rules) {
       const column = expenseFieldMap[rule.fieldKey];
       if (!column) continue;
-      const present = expenseRows.results.length > 0 && expenseRows.results.every((row) => meaningful(row[column], rule.fieldType));
+      const present = expenseRows.results.length > 0 && expenseRows.results.every((row) => expenseLedgerFieldPresent(rule.fieldKey,row[column],rule.fieldType));
       result.set(rule.fieldKey, {
         present,
         displayValue: present ? `${expenseRows.results.length} 条费用` : null,
@@ -1679,6 +1679,17 @@ function setPresence(
     present,
     displayValue: present ? display(value) : null,
   });
+}
+
+export function expenseLedgerFieldPresent(fieldKey:string,value:unknown,fieldType:string) {
+  if(value===null||value===undefined||(typeof value==='string'&&!value.trim()))return false;
+  if(fieldKey==='expense_is_internal')return value===0||value===1||value==='0'||value==='1'||typeof value==='boolean';
+  if(fieldKey==='expense_unit_price'||fieldKey==='expense_tax_rate'){
+    if(typeof value!=='number'&&typeof value!=='string')return false;
+    const number=Number(value);
+    return Number.isFinite(number)&&number>=0&&(fieldKey!=='expense_tax_rate'||number<=100);
+  }
+  return meaningful(value,fieldType);
 }
 
 function meaningful(value: unknown, fieldType: string) {

@@ -14,9 +14,19 @@ export async function loadMeetingSettlement(db:D1Database,org:string,orderId:str
     (SELECT assignee_user_id FROM order_module_instances WHERE organization_id=o.organization_id AND order_id=o.id AND module_code='costs' AND enabled=1) cs_user_id,
     (SELECT assignee_user_id FROM order_module_instances WHERE organization_id=o.organization_id AND order_id=o.id AND module_code='transport' AND enabled=1) operation_user_id,
     (SELECT assignee_user_id FROM order_module_instances WHERE organization_id=o.organization_id AND order_id=o.id AND module_code='review' AND enabled=1) finance_user_id,
-    (SELECT fulfilled_by_user_id FROM order_dispatch_requests WHERE organization_id=o.organization_id AND order_id=o.id AND status='fulfilled') commercial_user_id
+    COALESCE((SELECT fulfilled_by_user_id FROM order_dispatch_requests WHERE organization_id=o.organization_id AND order_id=o.id AND status='fulfilled'),
+      (SELECT quote.created_by_user_id FROM transport_batch_orders bo JOIN transport_batches b ON b.id=bo.batch_id AND b.organization_id=bo.organization_id
+       JOIN batch_dispatch_quotes quote ON quote.batch_id=b.id AND quote.organization_id=b.organization_id
+       WHERE bo.organization_id=o.organization_id AND bo.order_id=o.id AND bo.status!='removed' AND b.status!='cancelled' ORDER BY quote.created_at DESC LIMIT 1)) commercial_user_id
     FROM transport_orders o JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id WHERE o.id=? AND o.organization_id=?`).bind(orderId,org).first<{id:string;order_number:string;status:string;salesperson_user_id:string|null;created_by_user_id:string|null;operation_supervisor_user_id:string|null;cs_order_entry_enabled:number;actual_exported:number;cs_user_id:string|null;operation_user_id:string|null;finance_user_id:string|null;commercial_user_id:string|null}>();
   if(!order) throw new Error("订单不存在");
+  const responsibilityIds=[order.salesperson_user_id,order.operation_supervisor_user_id,order.cs_user_id,order.operation_user_id,order.finance_user_id,order.commercial_user_id].filter((id):id is string=>Boolean(id));
+  const responsibleUsers=(await db.prepare(`SELECT DISTINCT u.id userId,u.display_name displayName,p.code positionCode,p.name positionName
+    FROM users u JOIN memberships membership_row ON membership_row.user_id=u.id AND membership_row.organization_id=? AND membership_row.status='active'
+    JOIN positions p ON p.id=membership_row.position_id AND p.organization_id=membership_row.organization_id AND p.status='active'
+    WHERE u.status='active' AND (u.id IN (${responsibilityIds.length?responsibilityIds.map(()=>'?').join(','):'NULL'})
+      OR EXISTS(SELECT 1 FROM order_module_instances assigned WHERE assigned.organization_id=membership_row.organization_id AND assigned.order_id=? AND assigned.enabled=1 AND assigned.assignee_user_id=u.id))
+    ORDER BY p.code,u.display_name,u.id`).bind(org,...responsibilityIds,orderId).all<{userId:string;displayName:string;positionCode:string;positionName:string}>()).results;
   const [policy,workflow,controls]=await Promise.all([loadBusinessProcessPolicy(org,db),loadLockedWorkflowStageContext(db,org,orderId,"costs"),db.prepare("SELECT direction,confirmed,business_reviewed,finance_reviewed,business_locked,finance_locked FROM order_expense_direction_controls WHERE organization_id=? AND order_id=?").bind(org,orderId).all<ExpenseDirectionControl>()]);
   const costSteps=workflow.steps.filter(s=>workflow.modulePlacements.some(m=>m.moduleCode==='costs'&&m.stepKey===s.stepKey));
   const target=costSteps.at(-1)?.stepKey;
@@ -26,7 +36,7 @@ export async function loadMeetingSettlement(db:D1Database,org:string,orderId:str
   const fields=configuredFields.length||!workflow.locked?configuredFields:[{fieldKey:'__empty_frozen_costs__',isActive:false,isRequired:false}];
   const historical=workflow.locked&&target?Boolean(await db.prepare("SELECT 1 FROM workflow_instance_step_states s JOIN workflow_instances wi ON wi.id=s.instance_id JOIN transport_orders o ON o.workflow_instance_id=wi.id AND o.id=wi.order_id AND o.organization_id=wi.organization_id WHERE o.organization_id=? AND o.id=? AND s.step_key=? AND s.status='completed'").bind(org,orderId,target).first()):false;
   const open=validBinding&&!historical&&order.status==="in_execution"&&(policyEnabled(policy,"settlement.after_actual_export")?Boolean(order.actual_exported):["reconciliation","completion_review"].includes(workflow.currentStepKey??""));
-  return {order,policy,workflow,fields,open,historical,validBinding,controls:controls.results};
+  return {order,policy,workflow,fields,open,historical,validBinding,controls:controls.results,responsibleUsers};
 }
 export async function submitMeetingSignature(db:D1Database,input:{current:SessionUser;orderId:string;direction:"receivable"|"payable";action:ExpenseDirectionAction;notes:string;refresh:()=>Promise<void>}) {
   const visibility=orderVisibilitySql(input.current,"o");

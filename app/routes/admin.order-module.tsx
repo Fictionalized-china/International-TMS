@@ -20,7 +20,7 @@ import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 import { writeAudit } from "../lib/audit.server";
 import { persistExpenseDirectionAction, retryOrderSettlementSync } from "../lib/expense-direction-submit.server";
 import { submitMeetingSignature,loadMeetingSettlement } from "../lib/meeting-settlement.server";
-import { meetingSignatureAccess } from '../lib/meeting-settlement';
+import { meetingSignatureAccess,settlementActionOwnerLabel } from '../lib/meeting-settlement';
 import { loadBusinessProcessPolicy } from "../lib/business-process-policy.server";
 import { policyPositions } from "../lib/business-process-policy";
 import { synchronizeOrderDocumentsModuleStatus } from "../lib/documents-module-status.server";
@@ -7513,10 +7513,6 @@ function ModuleBusinessData({
     const directionControl = (direction: "receivable" | "payable") =>
       data.expenseDirectionControls.find((item) => item.direction === direction) ||
       emptyExpenseDirectionControl(direction);
-    const costsModule = data.modules.find((item) => item.module_code === "costs");
-    const reviewModule = data.modules.find((item) => item.module_code === "review");
-    const transportModule = data.modules.find((item) => item.module_code === "transport");
-    const assignmentModule = data.modules.find((item) => item.module_code === "assignment");
     const actionPolicies = expenseDirectionActionPolicies(data.workflowFields);
     const activeActionPolicies = actionPolicies.filter((policy) => policy.active);
     const requiredActionCount = activeActionPolicies.filter(
@@ -7564,6 +7560,7 @@ function ModuleBusinessData({
               : "当前工作流无需费用签核"}
           </span>
         </div>
+        <p className="alert info">应收、应付分别按下方顺序办理；每一步由本单配置责任人签核，不要求当前账号办理所有步骤。请从“出境后对账签核 / 付款审批”进入集中办理，签核完成后继续对账、收付款与核销。</p>
         <ModuleSummaryTable items={[
           { label: "应收", value: moneyTotal(data.expenses, "receivable").toFixed(2), detail: "折算汇总" },
           { label: "应付", value: moneyTotal(data.expenses, "payable").toFixed(2), detail: "折算汇总" },
@@ -7578,19 +7575,8 @@ function ModuleBusinessData({
           ) || Boolean(control.business_locked || control.finance_locked);
           const actionAccessByAction = Object.fromEntries(
             expenseDirectionActions.map((action) => {
-              const assignee = direction === "receivable"
-                ? action === "confirm"
-                  ? { id: costsModule?.assignee_user_id || null, name: costsModule?.assignee_name || null }
-                  : action === "business_review"
-                    ? { id: transportModule?.assignee_user_id || null, name: transportModule?.assignee_name || null }
-                    : { id: assignmentModule?.assignee_user_id || null, name: assignmentModule?.assignee_name || null }
-                : action === "confirm"
-                  ? { id: transportModule?.assignee_user_id || null, name: transportModule?.assignee_name || null }
-                  : action === "business_review"
-                    ? { id: assignmentModule?.assignee_user_id || null, name: assignmentModule?.assignee_name || null }
-                    : { id: reviewModule?.assignee_user_id || null, name: reviewModule?.assignee_name || null };
               const reason=meetingSignatureAccess(data.meetingSettlement,data.current,direction,action);
-              return [action,{allowed:!reason,reason,ownerLabel:assignee.name??"本单配置责任人"}];
+              return [action,{allowed:!reason,reason,ownerLabel:settlementActionOwnerLabel(data.meetingSettlement,direction,action)}];
             }),
           ) as Record<ExpenseDirectionAction, ExpenseDirectionActionAccess>;
           return (

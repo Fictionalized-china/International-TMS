@@ -1,6 +1,6 @@
 import { afterEach,beforeEach,describe,it,expect,vi } from "vitest";
 import { meetingFixture,seedFrozenMeetingWorkflow } from "./meeting-integration-fixture";
-import { submitMeetingSignature,loadMeetingSettlement,assertMeetingSignoffsComplete } from "./meeting-settlement.server";
+import { submitMeetingSignature,loadMeetingSettlement,assertMeetingSignoffsComplete,meetingSignatureAccess } from "./meeting-settlement.server";
 import { loadHrReport,saveCommission,generateScheduledHrReports } from "./hr-reports.server";
 import { requestDispatchTask,fulfillDispatchTask,refreshAutomaticDispatchTasks } from "./dispatch-tasks.server";
 import { recordCashTransaction,allocateCashTransaction } from './settlement-workbench.server';
@@ -97,7 +97,8 @@ describe("meeting workflow integrated against all real migrations",()=>{
     fee("receivable");const input={current:fixture.actors.get("sales")!,orderId:"order",direction:"receivable" as const,action:"confirm" as const,notes:"",refresh:async()=>{}};
     await expect(submitMeetingSignature(fixture.db,input)).rejects.toThrow("实际出境");exported();
     await expect(submitMeetingSignature(fixture.db,{...input,current:fixture.actors.get("supervisor")!,action:"finance_review"})).rejects.toThrow("前序");
-    await expect(submitMeetingSignature(fixture.db,{...input,current:fixture.actors.get("cs")!})).rejects.toThrow("未配置客服");
+    const csState=await loadMeetingSettlement(fixture.db,"org","order");
+    expect(meetingSignatureAccess(csState,fixture.actors.get("cs")!,"receivable","confirm")).toBeNull();
     await submitMeetingSignature(fixture.db,input);
     await submitMeetingSignature(fixture.db,{...input,current:fixture.actors.get("operation")!,action:"business_review"});
     expect(fixture.database.prepare("SELECT stage FROM business_expenses").get()?.stage).toBe("estimated");

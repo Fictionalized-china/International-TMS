@@ -1,10 +1,23 @@
 import { policyPositions,policyEnabled,type BusinessProcessPolicy } from "./business-process-policy";
-import { expenseDirectionActions,expenseDirectionActionCompleted,expenseDirectionActionPolicies,emptyExpenseDirectionControl,type ExpenseDirectionAction,type ExpenseDirectionControl,type ExpenseDirectionWorkflowField } from "./expense-control";
+import { expenseDirectionActions,expenseDirectionActionCompleted,expenseDirectionActionPolicies,expenseDirectionActionLabel,emptyExpenseDirectionControl,type ExpenseDirectionAction,type ExpenseDirectionControl,type ExpenseDirectionWorkflowField } from "./expense-control";
 import type { SessionUser } from './auth.server';
 import type { loadMeetingSettlement } from './meeting-settlement.server';
 import { isBossBusinessActor } from './permission-blocks';
 export function settlementActorPositions(policy:BusinessProcessPolicy,direction:"receivable"|"payable",action:ExpenseDirectionAction) {
   return policyPositions(policy,`${direction}.${action==="confirm"?"initiator":action==="business_review"?"review":"approve"}_positions`);
+}
+export function settlementActionOwners(state:Awaited<ReturnType<typeof loadMeetingSettlement>>,direction:"receivable"|"payable",action:ExpenseDirectionAction) {
+  const order=state.order;
+  const canonical:Record<string,string|null>={SALES:order.salesperson_user_id,CS:order.cs_user_id,
+    OPERATION:order.operation_user_id,OPERATION_SUPERVISOR:order.operation_supervisor_user_id,
+    FINANCE_ACCOUNTING:order.finance_user_id,BUSINESS_ROUTE:order.commercial_user_id};
+  const positions=settlementActorPositions(state.policy,direction,action);
+  return (state.responsibleUsers??[]).filter(person=>positions.includes(person.positionCode)&&
+    (!(person.positionCode in canonical)||canonical[person.positionCode]===person.userId));
+}
+export function settlementActionOwnerLabel(state:Awaited<ReturnType<typeof loadMeetingSettlement>>,direction:"receivable"|"payable",action:ExpenseDirectionAction) {
+  const owners=settlementActionOwners(state,direction,action);
+  return owners.length?owners.map(person=>`${person.displayName}（${person.positionName}）`).join(" / "):"尚未配置有效的本单签核责任人";
 }
 export function settlementSequenceReason(control:ExpenseDirectionControl,action:ExpenseDirectionAction,fields:readonly ExpenseDirectionWorkflowField[],policy:BusinessProcessPolicy) {
   if(!policyEnabled(policy,"settlement.sequential") || expenseDirectionActionCompleted(control,action)) return null;
@@ -18,13 +31,16 @@ export function meetingSignatureAccess(state:Awaited<ReturnType<typeof loadMeeti
   if(!actions.find(p=>p.action===action)?.active&&!(action==='confirm'&&!actions.some(p=>p.required)))return '当前工作流已隐藏此签核';
   const control=state.controls.find(c=>c.direction===direction)??emptyExpenseDirectionControl(direction);
   const sequenceReason=settlementSequenceReason(control,action,state.fields,state.policy);
-  if(sequenceReason)return sequenceReason;
+  if(sequenceReason){
+    const prior=actions.find(item=>item.required&&expenseDirectionActions.indexOf(item.action)<expenseDirectionActions.indexOf(action)&&!expenseDirectionActionCompleted(control,item.action));
+    return prior?`前序必办签核尚未完成：请先由${settlementActionOwnerLabel(state,direction,prior.action)}办理“${expenseDirectionActionLabel(prior.action,direction)}”`:sequenceReason;
+  }
   if(isBossBusinessActor(actor)) return null;
   const pos=actor.positionCode??'',codes=settlementActorPositions(state.policy,direction,action);
-  if(!codes.includes(pos)||!actor.permissions.includes('settlement.signature.manage'))return '当前岗位没有此项签核办理权';
-  const order=state.order;
-  const assigned=action==='confirm'?(direction==='receivable'?(pos==='CS'?order.cs_user_id:order.salesperson_user_id):(pos==='BUSINESS_ROUTE'?order.commercial_user_id:order.operation_user_id)):action==='business_review'?(direction==='receivable'?order.operation_user_id:order.operation_supervisor_user_id):(direction==='receivable'?order.operation_supervisor_user_id:order.finance_user_id);
-  if(assigned!==actor.userId)return '请由本单指定责任人办理；尚未分配时请先完成任务分派';
-  if(direction==='receivable'&&action==='confirm'&&pos==='CS'&&policyEnabled(state.policy,'order.cs_requires_customer_flag')&&!order.cs_order_entry_enabled)return '此客户未配置客服代办应收，应由业务员发起';
+  if(!codes.includes(pos)||!actor.permissions.includes('settlement.signature.manage'))return `当前岗位没有此项签核办理权；本步由${settlementActionOwnerLabel(state,direction,action)}办理`;
+  if(!settlementActionOwners(state,direction,action).some(person=>person.userId===actor.userId&&person.positionCode===pos))
+    return `请由本单指定责任人办理：${settlementActionOwnerLabel(state,direction,action)}`;
+  // Customer order-entry authorization does not grant or revoke settlement authority.
+  // Settlement uses the configured action roles, exact order owners and signature permission.
   return null;
 }

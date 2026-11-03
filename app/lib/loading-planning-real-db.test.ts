@@ -7,6 +7,8 @@ vi.mock('./batch-transport-sync.server',()=>({synchronizeBatchTransport:async()=
 vi.mock('./loading-manifest.server',()=>({ensureBatchSystemDocuments:async()=>true}));
 import { createOperationPlannedBatch } from './loading-batch-planning.server';
 import { sendBatchToCommercial,loadBatchFindVehicleTasks,fulfillBatchFindVehicle,returnBatchVehicleToCommercial } from './batch-dispatch.server';
+import { loadMeetingSettlement } from './meeting-settlement.server';
+import { settlementActionOwners } from './meeting-settlement';
 let fixture:Awaited<ReturnType<typeof meetingFixture>>;
 afterEach(()=>fixture?.database.close());
 describe('new loading plans against every actual database guard',()=>{
@@ -69,6 +71,9 @@ describe('new loading plans against every actual database guard',()=>{
     expect(sql.prepare('SELECT carrier_id,approval_status FROM transport_batches WHERE id=?').get(result.batchId)).toMatchObject({approval_status:'submitted',carrier_id:expect.any(String)});
     expect(sql.prepare('SELECT COUNT(*) n FROM transport_batch_vehicles WHERE batch_id=?').get(result.batchId)?.n).toBe(1);
     expect(sql.prepare('SELECT freight_amount,currency FROM batch_dispatch_quotes WHERE batch_id=?').get(result.batchId)).toMatchObject({freight_amount:60,currency:'CNY'});
+    const settlement=await loadMeetingSettlement(fixture.db,'org','order');
+    expect(settlement.order.commercial_user_id).toBe('commercial');
+    expect(settlementActionOwners(settlement,'payable','confirm').map(person=>person.userId)).toEqual(expect.arrayContaining(['operation','commercial']));
     await expect(fulfillBatchFindVehicle({current:fixture.actors.get('commercial')!,batchId:result.batchId,
       carrierId:'carrier',newCarrierName:'',vehicleId:'vehicle',newPlateNumber:'',newVehicleType:'',driverId:'driver',newDriverName:'',newDriverPhone:'',freightAmount:60,currency:'CNY',exchangeRate:1,allocationMethod:'auto',notes:''})).rejects.toThrow('已经完成绑定');
     // A disabled/misconfigured handler must not clear already-bound resources into a dead end.

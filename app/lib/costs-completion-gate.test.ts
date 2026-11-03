@@ -149,7 +149,7 @@ describe("costs completion gate", () => {
     });
   });
 
-  it("still requires enabled settlement signatures when legacy configuration marks them optional", () => {
+  it("does not turn configured optional settlement signatures into mandatory blockers", () => {
     const result = evaluateCostsCompletionGate({
       fields: [
         {
@@ -173,9 +173,9 @@ describe("costs completion gate", () => {
     });
 
     expect(result).toMatchObject({
-      complete: false,
-      status: "in_progress",
-      blockers: [{ fieldKey: "business_review", direction: "receivable" }],
+      complete: true,
+      status: "completed",
+      blockers: [],
     });
   });
 
