@@ -1,7 +1,8 @@
 #Requires -Version 7.0
 param(
   [Parameter(Mandatory=$true)][string]$CredentialsPath,
-  [string]$BaseUrl='https://tms.shxlh.com'
+  [string]$BaseUrl='https://tms.shxlh.com',
+  [switch]$Focused
 )
 $ErrorActionPreference='Stop'
 # Only authentication POSTs and page GETs. Never submit a business form.
@@ -43,10 +44,12 @@ function Read-AccessPage($context,[string]$path,[int]$expected=200){
 }
 function Sidebar($page){return [regex]::Match($page.Content,'(?s)<aside\b.*?</aside>').Value}
 $contexts=@{}
-foreach($index in @(0,1,2,4,5,6,7,8,10,11,12)){
+$indices=if($Focused){@(0,4,5,8,10)}else{@(0,1,2,4,5,6,7,8,10,11,12)}
+foreach($index in $indices){
   $context=Open-Account $index
   $contexts[$index]=$context
   $page=Read-AccessPage $context '/admin/portal'
+  if($Focused){continue}
   $sidebar=Sidebar $page
   if(!$sidebar){throw "No sidebar for slot $index"}
   $links=@([regex]::Matches($sidebar,'href="([^"]+)"') | ForEach-Object {[System.Net.WebUtility]::HtmlDecode($_.Groups[1].Value)} | Where-Object {$_ -match '^/admin(?:/|\?|$)'} | Select-Object -Unique)
@@ -79,4 +82,7 @@ foreach($label in @('订单 / 货物','装车仓库','境外目的仓','境外�
 $null=Read-AccessPage $contexts[10] '/admin/workbenches/costs'
 $null=Read-AccessPage $contexts[0] '/admin/dispatch'
 $null=Read-AccessPage $contexts[0] '/admin/workbenches/costs'
+foreach($workspace in @('tasks','documents','customs','tracking','costs')){
+  $null=Read-AccessPage $contexts[0] "/admin/workbenches/$workspace"
+}
 Write-Output "Read-only access verification complete: $pageChecks page checks. No business forms submitted."

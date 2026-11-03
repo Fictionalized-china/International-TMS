@@ -28,6 +28,22 @@ function args(workspace = "tracking") {
 beforeEach(() => { vi.clearAllMocks(); actor(["order.view", "shipment.view"]); harness.policy.mockResolvedValue(defaultBusinessProcessPolicy); });
 
 describe("transport route authorization before data access", () => {
+  it.each(["tasks", "documents", "customs", "tracking", "costs"])("uses a non-reserved MySQL CTE name for the authorized %s workspace", async workspace => {
+    actor(["order.view", "shipment.view", "tracking.center.view", "billing.view", "billing.sensitive.view"]);
+    harness.prepare.mockImplementation(() => {
+      const statement = { bind: (..._values: unknown[]) => statement, first: async () => ({ total: 0 }), all: async () => ({ results: [] }) };
+      return statement;
+    });
+    const result = await workbenchLoader(args(workspace) as never);
+    expect(result).toMatchObject({ workspace, total: 0, rows: [] });
+    const cteQueries = harness.prepare.mock.calls.map(call => String(call[0])).filter(sql => /^WITH/i.test(sql));
+    expect(cteQueries).toHaveLength(2);
+    for (const sql of cteQueries) {
+      expect(sql).toMatch(/^WITH workbench_rows AS/);
+      expect(sql).toMatch(/FROM workbench_rows/);
+      expect(sql).not.toMatch(/\b(?:WITH|FROM)\s+rows\b/i);
+    }
+  });
   it("blocks operation direct tracking reads and writes before querying any overseas data", async () => {
     await expect(trackingLoader(args() as never)).rejects.toMatchObject({ status: 403 });
     await expect(trackingAction(args() as never)).rejects.toMatchObject({ status: 403 });

@@ -139,7 +139,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
 
   const filter = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const count = await env.DB.prepare(
-    `${cte} SELECT COUNT(*) total FROM rows ${filter}`,
+    `${cte} SELECT COUNT(*) total FROM workbench_rows ${filter}`,
   )
     .bind(...filterBindings)
     .first<{ total: number }>();
@@ -148,7 +148,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
   const page = Math.min(requestedPage, pages);
   const [rows, savedViews, profile] = await Promise.all([
     env.DB.prepare(
-      `${cte} SELECT * FROM rows ${filter} ORDER BY overdue_count DESC,pending_count DESC,updated_at DESC LIMIT ? OFFSET ?`,
+      `${cte} SELECT * FROM workbench_rows ${filter} ORDER BY overdue_count DESC,pending_count DESC,updated_at DESC LIMIT ? OFFSET ?`,
     )
       .bind(...filterBindings, PAGE_SIZE, (page - 1) * PAGE_SIZE)
       .all<Row>(),
@@ -325,7 +325,7 @@ function workspaceQuery(workspace: Workspace, organizationId: string) {
   if (workspace === "tasks") {
     return {
       bindings: [organizationId],
-      cte: `WITH rows AS (
+      cte: `WITH workbench_rows AS (
         SELECT mi.id row_id,o.id order_id,o.order_number,c.name customer_name,mi.module_code,mi.current_step_name state,
           mi.module_name primary_text,
           CAST((SELECT COUNT(*) FROM order_tasks t WHERE t.order_id=o.id AND t.module_code=mi.module_code AND t.status IN ('pending','in_progress')) AS TEXT)||' 个待办' secondary_text,
@@ -358,7 +358,7 @@ function workspaceQuery(workspace: Workspace, organizationId: string) {
       CASE WHEN EXISTS(SELECT 1 FROM order_tracking_milestones tm WHERE tm.order_id=o.id) THEN 0 ELSE 1 END`);
   return {
     bindings: [organizationId],
-    cte: `WITH rows AS (
+    cte: `WITH workbench_rows AS (
       SELECT mi.id row_id,o.id order_id,o.order_number,c.name customer_name,'costs' module_code,mi.current_step_name state,
         '应收 '||printf('%.2f',COALESCE((SELECT SUM(e.amount) FROM business_expenses e WHERE e.order_id=o.id AND e.direction='receivable' AND e.stage!='cancelled'),0))||' / 应付 '||printf('%.2f',COALESCE((SELECT SUM(e.amount) FROM business_expenses e WHERE e.order_id=o.id AND e.direction='payable' AND e.stage!='cancelled'),0)) primary_text,
         CAST(COALESCE((SELECT SUM(dc.confirmed+dc.business_reviewed+dc.finance_reviewed) FROM order_expense_direction_controls dc WHERE dc.organization_id=o.organization_id AND dc.order_id=o.id),0) AS TEXT)||'/6 项并行签核完成' secondary_text,
@@ -384,7 +384,7 @@ function moduleWorkspaceQuery(
     .split(/,\s*\n/);
   return {
     bindings: [organizationId],
-    cte: `WITH rows AS (
+    cte: `WITH workbench_rows AS (
       SELECT mi.id row_id,o.id order_id,o.order_number,c.name customer_name,'${moduleCode}' module_code,mi.current_step_name state,
         ${primaryText} primary_text,
         ${secondaryText} secondary_text,
