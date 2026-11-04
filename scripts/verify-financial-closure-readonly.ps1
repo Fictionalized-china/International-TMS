@@ -19,7 +19,10 @@ function Read-Page($context,[string]$path){
   $query=[System.Web.HttpUtility]::ParseQueryString($builder.Query)
   if($context.Slot){$query['itmsTab']=$context.Slot}
   $builder.Query=$query.ToString()
-  $response=Invoke-WebRequest $builder.Uri -WebSession $context.Session -TimeoutSec 60 -SkipHttpErrorCheck
+  for($attempt=1;$attempt -le 2;$attempt++){
+    try{$response=Invoke-WebRequest $builder.Uri -WebSession $context.Session -TimeoutSec 60 -SkipHttpErrorCheck;break}
+    catch{if($attempt -eq 2){throw};Write-Host "RETRY slot=$($context.Index) read-only transport failure"}
+  }
   if($response.StatusCode -ne 200 -or $response.BaseResponse.RequestMessage.RequestUri.AbsolutePath -match '/login$' -or $response.Content -match 'SYSTEM RECOVERY|502 Bad Gateway'){throw "Slot $($context.Index): failed page $path"}
   return [regex]::Replace($response.Content,'(?s)<script\b[^>]*>.*?</script>','')
 }
