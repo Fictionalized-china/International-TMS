@@ -49,6 +49,22 @@ export function meetingSettlementDirections(
   });
 }
 export type MeetingSettlementDirection = ReturnType<typeof meetingSettlementDirections>[number];
+export function canReadSignatureExpenses(
+  state: Awaited<ReturnType<typeof loadMeetingSettlement>>,
+  actor: Pick<SessionUser, "userId" | "positionCode" | "permissions" | "roleCodes">,
+  direction: "receivable" | "payable",
+) {
+  if (!actor.permissions.includes("order.view")) return false;
+  if (isBossBusinessActor(actor) || actor.permissions.includes("billing.sensitive.view")) return true;
+  if (!policyEnabled(state.policy, "settlement.approver_amounts_visible") || !actor.permissions.includes("settlement.signature.manage")) return false;
+  const policies = expenseDirectionActionPolicies(state.fields);
+  return policies.some(policy => (policy.active || (policy.action === "confirm" && policies.every(item => !item.active))) &&
+    settlementActionOwners(state, direction, policy.action).some(owner => owner.userId === actor.userId && owner.positionCode === actor.positionCode));
+}
+export type SignatureExpense = {
+  id: string; direction: "receivable" | "payable"; charge_name: string; counterparty_name: string | null;
+  currency: string; quantity: number; unit_price: number; amount: number; exchange_rate: number;
+};
 export function settlementSequenceReason(control:ExpenseDirectionControl,action:ExpenseDirectionAction,fields:readonly ExpenseDirectionWorkflowField[],policy:BusinessProcessPolicy) {
   if(!policyEnabled(policy,"settlement.sequential") || expenseDirectionActionCompleted(control,action)) return null;
   const index=expenseDirectionActions.indexOf(action);
@@ -70,6 +86,7 @@ export function meetingSignatureAccess(state:Awaited<ReturnType<typeof loadMeeti
   if(!codes.includes(pos)||!actor.permissions.includes('settlement.signature.manage'))return `当前岗位没有此项签核办理权；本步由${settlementActionOwnerLabel(state,direction,action)}办理`;
   if(!settlementActionOwners(state,direction,action).some(person=>person.userId===actor.userId&&person.positionCode===pos))
     return `请由本单指定责任人办理：${settlementActionOwnerLabel(state,direction,action)}`;
+  if (!canReadSignatureExpenses(state, actor, direction)) return "本单审核金额查看未授权，请先配置签核金额可见或财务查看权限，不能盲签";
   // Customer order-entry authorization does not grant or revoke settlement authority.
   // Settlement uses the configured action roles, exact order owners and signature permission.
   return null;

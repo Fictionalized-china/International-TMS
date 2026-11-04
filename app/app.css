@@ -34864,3 +34864,21 @@ html[data-motion="off"] *::after {
     transform: none;
   }
 }
+
+/* Reuse the existing finance palette; keep handoffs and review amounts aligned. */
+.linear-order-page .settlement-handoff,
+.settlement-handoff.alert {
+  display: grid;
+  gap: 8px;
+  align-items: start;
+}
+.settlement-handoff p { margin: 0; }
+.settlement-handoff .row-actions { flex-wrap: wrap; }
+.settlement-handoff form { display: grid; gap: 8px; }
+.order-settlement-signoffs .signature-expense-table caption {
+  text-align: left;
+  padding: 8px 10px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.order-settlement-signoffs .signature-expense-table table { min-width: 660px; }

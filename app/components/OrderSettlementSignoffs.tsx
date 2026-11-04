@@ -1,13 +1,14 @@
 import { Form } from "react-router";
 import { expenseDirectionActionLabel } from "../lib/expense-control";
-import type { MeetingSettlementDirection } from "../lib/meeting-settlement";
+import type { MeetingSettlementDirection, SignatureExpense } from "../lib/meeting-settlement";
 
-/** No money data or broad module-edit permission is needed to sign one's step. */
-export function OrderSettlementSignoffs({ orderId, directions, busy, actionUrl }: {
+/** Only the assigned review direction's necessary amounts are shown here. */
+export function OrderSettlementSignoffs({ orderId, directions, busy, actionUrl, showExpenses = true }: {
   orderId: string;
-  directions: readonly MeetingSettlementDirection[];
+  directions: readonly (MeetingSettlementDirection & { canViewAmounts?: boolean; expenses?: SignatureExpense[] })[];
   busy: boolean;
   actionUrl?: string;
+  showExpenses?: boolean;
 }) {
   return <div className="order-settlement-signoffs module-business-stack dense-module-stack">
     {directions.map(direction => {
@@ -19,6 +20,16 @@ export function OrderSettlementSignoffs({ orderId, directions, busy, actionUrl }
             <span>应收、应付独立办理；各方向内部遵循本单配置的签核顺序。</span></div>
           <span className={`status-pill ${pending ? "off" : "success"}`}>{pending ? `${pending} 项必办待处理` : "必办签核已完成"}</span>
         </div>
+        {showExpenses && direction.canViewAmounts && <div className="table-wrap signature-expense-table">
+          <table><caption>本单{direction.direction === "receivable" ? "应收" : "应付"}审核明细 · 请核对金额与往来单位后签核</caption>
+            <thead><tr><th>费用名称</th><th>往来单位</th><th>币种</th><th>数量</th><th>单价</th><th>金额</th><th>汇率</th></tr></thead>
+            <tbody>{direction.expenses?.map(expense => <tr key={expense.id}><td>{expense.charge_name}</td><td>{expense.counterparty_name || "待补录"}</td><td>{expense.currency}</td><td>{expense.quantity}</td><td>{Number(expense.unit_price).toFixed(2)}</td><td><strong>{Number(expense.amount).toFixed(2)}</strong></td><td>{expense.exchange_rate}</td></tr>)}
+              {!direction.expenses?.length && <tr><td colSpan={7} className="empty-state">本方向尚无费用明细</td></tr>}</tbody>
+          </table>
+          <p>本方向合计：{[...new Set(direction.expenses?.map(expense => expense.currency))].map(currency =>
+            `${currency} ${((direction.expenses ?? []).filter(expense => expense.currency === currency).reduce((sum, expense) => sum + Math.round(Number(expense.amount) * 100), 0) / 100).toFixed(2)}`,
+          ).join("；") || "暂无费用"}（不同币种分别列示）</p>
+        </div>}
         {!actions.length && <p className="empty-state">当前工作流未启用本方向的费用签核动作。</p>}
         <div className="expense-parallel-grid">
           {actions.map(action => {

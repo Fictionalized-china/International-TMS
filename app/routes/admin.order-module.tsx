@@ -5,6 +5,9 @@ import type { Route } from "./+types/admin.order-module";
 import { BatchNumberLink, OrderNumberLink } from "../components/EntityNumberLink";
 import { ActionToast } from "../components/ActionToast";
 import { OrderSettlementSignoffs } from "../components/OrderSettlementSignoffs";
+import { SettlementHandoff } from "../components/SettlementHandoff";
+import { loadSettlementHandoff } from "../lib/financial-closure.server";
+import { reopenPrematureSettlement } from "../lib/settlement-recovery.server";
 import { DateTimeSelect } from "../components/DateTimeSelect";
 import { requireSessionUser } from "../lib/auth.server";
 import { dispatchWorkspaceHref } from "../lib/transport-workspace-access";
@@ -1502,6 +1505,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     processPolicy: await loadBusinessProcessPolicy(current.organizationId),
     meetingSettlement,
     settlementDirections,
+    settlementHandoff: moduleCode === "costs" ? await loadSettlementHandoff(env.DB, meetingSettlement, current, settlementDirections) : null,
     canViewFullExpenseDetails,
     access: {
       ...baseAccess,
@@ -1601,6 +1605,14 @@ export async function action({ request, params }: Route.ActionArgs) {
       created_by_user_id:string|null;
     }>();
   if (!order) return { formError: "订单不存在" };
+  if (moduleCode === "costs" && intent === "settlement_reopen") {
+    try {
+      const result = await reopenPrematureSettlement(env.DB, current, orderId, valueOf(form, "confirmed") === "1");
+      try { await refreshOrderSettlementState(current.organizationId, orderId, new Date().toISOString()); }
+      catch { return { success: `${result.success}；阶段摘要同步待刷新，恢复结果已保存` }; }
+      return result;
+    } catch (error) { return { formError: error instanceof Error ? error.message : "恢复财务办理失败" }; }
+  }
   const processPolicy = await loadBusinessProcessPolicy(current.organizationId);
   if(isExpenseDirectionControlAction) {
     const direction=valueOf(form,"direction"),action=valueOf(form,"controlAction");
@@ -4902,8 +4914,9 @@ export function EmbeddedOrderModule({
   // configured approvers while the order's current handler is another person.
   if (definition.code === "costs" && (!scopedData.canViewExpenseSummary || !scopedData.workflowStageAccess.available)) {
     return <div className="module-business-stack dense-module-stack" id="module-business-data">
-      <p className="alert info">当前页面仅展示费用签核职责与进度；金额、毛利和结算文件仍按财务查看权限控制。不要求当前账号办理所有步骤。</p>
+      <p className="alert info">本单签核人可查看其审核方向的必要费用明细；毛利、银行资料和结算文件仍按独立权限控制。不要求当前账号办理所有步骤。</p>
       <OrderSettlementSignoffs orderId={order.id} directions={scopedData.settlementDirections} busy={busy} actionUrl={actionUrl} />
+      <SettlementHandoff data={scopedData.settlementHandoff} orderId={order.id} orderNumber={order.order_number} actionUrl={actionUrl} busy={busy}/>
       <Link className="secondary" to={`/admin/settlement-approvals?q=${encodeURIComponent(order.order_number)}`}>费用结算 · 待我审批</Link>
     </div>;
   }
@@ -5000,6 +5013,7 @@ export function EmbeddedOrderModule({
             costsCompleted={scopedData.module.status === "completed"}
           />
         )}
+        {definition.code === "costs" && <SettlementHandoff data={scopedData.settlementHandoff} orderId={order.id} orderNumber={order.order_number} actionUrl={actionUrl} busy={busy}/>}
       </div>
     </embeddedModuleFormAction.Provider>
   );
@@ -7645,7 +7659,7 @@ function ModuleBusinessData({
               </div>
               <OrderSettlementSignoffs orderId={data.order.id}
                 directions={data.settlementDirections.filter(item => item.direction === direction)}
-                busy={busy} actionUrl={moduleFormActionUrl} />
+                busy={busy} actionUrl={moduleFormActionUrl} showExpenses={false} />
             </BusinessSubsection>
           );
         })}

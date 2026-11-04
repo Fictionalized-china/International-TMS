@@ -19,6 +19,10 @@ import {
 } from "./order-review";
 import { syncOrderBusinessWorkflow } from "./business-workflow.server";
 import { missingRequiredModuleFields } from "./workflow-fields.server";
+import { loadBusinessProcessPolicy } from "./business-process-policy.server";
+import { policyEnabled } from "./business-process-policy";
+import { loadFinancialClosure, financialClosurePredicate } from "./financial-closure.server";
+import { predicateGuard, changedRowGuard, guardedBatch } from "./mutation-guard.server";
 
 export type ReviewTiming = {
   orderAt: string | null;
@@ -274,6 +278,11 @@ export async function loadOrderReviewFinalizationGate(
       reason: `当前工作流仍有必办模块未完成：${pendingRequiredModules.results.map((item) => item.module_name).join("、")}`,
     };
   }
+  const policy = await loadBusinessProcessPolicy(organizationId, db);
+  if (policyEnabled(policy, "settlement.require_cash_before_archive")) {
+    const closure = await loadFinancialClosure(db, organizationId, orderId);
+    if (!closure.complete) return { allowed: false, reason: `请先完成财务闭环：${closure.blockers.join("；")}` };
+  }
   return orderReviewFinalizationDecision({
     confirmed: true,
     snapshotId: currentReview.snapshotId,
@@ -338,7 +347,10 @@ export async function finalizeOrderReview(
   if (review.completionStatus === "in_progress")
     return { completed: false as const, reason: "当前仍有必办门禁未完成" };
   const finalState = finalizedOrderReviewState(review.completionStatus);
-  await db.batch([
+  const archivePolicy = await loadBusinessProcessPolicy(input.organizationId, db);
+  await guardedBatch(db, [
+    ...(policyEnabled(archivePolicy, "settlement.require_cash_before_archive")
+      ? [predicateGuard(db, financialClosurePredicate(), [input.organizationId, input.orderId], input.now)] : []),
     db.prepare(`UPDATE transport_orders SET
       completion_status=?,status='completed',
       business_completed_at=COALESCE(business_completed_at,?),
@@ -357,6 +369,7 @@ export async function finalizeOrderReview(
         input.orderId,
         input.organizationId,
       ),
+    changedRowGuard(db, input.now),
     db.prepare(`UPDATE order_module_instances SET
       status='completed',current_step_code='confirmed',current_step_name='复盘确认',
       progress_percent=100,blocking_reason=NULL,started_at=COALESCE(started_at,?),
@@ -372,7 +385,7 @@ export async function finalizeOrderReview(
         "finalize_review","最终确认并归档",module.current_step_code,
         "confirmed","复盘确认",input.userId,"全部当前工作流门禁已通过",input.now,
       ),
-  ]);
+  ], "订单或收付款状态已变化，请刷新后核对财务闭环再归档");
   await syncSettlementFollowUpTask(
     db,input.organizationId,input.orderId,input.userId,input.now,finalState.completionStatus,
   );

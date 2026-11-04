@@ -1048,7 +1048,13 @@ export async function loadCostsCompletionGate(
   const controlByDirection = new Map(
     controls.results.map((item) => [item.direction, item]),
   );
+  const { loadBusinessProcessPolicy } = await import("./business-process-policy.server");
+  const { policyEnabled } = await import("./business-process-policy");
+  const policy = await loadBusinessProcessPolicy(organizationId, env.DB);
+  const financial = policyEnabled(policy, "settlement.require_cash_before_archive")
+    ? await (await import("./financial-closure.server")).loadFinancialClosure(env.DB, organizationId, orderId) : null;
   const gate = evaluateCostsCompletionGate({
+    financialBlockers: financial?.blockers,
     fields: workflowFields.map(field=>{
       const labels:Record<string,string>={customer_service_confirmation:"费用确认",business_review:"费用复核",finance_review:"费用审批"};
       const legacyLabels=["客服费用确认","客服确认","业务审核","财务审核"];

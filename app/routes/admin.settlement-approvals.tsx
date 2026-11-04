@@ -4,6 +4,9 @@ import type { Route } from "./+types/admin.settlement-approvals";
 import { requireSessionUser } from "../lib/auth.server";
 import { AdminWorkspaceTabs } from "../components/AdminWorkspaceTabs";
 import { OrderSettlementSignoffs } from "../components/OrderSettlementSignoffs";
+import { SettlementHandoff } from "../components/SettlementHandoff";
+import { loadSettlementHandoff } from "../lib/financial-closure.server";
+import { reopenPrematureSettlement } from "../lib/settlement-recovery.server";
 import { canViewAdminNavigationItem } from "../lib/admin-navigation";
 import { orderVisibilitySql } from "../lib/order-access";
 import { loadMeetingSettlement,loadMeetingSettlementDirections,submitMeetingSignature,actualExportSql,assertMeetingSignoffsComplete } from "../lib/meeting-settlement.server";
@@ -23,13 +26,15 @@ export async function loader({request}:Route.LoaderArgs) {
     const state=await loadMeetingSettlement(env.DB,current.organizationId,order.id);
     const directions=await loadMeetingSettlementDirections(env.DB,current.organizationId,order.id,state,current);
     const offline=await env.DB.prepare("SELECT approver_name,approved_at,evidence_reference FROM order_payable_offline_approvals WHERE organization_id=? AND order_id=?").bind(current.organizationId,order.id).first<{approver_name:string;approved_at:string;evidence_reference:string}>();
-    rows.push({id:order.id,orderNumber:state.order.order_number,open:state.open,directions,offline,payableMissing:!directions.find(item=>item.direction==='payable')?.hasExpenses,canRecordOffline:state.open&&(isBossBusinessActor(current)||(state.order.finance_user_id===current.userId&&current.permissions.includes("settlement.offline_approval.record")))});
+    const handoff=await loadSettlementHandoff(env.DB,state,current,directions);
+    rows.push({id:order.id,orderNumber:state.order.order_number,open:state.open,directions,offline,handoff,payableMissing:!directions.find(item=>item.direction==='payable')?.hasExpenses,canRecordOffline:state.open&&handoff.canRecordOffline});
   }
   return {current,rows,pagination:page,q};
 }
 export async function action({request}:Route.ActionArgs) {
   const current=await requireSessionUser(request,"order.view"),form=await request.formData(),v=(key:string)=>String(form.get(key)??"");
   try {
+    if(v("intent")==="settlement_reopen") return {...await reopenPrematureSettlement(env.DB,current,v("orderId"),v("confirmed")==="1"),savedAt:crypto.randomUUID(),formError:undefined};
     if(v("intent")==="offline") {
       const scope=orderVisibilitySql(current,"o");if(!await env.DB.prepare(`SELECT 1 FROM transport_orders o WHERE o.id=? AND o.organization_id=? AND ${scope.sql}`).bind(v("orderId"),current.organizationId,...scope.values).first()) throw new Error("订单不在当前读取范围");
       const state=await loadMeetingSettlement(env.DB,current.organizationId,v("orderId"));
@@ -54,6 +59,7 @@ export default function SettlementApprovals({loaderData,actionData}:Route.Compon
     {loaderData.rows.map(row=><section className="panel" key={row.id}><h2><OrderNumberLink id={row.id} number={row.orderNumber}/></h2><OrderSettlementSignoffs orderId={row.id} directions={row.directions} busy={busy}/>
       {row.offline?<p>线下付款审批：{row.offline.approver_name} · {row.offline.approved_at} · {row.offline.evidence_reference}</p>:row.canRecordOffline?<Modal title="记录总经理线下审批" triggerLabel="记录线下付款审批" closeSignal={actionData?.savedAt}><Form method="post" className="form-grid"><input type="hidden" name="intent" value="offline"/><input type="hidden" name="orderId" value={row.id}/><label>审批人<input name="approver" required/></label><label>实际审批日期<input type="date" name="approvedAt" required/></label><label>凭证 / 记录编号<input name="evidence" required/></label><button className="primary" disabled={busy}>保存审批记录</button></Form></Modal>:<p>线下付款审批记录待财务登记。</p>}
       {row.payableMissing&&<p className="alert warning">尚无应付费用，请通知操作或商务补录；不阻断独立应收对账。</p>}
+      <SettlementHandoff data={row.handoff} orderId={row.id} orderNumber={row.orderNumber} busy={busy}/>
       <div className="row-actions">{canViewAdminNavigationItem(loaderData.current, "billing") && <Link to={`/admin/billing?q=${encodeURIComponent(row.orderNumber)}`}>查看确认、对账与发票状态</Link>}<Link to={`/admin/orders/${row.id}?module=documents&stage=outbound_transport`}>查看报关与出境资料</Link></div>
     </section>)}{!loaderData.rows.length&&<p className="empty-state">当前范围内尚无已实际出境订单。</p>}<QueryPagination {...loaderData.pagination} unit="票订单"/></div>;
 }

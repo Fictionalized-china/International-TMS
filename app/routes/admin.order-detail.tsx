@@ -1032,6 +1032,7 @@ function LinearOrderWorkspace({
   const currentDisplayStep = displaySteps[currentIndex];
   const selectedDisplayStep = displaySteps[selectedIndex];
   const orderCompleted = order.status === "completed";
+  const financialFollowUpPending = orderCompleted && order.completion_status === "business_complete_unsettled";
   const viewingCurrent = orderCompleted || selectedStep?.step_key === currentStepKey;
   const currentCostsStage = frozenWorkflowModuleStage(
     data.workflowFormRows, currentStepKey, "costs",
@@ -1121,12 +1122,12 @@ function LinearOrderWorkspace({
       <header className="order-head">
         <div className="order-title"><span className="eyebrow">TRANSPORT ORDER / {order.business_type === "ltl" ? "拼车订单" : "整车订单"}</span><h1>{order.order_number}</h1><p>{order.customer_name} · {order.origin_state || ""}{order.origin_city} → {order.destination_state || ""}{order.destination_city}</p></div>
         <div className="current-summary">
-          <div className="summary-cell"><span>当前办理</span><b>{orderCompleted ? "订单已完成" : data.businessWorkflow?.current_step_name || order.current_step_name}</b></div>
-          <div className="summary-cell"><span>负责岗位 / 人员</span><b>{orderCompleted ? "已归档" : `${responsiblePosition} · ${responsibleAssignee}`}</b></div>
-          <div className="summary-cell"><span>办理条件</span><b className={guidance.blocker ? "danger" : "ok"}>{orderCompleted ? "全部节点已完成" : guidance.blocker || "当前节点暂无阻断"}</b></div>
+          <div className="summary-cell"><span>当前办理</span><b>{financialFollowUpPending ? "业务完成 · 财务待结清" : orderCompleted ? "订单已完成" : data.businessWorkflow?.current_step_name || order.current_step_name}</b></div>
+          <div className="summary-cell"><span>负责岗位 / 人员</span><b>{financialFollowUpPending ? "客服 / 出纳 / 财务继续办理" : orderCompleted ? "已归档" : `${responsiblePosition} · ${responsibleAssignee}`}</b></div>
+          <div className="summary-cell"><span>办理条件</span><b className={guidance.blocker || financialFollowUpPending ? "danger" : "ok"}>{financialFollowUpPending ? "尚未财务结清，不能视为全单最终完成" : orderCompleted ? "全部节点已完成" : guidance.blocker || "当前节点暂无阻断"}</b></div>
         </div>
         <div className="head-actions">
-          <span className={`status ${orderCompleted ? "green" : "blue"}`}>{statusLabel(order.status)}</span>
+          <span className={`status ${orderCompleted && !financialFollowUpPending ? "green" : "blue"}`}>{financialFollowUpPending ? "待财务结清" : statusLabel(order.status)}</span>
           {data.current.permissions.includes("workflow.manage") && !readOnly && <Modal title={`工作流版本 · ${order.order_number}`} triggerLabel="工作流版本" triggerClassName="btn" closeSignal={success} size="wide" dialogClassName="workflow-switch-modal"><WorkflowVersionSwitchForm current={data.businessWorkflow} options={data.workflowVersions} impact={data.workflowSwitchImpact} busy={busy}/></Modal>}
           <button className="btn head-detail-trigger" type="button" onClick={() => setDrawerTab("dossier")}>订单关键资料</button>
           {queuePosition && <span className="order-queue-position">当前筛选 {queuePosition}</span>}

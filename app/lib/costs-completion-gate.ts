@@ -57,6 +57,7 @@ export function evaluateCostsCompletionGate(input: {
   fields: readonly CostsCompletionFieldState[];
   directions: readonly CostsCompletionDirectionState[];
   settlementStageReached?: boolean;
+  financialBlockers?: readonly string[];
 }): CostsCompletionGateResult {
   const requiredFields = input.fields.filter((field) => {
     if (field.moduleCode !== "costs" || !field.isActive) return false;
@@ -68,7 +69,8 @@ export function evaluateCostsCompletionGate(input: {
     input.directions.map((direction) => [direction.direction, direction]),
   );
   const blockers: CostsCompletionBlocker[] = [];
-  let requiredCheckCount = 0;
+  for (const label of input.financialBlockers ?? []) blockers.push({ fieldKey: "financial_closure", label });
+  let requiredCheckCount = input.financialBlockers?.length ?? 0;
   let completedRequiredCheckCount = 0;
   const requiredBalanceFields = requiredFields.filter((field) =>
     balanceFieldKeys.has(field.fieldKey),

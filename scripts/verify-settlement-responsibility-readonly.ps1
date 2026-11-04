@@ -63,6 +63,7 @@ foreach($index in $AccountIndexes){
     $actual=@(Signature-Forms $detail | Sort-Object)
     if(($expected -join ',') -ne ($actual -join ',')){throw "Slot $index embedded/independent signature mismatch: expected=$($expected -join ',') actual=$($actual -join ',')"}
     Write-Host "PASS slot=$index embedded/independent parity: $($actual -join ',')"
+    if($index -ne 11 -and ($approval.Content -notmatch 'signature-expense-table' -or $detail.Content -notmatch '财务闭环办理路径')){throw "Slot $index lacks review amounts or the financial handoff path"}
     if($index -in @(5,8)){
       $visible=[regex]::Replace($detail.Content,'(?s)<script\b[^>]*>.*?</script>','')
       if($visible -match 'expense-ledger-table|预计利润|foreign_account_no'){throw "Slot $index received a financial ledger in the sign-only page"}

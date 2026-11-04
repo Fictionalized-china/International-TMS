@@ -135,7 +135,10 @@ export async function loadSettlementWorkbenchActionAccess(
   const workflows: SettlementOrderActionInput[] = [];
   const processPolicy=await loadBusinessProcessPolicy(input.actor.organizationId,db);
   for (const orderId of orderIds) {
-    const exported=policyEnabled(processPolicy,"settlement.after_actual_export")?await db.prepare(`SELECT 1 FROM transport_orders o WHERE o.id=? AND o.organization_id=? AND o.status='in_execution' AND ${actualExportSql()}`).bind(orderId,input.actor.organizationId).first():null;
+    const exported=await db.prepare(`SELECT 1 FROM transport_orders o WHERE o.id=? AND o.organization_id=? AND
+      ((o.status='completed' AND o.completion_status='business_complete_unsettled') OR
+       (o.status='in_execution' AND ?=1 AND ${actualExportSql()}))`)
+      .bind(orderId,input.actor.organizationId,policyEnabled(processPolicy,"settlement.after_actual_export")?1:0).first();
     workflows.push({
       orderId,
       assignedToActor: scopeByOrder.get(orderId) === true,

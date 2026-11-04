@@ -19,6 +19,8 @@ export const businessProcessPolicyDefinitions = [
   { key: "tracking.alerts_enabled", label: "自动向业务与操作发送时效预警", group: "运踪与商务调度", kind: "boolean", defaultValue: "1" },
   { key: "settlement.after_actual_export", label: "实际出境后开放对账签核", group: "应收应付", kind: "boolean", defaultValue: "1" },
   { key: "settlement.sequential", label: "费用签核必须按顺序办理", group: "应收应付", kind: "boolean", defaultValue: "1" },
+  { key: "settlement.approver_amounts_visible", label: "本单签核人可查看其审核方向的必要费用明细（不含毛利、银行资料）", group: "应收应付", kind: "boolean", defaultValue: "1" },
+  { key: "settlement.require_cash_before_archive", label: "最终归档前必须完成对账及真实收付款核销（关闭才允许业务先归档）", group: "应收应付", kind: "boolean", defaultValue: "1" },
   { key: "receivable.initiator_positions", label: "应收发起岗位", group: "应收应付", kind: "positions", defaultValue: "SALES,CS" },
   { key: "receivable.review_positions", label: "应收复核岗位", group: "应收应付", kind: "positions", defaultValue: "OPERATION" },
   { key: "receivable.approve_positions", label: "应收审批岗位", group: "应收应付", kind: "positions", defaultValue: "OPERATION_SUPERVISOR" },

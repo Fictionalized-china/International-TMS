@@ -77,6 +77,7 @@ function dbWithPendingModules(
 ) {
   return {
     prepare(sql: string) {
+      if (sql.includes("FROM business_process_policies")) return { bind: () => ({ all: async () => ({ results: [{ policy_key: "settlement.require_cash_before_archive", policy_value: "0" }] }) }) };
       expect(sql).toContain("workflow_instance_module_states");
       return {
         bind() {

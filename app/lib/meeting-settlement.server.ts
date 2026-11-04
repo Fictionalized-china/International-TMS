@@ -4,13 +4,13 @@ import { policyEnabled } from "./business-process-policy";
 import { orderVisibilitySql } from "./order-access";
 import { expenseDirectionActions,expenseDirectionActionPolicies,expenseDirectionActionCompleted,emptyExpenseDirectionControl,type ExpenseDirectionAction,type ExpenseDirectionControl } from "./expense-control";
 import { loadLockedWorkflowStageContext } from "./workflow-instance-stage-gate.server";
-import { meetingSignatureAccess, meetingSettlementDirections } from "./meeting-settlement";
+import { meetingSignatureAccess, meetingSettlementDirections, canReadSignatureExpenses, type SignatureExpense } from "./meeting-settlement";
 export { meetingSignatureAccess } from './meeting-settlement';
 import { persistExpenseDirectionAction } from "./expense-direction-submit.server";
 
 export const actualExportSql=(alias="o")=>`(EXISTS(SELECT 1 FROM order_tracking_milestones m WHERE m.organization_id=${alias}.organization_id AND m.order_id=${alias}.id AND m.milestone_code IN ('exported','actual_exit','exit')) OR EXISTS(SELECT 1 FROM transport_exit_confirmations x JOIN transport_batches b ON b.id=x.batch_id AND b.organization_id=x.organization_id WHERE x.organization_id=${alias}.organization_id AND (b.order_id=${alias}.id OR EXISTS(SELECT 1 FROM transport_batch_orders bo WHERE bo.batch_id=b.id AND bo.organization_id=b.organization_id AND bo.order_id=${alias}.id AND bo.status!='removed'))))`;
 export async function loadMeetingSettlement(db:D1Database,org:string,orderId:string) {
-  const order=await db.prepare(`SELECT o.id,o.order_number,o.status,o.salesperson_user_id,o.created_by_user_id,o.operation_supervisor_user_id,c.cs_order_entry_enabled,${actualExportSql()} actual_exported,
+  const order=await db.prepare(`SELECT o.id,o.order_number,o.status,o.completion_status,o.salesperson_user_id,o.created_by_user_id,o.operation_supervisor_user_id,c.cs_order_entry_enabled,${actualExportSql()} actual_exported,
     (SELECT assignee_user_id FROM order_module_instances WHERE organization_id=o.organization_id AND order_id=o.id AND module_code='costs' AND enabled=1) cs_user_id,
     (SELECT assignee_user_id FROM order_module_instances WHERE organization_id=o.organization_id AND order_id=o.id AND module_code='transport' AND enabled=1) operation_user_id,
     (SELECT assignee_user_id FROM order_module_instances WHERE organization_id=o.organization_id AND order_id=o.id AND module_code='review' AND enabled=1) finance_user_id,
@@ -18,7 +18,7 @@ export async function loadMeetingSettlement(db:D1Database,org:string,orderId:str
       (SELECT quote.created_by_user_id FROM transport_batch_orders bo JOIN transport_batches b ON b.id=bo.batch_id AND b.organization_id=bo.organization_id
        JOIN batch_dispatch_quotes quote ON quote.batch_id=b.id AND quote.organization_id=b.organization_id
        WHERE bo.organization_id=o.organization_id AND bo.order_id=o.id AND bo.status!='removed' AND b.status!='cancelled' ORDER BY quote.created_at DESC LIMIT 1)) commercial_user_id
-    FROM transport_orders o JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id WHERE o.id=? AND o.organization_id=?`).bind(orderId,org).first<{id:string;order_number:string;status:string;salesperson_user_id:string|null;created_by_user_id:string|null;operation_supervisor_user_id:string|null;cs_order_entry_enabled:number;actual_exported:number;cs_user_id:string|null;operation_user_id:string|null;finance_user_id:string|null;commercial_user_id:string|null}>();
+    FROM transport_orders o JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id WHERE o.id=? AND o.organization_id=?`).bind(orderId,org).first<{id:string;order_number:string;status:string;completion_status:string;salesperson_user_id:string|null;created_by_user_id:string|null;operation_supervisor_user_id:string|null;cs_order_entry_enabled:number;actual_exported:number;cs_user_id:string|null;operation_user_id:string|null;finance_user_id:string|null;commercial_user_id:string|null}>();
   if(!order) throw new Error("订单不存在");
   const responsibilityIds=[order.salesperson_user_id,order.operation_supervisor_user_id,order.cs_user_id,order.operation_user_id,order.finance_user_id,order.commercial_user_id].filter((id):id is string=>Boolean(id));
   const responsibleUsers=(await db.prepare(`SELECT DISTINCT u.id userId,u.display_name displayName,p.code positionCode,p.name positionName
@@ -45,7 +45,14 @@ export async function loadMeetingSettlementDirections(
   const info = await db.prepare(
     "SELECT direction,COUNT(*) n,SUM(CASE WHEN counterparty_name IS NULL OR TRIM(counterparty_name)='' THEN 1 ELSE 0 END) missing FROM business_expenses WHERE organization_id=? AND order_id=? AND stage!='cancelled' GROUP BY direction",
   ).bind(org, orderId).all<{ direction: string; n: number; missing: number }>();
-  return meetingSettlementDirections(state, actor, info.results);
+  const directions = meetingSettlementDirections(state, actor, info.results);
+  const visible = directions.filter(item => canReadSignatureExpenses(state, actor, item.direction)).map(item => item.direction);
+  const expenses = visible.length ? (await db.prepare(
+    `SELECT id,direction,charge_name,counterparty_name,currency,quantity,unit_price,amount,exchange_rate
+     FROM business_expenses WHERE organization_id=? AND order_id=? AND stage!='cancelled'
+     AND direction IN (${visible.map(() => "?").join(",")}) ORDER BY created_at,id`,
+  ).bind(org, orderId, ...visible).all<SignatureExpense>()).results : [];
+  return directions.map(item => ({ ...item, canViewAmounts: visible.includes(item.direction), expenses: expenses.filter(expense => expense.direction === item.direction) }));
 }
 
 export async function submitMeetingSignature(db:D1Database,input:{current:SessionUser;orderId:string;direction:"receivable"|"payable";action:ExpenseDirectionAction;notes:string;refresh:()=>Promise<void>}) {
@@ -65,8 +72,10 @@ export async function submitMeetingSignature(db:D1Database,input:{current:Sessio
 export async function assertMeetingSignoffsComplete(db:D1Database,org:string,orderIds:readonly string[],direction:"receivable"|"payable",requireOffline=false) {
   for(const id of new Set(orderIds)) {
     const state=await loadMeetingSettlement(db,org,id);
-    // Passed settlement nodes are historical; do not force new gates onto completed business.
-    if(state.order.status==="completed"||state.historical) continue;
+    // A financially closed historical order stays historical. Business-only
+    // archives in strict mode must not bypass unsigned fees or offline payment approval.
+    const unfinishedArchive=state.order.status==="completed"&&state.order.completion_status==="business_complete_unsettled"&&policyEnabled(state.policy,"settlement.require_cash_before_archive");
+    if((state.order.status==="completed"||state.historical)&&!unfinishedArchive) continue;
     if(!state.validBinding)throw new Error(`${state.order.order_number}：冻结工作流费用节点不完整，请修正工作流配置后重试`);
     const control=state.controls.find(c=>c.direction===direction)??emptyExpenseDirectionControl(direction);
     if(expenseDirectionActionPolicies(state.fields).filter(p=>p.required).some(p=>!expenseDirectionActionCompleted(control,p.action))) throw new Error(`${state.order.order_number}：必办签核尚未完成，不能生成对账单或付款`);

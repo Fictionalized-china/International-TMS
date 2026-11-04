@@ -43,7 +43,7 @@ function markup(data: Awaited<ReturnType<typeof loader>>) {
   return renderToStaticMarkup(createElement(RouterProvider, { router }));
 }
 describe("real frozen workflow settlement entrances", () => {
-  it("loads and renders both operation actions without returning expense amounts or expanding financial permissions", async () => {
+  it("renders assigned operation amounts and actions without granting full ledgers, profit or sensitive financial permissions", async () => {
     await setup(); await sign("cs", "receivable", "confirm");
     const data = await loader(request());
     expect(data.canViewExpenseSummary).toBe(false);
@@ -52,7 +52,9 @@ describe("real frozen workflow settlement entrances", () => {
     const html = markup(data);
     expect(html).toContain('name="controlAction" value="business_review"');
     expect(html).toContain('name="controlAction" value="confirm"');
-    expect(html).not.toContain("981234.56");
+    expect(html).toContain("981234.56");
+    expect(html).toContain("signature-expense-table");
+    expect(html).not.toContain("foreign_account_no");
     expect(html).not.toContain("预计利润");
     expect(harness.actor.permissions).not.toContain("billing.sensitive.view");
   });
@@ -89,7 +91,8 @@ describe("real frozen workflow settlement entrances", () => {
     const data = await loader(request());
     expect(data.canViewExpenseSummary).toBe(false);
     expect(markup(data)).toContain('name="controlAction" value="business_review"');
-    expect(markup(data)).not.toContain("981234.56");
+    expect(markup(data)).toContain("981234.56");
+    expect(data.settlementDirections.find(direction => direction.direction === "payable")?.expenses).toEqual([]);
   });
   it("keeps a hidden approval chain usable through its explicit fee-confirmation fallback", async () => {
     await setup();
