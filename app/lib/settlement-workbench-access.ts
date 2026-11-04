@@ -1,4 +1,11 @@
 import type { LockedWorkflowStageContext } from "./workflow-instance-stage-gate";
+import { policyPositions, type BusinessProcessPolicy } from "./business-process-policy";
+import { isBossBusinessActor } from "./permission-blocks";
+
+/** Shared by service mutations, row controls and next-step links. */
+export function canCreateReceivableStatement(actor: { positionCode: string | null; roleCodes: string[] }, policy: BusinessProcessPolicy) {
+  return isBossBusinessActor(actor) || policyPositions(policy, "receivable.statement_positions").includes(actor.positionCode ?? "");
+}
 
 export const settlementActionFieldKeys = {
   create_reconciliation: ["reconciliation_statement"],

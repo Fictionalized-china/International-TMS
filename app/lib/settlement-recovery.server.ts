@@ -22,12 +22,15 @@ export async function reopenPrematureSettlement(db: D1Database, actor: SessionUs
   if (!instance) throw new Error("订单工作流绑定异常");
   const steps = (await db.prepare("SELECT id,step_key,step_name,sort_order,status,started_at,completed_at FROM workflow_instance_step_states WHERE instance_id=? ORDER BY sort_order").bind(order.workflow_instance_id)
     .all<{ id: string; step_key: string; step_name: string; sort_order: number; status: string; started_at: string | null; completed_at: string | null }>()).results;
-  const modules = (await db.prepare("SELECT m.id,m.instance_step_state_id,m.module_code,m.status FROM workflow_instance_module_states m JOIN workflow_instance_step_states s ON s.id=m.instance_step_state_id WHERE s.instance_id=?").bind(order.workflow_instance_id)
-    .all<{ id: string; instance_step_state_id: string; module_code: string; status: string }>()).results;
+  const modules = (await db.prepare("SELECT m.id,m.instance_step_state_id,m.module_code,m.status,m.is_required FROM workflow_instance_module_states m JOIN workflow_instance_step_states s ON s.id=m.instance_step_state_id WHERE s.instance_id=?").bind(order.workflow_instance_id)
+    .all<{ id: string; instance_step_state_id: string; module_code: string; status: string; is_required: number }>()).results;
   const target = steps.filter(step => modules.some(module => module.instance_step_state_id === step.id && module.module_code === "costs")).at(-1);
   if (!target || !steps.some(step => step.sort_order > target.sort_order && modules.some(module => module.instance_step_state_id === step.id && module.module_code === "review"))) throw new Error("冻结工作流缺少独立的结算和最终复盘节点");
   const affectedSteps = steps.filter(step => step.sort_order >= target.sort_order);
-  if (modules.some(module => affectedSteps.some(step => step.id === module.instance_step_state_id) && !["costs", "review"].includes(module.module_code))) throw new Error("结算后的自定义业务模块需要人工核查，不能自动回退");
+  // The standard final-review step includes an optional exceptions placement.
+  // A finished optional placement is historical evidence, not financial work to reopen.
+  if (modules.some(module => affectedSteps.some(step => step.id === module.instance_step_state_id) && !["costs", "review"].includes(module.module_code) &&
+    !(module.module_code === "exceptions" && !module.is_required && ["completed", "skipped"].includes(module.status)))) throw new Error("结算后的自定义或未完成业务模块需要人工核查，不能自动回退");
   const reviewTasks = (await db.prepare(`SELECT t.* FROM workflow_instance_task_states t JOIN workflow_instance_module_states m ON m.id=t.instance_module_state_id
     JOIN workflow_instance_step_states s ON s.id=m.instance_step_state_id WHERE s.instance_id=? AND s.sort_order>=? AND m.module_code='review'`).bind(order.workflow_instance_id, target.sort_order).all<Record<string, unknown>>()).results;
   const reviewSnapshots = (await db.prepare("SELECT * FROM order_review_snapshots WHERE organization_id=? AND order_id=?").bind(actor.organizationId, orderId).all<Record<string, unknown>>()).results;
@@ -41,7 +44,7 @@ export async function reopenPrematureSettlement(db: D1Database, actor: SessionUs
     changedRowGuard(db, now),
     db.prepare("UPDATE workflow_instances SET status='active',current_step_key=?,completed_at=NULL,updated_at=? WHERE id=? AND organization_id=? AND order_id=?").bind(target.step_key, now, order.workflow_instance_id, actor.organizationId, orderId),
     db.prepare("UPDATE workflow_instance_step_states SET status=CASE WHEN id=? THEN 'active' ELSE 'pending' END,started_at=CASE WHEN id=? THEN started_at ELSE NULL END,completed_at=NULL,updated_at=? WHERE instance_id=? AND sort_order>=?").bind(target.id, target.id, now, order.workflow_instance_id, target.sort_order),
-    ...modules.filter(module => affectedSteps.some(step => step.id === module.instance_step_state_id)).map(module => db.prepare("UPDATE workflow_instance_module_states SET status=?,updated_at=? WHERE id=?").bind(module.instance_step_state_id === target.id ? "active" : "pending", now, module.id)),
+    ...modules.filter(module => ["costs", "review"].includes(module.module_code) && affectedSteps.some(step => step.id === module.instance_step_state_id)).map(module => db.prepare("UPDATE workflow_instance_module_states SET status=?,updated_at=? WHERE id=?").bind(module.instance_step_state_id === target.id ? "active" : "pending", now, module.id)),
     ...reviewTasks.map(task => db.prepare("UPDATE workflow_instance_task_states SET status='pending',completed_at=NULL,completed_by_user_id=NULL,updated_at=? WHERE id=?").bind(now, String(task.id))),
     db.prepare("UPDATE order_module_instances SET status='in_progress',current_step_code=CASE WHEN module_code='costs' THEN 'parallel_review' ELSE 'reviewing' END,current_step_name=CASE WHEN module_code='costs' THEN '待对账与真实收付款核销' ELSE '待财务结清后最终复盘' END,progress_percent=CASE WHEN module_code='costs' THEN 80 ELSE 0 END,completed_at=NULL,blocking_reason=?,updated_at=? WHERE organization_id=? AND order_id=? AND module_code IN ('costs','review')").bind("财务闭环尚未完成，最终复盘归档暂未开放", now, actor.organizationId, orderId),
     db.prepare("INSERT INTO audit_logs(id,organization_id,actor_user_id,action,resource_type,resource_id,outcome,metadata_json,created_at) VALUES(?,?,?,'settlement.archive.reopen','transport_order',?,'success',?,?)").bind(crypto.randomUUID(), actor.organizationId, actor.userId, orderId, metadata, now),

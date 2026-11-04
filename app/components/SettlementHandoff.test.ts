@@ -32,4 +32,9 @@ describe("clear financial handoff entrances", () => {
     expect(html).not.toContain("<form");
     expect(html).not.toContain("tab=cash");
   });
+  it("filters the creation entrance to payable when AR is assigned to a different configured position", () => {
+    const html = render({ canStatements: true, statementDirection: "payable" });
+    expect(html).toContain("tab=pending&amp;q=SO-1&amp;direction=payable");
+    expect(html).toContain("tab=reconciliations&amp;q=SO-1");
+  });
 });

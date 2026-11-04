@@ -1,6 +1,7 @@
 import type { SessionUser } from "./auth.server";
 import type { loadMeetingSettlement, loadMeetingSettlementDirections } from "./meeting-settlement.server";
 import { isBossBusinessActor } from "./permission-blocks";
+import { canCreateReceivableStatement } from "./settlement-workbench-access";
 
 /** Same evidence is used by stage progress and the final atomic archive guard. */
 function cashTotal(alias: string) {
@@ -54,7 +55,7 @@ export async function loadSettlementHandoff(db: D1Database, state: Awaited<Retur
     ((closure.amounts.some(row => row.unreconciled > 0.009) && !state.fields.some(field => field.fieldKey === "reconciliation_statement" && field.isActive)) ||
      !state.fields.some(field => ["cash_records", "writeoff_records"].includes(field.fieldKey) && field.isActive))
     ? "本单严格归档要求财务闭环，但冻结流程关闭了对账或资金办理项；请管理员修正流程配置，或明确切换为业务先归档模式。" : null;
-  return { phase, canStatements: statements, canCash: cash, canReview, financiallyClosed: closure.complete,
+  return { phase, canStatements: statements, statementDirection: canCreateReceivableStatement(actor, state.policy) ? "" : "payable", canCash: cash, canReview, financiallyClosed: closure.complete,
     offlineRequired, offlineRecorded, canRecordOffline: signed && (isBossBusinessActor(actor) || (state.order.finance_user_id === actor.userId && actor.permissions.includes("settlement.offline_approval.record"))),
     configurationIssue,
     archived: state.order.status === "completed" && state.order.completion_status === "completed_settled",

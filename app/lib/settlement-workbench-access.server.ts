@@ -2,6 +2,7 @@ import { chunkD1Values, d1Placeholders } from "./d1-bindings";
 import { orderVisibilitySql, type OrderAccessUser } from "./order-access";
 import {
   closedSettlementMultiOrderActionAccess,
+  canCreateReceivableStatement,
   hasFullSettlementScope,
   resolveSettlementMultiOrderActionAccess,
   type SettlementLegacyFallback,
@@ -151,17 +152,26 @@ export async function loadSettlementWorkbenchActionAccess(
       ),
     });
   }
-  return resolveSettlementMultiOrderActionAccess({
+  const resolved = resolveSettlementMultiOrderActionAccess({
     action: input.action,
     actor: input.actor,
     legacyFallback: input.legacyFallback,
     orders: workflows,
   });
+  if (resolved.canWrite && input.action === "create_reconciliation" && input.source.kind === "expense_ids" && !canCreateReceivableStatement(input.actor, processPolicy)) {
+    const blockedOrders = new Set(linked.filter(row => row.direction === "receivable").map(row => row.order_id));
+    if (blockedOrders.size) {
+      const reason = "客户应收对账单须由策略配置的生成岗位办理";
+      return { ...resolved, canWrite: false, reason, orders: resolved.orders.map(order => blockedOrders.has(order.orderId) ? { ...order, canWrite: false, reason } : order) };
+    }
+  }
+  return resolved;
 }
 
 type LinkedOrderRow = {
   source_key: string;
   order_id: string;
+  direction?: string;
 };
 
 async function loadLinkedOrderRows(
@@ -187,7 +197,7 @@ async function loadLinkedOrderRows(
     const rows: LinkedOrderRow[] = [];
     for (const sourceChunk of chunkD1Values(sourceIds, 1)) {
       const result = await db.prepare(
-        `SELECT e.id source_key,o.id order_id
+        `SELECT e.id source_key,o.id order_id,e.direction
          FROM business_expenses e
          JOIN transport_orders o
            ON o.id=e.order_id AND o.organization_id=e.organization_id

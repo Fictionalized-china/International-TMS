@@ -14,7 +14,7 @@ export function SettlementHandoff({ data, orderId, orderNumber, actionUrl, busy 
     {data.configurationIssue && <p role="alert">{data.configurationIssue}</p>}
     {!data.archived && data.offlineRequired && !data.offlineRecorded && <p>本单付款策略要求财务先登记真实线下审批凭证；未登记前不能支付供应商款。</p>}
     <div className="row-actions">
-      {!data.archived && data.canStatements && <><Link className="secondary" to={`/admin/billing?tab=pending&q=${query}`}>生成对账单</Link><Link className="secondary" to={`/admin/billing?tab=reconciliations&q=${query}`}>确认对账单</Link></>}
+      {!data.archived && data.canStatements && <><Link className="secondary" to={`/admin/billing?tab=pending&q=${query}${data.statementDirection ? `&direction=${data.statementDirection}` : ""}`}>生成对账单</Link><Link className="secondary" to={`/admin/billing?tab=reconciliations&q=${query}`}>确认对账单</Link></>}
       {!data.archived && data.canCash && <Link className="secondary" to={`/admin/billing?tab=cash&q=${query}`}>出纳 · 收付款核销</Link>}
       {!data.archived && data.canReview && <Link className="secondary" to={`/admin/orders/${orderId}?stage=completion_review&module=review`}>财务 · 最终复盘归档</Link>}
       {!data.archived && data.offlineRequired && !data.offlineRecorded && data.canRecordOffline && <Link className="secondary" to={`/admin/settlement-approvals?q=${query}`}>财务 · 登记付款审批凭证</Link>}

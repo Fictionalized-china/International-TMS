@@ -3,7 +3,7 @@ import { meetingFixture, seedFrozenMeetingWorkflow } from "./meeting-integration
 const harness = vi.hoisted(() => ({ db: null as unknown as D1Database }));
 vi.mock("cloudflare:workers", () => ({ env: { get DB() { return harness.db; } } }));
 import { loadMeetingSettlement, loadMeetingSettlementDirections, submitMeetingSignature, assertMeetingSignoffsComplete } from "./meeting-settlement.server";
-import { loadFinancialClosure } from "./financial-closure.server";
+import { loadFinancialClosure, loadSettlementHandoff } from "./financial-closure.server";
 import { createReconciliation, confirmReconciliation, recordCashTransaction, allocateCashTransaction } from "./settlement-workbench.server";
 import { loadSettlementWorkbenchActionAccess, type SettlementAccessSource } from "./settlement-workbench-access.server";
 import type { SettlementWorkbenchAction } from "./settlement-workbench-access";
@@ -80,6 +80,8 @@ describe("reviewed statements -> real cash -> final archive", () => {
   });
   it("recovers only financial stages with an audit, preserves signed fees and business history, and is repeat-safe", async () => {
     await setup(); await allSignatures();
+    fixture.database.prepare("INSERT INTO workflow_step_modules(id,workflow_id,step_id,module_code,display_name,created_at,updated_at) VALUES('exceptions-placement','wf','review-step','exceptions','异常处理',?,?)").run(fixture.now, fixture.now);
+    fixture.database.prepare("INSERT INTO workflow_instance_module_states(id,instance_step_state_id,step_module_id,module_code,display_name,sort_order,is_required,completion_mode,status,updated_at) VALUES('exceptions-state','review-state','exceptions-placement','exceptions','异常处理',5,0,'all_tasks','completed',?)").run(fixture.now);
     await generateOrderReview(fixture.db, { organizationId: "org", orderId: "order", userId: "finance", now: fixture.now, reviewConclusion: "原复盘应保留" });
     fixture.database.exec("UPDATE transport_orders SET status='completed',completion_status='business_complete_unsettled'; UPDATE workflow_instances SET status='completed',current_step_key='completion_review'; UPDATE workflow_instance_step_states SET status='completed'; UPDATE workflow_instance_module_states SET status='completed'; UPDATE order_module_instances SET status='completed'");
     const fees = fixture.database.prepare("SELECT * FROM business_expenses ORDER BY id").all();
@@ -92,12 +94,36 @@ describe("reviewed statements -> real cash -> final archive", () => {
     expect(fixture.database.prepare("SELECT status FROM workflow_instance_step_states WHERE step_key='order_creation'").get()?.status).toBe("completed");
     expect(fixture.database.prepare("SELECT status FROM workflow_instance_step_states WHERE step_key='reconciliation'").get()?.status).toBe("active");
     expect(fixture.database.prepare("SELECT status FROM workflow_instance_step_states WHERE step_key='completion_review'").get()?.status).toBe("pending");
+    expect(fixture.database.prepare("SELECT status FROM workflow_instance_module_states WHERE id='exceptions-state'").get()?.status).toBe("completed");
     expect(fixture.database.prepare("SELECT * FROM business_expenses ORDER BY id").all()).toEqual(fees);
     expect(fixture.database.prepare("SELECT * FROM order_expense_direction_controls ORDER BY direction").all()).toEqual(signs);
     expect(fixture.database.prepare("SELECT * FROM order_review_snapshots").all()).toEqual(snapshot);
     await reopenPrematureSettlement(fixture.db, fixture.actors.get("finance")!, "order", true);
     expect(fixture.database.prepare("SELECT COUNT(*) n FROM audit_logs WHERE action='settlement.archive.reopen'").get()?.n).toBe(1);
     await access("cs", "create_reconciliation", { kind: "expense_ids", ids: ["receivable"] })();
+  });
+  it("projects the same configurable AR statement creator rule in row controls, links and mutations", async () => {
+    await setup(); await allSignatures();
+    const state = await loadMeetingSettlement(fixture.db, "org", "order");
+    const finance = fixture.actors.get("finance")!;
+    expect((await loadSettlementHandoff(fixture.db, state, finance, await loadMeetingSettlementDirections(fixture.db, "org", "order", state, finance))).statementDirection).toBe("payable");
+    await expect(access("finance", "create_reconciliation", { kind: "expense_ids", ids: ["receivable"] })()).rejects.toThrow("策略配置");
+    await expect(access("finance", "create_reconciliation", { kind: "expense_ids", ids: ["payable"] })()).resolves.toBeUndefined();
+    await expect(access("cs", "create_reconciliation", { kind: "expense_ids", ids: ["receivable"] })()).resolves.toBeUndefined();
+    await expect(createReconciliation(fixture.db, { organizationId: "org", expenseIds: ["receivable"], direction: "receivable", userId: "finance", now: fixture.now, assertCanMutate: async () => {} })).rejects.toThrow("策略配置");
+    fixture.database.prepare("INSERT INTO business_process_policies(organization_id,policy_key,policy_value,updated_at) VALUES('org','receivable.statement_positions','FINANCE_ACCOUNTING',?)").run(fixture.now);
+    await expect(access("finance", "create_reconciliation", { kind: "expense_ids", ids: ["receivable"] })()).resolves.toBeUndefined();
+    await expect(access("cs", "create_reconciliation", { kind: "expense_ids", ids: ["receivable"] })()).rejects.toThrow("策略配置");
+  });
+  it("refuses automatic recovery when an unfinished or required non-financial module follows settlement", async () => {
+    await setup();
+    fixture.database.exec("UPDATE transport_orders SET status='completed',completion_status='business_complete_unsettled'");
+    fixture.database.prepare("INSERT INTO workflow_step_modules(id,workflow_id,step_id,module_code,display_name,created_at,updated_at) VALUES('exceptions-placement','wf','review-step','exceptions','异常处理',?,?)").run(fixture.now, fixture.now);
+    fixture.database.prepare("INSERT INTO workflow_instance_module_states(id,instance_step_state_id,step_module_id,module_code,display_name,sort_order,is_required,completion_mode,status,updated_at) VALUES('exceptions-state','review-state','exceptions-placement','exceptions','异常处理',5,0,'all_tasks','pending',?)").run(fixture.now);
+    await expect(reopenPrematureSettlement(fixture.db, fixture.actors.get("finance")!, "order", true)).rejects.toThrow("人工核查");
+    fixture.database.exec("UPDATE workflow_instance_module_states SET status='completed',is_required=1 WHERE id='exceptions-state'");
+    await expect(reopenPrematureSettlement(fixture.db, fixture.actors.get("finance")!, "order", true)).rejects.toThrow("人工核查");
+    expect(fixture.database.prepare("SELECT status FROM transport_orders WHERE id='order'").get()?.status).toBe("completed");
   });
   it("does not let business-only archive bypass signature or offline approval requirements", async () => {
     await setup();
