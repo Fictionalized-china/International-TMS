@@ -6,6 +6,7 @@ import { loadFinancialClosure, financialClosurePredicate } from "./financial-clo
 import { loadCostsCompletionGate } from "./order-modules.server";
 import { loadOrderReviewFinalizationGate } from "./order-review.server";
 import { predicateGuard, guardedBatch } from "./mutation-guard.server";
+import { synchronizeWorkflowExecution } from "./workflow-execution.server";
 
 let fixture: Awaited<ReturnType<typeof meetingFixture>>;
 afterEach(() => { if (fixture?.database.isOpen) fixture.database.close(); });
@@ -65,5 +66,25 @@ describe("financial closure is real evidence, not signature completion", () => {
     expect((await loadFinancialClosure(fixture.db, "org", "order")).complete).toBe(false);
     fixture.database.exec("UPDATE settlement_cash_transactions SET direction='receipt'; UPDATE settlement_reconciliations SET status='withdrawn'");
     expect((await loadFinancialClosure(fixture.db, "org", "order")).complete).toBe(false);
+  });
+  it("keeps the final frozen costs module unfinished despite completed signature tasks, until true cash closure", async () => {
+    await setup();
+    fixture.database.exec("UPDATE workflow_instance_step_states SET status='active' WHERE step_key='reconciliation'");
+    for (const direction of ["receivable", "payable"]) fixture.database.prepare("INSERT INTO order_expense_direction_controls(organization_id,order_id,direction,confirmed,business_reviewed,finance_reviewed,updated_at) VALUES('org','order',?,1,1,1,?)").run(direction, fixture.now);
+    fixture.database.prepare("INSERT INTO workflow_module_tasks(id,workflow_id,step_module_id,task_key,name,task_type,is_required,created_at,updated_at) VALUES('signed-task','wf','placement:reconciliation','signed','费用已签核','form',1,?,?)").run(fixture.now, fixture.now);
+    fixture.database.prepare("INSERT INTO workflow_instance_task_states(id,instance_module_state_id,module_task_id,task_key,name,task_type,sort_order,is_required,status,updated_at) VALUES('signed-task-state','module-state:reconciliation','signed-task','signed','费用已签核','form',10,1,'completed',?)").run(fixture.now);
+    const sync = () => synchronizeWorkflowExecution({ organizationId: "org", orderId: "order", instanceId: "instance", workflowId: "wf", targetStepKey: "reconciliation", orderStatus: "in_execution" });
+    await sync();
+    expect(fixture.database.prepare("SELECT status FROM workflow_instance_module_states WHERE id='module-state:reconciliation'").get()?.status).not.toBe("completed");
+    expect(fixture.database.prepare("SELECT status FROM workflow_instance_module_states WHERE id='module-state:order_creation'").get()?.status).toBe("completed");
+    fixture.database.prepare("INSERT INTO business_process_policies(organization_id,policy_key,policy_value,updated_at) VALUES('org','settlement.require_cash_before_archive','0',?)").run(fixture.now);
+    await sync();
+    expect(fixture.database.prepare("SELECT status FROM workflow_instance_module_states WHERE id='module-state:reconciliation'").get()?.status).toBe("completed");
+    fixture.database.exec("DELETE FROM business_process_policies WHERE policy_key='settlement.require_cash_before_archive'");
+    await sync();
+    expect(fixture.database.prepare("SELECT status FROM workflow_instance_module_states WHERE id='module-state:reconciliation'").get()?.status).not.toBe("completed");
+    statement(); cash();
+    await sync();
+    expect(fixture.database.prepare("SELECT status FROM workflow_instance_module_states WHERE id='module-state:reconciliation'").get()?.status).toBe("completed");
   });
 });

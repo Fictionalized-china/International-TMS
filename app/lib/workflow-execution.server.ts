@@ -203,8 +203,22 @@ export async function synchronizeWorkflowExecution(input:{
     );
     if (missing.length) fieldBlockers.add(item.id);
   }
+  // A completed signature task is not evidence of settled funds. Keep the final
+  // required costs placement open even when its cash fields are optional.
+  // Passed business nodes remain historical; only unfinished settlement is gated.
+  const lastRequiredCostsSort = Math.max(-Infinity, ...modules.results.filter(item => item.module_code === "costs" && item.is_required === 1).map(item => item.step_sort_order));
+  const unsettledCosts = modules.results.filter(item => item.module_code === "costs" && item.step_sort_order === lastRequiredCostsSort && item.step_status !== "completed");
+  let financialBlocked = false;
+  if (unsettledCosts.length) {
+    const { loadBusinessProcessPolicy } = await import("./business-process-policy.server");
+    const { policyEnabled } = await import("./business-process-policy");
+    if (policyEnabled(await loadBusinessProcessPolicy(input.organizationId, env.DB), "settlement.require_cash_before_archive")) {
+      financialBlocked = !(await (await import("./financial-closure.server")).loadFinancialClosure(env.DB, input.organizationId, input.orderId)).complete;
+    }
+  }
+  const blockedCostsIds = new Set(financialBlocked ? unsettledCosts.map(item => item.id) : []);
   const moduleUpdates = modules.results.map((item) => {
-    const completed = workflowExecutionModuleIsComplete({
+    const completed = !blockedCostsIds.has(item.id) && workflowExecutionModuleIsComplete({
       existingStepStatus:item.step_status,
       stepSortOrder:item.step_sort_order,
       targetSortOrder:target.sort_order,
