@@ -8,6 +8,11 @@ import { OrderSettlementSignoffs } from "../components/OrderSettlementSignoffs";
 import { SettlementHandoff } from "../components/SettlementHandoff";
 import { loadSettlementHandoff } from "../lib/financial-closure.server";
 import { reopenPrematureSettlement } from "../lib/settlement-recovery.server";
+import { loadOrderFinancialWorkspace, assertOrderFinancialSubmission, orderFinancialIntents } from "../lib/order-settlement-workbench.server";
+import { OrderFinancialWorkspace } from "../components/OrderFinancialWorkspace";
+import { orderFinancialHref } from "../lib/order-financial-navigation";
+import { action as billingAction } from "./admin.billing";
+import { action as settlementApprovalsAction } from "./admin.settlement-approvals";
 import { DateTimeSelect } from "../components/DateTimeSelect";
 import { requireSessionUser } from "../lib/auth.server";
 import { dispatchWorkspaceHref } from "../lib/transport-workspace-access";
@@ -1505,6 +1510,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     processPolicy: await loadBusinessProcessPolicy(current.organizationId),
     meetingSettlement,
     settlementDirections,
+    financialWorkspace: moduleCode === "costs" ? await loadOrderFinancialWorkspace(env.DB, current, orderId, new URL(request.url).searchParams) : null,
     settlementHandoff: moduleCode === "costs" ? await loadSettlementHandoff(env.DB, meetingSettlement, current, settlementDirections) : null,
     canViewFullExpenseDetails,
     access: {
@@ -1562,7 +1568,8 @@ export async function loader({ request, params }: Route.LoaderArgs) {
   };
 }
 
-export async function action({ request, params }: Route.ActionArgs) {
+export async function action({ request, params, context }: Route.ActionArgs) {
+  const financialRequest = request.clone();
   const current = await requireSessionUser(request, "order.view"),
     orderId = params.orderId,
     moduleCode = params.moduleCode,
@@ -1605,6 +1612,12 @@ export async function action({ request, params }: Route.ActionArgs) {
       created_by_user_id:string|null;
     }>();
   if (!order) return { formError: "订单不存在" };
+  if (moduleCode === "costs" && orderFinancialIntents.includes(intent)) {
+    try {
+      await assertOrderFinancialSubmission(env.DB, current, orderId, form);
+      return intent === "offline" ? await settlementApprovalsAction({ request: financialRequest, params: {}, context } as Parameters<typeof settlementApprovalsAction>[0]) : await billingAction({ request: financialRequest, params: {}, context } as Parameters<typeof billingAction>[0]);
+    } catch (error) { return { formError: error instanceof Error ? error.message : "本单财务办理失败" }; }
+  }
   if (moduleCode === "costs" && intent === "settlement_reopen") {
     try {
       const result = await reopenPrematureSettlement(env.DB, current, orderId, valueOf(form, "confirmed") === "1");
@@ -4909,6 +4922,14 @@ export function EmbeddedOrderModule({
   }));
   const compactApproval = definition.code === "consignment" && approvalMode;
 
+  if (definition.code === "costs" && costsSection !== "files" && scopedData.financialWorkspace) {
+    return <embeddedModuleFormAction.Provider value={actionUrl}><div className="linear-module-embedded" id="module-business-data">
+      <SettlementSyncNotice data={scopedData} busy={busy}/>
+      <OrderFinancialWorkspace data={scopedData.financialWorkspace} orderId={order.id} orderNumber={order.order_number} actionUrl={actionUrl} busy={busy}
+        ledger={<><ModuleBusinessData code="costs" data={scopedData} manage={manage} canWriteField={canWriteField} canApproveConsignment={false} busy={busy} reviewCloseSignal={reviewCloseSignal}/><WorkflowFieldChecklist fields={scopedData.workflowFields.filter(field => !field.isBuiltIn)} manage={manage} canWriteField={canWriteField} busy={busy}/></>}/>
+    </div></embeddedModuleFormAction.Provider>;
+  }
+
   // A signature is an independently authorized action, not an edit to the
   // current module or a grant to see its financial ledger. This also covers
   // configured approvers while the order's current handler is another person.
@@ -4917,7 +4938,6 @@ export function EmbeddedOrderModule({
       <p className="alert info">本单签核人可查看其审核方向的必要费用明细；毛利、银行资料和结算文件仍按独立权限控制。不要求当前账号办理所有步骤。</p>
       <OrderSettlementSignoffs orderId={order.id} directions={scopedData.settlementDirections} busy={busy} actionUrl={actionUrl} />
       <SettlementHandoff data={scopedData.settlementHandoff} orderId={order.id} orderNumber={order.order_number} actionUrl={actionUrl} busy={busy}/>
-      <Link className="secondary" to={`/admin/settlement-approvals?q=${encodeURIComponent(order.order_number)}`}>费用结算 · 待我审批</Link>
     </div>;
   }
 
@@ -8121,7 +8141,7 @@ function ModuleBusinessData({
                     <b>由财务相关岗位处理</b>
                   </div>
                 ) : (
-                  <Link key={blocker.code} to={blocker.href}>
+                  <Link key={blocker.code} to={blocker.href === "/admin/billing" ? orderFinancialHref(data.order.id, "statements") : blocker.href}>
                     {blocker.message} <span>{blocker.href === "/admin/billing" ? "进入结算办理 →" : "查看并处理 →"}</span>
                   </Link>
                 );

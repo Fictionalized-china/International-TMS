@@ -10,6 +10,7 @@ import type {
 } from "./settlement-workbench.server";
 
 export type SettlementPageQuery = {
+  orderId?: string;
   page: number;
   pageSize: number;
   query: string;
@@ -242,6 +243,10 @@ export async function loadEligibleExpensePage(
   const baseSql = eligibleBaseSql(scope.sql);
   const where: string[] = [];
   const bindings: unknown[] = [actor.organizationId, ...scope.values];
+  if (query.orderId) {
+    where.push("o.id=?");
+    bindings.push(query.orderId);
+  }
   if (query.direction) {
     where.push("e.direction=?");
     bindings.push(query.direction);
@@ -289,6 +294,10 @@ export async function loadReconciliationPage(
   const cte = reconciliationCte(actor);
   const where: string[] = [];
   const bindings: unknown[] = [...cte.bindings];
+  if (query.orderId) {
+    where.push("EXISTS(SELECT 1 FROM settlement_reconciliation_lines order_line JOIN business_expenses order_expense ON order_expense.id=order_line.expense_id AND order_expense.organization_id=order_line.organization_id WHERE order_line.reconciliation_id=reconciliation_data.id AND order_line.organization_id=? AND order_expense.order_id=?)");
+    bindings.push(actor.organizationId, query.orderId);
+  }
   if (query.direction) {
     where.push("direction=?");
     bindings.push(query.direction);

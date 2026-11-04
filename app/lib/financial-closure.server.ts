@@ -48,6 +48,8 @@ export async function loadSettlementHandoff(db: D1Database, state: Awaited<Retur
   const statements = actor.permissions.includes("billing.view") && actor.permissions.includes("billing.sensitive.view") && actor.permissions.includes("billing.manage");
   const cash = actor.permissions.includes("billing.view") && actor.permissions.includes("billing.sensitive.view") && actor.permissions.includes("billing.cash.manage");
   const signed = directions.every(direction => !direction.hasExpenses || direction.actions.filter(action => action.active && (action.required || action.configuredRelease)).every(action => action.completed));
+  const payable = directions.find(direction => direction.direction === "payable");
+  const payableSigned = Boolean(payable?.hasExpenses && payable.actions.filter(action => action.active && (action.required || action.configuredRelease)).every(action => action.completed));
   const offlineRequired = state.policy["payable.offline_approval_required"] === "1" && closure.amounts.some(row => row.direction === "payable");
   const offlineRecorded = offlineRequired ? Boolean(await db.prepare("SELECT 1 FROM order_payable_offline_approvals WHERE organization_id=? AND order_id=?").bind(actor.organizationId, state.order.id).first()) : false;
   const phase = !signed ? "signatures" : closure.amounts.some(row => row.unreconciled > 0.009) ? "statements" : !closure.complete ? "cash" : "review";
@@ -55,8 +57,9 @@ export async function loadSettlementHandoff(db: D1Database, state: Awaited<Retur
     ((closure.amounts.some(row => row.unreconciled > 0.009) && !state.fields.some(field => field.fieldKey === "reconciliation_statement" && field.isActive)) ||
      !state.fields.some(field => ["cash_records", "writeoff_records"].includes(field.fieldKey) && field.isActive))
     ? "本单严格归档要求财务闭环，但冻结流程关闭了对账或资金办理项；请管理员修正流程配置，或明确切换为业务先归档模式。" : null;
-  return { phase, canStatements: statements, statementDirection: canCreateReceivableStatement(actor, state.policy) ? "" : "payable", canCash: cash, canReview, financiallyClosed: closure.complete,
-    offlineRequired, offlineRecorded, canRecordOffline: signed && (isBossBusinessActor(actor) || (state.order.finance_user_id === actor.userId && actor.permissions.includes("settlement.offline_approval.record"))),
+  const costStepKey = state.workflow.steps.filter(step => state.workflow.modulePlacements.some(module => module.moduleCode === "costs" && module.stepKey === step.stepKey)).at(-1)?.stepKey ?? "reconciliation";
+  return { phase, costStepKey, canStatements: statements, statementDirection: canCreateReceivableStatement(actor, state.policy) ? "" : "payable", canCash: cash, canReview, financiallyClosed: closure.complete,
+    offlineRequired, offlineRecorded, canRecordOffline: state.open && payableSigned && offlineRequired && (isBossBusinessActor(actor) || (state.order.finance_user_id === actor.userId && actor.permissions.includes("settlement.offline_approval.record"))),
     configurationIssue,
     archived: state.order.status === "completed" && state.order.completion_status === "completed_settled",
     canRecover: canReview && state.order.status === "completed" && state.order.completion_status === "business_complete_unsettled" && !closure.complete };

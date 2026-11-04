@@ -4,6 +4,7 @@ import type { SettlementPage, SettlementPageQuery } from "./settlement-workbench
 import type { SettlementTaskPackRow } from "./settlement-task-pack";
 import { loadMeetingSettlement,meetingSignatureAccess } from './meeting-settlement.server';
 import { expenseDirectionActionPolicies,expenseDirectionActionCompleted,expenseDirectionActionLabel,emptyExpenseDirectionControl } from './expense-control';
+import { orderFinancialHref } from "./order-financial-navigation";
 
 function candidateSql(scopeSql: string, filtered: boolean) {
   return `FROM transport_orders o
@@ -75,7 +76,7 @@ export async function loadSettlementTaskPackPage(
   for(const row of rows.results) {
     const state=await loadMeetingSettlement(db,actor.organizationId,row.id),policies=expenseDirectionActionPolicies(state.fields);
     let next:import('./settlement-task-pack').SettlementTaskAction|undefined;
-    const href=`/admin/settlement-approvals?q=${encodeURIComponent(row.order_number)}`;
+    const href=orderFinancialHref(row.id,"ledger");
     if(!state.open&&!state.historical&&state.order.status!=='completed')next={label:'等待实际出境或完善工作流配置',href,waiting:true};
     else if(state.open)for(const direction of ['receivable','payable'] as const){
       if((direction==='receivable'?row.receivable_count:row.payable_count)===0)continue;

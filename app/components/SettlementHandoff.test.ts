@@ -11,8 +11,10 @@ function render(overrides: Record<string, unknown> = {}) {
 describe("clear financial handoff entrances", () => {
   it("gives the cashier a real cash entrance without financial review or archive controls", () => {
     const html = render();
-    expect(html).toContain("/admin/billing?tab=cash");
-    expect(html).toContain("出纳 · 收付款核销");
+    expect(html).toContain("/admin/orders/order?");
+    expect(html).toContain("financeTab=cash");
+    expect(html).not.toContain("/admin/billing");
+    expect(html).toContain("本单 · 收付款核销");
     expect(html).not.toContain('name="intent" value="settlement_reopen"');
     expect(html).not.toContain("stage=completion_review");
   });
@@ -32,9 +34,10 @@ describe("clear financial handoff entrances", () => {
     expect(html).not.toContain("<form");
     expect(html).not.toContain("tab=cash");
   });
-  it("filters the creation entrance to payable when AR is assigned to a different configured position", () => {
+  it("keeps statement creation and confirmation in the same order and login tab", () => {
     const html = render({ canStatements: true, statementDirection: "payable" });
-    expect(html).toContain("tab=pending&amp;q=SO-1&amp;direction=payable");
-    expect(html).toContain("tab=reconciliations&amp;q=SO-1");
+    expect(html).toContain("financeTab=statements");
+    expect(html).toContain("itmsTab=test-session-123");
+    expect(html).not.toContain("/admin/billing");
   });
 });

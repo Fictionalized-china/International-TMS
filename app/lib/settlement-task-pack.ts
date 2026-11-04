@@ -54,7 +54,7 @@ function orderModuleHref(row: SettlementTaskPackRow, section: "expenses" | "file
 }
 
 function billingHref(tab: "pending" | "reconciliations" | "cash" | "invoices", row: SettlementTaskPackRow) {
-  return `/admin/billing?tab=${tab}&q=${encodeURIComponent(row.order_number)}`;
+  return `/admin/orders/${encodeURIComponent(row.id)}?stage=reconciliation&module=costs&section=expenses&financeTab=${tab === "pending" || tab === "reconciliations" ? "statements" : tab}`;
 }
 
 export function settlementTaskNextAction(

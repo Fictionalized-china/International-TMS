@@ -34882,3 +34882,18 @@ html[data-motion="off"] *::after {
   color: var(--ink);
 }
 .order-settlement-signoffs .signature-expense-table table { min-width: 660px; }
+/* Financial actions stay in the current order, with one aligned subpage at a time. */
+.order-financial-workspace { display: grid; gap: 16px; min-width: 0; }
+.order-financial-tabs { display: flex; flex-wrap: wrap; gap: 8px; border-bottom: 1px solid var(--line, #dbe4ee); padding-bottom: 12px; }
+.order-financial-tabs a { display: inline-flex; align-items: center; justify-content: center; min-height: 38px; padding: 8px 16px; border: 1px solid #c9d8e7; border-radius: 8px; color: #163951; background: #fff; text-decoration: none; transition: background-color 150ms ease-out; }
+.order-financial-tabs a:hover { background: #eef4f9; }
+.order-financial-tabs a.active { color: #fff; background: #123653; border-color: #123653; }
+.order-financial-tabs a:focus-visible { outline: 2px solid #f76b36; outline-offset: 2px; }
+.order-financial-body { display: grid; gap: 16px; min-width: 0; }
+.order-financial-body .form-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; align-items: end; }
+.order-financial-body .span-2 { grid-column: 1 / -1; }
+.order-financial-body .settlement-selector,.order-financial-body .reconciliation-card { margin-bottom: 16px; }
+.order-financial-body h3,.order-financial-body p { margin: 0; }
+.order-financial-workspace .settlement-handoff { margin: 0; }
+@media (max-width: 640px) { .order-financial-tabs { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); } .order-financial-tabs a { padding-inline: 8px; } .order-financial-body .form-grid { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) { .order-financial-tabs a { transition: none; } }

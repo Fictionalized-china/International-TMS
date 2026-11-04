@@ -762,13 +762,14 @@ function HistoryTypeSwitch({ active }: { active: BillingHistoryType }) {
   </nav>;
 }
 
-export function ExpenseSelection({ direction, counterparty, currency, expenses, busy, access }: {
+export function ExpenseSelection({ direction, counterparty, currency, expenses, busy, access, formAction }: {
   direction: "receivable" | "payable";
   counterparty: string;
   currency: string;
   expenses: SettlementExpense[];
   busy: boolean;
   access: SettlementUiAccess;
+  formAction?: string;
 }) {
   if (!access.visible) return null;
   const total = expenses.reduce((sum, item) => sum + item.amount, 0);
@@ -794,7 +795,7 @@ export function ExpenseSelection({ direction, counterparty, currency, expenses, 
         <small>{currency} · 本页 {expenses.length} 条 · 合计 {total.toFixed(2)}</small>
       </div>
     </header>
-    <Form method="post">
+    <Form method="post" action={formAction}>
       <input type="hidden" name="intent" value="create_reconciliation" />
       <input type="hidden" name="direction" value={direction} />
       <div className="settlement-expense-list">
@@ -817,12 +818,13 @@ export function ExpenseSelection({ direction, counterparty, currency, expenses, 
   </section>;
 }
 
-export function ReconciliationSheet({ row, mode, access, busy, cash = [] }: {
+export function ReconciliationSheet({ row, mode, access, busy, cash = [], formAction }: {
   row: ReconciliationRow;
   mode: "review" | "cash" | "invoice";
   access: SettlementUiAccess;
   busy: boolean;
   cash?: CashTransactionRow[];
+  formAction?: string;
 }) {
   const [allocationRequestId,setAllocationRequestId]=useState(()=>crypto.randomUUID());
   const [invoiceRequestId,setInvoiceRequestId]=useState(()=>crypto.randomUUID());
@@ -858,7 +860,7 @@ export function ReconciliationSheet({ row, mode, access, busy, cash = [] }: {
       <span>已核销<strong>{row.settled_amount.toFixed(2)}</strong><small>剩余 {settlementRemaining.toFixed(2)}</small></span>
     </div>
 
-    {mode === "review" && row.status === "draft" && canManage && <Form method="post" className="card-action">
+    {mode === "review" && row.status === "draft" && canManage && <Form method="post" action={formAction} className="card-action">
       <input type="hidden" name="intent" value="confirm_reconciliation" />
       <input type="hidden" name="id" value={row.id} />
       <p>确认后费用进入正式对账，不能再按草稿修改。</p>
@@ -869,7 +871,7 @@ export function ReconciliationSheet({ row, mode, access, busy, cash = [] }: {
 
     {mode === "invoice" && canManage && invoiceRemaining > 0.009 && <details className="billing-card-operation">
       <summary>登记{row.direction === "receivable" ? "销项开票" : "进项收票"}</summary>
-      <Form method="post" className="form-grid compact billing-invoice-form">
+      <Form method="post" action={formAction} className="form-grid compact billing-invoice-form">
         <input type="hidden" name="intent" value="record_invoice" />
         <input type="hidden" name="requestId" value={invoiceRequestId} />
         <input type="hidden" name="reconciliationId" value={row.id} />
@@ -895,7 +897,7 @@ export function ReconciliationSheet({ row, mode, access, busy, cash = [] }: {
 
     {mode === "cash" && canManage && settlementRemaining > 0.009 && <details className="billing-card-operation">
       <summary>匹配收付款流水并核销</summary>
-      <Form method="post" className="form-grid compact billing-allocation-form">
+      <Form method="post" action={formAction} className="form-grid compact billing-allocation-form">
         <input type="hidden" name="intent" value="allocate_cash" />
         <input type="hidden" name="requestId" value={allocationRequestId} />
         <input type="hidden" name="reconciliationId" value={row.id} />
@@ -913,29 +915,29 @@ export function ReconciliationSheet({ row, mode, access, busy, cash = [] }: {
   </article>;
 }
 
-function CashEntryForm({ users, organizationName, busy }: {
+export function CashEntryForm({ users, organizationName, busy, formAction, statement }: {
   users: UserOption[];
   organizationName: string;
   busy: boolean;
+  formAction?: string;
+  statement?: ReconciliationRow;
 }) {
   const [requestId,setRequestId]=useState(()=>crypto.randomUUID()),actionData=useActionData<typeof action>();
   const savedId=actionData&&'cashRecordedId' in actionData?actionData.cashRecordedId:undefined;
   useEffect(()=>{if(savedId)setRequestId(crypto.randomUUID());},[savedId]);
   return <details className="billing-entry-disclosure">
     <summary><span>登记一笔新流水</span><small>客户收款或供应商付款</small></summary>
-    <Form method="post" className="form-grid compact settlement-cash-form">
+    <Form method="post" action={formAction} className="form-grid compact settlement-cash-form">
       <input type="hidden" name="intent" value="record_cash" />
       <input type="hidden" name="requestId" value={requestId} />
-      <Sel name="direction" label="方向" items={[["receipt", "客户收款"], ["payment", "供应商付款"]]} />
-      <Text name="counterpartyName" label="往来单位" required />
-      <Text name="currency" label="币种" required defaultValue="CNY" />
+      {statement ? <><input type="hidden" name="reconciliationId" value={statement.id}/><input type="hidden" name="direction" value={statement.direction === "receivable" ? "receipt" : "payment"}/><input type="hidden" name="counterpartyName" value={statement.counterparty_name}/><input type="hidden" name="currency" value={statement.currency}/><input type="hidden" name="paymentStatementNumber" value={statement.direction === "payable" ? statement.document_number : ""}/><p className="span-2">{statement.direction === "receivable" ? "客户收款" : "供应商付款"} · {statement.counterparty_name} · {statement.currency} · {statement.document_number}</p></> : <><Sel name="direction" label="方向" items={[["receipt", "客户收款"], ["payment", "供应商付款"]]} /><Text name="counterpartyName" label="往来单位" required /><Text name="currency" label="币种" required defaultValue="CNY" /></>}
       <Num name="amount" label="金额" required />
       <label className="field"><span>收 / 付款日期</span><input name="occurredOn" type="date" required /></label>
       <Text name="settlementEntity" label="所属公司" required defaultValue={organizationName} />
       <Text name="accountName" label="银行 / 现金账户" required />
-      <Sel name="handledByUserId" label="经办人" items={users.map((item) => [item.id, item.display_name])} />
+      {statement && users.length === 1 ? <><input type="hidden" name="handledByUserId" value={users[0].id}/><p>经办人：{users[0].display_name}</p></> : <Sel name="handledByUserId" label="经办人" items={users.map((item) => [item.id, item.display_name])} />}
       <Text name="evidenceReference" label="凭证附件 / 编号" />
-      <Text name="paymentStatementNumber" label="供应商付款关联应付对账单编号（收款留空）" />
+      {!statement && <Text name="paymentStatementNumber" label="供应商付款关联应付对账单编号（收款留空）" />}
       <label className="field settlement-cash-notes"><span>备注</span><textarea name="cashNotes" rows={2} /></label>
       <button className="primary" disabled={busy}>登记收付款流水</button>
     </Form>

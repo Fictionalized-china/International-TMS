@@ -104,7 +104,7 @@ export function orderCollaborationNotice({
     case "reconciliation":
       return {
         title: "客服、业务、财务三方并行签核",
-        progress: "三方没有先后顺序；各自通过后立即锁定自己的结果，全部完成后自动推进。",
+        progress: "应收与应付独立办理，各方向按配置岗位顺序签核；审核完成后继续对账、真实收付款核销及最终复盘。",
       };
     case "completion_review":
       return {

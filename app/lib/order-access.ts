@@ -282,6 +282,11 @@ export function orderVisibilitySql(user: OrderAccessUser, alias = "o") {
 
   const conditions: string[] = [];
   const values: string[] = [];
+  // Organizational cash authority already covers these ledger records. Keep the
+  // order entry reachable without granting operational assignment or all orders.
+  if (canReadCashSettlementOrders(user)) {
+    conditions.push(`EXISTS(SELECT 1 FROM business_expenses cash_scope_expense WHERE cash_scope_expense.organization_id=${alias}.organization_id AND cash_scope_expense.order_id=${alias}.id AND cash_scope_expense.stage!='cancelled')`);
+  }
   if (user.permissions.includes("order.scope.sales_own")) {
     conditions.push(`(
       ${alias}.salesperson_user_id=? OR ${alias}.created_by_user_id=? OR EXISTS(
@@ -521,7 +526,12 @@ export function batchVisibilitySql(user: OrderAccessUser, alias = "b") {
   };
 }
 
+export function canReadCashSettlementOrders(user: Pick<OrderAccessUser, "permissions">) {
+  return ["order.view", "billing.view", "billing.sensitive.view", "billing.scope.all", "billing.cash.manage"].every(permission => user.permissions.includes(permission));
+}
+
 export function canSeeScopedOrder(user: OrderAccessUser, order: {
+  has_active_expenses?: boolean;
   salesperson_user_id?: string | null;
   created_by_user_id?: string | null;
   customer_sales_owner_user_id?: string | null;
@@ -536,6 +546,7 @@ export function canSeeScopedOrder(user: OrderAccessUser, order: {
   destination_country?: string | null;
 }) {
   if (canViewAllOrders(user)) return true;
+  if (order.has_active_expenses && canReadCashSettlementOrders(user)) return true;
   if (
     user.dataScope === "department" &&
     order.department_ids?.some((departmentId) => Boolean(

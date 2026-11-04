@@ -33,7 +33,7 @@ export function orderEntryPreference(
   if (positionCode === "OPERATION" && currentStepKey === "outbound_transport") {
     return { stepKey: "outbound_transport", moduleCode: "tracking", section: null };
   }
-  if (["CS", "SALES", "FINANCE_ACCOUNTING"].includes(positionCode || "") && currentStepKey === "reconciliation") {
+  if (["CS", "SALES", "FINANCE_ACCOUNTING", "CASHIER"].includes(positionCode || "") && currentStepKey === "reconciliation") {
     return { stepKey: "reconciliation", moduleCode: "costs", section: "expenses" };
   }
   if (positionCode === "FINANCE_ACCOUNTING" && currentStepKey === "completion_review") {

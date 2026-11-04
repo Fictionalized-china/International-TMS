@@ -54,6 +54,6 @@ describe("embedded settlement sign-only access", () => {
     const html = render({ reason: "请先由本单客服完成应收确认" });
     expect(html).toContain("请先由本单客服完成应收确认");
     expect(html).not.toContain('name="controlAction"');
-    expect(html).toContain("待我审批");
+    expect(html).not.toContain("/admin/settlement-approvals");
   });
 });

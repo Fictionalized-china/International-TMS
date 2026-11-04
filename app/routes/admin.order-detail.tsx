@@ -1039,6 +1039,8 @@ function LinearOrderWorkspace({
   );
   const parallelCostsActive =
     currentCostsStage.currentStepHasModule && data.embeddedModuleCode === "costs";
+  const financialWorkspace = data.embeddedModuleCode === "costs" ? data.embeddedModuleData?.financialWorkspace : null;
+  const financialPhase = financialWorkspace?.handoff.phase;
   const parallelCostsAssigneeIds = data.embeddedModuleData
     ? [
         data.embeddedModuleData.order.salesperson_user_id,
@@ -1092,10 +1094,10 @@ function LinearOrderWorkspace({
     (task) => !orderCompleted && task.status !== "completed",
   );
   const responsiblePosition = parallelCostsActive
-    ? "客服 / 业务 / 财务"
+    ? financialPhase === "cash" ? "出纳" : financialPhase === "review" ? "财务会计" : financialPhase === "statements" ? "客服 / 财务会计" : "本单费用责任岗"
     : currentWorkflowTask?.position_name || orderResponsiblePosition(guidance.moduleCode, order.status).name;
   const responsibleAssignee = parallelCostsActive
-    ? "三方独立签核"
+    ? financialPhase === "statements" ? "待生成并确认对账单" : financialPhase === "cash" ? "待真实收付款核销" : financialPhase === "review" ? "待最终复盘归档" : "应收、应付按配置签核"
     : orderResponsibilityAssigneeLabel({
         currentStepKey,
         moduleCode: guidance.moduleCode,
@@ -1159,7 +1161,7 @@ function LinearOrderWorkspace({
       <div className="workspace">
         <section className={`node-panel panel${showOuterActionBar ? "" : " without-actionbar"}`}>
           <header className="node-header">
-            <div className="node-title"><span className="node-number">{selectedIndex + 1}</span><div><h2>{selectedDisplayStep?.name || selectedStep?.name || "订单资料"}</h2><p>{selectedDisplayStep?.member_step_keys.length === 2 ? `当前环节：${selectedStep?.name || "审核分配"}。` : ""}{orderCompleted ? "订单已归档；页面内容仅供查看。" : canSignSelectedCosts ? "本页可办理您负责的费用签核；其他信息按权限只读。" : viewingCurrent && !readOnly ? "本页只显示当前节点需要查看和处理的数据。" : viewingCurrent ? "当前节点不由本账号办理；订单信息仅供查看。" : viewingPast ? "正在查看已完成节点；历史数据只读。" : "正在查看后续节点；当前仅可查看，不能提前办理。"}</p></div></div>
+            <div className="node-title"><span className="node-number">{selectedIndex + 1}</span><div><h2>{selectedDisplayStep?.name || selectedStep?.name || "订单资料"}</h2><p>{selectedDisplayStep?.member_step_keys.length === 2 ? `当前环节：${selectedStep?.name || "审核分配"}。` : ""}{orderCompleted ? "订单已归档；页面内容仅供查看。" : financialWorkspace ? "在本单切换页签完成对账、收付款核销及付款审批记录；每项按当前账号实际权限开放。" : canSignSelectedCosts ? "本页可办理您负责的费用签核；其他信息按权限只读。" : viewingCurrent && !readOnly ? "本页只显示当前节点需要查看和处理的数据。" : viewingCurrent ? "当前节点不由本账号办理；订单信息仅供查看。" : viewingPast ? "正在查看已完成节点；历史数据只读。" : "正在查看后续节点；当前仅可查看，不能提前办理。"}</p></div></div>
             <div className="node-header-tools">
               <div className="owner-chips"><span className="active">{responsiblePosition}</span><span>{responsibleAssignee}</span><span>{canSignSelectedCosts ? "可办理本单签核" : readOnly ? "只读" : parallelCostsActive ? "分岗签核" : `${pendingTasks.length} 项待办`}</span></div>
               <div className="node-reference-actions" aria-label="订单辅助资料">
@@ -1169,7 +1171,7 @@ function LinearOrderWorkspace({
               </div>
             </div>
           </header>
-          {viewingCurrent && !readOnly && collaborationNotice && (
+          {viewingCurrent && !readOnly && collaborationNotice && !financialWorkspace && (
             <aside className="order-collaboration-banner" aria-live="polite">
               <strong>{collaborationNotice.title}</strong>
               <span>{collaborationNotice.progress}</span>
