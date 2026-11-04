@@ -1072,6 +1072,11 @@ function LinearOrderWorkspace({
     canOperateScopedModule: canOperateScopedEmbeddedModule,
   });
   const canReadFullLifecycle = canReadFullOrderLifecycle(data.current);
+  const canSignSelectedCosts = data.embeddedModuleCode === "costs" && Boolean(
+    data.embeddedModuleData?.settlementDirections.some(direction =>
+      direction.actions.some(action => action.active && !action.completed && !action.reason),
+    ),
+  );
   const viewingPast = !viewingCurrent && selectedIndex < currentIndex;
   const guidance = orderNextGuidance({ orderId: order.id, orderStatus: order.status, modules: data.modules });
   const directAction = directOrderWorkflowAction(data);
@@ -1153,9 +1158,9 @@ function LinearOrderWorkspace({
       <div className="workspace">
         <section className={`node-panel panel${showOuterActionBar ? "" : " without-actionbar"}`}>
           <header className="node-header">
-            <div className="node-title"><span className="node-number">{selectedIndex + 1}</span><div><h2>{selectedDisplayStep?.name || selectedStep?.name || "订单资料"}</h2><p>{selectedDisplayStep?.member_step_keys.length === 2 ? `当前环节：${selectedStep?.name || "审核分配"}。` : ""}{orderCompleted ? "订单已归档；页面内容仅供查看。" : viewingCurrent && !readOnly ? "本页只显示当前节点需要查看和处理的数据。" : viewingCurrent ? "当前节点不由本账号办理；订单信息仅供查看。" : viewingPast ? "正在查看已完成节点；历史数据只读。" : "正在查看后续节点；当前仅可查看，不能提前办理。"}</p></div></div>
+            <div className="node-title"><span className="node-number">{selectedIndex + 1}</span><div><h2>{selectedDisplayStep?.name || selectedStep?.name || "订单资料"}</h2><p>{selectedDisplayStep?.member_step_keys.length === 2 ? `当前环节：${selectedStep?.name || "审核分配"}。` : ""}{orderCompleted ? "订单已归档；页面内容仅供查看。" : canSignSelectedCosts ? "本页可办理您负责的费用签核；其他信息按权限只读。" : viewingCurrent && !readOnly ? "本页只显示当前节点需要查看和处理的数据。" : viewingCurrent ? "当前节点不由本账号办理；订单信息仅供查看。" : viewingPast ? "正在查看已完成节点；历史数据只读。" : "正在查看后续节点；当前仅可查看，不能提前办理。"}</p></div></div>
             <div className="node-header-tools">
-              <div className="owner-chips"><span className="active">{responsiblePosition}</span><span>{responsibleAssignee}</span><span>{readOnly ? "只读" : parallelCostsActive ? "并行办理" : `${pendingTasks.length} 项待办`}</span></div>
+              <div className="owner-chips"><span className="active">{responsiblePosition}</span><span>{responsibleAssignee}</span><span>{canSignSelectedCosts ? "可办理本单签核" : readOnly ? "只读" : parallelCostsActive ? "分岗签核" : `${pendingTasks.length} 项待办`}</span></div>
               <div className="node-reference-actions" aria-label="订单辅助资料">
                 <button type="button" onClick={() => setDrawerTab("cargo")}>货物与标签</button>
                 <button type="button" onClick={() => setDrawerTab("attachments")}>文件 {data.attachments.length}</button>

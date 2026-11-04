@@ -4,6 +4,7 @@ import { env } from "cloudflare:workers";
 import type { Route } from "./+types/admin.order-module";
 import { BatchNumberLink, OrderNumberLink } from "../components/EntityNumberLink";
 import { ActionToast } from "../components/ActionToast";
+import { OrderSettlementSignoffs } from "../components/OrderSettlementSignoffs";
 import { DateTimeSelect } from "../components/DateTimeSelect";
 import { requireSessionUser } from "../lib/auth.server";
 import { dispatchWorkspaceHref } from "../lib/transport-workspace-access";
@@ -19,8 +20,7 @@ import { formatQuoteVolumeInput } from "../lib/quote-cargo-projection";
 import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 import { writeAudit } from "../lib/audit.server";
 import { persistExpenseDirectionAction, retryOrderSettlementSync } from "../lib/expense-direction-submit.server";
-import { submitMeetingSignature,loadMeetingSettlement } from "../lib/meeting-settlement.server";
-import { meetingSignatureAccess,settlementActionOwnerLabel } from '../lib/meeting-settlement';
+import { submitMeetingSignature,loadMeetingSettlement,loadMeetingSettlementDirections } from "../lib/meeting-settlement.server";
 import { loadBusinessProcessPolicy } from "../lib/business-process-policy.server";
 import { policyPositions } from "../lib/business-process-policy";
 import { synchronizeOrderDocumentsModuleStatus } from "../lib/documents-module-status.server";
@@ -138,11 +138,8 @@ import {
   expenseDirectionActionCompleted,
   expenseDirectionActionLabel,
   expenseDirectionActionPolicies,
-  expenseDirectionActions,
   expenseDirectionComplete,
-  expenseDirectionProgress,
   type ExpenseDirectionAction,
-  type ExpenseDirectionActionAccess,
   type ExpenseDirectionControl,
 } from "../lib/expense-control";
 import { ftlBatchTrackingState } from "../lib/ftl-tracking";
@@ -858,7 +855,13 @@ export async function loader({ request, params }: Route.LoaderArgs) {
       stage: stage?.code || "order_creation",
       module: moduleCode,
     });
-    throw redirect(`/admin/orders/${orderId}?${query}#module-business-data`);
+    const section = requestUrl.searchParams.get("section");
+    if (section && (
+      (moduleCode === "costs" && ["files", "expenses"].includes(section)) ||
+      (moduleCode === "customs" && ["files", "declarations"].includes(section)) ||
+      (moduleCode === "consignment" && ["info", "files", "costs"].includes(section))
+    )) query.set("section", section);
+    throw redirect(withSessionSlot(`/admin/orders/${orderId}?${query}#module-business-data`, sessionSlotFromRequest(request)));
   }
   const order = await env.DB.prepare(
     `SELECT o.id,o.order_number,o.order_date,o.quotation_id,q.quote_number,q.currency quotation_currency,q.subtotal quotation_subtotal,q.tax_amount quotation_tax_amount,q.total_amount quotation_total_amount,q.status quotation_status,
@@ -1479,6 +1482,10 @@ export async function loader({ request, params }: Route.LoaderArgs) {
   const settlementSyncPending = moduleCode === "costs" && Boolean(await env.DB.prepare(
     "SELECT 1 FROM order_settlement_sync_requests WHERE organization_id=? AND order_id=?",
   ).bind(current.organizationId,orderId).first());
+  const meetingSettlement = await loadMeetingSettlement(env.DB,current.organizationId,orderId);
+  const settlementDirections = moduleCode === "costs"
+    ? await loadMeetingSettlementDirections(env.DB,current.organizationId,orderId,meetingSettlement,current)
+    : [];
   return {
     settlementSyncPending,
     current,
@@ -1493,7 +1500,8 @@ export async function loader({ request, params }: Route.LoaderArgs) {
         },
     canViewExpenseSummary,
     processPolicy: await loadBusinessProcessPolicy(current.organizationId),
-    meetingSettlement: await loadMeetingSettlement(env.DB,current.organizationId,orderId),
+    meetingSettlement,
+    settlementDirections,
     canViewFullExpenseDetails,
     access: {
       ...baseAccess,
@@ -4889,6 +4897,17 @@ export function EmbeddedOrderModule({
   }));
   const compactApproval = definition.code === "consignment" && approvalMode;
 
+  // A signature is an independently authorized action, not an edit to the
+  // current module or a grant to see its financial ledger. This also covers
+  // configured approvers while the order's current handler is another person.
+  if (definition.code === "costs" && (!scopedData.canViewExpenseSummary || !scopedData.workflowStageAccess.available)) {
+    return <div className="module-business-stack dense-module-stack" id="module-business-data">
+      <p className="alert info">当前页面仅展示费用签核职责与进度；金额、毛利和结算文件仍按财务查看权限控制。不要求当前账号办理所有步骤。</p>
+      <OrderSettlementSignoffs orderId={order.id} directions={scopedData.settlementDirections} busy={busy} actionUrl={actionUrl} />
+      <Link className="secondary" to={`/admin/settlement-approvals?q=${encodeURIComponent(order.order_number)}`}>费用结算 · 待我审批</Link>
+    </div>;
+  }
+
   if (
     !scopedData.workflowStageAccess.available &&
     !canApproveConsignment &&
@@ -4898,15 +4917,6 @@ export function EmbeddedOrderModule({
       <div className="module-future-stage">
         <strong>当前节点尚未开放办理</strong>
         <p>{scopedData.workflowStageAccess.reason}</p>
-      </div>
-    );
-  }
-
-  if (definition.code === "costs" && !scopedData.canViewExpenseSummary) {
-    return (
-      <div className="module-future-stage">
-        <strong>当前账号无需办理费用结算</strong>
-        <p>费用明细及结算文件仅向本单业务员、已分配客服、财务岗位和系统管理人员开放。</p>
       </div>
     );
   }
@@ -5009,7 +5019,7 @@ function CostsCompletionReviewEntry({
         <span>
           {costsCompleted
             ? "应收、应付费用已完成确认、审核与锁定，可以进入完成复盘。"
-            : "请先在“费用”页完成应收、应付费用的客服确认、业务审核和财务审核；三方可并行办理，全部完成后系统自动开放复盘。"}
+            : "请先按本单配置完成费用签核、对账及收付款核销。应收与应付独立办理，各方向内部按配置签核；全部必办条件满足后才能完成复盘。"}
         </span>
       </div>
       {costsCompleted ? (
@@ -6332,6 +6342,7 @@ function ModuleBusinessData({
   consignmentSection?: "info" | "files" | "costs";
   showConsignmentActionBar?: boolean;
 }) {
+  const moduleFormActionUrl = useContext(embeddedModuleFormAction);
   const activeBatch = data.batches.find((item) => item.status !== "cancelled");
   const [domesticCarrierId, setDomesticCarrierId] = useState("");
   const [domesticVehicleId, setDomesticVehicleId] = useState("");
@@ -7519,31 +7530,11 @@ function ModuleBusinessData({
       (policy) => policy.required,
     ).length;
     const optionalActionCount = activeActionPolicies.length - requiredActionCount;
-    const actionStageAccessByAction = Object.fromEntries(
-      expenseDirectionActions.map((action) => [
-        action,
-        expenseDirectionActionStageAccess({
-          action,
-          orderStatus: data.order.status,
-          workflow: data.workflowStageAccess.workflowContext,
-        }),
-      ]),
-    ) as Record<ExpenseDirectionAction, ReturnType<typeof expenseDirectionActionStageAccess>>;
-    const pendingActionStageHints = activeActionPolicies
-      .filter((policy) => !actionStageAccessByAction[policy.action].allowed)
-      .map((policy) =>
-        `${expenseDirectionActionLabel(policy.action)}：${actionStageAccessByAction[policy.action].reason || "当前节点尚未开放"}`,
-      );
     return (
       <div className="module-business-stack dense-module-stack">
         {data.order.status === "draft" && (
           <div className="alert warning">
             提交审批前的应收费用由“已接受报价”自动继承；应付费用在国内运输安排确定承运商和运价时自动生成。
-          </div>
-        )}
-        {pendingActionStageHints.length > 0 && data.order.status !== "draft" && (
-          <div className="alert">
-            本单签核按冻结工作流节点分别开放：{pendingActionStageHints.join("；")}。
           </div>
         )}
         <div className="module-toolbar">
@@ -7573,12 +7564,6 @@ function ModuleBusinessData({
           const locked = activeActionPolicies.some((policy) =>
             expenseDirectionActionCompleted(control, policy.action),
           ) || Boolean(control.business_locked || control.finance_locked);
-          const actionAccessByAction = Object.fromEntries(
-            expenseDirectionActions.map((action) => {
-              const reason=meetingSignatureAccess(data.meetingSettlement,data.current,direction,action);
-              return [action,{allowed:!reason,reason,ownerLabel:settlementActionOwnerLabel(data.meetingSettlement,direction,action)}];
-            }),
-          ) as Record<ExpenseDirectionAction, ExpenseDirectionActionAccess>;
           return (
             <BusinessSubsection
               key={direction}
@@ -7658,15 +7643,9 @@ function ModuleBusinessData({
                   </tbody>
                 </table>
               </div>
-              <ExpenseDirectionWorkflow
-                direction={direction}
-                control={control}
-                hasExpenses={rows.length > 0}
-                actionStageAccessByAction={actionStageAccessByAction}
-                actionAccessByAction={actionAccessByAction}
-                workflowFields={data.workflowFields}
-                busy={busy}
-              />
+              <OrderSettlementSignoffs orderId={data.order.id}
+                directions={data.settlementDirections.filter(item => item.direction === direction)}
+                busy={busy} actionUrl={moduleFormActionUrl} />
             </BusinessSubsection>
           );
         })}
@@ -9176,122 +9155,6 @@ function ExpenseEditForm({
   );
 }
 
-function ExpenseDirectionWorkflow({
-  direction,
-  control,
-  hasExpenses,
-  actionStageAccessByAction,
-  actionAccessByAction,
-  workflowFields,
-  busy,
-}: {
-  direction: "receivable" | "payable";
-  control: ExpenseDirectionControl;
-  hasExpenses: boolean;
-  actionStageAccessByAction: Record<ExpenseDirectionAction, ReturnType<typeof expenseDirectionActionStageAccess>>;
-  actionAccessByAction: Record<ExpenseDirectionAction, ExpenseDirectionActionAccess>;
-  workflowFields: WorkflowFieldState[];
-  busy: boolean;
-}) {
-  const actionPolicies = expenseDirectionActionPolicies(workflowFields);
-  const activeActionPolicies = actionPolicies.filter((policy) => policy.active);
-  const requiredActionPolicies = activeActionPolicies.filter(
-    (policy) => policy.required,
-  );
-  const optionalActionPolicies = activeActionPolicies.filter(
-    (policy) => !policy.required,
-  );
-  const pendingRequiredCount = requiredActionPolicies.filter(
-    (policy) => !expenseDirectionActionCompleted(control, policy.action),
-  ).length;
-  const completedVisibleCount = activeActionPolicies.filter((policy) =>
-    expenseDirectionActionCompleted(control, policy.action),
-  ).length;
-  const pendingOptionalCount = optionalActionPolicies.filter(
-    (policy) => !expenseDirectionActionCompleted(control, policy.action),
-  ).length;
-  const progress = expenseDirectionProgress(control, workflowFields);
-  const complete = expenseDirectionComplete(control, workflowFields);
-  if (!activeActionPolicies.length) {
-    return (
-      <div className="expense-direction-flow">
-        <p className="alert">当前工作流未启用本方向的费用签核动作。</p>
-      </div>
-    );
-  }
-  return (
-    <div className="expense-direction-flow">
-      <div className="expense-parallel-heading">
-        <div>
-          <strong>费用签核</strong>
-          <span>
-            按流程策略办理，出境后审批请使用上方独立入口；{requiredActionPolicies.length} 项必办
-            {optionalActionPolicies.length
-              ? `，${optionalActionPolicies.length} 项选办且不阻断结算`
-              : ""}。
-          </span>
-        </div>
-        <span className={`status-pill ${pendingRequiredCount === 0 ? "success" : "off"}`}>
-          {pendingRequiredCount > 0
-            ? `${pendingRequiredCount} 项必办待处理 · ${completedVisibleCount}/${activeActionPolicies.length}`
-            : `必办已完成 · 总进度 ${progress}%`}
-        </span>
-      </div>
-      <div className="expense-parallel-grid">
-        {activeActionPolicies.map((policy) => {
-          const action = policy.action;
-          const actionComplete = expenseDirectionActionCompleted(control, action);
-          const actionAccess = actionAccessByAction[action];
-          const actionStageAccess = actionStageAccessByAction[action];
-          const label = expenseDirectionActionLabel(action, direction);
-          return (
-            <section
-              className={`expense-parallel-card ${actionComplete ? "is-complete" : "is-pending"}`}
-              key={action}
-            >
-              <header>
-                <div>
-                  <strong>{label}</strong>
-                  <small>
-                    {actionAccess.ownerLabel} · {policy.required ? "必办" : "选办"}
-                  </small>
-                </div>
-                <span className={`status-pill ${actionComplete ? "success" : "off"}`}>
-                  {actionComplete
-                    ? "已完成并锁定"
-                    : policy.required
-                      ? "必办 · 待办理"
-                      : "选办 · 可办理"}
-                </span>
-              </header>
-              {actionComplete ? (
-                <p>本签核结果已锁定，不受另外两方办理顺序影响。</p>
-              ) : actionStageAccess.allowed && hasExpenses && actionAccess.allowed ? (
-                <Form method="post" className="expense-parallel-action">
-                  <input type="hidden" name="intent" value="expense_direction_control" />
-                  <input type="hidden" name="direction" value={direction} />
-                  <input type="hidden" name="controlAction" value={action} />
-                  <input name="notes" placeholder={`${label}说明（可选）`} />
-                  <button className="secondary expense-signoff-submit" disabled={busy}>{label}通过</button>
-                </Form>
-              ) : (
-                <p>{!actionStageAccess.allowed ? actionStageAccess.reason || "当前工作流节点尚未开放" : !hasExpenses ? "请先录入本方向费用" : actionAccess.reason || "等待对应负责人办理"}</p>
-              )}
-            </section>
-          );
-        })}
-      </div>
-      {!hasExpenses && <p className="alert warning">尚未预录该方向费用，不能进入确认和审核。</p>}
-      {complete && (
-        <p className="alert success">
-          {pendingOptionalCount
-            ? `该方向必办签核已完成；仍有 ${pendingOptionalCount} 项选办，跳过不会阻断结算。`
-            : "该方向已启用签核均已完成；原费用不可直接修改，只能走调整或补充费用。"}
-        </p>
-      )}
-    </div>
-  );
-}
 function FtlOutboundResourceForm({
   data,
   batch,

@@ -3,12 +3,12 @@ import { Form,Link,useNavigation } from "react-router";
 import type { Route } from "./+types/admin.settlement-approvals";
 import { requireSessionUser } from "../lib/auth.server";
 import { AdminWorkspaceTabs } from "../components/AdminWorkspaceTabs";
+import { OrderSettlementSignoffs } from "../components/OrderSettlementSignoffs";
 import { canViewAdminNavigationItem } from "../lib/admin-navigation";
 import { orderVisibilitySql } from "../lib/order-access";
-import { loadMeetingSettlement,meetingSignatureAccess,submitMeetingSignature,actualExportSql,assertMeetingSignoffsComplete } from "../lib/meeting-settlement.server";
+import { loadMeetingSettlement,loadMeetingSettlementDirections,submitMeetingSignature,actualExportSql,assertMeetingSignoffsComplete } from "../lib/meeting-settlement.server";
 import { refreshMeetingSettlement } from "../lib/meeting-settlement-refresh.server";
-import { settlementActionOwnerLabel } from "../lib/meeting-settlement";
-import { expenseDirectionActionPolicies,expenseDirectionActionCompleted,expenseDirectionActionLabel,emptyExpenseDirectionControl,type ExpenseDirectionAction } from "../lib/expense-control";
+import type { ExpenseDirectionAction } from "../lib/expense-control";
 import { OrderNumberLink } from "../components/EntityNumberLink";
 import { QueryPagination } from "../components/QueryPagination";
 import { Modal } from "../components/Modal";
@@ -21,15 +21,9 @@ export async function loader({request}:Route.LoaderArgs) {
   const rows=[];
   for(const order of page.items) {
     const state=await loadMeetingSettlement(env.DB,current.organizationId,order.id);
-    const expenseInfo=(await env.DB.prepare("SELECT direction,COUNT(*) n,SUM(CASE WHEN counterparty_name IS NULL OR TRIM(counterparty_name)='' THEN 1 ELSE 0 END) missing FROM business_expenses WHERE organization_id=? AND order_id=? AND stage!='cancelled' GROUP BY direction").bind(current.organizationId,order.id).all<{direction:string;n:number;missing:number}>()).results;
-    const directions=(["receivable","payable"] as const).map(direction=>{
-      const control=state.controls.find(c=>c.direction===direction)??emptyExpenseDirectionControl(direction);
-      const policies=expenseDirectionActionPolicies(state.fields),configuredRelease=policies.every(p=>!p.active);
-      const expense=expenseInfo.find(e=>e.direction===direction);
-      return {direction,actions:policies.map(p=>({...p,ownerLabel:settlementActionOwnerLabel(state,direction,p.action),configuredRelease:configuredRelease&&p.action==='confirm',active:p.active||(configuredRelease&&p.action==='confirm'),completed:expenseDirectionActionCompleted(control,p.action),reason:!expense?.n?'尚未录入本方向费用，请先补录':expense.missing?'请先补齐费用往来单位':meetingSignatureAccess(state,current,direction,p.action)}))};
-    });
+    const directions=await loadMeetingSettlementDirections(env.DB,current.organizationId,order.id,state,current);
     const offline=await env.DB.prepare("SELECT approver_name,approved_at,evidence_reference FROM order_payable_offline_approvals WHERE organization_id=? AND order_id=?").bind(current.organizationId,order.id).first<{approver_name:string;approved_at:string;evidence_reference:string}>();
-    rows.push({id:order.id,orderNumber:state.order.order_number,open:state.open,directions,offline,payableMissing:!expenseInfo.some(e=>e.direction==='payable'),canRecordOffline:state.open&&(isBossBusinessActor(current)||(state.order.finance_user_id===current.userId&&current.permissions.includes("settlement.offline_approval.record")))});
+    rows.push({id:order.id,orderNumber:state.order.order_number,open:state.open,directions,offline,payableMissing:!directions.find(item=>item.direction==='payable')?.hasExpenses,canRecordOffline:state.open&&(isBossBusinessActor(current)||(state.order.finance_user_id===current.userId&&current.permissions.includes("settlement.offline_approval.record")))});
   }
   return {current,rows,pagination:page,q};
 }
@@ -57,7 +51,7 @@ export default function SettlementApprovals({loaderData,actionData}:Route.Compon
     <AdminWorkspaceTabs user={loaderData.current} workspace="billing" />
     {actionData?.formError&&<p role="alert" className="alert danger">{actionData.formError}</p>}{actionData?.success&&<p role="status" className="alert success">{actionData.success}</p>}
     <Form method="get" className="tracking-center-filter"><label>订单定位<input name="q" defaultValue={loaderData.q}/></label><button className="primary">查询</button></Form>
-    {loaderData.rows.map(row=><section className="panel" key={row.id}><h2><OrderNumberLink id={row.id} number={row.orderNumber}/></h2>{row.directions.map(item=><div key={item.direction}><h3>{item.direction==="receivable"?"客户应收":"供应商应付"}</h3><div className="row-actions">{item.actions.filter(a=>a.active).map(a=><div key={a.action}><span>{a.configuredRelease?'确认费用（配置为无需审批链）':expenseDirectionActionLabel(a.action,item.direction)} · {a.required?"必办":"选办"} · {a.completed?"已完成":"待办"}</span><small>本单责任人：{a.ownerLabel}</small>{!a.completed&&(a.reason?<small>{a.reason}</small>:<Form method="post"><input type="hidden" name="orderId" value={row.id}/><input type="hidden" name="direction" value={item.direction}/><input type="hidden" name="action" value={a.action}/><input aria-label="签核备注" name="notes" placeholder="签核备注"/><button className="primary" disabled={busy}>{a.configuredRelease?'按当前配置确认费用':expenseDirectionActionLabel(a.action,item.direction)}</button></Form>)}</div>)}</div></div>)}
+    {loaderData.rows.map(row=><section className="panel" key={row.id}><h2><OrderNumberLink id={row.id} number={row.orderNumber}/></h2><OrderSettlementSignoffs orderId={row.id} directions={row.directions} busy={busy}/>
       {row.offline?<p>线下付款审批：{row.offline.approver_name} · {row.offline.approved_at} · {row.offline.evidence_reference}</p>:row.canRecordOffline?<Modal title="记录总经理线下审批" triggerLabel="记录线下付款审批" closeSignal={actionData?.savedAt}><Form method="post" className="form-grid"><input type="hidden" name="intent" value="offline"/><input type="hidden" name="orderId" value={row.id}/><label>审批人<input name="approver" required/></label><label>实际审批日期<input type="date" name="approvedAt" required/></label><label>凭证 / 记录编号<input name="evidence" required/></label><button className="primary" disabled={busy}>保存审批记录</button></Form></Modal>:<p>线下付款审批记录待财务登记。</p>}
       {row.payableMissing&&<p className="alert warning">尚无应付费用，请通知操作或商务补录；不阻断独立应收对账。</p>}
       <div className="row-actions">{canViewAdminNavigationItem(loaderData.current, "billing") && <Link to={`/admin/billing?q=${encodeURIComponent(row.orderNumber)}`}>查看确认、对账与发票状态</Link>}<Link to={`/admin/orders/${row.id}?module=documents&stage=outbound_transport`}>查看报关与出境资料</Link></div>

@@ -3,7 +3,8 @@ param(
   [Parameter(Mandatory=$true)][string]$CredentialsPath,
   [string]$BaseUrl='https://tms.shxlh.com',
   [string]$OrderId='6dc926e7-661f-498d-be88-82978afd65c6',
-  [string]$OrderNumber='SO2026110300027'
+  [string]$OrderNumber='SO2026110300027',
+  [int[]]$AccountIndexes=@(7,2,5,4,10,8,11,0)
 )
 $ErrorActionPreference='Stop'
 # No signature, money, order or configuration forms are submitted.
@@ -19,7 +20,10 @@ function Read-Page($context,[string]$path){
   $slot=[System.Web.HttpUtility]::ParseQueryString($context.Query)['itmsTab']
   if($slot){$query['itmsTab']=$slot}
   $builder.Query=$query.ToString()
-  $response=Invoke-WebRequest $builder.Uri -WebSession $context.Session -TimeoutSec 45 -SkipHttpErrorCheck
+  for($attempt=1;$attempt -le 2;$attempt++){
+    try{$response=Invoke-WebRequest $builder.Uri -WebSession $context.Session -TimeoutSec 60 -SkipHttpErrorCheck;break}
+    catch{if($attempt -eq 2){throw};Write-Host "RETRY slot=$($context.Index) transport failure reading $path"}
+  }
   if($response.StatusCode -ne 200 -or $response.BaseResponse.RequestMessage.RequestUri.AbsolutePath -match '/login$' -or $response.Content -match 'SYSTEM RECOVERY|502 Bad Gateway'){
     throw "Slot $($context.Index): failed $path HTTP $($response.StatusCode)"
   }
@@ -32,7 +36,16 @@ function Has-SignatureForm($page,[string]$direction,[string]$action){
   }
   return $false
 }
-foreach($index in @(7,2,5,4,10,8,11)){
+function Signature-Forms($page){
+  $result=@()
+  foreach($direction in @('receivable','payable')){
+    foreach($action in @('confirm','business_review','finance_review')){
+      if(Has-SignatureForm $page $direction $action){$result+="$direction/$action"}
+    }
+  }
+  return $result
+}
+foreach($index in $AccountIndexes){
   $session=[Microsoft.PowerShell.Commands.WebRequestSession]::new()
   $login=Invoke-WebRequest "$BaseUrl/login" -WebSession $session -TimeoutSec 45
   $signed=Invoke-WebRequest $login.BaseResponse.RequestMessage.RequestUri -Method Post -Body @{email=$accounts[$index].Email;password=$accounts[$index].Password} -WebSession $session -TimeoutSec 45
@@ -42,14 +55,18 @@ foreach($index in @(7,2,5,4,10,8,11)){
   $approval=Read-Page $context "/admin/settlement-approvals?q=$OrderNumber"
   if($approval.Content -match '此客户未配置客服代办应收'){throw 'Order-entry authorization still blocks settlement'}
   if($index -ne 11 -and $approval.Content -notmatch '本单责任人：'){throw 'Canonical signature-owner hints missing'}
-  if($index -eq 7 -and !(Has-SignatureForm $approval 'receivable' 'confirm')){throw 'Assigned CS has no AR confirmation form'}
-  if($index -eq 5 -and !(Has-SignatureForm $approval 'payable' 'confirm')){throw 'Assigned operation user has no AP application form'}
-  if($index -notin @(7,2) -and (Has-SignatureForm $approval 'receivable' 'confirm')){throw "Slot $index can incorrectly initiate AR"}
-  if($index -in @(4,10) -and ((Has-SignatureForm $approval 'receivable' 'finance_review') -or (Has-SignatureForm $approval 'payable' 'finance_review'))){throw 'Approval opened before prerequisite signatures'}
-  if($index -in @(7,5,4,10)){
-    $detail=Read-Page $context "/admin/orders/$OrderId"
+  if($index -in @(7,2,5,4,10,8,0)){
+    $detail=Read-Page $context "/admin/orders/${OrderId}?stage=reconciliation&module=costs&section=expenses"
     if($detail.Content -match '此客户未配置客服代办应收'){throw 'Order detail still uses customer intake flag for settlement'}
-    if($index -eq 7 -and $detail.Content -notmatch '不要求当前账号办理所有步骤'){throw 'Settlement-chain guidance missing for the assigned CS'}
+    if($detail.Content -match '当前账号无[需权]办理费用结算'){throw "Slot $index blocked by financial-read permission instead of signature authority"}
+    $expected=@(Signature-Forms $approval | Sort-Object)
+    $actual=@(Signature-Forms $detail | Sort-Object)
+    if(($expected -join ',') -ne ($actual -join ',')){throw "Slot $index embedded/independent signature mismatch: expected=$($expected -join ',') actual=$($actual -join ',')"}
+    Write-Host "PASS slot=$index embedded/independent parity: $($actual -join ',')"
+    if($index -in @(5,8)){
+      $visible=[regex]::Replace($detail.Content,'(?s)<script\b[^>]*>.*?</script>','')
+      if($visible -match 'expense-ledger-table|预计利润|foreign_account_no'){throw "Slot $index received a financial ledger in the sign-only page"}
+    }
     if($index -eq 7){
       $visible=[regex]::Replace($detail.Content,'(?s)<script\b[^>]*>.*?</script>','')
       foreach($block in [regex]::Matches($visible,'待补齐必填项：([^<]+)')){

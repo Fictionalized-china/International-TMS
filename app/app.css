@@ -23692,7 +23692,7 @@ html[data-motion="off"] .consolidation-view-content { animation: none; }
   border-radius: 0;
   background: #fff;
 }
-.linear-order-page .expense-parallel-heading {
+:is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -23702,70 +23702,70 @@ html[data-motion="off"] .consolidation-view-content { animation: none; }
   border-bottom: 1px solid var(--line);
   background: #f8fbff;
 }
-.linear-order-page .expense-parallel-heading > div {
+:is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-heading > div {
   display: flex;
   align-items: baseline;
   gap: 10px;
   min-width: 0;
 }
-.linear-order-page .expense-parallel-heading span,
-.linear-order-page .expense-parallel-card small,
-.linear-order-page .expense-parallel-card p {
+:is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-heading span,
+:is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-card small,
+:is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-card p {
   color: #64748b;
   font-size: 11px;
 }
-.linear-order-page .expense-parallel-grid {
+:is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   border-bottom: 1px solid var(--line);
 }
-.linear-order-page .expense-parallel-card {
+:is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-card {
   min-width: 0;
   padding: 9px 10px;
   border-right: 1px solid var(--line);
 }
-.linear-order-page .expense-parallel-card:last-child { border-right: 0; }
-.linear-order-page .expense-parallel-card.is-pending {
+:is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-card:last-child { border-right: 0; }
+:is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-card.is-pending {
   background: #fff5f5;
   box-shadow: inset 0 2px 0 #f4a6a6;
 }
-.linear-order-page .expense-parallel-card.is-complete {
+:is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-card.is-complete {
   background: #f1faf5;
   box-shadow: inset 0 2px 0 #68c79d;
 }
-.linear-order-page .expense-parallel-card > header {
+:is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-card > header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
 }
-.linear-order-page .expense-parallel-card > header > div,
-.linear-order-page .expense-parallel-card > header strong,
-.linear-order-page .expense-parallel-card > header small {
+:is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-card > header > div,
+:is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-card > header strong,
+:is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-card > header small {
   display: block;
   min-width: 0;
 }
-.linear-order-page .expense-parallel-card p { margin: 7px 0 0; }
-.linear-order-page .expense-parallel-action {
+:is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-card p { margin: 7px 0 0; }
+:is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-action {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 6px;
   margin-top: 7px;
 }
-.linear-order-page .expense-parallel-action input,
-.linear-order-page .expense-parallel-action button { min-height: 32px; }
-.linear-order-page .expense-parallel-action .expense-signoff-submit {
+:is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-action input,
+:is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-action button { min-height: 32px; }
+:is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-action .expense-signoff-submit {
   color: #fff;
   border-color: #b83f36;
   background: #c94f45;
   box-shadow: 0 1px 2px rgb(125 31 25 / 18%);
   font-weight: 750;
 }
-.linear-order-page .expense-parallel-action .expense-signoff-submit:hover:not(:disabled) {
+:is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-action .expense-signoff-submit:hover:not(:disabled) {
   border-color: #9f3029;
   background: #ad3b33;
 }
-.linear-order-page .expense-parallel-action .expense-signoff-submit:focus-visible {
+:is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-action .expense-signoff-submit:focus-visible {
   outline: 2px solid #8f2f28;
   outline-offset: 2px;
 }
@@ -23829,9 +23829,9 @@ html[data-motion="off"] .consolidation-view-content { animation: none; }
 
 @media (max-width: 760px) {
   .transport-next-step-banner { align-items: stretch; flex-direction: column; }
-  .linear-order-page .expense-parallel-grid { grid-template-columns: 1fr; }
-  .linear-order-page .expense-parallel-card { border-right: 0; border-bottom: 1px solid var(--line); }
-  .linear-order-page .expense-parallel-card:last-child { border-bottom: 0; }
+  :is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-grid { grid-template-columns: 1fr; }
+  :is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-card { border-right: 0; border-bottom: 1px solid var(--line); }
+  :is(.linear-order-page, .order-settlement-signoffs) .expense-parallel-card:last-child { border-bottom: 0; }
   .linear-order-page .tracking-shipment-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }

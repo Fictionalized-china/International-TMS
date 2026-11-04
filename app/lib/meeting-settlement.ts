@@ -19,6 +19,36 @@ export function settlementActionOwnerLabel(state:Awaited<ReturnType<typeof loadM
   const owners=settlementActionOwners(state,direction,action);
   return owners.length?owners.map(person=>`${person.displayName}（${person.positionName}）`).join(" / "):"尚未配置有效的本单签核责任人";
 }
+
+// Signature authority is independent of permission to read financial amounts.
+// Keep amounts, margin and bank data out of this shared UI projection.
+export function meetingSettlementDirections(
+  state: Awaited<ReturnType<typeof loadMeetingSettlement>>,
+  actor: Pick<SessionUser, "userId" | "positionCode" | "permissions" | "roleCodes">,
+  expenseInfo: readonly { direction: string; n: number; missing: number }[],
+) {
+  const policies = expenseDirectionActionPolicies(state.fields);
+  const configuredRelease = policies.every(policy => !policy.active);
+  return (["receivable", "payable"] as const).map(direction => {
+    const control = state.controls.find(item => item.direction === direction) ?? emptyExpenseDirectionControl(direction);
+    const expense = expenseInfo.find(item => item.direction === direction);
+    return {
+      direction,
+      hasExpenses: Boolean(expense?.n),
+      actions: policies.map(policy => ({
+        ...policy,
+        ownerLabel: settlementActionOwnerLabel(state, direction, policy.action),
+        configuredRelease: configuredRelease && policy.action === "confirm",
+        active: policy.active || (configuredRelease && policy.action === "confirm"),
+        completed: expenseDirectionActionCompleted(control, policy.action),
+        reason: !expense?.n ? "尚未录入本方向费用，请先补录"
+          : expense.missing ? "请先补齐费用往来单位"
+          : meetingSignatureAccess(state, actor, direction, policy.action),
+      })),
+    };
+  });
+}
+export type MeetingSettlementDirection = ReturnType<typeof meetingSettlementDirections>[number];
 export function settlementSequenceReason(control:ExpenseDirectionControl,action:ExpenseDirectionAction,fields:readonly ExpenseDirectionWorkflowField[],policy:BusinessProcessPolicy) {
   if(!policyEnabled(policy,"settlement.sequential") || expenseDirectionActionCompleted(control,action)) return null;
   const index=expenseDirectionActions.indexOf(action);

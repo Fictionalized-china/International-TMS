@@ -4,7 +4,7 @@ import { policyEnabled } from "./business-process-policy";
 import { orderVisibilitySql } from "./order-access";
 import { expenseDirectionActions,expenseDirectionActionPolicies,expenseDirectionActionCompleted,emptyExpenseDirectionControl,type ExpenseDirectionAction,type ExpenseDirectionControl } from "./expense-control";
 import { loadLockedWorkflowStageContext } from "./workflow-instance-stage-gate.server";
-import { meetingSignatureAccess } from "./meeting-settlement";
+import { meetingSignatureAccess, meetingSettlementDirections } from "./meeting-settlement";
 export { meetingSignatureAccess } from './meeting-settlement';
 import { persistExpenseDirectionAction } from "./expense-direction-submit.server";
 
@@ -38,6 +38,16 @@ export async function loadMeetingSettlement(db:D1Database,org:string,orderId:str
   const open=validBinding&&!historical&&order.status==="in_execution"&&(policyEnabled(policy,"settlement.after_actual_export")?Boolean(order.actual_exported):["reconciliation","completion_review"].includes(workflow.currentStepKey??""));
   return {order,policy,workflow,fields,open,historical,validBinding,controls:controls.results,responsibleUsers};
 }
+export async function loadMeetingSettlementDirections(
+  db: D1Database, org: string, orderId: string,
+  state: Awaited<ReturnType<typeof loadMeetingSettlement>>, actor: SessionUser,
+) {
+  const info = await db.prepare(
+    "SELECT direction,COUNT(*) n,SUM(CASE WHEN counterparty_name IS NULL OR TRIM(counterparty_name)='' THEN 1 ELSE 0 END) missing FROM business_expenses WHERE organization_id=? AND order_id=? AND stage!='cancelled' GROUP BY direction",
+  ).bind(org, orderId).all<{ direction: string; n: number; missing: number }>();
+  return meetingSettlementDirections(state, actor, info.results);
+}
+
 export async function submitMeetingSignature(db:D1Database,input:{current:SessionUser;orderId:string;direction:"receivable"|"payable";action:ExpenseDirectionAction;notes:string;refresh:()=>Promise<void>}) {
   const visibility=orderVisibilitySql(input.current,"o");
   if(!await db.prepare(`SELECT 1 FROM transport_orders o WHERE o.id=? AND o.organization_id=? AND ${visibility.sql}`).bind(input.orderId,input.current.organizationId,...visibility.values).first()) throw new Error("订单不在当前读取范围");
