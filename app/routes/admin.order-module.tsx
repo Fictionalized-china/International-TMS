@@ -4,6 +4,7 @@ import { env } from "cloudflare:workers";
 import type { Route } from "./+types/admin.order-module";
 import { BatchNumberLink, OrderNumberLink } from "../components/EntityNumberLink";
 import { ActionToast } from "../components/ActionToast";
+import { BossWarehouseEntry } from "../components/BossWarehouseEntry";
 import { OrderSettlementSignoffs } from "../components/OrderSettlementSignoffs";
 import { SettlementHandoff } from "../components/SettlementHandoff";
 import { loadSettlementHandoff } from "../lib/financial-closure.server";
@@ -1874,6 +1875,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
     return { formError: "当前节点不由本账号办理，订单信息仅供查看" };
   }
   const isAssignedConsignmentApprover = isAssignedOrderApprover({
+    positionCode: current.positionCode, roleCodes: current.roleCodes,
     status: order.status,
     currentAssigneeUserId: order.current_assignee_user_id,
     currentUserId: current.userId,
@@ -4657,6 +4659,7 @@ export default function OrderModulePage({
     manage = canManageLoadedModule(loaderData) && loaderData.access.canEdit,
     canApproveConsignment =
       isAssignedOrderApprover({
+        positionCode: loaderData.current.positionCode, roleCodes: loaderData.current.roleCodes,
         status: order.status,
         currentAssigneeUserId: order.current_assignee_user_id,
         currentUserId: loaderData.current.userId,
@@ -4917,6 +4920,7 @@ export function EmbeddedOrderModule({
   const canWriteField = (field: WorkflowFieldState) =>
     canWriteLoadedWorkflowField(scopedData, field);
   const canApproveConsignment = !readOnly && (isAssignedOrderApprover({
+    positionCode: scopedData.current.positionCode, roleCodes: scopedData.current.roleCodes,
     status: order.status,
     currentAssigneeUserId: order.current_assignee_user_id,
     currentUserId: scopedData.current.userId,
@@ -4959,6 +4963,9 @@ export function EmbeddedOrderModule({
     <embeddedModuleFormAction.Provider value={actionUrl}>
       <div className={`linear-module-embedded${readOnly ? " is-read-only" : ""}`} id="module-business-data">
         <SettlementSyncNotice data={scopedData} busy={busy}/>
+        {!readOnly && ["warehouse", "loading", "tracking", "overseas_warehouse"].includes(definition.code) && <BossWarehouseEntry
+          actor={scopedData.current} warehouses={scopedData.warehouses} orderId={order.id} actionUrl={actionUrl}
+          overseas={["tracking", "overseas_warehouse"].includes(definition.code)} screen={definition.code === "loading" ? "outbound" : undefined}/>}
         {!scopedData.access.canEdit && (
           <div className="alert module-access-note">
             <strong>当前为只读状态</strong>
@@ -5114,6 +5121,7 @@ export function ConsignmentReviewActionBar({
         submitPositionCodes: policyPositions(data.processPolicy,"order.submit_positions"),
       })) && data.access.canEdit;
   const canApproveConsignment = isAssignedOrderApprover({
+    positionCode: data.current.positionCode, roleCodes: data.current.roleCodes,
     status: data.order.status,
     currentAssigneeUserId: data.order.current_assignee_user_id,
     currentUserId: data.current.userId,

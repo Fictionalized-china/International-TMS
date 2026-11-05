@@ -41,6 +41,7 @@ export function orderWorkflowTargetAssigneeRequirements(actionCode: string) {
 export function canRunOrderWorkflowAction(input: {
   actionCode: string;
   positionCode: string | null | undefined;
+  roleCodes?: readonly string[];
   currentAssigneeUserId: string | null | undefined;
   salespersonUserId?: string | null | undefined;
   creatorUserId?: string | null;
@@ -48,7 +49,7 @@ export function canRunOrderWorkflowAction(input: {
   bypassAssigneeRestriction?: boolean;
   allowedPositionCodes?: readonly string[];
 }) {
-  if (input.bypassAssigneeRestriction) return true;
+  if (input.bypassAssigneeRestriction || isBossBusinessActor(input)) return true;
   const allowedPositions = input.allowedPositionCodes ?? workflowActionPositionCodes[input.actionCode];
   if (!allowedPositions?.includes(input.positionCode ?? "")) return false;
   if (["submit", "cancel_draft"].includes(input.actionCode)) {
@@ -101,13 +102,15 @@ export function statusLabel(status: string) {
 
 export function isAssignedOrderApprover(input: {
   status: string;
+  positionCode?: string | null;
+  roleCodes?: readonly string[];
   currentAssigneeUserId: string | null | undefined;
   currentUserId: string;
 }) {
   return (
     input.status === "submitted" &&
-    Boolean(input.currentAssigneeUserId) &&
-    input.currentAssigneeUserId === input.currentUserId
+    (isBossBusinessActor(input) || (Boolean(input.currentAssigneeUserId) &&
+    input.currentAssigneeUserId === input.currentUserId))
   );
 }
 

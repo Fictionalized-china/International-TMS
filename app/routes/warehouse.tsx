@@ -13,6 +13,9 @@ import { ConnectionStatus } from "../components/InteractionFeedback";
 import { WorkspacePreferences } from "../components/WorkspacePreferences";
 import { InternalNotificationCenter } from "../components/InternalNotificationCenter";
 import { loadInternalNotificationSummary } from "../lib/internal-notifications.server";
+import { isBossBusinessActor } from "../lib/permission-blocks";
+import { sessionSlotFromRequest, withSessionSlot } from "../lib/session-slot";
+import { bossWarehouseHref } from "../components/BossWarehouseEntry";
 
 type WarehouseOrder = {
   id: string;
@@ -84,6 +87,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const notifications=await loadInternalNotificationSummary(user.organizationId,user.userId);
   return {
     user,
+    sessionSlot: sessionSlotFromRequest(request),
     warehouses: warehouseContext.warehouses,
     warehouse,
     warehouseName: warehouse.name,
@@ -124,9 +128,14 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
           </div>
         </div>
         <div className="warehouse-context-switcher warehouse-account-context" aria-label="当前账号绑定仓库">
-          <span>当前账号专属仓库</span>
+          <span>{isBossBusinessActor(user) ? "老板全仓代办" : "当前账号专属仓库"}</span>
           <strong>{loaderData.warehouse.name}</strong>
           <small>{loaderData.warehouse.code} · {warehouseRoleLabels[loaderData.warehouse.warehouse_role]} · 登录自动进入</small>
+          {isBossBusinessActor(user) && <Form method="post" action={withSessionSlot(`/switch-site?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}`, loaderData.sessionSlot)} className="boss-warehouse-switch">
+            <input type="hidden" name="target" value="warehouse"/><input type="hidden" name="sourceSite" value="warehouse"/>
+            <label><span>切换办理仓库</span><select name="warehouseTo" defaultValue={bossWarehouseHref(loaderData.warehouse)} required>{loaderData.warehouses.map(warehouse => <option key={warehouse.id} value={bossWarehouseHref(warehouse)}>{warehouse.name}</option>)}</select></label>
+            <button className="secondary">切换仓库</button>
+          </Form>}
         </div>
         <nav className="nav" aria-label="仓库作业导航">
           <span className="warehouse-nav-group nav-title">工作台</span>
@@ -183,6 +192,10 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
             <span><AppIcon name="warehouse" size={17} /></span>仓库与库位
           </NavLink>
         </nav>
+        {isBossBusinessActor(user) && <Form className="boss-warehouse-return" method="post" action={withSessionSlot(`/switch-site?warehouseId=${encodeURIComponent(loaderData.warehouse.id)}`, loaderData.sessionSlot)}>
+            <input type="hidden" name="target" value="admin"/><input type="hidden" name="returnTo" value={orderContext ? `/admin/orders/${orderContext.id}` : "/admin/warehouses"}/>
+            <button className="secondary">返回管理端</button>
+        </Form>}
         <div className="warehouse-user">
           <span className="warehouse-avatar">
             {user.displayName.slice(0, 1).toUpperCase()}

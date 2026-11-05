@@ -28,9 +28,9 @@ async function setup() {
   fixture.database.prepare("INSERT INTO order_tracking_milestones(id,organization_id,order_id,milestone_code,milestone_name,event_at,created_at) VALUES('export','org','order','exported','实际出境',?,?)").run(fixture.now, fixture.now);
   for (const [direction, amount] of [["receivable", 100], ["payable", 50]] as const) fixture.database.prepare("INSERT INTO business_expenses(id,organization_id,order_id,direction,charge_code,charge_name,counterparty_name,currency,quantity,unit_price,amount,foreign_account_no,created_by_user_id,created_at,updated_at) VALUES(?,'org','order',?,'freight','运输费',?,'CNY',1,?,?,'PRIVATE-BANK-REFERENCE','cs',?,?)").run(direction, direction, direction === "receivable" ? "测试客户" : "供应商", amount, amount, fixture.now, fixture.now);
 }
-async function allSignatures() {
+async function allSignatures(actorOverride?: string) {
   for (const [direction, actors] of [["receivable", ["cs", "operation", "supervisor"]], ["payable", ["operation", "supervisor", "finance"]]] as const)
-    for (const [index, action] of (["confirm", "business_review", "finance_review"] as const).entries()) await submitMeetingSignature(fixture.db, { current: fixture.actors.get(actors[index])!, orderId: "order", direction, action, notes: "核对完成", refresh: async () => {} });
+    for (const [index, action] of (["confirm", "business_review", "finance_review"] as const).entries()) await submitMeetingSignature(fixture.db, { current: fixture.actors.get(actorOverride ?? actors[index])!, orderId: "order", direction, action, notes: "核对完成", refresh: async () => {} });
 }
 function access(actor: string, action: SettlementWorkbenchAction, source: SettlementAccessSource) {
   return async () => {
@@ -39,29 +39,40 @@ function access(actor: string, action: SettlementWorkbenchAction, source: Settle
   };
 }
 describe("reviewed statements -> real cash -> final archive", () => {
-  it("completes both chains and real settlement services before allowing final financial archive", async () => {
+  it.each([
+    { mode: "岗位协作", businessType: "ltl", solo: false },
+    { mode: "老板代办", businessType: "ltl", solo: true },
+    { mode: "岗位协作", businessType: "ftl", solo: false },
+    { mode: "老板代办", businessType: "ftl", solo: true },
+  ])("$mode / $businessType completes signatures and real cash settlement before final archive", async ({ solo, businessType }) => {
     await setup();
-    await expect(createReconciliation(fixture.db, { organizationId: "org", expenseIds: ["receivable"], direction: "receivable", userId: "cs", now: fixture.now, assertCanMutate: access("cs", "create_reconciliation", { kind: "expense_ids", ids: ["receivable"] }) })).rejects.toThrow();
-    await allSignatures();
-    await generateOrderReview(fixture.db, { organizationId: "org", orderId: "order", userId: "finance", now: fixture.now, reviewConclusion: "财务尚未结清" });
-    expect((await finalizeOrderReview(fixture.db, { organizationId: "org", orderId: "order", userId: "finance", now: fixture.now, confirmed: true })).completed).toBe(false);
-    fixture.database.prepare("INSERT INTO order_payable_offline_approvals(id,organization_id,order_id,approver_name,approved_at,evidence_reference,recorded_by_user_id,created_at) VALUES('offline','org','order','本地测试审批人',?,'本地测试凭证','finance',?)").run(fixture.now, fixture.now);
+    fixture.database.prepare("UPDATE transport_orders SET business_type=? WHERE id='order'").run(businessType);
+    const reviewer = solo ? "owner" : "finance";
+    const cashier = solo ? "owner" : "cashier";
+    const receivableCreator = solo ? "owner" : "cs";
+    await expect(createReconciliation(fixture.db, { organizationId: "org", expenseIds: ["receivable"], direction: "receivable", userId: receivableCreator, now: fixture.now, assertCanMutate: access(receivableCreator, "create_reconciliation", { kind: "expense_ids", ids: ["receivable"] }) })).rejects.toThrow();
+    if (solo) await expect(submitMeetingSignature(fixture.db, { current: fixture.actors.get("owner")!, orderId: "order", direction: "receivable", action: "finance_review", notes: "不得越级", refresh: async () => {} })).rejects.toThrow();
+    await allSignatures(solo ? "owner" : undefined);
+    await generateOrderReview(fixture.db, { organizationId: "org", orderId: "order", userId: reviewer, now: fixture.now, reviewConclusion: "财务尚未结清" });
+    expect((await finalizeOrderReview(fixture.db, { organizationId: "org", orderId: "order", userId: reviewer, now: fixture.now, confirmed: true })).completed).toBe(false);
+    fixture.database.prepare("INSERT INTO order_payable_offline_approvals(id,organization_id,order_id,approver_name,approved_at,evidence_reference,recorded_by_user_id,created_at) VALUES('offline','org','order','本地测试审批人',?,'本地测试凭证',?,?)").run(fixture.now, reviewer, fixture.now);
     for (const direction of ["receivable", "payable"] as const) {
-      const actor = direction === "receivable" ? "cs" : "finance";
+      const actor = direction === "receivable" ? receivableCreator : reviewer;
       const statement = await createReconciliation(fixture.db, { organizationId: "org", expenseIds: [direction], direction, userId: actor, now: fixture.now, assertCanMutate: access(actor, "create_reconciliation", { kind: "expense_ids", ids: [direction] }) });
       await confirmReconciliation(fixture.db, { organizationId: "org", id: statement.id, userId: actor, now: fixture.now, assertCanMutate: access(actor, "confirm_reconciliation", { kind: "reconciliation_id", id: statement.id }) });
-      const cashierPage = await loadReconciliationPage(fixture.db, fixture.actors.get("cashier")!, { page: 1, pageSize: 10, query: "TEST-SO", direction: "", currency: "", status: "" }, "cash");
+      const cashierPage = await loadReconciliationPage(fixture.db, fixture.actors.get(cashier)!, { page: 1, pageSize: 10, query: "TEST-SO", direction: "", currency: "", status: "" }, "cash");
       expect(cashierPage.items.some(item => item.id === statement.id)).toBe(true);
       const amount = direction === "receivable" ? 100 : 50;
-      const cash = await recordCashTransaction(fixture.db, { organizationId: "org", direction: direction === "receivable" ? "receipt" : "payment", counterpartyName: direction === "receivable" ? "测试客户" : "供应商", currency: "CNY", amount, occurredOn: "2026-09-01", settlementEntity: "测试", accountName: "本地测试账户", handledByUserId: "cashier", paymentStatementNumber: statement.number, evidenceReference: "本地测试资金凭证", userId: "cashier", now: fixture.now, requestId: `${direction}-cash-record`, assertCanMutate: async () => {} });
-      await allocateCashTransaction(fixture.db, { organizationId: "org", transactionId: cash.id, reconciliationId: statement.id, amount, userId: "cashier", now: fixture.now, requestId: `${direction}-cash-allocation`, assertCanMutate: access("cashier", "allocate_cash", { kind: "reconciliation_id", id: statement.id }) });
+      const cash = await recordCashTransaction(fixture.db, { organizationId: "org", direction: direction === "receivable" ? "receipt" : "payment", counterpartyName: direction === "receivable" ? "测试客户" : "供应商", currency: "CNY", amount, occurredOn: "2026-09-01", settlementEntity: "测试", accountName: "本地测试账户", handledByUserId: cashier, paymentStatementNumber: statement.number, evidenceReference: "本地测试资金凭证", userId: cashier, now: fixture.now, requestId: `${direction}-cash-record`, assertCanMutate: access(cashier, "allocate_cash", { kind: "reconciliation_id", id: statement.id }) });
+      await allocateCashTransaction(fixture.db, { organizationId: "org", transactionId: cash.id, reconciliationId: statement.id, amount, userId: cashier, now: fixture.now, requestId: `${direction}-cash-allocation`, assertCanMutate: access(cashier, "allocate_cash", { kind: "reconciliation_id", id: statement.id }) });
     }
     expect((await loadFinancialClosure(fixture.db, "org", "order")).complete).toBe(true);
     expect(fixture.database.prepare("SELECT status FROM transport_orders WHERE id='order'").get()?.status).not.toBe("completed");
-    await generateOrderReview(fixture.db, { organizationId: "org", orderId: "order", userId: "finance", now: fixture.now, reviewConclusion: "全部真实收付款已核销" });
-    const result = await finalizeOrderReview(fixture.db, { organizationId: "org", orderId: "order", userId: "finance", now: fixture.now, confirmed: true });
+    await generateOrderReview(fixture.db, { organizationId: "org", orderId: "order", userId: reviewer, now: fixture.now, reviewConclusion: "全部真实收付款已核销" });
+    const result = await finalizeOrderReview(fixture.db, { organizationId: "org", orderId: "order", userId: reviewer, now: fixture.now, confirmed: true });
     expect(result).toMatchObject({ completed: true, completionStatus: "completed_settled" });
     expect(fixture.database.prepare("SELECT status,completion_status FROM transport_orders WHERE id='order'").get()).toMatchObject({ status: "completed", completion_status: "completed_settled" });
+    expect(fixture.database.prepare("SELECT DISTINCT created_by_user_id FROM settlement_cash_transactions").all()).toEqual([{ created_by_user_id: cashier }]);
     await expect(reopenPrematureSettlement(fixture.db, fixture.actors.get("finance")!, "order", true)).rejects.toThrow("仅可恢复");
   });
   it("provides only the assigned review direction's amounts and honors the visibility switch without permitting blind approval", async () => {

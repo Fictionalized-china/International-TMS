@@ -90,7 +90,7 @@ export async function loadActivePositionAccessProfile(
     positionName: row.position_name,
     roleCode: row.role_code,
     permissions,
-    dataScope: row.data_scope,
+    dataScope: row.position_code === "BOSS" ? "company" : row.data_scope,
   };
 }
 

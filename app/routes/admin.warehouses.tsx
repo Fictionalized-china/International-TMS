@@ -9,6 +9,9 @@ import { ConfirmAction } from "../components/ConfirmAction";
 import { ActionToast } from "../components/ActionToast";
 import { requireSessionUser } from "../lib/auth.server";
 import { canAccessWarehouseAdministration } from "../lib/admin-navigation";
+import { isBossBusinessActor } from "../lib/permission-blocks";
+import { sessionSlotFromRequest, withSessionSlot } from "../lib/session-slot";
+import { bossWarehouseHref } from "../components/BossWarehouseEntry";
 import { validateEmail, validatePassword, validatePhone, valueOf } from "../lib/validation";
 import { writeAudit } from "../lib/audit.server";
 import {
@@ -236,6 +239,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   ]);
   return {
     current,
+    sessionSlot: sessionSlotFromRequest(request),
     warehouses: warehouses.results,
     users: canManage ? users.results : [],
     access: canManage ? access.results : [],
@@ -674,6 +678,10 @@ export default function AdminWarehouses({ loaderData, actionData }: Route.Compon
                   <td><span className={`status-pill ${warehouse.status !== "active" ? "off" : ""}`}>{warehouse.status === "active" ? "启用" : "停用"}</span></td>
                   <td>
                     <div className="page-actions">
+                      {warehouse.status === "active" && isBossBusinessActor(loaderData.current) && <Form method="post" action={withSessionSlot("/switch-site", loaderData.sessionSlot)}>
+                        <input type="hidden" name="target" value="warehouse"/><input type="hidden" name="warehouseTo" value={bossWarehouseHref(warehouse)}/>
+                        <button className="text-button" disabled={busy}>以老板身份办理</button>
+                      </Form>}
                       <Modal title={`查看仓库 · ${warehouse.name}`} triggerLabel="查看" triggerClassName="text-button" size="wide">
                         <WarehouseDetails warehouse={warehouse} accounts={loaderData.access.filter((item) => item.warehouse_id === warehouse.id)} />
                       </Modal>

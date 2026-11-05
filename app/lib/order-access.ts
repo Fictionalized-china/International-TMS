@@ -1,4 +1,4 @@
-import { isBossBusinessActor, isProtectedAccessRole } from "./permission-blocks";
+import { isBossBusinessActor } from "./permission-blocks";
 import {
   resolveWorkflowNodeOperationAccess,
 } from "./workflow-node-access";
@@ -18,7 +18,7 @@ export type OrderAccessUser = {
 };
 
 export function canViewAllOrders(user: OrderAccessUser) {
-  return isProtectedAccessRole(user.roleCodes) || user.dataScope === "company" || (
+  return isBossBusinessActor(user) || user.dataScope === "company" || (
     user.dataScope === undefined && user.permissions.includes("order.scope.all")
   );
 }
@@ -189,7 +189,8 @@ export function canOperateCurrentOrder(
  * but only an account explicitly assigned to the order, current module or a
  * current unfinished task belongs in the work queue.
  */
-export function currentOrderActionSql(user: Pick<OrderAccessUser, "userId">, alias = "o") {
+export function currentOrderActionSql(user: Pick<OrderAccessUser, "userId"> & Partial<Pick<OrderAccessUser, "positionCode" | "roleCodes">>, alias = "o") {
+  if (isBossBusinessActor(user)) return { sql: `${alias}.status NOT IN ('completed','cancelled')`, values: [] as string[] };
   return {
     sql: `${alias}.status NOT IN ('completed','cancelled') AND (
       ${alias}.current_assignee_user_id=?

@@ -4,6 +4,7 @@ import { flushSync } from "react-dom";
 import { Form, Link, redirect, useNavigate, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.order-detail";
 import { ActionToast } from "../components/ActionToast";
+import { canCompleteWorkflowTask } from "../lib/workflow-task-access";
 import { DateTimeSelect } from "../components/DateTimeSelect";
 import { ReviewAssignmentWorkbench } from "../components/ReviewAssignmentWorkbench";
 import { requireSessionUser } from "../lib/auth.server";
@@ -2203,13 +2204,11 @@ function CurrentNodeWorksheet({
                         <strong>{task.task_name}</strong>
                         <small>{task.task_position_name || task.task_position_code || row.position_name || "按模组岗位"}{task.task_instructions ? ` · ${task.task_instructions}` : ""}</small>
                       </div>
-                      {task.task_status !== "completed" && isWorkflowTaskManual(step.step_key, task.task_key || "") && (
-                        task.task_assignee_user_id
-                          ? task.task_assignee_user_id === data.current.userId
-                          : row.assignee_user_id
-                            ? row.assignee_user_id === data.current.userId
-                            : (task.task_position_code || row.responsibility_position_code) === data.current.positionCode
-                      ) ? (
+                      {row.step_status === "active" && task.task_status !== "completed" && isWorkflowTaskManual(step.step_key, task.task_key || "") && canCompleteWorkflowTask({
+                        actorUserId: data.current.userId, actorPositionCodes: data.current.positionCode ? [data.current.positionCode] : [], actorRoleCodes: data.current.roleCodes,
+                        taskAssigneeUserId: task.task_assignee_user_id, moduleAssigneeUserId: row.assignee_user_id,
+                        responsibilityPositionCode: task.task_position_code || row.responsibility_position_code,
+                      }) ? (
                         <Form method="post">
                           <input type="hidden" name="intent" value="workflow_task_complete" />
                           <input type="hidden" name="taskStateId" value={task.task_state_id || ""} />
@@ -2768,14 +2767,12 @@ function directOrderWorkflowAction(data: Route.ComponentProps["loaderData"]) {
   const actorCanRun = (actionCode: string) => canRunOrderWorkflowAction({
     actionCode,
     positionCode: data.current.positionCode,
+    roleCodes: data.current.roleCodes,
     currentAssigneeUserId: data.order.current_assignee_user_id,
     salespersonUserId: data.order.salesperson_user_id,
     creatorUserId: data.order.created_by_user_id,
     currentUserId: data.current.userId,
     allowedPositionCodes: policyPositions(data.processPolicy, ["submit", "cancel_draft"].includes(actionCode) ? "order.submit_positions" : "order.approve_positions"),
-    bypassAssigneeRestriction: data.current.roleCodes.some((code) =>
-      ["owner", "boss", "developer"].includes(code),
-    ),
   });
   const module = (code: string) =>
     data.modules.find((item) => item.enabled === 1 && item.module_code === code);

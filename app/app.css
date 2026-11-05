@@ -34903,3 +34903,15 @@ html[data-motion="off"] *::after {
 .order-financial-workspace .settlement-handoff { margin: 0; }
 @media (max-width: 640px) { .order-financial-tabs { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); } .order-financial-tabs a { padding-inline: 8px; } .order-financial-body .form-grid { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { .order-financial-tabs a { transition: none; } }
+
+/* Boss uses the existing work surfaces as self; ordinary account layouts stay unchanged. */
+.boss-warehouse-entry { display: grid; gap: 10px; }
+.boss-warehouse-entry p { margin: 0; }
+.boss-warehouse-entry .row-actions { display: flex; align-items: end; gap: 12px; flex-wrap: wrap; }
+.boss-warehouse-entry .field { flex: 1 1 220px; max-width: 420px; min-width: 0; }
+.boss-warehouse-entry select { width: 100%; }
+.boss-warehouse-switch { display: grid; gap: 8px; margin-top: 10px; }
+.boss-warehouse-switch label { display: grid; gap: 6px; min-width: 0; }
+.boss-warehouse-switch select { width: 100%; min-width: 0; }
+.boss-warehouse-switch button, .boss-warehouse-return button { width: 100%; }
+.boss-warehouse-return { margin: 8px 12px; }

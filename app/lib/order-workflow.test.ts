@@ -10,6 +10,17 @@ import {
 } from "./order-workflow";
 
 describe("assigned order approval", () => {
+  it("allows the boss to approve another person's submitted order without approving closed states", () => {
+    const input = { status: "submitted", positionCode: "BOSS", roleCodes: ["pos_boss"], currentAssigneeUserId: "supervisor", currentUserId: "boss" };
+    expect(isAssignedOrderApprover(input)).toBe(true);
+    for (const status of ["draft", "confirmed", "completed", "cancelled"]) expect(isAssignedOrderApprover({ ...input, status })).toBe(false);
+    expect(isAssignedOrderApprover({ ...input, positionCode: "OPERATION_SUPERVISOR", roleCodes: ["pos_operation_supervisor"] })).toBe(false);
+  });
+  it.each(["submit", "approve", "reject", "dispatch", "complete"])("gives boss authority for %s but does not promote another role", actionCode => {
+    const input = { actionCode, positionCode: "BOSS", currentAssigneeUserId: "somebody-else", salespersonUserId: "sales", currentUserId: "owner" };
+    expect(canRunOrderWorkflowAction(input)).toBe(true);
+    expect(canRunOrderWorkflowAction({ ...input, positionCode: "DEVELOPER" })).toBe(false);
+  });
   it("allows only the assigned user while the order is submitted", () => {
     expect(
       isAssignedOrderApprover({

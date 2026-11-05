@@ -6,6 +6,7 @@ import { writeAudit } from "../lib/audit.server";
 import { valueOf } from "../lib/validation";
 import { sessionSlotFromRequest, withSessionSlot } from "../lib/session-slot";
 import { canUseAdminSite } from "../lib/site-account-access";
+import { isBossBusinessActor } from "../lib/permission-blocks";
 
 export async function loader({ request }: Route.LoaderArgs) {
   throw redirect(withSessionSlot("/login", sessionSlotFromRequest(request)));
@@ -19,7 +20,7 @@ export async function action({ request }: Route.ActionArgs) {
     return new Response("不支持的站点", { status: 400 });
   }
 
-  const sourceSite = target === "warehouse" ? "admin" : "warehouse";
+  const sourceSite = target === "warehouse" && valueOf(form, "sourceSite") !== "warehouse" ? "admin" : "warehouse";
   const current = await getSessionUser(
     request,
     sourceSite,
@@ -28,6 +29,9 @@ export async function action({ request }: Route.ActionArgs) {
   if (!current) throw redirect(sourceSite === "warehouse" ? "/warehouse/login" : "/login");
 
   if (target === "warehouse") {
+    if (sourceSite === "warehouse" && !isBossBusinessActor(current)) {
+      return new Response("普通仓库账号不能切换至其他仓库", { status: 403 });
+    }
     if (!current.permissions.includes("warehouse.view")) {
       return new Response("当前账号没有仓库作业访问权限", { status: 403 });
     }
@@ -40,6 +44,9 @@ export async function action({ request }: Route.ActionArgs) {
       ? requestedWarehouseTo
       : "/warehouse";
     const warehouseUrl = new URL(safeWarehouseTo, "http://local");
+    if (warehouseUrl.origin !== "http://local" || !(warehouseUrl.pathname === "/warehouse" || warehouseUrl.pathname.startsWith("/warehouse/"))) {
+      return new Response("仓库目标地址无效", { status: 400 });
+    }
     const requestedWarehouseId = warehouseUrl.searchParams.get("warehouseId");
     const warehouse = await env.DB.prepare(
       `SELECT warehouse.id
@@ -76,7 +83,7 @@ export async function action({ request }: Route.ActionArgs) {
       resourceType: "session",
       organizationId: current.organizationId,
       actorUserId: current.userId,
-      metadata: { from: current.site, to: "warehouse" },
+      metadata: { from: current.site, to: "warehouse", warehouseId: warehouse.id, actingAsSelf: true, bossStandIn: isBossBusinessActor(current) },
     });
     return redirect(withSessionSlot(warehouseTo, sessionSlot), {
       headers: {

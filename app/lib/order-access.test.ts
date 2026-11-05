@@ -426,6 +426,16 @@ describe("order access", () => {
     })).toBe(false);
   });
 
+  it("keeps canonical BOSS open work visible and actionable without granting ordinary accounts the same scope", () => {
+    const boss = { ...baseUser, positionCode: "BOSS", roleCodes: ["pos_boss"], dataScope: "self" as const };
+    expect(canViewAllOrders(boss)).toBe(true);
+    expect(canSeeScopedOrder(boss, { assignee_user_id: "another-person" })).toBe(true);
+    expect(currentOrderActionSql(boss, "work_order")).toEqual({ sql: "work_order.status NOT IN ('completed','cancelled')", values: [] });
+    for (const status of ["completed", "cancelled"]) expect(canOperateCurrentOrder(boss, { status, current_assignee_user_id: "another-person" })).toBe(false);
+    expect(canViewAllOrders({ ...baseUser, dataScope: "self" })).toBe(false);
+    expect(currentOrderActionSql(baseUser).values).toEqual(["user-a", "user-a", "user-a"]);
+  });
+
   it("grants owner and all-scope accounts every order", () => {
     expect(orderVisibilitySql({ ...baseUser, roleCodes: ["owner"] }).sql).toBe("1=1");
     expect(canSeeScopedOrder({
