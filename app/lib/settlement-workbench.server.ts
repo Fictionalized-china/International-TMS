@@ -21,7 +21,7 @@ export type ReconciliationRow={
   id:string;document_number:string;direction:"receivable"|"payable";counterparty_name:string;
   settlement_entity:string;currency:string;total_amount:number;status:string;notes:string|null;
   confirmed_at:string|null;created_at:string;expense_count:number;orders:string|null;order_refs:string|null;
-  invoiced_amount:number;settled_amount:number;
+  invoiced_amount:number;settled_amount:number;registered_payment_amount?:number;
 };
 
 export type InvoiceRecordRow={
@@ -33,7 +33,7 @@ export type InvoiceRecordRow={
 export type CashTransactionRow={
   id:string;transaction_number:string;direction:"receipt"|"payment";counterparty_name:string;
   currency:string;amount:number;occurred_on:string;settlement_entity:string;account_name:string;
-  status:string;allocated_amount:number;created_at:string;
+  status:string;allocated_amount:number;created_at:string;payment_reconciliation_id?:string|null;
 };
 
 export async function loadSettlementWorkbench(db:D1Database,organizationId:string){
@@ -191,7 +191,7 @@ export async function recordCashTransaction(db:D1Database,input:{organizationId:
       if(statement.counterparty_name!==input.counterpartyName || statement.currency!==input.currency.toUpperCase()) throw new Error("付款往来单位、币种与付款申请不一致");
       await assertMeetingSignoffsComplete(db,input.organizationId,await loadReconciliationOrderIds(db,input.organizationId,statement.id),"payable",true);
       const paid=await db.prepare("SELECT COALESCE(SUM(amount),0) amount FROM settlement_cash_transactions WHERE organization_id=? AND payment_reconciliation_id=? AND status!='void'").bind(input.organizationId,statement.id).first<{amount:number}>();
-      if(input.amount+Number(paid?.amount??0)>Number(statement.total_amount)+0.009) throw new Error("登记付款总额超过已审批的付款申请金额");
+      if(input.amount+Number(paid?.amount??0)>Number(statement.total_amount)+0.009) throw new Error(`登记付款总额超过已审批的付款申请金额；本账单已登记 ${Number(paid?.amount??0).toFixed(2)}，请核对现有流水并办理核销，勿重复登记`);
       paymentReconciliationId=statement.id;
     }
   }

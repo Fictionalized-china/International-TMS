@@ -34892,6 +34892,12 @@ html[data-motion="off"] *::after {
 .order-financial-body { display: grid; gap: 16px; min-width: 0; }
 .order-financial-body .form-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; align-items: end; }
 .order-financial-body .span-2 { grid-column: 1 / -1; }
+.order-financial-body .settlement-cash-form > :is(.settlement-cash-notes, .financial-cash-submit, .financial-form-feedback) { grid-column: 1 / -1; }
+.order-financial-body .form-grid > * { min-width: 0; }
+.order-financial-body .billing-card-operation > summary { min-height: 38px; }
+.order-financial-body .billing-card-operation > summary:hover { background: #eef4f9; }
+.order-financial-body .billing-card-operation > summary:focus-visible { outline: 2px solid #f76b36; outline-offset: 2px; }
+.financial-form-feedback { grid-column: 1 / -1; overflow-wrap: anywhere; }
 .order-financial-body .settlement-selector,.order-financial-body .reconciliation-card { margin-bottom: 16px; }
 .order-financial-body h3,.order-financial-body p { margin: 0; }
 .order-financial-workspace .settlement-handoff { margin: 0; }

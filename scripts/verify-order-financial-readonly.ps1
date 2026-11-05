@@ -43,13 +43,25 @@ foreach($index in @(7,10,11)){
   $page=Read-Order $context $tab
   if($index -in @(7,10)){
     $direction=if($index -eq 7){'receivable'}else{'payable'}
-    if(!@($page.Forms | Where-Object {$_ -match 'value="create_reconciliation"' -and $_ -match ('name="direction"[^>]*value="'+$direction+'"')}).Count){throw "Slot $index has no own-direction creation form"}
+    $hasCreation=@($page.Forms | Where-Object {$_ -match 'value="create_reconciliation"' -and $_ -match ('name="direction"[^>]*value="'+$direction+'"')}).Count -gt 0
+    $hasStatement=$page.Html -match ('billing-flow-chip '+$direction)
+    if(!$hasCreation -and !$hasStatement){throw "Slot $index has neither an own-direction creation form nor an existing statement"}
     if($index -eq 10 -and @($page.Forms | Where-Object {$_ -match 'value="create_reconciliation"' -and $_ -match 'name="direction"[^>]*value="receivable"'}).Count){throw 'Finance has an unconfigured AR creator action'}
   }
   if($index -eq 10){
     $offline=Read-Order $context 'offline'
     if($offline.Html -notmatch 'name="intent"[^>]*value="offline"|已登记：'){throw 'Finance offline approval entrance missing'}
   }
-  if($index -eq 11 -and $page.Html -notmatch '请先在“对账办理”生成并确认|匹配收付款流水并核销'){throw 'Cashier has no clear next-step explanation'}
+  if($index -eq 11){
+    if($page.Html -notmatch '请先在“对账办理”生成并确认|匹配收付款流水并核销|已结清'){throw 'Cashier has no clear next-step explanation'}
+    foreach($form in @($page.Forms | Where-Object {$_ -match 'value="allocate_cash"'})){
+      if($form -match '<option[^>]* selected=""'){
+        $amount=[regex]::Match($form,'name="amount"[^>]*value="([^"]+)"')
+        if(!$amount.Success -or [double]::Parse($amount.Groups[1].Value,[Globalization.CultureInfo]::InvariantCulture) -le 0){throw 'Cash allocation has a selected transaction but no positive suggested amount'}
+        if($form -match '<button[^>]*disabled'){throw 'Cash allocation is unexpectedly disabled despite having an available transaction'}
+      }
+    }
+    if($page.Html -match 'financial-cash-recorded' -and @($page.Forms | Where-Object {$_ -match 'value="record_cash"' -and $_ -match 'name="direction"[^>]*value="payment"' -and $_ -match 'max="0"'}).Count){throw 'Fully paid statement still invites a duplicate payment'}
+  }
 }
 Write-Output 'Order financial read-only verification passed. No financial forms submitted.'

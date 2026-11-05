@@ -253,6 +253,7 @@ describe("central settlement workbench access integration", () => {
 
     await expect(invokeAction(request)).resolves.toEqual({
       formError: "当前账号没有组织级结算范围，不能登记组织收付款流水",
+      financialIntent: "record_cash", reconciliationId: "",
     });
     expect(harness.recordCashTransaction).not.toHaveBeenCalled();
 
@@ -272,6 +273,7 @@ describe("central settlement workbench access integration", () => {
 
     expect(result).toEqual({
       formError: "当前会话、岗位或角色已失效，请重新登录后再试",
+      financialIntent: "create_reconciliation", reconciliationId: "",
     });
     expect(harness.loadFreshActor).toHaveBeenCalledWith(harness.DB, {
       sessionId: "session-1",
@@ -294,6 +296,7 @@ describe("central settlement workbench access integration", () => {
 
     expect(result).toEqual({
       formError: "对账单状态已变化，请刷新后重试",
+      financialIntent: "confirm_reconciliation", reconciliationId: "",
     });
     expect(harness.writeAudit).not.toHaveBeenCalled();
   });

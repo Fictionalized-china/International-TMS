@@ -79,6 +79,9 @@ function reconciliationCte(actor: SettlementWorkbenchActor) {
   return { sql: `WITH reconciliation_data AS (
     SELECT r.id,r.document_number,r.direction,r.counterparty_name,r.settlement_entity,r.currency,
       r.total_amount,r.status,r.notes,r.confirmed_at,r.created_at,
+      COALESCE((SELECT SUM(payment.amount) FROM settlement_cash_transactions payment
+        WHERE payment.organization_id=r.organization_id AND payment.payment_reconciliation_id=r.id
+          AND payment.status!='void'),0) registered_payment_amount,
       COUNT(DISTINCT l.expense_id) expense_count,
       GROUP_CONCAT(DISTINCT o.order_number) orders,
       GROUP_CONCAT(DISTINCT o.id||'|'||o.order_number) order_refs,
@@ -146,7 +149,7 @@ function cashCte(actor: SettlementWorkbenchActor) {
       )`;
   return { sql: `${reconciliation.sql}, cash_data AS (
     SELECT t.id,t.transaction_number,t.direction,t.counterparty_name,t.currency,t.amount,t.occurred_on,
-      t.settlement_entity,t.account_name,t.created_at,COALESCE(SUM(a.amount),0) allocated_amount,
+      t.settlement_entity,t.account_name,t.created_at,t.payment_reconciliation_id,COALESCE(SUM(a.amount),0) allocated_amount,
       CASE
         WHEN COALESCE(SUM(a.amount),0)>=t.amount-0.009 THEN 'allocated'
         WHEN COALESCE(SUM(a.amount),0)>0.009 THEN 'partially_allocated'

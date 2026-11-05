@@ -1615,8 +1615,9 @@ export async function action({ request, params, context }: Route.ActionArgs) {
   if (moduleCode === "costs" && orderFinancialIntents.includes(intent)) {
     try {
       await assertOrderFinancialSubmission(env.DB, current, orderId, form);
-      return intent === "offline" ? await settlementApprovalsAction({ request: financialRequest, params: {}, context } as Parameters<typeof settlementApprovalsAction>[0]) : await billingAction({ request: financialRequest, params: {}, context } as Parameters<typeof billingAction>[0]);
-    } catch (error) { return { formError: error instanceof Error ? error.message : "本单财务办理失败" }; }
+      const result = intent === "offline" ? await settlementApprovalsAction({ request: financialRequest, params: {}, context } as Parameters<typeof settlementApprovalsAction>[0]) : await billingAction({ request: financialRequest, params: {}, context } as Parameters<typeof billingAction>[0]);
+      return { ...result, financialIntent: intent, reconciliationId: valueOf(form, "reconciliationId") };
+    } catch (error) { return { formError: error instanceof Error ? error.message : "本单财务办理失败", financialIntent: intent, reconciliationId: valueOf(form, "reconciliationId") }; }
   }
   if (moduleCode === "costs" && intent === "settlement_reopen") {
     try {

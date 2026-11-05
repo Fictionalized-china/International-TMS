@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { Form, Link, useLocation, useNavigation, useActionData } from "react-router";
 import { useState,useEffect } from "react";
+import { cashRegistrationRemaining, matchingStatementCash } from "../lib/settlement-cash-view";
 import type { Route } from "./+types/admin.billing";
 import { QueryPagination } from "../components/QueryPagination";
 import { OrderNumberLink, OrderNumberLinkList } from "../components/EntityNumberLink";
@@ -275,7 +276,7 @@ export async function action({ request }: Route.ActionArgs) {
     }
     if (intent === "record_cash") {
       const cashAccess = recordCashUiAccess(current);
-      if (!cashAccess.canWrite) return { formError: cashAccess.reason ?? "当前不可登记收付款流水" };
+      if (!cashAccess.canWrite) return { formError: cashAccess.reason ?? "当前不可登记收付款流水", financialIntent: intent, reconciliationId: valueOf(form, "reconciliationId") };
       const direction = valueOf(form, "direction");
       if (direction !== "receipt" && direction !== "payment") {
         return { formError: "收付款方向无效" };
@@ -302,14 +303,14 @@ export async function action({ request }: Route.ActionArgs) {
         number: result.number,
         direction,
       });
-      return { success: `流水 ${result.number} 已登记；可在当前页匹配对账单并核销`,cashRecordedId:result.id };
+      return { success: `流水 ${result.number} 已登记；请在上方“匹配收付款流水并核销”选择该流水并确认核销，勿重复登记`,cashRecordedId:result.id, cashRecordedRequestId: valueOf(form, "requestId"), financialIntent: intent, reconciliationId: valueOf(form, "reconciliationId") };
     }
     if (intent === "allocate_cash") {
       const transactionId = valueOf(form, "transactionId");
       const reconciliationId = valueOf(form, "reconciliationId");
       const source = { kind: "reconciliation_id", id: reconciliationId } as const;
       const blocked = await settlementActionBlocked(current, "allocate_cash", source);
-      if (blocked) return { formError: blocked };
+      if (blocked) return { formError: blocked, financialIntent: intent, reconciliationId };
       await allocateCashTransaction(env.DB, {
         organizationId: current.organizationId,
         transactionId,
@@ -323,11 +324,11 @@ export async function action({ request }: Route.ActionArgs) {
       await audit(request, current, "settlement.cash.allocate", "settlement_cash_transaction", transactionId, {
         reconciliationId,
       });
-      return { success: "核销完成；流水未分配余额和订单费用余额已同步更新" };
+      return { success: "核销完成；流水未分配余额和订单费用余额已同步更新", financialIntent: intent, reconciliationId };
     }
     return { formError: "操作无效" };
   } catch (error) {
-    return { formError: error instanceof Error ? error.message : "操作失败，请稍后重试" };
+    return { formError: error instanceof Error ? error.message : "操作失败，请稍后重试", financialIntent: intent, reconciliationId: valueOf(form, "reconciliationId") };
   }
 }
 
@@ -833,11 +834,7 @@ export function ReconciliationSheet({ row, mode, access, busy, cash = [], formAc
   const invoiceRemaining = Math.max(0, row.total_amount - row.invoiced_amount);
   if (!access.visible) return null;
   const settlementRemaining = Math.max(0, row.total_amount - row.settled_amount);
-  const matchingCash = cash.filter((item) =>
-    item.direction === (row.direction === "receivable" ? "receipt" : "payment") &&
-    item.counterparty_name === row.counterparty_name &&
-    item.currency === row.currency &&
-    item.amount - item.allocated_amount > 0.009);
+  const matchingCash = matchingStatementCash(row, cash);
   const visualStatus = reconciliationStatus(row, settlementRemaining);
   const canManage = access.canWrite;
 
@@ -895,24 +892,54 @@ export function ReconciliationSheet({ row, mode, access, busy, cash = [], formAc
     {mode === "invoice" && invoiceRemaining > 0.009 && !canManage &&
       <ReadOnlyNotice>{access.reason ?? "当前不可登记发票。"}</ReadOnlyNotice>}
 
-    {mode === "cash" && canManage && settlementRemaining > 0.009 && <details className="billing-card-operation">
-      <summary>匹配收付款流水并核销</summary>
-      <Form method="post" action={formAction} className="form-grid compact billing-allocation-form">
-        <input type="hidden" name="intent" value="allocate_cash" />
-        <input type="hidden" name="requestId" value={allocationRequestId} />
-        <input type="hidden" name="reconciliationId" value={row.id} />
-        <Sel name="transactionId" label="可用流水" items={matchingCash.map((item) => [
-          item.id,
-          `${item.transaction_number} · 剩余 ${(item.amount - item.allocated_amount).toFixed(2)}`,
-        ])} />
-        <Num name="amount" label={`本次核销（剩余 ${settlementRemaining.toFixed(2)}）`} required max={settlementRemaining} />
-        <button className="primary" disabled={busy || !matchingCash.length}>确认核销</button>
-        {!matchingCash.length && <small className="field-error">尚无同方向、同往来单位、同币种的可用流水，请先登记。</small>}
-      </Form>
+    {mode === "cash" && canManage && settlementRemaining > 0.009 && <details className="billing-card-operation" open>
+      <summary>匹配收付款流水并核销 · {matchingCash.length ? `${matchingCash.length} 笔可用流水` : "请先登记流水"}</summary>
+      <CashAllocationForm row={row} cash={matchingCash} requestId={allocationRequestId} busy={busy} formAction={formAction}/>
     </details>}
+    {mode === "cash" && <FinancialActionFeedback intent="allocate_cash" reconciliationId={row.id}/>}
     {mode === "cash" && settlementRemaining > 0.009 && !canManage &&
       <ReadOnlyNotice>{access.reason ?? "当前不可核销该对账单。"}</ReadOnlyNotice>}
   </article>;
+}
+
+type FinancialFeedback = { financialIntent?: string; reconciliationId?: string; success?: string; formError?: string; cashRecordedId?: string; cashRecordedRequestId?: string };
+
+function FinancialActionFeedback({ intent, reconciliationId }: { intent: string; reconciliationId?: string }) {
+  const data = useActionData<FinancialFeedback>();
+  if (data?.financialIntent !== intent || (reconciliationId && data.reconciliationId !== reconciliationId)) return null;
+  const message = data.formError || data.success;
+  return message ? <p className={`financial-form-feedback alert ${data.formError ? "error" : "success"}`} role={data.formError ? "alert" : "status"}>{message}</p> : null;
+}
+
+function invalidCashField(target: EventTarget) {
+  if (target instanceof HTMLInputElement || target instanceof HTMLSelectElement) {
+    return `请检查“${target.closest("label")?.querySelector("span")?.textContent || "必填项"}”：${target.validationMessage}`;
+  }
+  return "请检查必填项和金额后再提交。";
+}
+
+function CashAllocationForm({ row, cash, requestId, busy, formAction }: {
+  row: ReconciliationRow; cash: CashTransactionRow[]; requestId: string; busy: boolean; formAction?: string;
+}) {
+  const [choice, setChoice] = useState("");
+  const [validationError, setValidationError] = useState("");
+  const selected = cash.find(item => item.id === choice) ?? (cash.length === 1 ? cash[0] : undefined);
+  const remaining = Math.max(0, row.total_amount - row.settled_amount);
+  const max = selected ? Math.max(0, Math.min(remaining, selected.amount - selected.allocated_amount)) : remaining;
+  return <Form method="post" action={formAction} className="form-grid compact billing-allocation-form" aria-busy={busy}
+    onInvalidCapture={event => setValidationError(invalidCashField(event.target))} onChange={() => setValidationError("")}>
+    <input type="hidden" name="intent" value="allocate_cash"/>
+    <input type="hidden" name="requestId" value={requestId}/>
+    <input type="hidden" name="reconciliationId" value={row.id}/>
+    <label className="field"><span>可用流水（必选）</span><select name="transactionId" required value={selected?.id ?? ""} onChange={event => setChoice(event.currentTarget.value)}>
+      <option value="">请选择</option>{cash.map(item => <option key={item.id} value={item.id}>{item.transaction_number} · {item.occurred_on} · 剩余 {(item.amount - item.allocated_amount).toFixed(2)}</option>)}
+    </select></label>
+    <Num key={`${selected?.id}:${selected?.allocated_amount}:${row.settled_amount}`} name="amount" label={`本次核销金额（剩余 ${remaining.toFixed(2)}）`} required min={0.01} max={max} defaultValue={selected ? max.toFixed(2) : ""}/>
+    <p className="span-2">核对流水和金额后点击确认，系统才会完成核销；不会自动扣款或重复付款。</p>
+    {validationError && <p className="field-error span-2" role="alert">{validationError}</p>}
+    {!cash.length && <p className="field-error span-2">尚无同方向、同往来单位、同币种且可用于本账单的流水，请先在下方登记。</p>}
+    <button className="primary span-2" disabled={busy || !cash.length}>{busy ? "正在提交，请勿重复操作…" : "确认核销"}</button>
+  </Form>;
 }
 
 export function CashEntryForm({ users, organizationName, busy, formAction, statement }: {
@@ -922,16 +949,24 @@ export function CashEntryForm({ users, organizationName, busy, formAction, state
   formAction?: string;
   statement?: ReconciliationRow;
 }) {
-  const [requestId,setRequestId]=useState(()=>crypto.randomUUID()),actionData=useActionData<typeof action>();
-  const savedId=actionData&&'cashRecordedId' in actionData?actionData.cashRecordedId:undefined;
-  useEffect(()=>{if(savedId)setRequestId(crypto.randomUUID());},[savedId]);
+  const [requestId,setRequestId]=useState(()=>crypto.randomUUID()),actionData=useActionData<FinancialFeedback>();
+  const [validationError, setValidationError] = useState("");
+  const remaining = statement ? cashRegistrationRemaining(statement) : undefined;
+  if (statement?.direction === "payable" && remaining !== undefined && remaining <= 0.009) return <p className="alert info financial-cash-recorded" role="status">本账单付款流水已足额登记，无需重复登记。尚待核销 {statement.currency} {Math.max(0, statement.total_amount - statement.settled_amount).toFixed(2)}；请在上方选择现有流水并点击“确认核销”。</p>;
+  // Keep the successful request's idempotency key until the user explicitly
+  // starts another real transaction, rather than silently enabling a replay.
+  if (actionData?.cashRecordedId && actionData.cashRecordedRequestId === requestId && actionData.reconciliationId === (statement?.id ?? "")) return <div className="financial-cash-recorded">
+    <FinancialActionFeedback intent="record_cash" reconciliationId={statement?.id}/>
+    <button type="button" className="secondary" disabled={busy} onClick={() => setRequestId(crypto.randomUUID())}>继续登记另一笔实际流水</button>
+  </div>;
   return <details className="billing-entry-disclosure">
     <summary><span>登记一笔新流水</span><small>客户收款或供应商付款</small></summary>
-    <Form method="post" action={formAction} className="form-grid compact settlement-cash-form">
+    <Form method="post" action={formAction} className="form-grid compact settlement-cash-form" aria-busy={busy}
+      onInvalidCapture={event => setValidationError(invalidCashField(event.target))} onChange={() => setValidationError("")}>
       <input type="hidden" name="intent" value="record_cash" />
       <input type="hidden" name="requestId" value={requestId} />
       {statement ? <><input type="hidden" name="reconciliationId" value={statement.id}/><input type="hidden" name="direction" value={statement.direction === "receivable" ? "receipt" : "payment"}/><input type="hidden" name="counterpartyName" value={statement.counterparty_name}/><input type="hidden" name="currency" value={statement.currency}/><input type="hidden" name="paymentStatementNumber" value={statement.direction === "payable" ? statement.document_number : ""}/><p className="span-2">{statement.direction === "receivable" ? "客户收款" : "供应商付款"} · {statement.counterparty_name} · {statement.currency} · {statement.document_number}</p></> : <><Sel name="direction" label="方向" items={[["receipt", "客户收款"], ["payment", "供应商付款"]]} /><Text name="counterpartyName" label="往来单位" required /><Text name="currency" label="币种" required defaultValue="CNY" /></>}
-      <Num name="amount" label="金额" required />
+      <Num name="amount" label="金额（必填）" required min={0.01} max={remaining} defaultValue={remaining?.toFixed(2) ?? ""}/>
       <label className="field"><span>收 / 付款日期</span><input name="occurredOn" type="date" required /></label>
       <Text name="settlementEntity" label="所属公司" required defaultValue={organizationName} />
       <Text name="accountName" label="银行 / 现金账户" required />
@@ -939,7 +974,9 @@ export function CashEntryForm({ users, organizationName, busy, formAction, state
       <Text name="evidenceReference" label="凭证附件 / 编号" />
       {!statement && <Text name="paymentStatementNumber" label="供应商付款关联应付对账单编号（收款留空）" />}
       <label className="field settlement-cash-notes"><span>备注</span><textarea name="cashNotes" rows={2} /></label>
-      <button className="primary" disabled={busy}>登记收付款流水</button>
+      {validationError && <p className="field-error span-2" role="alert">{validationError}</p>}
+      <FinancialActionFeedback intent="record_cash" reconciliationId={statement?.id}/>
+      <button className="primary financial-cash-submit" disabled={busy}>{busy ? "正在登记，请勿重复操作…" : "登记收付款流水"}</button>
     </Form>
   </details>;
 }
@@ -1021,8 +1058,8 @@ function Text({ name, label, required, defaultValue }: { name: string; label: st
   return <label className="field"><span>{label}</span><input name={name} required={required} defaultValue={defaultValue} /></label>;
 }
 
-function Num({ name, label, required, defaultValue = "0", max }: { name: string; label: string; required?: boolean; defaultValue?: string; max?: number }) {
-  return <label className="field"><span>{label}</span><input name={name} type="number" min="0" max={max} step="0.01" required={required} defaultValue={defaultValue} /></label>;
+function Num({ name, label, required, defaultValue = "0", max, min = 0 }: { name: string; label: string; required?: boolean; defaultValue?: string; max?: number; min?: number }) {
+  return <label className="field"><span>{label}</span><input name={name} type="number" min={min} max={max} step="0.01" required={required} defaultValue={defaultValue} /></label>;
 }
 
 function Sel({ name, label, items }: { name: string; label: string; items: string[][] }) {

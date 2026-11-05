@@ -68,10 +68,41 @@ describe("financial operations remain in the scoped order", () => {
       const cash = fixture.database.prepare("SELECT id FROM settlement_cash_transactions WHERE request_id=?").get(`${direction}-cash`)!;
       const html = await render("cashier", "&financeTab=cash");
       expect(html).toContain('value="allocate_cash"'); expect(html).not.toContain("/admin/billing");
+      const allocation = (html.match(/<form\b[^>]*>[\s\S]*?<\/form>/g) ?? []).find(form => form.includes('value="allocate_cash"'))!;
+      expect(allocation).toContain(`value="${cash.id}" selected=""`);
+      expect(allocation).toContain(`name="amount" value="${Number(amount).toFixed(2)}"`);
+      expect(allocation).toContain('min="0.01"');
+      expect(allocation).not.toContain('disabled=""');
+      expect(html).toContain('class="billing-card-operation" open=""');
+      if (direction === "payable") {
+        // Exact production state: AR already settled, AP paid but not allocated.
+        expect(html).toContain("本账单付款流水已足额登记，无需重复登记");
+        expect(html).not.toContain('value="record_cash"');
+        const view = await loadOrderFinancialWorkspace(fixture.db, harness.actor, "order", new URLSearchParams("financeTab=cash"));
+        expect(view?.statements.items.find(row => row.id === statement.id)?.registered_payment_amount).toBe(50);
+        expect(view?.cash.find(row => row.id === cash.id)?.payment_reconciliation_id).toBe(statement.id);
+        const duplicate = await action(args({ intent: "record_cash", reconciliationId: String(statement.id), direction: "payment", counterpartyName: "供应商", currency: "CNY", amount, occurredOn: "2026-09-01", settlementEntity: "测试", accountName: "本地测试账户", handledByUserId: "cashier", paymentStatementNumber: String(statement.document_number), requestId: "duplicate-payment" }));
+        expect(duplicate).toMatchObject({ financialIntent: "record_cash", reconciliationId: statement.id });
+        expect(duplicate).toHaveProperty("formError", expect.stringContaining("勿重复登记"));
+        expect(fixture.database.prepare("SELECT COUNT(*) n FROM settlement_cash_transactions WHERE direction='payment'").get()?.n).toBe(1);
+      }
       await post("cashier", { intent: "allocate_cash", transactionId: String(cash.id), reconciliationId: String(statement.id), amount, requestId: `${direction}-allocate` });
     }
     expect((await loadFinancialClosure(fixture.db, "org", "order")).complete).toBe(true);
     expect(fixture.database.prepare("SELECT status FROM transport_orders WHERE id='order'").get()?.status).toBe("in_execution");
+  });
+  it("shows only the unpaid registration remainder after a partial payment and exposes its existing cash for allocation", async () => {
+    await setup();
+    await post("finance", { intent: "create_reconciliation", direction: "payable", expenseId: "payable" });
+    const statement = fixture.database.prepare("SELECT id,document_number FROM settlement_reconciliations").get()!;
+    await post("finance", { intent: "confirm_reconciliation", id: String(statement.id) });
+    await post("finance", { intent: "offline", orderId: "order", approver: "测试审批人", approvedAt: "2026-09-01", evidence: "测试凭证" });
+    await post("cashier", { intent: "record_cash", reconciliationId: String(statement.id), direction: "payment", counterpartyName: "供应商", currency: "CNY", amount: "20", occurredOn: "2026-09-01", settlementEntity: "测试", accountName: "测试账户", handledByUserId: "cashier", paymentStatementNumber: String(statement.document_number), requestId: "partial-payment" });
+    const html = await render("cashier", "&financeTab=cash");
+    const registration = (html.match(/<form\b[^>]*>[\s\S]*?<\/form>/g) ?? []).find(form => form.includes('value="record_cash"'))!;
+    expect(registration).toContain('max="30"'); expect(registration).toContain('name="amount" value="30.00"');
+    const allocation = (html.match(/<form\b[^>]*>[\s\S]*?<\/form>/g) ?? []).find(form => form.includes('value="allocate_cash"'))!;
+    expect(allocation).toContain('max="20"'); expect(allocation).toContain('name="amount" value="20.00"');
   });
   it("rejects foreign-order references, mismatched cash and non-financial accounts before any financial writes", async () => {
     await setup();
