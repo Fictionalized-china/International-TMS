@@ -64,7 +64,7 @@ import {
   runtimeWorkflowFieldPolicy,
 } from "./workflow-field-runtime";
 import { workflowFieldsForStep } from "./order-workflow-field-presentation";
-import { loadOrderModuleWorkflowFields } from "./workflow-fields.server";
+import { createOrderWorkflowFieldReader, loadOrderModuleWorkflowFields } from "./workflow-fields.server";
 
 describe("frozen workflow field loading", () => {
   beforeEach(() => {
@@ -98,6 +98,24 @@ describe("frozen workflow field loading", () => {
       true,
     )).toMatchObject({ visible: false, required: false, configured: false });
     expect(harness.sql.some((query) => query.includes("FROM workflow_step_fields f"))).toBe(false);
+    expect(harness.sql.some((query) => query.includes("SELECT o.*,wi.id bound_instance_id"))).toBe(false);
+  });
+
+  it("shares only common facts within a read phase and rereads them in the next phase", async () => {
+    harness.state.snapshotFields = [{
+      id: "field", workflow_id: "workflow-1", step_key: "outbound_transport", step_name: "Outbound",
+      module_code: "consignment", field_key: "cargo_description", label: "Cargo", field_type: "text",
+      is_required: 1, is_active: 1, sort_order: 1, options_text: null, help_text: null,
+    }];
+    const read = createOrderWorkflowFieldReader("org-1", "order-1");
+    await Promise.all([read("consignment"), read("review")]);
+    const count = (fragment: string) => harness.sql.filter(sql => sql.includes(fragment)).length;
+    expect(count("SELECT o.workflow_instance_id,wi.id matched_instance_id,wi.workflow_id")).toBe(1);
+    expect(count("SELECT o.*,wi.id bound_instance_id")).toBe(1);
+    expect(count("FROM workflow_instance_fields f")).toBe(2);
+    await createOrderWorkflowFieldReader("org-1", "order-1")("consignment");
+    expect(count("SELECT o.workflow_instance_id,wi.id matched_instance_id,wi.workflow_id")).toBe(2);
+    expect(count("SELECT o.*,wi.id bound_instance_id")).toBe(2);
   });
 
   it("fails closed when the order keeps a dangling frozen instance id", async () => {

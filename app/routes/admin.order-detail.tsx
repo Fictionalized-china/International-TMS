@@ -83,9 +83,10 @@ import {
 } from "../lib/workflow-execution.server";
 import { syncOrderBusinessWorkflow } from "../lib/business-workflow.server";
 import {
-  loadOrderModuleWorkflowFields,
+  createOrderWorkflowFieldReader,
   type WorkflowFieldState,
 } from "../lib/workflow-fields.server";
+import { loadWorkflowFieldGroups } from "../lib/workflow-field-read-batch";
 import {
   ConsignmentReviewActionBar,
   EmbeddedOrderModule,
@@ -617,15 +618,11 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
     workflowFormRows.results,
     selectedStepKey,
   ) as OrderModuleCode[];
-  const currentWorkflowFieldGroups: Awaited<
-    ReturnType<typeof loadOrderModuleWorkflowFields>
-  >[] = [];
-  for (const moduleCode of currentWorkflowModuleCodes) {
-    currentWorkflowFieldGroups.push(
-      await loadOrderModuleWorkflowFields(current.organizationId, id, moduleCode),
-    );
-  }
-  const currentWorkflowFields = currentWorkflowFieldGroups.flat();
+  const currentWorkflowFieldGroups = await loadWorkflowFieldGroups(
+    currentWorkflowModuleCodes,
+    createOrderWorkflowFieldReader(current.organizationId, id),
+  );
+  const currentWorkflowFields = [...currentWorkflowFieldGroups.values()].flat();
   const requestedModuleCode = (
     requestUrl.searchParams.get("module") || (
       preferenceAvailable && selectedStepKey === entryPreference!.stepKey
@@ -657,7 +654,9 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
         request,
         params: { orderId: id, moduleCode: embeddedModuleCode },
         context,
-      } as Parameters<typeof orderModuleLoader>[0]);
+      } as Parameters<typeof orderModuleLoader>[0], {
+        request, organizationId: current.organizationId, orderId: id, modules,
+      });
     } catch (error) {
       if (error instanceof Response && error.status >= 300 && error.status < 400) {
         embeddedModuleRedirect = error.headers.get("Location");

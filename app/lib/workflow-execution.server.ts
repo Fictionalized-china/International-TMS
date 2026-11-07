@@ -4,10 +4,10 @@ import {
   mysqlTransactionRetryDelayMs,
 } from "../runtime/mysql-transaction-policy";
 import {
-  missingRequiredWorkflowModuleStepFields,
+  createOrderWorkflowFieldReader,
   snapshotWorkflowFieldsForInstance,
 } from "./workflow-fields.server";
-import type { OrderModuleCode } from "./order-modules";
+import { loadWorkflowPlacementBlockers } from "./workflow-field-read-batch";
 import { workflowVersionSwitchDecision } from "./workflow-version-policy";
 import {
   selectWorkflowExecutionCurrentStep,
@@ -193,16 +193,12 @@ export async function synchronizeWorkflowExecution(input:{
     module_code:string;step_key:string;step_sort_order:number;step_status:string;
     task_count:number;pending_required:number;
   }>();
-  const fieldBlockers = new Set<string>();
-  for (const item of modules.results) {
-    const missing = await missingRequiredWorkflowModuleStepFields(
-      input.organizationId,
-      input.orderId,
-      item.step_key,
-      item.module_code as OrderModuleCode,
-    );
-    if (missing.length) fieldBlockers.add(item.id);
-  }
+  // This phase has no writes: reuse each module's full frozen field snapshot,
+  // but still evaluate every placement's own required fields independently.
+  const fieldBlockers = await loadWorkflowPlacementBlockers(
+    modules.results,
+    createOrderWorkflowFieldReader(input.organizationId, input.orderId),
+  );
   // A completed signature task is not evidence of settled funds. Keep the final
   // required costs placement open even when its cash fields are optional.
   // Passed business nodes remain historical; only unfinished settlement is gated.

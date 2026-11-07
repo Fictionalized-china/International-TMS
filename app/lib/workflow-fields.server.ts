@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { nonNegativeNumberPresent } from "./validation";
 import { chunkD1Values, d1Placeholders } from "./d1-bindings";
 import type { OrderModuleCode } from "./order-modules";
+import { loadWorkflowFieldGroups } from "./workflow-field-read-batch";
 import { domesticTransportPayableWorkflowValues } from "./transport-workflow";
 import { orderDocumentPlacements } from "./order-documents";
 import { isActualExitTrackingMilestone } from "./batch-tracking.shared";
@@ -710,12 +711,32 @@ type FrozenModuleFieldPlacement = {
   sort_order: number;
 };
 
+type WorkflowFieldReadPhase = Map<string, Promise<unknown>>;
+
+async function readWorkflowFieldFact<T>(
+  phase: WorkflowFieldReadPhase | undefined,
+  key: string,
+  load: () => Promise<T>,
+): Promise<T> {
+  if (!phase) return load();
+  if (!phase.has(key)) phase.set(key, load());
+  return phase.get(key) as Promise<T>;
+}
+
+/** Construct anew for each write-free read phase, never across mutations. */
+export function createOrderWorkflowFieldReader(organizationId: string, orderId: string) {
+  const phase: WorkflowFieldReadPhase = new Map();
+  return (moduleCode: OrderModuleCode) =>
+    loadOrderModuleWorkflowFields(organizationId, orderId, moduleCode, phase);
+}
+
 export async function loadOrderModuleWorkflowFields(
   organizationId: string,
   orderId: string,
   moduleCode: OrderModuleCode,
+  readPhase?: WorkflowFieldReadPhase,
 ): Promise<WorkflowFieldState[]> {
-  const binding = await env.DB.prepare(
+  const binding = await readWorkflowFieldFact(readPhase, "binding", () => env.DB.prepare(
     `SELECT o.workflow_instance_id,wi.id matched_instance_id,wi.workflow_id
      FROM transport_orders o
      LEFT JOIN workflow_instances wi
@@ -729,7 +750,7 @@ export async function loadOrderModuleWorkflowFields(
       workflow_instance_id: string | null;
       matched_instance_id: string | null;
       workflow_id: string | null;
-    }>();
+    }>());
   if (!binding) return [];
   let raw: RawField[] = [];
   let frozenPlacements: FrozenModuleFieldPlacement[] = [];
@@ -790,7 +811,9 @@ export async function loadOrderModuleWorkflowFields(
     }
   }
   const rules = raw.map(toRule);
-  const presence = await resolveFieldPresence(organizationId, orderId, moduleCode, rules);
+  const presence = rules.length
+    ? await resolveFieldPresence(organizationId, orderId, moduleCode, rules, readPhase)
+    : new Map<string, Presence>();
   const states = rules.map((rule) => ({
     ...rule,
     present: presence.get(rule.fieldKey)?.present ?? false,
@@ -876,11 +899,8 @@ export async function missingRequiredWorkflowStepFields(
     "exceptions",
     "review",
   ];
-  const groups: Awaited<ReturnType<typeof loadOrderModuleWorkflowFields>>[] = [];
-  for (const moduleCode of moduleCodes) {
-    groups.push(await loadOrderModuleWorkflowFields(organizationId, orderId, moduleCode));
-  }
-  return groups
+  const groups = await loadWorkflowFieldGroups(moduleCodes, createOrderWorkflowFieldReader(organizationId, orderId));
+  return [...groups.values()]
     .flat()
     .filter(
       (field) =>
@@ -1116,9 +1136,10 @@ async function resolveFieldPresence(
   orderId: string,
   moduleCode: OrderModuleCode,
   rules: WorkflowFieldRule[],
+  readPhase?: WorkflowFieldReadPhase,
 ) {
   const result = new Map<string, Presence>();
-  const order = await env.DB.prepare(
+  const order = await readWorkflowFieldFact(readPhase, "order", () => env.DB.prepare(
     `SELECT o.*,wi.id bound_instance_id
      FROM transport_orders o
      LEFT JOIN workflow_instances wi
@@ -1128,7 +1149,7 @@ async function resolveFieldPresence(
      WHERE o.id=? AND o.organization_id=?`,
   )
     .bind(orderId, organizationId)
-    .first<Record<string, unknown>>();
+    .first<Record<string, unknown>>());
   if (!order) return result;
   for (const rule of rules) {
     if (rule.fieldKey in order) setPresence(result, rule.fieldKey, order[rule.fieldKey]);
@@ -1163,7 +1184,7 @@ async function resolveFieldPresence(
     ),
   );
   if (documentRules.length) {
-    const attachments = await env.DB.prepare(
+    const attachments = await readWorkflowFieldFact(readPhase, "documents", () => env.DB.prepare(
       `SELECT m.document_category,m.review_status,COUNT(*) total
        FROM order_attachments a
        JOIN order_document_metadata m ON m.attachment_id=a.id
@@ -1175,7 +1196,7 @@ async function resolveFieldPresence(
         document_category: string;
         review_status: string | null;
         total: number;
-      }>();
+      }>());
     for (const rule of documentRules) {
       const placement = orderDocumentPlacements.find(
         (item) => item.fieldKey === rule.fieldKey,

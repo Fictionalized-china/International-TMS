@@ -41,6 +41,7 @@ import {
   loadOrderModuleActionScope,
   syncCostsModuleStatus,
   syncOrderWorkflowSnapshot,
+  type OrderModuleInstance,
 } from "../lib/order-modules.server";
 import { assignOrderModulesBulk } from "../lib/order-module-bulk-assignment.server";
 import { runOrderWorkflowAction } from "../lib/order-workflow-action.server";
@@ -846,7 +847,15 @@ type OverseasOperation = {
   in_warehouse_package_count: number;
 };
 
-export async function loader({ request, params }: Route.LoaderArgs) {
+export async function loader(
+  { request, params }: Route.LoaderArgs,
+  readSnapshot?: {
+    request: Request;
+    organizationId: string;
+    orderId: string;
+    modules: OrderModuleInstance[];
+  },
+) {
   const current = await requireSessionUser(request, "order.view"),
     orderId = params.orderId,
     moduleCode = params.moduleCode;
@@ -908,7 +917,12 @@ export async function loader({ request, params }: Route.LoaderArgs) {
   const canViewFullExpenseDetails = canViewFullOrderExpenseDetails(
     current.permissions,
   );
-  const modules = await listOrderModules(current.organizationId, orderId);
+  // Only the already-authorized parent loader can supply this read snapshot.
+  // HTTP parameters cannot populate it; actions always do their own fresh checks.
+  const modules = readSnapshot?.request === request && request.method === "GET" &&
+    readSnapshot.organizationId === current.organizationId && readSnapshot.orderId === orderId
+    ? readSnapshot.modules
+    : await listOrderModules(current.organizationId, orderId);
   const module = modules.find((item) => item.module_code === moduleCode);
   if (!module) throw new Response("订单模块不存在", { status: 404 });
   const assignmentManifest = moduleCode === "assignment"
@@ -1616,7 +1630,10 @@ export async function action({ request, params, context }: Route.ActionArgs) {
   if (moduleCode === "costs" && orderFinancialIntents.includes(intent)) {
     try {
       await assertOrderFinancialSubmission(env.DB, current, orderId, form);
-      const result = intent === "offline" ? await settlementApprovalsAction({ request: financialRequest, params: {}, context } as Parameters<typeof settlementApprovalsAction>[0]) : await billingAction({ request: financialRequest, params: {}, context } as Parameters<typeof billingAction>[0]);
+      const financialArgs = { request: financialRequest, params: {}, context, url: new URL(financialRequest.url) };
+      const result = intent === "offline"
+        ? await settlementApprovalsAction({ ...financialArgs, pattern: "/admin/settlement-approvals" } as Parameters<typeof settlementApprovalsAction>[0])
+        : await billingAction({ ...financialArgs, pattern: "/admin/billing" } as Parameters<typeof billingAction>[0]);
       return { ...result, financialIntent: intent, reconciliationId: valueOf(form, "reconciliationId") };
     } catch (error) { return { formError: error instanceof Error ? error.message : "本单财务办理失败", financialIntent: intent, reconciliationId: valueOf(form, "reconciliationId") }; }
   }
