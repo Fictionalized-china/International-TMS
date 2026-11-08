@@ -5,7 +5,7 @@ process.env.MYSQL_POOL_SIZE='1';
 setTimeout(()=>{console.error('Isolated MySQL verification exceeded 90 seconds');process.exit(1);},90000).unref();
 try {
   const {createMysqlD1Database}=await import('../app/runtime/mysql-d1.server.ts');
-  const {workflowModuleStateStatements,workflowStepStateStatements}=await import('../app/lib/workflow-state-write-batch.ts');
+  const {workflowModuleConfigurationStatements,workflowModuleStateStatements,workflowStepStateStatements}=await import('../app/lib/workflow-state-write-batch.ts');
   const db=createMysqlD1Database();
   // A single isolated pool connection keeps these temporary tables local to
   // this test and shadows the cloned tables without altering their real rows.
@@ -36,12 +36,25 @@ try {
   await db.batch(statements);assert.deepEqual(await rows(),expected);
   await db.batch([...workflowStepStateStatements(db,'instance',[{id:'foreign-step',status:'completed'}],'wrong'),...workflowModuleStateStatements(db,'instance',[{id:'foreign-module',status:'completed'}],'wrong')]);
   assert.deepEqual(await rows(),expected);
+  await db.prepare('CREATE TEMPORARY TABLE order_module_instances(id VARCHAR(64) PRIMARY KEY,organization_id VARCHAR(64),order_id VARCHAR(64),module_name VARCHAR(128),enabled INT,is_required INT,status VARCHAR(32),current_step_code VARCHAR(64),current_step_name VARCHAR(128),progress_percent INT,updated_at VARCHAR(64))').run();
+  const configuration=Array.from({length:140},(_,i)=>({id:`config-${i}`,name:i%3?`renamed-${i}`:null,enabled:i%2,required:Math.floor(i/2)%2,disabledReason:i%5?'disabled':'file index only'}));
+  await db.batch(configuration.map((row,i)=>db.prepare("INSERT INTO order_module_instances VALUES(?,'org','order','original',1,1,?,'ready','current',75,'old')").bind(row.id,['not_applicable','completed','in_progress'][i%3])));
+  await db.prepare("INSERT INTO order_module_instances VALUES('foreign','foreign-org','order','original',1,1,'completed','ready','current',75,'old')").run();
+  const configRows=async()=>(await db.prepare('SELECT * FROM order_module_instances ORDER BY id').all()).results;
+  const configOriginal=await configRows();
+  await db.batch(configuration.map(row=>db.prepare("UPDATE order_module_instances SET module_name=COALESCE(?,module_name),enabled=?,is_required=?,status=CASE WHEN ?=0 THEN 'not_applicable' WHEN status='not_applicable' THEN 'not_started' ELSE status END,current_step_code=CASE WHEN ?=0 THEN NULL ELSE current_step_code END,current_step_name=CASE WHEN ?=0 THEN ? ELSE current_step_name END,progress_percent=CASE WHEN ?=0 THEN 0 ELSE progress_percent END,updated_at=? WHERE id=?").bind(row.name,row.enabled,row.required,row.enabled,row.enabled,row.enabled,row.disabledReason,row.enabled,'now',row.id)));
+  const configExpected=await configRows();
+  await db.batch(configOriginal.map(row=>db.prepare('UPDATE order_module_instances SET module_name=?,enabled=?,is_required=?,status=?,current_step_code=?,current_step_name=?,progress_percent=?,updated_at=? WHERE id=?').bind(row.module_name,row.enabled,row.is_required,row.status,row.current_step_code,row.current_step_name,row.progress_percent,row.updated_at,row.id)));
+  const configStatements=workflowModuleConfigurationStatements(db,'org','order',[...configuration,{id:'foreign',name:'wrong',enabled:0,required:0,disabledReason:'wrong'}],'now');
+  await db.batch(configStatements);assert.deepEqual(await configRows(),configExpected);
   await db.prepare('CREATE TEMPORARY TABLE mutation_commit_guards(id VARCHAR(64) PRIMARY KEY,valid INT NOT NULL,created_at VARCHAR(64))').run();
   await assert.rejects(db.batch([
     ...workflowModuleStateStatements(db,'instance',[{id:'module-test-step-2',status:'completed'}],'must-rollback'),
+    ...workflowModuleConfigurationStatements(db,'org','order',[{id:'config-0',name:'must-rollback',enabled:1,required:1,disabledReason:'unused'}],'must-rollback'),
     db.prepare('INSERT INTO mutation_commit_guards(id,valid,created_at) VALUES(?,NULL,?)').bind('guard','now'),
   ]),/mutation_commit_guards/);
   assert.deepEqual(await rows(),expected);
-  console.log(JSON.stringify({ok:true,engine:'MySQL 8 isolated',rows:75,legacyStatements:legacy.length,batchedStatements:statements.length,identicalStatusAndTimestamps:true,foreignInstanceUnchanged:true,guardFailureRolledBack:true}));
+  assert.deepEqual(await configRows(),configExpected);
+  console.log(JSON.stringify({ok:true,engine:'MySQL 8 isolated',rows:75,legacyStatements:legacy.length,batchedStatements:statements.length,configurationRows:140,configurationStatements:configStatements.length,identicalStatusAndTimestamps:true,identicalConfiguration:true,foreignInstanceUnchanged:true,guardFailureRolledBack:true}));
   process.exit(0);
 } catch(error) {console.error(error);process.exit(1);}

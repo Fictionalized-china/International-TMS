@@ -38,6 +38,7 @@ import {
 } from "./order-assignment-manifest.server";
 import { runtimeWorkflowFieldPolicy } from "./workflow-field-runtime";
 import { withOrderProjectionSync } from "./order-sync-queue.server";
+import { workflowModuleConfigurationStatements } from "./workflow-state-write-batch";
 
 export type OrderModuleInstance = {
   id: string;
@@ -412,19 +413,12 @@ async function applyWorkflowModuleConfiguration(
       moduleCode: row.module_code,
       rule,
     });
-    return env.DB.prepare(
-      `UPDATE order_module_instances SET module_name=COALESCE(?,module_name),enabled=?,is_required=?,
-        status=CASE WHEN ?=0 THEN 'not_applicable' WHEN status='not_applicable' THEN 'not_started' ELSE status END,
-        current_step_code=CASE WHEN ?=0 THEN NULL ELSE current_step_code END,
-        current_step_name=CASE WHEN ?=0 THEN ? ELSE current_step_name END,
-        progress_percent=CASE WHEN ?=0 THEN 0 ELSE progress_percent END,updated_at=? WHERE id=?`,
-    ).bind(
-      rule?.display_name||null,enabled,required,enabled,enabled,enabled,
-      fileIndexOnly ? "文件由所属业务节点收集，文件中心仅供查询" : "当前工作流未启用本模组",
-      enabled,now,row.id,
-    );
+    return {
+      id:row.id,name:rule?.display_name||null,enabled,required,
+      disabledReason:fileIndexOnly ? "文件由所属业务节点收集，文件中心仅供查询" : "当前工作流未启用本模组",
+    };
   });
-  if (updates.length) await env.DB.batch(updates);
+  if (updates.length) await env.DB.batch(workflowModuleConfigurationStatements(env.DB,organizationId,orderId,updates,now));
 }
 
 async function synchronizeDataDrivenModules(

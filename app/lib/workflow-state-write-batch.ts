@@ -5,6 +5,44 @@ export type WorkflowStateWrite = {
   status: "pending" | "active" | "completed";
 };
 
+export type WorkflowModuleConfigurationWrite = {
+  id: string;
+  name: string | null;
+  enabled: number;
+  required: number;
+  disabledReason: string;
+};
+
+export function workflowModuleConfigurationStatements(
+  db: D1Database, organizationId: string, orderId: string,
+  updates: WorkflowModuleConfigurationWrite[], now: string,
+) {
+  const groups = new Map<string, WorkflowModuleConfigurationWrite[]>();
+  for (const row of updates) {
+    const key = JSON.stringify([row.enabled, row.required, row.disabledReason]);
+    const group = groups.get(key) ?? [];
+    group.push(row);
+    groups.set(key, group);
+  }
+  return [...groups.values()].flatMap(group => chunkD1Rows(group, 3, 11).map(rows => {
+    const rule = rows[0];
+    return db.prepare(
+      `UPDATE order_module_instances
+          SET module_name=COALESCE(CASE id ${rows.map(() => "WHEN ? THEN ?").join(" ")} ELSE NULL END,module_name),
+              enabled=?,is_required=?,
+              status=CASE WHEN ?=0 THEN 'not_applicable' WHEN status='not_applicable' THEN 'not_started' ELSE status END,
+              current_step_code=CASE WHEN ?=0 THEN NULL ELSE current_step_code END,
+              current_step_name=CASE WHEN ?=0 THEN ? ELSE current_step_name END,
+              progress_percent=CASE WHEN ?=0 THEN 0 ELSE progress_percent END,updated_at=?
+        WHERE organization_id=? AND order_id=? AND id IN (${d1Placeholders(rows.length)})`,
+    ).bind(
+      ...rows.flatMap(row => [row.id, row.name]),
+      rule.enabled,rule.required,rule.enabled,rule.enabled,rule.enabled,
+      rule.disabledReason,rule.enabled,now,organizationId,orderId,...rows.map(row => row.id),
+    );
+  }));
+}
+
 // Preserve the caller's transaction and state calculations. These statements
 // only combine independent projection writes; they never authorize a mutation.
 export function workflowModuleStateStatements(
