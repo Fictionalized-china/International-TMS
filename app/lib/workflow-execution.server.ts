@@ -17,6 +17,7 @@ import {
   workflowSystemTaskShouldAutoComplete,
 } from "./workflow-execution";
 import { canCompleteWorkflowTask } from "./workflow-task-access";
+import { withOrderProjectionSync } from "./order-sync-queue.server";
 
 type ModuleFact = { module_code:string; status:string };
 
@@ -109,7 +110,9 @@ export async function synchronizeWorkflowExecution(input:{
   targetStepKey:string;
   orderStatus:string;
 }) {
-  await ensureWorkflowExecutionSnapshot({instanceId:input.instanceId,workflowId:input.workflowId});
+  // Only projection writes share a queue. Do not serialize the subsequent
+  // permission/business fact reads or reuse another caller's calculations.
+  await withOrderProjectionSync(input.organizationId,input.orderId,()=>ensureWorkflowExecutionSnapshot({instanceId:input.instanceId,workflowId:input.workflowId}));
   const [target,moduleFacts,rows] = await Promise.all([
     env.DB.prepare(
       "SELECT sort_order FROM workflow_steps WHERE workflow_id=? AND step_key=? AND is_active=1",
@@ -135,7 +138,7 @@ export async function synchronizeWorkflowExecution(input:{
   if (!target) return input.targetStepKey;
   const now = new Date().toISOString();
   if (input.orderStatus === "completed") {
-    await env.DB.batch([
+    await withOrderProjectionSync(input.organizationId,input.orderId,()=>env.DB.batch([
       env.DB.prepare(
         `UPDATE workflow_instance_task_states
             SET status='completed',completed_at=COALESCE(completed_at,?),updated_at=?
@@ -162,11 +165,11 @@ export async function synchronizeWorkflowExecution(input:{
             SET current_step_key=?,status='completed',completed_at=COALESCE(completed_at,?),updated_at=?
           WHERE id=? AND organization_id=?`,
       ).bind(input.targetStepKey,now,now,input.instanceId,input.organizationId),
-    ]);
+    ]));
     return input.targetStepKey;
   }
   const moduleStatus = new Map(moduleFacts.results.map((item)=>[item.module_code,item.status]));
-  const taskUpdates = [];
+  const taskUpdates: D1PreparedStatement[] = [];
   for (const row of rows.results) {
     if (!row.task_state_id || row.task_status === "completed") continue;
     const autoComplete = workflowSystemTaskShouldAutoComplete(
@@ -178,7 +181,7 @@ export async function synchronizeWorkflowExecution(input:{
       ).bind(now,now,row.task_state_id));
     }
   }
-  if (taskUpdates.length) await env.DB.batch(taskUpdates);
+  if (taskUpdates.length) await withOrderProjectionSync(input.organizationId,input.orderId,()=>env.DB.batch(taskUpdates));
 
   const modules = await env.DB.prepare(
     `SELECT ms.id,ms.instance_step_state_id,ms.is_required,ms.completion_mode,ms.module_code,ss.step_key,ss.sort_order step_sort_order,
@@ -227,7 +230,7 @@ export async function synchronizeWorkflowExecution(input:{
     });
     return { id:item.id, status:completed?"completed":"pending" };
   });
-  if (moduleUpdates.length) await env.DB.batch(workflowModuleStateStatements(env.DB,input.instanceId,moduleUpdates,now));
+  if (moduleUpdates.length) await withOrderProjectionSync(input.organizationId,input.orderId,()=>env.DB.batch(workflowModuleStateStatements(env.DB,input.instanceId,moduleUpdates,now)));
 
   const steps = await env.DB.prepare(
     `SELECT ss.id,ss.step_key,ss.sort_order,ss.status existing_status,
@@ -252,12 +255,12 @@ export async function synchronizeWorkflowExecution(input:{
     const status = item.id===current.id ? "active" : completed ? "completed" : "pending";
     return { id:item.id, status };
   });
-  await env.DB.batch([
+  await withOrderProjectionSync(input.organizationId,input.orderId,()=>env.DB.batch([
     ...workflowStepStateStatements(env.DB,input.instanceId,stepUpdates,now),
     env.DB.prepare(
       "UPDATE workflow_instances SET current_step_key=?,updated_at=? WHERE id=? AND organization_id=?",
     ).bind(current.step_key,now,input.instanceId,input.organizationId),
-  ]);
+  ]));
   return current.step_key;
 }
 

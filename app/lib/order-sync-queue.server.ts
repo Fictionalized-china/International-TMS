@@ -1,7 +1,9 @@
 /**
- * Serialize projection writers for one order inside this application process.
+ * Serialize short projection write phases for one order in this process.
  * This is a work queue, not a data cache: every caller runs its own work and
- * rereads current facts. SQL transactions/guards/retries remain authoritative,
+ * reads its own current facts outside the queue. Never put a whole request,
+ * business-fact evaluation or a call that recursively queues inside work().
+ * SQL transactions/guards/retries remain authoritative,
  * including for independent application instances and external writers.
  */
 export function createOrderSyncQueue() {

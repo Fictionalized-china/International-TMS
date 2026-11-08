@@ -195,14 +195,6 @@ export async function ensureOrderModules(
   orderId: string,
   options: { syncBusinessWorkflow?: boolean } = {},
 ) {
-  return withOrderProjectionSync(organizationId,orderId,()=>ensureOrderModulesUnlocked(organizationId,orderId,options));
-}
-
-async function ensureOrderModulesUnlocked(
-  organizationId: string,
-  orderId: string,
-  options: { syncBusinessWorkflow?: boolean } = {},
-) {
   const order = await env.DB.prepare(
     `SELECT o.id,o.business_type,o.status,o.current_assignee_user_id,
             o.workflow_instance_id,wi.id matched_instance_id,
@@ -283,7 +275,7 @@ async function ensureOrderModulesUnlocked(
           END,
          updated_at=excluded.updated_at`,
     ).bind(...rows.flat()));
-  if (statements.length) await env.DB.batch(statements);
+  if (statements.length) await withOrderProjectionSync(organizationId,orderId,()=>env.DB.batch(statements));
   await clearPrematureModuleAssignments(organizationId, orderId, now);
   await applyWorkflowModuleConfiguration(
     organizationId,
@@ -418,7 +410,7 @@ async function applyWorkflowModuleConfiguration(
       disabledReason:fileIndexOnly ? "文件由所属业务节点收集，文件中心仅供查询" : "当前工作流未启用本模组",
     };
   });
-  if (updates.length) await env.DB.batch(workflowModuleConfigurationStatements(env.DB,organizationId,orderId,updates,now));
+  if (updates.length) await withOrderProjectionSync(organizationId,orderId,()=>env.DB.batch(workflowModuleConfigurationStatements(env.DB,organizationId,orderId,updates,now)));
 }
 
 async function synchronizeDataDrivenModules(
@@ -427,7 +419,7 @@ async function synchronizeDataDrivenModules(
   metrics: Awaited<ReturnType<typeof orderModuleMetrics>>,
   now: string,
 ) {
-  const statements = [];
+  const statements: D1PreparedStatement[] = [];
   const warehouseCounting = await env.DB.prepare(
     `SELECT EXISTS(
        SELECT 1 FROM warehouse_sorting_batches b
@@ -516,7 +508,7 @@ async function synchronizeDataDrivenModules(
       ).bind(now, now, organizationId, orderId),
     );
   }
-  if (statements.length) await env.DB.batch(statements);
+  if (statements.length) await withOrderProjectionSync(organizationId,orderId,()=>env.DB.batch(statements));
   await synchronizeLoadingModuleFromBatch(organizationId, orderId, now);
 }
 
@@ -674,19 +666,14 @@ async function synchronizeGovernanceModules(
          )`,
     ).bind(now, now, now, organizationId, orderId, organizationId, orderId),
   );
-  await env.DB.batch(statements);
+  await withOrderProjectionSync(organizationId,orderId,()=>env.DB.batch(statements));
 }
 
 export async function syncOrderWorkflowSnapshot(
   organizationId: string,
   orderId: string,
 ) {
-  return withOrderProjectionSync(organizationId,orderId,()=>syncOrderWorkflowSnapshotUnlocked(organizationId,orderId));
-}
-
-async function syncOrderWorkflowSnapshotUnlocked(organizationId: string, orderId: string) {
-  // Already inside the order queue: do not enqueue recursively and wait on self.
-  await ensureOrderModulesUnlocked(organizationId, orderId, { syncBusinessWorkflow: false });
+  await ensureOrderModules(organizationId, orderId, { syncBusinessWorkflow: false });
   await syncModuleStateFromTransportBatch(organizationId, orderId);
   const order = await env.DB.prepare(
     `SELECT o.status,o.business_type,o.current_assignee_user_id,o.workflow_instance_id,
@@ -755,13 +742,13 @@ async function syncOrderWorkflowSnapshotUnlocked(organizationId: string, orderId
   const activeModuleIds = frozenCurrent?.activeModuleInstanceIds ??
     (legacyNext?.status === "not_started" ? [legacyNext.id] : []);
   if (activeModuleIds.length) {
-    await env.DB.batch(activeModuleIds.map((moduleId) => env.DB.prepare(
+    await withOrderProjectionSync(organizationId,orderId,()=>env.DB.batch(activeModuleIds.map((moduleId) => env.DB.prepare(
       `UPDATE order_module_instances
           SET status='in_progress',started_at=COALESCE(started_at,?),
               progress_percent=CASE WHEN progress_percent>0 THEN progress_percent ELSE 1 END,
               updated_at=?
         WHERE id=? AND status='not_started'`,
-    ).bind(now, now, moduleId)));
+    ).bind(now, now, moduleId))));
   }
   const primaryModuleCode = frozenCurrent?.primaryModuleCode ?? legacyNext?.module_code ?? null;
   const primaryAssigneeUserId = frozenCurrent?.primaryAssigneeUserId ?? legacyNext?.assignee_user_id ?? null;
@@ -772,7 +759,7 @@ async function syncOrderWorkflowSnapshotUnlocked(organizationId: string, orderId
       : order.workflow_instance_id
         ? "工作流实例当前节点配置异常"
         : "已启用模块全部完成";
-  const notificationStatements = [];
+  const notificationStatements: D1PreparedStatement[] = [];
   let notificationAssigneeUserIds =
     frozenCurrent?.notificationAssigneeUserIds ??
       (primaryAssigneeUserId ? [primaryAssigneeUserId] : []);
@@ -852,7 +839,7 @@ async function syncOrderWorkflowSnapshotUnlocked(organizationId: string, orderId
       : order.workflow_instance_id
         ? "workflow_configuration_error"
         : "ready_to_complete";
-  await env.DB.batch([
+  await withOrderProjectionSync(organizationId,orderId,()=>env.DB.batch([
     env.DB.prepare(
       "UPDATE transport_orders SET current_step_code=?,current_step_name=?,current_assignee_user_id=?,workflow_updated_at=?,updated_at=? WHERE organization_id=? AND id=? AND status='in_execution'",
     ).bind(
@@ -865,7 +852,7 @@ async function syncOrderWorkflowSnapshotUnlocked(organizationId: string, orderId
       orderId,
     ),
     ...notificationStatements,
-  ]);
+  ]));
 }
 
 function pickLegacyNextWorkflowModule(
@@ -994,7 +981,7 @@ async function syncModuleStateFromTransportBatch(organizationId: string, orderId
       ),
     );
   }
-  if (statements.length) await env.DB.batch(statements);
+  if (statements.length) await withOrderProjectionSync(organizationId,orderId,()=>env.DB.batch(statements));
 }
 
 export async function loadCostsCompletionGate(

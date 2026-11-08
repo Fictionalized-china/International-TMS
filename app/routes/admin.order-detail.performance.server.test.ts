@@ -42,6 +42,33 @@ describe("order detail request-local module reuse", () => {
     expect(ensureCount(spy)).toBe(3);
     expect(fixture.database.prepare("SELECT COUNT(*) n FROM order_module_instances WHERE order_id='order'").get()).toEqual({n:13});
   });
+  it("serializes projection transactions but does not serialize independent fact reads",async()=>{
+    await setup("owner");
+    const originalBatch=fixture.db.batch.bind(fixture.db);
+    let writes=0,maxWrites=0;
+    vi.spyOn(fixture.db,"batch").mockImplementation(async statements=>{
+      writes++;maxWrites=Math.max(maxWrites,writes);
+      try {await new Promise(resolve=>setTimeout(resolve,1));return await originalBatch(statements);}
+      finally {writes--;}
+    });
+    const prepare=fixture.db.prepare.bind(fixture.db);
+    let reads=0,maxReads=0;
+    vi.spyOn(fixture.db,"prepare").mockImplementation(sql=>{
+      const statement=prepare(sql),bind=statement.bind.bind(statement);
+      statement.bind=(...values)=>{
+        const bound=bind(...values);
+        if(sql.includes("SELECT o.id,o.business_type,o.status,o.current_assignee_user_id")) {
+          const first=bound.first.bind(bound);
+          bound.first=async <T>()=>{reads++;maxReads=Math.max(maxReads,reads);try{await new Promise(resolve=>setTimeout(resolve,1));return await first<T>();}finally{reads--;}};
+        }
+        return bound;
+      };
+      return statement;
+    });
+    await Promise.all([ensureOrderModules("org","order"),syncOrderWorkflowSnapshot("org","order"),ensureOrderModules("org","order")]);
+    expect(maxWrites).toBe(1);
+    expect(maxReads).toBeGreaterThan(1);
+  });
   it("initializes the same module set with bounded multi-row statements",async()=>{
     const spy=await setup("owner");
     const modules=await listOrderModules("org","order");
