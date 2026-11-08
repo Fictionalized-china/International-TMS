@@ -7,7 +7,7 @@ vi.mock("cloudflare:workers", () => ({ env: { get DB() { return harness.db; } } 
 vi.mock("../lib/auth.server", () => ({ requireSessionUser: vi.fn(async () => harness.actor) }));
 import { loader as detailLoader } from "./admin.order-detail";
 import { loader as moduleLoader } from "./admin.order-module";
-import { listOrderModules } from "../lib/order-modules.server";
+import { ensureOrderModules, listOrderModules, syncOrderWorkflowSnapshot } from "../lib/order-modules.server";
 import { requireSessionUser } from "../lib/auth.server";
 import { createOrderWorkflowFieldReader, loadOrderModuleWorkflowFields } from "../lib/workflow-fields.server";
 
@@ -36,6 +36,12 @@ const ensureCount = (spy: { mock: { calls: unknown[][] } }) => spy.mock.calls.fi
 ).length;
 
 describe("order detail request-local module reuse", () => {
+  it("runs concurrent module and whole-order synchronization without waiting on its own queue",async()=>{
+    const spy=await setup("owner");
+    await Promise.all([ensureOrderModules("org","order"),syncOrderWorkflowSnapshot("org","order"),ensureOrderModules("org","order")]);
+    expect(ensureCount(spy)).toBe(3);
+    expect(fixture.database.prepare("SELECT COUNT(*) n FROM order_module_instances WHERE order_id='order'").get()).toEqual({n:13});
+  });
   it("initializes the same module set with bounded multi-row statements",async()=>{
     const spy=await setup("owner");
     const modules=await listOrderModules("org","order");

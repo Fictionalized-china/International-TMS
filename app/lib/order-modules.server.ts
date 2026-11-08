@@ -37,6 +37,7 @@ import {
   resolveOrderModuleAssignmentTarget,
 } from "./order-assignment-manifest.server";
 import { runtimeWorkflowFieldPolicy } from "./workflow-field-runtime";
+import { withOrderProjectionSync } from "./order-sync-queue.server";
 
 export type OrderModuleInstance = {
   id: string;
@@ -189,6 +190,14 @@ type OrderSeed = {
 };
 
 export async function ensureOrderModules(
+  organizationId: string,
+  orderId: string,
+  options: { syncBusinessWorkflow?: boolean } = {},
+) {
+  return withOrderProjectionSync(organizationId,orderId,()=>ensureOrderModulesUnlocked(organizationId,orderId,options));
+}
+
+async function ensureOrderModulesUnlocked(
   organizationId: string,
   orderId: string,
   options: { syncBusinessWorkflow?: boolean } = {},
@@ -678,7 +687,12 @@ export async function syncOrderWorkflowSnapshot(
   organizationId: string,
   orderId: string,
 ) {
-  await ensureOrderModules(organizationId, orderId, { syncBusinessWorkflow: false });
+  return withOrderProjectionSync(organizationId,orderId,()=>syncOrderWorkflowSnapshotUnlocked(organizationId,orderId));
+}
+
+async function syncOrderWorkflowSnapshotUnlocked(organizationId: string, orderId: string) {
+  // Already inside the order queue: do not enqueue recursively and wait on self.
+  await ensureOrderModulesUnlocked(organizationId, orderId, { syncBusinessWorkflow: false });
   await syncModuleStateFromTransportBatch(organizationId, orderId);
   const order = await env.DB.prepare(
     `SELECT o.status,o.business_type,o.current_assignee_user_id,o.workflow_instance_id,
