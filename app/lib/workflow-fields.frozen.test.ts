@@ -19,8 +19,10 @@ const harness = vi.hoisted(() => {
   const DB = {
     prepare(query: string) {
       sql.push(query);
+      let bindings: unknown[] = [];
       const statement = {
-        bind() {
+        bind(...values: unknown[]) {
+          bindings = values;
           return statement;
         },
         async first() {
@@ -34,7 +36,9 @@ const harness = vi.hoisted(() => {
         },
         async all() {
           if (query.includes("FROM workflow_instance_fields f")) {
-            return { results: state.snapshotFields };
+            return { results: query.includes("AND f.module_code=?")
+              ? state.snapshotFields.filter(field=>field.module_code===bindings[1])
+              : state.snapshotFields };
           }
           if (query.includes("FROM workflow_step_fields f")) {
             return { results: state.liveFields };
@@ -101,21 +105,26 @@ describe("frozen workflow field loading", () => {
     expect(harness.sql.some((query) => query.includes("SELECT o.*,wi.id bound_instance_id"))).toBe(false);
   });
 
-  it("shares only common facts within a read phase and rereads them in the next phase", async () => {
+  it("batches frozen definitions within a read phase, isolates modules and rereads the next phase", async () => {
     harness.state.snapshotFields = [{
       id: "field", workflow_id: "workflow-1", step_key: "outbound_transport", step_name: "Outbound",
       module_code: "consignment", field_key: "cargo_description", label: "Cargo", field_type: "text",
       is_required: 1, is_active: 1, sort_order: 1, options_text: null, help_text: null,
     }];
     const read = createOrderWorkflowFieldReader("org-1", "order-1");
-    await Promise.all([read("consignment"), read("review")]);
+    harness.state.placements = [{module_code:"consignment",step_key:"outbound_transport",step_name:"Outbound",sort_order:20}];
+    const [consignment, review] = await Promise.all([read("consignment"), read("review")]);
+    expect(consignment.some(field=>field.fieldKey==="cargo_description")).toBe(true);
+    expect(review.some(field=>field.fieldKey==="cargo_description")).toBe(false);
     const count = (fragment: string) => harness.sql.filter(sql => sql.includes(fragment)).length;
     expect(count("SELECT o.workflow_instance_id,wi.id matched_instance_id,wi.workflow_id")).toBe(1);
     expect(count("SELECT o.*,wi.id bound_instance_id")).toBe(1);
-    expect(count("FROM workflow_instance_fields f")).toBe(2);
+    expect(count("FROM workflow_instance_fields f")).toBe(1);
+    expect(count("FROM workflow_instance_module_states")).toBe(1);
     await createOrderWorkflowFieldReader("org-1", "order-1")("consignment");
     expect(count("SELECT o.workflow_instance_id,wi.id matched_instance_id,wi.workflow_id")).toBe(2);
     expect(count("SELECT o.*,wi.id bound_instance_id")).toBe(2);
+    expect(count("FROM workflow_instance_fields f")).toBe(2);
   });
 
   it("fails closed when the order keeps a dangling frozen instance id", async () => {

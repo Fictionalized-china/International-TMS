@@ -25,7 +25,7 @@ export function createRequestProfiler({emit=console.log,now=()=>performance.now(
         const command=sql?/^\s*(\w+)/.exec(sql)?.[1]?.toUpperCase()??'OTHER':name.toUpperCase();
         let row=stats.queries.get(key);
         if(!row) {
-          row={key,command,count:0,milliseconds:0,failures:0,caller:new Error().stack?.split('\n').slice(2,6).map(line=>line.replace(/file:\/\/[^ ]*\//g,'').trim())};
+          row={key,command,count:0,milliseconds:0,failures:0,caller:new Error().stack?.split('\n').slice(4,6).map(line=>line.replace(/file:\/\/[^ ]*\//g,'').trim())};
           stats.queries.set(key,row);
         }
         row.count++;
@@ -53,7 +53,9 @@ export function createRequestProfiler({emit=console.log,now=()=>performance.now(
     const kind=path.includes('/orders/')?'order':path.includes('/orders')?'orders':path.includes('/login')?'login':'other';
     response.once('finish',()=>{
       const queries=[...stats.queries.values()];
-      emit(JSON.stringify({kind,method:request.method,status:response.statusCode,milliseconds:Math.round(now()-stats.started),acquireMilliseconds:Math.round(stats.acquireMilliseconds),count:queries.reduce((sum,item)=>sum+item.count,0),queries:queries.map(item=>({...item,milliseconds:Math.round(item.milliseconds)}))}));
+      // Bound each log record: journald splits very large JSON lines, making the
+      // diagnostic data unreadable. Counts cover all queries; details are top 16.
+      emit(JSON.stringify({kind,method:request.method,status:response.statusCode,milliseconds:Math.round(now()-stats.started),acquireMilliseconds:Math.round(stats.acquireMilliseconds),count:queries.reduce((sum,item)=>sum+item.count,0),queryShapes:queries.length,queries:queries.sort((a,b)=>b.count-a.count||b.milliseconds-a.milliseconds).slice(0,16).map(item=>({...item,milliseconds:Math.round(item.milliseconds)}))}));
     });
     return context.run(stats,()=>listener(request,response));
   }

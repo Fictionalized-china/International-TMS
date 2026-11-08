@@ -756,31 +756,35 @@ export async function loadOrderModuleWorkflowFields(
   let frozenPlacements: FrozenModuleFieldPlacement[] = [];
   if (binding.workflow_instance_id && binding.matched_instance_id) {
     const [snapshot, placements] = await Promise.all([
-      env.DB.prepare(
+      readWorkflowFieldFact(readPhase, "frozen-fields", () => env.DB.prepare(
         `SELECT f.id,f.workflow_id,f.step_key,COALESCE(ss.step_name,f.step_key) step_name,
                 f.module_code,f.field_key,f.label,f.field_type,f.is_required,
                 f.is_active,f.sort_order,f.options_text,f.help_text,f.handler_position_codes
          FROM workflow_instance_fields f
          LEFT JOIN workflow_instance_step_states ss
            ON ss.instance_id=f.instance_id AND ss.step_key=f.step_key
-         WHERE f.instance_id=? AND f.module_code=?
+         WHERE f.instance_id=?${readPhase ? "" : " AND f.module_code=?"}
          ORDER BY f.sort_order,f.field_key`,
       )
-        .bind(binding.matched_instance_id, moduleCode)
-        .all<RawField>(),
-      env.DB.prepare(
-        `SELECT ss.step_key,ss.step_name,ss.sort_order
+        .bind(...(readPhase ? [binding.matched_instance_id] : [binding.matched_instance_id, moduleCode]))
+        .all<RawField>()),
+      readWorkflowFieldFact(readPhase, "frozen-placements", () => env.DB.prepare(
+        `SELECT ms.module_code,ss.step_key,ss.step_name,ss.sort_order
          FROM workflow_instance_module_states ms
          JOIN workflow_instance_step_states ss
            ON ss.id=ms.instance_step_state_id
-         WHERE ss.instance_id=? AND ms.module_code=?
+         WHERE ss.instance_id=?${readPhase ? "" : " AND ms.module_code=?"}
          ORDER BY ss.sort_order,ms.sort_order,ms.id`,
       )
-        .bind(binding.matched_instance_id, moduleCode)
-        .all<FrozenModuleFieldPlacement>(),
+        .bind(...(readPhase ? [binding.matched_instance_id] : [binding.matched_instance_id, moduleCode]))
+        .all<FrozenModuleFieldPlacement & { module_code: OrderModuleCode }>()),
     ]);
-    raw = snapshot.results;
-    frozenPlacements = placements.results;
+    // Only this write-free phase shares definitions. Keep every module's fields
+    // and placements separate, including empty/repeated frozen placements.
+    raw = readPhase ? snapshot.results.filter(field => field.module_code === moduleCode) : snapshot.results;
+    frozenPlacements = readPhase
+      ? placements.results.filter(placement => placement.module_code === moduleCode)
+      : placements.results;
   } else if (!binding.workflow_instance_id) {
     if (!binding.workflow_id) return [];
 

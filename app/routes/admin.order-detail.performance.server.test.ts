@@ -9,6 +9,7 @@ import { loader as detailLoader } from "./admin.order-detail";
 import { loader as moduleLoader } from "./admin.order-module";
 import { listOrderModules } from "../lib/order-modules.server";
 import { requireSessionUser } from "../lib/auth.server";
+import { createOrderWorkflowFieldReader, loadOrderModuleWorkflowFields } from "../lib/workflow-fields.server";
 
 let fixture: Awaited<ReturnType<typeof meetingFixture>>;
 afterEach(() => { if (fixture?.database.isOpen) fixture.database.close(); vi.clearAllMocks(); });
@@ -35,6 +36,17 @@ const ensureCount = (spy: { mock: { calls: unknown[][] } }) => spy.mock.calls.fi
 ).length;
 
 describe("order detail request-local module reuse", () => {
+  it("loads the full frozen definition once per phase without changing any module fields or placement markers", async()=>{
+    const spy=await setup("owner");
+    const codes=["consignment","costs","transport","review","assignment"] as const;
+    const independent=await Promise.all(codes.map(code=>loadOrderModuleWorkflowFields("org","order",code)));
+    spy.mockClear();
+    const read=createOrderWorkflowFieldReader("org","order");
+    const batched=await Promise.all(codes.map(code=>read(code)));
+    expect(batched).toEqual(independent);
+    expect(spy.mock.calls.filter(([sql])=>String(sql).includes("FROM workflow_instance_fields f")).length).toBe(1);
+    expect(spy.mock.calls.filter(([sql])=>String(sql).includes("SELECT ms.module_code,ss.step_key,ss.step_name,ss.sort_order")).length).toBe(1);
+  });
   it.each(["owner", "operation", "cs", "finance"])("keeps %s data and authorization with one module synchronization", async actor => {
     const spy = await setup(actor);
     const request = args();
