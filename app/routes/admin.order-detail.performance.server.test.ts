@@ -36,6 +36,14 @@ const ensureCount = (spy: { mock: { calls: unknown[][] } }) => spy.mock.calls.fi
 ).length;
 
 describe("order detail request-local module reuse", () => {
+  it("initializes the same module set with bounded multi-row statements",async()=>{
+    const spy=await setup("owner");
+    const modules=await listOrderModules("org","order");
+    const inserts=spy.mock.calls.filter(([sql])=>String(sql).includes("INSERT INTO order_module_instances(id,organization_id,order_id,module_code"));
+    expect(modules.length).toBeGreaterThan(6);
+    expect(inserts.length).toBe(Math.ceil(modules.length/6));
+    for(const [sql] of inserts) expect((String(sql).match(/\?/g)??[]).length).toBeLessThanOrEqual(100);
+  });
   it("loads the full frozen definition once per phase without changing any module fields or placement markers", async()=>{
     const spy=await setup("owner");
     const codes=["consignment","costs","transport","review","assignment"] as const;

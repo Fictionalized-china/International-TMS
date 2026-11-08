@@ -8,6 +8,7 @@ import {
   snapshotWorkflowFieldsForInstance,
 } from "./workflow-fields.server";
 import { loadWorkflowPlacementBlockers } from "./workflow-field-read-batch";
+import { workflowModuleStateStatements, workflowStepStateStatements, type WorkflowStateWrite } from "./workflow-state-write-batch";
 import { workflowVersionSwitchDecision } from "./workflow-version-policy";
 import {
   selectWorkflowExecutionCurrentStep,
@@ -213,7 +214,7 @@ export async function synchronizeWorkflowExecution(input:{
     }
   }
   const blockedCostsIds = new Set(financialBlocked ? unsettledCosts.map(item => item.id) : []);
-  const moduleUpdates = modules.results.map((item) => {
+  const moduleUpdates = modules.results.map<WorkflowStateWrite>((item) => {
     const completed = !blockedCostsIds.has(item.id) && workflowExecutionModuleIsComplete({
       existingStepStatus:item.step_status,
       stepSortOrder:item.step_sort_order,
@@ -224,11 +225,9 @@ export async function synchronizeWorkflowExecution(input:{
       pendingRequired:item.pending_required,
       hasMissingRequiredFields:fieldBlockers.has(item.id),
     });
-    return env.DB.prepare(
-      "UPDATE workflow_instance_module_states SET status=?,updated_at=? WHERE id=?",
-    ).bind(completed?"completed":"pending",now,item.id);
+    return { id:item.id, status:completed?"completed":"pending" };
   });
-  if (moduleUpdates.length) await env.DB.batch(moduleUpdates);
+  if (moduleUpdates.length) await env.DB.batch(workflowModuleStateStatements(env.DB,input.instanceId,moduleUpdates,now));
 
   const steps = await env.DB.prepare(
     `SELECT ss.id,ss.step_key,ss.sort_order,ss.status existing_status,
@@ -247,17 +246,14 @@ export async function synchronizeWorkflowExecution(input:{
     target.sort_order,
   );
   if (!current) return input.targetStepKey;
-  const stepUpdates = steps.results.map((item) => {
+  const stepUpdates = steps.results.map<WorkflowStateWrite>((item) => {
     const completed = item.sort_order<current.sort_order ||
       (item.sort_order===current.sort_order && item.module_count>0 && item.pending_required===0 && item.step_key!==input.targetStepKey);
     const status = item.id===current.id ? "active" : completed ? "completed" : "pending";
-    return env.DB.prepare(
-      `UPDATE workflow_instance_step_states SET status=?,started_at=CASE WHEN ?='active' THEN COALESCE(started_at,?) ELSE started_at END,
-        completed_at=CASE WHEN ?='completed' THEN COALESCE(completed_at,?) ELSE NULL END,updated_at=? WHERE id=?`,
-    ).bind(status,status,now,status,now,now,item.id);
+    return { id:item.id, status };
   });
   await env.DB.batch([
-    ...stepUpdates,
+    ...workflowStepStateStatements(env.DB,input.instanceId,stepUpdates,now),
     env.DB.prepare(
       "UPDATE workflow_instances SET current_step_key=?,updated_at=? WHERE id=? AND organization_id=?",
     ).bind(current.step_key,now,input.instanceId,input.organizationId),

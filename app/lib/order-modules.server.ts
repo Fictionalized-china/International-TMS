@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { requireActiveOrganizationAssignee } from "./organization-assignee.server";
-import { chunkD1Values, d1Placeholders } from "./d1-bindings";
+import { chunkD1Rows, chunkD1Values, d1Placeholders } from "./d1-bindings";
 import {
   loadOrderModuleWorkflowFields,
   missingRequiredModuleFields,
@@ -225,7 +225,7 @@ export async function ensureOrderModules(
     order.business_type,
     services.results.map((item) => item.service_code),
   );
-  const statements = definitions.map((definition) => {
+  const seeds = definitions.map((definition) => {
     const initial = initialModuleState(
       definition.code,
       definition.steps,
@@ -233,9 +233,18 @@ export async function ensureOrderModules(
       order,
       metrics,
     );
-    return env.DB.prepare(
+    return [
+      crypto.randomUUID(), organizationId, orderId, definition.code, definition.name,
+      definition.enabled ? 1 : 0, definition.required ? 1 : 0,
+      initial.status, initial.stepCode, initial.stepName, initial.progress,
+      initialModuleAssigneeUserId(definition.code, order),
+      initial.status === "in_progress" ? now : null,
+      initial.status === "completed" ? now : null, now, now,
+    ];
+  });
+  const statements = chunkD1Rows(seeds,16).map(rows => env.DB.prepare(
       `INSERT INTO order_module_instances(id,organization_id,order_id,module_code,module_name,enabled,is_required,status,current_step_code,current_step_name,progress_percent,assignee_user_id,started_at,completed_at,created_at,updated_at)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       VALUES${rows.map(()=>`(${d1Placeholders(16)})`).join(",")}
        ON CONFLICT(order_id,module_code) DO UPDATE SET
          module_name=excluded.module_name,
          enabled=CASE
@@ -263,25 +272,7 @@ export async function ensureOrderModules(
             ELSE COALESCE(order_module_instances.assignee_user_id,excluded.assignee_user_id)
           END,
          updated_at=excluded.updated_at`,
-    ).bind(
-      crypto.randomUUID(),
-      organizationId,
-      orderId,
-      definition.code,
-      definition.name,
-      definition.enabled ? 1 : 0,
-      definition.required ? 1 : 0,
-      initial.status,
-      initial.stepCode,
-      initial.stepName,
-      initial.progress,
-      initialModuleAssigneeUserId(definition.code, order),
-      initial.status === "in_progress" ? now : null,
-      initial.status === "completed" ? now : null,
-      now,
-      now,
-    );
-  });
+    ).bind(...rows.flat()));
   if (statements.length) await env.DB.batch(statements);
   await clearPrematureModuleAssignments(organizationId, orderId, now);
   await applyWorkflowModuleConfiguration(
