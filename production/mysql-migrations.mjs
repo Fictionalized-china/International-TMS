@@ -286,6 +286,19 @@ migrations.push({
       SELECT DISTINCT role_id,'menu.admin.dispatch.view' FROM role_permissions WHERE permission_code='dispatch.view'`);
   },
 });
+migrations.push({
+  version:185,
+  name:'quote_commercial_attribution',
+  definition:'quotations/transport_orders.quote_commercial_user_id VARCHAR(128) NULL;quote_commercial_name_snapshot VARCHAR(255) NULL;idx_orders_quote_commercial(organization_id,quote_commercial_user_id);no_historical_inference',
+  async up(connection) {
+    for (const table of ['quotations','transport_orders']) {
+      await addColumnIfMissing(connection,table,'quote_commercial_user_id','VARCHAR(128) NULL');
+      await addColumnIfMissing(connection,table,'quote_commercial_name_snapshot','VARCHAR(255) NULL');
+    }
+    const [indexes]=await connection.execute(`SELECT 1 FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='transport_orders' AND index_name='idx_orders_quote_commercial' LIMIT 1`);
+    if(!indexes.length)await connection.query('CREATE INDEX idx_orders_quote_commercial ON transport_orders(organization_id,quote_commercial_user_id)');
+  },
+});
 for (const migration of migrations) {
   migration.checksum = createHash("sha256")
     .update(`${migration.version}:${migration.name}\n${migration.definition}`)
@@ -316,6 +329,10 @@ export const requiredMysqlSchemaColumns = [
   ['quotations','intake_payload_hash'],
   ['settlement_cash_allocation_requests','payload_hash'],
   ['batch_dispatch_quotes','freight_amount'],
+  ['quotations','quote_commercial_user_id'],
+  ['quotations','quote_commercial_name_snapshot'],
+  ['transport_orders','quote_commercial_user_id'],
+  ['transport_orders','quote_commercial_name_snapshot'],
 ];
 
 async function addColumnIfMissing(connection, table, column, definition) {

@@ -34915,3 +34915,21 @@ html[data-motion="off"] *::after {
 .boss-warehouse-switch select { width: 100%; min-width: 0; }
 .boss-warehouse-switch button, .boss-warehouse-return button { width: 100%; }
 .boss-warehouse-return { margin: 8px 12px; }
+
+/* Keep intake decisions in complete rows when the independent quote owner is shown. */
+.modal-card.xwide.quote-form-modal.quote-intake-modal { width: min(1360px, calc(100vw - 48px)); min-width: 0; max-width: 100%; }
+.quote-intake-modal .quote-plan-grid > .quote-plan-customer { grid-column: span 6; }
+.quote-intake-modal .quote-plan-grid > .quote-plan-contact,
+.quote-intake-modal .quote-plan-grid > .quote-plan-phone,
+.quote-intake-modal .quote-plan-grid > .quote-plan-secondary { grid-column: span 3; }
+.quote-intake-modal .quote-plan-grid > .quote-plan-mark-contact,
+.quote-intake-modal .quote-plan-grid > .quote-plan-order-type,
+.quote-intake-modal .quote-plan-grid > .quote-plan-workflow { grid-column: span 4; }
+@media (max-width: 1100px) {
+  .quote-intake-modal .quote-plan-grid > .quote-plan-mark-contact { grid-column: 1 / -1; }
+  .quote-intake-modal .quote-plan-grid > .quote-plan-order-type,
+  .quote-intake-modal .quote-plan-grid > .quote-plan-workflow { grid-column: span 3; }
+}
+@media (max-width: 620px) {
+  .quote-intake-modal .quote-plan-grid > .field { grid-column: 1 / -1; }
+}

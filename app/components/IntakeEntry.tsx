@@ -23,9 +23,9 @@ export function IntakeStepLayout({ enabled, busy, children }: { enabled: boolean
     requestAnimationFrame(() => { invalid.focus(); invalid.reportValidity(); });
     return false;
   };
-  const move = (target: number) => {
+  const move = (target: number, requireValidPrevious = true) => {
     if (busy) return;
-    if (target > step && !validate(target - 1)) return;
+    if (requireValidPrevious && target > step && !validate(target - 1)) return;
     setStep(target);
     if (root.current) root.current.querySelector('.intake-step-content')?.scrollTo(0, 0);
   };
@@ -46,7 +46,7 @@ export function IntakeStepLayout({ enabled, busy, children }: { enabled: boolean
     data-active-step={enabled ? step : undefined}>
     {enabled && <nav className="intake-step-nav" aria-label="录单步骤">{intakeStepNames.map((name, index) =>
       <button key={name} type="button" disabled={busy} aria-current={index === step ? 'step' : undefined}
-        onClick={() => move(index)}><span>{index + 1}</span>{name}</button>)}</nav>}
+        onClick={() => move(index, false)}><span>{index + 1}</span>{name}</button>)}</nav>}
     <div className={enabled ? 'intake-step-content' : undefined}>{children}</div>
     <div className={enabled ? 'intake-step-actions' : 'modal-form-actions'}>
       {enabled && <><span aria-live="polite">第 {step + 1} / {intakeStepNames.length} 步 · 切换步骤保留填写内容</span>

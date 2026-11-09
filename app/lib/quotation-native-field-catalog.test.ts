@@ -21,9 +21,9 @@ describe("quotation native workflow fields",() => {
     expect(quotationNativeFieldPresent("quotation_volume_cbm", { volume_cbm })).toBe(false);
   });
 
-  it("derives every quote workflow surface from one unique 23-field registry",() => {
+  it("derives every quote workflow surface from one unique native-field registry",() => {
     const keys = quotationNativeFieldCatalog.map((field) => field.fieldKey);
-    expect(keys).toHaveLength(23);
+    expect(keys).toHaveLength(24);
     expect(new Set(keys).size).toBe(keys.length);
     expect([...quotationBuiltInWorkflowFieldKeys]).toEqual(keys);
     expect([...quotationNativeFieldKeySet]).toEqual(keys);
@@ -47,6 +47,7 @@ describe("quotation native workflow fields",() => {
     expect(quotationNativeFieldCatalog.filter((field) => field.defaultMode === "required")).toHaveLength(19);
     expect(quotationNativeFieldCatalog.filter((field) => field.defaultMode === "optional").map((field) => field.fieldKey)).toEqual([
       "quotation_mark_contacts",
+      "quotation_quote_commercial_user_id",
       "quotation_destination_warehouse_note",
       "quotation_notes",
       "quotation_valid_until",

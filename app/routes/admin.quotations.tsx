@@ -69,6 +69,7 @@ import { IntakeStepLayout, IntakeFeeEditor } from "../components/IntakeEntry";
 import { loadBusinessProcessPolicy } from "../lib/business-process-policy.server";
 import { preferredIntakeSalespersonId } from "../lib/intake-salesperson";
 import { isBossBusinessActor } from "../lib/permission-blocks";
+import { listQuoteCommercialOptions, resolveQuoteCommercial, type QuoteCommercialOption } from "../lib/quote-commercial.server";
 
 type Quote = {
   id: string;
@@ -80,6 +81,8 @@ type Quote = {
   mark_contact_ids_json: string | null;
   salesperson_name: string | null;
   salesperson_user_id: string | null;
+  quote_commercial_user_id: string | null;
+  quote_commercial_name_snapshot: string | null;
   workflow_definition_id: string | null;
   workflow_name: string | null;
   workflow_version_number: number | null;
@@ -148,6 +151,7 @@ type CustomerCreateActionData = {
 };
 
 type UserOption = { id: string; display_name: string; email: string; position_code: string | null };
+type QuoteCommercialChange = { before: {id:string|null;name:string|null}; after: {id:string|null;name:string|null}; reason: string };
 type WarehouseOption = { id: string; name: string; country_code: string | null; city: string | null; address: string | null };
 type GeoOption = { code: string; name: string; parent_code: string | null };
 type WorkflowOption = {
@@ -186,7 +190,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const [quotes, quotationCharges, customers] = await Promise.all([
     env.DB.prepare(
       `SELECT q.id,q.customer_id,q.quote_number,c.name customer_name,q.customer_contact_name,q.customer_contact_phone,q.mark_contact_ids_json,
-        q.salesperson_user_id,u.display_name salesperson_name,
+        q.salesperson_user_id,u.display_name salesperson_name,q.quote_commercial_user_id,q.quote_commercial_name_snapshot,
         q.workflow_definition_id,wd.name workflow_name,wd.version_number workflow_version_number,
         q.origin_country,q.origin_state,q.origin_city,q.pickup_address,
         q.destination_country,q.destination_state,q.destination_city,
@@ -261,7 +265,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const quoteRows = quotes.results ?? [];
   const pagination = paginateList(quoteRows, page);
   const visibleQuoteRows = pagination.items;
-  const [workflowValues,quotationWorkflowFields] = await Promise.all([
+  const [workflowValues,quotationWorkflowFields,quoteCommercials] = await Promise.all([
     listQuotationWorkflowFieldValues(
       current.organizationId,
       visibleQuoteRows.map((quote) => quote.id),
@@ -270,6 +274,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       current.organizationId,
       visibleQuoteRows.map((quote) => quote.id),
     ),
+    listQuoteCommercialOptions(current.organizationId, processPolicy),
   ]);
   return {
     current,
@@ -285,6 +290,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     quotationCharges: current.permissions.includes("quote.view") ? quotationCharges.results ?? [] : [],
     customers: customers.results ?? [],
     users: users.results ?? [],
+    quoteCommercials,
     warehouses: warehouses.results ?? [],
     countries,
     provinces,
@@ -374,6 +380,7 @@ export async function action({ request }: Route.ActionArgs) {
           workflowId:quote.workflow_definition_id,
           nativeFieldsChanged:editResult.changedNativeFieldKeys.length > 0,
           changedNativeFieldKeys:editResult.changedNativeFieldKeys,
+          quoteCommercialChange:editResult.quoteCommercialChange,
           customFieldsChanged:changedCustomFieldKeys.length > 0,
           changedCustomFieldKeys,
           chargesChanged:editResult.chargesChanged,
@@ -407,6 +414,7 @@ export async function action({ request }: Route.ActionArgs) {
       }
       const customerId = valueOf(form, "customerId");
       const salespersonId = valueOf(form, "salespersonId");
+      const quoteCommercialUserId = valueOf(form, "quoteCommercialUserId");
       const transportMode = valueOf(form, "transportMode");
       const roadLoadType = valueOf(form, "roadLoadType");
       const workflowDefinitionId = valueOf(form, "workflowDefinitionId");
@@ -460,6 +468,13 @@ export async function action({ request }: Route.ActionArgs) {
       ) => quotationWorkflowFieldPolicy(selectedWorkflowFields,fieldKey,fallback);
       const activeValue = (fieldKey: Parameters<typeof policy>[0], value: string, fallback: Parameters<typeof policy>[1]) =>
         policy(fieldKey,fallback).isActive ? value : "";
+      const quoteCommercialPolicy = policy("quotation_quote_commercial_user_id", "optional");
+      const quoteCommercial = await resolveQuoteCommercial({
+        organizationId: current.organizationId,
+        userId: directEntry || quoteCommercialPolicy.isActive ? quoteCommercialUserId : "",
+        required: directEntry || quoteCommercialPolicy.isRequired,
+        policy: processPolicy,
+      });
       const requiredText = (fieldKey: Parameters<typeof policy>[0], value: string, label: string, fallback: Parameters<typeof policy>[1]) => {
         if (policy(fieldKey,fallback).isRequired && !value.trim()) throw new Error(`请填写“${label}”`);
       };
@@ -648,8 +663,8 @@ export async function action({ request }: Route.ActionArgs) {
             JSON.stringify(markContactSnapshots.map((contact)=>contact.id)),now,now,
           ),
           env.DB.prepare(
-            "UPDATE quotations SET customer_contact_name=?,customer_contact_phone=?,intake_payload_hash=?,intake_payables_json=? WHERE id=? AND organization_id=?",
-          ).bind(effectiveContactName || null,effectiveContactPhone || null,identity?.payloadHash??null,identity?JSON.stringify(payableFees):null,id,current.organizationId),
+            "UPDATE quotations SET customer_contact_name=?,customer_contact_phone=?,intake_payload_hash=?,intake_payables_json=?,quote_commercial_user_id=?,quote_commercial_name_snapshot=? WHERE id=? AND organization_id=?",
+          ).bind(effectiveContactName || null,effectiveContactPhone || null,identity?.payloadHash??null,identity?JSON.stringify(payableFees):null,quoteCommercial?.id??null,quoteCommercial?.display_name??null,id,current.organizationId),
           ...charges.map((charge, index) => env.DB.prepare(
             `INSERT INTO quotation_charges(
               id,quotation_id,charge_code,description,quantity,unit_price,amount,exchange_rate,sort_order,notes,created_at
@@ -712,7 +727,7 @@ export async function action({ request }: Route.ActionArgs) {
           resourceId: order.id,
           organizationId: current.organizationId,
           actorUserId: current.userId,
-          metadata: { quotationId: id, quotationNumber: number, orderNumber: order.orderNumber,emergencyReason:current.positionCode==='HR_ADMIN'?valueOf(form,'intakeEmergencyReason'):undefined },
+          metadata: { quotationId: id, quotationNumber: number, orderNumber: order.orderNumber, quoteCommercialUserId:quoteCommercial?.id??null, quoteCommercialName:quoteCommercial?.display_name??null,emergencyReason:current.positionCode==='HR_ADMIN'?valueOf(form,'intakeEmergencyReason'):undefined },
         });
         return {
           intent,
@@ -768,6 +783,7 @@ async function saveQuotationNativeWorkflowUpdate(input: {
       chargesChanged:false,
       chargeCountBefore:chargeCount,
       chargeCountAfter:chargeCount,
+      quoteCommercialChange:null as QuoteCommercialChange|null,
     };
   }
   const nativeFields = input.fields.filter((field) => quotationNativeFieldKeySet.has(field.field_key));
@@ -816,6 +832,19 @@ async function saveQuotationNativeWorkflowUpdate(input: {
     next.mark_contact_ids_json = "[]";
   }
   setText("quotation_salesperson_user_id","salespersonId","salesperson_user_id","required");
+  setText("quotation_quote_commercial_user_id","quoteCommercialUserId","quote_commercial_user_id","optional");
+  let quoteCommercialChange: QuoteCommercialChange|null = null;
+  if (String(next.quote_commercial_user_id ?? "") !== String(input.quote.quote_commercial_user_id ?? "")) {
+    const reason=valueOf(input.form,"quoteCommercialChangeReason").trim();
+    if ((input.quote.quote_commercial_user_id || input.quote.quote_commercial_name_snapshot) && (reason.length<2 || reason.length>1000))
+      throw new Error("更正报价商务请填写 2 至 1000 字的原因，便于人事追溯");
+    const person=await resolveQuoteCommercial({organizationId:input.organizationId,
+      userId:String(next.quote_commercial_user_id??""),required:Boolean(input.quote.quote_commercial_user_id || input.quote.quote_commercial_name_snapshot)||policy("quotation_quote_commercial_user_id","optional").isRequired,
+      policy:await loadBusinessProcessPolicy(input.organizationId)});
+    next.quote_commercial_name_snapshot=person?.display_name??null;
+    quoteCommercialChange={before:{id:input.quote.quote_commercial_user_id?String(input.quote.quote_commercial_user_id):null,name:input.quote.quote_commercial_name_snapshot?String(input.quote.quote_commercial_name_snapshot):null},
+      after:{id:person?.id??null,name:person?.display_name??null},reason:reason||"首次补充实际报价商务"};
+  }
   setText("quotation_customs_clearance_mode","customsClearanceMode","customs_clearance_mode","required","company");
   setText("quotation_origin_region","originCountry","origin_country","required","");
   setText("quotation_origin_region","originState","origin_state","required","");
@@ -953,7 +982,7 @@ async function saveQuotationNativeWorkflowUpdate(input: {
     : Number(next.total_amount || 0);
   const statements:D1PreparedStatement[] = [env.DB.prepare(
     `UPDATE quotations SET
-      customer_contact_name=?,customer_contact_phone=?,mark_contact_ids_json=?,salesperson_user_id=?,customs_clearance_mode=?,
+      customer_contact_name=?,customer_contact_phone=?,mark_contact_ids_json=?,salesperson_user_id=?,quote_commercial_user_id=?,quote_commercial_name_snapshot=?,customs_clearance_mode=?,
       origin_country=?,origin_state=?,origin_city=?,pickup_address=?,
       destination_country=?,destination_state=?,destination_city=?,destination_warehouse_id=?,destination_warehouse_note=?,
       cargo_description=?,notes=?,pieces=?,declared_quantity_unit=?,planned_package_count=?,planned_package_type=?,
@@ -963,6 +992,7 @@ async function saveQuotationNativeWorkflowUpdate(input: {
        AND lifecycle_status IN ('pending','withdrawn') AND updated_at=?`,
   ).bind(
     next.customer_contact_name ?? null,next.customer_contact_phone ?? null,next.mark_contact_ids_json ?? null,next.salesperson_user_id ?? null,
+    next.quote_commercial_user_id ?? null,next.quote_commercial_name_snapshot ?? null,
     next.customs_clearance_mode || "company",next.origin_country || "",next.origin_state || null,next.origin_city || "",
     next.pickup_address ?? null,next.destination_country || "",next.destination_state || null,next.destination_city || "",
     next.destination_warehouse_id ?? null,next.destination_warehouse_note ?? null,next.cargo_description || "",next.notes ?? null,
@@ -1010,6 +1040,7 @@ async function saveQuotationNativeWorkflowUpdate(input: {
     chargesChanged:chargeUpdate.changed,
     chargeCountBefore,
     chargeCountAfter,
+    quoteCommercialChange,
   };
 }
 
@@ -1133,7 +1164,7 @@ function QuoteActions({ quote, fields, values, charges, loaderData, actionData, 
   ));
   return <div className="toolbar-actions quotation-table-actions">
     <Modal title={quote.order_number ? `报价详情 · ${quote.order_number}` : "报价详情"} triggerLabel="查看" triggerClassName="btn" size="wide" dialogClassName="quote-review-modal"><QuoteDetail quote={quote} fields={fields} values={values} charges={charges} customers={loaderData.customers} warehouses={loaderData.warehouses} /></Modal>
-    {activeFields.length > 0 && ["pending","withdrawn"].includes(quote.lifecycle_status) && <Modal title={quote.order_number ? `补充第一步配置项 · ${quote.order_number}` : "补充第一步配置项"} triggerLabel={missing.length ? `补充配置项 ${missing.length}` : "配置项"} triggerClassName={missing.length ? "btn danger" : "btn"} closeSignal={workflowSuccess} isOpen={workflowEditorOpen} onOpenChange={updateWorkflowEditorOpen} size="xwide" guardFormChanges><Form method="post" encType="multipart/form-data" className="quotation-workflow-update-form" data-enter-flow><input type="hidden" name="intent" value="workflow_fields_update"/><input type="hidden" name="id" value={quote.id}/><input type="hidden" name="nativeFieldsIncluded" value="1"/>{workflowError&&<div ref={workflowErrorRef} className="alert error" role="alert" tabIndex={-1}><strong>配置项尚未保存</strong><span>{workflowError}</span><small>已填写内容仍保留，请按提示修改后重试。</small></div>}<div className="quote-workflow-form-head"><strong>第 1 步 · 询价报价</strong><span>{quote.workflow_name} v{quote.workflow_version_number} · 版本已锁定</span></div>{nativeFields.length > 0 && <QuotationNativeWorkflowInputs quote={quote} fields={nativeFields} charges={charges} users={loaderData.users} warehouses={loaderData.warehouses} countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} markContacts={loaderData.markContacts}/>}<QuotationWorkflowFieldInputs fields={customFields} values={values} customers={loaderData.customers} warehouses={loaderData.warehouses}/><div className="modal-form-actions"><button className="btn primary" disabled={busy}>保存配置项</button></div></Form></Modal>}
+    {activeFields.length > 0 && ["pending","withdrawn"].includes(quote.lifecycle_status) && <Modal title={quote.order_number ? `补充第一步配置项 · ${quote.order_number}` : "补充第一步配置项"} triggerLabel={missing.length ? `补充配置项 ${missing.length}` : "配置项"} triggerClassName={missing.length ? "btn danger" : "btn"} closeSignal={workflowSuccess} isOpen={workflowEditorOpen} onOpenChange={updateWorkflowEditorOpen} size="xwide" guardFormChanges><Form method="post" encType="multipart/form-data" className="quotation-workflow-update-form" data-enter-flow><input type="hidden" name="intent" value="workflow_fields_update"/><input type="hidden" name="id" value={quote.id}/><input type="hidden" name="nativeFieldsIncluded" value="1"/>{workflowError&&<div ref={workflowErrorRef} className="alert error" role="alert" tabIndex={-1}><strong>配置项尚未保存</strong><span>{workflowError}</span><small>已填写内容仍保留，请按提示修改后重试。</small></div>}<div className="quote-workflow-form-head"><strong>第 1 步 · 询价报价</strong><span>{quote.workflow_name} v{quote.workflow_version_number} · 版本已锁定</span></div>{nativeFields.length > 0 && <QuotationNativeWorkflowInputs quote={quote} fields={nativeFields} charges={charges} users={loaderData.users} quoteCommercials={loaderData.quoteCommercials} warehouses={loaderData.warehouses} countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} markContacts={loaderData.markContacts}/>}<QuotationWorkflowFieldInputs fields={customFields} values={values} customers={loaderData.customers} warehouses={loaderData.warehouses}/><div className="modal-form-actions"><button className="btn primary" disabled={busy}>保存配置项</button></div></Form></Modal>}
     {quote.lifecycle_status === "pending" && <Form method="post"><input type="hidden" name="intent" value="accept"/><input type="hidden" name="id" value={quote.id}/><button className="btn primary" disabled={busy || missing.length > 0} title={missing.length ? `尚缺：${missing.map((field) => field.label).join("、")}` : undefined}>代客户确认</button></Form>}
     {quote.lifecycle_status === "accepted" && quote.order_status === "draft" && <Form method="post"><input type="hidden" name="intent" value="withdraw"/><input type="hidden" name="id" value={quote.id}/><ConfirmAction className="btn" title="撤回报价接受" description="将撤回该报价的客户接受状态；已生成订单会保留为草稿并留下审计记录。" triggerLabel="撤回接受" confirmLabel="确认撤回" pending={busy}/></Form>}
     {quote.lifecycle_status === "withdrawn" && <Form method="post"><input type="hidden" name="intent" value="accept"/><input type="hidden" name="id" value={quote.id}/><button className="btn primary" disabled={busy}>重新接受</button></Form>}
@@ -1173,6 +1204,7 @@ function QuoteDetail({ quote, fields, values, charges, customers, warehouses }: 
       <section className="quote-detail-section"><header><h3>客户与负责人</h3><span>报价归属</span></header><div className="drawer-grid quote-detail-grid">
         <ReadCell label="客户" value={quote.customer_name}/>
         {visible("quotation_salesperson_user_id","required") && <ReadCell label="业务员" value={quote.salesperson_name || "—"}/>}
+        {visible("quotation_quote_commercial_user_id","optional") && <ReadCell label="报价商务" value={quote.quote_commercial_name_snapshot || "尚未记录"}/>}
         {visible("quotation_customer_contact_name","required") && <ReadCell label="客户联系人" value={quote.customer_contact_name || "—"}/>}
         {visible("quotation_customer_contact_phone","required") && <ReadCell label="联系电话" value={quote.customer_contact_phone || "—"}/>}
         <ReadCell label="运输方案" value={`汽运 · ${quote.road_load_type === "ltl" ? "拼车" : "整车"}`}/>
@@ -1368,6 +1400,7 @@ function QuoteForm({ loaderData, busy, formError, entryMode }: { loaderData: Awa
         <Field label="订单类型" className="quote-plan-order-type"><select className="control" name="roadLoadType" value={roadLoadType} onChange={(event) => selectRoadLoadType(event.target.value as "" | "ltl" | "ftl")} required><option value="" disabled>请选择订单类型</option><option value="ltl">拼车</option><option value="ftl">整车</option></select></Field>
         <Field label="工作流版本" className="quote-plan-workflow"><select className="control" name="workflowDefinitionId" value={workflowDefinitionId} onChange={(event) => setWorkflowDefinitionId(event.target.value)} disabled={!roadLoadType} required><option value="">{!roadLoadType ? "请先选择订单类型" : compatibleWorkflows.length ? "请选择工作流版本" : "当前类型暂无可用工作流"}</option>{compatibleWorkflows.map((workflow) => <option key={workflow.id} value={workflow.id}>{workflow.name} · v{workflow.version_number}{workflow.lifecycle_status === "published" ? " · 当前发布" : " · 历史版本"}</option>)}</select></Field>
         {policies.salesperson.isActive && <Field label="业务员" className="quote-plan-secondary quote-plan-salesperson"><select className="control" name="salespersonId" value={salespersonId} onChange={(event)=>setSalespersonId(event.target.value)} required={policies.salesperson.isRequired}><option value="">请选择业务员</option>{loaderData.users.map((user) => <option key={user.id} value={user.id}>{user.display_name} · {user.email}</option>)}</select></Field>}
+        {(entryMode === "direct" || quotePolicy("quotation_quote_commercial_user_id","optional").isActive) && <Field label="报价商务" className="quote-plan-secondary quote-plan-salesperson"><select className="control" name="quoteCommercialUserId" defaultValue="" required={entryMode === "direct" || quotePolicy("quotation_quote_commercial_user_id","optional").isRequired}><option value="">请选择实际报价人</option>{loaderData.quoteCommercials.map(user => <option key={user.id} value={user.id}>{user.display_name}</option>)}</select>{loaderData.quoteCommercials.length === 0 && <small>暂无可选报价人员，请由管理员配置报价岗位及人员。</small>}</Field>}
         <Field label="运输方式" className="quote-plan-secondary quote-plan-transport"><select className="control" name="transportMode" defaultValue="ROAD" required><option value="ROAD">汽运</option><option value="RAIL" disabled>铁运（流程未开放）</option><option value="AIR" disabled>空运（流程未开放）</option></select></Field>
         {policies.customsMode.isActive && <Field label="清关办理方式" className="quote-plan-secondary quote-plan-customs"><select className="control" name="customsClearanceMode" defaultValue="company" required={policies.customsMode.isRequired}><option value="company">公司代办清关</option><option value="customer">客户自理清关</option></select></Field>}
       </div>
@@ -1433,6 +1466,7 @@ function QuotationNativeWorkflowInputs({
   fields,
   charges: initialCharges,
   users,
+  quoteCommercials,
   warehouses,
   countries,
   provinces,
@@ -1443,6 +1477,7 @@ function QuotationNativeWorkflowInputs({
   fields: QuotationWorkflowField[];
   charges: QuoteCharge[];
   users: UserOption[];
+  quoteCommercials: QuoteCommercialOption[];
   warehouses: WarehouseOption[];
   countries: GeoOption[];
   provinces: GeoOption[];
@@ -1456,6 +1491,7 @@ function QuotationNativeWorkflowInputs({
     contactPhone:policy("quotation_customer_contact_phone","required"),
     markContacts:policy("quotation_mark_contacts","optional"),
     salesperson:policy("quotation_salesperson_user_id","required"),
+    quoteCommercial:policy("quotation_quote_commercial_user_id","optional"),
     customs:policy("quotation_customs_clearance_mode","required"),
     origin:policy("quotation_origin_region","required"),
     pickup:policy("quotation_pickup_address","required"),
@@ -1500,7 +1536,7 @@ function QuotationNativeWorkflowInputs({
       })
     : null;
   const calculatedVolume = formatQuoteVolumeInput(calculatedVolumeValue);
-  const anyParty = p.contactName.isActive || p.contactPhone.isActive || p.markContacts.isActive || p.salesperson.isActive || p.customs.isActive;
+  const anyParty = p.contactName.isActive || p.contactPhone.isActive || p.markContacts.isActive || p.salesperson.isActive || p.quoteCommercial.isActive || p.customs.isActive;
   const anyRoute = p.origin.isActive || p.pickup.isActive || p.destination.isActive || p.warehouse.isActive || p.warehouseNote.isActive;
   const anyCargo = p.cargo.isActive || p.notes.isActive || p.pieces.isActive || p.declaredQuantityUnit.isActive || p.plannedPackageCount.isActive || p.plannedPackageType.isActive || p.weight.isActive || p.length.isActive || p.width.isActive || p.height.isActive || p.volume.isActive;
   return <div className="quote-native-workflow-inputs">
@@ -1510,6 +1546,10 @@ function QuotationNativeWorkflowInputs({
         {p.contactPhone.isActive && <Field label="客户联系电话"><input className="control" name="customerContactPhone" type="tel" defaultValue={quote.customer_contact_phone || ""} required={p.contactPhone.isRequired}/></Field>}
         {p.markContacts.isActive && <div className="field quote-mark-contacts-field"><span>我方唛头联系人{p.markContacts.isRequired?"":"（选填）"}</span><MarkContactPicker contacts={markContacts} selectedIds={selectedMarkContactIds} required={p.markContacts.isRequired} onChange={setSelectedMarkContactIds}/></div>}
         {p.salesperson.isActive && <Field label="业务员"><select className="control" name="salespersonId" defaultValue={quote.salesperson_user_id || ""} required={p.salesperson.isRequired}><option value="">请选择业务员</option>{users.map((user) => <option key={user.id} value={user.id}>{user.display_name} · {user.email}</option>)}</select></Field>}
+        {p.quoteCommercial.isActive && <>
+          <Field label="报价商务"><select className="control" name="quoteCommercialUserId" defaultValue={quote.quote_commercial_user_id||""} required={p.quoteCommercial.isRequired}><option value="">请选择实际报价人</option>{quote.quote_commercial_user_id&&!quoteCommercials.some(person=>person.id===quote.quote_commercial_user_id)&&<option value={quote.quote_commercial_user_id}>历史归属：{quote.quote_commercial_name_snapshot||"人员已停用"}</option>}{quoteCommercials.map(person=><option key={person.id} value={person.id}>{person.display_name}</option>)}</select></Field>
+          {(quote.quote_commercial_user_id||quote.quote_commercial_name_snapshot)&&<Field label="报价归属更正原因"><input className="control" name="quoteCommercialChangeReason" maxLength={1000} placeholder="仅更换报价人时填写；其他资料修改无需填写"/></Field>}
+        </>}
         {p.customs.isActive && <Field label="清关办理方式"><select className="control" name="customsClearanceMode" defaultValue={quote.customs_clearance_mode || "company"} required={p.customs.isRequired}><option value="company">公司代办清关</option><option value="customer">客户自理清关</option></select></Field>}
       </div>
     </QuoteLedgerSection>}

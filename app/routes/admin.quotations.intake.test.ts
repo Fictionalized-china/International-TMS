@@ -3,7 +3,7 @@ import { env } from 'cloudflare:workers';
 import { meetingFixture } from '../lib/meeting-integration-fixture';
 import { ensureDefaultWorkflow } from '../lib/business-workflow.server';
 import { requireSessionUser } from '../lib/auth.server';
-import { action } from './admin.quotations';
+import { action, loader } from './admin.quotations';
 
 vi.mock('cloudflare:workers', () => ({ env: {} }));
 vi.mock('../lib/auth.server', () => ({ requireSessionUser: vi.fn() }));
@@ -32,7 +32,7 @@ function form(type = 'ltl', mode = 'direct') {
   const data = new FormData();
   const values = {
     intent:'create', entryMode:mode, intakeRequestId:crypto.randomUUID(), customerId:'customer',
-    salespersonId:'sales', transportMode:'ROAD', roadLoadType:type,
+    salespersonId:'sales', quoteCommercialUserId:'commercial', transportMode:'ROAD', roadLoadType:type,
     workflowDefinitionId:type === 'ftl' ? 'org:tms-ftl-standard' : 'org:tms-default',
     customerContactName:'联系人', customerContactPhone:'13800000000',
     pickupAddress:'工厂', originCountry:'中国', originState:'广东', originCity:'深圳',
@@ -51,6 +51,78 @@ function form(type = 'ltl', mode = 'direct') {
 const submit = (body: FormData) => action({request:new Request('http://localhost/admin/quotations?entryMode=direct', {method:'POST',body}),params:{},context:undefined} as never);
 
 describe('real intake action with quotation node unplugged', () => {
+  it.each(['owner','sales'])('%s records the actual quote commercial independently and freezes their name', async actor => {
+    vi.mocked(requireSessionUser).mockResolvedValue(fixture.actors.get(actor)!);
+    const body=form();
+    const result=await submit(body);
+    expect(result,JSON.stringify(result)).toMatchObject({orderId:expect.any(String)});
+    if(!('orderId' in result))throw new Error(JSON.stringify(result));
+    const stored=()=>fixture.database.prepare('SELECT quote_commercial_user_id,quote_commercial_name_snapshot,salesperson_user_id,created_by_user_id FROM transport_orders WHERE id=?').get(result.orderId!);
+    expect(stored()).toMatchObject({quote_commercial_user_id:'commercial',quote_commercial_name_snapshot:'commercial',salesperson_user_id:'sales',created_by_user_id:actor});
+    fixture.database.exec("UPDATE users SET display_name='改名后的商务' WHERE id='commercial'");
+    expect(await submit(body)).toMatchObject({orderId:result.orderId});
+    expect(stored()).toMatchObject({quote_commercial_name_snapshot:'commercial'});
+    const snapshot=fixture.database.prepare('SELECT snapshot_json FROM transport_order_quote_snapshots WHERE order_id=?').get(result.orderId!) as {snapshot_json:string};
+    expect(JSON.parse(snapshot.snapshot_json)).toMatchObject({quoteCommercialUserId:'commercial',quoteCommercialName:'commercial'});
+  });
+
+  it.each([false,true])('requires a reason for changed quote attribution even if the historical account is removed (%s), and inherits it on the same resumed order', async removed => {
+    fixture.database.prepare("INSERT INTO business_process_policies(organization_id,policy_key,policy_value,updated_at) VALUES('org','order.quote_commercial_positions','BUSINESS_ROUTE,SALES',?)").run(fixture.now);
+    const created=await submit(form());
+    if(!('orderId' in created)||!created.orderId||!created.quotationId)throw new Error(JSON.stringify(created));
+    const quoteId=created.quotationId;
+    const withdrawal=new FormData();withdrawal.set('intent','withdraw');withdrawal.set('id',quoteId);
+    expect(await submit(withdrawal)).toMatchObject({success:expect.any(String)});
+    if(removed)fixture.database.prepare('UPDATE quotations SET quote_commercial_user_id=NULL WHERE id=?').run(quoteId);
+    const body=form('ltl','quote');body.set('intent','workflow_fields_update');body.set('id',quoteId);body.set('nativeFieldsIncluded','1');body.set('quoteCommercialUserId','sales');
+    const charge=fixture.database.prepare('SELECT id FROM quotation_charges WHERE quotation_id=?').get(quoteId) as {id:string};body.set('chargeId',charge.id);
+    expect(await submit(body)).toMatchObject({formError:expect.stringContaining('更正报价商务')});
+    expect(fixture.database.prepare('SELECT quote_commercial_user_id,quote_commercial_name_snapshot FROM quotations WHERE id=?').get(quoteId)).toMatchObject({quote_commercial_user_id:removed?null:'commercial',quote_commercial_name_snapshot:'commercial'});
+    body.set('quoteCommercialChangeReason','会议确认实际报价人为业务员');
+    const corrected=await submit(body);
+    expect(corrected,JSON.stringify(corrected)).toMatchObject({success:expect.any(String)});
+    const audit=fixture.database.prepare("SELECT metadata_json FROM audit_logs WHERE resource_id=? AND action='quotation.workflow_fields.update' ORDER BY created_at DESC LIMIT 1").get(quoteId) as {metadata_json:string};
+    expect(JSON.parse(audit.metadata_json)).toMatchObject({quoteCommercialChange:{before:{id:removed?null:'commercial',name:'commercial'},after:{id:'sales',name:'sales'},reason:'会议确认实际报价人为业务员'}});
+    const accept=new FormData();accept.set('intent','accept');accept.set('id',quoteId);
+    expect(await submit(accept)).toMatchObject({success:expect.any(String)});
+    expect(fixture.database.prepare('SELECT quote_commercial_user_id,quote_commercial_name_snapshot FROM transport_orders WHERE id=?').get(created.orderId)).toMatchObject({quote_commercial_user_id:'sales',quote_commercial_name_snapshot:'sales'});
+    expect(fixture.database.prepare('SELECT COUNT(*) n FROM transport_orders WHERE quotation_id=?').get(quoteId)).toMatchObject({n:1});
+  });
+
+  it.each(['owner','sales'])('%s cannot replace a missing quote commercial with the creator or salesperson', async actor => {
+    vi.mocked(requireSessionUser).mockResolvedValue(fixture.actors.get(actor)!);
+    const body=form();body.delete('quoteCommercialUserId');
+    expect(await submit(body)).toMatchObject({formError:expect.stringContaining('报价商务')});
+    expect(fixture.database.prepare('SELECT COUNT(*) n FROM quotations').get()).toMatchObject({n:0});
+  });
+
+  it.each(['sales','owner','not-a-member'])('rejects an unconfigured quote commercial %s',async userId=>{
+    const body=form();body.set('quoteCommercialUserId',userId);
+    expect(await submit(body)).toMatchObject({formError:expect.stringContaining('报价商务')});
+    expect(fixture.database.prepare('SELECT COUNT(*) n FROM quotations').get()).toMatchObject({n:0});
+  });
+
+  it('uses the configured eligible positions without silently expanding customer access',async()=>{
+    fixture.database.prepare("INSERT INTO business_process_policies(organization_id,policy_key,policy_value,updated_at) VALUES('org','order.quote_commercial_positions','SALES',?)").run(fixture.now);
+    const body=form();body.set('quoteCommercialUserId','sales');
+    expect(await submit(body)).toMatchObject({orderId:expect.any(String)});
+    const data=await loader({request:new Request('http://localhost/admin/quotations?entryMode=direct'),params:{},context:undefined} as never);
+    expect(data.quoteCommercials).toEqual([{id:'sales',display_name:'sales'}]);
+    expect(data.customers.map(row=>row.id)).toEqual(['customer']);
+  });
+
+  it('offers the commercial to a salesperson without exposing other employee contact details',async()=>{
+    const data=await loader({request:new Request('http://localhost/admin/quotations?entryMode=direct'),params:{},context:undefined} as never);
+    expect(data.quoteCommercials).toEqual([{id:'commercial',display_name:'commercial'}]);
+    expect(data.users.map(row=>row.id)).toEqual(['sales']);
+  });
+
+  it.each(["UPDATE users SET status='disabled' WHERE id='commercial'","UPDATE memberships SET status='disabled' WHERE user_id='commercial'","UPDATE positions SET status='disabled' WHERE code='BUSINESS_ROUTE'"])("rejects unavailable quote commercial membership: %s",async sql=>{
+    fixture.database.exec(sql);
+    expect(await submit(form())).toMatchObject({formError:expect.stringContaining('报价商务')});
+    expect(fixture.database.prepare('SELECT COUNT(*) n FROM quotations').get()).toMatchObject({n:0});
+  });
+
   it('rejects a receivable pickup line instead of a missing payable pickup line before any order writes', async () => {
     const body = form();
     for (const key of ['intakePayableCode','intakePayableQuantity','intakePayableUnitPrice','intakePayableCounterparty','intakePayableNotes']) body.delete(key);

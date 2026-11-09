@@ -45,6 +45,8 @@ type AcceptedQuote = {
   mark_contact_ids_json: string | null;
   mark_contacts_field_active: number;
   salesperson_user_id: string | null;
+  quote_commercial_user_id: string | null;
+  quote_commercial_name_snapshot: string | null;
   workflow_definition_id: string | null;
   origin_country: string;
   origin_state: string | null;
@@ -189,6 +191,8 @@ export async function createOrderFromAcceptedQuote(input: {
     taxAmount: quote.tax_amount,
     totalAmount: quote.total_amount,
     salespersonUserId: quote.salesperson_user_id,
+    quoteCommercialUserId: quote.quote_commercial_user_id,
+    quoteCommercialName: quote.quote_commercial_name_snapshot,
     workflowDefinitionId: quote.workflow_definition_id,
     notes: quote.notes,
     charges: chargeRows.results,
@@ -222,6 +226,8 @@ export async function createOrderFromAcceptedQuote(input: {
       quote.salesperson_user_id,"order_creation","委托资料补充",now,
       now,now,quote.customs_clearance_mode,0,JSON.stringify(markContactSnapshots),
     ),
+    env.DB.prepare("UPDATE transport_orders SET quote_commercial_user_id=?,quote_commercial_name_snapshot=? WHERE id=? AND organization_id=?")
+      .bind(quote.quote_commercial_user_id,quote.quote_commercial_name_snapshot,orderId,input.organizationId),
     env.DB.prepare(
       `INSERT INTO order_cargo_items(
          id,organization_id,order_id,line_no,cargo_name_cn,package_type,package_count,pieces_per_package,
@@ -318,7 +324,7 @@ async function loadAcceptedQuote(organizationId: string, quotationId: string) {
     `SELECT q.id,q.quote_number,q.customer_id,c.name customer_name,
             COALESCE(q.customer_contact_name,(SELECT cc.name FROM customer_contacts cc WHERE cc.customer_id=q.customer_id ORDER BY cc.is_primary DESC,cc.created_at LIMIT 1),c.name) customer_contact_name,
             COALESCE(q.customer_contact_phone,(SELECT cc.phone FROM customer_contacts cc WHERE cc.customer_id=q.customer_id ORDER BY cc.is_primary DESC,cc.created_at LIMIT 1)) customer_contact_phone,
-            q.salesperson_user_id,q.workflow_definition_id,q.mark_contact_ids_json,
+            q.salesperson_user_id,q.quote_commercial_user_id,q.quote_commercial_name_snapshot,q.workflow_definition_id,q.mark_contact_ids_json,
             EXISTS(
               SELECT 1
                 FROM workflow_step_fields mark_field
@@ -389,6 +395,8 @@ async function repairGeneratedOrder(input: {
   await env.DB.prepare(
     `UPDATE transport_orders
         SET shipper_contact=?,shipper_phone=?,consignee_contact=?,consignee_phone=?,
+            quote_commercial_user_id=CASE WHEN status='draft' AND ? IS NOT NULL THEN ? ELSE quote_commercial_user_id END,
+            quote_commercial_name_snapshot=CASE WHEN status='draft' AND ? IS NOT NULL THEN ? ELSE quote_commercial_name_snapshot END,
             requested_pickup_date=COALESCE(requested_pickup_date,?),
             destination_address=?,mark_contacts_snapshot_json=COALESCE(mark_contacts_snapshot_json,?),updated_at=?
       WHERE id=? AND organization_id=?`,
@@ -397,6 +405,8 @@ async function repairGeneratedOrder(input: {
     input.quote.customer_contact_phone,
     input.quote.customer_contact_name || input.quote.customer_name,
     input.quote.customer_contact_phone,
+    input.quote.quote_commercial_user_id,input.quote.quote_commercial_user_id,
+    input.quote.quote_commercial_user_id,input.quote.quote_commercial_name_snapshot,
     now,
     destinationAddress,
     JSON.stringify(markContactSnapshots),

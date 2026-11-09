@@ -74,7 +74,7 @@ describe("quotation loader D1 concurrency", () => {
     } as never);
 
     expect(result.quotes).toEqual([{ id: "quote-1" }]);
-    expect(d1.snapshot().calls).toBe(14); // Includes the organization-level intake policy.
+    expect(d1.snapshot().calls).toBe(15); // Intake policy and independently eligible commercial candidates.
     expect(d1.snapshot().maxActive).toBeLessThanOrEqual(4);
     expect(d1.snapshot().active).toBe(0);
   });

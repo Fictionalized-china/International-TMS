@@ -3,6 +3,7 @@ export const businessProcessPolicyDefinitions = [
   { key: "order.submit_positions", label: "录单提交岗位（含紧急协助）", group: "录单与审核", kind: "positions", defaultValue: "SALES,CS,HR_ADMIN" },
   { key: "order.hr_emergency_enabled", label: "允许人事紧急协助录单（必须记录原因）", group: "录单与审核", kind: "boolean", defaultValue: "1" },
   { key: "order.approve_positions", label: "订单审核岗位", group: "录单与审核", kind: "positions", defaultValue: "OPERATION_SUPERVISOR" },
+  { key: "order.quote_commercial_positions", label: "报价商务可选岗位", group: "录单与审核", kind: "positions", defaultValue: "BUSINESS_ROUTE" },
   { key: "order.cs_requires_customer_flag", label: "客服仅代录已配置客户", group: "录单与审核", kind: "boolean", defaultValue: "1" },
   { key: "order.ftl_required_fees", label: "整车开单必录费用代码", group: "录单与审核", kind: "fees", defaultValue: "pickup,handling,storage,customs_port,overseas_driver,transit_customs" },
   { key: "order.ltl_required_fees", label: "拼车开单必录费用代码", group: "录单与审核", kind: "fees", defaultValue: "pickup" },

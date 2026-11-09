@@ -5,6 +5,7 @@ export const quotationConsignmentPresentationKeys = [
   "quotation_customer_contact_phone",
   "quotation_mark_contacts",
   "quotation_salesperson_user_id",
+  "quotation_quote_commercial_user_id",
   "quotation_customs_clearance_mode",
   "quotation_origin_region",
   "quotation_pickup_address",

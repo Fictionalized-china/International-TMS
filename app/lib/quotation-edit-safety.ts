@@ -110,6 +110,7 @@ const nativeColumns: ReadonlyArray<{
   { key: "quotation_customer_contact_phone", columns: ["customer_contact_phone"] },
   { key: "quotation_mark_contacts", columns: ["mark_contact_ids_json"] },
   { key: "quotation_salesperson_user_id", columns: ["salesperson_user_id"] },
+  { key: "quotation_quote_commercial_user_id", columns: ["quote_commercial_user_id", "quote_commercial_name_snapshot"] },
   { key: "quotation_customs_clearance_mode", columns: ["customs_clearance_mode"] },
   { key: "quotation_origin_region", columns: ["origin_country", "origin_state", "origin_city"] },
   { key: "quotation_pickup_address", columns: ["pickup_address"] },

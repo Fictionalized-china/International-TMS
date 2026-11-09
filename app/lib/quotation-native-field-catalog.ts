@@ -34,6 +34,7 @@ export const quotationNativeFieldCatalog = [
   nativeField("quotation_customer_contact_phone","客户联系电话","text","consignment","required","客户业务联系使用的电话，不再自动作为唛头公开电话。"),
   nativeField("quotation_mark_contacts","我方唛头联系人","multiselect","consignment","optional","按部门与岗位从组织账号中选择 0 至 3 人；订单生成时冻结姓名、岗位和电话快照。"),
   nativeField("quotation_salesperson_user_id","业务员","select","consignment","required","负责本次询价与报价的业务员；未显示时默认当前操作人。"),
+  nativeField("quotation_quote_commercial_user_id","报价商务","select","consignment","optional","实际为本业务报价的人员，独立于业务员和录单人；直接录单必须明确选择。"),
   nativeField("quotation_customs_clearance_mode","清关办理方式","select","consignment","required","选择公司代办清关或客户自理清关。","company|公司代办清关\ncustomer|客户自理清关"),
   nativeField("quotation_origin_region","起运地区","select","consignment","required","按国家或地区、省或州、城市三级选择起运地区。"),
   nativeField("quotation_pickup_address","提货地址","textarea","consignment","required","本次报价使用的详细提货地址，可不写入客户常用地址。"),
@@ -73,6 +74,7 @@ export function quotationNativeFieldPresent(
     case "quotation_customer_contact_phone": return text("customer_contact_phone");
     case "quotation_mark_contacts": return text("mark_contact_ids_json") && String(quotation.mark_contact_ids_json) !== "[]";
     case "quotation_salesperson_user_id": return text("salesperson_user_id");
+    case "quotation_quote_commercial_user_id": return text("quote_commercial_user_id");
     case "quotation_customs_clearance_mode": return text("customs_clearance_mode");
     case "quotation_origin_region":
       return text("origin_country") && text("origin_state") && text("origin_city");
