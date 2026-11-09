@@ -299,6 +299,17 @@ migrations.push({
     if(!indexes.length)await connection.query('CREATE INDEX idx_orders_quote_commercial ON transport_orders(organization_id,quote_commercial_user_id)');
   },
 });
+migrations.push({
+  version:186,
+  name:'intake_route_fields',
+  definition:'quotations.exit_port,transit_locations,customs_location,domestic_agent TEXT NULL;quotations.intake_route_recorded TINYINT NOT NULL DEFAULT 0;transport_orders.domestic_agent TEXT NULL;no_historical_inference',
+  async up(connection) {
+    for (const column of ['exit_port','transit_locations','customs_location','domestic_agent'])
+      await addColumnIfMissing(connection,'quotations',column,'TEXT NULL');
+    await addColumnIfMissing(connection,'quotations','intake_route_recorded','TINYINT NOT NULL DEFAULT 0');
+    await addColumnIfMissing(connection,'transport_orders','domestic_agent','TEXT NULL');
+  },
+});
 for (const migration of migrations) {
   migration.checksum = createHash("sha256")
     .update(`${migration.version}:${migration.name}\n${migration.definition}`)
@@ -333,6 +344,9 @@ export const requiredMysqlSchemaColumns = [
   ['quotations','quote_commercial_name_snapshot'],
   ['transport_orders','quote_commercial_user_id'],
   ['transport_orders','quote_commercial_name_snapshot'],
+  ['quotations','exit_port'], ['quotations','transit_locations'], ['quotations','customs_location'], ['quotations','domestic_agent'],
+  ['transport_orders','domestic_agent'],
+  ['quotations','intake_route_recorded'],
 ];
 
 async function addColumnIfMissing(connection, table, column, definition) {

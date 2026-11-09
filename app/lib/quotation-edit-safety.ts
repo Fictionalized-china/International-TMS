@@ -1,4 +1,5 @@
 import type { QuotationNativeFieldKey } from "./quotation-native-field-catalog";
+import { intakeRouteFields } from "./intake-route-fields";
 
 export type ExistingQuotationCharge = {
   id: string;
@@ -112,6 +113,7 @@ const nativeColumns: ReadonlyArray<{
   { key: "quotation_salesperson_user_id", columns: ["salesperson_user_id"] },
   { key: "quotation_quote_commercial_user_id", columns: ["quote_commercial_user_id", "quote_commercial_name_snapshot"] },
   { key: "quotation_customs_clearance_mode", columns: ["customs_clearance_mode"] },
+  ...intakeRouteFields.map(field=>({key:field.fieldKey,columns:[field.column]})),
   { key: "quotation_origin_region", columns: ["origin_country", "origin_state", "origin_city"] },
   { key: "quotation_pickup_address", columns: ["pickup_address"] },
   { key: "quotation_destination_region", columns: ["destination_country", "destination_state", "destination_city"] },

@@ -25,6 +25,9 @@ beforeEach(async () => {
     VALUES(?,'org',?,?,?,?,?,?)`).run(code!, category!, code!, name!, parent, fixture.now, fixture.now);
   fixture.database.prepare(`INSERT INTO warehouses(id,organization_id,code,name,warehouse_role,created_at,updated_at)
     VALUES('dest','org','DEST','目的仓','overseas_destination',?,?)`).run(fixture.now, fixture.now);
+  for(const [category,code] of [['border_port','KH'],['transit_place','ALA'],['customs_place','MOW']])
+    fixture.database.prepare(`INSERT INTO reference_data(id,organization_id,category,code,name,created_at,updated_at)
+      VALUES(?,'org',?,?,?,?,?)`).run(`route:${category}`,category,code,code,fixture.now,fixture.now);
 });
 afterEach(() => fixture?.database.close());
 
@@ -38,6 +41,7 @@ function form(type = 'ltl', mode = 'direct') {
     pickupAddress:'工厂', originCountry:'中国', originState:'广东', originCity:'深圳',
     destinationCountry:'俄罗斯', destinationState:'莫斯科州', destinationCity:'莫斯科',
     destinationWarehouseId:'dest', customsClearanceMode:'company', cargoDescription:'测试货物',
+    exitPort:'KH',transitLocations:'ALA',customsLocation:'MOW',domesticAgent:'国内代理甲',
     pieces:'1', plannedPackageCount:'1', declaredQuantityUnit:'件', plannedPackageType:'carton',
     weight:'100', length:'100', width:'100', height:'100', volume:'1',
     chargeName:'国际汽运费', chargeQuantity:'1', chargeUnitPrice:'100', chargeNotes:'',
@@ -51,6 +55,55 @@ function form(type = 'ltl', mode = 'direct') {
 const submit = (body: FormData) => action({request:new Request('http://localhost/admin/quotations?entryMode=direct', {method:'POST',body}),params:{},context:undefined} as never);
 
 describe('real intake action with quotation node unplugged', () => {
+  it.each([['exitPort','出境口岸'],['transitLocations','中转地'],['customsLocation','清关地'],['domesticAgent','国内代理']])('blocks missing intake route field %s before any writes',async(key,label)=>{
+    const body=form();body.delete(key);
+    expect(await submit(body)).toMatchObject({formError:expect.stringContaining(label)});
+    expect(fixture.database.prepare('SELECT COUNT(*) n FROM quotations').get()).toMatchObject({n:0});
+  });
+  it.each(['ltl','ftl'])('%s inherits intake route and domestic agent exactly once without overwriting RO',async type=>{
+    const body=form(type);const result=await submit(body);
+    if(!('orderId' in result)||!result.orderId)throw new Error(JSON.stringify(result));
+    const expected={exit_port:'KH',transit_locations:'ALA',customs_location:'MOW',domestic_agent:'国内代理甲'};
+    expect(fixture.database.prepare('SELECT exit_port,transit_locations,customs_location,domestic_agent,ro_agent FROM transport_orders WHERE id=?').get(result.orderId)).toMatchObject({...expected,ro_agent:null});
+    expect(fixture.database.prepare('SELECT exit_port,transit_locations,customs_location,domestic_agent FROM quotations WHERE id=?').get(result.quotationId!)).toMatchObject(expected);
+    expect(await submit(body)).toMatchObject({orderId:result.orderId});
+    const snapshot=fixture.database.prepare('SELECT snapshot_json FROM transport_order_quote_snapshots WHERE order_id=?').get(result.orderId) as {snapshot_json:string};
+    expect(JSON.parse(snapshot.snapshot_json)).toMatchObject({intakeRoute:expected});
+  });
+  it('rejects invalid, disabled or outside-organization route references',async()=>{
+    fixture.database.prepare("INSERT INTO organizations(id,code,name,created_at,updated_at) VALUES('other-org','OTHER','其他组织',?,?)").run(fixture.now,fixture.now);
+    fixture.database.prepare("INSERT INTO reference_data(id,organization_id,category,code,name,created_at,updated_at) VALUES('foreign-ref','other-org','transit_place','foreign','外部组织中转地',?,?)").run(fixture.now,fixture.now);
+    for(const [key,value] of [['exitPort','missing'],['customsLocation','KH'],['transitLocations','foreign']]){
+      const body=form();body.set(key,value);
+      expect(await submit(body)).toMatchObject({formError:expect.stringContaining('基础数据')});
+    }
+    fixture.database.exec("UPDATE reference_data SET status='disabled' WHERE category='border_port'");
+    expect(await submit(form())).toMatchObject({formError:expect.stringContaining('出境口岸')});
+    expect(fixture.database.prepare('SELECT COUNT(*) n FROM quotations').get()).toMatchObject({n:0});
+  });
+  it('inherits a corrected route when the same draft is reaccepted, but never overwrites it on a direct-intake retry',async()=>{
+    const original=form();const created=await submit(original);
+    if(!('orderId' in created)||!created.orderId||!created.quotationId)throw new Error(JSON.stringify(created));
+    fixture.database.prepare("INSERT INTO reference_data(id,organization_id,category,code,name,created_at,updated_at) VALUES('second-port','org','border_port','KH2','第二口岸',?,?)").run(fixture.now,fixture.now);
+    const withdrawal=new FormData();withdrawal.set('intent','withdraw');withdrawal.set('id',created.quotationId);expect(await submit(withdrawal)).toMatchObject({success:expect.any(String)});
+    const update=form('ltl','quote');update.set('intent','workflow_fields_update');update.set('id',created.quotationId);update.set('nativeFieldsIncluded','1');update.set('exitPort','KH2');
+    const charge=fixture.database.prepare('SELECT id FROM quotation_charges WHERE quotation_id=?').get(created.quotationId) as {id:string};update.set('chargeId',charge.id);
+    update.set('domesticAgent','');expect(await submit(update)).toMatchObject({formError:expect.stringContaining('国内代理')});
+    update.set('domesticAgent','代理乙');expect(await submit(update)).toMatchObject({success:expect.any(String)});
+    const accept=new FormData();accept.set('intent','accept');accept.set('id',created.quotationId);expect(await submit(accept)).toMatchObject({success:expect.any(String)});
+    expect(await submit(original)).toMatchObject({orderId:created.orderId});
+    expect(fixture.database.prepare('SELECT exit_port,domestic_agent FROM transport_orders WHERE id=?').get(created.orderId)).toMatchObject({exit_port:'KH2',domestic_agent:'代理乙'});
+    const audit=fixture.database.prepare("SELECT metadata_json FROM audit_logs WHERE resource_id=? AND action='quotation.workflow_fields.update'").get(created.quotationId) as {metadata_json:string};
+    expect(JSON.parse(audit.metadata_json).changedNativeFieldKeys).toEqual(expect.arrayContaining(['quotation_exit_port','quotation_domestic_agent']));
+  });
+  it('does not erase independently completed route information when a legacy quote has no intake-route ownership',async()=>{
+    const created=await submit(form());
+    if(!('orderId' in created)||!created.orderId||!created.quotationId)throw new Error(JSON.stringify(created));
+    fixture.database.prepare('UPDATE quotations SET exit_port=NULL,transit_locations=NULL,customs_location=NULL,domestic_agent=NULL,intake_route_recorded=0 WHERE id=?').run(created.quotationId);
+    const withdrawal=new FormData();withdrawal.set('intent','withdraw');withdrawal.set('id',created.quotationId);expect(await submit(withdrawal)).toMatchObject({success:expect.any(String)});
+    const accept=new FormData();accept.set('intent','accept');accept.set('id',created.quotationId);expect(await submit(accept)).toMatchObject({success:expect.any(String)});
+    expect(fixture.database.prepare('SELECT exit_port,transit_locations,customs_location,domestic_agent FROM transport_orders WHERE id=?').get(created.orderId)).toMatchObject({exit_port:'KH',transit_locations:'ALA',customs_location:'MOW',domestic_agent:'国内代理甲'});
+  });
   it.each(['owner','sales'])('%s records the actual quote commercial independently and freezes their name', async actor => {
     vi.mocked(requireSessionUser).mockResolvedValue(fixture.actors.get(actor)!);
     const body=form();

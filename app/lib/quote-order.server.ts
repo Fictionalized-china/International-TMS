@@ -47,6 +47,11 @@ type AcceptedQuote = {
   salesperson_user_id: string | null;
   quote_commercial_user_id: string | null;
   quote_commercial_name_snapshot: string | null;
+  exit_port: string | null;
+  transit_locations: string | null;
+  customs_location: string | null;
+  domestic_agent: string | null;
+  intake_route_recorded: number;
   workflow_definition_id: string | null;
   origin_country: string;
   origin_state: string | null;
@@ -193,6 +198,7 @@ export async function createOrderFromAcceptedQuote(input: {
     salespersonUserId: quote.salesperson_user_id,
     quoteCommercialUserId: quote.quote_commercial_user_id,
     quoteCommercialName: quote.quote_commercial_name_snapshot,
+    intakeRoute: {exit_port:quote.exit_port,transit_locations:quote.transit_locations,customs_location:quote.customs_location,domestic_agent:quote.domestic_agent},
     workflowDefinitionId: quote.workflow_definition_id,
     notes: quote.notes,
     charges: chargeRows.results,
@@ -226,8 +232,8 @@ export async function createOrderFromAcceptedQuote(input: {
       quote.salesperson_user_id,"order_creation","委托资料补充",now,
       now,now,quote.customs_clearance_mode,0,JSON.stringify(markContactSnapshots),
     ),
-    env.DB.prepare("UPDATE transport_orders SET quote_commercial_user_id=?,quote_commercial_name_snapshot=? WHERE id=? AND organization_id=?")
-      .bind(quote.quote_commercial_user_id,quote.quote_commercial_name_snapshot,orderId,input.organizationId),
+    env.DB.prepare("UPDATE transport_orders SET quote_commercial_user_id=?,quote_commercial_name_snapshot=?,exit_port=?,transit_locations=?,customs_location=?,domestic_agent=? WHERE id=? AND organization_id=?")
+      .bind(quote.quote_commercial_user_id,quote.quote_commercial_name_snapshot,quote.exit_port,quote.transit_locations,quote.customs_location,quote.domestic_agent,orderId,input.organizationId),
     env.DB.prepare(
       `INSERT INTO order_cargo_items(
          id,organization_id,order_id,line_no,cargo_name_cn,package_type,package_count,pieces_per_package,
@@ -324,7 +330,7 @@ async function loadAcceptedQuote(organizationId: string, quotationId: string) {
     `SELECT q.id,q.quote_number,q.customer_id,c.name customer_name,
             COALESCE(q.customer_contact_name,(SELECT cc.name FROM customer_contacts cc WHERE cc.customer_id=q.customer_id ORDER BY cc.is_primary DESC,cc.created_at LIMIT 1),c.name) customer_contact_name,
             COALESCE(q.customer_contact_phone,(SELECT cc.phone FROM customer_contacts cc WHERE cc.customer_id=q.customer_id ORDER BY cc.is_primary DESC,cc.created_at LIMIT 1)) customer_contact_phone,
-            q.salesperson_user_id,q.quote_commercial_user_id,q.quote_commercial_name_snapshot,q.workflow_definition_id,q.mark_contact_ids_json,
+            q.salesperson_user_id,q.quote_commercial_user_id,q.quote_commercial_name_snapshot,q.exit_port,q.transit_locations,q.customs_location,q.domestic_agent,q.intake_route_recorded,q.workflow_definition_id,q.mark_contact_ids_json,
             EXISTS(
               SELECT 1
                 FROM workflow_step_fields mark_field
@@ -397,6 +403,10 @@ async function repairGeneratedOrder(input: {
         SET shipper_contact=?,shipper_phone=?,consignee_contact=?,consignee_phone=?,
             quote_commercial_user_id=CASE WHEN status='draft' AND ? IS NOT NULL THEN ? ELSE quote_commercial_user_id END,
             quote_commercial_name_snapshot=CASE WHEN status='draft' AND ? IS NOT NULL THEN ? ELSE quote_commercial_name_snapshot END,
+            exit_port=CASE WHEN status='draft' AND ?=1 THEN ? ELSE exit_port END,
+            transit_locations=CASE WHEN status='draft' AND ?=1 THEN ? ELSE transit_locations END,
+            customs_location=CASE WHEN status='draft' AND ?=1 THEN ? ELSE customs_location END,
+            domestic_agent=CASE WHEN status='draft' AND ?=1 THEN ? ELSE domestic_agent END,
             requested_pickup_date=COALESCE(requested_pickup_date,?),
             destination_address=?,mark_contacts_snapshot_json=COALESCE(mark_contacts_snapshot_json,?),updated_at=?
       WHERE id=? AND organization_id=?`,
@@ -407,6 +417,10 @@ async function repairGeneratedOrder(input: {
     input.quote.customer_contact_phone,
     input.quote.quote_commercial_user_id,input.quote.quote_commercial_user_id,
     input.quote.quote_commercial_user_id,input.quote.quote_commercial_name_snapshot,
+    input.quote.intake_route_recorded,input.quote.exit_port,
+    input.quote.intake_route_recorded,input.quote.transit_locations,
+    input.quote.intake_route_recorded,input.quote.customs_location,
+    input.quote.intake_route_recorded,input.quote.domestic_agent,
     now,
     destinationAddress,
     JSON.stringify(markContactSnapshots),

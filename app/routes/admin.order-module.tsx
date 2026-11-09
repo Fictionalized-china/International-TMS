@@ -15,6 +15,7 @@ import { orderFinancialHref } from "../lib/order-financial-navigation";
 import { action as billingAction } from "./admin.billing";
 import { action as settlementApprovalsAction } from "./admin.settlement-approvals";
 import { DateTimeSelect } from "../components/DateTimeSelect";
+import { intakeRouteFields } from "../lib/intake-route-fields";
 import { requireSessionUser } from "../lib/auth.server";
 import { dispatchWorkspaceHref } from "../lib/transport-workspace-access";
 import { sessionSlotFromRequest, withSessionSlot } from "../lib/session-slot";
@@ -239,6 +240,7 @@ type OrderSummary = {
   quotation_salesperson_name: string | null;
   quote_commercial_user_id: string | null;
   quote_commercial_name_snapshot: string | null;
+  domestic_agent: string | null;
   quotation_cargo_description: string | null;
   quotation_notes: string | null;
   quotation_pieces: number | null;
@@ -890,7 +892,7 @@ export async function loader(
             o.mark_contacts_snapshot_json,o.created_by_user_id,
             COALESCE(q.salesperson_user_id,o.salesperson_user_id) salesperson_user_id,
             salesperson.display_name quotation_salesperson_name,
-            o.quote_commercial_user_id,o.quote_commercial_name_snapshot,
+            o.quote_commercial_user_id,o.quote_commercial_name_snapshot,o.domestic_agent,
             COALESCE(q.cargo_description,o.cargo_description) quotation_cargo_description,
             COALESCE(q.notes,o.special_instructions) quotation_notes,
             COALESCE(q.pieces,o.pieces) quotation_pieces,
@@ -7838,6 +7840,7 @@ function ModuleBusinessData({
           </header>
 
           {!data.workflowFields.some(field=>field.fieldKey==="quotation_quote_commercial_user_id") && <InformationTable items={[{label:"报价商务",value:data.order.quote_commercial_name_snapshot||"历史订单尚未记录"}]} />}
+          <InformationTable items={intakeRouteFields.filter(field=>!data.workflowFields.some(rule=>rule.fieldKey===field.fieldKey)).map(field=>({label:field.label,value:data.order[field.column]||"尚未记录"}))}/>
           {showQuotationInformation && <WorkflowInformationGroup
             title="询价报价确认资料"
             hint="只展示当前订单锁定工作流在第一步设为显示的字段；必填状态沿用该版本规则。"
@@ -7848,6 +7851,7 @@ function ModuleBusinessData({
               { fieldKey: "quotation_mark_contacts", label: "我方联系人", value: formatMarkContacts(data.order.mark_contacts_snapshot_json) },
               { fieldKey: "quotation_salesperson_user_id", label: "业务员", value: data.order.quotation_salesperson_name || "" },
               { fieldKey: "quotation_quote_commercial_user_id", label: "报价商务", value: data.order.quote_commercial_name_snapshot || "" },
+              ...intakeRouteFields.map(field=>({fieldKey:field.fieldKey,label:field.label,value:data.order[field.column]||""})),
               { fieldKey: "quotation_customs_clearance_mode", label: "清关办理方式", value: data.order.customs_clearance_mode === "customer" ? "客户自理清关" : "公司代办清关" },
               { fieldKey: "quotation_origin_region", label: "起运地区", value: [data.order.origin_country,data.order.origin_state,data.order.origin_city].filter(Boolean).join(" / ") },
               { fieldKey: "quotation_pickup_address", label: "提货地址", value: data.order.origin_address || "" },
@@ -8850,6 +8854,7 @@ function OrderApprovalReview({
         <Info label="客户" value={order.customer_name} className="span-2" />
         <Info label="订单号" value={order.order_number} />
         <Info label="报价商务" value={order.quote_commercial_name_snapshot || "历史订单尚未记录"} />
+        {intakeRouteFields.map(field=><Info key={field.fieldKey} label={field.label} value={order[field.column]||"尚未记录"}/>)}
         <Info label="订单类型" value={`${order.business_type === "ltl" ? "拼车" : "整车"} · 报价锁定`} />
         <Info label="提货地址" value={pickupAddress} className="span-2" />
         <Info label="预约提货" value={order.requested_pickup_date || "—"} />

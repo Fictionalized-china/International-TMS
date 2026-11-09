@@ -1,5 +1,6 @@
 import type { OrderModuleCode } from "./order-modules";
 import { nonNegativeNumberPresent } from "./validation";
+import { intakeRouteFields } from "./intake-route-fields";
 
 export type QuotationNativeFieldMode = "required" | "optional" | "hidden";
 
@@ -36,6 +37,7 @@ export const quotationNativeFieldCatalog = [
   nativeField("quotation_salesperson_user_id","业务员","select","consignment","required","负责本次询价与报价的业务员；未显示时默认当前操作人。"),
   nativeField("quotation_quote_commercial_user_id","报价商务","select","consignment","optional","实际为本业务报价的人员，独立于业务员和录单人；直接录单必须明确选择。"),
   nativeField("quotation_customs_clearance_mode","清关办理方式","select","consignment","required","选择公司代办清关或客户自理清关。","company|公司代办清关\ncustomer|客户自理清关"),
+  ...intakeRouteFields.map(field => nativeField(field.fieldKey,field.label,field.category ? "select" : "text","consignment","optional","直接录单必填；保存后自动继承到订单，不需要重复录入。")),
   nativeField("quotation_origin_region","起运地区","select","consignment","required","按国家或地区、省或州、城市三级选择起运地区。"),
   nativeField("quotation_pickup_address","提货地址","textarea","consignment","required","本次报价使用的详细提货地址，可不写入客户常用地址。"),
   nativeField("quotation_destination_region","目的地区","select","consignment","required","按国家或地区、省或州、城市三级选择目的地区。"),
@@ -69,6 +71,8 @@ export function quotationNativeFieldPresent(
 ) {
   const text = (key: string) => String(quotation[key] ?? "").trim().length > 0;
   const positive = (key: string) => Number(quotation[key] ?? 0) > 0;
+  const route = intakeRouteFields.find(field => field.fieldKey === fieldKey);
+  if (route) return text(route.column);
   switch (fieldKey) {
     case "quotation_customer_contact_name": return text("customer_contact_name");
     case "quotation_customer_contact_phone": return text("customer_contact_phone");
