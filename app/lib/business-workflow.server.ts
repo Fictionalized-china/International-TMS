@@ -606,7 +606,9 @@ export async function syncOrderBusinessWorkflow(input: OrderBusinessWorkflowSync
       instanceId,
       workflowId,
     });
-    await ensureWorkflowExecutionSnapshot({instanceId,workflowId});
+    // synchronizeWorkflowExecution initializes/repairs the execution snapshot
+    // under the order projection queue before it reads any execution rows.
+    // Do not repeat the same six idempotent writes immediately beforehand.
     const actualStepKey = await synchronizeWorkflowExecution({
       organizationId:input.organizationId,
       orderId:order.id,
