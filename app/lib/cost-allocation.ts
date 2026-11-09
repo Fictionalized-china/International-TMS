@@ -29,14 +29,20 @@ export function allocationMethodLabel(method:AllocationMethod){
 export function allocateCost(basis:AllocationBasis[],totalAmount:number,method:AllocationMethod):SuggestedAllocation[]{
   if(!basis.length)throw new Error("配载批次没有可分摊订单");
   if(!Number.isFinite(totalAmount)||totalAmount<=0)throw new Error("分摊总金额必须大于 0");
+  if(!["weight","volume","equal"].includes(method))throw new Error("分摊方式无效");
   const values=basis.map(item=>method==="weight"?item.actualWeightKg:method==="volume"?item.actualVolumeCbm:1);
+  if(values.some(value=>!Number.isFinite(value)||value<0))throw new Error("分摊依据必须为有效的非负数");
   const totalBasis=values.reduce((sum,value)=>sum+value,0);
-  if(totalBasis<=0)throw new Error(method==="weight"?"没有可用的实收重量":"没有可用的实收体积");
+  if(!Number.isFinite(totalBasis)||totalBasis<=0)throw new Error(method==="weight"?"没有可用的实收重量":"没有可用的实收体积");
   const totalCents=Math.round(totalAmount*100);
+  if(!Number.isSafeInteger(totalCents)||totalCents<1)throw new Error("分摊总金额超出有效分币精度范围");
   let allocatedCents=0;
   return basis.map((item,index)=>{
     const ratio=values[index]/totalBasis;
-    const cents=index===basis.length-1?totalCents-allocatedCents:Math.round(totalCents*ratio);
+    // Preserve existing rounding and last-line remainder, but never consume
+    // more than the unallocated cents when many tiny lines round upwards.
+    const remainingCents=totalCents-allocatedCents;
+    const cents=index===basis.length-1?remainingCents:Math.min(remainingCents,Math.round(totalCents*ratio));
     allocatedCents+=cents;
     return{...item,ratio:Number(ratio.toFixed(8)),amount:cents/100};
   });

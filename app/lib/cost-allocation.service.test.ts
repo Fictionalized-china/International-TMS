@@ -15,7 +15,7 @@ import {
   updateCostAllocation,
 } from "./cost-allocation.server";
 
-function database(input: { zeroChanges?: boolean } = {}) {
+function database(input: { zeroChanges?: boolean; finalAmount?: number } = {}) {
   const events: string[] = [];
   const prepare = vi.fn((sql: string) => ({
     bind: vi.fn(() => ({
@@ -35,7 +35,7 @@ function database(input: { zeroChanges?: boolean } = {}) {
         if (sql.includes("FROM transport_cost_allocation_lines") && sql.includes("actual_weight_kg"))
           return { results: [{ id: "line-1", order_id: "order-1", actual_weight_kg: 100, actual_volume_cbm: 1 }] };
         if (sql.includes("FROM transport_cost_allocation_lines") && sql.includes("suggested_amount"))
-          return { results: [{ id: "line-1", order_id: "order-1", suggested_amount: 100, final_amount: 100, adjustment_reason: null }] };
+          return { results: [{ id: "line-1", order_id: "order-1", suggested_amount: 100, final_amount: input.finalAmount ?? 100, adjustment_reason: null }] };
         if (sql.includes("FROM transport_batch_orders"))
           return { results: [{ order_id: "order-1", order_number: "SO-1", customer_name: "客户", receipt_count: 1, actual_weight_kg: 100, actual_volume_cbm: 1 }] };
         return { results: [] };
@@ -53,6 +53,15 @@ describe("cost allocation mutation boundary", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     gate.rows = [{ order_id: "order-1" }];
+  });
+
+  it.each([-1,NaN,Infinity])("rejects a legacy invalid final amount %s before generating payable expenses", async finalAmount => {
+    const harness=database({finalAmount});
+    await expect(confirmCostAllocation(harness.db,{
+      organizationId:"org-1",allocationId:"allocation-1",userId:"user-1",
+      now:"2026-11-09T00:00:00Z",assertCanMutate:vi.fn(async()=>{}),
+    })).rejects.toThrow("有效非负数");
+    expect(harness.batch).not.toHaveBeenCalled();
   });
 
   it("revalidates actor, members and workflow immediately before create writes", async () => {

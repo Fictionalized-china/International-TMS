@@ -35,4 +35,33 @@ describe("cost allocation",()=>{
     ],10,"equal");
     expect(lines.map(line=>line.amount)).toEqual([3.33,3.33,3.34]);
   });
+
+  it.each(["equal", "weight", "volume"] as const)("never produces a negative remainder for tiny %s allocations",method=>{
+    const basis=Array.from({length:6},(_,index)=>({orderId:String(index),actualWeightKg:1,actualVolumeCbm:1}));
+    const lines=allocateCost(basis,0.03,method);
+    expect(lines.every(line=>line.amount>=0)).toBe(true);
+    expect(lines.reduce((sum,line)=>sum+Math.round(line.amount*100),0)).toBe(3);
+    expect(allocateCost(basis,0.03,method)).toEqual(lines);
+  });
+
+  it("conserves cents across many small totals and weighted orders",()=>{
+    for(const count of [2,3,6,31,100])for(const totalCents of [1,2,3,7,99,100,101]){
+      const basis=Array.from({length:count},(_,index)=>({orderId:String(index),actualWeightKg:index%5,actualVolumeCbm:(index+1)/10}));
+      for(const method of ["equal","weight","volume"] as const){
+        const lines=allocateCost(basis,totalCents/100,method);
+        expect(lines.every(line=>Number.isFinite(line.amount)&&line.amount>=0)).toBe(true);
+        expect(lines.reduce((sum,line)=>sum+Math.round(line.amount*100),0)).toBe(totalCents);
+      }
+    }
+  });
+
+  it.each([-1,NaN,Infinity])("rejects invalid selected allocation basis %s",value=>{
+    const basis=[{orderId:"bad",actualWeightKg:value,actualVolumeCbm:1},{orderId:"good",actualWeightKg:2,actualVolumeCbm:1}];
+    expect(()=>allocateCost(basis,1,"weight")).toThrow();
+  });
+
+  it("rejects amounts outside safe cent precision before producing line amounts",()=>{
+    const basis=[{orderId:"a",actualWeightKg:1,actualVolumeCbm:1}];
+    for(const total of [0,0.001,-1,NaN,Infinity,Number.MAX_SAFE_INTEGER])expect(()=>allocateCost(basis,total,"equal")).toThrow();
+  });
 });

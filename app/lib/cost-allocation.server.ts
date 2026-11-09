@@ -185,6 +185,8 @@ export async function confirmCostAllocation(db:D1Database,input:{organizationId:
   const activeOrderIds=new Set(gateOrders.map(item=>item.order_id));
   if(lines.results.some(line=>!activeOrderIds.has(line.order_id))||lines.results.length!==activeOrderIds.size)
     throw new Error("分摊草稿订单与当前配载单不一致，请作废草稿后重新生成");
+  if(lines.results.some(line=>!Number.isFinite(line.final_amount)||line.final_amount<0))
+    throw new Error("分摊金额必须为有效非负数，请先修正草稿后确认");
   const total=lines.results.reduce((sum,line)=>sum+line.final_amount,0);
   if(Math.abs(total-header.total_amount)>0.009)throw new Error("分摊金额合计与费用总额不一致，请先调整");
   const missingReason=lines.results.some(line=>Math.abs(line.final_amount-line.suggested_amount)>0.009&&!line.adjustment_reason?.trim());
