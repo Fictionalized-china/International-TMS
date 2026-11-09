@@ -44,7 +44,7 @@ export function missingOrderIntakeFees(
     const searchable = `${expense.chargeCode} ${expense.chargeName}`.trim();
     // An explicit zero is valid (for example customer self-delivery). The
     // presence of a real expense row is the business confirmation.
-    return Number.isFinite(Number(expense.amount)) && Number(expense.amount) >= 0 &&
+    return expense.direction === "payable" && Number.isFinite(expense.amount) && expense.amount >= 0 &&
       (expense.chargeCode === requirement.code || requirement.aliases.some((alias) => alias.test(searchable)));
   }));
   if (policy) {

@@ -51,6 +51,14 @@ function form(type = 'ltl', mode = 'direct') {
 const submit = (body: FormData) => action({request:new Request('http://localhost/admin/quotations?entryMode=direct', {method:'POST',body}),params:{},context:undefined} as never);
 
 describe('real intake action with quotation node unplugged', () => {
+  it('rejects a receivable pickup line instead of a missing payable pickup line before any order writes', async () => {
+    const body = form();
+    for (const key of ['intakePayableCode','intakePayableQuantity','intakePayableUnitPrice','intakePayableCounterparty','intakePayableNotes']) body.delete(key);
+    body.set('chargeName','提货费');
+    expect(await submit(body)).toMatchObject({entryMode:'direct',formError:expect.stringContaining('提货费')});
+    expect(fixture.database.prepare('SELECT COUNT(*) n FROM quotations').get()).toMatchObject({n:0});
+    expect(fixture.database.prepare('SELECT COUNT(*) n FROM transport_orders WHERE quotation_id IS NOT NULL').get()).toMatchObject({n:0});
+  });
   it.each(['ltl','ftl'])('%s: a rounded-zero submission still creates tiny cargo without a volume gate', async type => {
     const body = form(type);
     body.set('length','1'); body.set('width','1'); body.set('height','0.1'); body.set('volume','0');

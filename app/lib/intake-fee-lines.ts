@@ -26,7 +26,7 @@ export function intakePayableOptions(policy: BusinessProcessPolicy, businessType
     .filter((fee, index, all) => all.findIndex(item => item.label === fee.label) === index);
 }
 
-export function parseIntakePayables(form: FormData, options: readonly { code: string; label: string }[]): IntakePayable[] {
+export function parseIntakePayables(form: FormData, options: readonly { code: string; label: string }[]): Array<IntakePayable & { direction: "payable" }> {
   const codes = form.getAll('intakePayableCode').map(String);
   if (codes.length > MAX_INTAKE_FEE_LINES) throw new Error(`开单应付费用最多 ${MAX_INTAKE_FEE_LINES} 条`);
   const detailed = form.has('intakePayableUnitPrice');
@@ -55,6 +55,6 @@ export function parseIntakePayables(form: FormData, options: readonly { code: st
     }
     if (!counterparty) throw new Error(`请填写第 ${index + 1} 条${fee.label}的应付往来单位`);
     if (counterparty.length > 200 || note.length > 1000) throw new Error(`第 ${index + 1} 条费用的往来单位或备注过长`);
-    return [{ chargeCode: code, chargeName: fee.label, quantity, unitPrice, amount, counterparty, notes: note || null }];
+    return [{ chargeCode: code, chargeName: fee.label, direction: "payable" as const, quantity, unitPrice, amount, counterparty, notes: note || null }];
   });
 }
