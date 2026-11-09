@@ -63,14 +63,35 @@ export async function loadFreshSettlementWorkbenchActor(
 }
 
 
-export async function loadSettlementWorkbenchActionAccess(
-  db: D1Database,
-  input: {
+type SettlementActionAccessInput = {
     actor: SettlementWorkbenchActor;
     action: SettlementWorkbenchAction;
     source: SettlementAccessSource;
     legacyFallback: SettlementLegacyFallback;
-  },
+};
+type SettlementReadPhase = Map<string, Promise<unknown>>;
+function readSettlementFact<T>(phase: SettlementReadPhase | undefined, key: string, load: () => Promise<T>): Promise<T> {
+  if (!phase) return load();
+  if (!phase.has(key)) phase.set(key, load());
+  return phase.get(key) as Promise<T>;
+}
+
+/** Construct only inside one write-free loader phase. Never carry this reader
+ * into an action or reuse it after a write, across requests or across actors. */
+export function createSettlementAccessReadPhase(db: D1Database, actor: SettlementWorkbenchActor) {
+  const phase: SettlementReadPhase = new Map();
+  return (input: Omit<SettlementActionAccessInput, "actor">) => readSettlementWorkbenchActionAccess(db, { ...input, actor }, phase);
+}
+
+/** Submission callers always read current facts, without a shared phase. */
+export function loadSettlementWorkbenchActionAccess(db: D1Database, input: SettlementActionAccessInput): Promise<SettlementMultiOrderActionAccess> {
+  return readSettlementWorkbenchActionAccess(db, input);
+}
+
+async function readSettlementWorkbenchActionAccess(
+  db: D1Database,
+  input: SettlementActionAccessInput,
+  phase?: SettlementReadPhase,
 ): Promise<SettlementMultiOrderActionAccess> {
   const sourceIds = input.source.kind === "reconciliation_id"
     ? normalizeIds([input.source.id])
@@ -88,7 +109,8 @@ export async function loadSettlementWorkbenchActionAccess(
     );
   }
 
-  const linked = await loadLinkedOrderRows(db, input.actor.organizationId, input.source, sourceIds);
+  const linked = await readSettlementFact(phase, JSON.stringify(["linked", input.source.kind, sourceIds]),
+    () => loadLinkedOrderRows(db, input.actor.organizationId, input.source, sourceIds));
   const resolvedSourceKeys = new Set(linked.map((row) => row.source_key));
   if (sourceIds.some((id) => !resolvedSourceKeys.has(id))) {
     return closedSettlementMultiOrderActionAccess(
@@ -110,7 +132,7 @@ export async function loadSettlementWorkbenchActionAccess(
     assigned_to_actor: number;
   }> = [];
   for (const orderChunk of chunkD1Values(orderIds, scope.values.length + 1)) {
-    const rows = await db.prepare(
+    const rows = await readSettlementFact(phase, JSON.stringify(["scope", orderChunk]), () => db.prepare(
       `SELECT o.id order_id,
          CASE WHEN (${scope.sql}) THEN 1 ELSE 0 END assigned_to_actor
        FROM transport_orders o
@@ -120,7 +142,7 @@ export async function loadSettlementWorkbenchActionAccess(
     ).bind(...scope.values, input.actor.organizationId, ...orderChunk).all<{
       order_id: string;
       assigned_to_actor: number;
-    }>();
+    }>());
     scopeRows.push(...rows.results);
   }
   const scopeByOrder = new Map(
@@ -134,22 +156,22 @@ export async function loadSettlementWorkbenchActionAccess(
   }
 
   const workflows: SettlementOrderActionInput[] = [];
-  const processPolicy=await loadBusinessProcessPolicy(input.actor.organizationId,db);
+  const processPolicy=await readSettlementFact(phase, "policy", () => loadBusinessProcessPolicy(input.actor.organizationId,db));
   for (const orderId of orderIds) {
-    const exported=await db.prepare(`SELECT 1 FROM transport_orders o WHERE o.id=? AND o.organization_id=? AND
+    const exported=await readSettlementFact(phase, JSON.stringify(["exported", orderId]), () => db.prepare(`SELECT 1 FROM transport_orders o WHERE o.id=? AND o.organization_id=? AND
       ((o.status='completed' AND o.completion_status='business_complete_unsettled') OR
        (o.status='in_execution' AND ?=1 AND ${actualExportSql()}))`)
-      .bind(orderId,input.actor.organizationId,policyEnabled(processPolicy,"settlement.after_actual_export")?1:0).first();
+      .bind(orderId,input.actor.organizationId,policyEnabled(processPolicy,"settlement.after_actual_export")?1:0).first());
     workflows.push({
       orderId,
       assignedToActor: scopeByOrder.get(orderId) === true,
       parallelSettlementOpen:Boolean(exported),
-      workflow: await loadLockedWorkflowStageContext(
+      workflow: await readSettlementFact(phase, JSON.stringify(["workflow", orderId]), () => loadLockedWorkflowStageContext(
         db,
         input.actor.organizationId,
         orderId,
         "costs",
-      ),
+      )),
     });
   }
   const resolved = resolveSettlementMultiOrderActionAccess({

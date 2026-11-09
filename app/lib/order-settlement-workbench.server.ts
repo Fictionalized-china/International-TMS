@@ -3,7 +3,7 @@ import { canAccessSettlementWorkbench } from "./billing-access";
 import { loadMeetingSettlement, loadMeetingSettlementDirections, assertMeetingSignoffsComplete } from "./meeting-settlement.server";
 import { loadSettlementHandoff } from "./financial-closure.server";
 import { loadEligibleExpensePage, loadReconciliationPage, loadAvailableCashTransactions } from "./settlement-workbench-pages.server";
-import { loadSettlementWorkbenchActionAccess, type SettlementAccessSource } from "./settlement-workbench-access.server";
+import { createSettlementAccessReadPhase, loadSettlementWorkbenchActionAccess, type SettlementAccessSource } from "./settlement-workbench-access.server";
 import type { SettlementWorkbenchAction, SettlementMultiOrderActionAccess } from "./settlement-workbench-access";
 import { hasFullSettlementScope } from "./settlement-workbench-access";
 import { orderVisibilitySql } from "./order-access";
@@ -67,6 +67,9 @@ export async function loadOrderFinancialWorkspace(db: D1Database, actor: Session
   const expenses = await loadEligibleExpensePage(db, actor, query);
   const statements = await loadReconciliationPage(db, actor, query);
   const cash = handoff.canCash ? await loadAvailableCashTransactions(db, actor, statements.items.filter(row => row.status === "confirmed")) : [];
+  // Everything below only reads. Share facts for row controls, never with
+  // assertOrderFinancialSubmission or the actual money mutations.
+  const readAccess = createSettlementAccessReadPhase(db, actor);
   const createAccess: Record<string, SettlementMultiOrderActionAccess> = {};
   const signatureReasons = new Map<string, string | null>();
   const prerequisite = async (direction: "receivable" | "payable", payment = false) => {
@@ -78,7 +81,7 @@ export async function loadOrderFinancialWorkspace(db: D1Database, actor: Session
     return signatureReasons.get(key);
   };
   for (const expense of expenses.items) {
-    const access = await loadSettlementWorkbenchActionAccess(db, { actor, action: "create_reconciliation", source: { kind: "expense_ids", ids: [expense.id] }, legacyFallback: "deny" });
+    const access = await readAccess({ action: "create_reconciliation", source: { kind: "expense_ids", ids: [expense.id] }, legacyFallback: "deny" });
     const reason = access.canWrite ? await prerequisite(expense.direction) : null;
     createAccess[expense.id] = reason ? { ...access, canWrite: false, reason } : access;
   }
@@ -87,7 +90,7 @@ export async function loadOrderFinancialWorkspace(db: D1Database, actor: Session
     const exclusive = await statementIsExclusive(db, actor.organizationId, orderId, row.id);
     statementAccess[row.id] = {};
     for (const action of ["confirm_reconciliation", "record_invoice", "allocate_cash"] as SettlementWorkbenchAction[]) {
-      const access = await loadSettlementWorkbenchActionAccess(db, { actor, action, source: { kind: "reconciliation_id", id: row.id } as SettlementAccessSource, legacyFallback: "deny" });
+      const access = await readAccess({ action, source: { kind: "reconciliation_id", id: row.id } as SettlementAccessSource, legacyFallback: "deny" });
       const reason = access.canWrite ? await prerequisite(row.direction === "receivable" ? "receivable" : "payable", action === "allocate_cash") : null;
       statementAccess[row.id][action] = !exclusive ? { ...access, canWrite: false, reason: "该账单合并了其他订单，本单只展示进度；请按合并账单统一办理" } : reason ? { ...access, canWrite: false, reason } : access;
     }
