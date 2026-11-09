@@ -18,8 +18,8 @@ import { GlobalInteractionFeedback } from "./components/InteractionFeedback";
 import { useExpandableDialogScrollLock } from "./components/Modal";
 import {
   canRequestLiveDataRefresh,
+  createLiveDataSignalReceiver,
   isLiveDataRoute,
-  shouldRefreshForDataMutationSignal,
 } from "./lib/live-data-refresh";
 import { normalizeSessionSlot, withSessionSlot } from "./lib/session-slot";
 import "./app.css";
@@ -67,7 +67,7 @@ function createDataMutationSenderId() {
 
 function publishDataMutation(mutation: DataMutationSource, senderId: string) {
   const sessionSlot = new URL(window.location.href).searchParams.get("itmsTab");
-  const signal = JSON.stringify({ ...mutation, sessionSlot, senderId, occurredAt: Date.now() });
+  const signal = JSON.stringify({ ...mutation, sessionSlot, senderId, signalId: createDataMutationSenderId(), occurredAt: Date.now() });
   try {
     if ("BroadcastChannel" in window) {
       const channel = new BroadcastChannel(DATA_SYNC_CHANNEL);
@@ -203,6 +203,9 @@ export default function App() {
   const senderIdRef = useRef<string | null>(null);
   const senderId = senderIdRef.current ?? createDataMutationSenderId();
   senderIdRef.current = senderId;
+  const fetchersBusy = fetchers.some(fetcher => fetcher.state !== "idle");
+  const refreshState = useRef({ navigationState: navigation.state, revalidationState: revalidator.state, fetcherStates: fetchers.map(fetcher => fetcher.state) });
+  refreshState.current = { navigationState: navigation.state, revalidationState: revalidator.state, fetcherStates: fetchers.map(fetcher => fetcher.state) };
   useExpandableDialogScrollLock();
 
   useEffect(() => {
@@ -262,8 +265,9 @@ export default function App() {
 
   useEffect(() => {
     if (!isLiveDataRoute(location.pathname)) return;
+    const acceptSignal = createLiveDataSignalReceiver(senderId);
     const refresh = (signal: unknown) => {
-      if (!shouldRefreshForDataMutationSignal(signal, senderId)) return;
+      if (!acceptSignal(signal)) return;
       setRemoteMutationVersion((version) => version + 1);
     };
     let channel: BroadcastChannel | null = null;
@@ -292,6 +296,7 @@ export default function App() {
       visibilityState: document.visibilityState,
       navigationState: navigation.state,
       revalidationState: revalidator.state,
+      fetcherStates: fetchersBusy ? ["loading"] : [],
     })) return;
     const pendingVersion = remoteMutationVersion;
     const timer = window.setTimeout(() => {
@@ -299,15 +304,14 @@ export default function App() {
       revalidator.revalidate();
     }, 120);
     return () => window.clearTimeout(timer);
-  }, [location.pathname, navigation.state, remoteMutationVersion, revalidator]);
+  }, [location.pathname, navigation.state, remoteMutationVersion, revalidator, fetchersBusy]);
 
   useEffect(() => {
     if (!isLiveDataRoute(location.pathname)) return;
     const requestRefresh = () => {
       if (!canRequestLiveDataRefresh({
         visibilityState: document.visibilityState,
-        navigationState: navigation.state,
-        revalidationState: revalidator.state,
+        ...refreshState.current,
       })) return;
       setRemoteMutationVersion((version) => version + 1);
     };
@@ -324,7 +328,7 @@ export default function App() {
       window.removeEventListener("focus", requestRefresh);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [location.pathname, navigation.state, revalidator.state]);
+  }, [location.pathname]);
 
   return (
     <>

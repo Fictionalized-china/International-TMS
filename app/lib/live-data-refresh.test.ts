@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import * as liveDataRefresh from "./live-data-refresh";
 import {
   canRequestLiveDataRefresh,
+  createLiveDataSignalReceiver,
   isLiveDataRoute,
 } from "./live-data-refresh";
 
@@ -48,6 +49,10 @@ describe("isLiveDataRoute", () => {
 });
 
 describe("canRequestLiveDataRefresh", () => {
+  it.each(["submitting", "loading"] as const)("waits for a %s fetcher, not only the page navigation", state => {
+    expect(canRequestLiveDataRefresh({ visibilityState: "visible", navigationState: "idle", revalidationState: "idle", fetcherStates: ["idle", state] })).toBe(false);
+    expect(canRequestLiveDataRefresh({ visibilityState: "visible", navigationState: "idle", revalidationState: "idle", fetcherStates: ["idle", "idle"] })).toBe(true);
+  });
   it("refreshes only while the page and both routers are idle", () => {
     expect(canRequestLiveDataRefresh({
       visibilityState: "visible",
@@ -69,6 +74,36 @@ describe("canRequestLiveDataRefresh", () => {
       navigationState: "idle",
       revalidationState: "loading",
     })).toBe(false);
+  });
+});
+
+describe("createLiveDataSignalReceiver", () => {
+  it("accepts one notification delivered via both broadcast and storage only once", () => {
+    const receive = createLiveDataSignalReceiver("this-app");
+    const signal = { senderId: "other-app", signalId: "mutation-one" };
+    expect(receive(signal)).toBe(true);
+    expect(receive(JSON.stringify(signal))).toBe(false);
+    expect(receive({ ...signal, signalId: "mutation-two" })).toBe(true);
+    expect(receive({ ...signal, senderId: "third-app" })).toBe(true);
+    expect(receive({ ...signal, senderId: "this-app" })).toBe(false);
+  });
+  it("does not confuse different notifications at the same clock time", () => {
+    const receive = createLiveDataSignalReceiver("this-app");
+    expect(receive({ senderId: "other", signalId: "first", occurredAt: 1 })).toBe(true);
+    expect(receive({ senderId: "other", signalId: "second", occurredAt: 1 })).toBe(true);
+  });
+  it.each([null, "not-json", {}, { senderId: "other", occurredAt: 1 }, { signalId: "missing-sender" }, { senderId: "other", signalId: "x".repeat(129) }])("keeps unrecognized/legacy hint %j conservative", signal => {
+    const receive = createLiveDataSignalReceiver("this-app");
+    expect(receive(signal)).toBe(true);
+    expect(receive(signal)).toBe(true);
+  });
+  it("bounds memory and never shares notification history across App instances", () => {
+    const receive = createLiveDataSignalReceiver("this-app");
+    const signal = { senderId: "other", signalId: "first" };
+    expect(receive(signal)).toBe(true);
+    for (let index = 0; index < 64; index++) expect(receive({ ...signal, signalId: `later-${index}` })).toBe(true);
+    expect(receive(signal)).toBe(true);
+    expect(createLiveDataSignalReceiver("this-app")(signal)).toBe(true);
   });
 });
 
