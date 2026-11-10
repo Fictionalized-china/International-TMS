@@ -55,7 +55,9 @@ export function GlobalInteractionFeedback() {
   }, []);
 
   const blocker = useBlocker(useCallback<BlockerFunction>(({ currentLocation, nextLocation }) => {
-    if (!unsavedMessage || navigation.state !== "idle" || formSubmissionInProgress.current) return false;
+    // The registry is updated synchronously when a dialog acknowledges a save.
+    // React state may still hold the previous warning during same-tick navigation.
+    if (!unsavedRegistry.current.size || navigation.state !== "idle" || formSubmissionInProgress.current) return false;
     return `${currentLocation.pathname}${currentLocation.search}${currentLocation.hash}` !==
       `${nextLocation.pathname}${nextLocation.search}${nextLocation.hash}`;
   }, [navigation.state, unsavedMessage]));

@@ -34,7 +34,7 @@ function serializeModalForms(dialog: HTMLElement) {
           : ["checkbox", "radio"].includes(element.type)
             ? { checked: element.checked, value: element.value }
             : element.value;
-        fields.push([index, element.name, element.type, value]);
+        if (!element.closest("[data-ignore-dirty]")) fields.push([index, element.name, element.type, value]);
         return;
       }
       if (element instanceof HTMLSelectElement) {
@@ -225,6 +225,11 @@ type ModalProps = {
   onOpenChange?: (open: boolean) => void;
 };
 
+/** Acknowledges a real successful save; does not close the dialog. */
+export function notifyModalFormSaved(form:HTMLFormElement) {
+  form.dispatchEvent(new CustomEvent("itms:form-saved",{bubbles:true}));
+}
+
 export function Modal({
   title,
   triggerLabel,
@@ -257,6 +262,9 @@ export function Modal({
   const modalId = useId();
   const triggerRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
+  const formBaselineRef=useRef<string|null>(null);
+  const explicitDirtyRef=useRef(dirty);
+  explicitDirtyRef.current=dirty;
   const previousFocusRef = useRef<HTMLElement | null>(null);
   useModalScrollLock(open);
 
@@ -268,7 +276,9 @@ export function Modal({
   const close = useCallback((force = false) => {
     if (!force && submissionCloseLocked) return;
     if(!force&&!dismissible)return;
-    if (!force && hasUnsavedChanges) {
+    const currentFormDirty=guardFormChanges&&dialogRef.current&&formBaselineRef.current!==null
+      ?serializeModalForms(dialogRef.current)!==formBaselineRef.current:formDirty;
+    if (!force && (dirty||(guardFormChanges&&currentFormDirty))) {
       dialogRef.current?.querySelectorAll<HTMLDetailsElement>("details[open]").forEach((details) => {
         details.open = false;
       });
@@ -278,7 +288,7 @@ export function Modal({
     setDiscardConfirmationOpen(false);
     updateOpen(false);
     onClose?.();
-  }, [dismissible, hasUnsavedChanges, onClose, submissionCloseLocked, updateOpen]);
+  }, [dismissible, dirty,formDirty,guardFormChanges, onClose, submissionCloseLocked, updateOpen]);
 
   useEffect(() => {
     if (!submissionPending) {
@@ -295,12 +305,14 @@ export function Modal({
     const dialog = dialogRef.current;
     if (!dialog) return;
     let baseline = "";
+    formBaselineRef.current=null;
     let ready = false;
     let pendingFrame: number | null = null;
     let baselineFrame: number | null = window.requestAnimationFrame(() => {
       baselineFrame = window.requestAnimationFrame(() => {
         baselineFrame = null;
         baseline = serializeModalForms(dialog);
+        formBaselineRef.current=baseline;
         ready = true;
       });
     });
@@ -309,21 +321,37 @@ export function Modal({
       const target = event.target instanceof HTMLElement ? event.target : null;
       if (target?.closest("[data-ignore-dirty]")) return;
       if (!target?.closest("form")) return;
+      const syncDirty=()=>{
+        const changed=serializeModalForms(dialog)!==baseline;
+        setFormDirty(changed);
+        window.dispatchEvent(new CustomEvent("itms:unsaved-changes",{detail:{id:modalId,active:explicitDirtyRef.current||changed,message:discardMessage}}));
+      };
+      // Capture fast input -> Escape/navigation before the next animation frame.
+      syncDirty();
       if (pendingFrame !== null) window.cancelAnimationFrame(pendingFrame);
       pendingFrame = window.requestAnimationFrame(() => {
         pendingFrame = null;
-        setFormDirty(serializeModalForms(dialog) !== baseline);
+        syncDirty();
       });
     };
     dialog.addEventListener("input", detectChanges);
     dialog.addEventListener("change", detectChanges);
     dialog.addEventListener("click", detectChanges);
+    const acceptSavedForm=(event:Event)=>{
+      if(!(event.target instanceof HTMLFormElement)||!dialog.contains(event.target)||dialog.querySelectorAll("form").length!==1)return;
+      if(pendingFrame!==null){window.cancelAnimationFrame(pendingFrame);pendingFrame=null;}
+      baseline=serializeModalForms(dialog);formBaselineRef.current=baseline;ready=true;setFormDirty(false);
+      window.dispatchEvent(new CustomEvent("itms:unsaved-changes",{detail:{id:modalId,active:false,message:discardMessage}}));
+    };
+    dialog.addEventListener("itms:form-saved",acceptSavedForm);
     return () => {
+      formBaselineRef.current=null;
       if (pendingFrame !== null) window.cancelAnimationFrame(pendingFrame);
       if (baselineFrame !== null) window.cancelAnimationFrame(baselineFrame);
       dialog.removeEventListener("input", detectChanges);
       dialog.removeEventListener("change", detectChanges);
       dialog.removeEventListener("click", detectChanges);
+      dialog.removeEventListener("itms:form-saved",acceptSavedForm);
     };
   }, [guardFormChanges, open]);
 
