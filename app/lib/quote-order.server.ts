@@ -16,6 +16,7 @@ import { resolveMarkContactSnapshots } from "./mark-contacts.server";
 import type { IntakePayable } from "./intake-fee-lines";
 import { intakePayableStatements } from "./intake-fee-lines.server";
 import { readIntakeOperations } from "./intake-operations";
+import { changedRowGuard, guardedBatch } from "./mutation-guard.server";
 
 type QuoteReceivable = {
   id: string;
@@ -111,22 +112,23 @@ export async function createOrderFromAcceptedQuote(input: {
   if (!quote) throw new Error("报价无效或尚未被接受");
 
   const existing = await env.DB.prepare(
-    "SELECT id,order_number,workflow_instance_id FROM transport_orders WHERE organization_id=? AND quotation_id=? LIMIT 1",
+    "SELECT id,order_number,workflow_instance_id,status,quote_withdrawn,updated_at FROM transport_orders WHERE organization_id=? AND quotation_id=? LIMIT 1",
   ).bind(input.organizationId, input.quotationId).first<{
     id: string;
     order_number: string;
     workflow_instance_id: string | null;
+    status: string;
+    quote_withdrawn: number;
+    updated_at: string;
   }>();
   if (existing) {
-    await env.DB.prepare(
-      `UPDATE transport_orders
-       SET quote_withdrawn=0,status=CASE WHEN status='cancelled' THEN 'draft' ELSE status END,
-           current_step_code=CASE WHEN status='cancelled' OR quote_withdrawn=1 OR current_step_code='quote_withdrawn' THEN 'order_creation' ELSE current_step_code END,
-           current_step_name=CASE WHEN status='cancelled' OR quote_withdrawn=1 OR current_step_code='quote_withdrawn' THEN '委托资料补充' ELSE current_step_name END,
-           updated_at=?
-       WHERE id=? AND organization_id=?`,
-    ).bind(new Date().toISOString(), existing.id, input.organizationId).run();
-    await repairGeneratedOrder({ ...input, orderId: existing.id, orderNumber: existing.order_number, quote });
+    if (existing.status === "cancelled") throw new Error("关联订单已取消，不能通过接受报价重新开单");
+    if (existing.status !== "draft") {
+      if (existing.quote_withdrawn) throw new Error("关联订单状态已变化，请刷新后进入订单处理");
+      return { id:existing.id,orderNumber:existing.order_number,created:false };
+    }
+    await repairGeneratedOrder({ ...input, orderId: existing.id, orderNumber: existing.order_number, quote,
+      expectedUpdatedAt:existing.updated_at,resumeExisting:true });
     return { id: existing.id, orderNumber: existing.order_number, created: false };
   }
 
@@ -393,6 +395,8 @@ async function repairGeneratedOrder(input: {
   orderId: string;
   orderNumber: string;
   quote: AcceptedQuote;
+  expectedUpdatedAt?: string;
+  resumeExisting?: boolean;
 }) {
   const now = new Date().toISOString();
   const destinationAddress = input.quote.warehouse_address || input.quote.destination_warehouse_note || input.quote.warehouse_name || input.quote.destination_city;
@@ -405,7 +409,10 @@ async function repairGeneratedOrder(input: {
   const selectedServices=readIntakeOperations(input.quote.intake_operations_json).entrustedServices;
   const orderRepair=env.DB.prepare(
     `UPDATE transport_orders
-        SET shipper_contact=?,shipper_phone=?,consignee_contact=?,consignee_phone=?,
+        SET current_step_name=CASE WHEN ?=1 AND (quote_withdrawn=1 OR current_step_code='quote_withdrawn') THEN '委托资料补充' ELSE current_step_name END,
+            current_step_code=CASE WHEN ?=1 AND (quote_withdrawn=1 OR current_step_code='quote_withdrawn') THEN 'order_creation' ELSE current_step_code END,
+            quote_withdrawn=CASE WHEN ?=1 THEN 0 ELSE quote_withdrawn END,
+            shipper_contact=?,shipper_phone=?,consignee_contact=?,consignee_phone=?,
             quote_commercial_user_id=CASE WHEN status='draft' AND ? IS NOT NULL THEN ? ELSE quote_commercial_user_id END,
             quote_commercial_name_snapshot=CASE WHEN status='draft' AND ? IS NOT NULL THEN ? ELSE quote_commercial_name_snapshot END,
             exit_port=CASE WHEN status='draft' AND ?=1 THEN ? ELSE exit_port END,
@@ -415,8 +422,9 @@ async function repairGeneratedOrder(input: {
             intake_operations_json=CASE WHEN status='draft' AND ? IS NOT NULL THEN ? ELSE intake_operations_json END,
             requested_pickup_date=COALESCE(requested_pickup_date,?),
             destination_address=?,mark_contacts_snapshot_json=COALESCE(mark_contacts_snapshot_json,?),updated_at=?
-      WHERE id=? AND organization_id=?`,
+      WHERE id=? AND organization_id=? AND status='draft' AND (? IS NULL OR updated_at=?)`,
   ).bind(
+    input.resumeExisting?1:0,input.resumeExisting?1:0,input.resumeExisting?1:0,
     input.quote.customer_contact_name || input.quote.customer_name,
     input.quote.customer_contact_phone,
     input.quote.customer_contact_name || input.quote.customer_name,
@@ -434,13 +442,14 @@ async function repairGeneratedOrder(input: {
     now,
     input.orderId,
     input.organizationId,
+    input.expectedUpdatedAt??null,input.expectedUpdatedAt??null,
   );
-  await env.DB.batch([orderRepair,...(Array.isArray(selectedServices)?[
+  await guardedBatch(env.DB,[orderRepair,changedRowGuard(env.DB,now),...(Array.isArray(selectedServices)?[
     env.DB.prepare("DELETE FROM order_services WHERE organization_id=? AND order_id=? AND EXISTS(SELECT 1 FROM transport_orders WHERE id=? AND organization_id=? AND status='draft')").bind(input.organizationId,input.orderId,input.orderId,input.organizationId),
     ...Object.entries(defaultServices).filter(([code])=>selectedServices.includes(code)).map(([code,name])=>env.DB.prepare(
       "INSERT INTO order_services(id,organization_id,order_id,service_code,service_name,created_at) SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM transport_orders WHERE id=? AND organization_id=? AND status='draft')",
     ).bind(crypto.randomUUID(),input.organizationId,input.orderId,code,name,now,input.orderId,input.organizationId)),
-  ]:[])]);
+  ]:[])],"订单状态或资料已被其他人更改，请刷新后重试");
   let workflowId: string;
   if (input.quote.workflow_definition_id) {
     const selectedWorkflow = await env.DB.prepare(

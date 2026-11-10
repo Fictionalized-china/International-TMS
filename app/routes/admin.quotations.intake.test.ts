@@ -59,6 +59,45 @@ function form(type = 'ltl', mode = 'direct') {
 const submit = (body: FormData) => action({request:new Request('http://localhost/admin/quotations?entryMode=direct', {method:'POST',body}),params:{},context:undefined} as never);
 
 describe('real intake action with quotation node unplugged', () => {
+  it('does not report a failed existing-draft repair as a successful concurrent creation, and can retry after the fault is removed',async()=>{
+    const created=await submit(form());if(!('orderId' in created)||!created.orderId||!created.quotationId)throw new Error(JSON.stringify(created));
+    const withdrawal=new FormData();withdrawal.set('intent','withdraw');withdrawal.set('id',created.quotationId);expect(await submit(withdrawal)).toMatchObject({success:expect.any(String)});
+    const edit=form('ltl','quote');edit.set('intent','workflow_fields_update');edit.set('id',created.quotationId);edit.set('nativeFieldsIncluded','1');edit.set('intake_headCarrier','更正后的计划承运人');
+    const charge=fixture.database.prepare('SELECT id FROM quotation_charges WHERE quotation_id=?').get(created.quotationId) as {id:string};edit.set('chargeId',charge.id);expect(await submit(edit)).toMatchObject({success:expect.any(String)});
+    const before=fixture.database.prepare('SELECT status,current_step_code,quote_withdrawn,intake_operations_json,updated_at FROM transport_orders WHERE id=?').get(created.orderId);
+    fixture.database.exec(`CREATE TRIGGER fail_service_repair BEFORE INSERT ON order_services WHEN NEW.order_id='${created.orderId}' BEGIN SELECT RAISE(ABORT,'injected service repair failure'); END`);
+    const accept=new FormData();accept.set('intent','accept');accept.set('id',created.quotationId);
+    expect(await submit(accept)).toMatchObject({formError:expect.stringContaining('injected service repair failure')});
+    expect(fixture.database.prepare('SELECT status,current_step_code,quote_withdrawn,intake_operations_json,updated_at FROM transport_orders WHERE id=?').get(created.orderId)).toEqual(before);
+    expect(fixture.database.prepare('SELECT lifecycle_status FROM quotations WHERE id=?').get(created.quotationId)).toMatchObject({lifecycle_status:'withdrawn'});
+    fixture.database.exec('DROP TRIGGER fail_service_repair');expect(await submit(accept)).toMatchObject({success:expect.any(String)});
+    const order=fixture.database.prepare('SELECT intake_operations_json,quote_withdrawn FROM transport_orders WHERE id=?').get(created.orderId) as {intake_operations_json:string;quote_withdrawn:number};
+    expect(JSON.parse(order.intake_operations_json).headCarrier).toBe('更正后的计划承运人');expect(order.quote_withdrawn).toBe(0);
+    expect(fixture.database.prepare('SELECT COUNT(*) n FROM transport_orders WHERE quotation_id=?').get(created.quotationId)).toMatchObject({n:1});
+  });
+  it('never resurrects a cancelled order through reacceptance of its withdrawn quote',async()=>{
+    const created=await submit(form());if(!('orderId' in created)||!created.orderId||!created.quotationId)throw new Error(JSON.stringify(created));
+    const withdrawal=new FormData();withdrawal.set('intent','withdraw');withdrawal.set('id',created.quotationId);expect(await submit(withdrawal)).toMatchObject({success:expect.any(String)});
+    fixture.database.prepare("UPDATE transport_orders SET status='cancelled',current_step_code='cancelled' WHERE id=?").run(created.orderId);
+    const accept=new FormData();accept.set('intent','accept');accept.set('id',created.quotationId);expect(await submit(accept)).toMatchObject({formError:expect.stringContaining('取消')});
+    expect(fixture.database.prepare('SELECT status,current_step_code FROM transport_orders WHERE id=?').get(created.orderId)).toMatchObject({status:'cancelled',current_step_code:'cancelled'});
+    expect(fixture.database.prepare('SELECT lifecycle_status FROM quotations WHERE id=?').get(created.quotationId)).toMatchObject({lifecycle_status:'withdrawn'});
+  });
+  it('does not repair an old draft if its state changes between reading and the repair transaction',async()=>{
+    const created=await submit(form());if(!('orderId' in created)||!created.orderId||!created.quotationId)throw new Error(JSON.stringify(created));
+    const withdrawal=new FormData();withdrawal.set('intent','withdraw');withdrawal.set('id',created.quotationId);expect(await submit(withdrawal)).toMatchObject({success:expect.any(String)});
+    const previous=fixture.database.prepare('SELECT intake_operations_json FROM transport_orders WHERE id=?').get(created.orderId);
+    const originalBatch=fixture.db.batch.bind(fixture.db);
+    const interception=vi.spyOn(fixture.db,'batch').mockImplementationOnce(async statements=>{
+      fixture.database.prepare("UPDATE transport_orders SET status='cancelled',current_step_code='cancelled',updated_at='concurrent-version' WHERE id=?").run(created.orderId);
+      return originalBatch(statements);
+    });
+    const accept=new FormData();accept.set('intent','accept');accept.set('id',created.quotationId);
+    try{expect(await submit(accept)).toMatchObject({formError:expect.stringContaining('其他人更改')});}finally{interception.mockRestore();}
+    expect(fixture.database.prepare('SELECT status,current_step_code,quote_withdrawn,updated_at FROM transport_orders WHERE id=?').get(created.orderId)).toMatchObject({status:'cancelled',current_step_code:'cancelled',quote_withdrawn:1,updated_at:'concurrent-version'});
+    expect(fixture.database.prepare('SELECT intake_operations_json FROM transport_orders WHERE id=?').get(created.orderId)).toEqual(previous);
+    expect(fixture.database.prepare('SELECT lifecycle_status FROM quotations WHERE id=?').get(created.quotationId)).toMatchObject({lifecycle_status:'withdrawn'});
+  });
   it('saves and reloads an incomplete draft without a quote/order, rejects stale confirmation, then creates once from the latest draft',async()=>{
     const body=form(),requestId=String(body.get('intakeRequestId'));
     const save=new FormData();save.set('intent','intake_draft_save');save.set('draftId',requestId);save.set('draftRevision','0');save.set('draftPayload',JSON.stringify(captureIntakeDraft(body)));

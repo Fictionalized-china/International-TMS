@@ -31,6 +31,10 @@ export async function acceptQuotation(input: {
   const quote = await loadQuote(input.organizationId, input.quotationId);
   if (!quote) throw new Error("报价不存在");
   if (quote.lifecycle_status === "void") throw new Error("已作废报价不能接受");
+  if (quote.order_status === "cancelled") throw new Error("关联订单已取消，不能通过接受报价重新开单");
+  if (quote.order_id && quote.lifecycle_status !== "accepted" && quote.order_status !== "draft") {
+    throw new Error("关联订单已离开草稿，不能通过接受报价修改；请进入订单办理受控变更");
+  }
   if (quote.lifecycle_status === "accepted") {
     if (quote.order_id && quote.order_number) {
       return { id: quote.order_id, orderNumber: quote.order_number, created: false };
@@ -58,7 +62,9 @@ export async function acceptQuotation(input: {
     return created;
   } catch (error) {
     const raced = await existingOrderForQuote(input.organizationId,input.quotationId);
-    if (raced) {
+    // A pre-existing order is not evidence of a concurrent successful creation.
+    // In particular, failed repairs of withdrawn drafts must remain retryable errors.
+    if (!quote.order_id && raced && /UNIQUE constraint failed|Duplicate entry/i.test(String(error))) {
       await writeAudit({ ...input, action: "quotation.accept", resourceId: input.quotationId, metadata: { orderId: raced.id, orderNumber: raced.orderNumber, created: false, recoveredFromRace: true } });
       return { ...raced, created: false };
     }
@@ -168,7 +174,10 @@ async function loadQuote(organizationId: string, quotationId: string) {
 
 async function existingOrderForQuote(organizationId: string, quotationId: string) {
   const row = await env.DB.prepare(
-    "SELECT id,order_number FROM transport_orders WHERE organization_id=? AND quotation_id=? LIMIT 1",
+    `SELECT o.id,o.order_number FROM transport_orders o
+     JOIN quotations q ON q.id=o.quotation_id AND q.organization_id=o.organization_id
+     WHERE o.organization_id=? AND o.quotation_id=? AND o.quote_withdrawn=0
+       AND o.status<>'cancelled' AND q.lifecycle_status='accepted' LIMIT 1`,
   ).bind(organizationId,quotationId).first<{ id: string; order_number: string }>();
   return row ? { id: row.id, orderNumber: row.order_number } : null;
 }
