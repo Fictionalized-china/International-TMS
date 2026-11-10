@@ -4,6 +4,10 @@ import {describe,it,expect} from "vitest";
 import {IntakeRouteFields} from "./IntakeRouteFields";
 
 describe('intake route inputs',()=>{
+  it('only submits missing route fields in the remediation form',()=>{
+    const html=renderToStaticMarkup(createElement(IntakeRouteFields,{references:[],values:{exit_port:'OLD'},editableKeys:['quotation_domestic_agent'],policy:()=>({isActive:true,isRequired:false})}));
+    expect(html).not.toContain('name="exitPort"');expect(html).toContain('value="OLD"');expect(html).toContain('name="domesticAgent"');expect(html).toContain('待补录');
+  });
   it('shows four labelled required fields for direct intake even if the auxiliary quote configuration hides them',()=>{
     const html=renderToStaticMarkup(createElement(IntakeRouteFields,{references:[],direct:true,policy:()=>({isActive:false,isRequired:false})}));
     expect(html.match(/<label /g)).toHaveLength(4);

@@ -1,16 +1,18 @@
 import { intakeRouteFields, type IntakeFieldPolicy, type IntakeRouteReference } from "../lib/intake-route-fields";
 
-export function IntakeRouteFields({ references, policy, direct = false, values = {} }: {
+export function IntakeRouteFields({ references, policy, direct = false, values = {},editableKeys }: {
   references: readonly IntakeRouteReference[];
   policy: (key: string) => IntakeFieldPolicy;
   direct?: boolean;
   values?: Record<string, unknown>;
+  editableKeys?:readonly string[];
 }) {
   return <div className="quote-field-grid intake-route-fields">{intakeRouteFields.map(field => {
     const rule = policy(field.fieldKey);
     if (!direct && !rule.isActive) return null;
     const value = String(values[field.column] ?? "");
     const options = references.filter(row => row.category === field.category);
+    if(editableKeys&&!editableKeys.includes(field.fieldKey))return <label className="field" key={field.fieldKey}><span>{field.label}{value.trim()?"（已记录）":"（待补录）"}</span><input className="control" readOnly value={options.find(row=>row.code===value)?.name??value}/></label>;
     return <label className="field" key={field.fieldKey}><span>{field.label}</span>{field.category
       ? <select className="control" name={field.formName} defaultValue={value} required={direct || rule.isRequired}>
         <option value="">请选择{field.label}</option>

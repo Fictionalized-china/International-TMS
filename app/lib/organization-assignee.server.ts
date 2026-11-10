@@ -16,6 +16,17 @@ const activeOrganizationAssigneeBaseSql = `
     ON p.id=m.position_id AND p.organization_id=m.organization_id AND p.status='active'
    AND p.department_code=d.code`;
 
+/** Server-authored predicate for rechecking a NEW selection in a write batch. */
+export function activeOrganizationAssigneeSelectionPredicate(input:{organizationId:string;userId:string;positionCodes:readonly string[];displayName:string}) {
+  if(!input.positionCodes.length)return{sql:"0=1",values:[]as(string|number|null)[]};
+  return{
+    sql:`EXISTS(SELECT 1 ${activeOrganizationAssigneeBaseSql}
+      JOIN roles r ON r.organization_id=m.organization_id AND r.code=${positionRoleCodeSql("p.code")} AND r.status='active'
+      WHERE m.organization_id=? AND m.user_id=? AND m.status='active' AND u.display_name=? AND p.code IN (${input.positionCodes.map(()=>"?").join(",")}))`,
+    values:[input.organizationId,input.userId,input.displayName,...input.positionCodes],
+  };
+}
+
 export async function listActiveOrganizationAssignees(organizationId: string) {
   const roleCodeSql = positionRoleCodeSql("p.code");
   const rows = await env.DB.prepare(

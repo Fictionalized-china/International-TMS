@@ -1,0 +1,46 @@
+import {useEffect,useRef,useState} from "react";
+import {useFetcher,useLocation} from "react-router";
+import type {loader,action} from "../routes/admin.order-intake-supplement";
+import type {loadOrderIntakeSupplement} from "../lib/order-intake-supplement.server";
+import {Modal} from "./Modal";
+import {IntakeOperationsFields} from "./IntakeOperationsFields";
+import {IntakeRouteFields} from "./IntakeRouteFields";
+type Snapshot=Awaited<ReturnType<typeof loadOrderIntakeSupplement>>;
+const visible=(key:string)=>({isActive:key!=="quotation_intake_entrustedServices",isRequired:false});
+export function OrderIntakeSupplement({orderId}:{orderId:string}) {
+  const reader=useFetcher<typeof loader>(),writer=useFetcher<typeof action>(),location=useLocation();
+  const [snapshot,setSnapshot]=useState<Snapshot|null>(null),[loading,setLoading]=useState(false),[loadError,setLoadError]=useState("");
+  const pending=useRef(false);
+  const previousResponse=useRef(writer.data);
+  const query=new URLSearchParams();const slot=new URLSearchParams(location.search).get("itmsTab");if(slot)query.set("itmsTab",slot);
+  const endpoint=`/admin/orders/${encodeURIComponent(orderId)}/intake-supplement${query.size?`?${query}`:""}`;
+  function load(){pending.current=true;previousResponse.current=writer.data;setLoading(true);setLoadError("");setSnapshot(null);reader.load(endpoint);}
+  useEffect(()=>{
+    if(!pending.current||reader.state!=="idle"||!reader.data)return;
+    pending.current=false;setLoading(false);
+    if("loadError"in reader.data)setLoadError(reader.data.loadError);else setSnapshot(reader.data);
+  },[reader.state,reader.data]);
+  const busy=writer.state!=="idle";
+  return <div className="order-intake-supplement-entry">
+    <p>开单计划、线路和报价归属缺失时可在本订单补录。已有资料只读；服务、货物、费用及已完成节点不在此处变更。</p>
+    <Modal title="查看与补录开单资料" triggerLabel="查看 / 补齐开单资料" triggerClassName="secondary" size="wide" guardFormChanges={Boolean(snapshot)} dismissible={!busy} closeSignal={writer.data&&"saveKey"in writer.data?writer.data.saveKey:undefined} onOpenChange={open=>{if(open)load();}}>
+      {loading&&<p role="status">正在读取当前订单资料…</p>}
+      {loadError&&<div role="alert"><p>{loadError}</p><button className="secondary" type="button" onClick={load}>重新读取</button></div>}
+      {snapshot&&<writer.Form method="post" action={endpoint} className="order-intake-supplement-form" aria-label="开单资料补录">
+        <fieldset className="intake-supplement-fields" disabled={busy}>
+        <input type="hidden" name="version" value={snapshot.order.version}/>
+        <p className="alert info">{snapshot.order.number} · 本区尚缺 {snapshot.missing.length} 项{snapshot.missing.length?`：${snapshot.missing.join("、")}`:"，无需补录"}。此处只统计计划、线路及报价归属，完整业务门禁还需核对货物、服务与费用。</p>
+        {writer.data&&writer.data!==previousResponse.current&&"formError"in writer.data&&<p className="alert danger" role="alert">{writer.data.formError}</p>}
+        <IntakeOperationsFields people={snapshot.people} policy={visible} raw={snapshot.order.operations} defaultTailCarrier="" editableKeys={snapshot.canEdit?snapshot.operationKeys:[]}/>
+        <IntakeRouteFields references={snapshot.references} policy={visible} values={snapshot.order.routes} editableKeys={snapshot.canEdit?snapshot.routeKeys:[]}/>
+        <div className="quote-field-grid">
+          <label className="field"><span>报价商务</span>{snapshot.canEdit&&!snapshot.order.commercialId&&!snapshot.order.commercialName?.trim()?<select className="control" name="quoteCommercialUserId" defaultValue=""><option value="">请选择实际报价人（不自动猜填）</option>{snapshot.people.quoteCommercials.map(person=><option key={person.id} value={person.id}>{person.display_name}</option>)}</select>:<input className="control" readOnly value={snapshot.order.commercialName??snapshot.order.commercialId??"尚未记录"}/>}</label>
+          {snapshot.canEdit&&snapshot.missing.length>0&&<label className="field"><span>补录原因</span><textarea name="reason" minLength={2} maxLength={1000} required placeholder="说明所依据的原始委托或业务确认"/></label>}
+        </div>
+        {snapshot.canEdit&&snapshot.missing.length>0?<button className="primary" disabled={busy}>{busy?"正在保存…":"保存已补资料（不推进节点）"}</button>:<p className="muted">{snapshot.missing.length?"当前账号仅可查看，请由本单业务、操作等有权责任人补录。":"本区资料已完整；修改已有内容需走受控更正。"}</p>}
+        </fieldset>
+      </writer.Form>}
+    </Modal>
+    {writer.data&&writer.data!==previousResponse.current&&"success"in writer.data&&<p className="alert success" role="status">{writer.data.success}</p>}
+  </div>;
+}

@@ -14,6 +14,10 @@ import {
 } from "./quotation-workflow-fields";
 
 describe("quotation native workflow fields",() => {
+  it("retains a genuine historical commercial name snapshot after its user identity was deleted",()=>{
+    expect(quotationNativeFieldPresent("quotation_quote_commercial_user_id",{quote_commercial_user_id:null,quote_commercial_name_snapshot:"历史报价人"})).toBe(true);
+    expect(quotationNativeFieldPresent("quotation_quote_commercial_user_id",{quote_commercial_user_id:null,quote_commercial_name_snapshot:"  "})).toBe(false);
+  });
   it.each([
     ["headVehicleCount",0],["headVehicleCount",1.5],["headVehicleCount","1"],
     ["headCarrier",{}],["headCarrier","  "],["headCarrier","x\u0000"],

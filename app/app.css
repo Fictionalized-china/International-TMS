@@ -34935,6 +34935,15 @@ html[data-motion="off"] *::after {
 .intake-draft-picker a { padding: 6px; overflow-wrap: anywhere; }
 .intake-draft-picker a:hover { background: #f1f6fa; }
 .intake-draft-picker a:focus-visible { outline: 2px solid #fb6938; outline-offset: 1px; }
+.order-intake-supplement-entry { margin-bottom: 16px; }
+.order-intake-supplement-entry p { line-height: 1.6; margin-bottom: 8px; }
+.order-intake-supplement-form { display: grid; gap: 16px; min-width: 0; }
+.order-intake-supplement-form .intake-supplement-fields { border: 0; padding: 0; margin: 0; display: grid; gap: 16px; min-width: 0; }
+.order-intake-supplement-form .quote-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; }
+.order-intake-supplement-form .field { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.order-intake-supplement-form .field > .date-time-select { display: grid; min-width: 0; grid-template-columns: minmax(86px,1fr) 1px minmax(44px,54px) 8px minmax(44px,54px); }
+.order-intake-supplement-form input[readonly] { background: #f4f7fa; color: #475b70; }
+@media(max-width:620px) { .order-intake-supplement-form .quote-field-grid { grid-template-columns: minmax(0,1fr); } }
 @media (max-width: 620px) { .quote-intake-modal .intake-step-nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); } .quote-intake-modal .intake-step-nav button { flex-direction: row; gap: 4px; min-height: 36px; } }
 .quote-intake-modal .quote-plan-grid > .quote-plan-contact,
 .quote-intake-modal .quote-plan-grid > .quote-plan-phone,

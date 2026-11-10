@@ -15,6 +15,8 @@ export const intakeOperationFields = [
 export type IntakeOperationKey = typeof intakeOperationFields[number]["key"];
 export type IntakePerson = { id:string; display_name:string };
 export type IntakeOperations = {
+  /** Server-owned recovery marker; audit retention must not change business facts. */
+  canonicalSupplementVersion?:1;
   headCarrier:string; tailCarrier:string; headVehicleCount:number|null; tailVehicleCount:number|null;
   plannedDeparture:string|null; plannedArrival:string|null;
   businessAssistant:IntakePerson|null; customerService:IntakePerson|null; entrustedServices:string[];

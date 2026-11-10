@@ -9,6 +9,11 @@ describe("intake planned facts UI",()=>{
     expect(html).toContain('name="intake_tailCarrier"');expect(html).toContain('value="口岸调度"');expect(html).toContain('北京时间');expect(html).toContain('name="intake_businessAssistant"');expect(html).toContain('name="intake_entrustedServices"');expect(html).not.toContain('车牌');
   });
   it("respects hidden auxiliary fields",()=>expect(renderToStaticMarkup(createElement(IntakeOperationsFields,{...props,policy:()=>({isActive:false,isRequired:false})}))).not.toContain('<input'));
+  it("makes recorded values read-only in missing-only remediation and does not prefill invalid legacy counts",()=>{
+    const html=renderToStaticMarkup(createElement(IntakeOperationsFields,{...props,raw:JSON.stringify({headCarrier:"已记录计划",headVehicleCount:0}),editableKeys:["headVehicleCount"]}));
+    expect(html).not.toContain('name="intake_headCarrier"');expect(html).toContain('value="已记录计划"');
+    expect(html).toContain('name="intake_headVehicleCount"');expect(html).not.toContain('value="0"');expect(html).not.toContain('required=""');
+  });
   it("formats stored UTC back to Beijing time without shifting a correction",()=>{
     const html=renderToStaticMarkup(createElement(IntakeOperationsFields,{...props,raw:JSON.stringify({plannedDeparture:"2026-11-10T01:00:00.000Z"})}));
     expect(html).toContain('value="2026-11-10T09:00"');

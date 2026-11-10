@@ -5,7 +5,7 @@ import { nonNegativeNumberPresent } from "./validation";
 const orderNativeColumns:Readonly<Record<string,string>>={
   customer_contact_name:"shipper_contact",customer_contact_phone:"shipper_phone",
   mark_contact_ids_json:"mark_contacts_snapshot_json",salesperson_user_id:"salesperson_user_id",
-  quote_commercial_user_id:"quote_commercial_user_id",customs_clearance_mode:"customs_clearance_mode",
+  quote_commercial_user_id:"quote_commercial_user_id",quote_commercial_name_snapshot:"quote_commercial_name_snapshot",customs_clearance_mode:"customs_clearance_mode",
   origin_country:"origin_country",origin_state:"origin_state",origin_city:"origin_city",pickup_address:"origin_address",
   destination_country:"destination_country",destination_state:"destination_state",destination_city:"destination_city",
   destination_warehouse_id:"overseas_warehouse_id",destination_warehouse_note:"overseas_warehouse_address_note",

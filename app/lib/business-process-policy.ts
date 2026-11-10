@@ -3,6 +3,7 @@ export const businessProcessPolicyDefinitions = [
   { key: "order.submit_positions", label: "录单提交岗位（含紧急协助）", group: "录单与审核", kind: "positions", defaultValue: "SALES,CS,HR_ADMIN" },
   { key: "order.hr_emergency_enabled", label: "允许人事紧急协助录单（必须记录原因）", group: "录单与审核", kind: "boolean", defaultValue: "1" },
   { key: "order.approve_positions", label: "订单审核岗位", group: "录单与审核", kind: "positions", defaultValue: "OPERATION_SUPERVISOR" },
+  { key: "order.supplement_positions", label: "本单开单资料补录岗位（仍须本单责任与编辑权限）", group: "录单与审核", kind: "positions", defaultValue: "SALES,OPERATION,OPERATION_SUPERVISOR,CS" },
   { key: "order.quote_commercial_positions", label: "报价商务可选岗位", group: "录单与审核", kind: "positions", defaultValue: "BUSINESS_ROUTE" },
   { key: "order.business_assistant_positions", label: "业务助理可选岗位（可配置兼任）", group: "录单与审核", kind: "positions", defaultValue: "SALES,CS" },
   { key: "order.customer_service_positions", label: "录单客服可选岗位", group: "录单与审核", kind: "positions", defaultValue: "CS" },

@@ -5,6 +5,7 @@ import { ensureDefaultWorkflow } from '../lib/business-workflow.server';
 import { requireSessionUser } from '../lib/auth.server';
 import { action, loader } from './admin.quotations';
 import { captureIntakeDraft } from '../lib/intake-drafts';
+import {saveOrderIntakeSupplement} from '../lib/order-intake-supplement.server';
 
 vi.mock('cloudflare:workers', () => ({ env: {} }));
 vi.mock('../lib/auth.server', () => ({ requireSessionUser: vi.fn() }));
@@ -59,6 +60,32 @@ function form(type = 'ltl', mode = 'direct') {
 const submit = (body: FormData) => action({request:new Request('http://localhost/admin/quotations?entryMode=direct', {method:'POST',body}),params:{},context:undefined} as never);
 
 describe('real intake action with quotation node unplugged', () => {
+  it('never erases canonical order supplements when an old partial source quote is withdrawn and accepted again',async()=>{
+    const original=form('ltl','quote');original.delete('intake_headCarrier');original.delete('domesticAgent');original.delete('quoteCommercialUserId');
+    const quotation=await submit(original);if(!('quotationId'in quotation)||!quotation.quotationId)throw new Error(JSON.stringify(quotation));
+    const accept=new FormData();accept.set('intent','accept');accept.set('id',quotation.quotationId);expect(await submit(accept)).toMatchObject({success:expect.any(String)});
+    const order=fixture.database.prepare('SELECT id,updated_at FROM transport_orders WHERE quotation_id=?').get(quotation.quotationId)as{id:string;updated_at:string};
+    const source=fixture.database.prepare('SELECT snapshot_json FROM transport_order_quote_snapshots WHERE order_id=?').get(order.id);
+    const supplement=new FormData();supplement.set('version',order.updated_at);supplement.set('reason','核对原委托补齐旧单');supplement.set('intake_headCarrier','订单补录计划');supplement.set('domesticAgent','订单补录代理');supplement.set('quoteCommercialUserId','commercial');
+    expect(await saveOrderIntakeSupplement(fixture.actors.get('sales')!,order.id,supplement)).toMatchObject({success:expect.any(String)});
+    // Audit rotation must not remove the canonical business recovery marker.
+    fixture.database.prepare("DELETE FROM audit_logs WHERE resource_id=? AND action='order.intake.supplement'").run(order.id);
+    const withdrawal=new FormData();withdrawal.set('intent','withdraw');withdrawal.set('id',quotation.quotationId);expect(await submit(withdrawal)).toMatchObject({success:expect.any(String)});
+    expect(await submit(accept)).toMatchObject({success:expect.any(String)});
+    const restored=fixture.database.prepare('SELECT intake_operations_json,domestic_agent,quote_commercial_user_id FROM transport_orders WHERE id=?').get(order.id)as{intake_operations_json:string;domestic_agent:string;quote_commercial_user_id:string};
+    expect(JSON.parse(restored.intake_operations_json).headCarrier).toBe('订单补录计划');expect(restored.domestic_agent).toBe('订单补录代理');expect(restored.quote_commercial_user_id).toBe('commercial');
+    expect(fixture.database.prepare('SELECT snapshot_json FROM transport_order_quote_snapshots WHERE order_id=?').get(order.id)).toEqual(source);
+    expect(fixture.database.prepare('SELECT COUNT(*) n FROM transport_orders WHERE quotation_id=?').get(quotation.quotationId)).toMatchObject({n:1});
+    // An overlapping source correction must not silently replace the supplement.
+    expect(await submit(withdrawal)).toMatchObject({success:expect.any(String)});
+    const correction=form('ltl','quote');correction.set('intent','workflow_fields_update');correction.set('id',quotation.quotationId);correction.set('nativeFieldsIncluded','1');correction.set('intake_headCarrier','报价另行修改的计划');correction.delete('domesticAgent');correction.delete('quoteCommercialUserId');
+    const charge=fixture.database.prepare('SELECT id FROM quotation_charges WHERE quotation_id=?').get(quotation.quotationId)as{id:string};correction.set('chargeId',charge.id);
+    expect(await submit(correction)).toMatchObject({success:expect.any(String)});
+    const priorConflict=fixture.database.prepare('SELECT intake_operations_json,domestic_agent,quote_withdrawn,updated_at FROM transport_orders WHERE id=?').get(order.id);
+    expect(await submit(accept)).toMatchObject({formError:expect.stringContaining('已在订单补录')});
+    expect(fixture.database.prepare('SELECT intake_operations_json,domestic_agent,quote_withdrawn,updated_at FROM transport_orders WHERE id=?').get(order.id)).toEqual(priorConflict);
+    expect(fixture.database.prepare('SELECT lifecycle_status FROM quotations WHERE id=?').get(quotation.quotationId)).toMatchObject({lifecycle_status:'withdrawn'});
+  });
   it('does not report a failed existing-draft repair as a successful concurrent creation, and can retry after the fault is removed',async()=>{
     const created=await submit(form());if(!('orderId' in created)||!created.orderId||!created.quotationId)throw new Error(JSON.stringify(created));
     const withdrawal=new FormData();withdrawal.set('intent','withdraw');withdrawal.set('id',created.quotationId);expect(await submit(withdrawal)).toMatchObject({success:expect.any(String)});

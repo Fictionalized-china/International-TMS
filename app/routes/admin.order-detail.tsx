@@ -4,6 +4,7 @@ import { flushSync } from "react-dom";
 import { Form, Link, redirect, useNavigate, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.order-detail";
 import { ActionToast } from "../components/ActionToast";
+import { OrderIntakeSupplement } from "../components/OrderIntakeSupplement";
 import { canCompleteWorkflowTask } from "../lib/workflow-task-access";
 import { DateTimeSelect } from "../components/DateTimeSelect";
 import { ReviewAssignmentWorkbench } from "../components/ReviewAssignmentWorkbench";
@@ -1465,7 +1466,7 @@ function LinearOrderDrawer({
             {data.attachments.map((attachment) => <article key={attachment.id}><div><strong>{attachment.file_name}</strong><span>{new Date(attachment.created_at).toLocaleString("zh-CN")}</span></div><small>{attachment.content_type}<br/>{(attachment.size_bytes / 1024).toFixed(1)} KB</small><a href={`/admin/document-files/order/${attachment.id}`}>下载</a></article>)}
             {!data.attachments.length && <p className="linear-drawer-empty">当前订单暂无文件。</p>}
           </div></section>}
-          {activeTab === "supplements" && <section className="linear-drawer-section"><h3>资料补录 <span>{data.supplementTasks.filter((item)=>item.status==="open").length} 项待办</span></h3><p className="linear-drawer-section-note">此入口只展示当前缺件，不重新开放已完成的历史节点。绑定业务员选择文件后会自动上传、通过并销项。</p><div className="linear-drawer-list supplement-task-list">
+          {activeTab === "supplements" && <section className="linear-drawer-section"><h3>资料补录 <span>{data.supplementTasks.filter((item)=>item.status==="open").length} 项待办</span></h3><OrderIntakeSupplement orderId={order.id}/><p className="linear-drawer-section-note">文件补录不重新开放已完成的历史节点。绑定业务员选择文件后会自动上传、通过并销项。</p><div className="linear-drawer-list supplement-task-list">
             {data.supplementTasks.map((task)=>{
               const documentPlacement=orderDocumentPlacements.find((item)=>item.moduleCode===task.module_code&&item.fieldKey===task.field_key);
               const canUploadMissingDocument=task.status==="open"&&task.task_kind==="supplement"&&Boolean(documentPlacement)&&(

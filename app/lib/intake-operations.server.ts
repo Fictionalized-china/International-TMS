@@ -1,7 +1,7 @@
 import { listActiveOrganizationAssigneeCandidates } from "./organization-assignee.server";
 import { policyPositions, type BusinessProcessPolicy } from "./business-process-policy";
 import { normalizeBusinessPlanTime } from "./business-time";
-import { intakeOperationFields, intakeOperationFieldKey, intakeOperationFormName, intakeServiceOptions, readIntakeOperations, type IntakeOperations, type IntakePerson } from "./intake-operations";
+import { intakeOperationFields, intakeOperationFieldKey, intakeOperationFormName, intakeOperationPresent, intakeServiceOptions, readIntakeOperations, type IntakeOperations, type IntakePerson } from "./intake-operations";
 import type { IntakeFieldPolicy } from "./intake-route-fields";
 
 export async function listIntakePeople(organizationId:string, policy:BusinessProcessPolicy) {
@@ -31,7 +31,7 @@ export async function resolveIntakeOperations(input:{organizationId:string;form:
         next.entrustedServices=values;
       } else if(field.kind==="person") {
         const old=previous[field.key];
-        if(old?.id===raw) {next[field.key]=old;continue;}
+        if(old?.id===raw&&intakeOperationPresent(field.key,previous)) {next[field.key]=old;continue;}
         if(!raw){if(required)throw new Error(`请选择${field.label}`);next[field.key]=null;continue;}
         people??=await listIntakePeople(input.organizationId,input.processPolicy);
         const person: IntakePerson|undefined=people[field.key].find(person=>person.id===raw);

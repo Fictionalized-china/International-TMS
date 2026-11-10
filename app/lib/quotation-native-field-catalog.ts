@@ -82,7 +82,7 @@ export function quotationNativeFieldPresent(
     case "quotation_customer_contact_phone": return text("customer_contact_phone");
     case "quotation_mark_contacts": return text("mark_contact_ids_json") && String(quotation.mark_contact_ids_json) !== "[]";
     case "quotation_salesperson_user_id": return text("salesperson_user_id");
-    case "quotation_quote_commercial_user_id": return text("quote_commercial_user_id");
+    case "quotation_quote_commercial_user_id": return text("quote_commercial_user_id") || text("quote_commercial_name_snapshot");
     case "quotation_customs_clearance_mode": return text("customs_clearance_mode");
     case "quotation_origin_region":
       return text("origin_country") && text("origin_state") && text("origin_city");

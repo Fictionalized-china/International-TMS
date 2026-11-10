@@ -17,6 +17,7 @@ import type { IntakePayable } from "./intake-fee-lines";
 import { intakePayableStatements } from "./intake-fee-lines.server";
 import { readIntakeOperations } from "./intake-operations";
 import { changedRowGuard, guardedBatch } from "./mutation-guard.server";
+import {recoveredSupplementedIntake} from "./quote-order-intake-recovery";
 
 type QuoteReceivable = {
   id: string;
@@ -112,7 +113,7 @@ export async function createOrderFromAcceptedQuote(input: {
   if (!quote) throw new Error("报价无效或尚未被接受");
 
   const existing = await env.DB.prepare(
-    "SELECT id,order_number,workflow_instance_id,status,quote_withdrawn,updated_at FROM transport_orders WHERE organization_id=? AND quotation_id=? LIMIT 1",
+    `SELECT o.* FROM transport_orders o WHERE o.organization_id=? AND o.quotation_id=? LIMIT 1`,
   ).bind(input.organizationId, input.quotationId).first<{
     id: string;
     order_number: string;
@@ -120,14 +121,19 @@ export async function createOrderFromAcceptedQuote(input: {
     status: string;
     quote_withdrawn: number;
     updated_at: string;
-  }>();
+  }&Record<string,unknown>>();
   if (existing) {
     if (existing.status === "cancelled") throw new Error("关联订单已取消，不能通过接受报价重新开单");
     if (existing.status !== "draft") {
       if (existing.quote_withdrawn) throw new Error("关联订单状态已变化，请刷新后进入订单处理");
       return { id:existing.id,orderNumber:existing.order_number,created:false };
     }
-    await repairGeneratedOrder({ ...input, orderId: existing.id, orderNumber: existing.order_number, quote,
+    let repairQuote=quote;
+    if(readIntakeOperations(existing.intake_operations_json).canonicalSupplementVersion===1) {
+      const source=await env.DB.prepare("SELECT snapshot_json FROM transport_order_quote_snapshots WHERE organization_id=? AND order_id=?").bind(input.organizationId,existing.id).first<{snapshot_json:string}>();
+      repairQuote={...quote,...recoveredSupplementedIntake(existing,quote,source?.snapshot_json)};
+    }
+    await repairGeneratedOrder({ ...input, orderId: existing.id, orderNumber: existing.order_number, quote:repairQuote,
       expectedUpdatedAt:existing.updated_at,resumeExisting:true });
     return { id: existing.id, orderNumber: existing.order_number, created: false };
   }
