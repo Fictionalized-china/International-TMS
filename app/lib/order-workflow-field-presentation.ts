@@ -1,5 +1,6 @@
 import { isFrozenWorkflowFieldScopeMarker } from "./workflow-field-runtime";
 import { intakeRouteFields } from "./intake-route-fields";
+import { intakeOperationFields, intakeOperationFieldKey } from "./intake-operations";
 
 export const quotationConsignmentPresentationKeys = [
   "quotation_customer_contact_name",
@@ -9,6 +10,7 @@ export const quotationConsignmentPresentationKeys = [
   "quotation_quote_commercial_user_id",
   "quotation_customs_clearance_mode",
   ...intakeRouteFields.map(field => field.fieldKey),
+  ...intakeOperationFields.map(field => intakeOperationFieldKey(field.key)),
   "quotation_origin_region",
   "quotation_pickup_address",
   "quotation_destination_region",

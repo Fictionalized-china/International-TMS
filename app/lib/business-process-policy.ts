@@ -4,6 +4,9 @@ export const businessProcessPolicyDefinitions = [
   { key: "order.hr_emergency_enabled", label: "允许人事紧急协助录单（必须记录原因）", group: "录单与审核", kind: "boolean", defaultValue: "1" },
   { key: "order.approve_positions", label: "订单审核岗位", group: "录单与审核", kind: "positions", defaultValue: "OPERATION_SUPERVISOR" },
   { key: "order.quote_commercial_positions", label: "报价商务可选岗位", group: "录单与审核", kind: "positions", defaultValue: "BUSINESS_ROUTE" },
+  { key: "order.business_assistant_positions", label: "业务助理可选岗位（可配置兼任）", group: "录单与审核", kind: "positions", defaultValue: "SALES,CS" },
+  { key: "order.customer_service_positions", label: "录单客服可选岗位", group: "录单与审核", kind: "positions", defaultValue: "CS" },
+  { key: "order.default_tail_carrier", label: "新录单尾程计划承运人默认值", group: "录单与审核", kind: "text", defaultValue: "口岸调度" },
   { key: "order.cs_requires_customer_flag", label: "客服仅代录已配置客户", group: "录单与审核", kind: "boolean", defaultValue: "1" },
   { key: "order.ftl_required_fees", label: "整车开单必录费用代码", group: "录单与审核", kind: "fees", defaultValue: "pickup,handling,storage,customs_port,overseas_driver,transit_customs" },
   { key: "order.ltl_required_fees", label: "拼车开单必录费用代码", group: "录单与审核", kind: "fees", defaultValue: "pickup" },
@@ -50,6 +53,9 @@ export function validateBusinessProcessPolicy(values: Partial<Record<BusinessPro
     const value = String(values[definition.key] ?? "").trim();
     if (definition.kind === "boolean") {
       if (!["0", "1"].includes(value)) throw new Error(`${definition.label}必须为启用或停用`);
+      normalized[definition.key] = value;
+    } else if (definition.kind === "text") {
+      if (!value || value.length>200 || /[\u0000-\u001f\u007f]/.test(value)) throw new Error(`${definition.label}须为 1 至 200 字的文本`);
       normalized[definition.key] = value;
     } else {
       const codes = [...new Set(value.split(",").map(v => v.trim()).filter(Boolean))];

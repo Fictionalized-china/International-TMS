@@ -69,10 +69,13 @@ import { IntakeStepLayout, IntakeFeeEditor } from "../components/IntakeEntry";
 import { loadBusinessProcessPolicy } from "../lib/business-process-policy.server";
 import { preferredIntakeSalespersonId } from "../lib/intake-salesperson";
 import { isBossBusinessActor } from "../lib/permission-blocks";
-import { listQuoteCommercialOptions, resolveQuoteCommercial, type QuoteCommercialOption } from "../lib/quote-commercial.server";
+import { resolveQuoteCommercial, type QuoteCommercialOption } from "../lib/quote-commercial.server";
 import { intakeRouteFields } from "../lib/intake-route-fields";
 import { listIntakeRouteReferences, resolveIntakeRouteFields } from "../lib/intake-route-fields.server";
 import { IntakeRouteFields } from "../components/IntakeRouteFields";
+import { IntakeOperationsFields } from "../components/IntakeOperationsFields";
+import { intakeOperationFields, intakeOperationFieldKey, intakeOperationDisplay, readIntakeOperations } from "../lib/intake-operations";
+import { listIntakePeople, resolveIntakeOperations } from "../lib/intake-operations.server";
 
 type Quote = {
   id: string;
@@ -90,6 +93,7 @@ type Quote = {
   transit_locations: string | null;
   customs_location: string | null;
   domestic_agent: string | null;
+  intake_operations_json: string | null;
   is_direct_entry: number;
   workflow_definition_id: string | null;
   workflow_name: string | null;
@@ -199,7 +203,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     env.DB.prepare(
       `SELECT q.id,q.customer_id,q.quote_number,c.name customer_name,q.customer_contact_name,q.customer_contact_phone,q.mark_contact_ids_json,
         q.salesperson_user_id,u.display_name salesperson_name,q.quote_commercial_user_id,q.quote_commercial_name_snapshot,
-        q.exit_port,q.transit_locations,q.customs_location,q.domestic_agent,CASE WHEN q.intake_payload_hash IS NOT NULL THEN 1 ELSE 0 END is_direct_entry,
+        q.exit_port,q.transit_locations,q.customs_location,q.domestic_agent,q.intake_operations_json,CASE WHEN q.intake_payload_hash IS NOT NULL THEN 1 ELSE 0 END is_direct_entry,
         q.workflow_definition_id,wd.name workflow_name,wd.version_number workflow_version_number,
         q.origin_country,q.origin_state,q.origin_city,q.pickup_address,
         q.destination_country,q.destination_state,q.destination_city,
@@ -274,7 +278,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const quoteRows = quotes.results ?? [];
   const pagination = paginateList(quoteRows, page);
   const visibleQuoteRows = pagination.items;
-  const [workflowValues,quotationWorkflowFields,quoteCommercials,intakeRouteReferences] = await Promise.all([
+  const [workflowValues,quotationWorkflowFields,intakePeople,intakeRouteReferences] = await Promise.all([
     listQuotationWorkflowFieldValues(
       current.organizationId,
       visibleQuoteRows.map((quote) => quote.id),
@@ -283,7 +287,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       current.organizationId,
       visibleQuoteRows.map((quote) => quote.id),
     ),
-    listQuoteCommercialOptions(current.organizationId, processPolicy),
+    listIntakePeople(current.organizationId, processPolicy),
     listIntakeRouteReferences(current.organizationId),
   ]);
   return {
@@ -300,7 +304,8 @@ export async function loader({ request }: Route.LoaderArgs) {
     quotationCharges: current.permissions.includes("quote.view") ? quotationCharges.results ?? [] : [],
     customers: customers.results ?? [],
     users: users.results ?? [],
-    quoteCommercials,
+    quoteCommercials:intakePeople.quoteCommercials,
+    intakePeople,
     intakeRouteReferences,
     warehouses: warehouses.results ?? [],
     countries,
@@ -487,6 +492,8 @@ export async function action({ request }: Route.ActionArgs) {
         policy: processPolicy,
       });
       const intakeRoute = await resolveIntakeRouteFields({organizationId:current.organizationId,form,direct:directEntry,
+        policy:key=>policy(key,"optional")});
+      const intakeOperations = await resolveIntakeOperations({organizationId:current.organizationId,form,direct:directEntry,processPolicy,
         policy:key=>policy(key,"optional")});
       const requiredText = (fieldKey: Parameters<typeof policy>[0], value: string, label: string, fallback: Parameters<typeof policy>[1]) => {
         if (policy(fieldKey,fallback).isRequired && !value.trim()) throw new Error(`请填写“${label}”`);
@@ -676,8 +683,8 @@ export async function action({ request }: Route.ActionArgs) {
             JSON.stringify(markContactSnapshots.map((contact)=>contact.id)),now,now,
           ),
           env.DB.prepare(
-            "UPDATE quotations SET customer_contact_name=?,customer_contact_phone=?,intake_payload_hash=?,intake_payables_json=?,quote_commercial_user_id=?,quote_commercial_name_snapshot=?,exit_port=?,transit_locations=?,customs_location=?,domestic_agent=?,intake_route_recorded=? WHERE id=? AND organization_id=?",
-          ).bind(effectiveContactName || null,effectiveContactPhone || null,identity?.payloadHash??null,identity?JSON.stringify(payableFees):null,quoteCommercial?.id??null,quoteCommercial?.display_name??null,intakeRoute.exit_port,intakeRoute.transit_locations,intakeRoute.customs_location,intakeRoute.domestic_agent,Object.values(intakeRoute).some(Boolean)?1:0,id,current.organizationId),
+            "UPDATE quotations SET customer_contact_name=?,customer_contact_phone=?,intake_payload_hash=?,intake_payables_json=?,quote_commercial_user_id=?,quote_commercial_name_snapshot=?,exit_port=?,transit_locations=?,customs_location=?,domestic_agent=?,intake_route_recorded=?,intake_operations_json=? WHERE id=? AND organization_id=?",
+          ).bind(effectiveContactName || null,effectiveContactPhone || null,identity?.payloadHash??null,identity?JSON.stringify(payableFees):null,quoteCommercial?.id??null,quoteCommercial?.display_name??null,intakeRoute.exit_port,intakeRoute.transit_locations,intakeRoute.customs_location,intakeRoute.domestic_agent,Object.values(intakeRoute).some(Boolean)?1:0,intakeOperations,id,current.organizationId),
           ...charges.map((charge, index) => env.DB.prepare(
             `INSERT INTO quotation_charges(
               id,quotation_id,charge_code,description,quantity,unit_price,amount,exchange_rate,sort_order,notes,created_at
@@ -861,6 +868,8 @@ async function saveQuotationNativeWorkflowUpdate(input: {
   setText("quotation_customs_clearance_mode","customsClearanceMode","customs_clearance_mode","required","company");
   Object.assign(next,await resolveIntakeRouteFields({organizationId:input.organizationId,form:input.form,direct:Boolean(input.quote.intake_payload_hash),
     policy:key=>policy(key,"optional"),existing:input.quote}));
+  next.intake_operations_json=await resolveIntakeOperations({organizationId:input.organizationId,form:input.form,direct:Boolean(input.quote.intake_payload_hash),
+    policy:key=>policy(key,"optional"),processPolicy:await loadBusinessProcessPolicy(input.organizationId),existing:input.quote.intake_operations_json});
   setText("quotation_origin_region","originCountry","origin_country","required","");
   setText("quotation_origin_region","originState","origin_state","required","");
   setText("quotation_origin_region","originCity","origin_city","required","");
@@ -1002,7 +1011,7 @@ async function saveQuotationNativeWorkflowUpdate(input: {
       destination_country=?,destination_state=?,destination_city=?,destination_warehouse_id=?,destination_warehouse_note=?,
       cargo_description=?,notes=?,pieces=?,declared_quantity_unit=?,planned_package_count=?,planned_package_type=?,
       gross_weight_kg=?,estimated_length_cm=?,estimated_width_cm=?,estimated_height_cm=?,
-      volume_cbm=?,valid_until=?,subtotal=?,total_amount=?,exit_port=?,transit_locations=?,customs_location=?,domestic_agent=?,intake_route_recorded=?,updated_at=?
+      volume_cbm=?,valid_until=?,subtotal=?,total_amount=?,exit_port=?,transit_locations=?,customs_location=?,domestic_agent=?,intake_route_recorded=?,intake_operations_json=?,updated_at=?
      WHERE id=? AND organization_id=?
        AND lifecycle_status IN ('pending','withdrawn') AND updated_at=?`,
   ).bind(
@@ -1016,7 +1025,7 @@ async function saveQuotationNativeWorkflowUpdate(input: {
     Number(next.estimated_width_cm || 0),Number(next.estimated_height_cm || 0),Number(next.volume_cbm || 0),
     next.valid_until ?? null,total,total,next.exit_port??null,next.transit_locations??null,next.customs_location??null,next.domestic_agent??null,
     Number(input.quote.intake_route_recorded||0)||intakeRouteFields.some(field=>String(next[field.column]??"")!==String(input.quote[field.column]??""))?1:0,
-    now,input.quotationId,input.organizationId,expectedUpdatedAt,
+    next.intake_operations_json??null,now,input.quotationId,input.organizationId,expectedUpdatedAt,
   )];
   if (chargePolicy.isActive) {
     statements.push(...charges.map((charge,index) => charge.id
@@ -1230,6 +1239,7 @@ function QuoteDetail({ quote, fields, values, charges, customers, warehouses }: 
       <section className="quote-detail-section"><header><h3>运输路线</h3><span>起运与交付</span></header><div className="drawer-grid quote-detail-grid">
         {routeFacts.map((fact) => <ReadCell key={fact.key} label={fact.label} value={fact.value}/>)}
         {intakeRouteFields.filter(field=>visible(field.fieldKey,"optional")).map(field=><ReadCell key={field.fieldKey} label={field.label} value={quote[field.column]||"尚未记录"}/>)}
+        {intakeOperationFields.filter(field=>Boolean(quote.is_direct_entry)||visible(intakeOperationFieldKey(field.key),"optional")).map(field=><ReadCell key={field.key} label={field.label} value={intakeOperationDisplay(field.key,readIntakeOperations(quote.intake_operations_json)[field.key])||"尚未记录"}/>)}
         {visible("quotation_pickup_address","required") && <ReadCell label="提货地址" value={quote.pickup_address || "—"}/>}
         {visible("quotation_destination_warehouse_id","required") && <ReadCell label="目的仓" value={quote.destination_warehouse_name || "—"}/>}
         {visible("quotation_destination_warehouse_note","optional") && <ReadCell label="目的仓备注" value={quote.destination_warehouse_note || "—"}/>}
@@ -1461,9 +1471,12 @@ function QuoteForm({ loaderData, busy, formError, entryMode }: { loaderData: Awa
     {(entryMode==="direct"||intakeRouteFields.some(field=>quotePolicy(field.fieldKey,"optional").isActive)) && <QuoteLedgerSection step={1} title="线路清关与国内代理">
       <IntakeRouteFields references={loaderData.intakeRouteReferences} policy={key=>quotePolicy(key,"optional")} direct={entryMode==="direct"}/>
     </QuoteLedgerSection>}
-    {cargoMetricsVisible && <QuoteLedgerSection step={2} className="quote-metrics-section" title="3　货物数量与尺寸">{cargoMetrics}</QuoteLedgerSection>}
+    {(entryMode==="direct"||intakeOperationFields.some(field=>quotePolicy(intakeOperationFieldKey(field.key),"optional").isActive))&&<QuoteLedgerSection step={2} title="运输计划、责任人与委托服务">
+      <IntakeOperationsFields people={loaderData.intakePeople} policy={key=>quotePolicy(key,"optional")} direct={entryMode==="direct"} defaultTailCarrier={loaderData.processPolicy["order.default_tail_carrier"]}/>
+    </QuoteLedgerSection>}
+    {cargoMetricsVisible && <QuoteLedgerSection step={3} className="quote-metrics-section" title="货物数量与尺寸">{cargoMetrics}</QuoteLedgerSection>}
     {(policies.charges.isActive || policies.validUntil.isActive) && <QuoteLedgerSection
-      step={3} title={entryMode === 'direct' ? '4　客户应收费用' : '4　报价费用与有效期'}
+      step={4} title={entryMode === 'direct' ? '客户应收费用' : '报价费用与有效期'}
       action={entryMode !== 'direct' && policies.charges.isActive ? <button className="btn quote-charge-add" type="button" onClick={() => setCharges((rows) => [...rows, { name: transportChargeNameOptions[0]?.[0] || "国际汽运费", quantity: 1, unitPrice: "", notes: "" }])}>＋ 添加费用</button> : undefined}
     >
       {policies.charges.isActive && <>{entryMode === 'direct' ? <IntakeFeeEditor direction="receivable" rows={receivableRows} setRows={setReceivableRows} options={transportChargeNameOptions.map(([code,label]) => ({code,label}))} required={policies.charges.isRequired}/> : <div className="table-wrap quote-charge-table-wrap"><table className="inline-table quote-charge-table"><thead><tr><th>费用名称</th><th>数量</th><th>单价</th><th>金额</th><th>备注</th><th>操作</th></tr></thead><tbody>{charges.map((charge, index) => <tr key={index}><td><select className="control" name="chargeName" value={charge.name} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, name: event.target.value } : row))} required={policies.charges.isRequired}>{transportChargeNameOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td><td><input className="control" name="chargeQuantity" type="number" min="0.01" step="0.01" value={charge.quantity} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: Number(event.target.value) } : row))} required={policies.charges.isRequired}/></td><td><input className="control" name="chargeUnitPrice" type="number" min="0" step="0.01" value={charge.unitPrice} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, unitPrice: event.target.value } : row))} required={policies.charges.isRequired}/></td><td><b>{(charge.quantity * Number(charge.unitPrice || 0)).toLocaleString()}</b></td><td><input className="control" name="chargeNotes" value={charge.notes} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, notes: event.target.value } : row))}/></td><td><button className="btn danger" type="button" disabled={charges.length === 1} onClick={() => setCharges((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>删除</button></td></tr>)}</tbody></table></div>}
@@ -1474,7 +1487,7 @@ function QuoteForm({ loaderData, busy, formError, entryMode }: { loaderData: Awa
       </div>
     </QuoteLedgerSection>}
     </div>
-    {entryMode === "direct" && <QuoteLedgerSection step={4} title="5　开单应付费用 CNY" note="未录入留空；客户自送等明确无费用时填写单价 0。必录规则仍由流程策略配置。">
+    {entryMode === "direct" && <QuoteLedgerSection step={5} title="开单应付费用 CNY" note="未录入留空；客户自送等明确无费用时填写单价 0。必录规则仍由流程策略配置。">
       <IntakeFeeEditor direction="payable" rows={payableRows} setRows={setPayableRows} options={payableOptions}
         recommended={configuredOrderIntakeFees(loaderData.processPolicy, roadLoadType || 'ltl')}/>
     </QuoteLedgerSection>}
@@ -1557,7 +1570,7 @@ function QuotationNativeWorkflowInputs({
       })
     : null;
   const calculatedVolume = formatQuoteVolumeInput(calculatedVolumeValue);
-  const {intakeRouteReferences} = useLoaderData<typeof loader>();
+  const {intakeRouteReferences,intakePeople,processPolicy} = useLoaderData<typeof loader>();
   const anyParty = p.contactName.isActive || p.contactPhone.isActive || p.markContacts.isActive || p.salesperson.isActive || p.quoteCommercial.isActive || p.customs.isActive;
   const anyRoute = p.origin.isActive || p.pickup.isActive || p.destination.isActive || p.warehouse.isActive || p.warehouseNote.isActive;
   const anyCargo = p.cargo.isActive || p.notes.isActive || p.pieces.isActive || p.declaredQuantityUnit.isActive || p.plannedPackageCount.isActive || p.plannedPackageType.isActive || p.weight.isActive || p.length.isActive || p.width.isActive || p.height.isActive || p.volume.isActive;
@@ -1593,6 +1606,9 @@ function QuotationNativeWorkflowInputs({
     </QuoteLedgerSection>}
     {(Boolean(quote.is_direct_entry)||intakeRouteFields.some(field=>policy(field.fieldKey,"optional").isActive)) && <QuoteLedgerSection title="线路清关与国内代理">
       <IntakeRouteFields references={intakeRouteReferences} policy={key=>policy(key,"optional")} values={quote} direct={Boolean(quote.is_direct_entry)}/>
+    </QuoteLedgerSection>}
+    {(Boolean(quote.is_direct_entry)||intakeOperationFields.some(field=>policy(intakeOperationFieldKey(field.key),"optional").isActive))&&<QuoteLedgerSection title="运输计划、责任人与委托服务">
+      <IntakeOperationsFields people={intakePeople} policy={key=>policy(key,"optional")} direct={Boolean(quote.is_direct_entry)} raw={quote.intake_operations_json} defaultTailCarrier={processPolicy["order.default_tail_carrier"]}/>
     </QuoteLedgerSection>}
     {anyCargo && <QuoteLedgerSection title="货物与预估" note="只补录工作流当前显示的原生字段">
       <div className="quote-description-grid">

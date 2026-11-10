@@ -42,6 +42,9 @@ function form(type = 'ltl', mode = 'direct') {
     destinationCountry:'俄罗斯', destinationState:'莫斯科州', destinationCity:'莫斯科',
     destinationWarehouseId:'dest', customsClearanceMode:'company', cargoDescription:'测试货物',
     exitPort:'KH',transitLocations:'ALA',customsLocation:'MOW',domesticAgent:'国内代理甲',
+    intake_headCarrier:'国内承运计划甲',intake_tailCarrier:'口岸调度',intake_headVehicleCount:'1',intake_tailVehicleCount:'2',
+    intake_plannedDeparture:'2026-11-10T09:00',intake_plannedArrival:'2026-11-12T18:00',
+    intake_businessAssistant:'sales',intake_customerService:'cs',intake_entrustedServices:'pickup',
     pieces:'1', plannedPackageCount:'1', declaredQuantityUnit:'件', plannedPackageType:'carton',
     weight:'100', length:'100', width:'100', height:'100', volume:'1',
     chargeName:'国际汽运费', chargeQuantity:'1', chargeUnitPrice:'100', chargeNotes:'',
@@ -55,6 +58,46 @@ function form(type = 'ltl', mode = 'direct') {
 const submit = (body: FormData) => action({request:new Request('http://localhost/admin/quotations?entryMode=direct', {method:'POST',body}),params:{},context:undefined} as never);
 
 describe('real intake action with quotation node unplugged', () => {
+  it('does not remove legacy service defaults when an auxiliary quote only records a partial plan',async()=>{
+    const body=form('ltl','quote');for(const key of [...body.keys()].filter(key=>key.startsWith('intake_')))body.delete(key);
+    body.set('intake_headCarrier','仅补头程计划');
+    const created=await submit(body);if(!('quotationId' in created)||!created.quotationId)throw new Error(JSON.stringify(created));
+    const accept=new FormData();accept.set('intent','accept');accept.set('id',created.quotationId);
+    expect(await submit(accept)).toMatchObject({success:expect.any(String)});
+    const order=fixture.database.prepare('SELECT id FROM transport_orders WHERE quotation_id=?').get(created.quotationId) as {id:string};
+    expect(fixture.database.prepare('SELECT COUNT(*) n FROM order_services WHERE order_id=?').get(order.id)).toMatchObject({n:7});
+  });
+  it('inherits a corrected service selection on reacceptance without changing the original intake snapshot',async()=>{
+    const created=await submit(form());if(!('orderId' in created)||!created.orderId||!created.quotationId)throw new Error(JSON.stringify(created));
+    const before=fixture.database.prepare('SELECT snapshot_json FROM transport_order_quote_snapshots WHERE order_id=?').get(created.orderId);
+    const withdrawal=new FormData();withdrawal.set('intent','withdraw');withdrawal.set('id',created.quotationId);expect(await submit(withdrawal)).toMatchObject({success:expect.any(String)});
+    const body=form('ltl','quote');body.set('intent','workflow_fields_update');body.set('id',created.quotationId);body.set('nativeFieldsIncluded','1');body.append('intake_entrustedServices','packing');
+    const charge=fixture.database.prepare('SELECT id FROM quotation_charges WHERE quotation_id=?').get(created.quotationId) as {id:string};body.set('chargeId',charge.id);
+    expect(await submit(body)).toMatchObject({success:expect.any(String)});
+    const accept=new FormData();accept.set('intent','accept');accept.set('id',created.quotationId);expect(await submit(accept)).toMatchObject({success:expect.any(String)});
+    expect(fixture.database.prepare('SELECT id FROM transport_orders WHERE quotation_id=?').get(created.quotationId)).toMatchObject({id:created.orderId});
+    expect(fixture.database.prepare('SELECT service_code FROM order_services WHERE order_id=? ORDER BY service_code').all(created.orderId)).toEqual([{service_code:'packing'},{service_code:'pickup'}]);
+    expect(fixture.database.prepare('SELECT snapshot_json FROM transport_order_quote_snapshots WHERE order_id=?').get(created.orderId)).toEqual(before);
+  });
+  it.each([['headCarrier','头程承运人'],['headVehicleCount','头程车量'],['tailVehicleCount','尾程车量'],['plannedDeparture','预计发车'],['plannedArrival','预计到达'],['businessAssistant','业务助理'],['customerService','客服'],['entrustedServices','委托服务']])('blocks missing intake operation %s without writes',async(key,label)=>{
+    const body=form();body.delete(`intake_${key}`);
+    expect(await submit(body)).toMatchObject({formError:expect.stringContaining(label)});
+    expect(fixture.database.prepare('SELECT COUNT(*) n FROM quotations').get()).toMatchObject({n:0});
+  });
+  it.each(['ltl','ftl'])('%s persists planned facts, selected services and responsibility snapshots without pretending actual resources exist',async type=>{
+    const body=form(type);body.delete('intake_tailCarrier');body.append('intake_entrustedServices','packing');
+    const result=await submit(body);if(!('orderId' in result)||!result.orderId)throw new Error(JSON.stringify(result));
+    const row=fixture.database.prepare('SELECT intake_operations_json FROM transport_orders WHERE id=?').get(result.orderId) as {intake_operations_json:string};
+    expect(JSON.parse(row.intake_operations_json)).toMatchObject({headCarrier:'国内承运计划甲',tailCarrier:'口岸调度',headVehicleCount:1,tailVehicleCount:2,plannedDeparture:'2026-11-10T01:00:00.000Z',plannedArrival:'2026-11-12T10:00:00.000Z',businessAssistant:{id:'sales',display_name:'sales'},customerService:{id:'cs',display_name:'cs'},entrustedServices:['pickup','packing']});
+    expect(fixture.database.prepare('SELECT service_code FROM order_services WHERE order_id=? ORDER BY service_code').all(result.orderId)).toEqual([{service_code:'packing'},{service_code:'pickup'}]);
+    const snapshot=fixture.database.prepare('SELECT snapshot_json FROM transport_order_quote_snapshots WHERE order_id=?').get(result.orderId) as {snapshot_json:string};
+    expect(JSON.parse(snapshot.snapshot_json).intakeOperations).toEqual(JSON.parse(row.intake_operations_json));
+    expect(await submit(body)).toMatchObject({orderId:result.orderId});
+  });
+  it.each([['headVehicleCount','-1','头程车量'],['tailVehicleCount','1.5','尾程车量'],['plannedArrival','2026-11-09T18:00','不得早于'],['plannedDeparture','2026-02-30T00:00','日期无效'],['businessAssistant','owner','业务助理'],['customerService','sales','客服'],['entrustedServices','invalid','无效选项']])('rejects invalid planned facts %s=%s',async(key,value,label)=>{
+    const body=form();body.set(`intake_${key}`,value);expect(await submit(body)).toMatchObject({formError:expect.stringContaining(label)});
+    expect(fixture.database.prepare('SELECT COUNT(*) n FROM quotations').get()).toMatchObject({n:0});
+  });
   it.each([['exitPort','出境口岸'],['transitLocations','中转地'],['customsLocation','清关地'],['domesticAgent','国内代理']])('blocks missing intake route field %s before any writes',async(key,label)=>{
     const body=form();body.delete(key);
     expect(await submit(body)).toMatchObject({formError:expect.stringContaining(label)});

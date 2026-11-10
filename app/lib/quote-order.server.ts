@@ -15,6 +15,7 @@ import { parseMarkContactIdsJson, type MarkContactSnapshot } from "./mark-contac
 import { resolveMarkContactSnapshots } from "./mark-contacts.server";
 import type { IntakePayable } from "./intake-fee-lines";
 import { intakePayableStatements } from "./intake-fee-lines.server";
+import { readIntakeOperations } from "./intake-operations";
 
 type QuoteReceivable = {
   id: string;
@@ -52,6 +53,7 @@ type AcceptedQuote = {
   customs_location: string | null;
   domestic_agent: string | null;
   intake_route_recorded: number;
+  intake_operations_json: string | null;
   workflow_definition_id: string | null;
   origin_country: string;
   origin_state: string | null;
@@ -165,6 +167,7 @@ export async function createOrderFromAcceptedQuote(input: {
     totalVolumeCbm: Number(quote.volume_cbm),
   });
   const pieces = cargoProjection.declaredQuantity;
+  const entrustedServices=readIntakeOperations(quote.intake_operations_json).entrustedServices;
 
   const snapshotJson = JSON.stringify({
     quoteNumber: quote.quote_number,
@@ -199,6 +202,7 @@ export async function createOrderFromAcceptedQuote(input: {
     quoteCommercialUserId: quote.quote_commercial_user_id,
     quoteCommercialName: quote.quote_commercial_name_snapshot,
     intakeRoute: {exit_port:quote.exit_port,transit_locations:quote.transit_locations,customs_location:quote.customs_location,domestic_agent:quote.domestic_agent},
+    intakeOperations:readIntakeOperations(quote.intake_operations_json),
     workflowDefinitionId: quote.workflow_definition_id,
     notes: quote.notes,
     charges: chargeRows.results,
@@ -232,8 +236,8 @@ export async function createOrderFromAcceptedQuote(input: {
       quote.salesperson_user_id,"order_creation","委托资料补充",now,
       now,now,quote.customs_clearance_mode,0,JSON.stringify(markContactSnapshots),
     ),
-    env.DB.prepare("UPDATE transport_orders SET quote_commercial_user_id=?,quote_commercial_name_snapshot=?,exit_port=?,transit_locations=?,customs_location=?,domestic_agent=? WHERE id=? AND organization_id=?")
-      .bind(quote.quote_commercial_user_id,quote.quote_commercial_name_snapshot,quote.exit_port,quote.transit_locations,quote.customs_location,quote.domestic_agent,orderId,input.organizationId),
+    env.DB.prepare("UPDATE transport_orders SET quote_commercial_user_id=?,quote_commercial_name_snapshot=?,exit_port=?,transit_locations=?,customs_location=?,domestic_agent=?,intake_operations_json=? WHERE id=? AND organization_id=?")
+      .bind(quote.quote_commercial_user_id,quote.quote_commercial_name_snapshot,quote.exit_port,quote.transit_locations,quote.customs_location,quote.domestic_agent,quote.intake_operations_json,orderId,input.organizationId),
     env.DB.prepare(
       `INSERT INTO order_cargo_items(
          id,organization_id,order_id,line_no,cargo_name_cn,package_type,package_count,pieces_per_package,
@@ -295,7 +299,7 @@ export async function createOrderFromAcceptedQuote(input: {
       input.actorUserId,`唛头号 ${orderNumber}（与订单号一致）`,now,
     ),
     ...Object.entries(defaultServices)
-      .filter(([code]) => quote.customs_clearance_mode === "company" || code !== "destination_customs")
+      .filter(([code]) => Array.isArray(entrustedServices) ? entrustedServices.includes(code) : quote.customs_clearance_mode === "company" || code !== "destination_customs")
       .map(([code, name]) => env.DB.prepare(
         "INSERT INTO order_services(id,organization_id,order_id,service_code,service_name,created_at) VALUES(?,?,?,?,?,?)",
       ).bind(crypto.randomUUID(),input.organizationId,orderId,code,name,now)),
@@ -330,7 +334,7 @@ async function loadAcceptedQuote(organizationId: string, quotationId: string) {
     `SELECT q.id,q.quote_number,q.customer_id,c.name customer_name,
             COALESCE(q.customer_contact_name,(SELECT cc.name FROM customer_contacts cc WHERE cc.customer_id=q.customer_id ORDER BY cc.is_primary DESC,cc.created_at LIMIT 1),c.name) customer_contact_name,
             COALESCE(q.customer_contact_phone,(SELECT cc.phone FROM customer_contacts cc WHERE cc.customer_id=q.customer_id ORDER BY cc.is_primary DESC,cc.created_at LIMIT 1)) customer_contact_phone,
-            q.salesperson_user_id,q.quote_commercial_user_id,q.quote_commercial_name_snapshot,q.exit_port,q.transit_locations,q.customs_location,q.domestic_agent,q.intake_route_recorded,q.workflow_definition_id,q.mark_contact_ids_json,
+            q.salesperson_user_id,q.quote_commercial_user_id,q.quote_commercial_name_snapshot,q.exit_port,q.transit_locations,q.customs_location,q.domestic_agent,q.intake_route_recorded,q.intake_operations_json,q.workflow_definition_id,q.mark_contact_ids_json,
             EXISTS(
               SELECT 1
                 FROM workflow_step_fields mark_field
@@ -398,7 +402,8 @@ async function repairGeneratedOrder(input: {
     legacyName:input.quote.customer_contact_name||input.quote.customer_name,
     legacyPhone:input.quote.customer_contact_phone,
   });
-  await env.DB.prepare(
+  const selectedServices=readIntakeOperations(input.quote.intake_operations_json).entrustedServices;
+  const orderRepair=env.DB.prepare(
     `UPDATE transport_orders
         SET shipper_contact=?,shipper_phone=?,consignee_contact=?,consignee_phone=?,
             quote_commercial_user_id=CASE WHEN status='draft' AND ? IS NOT NULL THEN ? ELSE quote_commercial_user_id END,
@@ -407,6 +412,7 @@ async function repairGeneratedOrder(input: {
             transit_locations=CASE WHEN status='draft' AND ?=1 THEN ? ELSE transit_locations END,
             customs_location=CASE WHEN status='draft' AND ?=1 THEN ? ELSE customs_location END,
             domestic_agent=CASE WHEN status='draft' AND ?=1 THEN ? ELSE domestic_agent END,
+            intake_operations_json=CASE WHEN status='draft' AND ? IS NOT NULL THEN ? ELSE intake_operations_json END,
             requested_pickup_date=COALESCE(requested_pickup_date,?),
             destination_address=?,mark_contacts_snapshot_json=COALESCE(mark_contacts_snapshot_json,?),updated_at=?
       WHERE id=? AND organization_id=?`,
@@ -421,13 +427,20 @@ async function repairGeneratedOrder(input: {
     input.quote.intake_route_recorded,input.quote.transit_locations,
     input.quote.intake_route_recorded,input.quote.customs_location,
     input.quote.intake_route_recorded,input.quote.domestic_agent,
+    input.quote.intake_operations_json,input.quote.intake_operations_json,
     now,
     destinationAddress,
     JSON.stringify(markContactSnapshots),
     now,
     input.orderId,
     input.organizationId,
-  ).run();
+  );
+  await env.DB.batch([orderRepair,...(Array.isArray(selectedServices)?[
+    env.DB.prepare("DELETE FROM order_services WHERE organization_id=? AND order_id=? AND EXISTS(SELECT 1 FROM transport_orders WHERE id=? AND organization_id=? AND status='draft')").bind(input.organizationId,input.orderId,input.orderId,input.organizationId),
+    ...Object.entries(defaultServices).filter(([code])=>selectedServices.includes(code)).map(([code,name])=>env.DB.prepare(
+      "INSERT INTO order_services(id,organization_id,order_id,service_code,service_name,created_at) SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM transport_orders WHERE id=? AND organization_id=? AND status='draft')",
+    ).bind(crypto.randomUUID(),input.organizationId,input.orderId,code,name,now,input.orderId,input.organizationId)),
+  ]:[])]);
   let workflowId: string;
   if (input.quote.workflow_definition_id) {
     const selectedWorkflow = await env.DB.prepare(

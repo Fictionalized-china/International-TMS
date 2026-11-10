@@ -1,5 +1,6 @@
 import type { QuotationNativeFieldKey } from "./quotation-native-field-catalog";
 import { intakeRouteFields } from "./intake-route-fields";
+import { intakeOperationFields, intakeOperationFieldKey, readIntakeOperations } from "./intake-operations";
 
 export type ExistingQuotationCharge = {
   id: string;
@@ -137,9 +138,10 @@ export function changedQuotationNativeFieldKeys(
   before: Record<string, unknown>,
   after: Record<string, unknown>,
 ) {
-  return nativeColumns
+  const beforeOperations=readIntakeOperations(before.intake_operations_json),afterOperations=readIntakeOperations(after.intake_operations_json);
+  return [...nativeColumns
     .filter((item) => item.columns.some((column) => comparable(before[column]) !== comparable(after[column])))
-    .map((item) => item.key);
+    .map((item) => item.key),...intakeOperationFields.filter(field=>JSON.stringify(beforeOperations[field.key])!==JSON.stringify(afterOperations[field.key])).map(field=>intakeOperationFieldKey(field.key))];
 }
 
 function comparable(value: unknown) {

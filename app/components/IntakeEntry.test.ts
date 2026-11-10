@@ -1,9 +1,14 @@
 import { describe,it,expect,vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createElement as h } from 'react';
-import { IntakeStepLayout,IntakeFeeEditor } from './IntakeEntry';
+import { IntakeStepLayout,IntakeFeeEditor,intakeStepNames } from './IntakeEntry';
 import { newFeeDraft } from '../lib/intake-fee-lines';
 describe('intake step and fee presentation',()=>{
+  it('keeps the transport plan on a separate mounted section before cargo and fees',()=>{
+    expect(intakeStepNames).toEqual(['客户与方案','路线与货物','运输计划','数量与尺寸','客户应收','开单应付']);
+    const html=renderToStaticMarkup(h(IntakeStepLayout,{enabled:true,busy:false,children:h('section',{'data-intake-step':'5'},'费用')}));
+    expect(html).toContain('第 1 / 6 步');expect(html).toContain('data-intake-step="5"');
+  });
   it('mounts every step without disabling hidden values, but only offers Next before confirmation',()=>{
     const html=renderToStaticMarkup(h(IntakeStepLayout,{enabled:true,busy:false,children:[
       h('section',{'data-intake-step':'0',key:0},h('input',{name:'first',defaultValue:'甲'})),

@@ -34311,7 +34311,8 @@ html[data-motion="off"] *::after {
 .intake-step-layout[data-active-step="1"] [data-intake-step]:not([data-intake-step="1"]),
 .intake-step-layout[data-active-step="2"] [data-intake-step]:not([data-intake-step="2"]),
 .intake-step-layout[data-active-step="3"] [data-intake-step]:not([data-intake-step="3"]),
-.intake-step-layout[data-active-step="4"] [data-intake-step]:not([data-intake-step="4"]) { display: none; }
+.intake-step-layout[data-active-step="4"] [data-intake-step]:not([data-intake-step="4"]),
+.intake-step-layout[data-active-step="5"] [data-intake-step]:not([data-intake-step="5"]) { display: none; }
 .intake-step-actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; padding: 12px 0 0; border-top: 1px solid #dce5ed; flex-shrink: 0; }
 .intake-step-actions > span { margin-right: auto; color: #64798b; }
 .intake-fee-toolbar, .intake-fee-summary { display: flex; align-items: center; gap: 10px; justify-content: space-between; padding: 10px 0; }
@@ -34919,6 +34920,16 @@ html[data-motion="off"] *::after {
 /* Keep intake decisions in complete rows when the independent quote owner is shown. */
 .modal-card.xwide.quote-form-modal.quote-intake-modal { width: min(1360px, calc(100vw - 48px)); min-width: 0; max-width: 100%; }
 .quote-intake-modal .quote-plan-grid > .quote-plan-customer { grid-column: span 6; }
+.intake-operations-fields > fieldset { grid-column: 1 / -1; margin: 0; min-width: 0; padding: 12px; border: 1px solid var(--line, #dbe4ee); display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; }
+.intake-operations-fields > fieldset legend { padding-inline: 4px; font-weight: 600; }
+.intake-operations-fields > fieldset label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.intake-operations-fields > fieldset input[type="checkbox"] { width: 16px; min-width: 16px; height: 16px; margin: 0; }
+.intake-operations-fields > fieldset small { flex-basis: 100%; }
+.intake-operations-fields > .field { min-width: 0; }
+.prototype-quote-form .field > .date-time-select { display: grid; font-size: inherit; line-height: normal; min-height: 30px; margin-bottom: 0; color: var(--ink, #183149); }
+.prototype-quote-form .field > .date-time-select::after { content: none; }
+.prototype-quote-form .intake-operations-fields .date-time-select { grid-template-columns: minmax(86px, 1fr) 1px minmax(44px, 54px) 8px minmax(44px, 54px); width: 100%; }
+@media (max-width: 620px) { .quote-intake-modal .intake-step-nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); } .quote-intake-modal .intake-step-nav button { flex-direction: row; gap: 4px; min-height: 36px; } }
 .quote-intake-modal .quote-plan-grid > .quote-plan-contact,
 .quote-intake-modal .quote-plan-grid > .quote-plan-phone,
 .quote-intake-modal .quote-plan-grid > .quote-plan-secondary { grid-column: span 3; }

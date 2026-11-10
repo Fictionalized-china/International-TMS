@@ -13,6 +13,8 @@ export function normalizeBusinessPlanTime(value: string | null | undefined): str
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})?$/.test(raw)) throw new Error("计划时间格式无效");
   const [year, month, day] = raw.slice(0, 10).split("-").map(Number);
   if (month < 1 || month > 12 || day < 1 || day > new Date(Date.UTC(year,month,0)).getUTCDate()) throw new Error("计划日期无效");
+  const [hour,minute,second] = raw.slice(11).split(/[:Z+-]/).map(Number);
+  if(hour>23||minute>59||(Number.isFinite(second)&&second>=60))throw new Error("计划时间无效");
   const instant = storedBusinessTimestamp(raw);
   if (!Number.isFinite(instant)) throw new Error("计划时间无效");
   return new Date(instant).toISOString();

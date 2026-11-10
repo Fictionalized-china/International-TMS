@@ -1,4 +1,5 @@
 import { describe,expect,it } from "vitest";
+import { intakeOperationFields,intakeOperationFieldKey } from "./intake-operations";
 import {
   quotationNativeFieldCatalog,
   quotationNativeFieldKeySet,
@@ -23,7 +24,7 @@ describe("quotation native workflow fields",() => {
 
   it("derives every quote workflow surface from one unique native-field registry",() => {
     const keys = quotationNativeFieldCatalog.map((field) => field.fieldKey);
-    expect(keys).toHaveLength(28);
+    expect(keys).toHaveLength(37);
     expect(new Set(keys).size).toBe(keys.length);
     expect([...quotationBuiltInWorkflowFieldKeys]).toEqual(keys);
     expect([...quotationNativeFieldKeySet]).toEqual(keys);
@@ -52,6 +53,7 @@ describe("quotation native workflow fields",() => {
       "quotation_transit_locations",
       "quotation_customs_location",
       "quotation_domestic_agent",
+      ...intakeOperationFields.map(field=>intakeOperationFieldKey(field.key)),
       "quotation_destination_warehouse_note",
       "quotation_notes",
       "quotation_valid_until",

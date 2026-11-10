@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode, type Dispatch, type SetStateAction } from 'react';
 import { feeLineAmount, MAX_INTAKE_FEE_LINES, newFeeDraft, type FeeDraft } from '../lib/intake-fee-lines';
 
-export const intakeStepNames = ['客户与方案', '路线与货物', '数量与尺寸', '客户应收', '开单应付'];
+export const intakeStepNames = ['客户与方案', '路线与货物', '运输计划', '数量与尺寸', '客户应收', '开单应付'];
 type Validatable = HTMLElement & Pick<HTMLInputElement, 'form' | 'willValidate' | 'validity' | 'checkValidity' | 'reportValidity'>;
 export function firstInvalidIntakeControl(root: HTMLElement, throughStep: number): Validatable | undefined {
   return [...root.querySelectorAll<Validatable>('input,select,textarea')].find(control => {

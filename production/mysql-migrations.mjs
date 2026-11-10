@@ -310,6 +310,14 @@ migrations.push({
     await addColumnIfMissing(connection,'transport_orders','domestic_agent','TEXT NULL');
   },
 });
+migrations.push({
+  version:187,
+  name:'intake_operations',
+  definition:'quotations/transport_orders.intake_operations_json TEXT NULL;canonical_plans_responsibilities_services;no_historical_inference',
+  async up(connection) {
+    for(const table of ['quotations','transport_orders']) await addColumnIfMissing(connection,table,'intake_operations_json','TEXT NULL');
+  },
+});
 for (const migration of migrations) {
   migration.checksum = createHash("sha256")
     .update(`${migration.version}:${migration.name}\n${migration.definition}`)
@@ -347,6 +355,7 @@ export const requiredMysqlSchemaColumns = [
   ['quotations','exit_port'], ['quotations','transit_locations'], ['quotations','customs_location'], ['quotations','domestic_agent'],
   ['transport_orders','domestic_agent'],
   ['quotations','intake_route_recorded'],
+  ['quotations','intake_operations_json'], ['transport_orders','intake_operations_json'],
 ];
 
 async function addColumnIfMissing(connection, table, column, definition) {

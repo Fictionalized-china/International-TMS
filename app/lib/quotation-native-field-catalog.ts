@@ -1,6 +1,7 @@
 import type { OrderModuleCode } from "./order-modules";
 import { nonNegativeNumberPresent } from "./validation";
 import { intakeRouteFields } from "./intake-route-fields";
+import { intakeOperationFields, intakeOperationFieldKey, intakeOperationDisplay, readIntakeOperations } from "./intake-operations";
 
 export type QuotationNativeFieldMode = "required" | "optional" | "hidden";
 
@@ -38,6 +39,7 @@ export const quotationNativeFieldCatalog = [
   nativeField("quotation_quote_commercial_user_id","报价商务","select","consignment","optional","实际为本业务报价的人员，独立于业务员和录单人；直接录单必须明确选择。"),
   nativeField("quotation_customs_clearance_mode","清关办理方式","select","consignment","required","选择公司代办清关或客户自理清关。","company|公司代办清关\ncustomer|客户自理清关"),
   ...intakeRouteFields.map(field => nativeField(field.fieldKey,field.label,field.category ? "select" : "text","consignment","optional","直接录单必填；保存后自动继承到订单，不需要重复录入。")),
+  ...intakeOperationFields.map(field => nativeField(intakeOperationFieldKey(field.key),field.label,field.kind==="person"?"select":field.kind==="integer"?"number":field.kind==="services"?"multiselect":field.kind,"consignment","optional","直接录单必填的计划及归属，自动继承；计划不代表实际运输资源。")),
   nativeField("quotation_origin_region","起运地区","select","consignment","required","按国家或地区、省或州、城市三级选择起运地区。"),
   nativeField("quotation_pickup_address","提货地址","textarea","consignment","required","本次报价使用的详细提货地址，可不写入客户常用地址。"),
   nativeField("quotation_destination_region","目的地区","select","consignment","required","按国家或地区、省或州、城市三级选择目的地区。"),
@@ -73,6 +75,8 @@ export function quotationNativeFieldPresent(
   const positive = (key: string) => Number(quotation[key] ?? 0) > 0;
   const route = intakeRouteFields.find(field => field.fieldKey === fieldKey);
   if (route) return text(route.column);
+  const operation=intakeOperationFields.find(field=>intakeOperationFieldKey(field.key)===fieldKey);
+  if(operation)return Boolean(intakeOperationDisplay(operation.key,readIntakeOperations(quotation.intake_operations_json)[operation.key]));
   switch (fieldKey) {
     case "quotation_customer_contact_name": return text("customer_contact_name");
     case "quotation_customer_contact_phone": return text("customer_contact_phone");

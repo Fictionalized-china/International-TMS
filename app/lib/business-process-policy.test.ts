@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { defaultBusinessProcessPolicy, policyPositions, resolveBusinessProcessPolicy, validateBusinessProcessPolicy } from "./business-process-policy";
 describe("configurable meeting business policy", () => {
+  it("validates a configurable tail-plan default as text, not a list of position codes",()=>{
+    expect(validateBusinessProcessPolicy({"order.default_tail_carrier":"口岸调度"})).toEqual({"order.default_tail_carrier":"口岸调度"});
+    expect(()=>validateBusinessProcessPolicy({"order.default_tail_carrier":""})).toThrow();
+    expect(()=>validateBusinessProcessPolicy({"order.default_tail_carrier":"a\u0000b"})).toThrow();
+  });
   it("uses the final meeting responsibilities, not the superseded business supervisor", () => {
     expect(policyPositions(defaultBusinessProcessPolicy, "order.approve_positions")).toEqual(["OPERATION_SUPERVISOR"]);
     expect(policyPositions(defaultBusinessProcessPolicy, "payable.initiator_positions")).toContain("BUSINESS_ROUTE");
