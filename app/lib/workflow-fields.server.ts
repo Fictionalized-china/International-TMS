@@ -6,6 +6,8 @@ import { loadWorkflowFieldGroups } from "./workflow-field-read-batch";
 import { domesticTransportPayableWorkflowValues } from "./transport-workflow";
 import { orderDocumentPlacements } from "./order-documents";
 import { isActualExitTrackingMilestone } from "./batch-tracking.shared";
+import { orderNativeQuotationFacts,cargoNativeFieldKeys,cargoNativeFieldPresent } from "./order-intake-facts";
+import { readIntakeOperations } from "./intake-operations";
 import { loadOrderAssignmentManifest } from "./order-assignment-manifest.server";
 import {
   quotationNativeFieldKeySet,
@@ -1163,22 +1165,33 @@ async function resolveFieldPresence(
     quotationNativeFieldKeySet.has(rule.fieldKey),
   );
   if (quotationRules.length) {
-    const quotation = await env.DB.prepare(
-      `SELECT q.*,
-        (SELECT COUNT(*) FROM quotation_charges c
-         WHERE c.quotation_id=q.id AND c.quantity>0 AND c.unit_price>=0) quotation_charge_items
+    const quotation = await readWorkflowFieldFact(readPhase,"intake-source-quote",()=>env.DB.prepare(
+      `SELECT q.*
        FROM quotations q
        JOIN transport_orders o ON o.quotation_id=q.id AND o.organization_id=q.organization_id
        WHERE o.id=? AND o.organization_id=?`,
-    ).bind(orderId,organizationId).first<Record<string, unknown>>();
-    if (quotation) {
-      for (const rule of quotationRules) {
-        const present = quotationNativeFieldPresent(rule.fieldKey,quotation);
+    ).bind(orderId,organizationId).first<Record<string, unknown>>());
+    const facts=orderNativeQuotationFacts(order,quotation);
+    if(quotationRules.some(rule=>rule.fieldKey==="quotation_intake_entrustedServices")) {
+      const services=await readWorkflowFieldFact(readPhase,"intake-services",()=>env.DB.prepare("SELECT service_code FROM order_services WHERE organization_id=? AND order_id=?").bind(organizationId,orderId).all<{service_code:string}>());
+      facts.intake_operations_json=JSON.stringify({...readIntakeOperations(order.intake_operations_json),entrustedServices:services.results.map(row=>row.service_code)});
+    }
+    const cargo=quotationRules.some(rule=>cargoNativeFieldKeys.has(rule.fieldKey))
+      ? await readWorkflowFieldFact(readPhase,"cargo-items",()=>env.DB.prepare("SELECT * FROM order_cargo_items WHERE organization_id=? AND order_id=? ORDER BY line_no").bind(organizationId,orderId).all<Record<string,unknown>>()) : null;
+    if(quotationRules.some(rule=>rule.fieldKey==="quotation_charge_items")) {
+      const expenses=await readWorkflowFieldFact(readPhase,"intake-receivables",()=>env.DB.prepare("SELECT quantity,unit_price,amount,currency,exchange_rate,charge_name FROM business_expenses WHERE organization_id=? AND order_id=? AND direction='receivable' AND stage!='cancelled'").bind(organizationId,orderId).all<Record<string,unknown>>());
+      facts.quotation_charge_items=expenses.results.length>0&&expenses.results.every(row=>
+        nonNegativeNumberPresent(row.quantity)&&Number(row.quantity)>0&&nonNegativeNumberPresent(row.unit_price)&&nonNegativeNumberPresent(row.amount)&&
+        nonNegativeNumberPresent(row.exchange_rate)&&Number(row.exchange_rate)>0&&String(row.currency??"").trim()&&String(row.charge_name??"").trim())?expenses.results.length:0;
+    }
+    for (const rule of quotationRules) {
+        const present = cargoNativeFieldKeys.has(rule.fieldKey)
+          ? cargoNativeFieldPresent(rule.fieldKey,cargo?.results??[],order)
+          : quotationNativeFieldPresent(rule.fieldKey,facts);
         result.set(rule.fieldKey,{
           present,
-          displayValue:present ? "已由报价继承" : null,
+          displayValue:present ? "已核对本单资料" : null,
         });
-      }
     }
   }
 
@@ -1226,15 +1239,16 @@ async function resolveFieldPresence(
   }
 
   if (moduleCode === "cargo") {
-    const rows = await env.DB.prepare(
+    const rows = await readWorkflowFieldFact(readPhase,"cargo-items",()=>env.DB.prepare(
       "SELECT * FROM order_cargo_items WHERE organization_id=? AND order_id=? ORDER BY line_no",
-    ).bind(organizationId, orderId).all<Record<string, unknown>>();
+    ).bind(organizationId, orderId).all<Record<string, unknown>>());
     const cargoKeyMap: Record<string, string> = {
       origin_country_cargo: "origin_country",
       cargo_images: "image_count",
       cargo_notes: "notes",
     };
     for (const rule of rules) {
+      if(quotationNativeFieldKeySet.has(rule.fieldKey))continue;
       const column = cargoKeyMap[rule.fieldKey] ?? rule.fieldKey;
       if (rule.fieldKey === "cargo_images") {
         const image = await env.DB.prepare(
@@ -1662,7 +1676,7 @@ async function resolveFieldPresence(
     }>();
     for (const item of values.results) {
       const rule = quotationFields.find((field) => field.fieldKey === item.field_key);
-      if (!rule) continue;
+      if (!rule || quotationNativeFieldKeySet.has(rule.fieldKey)) continue;
       setPresence(
         result,
         rule.fieldKey,

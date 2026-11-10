@@ -1,7 +1,7 @@
 import type { OrderModuleCode } from "./order-modules";
 import { nonNegativeNumberPresent } from "./validation";
 import { intakeRouteFields } from "./intake-route-fields";
-import { intakeOperationFields, intakeOperationFieldKey, intakeOperationDisplay, readIntakeOperations } from "./intake-operations";
+import { intakeOperationFields, intakeOperationFieldKey, intakeOperationPresent, readIntakeOperations } from "./intake-operations";
 
 export type QuotationNativeFieldMode = "required" | "optional" | "hidden";
 
@@ -72,11 +72,11 @@ export function quotationNativeFieldPresent(
   quotation: Record<string, unknown>,
 ) {
   const text = (key: string) => String(quotation[key] ?? "").trim().length > 0;
-  const positive = (key: string) => Number(quotation[key] ?? 0) > 0;
+  const positive = (key: string) => nonNegativeNumberPresent(quotation[key]) && Number(quotation[key]) > 0;
   const route = intakeRouteFields.find(field => field.fieldKey === fieldKey);
   if (route) return text(route.column);
   const operation=intakeOperationFields.find(field=>intakeOperationFieldKey(field.key)===fieldKey);
-  if(operation)return Boolean(intakeOperationDisplay(operation.key,readIntakeOperations(quotation.intake_operations_json)[operation.key]));
+  if(operation)return intakeOperationPresent(operation.key,readIntakeOperations(quotation.intake_operations_json));
   switch (fieldKey) {
     case "quotation_customer_contact_name": return text("customer_contact_name");
     case "quotation_customer_contact_phone": return text("customer_contact_phone");

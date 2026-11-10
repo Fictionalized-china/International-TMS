@@ -1,4 +1,4 @@
-import { businessDateTimeLabel } from "./business-time";
+import { businessDateTimeLabel, normalizeBusinessPlanTime } from "./business-time";
 
 /** Planned facts only. Actual carriers/vehicles remain owned by dispatch. */
 export const intakeOperationFields = [
@@ -40,10 +40,27 @@ export function intakeOperationDisplay(key:IntakeOperationKey, value:unknown):st
 }
 
 export function missingIntakeOperations(values:Partial<IntakeOperations>) {
-  return intakeOperationFields.filter(field=> {
-    const value=values[field.key];
-    if(field.kind==="person") return !value || typeof value!=="object" || !("id" in value) || !value.id;
-    if(field.kind==="integer") return typeof value!=="number" || !Number.isSafeInteger(value) || value<=0 || value>10000;
-    return !intakeOperationDisplay(field.key,value).trim();
-  }).map(field=>field.label);
+  return intakeOperationFields.filter(field=>!intakeOperationPresent(field.key,values)).map(field=>field.label);
+}
+
+/** Validate persisted facts too: a nonempty display label is not a hard gate. */
+export function intakeOperationPresent(key:IntakeOperationKey,values:Partial<IntakeOperations>):boolean {
+  const field=intakeOperationFields.find(field=>field.key===key)!;
+  const value:unknown=values[key];
+  if(field.kind==="integer")return typeof value==="number"&&Number.isSafeInteger(value)&&value>0&&value<=10000;
+  const text=(value:unknown)=>typeof value==="string"&&value.trim().length>0&&!/[\u0000-\u001f\u007f]/.test(value);
+  if(field.kind==="person")return Boolean(value&&typeof value==="object"&&"id" in value&&text(value.id)&&"display_name" in value&&text(value.display_name));
+  if(field.kind==="services")return Array.isArray(value)&&value.length>0&&value.every(code=>typeof code==="string"&&intakeServiceOptions.some(option=>option[0]===code));
+  if(field.kind==="datetime") {
+    if(typeof value!=="string")return false;
+    try {
+      const normalized=normalizeBusinessPlanTime(value);if(!normalized)return false;
+      if(key==="plannedArrival"&&values.plannedDeparture){
+        const departure=normalizeBusinessPlanTime(values.plannedDeparture);
+        if(!departure||Date.parse(normalized)<Date.parse(departure))return false;
+      }
+      return true;
+    }catch{return false;}
+  }
+  return text(value)&&String(value).length<=200;
 }

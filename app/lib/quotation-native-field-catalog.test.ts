@@ -14,6 +14,22 @@ import {
 } from "./quotation-workflow-fields";
 
 describe("quotation native workflow fields",() => {
+  it.each([
+    ["headVehicleCount",0],["headVehicleCount",1.5],["headVehicleCount","1"],
+    ["headCarrier",{}],["headCarrier","  "],["headCarrier","x\u0000"],
+    ["businessAssistant",{id:"",display_name:"伪造姓名"}],
+    ["businessAssistant",{id:"sales",display_name:""}],
+    ["entrustedServices",["not-a-service"]],
+    ["plannedDeparture","2026-02-30T01:00:00Z"],
+  ])("does not mistake an invalid planned fact %s=%j for completeness",(key,value)=>{
+    expect(quotationNativeFieldPresent(intakeOperationFieldKey(key as typeof intakeOperationFields[number]["key"]),{intake_operations_json:JSON.stringify({[key]:value})})).toBe(false);
+  });
+  it("rejects a backwards arrival even when both individual dates have values",()=>{
+    expect(quotationNativeFieldPresent("quotation_intake_plannedArrival",{intake_operations_json:JSON.stringify({plannedDeparture:"2026-11-12T00:00:00Z",plannedArrival:"2026-11-10T00:00:00Z"})})).toBe(false);
+  });
+  it.each([Infinity,true,"Infinity"])("rejects invalid positive numeric fact %s",pieces=>{
+    expect(quotationNativeFieldPresent("quotation_pieces",{pieces})).toBe(false);
+  });
   it.each([0, "0", 0.0000001])("treats entered volume %s as present, not a positive-only gate", (volume_cbm) => {
     expect(quotationNativeFieldPresent("quotation_volume_cbm", { volume_cbm })).toBe(true);
   });
