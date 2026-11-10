@@ -1173,7 +1173,7 @@ async function resolveFieldPresence(
     ).bind(orderId,organizationId).first<Record<string, unknown>>());
     const facts=orderNativeQuotationFacts(order,quotation);
     if(quotationRules.some(rule=>rule.fieldKey==="quotation_intake_entrustedServices")) {
-      const services=await readWorkflowFieldFact(readPhase,"intake-services",()=>env.DB.prepare("SELECT service_code FROM order_services WHERE organization_id=? AND order_id=?").bind(organizationId,orderId).all<{service_code:string}>());
+      const services=await readWorkflowFieldFact(readPhase,"intake-services",()=>env.DB.prepare("SELECT service_code FROM order_services WHERE organization_id=? AND order_id=? AND status!='cancelled'").bind(organizationId,orderId).all<{service_code:string}>());
       facts.intake_operations_json=JSON.stringify({...readIntakeOperations(order.intake_operations_json),entrustedServices:services.results.map(row=>row.service_code)});
     }
     const cargo=quotationRules.some(rule=>cargoNativeFieldKeys.has(rule.fieldKey))

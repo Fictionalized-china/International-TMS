@@ -58,6 +58,8 @@ describe("order-owned intake facts in frozen fields",()=>{
     expect(await present("quotation_intake_entrustedServices")).toBe(false);
     fixture.database.prepare("INSERT INTO order_services(id,organization_id,order_id,service_code,service_name,created_at) VALUES('pickup','org','order','pickup','提货',?)").run(fixture.now);
     expect(await present("quotation_intake_entrustedServices")).toBe(true);
+    fixture.database.exec("UPDATE order_services SET status='cancelled' WHERE id='pickup'");
+    expect(await present("quotation_intake_entrustedServices")).toBe(false);
     fixture.database.exec("DELETE FROM order_services WHERE id='pickup'");expect(await present("quotation_intake_entrustedServices")).toBe(false);
   });
 });
