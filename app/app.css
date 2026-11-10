@@ -34929,6 +34929,12 @@ html[data-motion="off"] *::after {
 .prototype-quote-form .field > .date-time-select { display: grid; font-size: inherit; line-height: normal; min-height: 30px; margin-bottom: 0; color: var(--ink, #183149); }
 .prototype-quote-form .field > .date-time-select::after { content: none; }
 .prototype-quote-form .intake-operations-fields .date-time-select { grid-template-columns: minmax(86px, 1fr) 1px minmax(44px, 54px) 8px minmax(44px, 54px); width: 100%; }
+.intake-draft-picker { padding: 8px 12px; border: 1px solid var(--line, #dbe4ee); border-radius: 6px; margin-block: 8px; }
+.intake-draft-picker summary { cursor: pointer; color: var(--ink, #183149); }
+.intake-draft-picker > div { display: grid; gap: 6px; max-height: 160px; overflow-y: auto; padding-top: 8px; }
+.intake-draft-picker a { padding: 6px; overflow-wrap: anywhere; }
+.intake-draft-picker a:hover { background: #f1f6fa; }
+.intake-draft-picker a:focus-visible { outline: 2px solid #fb6938; outline-offset: 1px; }
 @media (max-width: 620px) { .quote-intake-modal .intake-step-nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); } .quote-intake-modal .intake-step-nav button { flex-direction: row; gap: 4px; min-height: 36px; } }
 .quote-intake-modal .quote-plan-grid > .quote-plan-contact,
 .quote-intake-modal .quote-plan-grid > .quote-plan-phone,

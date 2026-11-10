@@ -5,7 +5,7 @@ import { adminWorkspaceHref } from "../lib/admin-workspace-navigation";
 import { intakeSubmissionIdentity,assertDirectIntakeAuthority } from '../lib/intake-submission.server';
 import { ChevronDown, ChevronRight } from "lucide-react";
 import type { Route } from "./+types/admin.quotations";
-import { Modal } from "../components/Modal";
+import { Modal,notifyModalFormSaved } from "../components/Modal";
 import { CustomerEditorForm, type CustomerEditorValues } from "../components/CustomerEditorForm";
 import { ConfirmAction } from "../components/ConfirmAction";
 import { QueryPagination } from "../components/QueryPagination";
@@ -74,8 +74,10 @@ import { intakeRouteFields } from "../lib/intake-route-fields";
 import { listIntakeRouteReferences, resolveIntakeRouteFields } from "../lib/intake-route-fields.server";
 import { IntakeRouteFields } from "../components/IntakeRouteFields";
 import { IntakeOperationsFields } from "../components/IntakeOperationsFields";
-import { intakeOperationFields, intakeOperationFieldKey, intakeOperationDisplay, readIntakeOperations } from "../lib/intake-operations";
+import { intakeOperationFields, intakeOperationFieldKey, intakeOperationFormName, intakeOperationDisplay, readIntakeOperations } from "../lib/intake-operations";
 import { listIntakePeople, resolveIntakeOperations } from "../lib/intake-operations.server";
+import { captureIntakeDraft,intakeDraftValues } from "../lib/intake-drafts";
+import { listIntakeDrafts,loadIntakeDraft,saveIntakeDraft,markIntakeDraftSubmitted,intakeDraftSubmissionGuard } from "../lib/intake-drafts.server";
 
 type Quote = {
   id: string;
@@ -290,9 +292,16 @@ export async function loader({ request }: Route.LoaderArgs) {
     listIntakePeople(current.organizationId, processPolicy),
     listIntakeRouteReferences(current.organizationId),
   ]);
+  const intakeDrafts=directEntry?await listIntakeDrafts(current):[];
+  let intakeDraft:Awaited<ReturnType<typeof loadIntakeDraft>>|null=null;
+  if(directEntry&&url.searchParams.get("draft")) {
+    try{intakeDraft=await loadIntakeDraft(current,url.searchParams.get("draft")!);}
+    catch{throw new Response("草稿不存在、已转单或不属于当前账号",{status:404});}
+  }
   return {
     current,
     intakeRequestId:crypto.randomUUID(),
+    intakeDrafts,intakeDraft,
     quotes: visibleQuoteRows,
     processPolicy,
     pagination,
@@ -327,10 +336,14 @@ export async function action({ request }: Route.ActionArgs) {
   const form = await request.formData();
   const intent = valueOf(form, "intent");
   const directEntry = intent === "create" && valueOf(form, "entryMode") === "direct";
-  if (!current.permissions.includes(directEntry ? "order.intake.manage" : "quote.manage")) throw new Response("没有权限执行此操作", { status: 403 });
+  if (!current.permissions.includes(directEntry || intent==="intake_draft_save" ? "order.intake.manage" : "quote.manage")) throw new Response("没有权限执行此操作", { status: 403 });
   const processPolicy = await loadBusinessProcessPolicy(current.organizationId);
   const actionQuotationId = valueOf(form, "id") || undefined;
   try {
+    if(intent==="intake_draft_save") {
+      const saved=await saveIntakeDraft({current,id:valueOf(form,"draftId"),revision:Number(valueOf(form,"draftRevision")),payload:valueOf(form,"draftPayload"),request});
+      return {intent,entryMode:"direct",draftId:saved.id,draftRevision:saved.revision,draftFilesOmitted:saved.payload.filesOmitted.length,success:saved.payload.filesOmitted.length?"文字资料已暂存；附件未上传，继续录入时请重新选择。":"草稿已暂存，未建立订单、未派发下一岗任务。"};
+    }
     if (intent === "workflow_fields_update") {
       const quotationId = valueOf(form, "id");
       const quote = await env.DB.prepare(
@@ -425,6 +438,7 @@ export async function action({ request }: Route.ActionArgs) {
           if(!saved.order_id){
             await writeAudit({request,action:'order.direct_entry.resume',resourceType:'transport_order',resourceId:order.id,organizationId:current.organizationId,actorUserId:current.userId,metadata:{quotationId:saved.id,orderNumber:order.orderNumber,emergencyReason:current.positionCode==='HR_ADMIN'?valueOf(form,'intakeEmergencyReason'):undefined}});
           }
+          await markIntakeDraftSubmitted(current,valueOf(form,"intakeRequestId"),order.id);
           return {intent,entryMode,quotationId:saved.id,orderId:order.id,orderNumber:order.orderNumber,success:`订单 ${order.orderNumber} 已建立，重复提交未重复开单`};
         }
       }
@@ -664,6 +678,7 @@ export async function action({ request }: Route.ActionArgs) {
       let quoteCreated=false;
       try {
         await env.DB.batch([
+          ...(directEntry?[intakeDraftSubmissionGuard(current,valueOf(form,"intakeRequestId"),Number(valueOf(form,"intakeDraftRevision")||0),now)]:[]),
           env.DB.prepare(
             `INSERT INTO quotations(
               id,organization_id,quote_number,customer_id,origin_country,origin_state,origin_city,pickup_address,
@@ -717,7 +732,7 @@ export async function action({ request }: Route.ActionArgs) {
         if (!workflowInstanceId) throw new Error("所选工作流缺少可用于录单的初始节点");
       } catch (error) {
         // A losing concurrent insert must never clean up the winning submission.
-        if(!quoteCreated){if(identity&&/unique|duplicate/i.test(String(error)))throw new Error('本次录单正在处理，请稍后使用原窗口重试');throw error;}
+        if(!quoteCreated){if(identity&&String(error).includes("mutation_commit_guards"))throw new Error("草稿已在其他窗口保存或转单，请打开最新草稿再确认；当前输入仍保留");if(identity&&/unique|duplicate/i.test(String(error)))throw new Error('本次录单正在处理，请稍后使用原窗口重试');throw error;}
         await env.DB.batch([
           env.DB.prepare("DELETE FROM workflow_instances WHERE organization_id=? AND quotation_id=?")
             .bind(current.organizationId,id),
@@ -749,6 +764,7 @@ export async function action({ request }: Route.ActionArgs) {
           actorUserId: current.userId,
           metadata: { quotationId: id, quotationNumber: number, orderNumber: order.orderNumber, quoteCommercialUserId:quoteCommercial?.id??null, quoteCommercialName:quoteCommercial?.display_name??null,emergencyReason:current.positionCode==='HR_ADMIN'?valueOf(form,'intakeEmergencyReason'):undefined },
         });
+        await markIntakeDraftSubmitted(current,valueOf(form,"intakeRequestId"),order.id);
         return {
           intent,
           entryMode,
@@ -1259,38 +1275,69 @@ function ReadCell({ label, value }: { label: string; value: string }) {
   return <div><span>{label}</span><b>{value}</b></div>;
 }
 
-function QuoteForm({ loaderData, busy, formError, entryMode }: { loaderData: Awaited<ReturnType<typeof loader>>; busy: boolean; formError?: string; entryMode: "quote" | "direct" }) {
+type QuoteFormProps={loaderData:Awaited<ReturnType<typeof loader>>;busy:boolean;formError?:string;entryMode:"quote"|"direct"};
+function QuoteForm(props:QuoteFormProps) {const [newFormKey]=useState(props.loaderData.intakeRequestId);return <QuoteFormFields key={props.loaderData.intakeDraft?.id||newFormKey} {...props}/>;}
+function QuoteFormFields({ loaderData, busy, formError, entryMode }: QuoteFormProps) {
+  const draftLocation=useLocation();
+  const draftNavigate=useNavigate();
   const creationResult=useActionData<typeof action>();
-  const [intakeRequestId,setIntakeRequestId]=useState(loaderData.intakeRequestId);
+  const draft=entryMode==="direct"?loaderData.intakeDraft:null,draftValues=intakeDraftValues(draft?.payload),v=draftValues.get;
+  const [intakeRequestId,setIntakeRequestId]=useState(draft?.id||loaderData.intakeRequestId);
+  const formRef=useRef<HTMLFormElement>(null),dirty=useRef(false);
+  const pendingDraftPayloadRef=useRef("");
+  const [draftChangedDuringSave,setDraftChangedDuringSave]=useState(false);
+  const draftFetcher=useFetcher<{success?:string;formError?:string;draftRevision?:number;draftId?:string;draftFilesOmitted?:number}>();
+  const [draftRevision,setDraftRevision]=useState(draft?.revision??0);
+  useEffect(()=>{if(draftFetcher.data?.draftRevision){setDraftRevision(draftFetcher.data.draftRevision);
+    let matches=false;try{matches=Boolean(formRef.current)&&JSON.stringify(captureIntakeDraft(new FormData(formRef.current!)))===pendingDraftPayloadRef.current;}catch{}
+    dirty.current=!matches;setDraftChangedDuringSave(!matches);
+    if(!dirty.current&&!draftFetcher.data.draftFilesOmitted&&formRef.current)notifyModalFormSaved(formRef.current);
+    if(!dirty.current&&!draftFetcher.data.draftFilesOmitted&&draftFetcher.data.draftId&&new URLSearchParams(draftLocation.search).get("draft")!==draftFetcher.data.draftId)
+      draftNavigate(adminWorkspaceHref(`/admin/quotations?entryMode=direct&draft=${encodeURIComponent(draftFetcher.data.draftId)}`,draftLocation.search),{replace:true});
+  }},[draftFetcher.data]);
+  const saveDraft=()=>{
+    if(!formRef.current||busy||draftFetcher.state!=="idle")return;
+    try {setDraftClientError("");const payload=captureIntakeDraft(new FormData(formRef.current));const encoded=JSON.stringify(payload);pendingDraftPayloadRef.current=encoded;dirty.current=false;draftFetcher.submit({intent:"intake_draft_save",draftId:intakeRequestId,draftRevision:String(draftRevision),draftPayload:encoded},{method:"post"});}
+    catch(error){setDraftClientError(error instanceof Error?error.message:"暂存失败，请重试");}
+  };
+  const [draftClientError,setDraftClientError]=useState("");
   useEffect(()=>{if(creationResult?.intent==='create'&&'success' in creationResult&&creationResult.success)setIntakeRequestId(crypto.randomUUID());},[creationResult]);
   const errorSummaryRef=useRef<HTMLDivElement>(null);
   const autoSelectedCustomerRef = useRef("");
   const customerFetcher = useFetcher<CustomerCreateActionData>();
-  const [customerId, setCustomerId] = useState(loaderData.customers[0]?.id || "");
-  const [pickupAddress, setPickupAddress] = useState(loaderData.customers[0]?.pickup_address || "");
-  const [customerContactName, setCustomerContactName] = useState(loaderData.customers[0]?.contact_name || "");
-  const [customerContactPhone, setCustomerContactPhone] = useState(loaderData.customers[0]?.contact_phone || "");
-  const [salespersonId,setSalespersonId] = useState(() => preferredIntakeSalespersonId({
+  const [customerId, setCustomerId] = useState(v("customerId",loaderData.customers[0]?.id || ""));
+  const initialCustomer=loaderData.customers.find(customer=>customer.id===customerId);
+  const [pickupAddress, setPickupAddress] = useState(v("pickupAddress",initialCustomer?.pickup_address || ""));
+  const [customerContactName, setCustomerContactName] = useState(v("customerContactName",initialCustomer?.contact_name || ""));
+  const [customerContactPhone, setCustomerContactPhone] = useState(v("customerContactPhone",initialCustomer?.contact_phone || ""));
+  const [salespersonId,setSalespersonId] = useState(() => v("salespersonId",preferredIntakeSalespersonId({
     currentUserId: loaderData.current.userId,
     currentPositionCode: loaderData.current.positionCode,
     currentRoleCodes: loaderData.current.roleCodes,
     users: loaderData.users,
-  }));
-  const [originCountry,setOriginCountry] = useState("");
-  const [destinationCountry,setDestinationCountry] = useState("");
-  const [destinationWarehouseId,setDestinationWarehouseId] = useState("");
-  const [selectedMarkContactIds,setSelectedMarkContactIds] = useState<string[]>([]);
-  const markContactsTouchedRef = useRef(false);
-  const [roadLoadType, setRoadLoadType] = useState<"" | "ltl" | "ftl">("");
-  const [workflowDefinitionId, setWorkflowDefinitionId] = useState("");
-  const [pieces, setPieces] = useState("1");
-  const [plannedPackageCount, setPlannedPackageCount] = useState("1");
-  const [lengthCm, setLengthCm] = useState("");
-  const [widthCm, setWidthCm] = useState("");
-  const [heightCm, setHeightCm] = useState("");
+  })));
+  const [originCountry,setOriginCountry] = useState(v("originCountry"));
+  const [destinationCountry,setDestinationCountry] = useState(v("destinationCountry"));
+  const [destinationWarehouseId,setDestinationWarehouseId] = useState(v("destinationWarehouseId"));
+  const [selectedMarkContactIds,setSelectedMarkContactIds] = useState<string[]>(draftValues.all("markContactIds"));
+  const markContactsTouchedRef = useRef(Boolean(draft));
+  const [roadLoadType, setRoadLoadType] = useState<"" | "ltl" | "ftl">(v("roadLoadType")==="ftl"?"ftl":v("roadLoadType")==="ltl"?"ltl":"");
+  const [workflowDefinitionId, setWorkflowDefinitionId] = useState(v("workflowDefinitionId"));
+  const [pieces, setPieces] = useState(v("pieces","1"));
+  const [plannedPackageCount, setPlannedPackageCount] = useState(v("plannedPackageCount","1"));
+  const [lengthCm, setLengthCm] = useState(v("length"));
+  const [widthCm, setWidthCm] = useState(v("width"));
+  const [heightCm, setHeightCm] = useState(v("height"));
   const [charges, setCharges] = useState([{ name: transportChargeNameOptions[0]?.[0] || "国际汽运费", quantity: 1, unitPrice: "", notes: "" }]);
-  const [receivableRows, setReceivableRows] = useState<FeeDraft[]>(() => [newFeeDraft('国际汽运费')]);
-  const [payableRows, setPayableRows] = useState<FeeDraft[]>([]);
+  const draftFees=(payable:boolean):FeeDraft[]=>draftValues.all(payable?"intakePayableCode":"chargeName").map((code,index)=>({id:`draft-${payable}-${index}`,code,quantity:draftValues.all(payable?"intakePayableQuantity":"chargeQuantity")[index]??"1",unitPrice:draftValues.all(payable?"intakePayableUnitPrice":"chargeUnitPrice")[index]??"",counterparty:payable?draftValues.all("intakePayableCounterparty")[index]??"":"",notes:draftValues.all(payable?"intakePayableNotes":"chargeNotes")[index]??""}));
+  const [receivableRows, setReceivableRows] = useState<FeeDraft[]>(() => draft?draftFees(false):[newFeeDraft('国际汽运费')]);
+  const [payableRows, setPayableRows] = useState<FeeDraft[]>(()=>draft?draftFees(true):[]);
+  const restoredOperations=draft?JSON.stringify(Object.fromEntries(intakeOperationFields.map(field=>{
+    const value=v(intakeOperationFormName(field.key));
+    if(field.kind==="services")return [field.key,draftValues.all(intakeOperationFormName(field.key))];
+    if(field.kind==="person")return [field.key,value?loaderData.intakePeople[field.key].find(person=>person.id===value)??{id:value,display_name:"已失效人员，请重新选择"}:null];
+    return [field.key,field.kind==="integer"?(value?Number(value):null):value];
+  }))):undefined;
   const payableOptions = intakePayableOptions(loaderData.processPolicy, roadLoadType || 'ltl');
   const total = entryMode === 'direct'
     ? receivableRows.reduce((sum, row) => {
@@ -1359,9 +1406,8 @@ function QuoteForm({ loaderData, busy, formError, entryMode }: { loaderData: Awa
       setWorkflowDefinitionId(compatibleWorkflows[0]?.id || "");
     }
   }, [roadLoadType, workflowDefinitionId, compatibleWorkflows]);
-  useEffect(() => {
-    markContactsTouchedRef.current=false;
-  },[workflowDefinitionId]);
+  const previousWorkflowId=useRef(workflowDefinitionId);
+  useEffect(() => {if(previousWorkflowId.current!==workflowDefinitionId){markContactsTouchedRef.current=false;previousWorkflowId.current=workflowDefinitionId;}},[workflowDefinitionId]);
   useEffect(() => {
     if (!policies.markContacts.isActive) {
       setSelectedMarkContactIds([]);
@@ -1394,10 +1440,10 @@ function QuoteForm({ loaderData, busy, formError, entryMode }: { loaderData: Awa
   };
   const cargoMetrics = cargoMetricsVisible && <div className="quote-metrics-grid">
     {policies.pieces.isActive && <Field label="商品实际件数" className="quote-metric-compact"><input className="control" name="pieces" type="number" min="1" step="1" value={pieces} onChange={(event) => setPieces(event.target.value)} required={policies.pieces.isRequired}/></Field>}
-    {policies.declaredQuantityUnit.isActive && <Field label="商品数量单位" className="quote-metric-compact"><input className="control" name="declaredQuantityUnit" defaultValue="件" placeholder="件 / 套 / 台" required={policies.declaredQuantityUnit.isRequired}/></Field>}
+    {policies.declaredQuantityUnit.isActive && <Field label="商品数量单位" className="quote-metric-compact"><input className="control" name="declaredQuantityUnit" defaultValue={v("declaredQuantityUnit","件")} placeholder="件 / 套 / 台" required={policies.declaredQuantityUnit.isRequired}/></Field>}
     {policies.plannedPackageCount.isActive && <Field label="预计入仓包装数" className="quote-metric-compact"><input className="control" name="plannedPackageCount" type="number" min="1" max={MAX_QUOTE_AUTO_PACKAGES} step="1" value={plannedPackageCount} onChange={(event) => setPlannedPackageCount(event.target.value)} required={policies.plannedPackageCount.isRequired}/></Field>}
-    {policies.plannedPackageType.isActive && <Field label="预计包装类型"><select className="control" name="plannedPackageType" defaultValue="other" required={policies.plannedPackageType.isRequired}><option value="carton">纸箱</option><option value="pallet">托盘</option><option value="wooden_case">木箱</option><option value="bag">袋装</option><option value="other">其他</option></select></Field>}
-    {policies.weight.isActive && <Field label="预计重量 KG"><input className="control" name="weight" type="number" min="0.001" step="0.001" required={policies.weight.isRequired}/></Field>}
+    {policies.plannedPackageType.isActive && <Field label="预计包装类型"><select className="control" name="plannedPackageType" defaultValue={v("plannedPackageType","other")} required={policies.plannedPackageType.isRequired}><option value="carton">纸箱</option><option value="pallet">托盘</option><option value="wooden_case">木箱</option><option value="bag">袋装</option><option value="other">其他</option></select></Field>}
+    {policies.weight.isActive && <Field label="预计重量 KG"><input className="control" name="weight" defaultValue={v("weight")} type="number" min="0.001" step="0.001" required={policies.weight.isRequired}/></Field>}
     {(policies.length.isActive || policies.width.isActive || policies.height.isActive) && <fieldset className="quote-dimension-group">
       <legend>预计尺寸 CM</legend>
       <div className="quote-dimension-inputs">
@@ -1408,18 +1454,26 @@ function QuoteForm({ loaderData, busy, formError, entryMode }: { loaderData: Awa
     </fieldset>}
     {policies.volume.isActive && <Field label={`预计体积 CBM${volumeCanAutoCalculate ? "（自动计算）" : ""}`}>{volumeCanAutoCalculate
       ? <input aria-label="预计体积 CBM" className="control quote-calculated-volume" name="volume" type="number" min="0" step="any" value={calculatedVolume} readOnly required={policies.volume.isRequired}/>
-      : <input aria-label="预计体积 CBM" className="control" name="volume" type="number" min="0" step="any" required={policies.volume.isRequired}/>}</Field>}
+      : <input aria-label="预计体积 CBM" className="control" name="volume" type="number" min="0" step="any" defaultValue={v("volume")} required={policies.volume.isRequired}/>}</Field>}
   </div>;
-  return <Form method="post" encType="multipart/form-data" className="prototype-quote-form" noValidate={entryMode === 'direct'} data-keyboard-submit data-enter-flow>
+  return <Form ref={formRef} onChange={()=>{dirty.current=true;}} onInput={()=>{dirty.current=true;}} method="post" encType="multipart/form-data" className="prototype-quote-form" noValidate={entryMode === 'direct'} data-keyboard-submit data-enter-flow>
     <input type="hidden" name="intent" value="create"/>
     <input type="hidden" name="entryMode" value={entryMode}/>
     {entryMode==='direct'&&<input type="hidden" name="intakeRequestId" value={intakeRequestId}/>}
+    {entryMode==='direct'&&<input type="hidden" name="intakeDraftRevision" value={draftRevision} data-ignore-dirty/>}
     {entryMode === "direct" && <div className="alert info"><strong>直接录单</strong><span>适用于已经通过微信、线下等方式确认的业务；保存后直接建立草稿订单，不向客户发送待确认报价。</span></div>}
     {formError && <div ref={errorSummaryRef} className="alert error" role="alert" tabIndex={-1}><strong>{entryMode === "direct" ? "订单尚未建立" : "报价尚未保存"}</strong><span>{formError}</span><small>已填写内容仍保留在当前弹窗，请按提示修改后重试。</small></div>}
-    <IntakeStepLayout enabled={entryMode === 'direct'} busy={busy}>
+    {entryMode==="direct"&&<>
+      {(draftClientError||draftFetcher.data?.formError)&&<p className="alert error" role="alert">{draftClientError||draftFetcher.data?.formError}；当前输入仍保留。</p>}
+      {draftFetcher.data?.success&&<p className="alert success" role="status">{draftFetcher.data.success}</p>}
+      {draftChangedDuringSave&&<p className="alert info" role="status">保存期间新增的修改尚未暂存，请再点一次“暂存草稿”。当前输入仍保留。</p>}
+      {Boolean(draft?.payload.filesOmitted.length)&&<p className="alert info">草稿未上传附件，请重新选择：{draft!.payload.filesOmitted.join("、")}</p>}
+      {loaderData.intakeDrafts.length>0&&<details className="intake-draft-picker"><summary>我的未完成草稿（{loaderData.intakeDrafts.length}）{draft?" · 当前正在继续草稿":""}</summary><div>{loaderData.intakeDrafts.map(saved=><Link key={saved.id} to={adminWorkspaceHref(`/admin/quotations?entryMode=direct&draft=${encodeURIComponent(saved.id)}`,draftLocation.search)}>{saved.title} · {saved.updated_at}</Link>)}</div></details>}
+    </>}
+    <IntakeStepLayout enabled={entryMode === 'direct'} busy={busy||draftFetcher.state!=="idle"} secondaryAction={entryMode==="direct"?<button type="button" className="btn" onClick={saveDraft} disabled={busy||draftFetcher.state!=="idle"}>{draftFetcher.state!=="idle"?"正在暂存…":"暂存草稿"}</button>:undefined}>
     <div className="quote-ledger">
     <QuoteLedgerSection step={0} className="quote-plan-section" title="1　客户与运输方案">
-      {entryMode==='direct'&&loaderData.current.positionCode==='HR_ADMIN'&&<label className="field"><span>紧急协助原因 *</span><input className="control" name="intakeEmergencyReason" required maxLength={1000}/></label>}
+      {entryMode==='direct'&&loaderData.current.positionCode==='HR_ADMIN'&&<label className="field"><span>紧急协助原因 *</span><input className="control" name="intakeEmergencyReason" defaultValue={v("intakeEmergencyReason")} required maxLength={1000}/></label>}
       <div className="quote-field-grid quote-plan-grid">
         <Field label="客户" className="quote-customer-picker-field quote-plan-customer"><div className="quote-customer-picker-row"><select className="control" name="customerId" value={customerId} onChange={(event) => selectCustomer(event.target.value)} required><option value="">请选择客户</option>{loaderData.customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name}</option>)}</select>{canCreateCustomer && <Modal title="新增客户" triggerLabel="＋ 新增客户" triggerClassName="secondary" size="xwide" dialogClassName="customer-editor-modal" closeSignal={createdCustomerId || undefined} guardFormChanges><CustomerEditorForm intent="customer" owners={loaderData.users} countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} busy={customerFetcher.state !== "idle"} values={customerFetcher.data?.values} errors={customerFetcher.data?.errors} formError={customerFetcher.data?.formError} formComponent={customerFetcher.Form} action="/admin/customers"/></Modal>}</div>{createdCustomerId && <small className="quote-customer-created">新客户已创建并自动选中</small>}</Field>
         {policies.contactName.isActive && <Field label="客户联系人" className="quote-plan-contact"><input className="control quote-customer-autofill" name="customerContactName" value={customerContactName} readOnly required={policies.contactName.isRequired} placeholder="选择客户后自动带出"/></Field>}
@@ -1428,67 +1482,67 @@ function QuoteForm({ loaderData, busy, formError, entryMode }: { loaderData: Awa
         <Field label="订单类型" className="quote-plan-order-type"><select className="control" name="roadLoadType" value={roadLoadType} onChange={(event) => selectRoadLoadType(event.target.value as "" | "ltl" | "ftl")} required><option value="" disabled>请选择订单类型</option><option value="ltl">拼车</option><option value="ftl">整车</option></select></Field>
         <Field label="工作流版本" className="quote-plan-workflow"><select className="control" name="workflowDefinitionId" value={workflowDefinitionId} onChange={(event) => setWorkflowDefinitionId(event.target.value)} disabled={!roadLoadType} required><option value="">{!roadLoadType ? "请先选择订单类型" : compatibleWorkflows.length ? "请选择工作流版本" : "当前类型暂无可用工作流"}</option>{compatibleWorkflows.map((workflow) => <option key={workflow.id} value={workflow.id}>{workflow.name} · v{workflow.version_number}{workflow.lifecycle_status === "published" ? " · 当前发布" : " · 历史版本"}</option>)}</select></Field>
         {policies.salesperson.isActive && <Field label="业务员" className="quote-plan-secondary quote-plan-salesperson"><select className="control" name="salespersonId" value={salespersonId} onChange={(event)=>setSalespersonId(event.target.value)} required={policies.salesperson.isRequired}><option value="">请选择业务员</option>{loaderData.users.map((user) => <option key={user.id} value={user.id}>{user.display_name} · {user.email}</option>)}</select></Field>}
-        {(entryMode === "direct" || quotePolicy("quotation_quote_commercial_user_id","optional").isActive) && <Field label="报价商务" className="quote-plan-secondary quote-plan-salesperson"><select className="control" name="quoteCommercialUserId" defaultValue="" required={entryMode === "direct" || quotePolicy("quotation_quote_commercial_user_id","optional").isRequired}><option value="">请选择实际报价人</option>{loaderData.quoteCommercials.map(user => <option key={user.id} value={user.id}>{user.display_name}</option>)}</select>{loaderData.quoteCommercials.length === 0 && <small>暂无可选报价人员，请由管理员配置报价岗位及人员。</small>}</Field>}
+        {(entryMode === "direct" || quotePolicy("quotation_quote_commercial_user_id","optional").isActive) && <Field label="报价商务" className="quote-plan-secondary quote-plan-salesperson"><select className="control" name="quoteCommercialUserId" defaultValue={v("quoteCommercialUserId")} required={entryMode === "direct" || quotePolicy("quotation_quote_commercial_user_id","optional").isRequired}><option value="">请选择实际报价人</option>{loaderData.quoteCommercials.map(user => <option key={user.id} value={user.id}>{user.display_name}</option>)}</select>{loaderData.quoteCommercials.length === 0 && <small>暂无可选报价人员，请由管理员配置报价岗位及人员。</small>}</Field>}
         <Field label="运输方式" className="quote-plan-secondary quote-plan-transport"><select className="control" name="transportMode" defaultValue="ROAD" required><option value="ROAD">汽运</option><option value="RAIL" disabled>铁运（流程未开放）</option><option value="AIR" disabled>空运（流程未开放）</option></select></Field>
-        {policies.customsMode.isActive && <Field label="清关办理方式" className="quote-plan-secondary quote-plan-customs"><select className="control" name="customsClearanceMode" defaultValue="company" required={policies.customsMode.isRequired}><option value="company">公司代办清关</option><option value="customer">客户自理清关</option></select></Field>}
+        {policies.customsMode.isActive && <Field label="清关办理方式" className="quote-plan-secondary quote-plan-customs"><select className="control" name="customsClearanceMode" defaultValue={v("customsClearanceMode","company")} required={policies.customsMode.isRequired}><option value="company">公司代办清关</option><option value="customer">客户自理清关</option></select></Field>}
       </div>
     </QuoteLedgerSection>
     {selectedWorkflow && selectedCustomWorkflowFields.length > 0 && <QuoteLedgerSection step={0} className="quote-workflow-fields-section" title="工作流配置项" note={`${selectedWorkflow.name} v${selectedWorkflow.version_number}`}>
-      <QuotationWorkflowFieldInputs fields={selectedCustomWorkflowFields} values={[]} customers={loaderData.customers} warehouses={loaderData.warehouses}/>
+      <QuotationWorkflowFieldInputs fields={selectedCustomWorkflowFields} values={[]} customers={loaderData.customers} warehouses={loaderData.warehouses} draftValues={draft?draftValues:undefined}/>
     </QuoteLedgerSection>}
     {routeFieldsVisible && <QuoteLedgerSection step={1} className="quote-route-section" title="2　起运、目的与货物">
       <div className={`quote-route-cards ${cargoNarrativeVisible ? "with-cargo" : ""}`} role="group" aria-label="报价运输路线与货物">
         <section className="quote-route-card">
           <header><b>起运信息</b></header>
           <div className="quote-route-card-fields">
-            {policies.originRegion.isActive && <div className="field"><span>起运地区</span><GeoCascadeFields key={`origin-${customerId}`} prefix="origin" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} initialCountry={selectedCustomer?.pickup_country_code} initialProvince={selectedCustomer?.pickup_state_code} initialCity={selectedCustomer?.pickup_city} required={policies.originRegion.isRequired} onChange={(region)=>setOriginCountry(region.country)}/></div>}
+            {policies.originRegion.isActive && <div className="field"><span>起运地区</span><GeoCascadeFields key={`origin-${customerId}`} prefix="origin" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} initialCountry={draft&&customerId===v("customerId")?v("originCountry"):selectedCustomer?.pickup_country_code} initialProvince={draft&&customerId===v("customerId")?v("originState"):selectedCustomer?.pickup_state_code} initialCity={draft&&customerId===v("customerId")?v("originCity"):selectedCustomer?.pickup_city} required={policies.originRegion.isRequired} onChange={(region)=>setOriginCountry(region.country)}/></div>}
             {policies.pickupAddress.isActive && <Field label="提货地址"><input className="control" name="pickupAddress" value={pickupAddress} onChange={(event) => setPickupAddress(event.target.value)} required={policies.pickupAddress.isRequired}/></Field>}
           </div>
         </section>
         <section className="quote-route-card">
           <header><b>目的信息</b></header>
           <div className="quote-route-card-fields quote-destination-card-fields">
-            {policies.destinationRegion.isActive && <div className="field"><span>目的地区</span><GeoCascadeFields prefix="destination" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} required={policies.destinationRegion.isRequired} onChange={(region)=>setDestinationCountry(region.country)}/></div>}
+            {policies.destinationRegion.isActive && <div className="field"><span>目的地区</span><GeoCascadeFields prefix="destination" countries={loaderData.countries} provinces={loaderData.provinces} cities={loaderData.cities} initialCountry={v("destinationCountry")} initialProvince={v("destinationState")} initialCity={v("destinationCity")} required={policies.destinationRegion.isRequired} onChange={(region)=>setDestinationCountry(region.country)}/></div>}
             {policies.destinationWarehouse.isActive && <Field label="目的仓库"><select className="control quote-warehouse-select" name="destinationWarehouseId" value={destinationWarehouseId} onChange={(event)=>setDestinationWarehouseId(event.target.value)} required={policies.destinationWarehouse.isRequired}><option value="">请选择境外目的仓</option>{loaderData.warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></Field>}
-            {policies.destinationNote.isActive && <Field label="目的地备注"><input className="control" name="destinationWarehouseNote" required={policies.destinationNote.isRequired}/></Field>}
+            {policies.destinationNote.isActive && <Field label="目的地备注"><input className="control" name="destinationWarehouseNote" defaultValue={v("destinationWarehouseNote")} required={policies.destinationNote.isRequired}/></Field>}
           </div>
         </section>
         {cargoNarrativeVisible && <section className="quote-route-card quote-route-cargo-card">
           <header><b>货物与说明</b></header>
           <div className="quote-route-card-fields">
-            {policies.cargoDescription.isActive && <Field label="货物描述"><textarea className="control textarea" name="cargoDescription" rows={3} placeholder="货物名称、品类、材质、用途" required={policies.cargoDescription.isRequired} /></Field>}
-            {policies.notes.isActive && <Field label="报价备注"><input className="control" name="notes" placeholder="特殊约定或其他说明" required={policies.notes.isRequired} /></Field>}
+            {policies.cargoDescription.isActive && <Field label="货物描述"><textarea className="control textarea" name="cargoDescription" defaultValue={v("cargoDescription")} rows={3} placeholder="货物名称、品类、材质、用途" required={policies.cargoDescription.isRequired} /></Field>}
+            {policies.notes.isActive && <Field label="报价备注"><input className="control" name="notes" defaultValue={v("notes")} placeholder="特殊约定或其他说明" required={policies.notes.isRequired} /></Field>}
           </div>
         </section>}
       </div>
     </QuoteLedgerSection>}
     {!routeFieldsVisible && cargoNarrativeVisible && <QuoteLedgerSection step={1} title="2　货物与报价说明">
       <div className="quote-description-grid">
-        {policies.cargoDescription.isActive && <Field label="货物描述"><textarea className="control textarea" name="cargoDescription" rows={3} placeholder="填写货物名称、品类、材质、用途等说明" required={policies.cargoDescription.isRequired} /></Field>}
-        {policies.notes.isActive && <Field label="报价备注"><textarea className="control textarea" name="notes" rows={3} placeholder="填写报价范围、特殊约定或其他说明" required={policies.notes.isRequired} /></Field>}
+        {policies.cargoDescription.isActive && <Field label="货物描述"><textarea className="control textarea" name="cargoDescription" defaultValue={v("cargoDescription")} rows={3} placeholder="填写货物名称、品类、材质、用途等说明" required={policies.cargoDescription.isRequired} /></Field>}
+        {policies.notes.isActive && <Field label="报价备注"><textarea className="control textarea" name="notes" defaultValue={v("notes")} rows={3} placeholder="填写报价范围、特殊约定或其他说明" required={policies.notes.isRequired} /></Field>}
       </div>
     </QuoteLedgerSection>}
     {(entryMode==="direct"||intakeRouteFields.some(field=>quotePolicy(field.fieldKey,"optional").isActive)) && <QuoteLedgerSection step={1} title="线路清关与国内代理">
-      <IntakeRouteFields references={loaderData.intakeRouteReferences} policy={key=>quotePolicy(key,"optional")} direct={entryMode==="direct"}/>
+      <IntakeRouteFields references={loaderData.intakeRouteReferences} policy={key=>quotePolicy(key,"optional")} direct={entryMode==="direct"} values={draft?Object.fromEntries(intakeRouteFields.map(field=>[field.column,v(field.formName)])):undefined}/>
     </QuoteLedgerSection>}
     {(entryMode==="direct"||intakeOperationFields.some(field=>quotePolicy(intakeOperationFieldKey(field.key),"optional").isActive))&&<QuoteLedgerSection step={2} title="运输计划、责任人与委托服务">
-      <IntakeOperationsFields people={loaderData.intakePeople} policy={key=>quotePolicy(key,"optional")} direct={entryMode==="direct"} defaultTailCarrier={loaderData.processPolicy["order.default_tail_carrier"]}/>
+      <IntakeOperationsFields people={loaderData.intakePeople} policy={key=>quotePolicy(key,"optional")} direct={entryMode==="direct"} defaultTailCarrier={loaderData.processPolicy["order.default_tail_carrier"]} raw={restoredOperations}/>
     </QuoteLedgerSection>}
     {cargoMetricsVisible && <QuoteLedgerSection step={3} className="quote-metrics-section" title="货物数量与尺寸">{cargoMetrics}</QuoteLedgerSection>}
     {(policies.charges.isActive || policies.validUntil.isActive) && <QuoteLedgerSection
       step={4} title={entryMode === 'direct' ? '客户应收费用' : '报价费用与有效期'}
       action={entryMode !== 'direct' && policies.charges.isActive ? <button className="btn quote-charge-add" type="button" onClick={() => setCharges((rows) => [...rows, { name: transportChargeNameOptions[0]?.[0] || "国际汽运费", quantity: 1, unitPrice: "", notes: "" }])}>＋ 添加费用</button> : undefined}
     >
-      {policies.charges.isActive && <>{entryMode === 'direct' ? <IntakeFeeEditor direction="receivable" rows={receivableRows} setRows={setReceivableRows} options={transportChargeNameOptions.map(([code,label]) => ({code,label}))} required={policies.charges.isRequired}/> : <div className="table-wrap quote-charge-table-wrap"><table className="inline-table quote-charge-table"><thead><tr><th>费用名称</th><th>数量</th><th>单价</th><th>金额</th><th>备注</th><th>操作</th></tr></thead><tbody>{charges.map((charge, index) => <tr key={index}><td><select className="control" name="chargeName" value={charge.name} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, name: event.target.value } : row))} required={policies.charges.isRequired}>{transportChargeNameOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td><td><input className="control" name="chargeQuantity" type="number" min="0.01" step="0.01" value={charge.quantity} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: Number(event.target.value) } : row))} required={policies.charges.isRequired}/></td><td><input className="control" name="chargeUnitPrice" type="number" min="0" step="0.01" value={charge.unitPrice} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, unitPrice: event.target.value } : row))} required={policies.charges.isRequired}/></td><td><b>{(charge.quantity * Number(charge.unitPrice || 0)).toLocaleString()}</b></td><td><input className="control" name="chargeNotes" value={charge.notes} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, notes: event.target.value } : row))}/></td><td><button className="btn danger" type="button" disabled={charges.length === 1} onClick={() => setCharges((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>删除</button></td></tr>)}</tbody></table></div>}
+      {policies.charges.isActive && <>{entryMode === 'direct' ? <IntakeFeeEditor direction="receivable" rows={receivableRows} setRows={rows=>{dirty.current=true;setReceivableRows(rows);}} options={transportChargeNameOptions.map(([code,label]) => ({code,label}))} required={policies.charges.isRequired}/> : <div className="table-wrap quote-charge-table-wrap"><table className="inline-table quote-charge-table"><thead><tr><th>费用名称</th><th>数量</th><th>单价</th><th>金额</th><th>备注</th><th>操作</th></tr></thead><tbody>{charges.map((charge, index) => <tr key={index}><td><select className="control" name="chargeName" value={charge.name} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, name: event.target.value } : row))} required={policies.charges.isRequired}>{transportChargeNameOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td><td><input className="control" name="chargeQuantity" type="number" min="0.01" step="0.01" value={charge.quantity} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: Number(event.target.value) } : row))} required={policies.charges.isRequired}/></td><td><input className="control" name="chargeUnitPrice" type="number" min="0" step="0.01" value={charge.unitPrice} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, unitPrice: event.target.value } : row))} required={policies.charges.isRequired}/></td><td><b>{(charge.quantity * Number(charge.unitPrice || 0)).toLocaleString()}</b></td><td><input className="control" name="chargeNotes" value={charge.notes} onChange={(event) => setCharges((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, notes: event.target.value } : row))}/></td><td><button className="btn danger" type="button" disabled={charges.length === 1} onClick={() => setCharges((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>删除</button></td></tr>)}</tbody></table></div>}
       </>}
       <div className="quote-charge-footer">
-        {policies.validUntil.isActive && <Field label="报价有效期"><input className="control" name="validUntil" type="date" required={policies.validUntil.isRequired}/></Field>}
+        {policies.validUntil.isActive && <Field label="报价有效期"><input className="control" name="validUntil" defaultValue={v("validUntil")} type="date" required={policies.validUntil.isRequired}/></Field>}
         {policies.charges.isActive && <strong>报价总额　CNY {total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>}
       </div>
     </QuoteLedgerSection>}
     </div>
     {entryMode === "direct" && <QuoteLedgerSection step={5} title="开单应付费用 CNY" note="未录入留空；客户自送等明确无费用时填写单价 0。必录规则仍由流程策略配置。">
-      <IntakeFeeEditor direction="payable" rows={payableRows} setRows={setPayableRows} options={payableOptions}
+      <IntakeFeeEditor direction="payable" rows={payableRows} setRows={rows=>{dirty.current=true;setPayableRows(rows);}} options={payableOptions}
         recommended={configuredOrderIntakeFees(loaderData.processPolicy, roadLoadType || 'ltl')}/>
     </QuoteLedgerSection>}
     </IntakeStepLayout>
@@ -1640,16 +1694,17 @@ function QuotationNativeWorkflowInputs({
   </div>;
 }
 
-function QuotationWorkflowFieldInputs({ fields, values, customers, warehouses }: {
+function QuotationWorkflowFieldInputs({ fields, values, customers, warehouses, draftValues }: {
   fields: QuotationWorkflowField[];
   values: QuotationWorkflowFieldValue[];
+  draftValues?:ReturnType<typeof intakeDraftValues>;
   customers: CustomerOption[];
   warehouses: WarehouseOption[];
 }) {
   return <div className="quote-workflow-field-grid">
     {fields.map((field) => {
       const name = quotationWorkflowFieldInputName(field.id);
-      const existing = values.find((value) => value.field_id === field.id) || null;
+      const existing = values.find((value) => value.field_id === field.id) || (draftValues?{id:"",file_name:null,value_text:field.field_type==="multiselect"?JSON.stringify(draftValues.all(name)):draftValues.get(name)}:null);
       const options = parseQuotationWorkflowFieldOptions(field.options_text);
       const selectedValues = field.field_type === "multiselect"
         ? parseStoredMultipleValues(existing?.value_text)

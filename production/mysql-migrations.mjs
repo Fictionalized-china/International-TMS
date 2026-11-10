@@ -318,6 +318,34 @@ migrations.push({
     for(const table of ['quotations','transport_orders']) await addColumnIfMissing(connection,table,'intake_operations_json','TEXT NULL');
   },
 });
+migrations.push({
+  version:188,
+  name:'order_intake_drafts',
+  definition:'isolated incomplete intake payload;organization+creator scope;optimistic revision;no order or financial facts',
+  async up(connection) {
+    await connection.query(`CREATE TABLE IF NOT EXISTS order_intake_drafts (
+      id VARCHAR(160) NOT NULL PRIMARY KEY, organization_id VARCHAR(160) NOT NULL,
+      created_by_user_id VARCHAR(160) NOT NULL,title VARCHAR(100) NOT NULL,payload_json MEDIUMTEXT NOT NULL,
+      revision INT NOT NULL DEFAULT 1,status VARCHAR(16) NOT NULL DEFAULT 'draft',linked_order_id VARCHAR(160) NULL,
+      created_at DATETIME(3) NOT NULL,updated_at DATETIME(3) NOT NULL,
+      INDEX idx_order_intake_drafts_owner(organization_id,created_by_user_id,status,updated_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
+  },
+});
+migrations.push({
+  version:189,
+  name:'intake_draft_iso_timestamps',
+  definition:'only order_intake_drafts.created_at/updated_at become canonical UTC ISO VARCHAR(32);188 checksum retained;no business facts rewritten',
+  async up(connection) {
+    const [columns]=await connection.query("SELECT column_name AS column_name,data_type AS data_type FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='order_intake_drafts' AND column_name IN ('created_at','updated_at')");
+    if(columns.length!==2)throw new Error('Draft timestamp columns missing');
+    for(const column of columns) {
+      if(!['created_at','updated_at'].includes(column.column_name)||!['datetime','varchar'].includes(column.data_type))throw new Error('Unexpected draft timestamp storage');
+      if(column.data_type==='datetime')await connection.query(`ALTER TABLE order_intake_drafts MODIFY COLUMN \`${column.column_name}\` VARCHAR(32) NOT NULL`);
+      await connection.query(`UPDATE order_intake_drafts SET \`${column.column_name}\`=CONCAT(DATE_FORMAT(CAST(\`${column.column_name}\` AS DATETIME(3)),'%Y-%m-%dT%H:%i:%s.'),LEFT(DATE_FORMAT(CAST(\`${column.column_name}\` AS DATETIME(3)),'%f'),3),'Z') WHERE \`${column.column_name}\` LIKE '____-__-__ __:__:__%'`);
+    }
+  },
+});
 for (const migration of migrations) {
   migration.checksum = createHash("sha256")
     .update(`${migration.version}:${migration.name}\n${migration.definition}`)
@@ -356,6 +384,7 @@ export const requiredMysqlSchemaColumns = [
   ['transport_orders','domestic_agent'],
   ['quotations','intake_route_recorded'],
   ['quotations','intake_operations_json'], ['transport_orders','intake_operations_json'],
+  ...['id','organization_id','created_by_user_id','title','payload_json','revision','status','linked_order_id','created_at','updated_at'].map(column=>['order_intake_drafts',column]),
 ];
 
 async function addColumnIfMissing(connection, table, column, definition) {

@@ -4,6 +4,7 @@ import { meetingFixture } from '../lib/meeting-integration-fixture';
 import { ensureDefaultWorkflow } from '../lib/business-workflow.server';
 import { requireSessionUser } from '../lib/auth.server';
 import { action, loader } from './admin.quotations';
+import { captureIntakeDraft } from '../lib/intake-drafts';
 
 vi.mock('cloudflare:workers', () => ({ env: {} }));
 vi.mock('../lib/auth.server', () => ({ requireSessionUser: vi.fn() }));
@@ -58,6 +59,23 @@ function form(type = 'ltl', mode = 'direct') {
 const submit = (body: FormData) => action({request:new Request('http://localhost/admin/quotations?entryMode=direct', {method:'POST',body}),params:{},context:undefined} as never);
 
 describe('real intake action with quotation node unplugged', () => {
+  it('saves and reloads an incomplete draft without a quote/order, rejects stale confirmation, then creates once from the latest draft',async()=>{
+    const body=form(),requestId=String(body.get('intakeRequestId'));
+    const save=new FormData();save.set('intent','intake_draft_save');save.set('draftId',requestId);save.set('draftRevision','0');save.set('draftPayload',JSON.stringify(captureIntakeDraft(body)));
+    expect(await submit(save)).toMatchObject({draftRevision:1});expect(fixture.database.prepare('SELECT COUNT(*) n FROM quotations').get()).toMatchObject({n:0});
+    const data=await loader({request:new Request(`http://localhost/admin/quotations?entryMode=direct&draft=${requestId}`),params:{},context:undefined} as never);
+    expect(data.intakeDraft).toMatchObject({id:requestId,revision:1});
+    save.set('draftRevision','1');expect(await submit(save)).toMatchObject({draftRevision:2});
+    body.set('intakeDraftRevision','1');expect(await submit(body)).toMatchObject({formError:expect.stringContaining('其他窗口')});expect(fixture.database.prepare('SELECT COUNT(*) n FROM quotations').get()).toMatchObject({n:0});
+    body.set('intakeDraftRevision','2');const created=await submit(body);if(!('orderId' in created)||!created.orderId)throw new Error(JSON.stringify(created));
+    expect(await submit(body)).toMatchObject({orderId:created.orderId});
+    expect(fixture.database.prepare('SELECT status,linked_order_id FROM order_intake_drafts WHERE id=?').get(requestId)).toMatchObject({status:'submitted',linked_order_id:created.orderId});
+  });
+  it('permits private draft saving with intake authority even when the optional quote tool is disabled for the user',async()=>{
+    const sales=fixture.actors.get('sales')!;vi.mocked(requireSessionUser).mockResolvedValue({...sales,permissions:sales.permissions.filter(permission=>!permission.startsWith('quote.'))});
+    const body=form();body.delete('weight');const save=new FormData();save.set('intent','intake_draft_save');save.set('draftId',String(body.get('intakeRequestId')));save.set('draftRevision','0');save.set('draftPayload',JSON.stringify(captureIntakeDraft(body)));
+    expect(await submit(save)).toMatchObject({draftRevision:1});expect(fixture.database.prepare('SELECT COUNT(*) n FROM quotations').get()).toMatchObject({n:0});
+  });
   it('does not remove legacy service defaults when an auxiliary quote only records a partial plan',async()=>{
     const body=form('ltl','quote');for(const key of [...body.keys()].filter(key=>key.startsWith('intake_')))body.delete(key);
     body.set('intake_headCarrier','仅补头程计划');

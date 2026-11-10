@@ -2,6 +2,13 @@ import { describe,it,expect } from 'vitest';
 import { intakeSubmissionIdentity,assertDirectIntakeAuthority } from './intake-submission.server';
 import { defaultBusinessProcessPolicy } from './business-process-policy';
 describe('direct intake request identity',()=>{
+  it('does not treat draft control revisions as business edits, but still detects changed fees',async()=>{
+    const form=new FormData();form.set('intakeRequestId','request-000000001');form.set('amount','10');
+    const first=await intakeSubmissionIdentity(form,'org','sales');
+    form.set('intakeDraftRevision','2');expect(await intakeSubmissionIdentity(form,'org','sales')).toEqual(first);
+    form.set('intakeDraftRevision','3');expect(await intakeSubmissionIdentity(form,'org','sales')).toEqual(first);
+    form.set('amount','11');expect((await intakeSubmissionIdentity(form,'org','sales')).payloadHash).not.toBe(first.payloadHash);
+  });
   it('reuses the same actor request and separates organizations and people',async()=>{
     const form=new FormData();form.set('intakeRequestId','request-000000001');form.set('customerId','customer');
     const first=await intakeSubmissionIdentity(form,'org','sales');expect(await intakeSubmissionIdentity(form,'org','sales')).toEqual(first);

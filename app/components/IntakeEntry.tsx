@@ -10,7 +10,7 @@ export function firstInvalidIntakeControl(root: HTMLElement, throughStep: number
   });
 }
 /** Keep every panel mounted: hidden does not mean disabled, and FormData still contains all steps. */
-export function IntakeStepLayout({ enabled, busy, children }: { enabled: boolean; busy: boolean; children: ReactNode }) {
+export function IntakeStepLayout({ enabled, busy, children, secondaryAction }: { enabled: boolean; busy: boolean; children: ReactNode; secondaryAction?:ReactNode }) {
   const [step, setStep] = useState(0);
   const root = useRef<HTMLDivElement>(null);
   const validate = (throughStep: number) => {
@@ -49,6 +49,7 @@ export function IntakeStepLayout({ enabled, busy, children }: { enabled: boolean
         onClick={() => move(index, false)}><span>{index + 1}</span>{name}</button>)}</nav>}
     <div className={enabled ? 'intake-step-content' : undefined}>{children}</div>
     <div className={enabled ? 'intake-step-actions' : 'modal-form-actions'}>
+      {secondaryAction}
       {enabled && <><span aria-live="polite">第 {step + 1} / {intakeStepNames.length} 步 · 切换步骤保留填写内容</span>
         <button className="btn" type="button" disabled={busy || step === 0} onClick={() => move(step - 1)}>上一步</button></>}
       {enabled && step < intakeStepNames.length - 1

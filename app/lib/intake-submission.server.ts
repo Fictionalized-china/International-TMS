@@ -15,9 +15,10 @@ export async function intakeSubmissionIdentity(form:FormData,organizationId:stri
   if(!/^[A-Za-z0-9_-]{10,160}$/.test(requestId))throw new Error('录单请求已失效，请重新打开录单窗口');
   const values:unknown[]=[];
   for(const [key,value] of form.entries()){
-    if(key==='intakeRequestId')continue;
+    if(key==='intakeRequestId'||key==='intakeDraftRevision')continue;
     if(typeof value==='string')values.push([key,value]);
     else {const hash=await crypto.subtle.digest('SHA-256',await value.arrayBuffer());values.push([key,value.name,value.type,value.size,Array.from(new Uint8Array(hash),b=>b.toString(16).padStart(2,'0')).join('')]);}
   }
-  return {id:`direct-${await sha256(JSON.stringify([organizationId,userId,requestId]))}`,payloadHash:await sha256(JSON.stringify(values))};
+  return {id:await directIntakeQuotationId(organizationId,userId,requestId),payloadHash:await sha256(JSON.stringify(values))};
 }
+export async function directIntakeQuotationId(organizationId:string,userId:string,requestId:string) {return `direct-${await sha256(JSON.stringify([organizationId,userId,requestId]))}`;}
