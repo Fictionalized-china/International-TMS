@@ -173,7 +173,8 @@ describe("internal notification delivery",()=>{
       actorUserId:"warehouse-1",now:"2026-09-10T00:00:00.000Z",
     }).run();
     const query=database.queries.at(-1);
-    expect(query?.sql).toContain("COALESCE(q.salesperson_user_id,o.salesperson_user_id)");
+    expect(query?.sql).toContain("o.salesperson_user_id");
+    expect(query?.sql).not.toContain("q.salesperson_user_id");
     expect(query?.sql).toContain("order_document_supplement");
     expect(query?.sql).toContain("NOT EXISTS");
     expect(query?.bindings).toContain("/admin/orders/order%201?drawer=supplements");

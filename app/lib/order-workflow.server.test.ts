@@ -82,6 +82,9 @@ const dispatchPolicy = vi.hoisted(() => ({
 }));
 
 vi.mock("cloudflare:workers", () => ({ env: { DB: database.DB } }));
+vi.mock("./position-access-profile.server", () => ({
+  loadActivePositionAccessProfile: vi.fn(async () => ({positionCode:"OPERATION_SUPERVISOR",roleCode:"pos_operation_supervisor",permissions:["order.view","order.manage","order.intake.manage"]})),
+}));
 vi.mock("./order-modules.server", () => ({
   ensureOrderModules: vi.fn(async () => undefined),
   syncOrderWorkflowSnapshot: vi.fn(async () => undefined),

@@ -892,7 +892,7 @@ export async function loader(
             COALESCE(q.customer_contact_name,o.shipper_contact) quotation_customer_contact_name,
             COALESCE(q.customer_contact_phone,o.shipper_phone) quotation_customer_contact_phone,
             o.mark_contacts_snapshot_json,o.created_by_user_id,
-            COALESCE(q.salesperson_user_id,o.salesperson_user_id) salesperson_user_id,
+            o.salesperson_user_id,
             salesperson.display_name quotation_salesperson_name,
             o.quote_commercial_user_id,o.quote_commercial_name_snapshot,o.domestic_agent,o.intake_operations_json,
             COALESCE(q.cargo_description,o.cargo_description) quotation_cargo_description,
@@ -908,7 +908,7 @@ export async function loader(
      FROM transport_orders o
      JOIN customers c ON c.id=o.customer_id
      LEFT JOIN quotations q ON q.id=o.quotation_id AND q.organization_id=o.organization_id
-     LEFT JOIN users salesperson ON salesperson.id=COALESCE(q.salesperson_user_id,o.salesperson_user_id)
+     LEFT JOIN users salesperson ON salesperson.id=o.salesperson_user_id
      LEFT JOIN customer_addresses pickup_address ON pickup_address.id=o.pickup_address_id AND pickup_address.customer_id=o.customer_id
      LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id
      WHERE o.id=? AND o.organization_id=?`,
@@ -3773,7 +3773,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
           formError: `当前工作流未启用“${expenseDirectionActionLabel(action, direction)}”，不能执行该签核`,
         };
       const expenseAssignees = await env.DB.prepare(
-        `SELECT COALESCE(q.salesperson_user_id,o.salesperson_user_id) business_assignee_user_id,
+        `SELECT o.salesperson_user_id business_assignee_user_id,
                 sales.display_name business_assignee_name,
                 costs.assignee_user_id customer_service_assignee_user_id,
                 customer_service.display_name customer_service_assignee_name,
@@ -3784,8 +3784,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
                 review.assignee_user_id finance_assignee_user_id,
                 finance.display_name finance_assignee_name
          FROM transport_orders o
-         LEFT JOIN quotations q ON q.id=o.quotation_id AND q.organization_id=o.organization_id
-         LEFT JOIN users sales ON sales.id=COALESCE(q.salesperson_user_id,o.salesperson_user_id)
+         LEFT JOIN users sales ON sales.id=o.salesperson_user_id
          LEFT JOIN order_module_instances costs ON costs.organization_id=o.organization_id AND costs.order_id=o.id AND costs.module_code='costs' AND costs.enabled=1
          LEFT JOIN users customer_service ON customer_service.id=costs.assignee_user_id
          LEFT JOIN order_module_instances transport ON transport.organization_id=o.organization_id AND transport.order_id=o.id AND transport.module_code='transport' AND transport.enabled=1

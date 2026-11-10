@@ -84,7 +84,7 @@ export async function validateOrderWorkflowAction(input: {
 }) {
   const order = await env.DB.prepare(
     `SELECT o.id,o.order_number,o.status,o.current_step_code,o.current_assignee_user_id,o.created_by_user_id,
-      COALESCE(q.salesperson_user_id,o.salesperson_user_id) salesperson_user_id,o.business_type,
+      o.salesperson_user_id,o.business_type,
       o.shipper_name,o.shipper_contact,o.shipper_phone,o.consignee_name,
       o.origin_city,o.origin_address,o.destination_city,o.destination_address,o.cargo_description,o.transport_mode,
       o.requested_pickup_date,o.exit_port,o.overseas_warehouse_id,
@@ -98,7 +98,6 @@ export async function validateOrderWorkflowAction(input: {
           AND w.warehouse_role='overseas_destination' AND w.status='active'
       ) THEN 1 ELSE 0 END overseas_warehouse_valid
      FROM transport_orders o
-     LEFT JOIN quotations q ON q.id=o.quotation_id AND q.organization_id=o.organization_id
      WHERE o.id=? AND o.organization_id=?`,
   )
     .bind(input.orderId, input.organizationId)
@@ -115,15 +114,11 @@ export async function validateOrderWorkflowAction(input: {
       reason: `当前状态“${statusLabel(order.status)}”不能执行该动作`,
       order,
     };
-  const actorPosition = await env.DB.prepare(
-    `SELECT p.code FROM memberships m
-     JOIN positions p ON p.id=m.position_id AND p.organization_id=m.organization_id
-     WHERE m.organization_id=? AND m.user_id=? AND m.status='active' AND p.status='active'
-     LIMIT 1`,
-  ).bind(input.organizationId,input.actorUserId).first<{code:string}>();
+  const profile=await loadActivePositionAccessProfile(env.DB,input.organizationId,input.actorUserId);
+  if(!profile)return {ok:false as const,reason:"账号、部门、岗位或角色已停用，请重新登录后办理",order,transition};
+  const actorPosition={code:profile.positionCode};
   const processPolicy = await loadBusinessProcessPolicy(input.organizationId);
   if(input.actionCode==='submit'&&actorPosition?.code==='HR_ADMIN'&&!policyEnabled(processPolicy,'order.hr_emergency_enabled'))return {ok:false as const,reason:'人事紧急协助录单已停用',order,transition};
-  const profile=await loadActivePositionAccessProfile(env.DB,input.organizationId,input.actorUserId);
   if(["submit","cancel_draft"].includes(input.actionCode)) {
     if(!profile?.permissions.includes("order.intake.manage")) return {ok:false as const,reason:"当前账号录单权限已撤销",order,transition};
   }

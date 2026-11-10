@@ -383,14 +383,14 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
       o.destination_country,o.destination_state,o.destination_city,o.destination_address,o.cargo_description,
       o.pieces,o.gross_weight_kg,o.volume_cbm,o.transport_mode,o.service_level,o.requested_pickup_date,o.created_by_user_id,
       o.requested_delivery_date,o.status,o.source,o.special_instructions,o.current_step_name,o.current_assignee_user_id,
-      au.display_name assignee_name,au.email assignee_email,COALESCE(q.salesperson_user_id,o.salesperson_user_id) salesperson_user_id,
+      au.display_name assignee_name,au.email assignee_email,o.salesperson_user_id,
       sales.display_name salesperson_name,sales.email salesperson_email,o.workflow_updated_at,o.is_overdue,o.exception_status,o.completion_status,
       o.business_completed_at,o.settlement_completed_at,o.created_at
      FROM transport_orders o
      JOIN customers c ON c.id=o.customer_id
      LEFT JOIN quotations q ON q.id=o.quotation_id
      LEFT JOIN users au ON au.id=o.current_assignee_user_id
-     LEFT JOIN users sales ON sales.id=COALESCE(q.salesperson_user_id,o.salesperson_user_id)
+     LEFT JOIN users sales ON sales.id=o.salesperson_user_id
      LEFT JOIN reference_data bp ON bp.organization_id=o.organization_id AND bp.category='border_port' AND bp.code=o.exit_port
      LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id
      WHERE o.id=? AND o.organization_id=?`,

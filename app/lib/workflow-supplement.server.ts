@@ -309,10 +309,9 @@ export async function uploadWorkflowSupplementDocument(input:{
 }) {
   const task=await env.DB.prepare(
     `SELECT t.instance_id,t.target_step_key,t.module_code,t.field_key,t.field_label,t.task_kind,
-       o.customer_id,COALESCE(q.salesperson_user_id,o.salesperson_user_id) salesperson_user_id
+       o.customer_id,o.salesperson_user_id
      FROM workflow_supplement_tasks t
      JOIN transport_orders o ON o.id=t.order_id AND o.organization_id=t.organization_id
-     LEFT JOIN quotations q ON q.id=o.quotation_id AND q.organization_id=o.organization_id
      WHERE t.id=? AND t.organization_id=? AND t.order_id=? AND t.status='open'`,
   ).bind(
     input.taskId,input.organizationId,input.orderId,

@@ -677,9 +677,8 @@ export async function syncOrderWorkflowSnapshot(
   await syncModuleStateFromTransportBatch(organizationId, orderId);
   const order = await env.DB.prepare(
     `SELECT o.status,o.business_type,o.current_assignee_user_id,o.workflow_instance_id,
-            COALESCE(q.salesperson_user_id,o.salesperson_user_id) salesperson_user_id
+            o.salesperson_user_id
      FROM transport_orders o
-     LEFT JOIN quotations q ON q.organization_id=o.organization_id AND q.id=o.quotation_id
      WHERE o.organization_id=? AND o.id=?`,
   )
     .bind(organizationId, orderId)

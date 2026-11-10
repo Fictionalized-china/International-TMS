@@ -36,6 +36,15 @@ const ensureCount = (spy: { mock: { calls: unknown[][] } }) => spy.mock.calls.fi
 ).length;
 
 describe("order detail request-local module reuse", () => {
+  it.each(["sales", null])("keeps current order salesperson %s authoritative in both detail and embedded module", async salesperson => {
+    await setup("owner");
+    fixture.database.prepare(`INSERT INTO quotations(id,organization_id,quote_number,customer_id,salesperson_user_id,origin_country,origin_city,destination_country,destination_city,transport_mode,cargo_description,created_at,updated_at) VALUES('history-quote','org','Q-HISTORY','customer','owner','CN','深圳','RU','莫斯科','ROAD','来源货物',?,?)`).run(fixture.now, fixture.now);
+    fixture.database.prepare("UPDATE transport_orders SET quotation_id='history-quote',salesperson_user_id=? WHERE id='order'").run(salesperson);
+    const detail = await detailLoader(args());
+    expect(detail.order.salesperson_user_id).toBe(salesperson);
+    expect(detail.embeddedModuleData?.order.salesperson_user_id).toBe(salesperson);
+    expect(fixture.database.prepare("SELECT salesperson_user_id FROM quotations WHERE id='history-quote'").get()).toEqual({salesperson_user_id:"owner"});
+  });
   it("runs concurrent module and whole-order synchronization without waiting on its own queue",async()=>{
     const spy=await setup("owner");
     await Promise.all([ensureOrderModules("org","order"),syncOrderWorkflowSnapshot("org","order"),ensureOrderModules("org","order")]);
