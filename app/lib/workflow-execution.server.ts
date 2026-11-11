@@ -18,6 +18,8 @@ import {
 } from "./workflow-execution";
 import { canCompleteWorkflowTask } from "./workflow-task-access";
 import { withOrderProjectionSync } from "./order-sync-queue.server";
+import { activePositionProfilePredicate, loadActivePositionAccessProfile } from "./position-access-profile.server";
+import { changedRowGuard, guardedBatch, predicateGuard } from "./mutation-guard.server";
 
 type ModuleFact = { module_code:string; status:string };
 
@@ -300,57 +302,85 @@ export async function listCurrentWorkflowTasks(organizationId:string,orderId:str
   ).bind(organizationId,orderId).all<CurrentWorkflowTask>()).results;
 }
 
+const manualWorkflowTaskScopeSql = `
+     FROM workflow_instance_task_states ts
+     JOIN workflow_instance_module_states ms ON ms.id=ts.instance_module_state_id
+     JOIN workflow_instance_step_states ss ON ss.id=ms.instance_step_state_id
+     JOIN workflow_instances wi ON wi.id=ss.instance_id AND wi.current_step_key=ss.step_key
+     JOIN transport_orders o ON o.workflow_instance_id=wi.id AND o.id=wi.order_id AND o.organization_id=wi.organization_id
+     LEFT JOIN order_module_instances omi
+       ON omi.organization_id=wi.organization_id AND omi.order_id=wi.order_id
+      AND omi.module_code=ms.module_code
+     WHERE ts.id=? AND wi.organization_id=? AND wi.order_id=? AND ts.status!='completed'
+       AND wi.status='active' AND ss.status='active' AND COALESCE(omi.enabled,1)=1
+       AND o.status NOT IN ('completed','cancelled')`;
+
 export async function completeWorkflowTask(input:{
   organizationId:string;
   orderId:string;
   taskStateId:string;
   actorUserId:string;
+  /** Retained for caller compatibility; authority is reloaded from the DB. */
   actorRoleCodes?: readonly string[];
 }) {
   const task = await env.DB.prepare(
-    `SELECT ts.id,ts.task_key,ss.step_key,
+    `SELECT ts.id,ts.task_key,ts.task_type,ts.status,ts.updated_at,ss.step_key,
+      wi.id instance_id,wi.workflow_id,ss.id step_state_id,ms.id module_state_id,omi.id module_instance_id,o.status order_status,
       ts.assignee_user_id task_assignee_user_id,
       omi.assignee_user_id module_assignee_user_id,
+      ts.responsibility_position_code task_position_code,ms.responsibility_position_code module_position_code,
       COALESCE(ts.responsibility_position_code,ms.responsibility_position_code) responsibility_position_code
-     FROM workflow_instance_task_states ts
-     JOIN workflow_instance_module_states ms ON ms.id=ts.instance_module_state_id
-     JOIN workflow_instance_step_states ss ON ss.id=ms.instance_step_state_id
-     JOIN workflow_instances wi ON wi.id=ss.instance_id AND wi.current_step_key=ss.step_key
-     LEFT JOIN order_module_instances omi
-       ON omi.organization_id=wi.organization_id AND omi.order_id=wi.order_id
-      AND omi.module_code=ms.module_code AND omi.enabled=1
-     WHERE ts.id=? AND wi.organization_id=? AND wi.order_id=? AND ts.status!='completed'`,
+     ${manualWorkflowTaskScopeSql}`,
   ).bind(input.taskStateId,input.organizationId,input.orderId).first<{
     id:string;
     task_key:string;
+    task_type:string;
+    status:string;
+    updated_at:string;
     step_key:string;
+    instance_id:string;
+    workflow_id:string;
+    step_state_id:string;
+    module_state_id:string;
+    module_instance_id:string|null;
+    order_status:string;
     task_assignee_user_id:string|null;
     module_assignee_user_id:string|null;
+    task_position_code:string|null;
+    module_position_code:string|null;
     responsibility_position_code:string|null;
   }>();
   if (!task) throw new Error("该办理步骤不在当前节点，或已经完成");
   if (workflowSystemTaskHasAutoHandler(task.step_key, task.task_key))
     throw new Error("该步骤由对应业务模组自动完成，不能人工跳过");
-  const actorPositions = await env.DB.prepare(
-    `SELECT DISTINCT p.code
-     FROM memberships membership
-     JOIN positions p
-       ON p.id=membership.position_id AND p.organization_id=membership.organization_id
-     WHERE membership.organization_id=? AND membership.user_id=?
-       AND membership.status='active' AND p.status='active'`,
-  ).bind(input.organizationId,input.actorUserId).all<{code:string}>();
+  const profile = await loadActivePositionAccessProfile(env.DB,input.organizationId,input.actorUserId);
+  if (!profile || !profile.permissions.includes("order.view"))
+    throw new Error("账号或订单查看权限已停用，不能完成办理步骤");
   if (!canCompleteWorkflowTask({
     actorUserId: input.actorUserId,
-    actorPositionCodes: actorPositions.results.map((item) => item.code),
-    actorRoleCodes: input.actorRoleCodes,
+    actorPositionCodes: [profile.positionCode],
+    actorRoleCodes: [profile.roleCode],
     taskAssigneeUserId: task.task_assignee_user_id,
     moduleAssigneeUserId: task.module_assignee_user_id,
     responsibilityPositionCode: task.responsibility_position_code,
   })) throw new Error("当前账号不是该办理步骤的负责人，无权完成");
   const now = new Date().toISOString();
-  await env.DB.prepare(
-    `UPDATE workflow_instance_task_states SET status='completed',completed_by_user_id=?,completed_at=?,updated_at=? WHERE id=?`,
-  ).bind(input.actorUserId,now,now,task.id).run();
+  const authority = activePositionProfilePredicate({organizationId:input.organizationId,userId:input.actorUserId,profile,requiredPermissions:["order.view"]});
+  await guardedBatch(env.DB,[
+    predicateGuard(env.DB,authority.sql,authority.values,now),
+    predicateGuard(env.DB,`EXISTS(SELECT 1 ${manualWorkflowTaskScopeSql}
+      AND wi.id=? AND wi.workflow_id=? AND ss.id=? AND ss.step_key=? AND ms.id=? AND COALESCE(omi.id,'')=? AND o.status=?
+      AND ts.task_key=? AND ts.task_type=? AND ts.status=? AND ts.updated_at=?
+      AND COALESCE(ts.assignee_user_id,'')=? AND COALESCE(omi.assignee_user_id,'')=?
+      AND COALESCE(ts.responsibility_position_code,'')=? AND COALESCE(ms.responsibility_position_code,'')=?)`,[
+        task.id,input.organizationId,input.orderId,task.instance_id,task.workflow_id,task.step_state_id,task.step_key,task.module_state_id,task.module_instance_id??"",task.order_status,
+        task.task_key,task.task_type,task.status,task.updated_at,task.task_assignee_user_id??"",task.module_assignee_user_id??"",task.task_position_code??"",task.module_position_code??"",
+      ],now),
+    env.DB.prepare(
+      `UPDATE workflow_instance_task_states SET status='completed',completed_by_user_id=?,completed_at=?,updated_at=? WHERE id=? AND status=? AND updated_at=?`,
+    ).bind(input.actorUserId,now,now,task.id,task.status,task.updated_at),
+    changedRowGuard(env.DB,now),
+  ],"办理步骤、负责人或权限已变化，本次未提交；请刷新后重试");
 }
 
 export async function replaceWorkflowInstanceVersion(input:{
