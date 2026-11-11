@@ -5,7 +5,7 @@ import {
   type OrganizationAssigneeWorkflowNode,
   type OrganizationAssigneeMember,
 } from "./organization-assignee";
-import { isProtectedAccessPosition, positionRoleCodeSql } from "./position-role";
+import { isProtectedAccessPosition, positionRoleCodeSql, protectedAccessPositionCodes } from "./position-role";
 
 const activeOrganizationAssigneeBaseSql = `
   FROM memberships m
@@ -18,12 +18,37 @@ const activeOrganizationAssigneeBaseSql = `
 
 /** Server-authored predicate for rechecking a NEW selection in a write batch. */
 export function activeOrganizationAssigneeSelectionPredicate(input:{organizationId:string;userId:string;positionCodes:readonly string[];displayName:string}) {
-  if(!input.positionCodes.length)return{sql:"0=1",values:[]as(string|number|null)[]};
-  return{
-    sql:`EXISTS(SELECT 1 ${activeOrganizationAssigneeBaseSql}
+  return activeOrganizationAssigneePredicate(input);
+}
+
+/** Same position-owned AND-of-OR permission rules as the assignee picker. */
+export function activeOrganizationAssigneePredicate(input: {
+  organizationId: string;
+  userId: string;
+  positionCodes?: readonly string[];
+  displayName?: string;
+  permissionRequirements?: readonly (readonly string[])[];
+}) {
+  if (input.positionCodes && !input.positionCodes.length) return { sql: "0=1", values: [] as (string | number | null)[] };
+  const conditions = ["m.organization_id=?", "m.user_id=?", "m.status='active'"];
+  const values: (string | number | null)[] = [input.organizationId, input.userId];
+  if (input.displayName !== undefined) { conditions.push("u.display_name=?"); values.push(input.displayName); }
+  if (input.positionCodes) {
+    conditions.push(`p.code IN (${input.positionCodes.map(() => "?").join(",")})`);
+    values.push(...input.positionCodes);
+  }
+  const requirements = (input.permissionRequirements ?? []).filter(group => group.length);
+  if (requirements.length) {
+    conditions.push(`(p.code IN (${protectedAccessPositionCodes.map(() => "?").join(",")}) OR (${requirements.map(group =>
+      `EXISTS(SELECT 1 FROM role_permissions rp WHERE rp.role_id=r.id AND rp.permission_code IN (${group.map(() => "?").join(",")}))`,
+    ).join(" AND ")}))`);
+    values.push(...protectedAccessPositionCodes, ...requirements.flat());
+  }
+  return {
+    sql: `EXISTS(SELECT 1 ${activeOrganizationAssigneeBaseSql}
       JOIN roles r ON r.organization_id=m.organization_id AND r.code=${positionRoleCodeSql("p.code")} AND r.status='active'
-      WHERE m.organization_id=? AND m.user_id=? AND m.status='active' AND u.display_name=? AND p.code IN (${input.positionCodes.map(()=>"?").join(",")}))`,
-    values:[input.organizationId,input.userId,input.displayName,...input.positionCodes],
+      WHERE ${conditions.join(" AND ")})`,
+    values,
   };
 }
 

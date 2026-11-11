@@ -97,7 +97,8 @@ vi.mock("./order-workflow", () => ({
   canRunOrderWorkflowAction: vi.fn(() => true),
   shouldRefreshOrderModulesBeforeWorkflowGate: vi.fn(() => false),
 }));
-vi.mock("./organization-assignee.server", () => ({
+vi.mock("./organization-assignee.server", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./organization-assignee.server")>(),
   isActiveOrganizationAssignee: assignees.active,
   isActiveOrganizationAssigneeForPositions: assignees.activeForPositions,
 }));

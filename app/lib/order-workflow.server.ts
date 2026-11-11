@@ -14,6 +14,7 @@ import {
 } from "./order-workflow";
 import { assignedOrderNotificationStatement } from "./internal-notifications.server";
 import {
+  activeOrganizationAssigneePredicate,
   isActiveOrganizationAssignee,
   isActiveOrganizationAssigneeForPositions,
 } from "./organization-assignee.server";
@@ -255,6 +256,7 @@ export async function validateOrderWorkflowAction(input: {
       }
     }
   }
+  let targetAssigneePredicate: ReturnType<typeof activeOrganizationAssigneePredicate> | null = null;
   if (input.assigneeUserId) {
     const validAssignee = await isActiveOrganizationAssignee(
       input.organizationId,
@@ -314,6 +316,12 @@ export async function validateOrderWorkflowAction(input: {
         transition,
       };
     }
+    targetAssigneePredicate = activeOrganizationAssigneePredicate({
+      organizationId: input.organizationId,
+      userId: input.assigneeUserId,
+      positionCodes: expectedPositionCodes,
+      permissionRequirements,
+    });
   }
   if (input.actionCode === "complete") {
     await ensureOrderModules(input.organizationId, input.orderId);
@@ -343,7 +351,7 @@ export async function validateOrderWorkflowAction(input: {
         transition,
       };
   }
-  return { ok: true as const, order, transition, profile, processPolicy };
+  return { ok: true as const, order, transition, profile, processPolicy, targetAssigneePredicate };
 }
 
 export async function executeOrderWorkflowAction(input: {
@@ -374,6 +382,8 @@ export async function executeOrderWorkflowAction(input: {
   if(input.actionCode==="submit"&&checked.profile.positionCode==="CS")usedPolicies.add("order.cs_requires_customer_flag");
   await guardedBatch(env.DB, [
     predicateGuard(env.DB,authority.sql,authority.values,now),
+    ...(checked.targetAssigneePredicate
+      ? [predicateGuard(env.DB,checked.targetAssigneePredicate.sql,checked.targetAssigneePredicate.values,now)] : []),
     ...[...usedPolicies].map(key=>predicateGuard(env.DB,"COALESCE((SELECT policy_value FROM business_process_policies WHERE organization_id=? AND policy_key=?),?)=?",[input.organizationId,key,defaultBusinessProcessPolicy[key],checked.processPolicy[key]],now)),
     predicateGuard(env.DB,`EXISTS(SELECT 1 FROM order_workflow_transitions WHERE organization_id=? AND action_code=? AND from_status=? AND is_active=1
       AND action_name=? AND to_status=? AND target_step_code=? AND target_step_name=? AND requires_assignee=?)`,[input.organizationId,transition.action_code,transition.from_status,transition.action_name,transition.to_status,transition.target_step_code,transition.target_step_name,transition.requires_assignee],now),
