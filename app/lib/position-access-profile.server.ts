@@ -19,6 +19,26 @@ export type PositionBusinessDataScope =
   | "region"
   | "company";
 
+/** Recheck a previously authorized profile inside the caller's write batch. */
+export function activePositionProfilePredicate(input: {
+  organizationId: string; userId: string; profile: PositionAccessProfile;
+  requiredPermissions: readonly string[];
+}) {
+  const {profile}=input;
+  const permissions=[...new Set(input.requiredPermissions)];
+  return {
+    sql:`EXISTS(SELECT 1 FROM memberships m
+      JOIN users u ON u.id=m.user_id AND u.status='active'
+      JOIN departments d ON d.id=m.department_id AND d.organization_id=m.organization_id AND d.status='active'
+      JOIN positions p ON p.id=m.position_id AND p.organization_id=m.organization_id AND p.department_code=d.code AND p.status='active'
+      JOIN roles r ON r.organization_id=m.organization_id AND r.code=${positionRoleCodeSql("p.code")} AND r.status='active'
+      WHERE m.id=? AND m.organization_id=? AND m.user_id=? AND m.status='active'
+        AND m.department_id=? AND m.position_id=? AND p.code=? AND r.code=?
+        AND (?=1 OR (${permissions.length?permissions.map(()=>"EXISTS(SELECT 1 FROM role_permissions rp WHERE rp.role_id=r.id AND rp.permission_code=?)").join(" AND "):"1=1"})))`,
+    values:[profile.membershipId,input.organizationId,input.userId,profile.departmentId,profile.positionId,profile.positionCode,profile.roleCode,isProtectedAccessPosition(profile.positionCode)?1:0,...permissions] as (string|number|null)[],
+  };
+}
+
 type PositionAccessRow = {
   membership_id: string;
   department_id: string;

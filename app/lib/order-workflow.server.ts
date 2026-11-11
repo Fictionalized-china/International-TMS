@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { changedRowGuard, guardedBatch } from "./mutation-guard.server";
+import { changedRowGuard, guardedBatch, predicateGuard } from "./mutation-guard.server";
 import {
   ensureOrderModules,
   syncOrderWorkflowSnapshot,
@@ -20,9 +20,15 @@ import {
 import { loadOrderDispatchResponsibilityPolicy } from "./order-assignment-manifest.server";
 import { loadMissingOrderIntakeFees } from "./order-intake-fees.server";
 import { loadBusinessProcessPolicy } from "./business-process-policy.server";
-import { policyEnabled, policyPositions } from "./business-process-policy";
-import { loadActivePositionAccessProfile } from "./position-access-profile.server";
+import { defaultBusinessProcessPolicy, policyEnabled, policyPositions, type BusinessProcessPolicyKey } from "./business-process-policy";
+import { activePositionProfilePredicate, loadActivePositionAccessProfile } from "./position-access-profile.server";
 import { isBossBusinessActor } from "./permission-blocks";
+
+const actionPositionPolicy:Readonly<Record<string,BusinessProcessPolicyKey>>={
+  submit:"order.submit_positions",cancel_draft:"order.submit_positions",
+  approve:"order.approve_positions",reject:"order.approve_positions",cancel_submitted:"order.approve_positions",
+  dispatch:"order.approve_positions",cancel_confirmed:"order.approve_positions",
+};
 
 export type OrderWorkflowTransition = {
   action_code: string;
@@ -116,13 +122,13 @@ export async function validateOrderWorkflowAction(input: {
     };
   const profile=await loadActivePositionAccessProfile(env.DB,input.organizationId,input.actorUserId);
   if(!profile)return {ok:false as const,reason:"账号、部门、岗位或角色已停用，请重新登录后办理",order,transition};
+  if(!profile.permissions.includes("order.view"))return {ok:false as const,reason:"当前账号订单查看权限已撤销，不能继续办理",order,transition};
   const actorPosition={code:profile.positionCode};
   const processPolicy = await loadBusinessProcessPolicy(input.organizationId);
   if(input.actionCode==='submit'&&actorPosition?.code==='HR_ADMIN'&&!policyEnabled(processPolicy,'order.hr_emergency_enabled'))return {ok:false as const,reason:'人事紧急协助录单已停用',order,transition};
   if(["submit","cancel_draft"].includes(input.actionCode)) {
     if(!profile?.permissions.includes("order.intake.manage")) return {ok:false as const,reason:"当前账号录单权限已撤销",order,transition};
   }
-  const configurableActions = ["submit", "cancel_draft", "approve", "reject", "cancel_submitted", "dispatch", "cancel_confirmed"];
   if (input.actionCode === "submit" && actorPosition?.code === "CS" && policyEnabled(processPolicy, "order.cs_requires_customer_flag")) {
     const eligible = await env.DB.prepare("SELECT 1 FROM transport_orders o JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id WHERE o.id=? AND o.organization_id=? AND c.cs_order_entry_enabled=1 AND c.status='active'").bind(input.orderId,input.organizationId).first();
     if (!eligible) return { ok: false as const, reason: "该客户尚未配置为客服代录客户", order, transition };
@@ -138,7 +144,7 @@ export async function validateOrderWorkflowAction(input: {
       positionCode: profile.positionCode,
       roleCodes: [profile.roleCode],
     })),
-    allowedPositionCodes: configurableActions.includes(input.actionCode) ? policyPositions(processPolicy, ["submit", "cancel_draft"].includes(input.actionCode) ? "order.submit_positions" : "order.approve_positions") : undefined,
+    allowedPositionCodes: actionPositionPolicy[input.actionCode] ? policyPositions(processPolicy, actionPositionPolicy[input.actionCode]) : undefined,
   })) {
     const actionOwner: Record<string, string> = {
       submit: "当前订单的业务员",
@@ -337,7 +343,7 @@ export async function validateOrderWorkflowAction(input: {
         transition,
       };
   }
-  return { ok: true as const, order, transition };
+  return { ok: true as const, order, transition, profile, processPolicy };
 }
 
 export async function executeOrderWorkflowAction(input: {
@@ -359,9 +365,22 @@ export async function executeOrderWorkflowAction(input: {
     now = new Date().toISOString(),
     historyId = crypto.randomUUID(),
     assignee = input.assigneeUserId || null;
+  const requiredPermissions=["order.view",...(["submit","cancel_draft"].includes(input.actionCode)?["order.intake.manage"]:[])];
+  const authority=activePositionProfilePredicate({organizationId:input.organizationId,userId:input.actorUserId,profile:checked.profile,requiredPermissions});
+  const usedPolicies=new Set<BusinessProcessPolicyKey>();
+  if(actionPositionPolicy[input.actionCode])usedPolicies.add(actionPositionPolicy[input.actionCode]);
+  if(assignee&&["submit","approve"].includes(input.actionCode))usedPolicies.add("order.approve_positions");
+  if(input.actionCode==="submit"&&checked.profile.positionCode==="HR_ADMIN")usedPolicies.add("order.hr_emergency_enabled");
+  if(input.actionCode==="submit"&&checked.profile.positionCode==="CS")usedPolicies.add("order.cs_requires_customer_flag");
   await guardedBatch(env.DB, [
+    predicateGuard(env.DB,authority.sql,authority.values,now),
+    ...[...usedPolicies].map(key=>predicateGuard(env.DB,"COALESCE((SELECT policy_value FROM business_process_policies WHERE organization_id=? AND policy_key=?),?)=?",[input.organizationId,key,defaultBusinessProcessPolicy[key],checked.processPolicy[key]],now)),
+    predicateGuard(env.DB,`EXISTS(SELECT 1 FROM order_workflow_transitions WHERE organization_id=? AND action_code=? AND from_status=? AND is_active=1
+      AND action_name=? AND to_status=? AND target_step_code=? AND target_step_name=? AND requires_assignee=?)`,[input.organizationId,transition.action_code,transition.from_status,transition.action_name,transition.to_status,transition.target_step_code,transition.target_step_name,transition.requires_assignee],now),
+    ...(input.actionCode==="submit"&&checked.profile.positionCode==="CS"&&policyEnabled(checked.processPolicy,"order.cs_requires_customer_flag")?
+      [predicateGuard(env.DB,"EXISTS(SELECT 1 FROM transport_orders o JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id WHERE o.id=? AND o.organization_id=? AND c.cs_order_entry_enabled=1 AND c.status='active')",[order.id,input.organizationId],now)]:[]),
     env.DB.prepare(
-      `UPDATE transport_orders SET status=?,current_step_code=?,current_step_name=?,current_assignee_user_id=?,workflow_updated_at=?,is_overdue=0,confirmed_at=CASE WHEN ?='confirmed' THEN COALESCE(confirmed_at,?) ELSE confirmed_at END,updated_at=? WHERE id=? AND organization_id=? AND status=? AND current_step_code=? AND COALESCE(current_assignee_user_id,'')=?`,
+      `UPDATE transport_orders SET status=?,current_step_code=?,current_step_name=?,current_assignee_user_id=?,workflow_updated_at=?,is_overdue=0,confirmed_at=CASE WHEN ?='confirmed' THEN COALESCE(confirmed_at,?) ELSE confirmed_at END,updated_at=? WHERE id=? AND organization_id=? AND status=? AND current_step_code=? AND COALESCE(current_assignee_user_id,'')=? AND COALESCE(salesperson_user_id,'')=? AND COALESCE(created_by_user_id,'')=?`,
     ).bind(
       transition.to_status,
       transition.target_step_code,
@@ -376,6 +395,8 @@ export async function executeOrderWorkflowAction(input: {
       order.status,
       order.current_step_code,
       order.current_assignee_user_id || "",
+      order.salesperson_user_id || "",
+      order.created_by_user_id || "",
     ),
     changedRowGuard(env.DB, now),
     ...(input.atomicStatements ?? []),
@@ -408,7 +429,7 @@ export async function executeOrderWorkflowAction(input: {
           now,
         })]
       : []),
-  ], "订单已被其他人处理，本次未提交，请刷新后重试");
+  ], "订单已被其他人处理，或权限/流程配置已变化；本次未提交，请刷新后重试");
   if (transition.to_status === "in_execution") {
     await reconcileDispatchedOrderWorkflow(input.organizationId, order.id, { force: true });
   } else {
