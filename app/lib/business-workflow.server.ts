@@ -514,7 +514,7 @@ export async function syncOrderBusinessWorkflow(input: OrderBusinessWorkflowSync
   )
     .bind(input.organizationId, input.orderId)
     .first<OrderWorkflowSnapshot>();
-  if (!order) return null;
+  if (!order || order.status === "cancelled") return null;
   let instance = await env.DB.prepare(
     `SELECT id,workflow_id,current_step_key
      FROM workflow_instances

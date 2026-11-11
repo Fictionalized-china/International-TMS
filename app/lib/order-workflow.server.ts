@@ -430,6 +430,16 @@ export async function executeOrderWorkflowAction(input: {
         })]
       : []),
   ], "订单已被其他人处理，或权限/流程配置已变化；本次未提交，请刷新后重试");
+  if (transition.to_status === "cancelled") {
+    // The cancellation and its history have committed. No forward projection
+    // is needed, especially for legacy orders without a published workflow.
+    return {
+      orderNumber: order.order_number,
+      actionName: transition.action_name,
+      toStatus: transition.to_status,
+      stepName: transition.target_step_name,
+    };
+  }
   if (transition.to_status === "in_execution") {
     await reconcileDispatchedOrderWorkflow(input.organizationId, order.id, { force: true });
   } else {

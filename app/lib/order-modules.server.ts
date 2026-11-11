@@ -213,6 +213,9 @@ export async function ensureOrderModules(
     .bind(orderId, organizationId)
     .first<OrderSeed>();
   if (!order) throw new Error("订单不存在");
+  // Cancellation preserves the last real module/workflow facts. Reading an
+  // old cancelled order must not initialize a newer workflow or rewrite them.
+  if (order.status === "cancelled") return order;
   if (order.workflow_instance_id && !order.matched_instance_id) {
     throw new Error("订单工作流实例绑定异常，不能同步业务模块");
   }
@@ -293,6 +296,7 @@ export async function ensureOrderModules(
       source: "system",
     });
   }
+  return order;
 }
 
 /**
@@ -673,7 +677,8 @@ export async function syncOrderWorkflowSnapshot(
   organizationId: string,
   orderId: string,
 ) {
-  await ensureOrderModules(organizationId, orderId, { syncBusinessWorkflow: false });
+  const seed = await ensureOrderModules(organizationId, orderId, { syncBusinessWorkflow: false });
+  if (seed?.status === "cancelled") return;
   await syncModuleStateFromTransportBatch(organizationId, orderId);
   const order = await env.DB.prepare(
     `SELECT o.status,o.business_type,o.current_assignee_user_id,o.workflow_instance_id,
