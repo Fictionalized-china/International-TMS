@@ -36,6 +36,21 @@ const ensureCount = (spy: { mock: { calls: unknown[][] } }) => spy.mock.calls.fi
 ).length;
 
 describe("order detail request-local module reuse", () => {
+  it.each(["当前订单联系人", null])("shows current consignment contact/cargo facts, including a deliberately empty contact (%s)", async contact => {
+    await setup("owner");
+    fixture.database.prepare(`INSERT INTO quotations(id,organization_id,quote_number,customer_id,customer_contact_name,customer_contact_phone,origin_country,origin_city,destination_country,destination_city,transport_mode,cargo_description,pieces,gross_weight_kg,volume_cbm,notes,created_at,updated_at)
+      VALUES('history-quote','org','Q-HISTORY','customer','旧报价联系人','旧电话','CN','深圳','RU','莫斯科','ROAD','旧报价货物',200,300,400,'来源报价备注',?,?)`).run(fixture.now, fixture.now);
+    fixture.database.prepare("UPDATE transport_orders SET quotation_id='history-quote',shipper_contact=?,shipper_phone=NULL,cargo_description='当前货物',pieces=10,gross_weight_kg=24,volume_cbm=0,special_instructions='订单作业备注' WHERE id='order'").run(contact);
+    const data = await moduleLoader(args());
+    expect(data.order).toMatchObject({ quotation_customer_contact_name: contact, quotation_customer_contact_phone: null, quotation_cargo_description: "当前货物", quotation_pieces: 10, quotation_gross_weight_kg: 24, quotation_volume_cbm: 0, quotation_notes: "来源报价备注" });
+    expect(fixture.database.prepare("SELECT customer_contact_name,cargo_description,pieces FROM quotations WHERE id='history-quote'").get()).toEqual({ customer_contact_name: "旧报价联系人", cargo_description: "旧报价货物", pieces: 200 });
+  });
+  it("loads declared product quantity and unit separately from warehouse packaging", async () => {
+    await setup("owner");
+    fixture.database.prepare(`INSERT INTO order_cargo_items(id,organization_id,order_id,line_no,cargo_name_cn,package_type,package_count,pieces_per_package,gross_weight_per_package_kg,net_weight_per_package_kg,length_cm,width_cm,height_cm,volume_per_package_cbm,declared_value,currency,declared_quantity,declared_unit,created_at,updated_at)
+      VALUES('quantity-cargo','org','order',1,'当前货物','carton',2,1,12,12,1,1,1,0,0,'CNY',10,'台',?,?)`).run(fixture.now, fixture.now);
+    expect((await moduleLoader(args())).cargo[0]).toMatchObject({ declared_quantity: 10, declared_unit: "台", package_count: 2, pieces_per_package: 1 });
+  });
   it.each(["sales", null])("keeps current order salesperson %s authoritative in both detail and embedded module", async salesperson => {
     await setup("owner");
     fixture.database.prepare(`INSERT INTO quotations(id,organization_id,quote_number,customer_id,salesperson_user_id,origin_country,origin_city,destination_country,destination_city,transport_mode,cargo_description,created_at,updated_at) VALUES('history-quote','org','Q-HISTORY','customer','owner','CN','深圳','RU','莫斯科','ROAD','来源货物',?,?)`).run(fixture.now, fixture.now);

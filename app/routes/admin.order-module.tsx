@@ -17,6 +17,8 @@ import { action as settlementApprovalsAction } from "./admin.settlement-approval
 import { DateTimeSelect } from "../components/DateTimeSelect";
 import { intakeRouteFields } from "../lib/intake-route-fields";
 import { intakeOperationFields, intakeOperationFieldKey, intakeOperationDisplay, readIntakeOperations } from "../lib/intake-operations";
+import { consignmentCargoSummary, consignmentIntakeOperations } from "../lib/consignment-facts";
+import { businessDateTimeLabel } from "../lib/business-time";
 import { requireSessionUser } from "../lib/auth.server";
 import { dispatchWorkspaceHref } from "../lib/transport-workspace-access";
 import { sessionSlotFromRequest, withSessionSlot } from "../lib/session-slot";
@@ -243,6 +245,7 @@ type OrderSummary = {
   quote_commercial_name_snapshot: string | null;
   domestic_agent: string | null;
   intake_operations_json: string | null;
+  declared_quantity_unit: string | null;
   quotation_cargo_description: string | null;
   quotation_notes: string | null;
   quotation_pieces: number | null;
@@ -367,6 +370,8 @@ type ApprovalHistory = {
 };
 type Cargo = {
   id: string;
+  declared_quantity: number | null;
+  declared_unit: string | null;
   cargo_name_cn: string;
   cargo_name_en: string | null;
   hs_code: string | null;
@@ -889,18 +894,18 @@ export async function loader(
   }
   const order = await env.DB.prepare(
     `SELECT o.id,o.order_number,o.order_date,o.quotation_id,q.quote_number,q.currency quotation_currency,q.subtotal quotation_subtotal,q.tax_amount quotation_tax_amount,q.total_amount quotation_total_amount,q.status quotation_status,
-            COALESCE(q.customer_contact_name,o.shipper_contact) quotation_customer_contact_name,
-            COALESCE(q.customer_contact_phone,o.shipper_phone) quotation_customer_contact_phone,
+            o.shipper_contact quotation_customer_contact_name,
+            o.shipper_phone quotation_customer_contact_phone,
             o.mark_contacts_snapshot_json,o.created_by_user_id,
             o.salesperson_user_id,
             salesperson.display_name quotation_salesperson_name,
-            o.quote_commercial_user_id,o.quote_commercial_name_snapshot,o.domestic_agent,o.intake_operations_json,
-            COALESCE(q.cargo_description,o.cargo_description) quotation_cargo_description,
+            o.quote_commercial_user_id,o.quote_commercial_name_snapshot,o.domestic_agent,o.intake_operations_json,o.declared_quantity_unit,
+            o.cargo_description quotation_cargo_description,
             COALESCE(q.notes,o.special_instructions) quotation_notes,
-            COALESCE(q.pieces,o.pieces) quotation_pieces,
-            COALESCE(q.gross_weight_kg,o.gross_weight_kg) quotation_gross_weight_kg,
+            o.pieces quotation_pieces,
+            o.gross_weight_kg quotation_gross_weight_kg,
             q.estimated_length_cm quotation_length_cm,q.estimated_width_cm quotation_width_cm,
-            q.estimated_height_cm quotation_height_cm,COALESCE(q.volume_cbm,o.volume_cbm) quotation_volume_cbm,
+            q.estimated_height_cm quotation_height_cm,o.volume_cbm quotation_volume_cbm,
             q.valid_until quotation_valid_until,
             o.customer_id,c.name customer_name,o.customer_reference,o.shipper_name,o.shipper_contact,o.shipper_phone,
             o.pickup_address_id,pickup_address.label pickup_address_name,
@@ -1013,7 +1018,7 @@ export async function loader(
       .bind(module.id, current.organizationId)
       .all<History>(),
     env.DB.prepare(
-      `SELECT i.id,i.cargo_name_cn,i.cargo_name_en,i.hs_code,i.overseas_hs_code,i.package_type,i.package_count,i.pieces_per_package,i.gross_weight_per_package_kg,i.net_weight_per_package_kg,i.length_cm,i.width_cm,i.height_cm,i.volume_per_package_cbm,i.declared_value,i.currency,i.origin_country,i.brand_model,i.marks,i.special_attributes,i.notes,(SELECT COUNT(*) FROM order_cargo_images img WHERE img.cargo_item_id=i.id) image_count FROM order_cargo_items i WHERE i.order_id=? AND i.organization_id=? ORDER BY i.line_no`,
+      `SELECT i.id,i.declared_quantity,i.declared_unit,i.cargo_name_cn,i.cargo_name_en,i.hs_code,i.overseas_hs_code,i.package_type,i.package_count,i.pieces_per_package,i.gross_weight_per_package_kg,i.net_weight_per_package_kg,i.length_cm,i.width_cm,i.height_cm,i.volume_per_package_cbm,i.declared_value,i.currency,i.origin_country,i.brand_model,i.marks,i.special_attributes,i.notes,(SELECT COUNT(*) FROM order_cargo_images img WHERE img.cargo_item_id=i.id) image_count FROM order_cargo_items i WHERE i.order_id=? AND i.organization_id=? ORDER BY i.line_no`,
     )
       .bind(orderId, current.organizationId)
       .all<Cargo>(),
@@ -7809,6 +7814,7 @@ function ModuleBusinessData({
         />;
   }
   if (code === "consignment") {
+    const intake = consignmentIntakeOperations(data.order.intake_operations_json, data.services);
     const customFields = data.workflowFields.filter(
       (field) => field.isActive && !field.isBuiltIn,
     );
@@ -7851,7 +7857,7 @@ function ModuleBusinessData({
 
           {!data.workflowFields.some(field=>field.fieldKey==="quotation_quote_commercial_user_id") && <InformationTable items={[{label:"报价商务",value:data.order.quote_commercial_name_snapshot||"历史订单尚未记录"}]} />}
           <InformationTable items={intakeRouteFields.filter(field=>!data.workflowFields.some(rule=>rule.fieldKey===field.fieldKey)).map(field=>({label:field.label,value:data.order[field.column]||"尚未记录"}))}/>
-          <InformationTable items={intakeOperationFields.filter(field=>!data.workflowFields.some(rule=>rule.fieldKey===intakeOperationFieldKey(field.key))).map(field=>({label:field.label,value:intakeOperationDisplay(field.key,readIntakeOperations(data.order.intake_operations_json)[field.key])||"尚未记录"}))}/>
+          <InformationTable items={intakeOperationFields.filter(field=>!data.workflowFields.some(rule=>rule.fieldKey===intakeOperationFieldKey(field.key))).map(field=>({label:field.label,value:intakeOperationDisplay(field.key,intake[field.key])||"尚未记录"}))}/>
           {showQuotationInformation && <WorkflowInformationGroup
             title="询价报价确认资料"
             hint="只展示当前订单锁定工作流在第一步设为显示的字段；必填状态沿用该版本规则。"
@@ -7863,7 +7869,7 @@ function ModuleBusinessData({
               { fieldKey: "quotation_salesperson_user_id", label: "业务员", value: data.order.quotation_salesperson_name || "" },
               { fieldKey: "quotation_quote_commercial_user_id", label: "报价商务", value: data.order.quote_commercial_name_snapshot || "" },
               ...intakeRouteFields.map(field=>({fieldKey:field.fieldKey,label:field.label,value:data.order[field.column]||""})),
-              ...intakeOperationFields.map(field=>({fieldKey:intakeOperationFieldKey(field.key),label:field.label,value:intakeOperationDisplay(field.key,readIntakeOperations(data.order.intake_operations_json)[field.key])})),
+              ...intakeOperationFields.map(field=>({fieldKey:intakeOperationFieldKey(field.key),label:field.label,value:intakeOperationDisplay(field.key,intake[field.key])})),
               { fieldKey: "quotation_customs_clearance_mode", label: "清关办理方式", value: data.order.customs_clearance_mode === "customer" ? "客户自理清关" : "公司代办清关" },
               { fieldKey: "quotation_origin_region", label: "起运地区", value: [data.order.origin_country,data.order.origin_state,data.order.origin_city].filter(Boolean).join(" / ") },
               { fieldKey: "quotation_pickup_address", label: "提货地址", value: data.order.origin_address || "" },
@@ -8851,28 +8857,25 @@ function OrderApprovalReview({
   const continueWithCurrentApprover = combinedReviewAssignment &&
     operationSupervisors.some((member) => member.id === data.current.userId);
   const salesperson = data.members.find((member) => member.id === order.salesperson_user_id);
-  const cargoTotals = cargo.reduce((total, item) => ({
-    pieces: total.pieces + item.package_count * item.pieces_per_package,
-    grossWeight: total.grossWeight + item.package_count * item.gross_weight_per_package_kg,
-    volume: total.volume + item.package_count * item.volume_per_package_cbm,
-  }), { pieces: 0, grossWeight: 0, volume: 0 });
+  const cargoTotals = consignmentCargoSummary(cargo, order.declared_quantity_unit);
+  const intake = consignmentIntakeOperations(order.intake_operations_json, data.services);
   const pickupAddress = [order.origin_country, order.origin_state, order.origin_city, order.origin_address]
     .filter(Boolean)
     .join(" ");
   return <div className="approval-sheet">
     <section className="approval-section">
       <header><strong>审批资料一览</strong><span>详细委托资料可在右侧“订单关键资料”查看</span></header>
-      <div className="approval-facts">
+      <div className="approval-facts approval-facts--complete">
         <Info label="客户" value={order.customer_name} className="span-2" />
         <Info label="订单号" value={order.order_number} />
         <Info label="报价商务" value={order.quote_commercial_name_snapshot || "历史订单尚未记录"} />
         {intakeRouteFields.map(field=><Info key={field.fieldKey} label={field.label} value={order[field.column]||"尚未记录"}/>)}
-        {intakeOperationFields.map(field=><Info key={field.key} label={field.label} value={intakeOperationDisplay(field.key,readIntakeOperations(order.intake_operations_json)[field.key])||"尚未记录"}/>)}
+        {intakeOperationFields.map(field=><Info key={field.key} label={field.label} value={intakeOperationDisplay(field.key,intake[field.key])||"尚未记录"}/>)}
         <Info label="订单类型" value={`${order.business_type === "ltl" ? "拼车" : "整车"} · 报价锁定`} />
         <Info label="提货地址" value={pickupAddress} className="span-2" />
-        <Info label="预约提货" value={order.requested_pickup_date || "—"} />
+        <Info label="预约提货（北京时间）" value={businessDateTimeLabel(order.requested_pickup_date) || "—"} />
         <Info label="清关方式" value={order.customs_clearance_mode === "customer" ? "客户自理清关" : "公司代办清关"} />
-        <Info label="货物" value={`${cargo.map((item) => item.cargo_name_cn).filter(Boolean).join("、") || "—"} · ${cargoTotals.pieces} 件`} className="span-2" />
+        <Info label="货物 / 商品数量 / 入仓包装" value={`${cargo.map((item) => item.cargo_name_cn).filter(Boolean).join("、") || "—"} · ${cargoTotals.quantityLabel} · ${cargoTotals.packageCount} 包`} className="span-2" />
         <Info label="预录数据" value={`${cargoTotals.grossWeight.toFixed(3)} KG · ${cargoTotals.volume.toFixed(4)} CBM`} />
         <Info label="境外目的仓" value={order.overseas_warehouse_name || "—"} />
       </div>

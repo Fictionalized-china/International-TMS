@@ -21903,6 +21903,14 @@ html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animatio
 .linear-order-page .approval-facts > div > span { display: block; color: #91a0ae; font-size: 9px; }
 .linear-order-page .approval-facts > div > strong { margin-top: 3px; display: block; overflow: hidden; color: var(--ink); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .linear-order-page .approval-facts > .span-2 { grid-column: span 2; }
+.linear-order-page .approval-facts--complete > div > strong { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+@media (max-width: 1100px) {
+  .linear-order-page .approval-facts--complete { grid-template-columns: repeat(2,minmax(0,1fr)); }
+}
+@media (max-width: 600px) {
+  .linear-order-page .approval-facts--complete { grid-template-columns: minmax(0,1fr); }
+  .linear-order-page .approval-facts--complete > .span-2 { grid-column: auto; }
+}
 .linear-order-page .approval-sheet > .source-document-section { margin: 0; border: 1px solid var(--line); border-radius: 3px; box-shadow: none; }
 .linear-order-page .approval-sheet > .source-document-section > header { min-height: 30px; padding: 0 10px; }
 .linear-order-page .approval-sheet > .source-document-section > header h3 { font-size: 11px; }
