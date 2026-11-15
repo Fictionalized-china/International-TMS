@@ -39,6 +39,7 @@ import {
 import { runtimeWorkflowFieldPolicy } from "./workflow-field-runtime";
 import { withOrderProjectionSync } from "./order-sync-queue.server";
 import { workflowModuleConfigurationStatements } from "./workflow-state-write-batch";
+import { changedRowGuard, guardedBatch, predicateGuard } from "./mutation-guard.server";
 
 export type OrderModuleInstance = {
   id: string;
@@ -1266,8 +1267,11 @@ export async function advanceOrderModule(input: {
   moduleCode: string;
   actorUserId: string;
   notes?: string;
+  /** Server-authored guards, committed with this advance, never form input. */
+  commitGuards?: readonly D1PreparedStatement[];
 }) {
   const module = await moduleRow(input);
+  if (["completed", "cancelled"].includes(module.order_status)) throw new Error("订单已结束，当前不能推进模块");
   if (!module.enabled) throw new Error("该模块未启用");
   if (module.status === "completed") throw new Error("该模块已经完成");
   const definition = orderModuleDefinition(input.moduleCode);
@@ -1309,9 +1313,20 @@ export async function advanceOrderModule(input: {
   const progress = isLast
     ? 100
     : Math.round(((currentIndex + 1) / definition.steps.length) * 100);
-  await env.DB.batch([
+  await guardedBatch(env.DB, [
+    ...(input.commitGuards ?? []),
+    predicateGuard(env.DB,`EXISTS(SELECT 1 FROM order_module_instances m
+      JOIN transport_orders o ON o.id=m.order_id AND o.organization_id=m.organization_id
+      LEFT JOIN workflow_instances wi ON wi.id=o.workflow_instance_id AND wi.organization_id=o.organization_id AND wi.order_id=o.id
+      WHERE m.id=? AND m.organization_id=? AND m.order_id=? AND m.enabled=1
+        AND m.status=? AND COALESCE(m.current_step_code,'')=? AND m.progress_percent=? AND COALESCE(m.assignee_user_id,'')=? AND COALESCE(m.blocking_reason,'')=?
+        AND o.status=? AND COALESCE(o.current_assignee_user_id,'')=? AND COALESCE(o.workflow_instance_id,'')=?
+        AND COALESCE(wi.workflow_id,'')=? AND COALESCE(wi.current_step_key,'')=? AND COALESCE(wi.status,'')=?)`,[
+          module.id,input.organizationId,input.orderId,module.status,module.current_step_code??"",module.progress_percent,module.assignee_user_id??"",module.blocking_reason??"",
+          module.order_status,module.order_assignee_user_id??"",module.workflow_instance_id??"",module.workflow_id??"",module.workflow_step_key??"",module.workflow_status??"",
+        ],now),
     env.DB.prepare(
-      "UPDATE order_module_instances SET status=?,current_step_code=?,current_step_name=?,progress_percent=?,blocking_reason=NULL,started_at=COALESCE(started_at,?),completed_at=?,updated_at=? WHERE id=?",
+      "UPDATE order_module_instances SET status=?,current_step_code=?,current_step_name=?,progress_percent=?,blocking_reason=NULL,started_at=COALESCE(started_at,?),completed_at=?,updated_at=? WHERE id=? AND organization_id=? AND order_id=? AND enabled=1 AND status=? AND COALESCE(current_step_code,'')=? AND progress_percent=? AND COALESCE(assignee_user_id,'')=? AND COALESCE(blocking_reason,'')=?",
     ).bind(
       isLast ? "completed" : "in_progress",
       next.code,
@@ -1321,7 +1336,15 @@ export async function advanceOrderModule(input: {
       isLast ? now : null,
       now,
       module.id,
+      input.organizationId,
+      input.orderId,
+      module.status,
+      module.current_step_code??"",
+      module.progress_percent,
+      module.assignee_user_id??"",
+      module.blocking_reason??"",
     ),
+    changedRowGuard(env.DB,now),
     historyStatement({
       organizationId: input.organizationId,
       orderId: input.orderId,
@@ -1337,7 +1360,7 @@ export async function advanceOrderModule(input: {
       notes: input.notes || null,
       now,
     }),
-  ]);
+  ],"模块、订单或办理权限已变化，本次未提交；请刷新后重试");
   await syncOrderWorkflowSnapshot(input.organizationId, input.orderId);
 }
 
@@ -1348,7 +1371,13 @@ async function moduleRow(input: {
 }) {
   await ensureOrderModules(input.organizationId, input.orderId);
   const module = await env.DB.prepare(
-    "SELECT id,enabled,status,current_step_code,progress_percent FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code=?",
+    `SELECT m.id,m.enabled,m.status,m.current_step_code,m.current_step_name,m.progress_percent,m.assignee_user_id,m.blocking_reason,m.updated_at,
+      o.status order_status,o.current_assignee_user_id order_assignee_user_id,o.workflow_instance_id,
+      wi.workflow_id,wi.current_step_key workflow_step_key,wi.status workflow_status
+     FROM order_module_instances m
+     JOIN transport_orders o ON o.id=m.order_id AND o.organization_id=m.organization_id
+     LEFT JOIN workflow_instances wi ON wi.id=o.workflow_instance_id AND wi.organization_id=o.organization_id AND wi.order_id=o.id
+     WHERE m.organization_id=? AND m.order_id=? AND m.module_code=?`,
   )
     .bind(input.organizationId, input.orderId, input.moduleCode)
     .first<{
@@ -1358,6 +1387,15 @@ async function moduleRow(input: {
       current_step_code: string | null;
       current_step_name: string | null;
       progress_percent: number;
+      assignee_user_id: string | null;
+      blocking_reason: string | null;
+      updated_at: string;
+      order_status: string;
+      order_assignee_user_id: string | null;
+      workflow_instance_id: string | null;
+      workflow_id: string | null;
+      workflow_step_key: string | null;
+      workflow_status: string | null;
     }>();
   if (!module) throw new Error("模块不存在");
   return module;
