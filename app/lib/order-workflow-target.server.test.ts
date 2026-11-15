@@ -62,4 +62,10 @@ describe("workflow handoff target remains eligible at commit", () => {
     const assertInjected = beforeCommit(() => fixture.database.exec("UPDATE users SET display_name='新显示姓名' WHERE id='supervisor'"));
     expect(await execute()).toMatchObject({ toStatus: "confirmed" }); assertInjected();
   });
+  it("rolls back approval when the current reviewer's amount capability is revoked before commit", async () => {
+    const assertInjected = beforeCommit(() => fixture.database.exec("DELETE FROM role_permissions WHERE role_id='org:role:pos_operation_supervisor' AND permission_code='order.module.costs.manage'"));
+    await expect(execute("supervisor")).rejects.toThrow("本次未提交"); assertInjected();
+    expect(fixture.database.prepare("SELECT status FROM transport_orders WHERE id='order'").get()).toEqual({ status: "submitted" });
+    expect(fixture.database.prepare("SELECT COUNT(*) n FROM order_workflow_history WHERE order_id='order'").get()).toEqual({ n: 0 });
+  });
 });

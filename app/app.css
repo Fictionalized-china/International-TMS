@@ -21022,7 +21022,8 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   white-space: nowrap;
 }
 .linear-side-links { padding: 5px; display: grid; gap: 4px; }
-.linear-side-links button {
+.linear-side-links button,
+.linear-side-links > a {
   min-height: 34px;
   padding: 0 8px;
   display: grid;
@@ -21037,7 +21038,9 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   cursor: pointer;
 }
 .linear-side-links button:hover,
-.linear-side-links button:focus-visible { color: var(--blue); border-color: #b8cde0; background: #f8fbff; outline: 0; }
+.linear-side-links button:focus-visible,
+.linear-side-links > a:hover,
+.linear-side-links > a:focus-visible { color: var(--blue); border-color: #b8cde0; background: #f8fbff; outline: 0; }
 .linear-side-links span { overflow: hidden; font-size: 9px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .linear-side-links small { color: #97a4af; font-size: 8px; }
 .linear-side-links i { font-size: 12px; font-style: normal; }
@@ -21904,6 +21907,32 @@ html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animatio
 .linear-order-page .approval-facts > div > strong { margin-top: 3px; display: block; overflow: hidden; color: var(--ink); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .linear-order-page .approval-facts > .span-2 { grid-column: span 2; }
 .linear-order-page .approval-facts--complete > div > strong { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+.linear-order-page .approval-expense-summary { grid-template-columns: repeat(auto-fit,minmax(min(100%,220px),1fr)); }
+.linear-order-page .approval-expense-summary > div > strong { overflow: visible; white-space: normal; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.linear-order-page .approval-expense-summary small { display: block; margin-top: 4px; color: var(--muted); }
+.consignment-current-expenses .consignment-form-group { padding: 10px; }
+.consignment-current-expense-table { max-width: 100%; }
+.consignment-current-expense-table th,
+.consignment-current-expense-table td { vertical-align: top; }
+.consignment-current-expense-table td:nth-child(n+4):nth-child(-n+7) { font-variant-numeric: tabular-nums; text-align: right; }
+.consignment-current-expense-table th:nth-child(n+4):nth-child(-n+7) { text-align: right; }
+.consignment-current-expense-table:focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; }
+.hr-consignment-filter { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); align-items: end; gap: 12px; }
+.hr-consignment-filter > label { min-width: 0; }
+.hr-consignment-workspace .hr-consignment-filter :is(input,select) { min-width: 0; width: 100% !important; max-width: 100%; }
+.hr-report-tabs.peer-page-tabs > a { flex: 1 1 220px !important; min-width: 0; max-width: 300px; }
+.hr-consignment-filter-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.hr-consignment-table { max-width: 100%; }
+.hr-consignment-table th:nth-child(n+5):nth-child(-n+8),
+.hr-consignment-table td:nth-child(n+5):nth-child(-n+8) { text-align: right; font-variant-numeric: tabular-nums; }
+.hr-consignment-table:focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; }
+.readonly-tracking-events { display: grid; gap: 12px; }
+.readonly-tracking-events article { padding: 12px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.readonly-tracking-events article header { display: flex; align-items: start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.readonly-tracking-events time { color: var(--muted); font-variant-numeric: tabular-nums; }
+.readonly-tracking-events article p { margin: 6px 0; }
+@media(max-width:1100px) { .hr-consignment-filter { grid-template-columns: repeat(2,minmax(0,1fr)); } }
+@media(max-width:600px) { .hr-consignment-filter { grid-template-columns: minmax(0,1fr); } }
 @media (max-width: 1100px) {
   .linear-order-page .approval-facts--complete { grid-template-columns: repeat(2,minmax(0,1fr)); }
 }
@@ -21975,7 +22004,21 @@ html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animatio
 .linear-order-page .approval-status-badge.active { border-color: #f0c49b; color: #a45a18; background: #fff7ed; }
 .linear-order-page .approval-status-badge.returned { border-color: #efb6ad; color: #b64032; background: #fff2f0; }
 .linear-order-page .approval-status-section > footer { padding: 8px 12px; border-top: 1px solid var(--line2); color: #71869a; background: #fbfcfd; font-size: 9px; }
-.review-assignment-workbench { display: grid; gap: 12px; }
+.review-assignment-workbench { display: grid; grid-template-columns: minmax(0,1fr); min-width: 0; gap: 12px; }
+.linear-order-page .review-assignment-workbench .linear-module-embedded { grid-template-columns: minmax(0,1fr); }
+.linear-order-page .approval-sheet,
+.linear-order-page .approval-sheet > *,
+.linear-order-page .approval-sheet .consignment-form-group { min-width: 0; max-width: 100%; }
+.linear-order-page .approval-sheet .consignment-business-stack { grid-template-columns: minmax(0,1fr); }
+.approval-information-grid { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 0; margin: 0; }
+.approval-information-grid > div { min-width: 0; padding: 8px; border-bottom: 1px solid var(--line); }
+.approval-information-grid dt { color: var(--muted); font-size: 11px; }
+.approval-information-grid dd { margin: 4px 0 0; overflow-wrap: anywhere; color: var(--ink); }
+.linear-order-page .approval-sheet .consignment-current-expense-table table { min-width: 760px; width: 100%; }
+.consignment-current-expense-table :is(th,td) { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.consignment-current-expense-table :is(th,td):nth-child(n+4):nth-child(-n+7) { white-space: nowrap; overflow-wrap: normal; }
+@media(max-width:1100px) { .approval-information-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } }
+@media(max-width:600px) { .approval-information-grid { grid-template-columns: minmax(0,1fr); } }
 .review-assignment-record, .review-assignment-waiting { margin: 0; padding: 12px; color: var(--ink); }
 .review-assignment-record > summary { cursor: pointer; color: #177b5d; font-weight: 650; }
 .review-assignment-record > p { margin: 10px 0 0; }

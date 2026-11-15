@@ -4,8 +4,11 @@ import { loadBusinessProcessPolicy } from "./business-process-policy.server";
 import { policyEnabled } from "./business-process-policy";
 import { isExcludedFromGrossProfit } from "./financial-analytics";
 import { chunkD1Values,d1Placeholders } from "./d1-bindings";
-import { hrReportPeriod } from "./hr-reports";
+import { hrReportPeriod, reportCsv } from "./hr-reports";
 export type HrReportRow={id:string;order_number:string;salesperson_user_id:string|null;salesperson_name:string|null;status:string;paid_on:string;main_plates:string|null;transloading_plates:string|null;departure_count:number;departure_ids:string|null;cost_pending:boolean;revenue:number|null;cost:number|null;profit:number|null;commission_amount:number|null;commission_status:string;commission_paid_on:string|null;commission_notes:string|null;commission_revision:number};
+export function hrPaidReportCsv(rows: readonly HrReportRow[]) {
+  return reportCsv([["订单","业务员","回款日","业务状态","主车号","换装车号","发车批次","确认收入CNY","直接成本CNY","毛利CNY","提成CNY","发放状态","发放日期"],...rows.map(r=>[r.order_number,r.salesperson_name,r.paid_on,r.status,r.main_plates,r.transloading_plates,r.departure_count,r.revenue,r.cost,r.profit,r.commission_amount,r.commission_status==="paid"?"已发放":"未发放",r.commission_paid_on])]);
+}
 export async function loadHrReport(db:D1Database,current:SessionUser,from:string,to:string) {
   if(!current.permissions.includes("hr.report.view")) throw new Error("没有人事报表权限");
   if(!/^\d{4}-\d{2}-\d{2}$/.test(from)||!/^\d{4}-\d{2}-\d{2}$/.test(to)||!Number.isFinite(Date.parse(from))||!Number.isFinite(Date.parse(to))||from>to) throw new Error("统计日期范围无效");

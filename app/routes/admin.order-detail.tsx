@@ -1,7 +1,8 @@
 ﻿import { env } from "cloudflare:workers";
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
-import { Form, Link, redirect, useNavigate, useNavigation } from "react-router";
+import { Form, Link, redirect, useLocation, useNavigate, useNavigation } from "react-router";
+import { sessionSlotFromUrl, withSessionSlot } from "../lib/session-slot";
 import type { Route } from "./+types/admin.order-detail";
 import { ActionToast } from "../components/ActionToast";
 import { OrderIntakeSupplement } from "../components/OrderIntakeSupplement";
@@ -1270,6 +1271,7 @@ function LinearOrderSideRail({
   onOpen: (tab: LinearOrderDrawerTab) => void;
 }) {
   const order = data.order;
+  const location = useLocation();
   const labelReceived = data.packageLabels.reduce(
     (total, label) => ({
       pieces: total.pieces + Number(label.pieces || 0),
@@ -1307,6 +1309,7 @@ function LinearOrderSideRail({
         <button type="button" onClick={() => onOpen("responsibility")}><span>负责人</span><small>{data.modules.filter((module) => module.enabled && module.assignee_user_id).length + (data.order.salesperson_user_id ? 1 : 0)} 人</small><i>→</i></button>
         <button type="button" onClick={() => onOpen("cargo")}><span>货物与标签</span><small>{data.packageLabels.length} 张</small><i>→</i></button>
         <button type="button" onClick={() => onOpen("attachments")}><span>文件汇总</span><small>{data.attachments.length} 个</small><i>→</i></button>
+        <Link to={withSessionSlot(`/admin/orders/tracking?orderId=${encodeURIComponent(order.id)}`, sessionSlotFromUrl(location.pathname + location.search))}><span>订单运踪（只读）</span><i>→</i></Link>
         <button type="button" onClick={() => onOpen("supplements")}><span>资料补录</span><small>{data.supplementTasks.filter((item)=>item.status==="open").length} 项待办</small><i>→</i></button>
         <button type="button" onClick={() => onOpen("history")}><span>历史节点与日志</span><small>{data.history.length + data.macro.length} 条</small><i>→</i></button>
       </div>

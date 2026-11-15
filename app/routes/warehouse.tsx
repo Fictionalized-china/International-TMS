@@ -16,6 +16,7 @@ import { loadInternalNotificationSummary } from "../lib/internal-notifications.s
 import { isBossBusinessActor } from "../lib/permission-blocks";
 import { sessionSlotFromRequest, withSessionSlot } from "../lib/session-slot";
 import { bossWarehouseHref } from "../components/BossWarehouseEntry";
+import { warehouseRelatedOrderSql } from "../lib/warehouse-related-order";
 
 type WarehouseOrder = {
   id: string;
@@ -40,17 +41,21 @@ export async function loader({ request }: Route.LoaderArgs) {
 
   const url = new URL(request.url);
   const orderId = url.searchParams.get("orderId");
+  const readOnlyTracking = url.pathname.replace(/\/+$/, "").toLowerCase() === "/warehouse/order-tracking";
   let orderContext: (WarehouseOrder & {
     module: Awaited<ReturnType<typeof listOrderModules>>[number] | null;
   }) | null = null;
   let warehouseFlow: WarehouseFlow | null = null;
-  if (orderId) {
+  // The read-only timeline authorizes its selected order itself. Do not run
+  // inventory/module projections just to view history, including legacy orders.
+  if (orderId && !readOnlyTracking) {
+    const relatedOrder = warehouseRelatedOrderSql(warehouse.id, warehouse.warehouse_role);
     const order = await env.DB.prepare(
       `SELECT o.id,o.order_number,c.name customer_name,o.status,o.business_type
        FROM transport_orders o JOIN customers c ON c.id=o.customer_id
-       WHERE o.id=? AND o.organization_id=?`,
+       WHERE o.id=? AND o.organization_id=? AND ${relatedOrder.sql}`,
     )
-      .bind(orderId, user.organizationId)
+      .bind(orderId, user.organizationId, ...relatedOrder.values)
       .first<WarehouseOrder>();
     if (order) {
       const [modules, operational, loadPlan] = await Promise.all([
@@ -181,6 +186,9 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
             </NavLink>
           )}
           <span className="warehouse-nav-group nav-title">库存管理</span>
+          <NavLink to={warehouseLink("/warehouse/order-tracking", loaderData.query)}>
+            <span><AppIcon name="map" size={17}/></span>订单运踪（只读）
+          </NavLink>
           <NavLink to={warehouseLink("/warehouse/inventory", loaderData.query)}>
             <span><AppIcon name="archive" size={17} /></span>仓库货物与盘点
           </NavLink>

@@ -9,7 +9,7 @@ import { sessionSlotFromUrl, withSessionSlot } from "./session-slot";
 
 export type AdminWorkspaceKey = "portal" | "trackingCenter" | "orders" | "billing" | "sales";
 export type AdminWorkspaceSection = {
-  key: AdminNavigationItemKey | "vehicles" | "directIntake" | "batchTracking";
+  key: AdminNavigationItemKey | "vehicles" | "directIntake" | "batchTracking" | "orderTracking";
   label: string;
   href: string;
 };
@@ -41,6 +41,7 @@ export function adminWorkspaceSections(user: AdminNavigationUser, workspace: Adm
     (can("trackingCenter") || can("shipments")) && { key: "vehicles", label: "在途车辆", href: "/admin/domestic-tracking" },
   ] : workspace === "orders" ? [
     can("orders") && { key: "orders", label: "订单台账", href: "/admin/orders" },
+    can("orders") && { key: "orderTracking", label: "订单运踪（只读）", href: "/admin/orders/tracking" },
     can("cargo") && { key: "cargo", label: "货物检索", href: "/admin/cargo" },
     user.permissions.includes("menu.admin.orders.view") && user.permissions.includes("order.intake.manage") &&
       { key: "directIntake", label: "直接录单", href: "/admin/quotations?entryMode=direct" },
@@ -96,6 +97,7 @@ function directIntake(pathname: string, search: string) {
 export function adminWorkspaceSectionActive(section: AdminWorkspaceSection, pathname: string, search = "") {
   pathname = canonicalPath(pathname);
   if (section.key === "batchTracking") return within(pathname, "/admin/loading");
+  if (section.key === "orders" && within(pathname, "/admin/orders/tracking")) return false;
   if (section.key === "dashboard") return pathname === "/admin" || pathname === "/admin/";
   if (section.key === "directIntake") return directIntake(pathname, search);
   if (section.key === "quotations") return within(pathname, "/admin/quotations") && !directIntake(pathname, search);

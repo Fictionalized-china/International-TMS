@@ -24,6 +24,7 @@ import { loadBusinessProcessPolicy } from "./business-process-policy.server";
 import { defaultBusinessProcessPolicy, policyEnabled, policyPositions, type BusinessProcessPolicyKey } from "./business-process-policy";
 import { activePositionProfilePredicate, loadActivePositionAccessProfile } from "./position-access-profile.server";
 import { isBossBusinessActor } from "./permission-blocks";
+import { canReadConsignmentExpenses } from "./consignment-expenses";
 
 const actionPositionPolicy:Readonly<Record<string,BusinessProcessPolicyKey>>={
   submit:"order.submit_positions",cancel_draft:"order.submit_positions",
@@ -124,6 +125,10 @@ export async function validateOrderWorkflowAction(input: {
   const profile=await loadActivePositionAccessProfile(env.DB,input.organizationId,input.actorUserId);
   if(!profile)return {ok:false as const,reason:"账号、部门、岗位或角色已停用，请重新登录后办理",order,transition};
   if(!profile.permissions.includes("order.view"))return {ok:false as const,reason:"当前账号订单查看权限已撤销，不能继续办理",order,transition};
+  if (input.actionCode === "approve" && !canReadConsignmentExpenses({
+    permissions: profile.permissions, userId: input.actorUserId, salespersonUserId: order.salesperson_user_id,
+    responsibleUserIds: [order.current_assignee_user_id],
+  })) return { ok: false as const, reason: "当前账号不能查看本单应收应付，不能盲审通过；请配置本单审核所需的费用查看能力", order, transition };
   const actorPosition={code:profile.positionCode};
   const processPolicy = await loadBusinessProcessPolicy(input.organizationId);
   if(input.actionCode==='submit'&&actorPosition?.code==='HR_ADMIN'&&!policyEnabled(processPolicy,'order.hr_emergency_enabled'))return {ok:false as const,reason:'人事紧急协助录单已停用',order,transition};
@@ -374,6 +379,11 @@ export async function executeOrderWorkflowAction(input: {
     historyId = crypto.randomUUID(),
     assignee = input.assigneeUserId || null;
   const requiredPermissions=["order.view",...(["submit","cancel_draft"].includes(input.actionCode)?["order.intake.manage"]:[])];
+  if (input.actionCode === "approve") requiredPermissions.push(
+    checked.profile.permissions.includes("billing.sensitive.view") ? "billing.sensitive.view" :
+      checked.profile.permissions.includes("billing.assigned_expense.review") && order.salesperson_user_id === input.actorUserId
+        ? "billing.assigned_expense.review" : "order.module.costs.manage",
+  );
   const authority=activePositionProfilePredicate({organizationId:input.organizationId,userId:input.actorUserId,profile:checked.profile,requiredPermissions});
   const usedPolicies=new Set<BusinessProcessPolicyKey>();
   if(actionPositionPolicy[input.actionCode])usedPolicies.add(actionPositionPolicy[input.actionCode]);

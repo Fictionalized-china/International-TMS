@@ -62,9 +62,16 @@ describe("consolidated admin navigation", () => {
 
   it("exposes direct intake only with its independent write permission, regardless of quotation permission", () => {
     const readOnly = user(["menu.admin.orders.view", "order.view"]);
-    expect(adminWorkspaceSections(readOnly, "orders").map(section => section.key)).toEqual(["orders"]);
-    expect(adminWorkspaceSections(user([...readOnly.permissions, "order.intake.manage"]), "orders").map(section => section.key)).toEqual(["orders", "directIntake"]);
+    expect(adminWorkspaceSections(readOnly, "orders").map(section => section.key)).toEqual(["orders", "orderTracking"]);
+    expect(adminWorkspaceSections(user([...readOnly.permissions, "order.intake.manage"]), "orders").map(section => section.key)).toEqual(["orders", "orderTracking", "directIntake"]);
     expect(adminWorkspaceSections(user(["menu.admin.quotations.view", "quote.view", "quote.manage"]), "sales").map(section => section.key)).toEqual(["quotations"]);
+  });
+  it("offers only one active order tab for the scoped read-only timeline, without any tracking write grant", () => {
+    const actor = user(["menu.admin.orders.view", "order.view"]);
+    const sections = adminWorkspaceSections(actor, "orders");
+    expect(sections.filter(section => adminWorkspaceSectionActive(section, "/admin/orders/tracking")).map(section => section.key)).toEqual(["orderTracking"]);
+    expect(actor.permissions).not.toContain("order.module.tracking.manage");
+    expect(adminWorkspaceSections(user(["order.view"]), "orders")).toEqual([]);
   });
 
   it("offers the tracking role a batch-level entrance only with batch read access", () => {

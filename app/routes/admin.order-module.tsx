@@ -18,6 +18,8 @@ import { DateTimeSelect } from "../components/DateTimeSelect";
 import { intakeRouteFields } from "../lib/intake-route-fields";
 import { intakeOperationFields, intakeOperationFieldKey, intakeOperationDisplay, readIntakeOperations } from "../lib/intake-operations";
 import { consignmentCargoSummary, consignmentIntakeOperations } from "../lib/consignment-facts";
+import { canReadConsignmentExpenses } from "../lib/consignment-expenses";
+import { ConsignmentExpenseLedger } from "../components/ConsignmentExpenseLedger";
 import { businessDateTimeLabel } from "../lib/business-time";
 import { requireSessionUser } from "../lib/auth.server";
 import { dispatchWorkspaceHref } from "../lib/transport-workspace-access";
@@ -307,6 +309,7 @@ function formatMarkContacts(value: string | null) {
 }
 
 const embeddedModuleFormAction = createContext<string | undefined>(undefined);
+const approvalInformationGrid = createContext(false);
 
 function Form(props: ComponentProps<typeof RouterForm>) {
   const inheritedAction = useContext(embeddedModuleFormAction);
@@ -937,6 +940,14 @@ export async function loader(
     : await listOrderModules(current.organizationId, orderId);
   const module = modules.find((item) => item.module_code === moduleCode);
   if (!module) throw new Response("订单模块不存在", { status: 404 });
+  // The enclosing order access check remains authoritative. Business amounts
+  // for an assigned cost maintainer do not grant bank or settlement access.
+  const canViewConsignmentExpenses = moduleCode === "consignment" && canReadConsignmentExpenses({
+    permissions: current.permissions,
+    userId: current.userId,
+    salespersonUserId: order.salesperson_user_id,
+    responsibleUserIds: [order.current_assignee_user_id, ...modules.map(item => item.assignee_user_id)],
+  });
   const assignmentManifest = moduleCode === "assignment"
     ? await loadOrderAssignmentManifest(current.organizationId, orderId)
     : null;
@@ -1069,7 +1080,7 @@ export async function loader(
       .bind(orderId, current.organizationId)
       .all<Shipment>(),
   ]);
-  const expenseRowsPromise: Promise<{ results: Expense[] }> = !canViewExpenseSummary
+  const expenseRowsPromise: Promise<{ results: Expense[] }> = !canViewExpenseSummary && !canViewConsignmentExpenses
     ? Promise.resolve({ results: [] })
     : canViewFullExpenseDetails
       ? env.DB.prepare(
@@ -1086,12 +1097,13 @@ export async function loader(
     expenseRowsPromise,
     order.quotation_id && canViewExpenseSummary
       ? env.DB.prepare(
-          `SELECT id,charge_code,description,quantity,unit_price,amount,exchange_rate
-           FROM quotation_charges
-           WHERE quotation_id=?
-           ORDER BY sort_order,id`,
+          `SELECT charge.id,charge.charge_code,charge.description,charge.quantity,charge.unit_price,charge.amount,charge.exchange_rate
+           FROM quotation_charges charge
+           JOIN quotations source_quote ON source_quote.id=charge.quotation_id AND source_quote.organization_id=?
+           WHERE charge.quotation_id=?
+           ORDER BY charge.sort_order,charge.id`,
         )
-          .bind(order.quotation_id)
+          .bind(current.organizationId,order.quotation_id)
           .all<QuoteCharge>()
       : Promise.resolve({ results: [] as QuoteCharge[] }),
     env.DB.prepare(
@@ -1534,6 +1546,7 @@ export async function loader(
           quotation_total_amount: null,
         },
     canViewExpenseSummary,
+    canViewConsignmentExpenses,
     processPolicy: await loadBusinessProcessPolicy(current.organizationId),
     meetingSettlement,
     settlementDirections,
@@ -5026,7 +5039,7 @@ export function EmbeddedOrderModule({
               busy={busy}
             />
             <OrderApprovalReview
-              data={scopedData}
+              data={{ ...scopedData, workflowFields: data.workflowFields }}
               manage={manage}
               canApproveConsignment={canApproveConsignment}
               busy={busy}
@@ -7841,9 +7854,6 @@ function ModuleBusinessData({
       "pre_receivable_expenses",
     );
     const showQuotationChargeTable = quotationChargePolicy.visible || inheritedReceivablePolicy.visible;
-    const supplementalExpenses = data.expenses.filter(
-      (expense) => !["quotation", "quotation_charge"].includes(expense.source_type || ""),
-    );
     return (
       <div className="module-business-stack consignment-business-stack">
         {showInfo && <section className="consignment-form-sheet" aria-label="委托信息">
@@ -7859,8 +7869,8 @@ function ModuleBusinessData({
           <InformationTable items={intakeRouteFields.filter(field=>!data.workflowFields.some(rule=>rule.fieldKey===field.fieldKey)).map(field=>({label:field.label,value:data.order[field.column]||"尚未记录"}))}/>
           <InformationTable items={intakeOperationFields.filter(field=>!data.workflowFields.some(rule=>rule.fieldKey===intakeOperationFieldKey(field.key))).map(field=>({label:field.label,value:intakeOperationDisplay(field.key,intake[field.key])||"尚未记录"}))}/>
           {showQuotationInformation && <WorkflowInformationGroup
-            title="询价报价确认资料"
-            hint="只展示当前订单锁定工作流在第一步设为显示的字段；必填状态沿用该版本规则。"
+            title="委托业务资料"
+            hint="展示当前订单资料；字段显示和必填状态沿用本单冻结工作流，已录资料不重复填写。"
             fields={data.workflowFields}
             items={[
               { fieldKey: "quotation_customer_contact_name", label: "客户联系人", value: data.order.quotation_customer_contact_name || "" },
@@ -7925,8 +7935,8 @@ function ModuleBusinessData({
             title="时间与备注"
             fields={data.workflowFields}
             items={[
-              { fieldKey: "requested_pickup_date", label: "预约提货时间", value: data.order.requested_pickup_date || "" },
-              { fieldKey: "cargo_ready_at", label: "货好时间", value: data.order.cargo_ready_at ? formatDateTime(data.order.cargo_ready_at) : "" },
+              { fieldKey: "requested_pickup_date", label: "预约提货时间（北京时间）", value: businessDateTimeLabel(data.order.requested_pickup_date) },
+              { fieldKey: "cargo_ready_at", label: "货好时间（北京时间）", value: businessDateTimeLabel(data.order.cargo_ready_at) },
               { fieldKey: "requested_delivery_date", label: "要求送达日", value: data.order.requested_delivery_date || "" },
               { fieldKey: "ro_agent", label: "RO 代理", value: data.order.ro_agent || "" },
               { fieldKey: "special_instructions", label: "备注", value: data.order.special_instructions || "" },
@@ -7958,9 +7968,8 @@ function ModuleBusinessData({
 
         {showCosts && <section className="consignment-form-sheet" aria-label="订单费用">
           <header>
-            <div><h3>订单费用</h3><p>报价费用自动继承且保持只读；业务员可新增本订单后续产生的应收或应付费用。</p></div>
+            <div><h3>订单费用</h3><p>当前应收应付直接引用本单台账；来源报价仅作历史参考，业务或操作责任人按权限维护费用。</p></div>
             <div className="consignment-cost-actions" id="consignment-cost-actions">
-              {showQuotationChargeTable && <strong className="consignment-total-amount">{data.order.quotation_currency && data.order.quotation_total_amount != null ? `${data.order.quotation_currency} ${Number(data.order.quotation_total_amount).toLocaleString()}` : "—"}</strong>}
               {manage&&<Modal title="新增订单费用" triggerLabel="新增费用" triggerClassName="primary" size="wide" closeSignal={moduleActionData?.success}>
                 {moduleActionData?.formError&&<div className="alert error" role="alert">{moduleActionData.formError}</div>}
                 <div className="alert">新增费用会进入订单费用台账，后续在“对账结算”节点统一确认、审核和锁定。</div>
@@ -7968,7 +7977,10 @@ function ModuleBusinessData({
               </Modal>}
             </div>
           </header>
-          {showQuotationCosts?<>
+          <ConsignmentExpenseLedger expenses={data.expenses} canRead={data.canViewConsignmentExpenses} canReadMargin={data.canViewFullExpenseDetails}/>
+          {showQuotationCosts?<details className="expandable">
+            <summary>来源报价（历史参考，不重复计入当前费用）</summary>
+            {showQuotationChargeTable && <strong className="consignment-total-amount">{data.order.quotation_currency && data.order.quotation_total_amount != null ? `${data.order.quotation_currency} ${Number(data.order.quotation_total_amount).toLocaleString()}` : "—"}</strong>}
             <WorkflowInformationGroup
               title="报价时效"
               fields={data.quotationCostWorkflowFields}
@@ -7983,19 +7995,7 @@ function ModuleBusinessData({
                 </tbody>
               </table>
             </div>}
-          </>:<div className="alert workflow-hidden-data-note">当前工作流已隐藏询价报价费用与有效期；历史金额仍保留用于结算和审计。</div>}
-          <section className="consignment-form-group consignment-supplemental-expenses">
-            <h4>新增订单费用 <span>{supplementalExpenses.length} 项</span></h4>
-            <div className="table-wrap">
-              <table>
-                <thead><tr><th>方向</th><th>费用名称</th><th>往来单位</th><th>币种</th><th>汇率</th><th>数量</th><th>单价</th><th>金额</th><th>状态</th><th>备注</th></tr></thead>
-                <tbody>
-                  {supplementalExpenses.map((expense)=><tr key={expense.id}><td><span className={`status-pill ${expense.direction==="payable"?"warning":"success"}`}>{expense.direction==="receivable"?"应收":"应付"}</span></td><td><strong>{expense.charge_name}</strong><small>{expense.charge_code}</small></td><td>{expense.counterparty_name||"—"}</td><td>{expense.currency}</td><td>{expense.exchange_rate}</td><td>{expense.quantity}</td><td>{expense.unit_price.toLocaleString()}</td><td><strong>{expense.amount.toLocaleString()}</strong></td><td>{expenseStageLabel(expense.stage)}</td><td>{expense.notes||"—"}</td></tr>)}
-                  {!supplementalExpenses.length&&<tr><td colSpan={10} className="empty-state">暂无新增费用；如报价之外产生其他费用，请点击右上角“新增费用”。</td></tr>}
-                </tbody>
-              </table>
-            </div>
-          </section>
+          </details>:<div className="alert workflow-hidden-data-note">当前工作流已隐藏询价报价费用与有效期；历史金额仍保留用于结算和审计。</div>}
         </section>}
 
         {showConsignmentActionBar && <ConsignmentReviewActionBar data={data} busy={busy} />}
@@ -8844,9 +8844,6 @@ function OrderApprovalReview({
   const [approvalAction, setApprovalAction] = useState<"approve" | "reject">("approve");
   const [decisionOpen, setDecisionOpen] = useState(false);
   const [approvalNotes, setApprovalNotes] = useState("资料完整，同意进入任务分配");
-  if (!canApproveConsignment) {
-    return <ConsignmentApprovalStatusTable data={data} />;
-  }
   const operationSupervisors = data.members.filter((member) =>
     policyPositions(data.processPolicy, "order.approve_positions").includes(member.position_code ?? "") &&
     organizationAssigneeCanHandle(
@@ -8864,7 +8861,7 @@ function OrderApprovalReview({
     .join(" ");
   return <div className="approval-sheet">
     <section className="approval-section">
-      <header><strong>审批资料一览</strong><span>详细委托资料可在右侧“订单关键资料”查看</span></header>
+      <header><strong>审批资料一览</strong><span>完整委托、逐条货物及本单应收应付在下方直接展开。</span></header>
       <div className="approval-facts approval-facts--complete">
         <Info label="客户" value={order.customer_name} className="span-2" />
         <Info label="订单号" value={order.order_number} />
@@ -8880,6 +8877,18 @@ function OrderApprovalReview({
         <Info label="境外目的仓" value={order.overseas_warehouse_name || "—"} />
       </div>
     </section>
+    <approvalInformationGrid.Provider value={true}><ModuleBusinessData code="consignment" data={data} manage={false} canWriteField={() => false}
+      canApproveConsignment={false} busy={busy} reviewCloseSignal={reviewCloseSignal}
+      consignmentSection="info" showConsignmentActionBar={false}/></approvalInformationGrid.Provider>
+    <section className="approval-section" aria-label="审核货物明细">
+      <header><strong>货物明细</strong><span>商品数量与入仓包装分开，重量和体积按计划包装汇总。</span></header>
+      <div className="table-wrap" role="region" aria-label="审核货物明细，可左右滚动" tabIndex={0}><table>
+        <thead><tr><th>中文品名</th><th>商品数量</th><th>入仓包装</th><th>毛重 KG</th><th>体积 CBM</th></tr></thead>
+        <tbody>{cargo.map(item => <tr key={item.id}><td>{item.cargo_name_cn}</td><td>{consignmentCargoSummary([item], order.declared_quantity_unit).quantityLabel}</td><td>{item.package_count} 包</td><td>{(item.package_count * item.gross_weight_per_package_kg).toLocaleString("zh-CN", { maximumFractionDigits: 8 })}</td><td>{(item.package_count * item.volume_per_package_cbm).toLocaleString("zh-CN", { maximumFractionDigits: 8 })}</td></tr>)}
+          {!cargo.length && <tr><td colSpan={5} className="empty-state">尚未录入货物，不能以空清单完成审核。</td></tr>}
+        </tbody></table></div>
+    </section>
+    <ConsignmentExpenseLedger expenses={data.expenses} canRead={data.canViewConsignmentExpenses} canReadMargin={data.canViewFullExpenseDetails}/>
     <ModuleSourceDocuments
       code="consignment"
       data={data}
@@ -8888,11 +8897,12 @@ function OrderApprovalReview({
       busy={busy}
       reviewCloseSignal={reviewCloseSignal}
     />
-    <section className="approval-section approval-decision">
+    {canApproveConsignment ? <section className="approval-section approval-decision">
       <header><strong>审批办理</strong><span>{combinedReviewAssignment ? "通过后在本页展开任务分配；驳回则退回原业务员" : "选择通过或打回；通过时指定下一步具体操作主管"}</span>
         {combinedReviewAssignment && <button type="button" className="primary" aria-expanded={decisionOpen} aria-controls="consignment-approval-form" disabled={busy} onClick={() => setDecisionOpen((open) => !open)}>审核结果</button>}
       </header>
       {(!combinedReviewAssignment || decisionOpen) && <>
+      {approvalAction === "approve" && !data.canViewConsignmentExpenses && <div className="alert error" role="alert">当前账号不能查看本单应收应付，不能盲审通过；请为本单审核责任人配置必要费用查看能力。驳回入口仍可使用。</div>}
       {approvalAction === "approve" && !operationSupervisors.length && <div className="alert error" role="alert">没有同时具备订单查看、任务分配和配载审批权限的有效操作主管；请先调整组织人员或个人权限。</div>}
       <Form method="post" id="consignment-approval-form" className="approval-inline-form">
         <input type="hidden" name="intent" value="workflow_action" />
@@ -8918,10 +8928,10 @@ function OrderApprovalReview({
             <strong>{salesperson?.display_name || "原业务员"}</strong>
             <small>退回后恢复资料编辑，由原业务员补充并重新提交审批</small>
           </div>}
-        <button className="primary approval-submit-button" disabled={busy || !canApproveConsignment || (approvalAction === "approve" ? !cargo.length || !operationSupervisors.length : !order.salesperson_user_id || approvalNotes.trim().length < 2)}>{approvalAction === "approve" ? combinedReviewAssignment ? "审核通过，展开任务分配" : "审批通过并进入任务分配 →" : "驳回并退回业务员"}</button>
+        <button className="primary approval-submit-button" disabled={busy || !canApproveConsignment || (approvalAction === "approve" ? !data.canViewConsignmentExpenses || !cargo.length || !operationSupervisors.length : !order.salesperson_user_id || approvalNotes.trim().length < 2)}>{approvalAction === "approve" ? combinedReviewAssignment ? "审核通过，展开任务分配" : "审批通过并进入任务分配 →" : "驳回并退回业务员"}</button>
       </Form>
       </>}
-    </section>
+    </section> : <ConsignmentApprovalStatusTable data={data}/>}
   </div>;
 }
 function ConsignmentApprovalStatusTable({
@@ -9067,8 +9077,16 @@ function InformationTable({
   fields?: WorkflowFieldState[];
   className?: string;
 }) {
+  const grid = useContext(approvalInformationGrid);
   const visibleItems = items.filter((item) => !item.fieldKey || !fields || workflowFieldPolicy(fields, item.fieldKey).visible);
   if (!visibleItems.length) return null;
+  if (grid) return <dl className="approval-information-grid">{visibleItems.map(item => {
+    const policy = item.fieldKey && fields ? workflowFieldPolicy(fields, item.fieldKey) : null;
+    const present = workflowDisplayValuePresent(item.value);
+    return <div key={item.fieldKey || item.label} data-workflow-field={item.fieldKey} className={policy?.required && !present ? "required-missing" : present ? "filled" : "optional-empty"}>
+      <dt>{policy?.label || item.label}{policy?.required ? " *" : ""}</dt><dd>{present ? item.value : "—"}</dd>
+    </div>;
+  })}</dl>;
   return <div className={["table-wrap", "module-record-table", "information-table", className].filter(Boolean).join(" ")}>
     <table>
       <thead><tr>{visibleItems.map((item) => {
