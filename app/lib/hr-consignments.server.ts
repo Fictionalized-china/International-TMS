@@ -2,6 +2,7 @@ import type { SessionUser } from "./auth.server";
 import { orderVisibilitySql } from "./order-access";
 import { chunkD1Values, d1Placeholders } from "./d1-bindings";
 import { businessDateTimeLabel } from "./business-time";
+import { readIntakeOperations } from "./intake-operations";
 import { reportCsv } from "./hr-reports";
 import { statusLabel } from "./order-workflow";
 import { hrCashStates, readHrConsignmentFilters, type HrCashState, type HrConsignmentFilters } from "./hr-consignments";
@@ -26,10 +27,13 @@ export async function loadHrConsignments(db: D1Database, current: SessionUser, f
     values.push(filters.to, new Date(Date.parse(`${filters.to}T00:00:00+08:00`) + 86400000).toISOString().slice(0, 19).replace("T", " "));
   }
   const candidates = (await db.prepare(`SELECT o.id,o.order_number,o.order_date,o.created_at,c.name customer_name,o.business_type,o.status,
-    o.quote_commercial_user_id,o.quote_commercial_name_snapshot,o.salesperson_user_id,sales.display_name salesperson_name,creator.display_name creator_name
+    o.intake_operations_json,o.quote_commercial_user_id,o.quote_commercial_name_snapshot,o.salesperson_user_id,sales.display_name salesperson_name,creator.display_name creator_name
     FROM transport_orders o JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
     LEFT JOIN users sales ON sales.id=o.salesperson_user_id LEFT JOIN users creator ON creator.id=o.created_by_user_id
-    WHERE ${conditions.join(" AND ")} ORDER BY o.created_at DESC,o.id`).bind(...values).all<Candidate>()).results;
+    WHERE ${conditions.join(" AND ")} ORDER BY o.created_at DESC,o.id`).bind(...values).all<Candidate&{intake_operations_json:string|null}>()).results.map(({intake_operations_json,...row})=>{
+      const plan=readIntakeOperations(intake_operations_json);
+      return{...row,businessMajor:typeof plan.businessMajor==='string'?plan.businessMajor:'',businessKind:typeof plan.businessKind==='string'?plan.businessKind:''};
+    });
   const people = (key: "quote_commercial_user_id" | "salesperson_user_id", name: "quote_commercial_name_snapshot" | "salesperson_name") => {
     const peopleById = new Map<string, { id: string; name: string }>();
     // Rows are newest first. Keep the most recent recorded name per identity;
@@ -41,7 +45,7 @@ export async function loadHrConsignments(db: D1Database, current: SessionUser, f
     return options.map(person => ({ ...person, name: names.get(person.name)! > 1 ? `${person.name}（${person.id.slice(-8)}）` : person.name }));
   };
   const commercialOptions = people("quote_commercial_user_id", "quote_commercial_name_snapshot"), salespersonOptions = people("salesperson_user_id", "salesperson_name");
-  const selected = candidates.filter(row => (!filters.commercial || row.quote_commercial_user_id === filters.commercial) && (!filters.salesperson || row.salesperson_user_id === filters.salesperson) && (!filters.businessType || row.business_type === filters.businessType));
+  const selected = candidates.filter(row => (!filters.commercial || row.quote_commercial_user_id === filters.commercial) && (!filters.salesperson || row.salesperson_user_id === filters.salesperson) && (!filters.businessType || row.business_type === filters.businessType) && (!filters.businessMajor||row.businessMajor.includes(filters.businessMajor)) && (!filters.businessKind||row.businessKind.includes(filters.businessKind)));
   const amounts = new Map<string, { receivable: Direction; payable: Direction; allocation: number }>();
   for (const chunk of chunkD1Values(selected.map(row => row.id), 1)) {
     const fees = await db.prepare(`SELECT e.order_id,e.direction,e.stage,e.amount,e.exchange_rate,
@@ -92,7 +96,7 @@ export async function loadHrConsignments(db: D1Database, current: SessionUser, f
 }
 export type HrConsignmentRow = Awaited<ReturnType<typeof loadHrConsignments>>["rows"][number];
 export function hrConsignmentCsv(rows: readonly HrConsignmentRow[]) {
-  return reportCsv([["订单", "接单日期", "客户", "装车方式", "业务状态", "报价商务标识", "报价商务（订单快照）", "业务员标识", "业务员", "实际录单人", "预估应收CNY", "确认应收CNY", "预估应付CNY", "确认应付CNY", "已确认配载分摊CNY（已含于应付，不另加）", "收款核销CNY", "付款核销CNY", "应收核销状态", "应付核销状态", "符合现有回款提成登记口径"],
+  return reportCsv([["订单", "接单日期", "客户", "装车方式", "业务状态", "报价商务标识", "报价商务（订单快照）", "业务员标识", "业务员", "实际录单人", "预估应收CNY", "确认应收CNY", "预估应付CNY", "确认应付CNY", "已确认配载分摊CNY（已含于应付，不另加）", "收款核销CNY", "付款核销CNY", "应收核销状态", "应付核销状态", "符合现有回款提成登记口径", "业务大类", "业务类型"],
     ...rows.map(row => [row.order_number, row.order_date, row.customer_name, row.business_type === "ltl" ? "拼车" : row.business_type === "ftl" ? "整车" : row.business_type, statusLabel(row.status), row.quote_commercial_user_id, row.quote_commercial_name_snapshot || "历史未记录", row.salesperson_user_id, row.salesperson_name, row.creator_name,
-      row.amounts?.estimatedReceivable, row.amounts?.confirmedReceivable, row.amounts?.estimatedPayable, row.amounts?.confirmedPayable, row.amounts?.confirmedAllocation, row.amounts?.receiptAllocated, row.amounts?.paymentAllocated, hrCashStates[row.receiptState], hrCashStates[row.paymentState], row.commissionEligible ? "是；比例/金额由人事人工核定" : "否"])]);
+      row.amounts?.estimatedReceivable, row.amounts?.confirmedReceivable, row.amounts?.estimatedPayable, row.amounts?.confirmedPayable, row.amounts?.confirmedAllocation, row.amounts?.receiptAllocated, row.amounts?.paymentAllocated, hrCashStates[row.receiptState], hrCashStates[row.paymentState], row.commissionEligible ? "是；比例/金额由人事人工核定" : "否",row.businessMajor||"历史未记录",row.businessKind||"历史未记录"])]);
 }

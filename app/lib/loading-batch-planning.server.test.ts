@@ -36,6 +36,14 @@ beforeEach(async()=>{
   database.exec(readFileSync(new URL("../../migrations/0167_loading_integrity_and_sync.sql",import.meta.url),"utf8"));
   harness.db=sqliteD1(database);harness.notification.mockImplementation(()=>harness.db.prepare("SELECT 1"));
   database.exec("INSERT INTO transport_batches VALUES('batch','org','planning','PZ-TEST','operator','doc','warehouse','supervisor','draft',NULL)");
+  database.exec(`ALTER TABLE transport_batches ADD COLUMN order_id TEXT;
+    CREATE TABLE transport_orders(id TEXT PRIMARY KEY,organization_id TEXT,order_number TEXT,customer_id TEXT,business_type TEXT,transport_mode TEXT,
+      salesperson_user_id TEXT,quote_commercial_user_id TEXT,quote_commercial_name_snapshot TEXT,origin_country TEXT,origin_state TEXT,origin_city TEXT,
+      destination_country TEXT,destination_state TEXT,destination_city TEXT,exit_port TEXT,transit_locations TEXT,customs_location TEXT,domestic_agent TEXT,
+      declared_quantity_unit TEXT,intake_operations_json TEXT);
+    CREATE TABLE mutation_commit_guards(id TEXT PRIMARY KEY,valid INTEGER NOT NULL,created_at TEXT);
+    INSERT INTO transport_orders(id,organization_id,order_number) VALUES('order','org','LEGACY-SO');
+    INSERT INTO transport_batch_orders VALUES('membership','org','batch','order','active');`);
   const {current:_c,requestId:_r,...payload}=request;
   const hash=await sha256(JSON.stringify({...payload,orderIds:[...request.orderIds].sort()}));
   database.prepare("INSERT INTO loading_planning_submissions(organization_id,actor_user_id,request_id,payload_hash,batch_id,result_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)")

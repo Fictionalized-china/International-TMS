@@ -66,6 +66,7 @@ import {
 } from "../lib/workflow-field-locator";
 import {
   validateWorkflowOperationalGateStructure,
+  validateIntakeRuleFieldReachability,
   validateWorkflowResponsibilityReadiness,
   validateWorkflowCoreStepOrder,
   validateWorkflowCoreModuleBindings,
@@ -1833,6 +1834,7 @@ function validateWorkflowConfiguration(
   issues.push(...validateWorkflowCoreModuleBindings(activeSteps, modules, tasks));
   issues.push(
     ...validateWorkflowOperationalGateStructure({ steps, modules, fields }),
+    ...validateIntakeRuleFieldReachability({steps,modules,fields}),
   );
   const quotationStep = activeSteps.find((step) => step.step_key === "quotation");
   if (quotationStep) {

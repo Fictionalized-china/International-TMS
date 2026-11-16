@@ -25,7 +25,7 @@ const harness = vi.hoisted(() => {
           if (query.includes("SELECT o.workflow_instance_id,wi.id matched_instance_id,wi.current_step_key")) {
             return state.binding;
           }
-          if (query.includes("SELECT f.id,f.module_code,f.step_key,f.field_key,f.is_active")) {
+          if (query.includes("SELECT f.id,f.module_code,f.step_key,f.field_key,")) {
             return state.selectedField;
           }
           return null;
@@ -52,6 +52,7 @@ const harness = vi.hoisted(() => {
       };
       return statement;
     },
+    async batch(statements: Array<{run():Promise<unknown>}>) { return Promise.all(statements.map(statement=>statement.run())); },
   };
   return { state, sql, DB };
 });
@@ -106,7 +107,7 @@ describe("frozen custom workflow field mutation gates", () => {
     await expect(save()).resolves.toBeUndefined();
     expect(harness.state.writes).toBe(1);
     expect(harness.sql.find((query) =>
-      query.includes("SELECT f.id,f.module_code,f.step_key,f.field_key,f.is_active"),
+      query.includes("SELECT f.id,f.module_code,f.step_key,f.field_key,"),
     )).toContain("o.workflow_instance_id=wi.id");
   });
 

@@ -35,9 +35,20 @@ export function OrderIntakeSupplement({orderId}:{orderId:string}) {
         <IntakeRouteFields references={snapshot.references} policy={visible} values={snapshot.order.routes} editableKeys={snapshot.canEdit?snapshot.routeKeys:[]}/>
         <div className="quote-field-grid">
           <label className="field"><span>报价商务</span>{snapshot.canEdit&&!snapshot.order.commercialId&&!snapshot.order.commercialName?.trim()?<select className="control" name="quoteCommercialUserId" defaultValue=""><option value="">请选择实际报价人（不自动猜填）</option>{snapshot.people.quoteCommercials.map(person=><option key={person.id} value={person.id}>{person.display_name}</option>)}</select>:<input className="control" readOnly value={snapshot.order.commercialName??snapshot.order.commercialId??"尚未记录"}/>}</label>
-          {snapshot.canEdit&&snapshot.missing.length>0&&<label className="field"><span>补录原因</span><textarea name="reason" minLength={2} maxLength={1000} required placeholder="说明所依据的原始委托或业务确认"/></label>}
+          {snapshot.canEdit&&(snapshot.missing.length>0||!snapshot.ruleVersion)&&<label className="field"><span>补录 / 规则升级依据</span><textarea name="reason" minLength={2} maxLength={1000} required placeholder="说明所依据的原始委托或业务确认"/></label>}
         </div>
         {snapshot.canEdit&&snapshot.missing.length>0?<button className="primary" disabled={busy}>{busy?"正在保存…":"保存已补资料（不推进节点）"}</button>:<p className="muted">{snapshot.missing.length?"当前账号仅可查看，请由本单业务、操作等有权责任人补录。":"本区资料已完整；修改已有内容需走受控更正。"}</p>}
+        <p className="readonly-note">{snapshot.ruleVersion?"本单已绑定录单必填检查；向前办理会重新核对，不影响合法补录、驳回或取消。":"历史订单未静默替换规则。补齐资料、货物与费用后，可应用当前录单检查；不会替换运输工作流或重开已完成事实。"}</p>
+        {snapshot.canEdit&&!snapshot.ruleVersion&&snapshot.missing.length===0&&<button className="secondary" name="intent" value="apply_intake_rule" disabled={busy}>{busy?"正在核对…":"核对并应用本单录单检查"}</button>}
+        {snapshot.canEdit&&(snapshot.order.commercialId||snapshot.order.commercialName?.trim())&&<details className="tracking-history-disclosure">
+          <summary>更正报价商务归属</summary>
+          <p>仅在原归属确有错误时使用，需填写依据并保留前后历史。不会改写原始报价、费用或已结算提成。</p>
+          <div className="quote-field-grid">
+            <label className="field"><span>实际报价商务</span><select name="quoteCommercialCorrectionId" defaultValue={snapshot.order.commercialId??""}><option value="">请选择实际报价人</option>{snapshot.people.quoteCommercials.map(person=><option key={person.id} value={person.id}>{person.display_name}</option>)}</select></label>
+            <label className="field"><span>归属更正依据</span><textarea name="correctionReason" maxLength={1000} placeholder="说明原归属为何有误及核对依据"/></label>
+          </div>
+          <button className="secondary" name="intent" value="correct_quote_commercial" formNoValidate disabled={busy}>{busy?"正在保存…":"保存归属更正并留痕"}</button>
+        </details>}
         </fieldset>
       </writer.Form>}
     </Modal>

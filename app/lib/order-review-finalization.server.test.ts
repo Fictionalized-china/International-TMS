@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const workflowFields = vi.hoisted(() => ({
   missing: [] as Array<{ label: string }>,
 }));
+vi.mock("cloudflare:workers", () => ({ env: {} }));
 
 vi.mock("./workflow-fields.server", () => ({
   missingRequiredModuleFields: vi.fn(async () => workflowFields.missing),

@@ -29,6 +29,7 @@ const harness = vi.hoisted(() => {
       const statement = {
         bind() { return statement; },
         async first<T>() {
+          if (sql.startsWith("SELECT customer_id,")) return { intake_operations_json: null } as T;
           if (sql.includes("SELECT id,batch_number,road_status FROM transport_batches")) return state.batch as T;
           if (sql.includes("SELECT o.id,o.order_number,o.business_type")) return state.standaloneOrder as T;
           if (sql.includes("SELECT b.id,b.batch_number") && sql.includes("FROM transport_batch_orders")) {
@@ -37,6 +38,8 @@ const harness = vi.hoisted(() => {
           return null;
         },
         async all<T>() {
+          if (sql.startsWith("SELECT order_id,'child'")) return { results: [{ order_id: "order-1", source: "child" }] as T[] };
+          if (sql.startsWith("SELECT id,order_number,customer_id,")) return { results: [{ id: "order-1", intake_operations_json: null }] as T[] };
           if (sql.includes("SELECT DISTINCT bo.order_id")) return { results: state.orders as T[] };
           return { results: [] as T[] };
         },

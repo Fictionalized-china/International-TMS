@@ -10,13 +10,16 @@ import type { OrderModuleCode } from "./order-modules";
 // This is a named, reviewable baseline, NOT an implicit activation for old orders.
 // Business category/type await their real dictionary; do not substitute FTL/LTL.
 export const knownIntakeRuleVersion = "known-red-2026-11-09-v1";
+export const currentIntakeRuleVersion = "red-intake-2026-11-16-v2";
 export const unresolvedIntakeDefinitions = ["业务大类", "业务类型"] as const;
 const baselineKeys = new Set([
   "quotation_salesperson_user_id", "quotation_quote_commercial_user_id",
   "quotation_origin_region", "quotation_destination_region",
   "quotation_cargo_description", "quotation_pieces", "quotation_gross_weight_kg", "quotation_volume_cbm",
   ...intakeRouteFields.map(field => field.fieldKey),
-  ...intakeOperationFields.map(field => intakeOperationFieldKey(field.key)),
+  // Preserve the named v1 baseline. New independent business classifications
+  // are required by the explicitly bound v2 contract, not silently by v1.
+  ...intakeOperationFields.filter(field => !["businessMajor", "businessKind"].includes(field.key)).map(field => intakeOperationFieldKey(field.key)),
 ]);
 export const knownIntakeRequirements = quotationNativeFieldCatalog.filter(field => baselineKeys.has(field.fieldKey));
 export type IntakeCompletenessIssue = {
@@ -72,5 +75,6 @@ export function evaluateOrderIntakeCompleteness(
   const missingFees = missingOrderIntakeFees(String(facts.order.business_type), validExpenses.map(row => ({ chargeCode: String(row.charge_code), chargeName: String(row.charge_name), amount: Number(row.amount), direction: row.direction as "receivable" | "payable" })), policy);
   for (const fee of missingFees) add({ fieldKey: `intake_fee_${fee.code}`, label: fee.label, reason: "未登记完整的对应方向费用；明确零值可以，缺明细或非法金额不可以", moduleCode: "costs", source: "expense" });
   if (required.has("quotation_charge_items") && !validExpenses.some(row => row.direction === "receivable") && !missingFees.some(fee => fee.code === "receivable")) add({ fieldKey: "quotation_charge_items", label: "客户应收费用", reason: "未登记完整的应收明细", moduleCode: "costs", source: "expense" });
-  return { ruleVersion: knownIntakeRuleVersion, coverage: "known-fields-only" as const, unresolvedDefinitions: [...unresolvedIntakeDefinitions], knownFieldsSatisfied: issues.length === 0, issues };
+  const classified=required.has("quotation_intake_businessMajor")&&required.has("quotation_intake_businessKind");
+  return { ruleVersion: classified?currentIntakeRuleVersion:knownIntakeRuleVersion, coverage: classified?"confirmed-red-fields" as const:"known-fields-only" as const, unresolvedDefinitions: classified?[]:[...unresolvedIntakeDefinitions], knownFieldsSatisfied: issues.length === 0, issues };
 }

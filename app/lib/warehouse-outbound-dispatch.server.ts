@@ -7,6 +7,8 @@ export type CompleteWarehouseDispatchTransactionInput = {
   occurredAt: string;
   description: string;
   transportBatchId?: string | null;
+  /** Server-authored checks committed before any physical handover writes. */
+  commitGuards?:readonly D1PreparedStatement[];
 };
 
 /**
@@ -33,6 +35,7 @@ export async function completeWarehouseDispatchTransaction(
     transportBatchId,
   } = input;
   const statements: D1PreparedStatement[] = [
+    ...(input.commitGuards??[]),
     db.prepare(
       `UPDATE warehouse_packing_batches
        SET status='dispatched',updated_at=?

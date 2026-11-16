@@ -1,5 +1,7 @@
 import { env } from "cloudflare:workers";
 import { syncOrderWorkflowSnapshot } from "./order-modules.server";
+import { prepareOrderIntakeAdvance,intakeGateCommitStatements,prepareBatchIntakeAdvance,intakeManyCommitStatements } from "./order-intake-gate.server";
+import { changedRowGuard,guardedBatch } from "./mutation-guard.server";
 import { portalOrderListLink } from "./portal-notification-links";
 import { loadOverseasInboundCustomsGates } from "./overseas-inbound-policy.server";
 
@@ -21,6 +23,8 @@ type AdvanceInput = {
   pickupContact?: string;
   pickupProofReference?: string;
   notes?: string;
+  /** Warehouse handover/stock/audit statements, never supplied by a form. */
+  atomicStatements?:readonly D1PreparedStatement[];
 };
 
 type AutomaticNoticeInput = {
@@ -81,6 +85,10 @@ export async function confirmOverseasBatchArrival(input: ArrivalInput) {
   );
   const customsBlocker = customsGates.find((gate) => gate.blocked);
   if (customsBlocker) throw new Error(customsBlocker.message || "批次清关门禁尚未通过");
+  const intakeSnapshots=await prepareBatchIntakeAdvance(input.organizationId,input.batchId);
+  const expectedOrders=new Set(orders.results.map(order=>order.order_id));
+  if(intakeSnapshots.length!==expectedOrders.size||intakeSnapshots.some(snapshot=>!expectedOrders.has(snapshot.orderId)))
+    throw new Error("批次订单已变化，请刷新到仓任务后重试");
 
   const now = new Date().toISOString();
   const statements = [
@@ -228,7 +236,7 @@ export async function confirmOverseasBatchArrival(input: ArrivalInput) {
          )`,
     ).bind(now, now, now, input.organizationId, input.batchId, input.organizationId),
   ];
-  await env.DB.batch(statements);
+  await guardedBatch(env.DB,[...intakeManyCommitStatements(intakeSnapshots,now),...statements],"批次资料或子订单已变化，请刷新核对后重试；本次到仓未提交");
   const warning = await finishOverseasArrivalPostCommit({
     organizationId: input.organizationId,
     orderIds: orders.results.map((item) => item.order_id),
@@ -272,11 +280,13 @@ async function confirmStandaloneOrderArrival(input: ArrivalInput & { orderId: st
   );
   if (!customsGate || customsGate.blocked)
     throw new Error(customsGate?.message || "整车订单清关门禁解析失败");
+  const intakeSnapshot=await prepareOrderIntakeAdvance(input.organizationId,input.orderId);
 
   const now = new Date().toISOString();
   const batch = await ensureStandaloneBatch(input.organizationId, input.orderId, input.actorUserId, now);
   const location = [order.warehouse_name, order.warehouse_address].filter(Boolean).join(" · ");
-  await env.DB.batch([
+  await guardedBatch(env.DB,[
+    ...intakeGateCommitStatements(intakeSnapshot,now),
     env.DB.prepare(
       "UPDATE transport_batches SET status='arrived',road_status='overseas_arrived',actual_arrival_at=COALESCE(actual_arrival_at,?),updated_at=? WHERE id=? AND organization_id=?",
     ).bind(input.actualArrivalAt, now, batch.id, input.organizationId),
@@ -355,7 +365,7 @@ async function confirmStandaloneOrderArrival(input: ArrivalInput & { orderId: st
       `UPDATE order_module_instances SET status='completed',current_step_code='arrived',current_step_name='到达境外仓',progress_percent=100,started_at=COALESCE(started_at,?),completed_at=COALESCE(completed_at,?),blocking_reason=NULL,updated_at=?
        WHERE organization_id=? AND order_id=? AND module_code='tracking' AND enabled=1`,
     ).bind(now, now, now, input.organizationId, input.orderId),
-  ]);
+  ],"订单资料已变化，请刷新核对后重试；本次到仓未提交");
   const warning = await finishOverseasArrivalPostCommit({
     organizationId: input.organizationId,
     orderIds: [input.orderId],
@@ -506,15 +516,17 @@ export async function advanceOverseasOrder(input: AdvanceInput) {
     ? "等待客户预约或扫码自提"
     : "扫码自提签收完成";
   const moduleStatus=input.action === "pickup" ? "completed" : "in_progress";
+  const intakeSnapshot=await prepareOrderIntakeAdvance(input.organizationId,input.orderId);
   const now = new Date().toISOString();
   const statements = [
+    ...intakeGateCommitStatements(intakeSnapshot,now),
     env.DB.prepare(
       `UPDATE overseas_warehouse_operations SET status=?,
          notified_at=CASE WHEN ?='notify' THEN ? ELSE notified_at END,
          pickup_at=CASE WHEN ?='pickup' THEN ? ELSE pickup_at END,
          pickup_contact=CASE WHEN ?='pickup' THEN ? ELSE pickup_contact END,
          pickup_proof_reference=CASE WHEN ?='pickup' THEN ? ELSE pickup_proof_reference END,
-         notes=COALESCE(?,notes),updated_by_user_id=?,updated_at=? WHERE id=?`,
+         notes=COALESCE(?,notes),updated_by_user_id=?,updated_at=? WHERE id=? AND organization_id=? AND order_id=? AND status=?`,
     ).bind(
       nextStatus,
       input.action,
@@ -529,7 +541,10 @@ export async function advanceOverseasOrder(input: AdvanceInput) {
       input.actorUserId,
       now,
       operation.id,
+      input.organizationId,input.orderId,operation.status,
     ),
+    changedRowGuard(env.DB,now),
+    ...(input.atomicStatements??[]),
     env.DB.prepare(
       `UPDATE order_module_instances SET status=?,current_step_code=?,current_step_name=?,progress_percent=?,started_at=COALESCE(started_at,?),completed_at=CASE WHEN ?='completed' THEN COALESCE(completed_at,?) ELSE NULL END,blocking_reason=NULL,updated_at=?
        WHERE organization_id=? AND order_id=? AND module_code='overseas_warehouse' AND enabled=1`,
@@ -617,9 +632,10 @@ export async function advanceOverseasOrder(input: AdvanceInput) {
       ).bind(crypto.randomUUID(),input.organizationId,input.orderId,input.actorUserId,now,now,input.organizationId,input.orderId),
     );
   }
-  await env.DB.batch(statements);
+  await guardedBatch(env.DB,statements,"自提状态、资料或库存已变化，本次整批未提交，请刷新核对后重试");
 
-  if (input.action === "pickup") {
+  let syncPending=false;
+  try{if (input.action === "pickup") {
     const remaining = await env.DB.prepare(
       "SELECT COUNT(*) total FROM overseas_warehouse_operations WHERE batch_id=? AND organization_id=? AND status NOT IN ('picked_up','cancelled')",
     )
@@ -633,7 +649,8 @@ export async function advanceOverseasOrder(input: AdvanceInput) {
         .run();
   }
   await syncOrderWorkflowSnapshot(input.organizationId, input.orderId);
-  return { nextStatus, stepName };
+  }catch(error){syncPending=true;console.error("OVERSEAS_HANDOVER_SYNC_PENDING",{orderId:input.orderId,error:String(error)});}
+  return { nextStatus, stepName,syncPending };
 }
 
 export async function completeOverseasOrderDelivery(input: {
@@ -669,7 +686,9 @@ export async function completeOverseasOrderDelivery(input: {
   if (!signedReceipt) throw new Error("签收单尚未上传并审核通过，不能归档签收记录");
 
   const now = input.occurredAt || new Date().toISOString();
-  await env.DB.batch([
+  const intakeSnapshot=await prepareOrderIntakeAdvance(input.organizationId,input.orderId);
+  await guardedBatch(env.DB,[
+    ...intakeGateCommitStatements(intakeSnapshot,now),
     env.DB.prepare(
       "UPDATE shipments SET status='delivered',current_location=?,actual_delivery_at=COALESCE(actual_delivery_at,?),signed_by=?,updated_at=? WHERE order_id=? AND organization_id=? AND status!='cancelled'",
     ).bind(
@@ -706,7 +725,7 @@ export async function completeOverseasOrderDelivery(input: {
               blocking_reason=NULL,updated_at=?
         WHERE organization_id=? AND order_id=? AND module_code='overseas_warehouse' AND enabled=1`,
     ).bind(now, now, now, input.organizationId, input.orderId),
-  ]);
+  ],"订单资料已变化，请刷新核对后重试；本次签收未提交");
   await syncOrderWorkflowSnapshot(input.organizationId, input.orderId);
   return { completed: true };
 }

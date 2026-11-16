@@ -1,5 +1,6 @@
 import { businessDateTimeLabel } from "../lib/business-time";
 import { env } from "cloudflare:workers";
+import { prepareBatchIntakeAdvance,intakeManyCommitStatements } from "../lib/order-intake-gate.server";
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Form, Link, useNavigate, useNavigation, useSearchParams } from "react-router";
 import type { Route } from "./+types/admin.loading-detail";
@@ -239,6 +240,8 @@ async function assignBatchResponsibilities(input:{
   const historyStatements:D1PreparedStatement[]=[];
   const insertStatements:D1PreparedStatement[]=[];
   const orderIds=[...new Set(input.targets.map(target=>target.orderId))];
+  const intakeSnapshots=input.mode==='approve'?await prepareBatchIntakeAdvance(input.organizationId,input.batchId):[];
+  if(input.mode==='approve'&&JSON.stringify(intakeSnapshots.map(row=>row.orderId).sort())!==JSON.stringify([...orderIds].sort()))throw new Error("配载单挂载范围已变化，请刷新后核对，本次未审批");
   for(const orderId of orderIds){
     const orderTargets=input.targets.filter(target=>target.orderId===orderId);
     for(const target of orderTargets){
@@ -315,6 +318,7 @@ async function assignBatchResponsibilities(input:{
     ...cancelStatements,
     ...historyStatements,
     ...insertStatements,
+    ...intakeManyCommitStatements(intakeSnapshots,input.now),
   ]);
   return Number(results[0]?.meta?.changes||0)>0;
 }
@@ -1284,6 +1288,7 @@ export async function action({request,params}:Route.ActionArgs){
     }catch(error){return{formError:errorMessage(error)}}
   }
   if(intent==="exit_confirm"){
+    const intakeSnapshots=await prepareBatchIntakeAdvance(current.organizationId,batchId);
     if(!trackingActionPolicy)return{formError:"当前冻结工作流无法核验实际出境动作"};
     const participatingOrderIds=new Set(trackingActionPolicy.participatingOrderIds);
     const workflowPolicies=(await loadBatchOrderWorkflowPolicies(current.organizationId,batchId)).filter(policy=>participatingOrderIds.has(policy.orderId));
@@ -1418,7 +1423,7 @@ export async function action({request,params}:Route.ActionArgs){
         WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
           AND bo.order_id IN (${d1Placeholders(chunk.length)})`).bind(exitPort,description,actualExitAt,current.userId,now,current.organizationId,batchId,...chunk)),
     ];
-    await env.DB.batch(statements);
+    await env.DB.batch([...intakeManyCommitStatements(intakeSnapshots,now),...statements]);
     const postCommitWarnings:string[]=[];
     try{await writeAudit({request,action:"transport.batch.exit.confirm",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{actualExitAt,exitPort,exitVehiclePlate,orders:participatingOrders.length}})}catch{postCommitWarnings.push("审计记录暂未写入")}
     const workflowEventFailures=(await mapWithConcurrency(participatingOrders,2,async item=>{
@@ -1506,6 +1511,7 @@ export async function action({request,params}:Route.ActionArgs){
       groupedTargets.set(key,group);
     }
     const trackingInsertStatements:D1PreparedStatement[]=[];
+    const intakeSnapshots=await prepareBatchIntakeAdvance(current.organizationId,batchId);
     for(const group of groupedTargets.values())for(const chunk of chunkD1Values(group.orderIds,16)){
       trackingInsertStatements.push(env.DB.prepare(`INSERT INTO order_tracking_milestones(
         id,organization_id,order_id,milestone_code,milestone_name,event_at,
@@ -1521,7 +1527,7 @@ export async function action({request,params}:Route.ActionArgs){
             AND existing.milestone_code=? AND existing.event_at=?
         )`).bind(current.organizationId,milestoneCode,milestoneDef.name,eventAt,group.location,group.vehicle,group.notes,group.visible?1:0,current.userId,now,current.organizationId,...chunk,current.organizationId,batchId,current.organizationId,milestoneCode,eventAt));
     }
-    await env.DB.batch(trackingInsertStatements);
+    await env.DB.batch([...intakeManyCommitStatements(intakeSnapshots,now),...trackingInsertStatements]);
     const postCommitWarnings:string[]=[];
     try{await writeAudit({request,action:"transport.batch.tracking.add",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{milestoneCode,eventAt,orders:orderIds.length,location:locationValue,vehicleReference}})}catch{postCommitWarnings.push("审计记录暂未写入")}
     const moduleSyncFailures=(await mapWithConcurrency(orderIds,2,async(orderId)=>{

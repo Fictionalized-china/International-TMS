@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { prepareBatchIntakeAdvance,prepareOrdersIntakeAdvance,intakeManyCommitStatements } from "./order-intake-gate.server";
 import { normalizeBusinessPlanTime } from "./business-time";
 import type { SessionUser } from "./auth.server";
 import { chunkD1Rows, chunkD1Values, d1Placeholders } from "./d1-bindings";
@@ -265,6 +266,7 @@ export async function createOperationPlannedBatch(input: PlanningInput) {
     .map((reason) => `${row.order_number}：${reason}`));
   if (blockers.length) throw new Error(`暂不能配载：${[...new Set(blockers)].join("；")}`);
   const first = candidates[0];
+  const intakeSnapshots=await prepareOrdersIntakeAdvance(input.current.organizationId,orderIds);
   const same = (pick: (row: LoadingPlanningCandidate) => string | null) =>
     candidates.every((row) => (pick(row) || "").trim() === (pick(first) || "").trim());
   if (!same((row) => row.warehouse_id)) throw new Error("所选订单不在同一国内仓，请按仓库拆分配载");
@@ -368,7 +370,7 @@ export async function createOperationPlannedBatch(input: PlanningInput) {
       .bind(input.borderPort,input.borderPort,input.customsLocation,input.customsLocation,now,input.current.organizationId,...orderChunk));
   }
   try {
-    await env.DB.batch(statements);
+    await env.DB.batch([...statements,...intakeManyCommitStatements(intakeSnapshots,now)]);
   } catch (error) {
     // The database rolls back the complete batch if the request key or active
     // order claim loses a race. A repeated identical request reuses its winner.
@@ -439,6 +441,8 @@ async function activateLoadingModules(
   now: string,
   batchId: string,
 ) {
+  const intakeSnapshots=await prepareBatchIntakeAdvance(organizationId,batchId);
+  if(JSON.stringify(intakeSnapshots.map(row=>row.orderId).sort())!==JSON.stringify([...new Set(orderIds)].sort()))throw new Error("配载单订单范围已变化，请刷新后核对，未推进任何子订单");
   for (const orderId of orderIds) await ensureOrderModules(organizationId, orderId);
   const modules: Array<{ id: string; order_id: string; current_step_code: string | null }> = [];
   for (const orderChunk of chunkD1Values([...orderIds], 1)) {
@@ -466,6 +470,6 @@ async function activateLoadingModules(
         "batch_create","操作主管配载规划",module.current_step_code,"planned","配载成单",userId,
         `加入配载单 ${batchNumber}`,now])));
   }
-  if (statements.length) await env.DB.batch(statements);
+  if (statements.length) await env.DB.batch([...statements,...intakeManyCommitStatements(intakeSnapshots,now)]);
   for (const orderId of orderIds) await syncOrderWorkflowSnapshot(organizationId, orderId);
 }

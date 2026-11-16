@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { prepareBatchIntakeAdvance,intakeManyCommitStatements } from "./order-intake-gate.server";
 import type { SessionUser } from "./auth.server";
 import { loadBusinessProcessPolicy } from "./business-process-policy.server";
 import { policyEnabled,policyPositions } from "./business-process-policy";
@@ -73,6 +74,7 @@ export async function sendBatchToCommercial(current:SessionUser,batchId:string) 
   }
   if(!recipients.length)throw new Error("找车岗位没有具备办理权限的有效账号，请先配置人员与权限");
   const now=new Date().toISOString();
+  const intakeSnapshots=await prepareBatchIntakeAdvance(current.organizationId,batchId);
   const statements:D1PreparedStatement[]=[env.DB.prepare(`UPDATE transport_batches SET submitted_by_user_id=?,submitted_at=?,updated_at=?
     WHERE organization_id=? AND id=? AND approval_status='submitted' AND submitted_at IS NULL AND carrier_id IS NULL AND status!='cancelled'`)
     .bind(current.userId,now,now,current.organizationId,batchId),env.DB.prepare(`INSERT INTO settlement_commit_guards(id,valid,created_at)
@@ -81,7 +83,7 @@ export async function sendBatchToCommercial(current:SessionUser,batchId:string) 
     (id,organization_id,user_id,category,severity,title,message,link,requires_ack,is_read,created_by_user_id,created_at)
     VALUES(?,?,?,'dispatch_request','warning',?,?,'/admin/dispatch',0,0,?,?)`)
     .bind(crypto.randomUUID(),current.organizationId,userId,`配载单 ${batch.batch_number} 待找车`,"请进入找车工作台，按整张配载单落实车辆、司机和运价。",current.userId,now))];
-  try{const results=await env.DB.batch(statements);if(!Number(results[0]?.meta?.changes||0))throw new Error("配载单状态已变化，请刷新页面");}
+  try{const results=await env.DB.batch([...statements,...intakeManyCommitStatements(intakeSnapshots,now)]);if(!Number(results[0]?.meta?.changes||0))throw new Error("配载单状态已变化，请刷新页面");}
   catch(error){if(String(error).includes("NOT NULL"))throw new Error("配载单状态已变化，请刷新页面");throw error;}
   return batch.batch_number;
 }
@@ -128,6 +130,8 @@ export async function fulfillBatchFindVehicle(input:FeedbackInput){
   if(!newVehicle&&(!vehicle||vehicle.carrier_id!==carrierId||!vehicle.vehicle_type))throw new Error("车辆不属于所选承运商，或缺少车型");
   if(!newDriver&&(!driver||driver.carrier_id!==carrierId||!driver.phone))throw new Error("司机不属于所选承运商，或缺少电话");
   if(orders.results.length<2)throw new Error("配载单挂载订单不足，请主管核对");
+  const intakeSnapshots=await prepareBatchIntakeAdvance(current.organizationId,input.batchId);
+  if(JSON.stringify(intakeSnapshots.map(row=>row.orderId).sort())!==JSON.stringify([...new Set(orders.results.map(row=>row.order_id))].sort()))throw new Error("配载单订单范围已变化，请刷新后核对");
   if(newVehicle){const duplicate=await env.DB.prepare("SELECT 1 FROM carrier_vehicles WHERE organization_id=? AND plate_number=?").bind(current.organizationId,plate).first();if(duplicate)throw new Error("该车牌已存在，请直接选择现有车辆");}
   if(newDriver){const duplicate=await env.DB.prepare("SELECT 1 FROM carrier_drivers WHERE organization_id=? AND carrier_id=? AND name=?").bind(current.organizationId,carrierId,driverName).first();if(duplicate)throw new Error("该司机已存在，请直接选择现有司机");}
   const name=newCarrier?carrierName:carrier!.name;
@@ -164,7 +168,7 @@ export async function fulfillBatchFindVehicle(input:FeedbackInput){
     VALUES(?,?,?,'dispatch_request','info',?,?,?,0,0,?,?)`).bind(crypto.randomUUID(),current.organizationId,
       batch.operation_supervisor_user_id,`${batch.batch_number} 车辆已落实`,`商务已绑定 ${finalPlate}、${finalDriver}，请审核确认后交仓库装车。`,
       `/admin/loading/${input.batchId}`,current.userId,now));
-  await env.DB.batch(statements);
+  await env.DB.batch([...statements,...intakeManyCommitStatements(intakeSnapshots,now)]);
   await synchronizeBatchTransport(current.organizationId,input.batchId,now).catch(error=>console.error("BATCH_DISPATCH_SYNC_PENDING",{batchId:input.batchId,error:String(error)}));
   return batch.batch_number;
 }

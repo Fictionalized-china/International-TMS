@@ -1,5 +1,11 @@
 import { env } from "cloudflare:workers";
 import { nonNegativeNumberPresent } from "./validation";
+import { validateWorkflowFile } from "./quotation-workflow-fields.server";
+import { fileToDataUrl } from "./file-data-url";
+import { predicateGuard,guardedBatch,changedRowGuard } from "./mutation-guard.server";
+import { loadActivePositionAccessProfile,activePositionProfilePredicate } from "./position-access-profile.server";
+import { moduleManagePermission } from "./position-portal";
+import { isBossBusinessActor } from "./permission-blocks";
 import { chunkD1Values, d1Placeholders } from "./d1-bindings";
 import type { OrderModuleCode } from "./order-modules";
 import { loadWorkflowFieldGroups } from "./workflow-field-read-batch";
@@ -63,6 +69,7 @@ export type WorkflowFieldRule = {
 export type WorkflowFieldState = WorkflowFieldRule & {
   present: boolean;
   displayValue: string | null;
+  attachmentId?: string | null;
 };
 
 const standardWorkflowCodes = new Set([
@@ -824,6 +831,7 @@ export async function loadOrderModuleWorkflowFields(
     ...rule,
     present: presence.get(rule.fieldKey)?.present ?? false,
     displayValue: presence.get(rule.fieldKey)?.displayValue ?? null,
+    attachmentId: presence.get(rule.fieldKey)?.attachmentId ?? null,
   }));
   if (!binding.workflow_instance_id) return states;
 
@@ -923,6 +931,7 @@ export async function saveOrderCustomWorkflowFieldValue(input: {
   moduleCode: OrderModuleCode;
   fieldId: string;
   value: string | null;
+  file?: File | null;
   actorUserId: string;
   actorPositionCode?: string | null;
   actorRoleCodes?: readonly string[];
@@ -939,7 +948,7 @@ export async function saveOrderCustomWorkflowFieldValue(input: {
   if (!workflow.locked)
     throw new Error("历史订单没有冻结的自定义字段快照，不能修改该字段");
   const field = await env.DB.prepare(
-    `SELECT f.id,f.module_code,f.step_key,f.field_key,f.is_active,
+    `SELECT f.id,f.module_code,f.step_key,f.field_key,f.field_type,f.label,f.is_active,
             f.handler_position_codes,o.status order_status
      FROM workflow_instance_fields f
      JOIN workflow_instances wi ON wi.id=f.instance_id
@@ -952,6 +961,8 @@ export async function saveOrderCustomWorkflowFieldValue(input: {
     module_code: OrderModuleCode;
     step_key: string;
     field_key: string;
+    field_type: string;
+    label: string;
     is_active: number;
     handler_position_codes: string | null;
     order_status: string;
@@ -1003,7 +1014,34 @@ export async function saveOrderCustomWorkflowFieldValue(input: {
     throw new Error(capability.reason || "该自定义字段在当前冻结工作流节点尚未开放");
   }
   const now = new Date().toISOString();
-  await env.DB.prepare(
+  const statements:D1PreparedStatement[]=[];
+  let value=input.value?.trim()||null;
+  if(field.field_type==='attachment'){
+    if(!input.file?.size){
+      const existing=await env.DB.prepare(`SELECT a.id FROM order_custom_workflow_field_values v JOIN order_attachments a ON a.id=v.value_text AND a.order_id=v.order_id AND a.organization_id=v.organization_id WHERE v.organization_id=? AND v.order_id=? AND v.field_instance_id=?`).bind(input.organizationId,input.orderId,input.fieldId).first();
+      if(existing)return;
+      throw new Error(`请为“${field.label}”上传实际附件，不能用文字代替文件`);
+    }
+    validateWorkflowFile(input.file,field.label);
+    const profile=await loadActivePositionAccessProfile(env.DB,input.organizationId,input.actorUserId);
+    if(!profile||!profile.permissions.includes('order.view')||!canPositionHandleWorkflowField(field.handler_position_codes,profile.positionCode,[profile.roleCode]))throw new Error('账号、岗位或附件填写权限已变化，请重新登录核对');
+    const boss=isBossBusinessActor({positionCode:profile.positionCode,roleCodes:[profile.roleCode]});
+    const owner=await env.DB.prepare("SELECT current_assignee_user_id FROM transport_orders WHERE organization_id=? AND id=?").bind(input.organizationId,input.orderId).first<{current_assignee_user_id:string|null}>();
+    const currentNodeOwner=owner?.current_assignee_user_id===input.actorUserId;
+    if(!boss&&!currentNodeOwner&&!profile.permissions.includes(moduleManagePermission(input.moduleCode)))throw new Error('当前账号不能办理该模块的附件');
+    const dutySql=boss?'1=1':currentNodeOwner?'o.current_assignee_user_id=?':`EXISTS(SELECT 1 FROM order_module_instances m WHERE m.organization_id=o.organization_id AND m.order_id=o.id AND m.module_code=? AND m.enabled=1 AND (m.assignee_user_id=? OR (m.assignee_user_id IS NULL AND EXISTS(SELECT 1 FROM workflow_instance_step_states ss JOIN workflow_instance_module_states ms ON ms.instance_step_state_id=ss.id WHERE ss.instance_id=o.workflow_instance_id AND ms.module_code=m.module_code AND ms.responsibility_position_code=?))))`;
+    const dutyValues=boss?[]:currentNodeOwner?[input.actorUserId]:[input.moduleCode,input.actorUserId,profile.positionCode];
+    const authority=activePositionProfilePredicate({organizationId:input.organizationId,userId:input.actorUserId,profile,requiredPermissions:['order.view',...(!boss&&!currentNodeOwner?[moduleManagePermission(input.moduleCode)]:[])]});
+    statements.push(predicateGuard(env.DB,authority.sql,authority.values,now));
+    statements.push(predicateGuard(env.DB,`EXISTS(SELECT 1 FROM transport_orders o WHERE o.organization_id=? AND o.id=? AND ${dutySql})`,[input.organizationId,input.orderId,...dutyValues],now));
+    value=crypto.randomUUID();
+    statements.push(predicateGuard(env.DB,`EXISTS(SELECT 1 FROM workflow_instance_fields f JOIN workflow_instances wi ON wi.id=f.instance_id JOIN transport_orders o ON o.workflow_instance_id=wi.id AND o.id=wi.order_id AND o.organization_id=wi.organization_id WHERE f.id=? AND wi.organization_id=? AND wi.order_id=? AND f.is_active=1 AND f.field_type='attachment' AND f.module_code=? AND f.step_key=? AND COALESCE(f.handler_position_codes,'')=? AND wi.current_step_key=? AND wi.status='active' AND o.status NOT IN ('completed','cancelled'))`,[input.fieldId,input.organizationId,input.orderId,input.moduleCode,field.step_key,field.handler_position_codes??'',workflow.currentStepKey],now));
+    statements.push(env.DB.prepare("INSERT INTO order_attachments(id,organization_id,order_id,customer_id,file_name,content_type,size_bytes,data_url,uploaded_by_user_id,source,created_at) SELECT ?,o.organization_id,o.id,o.customer_id,?,?,?,?,?,'admin',? FROM transport_orders o WHERE o.id=? AND o.organization_id=?").bind(value,input.file.name,input.file.type,input.file.size,await fileToDataUrl(input.file),input.actorUserId,now,input.orderId,input.organizationId));
+    statements.push(changedRowGuard(env.DB,now));
+    statements.push(env.DB.prepare("INSERT INTO order_document_metadata(attachment_id,organization_id,order_id,document_category,description,public_to_customer,review_status,updated_at) VALUES(?,?,?,'other',?,0,'pending',?)").bind(value,input.organizationId,input.orderId,`工作流配置项附件：${field.label}`,now));
+    statements.push(env.DB.prepare("INSERT INTO audit_logs(id,organization_id,actor_user_id,action,resource_type,resource_id,outcome,metadata_json,created_at) VALUES(?,?,?,'order.custom_field.file.upload','transport_order',?,'success',?,?)").bind(crypto.randomUUID(),input.organizationId,input.actorUserId,input.orderId,JSON.stringify({fieldId:input.fieldId,attachmentId:value,fileName:input.file.name}),now));
+  }
+  statements.push(env.DB.prepare(
     `INSERT INTO order_custom_workflow_field_values(
        id,organization_id,order_id,field_instance_id,value_text,created_by_user_id,updated_by_user_id,created_at,updated_at
      ) VALUES(?,?,?,?,?,?,?,?,?)
@@ -1011,8 +1049,9 @@ export async function saveOrderCustomWorkflowFieldValue(input: {
        value_text=excluded.value_text,updated_by_user_id=excluded.updated_by_user_id,updated_at=excluded.updated_at`,
   ).bind(
     crypto.randomUUID(), input.organizationId, input.orderId, input.fieldId,
-    input.value?.trim() || null, input.actorUserId, input.actorUserId, now, now,
-  ).run();
+    value, input.actorUserId, input.actorUserId, now, now,
+  ));
+  await guardedBatch(env.DB,statements,"字段或订单节点已变化，本次未保存，请刷新重试");
 }
 
 type RawField = {
@@ -1110,7 +1149,7 @@ function toRule(row: RawField): WorkflowFieldRule {
   };
 }
 
-type Presence = { present: boolean; displayValue: string | null };
+type Presence = { present: boolean; displayValue: string | null; attachmentId?:string|null };
 
 export function ftlOutboundWorkflowFieldValues(
   assignment: Record<string, unknown> | null | undefined,
@@ -1690,15 +1729,22 @@ async function resolveFieldPresence(
     const ids = customFields.map((item) => item.id);
     for (const idChunk of chunkD1Values(ids, 2)) {
       const values = await env.DB.prepare(
-        `SELECT field_instance_id,value_text FROM order_custom_workflow_field_values
-         WHERE organization_id=? AND order_id=? AND field_instance_id IN (${d1Placeholders(idChunk.length)})`,
-      ).bind(organizationId, orderId, ...idChunk).all<{ field_instance_id: string; value_text: string | null }>();
-      for (const item of values.results)
+        `SELECT v.field_instance_id,v.value_text,a.id attachment_id,a.file_name FROM order_custom_workflow_field_values v
+         LEFT JOIN order_attachments a ON a.id=v.value_text AND a.organization_id=v.organization_id AND a.order_id=v.order_id
+         WHERE v.organization_id=? AND v.order_id=? AND v.field_instance_id IN (${d1Placeholders(idChunk.length)})`,
+      ).bind(organizationId, orderId, ...idChunk).all<{ field_instance_id: string; value_text: string | null; attachment_id:string|null;file_name:string|null }>();
+      for (const item of values.results){
+        const field=customFields.find(field=>field.id===item.field_instance_id);
+        if(field?.fieldType==='attachment'){
+          result.set(field.fieldKey,{present:Boolean(item.attachment_id),displayValue:item.attachment_id?item.file_name:null,attachmentId:item.attachment_id});
+          continue;
+        }
         setPresence(
           result,
           customFields.find((field) => field.id === item.field_instance_id)?.fieldKey ?? "",
           item.value_text,
         );
+      }
     }
   }
   return result;

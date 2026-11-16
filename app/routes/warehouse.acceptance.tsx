@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { prepareOrderIntakeAdvance,intakeGateCommitStatements,type IntakeGateSnapshot } from "../lib/order-intake-gate.server";
 import { Form, Link, redirect, useFetcher, useNavigate, useNavigation } from "react-router";
 import { useEffect, useRef, useState } from "react";
 import type { Route } from "./+types/warehouse.acceptance";
@@ -534,6 +535,8 @@ export async function action({ request }: Route.ActionArgs) {
     actualVolume: item.actualVolume ?? 0,
   }));
 
+  let intakeSnapshot:IntakeGateSnapshot;
+  try{intakeSnapshot=await prepareOrderIntakeAdvance(user.organizationId,order.id);}catch(error){return{formError:error instanceof Error?error.message:"开单资料核对失败，请重试"};}
   const now = new Date().toISOString();
   let shipmentId = order.shipment_id;
   let shipmentNumber = order.shipment_number;
@@ -809,7 +812,7 @@ export async function action({ request }: Route.ActionArgs) {
   }
 
   try {
-    await env.DB.batch(statements);
+    await env.DB.batch([...statements,...intakeGateCommitStatements(intakeSnapshot,now)]);
   } catch (error) {
     console.error("warehouse acceptance failed", error);
     return { formError: "验收入库失败，未写入库存，请检查数据后重试" };

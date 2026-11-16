@@ -44,7 +44,7 @@ function form(type = 'ltl', mode = 'direct') {
     destinationCountry:'俄罗斯', destinationState:'莫斯科州', destinationCity:'莫斯科',
     destinationWarehouseId:'dest', customsClearanceMode:'company', cargoDescription:'测试货物',
     exitPort:'KH',transitLocations:'ALA',customsLocation:'MOW',domesticAgent:'国内代理甲',
-    intake_headCarrier:'国内承运计划甲',intake_tailCarrier:'口岸调度',intake_headVehicleCount:'1',intake_tailVehicleCount:'2',
+    intake_businessMajor:'国际运输',intake_businessKind:'项目货',intake_headCarrier:'国内承运计划甲',intake_tailCarrier:'口岸调度',intake_headVehicleCount:'1',intake_tailVehicleCount:'2',
     intake_plannedDeparture:'2026-11-10T09:00',intake_plannedArrival:'2026-11-12T18:00',
     intake_businessAssistant:'sales',intake_customerService:'cs',intake_entrustedServices:'pickup',
     pieces:'1', plannedPackageCount:'1', declaredQuantityUnit:'件', plannedPackageType:'carton',
@@ -163,7 +163,7 @@ describe('real intake action with quotation node unplugged', () => {
     expect(fixture.database.prepare('SELECT service_code FROM order_services WHERE order_id=? ORDER BY service_code').all(created.orderId)).toEqual([{service_code:'packing'},{service_code:'pickup'}]);
     expect(fixture.database.prepare('SELECT snapshot_json FROM transport_order_quote_snapshots WHERE order_id=?').get(created.orderId)).toEqual(before);
   });
-  it.each([['headCarrier','头程承运人'],['headVehicleCount','头程车量'],['tailVehicleCount','尾程车量'],['plannedDeparture','预计发车'],['plannedArrival','预计到达'],['businessAssistant','业务助理'],['customerService','客服'],['entrustedServices','委托服务']])('blocks missing intake operation %s without writes',async(key,label)=>{
+  it.each([['businessMajor','业务大类'],['businessKind','业务类型'],['headCarrier','头程承运人'],['headVehicleCount','头程车量'],['tailVehicleCount','尾程车量'],['plannedDeparture','预计发车'],['plannedArrival','预计到达'],['businessAssistant','业务助理'],['customerService','客服'],['entrustedServices','委托服务']])('blocks missing intake operation %s without writes',async(key,label)=>{
     const body=form();body.delete(`intake_${key}`);
     expect(await submit(body)).toMatchObject({formError:expect.stringContaining(label)});
     expect(fixture.database.prepare('SELECT COUNT(*) n FROM quotations').get()).toMatchObject({n:0});
@@ -175,8 +175,11 @@ describe('real intake action with quotation node unplugged', () => {
     expect(JSON.parse(row.intake_operations_json)).toMatchObject({headCarrier:'国内承运计划甲',tailCarrier:'口岸调度',headVehicleCount:1,tailVehicleCount:2,plannedDeparture:'2026-11-10T01:00:00.000Z',plannedArrival:'2026-11-12T10:00:00.000Z',businessAssistant:{id:'sales',display_name:'sales'},customerService:{id:'cs',display_name:'cs'},entrustedServices:['pickup','packing']});
     expect(fixture.database.prepare('SELECT service_code FROM order_services WHERE order_id=? ORDER BY service_code').all(result.orderId)).toEqual([{service_code:'packing'},{service_code:'pickup'}]);
     const snapshot=fixture.database.prepare('SELECT snapshot_json FROM transport_order_quote_snapshots WHERE order_id=?').get(result.orderId) as {snapshot_json:string};
-    expect(JSON.parse(snapshot.snapshot_json).intakeOperations).toEqual(JSON.parse(row.intake_operations_json));
+    const {intakeRule,...sourcePlan}=JSON.parse(row.intake_operations_json);
+    expect(intakeRule.version).toBe('red-intake-2026-11-16-v2');
+    expect(JSON.parse(snapshot.snapshot_json).intakeOperations).toEqual(sourcePlan);
     expect(await submit(body)).toMatchObject({orderId:result.orderId});
+    expect(JSON.parse((fixture.database.prepare('SELECT intake_operations_json FROM transport_orders WHERE id=?').get(result.orderId)as{intake_operations_json:string}).intake_operations_json).intakeRule).toEqual(intakeRule);
   });
   it.each([['headVehicleCount','-1','头程车量'],['tailVehicleCount','1.5','尾程车量'],['plannedArrival','2026-11-09T18:00','不得早于'],['plannedDeparture','2026-02-30T00:00','日期无效'],['businessAssistant','owner','业务助理'],['customerService','sales','客服'],['entrustedServices','invalid','无效选项']])('rejects invalid planned facts %s=%s',async(key,value,label)=>{
     const body=form();body.set(`intake_${key}`,value);expect(await submit(body)).toMatchObject({formError:expect.stringContaining(label)});

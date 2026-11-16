@@ -235,7 +235,7 @@ export async function assertQuotationWorkflowFieldsComplete(
     throw new Error(`询价报价第一步尚缺必填项：${missing.map((item) => item.label).join("、")}`);
 }
 
-function validateWorkflowFile(file: File, label: string) {
+export function validateWorkflowFile(file: File, label: string) {
   if (file.size > maxInlineQuotationWorkflowFileBytes)
     throw new Error(`“${label}”附件不能超过 1.2MB`);
   const allowed = new Set([

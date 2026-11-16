@@ -25,6 +25,7 @@ import { defaultBusinessProcessPolicy, policyEnabled, policyPositions, type Busi
 import { activePositionProfilePredicate, loadActivePositionAccessProfile } from "./position-access-profile.server";
 import { isBossBusinessActor } from "./permission-blocks";
 import { canReadConsignmentExpenses } from "./consignment-expenses";
+import { prepareOrderIntakeAdvance,intakeGateCommitStatements } from "./order-intake-gate.server";
 
 const actionPositionPolicy:Readonly<Record<string,BusinessProcessPolicyKey>>={
   submit:"order.submit_positions",cancel_draft:"order.submit_positions",
@@ -374,6 +375,7 @@ export async function executeOrderWorkflowAction(input: {
 }) {
   const checked = await validateOrderWorkflowAction(input);
   if (!checked.ok) throw new Error(checked.reason);
+  const intakeSnapshot=["submit","approve","dispatch","complete"].includes(input.actionCode)?await prepareOrderIntakeAdvance(input.organizationId,input.orderId):null;
   const { order, transition } = checked,
     now = new Date().toISOString(),
     historyId = crypto.randomUUID(),
@@ -391,6 +393,7 @@ export async function executeOrderWorkflowAction(input: {
   if(input.actionCode==="submit"&&checked.profile.positionCode==="HR_ADMIN")usedPolicies.add("order.hr_emergency_enabled");
   if(input.actionCode==="submit"&&checked.profile.positionCode==="CS")usedPolicies.add("order.cs_requires_customer_flag");
   await guardedBatch(env.DB, [
+    ...intakeGateCommitStatements(intakeSnapshot,now),
     predicateGuard(env.DB,authority.sql,authority.values,now),
     ...(checked.targetAssigneePredicate
       ? [predicateGuard(env.DB,checked.targetAssigneePredicate.sql,checked.targetAssigneePredicate.values,now)] : []),

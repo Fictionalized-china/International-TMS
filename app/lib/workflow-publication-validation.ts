@@ -5,6 +5,9 @@ import {
   orderAssignmentPermissionRequirements,
 } from "./order-assignment-manifest";
 import { satisfiesOrganizationAssigneePermissionRequirements } from "./organization-assignee";
+import { currentIntakeRequiredKeys } from "./order-intake-rule";
+import { quotationNativeFieldCatalog } from "./quotation-native-field-catalog";
+import { normalizeWorkflowFieldHandlerPositionCodes } from "./workflow-field-position-access";
 
 export type PublicationStep = {
   id: string;
@@ -41,7 +44,24 @@ export type PublicationField = {
   field_key: string;
   is_required: number;
   is_active: number;
+  handler_position_codes?: string | null;
 };
+
+/** Built-in intake controls remain available when no override is declared.
+ * Explicit overrides may not make this version's mandatory facts unreachable. */
+export function validateIntakeRuleFieldReachability(input:{steps:readonly(PublicationStep&{sort_order?:number})[];modules:readonly PublicationModule[];fields:readonly PublicationField[]}){
+  const required=new Set(currentIntakeRequiredKeys),entry=input.steps.find(step=>step.step_key==='order_creation'&&step.is_active===1),issues:string[]=[];
+  for(const field of input.fields.filter(field=>required.has(field.field_key))){
+    const definition=quotationNativeFieldCatalog.find(item=>item.fieldKey===field.field_key),label=definition?.label??field.field_key;
+    const step=input.steps.find(step=>step.id===field.step_id);
+    if(!field.is_active||!step?.is_active){issues.push(`录单必填“${label}”不能隐藏或放在停用节点`);continue;}
+    if(!entry||Number(step.sort_order??0)>Number(entry.sort_order??0))issues.push(`录单必填“${label}”必须在录单阶段可填写，不能只放在后续节点`);
+    const moduleCode=field.module_code??definition?.moduleCode;
+    if(!input.modules.some(module=>module.step_id===field.step_id&&module.module_code===moduleCode&&module.is_active===1))issues.push(`录单必填“${label}”所属功能模组未启用，不能发布不可补录的配置`);
+    if(field.handler_position_codes!==undefined&&!normalizeWorkflowFieldHandlerPositionCodes(field.handler_position_codes).length)issues.push(`录单必填“${label}”必须配置填写岗位`);
+  }
+  return issues;
+}
 
 const customsDeclarationMutationFieldKeys = new Set([
   "customs_declarations",

@@ -1,5 +1,6 @@
 ﻿import { env } from "cloudflare:workers";
 import { syncOrderWorkflowSnapshot } from "./order-modules.server";
+import { prepareOrdersIntakeAdvance,intakeManyCommitStatements } from "./order-intake-gate.server";
 import { chunkD1Values, d1Placeholders } from "./d1-bindings";
 import { loadOrderModuleWorkflowFields } from "./workflow-fields.server";
 import {
@@ -153,6 +154,7 @@ export async function insertTrackingMilestoneForBatchOrders(params: {
     createdAt,
   } = params;
   if (!orderIds.length) return 0;
+  const intakeSnapshots=await prepareOrdersIntakeAdvance(organizationId,orderIds);
 
   const statements = orderIds.map((orderId) =>
     env.DB.prepare(
@@ -184,7 +186,7 @@ export async function insertTrackingMilestoneForBatchOrders(params: {
       eventAt,
     ),
   );
-  await env.DB.batch(statements);
+  await env.DB.batch([...intakeManyCommitStatements(intakeSnapshots,createdAt),...statements]);
   return orderIds.length;
 }
 

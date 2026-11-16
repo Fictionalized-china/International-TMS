@@ -23,6 +23,7 @@ import { loadBusinessProcessPolicy } from "./business-process-policy.server";
 import { policyEnabled } from "./business-process-policy";
 import { loadFinancialClosure, financialClosurePredicate } from "./financial-closure.server";
 import { predicateGuard, changedRowGuard, guardedBatch } from "./mutation-guard.server";
+import { prepareOrderIntakeAdvance,intakeGateCommitStatements,readIntakeGateSnapshot } from "./order-intake-gate.server";
 
 export type ReviewTiming = {
   orderAt: string | null;
@@ -347,8 +348,10 @@ export async function finalizeOrderReview(
   if (review.completionStatus === "in_progress")
     return { completed: false as const, reason: "当前仍有必办门禁未完成" };
   const finalState = finalizedOrderReviewState(review.completionStatus);
+  const intakeSnapshot=await prepareOrderIntakeAdvance(input.organizationId,input.orderId,db);
   const archivePolicy = await loadBusinessProcessPolicy(input.organizationId, db);
   await guardedBatch(db, [
+    ...intakeGateCommitStatements(intakeSnapshot,input.now,db),
     ...(policyEnabled(archivePolicy, "settlement.require_cash_before_archive")
       ? [predicateGuard(db, financialClosurePredicate(), [input.organizationId, input.orderId], input.now)] : []),
     db.prepare(`UPDATE transport_orders SET
@@ -420,6 +423,8 @@ export async function refreshOrderCompletionStatus(
       has_snapshot: number;
     }>();
     if (!order?.has_snapshot) continue;
+    const intakeSnapshot=order.status==='completed'?null:await readIntakeGateSnapshot(organizationId,orderId,undefined,db);
+    if(intakeSnapshot?.result&&!intakeSnapshot.result.knownFieldsSatisfied)continue;
     const draft = await buildOrderReview(db,organizationId,orderId,null);
     const status = orderCompletionStatus({pickupComplete:draft.pickupComplete,pickupRequired:draft.pickupRequired,blockers:draft.blockers.map(x=>x.message),reviewGenerated:true,finance:draft.finance});
     const reviewModuleState = orderReviewPreparationModuleState(status,draft.blockers.map(x=>x.message));
@@ -436,6 +441,7 @@ export async function refreshOrderCompletionStatus(
       now,
     });
     await db.batch([
+      ...intakeGateCommitStatements(intakeSnapshot,now,db),
       db.prepare(`UPDATE transport_orders SET completion_status=?,
         settlement_completed_at=?,
         current_step_code=CASE WHEN status!='completed' AND ?=1 THEN ? ELSE current_step_code END,

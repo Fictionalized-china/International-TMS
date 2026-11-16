@@ -1,5 +1,6 @@
 ﻿import { env } from "cloudflare:workers";
 import { Check, ChevronDown, Plus } from "lucide-react";
+import { prepareOrdersIntakeAdvance,prepareBatchIntakeAdvance,prepareDispatchIntakeAdvance,intakeManyCommitStatements,type IntakeGateSnapshot } from "../lib/order-intake-gate.server";
 import { useEffect, useId, useRef, useState } from "react";
 import { Form, Link, redirect, useNavigation } from "react-router";
 import type { Route } from "./+types/warehouse.outbound";
@@ -665,6 +666,10 @@ export async function action({request}:Route.ActionArgs){
       planned.batch_id,
     );
     if("error" in readyPacking)return{formError:readyPacking.error,inspection};
+    let creationIntakeSnapshots:IntakeGateSnapshot[];
+    try{creationIntakeSnapshots=planned.batch_id?await prepareBatchIntakeAdvance(user.organizationId,planned.batch_id):await prepareOrdersIntakeAdvance(user.organizationId,inspection.documentGroups.map(group=>group.orderId));}
+    catch(error){return{formError:error instanceof Error?error.message:"开单资料核对失败",inspection};}
+    if(JSON.stringify(creationIntakeSnapshots.map(row=>row.orderId).sort())!==JSON.stringify([...new Set(inspection.documentGroups.map(group=>group.orderId))].sort()))return{formError:"配载单挂载范围已变化，请刷新后核对",inspection};
     const dispatchId=crypto.randomUUID(),number=generateDispatch(),mainAssignmentId=crypto.randomUUID();
     const packingStatements:D1PreparedStatement[]=[];
     for(const jobChunk of chunkD1Values(readyPacking.jobs,3)){
@@ -708,6 +713,7 @@ export async function action({request}:Route.ActionArgs){
     try{
       await env.DB.batch([
         ...newDriverStatements,
+        ...intakeManyCommitStatements(creationIntakeSnapshots,now),
         env.DB.prepare(`INSERT INTO warehouse_dispatches(id,organization_id,dispatch_number,sorting_batch_id,shipment_id,vehicle_plate,driver_name,driver_phone,carrier_name,seal_number,destination,status,notes,created_by_user_id,created_at,updated_at,transport_batch_id) VALUES(?,?,?,?,?,?,?,?,?,NULL,?,'loading',?,?,?,?,?)`).bind(dispatchId,user.organizationId,number,batch.id,batch.shipment_id,plate,driver,phone||null,carrier||null,destination,inspection.notesActive?(notes||null):null,user.userId,now,now,planned.batch_id),
         ...packingStatements,
         ...workflowFieldStatements,
@@ -756,6 +762,11 @@ export async function action({request}:Route.ActionArgs){
       AND EXISTS(SELECT 1 FROM warehouse_dispatch_items wi JOIN warehouse_packages wp ON wp.id=wi.package_id AND wp.organization_id=wi.organization_id WHERE wi.dispatch_id=d.id AND wi.organization_id=d.organization_id AND wp.warehouse_id=?)
       AND NOT EXISTS(SELECT 1 FROM warehouse_dispatch_items wi JOIN warehouse_packages wp ON wp.id=wi.package_id AND wp.organization_id=wi.organization_id WHERE wi.dispatch_id=d.id AND wi.organization_id=d.organization_id AND wp.warehouse_id<>?)`).bind(dispatchId,user.organizationId,warehouse.id,warehouse.id).first<{id:string;shipment_id:string;order_id:string;business_type:string;exit_port:string|null;customs_location:string|null;status:string;dispatch_number:string;vehicle_plate:string;vehicle_type:string|null;driver_name:string;driver_phone:string|null;carrier_name:string|null;destination:string;transport_batch_id:string|null;planned_departure_at:string|null;planned_arrival_at:string|null}>();
   if(!dispatch)return{formError:"装车任务不存在"};
+  let dispatchIntakeSnapshots:IntakeGateSnapshot[]=[];
+  if(["schedule","load","dispatch"].includes(intent)&&dispatch.status==="loading"){
+    try{dispatchIntakeSnapshots=await prepareDispatchIntakeAdvance(user.organizationId,dispatch.id);}
+    catch(error){return{formError:error instanceof Error?error.message:"装车订单的开单资料核对失败"};}
+  }
   if(intent==="repack_oul"){
     if(dispatch.status!=="loading")return{formError:"该任务已经完成出库交接，不能重做 OUL"};
     const predispatchJob=await env.DB.prepare("SELECT id FROM warehouse_packing_jobs WHERE organization_id=? AND warehouse_id=? AND dispatch_id=? AND status!='cancelled' LIMIT 1")
@@ -955,7 +966,7 @@ export async function action({request}:Route.ActionArgs){
     const finalScheduleStageError=warehouseOutboundWorkflowActionError(finalSchedulePolicy);
     if(finalScheduleStageError)return{formError:finalScheduleStageError};
     if(!finalSchedulePolicy?.batchFields.planned_exit_at.isActive)return{formError:"保存前工作流已隐藏计划出境发车时间，未写入"};
-    const result=await env.DB.prepare("UPDATE transport_batches SET planned_departure_at=?,updated_at=? WHERE id=? AND organization_id=? AND warehouse_id=? AND status!='cancelled'").bind(plannedDepartureAt,now,dispatch.transport_batch_id,user.organizationId,warehouse.id).run();
+    const [result]=await env.DB.batch([env.DB.prepare("UPDATE transport_batches SET planned_departure_at=?,updated_at=? WHERE id=? AND organization_id=? AND warehouse_id=? AND status!='cancelled'").bind(plannedDepartureAt,now,dispatch.transport_batch_id,user.organizationId,warehouse.id),...intakeManyCommitStatements(dispatchIntakeSnapshots,now)]);
     if(!result.meta.changes)return{formError:"配载单不存在或不属于当前仓库"};
     await writeAudit({request,action:"warehouse.dispatch.schedule",resourceType:"transport_batch",resourceId:dispatch.transport_batch_id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{dispatchNumber:dispatch.dispatch_number,plannedDepartureAt}});
     return{success:`${dispatch.dispatch_number} 的计划出境发车时间已保存`};
@@ -1048,6 +1059,7 @@ export async function action({request}:Route.ActionArgs){
         .bind(now,user.organizationId,warehouse.id,dispatch.id),
       env.DB.prepare("UPDATE warehouse_packing_jobs SET status='loading',updated_at=? WHERE organization_id=? AND warehouse_id=? AND dispatch_id=? AND status='allocated'")
         .bind(now,user.organizationId,warehouse.id,dispatch.id),
+      ...intakeManyCommitStatements(dispatchIntakeSnapshots,now),
     ]);
     if(!loadResults[0]?.meta.changes)return{formError:"装车任务或货物状态已变化，请刷新后重试"};
     if(resourceDifferences.length)await writeAudit({request,action:"warehouse.dispatch.resource_difference_confirmed",resourceType:"warehouse_dispatch",resourceId:dispatch.id,organizationId:user.organizationId,actorUserId:user.userId,metadata:{dispatchNumber:dispatch.dispatch_number,stage:"scan",resourcePolicyDifferences:resourceDifferences}});
@@ -1106,7 +1118,7 @@ export async function action({request}:Route.ActionArgs){
       ?`；逐件扫码${finalExecutionPolicy.scanConfirmation.mode==="hidden"?"已隐藏":"为选填"}，未扫描 ${missingScanCount}/${counts.total}，已由操作员二次确认`
       :"";
     const description=`${transportSummary}；已完成仓库装车，等待出境确认${scanDifferenceNote}`;
-    const transaction=await completeWarehouseDispatchTransaction({db:env.DB,organizationId:user.organizationId,warehouseId:warehouse.id,dispatchId:dispatch.id,actorUserId:user.userId,occurredAt:now,description,transportBatchId:linkedBatch?.batch_id});
+    const transaction=await completeWarehouseDispatchTransaction({db:env.DB,organizationId:user.organizationId,warehouseId:warehouse.id,dispatchId:dispatch.id,actorUserId:user.userId,occurredAt:now,description,transportBatchId:linkedBatch?.batch_id,commitGuards:intakeManyCommitStatements(dispatchIntakeSnapshots,now)});
     if(!transaction.transitioned)return warehouseDispatchCompletionResult({dispatchNumber:dispatch.dispatch_number,businessType:dispatch.business_type,completionWarningText:"；该任务已由另一请求完成，本次未重复写入出库流水"});
     const completionWarnings:string[]=[];
     if(linkedBatch?.batch_id){

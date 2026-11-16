@@ -10,11 +10,11 @@ beforeEach(async()=>{fixture=await meetingFixture();Object.assign(env,{DB:fixtur
 afterEach(()=>fixture?.database.close());
 const policy=()=>({isActive:true,isRequired:false});
 const resolve=(form:FormData,existing?:string,direct=true)=>resolveIntakeOperations({organizationId:"org",form,existing,direct,policy,processPolicy:defaultBusinessProcessPolicy});
-function valid(){const f=new FormData();Object.entries({headCarrier:"头程计划",tailCarrier:"口岸调度",headVehicleCount:"1",tailVehicleCount:"2",plannedDeparture:"2026-11-10T09:00",plannedArrival:"2026-11-12T09:00",businessAssistant:"sales",customerService:"cs",entrustedServices:"pickup"}).forEach(([key,value])=>f.set(`intake_${key}`,value));return f;}
+function valid(){const f=new FormData();Object.entries({businessMajor:"国际运输",businessKind:"项目货",headCarrier:"头程计划",tailCarrier:"口岸调度",headVehicleCount:"1",tailVehicleCount:"2",plannedDeparture:"2026-11-10T09:00",plannedArrival:"2026-11-12T09:00",businessAssistant:"sales",customerService:"cs",entrustedServices:"pickup"}).forEach(([key,value])=>f.set(`intake_${key}`,value));return f;}
 describe("planned intake facts",()=>{
   it("reports all missing values at once without fabricating legacy plans",async()=>{
     await expect(resolve(new FormData())).rejects.toThrow(/头程承运人.*头程车量.*尾程车量.*预计发车.*预计到达.*业务助理.*客服.*委托服务/);
-    expect(missingIntakeOperations({})).toHaveLength(9);
+    expect(missingIntakeOperations({})).toHaveLength(11);
   });
   it("uses one shared scoped candidate list and exposes no employee contacts",async()=>{
     expect(await listIntakePeople("org",defaultBusinessProcessPolicy)).toEqual({quoteCommercials:[{id:"commercial",display_name:"commercial"}],businessAssistant:[{id:"sales",display_name:"sales"},{id:"cs",display_name:"cs"}],customerService:[{id:"cs",display_name:"cs"}]});

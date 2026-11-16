@@ -15,7 +15,9 @@ import { parseMarkContactIdsJson, type MarkContactSnapshot } from "./mark-contac
 import { resolveMarkContactSnapshots } from "./mark-contacts.server";
 import type { IntakePayable } from "./intake-fee-lines";
 import { intakePayableStatements } from "./intake-fee-lines.server";
-import { readIntakeOperations } from "./intake-operations";
+import { missingIntakeOperations,readIntakeOperations } from "./intake-operations";
+import { createIntakeRuleBinding,readIntakeRuleBinding } from "./order-intake-rule";
+import { loadBusinessProcessPolicy } from "./business-process-policy.server";
 import { changedRowGuard, guardedBatch } from "./mutation-guard.server";
 import {recoveredSupplementedIntake} from "./quote-order-intake-recovery";
 
@@ -39,6 +41,7 @@ type QuoteCharge = {
 };
 
 type AcceptedQuote = {
+  is_direct_entry: number;
   id: string;
   quote_number: string;
   customer_id: string;
@@ -133,6 +136,8 @@ export async function createOrderFromAcceptedQuote(input: {
       const source=await env.DB.prepare("SELECT snapshot_json FROM transport_order_quote_snapshots WHERE organization_id=? AND order_id=?").bind(input.organizationId,existing.id).first<{snapshot_json:string}>();
       repairQuote={...quote,...recoveredSupplementedIntake(existing,quote,source?.snapshot_json)};
     }
+    const existingRule=readIntakeRuleBinding(existing.intake_operations_json);
+    if(existingRule)repairQuote={...repairQuote,intake_operations_json:JSON.stringify({...readIntakeOperations(repairQuote.intake_operations_json),intakeRule:existingRule})};
     await repairGeneratedOrder({ ...input, orderId: existing.id, orderNumber: existing.order_number, quote:repairQuote,
       expectedUpdatedAt:existing.updated_at,resumeExisting:true });
     return { id: existing.id, orderNumber: existing.order_number, created: false };
@@ -175,6 +180,11 @@ export async function createOrderFromAcceptedQuote(input: {
     totalVolumeCbm: Number(quote.volume_cbm),
   });
   const pieces = cargoProjection.declaredQuantity;
+  const planned=readIntakeOperations(quote.intake_operations_json);
+  if(quote.is_direct_entry&&missingIntakeOperations(planned).length)throw new Error(`请先在录单资料补齐：${missingIntakeOperations(planned).join("、")}`);
+  // Every newly created order uses the rule, including the optional quotation
+  // source. A partial quotation may create only a draft, never bypass submission.
+  const orderIntakeRaw=JSON.stringify({...planned,intakeRule:createIntakeRuleBinding(await loadBusinessProcessPolicy(input.organizationId))});
   const entrustedServices=readIntakeOperations(quote.intake_operations_json).entrustedServices;
 
   const snapshotJson = JSON.stringify({
@@ -245,7 +255,7 @@ export async function createOrderFromAcceptedQuote(input: {
       now,now,quote.customs_clearance_mode,0,JSON.stringify(markContactSnapshots),
     ),
     env.DB.prepare("UPDATE transport_orders SET quote_commercial_user_id=?,quote_commercial_name_snapshot=?,exit_port=?,transit_locations=?,customs_location=?,domestic_agent=?,intake_operations_json=? WHERE id=? AND organization_id=?")
-      .bind(quote.quote_commercial_user_id,quote.quote_commercial_name_snapshot,quote.exit_port,quote.transit_locations,quote.customs_location,quote.domestic_agent,quote.intake_operations_json,orderId,input.organizationId),
+      .bind(quote.quote_commercial_user_id,quote.quote_commercial_name_snapshot,quote.exit_port,quote.transit_locations,quote.customs_location,quote.domestic_agent,orderIntakeRaw,orderId,input.organizationId),
     env.DB.prepare(
       `INSERT INTO order_cargo_items(
          id,organization_id,order_id,line_no,cargo_name_cn,package_type,package_count,pieces_per_package,
@@ -329,7 +339,7 @@ export async function createOrderFromAcceptedQuote(input: {
   }
 
   try {
-    await repairGeneratedOrder({ ...input, orderId, orderNumber, quote });
+    await repairGeneratedOrder({ ...input, orderId, orderNumber, quote:{...quote,intake_operations_json:orderIntakeRaw} });
   } catch (error) {
     await rollbackGeneratedOrder(input.organizationId, orderId);
     throw error;
@@ -342,7 +352,7 @@ async function loadAcceptedQuote(organizationId: string, quotationId: string) {
     `SELECT q.id,q.quote_number,q.customer_id,c.name customer_name,
             COALESCE(q.customer_contact_name,(SELECT cc.name FROM customer_contacts cc WHERE cc.customer_id=q.customer_id ORDER BY cc.is_primary DESC,cc.created_at LIMIT 1),c.name) customer_contact_name,
             COALESCE(q.customer_contact_phone,(SELECT cc.phone FROM customer_contacts cc WHERE cc.customer_id=q.customer_id ORDER BY cc.is_primary DESC,cc.created_at LIMIT 1)) customer_contact_phone,
-            q.salesperson_user_id,q.quote_commercial_user_id,q.quote_commercial_name_snapshot,q.exit_port,q.transit_locations,q.customs_location,q.domestic_agent,q.intake_route_recorded,q.intake_operations_json,q.workflow_definition_id,q.mark_contact_ids_json,
+            CASE WHEN q.intake_payload_hash IS NOT NULL THEN 1 ELSE 0 END is_direct_entry,q.salesperson_user_id,q.quote_commercial_user_id,q.quote_commercial_name_snapshot,q.exit_port,q.transit_locations,q.customs_location,q.domestic_agent,q.intake_route_recorded,q.intake_operations_json,q.workflow_definition_id,q.mark_contact_ids_json,
             EXISTS(
               SELECT 1
                 FROM workflow_step_fields mark_field

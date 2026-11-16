@@ -2,6 +2,8 @@ import { businessDateTimeLabel, normalizeBusinessPlanTime } from "./business-tim
 
 /** Planned facts only. Actual carriers/vehicles remain owned by dispatch. */
 export const intakeOperationFields = [
+  { key:"businessMajor", label:"业务大类", kind:"text" },
+  { key:"businessKind", label:"业务类型", kind:"text" },
   { key:"headCarrier", label:"头程承运人", kind:"text" },
   { key:"tailCarrier", label:"尾程承运人", kind:"text" },
   { key:"headVehicleCount", label:"头程车量", kind:"integer" },
@@ -17,6 +19,7 @@ export type IntakePerson = { id:string; display_name:string };
 export type IntakeOperations = {
   /** Server-owned recovery marker; audit retention must not change business facts. */
   canonicalSupplementVersion?:1;
+  businessMajor:string; businessKind:string;
   headCarrier:string; tailCarrier:string; headVehicleCount:number|null; tailVehicleCount:number|null;
   plannedDeparture:string|null; plannedArrival:string|null;
   businessAssistant:IntakePerson|null; customerService:IntakePerson|null; entrustedServices:string[];

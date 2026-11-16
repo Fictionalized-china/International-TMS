@@ -6,6 +6,8 @@ import { sessionSlotFromUrl, withSessionSlot } from "../lib/session-slot";
 import type { Route } from "./+types/admin.order-detail";
 import { ActionToast } from "../components/ActionToast";
 import { OrderIntakeSupplement } from "../components/OrderIntakeSupplement";
+import { readIntakeRuleBinding } from "../lib/order-intake-rule";
+import { readIntakeGateSnapshot } from "../lib/order-intake-gate.server";
 import { canCompleteWorkflowTask } from "../lib/workflow-task-access";
 import { DateTimeSelect } from "../components/DateTimeSelect";
 import { ReviewAssignmentWorkbench } from "../components/ReviewAssignmentWorkbench";
@@ -106,6 +108,7 @@ import { orderDocumentPlacements } from "../lib/order-documents";
 import { synchronizeOrderDocumentsModuleStatus } from "../lib/documents-module-status.server";
 
 type Order = {
+  intake_operations_json: string | null;
   id: string;
   order_number: string;
   order_date: string | null;
@@ -377,7 +380,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
     `SELECT o.id,o.order_number,o.order_date,o.business_nature,o.business_type,o.transport_terms,o.trade_terms,
       o.exit_port,bp.name exit_port_name,o.overseas_warehouse_id,ow.name overseas_warehouse_name,
       ow.code overseas_warehouse_code,ow.address overseas_warehouse_address,o.overseas_warehouse_address_note,
-      o.transit_locations,o.customs_location,o.route_notes,o.customs_clearance_mode,o.customer_id,c.name customer_name,c.code customer_code,
+      o.transit_locations,o.customs_location,o.route_notes,o.intake_operations_json,o.customs_clearance_mode,o.customer_id,c.name customer_name,c.code customer_code,
       o.customer_reference,q.quote_number,q.accepted_at quote_accepted_at,o.quote_withdrawn,
       o.shipper_name,o.shipper_contact,o.shipper_phone,o.origin_country,
       o.origin_state,o.origin_city,o.origin_address,o.consignee_name,o.consignee_contact,o.consignee_phone,
@@ -669,6 +672,8 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
   }
   return {
     current,
+    intakeGateIssues: !["completed","cancelled"].includes(order.status)&&readIntakeRuleBinding(order.intake_operations_json)
+      ? (await readIntakeGateSnapshot(current.organizationId,id)).result?.issues.map(issue=>({key:issue.key,label:issue.label,reason:issue.reason,moduleCode:issue.moduleCode,rowNumber:issue.rowNumber}))??[] : [],
     orderQueueNavigation,
     processPolicy: await loadBusinessProcessPolicy(current.organizationId),
     canManage: current.permissions.includes("order.manage"),
@@ -1159,6 +1164,7 @@ function LinearOrderWorkspace({
       </nav>
 
       <ActionToast message={formError ?? success} tone={formError ? "error" : "success"}/>
+      {data.intakeGateIssues.length>0&&<section className="alert warning" aria-label="开单资料缺项"><strong>以下开单资料待补齐，向前办理已暂停；仍可查看、补录或按权限驳回、取消。</strong><ul>{data.intakeGateIssues.map(issue=><li key={issue.key}>{issue.rowNumber?`第 ${issue.rowNumber} 条：`:""}{issue.label}：{issue.reason}</li>)}</ul><button type="button" className="secondary" onClick={()=>setDrawerTab("supplements")}>查看补录资料与责任人</button></section>}
 
       <div className="workspace">
         <section className={`node-panel panel${showOuterActionBar ? "" : " without-actionbar"}`}>

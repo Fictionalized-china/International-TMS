@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { prepareOrderIntakeAdvance,intakeGateCommitStatements } from "./order-intake-gate.server";
 import { isActiveOrganizationAssigneeForWorkflowNodes } from "./organization-assignee.server";
 import {
   buildOrderAssignmentManifest,
@@ -358,6 +359,7 @@ export async function prepareOrderAssignmentManifest(input: {
   if (!workflowInstanceId)
     throw new Error("订单尚未锁定工作流实例，不能确认派单");
   const now = input.now ?? new Date().toISOString();
+  const intakeSnapshot=await prepareOrderIntakeAdvance(input.organizationId,input.orderId);
   const assignedModuleCodes = [...new Set(
     resolvedGroups.flatMap(({ group }) => group.modules.map((module) => module.moduleCode)),
   )];
@@ -368,6 +370,7 @@ export async function prepareOrderAssignmentManifest(input: {
           AND task_type='module_owner' AND status IN ('pending','in_progress')`,
     ).bind(now, input.organizationId, input.orderId, moduleCode),
   );
+  statements.unshift(...intakeGateCommitStatements(intakeSnapshot,now));
 
   for (const resolved of resolvedGroups) {
     for (const module of resolved.group.modules) {

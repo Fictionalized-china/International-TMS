@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { prepareOrderIntakeAdvance,prepareOrdersIntakeAdvance,intakeGateCommitStatements,intakeManyCommitStatements,type IntakeGateSnapshot } from "../lib/order-intake-gate.server";
 import { Form, Link, redirect, useNavigation } from "react-router";
 import { useEffect, useState } from "react";
 import type { Route } from "./+types/warehouse.inbound";
@@ -636,6 +637,8 @@ export async function action({ request }: Route.ActionArgs) {
     if (!customsGate || customsGate.blocked)
       return { formError: customsGate?.message || "当前订单清关门禁解析失败" };
   }
+  let intakeSnapshot:IntakeGateSnapshot;
+  try{intakeSnapshot=await prepareOrderIntakeAdvance(user.organizationId,orderId);}catch(error){return{formError:error instanceof Error?error.message:"开单资料核对失败，请重试"};}
   const workflowFields = await loadOrderModuleWorkflowFields(
     user.organizationId,
     orderId,
@@ -864,6 +867,7 @@ export async function action({ request }: Route.ActionArgs) {
   try {
     await env.DB.batch([
       ...shipmentBootstrap,
+      ...intakeGateCommitStatements(intakeSnapshot,now),
       env.DB.prepare(
         `INSERT INTO warehouse_receipts(id,organization_id,receipt_number,shipment_id,warehouse_id,location_id,status,total_packages,total_pieces,total_weight_kg,total_volume_cbm,notes,received_by_user_id,received_at,created_at,updated_at,package_type,evidence_note,cargo_complete,has_exception,exception_notes) VALUES(?,?,?,?,?,?,'completed',1,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       ).bind(
@@ -1158,6 +1162,8 @@ async function receiveAtomicOverseasScope(input:{
   if(rows.some(row=>row.overseas_warehouse_id!==input.warehouse.id))return{formError:"本次收货范围包含不属于当前目的仓的订单，已整体拒绝提交"};
   if(input.batchId&&rows.some(row=>row.transport_batch_id!==input.batchId))return{formError:"当前装车任务与 PZ 配载单不一致，已整体拒绝提交"};
   const orderIds=[...new Set(rows.map(row=>row.order_id))];
+  let intakeSnapshots:IntakeGateSnapshot[];
+  try{intakeSnapshots=await prepareOrdersIntakeAdvance(input.user.organizationId,orderIds);}catch(error){return{formError:error instanceof Error?error.message:"整批开单资料核对失败，请重试"};}
   if(input.requestedBatchOrderIds.length&&(
     input.requestedBatchOrderIds.length!==orderIds.length||orderIds.some(orderId=>!input.requestedBatchOrderIds.includes(orderId))
   ))return{formError:"页面锁定的 PZ 挂载订单与提交范围不一致，已整体拒绝提交"};
@@ -1212,7 +1218,7 @@ async function receiveAtomicOverseasScope(input:{
         VALUES(?,?,?,'inbound',?,?,?,?,?,?)`).bind(crypto.randomUUID(),input.user.organizationId,row.id,row.source_location_id,location.id,input.user.userId,`境外仓全量扫码入库 · ${receipt.number}`,input.now,input.now),
     );
   }
-  try{await env.DB.batch(statements)}catch(error){console.error("atomic overseas receiving failed",error);return{formError:"整批收货失败，本次没有写入任何 OUL，请核对后重试"}}
+  try{await env.DB.batch([...statements,...intakeManyCommitStatements(intakeSnapshots,input.now)])}catch(error){console.error("atomic overseas receiving failed",error);return{formError:"整批收货失败，本次没有写入任何 OUL；资料、标签或任务可能已变化，请刷新核对后重试"}}
   const warnings:string[]=[];
   if(cargoComplete){
     for(const orderId of orderIds){

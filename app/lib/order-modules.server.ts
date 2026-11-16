@@ -40,6 +40,7 @@ import { runtimeWorkflowFieldPolicy } from "./workflow-field-runtime";
 import { withOrderProjectionSync } from "./order-sync-queue.server";
 import { workflowModuleConfigurationStatements } from "./workflow-state-write-batch";
 import { changedRowGuard, guardedBatch, predicateGuard } from "./mutation-guard.server";
+import { prepareOrderIntakeAdvance,intakeGateCommitStatements } from "./order-intake-gate.server";
 
 export type OrderModuleInstance = {
   id: string;
@@ -1276,6 +1277,7 @@ export async function advanceOrderModule(input: {
   if (module.status === "completed") throw new Error("该模块已经完成");
   const definition = orderModuleDefinition(input.moduleCode);
   if (!definition) throw new Error("模块不存在");
+  const intakeSnapshot=await prepareOrderIntakeAdvance(input.organizationId,input.orderId);
   const currentIndex = Math.max(
     0,
     definition.steps.findIndex(
@@ -1315,6 +1317,7 @@ export async function advanceOrderModule(input: {
     : Math.round(((currentIndex + 1) / definition.steps.length) * 100);
   await guardedBatch(env.DB, [
     ...(input.commitGuards ?? []),
+    ...intakeGateCommitStatements(intakeSnapshot,now),
     predicateGuard(env.DB,`EXISTS(SELECT 1 FROM order_module_instances m
       JOIN transport_orders o ON o.id=m.order_id AND o.organization_id=m.organization_id
       LEFT JOIN workflow_instances wi ON wi.id=o.workflow_instance_id AND wi.organization_id=o.organization_id AND wi.order_id=o.id

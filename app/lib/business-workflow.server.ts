@@ -1,4 +1,6 @@
 import { env } from "cloudflare:workers";
+import { prepareOrderIntakeAdvance,intakeGateCommitStatements } from "./order-intake-gate.server";
+import { changedRowGuard,guardedBatch } from "./mutation-guard.server";
 import { orderBusinessStages } from "./order-stage-flow";
 import {
   pickNextRequiredWorkflowModule,
@@ -485,10 +487,10 @@ export async function recordWorkflowEvent(input: RecordEventInput): Promise<stri
 }
 
 export async function advanceWorkflowInstance(input: AdvanceInput): Promise<{ stepName: string; completed: boolean }> {
-  const instance = await env.DB.prepare(`SELECT wi.id,wi.workflow_id,wi.current_step_key,ws.sort_order
+  const instance = await env.DB.prepare(`SELECT wi.id,wi.workflow_id,wi.current_step_key,wi.order_id,ws.sort_order
     FROM workflow_instances wi JOIN workflow_steps ws ON ws.workflow_id=wi.workflow_id AND ws.step_key=wi.current_step_key
     WHERE wi.id=? AND wi.organization_id=? AND wi.status='active'`)
-    .bind(input.instanceId,input.organizationId).first<{id:string;workflow_id:string;current_step_key:string;sort_order:number}>();
+    .bind(input.instanceId,input.organizationId).first<{id:string;workflow_id:string;current_step_key:string;order_id:string|null;sort_order:number}>();
   if (!instance) throw new Error("流程实例不存在或已经结束");
   const next = await env.DB.prepare(`SELECT step_key,name,sort_order FROM workflow_steps
     WHERE workflow_id=? AND is_active=1 AND sort_order>? ORDER BY sort_order,step_key LIMIT 1`)
@@ -498,13 +500,16 @@ export async function advanceWorkflowInstance(input: AdvanceInput): Promise<{ st
     SELECT 1 FROM workflow_steps WHERE workflow_id=? AND is_active=1 AND sort_order>?
   ) AS done`).bind(instance.workflow_id,next.sort_order).first<{done:number}>();
   const now=new Date().toISOString(), status=final?.done?"completed":"active";
-  await env.DB.batch([
+  const intakeSnapshot=instance.order_id?await prepareOrderIntakeAdvance(input.organizationId,instance.order_id):null;
+  await guardedBatch(env.DB,[
+    ...intakeGateCommitStatements(intakeSnapshot,now),
     env.DB.prepare(`UPDATE workflow_instances SET current_step_key=?,status=?,completed_at=CASE WHEN ?='completed' THEN ? ELSE NULL END,updated_at=?
-      WHERE id=? AND organization_id=?`).bind(next.step_key,status,status,now,now,input.instanceId,input.organizationId),
+      WHERE id=? AND organization_id=? AND status='active' AND workflow_id=? AND current_step_key=?`).bind(next.step_key,status,status,now,now,input.instanceId,input.organizationId,instance.workflow_id,instance.current_step_key),
+    changedRowGuard(env.DB,now),
     env.DB.prepare(`INSERT INTO workflow_history(id,instance_id,step_key,step_name,actor_user_id,source,metadata,occurred_at)
       SELECT ?,?,?,?,?, 'admin', ?, ? WHERE NOT EXISTS(SELECT 1 FROM workflow_history WHERE instance_id=? AND step_key=?)`)
       .bind(crypto.randomUUID(),input.instanceId,next.step_key,next.name,input.actorUserId,JSON.stringify({manual:true}),now,input.instanceId,next.step_key),
-  ]);
+  ],"流程节点或开单资料已变化，本次未推进，请刷新后重试");
   return {stepName:next.name,completed:Boolean(final?.done)};
 }
 

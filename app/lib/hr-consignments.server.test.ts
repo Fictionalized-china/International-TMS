@@ -29,6 +29,13 @@ async function receive(amount: number, allocate: number) {
   return cash;
 }
 describe("HR all-consignment read model", () => {
+  it("filters and exports manual business classifications separately from FTL/LTL",async()=>{
+    fixture.database.prepare("UPDATE transport_orders SET intake_operations_json=? WHERE id='order'").run(JSON.stringify({businessMajor:'国际运输',businessKind:'项目货'}));
+    const data=await load('businessMajor=国际&businessKind=项目&businessType=ltl');
+    expect(data.rows).toHaveLength(1);expect(data.rows[0]).toMatchObject({businessMajor:'国际运输',businessKind:'项目货',business_type:'ltl'});
+    expect(data.rows[0]).not.toHaveProperty('intake_operations_json');expect(hrConsignmentCsv(data.rows)).toContain('国际运输');
+    expect((await load('businessKind=整车')).rows).toHaveLength(0);
+  });
   it("includes uncollected/draft orders and preserves quotation identity without guessing", async () => {
     fixture.database.exec("UPDATE transport_orders SET status='draft'");
     const data = await load(); expect(data.rows).toHaveLength(1);

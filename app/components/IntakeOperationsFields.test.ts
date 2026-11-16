@@ -7,6 +7,7 @@ describe("intake planned facts UI",()=>{
   it("shows labeled single-source inputs and no actual car or driver requirement",()=>{
     const html=renderToStaticMarkup(createElement(IntakeOperationsFields,{...props,direct:true}));
     expect(html).toContain('name="intake_tailCarrier"');expect(html).toContain('value="口岸调度"');expect(html).toContain('北京时间');expect(html).toContain('name="intake_businessAssistant"');expect(html).toContain('name="intake_entrustedServices"');expect(html).not.toContain('车牌');
+    expect(html).toContain('name="intake_businessMajor"');expect(html).toContain('name="intake_businessKind"');expect(html).toContain('与整车/拼车的装车方式分别记录');
   });
   it("respects hidden auxiliary fields",()=>expect(renderToStaticMarkup(createElement(IntakeOperationsFields,{...props,policy:()=>({isActive:false,isRequired:false})}))).not.toContain('<input'));
   it("makes recorded values read-only in missing-only remediation and does not prefill invalid legacy counts",()=>{

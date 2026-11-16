@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
-import { Form as RouterForm, Link, useActionData, useFetcher, useNavigation, redirect } from "react-router";
+import { Form as RouterForm, Link, useActionData, useFetcher, useLocation, useNavigation, redirect } from "react-router";
 import { env } from "cloudflare:workers";
 import type { Route } from "./+types/admin.order-module";
 import { BatchNumberLink, OrderNumberLink } from "../components/EntityNumberLink";
@@ -20,6 +20,7 @@ import { intakeOperationFields, intakeOperationFieldKey, intakeOperationDisplay,
 import { consignmentCargoSummary, consignmentIntakeOperations } from "../lib/consignment-facts";
 import { canReadConsignmentExpenses } from "../lib/consignment-expenses";
 import { ConsignmentExpenseLedger } from "../components/ConsignmentExpenseLedger";
+import { prepareOrdersIntakeAdvance,intakeManyCommitStatements } from "../lib/order-intake-gate.server";
 import { businessDateTimeLabel } from "../lib/business-time";
 import { requireSessionUser } from "../lib/auth.server";
 import { dispatchWorkspaceHref } from "../lib/transport-workspace-access";
@@ -202,7 +203,7 @@ import {
   canWriteWorkflowFieldAtCurrentNode,
 } from "../lib/workflow-field-position-access";
 import { visibleApprovalCustomFields } from "../lib/order-approval-custom-fields";
-import { canCompleteWorkflowTask } from "../lib/workflow-task-access";
+import { completeOrderModuleTask } from "../lib/order-module-task.server";
 import { workflowFieldConfigurationHref } from "../lib/workflow-field-locator";
 import {
   hasVisibleRuntimeWorkflowField,
@@ -2109,6 +2110,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
         moduleCode: moduleCode as OrderModuleCode,
         fieldId: valueOf(form, "fieldId"),
         value: valueOf(form, "fieldValue"),
+        file: form.get("fieldFile") instanceof File ? form.get("fieldFile") as File : null,
         actorUserId: current.userId,
         actorPositionCode: current.positionCode,
         actorRoleCodes: current.roleCodes,
@@ -2817,88 +2819,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
       return { success: "模块工作流已推进" };
     }
     if (intent === "task_complete") {
-      const taskId = valueOf(form, "taskId"),
-        now = new Date().toISOString();
-      const task = await env.DB.prepare(
-        `SELECT t.id,t.module_code,t.status,
-                t.assignee_user_id task_assignee_user_id,
-                omi.assignee_user_id module_assignee_user_id,
-                o.workflow_instance_id,o.current_step_code,
-                wi.current_step_key,
-                ms.responsibility_position_code,
-                CASE WHEN o.workflow_instance_id IS NOT NULL
-                           AND wi.id IS NOT NULL AND ss.id IS NOT NULL AND ms.id IS NOT NULL
-                     THEN 1 ELSE 0 END frozen_current_module
-         FROM order_tasks t
-         JOIN transport_orders o
-           ON o.id=t.order_id AND o.organization_id=t.organization_id
-         LEFT JOIN workflow_instances wi
-           ON wi.id=o.workflow_instance_id
-          AND wi.organization_id=o.organization_id
-          AND wi.order_id=o.id
-         LEFT JOIN workflow_instance_step_states ss
-           ON ss.instance_id=wi.id AND ss.step_key=wi.current_step_key
-         LEFT JOIN workflow_instance_module_states ms
-           ON ms.instance_step_state_id=ss.id AND ms.module_code=t.module_code
-         LEFT JOIN order_module_instances omi
-           ON omi.organization_id=t.organization_id AND omi.order_id=t.order_id
-          AND omi.module_code=t.module_code AND omi.enabled=1
-         WHERE t.id=? AND t.order_id=? AND t.organization_id=?
-         LIMIT 1`,
-      ).bind(taskId, orderId, current.organizationId).first<{
-        id:string;
-        module_code:string;
-        status:string;
-        task_assignee_user_id:string|null;
-        module_assignee_user_id:string|null;
-        workflow_instance_id:string|null;
-        current_step_code:string|null;
-        current_step_key:string|null;
-        responsibility_position_code:string|null;
-        frozen_current_module:number;
-      }>();
-      if (!task || task.module_code !== moduleCode || !["pending", "in_progress"].includes(task.status))
-        return { formError: "该待办不属于当前模块、已完成或不存在" };
-      if (task.workflow_instance_id) {
-        if (!task.frozen_current_module)
-          return { formError: "该待办不属于当前冻结工作流节点" };
-      } else if (task.current_step_code !== `module:${moduleCode}`) {
-        // Explicit compatibility boundary for pre-snapshot orders only.
-        return { formError: "历史待办不在订单当前模块" };
-      }
-      const actorPositions = await env.DB.prepare(
-        `SELECT DISTINCT p.code
-         FROM memberships membership
-         JOIN positions p
-           ON p.id=membership.position_id AND p.organization_id=membership.organization_id
-         WHERE membership.organization_id=? AND membership.user_id=?
-           AND membership.status='active' AND p.status='active'`,
-      ).bind(current.organizationId, current.userId).all<{code:string}>();
-      if (!canCompleteWorkflowTask({
-        actorUserId: current.userId,
-        actorPositionCodes: actorPositions.results.map((item) => item.code),
-        actorRoleCodes: current.roleCodes,
-        taskAssigneeUserId: task.task_assignee_user_id,
-        moduleAssigneeUserId: task.module_assignee_user_id,
-        responsibilityPositionCode: task.responsibility_position_code,
-      })) return { formError: "当前账号不是该待办的指定负责人" };
-      const completed = await env.DB.prepare(
-        `UPDATE order_tasks
-         SET status='completed',completed_at=?,updated_at=?
-         WHERE id=? AND order_id=? AND organization_id=? AND module_code=?
-           AND status IN ('pending','in_progress')`,
-      ).bind(now, now, taskId, orderId, current.organizationId, moduleCode).run();
-      if (Number(completed.meta?.changes || 0) !== 1)
-        return { formError: "待办状态已变化，请刷新后重试" };
-      await writeAudit({
-        request,
-        action:"order.task.complete",
-        resourceType:"order_task",
-        resourceId:taskId,
-        organizationId:current.organizationId,
-        actorUserId:current.userId,
-        metadata:{orderId,moduleCode},
-      });
+      await completeOrderModuleTask(env.DB, current, orderId, moduleCode, valueOf(form,"taskId"));
       return { success: "任务已完成" };
     }
     if (intent === "customs_declaration_save") {
@@ -3506,6 +3427,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
       }
       const now = new Date().toISOString();
       const shipmentStatus = milestoneCode === "border_arrived" ? "customs" : "in_transit";
+      const intakeSnapshots = await prepareOrdersIntakeAdvance(current.organizationId, linkedOrderIds);
       // MySQL 1093 guard ("You can't specify target table 'shipments' for
       // update in FROM clause"): resolve the latest shipment id per order
       // BEFORE the atomic batch, then update by primary key only.  Nothing in
@@ -3578,7 +3500,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
             ]
           : []),
       ]);
-      await env.DB.batch(statements);
+      await env.DB.batch([...intakeManyCommitStatements(intakeSnapshots, now), ...statements]);
       if (batchSynchronizedTrackingMilestones.has(milestoneCode)) {
         await syncBatchTrackingMilestonesFromOrder(
           current.organizationId,
@@ -5354,6 +5276,7 @@ function WorkflowFieldChecklist({
 }
 
 function CustomWorkflowFieldForm({ field, busy }: { field: WorkflowFieldState; busy: boolean }) {
+  const location=useLocation();
   const options = (field.optionsText || "")
     .split(/\r?\n|,/)
     .map((option) => option.trim())
@@ -5364,10 +5287,13 @@ function CustomWorkflowFieldForm({ field, busy }: { field: WorkflowFieldState; b
     });
   const type = field.fieldType === "datetime" ? "datetime-local" : field.fieldType === "amount" ? "number" : field.fieldType;
   return (
-    <Form method="post" className="workflow-custom-field-form">
+    <Form method="post" encType="multipart/form-data" className="workflow-custom-field-form">
       <input type="hidden" name="intent" value="workflow_field_save" />
       <input type="hidden" name="fieldId" value={field.id} />
-      {field.fieldType === "textarea" ? (
+      {field.fieldType === "attachment" ? <div className="quote-workflow-file-control">
+        {field.attachmentId&&<Link reloadDocument target="_blank" rel="noreferrer" to={withSessionSlot(`/admin/document-files/order/${field.attachmentId}?mode=view`,new URLSearchParams(location.search).get('itmsTab'))}>查看已保存附件：{field.displayValue}</Link>}
+        <input type="file" name="fieldFile" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" required={field.isRequired&&!field.present}/>
+      </div> : field.fieldType === "textarea" ? (
         <textarea name="fieldValue" defaultValue={field.displayValue || ""} required={field.isRequired} rows={2} />
       ) : ["select", "multiselect"].includes(field.fieldType) && options.length ? (
         <select name="fieldValue" defaultValue={field.displayValue || ""} required={field.isRequired}>

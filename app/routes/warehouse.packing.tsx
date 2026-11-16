@@ -1,12 +1,13 @@
 import { env } from "cloudflare:workers";
 import { useState } from "react";
+import { prepareOrderIntakeAdvance,intakeGateCommitStatements,type IntakeGateSnapshot } from "../lib/order-intake-gate.server";
 import { Form, Link, useNavigation } from "react-router";
 import type { Route } from "./+types/warehouse.packing";
 import { ActionToast } from "../components/ActionToast";
 import { Modal } from "../components/Modal";
 import { QueryPagination } from "../components/QueryPagination";
 import { requireSessionUser } from "../lib/auth.server";
-import { d1Placeholders } from "../lib/d1-bindings";
+import { chunkD1Values,d1Placeholders } from "../lib/d1-bindings";
 import { oulCode, randomOulSuffix } from "../lib/package-identity";
 import { valueOf } from "../lib/validation";
 import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
@@ -132,6 +133,8 @@ export async function action({ request }: Route.ActionArgs) {
       .bind(user.organizationId, orderId, warehouse.id, warehouse.id)
       .first<{ id: string; order_number: string; business_type: "ftl" | "ltl"; shipment_id: string }>();
     if (!order) return { formError: "订单未完成货齐入库、已有包装方案，或状态已变化" };
+    let intakeSnapshot:IntakeGateSnapshot;
+    try{intakeSnapshot=await prepareOrderIntakeAdvance(user.organizationId,orderId);}catch(error){return{formError:error instanceof Error?error.message:"开单资料核对失败"};}
     const sources = await env.DB.prepare(`SELECT p.id,p.receipt_id,p.shipment_id,p.location_id,p.source_order_package_id
       FROM warehouse_packages p WHERE p.organization_id=? AND p.warehouse_id=? AND p.shipment_id=?
         AND p.label_kind='inbound_mark' AND p.lifecycle_status='active' AND p.status='in_stock'
@@ -208,11 +211,11 @@ export async function action({ request }: Route.ActionArgs) {
         outputId, mode === "preserve" ? "kept" : mode === "merge" ? "merged" : "split", user.userId, now,
       ));
     }
-    statements.push(env.DB.prepare(`UPDATE warehouse_packages SET status='allocated',updated_at=?
-      WHERE organization_id=? AND id IN (${d1Placeholders(sources.results.length)}) AND status='in_stock'`)
-      .bind(now, user.organizationId, ...sources.results.map((source) => source.id)));
+    for(const chunk of chunkD1Values(sources.results,2))statements.push(env.DB.prepare(`UPDATE warehouse_packages SET status='allocated',updated_at=?
+      WHERE organization_id=? AND id IN (${d1Placeholders(chunk.length)}) AND status='in_stock'`)
+      .bind(now, user.organizationId, ...chunk.map((source) => source.id)));
     try {
-      await env.DB.batch(statements);
+      await env.DB.batch([...statements,...intakeGateCommitStatements(intakeSnapshot,now)]);
     } catch (error) {
       console.error("create pre-dispatch packing job failed", error);
       return { formError: "包装方案保存失败；订单可能已被其他仓库人员处理，请刷新后重试" };
@@ -231,9 +234,10 @@ export async function action({ request }: Route.ActionArgs) {
   if (intent === "confirm_labelled") {
     if (job.status !== "generated") return { formError: "该包装任务已确认贴标或已进入后续流程" };
     try {
-      await env.DB.prepare(`UPDATE warehouse_packing_jobs SET status='labelled',labeling_confirmed_at=?,
+      const intakeSnapshot=await prepareOrderIntakeAdvance(user.organizationId,job.order_id);
+      await env.DB.batch([...intakeGateCommitStatements(intakeSnapshot,now),env.DB.prepare(`UPDATE warehouse_packing_jobs SET status='labelled',labeling_confirmed_at=?,
         labeling_confirmed_by_user_id=?,updated_at=? WHERE id=? AND organization_id=? AND warehouse_id=? AND status='generated'`)
-        .bind(now, user.userId, now, job.id, user.organizationId, warehouse.id).run();
+        .bind(now, user.userId, now, job.id, user.organizationId, warehouse.id)]);
     } catch (error) {
       console.error("confirm packing labels failed", error);
       return { formError: "贴标确认失败，请检查所有最终包装的实重和长宽高后重试" };

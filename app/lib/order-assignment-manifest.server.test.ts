@@ -16,6 +16,7 @@ const database = vi.hoisted(() => {
           state.calls.push({ sql, values });
           return {
             async first() {
+              if(sql.includes("intake_operations_json")&&sql.includes("FROM transport_orders"))return{intake_operations_json:null};
               if (sql.includes("workflow_instance_id") && sql.includes("transport_orders")) return {
                 workflow_instance_id: state.workflowInstanceId,
                 matched_instance_id: state.matchedWorkflowInstanceId,
@@ -415,7 +416,7 @@ describe("frozen order assignment manifest server", () => {
       assignedModuleCodes: ["transport"],
       primaryAssigneeUserId: "operator-1",
     });
-    expect(database.state.batchSizes).toEqual([8]);
+    expect(database.state.batchSizes).toEqual([9]); // Original eight writes plus the same-transaction intake version guard.
     expect(database.state.calls.filter((call) =>
       call.sql.includes("UPDATE workflow_instance_task_states"),
     )).toHaveLength(2);

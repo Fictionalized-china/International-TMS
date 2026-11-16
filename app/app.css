@@ -21917,7 +21917,7 @@ html[data-motion="off"]::view-transition-new(linear-module-tab-panel) { animatio
 .consignment-current-expense-table td:nth-child(n+4):nth-child(-n+7) { font-variant-numeric: tabular-nums; text-align: right; }
 .consignment-current-expense-table th:nth-child(n+4):nth-child(-n+7) { text-align: right; }
 .consignment-current-expense-table:focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; }
-.hr-consignment-filter { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); align-items: end; gap: 12px; }
+.hr-consignment-filter { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); align-items: end; gap: 12px; }
 .hr-consignment-filter > label { min-width: 0; }
 .hr-consignment-workspace .hr-consignment-filter :is(input,select) { min-width: 0; width: 100% !important; max-width: 100%; }
 .hr-report-tabs.peer-page-tabs > a { flex: 1 1 220px !important; min-width: 0; max-width: 300px; }

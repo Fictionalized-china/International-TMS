@@ -20,6 +20,7 @@ import { canCompleteWorkflowTask } from "./workflow-task-access";
 import { withOrderProjectionSync } from "./order-sync-queue.server";
 import { activePositionProfilePredicate, loadActivePositionAccessProfile } from "./position-access-profile.server";
 import { changedRowGuard, guardedBatch, predicateGuard } from "./mutation-guard.server";
+import { prepareOrderIntakeAdvance,readIntakeGateSnapshot,intakeGateCommitStatements } from "./order-intake-gate.server";
 
 type ModuleFact = { module_code:string; status:string };
 
@@ -170,6 +171,15 @@ export async function synchronizeWorkflowExecution(input:{
     ]));
     return input.targetStepKey;
   }
+  const intakeSnapshot=await readIntakeGateSnapshot(input.organizationId,input.orderId);
+  const currentStep=async()=> (await env.DB.prepare("SELECT current_step_key FROM workflow_instances WHERE id=? AND organization_id=? AND order_id=?").bind(input.instanceId,input.organizationId,input.orderId).first<{current_step_key:string}>())?.current_step_key??input.targetStepKey;
+  // Reading an incomplete order must neither move it forward nor break a list.
+  // Completed historical facts above are never reopened by a new intake rule.
+  if(intakeSnapshot.result&&!intakeSnapshot.result.knownFieldsSatisfied)return currentStep();
+  const commitProjection=async(statements:D1PreparedStatement[])=>{
+    try{await withOrderProjectionSync(input.organizationId,input.orderId,()=>env.DB.batch([...intakeGateCommitStatements(intakeSnapshot,now),...statements]));return true;}
+    catch(error){if(String(error).includes("mutation_commit_guards"))return false;throw error;}
+  };
   const moduleStatus = new Map(moduleFacts.results.map((item)=>[item.module_code,item.status]));
   const taskUpdates: D1PreparedStatement[] = [];
   for (const row of rows.results) {
@@ -183,7 +193,7 @@ export async function synchronizeWorkflowExecution(input:{
       ).bind(now,now,row.task_state_id));
     }
   }
-  if (taskUpdates.length) await withOrderProjectionSync(input.organizationId,input.orderId,()=>env.DB.batch(taskUpdates));
+  if (taskUpdates.length && !await commitProjection(taskUpdates)) return currentStep();
 
   const modules = await env.DB.prepare(
     `SELECT ms.id,ms.instance_step_state_id,ms.is_required,ms.completion_mode,ms.module_code,ss.step_key,ss.sort_order step_sort_order,
@@ -232,7 +242,7 @@ export async function synchronizeWorkflowExecution(input:{
     });
     return { id:item.id, status:completed?"completed":"pending" };
   });
-  if (moduleUpdates.length) await withOrderProjectionSync(input.organizationId,input.orderId,()=>env.DB.batch(workflowModuleStateStatements(env.DB,input.instanceId,moduleUpdates,now)));
+  if (moduleUpdates.length && !await commitProjection(workflowModuleStateStatements(env.DB,input.instanceId,moduleUpdates,now))) return currentStep();
 
   const steps = await env.DB.prepare(
     `SELECT ss.id,ss.step_key,ss.sort_order,ss.status existing_status,
@@ -257,12 +267,12 @@ export async function synchronizeWorkflowExecution(input:{
     const status = item.id===current.id ? "active" : completed ? "completed" : "pending";
     return { id:item.id, status };
   });
-  await withOrderProjectionSync(input.organizationId,input.orderId,()=>env.DB.batch([
+  if(!await commitProjection([
     ...workflowStepStateStatements(env.DB,input.instanceId,stepUpdates,now),
     env.DB.prepare(
       "UPDATE workflow_instances SET current_step_key=?,updated_at=? WHERE id=? AND organization_id=?",
     ).bind(current.step_key,now,input.instanceId,input.organizationId),
-  ]));
+  ]))return currentStep();
   return current.step_key;
 }
 
@@ -364,9 +374,11 @@ export async function completeWorkflowTask(input:{
     moduleAssigneeUserId: task.module_assignee_user_id,
     responsibilityPositionCode: task.responsibility_position_code,
   })) throw new Error("当前账号不是该办理步骤的负责人，无权完成");
+  const intakeSnapshot=await prepareOrderIntakeAdvance(input.organizationId,input.orderId);
   const now = new Date().toISOString();
   const authority = activePositionProfilePredicate({organizationId:input.organizationId,userId:input.actorUserId,profile,requiredPermissions:["order.view"]});
   await guardedBatch(env.DB,[
+    ...intakeGateCommitStatements(intakeSnapshot,now),
     predicateGuard(env.DB,authority.sql,authority.values,now),
     predicateGuard(env.DB,`EXISTS(SELECT 1 ${manualWorkflowTaskScopeSql}
       AND wi.id=? AND wi.workflow_id=? AND ss.id=? AND ss.step_key=? AND ms.id=? AND COALESCE(omi.id,'')=? AND o.status=?

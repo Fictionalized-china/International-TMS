@@ -4,7 +4,6 @@ import { Form, Link, redirect, useNavigation } from "react-router";
 import type { Route } from "./+types/warehouse.pickup";
 import { QueryPagination } from "../components/QueryPagination";
 import { requireSessionUser } from "../lib/auth.server";
-import { writeAudit } from "../lib/audit.server";
 import { advanceOverseasOrder } from "../lib/overseas-warehouse.server";
 import { Modal } from "../components/Modal";
 import { ActionToast } from "../components/ActionToast";
@@ -214,18 +213,20 @@ export async function action({ request }: Route.ActionArgs) {
     const expectedCodes=packages.map(item=>item.barcode.toUpperCase());
     if(scannedCodes.length!==expectedCodes.length||expectedCodes.some(code=>!scannedCodes.includes(code)))return{formError:`必须一次扫齐 ${expectedCodes.length} 个 OUL 后才能确认自提，本次已扫 ${scannedCodes.length} 个`};
     const now=new Date().toISOString();
-    await env.DB.batch([
+    const stockStatements=[
       env.DB.prepare(`INSERT INTO warehouse_package_movements(id,organization_id,package_id,operation_type,from_location_id,to_location_id,operator_user_id,notes,occurred_at,created_at)
         SELECT lower(hex(randomblob(16))),p.organization_id,p.id,'dispatch',p.location_id,NULL,?,'境外目的仓客户自提复核后出库',?,?
         FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id
         WHERE p.organization_id=? AND p.warehouse_id=? AND s.order_id=? AND p.label_kind='oul' AND p.lifecycle_status='overseas_received' AND p.status='in_stock'`).bind(user.userId,now,now,user.organizationId,warehouse.id,orderId),
       env.DB.prepare(`UPDATE warehouse_packages SET status='dispatched',lifecycle_status='signed',signed_at=?,updated_at=? WHERE organization_id=? AND warehouse_id=? AND status='in_stock' AND label_kind='oul' AND lifecycle_status='overseas_received' AND shipment_id IN (SELECT id FROM shipments WHERE organization_id=? AND order_id=?)`).bind(now,now,user.organizationId,warehouse.id,user.organizationId,orderId),
-    ]);
-    await advanceOverseasOrder({organizationId:user.organizationId,orderId,actorUserId:user.userId,action:"pickup",occurredAt:now,pickupContact:submission.pickupContact ?? undefined,pickupProofReference:submission.pickupProofReference ?? undefined,notes:`${warehouse.name} 已核对整票货物并完成客户自提出库`});
-    await writeAudit({request,action:"warehouse.overseas.pickup",resourceType:"transport_order",resourceId:orderId,organizationId:user.organizationId,actorUserId:user.userId,metadata:{warehouseId:warehouse.id,orderNumber:pickup.order_number,confirmedPackages:packages.length,barcodes:expectedCodes}});
+      env.DB.prepare("INSERT INTO audit_logs(id,organization_id,actor_user_id,action,resource_type,resource_id,outcome,metadata_json,created_at) VALUES(?,?,?,'warehouse.overseas.pickup','transport_order',?,'success',?,?)").bind(crypto.randomUUID(),user.organizationId,user.userId,orderId,JSON.stringify({warehouseId:warehouse.id,orderNumber:pickup.order_number,confirmedPackages:packages.length,barcodes:expectedCodes}),now),
+    ];
+    let handover:Awaited<ReturnType<typeof advanceOverseasOrder>>;
+    try{handover=await advanceOverseasOrder({organizationId:user.organizationId,orderId,actorUserId:user.userId,action:"pickup",occurredAt:now,pickupContact:submission.pickupContact ?? undefined,pickupProofReference:submission.pickupProofReference ?? undefined,notes:`${warehouse.name} 已核对整票货物并完成客户自提出库`,atomicStatements:stockStatements});}
+    catch(error){return{formError:error instanceof Error?error.message:"自提出库失败，本次未写入库存，请刷新核对后重试"};}
     const params=new URLSearchParams({
       warehouseId:warehouse.id,
-      pickupResult:`${pickup.order_number} 已复核并完成自提签收，订单进入费用结算`,
+      pickupResult:`${pickup.order_number} 已复核并完成自提签收${handover.syncPending?"；实物出库已保存，流程同步待重试，请勿重复出库":"，订单进入费用结算"}`,
       pickupCompleted:"1",
       pickupOrderNumber:pickup.order_number,
       pickupPackageCount:String(packages.length),

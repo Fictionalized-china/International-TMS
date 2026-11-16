@@ -137,9 +137,9 @@ export async function saveOrderCargoItem(input: {
       `INSERT INTO order_cargo_items(id,organization_id,order_id,line_no,cargo_name_cn,cargo_name_en,hs_code,
         overseas_hs_code,package_type,package_count,pieces_per_package,gross_weight_per_package_kg,
         net_weight_per_package_kg,length_cm,width_cm,height_cm,volume_per_package_cbm,declared_value,currency,
-        origin_country,brand_model,marks,special_attributes,notes,created_at,updated_at)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    ).bind(itemId, input.organizationId, input.orderId, line?.line_no ?? 1, ...cargoBindValues(result.value), now, now));
+        origin_country,brand_model,marks,special_attributes,notes,created_at,updated_at,declared_quantity,declared_unit)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE((SELECT declared_quantity_unit FROM transport_orders WHERE organization_id=? AND id=?),'件'))`,
+    ).bind(itemId, input.organizationId, input.orderId, line?.line_no ?? 1, ...cargoBindValues(result.value), now, now,result.value.packageCount*result.value.piecesPerPackage,input.organizationId,input.orderId));
   }
 
   if (result.value.packageCount < activePackages.length) {
@@ -184,7 +184,7 @@ export async function saveOrderCargoItem(input: {
   statements.push(input.db.prepare(
     `UPDATE transport_orders SET
       cargo_description=COALESCE((SELECT GROUP_CONCAT(cargo_name_cn,'、') FROM order_cargo_items WHERE order_id=? AND organization_id=?),'未填写'),
-      pieces=COALESCE((SELECT SUM(package_count*pieces_per_package) FROM order_cargo_items WHERE order_id=? AND organization_id=?),1),
+      pieces=COALESCE((SELECT SUM(COALESCE(declared_quantity,package_count*pieces_per_package)) FROM order_cargo_items WHERE order_id=? AND organization_id=?),1),
       planned_inbound_package_count=COALESCE((SELECT SUM(package_count) FROM order_cargo_items WHERE order_id=? AND organization_id=?),1),
       gross_weight_kg=COALESCE((SELECT SUM(package_count*gross_weight_per_package_kg) FROM order_cargo_items WHERE order_id=? AND organization_id=?),0),
       volume_cbm=COALESCE((SELECT SUM(package_count*volume_per_package_cbm) FROM order_cargo_items WHERE order_id=? AND organization_id=?),0),
