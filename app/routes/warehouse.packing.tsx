@@ -14,6 +14,7 @@ import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
 import { writeAudit } from "../lib/audit.server";
 import { ensureMissingLoadingDocumentSupplements } from "../lib/workflow-supplement.server";
+import {changedRowGuard,predicateGuard} from "../lib/mutation-guard.server";
 
 type PackingRow = {
   order_id: string;
@@ -166,6 +167,7 @@ export async function action({ request }: Route.ActionArgs) {
     const volumes = measures.map((item) => item.lengthCm * item.widthCm * item.heightCm / 1_000_000);
     const totalVolume = volumes.reduce((sum, value) => sum + value, 0);
     const statements: D1PreparedStatement[] = [
+      predicateGuard(env.DB,"EXISTS(SELECT 1 FROM transport_orders WHERE id=? AND organization_id=? AND status IN ('confirmed','in_execution')) AND NOT EXISTS(SELECT 1 FROM warehouse_packing_jobs WHERE order_id=? AND organization_id=? AND warehouse_id=? AND status!='cancelled')",[order.id,user.organizationId,order.id,user.organizationId,warehouse.id],now),
       env.DB.prepare(`INSERT INTO warehouse_packing_jobs(
         id,organization_id,warehouse_id,order_id,shipment_id,packing_mode,source_package_count,
         outbound_package_count,total_weight_kg,total_volume_cbm,notes,status,created_by_user_id,created_at,updated_at
@@ -175,6 +177,7 @@ export async function action({ request }: Route.ActionArgs) {
         valueOf(form, "notes").trim() || null, user.userId, now, now,
       ),
     ];
+    for(const chunk of chunkD1Values(sources.results,5))statements.unshift(predicateGuard(env.DB,`(SELECT COUNT(*) FROM warehouse_packages WHERE organization_id=? AND warehouse_id=? AND shipment_id=? AND label_kind='inbound_mark' AND lifecycle_status='active' AND status='in_stock' AND id IN (${d1Placeholders(chunk.length)}))=?`,[user.organizationId,warehouse.id,order.shipment_id,...chunk.map(row=>row.id),chunk.length],now));
     for (const source of sources.results) {
       statements.push(env.DB.prepare(`INSERT INTO warehouse_packing_job_sources(
         id,organization_id,packing_job_id,inbound_warehouse_package_id,created_at
@@ -237,7 +240,7 @@ export async function action({ request }: Route.ActionArgs) {
       const intakeSnapshot=await prepareOrderIntakeAdvance(user.organizationId,job.order_id);
       await env.DB.batch([...intakeGateCommitStatements(intakeSnapshot,now),env.DB.prepare(`UPDATE warehouse_packing_jobs SET status='labelled',labeling_confirmed_at=?,
         labeling_confirmed_by_user_id=?,updated_at=? WHERE id=? AND organization_id=? AND warehouse_id=? AND status='generated'`)
-        .bind(now, user.userId, now, job.id, user.organizationId, warehouse.id)]);
+        .bind(now, user.userId, now, job.id, user.organizationId, warehouse.id),changedRowGuard(env.DB,now)]);
     } catch (error) {
       console.error("confirm packing labels failed", error);
       return { formError: "贴标确认失败，请检查所有最终包装的实重和长宽高后重试" };
@@ -262,9 +265,10 @@ export async function action({ request }: Route.ActionArgs) {
       WHERE organization_id=? AND packing_job_id=?`).bind(user.organizationId, job.id).all<{ id: string }>();
     const statements: D1PreparedStatement[] = [
       env.DB.prepare("UPDATE warehouse_packing_jobs SET status='cancelled',updated_at=? WHERE id=? AND organization_id=? AND status IN ('generated','labelled')").bind(now, job.id, user.organizationId),
+      changedRowGuard(env.DB,now),
       env.DB.prepare("UPDATE warehouse_packages SET lifecycle_status='voided',status='exception',voided_at=?,voided_by_user_id=?,void_reason='仓库重做包装方案',updated_at=? WHERE organization_id=? AND packing_job_id=? AND label_kind='oul' AND lifecycle_status='active'").bind(now, user.userId, now, user.organizationId, job.id),
     ];
-    if (sourceIds.results.length) statements.push(env.DB.prepare(`UPDATE warehouse_packages SET status='in_stock',updated_at=? WHERE organization_id=? AND id IN (${d1Placeholders(sourceIds.results.length)}) AND label_kind='inbound_mark' AND status='allocated'`).bind(now, user.organizationId, ...sourceIds.results.map((row) => row.id)));
+    for(const chunk of chunkD1Values(sourceIds.results,3))statements.push(env.DB.prepare(`UPDATE warehouse_packages SET status='in_stock',updated_at=? WHERE organization_id=? AND warehouse_id=? AND id IN (${d1Placeholders(chunk.length)}) AND label_kind='inbound_mark' AND status='allocated'`).bind(now, user.organizationId,warehouse.id, ...chunk.map((row) => row.id)));
     await env.DB.batch(statements);
     return { success: `${job.order_number} 的包装方案已作废，可重新打包` };
   }

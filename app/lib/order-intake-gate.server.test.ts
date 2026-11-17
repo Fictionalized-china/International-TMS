@@ -9,6 +9,8 @@ import { executeOrderWorkflowAction } from "./order-workflow.server";
 import { synchronizeWorkflowExecution } from "./workflow-execution.server";
 import { activateOrderIntakeRule } from "./order-intake-supplement.server";
 import { guardedBatch } from "./mutation-guard.server";
+import {customsIntakeCommitStatements} from "./customs-intake-commit.server";
+import {loadOrderIntakeSupplement} from "./order-intake-supplement.server";
 vi.mock("cloudflare:workers", () => ({ env: {} }));
 let fixture: Awaited<ReturnType<typeof meetingFixture>>;
 beforeEach(async () => {
@@ -28,6 +30,23 @@ function bind() {
 const prepare = () => prepareOrderIntakeAdvance("org", "order");
 const apply = (snapshot: Awaited<ReturnType<typeof prepare>>) => guardedBatch(fixture.db, [...intakeGateCommitStatements(snapshot, fixture.now), fixture.db.prepare("UPDATE customers SET name='forward-effect' WHERE id='customer'")], "资料变更，整批未提交");
 describe("versioned intake forward gate and commit snapshots", () => {
+  it.each(['{broken','[]','null','{"intakeRule":null}'])("blocks corrupted root/rule %s without hiding the correction view",async raw=>{
+    fixture.database.prepare("UPDATE transport_orders SET intake_operations_json=? WHERE id='order'").run(raw);
+    await expect(prepare()).rejects.toThrow("损坏");
+    expect(await loadOrderIntakeSupplement(fixture.actors.get("owner")!,"order")).toMatchObject({canEdit:true,ruleError:expect.stringContaining("损坏")});
+  });
+  it("keeps customs drafts/deletion reachable but blocks declaration and release with missing red data",async()=>{
+    bind();fixture.database.exec("UPDATE transport_orders SET exit_port=NULL WHERE id='order'");
+    expect(await customsIntakeCommitStatements(fixture.db,"org","order","draft",false,fixture.now)).toEqual([]);
+    expect(await customsIntakeCommitStatements(fixture.db,"org","order","released",true,fixture.now)).toEqual([]);
+    for(const status of["declared","inspecting","released"])await expect(customsIntakeCommitStatements(fixture.db,"org","order",status,false,fixture.now)).rejects.toThrow("出境口岸");
+  });
+  it("rechecks declared facts in the same customs transaction rather than trusting the page",async()=>{
+    bind();const guards=await customsIntakeCommitStatements(fixture.db,"org","order","released",false,fixture.now);
+    fixture.database.exec("UPDATE transport_orders SET exit_port=NULL WHERE id='order'");
+    await expect(fixture.db.batch([...guards,fixture.db.prepare("UPDATE customers SET name='wrong' WHERE id='customer'")])).rejects.toThrow();
+    expect(fixture.database.prepare("SELECT name FROM customers WHERE id='customer'").get()?.name).toBe("测试客户");
+  });
   it("uses independent business classifications and accepts explicit zero volume and self-delivery payable", async () => {
     bind(); const snapshot = await prepare(); expect(snapshot.binding?.version).toContain("v2"); expect(snapshot.result?.issues).toEqual([]);
     await apply(snapshot); expect(fixture.database.prepare("SELECT name FROM customers WHERE id='customer'").get()).toEqual({ name: "forward-effect" });

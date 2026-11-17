@@ -1,6 +1,9 @@
 import { businessDateTimeLabel } from "../lib/business-time";
 import { env } from "cloudflare:workers";
 import { prepareBatchIntakeAdvance,intakeManyCommitStatements } from "../lib/order-intake-gate.server";
+import { customsIntakeCommitStatements } from "../lib/customs-intake-commit.server";
+import { changedRowGuard,predicateGuard } from "../lib/mutation-guard.server";
+import { loadActivePositionAccessProfile,activePositionProfilePredicate } from "../lib/position-access-profile.server";
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Form, Link, useNavigate, useNavigation, useSearchParams } from "react-router";
 import type { Route } from "./+types/admin.loading-detail";
@@ -634,6 +637,15 @@ async function assertFreshBatchCostMutation(input:{
       .bind(input.allocationId,fresh.organizationId,input.batchId).first<{present:number}>();
     if(!allocation)throw new Error("费用分摊草稿状态已变化，请刷新页面后重试");
   }
+  const profile=await loadActivePositionAccessProfile(env.DB,fresh.organizationId,fresh.userId);
+  if(!profile)throw new Error("当前岗位已停用，请重新登录");
+  const identity=activePositionProfilePredicate({organizationId:fresh.organizationId,userId:fresh.userId,profile,requiredPermissions:["order.view","billing.manage","order.module.costs.manage"]});
+  const actor={...fresh,...profile,roleCodes:[profile.roleCode]},scope=batchCostsManageScopeSql(actor,"cost_scope_batch");
+  const now=new Date().toISOString();
+  const intake=await prepareBatchIntakeAdvance(fresh.organizationId,input.batchId);
+  return [predicateGuard(env.DB,identity.sql,identity.values,now),
+    predicateGuard(env.DB,`EXISTS(SELECT 1 FROM transport_batches cost_scope_batch WHERE cost_scope_batch.id=? AND cost_scope_batch.organization_id=? AND ${scope.sql})`,[input.batchId,fresh.organizationId,...scope.values],now),
+    ...intakeManyCommitStatements(intake,now)];
 }
 
 export async function loader({request,params}:Route.LoaderArgs){
@@ -996,7 +1008,7 @@ export async function action({request,params}:Route.ActionArgs){
   const assertCostCanMutate:AssertCostAllocationCanMutate=async(context)=>{
     if(context.organizationId!==current.organizationId||context.batchId!==batchId)
       throw new Error("费用分摊办理范围已变化，请刷新页面后重试");
-    await assertFreshBatchCostMutation({
+    return assertFreshBatchCostMutation({
       request,organizationId:current.organizationId,userId:current.userId,batchId,
       allocationId:context.allocationId,orderIds:context.orderIds,
     });
@@ -1214,6 +1226,7 @@ export async function action({request,params}:Route.ActionArgs){
     const {clearanceStage,declarationNumber,declarationType,declarationTitle,declaringCompany,
       declaredAt,currency,declaredAmount,grossWeightKg,isDeleted,changeReason,declarationStatus,
       releasedAt,isRedeclared,isAmended,isInspected}=resolved.value;
+    const customsWrites=await customsIntakeCommitStatements(env.DB,current.organizationId,orderId,declarationStatus,isDeleted,now);
     if(declarationStatus==="released"&&!orderCustomsAccess.canRelease){
       return{formError:orderCustomsAccess.releaseAccess.reason||"当前冻结工作流节点不允许确认海关放行"};
     }
@@ -1228,17 +1241,16 @@ export async function action({request,params}:Route.ActionArgs){
     }else{
       const record=await env.DB.prepare("SELECT id FROM order_customs_records WHERE organization_id=? AND order_id=? AND clearance_stage=? AND status!='cancelled' ORDER BY created_at LIMIT 1").bind(current.organizationId,orderId,clearanceStage).first<{id:string}>();
       customsRecordId=record?.id??crypto.randomUUID();
-      if(!record)await env.DB.prepare("INSERT INTO order_customs_records(id,organization_id,order_id,clearance_stage,status,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,'draft',?,?,?)").bind(customsRecordId,current.organizationId,orderId,clearanceStage,current.userId,now,now).run();
+      if(!record)customsWrites.push(env.DB.prepare("INSERT INTO order_customs_records(id,organization_id,order_id,clearance_stage,status,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,'draft',?,?,?)").bind(customsRecordId,current.organizationId,orderId,clearanceStage,current.userId,now,now));
     }
     try{
       if(declarationId){
-        const result=await env.DB.prepare(`UPDATE order_customs_declarations SET customs_record_id=?,declaration_number=?,declaration_type=?,declaration_title=?,declaring_company=?,declared_at=?,declared_amount=?,currency=?,gross_weight_kg=?,released_at=?,status=?,is_deleted=?,is_redeclared=?,is_amended=?,is_inspected=?,change_reason=?,updated_at=? WHERE id=? AND organization_id=? AND order_id=?`).bind(customsRecordId,declarationNumber,declarationType,declarationTitle,declaringCompany,declaredAt,declaredAmount,currency,grossWeightKg,declarationStatus==="released"?releasedAt:null,declarationStatus,isDeleted?1:0,isRedeclared?1:0,isAmended?1:0,isInspected?1:0,changeReason||null,now,declarationId,current.organizationId,orderId).run();
-        if(!result.meta.changes)return{formError:"报关单未更新，请刷新后重试"};
+        customsWrites.push(env.DB.prepare(`UPDATE order_customs_declarations SET customs_record_id=?,declaration_number=?,declaration_type=?,declaration_title=?,declaring_company=?,declared_at=?,declared_amount=?,currency=?,gross_weight_kg=?,released_at=?,status=?,is_deleted=?,is_redeclared=?,is_amended=?,is_inspected=?,change_reason=?,updated_at=? WHERE id=? AND organization_id=? AND order_id=?`).bind(customsRecordId,declarationNumber,declarationType,declarationTitle,declaringCompany,declaredAt,declaredAmount,currency,grossWeightKg,declarationStatus==="released"?releasedAt:null,declarationStatus,isDeleted?1:0,isRedeclared?1:0,isAmended?1:0,isInspected?1:0,changeReason||null,now,declarationId,current.organizationId,orderId),changedRowGuard(env.DB,now));
       }else{
         const id=crypto.randomUUID();
-        const result=await env.DB.prepare(`INSERT INTO order_customs_declarations(id,organization_id,order_id,customs_record_id,declaration_number,declaration_type,declaration_title,declaring_company,declared_at,declared_amount,currency,gross_weight_kg,released_at,status,is_deleted,is_redeclared,is_amended,is_inspected,change_reason,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id,current.organizationId,orderId,customsRecordId,declarationNumber,declarationType,declarationTitle,declaringCompany,declaredAt,declaredAmount,currency,grossWeightKg,declarationStatus==="released"?releasedAt:null,declarationStatus,isDeleted?1:0,isRedeclared?1:0,isAmended?1:0,isInspected?1:0,changeReason||null,current.userId,now,now).run();
-        if(!result.meta.changes)return{formError:"报关单未保存，请重试"};
+        customsWrites.push(env.DB.prepare(`INSERT INTO order_customs_declarations(id,organization_id,order_id,customs_record_id,declaration_number,declaration_type,declaration_title,declaring_company,declared_at,declared_amount,currency,gross_weight_kg,released_at,status,is_deleted,is_redeclared,is_amended,is_inspected,change_reason,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id,current.organizationId,orderId,customsRecordId,declarationNumber,declarationType,declarationTitle,declaringCompany,declaredAt,declaredAmount,currency,grossWeightKg,declarationStatus==="released"?releasedAt:null,declarationStatus,isDeleted?1:0,isRedeclared?1:0,isAmended?1:0,isInspected?1:0,changeReason||null,current.userId,now,now));
       }
+      await env.DB.batch(customsWrites);
     }catch(error){if(String(error).includes("UNIQUE"))return{formError:"同一订单的报关单号不能重复"};throw error}
     await syncCustomsModuleFromRecords(current.organizationId,orderId,current.userId);
     await writeAudit({request,action:declarationId?"transport.batch.order_customs_declaration.update":"transport.batch.order_customs_declaration.create",resourceType:"transport_order",resourceId:orderId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{batchId,declarationId,declarationNumber,clearanceStage,declarationStatus}});

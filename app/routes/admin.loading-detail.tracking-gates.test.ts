@@ -145,6 +145,8 @@ const harness = vi.hoisted(() => {
           return null;
         }),
         all: vi.fn(async () => {
+          if(sql.includes("SELECT order_id,'child' source"))return{results:orders.map(order=>({order_id:order.order_id,source:'child'}))};
+          if(sql.includes('FROM transport_orders WHERE organization_id=? AND id IN'))return{results:orders.map(order=>({id:order.order_id,order_number:order.order_number,intake_operations_json:null}))};
           if (sql.includes("COALESCE((SELECT s.shipment_number"))
             return { results: orders };
           // MySQL 1093 guard: latest shipment ids are resolved before the

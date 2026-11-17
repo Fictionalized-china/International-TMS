@@ -44,7 +44,8 @@ describe("quotation native workflow fields",() => {
 
   it("derives every quote workflow surface from one unique native-field registry",() => {
     const keys = quotationNativeFieldCatalog.map((field) => field.fieldKey);
-    expect(keys).toHaveLength(37);
+    expect(keys).toHaveLength(39);
+    expect(keys).toEqual(expect.arrayContaining(['quotation_intake_businessMajor','quotation_intake_businessKind']));
     expect(new Set(keys).size).toBe(keys.length);
     expect([...quotationBuiltInWorkflowFieldKeys]).toEqual(keys);
     expect([...quotationNativeFieldKeySet]).toEqual(keys);

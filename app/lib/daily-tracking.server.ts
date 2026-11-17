@@ -3,8 +3,11 @@ import { loadBusinessProcessPolicy } from "./business-process-policy.server";
 import { dailyTrackingAccess,dailyTrackingDescription,validTrackingEventTime,storedTrackingTimestamp,type DailyTrackingKind } from "./daily-tracking";
 import { sha256 } from "./crypto.server";
 import { orderVisibilitySql } from "./order-access";
+import { prepareOrderIntakeAdvance,intakeGateCommitStatements } from "./order-intake-gate.server";
+import { prepareSitePhotoStatements } from "./order-site-photos.server";
+import { fileToDataUrl } from "./file-data-url";
 
-export async function recordDailyTracking(db:D1Database,input:{current:SessionUser;orderId:string;requestId:string;eventKind:string;eventAt:string;location:string;vehicleReference:string;notes:string;visibleToCustomer:boolean}) {
+export async function recordDailyTracking(db:D1Database,input:{current:SessionUser;orderId:string;requestId:string;eventKind:string;eventAt:string;location:string;vehicleReference:string;notes:string;visibleToCustomer:boolean;photoForm?:FormData}) {
   const {current}=input;
   if (!/^[A-Za-z0-9:_-]{10,160}$/.test(input.requestId)) throw new Error("缺少有效提交标识，请刷新后重试");
   if (!input.location.trim() || !input.notes.trim() || input.notes.length>2000 || input.location.length>200 || input.vehicleReference.length>100) throw new Error("请填写地点与运踪说明，并保持内容长度合理");
@@ -12,10 +15,10 @@ export async function recordDailyTracking(db:D1Database,input:{current:SessionUs
   if (!validTrackingEventTime(input.eventAt,now)) throw new Error("运踪时间无效或超出当前时间");
   const eventAt=new Date(input.eventAt).toISOString();
   const visibility=orderVisibilitySql(current,"o");
-  const order=await db.prepare(`SELECT o.id,o.status,s.id shipment_id,s.status shipment_status,s.actual_pickup_at
+  const order=await db.prepare(`SELECT o.id,o.customer_id,o.status,s.id shipment_id,s.status shipment_status,s.actual_pickup_at
     FROM transport_orders o JOIN shipments s ON s.id=(SELECT ss.id FROM shipments ss WHERE ss.organization_id=o.organization_id AND ss.order_id=o.id ORDER BY ss.updated_at DESC,ss.created_at DESC LIMIT 1)
     WHERE o.id=? AND o.organization_id=? AND ${visibility.sql}`)
-    .bind(input.orderId,current.organizationId,...visibility.values).first<{id:string;status:string;shipment_id:string;shipment_status:string;actual_pickup_at:string|null}>();
+    .bind(input.orderId,current.organizationId,...visibility.values).first<{id:string;customer_id:string;status:string;shipment_id:string;shipment_status:string;actual_pickup_at:string|null}>();
   if(!order) throw new Error("订单或运单不存在，或超出当前账号数据范围");
   const policy=await loadBusinessProcessPolicy(current.organizationId,db);
   const denied=dailyTrackingAccess({policy,positionCode:current.positionCode,roleCodes:current.roleCodes,permissions:current.permissions,orderStatus:order.status,eventKind:input.eventKind,pickupAt:order.actual_pickup_at});
@@ -28,15 +31,22 @@ export async function recordDailyTracking(db:D1Database,input:{current:SessionUs
   }
   const kind=input.eventKind as DailyTrackingKind;
   const description=dailyTrackingDescription(kind,input.notes,input.vehicleReference);
-  const hash=await sha256(JSON.stringify({orderId:input.orderId,kind,eventAt,location:input.location.trim(),vehicle:input.vehicleReference.trim(),notes:input.notes.trim(),visible:input.visibleToCustomer}));
+  const photoFiles=input.photoForm?.getAll("sitePhotos").filter((file):file is File=>file instanceof File&&file.size>0)??[];
+  if(photoFiles.length>8||photoFiles.some(file=>file.size>2*1024*1024))throw new Error("照片数量或大小超限，请压缩或减少图片后重试");
+  const photoHashes=await Promise.all(photoFiles.map(async file=>({name:file.name,hash:await sha256(await fileToDataUrl(file))})));
+  const hash=await sha256(JSON.stringify({orderId:input.orderId,kind,eventAt,location:input.location.trim(),vehicle:input.vehicleReference.trim(),notes:input.notes.trim(),visible:input.visibleToCustomer,...(photoHashes.length?{photos:photoHashes}:{})}));
   const existing=await db.prepare("SELECT payload_hash FROM order_daily_tracking WHERE organization_id=? AND actor_user_id=? AND request_id=?").bind(current.organizationId,current.userId,input.requestId).first<{payload_hash:string}>();
   if(existing) {
     if(existing.payload_hash!==hash) throw new Error("同一提交标识的内容已变化，请刷新后重新提交");
     return {duplicate:true};
   }
   const id=crypto.randomUUID(),at=now.toISOString();
+  // Free-form location notes do not advance an order. First pickup does, and
+  // must use the same server-owned intake rule as the ordinary order action.
+  const intake=kind==="pickup"?await prepareOrderIntakeAdvance(current.organizationId,order.id,db):null;
   const status=kind==="pickup" ? "picked_up" : kind==="exception" ? "exception" : "in_transit";
   const statements=[
+    ...intakeGateCommitStatements(intake,at,db),
     db.prepare(`INSERT INTO order_daily_tracking(id,organization_id,order_id,shipment_id,request_id,payload_hash,event_kind,event_at,location,vehicle_reference,notes,visible_to_customer,actor_user_id,created_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id,current.organizationId,order.id,order.shipment_id,input.requestId,hash,kind,eventAt,input.location.trim(),input.vehicleReference.trim()||null,input.notes.trim(),input.visibleToCustomer?1:0,current.userId,at),
     db.prepare(`INSERT INTO shipment_events(id,shipment_id,status,location,description,event_at,visible_to_customer,created_by_user_id,created_at) VALUES(?,?,?,?,?,?,?,?,?)`)
@@ -47,6 +57,7 @@ export async function recordDailyTracking(db:D1Database,input:{current:SessionUs
       VALUES(?,?,?,'tracking.daily.create','transport_order',?,'success',?,?)`).bind(crypto.randomUUID(),current.organizationId,current.userId,order.id,JSON.stringify({kind,visibleToCustomer:input.visibleToCustomer}),at),
   ];
   if(kind==="pickup") statements.push(db.prepare("UPDATE shipments SET actual_pickup_at=COALESCE(actual_pickup_at,?),status=CASE WHEN status IN ('pending','booked') THEN 'picked_up' ELSE status END,updated_at=? WHERE id=? AND organization_id=?").bind(eventAt,at,order.shipment_id,current.organizationId));
+  statements.push(...await prepareSitePhotoStatements(db,{organizationId:current.organizationId,actorUserId:current.userId,form:input.photoForm??new FormData(),stage:kind==="pickup"?"pickup":"other",sourceType:"daily_tracking",sourceId:id,requestKey:input.requestId,targets:[{orderId:order.id,customerId:order.customer_id,eventId:id}],occurredAt:eventAt,now:at,policy}));
   try { await db.batch(statements); }
   catch(error) {
     const concurrent=await db.prepare("SELECT payload_hash FROM order_daily_tracking WHERE organization_id=? AND actor_user_id=? AND request_id=?").bind(current.organizationId,current.userId,input.requestId).first<{payload_hash:string}>();

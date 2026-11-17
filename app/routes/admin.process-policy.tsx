@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { Form, Link, useNavigation } from "react-router";
 import type { Route } from "./+types/admin.process-policy";
 import { requireSessionUser } from "../lib/auth.server";
-import { businessProcessPolicyDefinitions, dispatchOrderFieldCodes, type BusinessProcessPolicyKey } from "../lib/business-process-policy";
+import { businessProcessPolicyDefinitions, dispatchOrderFieldCodes, sitePhotoStages, type BusinessProcessPolicyKey } from "../lib/business-process-policy";
 import { loadBusinessProcessPolicy, saveBusinessProcessPolicy } from "../lib/business-process-policy.server";
 import { writeAudit } from "../lib/audit.server";
 
@@ -43,6 +43,7 @@ export default function ProcessPolicy({ loaderData, actionData }: Route.Componen
       <fieldset className="panel"><legend>客服代录客户</legend><p>不以姓名推测客户身份；勾选实际业务客户后，客服才可代录其订单。</p><div className="form-grid">{loaderData.customers.map(c => <label key={c.id}><input type="checkbox" name="csCustomerIds" value={c.id} defaultChecked={Boolean(c.cs_order_entry_enabled)} /> {c.name}</label>)}</div></fieldset>
       <details className="panel"><summary>可选岗位代码</summary><p>{loaderData.positions.map(p => `${p.code}：${p.name}`).join("；")}</p></details>
       <details className="panel"><summary>找车资料字段代码</summary><p>{dispatchOrderFieldCodes.join("、")}</p><p>仅支持现有订单字段；不填写表示不增加额外资料门禁。</p></details>
+      <details className="panel"><summary>现场照片节点代码</summary><p>{Object.entries(sitePhotoStages).map(([code,label])=>`${code}：${label}`).join("；")}</p><p>停用上传不删除已存照片，也不停止客户查看；必传节点必须同时开放。照片设置不扩大岗位或订单访问权限。</p></details>
       <button className="primary" disabled={busy}>保存流程策略</button>
     </Form></div>;
 }

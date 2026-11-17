@@ -5,7 +5,9 @@ import {defaultBusinessProcessPolicy,policyPositions,type BusinessProcessPolicyK
 import {orderVisibilitySql} from "./order-access";
 import {isBossBusinessActor} from "./permission-blocks";
 import {loadActivePositionAccessProfile} from "./position-access-profile.server";
-import {intakeOperationFields,intakeOperationPresent,readIntakeOperations} from "./intake-operations";
+import {intakeOperationFields,intakeOperationPresent,intakeServiceOptions,readIntakeOperations} from "./intake-operations";
+import {orderModuleDefinitions} from "./order-modules";
+import {querySnapshotGuards} from "./query-snapshot-guard.server";
 import {listIntakePeople,resolveIntakeOperations} from "./intake-operations.server";
 import {intakeRouteFields} from "./intake-route-fields";
 import {listIntakeRouteReferences,resolveIntakeRouteFields} from "./intake-route-fields.server";
@@ -14,7 +16,7 @@ import {changedRowGuard,guardedBatch,predicateGuard} from "./mutation-guard.serv
 import {valueOf} from "./validation";
 import {activeOrganizationAssigneeSelectionPredicate} from "./organization-assignee.server";
 import {activePositionProfilePredicate} from "./position-access-profile.server";
-import {createIntakeRuleBinding,readIntakeRuleBinding,intakeRulePolicyKeys} from "./order-intake-rule";
+import {createIntakeRuleBinding,inspectIntakeRuleBinding,intakeRulePolicyKeys} from "./order-intake-rule";
 import {readIntakeGateSnapshot,intakeGateMessage,intakeGateCommitStatements} from "./order-intake-gate.server";
 
 const supplementalOperationFields=intakeOperationFields.filter(field=>field.kind!=="services");
@@ -42,22 +44,63 @@ async function context(current:SessionUser,orderId:string) {
 }
 export async function loadOrderIntakeSupplement(current:SessionUser,orderId:string) {
   const state=await context(current,orderId),{order}=state,operations=readIntakeOperations(order.intake_operations_json);
+  const services=await env.DB.prepare("SELECT service_code,status FROM order_services WHERE organization_id=? AND order_id=?").bind(current.organizationId,orderId).all<{service_code:string;status:string}>();
   const operationKeys=supplementalOperationFields.filter(field=>!intakeOperationPresent(field.key,operations)).map(field=>field.key);
   const routeKeys=intakeRouteFields.filter(field=>!String(order[field.column]??"").trim()).map(field=>field.fieldKey);
   const missing=[...supplementalOperationFields.filter(field=>operationKeys.includes(field.key)).map(field=>field.label),...intakeRouteFields.filter(field=>routeKeys.includes(field.fieldKey)).map(field=>field.label),...(!order.quote_commercial_user_id&&!order.quote_commercial_name_snapshot?.trim()?["报价商务"]:[])];
   return{
     order:{id:order.id,number:order.order_number,status:order.status,version:order.updated_at,operations:order.intake_operations_json??"{}",routes:Object.fromEntries(intakeRouteFields.map(field=>[field.column,order[field.column]])),commercialId:order.quote_commercial_user_id,commercialName:order.quote_commercial_name_snapshot},
-    operationKeys,routeKeys,missing,canEdit:state.canEdit,ruleVersion:readIntakeRuleBinding(order.intake_operations_json)?.version??null,
+    operationKeys,routeKeys,missing,canEdit:state.canEdit,servicesMissing:services.results.length===0,ruleVersion:inspectIntakeRuleBinding(order.intake_operations_json).binding?.version??null,ruleError:inspectIntakeRuleBinding(order.intake_operations_json).error,
     people:state.canEdit?await listIntakePeople(current.organizationId,state.policy):{businessAssistant:[],customerService:[],quoteCommercials:[]},
     references:state.canEdit?await listIntakeRouteReferences(current.organizationId):[],
   };
+}
+
+/** Repair absent historical service rows only. Never replaces a selection or
+ * activates new workflow branches; those require a real workflow amendment. */
+export async function supplementMissingOrderServices(current:SessionUser,orderId:string,form:FormData){
+  const {order,profile,boss,canEdit,policy}=await context(current,orderId);
+  if(!canEdit)throw new Error("当前账号不能补录本单委托服务，或订单已终结");
+  const reason=valueOf(form,"serviceReason"),codes=[...new Set(form.getAll("missingServiceCode").map(String))];
+  if(reason.length<2||reason.length>1000)throw new Error("请填写 2 至 1000 字的原始委托依据");
+  if(!codes.length||codes.some(code=>!intakeServiceOptions.some(option=>option[0]===code)))throw new Error("请选择本单实际委托的服务");
+  if(valueOf(form,"version")!==order.updated_at)throw new Error("资料已变化，请刷新后核对委托服务");
+  const serviceSql="SELECT id,service_code,status FROM order_services WHERE organization_id=? AND order_id=?";
+  const modulesSql=`SELECT m.id,m.module_code,m.status,o.workflow_instance_id,
+    CASE WHEN o.workflow_instance_id IS NULL THEN m.enabled WHEN EXISTS(
+      SELECT 1 FROM workflow_instances wi JOIN workflow_instance_step_states ss ON ss.instance_id=wi.id
+      JOIN workflow_instance_module_states ms ON ms.instance_step_state_id=ss.id AND ms.module_code=m.module_code
+      WHERE wi.id=o.workflow_instance_id AND wi.organization_id=o.organization_id AND wi.order_id=o.id
+    ) THEN 1 ELSE 0 END enabled
+    FROM order_module_instances m JOIN transport_orders o ON o.id=m.order_id AND o.organization_id=m.organization_id
+    WHERE m.organization_id=? AND m.order_id=?`;
+  const [services,modules]=await Promise.all([env.DB.prepare(serviceSql).bind(current.organizationId,orderId).all<Record<string,unknown>>(),env.DB.prepare(modulesSql).bind(current.organizationId,orderId).all<Record<string,unknown>>()]);
+  if(services.results.length)throw new Error("本单已有委托服务，不允许从历史补录入口替换或恢复已取消的服务");
+  const required=orderModuleDefinitions.filter(module=>module.services?.some(code=>codes.includes(code)));
+  for(const module of required){if(!modules.results.some(row=>row.module_code===module.code&&Number(row.enabled)===1))throw new Error(`本单冻结流程未启用“${module.name}”，不能靠补录服务新增分支；请由主管办理流程调整`);}
+  const now=new Date().toISOString(),authority=activePositionProfilePredicate({organizationId:current.organizationId,userId:current.userId,profile,requiredPermissions:["order.view",...(!boss?[profile.permissions.includes("order.intake.manage")?"order.intake.manage":"order.manage"]:[])]});
+  const next=JSON.stringify({...readIntakeOperations(order.intake_operations_json),entrustedServices:codes,canonicalSupplementVersion:1,...(inspectIntakeRuleBinding(order.intake_operations_json).error?{intakeRule:{version:"corrupt"}}:{})});
+  await guardedBatch(env.DB,[
+    predicateGuard(env.DB,authority.sql,authority.values,now),
+    predicateGuard(env.DB,"COALESCE((SELECT policy_value FROM business_process_policies WHERE organization_id=? AND policy_key='order.supplement_positions'),?)=?",[current.organizationId,defaultBusinessProcessPolicy["order.supplement_positions"],policy["order.supplement_positions"]],now),
+    ...querySnapshotGuards(env.DB,serviceSql,[current.organizationId,orderId],services.results,now),
+    ...querySnapshotGuards(env.DB,modulesSql,[current.organizationId,orderId],modules.results,now),
+    env.DB.prepare(`UPDATE transport_orders SET intake_operations_json=?,updated_at=? WHERE organization_id=? AND id=? AND status=? AND updated_at=? AND HEX(COALESCE(intake_operations_json,''))=HEX(?)
+      AND (?=1 OR salesperson_user_id=? OR created_by_user_id=? OR operation_supervisor_user_id=? OR current_assignee_user_id=? OR EXISTS(SELECT 1 FROM order_module_instances m WHERE m.organization_id=transport_orders.organization_id AND m.order_id=transport_orders.id AND m.enabled=1 AND m.assignee_user_id=?))`)
+      .bind(next,now,current.organizationId,orderId,order.status,order.updated_at,order.intake_operations_json??"",boss?1:0,current.userId,current.userId,current.userId,current.userId,current.userId),changedRowGuard(env.DB,now),
+    ...codes.map(code=>env.DB.prepare("INSERT INTO order_services(id,organization_id,order_id,service_code,service_name,created_at) VALUES(?,?,?,?,?,?)").bind(crypto.randomUUID(),current.organizationId,orderId,code,intakeServiceOptions.find(option=>option[0]===code)![1],now)),
+    env.DB.prepare("INSERT INTO audit_logs(id,organization_id,actor_user_id,action,resource_type,resource_id,outcome,metadata_json,created_at) VALUES(?,?,?,'order.intake.services.supplement','transport_order',?,'success',?,?)").bind(crypto.randomUUID(),current.organizationId,current.userId,orderId,JSON.stringify({reason,before:[],after:codes,sourceVersion:order.updated_at,workflowUnchanged:true}),now),
+  ],"委托服务、订单责任人或权限已变化，本次未保存，请刷新核对");
+  return{success:"已按原始委托补录服务；未新增流程分支，运输、库存及资金事实保持不变"};
 }
 
 /** Explicit, audited upgrade of the intake rule only; never replaces the workflow or historical facts. */
 export async function activateOrderIntakeRule(current:SessionUser,orderId:string,form:FormData) {
   const {order,actor,profile,policy,boss,canEdit}=await context(current,orderId);
   if(!canEdit)throw new Error("当前账号无权为本单应用录单检查规则，或订单已终结");
-  if(readIntakeRuleBinding(order.intake_operations_json))return{success:"本单已使用当前录单检查规则，无需重复应用"};
+  const priorRule=inspectIntakeRuleBinding(order.intake_operations_json);
+  if(priorRule.binding)return{success:"本单已使用当前录单检查规则，无需重复应用"};
+  if(priorRule.error&&!boss&&!actor.permissions.includes("workflow.manage"))throw new Error("规则损坏不能作为旧单放行；请由老板或流程管理员核对本单资料后修复规则");
   const reason=valueOf(form,"reason");if(reason.length<2||reason.length>1000)throw new Error("请填写 2 至 1000 字的规则升级依据");
   if(valueOf(form,"version")!==order.updated_at)throw new Error("资料已被其他窗口修改，请刷新后再应用规则");
   const binding=createIntakeRuleBinding(policy),snapshot=await readIntakeGateSnapshot(current.organizationId,orderId,binding);
@@ -76,7 +119,7 @@ export async function activateOrderIntakeRule(current:SessionUser,orderId:string
       .bind(next,now,current.organizationId,orderId,order.status,order.updated_at),
     changedRowGuard(env.DB,now),
     env.DB.prepare("INSERT INTO audit_logs(id,organization_id,actor_user_id,action,resource_type,resource_id,outcome,metadata_json,created_at) VALUES(?,?,?,'order.intake.rule.bind','transport_order',?,'success',?,?)")
-      .bind(crypto.randomUUID(),current.organizationId,current.userId,orderId,JSON.stringify({reason,binding,previousVersion:null}),now),
+      .bind(crypto.randomUUID(),current.organizationId,current.userId,orderId,JSON.stringify({reason,binding,previousVersion:null,...(priorRule.error?{repair:true,previousRaw:order.intake_operations_json}: {})}),now),
   ],"应用规则期间资料、权限或费用配置已变化，本次未保存，请刷新重试");
   return{success:"已应用录单必填检查；未替换本单工作流，未改动运输、库存、费用或资金事实"};
 }
@@ -99,7 +142,7 @@ export async function correctOrderQuoteCommercial(current:SessionUser,orderId:st
     predicateGuard(env.DB,target.sql,target.values,now),
     ...(["order.supplement_positions","order.quote_commercial_positions"] as const).map(key=>predicateGuard(env.DB,"COALESCE((SELECT policy_value FROM business_process_policies WHERE organization_id=? AND policy_key=?),?)=?",[current.organizationId,key,defaultBusinessProcessPolicy[key],policy[key]],now)),
     predicateGuard(env.DB,`EXISTS(SELECT 1 FROM transport_orders o WHERE o.organization_id=? AND o.id=? AND (?=1 OR o.salesperson_user_id=? OR o.created_by_user_id=? OR o.operation_supervisor_user_id=? OR o.current_assignee_user_id=? OR EXISTS(SELECT 1 FROM order_module_instances m WHERE m.organization_id=o.organization_id AND m.order_id=o.id AND m.assignee_user_id=? AND m.enabled=1)))`,[current.organizationId,orderId,boss?1:0,current.userId,current.userId,current.userId,current.userId,current.userId],now),
-    env.DB.prepare(`UPDATE transport_orders SET quote_commercial_user_id=?,quote_commercial_name_snapshot=?,intake_operations_json=?,updated_at=? WHERE organization_id=? AND id=? AND status=? AND updated_at=? AND COALESCE(quote_commercial_user_id,'')=? AND COALESCE(quote_commercial_name_snapshot,'')=? AND HEX(COALESCE(intake_operations_json,''))=HEX(?)`).bind(person.id,person.display_name,JSON.stringify({...readIntakeOperations(order.intake_operations_json),canonicalSupplementVersion:1}),now,current.organizationId,orderId,order.status,order.updated_at,order.quote_commercial_user_id??"",order.quote_commercial_name_snapshot??"",order.intake_operations_json??""),
+    env.DB.prepare(`UPDATE transport_orders SET quote_commercial_user_id=?,quote_commercial_name_snapshot=?,intake_operations_json=?,updated_at=? WHERE organization_id=? AND id=? AND status=? AND updated_at=? AND COALESCE(quote_commercial_user_id,'')=? AND COALESCE(quote_commercial_name_snapshot,'')=? AND HEX(COALESCE(intake_operations_json,''))=HEX(?)`).bind(person.id,person.display_name,JSON.stringify({...readIntakeOperations(order.intake_operations_json),canonicalSupplementVersion:1,...(inspectIntakeRuleBinding(order.intake_operations_json).error?{intakeRule:{version:"corrupt"}}:{})}),now,current.organizationId,orderId,order.status,order.updated_at,order.quote_commercial_user_id??"",order.quote_commercial_name_snapshot??"",order.intake_operations_json??""),
     changedRowGuard(env.DB,now),
     env.DB.prepare("INSERT INTO audit_logs(id,organization_id,actor_user_id,action,resource_type,resource_id,outcome,metadata_json,created_at) VALUES(?,?,?,'order.quote_commercial.correct','transport_order',?,'success',?,?)").bind(crypto.randomUUID(),current.organizationId,current.userId,orderId,JSON.stringify({reason,before:{id:order.quote_commercial_user_id,name:order.quote_commercial_name_snapshot},after:person,sourceQuoteUnchanged:true,financialFactsUnchanged:true}),now),
   ],"订单、报价人员资格或更正权限已变化，本次未保存，请刷新重试");
@@ -136,7 +179,7 @@ export async function saveOrderIntakeSupplement(current:SessionUser,orderId:stri
   if(!changes.length)return{success:"所填资料已经存在，无需重复补录"};
   if(valueOf(form,"version")!==order.updated_at)throw new Error("订单资料已由其他窗口修改，请刷新补录区后再保存；本次未覆盖任何资料");
   next.canonicalSupplementVersion=1;
-  const nextRaw=JSON.stringify(next);
+  const nextRaw=JSON.stringify({...next,...(inspectIntakeRuleBinding(order.intake_operations_json).error?{intakeRule:{version:"corrupt"}}:{})});
   const now=new Date().toISOString();
   const usedPolicies=new Set<BusinessProcessPolicyKey>(["order.supplement_positions"]);
   const selectionGuards:D1PreparedStatement[]=[];

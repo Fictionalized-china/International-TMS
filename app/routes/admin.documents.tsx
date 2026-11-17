@@ -1,5 +1,7 @@
 import { env } from "cloudflare:workers";
 import { Form, Link } from "react-router";
+import { useState } from "react";
+import { SitePhotoPanel } from "../components/SitePhotos";
 import type { Route } from "./+types/admin.documents";
 import { requireSessionUser } from "../lib/auth.server";
 import { orderDocumentPlacement, orderDocumentTypeLabel } from "../lib/order-documents";
@@ -101,6 +103,7 @@ export async function loader({ request }: Route.LoaderArgs) {
      ORDER BY document_category`,
   ).bind(current.organizationId,current.organizationId).all<{ document_category: string }>();
   return {
+    photoOrders:(await env.DB.prepare(`SELECT o.id,o.order_number FROM transport_orders o WHERE o.organization_id=? AND ${orderVisibility.sql} AND (?='' OR o.order_number LIKE '%'||?||'%') ORDER BY o.created_at DESC LIMIT 50`).bind(current.organizationId,...orderVisibility.values,q,q).all<{id:string;order_number:string}>()).results,
     rows: rows.results,
     total: total?.total ?? 0,
     scopeCounts: { order: scopeCounts?.order_total ?? 0, batch: scopeCounts?.batch_total ?? 0 },
@@ -111,8 +114,10 @@ export async function loader({ request }: Route.LoaderArgs) {
 }
 
 export default function DocumentCenter({ loaderData }: Route.ComponentProps) {
+  const [photoOrderId,setPhotoOrderId]=useState("");
   return <>
-    <header className="page-header"><div><p className="eyebrow">DOCUMENT INDEX</p><h1>文件中心</h1><p>集中查看订单与配载单文件；上传、编辑、审核和门禁仍由文件所属业务节点负责。</p></div><span className="status-pill">{loaderData.scope === "order" ? "订单文件" : "配载单文件"} · {loaderData.total} 个</span></header>
+    <header className="page-header"><div><p className="eyebrow">DOCUMENT INDEX</p><h1>文件中心</h1><p>集中查看订单与配载单文件；现场照片可在此补传，其他文件的编辑、审核和门禁仍由所属节点负责。</p></div><span className="status-pill">{loaderData.scope === "order" ? "订单文件" : "配载单文件"} · {loaderData.total} 个</span></header>
+    <details className="panel"><summary>补传收货、提货或换装照片</summary><label className="field"><span>所属订单（按页面订单号筛选，或在订单内“文件汇总”直接办理）</span><select value={photoOrderId} onChange={event=>setPhotoOrderId(event.target.value)}><option value="">请选择订单</option>{loaderData.photoOrders.map(order=><option key={order.id} value={order.id}>{order.order_number}</option>)}</select></label>{photoOrderId&&<SitePhotoPanel key={photoOrderId} orderId={photoOrderId}/>}</details>
     <section className="panel"><Form method="get" action="." className="filter-bar compact document-center-filters">
       <fieldset className="document-scope-filter">
         <legend>文件归属</legend>

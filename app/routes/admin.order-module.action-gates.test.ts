@@ -59,22 +59,31 @@ const harness = vi.hoisted(() => {
   };
   const sql: string[] = [];
   const DB = {
-    async batch() {
+    async batch(statements: Array<{query:string;run:()=>Promise<{meta:{changes:number}}> }>) {
       state.batchRuns += 1;
-      return [];
+      const result=[];
+      for(const statement of statements){
+        if(statement.query.includes('UPDATE order_tasks')){
+          const row=await statement.run();if(!row.meta.changes)throw new Error('mutation_commit_guards');result.push(row);
+        }else result.push({meta:{changes:1}});
+      }
+      return result;
     },
     prepare(query: string) {
       sql.push(query);
       const statement = {
+        query,
         bind() {
           return statement;
         },
         async first() {
-          if (query.includes("FROM transport_orders WHERE id=? AND organization_id=?")) {
+          if (query.includes("FROM transport_orders WHERE")) {
             return order;
           }
           if (query.includes("FROM order_tasks t")) {
-            return state.task;
+            const task=state.task;
+            if(!task||task.module_code!=='transport'||!task.frozen_current_module)return null;
+            return{...task,updated_at:'fixture-version',task_assignee:task.task_assignee_user_id,module_assignee:task.module_assignee_user_id,module_id:'module-transport',order_status:order.status,instance_id:task.workflow_instance_id,workflow_id:'workflow-1',current_step_key:'transport',step_id:'step-1',state_id:'state-1'};
           }
           if (query.includes("FROM order_document_metadata m") && query.includes("JOIN order_attachments a")) {
             return {
@@ -172,6 +181,10 @@ const harness = vi.hoisted(() => {
 });
 
 vi.mock("cloudflare:workers", () => ({ env: { DB: harness.DB } }));
+vi.mock('../lib/position-access-profile.server',async importOriginal=>({
+  ...await importOriginal<typeof import('../lib/position-access-profile.server')>(),
+  loadActivePositionAccessProfile:vi.fn(async()=>({...harness.current,membershipId:'member-user-a',positionId:'position-operation',roleCode:'pos_operation'})),
+}));
 vi.mock("../lib/auth.server", () => ({
   requireSessionUser: harness.requireSessionUser,
 }));
@@ -479,21 +492,21 @@ describe("order module action mutation gates", () => {
   it("rejects completion of a task belonging to another module", async () => {
     harness.state.task = { ...harness.state.task, module_code: "costs" };
     await expect(invoke(post("task_complete", { taskId: "task-1" })))
-      .resolves.toEqual({ formError: "该待办不属于当前模块、已完成或不存在" });
+      .resolves.toEqual({ formError: "该待办不在当前可办理模块，或已经完成" });
     expect(harness.state.updateRuns).toBe(0);
   });
 
   it("rejects a task outside the current frozen workflow module", async () => {
     harness.state.task = { ...harness.state.task, frozen_current_module: 0 };
     await expect(invoke(post("task_complete", { taskId: "task-1" })))
-      .resolves.toEqual({ formError: "该待办不属于当前冻结工作流节点" });
+      .resolves.toEqual({ formError: "该待办不在当前可办理模块，或已经完成" });
     expect(harness.state.updateRuns).toBe(0);
   });
 
   it("rejects a different task owner even when the actor has the same position", async () => {
     harness.state.task = { ...harness.state.task, task_assignee_user_id: "user-b" };
     await expect(invoke(post("task_complete", { taskId: "task-1" })))
-      .resolves.toEqual({ formError: "当前账号不是该待办的指定负责人" });
+      .resolves.toEqual({ formError: "当前账号不是该待办的负责人" });
     expect(harness.state.updateRuns).toBe(0);
   });
 
@@ -501,19 +514,19 @@ describe("order module action mutation gates", () => {
     await expect(invoke(post("task_complete", { taskId: "task-1" })))
       .resolves.toEqual({ success: "任务已完成" });
     expect(harness.state.updateRuns).toBe(1);
-    expect(harness.writeAudit).toHaveBeenCalledTimes(1);
+    expect(harness.sql.some(query=>query.includes("'order.task.complete'"))).toBe(true);
     const taskQuery = harness.sql.find((query) => query.includes("FROM order_tasks t"));
     expect(taskQuery).toContain("wi.current_step_key");
     expect(taskQuery).toContain("wi.organization_id=o.organization_id");
     expect(taskQuery).toContain("wi.order_id=o.id");
     expect(harness.sql.find((query) => query.includes("UPDATE order_tasks")))
-      .toContain("status IN ('pending','in_progress')");
+      .toContain("status=? AND updated_at=?");
   });
 
   it("reports a concurrent task state change instead of claiming success", async () => {
     harness.state.updateChanges = 0;
     await expect(invoke(post("task_complete", { taskId: "task-1" })))
-      .resolves.toEqual({ formError: "待办状态已变化，请刷新后重试" });
+      .resolves.toEqual({ formError: "待办、负责人、节点或权限已变化，本次未提交，请刷新重试" });
     expect(harness.writeAudit).not.toHaveBeenCalled();
   });
 

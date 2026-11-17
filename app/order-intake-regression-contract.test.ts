@@ -63,6 +63,6 @@ describe("order intake regression contract", () => {
     expect(warehouseAcceptanceRoute).toContain("扫描成功，已归入");
     expect(warehouseAcceptanceRoute).not.toContain(">加入本批</button>");
     expect(warehouseAcceptanceRoute).toContain("入仓包装数按唛头扫描累计");
-    expect(warehouseAcceptanceRoute).toContain("showPartial={false}");
+    expect(warehouseAcceptanceRoute).toContain("showPartial={!normalReceivingComplete}");
   });
 });

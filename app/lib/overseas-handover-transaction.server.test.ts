@@ -5,6 +5,7 @@ const sync=vi.hoisted(()=>vi.fn(async()=>{}));
 vi.mock("cloudflare:workers",()=>({env:{}}));
 vi.mock("./order-modules.server",()=>({syncOrderWorkflowSnapshot:sync}));
 import {advanceOverseasOrder} from "./overseas-warehouse.server";
+import {runPhysicalSyncJob,physicalSyncJobId} from "./physical-operation-sync.server";
 let fixture:Awaited<ReturnType<typeof meetingFixture>>;
 beforeEach(async()=>{
   sync.mockReset();sync.mockResolvedValue(undefined);fixture=await meetingFixture();Object.assign(env,{DB:fixture.db});
@@ -15,6 +16,17 @@ beforeEach(async()=>{
 afterEach(()=>{vi.restoreAllMocks();fixture?.database.close();});
 const handover=()=>advanceOverseasOrder({organizationId:'org',orderId:'order',actorUserId:'owner',action:'pickup',occurredAt:fixture.now,pickupContact:'实际提货人',atomicStatements:[fixture.db.prepare("UPDATE customers SET name='stock-effect' WHERE id='customer'")]});
 describe('overseas handover shares the physical stock transaction',()=>{
+  it('links a delivery photo to the exact signature event and refuses a configured missing photo before stock changes',async()=>{
+    fixture.database.prepare("INSERT INTO shipments(id,organization_id,shipment_number,order_id,customer_id,status,created_at,updated_at) VALUES('shipment','org','SIGN-PHOTO','order','customer','in_transit',?,?)").run(fixture.now,fixture.now);
+    fixture.database.prepare("INSERT INTO business_process_policies(organization_id,policy_key,policy_value,updated_at) VALUES('org','photos.required_stages','delivery',?)").run(fixture.now);
+    await expect(handover()).rejects.toThrow('必须上传现场照片');
+    expect(fixture.database.prepare("SELECT status FROM overseas_warehouse_operations WHERE id='operation'").get()?.status).toBe('notified');
+    expect(fixture.database.prepare("SELECT name FROM customers WHERE id='customer'").get()?.name).toBe('测试客户');
+    const bytes=Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMQCej5DwADXAHwCt6haAAAAABJRU5ErkJggg=='),c=>c.charCodeAt(0)),form=new FormData();
+    form.append('sitePhotos',new File([bytes],'签收.png',{type:'image/png'}));form.append('sitePhotoThumbnails',new File([bytes],'缩略.png',{type:'image/png'}));
+    expect(await advanceOverseasOrder({organizationId:'org',orderId:'order',actorUserId:'owner',action:'pickup',occurredAt:fixture.now,sitePhotoForm:form})).toMatchObject({nextStatus:'picked_up'});
+    expect(fixture.database.prepare("SELECT p.stage_code,e.status FROM order_site_photos p JOIN shipment_events e ON e.id=p.event_id").get()).toEqual({stage_code:'delivery',status:'delivered'});
+  });
   it('commits once, creates one pickup milestone and refuses duplicate handover',async()=>{
     expect(await handover()).toMatchObject({nextStatus:'picked_up',syncPending:false});
     await expect(handover()).rejects.toThrow('当前状态不能');
@@ -40,5 +52,10 @@ describe('overseas handover shares the physical stock transaction',()=>{
     expect(await handover()).toMatchObject({nextStatus:'picked_up',syncPending:true});
     expect(fixture.database.prepare("SELECT status FROM overseas_warehouse_operations WHERE id='operation'").get()).toEqual({status:'picked_up'});
     expect(fixture.database.prepare("SELECT name FROM customers WHERE id='customer'").get()).toEqual({name:'stock-effect'});
+    expect(fixture.database.prepare("SELECT status FROM physical_operation_sync_jobs").get()?.status).toBe('pending');
+    expect(await runPhysicalSyncJob(fixture.db,'org',physicalSyncJobId('overseas_pickup','operation'))).toMatchObject({syncPending:false});
+    expect(fixture.database.prepare("SELECT status FROM physical_operation_sync_jobs").get()?.status).toBe('completed');
+    expect(fixture.database.prepare("SELECT COUNT(*) n FROM order_tracking_milestones WHERE milestone_code='picked_up'").get()?.n).toBe(1);
+    expect(await runPhysicalSyncJob(fixture.db,'org',physicalSyncJobId('overseas_pickup','operation'))).toMatchObject({syncPending:false});
   });
 });

@@ -35,12 +35,18 @@ export const businessProcessPolicyDefinitions = [
   { key: "payable.approve_positions", label: "应付财务审批岗位", group: "应收应付", kind: "positions", defaultValue: "FINANCE_ACCOUNTING" },
   { key: "payable.offline_approval_required", label: "付款前必须记录总经理线下审批", group: "应收应付", kind: "boolean", defaultValue: "1" },
   { key: "hr.reports_enabled", label: "启用人事回款及提成报表", group: "总览与人事", kind: "boolean", defaultValue: "1" },
+  { key: "photos.enabled_stages", label: "现场照片开放节点代码（逗号分隔）", group: "现场照片", kind: "photo_stages", defaultValue: "pickup,domestic_receipt,overseas_receipt,delivery,transshipment,other" },
+  { key: "photos.required_stages", label: "现场照片必传作业节点（每次作业至少一张，留空不强制）", group: "现场照片", kind: "photo_stages", defaultValue: "" },
+  { key: "photos.formats", label: "现场照片格式（jpeg,png,webp）", group: "现场照片", kind: "photo_formats", defaultValue: "jpeg,png,webp" },
+  { key: "photos.max_count", label: "每次最多图片数（1—8）", group: "现场照片", kind: "photo_count", defaultValue: "6" },
+  { key: "photos.max_file_kb", label: "每张原图上限 KB（100—2048）", group: "现场照片", kind: "photo_size", defaultValue: "1536" },
 ] as const;
 
 export type BusinessProcessPolicyKey = typeof businessProcessPolicyDefinitions[number]["key"];
 export type BusinessProcessPolicy = Record<BusinessProcessPolicyKey, string>;
 export const defaultBusinessProcessPolicy = Object.fromEntries(businessProcessPolicyDefinitions.map(d => [d.key, d.defaultValue])) as BusinessProcessPolicy;
 export const dispatchOrderFieldCodes = ["shipper_name","shipper_contact","shipper_phone","origin_city","origin_address","consignee_name","consignee_contact","consignee_phone","destination_city","destination_address","cargo_description","exit_port","requested_pickup_date","overseas_warehouse_id"];
+export const sitePhotoStages = {pickup:"工厂提货",domestic_receipt:"国内仓收货",overseas_receipt:"境外仓收货",delivery:"提货签收",transshipment:"换装",other:"其他现场"} as const;
 
 export function policyPositions(policy: BusinessProcessPolicy, key: BusinessProcessPolicyKey) {
   return policy[key].split(",").map(v => v.trim()).filter(Boolean);
@@ -58,11 +64,17 @@ export function validateBusinessProcessPolicy(values: Partial<Record<BusinessPro
     } else if (definition.kind === "text") {
       if (!value || value.length>200 || /[\u0000-\u001f\u007f]/.test(value)) throw new Error(`${definition.label}须为 1 至 200 字的文本`);
       normalized[definition.key] = value;
+    } else if (definition.kind === "photo_count" || definition.kind === "photo_size") {
+      const numeric=Number(value),min=definition.kind === "photo_count"?1:100,max=definition.kind === "photo_count"?8:2048;
+      if(!/^\d+$/.test(value)||!Number.isSafeInteger(numeric)||numeric<min||numeric>max)throw new Error(`${definition.label}超出允许范围`);
+      normalized[definition.key]=String(numeric);
     } else {
       const codes = [...new Set(value.split(",").map(v => v.trim()).filter(Boolean))];
       if (definition.kind === "positions" && !codes.length) throw new Error(`${definition.label}不能为空，避免无人可办理`);
       if (codes.some(code => !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(code))) throw new Error(`${definition.label}包含无效代码`);
       if (definition.kind === "fields" && codes.some(code=>!dispatchOrderFieldCodes.includes(code))) throw new Error("找车字段代码不存在，请使用页面列出的订单字段，避免无法解除的门禁");
+      if(definition.kind === "photo_stages" && codes.some(code=>!Object.hasOwn(sitePhotoStages,code)))throw new Error("现场照片节点代码不存在");
+      if(definition.kind === "photo_formats" && (!codes.length||codes.some(code=>!["jpeg","png","webp"].includes(code))))throw new Error("请选择 JPEG、PNG 或 WebP 现场照片格式");
       normalized[definition.key] = codes.join(",");
     }
   }
@@ -77,5 +89,11 @@ export function resolveBusinessProcessPolicy(rows: readonly { policy_key: string
     // Invalid persisted policies fail closed instead of granting broader defaults.
     Object.assign(values, validateBusinessProcessPolicy({ [definition.key]: row.policy_value }));
   }
+  validateSitePhotoPolicy(values);
   return values;
+}
+
+export function validateSitePhotoPolicy(policy:BusinessProcessPolicy){
+  const enabled=policy["photos.enabled_stages"].split(",");
+  if(policy["photos.required_stages"].split(",").filter(Boolean).some(stage=>!enabled.includes(stage)))throw new Error("照片必传节点必须同时开放上传，避免形成无法解除的门禁");
 }

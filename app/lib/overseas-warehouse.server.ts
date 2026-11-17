@@ -4,6 +4,8 @@ import { prepareOrderIntakeAdvance,intakeGateCommitStatements,prepareBatchIntake
 import { changedRowGuard,guardedBatch } from "./mutation-guard.server";
 import { portalOrderListLink } from "./portal-notification-links";
 import { loadOverseasInboundCustomsGates } from "./overseas-inbound-policy.server";
+import {prepareSitePhotoStatements} from "./order-site-photos.server";
+import {physicalSyncJobStatement,physicalSyncJobId,tryPhysicalSyncJob} from "./physical-operation-sync.server";
 
 type ArrivalInput = {
   organizationId: string;
@@ -25,6 +27,7 @@ type AdvanceInput = {
   notes?: string;
   /** Warehouse handover/stock/audit statements, never supplied by a form. */
   atomicStatements?:readonly D1PreparedStatement[];
+  sitePhotoForm?:FormData;
 };
 
 type AutomaticNoticeInput = {
@@ -492,14 +495,15 @@ async function ensureStandaloneBatch(
 
 export async function advanceOverseasOrder(input: AdvanceInput) {
   const operation = await env.DB.prepare(
-    `SELECT op.id,op.batch_id,op.status,COALESCE(w.name,'境外目的仓') warehouse_name
+    `SELECT op.id,op.batch_id,op.status,op.warehouse_id,o.customer_id,COALESCE(w.name,'境外目的仓') warehouse_name
      FROM overseas_warehouse_operations op
+     JOIN transport_orders o ON o.id=op.order_id AND o.organization_id=op.organization_id
      LEFT JOIN warehouses w ON w.id=op.warehouse_id AND w.organization_id=op.organization_id
      WHERE op.organization_id=? AND op.order_id=? AND op.status!='cancelled'
      ORDER BY op.created_at DESC LIMIT 1`,
   )
     .bind(input.organizationId, input.orderId)
-    .first<{ id: string; batch_id: string; status: string; warehouse_name: string }>();
+    .first<{ id: string; batch_id: string; status: string; warehouse_name: string;warehouse_id:string;customer_id:string }>();
   if (!operation) throw new Error("请先由批次确认货物已到达境外目的仓");
 
   const canAdvance = input.action === "notify"
@@ -581,6 +585,7 @@ export async function advanceOverseasOrder(input: AdvanceInput) {
     );
   }
   if (input.action === "pickup") {
+    const eventId=crypto.randomUUID();
     statements.push(
       env.DB.prepare(
         "UPDATE shipments SET status='delivered',current_location=?,actual_delivery_at=COALESCE(actual_delivery_at,?),updated_at=? WHERE order_id=? AND organization_id=? AND status!='cancelled'",
@@ -597,9 +602,9 @@ export async function advanceOverseasOrder(input: AdvanceInput) {
       env.DB.prepare(
         `INSERT INTO shipment_events(id,shipment_id,status,location,description,event_at,visible_to_customer,created_by_user_id,created_at)
           SELECT ?,s.id,'delivered',?,'客户已在境外目的仓扫码核对并完成自提签收，订单进入结算',?,1,?,?
-         FROM shipments s WHERE s.order_id=? AND s.organization_id=?`,
+         FROM shipments s WHERE s.order_id=? AND s.organization_id=? AND s.id=(SELECT sx.id FROM shipments sx WHERE sx.order_id=s.order_id AND sx.organization_id=s.organization_id ORDER BY sx.updated_at DESC,sx.created_at DESC,sx.id LIMIT 1)`,
       ).bind(
-        crypto.randomUUID(),
+        eventId,
         operation.warehouse_name,
         input.occurredAt,
         input.actorUserId,
@@ -631,25 +636,16 @@ export async function advanceOverseasOrder(input: AdvanceInput) {
          WHERE NOT EXISTS(SELECT 1 FROM order_tasks WHERE organization_id=? AND order_id=? AND task_type='start_receivable_reconciliation' AND status IN ('pending','in_progress'))`,
       ).bind(crypto.randomUUID(),input.organizationId,input.orderId,input.actorUserId,now,now,input.organizationId,input.orderId),
     );
+    const packages=input.sitePhotoForm?.getAll("sitePhotos").some(value=>value instanceof File&&value.size>0)
+      ?(await env.DB.prepare("SELECT p.id FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id WHERE p.organization_id=? AND s.order_id=? AND p.warehouse_id=? AND p.label_kind='oul' AND p.status!='dispatched'").bind(input.organizationId,input.orderId,operation.warehouse_id).all<{id:string}>()).results:[];
+    statements.push(...await prepareSitePhotoStatements(env.DB,{organizationId:input.organizationId,actorUserId:input.actorUserId,form:input.sitePhotoForm??new FormData(),stage:"delivery",sourceType:"overseas_pickup",sourceId:operation.id,targets:[{orderId:input.orderId,customerId:operation.customer_id,eventId,packageIds:packages.map(p=>p.id)}],warehouseId:operation.warehouse_id,occurredAt:input.occurredAt,now}));
   }
+  if(input.action==='pickup')statements.push(physicalSyncJobStatement(env.DB,{organizationId:input.organizationId,orderId:input.orderId,warehouseId:operation.warehouse_id,actorUserId:input.actorUserId,sourceId:operation.id,kind:"overseas_pickup",payload:{action:input.action},now}));
   await guardedBatch(env.DB,statements,"自提状态、资料或库存已变化，本次整批未提交，请刷新核对后重试");
 
   let syncPending=false;
-  try{if (input.action === "pickup") {
-    const remaining = await env.DB.prepare(
-      "SELECT COUNT(*) total FROM overseas_warehouse_operations WHERE batch_id=? AND organization_id=? AND status NOT IN ('picked_up','cancelled')",
-    )
-      .bind(operation.batch_id, input.organizationId)
-      .first<{ total: number }>();
-    if ((remaining?.total ?? 0) === 0)
-      await env.DB.prepare(
-        "UPDATE transport_batches SET status='arrived',road_status='pickup_completed',updated_at=? WHERE id=? AND organization_id=?",
-      )
-        .bind(now, operation.batch_id, input.organizationId)
-        .run();
-  }
-  await syncOrderWorkflowSnapshot(input.organizationId, input.orderId);
-  }catch(error){syncPending=true;console.error("OVERSEAS_HANDOVER_SYNC_PENDING",{orderId:input.orderId,error:String(error)});}
+  if(input.action==='pickup')({syncPending}=await tryPhysicalSyncJob(env.DB,input.organizationId,physicalSyncJobId("overseas_pickup",operation.id)));
+  else try{await syncOrderWorkflowSnapshot(input.organizationId,input.orderId);}catch{syncPending=true;}
   return { nextStatus, stepName,syncPending };
 }
 

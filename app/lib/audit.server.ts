@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 
-type AuditInput = {
+export type AuditInput = {
   request: Request;
   action: string;
   resourceType: string;
@@ -11,9 +11,9 @@ type AuditInput = {
   metadata?: Record<string, unknown>;
 };
 
-export async function writeAuditStrict(input: AuditInput): Promise<void> {
-  const now = new Date().toISOString();
-  await env.DB.prepare(
+/** Add to the caller's business batch when the audit must commit with its facts. */
+export function auditStatement(db:D1Database,input:AuditInput,now=new Date().toISOString()) {
+  return db.prepare(
     `INSERT INTO audit_logs
       (id, organization_id, actor_user_id, action, resource_type, resource_id, outcome, ip_address, user_agent, metadata_json, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -30,8 +30,11 @@ export async function writeAuditStrict(input: AuditInput): Promise<void> {
       input.request.headers.get("User-Agent"),
       input.metadata ? JSON.stringify(input.metadata) : null,
       now,
-    )
-    .run();
+    );
+}
+
+export async function writeAuditStrict(input: AuditInput): Promise<void> {
+  await auditStatement(env.DB,input).run();
 }
 
 /**

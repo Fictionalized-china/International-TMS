@@ -1,12 +1,13 @@
 import { env } from "cloudflare:workers";
 import { useEffect, useState } from "react";
-import { Form, Link, redirect, useNavigation } from "react-router";
+import { Form, Link, redirect, useNavigation,useLocation } from "react-router";
 import type { Route } from "./+types/warehouse.pickup";
 import { QueryPagination } from "../components/QueryPagination";
 import { requireSessionUser } from "../lib/auth.server";
 import { advanceOverseasOrder } from "../lib/overseas-warehouse.server";
 import { Modal } from "../components/Modal";
 import { ActionToast } from "../components/ActionToast";
+import { PhysicalSyncPanel } from "../components/PhysicalSyncPanel";
 import { valueOf } from "../lib/validation";
 import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
@@ -24,6 +25,9 @@ import {
   warehousePhysicalWorkflowVisibilitySql,
 } from "../lib/warehouse-workflow-access.server";
 import { initialOverseasInboundScans } from "../lib/overseas-inbound-scan";
+import { SitePhotoPicker } from "../components/SitePhotos";
+import { sitePhotoLimits } from "../lib/order-site-photos.server";
+import {loadBusinessProcessPolicy} from "../lib/business-process-policy.server";
 
 type PickupPackage = {
   id: string;
@@ -147,6 +151,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     packages: activeOrder ? packages.results : [],
     activeOrder,
     pickupWorkflowPolicy,
+    photoLimits:sitePhotoLimits(await loadBusinessProcessPolicy(user.organizationId)),
     initialScannedOul: url.searchParams.get("pickupScannedOul") || "",
     workflowGateReason: requestedOrderAccess && !requestedOrderAccess.available
       ? requestedOrderAccess.reason || "当前订单的冻结工作流尚未开放客户自提"
@@ -198,9 +203,9 @@ export async function action({ request }: Route.ActionArgs) {
       pickupProofReference: valueOf(form, "pickupProofReference"),
     });
     if (submission.error) return { formError: submission.error };
-    const pickup=await env.DB.prepare(`SELECT op.order_id,o.order_number,op.status operation_status
+    const pickup=await env.DB.prepare(`SELECT op.order_id,o.order_number,o.customer_id,op.status operation_status
       FROM overseas_warehouse_operations op JOIN transport_orders o ON o.id=op.order_id AND o.organization_id=op.organization_id
-      WHERE op.organization_id=? AND op.warehouse_id=? AND op.order_id=? AND o.status='in_execution' AND op.status!='cancelled' ORDER BY op.created_at DESC LIMIT 1`).bind(user.organizationId,warehouse.id,orderId).first<{order_id:string;order_number:string;operation_status:string}>();
+      WHERE op.organization_id=? AND op.warehouse_id=? AND op.order_id=? AND o.status='in_execution' AND op.status!='cancelled' ORDER BY op.created_at DESC LIMIT 1`).bind(user.organizationId,warehouse.id,orderId).first<{order_id:string;order_number:string;customer_id:string;operation_status:string}>();
     if(!pickup)return{formError:"未找到当前境外仓的待自提订单"};
     if(!["notified","appointment"].includes(pickup.operation_status))return{formError:"订单当前状态不能确认自提出库"};
     const packages=(await env.DB.prepare(`SELECT p.id,p.barcode,p.location_id,p.status,p.lifecycle_status
@@ -222,12 +227,14 @@ export async function action({ request }: Route.ActionArgs) {
       env.DB.prepare("INSERT INTO audit_logs(id,organization_id,actor_user_id,action,resource_type,resource_id,outcome,metadata_json,created_at) VALUES(?,?,?,'warehouse.overseas.pickup','transport_order',?,'success',?,?)").bind(crypto.randomUUID(),user.organizationId,user.userId,orderId,JSON.stringify({warehouseId:warehouse.id,orderNumber:pickup.order_number,confirmedPackages:packages.length,barcodes:expectedCodes}),now),
     ];
     let handover:Awaited<ReturnType<typeof advanceOverseasOrder>>;
-    try{handover=await advanceOverseasOrder({organizationId:user.organizationId,orderId,actorUserId:user.userId,action:"pickup",occurredAt:now,pickupContact:submission.pickupContact ?? undefined,pickupProofReference:submission.pickupProofReference ?? undefined,notes:`${warehouse.name} 已核对整票货物并完成客户自提出库`,atomicStatements:stockStatements});}
+    try{
+      handover=await advanceOverseasOrder({organizationId:user.organizationId,orderId,actorUserId:user.userId,action:"pickup",occurredAt:now,pickupContact:submission.pickupContact ?? undefined,pickupProofReference:submission.pickupProofReference ?? undefined,notes:`${warehouse.name} 已核对整票货物并完成客户自提出库`,atomicStatements:stockStatements,sitePhotoForm:form});}
     catch(error){return{formError:error instanceof Error?error.message:"自提出库失败，本次未写入库存，请刷新核对后重试"};}
     const params=new URLSearchParams({
       warehouseId:warehouse.id,
       pickupResult:`${pickup.order_number} 已复核并完成自提签收${handover.syncPending?"；实物出库已保存，流程同步待重试，请勿重复出库":"，订单进入费用结算"}`,
       pickupCompleted:"1",
+      ...(handover.syncPending?{syncPending:"1",syncOrderId:orderId}:{}),
       pickupOrderNumber:pickup.order_number,
       pickupPackageCount:String(packages.length),
     });
@@ -329,6 +336,7 @@ function parsePickupCodes(raw:string){
 }
 
 export default function WarehousePickup({ loaderData, actionData }: Route.ComponentProps) {
+  const location=useLocation();
   const busy = useNavigation().state !== "idle";
   const pickupCompletion = loaderData.pickupCompletion;
   const canOperate = canOperateWarehouseUi(
@@ -377,6 +385,7 @@ export default function WarehousePickup({ loaderData, actionData }: Route.Compon
     </header>
     {loaderData.workflowGateReason && <p className="alert warning">{loaderData.workflowGateReason}</p>}
     <ActionToast message={actionData?.formError || (!readyToConfirm ? loaderData.result : null)} tone={actionData?.formError ? "error" : "success"} data={actionData}/>
+    {new URLSearchParams(location.search).get("syncPending")==="1"&&<PhysicalSyncPanel site="warehouse" orderId={new URLSearchParams(location.search).get("syncOrderId")??""} initiallyOpen/>}
     {pickupCompletion && <Modal
       title="出库成功"
       openSignal={`${pickupCompletion.orderNumber}:${pickupCompletion.packageCount}`}
@@ -412,7 +421,12 @@ export default function WarehousePickup({ loaderData, actionData }: Route.Compon
       <div className="table-wrap"><table><thead><tr><th>货物标签</th><th>包装号</th><th>件数</th><th>重量 / 体积</th><th>状态</th></tr></thead><tbody>
         {loaderData.packages.map((item) => {const scanned=scannedCodes.includes(item.barcode.toUpperCase());return <tr key={item.id} className={scanned?"is-scanned":""}><td><strong>{item.barcode}</strong></td><td>{item.package_number}</td><td>{item.pieces}</td><td>{item.weight_kg ?? "—"} KG · {item.volume_cbm ?? "—"} CBM</td><td><span className={`status-pill ${scanned?"success":"warning"}`}>{scanned?"本次已扫":"待扫描"}</span></td></tr>})}
       </tbody></table></div>
-      <Form method="post" className="overseas-pickup-confirm-form atomic-pickup-confirm"><input type="hidden" name="intent" value="confirm_pickup"/><input type="hidden" name="orderId" value={loaderData.activeOrder.order_id}/><input type="hidden" name="scannedOulCodes" value={JSON.stringify(scannedCodes)}/><div className="overseas-pickup-confirm-fields">{loaderData.pickupWorkflowPolicy.contact.visible&&<label className="field"><span>{loaderData.pickupWorkflowPolicy.contact.label}{loaderData.pickupWorkflowPolicy.contact.required&&<b className="required-mark"> *</b>}</span><input name="pickupContact" defaultValue={loaderData.activeOrder.suggested_pickup_contact||""} required={loaderData.pickupWorkflowPolicy.contact.required} maxLength={120}/></label>}{loaderData.pickupWorkflowPolicy.proof.visible&&<label className="field"><span>{loaderData.pickupWorkflowPolicy.proof.label}{loaderData.pickupWorkflowPolicy.proof.required&&<b className="required-mark"> *</b>}</span><input name="pickupProofReference" required={loaderData.pickupWorkflowPolicy.proof.required} maxLength={240} placeholder="填写凭证编号或签收凭证引用"/></label>}</div><button className="primary warehouse-primary" disabled={!readyToConfirm||busy}>{busy?"正在原子签收…":readyToConfirm?"全部扫齐，确认自提签收":`还需扫描 ${Math.max(0,loaderData.packages.length-scannedCodes.length)} 个 OUL`}</button></Form>
+      <Form method="post" encType="multipart/form-data" className="overseas-pickup-confirm-form atomic-pickup-confirm">
+        <input type="hidden" name="intent" value="confirm_pickup"/><input type="hidden" name="orderId" value={loaderData.activeOrder.order_id}/><input type="hidden" name="scannedOulCodes" value={JSON.stringify(scannedCodes)}/>
+        <div className="overseas-pickup-confirm-fields">{loaderData.pickupWorkflowPolicy.contact.visible&&<label className="field"><span>{loaderData.pickupWorkflowPolicy.contact.label}{loaderData.pickupWorkflowPolicy.contact.required&&<b className="required-mark"> *</b>}</span><input name="pickupContact" defaultValue={loaderData.activeOrder.suggested_pickup_contact||""} required={loaderData.pickupWorkflowPolicy.contact.required} maxLength={120}/></label>}{loaderData.pickupWorkflowPolicy.proof.visible&&<label className="field"><span>{loaderData.pickupWorkflowPolicy.proof.label}{loaderData.pickupWorkflowPolicy.proof.required&&<b className="required-mark"> *</b>}</span><input name="pickupProofReference" required={loaderData.pickupWorkflowPolicy.proof.required} maxLength={240} placeholder="填写凭证编号或签收凭证引用"/></label>}</div>
+        <SitePhotoPicker key={loaderData.activeOrder.order_id} limits={loaderData.photoLimits} stage="delivery" scopeLabel="本票自提签收"/>
+        <button className="primary warehouse-primary" disabled={!readyToConfirm||busy}>{busy?"正在原子签收…":readyToConfirm?"全部扫齐，确认自提签收":`还需扫描 ${Math.max(0,loaderData.packages.length-scannedCodes.length)} 个 OUL`}</button>
+      </Form>
     </section>}
 
     <section className="panel overseas-pickup-queue-panel">

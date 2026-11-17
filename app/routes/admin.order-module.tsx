@@ -21,6 +21,8 @@ import { consignmentCargoSummary, consignmentIntakeOperations } from "../lib/con
 import { canReadConsignmentExpenses } from "../lib/consignment-expenses";
 import { ConsignmentExpenseLedger } from "../components/ConsignmentExpenseLedger";
 import { prepareOrdersIntakeAdvance,intakeManyCommitStatements } from "../lib/order-intake-gate.server";
+import { customsIntakeCommitStatements } from "../lib/customs-intake-commit.server";
+import { changedRowGuard } from "../lib/mutation-guard.server";
 import { businessDateTimeLabel } from "../lib/business-time";
 import { requireSessionUser } from "../lib/auth.server";
 import { dispatchWorkspaceHref } from "../lib/transport-workspace-access";
@@ -2849,6 +2851,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
         declaringCompany,declaredAt,declaredAmount,currency,grossWeightKg,releasedAt,
         isDeleted,isRedeclared,isAmended,isInspected,changeReason,
       } = resolved.value;
+      const customsWrites=await customsIntakeCommitStatements(env.DB,current.organizationId,orderId,declarationStatus,isDeleted,now);
       if (declarationStatus === "released") {
         const missingDocuments = await missingRequiredDocumentUploads("customs");
         if (missingDocuments.length)
@@ -2868,15 +2871,15 @@ export async function action({ request, params, context }: Route.ActionArgs) {
         ).bind(current.organizationId, orderId, clearanceStage).first<{ id: string }>();
         customsRecordId = existingRecord?.id ?? crypto.randomUUID();
         if (!existingRecord) {
-          await env.DB.prepare(
+          customsWrites.push(env.DB.prepare(
             `INSERT INTO order_customs_records(id,organization_id,order_id,clearance_stage,status,created_by_user_id,created_at,updated_at)
              VALUES(?,?,?,?,'draft',?,?,?)`,
-          ).bind(customsRecordId, current.organizationId, orderId, clearanceStage, current.userId, now, now).run();
+          ).bind(customsRecordId, current.organizationId, orderId, clearanceStage, current.userId, now, now));
         }
       }
       try {
         if (declarationId) {
-          await env.DB.prepare(
+          customsWrites.push(env.DB.prepare(
             `UPDATE order_customs_declarations
              SET customs_record_id=?,declaration_number=?,declaration_type=?,declaration_title=?,declaring_company=?,
                declared_at=?,declared_amount=?,currency=?,gross_weight_kg=?,released_at=?,status=?,is_deleted=?,
@@ -2888,10 +2891,10 @@ export async function action({ request, params, context }: Route.ActionArgs) {
             declarationStatus,isDeleted ? 1 : 0,isRedeclared ? 1 : 0,
             isAmended ? 1 : 0,isInspected ? 1 : 0,changeReason || null,
             now,declarationId,current.organizationId,orderId,
-          ).run();
+          ),changedRowGuard(env.DB,now));
         } else {
           const id = crypto.randomUUID();
-          await env.DB.prepare(
+          customsWrites.push(env.DB.prepare(
             `INSERT INTO order_customs_declarations(
                id,organization_id,order_id,customs_record_id,declaration_number,declaration_type,declaration_title,
                declaring_company,declared_at,declared_amount,currency,gross_weight_kg,released_at,status,is_deleted,
@@ -2903,8 +2906,9 @@ export async function action({ request, params, context }: Route.ActionArgs) {
             declarationStatus === "released" ? releasedAt : null,declarationStatus,isDeleted ? 1 : 0,
             isRedeclared ? 1 : 0,isAmended ? 1 : 0,isInspected ? 1 : 0,
             changeReason || null,current.userId,now,now,
-          ).run();
+          ));
         }
+        await env.DB.batch(customsWrites);
       } catch (error) {
         if (String(error).includes("UNIQUE")) return { formError: "同一订单的报关单号不能重复" };
         throw error;
@@ -2929,6 +2933,8 @@ export async function action({ request, params, context }: Route.ActionArgs) {
         return { formError: "报关作业阶段无效" };
       const now = new Date().toISOString();
       const customsStatus = valueOf(form, "status") || "draft";
+      if(!["draft","declared","inspecting","released","cancelled"].includes(customsStatus))return{formError:"报关状态无效"};
+      const customsWrites=await customsIntakeCommitStatements(env.DB,current.organizationId,orderId,customsStatus,false,now);
       const declarationNumber = valueOf(form, "declarationNumber");
       if (["declared", "inspecting", "released"].includes(customsStatus) && !declarationNumber)
         return { formError: "请先填写报关单号，再完成申报或放行" };
@@ -2949,7 +2955,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
           .bind(recordId, current.organizationId, orderId)
           .first<{ id: string }>();
         if (!existing) return { formError: "要更新的报关记录不存在" };
-        await env.DB.prepare(
+        customsWrites.push(env.DB.prepare(
           `UPDATE order_customs_records
            SET clearance_stage=?,declaration_number=?,declaration_type=?,declaration_mode=?,document_provider=?,
              broker_name=?,broker_contact=?,cutoff_at=?,declared_at=?,released_at=?,transit_customs=?,
@@ -2978,9 +2984,9 @@ export async function action({ request, params, context }: Route.ActionArgs) {
             current.organizationId,
             orderId,
           )
-          .run();
+          ,changedRowGuard(env.DB,now));
       } else {
-        await env.DB.prepare(
+        customsWrites.push(env.DB.prepare(
           `INSERT INTO order_customs_records(id,organization_id,order_id,clearance_stage,declaration_number,declaration_type,declaration_mode,document_provider,broker_name,broker_contact,cutoff_at,declared_at,released_at,transit_customs,inspection_required,inspection_notes,quarantine_required,quarantine_notes,status,created_by_user_id,created_at,updated_at)
            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
@@ -3008,8 +3014,9 @@ export async function action({ request, params, context }: Route.ActionArgs) {
             now,
             now,
           )
-          .run();
+          );
       }
+      await env.DB.batch(customsWrites);
       await syncCustomsModuleFromRecords(current.organizationId, orderId, current.userId);
       return { success: "报关/清关记录已保存" };
     }
@@ -3617,6 +3624,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
       if (!Number.isFinite(taxRate) || taxRate < 0)
         return { formError: "费用税率必须是大于或等于 0 的数字" };
       const amount = quantity * unitPrice;
+      if(!Number.isFinite(amount)||!Number.isFinite(amount*exchangeRate)||!Number.isFinite(amount*taxRate/100)||!Number.isSafeInteger(Math.round(amount*100)))return{formError:"费用金额或折算金额超出系统支持范围，请核对数量、单价、汇率及税率"};
       const now = new Date().toISOString();
       const values = {
         chargeCode: valueOf(form, "chargeCode") || "OTHER",

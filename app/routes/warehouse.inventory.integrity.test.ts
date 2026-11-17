@@ -19,7 +19,11 @@ beforeEach(()=>{
     CREATE TABLE warehouse_package_movements(id TEXT,organization_id TEXT,package_id TEXT,operation_type TEXT,from_location_id TEXT,to_location_id TEXT,operator_user_id TEXT,notes TEXT,occurred_at TEXT,created_at TEXT);
     INSERT INTO warehouse_stocktakes(id,organization_id,warehouse_id,location_id,status,stocktake_number) VALUES('task','org','A','loc','counting','ST');
     INSERT INTO warehouse_packages VALUES('a','org','A','BAR-A','loc','in_stock',NULL),('b','org','B','BAR-B','elsewhere','in_stock',NULL);
-    INSERT INTO warehouse_locations VALUES('target','org','A','active');`);
+    INSERT INTO warehouse_locations VALUES('target','org','A','active');
+    ALTER TABLE warehouse_packages ADD COLUMN lifecycle_status TEXT DEFAULT 'active';
+    ALTER TABLE warehouse_packages ADD COLUMN label_kind TEXT DEFAULT 'oul';
+    CREATE TABLE warehouse_packing_jobs(id TEXT,organization_id TEXT,status TEXT);
+    CREATE TABLE warehouse_packing_job_sources(inbound_warehouse_package_id TEXT,organization_id TEXT,packing_job_id TEXT);`);
   harness.beforeBatch=null;
   const db=sqliteD1(sqlite);
   harness.db={...db,batch:async statements=>{harness.beforeBatch?.();harness.beforeBatch=null;return db.batch(statements);}} as D1Database;

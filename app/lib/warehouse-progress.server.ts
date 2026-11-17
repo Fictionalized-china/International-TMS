@@ -1,4 +1,6 @@
 import { env } from "cloudflare:workers";
+import {prepareOrderIntakeAdvance,prepareBatchIntakeAdvance,intakeGateCommitStatements,intakeManyCommitStatements} from "./order-intake-gate.server";
+import {changedRowGuard,predicateGuard} from "./mutation-guard.server";
 import { chunkD1Rows, chunkD1Values, d1Placeholders } from "./d1-bindings";
 import {
   ensureOrderModules,
@@ -56,11 +58,12 @@ export async function recordWarehouseProgress(input: {
   const now = new Date().toISOString();
   const completed = input.stepCode === "ready";
   const statements: D1PreparedStatement[] = [
+    ...intakeGateCommitStatements(await prepareOrderIntakeAdvance(input.organizationId,input.orderId),now),
     env.DB.prepare(
       `UPDATE order_module_instances
        SET status=?,current_step_code=?,current_step_name=?,progress_percent=?,
            started_at=COALESCE(started_at,?),completed_at=?,blocking_reason=NULL,updated_at=?
-       WHERE id=?`,
+       WHERE id=? AND status=? AND COALESCE(current_step_code,'')=?`,
     ).bind(
       completed ? "completed" : "in_progress",
       input.stepCode,
@@ -70,7 +73,9 @@ export async function recordWarehouseProgress(input: {
       completed ? now : null,
       now,
       module.id,
+      module.status,module.current_step_code??'',
     ),
+    changedRowGuard(env.DB,now),
   ];
   if (module.current_step_code !== input.stepCode) {
     statements.push(
@@ -106,6 +111,7 @@ export async function recordBatchOutboundProgress(input: {
   dispatchNumber: string;
   referenceOrderId?: string;
 }) {
+  const intakeSnapshots=await prepareBatchIntakeAdvance(input.organizationId,input.batchId);
   const orders = await env.DB.prepare(
     `SELECT order_id
      FROM transport_batch_orders
@@ -125,17 +131,18 @@ export async function recordBatchOutboundProgress(input: {
   const modules: Array<{
     id: string;
     order_id: string;
+    status:string;
     current_step_code: string | null;
   }> = [];
   for (const chunk of chunkD1Values(orderIds, 1)) {
     const rows = await env.DB.prepare(
-      `SELECT id,order_id,current_step_code
+      `SELECT id,order_id,status,current_step_code
        FROM order_module_instances
        WHERE organization_id=? AND module_code='loading' AND enabled=1
          AND order_id IN (${d1Placeholders(chunk.length)})`,
     )
       .bind(input.organizationId, ...chunk)
-      .all<{ id: string; order_id: string; current_step_code: string | null }>();
+      .all<{ id: string; order_id: string; status:string; current_step_code: string | null }>();
     modules.push(...rows.results);
   }
   if (modules.length !== orderIds.length) {
@@ -143,7 +150,10 @@ export async function recordBatchOutboundProgress(input: {
   }
 
   const now = new Date().toISOString();
-  const statements: D1PreparedStatement[] = [];
+  const statements: D1PreparedStatement[] = [
+    ...intakeManyCommitStatements(intakeSnapshots,now),
+    ...modules.map(module=>predicateGuard(env.DB,"EXISTS(SELECT 1 FROM order_module_instances WHERE id=? AND organization_id=? AND order_id=? AND enabled=1 AND status=? AND COALESCE(current_step_code,'')=?)",[module.id,input.organizationId,module.order_id,module.status,module.current_step_code??''],now)),
+  ];
   for (const moduleChunk of chunkD1Values(modules, 3)) {
     statements.push(
       env.DB.prepare(
@@ -208,11 +218,12 @@ async function recordLoadingProgress(input: {
   const mappedStepCode = completed ? "confirmed" : "loading";
   const mappedStepName = completed ? "装车出库交接完成" : "拣货装车";
   const statements: D1PreparedStatement[] = [
+    ...intakeGateCommitStatements(await prepareOrderIntakeAdvance(input.organizationId,input.orderId),now),
     env.DB.prepare(
       `UPDATE order_module_instances
        SET status=?,current_step_code=?,current_step_name=?,progress_percent=?,
            started_at=COALESCE(started_at,?),completed_at=?,blocking_reason=NULL,updated_at=?
-       WHERE id=?`,
+       WHERE id=? AND status=? AND COALESCE(current_step_code,'')=?`,
     ).bind(
       completed ? "completed" : "in_progress",
       mappedStepCode,
@@ -222,7 +233,9 @@ async function recordLoadingProgress(input: {
       completed ? now : null,
       now,
       module.id,
+      module.status,module.current_step_code??'',
     ),
+    changedRowGuard(env.DB,now),
   ];
   if (module.current_step_code !== mappedStepCode) {
     statements.push(

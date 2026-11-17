@@ -57,7 +57,7 @@ type WorkflowDefinitionIdentity = Definition & {
   template_family_id: string | null;
 };
 type Step = { step_key: string; name: string; sort_order: number };
-type Instance = { id: string; workflow_id: string; current_step_key: string };
+type Instance = { id: string; workflow_id: string; current_step_key: string;order_id?:string|null };
 
 type AdvanceInput = {
   organizationId: string;
@@ -440,6 +440,12 @@ export async function recordWorkflowEvent(input: RecordEventInput): Promise<stri
   if (!step) return null;
 
   const now = new Date().toISOString();
+  let historyCommitted=false;
+  const eventHistory=(instanceId:string,target:Step)=>env.DB.prepare(`INSERT INTO workflow_history
+    (id, instance_id, step_key, step_name, actor_user_id, source, metadata, occurred_at)
+    SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS
+      (SELECT 1 FROM workflow_history WHERE instance_id = ? AND step_key = ?)`)
+    .bind(crypto.randomUUID(),instanceId,target.step_key,target.name,input.actorUserId??null,input.source,input.metadata?JSON.stringify(input.metadata):null,now,instanceId,target.step_key);
   if (!instance) {
     const instanceId = crypto.randomUUID();
     await env.DB.prepare(`INSERT INTO workflow_instances
@@ -459,6 +465,22 @@ export async function recordWorkflowEvent(input: RecordEventInput): Promise<stri
     ).bind(definition.id, instance.current_step_key).first<{ sort_order: number; trigger_event:string }>();
     if (current && step.sort_order < current.sort_order) return instance.id;
     if (current?.trigger_event.startsWith("manual.")) return instance.id;
+    if(current&&step.step_key===instance.current_step_key){
+      // Linking a source quote/shipment to the SAME draft node is not a
+      // forward transition. Do not run the next-node completeness gate here:
+      // it would strand partial auxiliary quotes after their draft was saved.
+      // Existing entity bindings and completion facts are never replaced.
+      await env.DB.batch([
+        env.DB.prepare(`UPDATE workflow_instances SET quotation_id=COALESCE(quotation_id,?),order_id=COALESCE(order_id,?),
+          shipment_id=COALESCE(shipment_id,?),invoice_id=COALESCE(invoice_id,?)
+          WHERE id=? AND organization_id=? AND current_step_key=?
+            AND (order_id IS NULL OR ? IS NULL OR order_id=?)
+            AND (quotation_id IS NULL OR ? IS NULL OR quotation_id=?)`)
+          .bind(input.quotationId??null,input.orderId??null,input.shipmentId??null,input.invoiceId??null,instance.id,input.organizationId,instance.current_step_key,input.orderId??null,input.orderId??null,input.quotationId??null,input.quotationId??null),
+        eventHistory(instance.id,step),
+      ]);
+      return instance.id;
+    }
     if (current) {
       const manualStep = await env.DB.prepare(`SELECT step_key,name,sort_order FROM workflow_steps
         WHERE workflow_id=? AND is_active=1 AND trigger_event LIKE 'manual.%' AND sort_order>? AND sort_order<?
@@ -468,21 +490,18 @@ export async function recordWorkflowEvent(input: RecordEventInput): Promise<stri
     const completed = await env.DB.prepare(
       "SELECT NOT EXISTS (SELECT 1 FROM workflow_steps WHERE workflow_id = ? AND is_active = 1 AND sort_order > ?) AS done",
     ).bind(definition.id, step.sort_order).first<{ done: number }>();
-    await env.DB.prepare(`UPDATE workflow_instances SET
+    const intakeSnapshot=(instance.order_id||input.orderId)?await prepareOrderIntakeAdvance(input.organizationId,(instance.order_id||input.orderId)!):null;
+    await guardedBatch(env.DB,[...intakeGateCommitStatements(intakeSnapshot,now),env.DB.prepare(`UPDATE workflow_instances SET
       customer_id = ?, quotation_id = COALESCE(?, quotation_id), order_id = COALESCE(?, order_id),
       shipment_id = COALESCE(?, shipment_id), invoice_id = COALESCE(?, invoice_id), current_step_key = ?,
       status = ?, completed_at = CASE WHEN ? = 'completed' THEN ? ELSE completed_at END, updated_at = ?
-      WHERE id = ? AND organization_id = ?`)
+      WHERE id = ? AND organization_id = ? AND current_step_key=?`)
       .bind(input.customerId, input.quotationId ?? null, input.orderId ?? null, input.shipmentId ?? null, input.invoiceId ?? null,
-        step.step_key, completed?.done ? "completed" : "active", completed?.done ? "completed" : "active", now, now, instance.id, input.organizationId).run();
+        step.step_key, completed?.done ? "completed" : "active", completed?.done ? "completed" : "active", now, now, instance.id, input.organizationId,instance.current_step_key),changedRowGuard(env.DB,now),eventHistory(instance.id,step)],"流程节点或录单资料已变化，请补齐资料后重试同步");
+    historyCommitted=true;
   }
 
-  await env.DB.prepare(`INSERT INTO workflow_history
-    (id, instance_id, step_key, step_name, actor_user_id, source, metadata, occurred_at)
-    SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS
-      (SELECT 1 FROM workflow_history WHERE instance_id = ? AND step_key = ?)`)
-    .bind(crypto.randomUUID(), instance.id, step.step_key, step.name, input.actorUserId ?? null, input.source,
-      input.metadata ? JSON.stringify(input.metadata) : null, now, instance.id, step.step_key).run();
+  if(!historyCommitted)await eventHistory(instance.id,step).run();
   return instance.id;
 }
 
@@ -824,7 +843,7 @@ async function findInstance(organizationId: string, refs: WorkflowRefs): Promise
   for (const [column, value] of candidates) {
     if (!value) continue;
     const row = await env.DB.prepare(
-      `SELECT id, workflow_id, current_step_key FROM workflow_instances WHERE organization_id = ? AND ${column} = ? LIMIT 1`,
+      `SELECT id, workflow_id, current_step_key,order_id FROM workflow_instances WHERE organization_id = ? AND ${column} = ? LIMIT 1`,
     ).bind(organizationId, value).first<Instance>();
     if (row) return row;
   }

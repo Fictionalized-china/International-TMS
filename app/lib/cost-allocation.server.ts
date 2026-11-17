@@ -1,6 +1,8 @@
 import type{AllocationMethod}from"./cost-allocation";
 import{allocateCost,allocationDensity,recommendAllocationMethod}from"./cost-allocation";
-import{assertBatchCostAllocationActionOpen}from"./batch-cost-allocation-action-policy.server";
+import{assertBatchCostAllocationActionOpen,batchCostAllocationCommitGuards}from"./batch-cost-allocation-action-policy.server";
+import{changedRowGuard}from"./mutation-guard.server";
+import{querySnapshotGuards}from"./query-snapshot-guard.server";
 
 export type CostAllocationLine={
   id:string;order_id:string;order_number:string;customer_name:string;
@@ -66,14 +68,19 @@ export type CostAllocationMutationContext={
 
 export type AssertCostAllocationCanMutate=(
   context:CostAllocationMutationContext,
-)=>Promise<void>;
+)=>Promise<void|D1PreparedStatement[]>;
 
 function mutationConflict(error:unknown):never{
   const message=error instanceof Error?error.message:String(error);
-  if(/UNIQUE|已确认|草稿|并发|配载成本|冻结工作流|费用分摊|SQLITE_CONSTRAINT/i.test(message)){
+  if(/UNIQUE|已确认|草稿|并发|配载成本|冻结工作流|费用分摊|SQLITE_CONSTRAINT|mutation_commit_guards/i.test(message)){
     throw new Error("费用分摊状态已被其他人更新，请刷新页面核对后重试");
   }
   throw error;
+}
+function moneyCents(amount:number){
+  const cents=Math.round(amount*100);
+  if(!Number.isFinite(amount)||amount<0||!Number.isSafeInteger(cents)||Math.abs(amount*100-cents)>0.000001)throw new Error("分摊金额必须为有效非负数，最多两位小数且在安全分币范围内");
+  return cents;
 }
 
 export async function loadCostAllocations(db:D1Database,organizationId:string,batchId:string){
@@ -94,8 +101,9 @@ export async function createCostAllocation(db:D1Database,input:{
 }){
   if(!input.chargeCode||!input.chargeName||!input.counterpartyName)throw new Error("请填写费用项目和往来单位");
   if(!Number.isFinite(input.totalAmount)||input.totalAmount<=0)throw new Error("分摊总金额必须大于 0");
+  moneyCents(input.totalAmount);
   if(!Number.isFinite(input.exchangeRate)||input.exchangeRate<=0)throw new Error("汇率必须大于 0");
-  await assertBatchCostAllocationActionOpen({db,organizationId:input.organizationId,batchId:input.batchId});
+  const gateOrders=await assertBatchCostAllocationActionOpen({db,organizationId:input.organizationId,batchId:input.batchId});
   const actuals=await loadBatchActuals(db,input.organizationId,input.batchId);
   const missing=actuals.filter(item=>item.receipt_count===0);
   if(missing.length)throw new Error(`以下订单没有仓库实收数据：${missing.map(item=>item.order_number).join("、")}`);
@@ -107,19 +115,19 @@ export async function createCostAllocation(db:D1Database,input:{
   const suggestions=allocateCost(actuals.map(item=>({orderId:item.order_id,actualWeightKg:item.actual_weight_kg,actualVolumeCbm:item.actual_volume_cbm})),input.totalAmount,method);
   const density=allocationDensity(totalWeight,totalVolume),allocationId=crypto.randomUUID();
   const statements:D1PreparedStatement[]=[
+    ...batchCostAllocationCommitGuards(db,input.organizationId,input.batchId,gateOrders,input.now),
     db.prepare(`INSERT INTO transport_cost_allocations(id,organization_id,batch_id,charge_code,charge_name,counterparty_name,currency,exchange_rate,total_amount,allocation_method,total_actual_weight_kg,total_actual_volume_cbm,density_kg_per_cbm,density_result,status,notes,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'draft',?,?,?,?)`).bind(allocationId,input.organizationId,input.batchId,input.chargeCode,input.chargeName,input.counterpartyName,input.currency.toUpperCase(),input.exchangeRate,input.totalAmount,method,totalWeight,totalVolume,density,density<volumeWeightRatio?`轻货：密度低于 ${volumeWeightRatio} KG/CBM`:`重货：密度达到 ${volumeWeightRatio} KG/CBM`,input.notes||null,input.userId,input.now,input.now),
     ...suggestions.map(line=>db.prepare(`INSERT INTO transport_cost_allocation_lines(id,organization_id,allocation_id,order_id,actual_weight_kg,actual_volume_cbm,suggested_ratio,suggested_amount,final_amount,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(),input.organizationId,allocationId,line.orderId,line.actualWeightKg,line.actualVolumeCbm,line.ratio,line.amount,line.amount,input.now,input.now)),
   ];
-  await input.assertCanMutate({
+  const actorGuards=await input.assertCanMutate({
     organizationId:input.organizationId,
     batchId:input.batchId,
     allocationId:null,
     orderIds:suggestions.map(line=>line.orderId),
   });
   try{
-    const results=await db.batch(statements);
-    if(results.some(result=>typeof result.meta?.changes==="number"&&result.meta.changes===0))
-      throw new Error("并发写入未生效");
+    const results=await db.batch([...(actorGuards??[]),...querySnapshotGuards(db,batchActualsSql,[input.organizationId,input.batchId],actuals,input.now),...statements]);
+    if(!results.length)throw new Error("并发写入未生效");
   }catch(error){mutationConflict(error)}
   return allocationId;
 }
@@ -130,10 +138,12 @@ export async function updateCostAllocation(db:D1Database,input:{
   adjustments:{lineId:string;amount:number;reason:string}[];now:string;
   assertCanMutate:AssertCostAllocationCanMutate;
 }){
-  const header=await db.prepare("SELECT id,batch_id,total_amount,status FROM transport_cost_allocations WHERE id=? AND organization_id=?").bind(input.allocationId,input.organizationId).first<{id:string;batch_id:string;total_amount:number;status:string}>();
+  const headerSql="SELECT id,batch_id,total_amount,status FROM transport_cost_allocations WHERE id=? AND organization_id=?";
+  const header=await db.prepare(headerSql).bind(input.allocationId,input.organizationId).first<{id:string;batch_id:string;total_amount:number;status:string}>();
   if(!header||header.status!=="draft")throw new Error("只有未确认的分摊草稿可以调整");
-  await assertBatchCostAllocationActionOpen({db,organizationId:input.organizationId,batchId:header.batch_id});
-  const lines=await db.prepare("SELECT id,order_id,actual_weight_kg,actual_volume_cbm FROM transport_cost_allocation_lines WHERE organization_id=? AND allocation_id=? ORDER BY id").bind(input.organizationId,input.allocationId).all<{id:string;order_id:string;actual_weight_kg:number;actual_volume_cbm:number}>();
+  const gateOrders=await assertBatchCostAllocationActionOpen({db,organizationId:input.organizationId,batchId:header.batch_id});
+  const linesSql="SELECT * FROM transport_cost_allocation_lines WHERE organization_id=? AND allocation_id=? ORDER BY id";
+  const lines=await db.prepare(linesSql).bind(input.organizationId,input.allocationId).all<CostAllocationLine>();
   if(lines.results.length!==input.adjustments.length)throw new Error("分摊明细不完整，请刷新页面后重试");
   const actuals=await loadBatchActuals(db,input.organizationId,header.batch_id);
   const missing=actuals.filter(item=>item.receipt_count===0);
@@ -146,87 +156,106 @@ export async function updateCostAllocation(db:D1Database,input:{
   }),header.total_amount,input.method);
   const suggestionByOrder=new Map(suggestions.map(item=>[item.orderId,item]));
   const adjustmentMap=new Map(input.adjustments.map(item=>[item.lineId,item]));
-  const statements:D1PreparedStatement[]=[];
+  const statements:D1PreparedStatement[]=[
+    ...batchCostAllocationCommitGuards(db,input.organizationId,header.batch_id,gateOrders,input.now),
+    ...querySnapshotGuards(db,headerSql,[input.allocationId,input.organizationId],[header],input.now),
+    ...querySnapshotGuards(db,linesSql,[input.organizationId,input.allocationId],lines.results,input.now),
+  ];
   let finalTotal=0;
   for(let index=0;index<lines.results.length;index++){
     const line=lines.results[index],actual=actualByOrder.get(line.order_id),suggestion=suggestionByOrder.get(line.order_id),adjustment=adjustmentMap.get(line.id);
     if(!actual||!suggestion)throw new Error("分摊订单实收数据不完整，请刷新页面后重试");
     if(!adjustment||!Number.isFinite(adjustment.amount)||adjustment.amount<0)throw new Error("分摊金额必须为不小于 0 的数字");
+    moneyCents(adjustment.amount);
     if(Math.abs(adjustment.amount-suggestion.amount)>0.009&&!adjustment.reason.trim())throw new Error("修改系统建议金额时必须填写调整原因");
-    finalTotal+=adjustment.amount;
-    statements.push(db.prepare("UPDATE transport_cost_allocation_lines SET actual_weight_kg=?,actual_volume_cbm=?,suggested_ratio=?,suggested_amount=?,adjusted_amount=?,adjustment_reason=?,final_amount=?,updated_at=? WHERE id=? AND organization_id=? AND allocation_id=? AND EXISTS(SELECT 1 FROM transport_cost_allocations allocation WHERE allocation.id=transport_cost_allocation_lines.allocation_id AND allocation.organization_id=transport_cost_allocation_lines.organization_id AND allocation.status='draft')").bind(actual.actual_weight_kg,actual.actual_volume_cbm,suggestion.ratio,suggestion.amount,Math.abs(adjustment.amount-suggestion.amount)>0.009?adjustment.amount:null,adjustment.reason.trim()||null,adjustment.amount,input.now,line.id,input.organizationId,input.allocationId));
+    finalTotal+=moneyCents(adjustment.amount);
+    statements.push(db.prepare("UPDATE transport_cost_allocation_lines SET actual_weight_kg=?,actual_volume_cbm=?,suggested_ratio=?,suggested_amount=?,adjusted_amount=?,adjustment_reason=?,final_amount=?,updated_at=? WHERE id=? AND organization_id=? AND allocation_id=? AND EXISTS(SELECT 1 FROM transport_cost_allocations allocation WHERE allocation.id=transport_cost_allocation_lines.allocation_id AND allocation.organization_id=transport_cost_allocation_lines.organization_id AND allocation.status='draft')").bind(actual.actual_weight_kg,actual.actual_volume_cbm,suggestion.ratio,suggestion.amount,Math.abs(adjustment.amount-suggestion.amount)>0.009?adjustment.amount:null,adjustment.reason.trim()||null,adjustment.amount,input.now,line.id,input.organizationId,input.allocationId),changedRowGuard(db,input.now));
   }
-  if(Math.abs(finalTotal-header.total_amount)>0.009)throw new Error(`各订单分摊金额合计必须等于 ${header.total_amount.toFixed(2)}`);
+  if(finalTotal!==moneyCents(Number(header.total_amount)))throw new Error(`各订单分摊金额合计必须等于 ${Number(header.total_amount).toFixed(2)}`);
   const totalWeight=actuals.reduce((sum,item)=>sum+item.actual_weight_kg,0);
   const totalVolume=actuals.reduce((sum,item)=>sum+item.actual_volume_cbm,0);
   const density=allocationDensity(totalWeight,totalVolume);
   const volumeWeightRatio=Number.isFinite(input.volumeWeightRatioKgPerCbm)&&Number(input.volumeWeightRatioKgPerCbm)>0
     ?Number(input.volumeWeightRatioKgPerCbm):300;
   statements.push(db.prepare("UPDATE transport_cost_allocations SET allocation_method=?,total_actual_weight_kg=?,total_actual_volume_cbm=?,density_kg_per_cbm=?,density_result=?,updated_at=? WHERE id=? AND organization_id=? AND status='draft'").bind(input.method,totalWeight,totalVolume,density,density<volumeWeightRatio?`轻货：密度低于 ${volumeWeightRatio} KG/CBM`:`重货：密度达到 ${volumeWeightRatio} KG/CBM`,input.now,input.allocationId,input.organizationId));
-  await input.assertCanMutate({
+  statements.push(changedRowGuard(db,input.now));
+  const actorGuards=await input.assertCanMutate({
     organizationId:input.organizationId,
     batchId:header.batch_id,
     allocationId:input.allocationId,
     orderIds:lines.results.map(line=>line.order_id),
   });
   try{
-    const results=await db.batch(statements);
+    const results=await db.batch([...(actorGuards??[]),...querySnapshotGuards(db,batchActualsSql,[input.organizationId,header.batch_id],actuals,input.now),...statements]);
     if(results.some(result=>typeof result.meta?.changes==="number"&&result.meta.changes===0))
       throw new Error("并发更新未生效");
   }catch(error){mutationConflict(error)}
 }
 
 export async function confirmCostAllocation(db:D1Database,input:{organizationId:string;allocationId:string;userId:string;now:string;assertCanMutate:AssertCostAllocationCanMutate}){
-  const header=await db.prepare("SELECT * FROM transport_cost_allocations WHERE id=? AND organization_id=?").bind(input.allocationId,input.organizationId).first<CostAllocation>();
+  const headerSql="SELECT * FROM transport_cost_allocations WHERE id=? AND organization_id=?";
+  const header=await db.prepare(headerSql).bind(input.allocationId,input.organizationId).first<CostAllocation>();
   if(!header||header.status!=="draft")throw new Error("该分摊草稿已确认或已失效");
   const gateOrders=await assertBatchCostAllocationActionOpen({db,organizationId:input.organizationId,batchId:header.batch_id});
-  const lines=await db.prepare("SELECT id,order_id,suggested_amount,final_amount,adjustment_reason FROM transport_cost_allocation_lines WHERE organization_id=? AND allocation_id=? ORDER BY id").bind(input.organizationId,input.allocationId).all<{id:string;order_id:string;suggested_amount:number;final_amount:number;adjustment_reason:string|null}>();
+  const linesSql="SELECT id,order_id,suggested_amount,final_amount,adjustment_reason FROM transport_cost_allocation_lines WHERE organization_id=? AND allocation_id=? ORDER BY id";
+  const lines=await db.prepare(linesSql).bind(input.organizationId,input.allocationId).all<{id:string;order_id:string;suggested_amount:number;final_amount:number;adjustment_reason:string|null}>();
   if(!lines.results.length)throw new Error("分摊草稿没有订单明细");
   const activeOrderIds=new Set(gateOrders.map(item=>item.order_id));
   if(lines.results.some(line=>!activeOrderIds.has(line.order_id))||lines.results.length!==activeOrderIds.size)
     throw new Error("分摊草稿订单与当前配载单不一致，请作废草稿后重新生成");
   if(lines.results.some(line=>!Number.isFinite(line.final_amount)||line.final_amount<0))
     throw new Error("分摊金额必须为有效非负数，请先修正草稿后确认");
-  const total=lines.results.reduce((sum,line)=>sum+line.final_amount,0);
-  if(Math.abs(total-header.total_amount)>0.009)throw new Error("分摊金额合计与费用总额不一致，请先调整");
+  const total=lines.results.reduce((sum,line)=>sum+moneyCents(line.final_amount),0);
+  if(total!==moneyCents(Number(header.total_amount)))throw new Error("分摊金额合计与费用总额不一致，请先调整");
   const missingReason=lines.results.some(line=>Math.abs(line.final_amount-line.suggested_amount)>0.009&&!line.adjustment_reason?.trim());
   if(missingReason)throw new Error("存在人工调整但未填写原因的订单");
-  const statements:D1PreparedStatement[]=[];
+  const statements:D1PreparedStatement[]=[
+    ...batchCostAllocationCommitGuards(db,input.organizationId,header.batch_id,gateOrders,input.now),
+    ...querySnapshotGuards(db,headerSql,[input.allocationId,input.organizationId],[header],input.now),
+    ...querySnapshotGuards(db,linesSql,[input.organizationId,input.allocationId],lines.results,input.now),
+  ];
   for(const line of lines.results){
     const expenseId=crypto.randomUUID();
     statements.push(
       db.prepare(`INSERT INTO business_expenses(id,organization_id,order_id,direction,stage,charge_code,charge_name,counterparty_name,currency,quantity,unit_price,amount,exchange_rate,base_amount,notes,created_by_user_id,created_at,updated_at,source_type,source_id) VALUES(?,?,?,'payable','estimated',?,?,?,?,1,?,?,?,?,?,?,?,?,'loading_cost_allocation_line',?)`).bind(expenseId,input.organizationId,line.order_id,header.charge_code,header.charge_name,header.counterparty_name,header.currency,line.final_amount,line.final_amount,header.exchange_rate,line.final_amount*header.exchange_rate,`配载批次成本分摊；${header.notes||"无备注"}`,input.userId,input.now,input.now,line.id),
       db.prepare("UPDATE transport_cost_allocation_lines SET expense_id=?,updated_at=? WHERE id=? AND organization_id=? AND allocation_id=? AND expense_id IS NULL AND EXISTS(SELECT 1 FROM transport_cost_allocations allocation WHERE allocation.id=transport_cost_allocation_lines.allocation_id AND allocation.organization_id=transport_cost_allocation_lines.organization_id AND allocation.status='draft')").bind(expenseId,input.now,line.id,input.organizationId,input.allocationId),
+      changedRowGuard(db,input.now),
       db.prepare(`INSERT INTO order_expense_direction_controls(organization_id,order_id,direction,updated_at) VALUES(?,?,'payable',?) ON CONFLICT(order_id,direction) DO NOTHING`).bind(input.organizationId,line.order_id,input.now),
     );
   }
   statements.push(db.prepare("UPDATE transport_cost_allocations SET status='confirmed',confirmed_by_user_id=?,confirmed_at=?,updated_at=? WHERE id=? AND organization_id=? AND status='draft'").bind(input.userId,input.now,input.now,input.allocationId,input.organizationId));
-  await input.assertCanMutate({
+  statements.push(changedRowGuard(db,input.now));
+  const actorGuards=await input.assertCanMutate({
     organizationId:input.organizationId,
     batchId:header.batch_id,
     allocationId:input.allocationId,
     orderIds:lines.results.map(line=>line.order_id),
   });
   try{
-    const results=await db.batch(statements);
-    const headerResult=results[results.length-1];
+    const results=await db.batch([...(actorGuards??[]),...statements]);
+    const headerResult=results[results.length-2];
     if(typeof headerResult?.meta?.changes==="number"&&headerResult.meta.changes!==1)
       throw new Error("并发确认未生效");
   }catch(error){mutationConflict(error)}
 }
 
-async function loadBatchActuals(db:D1Database,organizationId:string,batchId:string){
-  const result=await db.prepare(`SELECT bo.order_id,o.order_number,c.name customer_name,COUNT(DISTINCT r.id) receipt_count,COALESCE(SUM(r.total_weight_kg),0) actual_weight_kg,COALESCE(SUM(r.total_volume_cbm),0) actual_volume_cbm
+const batchActualsSql=`SELECT bo.order_id,o.order_number,c.name customer_name,COUNT(DISTINCT r.id) receipt_count,
+    COALESCE(MAX(pack.total_weight_kg),SUM(r.total_weight_kg),0) actual_weight_kg,
+    COALESCE(MAX(pack.total_volume_cbm),SUM(r.total_volume_cbm),0) actual_volume_cbm
     FROM transport_batch_orders bo
     JOIN transport_batches b ON b.id=bo.batch_id AND b.organization_id=bo.organization_id
     JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
     JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
+    LEFT JOIN warehouse_packing_jobs pack ON pack.organization_id=bo.organization_id AND pack.order_id=bo.order_id
+      AND pack.transport_batch_id=bo.batch_id AND pack.warehouse_id=b.warehouse_id AND pack.status IN ('allocated','loading','dispatched')
     LEFT JOIN shipments s ON s.order_id=o.id AND s.organization_id=o.organization_id
     LEFT JOIN warehouse_receipts r
       ON r.shipment_id=s.id AND r.organization_id=o.organization_id
      AND r.warehouse_id=b.warehouse_id AND r.status='completed'
     WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
-    GROUP BY bo.order_id,o.order_number,c.name ORDER BY bo.sequence_no`).bind(organizationId,batchId).all<ActualOrder>();
+    GROUP BY bo.order_id,o.order_number,c.name ORDER BY bo.sequence_no`;
+async function loadBatchActuals(db:D1Database,organizationId:string,batchId:string){
+  const result=await db.prepare(batchActualsSql).bind(organizationId,batchId).all<ActualOrder>();
   if(!result.results.length)throw new Error("配载批次没有有效订单");
-  return result.results;
+  return result.results.map(row=>({...row,receipt_count:Number(row.receipt_count),actual_weight_kg:Number(row.actual_weight_kg),actual_volume_cbm:Number(row.actual_volume_cbm)}));
 }

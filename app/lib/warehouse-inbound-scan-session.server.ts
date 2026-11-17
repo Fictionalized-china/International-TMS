@@ -1,3 +1,5 @@
+import { predicateGuard } from "./mutation-guard.server";
+
 export type WarehouseInboundScanOutcome =
   | "accepted"
   | "duplicate"
@@ -189,6 +191,7 @@ export async function scanInboundMarkAtWarehouse(db: D1Database, input: {
   const markReceiptId = crypto.randomUUID();
   try {
     await db.batch([
+      predicateGuard(db,`EXISTS(SELECT 1 FROM warehouse_inbound_order_receiving_sessions WHERE id=? AND organization_id=? AND warehouse_id=? AND order_id=? AND status='scanning')`,[receiving.id,input.organizationId,input.warehouseId,resolved.order_id],now),
       db.prepare(
         `INSERT INTO warehouse_inbound_scan_events(
            id,organization_id,warehouse_id,scan_session_id,normalized_code,request_key,outcome,inbound_mark_id,order_id,

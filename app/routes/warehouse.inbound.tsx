@@ -1,4 +1,10 @@
 import { env } from "cloudflare:workers";
+import { SitePhotoPicker } from "../components/SitePhotos";
+import {PhysicalSyncPanel} from "../components/PhysicalSyncPanel";
+import {physicalSyncJobStatement,physicalSyncJobId,tryPhysicalSyncJob} from "../lib/physical-operation-sync.server";
+import { prepareSitePhotoStatements,sitePhotoLimits } from "../lib/order-site-photos.server";
+import {loadBusinessProcessPolicy} from "../lib/business-process-policy.server";
+import {changedRowGuard} from "../lib/mutation-guard.server";
 import { prepareOrderIntakeAdvance,prepareOrdersIntakeAdvance,intakeGateCommitStatements,intakeManyCommitStatements,type IntakeGateSnapshot } from "../lib/order-intake-gate.server";
 import { Form, Link, redirect, useNavigation } from "react-router";
 import { useEffect, useState } from "react";
@@ -11,11 +17,9 @@ import {
 import { ActionToast } from "../components/ActionToast";
 import { requireSessionUser } from "../lib/auth.server";
 import { valueOf } from "../lib/validation";
-import { writeAudit } from "../lib/audit.server";
-import { recordWorkflowEvent } from "../lib/business-workflow.server";
+import { auditStatement,writeAudit } from "../lib/audit.server";
 import { isValidCustomerIdentityCode } from "../lib/customer-identity";
 import { nextDocumentNumber } from "../lib/documents.server";
-import { recordWarehouseProgress } from "../lib/warehouse-progress.server";
 import {
   calculateWarehouseDifference,
   shouldCreateWarehouseDifference,
@@ -23,14 +27,9 @@ import {
 import { loadOperationalRules } from "../lib/operational-rules.server";
 import { workflowFieldPolicy } from "../lib/workflow-field-catalog";
 import { loadOrderModuleWorkflowFields } from "../lib/workflow-fields.server";
-import { syncOrderWorkflowSnapshot } from "../lib/order-modules.server";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
 import { canOperateWarehouseUi } from "../lib/warehouse-ui-access";
 import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
-import {
-  automaticallyNotifyOverseasArrival,
-  confirmOverseasBatchArrival,
-} from "../lib/overseas-warehouse.server";
 import {
   loadOverseasInboundCustomsGates,
 } from "../lib/overseas-inbound-policy.server";
@@ -403,6 +402,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     warehouse,
     warehouseAccessLevel: warehouseContext.selectedAccessLevel,
     isOverseasWarehouse,
+    photoLimits:sitePhotoLimits(await loadBusinessProcessPolicy(user.organizationId)),
     locations: locations.results,
     orderId,
     batchContext: batchId ? {
@@ -811,7 +811,7 @@ export async function action({ request }: Route.ActionArgs) {
   const packageStatements = existingPackage
     ? [
         env.DB.prepare(
-          `UPDATE warehouse_packages SET receipt_id=?,warehouse_id=?,location_id=?,pieces=?,weight_kg=?,volume_cbm=?,length_cm=?,width_cm=?,height_cm=?,status='in_stock',notes=?,updated_at=? WHERE id=? AND organization_id=?`,
+          `UPDATE warehouse_packages SET receipt_id=?,warehouse_id=?,location_id=?,pieces=?,weight_kg=?,volume_cbm=?,length_cm=?,width_cm=?,height_cm=?,status='in_stock',notes=?,updated_at=? WHERE id=? AND organization_id=? AND warehouse_id=? AND status='dispatched'`,
         ).bind(
           receiptId,
           location.warehouse_id,
@@ -826,7 +826,9 @@ export async function action({ request }: Route.ActionArgs) {
           now,
           existingPackage.id,
           user.organizationId,
+          existingPackage.warehouse_id,
         ),
+        changedRowGuard(env.DB,now),
         env.DB.prepare(
           `INSERT INTO warehouse_package_movements(id,organization_id,package_id,operation_type,from_location_id,to_location_id,operator_user_id,notes,occurred_at,created_at) VALUES(?,?,?,'inbound',?,?,?,?,?,?)`,
         ).bind(
@@ -865,6 +867,7 @@ export async function action({ request }: Route.ActionArgs) {
         ),
       ];
   try {
+    const photoStatements=await prepareSitePhotoStatements(env.DB,{organizationId:user.organizationId,actorUserId:user.userId,form,stage:isOverseasWarehouse?"overseas_receipt":"domestic_receipt",sourceType:"warehouse_receipt",sourceId:receiptId,targets:[{orderId:shipment.order_id,customerId:shipment.customer_id,eventId,packageIds:[packageId]}],warehouseId:location.warehouse_id,occurredAt:now,now});
     await env.DB.batch([
       ...shipmentBootstrap,
       ...intakeGateCommitStatements(intakeSnapshot,now),
@@ -915,6 +918,9 @@ export async function action({ request }: Route.ActionArgs) {
         location.id,
       ),
       ...(isOverseasWarehouse
+        ? [env.DB.prepare("INSERT INTO shipment_events(id,shipment_id,status,location,description,event_at,visible_to_customer,created_by_user_id,created_at) VALUES(?,?,'in_transit',?,'境外仓已扫码验收入库',?,1,?,?)").bind(eventId,shipment.id,locationText,now,user.userId,now)]
+        : []),
+      ...(isOverseasWarehouse
         ? []
         : [
             env.DB.prepare(
@@ -958,152 +964,30 @@ export async function action({ request }: Route.ActionArgs) {
             ),
           ]
         : []),
+      ...photoStatements,
+      auditStatement(env.DB,{request,action:isOverseasWarehouse?"warehouse.overseas.receive":"warehouse.inbound.receive",resourceType:"warehouse_package",resourceId:packageId,organizationId:user.organizationId,actorUserId:user.userId,metadata:{receiptNumber,barcode,shipmentId:shipment.id,shipmentNumber:shipment.shipment_number,orderNumber:shipment.order_number,locationId,pieces,weight,volume}},now),
+      ...(!isOverseasWarehouse?[physicalSyncJobStatement(env.DB,{organizationId:user.organizationId,orderId:shipment.order_id,warehouseId:selectedWarehouse.id,actorUserId:user.userId,sourceId:receiptId,kind:"domestic_receipt",payload:{result:hasException?"exception":cargoComplete?"ready":"partial",packageCount:1,exceptionNotes,createdShipmentNumber},now})]:[]),
+      ...(cargoComplete&&isOverseasWarehouse?[physicalSyncJobStatement(env.DB,{organizationId:user.organizationId,orderId:shipment.order_id,warehouseId:selectedWarehouse.id,actorUserId:user.userId,sourceId:receiptId,kind:"overseas_receipt",payload:{notes:notes||`境外仓入库单 ${receiptNumber} 已清点货齐`},now})]:[]),
     ]);
   } catch (error) {
     console.error("warehouse inbound failed", error);
     return {
-      formError: "收货失败，未写入仓库数据，请核对订单、库位和标签后重试",
+      formError: error instanceof Error&&/图片|照片|预览|缩略图/.test(error.message)?`${error.message}；仓库数据未写入，可保留资料重试`:"收货失败，未写入仓库数据，请核对订单、库位和标签后重试",
     };
-  }
-  if (cargoComplete && !isOverseasWarehouse) {
-    await ensureVerifiedReceivingBatch({
-      organizationId: user.organizationId,
-      shipmentId: shipment.id,
-      locationId: location.id,
-      actorUserId: user.userId,
-      now,
-    });
-  }
-  if (!isOverseasWarehouse) {
-    await recordWarehouseProgress({
-      organizationId: user.organizationId,
-      orderId: shipment.order_id,
-      actorUserId: user.userId,
-      stepCode: cargoComplete ? "ready" : "receiving",
-      stepName: cargoComplete ? "货齐，等待装车/配载" : "累计收货中",
-      actionCode: "receipt_complete",
-      actionName: cargoComplete ? "确认货齐" : "仓库累计收货",
-      notes: `入库单 ${receiptNumber}；货物标签 ${barcode}${hasException ? `；异常：${exceptionNotes}` : ""}`,
-    });
-  }
-  if (cargoComplete && !isOverseasWarehouse) {
-    const transportModule = await env.DB.prepare(
-      "SELECT id,current_step_code FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='transport' AND enabled=1",
-    )
-      .bind(user.organizationId, shipment.order_id)
-      .first<{ id: string; current_step_code: string | null }>();
-    const assignment = await env.DB.prepare(
-      "SELECT id FROM order_transport_assignments WHERE organization_id=? AND order_id=? AND leg_type='first_mile' AND status!='cancelled' ORDER BY created_at DESC LIMIT 1",
-    )
-      .bind(user.organizationId, shipment.order_id)
-      .first<{ id: string }>();
-    const completionStatements: D1PreparedStatement[] = [
-      env.DB.prepare(
-        "UPDATE order_transport_assignments SET status='arrived',actual_arrival_at=COALESCE(actual_arrival_at,?),updated_at=? WHERE organization_id=? AND order_id=? AND leg_type='first_mile' AND status!='cancelled'",
-      ).bind(now, now, user.organizationId, shipment.order_id),
-      env.DB.prepare(
-        "UPDATE shipments SET actual_delivery_at=COALESCE(actual_delivery_at,?),updated_at=? WHERE id=? AND organization_id=?",
-      ).bind(now, now, shipment.id, user.organizationId),
-    ];
-    if (assignment?.id)
-      completionStatements.push(
-        env.DB.prepare(
-          "UPDATE domestic_waybill_vehicles SET status='arrived',actual_arrival_at=COALESCE(actual_arrival_at,?),updated_at=? WHERE organization_id=? AND assignment_id=?",
-        ).bind(now, now, user.organizationId, assignment.id),
-      );
-    if (transportModule?.id) {
-      completionStatements.push(
-        env.DB.prepare(
-          "UPDATE order_module_instances SET status='completed',current_step_code='warehouse_arrived',current_step_name='货物已到国内仓',progress_percent=100,completed_at=COALESCE(completed_at,?),blocking_reason=NULL,updated_at=? WHERE id=?",
-        ).bind(now, now, transportModule.id),
-        env.DB.prepare(
-          "INSERT INTO order_module_history(id,organization_id,order_id,module_instance_id,action_code,action_name,from_step_code,to_step_code,to_step_name,actor_user_id,notes,occurred_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-        ).bind(
-          crypto.randomUUID(),
-          user.organizationId,
-          shipment.order_id,
-          transportModule.id,
-          "warehouse_cargo_complete",
-          "仓库确认货齐",
-          transportModule.current_step_code,
-          "warehouse_arrived",
-          "货物已到国内仓",
-          user.userId,
-          `入库单 ${receiptNumber} 已确认货齐`,
-          now,
-        ),
-      );
-    }
-    await env.DB.batch(completionStatements);
-    await syncOrderWorkflowSnapshot(user.organizationId, shipment.order_id);
   }
   let overseasArrival: OverseasReceivingResult | null = null;
   let overseasArrivalWarning: string | null = null;
-  if (cargoComplete && isOverseasWarehouse) {
-    try {
-      overseasArrival = await finalizeOverseasReceiving({
-        organizationId: user.organizationId,
-        orderId: shipment.order_id,
-        actorUserId: user.userId,
-        actualArrivalAt: now,
-        notes: notes || `境外仓入库单 ${receiptNumber} 已清点货齐`,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "境外到仓状态同步失败";
-      overseasArrivalWarning = `本票已在 ${selectedWarehouse.name} 入库并完成清点，但批次暂未结束：${message}`;
-    }
+  const syncKind=isOverseasWarehouse?"overseas_receipt":"domestic_receipt";
+  if (!isOverseasWarehouse || cargoComplete) {
+    const syncResult=await tryPhysicalSyncJob(env.DB,user.organizationId,physicalSyncJobId(syncKind,receiptId));
+    if(syncResult.syncPending)overseasArrivalWarning=`本票已在 ${selectedWarehouse.name} 入库，流程同步待重试，请勿重复收货`;
+    else overseasArrival=syncResult.arrival??null;
   }
-  if (createdShipmentNumber)
-    await recordWorkflowEvent({
-      organizationId: user.organizationId,
-      event: "shipment.created",
-      customerId: shipment.customer_id,
-      orderId: shipment.order_id,
-      shipmentId: shipment.id,
-      actorUserId: user.userId,
-      source: "admin",
-      metadata: {
-        number: createdShipmentNumber,
-        createdFromOrder: true,
-        warehouse: true,
-      },
-    });
-  if (!isOverseasWarehouse)
-    await recordWorkflowEvent({
-      organizationId: user.organizationId,
-      event: "shipment.picked_up",
-      customerId: shipment.customer_id,
-      orderId: shipment.order_id,
-      shipmentId: shipment.id,
-      actorUserId: user.userId,
-      source: "admin",
-      metadata: { warehouse: true, receiptNumber, barcode, locationId },
-    });
-  await writeAudit({
-    request,
-    action: isOverseasWarehouse ? "warehouse.overseas.receive" : "warehouse.inbound.receive",
-    resourceType: "warehouse_package",
-    resourceId: packageId,
-    organizationId: user.organizationId,
-    actorUserId: user.userId,
-    metadata: {
-      receiptNumber,
-      barcode,
-      shipmentId: shipment.id,
-      shipmentNumber: shipment.shipment_number,
-      orderNumber: shipment.order_number,
-      customerIdentityCode: shipment.customer_identity_code,
-      locationId,
-      pieces,
-      weight,
-      volume,
-    },
-  });
   const differenceMessage = difference.hasDifference
     ? `；实收与预录最大差异 ${difference.maxPercent.toFixed(1)}%，已生成确认待办${difference.requiresFeeConfirmation ? "，结算前须确认费用影响" : ""}`
     : "；实收与预录一致";
   if (overseasArrivalWarning)
-    return { success: overseasArrivalWarning, barcode };
+    return { success: overseasArrivalWarning, barcode,syncOrderIds:[shipment.order_id] };
   if (overseasArrival?.completed)
     return {
       success: `境外目的仓收货完成：${barcode}；${overseasArrival.batchNumber} 全部订单已清点，境外运输已结束${overseasArrival.warning ? `；${overseasArrival.warning}` : "并已自动通知客户"}`,
@@ -1190,11 +1074,13 @@ async function receiveAtomicOverseasScope(input:{
   if(customsBlocked)return{formError:customsBlocked.message||`${rows.find(row=>row.order_id===customsBlocked.orderId)?.order_number||customsBlocked.orderId} 的清关门禁尚未通过`};
   const locationText=`${location.warehouse_name} / ${location.zone_name} / ${location.name} (${location.code})`;
   const statements:D1PreparedStatement[]=[];
-  const receiptByOrder=new Map<string,{id:string;number:string}>();
+  const receiptByOrder=new Map<string,{id:string;number:string;eventId:string}>();
   for(const orderId of orderIds){
     const orderRows=rows.filter(row=>row.order_id===orderId),lead=orderRows[0],receiptId=crypto.randomUUID(),receiptNumber=generateCode("IN");
-    receiptByOrder.set(orderId,{id:receiptId,number:receiptNumber});
+    const eventId=crypto.randomUUID();
+    receiptByOrder.set(orderId,{id:receiptId,number:receiptNumber,eventId});
     statements.push(
+      env.DB.prepare("INSERT INTO shipment_events(id,shipment_id,status,location,description,event_at,visible_to_customer,created_by_user_id,created_at) VALUES(?,?,'in_transit',?,?,?,1,?,?)").bind(eventId,lead.shipment_id,locationText,hasException?"境外仓已扫码异常入库，等待处理":"境外仓已扫码验收入库",input.now,input.user.userId,input.now),
       env.DB.prepare(`INSERT INTO warehouse_receipts(id,organization_id,receipt_number,shipment_id,warehouse_id,location_id,status,total_packages,total_pieces,total_weight_kg,total_volume_cbm,notes,received_by_user_id,received_at,created_at,updated_at,package_type,evidence_note,cargo_complete,has_exception,exception_notes)
         VALUES(?,?,?,?,?,?,'completed',?,?,?,?,?, ?,?,?,?,'mixed',NULL,?,?,?)`)
         .bind(receiptId,input.user.organizationId,receiptNumber,lead.shipment_id,input.warehouse.id,location.id,orderRows.length,
@@ -1214,24 +1100,29 @@ async function receiveAtomicOverseasScope(input:{
       env.DB.prepare(`UPDATE warehouse_packages SET receipt_id=?,warehouse_id=?,location_id=?,status=?,lifecycle_status='overseas_received',notes=COALESCE(?,notes),updated_at=?
         WHERE id=? AND organization_id=? AND label_kind='oul' AND lifecycle_status='in_transit' AND status='dispatched'`)
         .bind(receipt.id,input.warehouse.id,location.id,hasException?"exception":"in_stock",hasException?exceptionNotes:(notes||null),input.now,row.id,input.user.organizationId),
+      changedRowGuard(env.DB,input.now),
       env.DB.prepare(`INSERT INTO warehouse_package_movements(id,organization_id,package_id,operation_type,from_location_id,to_location_id,operator_user_id,notes,occurred_at,created_at)
         VALUES(?,?,?,'inbound',?,?,?,?,?,?)`).bind(crypto.randomUUID(),input.user.organizationId,row.id,row.source_location_id,location.id,input.user.userId,`境外仓全量扫码入库 · ${receipt.number}`,input.now,input.now),
     );
   }
-  try{await env.DB.batch([...statements,...intakeManyCommitStatements(intakeSnapshots,input.now)])}catch(error){console.error("atomic overseas receiving failed",error);return{formError:"整批收货失败，本次没有写入任何 OUL；资料、标签或任务可能已变化，请刷新核对后重试"}}
+  try{
+    const photos=await prepareSitePhotoStatements(env.DB,{organizationId:input.user.organizationId,actorUserId:input.user.userId,form:input.form,stage:"overseas_receipt",sourceType:"overseas_dispatch_receipt",sourceId:dispatchId,targets:orderIds.map(orderId=>({orderId,orderNumber:rows.find(row=>row.order_id===orderId)!.order_number,customerId:rows.find(row=>row.order_id===orderId)!.customer_id,eventId:receiptByOrder.get(orderId)!.eventId,packageIds:rows.filter(row=>row.order_id===orderId).map(row=>row.id)})),warehouseId:input.warehouse.id,occurredAt:input.now,now:input.now});
+    const jobs=cargoComplete?orderIds.map(orderId=>physicalSyncJobStatement(env.DB,{organizationId:input.user.organizationId,orderId,warehouseId:input.warehouse.id,actorUserId:input.user.userId,sourceId:receiptByOrder.get(orderId)!.id,kind:"overseas_receipt",payload:{notes:notes||`境外仓入库单 ${receiptByOrder.get(orderId)!.number} 已完成全部 OUL 扫码并确认货齐`},now:input.now})):[];
+    await env.DB.batch([...statements,...intakeManyCommitStatements(intakeSnapshots,input.now),...photos,...jobs]);
+  }catch(error){console.error("atomic overseas receiving failed",error);return{formError:error instanceof Error&&/图片|照片|预览|缩略图/.test(error.message)?`${error.message}；整批库存未写入，可保留资料重试`:"整批收货失败，本次没有写入任何 OUL；资料、标签或任务可能已变化，请刷新核对后重试"}}
   const warnings:string[]=[];
   if(cargoComplete){
     for(const orderId of orderIds){
       const receipt=receiptByOrder.get(orderId)!;
-      try{await finalizeOverseasReceiving({organizationId:input.user.organizationId,orderId,actorUserId:input.user.userId,actualArrivalAt:input.now,notes:notes||`境外仓入库单 ${receipt.number} 已完成全部 OUL 扫码并确认货齐`})}
-      catch(error){warnings.push(`${rows.find(row=>row.order_id===orderId)?.order_number||orderId} 工作流同步待重试`)}
+      const outcome=await tryPhysicalSyncJob(env.DB,input.user.organizationId,physicalSyncJobId("overseas_receipt",receipt.id));
+      if(outcome.syncPending)warnings.push(`${rows.find(row=>row.order_id===orderId)?.order_number||orderId} 工作流同步待重试`);
     }
   }
   await writeAudit({request:input.request,action:"warehouse.overseas.atomic_receive",resourceType:"warehouse_dispatch",resourceId:dispatchId,organizationId:input.user.organizationId,actorUserId:input.user.userId,metadata:{batchId:input.batchId||null,orderIds,barcodes:expectedCodes,warehouseId:input.warehouse.id,locationId:location.id,receiptResult,exceptionNotes:exceptionNotes||null,warnings}});
   return{success:hasException
     ?`已异常入库 ${expectedCodes.length} 个 OUL，异常处理完成前不会推进运输流程`
     :`已一次性收货 ${expectedCodes.length} 个 OUL并确认货齐，覆盖 ${orderIds.length} 票订单${warnings.length?`；${warnings.join("、")}`:""}`,
-    atomicCompleted:true};
+    atomicCompleted:true,syncOrderIds:warnings.length?orderIds:[]};
 }
 
 function parseCodeList(raw:string){
@@ -1239,224 +1130,6 @@ function parseCodeList(raw:string){
   try{const value=JSON.parse(raw);return Array.isArray(value)?[...new Set(value.map(item=>String(item).trim().toUpperCase()).filter(Boolean))]:[]}catch{return[]}
 }
 
-async function finalizeOverseasReceiving(input: {
-  organizationId: string;
-  orderId: string;
-  actorUserId: string;
-  actualArrivalAt: string;
-  notes: string;
-}): Promise<OverseasReceivingResult> {
-  const batch = await env.DB.prepare(
-    `SELECT b.id,b.batch_number,b.road_status,b.actual_arrival_at
-     FROM transport_batch_orders bo
-     JOIN transport_batches b ON b.id=bo.batch_id AND b.organization_id=bo.organization_id
-     WHERE bo.organization_id=? AND bo.order_id=? AND bo.status!='removed' AND b.status!='cancelled'
-     ORDER BY b.updated_at DESC LIMIT 1`,
-  ).bind(input.organizationId, input.orderId).first<{
-    id: string;
-    batch_number: string;
-    road_status: string;
-    actual_arrival_at: string | null;
-  }>();
-  if (!batch) {
-    const standalone = await confirmOverseasBatchArrival({
-      organizationId: input.organizationId,
-      orderId: input.orderId,
-      actualArrivalAt: input.actualArrivalAt,
-      actorUserId: input.actorUserId,
-      notes: input.notes,
-    });
-    return {
-      completed: true,
-      batchNumber: standalone.batchNumber,
-      remaining: 0,
-      warning: standalone.warning,
-    };
-  }
-  if (batch.road_status === "pickup_completed")
-    return { completed: true, batchNumber: batch.batch_number, remaining: 0 };
-  if (!["outbound_in_transit", "overseas_arrived", "waiting_pickup"].includes(batch.road_status))
-    throw new Error("运输单尚未登记实际出境");
-  const singleOrderWarning = await confirmSingleOrderOverseasArrival({
-    ...input,
-    batchId: batch.id,
-  });
-  if (["overseas_arrived", "waiting_pickup"].includes(batch.road_status)) {
-    const retry = await confirmOverseasBatchArrival({
-      organizationId: input.organizationId,
-      batchId: batch.id,
-      actualArrivalAt: batch.actual_arrival_at || input.actualArrivalAt,
-      actorUserId: input.actorUserId,
-      notes: input.notes,
-    });
-    return {
-      completed: true,
-      batchNumber: batch.batch_number,
-      remaining: 0,
-      warning: [singleOrderWarning, retry.warning].filter(Boolean).join("；") || null,
-    };
-  }
-  const readiness = await env.DB.prepare(
-    `SELECT COUNT(*) total,
-            SUM(CASE WHEN EXISTS(
-              SELECT 1 FROM warehouse_receipts wr
-              JOIN shipments s ON s.id=wr.shipment_id AND s.organization_id=wr.organization_id
-              WHERE wr.organization_id=bo.organization_id AND s.order_id=bo.order_id
-                AND wr.warehouse_id=o.overseas_warehouse_id
-                AND wr.status='completed' AND wr.cargo_complete=1
-            ) THEN 1 ELSE 0 END) ready
-     FROM transport_batch_orders bo
-     JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
-     WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'`,
-  ).bind(input.organizationId, batch.id).first<{ total: number; ready: number | null }>();
-  const total = readiness?.total ?? 0;
-  const ready = readiness?.ready ?? 0;
-  if (!total) throw new Error("运输单没有有效子订单");
-  if (ready < total)
-    return {
-      completed: false,
-      batchNumber: batch.batch_number,
-      remaining: total - ready,
-      warning: singleOrderWarning,
-    };
-
-  const arrival = await confirmOverseasBatchArrival({
-    organizationId: input.organizationId,
-    batchId: batch.id,
-    actualArrivalAt: input.actualArrivalAt,
-    actorUserId: input.actorUserId,
-    notes: input.notes,
-  });
-  return {
-    completed: true,
-    batchNumber: batch.batch_number,
-    remaining: 0,
-    warning: [singleOrderWarning, arrival.warning].filter(Boolean).join("；") || null,
-  };
-}
-
-async function confirmSingleOrderOverseasArrival(input: {
-  organizationId: string;
-  batchId: string;
-  orderId: string;
-  actorUserId: string;
-  actualArrivalAt: string;
-  notes: string;
-}) {
-  const order = await env.DB.prepare(
-    `SELECT o.order_number,o.overseas_warehouse_id,o.customs_clearance_mode,
-            COALESCE(w.name,'境外目的仓') warehouse_name,w.address warehouse_address
-       FROM transport_batch_orders bo
-       JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
-       LEFT JOIN warehouses w ON w.id=o.overseas_warehouse_id AND w.organization_id=o.organization_id
-      WHERE bo.organization_id=? AND bo.batch_id=? AND bo.order_id=? AND bo.status!='removed'`,
-  ).bind(input.organizationId, input.batchId, input.orderId).first<{
-    order_number: string;
-    overseas_warehouse_id: string | null;
-    customs_clearance_mode: string;
-    warehouse_name: string;
-    warehouse_address: string | null;
-  }>();
-  if (!order) throw new Error("当前订单不属于该运输批次");
-  if (!order.overseas_warehouse_id) throw new Error("订单尚未指定境外目的仓");
-  const [customsGate] = await loadOverseasInboundCustomsGates(
-    input.organizationId,
-    [{
-      orderId: input.orderId,
-      orderNumber: order.order_number,
-      customsClearanceMode: order.customs_clearance_mode === "customer" ? "customer" : "company",
-    }],
-  );
-  if (!customsGate || customsGate.blocked)
-    throw new Error(customsGate?.message || "当前订单清关门禁解析失败");
-
-  const now = new Date().toISOString();
-  const location = [order.warehouse_name, order.warehouse_address].filter(Boolean).join(" · ");
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE transport_batch_orders SET status='arrived',updated_at=?
-        WHERE organization_id=? AND batch_id=? AND order_id=? AND status!='removed'`,
-    ).bind(now, input.organizationId, input.batchId, input.orderId),
-    env.DB.prepare(
-      `INSERT INTO overseas_warehouse_operations(
-         id,organization_id,batch_id,order_id,warehouse_id,status,actual_arrival_at,
-         notes,updated_by_user_id,created_at,updated_at
-       ) VALUES(?,?,?,?,?,'arrived',?,?,?,?,?)
-       ON CONFLICT(batch_id,order_id) DO UPDATE SET
-         warehouse_id=COALESCE(overseas_warehouse_operations.warehouse_id,excluded.warehouse_id),
-         status=CASE WHEN overseas_warehouse_operations.status='waiting_arrival' THEN 'arrived' ELSE overseas_warehouse_operations.status END,
-         actual_arrival_at=COALESCE(overseas_warehouse_operations.actual_arrival_at,excluded.actual_arrival_at),
-         notes=COALESCE(excluded.notes,overseas_warehouse_operations.notes),
-         updated_by_user_id=excluded.updated_by_user_id,updated_at=excluded.updated_at`,
-    ).bind(
-      crypto.randomUUID(),
-      input.organizationId,
-      input.batchId,
-      input.orderId,
-      order.overseas_warehouse_id,
-      input.actualArrivalAt,
-      input.notes || null,
-      input.actorUserId,
-      now,
-      now,
-    ),
-    env.DB.prepare(
-      `UPDATE shipments SET status='in_transit',current_location=?,updated_at=?
-        WHERE organization_id=? AND order_id=? AND status!='cancelled'`,
-    ).bind(location || "境外目的仓", now, input.organizationId, input.orderId),
-    env.DB.prepare(
-      `INSERT INTO order_tracking_milestones(
-         id,organization_id,order_id,milestone_code,milestone_name,event_at,location,notes,
-         visible_to_customer,created_by_user_id,created_at
-       ) SELECT ?,?,?,'station_arrived','到达境外目的仓',?,?,?,1,?,?
-         WHERE NOT EXISTS(
-           SELECT 1 FROM order_tracking_milestones
-           WHERE organization_id=? AND order_id=? AND milestone_code='station_arrived'
-         )`,
-    ).bind(
-      crypto.randomUUID(),
-      input.organizationId,
-      input.orderId,
-      input.actualArrivalAt,
-      location || "境外目的仓",
-      input.notes || null,
-      input.actorUserId,
-      now,
-      input.organizationId,
-      input.orderId,
-    ),
-    env.DB.prepare(
-      `UPDATE order_module_instances
-          SET status='completed',current_step_code='arrived',current_step_name='到达境外仓',
-              progress_percent=100,started_at=COALESCE(started_at,?),completed_at=COALESCE(completed_at,?),
-              blocking_reason=NULL,updated_at=?
-        WHERE organization_id=? AND order_id=? AND module_code='tracking' AND enabled=1`,
-    ).bind(now, now, now, input.organizationId, input.orderId),
-    env.DB.prepare(
-      `UPDATE order_module_instances
-          SET status='in_progress',current_step_code='arrived',current_step_name='等待系统自动通知客户',
-              progress_percent=MAX(progress_percent,25),started_at=COALESCE(started_at,?),
-              blocking_reason=NULL,updated_at=?
-        WHERE organization_id=? AND order_id=? AND module_code='overseas_warehouse' AND enabled=1
-          AND status!='completed'`,
-    ).bind(now, now, input.organizationId, input.orderId),
-  ]);
-
-  try {
-    await automaticallyNotifyOverseasArrival({
-      organizationId: input.organizationId,
-      orderId: input.orderId,
-      actorUserId: input.actorUserId,
-      occurredAt: input.actualArrivalAt,
-    });
-    await syncOrderWorkflowSnapshot(input.organizationId, input.orderId);
-    return null;
-  } catch (error) {
-    await syncOrderWorkflowSnapshot(input.organizationId, input.orderId);
-    const reason = error instanceof Error ? error.message : "客户通知暂未完成";
-    return `本票已到仓并推进，客户通知待重试：${reason}`;
-  }
-}
 
 export default function WarehouseInbound({
   loaderData,
@@ -1525,6 +1198,7 @@ export default function WarehouseInbound({
         </div>
       </header>
       <ActionToast data={actionData} />
+      {actionData&&"syncOrderIds"in actionData&&actionData.syncOrderIds?.map(orderId=><PhysicalSyncPanel key={orderId} site="warehouse" orderId={orderId} initiallyOpen/>)}
       {loaderData.batchContext && (
         <section className={`alert ${loaderData.batchContext.error ? "error" : "info"}`} aria-label="PZ 配载单收货范围">
           <strong>{loaderData.batchContext.number} · 整批收货范围</strong>
@@ -1554,7 +1228,7 @@ export default function WarehouseInbound({
           { name: "returnTo", value: loaderData.returnTo },
         ]}
       />}
-      {canOperate&&loaderData.atomicScopePackages.length>0&&!(actionData&&"atomicCompleted" in actionData&&actionData.atomicCompleted)&&<Form method="post" className="panel atomic-oul-receiving-panel">
+      {canOperate&&loaderData.atomicScopePackages.length>0&&!(actionData&&"atomicCompleted" in actionData&&actionData.atomicCompleted)&&<Form method="post" encType="multipart/form-data" className="panel atomic-oul-receiving-panel">
         <input type="hidden" name="intent" value="atomic_overseas_receive"/>
         <input type="hidden" name="dispatchId" value={loaderData.atomicDispatchId||""}/>
         <input type="hidden" name="scannedOulCodes" value={JSON.stringify(atomicScans)}/>
@@ -1573,12 +1247,14 @@ export default function WarehouseInbound({
             exceptionFooter="填写异常 OUL、短少数量、破损或错货情况"
           />
           {notesPolicy.isActive&&<label className="field span-2"><span>收货备注{acceptanceRequiredMarker(notesPolicy)}</span><textarea name="notes" rows={3} required={notesPolicy.isRequired} placeholder="车辆、到仓时间、卸货或现场情况"/></label>}
+          <SitePhotoPicker key={loaderData.atomicDispatchId} limits={loaderData.photoLimits} stage="overseas_receipt" scopeLabel="本次 OUL 收货（逐张选择适用订单）" orders={[...new Map(loaderData.atomicScopePackages.map(item=>[item.order_id,{orderId:item.order_id,orderNumber:item.order_number,customerName:item.customer_name}])).values()]}/>
           <div className="atomic-oul-footer"><span>未扫齐或未确认验收结果时不能提交；服务器会再次核对完整范围。</span><button className="primary warehouse-primary" disabled={busy||atomicScans.length!==loaderData.atomicScopePackages.length||!receiptResult}>{busy?"正在整批入库…":receiptResult==="exception"?"确认异常入库":"全部扫齐并确认货齐"}</button></div>
         </section>
       </Form>}
       {showReceivingWorkbench && selectedShipmentRecord && scannedPackageRecord && canOperate && (
         <Form
           method="post"
+          encType="multipart/form-data"
           className="acceptance-workbench no-print"
           onInput={(event) => synchronizeWarehouseVolumeRow(event.target)}
         >
@@ -1624,6 +1300,7 @@ export default function WarehouseInbound({
               exceptionFooter="填写短少、破损、错货、超差等具体情况"
             />
             {notesPolicy.isActive && <label className="field span-2"><span>收货备注{acceptanceRequiredMarker(notesPolicy)}</span><textarea name="notes" rows={2} required={notesPolicy.isRequired} placeholder="本次到货车辆、现场情况等"/></label>}
+            <SitePhotoPicker key={`${selectedShipmentRecord.id}:${scannedPackageRecord.barcode}`} limits={loaderData.photoLimits} stage={loaderData.isOverseasWarehouse?"overseas_receipt":"domestic_receipt"} scopeLabel="本次扫码收货"/>
             <button className="primary acceptance-submit" disabled={busy || !loaderData.locations.length}>{busy ? "正在验收入库…" : "确认验收并扫码入库"}</button>
           </section>
         </Form>
@@ -1656,93 +1333,6 @@ function generateCode(prefix: string) {
   return `${prefix}-${Date.now().toString(36).toUpperCase()}-${crypto.randomUUID().slice(0, 5).toUpperCase()}`;
 }
 
-async function ensureVerifiedReceivingBatch(input: {
-  organizationId: string;
-  shipmentId: string;
-  locationId: string;
-  actorUserId: string;
-  now: string;
-}) {
-  const existing = await env.DB.prepare(
-    `SELECT id
-       FROM warehouse_sorting_batches
-      WHERE organization_id=? AND shipment_id=? AND status!='cancelled'
-      ORDER BY created_at DESC
-      LIMIT 1`,
-  )
-    .bind(input.organizationId, input.shipmentId)
-    .first<{ id: string }>();
-  const batchId = existing?.id ?? crypto.randomUUID();
-  const statements: D1PreparedStatement[] = [];
-
-  if (existing) {
-    statements.push(
-      env.DB.prepare(
-        `UPDATE warehouse_sorting_batches
-            SET target_location_id=?,status='verified',verified_by_user_id=?,
-                verified_at=COALESCE(verified_at,?),updated_at=?
-          WHERE id=? AND organization_id=?`,
-      ).bind(
-        input.locationId,
-        input.actorUserId,
-        input.now,
-        input.now,
-        batchId,
-        input.organizationId,
-      ),
-    );
-  } else {
-    statements.push(
-      env.DB.prepare(
-        `INSERT INTO warehouse_sorting_batches(
-           id,organization_id,batch_number,shipment_id,target_location_id,status,notes,
-           created_by_user_id,verified_by_user_id,created_at,updated_at,verified_at
-         ) VALUES(?,?,?,?,?,'verified',?,?,?,?,?,?)`,
-      ).bind(
-        batchId,
-        input.organizationId,
-        generateCode("SORT"),
-        input.shipmentId,
-        input.locationId,
-        "系统根据仓库确认货齐自动生成",
-        input.actorUserId,
-        input.actorUserId,
-        input.now,
-        input.now,
-        input.now,
-      ),
-    );
-  }
-
-  const packages = await env.DB.prepare(
-    `SELECT id
-       FROM warehouse_packages
-      WHERE organization_id=? AND shipment_id=? AND status!='cancelled'`,
-  )
-    .bind(input.organizationId, input.shipmentId)
-    .all<{ id: string }>();
-  for (const item of packages.results) {
-    statements.push(
-      env.DB.prepare(
-        `INSERT OR IGNORE INTO warehouse_sorting_items(
-           id,organization_id,batch_id,package_id,status,sorted_by_user_id,
-           verified_by_user_id,sorted_at,verified_at,notes
-         ) VALUES(?,?,?,?,'verified',?,?,?,?,?)`,
-      ).bind(
-        crypto.randomUUID(),
-        input.organizationId,
-        batchId,
-        item.id,
-        input.actorUserId,
-        input.actorUserId,
-        input.now,
-        input.now,
-        "仓库确认货齐，系统自动纳入装车范围",
-      ),
-    );
-  }
-  await env.DB.batch(statements);
-}
 export function meta() {
   return [{ title: "扫码收货 | International TMS" }];
 }

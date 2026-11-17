@@ -3,6 +3,7 @@ import {
   type BatchCostAllocationActionPolicy,
   type BatchCostAllocationGateRow,
 } from "./batch-cost-allocation-action-policy";
+import { querySnapshotGuards } from "./query-snapshot-guard.server";
 
 const targetFieldStepSql = `(SELECT field.step_key
   FROM workflow_instance_fields field
@@ -11,13 +12,7 @@ const targetFieldStepSql = `(SELECT field.step_key
     AND field.field_key='cost_allocation'
   ORDER BY field.sort_order,field.id LIMIT 1)`;
 
-/** Read one authoritative, organization-scoped snapshot for every mounted order. */
-export async function loadBatchCostAllocationActionPolicy(input: {
-  db: D1Database;
-  organizationId: string;
-  batchId: string;
-}): Promise<{ rows: BatchCostAllocationGateRow[]; policy: BatchCostAllocationActionPolicy }> {
-  const result = await input.db.prepare(`SELECT
+const snapshotSql = `SELECT
       bo.order_id,o.order_number,o.business_type,o.status order_status,
       b.status batch_status,b.approval_status batch_approval_status,
       b.actual_departure_at batch_actual_departure_at,
@@ -121,11 +116,23 @@ export async function loadBatchCostAllocationActionPolicy(input: {
       ON control.organization_id=o.organization_id AND control.order_id=o.id
      AND control.direction='payable'
     WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
-    ORDER BY bo.sequence_no,bo.order_id`)
+    ORDER BY bo.sequence_no,bo.order_id`;
+
+/** Read one authoritative, organization-scoped snapshot for every mounted order. */
+export async function loadBatchCostAllocationActionPolicy(input: {
+  db: D1Database;
+  organizationId: string;
+  batchId: string;
+}): Promise<{ rows: BatchCostAllocationGateRow[]; policy: BatchCostAllocationActionPolicy }> {
+  const result = await input.db.prepare(snapshotSql)
     .bind(input.organizationId, input.batchId)
     .all<BatchCostAllocationGateRow>();
   const policy = resolveBatchCostAllocationActionPolicy(result.results);
   return { rows: result.results, policy };
+}
+
+export function batchCostAllocationCommitGuards(db:D1Database,organizationId:string,batchId:string,rows:BatchCostAllocationGateRow[],now:string){
+  return querySnapshotGuards(db,snapshotSql,[organizationId,batchId],rows,now);
 }
 
 export async function assertBatchCostAllocationActionOpen(input: {

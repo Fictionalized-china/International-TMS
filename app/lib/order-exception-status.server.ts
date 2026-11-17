@@ -1,16 +1,17 @@
 import { env } from "cloudflare:workers";
 import { chunkD1Values, d1Placeholders } from "./d1-bindings";
 
-export async function synchronizeOrderExceptionStatuses(
+export function orderExceptionStatusStatements(
+  db:D1Database,
   organizationId:string,
   orderIds:string[],
   now=new Date().toISOString(),
 ) {
   const unique=[...new Set(orderIds.filter(Boolean))];
-  let changed=0;
+  const statements:D1PreparedStatement[]=[];
   for(const chunk of chunkD1Values(unique,2)){
     const placeholders=d1Placeholders(chunk.length);
-    const result=await env.DB.prepare(
+    statements.push(db.prepare(
       `UPDATE transport_orders AS target
        SET exception_status=CASE
          WHEN EXISTS(
@@ -46,8 +47,14 @@ export async function synchronizeOrderExceptionStatuses(
        END,
        updated_at=?
        WHERE target.organization_id=? AND target.id IN (${placeholders})`,
-    ).bind(now,organizationId,...chunk).run();
-    changed+=Number(result.meta?.changes||0);
+    ).bind(now,organizationId,...chunk));
   }
-  return changed;
+  return statements;
+}
+
+export async function synchronizeOrderExceptionStatuses(organizationId:string,orderIds:string[],now=new Date().toISOString()){
+  const statements=orderExceptionStatusStatements(env.DB,organizationId,orderIds,now);
+  if(!statements.length)return 0;
+  const result=await env.DB.batch(statements);
+  return result.reduce((sum,row)=>sum+Number(row.meta?.changes??0),0);
 }

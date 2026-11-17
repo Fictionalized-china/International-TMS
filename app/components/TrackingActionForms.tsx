@@ -3,16 +3,18 @@ import { Form, useNavigation } from "react-router";
 import { Modal } from "./Modal";
 import { DateTimeSelect } from "./DateTimeSelect";
 import { dailyTrackingKindLabels, dailyTrackingKinds } from "../lib/daily-tracking";
+import {SitePhotoPicker} from "./SitePhotos";
 
 export function DailyTrackingForm({orderId,orderNumber,requestId,closeSignal}:{orderId:string;orderNumber:string;requestId:string;closeSignal:unknown}) {
   const busy=useNavigation().state!=="idle";
   return <Modal title={`每日运踪 · ${orderNumber}`} triggerLabel="登记每日运踪" triggerClassName="text-button" closeSignal={closeSignal}>
-    <Form method="post" className="form-grid"><input type="hidden" name="intent" value="daily"/><input type="hidden" name="orderId" value={orderId}/><input type="hidden" name="requestId" value={`${requestId}:${orderId}`}/>
+    <Form method="post" encType="multipart/form-data" className="form-grid"><input type="hidden" name="intent" value="daily"/><input type="hidden" name="orderId" value={orderId}/><input type="hidden" name="requestId" value={`${requestId}:${orderId}`}/>
       <label>动态类型<select name="eventKind">{dailyTrackingKinds.map(kind=><option key={kind} value={kind}>{dailyTrackingKindLabels[kind]}</option>)}</select></label>
       <label>发生时间（北京时间）<DateTimeSelect name="eventAt" required defaultValue={new Date(Date.now()+8*3600*1000).toISOString().slice(0,16)}/></label>
       <label>当前地点<input name="location" required maxLength={200}/></label><label>车号 / 换装车号<input name="vehicleReference" maxLength={100}/></label>
       <label className="full">运踪说明 / 排队位置<textarea name="notes" required maxLength={2000}/></label>
       <label><input type="checkbox" name="visible" value="1" defaultChecked/>同步到客户运踪</label>
+      <SitePhotoPicker scopeLabel="本次提货或运踪节点（照片始终同步客户，独立于文字可见设置）"/>
       <p>此登记不推进主流程、不替代实际出境或仓库扫码。相同状态可每日重复登记。</p><button className="primary" disabled={busy}>保存运踪</button>
     </Form>
   </Modal>;

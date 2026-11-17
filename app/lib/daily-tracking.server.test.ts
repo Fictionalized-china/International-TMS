@@ -7,6 +7,7 @@ vi.mock("cloudflare:workers",()=>({env:{}}));
 import { recordDailyTracking } from "./daily-tracking.server";
 import { dailyTrackingAccess } from "./daily-tracking";
 import { defaultBusinessProcessPolicy } from "./business-process-policy";
+import { createIntakeRuleBinding } from "./order-intake-rule";
 import { dispatchIsDue,dispatchTaskAccess } from "./dispatch-tasks";
 let sql:DatabaseSync,db:D1Database;
 const current:SessionUser={sessionId:"s",organizationName:"测试",email:"tracker@test.local",displayName:"运踪",site:"admin",departmentId:null,departmentCode:null,warehouseIds:[],regionCountryCodes:[],userId:"tracker",organizationId:"org",positionCode:"TRACKING",permissions:["tracking.daily.manage"],roleCodes:[],dataScope:"company"};
@@ -22,9 +23,18 @@ beforeEach(()=>{
     CREATE TABLE role_permissions(role_id TEXT,permission_code TEXT,UNIQUE(role_id,permission_code));CREATE TABLE position_portal_settings(position_id TEXT,business_data_scope TEXT);CREATE TABLE positions(id TEXT,code TEXT);
     INSERT INTO transport_orders VALUES('order','org','in_execution');INSERT INTO shipments VALUES('shipment','org','order','booked',NULL,NULL,'2026-09-01','2026-09-01');`);
   sql.exec(readFileSync(new URL("../../migrations/0170_daily_tracking_and_dispatch.sql",import.meta.url),"utf8"));db=sqliteD1(sql);
+  for(const column of ["customer_id","business_type","transport_mode","salesperson_user_id","quote_commercial_user_id","quote_commercial_name_snapshot","origin_country","origin_state","origin_city","destination_country","destination_state","destination_city","exit_port","transit_locations","customs_location","domestic_agent","declared_quantity_unit","intake_operations_json"])sql.exec(`ALTER TABLE transport_orders ADD COLUMN ${column} TEXT`);
+  sql.exec("CREATE TABLE mutation_commit_guards(id TEXT PRIMARY KEY,valid INTEGER NOT NULL,created_at TEXT)");
 });
 afterEach(()=>sql.close());
 describe("independent daily tracking",()=>{
+  it("cannot use first pickup to bypass a bound red-intake requirement",async()=>{
+    sql.exec("CREATE TABLE order_cargo_items(id TEXT,organization_id TEXT,order_id TEXT,line_no INT,cargo_name_cn TEXT,declared_quantity INT,declared_unit TEXT,package_count INT,pieces_per_package INT,gross_weight_per_package_kg REAL,volume_per_package_cbm REAL);CREATE TABLE business_expenses(id TEXT,organization_id TEXT,order_id TEXT,direction TEXT,stage TEXT,charge_code TEXT,charge_name TEXT,counterparty_name TEXT,currency TEXT,quantity REAL,unit_price REAL,amount REAL,exchange_rate REAL,base_amount REAL,created_at TEXT);CREATE TABLE order_services(id TEXT,organization_id TEXT,order_id TEXT,service_code TEXT,status TEXT)");
+    sql.prepare("UPDATE transport_orders SET intake_operations_json=?").run(JSON.stringify({intakeRule:createIntakeRuleBinding(defaultBusinessProcessPolicy)}));
+    await expect(recordDailyTracking(db,input())).rejects.toThrow("开单必填资料尚未补齐");
+    expect(sql.prepare("SELECT COUNT(*) n FROM shipment_events").get()?.n).toBe(0);
+    expect(sql.prepare("SELECT actual_pickup_at FROM shipments").get()?.actual_pickup_at).toBeNull();
+  });
   it("publishes full notes and vehicle; allows repeated daily locations without advancing workflow",async()=>{
     await recordDailyTracking(db,input());
     const first={...input(),requestId:"request-two-123",eventKind:"location",eventAt:"2026-09-02T01:00:00Z"};await recordDailyTracking(db,first);

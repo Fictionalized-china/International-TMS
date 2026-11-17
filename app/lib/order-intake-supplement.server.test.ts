@@ -1,7 +1,7 @@
 import {afterEach,beforeEach,describe,expect,it,vi} from "vitest";
 import {env} from "cloudflare:workers";
 import {meetingFixture} from "./meeting-integration-fixture";
-import {loadOrderIntakeSupplement,saveOrderIntakeSupplement} from "./order-intake-supplement.server";
+import {loadOrderIntakeSupplement,saveOrderIntakeSupplement,supplementMissingOrderServices} from "./order-intake-supplement.server";
 vi.mock("cloudflare:workers",()=>({env:{}}));
 let fixture:Awaited<ReturnType<typeof meetingFixture>>;
 beforeEach(async()=>{fixture=await meetingFixture();Object.assign(env,{DB:fixture.db});});
@@ -9,6 +9,33 @@ afterEach(()=>fixture?.database.close());
 function body(){const form=new FormData();form.set("version",fixture.now);form.set("reason","核对原始委托后补录");form.set("intake_headCarrier","原委托头程承运人");return form;}
 const save=(form=body(),actor="operation")=>saveOrderIntakeSupplement(fixture.actors.get(actor)!,"order",form);
 describe("missing-only order intake remediation",()=>{
+  function services(codes=['pickup']){const form=body();form.set('serviceReason','对照原始委托核实服务');for(const code of codes)form.append('missingServiceCode',code);return form;}
+  it('repairs absent historical services without altering frozen modules, stock or money',async()=>{
+    const modules=fixture.database.prepare('SELECT * FROM order_module_instances ORDER BY id').all();
+    expect((await loadOrderIntakeSupplement(fixture.actors.get('owner')!,'order')).servicesMissing).toBe(true);
+    await supplementMissingOrderServices(fixture.actors.get('operation')!,'order',services());
+    expect(fixture.database.prepare('SELECT service_code,service_name FROM order_services').get()).toEqual({service_code:'pickup',service_name:'提货'});
+    expect(fixture.database.prepare('SELECT * FROM order_module_instances ORDER BY id').all()).toEqual(modules);
+    expect((await loadOrderIntakeSupplement(fixture.actors.get('owner')!,'order')).servicesMissing).toBe(false);
+    const repeated=services();repeated.set('version',String(fixture.database.prepare("SELECT updated_at FROM transport_orders WHERE id='order'").get()?.updated_at));
+    await expect(supplementMissingOrderServices(fixture.actors.get('owner')!,'order',repeated)).rejects.toThrow('已有委托服务');
+    expect(fixture.database.prepare('SELECT COUNT(*) n FROM business_expenses').get()?.n).toBe(0);
+  });
+  it('does not activate missing customs/overseas branches by changing service facts',async()=>{
+    await expect(supplementMissingOrderServices(fixture.actors.get('owner')!,'order',services(['customs']))).rejects.toThrow('未启用');
+    expect(fixture.database.prepare('SELECT COUNT(*) n FROM order_services').get()?.n).toBe(0);
+  });
+  it.each(['authority','responsible','competing-services'])('rolls back historical service remediation after %s changes',async change=>{
+    const original=fixture.db.batch.bind(fixture.db);vi.spyOn(fixture.db,'batch').mockImplementationOnce(async statements=>{
+      if(change==='authority')fixture.database.exec("UPDATE users SET status='disabled' WHERE id='operation'");
+      if(change==='responsible')fixture.database.exec("UPDATE order_module_instances SET assignee_user_id=NULL WHERE assignee_user_id='operation'");
+      if(change==='competing-services')fixture.database.prepare("INSERT INTO order_services(id,organization_id,order_id,service_code,service_name,created_at) VALUES('other','org','order','other','其他服务',?)").run(fixture.now);
+      return original(statements);
+    });
+    try{await expect(supplementMissingOrderServices(fixture.actors.get('operation')!,'order',services())).rejects.toThrow('本次未保存');}finally{vi.restoreAllMocks();}
+    expect(fixture.database.prepare("SELECT COUNT(*) n FROM order_services WHERE service_code='pickup'").get()?.n).toBe(0);
+    expect(fixture.database.prepare("SELECT COUNT(*) n FROM audit_logs WHERE action='order.intake.services.supplement'").get()?.n).toBe(0);
+  });
   it("does not invent supplemental facts from the empty controls of a partially filled form",async()=>{
     const form=body();for(const key of["tailCarrier","headVehicleCount","tailVehicleCount","plannedDeparture","plannedArrival","businessAssistant","customerService"])form.set(`intake_${key}`,"");
     expect(await save(form)).toMatchObject({success:expect.stringContaining("已补录 1 项")});

@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { prepareOrderIntakeAdvance,intakeGateCommitStatements,type IntakeGateSnapshot } from "../lib/order-intake-gate.server";
-import { Form, Link, redirect, useFetcher, useNavigate, useNavigation } from "react-router";
+import { Form, Link, redirect, useFetcher, useNavigate, useNavigation,useLocation } from "react-router";
 import { useEffect, useRef, useState } from "react";
 import type { Route } from "./+types/warehouse.acceptance";
 import {
@@ -8,21 +8,23 @@ import {
   WarehouseReceivingOrderStrip,
 } from "../components/WarehouseReceivingFlow";
 import { ActionToast } from "../components/ActionToast";
+import { SitePhotoPicker } from "../components/SitePhotos";
+import { PhysicalSyncPanel } from "../components/PhysicalSyncPanel";
+import { physicalSyncJobStatement,physicalSyncJobId,tryPhysicalSyncJob } from "../lib/physical-operation-sync.server";
+import { prepareSitePhotoStatements,sitePhotoLimits } from "../lib/order-site-photos.server";
+import { loadBusinessProcessPolicy } from "../lib/business-process-policy.server";
 import { requireSessionUser } from "../lib/auth.server";
 import { valueOf } from "../lib/validation";
 import { loadWarehouseContext } from "../lib/warehouse-context.server";
 import { requireWarehouseAssignment } from "../lib/warehouse-access.server";
 import { nextDocumentNumber } from "../lib/documents.server";
 import {
-  calculateDomesticWarehouseDifference,
   shouldCreateWarehouseDifference,
 } from "../lib/warehouse-actual";
+import { domesticReceiptComparison } from "../lib/domestic-receipt-comparison";
+import { changedRowGuard, predicateGuard } from "../lib/mutation-guard.server";
+import { chunkD1Values, d1Placeholders } from "../lib/d1-bindings";
 import { loadOperationalRules } from "../lib/operational-rules.server";
-import { recordWarehouseProgress } from "../lib/warehouse-progress.server";
-import { recordWorkflowEvent } from "../lib/business-workflow.server";
-import { syncOrderWorkflowSnapshot } from "../lib/order-modules.server";
-import { writeAudit } from "../lib/audit.server";
-import { synchronizeOrderExceptionStatuses } from "../lib/order-exception-status.server";
 import { loadOrderModuleWorkflowFields } from "../lib/workflow-fields.server";
 import { canOperateWarehouseUi } from "../lib/warehouse-ui-access";
 import { loadWarehousePhysicalWorkflowAccess } from "../lib/warehouse-workflow-access.server";
@@ -274,6 +276,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     receivingSessionId,
     scannedInboundMarks,
     workflowFields,
+    photoLimits:sitePhotoLimits(await loadBusinessProcessPolicy(user.organizationId)),
     locations: locations.results,
     recentLabels: recentLabels.results,
     receiptId,
@@ -382,6 +385,8 @@ export async function action({ request }: Route.ActionArgs) {
       ORDER BY opened_at DESC LIMIT 1`,
   ).bind(user.organizationId,warehouse.id,order.id).first<{id:string}>();
   if(!receivingSession)return{formError:"当前订单还没有扫码记录，请先使用页面顶部的仓库统一扫描栏扫描入仓唛头"};
+  if(valueOf(form,"receivingSessionId")!==receivingSession.id)
+    return{formError:"收货会话已变化或已提交，请刷新查看本次待收包裹，不要重复登记重量"};
   const persistedScans=await env.DB.prepare(
     `SELECT mark.package_code
        FROM warehouse_inbound_order_receiving_items item
@@ -390,6 +395,8 @@ export async function action({ request }: Route.ActionArgs) {
       ORDER BY mark.package_sequence,mark.id`,
   ).bind(user.organizationId,receivingSession.id).all<{package_code:string}>();
   const scannedMarkCodes=persistedScans.results.map(item=>item.package_code.toUpperCase());
+  if(valueOf(form,"scannedPackageCodes").split("|").filter(Boolean).sort().join("|")!==[...scannedMarkCodes].sort().join("|"))
+    return{formError:"本次扫描包裹已变化，请刷新核对本次重量后再入库"};
 
   const workflowFields = await loadOrderModuleWorkflowFields(
     user.organizationId,
@@ -557,6 +564,7 @@ export async function action({ request }: Route.ActionArgs) {
   }
 
   const receiptId = crypto.randomUUID();
+  const receiptEventId = crypto.randomUUID();
   const receiptNumber = generateCode("IN");
   const totalPackages = inventoryRows.reduce((sum, item) => sum + (item.actualPackages ?? 0), 0);
   const totalPieces = inventoryRows.reduce((sum, item) => sum + item.actualPieces, 0);
@@ -575,40 +583,43 @@ export async function action({ request }: Route.ActionArgs) {
        FROM warehouse_receipts WHERE organization_id=? AND shipment_id=? AND warehouse_id=? AND status='completed'`,
   ).bind(user.organizationId, shipmentId, warehouse.id).first<{ packages: number; pieces: number; weight_kg: number; volume_cbm: number }>();
   const cumulative = {
-    packages: (previous?.packages ?? 0) + totalPackages,
-    pieces: (previous?.pieces ?? 0) + totalPieces,
-    weightKg: (previous?.weight_kg ?? 0) + totalWeight,
-    volumeCbm: (previous?.volume_cbm ?? 0) + totalVolume,
+    packages: Number(previous?.packages ?? 0) + totalPackages,
+    pieces: Number(previous?.pieces ?? 0) + totalPieces,
+    weightKg: Number(previous?.weight_kg ?? 0) + totalWeight,
+    volumeCbm: Number(previous?.volume_cbm ?? 0) + totalVolume,
   };
   const piecesComparable = false;
   const weightComparable = policies.actualWeight.isActive &&
     receivedRows.every((item) => item.actualWeight !== null);
   const operationalRules = await loadOperationalRules(user.organizationId);
-  const difference = calculateDomesticWarehouseDifference(
-    {
-      pieces: piecesComparable ? expected.pieces : cumulative.pieces,
-      weightKg: weightComparable ? expected.weightKg : cumulative.weightKg,
-      volumeCbm: expected.volumeCbm,
-    },
-    cumulative,
-    operationalRules["warehouse.receipt_difference_threshold_percent"],
-  );
-  const packageMismatch = cumulative.packages !== expected.packages;
+  // Historical optional/hidden weights were stored as zero (unknown), not as
+  // an observed loss. Compare measured arrivals only; do not invent old scales.
+  const historicalWeights=await env.DB.prepare(`SELECT COALESCE(SUM(ri.actual_weight_kg),0) actual,
+    COALESCE(SUM(ri.actual_packages * c.gross_weight_per_package_kg),0) declared
+    FROM warehouse_receipt_items ri JOIN warehouse_receipts r ON r.id=ri.receipt_id AND r.organization_id=ri.organization_id
+    JOIN order_cargo_items c ON c.id=ri.cargo_item_id AND c.organization_id=ri.organization_id
+    WHERE ri.organization_id=? AND ri.order_id=? AND r.warehouse_id=? AND r.status='completed' AND ri.actual_weight_kg>0`)
+    .bind(user.organizationId,order.id,warehouse.id).first<{actual:number;declared:number}>();
+  const arrivedDeclaredWeightKg = Number(historicalWeights?.declared??0)+receivedRows.filter(item=>item.actualWeight!==null).reduce((sum,item) => sum +
+    item.actualPackages * Number(item.gross_weight_per_package_kg),0);
+  const comparableActualWeightKg=Number(historicalWeights?.actual??0)+receivedRows.filter(item=>item.actualWeight!==null).reduce((sum,item)=>sum+Number(item.actualWeight),0);
+  const {difference,packageMismatch,acceptanceComparison} = domesticReceiptComparison({
+    plannedPackages:expected.packages,cumulativePackages:cumulative.packages,
+    cumulativeWeightKg:comparableActualWeightKg,cumulativePieces:cumulative.pieces,cumulativeVolumeCbm:cumulative.volumeCbm,
+    arrivedDeclaredWeightKg,compareWeight:weightComparable,
+    thresholdPercent:operationalRules["warehouse.receipt_difference_threshold_percent"],
+  });
   const piecesMismatch = piecesComparable && cumulative.pieces !== expected.pieces;
-  const acceptanceComparison = {
-    actualPackages: cumulative.packages,
-    expectedPackages: expected.packages,
-    piecesMismatch,
-    requiresFeeConfirmation: difference.requiresFeeConfirmation,
-  };
   if (result === "auto") {
     result = automaticWarehouseAcceptanceResult(acceptanceComparison);
     if (result === "exception") {
       exceptionNotes ||= "系统已隐藏人工货齐选择，实收超量或差异较大，已自动转为异常入库";
     }
   }
-  if(result==="partial")
-    return{formError:`本单不支持分批入库；请继续扫描剩余 ${Math.max(0,expected.packages-cumulative.packages)} 包，或按实际情况选择“异常入库”`};
+  if(result==="partial" && cumulative.packages===expected.packages)
+    return{formError:"计划包裹已全部扫齐，请选择“订单货齐”；有货况问题请选择“异常入库”"};
+  if(result==="partial" && difference.requiresFeeConfirmation)
+    return{formError:`已到货包装可比实重差异 ${difference.maxPercent.toFixed(1)}%，请选择“异常入库”并填写说明；未到货包装不计入本次重量核对。`};
   if(supplementalMarks.length){
     result="exception";
     exceptionNotes||=`超计划收货 ${supplementalMarks.length} 包，已生成补录唛头，等待操作岗确认差异`;
@@ -647,7 +658,16 @@ export async function action({ request }: Route.ActionArgs) {
   }
   const effectiveNotes = policies.notes.isActive ? notes : "";
   const locationText = `${location.warehouse_name} / ${location.zone_name} / ${location.name} (${location.code})`;
-  const statements: D1PreparedStatement[] = [...bootstrap];
+  const statements: D1PreparedStatement[] = [
+    ...intakeGateCommitStatements(intakeSnapshot,now),
+    predicateGuard(env.DB,`EXISTS(SELECT 1 FROM warehouse_inbound_order_receiving_sessions WHERE id=? AND organization_id=? AND warehouse_id=? AND order_id=? AND status='scanning')`,[receivingSession.id,user.organizationId,warehouse.id,order.id],now),
+    predicateGuard(env.DB,`(SELECT COUNT(*) FROM warehouse_inbound_order_receiving_items WHERE organization_id=? AND order_receiving_session_id=?)=?`,[user.organizationId,receivingSession.id,scannedMarks.length],now),
+    predicateGuard(env.DB,`EXISTS(SELECT 1 FROM transport_orders WHERE organization_id=? AND id=? AND status IN ('confirmed','in_execution') AND planned_inbound_package_count=?)`,[user.organizationId,order.id,order.planned_inbound_package_count],now),
+    ...bootstrap,
+  ];
+  for(const marks of chunkD1Values(scannedMarks.map(mark=>mark.id),4)){
+    statements.push(predicateGuard(env.DB,`(SELECT COUNT(*) FROM warehouse_inbound_order_receiving_items WHERE organization_id=? AND order_receiving_session_id=? AND inbound_mark_id IN (${d1Placeholders(marks.length)}))=?`,[user.organizationId,receivingSession.id,...marks,marks.length],now));
+  }
   for(const mark of supplementalMarks){
     statements.push(env.DB.prepare(
       `INSERT INTO order_cargo_packages(
@@ -683,6 +703,7 @@ export async function action({ request }: Route.ActionArgs) {
           SET status='confirmed',confirmed_receipt_id=?,confirmed_by_user_id=?,confirmed_at=?,updated_at=?
         WHERE id=? AND organization_id=? AND warehouse_id=? AND order_id=? AND status='scanning'`,
     ).bind(receiptId,user.userId,now,now,receivingSession.id,user.organizationId,warehouse.id,order.id),
+    changedRowGuard(env.DB,now),
   );
 
   const createdPackages: { id: string; barcode: string }[] = [];
@@ -704,8 +725,8 @@ export async function action({ request }: Route.ActionArgs) {
         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       ).bind(
         crypto.randomUUID(),user.organizationId,receiptId,order.id,item.id,
-        item.package_count,item.package_count * item.pieces_per_package,
-        item.package_count * item.gross_weight_per_package_kg,item.package_count * item.volume_per_package_cbm,
+        actualPackages,actualPackages * item.pieces_per_package,
+        actualPackages * item.gross_weight_per_package_kg,actualPackages * item.volume_per_package_cbm,
         actualPackages,actualPieces,actualWeight,actualVolume,actualLength,actualWidth,actualHeight,
         result === "exception" ? "exception" : "normal",item.itemNotes || null,now,now,
       ),
@@ -741,6 +762,7 @@ export async function action({ request }: Route.ActionArgs) {
               SET status='received',received_at=?,received_warehouse_id=?,received_location_id=?,received_by_user_id=?
             WHERE id=? AND organization_id=? AND status='planned' AND is_active=1`,
         ).bind(now,warehouse.id,location.id,user.userId,inboundMark.id,user.organizationId),
+        changedRowGuard(env.DB,now),
         env.DB.prepare(
           `INSERT INTO warehouse_package_movements(
             id,organization_id,package_id,operation_type,from_location_id,to_location_id,
@@ -774,7 +796,7 @@ export async function action({ request }: Route.ActionArgs) {
     env.DB.prepare(
       `INSERT INTO shipment_events(id,shipment_id,status,location,description,event_at,visible_to_customer,created_by_user_id,created_at)
        VALUES(?,?,'picked_up',?,?,?,1,?,?)`,
-    ).bind(crypto.randomUUID(),shipmentId,locationText,result === "ready" ? "仓库验收完成并确认货齐" : result === "exception" ? "仓库异常验收入库" : "仓库完成一批货物验收入库",now,user.userId,now),
+    ).bind(receiptEventId,shipmentId,locationText,result === "ready" ? "仓库验收完成并确认货齐" : result === "exception" ? "仓库异常验收入库" : "仓库完成一批货物验收入库",now,user.userId,now),
     env.DB.prepare(
       `UPDATE shipments SET status='picked_up',current_location=?,actual_pickup_at=COALESCE(actual_pickup_at,?),updated_at=?
        WHERE id=? AND organization_id=?`,
@@ -793,7 +815,7 @@ export async function action({ request }: Route.ActionArgs) {
           actual_pieces,actual_weight_kg,actual_volume_cbm,max_difference_percent,status,notes,created_at,updated_at
         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,?)`,
       ).bind(
-        crypto.randomUUID(),user.organizationId,receiptId,order.id,expected.pieces,expected.weightKg,
+        crypto.randomUUID(),user.organizationId,receiptId,order.id,expected.pieces,arrivedDeclaredWeightKg,
         expected.volumeCbm,cumulative.pieces,cumulative.weightKg,cumulative.volumeCbm,difference.maxPercent,
         exceptionNotes || effectiveNotes || "仓库验收实收与预录存在差异",now,now,
       ),
@@ -811,46 +833,23 @@ export async function action({ request }: Route.ActionArgs) {
     );
   }
 
+  statements.push(env.DB.prepare("INSERT INTO audit_logs(id,organization_id,actor_user_id,action,resource_type,resource_id,outcome,ip_address,user_agent,metadata_json,created_at) VALUES(?,?,?,'warehouse.acceptance.receive','warehouse_receipt',?,'success',?,?,?,?)").bind(crypto.randomUUID(),user.organizationId,user.userId,receiptId,request.headers.get("CF-Connecting-IP"),request.headers.get("User-Agent"),JSON.stringify({orderId:order.id,orderNumber:order.order_number,receiptNumber,result,totalPackages,totalPieces,totalWeight,totalVolume,locationId}),now));
+  statements.push(physicalSyncJobStatement(env.DB,{organizationId:user.organizationId,orderId:order.id,warehouseId:warehouse.id,actorUserId:user.userId,sourceId:receiptId,kind:"domestic_receipt",payload:{result,packageCount:createdPackages.length,exceptionNotes},now}));
   try {
-    await env.DB.batch([...statements,...intakeGateCommitStatements(intakeSnapshot,now)]);
+    statements.push(...await prepareSitePhotoStatements(env.DB,{organizationId:user.organizationId,actorUserId:user.userId,form,stage:"domestic_receipt",sourceType:"warehouse_receipt",sourceId:receiptId,targets:[{orderId:order.id,customerId:order.customer_id,eventId:receiptEventId,packageIds:createdPackages.map(p=>p.id)}],warehouseId:warehouse.id,occurredAt:now,now}));
+    await env.DB.batch(statements);
   } catch (error) {
     console.error("warehouse acceptance failed", error);
-    return { formError: "验收入库失败，未写入库存，请检查数据后重试" };
+    if(error instanceof Error&&!String(error).includes("mutation_commit_guards")&&/图片|照片|预览|缩略图/.test(error.message))return{formError:`${error.message}；本次库存未写入，可保留资料重试`};
+    return { formError: "本次未写入库存，收货会话或包裹可能已变化，请刷新核对后重试" };
   }
 
-  if (result === "exception") {
-    await synchronizeOrderExceptionStatuses(user.organizationId, [order.id], now);
-  }
-
-  if (result === "ready") {
-    await ensureVerifiedReceivingBatch({ organizationId: user.organizationId, shipmentId, locationId: location.id, actorUserId: user.userId, now });
-  }
-  await recordWarehouseProgress({
-    organizationId: user.organizationId,
-    orderId: order.id,
-    actorUserId: user.userId,
-    stepCode: result === "ready" ? "ready" : "receiving",
-    stepName: result === "ready" ? "货齐，等待装车/配载" : result === "exception" ? "验收异常处理中" : "累计收货中",
-    actionCode: result === "ready" ? "acceptance_ready" : result === "exception" ? "acceptance_exception" : "acceptance_partial",
-    actionName: result === "ready" ? "验收并确认货齐" : result === "exception" ? "异常验收入库" : "分批验收入库",
-    notes: `入库单 ${receiptNumber}，生成 ${createdPackages.length} 张仓库标签${exceptionNotes ? `；${exceptionNotes}` : ""}`,
-  });
-  if (result === "ready") await completeDomesticTransport(user.organizationId, order.id, shipmentId, user.userId, receiptNumber, now);
-
-  await recordWorkflowEvent({
-    organizationId: user.organizationId,event: "shipment.picked_up",customerId: order.customer_id,
-    orderId: order.id,shipmentId,actorUserId: user.userId,source: "admin",
-    metadata: { warehouse: true, acceptance: true, receiptNumber, locationId, result, packages: createdPackages.length },
-  });
-  await writeAudit({
-    request,action: "warehouse.acceptance.receive",resourceType: "warehouse_receipt",resourceId: receiptId,
-    organizationId: user.organizationId,actorUserId: user.userId,
-    metadata: { orderId: order.id,orderNumber: order.order_number,receiptNumber,result,totalPackages,totalPieces,totalWeight,totalVolume,locationId },
-  });
+  const synchronization=await tryPhysicalSyncJob(env.DB,user.organizationId,physicalSyncJobId("domestic_receipt",receiptId));
   const successParams = new URLSearchParams({
     warehouseId: warehouse.id,
     receiptId,
     acceptanceResult: result,
+    ...(synchronization.syncPending?{syncPending:"1",syncOrderId:order.id}:{}),
   });
   return redirect(`/warehouse/acceptance?${successParams}`);
 }
@@ -858,6 +857,7 @@ export async function action({ request }: Route.ActionArgs) {
 export default function WarehouseAcceptance({ loaderData, actionData }: Route.ComponentProps) {
   const busy = useNavigation().state !== "idle";
   const navigate = useNavigate();
+  const location=useLocation();
   const scanFetcher=useFetcher<typeof action>();
   const actionError = actionData&&"formError" in actionData?actionData.formError:undefined;
   const scanResult=scanFetcher.data&&"scanResult" in scanFetcher.data?scanFetcher.data.scanResult:undefined;
@@ -865,7 +865,7 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
     loaderData.user,
     loaderData.warehouseAccessLevel,
   );
-  const [receiptResult, setReceiptResult] = useState<"" | "ready" | "exception">("");
+  const [receiptResult, setReceiptResult] = useState<"" | "partial" | "ready" | "exception">("");
   const [markInput,setMarkInput]=useState("");
   const markInputRef=useRef<HTMLInputElement>(null);
   const policies = resolveDomesticWarehouseAcceptancePolicies(loaderData.workflowFields);
@@ -896,7 +896,7 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
     setReceiptResult(current=>{
       if(current==='exception')return current;
       if(accountedPackageCount>plannedPackageCount)return 'exception';
-      return normalReceivingComplete?'ready':'';
+      return normalReceivingComplete?'ready':scannedMarks.length?'partial':'';
     });
   }, [accountedPackageCount, loaderData.order, normalReceivingComplete, plannedPackageCount]);
   const openScannedReference=(code:string)=>{
@@ -923,6 +923,7 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
   return <>
     <header className="page-header acceptance-header"><div><p className="eyebrow">ACCEPTANCE RECEIVING</p><h1>验收收货</h1><p>仓库统一扫描入口；扫描任一入仓唛头，系统自动识别订单并累计整批收货进度。</p></div></header>
     <ActionToast message={actionError ?? loaderData.resultMessage} tone={actionError ? "error" : "success"} data={actionData}/>
+    {new URLSearchParams(location.search).get("syncPending")==="1"&&<PhysicalSyncPanel site="warehouse" orderId={new URLSearchParams(location.search).get("syncOrderId")??""} initiallyOpen/>}
     {!loaderData.locations.length && <div className="alert error">当前仓库没有可用库位，请先<Link to={`/warehouse/locations?warehouseId=${loaderData.warehouse.id}`}>配置仓库与库位</Link>。</div>}
     {canOperate ? <section className="panel acceptance-scan-panel acceptance-unified-scan no-print">
       <form className="acceptance-scan-form" onSubmit={event=>{event.preventDefault();submitWarehouseScan();}}>
@@ -933,8 +934,9 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
       {(scanResult||loaderData.order)&&<div className={`inbound-mark-scan-feedback${normalReceivingComplete?' complete':''}`} role="status" aria-live="polite">{scanFeedback}</div>}
     </section> : <div className="alert info">当前账号为仓库只读视角，可查看入库结果与历史标签；验收扫描和入库提交仅向有操作权限的冻结任务负责人开放。</div>}
     {loaderData.lookupError && <div className="alert error no-print">{loaderData.lookupError}</div>}
-    {canOperate && loaderData.order && loaderData.cargoItems.length > 0 && <Form method="post" className="acceptance-workbench no-print">
+    {canOperate && loaderData.order && loaderData.cargoItems.length > 0 && <Form method="post" encType="multipart/form-data" className="acceptance-workbench no-print">
       <input type="hidden" name="warehouseId" value={loaderData.warehouse.id}/><input type="hidden" name="orderId" value={loaderData.order.id}/><input type="hidden" name="reference" value={loaderData.order.order_number}/>
+      <input type="hidden" name="receivingSessionId" value={loaderData.receivingSessionId}/><input type="hidden" name="scannedPackageCodes" value={[...scannedMarks].sort().join("|")}/>
       <WarehouseReceivingOrderStrip facts={[
         { label: "订单 / 类型", value: `${loaderData.order.order_number} · ${loaderData.order.business_type === "ftl" ? "整车" : "拼车"}` },
         { label: "客户", value: `[${loaderData.order.customer_identity_code}] ${loaderData.order.customer_name}` },
@@ -951,7 +953,7 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
         <div className="panel-header"><div><h2>包装收齐与实重核对</h2><p>入仓包装数按唛头扫描累计；收货时核对实重，体积可留空且不参与收货差异判断。最终包装尺寸在二次打包贴标阶段登记。</p></div><span className="status-pill">{loaderData.cargoItems.length} 条货物</span></div>
         <div className="table-wrap acceptance-cargo-table"><table><thead><tr>
           <th>货物</th><th>计划入仓包装</th><th>扫码累计</th><th>申报重量 / 体积</th>
-          {policies.actualWeight.isActive && <th>本单实收重量 KG{acceptanceRequiredMarker(policies.actualWeight)}</th>}
+          {policies.actualWeight.isActive && <th>本次扫描包裹实重 KG{acceptanceRequiredMarker(policies.actualWeight)}</th>}
           {policies.actualVolume.isActive && <th>实收总体积 CBM（选填）</th>}
           <th>备注</th>
         </tr></thead><tbody>{loaderData.cargoItems.map((item,index) => {
@@ -965,8 +967,8 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
             <td><strong>{item.package_count} 包</strong><small>按预计包装数生成入仓唛头</small></td>
             <td><strong>{cumulativeScanned} / {item.package_count} 包</strong><small>{scannedForItem?`含本次新扫 ${scannedForItem} 包，确认后正式入库`:"等待扫描"}</small></td>
             <td><strong>{expectedWeight.toFixed(2)} KG</strong><small>{item.volume_per_package_cbm * item.package_count > 0 ? `${(item.volume_per_package_cbm * item.package_count).toFixed(3)} CBM` : "体积未申报"}</small></td>
-            {policies.actualWeight.isActive && <td><input name={`actualWeight_${index}`} aria-label={`${item.cargo_name_cn} 本单实收重量`} type="number" min="0.001" step="0.001" defaultValue="" placeholder="必填，称重后填写" required={policies.actualWeight.isRequired}/></td>}
-            {policies.actualVolume.isActive && <td><input name={`actualVolume_${index}`} aria-label={`${item.cargo_name_cn} 本单实收总体积（选填）`} type="number" min="0.001" step="0.001" defaultValue="" placeholder="选填，不参与收货核对"/></td>}
+            {policies.actualWeight.isActive && <td><input name={`actualWeight_${index}`} aria-label={`${item.cargo_name_cn} 本次扫描包裹实重`} type="number" min="0.001" step="0.001" defaultValue="" placeholder={scannedForItem?"称量本次扫描包裹后填写":"本次未扫描"} required={policies.actualWeight.isRequired&&scannedForItem>0} disabled={!scannedForItem}/></td>}
+            {policies.actualVolume.isActive && <td><input name={`actualVolume_${index}`} aria-label={`${item.cargo_name_cn} 本次实收总体积（选填）`} type="number" min="0.001" step="0.001" defaultValue="" placeholder="选填，不参与收货核对" disabled={!scannedForItem}/></td>}
             <td><input name={`itemNotes_${index}`} placeholder="选填"/></td>
           </tr>;
         })}</tbody></table></div>
@@ -975,8 +977,8 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
         {policies.location.isActive ? <label className="field"><span>入库库位{acceptanceRequiredMarker(policies.location)}</span><select name="locationId" required={policies.location.isRequired}><option value="">{policies.location.isRequired ? "请选择库位" : "未选则使用首个启用库位"}</option>{loaderData.locations.map((item) => <option key={item.id} value={item.id}>{item.warehouse_name} / {item.zone_name} / {item.name}（{item.code}）</option>)}</select></label> : <div className="alert info">入库库位已在当前工作流中隐藏，系统将使用当前仓库首个启用库位。</div>}
         {policies.cargoComplete.isActive ? <WarehouseReceiptResultSelector
           value={receiptResult}
-          onChange={(value) => value !== "partial" && setReceiptResult(value)}
-          showPartial={false}
+          onChange={setReceiptResult}
+          showPartial={!normalReceivingComplete}
           readyLabel="订单货齐"
           readyHint={normalReceivingComplete ? "唛头已经全部扫齐" : `还需扫描 ${Math.max(0,plannedPackageCount-accountedPackageCount)} 包`}
           readyDisabled={!normalReceivingComplete}
@@ -985,35 +987,11 @@ export default function WarehouseAcceptance({ loaderData, actionData }: Route.Co
           exceptionFooter="填写短少、破损、错货、超差等具体情况"
         /> : <div className="alert info">货齐选择已在当前工作流中隐藏：系统依据累计包装数和已填的实收数据自动判定分批、货齐或异常。</div>}
         {policies.notes.isActive && <label className="field span-2"><span>收货备注{acceptanceRequiredMarker(policies.notes)}</span><textarea name="notes" rows={2} required={policies.notes.isRequired} placeholder="本次到货车辆、现场情况等"/></label>}
-        <button className="primary acceptance-submit" disabled={busy || !canOperate || !loaderData.locations.length || !scannedMarks.length || (!normalReceivingComplete&&receiptResult!=="exception")}>{busy ? "正在验收入库…" : normalReceivingComplete ? "确认整批扫码入库" : "请继续扫描至整批收齐"}</button>
+        <SitePhotoPicker key={loaderData.order.id} limits={loaderData.photoLimits} stage="domestic_receipt" scopeLabel="本次扫码收货"/>
+        <button className="primary acceptance-submit" disabled={busy || !canOperate || !loaderData.locations.length || !scannedMarks.length}>{busy ? "正在验收入库…" : receiptResult==='exception' ? "确认本次异常入库" : normalReceivingComplete ? "确认整批扫码入库" : `确认本次 ${scannedMarks.length} 包分批入库`}</button>
       </section>
     </Form>}
   </>;
-}
-
-async function ensureVerifiedReceivingBatch(input:{organizationId:string;shipmentId:string;locationId:string;actorUserId:string;now:string}) {
-  const existing=await env.DB.prepare("SELECT id FROM warehouse_sorting_batches WHERE organization_id=? AND shipment_id=? AND status!='cancelled' ORDER BY created_at DESC LIMIT 1").bind(input.organizationId,input.shipmentId).first<{id:string}>();
-  const batchId=existing?.id??crypto.randomUUID();const statements:D1PreparedStatement[]=[];
-  if(existing) statements.push(env.DB.prepare("UPDATE warehouse_sorting_batches SET target_location_id=?,status='verified',verified_by_user_id=?,verified_at=COALESCE(verified_at,?),updated_at=? WHERE id=? AND organization_id=?").bind(input.locationId,input.actorUserId,input.now,input.now,batchId,input.organizationId));
-  else statements.push(env.DB.prepare("INSERT INTO warehouse_sorting_batches(id,organization_id,batch_number,shipment_id,target_location_id,status,notes,created_by_user_id,verified_by_user_id,created_at,updated_at,verified_at) VALUES(?,?,?,?,?,'verified',?,?,?,?,?,?)").bind(batchId,input.organizationId,generateCode("SORT"),input.shipmentId,input.locationId,"系统根据验收确认货齐自动生成",input.actorUserId,input.actorUserId,input.now,input.now,input.now));
-  const packages=await env.DB.prepare("SELECT id FROM warehouse_packages WHERE organization_id=? AND shipment_id=? AND label_kind='inbound_mark' AND lifecycle_status='active' AND status='in_stock'").bind(input.organizationId,input.shipmentId).all<{id:string}>();
-  for(const item of packages.results) statements.push(env.DB.prepare("INSERT OR IGNORE INTO warehouse_sorting_items(id,organization_id,batch_id,package_id,status,sorted_by_user_id,verified_by_user_id,sorted_at,verified_at,notes) VALUES(?,?,?,?,'verified',?,?,?,?,?)").bind(crypto.randomUUID(),input.organizationId,batchId,item.id,input.actorUserId,input.actorUserId,input.now,input.now,"验收确认货齐，自动纳入装车范围"));
-  await env.DB.batch(statements);
-}
-
-async function completeDomesticTransport(organizationId:string,orderId:string,shipmentId:string,actorUserId:string,receiptNumber:string,now:string) {
-  const [module,assignment]=await Promise.all([
-    env.DB.prepare("SELECT id,current_step_code FROM order_module_instances WHERE organization_id=? AND order_id=? AND module_code='transport' AND enabled=1").bind(organizationId,orderId).first<{id:string;current_step_code:string|null}>(),
-    env.DB.prepare("SELECT id FROM order_transport_assignments WHERE organization_id=? AND order_id=? AND leg_type='first_mile' AND status!='cancelled' ORDER BY created_at DESC LIMIT 1").bind(organizationId,orderId).first<{id:string}>(),
-  ]);
-  const statements:D1PreparedStatement[]=[
-    env.DB.prepare("UPDATE order_transport_assignments SET status='arrived',actual_arrival_at=COALESCE(actual_arrival_at,?),updated_at=? WHERE organization_id=? AND order_id=? AND leg_type='first_mile' AND status!='cancelled'").bind(now,now,organizationId,orderId),
-    env.DB.prepare("UPDATE shipments SET actual_delivery_at=COALESCE(actual_delivery_at,?),updated_at=? WHERE id=? AND organization_id=?").bind(now,now,shipmentId,organizationId),
-  ];
-  if(assignment) statements.push(env.DB.prepare("UPDATE domestic_waybill_vehicles SET status='arrived',actual_arrival_at=COALESCE(actual_arrival_at,?),updated_at=? WHERE organization_id=? AND assignment_id=?").bind(now,now,organizationId,assignment.id));
-  if(module) statements.push(env.DB.prepare("UPDATE order_module_instances SET status='completed',current_step_code='warehouse_arrived',current_step_name='货物已到国内仓',progress_percent=100,completed_at=COALESCE(completed_at,?),blocking_reason=NULL,updated_at=? WHERE id=?").bind(now,now,module.id),env.DB.prepare("INSERT INTO order_module_history(id,organization_id,order_id,module_instance_id,action_code,action_name,from_step_code,to_step_code,to_step_name,actor_user_id,notes,occurred_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").bind(crypto.randomUUID(),organizationId,orderId,module.id,"warehouse_acceptance_ready","验收确认货齐",module.current_step_code,"warehouse_arrived","货物已到国内仓",actorUserId,`入库单 ${receiptNumber} 已确认货齐`,now));
-  await env.DB.batch(statements);
-  await syncOrderWorkflowSnapshot(organizationId,orderId);
 }
 
 function nonNegativeNumber(form:FormData,name:string){const raw=valueOf(form,name);if(raw==="")return null;const value=Number(raw);return Number.isFinite(value)&&value>=0?value:null}

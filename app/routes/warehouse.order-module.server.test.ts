@@ -34,11 +34,11 @@ async function submit(warehouseId = "warehouse-a") {
 }
 const noAdvance = () => expect(fixture.database.prepare("SELECT COUNT(*) n FROM order_module_history WHERE order_id='order'").get()).toEqual({ n: 0 });
 function beforeAdvance(change: string) {
-  let pending = false, fired = false;
+  let pending = false, fired = false,guardCountBeforeMutation=0;
   const prepare = fixture.db.prepare.bind(fixture.db), batch = fixture.db.batch.bind(fixture.db);
   vi.spyOn(fixture.db, "prepare").mockImplementation(sql => { if (sql.includes("SET status=?,current_step_code=?,current_step_name=?,progress_percent=?,blocking_reason=NULL")) pending = true; return prepare(sql); });
-  vi.spyOn(fixture.db, "batch").mockImplementation(async statements => { if (pending && !fired) { fired = true; fixture.database.exec(change); } return batch(statements); });
-  return () => expect(fired).toBe(true);
+  vi.spyOn(fixture.db, "batch").mockImplementation(async statements => { if (pending && !fired) { fired = true;guardCountBeforeMutation=Number(fixture.database.prepare('SELECT COUNT(*) n FROM mutation_commit_guards').get()?.n); fixture.database.exec(change); } return batch(statements); });
+  return () => {expect(fired).toBe(true);return guardCountBeforeMutation;};
 }
 describe("warehouse generic advance remains in the selected physical warehouse", () => {
   it.each(["operation", "owner"])("preserves a valid physical handoff for %s", async actor => {
@@ -83,8 +83,8 @@ describe("warehouse generic advance remains in the selected physical warehouse",
     ["module state", "UPDATE order_module_instances SET status='in_progress',current_step_code='receiving' WHERE id='warehouse-module'"],
     ["second warehouse binding", "INSERT INTO warehouse_user_access(id,organization_id,warehouse_id,user_id,access_level,created_at,updated_at) VALUES('second-access','org','warehouse-b','operation','operator','now','now')"],
   ])("rejects %s changing before the advance transaction", async (_label, change) => {
-    const assertInjected = beforeAdvance(change); const response = await submit(); assertInjected();
+    const assertInjected = beforeAdvance(change); const response = await submit(); const guardCountBeforeMutation=assertInjected();
     expect(new URL(response.headers.get("Location")!, "http://localhost").searchParams.get("warehouseError")).toContain("本次未提交"); noAdvance();
-    expect(fixture.database.prepare("SELECT COUNT(*) n FROM mutation_commit_guards").get()).toEqual({ n: 0 });
+    expect(fixture.database.prepare("SELECT COUNT(*) n FROM mutation_commit_guards").get()).toEqual({ n: guardCountBeforeMutation });
   });
 });

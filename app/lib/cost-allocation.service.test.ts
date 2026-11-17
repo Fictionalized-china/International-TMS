@@ -7,6 +7,7 @@ const gate = vi.hoisted(() => ({
 
 vi.mock("./batch-cost-allocation-action-policy.server", () => ({
   assertBatchCostAllocationActionOpen: gate.assertOpen,
+  batchCostAllocationCommitGuards:()=>[],
 }));
 
 import {
@@ -32,7 +33,7 @@ function database(input: { zeroChanges?: boolean; finalAmount?: number } = {}) {
         return null;
       }),
       all: vi.fn(async () => {
-        if (sql.includes("FROM transport_cost_allocation_lines") && sql.includes("actual_weight_kg"))
+        if (sql.startsWith("SELECT * FROM transport_cost_allocation_lines"))
           return { results: [{ id: "line-1", order_id: "order-1", actual_weight_kg: 100, actual_volume_cbm: 1 }] };
         if (sql.includes("FROM transport_cost_allocation_lines") && sql.includes("suggested_amount"))
           return { results: [{ id: "line-1", order_id: "order-1", suggested_amount: 100, final_amount: input.finalAmount ?? 100, adjustment_reason: null }] };

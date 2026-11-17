@@ -6,7 +6,9 @@ import { sessionSlotFromUrl, withSessionSlot } from "../lib/session-slot";
 import type { Route } from "./+types/admin.order-detail";
 import { ActionToast } from "../components/ActionToast";
 import { OrderIntakeSupplement } from "../components/OrderIntakeSupplement";
-import { readIntakeRuleBinding } from "../lib/order-intake-rule";
+import { PhysicalSyncPanel } from "../components/PhysicalSyncPanel";
+import { SitePhotoPanel } from "../components/SitePhotos";
+import { inspectIntakeRuleBinding } from "../lib/order-intake-rule";
 import { readIntakeGateSnapshot } from "../lib/order-intake-gate.server";
 import { canCompleteWorkflowTask } from "../lib/workflow-task-access";
 import { DateTimeSelect } from "../components/DateTimeSelect";
@@ -672,8 +674,11 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
   }
   return {
     current,
-    intakeGateIssues: !["completed","cancelled"].includes(order.status)&&readIntakeRuleBinding(order.intake_operations_json)
-      ? (await readIntakeGateSnapshot(current.organizationId,id)).result?.issues.map(issue=>({key:issue.key,label:issue.label,reason:issue.reason,moduleCode:issue.moduleCode,rowNumber:issue.rowNumber}))??[] : [],
+    physicalSyncPendingCount:Number((await env.DB.prepare("SELECT COUNT(*) n FROM physical_operation_sync_jobs WHERE organization_id=? AND order_id=? AND status!='completed'").bind(current.organizationId,id).first<{n:number}>())?.n??0),
+    intakeGateIssues: ["completed","cancelled"].includes(order.status)?[]:inspectIntakeRuleBinding(order.intake_operations_json).error
+      ?[{key:"intake_rule",label:"录单资料与检查规则",reason:inspectIntakeRuleBinding(order.intake_operations_json).error!,moduleCode:"consignment",rowNumber:undefined}]
+      :inspectIntakeRuleBinding(order.intake_operations_json).binding
+        ? (await readIntakeGateSnapshot(current.organizationId,id)).result?.issues.map(issue=>({key:issue.key,label:issue.label,reason:issue.reason,moduleCode:issue.moduleCode,rowNumber:issue.rowNumber}))??[] : [],
     orderQueueNavigation,
     processPolicy: await loadBusinessProcessPolicy(current.organizationId),
     canManage: current.permissions.includes("order.manage"),
@@ -1173,6 +1178,7 @@ function LinearOrderWorkspace({
             <div className="node-header-tools">
               <div className="owner-chips"><span className="active">{responsiblePosition}</span><span>{responsibleAssignee}</span><span>{canSignSelectedCosts ? "可办理本单签核" : readOnly ? "只读" : parallelCostsActive ? "分岗签核" : `${pendingTasks.length} 项待办`}</span></div>
               <div className="node-reference-actions" aria-label="订单辅助资料">
+                {data.physicalSyncPendingCount>0&&<button type="button" onClick={()=>setDrawerTab("supplements")}>作业同步 {data.physicalSyncPendingCount}</button>}
                 <button type="button" onClick={() => setDrawerTab("cargo")}>货物与标签</button>
                 <button type="button" onClick={() => setDrawerTab("attachments")}>文件 {data.attachments.length}</button>
                 <button type="button" onClick={() => setDrawerTab("history")}>记录 {data.history.length + data.macro.length}</button>
@@ -1471,11 +1477,11 @@ function LinearOrderDrawer({
               {!outboundOulLabels.length && <p className="linear-drawer-empty">完成最终包装后生成 OUL。</p>}
             </div></section>
           </>}
-          {activeTab === "attachments" && <section className="linear-drawer-section"><h3>订单文件 <span>{data.attachments.length} 个</span></h3><div className="linear-drawer-list">
+          {activeTab === "attachments" && <section className="linear-drawer-section"><SitePhotoPanel orderId={order.id}/><h3>订单文件 <span>{data.attachments.length} 个</span></h3><div className="linear-drawer-list">
             {data.attachments.map((attachment) => <article key={attachment.id}><div><strong>{attachment.file_name}</strong><span>{new Date(attachment.created_at).toLocaleString("zh-CN")}</span></div><small>{attachment.content_type}<br/>{(attachment.size_bytes / 1024).toFixed(1)} KB</small><a href={`/admin/document-files/order/${attachment.id}`}>下载</a></article>)}
             {!data.attachments.length && <p className="linear-drawer-empty">当前订单暂无文件。</p>}
           </div></section>}
-          {activeTab === "supplements" && <section className="linear-drawer-section"><h3>资料补录 <span>{data.supplementTasks.filter((item)=>item.status==="open").length} 项待办</span></h3><OrderIntakeSupplement orderId={order.id}/><p className="linear-drawer-section-note">文件补录不重新开放已完成的历史节点。绑定业务员选择文件后会自动上传、通过并销项。</p><div className="linear-drawer-list supplement-task-list">
+          {activeTab === "supplements" && <section className="linear-drawer-section"><h3>资料补录 <span>{data.supplementTasks.filter((item)=>item.status==="open").length} 项待办</span></h3><OrderIntakeSupplement orderId={order.id}/><PhysicalSyncPanel orderId={order.id} initiallyOpen={data.physicalSyncPendingCount>0}/><p className="linear-drawer-section-note">文件补录不重新开放已完成的历史节点。绑定业务员选择文件后会自动上传、通过并销项。</p><div className="linear-drawer-list supplement-task-list">
             {data.supplementTasks.map((task)=>{
               const documentPlacement=orderDocumentPlacements.find((item)=>item.moduleCode===task.module_code&&item.fieldKey===task.field_key);
               const canUploadMissingDocument=task.status==="open"&&task.task_kind==="supplement"&&Boolean(documentPlacement)&&(

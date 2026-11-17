@@ -2,9 +2,12 @@ import { env } from "cloudflare:workers";
 import { PortalLink as Link } from "../components/PortalNavigation";
 import { requirePortalCustomer } from "../lib/portal.server";
 import type { Route } from "./+types/portal.tracking-detail";
+import { listOrderSitePhotos } from "../lib/order-site-photos.server";
+import { SitePhotoGallery } from "../components/SitePhotos";
+import { usePortalContextId } from "../components/PortalNavigation";
 
 type Shipment = {
-  id: string; shipment_number: string; order_number: string; status: string;
+  id: string; order_id:string; shipment_number: string; order_number: string; status: string;
   current_location: string | null; estimated_delivery_at: string | null;
   actual_delivery_at: string | null; signed_by: string | null;
   origin_city: string; destination_city: string; cargo_description: string;
@@ -19,7 +22,7 @@ const displayTime = (value: string | null) => value ? new Date(value).toLocaleSt
 export async function loader({ request, params }: Route.LoaderArgs) {
   const { user, customer } = await requirePortalCustomer(request);
   const shipment = await env.DB.prepare(
-    `SELECT s.id,s.shipment_number,o.order_number,s.status,s.current_location,
+    `SELECT s.id,o.id order_id,s.shipment_number,o.order_number,s.status,s.current_location,
             s.estimated_delivery_at,s.actual_delivery_at,s.signed_by,
             o.origin_city,o.destination_city,o.cargo_description
        FROM shipments s JOIN transport_orders o ON o.id=s.order_id AND o.organization_id=s.organization_id
@@ -30,13 +33,14 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     `SELECT id,status,location,description,event_at FROM shipment_events
       WHERE shipment_id=? AND visible_to_customer=1 ORDER BY event_at DESC,created_at DESC`,
   ).bind(shipment.id).all<Event>();
-  return { shipment, events: events.results };
+  return { shipment, events: events.results,sitePhotos:await listOrderSitePhotos(env.DB,user.organizationId,shipment.order_id,{page:Number(new URL(request.url).searchParams.get("photoPage"))||1}) };
 }
 
 export function meta() { return [{ title: "单票运输轨迹 | 客户门户" }]; }
 
 export default function PortalTrackingDetail({ loaderData }: Route.ComponentProps) {
   const { shipment, events } = loaderData;
+  const portalContext=usePortalContextId();
   return <>
     <nav className="portal-tracking-breadcrumb" aria-label="当前位置">
       <Link to="/portal/tracking">运输轨迹</Link><span aria-hidden="true">/</span><span>{shipment.order_number}</span>
@@ -59,6 +63,7 @@ export default function PortalTrackingDetail({ loaderData }: Route.ComponentProp
           <Link to={`/portal/tracking/${shipment.id}/events/${event.id}`}>查看节点详情 →</Link></div>
       </li>)}</ol> : <p className="portal-tracking-no-events">暂无客户可见运输节点；请等待运踪岗更新。</p>}
     </section>
+    <section className="panel" aria-label="现场照片"><h2>现场照片</h2><p>提货、收货和换装照片按所属作业自动同步；点击查看原图。</p><SitePhotoGallery photos={loaderData.sitePhotos.photos} basePath="/portal/site-photos" context={`portalContext=${encodeURIComponent(portalContext)}`}/><div className="site-photo-pagination">{loaderData.sitePhotos.page>1&&<Link to={`?photoPage=${loaderData.sitePhotos.page-1}`}>上一页</Link>}<span>第 {loaderData.sitePhotos.page} 页</span>{loaderData.sitePhotos.hasMore&&<Link to={`?photoPage=${loaderData.sitePhotos.page+1}`}>下一页</Link>}</div></section>
     <section className="panel portal-tracking-detail-secondary" aria-label="运单资料">
       <h2>运单资料</h2><dl><div><dt>货物</dt><dd>{shipment.cargo_description || "—"}</dd></div>
         <div><dt>路线</dt><dd>{shipment.origin_city} → {shipment.destination_city}</dd></div>

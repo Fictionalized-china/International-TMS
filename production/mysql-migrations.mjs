@@ -4,6 +4,8 @@ import { applyMeetingFlowMigration } from './meeting-flow-migration.mjs';
 import { applyIsoTimestampMigration } from './iso-timestamp-migration.mjs';
 import { applyP0WorkflowParityMigration } from './p0-workflow-parity-migration.mjs';
 import { applyCloudMutationIntegrityMigration } from './cloud-mutation-integrity-migration.mjs';
+import { applyConfiguredCostWindowMigration } from './cost-allocation-window-migration.mjs';
+import { applySitePhotoTimeMigration } from './site-photo-time-migration.mjs';
 
 const migrations = [
   {
@@ -346,6 +348,54 @@ migrations.push({
     }
   },
 });
+migrations.push({
+  version:190,
+  name:'order_site_photos',
+  definition:'shared order_attachments originals;scoped site photo associations and thumbnails;atomic submission deduplication;no existing facts rewritten',
+  async up(connection) {
+    await connection.query(`CREATE TABLE IF NOT EXISTS order_site_photo_submissions (
+      id VARCHAR(160) NOT NULL PRIMARY KEY,organization_id VARCHAR(160) NOT NULL,
+      actor_user_id VARCHAR(160) NOT NULL,request_key VARCHAR(160) NOT NULL,payload_hash VARCHAR(64) NOT NULL,
+      created_at DATETIME(3) NOT NULL,UNIQUE KEY uq_site_photo_submission(organization_id,actor_user_id,request_key)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
+    await connection.query(`CREATE TABLE IF NOT EXISTS order_site_photos (
+      id VARCHAR(160) NOT NULL PRIMARY KEY,organization_id VARCHAR(160) NOT NULL,order_id VARCHAR(160) NOT NULL,
+      attachment_id VARCHAR(160) NOT NULL,submission_id VARCHAR(160) NOT NULL,
+      stage_code VARCHAR(40) NOT NULL,source_type VARCHAR(40) NOT NULL,source_id VARCHAR(160) NOT NULL,
+      event_id VARCHAR(160) NULL,warehouse_id VARCHAR(160) NULL,package_ids_json MEDIUMTEXT NOT NULL,
+      content_hash VARCHAR(64) NOT NULL,thumbnail_data_url MEDIUMTEXT NOT NULL,thumbnail_content_type VARCHAR(40) NOT NULL,
+      description VARCHAR(500) NULL,occurred_at DATETIME(3) NOT NULL,uploaded_by_user_id VARCHAR(160) NOT NULL,created_at DATETIME(3) NOT NULL,
+      UNIQUE KEY uq_site_photo_source(organization_id,order_id,source_type,source_id,content_hash),
+      INDEX idx_order_site_photos_order(organization_id,order_id,occurred_at,id),
+      INDEX idx_order_site_photos_event(organization_id,event_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
+  },
+});
+migrations.push({
+  version:191,name:'physical_operation_sync_jobs',
+  definition:'durable post-physical workflow projection jobs;leased retries;no stock money or historical facts rewritten',
+  async up(connection){
+    await connection.query(`CREATE TABLE IF NOT EXISTS physical_operation_sync_jobs (
+      id VARCHAR(160) NOT NULL PRIMARY KEY,organization_id VARCHAR(160) NOT NULL,order_id VARCHAR(160) NOT NULL,
+      warehouse_id VARCHAR(160) NOT NULL,kind VARCHAR(40) NOT NULL,source_id VARCHAR(160) NOT NULL,
+      payload_json MEDIUMTEXT NOT NULL,actor_user_id VARCHAR(160) NOT NULL,status VARCHAR(20) NOT NULL DEFAULT 'pending',
+      lease_token VARCHAR(80) NULL,lease_until VARCHAR(32) NULL,attempts INT NOT NULL DEFAULT 0,last_error VARCHAR(1000) NULL,
+      created_at DATETIME(3) NOT NULL,updated_at DATETIME(3) NOT NULL,
+      UNIQUE KEY uq_physical_sync_source(organization_id,kind,source_id),
+      INDEX idx_physical_sync_pending(organization_id,order_id,status,created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
+  },
+});
+migrations.push({
+  version:192,name:'configured_cost_allocation_window',
+  definition:'preserve frozen/approval/lock/actual-exit triggers;remove obsolete dispatched prerequisite;retain 0177 verified planning exception;install replacement before dropping old guard',
+  async up(connection){await applyConfiguredCostWindowMigration(connection);},
+});
+migrations.push({
+  version:193,name:'site_photo_job_iso_timestamps',
+  definition:'feature-owned photo and physical-sync created/updated/occurred timestamps use existing ISO UTC text contract;preserve milliseconds and unrelated facts',
+  async up(connection){await applySitePhotoTimeMigration(connection);},
+});
 for (const migration of migrations) {
   migration.checksum = createHash("sha256")
     .update(`${migration.version}:${migration.name}\n${migration.definition}`)
@@ -355,6 +405,8 @@ for (const migration of migrations) {
 export const requiredMysqlSchemaVersion = migrations.at(-1)?.version ?? 0;
 export const requiredMysqlSchemaChecksum = migrations.at(-1)?.checksum ?? "";
 export const requiredMysqlSchemaColumns = [
+  ['physical_operation_sync_jobs','lease_token'],['physical_operation_sync_jobs','payload_json'],
+  ['order_site_photo_submissions','payload_hash'],['order_site_photos','thumbnail_data_url'],['order_site_photos','event_id'],
   ["mutation_commit_guards", "valid"],
   ["warehouse_stocktakes", "mutation_version"],
   ["settlement_invoice_records", "request_id"],

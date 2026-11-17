@@ -38,7 +38,7 @@ export async function action({request}:Route.ActionArgs) {
   const beijingTime=(key:string)=>{const time=value(key);return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(time)?`${time}:00+08:00`:time;};
   try {
     switch(value("intent")) {
-      case "daily":await recordDailyTracking(env.DB,{current,orderId:value("orderId"),requestId:value("requestId"),eventKind:value("eventKind"),eventAt:beijingTime("eventAt"),location:value("location"),vehicleReference:value("vehicleReference"),notes:value("notes"),visibleToCustomer:value("visible")==="1"});break;
+      case "daily":await recordDailyTracking(env.DB,{current,orderId:value("orderId"),requestId:value("requestId"),eventKind:value("eventKind"),eventAt:beijingTime("eventAt"),location:value("location"),vehicleReference:value("vehicleReference"),notes:value("notes"),visibleToCustomer:value("visible")==="1",photoForm:form});break;
       case "dispatch_request":await requestDispatchTask(env.DB,{current,orderId:value("orderId"),plannedPortArrivalAt:beijingTime("plannedPortArrivalAt"),exitPort:value("exitPort"),planOnly:value("planOnly")==="1"});break;
       default:throw new Error("未知操作");
     }

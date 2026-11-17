@@ -118,7 +118,7 @@ export function validateWorkflowCoreStepOrder(
     index > 0 && activeOrder.get(key)! <= activeOrder.get(presentSequence[index - 1])!,
   );
   return misplaced
-    ? ["基础业务节点必须保持询价、委托、审批、分配、运输、仓库、出境、签收、结算、复盘的先后顺序；可在其间插入自定义节点，但不能倒置基础节点"]
+    ? ["基础业务节点必须保持录单、审核分配、运输、仓库、出境、签收、结算、复盘的先后顺序；可在其间插入自定义节点，但不能倒置基础节点"]
     : [];
 }
 export function validateWorkflowOperationalGateStructure(input: {
@@ -400,6 +400,18 @@ export function validateWorkflowResponsibilityReadiness(input: {
   const hasMemberDetails = input.positions.some((position) =>
     position.active_member_permissions !== undefined
   );
+  // An existing position name is not an editable intake entrance. At least
+  // one selected field handler must be active, staffed and able to enter orders.
+  for(const field of (input.fields??[]).filter(field=>field.is_active===1&&currentIntakeRequiredKeys.includes(field.field_key)&&activeStepIds.has(field.step_id))){
+    const handlers=normalizeWorkflowFieldHandlerPositionCodes(field.handler_position_codes);
+    if(!handlers.length)continue; // Structural validation reports an empty binding.
+    const eligible=handlers.some(code=>{
+      const position=positionByCode.get(code);if(!position||position.status!=="active"||Number(position.active_member_count)<1)return false;
+      const required=["order.view","order.intake.manage"];
+      return hasMemberDetails?members.some(member=>member.positionCode===code&&required.every(permission=>member.permissionCodes.includes(permission))):required.every(permission=>permissionSet(position).has(permission));
+    });
+    if(!eligible)issues.push(`录单必填“${quotationNativeFieldCatalog.find(item=>item.fieldKey===field.field_key)?.label??field.field_key}”没有具备录单权限的有效填写账号，不能发布不可补录的配置`);
+  }
   const requiredPlacements = new Map<string, string[]>();
   for (const module of input.modules.filter(
     (item) => item.is_active === 1 && item.is_required === 1 && activeStepIds.has(item.step_id),
