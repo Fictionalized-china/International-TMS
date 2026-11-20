@@ -46,6 +46,11 @@ export function workflowExecutionModuleIsComplete(
   input: WorkflowExecutionModuleCompletion,
 ) {
   if (input.existingStepStatus === "completed") return true;
+  // A later node is not reachable yet.  Even an automatic/no-task placement
+  // must remain pending until the order's module frontier reaches that node;
+  // otherwise the future placement can disappear before its source module is
+  // complete and leave the workflow without a valid next step.
+  if (input.stepSortOrder > input.targetSortOrder) return false;
 
   const taskComplete = input.completionMode === "automatic"
     ? input.taskCount === 0 || input.pendingRequired === 0

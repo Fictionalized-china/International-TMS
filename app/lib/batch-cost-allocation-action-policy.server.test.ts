@@ -34,7 +34,10 @@ describe("batch cost allocation policy loader", () => {
     expect(result.policy.reason).toContain("SO-2");
     const sql = prepare.mock.calls[0][0] as string;
     expect(sql).toContain("item.organization_id=dispatch.organization_id");
-    expect(sql).toContain("shipment.organization_id=package.organization_id");
+    expect(sql).toContain("mapped.organization_id=bo.organization_id");
+    expect(sql).toContain("dispatch.transport_batch_id=mapped.batch_id");
+    expect(sql).toContain("item.package_id=mapped.package_id");
+    expect(sql).toContain("milestone.transport_batch_id=bo.batch_id");
     expect(sql).toContain("field.module_code='loading'");
   });
 });

@@ -332,6 +332,11 @@ describe("PZ frozen tracking route gates", () => {
     expect(harness.loadBatchTrackingActionPolicy).toHaveBeenCalledWith(expect.objectContaining({
       fieldKey: "actual_exit_at",
     }));
+    const milestoneRead = harness.prepared.find((item) =>
+      item.sql.includes("FROM order_tracking_milestones") && item.sql.includes("ORDER BY event_at DESC"),
+    );
+    expect(milestoneRead?.sql).toContain("transport_batch_id=?");
+    expect(milestoneRead?.bindings).toContain("batch-1");
   });
 
   it.each([

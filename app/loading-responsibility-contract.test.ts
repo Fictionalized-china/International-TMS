@@ -30,7 +30,8 @@ describe("loading responsibility contract", () => {
   it("revalidates frozen workflow readiness and concurrent occupancy on submit", () => {
     expect(planningService).toContain("loadLoadingConsolidationWorkflowAccesses");
     expect(planningService).toContain("loadingConsolidationCandidateBlockers");
-    expect(planningService).toContain("transport_batch_id IS NULL");
+    expect(planningService).toContain("transport_batch_package_claims");
+    expect(planningService).toContain("INSERT INTO transport_batch_packages");
     expect(planningService).toContain("部分订单已不满足配载条件");
   });
 });

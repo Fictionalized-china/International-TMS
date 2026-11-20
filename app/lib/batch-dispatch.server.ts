@@ -30,13 +30,24 @@ export async function loadBatchFindVehicleTasks(current:SessionUser):Promise<Bat
       b.border_port,b.planned_departure_at,w.name warehouse_name,b.carrier_id,c.name carrier_name,
       b.overseas_vehicle_plate,b.overseas_driver_name,COUNT(DISTINCT bo.order_id) order_count,
       GROUP_CONCAT(DISTINCT o.order_number) order_numbers,
-      COALESCE(SUM(job.outbound_package_count),0) package_count,
-      COALESCE(SUM(job.total_weight_kg),0) weight_kg,
-      COALESCE(SUM(job.total_volume_cbm),0) volume_cbm
+      (SELECT COUNT(*) FROM transport_batch_packages batch_package
+        WHERE batch_package.organization_id=b.organization_id AND batch_package.batch_id=b.id
+          AND batch_package.status!='removed') package_count,
+      COALESCE((SELECT SUM(package_row.weight_kg)
+        FROM transport_batch_packages batch_package
+        JOIN warehouse_packages package_row ON package_row.id=batch_package.package_id
+          AND package_row.organization_id=batch_package.organization_id
+        WHERE batch_package.organization_id=b.organization_id AND batch_package.batch_id=b.id
+          AND batch_package.status!='removed'),0) weight_kg,
+      COALESCE((SELECT SUM(package_row.volume_cbm)
+        FROM transport_batch_packages batch_package
+        JOIN warehouse_packages package_row ON package_row.id=batch_package.package_id
+          AND package_row.organization_id=batch_package.organization_id
+        WHERE batch_package.organization_id=b.organization_id AND batch_package.batch_id=b.id
+          AND batch_package.status!='removed'),0) volume_cbm
     FROM transport_batches b
     JOIN transport_batch_orders bo ON bo.batch_id=b.id AND bo.organization_id=b.organization_id AND bo.status!='removed'
     JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id AND o.business_type='ltl'
-    LEFT JOIN warehouse_packing_jobs job ON job.organization_id=bo.organization_id AND job.order_id=bo.order_id AND job.transport_batch_id=b.id
     LEFT JOIN warehouses w ON w.id=b.warehouse_id AND w.organization_id=b.organization_id
     LEFT JOIN carriers c ON c.id=b.carrier_id AND c.organization_id=b.organization_id
     WHERE b.organization_id=? AND b.batch_number LIKE 'PZ-%'
@@ -122,14 +133,26 @@ export async function fulfillBatchFindVehicle(input:FeedbackInput){
     newCarrier?Promise.resolve(null):env.DB.prepare("SELECT id,name FROM carriers WHERE organization_id=? AND id=? AND status='active' AND carrier_scope='overseas'").bind(current.organizationId,carrierId).first<{id:string;name:string}>(),
     newVehicle?Promise.resolve(null):env.DB.prepare("SELECT id,carrier_id,plate_number,vehicle_type,capacity_weight_kg,capacity_volume_cbm FROM carrier_vehicles WHERE organization_id=? AND id=? AND status='active'").bind(current.organizationId,vehicleId).first<{id:string;carrier_id:string;plate_number:string;vehicle_type:string|null;capacity_weight_kg:number;capacity_volume_cbm:number}>(),
     newDriver?Promise.resolve(null):env.DB.prepare("SELECT id,carrier_id,name,phone FROM carrier_drivers WHERE organization_id=? AND id=? AND status='active'").bind(current.organizationId,driverId).first<{id:string;carrier_id:string;name:string;phone:string|null}>(),
-    env.DB.prepare(`SELECT bo.order_id,COALESCE(job.total_weight_kg,0) weight_kg,COALESCE(job.total_volume_cbm,0) volume_cbm
-      FROM transport_batch_orders bo LEFT JOIN warehouse_packing_jobs job ON job.organization_id=bo.organization_id AND job.order_id=bo.order_id AND job.transport_batch_id=bo.batch_id
+    env.DB.prepare(`SELECT bo.order_id,
+      COALESCE((SELECT SUM(package_row.weight_kg)
+        FROM transport_batch_packages batch_package
+        JOIN warehouse_packages package_row ON package_row.id=batch_package.package_id
+          AND package_row.organization_id=batch_package.organization_id
+        WHERE batch_package.organization_id=bo.organization_id AND batch_package.batch_id=bo.batch_id
+          AND batch_package.order_id=bo.order_id AND batch_package.status!='removed'),0) weight_kg,
+      COALESCE((SELECT SUM(package_row.volume_cbm)
+        FROM transport_batch_packages batch_package
+        JOIN warehouse_packages package_row ON package_row.id=batch_package.package_id
+          AND package_row.organization_id=batch_package.organization_id
+        WHERE batch_package.organization_id=bo.organization_id AND batch_package.batch_id=bo.batch_id
+          AND batch_package.order_id=bo.order_id AND batch_package.status!='removed'),0) volume_cbm
+      FROM transport_batch_orders bo
       WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed' ORDER BY bo.sequence_no`).bind(current.organizationId,input.batchId).all<{order_id:string;weight_kg:number;volume_cbm:number}>(),
   ]);
   if(!newCarrier&&!carrier)throw new Error("承运商不存在或已停用");
   if(!newVehicle&&(!vehicle||vehicle.carrier_id!==carrierId||!vehicle.vehicle_type))throw new Error("车辆不属于所选承运商，或缺少车型");
   if(!newDriver&&(!driver||driver.carrier_id!==carrierId||!driver.phone))throw new Error("司机不属于所选承运商，或缺少电话");
-  if(orders.results.length<2)throw new Error("配载单挂载订单不足，请主管核对");
+  if(!orders.results.length)throw new Error("配载单没有有效订单，请主管核对");
   const intakeSnapshots=await prepareBatchIntakeAdvance(current.organizationId,input.batchId);
   if(JSON.stringify(intakeSnapshots.map(row=>row.orderId).sort())!==JSON.stringify([...new Set(orders.results.map(row=>row.order_id))].sort()))throw new Error("配载单订单范围已变化，请刷新后核对");
   if(newVehicle){const duplicate=await env.DB.prepare("SELECT 1 FROM carrier_vehicles WHERE organization_id=? AND plate_number=?").bind(current.organizationId,plate).first();if(duplicate)throw new Error("该车牌已存在，请直接选择现有车辆");}

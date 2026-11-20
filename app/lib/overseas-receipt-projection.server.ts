@@ -3,10 +3,12 @@ import {syncOrderWorkflowSnapshot} from "./order-modules.server";
 import {prepareOrderIntakeAdvance,intakeGateCommitStatements} from "./order-intake-gate.server";
 import {loadOverseasInboundCustomsGates} from "./overseas-inbound-policy.server";
 import {automaticallyNotifyOverseasArrival,confirmOverseasBatchArrival} from "./overseas-warehouse.server";
+import {syncTrackingModuleStatusForOrder} from "./batch-tracking.server";
 export type OverseasReceivingResult={completed:boolean;batchNumber:string;remaining:number;warning?:string|null};
 export async function finalizeOverseasReceiving(input: {
   organizationId: string;
   orderId: string;
+  batchId?:string|null;
   actorUserId: string;
   actualArrivalAt: string;
   notes: string;
@@ -16,8 +18,9 @@ export async function finalizeOverseasReceiving(input: {
      FROM transport_batch_orders bo
      JOIN transport_batches b ON b.id=bo.batch_id AND b.organization_id=bo.organization_id
      WHERE bo.organization_id=? AND bo.order_id=? AND bo.status!='removed' AND b.status!='cancelled'
+       AND (? IS NULL OR b.id=?)
      ORDER BY b.updated_at DESC LIMIT 1`,
-  ).bind(input.organizationId, input.orderId).first<{
+  ).bind(input.organizationId, input.orderId,input.batchId??null,input.batchId??null).first<{
     id: string;
     batch_number: string;
     road_status: string;
@@ -64,11 +67,15 @@ export async function finalizeOverseasReceiving(input: {
   const readiness = await env.DB.prepare(
     `SELECT COUNT(*) total,
             SUM(CASE WHEN EXISTS(
-              SELECT 1 FROM warehouse_receipts wr
-              JOIN shipments s ON s.id=wr.shipment_id AND s.organization_id=wr.organization_id
-              WHERE wr.organization_id=bo.organization_id AND s.order_id=bo.order_id
-                AND wr.warehouse_id=o.overseas_warehouse_id
-                AND wr.status='completed' AND wr.cargo_complete=1
+              SELECT 1 FROM transport_batch_packages mapped_package
+              WHERE mapped_package.organization_id=bo.organization_id
+                AND mapped_package.batch_id=bo.batch_id AND mapped_package.order_id=bo.order_id
+                AND mapped_package.status!='removed'
+            ) AND NOT EXISTS(
+              SELECT 1 FROM transport_batch_packages batch_package
+              WHERE batch_package.organization_id=bo.organization_id
+                AND batch_package.batch_id=bo.batch_id AND batch_package.order_id=bo.order_id
+                AND batch_package.status NOT IN ('arrived','removed')
             ) THEN 1 ELSE 0 END) ready
      FROM transport_batch_orders bo
      JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
@@ -144,6 +151,9 @@ async function confirmSingleOrderOverseasArrival(input: {
       `UPDATE transport_batch_orders SET status='arrived',updated_at=?
         WHERE organization_id=? AND batch_id=? AND order_id=? AND status!='removed'`,
     ).bind(now, input.organizationId, input.batchId, input.orderId),
+    env.DB.prepare(`UPDATE transport_batch_packages SET status='arrived',updated_at=?
+      WHERE organization_id=? AND batch_id=? AND order_id=? AND status!='removed'`)
+      .bind(now,input.organizationId,input.batchId,input.orderId),
     env.DB.prepare(
       `INSERT INTO overseas_warehouse_operations(
          id,organization_id,batch_id,order_id,warehouse_id,status,actual_arrival_at,
@@ -174,11 +184,11 @@ async function confirmSingleOrderOverseasArrival(input: {
     env.DB.prepare(
       `INSERT INTO order_tracking_milestones(
          id,organization_id,order_id,milestone_code,milestone_name,event_at,location,notes,
-         visible_to_customer,created_by_user_id,created_at
-       ) SELECT ?,?,?,'station_arrived','到达境外目的仓',?,?,?,1,?,?
+         visible_to_customer,created_by_user_id,created_at,transport_batch_id
+       ) SELECT ?,?,?,'station_arrived','到达境外目的仓',?,?,?,1,?,?,?
          WHERE NOT EXISTS(
            SELECT 1 FROM order_tracking_milestones
-           WHERE organization_id=? AND order_id=? AND milestone_code='station_arrived'
+           WHERE organization_id=? AND order_id=? AND transport_batch_id=? AND milestone_code='station_arrived'
          )`,
     ).bind(
       crypto.randomUUID(),
@@ -189,16 +199,11 @@ async function confirmSingleOrderOverseasArrival(input: {
       input.notes || null,
       input.actorUserId,
       now,
+      input.batchId,
       input.organizationId,
       input.orderId,
+      input.batchId,
     ),
-    env.DB.prepare(
-      `UPDATE order_module_instances
-          SET status='completed',current_step_code='arrived',current_step_name='到达境外仓',
-              progress_percent=100,started_at=COALESCE(started_at,?),completed_at=COALESCE(completed_at,?),
-              blocking_reason=NULL,updated_at=?
-        WHERE organization_id=? AND order_id=? AND module_code='tracking' AND enabled=1`,
-    ).bind(now, now, now, input.organizationId, input.orderId),
     env.DB.prepare(
       `UPDATE order_module_instances
           SET status='in_progress',current_step_code='arrived',current_step_name='等待系统自动通知客户',
@@ -208,6 +213,8 @@ async function confirmSingleOrderOverseasArrival(input: {
           AND status!='completed'`,
     ).bind(now, now, input.organizationId, input.orderId),
   ]);
+
+  await syncTrackingModuleStatusForOrder(input.organizationId,input.orderId,"station_arrived",input.actorUserId,now);
 
   try {
     await automaticallyNotifyOverseasArrival({

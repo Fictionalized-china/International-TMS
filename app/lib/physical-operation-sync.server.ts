@@ -31,18 +31,43 @@ export async function runPhysicalSyncJob(db:D1Database,organizationId:string,id:
     let arrival:OverseasReceivingResult|undefined;
     if(job.kind==="domestic_receipt")await syncDomesticReceipt(job);
     else if(job.kind==="overseas_receipt"){
-      const receipt=await db.prepare("SELECT r.id FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id AND s.organization_id=r.organization_id WHERE r.id=? AND r.organization_id=? AND r.warehouse_id=? AND s.order_id=? AND r.status='completed' AND r.cargo_complete=1").bind(job.source_id,organizationId,job.warehouse_id,job.order_id).first();
+      const receipt=await db.prepare(`SELECT r.id,MIN(batch_package.batch_id) batch_id,
+          COUNT(DISTINCT batch_package.batch_id) batch_count
+        FROM warehouse_receipts r
+        JOIN shipments s ON s.id=r.shipment_id AND s.organization_id=r.organization_id
+        LEFT JOIN warehouse_packages package_row ON package_row.receipt_id=r.id
+          AND package_row.organization_id=r.organization_id AND package_row.label_kind='oul'
+        LEFT JOIN transport_batch_packages batch_package
+          ON batch_package.organization_id=package_row.organization_id
+         AND batch_package.package_id=package_row.id AND batch_package.status!='removed'
+        WHERE r.id=? AND r.organization_id=? AND r.warehouse_id=? AND s.order_id=?
+          AND r.status='completed' AND r.cargo_complete=1
+        GROUP BY r.id`).bind(job.source_id,organizationId,job.warehouse_id,job.order_id).first<{id:string;batch_id:string|null;batch_count:number}>();
       if(!receipt)throw new Error("原境外收货事实未确认货齐，不能重试推进");
+      if(Number(receipt.batch_count)>1)throw new Error("同一张境外收货单包含多个运输批次，不能自动推进；请按装车任务重新核对");
       const {finalizeOverseasReceiving}=await import("./overseas-receipt-projection.server");
-      arrival=await finalizeOverseasReceiving({organizationId,orderId:job.order_id,actorUserId:job.actor_user_id,actualArrivalAt:job.created_at,notes:String((JSON.parse(job.payload_json) as {notes?:string}).notes??"")});
+      arrival=await finalizeOverseasReceiving({organizationId,orderId:job.order_id,batchId:receipt.batch_id,actorUserId:job.actor_user_id,actualArrivalAt:job.created_at,notes:String((JSON.parse(job.payload_json) as {notes?:string}).notes??"")});
       if(arrival.warning)throw new Error(arrival.warning);
     }else if(job.kind==="overseas_pickup"){
       const action=(JSON.parse(job.payload_json) as {action:string}).action;
       const operation=await db.prepare("SELECT batch_id FROM overseas_warehouse_operations WHERE id=? AND organization_id=? AND order_id=? AND warehouse_id=? AND status IN ('notified','picked_up')").bind(job.source_id,organizationId,job.order_id,job.warehouse_id).first<{batch_id:string}>();
       if(!operation)throw new Error("原自提签收事实不完整，请先核对，不会重复出库");
-      if(action==='pickup')await db.prepare(`UPDATE transport_batches SET status='arrived',road_status='pickup_completed',updated_at=? WHERE id=? AND organization_id=?
-        AND NOT EXISTS(SELECT 1 FROM overseas_warehouse_operations WHERE batch_id=? AND organization_id=? AND status NOT IN ('picked_up','cancelled'))`)
-        .bind(now,operation.batch_id,organizationId,operation.batch_id,organizationId).run();
+      if(action==='pickup')await db.batch([
+        db.prepare(`UPDATE transport_batches
+          SET status='arrived',road_status='pickup_completed',updated_at=?
+          WHERE organization_id=? AND EXISTS(
+            SELECT 1 FROM overseas_warehouse_operations current_order_operation
+            WHERE current_order_operation.organization_id=transport_batches.organization_id
+              AND current_order_operation.batch_id=transport_batches.id
+              AND current_order_operation.order_id=?
+              AND current_order_operation.status='picked_up'
+          ) AND NOT EXISTS(
+            SELECT 1 FROM overseas_warehouse_operations pending_operation
+            WHERE pending_operation.organization_id=transport_batches.organization_id
+              AND pending_operation.batch_id=transport_batches.id
+              AND pending_operation.status NOT IN ('picked_up','cancelled')
+          )`).bind(now,organizationId,job.order_id),
+      ]);
       await syncOrderWorkflowSnapshot(organizationId,job.order_id);
     }else throw new Error("同步任务类型无效");
     const complete=await db.prepare("UPDATE physical_operation_sync_jobs SET status='completed',lease_token=NULL,lease_until=NULL,last_error=NULL,updated_at=? WHERE id=? AND organization_id=? AND lease_token=?").bind(new Date().toISOString(),id,organizationId,token).run();

@@ -295,7 +295,7 @@ export default function WarehousePacking({ loaderData, actionData }: Route.Compo
 function PackingRowView({ row, warehouseId, busy }: { row: PackingRow; warehouseId: string; busy: boolean }) {
   const [editing, setEditing] = useState(false);
   const next = row.job_status === "labelled"
-    ? row.business_type === "ftl" ? "创建整车装车任务" : "进入待配载池"
+    ? row.business_type === "ftl" ? "创建整车装车任务" : "等待操作主管配载"
     : row.job_status === "generated" ? "打印并贴好全部 OUL" : row.job_status ? "已进入后续业务" : "登记最终包装";
   return <>
     <tr className={row.job_status === "generated" ? "row-alert" : ""}>
@@ -318,7 +318,7 @@ function PackingRowView({ row, warehouseId, busy }: { row: PackingRow; warehouse
         ><PackingForm row={row} busy={busy} onCancel={() => setEditing(false)}/></Modal></>}
         {row.job_status === "generated" && <><Link className="secondary" target="_blank" to={`/warehouse/packing-labels?warehouseId=${encodeURIComponent(warehouseId)}&jobId=${encodeURIComponent(row.job_id!)}`}>查看 / 打印 OUL</Link><Form method="post"><input type="hidden" name="intent" value="confirm_labelled"/><input type="hidden" name="jobId" value={row.job_id ?? ""}/><button className="primary" disabled={busy}>确认全部标签已贴完</button></Form></>}
         {row.job_status === "labelled" && row.business_type === "ftl" && <Link className="primary" to={`/warehouse/outbound?warehouseId=${encodeURIComponent(warehouseId)}&view=create&orderId=${encodeURIComponent(row.order_id)}`}>创建装车任务</Link>}
-        {row.job_status === "labelled" && row.business_type === "ltl" && <Link className="primary" to={`/warehouse/consolidation?warehouseId=${encodeURIComponent(warehouseId)}&eligibility=eligible&q=${encodeURIComponent(row.order_number)}`}>查看待配载</Link>}
+        {row.job_status === "labelled" && row.business_type === "ltl" && <span className="status-pill warning">待操作主管生成配载单</span>}
         {row.job_id && ["generated", "labelled"].includes(row.job_status || "") && <Form method="post"><input type="hidden" name="intent" value="cancel_packing"/><input type="hidden" name="jobId" value={row.job_id}/><button className="text-button" disabled={busy}>重做包装</button></Form>}
       </div></td>
     </tr>

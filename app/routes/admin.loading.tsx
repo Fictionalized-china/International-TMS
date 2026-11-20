@@ -22,6 +22,7 @@ import { loadingTrackingFilters } from "../lib/loading-tracking-filters";
 import { resolveLoadingBatchFieldPolicies } from "../lib/loading-batch-field-policy";
 import { loadLoadingBatchWorkflowOrders } from "../lib/loading-batch-field-policy.server";
 import { emptyLoadingPlanningFilters, filterLoadingPlanningCandidates, hiddenLoadingPlanningSelections, type LoadingPlanningFilters } from "../lib/loading-planning-filters";
+import { canCreateLoadingBatch } from "../lib/loading-batch-selection";
 
 type BatchRow = {
   id: string;
@@ -90,8 +91,20 @@ export async function loader({ request }: Route.LoaderArgs) {
             COUNT(DISTINCT bo.order_id) order_count,
             GROUP_CONCAT(DISTINCT o.order_number) order_numbers,
             GROUP_CONCAT(DISTINCT o.id||'|'||o.order_number) order_refs,
-            COALESCE(SUM(COALESCE((SELECT SUM(r.total_weight_kg) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=o.id AND r.status='completed'),o.gross_weight_kg)),0) total_weight,
-            COALESCE(SUM(COALESCE((SELECT SUM(r.total_volume_cbm) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=o.id AND r.status='completed'),o.volume_cbm)),0) total_volume,
+             COALESCE(SUM(COALESCE((SELECT SUM(package_row.weight_kg)
+               FROM transport_batch_packages batch_package
+               JOIN warehouse_packages package_row ON package_row.id=batch_package.package_id
+                 AND package_row.organization_id=batch_package.organization_id
+                 AND package_row.label_kind='oul' AND package_row.lifecycle_status!='voided'
+               WHERE batch_package.organization_id=b.organization_id AND batch_package.batch_id=b.id
+                 AND batch_package.order_id=o.id AND batch_package.status!='removed'),0)),0) total_weight,
+             COALESCE(SUM(COALESCE((SELECT SUM(package_row.volume_cbm)
+               FROM transport_batch_packages batch_package
+               JOIN warehouse_packages package_row ON package_row.id=batch_package.package_id
+                 AND package_row.organization_id=batch_package.organization_id
+                 AND package_row.label_kind='oul' AND package_row.lifecycle_status!='voided'
+               WHERE batch_package.organization_id=b.organization_id AND batch_package.batch_id=b.id
+                 AND batch_package.order_id=o.id AND batch_package.status!='removed'),0)),0) total_volume,
             (SELECT COUNT(*) FROM transport_batch_vehicles v WHERE v.batch_id=b.id AND v.status!='cancelled') vehicle_count
        FROM transport_batches b
        JOIN transport_batch_orders bo ON bo.batch_id=b.id AND bo.organization_id=b.organization_id AND bo.status!='removed'
@@ -147,14 +160,15 @@ export async function action({ request }: Route.ActionArgs) {
       return {...saved,success:saved.syncPending ? `配载单 ${saved.batchNumber} 已保存，同步仍待完成，请稍后重试` : `配载单 ${saved.batchNumber} 已同步完成，可以继续办理`};
     }
     if (valueOf(form, "intent") !== "create_batch") return { formError: "未知操作" };
-    const allocationMethod = valueOf(form, "costAllocationMethod") || "auto";
-    if (!["auto", "weight", "volume", "equal"].includes(allocationMethod)) {
-      return { formError: "成本分摊方式无效，请刷新后重试" };
-    }
     const created = await createOperationPlannedBatch({
       current,
       requestId:valueOf(form,"requestId"),
       orderIds: form.getAll("orderIds").map(String),
+      packageCounts:Object.fromEntries(form.getAll("packageSelections").map(String).flatMap(value=>{
+        const split=value.lastIndexOf(":");
+        const orderId=split>0?value.slice(0,split):"",count=Number(split>0?value.slice(split+1):"");
+        return orderId&&Number.isInteger(count)?[[orderId,count]]:[];
+      })),
       batchName: valueOf(form, "batchName").trim(),
       carrierId: valueOf(form, "carrierId"),
       vehicleId: valueOf(form, "vehicleId"),
@@ -168,10 +182,6 @@ export async function action({ request }: Route.ActionArgs) {
       notes: valueOf(form, "notes").trim(),
       operationAssigneeUserId: valueOf(form, "operationAssigneeUserId"),
       documentAssigneeUserId: valueOf(form, "documentAssigneeUserId"),
-      costAmount: Number(valueOf(form, "costAmount")),
-      costCurrency: valueOf(form, "costCurrency") || "CNY",
-      costExchangeRate: Number(valueOf(form, "costExchangeRate")),
-      costAllocationMethod: allocationMethod as "auto" | "weight" | "volume" | "equal",
     });
     await writeAudit({
       request,
@@ -256,12 +266,17 @@ function BatchPlanningPanel({ data, busy }: {
   busy: boolean;
 }) {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [filters, setFilters] = useState<LoadingPlanningFilters>({ ...emptyLoadingPlanningFilters });
+  const [selectedCounts,setSelectedCounts]=useState<Record<string,number>>({});
+  const [filters, setFilters] = useState<LoadingPlanningFilters>({
+    ...emptyLoadingPlanningFilters,
+    q: data.view === "planning" ? data.q : "",
+  });
   const filteredCandidates = useMemo(() => filterLoadingPlanningCandidates(data.planningCandidates, filters), [data.planningCandidates, filters]);
   const updateFilter = (key: keyof LoadingPlanningFilters, value: string) => setFilters(current => ({ ...current, [key]: value }));
   const warehouseOptions = [...new Map(data.planningCandidates.map(item => [item.warehouse_id, item.warehouse_name])).entries()];
   const destinationWarehouseOptions = [...new Map(data.planningCandidates.filter(item => item.overseas_warehouse_id).map(item => [item.overseas_warehouse_id!, item.overseas_warehouse_name || item.overseas_warehouse_id!])).entries()];
   const selected = data.planningCandidates.filter((item) => selectedIds.includes(item.order_id));
+  const canSubmitSelection=canCreateLoadingBatch(selected,selected.map(item=>selectedCounts[item.order_id]||item.package_count));
   const selectedFieldPolicies=resolveLoadingBatchFieldPolicies(data.planningWorkflowOrders.filter((item)=>selectedIds.includes(item.orderId)));
   const first = selected[0];
   const routeKey = (item: (typeof data.planningCandidates)[number]) => [
@@ -270,14 +285,20 @@ function BatchPlanningPanel({ data, busy }: {
   ].join("|");
   const compatible = (item: (typeof data.planningCandidates)[number]) => !first || routeKey(item) === routeKey(first);
   const totals = useMemo(() => selected.reduce((sum, item) => ({
-    weight: sum.weight + Number(item.weight_kg || 0),
-    volume: sum.volume + Number(item.volume_cbm || 0),
-    packages: sum.packages + Number(item.package_count || 0),
-    receivable: sum.receivable + Number(item.receivable_base_amount || 0),
-  }), { weight: 0, volume: 0, packages: 0, receivable: 0 }), [selected]);
-  const toggle = (id: string, checked: boolean) => setSelectedIds((current) => checked
-    ? [...new Set([...current, id])]
-    : current.filter((item) => item !== id));
+    weight: sum.weight + Number(item.weight_kg || 0)*(selectedCounts[item.order_id]||item.package_count)/Math.max(1,item.package_count),
+    volume: sum.volume + Number(item.volume_cbm || 0)*(selectedCounts[item.order_id]||item.package_count)/Math.max(1,item.package_count),
+    packages: sum.packages + (selectedCounts[item.order_id]||Number(item.package_count || 0)),
+    receivable: sum.receivable + Number(item.receivable_base_amount || 0)
+      *(selectedCounts[item.order_id]||item.package_count)/Math.max(1,item.total_package_count),
+  }), { weight: 0, volume: 0, packages: 0, receivable: 0 }), [selected,selectedCounts]);
+  const toggle = (id: string, checked: boolean) => {
+    setSelectedIds((current) => checked?[...new Set([...current,id])]:current.filter((item)=>item!==id));
+    setSelectedCounts((current)=>{
+      if(!checked){const next={...current};delete next[id];return next;}
+      const candidate=data.planningCandidates.find(item=>item.order_id===id);
+      return{...current,[id]:candidate?.package_count??1};
+    });
+  };
   return <section className="panel inline-loading-workbench">
     <div className="panel-header"><div><h2>配载规划</h2><p>勾选同仓、同目的仓的订单，生成待找车配载单；此时不需要车辆、司机和报价。</p></div><span className="status-pill">{data.planningCandidates.length} 票可配载</span></div>
     <div className="loading-planning-filters" role="search" aria-label="筛选待配载订单">
@@ -293,6 +314,7 @@ function BatchPlanningPanel({ data, busy }: {
       <input type="hidden" name="intent" value="create_batch"/>
       <input type="hidden" name="requestId" value={data.requestId}/>
       {hiddenLoadingPlanningSelections(selected, filteredCandidates).map(item => <input key={item.order_id} type="hidden" name="orderIds" value={item.order_id}/>)}
+      {selected.map(item=><input key={`packages:${item.order_id}`} type="hidden" name="packageSelections" value={`${item.order_id}:${selectedCounts[item.order_id]||item.package_count}`}/>)}
       <div className="form-grid compact loading-batch-fields">
         <label className="field"><span>配载单名称</span><input name="batchName" placeholder="留空自动生成"/></label>
       </div>
@@ -308,16 +330,17 @@ function BatchPlanningPanel({ data, busy }: {
           {selectedFieldPolicies.loading_notes.isActive&&<label className="field span-2"><span>配载说明{selectedFieldPolicies.loading_notes.isRequired?" *":"（选填）"}</span><input name="notes" required={selectedFieldPolicies.loading_notes.isRequired} placeholder="特殊装载、交接或调度说明"/></label>}
         </div>}
       </section>
-      <div className="loading-selection-summary inline-loading-summary"><span>已选 <strong>{selected.length}</strong> 票</span><span>{totals.packages} 包</span><span>{totals.weight.toFixed(2)} KG</span><span>{totals.volume.toFixed(3)} CBM</span></div>
+      <div className="loading-selection-summary inline-loading-summary"><span>已选 <strong>{selected.length}</strong> 票</span><span>{totals.packages} 包</span><span>约 {totals.weight.toFixed(2)} KG</span><span>约 {totals.volume.toFixed(3)} CBM</span></div>
       {selected.length > 0 && <div className="loading-planning-selected" aria-label="已选待配载订单">{selected.map(item => <button key={item.order_id} type="button" className="secondary" aria-label={`取消选择 ${item.order_number}`} onClick={() => toggle(item.order_id, false)}>{item.order_number} ×</button>)}<button type="button" className="text-button" onClick={() => setSelectedIds([])}>清空选择</button></div>}
-      <div className="table-wrap module-record-table inline-loading-table"><table><thead><tr><th>选择</th><th>订单 / 客户</th><th>装车仓</th><th>境外目的地</th><th>实收汇总</th><th>状态</th></tr></thead><tbody>{filteredCandidates.map((item) => {
+      <div className="table-wrap module-record-table inline-loading-table"><table><thead><tr><th>选择</th><th>订单 / 客户</th><th>装车仓</th><th>境外目的地</th><th>本批包装</th><th>可配载汇总</th><th>状态</th></tr></thead><tbody>{filteredCandidates.map((item) => {
         const disabled = !compatible(item) && !selectedIds.includes(item.order_id);
-        return <tr key={item.order_id} className={selectedIds.includes(item.order_id) ? "selected-row" : ""}><td><input type="checkbox" name="orderIds" aria-label={`选择订单 ${item.order_number}`} value={item.order_id} checked={selectedIds.includes(item.order_id)} disabled={disabled} onChange={(event) => toggle(item.order_id,event.currentTarget.checked)}/></td><td><LoadingOrderPeek order={item}/><small>{item.customer_name}</small></td><td>{item.warehouse_name}</td><td>{item.overseas_warehouse_name || "未设置"}<small>{[item.destination_country,item.destination_state,item.destination_city].filter(Boolean).join(" ")}</small></td><td>{Number(item.weight_kg).toFixed(2)} KG<small>{Number(item.volume_cbm).toFixed(3)} CBM · {item.package_count} 包</small></td><td>{disabled ? "与当前选择不兼容" : "可配载"}</td></tr>;
+        const chosen=selectedIds.includes(item.order_id);
+        return <tr key={item.order_id} className={chosen ? "selected-row" : ""}><td><input type="checkbox" name="orderIds" aria-label={`选择订单 ${item.order_number}`} value={item.order_id} checked={chosen} disabled={disabled} onChange={(event) => toggle(item.order_id,event.currentTarget.checked)}/></td><td><LoadingOrderPeek order={item}/><small>{item.customer_name}{item.allocated_package_count?` · 已有 ${item.allocated_package_count} 包在其他批次`:""}</small></td><td>{item.warehouse_name}</td><td>{item.overseas_warehouse_name || "未设置"}<small>{[item.destination_country,item.destination_state,item.destination_city].filter(Boolean).join(" ")}</small></td><td>{chosen?<label className="loading-package-count"><span>本批包数</span><input type="number" min={1} max={item.package_count} value={selectedCounts[item.order_id]||item.package_count} onChange={event=>setSelectedCounts(current=>({...current,[item.order_id]:Math.max(1,Math.min(item.package_count,Number(event.currentTarget.value)||1))}))}/><small>可用 {item.package_count} 包</small></label>:<span>{item.package_count} 包可选</span>}</td><td>{Number(item.weight_kg).toFixed(2)} KG<small>{Number(item.volume_cbm).toFixed(3)} CBM · {item.package_count} 包</small></td><td>{disabled ? "与当前选择不兼容" : "可配载"}</td></tr>;
       })}</tbody></table></div>
       {!data.planningCandidates.length && <p className="empty-state">当前没有同时满足“已货齐、已贴标、无异常、未占用、工作流已到配载节点”的订单。仓库端待配载池仅供核对，不能在仓库账号中勾选成单。</p>}
       {!!data.planningCandidates.length && !filteredCandidates.length && <p className="empty-state">没有符合当前筛选条件的待配载订单；已选订单仍保留，可重置筛选继续选择。</p>}
-      {data.planningCandidates.length === 1 && <p className="alert info">目前只有 1 票可配载；拼车配载至少需要两票同仓、同目的地且同操作主管的订单。</p>}
-      <div className="inline-loading-actions"><small>生成后还需发送商务找车；商务反馈整批资源，主管确认后仓库才可装车。</small><button className="primary" disabled={busy || selected.length < 2}>{busy ? "正在校验并生成…" : "生成待找车配载单"}</button></div>
+      {selected.length === 1&&!canSubmitSelection&&<p className="alert info">普通拼车配载至少需要 2 票同仓、同目的地且同操作主管的订单。如果这是单票分批运输，请将“本批包数”调小；已有前序批次的余包可全部选完。</p>}
+      <div className="inline-loading-actions"><small>生成后还需发送商务找车；商务反馈整批资源，主管确认后仓库才可装车。</small><button className="primary" disabled={busy || !canSubmitSelection}>{busy ? "正在校验并生成…" : "生成待找车配载单"}</button></div>
     </Form>
   </section>;
 }

@@ -24,6 +24,11 @@ import { policyEnabled } from "./business-process-policy";
 import { loadFinancialClosure, financialClosurePredicate } from "./financial-closure.server";
 import { predicateGuard, changedRowGuard, guardedBatch } from "./mutation-guard.server";
 import { prepareOrderIntakeAdvance,intakeGateCommitStatements,readIntakeGateSnapshot } from "./order-intake-gate.server";
+import {
+  loadOrderTransportCompletionState,
+  orderTransportCompletionPredicate,
+  orderTransportCompletionPredicateValues,
+} from "./order-transport-completion.server";
 
 export type ReviewTiming = {
   orderAt: string | null;
@@ -279,6 +284,13 @@ export async function loadOrderReviewFinalizationGate(
       reason: `当前工作流仍有必办模块未完成：${pendingRequiredModules.results.map((item) => item.module_name).join("、")}`,
     };
   }
+  const physicalTransport = await loadOrderTransportCompletionState(db, organizationId, orderId);
+  if (!physicalTransport.complete) {
+    return {
+      allowed: false,
+      reason: physicalTransport.reason ?? "同一订单仍有运输批次未完成",
+    };
+  }
   const policy = await loadBusinessProcessPolicy(organizationId, db);
   if (policyEnabled(policy, "settlement.require_cash_before_archive")) {
     const closure = await loadFinancialClosure(db, organizationId, orderId);
@@ -354,6 +366,12 @@ export async function finalizeOrderReview(
     ...intakeGateCommitStatements(intakeSnapshot,input.now,db),
     ...(policyEnabled(archivePolicy, "settlement.require_cash_before_archive")
       ? [predicateGuard(db, financialClosurePredicate(), [input.organizationId, input.orderId], input.now)] : []),
+    predicateGuard(
+      db,
+      orderTransportCompletionPredicate(),
+      orderTransportCompletionPredicateValues(input.organizationId, input.orderId),
+      input.now,
+    ),
     db.prepare(`UPDATE transport_orders SET
       completion_status=?,status='completed',
       business_completed_at=COALESCE(business_completed_at,?),
@@ -575,6 +593,7 @@ async function buildOrderReview(
     pickupModule,
     warehouseModule,
     exceptionsModule,
+    physicalTransport,
   ] = await Promise.all([
     db.prepare(`SELECT
       (SELECT MIN(s.actual_pickup_at) FROM shipments s WHERE s.organization_id=? AND s.order_id=?) pickup_at,
@@ -585,9 +604,8 @@ async function buildOrderReview(
       (SELECT MAX(op.actual_arrival_at) FROM overseas_warehouse_operations op WHERE op.organization_id=? AND op.order_id=? AND op.status!='cancelled') overseas_arrival_at,
       (SELECT MAX(op.pickup_at) FROM overseas_warehouse_operations op WHERE op.organization_id=? AND op.order_id=? AND op.status='picked_up') pickup_completed_at,
       CASE WHEN EXISTS(SELECT 1 FROM overseas_warehouse_operations op WHERE op.organization_id=? AND op.order_id=? AND op.status='picked_up')
-        OR EXISTS(SELECT 1 FROM transport_batch_orders bo JOIN transport_batches b ON b.id=bo.batch_id WHERE bo.organization_id=? AND bo.order_id=? AND bo.status!='removed' AND b.road_status='pickup_completed')
         OR EXISTS(SELECT 1 FROM shipments s WHERE s.organization_id=? AND s.order_id=? AND s.status='delivered') THEN 1 ELSE 0 END pickup_complete`)
-      .bind(organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId)
+      .bind(organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId,organizationId,orderId)
       .first<{pickup_at:string|null;outbound_at:string|null;overseas_arrival_at:string|null;pickup_completed_at:string|null;pickup_complete:number}>(),
     db.prepare(`SELECT e.currency,
       SUM(CASE WHEN e.direction='receivable' THEN e.amount ELSE 0 END) receivable,
@@ -644,6 +662,7 @@ async function buildOrderReview(
     loadConfiguredReviewModuleState(db,organizationId,orderId,"overseas_warehouse"),
     loadConfiguredReviewModuleState(db,organizationId,orderId,"warehouse"),
     loadConfiguredReviewModuleState(db,organizationId,orderId,"exceptions"),
+    loadOrderTransportCompletionState(db,organizationId,orderId),
   ]);
   const [people] = await Promise.all([
     db.prepare(`SELECT
@@ -656,7 +675,12 @@ async function buildOrderReview(
   const hasReceivable=financeRows.results.some(row=>row.receivable_count>0);
   const hasPayable=financeRows.results.some(row=>row.payable_count>0);
   const blockers:ReviewBlocker[]=[];
-  const pickupComplete = Boolean(timing?.pickup_complete);
+  const pickupComplete = physicalTransport.complete && Boolean(timing?.pickup_complete);
+  if (!physicalTransport.complete) blockers.push({
+    code: "transport_batches_pending",
+    message: physicalTransport.reason ?? "同一订单仍有运输批次未完成",
+    href: "/admin/loading",
+  });
   const pickupFields = pickupWorkflowFields.results.map((field) => ({
     fieldKey: field.field_key,
     label: field.label,

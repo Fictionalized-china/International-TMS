@@ -6,6 +6,7 @@ import { applyP0WorkflowParityMigration } from './p0-workflow-parity-migration.m
 import { applyCloudMutationIntegrityMigration } from './cloud-mutation-integrity-migration.mjs';
 import { applyConfiguredCostWindowMigration } from './cost-allocation-window-migration.mjs';
 import { applySitePhotoTimeMigration } from './site-photo-time-migration.mjs';
+import { applyPartialOrderTransportMigration } from './partial-order-transport-migration.mjs';
 
 const migrations = [
   {
@@ -396,6 +397,44 @@ migrations.push({
   definition:'feature-owned photo and physical-sync created/updated/occurred timestamps use existing ISO UTC text contract;preserve milliseconds and unrelated facts',
   async up(connection){await applySitePhotoTimeMigration(connection);},
 });
+migrations.push({
+  version:194,name:'order_intake_change_requests',
+  definition:'review-before-apply intake plan and cargo corrections;one pending request per order;idempotent requests;immutable before and after;no physical or financial facts changed',
+  async up(connection){
+    await connection.query(`CREATE TABLE IF NOT EXISTS order_intake_change_requests (
+      id VARCHAR(160) NOT NULL PRIMARY KEY,organization_id VARCHAR(160) NOT NULL,order_id VARCHAR(160) NOT NULL,kind VARCHAR(20) NOT NULL DEFAULT 'plan',
+      request_key VARCHAR(160) NOT NULL,request_hash VARCHAR(64) NOT NULL,source_hash VARCHAR(64) NOT NULL,
+      before_json MEDIUMTEXT NOT NULL,proposed_json MEDIUMTEXT NOT NULL,changes_json MEDIUMTEXT NOT NULL,
+      reason VARCHAR(1000) NOT NULL,requested_by_user_id VARCHAR(160) NOT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'pending',pending_order_id VARCHAR(160) NULL,
+      reviewed_by_user_id VARCHAR(160) NULL,review_notes VARCHAR(1000) NULL,
+      created_at VARCHAR(32) NOT NULL,reviewed_at VARCHAR(32) NULL,
+      UNIQUE KEY uq_intake_change_request(organization_id,requested_by_user_id,request_key),
+      UNIQUE KEY uq_intake_change_pending(organization_id,pending_order_id),
+      INDEX idx_intake_changes_order(organization_id,order_id,created_at),
+      CHECK(status IN ('pending','approved','rejected','withdrawn')),
+      CHECK(kind IN ('plan','cargo')),
+      CHECK((status='pending' AND pending_order_id IS NOT NULL AND pending_order_id=order_id) OR (status!='pending' AND pending_order_id IS NULL))
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
+  },
+});
+migrations.push({
+  version:195,name:'order_cargo_edit_submissions',
+  definition:'atomic idempotent cargo edits with original request hash;no historical cargo package stock or financial rewrites',
+  async up(connection){
+    await connection.query(`CREATE TABLE IF NOT EXISTS order_cargo_edit_submissions (
+      id VARCHAR(160) NOT NULL PRIMARY KEY,organization_id VARCHAR(160) NOT NULL,order_id VARCHAR(160) NOT NULL,
+      actor_user_id VARCHAR(160) NOT NULL,request_key VARCHAR(160) NOT NULL,payload_hash VARCHAR(64) NOT NULL,
+      cargo_item_id VARCHAR(160) NOT NULL,mode VARCHAR(20) NOT NULL,package_count INT NOT NULL,created_at VARCHAR(32) NOT NULL,
+      UNIQUE KEY uq_cargo_edit_request(organization_id,actor_user_id,request_key),CHECK(mode IN ('create','update'))
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
+  },
+});
+migrations.push({
+  version:196,name:'partial_order_transport_batches',
+  definition:'one order may use multiple batches;exclusive immutable OUL batch and dispatch claims;batch-scoped milestones with safe unique-batch history backfill;existing allocations preserved',
+  async up(connection){await applyPartialOrderTransportMigration(connection,addColumnIfMissing);},
+});
 for (const migration of migrations) {
   migration.checksum = createHash("sha256")
     .update(`${migration.version}:${migration.name}\n${migration.definition}`)
@@ -405,6 +444,11 @@ for (const migration of migrations) {
 export const requiredMysqlSchemaVersion = migrations.at(-1)?.version ?? 0;
 export const requiredMysqlSchemaChecksum = migrations.at(-1)?.checksum ?? "";
 export const requiredMysqlSchemaColumns = [
+  ['order_intake_change_requests','proposed_json'],['order_intake_change_requests','pending_order_id'],['order_intake_change_requests','kind'],
+  ['order_cargo_edit_submissions','payload_hash'],['order_cargo_edit_submissions','mode'],
+  ['transport_batch_packages','package_id'],['transport_batch_package_claims','package_id'],
+  ['warehouse_dispatch_package_claims','package_id'],
+  ['order_tracking_milestones','transport_batch_id'],
   ['physical_operation_sync_jobs','lease_token'],['physical_operation_sync_jobs','payload_json'],
   ['order_site_photo_submissions','payload_hash'],['order_site_photos','thumbnail_data_url'],['order_site_photos','event_id'],
   ["mutation_commit_guards", "valid"],

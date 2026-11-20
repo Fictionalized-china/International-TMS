@@ -2,6 +2,9 @@ import { runtimeWorkflowFieldPolicy } from "./workflow-field-runtime";
 import { nonNegativeNumberPresent } from "./validation";
 
 export type CargoEditorWorkflowField = {
+  id?:string;
+  stepKey?:string;
+  handlerPositionCodes?:string[];
   fieldKey: string;
   label?: string;
   isActive: boolean;

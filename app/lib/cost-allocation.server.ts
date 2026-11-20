@@ -94,6 +94,7 @@ export async function loadCostAllocations(db:D1Database,organizationId:string,ba
 }
 
 export async function createCostAllocation(db:D1Database,input:{
+  allocationId?:string;
   organizationId:string;batchId:string;chargeCode:string;chargeName:string;counterpartyName:string;
   currency:string;exchangeRate:number;totalAmount:number;method:"auto"|AllocationMethod;notes?:string;
   volumeWeightRatioKgPerCbm?:number;
@@ -113,7 +114,7 @@ export async function createCostAllocation(db:D1Database,input:{
     ?Number(input.volumeWeightRatioKgPerCbm):300;
   const method=input.method==="auto"?recommendAllocationMethod(input.chargeCode,totalWeight,totalVolume,volumeWeightRatio):input.method;
   const suggestions=allocateCost(actuals.map(item=>({orderId:item.order_id,actualWeightKg:item.actual_weight_kg,actualVolumeCbm:item.actual_volume_cbm})),input.totalAmount,method);
-  const density=allocationDensity(totalWeight,totalVolume),allocationId=crypto.randomUUID();
+  const density=allocationDensity(totalWeight,totalVolume),allocationId=input.allocationId||crypto.randomUUID();
   const statements:D1PreparedStatement[]=[
     ...batchCostAllocationCommitGuards(db,input.organizationId,input.batchId,gateOrders,input.now),
     db.prepare(`INSERT INTO transport_cost_allocations(id,organization_id,batch_id,charge_code,charge_name,counterparty_name,currency,exchange_rate,total_amount,allocation_method,total_actual_weight_kg,total_actual_volume_cbm,density_kg_per_cbm,density_result,status,notes,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'draft',?,?,?,?)`).bind(allocationId,input.organizationId,input.batchId,input.chargeCode,input.chargeName,input.counterpartyName,input.currency.toUpperCase(),input.exchangeRate,input.totalAmount,method,totalWeight,totalVolume,density,density<volumeWeightRatio?`轻货：密度低于 ${volumeWeightRatio} KG/CBM`:`重货：密度达到 ${volumeWeightRatio} KG/CBM`,input.notes||null,input.userId,input.now,input.now),
@@ -239,19 +240,21 @@ export async function confirmCostAllocation(db:D1Database,input:{organizationId:
   }catch(error){mutationConflict(error)}
 }
 
-const batchActualsSql=`SELECT bo.order_id,o.order_number,c.name customer_name,COUNT(DISTINCT r.id) receipt_count,
-    COALESCE(MAX(pack.total_weight_kg),SUM(r.total_weight_kg),0) actual_weight_kg,
-    COALESCE(MAX(pack.total_volume_cbm),SUM(r.total_volume_cbm),0) actual_volume_cbm
+const batchActualsSql=`SELECT bo.order_id,o.order_number,c.name customer_name,COUNT(DISTINCT receipt.id) receipt_count,
+    COALESCE(SUM(package_row.weight_kg),0) actual_weight_kg,
+    COALESCE(SUM(package_row.volume_cbm),0) actual_volume_cbm
     FROM transport_batch_orders bo
     JOIN transport_batches b ON b.id=bo.batch_id AND b.organization_id=bo.organization_id
     JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
     JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
-    LEFT JOIN warehouse_packing_jobs pack ON pack.organization_id=bo.organization_id AND pack.order_id=bo.order_id
-      AND pack.transport_batch_id=bo.batch_id AND pack.warehouse_id=b.warehouse_id AND pack.status IN ('allocated','loading','dispatched')
-    LEFT JOIN shipments s ON s.order_id=o.id AND s.organization_id=o.organization_id
-    LEFT JOIN warehouse_receipts r
-      ON r.shipment_id=s.id AND r.organization_id=o.organization_id
-     AND r.warehouse_id=b.warehouse_id AND r.status='completed'
+    JOIN transport_batch_packages batch_package ON batch_package.organization_id=bo.organization_id
+      AND batch_package.batch_id=bo.batch_id AND batch_package.order_id=bo.order_id
+      AND batch_package.status!='removed'
+    JOIN warehouse_packages package_row ON package_row.organization_id=batch_package.organization_id
+      AND package_row.id=batch_package.package_id AND package_row.warehouse_id=b.warehouse_id
+      AND package_row.label_kind='oul' AND package_row.lifecycle_status!='voided'
+    LEFT JOIN warehouse_receipts receipt ON receipt.id=package_row.receipt_id
+      AND receipt.organization_id=package_row.organization_id AND receipt.status='completed'
     WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
     GROUP BY bo.order_id,o.order_number,c.name ORDER BY bo.sequence_no`;
 async function loadBatchActuals(db:D1Database,organizationId:string,batchId:string){

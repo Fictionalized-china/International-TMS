@@ -75,10 +75,27 @@ function review(
 
 function dbWithPendingModules(
   rows: Array<{ module_code: string; module_name: string }>,
+  transport: { totalPackageCount?: number; waitingDispatchCount?: number; waitingArrivalCount?: number; untrackedDepartedCount?: number } = {},
 ) {
   return {
     prepare(sql: string) {
       if (sql.includes("FROM business_process_policies")) return { bind: () => ({ all: async () => ({ results: [{ policy_key: "settlement.require_cash_before_archive", policy_value: "0" }] }) }) };
+      if (sql.includes("waiting_dispatch_count") && sql.includes("waiting_arrival_count")) {
+        return {
+          bind() {
+            return {
+              async first() {
+                return {
+                  total_package_count: transport.totalPackageCount ?? 1,
+                  waiting_dispatch_count: transport.waitingDispatchCount ?? 0,
+                  waiting_arrival_count: transport.waitingArrivalCount ?? 0,
+                  untracked_departed_count: transport.untrackedDepartedCount ?? 0,
+                };
+              },
+            };
+          },
+        };
+      }
       expect(sql).toContain("workflow_instance_module_states");
       return {
         bind() {
@@ -121,6 +138,18 @@ describe("order review finalization gate", () => {
       "order-1",
       review({ completionStatus: "business_complete_unsettled" }),
     )).resolves.toEqual({ allowed: true, reason: null });
+  });
+
+  it("blocks finalization while another transport batch still has OUL in transit", async () => {
+    await expect(loadOrderReviewFinalizationGate(
+      dbWithPendingModules([], { waitingArrivalCount: 1 }),
+      "organization-1",
+      "order-1",
+      review(),
+    )).resolves.toEqual({
+      allowed: false,
+      reason: "同一订单的运输尚未完成：1 包在途或待到仓。全部批次到仓后才能整票签收和归档",
+    });
   });
 
   it("blocks missing required review fields before evaluating completion", async () => {

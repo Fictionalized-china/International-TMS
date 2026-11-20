@@ -41,8 +41,8 @@ function remediationForReason(
         }
       : {
           key: "create-loading-batch",
-          title: "进入货物配载",
-          hint: "为拼车订单创建或加入 PZ 配载单，完成整批装车安排。",
+          title: "查看待配载状态",
+          hint: "仓库不能决定订单组合；请通知操作主管在管理端配载规划中选择本批 OUL 并生成 PZ 配载单。",
           href: `/warehouse/consolidation?orderId=${encodeURIComponent(input.orderId)}&returnTo=${encodeURIComponent(input.retryHref)}`,
         };
   }

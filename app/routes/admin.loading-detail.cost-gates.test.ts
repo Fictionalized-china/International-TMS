@@ -14,6 +14,8 @@ const harness = vi.hoisted(() => {
     approvalStatus: "approved",
     costsScopeAllowed: true,
     allocationInBatch: true,
+    quoteAllocationStatus: null as string | null,
+    quoteAvailable: true,
     dispatchTotal: 2,
     dispatched: 2,
   };
@@ -75,6 +77,17 @@ const harness = vi.hoisted(() => {
             } : null;
           if (sql.includes("FROM transport_batches cost_scope_batch"))
             return state.costsScopeAllowed ? { allowed: 1 } : null;
+          if (sql.startsWith("SELECT status FROM transport_cost_allocations"))
+            return state.quoteAllocationStatus ? { status: state.quoteAllocationStatus } : null;
+          if (sql.includes("FROM batch_dispatch_quotes q") && sql.includes("JOIN carriers c"))
+            return state.quoteAvailable ? {
+              freight_amount: 1200,
+              currency: "CNY",
+              exchange_rate: 1,
+              allocation_method: "weight",
+              notes: "商务确认整批运价",
+              carrier_name: "境外承运商",
+            } : null;
           if (sql.includes("FROM transport_cost_allocations") && sql.includes("batch_id=?"))
             return state.allocationInBatch ? { id: "allocation-1" } : null;
           if (sql.includes("COUNT(*) total") && sql.includes("warehouse_dispatches"))
@@ -136,6 +149,8 @@ describe("PZ cost allocation gates", () => {
     harness.state.approvalStatus = "approved";
     harness.state.costsScopeAllowed = true;
     harness.state.allocationInBatch = true;
+    harness.state.quoteAllocationStatus = null;
+    harness.state.quoteAvailable = true;
     harness.state.dispatchTotal = 2;
     harness.state.dispatched = 2;
     harness.current.permissions = [
@@ -261,6 +276,40 @@ describe("PZ cost allocation gates", () => {
       success: "分摊草稿已生成；请逐票检查后再确认入账",
     });
     expect(harness.createCostAllocation).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates one idempotent allocation directly from the commercial batch quote", async () => {
+    await expect(action({
+      request: post("create_quote_cost_allocation"),
+      params: { batchId: "batch-1" },
+      context: undefined,
+    } as never)).resolves.toEqual({
+      success: "已按本批 OUL 的实收重量/体积自动分摊商务运价；请复核后确认入账",
+    });
+    expect(harness.createCostAllocation).toHaveBeenCalledWith(
+      harness.DB,
+      expect.objectContaining({
+        allocationId: "batch-quote:batch-1",
+        batchId: "batch-1",
+        chargeCode: "OVERSEAS_TRANSPORT",
+        counterpartyName: "境外承运商",
+        totalAmount: 1200,
+        method: "weight",
+      }),
+    );
+  });
+
+  it("does not duplicate a commercial quote allocation on a repeated click", async () => {
+    harness.state.quoteAllocationStatus = "draft";
+
+    await expect(action({
+      request: post("create_quote_cost_allocation"),
+      params: { batchId: "batch-1" },
+      context: undefined,
+    } as never)).resolves.toEqual({
+      success: "商务运价的自动分摊草稿已存在，请直接复核",
+    });
+    expect(harness.createCostAllocation).not.toHaveBeenCalled();
   });
 
   it("rejects a forged cost POST without all three finance permissions", async () => {

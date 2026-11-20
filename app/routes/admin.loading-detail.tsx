@@ -229,12 +229,13 @@ async function assignBatchResponsibilities(input:{
     : env.DB.prepare(`UPDATE transport_batches
         SET operation_assignee_user_id=?,document_assignee_user_id=?,responsibility_revision=?,updated_at=?
         WHERE id=? AND organization_id=? AND batch_number LIKE 'PZ-%' AND approval_status='approved'
-          AND operation_assignee_user_id IS ? AND document_assignee_user_id IS ?
+          AND (operation_assignee_user_id=? OR (operation_assignee_user_id IS NULL AND ? IS NULL))
+          AND (document_assignee_user_id=? OR (document_assignee_user_id IS NULL AND ? IS NULL))
           AND (?=1 OR (
             actual_departure_at IS NULL
             AND road_status NOT IN ('outbound_in_transit','overseas_arrived','waiting_pickup','pickup_completed')
           ))`)
-      .bind(input.operationAssigneeUserId,input.documentAssigneeUserId,revision,input.now,input.batchId,input.organizationId,input.previousOperationAssigneeUserId??null,input.previousDocumentAssigneeUserId??null,input.allowAfterDeparture?1:0);
+      .bind(input.operationAssigneeUserId,input.documentAssigneeUserId,revision,input.now,input.batchId,input.organizationId,input.previousOperationAssigneeUserId??null,input.previousOperationAssigneeUserId??null,input.previousDocumentAssigneeUserId??null,input.previousDocumentAssigneeUserId??null,input.allowAfterDeparture?1:0);
   const guard=responsibilityRevisionGuard();
   const guardValues=[input.batchId,input.organizationId,revision,input.operationAssigneeUserId,input.documentAssigneeUserId];
   const taskStateStatements:D1PreparedStatement[]=[];
@@ -472,7 +473,7 @@ async function loadFreshBatchTrackingAction(
   });
   return loaded.batch;
 }
-type BatchOrder={order_id:string;order_number:string;business_type:string|null;work_number:string;customer_name:string;cargo_description:string|null;cargo_names:string|null;pieces:number;gross_weight_kg:number;volume_cbm:number;declared_weight_kg:number;declared_volume_cbm:number;inbound_at:string|null;dispatched_packages:number;in_stock_packages:number;overseas_warehouse_id:string|null;overseas_warehouse_name:string|null;overseas_status:string|null;overseas_arrival_at:string|null;document_assignee_user_id:string|null;customs_assignee_user_id:string|null};
+type BatchOrder={order_id:string;order_number:string;business_type:string|null;work_number:string;customer_name:string;cargo_description:string|null;cargo_names:string|null;pieces:number;gross_weight_kg:number;volume_cbm:number;declared_weight_kg:number;declared_volume_cbm:number;inbound_at:string|null;batch_package_count:number;total_order_packages:number;remaining_order_packages:number;dispatched_packages:number;in_stock_packages:number;overseas_warehouse_id:string|null;overseas_warehouse_name:string|null;overseas_status:string|null;overseas_arrival_at:string|null;document_assignee_user_id:string|null;customs_assignee_user_id:string|null};
 type BatchCargoItem={id:string;order_id:string;line_no:number;cargo_name_cn:string;cargo_name_en:string|null;hs_code:string|null;overseas_hs_code:string|null;package_type:string;package_count:number;pieces_per_package:number;gross_weight_per_package_kg:number;length_cm:number;width_cm:number;height_cm:number;volume_per_package_cbm:number;declared_value:number;currency:string;brand_model:string|null;marks:string|null;special_attributes:string|null};
 type BatchOrderPagination={page:number;pageCount:number;pageSize:number;total:number};
 type Vehicle={id:string;vehicle_no:string;vehicle_type:string|null;plate_number:string|null;driver_name:string|null;driver_phone:string|null;capacity_weight_kg:number;capacity_volume_cbm:number;used_weight:number;used_volume:number;loaded_orders:number;status:string};
@@ -665,39 +666,93 @@ export async function loader({request,params}:Route.LoaderArgs){
   // invocation. Load the workspace in groups of four instead of opening every
   // independent query at once.
   const [orders,vehicles,carriers,warehouses]=await Promise.all([
-    env.DB.prepare(`SELECT bo.order_id,o.order_number,o.business_type,COALESCE((SELECT s.shipment_number FROM shipments s WHERE s.order_id=o.id ORDER BY s.created_at DESC LIMIT 1),o.order_number) work_number,c.name customer_name,o.cargo_description,
+    env.DB.prepare(`WITH batch_package_facts AS (
+        SELECT batch_package.order_id,
+          COUNT(*) batch_package_count,
+          SUM(package_row.pieces) pieces,
+          SUM(COALESCE(package_row.weight_kg,0)) gross_weight_kg,
+          SUM(COALESCE(package_row.volume_cbm,0)) volume_cbm,
+          MIN(receipt.received_at) inbound_at,
+          SUM(CASE WHEN batch_package.status IN ('departed','arrived') OR package_row.status='dispatched' THEN 1 ELSE 0 END) dispatched_packages,
+          SUM(CASE WHEN batch_package.status='arrived' THEN 1 ELSE 0 END) arrived_packages,
+          SUM(CASE WHEN package_row.status IN ('in_stock','allocated') THEN 1 ELSE 0 END) in_stock_packages
+        FROM transport_batch_packages batch_package
+        JOIN warehouse_packages package_row ON package_row.id=batch_package.package_id
+          AND package_row.organization_id=batch_package.organization_id
+          AND package_row.label_kind='oul' AND package_row.lifecycle_status!='voided'
+        LEFT JOIN warehouse_receipts receipt ON receipt.id=package_row.receipt_id
+          AND receipt.organization_id=package_row.organization_id AND receipt.status='completed'
+        WHERE batch_package.batch_id=? AND batch_package.organization_id=?
+          AND batch_package.status!='removed'
+        GROUP BY batch_package.order_id
+      ), order_package_facts AS (
+        SELECT job.order_id,COUNT(*) total_order_packages,
+          SUM(COALESCE(package_row.weight_kg,0)) total_weight_kg,
+          SUM(COALESCE(package_row.volume_cbm,0)) total_volume_cbm,
+          SUM(CASE WHEN package_row.status='in_stock' AND NOT EXISTS(
+            SELECT 1 FROM transport_batch_package_claims claim
+            WHERE claim.organization_id=package_row.organization_id AND claim.package_id=package_row.id
+          ) THEN 1 ELSE 0 END) remaining_order_packages
+        FROM warehouse_packing_jobs job
+        JOIN warehouse_packages package_row ON package_row.packing_job_id=job.id
+          AND package_row.organization_id=job.organization_id
+          AND package_row.label_kind='oul' AND package_row.lifecycle_status!='voided'
+        WHERE job.organization_id=? AND job.status!='cancelled'
+        GROUP BY job.order_id
+      )
+      SELECT bo.order_id,o.order_number,o.business_type,COALESCE((SELECT s.shipment_number FROM shipments s WHERE s.order_id=o.id ORDER BY s.created_at DESC LIMIT 1),o.order_number) work_number,c.name customer_name,o.cargo_description,
         COALESCE((SELECT GROUP_CONCAT(NULLIF(TRIM(i.cargo_name_cn),''),'、') FROM order_cargo_items i WHERE i.order_id=o.id AND i.organization_id=o.organization_id),o.cargo_description) cargo_names,
-        COALESCE((SELECT SUM(r.total_pieces) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=o.id AND r.status='completed'),o.pieces) pieces,
-        COALESCE((SELECT SUM(r.total_weight_kg) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=o.id AND r.status='completed'),o.gross_weight_kg) gross_weight_kg,
-        COALESCE((SELECT SUM(r.total_volume_cbm) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=o.id AND r.status='completed'),o.volume_cbm) volume_cbm,
-        o.gross_weight_kg declared_weight_kg,o.volume_cbm declared_volume_cbm,
-        (SELECT MIN(r.received_at) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=o.id AND r.status='completed') inbound_at,
-        (SELECT COUNT(*) FROM warehouse_packages wp JOIN shipments s2 ON s2.id=wp.shipment_id WHERE s2.order_id=o.id AND wp.status='dispatched') dispatched_packages,
-        (SELECT COUNT(*) FROM warehouse_packages wp JOIN shipments s2 ON s2.id=wp.shipment_id WHERE s2.order_id=o.id AND wp.status IN ('in_stock','allocated')) in_stock_packages,
+        facts.pieces,facts.gross_weight_kg,facts.volume_cbm,
+        o.gross_weight_kg*CASE WHEN totals.total_weight_kg>0 THEN facts.gross_weight_kg/totals.total_weight_kg
+          ELSE facts.batch_package_count*1.0/CASE WHEN totals.total_order_packages>0 THEN totals.total_order_packages ELSE 1 END END declared_weight_kg,
+        o.volume_cbm*CASE WHEN totals.total_volume_cbm>0 THEN facts.volume_cbm/totals.total_volume_cbm
+          ELSE facts.batch_package_count*1.0/CASE WHEN totals.total_order_packages>0 THEN totals.total_order_packages ELSE 1 END END declared_volume_cbm,
+        facts.inbound_at,facts.batch_package_count,totals.total_order_packages,totals.remaining_order_packages,
+        facts.dispatched_packages,facts.in_stock_packages,
         o.overseas_warehouse_id,ow.name overseas_warehouse_name,
-        CASE WHEN EXISTS(
-          SELECT 1 FROM warehouse_receipts owr
-          JOIN shipments os ON os.id=owr.shipment_id AND os.organization_id=owr.organization_id
-          WHERE owr.organization_id=o.organization_id AND os.order_id=o.id
-            AND owr.warehouse_id=o.overseas_warehouse_id AND owr.status='completed' AND owr.cargo_complete=1
-        ) THEN 'received' ELSE op.status END overseas_status,
-        COALESCE(op.actual_arrival_at,(
-          SELECT MAX(owr.received_at) FROM warehouse_receipts owr
-          JOIN shipments os ON os.id=owr.shipment_id AND os.organization_id=owr.organization_id
-          WHERE owr.organization_id=o.organization_id AND os.order_id=o.id
-            AND owr.warehouse_id=o.overseas_warehouse_id AND owr.status='completed' AND owr.cargo_complete=1
-        )) overseas_arrival_at,
+        CASE WHEN facts.arrived_packages=facts.batch_package_count THEN 'arrived' ELSE op.status END overseas_status,
+        op.actual_arrival_at overseas_arrival_at,
         (SELECT omi.assignee_user_id FROM order_module_instances omi WHERE omi.organization_id=o.organization_id AND omi.order_id=o.id AND omi.module_code='documents' AND omi.enabled=1 LIMIT 1) document_assignee_user_id,
         (SELECT omi.assignee_user_id FROM order_module_instances omi WHERE omi.organization_id=o.organization_id AND omi.order_id=o.id AND omi.module_code='customs' AND omi.enabled=1 LIMIT 1) customs_assignee_user_id
-      FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id JOIN customers c ON c.id=o.customer_id LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id LEFT JOIN overseas_warehouse_operations op ON op.batch_id=bo.batch_id AND op.order_id=bo.order_id AND op.organization_id=bo.organization_id
-      WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed' ORDER BY bo.sequence_no`).bind(batchId,current.organizationId).all<BatchOrder>(),
+      FROM transport_batch_orders bo
+      JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
+      JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
+      JOIN batch_package_facts facts ON facts.order_id=bo.order_id
+      JOIN order_package_facts totals ON totals.order_id=bo.order_id
+      LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id
+      LEFT JOIN overseas_warehouse_operations op ON op.batch_id=bo.batch_id AND op.order_id=bo.order_id AND op.organization_id=bo.organization_id
+      WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed' ORDER BY bo.sequence_no`)
+      .bind(batchId,current.organizationId,current.organizationId,batchId,current.organizationId).all<BatchOrder>(),
     env.DB.prepare(`WITH vehicle_order_actual AS (
         SELECT l.vehicle_id,p.order_id,
           COALESCE((SELECT SUM(r.total_weight_kg) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=p.order_id AND r.status='completed'),SUM(i.gross_weight_per_package_kg)) weight,
           COALESCE((SELECT SUM(r.total_volume_cbm) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=p.order_id AND r.status='completed'),SUM(i.volume_per_package_cbm)) volume
         FROM transport_vehicle_loads l JOIN order_cargo_packages p ON p.id=l.package_id JOIN order_cargo_items i ON i.id=p.cargo_item_id
         GROUP BY l.vehicle_id,p.order_id
-      ) SELECT v.id,v.vehicle_no,v.vehicle_type,v.plate_number,v.driver_name,v.driver_phone,v.capacity_weight_kg,v.capacity_volume_cbm,v.status,COALESCE(SUM(a.weight),0) used_weight,COALESCE(SUM(a.volume),0) used_volume,COUNT(DISTINCT a.order_id) loaded_orders
+      ) SELECT v.id,v.vehicle_no,v.vehicle_type,v.plate_number,v.driver_name,v.driver_phone,v.capacity_weight_kg,v.capacity_volume_cbm,v.status,
+        CASE WHEN COUNT(a.order_id)>0 THEN COALESCE(SUM(a.weight),0)
+          WHEN v.id=(SELECT first_vehicle.id FROM transport_batch_vehicles first_vehicle
+            WHERE first_vehicle.organization_id=v.organization_id AND first_vehicle.batch_id=v.batch_id
+              AND first_vehicle.status!='cancelled' ORDER BY first_vehicle.created_at,first_vehicle.id LIMIT 1)
+          THEN COALESCE((SELECT SUM(package_row.weight_kg) FROM transport_batch_packages batch_package
+            JOIN warehouse_packages package_row ON package_row.id=batch_package.package_id AND package_row.organization_id=batch_package.organization_id
+            WHERE batch_package.organization_id=v.organization_id AND batch_package.batch_id=v.batch_id AND batch_package.status!='removed'),0)
+          ELSE 0 END used_weight,
+        CASE WHEN COUNT(a.order_id)>0 THEN COALESCE(SUM(a.volume),0)
+          WHEN v.id=(SELECT first_vehicle.id FROM transport_batch_vehicles first_vehicle
+            WHERE first_vehicle.organization_id=v.organization_id AND first_vehicle.batch_id=v.batch_id
+              AND first_vehicle.status!='cancelled' ORDER BY first_vehicle.created_at,first_vehicle.id LIMIT 1)
+          THEN COALESCE((SELECT SUM(package_row.volume_cbm) FROM transport_batch_packages batch_package
+            JOIN warehouse_packages package_row ON package_row.id=batch_package.package_id AND package_row.organization_id=batch_package.organization_id
+            WHERE batch_package.organization_id=v.organization_id AND batch_package.batch_id=v.batch_id AND batch_package.status!='removed'),0)
+          ELSE 0 END used_volume,
+        CASE WHEN COUNT(a.order_id)>0 THEN COUNT(DISTINCT a.order_id)
+          WHEN v.id=(SELECT first_vehicle.id FROM transport_batch_vehicles first_vehicle
+            WHERE first_vehicle.organization_id=v.organization_id AND first_vehicle.batch_id=v.batch_id
+              AND first_vehicle.status!='cancelled' ORDER BY first_vehicle.created_at,first_vehicle.id LIMIT 1)
+          THEN (SELECT COUNT(DISTINCT batch_package.order_id) FROM transport_batch_packages batch_package
+            WHERE batch_package.organization_id=v.organization_id AND batch_package.batch_id=v.batch_id AND batch_package.status!='removed')
+          ELSE 0 END loaded_orders
       FROM transport_batch_vehicles v LEFT JOIN vehicle_order_actual a ON a.vehicle_id=v.id
       WHERE v.batch_id=? AND v.organization_id=? GROUP BY v.id ORDER BY v.created_at`).bind(batchId,current.organizationId).all<Vehicle>(),
     env.DB.prepare("SELECT id,name FROM carriers WHERE organization_id=? AND status='active' AND carrier_scope='overseas' ORDER BY name").bind(current.organizationId).all<Option>(),
@@ -810,8 +865,8 @@ export async function loader({request,params}:Route.LoaderArgs){
       const trackingPlaceholders = d1Placeholders(chunk.length);
       const rows = await env.DB.prepare(`SELECT id,order_id,milestone_code,milestone_name,event_at,location,vehicle_reference,notes,visible_to_customer,created_at
         FROM order_tracking_milestones
-        WHERE organization_id=? AND order_id IN (${trackingPlaceholders})
-        ORDER BY event_at DESC, created_at DESC`).bind(current.organizationId,...chunk).all<BatchTrackingMilestone>();
+        WHERE organization_id=? AND transport_batch_id=? AND order_id IN (${trackingPlaceholders})
+        ORDER BY event_at DESC, created_at DESC`).bind(current.organizationId,batchId,...chunk).all<BatchTrackingMilestone>();
       trackingMilestones.push(...rows.results);
     }
   }
@@ -858,7 +913,7 @@ export async function action({request,params}:Route.ActionArgs){
   const documentIntent=["batch_order_document_upload","batch_order_document_review"].includes(intent);
   const exceptionIntent=["batch_exception_create","batch_exception_progress","batch_exception_resolve"].includes(intent);
   const trackingIntent=["exit_confirm","batch_tracking_option_toggle","batch_tracking_add"].includes(intent);
-  const costIntent=["create_cost_allocation","update_cost_allocation","confirm_cost_allocation"].includes(intent);
+  const costIntent=["create_cost_allocation","create_quote_cost_allocation","update_cost_allocation","confirm_cost_allocation"].includes(intent);
   const allowed=responsibilityIntent
     ? privileged||current.permissions.includes("transport.batch.approve")
     : costIntent
@@ -997,7 +1052,7 @@ export async function action({request,params}:Route.ActionArgs){
       db:env.DB,organizationId:current.organizationId,batchId,
     });
     if(!costAction.policy.editable)return{formError:costAction.policy.reason??"当前冻结工作流不允许办理费用分摊"};
-    if(intent!=="create_cost_allocation"){
+    if(!["create_cost_allocation","create_quote_cost_allocation"].includes(intent)){
       const allocationId=valueOf(form,"allocationId");
       const allocation=allocationId?await env.DB.prepare(`SELECT id FROM transport_cost_allocations
         WHERE id=? AND organization_id=? AND batch_id=? AND status!='cancelled'`)
@@ -1091,13 +1146,23 @@ export async function action({request,params}:Route.ActionArgs){
     }catch(error){return{formError:errorMessage(error)}}
   }
   if(WAREHOUSE_OWNED_BATCH_INTENTS.has(intent))return{formError:"该数据由仓库端配载单维护，管理后台仅同步查看"};
-  if(["batch_tracking_option_toggle","batch_tracking_add"].includes(intent)){
+  if(["batch_tracking_option_toggle","batch_tracking_add","exit_confirm"].includes(intent)){
     const dispatchGate=await env.DB.prepare(`SELECT COUNT(*) total,COALESCE(SUM(CASE WHEN EXISTS(
-        SELECT 1 FROM warehouse_dispatches d
-        JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id
-        JOIN warehouse_packages p ON p.id=di.package_id
-        JOIN shipments s ON s.id=p.shipment_id
-        WHERE d.organization_id=bo.organization_id AND s.order_id=bo.order_id AND d.status='dispatched'
+        SELECT 1 FROM transport_batch_packages mapped
+        WHERE mapped.organization_id=bo.organization_id AND mapped.batch_id=bo.batch_id
+          AND mapped.order_id=bo.order_id AND mapped.status!='removed'
+      ) AND NOT EXISTS(
+        SELECT 1 FROM transport_batch_packages mapped
+        WHERE mapped.organization_id=bo.organization_id AND mapped.batch_id=bo.batch_id
+          AND mapped.order_id=bo.order_id AND mapped.status!='removed'
+          AND NOT EXISTS(
+            SELECT 1 FROM warehouse_dispatches dispatch
+            JOIN warehouse_dispatch_items item
+              ON item.dispatch_id=dispatch.id AND item.organization_id=dispatch.organization_id
+            WHERE dispatch.organization_id=mapped.organization_id
+              AND dispatch.transport_batch_id=mapped.batch_id AND item.package_id=mapped.package_id
+              AND dispatch.status='dispatched'
+          )
       ) THEN 1 ELSE 0 END),0) dispatched
       FROM transport_batch_orders bo WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed'`).bind(batchId,current.organizationId).first<{total:number;dispatched:number}>();
     if(!dispatchGate?.total||dispatchGate.dispatched!==dispatchGate.total)return{formError:"仓库端尚未完成整批装车出库，运输执行与跟踪暂不可登记"};
@@ -1150,11 +1215,21 @@ export async function action({request,params}:Route.ActionArgs){
     const [ordersList,vehiclesList]=await Promise.all([
       env.DB.prepare(`SELECT bo.order_id,o.order_number,COALESCE((SELECT s.shipment_number FROM shipments s WHERE s.order_id=o.id ORDER BY s.created_at DESC LIMIT 1),o.order_number) work_number,c.name customer_name,
           COALESCE((SELECT GROUP_CONCAT(NULLIF(TRIM(i.cargo_name_cn),''),'、') FROM order_cargo_items i WHERE i.order_id=o.id AND i.organization_id=o.organization_id),o.cargo_description) cargo_names,
-          COALESCE((SELECT SUM(r.total_pieces) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=o.id AND r.status='completed'),o.pieces) pieces,
-          COALESCE((SELECT SUM(r.total_weight_kg) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=o.id AND r.status='completed'),o.gross_weight_kg) gross_weight_kg,
-          COALESCE((SELECT SUM(r.total_volume_cbm) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=o.id AND r.status='completed'),o.volume_cbm) volume_cbm
-        FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id JOIN customers c ON c.id=o.customer_id
-        WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed' ORDER BY bo.sequence_no`).bind(batchId,current.organizationId).all<ManifestOrderRow>(),
+          SUM(package_row.pieces) pieces,
+          SUM(COALESCE(package_row.weight_kg,0)) gross_weight_kg,
+          SUM(COALESCE(package_row.volume_cbm,0)) volume_cbm
+        FROM transport_batch_orders bo
+        JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
+        JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
+        JOIN transport_batch_packages batch_package ON batch_package.batch_id=bo.batch_id
+          AND batch_package.organization_id=bo.organization_id AND batch_package.order_id=bo.order_id
+          AND batch_package.status!='removed'
+        JOIN warehouse_packages package_row ON package_row.id=batch_package.package_id
+          AND package_row.organization_id=batch_package.organization_id
+          AND package_row.label_kind='oul' AND package_row.lifecycle_status!='voided'
+        WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed'
+        GROUP BY bo.sequence_no,bo.order_id,o.id,o.order_number,o.cargo_description,c.name
+        ORDER BY bo.sequence_no`).bind(batchId,current.organizationId).all<ManifestOrderRow>(),
       env.DB.prepare("SELECT vehicle_no,vehicle_type,plate_number,driver_name,driver_phone,capacity_weight_kg,capacity_volume_cbm FROM transport_batch_vehicles WHERE batch_id=? AND organization_id=? AND status!='cancelled' ORDER BY vehicle_no").bind(batchId,current.organizationId).all<ManifestVehicleRow>(),
     ]);
     if(!vehiclesList.results.length)return{formError:"配载单还没有车辆；请先在配载单信息中添加车辆，再生成配载单"};
@@ -1256,6 +1331,37 @@ export async function action({request,params}:Route.ActionArgs){
     await writeAudit({request,action:declarationId?"transport.batch.order_customs_declaration.update":"transport.batch.order_customs_declaration.create",resourceType:"transport_order",resourceId:orderId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{batchId,declarationId,declarationNumber,clearanceStage,declarationStatus}});
     return{success:isDeleted?"本票报关单已标记删单，门禁与订单工作流已同步":"本票报关单已保存，门禁与订单工作流已同步",savedCustomsDeclarationOrderId:orderId};
   }
+  if(intent==="create_quote_cost_allocation"){
+    const allocationId=`batch-quote:${batchId}`;
+    const existing=await env.DB.prepare(`SELECT status FROM transport_cost_allocations
+      WHERE id=? AND organization_id=? AND batch_id=? AND status!='cancelled'`)
+      .bind(allocationId,current.organizationId,batchId).first<{status:string}>();
+    if(existing)return{success:existing.status==="confirmed"?"商务运价已分摊并生成正式应付":"商务运价的自动分摊草稿已存在，请直接复核"};
+    const quote=await env.DB.prepare(`SELECT q.freight_amount,q.currency,q.exchange_rate,q.allocation_method,q.notes,c.name carrier_name
+      FROM batch_dispatch_quotes q
+      JOIN carriers c ON c.id=q.carrier_id AND c.organization_id=q.organization_id
+      WHERE q.organization_id=? AND q.batch_id=?`).bind(current.organizationId,batchId)
+      .first<{freight_amount:number;currency:string;exchange_rate:number;allocation_method:string;notes:string|null;carrier_name:string}>();
+    if(!quote)return{formError:"当前配载单没有已落实的商务整批运价"};
+    const method=["auto","weight","volume","equal"].includes(quote.allocation_method)?quote.allocation_method:"auto";
+    try{
+      const rules=await loadOperationalRules(current.organizationId);
+      await createCostAllocation(env.DB,{allocationId,organizationId:current.organizationId,batchId,
+        chargeCode:"OVERSEAS_TRANSPORT",chargeName:"境外运输费",counterpartyName:quote.carrier_name,
+        currency:quote.currency||"CNY",exchangeRate:Number(quote.exchange_rate)||1,totalAmount:Number(quote.freight_amount),
+        method:method as "auto"|AllocationMethod,notes:quote.notes||"商务找车整批运价自动分摊",
+        volumeWeightRatioKgPerCbm:rules["loading.volume_weight_ratio_kg_per_cbm"],userId:current.userId,now,
+        assertCanMutate:assertCostCanMutate});
+      await writeAudit({request,action:"transport.batch.cost_allocation.create_from_quote",resourceType:"transport_cost_allocation",resourceId:allocationId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{batchId,quoteAmount:Number(quote.freight_amount),method}});
+      return{success:"已按本批 OUL 的实收重量/体积自动分摊商务运价；请复核后确认入账"};
+    }catch(error){
+      const concurrent=await env.DB.prepare(`SELECT status FROM transport_cost_allocations
+        WHERE id=? AND organization_id=? AND batch_id=? AND status!='cancelled'`)
+        .bind(allocationId,current.organizationId,batchId).first<{status:string}>();
+      if(concurrent)return{success:concurrent.status==="confirmed"?"商务运价已分摊并生成正式应付":"商务运价的自动分摊草稿已生成，请直接复核"};
+      return{formError:errorMessage(error)};
+    }
+  }
   if(intent==="create_cost_allocation"){
     const chargeCode=valueOf(form,"chargeCode"),charge=COST_CHARGES.find(item=>item.code===chargeCode),method=valueOf(form,"method");
     if(!charge)return{formError:"请选择有效的分摊费用项目"};
@@ -1325,12 +1431,10 @@ export async function action({request,params}:Route.ActionArgs){
     if(participatingOrders.length!==trackingActionPolicy.participatingOrderIds.length)return{formError:"配载单挂载订单已变化，请刷新页面后重新办理实际出境"};
     const exitTrackingOrderIds=trackingActionPolicy.participatingOrderIds;
     const sequenceOrderIds=workflowPolicies.filter(policy=>policy.moduleCode==="tracking"&&policy.enabled&&runtimeWorkflowFieldPolicy(policy.fields,"actual_exit_at",true).visible&&orderWorkflowFieldBlocksBatch(workflowPolicies,policy.orderId,"tracking","tracking_milestone",true)).map(policy=>policy.orderId);
-    const exitSequenceMissing=sequenceOrderIds.length?await validateBatchTrackingRequiredPrevious(current.organizationId,sequenceOrderIds,"exported",actualExitAt):null;
+    const exitSequenceMissing=sequenceOrderIds.length?await validateBatchTrackingRequiredPrevious(current.organizationId,batchId,sequenceOrderIds,"exported",actualExitAt):null;
     if(exitSequenceMissing)return{formError:`暂不能确认出境：运输事件顺序要求已开放运踪节点的订单先登记不晚于实际出境时间的“口岸到达”；仍有 ${exitSequenceMissing.missingOrders} 票未满足${exitSequenceMissing.sampleOrderNumber?`（示例：${exitSequenceMissing.sampleOrderNumber}）` : ""}`};
     const blockers:string[]=[];
     for(const item of participatingOrders){
-      const dispatched=await env.DB.prepare(`SELECT 1 FROM warehouse_dispatches d JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id JOIN warehouse_packages p ON p.id=di.package_id JOIN shipments s ON s.id=p.shipment_id WHERE d.organization_id=? AND d.transport_batch_id=? AND s.order_id=? AND d.status='dispatched' LIMIT 1`).bind(current.organizationId,batchId,item.order_id).first();
-      if(!dispatched){blockers.push("存在尚未完成仓库装车出库交接的订单");continue;}
       const readiness=await checkOrderDeparture(current.organizationId,item.order_id,undefined,{warehouseDispatchConfirmed:true});
       if(!readiness.ready)blockers.push(...readiness.reasons);
     }
@@ -1385,25 +1489,40 @@ export async function action({request,params}:Route.ActionArgs){
               AND bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed')`).bind(now,now,current.organizationId,...chunk,current.organizationId,batchId)),
       ...Array.from(exitMilestoneGroups.values()).flatMap(group=>chunkD1Values(group.orderIds,12).map(chunk=>env.DB.prepare(`INSERT INTO order_tracking_milestones(
           id,organization_id,order_id,milestone_code,milestone_name,event_at,
-          location,vehicle_reference,notes,visible_to_customer,created_by_user_id,created_at
+          location,vehicle_reference,notes,visible_to_customer,created_by_user_id,created_at,transport_batch_id
         )
-        SELECT lower(hex(randomblob(16))),bo.organization_id,bo.order_id,'exported','出境',?,?,?,?,1,?,?
+        SELECT lower(hex(randomblob(16))),bo.organization_id,bo.order_id,'exported','出境',?,?,?,?,1,?,?,bo.batch_id
         FROM transport_batch_orders bo
         WHERE bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed'
           AND bo.order_id IN (${d1Placeholders(chunk.length)})
           AND NOT EXISTS(
             SELECT 1 FROM order_tracking_milestones existing
             WHERE existing.organization_id=bo.organization_id AND existing.order_id=bo.order_id
+              AND existing.transport_batch_id=bo.batch_id
               AND existing.milestone_code='exported' AND existing.event_at=?
           )`).bind(actualExitAt,exitPort,exitVehiclePlate,group.notes,current.userId,now,current.organizationId,batchId,...chunk,actualExitAt))),
       ...exitOrderChunks.map(chunk=>env.DB.prepare(`UPDATE order_cargo_packages
         SET status='in_transit'
-        WHERE organization_id=? AND status NOT IN ('cancelled','delivered')
+        WHERE organization_id=? AND status='loaded'
           AND order_id IN (${d1Placeholders(chunk.length)})
-          AND EXISTS(SELECT 1 FROM transport_batch_orders bo
-            WHERE bo.organization_id=order_cargo_packages.organization_id
-              AND bo.order_id=order_cargo_packages.order_id
-              AND bo.organization_id=? AND bo.batch_id=? AND bo.status!='removed')`).bind(current.organizationId,...chunk,current.organizationId,batchId)),
+          AND id IN (
+            SELECT DISTINCT relation.inbound_package_id
+            FROM transport_batch_packages batch_package
+            JOIN warehouse_package_relations relation
+              ON relation.outbound_package_id=batch_package.package_id
+             AND relation.organization_id=batch_package.organization_id
+            WHERE batch_package.organization_id=? AND batch_package.batch_id=?
+              AND batch_package.status!='removed'
+              AND NOT EXISTS(
+                SELECT 1 FROM warehouse_package_relations pending_relation
+                JOIN transport_batch_packages pending_batch_package
+                  ON pending_batch_package.package_id=pending_relation.outbound_package_id
+                 AND pending_batch_package.organization_id=pending_relation.organization_id
+                WHERE pending_relation.organization_id=relation.organization_id
+                  AND pending_relation.inbound_package_id=relation.inbound_package_id
+                  AND pending_batch_package.status NOT IN ('departed','arrived','removed')
+              )
+          )`).bind(current.organizationId,...chunk,current.organizationId,batchId)),
       ...exitOrderChunks.map(chunk=>env.DB.prepare(`INSERT INTO order_tasks(
           id,organization_id,order_id,module_code,task_type,title,priority,status,
           assignee_user_id,assigned_by_user_id,created_at,updated_at
@@ -1418,6 +1537,28 @@ export async function action({request,params}:Route.ActionArgs){
             WHERE existing.organization_id=bo.organization_id AND existing.order_id=bo.order_id
               AND existing.task_type='start_receivable_reconciliation'
               AND existing.status IN ('pending','in_progress')
+          )
+          AND NOT EXISTS(
+            SELECT 1 FROM transport_batch_packages pending_package
+            JOIN transport_batches pending_batch ON pending_batch.id=pending_package.batch_id
+              AND pending_batch.organization_id=pending_package.organization_id
+              AND pending_batch.status!='cancelled'
+            WHERE pending_package.organization_id=bo.organization_id
+              AND pending_package.order_id=bo.order_id
+              AND pending_package.status!='removed'
+              AND (
+                pending_package.status NOT IN ('departed','arrived')
+                OR pending_batch.road_status NOT IN ('outbound_in_transit','overseas_arrived','waiting_pickup','pickup_completed')
+              )
+          )
+          AND NOT EXISTS(
+            SELECT 1 FROM warehouse_packing_jobs pending_job
+            JOIN warehouse_packages pending_oul ON pending_oul.packing_job_id=pending_job.id
+              AND pending_oul.organization_id=pending_job.organization_id
+              AND pending_oul.label_kind='oul' AND pending_oul.lifecycle_status='active'
+              AND pending_oul.status!='dispatched'
+            WHERE pending_job.organization_id=bo.organization_id
+              AND pending_job.order_id=bo.order_id AND pending_job.status!='cancelled'
           )`).bind(current.userId,now,now,current.organizationId,batchId,...chunk)),
       ...chunkD1Values(exitShipmentIds,8).map(chunk=>env.DB.prepare(`UPDATE shipments
         SET status='in_transit',current_location=?,updated_at=?
@@ -1499,7 +1640,7 @@ export async function action({request,params}:Route.ActionArgs){
     if(!orderIds.length)return{formError:"当前批次没有可操作的订单"};
     // Structural integrity gate: configured fields decide whether the action
     // exists; once it exists, event chronology must remain coherent.
-    const previousMissing=await validateBatchTrackingRequiredPrevious(current.organizationId,orderIds,milestoneCode,eventAt);
+    const previousMissing=await validateBatchTrackingRequiredPrevious(current.organizationId,batchId,orderIds,milestoneCode,eventAt);
     if(previousMissing){
       return{formError:`节点"${milestoneDef.name}"要求每个订单已登记${BATCH_TRACKING_REQUIRED_PREVIOUS[milestoneCode]?.join("、")||"前置节点"}；${previousMissing.missingOrders} 票订单未满足${previousMissing.sampleOrderNumber?`（示例：${previousMissing.sampleOrderNumber}）`:""}`};
     }
@@ -1527,26 +1668,26 @@ export async function action({request,params}:Route.ActionArgs){
     for(const group of groupedTargets.values())for(const chunk of chunkD1Values(group.orderIds,16)){
       trackingInsertStatements.push(env.DB.prepare(`INSERT INTO order_tracking_milestones(
         id,organization_id,order_id,milestone_code,milestone_name,event_at,
-        location,vehicle_reference,notes,visible_to_customer,created_by_user_id,created_at
+        location,vehicle_reference,notes,visible_to_customer,created_by_user_id,created_at,transport_batch_id
       )
-      SELECT lower(hex(randomblob(16))),?,target.id,?,?,?,?,?,?,?,?,?
+      SELECT lower(hex(randomblob(16))),?,target.id,?,?,?,?,?,?,?,?,?,?
       FROM transport_orders target
       WHERE target.organization_id=? AND target.id IN (${d1Placeholders(chunk.length)})
         AND EXISTS(SELECT 1 FROM transport_batch_orders bo WHERE bo.organization_id=? AND bo.batch_id=? AND bo.order_id=target.id AND bo.status!='removed')
         AND NOT EXISTS(
           SELECT 1 FROM order_tracking_milestones existing
           WHERE existing.organization_id=? AND existing.order_id=target.id
-            AND existing.milestone_code=? AND existing.event_at=?
-        )`).bind(current.organizationId,milestoneCode,milestoneDef.name,eventAt,group.location,group.vehicle,group.notes,group.visible?1:0,current.userId,now,current.organizationId,...chunk,current.organizationId,batchId,current.organizationId,milestoneCode,eventAt));
+            AND existing.transport_batch_id=? AND existing.milestone_code=? AND existing.event_at=?
+        )`).bind(current.organizationId,milestoneCode,milestoneDef.name,eventAt,group.location,group.vehicle,group.notes,group.visible?1:0,current.userId,now,batchId,current.organizationId,...chunk,current.organizationId,batchId,current.organizationId,batchId,milestoneCode,eventAt));
     }
     await env.DB.batch([...intakeManyCommitStatements(intakeSnapshots,now),...trackingInsertStatements]);
     const postCommitWarnings:string[]=[];
     try{await writeAudit({request,action:"transport.batch.tracking.add",resourceType:"transport_batch",resourceId:batchId,organizationId:current.organizationId,actorUserId:current.userId,metadata:{milestoneCode,eventAt,orders:orderIds.length,location:locationValue,vehicleReference}})}catch{postCommitWarnings.push("审计记录暂未写入")}
+    try{await syncBatchRoadStatusFromTracking(current.organizationId,batchId,orderIds,now)}catch{postCommitWarnings.push("批次道路状态待重试")}
     const moduleSyncFailures=(await mapWithConcurrency(orderIds,2,async(orderId)=>{
       try{await syncTrackingModuleStatusForOrder(current.organizationId,orderId,milestoneCode,current.userId,now);return null}catch{return orderId}
     })).filter((orderId):orderId is string=>orderId!==null);
     if(moduleSyncFailures.length)postCommitWarnings.push(`${moduleSyncFailures.length} 票轨迹模块状态待重试`);
-    try{await syncBatchRoadStatusFromTracking(current.organizationId,batchId,orderIds,now)}catch{postCommitWarnings.push("批次道路状态待重试")}
     const milestoneStatusMap:Record<string,string>={border_arrived:"customs",exported:"in_transit",transloaded:"in_transit",transit_customs:"in_transit",foreign_entered:"in_transit",customs_cleared:"in_transit",station_arrived:"in_transit"};
     const shipmentStatus=milestoneStatusMap[milestoneCode]||"in_transit";
     try{
@@ -1636,9 +1777,9 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
   const loadPlanReady=planReady&&loaderData.vehicles.length>0;
   const flagsByOrder=new Map(loaderData.trackingFlags.map(item=>[item.order_id,item]));
   const requiresTransloading=loaderData.orders.some(o=>flagsByOrder.get(o.order_id)?.requires_transloading===1);
-  const dispatchedCount=loaderData.batchCustomsAccess.dispatched;
-  const allDispatched=loaderData.batchCustomsAccess.allDispatched;
-  const pendingDispatchOrders=loaderData.orders.filter(order=>!loaderData.outboundStatuses.find(item=>item.order_id===order.order_id)?.dispatched);
+  const dispatchedCount=loaderData.orders.filter(order=>order.batch_package_count>0&&order.dispatched_packages===order.batch_package_count).length;
+  const allDispatched=loaderData.orders.length>0&&dispatchedCount===loaderData.orders.length;
+  const pendingDispatchOrders=loaderData.orders.filter(order=>order.batch_package_count<=0||order.dispatched_packages!==order.batch_package_count);
   const customsPolicyFor=(orderId:string)=>orderBatchWorkflowPolicy(loaderData.batchWorkflowPolicies,orderId,"customs");
   // Only a required customs module may block batch progress. Within it, each
   // visible core action must produce its business result before handoff.
@@ -1767,8 +1908,8 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
     </div>
     <LoadingTotals totals={totals}/>
     <div className="loading-sheet-columns">
-      <section className="loading-sheet-section"><header><h3>挂载订单</h3><span>货物名称按每票货物明细完整汇总；这些完整订单跟随本配载单统一推进</span></header><div className="table-wrap loading-sheet-table"><table><thead><tr><th>订单号</th><th>工作号</th><th>委托人</th><th>起运地</th><th>目的地</th><th>货物名称</th><th>件数</th><th>报关重量</th><th>报关体积</th><th>进仓重量</th><th>进仓体积</th><th>入库时间</th><th>货物状态</th><th>配载车辆</th><th>境外仓</th><th>查看</th></tr></thead><tbody>{visibleOrders.map(item=><tr key={item.order_id}><td><strong><OrderNumberLink id={item.order_id} number={item.order_number}/></strong></td><td>{item.work_number}</td><td>{item.customer_name}</td><td>{loaderData.batch.origin_location}</td><td>{loaderData.batch.destination_location}</td><td><strong className="loading-cargo-names">{item.cargo_names||item.cargo_description||"未填写"}</strong></td><td>{item.pieces}</td><td>{item.declared_weight_kg.toFixed(2)}</td><td>{item.declared_volume_cbm.toFixed(3)}</td><td>{item.gross_weight_kg.toFixed(2)}</td><td>{item.volume_cbm.toFixed(3)}</td><td>{item.inbound_at?formatShortDateTime(item.inbound_at):<span className="off">未入库</span>}</td><td>{item.dispatched_packages>0?<span className="status-pill success">已出库 {item.dispatched_packages}</span>:item.inbound_at?(item.in_stock_packages>0?<span className="status-pill">在库 {item.in_stock_packages}</span>:<span className="status-pill off">无在库包装</span>):<span className="status-pill off">未入库</span>}</td><td>{loaderData.vehicles.map(vehicle=>vehicle.plate_number||vehicle.vehicle_no).join("、")||"待仓库补齐"}</td><td>{item.overseas_status==="arrived"||item.overseas_status==="notified"||item.overseas_status==="appointment"||item.overseas_status==="picked_up"?<span className="status-pill success">{item.overseas_arrival_at?`已到仓 ${formatShortDateTime(item.overseas_arrival_at)}`:"已到仓"}</span>:<span className="status-pill off">未到仓</span>}</td><td><div className="loading-row-actions"><Link className="text-button" to={`/admin/orders/${item.order_id}`}>订单详情</Link><Link className="text-button" to={tabHref("documents")}>报关状态</Link></div></td></tr>)}</tbody></table></div><QueryPagination {...orderPagination} pageParam="orderPage" unit="票订单"/></section>
-      <section className="loading-sheet-section"><header><h3>运输车辆</h3><span>重量和体积仅供人工判断，系统不校验是否超载</span></header><div className="table-wrap loading-vehicle-table"><table><thead><tr><th>车辆编号</th><th>车牌</th><th>车型</th><th>司机</th><th>电话</th><th>整批实收重量</th><th>整批实收体积</th><th>挂载订单</th></tr></thead><tbody>{loaderData.vehicles.map(vehicle=><tr key={vehicle.id}><td><strong>{vehicle.vehicle_no}</strong></td><td>{vehicle.plate_number||"车牌待录"}</td><td>{vehicle.vehicle_type||"车型待录"}</td><td>{vehicle.driver_name||"司机待定"}</td><td>{vehicle.driver_phone||"电话待录"}</td><td>{totals.actualWeight.toFixed(2)} KG</td><td>{totals.actualVolume.toFixed(3)} CBM</td><td>{loaderData.orders.length} 票完整订单</td></tr>)}{!loaderData.vehicles.length&&<tr><td colSpan={8} className="empty-state">当前配载单还没有运输车辆。</td></tr>}</tbody></table></div></section>
+      <section className="loading-sheet-section"><header><h3>挂载订单</h3><span>同一订单可分批运输；本表重量、体积、包数只统计当前配载单实际挂载的 OUL</span></header><div className="table-wrap loading-sheet-table"><table><thead><tr><th>订单号</th><th>工作号</th><th>委托人</th><th>起运地</th><th>目的地</th><th>货物名称</th><th>件数</th><th>本批申报重量</th><th>本批申报体积</th><th>本批实收重量</th><th>本批实收体积</th><th>入库时间</th><th>本批包装状态</th><th>配载车辆</th><th>境外仓</th><th>查看</th></tr></thead><tbody>{visibleOrders.map(item=><tr key={item.order_id}><td><strong><OrderNumberLink id={item.order_id} number={item.order_number}/></strong><small>本批 {item.batch_package_count} / 整票 {item.total_order_packages} 包{item.remaining_order_packages>0?` · 另有 ${item.remaining_order_packages} 包待配载`:""}</small></td><td>{item.work_number}</td><td>{item.customer_name}</td><td>{loaderData.batch.origin_location}</td><td>{loaderData.batch.destination_location}</td><td><strong className="loading-cargo-names">{item.cargo_names||item.cargo_description||"未填写"}</strong></td><td>{item.pieces}</td><td>{item.declared_weight_kg.toFixed(2)}</td><td>{item.declared_volume_cbm.toFixed(3)}</td><td>{item.gross_weight_kg.toFixed(2)}</td><td>{item.volume_cbm.toFixed(3)}</td><td>{item.inbound_at?formatShortDateTime(item.inbound_at):<span className="off">未入库</span>}</td><td>{item.dispatched_packages>0?<span className="status-pill success">本批已出库 {item.dispatched_packages} 包</span>:item.inbound_at?(item.in_stock_packages>0?<span className="status-pill">本批在库 {item.in_stock_packages} 包</span>:<span className="status-pill off">本批无在库包装</span>):<span className="status-pill off">未入库</span>}</td><td>{loaderData.vehicles.map(vehicle=>vehicle.plate_number||vehicle.vehicle_no).join("、")||"待仓库补齐"}</td><td>{item.overseas_status==="arrived"||item.overseas_status==="notified"||item.overseas_status==="appointment"||item.overseas_status==="picked_up"?<span className="status-pill success">{item.overseas_arrival_at?`已到仓 ${formatShortDateTime(item.overseas_arrival_at)}`:"已到仓"}</span>:<span className="status-pill off">未到仓</span>}</td><td><div className="loading-row-actions"><Link className="text-button" to={`/admin/orders/${item.order_id}`}>订单详情</Link><Link className="text-button" to={tabHref("documents")}>报关状态</Link></div></td></tr>)}</tbody></table></div><QueryPagination {...orderPagination} pageParam="orderPage" unit="票订单"/></section>
+      <section className="loading-sheet-section"><header><h3>运输车辆</h3><span>重量和体积仅供人工判断，系统不校验是否超载</span></header><div className="table-wrap loading-vehicle-table"><table><thead><tr><th>车辆编号</th><th>车牌</th><th>车型</th><th>司机</th><th>电话</th><th>整批实收重量</th><th>整批实收体积</th><th>挂载订单</th></tr></thead><tbody>{loaderData.vehicles.map(vehicle=><tr key={vehicle.id}><td><strong>{vehicle.vehicle_no}</strong></td><td>{vehicle.plate_number||"车牌待录"}</td><td>{vehicle.vehicle_type||"车型待录"}</td><td>{vehicle.driver_name||"司机待定"}</td><td>{vehicle.driver_phone||"电话待录"}</td><td>{totals.actualWeight.toFixed(2)} KG</td><td>{totals.actualVolume.toFixed(3)} CBM</td><td>{loaderData.orders.length} 票本批订单</td></tr>)}{!loaderData.vehicles.length&&<tr><td colSpan={8} className="empty-state">当前配载单还没有运输车辆。</td></tr>}</tbody></table></div></section>
     </div>
     </div>
   </section>
@@ -1777,7 +1918,7 @@ export default function LoadingDetail({loaderData,actionData}:Route.ComponentPro
     <div className="table-wrap batch-exit-gate-table"><table><thead><tr><th>装车项目</th><th>当前状态</th><th>核对结果</th></tr></thead><tbody>
       <tr className="completed-row"><td><strong>配载单同步</strong></td><td><span className="status-pill success">已通过</span></td><td>{loaderData.batch.batch_number} 已由操作主管生成，仓库按计划执行</td></tr>
       <tr className={hasRequiredTransportResources?(transportResourceReady?"completed-row":"blocked-row"):"readonly-row"}><td><strong>运输车辆与司机</strong></td><td><span className={`status-pill ${hasRequiredTransportResources?(transportResourceReady?"success":"danger"):"off"}`}>{hasRequiredTransportResources?(transportResourceReady?"必填项已齐":"必填项待补齐"):"当前工作流选填"}</span></td><td>{loaderData.batch.overseas_carrier_name||loaderData.batch.overseas_vehicle_plate?`${loaderData.batch.overseas_carrier_name||"承运方未填"} · ${loaderData.batch.overseas_vehicle_plate||"车牌未填"}`:hasRequiredTransportResources?"承运方、车辆或司机必填资料未齐":"未填写也不阻断当前流程"}</td></tr>
-      <tr className={allDispatched?"completed-row":"blocked-row"}><td><strong>仓库装车出库</strong></td><td><span className={`status-pill ${allDispatched?"success":"danger"}`}>{allDispatched?"已完成":"待办理"}</span></td><td>{allDispatched?"全部订单已完成装车和出库交接":`${dispatchedCount}/${loaderData.orders.length} 票已完成；待处理：${pendingDispatchOrders.map(order=>order.order_number).join("、")}`}</td></tr>
+      <tr className={allDispatched?"completed-row":"blocked-row"}><td><strong>仓库装车出库</strong></td><td><span className={`status-pill ${allDispatched?"success":"danger"}`}>{allDispatched?"已完成":"待办理"}</span></td><td>{allDispatched?"本配载单全部 OUL 已完成装车和出库交接":`${dispatchedCount}/${loaderData.orders.length} 票的本批 OUL 已全部出库；待处理：${pendingDispatchOrders.map(order=>order.order_number).join("、")}`}</td></tr>
     </tbody></table></div>
     {allDispatched?<div className="batch-outbound-next"><div><strong>装车出库已完成</strong><span>{allDocumentGateReady?"下一步登记口岸到达并确认实际出境。":"下一步由单证负责人完成逐票报关与放行。"}</span></div><Link className="primary" to={tabHref(allDocumentGateReady?"tracking":"documents")}>{allDocumentGateReady?"进入口岸到达与出境":"进入报关与文件"}</Link></div>:<div className="batch-gate-blocker"><div><strong>等待仓库完成装车出库</strong><p>仓库交接完成后，本配载单会自动进入下一环节。</p></div><div className="batch-gate-actions"><Link className="secondary" to={tabHref("batch")}>查看仓库配载结果</Link></div></div>}
   </section>}
@@ -2434,11 +2575,13 @@ function WarehouseOverseasInboundAction({batchId,batchNumber,warehouseId,orderId
 
 export function CostAllocationSection({allocations,quote,busy,manage,blockedReason}:{allocations:Awaited<ReturnType<typeof loadCostAllocations>>;quote?:{freight_amount:number;currency:string;exchange_rate:number;allocation_method:string;notes:string|null;carrier_name:string}|null;busy:boolean;manage:boolean;blockedReason:string|null}){
   const draftCount=allocations.filter(item=>item.status==="draft").length;
+  const quoteAllocated=allocations.some(item=>item.charge_code==="OVERSEAS_TRANSPORT");
   return <details className="panel cost-allocation-section batch-detail-disclosure"><summary className="batch-detail-summary"><div><h2>拼车成本分摊</h2><p>仅影响内部应付与毛利，不改变客户应收。</p></div><div className="batch-detail-summary-status"><span>{allocations.length} 条</span><b>{draftCount} 个待确认</b><em aria-hidden="true"/></div></summary><div className="batch-detail-disclosure-body">
     {!manage&&blockedReason&&<div className="alert warning">{blockedReason}</div>}
-    {quote&&<div className="alert info">商务整批报价：<strong>{quote.currency} {Number(quote.freight_amount).toFixed(2)}</strong> · {quote.carrier_name}。此报价尚未入账；待冻结费用窗口开放后由有权限的岗位生成并确认分摊。</div>}
+    {quote&&<div className="alert info">商务整批运价：<strong>{quote.currency} {Number(quote.freight_amount).toFixed(2)}</strong> · {quote.carrier_name}。系统只使用本 PZ 实际挂载的 OUL 重量/体积计算，不会把同一订单其他批次的货重复分摊。</div>}
+    {manage&&quote&&!quoteAllocated&&<Form method="post" className="allocation-confirm-form"><input type="hidden" name="intent" value="create_quote_cost_allocation"/><p>无需重复输入承运商和运价；系统会按冻结规则自动计算每票分摊，确认前仍可人工复核。</p><button className="primary" disabled={busy}>自动分摊商务运价</button></Form>}
     {manage&&<details className="inline-details"><summary>新增分摊草稿</summary><Form method="post" className="form-grid compact"><input type="hidden" name="intent" value="create_cost_allocation"/><label className="field"><span>费用项目</span><select name="chargeCode" required defaultValue={quote?"OVERSEAS_TRANSPORT":""}><option value="">请选择</option>{COST_CHARGES.map(item=><option key={item.code} value={item.code}>{item.name}</option>)}</select></label><Field name="counterpartyName" label="往来单位 / 供应商" required defaultValue={quote?.carrier_name}/><Field name="totalAmount" label="费用总额" type="number" required defaultValue={quote?String(quote.freight_amount):undefined}/><Field name="currency" label="币种" required defaultValue={quote?.currency||"CNY"}/><Field name="exchangeRate" label="折本位币汇率" type="number" required defaultValue={quote?String(quote.exchange_rate):"1"}/><label className="field"><span>分摊方式</span><select name="method" defaultValue={quote?.allocation_method||"auto"}><option value="auto">系统建议（推荐）</option><option value="weight">按实收重量</option><option value="volume">按实收体积</option><option value="equal">按订单均分</option></select></label><label className="field span-2"><span>费用备注</span><input name="allocationNotes" defaultValue={quote?.notes||""} placeholder="例如口岸换装运费、报关费等"/></label><button className="primary" disabled={busy}>生成分摊草稿</button></Form></details>}
-    {!allocations.length&&<p className="empty-state">暂无成本分摊。全部挂载订单完成装车出库后，可在这里生成分摊草稿。</p>}
+    {!allocations.length&&<p className="empty-state">暂无成本分摊。冻结费用窗口开放后，有权限岗位可直接自动分摊商务运价或登记其他整批费用。</p>}
     <div className="cost-allocation-list">{allocations.map(allocation=><section className="cost-allocation-sheet" key={allocation.id}><div className="table-wrap cost-allocation-summary-table"><table><thead><tr><th>费用项目</th><th>往来单位</th><th>总额</th><th>分摊方式</th><th>实收重量</th><th>实收体积</th><th>密度</th><th>状态</th></tr></thead><tbody><tr><td><strong>{allocation.charge_name}</strong></td><td>{allocation.counterparty_name}</td><td>{allocation.currency} {allocation.total_amount.toFixed(2)}</td><td>{allocationMethodLabel(allocation.allocation_method)}</td><td>{allocation.total_actual_weight_kg.toFixed(2)} KG</td><td>{allocation.total_actual_volume_cbm.toFixed(3)} CBM</td><td>{allocation.density_kg_per_cbm.toFixed(2)} KG/CBM<small>{allocation.density_result}</small></td><td><span className={`status-pill ${allocation.status==="confirmed"?"success":""}`}>{allocation.status==="confirmed"?"已确认入账":"草稿待复核"}</span><small>{allocation.confirmed_at?`确认时间 ${allocation.confirmed_at}`:"系统建议可人工调整"}</small></td></tr></tbody></table></div>
       {allocation.status==="draft"&&manage?<><Form method="post"><input type="hidden" name="intent" value="update_cost_allocation"/><input type="hidden" name="allocationId" value={allocation.id}/><label className="field allocation-method"><span>复核分摊方式</span><select name="method" defaultValue={allocation.allocation_method}><option value="weight">按实收重量</option><option value="volume">按实收体积</option><option value="equal">按订单均分</option></select></label><div className="table-wrap"><table><thead><tr><th>订单 / 客户</th><th>实收重量</th><th>实收体积</th><th>建议比例</th><th>建议金额</th><th>最终金额</th><th>调整原因</th></tr></thead><tbody>{allocation.lines.map(line=><tr key={line.id}><td><strong><OrderNumberLink id={line.order_id} number={line.order_number}/></strong><small>{line.customer_name}</small><input type="hidden" name="lineId" value={line.id}/></td><td>{line.actual_weight_kg.toFixed(2)} KG</td><td>{line.actual_volume_cbm.toFixed(3)} CBM</td><td>{(line.suggested_ratio*100).toFixed(2)}%</td><td>{line.suggested_amount.toFixed(2)}</td><td><input className="table-input amount" type="number" min="0" step="0.01" name="lineAmount" defaultValue={line.final_amount.toFixed(2)} required/></td><td><input className="table-input reason" name="lineReason" defaultValue={line.adjustment_reason||""} placeholder="修改金额时必填"/></td></tr>)}</tbody></table></div><button className="secondary" disabled={busy}>保存人工复核结果</button></Form><Form method="post" className="allocation-confirm-form"><input type="hidden" name="intent" value="confirm_cost_allocation"/><input type="hidden" name="allocationId" value={allocation.id}/><p>确认后将生成正式应付费用并进入内部毛利核算；客户应收仍以订单费用模块的应收记录为准。</p><button className="primary" disabled={busy}>确认分摊并生成应付</button></Form></>:<div className="table-wrap"><table><thead><tr><th>订单 / 客户</th><th>实收重量</th><th>实收体积</th><th>最终分摊</th><th>费用状态</th></tr></thead><tbody>{allocation.lines.map(line=><tr key={line.id}><td><strong><OrderNumberLink id={line.order_id} number={line.order_number}/></strong><small>{line.customer_name}</small></td><td>{line.actual_weight_kg.toFixed(2)} KG</td><td>{line.actual_volume_cbm.toFixed(3)} CBM</td><td>{allocation.currency} {line.final_amount.toFixed(2)}</td><td>{line.expense_id?"已生成应付":"待生成"}</td></tr>)}</tbody></table></div>}
     </section>)}</div>
@@ -2446,7 +2589,7 @@ export function CostAllocationSection({allocations,quote,busy,manage,blockedReas
 }
 
 const COST_CHARGES=[
-  {code:"FREIGHT",name:"运费"},{code:"LOADING",name:"装车费"},{code:"REINFORCEMENT",name:"加固费"},
+  {code:"OVERSEAS_TRANSPORT",name:"境外运输费"},{code:"FREIGHT",name:"运费"},{code:"LOADING",name:"装车费"},{code:"REINFORCEMENT",name:"加固费"},
   {code:"TRANSIT_CUSTOMS",name:"转关费"},{code:"CUSTOMS",name:"报关费"},{code:"INBOUND_WAREHOUSE",name:"入境仓储费"},
 ];
 function summarizeBatch(orders:BatchOrder[],vehicles:Vehicle[]){

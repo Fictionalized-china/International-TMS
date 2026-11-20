@@ -26,7 +26,20 @@ export async function loadWorkflowPlacementBlockers(
   const groups = await loadWorkflowFieldGroups(
     placements.map(item => item.module_code as OrderModuleCode), load,
   );
-  return new Set(placements.filter(item => groups.get(item.module_code as OrderModuleCode)!.some(
-    field => field.stepKey === item.step_key && field.isActive && field.isRequired && !field.present,
-  )).map(item => item.id));
+  // A required field gates its workflow step, not only the module placement
+  // that happens to share its module code.  This fails closed for a frozen
+  // legacy configuration whose field was attached to the step but whose
+  // matching module placement is missing.  Publication validation prevents
+  // new configurations from entering that shape; existing orders still must
+  // not silently advance past the required fact.
+  const blockedStepKeys = new Set(
+    [...groups.values()].flat().filter(
+      field => field.isActive && field.isRequired && !field.present,
+    ).map(field => field.stepKey),
+  );
+  return new Set(
+    placements
+      .filter(item => blockedStepKeys.has(item.step_key))
+      .map(item => item.id),
+  );
 }

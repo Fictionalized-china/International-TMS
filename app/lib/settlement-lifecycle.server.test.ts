@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { meetingFixture, seedFrozenMeetingWorkflow } from "./meeting-integration-fixture";
+import { meetingFixture, seedCompletedOrderTransport, seedFrozenMeetingWorkflow } from "./meeting-integration-fixture";
 const harness = vi.hoisted(() => ({ db: null as unknown as D1Database }));
 vi.mock("cloudflare:workers", () => ({ env: { get DB() { return harness.db; } } }));
 import { loadMeetingSettlement, loadMeetingSettlementDirections, submitMeetingSignature, assertMeetingSignoffsComplete } from "./meeting-settlement.server";
@@ -46,6 +46,7 @@ describe("reviewed statements -> real cash -> final archive", () => {
     { mode: "老板代办", businessType: "ftl", solo: true },
   ])("$mode / $businessType completes signatures and real cash settlement before final archive", async ({ solo, businessType }) => {
     await setup();
+    seedCompletedOrderTransport(fixture);
     fixture.database.prepare("UPDATE transport_orders SET business_type=? WHERE id='order'").run(businessType);
     const reviewer = solo ? "owner" : "finance";
     const cashier = solo ? "owner" : "cashier";

@@ -170,9 +170,9 @@ const harness = vi.hoisted(() => {
     assignOrderModule: vi.fn(async () => undefined),
     assignOrderModulesBulk: vi.fn(async () => ({ assignedCount: 0 })),
     runOrderWorkflowAction: vi.fn(async () => ({ success: "workflow advanced" })),
-    saveOrderCargoItem: vi.fn(async () => {
+    saveOrRequestOrderCargoChange: vi.fn(async () => {
       state.cargoSaveCalls += 1;
-      return { ok: true as const, itemId: "cargo-1", created: true, packageCount: 1 };
+      return { ok: true as const, pendingReview: false as const, itemId: "cargo-1", created: true, packageCount: 1 };
     }),
     saveOrderCustomWorkflowFieldValue: vi.fn(async () => {
       state.customFieldSaveCalls += 1;
@@ -249,8 +249,8 @@ vi.mock("../lib/order-document-access.server", () => ({
 vi.mock("../lib/documents-module-status.server", () => ({
   synchronizeOrderDocumentsModuleStatus: harness.synchronizeOrderDocumentsModuleStatus,
 }));
-vi.mock("../lib/order-cargo-editor.server", () => ({
-  saveOrderCargoItem: harness.saveOrderCargoItem,
+vi.mock("../lib/order-intake-changes.server", () => ({
+  saveOrRequestOrderCargoChange: harness.saveOrRequestOrderCargoChange,
 }));
 
 import { action, canWriteLoadedWorkflowField } from "./admin.order-module";
@@ -777,7 +777,7 @@ describe("order module action mutation gates", () => {
     }), "cargo")).resolves.toEqual(expect.objectContaining({
       actionKind: "cargo_editor",
     }));
-    expect(harness.saveOrderCargoItem).toHaveBeenCalledTimes(1);
+    expect(harness.saveOrRequestOrderCargoChange).toHaveBeenCalledTimes(1);
   });
 
   it("does not let another salesperson mutate cargo by forging the cargo action", async () => {
@@ -791,6 +791,6 @@ describe("order module action mutation gates", () => {
 
     const result = await invoke(post("cargo_update", { cargoItemId: "cargo-1" }), "cargo");
     expect(result).toEqual(expect.objectContaining({ formError: expect.any(String) }));
-    expect(harness.saveOrderCargoItem).not.toHaveBeenCalled();
+    expect(harness.saveOrRequestOrderCargoChange).not.toHaveBeenCalled();
   });
 });

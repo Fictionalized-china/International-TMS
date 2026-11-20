@@ -54,6 +54,7 @@ type OutboundRouteTestExports = {
     currentStepKey?: string | null;
     loadingTargetStepKey?: string | null;
   }>) => boolean;
+  warehouseDispatchOriginWarehousePredicate?: string;
   warehouseOutboundTaskStage?: (
     task: {
       status: string;
@@ -76,11 +77,44 @@ type OutboundRouteTestExports = {
     phoneRequired: boolean;
   }) => string | null;
   warehouseDispatchCreationErrorMessage?: (error: unknown) => string;
+  warehouseOutboundRepackError?: (task: {
+    status: string;
+    transport_batch_id: string | null;
+  }) => string | null;
+  warehouseOutboundCanRepack?: (task: {
+    status: string;
+    loaded_count: number;
+    transport_batch_id: string | null;
+  }, itemCount: number) => boolean;
 };
 
 const testExports = outboundRoute as typeof outboundRoute & OutboundRouteTestExports;
 
 describe("warehouse outbound interaction safety", () => {
+  it("keeps PZ OUL composition immutable after the supervisor locks the batch", () => {
+    expect(testExports.warehouseOutboundRepackError).toBeTypeOf("function");
+    expect(testExports.warehouseOutboundRepackError?.({
+      status: "loading",
+      transport_batch_id: "batch-1",
+    })).toContain("配载单已锁定");
+    expect(testExports.warehouseOutboundRepackError?.({
+      status: "loading",
+      transport_batch_id: null,
+    })).toBeNull();
+
+    expect(testExports.warehouseOutboundCanRepack).toBeTypeOf("function");
+    expect(testExports.warehouseOutboundCanRepack?.({
+      status: "loading",
+      loaded_count: 0,
+      transport_batch_id: "batch-1",
+    }, 2)).toBe(false);
+    expect(testExports.warehouseOutboundCanRepack?.({
+      status: "loading",
+      loaded_count: 0,
+      transport_batch_id: null,
+    }, 2)).toBe(true);
+  });
+
   it("maps a stale PZ packing claim to a recoverable inline creation error", () => {
     const mapError=testExports.warehouseDispatchCreationErrorMessage;
     expect(mapError).toBeTypeOf("function");
@@ -246,6 +280,15 @@ describe("warehouse outbound interaction safety", () => {
       currentStepKey: "customs",
       loadingTargetStepKey: "custom_loading",
     }])).toBe(false);
+  });
+
+  it("anchors a historical dispatch to its original sorting warehouse instead of the package's mutable current warehouse", () => {
+    const predicate=testExports.warehouseDispatchOriginWarehousePredicate;
+    expect(predicate).toContain("warehouse_sorting_batches");
+    expect(predicate).toContain("warehouse_locations");
+    expect(predicate).toContain("dispatch_origin_location.warehouse_id=?");
+    expect(predicate).not.toContain("warehouse_packages");
+    expect(predicate).not.toContain("package.warehouse_id");
   });
 
   it("keeps physical OUL scanning mandatory while preserving workflow synchronization state", () => {

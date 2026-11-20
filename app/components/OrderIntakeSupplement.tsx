@@ -1,4 +1,4 @@
-import {useEffect,useRef,useState} from "react";
+import {useCallback,useEffect,useRef,useState} from "react";
 import {useFetcher,useLocation} from "react-router";
 import type {loader,action} from "../routes/admin.order-intake-supplement";
 import type {loadOrderIntakeSupplement} from "../lib/order-intake-supplement.server";
@@ -6,24 +6,27 @@ import {Modal} from "./Modal";
 import {IntakeOperationsFields} from "./IntakeOperationsFields";
 import {IntakeRouteFields} from "./IntakeRouteFields";
 import {intakeServiceOptions} from "../lib/intake-operations";
+import {OrderIntakeChanges} from "./OrderIntakeChanges";
 type Snapshot=Awaited<ReturnType<typeof loadOrderIntakeSupplement>>;
 const visible=(key:string)=>({isActive:key!=="quotation_intake_entrustedServices",isRequired:false});
 export function OrderIntakeSupplement({orderId}:{orderId:string}) {
   const reader=useFetcher<typeof loader>(),writer=useFetcher<typeof action>(),location=useLocation();
   const [snapshot,setSnapshot]=useState<Snapshot|null>(null),[loading,setLoading]=useState(false),[loadError,setLoadError]=useState("");
+  const [changeBusy,setChangeBusy]=useState(false);
   const pending=useRef(false);
   const previousResponse=useRef(writer.data);
   const query=new URLSearchParams();const slot=new URLSearchParams(location.search).get("itmsTab");if(slot)query.set("itmsTab",slot);
   const endpoint=`/admin/orders/${encodeURIComponent(orderId)}/intake-supplement${query.size?`?${query}`:""}`;
   function load(){pending.current=true;previousResponse.current=writer.data;setLoading(true);setLoadError("");setSnapshot(null);reader.load(endpoint);}
+  const reloadChanges=useCallback(()=>{pending.current=true;reader.load(endpoint);},[endpoint]);
   useEffect(()=>{
     if(!pending.current||reader.state!=="idle"||!reader.data)return;
     pending.current=false;setLoading(false);
     if("loadError"in reader.data)setLoadError(reader.data.loadError);else setSnapshot(reader.data);
   },[reader.state,reader.data]);
-  const busy=writer.state!=="idle";
+  const busy=writer.state!=="idle"||changeBusy;
   return <div className="order-intake-supplement-entry">
-    <p>开单计划、线路和报价归属缺失时可在本订单补录。已有资料只读；缺失的历史委托服务可按原始依据补齐，不在此处新增流程分支。</p>
+    <p>开单计划、线路和报价归属缺失时可在本订单补录；已有计划与线路可在同页申请更正并复核。历史委托服务按原始依据补齐，不在此处新增流程分支。</p>
     <Modal title="查看与补录开单资料" triggerLabel="查看 / 补齐开单资料" triggerClassName="secondary" size="wide" guardFormChanges={Boolean(snapshot)} dismissible={!busy} closeSignal={writer.data&&"saveKey"in writer.data?writer.data.saveKey:undefined} onOpenChange={open=>{if(open)load();}}>
       {loading&&<p role="status">正在读取当前订单资料…</p>}
       {loadError&&<div role="alert"><p>{loadError}</p><button className="secondary" type="button" onClick={load}>重新读取</button></div>}
@@ -60,6 +63,7 @@ export function OrderIntakeSupplement({orderId}:{orderId:string}) {
         </details>}
         </fieldset>
       </writer.Form>}
+      {snapshot&&<OrderIntakeChanges snapshot={snapshot} endpoint={endpoint} onSaved={reloadChanges} onBusyChange={setChangeBusy}/>}
     </Modal>
     {writer.data&&writer.data!==previousResponse.current&&"success"in writer.data&&<p className="alert success" role="status">{writer.data.success}</p>}
   </div>;

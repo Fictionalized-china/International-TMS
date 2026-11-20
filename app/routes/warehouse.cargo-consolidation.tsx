@@ -109,6 +109,8 @@ const stockCtes=`WITH stock AS (
     LEFT JOIN warehouse_locations wl ON wl.id=p.location_id
     WHERE job.organization_id=? AND job.warehouse_id=? AND job.status IN ('labelled','allocated')
       AND p.status IN ('in_stock','allocated') AND p.label_kind='oul' AND p.lifecycle_status='active'
+      AND NOT EXISTS(SELECT 1 FROM transport_batch_package_claims claim
+        WHERE claim.organization_id=p.organization_id AND claim.package_id=p.id)
     GROUP BY job.order_id,job.id,job.status
   ), ready AS (
     SELECT DISTINCT s.order_id FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id
@@ -204,9 +206,9 @@ export async function loader({request}:Route.LoaderArgs){
   like("COALESCE(ow.name,'')",filters.warehouse);like("o.destination_country",filters.country);like("COALESCE(o.destination_state,'')",filters.state);like("o.destination_city",filters.city);like("c.name",filters.customer);
   if(filters.keyword){clauses.push("(o.order_number LIKE ? OR c.name LIKE ? OR COALESCE(o.cargo_description,'') LIKE ? OR EXISTS(SELECT 1 FROM order_cargo_items qi WHERE qi.order_id=o.id AND COALESCE(qi.cargo_name_cn,'') LIKE ?))");bindings.push(...Array(4).fill(`%${filters.keyword}%`))}
   const loadingWorkflowGateSql=loadingConsolidationWorkflowAccessSql("o");
-  if(filters.eligibility==="eligible")clauses.push(`o.business_type='ltl' AND st.packing_status='labelled' AND rr.order_id IS NOT NULL AND eo.order_id IS NULL AND dd.order_id IS NULL AND ab.batch_id IS NULL AND ${loadingWorkflowGateSql}`);
-  if(filters.eligibility==="assigned")clauses.push("ab.batch_id IS NOT NULL AND st.packing_status='allocated'");
-  if(filters.eligibility==="blocked")clauses.push(`ab.batch_id IS NULL AND (o.business_type!='ltl' OR st.packing_status!='labelled' OR rr.order_id IS NULL OR eo.order_id IS NOT NULL OR dd.order_id IS NOT NULL OR NOT ${loadingWorkflowGateSql})`);
+  if(filters.eligibility==="eligible")clauses.push(`o.business_type='ltl' AND st.packing_status IN ('labelled','allocated') AND rr.order_id IS NOT NULL AND eo.order_id IS NULL AND ${loadingWorkflowGateSql}`);
+  if(filters.eligibility==="assigned")clauses.push("ab.batch_id IS NOT NULL");
+  if(filters.eligibility==="blocked")clauses.push(`o.business_type!='ltl' OR rr.order_id IS NULL OR eo.order_id IS NOT NULL OR NOT ${loadingWorkflowGateSql}`);
   const filterSql=clauses.length?` AND ${clauses.join(" AND ")}`:"",baseBindings=stockBindings(user.organizationId,warehouse.id);
   const totalRow=await env.DB.prepare(`${stockCtes} SELECT COUNT(*) total ${stockFrom}${filterSql}`).bind(...baseBindings,...bindings).first<{total:number}>();
   const total=totalRow?.total??0,pages=Math.max(1,Math.ceil(total/pageSize)),safePage=Math.min(page,pages);
@@ -240,8 +242,16 @@ export async function loader({request}:Route.LoaderArgs){
       (SELECT v.vehicle_master_id FROM transport_batch_vehicles v WHERE v.batch_id=b.id AND v.organization_id=b.organization_id AND v.status!='cancelled' ORDER BY v.created_at LIMIT 1) vehicle_master_id,
       (SELECT v.driver_master_id FROM transport_batch_vehicles v WHERE v.batch_id=b.id AND v.organization_id=b.organization_id AND v.status!='cancelled' ORDER BY v.created_at LIMIT 1) driver_master_id,
       COUNT(DISTINCT bo.order_id) order_count,GROUP_CONCAT(DISTINCT o.order_number) order_numbers,
-      COALESCE(SUM((SELECT job.total_weight_kg FROM warehouse_packing_jobs job WHERE job.organization_id=b.organization_id AND job.warehouse_id=b.warehouse_id AND job.order_id=o.id AND job.status IN ('allocated','loading','dispatched') ORDER BY job.updated_at DESC LIMIT 1)),0) total_weight,
-      COALESCE(SUM((SELECT job.total_volume_cbm FROM warehouse_packing_jobs job WHERE job.organization_id=b.organization_id AND job.warehouse_id=b.warehouse_id AND job.order_id=o.id AND job.status IN ('allocated','loading','dispatched') ORDER BY job.updated_at DESC LIMIT 1)),0) total_volume,
+      COALESCE(SUM((SELECT SUM(package_row.weight_kg) FROM transport_batch_packages batch_package
+        JOIN warehouse_packages package_row ON package_row.id=batch_package.package_id
+          AND package_row.organization_id=batch_package.organization_id
+        WHERE batch_package.organization_id=b.organization_id AND batch_package.batch_id=b.id
+          AND batch_package.order_id=o.id AND batch_package.status!='removed')),0) total_weight,
+      COALESCE(SUM((SELECT SUM(package_row.volume_cbm) FROM transport_batch_packages batch_package
+        JOIN warehouse_packages package_row ON package_row.id=batch_package.package_id
+          AND package_row.organization_id=batch_package.organization_id
+        WHERE batch_package.organization_id=b.organization_id AND batch_package.batch_id=b.id
+          AND batch_package.order_id=o.id AND batch_package.status!='removed')),0) total_volume,
       (SELECT d.id FROM warehouse_dispatches d WHERE d.organization_id=b.organization_id AND d.transport_batch_id=b.id AND d.status!='cancelled' ORDER BY d.updated_at DESC LIMIT 1) dispatch_id,
       EXISTS(SELECT 1 FROM warehouse_dispatches d WHERE d.transport_batch_id=b.id AND d.status!='cancelled') has_dispatch,
       EXISTS(SELECT 1 FROM warehouse_dispatches d LEFT JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id
@@ -261,8 +271,16 @@ export async function loader({request}:Route.LoaderArgs){
       ORDER BY b.updated_at DESC LIMIT 100`).bind(user.organizationId,warehouse.id).all<AvailableBatch>(),
     env.DB.prepare(`SELECT bo.batch_id,o.id order_id,o.order_number,c.name customer_name,
       (SELECT GROUP_CONCAT(NULLIF(TRIM(i.cargo_name_cn),''),'、') FROM order_cargo_items i WHERE i.organization_id=o.organization_id AND i.order_id=o.id) cargo_names,
-      COALESCE((SELECT job.total_weight_kg FROM warehouse_packing_jobs job WHERE job.organization_id=b.organization_id AND job.warehouse_id=b.warehouse_id AND job.order_id=o.id AND job.status IN ('allocated','loading','dispatched') ORDER BY job.updated_at DESC LIMIT 1),0) weight_kg,
-      COALESCE((SELECT job.total_volume_cbm FROM warehouse_packing_jobs job WHERE job.organization_id=b.organization_id AND job.warehouse_id=b.warehouse_id AND job.order_id=o.id AND job.status IN ('allocated','loading','dispatched') ORDER BY job.updated_at DESC LIMIT 1),0) volume_cbm
+      COALESCE((SELECT SUM(package_row.weight_kg) FROM transport_batch_packages batch_package
+        JOIN warehouse_packages package_row ON package_row.id=batch_package.package_id
+          AND package_row.organization_id=batch_package.organization_id
+        WHERE batch_package.organization_id=b.organization_id AND batch_package.batch_id=b.id
+          AND batch_package.order_id=o.id AND batch_package.status!='removed'),0) weight_kg,
+      COALESCE((SELECT SUM(package_row.volume_cbm) FROM transport_batch_packages batch_package
+        JOIN warehouse_packages package_row ON package_row.id=batch_package.package_id
+          AND package_row.organization_id=batch_package.organization_id
+        WHERE batch_package.organization_id=b.organization_id AND batch_package.batch_id=b.id
+          AND batch_package.order_id=o.id AND batch_package.status!='removed'),0) volume_cbm
       FROM transport_batches b JOIN transport_batch_orders bo ON bo.batch_id=b.id AND bo.status!='removed'
       JOIN transport_orders o ON o.id=bo.order_id JOIN customers c ON c.id=o.customer_id
       WHERE b.organization_id=? AND b.warehouse_id=? AND b.batch_number LIKE 'PZ-%' AND b.status!='cancelled'
@@ -568,11 +586,14 @@ export default function CargoConsolidation({loaderData,actionData}:Route.Compone
           </thead>
           <tbody>
             {loaderData.rows.map(row=>{
-              const assigned=Boolean(row.active_batch_id),blockers=loadingConsolidationCandidateBlockers(row,loadingStageAccessByOrder.get(row.order_id));
+              const assigned=Boolean(row.active_batch_id),blockers=loadingConsolidationCandidateBlockers(
+                {...row,active_batch_id:null,active_batch_number:null,active_dispatch:0},
+                loadingStageAccessByOrder.get(row.order_id),
+              );
               const requirements=loaderData.orderDocumentRequirements.find(group=>group.orderId===row.order_id)?.documents??[];
               const documents=loaderData.latestRequiredDocuments.filter(document=>document.order_id===row.order_id);
               return <tr key={row.order_id}>
-                <td>{assigned?<span className="status-pill" title={row.active_batch_number??"已加入配载单"}>已配载 · {row.active_batch_number}</span>:<span className={`status-pill ${blockers.length?"off":"success"}`} title={blockers.join("；")}>{blockers.length?"暂不可配载":"待主管配载"}</span>}</td>
+                <td>{assigned?<span className={`status-pill ${blockers.length?"off":"success"}`} title={`${row.active_batch_number??"已有前序批次"}；本页仅显示尚未分配的 OUL`}>余包待配 · {row.active_batch_number}</span>:<span className={`status-pill ${blockers.length?"off":"success"}`} title={blockers.join("；")}>{blockers.length?"暂不可配载":"待主管配载"}</span>}</td>
                 <td className="consolidation-order-cell" title={`${row.order_number} · ${row.customer_name} · ${row.cargo_names||"未填写货名"}`}><strong>{row.order_number}</strong><span>· {row.customer_name}</span><small>· {row.cargo_names||"未填写货名"}</small></td>
                 <td className="consolidation-receipt-cell" title={`${row.package_count} 包装 / ${row.pieces} 件 · ${row.weight_kg.toFixed(2)} KG · ${row.volume_cbm.toFixed(3)} CBM`}><strong>{row.package_count} 包装 / {row.pieces} 件</strong><span>· {row.weight_kg.toFixed(2)} KG · {row.volume_cbm.toFixed(3)} CBM</span></td>
                 <td className="consolidation-origin-warehouse-cell" title={loaderData.warehouse.name}>{loaderData.warehouse.name}</td>

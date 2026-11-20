@@ -21,6 +21,19 @@ const harness = vi.hoisted(() => {
       warehouse_name: "境外仓",
       warehouse_address: "塔什干",
     },
+    operation: {
+      id: "operation-1",
+      batch_id: "batch-1",
+      status: "arrived",
+      warehouse_id: "warehouse-1",
+      customer_id: "customer-1",
+      warehouse_name: "境外仓",
+    },
+    transport: {
+      waiting_dispatch_count: 0,
+      waiting_arrival_count: 0,
+      untracked_departed_count: 0,
+    },
   };
   const queries: string[] = [];
   const DB = {
@@ -34,6 +47,12 @@ const harness = vi.hoisted(() => {
           if (sql.includes("SELECT o.id,o.order_number,o.business_type")) return state.standaloneOrder as T;
           if (sql.includes("SELECT b.id,b.batch_number") && sql.includes("FROM transport_batch_orders")) {
             return { id: "batch-1", batch_number: "SO-001" } as T;
+          }
+          if (sql.includes("SELECT op.id,op.batch_id,op.status") && sql.includes("FROM overseas_warehouse_operations op")) {
+            return state.operation as T;
+          }
+          if (sql.includes("waiting_dispatch_count") && sql.includes("waiting_arrival_count")) {
+            return state.transport as T;
           }
           return null;
         },
@@ -67,7 +86,7 @@ vi.mock("./order-modules.server", () => ({
   syncOrderWorkflowSnapshot: harness.syncOrderWorkflowSnapshot,
 }));
 
-import { confirmOverseasBatchArrival } from "./overseas-warehouse.server";
+import { advanceOverseasOrder, confirmOverseasBatchArrival } from "./overseas-warehouse.server";
 
 const blockedGate = {
   orderId: "order-1",
@@ -84,6 +103,11 @@ const readyGate = { ...blockedGate, cleared: true, blocked: false, message: null
 describe("overseas arrival service shares the frozen customs gate", () => {
   beforeEach(() => {
     harness.state.gates = [];
+    harness.state.transport = {
+      waiting_dispatch_count: 0,
+      waiting_arrival_count: 0,
+      untracked_departed_count: 0,
+    };
     harness.queries.length = 0;
     vi.clearAllMocks();
   });
@@ -150,5 +174,19 @@ describe("overseas arrival service shares the frozen customs gate", () => {
 
     expect(harness.DB.batch).toHaveBeenCalledTimes(1);
     expect(harness.queries.some((sql) => sql.includes("milestone_code='customs_cleared'"))).toBe(false);
+  });
+
+  it("does not notify the customer to collect a commercially whole order after only one batch arrived", async () => {
+    harness.state.transport.waiting_arrival_count = 1;
+
+    await expect(advanceOverseasOrder({
+      organizationId: "org-1",
+      orderId: "order-1",
+      actorUserId: "warehouse-user",
+      action: "notify",
+      occurredAt: "2026-09-06T00:00:00.000Z",
+    })).rejects.toThrow("1 包在途或待到仓");
+
+    expect(harness.DB.batch).not.toHaveBeenCalled();
   });
 });

@@ -19,17 +19,24 @@ export async function loadBatchCustomsAccess(
   const rows = await db.prepare(
     `SELECT bo.order_id,o.business_type,
        CASE WHEN EXISTS(
-         SELECT 1 FROM warehouse_dispatches d
-         JOIN warehouse_dispatch_items di
-           ON di.dispatch_id=d.id AND di.organization_id=d.organization_id
-         JOIN warehouse_packages p
-           ON p.id=di.package_id AND p.organization_id=di.organization_id
-         JOIN shipments s
-           ON s.id=p.shipment_id AND s.organization_id=p.organization_id
-         WHERE d.organization_id=bo.organization_id
-           AND d.transport_batch_id=bo.batch_id
-           AND s.order_id=bo.order_id
-           AND d.status='dispatched'
+         SELECT 1 FROM transport_batch_packages mapped
+         WHERE mapped.organization_id=bo.organization_id
+           AND mapped.batch_id=bo.batch_id AND mapped.order_id=bo.order_id
+           AND mapped.status!='removed'
+       ) AND NOT EXISTS(
+         SELECT 1 FROM transport_batch_packages mapped
+         WHERE mapped.organization_id=bo.organization_id
+           AND mapped.batch_id=bo.batch_id AND mapped.order_id=bo.order_id
+           AND mapped.status!='removed'
+           AND NOT EXISTS(
+             SELECT 1 FROM warehouse_dispatches dispatch
+             JOIN warehouse_dispatch_items item
+               ON item.dispatch_id=dispatch.id AND item.organization_id=dispatch.organization_id
+             WHERE dispatch.organization_id=mapped.organization_id
+               AND dispatch.transport_batch_id=mapped.batch_id
+               AND item.package_id=mapped.package_id
+               AND dispatch.status='dispatched'
+           )
        ) THEN 1 ELSE 0 END dispatched
      FROM transport_batch_orders bo
      JOIN transport_orders o

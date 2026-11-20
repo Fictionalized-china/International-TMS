@@ -23,6 +23,7 @@ beforeEach(async()=>{
   s.prepare("INSERT INTO warehouse_packages(id,organization_id,receipt_id,shipment_id,warehouse_id,location_id,barcode,package_number,pieces,weight_kg,volume_cbm,length_cm,width_cm,height_cm,status,label_kind,lifecycle_status,packing_job_id,created_at,updated_at) VALUES('oul','org','receipt','shipment','wh','loc','OUL-001','OUL-001',1,10,1,100,100,100,'in_stock','oul','active','packing',?,?)").run(n,n);
   s.exec("UPDATE warehouse_packages SET status='allocated' WHERE id='inbound'; UPDATE warehouse_packing_jobs SET status='labelled' WHERE id='packing'; UPDATE warehouse_packing_jobs SET status='allocated',transport_batch_id='batch' WHERE id='packing'");
   s.prepare("INSERT INTO transport_batch_orders(id,organization_id,batch_id,order_id,sequence_no,created_at,updated_at) VALUES('bo','org','batch','order',1,?,?)").run(n,n);
+  s.prepare("INSERT INTO transport_batch_packages(id,organization_id,batch_id,order_id,packing_job_id,package_id,sequence_no,status,added_by_user_id,created_at,updated_at) VALUES('bp','org','batch','order','packing','oul',1,'planned','owner',?,?)").run(n,n);
 });
 afterEach(()=>{vi.restoreAllMocks();fixture?.database.close();});
 const create=(totalAmount=100,currency="CNY",exchangeRate=1)=>createCostAllocation(fixture.db,{organizationId:"org",batchId:"batch",chargeCode:"FREIGHT",chargeName:"境外运费",counterpartyName:"承运人",currency,exchangeRate,totalAmount,method:"equal",userId:"owner",now:fixture.now,assertCanMutate:noop});
@@ -53,6 +54,8 @@ function appendActualOrder(index:number,weight=10){
   s.prepare("UPDATE warehouse_packing_jobs SET status='labelled' WHERE id=?").run(`packing${suffix}`);
   s.prepare("UPDATE warehouse_packing_jobs SET status='allocated',transport_batch_id='batch' WHERE id=?").run(`packing${suffix}`);
   copy('transport_batch_orders',"id='bo'",()=>({id:`bo${suffix}`,order_id:orderId,sequence_no:index}));
+  s.prepare("INSERT INTO transport_batch_packages(id,organization_id,batch_id,order_id,packing_job_id,package_id,sequence_no,status,added_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'planned','owner',?,?)")
+    .run(`bp${suffix}`,'org','batch',orderId,`packing${suffix}`,`oul${suffix}`,index,fixture.now,fixture.now);
 }
 describe("actual migrated cost-allocation service transactions",()=>{
   it('confirms three cents across six real orders without negative lines or extra cents',async()=>{

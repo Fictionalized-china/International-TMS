@@ -55,9 +55,18 @@ describe("completeWarehouseDispatchTransaction", () => {
     expect(sql).toContain("p.organization_id=di.organization_id");
     expect(sql).toContain("s.organization_id=p.organization_id");
     expect(sql).toContain("UPDATE warehouse_packing_jobs");
-    expect(sql).toContain("job.status='dispatched'");
-    expect(sql).toContain("warehouse_packing_job_sources");
+    expect(sql).toContain("SET status='loading'");
+    expect(sql).toContain("SET status='dispatched'");
+    expect(sql).toContain("UPDATE transport_batch_packages");
+    expect(sql).toContain("WHERE organization_id=? AND batch_id=?");
+    expect(sql).toContain("package_id IN");
     expect(sql).toContain("p.label_kind='oul'");
+    const sourceMarkUpdate = harness.queries.find(
+      (query) => query.includes("UPDATE warehouse_packages") && query.includes("source_order_package_id IN"),
+    );
+    expect(sourceMarkUpdate).toContain("JOIN transport_batch_packages pending_batch_package");
+    expect(sourceMarkUpdate).toContain("pending_batch_package.status NOT IN ('departed','arrived')");
+    expect(sourceMarkUpdate).not.toMatch(/(?:FROM|JOIN)\s+warehouse_packages\b/i);
   });
 
   it("reports a concurrent retry as a stable no-op so callers cannot repeat post-commit effects", async () => {

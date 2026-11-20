@@ -74,13 +74,25 @@ export async function refreshLoadingManifest(organizationId: string, batchId: st
         c.name carrier_name,b.overseas_carrier_name,b.overseas_vehicle_type,b.overseas_vehicle_count,b.overseas_vehicle_plate,b.overseas_driver_name,b.overseas_driver_phone
       FROM transport_batches b LEFT JOIN carriers c ON c.id=b.carrier_id
       WHERE b.id=? AND b.organization_id=? AND b.status!='cancelled'`).bind(batchId, organizationId).first<ManifestBatch>(),
-    env.DB.prepare(`SELECT o.order_number,COALESCE((SELECT s.shipment_number FROM shipments s WHERE s.order_id=o.id ORDER BY s.created_at DESC LIMIT 1),o.order_number) work_number,
-        c.name customer_name,COALESCE((SELECT GROUP_CONCAT(NULLIF(TRIM(i.cargo_name_cn),''),'、') FROM order_cargo_items i WHERE i.order_id=o.id AND i.organization_id=o.organization_id),o.cargo_description) cargo_names,
-        COALESCE((SELECT SUM(r.total_pieces) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=o.id AND r.status='completed'),o.pieces) pieces,
-        COALESCE((SELECT SUM(r.total_weight_kg) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=o.id AND r.status='completed'),o.gross_weight_kg) gross_weight_kg,
-        COALESCE((SELECT SUM(r.total_volume_cbm) FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id WHERE s.order_id=o.id AND r.status='completed'),o.volume_cbm) volume_cbm
-      FROM transport_batch_orders bo JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id JOIN customers c ON c.id=o.customer_id
-      WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed' ORDER BY bo.sequence_no`).bind(batchId, organizationId).all<ManifestOrder>(),
+    env.DB.prepare(`SELECT o.order_number,
+        COALESCE((SELECT s.shipment_number FROM shipments s WHERE s.order_id=o.id ORDER BY s.created_at DESC LIMIT 1),o.order_number) work_number,
+        c.name customer_name,
+        COALESCE((SELECT GROUP_CONCAT(NULLIF(TRIM(i.cargo_name_cn),''),'、') FROM order_cargo_items i WHERE i.order_id=o.id AND i.organization_id=o.organization_id),o.cargo_description) cargo_names,
+        SUM(package_row.pieces) pieces,
+        SUM(COALESCE(package_row.weight_kg,0)) gross_weight_kg,
+        SUM(COALESCE(package_row.volume_cbm,0)) volume_cbm
+      FROM transport_batch_orders bo
+      JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
+      JOIN customers c ON c.id=o.customer_id
+      JOIN transport_batch_packages batch_package ON batch_package.batch_id=bo.batch_id
+        AND batch_package.organization_id=bo.organization_id AND batch_package.order_id=bo.order_id
+        AND batch_package.status!='removed'
+      JOIN warehouse_packages package_row ON package_row.id=batch_package.package_id
+        AND package_row.organization_id=batch_package.organization_id
+        AND package_row.label_kind='oul' AND package_row.lifecycle_status!='voided'
+      WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed'
+      GROUP BY bo.sequence_no,o.id,o.order_number,o.cargo_description,c.name
+      ORDER BY bo.sequence_no`).bind(batchId, organizationId).all<ManifestOrder>(),
     env.DB.prepare(`SELECT vehicle_no,vehicle_type,plate_number,driver_name,driver_phone FROM transport_batch_vehicles
       WHERE batch_id=? AND organization_id=? AND status!='cancelled' ORDER BY created_at`).bind(batchId, organizationId).all<ManifestVehicle>(),
   ]);

@@ -80,6 +80,20 @@ describe("cost allocation mutation boundary", () => {
     expect(harness.events).toEqual(["assert", "batch"]);
   });
 
+  it("uses the caller supplied id for an idempotent commercial quote allocation", async () => {
+    const harness = database();
+    const allocationId = await createCostAllocation(harness.db, {
+      allocationId: "batch-quote:batch-1",
+      organizationId: "org-1", batchId: "batch-1", chargeCode: "OVERSEAS_TRANSPORT",
+      chargeName: "境外运输费", counterpartyName: "境外承运商", currency: "CNY",
+      exchangeRate: 1, totalAmount: 100, method: "equal", userId: "user-1",
+      now: "2026-09-06T00:00:00Z", assertCanMutate: vi.fn(async () => {}),
+    });
+
+    expect(allocationId).toBe("batch-quote:batch-1");
+    expect(harness.events).toEqual(["batch"]);
+  });
+
   it("revalidates immediately before update and uses conditional draft writes", async () => {
     const harness = database();
     const assertCanMutate = vi.fn(async () => { harness.events.push("assert"); });

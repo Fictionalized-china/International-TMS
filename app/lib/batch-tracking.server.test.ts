@@ -16,6 +16,12 @@ const harness = vi.hoisted(() => {
       isActive: boolean;
       isRequired: boolean;
     }>,
+    transport: {
+      total_package_count: 1,
+      waiting_dispatch_count: 0,
+      waiting_arrival_count: 0,
+      untracked_departed_count: 0,
+    },
     module: {
       id: "tracking-module-1",
       status: "in_progress",
@@ -27,6 +33,8 @@ const harness = vi.hoisted(() => {
       current_step_code: string | null;
       progress_percent: number;
     } | null,
+    batchMilestone: null as null | { milestone_code: string; event_at: string; location: string | null },
+    batchRoadStatus: "loaded_waiting_exit",
   };
   const batches: Prepared[][] = [];
   const DB = {
@@ -39,11 +47,26 @@ const harness = vi.hoisted(() => {
           return statement;
         },
         async first<T>() {
+          if (query.includes("waiting_dispatch_count") && query.includes("waiting_arrival_count")) {
+            return state.transport as T;
+          }
           if (query.includes("SELECT MAX(CASE milestone_code")) {
             return { progress: state.progress } as T;
           }
           if (query.includes("FROM order_module_instances")) {
             return state.module as T | null;
+          }
+          if (query.includes("SELECT milestone_code,event_at,location") && query.includes("transport_batch_id=?")) {
+            return state.batchMilestone as T | null;
+          }
+          if (query.includes("SELECT id,status,road_status FROM transport_batches")) {
+            return { id: "batch-1", status: "loading", road_status: state.batchRoadStatus } as T;
+          }
+          if (query.includes("MAX(CASE WHEN milestone_code='exported'")) {
+            return {
+              exported_at: state.batchMilestone?.milestone_code === "exported" ? state.batchMilestone.event_at : null,
+              border_location: state.batchMilestone?.location ?? null,
+            } as T;
           }
           return null;
         },
@@ -75,13 +98,19 @@ vi.mock("./workflow-fields.server", () => ({
 }));
 vi.mock("./order-modules.server", () => ({ syncOrderWorkflowSnapshot }));
 
-import { syncTrackingModuleStatusForOrder } from "./batch-tracking.server";
+import { syncBatchRoadStatusFromTracking, syncTrackingModuleStatusForOrder } from "./batch-tracking.server";
 
 describe("tracking module overseas handoff synchronization", () => {
   beforeEach(() => {
     harness.batches.length = 0;
     harness.state.progress = 0;
     harness.state.milestones = [];
+    harness.state.transport = {
+      total_package_count: 1,
+      waiting_dispatch_count: 0,
+      waiting_arrival_count: 0,
+      untracked_departed_count: 0,
+    };
     harness.state.fields = [
       { fieldKey: "actual_exit_at", isActive: true, isRequired: true },
       { fieldKey: "tracking_milestone", isActive: true, isRequired: true },
@@ -92,9 +121,55 @@ describe("tracking module overseas handoff synchronization", () => {
       current_step_code: "transit",
       progress_percent: 64,
     };
+    harness.state.batchMilestone = null;
+    harness.state.batchRoadStatus = "loaded_waiting_exit";
     workflowFields.mockReset();
     workflowFields.mockImplementation(async () => harness.state.fields);
     syncOrderWorkflowSnapshot.mockReset();
+  });
+
+  it("does not mark batch OULs exported at the earlier domestic departure node", async () => {
+    harness.state.batchMilestone = {
+      milestone_code: "departed",
+      event_at: "2026-09-06T03:00:00.000Z",
+      location: "深圳仓",
+    };
+
+    await syncBatchRoadStatusFromTracking(
+      "org-1",
+      "batch-1",
+      ["order-1"],
+      "2026-09-06T03:00:01.000Z",
+    );
+
+    expect(harness.batches.at(-1)?.some((statement) =>
+      statement.query.includes("UPDATE transport_batch_packages"),
+    )).toBe(false);
+  });
+
+  it("marks only the current batch OULs departed after actual export", async () => {
+    harness.state.batchMilestone = {
+      milestone_code: "exported",
+      event_at: "2026-09-06T04:00:00.000Z",
+      location: "霍尔果斯",
+    };
+
+    await syncBatchRoadStatusFromTracking(
+      "org-1",
+      "batch-1",
+      ["order-1"],
+      "2026-09-06T04:00:01.000Z",
+    );
+
+    const packageUpdate = harness.batches.at(-1)?.find((statement) =>
+      statement.query.includes("UPDATE transport_batch_packages"),
+    );
+    expect(packageUpdate?.bindings).toEqual([
+      "departed",
+      "2026-09-06T04:00:01.000Z",
+      "org-1",
+      "batch-1",
+    ]);
   });
 
   it("completes tracking at configured customs clearance and synchronizes the next frozen step", async () => {
@@ -165,6 +240,31 @@ describe("tracking module overseas handoff synchronization", () => {
       "arrived",
       "目的仓到达",
       100,
+    ]);
+  });
+
+  it("keeps the aggregate order open when only one of several batches reached the overseas warehouse", async () => {
+    harness.state.progress = 100;
+    harness.state.milestones = ["customs_cleared", "station_arrived"];
+    harness.state.transport.waiting_arrival_count = 1;
+
+    await syncTrackingModuleStatusForOrder(
+      "org-1",
+      "order-1",
+      "station_arrived",
+      "warehouse-user-1",
+      "2026-09-06T05:00:00.000Z",
+    );
+
+    const update = harness.batches[0].find((statement) =>
+      statement.query.includes("UPDATE order_module_instances"),
+    );
+    expect(update?.bindings.slice(0, 5)).toEqual([
+      "in_progress",
+      "partial_batches",
+      "分批运输中，等待其余货物",
+      95,
+      "同一订单的运输尚未完成：1 包在途或待到仓。全部批次到仓后才能整票签收和归档",
     ]);
   });
 });

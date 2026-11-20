@@ -273,8 +273,12 @@ describe("loading batch customs access", () => {
     await loadBatchCustomsAccess(database(), "org-1", "batch-1");
 
     expect(harness.sql[0]).toContain("o.organization_id=bo.organization_id");
-    expect(harness.sql[0]).toContain("d.organization_id=bo.organization_id");
-    expect(harness.sql[0]).toContain("s.order_id=bo.order_id");
+    expect(harness.sql[0]).toContain("mapped.batch_id=bo.batch_id");
+    expect(harness.sql[0]).toContain("mapped.order_id=bo.order_id");
+    expect(harness.sql[0]).toContain("dispatch.transport_batch_id=mapped.batch_id");
+    expect(harness.sql[0]).toContain("item.package_id=mapped.package_id");
+    expect(harness.sql[0]).toContain("dispatch.status='dispatched'");
+    expect(harness.sql[0]).not.toContain("shipment.order_id=bo.order_id");
     expect(harness.sql[0]).toContain("bo.status!='removed'");
     expect(harness.loadLockedWorkflowStageContext).toHaveBeenCalledWith(
       expect.anything(), "org-1", "ltl-1", "customs",

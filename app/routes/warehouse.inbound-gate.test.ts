@@ -44,6 +44,7 @@ const harness = vi.hoisted(() => {
     length_cm: 100,
     width_cm: 100,
     height_cm: 100,
+    transport_batch_id: "batch-1",
   };
   const state = {
     loaderHasShipment: false,
@@ -67,6 +68,9 @@ const harness = vi.hoisted(() => {
             exited: 1,
             order_number: shipment.order_number,
             customs_clearance_mode: "company",
+          };
+          if (sql.includes("FROM transport_batches") && sql.includes("road_status IN")) return {
+            event_at: "2026-09-06T01:00:00.000Z",
           };
           return null;
         }),
@@ -153,6 +157,7 @@ describe("overseas warehouse inbound frozen workflow gate", () => {
     harness.state.loaderHasShipment = false;
     harness.state.customsGates = [];
     harness.state.batchRows = [];
+    harness.pkg.transport_batch_id = "batch-1";
   });
 
   it("rejects a forged inbound POST before any warehouse mutation", async () => {
@@ -311,7 +316,7 @@ describe("overseas warehouse inbound frozen workflow gate", () => {
       error: "",
     });
     expect(result.selectedShipment).toBeUndefined();
-    expect(result.lookupError).toContain("不属于当前 PZ 配载单");
+    expect(result.lookupError).toContain("不属于当前 PZ 的实际 OUL 范围");
     expect(harness.loadCustomsGates).not.toHaveBeenCalled();
     expect(harness.loadWorkflowFields).not.toHaveBeenCalled();
   });
@@ -351,6 +356,29 @@ describe("overseas warehouse inbound frozen workflow gate", () => {
       orderNumber: "SO-001",
       customsClearanceMode: "company",
     }]);
+  });
+
+  it("rejects an OUL from another batch even when the same order belongs to both batches", async () => {
+    harness.state.loaderHasShipment = true;
+    harness.state.batchRows = [{
+      batch_number: "PZ-001",
+      road_status: "outbound_in_transit",
+      order_id: "order-1",
+      order_number: "SO-001",
+      overseas_warehouse_id: "overseas-warehouse",
+    }];
+    harness.pkg.transport_batch_id = "batch-2";
+
+    const result = await loader({
+      request: new Request("http://local.test/warehouse/inbound?warehouseId=overseas-warehouse&batchId=batch-1&orderIds=order-1&reference=PKG-001"),
+      params: {},
+      context: undefined,
+    } as never);
+
+    expect(result.selectedShipment).toBeUndefined();
+    expect(result.scannedPackage).toBeNull();
+    expect(result.lookupError).toContain("不属于当前 PZ 的实际 OUL 范围");
+    expect(harness.loadWorkflowFields).not.toHaveBeenCalled();
   });
 
   it("blocks the PZ entry explicitly before the overseas receiving stage opens", async () => {

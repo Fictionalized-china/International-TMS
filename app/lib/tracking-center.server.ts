@@ -64,7 +64,8 @@ export async function loadTrackingCenter(request: Request, current: SessionUser)
        LEFT JOIN order_transport_assignments a ON a.id=(
          SELECT candidate.id FROM order_transport_assignments candidate
          WHERE candidate.organization_id=o.organization_id AND candidate.order_id=o.id AND candidate.status!='cancelled'
-         ORDER BY candidate.updated_at DESC,candidate.created_at DESC LIMIT 1
+         ORDER BY CASE WHEN candidate.actual_arrival_at IS NULL AND COALESCE(candidate.road_status,'') NOT IN ('overseas_arrived','waiting_pickup','pickup_completed') THEN 0 ELSE 1 END,
+                  candidate.updated_at DESC,candidate.created_at DESC LIMIT 1
        )
        LEFT JOIN carriers carrier ON carrier.id=a.carrier_id
        LEFT JOIN shipments s ON s.id=(

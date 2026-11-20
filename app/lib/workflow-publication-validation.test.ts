@@ -700,6 +700,54 @@ describe("workflow core step order", () => {
 });
 
 describe("workflow operational gate structure", () => {
+  it("rejects a required field that has no required module placement on the same step", () => {
+    const outboundStep = {
+      id: "outbound",
+      step_key: "outbound_transport",
+      name: "出境运输",
+      is_active: 1,
+      sort_order: 80,
+    };
+    const issues = validateWorkflowOperationalGateStructure({
+      steps: [outboundStep],
+      modules: [{
+        id: "tracking-outbound",
+        step_id: outboundStep.id,
+        module_code: "tracking",
+        display_name: "运输跟踪",
+        is_active: 1,
+        is_required: 1,
+        responsibility_position_code: "TRACKING",
+        completion_mode: "automatic",
+      }],
+      fields: [{
+        step_id: outboundStep.id,
+        module_code: "consignment",
+        field_key: "custom_required_note",
+        is_required: 1,
+        is_active: 1,
+      }],
+    });
+
+    expect(issues.join("\n")).toContain("必填字段 custom_required_note");
+    expect(issues.join("\n")).toContain("必办的 consignment 模块");
+  });
+
+  it("allows an optional field to remain a non-blocking reference", () => {
+    const step = { id: "custom", step_key: "custom", name: "自定义节点", is_active: 1, sort_order: 75 };
+    expect(validateWorkflowOperationalGateStructure({
+      steps: [step],
+      modules: [],
+      fields: [{
+        step_id: step.id,
+        module_code: "consignment",
+        field_key: "optional_note",
+        is_required: 0,
+        is_active: 1,
+      }],
+    })).toEqual([]);
+  });
+
   it("rejects customs release without a declaration source", () => {
     const outboundStep = {
       id: "outbound",

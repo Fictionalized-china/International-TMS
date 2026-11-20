@@ -1,6 +1,6 @@
 import {afterEach,beforeEach,describe,expect,it,vi} from "vitest";
 import {env} from "cloudflare:workers";
-import {meetingFixture} from "./meeting-integration-fixture";
+import {meetingFixture,seedCompletedOrderTransport} from "./meeting-integration-fixture";
 const sync=vi.hoisted(()=>vi.fn(async()=>{}));
 vi.mock("cloudflare:workers",()=>({env:{}}));
 vi.mock("./order-modules.server",()=>({syncOrderWorkflowSnapshot:sync}));
@@ -11,13 +11,13 @@ beforeEach(async()=>{
   sync.mockReset();sync.mockResolvedValue(undefined);fixture=await meetingFixture();Object.assign(env,{DB:fixture.db});
   fixture.database.prepare("INSERT INTO warehouses(id,organization_id,code,name,warehouse_role,created_at,updated_at) VALUES('moscow','org','MOW','莫斯科仓','overseas_destination',?,?)").run(fixture.now,fixture.now);
   fixture.database.prepare("INSERT INTO transport_batches(id,organization_id,order_id,batch_number,batch_name,origin_location,destination_location,created_at,updated_at) VALUES('batch','org','order','TRIP-HANDOVER','演示运输','国内','莫斯科',?,?)").run(fixture.now,fixture.now);
+  seedCompletedOrderTransport(fixture,{batchId:'batch'});
   fixture.database.prepare("INSERT INTO overseas_warehouse_operations(id,organization_id,batch_id,order_id,warehouse_id,status,created_at,updated_at) VALUES('operation','org','batch','order','moscow','notified',?,?)").run(fixture.now,fixture.now);
 });
 afterEach(()=>{vi.restoreAllMocks();fixture?.database.close();});
 const handover=()=>advanceOverseasOrder({organizationId:'org',orderId:'order',actorUserId:'owner',action:'pickup',occurredAt:fixture.now,pickupContact:'实际提货人',atomicStatements:[fixture.db.prepare("UPDATE customers SET name='stock-effect' WHERE id='customer'")]});
 describe('overseas handover shares the physical stock transaction',()=>{
   it('links a delivery photo to the exact signature event and refuses a configured missing photo before stock changes',async()=>{
-    fixture.database.prepare("INSERT INTO shipments(id,organization_id,shipment_number,order_id,customer_id,status,created_at,updated_at) VALUES('shipment','org','SIGN-PHOTO','order','customer','in_transit',?,?)").run(fixture.now,fixture.now);
     fixture.database.prepare("INSERT INTO business_process_policies(organization_id,policy_key,policy_value,updated_at) VALUES('org','photos.required_stages','delivery',?)").run(fixture.now);
     await expect(handover()).rejects.toThrow('必须上传现场照片');
     expect(fixture.database.prepare("SELECT status FROM overseas_warehouse_operations WHERE id='operation'").get()?.status).toBe('notified');

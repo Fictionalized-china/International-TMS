@@ -225,11 +225,12 @@ import {
   quotationCostsPresentationKeys,
   workflowFieldsForStep,
 } from "../lib/order-workflow-field-presentation";
-import { saveOrderCargoItem } from "../lib/order-cargo-editor.server";
+import {saveOrRequestOrderCargoChange} from "../lib/order-intake-changes.server";
 import { cargoEditorFieldPolicy } from "../lib/order-cargo-editor";
 import { markContactTypeLabels, parseMarkContactSnapshots } from "../lib/mark-contacts";
 
 type OrderSummary = {
+  updated_at:string;
   id: string;
   order_number: string;
   order_date: string;
@@ -749,6 +750,9 @@ export function canWriteLoadedWorkflowField(
     roleCodes: data.current.roleCodes,
     canOperateCurrentNode: canOperateCurrentOrder(data.current, data.order),
     canOperateModule: data.moduleActionCanOperate,
+    canRemediateRequiredField:
+      field.isActive && field.isRequired && !field.present &&
+      !["completed", "cancelled"].includes(data.order.status),
   });
 }
 type CustomsRecord = {
@@ -899,7 +903,7 @@ export async function loader(
     throw redirect(withSessionSlot(`/admin/orders/${orderId}?${query}#module-business-data`, sessionSlotFromRequest(request)));
   }
   const order = await env.DB.prepare(
-    `SELECT o.id,o.order_number,o.order_date,o.quotation_id,q.quote_number,q.currency quotation_currency,q.subtotal quotation_subtotal,q.tax_amount quotation_tax_amount,q.total_amount quotation_total_amount,q.status quotation_status,
+    `SELECT o.id,o.updated_at,o.order_number,o.order_date,o.quotation_id,q.quote_number,q.currency quotation_currency,q.subtotal quotation_subtotal,q.tax_amount quotation_tax_amount,q.total_amount quotation_total_amount,q.status quotation_status,
             o.shipper_contact quotation_customer_contact_name,
             o.shipper_phone quotation_customer_contact_phone,
             o.mark_contacts_snapshot_json,o.created_by_user_id,
@@ -1065,7 +1069,17 @@ export async function loader(
               b.overseas_carrier_name,b.overseas_vehicle_type,b.overseas_vehicle_count,b.overseas_vehicle_plate,b.overseas_driver_name,b.overseas_driver_phone,
               (SELECT COUNT(*) FROM transport_batch_vehicles v WHERE v.batch_id=b.id AND v.status!='cancelled') vehicle_count,
               (SELECT COUNT(*) FROM transport_vehicle_loads l WHERE l.batch_id=b.id) load_count,
-              (SELECT COUNT(*) FROM transport_batch_orders bo3 JOIN order_cargo_packages p ON p.order_id=bo3.order_id AND p.status!='cancelled' WHERE bo3.batch_id=b.id AND bo3.status!='removed') package_count,
+              CASE WHEN b.batch_number LIKE 'PZ-%' OR EXISTS(
+                SELECT 1 FROM transport_batch_packages bp
+                WHERE bp.organization_id=b.organization_id AND bp.batch_id=b.id AND bp.status!='removed'
+              ) THEN (
+                SELECT COUNT(*) FROM transport_batch_packages bp
+                WHERE bp.organization_id=b.organization_id AND bp.batch_id=b.id AND bp.status!='removed'
+              ) ELSE (
+                SELECT COUNT(*) FROM transport_batch_orders bo3
+                JOIN order_cargo_packages p ON p.order_id=bo3.order_id AND p.status!='cancelled'
+                WHERE bo3.batch_id=b.id AND bo3.status!='removed'
+              ) END package_count,
               (SELECT COUNT(DISTINCT p.order_id) FROM transport_vehicle_loads l JOIN order_cargo_packages p ON p.id=l.package_id WHERE l.batch_id=b.id) assigned_order_count,
               (SELECT COUNT(*) FROM transport_batch_orders bo WHERE bo.batch_id=b.id AND bo.status!='removed') order_count,
               (SELECT GROUP_CONCAT(o2.order_number, '、') FROM transport_batch_orders bo2 JOIN transport_orders o2 ON o2.id=bo2.order_id WHERE bo2.batch_id=b.id AND bo2.status!='removed') order_numbers
@@ -1263,8 +1277,17 @@ export async function loader(
               op.pickup_proof_reference,op.notes,
               (SELECT COUNT(*) FROM transport_batch_orders bo WHERE bo.batch_id=b.id AND bo.status!='removed') batch_order_count,
               (SELECT COUNT(*) FROM overseas_warehouse_operations x WHERE x.batch_id=b.id AND x.status='picked_up') picked_up_order_count,
-              (SELECT COUNT(*) FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id WHERE p.organization_id=bo.organization_id AND s.order_id=bo.order_id AND p.warehouse_id=COALESCE(op.warehouse_id,target_order.overseas_warehouse_id)) warehouse_package_count,
-              (SELECT COUNT(*) FROM warehouse_packages p JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id WHERE p.organization_id=bo.organization_id AND s.order_id=bo.order_id AND p.warehouse_id=COALESCE(op.warehouse_id,target_order.overseas_warehouse_id) AND p.status IN ('in_stock','allocated','exception')) in_warehouse_package_count
+              (SELECT COUNT(*) FROM transport_batch_packages bp
+                JOIN warehouse_packages p ON p.id=bp.package_id AND p.organization_id=bp.organization_id
+                WHERE bp.organization_id=bo.organization_id AND bp.batch_id=b.id
+                  AND bp.order_id=bo.order_id AND bp.status!='removed'
+                  AND p.warehouse_id=COALESCE(op.warehouse_id,target_order.overseas_warehouse_id)) warehouse_package_count,
+              (SELECT COUNT(*) FROM transport_batch_packages bp
+                JOIN warehouse_packages p ON p.id=bp.package_id AND p.organization_id=bp.organization_id
+                WHERE bp.organization_id=bo.organization_id AND bp.batch_id=b.id
+                  AND bp.order_id=bo.order_id AND bp.status!='removed'
+                  AND p.warehouse_id=COALESCE(op.warehouse_id,target_order.overseas_warehouse_id)
+                  AND p.status IN ('in_stock','allocated','exception')) in_warehouse_package_count
        FROM transport_batch_orders bo
        JOIN transport_batches b ON b.id=bo.batch_id AND b.organization_id=bo.organization_id
        JOIN transport_orders target_order ON target_order.id=bo.order_id AND target_order.organization_id=bo.organization_id
@@ -1814,6 +1837,11 @@ export async function action({ request, params, context }: Route.ActionArgs) {
       roleCodes: current.roleCodes,
       canOperateCurrentNode: canOperateCurrentOrder(current, order),
       canOperateModule: moduleScopedActionAccess,
+      canRemediateRequiredField:
+        customWorkflowFieldAction.isActive &&
+        customWorkflowFieldAction.isRequired &&
+        !customWorkflowFieldAction.present &&
+        !["completed", "cancelled"].includes(order.status),
     }),
   );
   const documentFieldWriteAction = ["document_upload", "document_metadata_update"].includes(intent);
@@ -2076,7 +2104,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
     return { formError: "零担订单的拼车配载由配载批次操作自动推进" };
   try {
     if (["cargo_create", "cargo_update"].includes(intent) && moduleCode === "cargo") {
-      const saved = await saveOrderCargoItem({
+      const saved = await saveOrRequestOrderCargoChange(current,{
         db: env.DB,
         organizationId: current.organizationId,
         orderId,
@@ -2090,19 +2118,13 @@ export async function action({ request, params, context }: Route.ActionArgs) {
         ),
       });
       if (!saved.ok) return { formError: saved.error };
-      await syncOrderWorkflowSnapshot(current.organizationId, orderId);
-      await writeAudit({
-        request,
-        action: saved.created ? "order.cargo.create" : "order.cargo.update",
-        resourceType: "order_cargo_item",
-        resourceId: saved.itemId,
-        organizationId: current.organizationId,
-        actorUserId: current.userId,
-        metadata: { orderId, packageCount: saved.packageCount, source: "order_detail" },
-      });
+      if(saved.pendingReview)return{actionKind:'cargo_editor',success:saved.success,saveKey:crypto.randomUUID()};
+      let cargoSyncPending=false;
+      try{await syncOrderWorkflowSnapshot(current.organizationId, orderId);}catch{cargoSyncPending=true;}
       return {
         actionKind: "cargo_editor",
-        success: saved.created ? "货物明细已新增，包装编号已生成" : "货物明细已更新",
+        success: (saved.created ? "货物明细已新增，包装编号已生成" : "货物明细已更新")+(cargoSyncPending?"；资料已保存，流程展示同步待重试，请刷新核对，不要重复新增":""),
+        saveKey: crypto.randomUUID(),
       };
     }
     if (intent === "workflow_field_save") {
@@ -3373,6 +3395,16 @@ export async function action({ request, params, context }: Route.ActionArgs) {
         (await resolveOrderTrackingVehicleReference(current.organizationId, orderId));
       const notes = valueOf(form, "notes") || null;
       const visibleToCustomer = valueOf(form, "visibleToCustomer") === "0" ? 0 : 1;
+      if(order.business_type === "ltl" && batchSynchronizedTrackingMilestones.has(milestoneCode)){
+        const batchScope=await env.DB.prepare(`SELECT COUNT(DISTINCT batch_package.batch_id) batch_count
+          FROM transport_batch_packages batch_package
+          JOIN transport_batches batch ON batch.id=batch_package.batch_id
+            AND batch.organization_id=batch_package.organization_id AND batch.status!='cancelled'
+          WHERE batch_package.organization_id=? AND batch_package.order_id=?
+            AND batch_package.status!='removed'`)
+          .bind(current.organizationId,orderId).first<{batch_count:number}>();
+        if(Number(batchScope?.batch_count))return{formError:"拼车订单请在对应配载单的“配载单跟踪”中登记运输节点；系统会按本批 OUL 同步订单，避免多批运输轨迹串批"};
+      }
       const linkedOrderIds = batchSynchronizedTrackingMilestones.has(milestoneCode)
         ? await linkedBatchOrderIds(current.organizationId, orderId)
         : [orderId];
@@ -6168,7 +6200,7 @@ function CargoWorkflowData({
   data: Route.ComponentProps["loaderData"];
   manage: boolean;
   busy: boolean;
-  closeSignal?: unknown;
+  closeSignal?: string;
 }) {
   const fields = data.workflowFields;
   const visibleGroups = cargoDetailFieldGroups.filter((group) =>
@@ -6247,7 +6279,7 @@ function CargoWorkflowData({
         closeSignal={closeSignal}
         guardFormChanges
       >
-        <CargoEditorForm fields={fields} busy={busy} />
+        <CargoEditorForm key={closeSignal??"new-cargo"} fields={fields} busy={busy} orderVersion={data.order.updated_at} needsReview={!["draft","submitted","rejected"].includes(data.order.status)} />
       </Modal>
       {data.cargo.map((item) => <Modal
         key={item.id}
@@ -6259,7 +6291,7 @@ function CargoWorkflowData({
         closeSignal={closeSignal}
         guardFormChanges
       >
-        <CargoEditorForm fields={fields} busy={busy} item={item} />
+        <CargoEditorForm key={closeSignal??item.id} fields={fields} busy={busy} item={item} orderVersion={data.order.updated_at} needsReview={!["draft","submitted","rejected"].includes(data.order.status)} />
       </Modal>)}
     </section>}
   </div>;
@@ -6269,11 +6301,16 @@ function CargoEditorForm({
   fields,
   busy,
   item,
+  orderVersion,
+  needsReview,
 }: {
   fields: WorkflowFieldState[];
   busy: boolean;
   item?: Cargo;
+  orderVersion:string;
+  needsReview:boolean;
 }) {
+  const [cargoRequestKey]=useState(()=>crypto.randomUUID());
   const options = (fieldKey: string, fallback: Array<[string, string]>) => {
     const configured = fields.find((field) => field.fieldKey === fieldKey);
     const parsed = (configured?.optionsText || "")
@@ -6307,6 +6344,8 @@ function CargoEditorForm({
   const selectedAttributes = new Set((item?.special_attributes || "").split(",").filter(Boolean));
   return <Form method="post" encType="multipart/form-data" className="form-grid cargo-editor-form">
     <input type="hidden" name="intent" value={item ? "cargo_update" : "cargo_create"} />
+    <input type="hidden" name="cargoRequestKey" value={cargoRequestKey}/>
+    <input type="hidden" name="cargoOrderVersion" value={orderVersion}/>
     {item && <input type="hidden" name="cargoItemId" value={item.id} />}
     {textField("cargo_name_cn", "cargoName", "中文品名", item?.cargo_name_cn)}
     {textField("cargo_name_en", "cargoNameEn", "英文品名", item?.cargo_name_en || "")}
@@ -6343,7 +6382,8 @@ function CargoEditorForm({
     <ModuleField fields={fields} fieldKey="cargo_images" label="货物图片" className="field span-2">
       {(required) => <><input name="images" type="file" accept="image/jpeg,image/png,image/webp" multiple required={required && !item?.image_count} /><small>单条最多 5 张，单张不超过 600 KB{item?.image_count ? `；已有 ${item.image_count} 张` : ""}</small></>}
     </ModuleField>
-    <button className="primary span-2" disabled={busy}>{item ? "保存货物修改" : "新增货物并生成包装编号"}</button>
+    {needsReview&&<label className="field span-2"><span>关键更正依据（涉及品名、申报或包装改变时填写）</span><textarea name="cargoChangeReason" minLength={2} maxLength={1000} placeholder="关键资料更正经本单审核岗位复核后应用；仅补备注、图片不另走复核"/></label>}
+    <button className="primary span-2" disabled={busy}>{needsReview?"保存货物资料（关键更正需复核）":item ? "保存货物修改" : "新增货物并生成包装编号"}</button>
   </Form>;
 }
 
@@ -6377,7 +6417,7 @@ function ModuleBusinessData({
     manage ? "create" : "records",
   );
   const moduleActionData = useActionData() as
-    | { actionKind?: string; success?: string; formError?: string }
+    | { actionKind?: string; success?: string; formError?: string; saveKey?: string }
     | undefined;
   const domesticVehicle = data.carrierVehicles.find((item) => item.id === domesticVehicleId);
   const domesticDriver = data.carrierDrivers.find((item) => item.id === domesticDriverId);
@@ -6406,7 +6446,7 @@ function ModuleBusinessData({
       })
     )} busy={busy} closeSignal={
       moduleActionData?.actionKind === "cargo_editor" && moduleActionData.success
-        ? moduleActionData
+        ? moduleActionData.saveKey
         : undefined
     } />;
   if (code === "documents")

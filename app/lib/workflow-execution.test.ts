@@ -63,6 +63,19 @@ describe("selectWorkflowExecutionCurrentStep", () => {
 });
 
 describe("workflowExecutionModuleIsComplete", () => {
+  it("never pre-completes an automatic module on a future step", () => {
+    expect(workflowExecutionModuleIsComplete({
+      existingStepStatus: "pending",
+      stepSortOrder: 110,
+      targetSortOrder: 100,
+      sourceModuleStatus: "not_started",
+      completionMode: "automatic",
+      taskCount: 0,
+      pendingRequired: 0,
+      hasMissingRequiredFields: false,
+    })).toBe(false);
+  });
+
   it("does not let missing required fields pass at the current target step", () => {
     expect(workflowExecutionModuleIsComplete({
       existingStepStatus: "active",

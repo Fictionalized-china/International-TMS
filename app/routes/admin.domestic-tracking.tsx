@@ -135,7 +135,8 @@ export async function loader({ request }: Route.LoaderArgs) {
              SELECT 1 FROM transport_batch_orders bo
              WHERE bo.organization_id=o.organization_id AND bo.batch_id=bx.id AND bo.order_id=o.id AND bo.status!='removed'
            ))
-         ORDER BY bx.updated_at DESC,bx.created_at DESC LIMIT 1
+         ORDER BY CASE WHEN bx.actual_arrival_at IS NULL AND COALESCE(bx.road_status,'') NOT IN ('overseas_arrived','waiting_pickup','pickup_completed') THEN 0 ELSE 1 END,
+                  bx.updated_at DESC,bx.created_at DESC LIMIT 1
        )
       WHERE o.organization_id=? AND ${visibility.sql}
         AND o.status NOT IN ('draft','submitted','cancelled')${responsibilitySql}

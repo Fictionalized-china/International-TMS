@@ -41,6 +41,10 @@ import { withOrderProjectionSync } from "./order-sync-queue.server";
 import { workflowModuleConfigurationStatements } from "./workflow-state-write-batch";
 import { changedRowGuard, guardedBatch, predicateGuard } from "./mutation-guard.server";
 import { prepareOrderIntakeAdvance,intakeGateCommitStatements } from "./order-intake-gate.server";
+import {
+  hasCompletedDomesticWarehouseDispatch,
+  loadOrderTransportCompletionState,
+} from "./order-transport-completion.server";
 
 export type OrderModuleInstance = {
   id: string;
@@ -525,30 +529,43 @@ async function synchronizeLoadingModuleFromBatch(
 ) {
   const plan = await env.DB.prepare(
       `SELECT b.id,
-        MAX(o.business_type) business_type,
-         MAX(CASE WHEN EXISTS(
+        o.business_type,
+         (SELECT COUNT(*) FROM transport_batch_packages batch_package
+           JOIN transport_batches active_batch ON active_batch.id=batch_package.batch_id
+             AND active_batch.organization_id=batch_package.organization_id
+             AND active_batch.status!='cancelled'
+           WHERE batch_package.organization_id=bo.organization_id
+             AND batch_package.order_id=bo.order_id AND batch_package.status!='removed') batch_package_count,
+         CASE WHEN EXISTS(
            SELECT 1 FROM warehouse_dispatches d
            JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id
            JOIN warehouse_packages wp ON wp.id=di.package_id
            JOIN shipments sx ON sx.id=wp.shipment_id
            WHERE d.organization_id=bo.organization_id AND sx.order_id=bo.order_id AND d.status='dispatched'
-         ) THEN 1 ELSE 0 END) warehouse_dispatched
+         ) THEN 1 ELSE 0 END warehouse_dispatched
        FROM transport_batch_orders bo
        JOIN transport_batches b ON b.id=bo.batch_id AND b.status!='cancelled'
        JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
        WHERE bo.organization_id=? AND bo.order_id=? AND bo.status!='removed'
-       GROUP BY b.id
        ORDER BY b.created_at DESC LIMIT 1`,
   )
     .bind(organizationId, orderId)
     .first<{
       id: string;
       business_type: string | null;
+      batch_package_count: number;
       warehouse_dispatched: number;
     }>();
   if (!plan) return;
+  const transportState=await loadOrderTransportCompletionState(env.DB,organizationId,orderId);
+  const domesticDispatchComplete=hasCompletedDomesticWarehouseDispatch({
+    businessType:plan.business_type,
+    batchPackageCount:Number(plan.batch_package_count),
+    warehouseDispatched:plan.warehouse_dispatched,
+    transportState,
+  });
   const isFtl = plan.business_type === "ftl";
-  if (plan.warehouse_dispatched) {
+  if (domesticDispatchComplete) {
     await env.DB.prepare(
       `UPDATE order_module_instances
        SET status='completed',current_step_code='confirmed',current_step_name='装车出库交接完成',
@@ -572,7 +589,10 @@ async function synchronizeLoadingModuleFromBatch(
     : isFtl
       ? "整车运输单待完善车辆信息"
       : "配载成单，待完善整批车辆信息";
-  const progress = orderReady ? 60 : 25;
+  const pendingDispatchText=transportState.waitingDispatchCount>0&&plan.warehouse_dispatched
+    ? `已分批出库，仍有 ${transportState.waitingDispatchCount} 包待配载/装车`
+    : null;
+  const progress = pendingDispatchText ? 75 : orderReady ? 60 : 25;
   await env.DB.prepare(
     `UPDATE order_module_instances
        SET status='in_progress',current_step_code='planned',current_step_name=?,progress_percent=?,
@@ -581,10 +601,10 @@ async function synchronizeLoadingModuleFromBatch(
      WHERE organization_id=? AND order_id=? AND module_code='loading' AND enabled=1`,
   )
     .bind(
-      currentStepName,
+      pendingDispatchText||currentStepName,
       progress,
       now,
-      blockers.join("；") || null,
+      pendingDispatchText||(blockers.join("；") || null),
       now,
       organizationId,
       orderId,
@@ -707,11 +727,31 @@ export async function syncOrderWorkflowSnapshot(
       .bind(organizationId, orderId)
       .all<WorkflowSnapshotModule>()
   ).results;
-  const synchronizedStepKey = await syncOrderBusinessWorkflow({
+  let synchronizedStepKey = await syncOrderBusinessWorkflow({
     organizationId,
     orderId,
     source: "system",
   });
+  // Physical and financial facts may have completed before a repaired or
+  // delayed projection finally reaches reconciliation.  Re-evaluate the costs
+  // gate only after the frozen workflow has actually entered that stage, then
+  // consume the derived module status in one bounded second pass.  This makes
+  // one user action converge without weakening the settlement-stage gate or
+  // requiring repeated clicks.
+  if (await orderCostsSettlementStageReached(organizationId, orderId)) {
+    const settlementSyncAt = new Date().toISOString();
+    await syncCostsModuleStatus(
+      organizationId,
+      orderId,
+      settlementSyncAt,
+      { ensureModules: false },
+    );
+    synchronizedStepKey = await syncOrderBusinessWorkflow({
+      organizationId,
+      orderId,
+      source: "system",
+    });
+  }
   const frozenRows = await env.DB.prepare(
     `SELECT wi.current_step_key step_key,ss.step_name,
             ms.id module_state_id,ms.module_code,ms.display_name module_name,
@@ -873,7 +913,20 @@ function pickLegacyNextWorkflowModule(
 
 async function syncModuleStateFromTransportBatch(organizationId: string, orderId: string) {
   const batch = await env.DB.prepare(
-    `SELECT b.id,b.road_status,b.status,bo.status order_batch_status,
+    `SELECT b.id,b.road_status,b.status,bo.status order_batch_status,o.business_type,
+            (SELECT COUNT(*) FROM transport_batch_packages batch_package
+              JOIN transport_batches active_batch ON active_batch.id=batch_package.batch_id
+                AND active_batch.organization_id=batch_package.organization_id
+                AND active_batch.status!='cancelled'
+              WHERE batch_package.organization_id=bo.organization_id
+                AND batch_package.order_id=bo.order_id AND batch_package.status!='removed') batch_package_count,
+            EXISTS(SELECT 1 FROM transport_batch_orders started_order
+              JOIN transport_batches started_batch ON started_batch.id=started_order.batch_id
+                AND started_batch.organization_id=started_order.organization_id
+                AND started_batch.status!='cancelled'
+              WHERE started_order.organization_id=bo.organization_id
+                AND started_order.order_id=bo.order_id AND started_order.status!='removed'
+                AND started_batch.road_status IN ('outbound_in_transit','overseas_arrived','waiting_pickup','pickup_completed')) transport_started,
             EXISTS(SELECT 1 FROM warehouse_dispatches d JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id JOIN warehouse_packages wp ON wp.id=di.package_id JOIN shipments s ON s.id=wp.shipment_id WHERE d.organization_id=? AND s.order_id=? AND d.status='dispatched') warehouse_dispatched,
             EXISTS(SELECT 1 FROM transport_vehicle_loads l JOIN order_cargo_packages p ON p.id=l.package_id WHERE l.organization_id=? AND p.order_id=? AND l.loaded_at IS NOT NULL) packages_loaded,
             (SELECT op.status FROM overseas_warehouse_operations op
@@ -886,6 +939,7 @@ async function syncModuleStateFromTransportBatch(organizationId: string, orderId
              WHERE l.organization_id=? AND l.batch_id=bo.batch_id AND p.order_id=? AND l.loaded_at IS NOT NULL) loaded_package_count
      FROM transport_batch_orders bo
      JOIN transport_batches b ON b.id=bo.batch_id AND b.status!='cancelled'
+     JOIN transport_orders o ON o.id=bo.order_id AND o.organization_id=bo.organization_id
      WHERE bo.organization_id=? AND bo.order_id=? AND bo.status!='removed'
      ORDER BY b.updated_at DESC LIMIT 1`,
   ).bind(
@@ -906,6 +960,9 @@ async function syncModuleStateFromTransportBatch(organizationId: string, orderId
     road_status: string | null;
     status: string | null;
     order_batch_status: string | null;
+    business_type: string | null;
+    batch_package_count: number;
+    transport_started: number;
     warehouse_dispatched: number;
     packages_loaded: number;
     overseas_operation_status: string | null;
@@ -915,13 +972,18 @@ async function syncModuleStateFromTransportBatch(organizationId: string, orderId
   if (!batch) return;
 
   const now = new Date().toISOString();
+  const transportState=await loadOrderTransportCompletionState(env.DB,organizationId,orderId);
+  const domesticDispatchComplete=hasCompletedDomesticWarehouseDispatch({
+    businessType:batch.business_type,
+    batchPackageCount:Number(batch.batch_package_count),
+    warehouseDispatched:batch.warehouse_dispatched,
+    transportState,
+  });
+  const allTransportComplete=(batch.business_type==="ftl"
+    ?transportState.totalPackageCount>0
+    :Number(batch.batch_package_count)>0)&&transportState.complete;
   const statements: D1PreparedStatement[] = [];
-  if (
-    batch.warehouse_dispatched ||
-    ["loaded_waiting_exit", "outbound_in_transit", "overseas_arrived", "waiting_pickup", "pickup_completed"].includes(
-      batch.road_status || "",
-    )
-  ) {
+  if (domesticDispatchComplete) {
     statements.push(
       env.DB.prepare(
         `UPDATE order_module_instances
@@ -931,17 +993,21 @@ async function syncModuleStateFromTransportBatch(organizationId: string, orderId
       ).bind(now, now, now, organizationId, orderId),
     );
   }
-  if (batch.road_status === "outbound_in_transit") {
+  if (!allTransportComplete&&Boolean(batch.transport_started)) {
     statements.push(
       env.DB.prepare(
         `UPDATE order_module_instances
-       SET status='in_progress',current_step_code='transit',current_step_name='出境运输中',progress_percent=50,started_at=COALESCE(started_at,?),blocking_reason=NULL,updated_at=?
+       SET status='in_progress',current_step_code='transit',current_step_name=?,progress_percent=50,started_at=COALESCE(started_at,?),blocking_reason=?,updated_at=?
          WHERE organization_id=? AND order_id=? AND module_code='tracking' AND enabled=1
            AND status!='completed' AND COALESCE(progress_percent,0)<50`,
-      ).bind(now, now, organizationId, orderId),
+      ).bind(
+        transportState.waitingDispatchCount>0?"分批运输中，等待后续批次":"出境运输中",
+        transportState.reason,
+        now,now,organizationId,orderId,
+      ),
     );
   }
-  if (["overseas_arrived", "waiting_pickup", "pickup_completed"].includes(batch.road_status || "")) {
+  if (allTransportComplete) {
     statements.push(
       env.DB.prepare(
         `UPDATE order_module_instances
@@ -1073,8 +1139,9 @@ export async function syncCostsModuleStatus(
   organizationId: string,
   orderId: string,
   now = new Date().toISOString(),
+  options: { ensureModules?: boolean } = {},
 ) {
-  await ensureOrderModules(organizationId, orderId);
+  if (options.ensureModules !== false) await ensureOrderModules(organizationId, orderId);
   const gate = await loadCostsCompletionGate(organizationId, orderId);
 
   const definition = orderModuleDefinition("costs");

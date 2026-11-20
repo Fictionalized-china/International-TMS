@@ -948,7 +948,7 @@ export async function saveOrderCustomWorkflowFieldValue(input: {
   if (!workflow.locked)
     throw new Error("历史订单没有冻结的自定义字段快照，不能修改该字段");
   const field = await env.DB.prepare(
-    `SELECT f.id,f.module_code,f.step_key,f.field_key,f.field_type,f.label,f.is_active,
+    `SELECT f.id,f.module_code,f.step_key,f.field_key,f.field_type,f.label,f.is_required,f.is_active,
             f.handler_position_codes,o.status order_status
      FROM workflow_instance_fields f
      JOIN workflow_instances wi ON wi.id=f.instance_id
@@ -963,6 +963,7 @@ export async function saveOrderCustomWorkflowFieldValue(input: {
     field_key: string;
     field_type: string;
     label: string;
+    is_required: number;
     is_active: number;
     handler_position_codes: string | null;
     order_status: string;
@@ -1002,11 +1003,19 @@ export async function saveOrderCustomWorkflowFieldValue(input: {
       placement.moduleCode === input.moduleCode &&
       placement.stepKey === field.step_key,
   );
+  const orphanRequiredFieldRemediation = Boolean(
+    field.is_required === 1 &&
+    exactFieldPlacement &&
+    !modulePlacedAtFieldStep &&
+    currentStep &&
+    fieldStep &&
+    currentStep.sortOrder >= fieldStep.sortOrder,
+  );
   if (
-    !capability.visible ||
-    !capability.available ||
+    (!capability.visible && !orphanRequiredFieldRemediation) ||
+    (!capability.available && !orphanRequiredFieldRemediation) ||
     !exactFieldPlacement ||
-    !modulePlacedAtFieldStep ||
+    (!modulePlacedAtFieldStep && !orphanRequiredFieldRemediation) ||
     !currentStep ||
     !fieldStep ||
     currentStep.sortOrder < fieldStep.sortOrder

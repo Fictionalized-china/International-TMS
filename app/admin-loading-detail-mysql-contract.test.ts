@@ -16,5 +16,12 @@ describe("admin loading detail MySQL contract", () => {
     );
     expect(route).not.toMatch(/module_codes\s*\([^)]*\)\s+AS\s*\(\s*VALUES/i);
     expect(route).toContain("UNION ALL SELECT 'tracking'");
+    expect(route).not.toMatch(/(?:operation|document)_assignee_user_id IS \?/);
+    expect(route).toContain(
+      "operation_assignee_user_id=? OR (operation_assignee_user_id IS NULL AND ? IS NULL)",
+    );
+    expect(route).toContain(
+      "document_assignee_user_id=? OR (document_assignee_user_id IS NULL AND ? IS NULL)",
+    );
   });
 });

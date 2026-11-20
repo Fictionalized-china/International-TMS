@@ -24,6 +24,119 @@ export async function meetingFixture() {
   return {database,db,actors,now};
 }
 
+/** Seed one physically complete OUL without weakening production completion gates. */
+export function seedCompletedOrderTransport(
+  fixture: Awaited<ReturnType<typeof meetingFixture>>,
+  options: { batchId?: string; orderId?: string } = {},
+) {
+  const sql = fixture.database;
+  const now = fixture.now;
+  const batchId = options.batchId ?? "completed-transport-batch";
+  const orderId = options.orderId ?? "order";
+  const suffix = `${orderId}:${batchId}`;
+  const warehouseId = `completed-transport-warehouse:${suffix}`;
+  const shipmentId = `completed-transport-shipment:${suffix}`;
+  const zoneId = `completed-transport-zone:${suffix}`;
+  const locationId = `completed-transport-location:${suffix}`;
+  const receiptId = `completed-transport-receipt:${suffix}`;
+  const jobId = `completed-transport-job:${suffix}`;
+  const inboundPackageId = `completed-transport-inbound-package:${suffix}`;
+  const packageId = `completed-transport-package:${suffix}`;
+  sql.prepare(
+    "INSERT OR IGNORE INTO warehouses(id,organization_id,code,name,warehouse_role,created_at,updated_at) VALUES(?,'org',?,'测试国内仓','domestic_collection',?,?)",
+  ).run(warehouseId, `W-${suffix}`, now, now);
+  sql.prepare(
+    "INSERT OR IGNORE INTO shipments(id,organization_id,shipment_number,order_id,customer_id,status,created_at,updated_at) VALUES(?,'org',?,?, 'customer','in_transit',?,?)",
+  ).run(shipmentId, `SHIP-${suffix}`, orderId, now, now);
+  sql.prepare(
+    "INSERT OR IGNORE INTO warehouse_zones(id,organization_id,warehouse_id,code,name,created_at,updated_at) VALUES(?,'org',?,'Z','测试收货区',?,?)",
+  ).run(zoneId, warehouseId, now, now);
+  sql.prepare(
+    "INSERT OR IGNORE INTO warehouse_locations(id,organization_id,warehouse_id,zone_id,code,name,created_at,updated_at) VALUES(?,'org',?,?,'L','测试库位',?,?)",
+  ).run(locationId, warehouseId, zoneId, now, now);
+  sql.prepare(
+    `INSERT OR IGNORE INTO warehouse_receipts(
+      id,organization_id,receipt_number,shipment_id,warehouse_id,location_id,status,
+      total_packages,total_weight_kg,total_volume_cbm,cargo_complete,received_at,created_at,updated_at
+    ) VALUES(?,'org',?,?,?,?,'completed',1,1,1,1,?,?,?)`,
+  ).run(receiptId, `IN-${suffix}`, shipmentId, warehouseId, locationId, now, now, now);
+  sql.prepare(
+    `INSERT INTO warehouse_packing_jobs(
+      id,organization_id,warehouse_id,order_id,shipment_id,packing_mode,
+      source_package_count,outbound_package_count,total_weight_kg,total_volume_cbm,
+      status,created_by_user_id,created_at,updated_at
+    ) VALUES(?,'org',?,?,?,'preserve',1,1,1,1,'labelled','supervisor',?,?)`,
+  ).run(jobId, warehouseId, orderId, shipmentId, now, now);
+  const packingScope = sql.prepare(
+    "SELECT id,organization_id,warehouse_id,order_id,shipment_id,status FROM warehouse_packing_jobs WHERE id=?",
+  ).get(jobId);
+  if (!packingScope) throw new Error(`completed transport packing job missing: ${jobId}`);
+  const packingScopeValid = sql.prepare(
+    `SELECT 1 ok FROM warehouse_packing_jobs job
+     WHERE job.id=? AND job.organization_id='org' AND job.warehouse_id=?
+       AND job.shipment_id=? AND job.status!='cancelled'`,
+  ).get(jobId, warehouseId, shipmentId);
+  if (!packingScopeValid) throw new Error(`completed transport packing scope invalid: ${JSON.stringify(packingScope)}`);
+  sql.prepare(
+    `INSERT INTO warehouse_packages(
+      id,organization_id,receipt_id,shipment_id,warehouse_id,location_id,barcode,package_number,
+      pieces,weight_kg,volume_cbm,length_cm,width_cm,height_cm,label_kind,created_at,updated_at
+    ) VALUES(?,'org',?,?,?,?,?,?,1,1,1,1,1,1,'inbound_mark',?,?)`,
+  ).run(
+    inboundPackageId,
+    receiptId,
+    shipmentId,
+    warehouseId,
+    locationId,
+    `IN-${suffix}`,
+    `IN-P-${suffix}`,
+    now,
+    now,
+  );
+  sql.prepare(
+    `INSERT INTO warehouse_packing_job_sources(
+      id,organization_id,packing_job_id,inbound_warehouse_package_id,created_at
+    ) VALUES(?,'org',?,?,?)`,
+  ).run(`completed-transport-source:${suffix}`, jobId, inboundPackageId, now);
+  sql.prepare(
+    `INSERT INTO warehouse_packages(
+      id,organization_id,receipt_id,shipment_id,warehouse_id,location_id,barcode,package_number,
+      pieces,weight_kg,volume_cbm,length_cm,width_cm,height_cm,label_kind,packing_job_id,created_at,updated_at
+    ) VALUES(?,'org',?,?,?,?,?,?,1,1,1,1,1,1,'oul',?,?,?)`,
+  ).run(packageId, receiptId, shipmentId, warehouseId, locationId, `OUL-${suffix}`, `P-${suffix}`, jobId, now, now);
+  sql.prepare(
+    `INSERT OR IGNORE INTO transport_batches(
+      id,organization_id,order_id,batch_number,batch_name,origin_location,destination_location,
+      warehouse_id,status,road_status,actual_departure_at,created_by_user_id,created_at,updated_at
+    ) VALUES(?,'org',?,?,?,'国内仓','境外仓',?,'arrived','overseas_arrived',?,'supervisor',?,?)`,
+  ).run(batchId, orderId, `PZ-${suffix}`, `完成运输-${suffix}`, warehouseId, now, now, now);
+  sql.prepare(
+    `UPDATE transport_batches SET warehouse_id=?,status='arrived',road_status='overseas_arrived',
+      actual_departure_at=COALESCE(actual_departure_at,?),updated_at=?
+      WHERE id=? AND organization_id='org'`,
+  ).run(warehouseId, now, now, batchId);
+  sql.prepare(
+    `INSERT OR IGNORE INTO transport_batch_orders(
+      id,organization_id,batch_id,order_id,sequence_no,status,added_by_user_id,created_at,updated_at
+    ) VALUES(?,'org',?,?,1,'arrived','supervisor',?,?)`,
+  ).run(`completed-transport-membership:${suffix}`, batchId, orderId, now, now);
+  sql.prepare(
+    `INSERT OR IGNORE INTO transport_batch_packages(
+      id,organization_id,batch_id,order_id,packing_job_id,package_id,sequence_no,status,
+      added_by_user_id,created_at,updated_at
+    ) VALUES(?,'org',?,?,?,?,1,'planned','supervisor',?,?)`,
+  ).run(`completed-transport-map:${suffix}`, batchId, orderId, jobId, packageId, now, now);
+  sql.prepare(
+    "UPDATE transport_batch_packages SET status='arrived',updated_at=? WHERE organization_id='org' AND batch_id=? AND package_id=?",
+  ).run(now, batchId, packageId);
+  sql.prepare("UPDATE warehouse_packing_jobs SET status='allocated',updated_at=? WHERE id=?").run(now, jobId);
+  sql.prepare("UPDATE warehouse_packing_jobs SET status='loading',updated_at=? WHERE id=?").run(now, jobId);
+  sql.prepare("UPDATE warehouse_packing_jobs SET status='dispatched',updated_at=? WHERE id=?").run(now, jobId);
+  sql.prepare(
+    "UPDATE warehouse_packages SET status='dispatched',lifecycle_status='overseas_received',updated_at=? WHERE organization_id='org' AND id=?",
+  ).run(now, packageId);
+}
+
 export function seedFrozenMeetingWorkflow(fixture:Awaited<ReturnType<typeof meetingFixture>>) {
   const sql=fixture.database,now=fixture.now;
   sql.prepare("INSERT INTO workflow_definitions(id,organization_id,code,name,created_at,updated_at) VALUES('wf','org','test-flow','测试流程',?,?)").run(now,now);

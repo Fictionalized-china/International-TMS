@@ -48,35 +48,6 @@ export async function completeWarehouseDispatchTransaction(
          )`,
     ).bind(occurredAt, organizationId, warehouseId, dispatchId),
     db.prepare(
-      `UPDATE warehouse_packing_jobs
-       SET status='dispatched',updated_at=?
-       WHERE organization_id=? AND warehouse_id=? AND dispatch_id=? AND status='loading'
-         AND NOT EXISTS(
-           SELECT 1 FROM warehouse_dispatch_items item
-           WHERE item.organization_id=warehouse_packing_jobs.organization_id
-             AND item.dispatch_id=warehouse_packing_jobs.dispatch_id
-             AND item.status!='loaded'
-         )`,
-    ).bind(occurredAt, organizationId, warehouseId, dispatchId),
-    db.prepare(
-      `UPDATE warehouse_packages
-       SET status='dispatched',
-           notes=TRIM(COALESCE(notes||'；','')||'最终 OUL 已完成装车出库，入仓唛头结束流转'),
-           updated_at=?
-       WHERE organization_id=? AND warehouse_id=?
-         AND label_kind='inbound_mark' AND lifecycle_status='active' AND status='allocated'
-         AND id IN (
-           SELECT source.inbound_warehouse_package_id
-           FROM warehouse_packing_job_sources source
-           JOIN warehouse_packing_jobs job
-             ON job.id=source.packing_job_id AND job.organization_id=source.organization_id
-           JOIN warehouse_dispatches dispatch
-             ON dispatch.id=job.dispatch_id AND dispatch.organization_id=job.organization_id
-           WHERE source.organization_id=? AND job.warehouse_id=?
-             AND job.dispatch_id=? AND job.status='dispatched' AND dispatch.status='loading'
-         )`,
-    ).bind(occurredAt, organizationId, warehouseId, organizationId, warehouseId, dispatchId),
-    db.prepare(
       `UPDATE warehouse_packages
        SET status='dispatched',lifecycle_status=CASE WHEN label_kind='oul' THEN 'in_transit' ELSE lifecycle_status END,updated_at=?
        WHERE organization_id=? AND warehouse_id=?
@@ -87,6 +58,84 @@ export async function completeWarehouseDispatchTransaction(
            JOIN warehouse_dispatches d
              ON d.id=di.dispatch_id AND d.organization_id=di.organization_id
            WHERE d.id=? AND d.organization_id=? AND d.status='loading'
+         )`,
+    ).bind(occurredAt, organizationId, warehouseId, dispatchId, organizationId),
+    db.prepare(
+      `UPDATE transport_batch_packages
+       SET status='departed',updated_at=?
+       WHERE organization_id=? AND batch_id=? AND status IN ('planned','loaded')
+         AND package_id IN (
+           SELECT item.package_id FROM warehouse_dispatch_items item
+           JOIN warehouse_dispatches dispatch
+             ON dispatch.id=item.dispatch_id AND dispatch.organization_id=item.organization_id
+           WHERE dispatch.id=? AND dispatch.organization_id=? AND dispatch.status='loading'
+         )`,
+    ).bind(occurredAt, organizationId, transportBatchId??"", dispatchId, organizationId),
+    db.prepare(
+      `UPDATE warehouse_packages
+       SET status='dispatched',
+           notes=TRIM(COALESCE(notes||'；','')||'关联的最终 OUL 已全部完成装车出库，入仓唛头结束流转'),
+           updated_at=?
+       WHERE organization_id=? AND warehouse_id=?
+         AND label_kind='inbound_mark' AND lifecycle_status='active' AND status='allocated'
+         AND source_order_package_id IN (
+           SELECT DISTINCT relation.inbound_package_id
+           FROM warehouse_package_relations relation
+           JOIN warehouse_dispatch_items item
+             ON item.package_id=relation.outbound_package_id
+            AND item.organization_id=relation.organization_id
+           JOIN warehouse_dispatches dispatch
+             ON dispatch.id=item.dispatch_id AND dispatch.organization_id=item.organization_id
+           WHERE relation.organization_id=? AND dispatch.id=? AND dispatch.status='loading'
+             AND NOT EXISTS (
+               SELECT 1
+               FROM warehouse_package_relations pending_relation
+               JOIN transport_batch_packages pending_batch_package
+                 ON pending_batch_package.package_id=pending_relation.outbound_package_id
+                AND pending_batch_package.organization_id=pending_relation.organization_id
+                AND pending_batch_package.status!='removed'
+               WHERE pending_relation.organization_id=relation.organization_id
+                 AND pending_relation.inbound_package_id=relation.inbound_package_id
+                 AND pending_batch_package.status NOT IN ('departed','arrived')
+             )
+         )`,
+    ).bind(occurredAt, organizationId, warehouseId, organizationId, dispatchId),
+    db.prepare(
+      `UPDATE warehouse_packing_jobs
+       SET status='loading',updated_at=?
+       WHERE organization_id=? AND warehouse_id=? AND status='allocated'
+         AND id IN (
+           SELECT DISTINCT package_row.packing_job_id
+           FROM warehouse_dispatch_items item
+           JOIN warehouse_packages package_row
+             ON package_row.id=item.package_id AND package_row.organization_id=item.organization_id
+           WHERE item.dispatch_id=? AND item.organization_id=?
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM warehouse_packages remaining
+           WHERE remaining.organization_id=warehouse_packing_jobs.organization_id
+             AND remaining.packing_job_id=warehouse_packing_jobs.id
+             AND remaining.label_kind='oul' AND remaining.lifecycle_status='active'
+             AND remaining.status='in_stock'
+         )`,
+    ).bind(occurredAt, organizationId, warehouseId, dispatchId, organizationId),
+    db.prepare(
+      `UPDATE warehouse_packing_jobs
+       SET status='dispatched',updated_at=?
+       WHERE organization_id=? AND warehouse_id=? AND status='loading'
+         AND id IN (
+           SELECT DISTINCT package_row.packing_job_id
+           FROM warehouse_dispatch_items item
+           JOIN warehouse_packages package_row
+             ON package_row.id=item.package_id AND package_row.organization_id=item.organization_id
+           WHERE item.dispatch_id=? AND item.organization_id=?
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM warehouse_packages remaining
+           WHERE remaining.organization_id=warehouse_packing_jobs.organization_id
+             AND remaining.packing_job_id=warehouse_packing_jobs.id
+             AND remaining.label_kind='oul' AND remaining.lifecycle_status='active'
+             AND remaining.status!='dispatched'
          )`,
     ).bind(occurredAt, organizationId, warehouseId, dispatchId, organizationId),
     db.prepare(
@@ -148,19 +197,28 @@ export async function completeWarehouseDispatchTransaction(
       `UPDATE order_cargo_packages
        SET status='loaded'
        WHERE organization_id=? AND status NOT IN ('cancelled','in_transit','delivered')
-         AND order_id IN (
-           SELECT DISTINCT s.order_id
-           FROM warehouse_dispatch_items di
-           JOIN warehouse_packages p
-             ON p.id=di.package_id AND p.organization_id=di.organization_id
-           JOIN shipments s
-             ON s.id=p.shipment_id AND s.organization_id=p.organization_id
-           JOIN warehouse_dispatches d
-             ON d.id=di.dispatch_id AND d.organization_id=di.organization_id
-           WHERE d.id=? AND d.organization_id=? AND d.status='loading'
-             AND p.warehouse_id=? AND p.label_kind='oul'
+         AND id IN (
+           SELECT DISTINCT relation.inbound_package_id
+           FROM warehouse_package_relations relation
+           JOIN warehouse_dispatch_items item
+             ON item.package_id=relation.outbound_package_id
+            AND item.organization_id=relation.organization_id
+           JOIN warehouse_dispatches dispatch
+             ON dispatch.id=item.dispatch_id AND dispatch.organization_id=item.organization_id
+           WHERE relation.organization_id=? AND dispatch.id=? AND dispatch.status='loading'
+             AND NOT EXISTS (
+               SELECT 1
+               FROM warehouse_package_relations pending_relation
+               JOIN warehouse_packages pending_oul
+                 ON pending_oul.id=pending_relation.outbound_package_id
+                AND pending_oul.organization_id=pending_relation.organization_id
+               WHERE pending_relation.organization_id=relation.organization_id
+                 AND pending_relation.inbound_package_id=relation.inbound_package_id
+                 AND pending_oul.label_kind='oul' AND pending_oul.lifecycle_status='active'
+                 AND pending_oul.status!='dispatched'
+             )
          )`,
-    ).bind(organizationId, dispatchId, organizationId, warehouseId),
+    ).bind(organizationId, organizationId, dispatchId),
   ];
 
   if (transportBatchId) {

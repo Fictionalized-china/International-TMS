@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { meetingFixture, seedFrozenMeetingWorkflow } from "./meeting-integration-fixture";
 import { createSettlementAccessReadPhase, loadSettlementWorkbenchActionAccess, type SettlementAccessSource } from "./settlement-workbench-access.server";
 import type { SettlementWorkbenchAction } from "./settlement-workbench-access";
@@ -21,8 +21,10 @@ const cases: { action: SettlementWorkbenchAction; source: SettlementAccessSource
 ];
 
 describe("settlement access write-free read phase", () => {
+  beforeEach(setup);
+
   it.each(["owner", "sales", "operation", "supervisor", "cs", "finance", "cashier", "commercial"])("keeps all %s row decisions identical and reduces repeated queries", async id => {
-    await setup(); const actor = fixture.actors.get(id)!;
+    const actor = fixture.actors.get(id)!;
     const spy = vi.spyOn(fixture.db, "prepare");
     const expected = [];
     for (const input of cases) expected.push(await loadSettlementWorkbenchActionAccess(fixture.db, { ...input, actor }));
@@ -37,7 +39,7 @@ describe("settlement access write-free read phase", () => {
     expect(spy.mock.calls.every(([sql]) => !/^\s*(INSERT|UPDATE|DELETE)/.test(sql))).toBe(true);
   });
   it("does not share stale facts with a later phase or a real submission", async () => {
-    await setup(); const actor = fixture.actors.get("owner")!;
+    const actor = fixture.actors.get("owner")!;
     const input = cases[3];
     expect((await createSettlementAccessReadPhase(fixture.db, actor)(input)).canWrite).toBe(true);
     fixture.database.exec("UPDATE workflow_instance_fields SET is_active=0 WHERE field_key IN ('cash_records','writeoff_records')");
@@ -48,7 +50,7 @@ describe("settlement access write-free read phase", () => {
     expect((await createSettlementAccessReadPhase(fixture.db, revokedActor)(cases[0])).canWrite).toBe(false);
   });
   it("fails closed for missing sources, foreign organizations and oversized source lists", async () => {
-    await setup(); const actor = fixture.actors.get("owner")!;
+    const actor = fixture.actors.get("owner")!;
     const read = createSettlementAccessReadPhase(fixture.db, actor);
     for (const source of [{ kind: "expense_ids", ids: ["fee", "missing"] }, { kind: "reconciliation_id", id: "missing" }, { kind: "order_ids", ids: Array.from({ length: 101 }, (_, i) => `order-${i}`) }] as SettlementAccessSource[]) {
       const input = { action: "allocate_cash" as const, source, legacyFallback: "deny" as const };
@@ -58,7 +60,7 @@ describe("settlement access write-free read phase", () => {
     expect((await createSettlementAccessReadPhase(fixture.db, { ...actor, organizationId: "foreign" })(cases[0])).canWrite).toBe(false);
   });
   it("propagates failed reads rather than returning an old allow decision", async () => {
-    await setup(); const actor = fixture.actors.get("owner")!;
+    const actor = fixture.actors.get("owner")!;
     fixture.database.exec("DROP TABLE business_process_policies");
     await expect(createSettlementAccessReadPhase(fixture.db, actor)(cases[0])).rejects.toThrow();
   });

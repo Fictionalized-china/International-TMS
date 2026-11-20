@@ -166,11 +166,6 @@ export default function WarehouseLayout({ loaderData }: Route.ComponentProps) {
             </NavLink>
           )}
           {loaderData.warehouse.warehouse_role !== "overseas_destination" && (
-            <NavLink to={warehouseLink("/warehouse/consolidation", loaderData.query)}>
-              <span><AppIcon name="boxes" size={17} /></span>待配载池
-            </NavLink>
-          )}
-          {loaderData.warehouse.warehouse_role !== "overseas_destination" && (
             <Link className={loaderData.currentPath.startsWith("/warehouse/outbound") && loaderData.outboundView === "pending" ? "active" : undefined} to={warehouseOutboundLink(loaderData.query,"pending")}>
               <span><AppIcon name="clipboardCheck" size={17} /></span>创建装车任务
             </Link>

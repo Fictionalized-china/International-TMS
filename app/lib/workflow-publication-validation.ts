@@ -147,6 +147,21 @@ export function validateWorkflowOperationalGateStructure(input: {
     (field) => field.field_key === "customs_declarations",
   );
   const issues: string[] = [];
+  for (const field of activeFields.filter((item) => item.is_required === 1)) {
+    const requiredPlacement = input.modules.some(
+      (module) =>
+        module.step_id === field.step_id &&
+        module.module_code === (field.module_code ?? "consignment") &&
+        module.is_active === 1 &&
+        module.is_required === 1,
+    );
+    if (!requiredPlacement) {
+      const stepName = activeStepById.get(field.step_id)?.name ?? field.step_id;
+      issues.push(
+        `节点“${stepName}”的必填字段 ${field.field_key} 必须归属同节点已启用且必办的 ${field.module_code ?? "consignment"} 模块`,
+      );
+    }
+  }
   for (const field of activeFields.filter((item) => item.module_code === "customs")) {
     if (!activeModulePlacements.has(`${field.step_id}:customs`)) {
       const stepName = activeStepById.get(field.step_id)?.name ?? field.step_id;

@@ -141,6 +141,34 @@ describe("frozen custom workflow field mutation gates", () => {
     expect(harness.state.writes).toBe(0);
   });
 
+  it("allows an authorized handler to repair a past required field from a frozen orphan placement", async () => {
+    harness.state.binding = {
+      workflow_instance_id: "instance-1",
+      matched_instance_id: "instance-1",
+      current_step_key: "outbound_transport",
+    };
+    harness.state.modules = [];
+    harness.state.fields = [{ ...customField(), is_required: 1 }];
+    harness.state.selectedField = { ...customField(), is_required: 1 };
+
+    await expect(save()).resolves.toBeUndefined();
+    expect(harness.state.writes).toBe(1);
+  });
+
+  it("does not use orphan remediation for an optional field", async () => {
+    harness.state.binding = {
+      workflow_instance_id: "instance-1",
+      matched_instance_id: "instance-1",
+      current_step_key: "outbound_transport",
+    };
+    harness.state.modules = [];
+    harness.state.fields = [customField()];
+    harness.state.selectedField = customField();
+
+    await expect(save()).rejects.toThrow();
+    expect(harness.state.writes).toBe(0);
+  });
+
   it.each(["completed", "cancelled"])("rejects custom field writes after the order is %s", async (status) => {
     harness.state.selectedField = { ...customField(), order_status: status };
     await expect(save()).rejects.toThrow("仅供查看");

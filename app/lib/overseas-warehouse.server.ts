@@ -1,11 +1,17 @@
 import { env } from "cloudflare:workers";
 import { syncOrderWorkflowSnapshot } from "./order-modules.server";
 import { prepareOrderIntakeAdvance,intakeGateCommitStatements,prepareBatchIntakeAdvance,intakeManyCommitStatements } from "./order-intake-gate.server";
-import { changedRowGuard,guardedBatch } from "./mutation-guard.server";
+import { changedRowGuard,guardedBatch,predicateGuard } from "./mutation-guard.server";
 import { portalOrderListLink } from "./portal-notification-links";
 import { loadOverseasInboundCustomsGates } from "./overseas-inbound-policy.server";
 import {prepareSitePhotoStatements} from "./order-site-photos.server";
 import {physicalSyncJobStatement,physicalSyncJobId,tryPhysicalSyncJob} from "./physical-operation-sync.server";
+import {syncTrackingModuleStatusForOrder} from "./batch-tracking.server";
+import {
+  loadOrderTransportCompletionState,
+  orderTransportCompletionPredicate,
+  orderTransportCompletionPredicateValues,
+} from "./order-transport-completion.server";
 
 type ArrivalInput = {
   organizationId: string;
@@ -102,6 +108,9 @@ export async function confirmOverseasBatchArrival(input: ArrivalInput) {
       "UPDATE transport_batch_orders SET status='arrived',updated_at=? WHERE batch_id=? AND organization_id=? AND status!='removed'",
     ).bind(now, input.batchId, input.organizationId),
     env.DB.prepare(
+      "UPDATE transport_batch_packages SET status='arrived',updated_at=? WHERE batch_id=? AND organization_id=? AND status!='removed'",
+    ).bind(now, input.batchId, input.organizationId),
+    env.DB.prepare(
       `INSERT INTO overseas_warehouse_operations(
          id,organization_id,batch_id,order_id,warehouse_id,status,actual_arrival_at,
          notes,updated_by_user_id,created_at,updated_at
@@ -186,7 +195,7 @@ export async function confirmOverseasBatchArrival(input: ArrivalInput) {
     env.DB.prepare(
       `INSERT INTO order_tracking_milestones(
          id,organization_id,order_id,milestone_code,milestone_name,event_at,
-         location,notes,visible_to_customer,created_by_user_id,created_at
+          location,notes,visible_to_customer,created_by_user_id,created_at,transport_batch_id
        )
        SELECT lower(hex(randomblob(16))),bo.organization_id,bo.order_id,
               'station_arrived','到达境外目的仓',?,
@@ -195,7 +204,7 @@ export async function confirmOverseasBatchArrival(input: ArrivalInput) {
                 CASE WHEN COALESCE(w.name,'')!='' AND COALESCE(w.address,'')!='' THEN ' · ' ELSE '' END ||
                 COALESCE(w.address,'')
               ),''),'境外目的仓'),
-              ?,1,?,?
+              ?,1,?,?,bo.batch_id
        FROM transport_batch_orders bo
        JOIN transport_orders o
          ON o.id=bo.order_id AND o.organization_id=bo.organization_id
@@ -206,6 +215,7 @@ export async function confirmOverseasBatchArrival(input: ArrivalInput) {
            SELECT 1 FROM order_tracking_milestones existing
            WHERE existing.organization_id=bo.organization_id
              AND existing.order_id=bo.order_id
+              AND existing.transport_batch_id=bo.batch_id
              AND existing.milestone_code='station_arrived'
          )`,
     ).bind(
@@ -227,19 +237,17 @@ export async function confirmOverseasBatchArrival(input: ArrivalInput) {
            WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed'
          )`,
     ).bind(now, now, input.organizationId, input.batchId, input.organizationId),
-    env.DB.prepare(
-      `UPDATE order_module_instances
-       SET status='completed',current_step_code='arrived',current_step_name='到达境外仓',
-           progress_percent=100,started_at=COALESCE(started_at,?),
-           completed_at=COALESCE(completed_at,?),blocking_reason=NULL,updated_at=?
-       WHERE organization_id=? AND module_code='tracking' AND enabled=1
-         AND order_id IN (
-           SELECT bo.order_id FROM transport_batch_orders bo
-           WHERE bo.batch_id=? AND bo.organization_id=? AND bo.status!='removed'
-         )`,
-    ).bind(now, now, now, input.organizationId, input.batchId, input.organizationId),
   ];
   await guardedBatch(env.DB,[...intakeManyCommitStatements(intakeSnapshots,now),...statements],"批次资料或子订单已变化，请刷新核对后重试；本次到仓未提交");
+  for (const order of orders.results) {
+    await syncTrackingModuleStatusForOrder(
+      input.organizationId,
+      order.order_id,
+      "station_arrived",
+      input.actorUserId,
+      now,
+    );
+  }
   const warning = await finishOverseasArrivalPostCommit({
     organizationId: input.organizationId,
     orderIds: orders.results.map((item) => item.order_id),
@@ -297,6 +305,9 @@ async function confirmStandaloneOrderArrival(input: ArrivalInput & { orderId: st
       "UPDATE transport_batch_orders SET status='arrived',updated_at=? WHERE batch_id=? AND organization_id=? AND status!='removed'",
     ).bind(now, batch.id, input.organizationId),
     env.DB.prepare(
+      "UPDATE transport_batch_packages SET status='arrived',updated_at=? WHERE batch_id=? AND organization_id=? AND status!='removed'",
+    ).bind(now, batch.id, input.organizationId),
+    env.DB.prepare(
       `INSERT INTO overseas_warehouse_operations(id,organization_id,batch_id,order_id,warehouse_id,status,actual_arrival_at,notes,updated_by_user_id,created_at,updated_at)
        VALUES(?,?,?,?,?,'arrived',?,?,?,?,?)
        ON CONFLICT(batch_id,order_id) DO UPDATE SET
@@ -342,11 +353,11 @@ async function confirmStandaloneOrderArrival(input: ArrivalInput & { orderId: st
       input.organizationId,
     ),
     env.DB.prepare(
-      `INSERT INTO order_tracking_milestones(id,organization_id,order_id,milestone_code,milestone_name,event_at,location,notes,visible_to_customer,created_by_user_id,created_at)
-       SELECT ?,?,?,'station_arrived','到达境外目的仓',?,?,?,1,?,?
+      `INSERT INTO order_tracking_milestones(id,organization_id,order_id,milestone_code,milestone_name,event_at,location,notes,visible_to_customer,created_by_user_id,created_at,transport_batch_id)
+       SELECT ?,?,?,'station_arrived','到达境外目的仓',?,?,?,1,?,?,?
        WHERE NOT EXISTS(
          SELECT 1 FROM order_tracking_milestones
-         WHERE organization_id=? AND order_id=? AND milestone_code='station_arrived'
+         WHERE organization_id=? AND order_id=? AND transport_batch_id=? AND milestone_code='station_arrived'
        )`,
     ).bind(
       crypto.randomUUID(),
@@ -357,18 +368,23 @@ async function confirmStandaloneOrderArrival(input: ArrivalInput & { orderId: st
       input.notes || null,
       input.actorUserId,
       now,
+      batch.id,
       input.organizationId,
       input.orderId,
+      batch.id,
     ),
     env.DB.prepare(
       `UPDATE order_module_instances SET status='in_progress',current_step_code='arrived',current_step_name='等待系统自动通知',progress_percent=MAX(progress_percent,25),started_at=COALESCE(started_at,?),blocking_reason=NULL,updated_at=?
        WHERE organization_id=? AND order_id=? AND module_code='overseas_warehouse' AND enabled=1 AND status!='completed'`,
     ).bind(now, now, input.organizationId, input.orderId),
-    env.DB.prepare(
-      `UPDATE order_module_instances SET status='completed',current_step_code='arrived',current_step_name='到达境外仓',progress_percent=100,started_at=COALESCE(started_at,?),completed_at=COALESCE(completed_at,?),blocking_reason=NULL,updated_at=?
-       WHERE organization_id=? AND order_id=? AND module_code='tracking' AND enabled=1`,
-    ).bind(now, now, now, input.organizationId, input.orderId),
   ],"订单资料已变化，请刷新核对后重试；本次到仓未提交");
+  await syncTrackingModuleStatusForOrder(
+    input.organizationId,
+    input.orderId,
+    "station_arrived",
+    input.actorUserId,
+    now,
+  );
   const warning = await finishOverseasArrivalPostCommit({
     organizationId: input.organizationId,
     orderIds: [input.orderId],
@@ -506,6 +522,19 @@ export async function advanceOverseasOrder(input: AdvanceInput) {
     .first<{ id: string; batch_id: string; status: string; warehouse_name: string;warehouse_id:string;customer_id:string }>();
   if (!operation) throw new Error("请先由批次确认货物已到达境外目的仓");
 
+  const physicalTransport = await loadOrderTransportCompletionState(
+    env.DB,
+    input.organizationId,
+    input.orderId,
+  );
+  if (!physicalTransport.complete) throw new Error(
+    physicalTransport.reason ?? (
+      input.action === "notify"
+        ? "本订单仍有其他包裹待装车、在途或待到仓，全部运输批次到齐后才能通知整票提货"
+        : "本订单仍有其他包裹待装车、在途或待到仓，全部运输批次到齐后才能确认整票自提签收"
+    ),
+  );
+
   const canAdvance = input.action === "notify"
     ? operation.status === "arrived"
     : ["notified", "appointment"].includes(operation.status);
@@ -548,6 +577,33 @@ export async function advanceOverseasOrder(input: AdvanceInput) {
       input.organizationId,input.orderId,operation.status,
     ),
     changedRowGuard(env.DB,now),
+    ...(input.action === "pickup" ? [
+      predicateGuard(
+        env.DB,
+        orderTransportCompletionPredicate(),
+        orderTransportCompletionPredicateValues(input.organizationId, input.orderId),
+        now,
+      ),
+      env.DB.prepare(
+        `UPDATE overseas_warehouse_operations
+            SET status='picked_up',pickup_at=COALESCE(pickup_at,?),
+                pickup_contact=COALESCE(pickup_contact,?),
+                pickup_proof_reference=COALESCE(pickup_proof_reference,?),
+                notes=COALESCE(?,notes),updated_by_user_id=?,updated_at=?
+          WHERE organization_id=? AND order_id=? AND id!=?
+            AND status IN ('arrived','notified','appointment')`,
+      ).bind(
+        input.occurredAt,
+        input.pickupContact || null,
+        input.pickupProofReference || null,
+        input.notes || null,
+        input.actorUserId,
+        now,
+        input.organizationId,
+        input.orderId,
+        operation.id,
+      ),
+    ] : []),
     ...(input.atomicStatements??[]),
     env.DB.prepare(
       `UPDATE order_module_instances SET status=?,current_step_code=?,current_step_name=?,progress_percent=?,started_at=COALESCE(started_at,?),completed_at=CASE WHEN ?='completed' THEN COALESCE(completed_at,?) ELSE NULL END,blocking_reason=NULL,updated_at=?
@@ -669,6 +725,14 @@ export async function completeOverseasOrderDelivery(input: {
   }>();
   if (!operation || operation.status !== "picked_up")
     throw new Error("境外仓尚未完成扫码自提出库，不能确认签收");
+  const physicalTransport = await loadOrderTransportCompletionState(
+    env.DB,
+    input.organizationId,
+    input.orderId,
+  );
+  if (!physicalTransport.complete) throw new Error(
+    physicalTransport.reason ?? "同一订单仍有运输批次未完成，不能确认整票签收",
+  );
 
   const signedReceipt = await env.DB.prepare(
     `SELECT a.id
@@ -685,6 +749,12 @@ export async function completeOverseasOrderDelivery(input: {
   const intakeSnapshot=await prepareOrderIntakeAdvance(input.organizationId,input.orderId);
   await guardedBatch(env.DB,[
     ...intakeGateCommitStatements(intakeSnapshot,now),
+    predicateGuard(
+      env.DB,
+      orderTransportCompletionPredicate(),
+      orderTransportCompletionPredicateValues(input.organizationId, input.orderId),
+      now,
+    ),
     env.DB.prepare(
       "UPDATE shipments SET status='delivered',current_location=?,actual_delivery_at=COALESCE(actual_delivery_at,?),signed_by=?,updated_at=? WHERE order_id=? AND organization_id=? AND status!='cancelled'",
     ).bind(

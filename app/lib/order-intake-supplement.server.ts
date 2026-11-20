@@ -1,10 +1,8 @@
 import {env} from "cloudflare:workers";
 import type {SessionUser} from "./auth.server";
-import {loadBusinessProcessPolicy} from "./business-process-policy.server";
 import {defaultBusinessProcessPolicy,policyPositions,type BusinessProcessPolicyKey} from "./business-process-policy";
-import {orderVisibilitySql} from "./order-access";
-import {isBossBusinessActor} from "./permission-blocks";
-import {loadActivePositionAccessProfile} from "./position-access-profile.server";
+import {loadOrderIntakeContext as context} from "./order-intake-context.server";
+import {loadOrderIntakeChanges} from "./order-intake-changes.server";
 import {intakeOperationFields,intakeOperationPresent,intakeServiceOptions,readIntakeOperations} from "./intake-operations";
 import {orderModuleDefinitions} from "./order-modules";
 import {querySnapshotGuards} from "./query-snapshot-guard.server";
@@ -21,27 +19,6 @@ import {readIntakeGateSnapshot,intakeGateMessage,intakeGateCommitStatements} fro
 
 const supplementalOperationFields=intakeOperationFields.filter(field=>field.kind!=="services");
 const optional=()=>({isActive:true,isRequired:false});
-type SupplementOrder=Record<string,unknown>&{id:string;order_number:string;status:string;updated_at:string;intake_operations_json:string|null;quote_commercial_user_id:string|null;quote_commercial_name_snapshot:string|null;is_responsible:number};
-async function context(current:SessionUser,orderId:string) {
-  const profile=await loadActivePositionAccessProfile(env.DB,current.organizationId,current.userId);
-  if(!profile)throw new Error("账号岗位或权限已停用，请重新登录");
-  const actor={...current,...profile,roleCodes:[profile.roleCode]};
-  if(!actor.permissions.includes("order.view"))throw new Error("当前账号没有订单查看权限");
-  const scope=orderVisibilitySql(actor,"o");
-  const order=await env.DB.prepare(`SELECT o.*,
-    CASE WHEN o.salesperson_user_id=? OR o.created_by_user_id=? OR o.operation_supervisor_user_id=? OR o.current_assignee_user_id=?
-      OR EXISTS(SELECT 1 FROM order_module_instances m WHERE m.organization_id=o.organization_id AND m.order_id=o.id AND m.assignee_user_id=? AND m.enabled=1)
-    THEN 1 ELSE 0 END is_responsible
-    FROM transport_orders o WHERE o.id=? AND o.organization_id=? AND ${scope.sql}`)
-    .bind(current.userId,current.userId,current.userId,current.userId,current.userId,orderId,current.organizationId,...scope.values).first<SupplementOrder>();
-  if(!order)throw new Error("订单不存在或不在当前账号授权范围");
-  const policy=await loadBusinessProcessPolicy(current.organizationId);
-  const boss=isBossBusinessActor(actor);
-  const canEdit=!["completed","cancelled"].includes(order.status)&&(boss||(
-    Boolean(order.is_responsible)&&policyPositions(policy,"order.supplement_positions").includes(profile.positionCode)&&
-    (actor.permissions.includes("order.intake.manage")||actor.permissions.includes("order.manage"))));
-  return{order,actor,profile,policy,boss,canEdit};
-}
 export async function loadOrderIntakeSupplement(current:SessionUser,orderId:string) {
   const state=await context(current,orderId),{order}=state,operations=readIntakeOperations(order.intake_operations_json);
   const services=await env.DB.prepare("SELECT service_code,status FROM order_services WHERE organization_id=? AND order_id=?").bind(current.organizationId,orderId).all<{service_code:string;status:string}>();
@@ -53,6 +30,7 @@ export async function loadOrderIntakeSupplement(current:SessionUser,orderId:stri
     operationKeys,routeKeys,missing,canEdit:state.canEdit,servicesMissing:services.results.length===0,ruleVersion:inspectIntakeRuleBinding(order.intake_operations_json).binding?.version??null,ruleError:inspectIntakeRuleBinding(order.intake_operations_json).error,
     people:state.canEdit?await listIntakePeople(current.organizationId,state.policy):{businessAssistant:[],customerService:[],quoteCommercials:[]},
     references:state.canEdit?await listIntakeRouteReferences(current.organizationId):[],
+    changes:await loadOrderIntakeChanges(current,orderId,state),
   };
 }
 

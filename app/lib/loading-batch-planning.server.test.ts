@@ -21,7 +21,7 @@ const result={batchId:"batch",batchNumber:"PZ-TEST",orderIds:["order"],operation
   totalWeight:20,totalVolume:1,receivableBaseAmount:100,costBaseAmount:60,costAllocationId:"cost"};
 const request={current,requestId:"request-000000001",orderIds:["order"],batchName:"test",carrierId:"carrier",vehicleId:"vehicle",driverId:"driver",
   borderPort:"",customsLocation:"",plannedLoadingAt:"",plannedDepartureAt:"",plannedArrivalAt:"",routeNotes:"",notes:"",
-  operationAssigneeUserId:"operator",documentAssigneeUserId:"doc",costAmount:60,costCurrency:"CNY",costExchangeRate:1,costAllocationMethod:"auto" as const};
+  operationAssigneeUserId:"operator",documentAssigneeUserId:"doc"};
 
 beforeEach(async()=>{
   vi.clearAllMocks();harness.ensure.mockResolvedValue(undefined);harness.sync.mockResolvedValue(undefined);harness.documents.mockResolvedValue(true);
@@ -45,7 +45,9 @@ beforeEach(async()=>{
     INSERT INTO transport_orders(id,organization_id,order_number) VALUES('order','org','LEGACY-SO');
     INSERT INTO transport_batch_orders VALUES('membership','org','batch','order','active');`);
   const {current:_c,requestId:_r,...payload}=request;
-  const hash=await sha256(JSON.stringify({...payload,orderIds:[...request.orderIds].sort()}));
+  const orderIds=[...request.orderIds].sort();
+  const packageCounts=Object.fromEntries(orderIds.map(orderId=>[orderId,0]));
+  const hash=await sha256(JSON.stringify({...payload,orderIds,packageCounts}));
   database.prepare("INSERT INTO loading_planning_submissions(organization_id,actor_user_id,request_id,payload_hash,batch_id,result_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)")
     .run("org","supervisor",request.requestId,hash,"batch",JSON.stringify(result),"now","now");
 });
@@ -73,7 +75,7 @@ describe("saved loading plan recovery",()=>{
     expect(await createOperationPlannedBatch(request)).toMatchObject({batchId:"batch",syncPending:false});
     expect(harness.sync).toHaveBeenCalledTimes(callCount);
     expect(database.prepare("SELECT COUNT(*) total FROM transport_batches").get()).toEqual({total:1});
-    await expect(createOperationPlannedBatch({...request,costAmount:61})).rejects.toThrow("不同的规划");
+    await expect(createOperationPlannedBatch({...request,batchName:"different"})).rejects.toThrow("不同的规划");
   });
   it("serializes two simultaneous retries",async()=>{
     let release:()=>void=()=>{};

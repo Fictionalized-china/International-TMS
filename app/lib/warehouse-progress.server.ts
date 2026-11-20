@@ -149,12 +149,29 @@ export async function recordBatchOutboundProgress(input: {
     throw new Error("配载批次订单模块不完整，已停止整批推进；请刷新订单模块后重试");
   }
 
+  const pendingOrderIds=new Set<string>();
+  for(const orderChunk of chunkD1Values(orderIds,2)){
+    const rows=await env.DB.prepare(`SELECT job.order_id
+      FROM warehouse_packing_jobs job
+      JOIN warehouse_packages package_row ON package_row.packing_job_id=job.id
+        AND package_row.organization_id=job.organization_id
+        AND package_row.label_kind='oul' AND package_row.lifecycle_status='active'
+        AND package_row.status!='dispatched'
+      WHERE job.organization_id=? AND job.order_id IN (${d1Placeholders(orderChunk.length)})
+        AND job.status!='cancelled'
+      GROUP BY job.order_id`)
+      .bind(input.organizationId,...orderChunk).all<{order_id:string}>();
+    rows.results.forEach(row=>pendingOrderIds.add(row.order_id));
+  }
+  const completedModules=modules.filter(module=>!pendingOrderIds.has(module.order_id));
+  const partialModules=modules.filter(module=>pendingOrderIds.has(module.order_id)&&module.status!=="completed");
+
   const now = new Date().toISOString();
   const statements: D1PreparedStatement[] = [
     ...intakeManyCommitStatements(intakeSnapshots,now),
     ...modules.map(module=>predicateGuard(env.DB,"EXISTS(SELECT 1 FROM order_module_instances WHERE id=? AND organization_id=? AND order_id=? AND enabled=1 AND status=? AND COALESCE(current_step_code,'')=?)",[module.id,input.organizationId,module.order_id,module.status,module.current_step_code??''],now)),
   ];
-  for (const moduleChunk of chunkD1Values(modules, 3)) {
+  for (const moduleChunk of chunkD1Values(completedModules, 3)) {
     statements.push(
       env.DB.prepare(
         `UPDATE order_module_instances
@@ -165,7 +182,15 @@ export async function recordBatchOutboundProgress(input: {
       ).bind(now, now, now, ...moduleChunk.map((module) => module.id)),
     );
   }
-  const historyModules = modules.filter((module) => module.current_step_code !== "confirmed");
+  for(const moduleChunk of chunkD1Values(partialModules,3)){
+    statements.push(env.DB.prepare(`UPDATE order_module_instances
+      SET status='in_progress',current_step_code='loading',current_step_name='分批装车出库中',
+          progress_percent=80,started_at=COALESCE(started_at,?),completed_at=NULL,
+          blocking_reason='同一订单仍有其他 OUL 待配载或待出库',updated_at=?
+      WHERE id IN (${d1Placeholders(moduleChunk.length)}) AND status!='completed'`)
+      .bind(now,now,...moduleChunk.map(module=>module.id)));
+  }
+  const historyModules = completedModules.filter((module) => module.current_step_code !== "confirmed");
   for (const moduleChunk of chunkD1Rows(historyModules, 12)) {
     statements.push(env.DB.prepare(
       `INSERT INTO order_module_history(
@@ -186,6 +211,19 @@ export async function recordBatchOutboundProgress(input: {
       `同一配载单随装车任务 ${input.dispatchNumber} 完成装车出库，等待出境确认`,
       now,
     ])));
+  }
+  const partialHistory=partialModules.filter(module=>module.current_step_code!=="loading");
+  for(const moduleChunk of chunkD1Rows(partialHistory,12)){
+    statements.push(env.DB.prepare(`INSERT INTO order_module_history(
+      id,organization_id,order_id,module_instance_id,action_code,action_name,
+      from_step_code,to_step_code,to_step_name,actor_user_id,notes,occurred_at
+    ) VALUES ${moduleChunk.map(()=>"(?,?,?,?,?,?,?,?,?,?,?,?)").join(",")}`)
+      .bind(...moduleChunk.flatMap(module=>[
+        crypto.randomUUID(),input.organizationId,module.order_id,module.id,
+        "partial_dispatch_complete","完成本批装车出库",module.current_step_code,
+        "loading","分批装车出库中",input.actorUserId,
+        `配载单随装车任务 ${input.dispatchNumber} 完成本批出库；订单仍有其他 OUL 待发`,now,
+      ])));
   }
   await env.DB.batch(statements);
 

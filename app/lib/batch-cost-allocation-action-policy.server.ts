@@ -86,20 +86,29 @@ const snapshotSql = `SELECT
       COALESCE(control.business_locked,0) payable_business_locked,
       COALESCE(control.finance_locked,0) payable_finance_locked,
       CASE WHEN EXISTS(
-        SELECT 1 FROM warehouse_dispatches dispatch
-        JOIN warehouse_dispatch_items item
-          ON item.dispatch_id=dispatch.id AND item.organization_id=dispatch.organization_id
-        JOIN warehouse_packages package
-          ON package.id=item.package_id AND package.organization_id=item.organization_id
-        JOIN shipments shipment
-          ON shipment.id=package.shipment_id AND shipment.organization_id=package.organization_id
-        WHERE dispatch.organization_id=bo.organization_id
-          AND dispatch.transport_batch_id=bo.batch_id
-          AND shipment.order_id=bo.order_id AND dispatch.status='dispatched'
+        SELECT 1 FROM transport_batch_packages mapped
+        WHERE mapped.organization_id=bo.organization_id
+          AND mapped.batch_id=bo.batch_id AND mapped.order_id=bo.order_id
+          AND mapped.status!='removed'
+      ) AND NOT EXISTS(
+        SELECT 1 FROM transport_batch_packages mapped
+        WHERE mapped.organization_id=bo.organization_id
+          AND mapped.batch_id=bo.batch_id AND mapped.order_id=bo.order_id
+          AND mapped.status!='removed'
+          AND NOT EXISTS(
+            SELECT 1 FROM warehouse_dispatches dispatch
+            JOIN warehouse_dispatch_items item
+              ON item.dispatch_id=dispatch.id AND item.organization_id=dispatch.organization_id
+            WHERE dispatch.organization_id=mapped.organization_id
+              AND dispatch.transport_batch_id=mapped.batch_id
+              AND item.package_id=mapped.package_id
+              AND dispatch.status='dispatched'
+          )
       ) THEN 1 ELSE 0 END dispatched,
       CASE WHEN b.actual_departure_at IS NOT NULL OR EXISTS(
         SELECT 1 FROM order_tracking_milestones milestone
         WHERE milestone.organization_id=o.organization_id AND milestone.order_id=o.id
+          AND milestone.transport_batch_id=bo.batch_id
           AND milestone.milestone_code IN ('exported','actual_exit','exit')
       ) THEN 1 ELSE 0 END actual_exit_recorded
     FROM transport_batch_orders bo

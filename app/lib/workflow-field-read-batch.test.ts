@@ -22,6 +22,19 @@ describe("workflow field read batches", () => {
     expect(load).toHaveBeenCalledTimes(1);
   });
 
+  it("blocks the whole step when a required field is frozen under a mismatched module", async () => {
+    const load = vi.fn(async (moduleCode: OrderModuleCode) =>
+      moduleCode === "consignment" ? [field("outbound")] : [],
+    );
+    const blockers = await loadWorkflowPlacementBlockers([
+      { id: "consignment-entry", step_key: "creation", module_code: "consignment" },
+      { id: "tracking-outbound", step_key: "outbound", module_code: "tracking" },
+    ], load);
+
+    expect([...blockers]).toEqual(["tracking-outbound"]);
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
   it("bounds parallel work instead of filling the database queue", async () => {
     let active = 0, maximum = 0;
     const load = vi.fn(async () => {

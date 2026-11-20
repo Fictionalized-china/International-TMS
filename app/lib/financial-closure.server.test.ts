@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { meetingFixture, seedFrozenMeetingWorkflow } from "./meeting-integration-fixture";
+import { meetingFixture, seedCompletedOrderTransport, seedFrozenMeetingWorkflow } from "./meeting-integration-fixture";
 const harness = vi.hoisted(() => ({ db: null as unknown as D1Database }));
 vi.mock("cloudflare:workers", () => ({ env: { get DB() { return harness.db; } } }));
 import { loadFinancialClosure, financialClosurePredicate } from "./financial-closure.server";
@@ -12,6 +12,7 @@ let fixture: Awaited<ReturnType<typeof meetingFixture>>;
 afterEach(() => { if (fixture?.database.isOpen) fixture.database.close(); });
 async function setup() {
   fixture = await meetingFixture(); harness.db = fixture.db; seedFrozenMeetingWorkflow(fixture);
+  seedCompletedOrderTransport(fixture);
   fixture.database.prepare("INSERT INTO business_expenses(id,organization_id,order_id,direction,charge_code,charge_name,counterparty_name,quantity,unit_price,amount,stage,created_by_user_id,created_at,updated_at) VALUES('fee','org','order','receivable','freight','运输费','客户',1,100,100,'confirmed','sales',?,?)").run(fixture.now, fixture.now);
   fixture.database.exec("UPDATE business_expenses SET currency='CNY'");
   fixture.database.exec("UPDATE workflow_instance_module_states SET status='completed'; UPDATE order_module_instances SET status='completed';");

@@ -3,6 +3,7 @@ import { syncOrderWorkflowSnapshot } from "./order-modules.server";
 import { prepareOrdersIntakeAdvance,intakeManyCommitStatements } from "./order-intake-gate.server";
 import { chunkD1Values, d1Placeholders } from "./d1-bindings";
 import { loadOrderModuleWorkflowFields } from "./workflow-fields.server";
+import { loadOrderTransportCompletionState } from "./order-transport-completion.server";
 import {
   type BatchTrackingMilestone,
   BATCH_TRACKING_MILESTONES,
@@ -87,6 +88,7 @@ export async function getBatchMainVehiclePlate(
 
 export async function validateBatchTrackingRequiredPrevious(
   organizationId: string,
+  batchId: string,
   orderIds: string[],
   milestoneCode: string,
   eventAt?: string,
@@ -110,11 +112,12 @@ export async function validateBatchTrackingRequiredPrevious(
          AND NOT EXISTS(
            SELECT 1 FROM order_tracking_milestones m
            WHERE m.organization_id=o.organization_id AND m.order_id=o.id
+             AND m.transport_batch_id=?
              AND m.milestone_code IN (${requiredPlaceholders})
              ${eventAt ? "AND m.event_at<=?" : ""}
          )`,
     )
-      .bind(organizationId, ...chunk, ...required, ...(eventAt ? [eventAt] : []))
+      .bind(organizationId, ...chunk, batchId, ...required, ...(eventAt ? [eventAt] : []))
       .all<{ order_number: string }>();
 
     if (missingRows.results.length) {
@@ -129,6 +132,7 @@ export async function validateBatchTrackingRequiredPrevious(
 
 export async function insertTrackingMilestoneForBatchOrders(params: {
   organizationId: string;
+  batchId: string;
   orderIds: string[];
   milestoneCode: string;
   milestoneName: string;
@@ -142,6 +146,7 @@ export async function insertTrackingMilestoneForBatchOrders(params: {
 }): Promise<number> {
   const {
     organizationId,
+    batchId,
     orderIds,
     milestoneCode,
     milestoneName,
@@ -160,12 +165,12 @@ export async function insertTrackingMilestoneForBatchOrders(params: {
     env.DB.prepare(
       `INSERT INTO order_tracking_milestones(
         id,organization_id,order_id,milestone_code,milestone_name,event_at,
-        location,vehicle_reference,notes,visible_to_customer,created_by_user_id,created_at
+        location,vehicle_reference,notes,visible_to_customer,created_by_user_id,created_at,transport_batch_id
       )
-       SELECT ?,?,?,?,?,?,?,?,?,?,?,?
+       SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?
        WHERE NOT EXISTS(
          SELECT 1 FROM order_tracking_milestones
-         WHERE organization_id=? AND order_id=? AND milestone_code=? AND event_at=?
+         WHERE organization_id=? AND order_id=? AND transport_batch_id=? AND milestone_code=? AND event_at=?
        )`,
     ).bind(
       crypto.randomUUID(),
@@ -180,8 +185,10 @@ export async function insertTrackingMilestoneForBatchOrders(params: {
       visibleToCustomer ? 1 : 0,
       actorUserId,
       createdAt,
+      batchId,
       organizationId,
       orderId,
+      batchId,
       milestoneCode,
       eventAt,
     ),
@@ -200,7 +207,7 @@ export async function syncTrackingModuleStatusForOrder(
   const next = MILESTONE_MODULE_MAPPING[milestoneCode];
   if (!next) return;
 
-  const [recorded, recordedMilestones, workflowFields] = await Promise.all([
+  const [recorded, recordedMilestones, workflowFields, pendingPhysical] = await Promise.all([
     env.DB.prepare(
       `SELECT MAX(CASE milestone_code
          WHEN 'departed' THEN 15
@@ -221,9 +228,12 @@ export async function syncTrackingModuleStatusForOrder(
        WHERE organization_id=? AND order_id=?`,
     ).bind(organizationId, orderId).all<{ milestone_code: string }>(),
     loadOrderModuleWorkflowFields(organizationId, orderId, "tracking"),
+    loadOrderTransportCompletionState(env.DB,organizationId,orderId),
   ]);
 
-  const effectiveProgress = Math.max(next.progress, recorded?.progress ?? 0);
+  const recordedProgress = Math.max(next.progress, recorded?.progress ?? 0);
+  const partialTransport = !pendingPhysical.complete;
+  const effectiveProgress = partialTransport ? Math.min(recordedProgress,95) : recordedProgress;
   const handoff = resolveTrackingWorkflowHandoff({
     fields: workflowFields,
     recordedCodes: recordedMilestones.results.map((item) => item.milestone_code),
@@ -231,9 +241,10 @@ export async function syncTrackingModuleStatusForOrder(
   // A warehouse-owned arrival can only be written after the next module's
   // physical gate has opened. Preserve that terminal fact for legacy orders
   // without making it part of the gate that opens the warehouse itself.
-  const effectiveComplete = handoff.ready || Boolean(next.complete);
-  const effectiveStep =
-    effectiveProgress >= 100
+  const effectiveComplete = (handoff.ready || Boolean(next.complete))&&pendingPhysical.complete;
+  const effectiveStep = partialTransport
+    ? "partial_batches"
+    : effectiveProgress >= 100
       ? "arrived"
       : effectiveProgress >= 82
         ? "customs_cleared"
@@ -241,8 +252,9 @@ export async function syncTrackingModuleStatusForOrder(
           ? "transit"
           : next.step;
 
-  const effectiveName =
-    effectiveProgress >= 100
+  const effectiveName = partialTransport
+    ? "分批运输中，等待其余货物"
+    : effectiveProgress >= 100
       ? "目的仓到达"
       : effectiveProgress >= 82
         ? "目的地清关"
@@ -271,7 +283,7 @@ export async function syncTrackingModuleStatusForOrder(
     env.DB.prepare(
       `UPDATE order_module_instances
        SET status=?,current_step_code=?,current_step_name=?,progress_percent=?,
-         blocking_reason=NULL,started_at=COALESCE(started_at,?),
+         blocking_reason=?,started_at=COALESCE(started_at,?),
          completed_at=CASE WHEN ?='completed' THEN COALESCE(completed_at,?) ELSE completed_at END,
          updated_at=?
        WHERE id=?`,
@@ -280,6 +292,7 @@ export async function syncTrackingModuleStatusForOrder(
       effectiveStep,
       effectiveName,
       effectiveProgress,
+      partialTransport ? pendingPhysical.reason : null,
       now,
       effectiveComplete ? "completed" : "in_progress",
       now,
@@ -299,8 +312,8 @@ export async function syncTrackingModuleStatusForOrder(
       effectiveStep,
       effectiveName,
       actorUserId,
-      `tracking milestone: ${milestoneCode}; handoff: ${
-        effectiveComplete ? "ready" : `waiting ${handoff.missingCodes.join(",")}`
+       `tracking milestone: ${milestoneCode}; handoff: ${
+         effectiveComplete ? "ready" : partialTransport ? pendingPhysical.reason : `waiting ${handoff.missingCodes.join(",")}`
       }`,
       now,
     ),
@@ -324,6 +337,7 @@ export async function syncBatchRoadStatusFromTracking(
       `SELECT milestone_code,event_at,location
        FROM order_tracking_milestones
        WHERE organization_id=? AND order_id IN (${placeholders})
+         AND transport_batch_id=?
          AND milestone_code IN ('departed','border_arrived','exported','transloaded','transit_customs','foreign_entered','customs_cleared','station_arrived')
        ORDER BY CASE milestone_code
          WHEN 'station_arrived' THEN 100
@@ -338,7 +352,7 @@ export async function syncBatchRoadStatusFromTracking(
          event_at DESC, created_at DESC
        LIMIT 1`,
     )
-      .bind(organizationId, ...chunk)
+      .bind(organizationId, ...chunk, batchId)
       .first<{ milestone_code: string; event_at: string; location: string | null }>();
     if (latest) {
       latestByChunk.push(latest);
@@ -373,9 +387,9 @@ export async function syncBatchRoadStatusFromTracking(
          MAX(CASE WHEN milestone_code='exported' THEN event_at END) exported_at,
          MAX(CASE WHEN milestone_code IN ('border_arrived','exported') THEN location END) border_location
        FROM order_tracking_milestones
-       WHERE organization_id=? AND order_id IN (${placeholders})`,
+       WHERE organization_id=? AND order_id IN (${placeholders}) AND transport_batch_id=?`,
     )
-      .bind(organizationId, ...chunk)
+      .bind(organizationId, ...chunk, batchId)
       .first<{ exported_at: string | null; border_location: string | null }>();
     if (transition?.exported_at && (!exportedAt || transition.exported_at > exportedAt)) {
       exportedAt = transition.exported_at;
@@ -413,6 +427,10 @@ export async function syncBatchRoadStatusFromTracking(
          SET status=?, updated_at=?
          WHERE batch_id=? AND organization_id=? AND status NOT IN ('removed','picked_up')`,
       ).bind(progress >= 100 ? "arrived" : "departed", now, batchId, organizationId),
+      env.DB.prepare(`UPDATE transport_batch_packages
+        SET status=?,updated_at=?
+        WHERE organization_id=? AND batch_id=? AND status!='removed'`)
+        .bind(progress>=100?"arrived":"departed",now,organizationId,batchId),
     );
   }
   await env.DB.batch(statements);
@@ -485,6 +503,7 @@ export async function recordShipmentEventForBatchOrders(params: {
 
 export async function syncBatchTrackingMilestonesFromBatch(
   organizationId: string,
+  batchId: string,
   orderIds: string[],
   actorUserId: string,
 ): Promise<void> {
@@ -510,9 +529,10 @@ export async function syncBatchTrackingMilestonesFromBatch(
       `SELECT milestone_code, milestone_name, event_at, location, vehicle_reference, notes, visible_to_customer, created_at
        FROM order_tracking_milestones
        WHERE organization_id=? AND order_id IN (${placeholders})
+         AND transport_batch_id=?
        ORDER BY event_at, created_at`,
     )
-      .bind(organizationId, ...chunk)
+      .bind(organizationId, ...chunk, batchId)
       .all<{
         milestone_code: string;
         milestone_name: string;
@@ -601,19 +621,20 @@ export async function syncBatchTrackingMilestonesFromBatch(
      )
      INSERT INTO order_tracking_milestones(
        id,organization_id,order_id,milestone_code,milestone_name,event_at,
-       location,vehicle_reference,notes,visible_to_customer,created_by_user_id,created_at
+       location,vehicle_reference,notes,visible_to_customer,created_by_user_id,created_at,transport_batch_id
      )
      SELECT
        lower(hex(randomblob(16))), ?, target.order_id,
        milestone.milestone_code, milestone.milestone_name, milestone.event_at,
        milestone.location, milestone.vehicle_reference, milestone.notes,
-       milestone.visible_to_customer, ?, milestone.created_at
+       milestone.visible_to_customer, ?, milestone.created_at, ?
      FROM target_orders target
      CROSS JOIN insertable_milestones milestone
      WHERE NOT EXISTS(
        SELECT 1 FROM order_tracking_milestones existing
        WHERE existing.organization_id=?
          AND existing.order_id=target.order_id
+         AND existing.transport_batch_id=?
          AND existing.milestone_code=milestone.milestone_code
          AND existing.event_at=milestone.event_at
      )`,
@@ -624,7 +645,9 @@ export async function syncBatchTrackingMilestonesFromBatch(
       JSON.stringify(sharedMilestones),
       organizationId,
       actorUserId,
+      batchId,
       organizationId,
+      batchId,
     )
     .run();
 

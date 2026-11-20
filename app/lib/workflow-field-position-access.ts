@@ -34,12 +34,17 @@ export function canWriteWorkflowFieldAtCurrentNode(input: {
   roleCodes?: readonly string[];
   canOperateCurrentNode: boolean;
   canOperateModule: boolean;
+  canRemediateRequiredField?: boolean;
 }) {
   return canPositionHandleWorkflowField(
     input.configuredPositionCodes,
     input.positionCode,
     input.roleCodes,
-  ) && (input.canOperateCurrentNode || input.canOperateModule);
+  ) && (
+    input.canOperateCurrentNode ||
+    input.canOperateModule ||
+    input.canRemediateRequiredField === true
+  );
 }
 
 export function toggleWorkflowFieldHandlerPosition(

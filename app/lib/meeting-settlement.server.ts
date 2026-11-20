@@ -8,7 +8,50 @@ import { meetingSignatureAccess, meetingSettlementDirections, canReadSignatureEx
 export { meetingSignatureAccess } from './meeting-settlement';
 import { persistExpenseDirectionAction } from "./expense-direction-submit.server";
 
-export const actualExportSql=(alias="o")=>`(EXISTS(SELECT 1 FROM order_tracking_milestones m WHERE m.organization_id=${alias}.organization_id AND m.order_id=${alias}.id AND m.milestone_code IN ('exported','actual_exit','exit')) OR EXISTS(SELECT 1 FROM transport_exit_confirmations x JOIN transport_batches b ON b.id=x.batch_id AND b.organization_id=x.organization_id WHERE x.organization_id=${alias}.organization_id AND (b.order_id=${alias}.id OR EXISTS(SELECT 1 FROM transport_batch_orders bo WHERE bo.batch_id=b.id AND bo.organization_id=b.organization_id AND bo.order_id=${alias}.id AND bo.status!='removed'))))`;
+export const actualExportSql=(alias="o")=>`(
+  (
+    EXISTS(
+      SELECT 1 FROM transport_batch_packages mapped
+      JOIN transport_batches mapped_batch ON mapped_batch.id=mapped.batch_id
+        AND mapped_batch.organization_id=mapped.organization_id
+        AND mapped_batch.status!='cancelled'
+      WHERE mapped.organization_id=${alias}.organization_id
+        AND mapped.order_id=${alias}.id AND mapped.status!='removed'
+    )
+    AND NOT EXISTS(
+      SELECT 1 FROM warehouse_packing_jobs job
+      JOIN warehouse_packages package_row ON package_row.packing_job_id=job.id
+        AND package_row.organization_id=job.organization_id
+        AND package_row.label_kind='oul' AND package_row.lifecycle_status!='voided'
+      WHERE job.organization_id=${alias}.organization_id AND job.order_id=${alias}.id
+        AND job.status!='cancelled'
+        AND NOT EXISTS(
+          SELECT 1 FROM transport_batch_packages batch_package
+          JOIN transport_batches batch ON batch.id=batch_package.batch_id
+            AND batch.organization_id=batch_package.organization_id
+            AND batch.status!='cancelled'
+            AND batch.road_status IN ('outbound_in_transit','overseas_arrived','waiting_pickup','pickup_completed')
+          WHERE batch_package.organization_id=package_row.organization_id
+            AND batch_package.package_id=package_row.id
+            AND batch_package.status IN ('departed','arrived')
+        )
+    )
+  )
+  OR (
+    NOT EXISTS(
+      SELECT 1 FROM transport_batch_packages mapped
+      JOIN transport_batches mapped_batch ON mapped_batch.id=mapped.batch_id
+        AND mapped_batch.organization_id=mapped.organization_id
+        AND mapped_batch.status!='cancelled'
+      WHERE mapped.organization_id=${alias}.organization_id
+        AND mapped.order_id=${alias}.id AND mapped.status!='removed'
+    )
+    AND (
+      EXISTS(SELECT 1 FROM order_tracking_milestones m WHERE m.organization_id=${alias}.organization_id AND m.order_id=${alias}.id AND m.milestone_code IN ('exported','actual_exit','exit'))
+      OR EXISTS(SELECT 1 FROM transport_exit_confirmations x JOIN transport_batches b ON b.id=x.batch_id AND b.organization_id=x.organization_id WHERE x.organization_id=${alias}.organization_id AND (b.order_id=${alias}.id OR EXISTS(SELECT 1 FROM transport_batch_orders bo WHERE bo.batch_id=b.id AND bo.organization_id=b.organization_id AND bo.order_id=${alias}.id AND bo.status!='removed')))
+    )
+  )
+)`;
 export async function loadMeetingSettlement(db:D1Database,org:string,orderId:string) {
   const order=await db.prepare(`SELECT o.id,o.order_number,o.status,o.completion_status,o.salesperson_user_id,o.created_by_user_id,o.operation_supervisor_user_id,c.cs_order_entry_enabled,${actualExportSql()} actual_exported,
     (SELECT assignee_user_id FROM order_module_instances WHERE organization_id=o.organization_id AND order_id=o.id AND module_code='costs' AND enabled=1) cs_user_id,

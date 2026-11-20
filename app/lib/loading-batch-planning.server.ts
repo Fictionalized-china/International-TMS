@@ -32,11 +32,9 @@ import {
   type BatchResponsibilityTransferTarget,
 } from "./batch-responsibility";
 import { loadOrderAssignmentManifest } from "./order-assignment-manifest.server";
-import { allocateCost, allocationDensity, recommendAllocationMethod, type AllocationMethod } from "./cost-allocation";
 import { loadBusinessProcessPolicy } from "./business-process-policy.server";
 import { policyEnabled } from "./business-process-policy";
-import { loadOperationalRules } from "./operational-rules.server";
-import { plannedCostIntegrationStatements } from "./planning-cost-integration.server";
+import { canCreateLoadingBatch } from "./loading-batch-selection";
 
 export type LoadingPlanningCandidate = {
   order_id: string;
@@ -52,9 +50,13 @@ export type LoadingPlanningCandidate = {
   packing_job_id: string;
   packing_status: string;
   package_count: number;
+  allocated_package_count: number;
+  total_package_count: number;
   pieces: number;
   weight_kg: number;
   volume_cbm: number;
+  total_weight_kg: number;
+  total_volume_cbm: number;
   cargo_ready: number;
   has_exception: number;
   active_dispatch: number;
@@ -87,10 +89,32 @@ const planningCandidateSelect = `SELECT o.id order_id,o.order_number,c.name cust
     w.id warehouse_id,w.name warehouse_name,w.serial_code warehouse_serial_code,
     job.id packing_job_id,job.status packing_status,
     (SELECT COUNT(*) FROM warehouse_packages p WHERE p.organization_id=job.organization_id
-      AND p.packing_job_id=job.id AND p.status='in_stock' AND p.label_kind='oul' AND p.lifecycle_status='active') package_count,
+      AND p.packing_job_id=job.id AND p.status='in_stock' AND p.label_kind='oul' AND p.lifecycle_status='active'
+      AND NOT EXISTS(SELECT 1 FROM transport_batch_package_claims claim
+        WHERE claim.organization_id=p.organization_id AND claim.package_id=p.id)) package_count,
+    (SELECT COUNT(*) FROM transport_batch_package_claims claim
+      JOIN warehouse_packages claimed_package ON claimed_package.id=claim.package_id
+        AND claimed_package.organization_id=claim.organization_id
+      WHERE claim.organization_id=job.organization_id AND claim.order_id=o.id
+        AND claimed_package.packing_job_id=job.id AND claimed_package.lifecycle_status!='voided') allocated_package_count,
+    (SELECT COUNT(*) FROM warehouse_packages p WHERE p.organization_id=job.organization_id
+      AND p.packing_job_id=job.id AND p.label_kind='oul' AND p.lifecycle_status!='voided') total_package_count,
     COALESCE((SELECT SUM(p.pieces) FROM warehouse_packages p WHERE p.organization_id=job.organization_id
-      AND p.packing_job_id=job.id AND p.status='in_stock' AND p.label_kind='oul' AND p.lifecycle_status='active'),0) pieces,
-    job.total_weight_kg weight_kg,job.total_volume_cbm volume_cbm,
+      AND p.packing_job_id=job.id AND p.status='in_stock' AND p.label_kind='oul' AND p.lifecycle_status='active'
+      AND NOT EXISTS(SELECT 1 FROM transport_batch_package_claims claim
+        WHERE claim.organization_id=p.organization_id AND claim.package_id=p.id)),0) pieces,
+    COALESCE((SELECT SUM(p.weight_kg) FROM warehouse_packages p WHERE p.organization_id=job.organization_id
+      AND p.packing_job_id=job.id AND p.status='in_stock' AND p.label_kind='oul' AND p.lifecycle_status='active'
+      AND NOT EXISTS(SELECT 1 FROM transport_batch_package_claims claim
+        WHERE claim.organization_id=p.organization_id AND claim.package_id=p.id)),0) weight_kg,
+    COALESCE((SELECT SUM(p.volume_cbm) FROM warehouse_packages p WHERE p.organization_id=job.organization_id
+      AND p.packing_job_id=job.id AND p.status='in_stock' AND p.label_kind='oul' AND p.lifecycle_status='active'
+      AND NOT EXISTS(SELECT 1 FROM transport_batch_package_claims claim
+        WHERE claim.organization_id=p.organization_id AND claim.package_id=p.id)),0) volume_cbm,
+    COALESCE((SELECT SUM(p.weight_kg) FROM warehouse_packages p WHERE p.organization_id=job.organization_id
+      AND p.packing_job_id=job.id AND p.label_kind='oul' AND p.lifecycle_status!='voided'),0) total_weight_kg,
+    COALESCE((SELECT SUM(p.volume_cbm) FROM warehouse_packages p WHERE p.organization_id=job.organization_id
+      AND p.packing_job_id=job.id AND p.label_kind='oul' AND p.lifecycle_status!='voided'),0) total_volume_cbm,
     1 cargo_ready,0 has_exception,0 active_dispatch,NULL active_batch_id,NULL active_batch_number,
     o.overseas_warehouse_id,ow.name overseas_warehouse_name,
     o.destination_country,o.destination_state,o.destination_city,o.operation_supervisor_user_id,
@@ -101,7 +125,7 @@ const planningCandidateSelect = `SELECT o.id order_id,o.order_number,c.name cust
   FROM transport_orders o
   JOIN customers c ON c.id=o.customer_id AND c.organization_id=o.organization_id
   JOIN warehouse_packing_jobs job ON job.organization_id=o.organization_id AND job.order_id=o.id
-    AND job.status='labelled' AND job.transport_batch_id IS NULL
+    AND job.status IN ('labelled','allocated','loading')
   JOIN warehouses w ON w.id=job.warehouse_id AND w.organization_id=job.organization_id
     AND w.status='active' AND w.warehouse_role!='overseas_destination'
   LEFT JOIN warehouses ow ON ow.id=o.overseas_warehouse_id AND ow.organization_id=o.organization_id
@@ -110,20 +134,14 @@ const planningCandidateSelect = `SELECT o.id order_id,o.order_number,c.name cust
   WHERE o.organization_id=? AND o.business_type='ltl'
     AND o.overseas_warehouse_id IS NOT NULL
     AND EXISTS(SELECT 1 FROM warehouse_packages p WHERE p.organization_id=job.organization_id
-      AND p.packing_job_id=job.id AND p.status='in_stock' AND p.label_kind='oul' AND p.lifecycle_status='active')
+      AND p.packing_job_id=job.id AND p.status='in_stock' AND p.label_kind='oul' AND p.lifecycle_status='active'
+      AND NOT EXISTS(SELECT 1 FROM transport_batch_package_claims claim
+        WHERE claim.organization_id=p.organization_id AND claim.package_id=p.id))
     AND EXISTS(SELECT 1 FROM warehouse_receipts r JOIN shipments s ON s.id=r.shipment_id AND s.organization_id=r.organization_id
       WHERE r.organization_id=o.organization_id AND s.order_id=o.id AND r.warehouse_id=job.warehouse_id
         AND r.status='completed' AND r.cargo_complete=1)
     AND NOT EXISTS(SELECT 1 FROM warehouse_exceptions e JOIN shipments s ON s.id=e.shipment_id AND s.organization_id=e.organization_id
       WHERE e.organization_id=o.organization_id AND s.order_id=o.id AND e.status IN ('open','processing'))
-    AND NOT EXISTS(SELECT 1 FROM warehouse_dispatches d
-      JOIN warehouse_dispatch_items di ON di.dispatch_id=d.id AND di.organization_id=d.organization_id
-      JOIN warehouse_packages dp ON dp.id=di.package_id AND dp.organization_id=di.organization_id
-      JOIN shipments ds ON ds.id=dp.shipment_id AND ds.organization_id=dp.organization_id
-      WHERE d.organization_id=o.organization_id AND ds.order_id=o.id AND d.status!='cancelled')
-    AND NOT EXISTS(SELECT 1 FROM transport_batch_orders bo
-      JOIN transport_batches b ON b.id=bo.batch_id AND b.organization_id=bo.organization_id
-      WHERE bo.organization_id=o.organization_id AND bo.order_id=o.id AND bo.status!='removed' AND b.status!='cancelled')
     AND ${loadingConsolidationWorkflowAccessSql("o")}`;
 
 export async function loadLoadingPlanningCandidates(current: SessionUser) {
@@ -206,6 +224,7 @@ type PlanningInput = {
   current: SessionUser;
   requestId: string;
   orderIds: readonly string[];
+  packageCounts?: Readonly<Record<string, number>>;
   batchName: string;
   carrierId: string;
   vehicleId: string;
@@ -219,10 +238,6 @@ type PlanningInput = {
   notes: string;
   operationAssigneeUserId: string;
   documentAssigneeUserId: string;
-  costAmount: number;
-  costCurrency: string;
-  costExchangeRate: number;
-  costAllocationMethod: "auto" | AllocationMethod;
 };
 
 async function loadSubmission(input: Pick<PlanningInput, "current" | "requestId">) {
@@ -238,8 +253,9 @@ export async function createOperationPlannedBatch(input: PlanningInput) {
   if ((loading && departure && loading > departure) || (departure && arrival && departure > arrival) || (loading && arrival && loading > arrival)) throw new Error("计划时间须满足装车不晚于出境、出境不晚于到仓");
   if (!/^[a-zA-Z0-9-]{16,128}$/.test(input.requestId)) throw new Error("提交标识无效，请刷新页面后重试");
   const orderIds = [...new Set(input.orderIds.filter(Boolean))].sort();
+  const packageCounts=Object.fromEntries(orderIds.map(orderId=>[orderId,Math.trunc(Number(input.packageCounts?.[orderId]||0))]));
   const { current: _current, requestId: _requestId, ...payload } = input;
-  const payloadHash = await sha256(JSON.stringify({ ...payload, orderIds }));
+  const payloadHash = await sha256(JSON.stringify({ ...payload, orderIds, packageCounts }));
   const previous = await loadSubmission(input);
   if (previous) {
     if (previous.payload_hash !== payloadHash) throw new Error("这次提交已保存过不同的规划，请刷新页面后发起新规划");
@@ -247,7 +263,7 @@ export async function createOperationPlannedBatch(input: PlanningInput) {
   }
   // Keep request hashing backward-compatible; normalize only the persisted plan.
   input = {...input,plannedLoadingAt:loading || "",plannedDepartureAt:departure || "",plannedArrivalAt:arrival || ""};
-  if (orderIds.length < 2) throw new Error("拼车配载至少选择 2 票订单");
+  if (!orderIds.length) throw new Error("请至少选择 1 票待配载订单");
   if (orderIds.length > 50) throw new Error("单张配载单最多选择 50 票订单");
   const visibility = orderVisibilitySql(input.current, "o");
   const rows = await env.DB.prepare(
@@ -259,7 +275,46 @@ export async function createOperationPlannedBatch(input: PlanningInput) {
     throw new Error("部分订单已不满足配载条件、已被其他配载单占用或不在当前权限范围，请刷新后重选");
   }
   const byId = new Map(rows.results.map((row) => [row.order_id, row]));
-  const candidates = orderIds.map((id) => byId.get(id)).filter((row): row is LoadingPlanningCandidate => Boolean(row));
+  const availableCandidates = orderIds.map((id) => byId.get(id)).filter((row): row is LoadingPlanningCandidate => Boolean(row));
+  if(!canCreateLoadingBatch(
+    availableCandidates,
+    availableCandidates.map(row=>packageCounts[row.order_id]||Number(row.package_count)),
+  ))throw new Error("普通拼车配载至少选择 2 票订单；单票只能用于本批留有余包或已有前序批次的分批运输");
+  const selectedPackages: Array<{id:string;order_id:string;packing_job_id:string;pieces:number;weight_kg:number;volume_cbm:number}> = [];
+  for(const row of availableCandidates){
+    const requested=packageCounts[row.order_id]||Number(row.package_count);
+    if(!Number.isInteger(requested)||requested<1||requested>Number(row.package_count))
+      throw new Error(`${row.order_number} 本批包数须为 1 至 ${row.package_count}`);
+    const packages=await env.DB.prepare(`SELECT p.id,p.pieces,COALESCE(p.weight_kg,0) weight_kg,COALESCE(p.volume_cbm,0) volume_cbm
+      FROM warehouse_packages p
+      WHERE p.organization_id=? AND p.warehouse_id=? AND p.packing_job_id=?
+        AND p.status='in_stock' AND p.label_kind='oul' AND p.lifecycle_status='active'
+        AND NOT EXISTS(SELECT 1 FROM transport_batch_package_claims claim
+          WHERE claim.organization_id=p.organization_id AND claim.package_id=p.id)
+      ORDER BY p.package_number,p.id LIMIT ?`)
+      .bind(input.current.organizationId,row.warehouse_id,row.packing_job_id,requested)
+      .all<{id:string;pieces:number;weight_kg:number;volume_cbm:number}>();
+    if(packages.results.length!==requested)throw new Error(`${row.order_number} 的可用 OUL 已变化，请刷新后重新选择本批包数`);
+    selectedPackages.push(...packages.results.map(pkg=>({...pkg,order_id:row.order_id,packing_job_id:row.packing_job_id})));
+  }
+  const candidates=availableCandidates.map(row=>{
+    const packages=selectedPackages.filter(pkg=>pkg.order_id===row.order_id);
+    const weight=packages.reduce((sum,pkg)=>sum+Number(pkg.weight_kg||0),0);
+    const volume=packages.reduce((sum,pkg)=>sum+Number(pkg.volume_cbm||0),0);
+    const ratio=Number(row.total_weight_kg)>0
+      ?weight/Number(row.total_weight_kg)
+      :Number(row.total_volume_cbm)>0
+        ?volume/Number(row.total_volume_cbm)
+        :packages.length/Math.max(1,Number(row.total_package_count));
+    return {
+      ...row,
+      package_count:packages.length,
+      pieces:packages.reduce((sum,pkg)=>sum+Number(pkg.pieces||0),0),
+      weight_kg:weight,
+      volume_cbm:volume,
+      receivable_base_amount:Number(row.receivable_base_amount||0)*Math.max(0,Math.min(1,ratio)),
+    };
+  });
   const accesses = await loadLoadingConsolidationWorkflowAccesses(env.DB, input.current.organizationId, orderIds);
   const accessByOrder = new Map(accesses.map((access) => [access.orderId, access]));
   const blockers = candidates.flatMap((row) => loadingConsolidationCandidateBlockers(row, accessByOrder.get(row.order_id))
@@ -349,9 +404,9 @@ export async function createOperationPlannedBatch(input: PlanningInput) {
     )];
   for (const rowChunk of chunkD1Values(candidates, 5)) {
     statements.push(env.DB.prepare(`UPDATE warehouse_packing_jobs SET status='allocated',transport_batch_id=?,updated_at=?
-      WHERE organization_id=? AND warehouse_id=? AND status='labelled' AND transport_batch_id IS NULL
+      WHERE organization_id=? AND warehouse_id=? AND status IN ('labelled','allocated','loading')
         AND id IN (${d1Placeholders(rowChunk.length)})`)
-      .bind(batchId,now,input.current.organizationId,first.warehouse_id,...rowChunk.map((row) => row.packing_job_id)));
+      .bind(null,now,input.current.organizationId,first.warehouse_id,...rowChunk.map((row) => row.packing_job_id)));
   }
   let sequenceOffset = 0;
   for (const rowChunk of chunkD1Rows(candidates, 8)) {
@@ -361,6 +416,13 @@ export async function createOperationPlannedBatch(input: PlanningInput) {
     ) VALUES ${rowChunk.map(() => "(?,?,?,?,?,'planned',?,?,?)").join(",")}`)
       .bind(...rowChunk.flatMap((row, index) => [crypto.randomUUID(),input.current.organizationId,batchId,row.order_id,start + index + 1,input.current.userId,now,now])));
     sequenceOffset += rowChunk.length;
+  }
+  let packageSequence=0;
+  for(const packageChunk of chunkD1Rows(selectedPackages,7)){
+    statements.push(env.DB.prepare(`INSERT INTO transport_batch_packages(
+      id,organization_id,batch_id,order_id,packing_job_id,package_id,sequence_no,status,added_by_user_id,created_at,updated_at
+    ) VALUES ${packageChunk.map(()=>"(?,?,?,?,?,?,?,'planned',?,?,?)").join(",")}`)
+      .bind(...packageChunk.flatMap(pkg=>[crypto.randomUUID(),input.current.organizationId,batchId,pkg.order_id,pkg.packing_job_id,pkg.id,++packageSequence,input.current.userId,now,now])));
   }
   for (const orderChunk of chunkD1Values(orderIds, 6)) {
     statements.push(env.DB.prepare(`UPDATE transport_orders SET
@@ -376,8 +438,8 @@ export async function createOperationPlannedBatch(input: PlanningInput) {
     // order claim loses a race. A repeated identical request reuses its winner.
     const winner = await loadSubmission(input);
     if (winner && winner.payload_hash === payloadHash) return resumeOperationPlannedBatch(input.current,winner.batch_id);
-    if (String(error).includes("transport_batch_order_claims")) {
-      throw new Error("所选订单已被其他配载单占用，本次规划未保存，请刷新后重选");
+    if (String(error).includes("transport_batch_package_claims")) {
+      throw new Error("部分 OUL 已被其他配载单占用，本次规划未保存，请刷新后重选本批包数");
     }
     throw error;
   }

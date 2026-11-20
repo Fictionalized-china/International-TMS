@@ -49,5 +49,12 @@ describe("workflow field handler positions", () => {
       canOperateCurrentNode: false,
       canOperateModule: false,
     })).toBe(false);
+    expect(canWriteWorkflowFieldAtCurrentNode({
+      configuredPositionCodes: ["DOC", "OPERATION"],
+      positionCode: "OPERATION",
+      canOperateCurrentNode: false,
+      canOperateModule: false,
+      canRemediateRequiredField: true,
+    })).toBe(true);
   });
 });

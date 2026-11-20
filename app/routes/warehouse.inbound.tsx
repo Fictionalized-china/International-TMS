@@ -92,6 +92,7 @@ type ScannedPackage = {
   length_cm: number | null;
   width_cm: number | null;
   height_cm: number | null;
+  transport_batch_id: string | null;
 };
 type ScannedDispatch = {
   id: string;
@@ -245,7 +246,13 @@ export async function loader({ request }: Route.LoaderArgs) {
                 COALESCE(NULLIF(TRIM(i.cargo_name_cn),''),NULLIF(TRIM(o.cargo_description),'')) cargo_name,
                  COALESCE(r.package_type,i.package_type) package_type,
                  r.receipt_number,r.received_at,r.status receipt_status,
-                p.pieces,p.weight_kg,p.volume_cbm,p.length_cm,p.width_cm,p.height_cm
+                p.pieces,p.weight_kg,p.volume_cbm,p.length_cm,p.width_cm,p.height_cm,
+                (SELECT batch_package.batch_id FROM transport_batch_packages batch_package
+                  JOIN transport_batches batch ON batch.id=batch_package.batch_id
+                    AND batch.organization_id=batch_package.organization_id AND batch.status!='cancelled'
+                  WHERE batch_package.organization_id=p.organization_id
+                    AND batch_package.package_id=p.id AND batch_package.status!='removed'
+                  LIMIT 1) transport_batch_id
            FROM warehouse_packages p
            JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id
            JOIN transport_orders o ON o.id=s.order_id AND o.organization_id=s.organization_id
@@ -280,7 +287,13 @@ export async function loader({ request }: Route.LoaderArgs) {
                 COALESCE(NULLIF(TRIM(i.cargo_name_cn),''),NULLIF(TRIM(o.cargo_description),'')) cargo_name,
                  COALESCE(r.package_type,i.package_type) package_type,
                  r.receipt_number,r.received_at,r.status receipt_status,
-                p.pieces,p.weight_kg,p.volume_cbm,p.length_cm,p.width_cm,p.height_cm
+                p.pieces,p.weight_kg,p.volume_cbm,p.length_cm,p.width_cm,p.height_cm,
+                (SELECT batch_package.batch_id FROM transport_batch_packages batch_package
+                  JOIN transport_batches batch ON batch.id=batch_package.batch_id
+                    AND batch.organization_id=batch_package.organization_id AND batch.status!='cancelled'
+                  WHERE batch_package.organization_id=p.organization_id
+                    AND batch_package.package_id=p.id AND batch_package.status!='removed'
+                  LIMIT 1) transport_batch_id
            FROM warehouse_dispatch_items di
            JOIN warehouse_packages p ON p.id=di.package_id AND p.organization_id=di.organization_id
            JOIN shipments s ON s.id=p.shipment_id AND s.organization_id=p.organization_id
@@ -326,12 +339,20 @@ export async function loader({ request }: Route.LoaderArgs) {
       .bind(user.organizationId,atomicDispatchId,warehouse.id).all<AtomicInboundPackage>()).results
     :[];
   const actualExitRecord = scannedPackage
-    ? await env.DB.prepare(
-        `SELECT event_at
-           FROM order_tracking_milestones
-          WHERE organization_id=? AND order_id=? AND milestone_code='exported'
-          ORDER BY event_at DESC LIMIT 1`,
-      ).bind(user.organizationId, scannedPackage.order_id).first<{ event_at: string }>()
+    ? scannedPackage.transport_batch_id
+      ? await env.DB.prepare(
+          `SELECT COALESCE(actual_departure_at,updated_at) event_at
+             FROM transport_batches
+            WHERE organization_id=? AND id=? AND status!='cancelled'
+              AND road_status IN ('outbound_in_transit','overseas_arrived','waiting_pickup','pickup_completed')
+            LIMIT 1`,
+        ).bind(user.organizationId,scannedPackage.transport_batch_id).first<{event_at:string}>()
+      : await env.DB.prepare(
+          `SELECT event_at
+             FROM order_tracking_milestones
+            WHERE organization_id=? AND order_id=? AND milestone_code='exported'
+            ORDER BY event_at DESC LIMIT 1`,
+        ).bind(user.organizationId,scannedPackage.order_id).first<{event_at:string}>()
     : null;
   const packageReady = Boolean(
     scannedPackage &&
@@ -351,7 +372,7 @@ export async function loader({ request }: Route.LoaderArgs) {
         customsClearanceMode: selectedShipment.customs_clearance_mode,
       }])
     : [];
-  const receivableShipment = customsGate?.blocked
+  let receivableShipment = customsGate?.blocked
     ? undefined
     : selectedShipment;
   let lookupError = "";
@@ -376,8 +397,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     lookupError = `货物标签 ${scannedPackage.barcode} 尚未完成上一仓库出库，暂不能办理境外目的仓收货`;
   else if (reference && batchScopeError)
     lookupError = batchScopeError;
-  else if (reference && scannedPackage && batchId && !batchOrderIdSet.has(scannedPackage.order_id))
-    lookupError = `货物标签 ${scannedPackage.barcode} 不属于当前 PZ 配载单，已拒绝调出收货表单`;
+  else if (reference && scannedPackage && batchId && (
+    !batchOrderIdSet.has(scannedPackage.order_id) || scannedPackage.transport_batch_id !== batchId
+  ))
+    lookupError = `货物标签 ${scannedPackage.barcode} 不属于当前 PZ 的实际 OUL 范围，已拒绝调出收货表单`;
   else if (reference && customsGate?.blocked)
     lookupError = customsGate.message || "当前订单清关门禁尚未通过";
   else if (reference && scannedPackage && scannedPackage.overseas_warehouse_id !== warehouse.id)
@@ -390,6 +413,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     lookupError = `货物标签 ${scannedPackage.barcode} 不属于当前目的仓，或对应运输单尚未进入可收货阶段`;
   else if (reference && !scannedPackage && !atomicScopePackages.length)
     lookupError = `未找到国内仓生成的货物标签或装车任务：${reference}`;
+  // Never return an actionable receiving form together with a scope, stage or
+  // customs error.  In particular, an OUL belonging to another PZ must remain
+  // non-actionable even when its commercial order is also mounted here.
+  if (lookupError) receivableShipment = undefined;
   const workflowFields = receivableShipment
     ? await loadOrderModuleWorkflowFields(
         user.organizationId,
@@ -758,22 +785,6 @@ export async function action({ request }: Route.ActionArgs) {
       .bind(shipment.id, user.organizationId, selectedWarehouse.id)
       .first<{ pieces: number; weight_kg: number; volume_cbm: number }>(),
   ]);
-  const actual = {
-    pieces: (received?.pieces ?? 0) + pieces,
-    weightKg: (received?.weight_kg ?? 0) + (weight ?? 0),
-    volumeCbm: (received?.volume_cbm ?? 0) + (volume ?? 0),
-  };
-  const plannedActual = {
-    pieces: planned?.pieces ?? 0,
-    weightKg: planned?.gross_weight_kg ?? 0,
-    volumeCbm: planned?.volume_cbm ?? 0,
-  };
-  const operationalRules = await loadOperationalRules(user.organizationId);
-  const difference = calculateWarehouseDifference(
-    plannedActual,
-    actual,
-    operationalRules["warehouse.receipt_difference_threshold_percent"],
-  );
   if (isOverseasWarehouse && !rawBarcode)
     return { formError: "境外目的仓必须扫描装车时生成的 OUL 标签，不能重新生成标签" };
   const barcode = rawBarcode || generateCode("OUL"),
@@ -781,7 +792,7 @@ export async function action({ request }: Route.ActionArgs) {
   if (!/^[A-Z0-9-]{4,40}$/.test(barcode))
     return { formError: "标签条码只能使用大写字母、数字和横线，长度 4-40 位" };
   const existingPackage = await env.DB.prepare(
-    "SELECT id,shipment_id,warehouse_id,location_id,package_number,status FROM warehouse_packages WHERE organization_id=? AND barcode=?",
+    "SELECT id,shipment_id,warehouse_id,location_id,package_number,status,pieces,weight_kg,volume_cbm FROM warehouse_packages WHERE organization_id=? AND barcode=?",
   )
     .bind(user.organizationId, barcode)
     .first<{
@@ -791,6 +802,9 @@ export async function action({ request }: Route.ActionArgs) {
       location_id: string;
       package_number: string;
       status: string;
+      pieces: number;
+      weight_kg: number | null;
+      volume_cbm: number | null;
     }>();
   if (existingPackage && !isOverseasWarehouse)
     return { formError: `条码 ${barcode} 已经入库，请勿重复扫描` };
@@ -802,6 +816,73 @@ export async function action({ request }: Route.ActionArgs) {
     return { formError: `条码 ${barcode} 已经在 ${selectedWarehouse.name} 入库，请勿重复扫描` };
   if (existingPackage && existingPackage.status !== "dispatched")
     return { formError: `条码 ${barcode} 尚未完成上一仓库出库，不能办理境外目的仓入库` };
+  if (isOverseasWarehouse && existingPackage) {
+    const physicalScope = await env.DB.prepare(`SELECT batch_package.batch_id,
+        (SELECT COUNT(*) FROM transport_batch_packages sibling
+          WHERE sibling.organization_id=batch_package.organization_id
+            AND sibling.batch_id=batch_package.batch_id AND sibling.status!='removed') batch_package_count,
+        (SELECT COUNT(*) FROM transport_batch_orders member
+          WHERE member.organization_id=batch_package.organization_id
+            AND member.batch_id=batch_package.batch_id AND member.status!='removed') batch_order_count
+      FROM transport_batch_packages batch_package
+      JOIN transport_batches batch ON batch.id=batch_package.batch_id
+        AND batch.organization_id=batch_package.organization_id AND batch.status!='cancelled'
+        AND batch.road_status IN ('outbound_in_transit','overseas_arrived','waiting_pickup')
+      JOIN warehouse_dispatch_items dispatch_item
+        ON dispatch_item.organization_id=batch_package.organization_id
+       AND dispatch_item.package_id=batch_package.package_id
+      JOIN warehouse_dispatches dispatch
+        ON dispatch.id=dispatch_item.dispatch_id AND dispatch.organization_id=dispatch_item.organization_id
+       AND dispatch.transport_batch_id=batch_package.batch_id AND dispatch.status='dispatched'
+      WHERE batch_package.organization_id=? AND batch_package.package_id=?
+        AND batch_package.order_id=? AND batch_package.status!='removed'
+      LIMIT 1`).bind(user.organizationId,existingPackage.id,shipment.order_id).first<{
+        batch_id:string;batch_package_count:number;batch_order_count:number;
+      }>();
+    if(!physicalScope){
+      const legacyDispatch=await env.DB.prepare(`SELECT dispatch.transport_batch_id,batch.batch_number
+        FROM warehouse_dispatch_items dispatch_item
+        JOIN warehouse_dispatches dispatch
+          ON dispatch.id=dispatch_item.dispatch_id AND dispatch.organization_id=dispatch_item.organization_id
+         AND dispatch.status='dispatched'
+        LEFT JOIN transport_batches batch ON batch.id=dispatch.transport_batch_id
+          AND batch.organization_id=dispatch.organization_id AND batch.status!='cancelled'
+        WHERE dispatch_item.organization_id=? AND dispatch_item.package_id=?
+        ORDER BY dispatch.dispatched_at DESC LIMIT 1`)
+        .bind(user.organizationId,existingPackage.id).first<{transport_batch_id:string|null;batch_number:string|null}>();
+      if(!legacyDispatch||batchId||legacyDispatch.batch_number?.startsWith("PZ-"))
+        return{formError:`条码 ${barcode} 没有可核对的有效 PZ 装车出库关系，已拒绝入库`};
+    }else{
+      if(batchId&&physicalScope.batch_id!==batchId)return{formError:`条码 ${barcode} 不属于当前 PZ 的实际 OUL 范围，已拒绝入库`};
+      if(Number(physicalScope.batch_package_count)>1||Number(physicalScope.batch_order_count)>1){
+        return{formError:"当前 PZ 包含多张 OUL 或多票订单，请重新扫描装车任务码或任一 OUL，使用“全部扫齐并确认货齐”整批原子入库"};
+      }
+    }
+  }
+  const actual = isOverseasWarehouse ? {
+    pieces,
+    weightKg: weight ?? 0,
+    volumeCbm: volume ?? 0,
+  } : {
+    pieces: (received?.pieces ?? 0) + pieces,
+    weightKg: (received?.weight_kg ?? 0) + (weight ?? 0),
+    volumeCbm: (received?.volume_cbm ?? 0) + (volume ?? 0),
+  };
+  const plannedActual = isOverseasWarehouse && existingPackage ? {
+    pieces: Number(existingPackage.pieces || 0),
+    weightKg: Number(existingPackage.weight_kg || 0),
+    volumeCbm: Number(existingPackage.volume_cbm || 0),
+  } : {
+    pieces: planned?.pieces ?? 0,
+    weightKg: planned?.gross_weight_kg ?? 0,
+    volumeCbm: planned?.volume_cbm ?? 0,
+  };
+  const operationalRules = await loadOperationalRules(user.organizationId);
+  const difference = calculateWarehouseDifference(
+    plannedActual,
+    actual,
+    operationalRules["warehouse.receipt_difference_threshold_percent"],
+  );
   const receiptId = crypto.randomUUID(),
     packageId = existingPackage?.id ?? crypto.randomUUID(),
     packageNumber = existingPackage?.package_number ?? generateCode("PKG"),
@@ -811,7 +892,7 @@ export async function action({ request }: Route.ActionArgs) {
   const packageStatements = existingPackage
     ? [
         env.DB.prepare(
-          `UPDATE warehouse_packages SET receipt_id=?,warehouse_id=?,location_id=?,pieces=?,weight_kg=?,volume_cbm=?,length_cm=?,width_cm=?,height_cm=?,status='in_stock',notes=?,updated_at=? WHERE id=? AND organization_id=? AND warehouse_id=? AND status='dispatched'`,
+          `UPDATE warehouse_packages SET receipt_id=?,warehouse_id=?,location_id=?,pieces=?,weight_kg=?,volume_cbm=?,length_cm=?,width_cm=?,height_cm=?,status='in_stock',lifecycle_status='overseas_received',notes=?,updated_at=? WHERE id=? AND organization_id=? AND warehouse_id=? AND status='dispatched'`,
         ).bind(
           receiptId,
           location.warehouse_id,
@@ -1060,10 +1141,19 @@ async function receiveAtomicOverseasScope(input:{
     WHERE l.organization_id=? AND l.warehouse_id=? AND l.id=? AND l.status='active' AND z.status='active' AND w.status='active'`)
     .bind(input.user.organizationId,input.warehouse.id,requestedLocationId).first<{id:string;code:string;name:string;zone_name:string;warehouse_name:string}>();
   if(!location)return{formError:"请选择当前境外仓的有效入库库位"};
+  const scopedBatchId=rows.find(row=>row.transport_batch_id)?.transport_batch_id??null;
+  const batchExited=scopedBatchId?await env.DB.prepare(`SELECT 1 ok FROM transport_batches
+    WHERE organization_id=? AND id=? AND status!='cancelled'
+      AND road_status IN ('outbound_in_transit','overseas_arrived','waiting_pickup','pickup_completed') LIMIT 1`)
+    .bind(input.user.organizationId,scopedBatchId).first<{ok:number}>():null;
   for(const orderId of orderIds){
     const access=await loadWarehousePhysicalWorkflowAccess(env.DB,input.user.organizationId,orderId,"overseas_warehouse",{userId:input.user.userId,positionCode:input.user.positionCode,roleCodes:input.user.roleCodes});
     if(!access.available)return{formError:access.reason||"本次范围内有订单尚未开放境外仓入库，已整体拒绝提交"};
-    const exited=await env.DB.prepare("SELECT 1 ok FROM order_tracking_milestones WHERE organization_id=? AND order_id=? AND milestone_code='exported' LIMIT 1").bind(input.user.organizationId,orderId).first<{ok:number}>();
+    const currentBatchId=rows.find(row=>row.order_id===orderId)?.transport_batch_id??null;
+    const exited=currentBatchId
+      ? currentBatchId===scopedBatchId?batchExited:null
+      : await env.DB.prepare("SELECT 1 ok FROM order_tracking_milestones WHERE organization_id=? AND order_id=? AND milestone_code='exported' LIMIT 1")
+        .bind(input.user.organizationId,orderId).first<{ok:number}>();
     if(!exited)return{formError:`${rows.find(row=>row.order_id===orderId)?.order_number||orderId} 尚未登记实际出境，已整体拒绝提交`};
   }
   const customs=await loadOverseasInboundCustomsGates(input.user.organizationId,orderIds.map(orderId=>{
