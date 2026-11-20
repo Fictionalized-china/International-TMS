@@ -64,11 +64,26 @@ function Read-LinkedPages($Context,$Page,[string]$Pattern,[string]$Label,[int]$L
     $response = Invoke-WebRequest $uri -WebSession $Context.Session -UseBasicParsing -TimeoutSec 45
     Assert-Page $response $Label
     if ($Label -eq 'admin order detail') {
-      foreach($suffix in @('/operations','/mark-label')) {
-        $extra = [System.UriBuilder]::new($uri)
-        $extra.Path = $extra.Path.TrimEnd('/') + $suffix
-        $related = Invoke-WebRequest $extra.Uri -WebSession $Context.Session -UseBasicParsing -TimeoutSec 45
-        Assert-Page $related "admin order $suffix"
+      $detailPath = $uri.AbsolutePath.TrimEnd('/')
+      $relatedPattern = '^' + [regex]::Escape($detailPath) + '/(?:operations|mark-label)(?:\?|$)'
+      $relatedLinks = @([regex]::Matches($response.Content,'href="([^"]+)"') |
+        ForEach-Object { [System.Net.WebUtility]::HtmlDecode($_.Groups[1].Value) } |
+        Where-Object { $_ -match $relatedPattern } |
+        Select-Object -Unique)
+      if (!$relatedLinks.Count) {
+        Write-Output 'SKIP admin order related pages (current order exposes no matching entrance)'
+      }
+      foreach($relatedLink in $relatedLinks) {
+        $relatedUri = [uri]::new([uri]$BaseUrl,$relatedLink)
+        $relatedBuilder = [System.UriBuilder]::new($relatedUri)
+        $relatedQuery = [System.Web.HttpUtility]::ParseQueryString($relatedBuilder.Query)
+        $sessionQuery = [System.Web.HttpUtility]::ParseQueryString($Context.Query)
+        foreach ($key in @('itmsTab','portalContext')) {
+          if ($sessionQuery[$key]) { $relatedQuery[$key] = $sessionQuery[$key] }
+        }
+        $relatedBuilder.Query = $relatedQuery.ToString()
+        $related = Invoke-WebRequest $relatedBuilder.Uri -WebSession $Context.Session -UseBasicParsing -TimeoutSec 45
+        Assert-Page $related "admin order $($relatedBuilder.Uri.AbsolutePath)"
       }
     }
   }
