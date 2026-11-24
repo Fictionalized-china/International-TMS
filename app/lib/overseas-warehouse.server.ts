@@ -43,6 +43,10 @@ type AutomaticNoticeInput = {
   occurredAt?: string;
 };
 
+type OrderTransportCompletionState = Awaited<
+  ReturnType<typeof loadOrderTransportCompletionState>
+>;
+
 type BatchOrder = {
   order_id: string;
   order_number: string;
@@ -509,7 +513,10 @@ async function ensureStandaloneBatch(
   return { id: batchId, batch_number: batchNumber };
 }
 
-export async function advanceOverseasOrder(input: AdvanceInput) {
+export async function advanceOverseasOrder(
+  input: AdvanceInput,
+  preparedTransport?: OrderTransportCompletionState,
+) {
   const operation = await env.DB.prepare(
     `SELECT op.id,op.batch_id,op.status,op.warehouse_id,o.customer_id,COALESCE(w.name,'境外目的仓') warehouse_name
      FROM overseas_warehouse_operations op
@@ -522,7 +529,7 @@ export async function advanceOverseasOrder(input: AdvanceInput) {
     .first<{ id: string; batch_id: string; status: string; warehouse_name: string;warehouse_id:string;customer_id:string }>();
   if (!operation) throw new Error("请先由批次确认货物已到达境外目的仓");
 
-  const physicalTransport = await loadOrderTransportCompletionState(
+  const physicalTransport = preparedTransport ?? await loadOrderTransportCompletionState(
     env.DB,
     input.organizationId,
     input.orderId,
@@ -881,14 +888,28 @@ export async function automaticallyNotifyOverseasArrival(input: AutomaticNoticeI
 
   const occurredAt = input.occurredAt || new Date().toISOString();
   if (context.status === "arrived") {
-    await advanceOverseasOrder({
-      organizationId: input.organizationId,
-      orderId: input.orderId,
-      actorUserId: input.actorUserId,
-      action: "notify",
-      occurredAt,
-      notes: `${context.warehouse_name}已完成扫码入库和清点，系统自动通知客户`,
-    });
+    const physicalTransport = await loadOrderTransportCompletionState(
+      env.DB,
+      input.organizationId,
+      input.orderId,
+    );
+    if (!physicalTransport.complete) {
+      return {
+        notified: false,
+        blockedReason: physicalTransport.reason ?? "本订单仍有其他包裹待装车、在途或待到仓",
+      };
+    }
+    await advanceOverseasOrder(
+      {
+        organizationId: input.organizationId,
+        orderId: input.orderId,
+        actorUserId: input.actorUserId,
+        action: "notify",
+        occurredAt,
+        notes: `${context.warehouse_name}已完成扫码入库和清点，系统自动通知客户`,
+      },
+      physicalTransport,
+    );
   }
 
   const existing = await env.DB.prepare(

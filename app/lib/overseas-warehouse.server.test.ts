@@ -51,6 +51,12 @@ const harness = vi.hoisted(() => {
           if (sql.includes("SELECT op.id,op.batch_id,op.status") && sql.includes("FROM overseas_warehouse_operations op")) {
             return state.operation as T;
           }
+          if (sql.includes("SELECT op.status,op.warehouse_id") && sql.includes("FROM overseas_warehouse_operations op")) {
+            return {
+              ...state.operation,
+              order_number: "SO-001",
+            } as T;
+          }
           if (sql.includes("waiting_dispatch_count") && sql.includes("waiting_arrival_count")) {
             return state.transport as T;
           }
@@ -86,7 +92,11 @@ vi.mock("./order-modules.server", () => ({
   syncOrderWorkflowSnapshot: harness.syncOrderWorkflowSnapshot,
 }));
 
-import { advanceOverseasOrder, confirmOverseasBatchArrival } from "./overseas-warehouse.server";
+import {
+  advanceOverseasOrder,
+  automaticallyNotifyOverseasArrival,
+  confirmOverseasBatchArrival,
+} from "./overseas-warehouse.server";
 
 const blockedGate = {
   orderId: "order-1",
@@ -186,6 +196,22 @@ describe("overseas arrival service shares the frozen customs gate", () => {
       action: "notify",
       occurredAt: "2026-09-06T00:00:00.000Z",
     })).rejects.toThrow("1 包在途或待到仓");
+
+    expect(harness.DB.batch).not.toHaveBeenCalled();
+  });
+
+  it("keeps an expected partial-transport gate from breaking automatic arrival synchronization", async () => {
+    harness.state.transport.waiting_arrival_count = 1;
+
+    await expect(automaticallyNotifyOverseasArrival({
+      organizationId: "org-1",
+      orderId: "order-1",
+      actorUserId: "warehouse-user",
+      occurredAt: "2026-09-06T00:00:00.000Z",
+    })).resolves.toMatchObject({
+      notified: false,
+      blockedReason: expect.stringContaining("1 包在途或待到仓"),
+    });
 
     expect(harness.DB.batch).not.toHaveBeenCalled();
   });
